@@ -8,12 +8,13 @@ import json
 import re
 import secrets
 import time
-import uuid
+import unicodedata
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
-from typing import AsyncIterator, Iterable
 
 from .blobengine import BlobEngine
 from .errors import InvalidStateError, NotFoundError, QuotaExceededError, ShareExpiredError
+from .fingerprint import combine, is_fingerprint
 from .metadata import Metadata
 
 
@@ -212,6 +213,8 @@ class ObjectService:
             if expect_md5 is not None and result.md5.lower() != expect_md5.lower():
                 raise ValueError("object MD5 does not match request")
             self.engine.finalize(blob_uuid, [1])
+            if result.size:
+                self.metadata.set_fingerprint(blob_uuid, combine(result.size, result.leaves))
             return self._commit_blob(scope.bucket_id, key, blob_uuid, result.size, result.md5,
                                      content_type, user_meta)
         except Exception:
@@ -222,7 +225,36 @@ class ObjectService:
                 pass
             raise
 
+    MIN_PART_SIZE = 5 * 1024 * 1024  # S3 规定：除最后一段外每段至少 5 MiB
+
+    def find_by_fingerprint(self, bucket_id: int, fingerprint: str, size: int, prefix: str = ""):
+        """在同一个存储桶、调用者授权前缀内按内容指纹找一个现有对象；回收站内部前缀不参与。"""
+        return self.metadata.db.execute(
+            "SELECT o.* FROM objects o JOIN blobs b ON b.uuid = o.blob_uuid "
+            "WHERE o.bucket_id = ? AND b.fingerprint = ? AND b.size = ? AND b.status = 'complete' "
+            "AND substr(o.key, 1, ?) = ? AND o.key NOT LIKE '.tgdrive/%' ORDER BY o.modified_at DESC LIMIT 1",
+            (bucket_id, fingerprint, size, len(prefix), prefix)).fetchone()
+
+    def instant_put(self, scope: Scope, key: str, size: int, fingerprint: str,
+                    content_type: str | None = None) -> ObjectInfo | None:
+        """秒传：同一存储桶里已有内容指纹相同的对象时，让新路径直接引用它的加密 Blob，不传输任何数据。
+
+        只在调用者自己的存储桶内查找，因此不会泄露其他用户是否保存过某个文件。未命中返回 None。
+        """
+        self._check_scope(scope, key, write=True)
+        if not is_fingerprint(fingerprint) or size <= 0:
+            raise ValueError("无效的内容指纹或文件大小")
+        source = self.find_by_fingerprint(scope.bucket_id, fingerprint, size, scope.prefix)
+        if source is None:
+            return None
+        return self._commit_blob(scope.bucket_id, key, source["blob_uuid"], source["size"], source["etag"],
+                                 content_type if content_type else source["content_type"],
+                                 json.loads(source["user_meta"] or "{}"))
+
     async def put_directory_marker(self, scope: Scope, key: str) -> ObjectInfo:
+        return self._write_directory_marker(scope, key)
+
+    def _write_directory_marker(self, scope: Scope, key: str) -> ObjectInfo:
         if not key.endswith("/"):
             key += "/"
         self._check_scope(scope, key, write=True)
@@ -234,9 +266,12 @@ class ObjectService:
             if old and old["blob_uuid"]:
                 self._release_blob(db, old["blob_uuid"], now)
             old_size = old["size"] if old else 0
-            db.execute("INSERT INTO objects(bucket_id,key,blob_uuid,size,etag,content_type,user_meta,modified_at) "
-                       "VALUES(?,?,?,?,?,?,?,?)", (scope.bucket_id, key, None, 0, hashlib.md5(b"").hexdigest(),
-                                                    "application/x-directory", "{}", now))
+            # 文件夹的公开分享（令牌、有效期、密码、下载次数）保存在目录标记行上：重写标记时必须保留。
+            share = [old[name] if old else None for name in ("public_token", "public_at", "public_expires_at", "public_password")]
+            downloads = old["public_downloads"] if old else 0
+            db.execute("INSERT INTO objects(bucket_id,key,blob_uuid,size,etag,content_type,user_meta,modified_at,"
+                       "public_token,public_at,public_expires_at,public_password,public_downloads) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (scope.bucket_id, key, None, 0, hashlib.md5(b"").hexdigest(), "application/x-directory", "{}", now, *share, downloads))
             db.execute("UPDATE buckets SET used_bytes = used_bytes - ? WHERE id = ?", (old_size, scope.bucket_id))
         return self._object(self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id=? AND key=?",
                                                       (scope.bucket_id, key)).fetchone())
@@ -256,9 +291,16 @@ class ObjectService:
 
     def set_public(self, scope: Scope, key: str, public: bool) -> ObjectInfo:
         """开启或关闭对象的公开链接；重复开启返回同一个令牌。"""
+        if key.endswith("/"):
+            # 文件夹的分享信息保存在它的目录标记行上；只靠前缀存在的“隐式文件夹”先补一个标记。
+            self._check_scope(scope, key, write=True)
+            marker = self.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone()
+            if marker is None:
+                if not self.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>? AND key<? LIMIT 1",
+                                                (scope.bucket_id, key, key + self._PREFIX_END)).fetchone():
+                    raise NotFoundError(key)
+                self._write_directory_marker(scope, key)
         row = self._lookup(scope, key, write=True)
-        if row["blob_uuid"] is None and key.endswith("/"):
-            raise ValueError("文件夹不能设置公开访问")
         if public and row["public_token"] is None:
             with self.metadata.transaction() as db:
                 db.execute("UPDATE objects SET public_token=?, public_at=?, public_downloads=0 WHERE bucket_id=? AND key=?",
@@ -341,8 +383,9 @@ class ObjectService:
             entry_id = f"{int(time.time() * 1000)}-{secrets.token_hex(3)}"
             target = f"{self.TRASH_PREFIX}{entry_id}/{key}"
             self.move(scope, key, target, "overwrite")
-            if folder:
+            if folder and not self.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, target)).fetchone():
                 # 没有目录标记的“隐式”文件夹在回收站中补一个标记，恢复时才能得到完整的文件夹。
+                # 已有标记时不能覆盖：公开分享信息（令牌、有效期、密码）保存在标记行上，还原后链接要恢复。
                 await self.put_directory_marker(scope, target)
             with self.metadata.transaction() as db:
                 db.execute("INSERT INTO trash(id,bucket_id,original_path,is_folder,size,item_count,deleted_at) VALUES(?,?,?,?,?,?,?)",
@@ -440,11 +483,54 @@ class ObjectService:
             raise NotFoundError("public link not found")
         return row
 
+    @staticmethod
+    def _public_relative(value: str) -> str:
+        """分享文件夹内的相对路径：不允许绝对路径、.、..、空段与控制字符，防止越出被分享的目录。"""
+        value = unicodedata.normalize("NFC", value or "")
+        if value.startswith("/") or "\x00" in value or any(ord(ch) < 32 for ch in value):
+            raise ValueError("invalid path")
+        if value and any(part in ("", ".", "..") for part in value.rstrip("/").split("/")):
+            raise ValueError("invalid path")
+        return value
+
+    def _public_folder_root(self, token: str) -> ObjectInfo:
+        info = self.resolve_public(token)
+        if not info.key.endswith("/"):
+            raise NotFoundError("not a shared folder")
+        return info
+
+    async def list_public_folder(self, token: str, relative: str = "", cursor: str | None = None, limit: int = 200) -> dict[str, object]:
+        """列出被公开的文件夹（或其中的子文件夹）。内容是实时的：分享之后新增的文件访客也能看到。"""
+        root = self._public_folder_root(token)
+        relative = self._public_relative(relative)
+        if relative and not relative.endswith("/"):
+            relative += "/"
+        prefix = root.key + relative
+        scope = Scope(root.bucket_id)
+        page = await self.alist_objects(scope, prefix, "/", cursor, max(1, min(limit, 500)))
+        files = [{"name": item.key[len(prefix):], "path": item.key[len(root.key):], "size": item.size, "content_type": item.content_type,
+                  "etag": item.etag, "modified_at": item.modified_at}
+                 for item in page.objects if item.key != prefix and not item.key.endswith("/")]
+        folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):]} for value in page.common_prefixes]
+        if relative and not files and not folders and cursor is None and not self.metadata.db.execute(
+                "SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (root.bucket_id, prefix)).fetchone():
+            raise NotFoundError(relative)
+        return {"name": root.key.rstrip("/").rsplit("/", 1)[-1], "path": relative, "folders": folders, "files": files,
+                "next_cursor": page.next_cursor}
+
+    def public_folder_file(self, token: str, relative: str) -> tuple[ObjectInfo, ObjectInfo]:
+        """返回 (文件夹分享根, 文件信息)；路径必须落在被分享的文件夹内，且指向一个文件。"""
+        root = self._public_folder_root(token)
+        relative = self._public_relative(relative)
+        if not relative or relative.endswith("/"):
+            raise NotFoundError(relative)
+        return root, self.head_object(Scope(root.bucket_id), root.key + relative)
+
     async def get_public_object(self, token: str, start: int = 0, end: int | None = None):
         info = self.resolve_public(token)
         return await self.get_object(Scope(info.bucket_id), info.key, start, end)
 
-    async def delete_objects(self, scope: Scope, keys: list[str]) -> list[DeleteResult]:
+    def _delete_objects_sync(self, scope: Scope, keys: list[str]) -> list[DeleteResult]:
         self._check_scope(scope, keys[0], write=True) if keys else None
         results: list[DeleteResult] = []
         now = time.time()
@@ -464,6 +550,9 @@ class ObjectService:
                 results.append(DeleteResult(key, True))
         return results
 
+    async def delete_objects(self, scope: Scope, keys: list[str]) -> list[DeleteResult]:
+        return await self.metadata.run_in_thread(self._delete_objects_sync, scope, keys)
+
     # 跳过一个公共前缀下全部键时使用的上界：U+10FFFF 是最大码点，按 SQLite 二进制排序大于该前缀下的任何键。
     _PREFIX_END = "\U0010ffff"
 
@@ -474,12 +563,15 @@ class ObjectService:
         self._check_scope(scope, prefix, write=True)
         deleted = 0
         while True:
-            keys = [row["key"] for row in self.metadata.db.execute(
-                "SELECT key FROM objects WHERE bucket_id=? AND key>=? AND key<? ORDER BY key LIMIT ?",
-                (scope.bucket_id, prefix, prefix + self._PREFIX_END, batch))]
+            def read_keys():
+                return [row["key"] for row in self.metadata.db.execute(
+                    "SELECT key FROM objects WHERE bucket_id=? AND key>=? AND key<? ORDER BY key LIMIT ?",
+                    (scope.bucket_id, prefix, prefix + self._PREFIX_END, batch))]
+            keys = await self.metadata.run_in_thread(read_keys)
             if not keys:
                 return deleted
-            deleted += sum(result.deleted for result in await self.delete_objects(scope, keys))
+            results = await self.metadata.run_in_thread(self._delete_objects_sync, scope, keys)
+            deleted += sum(result.deleted for result in results)
 
     def list_objects(self, scope: Scope, prefix: str = "", delimiter: str | None = "/",
                      cursor: str | None = None, limit: int = 1000) -> ListPage:
@@ -530,6 +622,11 @@ class ObjectService:
                 break
         return ListPage(objects, common, None)
 
+    async def alist_objects(self, scope: Scope, prefix: str = "", delimiter: str | None = "/",
+                            cursor: str | None = None, limit: int = 1000) -> ListPage:
+        """在线程池中执行列表查询，避免大目录扫描占用 ASGI 事件循环。"""
+        return await self.metadata.run_in_thread(self.list_objects, scope, prefix, delimiter, cursor, limit)
+
     async def copy_object(self, src: Scope, src_key: str, dst: Scope, dst_key: str,
                           *, metadata: dict[str, str] | None = None, content_type: str | None = None) -> ObjectInfo:
         """服务端复制：新对象引用同一个加密 Blob，不搬运数据；目标的公开链接按覆盖写入规则保留。"""
@@ -544,7 +641,7 @@ class ObjectService:
     def move_prefix(self, scope: Scope, old: str, new: str, conflict: str = "skip") -> int:
         return self.move(scope, old, new, conflict).moved
 
-    def move(self, scope: Scope, old: str, new: str, conflict: str = "skip") -> "MoveResult":
+    def move(self, scope: Scope, old: str, new: str, conflict: str = "skip") -> MoveResult:
         """移动单个文件（old 不以 / 结尾，精确匹配）或整个文件夹（old 以 / 结尾，前缀匹配）。
 
         文件夹之间的同名目录标记直接合并；文件冲突按 conflict 处理，skip 时计入 skipped。
@@ -645,8 +742,8 @@ class ObjectService:
             raise ValueError("part size does not match request")
         now = time.time()
         with self.metadata.transaction() as db:
-            db.execute("INSERT OR REPLACE INTO upload_parts(upload_id,part_no,size,md5,uploaded_at) VALUES(?,?,?,?,?)",
-                       (upload_id, part_no, result.size, result.md5, now))
+            db.execute("INSERT OR REPLACE INTO upload_parts(upload_id,part_no,size,md5,uploaded_at,leaves) VALUES(?,?,?,?,?,?)",
+                       (upload_id, part_no, result.size, result.md5, now, result.leaves))
             db.execute("UPDATE uploads SET last_activity=? WHERE upload_id=?", (now, upload_id))
         return PartInfo(upload_id, part_no, result.size, result.md5, now)
 
@@ -665,9 +762,16 @@ class ObjectService:
         for index, (number, etag) in enumerate(parts):
             if number not in records or records[number]["md5"].lower() != etag.strip('"').lower():
                 raise ValueError("InvalidPart")
-            if index < len(parts) - 1 and records[number]["size"] < 5 * 1024 * 1024:
+            if index < len(parts) - 1 and records[number]["size"] < self.MIN_PART_SIZE:
                 raise ValueError("EntityTooSmall")
         blob_size = self.engine.finalize(upload["blob_uuid"], [p[0] for p in parts])
+        # 只有除最后一段外每段大小都是指纹分块的整数倍时，各段的块边界才与整个文件对齐，才能由各段的
+        # 块哈希拼出指纹；否则（例如 aws cli 默认 8 MB 分段）这个对象不参与秒传，也不需要重读数据。
+        block = self.engine.fingerprint_block
+        if blob_size and all(records[n]["leaves"] is not None for n, _ in parts) \
+                and all(records[n]["size"] % block == 0 for n, _ in parts[:-1]):
+            self.metadata.set_fingerprint(upload["blob_uuid"],
+                                          combine(blob_size, b"".join(bytes(records[n]["leaves"]) for n, _ in parts)))
         combined = hashlib.md5(b"".join(bytes.fromhex(records[p[0]]["md5"]) for p in parts)).hexdigest() + f"-{len(parts)}"
         info = self._commit_blob(scope.bucket_id, upload["key"], upload["blob_uuid"], blob_size, combined,
                                  upload["content_type"], json.loads(upload["user_meta"] or "{}"))

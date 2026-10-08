@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from .errors import BlobNotFound, NotFoundError
 
@@ -41,16 +42,25 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 8
+    SCHEMA_VERSION = 10
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
         self._lock = threading.RLock()
-        self.db = sqlite3.connect(self.path, check_same_thread=False)
+        self._thread = threading.local()
+        self._db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("PRAGMA journal_mode = WAL")
+        # 统一设置 SQLite 的等待和同步策略：同一进程由 RLock 串行写入，短暂的
+        # 外部锁竞争应等待而不是立即失败；WAL 下 NORMAL 已足够保护事务提交。
+        self.db.execute("PRAGMA busy_timeout = 5000")
+        self.db.execute("PRAGMA synchronous = NORMAL")
         self._migrate()
+
+    @property
+    def db(self) -> sqlite3.Connection:
+        return getattr(self._thread, "db", self._db)
 
     def close(self) -> None:
         self.db.close()
@@ -213,10 +223,36 @@ class Metadata:
                     """
                 )
                 db.execute("PRAGMA user_version = 8")
+            if version < 9:
+                # 秒传：Blob 的内容指纹（见 fingerprint.py），以及分段上传时各分段的块哈希。
+                # 旧版本写入的 Blob 没有指纹，不参与秒传命中。
+                self._schema(
+                    """
+                    ALTER TABLE blobs ADD COLUMN fingerprint TEXT;
+                    ALTER TABLE upload_parts ADD COLUMN leaves BLOB;
+                    CREATE INDEX IF NOT EXISTS blobs_by_fingerprint ON blobs(fingerprint) WHERE fingerprint IS NOT NULL
+                    """
+                )
+                db.execute("PRAGMA user_version = 9")
+            if version < 10:
+                # “保持登录”会话：只保存令牌的哈希，到期后自动清理。
+                self._schema(
+                    """
+                    CREATE TABLE IF NOT EXISTS sessions(
+                        token_hash TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        csrf_token TEXT NOT NULL,
+                        expires_at REAL NOT NULL,
+                        created_at REAL NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS sessions_by_user ON sessions(user_id)
+                    """
+                )
+                db.execute("PRAGMA user_version = 10")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
+        with (nullcontext() if hasattr(self._thread, "db") else self._lock):
             nested = self.db.in_transaction
             savepoint = f"tx_{time.time_ns()}"
             try:
@@ -233,6 +269,28 @@ class Metadata:
                 else:
                     self.db.rollback()
                 raise
+
+    async def run_in_thread(self, function, /, *args, **kwargs):
+        """在线程池和独立连接中执行重查询或批量事务。
+
+        磁盘数据库使用 WAL 独立连接，避免慢查询持有主连接锁，也避免其他
+        请求读到线程中尚未提交的事务。纯内存数据库仅供测试，保持原连接。
+        """
+        def call():
+            if self.path == ":memory:":
+                with self._lock:
+                    return function(*args, **kwargs)
+            connection = sqlite3.connect(self.path, timeout=5)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            self._thread.db = connection
+            try:
+                return function(*args, **kwargs)
+            finally:
+                del self._thread.db
+                connection.close()
+        return await asyncio.to_thread(call)
 
     def _schema(self, script: str) -> None:
         # executescript 会隐式提交，必须逐条执行以保持迁移原子性。
@@ -293,6 +351,10 @@ class Metadata:
                 [(c.blob_uuid, c.part_no, c.sub_idx, c.offset, c.plain_size, c.cipher_size,
                   c.salt, c.cipher_sha256, c.blob_ref) for c in chunks],
             )
+
+    def set_fingerprint(self, blob_uuid: str, fingerprint: str | None) -> None:
+        with self.transaction() as db:
+            db.execute("UPDATE blobs SET fingerprint = ? WHERE uuid = ?", (fingerprint, blob_uuid))
 
     def finalize_blob(self, blob_uuid: str, part_order: list[int]) -> int:
         with self.transaction() as db:

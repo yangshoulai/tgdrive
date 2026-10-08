@@ -3,19 +3,29 @@ from __future__ import annotations
 
 import asyncio
 import json
-import mimetypes
 import re
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
 from .api import AdminApi, UserApi
 from .audit import AuditLog
-from .keyapi import KeyApi, KeyAuthError
 from .authn import AuthenticationError, CsrfError, SessionExpired, TooManyAttempts, verify_password
+from .context import AppContext
+from .errors import (
+    IntegrityError,
+    NotFoundError,
+    NotReadyError,
+    QuotaExceededError,
+    ShareExpiredError,
+    WrongPassphrase,
+)
+from .keyapi import KeyApi, KeyAuthError
+from .metrics import TrafficMetrics
 from .objects import Scope
 from .settings import SystemSettings
-from .errors import IntegrityError, NotFoundError, NotReadyError, QuotaExceededError, ShareExpiredError, WrongPassphrase
 from .share import ShareAccess
+from .static import StaticFiles
 
 
 class InvalidRange(ValueError):
@@ -42,27 +52,19 @@ def byte_range(value: str | None, size: int) -> tuple[int, int, bool]:
     return start, end, True
 
 
-# 网页（用户端、控制台、文档、分享页）的安全响应头：只允许同源脚本，禁止被其他站点嵌入框架（防点击劫持）。
-PAGE_SECURITY_HEADERS = {
-    "Content-Security-Policy": ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                                "img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self'; connect-src 'self'; "
-                                "font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "same-origin",
-    "X-Content-Type-Options": "nosniff",
-}
 
 
 class SharePasswordRequired(PermissionError):
     """带密码的分享缺少有效访问凭证。"""
 
 
-class TgDriveASGI:
+class TgDriveASGI(StaticFiles):
     def __init__(self, admin: AdminApi, user: UserApi, *, secure_cookies: bool = True,
                  json_limit: int = 1024 * 1024, s3=None, s3_host: str | None = None,
-                 static_dir: str | Path | dict[str, str | Path] | None = None,
+                 static_dir: str | Path | None = None,
                  public_base_url: str | None = None, settings: SystemSettings | None = None,
-                 keys: KeyApi | None = None, scheduler=None) -> None:
+                 keys: KeyApi | None = None, scheduler=None, metrics: TrafficMetrics | None = None,
+                 context: AppContext | None = None) -> None:
         self.scheduler = scheduler
         self.admin, self.user, self.s3 = admin, user, s3
         # /api/v1 只认访问密钥；未注入时使用用户 API 的对象服务与密钥存储。
@@ -72,9 +74,10 @@ class TgDriveASGI:
         # 对外地址由管理员在控制台配置；启动参数 --public-url 只作为默认值。
         self.settings = settings or SystemSettings(admin.accounts.metadata, {"public_base_url": public_base_url})
         self.s3_host = s3_host.split(":", 1)[0].lower() if s3_host else None
-        self.static_dir = ({key: Path(value).expanduser().resolve() for key, value in static_dir.items()}
-                           if isinstance(static_dir, dict) else Path(static_dir).expanduser().resolve() if static_dir else None)
+        self.static_dir = Path(static_dir).expanduser().resolve() if static_dir else None
         self.secure_cookies, self.json_limit = secure_cookies, json_limit
+        self.metrics = metrics
+        self.context = context
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -95,9 +98,11 @@ class TgDriveASGI:
         cookies = {part.strip().split("=", 1)[0]: part.strip().split("=", 1)[1]
                    for part in headers.get("cookie", "").split(";") if "=" in part}
         path, method = scope.get("path", ""), scope.get("method", "GET").upper()
-        # 两个入口可同时登录。旧 Cookie 仅用于兼容，角色仍由服务层校验。
-        cookie_name = "tg_admin_session" if path.startswith("/api/admin/") else "tg_user_session"
-        token = cookies.get(cookie_name, cookies.get("tg_session", ""))
+        # 全站只有一个会话 Cookie；账号的角色保存在服务端会话里，由每个接口按角色校验。
+        token = cookies.get("tg_session", "")
+        # /api/auth/v1/* 是登录、退出、当前会话与改密的统一入口，实现与 /api/user/v1/* 相同。
+        if path.startswith("/api/auth/v1/"):
+            path = "/api/user/v1/" + path[len("/api/auth/v1/"):]
         csrf = headers.get("x-csrf-token", "")
         host = headers.get("host", "localhost").split(":", 1)[0].lower()
         query = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
@@ -107,6 +112,8 @@ class TgDriveASGI:
             nonlocal started
             if message["type"] == "http.response.start":
                 started = True
+            elif message["type"] == "http.response.body" and self.metrics is not None:
+                self.metrics.record_out(len(message.get("body", b"")))
             await send(message)
 
         async def body_stream():
@@ -117,11 +124,19 @@ class TgDriveASGI:
                 if message["type"] != "http.request":
                     continue
                 if message.get("body"):
+                    if self.metrics is not None:
+                        self.metrics.record_in(len(message["body"]))
                     yield message["body"]
                 if not message.get("more_body", False):
                     return
 
         try:
+            if path == "/healthz" and method in ("GET", "HEAD"):
+                if method == "HEAD":
+                    await self._send_raw(tracked_send, 200, {"Content-Type": "application/json; charset=utf-8"}, b"")
+                else:
+                    await self._send(tracked_send, 200, {"status": "ok"})
+                return
             # 公开直链优先于 S3 路径路由；桶名至少 3 个字符，因此 /p/ 不会与桶冲突。
             if path.startswith("/p/") and method in ("GET", "HEAD"):
                 await self._public_content(tracked_send, method, path, query, headers)
@@ -148,7 +163,7 @@ class TgDriveASGI:
                 if path.endswith("/admin-docs.js"):
                     await self._send(tracked_send, 404, {"error": {"code": "not_found", "message": "资源不存在"}})
                     return
-                https = scope.get("scheme") == "https" or headers.get("x-forwarded-proto") == "https"
+                https = scope.get("scheme") == "https"
                 await self._static(tracked_send, path, method, https=https)
                 return
             if path == "/api/admin/v1/docs-bundle.js" and method in ("GET", "HEAD"):
@@ -244,8 +259,9 @@ class TgDriveASGI:
             action = routes.get(pattern)
             if action is None:
                 return None
-            role = "admin" if prefix.endswith("admin/v1") else "user"
             session = self.admin.accounts.sessions.peek(token)
+            # 文件空间接口现在也会收到管理员的会话：操作者类型取会话里的真实角色。
+            role = "admin" if prefix.endswith("admin/v1") else (session.role if session else "user")
             actor = str(payload.get("username") or "") if action.endswith(".login") or action == "system.setup" else (session.username if session else None)
             target_id = route.split("/")[2] if pattern.count("{}") else None
             return {"action": action, "actor_type": role, "actor": actor or None, "payload": payload, "target_id": target_id,
@@ -254,6 +270,9 @@ class TgDriveASGI:
 
     def _write_audit(self, entry, *, ok, result=None, error=None):
         payload, action = entry["payload"], entry["action"]
+        if action == "user.login" and ok and (result or {}).get("role") == "admin":
+            # 统一登录入口：管理员登录在审计里仍记为 admin.login。
+            action, entry = "admin.login", {**entry, "actor_type": "admin"}
         # 只挑选非敏感字段：从不记录 password / passphrase / token / secret。
         target, detail = entry["target_id"], {}
         if action in ("user.create",):
@@ -348,9 +367,13 @@ class TgDriveASGI:
         if method == "GET" and route == "/me":
             result = self.keys.whoami(principal)
         elif method == "GET" and route == "/list":
-            result = self.keys.list(principal, bucket, arg("prefix"), arg("cursor") or None, int(arg("limit", "1000")))
+            result = await self.keys.list(principal, bucket, arg("prefix"), arg("cursor") or None, int(arg("limit", "1000")))
         elif method == "GET" and route == "/search":
-            result = self.keys.search(principal, bucket, arg("q"), arg("cursor"), int(arg("limit", "100")))
+            result = await self.keys.search(principal, bucket, arg("q"), arg("cursor"), int(arg("limit", "100")))
+        elif method == "POST" and route == "/files/instant":
+            public = payload.get("public")
+            result = await self.keys.instant(principal, bucket, payload["path"], payload["size"], payload["fingerprint"],
+                                             payload.get("content_type"), None if public is None else bool(public))
         elif method == "POST" and route == "/folders":
             await self._send(send, 201, await self.keys.folder(principal, bucket, payload["path"]))
             return
@@ -408,10 +431,10 @@ class TgDriveASGI:
                 return 200, self.admin.unlock(token, csrf, payload["passphrase"]), {}
             if method == "POST" and route == "/lock":
                 self.admin.lock(token, csrf)
-                return 204, None, {"Set-Cookie": self._cookie("", role="admin", expires=True)}
+                return 204, None, {"Set-Cookie": self._cookie("", expires=True)}
             if method == "POST" and route == "/logout":
                 self.admin.logout(token)
-                return 204, None, {"Set-Cookie": self._cookie("", role="admin", expires=True)}
+                return 204, None, {"Set-Cookie": self._cookie("", expires=True)}
             if not self.admin.accounts.keystore.unlocked:
                 raise NotReadyError("系统尚未解锁")
             if method == "GET" and route == "/users":
@@ -435,9 +458,9 @@ class TgDriveASGI:
                 self.admin.set_bot_status(token, csrf, bot_id, payload["status"])
                 return 204, None, {}
             if method == "GET" and route == "/objects":
-                return 200, self.admin.list_objects(token, limit=int(query.get("limit", ["100"])[0]),
-                                                    cursor=query.get("cursor", [None])[0] or None, query=query.get("q", [""])[0],
-                                                    public_only=query.get("public", ["0"])[0] in ("1", "true")), {}
+                return 200, await self.admin.list_objects(token, limit=int(query.get("limit", ["100"])[0]),
+                                                         cursor=query.get("cursor", [None])[0] or None, query=query.get("q", [""])[0],
+                                                         public_only=query.get("public", ["0"])[0] in ("1", "true")), {}
             if method == "POST" and route == "/objects/public":
                 return 200, self.admin.set_object_public(token, csrf, int(payload["bucket_id"]), payload["path"],
                                                          bool(payload["public"])), {}
@@ -490,11 +513,11 @@ class TgDriveASGI:
         elif path.startswith("/api/user/v1/"):
             route = path[len("/api/user/v1"):]
             if method == "POST" and route == "/login":
-                return self._login(self.user.login(payload["username"], payload["password"], ip))
+                return self._login(self.user.login(payload["username"], payload["password"], ip, bool(payload.get("remember"))))
             if method == "POST" and route == "/logout":
-                self.user.accounts.sessions.require(token, role="user", csrf=csrf, mutation=True)
+                self.user.accounts.sessions.require(token, csrf=csrf, mutation=True)
                 self.user.logout(token)
-                return 204, None, {"Set-Cookie": self._cookie("", role="user", expires=True)}
+                return 204, None, {"Set-Cookie": self._cookie("", expires=True)}
             if method == "GET" and route == "/me":
                 return 200, {**self.user.me(token), **self.settings.public_config()}, {}
             if method == "POST" and route == "/password":
@@ -519,6 +542,10 @@ class TgDriveASGI:
             if method == "POST" and route == "/thumbnail":
                 self.user.set_thumbnail(token, csrf, payload["path"], str(payload["data"]))
                 return 204, None, {}
+            if method == "POST" and route == "/files/instant":
+                public = payload.get("public")
+                return 200, self.user.instant_put(token, csrf, payload["path"], payload["size"], payload["fingerprint"],
+                                                  payload.get("content_type"), None if public is None else bool(public)), {}
             if method == "POST" and route == "/uploads":
                 return 201, await self.user.create_upload(token, csrf, payload["path"], payload.get("content_type")), {}
             upload_route = re.fullmatch(r"/uploads/([A-Za-z0-9_-]+)(/complete)?", route)
@@ -532,11 +559,11 @@ class TgDriveASGI:
                 await self.user.abort_upload(token, csrf, upload_route.group(1))
                 return 204, None, {}
             if method == "GET" and route == "/search":
-                return 200, self.user.search(token, query.get("q", [""])[0],
+                return 200, await self.user.search(token, query.get("q", [""])[0],
                     query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0])), {}
             if method == "GET" and route == "/list":
-                return 200, self.user.list(token, prefix=query.get("prefix", [""])[0],
-                                          cursor=query.get("cursor", [None])[0], limit=int(query.get("limit", ["1000"])[0])), {}
+                return 200, await self.user.list(token, prefix=query.get("prefix", [""])[0],
+                                                 cursor=query.get("cursor", [None])[0], limit=int(query.get("limit", ["1000"])[0])), {}
             if method == "POST" and route == "/folders":
                 return 201, await self.user.folder(token, csrf, payload["path"]), {}
             if method == "POST" and route == "/delete":
@@ -570,10 +597,21 @@ class TgDriveASGI:
             info, password_hash = self._public_share(token)
             if password_hash and not self.share_access.check(token, password_hash, query.get("access", [None])[0]):
                 return 200, {"token": token, "password_required": True}, {}
-            return 200, {"token": info.public_token, "name": info.key.rsplit("/", 1)[-1], "size": info.size,
+            if info.key.endswith("/"):
+                return 200, {"token": info.public_token, "kind": "folder", "name": info.key.rstrip("/").rsplit("/", 1)[-1],
+                             "password_required": False, "modified_at": info.modified_at, "public_at": info.public_at,
+                             "expires_at": info.public_expires_at}, {}
+            return 200, {"token": info.public_token, "kind": "file", "name": info.key.rsplit("/", 1)[-1], "size": info.size,
                          "content_type": info.content_type, "etag": info.etag, "password_required": False,
                          "modified_at": info.modified_at, "public_at": info.public_at,
                          "expires_at": info.public_expires_at}, {}
+        elif re.fullmatch(r"/api/public/v1/folders/[A-Za-z0-9_-]+/list", path) and method == "GET":
+            token = path.split("/")[5]
+            info, password_hash = self._public_share(token)
+            if password_hash and not self.share_access.check(token, password_hash, query.get("access", [None])[0]):
+                raise SharePasswordRequired("password required")
+            return 200, await self.user.objects.list_public_folder(
+                token, query.get("path", [""])[0], query.get("cursor", [None])[0] or None, int(query.get("limit", ["200"])[0])), {}
         raise NotFoundError("接口不存在")
 
     @staticmethod
@@ -591,7 +629,8 @@ class TgDriveASGI:
     def _login(self, result):
         token = result["session"]
         # 会话 ID 仅放 HttpOnly Cookie，浏览器脚本只需要 CSRF token。
-        return 200, {k: v for k, v in result.items() if k != "session"}, {"Set-Cookie": self._cookie(token, role=result["role"])}
+        # “保持登录”的会话用持久 Cookie（与服务端有效期一致）；普通会话 12 小时。
+        return 200, {k: v for k, v in result.items() if k != "session"}, {"Set-Cookie": self._cookie(token, max_age=round(result["expires_at"] - time.time()))}
 
     async def _content(self, send, method, token, query, headers, *, admin: bool = False):
         path = query.get("path", [""])[0]
@@ -605,16 +644,20 @@ class TgDriveASGI:
         await self._stream_object(send, method, info, opener, query, headers, "private")
 
     async def _public_content(self, send, method, path, query, headers):
-        # /p/<token> 与 /p/<token>/<文件名> 等价，文件名只用于让链接更易读。
-        token = path[len("/p/"):].split("/", 1)[0]
+        # 文件分享：/p/<token> 与 /p/<token>/<文件名> 等价，文件名只用于让链接更易读。
+        # 文件夹分享：/p/<token>/<文件夹内的相对路径> 指向其中的某个文件。
+        token, _, rest = path[len("/p/"):].partition("/")
         info, password_hash = self._public_share(token)
         if password_hash and not self.share_access.check(token, password_hash, query.get("access", [None])[0]):
             raise SharePasswordRequired("password required")
+        root = info
+        if info.key.endswith("/"):
+            root, info = self.user.objects.public_folder_file(token, rest)
 
         def opener(start, end):
             # 从头开始的完整读取计为一次下载；Range 续传与预览拖动不重复计数。
             if start == 0:
-                self.user.objects.count_public_download(info.bucket_id, info.key)
+                self.user.objects.count_public_download(root.bucket_id, root.key)
             return self.user.objects.get_object(Scope(info.bucket_id), info.key, start, end)
         # 允许 CDN/浏览器存储，但每次使用前必须回源验证（ETag → 304）。关闭分享后回源即得到 404，链接立即失效。
         await self._stream_object(send, method, info, opener, query, headers, "public, no-cache")
@@ -656,59 +699,6 @@ class TgDriveASGI:
         async for chunk in iterator:
             await send({"type": "http.response.body", "body": chunk, "more_body": True})
         await send({"type": "http.response.body", "body": b""})
-
-    async def _static(self, send, path: str, method: str, *, https: bool = False) -> None:
-        assert self.static_dir is not None
-        static_dir = self.static_dir
-        if isinstance(static_dir, dict):
-            # 生产部署可把两个应用挂到不同域名；本地单进程也按路径保持相同隔离。
-            static_dir = static_dir["admin"] if path.startswith("/admin") else static_dir["user"]
-        elif path.startswith("/admin") and (Path(static_dir) / "admin").is_dir():
-            # Docker 镜像把管理端放在单一静态根目录的 admin/ 子目录中。
-            static_dir = Path(static_dir) / "admin"
-        static_dir = Path(static_dir)
-        relative = path.lstrip("/")
-        if path.startswith("/admin"):
-            relative = relative[len("admin"):].lstrip("/")
-        candidate = (static_dir / relative).resolve() if relative else static_dir / "index.html"
-        if static_dir not in candidate.parents and candidate != static_dir:
-            await self._send(send, 404, {"error": {"code": "not_found", "message": "资源不存在"}})
-            return
-        if not candidate.is_file():
-            candidate = static_dir / "index.html"
-        if not candidate.is_file():
-            await self._send(send, 404, {"error": {"code": "not_found", "message": "前端资源未构建"}})
-            return
-        data = candidate.read_bytes()
-        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        headers = {"Content-Type": content_type, "Content-Length": str(len(data)),
-                   "Cache-Control": "no-cache" if candidate.name == "index.html" else "public, max-age=31536000, immutable",
-                   **PAGE_SECURITY_HEADERS}
-        if https:
-            headers["Strict-Transport-Security"] = "max-age=31536000"
-        await send({"type": "http.response.start", "status": 200, "headers": self._headers(headers)})
-        await send({"type": "http.response.body", "body": b"" if method == "HEAD" else data})
-
-    async def _admin_docs_bundle(self, send, method: str, token: str) -> None:
-        """只向管理员会话返回管理员文档代码，避免普通用户从前端 bundle 读取运维内容。"""
-        session = self.admin.accounts.sessions.require(token, role="admin")
-        self.admin.accounts.account_for_session(session)
-        if self.static_dir is None:
-            raise NotFoundError("管理员文档未构建")
-        if isinstance(self.static_dir, dict):
-            root = self.static_dir.get("admin")
-            candidate = Path(root) / "admin-docs.js" if root else None
-        else:
-            base = Path(self.static_dir)
-            candidate = base / "admin" / "admin-docs.js" if (base / "admin").is_dir() else base / "admin-docs.js"
-        if candidate is None or not candidate.is_file():
-            raise NotFoundError("管理员文档未构建")
-        data = candidate.read_bytes()
-        await self._send_raw(send, 200, {
-            "Content-Type": "text/javascript; charset=utf-8",
-            "Cache-Control": "no-store",
-            **PAGE_SECURITY_HEADERS,
-        }, b"" if method == "HEAD" else data)
 
     @staticmethod
     def _headers(headers):
@@ -773,7 +763,7 @@ class TgDriveASGI:
         else: status, code, message = 500, "internal_error", "内部服务错误"
         return status, {"error": {"code": code, "message": message}}, extra
 
-    def _cookie(self, value, *, role="user", expires=False):
-        return (f"tg_{role}_session={value}; HttpOnly; SameSite=Strict; Path=/api/{role}/v1"
+    def _cookie(self, value, *, expires=False, max_age: int | None = None):
+        return (f"tg_session={value}; HttpOnly; SameSite=Strict; Path=/api"
                 + ("; Secure" if self.secure_cookies else "")
-                + ("; Max-Age=0" if expires else f"; Max-Age={int(self.admin.accounts.sessions.ttl)}"))
+                + ("; Max-Age=0" if expires else f"; Max-Age={max_age if max_age is not None else int(self.admin.accounts.sessions.ttl)}"))

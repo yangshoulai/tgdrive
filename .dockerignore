@@ -8,7 +8,7 @@ __pycache__
 *.py[cod]
 *.egg-info
 web/node_modules
-web/apps/*/dist
+web/dist
 web/tsconfig.app.tsbuildinfo
 tests
 .claude

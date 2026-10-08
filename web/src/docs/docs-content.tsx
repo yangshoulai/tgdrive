@@ -1,8 +1,9 @@
-/** 文档内容。所有接口与限制都对应 tgdrive/asgi.py、tgdrive/s3/ 中的实际实现，修改后端时请同步更新。 */
+/** 文档内容。所有接口与限制都对应 src/tgdrive/asgi.py、src/tgdrive/s3/ 中的实际实现，修改后端时请同步更新。 */
 import type { ComponentType } from "react";
 import {
   C, Callout, Card, CardGrid, Code, CodeTabs, DocLink, Endpoint, Flow, H2, H3, Params, Step, Steps, Table, useDocsConfig,
 } from "./docs-ui";
+import { BRAND } from "../brand";
 import type { IconName } from "../ui";
 
 export type DocPage = { slug: string; group: string; title: string; summary: string; keywords: string; icon: IconName; Content: ComponentType };
@@ -23,26 +24,25 @@ const OBJECT_JSON = `{
 function Overview() {
   return (
     <>
-      <p>tgdrive 是一个自托管的私有对象存储。文件在服务器上加密并切分为分片，以消息的形式保存在你自己的 Telegram 私有频道里；服务器只保存元数据和加密后的密钥。</p>
+      <p>{BRAND} 是一个私人云盘：上传文件、用文件夹整理，随时预览和下载，也可以生成链接分享给别人，还能用同步工具和脚本访问。文件加密保存，只有你的账号能打开。</p>
       <Flow nodes={[
-        { icon: "upload", title: "上传", detail: "浏览器或 S3 客户端" },
-        { icon: "lock", title: "加密与分片", detail: "AES-256-GCM，每片 16 MiB" },
-        { icon: "send", title: "私有频道", detail: "由你的 Bot 写入" },
+        { icon: "upload", title: "上传", detail: "网页、同步工具或脚本" },
+        { icon: "lock", title: "加密保存", detail: "只有你的账号能打开" },
+        { icon: "globe", title: "随时取用", detail: "预览、下载或分享" },
       ]} />
       <H2>核心概念</H2>
       <Table head={["概念", "说明"]} rows={[
-        ["存储桶", <>每个用户拥有一个独立的存储桶，名称形如 <C>user-2</C>。容量配额按存储桶计算。</>],
+        ["存储桶", <>每个用户拥有一个独立的空间（存储桶），名称形如 <C>user-2</C>，互相看不到对方的文件。容量配额按存储桶计算。</>],
         ["对象与路径", <>文件以完整路径存储，例如 <C>photos/2026/trip.jpg</C>。路径区分大小写，最长 1024 字节。</>],
         ["文件夹", <>路径中 <C>/</C> 之前的部分。空文件夹以一个以 <C>/</C> 结尾的目录标记保存。</>],
         ["公开链接", "为单个文件生成的随机地址，任何拥有链接的人都可以免登录访问，可随时关闭。"],
-        ["访问密钥", "供 rclone、AWS CLI 等工具使用的 S3 凭据，每个密钥只能访问其所有者的存储桶。"],
-        ["主密钥", "由管理员的加密口令派生。服务重启后需要管理员解锁，解锁前所有文件都无法读取。"],
+        ["访问密钥", "让 rclone、AWS CLI 等同步工具或脚本访问你的文件的凭据，每个密钥只能访问其所有者的文件。"],
       ]} />
       <H2>访问方式</H2>
       <CardGrid>
         <Card to="files" icon="folder" title="网页文件空间">上传、整理、预览和分享文件。</Card>
-        <Card to="s3" icon="key" title="S3 客户端">用 rclone、AWS CLI、boto3 同步与备份。</Card>
-        <Card to="api-basics" icon="code" title="HTTP API">用访问密钥从脚本和程序调用的 JSON 接口。</Card>
+        <Card to="s3" icon="key" title="同步工具（S3）">用 rclone、AWS CLI、boto3 同步与备份。</Card>
+        <Card to="api-basics" icon="code" title="脚本接口（HTTP API）">用访问密钥从脚本和程序读写文件。</Card>
         <Card to="sharing" icon="globe" title="公开分享">分享页与可嵌入的直链。</Card>
       </CardGrid>
     </>
@@ -55,7 +55,7 @@ function QuickStart() {
     <>
       <H2>用户：开始使用</H2>
       <Steps>
-        <Step title="登录">打开 <a className="doc-link" href={site}>{site}</a>，使用管理员提供的账号登录，之后在账号菜单中修改密码。</Step>
+        <Step title="登录">打开 <a className="doc-link" href={site}>{site}</a>，使用管理员提供的账号登录，之后在账号菜单中修改密码。在自己的电脑上可以勾选「30 天内保持登录」，下次打开无需重新登录；公共电脑请不要勾选。</Step>
         <Step title="上传文件">点击「上传」或把文件拖进页面。勾选「上传后公开访问」可以直接生成分享链接。</Step>
         <Step title="整理与分享">用文件夹、移动和重命名整理文件；在文件菜单中选择「公开分享」获取链接。</Step>
         <Step title="连接其他工具">在「访问密钥」中创建密钥。同一个密钥既可以调用 <DocLink to="api-basics">HTTP API</DocLink>，也可以用于 <DocLink to="s3">S3 客户端</DocLink>。</Step>
@@ -91,9 +91,13 @@ function FilesGuide() {
       <Table head={["类型", "支持的格式"]} rows={[
         ["图片", "PNG、JPEG、GIF、WebP、AVIF、BMP"],
         ["视频与音频", "MP4、WebM、MOV、MP3、M4A、OGG、WAV、FLAC，支持拖动进度条"],
-        ["文档", "PDF；纯文本、Markdown、JSON、CSV、日志与源代码（预览前 512 KB）"],
+        ["PDF", "使用浏览器自带的 PDF 查看器"],
+        ["Markdown", "渲染标题、列表、任务列表、表格、引用、代码块和链接，可切换到源码；同目录下的相对路径图片会直接显示"],
+        ["文本与代码", "带行号和语法高亮，覆盖 JavaScript/TypeScript、Python、Go、Rust、Java、C/C++、C#、Kotlin、Swift、PHP、Ruby、Shell、SQL、JSON、YAML、TOML、HTML/XML、CSS、Diff、Dockerfile、Makefile 等；UTF-8 与 GBK 编码都能正确显示"],
       ]} />
-      <p>其他类型显示下载按钮。浏览器无法解码的媒体也会回退到下载。</p>
+      <p>文本类文件只读取前 512 KB，超出时顶部会提示并提供完整下载。Markdown 中的原始 HTML 不会执行，外部图片和脚本不会加载，链接只允许 http(s) 与 mailto。其他类型显示下载按钮，浏览器无法解码的媒体也会回退到下载。</p>
+      <H2>上传与下载</H2>
+      <p>超过 64 MB 的文件自动分块上传（每块 16 MB，4 块并行），某一块失败会自动重试；中断或刷新页面后重新选择同一文件即可从断点继续。多个文件同时上传时最多并行 2 个。大于 1 MB 的文件会先在本地计算内容指纹（上传列表显示“校验”进度），如果你的空间里已经有内容完全相同的文件，就直接引用它并标记“秒传”，不会传输任何数据，也不会多占一份存储（但仍计入配额）。浏览器不是 HTTPS 或 localhost 访问时无法计算指纹，会自动按普通方式上传。下载由浏览器直接发起，支持断点续传，服务端会提前取回并解密后续数据以缩短等待。</p>
       <H2>路径规则</H2>
       <ul className="doc-list">
         <li>路径不能以 <C>/</C> 开头，不能包含空段、<C>.</C> 或 <C>..</C>，不能包含控制字符。</li>
@@ -114,9 +118,17 @@ function SharingGuide() {
       <H2>两种链接</H2>
       <Table head={["链接", "格式", "适合"]} rows={[
         ["分享页", <C>{site}/s/&lt;令牌&gt;</C>, "发给他人：带预览、文件信息和下载按钮"],
-        ["直链", <C>{site}/p/&lt;令牌&gt;/&lt;文件名&gt;</C>, <>嵌入网页的 <C>&lt;img&gt;</C>、<C>&lt;video&gt;</C>，或交给下载工具；支持断点续传</>],
+        ["直链", <C>{site}/p/&lt;令牌&gt;/&lt;文件名&gt;</C>, <>嵌入网页的 <C>&lt;img&gt;</C>、<C>&lt;video&gt;</C>，或交给下载工具；支持断点续传（仅文件）</>],
       ]} />
-      <p>直链末尾的文件名只为便于识别，改成其他名字也能访问。加上 <C>?download=1</C> 会强制浏览器下载而不是打开。</p>
+      <p>文件直链末尾的文件名只为便于识别，改成其他名字也能访问。加上 <C>?download=1</C> 会强制浏览器下载而不是打开。</p>
+      <H2>分享文件夹</H2>
+      <p>文件夹也可以公开：在文件夹菜单中选择「公开分享」，得到一个分享页链接。访问者无需登录，可以浏览整个文件夹（含子文件夹），预览和下载其中的任意文件，但不能修改、上传或删除。</p>
+      <ul className="doc-list">
+        <li>内容是实时的：分享之后新增、替换或删除的文件，访问者刷新页面就能看到；他们看不到这个文件夹之外的任何内容。</li>
+        <li>有效期和访问密码与分享文件时一致，整个文件夹共用一个密码；下载次数统计的是文件夹内所有文件的下载总数。</li>
+        <li>文件夹里的单个文件也可以另外生成自己的链接，两者互不影响。</li>
+        <li>文件夹内文件的地址是 <C>{site}/p/&lt;令牌&gt;/&lt;相对路径&gt;</C>，例如 <C>/p/abc123/2026/trip.jpg</C>，同样支持断点续传。</li>
+      </ul>
       <H2>开启与关闭</H2>
       <ul className="doc-list">
         <li>上传时开启：在上传确认窗口中打开「上传后公开访问」。</li>
@@ -126,15 +138,15 @@ function SharingGuide() {
       <H2>链接什么时候会变化</H2>
       <Table head={["操作", "链接"]} rows={[
         ["覆盖上传同名文件", "保持不变，访问者看到新内容"],
-        ["移动或重命名", "保持不变"],
+        ["移动或重命名", "保持不变（文件夹也一样）"],
         ["关闭公开访问", "立即失效；再次开启会生成新链接"],
-        ["删除文件", "立即失效"],
+        ["删除文件或文件夹", "立即失效；放进回收站时暂时失效，还原后恢复"],
         ["账号被禁用、系统锁定", "暂停访问，恢复后继续有效"],
         ["管理员撤销", "立即失效"],
       ]} />
-      <Callout tone="warning" title="公开链接等同于文件本身">任何拿到链接的人都能下载文件，也可以继续转发。只分享你愿意让任何人看到的内容。文件夹不能公开。</Callout>
+      <Callout tone="warning" title="公开链接等同于文件本身">任何拿到链接的人都能下载文件，也可以继续转发。只分享你愿意让任何人看到的内容。分享文件夹时，里面现有的和以后新增的所有文件都会被看到，请确认文件夹里没有不想公开的内容。</Callout>
       <H2>访问者能看到什么</H2>
-      <p>分享页只显示文件名、大小、类型和修改时间，不会显示你的用户名、文件所在的文件夹或其他文件。</p>
+      <p>分享文件时，分享页只显示文件名、大小、类型和修改时间；分享文件夹时，显示文件夹里的文件名、大小和修改时间。两种情况都不会显示你的用户名、所在的上级文件夹或其他文件。</p>
     </>
   );
 }
@@ -143,7 +155,7 @@ function S3Guide() {
   const { s3, s3Configured } = useDocsConfig();
   return (
     <>
-      <p>tgdrive 提供 S3 兼容网关，可以直接使用 rclone、AWS CLI、boto3 等工具。先在网页「访问密钥」中创建密钥，Secret 只显示一次。</p>
+      <p>{BRAND} 提供 S3 兼容网关，可以直接使用 rclone、AWS CLI、boto3 等工具。先在网页「访问密钥」中创建密钥，Secret 只显示一次。</p>
       {!s3Configured && <Callout tone="warning" title="尚未配置 S3 Endpoint">管理员还没有在「系统设置」中配置 S3 Endpoint，下面的示例使用占位地址 <C>{s3}</C>。</Callout>}
       <H2>连接参数</H2>
       <Table head={["参数", "值"]} rows={[
@@ -155,7 +167,7 @@ function S3Guide() {
       ]} />
       <H2>rclone</H2>
       <Code lang="ini" title="~/.config/rclone/rclone.conf" code={`
-[tgdrive]
+[tessera]
 type = s3
 provider = Other
 access_key_id = <Access Key ID>
@@ -164,22 +176,22 @@ endpoint = ${s3}
 region = us-east-1
 force_path_style = true`} />
       <Code lang="bash" code={`
-rclone ls tgdrive:user-2
-rclone copy ./photos tgdrive:user-2/photos --progress
-rclone sync ./backup tgdrive:user-2/backup`} />
+rclone ls tessera:user-2
+rclone copy ./photos tessera:user-2/photos --progress
+rclone sync ./backup tessera:user-2/backup`} />
       <H2>AWS CLI</H2>
       <Code lang="bash" code={`
-aws configure --profile tgdrive   # 填写 Access Key、Secret，区域 us-east-1
-aws configure set profile.tgdrive.s3.addressing_style path
-aws configure set profile.tgdrive.s3.signature_version s3v4   # AWS CLI v1 需要，v2 默认即为 SigV4
+aws configure --profile tessera   # 填写 Access Key、Secret，区域 us-east-1
+aws configure set profile.tessera.s3.addressing_style path
+aws configure set profile.tessera.s3.signature_version s3v4   # AWS CLI v1 需要，v2 默认即为 SigV4
 
-aws --profile tgdrive --endpoint-url ${s3} s3 ls s3://user-2/
-aws --profile tgdrive --endpoint-url ${s3} s3 cp ./report.pdf s3://user-2/docs/report.pdf
-aws --profile tgdrive --endpoint-url ${s3} s3 cp s3://user-2/docs/report.pdf ./report.pdf
+aws --profile tessera --endpoint-url ${s3} s3 ls s3://user-2/
+aws --profile tessera --endpoint-url ${s3} s3 cp ./report.pdf s3://user-2/docs/report.pdf
+aws --profile tessera --endpoint-url ${s3} s3 cp s3://user-2/docs/report.pdf ./report.pdf
 
 # 服务端复制、移动与同步：不经过本机传输
-aws --profile tgdrive --endpoint-url ${s3} s3 cp s3://user-2/docs/ s3://user-2/backup/docs/ --recursive
-aws --profile tgdrive --endpoint-url ${s3} s3 mv s3://user-2/inbox/a.pdf s3://user-2/archive/a.pdf`} />
+aws --profile tessera --endpoint-url ${s3} s3 cp s3://user-2/docs/ s3://user-2/backup/docs/ --recursive
+aws --profile tessera --endpoint-url ${s3} s3 mv s3://user-2/inbox/a.pdf s3://user-2/archive/a.pdf`} />
       <H2>Python（boto3）</H2>
       <Code lang="python" code={`
 import boto3
@@ -370,6 +382,37 @@ print(obj["public_token"])` },
         ]} />
         <p>成功时返回 <DocLink to="api-basics#对象格式">对象</DocLink>。超出配额返回 413。</p>
       </Endpoint>
+      <Endpoint method="POST" path="/files/instant" auth="key" summary="秒传：同一个存储桶里已经有内容相同的文件时，直接让新路径引用它，不需要传输任何数据。未命中时返回 hit 为 false，再按普通方式上传即可。需要读写权限。">
+        <Params title="请求体（JSON）" rows={[
+          ["path", "string", true, "目标路径"],
+          ["size", "number", true, "文件大小（字节），必须大于 0"],
+          ["fingerprint", "string", true, "内容指纹，64 位小写十六进制，算法见下方"],
+          ["content_type", "string", false, "省略时沿用被引用文件的类型"],
+          ["public", "boolean", false, "命中后是否公开；省略时保持目标路径原有的公开状态"],
+        ]} />
+        <p>命中时返回文件对象并带 <C>hit: true</C>，未命中返回 <C>{"{ \"hit\": false }"}</C>。只会在你自己的存储桶、且密钥有权读取的路径范围内查找，不会暴露其他用户是否保存过某个文件。同名文件会被覆盖，配额照常计算。</p>
+        <H3>指纹算法</H3>
+        <p>把文件按 16 MiB 切块（最后一块可以更短），分别计算 SHA-256；再对「<C>tgdrive-fp-v1\n</C> + 文件大小（8 字节大端）+ 全部块哈希依次拼接」计算 SHA-256，取十六进制。</p>
+        <Code lang="python" code={`
+import hashlib
+
+def fingerprint(path, block=16 * 1024 * 1024):
+    leaves, size = [], 0
+    with open(path, "rb") as f:
+        while chunk := f.read(block):
+            size += len(chunk)
+            leaves.append(hashlib.sha256(chunk).digest())
+    return hashlib.sha256(b"tgdrive-fp-v1\\n" + size.to_bytes(8, "big") + b"".join(leaves)).hexdigest()
+
+result = session.post(f"{base}/files/instant", json={
+    "path": "docs/report.pdf", "size": os.path.getsize("report.pdf"), "fingerprint": fingerprint("report.pdf"),
+}).json()
+if not result["hit"]:
+    ...  # 未命中，用 PUT /files 上传`} />
+        <Callout tone="info" title="哪些文件可以被秒传命中">
+          网页端、<C>PUT /files</C> 和 S3 的单次上传都会在写入时顺带记录指纹，不需要重读数据。分段上传只有在除最后一段外每段大小都是 16 MiB 的整数倍时才有指纹（网页端和 <C>rclone --s3-chunk-size 16M</C> 这类配置满足，aws cli 默认的 8 MB 分段不满足）。升级前已有的文件没有指纹。
+        </Callout>
+      </Endpoint>
       <Endpoint method="GET" path="/content" auth="key" summary="读取文件内容，也支持 HEAD。图片、音视频、PDF 和纯文本以内联方式返回，其他类型作为附件下载。">
         <Params title="查询参数" rows={[
           ["path", "string", true, "文件路径"],
@@ -416,9 +459,9 @@ function ApiSharing() {
   return (
     <>
       <H2>管理公开状态</H2>
-      <Endpoint method="POST" path="/api/v1/public" auth="key" summary="开启或关闭一个或多个文件的公开访问，需要读写权限。重复开启返回相同的令牌；文件夹不能公开。">
+      <Endpoint method="POST" path="/api/v1/public" auth="key" summary="开启或关闭一个或多个文件或文件夹的公开访问，需要读写权限。重复开启返回相同的令牌。文件夹路径以 / 结尾，开启后访问者可以浏览并下载其中的全部文件。">
         <Params title="请求体" rows={[
-          ["paths", "string[]", true, <>文件路径列表；也可以用单个 <C>path</C> 字段</>],
+          ["paths", "string[]", true, <>文件或文件夹路径列表（文件夹以 <C>/</C> 结尾）；也可以用单个 <C>path</C> 字段</>],
           ["public", "boolean", true, "true 开启，false 关闭"],
         ]} />
         <CodeTabs tabs={[
@@ -501,8 +544,8 @@ function ApiPermissions() {
 }
 
 export const DOC_PAGES: DocPage[] = [
-  { slug: "overview", group: "入门", title: "概览", icon: "home", Content: Overview,
-    summary: "tgdrive 是什么、如何存储文件，以及有哪些访问方式。", keywords: "介绍 架构 加密 telegram 频道 存储桶 概念" },
+  { slug: "overview", group: "入门", title: "简介", icon: "home", Content: Overview,
+    summary: `${BRAND} 是什么、如何存储文件，以及有哪些访问方式。`, keywords: "介绍 架构 加密 telegram 频道 存储桶 概念" },
   { slug: "quickstart", group: "入门", title: "快速开始", icon: "checkCircle", Content: QuickStart,
     summary: "用户登录、上传文件，并连接 S3 客户端。", keywords: "登录 上传 文件夹 分享 访问密钥 s3" },
   { slug: "files", group: "使用指南", title: "管理文件", icon: "folder", Content: FilesGuide,
@@ -510,7 +553,7 @@ export const DOC_PAGES: DocPage[] = [
   { slug: "sharing", group: "使用指南", title: "公开分享", icon: "globe", Content: SharingGuide,
     summary: "用分享页和直链把文件公开给任何人，并随时收回。", keywords: "公开 分享 链接 直链 令牌 嵌入 下载" },
   { slug: "s3", group: "使用指南", title: "S3 客户端", icon: "key", Content: S3Guide,
-    summary: "用 rclone、AWS CLI 和 boto3 连接 tgdrive，以及兼容性说明。", keywords: "s3 rclone aws cli boto3 python 预签名 分段上传 multipart endpoint 兼容" },
+    summary: `用 rclone、AWS CLI 和 boto3 连接 ${BRAND}，以及兼容性说明。`, keywords: "s3 rclone aws cli boto3 python 预签名 分段上传 multipart endpoint 兼容" },
   { slug: "api-basics", group: "API 参考", title: "认证与约定", icon: "lock", Content: ApiBasics,
     summary: "使用访问密钥认证，请求格式、对象结构与错误码。", keywords: "api 认证 密钥 access key secret bearer basic authorization 错误码 401 403 413 503" },
   { slug: "api-files", group: "API 参考", title: "文件接口", icon: "code", Content: ApiFiles,

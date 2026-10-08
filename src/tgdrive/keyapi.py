@@ -10,8 +10,8 @@ import base64
 import binascii
 import hmac
 import unicodedata
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import AsyncIterator
 
 from .api import UserApi, apply_share, normalize_user_path
 from .authn import AuthenticationError
@@ -96,7 +96,7 @@ class KeyApi:
         return {"access_key_id": principal.access_key_id, "name": row["name"], "owner": row["username"],
                 "grants": [{"bucket": item["bucket"], "prefix": item["prefix"], "perms": item["perms"]} for item in grants]}
 
-    def list(self, principal: KeyPrincipal, bucket: str | None, prefix: str, cursor: str | None, limit: int):
+    async def list(self, principal: KeyPrincipal, bucket: str | None, prefix: str, cursor: str | None, limit: int):
         bucket_id = self._bucket(principal, bucket)
         prefix = normalize_user_path(prefix, directory=True) if prefix else ""
         grants = self._readable(principal, bucket_id)
@@ -110,12 +110,12 @@ class KeyApi:
                 raise PermissionError("该密钥无权读取这个路径")
             grant = min(inside, key=lambda item: len(item.prefix))
             prefix = grant.prefix
-        page = self.objects.list_objects(Scope(bucket_id, grant.prefix, grant.perms), prefix, "/", cursor,
-                                         max(1, min(limit, 1000)))
+        page = await self.objects.alist_objects(Scope(bucket_id, grant.prefix, grant.perms), prefix, "/", cursor,
+                                                max(1, min(limit, 1000)))
         return {"objects": [UserApi._object_json(item) for item in page.objects],
                 "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor}
 
-    def search(self, principal: KeyPrincipal, bucket: str | None, query: str, cursor: str, limit: int):
+    async def search(self, principal: KeyPrincipal, bucket: str | None, query: str, cursor: str, limit: int):
         bucket_id = self._bucket(principal, bucket)
         grants = self._readable(principal, bucket_id)
         query = unicodedata.normalize("NFC", query.strip())
@@ -128,12 +128,14 @@ class KeyApi:
         prefixes = sorted({grant.prefix for grant in grants})
         prefix_sql = " OR ".join("substr(key,1,?)=?" for _ in prefixes)
         prefix_args = [value for prefix in prefixes for value in (len(prefix), prefix)]
-        rows = self.objects.metadata.db.execute(
-            "SELECT key,size,etag,content_type,modified_at,public_token,public_at FROM objects "
-            f"WHERE bucket_id=? AND key>? AND instr(lower(key),lower(?))>0 AND substr(key,-1)!='/' "
-            f"AND substr(key,1,9)!='.tgdrive/' AND ({prefix_sql}) "
-            "ORDER BY key LIMIT ?",
-            (bucket_id, cursor, query, *prefix_args, limit + 1)).fetchall()
+        def read_page():
+            return self.objects.metadata.db.execute(
+                "SELECT key,size,etag,content_type,modified_at,public_token,public_at FROM objects "
+                f"WHERE bucket_id=? AND key>? AND instr(lower(key),lower(?))>0 AND substr(key,-1)!='/' "
+                f"AND substr(key,1,9)!='.tgdrive/' AND ({prefix_sql}) "
+                "ORDER BY key LIMIT ?",
+                (bucket_id, cursor, query, *prefix_args, limit + 1)).fetchall()
+        rows = await self.objects.metadata.run_in_thread(read_page)
         return {"objects": [dict(row) for row in rows[:limit]], "common_prefixes": [],
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
@@ -162,6 +164,19 @@ class KeyApi:
         if public is not None:
             item = self.objects.set_public(scope, key, public)
         return UserApi._object_json(item)
+
+    async def instant(self, principal: KeyPrincipal, bucket: str | None, path: str, size: int, fingerprint: str,
+                      content_type: str | None, public: bool | None):
+        """秒传：同一存储桶里已有内容相同的文件时直接引用，未命中返回 {"hit": False}。"""
+        bucket_id = self._bucket(principal, bucket)
+        key = normalize_user_path(path)
+        scope = self._scope(principal, bucket_id, [key], write=True)
+        item = self.objects.instant_put(scope, key, int(size), fingerprint, content_type)
+        if item is None:
+            return {"hit": False}
+        if public is not None:
+            item = self.objects.set_public(scope, key, public)
+        return {"hit": True, **UserApi._object_json(item)}
 
     async def folder(self, principal: KeyPrincipal, bucket: str | None, path: str):
         bucket_id = self._bucket(principal, bucket)

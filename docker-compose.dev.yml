@@ -1,0 +1,5 @@
+services:
+  tgdrive:
+    environment:
+      # 仅供本机 HTTP 开发；生产环境应使用 HTTPS，不要启用此项。
+      TGDRIVE_INSECURE_COOKIES: "1"

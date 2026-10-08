@@ -5,9 +5,7 @@ WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY web ./
-RUN node build-apps.mjs user \
-    && TGDRIVE_ASSET_PREFIX=/admin/ node build-apps.mjs admin \
-    && node build-apps.mjs admin-docs
+RUN node build-apps.mjs
 
 # 运行阶段：API 服务同时托管用户端根路径和 /admin/ 管理端。
 FROM python:3.12-slim
@@ -24,10 +22,16 @@ COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
-COPY --from=web-build /src/web/apps/user/dist /app/static/
-COPY --from=web-build /src/web/apps/admin/dist /app/static/admin/
+COPY --from=web-build /src/web/dist /app/static/
+
+RUN useradd --system --uid 10001 --create-home --home-dir /home/tgdrive tgdrive \
+    && mkdir -p /data \
+    && chown -R tgdrive:tgdrive /app /data
 
 VOLUME ["/data"]
 EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"
+USER tgdrive
 ENTRYPOINT ["tgdrive"]
 CMD ["--data-dir", "/data", "--host", "0.0.0.0", "--static-dir", "/app/static"]

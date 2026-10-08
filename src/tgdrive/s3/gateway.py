@@ -7,19 +7,25 @@ HTTP 框架只需把请求字段转成 ``handle`` 参数即可。
 from __future__ import annotations
 
 import datetime as dt
-from email.utils import formatdate
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from email.utils import formatdate
 from urllib.parse import parse_qs, unquote, urlsplit
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
-from ..objects import ObjectService, Scope
 from ..errors import NotFoundError, NotReadyError, QuotaExceededError
+from ..objects import ObjectService, Scope
 from .auth import ClientAuthStore
-from .payload import (ChunkSigningContext, PayloadError, UNSIGNED, as_stream, limit_size, read_all,
-                      verified_body)
+from .payload import (
+    ChunkSigningContext,
+    PayloadError,
+    as_stream,
+    limit_size,
+    read_all,
+    verified_body,
+)
 from .sigv4 import SignedRequest, SigV4Error, SigV4Verifier
 
 
@@ -58,7 +64,7 @@ def _child_text(node: ElementTree.Element, name: str) -> str | None:
 
 
 def _http_date(timestamp: float) -> str:
-    return dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return dt.datetime.fromtimestamp(timestamp, dt.UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 # 与 S3 一致：单次 PutObject 与单个分段最大 5 GiB；XML 请求体（批量删除、完成分段上传）最大 2 MiB。
@@ -346,7 +352,8 @@ class S3Gateway:
                 # 与 S3 一致：未提供 delimiter 时递归列出前缀下的全部对象，不做分组。
                 delimiter = params.get("delimiter", [""])[0] or None
                 max_keys = max(1, min(int(params.get("max-keys", ["1000"])[0]), 1000))
-                page = self.objects.list_objects(scope, prefix, delimiter, params.get("continuation-token", [None])[0], max_keys)
+                page = await self.objects.alist_objects(scope, prefix, delimiter,
+                                                        params.get("continuation-token", [None])[0], max_keys)
                 fragments = ["<Name>" + escape(bucket_name) + "</Name>", "<KeyCount>" + str(len(page.objects) + len(page.common_prefixes)) + "</KeyCount>"]
                 fragments.extend(f"<Contents><Key>{escape(item.key)}</Key><LastModified>{_http_date(item.modified_at)}</LastModified>"
                                  f"<ETag>&quot;{escape(item.etag)}&quot;</ETag><Size>{item.size}</Size>"

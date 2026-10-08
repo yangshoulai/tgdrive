@@ -17,8 +17,8 @@ import hashlib
 import hmac
 import re
 import zlib
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable
 
 from .sigv4 import SigV4Error
 

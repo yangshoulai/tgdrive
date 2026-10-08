@@ -92,3 +92,16 @@ class BotPool:
 
     def enabled_ids(self) -> list[str]:
         return sorted(bot.id for bot in self.bots.values() if bot.state is BotState.ENABLED)
+
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        """返回不含凭据的运行状态，供管理端展示限速退避情况。"""
+        now = time.monotonic()
+        return {
+            bot.id: {
+                "failures": bot.failures,
+                "cooldown_seconds": max(0.0, bot.cooldown_until - now),
+                "last_sent_at": bot.last_sent_at,
+                "state": bot.state.value,
+            }
+            for bot in self.bots.values()
+        }

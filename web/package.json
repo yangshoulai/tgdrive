@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p tsconfig.app.json",
-    "build": "node build-apps.mjs user && node build-apps.mjs admin && node build-apps.mjs admin-docs"
+    "build": "node build-apps.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

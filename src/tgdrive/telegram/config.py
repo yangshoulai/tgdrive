@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
-import json
 from typing import Any
 
 from ..blobstore import BlobStore
@@ -147,6 +147,11 @@ class ConfiguredBlobStore(BlobStore):
 
     def read_window(self, ref: str) -> int:
         return self.TELEGRAM_READ_WINDOW if self._telegram_bot_id(ref) is not None else 1024 * 1024
+
+    def bot_runtime(self) -> dict[str, dict[str, object]]:
+        """返回当前进程中各 Bot 的退避状态，不包含 token 或频道内容。"""
+        store = self._build()
+        return {} if store is None else store.pool.snapshot()
 
     async def put(self, key: str, data: bytes) -> str:
         store = self._build()

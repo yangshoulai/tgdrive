@@ -90,10 +90,10 @@ class SigV4Verifier:
         if not amz_date:
             raise SigV4Error("missing x-amz-date")
         try:
-            timestamp = dt.datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc)
+            timestamp = dt.datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.UTC)
         except ValueError as exc:
             raise SigV4Error("invalid x-amz-date") from exc
-        current = now or dt.datetime.now(dt.timezone.utc)
+        current = now or dt.datetime.now(dt.UTC)
         if abs((current - timestamp).total_seconds()) > self.max_clock_skew:
             raise SigV4Error("request time outside allowed skew")
         signed = [item.strip().lower() for item in match.group("headers").split(";")]
@@ -126,12 +126,12 @@ class SigV4Verifier:
         try:
             credential = query["X-Amz-Credential"].split("/")
             expires = int(query["X-Amz-Expires"])
-            timestamp = dt.datetime.strptime(query["X-Amz-Date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc)
+            timestamp = dt.datetime.strptime(query["X-Amz-Date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.UTC)
         except (ValueError, IndexError) as exc:
             raise SigV4Error("invalid presigned credential") from exc
         if len(credential) != 5 or credential[4] != "aws4_request" or not 1 <= expires <= 604800:
             raise SigV4Error("invalid presigned scope or expiry")
-        current = now or dt.datetime.now(dt.timezone.utc)
+        current = now or dt.datetime.now(dt.UTC)
         age = (current - timestamp).total_seconds()
         if age < -self.max_clock_skew or age > expires:
             raise SigV4Error("presigned request expired or not yet valid")

@@ -7,7 +7,7 @@ data/
 
 # Python 环境、缓存与打包产物
 .venv/
-.venv-*/
+.venv-*
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -16,7 +16,7 @@ __pycache__/
 
 # 前端依赖与构建产物
 web/node_modules/
-web/apps/*/dist/
+web/dist/
 web/tsconfig.app.tsbuildinfo
 
 # 本机工具配置与系统文件

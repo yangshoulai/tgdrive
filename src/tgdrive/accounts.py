@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass
 
-from .authn import AuthenticationError, Session, SessionManager, TooManyAttempts, hash_password, verify_password
+from .authn import (
+    AuthenticationError,
+    Session,
+    SessionManager,
+    TooManyAttempts,
+    hash_password,
+    verify_password,
+)
 from .errors import NotFoundError, NotReadyError
 from .keystore import KeyStore
 from .metadata import Metadata
@@ -21,10 +29,51 @@ class Account:
     bucket_id: int | None
 
 
+class MetadataSessionStore:
+    """“保持登录”会话的持久化：数据库里只保存令牌的 SHA-256，泄露数据库也拿不到可用的令牌。"""
+
+    def __init__(self, metadata: Metadata) -> None:
+        self.metadata = metadata
+
+    @staticmethod
+    def _digest(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def save(self, session: Session) -> None:
+        now = time.time()
+        with self.metadata.transaction() as db:
+            db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+            db.execute("INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at,created_at) VALUES(?,?,?,?,?)",
+                       (self._digest(session.token), session.user_id, session.csrf_token, session.expires_at, now))
+
+    def load(self, token: str) -> Session | None:
+        row = self.metadata.db.execute(
+            "SELECT s.csrf_token, s.expires_at, u.id, u.username, u.role, u.status FROM sessions s "
+            "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?", (self._digest(token),)).fetchone()
+        if row is None:
+            return None
+        if row["expires_at"] <= time.time() or row["status"] != "active":
+            self.delete(token)
+            return None
+        return Session(token, row["csrf_token"], row["id"], row["username"], row["role"], row["expires_at"], True)
+
+    def delete(self, token: str) -> None:
+        with self.metadata.transaction() as db:
+            db.execute("DELETE FROM sessions WHERE token_hash = ?", (self._digest(token),))
+
+    def delete_user(self, user_id: int, *, keep: str | None = None) -> None:
+        with self.metadata.transaction() as db:
+            db.execute("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?", (user_id, self._digest(keep) if keep else ""))
+
+    def delete_all(self) -> None:
+        with self.metadata.transaction() as db:
+            db.execute("DELETE FROM sessions")
+
+
 class AccountService:
     def __init__(self, metadata: Metadata, keystore: KeyStore, *, sessions: SessionManager | None = None) -> None:
         self.metadata, self.keystore = metadata, keystore
-        self.sessions = sessions or SessionManager()
+        self.sessions = sessions or SessionManager(store=MetadataSessionStore(metadata))
 
     def status(self) -> dict[str, object]:
         return {"initialized": self.keystore.is_initialized(), "unlocked": self.keystore.unlocked,
@@ -119,7 +168,7 @@ class AccountService:
     # 单个 IP 在失败窗口内对所有用户名的失败总数上限（防止用一个密码批量尝试用户名）。
     MAX_FAILURES_PER_IP = 30
 
-    def login(self, username: str, password: str, *, role: str | None = None, ip: str | None = None) -> Session:
+    def login(self, username: str, password: str, *, role: str | None = None, ip: str | None = None, remember: bool = False) -> Session:
         # 失败按“用户名 + 来源 IP”计数：别人从其他地址输错密码不会把真正的用户（尤其是管理员）锁在门外。
         account_key = f"{username.lower()}|{ip or '-'}"
         ip_key = f"ip:{ip}" if ip else None
@@ -142,7 +191,7 @@ class AccountService:
         self.sessions.clear_failures(account_key)
         with self.metadata.transaction() as db:
             db.execute("UPDATE users SET last_login_at=? WHERE id=?", (time.time(), row["id"]))
-        return self.sessions.create(row["id"], row["username"], row["role"])
+        return self.sessions.create(row["id"], row["username"], row["role"], remember=remember)
 
     def account_for_session(self, session: Session) -> Account:
         row = self.metadata.db.execute("SELECT * FROM users WHERE id=?", (session.user_id,)).fetchone()
@@ -169,3 +218,5 @@ class AccountService:
         encoded = hash_password(new_password)
         with self.metadata.transaction() as db:
             db.execute("UPDATE users SET password_hash=? WHERE id=?", (encoded, session.user_id))
+        # 改密码后其他设备上的登录（含“保持登录”的长期会话）一律失效，只保留当前这一个。
+        self.sessions.clear_user(session.user_id, keep=session.token)

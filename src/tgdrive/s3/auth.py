@@ -9,8 +9,8 @@ from dataclasses import dataclass
 
 from ..crypto import derive_subkey, open_sealed, seal
 from ..errors import NotFoundError
-from ..metadata import Metadata
 from ..keystore import KeyStore
+from ..metadata import Metadata
 
 
 @dataclass(frozen=True)

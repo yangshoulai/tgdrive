@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 import secrets
 import time
-import hmac
 from dataclasses import dataclass
 
-from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.exceptions import InvalidKey
+from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
 from .errors import TgDriveError
 
@@ -49,6 +49,7 @@ class Session:
     username: str
     role: str
     expires_at: float
+    remember: bool = False
 
 
 class TooManyAttempts(AuthenticationError):
@@ -56,8 +57,14 @@ class TooManyAttempts(AuthenticationError):
 
 
 class SessionManager:
-    def __init__(self, *, ttl: float = 12 * 60 * 60, max_failures: int = 5, failure_window: float = 15 * 60) -> None:
+    """会话默认只保存在进程内存里（12 小时）；勾选“保持登录”的会话额外持久化到数据库（只存令牌哈希），
+    有效期更长，服务重启或重新部署后仍然有效。"""
+
+    REMEMBER_TTL = 30 * 24 * 60 * 60
+
+    def __init__(self, *, ttl: float = 12 * 60 * 60, max_failures: int = 5, failure_window: float = 15 * 60, store=None) -> None:
         self.ttl, self.max_failures, self.failure_window = ttl, max_failures, failure_window
+        self.store = store
         self._sessions: dict[str, Session] = {}
         self._failures: dict[str, tuple[int, float]] = {}
 
@@ -91,40 +98,61 @@ class SessionManager:
     # 会话与失败计数只保存在本进程内：tgdrive 设计为单进程部署（不要用多个 worker 或多实例运行同一个数据目录）。
     MAX_TRACKED_FAILURES = 10_000
 
-    def create(self, user_id: int, username: str, role: str) -> Session:
+    def create(self, user_id: int, username: str, role: str, *, remember: bool = False) -> Session:
         now = time.time()
         # 顺带清理过期会话，避免从未再次访问的会话长期驻留内存。
         for token, item in list(self._sessions.items()):
             if item.expires_at <= now:
                 self._sessions.pop(token, None)
-        session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), user_id, username, role, now + self.ttl)
+        persistent = remember and self.store is not None
+        session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), user_id, username, role,
+                          now + (self.REMEMBER_TTL if persistent else self.ttl), persistent)
         self._sessions[session.token] = session
+        if persistent:
+            self.store.save(session)
+        return session
+
+    def _find(self, token: str) -> Session | None:
+        """先查内存；未命中再查持久化的“保持登录”会话（例如服务重启之后）。过期的一律丢弃。"""
+        session = self._sessions.get(token)
+        if session is None and self.store is not None and token:
+            session = self.store.load(token)
+            if session is not None:
+                self._sessions[token] = session
+        if session is not None and session.expires_at <= time.time():
+            self.revoke(token)
+            return None
         return session
 
     def peek(self, token: str) -> Session | None:
         """不做任何校验地查看会话，仅用于审计日志记录操作者。"""
-        session = self._sessions.get(token)
-        return session if session is not None and session.expires_at > time.time() else None
+        return self._find(token)
 
     def require(self, token: str, *, role: str | None = None, csrf: str | None = None, mutation: bool = False) -> Session:
-        session = self._sessions.get(token)
-        if session is None or session.expires_at <= time.time():
-            if session is not None:
-                self._sessions.pop(token, None)
+        session = self._find(token)
+        if session is None:
             raise SessionExpired("session is expired")
         if role is not None and session.role != role:
-            raise AuthenticationError("insufficient role")
+            # 已登录但角色不够：HTTP 层映射为 403，而不是 401，避免前端把它当成会话过期而强制退出。
+            raise PermissionError("insufficient role")
         if mutation and (csrf is None or not hmac.compare_digest(csrf, session.csrf_token)):
             raise CsrfError("invalid CSRF token")
         return session
 
     def revoke(self, token: str) -> None:
         self._sessions.pop(token, None)
+        if self.store is not None:
+            self.store.delete(token)
 
     def clear(self) -> None:
         self._sessions.clear()
+        if self.store is not None:
+            self.store.delete_all()
 
-    def clear_user(self, user_id: int) -> None:
+    def clear_user(self, user_id: int, *, keep: str | None = None) -> None:
+        """注销某个账号的全部会话；keep 指定要保留的那一个（例如正在修改密码的当前会话）。"""
         for token, session in list(self._sessions.items()):
-            if session.user_id == user_id:
+            if session.user_id == user_id and token != keep:
                 self._sessions.pop(token, None)
+        if self.store is not None:
+            self.store.delete_user(user_id, keep=keep)

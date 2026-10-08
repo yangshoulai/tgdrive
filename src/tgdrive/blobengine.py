@@ -6,14 +6,25 @@ import asyncio
 import hashlib
 import time
 import uuid
+from collections import deque
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
-from typing import AsyncIterator, Iterable
 
 from .blobstore import BlobStore
-from .crypto import FORMAT_VERSION, FileKey, cipher_range, decrypt_range, encrypt_chunk, new_dek, unwrap_dek, wrap_dek
+from .crypto import (
+    FORMAT_VERSION,
+    FileKey,
+    cipher_range,
+    decrypt_range,
+    encrypt_chunk,
+    new_dek,
+    unwrap_dek,
+    wrap_dek,
+)
 from .errors import IntegrityError, InvalidStateError, NotFoundError
-from .metadata import BlobRecord, ChunkRecord, Metadata
+from .fingerprint import BLOCK_SIZE, BlockHasher
 from .keystore import KeyStore
+from .metadata import BlobRecord, ChunkRecord, Metadata
 
 
 @dataclass(frozen=True)
@@ -23,6 +34,8 @@ class PartResult:
     size: int
     md5: str
     chunks: int
+    # 本分段按 fingerprint_block 切块后各块 SHA-256 的拼接，用于计算内容指纹（见 fingerprint.py）。
+    leaves: bytes = b""
 
 
 class BlobEngine:
@@ -38,6 +51,9 @@ class BlobEngine:
         self.chunk_size, self.frame_size = chunk_size, frame_size
         # 同一个分段内并行写入后端的分片数；内存上限约为 (并发数 + 1) × chunk_size。
         self.upload_concurrency = 3
+        # 下载时提前取回并解密的窗口数；内存上限约为 (预读数 + 1) × 读取窗口。
+        self.read_ahead = 2
+        self.fingerprint_block = BLOCK_SIZE
 
     def _kek(self) -> bytes:
         if self.keystore is not None:
@@ -69,6 +85,7 @@ class BlobEngine:
         dek = unwrap_dek(self._kek(), record.wrapped_dek, blob_uuid)
         fk = FileKey(dek, self._blob_key(blob_uuid), record.frame_size)
         md5 = hashlib.md5()
+        blocks = BlockHasher(self.fingerprint_block)
         pending: list[ChunkRecord] = []
         old_refs: list[str] = []
         old = self.metadata.list_chunks(blob_uuid, part_no=part_no)
@@ -96,6 +113,7 @@ class BlobEngine:
         async def launch(plain: bytes) -> None:
             nonlocal started, total
             md5.update(plain)
+            blocks.update(plain)
             total += len(plain)
             inflight.append(asyncio.ensure_future(self._store_chunk(fk, blob_uuid, part_no, started, plain)))
             started += 1
@@ -129,10 +147,11 @@ class BlobEngine:
             # 分段只在全部写完后登记；中途失败时已写入后端的分片交给 GC 回收，否则会永久遗留在频道里。
             self.metadata.enqueue_refs([chunk.blob_ref for chunk in pending], time.time())
             raise
-        return PartResult(blob_uuid, part_no, total, md5.hexdigest(), len(pending))
+        return PartResult(blob_uuid, part_no, total, md5.hexdigest(), len(pending), blocks.finish())
 
     async def _store_chunk(self, fk: FileKey, blob_uuid: str, part_no: int, sub_idx: int, plain: bytes) -> ChunkRecord:
-        encrypted, salt = encrypt_chunk(fk, plain)
+        # 16 MB 的 AES-GCM 加密放到线程里，避免阻塞事件循环（cryptography 会释放 GIL）。
+        encrypted, salt = await asyncio.to_thread(encrypt_chunk, fk, plain)
         ref = await self.store.put(f"{blob_uuid}:{part_no}:{sub_idx}", encrypted)
         return ChunkRecord(blob_uuid, part_no, sub_idx, None, len(plain), len(encrypted), salt,
                            hashlib.sha256(encrypted).hexdigest(), ref)
@@ -159,24 +178,47 @@ class BlobEngine:
         fk = FileKey(dek, self._blob_key(blob_uuid), record.frame_size)
         # 远端后端（Telegram）每次请求的开销大，允许它要求更大的读取窗口。
         window_for = getattr(self.store, "read_window", None)
-        for chunk in chunks:
-            if chunk.offset is None:
-                raise IntegrityError("complete blob has unassigned chunk offset")
-            chunk_window = max(window, window_for(chunk.blob_ref)) if callable(window_for) else window
-            chunk_end = chunk.offset + chunk.plain_size
-            if chunk_end <= start or chunk.offset >= stop:
-                continue
-            lo = max(start, chunk.offset) - chunk.offset
-            hi_exclusive = min(stop, chunk_end) - chunk.offset
-            position = lo
-            while position < hi_exclusive:
-                local_end = min(hi_exclusive, position + max(chunk_window, record.frame_size))
-                cipher_start, cipher_end, _, _ = cipher_range(record.frame_size, chunk.plain_size,
-                                                               position, local_end - 1)
-                encrypted = await self.store.get(chunk.blob_ref, cipher_start, cipher_end)
-                yield decrypt_range(fk, chunk.salt, chunk.plain_size, encrypted,
-                                    position, local_end - 1)
-                position = local_end
+        def windows():
+            for chunk in chunks:
+                if chunk.offset is None:
+                    raise IntegrityError("complete blob has unassigned chunk offset")
+                chunk_window = max(window, window_for(chunk.blob_ref)) if callable(window_for) else window
+                chunk_end = chunk.offset + chunk.plain_size
+                if chunk_end <= start or chunk.offset >= stop:
+                    continue
+                position = max(start, chunk.offset) - chunk.offset
+                hi_exclusive = min(stop, chunk_end) - chunk.offset
+                while position < hi_exclusive:
+                    local_end = min(hi_exclusive, position + max(chunk_window, record.frame_size))
+                    yield chunk, position, local_end
+                    position = local_end
+
+        async def fetch(chunk: ChunkRecord, lo: int, hi_exclusive: int) -> bytes:
+            cipher_start, cipher_end, _, _ = cipher_range(record.frame_size, chunk.plain_size, lo, hi_exclusive - 1)
+            encrypted = await self.store.get(chunk.blob_ref, cipher_start, cipher_end)
+            return await asyncio.to_thread(decrypt_range, fk, chunk.salt, chunk.plain_size, encrypted, lo, hi_exclusive - 1)
+
+        # 流水线：消费者处理当前窗口时，后面最多 read_ahead 个窗口已在并行取回与解密，
+        # 把远端后端每次请求的往返延迟隐藏起来。结果仍按顺序返回。
+        pending: deque[asyncio.Task[bytes]] = deque()
+        source = windows()
+        try:
+            exhausted = False
+            while True:
+                while not exhausted and len(pending) <= self.read_ahead:
+                    item = next(source, None)
+                    if item is None:
+                        exhausted = True
+                    else:
+                        pending.append(asyncio.ensure_future(fetch(*item)))
+                if not pending:
+                    return
+                yield await pending.popleft()
+        finally:
+            # 客户端中断或某个窗口失败：取消尚未使用的预读，并等待它们结束以免遗留未处理的异常。
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def read(self, blob_uuid: str, start: int = 0, end: int | None = None) -> bytes:
         parts = [part async for part in self.stream(blob_uuid, start, end)]

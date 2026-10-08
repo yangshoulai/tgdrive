@@ -9,7 +9,12 @@ from dataclasses import dataclass
 
 from ..blobstore import BlobStore
 from ..errors import BlobNotFound, IntegrityError
-from .client import TelegramAuthError, TelegramNotFoundError, TelegramRateLimitError, TelegramTransientError
+from .client import (
+    TelegramAuthError,
+    TelegramNotFoundError,
+    TelegramRateLimitError,
+    TelegramTransientError,
+)
 from .pool import BotPool
 
 
@@ -26,7 +31,7 @@ class TelegramRef:
                            "fid": self.file_id, "uid": self.file_unique_id}, separators=(",", ":"))
 
     @classmethod
-    def decode(cls, value: str) -> "TelegramRef":
+    def decode(cls, value: str) -> TelegramRef:
         try:
             data = json.loads(value)
             if data.get("v") != 1:

@@ -1,6 +1,6 @@
 export type Role = "admin" | "user";
 export type SiteConfig = { public_base_url: string | null; s3_endpoint: string | null };
-export type Session = { csrf_token: string; expires_at: number; username: string; role: Role } & Partial<SiteConfig>;
+export type Session = { csrf_token: string; expires_at: number; username: string; role: Role; bucket_id?: number | null; unlocked?: boolean; remember?: boolean } & Partial<SiteConfig>;
 export type FileItem = {
   key: string;
   size: number;
@@ -14,20 +14,30 @@ export type FileItem = {
   public_downloads?: number;
   has_thumbnail?: boolean;
 };
-export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null };
+/** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
+export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem> };
 export type Account = { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
 export type ClientKey = { access_key_id: string; status: "active" | "disabled"; created_at: number; last_used_at: number | null };
 export type ClientGrant = { bucket_id: number; bucket_name: string; prefix: string; perms: "ro" | "rw" };
 export type AdminClient = { id: number; name: string; description: string | null; owner_user_id: number | null; status: "active" | "disabled"; created_at: number; keys: ClientKey[]; grants: ClientGrant[] };
-export type BotConfig = { id: number; name: string; channel_id: string; status: "active" | "disabled"; created_at: number; last_check_at: number | null; last_check_status: string | null };
+export type BotRuntime = { failures: number; cooldown_seconds: number; last_sent_at: number; state: "enabled" | "draining" | "disabled" } | null;
+export type BotConfig = { id: number; name: string; channel_id: string; status: "active" | "disabled"; created_at: number; last_check_at: number | null; last_check_status: string | null; runtime?: BotRuntime };
 export type AdminObject = FileItem & { bucket_id: number; bucket_name: string; username: string | null };
-export type UserMe = { id: number; username: string; role: "user"; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; csrf_token: string; expires_at: number } & SiteConfig;
-export type AdminMe = { id: number; username: string; role: "admin"; status: "active"; csrf_token: string; expires_at: number } & SiteConfig;
+/** 当前登录账号：管理员和普通用户共用同一个会话接口，角色决定能看到哪些功能。 */
+export type UserMe = { id: number; username: string; role: Role; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; unlocked: boolean; remember?: boolean; csrf_token: string; expires_at: number } & SiteConfig;
 export type SettingValue = { value: string | null; default: string | null; effective: string | null };
 export type SystemSettings = { public_base_url: SettingValue; s3_endpoint: SettingValue };
-export type SystemStatus = { initialized: boolean; unlocked: boolean; user_count: number };
-export type PublicObject = { token: string; password_required: false; name: string; size: number; content_type: string | null; etag: string; modified_at: number; public_at: number | null; expires_at: number | null }
-  | { token: string; password_required: true };
+export type TrafficPoint = { at: number; in_bytes: number; out_bytes: number };
+export type TrafficMetrics = { total_in_bytes: number; total_out_bytes: number; recent: TrafficPoint[] };
+export type SystemStatus = { initialized: boolean; unlocked: boolean; user_count: number; traffic?: TrafficMetrics };
+export type PublicFile = { kind: "file"; token: string; password_required: false; name: string; size: number; content_type: string | null; etag: string; modified_at: number; public_at: number | null; expires_at: number | null };
+export type PublicFolder = { kind: "folder"; token: string; password_required: false; name: string; modified_at: number; public_at: number | null; expires_at: number | null };
+export type PublicObject = PublicFile | PublicFolder | { token: string; password_required: true };
+export type PublicFolderPage = {
+  name: string; path: string; next_cursor: string | null;
+  folders: { name: string; path: string }[];
+  files: { name: string; path: string; size: number; content_type: string | null; etag: string; modified_at: number }[];
+};
 export type CreatedClient = { id: number; access_key_id: string; secret: string };
 
 let csrfToken = "";
@@ -39,12 +49,6 @@ export class ApiError extends Error {
 
 export function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error && reason.message ? reason.message : fallback;
-}
-
-function sessionScope(path: string): Role | null {
-  if (path.includes("/api/admin/")) return "admin";
-  if (path.includes("/api/user/")) return "user";
-  return null;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -61,8 +65,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     let message = `请求失败（${response.status}）`;
     let code = "request_failed";
     try { const body = await response.json(); message = body.error?.message ?? message; code = body.error?.code ?? code; } catch { /* 保留状态码 */ }
-    const scope = sessionScope(path);
-    if (response.status === 401 && scope && !path.endsWith("/login")) window.dispatchEvent(new CustomEvent("tgdrive:session-expired", { detail: scope }));
+    if (response.status === 401 && path.startsWith("/api/") && !path.endsWith("/login")) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
     throw new ApiError(message, response.status, code);
   }
   if (response.status === 204) return undefined as T;
@@ -73,34 +76,24 @@ const post = <T>(path: string, body?: unknown) => request<T>(path, { method: "PO
 
 /* ---------- 会话 ---------- */
 
-export async function login(username: string, password: string): Promise<Session> {
-  const session = await post<Session>("/api/user/v1/login", { username, password });
+/** remember 为 true 时服务端签发 30 天的长期会话（服务重启后仍有效）；否则 12 小时。 */
+export async function login(username: string, password: string, remember = false): Promise<Session> {
+  const session = await post<Session>("/api/auth/v1/login", { username, password, remember });
   setCsrf(session.csrf_token);
   return session;
 }
-export async function adminLogin(username: string, password: string): Promise<Session> {
-  const session = await post<Session>("/api/admin/v1/login", { username, password });
-  setCsrf(session.csrf_token);
-  return session;
-}
-export async function logout(admin = false) {
-  try { await post<void>(`/api/${admin ? "admin" : "user"}/v1/logout`); }
+export async function logout() {
+  try { await post<void>("/api/auth/v1/logout"); }
   finally { setCsrf(""); }
 }
-export const me = () => request<UserMe>("/api/user/v1/me");
-export async function restoreUserSession(): Promise<Session> {
+export const me = () => request<UserMe>("/api/auth/v1/me");
+export async function restoreSession(): Promise<Session> {
   const account = await me();
   setCsrf(account.csrf_token);
   setSiteConfig(account);
-  return { csrf_token: account.csrf_token, expires_at: account.expires_at, username: account.username, role: "user", public_base_url: account.public_base_url, s3_endpoint: account.s3_endpoint };
+  return { csrf_token: account.csrf_token, expires_at: account.expires_at, username: account.username, role: account.role, bucket_id: account.bucket_id, unlocked: account.unlocked, remember: account.remember, public_base_url: account.public_base_url, s3_endpoint: account.s3_endpoint };
 }
-export async function restoreAdminSession(): Promise<Session> {
-  const account = await request<AdminMe>("/api/admin/v1/me");
-  setCsrf(account.csrf_token);
-  setSiteConfig(account);
-  return { csrf_token: account.csrf_token, expires_at: account.expires_at, username: account.username, role: "admin", public_base_url: account.public_base_url, s3_endpoint: account.s3_endpoint };
-}
-export const changePassword = (oldPassword: string, newPassword: string) => post<void>("/api/user/v1/password", { old_password: oldPassword, new_password: newPassword });
+export const changePassword = (oldPassword: string, newPassword: string) => post<void>("/api/auth/v1/password", { old_password: oldPassword, new_password: newPassword });
 
 /* ---------- 用户文件 ---------- */
 
@@ -131,6 +124,10 @@ export const setThumbnail = (path: string, data: string) => post<void>("/api/use
 
 /* ---------- 可续传的分段上传 ---------- */
 export type UploadState = { upload_id: string; path: string; completed: boolean; parts: { part_no: number; size: number; etag: string }[] };
+export type InstantResult = ({ hit: true } & FileItem) | { hit: false };
+/** 秒传：存储桶里已有内容相同的文件时直接引用；未命中返回 { hit: false }，调用方再走普通上传。 */
+export const instantUpload = (path: string, size: number, fingerprint: string, contentType: string, isPublic?: boolean) =>
+  post<InstantResult>("/api/user/v1/files/instant", { path, size, fingerprint, content_type: contentType || undefined, ...(isPublic === undefined ? {} : { public: isPublic }) });
 export const createUpload = (path: string, contentType: string) => post<{ upload_id: string; part_size: number }>("/api/user/v1/uploads", { path, content_type: contentType });
 export const getUpload = (id: string) => request<UploadState>(`/api/user/v1/uploads/${id}`);
 export const completeUpload = (id: string, parts: [number, string][], isPublic?: boolean) => post<FileItem>(`/api/user/v1/uploads/${id}/complete`, { parts, ...(isPublic === undefined ? {} : { public: isPublic }) });
@@ -161,7 +158,7 @@ function xhrPut<T>(url: string, body: Blob, contentType: string, onProgress: (pr
       }
       let message = `上传失败（${xhr.status}）`; let code = "upload_failed";
       try { const parsed = JSON.parse(xhr.responseText); message = parsed.error?.message ?? message; code = parsed.error?.code ?? code; } catch { /* 保留状态码 */ }
-      if (xhr.status === 401) window.dispatchEvent(new CustomEvent("tgdrive:session-expired", { detail: "user" }));
+      if (xhr.status === 401) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
       reject(new ApiError(message, xhr.status, code));
     };
     xhr.send(body);
@@ -192,6 +189,20 @@ export async function loadPublicConfig() {
   return config;
 }
 export const publicObject = (token: string, access?: string | null) => request<PublicObject>(`/api/public/v1/objects/${encodeURIComponent(token)}${access ? `?access=${encodeURIComponent(access)}` : ""}`);
+export const publicFolderList = (token: string, path = "", cursor: string | null = null, access?: string | null) => {
+  const params = new URLSearchParams({ path });
+  if (cursor) params.set("cursor", cursor);
+  if (access) params.set("access", access);
+  return request<PublicFolderPage>(`/api/public/v1/folders/${encodeURIComponent(token)}/list?${params}`);
+};
+/** 分享文件夹中某个文件的地址：/p/<令牌>/<相对路径>。 */
+export const publicFolderFile = (token: string, path: string, download = false, access?: string | null) => {
+  const params = new URLSearchParams();
+  if (download) params.set("download", "1");
+  if (access) params.set("access", access);
+  const query = params.toString();
+  return `/p/${encodeURIComponent(token)}/${path.split("/").map(encodeURIComponent).join("/")}${query ? `?${query}` : ""}`;
+};
 export const unlockShare = (token: string, password: string) => post<{ access: string; expires_at: number }>(`/api/public/v1/objects/${encodeURIComponent(token)}/unlock`, { password });
 export const publicPath = (token: string, name: string, download = false, access?: string | null) => {
   const params = new URLSearchParams();
@@ -225,7 +236,6 @@ export const createAdminUser = (username: string, password: string, quotaBytes: 
 export const setAdminUserStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/users/${id}/status`, { status });
 export const resetAdminUserPassword = (id: number, password: string) => post<void>(`/api/admin/v1/users/${id}/password`, { password });
 export const deleteAdminUser = (id: number, confirm: string) => post<{ username: string; deleted_objects: number }>(`/api/admin/v1/users/${id}/delete`, { confirm });
-export const changeAdminPassword = (oldPassword: string, newPassword: string) => post<void>("/api/admin/v1/password", { old_password: oldPassword, new_password: newPassword });
 export const changePassphrase = (oldPassphrase: string, newPassphrase: string) => post<{ key_version: number; rewrapped_files: number }>("/api/admin/v1/passphrase", { old_passphrase: oldPassphrase, new_passphrase: newPassphrase });
 export type MaintenanceTask = { at: number; error?: string; [key: string]: unknown };
 export type MaintenanceStatus = { gc_pending: number; gc_dead: number; cleanup?: MaintenanceTask; gc?: MaintenanceTask; scrub?: MaintenanceTask; backup?: MaintenanceTask; trash?: MaintenanceTask };
@@ -265,10 +275,9 @@ export function setSiteConfig(config: Partial<SiteConfig>) {
   siteConfig = { public_base_url: config.public_base_url ?? null, s3_endpoint: config.s3_endpoint ?? null };
 }
 
-/** 推断的用户站点地址：本地开发时管理端在 8002，用户端与分享页在 8001。 */
+/** 推断的用户站点地址：用户端、控制台和 API 在同一个站点下，直接取当前站点。 */
 export function detectedSiteOrigin() {
-  const { protocol, hostname, port, origin } = window.location;
-  return port === "8002" ? `${protocol}//${hostname}:8001` : origin;
+  return window.location.origin;
 }
 export function detectedS3Endpoint() {
   const { hostname } = window.location;

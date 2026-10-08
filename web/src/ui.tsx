@@ -1,5 +1,7 @@
-/** tgdrive 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
+/** Tessera 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
 import { useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { BRAND } from "./brand";
 
 /* ---------- 图标 ---------- */
 
@@ -64,13 +66,23 @@ export function Icon({ name, size = 18, className }: { name: IconName; size?: nu
 
 /* ---------- 品牌 ---------- */
 
+/** 标志：四块马赛克瓦片（tessera）拼成一个方块，右上角那块切成纸飞机的形状并用公开色强调。 */
+export function LogoMark({ size = 28 }: { size?: number }) {
+  return (
+    <svg className="logo-mark" viewBox="0 0 32 32" width={size} height={size} aria-hidden="true">
+      <rect className="logo-a" x="3" y="3" width="12" height="12" rx="3.4" />
+      <polygon className="logo-plane" points="18.6,4.6 27.4,4.6 27.4,13.4" strokeWidth="3.2" strokeLinejoin="round" />
+      <rect className="logo-b" x="3" y="17" width="12" height="12" rx="3.4" />
+      <rect className="logo-c" x="17" y="17" width="12" height="12" rx="3.4" />
+    </svg>
+  );
+}
+
 export function Brand({ href = "/", suffix }: { href?: string; suffix?: string }) {
   return (
-    <a className="brand" href={href} aria-label="tgdrive 首页">
-      <span className="brand-glyph" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="16" height="16"><path d="M20.5 4.2 3.6 10.8c-.9.4-.9 1.6 0 1.9l4.3 1.4 1.6 5c.3.8 1.3 1 1.9.4l2.4-2.3 4.5 3.3c.7.5 1.7.1 1.9-.8l2.7-13.7c.2-1.1-.8-1.9-1.8-1.5Z" fill="currentColor" /></svg>
-      </span>
-      <span className="brand-name">tgdrive</span>
+    <a className="brand" href={href} aria-label={`${BRAND} 首页`}>
+      <LogoMark />
+      <span className="brand-name">{BRAND}</span>
       {suffix && <span className="brand-suffix">{suffix}</span>}
     </a>
   );
@@ -273,7 +285,7 @@ export function Menu({ items, label, icon = "more" }: { items: MenuItem[]; label
       <button ref={trigger} type="button" className={`icon-btn icon-btn-ghost icon-btn-sm${open ? " is-active" : ""}`} aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open} onClick={event => { event.stopPropagation(); setOpen(value => !value); setPosition(null); }}>
         <Icon name={icon} size={16} />
       </button>
-      {open && (
+      {open && createPortal(
         <div ref={list} className="menu" role="menu" aria-label={label} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }} onClick={event => event.stopPropagation()}>
           {items.map(item => {
             const content = <><Icon name={item.icon} size={16} /><span>{item.label}</span></>;
@@ -282,7 +294,8 @@ export function Menu({ items, label, icon = "more" }: { items: MenuItem[]; label
               ? <a key={item.label} role="menuitem" className={className} href={item.href} onClick={() => setOpen(false)}>{content}</a>
               : <button key={item.label} type="button" role="menuitem" className={className} onClick={() => { setOpen(false); item.onSelect(); }}>{content}</button>;
           })}
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

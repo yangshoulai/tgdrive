@@ -7,15 +7,16 @@
 from __future__ import annotations
 
 import unicodedata
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from .accounts import AccountService
 from .authn import AuthenticationError, Session
-from .errors import NotReadyError, NotFoundError
+from .errors import NotFoundError, NotReadyError
+from .maintenance import MaintenanceService
+from .metrics import TrafficMetrics
 from .objects import ObjectService, Scope
 from .s3.auth import ClientAuthStore
-from .maintenance import MaintenanceService
-from .telegram.config import TelegramBotConfigStore
+from .telegram.config import ConfiguredBlobStore, TelegramBotConfigStore
 
 
 def apply_share(objects: ObjectService, scope: Scope, key: str, public: bool, options: dict[str, object] | None):
@@ -46,12 +47,17 @@ def normalize_user_path(value: str, *, directory: bool = False) -> str:
 class AdminApi:
     def __init__(self, accounts: AccountService, objects: ObjectService, clients: ClientAuthStore,
                  maintenance: MaintenanceService | None = None,
-                 telegram_bots: TelegramBotConfigStore | None = None) -> None:
+                 telegram_bots: TelegramBotConfigStore | None = None,
+                 metrics: TrafficMetrics | None = None,
+                 storage: ConfiguredBlobStore | None = None) -> None:
         self.accounts, self.objects, self.clients = accounts, objects, clients
-        self.maintenance, self.telegram_bots = maintenance, telegram_bots
+        self.maintenance, self.telegram_bots, self.metrics, self.storage = maintenance, telegram_bots, metrics, storage
 
     def status(self) -> dict[str, object]:
-        return self.accounts.status()
+        result = self.accounts.status()
+        if self.metrics is not None:
+            result["traffic"] = self.metrics.snapshot()
+        return result
 
     def setup(self, passphrase: str, username: str, password: str) -> dict[str, object]:
         account = self.accounts.setup(passphrase, username, password)
@@ -181,7 +187,9 @@ class AdminApi:
         self.accounts.sessions.require(token, role="admin")
         if self.telegram_bots is None:
             return []
-        return self.telegram_bots.list()
+        items = self.telegram_bots.list()
+        runtime = self.storage.bot_runtime() if self.storage is not None else {}
+        return [{**item, "runtime": runtime.get(str(item["id"]))} for item in items]
 
     def create_bot(self, token: str, csrf: str, name: str, bot_token: str, channel_id: str) -> dict[str, object]:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
@@ -201,8 +209,13 @@ class AdminApi:
             raise NotReadyError("Telegram Bot 配置尚未启用")
         self.telegram_bots.set_status(bot_id, status)
 
-    def list_objects(self, token: str, *, limit: int = 100, cursor: str | None = None, query: str = "",
-                     public_only: bool = False) -> dict[str, object]:
+    async def list_objects(self, token: str, *, limit: int = 100, cursor: str | None = None, query: str = "",
+                           public_only: bool = False) -> dict[str, object]:
+        return await self.accounts.metadata.run_in_thread(
+            self._list_objects_sync, token, limit=limit, cursor=cursor, query=query, public_only=public_only)
+
+    def _list_objects_sync(self, token: str, *, limit: int = 100, cursor: str | None = None, query: str = "",
+                            public_only: bool = False) -> dict[str, object]:
         """全部文件：按修改时间倒序的键集分页，筛选在 SQL 中完成。不包含文件夹标记。"""
         self.accounts.sessions.require(token, role="admin")
         limit = max(1, min(limit, 200))
@@ -305,7 +318,7 @@ class AdminApi:
     @staticmethod
     def _session_payload(session: Session) -> dict[str, object]:
         return {"session": session.token, "csrf_token": session.csrf_token, "expires_at": session.expires_at,
-                "username": session.username, "role": session.role}
+                "username": session.username, "role": session.role, "remember": session.remember}
 
 
 class UserApi:
@@ -316,36 +329,54 @@ class UserApi:
     def _session(self, token: str, *, csrf: str | None = None, mutation: bool = False) -> Session:
         if not self.accounts.keystore.unlocked:
             raise NotReadyError("system is locked")
-        # 用户端所有读写都必须由用户会话完成，避免管理员 Cookie 读到用户空间。
-        return self.accounts.sessions.require(token, role="user", csrf=csrf, mutation=mutation)
+        # 文件空间接口接受任何角色的有效会话：管理员同样拥有自己的存储桶。管理接口另由 role="admin" 校验。
+        return self.accounts.sessions.require(token, csrf=csrf, mutation=mutation)
 
-    def login(self, username: str, password: str, ip: str | None = None) -> dict[str, object]:
-        if not self.accounts.keystore.unlocked:
+    def login(self, username: str, password: str, ip: str | None = None, remember: bool = False) -> dict[str, object]:
+        """统一登录入口：任何角色的账号都从这里登录，登录后的菜单与权限由角色决定。
+
+        系统锁定时只有管理员可以登录（需要进入控制台输入口令解锁），普通用户得到“系统已锁定”。
+        """
+        session = self.accounts.login(username, password, ip=ip, remember=remember)
+        if not self.accounts.keystore.unlocked and session.role != "admin":
+            self.accounts.sessions.revoke(session.token)
             raise NotReadyError("system is locked")
-        session = self.accounts.login(username, password, role="user", ip=ip)
         return AdminApi._session_payload(session)
 
     def logout(self, token: str) -> None:
+        self.accounts.sessions.require(token)
         self.accounts.sessions.revoke(token)
 
     def me(self, token: str) -> dict[str, object]:
-        session = self._session(token)
+        # 不检查锁定状态：管理员在锁定时也要能恢复会话并看到解锁入口。
+        session = self.accounts.sessions.require(token)
         account = self.accounts.account_for_session(session)
         bucket = self.objects._bucket(account.bucket_id) if account.bucket_id is not None else None
         return {"id": account.id, "username": account.username, "role": account.role,
                 "bucket_id": account.bucket_id, "quota_bytes": bucket["quota_bytes"] if bucket else None,
                 "used_bytes": bucket["used_bytes"] if bucket else 0,
+                "unlocked": self.accounts.keystore.unlocked, "remember": session.remember,
                 "csrf_token": session.csrf_token, "expires_at": session.expires_at}
 
-    def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000):
+    async def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         path_prefix = normalize_user_path(prefix) if prefix else ""
-        page = self.objects.list_objects(Scope(account.bucket_id, ""), path_prefix, "/", cursor, min(limit, 1000))
+        page = await self.objects.alist_objects(Scope(account.bucket_id, ""), path_prefix, "/", cursor, min(limit, 1000))
         return {"objects": [self._object_json(item) for item in page.objects],
-                "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor}
+                "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor,
+                "public_folders": self._public_folders(account.bucket_id, page.common_prefixes)}
 
-    def search(self, token: str, query: str, cursor: str = "", limit: int = 100):
+    def _public_folders(self, bucket_id: int, prefixes: list[str]) -> dict[str, dict[str, object]]:
+        """这一页里已公开的文件夹：{文件夹路径: 公开信息}。文件夹的分享信息保存在它的目录标记行上。"""
+        if not prefixes:
+            return {}
+        marks = ",".join("?" for _ in prefixes)
+        rows = self.objects.metadata.db.execute(
+            f"SELECT * FROM objects WHERE bucket_id=? AND public_token IS NOT NULL AND key IN ({marks})", (bucket_id, *prefixes)).fetchall()
+        return {row["key"]: self._object_json(self.objects._object(row)) for row in rows}
+
+    async def search(self, token: str, query: str, cursor: str = "", limit: int = 100):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         self.objects._bucket(account.bucket_id)
@@ -353,12 +384,14 @@ class UserApi:
         query = unicodedata.normalize("NFC", query.strip())
         if len(query) > 256:
             raise ValueError("搜索词不能超过 256 个字符")
-        rows = self.objects.metadata.db.execute(
-            "SELECT key,size,etag,content_type,modified_at,public_token,public_at FROM objects "
-            "WHERE bucket_id=? AND key>? AND instr(lower(key),lower(?))>0 "
-            "AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' ORDER BY key LIMIT ?",
-            (account.bucket_id, cursor, query, limit + 1),
-        ).fetchall()
+        def read_page():
+            return self.objects.metadata.db.execute(
+                "SELECT key,size,etag,content_type,modified_at,public_token,public_at FROM objects "
+                "WHERE bucket_id=? AND key>? AND instr(lower(key),lower(?))>0 "
+                "AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' ORDER BY key LIMIT ?",
+                (account.bucket_id, cursor, query, limit + 1),
+            ).fetchall()
+        rows = await self.objects.metadata.run_in_thread(read_page)
         return {"objects": [dict(row) for row in rows[:limit]], "common_prefixes": [],
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
@@ -380,6 +413,20 @@ class UserApi:
         if public is not None:
             item = self.objects.set_public(Scope(account.bucket_id), key, public)
         return self._object_json(item)
+
+    def instant_put(self, token: str, csrf: str, path: str, size: int, fingerprint: str,
+                    content_type: str | None = None, public: bool | None = None) -> dict[str, object]:
+        """秒传：存储桶内已有内容相同的文件时直接引用它；未命中返回 {"hit": False}，由前端走普通上传。"""
+        session = self._session(token, csrf=csrf, mutation=True)
+        account = self.accounts.account_for_session(session)
+        scope = Scope(account.bucket_id)
+        key = normalize_user_path(path)
+        item = self.objects.instant_put(scope, key, int(size), fingerprint, content_type)
+        if item is None:
+            return {"hit": False}
+        if public is not None:
+            item = self.objects.set_public(scope, key, public)
+        return {"hit": True, **self._object_json(item)}
 
     def set_public(self, token: str, csrf: str, paths: list[str], public: bool,
                    options: dict[str, object] | None = None) -> list[dict[str, object]]:
@@ -460,7 +507,7 @@ class UserApi:
         return [self._object_json(item) for item in self.objects.list_public(account.bucket_id)]
 
     def change_password(self, token: str, csrf: str, old_password: str, new_password: str) -> None:
-        session = self._session(token, csrf=csrf, mutation=True)
+        session = self.accounts.sessions.require(token, csrf=csrf, mutation=True)
         if len(new_password) < 8:
             raise ValueError("新密码至少需要 8 个字符")
         try:

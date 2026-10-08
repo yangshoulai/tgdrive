@@ -11,9 +11,11 @@ from .api import AdminApi, UserApi
 from .asgi import TgDriveASGI
 from .blobengine import BlobEngine
 from .blobstore import LocalDiskBlobStore
+from .context import AppContext
 from .keystore import KeyStore
-from .metadata import Metadata
 from .maintenance import MaintenanceScheduler, MaintenanceService
+from .metadata import Metadata
+from .metrics import TrafficMetrics
 from .objects import ObjectService
 from .s3.auth import ClientAuthStore
 from .s3.gateway import S3Gateway
@@ -21,7 +23,7 @@ from .settings import SystemSettings
 from .telegram.config import ConfiguredBlobStore, TelegramBotConfigStore
 
 
-def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | dict[str, str | Path] | None = None,
+def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None = None,
                s3_host: str | None = None, secure_cookies: bool = True,
                public_base_url: str | None = None, s3_endpoint: str | None = None,
                run_scheduler: bool = True) -> TgDriveASGI:
@@ -37,27 +39,32 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | dict
     accounts = AccountService(metadata, keystore)
     clients = ClientAuthStore(metadata, keystore=keystore)
     s3 = S3Gateway(objects, clients)
+    metrics = TrafficMetrics()
     maintenance = MaintenanceService(metadata, engine, store, keystore, backup_dir=root / "backups")
     maintenance.trash_purger = objects.purge_expired_trash  # 回收站条目保留 30 天后自动永久删除
-    app = TgDriveASGI(AdminApi(accounts, objects, clients, maintenance, telegram_bots), UserApi(accounts, objects, clients),
+    context = AppContext(metadata, keystore, engine, accounts, objects, clients, s3, maintenance,
+                         telegram_bots, store, SystemSettings(metadata, {"public_base_url": public_base_url, "s3_endpoint": s3_endpoint}), metrics)
+    app = TgDriveASGI(AdminApi(accounts, objects, clients, maintenance, telegram_bots, metrics=metrics, storage=store), UserApi(accounts, objects, clients),
                       s3=s3, s3_host=s3_host, static_dir=static_dir, secure_cookies=secure_cookies,
-                      settings=SystemSettings(metadata, {"public_base_url": public_base_url, "s3_endpoint": s3_endpoint}),
-                      scheduler=MaintenanceScheduler(maintenance) if run_scheduler else None)
-    app.metadata = metadata  # type: ignore[attr-defined]
-    app.keystore = keystore  # type: ignore[attr-defined]
-    app.engine = engine  # type: ignore[attr-defined]
-    app.accounts = accounts  # type: ignore[attr-defined]
-    app.objects = objects  # type: ignore[attr-defined]
-    app.s3 = s3  # type: ignore[attr-defined]
-    app.maintenance = maintenance  # type: ignore[attr-defined]
-    app.telegram_bots = telegram_bots  # type: ignore[attr-defined]
-    app.system_settings = app.settings  # type: ignore[attr-defined]
+                      settings=context.system_settings,
+                      scheduler=MaintenanceScheduler(maintenance) if run_scheduler else None, metrics=metrics,
+                      context=context)
+    app.metadata = context.metadata
+    app.keystore = context.keystore
+    app.engine = context.engine
+    app.accounts = context.accounts
+    app.objects = context.objects
+    app.s3 = context.s3
+    app.maintenance = context.maintenance
+    app.telegram_bots = context.telegram_bots
+    app.system_settings = context.system_settings
     return app
 
 
 def restore_main(argv: list[str]) -> None:
     """tgdrive restore <备份文件> --data-dir <目录>：从加密备份恢复元数据库。必须先停止服务。"""
     import getpass
+
     from .errors import WrongPassphrase
     from .maintenance import restore_backup
     parser = argparse.ArgumentParser(prog="tgdrive restore", description="从加密备份恢复 tgdrive 元数据库（请先停止服务）")
@@ -87,6 +94,9 @@ def main() -> None:
                         help="公开访问地址的默认值，例如 https://drive.example.com；管理员可在控制台覆盖")
     parser.add_argument("--s3-endpoint", default=os.environ.get("TGDRIVE_S3_ENDPOINT"),
                         help="S3 Endpoint 的默认值，例如 https://s3.example.com；管理员可在控制台覆盖")
+    parser.add_argument("--trusted-proxies", dest="forwarded_allow_ips",
+                        default=os.environ.get("TGDRIVE_TRUSTED_PROXIES"),
+                        help="信任 X-Forwarded-For/Proto 的代理 IP 或网段，逗号分隔；留空使用 Uvicorn 默认值")
     parser.add_argument("--insecure-cookies", action="store_true",
                         default=os.environ.get("TGDRIVE_INSECURE_COOKIES", "0") == "1")
     args = parser.parse_args()
@@ -94,10 +104,15 @@ def main() -> None:
         import uvicorn
     except ImportError as exc:  # pragma: no cover
         raise SystemExit("请安装 uvicorn 后再启动服务") from exc
+    uvicorn_options = {
+        "host": args.host,
+        "port": args.port,
+    }
+    if args.forwarded_allow_ips is not None:
+        uvicorn_options["forwarded_allow_ips"] = args.forwarded_allow_ips
     uvicorn.run(create_app(args.data_dir, static_dir=args.static_dir, s3_host=args.s3_host,
                            secure_cookies=not args.insecure_cookies, public_base_url=args.public_url,
-                           s3_endpoint=args.s3_endpoint),
-                host=args.host, port=args.port)
+                           s3_endpoint=args.s3_endpoint), **uvicorn_options)
 
 
 if __name__ == "__main__":

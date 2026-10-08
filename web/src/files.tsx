@@ -1,6 +1,9 @@
 /** 文件类型识别、预览与公开分享对话框。 */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api";
+import { HighlightedCode } from "./code";
+import { languageOf } from "./highlight";
+import { Markdown } from "./markdown";
 import { Badge, Button, CopyField, Field, Icon, KeyValue, Modal, Segmented, SkeletonRows, Switch, formatBytes, formatDateTime, toast, type IconName } from "./ui";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "text" | "code" | "archive" | "other";
@@ -13,8 +16,8 @@ export function getFileKind(type: string | null | undefined, name: string): File
   if (mime.startsWith("video/") || /\.(mp4|webm|mov|mkv|avi|m4v)$/.test(lower)) return "video";
   if (mime.startsWith("audio/") || /\.(mp3|wav|ogg|flac|m4a|aac)$/.test(lower)) return "audio";
   if (mime === "application/pdf" || lower.endsWith(".pdf")) return "pdf";
-  if (/\.(js|ts|tsx|jsx|py|go|rs|java|c|cpp|h|sh|html|css|sql|rb|php|swift|kt)$/.test(lower)) return "code";
-  if (mime.startsWith("text/") || mime === "application/json" || /\.(md|txt|json|csv|log|xml|ya?ml|toml|ini|conf)$/.test(lower)) return "text";
+  if (/\.(js|mjs|cjs|ts|tsx|jsx|py|go|rs|java|c|cc|cpp|cxx|h|hpp|cs|sh|bash|zsh|ps1|bat|html?|css|scss|sass|less|vue|svelte|sql|rb|php|swift|kt|kts|scala|dart|gradle|lua|diff|patch)$/.test(lower) || /(^|\/)(dockerfile|makefile)$/.test(lower)) return "code";
+  if (mime.startsWith("text/") || mime === "application/json" || /\.(md|markdown|mdx|rst|txt|json|jsonc|csv|tsv|log|xml|ya?ml|toml|ini|conf|cfg|properties|env|gitignore|editorconfig)$/.test(lower) || /(^|\/)\.env(\.[\w.-]+)?$/.test(lower)) return "text";
   if (/\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst|dmg|iso)$/.test(lower) || /zip|compressed|x-tar/.test(mime)) return "archive";
   return "other";
 }
@@ -41,18 +44,58 @@ const PREVIEWABLE: FileKind[] = ["image", "video", "audio", "pdf", "text", "code
 export function canPreview(kind: FileKind) { return PREVIEWABLE.includes(kind); }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-export function FilePreview({ kind, url, name, downloadUrl, onImageLoad }: { kind: FileKind; url: string; name: string; downloadUrl: string; onImageLoad?: (image: HTMLImageElement) => void }) {
-  const [text, setText] = useState<string | null>(null);
+const TEXT_PREVIEW_LIMIT = 512 * 1024;
+
+/** 解码预览文本：先按 UTF-8 严格解码，失败时回退到 GB18030；被截断的末尾多字节字符会被丢弃。 */
+function decodeText(buffer: ArrayBuffer, truncated: boolean): string {
+  let bytes = new Uint8Array(buffer);
+  if (truncated) {
+    let back = 0;
+    while (back < 3 && bytes.length - 1 - back >= 0 && (bytes[bytes.length - 1 - back] & 0xc0) === 0x80) back++;
+    const lead = bytes[bytes.length - 1 - back];
+    if (lead !== undefined && lead >= 0xc0 && back + 1 < (lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : 2)) bytes = bytes.subarray(0, bytes.length - 1 - back);
+  }
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { try { return new TextDecoder("gb18030").decode(bytes); } catch { return new TextDecoder().decode(bytes); } }
+}
+
+/** 把 Markdown 里的相对路径图片解析为云盘内的绝对键；越出根目录或带协议的地址返回 null。 */
+export function resolveRelativeKey(baseDir: string, src: string): string | null {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//")) return null;
+  let path = src.split(/[?#]/)[0];
+  try { path = decodeURI(path); } catch { /* 保留原样 */ }
+  const segments: string[] = [];
+  for (const part of ((path.startsWith("/") ? "" : baseDir) + path).split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") { if (!segments.pop()) return null; } else segments.push(part);
+  }
+  return segments.length ? segments.join("/") : null;
+}
+
+type TextState = { text: string; truncated: boolean; total: number | null };
+
+/** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
+export function FilePreview({ kind, url, name, downloadUrl, onImageLoad, resolveImage }: { kind: FileKind; url: string; name: string; downloadUrl: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null }) {
+  const [content, setContent] = useState<TextState | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
+  const [mode, setMode] = useState<"render" | "source">("render");
   useEffect(() => {
     if (kind !== "text" && kind !== "code") return;
-    setText(null); setError("");
+    setContent(null); setError("");
     const controller = new AbortController();
     // 文本预览只读取前 512 KB，避免大日志拖垮页面。
-    void fetch(url, { credentials: "include", headers: { Range: "bytes=0-524287" }, signal: controller.signal })
-      .then(response => response.ok ? response.text() : Promise.reject(new Error(`无法读取文件（${response.status}）`)))
-      .then(setText)
+    void fetch(url, { credentials: "include", headers: { Range: `bytes=0-${TEXT_PREVIEW_LIMIT - 1}` }, signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error(`无法读取文件（${response.status}）`);
+        const range = /\/(\d+)$/.exec(response.headers.get("content-range") ?? "");
+        let buffer = await response.arrayBuffer();
+        let total = range ? Number(range[1]) : null;
+        if (buffer.byteLength > TEXT_PREVIEW_LIMIT) { total = buffer.byteLength; buffer = buffer.slice(0, TEXT_PREVIEW_LIMIT); }
+        const truncated = total !== null && total > buffer.byteLength;
+        return { text: decodeText(buffer, truncated), truncated, total };
+      })
+      .then(setContent)
       .catch(reason => { if (!controller.signal.aborted) setError(api.errorMessage(reason, "无法读取文件")); });
     return () => controller.abort();
   }, [url, kind]);
@@ -69,12 +112,38 @@ export function FilePreview({ kind, url, name, downloadUrl, onImageLoad }: { kin
   if (kind === "video") return <div className="preview-media"><video src={url} controls preload="metadata" onError={() => setMediaFailed(true)} /></div>;
   if (kind === "audio") return <div className="preview-audio"><FileTile kind="audio" size="xl" /><audio src={url} controls onError={() => setMediaFailed(true)} /></div>;
   if (kind === "pdf") return <iframe className="preview-frame" src={url} title={name} />;
-  if (kind === "text" || kind === "code") return error ? fallback : text === null ? <div className="preview-loading"><SkeletonRows rows={6} /></div> : <pre className="preview-text">{text}</pre>;
+  if (kind === "text" || kind === "code") {
+    if (error) return fallback;
+    if (content === null) return <div className="preview-loading"><SkeletonRows rows={6} /></div>;
+    const markdown = /\.(md|markdown|mdx)$/i.test(name);
+    const lang = languageOf(name);
+    return (
+      <div className="preview-text">
+        {(markdown || content.truncated) && (
+          <div className="preview-toolbar">
+            {markdown && <Segmented label="显示方式" value={mode} onChange={setMode} options={[{ value: "render", label: "预览" }, { value: "source", label: "源码" }]} />}
+            {content.truncated && <span className="preview-notice">仅显示前 {formatBytes(TEXT_PREVIEW_LIMIT)}{content.total ? `（共 ${formatBytes(content.total)}）` : ""}，<a href={downloadUrl}>下载完整文件</a></span>}
+          </div>
+        )}
+        {markdown && mode === "render"
+          ? <article className="preview-doc"><Markdown source={content.text} resolveImage={resolveImage} /></article>
+          : <HighlightedCode code={content.text} lang={lang} lineNumbers={lang !== null || kind === "code"} />}
+      </div>
+    );
+  }
   return fallback;
 }
 
-export function PreviewModal({ file, url, downloadUrl, onClose, onShare, onImageLoad }: { file: api.FileItem; url: string; downloadUrl: string; onClose: () => void; onShare?: () => void; onImageLoad?: (image: HTMLImageElement) => void }) {
+export function PreviewModal({ file, url, downloadUrl, onClose, onShare, onImageLoad, assetUrl }: { file: api.FileItem; url: string; downloadUrl: string; onClose: () => void; onShare?: () => void; onImageLoad?: (image: HTMLImageElement) => void; assetUrl?: (key: string) => string }) {
   const kind = getFileKind(file.content_type, file.key);
+  // Markdown 里的相对路径图片按文件所在目录解析为云盘内的文件；解析函数保持稳定，避免重复渲染整篇文档。
+  const assetRef = useRef(assetUrl);
+  assetRef.current = assetUrl;
+  const hasAssets = Boolean(assetUrl);
+  const resolveImage = useMemo(() => hasAssets ? (src: string) => {
+    const key = resolveRelativeKey(parentPath(file.key), src);
+    return key && assetRef.current ? assetRef.current(key) : null;
+  } : undefined, [file.key, hasAssets]);
   return (
     <Modal size="xl" title={baseName(file.key)} onClose={onClose}
       description={<span className="preview-meta"><span>{formatBytes(file.size)}</span><span>{file.content_type || kindLabel(kind)}</span><span>{formatDateTime(file.modified_at)}</span>{file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>}
@@ -82,7 +151,7 @@ export function PreviewModal({ file, url, downloadUrl, onClose, onShare, onImage
         {onShare && <Button icon="link" onClick={onShare}>{file.public_token ? "管理分享" : "公开分享"}</Button>}
         <a className="btn btn-primary btn-md" href={downloadUrl}><Icon name="download" size={17} /><span>下载</span></a>
       </>}>
-      <div className="preview-stage"><FilePreview kind={kind} url={url} name={baseName(file.key)} downloadUrl={downloadUrl} onImageLoad={onImageLoad} /></div>
+      <div className="preview-stage"><FilePreview kind={kind} url={url} name={baseName(file.key)} downloadUrl={downloadUrl} onImageLoad={onImageLoad} resolveImage={resolveImage} /></div>
     </Modal>
   );
 }
@@ -96,6 +165,7 @@ export function ShareDialog({ file, publicBase, onClose, onChange, update }: {
   const [password, setPassword] = useState("");
   const [editingPassword, setEditingPassword] = useState(false);
   const isPublic = Boolean(file.public_token);
+  const folder = file.key.endsWith("/");
   const name = baseName(file.key);
   const links = file.public_token ? api.publicLinks(file.public_token, name, publicBase) : null;
   async function apply(next: boolean, options?: api.ShareOptions, message?: string) {
@@ -105,7 +175,7 @@ export function ShareDialog({ file, publicBase, onClose, onChange, update }: {
       onChange(updated);
       toast.success(message ?? (next ? "已开启公开访问" : "已关闭公开访问，原链接立即失效"));
       return true;
-    } catch (reason) { toast.error(api.errorMessage(reason, "更新分享设置失败")); return false; }
+    } catch (reason) { toast.error(api.errorMessage(reason, "更新分享设置失败，请稍后重试")); return false; }
     finally { setBusy(false); }
   }
   const expiry = file.public_expires_at ? "custom" : "never";
@@ -116,20 +186,24 @@ export function ShareDialog({ file, publicBase, onClose, onChange, update }: {
     if (await apply(true, { password }, "已设置访问密码，旧的验证凭证已失效")) { setPassword(""); setEditingPassword(false); }
   }
   return (
-    <Modal title="分享文件" description={name} icon="link" tone={isPublic ? "public" : "accent"} onClose={onClose}
+    <Modal title={folder ? "分享文件夹" : "分享文件"} description={name} icon="link" tone={isPublic ? "public" : "accent"} onClose={onClose}
       footer={<>{links && <a className="btn btn-secondary btn-md" href={links.page} target="_blank" rel="noreferrer"><Icon name="external" size={17} /><span>打开分享页</span></a>}<Button variant="primary" onClick={onClose}>完成</Button></>}>
       <div className={`share-status${isPublic ? " is-public" : ""}`}>
         <Switch checked={isPublic} disabled={busy} onChange={value => void apply(value)} label={isPublic ? "任何拥有链接的人都可以访问" : "仅自己可见"}
-          description={isPublic ? (file.public_has_password ? "访问者需要输入密码才能查看和下载。" : "访问者无需登录即可预览和下载这个文件。") : "开启后会生成一个随机链接，可随时关闭。"} />
+          description={isPublic
+            ? (file.public_has_password ? `访问者需要输入密码才能查看和下载${folder ? "里面的文件" : ""}。` : folder ? "访问者无需登录即可浏览、预览和下载这个文件夹里的全部文件（含子文件夹）。" : "访问者无需登录即可预览和下载这个文件。")
+            : folder ? "开启后会生成一个随机链接，文件夹里的内容随时可以被访问者看到，可随时关闭。" : "开启后会生成一个随机链接，可随时关闭。"} />
       </div>
       {links && (
         <div className="form">
-          <Field label="分享页" hint="带预览和下载按钮的页面，适合发给他人。">
+          <Field label="分享页" hint={folder ? "访问者可以在页面里浏览文件夹、预览和下载文件。之后新增或删除的文件会实时反映。" : "带预览和下载按钮的页面，适合发给他人。"}>
             <CopyField value={links.page} label="分享页链接" copyMessage="分享链接已复制" />
           </Field>
-          <Field label="直链" hint={file.public_has_password ? "设置了访问密码时，直链需要先在分享页验证密码后才能使用。" : "直接返回文件内容，可用于 <img>、<video> 或下载工具，支持断点续传。"}>
-            <CopyField value={links.direct} label="文件直链" copyMessage="直链已复制" />
-          </Field>
+          {!folder && (
+            <Field label="直链" hint={file.public_has_password ? "设置了访问密码时，需要先在分享页输入密码，直链才能使用。" : "直接指向文件本身，可以嵌入网页，也可以交给下载工具。"}>
+              <CopyField value={links.direct} label="文件直链" copyMessage="直链已复制" />
+            </Field>
+          )}
           <Field label="有效期" hint={file.public_expires_at ? `将于 ${formatDateTime(file.public_expires_at)} 失效，之后访问会提示链接已过期。` : "链接一直有效，直到你关闭分享。"}>
             {/* 设置限时后当前值不对应任何选项：再次点击某个天数会从现在重新计算。 */}
             <Segmented label="有效期" value={expiry} onChange={value => setExpiry(value === "never" ? null : Number(value))}
@@ -151,7 +225,7 @@ export function ShareDialog({ file, publicBase, onClose, onChange, update }: {
               </form>
             )}
           </Field>
-          <KeyValue items={[["开启时间", formatDateTime(file.public_at)], ["下载次数", `${file.public_downloads ?? 0} 次`], ["覆盖、移动或重命名", "链接与设置保持不变"]]} />
+          <KeyValue items={[["开启时间", formatDateTime(file.public_at)], ["下载次数", `${file.public_downloads ?? 0} 次`], [folder ? "移动或重命名文件夹" : "覆盖、移动或重命名", "链接与设置保持不变"]]} />
         </div>
       )}
     </Modal>

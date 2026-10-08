@@ -1,6 +1,7 @@
 /** 文档站：多页面、侧栏导航、页内目录与搜索。管理员文档由独立受保护 bundle 挂载。 */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import * as api from "../api";
+import { SITE } from "../brand";
 import { DOC_PAGES, type DocPage } from "./docs-content";
 import { ConfigContext, Lead, NAV_EVENT, navigateDocs, useDocsConfig, type DocsConfig } from "./docs-ui";
 import { Brand, Icon } from "../ui";
@@ -13,7 +14,7 @@ function currentSlug(basePath: string, pages: DocPage[]) {
 
 /* ---------- 页面外壳 ---------- */
 
-export function DocsPage({ pages = DOC_PAGES, basePath = "/docs" }: { pages?: DocPage[]; basePath?: string }) {
+export function DocsPage({ pages = DOC_PAGES, basePath = "/docs", home = { label: "文件空间", href: "/" } }: { pages?: DocPage[]; basePath?: string; home?: { label: string; href: string } }) {
   const [current, setCurrent] = useState(() => currentSlug(basePath, pages));
   const [config, setConfig] = useState<DocsConfig>(() => ({ site: api.userSiteOrigin(), s3: api.s3Endpoint() ?? "https://s3.example.com", s3Configured: Boolean(api.s3Endpoint()), basePath }));
   const [toc, setToc] = useState<{ id: string; text: string; level: number }[]>([]);
@@ -42,7 +43,7 @@ export function DocsPage({ pages = DOC_PAGES, basePath = "/docs" }: { pages?: Do
 
   // 页面切换后：更新标题、滚动到锚点或顶部、根据实际标题生成目录。
   useEffect(() => {
-    document.title = `${page.title} · tgdrive 文档`;
+    document.title = `${page.title} · ${SITE.docs}`;
     const headings = Array.from(article.current?.querySelectorAll<HTMLElement>("h2.doc-h2, h3.doc-h3") ?? []);
     setToc(headings.map(heading => ({ id: heading.id, text: heading.textContent?.replace(/^#/, "") ?? "", level: heading.tagName === "H2" ? 2 : 3 })));
     const hash = decodeURIComponent(window.location.hash.slice(1));
@@ -71,7 +72,7 @@ export function DocsPage({ pages = DOC_PAGES, basePath = "/docs" }: { pages?: Do
             <Icon name="search" size={15} /><span>搜索文档</span><kbd>⌘K</kbd>
           </button>
           <nav className="docs-bar-links" aria-label="站点导航">
-            <a href="/">文件空间</a>
+            <a href={home.href}>{home.label}</a>
           </nav>
         </header>
         <div className="docs-layout">

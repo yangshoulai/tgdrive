@@ -2,6 +2,7 @@
 import {
   C, Callout, Code, H2, Table, useDocsConfig,
 } from "./docs-ui";
+import { BRAND } from "../brand";
 import type { DocPage } from "./docs-content";
 
 /* ---------------------------------------------------------------- 管理员 */
@@ -10,39 +11,59 @@ function AdminDeploy() {
   return (
     <>
       <H2>启动参数</H2>
-      <Code lang="bash" code={`tgdrive --data-dir /var/lib/tgdrive --port 8000 --static-dir /srv/tgdrive/user`} />
+      <Code lang="bash" code={`tgdrive --data-dir /var/lib/tgdrive --port 8000 --static-dir /srv/tgdrive/web`} />
       <Table head={["参数", "环境变量", "默认值", "说明"]} rows={[
         [<C>--data-dir</C>, <C>TGDRIVE_DATA_DIR</C>, <C>./data</C>, "元数据库与本地分片目录"],
         [<C>--host</C>, <C>TGDRIVE_HOST</C>, <C>127.0.0.1</C>, "监听地址"],
         [<C>--port</C>, <C>TGDRIVE_PORT</C>, <C>8000</C>, "监听端口"],
-        [<C>--static-dir</C>, <C>TGDRIVE_STATIC_DIR</C>, "无", "由 API 服务直接托管用户端静态文件"],
+        [<C>--static-dir</C>, <C>TGDRIVE_STATIC_DIR</C>, "无", "由 API 服务直接托管前端（Docker 镜像已内置）"],
         [<C>--public-url</C>, <C>TGDRIVE_PUBLIC_URL</C>, "无", "公开访问地址的默认值，控制台设置优先"],
         [<C>--s3-endpoint</C>, <C>TGDRIVE_S3_ENDPOINT</C>, "无", "S3 Endpoint 的默认值，控制台设置优先"],
         [<C>--s3-host</C>, <C>TGDRIVE_S3_HOST</C>, "无", "未配置 S3 Endpoint 时用于识别 S3 请求的域名"],
         [<C>--insecure-cookies</C>, <C>TGDRIVE_INSECURE_COOKIES=1</C>, "关闭", "允许通过 HTTP 发送会话 Cookie，只用于本机开发"],
+        [<C>--trusted-proxies</C>, <C>TGDRIVE_TRUSTED_PROXIES</C>, "Uvicorn 默认", "信任 X-Forwarded-For/Proto 的代理 IP 或网段，逗号分隔"],
       ]} />
       <Callout tone="danger" title="生产环境必须使用 HTTPS">默认情况下会话 Cookie 带有 Secure 标记，浏览器只会通过 HTTPS 发送。不要在公网环境开启 --insecure-cookies。</Callout>
-      <H2>站点结构</H2>
-      <p>用户端和控制台是两个独立的静态站点（<C>web/apps/user/dist</C>、<C>web/apps/admin/dist</C>），可以部署在不同域名。它们都把接口请求转发到同一个 API 服务：</p>
-      <Table head={["站点", "需要转发到 API 的路径"]} rows={[
-        ["用户端（公开访问地址）", <><C>/api/user/</C>、<C>/api/v1/</C>、<C>/api/public/</C>、<C>/p/</C></>],
-        ["控制台", <C>/api/admin/</C>],
-        ["S3 Endpoint", "全部路径"],
+      <H2>站点结构与角色</H2>
+      <p>整个站点是同一个应用、同一个端口，只有一个登录页。账号的角色决定登录后能看到什么：</p>
+      <Table head={["角色", "可见内容"]} rows={[
+        ["管理员", "自己的文件空间（我的文件、公开分享、回收站、访问密钥），以及侧栏的「系统管理」：概览、用户、全部文件、存储通道、全部密钥、安全与维护、系统设置，还有管理员文档"],
+        ["普通用户", "自己的文件空间；看不到「系统管理」菜单，直接输入 /admin/ 开头的地址只会看到「没有访问权限」"],
       ]} />
+      <p>权限由服务端按会话里的角色强制校验，隐藏菜单只是体验层面的处理：管理接口（<C>/api/admin/</C>）对普通用户一律返回 403，管理员文档的代码也只会发给管理员会话。全站只有一个会话 Cookie（<C>tg_session</C>），同一个浏览器同一时间只登录一个账号。</p>
+      <Table head={["路径", "内容"]} rows={[
+        [<C>/</C>, "登录与文件空间（所有账号共用）"],
+        [<C>/admin</C>, "系统管理（仅管理员）：/admin/users、/admin/objects 等"],
+        [<C>/docs</C>, "文档：所有人共用这个地址；管理员登录后会多出「管理员」分组（部署与运维、常见问题）"],
+        [<C>/s/&lt;令牌&gt;</C>, "公开分享页，无需登录"],
+        [<><C>/api/</C>、<C>/p/</C></>, "接口与公开直链"],
+        ["S3 Endpoint", "单独的域名，转发全部路径到同一个服务"],
+      ]} />
+      <p>系统锁定（刚启动或手动锁定）时，普通用户无法登录；管理员仍可登录，登录后会先看到解锁页。想让系统管理只在内网可访问，可以在反向代理里限制 <C>/admin</C> 和 <C>/api/admin/</C> 两个路径的来源。</p>
       <H2>反向代理示例</H2>
       <Code lang="nginx" title="nginx.conf" code={`
 server {
   listen 443 ssl;
   server_name drive.example.com;
-  root /srv/tgdrive/user;
 
-  location / { try_files $uri /index.html; }
-  location ~ ^/(api/user|api/public|api/v1|p)/ {
+  location / {
     proxy_pass http://127.0.0.1:8000;
     proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_request_buffering off;   # 上传以流式转发
     proxy_buffering off;           # 下载与 Range 不经代理缓冲
     client_max_body_size 0;
+  }
+
+  # 可选：控制台只允许内网访问
+  location ~ ^/(admin/|api/admin/) {
+    allow 10.0.0.0/8;
+    deny all;
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
   }
 }
 
@@ -53,15 +74,18 @@ server {
   location / {
     proxy_pass http://127.0.0.1:8000;
     proxy_set_header Host $host;   # S3 路由与签名校验依赖原始 Host
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_request_buffering off;
     client_max_body_size 0;
   }
 }`} />
-      <p>部署完成后，在控制台「系统设置」中填写公开访问地址和 S3 Endpoint。保存后立即生效，无需重启。</p>
+      <p>部署完成后，在控制台「系统设置」中填写公开访问地址和 S3 Endpoint。保存后立即生效，无需重启。若反向代理不在回环地址，请把代理网段传给 <C>--trusted-proxies</C>；不要使用通配符信任未知网络。</p>
+      <p>健康检查使用 <C>GET /healthz</C>，只表示进程正在响应，不代表系统已经解锁。管理员概览会显示存储用量、当前进程流量和 Telegram Bot 的限速退避状态。</p>
       <H2>锁定与解锁</H2>
-      <p>主密钥只存在于内存中：服务启动后系统处于锁定状态，用户无法登录，公开链接返回 503。管理员登录控制台后输入加密口令即可解锁。「安全与维护」中的「锁定系统」会清空内存中的密钥并注销所有会话，适合在离开或怀疑泄露时使用。</p>
+      <p>主密钥只存在于内存中：服务启动后系统处于锁定状态，用户无法登录，公开链接返回 503。管理员登录控制台后输入加密口令即可解锁。「安全与维护」中的「锁定系统」会清空内存中的密钥并注销所有会话（包括勾选了“保持登录”的），适合在离开或怀疑泄露时使用。</p>
       <H2>运行方式</H2>
-      <Callout tone="warning" title="只运行一个服务进程">登录会话、登录失败计数和 Telegram 客户端缓存都保存在进程内存中。请只运行一个 tgdrive 进程（不要给 uvicorn 设置多个 worker，也不要让多个实例共用同一个数据目录），需要高可用时在进程外做主备切换。</Callout>
+      <Callout tone="warning" title="只运行一个服务进程">普通登录会话、登录失败计数和 Telegram 客户端缓存都保存在进程内存中（勾选“保持登录”的会话会保存到数据库，只存令牌的哈希）。请只运行一个 {BRAND} 进程（不要给 uvicorn 设置多个 worker，也不要让多个实例共用同一个数据目录），需要高可用时在进程外做主备切换。</Callout>
       <H2>存储通道健康</H2>
       <ul className="doc-list">
         <li>添加通道后会自动检查 token、频道访问权限与发布消息权限；之后可以在「存储通道」的操作菜单中随时手动检查。</li>
@@ -98,8 +122,8 @@ function Faq() {
         <li>确认本机时间准确：与服务器相差超过 15 分钟的请求会被拒绝。</li>
         <li>经过反向代理时，代理必须保留原始 <C>Host</C> 请求头。</li>
         <li>确认密钥没有被禁用，Secret 复制完整。</li>
-        <li>AWS CLI v1 生成的预签名 URL 默认使用已淘汰的 SigV2（URL 中带 <C>AWSAccessKeyId</C>），tgdrive 只支持 SigV4：执行 <C>aws configure set default.s3.signature_version s3v4</C> 后重新生成。</li>
-        <li>较新的 AWS SDK 默认附加 CRC32C 等尾部校验和。tgdrive 校验 CRC32、SHA-1 与 SHA-256，其他算法会被接受但不校验；如遇兼容性问题，可设置环境变量 <C>AWS_REQUEST_CHECKSUM_CALCULATION=when_required</C>。</li>
+        <li>AWS CLI v1 生成的预签名 URL 默认使用已淘汰的 SigV2（URL 中带 <C>AWSAccessKeyId</C>），{BRAND} 只支持 SigV4：执行 <C>aws configure set default.s3.signature_version s3v4</C> 后重新生成。</li>
+        <li>较新的 AWS SDK 默认附加 CRC32C 等尾部校验和。{BRAND} 校验 CRC32、SHA-1 与 SHA-256，其他算法会被接受但不校验；如遇兼容性问题，可设置环境变量 <C>AWS_REQUEST_CHECKSUM_CALCULATION=when_required</C>。</li>
       </ul>
       <H2>上传失败，提示超出配额</H2>
       <p>容量按文件原始大小计算，覆盖同名文件时按新旧大小之差计算。删除不需要的文件，或请管理员在「用户」中调整配额。</p>

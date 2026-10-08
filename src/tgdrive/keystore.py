@@ -6,8 +6,15 @@ import os
 from dataclasses import dataclass
 
 from .crypto import (
-    KdfParams, derive_kek, derive_subkey, make_check_blob, new_dek, open_sealed,
-    seal, unwrap_dek, verify_check_blob, wrap_dek,
+    KdfParams,
+    derive_kek,
+    derive_subkey,
+    make_check_blob,
+    open_sealed,
+    seal,
+    unwrap_dek,
+    verify_check_blob,
+    wrap_dek,
 )
 from .errors import NotReadyError
 from .metadata import Metadata
