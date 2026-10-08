@@ -1,11 +1,11 @@
 /** 文档站排版基元：标题、提示框、参数表、端点卡片、代码块与高亮。 */
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { Icon, copyText, type IconName } from "./ui";
+import { Icon, copyText, type IconName } from "../ui";
 
 /* ---------- 地址上下文：示例代码使用管理员配置的真实地址 ---------- */
 
-export type DocsConfig = { site: string; s3: string; s3Configured: boolean };
-export const ConfigContext = createContext<DocsConfig>({ site: "https://drive.example.com", s3: "https://s3.example.com", s3Configured: false });
+export type DocsConfig = { site: string; s3: string; s3Configured: boolean; basePath: string };
+export const ConfigContext = createContext<DocsConfig>({ site: "https://drive.example.com", s3: "https://s3.example.com", s3Configured: false, basePath: "/docs" });
 export const useDocsConfig = () => useContext(ConfigContext);
 
 export function slug(value: string) {
@@ -33,7 +33,8 @@ export function Lead({ children }: { children: ReactNode }) { return <p classNam
 export function C({ children }: { children: ReactNode }) { return <code className="doc-inline">{children}</code>; }
 export function DocLink({ to, children }: { to: string; children: ReactNode }) {
   const [page, hash] = to.split("#");
-  return <a className="doc-link" href={`/docs/${page}${hash ? `#${hash}` : ""}`} onClick={event => { event.preventDefault(); navigateDocs(page, hash); }}>{children}</a>;
+  const { basePath } = useDocsConfig();
+  return <a className="doc-link" href={`${basePath}/${page}${hash ? `#${hash}` : ""}`} onClick={event => { event.preventDefault(); navigateDocs(page, hash, basePath); }}>{children}</a>;
 }
 
 const CALLOUT_ICON: Record<string, IconName> = { info: "info", tip: "checkCircle", warning: "alert", danger: "alert" };
@@ -201,8 +202,9 @@ export function Flow({ nodes }: { nodes: { title: string; detail: string; icon: 
 
 export function CardGrid({ children }: { children: ReactNode }) { return <div className="doc-cards">{children}</div>; }
 export function Card({ to, icon, title, children }: { to: string; icon: IconName; title: string; children: ReactNode }) {
+  const { basePath } = useDocsConfig();
   return (
-    <a className="doc-card" href={`/docs/${to}`} onClick={event => { event.preventDefault(); navigateDocs(to); }}>
+    <a className="doc-card" href={`${basePath}/${to}`} onClick={event => { event.preventDefault(); navigateDocs(to, undefined, basePath); }}>
       <span className="doc-card-icon"><Icon name={icon} size={18} /></span>
       <strong>{title}</strong>
       <span>{children}</span>
@@ -213,7 +215,7 @@ export function Card({ to, icon, title, children }: { to: string; icon: IconName
 /* ---------- 站内导航 ---------- */
 
 export const NAV_EVENT = "tgdrive:docs-nav";
-export function navigateDocs(page: string, hash?: string) {
-  window.history.pushState(null, "", `/docs/${page}${hash ? `#${hash}` : ""}`);
+export function navigateDocs(page: string, hash?: string, basePath = "/docs") {
+  window.history.pushState(null, "", `${basePath}/${page}${hash ? `#${hash}` : ""}`);
   window.dispatchEvent(new CustomEvent(NAV_EVENT));
 }

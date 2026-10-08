@@ -1,34 +1,35 @@
-/** 公开文档站：多页面、侧栏导航、页内目录与搜索。不读取任何会话数据。 */
+/** 文档站：多页面、侧栏导航、页内目录与搜索。管理员文档由独立受保护 bundle 挂载。 */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import * as api from "./api";
-import { DOC_GROUPS, DOC_PAGES, type DocPage } from "./docs-content";
-import { ConfigContext, Lead, NAV_EVENT, navigateDocs, type DocsConfig } from "./docs-ui";
-import { Brand, Icon } from "./ui";
+import * as api from "../api";
+import { DOC_PAGES, type DocPage } from "./docs-content";
+import { ConfigContext, Lead, NAV_EVENT, navigateDocs, useDocsConfig, type DocsConfig } from "./docs-ui";
+import { Brand, Icon } from "../ui";
 
-function currentSlug() {
-  const value = window.location.pathname.replace(/^\/docs\/?/, "").replace(/\/$/, "");
-  return DOC_PAGES.some(page => page.slug === value) ? value : DOC_PAGES[0].slug;
+function currentSlug(basePath: string, pages: DocPage[]) {
+  const prefix = new RegExp(`^${basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\/?`);
+  const value = window.location.pathname.replace(prefix, "").replace(/\/$/, "");
+  return pages.some(page => page.slug === value) ? value : pages[0].slug;
 }
 
 /* ---------- 页面外壳 ---------- */
 
-export function DocsPage() {
-  const [current, setCurrent] = useState(currentSlug);
-  const [config, setConfig] = useState<DocsConfig>(() => ({ site: api.userSiteOrigin(), s3: api.s3Endpoint() ?? "https://s3.example.com", s3Configured: Boolean(api.s3Endpoint()) }));
+export function DocsPage({ pages = DOC_PAGES, basePath = "/docs" }: { pages?: DocPage[]; basePath?: string }) {
+  const [current, setCurrent] = useState(() => currentSlug(basePath, pages));
+  const [config, setConfig] = useState<DocsConfig>(() => ({ site: api.userSiteOrigin(), s3: api.s3Endpoint() ?? "https://s3.example.com", s3Configured: Boolean(api.s3Endpoint()), basePath }));
   const [toc, setToc] = useState<{ id: string; text: string; level: number }[]>([]);
   const [activeHeading, setActiveHeading] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
   const article = useRef<HTMLElement>(null);
-  const page = DOC_PAGES.find(item => item.slug === current) ?? DOC_PAGES[0];
-  const index = DOC_PAGES.indexOf(page);
+  const page = pages.find(item => item.slug === current) ?? pages[0];
+  const index = pages.indexOf(page);
 
   useEffect(() => {
     void api.loadPublicConfig().then(() => {
       const s3 = api.s3Endpoint();
-      setConfig({ site: api.userSiteOrigin(), s3: s3 ?? "https://s3.example.com", s3Configured: Boolean(s3) });
+      setConfig({ site: api.userSiteOrigin(), s3: s3 ?? "https://s3.example.com", s3Configured: Boolean(s3), basePath });
     }).catch(() => undefined);
-    const sync = () => { setCurrent(currentSlug()); setNavOpen(false); };
+    const sync = () => { setCurrent(currentSlug(basePath, pages)); setNavOpen(false); };
     window.addEventListener(NAV_EVENT, sync);
     window.addEventListener("popstate", sync);
     const key = (event: KeyboardEvent) => {
@@ -37,7 +38,7 @@ export function DocsPage() {
     };
     document.addEventListener("keydown", key);
     return () => { window.removeEventListener(NAV_EVENT, sync); window.removeEventListener("popstate", sync); document.removeEventListener("keydown", key); };
-  }, []);
+  }, [basePath, pages]);
 
   // 页面切换后：更新标题、滚动到锚点或顶部、根据实际标题生成目录。
   useEffect(() => {
@@ -63,7 +64,7 @@ export function DocsPage() {
         <header className="docs-bar">
           <div className="docs-bar-left">
             <button type="button" className="icon-btn icon-btn-ghost docs-menu-button" aria-label="打开文档目录" aria-expanded={navOpen} onClick={() => setNavOpen(value => !value)}><Icon name="menu" /></button>
-            <Brand href="/docs" />
+            <Brand href={basePath} />
             <span className="docs-bar-tag">文档</span>
           </div>
           <button type="button" className="docs-search-trigger" aria-label="搜索文档" title="搜索文档（⌘K）" onClick={() => setSearchOpen(true)}>
@@ -75,12 +76,12 @@ export function DocsPage() {
         </header>
         <div className="docs-layout">
           <aside className={`docs-nav${navOpen ? " is-open" : ""}`} aria-label="文档目录">
-            {DOC_GROUPS.map(group => (
+            {[...new Set(pages.map(item => item.group))].map(group => (
               <div className="docs-nav-group" key={group}>
                 <p>{group}</p>
-                {DOC_PAGES.filter(item => item.group === group).map(item => (
-                  <a key={item.slug} href={`/docs/${item.slug}`} aria-current={item.slug === current ? "page" : undefined}
-                    onClick={event => { event.preventDefault(); navigateDocs(item.slug); }}>
+                {pages.filter(item => item.group === group).map(item => (
+                  <a key={item.slug} href={`${basePath}/${item.slug}`} aria-current={item.slug === current ? "page" : undefined}
+                    onClick={event => { event.preventDefault(); navigateDocs(item.slug, undefined, basePath); }}>
                     <Icon name={item.icon} size={16} />{item.title}
                   </a>
                 ))}
@@ -95,8 +96,8 @@ export function DocsPage() {
               <Content />
             </article>
             <nav className="doc-pager" aria-label="上一页与下一页">
-              {index > 0 ? <PagerLink page={DOC_PAGES[index - 1]} direction="prev" /> : <span />}
-              {index < DOC_PAGES.length - 1 ? <PagerLink page={DOC_PAGES[index + 1]} direction="next" /> : <span />}
+              {index > 0 ? <PagerLink page={pages[index - 1]} direction="prev" basePath={basePath} /> : <span />}
+              {index < pages.length - 1 ? <PagerLink page={pages[index + 1]} direction="next" basePath={basePath} /> : <span />}
             </nav>
           </main>
           <aside className="docs-toc" aria-label="本页内容">
@@ -107,15 +108,15 @@ export function DocsPage() {
           </aside>
         </div>
         {navOpen && <div className="docs-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />}
-        {searchOpen && <DocsSearch onClose={() => setSearchOpen(false)} />}
+        {searchOpen && <DocsSearch pages={pages} onClose={() => setSearchOpen(false)} />}
       </div>
     </ConfigContext.Provider>
   );
 }
 
-function PagerLink({ page, direction }: { page: DocPage; direction: "prev" | "next" }) {
+function PagerLink({ page, direction, basePath }: { page: DocPage; direction: "prev" | "next"; basePath: string }) {
   return (
-    <a className={`doc-pager-link is-${direction}`} href={`/docs/${page.slug}`} onClick={event => { event.preventDefault(); navigateDocs(page.slug); }}>
+    <a className={`doc-pager-link is-${direction}`} href={`${basePath}/${page.slug}`} onClick={event => { event.preventDefault(); navigateDocs(page.slug, undefined, basePath); }}>
       <small>{direction === "prev" ? "上一页" : "下一页"}</small>
       <strong>{direction === "prev" && <Icon name="arrowLeft" size={15} />}{page.title}{direction === "next" && <Icon name="chevronRight" size={15} />}</strong>
     </a>
@@ -123,14 +124,15 @@ function PagerLink({ page, direction }: { page: DocPage; direction: "prev" | "ne
 }
 
 /** 搜索：匹配页面标题、简介和关键词，回车打开第一个结果，方向键切换。 */
-function DocsSearch({ onClose }: { onClose: () => void }) {
+function DocsSearch({ pages, onClose }: { pages: DocPage[]; onClose: () => void }) {
+  const { basePath } = useDocsConfig();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const results = useMemo(() => {
     const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    if (!terms.length) return DOC_PAGES;
-    return DOC_PAGES
+    if (!terms.length) return pages;
+    return pages
       .map(page => {
         const haystack = `${page.title} ${page.summary} ${page.keywords}`.toLowerCase();
         const score = terms.reduce((sum, term) => sum + (page.title.toLowerCase().includes(term) ? 3 : haystack.includes(term) ? 1 : -100), 0);
@@ -139,7 +141,7 @@ function DocsSearch({ onClose }: { onClose: () => void }) {
       .filter(item => item.score > 0)
       .sort((a, b) => b.score - a.score)
       .map(item => item.page);
-  }, [query]);
+  }, [pages, query]);
   const dialog = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // 打开时聚焦输入框，关闭后把焦点还给触发搜索的元素。
@@ -156,7 +158,7 @@ function DocsSearch({ onClose }: { onClose: () => void }) {
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   }
   useEffect(() => setSelected(0), [query]);
-  function open(page: DocPage) { onClose(); navigateDocs(page.slug); }
+  function open(page: DocPage) { onClose(); navigateDocs(page.slug, undefined, basePath); }
   return (
     <div className="modal-backdrop docs-search-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
       <div ref={dialog} className="docs-search" role="dialog" aria-modal="true" aria-label="搜索文档" onKeyDown={trapFocus}>

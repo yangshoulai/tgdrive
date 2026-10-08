@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
 import * as api from "./api";
-import { DocsPage } from "./docs";
+import { DocsPage } from "./docs/docs";
 import { FileTile, PreviewModal, ShareDialog, baseName, getFileKind, makeThumbnail, parentPath, thumbnailable } from "./files";
 import { SharePage } from "./share";
 import { AppShell, FullPageLoading, LoginPage, useSessionGuard } from "./shell";

@@ -144,8 +144,15 @@ class TgDriveASGI:
                     await self._send_raw(tracked_send, response.status, response.headers, response.body)
                 return
             if self.static_dir is not None and method in ("GET", "HEAD") and not path.startswith("/api/"):
+                # 管理员文档代码只能通过下方受保护的 API 返回，不能绕过会话直接读取静态文件。
+                if path.endswith("/admin-docs.js"):
+                    await self._send(tracked_send, 404, {"error": {"code": "not_found", "message": "资源不存在"}})
+                    return
                 https = scope.get("scheme") == "https" or headers.get("x-forwarded-proto") == "https"
                 await self._static(tracked_send, path, method, https=https)
+                return
+            if path == "/api/admin/v1/docs-bundle.js" and method in ("GET", "HEAD"):
+                await self._admin_docs_bundle(tracked_send, method, token)
                 return
             if path.startswith("/api/v1/"):
                 await self._key_api(tracked_send, method, path[len("/api/v1"):], query, headers, body_stream)
@@ -656,6 +663,9 @@ class TgDriveASGI:
         if isinstance(static_dir, dict):
             # 生产部署可把两个应用挂到不同域名；本地单进程也按路径保持相同隔离。
             static_dir = static_dir["admin"] if path.startswith("/admin") else static_dir["user"]
+        elif path.startswith("/admin") and (Path(static_dir) / "admin").is_dir():
+            # Docker 镜像把管理端放在单一静态根目录的 admin/ 子目录中。
+            static_dir = Path(static_dir) / "admin"
         static_dir = Path(static_dir)
         relative = path.lstrip("/")
         if path.startswith("/admin"):
@@ -678,6 +688,27 @@ class TgDriveASGI:
             headers["Strict-Transport-Security"] = "max-age=31536000"
         await send({"type": "http.response.start", "status": 200, "headers": self._headers(headers)})
         await send({"type": "http.response.body", "body": b"" if method == "HEAD" else data})
+
+    async def _admin_docs_bundle(self, send, method: str, token: str) -> None:
+        """只向管理员会话返回管理员文档代码，避免普通用户从前端 bundle 读取运维内容。"""
+        session = self.admin.accounts.sessions.require(token, role="admin")
+        self.admin.accounts.account_for_session(session)
+        if self.static_dir is None:
+            raise NotFoundError("管理员文档未构建")
+        if isinstance(self.static_dir, dict):
+            root = self.static_dir.get("admin")
+            candidate = Path(root) / "admin-docs.js" if root else None
+        else:
+            base = Path(self.static_dir)
+            candidate = base / "admin" / "admin-docs.js" if (base / "admin").is_dir() else base / "admin-docs.js"
+        if candidate is None or not candidate.is_file():
+            raise NotFoundError("管理员文档未构建")
+        data = candidate.read_bytes()
+        await self._send_raw(send, 200, {
+            "Content-Type": "text/javascript; charset=utf-8",
+            "Cache-Control": "no-store",
+            **PAGE_SECURITY_HEADERS,
+        }, b"" if method == "HEAD" else data)
 
     @staticmethod
     def _headers(headers):

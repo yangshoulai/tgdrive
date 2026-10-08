@@ -142,10 +142,11 @@ export function LoginPage({ kind, onSuccess, notice }: { kind: api.Role; onSucce
         : status === 503 ? "系统当前已锁定，请联系管理员解锁后再登录" : api.errorMessage(reason, "登录失败，请稍后重试"));
     } finally { setBusy(false); }
   }
+  const docsHref = admin && window.location.pathname.startsWith("/admin") ? "/admin/docs" : "/docs";
   return (
     <AuthLayout admin={admin} title={admin ? "登录控制台" : "登录 tgdrive"}
       description={admin ? "管理用户、存储通道和系统密钥。" : "访问你的私有文件空间。"}
-      footer={<><a href={admin ? `${api.userSiteOrigin()}/docs` : "/docs"}>使用文档</a>{!admin && <span>没有账号？请联系管理员创建。</span>}</>}>
+      footer={<><a href={docsHref}>使用文档</a>{!admin && <span>没有账号？请联系管理员创建。</span>}</>}>
       {notice}
       <form className="form" onSubmit={submit} noValidate>
         <Field label="用户名" htmlFor="login-username">

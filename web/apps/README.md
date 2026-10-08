@@ -1,14 +1,15 @@
 # tgdrive 双 Web 应用
 
-用户端和管理端是两个独立的前端应用，分别位于 `web/apps/user` 与 `web/apps/admin`，可使用不同域名、容器或 CDN 部署。它们只共享 `src/api.ts`、`src/shared.tsx` 和设计令牌，不共享路由入口或 HTML 产物。
+用户端和管理端是两个独立的前端应用，分别位于 `web/apps/user` 与 `web/apps/admin`，可使用不同域名、容器或 CDN 部署。共享逻辑位于 `web/src`，文档相关模块集中在 `web/src/docs`。
 
 ```bash
 cd web
 node build-apps.mjs user
 node build-apps.mjs admin
+node build-apps.mjs admin-docs
 ```
 
-产物分别写入 `web/apps/user/dist` 和 `web/apps/admin/dist`。生产环境将两个 `dist` 目录配置到不同站点，并把 `/api` 反向代理到同一个 tgdrive API 服务即可。
+产物分别写入 `web/apps/user/dist` 和 `web/apps/admin/dist`。`admin-docs.js` 是管理员文档 bundle，不会随管理端登录 bundle 一起发送，浏览器会在管理员会话通过 `/api/admin/v1/docs-bundle.js` 校验后加载。生产环境将两个 `dist` 目录配置到不同站点，并把 `/api` 反向代理到同一个 tgdrive API 服务即可。
 
 本地开发使用三个独立进程：API/S3 `:8000`、用户 Web `:8001`、管理 Web `:8002`。用户 Web 和管理 Web 不再共用监听端口，也不再通过同一静态入口按路径切换。
 

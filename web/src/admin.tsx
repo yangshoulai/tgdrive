@@ -11,12 +11,43 @@ import {
 /* ---------- 路由 ---------- */
 
 export function AdminRoute() {
+  if (isAdminDocsPath()) return <AdminDocsRoute />;
+  return <AdminPanelRoute />;
+}
+
+function AdminPanelRoute() {
   const [initialized, setInitialized] = useState<boolean | null>(null);
   const [setupDone, setSetupDone] = useState(false);
   useEffect(() => { void api.adminStatus().then(status => setInitialized(status.initialized)).catch(() => setInitialized(true)); }, []);
   if (initialized === null) return <FullPageLoading label="正在连接控制台" />;
   if (!initialized) return <SetupPage onComplete={() => { setInitialized(true); setSetupDone(true); }} />;
   return <AdminSession justInitialized={setupDone} />;
+}
+
+function isAdminDocsPath() {
+  return window.location.pathname === "/admin/docs" || window.location.pathname.startsWith("/admin/docs/") ||
+    (window.location.port === "8002" && (window.location.pathname === "/docs" || window.location.pathname.startsWith("/docs/")));
+}
+
+function AdminDocsRoute() {
+  const { session, checking } = useSessionGuard("admin", api.restoreAdminSession);
+  if (checking) return <FullPageLoading label="正在验证管理员会话" />;
+  if (!session) return <LoginPage kind="admin" onSuccess={() => window.location.reload()} />;
+  return <AdminDocsGate />;
+}
+
+function AdminDocsGate() {
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    const script = document.createElement("script");
+    script.src = "/api/admin/v1/docs-bundle.js";
+    script.async = true;
+    script.onload = () => setError(false);
+    script.onerror = () => setError(true);
+    document.head.appendChild(script);
+    return () => script.remove();
+  }, []);
+  return <div id="admin-docs-root">{error ? <p className="form-alert" role="alert">管理员文档加载失败，请刷新后重试。</p> : <FullPageLoading label="正在加载管理员文档" />}</div>;
 }
 
 function AdminSession({ justInitialized }: { justInitialized: boolean }) {
@@ -83,7 +114,7 @@ function AdminShell({ session, onLogout }: { session: api.Session; onLogout: () 
       groups={[
         { items: MODULES.slice(0, 3) },
         { label: "系统", items: MODULES.slice(3) },
-        { label: "帮助", items: [{ key: "docs" as Module, label: "使用文档", icon: "book", href: `${api.userSiteOrigin()}/docs` }] },
+        { label: "帮助", items: [{ key: "docs" as Module, label: "使用文档", icon: "book", href: window.location.pathname.startsWith("/admin") ? "/admin/docs" : "/docs" }] },
       ]}
       sidebarFooter={
         <button type="button" className={`system-chip${locked ? " is-locked" : ""}`} onClick={() => navigate("maintenance")}>

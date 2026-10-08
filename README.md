@@ -19,7 +19,9 @@
 docker compose up -d --build
 ```
 
-打开 <http://127.0.0.1:8000/> 完成首次初始化；管理端位于 <http://127.0.0.1:8000/admin/>，文档位于 <http://127.0.0.1:8000/docs/>。
+打开 <http://127.0.0.1:8000/> 完成首次初始化；管理端位于 <http://127.0.0.1:8000/admin/>，用户文档位于 <http://127.0.0.1:8000/docs/>。管理端登录后从「使用文档」进入管理员文档（`/admin/docs/`）。
+
+用户文档只包含文件使用、HTTP API 和 S3 客户端说明。部署、运维、备份和故障排查页面只在管理员会话通过校验后按需加载，普通用户访问 `/docs/deploy` 等路径不会获得这些内容。
 
 `docker-compose.yml` 为本地 HTTP 体验设置了 `TGDRIVE_INSECURE_COOKIES=1`。生产部署应删除该变量，在反向代理后使用 HTTPS，并设置公开访问地址与 S3 Endpoint。容器默认监听 `8000`，数据目录为 `/data`。
 
@@ -93,7 +95,8 @@ node web/serve-app.mjs admin   # http://127.0.0.1:8002
 
 ```text
 tgdrive/              Python 后端、ASGI 路由、对象服务、S3 与 Telegram 适配器
-web/src/               React + TypeScript 用户端、管理端和文档站
+web/src/               React + TypeScript 用户端、管理端和共享界面
+web/src/docs/          用户文档、管理员文档和文档排版组件
 web/build-apps.mjs     前端离线打包器
 tests/                 unittest 回归测试
 DESIGN.md              视觉规范

@@ -6,7 +6,8 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY web ./
 RUN node build-apps.mjs user \
-    && TGDRIVE_ASSET_PREFIX=/admin/ node build-apps.mjs admin
+    && TGDRIVE_ASSET_PREFIX=/admin/ node build-apps.mjs admin \
+    && node build-apps.mjs admin-docs
 
 # 运行阶段：API 服务同时托管用户端根路径和 /admin/ 管理端。
 FROM python:3.12-slim

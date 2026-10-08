@@ -30,6 +30,8 @@ http.createServer((req, res) => {
     return;
   }
   if (!['GET','HEAD'].includes(req.method)) { res.writeHead(405); res.end(); return; }
+  // 管理员文档 bundle 只能由 API 在管理员会话通过后返回。
+  if (role === 'admin' && url.pathname === '/admin-docs.js') { res.writeHead(404); res.end(); return; }
   let name;
   try { name = decodeURIComponent(url.pathname); } catch { res.writeHead(400); res.end(); return; }
   let file = path.resolve(root, '.' + name);
