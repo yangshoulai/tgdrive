@@ -10,6 +10,7 @@ export function Clients() {
   const [clients, setClients] = useState<api.AdminClient[] | null>(null);
   const [owners, setOwners] = useState<Map<number, string>>(new Map());
   const [disabling, setDisabling] = useState<api.AdminClient | null>(null);
+  const [deleting, setDeleting] = useState<api.AdminClient | null>(null);
   useDocumentTitle(`全部访问密钥 · ${SITE.admin}`);
   const load = useCallback(() => {
     void Promise.all([api.adminClients(), api.adminUsers()])
@@ -38,12 +39,18 @@ export function Clients() {
                 <span role="cell">{client.status === "active" ? <Badge tone="success" dot>启用</Badge> : <Badge dot>已停用</Badge>}</span>
                 <span role="cell" className="cell-actions">
                   {client.status === "active" ? <Button size="sm" variant="ghost" onClick={() => setDisabling(client)}>停用</Button> : <Button size="sm" onClick={() => void setStatus(client, "active")}>启用</Button>}
+                  <Button size="sm" variant="ghost" className="btn-ghost-danger" onClick={() => setDeleting(client)}>删除</Button>
                 </span>
               </div>
             ))}
           </div>
         )}
       </section>
+      {deleting && <ConfirmDialog title={`删除 ${deleting.name}？`} description="它的所有密钥和授权会被永久删除，使用这些密钥的程序会立即失去访问权限，无法恢复。" confirmLabel="永久删除" onClose={() => setDeleting(null)}
+        onConfirm={async () => {
+          try { await api.deleteAdminClient(deleting.id); toast.success(`已删除 ${deleting.name}`); setDeleting(null); load(); }
+          catch (reason) { toast.error(api.errorMessage(reason, "删除失败，请稍后重试")); }
+        }} />}
       {disabling && <ConfirmDialog title={`停用 ${disabling.name}？`} description="使用该凭据的程序会立即失去访问权限。可以随时重新启用。" confirmLabel="停用" onClose={() => setDisabling(null)}
         onConfirm={async () => { await setStatus(disabling, "disabled"); setDisabling(null); }} />}
     </>

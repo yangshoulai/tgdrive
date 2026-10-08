@@ -287,7 +287,7 @@ print(session.get(f"{base}/list", params={"prefix": "docs/"}).json())` },
       <Callout tone="warning" title="像密码一样保管 Secret">请求头中直接携带 Secret，生产环境务必通过 HTTPS 访问。不要把密钥写进网页前端代码或提交到代码仓库；泄露后立即在「访问密钥」中禁用。</Callout>
       <ul className="doc-list">
         <li>密钥认证的请求不读取 Cookie，也不需要 CSRF 令牌。网页文件空间使用的 <C>/api/user/v1</C> 是内部接口，只接受浏览器会话，不能使用密钥访问。</li>
-        <li>密钥被禁用、所属账号被禁用时返回 401；系统锁定时返回 503。</li>
+        <li>密钥被禁用或删除、所属账号被禁用时返回 401；系统锁定时返回 503。</li>
         <li>每个请求都会更新密钥的「最近使用」时间，可在「访问密钥」页查看。</li>
       </ul>
       <H2>请求约定</H2>
@@ -311,7 +311,7 @@ print(session.get(f"{base}/list", params={"prefix": "docs/"}).json())` },
       <Code lang="json" code={`{ "error": { "code": "quota_exceeded", "message": "已超过当前用户的存储配额" } }`} />
       <Table head={["状态码", "code", "含义与处理"]} rows={[
         ["400", <C>bad_request</C>, "参数缺失、路径不合法，或多桶密钥未指定 bucket；message 中有具体原因"],
-        ["401", <C>invalid_key</C>, "缺少 Authorization 头，或密钥错误、已禁用"],
+        ["401", <C>invalid_key</C>, "缺少 Authorization 头，或密钥错误、已禁用、已删除"],
         ["403", <C>forbidden</C>, "密钥没有该存储桶或路径的权限，或只读密钥尝试写入"],
         ["404", <C>not_found</C>, "文件或接口不存在"],
         ["413", <C>quota_exceeded</C>, "上传后会超出容量配额"],
@@ -533,6 +533,7 @@ function ApiPermissions() {
         <li>列出根目录时，如果密钥只被授权了某个子目录，接口会直接返回该子目录的内容。</li>
         <li>移动要求源和目标在同一条读写授权内；复制要求对源有读权限、对目标有写权限。</li>
         <li>所属用户被禁用后，其所有密钥立即失效；重新启用后恢复。</li>
+        <li>在「访问密钥」页可以禁用或删除密钥：禁用后无法重新启用；删除是永久的，密钥和它的授权立即清除、无法恢复。不再使用的密钥建议直接删除。</li>
       </ul>
       <H2>多个存储桶</H2>
       <p>管理员可以为一个密钥授权多个存储桶。这时每个请求都需要指定 <C>bucket</C>：GET 请求放在查询参数中，POST 请求可以放在查询参数或 JSON 请求体中。未指定时返回 400。</p>

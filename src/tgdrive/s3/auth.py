@@ -76,6 +76,22 @@ class ClientAuthStore:
             if cursor.rowcount != 1:
                 raise NotFoundError("access key not found")
 
+    def delete_key(self, access_key_id: str) -> None:
+        """永久删除一个访问密钥；它所属的客户端没有其他密钥时一并删除（授权随之清除）。"""
+        with self.metadata.transaction() as db:
+            row = db.execute("SELECT client_id FROM client_keys WHERE access_key_id=?", (access_key_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("access key not found")
+            db.execute("DELETE FROM client_keys WHERE access_key_id=?", (access_key_id,))
+            if not db.execute("SELECT 1 FROM client_keys WHERE client_id=?", (row["client_id"],)).fetchone():
+                db.execute("DELETE FROM clients WHERE id=?", (row["client_id"],))
+
+    def delete_client(self, client_id: int) -> None:
+        """永久删除整个客户端：它的全部密钥与授权一起清除。"""
+        with self.metadata.transaction() as db:
+            if db.execute("DELETE FROM clients WHERE id=?", (client_id,)).rowcount != 1:
+                raise NotFoundError("client not found")
+
     def set_client_status(self, client_id: int, status: str) -> None:
         if status not in ("active", "disabled"):
             raise ValueError("invalid client status")

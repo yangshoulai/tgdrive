@@ -180,6 +180,8 @@ export function uploadPartWithProgress(uploadId: string, partNo: number, blob: B
 export const userClients = () => request<AdminClient[]>("/api/user/v1/clients");
 export const createUserClient = (name: string) => post<CreatedClient>("/api/user/v1/clients", { name });
 export const disableUserKey = (accessKeyId: string) => post<void>("/api/user/v1/client-keys/disable", { access_key_id: accessKeyId });
+/** 永久删除：立即失效，无法恢复。 */
+export const deleteUserKey = (accessKeyId: string) => post<void>("/api/user/v1/client-keys/delete", { access_key_id: accessKeyId });
 
 /* ---------- 公开分享 ---------- */
 
@@ -248,6 +250,7 @@ export const createBackup = () => post<Backup>("/api/admin/v1/backups");
 export const backupUrl = (name: string) => `/api/admin/v1/backups/${encodeURIComponent(name)}`;
 export const setAdminUserQuota = (id: number, quotaBytes: number | null) => post<void>(`/api/admin/v1/users/${id}/quota`, { quota_bytes: quotaBytes });
 export const adminClients = () => request<AdminClient[]>("/api/admin/v1/clients");
+export const deleteAdminClient = (id: number) => post<void>(`/api/admin/v1/clients/${id}/delete`);
 export const setAdminClientStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/clients/${id}/status`, { status });
 export const disableAdminKey = (accessKeyId: string) => post<void>("/api/admin/v1/client-keys/disable", { access_key_id: accessKeyId });
 export const adminBots = () => request<BotConfig[]>("/api/admin/v1/bots");

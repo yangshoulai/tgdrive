@@ -236,14 +236,15 @@ class TgDriveASGI(StaticFiles):
                           "/unlock": "system.unlock", "/lock": "system.lock", "/users": "user.create",
                           "/users/{}/status": "user.status", "/users/{}/quota": "user.quota", "/clients": "key.create",
                           "/clients/{}/status": "client.status", "/clients/{}/grants": "client.grant",
-                          "/client-keys/disable": "key.disable", "/bots": "bot.create", "/bots/{}/status": "bot.status",
+                          "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/clients/{}/delete": "client.delete",
+                          "/bots": "bot.create", "/bots/{}/status": "bot.status",
                           "/bots/{}/check": "bot.check", "/objects/public": "object.public", "/settings": "settings.update",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
                           "/backups": "backup.create", "/password": "admin.password", "/passphrase": "system.passphrase",
                           "/users/{}/password": "user.password_reset", "/users/{}/delete": "user.delete"},
         "/api/user/v1": {"/login": "user.login", "/logout": "user.logout", "/password": "user.password",
-                         "/clients": "key.create", "/client-keys/disable": "key.disable", "/public": "object.public",
+                         "/clients": "key.create", "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/public": "object.public",
                          "/trash/purge": "trash.purge"},
     }
 
@@ -284,7 +285,7 @@ class TgDriveASGI(StaticFiles):
         elif action == "key.create":
             target = (result or {}).get("access_key_id") if ok else None
             detail = {"name": payload.get("name")}
-        elif action == "key.disable":
+        elif action in ("key.disable", "key.delete"):
             target = payload.get("access_key_id")
         elif action == "client.grant":
             detail = {key: payload.get(key) for key in ("bucket_id", "prefix", "perms")}
@@ -500,6 +501,12 @@ class TgDriveASGI(StaticFiles):
             if route == "/client-keys/disable" and method == "POST":
                 self.admin.disable_client_key(token, csrf, payload["access_key_id"])
                 return 204, None, {}
+            if route == "/client-keys/delete" and method == "POST":
+                self.admin.delete_client_key(token, csrf, payload["access_key_id"])
+                return 204, None, {}
+            if route.startswith("/clients/") and route.endswith("/delete") and method == "POST":
+                self.admin.delete_client(token, csrf, int(route.split("/")[2]))
+                return 204, None, {}
             if route.startswith("/clients/") and route.endswith("/grants") and method == "POST":
                 client_id = int(route.split("/")[2])
                 self.admin.grant_client(token, csrf, client_id, int(payload["bucket_id"]),
@@ -578,6 +585,9 @@ class TgDriveASGI(StaticFiles):
                 return 201, self.user.create_client(token, csrf, payload["name"]), {}
             if method == "POST" and route == "/client-keys/disable":
                 self.user.disable_client_key(token, csrf, payload["access_key_id"])
+                return 204, None, {}
+            if method == "POST" and route == "/client-keys/delete":
+                self.user.delete_client_key(token, csrf, payload["access_key_id"])
                 return 204, None, {}
         elif path == "/api/public/v1/config" and method == "GET":
             return 200, self.settings.public_config(), {}

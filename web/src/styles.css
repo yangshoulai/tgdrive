@@ -517,14 +517,14 @@ code, .mono { font-family: var(--font-mono); font-size: .92em; }
 
 .file-table { --cols: 20px minmax(0, 1fr) 96px 132px 76px; }
 .shared-table { --cols: minmax(0, 1fr) 96px 120px 170px; }
-.keys-table { --cols: minmax(120px, 1fr) minmax(0, 1.4fr) 90px 110px 70px; }
+.keys-table { --cols: minmax(120px, 1fr) minmax(0, 1.4fr) 90px 110px 130px; }
 .users-table { --cols: minmax(160px, 1.2fr) minmax(160px, 1fr) 90px 110px 150px; }
 .btn-ghost-danger { color: var(--danger); }
 .btn-ghost-danger:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
 .cell-note { font-size: 12px; white-space: nowrap; }
 .objects-table { --cols: minmax(0, 2fr) minmax(80px, .7fr) 90px 110px 44px; }
 .bots-table { --cols: minmax(160px, 1fr) minmax(0, .8fr) 90px minmax(140px, 1fr) 44px; }
-.clients-table { --cols: minmax(160px, 1fr) 110px minmax(0, 1.4fr) 90px 70px; }
+.clients-table { --cols: minmax(160px, 1fr) 110px minmax(0, 1.4fr) 90px 130px; }
 
 .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 14px; padding: 16px; }
 .grid-card { position: relative; overflow: hidden; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--surface); cursor: pointer; transition: border-color .15s, box-shadow .15s; }
@@ -892,8 +892,8 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .users-table { --cols: minmax(160px, 1.2fr) minmax(160px, 1fr) 90px 110px 150px; }
   .objects-table { --cols: minmax(220px, 2fr) minmax(100px, .7fr) 90px 110px 44px; }
   .bots-table { --cols: minmax(180px, 1fr) minmax(120px, .8fr) 90px minmax(160px, 1fr) 44px; }
-  .clients-table { --cols: minmax(180px, 1fr) 110px minmax(160px, 1.4fr) 90px 70px; }
-  .keys-table { --cols: minmax(140px, 1fr) minmax(160px, 1.4fr) 90px 110px 70px; }
+  .clients-table { --cols: minmax(180px, 1fr) 110px minmax(160px, 1.4fr) 90px 130px; }
+  .keys-table { --cols: minmax(140px, 1fr) minmax(160px, 1.4fr) 90px 110px 130px; }
   .file-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; padding: 10px; }
   .grid-check { opacity: 1; }
   .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }

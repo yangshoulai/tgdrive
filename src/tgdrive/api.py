@@ -179,6 +179,14 @@ class AdminApi:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         self.clients.disable_key(access_key_id)
 
+    def delete_client_key(self, token: str, csrf: str, access_key_id: str) -> None:
+        self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        self.clients.delete_key(access_key_id)
+
+    def delete_client(self, token: str, csrf: str, client_id: int) -> None:
+        self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        self.clients.delete_client(client_id)
+
     def grant_client(self, token: str, csrf: str, client_id: int, bucket_id: int, prefix: str, perms: str) -> None:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         self.clients.grant(client_id, bucket_id, prefix, perms)
@@ -568,7 +576,8 @@ class UserApi:
             name, owner_user_id=account.id, grants=[(account.bucket_id, "", "rw")])
         return {"id": client_id, "access_key_id": access_key, "secret": secret}
 
-    def disable_client_key(self, token: str, csrf: str, access_key_id: str) -> None:
+    def _own_key(self, token: str, csrf: str, access_key_id: str) -> None:
+        """只能操作自己创建的密钥。"""
         session = self._session(token, csrf=csrf, mutation=True)
         if self.clients is None:
             raise NotReadyError("客户端密钥服务尚未启用")
@@ -578,7 +587,14 @@ class UserApi:
         ).fetchone()
         if row is None or row["owner_user_id"] != session.user_id:
             raise PermissionError("不能操作其他用户的客户端")
+
+    def disable_client_key(self, token: str, csrf: str, access_key_id: str) -> None:
+        self._own_key(token, csrf, access_key_id)
         self.clients.disable_key(access_key_id)
+
+    def delete_client_key(self, token: str, csrf: str, access_key_id: str) -> None:
+        self._own_key(token, csrf, access_key_id)
+        self.clients.delete_key(access_key_id)
 
     @staticmethod
     def _object_json(item) -> dict[str, object]:

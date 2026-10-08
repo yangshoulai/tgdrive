@@ -11,6 +11,7 @@ export function KeysView({ bucketName }: { bucketName: string | null }) {
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<(api.CreatedClient & { name: string }) | null>(null);
   const [disabling, setDisabling] = useState<{ client: string; key: string } | null>(null);
+  const [deleting, setDeleting] = useState<{ client: string; key: string } | null>(null);
   useDocumentTitle(`访问密钥 · ${BRAND}`);
   const load = useCallback(() => { void api.userClients().then(setClients).catch(reason => { setClients([]); toast.error(api.errorMessage(reason, "访问密钥加载失败，请稍后重试")); }); }, []);
   useEffect(load, [load]);
@@ -43,7 +44,10 @@ export function KeysView({ bucketName }: { bucketName: string | null }) {
                   <span role="cell"><code className="mono">{key.access_key_id}</code></span>
                   <span role="cell">{key.status === "active" && client.status === "active" ? <Badge tone="success" dot>启用</Badge> : <Badge dot>已禁用</Badge>}</span>
                   <span role="cell" className="muted">{key.last_used_at ? formatDate(key.last_used_at) : "从未使用"}</span>
-                  <span role="cell" className="cell-actions">{key.status === "active" && <Button size="sm" variant="ghost" onClick={() => setDisabling({ client: client.name, key: key.access_key_id })}>禁用</Button>}</span>
+                  <span role="cell" className="cell-actions">
+                    {key.status === "active" && <Button size="sm" variant="ghost" onClick={() => setDisabling({ client: client.name, key: key.access_key_id })}>禁用</Button>}
+                    <Button size="sm" variant="ghost" className="btn-ghost-danger" onClick={() => setDeleting({ client: client.name, key: key.access_key_id })}>删除</Button>
+                  </span>
                 </div>
               )))}
             </div>
@@ -52,6 +56,12 @@ export function KeysView({ bucketName }: { bucketName: string | null }) {
       </div>
       {creating && <CreateKeyDialog onClose={() => setCreating(false)} onCreated={value => { setCreating(false); setCreated(value); load(); }} />}
       {created && <SecretDialog created={created} endpoint={endpoint ?? "https://<S3 Endpoint>"} bucket={bucket} onClose={() => setCreated(null)} />}
+      {deleting && <ConfirmDialog title={`删除“${deleting.client}”的密钥？`} description="使用该密钥的程序会立即失去访问权限，删除后无法恢复。如果只是暂时不用，可以选择“禁用”。" confirmLabel="删除密钥"
+        onClose={() => setDeleting(null)}
+        onConfirm={async () => {
+          try { await api.deleteUserKey(deleting.key); toast.success("密钥已删除"); setDeleting(null); load(); }
+          catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); }
+        }} />}
       {disabling && <ConfirmDialog title={`禁用“${disabling.client}”的密钥？`} description="使用该密钥的程序会立即失去访问权限，禁用后无法重新启用。" confirmLabel="禁用密钥"
         onClose={() => setDisabling(null)}
         onConfirm={async () => {

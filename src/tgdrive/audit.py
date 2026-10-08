@@ -15,7 +15,7 @@ ACTIONS = {
     "system.setup": "初始化系统", "system.unlock": "解锁系统", "system.lock": "锁定系统",
     "admin.login": "管理员登录", "admin.logout": "管理员退出", "user.login": "用户登录", "user.logout": "用户退出",
     "user.password": "修改密码", "user.create": "创建用户", "user.status": "更改用户状态", "user.quota": "调整配额",
-    "key.create": "创建访问密钥", "key.disable": "禁用访问密钥", "client.status": "更改密钥状态", "client.grant": "修改密钥授权",
+    "key.create": "创建访问密钥", "key.disable": "禁用访问密钥", "key.delete": "删除访问密钥", "client.delete": "删除密钥客户端", "client.status": "更改密钥状态", "client.grant": "修改密钥授权",
     "bot.create": "添加存储通道", "bot.status": "更改通道状态", "bot.check": "检查存储通道",
     "object.public": "更改公开分享", "settings.update": "修改系统设置",
     "maintenance.gc": "运行垃圾回收", "maintenance.scrub": "运行完整性校验", "maintenance.cleanup": "清理未完成的上传",
