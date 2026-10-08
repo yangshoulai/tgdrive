@@ -46,6 +46,7 @@ cd web && node build-apps.mjs                                  # 构建到 web/d
 - 业务校验失败返回 `ValueError`（400），不要用 `AuthenticationError`（401 会让前端登出）。
 - 新的数据库字段通过在 `Metadata._migrate` 中追加版本块添加，并提升 `SCHEMA_VERSION`。
 - 对外地址（公开访问地址、S3 Endpoint）由 `tgdrive/settings.py` 的 `SystemSettings` 管理，存 `settings` 表，优先级：控制台设置 > 启动参数 > 前端推断。S3 路由主机名每个请求从它读取（带缓存）。前端统一通过 `api.userSiteOrigin()` / `api.s3Endpoint()` / `api.publicLinks()` 取地址，不要在组件里自行拼接 `window.location`。
+- Docker：镜像入口是 `docker-entrypoint.sh`（以 root 启动 → 数据目录属主不是 10001 时一次性 `chown -R` → `setpriv` 降权运行 `tgdrive`），不要在 Dockerfile 里写 `USER`，否则旧数据卷和宿主机挂载目录会因为权限问题启动失败（sqlite 报 unable to open database file）。`create_app` 会在数据目录不可写时给出明确的错误提示。
 - 单进程部署：普通会话、登录失败计数、Telegram 客户端池都在进程内存中，不要使用多个 uvicorn worker 或多实例共享数据目录。登录页勾选“30 天内保持登录”的会话例外：它们额外持久化在 `sessions` 表（只存令牌的 SHA-256，由 `accounts.MetadataSessionStore` 管理），服务重启后在系统解锁时恢复；退出、改密码（保留当前会话）、禁用账号、删除账号、管理员重置密码、锁定系统都必须同时清掉这张表里的对应记录（`SessionManager.revoke/clear/clear_user` 已统一处理，新增注销路径时不要绕过）。
 - 大数据量：请求体与对象内容一律以流处理，不要在内存中拼接完整对象。`BlobEngine.put_part` 用片段列表攒分片，不要改回 `bytearray` + `del buf[:n]`（会让常驻内存随上传量增长到 GB 级）。列表、搜索、管理端文件列表都用 SQL 键集分页，不要先取全量再在 Python 里过滤。
 - S3 请求体校验在 `tgdrive/s3/payload.py`：签名只覆盖声明的负载哈希，实际内容在读取时校验；新增读取请求体的 S3 操作必须走 `S3Gateway._body`。

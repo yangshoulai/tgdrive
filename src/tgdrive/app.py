@@ -29,6 +29,10 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
                run_scheduler: bool = True) -> TgDriveASGI:
     root = Path(data_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
+    if not os.access(root, os.W_OK | os.X_OK):
+        # 比 sqlite 的 “unable to open database file” 更容易看懂：最常见的原因是目录属主与运行用户不一致。
+        raise SystemExit(f"数据目录 {root} 不可写（当前用户 uid={os.getuid()}）。请修改目录权限，例如：chown -R {os.getuid()} {root}；"
+                         "使用 Docker 时容器默认以 uid 10001 运行，宿主机挂载目录需要对它可写。")
     metadata = Metadata(root / "meta.db")
     keystore = KeyStore(metadata)
     telegram_bots = TelegramBotConfigStore(metadata, keystore)

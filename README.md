@@ -26,7 +26,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 用户文档只包含文件使用、HTTP API 和 S3 客户端说明。部署、运维、备份和故障排查页面只在管理员会话通过校验后按需加载，普通用户访问 `/docs/deploy` 等路径不会获得这些内容。
 
-`docker-compose.dev.yml` 才会设置 `TGDRIVE_INSECURE_COOKIES=1`，只用于本地 HTTP。生产部署应直接使用 `docker-compose.yml`，在反向代理后使用 HTTPS，并设置公开访问地址与 S3 Endpoint。容器默认以非 root 用户运行，监听 `8000`，数据目录为 `/data`；`/healthz` 可用于容器和反向代理健康检查。
+`docker-compose.dev.yml` 才会设置 `TGDRIVE_INSECURE_COOKIES=1`，只用于本地 HTTP。生产部署应直接使用 `docker-compose.yml`，在反向代理后使用 HTTPS，并设置公开访问地址与 S3 Endpoint。容器默认监听 `8000`，数据目录为 `/data`；`/healthz` 可用于容器和反向代理健康检查。
+
+服务进程以非 root 用户（uid 10001）运行。容器以 root 启动时，入口脚本会先把 `/data` 的所有者修正为 10001 再降权，所以旧版本留下的数据卷和 `./data:/data` 这样的宿主机目录都能直接使用。如果你在 compose 里用 `user:` 指定了其他用户，就需要自己保证 `/data` 对该用户可写，例如 `chown -R <uid> ./data`。
 
 如果使用 GitHub Container Registry 发布的镜像，可将 Compose 中的 `build` 部分删掉，然后执行：
 
