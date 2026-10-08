@@ -31,18 +31,30 @@ export function Clients() {
             <div className="data-row data-head" role="row">
               <span role="columnheader">名称</span><span role="columnheader">所有者</span><span role="columnheader">授权范围</span><span role="columnheader">状态</span><span role="columnheader"><span className="sr-only">操作</span></span>
             </div>
-            {clients.map(client => (
+            {clients.map(client => {
+              // 状态要同时看客户端和它的密钥：用户在自己的页面里“禁用”的是密钥本身，客户端状态不会变。
+              const activeKeys = client.keys.filter(key => key.status === "active").length;
+              const stopped = client.status !== "active";
+              return (
               <div key={client.id} role="row" className="data-row">
-                <span role="cell" className="name-stack"><strong>{client.name}</strong><small className="mono">{client.keys.map(key => key.access_key_id).join("，") || "无密钥"}</small></span>
+                <span role="cell" className="name-stack"><strong>{client.name}</strong>
+                  <small className="mono">{client.keys.map(key => key.status === "active" ? key.access_key_id : `${key.access_key_id}（已禁用）`).join("，") || "无密钥"}</small></span>
                 <span role="cell" className="muted">{client.owner_user_id ? owners.get(client.owner_user_id) ?? `用户 ${client.owner_user_id}` : "管理员创建"}</span>
                 <span role="cell" className="grant-list">{client.grants.length ? client.grants.map(grant => <Badge key={`${grant.bucket_id}:${grant.prefix}`} tone={grant.perms === "rw" ? "accent" : "neutral"}>{grant.bucket_name}/{grant.prefix || "*"} {grant.perms === "rw" ? "读写" : "只读"}</Badge>) : <span className="muted">无授权</span>}</span>
-                <span role="cell">{client.status === "active" ? <Badge tone="success" dot>启用</Badge> : <Badge dot>已停用</Badge>}</span>
+                <span role="cell">
+                  {stopped ? <Badge dot>已停用</Badge>
+                    : activeKeys === 0 ? <Badge dot>已禁用</Badge>
+                      : activeKeys < client.keys.length ? <Badge tone="warning" dot>部分启用</Badge>
+                        : <Badge tone="success" dot>启用</Badge>}
+                </span>
                 <span role="cell" className="cell-actions">
-                  {client.status === "active" ? <Button size="sm" variant="ghost" onClick={() => setDisabling(client)}>停用</Button> : <Button size="sm" onClick={() => void setStatus(client, "active")}>启用</Button>}
+                  {stopped ? <Button size="sm" onClick={() => void setStatus(client, "active")}>启用</Button>
+                    : activeKeys > 0 && <Button size="sm" variant="ghost" onClick={() => setDisabling(client)}>停用</Button>}
                   <Button size="sm" variant="ghost" className="btn-ghost-danger" onClick={() => setDeleting(client)}>删除</Button>
                 </span>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
