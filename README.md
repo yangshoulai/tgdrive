@@ -94,17 +94,17 @@ node web/serve-app.mjs admin   # http://127.0.0.1:8002
 ## 项目结构
 
 ```text
-tgdrive/              Python 后端、ASGI 路由、对象服务、S3 与 Telegram 适配器
+src/tgdrive/          Python 后端、ASGI 路由、对象服务、S3 与 Telegram 适配器
 web/src/               React + TypeScript 用户端、管理端和共享界面
 web/src/docs/          用户文档、管理员文档和文档排版组件
 web/build-apps.mjs     前端离线打包器
 tests/                 unittest 回归测试
 DESIGN.md              视觉规范
 UX-CONTRACT.md         路由与交互契约
-tgdrive-architecture-v2.md  架构设计记录
+docs/architecture-v2.md  架构设计记录
 Dockerfile             多阶段镜像构建
 docker-compose.yml    本地启动配置
 .github/workflows/     仅 tag 推送触发的镜像发布流程
 ```
 
-更多接口细节请查看内置文档站和 `tgdrive-architecture-v2.md`。生产环境建议单进程运行；会话、登录限流和 Telegram 客户端池都保存在进程内存中。
+更多接口细节请查看内置文档站和 `docs/architecture-v2.md`。生产环境建议单进程运行；会话、登录限流和 Telegram 客户端池都保存在进程内存中。

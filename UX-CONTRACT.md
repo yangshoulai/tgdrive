@@ -2,9 +2,9 @@
 
 ## 业务来源
 
-- `tgdrive-architecture-v2.md`：用户隔离、S3 SigV4、Telegram 私有频道、容量和预览边界。
-- `tgdrive/api.py` 与 `tgdrive/asgi.py`：会话、CSRF、对象、公开链接和维护接口契约。
-- `tgdrive/objects.py`：桶配额在提交对象时强制校验；公开令牌随对象行移动。
+- `docs/architecture-v2.md`：用户隔离、S3 SigV4、Telegram 私有频道、容量和预览边界。
+- `src/tgdrive/api.py` 与 `src/tgdrive/asgi.py`：会话、CSRF、对象、公开链接和维护接口契约。
+- `src/tgdrive/objects.py`：桶配额在提交对象时强制校验；公开令牌随对象行移动。
 
 ## 路由与角色
 

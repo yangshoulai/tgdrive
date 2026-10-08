@@ -6,7 +6,7 @@ const role = process.argv[2];
 if (!['user', 'admin'].includes(role)) throw new Error('请指定 user 或 admin');
 const port = Number(process.env.PORT || (role === 'user' ? 8001 : 8002));
 const upstream = new URL(process.env.API_UPSTREAM || 'http://127.0.0.1:8000');
-// 与 tgdrive/asgi.py 中 PAGE_SECURITY_HEADERS 保持一致。
+// 与 src/tgdrive/asgi.py 中 PAGE_SECURITY_HEADERS 保持一致。
 const securityHeaders = {
   'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   'X-Frame-Options': 'DENY',

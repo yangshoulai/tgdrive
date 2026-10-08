@@ -1,1 +1,0 @@
-{"name":"tgdrive-admin","private":true,"type":"module","scripts":{"build":"node ../../build-apps.mjs admin","dev":"vite --config vite.config.ts"}}

@@ -21,7 +21,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY pyproject.toml ./
-COPY tgdrive ./tgdrive
+COPY src ./src
 RUN pip install --no-cache-dir .
 
 COPY --from=web-build /src/web/apps/user/dist /app/static/

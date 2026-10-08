@@ -1247,7 +1247,7 @@ make_check_blob(kek) / verify_check_blob(kek, blob)
 ```
 tgdrive/
 ├── pyproject.toml
-├── tgdrive/
+├── src/tgdrive/
 │   ├── errors.py          # 异常层次
 │   ├── crypto.py          # 加密（M1）
 │   ├── metadata.py        # SQLite 访问层、迁移（M1，随各里程碑扩展）
