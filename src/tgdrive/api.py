@@ -10,7 +10,7 @@ import unicodedata
 from collections.abc import AsyncIterator
 
 from .accounts import AccountService
-from .authn import AuthenticationError, Session
+from .authn import AuthenticationError, Session, hash_password
 from .errors import NotFoundError, NotReadyError
 from .maintenance import MaintenanceService
 from .metrics import TrafficMetrics
@@ -19,13 +19,13 @@ from .s3.auth import ClientAuthStore
 from .telegram.config import ConfiguredBlobStore, TelegramBotConfigStore
 
 
-def apply_share(objects: ObjectService, scope: Scope, key: str, public: bool, options: dict[str, object] | None):
+def apply_share(objects: ObjectService, scope: Scope, key: str, public: bool, options: dict[str, object] | None, *, password_hash=ObjectService._UNSET):
     """网页与密钥 API 共用：切换公开状态，并按需更新有效期与访问密码。"""
     info = objects.set_public(scope, key, public)
     if public and options:
         kwargs = {name: options[name] for name in ("expires_at", "password") if name in options}
         if kwargs:
-            info = objects.update_share(scope, key, **kwargs)
+            info = objects.update_share(scope, key, **kwargs, password_hash=password_hash)
     return info
 
 
@@ -66,6 +66,68 @@ class AdminApi:
     def login(self, username: str, password: str, ip: str | None = None) -> dict[str, object]:
         session = self.accounts.login(username, password, role="admin", ip=ip)
         return self._session_payload(session)
+
+    async def asetup(self, passphrase: str, username: str, password: str):
+        account = await self.accounts.asetup(passphrase, username, password)
+        return {"user_id": account.id, "username": account.username, "bucket_id": account.bucket_id}
+
+    async def aunlock(self, token: str, csrf: str, passphrase: str):
+        def authorize():
+            session = self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+            self.accounts.account_for_session(session)
+        authorize()
+        keys = self.accounts.keystore
+        row = keys.metadata.get_key_row()
+        material = await self.accounts.password_work.run(keys.unlock_material, row, passphrase)
+        authorize()
+        keys.unlock(passphrase, material=material, expected=(row["version"], row["kdf_salt"]))
+        return self.accounts.status()
+
+    async def achange_passphrase(self, token: str, csrf: str, old: str, new: str):
+        def authorize():
+            self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        authorize()
+        if len(new) < 12 or new == old:
+            raise ValueError("新加密口令至少 12 个字符，且不能与当前口令相同")
+        keys = self.accounts.keystore
+        row = keys.metadata.get_key_row()
+        material = await self.accounts.password_work.run(keys.rotation_material, row, old, new)
+        authorize()
+        report = keys.rotate(old, new, material=material, expected=(row["version"], row["kdf_salt"]))
+        return {"key_version": report.new_version, "rewrapped_files": report.blob_count}
+
+    async def alogin(self, username: str, password: str, ip: str | None = None):
+        return self._session_payload(await self.accounts.alogin(username, password, role="admin", ip=ip))
+
+    async def acreate_user(self, token: str, csrf: str, username: str, password: str, quota_bytes: int | None = None):
+        def authorize():
+            self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        authorize()
+        account = await self.accounts.acreate_user(username, password, quota_bytes=quota_bytes, authorize=authorize)
+        return {"id": account.id, "username": account.username, "bucket_id": account.bucket_id, "quota_bytes": quota_bytes}
+
+    async def areset_user_password(self, token: str, csrf: str, user_id: int, password: str):
+        def authorize():
+            self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+            row = self.accounts.metadata.db.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+            if row is not None and row["role"] == "admin":
+                raise PermissionError("管理员请在账号菜单中修改自己的密码")
+        authorize()
+        await self.accounts.areset_password(user_id, password, authorize=authorize)
+
+    async def alist_users(self, token: str, **options):
+        self.accounts.sessions.require(token, role="admin")
+        return await self.accounts.metadata.run_in_thread(
+            self.accounts.list_accounts if options.get("limit") is None else self.accounts.list_accounts_page,
+            **({} if options.get("limit") is None else options))
+
+    async def auser_summary(self, token: str):
+        self.accounts.sessions.require(token, role="admin")
+        return await self.accounts.metadata.run_in_thread(self.accounts.account_summary)
+
+    async def alist_clients(self, token: str, **options):
+        self.accounts.sessions.require(token, role="admin")
+        return await self.accounts.metadata.run_in_thread(self.clients.list_clients, **options)
 
     def logout(self, token: str) -> None:
         self.accounts.sessions.revoke(token)
@@ -256,8 +318,8 @@ class AdminApi:
             " ORDER BY o.modified_at DESC, o.bucket_id DESC, o.key DESC LIMIT ?", (*args, *page_args, limit + 1)).fetchall()
         items = [dict(row) for row in rows[:limit]]
         last = items[-1] if items else None
-        totals = self.objects.metadata.db.execute(
-            "SELECT COUNT(*), COUNT(o.public_token) " + base, args).fetchone()
+        totals = self.objects.metadata.cached_read(("admin-objects-total", query, public_only),
+            lambda: tuple(self.objects.metadata.db.execute("SELECT COUNT(*), COUNT(o.public_token) " + base, args).fetchone()))
         return {"objects": items, "total": totals[0], "public_total": totals[1],
                 "next_cursor": f"{last['modified_at']!r}|{last['bucket_id']}|{last['key']}" if len(rows) > limit and last else None}
 
@@ -288,9 +350,9 @@ class AdminApi:
         self.accounts.sessions.require(token, role="admin")
         return self._maintenance().status()
 
-    def run_cleanup(self, token: str, csrf: str) -> dict[str, object]:
+    async def run_cleanup(self, token: str, csrf: str) -> dict[str, object]:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
-        report = self._maintenance().cleaner.run_once()
+        report = await self.accounts.metadata.run_in_thread(self._maintenance().cleaner.run_once)
         result = {"aborted_uploads": report.aborted_uploads, "stale_blobs": report.stale_blobs,
                   "expired_upload_records": report.expired_upload_records}
         self._maintenance().record("cleanup", result)
@@ -355,6 +417,36 @@ class UserApi:
             self.accounts.sessions.revoke(session.token)
             raise NotReadyError("system is locked")
         return AdminApi._session_payload(session)
+
+    async def alogin(self, username: str, password: str, ip: str | None = None, remember: bool = False):
+        session = await self.accounts.alogin(username, password, ip=ip, remember=remember)
+        if not self.accounts.keystore.unlocked and session.role != "admin":
+            self.accounts.sessions.revoke(session.token)
+            raise NotReadyError("system is locked")
+        return AdminApi._session_payload(session)
+
+    async def achange_password(self, token: str, csrf: str, old_password: str, new_password: str) -> None:
+        session = self.accounts.sessions.require(token, csrf=csrf, mutation=True)
+        if len(new_password) < 8:
+            raise ValueError("新密码至少需要 8 个字符")
+        try:
+            await self.accounts.achange_password(session, old_password, new_password)
+        except AuthenticationError as exc:
+            raise ValueError("当前密码不正确") from exc
+
+    async def alist_clients(self, token: str, **options):
+        account = self.accounts.account_for_session(self._session(token))
+        if self.clients is None:
+            return [] if options.get("limit") is None else {"clients": [], "total": 0, "next_cursor": None}
+        return await self.accounts.metadata.run_in_thread(self.clients.list_clients, owner_user_id=account.id, **options)
+
+    async def alist_public(self, token: str, **options):
+        scope = self._scope(token)
+        return await self.objects.metadata.run_in_thread(self._list_public_scope, scope, **options)
+
+    async def alist_trash(self, token: str, **options):
+        scope = self._scope(token)
+        return await self.objects.metadata.run_in_thread(self._list_trash_scope, scope, **options)
 
     def logout(self, token: str) -> None:
         self.accounts.sessions.require(token)
@@ -490,12 +582,19 @@ class UserApi:
         return {"hit": True, **self._object_json(item)}
 
     def set_public(self, token: str, csrf: str, paths: list[str], public: bool,
-                   options: dict[str, object] | None = None) -> list[dict[str, object]]:
+                   options: dict[str, object] | None = None, *, password_hash=ObjectService._UNSET) -> list[dict[str, object]]:
         """开启/关闭公开分享；options 可包含 expires_at（时间戳或 None）与 password（字符串，空为取消）。"""
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
-        return [self._object_json(apply_share(self.objects, Scope(account.bucket_id), normalize_user_path(path), public, options))
+        return [self._object_json(apply_share(self.objects, Scope(account.bucket_id), normalize_user_path(path), public, options, password_hash=password_hash))
                 for path in paths]
+
+    async def aset_public(self, token: str, csrf: str, paths: list[str], public: bool, options=None):
+        self._scope(token, csrf=csrf, mutation=True)
+        encoded = ObjectService._UNSET
+        if public and options and options.get("password"):
+            encoded = await self.accounts.password_work.run(hash_password, str(options["password"]), min_length=4)
+        return self.set_public(token, csrf, paths, public, options, password_hash=encoded)
 
     def _scope(self, token: str, *, csrf: str | None = None, mutation: bool = False) -> Scope:
         session = self._session(token, csrf=csrf, mutation=mutation)
@@ -504,12 +603,15 @@ class UserApi:
     # ---------- 回收站 ----------
 
     def list_trash(self, token: str, *, limit: int | None = None, cursor: str = "") -> dict[str, object]:
-        scope = self._scope(token)
+        return self._list_trash_scope(self._scope(token), limit=limit, cursor=cursor)
+
+    def _list_trash_scope(self, scope: Scope, *, limit: int | None = None, cursor: str = ""):
         if limit is not None:
             limit = max(1, min(limit, 200))
             where, args = "bucket_id=?", [scope.bucket_id]
-            totals = self.objects.metadata.db.execute(
-                "SELECT COUNT(*),COALESCE(SUM(size),0) FROM trash WHERE bucket_id=?", args).fetchone()
+            totals = self.objects.metadata.cached_read(("trash-total", scope.bucket_id),
+                lambda: tuple(self.objects.metadata.db.execute(
+                    "SELECT COUNT(*),COALESCE(SUM(size),0) FROM trash WHERE bucket_id=?", (scope.bucket_id,)).fetchone()))
             if cursor:
                 try:
                     deleted, entry_id = cursor.split("|", 1)
@@ -583,15 +685,17 @@ class UserApi:
         await self.objects.abort_multipart(self._scope(token, csrf=csrf, mutation=True), upload_id)
 
     def list_public(self, token: str, *, cursor: str = "", limit: int | None = None):
-        session = self._session(token)
-        account = self.accounts.account_for_session(session)
+        return self._list_public_scope(self._scope(token), cursor=cursor, limit=limit)
+
+    def _list_public_scope(self, scope: Scope, *, cursor: str = "", limit: int | None = None):
         if limit is None:
-            return [self._object_json(item) for item in self.objects.list_public(account.bucket_id)]
+            return [self._object_json(item) for item in self.objects.list_public(scope.bucket_id)]
         limit = max(1, min(limit, 200))
         condition = "bucket_id=? AND public_token IS NOT NULL AND substr(key,1,9)!='.tgdrive/'"
-        total = self.objects.metadata.db.execute(f"SELECT COUNT(*) FROM objects WHERE {condition}", (account.bucket_id,)).fetchone()[0]
+        total = self.objects.metadata.cached_read(("public-total", scope.bucket_id),
+            lambda: self.objects.metadata.db.execute(f"SELECT COUNT(*) FROM objects WHERE {condition}", (scope.bucket_id,)).fetchone()[0])
         rows = self.objects.metadata.db.execute(
-            f"SELECT * FROM objects WHERE {condition} AND key>? ORDER BY key LIMIT ?", (account.bucket_id, cursor, limit + 1)).fetchall()
+            f"SELECT * FROM objects WHERE {condition} AND key>? ORDER BY key LIMIT ?", (scope.bucket_id, cursor, limit + 1)).fetchall()
         return {"objects": [self._object_json(self.objects._object(row)) for row in rows[:limit]], "total": total,
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 

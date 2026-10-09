@@ -214,8 +214,8 @@ class KeyApi:
         return UserApi._object_json(item)
 
     def set_public(self, principal: KeyPrincipal, bucket: str | None, paths: list[str], public: bool,
-                   options: dict[str, object] | None = None):
+                   options: dict[str, object] | None = None, *, password_hash=ObjectService._UNSET):
         bucket_id = self._bucket(principal, bucket)
         keys = [normalize_user_path(path) for path in paths]
         scopes = [self._scope(principal, bucket_id, [key], write=True) for key in keys]
-        return [UserApi._object_json(apply_share(self.objects, scope, key, public, options)) for scope, key in zip(scopes, keys)]
+        return [UserApi._object_json(apply_share(self.objects, scope, key, public, options, password_hash=password_hash)) for scope, key in zip(scopes, keys)]

@@ -17,13 +17,17 @@ import re
 import secrets
 import sqlite3
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .audit import AuditLog
 from .blobengine import BlobEngine
 from .blobstore import BlobStore
-from .crypto import KdfParams, derive_kek, derive_subkey, open_sealed, seal, verify_check_blob
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+from .crypto import KdfParams, derive_kek, derive_subkey, open_sealed, verify_check_blob
 from .keystore import KeyStore
 from .metadata import Metadata
 
@@ -143,26 +147,27 @@ class Cleaner:
         self.metadata, self.upload_ttl, self.stale_blob_ttl = metadata, upload_ttl, stale_blob_ttl
 
     def _discard_blob(self, db, blob_uuid: str, now: float) -> None:
-        refs = [r[0] for r in db.execute("SELECT blob_ref FROM chunks WHERE blob_uuid=?", (blob_uuid,))]
-        db.executemany("INSERT INTO gc_queue(blob_ref,enqueued_at) VALUES(?,?)", ((ref, now) for ref in refs))
+        db.execute("INSERT INTO gc_queue(blob_ref,enqueued_at) SELECT blob_ref,? FROM chunks WHERE blob_uuid=?", (now, blob_uuid))
         db.execute("DELETE FROM blobs WHERE uuid=?", (blob_uuid,))
 
-    def run_once(self, *, now: float | None = None) -> CleanupReport:
-        now = now or time.time()
+    def run_once(self, *, now: float | None = None, limit: int = 500) -> CleanupReport:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        now = time.time() if now is None else now
         aborted = stale = expired = 0
         with self.metadata.transaction() as db:
-            for row in db.execute("SELECT upload_id, blob_uuid FROM uploads WHERE completed_at IS NULL AND last_activity < ?",
-                                  (now - self.upload_ttl,)).fetchall():
+            for row in db.execute("SELECT upload_id, blob_uuid FROM uploads WHERE completed_at IS NULL AND last_activity < ? ORDER BY last_activity LIMIT ?",
+                                  (now - self.upload_ttl, limit)).fetchall():
                 db.execute("DELETE FROM uploads WHERE upload_id=?", (row["upload_id"],))
                 self._discard_blob(db, row["blob_uuid"], now)
                 aborted += 1
             # 已完成的记录只用于幂等重试；过期后删除记录本身，Blob 由对象继续引用。
-            expired = db.execute("DELETE FROM uploads WHERE completed_at IS NOT NULL AND completed_at < ?",
-                                 (now - self.upload_ttl,)).rowcount
+            expired = db.execute("DELETE FROM uploads WHERE upload_id IN (SELECT upload_id FROM uploads WHERE completed_at IS NOT NULL AND completed_at < ? ORDER BY completed_at LIMIT ?)",
+                                 (now - self.upload_ttl, limit)).rowcount
             for row in db.execute(
                     "SELECT uuid FROM blobs b WHERE status='uploading' AND created_at < ? AND refcount = 0 "
-                    "AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.blob_uuid=b.uuid)",
-                    (now - self.stale_blob_ttl,)).fetchall():
+                    "AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.blob_uuid=b.uuid) ORDER BY created_at,uuid LIMIT ?",
+                    (now - self.stale_blob_ttl, limit)).fetchall():
                 self._discard_blob(db, row["uuid"], now)
                 stale += 1
         return CleanupReport(aborted, stale, expired)
@@ -177,32 +182,59 @@ class EncryptedSnapshotStore:
     def __init__(self, metadata: Metadata, keystore: KeyStore) -> None:
         self.metadata, self.keystore = metadata, keystore
 
-    def _plaintext(self) -> bytes:
-        with tempfile.TemporaryDirectory(prefix="tgdrive-snapshot-") as workdir:
-            plain_path = Path(workdir) / "meta.db"
-            target = sqlite3.connect(plain_path)
-            try:
-                with self.metadata._lock:  # backup 期间避免本地事务并发修改
-                    self.metadata.db.backup(target)
-                target.commit()
-            finally:
-                target.close()
-            return plain_path.read_bytes()
+    def _capture(self, target: sqlite3.Connection) -> tuple[dict, bytes]:
+        # WAL 读事务固定数据库版本；仅捕获版本和 KEK 时持锁，复制期间允许正常读写。
+        if self.metadata.path == ":memory:":
+            with self.keystore.consistency_lock:
+                row = dict(self.metadata.get_key_row())
+                kek = self.keystore.require_kek()
+                self.metadata.db.backup(target)
+                return row, kek
+        source = sqlite3.connect(self.metadata.path)
+        source.row_factory = sqlite3.Row
+        try:
+            with self.keystore.consistency_lock:
+                source.execute("BEGIN")
+                row = dict(source.execute("SELECT * FROM keys WHERE id=1").fetchone())
+                kek = self.keystore.require_kek()
+            source.backup(target, pages=256)
+            return row, kek
+        finally:
+            source.close()
 
     def create(self, destination: str | Path) -> Path:
-        """生成一个原子替换的加密 SQLite 快照，并返回最终路径。"""
+        """固定密钥与快照版本，分块加密并原子发布；继续使用兼容的 v2 格式。"""
         destination = Path(destination).expanduser()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        row = self.metadata.get_key_row()
-        header = json.dumps({"kdf_salt": base64.b64encode(row["kdf_salt"]).decode(), "kdf_params": json.loads(row["kdf_params"]),
-                             "key_version": row["version"], "created_at": time.time()}, separators=(",", ":")).encode()
-        sealed = seal(derive_subkey(self.keystore.require_kek(), "snapshot"), self._plaintext(), self.AAD + header)
-        payload = self.MAGIC_V2 + len(header).to_bytes(4, "big") + header + sealed
         temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(6)}.tmp")
-        temporary.write_bytes(payload)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, destination)
-        return destination
+        try:
+            with tempfile.TemporaryDirectory(prefix="tgdrive-snapshot-") as workdir:
+                plain_path = Path(workdir) / "meta.db"
+                target = sqlite3.connect(plain_path)
+                try:
+                    row, kek = self._capture(target)
+                finally:
+                    target.close()
+                header = json.dumps({"kdf_salt": base64.b64encode(row["kdf_salt"]).decode(),
+                                     "kdf_params": json.loads(row["kdf_params"]), "key_version": row["version"],
+                                     "created_at": time.time()}, separators=(",", ":")).encode()
+                nonce = os.urandom(12)
+                encryptor = Cipher(algorithms.AES(derive_subkey(kek, "snapshot")), modes.GCM(nonce)).encryptor()
+                encryptor.authenticate_additional_data(self.AAD + header)
+                # 创建时即限制权限，避免写完之前存在可读窗口。
+                with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+                    output.write(self.MAGIC_V2 + len(header).to_bytes(4, "big") + header + nonce)
+                    with plain_path.open("rb") as source:
+                        while chunk := source.read(1024 * 1024):
+                            output.write(encryptor.update(chunk))
+                    output.write(encryptor.finalize())
+                    output.write(encryptor.tag)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, destination)
+            return destination
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @classmethod
     def _parse(cls, payload: bytes) -> tuple[dict | None, bytes, bytes]:
@@ -232,16 +264,69 @@ class EncryptedSnapshotStore:
         except Exception as exc:
             raise ValueError("加密口令不正确，或备份文件已损坏") from exc
 
+    @classmethod
+    def decrypt_to(cls, snapshot: str | Path, destination: str | Path, passphrase: str,
+                   *, kind: str | None = None) -> None:
+        """分块解密至新的临时文件；认证失败不留下部分明文。"""
+        destination = Path(destination)
+        created = False
+        try:
+            with Path(snapshot).open("rb") as source:
+                if source.read(len(cls.MAGIC_V2)) != cls.MAGIC_V2:
+                    raise ValueError("备份不包含密钥参数，无法仅凭口令恢复")
+                header_size = int.from_bytes(source.read(4), "big")
+                if not 0 < header_size <= 65536:
+                    raise ValueError("备份头部损坏")
+                header_bytes = source.read(header_size)
+                header = json.loads(header_bytes)
+                if header.get("kind") != kind:
+                    raise ValueError("归档类型与操作不匹配")
+                kek = derive_kek(passphrase, base64.b64decode(header["kdf_salt"]), KdfParams(**header["kdf_params"]))
+                nonce = source.read(12)
+                start = source.tell()
+                source.seek(0, os.SEEK_END)
+                remaining = source.tell() - start - 16
+                if remaining < 0:
+                    raise ValueError("备份文件已截断")
+                source.seek(-16, os.SEEK_END)
+                decryptor = Cipher(algorithms.AES(derive_subkey(kek, "snapshot")), modes.GCM(nonce, source.read(16))).decryptor()
+                decryptor.authenticate_additional_data(cls.AAD + header_bytes)
+                source.seek(start)
+                descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                created = True
+                with os.fdopen(descriptor, "wb") as output:
+                    while remaining:
+                        chunk = source.read(min(remaining, 1024 * 1024))
+                        if not chunk:
+                            raise ValueError("备份文件已截断")
+                        output.write(decryptor.update(chunk))
+                        remaining -= len(chunk)
+                    output.write(decryptor.finalize())
+                    output.flush()
+                    os.fsync(output.fileno())
+        except FileExistsError:
+            raise
+        except Exception as exc:
+            if created:
+                destination.unlink(missing_ok=True)
+            raise ValueError("加密口令不正确，或备份文件已损坏") from exc
+
 
 class BackupService:
-    NAME = re.compile(r"tgdrive-\d{8}-\d{6}\.tgdbak")
+    NAME = re.compile(r"tgdrive-\d{8}-\d{6}(?:-\d+)?\.tgdbak")
 
     def __init__(self, snapshots: EncryptedSnapshotStore, directory: str | Path, *, keep: int = 14) -> None:
         self.snapshots, self.directory, self.keep = snapshots, Path(directory), keep
+        self._lock = threading.Lock()
 
     def create(self) -> dict[str, object]:
+        # 手动与定时备份串行发布和保留，避免同时清理对方刚生成的文件。
+        with self._lock:
+            return self._create()
+
+    def _create(self) -> dict[str, object]:
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        path = self.snapshots.create(self.directory / f"tgdrive-{stamp}.tgdbak")
+        path = self.snapshots.create(self.directory / f"tgdrive-{stamp}-{time.time_ns()}.tgdbak")
         for old in self.list()[self.keep:]:
             (self.directory / str(old["name"])).unlink(missing_ok=True)
         return {"name": path.name, "size": path.stat().st_size, "created_at": path.stat().st_mtime}
@@ -264,12 +349,11 @@ def restore_backup(backup: str | Path, passphrase: str, data_dir: str | Path) ->
 
     必须在服务停止时执行。
     """
-    plaintext = EncryptedSnapshotStore.open_with_passphrase(backup, passphrase)
     data_dir = Path(data_dir).expanduser().resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
     staging = data_dir / f".restore-{secrets.token_hex(6)}.db"
-    staging.write_bytes(plaintext)
     try:
+        EncryptedSnapshotStore.decrypt_to(backup, staging, passphrase)
         check = sqlite3.connect(staging)
         try:
             if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -293,8 +377,12 @@ class MaintenanceService:
     STATUS_KEY = "maintenance.last"
 
     def __init__(self, metadata: Metadata, engine: BlobEngine, store: BlobStore, keystore: KeyStore,
-                 *, backup_dir: str | Path | None = None) -> None:
+                 *, backup_dir: str | Path | None = None, audit_retention_days: int = 0) -> None:
+        if audit_retention_days < 0:
+            raise ValueError("审计保留天数不能为负数")
         self.metadata, self.keystore = metadata, keystore
+        self.audit_retention_days = audit_retention_days
+        self.audit_directory = Path(metadata.path).parent / "audit-archives"
         self.gc = GarbageCollector(metadata, store)
         self.scrub = Scrubber(metadata, engine)
         self.cleaner = Cleaner(metadata)
@@ -337,6 +425,10 @@ class MaintenanceScheduler:
             ("cleanup", lambda: self._cleanup(now)),
             ("gc", lambda: self._gc()),
         ]
+        if self.service.audit_retention_days:
+            steps.append(("audit_archive", lambda: self.service.metadata.run_in_thread(
+                AuditLog(self.service.metadata).archive, self.service.audit_directory, self.service.keystore,
+                days=self.service.audit_retention_days, now=now)))
         if self.service.trash_purger is not None:
             steps.append(("trash", lambda: self._purge(now)))
         if self._due("scrub", self.scrub_every, now):
@@ -354,7 +446,7 @@ class MaintenanceScheduler:
         return done
 
     async def _cleanup(self, now: float) -> dict[str, object]:
-        return asdict(self.service.cleaner.run_once(now=now))
+        return asdict(await self.service.metadata.run_in_thread(self.service.cleaner.run_once, now=now))
 
     async def _gc(self) -> dict[str, object]:
         return asdict(await self.service.gc.run_once(limit=500))

@@ -26,7 +26,8 @@ from .telegram.config import ConfiguredBlobStore, TelegramBotConfigStore
 def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None = None,
                s3_host: str | None = None, secure_cookies: bool = True,
                public_base_url: str | None = None, s3_endpoint: str | None = None,
-               run_scheduler: bool = True) -> TgDriveASGI:
+               run_scheduler: bool = True, transfer_concurrency: int = 4, bucket_concurrency: int = 2,
+               audit_retention_days: int = 0) -> TgDriveASGI:
     root = Path(data_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     if not os.access(root, os.W_OK | os.X_OK):
@@ -38,13 +39,15 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     telegram_bots = TelegramBotConfigStore(metadata, keystore)
     local_store = LocalDiskBlobStore(root / "blobs")
     store = ConfiguredBlobStore(metadata, keystore, local_store, telegram_bots)
-    engine = BlobEngine(metadata, store, keystore=keystore)
+    engine = BlobEngine(metadata, store, keystore=keystore,
+                        transfer_concurrency=transfer_concurrency, bucket_concurrency=bucket_concurrency)
     objects = ObjectService(metadata, engine)
     accounts = AccountService(metadata, keystore)
     clients = ClientAuthStore(metadata, keystore=keystore)
     s3 = S3Gateway(objects, clients)
     metrics = TrafficMetrics()
-    maintenance = MaintenanceService(metadata, engine, store, keystore, backup_dir=root / "backups")
+    maintenance = MaintenanceService(metadata, engine, store, keystore, backup_dir=root / "backups",
+                                     audit_retention_days=audit_retention_days)
     maintenance.trash_purger = objects.purge_expired_trash  # 回收站条目保留 30 天后自动永久删除
     context = AppContext(metadata, keystore, engine, accounts, objects, clients, s3, maintenance,
                          telegram_bots, store, SystemSettings(metadata, {"public_base_url": public_base_url, "s3_endpoint": s3_endpoint}), metrics)
@@ -83,10 +86,37 @@ def restore_main(argv: list[str]) -> None:
     print(f"已恢复到 {target}。原数据库已保留为 meta.db.before-restore-*。启动服务后用备份时的口令解锁。")
 
 
+def audit_export_main(argv: list[str]) -> None:
+    """导出加密审计归档；不读取或修改在线数据库。"""
+    import secrets
+    from .maintenance import EncryptedSnapshotStore
+    parser = argparse.ArgumentParser(description="导出加密审计归档为 JSONL")
+    parser.add_argument("archive")
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args(argv)
+    target = Path(args.output).expanduser().resolve()
+    if target.exists():
+        raise SystemExit("输出文件已经存在，请使用新的文件名")
+    staging = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+    passphrase = getpass.getpass("归档时的加密口令：")
+    try:
+        EncryptedSnapshotStore.decrypt_to(args.archive, staging, passphrase, kind="audit-jsonl")
+        # 硬链接原子发布且拒绝覆盖已有文件。
+        os.link(staging, target)
+    except (ValueError, OSError) as exc:
+        raise SystemExit(f"导出失败：{exc}") from exc
+    finally:
+        staging.unlink(missing_ok=True)
+    print(f"已导出到 {target}")
+
+
 def main() -> None:
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "restore":
         restore_main(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "audit-export":
+        audit_export_main(sys.argv[2:])
         return
     parser = argparse.ArgumentParser(description="启动 tgdrive ASGI 服务")
     parser.add_argument("--data-dir", default=os.environ.get("TGDRIVE_DATA_DIR", "./data"))
@@ -103,6 +133,10 @@ def main() -> None:
                         help="信任 X-Forwarded-For/Proto 的代理 IP 或网段，逗号分隔；留空使用 Uvicorn 默认值")
     parser.add_argument("--insecure-cookies", action="store_true",
                         default=os.environ.get("TGDRIVE_INSECURE_COOKIES", "0") == "1")
+    parser.add_argument("--transfer-concurrency", type=int, default=int(os.environ.get("TGDRIVE_TRANSFER_CONCURRENCY", "4")))
+    parser.add_argument("--bucket-concurrency", type=int, default=int(os.environ.get("TGDRIVE_BUCKET_CONCURRENCY", "2")))
+    parser.add_argument("--audit-retention-days", type=int, default=int(os.environ.get("TGDRIVE_AUDIT_RETENTION_DAYS", "0")),
+                        help="审计日志归档期限；0 为永久保留，正数表示归档指定天数以前的记录")
     args = parser.parse_args()
     try:
         import uvicorn
@@ -116,7 +150,8 @@ def main() -> None:
         uvicorn_options["forwarded_allow_ips"] = args.forwarded_allow_ips
     uvicorn.run(create_app(args.data_dir, static_dir=args.static_dir, s3_host=args.s3_host,
                            secure_cookies=not args.insecure_cookies, public_base_url=args.public_url,
-                           s3_endpoint=args.s3_endpoint), **uvicorn_options)
+                           s3_endpoint=args.s3_endpoint, transfer_concurrency=args.transfer_concurrency,
+                           bucket_concurrency=args.bucket_concurrency, audit_retention_days=args.audit_retention_days), **uvicorn_options)
 
 
 if __name__ == "__main__":

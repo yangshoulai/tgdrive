@@ -51,28 +51,39 @@ export function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error && reason.message ? reason.message : fallback;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 30000): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type") && !(init.body instanceof Blob)) headers.set("Content-Type", "application/json");
   if (csrfToken && init.method && init.method !== "GET") headers.set("X-CSRF-Token", csrfToken);
-  let response: Response;
+  const controller = new AbortController();
+  let timedOut = false;
+  const cancel = () => controller.abort();
+  init.signal?.addEventListener("abort", cancel, { once: true });
+  if (init.signal?.aborted) controller.abort();
+  const timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   try {
-    response = await fetch(path, { ...init, credentials: "include", headers });
-  } catch {
+    const response = await fetch(path, { ...init, signal: controller.signal, credentials: "include", headers });
+    if (!response.ok) {
+      let message = `请求失败（${response.status}）`;
+      let code = "request_failed";
+      try { const body = await response.json(); message = body.error?.message ?? message; code = body.error?.code ?? code; } catch { /* 保留状态码 */ }
+      if (response.status === 401 && path.startsWith("/api/") && !path.endsWith("/login")) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
+      throw new ApiError(message, response.status, code);
+    }
+    if (response.status === 204) return undefined as T;
+    return await response.json() as T;
+  } catch (reason) {
+    if (timedOut) throw new ApiError("请求超时，请稍后重试", 0, "request_timeout");
+    if (init.signal?.aborted) throw new ApiError("请求已取消", 0, "request_aborted");
+    if (reason instanceof ApiError) throw reason;
     throw new ApiError("无法连接到服务器，请检查网络后重试", 0, "network_error");
+  } finally {
+    window.clearTimeout(timer);
+    init.signal?.removeEventListener("abort", cancel);
   }
-  if (!response.ok) {
-    let message = `请求失败（${response.status}）`;
-    let code = "request_failed";
-    try { const body = await response.json(); message = body.error?.message ?? message; code = body.error?.code ?? code; } catch { /* 保留状态码 */ }
-    if (response.status === 401 && path.startsWith("/api/") && !path.endsWith("/login")) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
-    throw new ApiError(message, response.status, code);
-  }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
 }
 
-const post = <T>(path: string, body?: unknown) => request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+const post = <T>(path: string, body?: unknown, timeoutMs?: number) => request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs);
 
 /* ---------- 会话 ---------- */
 
@@ -135,7 +146,7 @@ export const instantUpload = (path: string, size: number, fingerprint: string, c
   post<InstantResult>("/api/user/v1/files/instant", { path, size, fingerprint, content_type: contentType || undefined, ...(isPublic === undefined ? {} : { public: isPublic }) });
 export const createUpload = (path: string, contentType: string) => post<{ upload_id: string; part_size: number }>("/api/user/v1/uploads", { path, content_type: contentType });
 export const getUpload = (id: string) => request<UploadState>(`/api/user/v1/uploads/${id}`);
-export const completeUpload = (id: string, parts: [number, string][], isPublic?: boolean) => post<FileItem>(`/api/user/v1/uploads/${id}/complete`, { parts, ...(isPublic === undefined ? {} : { public: isPublic }) });
+export const completeUpload = (id: string, parts: [number, string][], isPublic?: boolean) => post<FileItem>(`/api/user/v1/uploads/${id}/complete`, { parts, ...(isPublic === undefined ? {} : { public: isPublic }) }, 15 * 60000);
 export const abortUpload = (id: string) => request<void>(`/api/user/v1/uploads/${id}`, { method: "DELETE" });
 export const listPublic = () => request<FileItem[]>("/api/user/v1/public");
 export const listPublicPage = (cursor: string | null = null, limit = 50) => request<{ objects: FileItem[]; total: number; next_cursor: string | null }>(
@@ -146,17 +157,22 @@ export type UploadProgress = { loaded: number; total: number; percent: number };
 /** 用 XHR 上传一个请求体以获得进度；文件体直接流向服务端，不在前端复制。返回的 abort 可取消该请求。 */
 function xhrPut<T>(url: string, body: Blob, contentType: string, onProgress: (progress: UploadProgress) => void): { promise: Promise<T>; abort: () => void } {
   const xhr = new XMLHttpRequest();
+  let timer: number | undefined;
+  let timedOut = false;
+  const touch = () => { window.clearTimeout(timer); timer = window.setTimeout(() => { timedOut = true; xhr.abort(); }, 5 * 60000); };
   const promise = new Promise<T>((resolve, reject) => {
     xhr.open("PUT", url);
     xhr.withCredentials = true;
     xhr.setRequestHeader("Content-Type", contentType);
     if (csrfToken) xhr.setRequestHeader("X-CSRF-Token", csrfToken);
+    xhr.onprogress = touch;
     xhr.upload.onprogress = event => {
+      touch();
       const total = event.lengthComputable ? event.total : body.size;
       onProgress({ loaded: event.loaded, total, percent: total ? Math.min(100, event.loaded / total * 100) : 0 });
     };
     xhr.onerror = () => reject(new ApiError("网络连接中断，请重试", 0, "network_error"));
-    xhr.onabort = () => reject(new ApiError("已取消上传", 0, "upload_aborted"));
+    xhr.onabort = () => reject(new ApiError(timedOut ? "上传长时间无响应，请重试" : "已取消上传", 0, timedOut ? "request_timeout" : "upload_aborted"));
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress({ loaded: body.size, total: body.size, percent: 100 });
@@ -168,9 +184,10 @@ function xhrPut<T>(url: string, body: Blob, contentType: string, onProgress: (pr
       if (xhr.status === 401) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
       reject(new ApiError(message, xhr.status, code));
     };
+    touch();
     xhr.send(body);
   });
-  return { promise, abort: () => xhr.abort() };
+  return { promise: promise.finally(() => window.clearTimeout(timer)), abort: () => xhr.abort() };
 }
 
 export function uploadFileWithProgress(path: string, file: File, options: { isPublic?: boolean; onProgress: (progress: UploadProgress) => void }): { promise: Promise<FileItem>; abort: () => void } {
@@ -225,7 +242,7 @@ export const publicPath = (token: string, name: string, download = false, access
 
 /* ---------- 管理端 ---------- */
 
-export const adminSettings = () => request<SystemSettings>("/api/admin/v1/settings");
+export const adminSettings = (signal?: AbortSignal) => request<SystemSettings>("/api/admin/v1/settings", { signal });
 export const updateAdminSettings = async (values: Partial<Record<keyof SiteConfig, string>>) => {
   const result = await post<SystemSettings>("/api/admin/v1/settings", values);
   setSiteConfig({ public_base_url: result.public_base_url.effective, s3_endpoint: result.s3_endpoint.effective });
@@ -244,14 +261,14 @@ export const adminUnlock = (passphrase: string) => post<SystemStatus>("/api/admi
 export const adminLock = () => post<void>("/api/admin/v1/lock");
 export const adminUsers = () => request<Account[]>("/api/admin/v1/users");
 export type AccountSummary = { total: number; active: number; user_total: number; used_bytes: number; top_users: Account[]; near_quota: Account[] };
-export const adminUserSummary = () => request<AccountSummary>("/api/admin/v1/users/summary");
+export const adminUserSummary = (signal?: AbortSignal) => request<AccountSummary>("/api/admin/v1/users/summary", { signal });
 export const adminUsersPage = (cursor: string | null, q = "", status = "") => request<{ users: Account[]; total: number; next_cursor: number | null }>(
   `/api/admin/v1/users?limit=50&q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const createAdminUser = (username: string, password: string, quotaBytes: number | null) => post<{ id: number; username: string; bucket_id: number; quota_bytes: number | null }>("/api/admin/v1/users", { username, password, quota_bytes: quotaBytes });
 export const setAdminUserStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/users/${id}/status`, { status });
 export const resetAdminUserPassword = (id: number, password: string) => post<void>(`/api/admin/v1/users/${id}/password`, { password });
 export const deleteAdminUser = (id: number, confirm: string) => post<{ username: string; deleted_objects: number }>(`/api/admin/v1/users/${id}/delete`, { confirm });
-export const changePassphrase = (oldPassphrase: string, newPassphrase: string) => post<{ key_version: number; rewrapped_files: number }>("/api/admin/v1/passphrase", { old_passphrase: oldPassphrase, new_passphrase: newPassphrase });
+export const changePassphrase = (oldPassphrase: string, newPassphrase: string) => post<{ key_version: number; rewrapped_files: number }>("/api/admin/v1/passphrase", { old_passphrase: oldPassphrase, new_passphrase: newPassphrase }, 15 * 60000);
 export type MaintenanceTask = { at: number; error?: string; [key: string]: unknown };
 export type MaintenanceStatus = { gc_pending: number; gc_dead: number; cleanup?: MaintenanceTask; gc?: MaintenanceTask; scrub?: MaintenanceTask; backup?: MaintenanceTask; trash?: MaintenanceTask };
 export const maintenanceStatus = () => request<MaintenanceStatus>("/api/admin/v1/maintenance/status");
@@ -259,7 +276,7 @@ export const runCleanup = () => post<{ aborted_uploads: number; stale_blobs: num
 export const retryDeadGc = () => post<{ requeued: number }>("/api/admin/v1/maintenance/gc/retry");
 export type Backup = { name: string; size: number; created_at: number };
 export const listBackups = () => request<Backup[]>("/api/admin/v1/backups");
-export const createBackup = () => post<Backup>("/api/admin/v1/backups");
+export const createBackup = () => post<Backup>("/api/admin/v1/backups", undefined, 15 * 60000);
 export const backupUrl = (name: string) => `/api/admin/v1/backups/${encodeURIComponent(name)}`;
 export const setAdminUserQuota = (id: number, quotaBytes: number | null) => post<void>(`/api/admin/v1/users/${id}/quota`, { quota_bytes: quotaBytes });
 export const adminClients = () => request<AdminClient[]>("/api/admin/v1/clients");
@@ -267,22 +284,22 @@ export const adminClientsPage = (cursor: string | null) => request<ClientPage>(`
 export const deleteAdminClient = (id: number) => post<void>(`/api/admin/v1/clients/${id}/delete`);
 export const setAdminClientStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/clients/${id}/status`, { status });
 export const disableAdminKey = (accessKeyId: string) => post<void>("/api/admin/v1/client-keys/disable", { access_key_id: accessKeyId });
-export const adminBots = () => request<BotConfig[]>("/api/admin/v1/bots");
+export const adminBots = (signal?: AbortSignal) => request<BotConfig[]>("/api/admin/v1/bots", { signal });
 export const createAdminBot = (name: string, token: string, channelId: string) => post<BotConfig>("/api/admin/v1/bots", { name, token, channel_id: channelId });
 export const checkAdminBot = (id: number) => post<{ id: number; ok: boolean; status: string }>(`/api/admin/v1/bots/${id}/check`);
 export const setAdminBotStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/bots/${id}/status`, { status });
 export type AdminObjectPage = { objects: AdminObject[]; next_cursor: string | null; total: number; public_total: number };
-export const adminObjects = (options: { q?: string; publicOnly?: boolean; cursor?: string | null; limit?: number } = {}) => {
+export const adminObjects = (options: { q?: string; publicOnly?: boolean; cursor?: string | null; limit?: number } = {}, signal?: AbortSignal) => {
   const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
   if (options.q) params.set("q", options.q);
   if (options.publicOnly) params.set("public", "1");
   if (options.cursor) params.set("cursor", options.cursor);
-  return request<AdminObjectPage>(`/api/admin/v1/objects?${params}`);
+  return request<AdminObjectPage>(`/api/admin/v1/objects?${params}`, { signal });
 };
 export const setAdminObjectPublic = (bucketId: number, path: string, isPublic: boolean) => post<FileItem>("/api/admin/v1/objects/public", { bucket_id: bucketId, path, public: isPublic });
 export const adminContentUrl = (bucketId: number, path: string, download = false) => `/api/admin/v1/content?bucket_id=${bucketId}&path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
-export const runAdminGc = (limit = 100) => post<{ processed: number; deleted: number; failed: number; dead: number }>("/api/admin/v1/maintenance/gc", { limit });
-export const runAdminScrub = (limit = 100, deep = false) => post<{ checked: number; wrapped: boolean; bad: { blob_uuid: string; chunks: [number, number][] }[] }>("/api/admin/v1/maintenance/scrub", { limit, deep });
+export const runAdminGc = (limit = 100) => post<{ processed: number; deleted: number; failed: number; dead: number }>("/api/admin/v1/maintenance/gc", { limit }, 15 * 60000);
+export const runAdminScrub = (limit = 100, deep = false) => post<{ checked: number; wrapped: boolean; bad: { blob_uuid: string; chunks: [number, number][] }[] }>("/api/admin/v1/maintenance/scrub", { limit, deep }, 15 * 60000);
 
 /* ---------- 站点地址 ---------- */
 

@@ -90,6 +90,30 @@ class TelegramPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(flaky.cooldown_until, 0)
         self.assertEqual(good.failures, 0)
 
+    async def test_all_bots_cooling_waits_until_available(self):
+        bot = PoolBot("cooling", TelegramClient(TOKEN_A, transport=self.transport), "-1001", cooldown_until=130)
+        pool = BotPool([bot], min_interval=1)
+        with mock.patch("tgdrive.telegram.pool.time.monotonic", return_value=100), mock.patch("tgdrive.telegram.pool.asyncio.sleep", new_callable=mock.AsyncMock) as sleep:
+            self.assertIs(await pool.acquire_for_upload(), bot)
+            sleep.assert_awaited_once_with(30)
+
+    async def test_download_retries_transient_failure(self):
+        client = TelegramClient(TOKEN_A, transport=self.transport)
+        store = TelegramBlobStore(BotPool([PoolBot("main", client, "-1001")], min_interval=0))
+        ref = await store.put("file", b"keep range")
+        download = client.download_file
+        calls = 0
+        async def flaky(*args):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return HttpResponse(502, {}, b"")
+            return await download(*args)
+        with mock.patch.object(client, "download_file", side_effect=flaky), mock.patch("tgdrive.telegram.store.asyncio.sleep", new_callable=mock.AsyncMock) as sleep:
+            self.assertEqual(await store.get(ref, 0, 4), b"keep")
+            self.assertEqual(calls, 3)
+            self.assertEqual(sleep.await_count, 2)
+
     async def test_health_check_records_status(self):
         bot = self.config.create("main", TOKEN_A, "-1001234567")
 

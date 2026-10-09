@@ -42,12 +42,15 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 11
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
         self._lock = threading.RLock()
         self._thread = threading.local()
+        self._cache_lock = threading.Lock()
+        self._read_cache: dict[tuple, tuple[float, object]] = {}
+        self._revision = 0
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
@@ -250,6 +253,38 @@ class Metadata:
                 )
                 db.execute("PRAGMA user_version = 10")
 
+            if version < 11:
+                self._schema(
+                    """
+                    CREATE INDEX IF NOT EXISTS objects_admin_page ON objects(modified_at DESC,bucket_id DESC,key DESC)
+                        WHERE substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/';
+                    CREATE INDEX IF NOT EXISTS objects_public_bucket ON objects(bucket_id,key) WHERE public_token IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS client_keys_by_client ON client_keys(client_id,access_key_id);
+                    CREATE INDEX IF NOT EXISTS trash_page ON trash(bucket_id,deleted_at DESC,id DESC);
+                    CREATE INDEX IF NOT EXISTS audit_failed_page ON audit_log(id DESC) WHERE ok=0;
+                    CREATE INDEX IF NOT EXISTS audit_archive_age ON audit_log(ts,id);
+                    CREATE INDEX IF NOT EXISTS uploads_activity ON uploads(last_activity) WHERE completed_at IS NULL;
+                    CREATE INDEX IF NOT EXISTS uploads_completed ON uploads(completed_at) WHERE completed_at IS NOT NULL
+                    """
+                )
+                db.execute("PRAGMA user_version = 11")
+
+    def cached_read(self, key: tuple, function, *, ttl: float = 2):
+        """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""
+        now = time.monotonic()
+        with self._cache_lock:
+            revision = self._revision
+            cached = self._read_cache.get(key)
+            if cached is not None and cached[0] > now:
+                return cached[1]
+        result = function()
+        with self._cache_lock:
+            if revision == self._revision:
+                if len(self._read_cache) >= 256:
+                    self._read_cache.pop(next(iter(self._read_cache)))
+                self._read_cache[key] = (now + ttl, result)
+        return result
+
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         with (nullcontext() if hasattr(self._thread, "db") else self._lock):
@@ -262,6 +297,9 @@ class Metadata:
                     self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
                 else:
                     self.db.commit()
+                    with self._cache_lock:
+                        self._revision += 1
+                        self._read_cache.clear()
             except BaseException:
                 if nested:
                     self.db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")

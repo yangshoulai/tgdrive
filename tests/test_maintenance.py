@@ -4,6 +4,12 @@ import json
 import tempfile
 import time
 import unittest
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
+
+from tgdrive.audit import AuditLog
 from pathlib import Path
 
 from tests.test_public_links import Client
@@ -137,6 +143,72 @@ class MaintenanceTests(unittest.TestCase):
         # 旧备份仍需旧口令恢复。
         old_backup = self.m.backups.path(self.m.backups.list()[0]["name"])
         self.assertTrue(EncryptedSnapshotStore.open_with_passphrase(old_backup, "encryption passphrase"))
+
+    def test_backup_keeps_pinned_version_during_rotation(self):
+        entered, release = threading.Event(), threading.Event()
+        connect = sqlite3.connect
+        class PinnedSource:
+            def __init__(self, connection):
+                object.__setattr__(self, "connection", connection)
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+            def __setattr__(self, name, value):
+                setattr(self.connection, name, value)
+            def backup(self, target, **options):
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("备份等待超时")
+                return self.connection.backup(target, **options)
+        def wrapped_connect(path, *args, **kwargs):
+            connection = connect(path, *args, **kwargs)
+            return PinnedSource(connection) if str(path) == self.app.metadata.path else connection
+        with mock.patch("tgdrive.maintenance.sqlite3.connect", side_effect=wrapped_connect), ThreadPoolExecutor() as executor:
+            pending = executor.submit(self.m.backups.create)
+            try:
+                self.assertTrue(entered.wait(5))
+                self.app.keystore.rotate("encryption passphrase", "new encryption passphrase")
+            finally:
+                release.set()
+            backup = pending.result(timeout=5)
+        path = self.m.backups.path(backup["name"])
+        header, _, _ = EncryptedSnapshotStore._parse(path.read_bytes())
+        plaintext = EncryptedSnapshotStore.open_with_passphrase(path, "encryption passphrase")
+        restored = self.root / "pinned.db"
+        restored.write_bytes(plaintext)
+        database = connect(restored)
+        try:
+            self.assertEqual(header["key_version"], database.execute("SELECT version FROM keys").fetchone()[0])
+            self.assertEqual(header["key_version"], 1)
+        finally:
+            database.close()
+
+    def test_backup_streams_and_names_do_not_collide(self):
+        with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("不应全量读取快照")):
+            first = self.m.backups.create()
+            second = self.m.backups.create()
+        self.assertNotEqual(first["name"], second["name"])
+        self.assertEqual(len(self.m.backups.list()), 2)
+
+    def test_cleanup_is_batched_and_audit_archive_is_recoverable(self):
+        for _ in range(3):
+            self.app.engine.begin_blob()
+        future = time.time() + 8 * 86400
+        self.assertEqual(self.m.cleaner.run_once(now=future, limit=2).stale_blobs, 2)
+        self.assertEqual(self.m.cleaner.run_once(now=future, limit=2).stale_blobs, 1)
+        audit = AuditLog(self.app.metadata)
+        for _ in range(3):
+            audit.record("admin.login", actor_type="admin", actor="admin", ok=True)
+        result = audit.archive(self.root / "archives", self.app.keystore, days=1, now=future, limit=2)
+        self.assertEqual(result["archived"], 2)
+        output = self.root / "export.jsonl"
+        EncryptedSnapshotStore.decrypt_to(self.root / "archives" / result["name"], output,
+                                          "encryption passphrase", kind="audit-jsonl")
+        self.assertEqual(len(output.read_text().splitlines()), 2)
+        self.assertEqual(len(audit.list()["events"]), 1)
+        with mock.patch("tgdrive.audit.os.replace", side_effect=OSError("模拟落盘失败")):
+            with self.assertRaises(OSError):
+                audit.archive(self.root / "archives", self.app.keystore, days=1, now=future)
+        self.assertEqual(len(audit.list()["events"]), 1)
 
     def test_password_management(self):
         admin = asyncio.run(self.client.login("admin", "admin", "admin password"))

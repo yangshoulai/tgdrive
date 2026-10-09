@@ -18,6 +18,7 @@ from .authn import (
 from .errors import NotFoundError, NotReadyError
 from .keystore import KeyStore
 from .metadata import Metadata
+from .work import PasswordWork
 
 
 @dataclass(frozen=True)
@@ -74,12 +75,13 @@ class AccountService:
     def __init__(self, metadata: Metadata, keystore: KeyStore, *, sessions: SessionManager | None = None) -> None:
         self.metadata, self.keystore = metadata, keystore
         self.sessions = sessions or SessionManager(store=MetadataSessionStore(metadata))
+        self.password_work = PasswordWork()
 
     def status(self) -> dict[str, object]:
         return {"initialized": self.keystore.is_initialized(), "unlocked": self.keystore.unlocked,
                 "user_count": self.metadata.db.execute("SELECT COUNT(*) FROM users").fetchone()[0]}
 
-    def setup(self, passphrase: str, username: str, password: str) -> Account:
+    def setup(self, passphrase: str, username: str, password: str, *, material=None, encoded=None) -> Account:
         if self.keystore.is_initialized() or self.metadata.db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
             raise NotReadyError("initial setup has already completed")
         self._validate_username(username)
@@ -88,11 +90,22 @@ class AccountService:
             raise ValueError("加密口令至少 12 个字符")
         try:
             with self.metadata.transaction():
-                self.keystore.initialize(passphrase)
-                return self._create_account(username, password, "admin")
+                self.keystore.initialize(passphrase, material=material)
+                return self._create_account(username, password, "admin", encoded=encoded)
         except BaseException:
             self.keystore.lock()
             raise
+
+    async def asetup(self, passphrase: str, username: str, password: str) -> Account:
+        self._validate_username(username)
+        if len(passphrase) < 12:
+            raise ValueError("加密口令至少 12 个字符")
+        if self.keystore.is_initialized():
+            raise NotReadyError("initial setup has already completed")
+        def calculate():
+            return self.keystore.initial_material(passphrase), hash_password(password)
+        material, encoded = await self.password_work.run(calculate)
+        return self.setup(passphrase, username, password, material=material, encoded=encoded)
 
     @staticmethod
     def _validate_username(username: str) -> None:
@@ -100,11 +113,11 @@ class AccountService:
             raise ValueError("用户名需要 2-64 位英文字母、数字、点、下划线或连字符")
 
     def _create_account(self, username: str, password: str, role: str,
-                        quota_bytes: int | None = None) -> Account:
+                        quota_bytes: int | None = None, *, encoded: str | None = None) -> Account:
         self._validate_username(username)
         if quota_bytes is not None and quota_bytes < 0:
             raise ValueError("quota must be non-negative")
-        password_hash = hash_password(password)
+        password_hash = encoded if encoded is not None else hash_password(password)
         now = time.time()
         with self.metadata.transaction() as db:
             if db.execute("SELECT 1 FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone() is not None:
@@ -139,12 +152,16 @@ class AccountService:
         if cursor < 0 or status not in ("", "active", "disabled") or len(query) > 256:
             raise ValueError("分页或筛选参数不合法")
         limit = max(1, min(limit, 200))
-        where, args = ["instr(lower(u.username),lower(?))>0"], [query.strip()]
+        where, args = ["1=1"], []
+        if query.strip():
+            where.append("instr(lower(u.username),lower(?))>0")
+            args.append(query.strip())
         if status:
             where.append("u.status=?")
             args.append(status)
         condition = " AND ".join(where)
-        total = self.metadata.db.execute(f"SELECT COUNT(*) FROM users u WHERE {condition}", args).fetchone()[0]
+        total = self.metadata.cached_read(("users-total", query.strip(), status),
+            lambda: self.metadata.db.execute(f"SELECT COUNT(*) FROM users u WHERE {condition}", args).fetchone()[0])
         rows = self.metadata.db.execute(
             "SELECT u.id,u.username,u.role,u.status,u.bucket_id,u.created_at,u.last_login_at,"
             "b.quota_bytes,COALESCE(b.used_bytes,0) AS used_bytes FROM users u LEFT JOIN buckets b ON b.id=u.bucket_id "
@@ -153,6 +170,9 @@ class AccountService:
                 "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None}
 
     def account_summary(self) -> dict[str, object]:
+        return self.metadata.cached_read(("account-summary",), self._account_summary)
+
+    def _account_summary(self) -> dict[str, object]:
         totals = self.metadata.db.execute(
             "SELECT COUNT(*) AS total,COALESCE(SUM(u.status='active'),0) AS active,"
             "COALESCE(SUM(u.role='user'),0) AS user_total,COALESCE(SUM(b.used_bytes),0) AS used_bytes "
@@ -197,30 +217,72 @@ class AccountService:
     # 单个 IP 在失败窗口内对所有用户名的失败总数上限（防止用一个密码批量尝试用户名）。
     MAX_FAILURES_PER_IP = 30
 
-    def login(self, username: str, password: str, *, role: str | None = None, ip: str | None = None, remember: bool = False) -> Session:
-        # 失败按“用户名 + 来源 IP”计数：别人从其他地址输错密码不会把真正的用户（尤其是管理员）锁在门外。
-        account_key = f"{username.lower()}|{ip or '-'}"
-        ip_key = f"ip:{ip}" if ip else None
-        if self.sessions.is_rate_limited(account_key) or (
-                ip_key and self.sessions.is_rate_limited(ip_key, limit=self.MAX_FAILURES_PER_IP)):
-            raise TooManyAttempts("too many login attempts")
+    def _login_failure(self, username: str, ip: str | None) -> None:
+        self.sessions.record_failure(f"{username.lower()}|{ip or '-'}")
+        if ip:
+            self.sessions.record_failure(f"ip:{ip}")
 
-        def fail() -> None:
-            self.sessions.record_failure(account_key)
-            if ip_key:
-                self.sessions.record_failure(ip_key)
+    def _login_row(self, username: str, role: str | None, ip: str | None):
+        account_key = f"{username.lower()}|{ip or '-'}"
+        if self.sessions.is_rate_limited(account_key) or (
+                ip and self.sessions.is_rate_limited(f"ip:{ip}", limit=self.MAX_FAILURES_PER_IP)):
+            raise TooManyAttempts("too many login attempts")
         try:
             row = self._row(username)
+            if row["status"] != "active" or (role is not None and row["role"] != role):
+                raise AuthenticationError("invalid credentials")
+            return row
         except AuthenticationError:
-            fail()
+            self._login_failure(username, ip)
             raise
-        if row["status"] != "active" or (role is not None and row["role"] != role) or not verify_password(password, row["password_hash"]):
-            fail()
+
+    def _finish_login(self, row, valid: bool, username: str, ip: str | None, remember: bool) -> Session:
+        current = self.metadata.db.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+        # 密码校验期间允许禁用、重置密码和锁定；旧结果不能生成新的有效会话。
+        if not valid or current is None or current["status"] != "active" or current["password_hash"] != row["password_hash"]:
+            self._login_failure(username, ip)
             raise AuthenticationError("invalid credentials")
-        self.sessions.clear_failures(account_key)
+        self.sessions.clear_failures(f"{username.lower()}|{ip or '-'}")
         with self.metadata.transaction() as db:
             db.execute("UPDATE users SET last_login_at=? WHERE id=?", (time.time(), row["id"]))
         return self.sessions.create(row["id"], row["username"], row["role"], remember=remember)
+
+    def login(self, username: str, password: str, *, role: str | None = None, ip: str | None = None, remember: bool = False) -> Session:
+        row = self._login_row(username, role, ip)
+        return self._finish_login(row, verify_password(password, row["password_hash"]), username, ip, remember)
+
+    async def alogin(self, username: str, password: str, *, role: str | None = None, ip: str | None = None, remember: bool = False) -> Session:
+        row = None
+        def prepare():
+            nonlocal row
+            row = self._login_row(username, role, ip)
+        valid = await self.password_work.run(lambda: verify_password(password, row["password_hash"]), before=prepare)
+        return self._finish_login(row, valid, username, ip, remember)
+
+    async def acreate_user(self, username: str, password: str, *, quota_bytes: int | None = None, authorize=None) -> Account:
+        self._validate_username(username)
+        encoded = await self.password_work.run(hash_password, password)
+        if authorize:
+            authorize()
+        return self._create_account(username, password, "user", quota_bytes, encoded=encoded)
+
+    async def areset_password(self, account_id: int, password: str, *, authorize=None) -> None:
+        encoded = await self.password_work.run(hash_password, password)
+        if authorize:
+            authorize()
+        self.reset_password(account_id, password, encoded=encoded)
+
+    async def achange_password(self, session: Session, old: str, new: str) -> None:
+        row = self.metadata.db.execute("SELECT password_hash FROM users WHERE id=?", (session.user_id,)).fetchone()
+        if row is None:
+            raise AuthenticationError("invalid password")
+        def calculate():
+            if not verify_password(old, row["password_hash"]):
+                raise AuthenticationError("invalid password")
+            return hash_password(new)
+        encoded = await self.password_work.run(calculate)
+        self.sessions.require(session.token)
+        self.change_password(session, old, new, encoded=encoded, expected_hash=row["password_hash"])
 
     def account_for_session(self, session: Session) -> Account:
         row = self.metadata.db.execute("SELECT * FROM users WHERE id=?", (session.user_id,)).fetchone()
@@ -230,21 +292,21 @@ class AccountService:
             raise AuthenticationError("account is disabled")
         return Account(row["id"], row["username"], row["role"], row["status"], row["bucket_id"])
 
-    def reset_password(self, account_id: int, new_password: str) -> None:
+    def reset_password(self, account_id: int, new_password: str, *, encoded: str | None = None) -> None:
         """管理员为用户设置新密码；该用户的全部会话立即失效。"""
         if len(new_password) < 8:
             raise ValueError("密码至少需要 8 个字符")
-        encoded = hash_password(new_password)
+        encoded = encoded if encoded is not None else hash_password(new_password)
         with self.metadata.transaction() as db:
             if db.execute("UPDATE users SET password_hash=? WHERE id=?", (encoded, account_id)).rowcount != 1:
                 raise NotFoundError("user not found")
         self.sessions.clear_user(account_id)
 
-    def change_password(self, session: Session, old_password: str, new_password: str) -> None:
+    def change_password(self, session: Session, old_password: str, new_password: str, *, encoded: str | None = None, expected_hash: str | None = None) -> None:
         row = self.metadata.db.execute("SELECT password_hash FROM users WHERE id=?", (session.user_id,)).fetchone()
-        if row is None or not verify_password(old_password, row["password_hash"]):
+        if row is None or (row["password_hash"] != expected_hash if encoded is not None else not verify_password(old_password, row["password_hash"])):
             raise AuthenticationError("invalid password")
-        encoded = hash_password(new_password)
+        encoded = encoded if encoded is not None else hash_password(new_password)
         with self.metadata.transaction() as db:
             db.execute("UPDATE users SET password_hash=? WHERE id=?", (encoded, session.user_id))
         # 改密码后其他设备上的登录（含“保持登录”的长期会话）一律失效，只保留当前这一个。

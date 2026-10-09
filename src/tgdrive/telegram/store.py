@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import OrderedDict
@@ -93,6 +94,17 @@ class TelegramBlobStore(BlobStore):
         return info.file_path
 
     async def get(self, ref_value: str, start: int | None = None, end: int | None = None) -> bytes:
+        for attempt in range(3):
+            try:
+                return await self._get_once(ref_value, start, end)
+            except (TelegramRateLimitError, TelegramTransientError, OSError) as exc:
+                if attempt == 2:
+                    raise
+                delay = exc.retry_after if isinstance(exc, TelegramRateLimitError) else 2 ** attempt
+                await asyncio.sleep(max(0, delay))
+        raise AssertionError("unreachable")
+
+    async def _get_once(self, ref_value: str, start: int | None = None, end: int | None = None) -> bytes:
         try:
             ref = TelegramRef.decode(ref_value)
             bot = self.pool.get(ref.bot)

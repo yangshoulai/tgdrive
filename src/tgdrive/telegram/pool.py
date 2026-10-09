@@ -66,7 +66,7 @@ class BotPool:
             else:
                 # 全部处于冷却时退化为尝试最早恢复的那个，而不是直接拒绝上传。
                 bot = min(enabled, key=lambda item: item.cooldown_until)
-            scheduled = max(now, bot.last_sent_at + self.min_interval)
+            scheduled = max(now, bot.cooldown_until, bot.last_sent_at + self.min_interval)
             # 先预留发送时刻再释放锁，不能因为某个频道限速而阻塞其他 Bot。
             bot.last_sent_at = scheduled
         if scheduled > now:

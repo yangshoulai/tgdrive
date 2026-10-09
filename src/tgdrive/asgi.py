@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import secrets
+import traceback
 import re
 import time
 from pathlib import Path
@@ -10,7 +13,7 @@ from urllib.parse import parse_qs, quote
 
 from .api import AdminApi, UserApi
 from .audit import AuditLog
-from .authn import AuthenticationError, CsrfError, SessionExpired, TooManyAttempts, verify_password
+from .authn import AuthenticationError, CsrfError, SessionExpired, TooManyAttempts, hash_password, verify_password
 from .context import AppContext
 from .errors import (
     IntegrityError,
@@ -26,6 +29,10 @@ from .objects import Scope
 from .settings import SystemSettings
 from .share import ShareAccess
 from .static import StaticFiles
+from .work import WorkBusyError
+
+
+log = logging.getLogger("tgdrive.http")
 
 
 class InvalidRange(ValueError):
@@ -107,11 +114,14 @@ class TgDriveASGI(StaticFiles):
         host = headers.get("host", "localhost").split(":", 1)[0].lower()
         query = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
         started = False
+        request_id = secrets.token_hex(8)
+        request_start = time.monotonic()
 
         async def tracked_send(message):
             nonlocal started
             if message["type"] == "http.response.start":
                 started = True
+                message["headers"] = [*message.get("headers", []), (b"x-request-id", request_id.encode())]
             elif message["type"] == "http.response.body" and self.metrics is not None:
                 self.metrics.record_out(len(message.get("body", b"")))
             await send(message)
@@ -154,7 +164,13 @@ class TgDriveASGI(StaticFiles):
                 url = f"{scheme}://{host}{path}" + (f"?{query_text}" if query_text else "")
                 response = await self.s3.handle(method, url, headers, body_stream())
                 if response.stream is not None:
-                    await self._send_stream(tracked_send, response.status, response.headers, response.stream, method)
+                    try:
+                        await self._send_stream(tracked_send, response.status, response.headers, response.stream, method)
+                    except WorkBusyError:
+                        if started:
+                            raise
+                        busy = self.s3._error("SlowDown", "transfer capacity is busy; retry later", 503)
+                        await self._send_raw(tracked_send, busy.status, {**busy.headers, "Retry-After": "5"}, busy.body)
                 else:
                     await self._send_raw(tracked_send, response.status, response.headers, response.body)
                 return
@@ -225,10 +241,18 @@ class TgDriveASGI(StaticFiles):
                 self._write_audit(audit, ok=True, result=result)
             await self._send(tracked_send, status, result, extra)
         except Exception as exc:
+            error = self._error(exc)
+            if error[0] == 500:
+                # 只记录类型与调用位置，异常字符串、URL、查询参数都可能包含秘密。
+                frames = traceback.extract_tb(exc.__traceback__)
+                category = "admin" if path.startswith("/api/admin/") else "user" if path.startswith("/api/user/") else "key" if path.startswith("/api/v1/") else "public" if path.startswith("/p/") or path.startswith("/api/public/") else "other"
+                log.error("request_failed id=%s method=%s category=%s elapsed_ms=%.0f error_type=%s stack=%s",
+                          request_id, method, category, (time.monotonic() - request_start) * 1000, type(exc).__name__,
+                          ";".join(f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames))
             if started:
                 # 流已开始时交给 ASGI 服务器关闭连接，不能再发送第二个响应头。
                 raise
-            await self._send(tracked_send, *self._error(exc))
+            await self._send(tracked_send, *error)
 
     # (前缀, 路由模式) → 审计动作。路由中的 {} 匹配一个路径段。
     _AUDITED = {
@@ -394,7 +418,12 @@ class TgDriveASGI(StaticFiles):
             entry = {"action": "object.public", "actor_type": "key", "actor": principal.access_key_id, "payload": payload,
                      "target_id": None, "ip": None}
             try:
-                result = {"objects": self.keys.set_public(principal, bucket, paths, bool(payload["public"]), self._share_options(payload))}
+                options = self._share_options(payload)
+                encoded = self.user.objects._UNSET
+                if payload["public"] and options.get("password"):
+                    encoded = await self.user.accounts.password_work.run(hash_password, str(options["password"]), min_length=4)
+                    principal = self.keys.authenticate(headers.get("authorization"))
+                result = {"objects": self.keys.set_public(principal, bucket, paths, bool(payload["public"]), options, password_hash=encoded)}
             except Exception as exc:
                 self._write_audit(entry, ok=False, error=exc)
                 raise
@@ -409,10 +438,10 @@ class TgDriveASGI(StaticFiles):
             if method == "GET" and route == "/status":
                 return 200, self.admin.status(), {}
             if method == "POST" and route == "/setup":
-                result = self.admin.setup(payload["passphrase"], payload["username"], payload["password"])
+                result = await self.admin.asetup(payload["passphrase"], payload["username"], payload["password"])
                 return 201, result, {}
             if method == "POST" and route == "/login":
-                return self._login(self.admin.login(payload["username"], payload["password"], ip))
+                return self._login(await self.admin.alogin(payload["username"], payload["password"], ip))
             # 除首次设置和登录外，修改操作统一要求管理员会话和 CSRF。
             session = self.admin.accounts.sessions.require(token, role="admin", csrf=csrf,
                                                            mutation=method != "GET")
@@ -421,7 +450,7 @@ class TgDriveASGI(StaticFiles):
                 return 200, {**self.admin.me(token), **self.settings.public_config()}, {}
             if method == "GET" and route == "/audit":
                 before = query.get("cursor", [""])[0]
-                return 200, self.audit.list(before=int(before) if before else None, limit=int(query.get("limit", ["50"])[0]),
+                return 200, await self.admin.accounts.metadata.run_in_thread(self.audit.list, before=int(before) if before else None, limit=int(query.get("limit", ["50"])[0]),
                                             action=query.get("action", [""])[0] or None,
                                             failed_only=query.get("failed", ["0"])[0] in ("1", "true")), {}
             if method == "GET" and route == "/settings":
@@ -429,7 +458,7 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/settings":
                 return 200, self.settings.update(payload), {}
             if method == "POST" and route == "/unlock":
-                return 200, self.admin.unlock(token, csrf, payload["passphrase"]), {}
+                return 200, await self.admin.aunlock(token, csrf, payload["passphrase"]), {}
             if method == "POST" and route == "/lock":
                 self.admin.lock(token, csrf)
                 return 204, None, {"Set-Cookie": self._cookie("", expires=True)}
@@ -439,18 +468,18 @@ class TgDriveASGI(StaticFiles):
             if not self.admin.accounts.keystore.unlocked:
                 raise NotReadyError("系统尚未解锁")
             if method == "GET" and route == "/users":
-                return 200, self.admin.list_users(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                return 200, await self.admin.alist_users(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=int(query.get("cursor", ["0"])[0]), query=query.get("q", [""])[0], status=query.get("status", [""])[0]), {}
             if method == "GET" and route == "/users/summary":
-                return 200, self.admin.user_summary(token), {}
+                return 200, await self.admin.auser_summary(token), {}
             if method == "GET" and route == "/clients":
-                return 200, self.admin.list_clients(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                return 200, await self.admin.alist_clients(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=int(query.get("cursor", ["0"])[0])), {}
             if method == "GET" and route == "/bots":
                 return 200, self.admin.list_bots(token), {}
             if method == "POST" and route == "/users":
                 quota = payload.get("quota_bytes")
-                return 201, self.admin.create_user(token, csrf, payload["username"], payload["password"],
+                return 201, await self.admin.acreate_user(token, csrf, payload["username"], payload["password"],
                                                     int(quota) if quota is not None and quota != "" else None), {}
             if method == "POST" and route == "/clients":
                 return 201, self.admin.create_client(token, csrf, payload["name"], payload.get("grants", [])), {}
@@ -472,17 +501,17 @@ class TgDriveASGI(StaticFiles):
             if route.startswith("/users/") and method == "POST" and route.endswith("/delete"):
                 return 200, await self.admin.delete_user(token, csrf, int(route.split("/")[2]), str(payload.get("confirm", ""))), {}
             if route.startswith("/users/") and method == "POST" and route.endswith("/password"):
-                self.admin.reset_user_password(token, csrf, int(route.split("/")[2]), payload["password"])
+                await self.admin.areset_user_password(token, csrf, int(route.split("/")[2]), payload["password"])
                 return 204, None, {}
             if method == "POST" and route == "/password":
-                self.admin.change_own_password(token, csrf, payload["old_password"], payload["new_password"])
+                await self.user.achange_password(token, csrf, payload["old_password"], payload["new_password"])
                 return 204, None, {}
             if method == "POST" and route == "/passphrase":
-                return 200, self.admin.change_passphrase(token, csrf, payload["old_passphrase"], payload["new_passphrase"]), {}
+                return 200, await self.admin.achange_passphrase(token, csrf, payload["old_passphrase"], payload["new_passphrase"]), {}
             if method == "GET" and route == "/maintenance/status":
                 return 200, self.admin.maintenance_status(token), {}
             if method == "POST" and route == "/maintenance/cleanup":
-                return 200, self.admin.run_cleanup(token, csrf), {}
+                return 200, await self.admin.run_cleanup(token, csrf), {}
             if method == "POST" and route == "/maintenance/gc/retry":
                 return 200, self.admin.retry_gc(token, csrf), {}
             if method == "GET" and route == "/backups":
@@ -524,7 +553,7 @@ class TgDriveASGI(StaticFiles):
         elif path.startswith("/api/user/v1/"):
             route = path[len("/api/user/v1"):]
             if method == "POST" and route == "/login":
-                return self._login(self.user.login(payload["username"], payload["password"], ip, bool(payload.get("remember"))))
+                return self._login(await self.user.alogin(payload["username"], payload["password"], ip, bool(payload.get("remember"))))
             if method == "POST" and route == "/logout":
                 self.user.accounts.sessions.require(token, csrf=csrf, mutation=True)
                 self.user.logout(token)
@@ -532,18 +561,18 @@ class TgDriveASGI(StaticFiles):
             if method == "GET" and route == "/me":
                 return 200, {**self.user.me(token), **self.settings.public_config()}, {}
             if method == "POST" and route == "/password":
-                self.user.change_password(token, csrf, payload["old_password"], payload["new_password"])
+                await self.user.achange_password(token, csrf, payload["old_password"], payload["new_password"])
                 return 204, None, {}
             if method == "GET" and route == "/public":
-                return 200, self.user.list_public(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                return 200, await self.user.alist_public(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=query.get("cursor", [""])[0]), {}
             if method == "POST" and route == "/public":
                 paths = payload["paths"] if "paths" in payload else [payload["path"]]
                 if not isinstance(paths, list):
                     raise ValueError("paths 必须为数组")
-                return 200, {"objects": self.user.set_public(token, csrf, paths, bool(payload["public"]), self._share_options(payload))}, {}
+                return 200, {"objects": await self.user.aset_public(token, csrf, paths, bool(payload["public"]), self._share_options(payload))}, {}
             if method == "GET" and route == "/trash":
-                return 200, self.user.list_trash(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                return 200, await self.user.alist_trash(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=query.get("cursor", [""])[0]), {}
             if method == "POST" and route == "/trash":
                 return 200, {"items": await self.user.trash(token, csrf, list(payload["paths"]))}, {}
@@ -593,7 +622,7 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/copy":
                 return 201, await self.user.copy(token, csrf, payload["from"], payload["to"]), {}
             if method == "GET" and route == "/clients":
-                return 200, self.user.list_clients(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                return 200, await self.user.alist_clients(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=int(query.get("cursor", ["0"])[0])), {}
             if method == "POST" and route == "/clients":
                 return 201, self.user.create_client(token, csrf, payload["name"]), {}
@@ -609,11 +638,16 @@ class TgDriveASGI(StaticFiles):
             token = path.split("/")[5]
             info, password_hash = self._public_share(token)
             limiter, key = self.user.accounts.sessions, f"share:{token}|{ip or '-'}"
-            if limiter.is_rate_limited(key):
-                raise TooManyAttempts("too many attempts")
-            if not password_hash or not verify_password(str(payload.get("password", "")), password_hash):
+            def check_attempts():
+                if limiter.is_rate_limited(key):
+                    raise TooManyAttempts("too many attempts")
+            check_attempts()
+            if not password_hash or not await self.user.accounts.password_work.run(verify_password, str(payload.get("password", "")), password_hash, before=check_attempts):
                 limiter.record_failure(key)
                 raise ValueError("访问密码不正确")
+            _, current_hash = self._public_share(token)
+            if current_hash != password_hash:
+                raise ValueError("分享设置已更改，请重新输入访问密码")
             access, expires = self.share_access.grant(token, password_hash)
             return 200, {"access": access, "expires_at": expires}, {}
         elif path.startswith("/api/public/v1/objects/") and method == "GET":
@@ -715,14 +749,19 @@ class TgDriveASGI(StaticFiles):
             return
         _, stream = await opener(start, end)
         iterator = stream.__aiter__()
-        # 首个窗口解密成功后才提交响应头；后续完整性失败使连接终止。
-        first = await anext(iterator, b"")
-        await send({"type": "http.response.start", "status": 206 if partial else 200,
-                    "headers": self._headers(response_headers)})
-        await send({"type": "http.response.body", "body": first, "more_body": True})
-        async for chunk in iterator:
-            await send({"type": "http.response.body", "body": chunk, "more_body": True})
-        await send({"type": "http.response.body", "body": b""})
+        try:
+            # 首个窗口解密成功后才提交响应头；后续完整性失败使连接终止。
+            first = await anext(iterator, b"")
+            await send({"type": "http.response.start", "status": 206 if partial else 200,
+                        "headers": self._headers(response_headers)})
+            await send({"type": "http.response.body", "body": first, "more_body": True})
+            async for chunk in iterator:
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            await send({"type": "http.response.body", "body": b""})
+
+        finally:
+            if hasattr(iterator, "aclose"):
+                await iterator.aclose()
 
     @staticmethod
     def _headers(headers):
@@ -741,16 +780,21 @@ class TgDriveASGI(StaticFiles):
 
     async def _send_stream(self, send, status, headers, stream, method):
         iterator = stream.__aiter__()
-        # 首个窗口解密成功后才提交响应头；之后的失败只能中断连接。
-        first = b"" if method == "HEAD" else await anext(iterator, b"")
-        await send({"type": "http.response.start", "status": status,
-                    "headers": self._headers({str(k): str(v) for k, v in headers.items()})})
-        await send({"type": "http.response.body", "body": first, "more_body": method != "HEAD"})
-        if method == "HEAD":
-            return
-        async for chunk in iterator:
-            await send({"type": "http.response.body", "body": chunk, "more_body": True})
-        await send({"type": "http.response.body", "body": b""})
+        try:
+            # 首个窗口解密成功后才提交响应头；之后的失败只能中断连接。
+            first = b"" if method == "HEAD" else await anext(iterator, b"")
+            await send({"type": "http.response.start", "status": status,
+                        "headers": self._headers({str(k): str(v) for k, v in headers.items()})})
+            await send({"type": "http.response.body", "body": first, "more_body": method != "HEAD"})
+            if method == "HEAD":
+                return
+            async for chunk in iterator:
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            await send({"type": "http.response.body", "body": b""})
+
+        finally:
+            if hasattr(iterator, "aclose"):
+                await iterator.aclose()
 
     async def _send_raw(self, send, status, headers, data):
         response_headers = {str(key): str(value) for key, value in headers.items()}
@@ -774,6 +818,9 @@ class TgDriveASGI(StaticFiles):
         elif isinstance(exc, TooManyAttempts): status, code, message = 429, "too_many_attempts", "登录失败次数过多，请 15 分钟后再试"
         elif isinstance(exc, (AuthenticationError, SessionExpired)): status, code, message = 401, "unauthorized", "登录凭据无效或会话已过期"
         elif isinstance(exc, (CsrfError, PermissionError)): status, code, message = 403, "forbidden", "权限不足或 CSRF 校验失败"
+        elif isinstance(exc, WorkBusyError):
+            status, code, message = 503, "transfer_busy", "传输繁忙，请稍后重试"
+            extra["Retry-After"] = "5"
         elif isinstance(exc, NotReadyError): status, code, message = 503, "locked", "系统尚未解锁"
         elif isinstance(exc, NotFoundError): status, code, message = 404, "not_found", "请求的资源不存在"
         elif isinstance(exc, InvalidRange):

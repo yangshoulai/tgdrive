@@ -54,6 +54,72 @@ class M5Tests(unittest.TestCase):
             keys.lock()
             self.assertFalse(accounts.status()["unlocked"])
 
+    def test_cancelled_password_work_keeps_its_slot_until_finished(self):
+        import asyncio
+        import threading
+        from tgdrive.work import PasswordWork
+        started, release = threading.Event(), threading.Event()
+        second_started = threading.Event()
+        def slow():
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError("计算等待超时")
+        async def run():
+            work = PasswordWork(concurrency=1)
+            first = asyncio.create_task(work.run(slow))
+            for _ in range(500):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.001)
+            self.assertTrue(started.is_set())
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            second = asyncio.create_task(work.run(second_started.set))
+            try:
+                await asyncio.sleep(0.01)
+                self.assertFalse(second_started.is_set())
+            finally:
+                release.set()
+            await second
+            self.assertTrue(second_started.is_set())
+        asyncio.run(run())
+
+    def test_async_login_does_not_block_or_accept_disabled_account(self):
+        import asyncio
+        import threading
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as temp:
+            metadata = Metadata(Path(temp) / "meta.db")
+            keys = KeyStore(metadata)
+            accounts = AccountService(metadata, keys)
+            accounts.setup("encryption passphrase", "admin", "admin password")
+            user = accounts.create_user("alice", "alice password")
+            entered, release = threading.Event(), threading.Event()
+            def verify(*args):
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("校验等待超时")
+                return True
+            async def run():
+                pending = asyncio.create_task(accounts.alogin("alice", "alice password"))
+                try:
+                    for _ in range(500):
+                        if entered.is_set():
+                            break
+                        await asyncio.sleep(0.001)
+                    self.assertTrue(entered.is_set(), "密码计算应在后台运行")
+                    accounts.set_account_status(user.id, "disabled")
+                finally:
+                    release.set()
+                with self.assertRaises(AuthenticationError):
+                    await pending
+            try:
+                with mock.patch("tgdrive.accounts.verify_password", side_effect=verify):
+                    asyncio.run(run())
+            finally:
+                metadata.close()
+
     def test_admin_and_user_api_flow(self):
         import asyncio
         async def run():

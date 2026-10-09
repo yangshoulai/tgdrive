@@ -207,7 +207,7 @@ class ObjectService:
         body = self._guard_quota(body, self._quota_room(scope.bucket_id, key), size)
         blob_uuid = self.engine.begin_blob()
         try:
-            result = await self.engine.put_part(blob_uuid, 1, body)
+            result = await self.engine.put_part(blob_uuid, 1, body, bucket_id=scope.bucket_id)
             if size is not None and result.size != size:
                 raise ValueError("object size does not match request")
             if expect_md5 is not None and result.md5.lower() != expect_md5.lower():
@@ -284,7 +284,7 @@ class ObjectService:
                 if False:
                     yield b""
             return info, empty()
-        return info, self.engine.stream(info.blob_uuid, start, end)
+        return info, self.engine.stream(info.blob_uuid, start, end, bucket_id=scope.bucket_id)
 
     def head_object(self, scope: Scope, key: str) -> ObjectInfo:
         return self._object(self._lookup(scope, key))
@@ -313,7 +313,7 @@ class ObjectService:
 
     _UNSET = object()
 
-    def update_share(self, scope: Scope, key: str, *, expires_at=_UNSET, password=_UNSET) -> ObjectInfo:
+    def update_share(self, scope: Scope, key: str, *, expires_at=_UNSET, password=_UNSET, password_hash=_UNSET) -> ObjectInfo:
         """设置分享有效期（None 为永久）与访问密码（None 或空字符串为取消）。只对已公开的文件有效。"""
         row = self._lookup(scope, key, write=True)
         if row["public_token"] is None:
@@ -329,7 +329,7 @@ class ObjectService:
                 raise ValueError("访问密码至少 4 个字符")
             from .authn import hash_password
             updates.append("public_password=?")
-            args.append(hash_password(str(password), min_length=4) if password else None)
+            args.append(password_hash if password_hash is not self._UNSET else hash_password(str(password), min_length=4) if password else None)
         if updates:
             with self.metadata.transaction() as db:
                 db.execute(f"UPDATE objects SET {', '.join(updates)} WHERE bucket_id=? AND key=?", (*args, scope.bucket_id, key))
@@ -419,18 +419,27 @@ class ObjectService:
 
     async def purge_trash(self, scope: Scope, entry_ids: list[str] | None = None) -> int:
         """永久删除回收站条目；entry_ids 为 None 时清空整个回收站。"""
-        ids = entry_ids if entry_ids is not None else [row["id"] for row in self.metadata.db.execute(
-            "SELECT id FROM trash WHERE bucket_id=?", (scope.bucket_id,))]
-        for entry_id in ids:
+        if entry_ids is None:
+            total = 0
+            while True:
+                ids = [row["id"] for row in self.metadata.db.execute(
+                    "SELECT id FROM trash WHERE bucket_id=? ORDER BY deleted_at,id LIMIT 100", (scope.bucket_id,))]
+                if not ids:
+                    return total
+                total += await self.purge_trash(scope, ids)
+                await asyncio.sleep(0)
+        for entry_id in entry_ids:
             self._trash_row(scope.bucket_id, entry_id)
             await self.delete_prefix(scope, f"{self.TRASH_PREFIX}{entry_id}/")
             with self.metadata.transaction() as db:
                 db.execute("DELETE FROM trash WHERE id=?", (entry_id,))
-        return len(ids)
+        return len(entry_ids)
 
     async def purge_expired_trash(self, now: float | None = None) -> int:
-        cutoff = (now or time.time()) - self.TRASH_DAYS * 86400
-        rows = self.metadata.db.execute("SELECT id, bucket_id FROM trash WHERE deleted_at < ?", (cutoff,)).fetchall()
+        cutoff = (time.time() if now is None else now) - self.TRASH_DAYS * 86400
+        # 单次调度有界，剩余条目留给下一轮，避免过期条目积压时占满整个维护周期。
+        rows = self.metadata.db.execute(
+            "SELECT id,bucket_id FROM trash WHERE deleted_at<? ORDER BY deleted_at,id LIMIT 100", (cutoff,)).fetchall()
         for row in rows:
             await self.purge_trash(Scope(row["bucket_id"]), [row["id"]])
         return len(rows)
@@ -737,7 +746,7 @@ class ObjectService:
         others = self.metadata.db.execute("SELECT COALESCE(SUM(size),0) FROM upload_parts WHERE upload_id=? AND part_no!=?",
                                           (upload_id, part_no)).fetchone()[0]
         body = self._guard_quota(body, self._quota_room(scope.bucket_id, row["key"], reserved=int(others)), size)
-        result = await self.engine.put_part(row["blob_uuid"], part_no, body)
+        result = await self.engine.put_part(row["blob_uuid"], part_no, body, bucket_id=scope.bucket_id)
         if size is not None and size != result.size:
             raise ValueError("part size does not match request")
         now = time.time()

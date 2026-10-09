@@ -6,6 +6,8 @@ HTTP 框架只需把请求字段转成 ``handle`` 参数即可。
 
 from __future__ import annotations
 
+from ..work import WorkBusyError
+
 import datetime as dt
 import re
 from collections.abc import AsyncIterator
@@ -378,6 +380,10 @@ class S3Gateway:
             return self._error("NoSuchKey", "object does not exist", 404)
         except QuotaExceededError:
             return self._error("QuotaExceeded", "the bucket storage quota would be exceeded", 403)
+        except WorkBusyError:
+            response = self._error("SlowDown", "transfer capacity is busy; retry later", 503)
+            response.headers["Retry-After"] = "5"
+            return response
         except NotReadyError:
             return self._error("ServiceUnavailable", "service is locked", 503)
         except ValueError as exc:

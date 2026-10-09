@@ -16,6 +16,30 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 安装并检查后端
+        run: |
+          python -m pip install .
+          python -m unittest discover -s tests
+
+      - name: 检查并构建前端
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+
       - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 

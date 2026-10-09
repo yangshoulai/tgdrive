@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { BRAND } from "./brand";
 import * as api from "./api";
 import { DocsPage } from "./docs/docs";
@@ -9,6 +9,7 @@ import { AppShell, FullPageLoading, LoginPage, SetupPage, useSessionGuard, type 
 import { Icon, Progress, formatBytes, toast, usageTone, useDocumentTitle } from "./ui";
 
 import { FilesView } from "./user/files";
+import { UploadTray, useUploadQueue } from "./user/uploads";
 
 import { SharedView } from "./user/shared";
 import { TrashView } from "./user/trash";
@@ -114,10 +115,17 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [status, setStatus] = useState<api.SystemStatus | null>(null);
   const [, setConfigVersion] = useState(0);
+  const [uploadRevision, setUploadRevision] = useState(0);
+  const refreshTimer = useRef<number | undefined>();
   const refreshUsage = useCallback(() => {
-    void api.me().then(value => setUsage({ used_bytes: value.used_bytes, quota_bytes: value.quota_bytes, id: value.id })).catch(() => undefined);
-    void api.listPublicPage(null, 1).then(page => setSharedCount(page.total)).catch(() => undefined);
+    window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => {
+      void api.me().then(value => setUsage({ used_bytes: value.used_bytes, quota_bytes: value.quota_bytes, id: value.id })).catch(() => undefined);
+      void api.listPublicPage(null, 1).then(page => setSharedCount(page.total)).catch(() => undefined);
+    }, 300);
   }, []);
+  const uploads = useUploadQueue(() => { setUploadRevision(revision => revision + 1); refreshUsage(); });
+  useEffect(() => () => window.clearTimeout(refreshTimer.current), []);
   // 只有管理员需要系统状态（是否已解锁、流量统计）；普通用户在系统锁定时根本无法登录。
   const refreshStatus = useCallback(() => {
     if (isAdmin) void api.adminStatus().then(setStatus).catch(reason => toast.error(api.errorMessage(reason, "系统状态加载失败，请稍后重试")));
@@ -144,10 +152,12 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
     document.getElementById("main")?.scrollTo?.({ top: 0 });
   }, []);
   async function logout() {
+    uploads.cancelAll();
     await api.logout().catch(() => undefined);
     onLogout();
   }
   const locked = isAdmin && status !== null && !status.unlocked;
+  useEffect(() => { if (locked || session.unlocked === false && !isAdmin) uploads.cancelAll(); }, [locked, session.unlocked, isAdmin]);
   const percent = usage?.quota_bytes ? usage.used_bytes / usage.quota_bytes * 100 : 0;
   const unlocked = () => { refreshStatus(); refreshUsage(); };
   const section = location.section;
@@ -167,7 +177,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
     content = <LockedGate onUnlocked={unlocked} />;
   } else {
     content = <>
-      {section === "files" && <FilesView session={session} prefix={location.prefix} onOpenFolder={prefix => navigate("files", prefix)} onChanged={refreshUsage} />}
+      {section === "files" && <FilesView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={prefix => navigate("files", prefix)} onChanged={refreshUsage} />}
       {section === "shared" && <SharedView session={session} onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
       {section === "keys" && <KeysView bucketName={usage ? `user-${usage.id}` : null} />}
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
@@ -204,6 +214,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },
       ] }}>
       {content}
+      <UploadTray queue={uploads} />
       {passwordOpen && <PasswordDialog onClose={() => setPasswordOpen(false)} />}
     </AppShell>
   );

@@ -8,14 +8,14 @@ import { FileTile, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, 
 
 import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
-import { UploadDialog, UploadTray, useUploadQueue } from "./uploads";
+import { UploadDialog, type UploadQueue } from "./uploads";
 
 /* ---------- 文件 ---------- */
 
 type Entry = { kind: "folder"; key: string } | { kind: "file"; key: string; file: api.FileItem };
 type SortKey = "name" | "size" | "modified";
 
-export function FilesView({ session, prefix, onOpenFolder, onChanged }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void }) {
+export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number }) {
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "public">("all");
@@ -31,7 +31,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
   const [folderOpen, setFolderOpen] = useState(false);
   const [pendingUpload, setPendingUpload] = useState<File[] | null>(null);
   const [dragging, setDragging] = useState(false);
-  const uploads = useUploadQueue(() => { void load(); onChanged(); });
+  const lastUploadRevision = useRef(uploadRevision);
   const fileInput = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const name = prefix ? baseName(prefix) : "我的文件";
@@ -42,6 +42,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
     : api.listFiles(prefix, cursor, filter === "public"), [prefix, query, filter]);
   const pagination = useCursorPage(fetchPage);
   const load = pagination.reload;
+  useEffect(() => {
+    if (lastUploadRevision.current !== uploadRevision) { lastUploadRevision.current = uploadRevision; void load(); }
+  }, [uploadRevision, load]);
   const loading = pagination.loading;
   const loadError = pagination.error;
   const files = useMemo(() => (pagination.page?.objects ?? []).filter(item => !item.key.endsWith("/")), [pagination.page]);
@@ -353,7 +356,6 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
         }} />}
       {sharing && <ShareDialog file={sharing} publicBase={session.public_base_url} onClose={() => setSharing(null)}
         update={async (isPublic, options) => (await api.setPublic([sharing.key], isPublic, options)).objects[0]} onChange={file => { replaceFile(file); onChanged(); }} />}
-      <UploadTray queue={uploads} />
     </div>
   );
 }

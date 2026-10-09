@@ -100,6 +100,7 @@ async function uploadMultipart(job: UploadJob, signal: { aborted: boolean; abort
     partSize = created.part_size;
     localStorage.setItem(storageKey, uploadId);
   }
+  if (signal.aborted) throw new api.ApiError("已取消上传", 0, "upload_aborted");
   const count = Math.max(1, Math.ceil(job.file.size / partSize));
   const sizeOf = (number: number) => Math.min(partSize, job.file.size - (number - 1) * partSize);
   let finished = [...done.keys()].reduce((sum, number) => sum + sizeOf(number), 0);
@@ -148,16 +149,21 @@ async function uploadMultipart(job: UploadJob, signal: { aborted: boolean; abort
   localStorage.removeItem(storageKey);
   return result;
 }
-type UploadQueue = ReturnType<typeof useUploadQueue>;
+export type UploadQueue = ReturnType<typeof useUploadQueue>;
 
 export function useUploadQueue(onSettled: () => void) {
   const [jobs, setJobs] = useState<UploadJob[]>([]);
   const queue = useRef<UploadJob[]>([]);
+  const disposed = useRef(false);
   const aborters = useRef(new Map<string, () => void>());
   const canceled = useRef(new Set<string>());
   const settled = useRef(onSettled);
   settled.current = onSettled;
-  const update = (id: string, patch: Partial<UploadJob>) => setJobs(current => current.map(job => job.id === id ? { ...job, ...patch } : job));
+  const update = (id: string, patch: Partial<UploadJob>) => { if (!disposed.current) setJobs(current => current.map(job => job.id === id ? { ...job, ...patch } : job)); };
+  useEffect(() => {
+    disposed.current = false;
+    return () => { disposed.current = true; queue.current = []; aborters.current.forEach(abort => abort()); };
+  }, []);
 
   const workers = useRef(0);
   const tally = useRef({ done: 0, failed: 0, instant: 0 });
@@ -200,9 +206,9 @@ export function useUploadQueue(onSettled: () => void) {
       const result = await promise;
       update(job.id, { status: "done", percent: 100, result });
       tally.current.done++;
-      if (!result.has_thumbnail && thumbnailable(job.file.name, job.file.type, job.file.size)) {
+      if (!disposed.current && !result.has_thumbnail && thumbnailable(job.file.name, job.file.type, job.file.size)) {
         // 缩略图失败不影响上传结果。
-        void makeThumbnail(job.file).then(data => data ? api.setThumbnail(job.path, data) : undefined).then(() => settled.current()).catch(() => undefined);
+        void makeThumbnail(job.file).then(data => data && !disposed.current ? api.setThumbnail(job.path, data) : undefined).then(() => { if (!disposed.current) settled.current(); }).catch(() => undefined);
       }
     } catch (reason) {
       const aborted = reason instanceof api.ApiError && reason.code === "upload_aborted";
@@ -215,19 +221,20 @@ export function useUploadQueue(onSettled: () => void) {
       update(job.id, { status: aborted ? "canceled" : "error",
         error: multipart && !aborted ? `${api.errorMessage(reason, "上传失败，请稍后重试")}。进度已保存，重新上传同一文件即可继续。` : api.errorMessage(reason, "上传失败，请稍后重试") });
       if (!aborted) tally.current.failed++;
-    } finally { aborters.current.delete(job.id); }
-    settled.current();
+    } finally { aborters.current.delete(job.id); canceled.current.delete(job.id); }
+    if (!disposed.current) settled.current();
   }
 
   async function worker() {
     while (queue.current.length) {
       const job = queue.current.shift()!;
-      if (canceled.current.has(job.id)) continue;
+      if (canceled.current.delete(job.id)) continue;
       await uploadOne(job);
     }
     if (--workers.current > 0) return;
     const { done, failed, instant } = tally.current;
     tally.current = { done: 0, failed: 0, instant: 0 };
+    if (disposed.current) return;
     if (failed) toast.error(`${failed} 个文件上传失败，可在上传列表中查看原因`);
     else if (done) toast.success(instant === done ? (done === 1 ? "秒传完成" : `${done} 个文件秒传完成`) : `${done === 1 ? "上传完成" : `${done} 个文件上传完成`}${instant ? `（其中 ${instant} 个秒传）` : ""}`);
   }
@@ -248,8 +255,14 @@ export function useUploadQueue(onSettled: () => void) {
     aborters.current.get(id)?.();
     setJobs(current => current.map(job => job.id === id && job.status === "queued" ? { ...job, status: "canceled" } : job));
   }
+  function cancelAll() {
+    queue.current = [];
+    canceled.current.clear();
+    aborters.current.forEach(abort => abort());
+    setJobs(current => current.map(job => job.status === "queued" ? { ...job, status: "canceled" } : job));
+  }
   function clear() { setJobs(current => current.filter(job => job.status === "queued" || job.status === "uploading")); }
-  return { jobs, enqueue, cancel, clear };
+  return { jobs, enqueue, cancel, cancelAll, clear };
 }
 
 export function UploadTray({ queue }: { queue: UploadQueue }) {
@@ -258,12 +271,15 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
   if (!jobs.length) return null;
   const active = jobs.filter(job => job.status === "queued" || job.status === "uploading").length;
   const failed = jobs.filter(job => job.status === "error").length;
+  const canceledCount = jobs.filter(job => job.status === "canceled").length;
+  const completed = jobs.filter(job => job.status === "done").length;
+  const allCanceled = canceledCount === jobs.length;
   const overall = jobs.reduce((sum, job) => sum + (job.status === "done" ? 100 : job.percent), 0) / jobs.length;
-  const title = active ? `正在上传 ${jobs.length - active + 1}/${jobs.length}` : failed ? `${failed} 个文件上传失败` : "上传完成";
+  const title = active ? `正在上传 ${jobs.length - active + 1}/${jobs.length}` : failed ? `${failed} 个文件上传失败` : allCanceled ? "上传已取消" : canceledCount ? `${completed} 个完成，${canceledCount} 个已取消` : "上传完成";
   return (
     <aside className={`upload-tray${collapsed ? " is-collapsed" : ""}`} aria-label="上传进度" aria-live="polite">
       <header>
-        <span className={`tray-status${active ? " is-active" : failed ? " is-error" : " is-done"}`}><Icon name={active ? "upload" : failed ? "alert" : "check"} size={16} /></span>
+        <span className={`tray-status${active ? " is-active" : failed ? " is-error" : allCanceled ? "" : " is-done"}`}><Icon name={active ? "upload" : failed ? "alert" : allCanceled ? "x" : "check"} size={16} /></span>
         <strong>{title}</strong>
         <IconButton icon="chevronDown" size="sm" label={collapsed ? "展开" : "收起"} onClick={() => setCollapsed(value => !value)} />
         {!active && <IconButton icon="x" size="sm" label="关闭上传列表" onClick={queue.clear} />}

@@ -9,6 +9,7 @@ from tgdrive.blobengine import BlobEngine
 from tgdrive.blobstore import LocalDiskBlobStore
 from tgdrive.keystore import KeyStore
 from tgdrive.metadata import Metadata
+from tgdrive.work import TransferSlots, WorkBusyError
 
 
 class SlowStore(LocalDiskBlobStore):
@@ -64,12 +65,35 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
         [piece async for piece in self.engine.stream(self.blob, window=64)]
         self.assertEqual(self.store.peak, 1)
 
+    async def test_global_and_bucket_limits_survive_cancellation(self):
+        slots = TransferSlots(total=2, per_bucket=1, wait_seconds=0.03)
+        async with slots.slot(1):
+            async with slots.slot(2):
+                with self.assertRaises(WorkBusyError):
+                    async with slots.slot(3):
+                        self.fail("超过全局上限")
+                with self.assertRaises(WorkBusyError):
+                    async with slots.slot(1):
+                        self.fail("超过账号上限")
+                async def waiting():
+                    async with slots.slot(1):
+                        pass
+                pending = asyncio.create_task(waiting())
+                await asyncio.sleep(0)
+                pending.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await pending
+        self.assertEqual(slots._buckets, {})
+        async with slots.slot(1):
+            pass
+
     async def test_closing_stream_cancels_pending_reads(self):
         stream = self.engine.stream(self.blob, window=64)
         await anext(stream)
         await stream.aclose()
         await asyncio.sleep(0.1)
         self.assertEqual(self.store.active, 0)
+        self.assertEqual(self.engine.transfers._buckets, {})
         self.assertLess(self.store.calls, len(self.data) // 64)
 
 

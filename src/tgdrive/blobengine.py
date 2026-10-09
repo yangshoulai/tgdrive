@@ -9,6 +9,7 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
+from contextlib import aclosing
 
 from .blobstore import BlobStore
 from .crypto import (
@@ -25,6 +26,7 @@ from .errors import IntegrityError, InvalidStateError, NotFoundError
 from .fingerprint import BLOCK_SIZE, BlockHasher
 from .keystore import KeyStore
 from .metadata import BlobRecord, ChunkRecord, Metadata
+from .work import TransferSlots
 
 
 @dataclass(frozen=True)
@@ -41,7 +43,8 @@ class PartResult:
 class BlobEngine:
     def __init__(self, metadata: Metadata, store: BlobStore, kek: bytes | None = None,
                  *, keystore: KeyStore | None = None,
-                 chunk_size: int = 16 * 1024 * 1024, frame_size: int = 64 * 1024) -> None:
+                 chunk_size: int = 16 * 1024 * 1024, frame_size: int = 64 * 1024,
+                 transfer_concurrency: int = 4, bucket_concurrency: int = 2) -> None:
         if chunk_size <= 0 or frame_size <= 0:
             raise ValueError("chunk_size and frame_size must be positive")
         self.metadata, self.store, self.kek = metadata, store, kek
@@ -54,6 +57,7 @@ class BlobEngine:
         # 下载时提前取回并解密的窗口数；内存上限约为 (预读数 + 1) × 读取窗口。
         self.read_ahead = 2
         self.fingerprint_block = BLOCK_SIZE
+        self.transfers = TransferSlots(transfer_concurrency, bucket_concurrency)
 
     def _kek(self) -> bytes:
         if self.keystore is not None:
@@ -76,7 +80,13 @@ class BlobEngine:
         except ValueError:
             return blob_uuid.encode("ascii")
 
-    async def put_part(self, blob_uuid: str, part_no: int, body: AsyncIterator[bytes] | Iterable[bytes] | bytes) -> PartResult:
+    async def put_part(self, blob_uuid: str, part_no: int, body: AsyncIterator[bytes] | Iterable[bytes] | bytes,
+                       *, bucket_id: int | None = None) -> PartResult:
+        # 在读取请求体前取得名额，让 ASGI 的背压限制尚未获准的上传。
+        async with self.transfers.slot(bucket_id):
+            return await self._put_part(blob_uuid, part_no, body)
+
+    async def _put_part(self, blob_uuid: str, part_no: int, body: AsyncIterator[bytes] | Iterable[bytes] | bytes) -> PartResult:
         if part_no < 1 or part_no > 10000:
             raise ValueError("part_no must be between 1 and 10000")
         record = self.metadata.get_blob(blob_uuid)
@@ -118,7 +128,8 @@ class BlobEngine:
             inflight.append(asyncio.ensure_future(self._store_chunk(fk, blob_uuid, part_no, started, plain)))
             started += 1
             if len(inflight) >= self.upload_concurrency:
-                pending.append(await inflight.pop(0))
+                pending.append(await asyncio.shield(inflight[0]))
+                inflight.pop(0)
 
         try:
             async for item in consume():
@@ -137,7 +148,8 @@ class BlobEngine:
             if buffered or started == 0:
                 await launch(b"".join(pieces))
             while inflight:
-                pending.append(await inflight.pop(0))
+                pending.append(await asyncio.shield(inflight[0]))
+                inflight.pop(0)
             self.metadata.replace_part(blob_uuid, part_no, pending, old_refs, time.time())
         except BaseException:
             # 不取消仍在进行的写入：被取消的写入可能已把数据存进后端却丢失引用，无法回收。
@@ -162,7 +174,14 @@ class BlobEngine:
         return self.metadata.finalize_blob(blob_uuid, part_order)
 
     async def stream(self, blob_uuid: str, start: int = 0, end: int | None = None,
-                     *, window: int = 1024 * 1024) -> AsyncIterator[bytes]:
+                     *, window: int = 1024 * 1024, bucket_id: int | None = None) -> AsyncIterator[bytes]:
+        async with self.transfers.slot(bucket_id):
+            async with aclosing(self._stream(blob_uuid, start, end, window=window)) as source:
+                async for piece in source:
+                    yield piece
+
+    async def _stream(self, blob_uuid: str, start: int = 0, end: int | None = None,
+                      *, window: int = 1024 * 1024) -> AsyncIterator[bytes]:
         record = self.metadata.get_blob(blob_uuid)
         if record.status != "complete" or record.size is None:
             raise InvalidStateError("blob is not complete")
@@ -225,6 +244,10 @@ class BlobEngine:
         return b"".join(parts)
 
     async def scrub(self, blob_uuid: str, *, deep: bool = False) -> list[tuple[int, int]]:
+        async with self.transfers.slot(None):
+            return await self._scrub(blob_uuid, deep=deep)
+
+    async def _scrub(self, blob_uuid: str, *, deep: bool = False) -> list[tuple[int, int]]:
         record = self.metadata.get_blob(blob_uuid)
         bad: list[tuple[int, int]] = []
         dek = unwrap_dek(self._kek(), record.wrapped_dek, blob_uuid)
@@ -239,7 +262,7 @@ class BlobEngine:
                     # 只要完整解密一次即可验证全部帧；结果不必留在内存中。
                     if chunk.plain_size:
                         start, end, _, _ = cipher_range(record.frame_size, chunk.plain_size, 0, chunk.plain_size - 1)
-                        decrypt_range(fk, chunk.salt, chunk.plain_size, encrypted[start:end], 0, chunk.plain_size - 1)
+                        await asyncio.to_thread(decrypt_range, fk, chunk.salt, chunk.plain_size, encrypted[start:end], 0, chunk.plain_size - 1)
             except (IntegrityError, NotFoundError):
                 bad.append((chunk.part_no, chunk.sub_idx))
         return bad

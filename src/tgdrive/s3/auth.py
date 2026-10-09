@@ -109,7 +109,8 @@ class ClientAuthStore:
         total = None
         if limit is not None:
             limit = max(1, min(limit, 200))
-            total = self.metadata.db.execute("SELECT COUNT(*) FROM clients c" + condition, args).fetchone()[0]
+            total = self.metadata.cached_read(("clients-total", owner_user_id),
+                lambda: self.metadata.db.execute("SELECT COUNT(*) FROM clients c" + condition, args).fetchone()[0])
         sql = ("SELECT c.id,c.name,c.description,c.owner_user_id,c.status,c.created_at,u.username AS owner_username "
                "FROM clients c LEFT JOIN users u ON u.id=c.owner_user_id" + condition)
         if limit is not None:

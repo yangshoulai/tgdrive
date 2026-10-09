@@ -3,7 +3,7 @@ import { SITE } from "../brand";
 import * as api from "../api";
 import { FileTile, baseName, getFileKind } from "../files";
 
-import { Badge, Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type IconName } from "../ui";
+import { Badge, Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, formatDate, formatDateTime, useDocumentTitle, type IconName } from "../ui";
 
 import type { AdminModule } from "../admin";
 
@@ -13,12 +13,19 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
   const [data, setData] = useState<{ users: api.AccountSummary; objects: api.AdminObjectPage; bots: api.BotConfig[] } | null>(null);
   useDocumentTitle(`概览 · ${SITE.admin}`);
   const [settings, setSettings] = useState<api.SystemSettings | null>(null);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    void api.adminSettings().then(setSettings).catch(() => undefined);
-    void Promise.all([api.adminUserSummary(), api.adminObjects({ limit: 6 }), api.adminBots()])
-      .then(([users, objects, bots]) => setData({ users, objects, bots }))
-      .catch(reason => toast.error(api.errorMessage(reason, "概览加载失败，请稍后重试")));
-  }, []);
+    let active = true;
+    const controller = new AbortController();
+    setError("");
+    void api.adminSettings(controller.signal).then(value => { if (active) setSettings(value); }).catch(() => undefined);
+    void Promise.all([api.adminUserSummary(controller.signal), api.adminObjects({ limit: 6 }, controller.signal), api.adminBots(controller.signal)])
+      .then(([users, objects, bots]) => { if (active) setData({ users, objects, bots }); })
+      .catch(reason => { if (active) setError(api.errorMessage(reason, "概览加载失败，请稍后重试")); });
+    return () => { active = false; controller.abort(); };
+  }, [attempt]);
+  if (error) return <><PageHeader title="概览" /><Panel><EmptyState icon="alert" title="概览加载失败" description={error} action={<Button onClick={() => setAttempt(value => value + 1)}>重试</Button>} /></Panel></>;
   if (!data) return <><PageHeader title="概览" /><Panel><SkeletonRows rows={4} /></Panel></>;
   const used = data.users.used_bytes;
   const files = data.objects.objects;

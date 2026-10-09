@@ -21,6 +21,9 @@ function AdminDeploy() {
         [<C>--s3-endpoint</C>, <C>TGDRIVE_S3_ENDPOINT</C>, "无", "S3 Endpoint 的默认值，控制台设置优先"],
         [<C>--s3-host</C>, <C>TGDRIVE_S3_HOST</C>, "无", "未配置 S3 Endpoint 时用于识别 S3 请求的域名"],
         [<C>--insecure-cookies</C>, <C>TGDRIVE_INSECURE_COOKIES=1</C>, "关闭", "允许通过 HTTP 发送会话 Cookie，只用于本机开发"],
+        [<C>--transfer-concurrency</C>, <C>TGDRIVE_TRANSFER_CONCURRENCY</C>, "4", "全局同时进行的上传分段、下载流与校验任务数"],
+        [<C>--bucket-concurrency</C>, <C>TGDRIVE_BUCKET_CONCURRENCY</C>, "2", "每个存储桶同时进行的传输数，所有接入方式共用"],
+        [<C>--audit-retention-days</C>, <C>TGDRIVE_AUDIT_RETENTION_DAYS</C>, "0", "0 为永久保留；正数表示将过期日志移入加密归档"],
         [<C>--trusted-proxies</C>, <C>TGDRIVE_TRUSTED_PROXIES</C>, "Uvicorn 默认", "信任 X-Forwarded-For/Proto 的代理 IP 或网段，逗号分隔"],
       ]} />
       <Callout tone="danger" title="生产环境必须使用 HTTPS">默认情况下会话 Cookie 带有 Secure 标记，浏览器只会通过 HTTPS 发送。不要在公网环境开启 --insecure-cookies。</Callout>
@@ -99,9 +102,17 @@ server {
         ["垃圾回收", "从频道中删除已经没有文件引用的分片，释放空间", "大量删除后，或每周一次"],
         ["完整性校验", "下载分片并校验哈希；深度校验还会逐帧解密验证。每次检查最早的 100 个文件，会占用 Telegram 带宽", "每月一次；怀疑数据损坏时立即运行"],
       ]} />
+      <H2>传输与清理</H2>
+      <p>网页、访问密钥 API 与 S3 共用服务端传输名额。请求在读取上传数据前排队，等待超过 30 秒返回 503（S3 为 SlowDown），可稍后重试。默认全局 4 个名额、每桶 2 个；以 16 MiB 分片估算，上传缓冲约为每个活动分段 64 MiB，调整前请预留加密、下载和密码校验的内存。</p>
+      <p>后台每轮最多清理 500 个中断上传、500 个孤立文件和 500 个已完成上传记录，回收站每轮最多处理 100 个过期条目。剩余积压在后续周期继续处理。</p>
+      <H2>审计保留与导出</H2>
+      <p>默认永久保留在线日志。设置审计保留天数后，每轮最多将 500 条过期记录加密归档到数据目录的 <C>audit-archives/</C>；归档可靠落盘后才从在线日志移除，归档文件不会自动删除。请将该目录一起备份，并保存归档时的加密口令。</p>
+      <Code lang="bash" code={`tgdrive audit-export /var/lib/tgdrive/audit-archives/audit-1-500-123.tgdaudit --output ./audit.jsonl`} />
+      <p>导出交互式输入归档时的口令，生成权限为 0600 的 JSONL 文件，拒绝覆盖已有文件，不需要访问在线数据库。</p>
       <H2>备份</H2>
       <ul className="doc-list">
         <li>数据目录中的 <C>meta.db</C> 保存了全部文件索引和加密后的密钥，丢失后频道中的分片将无法使用。请定期备份数据目录。</li>
+        <li>备份固定数据库与密钥版本，创建和恢复都分块处理；保留 v2 格式，旧备份继续可恢复。同一秒创建的备份使用不同文件名。</li>
         <li>加密口令不保存在任何地方，请保存在密码管理器中。没有口令，备份也无法恢复。</li>
         <li>升级时，程序会在迁移数据库前自动生成 <C>meta.db.v&lt;旧版本&gt;.*.bak</C> 备份。</li>
       </ul>

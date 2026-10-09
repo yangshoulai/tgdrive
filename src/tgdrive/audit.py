@@ -7,6 +7,12 @@ from __future__ import annotations
 
 import json
 import time
+import base64
+import os
+import secrets
+from pathlib import Path
+
+from .crypto import derive_subkey, seal
 
 from .metadata import Metadata
 
@@ -28,6 +34,49 @@ ACTIONS = {
 class AuditLog:
     def __init__(self, metadata: Metadata) -> None:
         self.metadata = metadata
+
+    def archive(self, directory: str | Path, keystore, *, days: int, now: float | None = None,
+                limit: int = 500) -> dict[str, object]:
+        """先可靠写入加密 JSONL 归档，再移出在线日志；默认保留策略不调用此方法。"""
+        if days < 1 or limit < 1:
+            raise ValueError("归档期限和批量大小必须为正数")
+        cutoff = (time.time() if now is None else now) - days * 86400
+        rows = self.metadata.db.execute(
+            "SELECT * FROM audit_log WHERE ts<? ORDER BY ts,id LIMIT ?", (cutoff, limit)).fetchall()
+        if not rows:
+            return {"archived": 0}
+        # 头部 KDF 参数与加密密钥必须来自同一版本。
+        with keystore.consistency_lock:
+            key = self.metadata.get_key_row()
+            kek = keystore.require_kek()
+            header = json.dumps({"kdf_salt": base64.b64encode(key["kdf_salt"]).decode(),
+                                 "kdf_params": json.loads(key["kdf_params"]), "key_version": key["version"],
+                                 "kind": "audit-jsonl", "created_at": time.time()}, separators=(",", ":")).encode()
+        from .maintenance import EncryptedSnapshotStore
+        data = b"".join(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":")).encode() + b"\n" for row in rows)
+        payload = EncryptedSnapshotStore.MAGIC_V2 + len(header).to_bytes(4, "big") + header
+        payload += seal(derive_subkey(kek, "snapshot"), data, EncryptedSnapshotStore.AAD + header)
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        name = f"audit-{rows[0]['id']}-{rows[-1]['id']}-{time.time_ns()}.tgdaudit"
+        destination = directory / name
+        staging = directory / f".{name}.{secrets.token_hex(6)}.tmp"
+        try:
+            with os.fdopen(os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(staging, destination)
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            with self.metadata.transaction() as db:
+                db.executemany("DELETE FROM audit_log WHERE id=? AND ts<?", ((row["id"], cutoff) for row in rows))
+        finally:
+            staging.unlink(missing_ok=True)
+        return {"archived": len(rows), "name": name}
 
     def record(self, action: str, *, actor_type: str, actor: str | None, ok: bool, target: str | None = None,
                detail: dict[str, object] | None = None, ip: str | None = None) -> None:
