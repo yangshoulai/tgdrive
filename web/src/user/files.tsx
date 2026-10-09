@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { useCursorPage } from "../pagination";
-import { FolderPicker } from "./folders";
+import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileTile, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, makeThumbnail, parentPath, thumbnailable } from "../files";
+import { FileThumbnail, FileTile, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, makeThumbnail, parentPath, thumbnailable } from "../files";
 
 import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
@@ -12,7 +12,7 @@ import { UploadDialog, type UploadQueue } from "./uploads";
 
 /* ---------- 文件 ---------- */
 
-type Entry = { kind: "folder"; key: string } | { kind: "file"; key: string; file: api.FileItem };
+type Entry = { kind: "folder"; key: string; size?: number } | { kind: "file"; key: string; file: api.FileItem };
 type SortKey = "name" | "size" | "modified";
 
 export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number }) {
@@ -50,6 +50,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const files = useMemo(() => (pagination.page?.objects ?? []).filter(item => !item.key.endsWith("/")), [pagination.page]);
   const folders = pagination.page?.common_prefixes ?? [];
   const publicFolders = pagination.page?.public_folders ?? {};
+  const folderSizes = pagination.page?.folder_sizes ?? {};
   const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
   const setPublicFolders = (update: (items: Record<string, api.FileItem>) => Record<string, api.FileItem>) => pagination.setPage(current => current && { ...current, public_folders: update(current.public_folders ?? {}) });
   useEffect(() => { setSelected(new Set()); }, [fetchPage, pagination.number]);
@@ -63,10 +64,12 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       .sort((a, b) => direction * (sort.key === "size" ? a.size - b.size : sort.key === "modified" ? a.modified_at - b.modified_at : baseName(a.key).localeCompare(baseName(b.key), "zh-CN", { numeric: true })))
       .map(file => ({ kind: "file" as const, key: file.key, file }));
     const folderEntries = [...folders].filter(key => filter === "all" || publicFolders[key])
-      .sort((a, b) => (sort.key === "name" ? direction : 1) * a.localeCompare(b, "zh-CN", { numeric: true }))
-      .map(key => ({ kind: "folder" as const, key }));
+      .sort((a, b) => sort.key === "size"
+        ? direction * ((folderSizes[a] ?? 0) - (folderSizes[b] ?? 0)) || a.localeCompare(b, "zh-CN", { numeric: true })
+        : (sort.key === "name" ? direction : 1) * a.localeCompare(b, "zh-CN", { numeric: true }))
+      .map(key => ({ kind: "folder" as const, key, size: folderSizes[key] }));
     return [...folderEntries, ...fileEntries];
-  }, [files, folders, publicFolders, filter, sort]);
+  }, [files, folders, publicFolders, folderSizes, filter, sort]);
   /** 文件夹的分享信息保存在它的目录标记上；还没公开过的文件夹用一个占位对象打开分享对话框。 */
   const folderItem = (key: string): api.FileItem => publicFolders[key] ?? { key, size: 0, etag: "", content_type: "application/x-directory", modified_at: 0 };
   const selectedEntries = entries.filter(entry => selected.has(entry.key));
@@ -235,6 +238,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索全部文件，按回车" label="搜索文件" />
           <div className="toolbar-actions">
             <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />
+            <label className="mobile-file-sort"><span className="sr-only">本页排序</span><select aria-label="本页排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
+              const [key, direction] = event.target.value.split(":"); setSort({ key: key as SortKey, desc: direction === "desc" });
+            }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select></label>
             <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
           </div>
         </div>
@@ -260,10 +266,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             {entries.map(entry => entry.kind === "folder" ? (
               <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}${dropClass(entry.key)}`} {...dragProps(entry)} {...dropProps(entry.key)} onClick={() => onOpenFolder(entry.key)}>
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
-                <span role="cell" className="cell-name"><FileTile kind="folder" /><button type="button" className="name-button" onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
+                <span role="cell" className="cell-name"><FileTile kind="folder" /><span className="name-stack"><button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
+                  <span className="file-mobile-meta"><span>文件夹 · {entry.size == null ? "—" : formatBytes(entry.size)}</span>{publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span></span>
                   {publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span>
                 <span role="cell" className="cell-type muted">文件夹</span>
-                <span role="cell" className="cell-size muted">—</span>
+                <span role="cell" className="cell-size muted" title="包含所有子文件夹中的文件">{entry.size == null ? "—" : formatBytes(entry.size)}</span>
                 <span role="cell" className="cell-date muted">—</span>
                 <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
                   <span className="row-quick"><IconButton icon="link" size="sm" label={`分享 ${baseName(entry.key)}`} onClick={() => setSharing(folderItem(entry.key))} /></span>
@@ -276,7 +283,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                 <span role="cell" className="cell-name">
                   <FileTile kind={getFileKind(entry.file.content_type, entry.key)} />
                   <span className="name-stack">
-                    <button type="button" className="name-button" onClick={event => { event.stopPropagation(); setPreview(entry.file); }}>{baseName(entry.key)}</button>
+                    <button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); setPreview(entry.file); }}>{baseName(entry.key)}</button>
+                    <span className="file-mobile-meta"><span>{kindLabel(getFileKind(entry.file.content_type, entry.key))} · {formatBytes(entry.file.size)} · {formatDate(entry.file.modified_at)}</span>{entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>
                     {query && parentPath(entry.key) && <small>{parentPath(entry.key)}</small>}
                   </span>
                   {entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}
@@ -300,9 +308,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                 <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${entry.kind === "folder" ? dropClass(entry.key) : ""}`} {...dragProps(entry)} {...(entry.kind === "folder" ? dropProps(entry.key) : {})} onClick={() => entry.kind === "folder" ? onOpenFolder(entry.key) : setPreview(entry.file)}>
                   <div className="grid-thumb">
                     {/* 有缩略图用缩略图；小图片直接显示原图；大图片显示类型图标，避免每个卡片下载完整原图。 */}
-                    {entry.kind === "file" && entry.file.has_thumbnail ? <img src={api.thumbnailUrl(entry.key, entry.file.etag)} alt="" loading="lazy" />
-                      : kind === "image" && entry.kind === "file" && entry.file.size <= 2 * 1024 * 1024 ? <img src={api.contentUrl(entry.key)} alt="" loading="lazy" />
-                        : <FileTile kind={kind} size="xl" />}
+                    <FileThumbnail kind={kind} url={entry.kind === "file" && entry.file.has_thumbnail ? api.thumbnailUrl(entry.key, entry.file.etag)
+                      : kind === "image" && entry.kind === "file" && entry.file.size <= 2 * 1024 * 1024 ? api.contentUrl(entry.key) : undefined} />
                     <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                     {(entry.kind === "file" ? entry.file.public_token : publicFolders[entry.key]) && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
                   </div>
@@ -312,7 +319,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                       onClick={event => { event.stopPropagation(); if (entry.kind === "folder") onOpenFolder(entry.key); else setPreview(entry.file); }}>
                       {baseName(entry.key)}
                     </button>
-                    <span className="grid-sub">{entry.kind === "folder" ? "文件夹" : `${kindLabel(kind)} · ${formatBytes(entry.file.size)}`}</span>
+                    <span className="grid-sub">{entry.kind === "folder" ? `文件夹 · ${entry.size == null ? "—" : formatBytes(entry.size)}` : `${kindLabel(kind)} · ${formatBytes(entry.file.size)}`}</span>
                     <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(entry.key)} 的更多操作`} items={entry.kind === "folder" ? folderMenu(entry.key) : fileMenu(entry.file)} /></span>
                   </div>
                 </div>
@@ -399,7 +406,7 @@ function SortHeader({ label, column, sort, onSort, className }: { label: string;
 
 function NameDialog({ title, label, confirm, initial = "", location, onClose, onSubmit }: { title: string; label: string; confirm: string; initial?: string; location?: string; onClose: () => void; onSubmit: (value: string, destination: string) => Promise<void> }) {
   const [destination, setDestination] = useState(location ?? "");
-  const [ready, setReady] = useState(location === undefined);
+  const [ready, setReady] = useState(true);
   const [value, setValue] = useState(initial);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -420,13 +427,13 @@ function NameDialog({ title, label, confirm, initial = "", location, onClose, on
     finally { setBusy(false); }
   }
   return (
-    <Modal title={title} onClose={onClose} size={location === undefined ? "sm" : "md"}
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="name-form" loading={busy} disabled={!ready}>{confirm}</Button></>}>
+    <Modal title={title} onClose={onClose} dismissible={!busy} size={location === undefined ? "sm" : "md"}
+      footer={<><Button disabled={busy} onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="name-form" loading={busy} disabled={!ready || !value.trim()}>{confirm}</Button></>}>
       <form id="name-form" className="form" onSubmit={submit} noValidate>
         <Field label={label} htmlFor="name-input" error={error}>
           <input id="name-input" ref={input} className="input" value={value} onChange={event => { setValue(event.target.value); setError(""); }} autoFocus />
         </Field>
-        {location !== undefined && <div className="form"><span className="field-label">创建位置</span><FolderPicker value={destination} onChange={next => { setReady(false); setDestination(next); }} onReady={setReady} /></div>}
+        {location !== undefined && <DestinationPicker value={destination} onChange={next => { setReady(false); setDestination(next); }} onReady={setReady} />}
       </form>
     </Modal>
   );

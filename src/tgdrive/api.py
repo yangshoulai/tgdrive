@@ -258,13 +258,15 @@ class AdminApi:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         self.clients.grant(client_id, bucket_id, prefix, perms)
 
-    def list_bots(self, token: str) -> list[dict[str, object]]:
+    async def list_bots(self, token: str) -> list[dict[str, object]]:
         self.accounts.sessions.require(token, role="admin")
         if self.telegram_bots is None:
             return []
         items = self.telegram_bots.list()
         runtime = self.storage.bot_runtime() if self.storage is not None else {}
-        return [{**item, "runtime": runtime.get(str(item["id"]))} for item in items]
+        usage = await self.accounts.metadata.run_in_thread(self.telegram_bots.storage_usage) if items else {}
+        return [{**item, "runtime": runtime.get(str(item["id"])),
+                 **usage.get(str(item["id"]), {"chunk_count": 0, "stored_bytes": 0})} for item in items]
 
     def create_bot(self, token: str, csrf: str, name: str, bot_token: str, channel_id: str) -> dict[str, object]:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
@@ -469,10 +471,14 @@ class UserApi:
         path_prefix = normalize_user_path(prefix) if prefix else ""
         if public_only:
             return await self.objects.metadata.run_in_thread(self._public_directory_page, account.bucket_id, path_prefix, cursor, limit)
-        page = await self.objects.alist_objects(Scope(account.bucket_id, ""), path_prefix, "/", cursor, min(limit, 1000))
-        return {"objects": [self._object_json(item) for item in page.objects],
-                "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor,
-                "public_folders": self._public_folders(account.bucket_id, page.common_prefixes)}
+        def read_page():
+            scope = Scope(account.bucket_id)
+            page = self.objects.list_objects(scope, path_prefix, "/", cursor, min(limit, 1000))
+            return {"objects": [self._object_json(item) for item in page.objects],
+                    "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor,
+                    "folder_sizes": self.objects.folder_sizes(scope, page.common_prefixes),
+                    "public_folders": self._public_folders(account.bucket_id, page.common_prefixes)}
+        return await self.objects.metadata.run_in_thread(read_page)
 
     def _public_directory_page(self, bucket_id: int, prefix: str, cursor: str | None, limit: int):
         limit = max(1, min(limit, 200))
@@ -485,6 +491,7 @@ class UserApi:
         folders = {item["key"]: item for item in items if item["key"].endswith("/")}
         return {"objects": [item for item in items if not item["key"].endswith("/")],
                 "common_prefixes": list(folders), "public_folders": folders,
+                "folder_sizes": self.objects.folder_sizes(Scope(bucket_id), list(folders)),
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
     async def folders(self, token: str, *, prefix: str = "", cursor: str = "", limit: int = 50):
@@ -696,7 +703,9 @@ class UserApi:
             lambda: self.objects.metadata.db.execute(f"SELECT COUNT(*) FROM objects WHERE {condition}", (scope.bucket_id,)).fetchone()[0])
         rows = self.objects.metadata.db.execute(
             f"SELECT * FROM objects WHERE {condition} AND key>? ORDER BY key LIMIT ?", (scope.bucket_id, cursor, limit + 1)).fetchall()
-        return {"objects": [self._object_json(self.objects._object(row)) for row in rows[:limit]], "total": total,
+        items = [self._object_json(self.objects._object(row)) for row in rows[:limit]]
+        return {"objects": items, "total": total,
+                "folder_sizes": self.objects.folder_sizes(scope, [item["key"] for item in items if item["key"].endswith("/")]),
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
     def change_password(self, token: str, csrf: str, old_password: str, new_password: str) -> None:

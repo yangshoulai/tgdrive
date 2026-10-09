@@ -183,7 +183,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
     </>;
   }
-  const personal: NavGroup<Section> = { label: isAdmin ? "我的空间" : undefined, items: [
+  const personal: NavGroup<Section> = { label: isAdmin ? "我的空间" : undefined, workspace: isAdmin, items: [
     { key: "files", label: "我的文件", icon: "folder" },
     { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
     { key: "trash", label: "回收站", icon: "trash" },
@@ -191,7 +191,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   ] };
   const groups: NavGroup<Section>[] = [
     personal,
-    ...(isAdmin ? [{ label: "系统管理", items: ADMIN_MODULES }] : []),
+    ...(isAdmin ? [{ label: "系统管理", workspace: true, items: ADMIN_MODULES }] : []),
     { label: "帮助", items: [{ key: "docs" as Section, label: "使用文档", icon: "book", href: "/docs" }] },
   ];
   return (
@@ -204,9 +204,9 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
           </button>
         )}
         <div className="storage-meter">
-          <div className="storage-meter-head"><span>存储空间</span><strong>{usage?.quota_bytes ? `${Math.round(percent)}%` : "不限"}</strong></div>
-          <Progress value={usage?.quota_bytes ? percent : 0} tone={usageTone(percent)} label="存储使用率" />
-          <p>{formatBytes(usage?.used_bytes ?? 0)}{usage?.quota_bytes ? ` / ${formatBytes(usage.quota_bytes)}` : " 已使用"}</p>
+          <div className="storage-meter-head"><span>存储空间</span><strong>{usage?.quota_bytes != null ? usage.quota_bytes > 0 ? `${Math.round(percent)}%` : "配额 0 B" : "不限"}</strong></div>
+          {usage?.quota_bytes != null && usage.quota_bytes > 0 && <Progress value={percent} tone={usageTone(percent)} label="存储使用率" />}
+          <p>{formatBytes(usage?.used_bytes ?? 0)}{usage?.quota_bytes != null ? ` / ${formatBytes(usage.quota_bytes)}` : " 已使用"}</p>
         </div>
       </>}
       account={{ name: session.username, caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", menu: [

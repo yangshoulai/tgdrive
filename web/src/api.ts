@@ -15,13 +15,13 @@ export type FileItem = {
   has_thumbnail?: boolean;
 };
 /** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
-export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem> };
+export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number> };
 export type Account = { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
 export type ClientKey = { access_key_id: string; status: "active" | "disabled"; created_at: number; last_used_at: number | null };
 export type ClientGrant = { bucket_id: number; bucket_name: string; prefix: string; perms: "ro" | "rw" };
 export type AdminClient = { id: number; name: string; description: string | null; owner_user_id: number | null; owner_username?: string | null; status: "active" | "disabled"; created_at: number; keys: ClientKey[]; grants: ClientGrant[] };
 export type BotRuntime = { failures: number; cooldown_seconds: number; last_sent_at: number; state: "enabled" | "draining" | "disabled" } | null;
-export type BotConfig = { id: number; name: string; channel_id: string; status: "active" | "disabled"; created_at: number; last_check_at: number | null; last_check_status: string | null; runtime?: BotRuntime };
+export type BotConfig = { id: number; name: string; channel_id: string; status: "active" | "disabled"; created_at: number; last_check_at: number | null; last_check_status: string | null; runtime?: BotRuntime; chunk_count?: number; stored_bytes?: number };
 export type AdminObject = FileItem & { bucket_id: number; bucket_name: string; username: string | null };
 /** 当前登录账号：管理员和普通用户共用同一个会话接口，角色决定能看到哪些功能。 */
 export type UserMe = { id: number; username: string; role: Role; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; unlocked: boolean; remember?: boolean; csrf_token: string; expires_at: number } & SiteConfig;
@@ -35,7 +35,7 @@ export type PublicFolder = { kind: "folder"; token: string; password_required: f
 export type PublicObject = PublicFile | PublicFolder | { token: string; password_required: true };
 export type PublicFolderPage = {
   name: string; path: string; next_cursor: string | null;
-  folders: { name: string; path: string }[];
+  folders: { name: string; path: string; size?: number }[];
   files: { name: string; path: string; size: number; content_type: string | null; etag: string; modified_at: number }[];
 };
 export type CreatedClient = { id: number; access_key_id: string; secret: string };
@@ -149,7 +149,7 @@ export const getUpload = (id: string) => request<UploadState>(`/api/user/v1/uplo
 export const completeUpload = (id: string, parts: [number, string][], isPublic?: boolean) => post<FileItem>(`/api/user/v1/uploads/${id}/complete`, { parts, ...(isPublic === undefined ? {} : { public: isPublic }) }, 15 * 60000);
 export const abortUpload = (id: string) => request<void>(`/api/user/v1/uploads/${id}`, { method: "DELETE" });
 export const listPublic = () => request<FileItem[]>("/api/user/v1/public");
-export const listPublicPage = (cursor: string | null = null, limit = 50) => request<{ objects: FileItem[]; total: number; next_cursor: string | null }>(
+export const listPublicPage = (cursor: string | null = null, limit = 50) => request<{ objects: FileItem[]; total: number; next_cursor: string | null; folder_sizes?: Record<string, number> }>(
   `/api/user/v1/public?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const contentUrl = (path: string, download = false) => `/api/user/v1/content?path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
 

@@ -6,14 +6,14 @@ import { fingerprintFile, fingerprintSupported } from "../fingerprint";
 import { FileTile, getFileKind, makeThumbnail, thumbnailable } from "../files";
 
 import { Badge, Button, Icon, IconButton, Modal, Progress, Switch, copyText, formatBytes, toast } from "../ui";
-import { FolderPicker } from "./folders";
+import { DestinationPicker } from "./folders";
 
 /* ---------- 上传 ---------- */
 
 export function UploadDialog({ files, destination: initialDestination, onClose, onStart }: { files: File[]; destination: string; onClose: () => void; onStart: (files: File[], isPublic: boolean, destination: string) => void }) {
   const [list, setList] = useState(files);
   const [destination, setDestination] = useState(initialDestination);
-  const [ready, setReady] = useState(false);
+  const [ready, setReady] = useState(true);
   const [existing, setExisting] = useState<Set<string>>(new Set());
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState("");
@@ -41,7 +41,7 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
   return (
     <Modal title={`上传 ${list.length} 个文件`} description={<>上传到 <strong>{destination ? `/${destination}` : "我的文件"}</strong>，共 {formatBytes(total)}</>} icon="upload" onClose={onClose} size="md"
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" icon="upload" disabled={!ready || checking || Boolean(error) || !list.length} onClick={() => { localStorage.setItem("tgdrive:upload-public", isPublic ? "1" : "0"); onStart(list, isPublic, destination); }}>开始上传</Button></>}>
-      <FolderPicker value={destination} onChange={next => { setReady(false); setDestination(next); setChecking(true); }} onReady={setReady} />
+      <DestinationPicker value={destination} onChange={next => { setReady(false); setDestination(next); setChecking(true); }} onReady={setReady} />
       <ul className="upload-pick-list">
         {list.map((file, index) => (
           <li key={`${file.name}-${index}`}>

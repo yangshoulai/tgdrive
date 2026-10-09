@@ -2,10 +2,10 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { BRAND, SITE } from "./brand";
 import * as api from "./api";
-import { Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Toaster, type IconName, type MenuItem } from "./ui";
+import { Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
 
 export type NavItem<K extends string> = { key: K; label: string; icon: IconName; count?: number; href?: string };
-export type NavGroup<K extends string> = { label?: string; items: NavItem<K>[] };
+export type NavGroup<K extends string> = { label?: string; workspace?: boolean; items: NavItem<K>[] };
 
 export function AppShell<K extends string>({ groups, active, onNavigate, sidebarFooter, account, children }: {
   groups: NavGroup<K>[];
@@ -16,6 +16,8 @@ export function AppShell<K extends string>({ groups, active, onNavigate, sidebar
   children: ReactNode;
 }) {
   const [drawer, setDrawer] = useState(false);
+  const workspaces = groups.filter(group => group.workspace && group.label);
+  const currentWorkspace = workspaces.find(group => group.items.some(item => item.key === active)) ?? workspaces[0];
   useEffect(() => { setDrawer(false); }, [active]);
   useEffect(() => {
     if (!drawer) return;
@@ -37,10 +39,13 @@ export function AppShell<K extends string>({ groups, active, onNavigate, sidebar
           <Brand />
           <button type="button" className="icon-btn icon-btn-ghost icon-btn-sm sidebar-close" aria-label="关闭导航" onClick={() => setDrawer(false)}><Icon name="x" size={16} /></button>
         </div>
+        {workspaces.length > 1 && <div className="workspace-switch"><Segmented label="工作区" value={currentWorkspace.label!} options={workspaces.map(group => ({ value: group.label!, label: group.label! }))} onChange={label => {
+          const group = workspaces.find(item => item.label === label); if (group?.items[0]) onNavigate(group.items[0].key);
+        }} /></div>}
         <nav className="sidebar-nav">
-          {groups.map((group, index) => (
+          {groups.filter(group => workspaces.length < 2 || !group.workspace || group === currentWorkspace).map((group, index) => (
             <div className="nav-group" key={group.label ?? index}>
-              {group.label && <p className="nav-group-label">{group.label}</p>}
+              {group.label && !group.workspace && <p className="nav-group-label">{group.label}</p>}
               {group.items.map(item => {
                 const content = <><Icon name={item.icon} size={18} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
                 return item.href
@@ -86,7 +91,7 @@ function AuthHero({ admin }: { admin: boolean }) {
     : [
       { icon: "upload", text: "上传、整理、预览各种文件，在任何设备上都能找到它们。" },
       { icon: "link", text: "一键生成分享链接，可以设置有效期和访问密码。" },
-      { icon: "lock", text: "文件加密保存，只有你的账号能打开。" },
+      { icon: "lock", text: "文件加密保存，由你控制是否公开分享。" },
     ];
   return (
     <div className="auth-visual">
@@ -162,7 +167,7 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
     usernameInput.current?.focus();
   }
   return (
-    <AuthLayout admin={false} title="登录" description="进入你的文件空间。管理员登录后还会看到系统管理。"
+    <AuthLayout admin={false} title="登录" description="登录你的文件空间。"
       footer={<><a href="/docs">使用文档</a><span>没有账号？请联系管理员创建。</span></>}>
       {notice}
       <form className="form" onSubmit={submit} noValidate>

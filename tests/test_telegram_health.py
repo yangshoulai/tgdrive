@@ -6,9 +6,11 @@ from pathlib import Path
 from unittest import mock
 
 from tests.test_telegram_store import FakeTransport
+from tgdrive.blobengine import BlobEngine
 from tgdrive.blobstore import LocalDiskBlobStore
 from tgdrive.keystore import KeyStore
 from tgdrive.metadata import Metadata
+from tgdrive.objects import ObjectService, Scope
 from tgdrive.telegram import config as config_module
 from tgdrive.telegram.client import HttpResponse, TelegramClient
 from tgdrive.telegram.config import ConfiguredBlobStore, TelegramBotConfigStore
@@ -77,6 +79,32 @@ class TelegramPathTests(unittest.IsolatedAsyncioTestCase):
             await store.get(ref)
         self.assertEqual(len(store._file_cache), 3)
         self.assertEqual([key[1] for key in store._file_cache], [TelegramRef.decode(ref).file_id for ref in refs[-3:]])
+
+    async def test_channel_usage_counts_encrypted_chunks_without_duplicate_copies(self):
+        first = self.config.create("first", TOKEN_A, "-1001234567")
+        engine = BlobEngine(self.metadata, self.store, keystore=self.keys, chunk_size=8, frame_size=4)
+        objects = ObjectService(self.metadata, engine)
+        scope = Scope(objects.create_bucket("usage-test"))
+        item = await objects.put_object(scope, "a.bin", b"0123456789")
+        chunks = self.metadata.list_chunks(item.blob_uuid)
+        expected = {"chunk_count": 2, "stored_bytes": sum(chunk.cipher_size for chunk in chunks)}
+        self.assertEqual(self.config.storage_usage(), {str(first["id"]): expected})
+        self.assertGreater(expected["stored_bytes"], item.size)
+        await objects.copy_object(scope, "a.bin", scope, "copy.bin")
+        self.assertEqual(self.config.storage_usage()[str(first["id"])], expected)
+        self.config.set_status(int(first["id"]), "disabled")
+        second = self.config.create("second", TOKEN_B, "-1007654321")
+        second_item = await objects.put_object(scope, "b.bin", b"new")
+        second_size = sum(chunk.cipher_size for chunk in self.metadata.list_chunks(second_item.blob_uuid))
+        self.assertEqual(self.config.storage_usage()[str(second["id"])], {"chunk_count": 1, "stored_bytes": second_size})
+        self.assertEqual(self.config.storage_usage()[str(first["id"])], expected)
+        self.config.set_status(int(second["id"]), "disabled")
+        await objects.put_object(scope, "local.bin", b"local")
+        self.assertEqual(sum(value["chunk_count"] for value in self.config.storage_usage().values()), 3)
+        await objects.trash(scope, ["a.bin"])
+        self.assertEqual(self.config.storage_usage()[str(first["id"])], expected)
+        await objects.delete_objects(scope, ["copy.bin"])
+        self.assertEqual(self.config.storage_usage()[str(first["id"])], expected)
 
     async def test_failed_bot_is_retried_on_another_and_cooled_down(self):
         flaky = PoolBot("bad", TelegramClient("1:x", transport=FlakyTransport()), -1001)

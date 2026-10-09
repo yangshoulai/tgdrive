@@ -184,7 +184,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
                   <div key={item.path} role="row" className="data-row is-clickable" onClick={() => open(item.path)}>
                     <span role="cell" className="cell-name"><FileTile kind="folder" /><button type="button" className="name-button" onClick={event => { event.stopPropagation(); open(item.path); }}>{item.name}</button></span>
                     <span role="cell" className="cell-type muted">文件夹</span>
-                    <span role="cell" className="cell-size muted">—</span>
+                    <span role="cell" className="cell-size muted" title="包含所有子文件夹中的文件">{item.size == null ? "—" : formatBytes(item.size)}</span>
                     <span role="cell" className="cell-date muted">—</span>
                     <span role="cell" className="cell-actions" />
                   </div>

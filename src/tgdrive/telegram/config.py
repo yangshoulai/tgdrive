@@ -55,6 +55,19 @@ class TelegramBotConfigStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def storage_usage(self) -> dict[str, dict[str, int]]:
+        """按通道对应的 Bot 汇总已记录的加密分片，复用短期缓存，不访问 Telegram。"""
+        def read():
+            rows = self.metadata.db.execute(
+                "WITH refs AS (SELECT cipher_size, "
+                "CASE WHEN json_valid(blob_ref) THEN CAST(json_extract(blob_ref,'$.bot') AS TEXT) END AS bot_id, "
+                "CASE WHEN json_valid(blob_ref) THEN json_extract(blob_ref,'$.v') END AS version FROM chunks) "
+                "SELECT bot_id,COUNT(*) AS chunk_count,COALESCE(SUM(cipher_size),0) AS stored_bytes "
+                "FROM refs WHERE version=1 AND bot_id IS NOT NULL GROUP BY bot_id")
+            return {row["bot_id"]: {"chunk_count": int(row["chunk_count"]), "stored_bytes": int(row["stored_bytes"])}
+                    for row in rows}
+        return self.metadata.cached_read(("telegram-storage-usage",), read)
+
     def record_check(self, bot_id: int, status: str) -> None:
         with self.metadata.transaction() as db:
             db.execute("UPDATE telegram_bots SET last_check_at=?, last_check_status=? WHERE id=?", (time.time(), status, bot_id))

@@ -57,9 +57,11 @@ class PublicFolderTests(unittest.TestCase):
             status, page = await self.api("GET", f"/api/public/v1/folders/{token}/list")
             self.assertEqual((status, [item["name"] for item in page["files"]], [item["path"] for item in page["folders"]]),
                              (200, ["a.txt"], ["sub/"]))
+            self.assertEqual(page["folders"][0]["size"], 6)
             status, page = await self.api("GET", f"/api/public/v1/folders/{token}/list?path=sub/")
             self.assertEqual(([item["path"] for item in page["files"]], [item["path"] for item in page["folders"]]),
                              (["sub/b.txt"], ["sub/deep/"]))
+            self.assertEqual(page["folders"][0]["size"], 3)
             status, page = await self.api("GET", f"/api/public/v1/folders/{token}/list?path=sub/deep")
             self.assertEqual([item["name"] for item in page["files"]], ["c.txt"])
 
@@ -159,13 +161,27 @@ class PublicFolderTests(unittest.TestCase):
             token = (await self.share(alice, "dir/sub/"))["public_token"]
             _, page = await self.api("GET", "/api/user/v1/list?prefix=dir/", alice)
             self.assertEqual(page["public_folders"]["dir/sub/"]["public_token"], token)
+            self.assertEqual(page["folder_sizes"], {"dir/sub/": 6})
+            _, page = await self.api("GET", "/api/user/v1/list?prefix=dir/&public=1&limit=1", alice)
+            self.assertEqual(page["folder_sizes"], {"dir/sub/": 6})
+            _, page = await self.api("GET", "/api/user/v1/public?limit=1", alice)
+            self.assertEqual(page["folder_sizes"], {"dir/sub/": 6})
             _, page = await self.api("GET", "/api/user/v1/list", alice)
             self.assertEqual(page["public_folders"], {})
+            self.assertEqual(page["folder_sizes"], {"dir/": 13, "other/": 7})
+            # 写入后立即失效缓存，同名前缀的相邻目录不计入。
+            await self.put(alice, "dir/sub/new.txt", b"new!")
+            await self.put(alice, "dir-other/ignore.txt", b"outside")
+            _, page = await self.api("GET", "/api/user/v1/list?prefix=dir/", alice)
+            self.assertEqual(page["folder_sizes"], {"dir/sub/": 10})
             status, _ = await self.api("POST", "/api/user/v1/public", alice, {"paths": ["nothing/"], "public": True})
             self.assertEqual(status, 404)
             bob = await self.client.login("user", "bob", "bob password")
             status, _ = await self.api("POST", "/api/user/v1/public", bob, {"paths": ["dir/"], "public": True})
             self.assertEqual(status, 404)
+            await self.put(bob, "dir/sub/own.txt", b"bob")
+            _, page = await self.api("GET", "/api/user/v1/list", bob)
+            self.assertEqual(page["folder_sizes"], {"dir/": 3})
         asyncio.run(run())
 
     def test_recreating_a_folder_keeps_its_share(self):
@@ -182,6 +198,8 @@ class PublicFolderTests(unittest.TestCase):
         async def run():
             alice = await self.client.login("user", "alice", "alice password")
             await self.api("POST", "/api/user/v1/folders", alice, {"path": "empty"})
+            _, page = await self.api("GET", "/api/user/v1/list", alice)
+            self.assertEqual(page["folder_sizes"], {"empty/": 0})
             token = (await self.share(alice, "empty/"))["public_token"]
             status, page = await self.api("GET", f"/api/public/v1/folders/{token}/list")
             self.assertEqual((status, page["files"], page["folders"]), (200, [], []))

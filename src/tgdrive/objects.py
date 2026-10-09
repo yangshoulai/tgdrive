@@ -515,12 +515,16 @@ class ObjectService:
         if relative and not relative.endswith("/"):
             relative += "/"
         prefix = root.key + relative
-        scope = Scope(root.bucket_id)
-        page = await self.alist_objects(scope, prefix, "/", cursor, max(1, min(limit, 500)))
+        scope = Scope(root.bucket_id, root.key)
+        def read_page():
+            page = self.list_objects(scope, prefix, "/", cursor, max(1, min(limit, 500)))
+            return page, self.folder_sizes(scope, page.common_prefixes)
+        page, sizes = await self.metadata.run_in_thread(read_page)
         files = [{"name": item.key[len(prefix):], "path": item.key[len(root.key):], "size": item.size, "content_type": item.content_type,
                   "etag": item.etag, "modified_at": item.modified_at}
                  for item in page.objects if item.key != prefix and not item.key.endswith("/")]
-        folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):]} for value in page.common_prefixes]
+        folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):], "size": sizes[value]}
+                   for value in page.common_prefixes]
         if relative and not files and not folders and cursor is None and not self.metadata.db.execute(
                 "SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (root.bucket_id, prefix)).fetchone():
             raise NotFoundError(relative)
@@ -564,6 +568,31 @@ class ObjectService:
 
     # 跳过一个公共前缀下全部键时使用的上界：U+10FFFF 是最大码点，按 SQLite 二进制排序大于该前缀下的任何键。
     _PREFIX_END = "\U0010ffff"
+
+    def folder_sizes(self, scope: Scope, prefixes: list[str]) -> dict[str, int]:
+        """只汇总当前页目录下的原始文件大小；由桶和路径范围限制查询，不读取文件内容。"""
+        prefixes = list(dict.fromkeys(prefixes))
+        for prefix in prefixes:
+            self._check_scope(scope, prefix)
+            if not prefix.endswith("/"):
+                raise ValueError("folder path must end with /")
+        if not prefixes:
+            return {}
+        def read():
+            sizes: dict[str, int] = {}
+            # 限制 SQL 参数数量；范围连接使用已有的桶 / 键索引，隐式目录和空目录也能统计。
+            for start in range(0, len(prefixes), 200):
+                batch = prefixes[start:start + 200]
+                values = ",".join("(?,?)" for _ in batch)
+                params = [value for prefix in batch for value in (prefix, prefix + self._PREFIX_END)]
+                rows = self.metadata.db.execute(
+                    f"WITH folders(prefix,upper_key) AS (VALUES {values}) "
+                    "SELECT f.prefix,COALESCE(SUM(o.size),0) AS size FROM folders f "
+                    "LEFT JOIN objects o ON o.bucket_id=? AND o.key>f.prefix AND o.key<f.upper_key "
+                    "AND substr(o.key,-1)!='/' GROUP BY f.prefix", (*params, scope.bucket_id))
+                sizes.update((row["prefix"], int(row["size"])) for row in rows)
+            return sizes
+        return self.metadata.cached_read(("folder-sizes", scope.bucket_id, tuple(prefixes)), read)
 
     async def delete_prefix(self, scope: Scope, prefix: str, *, batch: int = 1000) -> int:
         """删除前缀下的全部对象（含目录标记），按批提交，避免长时间占用写锁。返回删除数量。"""

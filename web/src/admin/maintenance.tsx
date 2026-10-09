@@ -12,40 +12,39 @@ import { UnlockForm } from "./lock";
 export function Maintenance({ status, onStatus, onLocked }: { status: api.SystemStatus | null; onStatus: (status: api.SystemStatus) => void; onLocked: () => void }) {
   const [locking, setLocking] = useState(false);
   const unlocked = status?.unlocked;
+  const [section, setSection] = useState<"maintenance" | "security">(unlocked ? "maintenance" : "security");
+  useEffect(() => { if (!unlocked) setSection("security"); }, [unlocked]);
   useDocumentTitle(`安全与维护 · ${SITE.admin}`);
   return (
     <>
-      <PageHeader title="安全与维护" description="系统的锁定状态、后台清理与检查任务，以及数据备份。" />
-      <div className="stack">
-        <Panel title="系统锁定" actions={unlocked ? <Badge tone="success" dot>已解锁</Badge> : <Badge tone="warning" dot>已锁定</Badge>}>
-          {unlocked ? (
-            <div className="key-panel">
-              <p>系统正在正常运行，用户可以登录，文件与公开链接可以访问。锁定后所有人会立即退出登录，再次使用需要输入加密口令。</p>
-              <Button variant="danger" icon="lock" onClick={() => setLocking(true)}>锁定系统</Button>
-            </div>
-          ) : (
-            <div className="key-panel">
-              <p>输入初始化时设置的加密口令以解锁系统。</p>
-              <UnlockForm onUnlocked={onStatus} />
-            </div>
-          )}
-        </Panel>
+      <PageHeader title="安全与维护" description="管理自动维护、数据备份与系统安全。" />
+      <div className="maintenance-tabs"><Segmented label="维护区域" value={section} onChange={setSection} options={[{ value: "maintenance", label: "维护与备份" }, { value: "security", label: "安全设置" }]} /></div>
+      <div className="stack maintenance-section" hidden={section !== "maintenance"}>
         <TasksPanel unlocked={Boolean(unlocked)} />
         <BackupsPanel unlocked={Boolean(unlocked)} />
-        {unlocked && <PassphrasePanel />}
-        <AuditPanel />
-        <Panel title="系统信息">
-          <KeyValue items={[["用户数", String(status?.user_count ?? "—")], ["初始化", status?.initialized ? "已完成" : "未完成"], ["用户端地址", <a className="link" href={api.userSiteOrigin()} target="_blank" rel="noreferrer">{api.userSiteOrigin()}</a>]]} />
+      </div>
+      <div className="stack maintenance-section" hidden={section !== "security"}>
+        <Panel title="系统锁定" actions={unlocked ? <Badge tone="success" dot>已解锁</Badge> : <Badge tone="warning" dot>已锁定</Badge>}>
+          {unlocked ? <div className="key-panel">
+            <p>系统正在正常运行。锁定后所有账号退出登录，文件和公开链接暂停访问，需输入加密口令重新解锁。</p>
+            <Button variant="danger" icon="lock" onClick={() => setLocking(true)}>锁定系统</Button>
+          </div> : <div className="key-panel"><p>输入初始化时设置的加密口令以解锁系统。</p><UnlockForm onUnlocked={onStatus} /></div>}
         </Panel>
+        {unlocked && <PassphrasePanel />}
+        <Panel title="系统信息"><KeyValue items={[["用户数", String(status?.user_count ?? "—")], ["初始化", status?.initialized ? "已完成" : "未完成"], ["用户端地址", <a className="link" href={api.userSiteOrigin()} target="_blank" rel="noreferrer">{api.userSiteOrigin()}</a>]]} /></Panel>
       </div>
       {locking && <ConfirmDialog title="锁定系统？" description="所有用户和管理员会被立即登出，公开链接暂停访问，直到再次输入加密口令解锁。" confirmLabel="锁定系统"
-        onClose={() => setLocking(false)}
-        onConfirm={async () => {
+        onClose={() => setLocking(false)} onConfirm={async () => {
           try { await api.adminLock(); toast.success("系统已锁定"); setLocking(false); onLocked(); }
           catch (reason) { toast.error(api.errorMessage(reason, "锁定失败，请稍后重试")); }
         }} />}
     </>
   );
+}
+
+export function Audit() {
+  useDocumentTitle(`审计日志 · ${SITE.admin}`);
+  return <><PageHeader title="审计日志" description="查看登录、权限、分享和系统配置的变更记录。" /><AuditPanel /></>;
 }
 
 const ACTOR_LABEL: Record<api.AuditEvent["actor_type"], string> = { admin: "管理员", user: "用户", key: "访问密钥" };
@@ -68,7 +67,7 @@ function AuditPanel() {
   const pagination = useCursorPage(fetchPage);
   const events = pagination.page?.events ?? null;
   return (
-    <Panel title="审计日志" description="登录、权限、密钥、分享与系统设置的变更记录。不会记录密码、口令、token 或 Secret。" flush
+    <Panel title="活动记录" description="不会记录密码、加密口令、访问令牌或密钥 Secret。" flush
       actions={<Segmented label="筛选" value={failedOnly ? "failed" : "all"} onChange={value => setFailedOnly(value === "failed")} options={[{ value: "all", label: "全部" }, { value: "failed", label: "仅失败" }]} />}>
       {pagination.error ? <EmptyState icon="alert" title="审计日志加载失败" description={pagination.error} action={<Button onClick={() => void pagination.reload()}>重试</Button>} /> : events === null ? <SkeletonRows rows={4} /> : events.length === 0 ? <EmptyState icon="shield" title={failedOnly ? "没有失败的操作" : "还没有记录"} /> : (
         <>
@@ -167,7 +166,8 @@ function TasksPanel({ unlocked }: { unlocked: boolean }) {
 function BackupsPanel({ unlocked }: { unlocked: boolean }) {
   const [backups, setBackups] = useState<api.Backup[] | null>(null);
   const [busy, setBusy] = useState(false);
-  const load = useCallback(() => { void api.listBackups().then(setBackups).catch(() => setBackups([])); }, []);
+  const [error, setError] = useState("");
+  const load = useCallback(() => { setError(""); void api.listBackups().then(setBackups).catch(reason => setError(api.errorMessage(reason, "备份列表加载失败，请稍后重试"))); }, []);
   useEffect(load, [load]);
   async function create() {
     setBusy(true);
@@ -178,8 +178,8 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
   return (
     <Panel title="数据备份" description="数据库记录了每个文件保存在哪里、如何打开。它丢失后，已保存的文件将无法读取。系统每天自动备份一次，保留最近 14 份。"
       actions={<Button size="sm" icon="plus" loading={busy} disabled={!unlocked} onClick={() => void create()}>立即备份</Button>} flush>
-      {backups === null ? <SkeletonRows rows={2} /> : backups.length === 0 ? <EmptyState icon="shield" title="还没有备份" description="解锁后系统会自动创建第一份备份。" /> : (
-        <div className="data-table backups-table" role="table" aria-label="备份">
+      {error ? <EmptyState icon="alert" title="备份列表加载失败" description={error} action={<Button onClick={load}>重试</Button>} /> : backups === null ? <SkeletonRows rows={2} /> : backups.length === 0 ? <EmptyState icon="shield" title="还没有备份" description="解锁后系统会自动创建第一份备份。" /> : (
+        <div className="table-scroll"><div className="data-table backups-table" role="table" aria-label="备份">
           <div className="data-row data-head" role="row"><span role="columnheader">备份文件</span><span role="columnheader">大小</span><span role="columnheader">创建时间</span><span role="columnheader"><span className="sr-only">操作</span></span></div>
           {backups.map(backup => (
             <div key={backup.name} role="row" className="data-row">
@@ -189,7 +189,7 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
               <span role="cell" className="cell-actions"><a className="btn btn-ghost btn-sm" href={api.backupUrl(backup.name)} download><Icon name="download" size={15} /><span>下载</span></a></span>
             </div>
           ))}
-        </div>
+        </div></div>
       )}
       <div className="panel-note">
         <p>备份已用加密口令加密，可以放在其他机器或网盘。请把备份保存在服务器以外的地方。恢复时先停止服务，然后执行：</p>

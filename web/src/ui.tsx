@@ -1,5 +1,5 @@
 /** Tessera 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
-import { useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { Children, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { BRAND } from "./brand";
 
@@ -59,7 +59,7 @@ export type IconName = keyof typeof ICONS;
 export function Icon({ name, size = 18, className }: { name: IconName; size?: number; className?: string }) {
   return (
     <svg className={className} aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-      <path d={ICONS[name]} />
+      {name === "more" ? [5, 12, 19].map(cy => <circle key={cy} cx="12" cy={cy} r="1.65" fill="currentColor" stroke="none" />) : <path d={ICONS[name]} />}
     </svg>
   );
 }
@@ -130,11 +130,20 @@ export function Badge({ tone = "neutral", icon, children, dot }: { tone?: Tone; 
 /* ---------- 表单 ---------- */
 
 export function Field({ label, hint, error, children, htmlFor }: { label: string; hint?: ReactNode; error?: string; children: ReactNode; htmlFor?: string }) {
+  const id = useId();
+  const content = Children.toArray(children);
+  const control = content.find(child => isValidElement(child) && typeof child.type === "string" && ["input", "select", "textarea"].includes(child.type));
+  const input = isValidElement<{ id?: string; "aria-describedby"?: string; "aria-invalid"?: boolean }>(control) ? control : null;
+  const inputId = htmlFor ?? input?.props.id ?? (input ? `${id}-input` : undefined);
+  const descriptionId = `${id}-description`;
   return (
     <div className={`field${error ? " has-error" : ""}`}>
-      <label className="field-label" htmlFor={htmlFor}>{label}</label>
-      {children}
-      {error ? <p className="field-error" role="alert">{error}</p> : hint && <p className="field-hint">{hint}</p>}
+      <label className="field-label" htmlFor={inputId}>{label}</label>
+      {content.map(child => child === input ? cloneElement(input, {
+        id: inputId, "aria-invalid": error ? true : input.props["aria-invalid"],
+        "aria-describedby": [input.props["aria-describedby"], (error || hint) && descriptionId].filter(Boolean).join(" ") || undefined,
+      }) : child)}
+      {error ? <p id={descriptionId} className="field-error" role="alert">{error}</p> : hint && <p id={descriptionId} className="field-hint">{hint}</p>}
     </div>
   );
 }
@@ -162,17 +171,25 @@ export function SearchInput({ value, onChange, onSubmit, onClear, placeholder, l
   return (
     <form className="search-input" role="search" noValidate onSubmit={event => { event.preventDefault(); onSubmit?.(); }}>
       <Icon name="search" size={16} />
-      <input value={value} onChange={event => onChange(event.target.value)} placeholder={placeholder} aria-label={label} />
+      <input value={value} onChange={event => onChange(event.target.value)} placeholder={placeholder} aria-label={label} enterKeyHint="search" />
       {value && <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => { onChange(""); onClear?.(); }}><Icon name="x" size={14} /></button>}
     </form>
   );
 }
 
-export function Segmented<T extends string>({ value, options, onChange, label }: { value: T; options: { value: T; label: string; icon?: IconName; count?: number }[]; onChange: (value: T) => void; label: string }) {
+export function Segmented<T extends string>({ value, options, onChange, label, disabled }: { value: T; options: { value: T; label: string; icon?: IconName; count?: number }[]; onChange: (value: T) => void; label: string; disabled?: boolean }) {
   return (
     <div className="segmented" role="radiogroup" aria-label={label}>
-      {options.map(option => (
-        <button key={option.value} type="button" role="radio" aria-checked={value === option.value} className={value === option.value ? "is-active" : ""} onClick={() => onChange(option.value)} title={option.icon ? option.label : undefined}>
+      {options.map((option, index) => (
+        <button key={option.value} type="button" role="radio" disabled={disabled} aria-checked={value === option.value} tabIndex={value === option.value || (!options.some(item => item.value === value) && index === 0) ? 0 : -1} className={value === option.value ? "is-active" : ""} onClick={() => onChange(option.value)} title={option.icon ? option.label : undefined}
+          onKeyDown={event => {
+            const offset = ["ArrowRight", "ArrowDown"].includes(event.key) ? 1 : ["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 0;
+            if (!offset && event.key !== "Home" && event.key !== "End") return;
+            event.preventDefault();
+            const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : (index + offset + options.length) % options.length;
+            onChange(options[next].value);
+            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=radio]")[next]?.focus();
+          }}>
           {option.icon && <Icon name={option.icon} size={15} />}
           {(!option.icon || option.count !== undefined) && <span className={option.icon ? "sr-only" : ""}>{option.label}</span>}
           {option.count !== undefined && <span className="segmented-count">{option.count}</span>}
@@ -185,48 +202,62 @@ export function Segmented<T extends string>({ value, options, onChange, label }:
 /* ---------- 浮层 ---------- */
 
 const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
+const modalStack: HTMLElement[] = [];
+const focusable = (node: HTMLElement) => Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(item => item.tabIndex >= 0 && item.getClientRects().length > 0);
 
-export function Modal({ title, description, onClose, children, footer, size = "md", icon, tone }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; tone?: Tone }) {
+export function Modal({ title, description, onClose, children, footer, size = "md", icon, tone, dismissible = true }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; tone?: Tone; dismissible?: boolean }) {
+  const id = useId();
   const ref = useRef<HTMLDivElement>(null);
+  const previousFocus = useRef(document.activeElement as HTMLElement | null);
   const closeRef = useRef(onClose);
+  const dismissibleRef = useRef(dismissible);
   closeRef.current = onClose;
+  dismissibleRef.current = dismissible;
   useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
+    const previous = previousFocus.current;
     const node = ref.current;
-    const preferred = node?.querySelector<HTMLElement>("[autofocus], .modal-body input, .modal-body select") ?? node?.querySelector<HTMLElement>(FOCUSABLE);
-    preferred?.focus();
+    if (!node) return;
+    modalStack.at(-1)?.setAttribute("inert", "");
+    modalStack.push(node);
+    const preferred = focusable(node).find(item => item.matches("[autofocus], .modal-body input, .modal-body select")) ?? focusable(node)[0];
+    (preferred ?? node).focus();
     document.body.classList.add("has-modal");
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { event.stopPropagation(); closeRef.current(); }
-      if (event.key !== "Tab" || !node) return;
-      const items = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE));
-      if (!items.length) return;
+      if (modalStack.at(-1) !== node || event.defaultPrevented) return;
+      if ((event.target as HTMLElement).closest?.(".menu")) return;
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (dismissibleRef.current) closeRef.current(); return; }
+      if (event.key !== "Tab") return;
+      const items = focusable(node);
+      if (!items.length) { event.preventDefault(); node.focus(); return; }
       const first = items[0], last = items[items.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      if (event.shiftKey && (document.activeElement === first || !node.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !node.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
     };
     document.addEventListener("keydown", handleKey);
     return () => {
       document.removeEventListener("keydown", handleKey);
-      if (!document.querySelector(".modal")) document.body.classList.remove("has-modal");
-      previous?.focus?.();
+      const wasTop = modalStack.at(-1) === node;
+      modalStack.splice(modalStack.indexOf(node), 1);
+      if (!modalStack.length) document.body.classList.remove("has-modal");
+      else modalStack.at(-1)?.removeAttribute("inert");
+      if (wasTop && previous?.isConnected) previous.focus();
     };
   }, []);
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={ref} className={`modal modal-${size}`} role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && modalStack.at(-1) === ref.current) onClose(); }}>
+      <div ref={ref} className={`modal modal-${size}`} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} tabIndex={-1}>
         <header className="modal-header">
           {icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>}
           <div className="modal-heading">
-            <h2 id="modal-title">{title}</h2>
+            <h2 id={`${id}-title`}>{title}</h2>
             {description && <p>{description}</p>}
           </div>
-          <IconButton icon="x" label="关闭" onClick={onClose} size="sm" />
+          <IconButton icon="x" label="关闭" onClick={onClose} size="sm" disabled={!dismissible} />
         </header>
         {children && <div className="modal-body">{children}</div>}
         {footer && <footer className="modal-footer">{footer}</footer>}
       </div>
-    </div>
+    </div>, document.body,
   );
 }
 
@@ -237,8 +268,8 @@ export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onC
     try { await onConfirm(); } finally { setBusy(false); }
   }
   return (
-    <Modal title={title} description={description} onClose={onClose} size="sm" icon={danger ? "alert" : "info"} tone={danger ? "danger" : "accent"}
-      footer={<><Button onClick={onClose}>取消</Button><Button variant={danger ? "danger" : "primary"} loading={busy} onClick={() => void confirm()}>{confirmLabel}</Button></>} />
+    <Modal title={title} description={description} onClose={onClose} dismissible={!busy} size="sm" icon={danger ? "alert" : "info"} tone={danger ? "danger" : "accent"}
+      footer={<><Button disabled={busy} onClick={onClose}>取消</Button><Button variant={danger ? "danger" : "primary"} loading={busy} onClick={() => void confirm()}>{confirmLabel}</Button></>} />
   );
 }
 
@@ -254,13 +285,16 @@ export function Menu({ items, label, icon = "more" }: { items: MenuItem[]; label
     const height = list.current.offsetHeight, width = list.current.offsetWidth;
     const below = rect.bottom + 6 + height < window.innerHeight;
     setPosition({ top: below ? rect.bottom + 6 : rect.top - height - 6, left: Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)) });
-    list.current.querySelector<HTMLElement>("[role=menuitem]")?.focus();
   }, [open]);
+  useLayoutEffect(() => {
+    if (open && position) list.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus({ preventScroll: true });
+  }, [open, position]);
   useEffect(() => {
     if (!open) return;
     const close = (event: Event) => { if (!list.current?.contains(event.target as Node) && !trigger.current?.contains(event.target as Node)) setOpen(false); };
     const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { setOpen(false); trigger.current?.focus(); }
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus(); }
+      if (event.key === "Tab") { event.preventDefault(); setOpen(false); trigger.current?.focus(); }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         const items = Array.from(list.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ?? []);
@@ -313,7 +347,7 @@ function pushToast(tone: Toast["tone"], message: string, action?: ToastAction) {
   toasts = [...toasts.slice(-3), { id, tone, message, action }];
   listeners.forEach(listener => listener(toasts));
   // 带操作（如撤销）的提示停留更久，给用户反应时间。
-  window.setTimeout(() => dismissToast(id), action ? 8000 : tone === "error" ? 6500 : 3800);
+  if (tone !== "error") window.setTimeout(() => dismissToast(id), action ? 8000 : 3800);
 }
 function dismissToast(id: number) {
   toasts = toasts.filter(item => item.id !== id);
@@ -412,22 +446,28 @@ export function usageTone(percent: number): Tone {
   return percent >= 95 ? "danger" : percent >= 80 ? "warning" : "accent";
 }
 
-export async function copyText(value: string, message = "已复制到剪贴板") {
+export async function copyText(value: string, message = "已复制到剪贴板", announce = true) {
   try {
     await navigator.clipboard.writeText(value);
-    toast.success(message);
+    if (announce) toast.success(message);
+    return true;
   } catch {
     toast.error("无法访问剪贴板，请手动选择并复制");
+    return false;
   }
 }
 
-export function CopyField({ value, label, secret, copyMessage }: { value: string; label: string; secret?: boolean; copyMessage?: string }) {
+export function CopyField({ value, label, secret, copyMessage, primary = false }: { value: string; label: string; secret?: boolean; copyMessage?: string; primary?: boolean }) {
   const [revealed, setRevealed] = useState(!secret);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => { setCopied(false); }, [value]);
+  useEffect(() => { if (!copied) return; const timer = window.setTimeout(() => setCopied(false), 2500); return () => window.clearTimeout(timer); }, [copied]);
   return (
     <div className="copy-field">
       <input readOnly value={revealed ? value : "•".repeat(Math.min(32, value.length))} aria-label={label} onFocus={event => revealed && event.target.select()} />
       {secret && <IconButton icon="eye" label={revealed ? "隐藏" : "显示"} size="sm" active={revealed} onClick={() => setRevealed(value => !value)} />}
-      <Button size="sm" icon="copy" onClick={() => void copyText(value, copyMessage)}>复制</Button>
+      <Button size={primary ? "md" : "sm"} variant={primary ? "primary" : "secondary"} icon={copied ? "check" : "copy"} onClick={() => void copyText(value, copyMessage, false).then(setCopied)}>{copied ? "已复制" : primary ? "复制分享链接" : "复制"}</Button>
+      <span className="sr-only" role="status">{copied ? copyMessage ?? "已复制到剪贴板" : ""}</span>
     </div>
   );
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { SITE } from "../brand";
 import * as api from "../api";
 
-import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, Menu, Modal, PageHeader, Panel, SkeletonRows, formatDate, formatDateTime, toast, useDocumentTitle } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, Menu, Modal, PageHeader, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 存储通道 ---------- */
 
@@ -11,12 +11,13 @@ export function Bots() {
   const [creating, setCreating] = useState(false);
   const [disabling, setDisabling] = useState<api.BotConfig | null>(null);
   const [checking, setChecking] = useState<number | null>(null);
+  const [error, setError] = useState("");
   useDocumentTitle(`存储通道 · ${SITE.admin}`);
-  const load = useCallback(() => { void api.adminBots().then(setBots).catch(reason => { setBots([]); toast.error(api.errorMessage(reason, "存储通道加载失败，请稍后重试")); }); }, []);
+  const load = useCallback(() => { setError(""); void api.adminBots().then(setBots).catch(reason => setError(api.errorMessage(reason, "存储通道加载失败，请稍后重试"))); }, []);
   useEffect(load, [load]);
   async function setStatus(bot: api.BotConfig, status: "active" | "disabled") {
-    try { await api.setAdminBotStatus(bot.id, status); toast.success(status === "active" ? `已启用 ${bot.name}` : `已停用 ${bot.name}`); load(); }
-    catch (reason) { toast.error(api.errorMessage(reason, "状态更新失败，请稍后重试")); }
+    try { await api.setAdminBotStatus(bot.id, status); toast.success(status === "active" ? `已启用 ${bot.name}` : `已停用 ${bot.name}`); load(); return true; }
+    catch (reason) { toast.error(api.errorMessage(reason, "状态更新失败，请稍后重试")); return false; }
   }
   async function check(bot: api.BotConfig, quiet = false) {
     setChecking(bot.id);
@@ -30,21 +31,23 @@ export function Bots() {
   const active = (bots ?? []).filter(bot => bot.status === "active").length;
   return (
     <>
-      <PageHeader title="存储通道" description="存储通道决定文件保存在哪里。每个通道由一个 Telegram Bot 和一个私有频道组成，新上传的文件会保存到启用中的通道。"
+      <PageHeader title="存储通道" description="查看各通道的分片容量、启用状态与最近连接检查。"
         actions={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>添加通道</Button>} />
-      {bots !== null && active === 0 && <p className="inline-note tone-warning banner"><Icon name="alert" size={16} />当前没有启用的通道，新上传的文件会加密后暂存在服务器本地磁盘。</p>}
-      <section className="file-surface">
-        {bots === null ? <SkeletonRows rows={3} /> : bots.length === 0 ? (
+      {!error && bots !== null && active === 0 && <p className="inline-note tone-warning banner"><Icon name="alert" size={16} />当前没有启用的通道，新上传的文件会加密后暂存在服务器本地磁盘。</p>}
+      <section className="file-surface table-scroll">
+        {error ? <EmptyState icon="alert" title="存储通道加载失败" description={error} action={<Button icon="refresh" onClick={load}>重试</Button>} /> : bots === null ? <SkeletonRows rows={3} /> : bots.length === 0 ? (
           <EmptyState icon="send" title="还没有存储通道" description="在 Telegram 中通过 BotFather 创建 Bot，把它设为私有频道的管理员，然后在这里添加。" action={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>添加通道</Button>} />
         ) : (
           <div className="data-table bots-table" role="table" aria-label="存储通道">
             <div className="data-row data-head" role="row">
-              <span role="columnheader">通道</span><span role="columnheader">频道 ID</span><span role="columnheader">状态</span><span role="columnheader">最近检查</span><span role="columnheader"><span className="sr-only">操作</span></span>
+              <span role="columnheader">通道</span><span role="columnheader">频道 ID</span><span role="columnheader">分片数量</span><span role="columnheader">存储大小</span><span role="columnheader">启用状态</span><span role="columnheader">最近连接检查</span><span role="columnheader"><span className="sr-only">操作</span></span>
             </div>
             {bots.map(bot => (
               <div key={bot.id} role="row" className="data-row">
                 <span role="cell" className="cell-user"><span className={`channel-mark${bot.status === "active" ? " is-active" : ""}`}><Icon name="send" size={16} /></span><span className="name-stack"><strong>{bot.name}</strong><small>添加于 {formatDate(bot.created_at)}</small></span></span>
                 <span role="cell"><code className="mono">{bot.channel_id}</code></span>
+                <span role="cell" className="cell-size muted">{bot.chunk_count == null ? "—" : `${bot.chunk_count.toLocaleString("zh-CN")} 个`}</span>
+                <span role="cell" className="cell-size muted">{bot.stored_bytes == null ? "—" : formatBytes(bot.stored_bytes)}</span>
                 <span role="cell">{bot.status === "active" ? <Badge tone="success" dot>启用</Badge> : <Badge dot>已停用</Badge>}</span>
                 <span role="cell" className="check-cell">
                   {!bot.last_check_at ? <span className="muted">尚未检查</span>
@@ -69,16 +72,18 @@ export function Bots() {
           </div>
         )}
       </section>
-      <Panel title="安全说明">
+      <p className="channel-storage-note">分片是文件加密后拆分的存储单元。统计包含上传中及回收站的分片，大小为加密后的容量；待清理分片和频道中的其他消息不计入。</p>
+      <details className="settings-disclosure channel-help"><summary><Icon name="shield" size={17} /><span>通道与安全说明</span><Icon name="chevronDown" size={16} /></summary><div className="disclosure-body">
         <ul className="plain-list">
+          <li>每个通道由一个 Telegram Bot 和一个私有频道组成，新文件保存到已启用的通道。</li>
           <li>Bot token 加密保存，页面和接口都不会再显示明文。</li>
           <li>私有频道中只保留存储用的 Bot，并关闭不需要的管理员权限。</li>
           <li>停用通道只影响之后上传的文件；已经保存在这个通道里的文件仍可正常读取。</li>
         </ul>
-      </Panel>
+      </div></details>
       {creating && <CreateBotDialog onClose={() => setCreating(false)} onCreated={bot => { setCreating(false); void check(bot, true); }} />}
       {disabling && <ConfirmDialog title={`停用 ${disabling.name}？`} description="新上传的文件不会再保存到这个通道，已保存的文件仍可正常读取。" confirmLabel="停用通道" onClose={() => setDisabling(null)}
-        onConfirm={async () => { await setStatus(disabling, "disabled"); setDisabling(null); }} />}
+        onConfirm={async () => { if (await setStatus(disabling, "disabled")) setDisabling(null); }} />}
     </>
   );
 }
@@ -121,4 +126,3 @@ function CreateBotDialog({ onClose, onCreated }: { onClose: () => void; onCreate
     </Modal>
   );
 }
-

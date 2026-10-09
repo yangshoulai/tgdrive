@@ -34,7 +34,6 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
   const attention: { tone: "warning" | "danger" | "accent"; icon: IconName; title: string; detail: string; action: string; module: AdminModule }[] = [];
   if (!activeBots.length) attention.push({ tone: "warning", icon: "send", title: "还没有启用的存储通道", detail: "新上传的文件现在保存在服务器本地磁盘。添加 Telegram Bot 和私有频道后，文件会保存到那里。", action: "添加通道", module: "bots" });
   if (settings && (!settings.public_base_url.effective || !settings.s3_endpoint.effective)) attention.push({ tone: "accent", icon: "globe", title: "尚未配置对外访问地址", detail: `${!settings.public_base_url.effective ? "分享链接目前使用访问者打开的地址生成。" : ""}${!settings.s3_endpoint.effective ? "用户在访问密钥页看不到同步工具要用的服务地址。" : ""}`, action: "去配置", module: "settings" });
-  if (data.users.user_total === 0) attention.push({ tone: "accent", icon: "users", title: "还没有普通用户", detail: "创建用户后，他们可以登录文件空间上传和分享文件。", action: "创建用户", module: "users" });
   nearQuota.forEach(user => attention.push({ tone: user.used_bytes >= (user.quota_bytes ?? 0) ? "danger" : "warning", icon: "pulse", title: `${user.username} 的空间即将用完`, detail: `已使用 ${formatBytes(user.used_bytes)} / ${formatBytes(user.quota_bytes)}。`, action: "调整配额", module: "users" }));
   return (
     <>
@@ -67,7 +66,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
                 const max = Math.max(1, ...data.users.top_users.map(item => item.used_bytes));
                 return <div className="usage-chart-row" key={user.id}><span>{user.username}</span><div className="usage-chart-track"><i style={{ width: `${Math.max(2, user.used_bytes / max * 100)}%` }} /></div><strong>{formatBytes(user.used_bytes)}</strong></div>;
               })}
-              {data.users.user_total === 0 && <p className="muted">还没有普通用户</p>}
+              {data.users.user_total === 0 && <div className="overview-empty"><p className="muted">暂无普通用户的空间使用数据。</p><Button size="sm" variant="ghost" onClick={() => onNavigate("users")}>管理用户</Button></div>}
             </div>
           </Panel>
         </div>
@@ -97,16 +96,24 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
 }
 
 function TrafficChart({ metrics }: { metrics?: api.TrafficMetrics }) {
+  const [selected, setSelected] = useState<number | null>(null);
   const points = metrics?.recent.slice(-12) ?? [];
   const max = Math.max(1, ...points.flatMap(point => [point.in_bytes, point.out_bytes]));
+  const current = points.find(point => point.at === selected) ?? points.at(-1);
+  const time = (at: number) => new Date(at * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
   return <div className="traffic-chart" aria-label="近一小时上传下载流量图表">
-    <div className="traffic-legend"><span><i className="traffic-dot traffic-in" />上传 {formatBytes(metrics?.total_in_bytes ?? 0)}</span><span><i className="traffic-dot traffic-out" />下载 {formatBytes(metrics?.total_out_bytes ?? 0)}</span></div>
-    <div className="traffic-bars">
-      {points.map(point => <div className="traffic-bar" key={point.at} title={`${formatDateTime(point.at)}：上传 ${formatBytes(point.in_bytes)}，下载 ${formatBytes(point.out_bytes)}`}>
-        <i className="traffic-in" style={{ height: `${Math.max(2, point.in_bytes / max * 100)}%` }} /><i className="traffic-out" style={{ height: `${Math.max(2, point.out_bytes / max * 100)}%` }} />
-      </div>)}
-      {!points.length && <p className="muted">暂无流量数据</p>}
-    </div>
+    <div className="traffic-legend"><span><i className="traffic-dot traffic-in" />上传 {formatBytes(points.reduce((sum, point) => sum + point.in_bytes, 0))}</span><span><i className="traffic-dot traffic-out" />下载 {formatBytes(points.reduce((sum, point) => sum + point.out_bytes, 0))}</span></div>
+    {points.length ? <>
+      <div className="traffic-plot"><div className="traffic-axis"><span>{formatBytes(max)}</span><span>{formatBytes(max / 2)}</span><span>0 B</span></div><div className="traffic-bars">
+        {points.map(point => <button type="button" className={`traffic-bar${current?.at === point.at ? " is-active" : ""}`} key={point.at}
+          title={`${formatDateTime(point.at)}：上传 ${formatBytes(point.in_bytes)}，下载 ${formatBytes(point.out_bytes)}`}
+          aria-label={`${time(point.at)}，上传 ${formatBytes(point.in_bytes)}，下载 ${formatBytes(point.out_bytes)}`} onMouseEnter={() => setSelected(point.at)} onFocus={() => setSelected(point.at)} onClick={() => setSelected(point.at)}>
+          <i className="traffic-in" style={{ height: `${point.in_bytes / max * 100}%` }} /><i className="traffic-out" style={{ height: `${point.out_bytes / max * 100}%` }} />
+        </button>)}
+      </div></div>
+      <div className="traffic-times"><span>{time(points[0].at)}</span><span>{time(points[Math.floor((points.length - 1) / 2)].at)}</span><span>{time(points.at(-1)!.at)}</span></div>
+      <p className="traffic-readout">{current && <>{time(current.at)}：上传 {formatBytes(current.in_bytes)}，下载 {formatBytes(current.out_bytes)}</>}</p>
+    </> : <p className="muted">暂无流量数据</p>}
   </div>;
 }
 

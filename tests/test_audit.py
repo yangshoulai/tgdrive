@@ -39,6 +39,10 @@ class OperationsTests(unittest.TestCase):
         self.request("POST", f"/api/admin/v1/users/{self.alice.id}/quota", {"quota_bytes": 1024}, admin)
         self.request("POST", "/api/admin/v1/settings", {"s3_endpoint": "https://s3.example.com"}, admin)
         self.request("POST", "/api/admin/v1/bots", {"name": "main", "token": "123456:" + "x" * 30, "channel_id": "-1001234567"}, admin)
+        status, bots = self.request("GET", "/api/admin/v1/bots", headers=admin)
+        self.assertEqual((status, bots[0]["chunk_count"], bots[0]["stored_bytes"]), (200, 0, 0))
+        self.assertNotIn("token", bots[0])
+        self.assertEqual(self.request("GET", "/api/admin/v1/bots", headers=user)[0], 403)
         events = self.events(admin)
         summary = [(event["action"], event["actor"], event["ok"]) for event in reversed(events)]
         self.assertEqual(summary, [

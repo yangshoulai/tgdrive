@@ -476,7 +476,7 @@ class TgDriveASGI(StaticFiles):
                 return 200, await self.admin.alist_clients(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=int(query.get("cursor", ["0"])[0])), {}
             if method == "GET" and route == "/bots":
-                return 200, self.admin.list_bots(token), {}
+                return 200, await self.admin.list_bots(token), {}
             if method == "POST" and route == "/users":
                 quota = payload.get("quota_bytes")
                 return 201, await self.admin.acreate_user(token, csrf, payload["username"], payload["password"],

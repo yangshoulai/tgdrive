@@ -4,7 +4,7 @@ import * as api from "./api";
 import { Bots } from "./admin/bots";
 import { Clients } from "./admin/clients";
 import { LockedGate } from "./admin/lock";
-import { Maintenance } from "./admin/maintenance";
+import { Audit, Maintenance } from "./admin/maintenance";
 import { Objects } from "./admin/objects";
 import { Overview } from "./admin/overview";
 import { Settings } from "./admin/settings";
@@ -14,7 +14,7 @@ import type { IconName } from "./ui";
 
 export { LockedGate };
 
-export type AdminModule = "overview" | "users" | "objects" | "bots" | "clients" | "maintenance" | "settings";
+export type AdminModule = "overview" | "users" | "objects" | "bots" | "clients" | "maintenance" | "audit" | "settings";
 export const ADMIN_MODULES: { key: AdminModule; label: string; icon: IconName }[] = [
   { key: "overview", label: "概览", icon: "home" },
   { key: "users", label: "用户", icon: "users" },
@@ -22,6 +22,7 @@ export const ADMIN_MODULES: { key: AdminModule; label: string; icon: IconName }[
   { key: "bots", label: "存储通道", icon: "send" },
   { key: "clients", label: "全部密钥", icon: "key" },
   { key: "maintenance", label: "安全与维护", icon: "shield" },
+  { key: "audit", label: "审计日志", icon: "list" },
   { key: "settings", label: "系统设置", icon: "settings" },
 ];
 
@@ -43,6 +44,7 @@ export function AdminConsole({ module, session, status, onStatus, onRefreshStatu
       {module === "bots" && <Bots />}
       {module === "clients" && <Clients />}
       {module === "maintenance" && <Maintenance status={status} onStatus={onStatus} onLocked={onLocked} />}
+      {module === "audit" && <Audit />}
       {module === "settings" && <Settings onSaved={onConfigSaved} />}
     </>
   );

@@ -37,6 +37,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                   </div>
                   {items.map(file => {
                     const folder = file.key.endsWith("/");
+                    const size = folder ? pagination.page?.folder_sizes?.[file.key] : file.size;
                     const open = () => folder ? onOpenFolder(file.key) : setPreview(file);
                     return (
                     <div key={file.key} role="row" className="data-row is-clickable" onClick={open}>
@@ -52,7 +53,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                           : <Badge tone="warning" icon="pulse">{`至 ${formatDate(file.public_expires_at)}`}</Badge>)}
                       </span>
                       <span role="cell" className="cell-type muted">{kindLabel(getFileKind(file.content_type, file.key))}</span>
-                      <span role="cell" className="cell-size muted">{folder ? "文件夹" : formatBytes(file.size)}</span>
+                      <span role="cell" className="cell-size muted" title={folder ? "包含所有子文件夹中的文件" : undefined}>{size == null ? "—" : formatBytes(size)}</span>
                       <span role="cell" className="cell-date muted">{formatDate(file.public_at)}</span>
                       <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
                         <Button size="sm" icon="copy" onClick={() => void copyText(links(file).page, "分享链接已复制")}>复制链接</Button>
