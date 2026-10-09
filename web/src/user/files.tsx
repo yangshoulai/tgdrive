@@ -240,13 +240,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />
             <label className="mobile-file-sort"><span className="sr-only">本页排序</span><select aria-label="本页排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
               const [key, direction] = event.target.value.split(":"); setSort({ key: key as SortKey, desc: direction === "desc" });
-            }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select></label>
+            }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>
             <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
           </div>
         </div>
       )}
 
-      <section className={`file-surface${dragging ? " is-dragging" : ""}`} aria-label="文件列表">
+      <section className={`file-surface${layout === "grid" && !loading && !loadError && entries.length > 0 ? " is-grid" : ""}${dragging ? " is-dragging" : ""}`} aria-label="文件列表">
         {loading ? <SkeletonRows rows={6} /> : loadError ? (
           <EmptyState icon="alert" title="文件列表加载失败" description={loadError} action={<Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         ) : entries.length === 0 ? (
@@ -319,7 +319,10 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                       onClick={event => { event.stopPropagation(); if (entry.kind === "folder") onOpenFolder(entry.key); else setPreview(entry.file); }}>
                       {baseName(entry.key)}
                     </button>
-                    <span className="grid-sub">{entry.kind === "folder" ? `文件夹 · ${entry.size == null ? "—" : formatBytes(entry.size)}` : `${kindLabel(kind)} · ${formatBytes(entry.file.size)}`}</span>
+                    <span className="grid-sub">
+                      <span className="grid-kind">{entry.kind === "folder" ? "文件夹" : kindLabel(kind)}</span>
+                      {" · "}<span className="grid-size">{entry.kind === "folder" ? entry.size == null ? "—" : formatBytes(entry.size) : formatBytes(entry.file.size)}</span>
+                    </span>
                     <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(entry.key)} 的更多操作`} items={entry.kind === "folder" ? folderMenu(entry.key) : fileMenu(entry.file)} /></span>
                   </div>
                 </div>
@@ -438,4 +441,3 @@ function NameDialog({ title, label, confirm, initial = "", location, onClose, on
     </Modal>
   );
 }
-
