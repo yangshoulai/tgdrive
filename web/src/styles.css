@@ -599,15 +599,15 @@ code, .mono { font-family: var(--font-mono); font-size: .92em; }
 
 /* 预览 */
 .preview-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; }
-.preview-stage { display: grid; min-height: 320px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); }
-.preview-media { display: grid; place-items: center; padding: 24px; }
+.preview-stage { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 320px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); }
+.preview-media { display: grid; min-width: 0; width: 100%; place-items: center; padding: 24px; }
 .preview-media img, .preview-media video { max-width: 100%; max-height: calc(100vh - 340px); border-radius: var(--radius-sm); }
-.preview-audio { display: grid; place-content: center; justify-items: center; gap: 20px; padding: 48px; }
-.preview-audio audio { width: min(420px, 80vw); }
+.preview-audio { display: grid; min-width: 0; width: 100%; place-content: center; justify-items: center; gap: 20px; padding: 48px; }
+.preview-audio audio { width: min(420px, 100%); max-width: 100%; }
 .preview-frame { width: 100%; height: calc(100vh - 320px); min-height: 420px; border: 0; background: var(--surface); }
 .preview-text { display: flex; flex-direction: column; max-height: calc(100vh - 320px); overflow: auto; background: var(--surface); }
 .preview-loading { display: grid; place-content: center; justify-items: center; gap: 14px; min-height: 280px; padding: 24px; color: var(--ink-2); }
-.preview-resource { position: relative; min-height: 280px; }
+.preview-resource { position: relative; min-width: 0; width: 100%; min-height: 280px; }
 .preview-media-loader { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; background: var(--surface-sunken); }
 .preview-fallback { display: grid; place-content: center; justify-items: center; gap: 8px; padding: 56px 24px; text-align: center; }
 .preview-fallback h3 { margin-top: 10px; font-size: 15px; }
@@ -952,6 +952,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .modal-backdrop { align-items: end; padding: 0; }
   .modal { max-width: none; max-height: 92vh; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
   .preview-stage { min-height: 240px; }
+  .preview-audio { padding-inline: 16px; }
   .auth-form-pane { padding: 24px; }
   .share-bar { padding: 0 16px; }
   .share-main { padding: 24px 12px; }
