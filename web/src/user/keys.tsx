@@ -1,20 +1,22 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
+import { useCursorPage } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, KeyValue, Modal, PageHeader, Panel, Segmented, SkeletonRows, copyText, formatDate, toast, useDocumentTitle } from "../ui";
+import { Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, KeyValue, Modal, PageHeader, Pagination, Panel, Segmented, SkeletonRows, copyText, formatDate, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 访问密钥 ---------- */
 
 export function KeysView({ bucketName }: { bucketName: string | null }) {
-  const [clients, setClients] = useState<api.AdminClient[] | null>(null);
+  const pagination = useCursorPage(api.userClientsPage);
+  const clients = pagination.page?.clients ?? null;
+  const load = pagination.reload;
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<(api.CreatedClient & { name: string }) | null>(null);
   const [disabling, setDisabling] = useState<{ client: string; key: string } | null>(null);
   const [deleting, setDeleting] = useState<{ client: string; key: string } | null>(null);
   useDocumentTitle(`访问密钥 · ${BRAND}`);
-  const load = useCallback(() => { void api.userClients().then(setClients).catch(reason => { setClients([]); toast.error(api.errorMessage(reason, "访问密钥加载失败，请稍后重试")); }); }, []);
-  useEffect(load, [load]);
+
   const endpoint = api.s3Endpoint();
   const bucket = clients?.[0]?.grants[0]?.bucket_name ?? bucketName ?? "你的存储桶";
   return (
@@ -30,11 +32,11 @@ export function KeysView({ bucketName }: { bucketName: string | null }) {
             ["区域", <code>us-east-1</code>],
           ]} />
         </Panel>
-        <Panel title="已创建的密钥" flush actions={clients && clients.length > 0 ? <Badge>{clients.length}</Badge> : undefined}>
-          {clients === null ? <SkeletonRows rows={3} /> : clients.length === 0 ? (
+        <Panel title="已创建的密钥" flush actions={clients && clients.length > 0 ? <Badge>{pagination.page?.total}</Badge> : undefined}>
+          {pagination.error ? <EmptyState icon="alert" title="访问密钥加载失败" description={pagination.error} action={<Button onClick={() => void load()}>重试</Button>} /> : clients === null ? <SkeletonRows rows={3} /> : clients.length === 0 ? (
             <EmptyState icon="key" title="还没有访问密钥" description="创建密钥后，就可以用命令行工具同步和备份文件。" action={<Button icon="plus" onClick={() => setCreating(true)}>新建访问密钥</Button>} />
           ) : (
-            <div className="data-table keys-table" role="table" aria-label="访问密钥">
+            <div className="table-scroll"><div className="data-table keys-table" role="table" aria-label="访问密钥">
               <div className="data-row data-head" role="row">
                 <span role="columnheader">名称</span><span role="columnheader">Access Key</span><span role="columnheader">状态</span><span role="columnheader">最近使用</span><span role="columnheader"><span className="sr-only">操作</span></span>
               </div>
@@ -50,8 +52,9 @@ export function KeysView({ bucketName }: { bucketName: string | null }) {
                   </span>
                 </div>
               )))}
-            </div>
+            </div></div>
           )}
+          <div className="panel-more"><Pagination {...pagination} /></div>
         </Panel>
       </div>
       {creating && <CreateKeyDialog onClose={() => setCreating(false)} onCreated={value => { setCreating(false); setCreated(value); load(); }} />}
@@ -115,4 +118,3 @@ function SecretDialog({ created, endpoint, bucket, onClose }: { created: api.Cre
     </Modal>
   );
 }
-

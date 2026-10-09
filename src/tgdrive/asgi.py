@@ -439,9 +439,13 @@ class TgDriveASGI(StaticFiles):
             if not self.admin.accounts.keystore.unlocked:
                 raise NotReadyError("系统尚未解锁")
             if method == "GET" and route == "/users":
-                return 200, self.admin.list_users(token), {}
+                return 200, self.admin.list_users(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                    cursor=int(query.get("cursor", ["0"])[0]), query=query.get("q", [""])[0], status=query.get("status", [""])[0]), {}
+            if method == "GET" and route == "/users/summary":
+                return 200, self.admin.user_summary(token), {}
             if method == "GET" and route == "/clients":
-                return 200, self.admin.list_clients(token), {}
+                return 200, self.admin.list_clients(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                    cursor=int(query.get("cursor", ["0"])[0])), {}
             if method == "GET" and route == "/bots":
                 return 200, self.admin.list_bots(token), {}
             if method == "POST" and route == "/users":
@@ -531,14 +535,16 @@ class TgDriveASGI(StaticFiles):
                 self.user.change_password(token, csrf, payload["old_password"], payload["new_password"])
                 return 204, None, {}
             if method == "GET" and route == "/public":
-                return 200, self.user.list_public(token), {}
+                return 200, self.user.list_public(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                    cursor=query.get("cursor", [""])[0]), {}
             if method == "POST" and route == "/public":
                 paths = payload["paths"] if "paths" in payload else [payload["path"]]
                 if not isinstance(paths, list):
                     raise ValueError("paths 必须为数组")
                 return 200, {"objects": self.user.set_public(token, csrf, paths, bool(payload["public"]), self._share_options(payload))}, {}
             if method == "GET" and route == "/trash":
-                return 200, self.user.list_trash(token), {}
+                return 200, self.user.list_trash(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                    cursor=query.get("cursor", [""])[0]), {}
             if method == "POST" and route == "/trash":
                 return 200, {"items": await self.user.trash(token, csrf, list(payload["paths"]))}, {}
             if method == "POST" and route == "/trash/restore":
@@ -567,10 +573,17 @@ class TgDriveASGI(StaticFiles):
                 return 204, None, {}
             if method == "GET" and route == "/search":
                 return 200, await self.user.search(token, query.get("q", [""])[0],
-                    query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0])), {}
+                    query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0]),
+                    public_only=query.get("public", ["0"])[0] == "1"), {}
             if method == "GET" and route == "/list":
                 return 200, await self.user.list(token, prefix=query.get("prefix", [""])[0],
-                                                 cursor=query.get("cursor", [None])[0], limit=int(query.get("limit", ["1000"])[0])), {}
+                                                 cursor=query.get("cursor", [None])[0], limit=int(query.get("limit", ["1000"])[0]),
+                                                 public_only=query.get("public", ["0"])[0] == "1"), {}
+            if method == "GET" and route == "/folders":
+                return 200, await self.user.folders(token, prefix=query.get("prefix", [""])[0],
+                    cursor=query.get("cursor", [""])[0], limit=int(query.get("limit", ["50"])[0])), {}
+            if method == "POST" and route == "/files/check":
+                return 200, self.user.check_files(token, csrf, payload.get("paths", [])), {}
             if method == "POST" and route == "/folders":
                 return 201, await self.user.folder(token, csrf, payload["path"]), {}
             if method == "POST" and route == "/delete":
@@ -580,7 +593,8 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/copy":
                 return 201, await self.user.copy(token, csrf, payload["from"], payload["to"]), {}
             if method == "GET" and route == "/clients":
-                return 200, self.user.list_clients(token), {}
+                return 200, self.user.list_clients(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                    cursor=int(query.get("cursor", ["0"])[0])), {}
             if method == "POST" and route == "/clients":
                 return 201, self.user.create_client(token, csrf, payload["name"]), {}
             if method == "POST" and route == "/client-keys/disable":

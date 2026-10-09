@@ -116,7 +116,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   const [, setConfigVersion] = useState(0);
   const refreshUsage = useCallback(() => {
     void api.me().then(value => setUsage({ used_bytes: value.used_bytes, quota_bytes: value.quota_bytes, id: value.id })).catch(() => undefined);
-    void api.listPublic().then(items => setSharedCount(items.length)).catch(() => undefined);
+    void api.listPublicPage(null, 1).then(page => setSharedCount(page.total)).catch(() => undefined);
   }, []);
   // 只有管理员需要系统状态（是否已解锁、流量统计）；普通用户在系统锁定时根本无法登录。
   const refreshStatus = useCallback(() => {

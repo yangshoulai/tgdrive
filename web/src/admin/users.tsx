@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCursorPage } from "../pagination";
 import { SITE } from "../brand";
 import * as api from "../api";
 
-import { Avatar, Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, Menu, Modal, PageHeader, Progress, SearchInput, Segmented, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, usageTone, useDocumentTitle } from "../ui";
+import { Avatar, Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, usageTone, useDocumentTitle } from "../ui";
 
 /* ---------- 用户 ---------- */
 
 const GB = 1024 ** 3;
 
 export function Users() {
-  const [users, setUsers] = useState<api.Account[] | null>(null);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<"all" | "active" | "disabled">("all");
   const [creating, setCreating] = useState(false);
@@ -18,9 +18,13 @@ export function Users() {
   const [deleteTarget, setDeleteTarget] = useState<api.Account | null>(null);
   const [disabling, setDisabling] = useState<api.Account | null>(null);
   useDocumentTitle(`用户 · ${SITE.admin}`);
-  const load = useCallback(() => { void api.adminUsers().then(setUsers).catch(reason => { setUsers([]); toast.error(api.errorMessage(reason, "用户加载失败，请稍后重试")); }); }, []);
-  useEffect(load, [load]);
-  const shown = (users ?? []).filter(user => user.username.toLowerCase().includes(query.trim().toLowerCase()) && (status === "all" || user.status === status));
+  const [search, setSearch] = useState("");
+  useEffect(() => { const timer = window.setTimeout(() => setQuery(search.trim()), 300); return () => window.clearTimeout(timer); }, [search]);
+  const fetchPage = useCallback((cursor: string | null) => api.adminUsersPage(cursor, query, status === "all" ? "" : status), [query, status]);
+  const pagination = useCursorPage(fetchPage);
+  const users = pagination.page?.users ?? null;
+  const shown = users ?? [];
+  const load = pagination.reload;
   async function setUserStatus(user: api.Account, next: "active" | "disabled") {
     try { await api.setAdminUserStatus(user.id, next); toast.success(next === "active" ? `已启用 ${user.username}` : `已禁用 ${user.username}`); load(); }
     catch (reason) { toast.error(api.errorMessage(reason, "状态更新失败，请稍后重试")); }
@@ -30,11 +34,11 @@ export function Users() {
       <PageHeader title="用户" description="每个用户拥有独立的存储桶。配额在每次上传提交时强制校验。"
         actions={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>新建用户</Button>} />
       <div className="toolbar">
-        <SearchInput value={query} onChange={setQuery} placeholder="按用户名筛选" label="筛选用户" />
+        <SearchInput value={search} onChange={setSearch} placeholder="按用户名筛选" label="筛选用户" />
         <Segmented label="状态" value={status} onChange={setStatus} options={[{ value: "all", label: "全部" }, { value: "active", label: "启用" }, { value: "disabled", label: "已禁用" }]} />
       </div>
       <section className="file-surface">
-        {users === null ? <SkeletonRows rows={4} /> : shown.length === 0 ? <EmptyState icon="users" title={users.length ? "没有匹配的用户" : "还没有用户"} action={!users.length ? <Button icon="plus" onClick={() => setCreating(true)}>新建用户</Button> : undefined} /> : (
+        {pagination.error ? <EmptyState icon="alert" title="用户加载失败" description={pagination.error} action={<Button onClick={() => void load()}>重试</Button>} /> : users === null ? <SkeletonRows rows={4} /> : shown.length === 0 ? <EmptyState icon="users" title={query || status !== "all" ? "没有匹配的用户" : "还没有用户"} action={!query && status === "all" ? <Button icon="plus" onClick={() => setCreating(true)}>新建用户</Button> : undefined} /> : (
           <div className="data-table users-table" role="table" aria-label="用户">
             <div className="data-row data-head" role="row">
               <span role="columnheader">用户</span><span role="columnheader">存储空间</span><span role="columnheader">状态</span><span role="columnheader">最近登录</span><span role="columnheader"><span className="sr-only">操作</span></span>
@@ -68,6 +72,7 @@ export function Users() {
           </div>
         )}
       </section>
+      <footer className="list-footer"><span>共 {pagination.page?.total ?? "—"} 个用户</span><Pagination {...pagination} /></footer>
       {creating && <CreateUserDialog onClose={() => setCreating(false)} onCreated={() => { setCreating(false); load(); }} />}
       {quotaTarget && <QuotaDialog user={quotaTarget} onClose={() => setQuotaTarget(null)} onSaved={() => { setQuotaTarget(null); load(); }} />}
       {resetTarget && <ResetPasswordDialog user={resetTarget} onClose={() => setResetTarget(null)} />}

@@ -102,13 +102,18 @@ class AdminApi:
         return {"id": account.id, "username": account.username, "bucket_id": account.bucket_id,
                 "quota_bytes": quota_bytes}
 
-    def list_users(self, token: str) -> list[dict[str, object]]:
+    def list_users(self, token: str, *, limit: int | None = None, cursor: int = 0, query: str = "", status: str = ""):
         self.accounts.sessions.require(token, role="admin")
-        return self.accounts.list_accounts()
+        return self.accounts.list_accounts() if limit is None else self.accounts.list_accounts_page(
+            limit=limit, cursor=cursor, query=query, status=status)
 
     def set_user_status(self, token: str, csrf: str, user_id: int, status: str) -> None:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         self.accounts.set_account_status(user_id, status)
+
+    def user_summary(self, token: str):
+        self.accounts.sessions.require(token, role="admin")
+        return self.accounts.account_summary()
 
     def reset_user_password(self, token: str, csrf: str, user_id: int, password: str) -> None:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
@@ -167,9 +172,9 @@ class AdminApi:
             name, grants=[(int(grant["bucket_id"]), str(grant.get("prefix", "")), str(grant.get("perms", "ro"))) for grant in grants])
         return {"id": client_id, "access_key_id": access_key, "secret": secret}
 
-    def list_clients(self, token: str) -> list[dict[str, object]]:
+    def list_clients(self, token: str, *, limit: int | None = None, cursor: int = 0):
         self.accounts.sessions.require(token, role="admin")
-        return self.clients.list_clients()
+        return self.clients.list_clients(limit=limit, cursor=cursor)
 
     def set_client_status(self, token: str, csrf: str, client_id: int, status: str) -> None:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
@@ -366,14 +371,62 @@ class UserApi:
                 "unlocked": self.accounts.keystore.unlocked, "remember": session.remember,
                 "csrf_token": session.csrf_token, "expires_at": session.expires_at}
 
-    async def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000):
+    async def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000, public_only: bool = False):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         path_prefix = normalize_user_path(prefix) if prefix else ""
+        if public_only:
+            return await self.objects.metadata.run_in_thread(self._public_directory_page, account.bucket_id, path_prefix, cursor, limit)
         page = await self.objects.alist_objects(Scope(account.bucket_id, ""), path_prefix, "/", cursor, min(limit, 1000))
         return {"objects": [self._object_json(item) for item in page.objects],
                 "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor,
                 "public_folders": self._public_folders(account.bucket_id, page.common_prefixes)}
+
+    def _public_directory_page(self, bucket_id: int, prefix: str, cursor: str | None, limit: int):
+        limit = max(1, min(limit, 200))
+        rows = self.objects.metadata.db.execute(
+            "SELECT * FROM objects WHERE bucket_id=? AND key>? AND key<? AND key>? "
+            "AND public_token IS NOT NULL AND substr(key,1,9)!='.tgdrive/' "
+            "AND instr(rtrim(substr(key,?),'/'),'/')=0 ORDER BY key LIMIT ?",
+            (bucket_id, prefix, prefix + self.objects._PREFIX_END, cursor or "", len(prefix) + 1, limit + 1)).fetchall()
+        items = [self._object_json(self.objects._object(row)) for row in rows[:limit]]
+        folders = {item["key"]: item for item in items if item["key"].endswith("/")}
+        return {"objects": [item for item in items if not item["key"].endswith("/")],
+                "common_prefixes": list(folders), "public_folders": folders,
+                "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
+
+    async def folders(self, token: str, *, prefix: str = "", cursor: str = "", limit: int = 50):
+        account = self.accounts.account_for_session(self._session(token))
+        prefix = normalize_user_path(prefix, directory=True) if prefix else ""
+        limit = max(1, min(limit, 200))
+        def read():
+            # 包含隐式目录；找到目录后跳过整棵子树，不扫描其中每个文件来去重。
+            folders = []
+            position = cursor + self.objects._PREFIX_END if cursor else prefix
+            while len(folders) <= limit:
+                row = self.objects.metadata.db.execute(
+                    "SELECT key FROM objects WHERE bucket_id=? AND key>? AND key<? "
+                    "AND substr(key,1,9)!='.tgdrive/' AND instr(substr(key,?),'/')>0 ORDER BY key LIMIT 1",
+                    (account.bucket_id, position, prefix + self.objects._PREFIX_END, len(prefix) + 1)).fetchone()
+                if row is None:
+                    break
+                folder = prefix + row["key"][len(prefix):].split("/", 1)[0] + "/"
+                folders.append(folder)
+                position = folder + self.objects._PREFIX_END
+            return {"folders": folders[:limit], "next_cursor": folders[limit - 1] if len(folders) > limit else None}
+        return await self.objects.metadata.run_in_thread(read)
+
+    def check_files(self, token: str, csrf: str, paths: list[str]):
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        if not isinstance(paths, list) or len(paths) > 200 or any(not isinstance(path, str) for path in paths):
+            raise ValueError("一次最多检查 200 个文件")
+        keys = [normalize_user_path(path) for path in paths]
+        if not keys:
+            return {"paths": []}
+        marks = ",".join("?" for _ in keys)
+        rows = self.objects.metadata.db.execute(
+            f"SELECT key FROM objects WHERE bucket_id=? AND key IN ({marks})", (scope.bucket_id, *keys))
+        return {"paths": [row["key"] for row in rows]}
 
     def _public_folders(self, bucket_id: int, prefixes: list[str]) -> dict[str, dict[str, object]]:
         """这一页里已公开的文件夹：{文件夹路径: 公开信息}。文件夹的分享信息保存在它的目录标记行上。"""
@@ -384,7 +437,7 @@ class UserApi:
             f"SELECT * FROM objects WHERE bucket_id=? AND public_token IS NOT NULL AND key IN ({marks})", (bucket_id, *prefixes)).fetchall()
         return {row["key"]: self._object_json(self.objects._object(row)) for row in rows}
 
-    async def search(self, token: str, query: str, cursor: str = "", limit: int = 100):
+    async def search(self, token: str, query: str, cursor: str = "", limit: int = 100, public_only: bool = False):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         self.objects._bucket(account.bucket_id)
@@ -394,13 +447,13 @@ class UserApi:
             raise ValueError("搜索词不能超过 256 个字符")
         def read_page():
             return self.objects.metadata.db.execute(
-                "SELECT key,size,etag,content_type,modified_at,public_token,public_at FROM objects "
+                "SELECT * FROM objects "
                 "WHERE bucket_id=? AND key>? AND instr(lower(key),lower(?))>0 "
-                "AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' ORDER BY key LIMIT ?",
-                (account.bucket_id, cursor, query, limit + 1),
+                "AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' AND (?=0 OR public_token IS NOT NULL) ORDER BY key LIMIT ?",
+                (account.bucket_id, cursor, query, int(public_only), limit + 1),
             ).fetchall()
         rows = await self.objects.metadata.run_in_thread(read_page)
-        return {"objects": [dict(row) for row in rows[:limit]], "common_prefixes": [],
+        return {"objects": [self._object_json(self.objects._object(row)) for row in rows[:limit]], "common_prefixes": [],
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
     async def folder(self, token: str, csrf: str, path: str) -> dict[str, object]:
@@ -450,8 +503,28 @@ class UserApi:
 
     # ---------- 回收站 ----------
 
-    def list_trash(self, token: str) -> dict[str, object]:
+    def list_trash(self, token: str, *, limit: int | None = None, cursor: str = "") -> dict[str, object]:
         scope = self._scope(token)
+        if limit is not None:
+            limit = max(1, min(limit, 200))
+            where, args = "bucket_id=?", [scope.bucket_id]
+            totals = self.objects.metadata.db.execute(
+                "SELECT COUNT(*),COALESCE(SUM(size),0) FROM trash WHERE bucket_id=?", args).fetchone()
+            if cursor:
+                try:
+                    deleted, entry_id = cursor.split("|", 1)
+                    args.extend((float(deleted), float(deleted), entry_id))
+                except (ValueError, TypeError) as exc:
+                    raise ValueError("cursor 不合法") from exc
+                where += " AND (deleted_at<? OR (deleted_at=? AND id<?))"
+            rows = self.objects.metadata.db.execute(
+                f"SELECT * FROM trash WHERE {where} ORDER BY deleted_at DESC,id DESC LIMIT ?", (*args, limit + 1)).fetchall()
+            items = [{"id": row["id"], "path": row["original_path"], "is_folder": bool(row["is_folder"]), "size": row["size"],
+                      "item_count": row["item_count"], "deleted_at": row["deleted_at"],
+                      "purge_at": row["deleted_at"] + self.objects.TRASH_DAYS * 86400} for row in rows[:limit]]
+            last = rows[limit - 1] if len(rows) > limit else None
+            return {"items": items, "total": totals[0], "total_size": totals[1], "retention_days": self.objects.TRASH_DAYS,
+                    "next_cursor": f"{last['deleted_at']!r}|{last['id']}" if last else None}
         items = self.objects.list_trash(scope.bucket_id)
         return {"items": items, "total_size": sum(int(item["size"]) for item in items), "retention_days": self.objects.TRASH_DAYS}
 
@@ -509,10 +582,18 @@ class UserApi:
     async def abort_upload(self, token: str, csrf: str, upload_id: str) -> None:
         await self.objects.abort_multipart(self._scope(token, csrf=csrf, mutation=True), upload_id)
 
-    def list_public(self, token: str) -> list[dict[str, object]]:
+    def list_public(self, token: str, *, cursor: str = "", limit: int | None = None):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
-        return [self._object_json(item) for item in self.objects.list_public(account.bucket_id)]
+        if limit is None:
+            return [self._object_json(item) for item in self.objects.list_public(account.bucket_id)]
+        limit = max(1, min(limit, 200))
+        condition = "bucket_id=? AND public_token IS NOT NULL AND substr(key,1,9)!='.tgdrive/'"
+        total = self.objects.metadata.db.execute(f"SELECT COUNT(*) FROM objects WHERE {condition}", (account.bucket_id,)).fetchone()[0]
+        rows = self.objects.metadata.db.execute(
+            f"SELECT * FROM objects WHERE {condition} AND key>? ORDER BY key LIMIT ?", (account.bucket_id, cursor, limit + 1)).fetchall()
+        return {"objects": [self._object_json(self.objects._object(row)) for row in rows[:limit]], "total": total,
+                "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
     def change_password(self, token: str, csrf: str, old_password: str, new_password: str) -> None:
         session = self.accounts.sessions.require(token, csrf=csrf, mutation=True)
@@ -561,11 +642,11 @@ class UserApi:
                                               Scope(account.bucket_id), normalize_user_path(target))
         return self._object_json(item)
 
-    def list_clients(self, token: str) -> list[dict[str, object]]:
+    def list_clients(self, token: str, *, limit: int | None = None, cursor: int = 0):
         session = self._session(token)
         if self.clients is None:
-            return []
-        return self.clients.list_clients(owner_user_id=session.user_id)
+            return [] if limit is None else {"clients": [], "total": 0, "next_cursor": None}
+        return self.clients.list_clients(owner_user_id=session.user_id, limit=limit, cursor=cursor)
 
     def create_client(self, token: str, csrf: str, name: str) -> dict[str, object]:
         session = self._session(token, csrf=csrf, mutation=True)

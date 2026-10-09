@@ -1,9 +1,10 @@
 /** 公开分享页：无需登录，只暴露文件名、大小和内容。带密码的分享先验证密码。 */
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCursorPage } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
 import { FilePreview, FileTile, canPreview, getFileKind, kindLabel } from "./files";
-import { Brand, Button, EmptyState, Field, Icon, Modal, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime } from "./ui";
+import { Brand, Button, EmptyState, Field, Icon, Modal, Pagination, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime } from "./ui";
 
 type Shared = Extract<api.PublicObject, { password_required: false }>;
 
@@ -121,36 +122,28 @@ type FolderPage = api.PublicFolderPage;
 function FolderShare({ token, folder, access, onPasswordRequired }: { token: string; folder: api.PublicFolder; access: string | null; onPasswordRequired: () => void }) {
   const readPath = () => new URLSearchParams(window.location.search).get("path") ?? "";
   const [path, setPath] = useState(readPath);
-  const [page, setPage] = useState<FolderPage | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState("");
   const [preview, setPreview] = useState<FolderPage["files"][number] | null>(null);
   useEffect(() => {
     const pop = () => setPath(readPath());
     window.addEventListener("popstate", pop);
     return () => window.removeEventListener("popstate", pop);
   }, []);
-  const fail = useCallback((reason: unknown) => {
-    if (reason instanceof api.ApiError && reason.code === "password_required") { onPasswordRequired(); return; }
-    setError(reason instanceof api.ApiError && reason.status === 404 ? "这个文件夹不存在，可能已被分享者移动或删除。" : api.errorMessage(reason, "加载失败，请稍后重试"));
-  }, [onPasswordRequired]);
-  const load = useCallback(() => {
-    setPage(null); setError("");
-    void api.publicFolderList(token, path, null, access).then(setPage).catch(fail);
-  }, [token, path, access, fail]);
-  useEffect(load, [load]);
+  const passwordRequired = useRef(onPasswordRequired);
+  passwordRequired.current = onPasswordRequired;
+  const fetchPage = useCallback(async (cursor: string | null) => {
+    try { return await api.publicFolderList(token, path, cursor, access); }
+    catch (reason) {
+      if (reason instanceof api.ApiError && reason.code === "password_required") passwordRequired.current();
+      throw new Error(reason instanceof api.ApiError && reason.status === 404 ? "这个文件夹不存在，可能已被分享者移动或删除。" : api.errorMessage(reason, "加载失败，请稍后重试"));
+    }
+  }, [token, path, access]);
+  const pagination = useCursorPage(fetchPage);
+  const page = pagination.page;
+  const error = pagination.error;
+  const load = pagination.reload;
   function open(next: string) {
     window.history.pushState(null, "", next ? `?path=${encodeURIComponent(next)}` : window.location.pathname);
     setPath(next);
-  }
-  async function loadMore() {
-    if (!page?.next_cursor) return;
-    setLoadingMore(true);
-    try {
-      const more = await api.publicFolderList(token, path, page.next_cursor, access);
-      setPage({ ...more, folders: [...page.folders, ...more.folders], files: [...page.files, ...more.files] });
-    } catch (reason) { fail(reason); }
-    finally { setLoadingMore(false); }
   }
   const segments = path.split("/").filter(Boolean);
   const crumbs = [{ label: folder.name, path: "" }, ...segments.map((label, index) => ({ label, path: `${segments.slice(0, index + 1).join("/")}/` }))];
@@ -175,13 +168,14 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
           </span>
         ))}
       </nav>
-      {error ? <EmptyState icon="alert" title="无法打开" description={error} action={path ? <Button onClick={() => open("")}>回到根目录</Button> : <Button icon="refresh" onClick={load}>重试</Button>} />
+      {error ? <EmptyState icon="alert" title="无法打开" description={error} action={path ? <Button onClick={() => open("")}>回到根目录</Button> : <Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         : page === null ? <div className="share-folder-loading"><SkeletonRows rows={4} /></div>
           : empty ? <EmptyState icon="folder" title="这个文件夹是空的" description="分享者之后添加的文件会显示在这里。" />
             : (
               <div className="data-table public-folder-table" role="table" aria-label="文件夹内容">
                 <div className="data-row data-head" role="row">
                   <span role="columnheader" className="cell-name">名称</span>
+                  <span role="columnheader" className="cell-type">类型</span>
                   <span role="columnheader" className="cell-size">大小</span>
                   <span role="columnheader" className="cell-date">修改时间</span>
                   <span role="columnheader" className="cell-actions"><span className="sr-only">操作</span></span>
@@ -189,6 +183,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
                 {page.folders.map(item => (
                   <div key={item.path} role="row" className="data-row is-clickable" onClick={() => open(item.path)}>
                     <span role="cell" className="cell-name"><FileTile kind="folder" /><button type="button" className="name-button" onClick={event => { event.stopPropagation(); open(item.path); }}>{item.name}</button></span>
+                    <span role="cell" className="cell-type muted">文件夹</span>
                     <span role="cell" className="cell-size muted">—</span>
                     <span role="cell" className="cell-date muted">—</span>
                     <span role="cell" className="cell-actions" />
@@ -203,6 +198,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
                       <span role="cell" className="cell-name"><FileTile kind={kind} />
                         <a className="name-button" href={previewable ? api.publicFolderFile(token, item.path, false, access) : download} onClick={event => { event.preventDefault(); event.stopPropagation(); if (previewable) setPreview(item); else window.location.assign(download); }}>{item.name}</a>
                       </span>
+                      <span role="cell" className="cell-type muted">{kindLabel(kind)}</span>
                       <span role="cell" className="cell-size muted">{formatBytes(item.size)}</span>
                       <span role="cell" className="cell-date muted" title={formatDateTime(item.modified_at)}>{formatDate(item.modified_at)}</span>
                       <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
@@ -213,7 +209,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
                 })}
               </div>
             )}
-      {page?.next_cursor && <div className="panel-more"><Button size="sm" loading={loadingMore} onClick={() => void loadMore()}>加载更多</Button></div>}
+      <div className="panel-more"><Pagination {...pagination} /></div>
       {preview && (
         <Modal size="xl" title={preview.name} onClose={() => setPreview(null)}
           description={<span className="preview-meta"><span>{formatBytes(preview.size)}</span><span>{preview.content_type || kindLabel(getFileKind(preview.content_type, preview.name))}</span><span>{formatDateTime(preview.modified_at)}</span></span>}

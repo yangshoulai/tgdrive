@@ -361,8 +361,8 @@ export function Panel({ title, description, actions, children, flush, className 
   return (
     <section className={`panel ${className}`}>
       {(title || actions) && (
-        <header className="panel-header">
-          <div>
+        <header className={`panel-header${description ? " has-description" : ""}`}>
+          <div className="panel-header-main">
             {title && <h2>{title}</h2>}
             {description && <p>{description}</p>}
           </div>
@@ -473,4 +473,15 @@ export function formatDateTime(seconds: number | null | undefined) {
 
 export function useDocumentTitle(title: string) {
   useEffect(() => { document.title = title; }, [title]);
+}
+
+export function Pagination({ number, hasPrevious, hasNext, loading, previous, next }: {
+  number: number; hasPrevious: boolean; hasNext: boolean; loading: boolean; previous: () => void; next: () => void;
+}) {
+  return <nav className="pagination" aria-label="分页">
+    <Button size="sm" disabled={loading || !hasPrevious} onClick={previous}>上一页</Button>
+    <span aria-live="polite" aria-atomic="true">第 {number} 页</span>
+    <Button size="sm" disabled={loading || !hasNext} onClick={next}>下一页</Button>
+    {loading && <span className="spinner" role="status" aria-label="正在加载" />}
+  </nav>;
 }

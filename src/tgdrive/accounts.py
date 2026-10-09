@@ -135,6 +135,35 @@ class AccountService:
             for row in rows
         ]
 
+    def list_accounts_page(self, *, cursor: int = 0, limit: int = 50, query: str = "", status: str = "") -> dict[str, object]:
+        if cursor < 0 or status not in ("", "active", "disabled") or len(query) > 256:
+            raise ValueError("分页或筛选参数不合法")
+        limit = max(1, min(limit, 200))
+        where, args = ["instr(lower(u.username),lower(?))>0"], [query.strip()]
+        if status:
+            where.append("u.status=?")
+            args.append(status)
+        condition = " AND ".join(where)
+        total = self.metadata.db.execute(f"SELECT COUNT(*) FROM users u WHERE {condition}", args).fetchone()[0]
+        rows = self.metadata.db.execute(
+            "SELECT u.id,u.username,u.role,u.status,u.bucket_id,u.created_at,u.last_login_at,"
+            "b.quota_bytes,COALESCE(b.used_bytes,0) AS used_bytes FROM users u LEFT JOIN buckets b ON b.id=u.bucket_id "
+            f"WHERE {condition} AND u.id>? ORDER BY u.id LIMIT ?", (*args, cursor, limit + 1)).fetchall()
+        return {"users": [dict(row) for row in rows[:limit]], "total": total,
+                "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None}
+
+    def account_summary(self) -> dict[str, object]:
+        totals = self.metadata.db.execute(
+            "SELECT COUNT(*) AS total,COALESCE(SUM(u.status='active'),0) AS active,"
+            "COALESCE(SUM(u.role='user'),0) AS user_total,COALESCE(SUM(b.used_bytes),0) AS used_bytes "
+            "FROM users u LEFT JOIN buckets b ON b.id=u.bucket_id").fetchone()
+        columns = ("SELECT u.id,u.username,u.role,u.status,u.bucket_id,u.created_at,u.last_login_at,"
+                   "b.quota_bytes,COALESCE(b.used_bytes,0) AS used_bytes FROM users u LEFT JOIN buckets b ON b.id=u.bucket_id ")
+        top = self.metadata.db.execute(columns + "WHERE u.role='user' ORDER BY b.used_bytes DESC,u.id LIMIT 8").fetchall()
+        near = self.metadata.db.execute(columns + "WHERE b.quota_bytes>0 AND b.used_bytes>=b.quota_bytes*0.85 "
+                                       "ORDER BY CAST(b.used_bytes AS REAL)/b.quota_bytes DESC,u.id LIMIT 8").fetchall()
+        return {**dict(totals), "top_users": [dict(row) for row in top], "near_quota": [dict(row) for row in near]}
+
     def set_account_status(self, account_id: int, status: str) -> None:
         if status not in ("active", "disabled"):
             raise ValueError("invalid account status")

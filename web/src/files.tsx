@@ -4,7 +4,7 @@ import * as api from "./api";
 import { HighlightedCode } from "./code";
 import { languageOf } from "./highlight";
 import { Markdown } from "./markdown";
-import { Badge, Button, CopyField, Field, Icon, KeyValue, Modal, Segmented, SkeletonRows, Switch, formatBytes, formatDateTime, toast, type IconName } from "./ui";
+import { Badge, Button, CopyField, Field, Icon, KeyValue, Modal, Segmented, Switch, formatBytes, formatDateTime, toast, type IconName } from "./ui";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "text" | "code" | "archive" | "other";
 
@@ -75,10 +75,20 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 type TextState = { text: string; truncated: boolean; total: number | null };
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-export function FilePreview({ kind, url, name, downloadUrl, onImageLoad, resolveImage }: { kind: FileKind; url: string; name: string; downloadUrl: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null }) {
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null };
+export function FilePreview(props: PreviewProps) {
+  return <PreviewContent key={`${props.kind}:${props.url}`} {...props} />;
+}
+
+function PreviewLoading() {
+  return <div className="preview-loading" role="status"><span className="spinner spinner-lg" /><span>正在加载预览…</span></div>;
+}
+
+function PreviewContent({ kind, url, name, downloadUrl, onImageLoad, resolveImage }: PreviewProps) {
   const [content, setContent] = useState<TextState | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
+  const [mediaReady, setMediaReady] = useState(false);
   const [mode, setMode] = useState<"render" | "source">("render");
   useEffect(() => {
     if (kind !== "text" && kind !== "code") return;
@@ -95,7 +105,7 @@ export function FilePreview({ kind, url, name, downloadUrl, onImageLoad, resolve
         const truncated = total !== null && total > buffer.byteLength;
         return { text: decodeText(buffer, truncated), truncated, total };
       })
-      .then(setContent)
+      .then(value => { if (!controller.signal.aborted) setContent(value); })
       .catch(reason => { if (!controller.signal.aborted) setError(api.errorMessage(reason, "无法读取文件")); });
     return () => controller.abort();
   }, [url, kind]);
@@ -108,13 +118,16 @@ export function FilePreview({ kind, url, name, downloadUrl, onImageLoad, resolve
     </div>
   );
   if (mediaFailed) return fallback;
-  if (kind === "image") return <div className="preview-media"><img src={url} alt={name} onError={() => setMediaFailed(true)} onLoad={event => onImageLoad?.(event.currentTarget)} /></div>;
-  if (kind === "video") return <div className="preview-media"><video src={url} controls preload="metadata" onError={() => setMediaFailed(true)} /></div>;
-  if (kind === "audio") return <div className="preview-audio"><FileTile kind="audio" size="xl" /><audio src={url} controls onError={() => setMediaFailed(true)} /></div>;
-  if (kind === "pdf") return <iframe className="preview-frame" src={url} title={name} />;
+  if (["image", "video", "audio", "pdf"].includes(kind)) return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
+    {!mediaReady && <div className="preview-media-loader"><PreviewLoading /></div>}
+    {kind === "image" && <div className="preview-media"><img src={url} alt={name} onError={() => setMediaFailed(true)} onLoad={event => { setMediaReady(true); onImageLoad?.(event.currentTarget); }} /></div>}
+    {kind === "video" && <div className="preview-media"><video src={url} controls preload="metadata" onError={() => setMediaFailed(true)} onLoadedMetadata={() => setMediaReady(true)} onWaiting={() => setMediaReady(false)} onCanPlay={() => setMediaReady(true)} onPlaying={() => setMediaReady(true)} /></div>}
+    {kind === "audio" && <div className="preview-audio"><FileTile kind="audio" size="xl" /><audio src={url} controls preload="metadata" onError={() => setMediaFailed(true)} onLoadedMetadata={() => setMediaReady(true)} onWaiting={() => setMediaReady(false)} onCanPlay={() => setMediaReady(true)} onPlaying={() => setMediaReady(true)} /></div>}
+    {kind === "pdf" && <iframe className="preview-frame" src={url} title={name} onLoad={() => setMediaReady(true)} onError={() => setMediaFailed(true)} />}
+  </div>;
   if (kind === "text" || kind === "code") {
     if (error) return fallback;
-    if (content === null) return <div className="preview-loading"><SkeletonRows rows={6} /></div>;
+    if (content === null) return <PreviewLoading />;
     const markdown = /\.(md|markdown|mdx)$/i.test(name);
     const lang = languageOf(name);
     return (

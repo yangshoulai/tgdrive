@@ -1,21 +1,20 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
+import { useCursorPage } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
 import { FileTile, baseName, getFileKind, parentPath } from "../files";
 
-import { Button, ConfirmDialog, EmptyState, PageHeader, SkeletonRows, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
+import { Button, ConfirmDialog, EmptyState, PageHeader, Pagination, SkeletonRows, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 回收站 ---------- */
 
 export function TrashView({ onChanged, onOpenFolder }: { onChanged: () => void; onOpenFolder: (prefix: string) => void }) {
-  const [data, setData] = useState<{ items: api.TrashItem[]; total_size: number; retention_days: number } | null>(null);
+  const pagination = useCursorPage(api.listTrashPage);
+  const data = pagination.page;
+  const load = pagination.reload;
   const [purging, setPurging] = useState<api.TrashItem[] | "all" | null>(null);
   useDocumentTitle(`回收站 · ${BRAND}`);
-  const load = useCallback(() => {
-    void api.listTrash().then(setData).catch(reason => { setData({ items: [], total_size: 0, retention_days: 30 }); toast.error(api.errorMessage(reason, "回收站加载失败，请稍后重试")); });
-  }, []);
-  useEffect(load, [load]);
   async function restore(items: api.TrashItem[]) {
     try {
       const { restored } = await api.restoreTrash(items.map(item => item.id));
@@ -38,7 +37,7 @@ export function TrashView({ onChanged, onOpenFolder }: { onChanged: () => void; 
       <PageHeader title="回收站" description={`删除的文件会在这里保留 ${data?.retention_days ?? 30} 天，之后自动永久删除。回收站中的文件仍占用存储空间，其公开链接暂停访问。`}
         actions={data && data.items.length > 0 ? <Button variant="danger" icon="trash" onClick={() => setPurging("all")}>清空回收站</Button> : undefined} />
       <section className="file-surface">
-        {data === null ? <SkeletonRows rows={4} /> : data.items.length === 0 ? (
+        {pagination.error ? <EmptyState icon="alert" title="回收站加载失败" description={pagination.error} action={<Button onClick={() => void load()}>重试</Button>} /> : data === null ? <SkeletonRows rows={4} /> : data.items.length === 0 ? (
           <EmptyState icon="trash" title="回收站是空的" description="删除的文件和文件夹会先放到这里，可以随时还原。" />
         ) : (
           <div className="data-table trash-table" role="table" aria-label="回收站">
@@ -65,11 +64,10 @@ export function TrashView({ onChanged, onOpenFolder }: { onChanged: () => void; 
           </div>
         )}
       </section>
-      {data && data.items.length > 0 && <footer className="list-footer"><span>{data.items.length} 项，共占用 {formatBytes(data.total_size)}</span></footer>}
+      {data && <footer className="list-footer"><span>共 {data.total} 项，占用 {formatBytes(data.total_size)}</span><Pagination {...pagination} /></footer>}
       {purging && <ConfirmDialog title={purging === "all" ? "清空回收站？" : `永久删除“${baseName(purging[0].path)}”？`}
         description={purging === "all" ? "回收站中的所有文件都会被永久删除并释放空间，无法恢复。" : "文件会被永久删除并释放空间，无法恢复。"}
         confirmLabel="永久删除" onConfirm={() => purge(purging)} onClose={() => setPurging(null)} />}
     </>
   );
 }
-

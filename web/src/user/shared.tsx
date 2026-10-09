@@ -1,36 +1,36 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
+import { useCursorPage } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileTile, PreviewModal, baseName, getFileKind, parentPath } from "../files";
+import { FileTile, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
 
-import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, SkeletonRows, copyText, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination, SkeletonRows, copyText, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 公开分享 ---------- */
 
 export function SharedView({ session, onChanged, onOpenFolder }: { session: api.Session; onChanged: () => void; onOpenFolder: (prefix: string) => void }) {
-  const [items, setItems] = useState<api.FileItem[] | null>(null);
-  const [error, setError] = useState("");
+  const pagination = useCursorPage(api.listPublicPage);
+  const items = pagination.page?.objects ?? null;
+  const error = pagination.error;
+  const load = pagination.reload;
   const [revoking, setRevoking] = useState<api.FileItem | null>(null);
   const [preview, setPreview] = useState<api.FileItem | null>(null);
   useDocumentTitle(`公开分享 · ${BRAND}`);
-  const load = useCallback(() => {
-    setError("");
-    void api.listPublic().then(setItems).catch(reason => setError(api.errorMessage(reason, "加载失败，请稍后重试")));
-  }, []);
-  useEffect(load, [load]);
+
   const links = (file: api.FileItem) => api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url);
   return (
     <>
       <PageHeader title="公开分享" description="这些文件和文件夹可以被任何拥有链接的人访问。关闭分享后，链接会立即失效。" />
       <section className="file-surface">
-        {error ? <EmptyState icon="alert" title="加载失败" description={error} action={<Button icon="refresh" onClick={load}>重试</Button>} />
+        {error ? <EmptyState icon="alert" title="加载失败" description={error} action={<Button icon="refresh" onClick={() => void load()}>重试</Button>} />
           : items === null ? <SkeletonRows rows={4} />
             : items.length === 0 ? <EmptyState icon="globe" title="还没有公开的内容" description="在“我的文件”中打开文件或文件夹的菜单，选择“公开分享”，或在上传时开启公开访问。" />
               : (
                 <div className="data-table shared-table" role="table" aria-label="公开内容">
                   <div className="data-row data-head" role="row">
                     <span role="columnheader" className="cell-name">名称</span>
+                    <span role="columnheader" className="cell-type">类型</span>
                     <span role="columnheader" className="cell-size">大小</span>
                     <span role="columnheader" className="cell-date">分享时间</span>
                     <span role="columnheader" className="cell-actions"><span className="sr-only">操作</span></span>
@@ -51,6 +51,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                           ? <Badge tone="danger">已过期</Badge>
                           : <Badge tone="warning" icon="pulse">{`至 ${formatDate(file.public_expires_at)}`}</Badge>)}
                       </span>
+                      <span role="cell" className="cell-type muted">{kindLabel(getFileKind(file.content_type, file.key))}</span>
                       <span role="cell" className="cell-size muted">{folder ? "文件夹" : formatBytes(file.size)}</span>
                       <span role="cell" className="cell-date muted">{formatDate(file.public_at)}</span>
                       <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
@@ -68,6 +69,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                 </div>
               )}
       </section>
+      <footer className="list-footer"><span>共 {pagination.page?.total ?? "—"} 个公开项目</span><Pagination {...pagination} /></footer>
       {revoking && <ConfirmDialog title={`停止分享“${baseName(revoking.key)}”？`} description="原链接会立即失效。再次分享时会生成新的链接。" confirmLabel="停止分享"
         onClose={() => setRevoking(null)}
         onConfirm={async () => {
@@ -78,4 +80,3 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
     </>
   );
 }
-

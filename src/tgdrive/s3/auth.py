@@ -100,30 +100,48 @@ class ClientAuthStore:
             if cursor.rowcount != 1:
                 raise NotFoundError("client not found")
 
-    def list_clients(self, owner_user_id: int | None = None) -> list[dict[str, object]]:
-        if owner_user_id is None:
-            clients = self.metadata.db.execute(
-                "SELECT id,name,description,owner_user_id,status,created_at FROM clients ORDER BY id"
-            ).fetchall()
+    def list_clients(self, owner_user_id: int | None = None, *, cursor: int = 0,
+                     limit: int | None = None) -> list[dict[str, object]] | dict[str, object]:
+        if cursor < 0:
+            raise ValueError("cursor 不合法")
+        condition = " WHERE c.owner_user_id=?" if owner_user_id is not None else ""
+        args = (owner_user_id,) if owner_user_id is not None else ()
+        total = None
+        if limit is not None:
+            limit = max(1, min(limit, 200))
+            total = self.metadata.db.execute("SELECT COUNT(*) FROM clients c" + condition, args).fetchone()[0]
+        sql = ("SELECT c.id,c.name,c.description,c.owner_user_id,c.status,c.created_at,u.username AS owner_username "
+               "FROM clients c LEFT JOIN users u ON u.id=c.owner_user_id" + condition)
+        if limit is not None:
+            sql += (" AND" if condition else " WHERE") + " c.id>? ORDER BY c.id LIMIT ?"
+            args += (cursor, limit + 1)
         else:
-            clients = self.metadata.db.execute(
-                "SELECT id,name,description,owner_user_id,status,created_at FROM clients "
-                "WHERE owner_user_id=? ORDER BY id", (owner_user_id,)
-            ).fetchall()
-        result: list[dict[str, object]] = []
-        for client in clients:
+            sql += " ORDER BY c.id"
+        clients = self.metadata.db.execute(sql, args).fetchall()
+        selected = clients if limit is None else clients[:limit]
+        keys_by_client, grants_by_client = {}, {}
+        # 按本页客户端批量取关联数据，避免每条凭据额外执行两次查询。
+        for start in range(0, len(selected), 200):
+            ids = [client["id"] for client in selected[start:start + 200]]
+            marks = ",".join("?" for _ in ids)
             keys = self.metadata.db.execute(
-                "SELECT access_key_id,status,created_at,last_used_at FROM client_keys "
-                "WHERE client_id=? ORDER BY created_at", (client["id"],)
-            ).fetchall()
+                f"SELECT client_id,access_key_id,status,created_at,last_used_at FROM client_keys WHERE client_id IN ({marks}) "
+                "ORDER BY created_at,access_key_id", ids).fetchall()
             grants = self.metadata.db.execute(
-                "SELECT g.bucket_id,b.name AS bucket_name,g.prefix,g.perms "
-                "FROM client_grants g JOIN buckets b ON b.id=g.bucket_id "
-                "WHERE g.client_id=? ORDER BY g.bucket_id,g.prefix", (client["id"],)
-            ).fetchall()
+                "SELECT g.client_id,g.bucket_id,b.name AS bucket_name,g.prefix,g.perms FROM client_grants g "
+                f"JOIN buckets b ON b.id=g.bucket_id WHERE g.client_id IN ({marks}) ORDER BY g.bucket_id,g.prefix", ids).fetchall()
+            for key in keys:
+                keys_by_client.setdefault(key["client_id"], []).append(key)
+            for grant in grants:
+                grants_by_client.setdefault(grant["client_id"], []).append(grant)
+        result: list[dict[str, object]] = []
+        for client in selected:
+            keys = keys_by_client.get(client["id"], [])
+            grants = grants_by_client.get(client["id"], [])
             result.append({
                 "id": client["id"], "name": client["name"], "description": client["description"],
                 "owner_user_id": client["owner_user_id"], "status": client["status"],
+                "owner_username": client["owner_username"],
                 "created_at": client["created_at"],
                 "keys": [{"access_key_id": row["access_key_id"], "status": row["status"],
                           "created_at": row["created_at"], "last_used_at": row["last_used_at"]}
@@ -131,7 +149,10 @@ class ClientAuthStore:
                 "grants": [{"bucket_id": row["bucket_id"], "bucket_name": row["bucket_name"],
                             "prefix": row["prefix"], "perms": row["perms"]} for row in grants],
             })
-        return result
+        if limit is None:
+            return result
+        return {"clients": result, "total": total,
+                "next_cursor": clients[limit - 1]["id"] if len(clients) > limit else None}
 
     def secret_for(self, access_key_id: str) -> tuple[ClientPrincipal, str]:
         row = self.metadata.db.execute(

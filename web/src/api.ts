@@ -19,7 +19,7 @@ export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cu
 export type Account = { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
 export type ClientKey = { access_key_id: string; status: "active" | "disabled"; created_at: number; last_used_at: number | null };
 export type ClientGrant = { bucket_id: number; bucket_name: string; prefix: string; perms: "ro" | "rw" };
-export type AdminClient = { id: number; name: string; description: string | null; owner_user_id: number | null; status: "active" | "disabled"; created_at: number; keys: ClientKey[]; grants: ClientGrant[] };
+export type AdminClient = { id: number; name: string; description: string | null; owner_user_id: number | null; owner_username?: string | null; status: "active" | "disabled"; created_at: number; keys: ClientKey[]; grants: ClientGrant[] };
 export type BotRuntime = { failures: number; cooldown_seconds: number; last_sent_at: number; state: "enabled" | "draining" | "disabled" } | null;
 export type BotConfig = { id: number; name: string; channel_id: string; status: "active" | "disabled"; created_at: number; last_check_at: number | null; last_check_status: string | null; runtime?: BotRuntime };
 export type AdminObject = FileItem & { bucket_id: number; bucket_name: string; username: string | null };
@@ -97,10 +97,13 @@ export const changePassword = (oldPassword: string, newPassword: string) => post
 
 /* ---------- 用户文件 ---------- */
 
-export const listFiles = (prefix = "", cursor: string | null = null) =>
-  request<ListPage>(`/api/user/v1/list?prefix=${encodeURIComponent(prefix)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-export const searchFiles = (query: string, cursor = "") =>
-  request<ListPage>(`/api/user/v1/search?q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}`);
+export const listFiles = (prefix = "", cursor: string | null = null, publicOnly = false) =>
+  request<ListPage>(`/api/user/v1/list?limit=50&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+export const searchFiles = (query: string, cursor = "", publicOnly = false) =>
+  request<ListPage>(`/api/user/v1/search?limit=50&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}`);
+export const listFolders = (prefix: string, cursor: string | null = null) => request<{ folders: string[]; next_cursor: string | null }>(
+  `/api/user/v1/folders?limit=50&prefix=${encodeURIComponent(prefix)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+export const checkFiles = (paths: string[]) => post<{ paths: string[] }>("/api/user/v1/files/check", { paths });
 export const makeFolder = (path: string) => post<FileItem>("/api/user/v1/folders", { path });
 /** recursive 为 true 时，以 / 结尾的文件夹路径会在服务端连同其中所有内容一起删除。 */
 export const deleteFiles = (paths: string[], recursive = false) => post<{ results: { path: string; deleted: boolean; count?: number }[] }>("/api/user/v1/delete", { paths, recursive });
@@ -114,6 +117,8 @@ export const setPublic = (paths: string[], isPublic: boolean, options: ShareOpti
 /* ---------- 回收站 ---------- */
 export type TrashItem = { id: string; path: string; is_folder: boolean; size: number; item_count: number; deleted_at: number; purge_at: number };
 export const listTrash = () => request<{ items: TrashItem[]; total_size: number; retention_days: number }>("/api/user/v1/trash");
+export const listTrashPage = (cursor: string | null) => request<{ items: TrashItem[]; total: number; total_size: number; retention_days: number; next_cursor: string | null }>(
+  `/api/user/v1/trash?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const moveToTrash = (paths: string[]) => post<{ items: { id: string; path: string }[] }>("/api/user/v1/trash", { paths });
 export const restoreTrash = (ids: string[]) => post<{ restored: { id: string; path: string }[] }>("/api/user/v1/trash/restore", { ids });
 export const purgeTrash = (ids: string[] | "all") => post<{ purged: number }>("/api/user/v1/trash/purge", ids === "all" ? { all: true } : { ids });
@@ -133,6 +138,8 @@ export const getUpload = (id: string) => request<UploadState>(`/api/user/v1/uplo
 export const completeUpload = (id: string, parts: [number, string][], isPublic?: boolean) => post<FileItem>(`/api/user/v1/uploads/${id}/complete`, { parts, ...(isPublic === undefined ? {} : { public: isPublic }) });
 export const abortUpload = (id: string) => request<void>(`/api/user/v1/uploads/${id}`, { method: "DELETE" });
 export const listPublic = () => request<FileItem[]>("/api/user/v1/public");
+export const listPublicPage = (cursor: string | null = null, limit = 50) => request<{ objects: FileItem[]; total: number; next_cursor: string | null }>(
+  `/api/user/v1/public?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const contentUrl = (path: string, download = false) => `/api/user/v1/content?path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
 
 export type UploadProgress = { loaded: number; total: number; percent: number };
@@ -178,6 +185,8 @@ export function uploadPartWithProgress(uploadId: string, partNo: number, blob: B
 /* ---------- 用户客户端密钥 ---------- */
 
 export const userClients = () => request<AdminClient[]>("/api/user/v1/clients");
+export type ClientPage = { clients: AdminClient[]; total: number; next_cursor: number | null };
+export const userClientsPage = (cursor: string | null) => request<ClientPage>(`/api/user/v1/clients?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const createUserClient = (name: string) => post<CreatedClient>("/api/user/v1/clients", { name });
 export const disableUserKey = (accessKeyId: string) => post<void>("/api/user/v1/client-keys/disable", { access_key_id: accessKeyId });
 /** 永久删除：立即失效，无法恢复。 */
@@ -192,7 +201,7 @@ export async function loadPublicConfig() {
 }
 export const publicObject = (token: string, access?: string | null) => request<PublicObject>(`/api/public/v1/objects/${encodeURIComponent(token)}${access ? `?access=${encodeURIComponent(access)}` : ""}`);
 export const publicFolderList = (token: string, path = "", cursor: string | null = null, access?: string | null) => {
-  const params = new URLSearchParams({ path });
+  const params = new URLSearchParams({ path, limit: "50" });
   if (cursor) params.set("cursor", cursor);
   if (access) params.set("access", access);
   return request<PublicFolderPage>(`/api/public/v1/folders/${encodeURIComponent(token)}/list?${params}`);
@@ -234,6 +243,10 @@ export const adminSetup = (passphrase: string, username: string, password: strin
 export const adminUnlock = (passphrase: string) => post<SystemStatus>("/api/admin/v1/unlock", { passphrase });
 export const adminLock = () => post<void>("/api/admin/v1/lock");
 export const adminUsers = () => request<Account[]>("/api/admin/v1/users");
+export type AccountSummary = { total: number; active: number; user_total: number; used_bytes: number; top_users: Account[]; near_quota: Account[] };
+export const adminUserSummary = () => request<AccountSummary>("/api/admin/v1/users/summary");
+export const adminUsersPage = (cursor: string | null, q = "", status = "") => request<{ users: Account[]; total: number; next_cursor: number | null }>(
+  `/api/admin/v1/users?limit=50&q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const createAdminUser = (username: string, password: string, quotaBytes: number | null) => post<{ id: number; username: string; bucket_id: number; quota_bytes: number | null }>("/api/admin/v1/users", { username, password, quota_bytes: quotaBytes });
 export const setAdminUserStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/users/${id}/status`, { status });
 export const resetAdminUserPassword = (id: number, password: string) => post<void>(`/api/admin/v1/users/${id}/password`, { password });
@@ -250,6 +263,7 @@ export const createBackup = () => post<Backup>("/api/admin/v1/backups");
 export const backupUrl = (name: string) => `/api/admin/v1/backups/${encodeURIComponent(name)}`;
 export const setAdminUserQuota = (id: number, quotaBytes: number | null) => post<void>(`/api/admin/v1/users/${id}/quota`, { quota_bytes: quotaBytes });
 export const adminClients = () => request<AdminClient[]>("/api/admin/v1/clients");
+export const adminClientsPage = (cursor: string | null) => request<ClientPage>(`/api/admin/v1/clients?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const deleteAdminClient = (id: number) => post<void>(`/api/admin/v1/clients/${id}/delete`);
 export const setAdminClientStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/clients/${id}/status`, { status });
 export const disableAdminKey = (accessKeyId: string) => post<void>("/api/admin/v1/client-keys/disable", { access_key_id: accessKeyId });
@@ -259,7 +273,7 @@ export const checkAdminBot = (id: number) => post<{ id: number; ok: boolean; sta
 export const setAdminBotStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/bots/${id}/status`, { status });
 export type AdminObjectPage = { objects: AdminObject[]; next_cursor: string | null; total: number; public_total: number };
 export const adminObjects = (options: { q?: string; publicOnly?: boolean; cursor?: string | null; limit?: number } = {}) => {
-  const params = new URLSearchParams({ limit: String(options.limit ?? 100) });
+  const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
   if (options.q) params.set("q", options.q);
   if (options.publicOnly) params.set("public", "1");
   if (options.cursor) params.set("cursor", options.cursor);

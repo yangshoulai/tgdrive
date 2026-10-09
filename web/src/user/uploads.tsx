@@ -6,28 +6,54 @@ import { fingerprintFile, fingerprintSupported } from "../fingerprint";
 import { FileTile, getFileKind, makeThumbnail, thumbnailable } from "../files";
 
 import { Badge, Button, Icon, IconButton, Modal, Progress, Switch, copyText, formatBytes, toast } from "../ui";
+import { FolderPicker } from "./folders";
 
 /* ---------- 上传 ---------- */
 
-export function UploadDialog({ files, destination, existing, onClose, onStart }: { files: File[]; destination: string; existing: Set<string>; onClose: () => void; onStart: (files: File[], isPublic: boolean) => void }) {
+export function UploadDialog({ files, destination: initialDestination, onClose, onStart }: { files: File[]; destination: string; onClose: () => void; onStart: (files: File[], isPublic: boolean, destination: string) => void }) {
   const [list, setList] = useState(files);
+  const [destination, setDestination] = useState(initialDestination);
+  const [ready, setReady] = useState(false);
+  const [existing, setExisting] = useState<Set<string>>(new Set());
+  const [checking, setChecking] = useState(true);
+  const [error, setError] = useState("");
+  const [checkVersion, setCheckVersion] = useState(0);
   const [isPublic, setIsPublic] = useState(() => localStorage.getItem("tgdrive:upload-public") === "1");
   const total = list.reduce((sum, file) => sum + file.size, 0);
-  const conflicts = list.filter(file => existing.has(file.name)).length;
+  const conflicts = list.filter(file => existing.has(file.name.normalize("NFC"))).length;
   useEffect(() => { if (!list.length) onClose(); }, [list.length]);
+  useEffect(() => {
+    let active = true;
+    setChecking(true); setExisting(new Set()); setError("");
+    const check = async () => {
+      const found = new Set<string>();
+      for (let index = 0; index < list.length; index += 200) {
+        const result = await api.checkFiles(list.slice(index, index + 200).map(file => `${destination}${file.name}`));
+        if (!active) return;
+        result.paths.forEach(path => found.add(path.slice(destination.length)));
+      }
+      if (active) setExisting(found);
+    };
+    void check().catch(reason => { if (active) setError(api.errorMessage(reason, "无法检查目标位置，请重试")); })
+      .finally(() => { if (active) setChecking(false); });
+    return () => { active = false; };
+  }, [destination, list, checkVersion]);
   return (
     <Modal title={`上传 ${list.length} 个文件`} description={<>上传到 <strong>{destination ? `/${destination}` : "我的文件"}</strong>，共 {formatBytes(total)}</>} icon="upload" onClose={onClose} size="md"
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" icon="upload" onClick={() => { localStorage.setItem("tgdrive:upload-public", isPublic ? "1" : "0"); onStart(list, isPublic); }}>开始上传</Button></>}>
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" icon="upload" disabled={!ready || checking || Boolean(error) || !list.length} onClick={() => { localStorage.setItem("tgdrive:upload-public", isPublic ? "1" : "0"); onStart(list, isPublic, destination); }}>开始上传</Button></>}>
+      <FolderPicker value={destination} onChange={next => { setReady(false); setDestination(next); setChecking(true); }} onReady={setReady} />
       <ul className="upload-pick-list">
         {list.map((file, index) => (
           <li key={`${file.name}-${index}`}>
             <FileTile kind={getFileKind(file.type, file.name)} />
-            <span className="upload-pick-name">{file.name}{existing.has(file.name) && <Badge tone="warning">将覆盖</Badge>}</span>
+            <span className="upload-pick-name">{file.name}{existing.has(file.name.normalize("NFC")) && <Badge tone="warning">将覆盖</Badge>}</span>
             <span className="muted">{formatBytes(file.size)}</span>
             <IconButton icon="x" size="sm" label={`移除 ${file.name}`} onClick={() => setList(current => current.filter((_, i) => i !== index))} />
           </li>
         ))}
       </ul>
+      {checking && <p className="inline-note" role="status"><span className="spinner" />正在检查目标位置的同名文件</p>}
+      {error && <div className="form-alert" role="alert"><span>{error}</span><Button size="sm" onClick={() => setCheckVersion(current => current + 1)}>重试</Button></div>}
       {conflicts > 0 && <p className="inline-note tone-warning"><Icon name="alert" size={15} />{conflicts} 个文件与现有文件同名，上传后将替换原文件，已有的公开链接保持不变。</p>}
       <div className={`share-status${isPublic ? " is-public" : ""}`}>
         <Switch checked={isPublic} onChange={setIsPublic} label="上传后公开访问"
@@ -267,4 +293,3 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
     </aside>
   );
 }
-

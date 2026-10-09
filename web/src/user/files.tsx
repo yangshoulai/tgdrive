@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useCursorPage } from "../pagination";
+import { FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileTile, PreviewModal, ShareDialog, baseName, getFileKind, makeThumbnail, parentPath, thumbnailable } from "../files";
+import { FileTile, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, makeThumbnail, parentPath, thumbnailable } from "../files";
 
-import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
+import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
 import { UploadDialog, UploadTray, useUploadQueue } from "./uploads";
 
@@ -14,13 +16,6 @@ type Entry = { kind: "folder"; key: string } | { kind: "file"; key: string; file
 type SortKey = "name" | "size" | "modified";
 
 export function FilesView({ session, prefix, onOpenFolder, onChanged }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void }) {
-  const [files, setFiles] = useState<api.FileItem[]>([]);
-  const [folders, setFolders] = useState<string[]>([]);
-  const [publicFolders, setPublicFolders] = useState<Record<string, api.FileItem>>({});
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [loadError, setLoadError] = useState("");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "public">("all");
@@ -38,43 +33,25 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
   const [dragging, setDragging] = useState(false);
   const uploads = useUploadQueue(() => { void load(); onChanged(); });
   const fileInput = useRef<HTMLInputElement>(null);
-  const requestId = useRef(0);
   const dragDepth = useRef(0);
   const name = prefix ? baseName(prefix) : "我的文件";
   useDocumentTitle(`${query ? `搜索“${query}”` : name} · ${BRAND}`);
 
-  const load = useCallback(async () => {
-    const id = ++requestId.current;
-    setLoading(true); setLoadError("");
-    try {
-      const page = query ? await api.searchFiles(query) : await api.listFiles(prefix);
-      if (id !== requestId.current) return;
-      setFiles(page.objects.filter(item => !item.key.endsWith("/")));
-      setFolders(page.common_prefixes);
-      setPublicFolders(page.public_folders ?? {});
-      setCursor(page.next_cursor);
-    } catch (reason) {
-      if (id === requestId.current) setLoadError(api.errorMessage(reason, "文件列表加载失败，请稍后重试"));
-    } finally {
-      if (id === requestId.current) setLoading(false);
-    }
-  }, [prefix, query]);
-  useEffect(() => { setSelected(new Set()); void load(); return () => { requestId.current++; }; }, [load]);
+  const fetchPage = useCallback((cursor: string | null) => query
+    ? api.searchFiles(query, cursor ?? "", filter === "public")
+    : api.listFiles(prefix, cursor, filter === "public"), [prefix, query, filter]);
+  const pagination = useCursorPage(fetchPage);
+  const load = pagination.reload;
+  const loading = pagination.loading;
+  const loadError = pagination.error;
+  const files = useMemo(() => (pagination.page?.objects ?? []).filter(item => !item.key.endsWith("/")), [pagination.page]);
+  const folders = pagination.page?.common_prefixes ?? [];
+  const publicFolders = pagination.page?.public_folders ?? {};
+  const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
+  const setPublicFolders = (update: (items: Record<string, api.FileItem>) => Record<string, api.FileItem>) => pagination.setPage(current => current && { ...current, public_folders: update(current.public_folders ?? {}) });
+  useEffect(() => { setSelected(new Set()); }, [fetchPage, pagination.number]);
   useEffect(() => { setSearch(""); setQuery(""); }, [prefix]);
   useEffect(() => { localStorage.setItem("tgdrive:layout", layout); }, [layout]);
-
-  async function loadMore() {
-    if (!cursor) return;
-    setLoadingMore(true);
-    try {
-      const page = query ? await api.searchFiles(query, cursor) : await api.listFiles(prefix, cursor);
-      setFiles(current => [...current, ...page.objects.filter(item => !item.key.endsWith("/"))]);
-      setFolders(current => [...current, ...page.common_prefixes]);
-      setPublicFolders(current => ({ ...current, ...(page.public_folders ?? {}) }));
-      setCursor(page.next_cursor);
-    } catch (reason) { toast.error(api.errorMessage(reason, "加载失败，请稍后重试")); }
-    finally { setLoadingMore(false); }
-  }
 
   const entries = useMemo<Entry[]>(() => {
     const direction = sort.desc ? -1 : 1;
@@ -87,7 +64,6 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
       .map(key => ({ kind: "folder" as const, key }));
     return [...folderEntries, ...fileEntries];
   }, [files, folders, publicFolders, filter, sort]);
-  const publicCount = files.filter(file => file.public_token).length + folders.filter(key => publicFolders[key]).length;
   /** 文件夹的分享信息保存在它的目录标记上；还没公开过的文件夹用一个占位对象打开分享对话框。 */
   const folderItem = (key: string): api.FileItem => publicFolders[key] ?? { key, size: 0, etag: "", content_type: "application/x-directory", modified_at: 0 };
   const selectedEntries = entries.filter(entry => selected.has(entry.key));
@@ -218,7 +194,6 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
   }
   const crumbs = prefix.split("/").filter(Boolean);
   const allSelected = entries.length > 0 && entries.every(entry => selected.has(entry.key));
-  const existingNames = useMemo(() => new Set(files.map(file => baseName(file.key))), [files]);
 
   return (
     <div className="files-view"
@@ -228,7 +203,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
       onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); startUpload(event.dataTransfer.files); }}>
       <PageHeader title={query ? `搜索“${query}”` : name}
         actions={<>
-          <Button icon="folderPlus" onClick={() => setFolderOpen(true)} disabled={Boolean(query)}>新建文件夹</Button>
+          <Button icon="folderPlus" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
           <Button variant="primary" icon="upload" onClick={() => fileInput.current?.click()}>上传</Button>
           <input ref={fileInput} type="file" multiple hidden onChange={event => { startUpload(event.target.files); event.target.value = ""; }} />
         </>}>
@@ -256,7 +231,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
         <div className="toolbar">
           <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索全部文件，按回车" label="搜索文件" />
           <div className="toolbar-actions">
-            <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开", count: publicCount }]} />
+            <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />
             <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
           </div>
         </div>
@@ -272,8 +247,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
         ) : layout === "list" ? (
           <div className="data-table file-table" role="table" aria-label="文件">
             <div className="data-row data-head" role="row">
-              <span role="columnheader" className="cell-check"><Checkbox label="全选" checked={allSelected} indeterminate={selected.size > 0 && !allSelected} onChange={value => setSelected(value ? new Set(entries.map(entry => entry.key)) : new Set())} /></span>
+              <span role="columnheader" className="cell-check"><Checkbox label="全选本页" checked={allSelected} indeterminate={selected.size > 0 && !allSelected} onChange={value => setSelected(value ? new Set(entries.map(entry => entry.key)) : new Set())} /></span>
               <SortHeader label="名称" column="name" sort={sort} onSort={setSort} className="cell-name" />
+              <span role="columnheader" className="cell-type">类型</span>
               <SortHeader label="大小" column="size" sort={sort} onSort={setSort} className="cell-size" />
               <SortHeader label="修改时间" column="modified" sort={sort} onSort={setSort} className="cell-date" />
               <span role="columnheader" className="cell-actions"><span className="sr-only">操作</span></span>
@@ -283,6 +259,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
                 <span role="cell" className="cell-name"><FileTile kind="folder" /><button type="button" className="name-button" onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
                   {publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span>
+                <span role="cell" className="cell-type muted">文件夹</span>
                 <span role="cell" className="cell-size muted">—</span>
                 <span role="cell" className="cell-date muted">—</span>
                 <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
@@ -301,6 +278,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
                   </span>
                   {entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}
                 </span>
+                <span role="cell" className="cell-type muted">{kindLabel(getFileKind(entry.file.content_type, entry.key))}</span>
                 <span role="cell" className="cell-size muted">{formatBytes(entry.file.size)}</span>
                 <span role="cell" className="cell-date muted" title={formatDateTime(entry.file.modified_at)}>{formatDate(entry.file.modified_at)}</span>
                 <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
@@ -331,7 +309,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
                       onClick={event => { event.stopPropagation(); if (entry.kind === "folder") onOpenFolder(entry.key); else setPreview(entry.file); }}>
                       {baseName(entry.key)}
                     </button>
-                    <span className="grid-sub">{entry.kind === "folder" ? "文件夹" : formatBytes(entry.file.size)}</span>
+                    <span className="grid-sub">{entry.kind === "folder" ? "文件夹" : `${kindLabel(kind)} · ${formatBytes(entry.file.size)}`}</span>
                     <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(entry.key)} 的更多操作`} items={entry.kind === "folder" ? folderMenu(entry.key) : fileMenu(entry.file)} /></span>
                   </div>
                 </div>
@@ -343,14 +321,14 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged }: { sessio
       </section>
 
       <footer className="list-footer">
-        <span>{loading ? "正在加载" : `${folders.length} 个文件夹，${files.length} 个文件`}</span>
-        {cursor && <Button size="sm" loading={loadingMore} onClick={() => void loadMore()}>加载更多</Button>}
+        <span>{loading ? "正在加载" : `本页 ${folders.length} 个文件夹，${files.length} 个文件（排序仅作用于本页）`}</span>
+        <Pagination {...pagination} />
       </footer>
 
-      {pendingUpload && <UploadDialog files={pendingUpload} destination={prefix} existing={existingNames} onClose={() => setPendingUpload(null)}
-        onStart={(list, isPublic) => { setPendingUpload(null); uploads.enqueue(list.map(file => ({ file, path: `${prefix}${file.name}`, isPublic }))); }} />}
-      {folderOpen && <NameDialog title="新建文件夹" label="文件夹名称" confirm="创建" onClose={() => setFolderOpen(false)}
-        onSubmit={async value => { await api.makeFolder(`${prefix}${value}`); toast.success(`已创建文件夹“${value}”`); setFolderOpen(false); await load(); }} />}
+      {pendingUpload && <UploadDialog files={pendingUpload} destination={prefix} onClose={() => setPendingUpload(null)}
+        onStart={(list, isPublic, destination) => { setPendingUpload(null); uploads.enqueue(list.map(file => ({ file, path: `${destination}${file.name}`, isPublic }))); }} />}
+      {folderOpen && <NameDialog title="新建文件夹" label="文件夹名称" confirm="创建" location={prefix} onClose={() => setFolderOpen(false)}
+        onSubmit={async (value, destination) => { await api.makeFolder(`${destination}${value}`); toast.success(`已创建文件夹“${value}”`); setFolderOpen(false); await load(); }} />}
       {renaming && <NameDialog title={renaming.kind === "folder" ? "重命名文件夹" : "重命名文件"} label="新名称" confirm="重命名" initial={baseName(renaming.key)} onClose={() => setRenaming(null)}
         onSubmit={async value => {
           const folder = renaming.kind === "folder";
@@ -388,98 +366,22 @@ function canMoveInto(entry: Entry, dest: string) {
   return !(entry.kind === "folder" && dest.startsWith(entry.key));
 }
 
-async function listAllFolders(prefix: string) {
-  const folders: string[] = [];
-  let cursor: string | null = null;
-  do {
-    const page = await api.listFiles(prefix, cursor);
-    folders.push(...page.common_prefixes);
-    cursor = page.next_cursor;
-  } while (cursor);
-  return folders.sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
-}
-
 function MoveDialog({ targets, startPrefix, onClose, onMove }: { targets: Entry[]; startPrefix: string; onClose: () => void; onMove: (dest: string, conflict: api.MoveConflict) => Promise<void> }) {
-  const movingFolders = targets.filter(target => target.kind === "folder").map(target => target.key);
-  const blocked = (key: string) => movingFolders.some(folder => key.startsWith(folder));
+  const blocked = (key: string) => targets.some(target => target.kind === "folder" && key.startsWith(target.key));
   const [browse, setBrowse] = useState(() => blocked(startPrefix) ? "" : startPrefix);
-  const [folders, setFolders] = useState<string[] | null>(null);
-  const [error, setError] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
+  const [ready, setReady] = useState(false);
   const [conflict, setConflict] = useState<api.MoveConflict>("rename");
   const [busy, setBusy] = useState(false);
-  const load = useCallback((prefix: string) => {
-    setFolders(null); setError("");
-    void listAllFolders(prefix).then(setFolders).catch(reason => setError(api.errorMessage(reason, "文件夹加载失败，请稍后重试")));
-  }, []);
-  useEffect(() => load(browse), [browse, load]);
   const alreadyHere = targets.every(target => !canMoveInto(target, browse));
-  const crumbs = browse.split("/").filter(Boolean);
   const title = targets.length === 1 ? `移动“${baseName(targets[0].key)}”` : `移动 ${targets.length} 个项目`;
-  async function createFolder(event: FormEvent) {
-    event.preventDefault();
-    const name = newName.trim();
-    if (!name || /[/\\]/.test(name) || name === "." || name === "..") { setError("文件夹名称不能为空，也不能包含斜杠"); return; }
-    try {
-      await api.makeFolder(`${browse}${name}`);
-      setCreating(false); setNewName("");
-      setBrowse(`${browse}${name}/`);
-    } catch (reason) { setError(api.errorMessage(reason, "创建失败，请稍后重试")); }
-  }
-  async function confirm() {
-    setBusy(true);
-    try { await onMove(browse, conflict); } finally { setBusy(false); }
-  }
-  return (
-    <Modal title={title} description="选择目标文件夹。文件的公开链接在移动后保持不变。" icon="move" onClose={onClose}
-      footer={<>
-        <Button onClick={onClose}>取消</Button>
-        <Button variant="primary" loading={busy} disabled={alreadyHere || folders === null} onClick={() => void confirm()}>
-          {alreadyHere ? "已在此文件夹中" : `移动到“${browse ? baseName(browse) : "我的文件"}”`}
-        </Button>
-      </>}>
-      <div className="move-browser">
-        <div className="move-head">
-          <nav className="breadcrumbs" aria-label="目标位置">
-            <button type="button" onClick={() => setBrowse("")} aria-current={!browse ? "page" : undefined}><Icon name="home" size={15} />我的文件</button>
-            {crumbs.map((part, index) => (
-              <span key={index}><Icon name="chevronRight" size={14} /><button type="button" onClick={() => setBrowse(`${crumbs.slice(0, index + 1).join("/")}/`)} aria-current={index === crumbs.length - 1 ? "page" : undefined}>{part}</button></span>
-            ))}
-          </nav>
-          {!creating && <Button size="sm" variant="ghost" icon="folderPlus" onClick={() => { setCreating(true); setError(""); }}>新建文件夹</Button>}
-        </div>
-        <div className="move-list" role="listbox" aria-label="子文件夹">
-          {creating && (
-            <form className="move-new" onSubmit={createFolder} noValidate>
-              <FileTile kind="folder" />
-              <input className="input" autoFocus placeholder="新文件夹名称" value={newName} onChange={event => { setNewName(event.target.value); setError(""); }} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setCreating(false); } }} />
-              <Button size="sm" variant="primary" type="submit">创建</Button>
-              <IconButton icon="x" size="sm" label="取消新建" onClick={() => setCreating(false)} />
-            </form>
-          )}
-          {folders === null && !error ? <SkeletonRows rows={3} /> : folders?.length === 0 && !creating ? (
-            <p className="move-empty">这个文件夹里没有子文件夹，可以直接移动到这里。</p>
-          ) : folders?.map(folder => {
-            const disabled = blocked(folder);
-            return (
-              <button key={folder} type="button" role="option" aria-selected={false} className={`move-item${disabled ? " is-disabled" : ""}`} disabled={disabled} onClick={() => setBrowse(folder)}>
-                <FileTile kind="folder" />
-                <span className="move-name">{baseName(folder)}</span>
-                {disabled ? <span className="muted">正在移动</span> : <Icon name="chevronRight" size={16} />}
-              </button>
-            );
-          })}
-          {error && <p className="field-error move-error" role="alert">{error}</p>}
-        </div>
-        <div className="move-conflict">
-          <span>遇到同名文件时</span>
-          <Segmented label="同名冲突处理" value={conflict} onChange={setConflict} options={[{ value: "rename", label: "保留两者" }, { value: "skip", label: "跳过" }, { value: "overwrite", label: "覆盖" }]} />
-        </div>
-        {conflict === "overwrite" && <p className="inline-note tone-warning"><Icon name="alert" size={15} />目标位置的同名文件会被替换且无法恢复。</p>}
-      </div>
-    </Modal>
-  );
+  return <Modal title={title} description="选择目标文件夹。文件的公开链接在移动后保持不变。" icon="move" onClose={onClose}
+    footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" loading={busy} disabled={alreadyHere || !ready || blocked(browse)} onClick={() => {
+      setBusy(true); void onMove(browse, conflict).finally(() => setBusy(false));
+    }}>{alreadyHere ? "已在此文件夹中" : `移动到“${browse ? baseName(browse) : "我的文件"}”`}</Button></>}>
+    <FolderPicker value={browse} onChange={next => { setReady(false); setBrowse(next); }} blocked={blocked} onReady={setReady} />
+    <div className="move-conflict"><span>遇到同名文件时</span><Segmented label="同名冲突处理" value={conflict} onChange={setConflict} options={[{ value: "rename", label: "保留两者" }, { value: "skip", label: "跳过" }, { value: "overwrite", label: "覆盖" }]} /></div>
+    {conflict === "overwrite" && <p className="inline-note tone-warning"><Icon name="alert" size={15} />目标位置的同名文件会被替换且无法恢复。</p>}
+  </Modal>;
 }
 
 function SortHeader({ label, column, sort, onSort, className }: { label: string; column: SortKey; sort: { key: SortKey; desc: boolean }; onSort: (sort: { key: SortKey; desc: boolean }) => void; className: string }) {
@@ -493,7 +395,9 @@ function SortHeader({ label, column, sort, onSort, className }: { label: string;
   );
 }
 
-function NameDialog({ title, label, confirm, initial = "", onClose, onSubmit }: { title: string; label: string; confirm: string; initial?: string; onClose: () => void; onSubmit: (value: string) => Promise<void> }) {
+function NameDialog({ title, label, confirm, initial = "", location, onClose, onSubmit }: { title: string; label: string; confirm: string; initial?: string; location?: string; onClose: () => void; onSubmit: (value: string, destination: string) => Promise<void> }) {
+  const [destination, setDestination] = useState(location ?? "");
+  const [ready, setReady] = useState(location === undefined);
   const [value, setValue] = useState(initial);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -505,20 +409,22 @@ function NameDialog({ title, label, confirm, initial = "", onClose, onSubmit }: 
   async function submit(event: FormEvent) {
     event.preventDefault();
     const trimmed = value.trim();
+    if (!ready || busy) return;
     if (!trimmed) { setError("名称不能为空"); return; }
     if (/[/\\]/.test(trimmed) || trimmed === "." || trimmed === "..") { setError("名称不能包含斜杠，也不能是 . 或 .."); return; }
     setBusy(true);
-    try { await onSubmit(trimmed); }
+    try { await onSubmit(trimmed, destination); }
     catch (reason) { setError(api.errorMessage(reason, "操作失败，请稍后重试")); }
     finally { setBusy(false); }
   }
   return (
-    <Modal title={title} onClose={onClose} size="sm"
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="name-form" loading={busy}>{confirm}</Button></>}>
+    <Modal title={title} onClose={onClose} size={location === undefined ? "sm" : "md"}
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="name-form" loading={busy} disabled={!ready}>{confirm}</Button></>}>
       <form id="name-form" className="form" onSubmit={submit} noValidate>
         <Field label={label} htmlFor="name-input" error={error}>
           <input id="name-input" ref={input} className="input" value={value} onChange={event => { setValue(event.target.value); setError(""); }} autoFocus />
         </Field>
+        {location !== undefined && <div className="form"><span className="field-label">创建位置</span><FolderPicker value={destination} onChange={next => { setReady(false); setDestination(next); }} onReady={setReady} /></div>}
       </form>
     </Modal>
   );

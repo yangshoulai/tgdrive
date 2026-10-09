@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCursorPage } from "../pagination";
 import { SITE } from "../brand";
 import * as api from "../api";
 
-import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, PageHeader, Panel, Segmented, SkeletonRows, Switch, formatBytes, formatDateTime, toast, useDocumentTitle } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, PageHeader, Pagination, Panel, Segmented, SkeletonRows, Switch, formatBytes, formatDateTime, toast, useDocumentTitle } from "../ui";
 
 import { UnlockForm } from "./lock";
 
@@ -62,30 +63,16 @@ function auditDetail(event: api.AuditEvent) {
 }
 
 function AuditPanel() {
-  const [events, setEvents] = useState<api.AuditEvent[] | null>(null);
-  const [cursor, setCursor] = useState<number | null>(null);
   const [failedOnly, setFailedOnly] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  useEffect(() => {
-    setEvents(null);
-    void api.adminAudit({ failedOnly }).then(page => { setEvents(page.events); setCursor(page.next_cursor); })
-      .catch(reason => { setEvents([]); toast.error(api.errorMessage(reason, "审计日志加载失败，请稍后重试")); });
-  }, [failedOnly]);
-  async function loadMore() {
-    setLoadingMore(true);
-    try {
-      const page = await api.adminAudit({ failedOnly, cursor });
-      setEvents(current => [...(current ?? []), ...page.events]);
-      setCursor(page.next_cursor);
-    } catch (reason) { toast.error(api.errorMessage(reason, "加载失败，请稍后重试")); }
-    finally { setLoadingMore(false); }
-  }
+  const fetchPage = useCallback((cursor: string | null) => api.adminAudit({ failedOnly, cursor: cursor === null ? null : Number(cursor) }), [failedOnly]);
+  const pagination = useCursorPage(fetchPage);
+  const events = pagination.page?.events ?? null;
   return (
     <Panel title="审计日志" description="登录、权限、密钥、分享与系统设置的变更记录。不会记录密码、口令、token 或 Secret。" flush
       actions={<Segmented label="筛选" value={failedOnly ? "failed" : "all"} onChange={value => setFailedOnly(value === "failed")} options={[{ value: "all", label: "全部" }, { value: "failed", label: "仅失败" }]} />}>
-      {events === null ? <SkeletonRows rows={4} /> : events.length === 0 ? <EmptyState icon="shield" title={failedOnly ? "没有失败的操作" : "还没有记录"} /> : (
+      {pagination.error ? <EmptyState icon="alert" title="审计日志加载失败" description={pagination.error} action={<Button onClick={() => void pagination.reload()}>重试</Button>} /> : events === null ? <SkeletonRows rows={4} /> : events.length === 0 ? <EmptyState icon="shield" title={failedOnly ? "没有失败的操作" : "还没有记录"} /> : (
         <>
-          <div className="data-table audit-table" role="table" aria-label="审计日志">
+          <div className="table-scroll"><div className="data-table audit-table" role="table" aria-label="审计日志">
             <div className="data-row data-head" role="row">
               <span role="columnheader">时间</span><span role="columnheader">操作者</span><span role="columnheader">操作</span><span role="columnheader">对象与详情</span><span role="columnheader">结果</span>
             </div>
@@ -98,8 +85,8 @@ function AuditPanel() {
                 <span role="cell">{event.ok ? <Badge tone="success" dot>成功</Badge> : <Badge tone="danger" dot>失败</Badge>}</span>
               </div>
             ))}
-          </div>
-          {cursor && <div className="panel-more"><Button size="sm" loading={loadingMore} onClick={() => void loadMore()}>加载更多</Button></div>}
+          </div></div>
+          <div className="panel-more"><Pagination {...pagination} /></div>
         </>
       )}
     </Panel>

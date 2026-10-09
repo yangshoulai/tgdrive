@@ -1,23 +1,20 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
+import { useCursorPage } from "../pagination";
 import { SITE } from "../brand";
 import * as api from "../api";
 
-import { Badge, Button, ConfirmDialog, EmptyState, PageHeader, SkeletonRows, toast, useDocumentTitle } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, PageHeader, Pagination, SkeletonRows, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 访问密钥 ---------- */
 
 export function Clients() {
-  const [clients, setClients] = useState<api.AdminClient[] | null>(null);
-  const [owners, setOwners] = useState<Map<number, string>>(new Map());
+  const pagination = useCursorPage(api.adminClientsPage);
+  const clients = pagination.page?.clients ?? null;
+  const load = pagination.reload;
   const [disabling, setDisabling] = useState<api.AdminClient | null>(null);
   const [deleting, setDeleting] = useState<api.AdminClient | null>(null);
   useDocumentTitle(`全部访问密钥 · ${SITE.admin}`);
-  const load = useCallback(() => {
-    void Promise.all([api.adminClients(), api.adminUsers()])
-      .then(([items, users]) => { setClients(items); setOwners(new Map(users.map(user => [user.id, user.username]))); })
-      .catch(reason => { setClients([]); toast.error(api.errorMessage(reason, "访问密钥加载失败，请稍后重试")); });
-  }, []);
-  useEffect(load, [load]);
+
   async function setStatus(client: api.AdminClient, status: "active" | "disabled") {
     try { await api.setAdminClientStatus(client.id, status); toast.success(status === "active" ? `已启用 ${client.name}` : `已停用 ${client.name}`); load(); }
     catch (reason) { toast.error(api.errorMessage(reason, "状态更新失败，请稍后重试")); }
@@ -26,7 +23,7 @@ export function Clients() {
     <>
       <PageHeader title="全部访问密钥" description="用户创建的访问凭据，可用于 HTTP API 和 S3。管理员可以查看归属与授权范围并停用密钥，但看不到 Secret。" />
       <section className="file-surface">
-        {clients === null ? <SkeletonRows rows={3} /> : clients.length === 0 ? <EmptyState icon="key" title="还没有访问密钥" description="用户在自己的“访问密钥”页面创建后会显示在这里。" /> : (
+        {pagination.error ? <EmptyState icon="alert" title="访问密钥加载失败" description={pagination.error} action={<Button onClick={() => void load()}>重试</Button>} /> : clients === null ? <SkeletonRows rows={3} /> : clients.length === 0 ? <EmptyState icon="key" title="还没有访问密钥" description="用户在自己的“访问密钥”页面创建后会显示在这里。" /> : (
           <div className="data-table clients-table" role="table" aria-label="访问密钥">
             <div className="data-row data-head" role="row">
               <span role="columnheader">名称</span><span role="columnheader">所有者</span><span role="columnheader">授权范围</span><span role="columnheader">状态</span><span role="columnheader"><span className="sr-only">操作</span></span>
@@ -39,7 +36,7 @@ export function Clients() {
               <div key={client.id} role="row" className="data-row">
                 <span role="cell" className="name-stack"><strong>{client.name}</strong>
                   <small className="mono">{client.keys.map(key => key.status === "active" ? key.access_key_id : `${key.access_key_id}（已禁用）`).join("，") || "无密钥"}</small></span>
-                <span role="cell" className="muted">{client.owner_user_id ? owners.get(client.owner_user_id) ?? `用户 ${client.owner_user_id}` : "管理员创建"}</span>
+                <span role="cell" className="muted">{client.owner_user_id ? client.owner_username ?? `用户 ${client.owner_user_id}` : "管理员创建"}</span>
                 <span role="cell" className="grant-list">{client.grants.length ? client.grants.map(grant => <Badge key={`${grant.bucket_id}:${grant.prefix}`} tone={grant.perms === "rw" ? "accent" : "neutral"}>{grant.bucket_name}/{grant.prefix || "*"} {grant.perms === "rw" ? "读写" : "只读"}</Badge>) : <span className="muted">无授权</span>}</span>
                 <span role="cell">
                   {stopped ? <Badge dot>已停用</Badge>
@@ -58,6 +55,7 @@ export function Clients() {
           </div>
         )}
       </section>
+      <footer className="list-footer"><span>共 {pagination.page?.total ?? "—"} 个访问凭据</span><Pagination {...pagination} /></footer>
       {deleting && <ConfirmDialog title={`删除 ${deleting.name}？`} description="它的所有密钥和授权会被永久删除，使用这些密钥的程序会立即失去访问权限，无法恢复。" confirmLabel="永久删除" onClose={() => setDeleting(null)}
         onConfirm={async () => {
           try { await api.deleteAdminClient(deleting.id); toast.success(`已删除 ${deleting.name}`); setDeleting(null); load(); }
@@ -68,4 +66,3 @@ export function Clients() {
     </>
   );
 }
-
