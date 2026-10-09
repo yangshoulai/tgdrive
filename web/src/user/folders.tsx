@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import { FileTile, baseName } from "../files";
 import { useCursorPage } from "../pagination";
-import { Button, Field, Icon, IconButton, Pagination, SkeletonRows } from "../ui";
+import { Button, Field, Icon, Pagination, SkeletonRows } from "../ui";
 
 /** 上传、新建与移动共用的位置浏览器；每次只读取当前目录的一页子目录。 */
 export function FolderPicker({ value, onChange, blocked, onReady }: {
@@ -42,8 +42,10 @@ export function FolderPicker({ value, onChange, blocked, onReady }: {
             if (event.key === "Escape") { event.stopPropagation(); setCreating(false); }
           }} />
         </Field>
-        <Button size="sm" loading={busy} onClick={() => void create()}>创建</Button>
-        <IconButton icon="x" size="sm" label="取消新建子文件夹" onClick={() => setCreating(false)} />
+        <div className="move-new-actions">
+          <Button aria-label="取消新建子文件夹" onClick={() => setCreating(false)}>取消</Button>
+          <Button variant="primary" loading={busy} onClick={() => void create()}>创建</Button>
+        </div>
       </div>}
       {pagination.loading ? <SkeletonRows rows={3} /> : pagination.error ? <div className="move-error" role="alert"><p>{pagination.error}</p><Button size="sm" onClick={() => void pagination.reload()}>重试</Button></div>
         : pagination.page?.folders.length === 0 ? <p className="move-empty">这里没有子文件夹，可以选择当前位置。</p>

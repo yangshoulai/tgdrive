@@ -556,8 +556,9 @@ code, .mono { font-family: var(--font-mono); font-size: .92em; }
 .move-item:hover:not(:disabled) { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
 .move-item.is-disabled { cursor: not-allowed; opacity: .55; }
 .move-name { flex: 1; min-width: 0; overflow: hidden; color: var(--ink); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
-.move-new { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow-sm); }
-.move-new .input { height: 32px; }
+.move-new { display: grid; gap: 12px; min-width: 0; padding: 12px; border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow-sm); }
+.move-new > .field { min-width: 0; }
+.move-new-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .move-empty { padding: 32px 16px; color: var(--ink-3); font-size: 13px; text-align: center; }
 .move-error { padding: 8px 10px; }
 .move-list .skeleton-row { padding: 0 10px; }
