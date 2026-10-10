@@ -112,7 +112,8 @@ class KeyApi:
             prefix = grant.prefix
         page = await self.objects.alist_objects(Scope(bucket_id, grant.prefix, grant.perms), prefix, "/", cursor,
                                                 max(1, min(limit, 1000)))
-        return {"objects": [UserApi._object_json(item) for item in page.objects],
+        variants = self.objects.thumbnail_variants([item.blob_uuid for item in page.objects])
+        return {"objects": [UserApi._object_json(item, variants.get(item.blob_uuid or "", ())) for item in page.objects],
                 "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor}
 
     async def search(self, principal: KeyPrincipal, bucket: str | None, query: str, cursor: str, limit: int):

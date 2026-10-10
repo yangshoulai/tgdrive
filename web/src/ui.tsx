@@ -1,5 +1,5 @@
 /** Tessera 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
-import { Children, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { BRAND } from "./brand";
 
@@ -55,6 +55,10 @@ const ICONS = {
   move: "M3 7.2A2.2 2.2 0 0 1 5.2 5h3.6l2 2.2h8A2.2 2.2 0 0 1 21 9.4v8.4a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 17.8zM9 13.5h6m-2.5-2.5 2.5 2.5-2.5 2.5",
   shield: "M12 3 4.5 6v6c0 4.4 3.2 7.8 7.5 9 4.3-1.2 7.5-4.6 7.5-9V6z",
   server: "M4 4h16v6H4zm0 10h16v6H4zm3-7h.01M7 17h.01",
+  monitor: "M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm4 15h8m-4-3v3",
+  play: "M7 4.8v14.4a.8.8 0 0 0 1.2.7l11.3-7.2a.8.8 0 0 0 0-1.4L8.2 4.1a.8.8 0 0 0-1.2.7Z",
+  sun: "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-13v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4",
+  moon: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z",
   refresh: "M20 11a8 8 0 0 0-14.6-4.5L4 8m0-4v4h4m-4 5a8 8 0 0 0 14.6 4.5L20 16m0 4v-4h-4",
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.3l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-2.2-1.3L14.3 3h-4l-.4 2.4a7.4 7.4 0 0 0-2.2 1.3l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.6l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 2.2 1.3l.4 2.4h4l.4-2.4a7.4 7.4 0 0 0 2.2-1.3l2.4 1 2-3.4-2-1.6c.1-.4.1-.9.1-1.3Z",
 } as const;
@@ -210,6 +214,15 @@ const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select
 const modalStack: HTMLElement[] = [];
 const focusable = (node: HTMLElement) => Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(item => item.tabIndex >= 0 && item.getClientRects().length > 0);
 
+/* 焦点框只在键盘导航时显示：Tab、方向键等切到键盘模式，指针按下切回指针模式。
+ * Esc、Enter 不改变模式，所以鼠标打开的弹窗按 Esc 关闭后，焦点归还到原按钮时也不会出现焦点框。 */
+const NAVIGATION_KEYS = new Set(["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
+if (typeof document !== "undefined") {
+  const root = document.documentElement;
+  document.addEventListener("pointerdown", () => { root.dataset.input = "pointer"; }, true);
+  document.addEventListener("keydown", event => { if (NAVIGATION_KEYS.has(event.key)) root.dataset.input = "keyboard"; }, true);
+}
+
 export function Modal({ title, description, onClose, children, footer, size = "md", icon, leading, tone, dismissible = true, className = "", expandable = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; expandable?: boolean }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
@@ -246,7 +259,8 @@ export function Modal({ title, description, onClose, children, footer, size = "m
     if (!node) return;
     modalStack.at(-1)?.setAttribute("inert", "");
     modalStack.push(node);
-    const preferred = focusable(node).find(item => item.matches("[autofocus], .modal-body input, .modal-body select")) ?? focusable(node)[0];
+    // 只自动聚焦需要输入的控件；没有时聚焦对话框本身，避免窗口按钮一打开就带着焦点框。
+    const preferred = focusable(node).find(item => item.matches("[autofocus], .modal-body input, .modal-body select, .modal-body textarea"));
     (preferred ?? node).focus();
     document.body.classList.add("has-modal");
     const handleKey = (event: KeyboardEvent) => {
@@ -312,7 +326,7 @@ export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onC
   );
 }
 
-export type MenuItem = { label: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean };
+export type MenuItem = { label: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean };
 export function Menu({ items, label, icon = "more" }: { items: MenuItem[]; label: string; icon?: IconName }) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
@@ -326,7 +340,7 @@ export function Menu({ items, label, icon = "more" }: { items: MenuItem[]; label
     setPosition({ top: below ? rect.bottom + 6 : rect.top - height - 6, left: Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)) });
   }, [open]);
   useLayoutEffect(() => {
-    if (open && position) list.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus({ preventScroll: true });
+    if (open && position) list.current?.querySelector<HTMLElement>("[role^=menuitem]")?.focus({ preventScroll: true });
   }, [open, position]);
   useEffect(() => {
     if (!open) return;
@@ -336,7 +350,7 @@ export function Menu({ items, label, icon = "more" }: { items: MenuItem[]; label
       if (event.key === "Tab") { event.preventDefault(); setOpen(false); trigger.current?.focus(); }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
-        const items = Array.from(list.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ?? []);
+        const items = Array.from(list.current?.querySelectorAll<HTMLElement>("[role^=menuitem]") ?? []);
         const index = items.indexOf(document.activeElement as HTMLElement);
         items[(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
       }
@@ -361,11 +375,14 @@ export function Menu({ items, label, icon = "more" }: { items: MenuItem[]; label
       {open && createPortal(
         <div ref={list} className="menu" role="menu" aria-label={label} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }} onClick={event => event.stopPropagation()}>
           {items.map(item => {
-            const content = <><Icon name={item.icon} size={16} /><span>{item.label}</span></>;
-            const className = `menu-item${item.danger ? " is-danger" : ""}${item.divider ? " has-divider" : ""}`;
-            return item.href
-              ? <a key={item.label} role="menuitem" className={className} href={item.href} onClick={() => setOpen(false)}>{content}</a>
-              : <button key={item.label} type="button" role="menuitem" className={className} onClick={() => { setOpen(false); item.onSelect(); }}>{content}</button>;
+            const content = <><Icon name={item.icon} size={16} /><span>{item.label}</span>{item.checked && <span className="menu-check"><Icon name="check" size={15} /></span>}</>;
+            // 带标题的分组：标题承担分隔线，选项用 menuitemradio 表示单选状态。
+            const className = `menu-item${item.danger ? " is-danger" : ""}${item.divider && !item.heading ? " has-divider" : ""}`;
+            const role = item.checked === undefined ? "menuitem" : "menuitemradio";
+            const element = item.href
+              ? <a key={item.label} role={role} className={className} href={item.href} onClick={() => setOpen(false)}>{content}</a>
+              : <button key={item.label} type="button" role={role} aria-checked={item.checked === undefined ? undefined : item.checked} className={className} onClick={() => { setOpen(false); item.onSelect(); }}>{content}</button>;
+            return item.heading ? <Fragment key={item.label}><div className={`menu-heading${item.divider ? " has-divider" : ""}`} role="presentation">{item.heading}</div>{element}</Fragment> : element;
           })}
         </div>,
         document.body,

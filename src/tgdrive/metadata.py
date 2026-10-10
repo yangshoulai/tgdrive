@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sqlite3
 import threading
@@ -42,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 11
+    SCHEMA_VERSION = 12
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -268,6 +269,39 @@ class Metadata:
                     """
                 )
                 db.execute("PRAGMA user_version = 11")
+
+            if version < 12:
+                # 缩略图按 Blob 保存并加密（密钥由该 Blob 的 DEK 派生）；variant='none' 表示已尝试但无法生成。
+                # 迁移时系统尚未解锁，旧版存在 user_meta 里的明文缩略图先移到 thumbnail_legacy，
+                # 解锁后由维护任务或首次读取加密转入 thumbnails 并删除明文。
+                self._schema(
+                    """
+                    CREATE TABLE IF NOT EXISTS thumbnails(
+                        blob_uuid TEXT NOT NULL REFERENCES blobs(uuid) ON DELETE CASCADE,
+                        variant TEXT NOT NULL CHECK(variant IN ('thumb','poster','none')),
+                        mime TEXT NOT NULL, data BLOB NOT NULL, created_at REAL NOT NULL,
+                        PRIMARY KEY(blob_uuid, variant)
+                    ) WITHOUT ROWID;
+                    CREATE TABLE IF NOT EXISTS thumbnail_legacy(
+                        blob_uuid TEXT PRIMARY KEY REFERENCES blobs(uuid) ON DELETE CASCADE,
+                        data BLOB NOT NULL
+                    ) WITHOUT ROWID
+                    """
+                )
+                rows = db.execute("SELECT bucket_id, key, blob_uuid, user_meta FROM objects "
+                                  "WHERE user_meta LIKE '%tgdrive-thumbnail%'").fetchall()
+                for row in rows:
+                    meta = json.loads(row["user_meta"] or "{}")
+                    encoded = meta.pop("tgdrive-thumbnail", None)
+                    if encoded and row["blob_uuid"]:
+                        try:
+                            db.execute("INSERT OR IGNORE INTO thumbnail_legacy(blob_uuid, data) VALUES(?, ?)",
+                                       (row["blob_uuid"], base64.b64decode(encoded)))
+                        except (ValueError, TypeError):
+                            pass
+                    db.execute("UPDATE objects SET user_meta=? WHERE bucket_id=? AND key=?",
+                               (json.dumps(meta, separators=(",", ":")), row["bucket_id"], row["key"]))
+                db.execute("PRAGMA user_version = 12")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

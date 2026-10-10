@@ -30,6 +30,21 @@ export function TextPreview({ content, name, downloadUrl, resolveImage, onError 
     return () => { cancelled = true; editor.current?.destroy(); editor.current = null; if (host.current) host.current.replaceChildren(); };
   }, [content.text, name, mode]);
   useEffect(() => { editor.current?.setWrapping(wrapping); }, [wrapping, ready]);
+  // 预览弹窗里按 Ctrl/⌘+A 只选中文件内容，而不是整个页面；输入框（如查找框）保留原生行为。
+  useEffect(() => {
+    if (!ready) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "a") return;
+      const node = host.current, dialog = node?.closest(".modal"), target = event.target as HTMLElement;
+      if (!node || !dialog?.contains(target) || dialog.hasAttribute("inert") || target.closest("input, textarea, select, [contenteditable='true']")) return;
+      event.preventDefault();
+      if (editor.current) { editor.current.selectAll(); return; }
+      const selection = window.getSelection();
+      selection?.selectAllChildren(node);
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [ready, mode]);
   return <div className={`preview-text${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${content.truncated ? " is-truncated" : ""}`}>
     <div className="preview-toolbar">
       {markdown && <Segmented label="显示方式" value={mode} onChange={setMode} options={[{ value: "render", label: "预览" }, { value: "source", label: "源码" }]} />}

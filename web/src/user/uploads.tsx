@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 
 import { fingerprintFile, fingerprintSupported } from "../fingerprint";
-import { FileTile, getFileKind, makeThumbnail, thumbnailable } from "../files";
+import { FileTile, getFileKind } from "../files";
+import { createThumbnails, saveThumbnails, thumbnailSource } from "../thumbnails";
 
 import { Badge, Button, Icon, IconButton, Modal, Progress, Switch, copyText, formatBytes, toast } from "../ui";
 import { DestinationPicker } from "./folders";
@@ -206,9 +207,11 @@ export function useUploadQueue(onSettled: () => void) {
       const result = await promise;
       update(job.id, { status: "done", percent: 100, result });
       tally.current.done++;
-      if (!disposed.current && !result.has_thumbnail && thumbnailable(job.file.name, job.file.type, job.file.size)) {
-        // 缩略图失败不影响上传结果。
-        void makeThumbnail(job.file).then(data => data && !disposed.current ? api.setThumbnail(job.path, data) : undefined).then(() => { if (!disposed.current) settled.current(); }).catch(() => undefined);
+      const source = thumbnailSource(job.file.name, job.file.type, job.file.size);
+      if (!disposed.current && !result.thumbnails?.length && source) {
+        // 用本地文件生成缩略图（图片缩放、视频截帧、音频封面），不需要再下载；失败不影响上传结果。
+        void createThumbnails({ file: job.file }, source).then(value => !disposed.current ? saveThumbnails(job.path, value) : null)
+          .then(() => { if (!disposed.current) settled.current(); }).catch(() => undefined);
       }
     } catch (reason) {
       const aborted = reason instanceof api.ApiError && reason.code === "upload_aborted";

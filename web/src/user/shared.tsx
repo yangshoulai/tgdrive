@@ -3,7 +3,7 @@ import { useCursorPage } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileTile, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileVisual, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
 
 import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination, SkeletonRows, copyText, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
 
@@ -42,7 +42,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                     return (
                     <div key={file.key} role="row" className="data-row is-clickable" onClick={open}>
                       <span role="cell" className="cell-name">
-                        <FileTile kind={folder ? "folder" : getFileKind(file.content_type, file.key)} />
+                        <FileVisual kind={folder ? "folder" : getFileKind(file.content_type, file.key)} src={folder ? undefined : api.fileThumbnail(file)} />
                         <span className="name-stack">
                           <button type="button" className="name-button" onClick={event => { event.stopPropagation(); open(); }}>{baseName(file.key)}</button>
                           <small>{parentPath(file.key) ? `/${parentPath(file.key)}` : "我的文件"}{` · 下载 ${file.public_downloads ?? 0} 次`}</small>
@@ -77,7 +77,8 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
           try { await api.setPublic([revoking.key], false); toast.success("已停止分享"); setRevoking(null); load(); onChanged(); }
           catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
         }} />}
-      {preview && <PreviewModal file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)} onClose={() => setPreview(null)} />}
+      {preview && <PreviewModal file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)}
+        poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} />}
     </>
   );
 }

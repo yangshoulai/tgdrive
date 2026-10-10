@@ -478,7 +478,7 @@ class UserApi:
         def read_page():
             scope = Scope(account.bucket_id)
             page = self.objects.list_objects(scope, path_prefix, "/", cursor, min(limit, 1000))
-            return {"objects": [self._object_json(item) for item in page.objects],
+            return {"objects": self._objects_json(page.objects),
                     "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor,
                     "folder_sizes": self.objects.folder_sizes(scope, page.common_prefixes),
                     "public_folders": self._public_folders(account.bucket_id, page.common_prefixes)}
@@ -491,7 +491,7 @@ class UserApi:
             "AND public_token IS NOT NULL AND substr(key,1,9)!='.tgdrive/' "
             "AND instr(rtrim(substr(key,?),'/'),'/')=0 ORDER BY key LIMIT ?",
             (bucket_id, prefix, prefix + self.objects._PREFIX_END, cursor or "", len(prefix) + 1, limit + 1)).fetchall()
-        items = [self._object_json(self.objects._object(row)) for row in rows[:limit]]
+        items = self._objects_json([self.objects._object(row) for row in rows[:limit]])
         folders = {item["key"]: item for item in items if item["key"].endswith("/")}
         return {"objects": [item for item in items if not item["key"].endswith("/")],
                 "common_prefixes": list(folders), "public_folders": folders,
@@ -556,7 +556,7 @@ class UserApi:
                 (account.bucket_id, cursor, query, int(public_only), limit + 1),
             ).fetchall()
         rows = await self.objects.metadata.run_in_thread(read_page)
-        return {"objects": [self._object_json(self.objects._object(row)) for row in rows[:limit]], "common_prefixes": [],
+        return {"objects": self._objects_json([self.objects._object(row) for row in rows[:limit]]), "common_prefixes": [],
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
     async def folder(self, token: str, csrf: str, path: str) -> dict[str, object]:
@@ -590,7 +590,7 @@ class UserApi:
             return {"hit": False}
         if public is not None:
             item = self.objects.set_public(scope, key, public)
-        return {"hit": True, **self._object_json(item)}
+        return {"hit": True, **self._objects_json([item])[0]}
 
     def set_public(self, token: str, csrf: str, paths: list[str], public: bool,
                    options: dict[str, object] | None = None, *, password_hash=ObjectService._UNSET) -> list[dict[str, object]]:
@@ -654,17 +654,19 @@ class UserApi:
 
     # ---------- 缩略图 ----------
 
-    def set_thumbnail(self, token: str, csrf: str, path: str, data: str) -> None:
+    def set_thumbnail(self, token: str, csrf: str, path: str, data: str | None, variant: str = "thumb") -> None:
         import base64
         import binascii
-        try:
-            raw = base64.b64decode(data.split(",", 1)[-1], validate=True)
-        except binascii.Error as exc:
-            raise ValueError("缩略图数据不是有效的 base64") from exc
-        self.objects.set_thumbnail(self._scope(token, csrf=csrf, mutation=True), normalize_user_path(path), raw)
+        raw = None
+        if variant != "none":
+            try:
+                raw = base64.b64decode(str(data or "").split(",", 1)[-1], validate=True)
+            except binascii.Error as exc:
+                raise ValueError("缩略图数据不是有效的 base64") from exc
+        self.objects.set_thumbnail(self._scope(token, csrf=csrf, mutation=True), normalize_user_path(path), raw, variant)
 
-    def thumbnail(self, token: str, path: str) -> tuple[bytes, str]:
-        return self.objects.get_thumbnail(self._scope(token), normalize_user_path(path))
+    def thumbnail(self, token: str, path: str, variant: str = "thumb") -> tuple[bytes, str, str]:
+        return self.objects.get_thumbnail(self._scope(token), normalize_user_path(path), variant)
 
     # ---------- 可续传的分段上传 ----------
 
@@ -700,14 +702,14 @@ class UserApi:
 
     def _list_public_scope(self, scope: Scope, *, cursor: str = "", limit: int | None = None):
         if limit is None:
-            return [self._object_json(item) for item in self.objects.list_public(scope.bucket_id)]
+            return self._objects_json(self.objects.list_public(scope.bucket_id))
         limit = max(1, min(limit, 200))
         condition = "bucket_id=? AND public_token IS NOT NULL AND substr(key,1,9)!='.tgdrive/'"
         total = self.objects.metadata.cached_read(("public-total", scope.bucket_id),
             lambda: self.objects.metadata.db.execute(f"SELECT COUNT(*) FROM objects WHERE {condition}", (scope.bucket_id,)).fetchone()[0])
         rows = self.objects.metadata.db.execute(
             f"SELECT * FROM objects WHERE {condition} AND key>? ORDER BY key LIMIT ?", (scope.bucket_id, cursor, limit + 1)).fetchall()
-        items = [self._object_json(self.objects._object(row)) for row in rows[:limit]]
+        items = self._objects_json([self.objects._object(row) for row in rows[:limit]])
         return {"objects": items, "total": total,
                 "folder_sizes": self.objects.folder_sizes(scope, [item["key"] for item in items if item["key"].endswith("/")]),
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
@@ -760,7 +762,7 @@ class UserApi:
         account = self.accounts.account_for_session(session)
         item = await self.objects.copy_object(Scope(account.bucket_id), normalize_user_path(source),
                                               Scope(account.bucket_id), normalize_user_path(target))
-        return self._object_json(item)
+        return self._objects_json([item])[0]
 
     def list_clients(self, token: str, *, limit: int | None = None, cursor: int = 0):
         session = self._session(token)
@@ -797,10 +799,16 @@ class UserApi:
         self._own_key(token, csrf, access_key_id)
         self.clients.delete_key(access_key_id)
 
+    def _objects_json(self, items) -> list[dict[str, object]]:
+        """序列化一页对象，并用一次查询附上缩略图状态。"""
+        variants = self.objects.thumbnail_variants([item.blob_uuid for item in items])
+        return [self._object_json(item, variants.get(item.blob_uuid or "", ())) for item in items]
+
     @staticmethod
-    def _object_json(item) -> dict[str, object]:
+    def _object_json(item, thumbnails: list[str] | tuple[str, ...] = ()) -> dict[str, object]:
         meta = {key: value for key, value in item.user_meta.items() if key != ObjectService.THUMBNAIL_META}
         return {"key": item.key, "size": item.size, "etag": item.etag, "content_type": item.content_type,
-                "user_meta": meta, "modified_at": item.modified_at, "has_thumbnail": ObjectService.THUMBNAIL_META in item.user_meta,
+                "user_meta": meta, "modified_at": item.modified_at,
+                "has_thumbnail": "thumb" in thumbnails, "thumbnails": list(thumbnails),
                 "public_token": item.public_token, "public_at": item.public_at, "public_expires_at": item.public_expires_at,
                 "public_has_password": item.public_has_password, "public_downloads": item.public_downloads}

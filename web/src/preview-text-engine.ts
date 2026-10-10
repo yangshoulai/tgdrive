@@ -60,18 +60,20 @@ export function createTextView(container: HTMLElement, source: string, name: str
       ".cm-content": { padding: "20px 0" }, ".cm-line": { padding: "0 20px" },
       ".cm-gutters": { color: "var(--ink-3)", backgroundColor: "var(--surface)", borderColor: "var(--line-soft)" },
       ".cm-lineNumbers .cm-gutterElement": { padding: "0 12px 0 16px", minWidth: "44px" },
-      ".cm-selectionBackground": { backgroundColor: "var(--accent-soft) !important" },
+      ".cm-selectionBackground": { backgroundColor: "var(--selection) !important" },
       ".cm-searchMatch": { backgroundColor: "var(--warning-soft)", outline: "1px solid var(--warning)" },
       ".cm-searchMatch-selected": { backgroundColor: "var(--accent-soft)", outline: "1px solid var(--accent)" },
       ".cm-selectionMatch": { backgroundColor: "var(--accent-soft)" },
       ".cm-panels": { color: "var(--ink)", backgroundColor: "var(--surface-sunken)" },
       ".cm-textfield": { color: "var(--ink)", backgroundColor: "var(--surface)", borderColor: "var(--line)" },
       ".cm-button": { color: "var(--ink)", background: "var(--surface)", borderColor: "var(--line)" },
-      "&.cm-focused": { outline: "2px solid var(--accent)", outlineOffset: "-2px" },
+      "&.cm-focused": { outline: "none" },
     }),
   ] }) });
   return {
     destroy: () => view.destroy(), search: () => { openSearchPanel(view); },
+    // 编辑器只渲染可见行，必须用编辑器自己的选区全选，复制时才包含屏幕外的内容。
+    selectAll: () => { view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } }); view.focus(); },
     setWrapping: (enabled: boolean) => view.dispatch({ effects: wrapping.reconfigure(enabled ? EditorView.lineWrapping : []) }),
   };
 }

@@ -5,10 +5,10 @@ import "aplayer/dist/APlayer.min.css";
 
 export type MediaState = "loading" | "ready" | "buffering" | "failed";
 type Notify = (state: MediaState) => void;
-export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify) {
+export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string) {
   // 网页全屏仍留在预览的对话框内，保留焦点锁和无障碍语义。
   Artplayer.FULLSCREEN_WEB_IN_BODY = false;
-  const player = new Artplayer({ container, url, lang: "zh-cn", autoplay: false, theme: getComputedStyle(container).getPropertyValue("--accent").trim(),
+  const player = new Artplayer({ container, url, poster: poster ?? "", lang: "zh-cn", autoplay: false, theme: getComputedStyle(container).getPropertyValue("--accent").trim(),
     setting: true, playbackRate: true, aspectRatio: true, fullscreen: true, fullscreenWeb: true, pip: true,
     hotkey: true, mutex: true, autoSize: false, moreVideoAttr: { preload: "metadata", playsInline: true } });
   const controls = [["playAndPause", "播放视频"], ["setting", "显示设置"], ["pip", "开启画中画"], ["fullscreenWeb", "网页全屏"], ["fullscreen", "全屏"]];
@@ -66,10 +66,10 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   };
 }
 
-export function createAudioPlayer(container: HTMLElement, url: string, name: string, notify: Notify, onTime: (time: number) => void) {
+export function createAudioPlayer(container: HTMLElement, url: string, name: string, notify: Notify, onTime: (time: number) => void, cover?: string) {
   const player = new APlayer({ container, theme: getComputedStyle(container).getPropertyValue("--accent").trim(),
     autoplay: false, preload: "metadata", mutex: true, lrcType: 0,
-    audio: [{ name: "音频", artist: "", url }] });
+    audio: [{ name: "音频", artist: "", url, ...(cover ? { cover } : {}) }] });
   // 文件名通过 textContent 写入，避免第三方模板将它解释为 HTML。
   const title = container.querySelector(".aplayer-title");
   if (title) { title.textContent = name; container.querySelector(".aplayer-music")?.replaceChildren(title); }

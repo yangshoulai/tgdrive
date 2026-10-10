@@ -1229,6 +1229,8 @@ make_check_blob(kek) / verify_check_blob(kek, blob)
 
 **预览安全：** 白名单类型才用 `inline`，其余一律 `attachment`；预览响应带 `nosniff` 和 `Content-Security-Policy: sandbox`；所有由文件内容生成的 HTML（Markdown、Office）先经 DOMPurify 清洗；pdf.js 不执行脚本；超过大小上限的文件只提供下载。
 
+**缩略图（已实现，与原设想不同）：** 实际实现没有使用独立的 `thumbs.db`，而是在 `meta.db` 的 `thumbnails` 表中按 Blob 保存，用该 Blob 的 DEK 派生密钥加密；仍不进入快照（备份时清空该表），详见 AGENTS.md。以下为原始设想，仅作记录。
+
 **缩略图（M8）：** 图片和视频首帧在浏览器端生成，通过用户 API 存入 `thumbs.db`（可再生的缓存，不占用 Telegram 消息，不进入快照）。S3 客户端上传的文件没有缩略图，用户端首次浏览时对小图（如小于 5 MiB）懒生成。
 
 ### 11.5 通用要求

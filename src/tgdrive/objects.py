@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import re
@@ -339,29 +338,106 @@ class ObjectService:
         with self.metadata.transaction() as db:
             db.execute("UPDATE objects SET public_downloads=public_downloads+1 WHERE bucket_id=? AND key=?", (bucket_id, key))
 
-    # ---------- 缩略图（存于 user_meta，随移动/复制保留，覆盖内容后失效） ----------
+    # ---------- 缩略图（按 Blob 加密保存：移动、复制、秒传自动共享，覆盖内容后自然失效；不计入配额） ----------
 
-    THUMBNAIL_META = "tgdrive-thumbnail"
-    MAX_THUMBNAIL = 96 * 1024
+    THUMBNAIL_META = "tgdrive-thumbnail"  # 旧版存放位置，仅用于从 user_meta 中剔除
+    # thumb：列表与网格（最长边约 320px）；poster：预览封面与占位（约 960px）。
+    THUMBNAIL_LIMITS = {"thumb": 96 * 1024, "poster": 320 * 1024}
 
-    def set_thumbnail(self, scope: Scope, key: str, data: bytes) -> None:
-        if len(data) > self.MAX_THUMBNAIL:
+    @staticmethod
+    def _thumbnail_mime(data: bytes) -> str:
+        if data.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "image/webp"
+        raise ValueError("缩略图必须是 JPEG、PNG 或 WebP")
+
+    def _thumbnail_blob(self, scope: Scope, key: str, *, write: bool = False) -> tuple[ObjectInfo, str]:
+        info = self._object(self._lookup(scope, key, write=write))
+        if key.endswith("/") or not info.blob_uuid:
+            raise ValueError("只有文件可以设置缩略图")
+        return info, info.blob_uuid
+
+    def set_thumbnail(self, scope: Scope, key: str, data: bytes | None, variant: str = "thumb") -> None:
+        """保存一种规格的缩略图；variant='none' 记录“已尝试但无法生成”，避免各端反复尝试。"""
+        _, blob_uuid = self._thumbnail_blob(scope, key, write=True)
+        now = time.time()
+        if variant == "none":
+            with self.metadata.transaction() as db:
+                if not db.execute("SELECT 1 FROM thumbnails WHERE blob_uuid=? AND variant='thumb'", (blob_uuid,)).fetchone():
+                    db.execute("INSERT OR REPLACE INTO thumbnails(blob_uuid,variant,mime,data,created_at) VALUES(?,'none','',x'',?)",
+                               (blob_uuid, now))
+            return
+        limit = self.THUMBNAIL_LIMITS.get(variant)
+        if limit is None:
+            raise ValueError("不支持的缩略图规格")
+        if not data or len(data) > limit:
             raise ValueError("缩略图过大")
-        if not (data.startswith(b"\xff\xd8\xff") or data.startswith(b"\x89PNG") or data[8:12] == b"WEBP"):
-            raise ValueError("缩略图必须是 JPEG、PNG 或 WebP")
-        row = self._lookup(scope, key, write=True)
-        meta = json.loads(row["user_meta"] or "{}")
-        meta[self.THUMBNAIL_META] = base64.b64encode(data).decode()
+        mime = self._thumbnail_mime(data)
+        sealed = self.engine.seal_thumbnail(blob_uuid, variant, data)
         with self.metadata.transaction() as db:
-            db.execute("UPDATE objects SET user_meta=? WHERE bucket_id=? AND key=?",
-                       (json.dumps(meta, separators=(",", ":")), scope.bucket_id, key))
+            db.execute("INSERT OR REPLACE INTO thumbnails(blob_uuid,variant,mime,data,created_at) VALUES(?,?,?,?,?)",
+                       (blob_uuid, variant, mime, sealed, now))
+            db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant='none'", (blob_uuid,))
+            if variant == "thumb":
+                db.execute("DELETE FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,))
 
-    def get_thumbnail(self, scope: Scope, key: str) -> tuple[bytes, str]:
-        info = self._object(self._lookup(scope, key))
-        value = info.user_meta.get(self.THUMBNAIL_META)
-        if not value:
+    def read_thumbnail(self, info: ObjectInfo, variant: str = "thumb") -> tuple[bytes, str, str]:
+        """返回 (图片, MIME, ETag)。没有 poster 时退回 thumb；旧版明文缩略图在首次读取时加密转存。"""
+        if variant not in self.THUMBNAIL_LIMITS or not info.blob_uuid:
             raise NotFoundError("thumbnail not found")
-        return base64.b64decode(value), info.etag
+        for candidate in ((variant, "thumb") if variant == "poster" else (variant,)):
+            row = self.metadata.db.execute("SELECT mime, data, created_at FROM thumbnails WHERE blob_uuid=? AND variant=?",
+                                           (info.blob_uuid, candidate)).fetchone()
+            if row is None and candidate == "thumb" and self._adopt_legacy_thumbnail(info.blob_uuid):
+                row = self.metadata.db.execute("SELECT mime, data, created_at FROM thumbnails WHERE blob_uuid=? AND variant='thumb'",
+                                               (info.blob_uuid,)).fetchone()
+            if row is not None:
+                data = self.engine.open_thumbnail(info.blob_uuid, candidate, row["data"])
+                return data, row["mime"], f"{info.etag}-{candidate}-{int(row['created_at'])}"
+        raise NotFoundError("thumbnail not found")
+
+    def get_thumbnail(self, scope: Scope, key: str, variant: str = "thumb") -> tuple[bytes, str, str]:
+        return self.read_thumbnail(self._object(self._lookup(scope, key)), variant)
+
+    def thumbnail_variants(self, blob_uuids: list[str]) -> dict[str, list[str]]:
+        """一页对象的缩略图状态，一次查询：{blob_uuid: ["thumb", "poster"] 或 ["none"]}。"""
+        unique = list(dict.fromkeys(uuid for uuid in blob_uuids if uuid))
+        if not unique:
+            return {}
+        marks = ",".join("?" for _ in unique)
+        result: dict[str, list[str]] = {}
+        for row in self.metadata.db.execute(
+                f"SELECT blob_uuid, variant FROM thumbnails WHERE blob_uuid IN ({marks}) "
+                f"UNION ALL SELECT blob_uuid, 'thumb' FROM thumbnail_legacy WHERE blob_uuid IN ({marks}) ORDER BY 2 DESC",
+                (*unique, *unique)):
+            variants = result.setdefault(row["blob_uuid"], [])
+            if row["variant"] not in variants:
+                variants.append(row["variant"])
+        return result
+
+    def _adopt_legacy_thumbnail(self, blob_uuid: str) -> bool:
+        row = self.metadata.db.execute("SELECT data FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,)).fetchone()
+        if row is None:
+            return False
+        try:
+            mime = self._thumbnail_mime(row["data"])
+            sealed = self.engine.seal_thumbnail(blob_uuid, "thumb", row["data"])
+        except ValueError:
+            mime = sealed = None
+        with self.metadata.transaction() as db:
+            if sealed is not None:
+                db.execute("INSERT OR IGNORE INTO thumbnails(blob_uuid,variant,mime,data,created_at) VALUES(?,'thumb',?,?,?)",
+                           (blob_uuid, mime, sealed, time.time()))
+            db.execute("DELETE FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,))
+        return sealed is not None
+
+    def adopt_legacy_thumbnails(self, limit: int = 500) -> int:
+        """维护任务：把旧版明文缩略图加密转存并删除明文，需要系统已解锁。"""
+        rows = self.metadata.db.execute("SELECT blob_uuid FROM thumbnail_legacy LIMIT ?", (limit,)).fetchall()
+        return sum(1 for row in rows if self._adopt_legacy_thumbnail(row["blob_uuid"]))
 
     # ---------- 回收站：条目以 .tgdrive/trash/<id>/<原路径> 保存，仍计入容量 ----------
 
@@ -518,10 +594,10 @@ class ObjectService:
         scope = Scope(root.bucket_id, root.key)
         def read_page():
             page = self.list_objects(scope, prefix, "/", cursor, max(1, min(limit, 500)))
-            return page, self.folder_sizes(scope, page.common_prefixes)
-        page, sizes = await self.metadata.run_in_thread(read_page)
+            return page, self.folder_sizes(scope, page.common_prefixes), self.thumbnail_variants([item.blob_uuid for item in page.objects])
+        page, sizes, thumbnails = await self.metadata.run_in_thread(read_page)
         files = [{"name": item.key[len(prefix):], "path": item.key[len(root.key):], "size": item.size, "content_type": item.content_type,
-                  "etag": item.etag, "modified_at": item.modified_at}
+                  "etag": item.etag, "modified_at": item.modified_at, "thumbnails": thumbnails.get(item.blob_uuid or "", [])}
                  for item in page.objects if item.key != prefix and not item.key.endswith("/")]
         folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):], "size": sizes[value]}
                    for value in page.common_prefixes]

@@ -13,6 +13,8 @@ export type FileItem = {
   public_has_password?: boolean;
   public_downloads?: number;
   has_thumbnail?: boolean;
+  /** 缩略图状态："thumb"、"poster"，或 "none"（已尝试但无法生成）。 */
+  thumbnails?: string[];
 };
 export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subtitle"; language: string | null; size: number; etag: string };
 /** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
@@ -31,13 +33,13 @@ export type SystemSettings = { public_base_url: SettingValue; s3_endpoint: Setti
 export type TrafficPoint = { at: number; in_bytes: number; out_bytes: number };
 export type TrafficMetrics = { total_in_bytes: number; total_out_bytes: number; recent: TrafficPoint[] };
 export type SystemStatus = { initialized: boolean; unlocked: boolean; user_count: number; traffic?: TrafficMetrics };
-export type PublicFile = { kind: "file"; token: string; password_required: false; name: string; size: number; content_type: string | null; etag: string; modified_at: number; public_at: number | null; expires_at: number | null };
+export type PublicFile = { kind: "file"; token: string; password_required: false; name: string; size: number; content_type: string | null; etag: string; modified_at: number; public_at: number | null; expires_at: number | null; thumbnails?: string[] };
 export type PublicFolder = { kind: "folder"; token: string; password_required: false; name: string; modified_at: number; public_at: number | null; expires_at: number | null };
 export type PublicObject = PublicFile | PublicFolder | { token: string; password_required: true };
 export type PublicFolderPage = {
   name: string; path: string; next_cursor: string | null;
   folders: { name: string; path: string; size?: number }[];
-  files: { name: string; path: string; size: number; content_type: string | null; etag: string; modified_at: number }[];
+  files: { name: string; path: string; size: number; content_type: string | null; etag: string; modified_at: number; thumbnails?: string[] }[];
 };
 export type CreatedClient = { id: number; access_key_id: string; secret: string };
 
@@ -143,8 +145,18 @@ export const restoreTrash = (ids: string[]) => post<{ restored: { id: string; pa
 export const purgeTrash = (ids: string[] | "all") => post<{ purged: number }>("/api/user/v1/trash/purge", ids === "all" ? { all: true } : { ids });
 
 /* ---------- 缩略图 ---------- */
-export const thumbnailUrl = (path: string, etag: string) => `/api/user/v1/thumbnail?path=${encodeURIComponent(path)}&v=${etag}`;
-export const setThumbnail = (path: string, data: string) => post<void>("/api/user/v1/thumbnail", { path, data });
+export type ThumbnailVariant = "thumb" | "poster";
+export const thumbnailUrl = (path: string, etag: string, variant: ThumbnailVariant = "thumb") =>
+  `/api/user/v1/thumbnail?path=${encodeURIComponent(path)}&variant=${variant}&v=${etag}`;
+export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb") => post<void>("/api/user/v1/thumbnail", { path, data, variant });
+export const markNoThumbnail = (path: string) => post<void>("/api/user/v1/thumbnail", { path, variant: "none" });
+/** 文件的缩略图地址：有封面图时取 poster（服务端没有 poster 会退回 thumb），没有缩略图返回 undefined。 */
+export const fileThumbnail = (file: FileItem, variant: ThumbnailVariant = "thumb") =>
+  // 地址里带上缩略图状态：之后补生成了封面，地址随之改变，不会继续用缓存里退回的小图。
+  file.thumbnails?.includes("thumb") || file.has_thumbnail ? thumbnailUrl(file.key, `${file.etag}.${(file.thumbnails ?? []).join(".")}`, variant) : undefined;
+/** 公开分享里文件的缩略图：在 /p/ 地址上加 thumbnail 参数，沿用分享的权限。 */
+export const publicThumbnail = (contentUrl: string, variant: ThumbnailVariant = "thumb") =>
+  `${contentUrl}${contentUrl.includes("?") ? "&" : "?"}thumbnail=${variant}`;
 
 /* ---------- 可续传的分段上传 ---------- */
 export type UploadState = { upload_id: string; path: string; completed: boolean; parts: { part_no: number; size: number; etag: string }[] };

@@ -19,6 +19,9 @@ from .crypto import (
     decrypt_range,
     encrypt_chunk,
     new_dek,
+    open_sealed,
+    seal,
+    thumbnail_key,
     unwrap_dek,
     wrap_dek,
 )
@@ -79,6 +82,17 @@ class BlobEngine:
             return uuid.UUID(blob_uuid).bytes
         except ValueError:
             return blob_uuid.encode("ascii")
+
+    def _thumbnail_key(self, blob_uuid: str) -> bytes:
+        record = self.metadata.get_blob(blob_uuid)
+        return thumbnail_key(unwrap_dek(self._kek(), record.wrapped_dek, blob_uuid), self._blob_key(blob_uuid))
+
+    def seal_thumbnail(self, blob_uuid: str, variant: str, data: bytes) -> bytes:
+        """缩略图用该 Blob 的 DEK 派生密钥加密，附加数据绑定规格，不能挪作其他规格或其他文件使用。"""
+        return seal(self._thumbnail_key(blob_uuid), data, f"thumbnail:{variant}")
+
+    def open_thumbnail(self, blob_uuid: str, variant: str, sealed: bytes) -> bytes:
+        return open_sealed(self._thumbnail_key(blob_uuid), sealed, f"thumbnail:{variant}")
 
     async def put_part(self, blob_uuid: str, part_no: int, body: AsyncIterator[bytes] | Iterable[bytes] | bytes,
                        *, bucket_id: int | None = None) -> PartResult:

@@ -213,6 +213,14 @@ class EncryptedSnapshotStore:
                 target = sqlite3.connect(plain_path)
                 try:
                     row, kek = self._capture(target)
+                    # 缩略图是可再生的展示缓存，不进入备份，避免备份随媒体数量膨胀；恢复后由浏览器按需补生成。
+                    tables = {name for (name,) in target.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    if tables & {"thumbnails", "thumbnail_legacy"}:
+                        for table in ("thumbnails", "thumbnail_legacy"):
+                            if table in tables:
+                                target.execute(f"DELETE FROM {table}")
+                        target.commit()
+                        target.execute("VACUUM")
                 finally:
                     target.close()
                 header = json.dumps({"kdf_salt": base64.b64encode(row["kdf_salt"]).decode(),
@@ -389,6 +397,7 @@ class MaintenanceService:
         self.snapshots = EncryptedSnapshotStore(metadata, keystore)
         self.backups = BackupService(self.snapshots, backup_dir or Path(metadata.path).parent / "backups")
         self.trash_purger = None  # 由应用工厂注入：async (now) -> int
+        self.thumbnail_adopter = None  # 由应用工厂注入：同步 (limit) -> int，把旧版明文缩略图加密转存
 
     def status(self) -> dict[str, object]:
         state = _get_state(self.metadata, self.STATUS_KEY, {}) or {}
@@ -431,6 +440,8 @@ class MaintenanceScheduler:
                 days=self.service.audit_retention_days, now=now)))
         if self.service.trash_purger is not None:
             steps.append(("trash", lambda: self._purge(now)))
+        if self.service.thumbnail_adopter is not None:
+            steps.append(("thumbnails", lambda: self._adopt_thumbnails()))
         if self._due("scrub", self.scrub_every, now):
             steps.append(("scrub", lambda: self._scrub()))
         if self._due("backup", self.backup_every, now):
@@ -450,6 +461,9 @@ class MaintenanceScheduler:
 
     async def _gc(self) -> dict[str, object]:
         return asdict(await self.service.gc.run_once(limit=500))
+
+    async def _adopt_thumbnails(self) -> dict[str, object]:
+        return {"adopted": await self.service.metadata.run_in_thread(self.service.thumbnail_adopter, 500)}
 
     async def _purge(self, now: float) -> dict[str, object]:
         return {"purged": await self.service.trash_purger(now)}

@@ -203,13 +203,8 @@ class TgDriveASGI(StaticFiles):
                 await self._send(tracked_send, 200, result)
                 return
             if path == "/api/user/v1/thumbnail" and method == "GET":
-                data, etag = self.user.thumbnail(token, query.get("path", [""])[0])
-                if headers.get("if-none-match") == f'"{etag}"':
-                    await self._send(tracked_send, 304, None, {"ETag": f'"{etag}"'})
-                    return
-                kind = "image/webp" if data[8:12] == b"WEBP" else "image/png" if data.startswith(b"\x89PNG") else "image/jpeg"
-                await self._send_raw(tracked_send, 200, {"Content-Type": kind, "ETag": f'"{etag}"', "Cache-Control": "private, max-age=86400",
-                                                         "X-Content-Type-Options": "nosniff"}, data)
+                data, mime, etag = self.user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
+                await self._send_thumbnail(tracked_send, headers, data, mime, etag, "private, max-age=86400")
                 return
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
                 await self._content(tracked_send, method, token, query, headers, admin=False)
@@ -587,7 +582,7 @@ class TgDriveASGI(StaticFiles):
                 ids = None if payload.get("all") else list(payload["ids"])
                 return 200, {"purged": await self.user.purge_trash(token, csrf, ids)}, {}
             if method == "POST" and route == "/thumbnail":
-                self.user.set_thumbnail(token, csrf, payload["path"], str(payload["data"]))
+                self.user.set_thumbnail(token, csrf, payload["path"], payload.get("data"), str(payload.get("variant") or "thumb"))
                 return 204, None, {}
             if method == "POST" and route == "/files/instant":
                 public = payload.get("public")
@@ -664,8 +659,9 @@ class TgDriveASGI(StaticFiles):
                 return 200, {"token": info.public_token, "kind": "folder", "name": info.key.rstrip("/").rsplit("/", 1)[-1],
                              "password_required": False, "modified_at": info.modified_at, "public_at": info.public_at,
                              "expires_at": info.public_expires_at}, {}
+            thumbnails = self.user.objects.thumbnail_variants([info.blob_uuid]).get(info.blob_uuid or "", [])
             return 200, {"token": info.public_token, "kind": "file", "name": info.key.rsplit("/", 1)[-1], "size": info.size,
-                         "content_type": info.content_type, "etag": info.etag, "password_required": False,
+                         "content_type": info.content_type, "etag": info.etag, "password_required": False, "thumbnails": thumbnails,
                          "modified_at": info.modified_at, "public_at": info.public_at,
                          "expires_at": info.public_expires_at}, {}
         elif re.fullmatch(r"/api/public/v1/folders/[A-Za-z0-9_-]+/(list|preview-assets)", path) and method == "GET":
@@ -720,6 +716,11 @@ class TgDriveASGI(StaticFiles):
         root = info
         if info.key.endswith("/"):
             root, info = self.user.objects.public_folder_file(token, rest)
+        if "thumbnail" in query:
+            # 缩略图沿用分享的权限边界（密码、目录范围、账号状态），不计入下载次数。
+            data, mime, etag = self.user.objects.read_thumbnail(info, query["thumbnail"][0])
+            await self._send_thumbnail(send, headers, data, mime, etag, "public, no-cache")
+            return
 
         def opener(start, end):
             # 从头开始的完整读取计为一次下载；Range 续传与预览拖动不重复计数。
@@ -728,6 +729,13 @@ class TgDriveASGI(StaticFiles):
             return self.user.objects.get_object(Scope(info.bucket_id), info.key, start, end)
         # 允许 CDN/浏览器存储，但每次使用前必须回源验证（ETag → 304）。关闭分享后回源即得到 404，链接立即失效。
         await self._stream_object(send, method, info, opener, query, headers, "public, no-cache")
+
+    async def _send_thumbnail(self, send, headers, data: bytes, mime: str, etag: str, cache_control: str):
+        if headers.get("if-none-match") == f'"{etag}"':
+            await self._send(send, 304, None, {"ETag": f'"{etag}"'})
+            return
+        await self._send_raw(send, 200, {"Content-Type": mime, "ETag": f'"{etag}"', "Cache-Control": cache_control,
+                                         "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"}, data)
 
     async def _stream_object(self, send, method, info, opener, query, headers, cache_control):
         etag = f'"{info.etag}"'

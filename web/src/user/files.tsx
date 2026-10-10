@@ -4,7 +4,8 @@ import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileThumbnail, FileTile, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, makeThumbnail, parentPath, thumbnailable } from "../files";
+import { FileThumbnail, FileTile, FileVisual, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { saveThumbnails, thumbnailsFromImage, useThumbnailBackfill } from "../thumbnails";
 
 import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
@@ -52,6 +53,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const publicFolders = pagination.page?.public_folders ?? {};
   const folderSizes = pagination.page?.folder_sizes ?? {};
   const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
+  const setThumbnails = (key: string, thumbnails: string[]) =>
+    setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, has_thumbnail: thumbnails.includes("thumb") } : item));
+  useThumbnailBackfill(files, key => api.contentUrl(key), setThumbnails);
   const setPublicFolders = (update: (items: Record<string, api.FileItem>) => Record<string, api.FileItem>) => pagination.setPage(current => current && { ...current, public_folders: update(current.public_folders ?? {}) });
   useEffect(() => { setSelected(new Set()); }, [fetchPage, pagination.number]);
   useEffect(() => { setSearch(""); setQuery(""); }, [prefix]);
@@ -281,7 +285,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
               <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}`} {...dragProps(entry)} onClick={() => setPreview(entry.file)}>
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
                 <span role="cell" className="cell-name">
-                  <FileTile kind={getFileKind(entry.file.content_type, entry.key)} />
+                  <FileVisual kind={getFileKind(entry.file.content_type, entry.key)} src={api.fileThumbnail(entry.file)} />
                   <span className="name-stack">
                     <button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); setPreview(entry.file); }}>{baseName(entry.key)}</button>
                     <span className="file-mobile-meta"><span>{kindLabel(getFileKind(entry.file.content_type, entry.key))} · {formatBytes(entry.file.size)} · {formatDate(entry.file.modified_at)}</span>{entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>
@@ -307,9 +311,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
               return (
                 <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${entry.kind === "folder" ? dropClass(entry.key) : ""}`} {...dragProps(entry)} {...(entry.kind === "folder" ? dropProps(entry.key) : {})} onClick={() => entry.kind === "folder" ? onOpenFolder(entry.key) : setPreview(entry.file)}>
                   <div className="grid-thumb">
-                    {/* 有缩略图用缩略图；小图片直接显示原图；大图片显示类型图标，避免每个卡片下载完整原图。 */}
-                    <FileThumbnail kind={kind} url={entry.kind === "file" && entry.file.has_thumbnail ? api.thumbnailUrl(entry.key, entry.file.etag)
-                      : kind === "image" && entry.kind === "file" && entry.file.size <= 2 * 1024 * 1024 ? api.contentUrl(entry.key) : undefined} />
+                    {/* 有缩略图用缩略图；小图片直接显示原图；其余显示类型图标，避免每个卡片下载完整原图。 */}
+                    <FileThumbnail kind={kind} url={entry.kind === "file" ? api.fileThumbnail(entry.file)
+                      ?? (kind === "image" && entry.file.size <= 2 * 1024 * 1024 ? api.contentUrl(entry.key) : undefined) : undefined} />
                     <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                     {(entry.kind === "file" ? entry.file.public_token : publicFolders[entry.key]) && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
                   </div>
@@ -355,14 +359,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         }} />}
       {moving && <MoveDialog targets={moving} startPrefix={query ? "" : prefix} onClose={() => setMoving(null)}
         onMove={async (dest, conflict) => { await moveEntries(moving, dest, conflict); setMoving(null); }} />}
-      {preview && <PreviewModal file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)} onClose={() => setPreview(null)} onShare={() => setSharing(preview)}
+      {preview && <PreviewModal file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)}
+        poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} onShare={() => setSharing(preview)}
         onImageLoad={image => {
-          // 预览过的图片顺便补上缩略图（例如通过 S3 上传、没有缩略图的图片）。
-          if (preview.has_thumbnail || !thumbnailable(preview.key, preview.content_type, preview.size)) return;
+          // 预览过的图片顺便补上缩略图和封面图（例如通过 S3 上传、没有缩略图的图片），不必再下载一次原图。
+          // 已有封面、矢量图，或已有缩略图且原图不够大（不会生成封面）时跳过。
+          if (preview.thumbnails?.includes("poster") || /\.svg$/i.test(preview.key)
+            || (preview.thumbnails?.includes("thumb") && Math.max(image.naturalWidth, image.naturalHeight) <= 480)) return;
           const key = preview.key;
-          void makeThumbnail(image).then(data => data
-            ? api.setThumbnail(key, data).then(() => setFiles(current => current.map(item => item.key === key ? { ...item, has_thumbnail: true } : item)))
-            : undefined).catch(() => undefined);
+          void thumbnailsFromImage(image).then(result => saveThumbnails(key, result)).then(thumbnails => thumbnails && setThumbnails(key, thumbnails)).catch(() => undefined);
         }} />}
       {sharing && <ShareDialog file={sharing} publicBase={session.public_base_url} onClose={() => setSharing(null)}
         update={async (isPublic, options) => (await api.setPublic([sharing.key], isPublic, options)).objects[0]} onChange={file => { replaceFile(file); onChanged(); }} />}

@@ -49,6 +49,7 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     maintenance = MaintenanceService(metadata, engine, store, keystore, backup_dir=root / "backups",
                                      audit_retention_days=audit_retention_days)
     maintenance.trash_purger = objects.purge_expired_trash  # 回收站条目保留 30 天后自动永久删除
+    maintenance.thumbnail_adopter = objects.adopt_legacy_thumbnails  # 旧版明文缩略图解锁后加密转存
     context = AppContext(metadata, keystore, engine, accounts, objects, clients, s3, maintenance,
                          telegram_bots, store, SystemSettings(metadata, {"public_base_url": public_base_url, "s3_endpoint": s3_endpoint}), metrics)
     app = TgDriveASGI(AdminApi(accounts, objects, clients, maintenance, telegram_bots, metrics=metrics, storage=store), UserApi(accounts, objects, clients),

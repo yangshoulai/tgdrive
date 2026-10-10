@@ -15,6 +15,7 @@ import { SharedView } from "./user/shared";
 import { TrashView } from "./user/trash";
 import { KeysView } from "./user/keys";
 import { PasswordDialog } from "./user/account";
+import { onThemeChange, setThemePreference, themePreference, type ThemePreference } from "./theme";
 
 /* ---------- 路由 ---------- */
 
@@ -113,6 +114,8 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   const [usage, setUsage] = useState<Usage | null>(null);
   const [sharedCount, setSharedCount] = useState<number | undefined>();
   const [passwordOpen, setPasswordOpen] = useState(false);
+  const [theme, setTheme] = useState<ThemePreference>(themePreference);
+  useEffect(() => onThemeChange(setTheme), []);
   const [status, setStatus] = useState<api.SystemStatus | null>(null);
   const [, setConfigVersion] = useState(0);
   const [uploadRevision, setUploadRevision] = useState(0);
@@ -211,6 +214,9 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
       </>}
       account={{ name: session.username, caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", menu: [
         { label: "修改密码", icon: "lock", onSelect: () => setPasswordOpen(true) },
+        { label: "跟随系统", icon: "monitor", heading: "外观", divider: true, checked: theme === "system", onSelect: () => setThemePreference("system") },
+        { label: "浅色", icon: "sun", checked: theme === "light", onSelect: () => setThemePreference("light") },
+        { label: "深色", icon: "moon", checked: theme === "dark", onSelect: () => setThemePreference("dark") },
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },
       ] }}>
       {content}

@@ -155,6 +155,12 @@ def unwrap_dek(kek: bytes, wrapped: bytes, blob_uuid: bytes | str) -> bytes:
         raise IntegrityError("wrapped DEK authentication failed") from exc
 
 
+def thumbnail_key(dek: bytes, blob_uuid: bytes | str) -> bytes:
+    """缩略图密钥由文件自己的 DEK 派生：改口令只重新包裹 DEK，缩略图无需重加密；Blob 删除后随之不可解。"""
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                info=b"tgdrive-thumb|" + _blob_bytes(blob_uuid)).derive(dek)
+
+
 def derive_subkey(kek: bytes, purpose: str) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
                 info=b"tgdrive-sub|" + purpose.encode("utf-8")).derive(kek)

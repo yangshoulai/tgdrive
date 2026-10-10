@@ -8,7 +8,7 @@ Tessera（仓库名 tgdrive）：基于 Telegram Bot + 私有频道的加密分�
 
 ## 目录
 
-- `src/tgdrive/`：后端（src 布局，导入名仍为 `tgdrive`；改动后需 `pip install -e .` 重新安装）。`metadata.py`（SQLite 迁移，当前 schema v11）、`objects.py`（对象/公开链接）、`api.py`（网页会话服务层，按角色校验 Cookie 会话与 CSRF）、`keyapi.py`（`/api/v1` 访问密钥 API）、`asgi.py`（HTTP 路由与流式响应）、`app.py`（应用工厂与 CLI）、`s3/`、`telegram/`。
+- `src/tgdrive/`：后端（src 布局，导入名仍为 `tgdrive`；改动后需 `pip install -e .` 重新安装）。`metadata.py`（SQLite 迁移，当前 schema v12）、`objects.py`（对象/公开链接）、`api.py`（网页会话服务层，按角色校验 Cookie 会话与 CSRF）、`keyapi.py`（`/api/v1` 访问密钥 API）、`asgi.py`（HTTP 路由与流式响应）、`app.py`（应用工厂与 CLI）、`s3/`、`telegram/`。
 - `web/src/`：前端源码。
   - `ui.tsx`：设计系统基元（按钮、表单、弹窗、菜单、toast、格式化）。新界面必须复用这里的组件。
   - `shell.tsx`：应用外壳、登录页、首次初始化页。
@@ -16,7 +16,8 @@ Tessera（仓库名 tgdrive）：基于 Telegram Bot + 私有频道的加密分�
   - `markdown.tsx`：自带 Markdown 渲染器，直接产出 React 元素，不执行原始 HTML，链接只放行 http(s)/mailto；`highlight.ts`：正则语法高亮（每种语言一组规则，合并成一个正则扫描，规则内不得有捕获分组或后行断言）；`code.tsx`：带行号的代码块与 Markdown 围栏。新增语言只需在 `highlight.ts` 的 `RULES` 与 `ALIASES` 各加一项。
   - `user.tsx`（入口 `UserApp`，含移动对话框与拖放移动）、`admin.tsx`（入口 `AdminRoute`，含系统设置）、`share.tsx`。
   - 文档站位于 `web/src/docs/`：`docs.tsx`（外壳、`/docs/<页面>` 路由、目录、⌘K 搜索）、`docs-ui.tsx`（排版组件）、`docs-content.tsx`（用户文档内容；示例地址取自 `/api/public/v1/config`）、`docs-admin-content.tsx`（管理员文档内容）。`admin-docs.tsx` 是管理员文档独立入口。修改接口、限制或 S3 兼容性时必须同步更新对应内容文件。
-  - `styles.css`：全部样式与设计令牌；只引用 CSS 变量，深色模式只覆盖令牌。
+  - `styles.css`：全部样式与设计令牌；只引用 CSS 变量，深色模式只覆盖令牌（`:root[data-theme="dark"]`，不要再用 `prefers-color-scheme` 媒体查询）。
+  - `theme.ts`：外观偏好（跟随系统／浅色／深色），存 `localStorage` 的 `tessera-theme`；`build-apps.mjs` 生成的 head 脚本 `theme-<hash>.js` 在首帧前应用，二者的存储键与解析规则必须一致。
 - `tests/`：按功能命名的 `unittest` 回归测试，覆盖加密、认证、对象、S3、分页、Telegram、维护任务、公开链接、审计和管理员文档权限。
 - `docs/architecture-v2.md`：架构设计记录。
 - `Dockerfile` / `docker-compose.yml`：多阶段镜像，用户端在根路径，管理端在 `/admin/`。`.github/workflows/docker.yml` 仅在推送 `v*` 标签时构建并发布镜像，不要添加其他触发条件。
@@ -53,4 +54,5 @@ cd web && node build-apps.mjs                                  # 构建到 web/d
 - 审计日志（`tgdrive/audit.py`，路由表在 `TgDriveASGI._AUDITED`）只写入逐项挑选的字段，新增审计动作时不得记录密码、口令、token 或 Secret。
 - 传输性能：前端大文件（>64 MB）按服务端给出的 16 MB 分块上传，`PART_CONCURRENCY=4` 块并行、`FILE_CONCURRENCY=2` 个文件并行（`web/src/user.tsx`）；服务端加解密放在 `asyncio.to_thread`，`BlobEngine.stream` 用 `read_ahead` 个窗口的流水线预读（`tests/test_download_pipeline.py`）。调大并行度前先估算内存：上传约 并行块数 × 2 × 16 MB，下载约 (read_ahead+1) × 读取窗口。
 - 秒传（`tgdrive/fingerprint.py`、`ObjectService.instant_put`、`web/src/fingerprint.ts`）：指纹是 16 MiB 分块 SHA-256 的哈希树，算法是对外约定（见文档站 `/files/instant`），服务端和前端必须保持一致，改动会让已有指纹失效。指纹存在 `blobs.fingerprint`，写入时由 `put_part` 顺带计算（不重读数据）；分段上传只有除最后一段外每段都是 16 MiB 整数倍才有指纹。命中只在调用者自己的桶、授权前缀内查找，回收站前缀 `.tgdrive/` 不参与。新增会创建 Blob 的写入路径时要保证走 `put_part`，并在 `finalize` 后设置指纹。
+- 缩略图（`objects.py` 的 thumbnail 系列方法、`web/src/thumbnails.ts`）：按 Blob 保存在 `thumbnails` 表，规格 `thumb`（≤96 KB，约 320px）、`poster`（≤320 KB，约 960px）与 `none`（已尝试但无法生成）；用该 Blob 的 DEK 派生密钥加密（`BlobEngine.seal_thumbnail`），所以改口令无需重加密、Blob 删除时外键级联删除。不计入配额、不进入备份。生成只在浏览器完成（图片缩放、视频截帧、音频 ID3/FLAC/MP4 内嵌封面），服务端不解码用户文件；网页上传后用本地文件生成，其余文件由 `useThumbnailBackfill` 在浏览目录时补生成。列表接口用 `UserApi._objects_json` 批量附带 `thumbnails` 状态，新增返回文件列表的接口时不要逐项查询。公开分享通过 `/p/<令牌>/<路径>?thumbnail=thumb|poster` 读取，沿用分享的权限并且不计下载次数。旧版存在 `user_meta` 里的明文缩略图在 v12 迁移时移到 `thumbnail_legacy`，解锁后由维护任务或首次读取加密转存。
 - 文件移动使用 `ObjectService.move`：不以 `/` 结尾的源精确匹配单个文件，以 `/` 结尾的源移动整个文件夹；禁止移入自身子文件夹；同名目录标记合并。

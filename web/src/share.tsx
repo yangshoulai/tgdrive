@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { useCursorPage } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
-import { FilePreview, FileTile, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
+import { FilePreview, FileTile, FileVisual, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
 import { Brand, Button, EmptyState, Field, Icon, Pagination, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime } from "./ui";
 
 type Shared = Extract<api.PublicObject, { password_required: false }>;
@@ -38,6 +38,7 @@ export function SharePage({ token }: { token: string }) {
   const kind = single ? getFileKind(single.content_type, single.name) : "other";
   const url = single ? api.publicPath(token, single.name, false, access) : "";
   const downloadUrl = single ? api.publicPath(token, single.name, true, access) : "";
+  const hasThumbnail = Boolean(single?.thumbnails?.includes("thumb"));
   return (
     <div className="share-page">
       <header className="share-bar">
@@ -62,7 +63,7 @@ export function SharePage({ token }: { token: string }) {
         ) : (
           <article className="share-card">
             <header className="share-head">
-              <FileTile kind={kind} size="lg" />
+              <FileVisual kind={kind} src={hasThumbnail ? api.publicThumbnail(url) : undefined} size="lg" />
               <div className="share-title">
                 <h1>{file.name}</h1>
                 <p>
@@ -75,7 +76,7 @@ export function SharePage({ token }: { token: string }) {
                 <a className="btn btn-primary btn-md" href={downloadUrl}><Icon name="download" size={17} /><span>下载</span></a>
               </div>
             </header>
-            {canPreview(kind) && <div className="share-preview"><FilePreview kind={kind} url={url} name={file.name} downloadUrl={downloadUrl} /></div>}
+            {canPreview(kind) && <div className="share-preview"><FilePreview kind={kind} url={url} name={file.name} downloadUrl={downloadUrl} poster={hasThumbnail ? api.publicThumbnail(url, "poster") : undefined} /></div>}
           </article>
         )}
         <p className="share-footnote">这是 {BRAND} 用户分享的{file?.kind === "folder" ? "文件夹" : "文件"}，只有拿到链接的人才能访问。</p>
@@ -195,7 +196,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
                   const download = api.publicFolderFile(token, item.path, true, access);
                   return (
                     <div key={item.path} role="row" className="data-row is-clickable" onClick={() => previewable ? setPreview(item) : window.location.assign(download)}>
-                      <span role="cell" className="cell-name"><FileTile kind={kind} />
+                      <span role="cell" className="cell-name"><FileVisual kind={kind} src={item.thumbnails?.includes("thumb") ? api.publicThumbnail(api.publicFolderFile(token, item.path, false, access)) : undefined} />
                         <a className="name-button" href={previewable ? api.publicFolderFile(token, item.path, false, access) : download} onClick={event => { event.preventDefault(); event.stopPropagation(); if (previewable) setPreview(item); else window.location.assign(download); }}>{item.name}</a>
                       </span>
                       <span role="cell" className="cell-type muted">{kindLabel(kind)}</span>
@@ -212,6 +213,8 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
       <div className="panel-more"><Pagination {...pagination} /></div>
       {preview && (
         <PreviewModal file={{ ...preview, key: preview.path }} onClose={() => setPreview(null)}
+          poster={preview.thumbnails?.includes("thumb") ? api.publicThumbnail(api.publicFolderFile(token, preview.path, false, access), "poster") : undefined}
+          thumbnail={preview.thumbnails?.includes("thumb") ? api.publicThumbnail(api.publicFolderFile(token, preview.path, false, access)) : undefined}
           url={api.publicFolderFile(token, preview.path, false, access)} downloadUrl={api.publicFolderFile(token, preview.path, true, access)}
           loadAssets={signal => api.publicPreviewAssets(token, preview.path, access, signal)} assetUrl={path => api.publicFolderFile(token, path, false, access)} />
       )}

@@ -1,5 +1,5 @@
 /** 播放界面与歌词、字幕附件；缓冲状态始终保留播放器。 */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { errorMessage, type PreviewAsset } from "./api";
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
@@ -36,8 +36,8 @@ function assetLabel(asset: PreviewAsset): string {
   return (asset.language && languages[asset.language.toLowerCase()]) || asset.language || "默认";
 }
 
-export function MediaPreview({ kind, url, name, downloadUrl, onRetry, loadAssets, assetUrl }: {
-  kind: "video" | "audio"; url: string; name: string; downloadUrl: string; onRetry: () => void;
+export function MediaPreview({ kind, url, name, downloadUrl, cover, onRetry, loadAssets, assetUrl }: {
+  kind: "video" | "audio"; url: string; name: string; downloadUrl: string; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string;
 }) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
@@ -56,13 +56,15 @@ export function MediaPreview({ kind, url, name, downloadUrl, onRetry, loadAssets
     void loadMediaEngine().then(engine => {
       if (cancelled || !host.current) return;
       const notify = (value: MediaState) => { if (!cancelled) setState(value); };
-      player.current = kind === "video" ? engine.createVideoPlayer(host.current, url, notify)
+      player.current = kind === "video" ? engine.createVideoPlayer(host.current, url, notify, cover)
         : engine.createAudioPlayer(host.current, url, name, notify, time => {
           timeRef.current = time; if (!cancelled) setActive(lyricAt(lyricRef.current, time));
-        });
+        }, cover);
       setPlayerReady(true);
     }).catch(reason => { if (!cancelled) { setError(errorMessage(reason, "播放组件加载失败")); setState("failed"); } });
     return () => { cancelled = true; player.current?.destroy(); player.current = null; };
+    // 封面只用于初始化播放器，不因封面地址变化而重建正在播放的播放器。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, url, name]);
   useEffect(() => {
     if (state !== "loading" && state !== "buffering") { setSlow(false); return; }
@@ -125,7 +127,8 @@ export function MediaPreview({ kind, url, name, downloadUrl, onRetry, loadAssets
   const attachmentName = kind === "audio" ? "歌词" : "字幕";
   const selectedAsset = assets.find(asset => asset.path === selected);
   const attachmentStatus = discoveryError || assetError || (findingAssets ? `正在查找${attachmentName}…` : assetBusy ? `正在加载${attachmentName}…` : !assets.length ? `未找到同名${attachmentName}` : "");
-  return <div className={`preview-player preview-player-${kind}`}>
+  // 音频有封面时：播放键显示封面，歌词区背景使用模糊放大的封面。
+  return <div className={`preview-player preview-player-${kind}${cover ? " has-cover" : ""}`} style={kind === "audio" && cover ? { "--preview-cover": `url("${cover}")` } as CSSProperties : undefined}>
     <div className="preview-player-surface">
       <div ref={host} className={`preview-player-host ${kind === "video" ? "preview-video-host" : "preview-audio-host"}`} />
       {waiting && <div className={`preview-playback-status${state === "buffering" ? " is-buffering" : ""}`} role="status"><span className="spinner" />{state === "buffering" ? "正在缓冲…" : "正在加载播放器…"}</div>}
@@ -150,7 +153,7 @@ export function MediaPreview({ kind, url, name, downloadUrl, onRetry, loadAssets
         aria-current={active === index ? "true" : undefined} onClick={() => { const instance = player.current; if (instance && "seek" in instance) instance.seek(line.time); }}>{line.text || "♪"}</Button>)}
     </div>}
     {kind === "audio" && !lyrics.length && <div className="preview-lyrics-empty">
-      <span className="preview-audio-mark"><Icon name="audio" size={30} /></span>
+      {cover ? <img className="preview-audio-cover" src={cover} alt="专辑封面" /> : <span className="preview-audio-mark"><Icon name="audio" size={30} /></span>}
       <strong>{assetBusy || findingAssets ? "正在加载歌词" : assets.length && !selected ? "歌词已关闭" : "暂无同步歌词"}</strong>
       <span>{assetBusy || findingAssets ? "音乐可以继续播放" : assetError || discoveryError ? "歌词暂时不可用，音乐可以继续播放" : !assets.length ? "同目录的同名 LRC 歌词会自动显示在这里" : "随时开启同步歌词"}</span>
     </div>}

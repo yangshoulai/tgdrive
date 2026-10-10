@@ -63,6 +63,14 @@ export function FileTile({ kind, size = "md" }: { kind: FileKind; size?: "md" | 
   return <span className={`file-tile tile-${kind} tile-${size}`} aria-hidden="true"><FileGlyph kind={kind} size={TILE_SIZE[size]} /></span>;
 }
 
+/** 有缩略图时显示缩略图，否则（或加载失败时）显示文件类型图标。 */
+export function FileVisual({ kind, src, size = "md" }: { kind: FileKind; src?: string; size?: "md" | "lg" | "xl" }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
+  if (!src || failed) return <FileTile kind={kind} size={size} />;
+  return <span className={`file-tile file-visual tile-${size}`} aria-hidden="true"><img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} /></span>;
+}
+
 export function FileThumbnail({ kind, url }: { kind: FileKind; url?: string }) {
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   const [attempt, setAttempt] = useState(0);
@@ -70,6 +78,7 @@ export function FileThumbnail({ kind, url }: { kind: FileKind; url?: string }) {
   return <div className={`file-thumbnail thumbnail-${state}`}>
     {(!url || state !== "ready") && <FileTile kind={kind} size="xl" />}
     {url && state !== "failed" && <img key={attempt} src={url} alt="" loading="lazy" onLoad={() => setState("ready")} onError={() => setState("failed")} />}
+    {url && state === "ready" && (kind === "video" || kind === "audio") && <span className="thumbnail-badge" aria-hidden="true"><Icon name={kind === "video" ? "play" : "audio"} size={12} /></span>}
     {url && state === "loading" && <span className="thumbnail-loading" aria-label="正在加载缩略图"><span className="spinner" /></span>}
     {url && state === "failed" && <Button size="sm" variant="ghost" icon="refresh" onClick={event => { event.stopPropagation(); setState("loading"); setAttempt(current => current + 1); }}>重试缩略图</Button>}
   </div>;
@@ -104,7 +113,7 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string };
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string };
 export function FilePreview(props: PreviewProps) {
   const [attempt, setAttempt] = useState(0);
   return <PreviewContent key={`${props.kind}:${props.url}:${attempt}`} {...props} onRetry={() => setAttempt(current => current + 1)} />;
@@ -118,7 +127,7 @@ function PreviewLoading({ onRetry, downloadUrl }: { onRetry: () => void; downloa
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, onImageLoad, resolveImage, loadAssets, assetUrl, onRetry }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, poster, onImageLoad, resolveImage, loadAssets, assetUrl, onRetry }: PreviewProps & { onRetry: () => void }) {
   const [content, setContent] = useState<PreviewText | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
@@ -141,11 +150,14 @@ function PreviewContent({ kind, url, name, downloadUrl, onImageLoad, resolveImag
       <div className="preview-recovery">{(mediaFailed || error) && <Button icon="refresh" onClick={onRetry}>重新加载</Button>}<a className="btn btn-primary btn-md" href={downloadUrl}><Icon name="download" size={17} /><span>下载文件</span></a></div>
     </div>
   );
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} downloadUrl={downloadUrl} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} />;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} downloadUrl={downloadUrl} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} />;
   if (mediaFailed) return fallback;
   if (kind === "image" || kind === "pdf") return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
-    {!mediaReady && <div className="preview-media-loader"><PreviewLoading onRetry={onRetry} downloadUrl={downloadUrl} /></div>}
-    {kind === "image" && <div className="preview-media"><img src={url} alt={name} onError={() => setMediaFailed(true)} onLoad={event => { setMediaReady(true); onImageLoad?.(event.currentTarget); }} /></div>}
+    {!mediaReady && (kind === "image" && poster
+      // 原图从存储取回并解密需要时间：先显示封面图占位，原图加载完成后淡入替换。
+      ? <div className="preview-media preview-media-poster"><img src={poster} alt="" aria-hidden="true" /><span className="preview-poster-status" role="status"><span className="spinner" />正在加载原图…</span></div>
+      : <div className="preview-media-loader"><PreviewLoading onRetry={onRetry} downloadUrl={downloadUrl} /></div>)}
+    {kind === "image" && <div className="preview-media preview-media-full"><img src={url} alt={name} onError={() => setMediaFailed(true)} onLoad={event => { setMediaReady(true); onImageLoad?.(event.currentTarget); }} /></div>}
     {kind === "pdf" && <iframe className="preview-frame" src={url} title={name} onLoad={() => setMediaReady(true)} onError={() => setMediaFailed(true)} />}
   </div>;
   if (kind === "text" || kind === "code") {
@@ -156,7 +168,7 @@ function PreviewContent({ kind, url, name, downloadUrl, onImageLoad, resolveImag
   return fallback;
 }
 
-export function PreviewModal({ file, url, downloadUrl, onClose, onShare, onImageLoad, assetUrl, loadAssets }: { file: api.FileItem; url: string; downloadUrl: string; onClose: () => void; onShare?: () => void; onImageLoad?: (image: HTMLImageElement) => void; assetUrl?: (key: string) => string; loadAssets?: AssetLoader }) {
+export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, assetUrl, loadAssets }: { file: api.FileItem; url: string; downloadUrl: string; poster?: string; thumbnail?: string; onClose: () => void; onShare?: () => void; onImageLoad?: (image: HTMLImageElement) => void; assetUrl?: (key: string) => string; loadAssets?: AssetLoader }) {
   const kind = getFileKind(file.content_type, file.key);
   const extension = file.key.match(/\.([a-z\d]{1,10})$/i)?.[1].toUpperCase();
   const typeLabel = extension && kind !== "pdf" && kind !== "folder" ? `${extension === "JPG" ? "JPEG" : extension} ${kindLabel(kind)}` : kindLabel(kind);
@@ -178,14 +190,14 @@ export function PreviewModal({ file, url, downloadUrl, onClose, onShare, onImage
     return key && assetRef.current ? assetRef.current(key) : null;
   } : undefined, [file.key, hasAssets]);
   return (
-    <Modal size="xl" expandable className={`preview-modal preview-modal-${kind}`} leading={<FileTile kind={kind} size="lg" />} title={baseName(file.key)} onClose={onClose}
+    <Modal size="xl" expandable className={`preview-modal preview-modal-${kind}`} leading={<FileVisual kind={kind} src={thumbnail} size="lg" />} title={baseName(file.key)} onClose={onClose}
       description={<span className="preview-meta"><span title={file.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(file.size)}</span><span title="修改时间">{formatDateTime(file.modified_at)}</span>{file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>}
       footer={<>
         <span className="preview-close-hint"><kbd>Esc</kbd> 关闭</span>
         {onShare && <Button variant="ghost" size="sm" icon="link" onClick={() => void share()}>{file.public_token ? "管理分享" : "公开分享"}</Button>}
         <a className="btn btn-primary btn-sm" href={downloadUrl}><Icon name="download" size={15} /><span>下载文件</span></a>
       </>}>
-      <div ref={stage} className="preview-stage"><FilePreview kind={kind} url={url} name={baseName(file.key)} downloadUrl={downloadUrl} onImageLoad={onImageLoad} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className="preview-stage"><FilePreview kind={kind} url={url} name={baseName(file.key)} downloadUrl={downloadUrl} poster={poster} onImageLoad={onImageLoad} resolveImage={resolveImage} assetUrl={assetUrl}
         loadAssets={loadAssets ?? (assetUrl ? signal => api.previewAssets(file.key, signal) : undefined)} /></div>
     </Modal>
   );
@@ -271,39 +283,3 @@ export function ShareDialog({ file, publicBase, onClose, onChange, update }: {
   );
 }
 
-/* ---------- 缩略图 ---------- */
-
-/** 在浏览器中生成缩略图（最长边 320px），返回 data URL；失败或过大时返回 null。服务端上限 96 KB。 */
-export async function makeThumbnail(source: Blob | HTMLImageElement, max = 320): Promise<string | null> {
-  try {
-    const image = source instanceof Blob ? await createImageBitmap(source) : source;
-    const width = source instanceof Blob ? (image as ImageBitmap).width : (image as HTMLImageElement).naturalWidth;
-    const height = source instanceof Blob ? (image as ImageBitmap).height : (image as HTMLImageElement).naturalHeight;
-    if (!width || !height) return null;
-    const scale = Math.min(1, max / Math.max(width, height));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
-    canvas.getContext("2d")?.drawImage(image as CanvasImageSource, 0, 0, canvas.width, canvas.height);
-    if (image instanceof ImageBitmap) image.close();
-    for (const [type, quality] of [["image/webp", 0.78], ["image/jpeg", 0.8], ["image/jpeg", 0.6]] as const) {
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, type, quality));
-      // Safari 不支持编码 WebP，会返回 PNG：跳过，改用 JPEG。
-      if (!blob || blob.type !== type || blob.size > 90 * 1024) continue;
-      return await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(blob);
-      });
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/** 适合生成缩略图的文件：常见位图格式，且不超过 60 MB（避免浏览器解码超大图片）。 */
-export function thumbnailable(name: string, type: string | null | undefined, size: number) {
-  return getFileKind(type, name) === "image" && !/\.svg$/i.test(name) && !(type || "").includes("svg") && size <= 60 * 1024 * 1024;
-}

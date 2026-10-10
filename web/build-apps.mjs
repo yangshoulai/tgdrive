@@ -67,11 +67,16 @@ for(const app of process.argv[2] ? [process.argv[2]] : ['user','admin-docs']) {
  if(config.runtime) for(const old of fs.readdirSync(dist)) if(/^app-[0-9a-f]+\.(js|css)$/.test(old)) fs.unlinkSync(path.join(dist,old));
  if(!config.runtime) { fs.writeFileSync(path.join(dist,`${app}.js`),bundle); console.log(`${app}: ${dist}/${app}.js`); continue; }
  fs.writeFileSync(path.join(dist,`app-${hash}.js`),bundle);fs.writeFileSync(path.join(dist,`app-${hash}.css`),css);
+ // 外观主题在首帧前应用（CSP 不允许内联脚本，所以单独成文件放在 head）；存储键与解析规则需和 src/theme.ts 一致。
+ const themeInit=`(()=>{let p=null;try{p=localStorage.getItem("tessera-theme")}catch{}const d=p==="dark"||(p!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light"})();`;
+ const themeHash=crypto.createHash('sha256').update(themeInit).digest('hex').slice(0,12);
+ for(const old of fs.readdirSync(dist)) if(/^theme-[0-9a-f]+\.js$/.test(old)) fs.unlinkSync(path.join(dist,old));
+ fs.writeFileSync(path.join(dist,`theme-${themeHash}.js`),themeInit);
  for(const [pkg,name] of [['react','react'],['react-dom','react-dom']])fs.copyFileSync(path.join(root,'node_modules',pkg,'umd',`${name}.production.min.js`),path.join(dist,`${name}.js`));
  const prefix=config.assetPrefix;
  // 品牌名与图标：名称改动请同步 src/brand.ts；图标是内联 SVG，不依赖任何外部资源。
  const title='Tessera';
  const favicon='data:image/svg+xml,'+encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='#0b0c13'/><rect x='5' y='5' width='10' height='10' rx='2.4' fill='#fff'/><rect x='5' y='17' width='10' height='10' rx='2.4' fill='#fff' fill-opacity='.6'/><rect x='17' y='17' width='10' height='10' rx='2.4' fill='#fff' fill-opacity='.32'/><polygon points='18.2,6.2 25.8,6.2 25.8,13.8' fill='#f0a22e' stroke='#f0a22e' stroke-width='2.4' stroke-linejoin='round'/><path d='M25.1 6.9 22.2 9.8' stroke='#c27a10' stroke-width='1.1' stroke-linecap='round'/></svg>");
- fs.writeFileSync(path.join(dist,'index.html'),`<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><meta name="theme-color" content="#0b0c13"><link rel="icon" type="image/svg+xml" href="${favicon}"><link rel="stylesheet" href="${prefix}app-${hash}.css"></head><body><div id="root"></div><script src="${prefix}react.js"></script><script src="${prefix}react-dom.js"></script><script src="${prefix}app-${hash}.js"></script></body></html>`);
+ fs.writeFileSync(path.join(dist,'index.html'),`<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><meta name="theme-color" content="#0b0c13"><link rel="icon" type="image/svg+xml" href="${favicon}"><script src="${prefix}theme-${themeHash}.js"></script><link rel="stylesheet" href="${prefix}app-${hash}.css"></head><body><div id="root"></div><script src="${prefix}react.js"></script><script src="${prefix}react-dom.js"></script><script src="${prefix}app-${hash}.js"></script></body></html>`);
  console.log(`${app}: ${dist} (${Object.keys(modules).join(', ')})`);
 }
