@@ -37,6 +37,8 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   let ready = false, destroyed = false, subtitleUrl: string | null = null, version = 0;
   let switching = Promise.resolve();
   const markReady = () => { ready = true; notify("ready"); };
+  // iOS Safari 在用户点播放前不预加载画面，只会触发 loadedmetadata：读到时长即视为就绪，避免误报“加载较慢”。
+  player.on("video:loadedmetadata", markReady);
   player.on("video:loadeddata", markReady);
   player.on("video:canplay", markReady);
   player.on("video:playing", markReady);

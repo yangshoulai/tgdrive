@@ -331,8 +331,9 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 
 /* ---------- 浮层 ---------- */
 
-.modal-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; background: rgba(12, 12, 16, .42); backdrop-filter: blur(2px); animation: fade .14s ease-out; }
-.modal { display: flex; width: 100%; max-height: calc(100dvh - 48px); flex-direction: column; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-lg); animation: rise .2s cubic-bezier(.2, .9, .3, 1); }
+/* 单列轨道限制为可用宽度：单行省略的长文件名等内容不能把弹窗撑出屏幕。 */
+.modal-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; padding: 24px; background: rgba(12, 12, 16, .42); backdrop-filter: blur(2px); animation: fade .14s ease-out; }
+.modal { display: flex; width: 100%; min-width: 0; max-height: calc(100dvh - 48px); flex-direction: column; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-lg); animation: rise .2s cubic-bezier(.2, .9, .3, 1); }
 .modal-sm { max-width: 420px; }
 .modal-md { max-width: 540px; }
 .modal-lg { max-width: 720px; }
@@ -679,6 +680,8 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .preview-modal .modal-heading h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 .preview-meta { display: flex; align-items: center; min-width: 0; overflow: hidden; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .preview-meta > span { flex: none; }
+/* 空间不够时先省略类型，大小始终完整显示。 */
+.preview-meta > span:first-child { flex: 0 1 auto; min-width: 2em; overflow: hidden; text-overflow: ellipsis; }
 .preview-meta > span + span::before { margin: 0 6px; color: var(--line-strong); content: "·"; }
 .preview-meta .preview-meta-date { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .preview-meta-public { display: inline-flex; align-items: center; gap: 3px; color: var(--public-ink); }
@@ -1280,7 +1283,8 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .preview-modal .file-tile svg { width: 28px; height: 28px; }
   .preview-modal .modal-header { gap: 8px; }
   .preview-modal .modal-window-actions { gap: 0; }
-  .preview-modal .modal-window-actions .icon-btn { min-width: 36px; min-height: 36px; }
+  .preview-modal .modal-window-actions .icon-btn { width: 34px; min-width: 34px; min-height: 36px; }
+  .preview-modal .modal-actions-divider { display: none; }
   .auth-visual { display: none; }
 }
 
