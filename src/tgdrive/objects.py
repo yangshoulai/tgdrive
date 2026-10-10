@@ -665,6 +665,48 @@ class ObjectService:
         """在线程池中执行列表查询，避免大目录扫描占用 ASGI 事件循环。"""
         return await self.metadata.run_in_thread(self.list_objects, scope, prefix, delimiter, cursor, limit)
 
+    def preview_assets(self, scope: Scope, key: str) -> list[dict[str, object]]:
+        """按同目录、同主文件名查找歌词和字幕，不依赖文件列表当前页。"""
+        info = self.head_object(scope, key)
+        if info.key.endswith("/") or key.startswith(".tgdrive/"):
+            raise ValueError("只能查找普通文件的预览附件")
+        directory, _, name = key.rpartition("/")
+        stem, dot, _ = name.rpartition(".")
+        if not dot or not stem:
+            return []
+        prefix = (directory + "/" if directory else "") + stem + "."
+        # bucket_id/key 索引限定同名范围；过滤子目录，并限制附件数量与大小。
+        assets = []
+        cursor = prefix
+        while len(assets) < 32:
+            rows = self.metadata.db.execute(
+                "SELECT key,size,etag FROM objects WHERE bucket_id=? AND key>? AND key<? "
+                "AND instr(substr(key,?),'/')=0 AND lower(substr(key,-4)) IN ('.lrc','.srt','.vtt') "
+                "AND size<=? ORDER BY key LIMIT 64",
+                (scope.bucket_id, cursor, prefix + self._PREFIX_END, len(prefix) + 1, 2 * 1024 * 1024)).fetchall()
+            if not rows:
+                break
+            cursor = rows[-1]["key"]
+            for row in rows:
+                self._check_scope(scope, row["key"])
+                suffix = row["key"][len(prefix):]
+                language, separator, extension = suffix.rpartition(".")
+                if separator and not language:
+                    continue
+                # 允许语言标记；不把「电影.续集.srt」误关联给「电影.mp4」。
+                if language and not re.fullmatch(r"[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*", language):
+                    continue
+                assets.append({"path": row["key"], "name": row["key"].rsplit("/", 1)[-1],
+                               "kind": "lyrics" if extension.lower() == "lrc" else "subtitle",
+                               "language": language.replace("_", "-") or None,
+                               "size": row["size"], "etag": row["etag"]})
+                if len(assets) == 32:
+                    break
+        return assets
+
+    async def apreview_assets(self, scope: Scope, key: str) -> list[dict[str, object]]:
+        return await self.metadata.run_in_thread(self.preview_assets, scope, key)
+
     async def copy_object(self, src: Scope, src_key: str, dst: Scope, dst_key: str,
                           *, metadata: dict[str, str] | None = None, content_type: str | None = None) -> ObjectInfo:
         """服务端复制：新对象引用同一个加密 Blob，不搬运数据；目标的公开链接按覆盖写入规则保留。"""

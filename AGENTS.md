@@ -12,7 +12,7 @@ Tessera（仓库名 tgdrive）：基于 Telegram Bot + 私有频道的加密分�
 - `web/src/`：前端源码。
   - `ui.tsx`：设计系统基元（按钮、表单、弹窗、菜单、toast、格式化）。新界面必须复用这里的组件。
   - `shell.tsx`：应用外壳、登录页、首次初始化页。
-  - `files.tsx`：文件类型、预览（文本解码与 512 KB 截断、Markdown 相对路径图片解析）、分享对话框。
+  - `files.tsx`：文件类型、预览入口与分享对话框。`preview-data.ts` 负责流式文本解码与 512 KB 截断；`preview-text.tsx`、`preview-media.tsx` 提供文本／播放界面；两个 `preview-*-engine.ts` 用 CodeMirror、markdown-it／DOMPurify、ArtPlayer／APlayer 实现预览并按需加载。同目录 LRC／SRT／VTT 查询沿用用户、管理员和公开文件夹的权限边界。
   - `markdown.tsx`：自带 Markdown 渲染器，直接产出 React 元素，不执行原始 HTML，链接只放行 http(s)/mailto；`highlight.ts`：正则语法高亮（每种语言一组规则，合并成一个正则扫描，规则内不得有捕获分组或后行断言）；`code.tsx`：带行号的代码块与 Markdown 围栏。新增语言只需在 `highlight.ts` 的 `RULES` 与 `ALIASES` 各加一项。
   - `user.tsx`（入口 `UserApp`，含移动对话框与拖放移动）、`admin.tsx`（入口 `AdminRoute`，含系统设置）、`share.tsx`。
   - 文档站位于 `web/src/docs/`：`docs.tsx`（外壳、`/docs/<页面>` 路由、目录、⌘K 搜索）、`docs-ui.tsx`（排版组件）、`docs-content.tsx`（用户文档内容；示例地址取自 `/api/public/v1/config`）、`docs-admin-content.tsx`（管理员文档内容）。`admin-docs.tsx` 是管理员文档独立入口。修改接口、限制或 S3 兼容性时必须同步更新对应内容文件。
@@ -35,7 +35,7 @@ cd web && node build-apps.mjs                                  # 构建到 web/d
 
 ## 约定
 
-- `build-apps.mjs` 是自写打包器：只支持相对导入和 `react` / `react/jsx-runtime`，不要引入其他 npm 运行时依赖。前端没有开发服务器：重新构建后刷新页面即可（API 进程直接读 `web/dist`）。
+- `build-apps.mjs` 的主应用仍用自写打包器，只支持相对导入和 React；预览引擎单独用 esbuild 打包 npm 依赖，生成本地 `preview-*.js/css` 与许可证清单，按需加载。其他模块不要直接导入 npm 运行时依赖。前端没有开发服务器：重新构建后刷新页面即可（API 进程直接读 `web/dist`）。
 - 角色权限：整个站点是同一个应用和同一个登录页（`/api/auth/v1/login`），全站一个会话 Cookie `tg_session`（Path=/api），账号角色保存在服务端会话里。侧栏的「系统管理」分组和 `/admin/...` 页面只对 `role=admin` 显示，但这只是体验层：所有 `/api/admin/v1` 接口都必须用 `sessions.require(token, role="admin")` 校验，角色不够返回 403（不是 401，401 会让前端当成会话过期而退出）。文件空间接口（`/api/user/v1`）接受任何角色，管理员也有自己的存储桶。系统锁定时只有管理员能登录（用来解锁）。新增管理功能时：先加服务端角色校验，再在 `admin.tsx` 加页面，最后才是菜单。
 - 管理员文档内容只能进入 `admin-docs.js`，不得被主应用 bundle 导入；它仅通过 `/api/admin/v1/docs-bundle.js`（需 admin 会话）下发，静态路由对 `*/admin-docs.js` 返回 404。
 - 不加载外部字体或 CDN 资源。

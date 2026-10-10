@@ -74,11 +74,15 @@ export function AppShell<K extends string>({ groups, active, onNavigate, sidebar
 
 /* ---------- 登录与首次设置 ---------- */
 
-/** 登录页右侧：一面由瓦片拼成的马赛克（只做一次入场动画），配上三句话说明文件是怎么被保管的。 */
+/** 登录页右侧：一面由细小瓦片拼成的马赛克（只做一次入场动画，边缘渐隐），配上三句话说明文件是怎么被保管的。 */
+const MOSAIC_COLUMNS = 16;
 const MOSAIC = (() => {
   let seed = 7;
   const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
-  return Array.from({ length: 9 * 5 }, (_, index) => index === 13 ? "plane" : `t${1 + Math.floor(next() * next() * 4.4)}`);
+  return Array.from({ length: MOSAIC_COLUMNS * 9 }, (_, index) => ({
+    tone: index === 2 * MOSAIC_COLUMNS + 9 ? "plane" : `t${1 + Math.floor(next() * next() * next() * 5.2)}`,
+    delay: 80 + Math.round(next() * 520),
+  }));
 })();
 
 function AuthHero({ admin }: { admin: boolean }) {
@@ -96,7 +100,7 @@ function AuthHero({ admin }: { admin: boolean }) {
   return (
     <div className="auth-visual">
       <div className="mosaic" aria-hidden="true">
-        {MOSAIC.map((tone, index) => <i key={index} className={tone} style={{ animationDelay: `${120 + index * 22}ms` }} />)}
+        {MOSAIC.map((tile, index) => <i key={index} className={tile.tone} style={{ animationDelay: `${tile.delay}ms` }} />)}
       </div>
       <div className="auth-visual-copy">
         <h2>{admin ? "几分钟，搭好你的私人云盘" : "把文件放在一个只属于你的地方"}</h2>

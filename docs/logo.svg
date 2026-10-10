@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="128" height="128" role="img" aria-label="Tessera">
-  <rect width="32" height="32" rx="8" fill="#18236b"/>
-  <rect x="5" y="5" width="10" height="10" rx="2.6" fill="#fff"/>
-  <rect x="5" y="17" width="10" height="10" rx="2.6" fill="#fff" fill-opacity=".62"/>
-  <rect x="17" y="17" width="10" height="10" rx="2.6" fill="#fff" fill-opacity=".38"/>
-  <polygon points="18.3,6.3 25.7,6.3 25.7,13.7" fill="#f0a22e" stroke="#f0a22e" stroke-width="2.6" stroke-linejoin="round"/>
+  <rect width="32" height="32" rx="8" fill="#0b0c13"/>
+  <rect x="5" y="5" width="10" height="10" rx="2.4" fill="#fff"/>
+  <rect x="5" y="17" width="10" height="10" rx="2.4" fill="#fff" fill-opacity=".6"/>
+  <rect x="17" y="17" width="10" height="10" rx="2.4" fill="#fff" fill-opacity=".32"/>
+  <polygon points="18.2,6.2 25.8,6.2 25.8,13.8" fill="#f0a22e" stroke="#f0a22e" stroke-width="2.4" stroke-linejoin="round"/>
+  <path d="M25.1 6.9 22.2 9.8" stroke="#c27a10" stroke-width="1.1" stroke-linecap="round"/>
 </svg>

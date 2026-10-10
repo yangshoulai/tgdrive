@@ -495,6 +495,9 @@ class TgDriveASGI(StaticFiles):
                 return 200, await self.admin.list_objects(token, limit=int(query.get("limit", ["100"])[0]),
                                                          cursor=query.get("cursor", [None])[0] or None, query=query.get("q", [""])[0],
                                                          public_only=query.get("public", ["0"])[0] in ("1", "true")), {}
+            if method == "GET" and route == "/preview-assets":
+                return 200, await self.admin.preview_assets(token, int(query.get("bucket_id", [""])[0]),
+                                                           query.get("path", [""])[0]), {}
             if method == "POST" and route == "/objects/public":
                 return 200, self.admin.set_object_public(token, csrf, int(payload["bucket_id"]), payload["path"],
                                                          bool(payload["public"])), {}
@@ -566,6 +569,8 @@ class TgDriveASGI(StaticFiles):
             if method == "GET" and route == "/public":
                 return 200, await self.user.alist_public(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=query.get("cursor", [""])[0]), {}
+            if method == "GET" and route == "/preview-assets":
+                return 200, await self.user.preview_assets(token, query.get("path", [""])[0]), {}
             if method == "POST" and route == "/public":
                 paths = payload["paths"] if "paths" in payload else [payload["path"]]
                 if not isinstance(paths, list):
@@ -663,11 +668,15 @@ class TgDriveASGI(StaticFiles):
                          "content_type": info.content_type, "etag": info.etag, "password_required": False,
                          "modified_at": info.modified_at, "public_at": info.public_at,
                          "expires_at": info.public_expires_at}, {}
-        elif re.fullmatch(r"/api/public/v1/folders/[A-Za-z0-9_-]+/list", path) and method == "GET":
+        elif re.fullmatch(r"/api/public/v1/folders/[A-Za-z0-9_-]+/(list|preview-assets)", path) and method == "GET":
             token = path.split("/")[5]
             info, password_hash = self._public_share(token)
             if password_hash and not self.share_access.check(token, password_hash, query.get("access", [None])[0]):
                 raise SharePasswordRequired("password required")
+            if path.endswith("/preview-assets"):
+                root, file = self.user.objects.public_folder_file(token, query.get("path", [""])[0])
+                assets = await self.user.objects.apreview_assets(Scope(root.bucket_id, prefix=root.key), file.key)
+                return 200, [{**asset, "path": asset["path"][len(root.key):]} for asset in assets], {}
             return 200, await self.user.objects.list_public_folder(
                 token, query.get("path", [""])[0], query.get("cursor", [None])[0] or None, int(query.get("limit", ["200"])[0])), {}
         raise NotFoundError("接口不存在")

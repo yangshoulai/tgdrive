@@ -42,7 +42,7 @@ export function Objects({ session }: { session: api.Session }) {
                 <div key={`${item.bucket_id}:${item.key}`} role="row" className="data-row is-clickable" onClick={() => setPreview(item)}>
                   <span role="cell" className="cell-name">
                     <FileTile kind={getFileKind(item.content_type, item.key)} />
-                    <span className="name-stack"><button type="button" className="name-button" onClick={event => { event.stopPropagation(); setPreview(item); }}>{baseName(item.key)}</button><small>/{parentPath(item.key)}</small></span>
+                    <span className="name-stack"><button type="button" className="name-button" onClick={event => { event.stopPropagation(); setPreview(item); }}>{baseName(item.key)}</button>{parentPath(item.key) && <small>/{parentPath(item.key)}</small>}</span>
                     {item.public_token && <Badge tone="public" icon="globe">公开</Badge>}
                   </span>
                   <span role="cell" className="muted">{item.username ?? item.bucket_name}</span>
@@ -67,11 +67,11 @@ export function Objects({ session }: { session: api.Session }) {
       </section>
       {page && (
         <footer className="list-footer">
-          <span>本页 {shown.length.toLocaleString("zh-CN")} 个文件，共 {page.total.toLocaleString("zh-CN")} 个{filter === "all" && page.public_total ? `，其中 ${page.public_total.toLocaleString("zh-CN")} 个公开` : ""}</span>
+          <span>共 {page.total.toLocaleString("zh-CN")} 个文件{filter === "all" && page.public_total ? ` · ${page.public_total.toLocaleString("zh-CN")} 个公开` : ""}</span>
           <Pagination {...pagination} />
         </footer>
       )}
-      {preview && <PreviewModal file={preview} url={api.adminContentUrl(preview.bucket_id, preview.key)} downloadUrl={api.adminContentUrl(preview.bucket_id, preview.key, true)} assetUrl={key => api.adminContentUrl(preview.bucket_id, key)} onClose={() => setPreview(null)} />}
+      {preview && <PreviewModal file={preview} url={api.adminContentUrl(preview.bucket_id, preview.key)} downloadUrl={api.adminContentUrl(preview.bucket_id, preview.key, true)} assetUrl={key => api.adminContentUrl(preview.bucket_id, key)} loadAssets={signal => api.adminPreviewAssets(preview.bucket_id, preview.key, signal)} onClose={() => setPreview(null)} />}
       {revoking && <ConfirmDialog title={`撤销“${baseName(revoking.key)}”的公开访问？`} description={`该文件属于 ${revoking.username ?? revoking.bucket_name}。撤销后原链接立即失效，用户可以重新分享。`} confirmLabel="撤销公开访问"
         onClose={() => setRevoking(null)}
         onConfirm={async () => {

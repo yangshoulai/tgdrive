@@ -39,6 +39,10 @@ const ICONS = {
   alert: "M12 3.5 2.5 20h19zM12 10v4.5m0 2.5h.01",
   info: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-10v5m0-8h.01",
   x: "M6 6l12 12M18 6 6 18",
+  maximize: "M5 5h14v14H5z",
+  restore: "M8 8h12v12H8zM4 16V4h12",
+  fullscreen: "M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5",
+  exitFullscreen: "M3 8h5V3m8 0v5h5M8 21v-5H3m18 0h-5v5",
   chevronRight: "m9 6 6 6-6 6",
   chevronDown: "m6 9 6 6 6-6",
   arrowLeft: "M19 12H5m6-6-6 6 6 6",
@@ -58,7 +62,7 @@ export type IconName = keyof typeof ICONS;
 
 export function Icon({ name, size = 18, className }: { name: IconName; size?: number; className?: string }) {
   return (
-    <svg className={className} aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <svg className={className} aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       {name === "more" ? [5, 12, 19].map(cy => <circle key={cy} cx="12" cy={cy} r="1.65" fill="currentColor" stroke="none" />) : <path d={ICONS[name]} />}
     </svg>
   );
@@ -67,13 +71,14 @@ export function Icon({ name, size = 18, className }: { name: IconName; size?: nu
 /* ---------- 品牌 ---------- */
 
 /** 标志：四块马赛克瓦片（tessera）拼成一个方块，右上角那块切成纸飞机的形状并用公开色强调。 */
-export function LogoMark({ size = 28 }: { size?: number }) {
+export function LogoMark({ size = 22 }: { size?: number }) {
   return (
     <svg className="logo-mark" viewBox="0 0 32 32" width={size} height={size} aria-hidden="true">
-      <rect className="logo-a" x="3" y="3" width="12" height="12" rx="3.4" />
-      <polygon className="logo-plane" points="18.6,4.6 27.4,4.6 27.4,13.4" strokeWidth="3.2" strokeLinejoin="round" />
-      <rect className="logo-b" x="3" y="17" width="12" height="12" rx="3.4" />
-      <rect className="logo-c" x="17" y="17" width="12" height="12" rx="3.4" />
+      <rect className="logo-a" x="2.5" y="2.5" width="13" height="13" rx="3" />
+      <polygon className="logo-plane" points="18,4 28,4 28,14" strokeWidth="3" strokeLinejoin="round" />
+      <path className="logo-fold" d="M27.2 4.8 23.4 8.6" strokeWidth="1.3" strokeLinecap="round" />
+      <rect className="logo-b" x="2.5" y="16.5" width="13" height="13" rx="3" />
+      <rect className="logo-c" x="16.5" y="16.5" width="13" height="13" rx="3" />
     </svg>
   );
 }
@@ -205,14 +210,36 @@ const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select
 const modalStack: HTMLElement[] = [];
 const focusable = (node: HTMLElement) => Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(item => item.tabIndex >= 0 && item.getClientRects().length > 0);
 
-export function Modal({ title, description, onClose, children, footer, size = "md", icon, tone, dismissible = true }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; tone?: Tone; dismissible?: boolean }) {
+export function Modal({ title, description, onClose, children, footer, size = "md", icon, leading, tone, dismissible = true, className = "", expandable = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; expandable?: boolean }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
+  const backdrop = useRef<HTMLDivElement>(null);
+  const [maximized, setMaximized] = useState(false), [fullscreen, setFullscreen] = useState(false), [switchingScreen, setSwitchingScreen] = useState(false);
+  const supportsFullscreen = Boolean(document.fullscreenEnabled && document.documentElement.requestFullscreen);
   const previousFocus = useRef(document.activeElement as HTMLElement | null);
   const closeRef = useRef(onClose);
   const dismissibleRef = useRef(dismissible);
   closeRef.current = onClose;
   dismissibleRef.current = dismissible;
+  useEffect(() => {
+    if (!expandable) return;
+    const node = backdrop.current;
+    const sync = () => setFullscreen(document.fullscreenElement === node);
+    document.addEventListener("fullscreenchange", sync);
+    return () => {
+      document.removeEventListener("fullscreenchange", sync);
+      if (node && document.fullscreenElement && node.contains(document.fullscreenElement)) void document.exitFullscreen().catch(() => {});
+    };
+  }, [expandable]);
+  async function toggleFullscreen() {
+    if (!backdrop.current || switchingScreen) return;
+    setSwitchingScreen(true);
+    try {
+      if (document.fullscreenElement === backdrop.current) await document.exitFullscreen();
+      else await backdrop.current.requestFullscreen();
+    } catch { toast.error("无法进入全屏，可以使用最大化预览。"); }
+    finally { setSwitchingScreen(false); }
+  }
   useEffect(() => {
     const previous = previousFocus.current;
     const node = ref.current;
@@ -225,7 +252,13 @@ export function Modal({ title, description, onClose, children, footer, size = "m
     const handleKey = (event: KeyboardEvent) => {
       if (modalStack.at(-1) !== node || event.defaultPrevented) return;
       if ((event.target as HTMLElement).closest?.(".menu")) return;
-      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (dismissibleRef.current) closeRef.current(); return; }
+      if (event.key === "Escape") {
+        event.preventDefault(); event.stopPropagation();
+        // 全屏中的 Esc 只还原视图，避免同时关掉正在播放的预览。
+        if (document.fullscreenElement && backdrop.current?.contains(document.fullscreenElement)) void document.exitFullscreen().catch(() => {});
+        else if (dismissibleRef.current) closeRef.current();
+        return;
+      }
       if (event.key !== "Tab") return;
       const items = focusable(node);
       if (!items.length) { event.preventDefault(); node.focus(); return; }
@@ -244,15 +277,21 @@ export function Modal({ title, description, onClose, children, footer, size = "m
     };
   }, []);
   return createPortal(
-    <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && modalStack.at(-1) === ref.current) onClose(); }}>
-      <div ref={ref} className={`modal modal-${size}`} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} tabIndex={-1}>
+    <div ref={backdrop} className={`modal-backdrop${maximized || fullscreen ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}`} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && modalStack.at(-1) === ref.current) onClose(); }}>
+      <div ref={ref} className={`modal modal-${size} ${className}${maximized || fullscreen ? " is-expanded" : ""}`} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} tabIndex={-1}>
         <header className="modal-header">
-          {icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>}
+          {leading ?? (icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>)}
           <div className="modal-heading">
-            <h2 id={`${id}-title`}>{title}</h2>
+            <h2 id={`${id}-title`} title={title}>{title}</h2>
             {description && <p>{description}</p>}
           </div>
-          <IconButton icon="x" label="关闭" onClick={onClose} size="sm" disabled={!dismissible} />
+          <div className="modal-window-actions">
+            {expandable && <>
+              <IconButton icon={maximized ? "restore" : "maximize"} label={maximized ? "还原预览" : "最大化预览"} onClick={() => setMaximized(value => !value)} size="sm" active={maximized} disabled={fullscreen || switchingScreen} />
+              {supportsFullscreen && <IconButton icon={fullscreen ? "exitFullscreen" : "fullscreen"} label={fullscreen ? "退出全屏" : "全屏预览"} onClick={() => void toggleFullscreen()} size="sm" active={fullscreen} disabled={switchingScreen} />}
+            </>}
+            <IconButton icon="x" label="关闭" onClick={onClose} size="sm" disabled={!dismissible} />
+          </div>
         </header>
         {children && <div className="modal-body">{children}</div>}
         {footer && <footer className="modal-footer">{footer}</footer>}
@@ -518,6 +557,7 @@ export function useDocumentTitle(title: string) {
 export function Pagination({ number, hasPrevious, hasNext, loading, previous, next }: {
   number: number; hasPrevious: boolean; hasNext: boolean; loading: boolean; previous: () => void; next: () => void;
 }) {
+  if (number === 1 && !hasPrevious && !hasNext && !loading) return null;
   return <nav className="pagination" aria-label="分页">
     <Button size="sm" disabled={loading || !hasPrevious} onClick={previous}>上一页</Button>
     <span aria-live="polite" aria-atomic="true">第 {number} 页</span>

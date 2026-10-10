@@ -103,6 +103,48 @@ class PublicFolderTests(unittest.TestCase):
             self.assertEqual(status, 404)
         asyncio.run(run())
 
+    def test_preview_assets_match_names_and_respect_user_and_admin_scope(self):
+        async def run():
+            alice = await self.client.login("user", "alice", "alice password")
+            for path in ("dir/song.live.mp4", "dir/song.live.lrc", "dir/song.live.srt", "dir/song.live.zh_Hans.VTT",
+                         "dir/song.live.en.srt", "dir/song.live.sequel.srt", "dir/song.live/sub.srt", "other/song.live.srt"):
+                await self.put(alice, path)
+            status, assets = await self.api("GET", "/api/user/v1/preview-assets?path=dir/song.live.mp4", alice)
+            self.assertEqual(status, 200)
+            self.assertEqual([item["name"] for item in assets], ["song.live.en.srt", "song.live.lrc", "song.live.srt", "song.live.zh_Hans.VTT"])
+            self.assertEqual([item["language"] for item in assets], ["en", None, None, "zh-Hans"])
+            self.assertEqual(assets[1]["kind"], "lyrics")
+            bob = await self.client.login("user", "bob", "bob password")
+            self.assertEqual((await self.api("GET", "/api/user/v1/preview-assets?path=dir/song.live.mp4", bob))[0], 404)
+            self.assertEqual((await self.api("GET", "/api/user/v1/preview-assets?path=dir/song.live.mp4"))[0], 401)
+            _, me = await self.api("GET", "/api/user/v1/me", alice)
+            route = f"/api/admin/v1/preview-assets?bucket_id={me['bucket_id']}&path=dir/song.live.mp4"
+            self.assertEqual((await self.api("GET", route, alice))[0], 403)
+            admin = await self.client.login("admin", "admin", "admin password")
+            status, admin_assets = await self.api("GET", route, admin)
+            self.assertEqual((status, admin_assets), (200, assets))
+        asyncio.run(run())
+
+    def test_public_preview_assets_require_folder_grant_and_cannot_escape(self):
+        async def run():
+            alice = await self.seed()
+            await self.put(alice, "dir/a.lrc")
+            await self.put(alice, "other/secret.lrc")
+            token = (await self.share(alice, password="secret1"))["public_token"]
+            route = f"/api/public/v1/folders/{token}/preview-assets?path=a.txt"
+            self.assertEqual((await self.api("GET", route))[0], 403)
+            _, grant = await self.api("POST", f"/api/public/v1/objects/{token}/unlock", None, {"password": "secret1"})
+            status, assets = await self.api("GET", f"{route}&access={grant['access']}")
+            self.assertEqual((status, [item["path"] for item in assets]), (200, ["a.lrc"]))
+            for path in ("../other/secret.txt", "/other/secret.txt", "sub/../../other/secret.txt", "sub/"):
+                status, _ = await self.api("GET", f"/api/public/v1/folders/{token}/preview-assets?path={path}&access={grant['access']}")
+                self.assertIn(status, (400, 404))
+            single_token = (await self.share(alice, "dir/a.txt"))["public_token"]
+            self.assertEqual((await self.api("GET", f"/api/public/v1/folders/{single_token}/preview-assets?path=a.txt"))[0], 404)
+            await self.api("POST", "/api/user/v1/public", alice, {"paths": ["dir/"], "public": False})
+            self.assertEqual((await self.api("GET", f"{route}&access={grant['access']}"))[0], 404)
+        asyncio.run(run())
+
     def test_password_expiry_and_revoking(self):
         async def run():
             alice = await self.seed()

@@ -1,34 +1,66 @@
 /** 文件类型识别、预览与公开分享对话框。 */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as api from "./api";
-import { HighlightedCode } from "./code";
-import { languageOf } from "./highlight";
-import { Markdown } from "./markdown";
-import { Badge, Button, CopyField, Field, Icon, KeyValue, Modal, Segmented, Switch, formatBytes, formatDateTime, toast, type IconName } from "./ui";
+import { readPreviewText, type PreviewText } from "./preview-data";
+import { MediaPreview, type AssetLoader } from "./preview-media";
+import { TextPreview } from "./preview-text";
+import { Badge, Button, CopyField, Field, Icon, KeyValue, Modal, Switch, formatBytes, formatDateTime, toast, type IconName } from "./ui";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "text" | "code" | "archive" | "other";
 
 export function getFileKind(type: string | null | undefined, name: string): FileKind {
   const lower = name.toLowerCase();
-  const mime = (type || "").toLowerCase();
+  const mime = (type || "").split(";", 1)[0].trim().toLowerCase();
   if (lower.endsWith("/")) return "folder";
   if (mime.startsWith("image/") || /\.(png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$/.test(lower)) return "image";
-  if (mime.startsWith("video/") || /\.(mp4|webm|mov|mkv|avi|m4v)$/.test(lower)) return "video";
-  if (mime.startsWith("audio/") || /\.(mp3|wav|ogg|flac|m4a|aac)$/.test(lower)) return "audio";
+  if (mime === "video/mp2t" || /\.(mts|m2ts)$/.test(lower)) return "other";
+  if (mime.startsWith("video/") || /\.(mp4|webm|mov|mkv|avi|m4v|ogv)$/.test(lower)) return "video";
+  if (mime.startsWith("audio/") || /\.(mp3|wav|ogg|oga|opus|flac|m4a|aac)$/.test(lower)) return "audio";
   if (mime === "application/pdf" || lower.endsWith(".pdf")) return "pdf";
   if (/\.(js|mjs|cjs|ts|tsx|jsx|py|go|rs|java|c|cc|cpp|cxx|h|hpp|cs|sh|bash|zsh|ps1|bat|html?|css|scss|sass|less|vue|svelte|sql|rb|php|swift|kt|kts|scala|dart|gradle|lua|diff|patch)$/.test(lower) || /(^|\/)(dockerfile|makefile)$/.test(lower)) return "code";
-  if (mime.startsWith("text/") || mime === "application/json" || /\.(md|markdown|mdx|rst|txt|json|jsonc|csv|tsv|log|xml|ya?ml|toml|ini|conf|cfg|properties|env|gitignore|editorconfig)$/.test(lower) || /(^|\/)\.env(\.[\w.-]+)?$/.test(lower)) return "text";
+  if (mime.startsWith("text/") || mime === "application/json" || /\.(md|markdown|mdx|rst|txt|json|jsonc|csv|tsv|log|xml|ya?ml|toml|ini|conf|cfg|properties|env|gitignore|editorconfig|lrc|srt|vtt)$/.test(lower) || /(^|\/)\.env(\.[\w.-]+)?$/.test(lower)) return "text";
   if (/\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst|dmg|iso)$/.test(lower) || /zip|compressed|x-tar/.test(mime)) return "archive";
   return "other";
 }
 
-const KIND_ICON: Record<FileKind, IconName> = { folder: "folder", image: "image", video: "video", audio: "audio", pdf: "fileText", text: "fileText", code: "code", archive: "archive", other: "file" };
 const KIND_LABEL: Record<FileKind, string> = { folder: "文件夹", image: "图片", video: "视频", audio: "音频", pdf: "PDF 文档", text: "文本", code: "源代码", archive: "压缩包", other: "文件" };
 
 export function kindLabel(kind: FileKind) { return KIND_LABEL[kind]; }
 
+/* 文件类型图标：文件是一张细描边、折角的纸，类型只用纸面中下部的一个彩色记号区分；文件夹是双色扁平文件夹。
+ * 纸的描边不随尺寸变粗（non-scaling-stroke），记号随尺寸等比放大。 */
+const PAPER = "M6.5 2.5h7l5 5v13a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1Z";
+const FOLD = "M13.5 2.5v4a1 1 0 0 0 1 1h4";
+const KIND_MARK: Record<Exclude<FileKind, "folder">, ReactNode> = {
+  text: <path className="glyph-stroke" d="M8.75 12h6.5M8.75 14.75h6.5M8.75 17.5h4" />,
+  code: <path className="glyph-stroke" d="M10.25 12.25 8.5 14.5l1.75 2.25m3.5-4.5 1.75 2.25-1.75 2.25" />,
+  image: <><circle className="glyph-fill" cx="14.6" cy="11.6" r="1.25" /><path className="glyph-fill" d="M7.9 18.4 10.6 14.3a.5.5 0 0 1 .83 0l1.7 2.45 1.05-1.2a.5.5 0 0 1 .78.04l1.67 2.4a.25.25 0 0 1-.2.4H8.1a.25.25 0 0 1-.2-.38Z" /></>,
+  video: <path className="glyph-fill" d="M10.25 11.6a.6.6 0 0 1 .9-.52l4.6 2.9a.6.6 0 0 1 0 1.02l-4.6 2.9a.6.6 0 0 1-.9-.51Z" />,
+  audio: <><path className="glyph-stroke" d="M10.75 17.25V12l4.25-.9v5.25" /><circle className="glyph-fill" cx="9.6" cy="17.3" r="1.3" /><circle className="glyph-fill" cx="13.85" cy="16.4" r="1.3" /></>,
+  pdf: <><rect className="glyph-fill" x="3.5" y="12.25" width="12" height="6" rx="1.25" /><text className="glyph-label" x="9.5" y="16.6" textAnchor="middle">PDF</text></>,
+  archive: <><path className="glyph-stroke" d="M11.5 2.75v1.25m0 1.75V7m0 1.75V10" /><rect className="glyph-fill" x="10" y="11.25" width="3" height="4.25" rx=".75" /></>,
+  other: null,
+};
+
+export function FileGlyph({ kind, size = 24 }: { kind: FileKind; size?: number }) {
+  return (
+    <svg className={`file-glyph glyph-${kind}`} viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
+      {kind === "folder" ? <>
+        <path className="folder-back" d="M2.5 6.25c0-.97.78-1.75 1.75-1.75h4.3c.47 0 .92.19 1.25.52L11.3 6.5h8.45c.97 0 1.75.78 1.75 1.75V10h-19Z" />
+        <path className="folder-front" d="M2.5 9.25c0-.69.56-1.25 1.25-1.25h16.5c.69 0 1.25.56 1.25 1.25v9c0 .97-.78 1.75-1.75 1.75H4.25c-.97 0-1.75-.78-1.75-1.75Z" />
+      </> : <>
+        <path className="glyph-paper" d={PAPER} vectorEffect="non-scaling-stroke" />
+        <path className="glyph-fold" d={FOLD} vectorEffect="non-scaling-stroke" />
+        {KIND_MARK[kind]}
+      </>}
+    </svg>
+  );
+}
+
+const TILE_SIZE = { md: 24, lg: 32, xl: 56 } as const;
+
 export function FileTile({ kind, size = "md" }: { kind: FileKind; size?: "md" | "lg" | "xl" }) {
-  return <span className={`file-tile tile-${kind} tile-${size}`} aria-hidden="true"><Icon name={KIND_ICON[kind]} size={size === "xl" ? 34 : size === "lg" ? 22 : 17} /></span>;
+  return <span className={`file-tile tile-${kind} tile-${size}`} aria-hidden="true"><FileGlyph kind={kind} size={TILE_SIZE[size]} /></span>;
 }
 
 export function FileThumbnail({ kind, url }: { kind: FileKind; url?: string }) {
@@ -58,19 +90,6 @@ export function canPreview(kind: FileKind) { return PREVIEWABLE.includes(kind); 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
 const TEXT_PREVIEW_LIMIT = 512 * 1024;
 
-/** 解码预览文本：先按 UTF-8 严格解码，失败时回退到 GB18030；被截断的末尾多字节字符会被丢弃。 */
-function decodeText(buffer: ArrayBuffer, truncated: boolean): string {
-  let bytes = new Uint8Array(buffer);
-  if (truncated) {
-    let back = 0;
-    while (back < 3 && bytes.length - 1 - back >= 0 && (bytes[bytes.length - 1 - back] & 0xc0) === 0x80) back++;
-    const lead = bytes[bytes.length - 1 - back];
-    if (lead !== undefined && lead >= 0xc0 && back + 1 < (lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : 2)) bytes = bytes.subarray(0, bytes.length - 1 - back);
-  }
-  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-  catch { try { return new TextDecoder("gb18030").decode(bytes); } catch { return new TextDecoder().decode(bytes); } }
-}
-
 /** 把 Markdown 里的相对路径图片解析为云盘内的绝对键；越出根目录或带协议的地址返回 null。 */
 export function resolveRelativeKey(baseDir: string, src: string): string | null {
   if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//")) return null;
@@ -84,10 +103,8 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
   return segments.length ? segments.join("/") : null;
 }
 
-type TextState = { text: string; truncated: boolean; total: number | null };
-
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null };
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string };
 export function FilePreview(props: PreviewProps) {
   const [attempt, setAttempt] = useState(0);
   return <PreviewContent key={`${props.kind}:${props.url}:${attempt}`} {...props} onRetry={() => setAttempt(current => current + 1)} />;
@@ -101,27 +118,17 @@ function PreviewLoading({ onRetry, downloadUrl }: { onRetry: () => void; downloa
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, onImageLoad, resolveImage, onRetry }: PreviewProps & { onRetry: () => void }) {
-  const [content, setContent] = useState<TextState | null>(null);
+function PreviewContent({ kind, url, name, downloadUrl, onImageLoad, resolveImage, loadAssets, assetUrl, onRetry }: PreviewProps & { onRetry: () => void }) {
+  const [content, setContent] = useState<PreviewText | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
   const [mediaReady, setMediaReady] = useState(false);
-  const [mode, setMode] = useState<"render" | "source">("render");
   useEffect(() => {
     if (kind !== "text" && kind !== "code") return;
     setContent(null); setError("");
     const controller = new AbortController();
     // 文本预览只读取前 512 KB，避免大日志拖垮页面。
-    void fetch(url, { credentials: "include", headers: { Range: `bytes=0-${TEXT_PREVIEW_LIMIT - 1}` }, signal: controller.signal })
-      .then(async response => {
-        if (!response.ok) throw new Error(`无法读取文件（${response.status}）`);
-        const range = /\/(\d+)$/.exec(response.headers.get("content-range") ?? "");
-        let buffer = await response.arrayBuffer();
-        let total = range ? Number(range[1]) : null;
-        if (buffer.byteLength > TEXT_PREVIEW_LIMIT) { total = buffer.byteLength; buffer = buffer.slice(0, TEXT_PREVIEW_LIMIT); }
-        const truncated = total !== null && total > buffer.byteLength;
-        return { text: decodeText(buffer, truncated), truncated, total };
-      })
+    void readPreviewText(url, TEXT_PREVIEW_LIMIT, controller.signal)
       .then(value => { if (!controller.signal.aborted) setContent(value); })
       .catch(reason => { if (!controller.signal.aborted) setError(api.errorMessage(reason, "无法读取文件")); });
     return () => controller.abort();
@@ -134,37 +141,22 @@ function PreviewContent({ kind, url, name, downloadUrl, onImageLoad, resolveImag
       <div className="preview-recovery">{(mediaFailed || error) && <Button icon="refresh" onClick={onRetry}>重新加载</Button>}<a className="btn btn-primary btn-md" href={downloadUrl}><Icon name="download" size={17} /><span>下载文件</span></a></div>
     </div>
   );
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} downloadUrl={downloadUrl} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} />;
   if (mediaFailed) return fallback;
-  if (["image", "video", "audio", "pdf"].includes(kind)) return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
+  if (kind === "image" || kind === "pdf") return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
     {!mediaReady && <div className="preview-media-loader"><PreviewLoading onRetry={onRetry} downloadUrl={downloadUrl} /></div>}
     {kind === "image" && <div className="preview-media"><img src={url} alt={name} onError={() => setMediaFailed(true)} onLoad={event => { setMediaReady(true); onImageLoad?.(event.currentTarget); }} /></div>}
-    {kind === "video" && <div className="preview-media"><video src={url} controls preload="metadata" onError={() => setMediaFailed(true)} onLoadedMetadata={() => setMediaReady(true)} onWaiting={() => setMediaReady(false)} onCanPlay={() => setMediaReady(true)} onPlaying={() => setMediaReady(true)} /></div>}
-    {kind === "audio" && <div className="preview-audio"><FileTile kind="audio" size="xl" /><audio src={url} controls preload="metadata" onError={() => setMediaFailed(true)} onLoadedMetadata={() => setMediaReady(true)} onWaiting={() => setMediaReady(false)} onCanPlay={() => setMediaReady(true)} onPlaying={() => setMediaReady(true)} /></div>}
     {kind === "pdf" && <iframe className="preview-frame" src={url} title={name} onLoad={() => setMediaReady(true)} onError={() => setMediaFailed(true)} />}
   </div>;
   if (kind === "text" || kind === "code") {
     if (error) return fallback;
     if (content === null) return <PreviewLoading onRetry={onRetry} downloadUrl={downloadUrl} />;
-    const markdown = /\.(md|markdown|mdx)$/i.test(name);
-    const lang = languageOf(name);
-    return (
-      <div className="preview-text">
-        {(markdown || content.truncated) && (
-          <div className="preview-toolbar">
-            {markdown && <Segmented label="显示方式" value={mode} onChange={setMode} options={[{ value: "render", label: "预览" }, { value: "source", label: "源码" }]} />}
-            {content.truncated && <span className="preview-notice">仅显示前 {formatBytes(TEXT_PREVIEW_LIMIT)}{content.total ? `（共 ${formatBytes(content.total)}）` : ""}，<a href={downloadUrl}>下载完整文件</a></span>}
-          </div>
-        )}
-        {markdown && mode === "render"
-          ? <article className="preview-doc"><Markdown source={content.text} resolveImage={resolveImage} /></article>
-          : <HighlightedCode code={content.text} lang={lang} lineNumbers={lang !== null || kind === "code"} />}
-      </div>
-    );
+    return <TextPreview content={content} name={name} downloadUrl={downloadUrl} resolveImage={resolveImage} onError={reason => setError(api.errorMessage(reason, "文本组件加载失败"))} />;
   }
   return fallback;
 }
 
-export function PreviewModal({ file, url, downloadUrl, onClose, onShare, onImageLoad, assetUrl }: { file: api.FileItem; url: string; downloadUrl: string; onClose: () => void; onShare?: () => void; onImageLoad?: (image: HTMLImageElement) => void; assetUrl?: (key: string) => string }) {
+export function PreviewModal({ file, url, downloadUrl, onClose, onShare, onImageLoad, assetUrl, loadAssets }: { file: api.FileItem; url: string; downloadUrl: string; onClose: () => void; onShare?: () => void; onImageLoad?: (image: HTMLImageElement) => void; assetUrl?: (key: string) => string; loadAssets?: AssetLoader }) {
   const kind = getFileKind(file.content_type, file.key);
   const extension = file.key.match(/\.([a-z\d]{1,10})$/i)?.[1].toUpperCase();
   const typeLabel = extension && kind !== "pdf" && kind !== "folder" ? `${extension === "JPG" ? "JPEG" : extension} ${kindLabel(kind)}` : kindLabel(kind);
@@ -172,18 +164,29 @@ export function PreviewModal({ file, url, downloadUrl, onClose, onShare, onImage
   const assetRef = useRef(assetUrl);
   assetRef.current = assetUrl;
   const hasAssets = Boolean(assetUrl);
+  const stage = useRef<HTMLDivElement>(null);
+  async function share() {
+    // 分享弹窗 portal 到 body；先退出预览全屏，确保它不会被全屏层遮住。
+    const screen = document.fullscreenElement;
+    if (screen && stage.current?.closest(".modal-backdrop")?.contains(screen)) {
+      try { await document.exitFullscreen(); } catch { toast.error("请先退出全屏，再打开分享设置。"); return; }
+    }
+    onShare?.();
+  }
   const resolveImage = useMemo(() => hasAssets ? (src: string) => {
     const key = resolveRelativeKey(parentPath(file.key), src);
     return key && assetRef.current ? assetRef.current(key) : null;
   } : undefined, [file.key, hasAssets]);
   return (
-    <Modal size="xl" title={baseName(file.key)} onClose={onClose}
-      description={<span className="preview-meta"><span>{formatBytes(file.size)}</span><span title={file.content_type ?? undefined}>{typeLabel}</span><span>{formatDateTime(file.modified_at)}</span>{file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>}
+    <Modal size="xl" expandable className={`preview-modal preview-modal-${kind}`} leading={<FileTile kind={kind} size="lg" />} title={baseName(file.key)} onClose={onClose}
+      description={<span className="preview-meta"><span title={file.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(file.size)}</span><span title="修改时间">{formatDateTime(file.modified_at)}</span>{file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>}
       footer={<>
-        {onShare && <Button icon="link" onClick={onShare}>{file.public_token ? "管理分享" : "公开分享"}</Button>}
-        <a className="btn btn-primary btn-md" href={downloadUrl}><Icon name="download" size={17} /><span>下载</span></a>
+        <span className="preview-close-hint"><kbd>Esc</kbd> 关闭</span>
+        {onShare && <Button variant="ghost" size="sm" icon="link" onClick={() => void share()}>{file.public_token ? "管理分享" : "公开分享"}</Button>}
+        <a className="btn btn-primary btn-sm" href={downloadUrl}><Icon name="download" size={15} /><span>下载文件</span></a>
       </>}>
-      <div className="preview-stage"><FilePreview kind={kind} url={url} name={baseName(file.key)} downloadUrl={downloadUrl} onImageLoad={onImageLoad} resolveImage={resolveImage} /></div>
+      <div ref={stage} className="preview-stage"><FilePreview kind={kind} url={url} name={baseName(file.key)} downloadUrl={downloadUrl} onImageLoad={onImageLoad} resolveImage={resolveImage} assetUrl={assetUrl}
+        loadAssets={loadAssets ?? (assetUrl ? signal => api.previewAssets(file.key, signal) : undefined)} /></div>
     </Modal>
   );
 }

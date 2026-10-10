@@ -329,6 +329,10 @@ class AdminApi:
         self.accounts.sessions.require(token, role="admin")
         return await self.objects.get_object(Scope(bucket_id), normalize_user_path(path), start, end)
 
+    async def preview_assets(self, token: str, bucket_id: int, path: str):
+        self.accounts.sessions.require(token, role="admin")
+        return await self.objects.apreview_assets(Scope(bucket_id), normalize_user_path(path))
+
     def set_object_public(self, token: str, csrf: str, bucket_id: int, path: str, public: bool) -> dict[str, object]:
         """管理员可以撤销任意对象的公开链接，用于处置不当分享。"""
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
@@ -722,6 +726,9 @@ class UserApi:
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         return await self.objects.get_object(Scope(account.bucket_id), normalize_user_path(path), start, end)
+
+    async def preview_assets(self, token: str, path: str):
+        return await self.objects.apreview_assets(self._scope(token), normalize_user_path(path))
 
     async def delete(self, token: str, csrf: str, paths: list[str], recursive: bool = False) -> list[dict[str, object]]:
         """删除文件；recursive 为 True 时，以 / 结尾的路径会删除整个文件夹（在服务端分批完成）。"""

@@ -14,6 +14,7 @@ export type FileItem = {
   public_downloads?: number;
   has_thumbnail?: boolean;
 };
+export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subtitle"; language: string | null; size: number; etag: string };
 /** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
 export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number> };
 export type Account = { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
@@ -110,6 +111,13 @@ export const changePassword = (oldPassword: string, newPassword: string) => post
 
 export const listFiles = (prefix = "", cursor: string | null = null, publicOnly = false) =>
   request<ListPage>(`/api/user/v1/list?limit=50&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+export const previewAssets = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`/api/user/v1/preview-assets?path=${encodeURIComponent(path)}`, { signal });
+export const adminPreviewAssets = (bucketId: number, path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`/api/admin/v1/preview-assets?bucket_id=${bucketId}&path=${encodeURIComponent(path)}`, { signal });
+export const publicPreviewAssets = (token: string, path: string, access?: string | null, signal?: AbortSignal) => {
+  const params = new URLSearchParams({ path });
+  if (access) params.set("access", access);
+  return request<PreviewAsset[]>(`/api/public/v1/folders/${encodeURIComponent(token)}/preview-assets?${params}`, { signal });
+};
 export const searchFiles = (query: string, cursor = "", publicOnly = false) =>
   request<ListPage>(`/api/user/v1/search?limit=50&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}`);
 export const listFolders = (prefix: string, cursor: string | null = null) => request<{ folders: string[]; next_cursor: string | null }>(

@@ -334,7 +334,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       </section>
 
       <footer className="list-footer">
-        <span>{loading ? "正在加载" : `本页 ${folders.length} 个文件夹，${files.length} 个文件（排序仅作用于本页）`}</span>
+        <span>{loading ? "正在加载" : [folders.length && `${folders.length} 个文件夹`, files.length && `${files.length} 个文件`].filter(Boolean).join(" · ") || "空文件夹"}</span>
         <Pagination {...pagination} />
       </footer>
 

@@ -3,8 +3,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { useCursorPage } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
-import { FilePreview, FileTile, canPreview, getFileKind, kindLabel } from "./files";
-import { Brand, Button, EmptyState, Field, Icon, Modal, Pagination, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime } from "./ui";
+import { FilePreview, FileTile, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
+import { Brand, Button, EmptyState, Field, Icon, Pagination, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime } from "./ui";
 
 type Shared = Extract<api.PublicObject, { password_required: false }>;
 
@@ -160,14 +160,14 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
           <Button icon="link" onClick={() => void copyText(`${window.location.origin}${window.location.pathname}`, "分享链接已复制")}>复制链接</Button>
         </div>
       </header>
-      <nav className="share-crumbs" aria-label="文件夹路径">
+      {crumbs.length > 1 && <nav className="share-crumbs" aria-label="文件夹路径">
         {crumbs.map((crumb, index) => (
           <span key={crumb.path}>
             {index > 0 && <Icon name="chevronRight" size={14} />}
             {index === crumbs.length - 1 ? <strong aria-current="page">{crumb.label}</strong> : <button type="button" onClick={() => open(crumb.path)}>{crumb.label}</button>}
           </span>
         ))}
-      </nav>
+      </nav>}
       {error ? <EmptyState icon="alert" title="无法打开" description={error} action={path ? <Button onClick={() => open("")}>回到根目录</Button> : <Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         : page === null ? <div className="share-folder-loading"><SkeletonRows rows={4} /></div>
           : empty ? <EmptyState icon="folder" title="这个文件夹是空的" description="分享者之后添加的文件会显示在这里。" />
@@ -211,14 +211,9 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
             )}
       <div className="panel-more"><Pagination {...pagination} /></div>
       {preview && (
-        <Modal size="xl" title={preview.name} onClose={() => setPreview(null)}
-          description={<span className="preview-meta"><span>{formatBytes(preview.size)}</span><span>{preview.content_type || kindLabel(getFileKind(preview.content_type, preview.name))}</span><span>{formatDateTime(preview.modified_at)}</span></span>}
-          footer={<a className="btn btn-primary btn-md" href={api.publicFolderFile(token, preview.path, true, access)}><Icon name="download" size={17} /><span>下载</span></a>}>
-          <div className="preview-stage">
-            <FilePreview kind={getFileKind(preview.content_type, preview.name)} url={api.publicFolderFile(token, preview.path, false, access)} name={preview.name}
-              downloadUrl={api.publicFolderFile(token, preview.path, true, access)} />
-          </div>
-        </Modal>
+        <PreviewModal file={{ ...preview, key: preview.path }} onClose={() => setPreview(null)}
+          url={api.publicFolderFile(token, preview.path, false, access)} downloadUrl={api.publicFolderFile(token, preview.path, true, access)}
+          loadAssets={signal => api.publicPreviewAssets(token, preview.path, access, signal)} assetUrl={path => api.publicFolderFile(token, path, false, access)} />
       )}
     </article>
   );
