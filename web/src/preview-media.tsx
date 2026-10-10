@@ -33,11 +33,13 @@ function lyricAt(lines: Lyric[], time: number) {
 }
 function assetLabel(asset: PreviewAsset): string {
   const languages: Record<string, string> = { zh: "中文", "zh-cn": "简体中文", "zh-hans": "简体中文", "zh-tw": "繁体中文", "zh-hant": "繁体中文", en: "英语", eng: "英语", ja: "日语", jpn: "日语", ko: "韩语", kor: "韩语", fr: "法语", fra: "法语", de: "德语", deu: "德语", es: "西班牙语", spa: "西班牙语", it: "意大利语", pt: "葡萄牙语", ru: "俄语" };
-  return (asset.language && languages[asset.language.toLowerCase()]) || asset.language || "默认";
+  // 没有语言标记的附件按格式命名（如“SRT 字幕”“LRC 歌词”），比“默认”更清楚。
+  const format = asset.name.split(".").at(-1)?.toUpperCase() ?? "";
+  return (asset.language && languages[asset.language.toLowerCase()]) || asset.language || `${format} ${asset.kind === "lyrics" ? "歌词" : "字幕"}`.trim();
 }
 
-export function MediaPreview({ kind, url, name, downloadUrl, cover, onRetry, loadAssets, assetUrl }: {
-  kind: "video" | "audio"; url: string; name: string; downloadUrl: string; cover?: string; onRetry: () => void;
+export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl }: {
+  kind: "video" | "audio"; url: string; name: string; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string;
 }) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
@@ -124,38 +126,56 @@ export function MediaPreview({ kind, url, name, downloadUrl, cover, onRetry, loa
     return () => observer.disconnect();
   }, [lyrics.length]);
   const waiting = state === "loading" || state === "buffering";
-  const attachmentName = kind === "audio" ? "歌词" : "字幕";
-  const selectedAsset = assets.find(asset => asset.path === selected);
-  const attachmentStatus = discoveryError || assetError || (findingAssets ? `正在查找${attachmentName}…` : assetBusy ? `正在加载${attachmentName}…` : !assets.length ? `未找到同名${attachmentName}` : "");
-  // 音频有封面时：播放键显示封面，歌词区背景使用模糊放大的封面。
-  return <div className={`preview-player preview-player-${kind}${cover ? " has-cover" : ""}`} style={kind === "audio" && cover ? { "--preview-cover": `url("${cover}")` } as CSSProperties : undefined}>
+  const failed = state === "failed";
+  const options = assets.map(asset => ({ value: asset.path, label: assetLabel(asset) + (assets.filter(item => assetLabel(item) === assetLabel(asset)).length > 1 ? ` · ${asset.name}` : "") }));
+  const optionKey = options.map(option => `${option.value}=${option.label}`).join("|");
+  // 视频字幕放进播放器自己的设置菜单；没有找到字幕时不出现这一项，也不再单独占一行提示。
+  useEffect(() => {
+    const instance = player.current;
+    if (!playerReady || !instance || !("setSubtitleMenu" in instance)) return;
+    instance.setSubtitleMenu(options, selected, setSelected);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playerReady, optionKey, selected]);
+  useEffect(() => {
+    const instance = player.current, message = assetError || discoveryError;
+    if (message && instance && "notice" in instance) instance.notice(message);
+  }, [assetError, discoveryError]);
+  const failure = failed && <div className="preview-player-failure" role="alert">
+    <span className="preview-failure-icon"><Icon name="alert" size={18} /></span>
+    <strong>{kind === "video" ? "无法播放这个视频" : "无法播放这段音频"}</strong>
+    <span>{error || "浏览器无法读取文件或解码这种格式。可以重试，或下载后用本地播放器打开。"}</span>
+    <Button size="sm" variant="secondary" icon="refresh" onClick={onRetry}>重试</Button>
+  </div>;
+  const slowNotice = !failed && slow && <div className="preview-player-slow" role="status">
+    <span>加载较慢</span><button type="button" onClick={onRetry}>重试</button>
+  </div>;
+  const lyricStatus = findingAssets || assetBusy ? ["正在加载歌词", "音乐可以继续播放"]
+    : assetError || discoveryError ? ["歌词暂时不可用", assetError || discoveryError]
+    : assets.length && !selected ? ["歌词已关闭", "可以在右上角重新开启"]
+    : ["暂无同步歌词", "同目录的同名 LRC 歌词会自动显示在这里"];
+  return <div className={`preview-player preview-player-${kind}${cover ? " has-cover" : ""}${waiting && !failed ? " is-waiting" : ""}`}
+    style={kind === "audio" && cover ? { "--preview-cover": `url("${cover}")` } as CSSProperties : undefined}>
     <div className="preview-player-surface">
       <div ref={host} className={`preview-player-host ${kind === "video" ? "preview-video-host" : "preview-audio-host"}`} />
-      {waiting && <div className={`preview-playback-status${state === "buffering" ? " is-buffering" : ""}`} role="status"><span className="spinner" />{state === "buffering" ? "正在缓冲…" : "正在加载播放器…"}</div>}
+      {kind === "video" && (failure || slowNotice)}
     </div>
-    {(state === "failed" || slow) && <div className="preview-player-recovery" role={state === "failed" ? "alert" : "status"}>
-      <span>{error || (state === "failed" ? "播放器无法读取文件或解码此格式，请重试或下载后打开。" : "加载时间较长，可以继续等待或重新加载。")}</span>
-      <Button size="sm" icon="refresh" onClick={onRetry}>重新加载</Button><a className="btn btn-secondary btn-sm" href={downloadUrl}><Icon name="download" size={15} />下载文件</a>
-    </div>}
-    {loadAssets && <div className="preview-asset-bar">
-      <label className="preview-asset-control"><Icon name="fileText" size={15} /><span>{attachmentName}</span>
-        <select className="input" value={selected} disabled={findingAssets || !assets.length} title={selectedAsset?.name} onChange={event => setSelected(event.target.value)} aria-label={kind === "video" ? "选择字幕语言" : "选择歌词"}>
-          <option value="">关闭</option>{assets.map(asset => <option key={asset.path} value={asset.path}>
-            {assetLabel(asset)}{assets.filter(item => assetLabel(item) === assetLabel(asset)).length > 1 ? ` · ${asset.name}` : ""}
-          </option>)}
-        </select>
-      </label>
-      {attachmentStatus ? <span className={`preview-asset-status${discoveryError || assetError ? " is-error" : ""}`} role={discoveryError || assetError ? "alert" : "status"}>{attachmentStatus}</span>
-        : kind === "audio" && lyrics.length > 0 && <span className="preview-asset-hint">点击歌词跳转</span>}
-    </div>}
-    {kind === "audio" && lyrics.length > 0 && <div className="preview-lyrics" ref={lyricHost} aria-label="同步歌词">
-      {lyrics.map((line, index) => <Button variant="ghost" size="sm" key={index} data-line={index} className={`preview-lyric${active === index ? " is-active" : ""}`}
-        aria-current={active === index ? "true" : undefined} onClick={() => { const instance = player.current; if (instance && "seek" in instance) instance.seek(line.time); }}>{line.text || "♪"}</Button>)}
-    </div>}
-    {kind === "audio" && !lyrics.length && <div className="preview-lyrics-empty">
-      {cover ? <img className="preview-audio-cover" src={cover} alt="专辑封面" /> : <span className="preview-audio-mark"><Icon name="audio" size={30} /></span>}
-      <strong>{assetBusy || findingAssets ? "正在加载歌词" : assets.length && !selected ? "歌词已关闭" : "暂无同步歌词"}</strong>
-      <span>{assetBusy || findingAssets ? "音乐可以继续播放" : assetError || discoveryError ? "歌词暂时不可用，音乐可以继续播放" : !assets.length ? "同目录的同名 LRC 歌词会自动显示在这里" : "随时开启同步歌词"}</span>
+    {kind === "audio" && <div className="preview-lyrics-region">
+      {assets.length > 0 && !failed && <label className="preview-lyrics-picker" title={assets.find(asset => asset.path === selected)?.name}>
+        <span className="sr-only">选择歌词</span><Icon name="fileText" size={13} />
+        <select value={selected} disabled={findingAssets} onChange={event => setSelected(event.target.value)}>
+          <option value="">关闭歌词</option>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select><Icon name="chevronDown" size={12} />
+      </label>}
+      {failure || (lyrics.length > 0
+        ? <div className="preview-lyrics" ref={lyricHost} aria-label="同步歌词，点击跳转">
+          {lyrics.map((line, index) => <Button variant="ghost" size="sm" key={index} data-line={index} className={`preview-lyric${active === index ? " is-active" : ""}`}
+            aria-current={active === index ? "true" : undefined} onClick={() => { const instance = player.current; if (instance && "seek" in instance) instance.seek(line.time); }}>{line.text || "♪"}</Button>)}
+        </div>
+        : <div className="preview-lyrics-empty">
+          {cover ? <img className="preview-audio-cover" src={cover} alt="专辑封面" /> : <span className="preview-audio-mark"><Icon name="audio" size={30} /></span>}
+          <strong>{lyricStatus[0]}</strong><span>{lyricStatus[1]}</span>
+        </div>)}
+      {slowNotice}
     </div>}
   </div>;
 }

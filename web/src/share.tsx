@@ -76,7 +76,7 @@ export function SharePage({ token }: { token: string }) {
                 <a className="btn btn-primary btn-md" href={downloadUrl}><Icon name="download" size={17} /><span>下载</span></a>
               </div>
             </header>
-            {canPreview(kind) && <div className="share-preview"><FilePreview kind={kind} url={url} name={file.name} downloadUrl={downloadUrl} poster={hasThumbnail ? api.publicThumbnail(url, "poster") : undefined} /></div>}
+            {canPreview(kind) && <div className="share-preview"><FilePreview kind={kind} url={url} name={file.name} downloadUrl={downloadUrl} contentType={file.content_type} poster={hasThumbnail ? api.publicThumbnail(url, "poster") : undefined} /></div>}
           </article>
         )}
         <p className="share-footnote">这是 {BRAND} 用户分享的{file?.kind === "folder" ? "文件夹" : "文件"}，只有拿到链接的人才能访问。</p>

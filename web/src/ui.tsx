@@ -223,7 +223,7 @@ if (typeof document !== "undefined") {
   document.addEventListener("keydown", event => { if (NAVIGATION_KEYS.has(event.key)) root.dataset.input = "keyboard"; }, true);
 }
 
-export function Modal({ title, description, onClose, children, footer, size = "md", icon, leading, tone, dismissible = true, className = "", expandable = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; expandable?: boolean }) {
+export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, className = "", expandable = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; expandable?: boolean }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
@@ -300,6 +300,7 @@ export function Modal({ title, description, onClose, children, footer, size = "m
             {description && <p>{description}</p>}
           </div>
           <div className="modal-window-actions">
+            {actions}
             {expandable && <>
               <IconButton icon={maximized ? "restore" : "maximize"} label={maximized ? "还原预览" : "最大化预览"} onClick={() => setMaximized(value => !value)} size="sm" active={maximized} disabled={fullscreen || switchingScreen} />
               {supportsFullscreen && <IconButton icon={fullscreen ? "exitFullscreen" : "fullscreen"} label={fullscreen ? "退出全屏" : "全屏预览"} onClick={() => void toggleFullscreen()} size="sm" active={fullscreen} disabled={switchingScreen} />}

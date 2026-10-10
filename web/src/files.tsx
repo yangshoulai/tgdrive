@@ -4,7 +4,7 @@ import * as api from "./api";
 import { readPreviewText, type PreviewText } from "./preview-data";
 import { MediaPreview, type AssetLoader } from "./preview-media";
 import { TextPreview } from "./preview-text";
-import { Badge, Button, CopyField, Field, Icon, KeyValue, Modal, Switch, formatBytes, formatDateTime, toast, type IconName } from "./ui";
+import { Badge, Button, CopyField, Field, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, toast, type IconName } from "./ui";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "text" | "code" | "archive" | "other";
 
@@ -94,6 +94,12 @@ export function parentPath(key: string) {
 }
 
 const PREVIEWABLE: FileKind[] = ["image", "video", "audio", "pdf", "text", "code"];
+/** 浏览器原生 <video>/<audio> 都无法播放的格式：直接提示下载，不让播放器反复重连。 */
+const UNPLAYABLE = /\.(ts|m2ts|mts|avi|wmv|asf|flv|f4v|rm|rmvb|vob|mpg|mpeg|wma|ape|amr|ra)$/i;
+const UNPLAYABLE_TYPES = /^(video\/(mp2t|x-msvideo|avi|x-ms-wmv|x-ms-asf|x-flv|mpeg)|audio\/(x-ms-wma|ape|x-ape|amr))$/i;
+export function isPlayable(name: string, type?: string | null) {
+  return !UNPLAYABLE.test(name) && !UNPLAYABLE_TYPES.test((type || "").split(";")[0].trim());
+}
 export function canPreview(kind: FileKind) { return PREVIEWABLE.includes(kind); }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
@@ -113,21 +119,21 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string };
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string };
 export function FilePreview(props: PreviewProps) {
   const [attempt, setAttempt] = useState(0);
   return <PreviewContent key={`${props.kind}:${props.url}:${attempt}`} {...props} onRetry={() => setAttempt(current => current + 1)} />;
 }
 
-function PreviewLoading({ onRetry, downloadUrl }: { onRetry: () => void; downloadUrl: string }) {
+function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   const [slow, setSlow] = useState(false);
   useEffect(() => { const timer = window.setTimeout(() => setSlow(true), 8000); return () => window.clearTimeout(timer); }, []);
-  return <div className="preview-loading" role="status"><span className="spinner spinner-lg" /><span>{slow ? "加载时间较长，可以重试或下载后打开。" : "正在加载预览…"}</span>
-    {slow && <div className="preview-recovery"><Button size="sm" icon="refresh" onClick={onRetry}>重新加载</Button><a className="btn btn-secondary btn-sm" href={downloadUrl}>下载文件</a></div>}
+  return <div className="preview-loading" role="status"><span className="spinner spinner-lg" /><span>{slow ? "加载时间较长" : "正在加载预览…"}</span>
+    {slow && <Button size="sm" variant="ghost" icon="refresh" onClick={onRetry}>重试</Button>}
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, poster, onImageLoad, resolveImage, loadAssets, assetUrl, onRetry }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, resolveImage, loadAssets, assetUrl, onRetry }: PreviewProps & { onRetry: () => void }) {
   const [content, setContent] = useState<PreviewText | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
@@ -142,27 +148,32 @@ function PreviewContent({ kind, url, name, downloadUrl, poster, onImageLoad, res
       .catch(reason => { if (!controller.signal.aborted) setError(api.errorMessage(reason, "无法读取文件")); });
     return () => controller.abort();
   }, [url, kind]);
+  const failed = Boolean(mediaFailed || error);
+  const extension = name.match(/\.([a-z\d]{1,8})$/i)?.[1].toUpperCase();
+  const unplayable = (kind === "video" || kind === "audio") && !isPlayable(name, contentType);
   const fallback = (
     <div className="preview-fallback">
       <FileTile kind={kind} size="xl" />
-      <h3>{mediaFailed || error ? "预览加载失败" : "此类型不支持在线预览"}</h3>
-      <p>{error || (mediaFailed ? "文件未能加载或当前浏览器不支持此格式，可以重试或下载后打开。" : "下载后使用本地应用打开。")}</p>
-      <div className="preview-recovery">{(mediaFailed || error) && <Button icon="refresh" onClick={onRetry}>重新加载</Button>}<a className="btn btn-primary btn-md" href={downloadUrl}><Icon name="download" size={17} /><span>下载文件</span></a></div>
+      <h3>{failed ? "预览加载失败" : unplayable ? `浏览器无法播放${extension ? ` ${extension} ` : "此"}格式` : "此类型不支持在线预览"}</h3>
+      <p>{error || (failed ? "文件未能加载或当前浏览器不支持此格式。" : unplayable ? "请下载后用本地播放器打开。" : "下载后使用本地应用打开。")}</p>
+      <div className="preview-recovery">{failed ? <Button size="sm" icon="refresh" onClick={onRetry}>重试</Button>
+        : <a className="btn btn-primary btn-sm" href={downloadUrl}><Icon name="download" size={15} /><span>下载文件</span></a>}</div>
     </div>
   );
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} downloadUrl={downloadUrl} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} />;
+  if (unplayable) return fallback;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} />;
   if (mediaFailed) return fallback;
   if (kind === "image" || kind === "pdf") return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
     {!mediaReady && (kind === "image" && poster
       // 原图从存储取回并解密需要时间：先显示封面图占位，原图加载完成后淡入替换。
       ? <div className="preview-media preview-media-poster"><img src={poster} alt="" aria-hidden="true" /><span className="preview-poster-status" role="status"><span className="spinner" />正在加载原图…</span></div>
-      : <div className="preview-media-loader"><PreviewLoading onRetry={onRetry} downloadUrl={downloadUrl} /></div>)}
+      : <div className="preview-media-loader"><PreviewLoading onRetry={onRetry} /></div>)}
     {kind === "image" && <div className="preview-media preview-media-full"><img src={url} alt={name} onError={() => setMediaFailed(true)} onLoad={event => { setMediaReady(true); onImageLoad?.(event.currentTarget); }} /></div>}
     {kind === "pdf" && <iframe className="preview-frame" src={url} title={name} onLoad={() => setMediaReady(true)} onError={() => setMediaFailed(true)} />}
   </div>;
   if (kind === "text" || kind === "code") {
     if (error) return fallback;
-    if (content === null) return <PreviewLoading onRetry={onRetry} downloadUrl={downloadUrl} />;
+    if (content === null) return <PreviewLoading onRetry={onRetry} />;
     return <TextPreview content={content} name={name} downloadUrl={downloadUrl} resolveImage={resolveImage} onError={reason => setError(api.errorMessage(reason, "文本组件加载失败"))} />;
   }
   return fallback;
@@ -189,15 +200,20 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     const key = resolveRelativeKey(parentPath(file.key), src);
     return key && assetRef.current ? assetRef.current(key) : null;
   } : undefined, [file.key, hasAssets]);
+  // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
     <Modal size="xl" expandable className={`preview-modal preview-modal-${kind}`} leading={<FileVisual kind={kind} src={thumbnail} size="lg" />} title={baseName(file.key)} onClose={onClose}
-      description={<span className="preview-meta"><span title={file.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(file.size)}</span><span title="修改时间">{formatDateTime(file.modified_at)}</span>{file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>}
-      footer={<>
-        <span className="preview-close-hint"><kbd>Esc</kbd> 关闭</span>
-        {onShare && <Button variant="ghost" size="sm" icon="link" onClick={() => void share()}>{file.public_token ? "管理分享" : "公开分享"}</Button>}
-        <a className="btn btn-primary btn-sm" href={downloadUrl}><Icon name="download" size={15} /><span>下载文件</span></a>
+      description={<span className="preview-meta">
+        <span title={file.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(file.size)}</span>
+        <span className="preview-meta-date" title={`修改于 ${formatDateTime(file.modified_at)}`}>{formatDate(file.modified_at)}</span>
+        {file.public_token && <span className="preview-meta-public" title="已公开分享"><Icon name="globe" size={12} />公开</span>}
+      </span>}
+      actions={<>
+        {onShare && <IconButton icon="link" label={file.public_token ? "管理分享" : "公开分享"} size="sm" onClick={() => void share()} />}
+        <a className="icon-btn icon-btn-ghost icon-btn-sm" href={downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
+        <span className="modal-actions-divider" aria-hidden="true" />
       </>}>
-      <div ref={stage} className="preview-stage"><FilePreview kind={kind} url={url} name={baseName(file.key)} downloadUrl={downloadUrl} poster={poster} onImageLoad={onImageLoad} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className="preview-stage"><FilePreview kind={kind} url={url} name={baseName(file.key)} downloadUrl={downloadUrl} contentType={file.content_type} poster={poster} onImageLoad={onImageLoad} resolveImage={resolveImage} assetUrl={assetUrl}
         loadAssets={loadAssets ?? (assetUrl ? signal => api.previewAssets(file.key, signal) : undefined)} /></div>
     </Modal>
   );

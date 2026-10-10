@@ -8,6 +8,8 @@ type Notify = (state: MediaState) => void;
 export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string) {
   // 网页全屏仍留在预览的对话框内，保留焦点锁和无障碍语义。
   Artplayer.FULLSCREEN_WEB_IN_BODY = false;
+  // 不自动重连：播放失败直接交给预览界面显示原因与重试，避免画面上反复出现“重新连接”。
+  Artplayer.RECONNECT_TIME_MAX = 0;
   const player = new Artplayer({ container, url, poster: poster ?? "", lang: "zh-cn", autoplay: false, theme: getComputedStyle(container).getPropertyValue("--accent").trim(),
     setting: true, playbackRate: true, aspectRatio: true, fullscreen: true, fullscreenWeb: true, pip: true,
     hotkey: true, mutex: true, autoSize: false, moreVideoAttr: { preload: "metadata", playsInline: true } });
@@ -44,6 +46,20 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   player.on("video:ended", markReady);
   player.on("video:error", () => notify("failed"));
   return {
+    /** 字幕选择放在播放器的设置菜单里；没有字幕时不显示这一项。 */
+    setSubtitleMenu: (options: { value: string; label: string }[], selected: string, onSelect: (value: string) => void) => {
+      if (destroyed) return;
+      if (!options.length) { if (player.setting.find("subtitle")) player.setting.remove("subtitle"); return; }
+      const choices = [{ value: "", label: "关闭" }, ...options];
+      const current = choices.find(choice => choice.value === selected) ?? choices[0];
+      const item = {
+        name: "subtitle", html: "字幕", tooltip: current.label, width: 220,
+        selector: choices.map(choice => ({ html: choice.label, value: choice.value, default: choice.value === current.value })),
+        onSelect: (option: { value?: string; html: string }) => { onSelect(String(option.value ?? "")); return option.html; },
+      };
+      if (player.setting.find("subtitle")) player.setting.update(item); else player.setting.add(item);
+    },
+    notice: (message: string) => { if (!destroyed) player.notice.show = message; },
     setSubtitle: (source: string | null, type: "srt" | "vtt" = "vtt") => {
       const current = ++version;
       switching = switching.catch(() => {}).then(async () => {
