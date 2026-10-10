@@ -186,11 +186,11 @@ export function SearchInput({ value, onChange, onSubmit, onClear, placeholder, l
   );
 }
 
-export function Segmented<T extends string>({ value, options, onChange, label, disabled }: { value: T; options: { value: T; label: string; icon?: IconName; count?: number }[]; onChange: (value: T) => void; label: string; disabled?: boolean }) {
+export function Segmented<T extends string>({ value, options, onChange, label, disabled, showLabels = false }: { value: T; options: { value: T; label: string; icon?: IconName; count?: number }[]; onChange: (value: T) => void; label: string; disabled?: boolean; /** 有图标时同时显示文字（默认只显示图标） */ showLabels?: boolean }) {
   return (
     <div className="segmented" role="radiogroup" aria-label={label}>
       {options.map((option, index) => (
-        <button key={option.value} type="button" role="radio" disabled={disabled} aria-checked={value === option.value} tabIndex={value === option.value || (!options.some(item => item.value === value) && index === 0) ? 0 : -1} className={value === option.value ? "is-active" : ""} onClick={() => onChange(option.value)} title={option.icon ? option.label : undefined}
+        <button key={option.value} type="button" role="radio" disabled={disabled} aria-checked={value === option.value} tabIndex={value === option.value || (!options.some(item => item.value === value) && index === 0) ? 0 : -1} className={value === option.value ? "is-active" : ""} onClick={() => onChange(option.value)} title={option.icon && !showLabels ? option.label : undefined}
           onKeyDown={event => {
             const offset = ["ArrowRight", "ArrowDown"].includes(event.key) ? 1 : ["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 0;
             if (!offset && event.key !== "Home" && event.key !== "End") return;
@@ -200,7 +200,7 @@ export function Segmented<T extends string>({ value, options, onChange, label, d
             event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=radio]")[next]?.focus();
           }}>
           {option.icon && <Icon name={option.icon} size={15} />}
-          {(!option.icon || option.count !== undefined) && <span className={option.icon ? "sr-only" : ""}>{option.label}</span>}
+          {(!option.icon || showLabels || option.count !== undefined) && <span className={option.icon && !showLabels ? "sr-only" : ""}>{option.label}</span>}
           {option.count !== undefined && <span className="segmented-count">{option.count}</span>}
         </button>
       ))}

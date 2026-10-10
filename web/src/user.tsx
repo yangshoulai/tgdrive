@@ -186,7 +186,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
     </>;
   }
-  const personal: NavGroup<Section> = { label: isAdmin ? "我的空间" : undefined, workspace: isAdmin, items: [
+  const personal: NavGroup<Section> = { label: isAdmin ? "我的空间" : undefined, workspace: isAdmin, icon: "folder", items: [
     { key: "files", label: "我的文件", icon: "folder" },
     { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
     { key: "trash", label: "回收站", icon: "trash" },
@@ -194,22 +194,23 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   ] };
   const groups: NavGroup<Section>[] = [
     personal,
-    ...(isAdmin ? [{ label: "系统管理", workspace: true, items: ADMIN_MODULES }] : []),
+    ...(isAdmin ? [{ label: "系统管理", workspace: true, icon: "shield" as const, items: ADMIN_MODULES }] : []),
     { label: "帮助", items: [{ key: "docs" as Section, label: "使用文档", icon: "book", href: "/docs" }] },
   ];
   return (
     <AppShell active={section} onNavigate={key => navigate(key)} groups={groups}
       sidebarFooter={<>
         {isAdmin && (
-          <button type="button" className={`system-chip${locked ? " is-locked" : ""}`} onClick={() => navigate("maintenance")}>
-            <Icon name={locked ? "lock" : "unlock"} size={16} />
-            <span><strong>{status === null ? "检查中" : locked ? "系统已锁定" : "系统运行中"}</strong><small>{locked ? "输入加密口令后继续使用" : "一切正常"}</small></span>
+          // 正常时只是一行带状态点的小字；锁定时变成醒目的提示条。
+          <button type="button" className={`system-chip${locked ? " is-locked" : ""}`} onClick={() => navigate("maintenance")} title="安全与维护">
+            {locked ? <Icon name="lock" size={15} /> : <span className={`status-dot${status === null ? " is-pending" : ""}`} aria-hidden="true" />}
+            <span><strong>{status === null ? "检查中" : locked ? "系统已锁定" : "系统运行中"}</strong>{locked && <small>输入加密口令后继续使用</small>}</span>
           </button>
         )}
         <div className="storage-meter">
-          <div className="storage-meter-head"><span>存储空间</span><strong>{usage?.quota_bytes != null ? usage.quota_bytes > 0 ? `${Math.round(percent)}%` : "配额 0 B" : "不限"}</strong></div>
+          <div className="storage-meter-head"><span>存储空间</span><strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></div>
           {usage?.quota_bytes != null && usage.quota_bytes > 0 && <Progress value={percent} tone={usageTone(percent)} label="存储使用率" />}
-          <p>{formatBytes(usage?.used_bytes ?? 0)}{usage?.quota_bytes != null ? ` / ${formatBytes(usage.quota_bytes)}` : " 已使用"}</p>
+          <p>{usage?.quota_bytes != null ? usage.quota_bytes > 0 ? `共 ${formatBytes(usage.quota_bytes)} · 已用 ${Math.round(percent)}%` : "配额为 0，无法上传" : "不限配额"}</p>
         </div>
       </>}
       account={{ name: session.username, caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", menu: [

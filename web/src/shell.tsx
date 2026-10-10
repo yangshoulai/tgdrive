@@ -5,7 +5,7 @@ import * as api from "./api";
 import { Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
 
 export type NavItem<K extends string> = { key: K; label: string; icon: IconName; count?: number; href?: string };
-export type NavGroup<K extends string> = { label?: string; workspace?: boolean; items: NavItem<K>[] };
+export type NavGroup<K extends string> = { label?: string; workspace?: boolean; icon?: IconName; items: NavItem<K>[] };
 
 export function AppShell<K extends string>({ groups, active, onNavigate, sidebarFooter, account, children }: {
   groups: NavGroup<K>[];
@@ -39,7 +39,7 @@ export function AppShell<K extends string>({ groups, active, onNavigate, sidebar
           <Brand />
           <button type="button" className="icon-btn icon-btn-ghost icon-btn-sm sidebar-close" aria-label="关闭导航" onClick={() => setDrawer(false)}><Icon name="x" size={16} /></button>
         </div>
-        {workspaces.length > 1 && <div className="workspace-switch"><Segmented label="工作区" value={currentWorkspace.label!} options={workspaces.map(group => ({ value: group.label!, label: group.label! }))} onChange={label => {
+        {workspaces.length > 1 && <div className="workspace-switch"><Segmented label="工作区" showLabels value={currentWorkspace.label!} options={workspaces.map(group => ({ value: group.label!, label: group.label!, icon: group.icon }))} onChange={label => {
           const group = workspaces.find(item => item.label === label); if (group?.items[0]) onNavigate(group.items[0].key);
         }} /></div>}
         <nav className="sidebar-nav">
@@ -47,7 +47,7 @@ export function AppShell<K extends string>({ groups, active, onNavigate, sidebar
             <div className="nav-group" key={group.label ?? index}>
               {group.label && !group.workspace && <p className="nav-group-label">{group.label}</p>}
               {group.items.map(item => {
-                const content = <><Icon name={item.icon} size={18} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
+                const content = <><Icon name={item.icon} size={17} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
                 return item.href
                   ? <a key={item.key} className="nav-item" href={item.href} target="_blank" rel="noreferrer">{content}</a>
                   : <button key={item.key} type="button" className={`nav-item${active === item.key ? " is-active" : ""}`} aria-current={active === item.key ? "page" : undefined} onClick={() => onNavigate(item.key)}>{content}</button>;

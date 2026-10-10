@@ -441,37 +441,43 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 
 .shell { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); min-height: 100vh; min-height: 100dvh; }
 .sidebar { position: sticky; top: 0; display: flex; height: 100vh; height: 100dvh; flex-direction: column; border-right: 1px solid var(--line); background: var(--surface-sunken); }
-.sidebar-top { display: flex; align-items: center; justify-content: space-between; height: 56px; padding: 0 14px 0 18px; }
+.sidebar-top { display: flex; align-items: center; justify-content: space-between; height: 60px; padding: 0 14px 0 20px; }
 .sidebar-close { display: none; }
-.sidebar-nav { display: grid; align-content: start; flex: 1; gap: 16px; padding: 6px 10px; overflow-y: auto; }
-.nav-group { display: grid; gap: 1px; }
-.nav-group-label { padding: 0 10px 4px; color: var(--ink-3); font-size: 11.5px; font-weight: 500; }
-.nav-item { position: relative; display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink-2); font-size: 13.5px; font-weight: 500; text-align: left; transition: background-color .12s, color .12s; }
-.nav-item > svg { color: var(--ink-3); }
-.nav-item:hover { background: var(--surface-hover); color: var(--ink); }
-.nav-item.is-active { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line), var(--shadow-sm); }
+.sidebar-nav { display: grid; align-content: start; flex: 1; gap: 22px; padding: 8px 12px 16px; overflow-y: auto; }
+.nav-group { display: grid; gap: 2px; }
+.nav-group-label { padding: 0 10px 6px; color: var(--ink-3); font-size: 11.5px; font-weight: 500; letter-spacing: .04em; }
+/* 导航项：悬停与当前项都用浅色填充，不用白卡片描边，避免和工作区切换器叠成两块白色。 */
+.nav-item { position: relative; display: flex; align-items: center; gap: 11px; height: 34px; padding: 0 10px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--ink-2); font-size: 13.5px; font-weight: 500; text-align: left; transition: background-color .12s, color .12s; }
+.nav-item > svg { flex: none; color: var(--ink-3); transition: color .12s; }
+.nav-item:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--ink); }
+.nav-item:hover > svg { color: var(--ink-2); }
+.nav-item.is-active { background: color-mix(in srgb, var(--ink) 7.5%, transparent); color: var(--ink); font-weight: 600; }
 .nav-item.is-active > svg { color: var(--accent); }
 .nav-label { flex: 1; }
-.nav-count { min-width: 18px; padding: 0 5px; border-radius: var(--radius-xs); background: transparent; color: var(--ink-3); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; text-align: center; }
+.nav-count { display: inline-grid; min-width: 20px; height: 20px; padding: 0 6px; place-items: center; border-radius: 999px; background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink-2); font-size: 11.5px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .nav-external { color: var(--ink-3); }
-.sidebar-bottom { display: grid; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
-.account-row { display: flex; align-items: center; gap: 10px; padding: 6px 2px 0 8px; border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.sidebar-bottom { display: grid; gap: 10px; padding: 12px; }
+.account-row { display: flex; align-items: center; gap: 10px; padding: 4px 2px 0 6px; }
 .account-copy { display: grid; flex: 1; min-width: 0; }
-.account-copy strong { overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.account-copy small { color: var(--ink-3); font-size: 12px; }
+.account-copy strong { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.account-copy small { color: var(--ink-3); font-size: 11.5px; }
 
-.storage-meter { display: grid; gap: 6px; padding: 4px 10px; }
-.storage-meter-head { display: flex; justify-content: space-between; color: var(--ink-2); font-size: 12.5px; font-weight: 500; }
-.storage-meter-head strong { font-variant-numeric: tabular-nums; }
-.storage-meter p { color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* 存储卡片：已用容量是主数字，配额与百分比作为说明；有配额时显示进度条。 */
+.storage-meter { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-sm); }
+.storage-meter-head { display: flex; align-items: baseline; justify-content: space-between; color: var(--ink-3); font-size: 12px; font-weight: 500; }
+.storage-meter-head strong { color: var(--ink); font-size: 14px; font-weight: 600; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.storage-meter p { color: var(--ink-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 
-.system-chip { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--success); text-align: left; }
+/* 系统状态：正常时是一行带状态点的小字，锁定时是琥珀色提示条。 */
+.system-chip { display: flex; align-items: center; gap: 9px; width: 100%; padding: 4px 10px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--ink-2); text-align: left; }
 .system-chip span { display: grid; }
 .system-chip strong { font-size: 12.5px; font-weight: 500; }
 .system-chip small { color: var(--ink-2); font-size: 12px; }
-.system-chip:not(.is-locked) small { display: none; }
-.system-chip:hover { background: var(--surface-hover); }
-.system-chip.is-locked { background: var(--warning-soft); color: var(--warning); }
+.status-dot { width: 8px; height: 8px; flex: none; margin: 0 3px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 18%, transparent); }
+.status-dot.is-pending { background: var(--ink-3); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink-3) 18%, transparent); }
+.system-chip:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--ink); }
+.system-chip.is-locked { padding: 8px 10px; background: var(--warning-soft); color: var(--warning); }
+.system-chip.is-locked:hover { background: color-mix(in srgb, var(--warning) 16%, transparent); }
 
 .main { min-width: 0; outline: none; }
 .main-inner { width: 100%; max-width: var(--content-width); margin: 0 auto; padding: 28px 36px 96px; }
@@ -1392,9 +1398,11 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .file-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-.workspace-switch { padding: 2px 10px 12px; }
+.workspace-switch { padding: 0 12px 14px; }
 .workspace-switch .segmented { display: flex; width: 100%; }
-.workspace-switch .segmented button { flex: 1; }
+.workspace-switch .segmented button { flex: 1; justify-content: center; height: 28px; gap: 6px; }
+.workspace-switch .segmented button svg { color: var(--ink-3); }
+.workspace-switch .segmented button.is-active svg { color: var(--accent); }
 
 .maintenance-tabs { margin-bottom: 24px; }
 .maintenance-section[hidden] { display: none; }
