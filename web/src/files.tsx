@@ -1,9 +1,9 @@
 /** 文件类型识别、预览与公开分享对话框。 */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import * as api from "./api";
 import { readPreviewText, type PreviewText } from "./preview-data";
-import { MediaPreview, type AssetLoader, type PlaybackControls, type PlaybackProps } from "./preview-media";
-import { PlaylistControls, PlaylistPanel, useMediaPlaylist, type PlaylistLoader } from "./preview-playlist";
+import { MediaPreview, MinimizedPlayback, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
+import { PlaylistControls, PlaylistPanel, usePreviewPlaylist } from "./preview-playlist";
 import { TextPreview } from "./preview-text";
 import { Badge, Button, CopyField, Field, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, toast, type IconName } from "./ui";
 
@@ -137,7 +137,7 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string } & PlaybackProps;
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string } & PlaybackProps;
 export function FilePreview(props: PreviewProps) {
   const [attempt, setAttempt] = useState(0);
   return <PreviewContent key={`${props.kind}:${props.kind === "audio" || props.kind === "video" ? "media" : props.url}:${attempt}`} {...props} onRetry={() => setAttempt(current => current + 1)} />;
@@ -151,7 +151,7 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, resolveImage, loadAssets, assetUrl, onRetry, onEnded, onPlaying, onControls, onVideoSize }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize }: PreviewProps & { onRetry: () => void }) {
   const [content, setContent] = useState<PreviewText | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
@@ -179,14 +179,14 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
     </div>
   );
   if (unplayable) return fallback;
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} onEnded={onEnded} onPlaying={onPlaying} onControls={onControls} onVideoSize={onVideoSize} />;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} />;
   if (mediaFailed) return fallback;
   if (kind === "image" || kind === "pdf") return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
     {!mediaReady && (kind === "image" && poster
       // 原图从存储取回并解密需要时间：先显示封面图占位，原图加载完成后淡入替换。
-      ? <div className="preview-media preview-media-poster"><img src={poster} alt="" aria-hidden="true" /><span className="preview-poster-status" role="status"><span className="spinner" />正在加载原图…</span></div>
+      ? <div className="preview-media preview-media-poster"><img src={poster} alt="" aria-hidden="true" onLoad={event => onImageSize?.(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight, false)} /><span className="preview-poster-status" role="status"><span className="spinner" />正在加载原图…</span></div>
       : <div className="preview-media-loader"><PreviewLoading onRetry={onRetry} /></div>)}
-    {kind === "image" && <div className="preview-media preview-media-full"><img src={url} alt={name} onError={() => setMediaFailed(true)} onLoad={event => { setMediaReady(true); onImageLoad?.(event.currentTarget); }} /></div>}
+    {kind === "image" && <div className="preview-media preview-media-full"><img src={url} alt={name} onError={() => setMediaFailed(true)} onLoad={event => { const image = event.currentTarget; setMediaReady(true); onImageSize?.(image.naturalWidth, image.naturalHeight, true); onImageLoad?.(image); }} /></div>}
     {kind === "pdf" && <iframe className="preview-frame" src={url} title={name} onLoad={() => setMediaReady(true)} onError={() => setMediaFailed(true)} />}
   </div>;
   if (kind === "text" || kind === "code") {
@@ -198,22 +198,37 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
 }
 
 type PreviewSource = { url: string; downloadUrl: string; poster?: string; thumbnail?: string };
-export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, assetUrl, loadAssets, loadPlaylist, sourceFor }: PreviewSource & { file: api.FileItem; onClose: () => void; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement) => void; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; loadPlaylist?: PlaylistLoader; sourceFor?: (file: api.FileItem) => PreviewSource }) {
+export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, assetUrl, loadAssets, playlistFiles, sourceFor }: PreviewSource & { file: api.FileItem; onClose: () => void; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource }) {
   const kind = getFileKind(file.content_type, file.key);
   const media = (kind === "audio" || kind === "video") && isPlayable(file.key, file.content_type);
-  const playlist = useMediaPlaylist(file, kind, media ? loadPlaylist ?? (assetUrl ? (item, cursor, signal) => api.previewList(item.key, cursor, signal) : undefined) : undefined,
-    item => getFileKind(item.content_type, item.key) === kind && isPlayable(item.key, item.content_type) && parentPath(item.key) === parentPath(file.key));
-  const active = media && playlist.current.key !== file.key ? playlist.current : file;
+  const browsable = media || kind === "image";
+  const playlist = usePreviewPlaylist(file, kind, playlistFiles,
+    item => getFileKind(item.content_type, item.key) === kind && (kind === "image" || isPlayable(item.key, item.content_type)) && parentPath(item.key) === parentPath(file.key));
+  const active = browsable && playlist.current.key !== file.key ? playlist.current : file;
   const sourceOf = (item: api.FileItem): PreviewSource => item.key === file.key ? { url, downloadUrl, poster, thumbnail } : sourceFor?.(item) ?? {
     url: api.contentUrl(item.key), downloadUrl: api.contentUrl(item.key, true), poster: api.fileThumbnail(item, "poster"), thumbnail: api.fileThumbnail(item),
   };
   const source = sourceOf(active);
   const [playlistExpanded, setPlaylistExpanded] = useState(() => window.matchMedia("(min-width: 861px)").matches);
-  const [videoSize, setVideoSize] = useState<{ key: string; width: number; height: number } | null>(null);
-  const videoRatio = videoSize?.key === active.key ? videoSize.width / videoSize.height : 16 / 9;
-  const controls = useRef<PlaybackControls | null>(null), pendingPlay = useRef(false), pendingAdvance = useRef(false), currentKey = useRef(active.key);
+  const [pictureSize, setPictureSize] = useState<{ key: string; width: number; height: number; original: boolean } | null>(null);
+  const pictureRatio = pictureSize?.key === active.key ? pictureSize.width / pictureSize.height : kind === "image" ? 1 : 16 / 9;
+  const pictureWidth = kind === "image" && pictureSize?.key === active.key && pictureSize.original ? pictureSize.width : null;
+  function setPicture(width: number, height: number, original = true) {
+    if (width <= 0 || height <= 0) return;
+    setPictureSize(value => {
+      if (value?.key === active.key) {
+        // 原图优先，避免迟到的旧封面把竖图窗口改回横图比例。
+        if (value.original && !original) return value;
+        if (value.width === width && value.height === height && value.original === original) return value;
+      }
+      return { key: active.key, width, height, original };
+    });
+  }
+  const controls = useRef<PlaybackControls | null>(null), pendingPlay = useRef(false), currentKey = useRef(active.key);
   currentKey.current = active.key;
   const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState<MediaProgress>({ currentTime: 0, duration: 0 });
+  const [mediaState, setMediaState] = useState<MediaState>("loading");
   function play() {
     if (!controls.current) { pendingPlay.current = true; return; }
     const key = active.key;
@@ -223,20 +238,24 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     });
   }
   function select(item: api.FileItem) {
-    pendingAdvance.current = false;
+    if (kind === "image") { playlist.select(item); return; }
     if (item.key === active.key) { if (controls.current) { controls.current.seek(0); play(); } else pendingPlay.current = true; return; }
     pendingPlay.current = true; playlist.select(item);
   }
-  useEffect(() => {
-    if (playlist.loading || !pendingAdvance.current) return;
-    pendingAdvance.current = false;
-    const next = playlist.next(true);
+  useEffect(() => { pendingPlay.current = false; }, [file.key]);
+  function navigate(event: KeyboardEvent<HTMLDivElement>) {
+    if (!browsable || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+    const target = event.target as HTMLElement;
+    if (!event.currentTarget.contains(target) || event.currentTarget.closest("[inert]")) return;
+    if (target.closest("input, textarea, [contenteditable]:not([contenteditable='false']), [role='slider']")) return;
+    // 原生下拉框和播放器菜单保留方向键操作，但不再传给 ArtPlayer 的全局快进快捷键。
+    if (target.closest("select, [role='combobox'], [role^='menu'], .menu, .art-settings")) { event.stopPropagation(); return; }
+    event.preventDefault(); event.stopPropagation();
+    if (event.repeat || playlist.items.length < 2) return;
+    const next = event.key === "ArrowLeft" ? playlist.previous() : playlist.next();
     if (next) select(next);
-    // 结束时若目录还在分页加载，等完整列表就绪后再确定下一首。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playlist.loading]);
-  useEffect(() => { pendingPlay.current = false; pendingAdvance.current = false; }, [file.key]);
-  const transport = (compact = false) => <PlaylistControls playlist={playlist} compact={compact} onSelect={select} playing={playing} onToggle={() => playing ? controls.current?.pause() : play()}
+  }
+  const transport = (compact = false) => <PlaylistControls playlist={playlist} compact={compact} image={kind === "image"} onSelect={select} playing={playing} onToggle={() => playing ? controls.current?.pause() : play()}
     expanded={playlistExpanded} onExpand={() => setPlaylistExpanded(value => !value)} />;
   const extension = active.key.match(/\.([a-z\d]{1,10})$/i)?.[1].toUpperCase();
   const typeLabel = extension && kind !== "pdf" && kind !== "folder" ? `${extension === "JPG" ? "JPEG" : extension} ${kindLabel(kind)}` : kindLabel(kind);
@@ -248,22 +267,25 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   useEffect(() => {
     const node = stage.current, modal = node?.closest<HTMLElement>(".modal"), backdrop = modal?.parentElement;
     const header = modal?.querySelector<HTMLElement>(".modal-header"), toolbar = node?.querySelector<HTMLElement>(".preview-playlist-toolbar");
-    if (!media || !node || !modal || !backdrop || !header || !toolbar) return;
+    if (!browsable || !node || !modal || !backdrop || !header || !toolbar) return;
     // 按实际头部和工具栏高度计算画布，避免窄屏换行挤出列表及百分比高度循环。
     const resize = () => {
       if (modal.classList.contains("is-minimized")) return;
       const outer = getComputedStyle(backdrop), frame = getComputedStyle(modal);
       let height = window.innerHeight - parseFloat(outer.paddingTop) - parseFloat(outer.paddingBottom);
       if (frame.maxHeight.endsWith("px")) height = Math.min(height, parseFloat(frame.maxHeight));
-      const content = Math.max(0, height - header.getBoundingClientRect().height - parseFloat(frame.borderTopWidth) - parseFloat(frame.borderBottomWidth));
+      // 入场动画带缩放变换，布局高度不受动画影响，避免误算可用画布。
+      const content = Math.max(0, height - header.offsetHeight - parseFloat(frame.borderTopWidth) - parseFloat(frame.borderBottomWidth));
       node.style.setProperty("--preview-content-height", `${content}px`);
-      const playerHeight = Math.max(0, content - toolbar.getBoundingClientRect().height);
+      const playerHeight = Math.max(0, content - toolbar.offsetHeight);
       node.style.setProperty("--preview-player-height", `${playerHeight}px`);
-      if (kind === "video") {
+      if (kind === "video" || kind === "image") {
+        node.style.setProperty("--preview-picture-ratio", String(pictureRatio));
+        if (kind === "image") node.style.setProperty("--preview-picture-width", pictureWidth ? `${pictureWidth}px` : "none");
         const border = parseFloat(frame.borderLeftWidth) + parseFloat(frame.borderRightWidth);
         const width = Math.min(window.innerWidth - parseFloat(outer.paddingLeft) - parseFloat(outer.paddingRight), playlistExpanded ? 1360 : 1120);
         const side = playlistExpanded && window.innerWidth > 860 ? 300 : 0;
-        const picture = Math.min(Math.max(0, width - side - border), playerHeight * videoRatio);
+        const picture = Math.min(Math.max(0, width - side - border), playerHeight * pictureRatio, pictureWidth ?? width);
         modal.style.setProperty("--preview-modal-width", `${Math.min(width, Math.max(320, picture + side + border))}px`);
       }
     };
@@ -271,7 +293,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     for (const element of [header, toolbar, backdrop]) observer.observe(element);
     window.addEventListener("resize", resize); resize();
     return () => { observer.disconnect(); window.removeEventListener("resize", resize); };
-  }, [media, kind, playlistExpanded, videoRatio]);
+  }, [browsable, kind, playlistExpanded, pictureRatio, pictureWidth]);
   async function share() {
     // 分享弹窗 portal 到 body；先退出预览全屏，确保它不会被全屏层遮住。
     const screen = document.fullscreenElement;
@@ -286,7 +308,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   } : undefined, [active.key, hasAssets]);
   // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
-    <Modal size="xl" expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? transport(true) : undefined} className={`preview-modal preview-modal-${kind}${media && playlistExpanded ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
+    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={navigate} expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} onSeek={time => controls.current?.seek(time)}>{transport(true)}</MinimizedPlayback> : kind === "image" ? transport(true) : undefined} className={`preview-modal preview-modal-${kind}${browsable && playlistExpanded ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>
@@ -297,13 +319,14 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         <a className="icon-btn icon-btn-ghost icon-btn-sm" href={source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
         <span className="modal-actions-divider" aria-hidden="true" />
       </>}>
-      <div ref={stage} className={`preview-stage${media ? " has-playlist" : ""}${media && playlistExpanded ? " is-playlist-open" : ""}`}><FilePreview kind={kind} url={kind === "image" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={onImageLoad} resolveImage={resolveImage} assetUrl={assetUrl}
-        onVideoSize={(width, height) => setVideoSize(value => value?.key === active.key && value.width === width && value.height === height ? value : { key: active.key, width, height })}
-        onPlaying={setPlaying} onEnded={() => { if (playlist.loading) { pendingAdvance.current = true; return; } const next = playlist.next(true); if (next) select(next); }}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist" : ""}${browsable && playlistExpanded ? " is-playlist-open" : ""}`}><FilePreview kind={kind} url={kind === "image" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={setPicture} resolveImage={resolveImage} assetUrl={assetUrl}
+        onVideoSize={setPicture}
+        onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
+        onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}
         loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} />
-        {media && transport()}
-        {media && playlistExpanded && <PlaylistPanel playlist={playlist} onSelect={select} typeLabel={kindLabel(kind)}
+        {browsable && transport()}
+        {browsable && playlistExpanded && <PlaylistPanel playlist={playlist} onSelect={select} typeLabel={kindLabel(kind)} image={kind === "image"}
           onCollapse={() => { setPlaylistExpanded(false); stage.current?.querySelector<HTMLButtonElement>(".preview-playlist-toggle")?.focus(); }}
           renderThumbnail={item => <FileVisual kind={getFileKind(item.content_type, item.key)} src={sourceOf(item).thumbnail} size="lg" />} />}
       </div>

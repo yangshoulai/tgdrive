@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
-import { useCursorPage } from "../pagination";
+import { useCursorPage, useFilePageSize } from "../pagination";
 import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
@@ -17,6 +17,7 @@ type Entry = { kind: "folder"; key: string; size?: number } | { kind: "file"; ke
 type SortKey = "name" | "type" | "size" | "modified";
 
 export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number }) {
+  const pageSize = useFilePageSize();
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "public">("all");
@@ -24,6 +25,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "name", desc: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [preview, setPreview] = useState<api.FileItem | null>(null);
+  const [previewPage, setPreviewPage] = useState<{ id: number; files: api.FileItem[] }>({ id: 0, files: [] });
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
   const [renaming, setRenaming] = useState<Entry | null>(null);
   const [moving, setMoving] = useState<Entry[] | null>(null);
@@ -40,8 +42,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   useDocumentTitle(`${query ? `搜索“${query}”` : name} · ${BRAND}`);
 
   const fetchPage = useCallback((cursor: string | null) => query
-    ? api.searchFiles(query, cursor ?? "", filter === "public")
-    : api.listFiles(prefix, cursor, filter === "public"), [prefix, query, filter]);
+    ? api.searchFiles(query, cursor ?? "", filter === "public", pageSize.pageSize)
+    : api.listFiles(prefix, cursor, filter === "public", pageSize.pageSize), [prefix, query, filter, pageSize.pageSize]);
   const pagination = useCursorPage(fetchPage);
   const load = pagination.reload;
   useEffect(() => {
@@ -90,6 +92,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       .map(key => ({ kind: "folder" as const, key, size: folderSizes[key] }));
     return [...folderEntries, ...fileEntries];
   }, [files, folders, publicFolders, folderSizes, filter, sort]);
+  function openPreview(file: api.FileItem) {
+    setPreview(file);
+    // 打开文件时记录本页顺序，预览内管理分享时仍保留这份列表。
+    setPreviewPage(current => ({ id: current.id + 1, files: entries.flatMap(entry => entry.kind === "file" ? [entry.file] : []) }));
+  }
   /** 文件夹的分享信息保存在它的目录标记上；还没公开过的文件夹用一个占位对象打开分享对话框。 */
   const folderItem = (key: string): api.FileItem => publicFolders[key] ?? { key, size: 0, etag: "", content_type: "application/x-directory", modified_at: 0 };
   const selectedEntries = entries.filter(entry => selected.has(entry.key));
@@ -301,12 +308,12 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                 </span>
               </div>
             ) : (
-              <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}`} {...dragProps(entry)} onClick={() => setPreview(entry.file)}>
+              <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}`} {...dragProps(entry)} onClick={() => openPreview(entry.file)}>
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
                 <span role="cell" className="cell-name">
                   <FileVisual kind={getFileKind(entry.file.content_type, entry.key)} src={api.fileThumbnail(entry.file)} />
                   <span className="name-stack">
-                    <button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); setPreview(entry.file); }}>{baseName(entry.key)}</button>
+                    <button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); openPreview(entry.file); }}>{baseName(entry.key)}</button>
                     <span className="file-mobile-meta"><span>{kindLabel(getFileKind(entry.file.content_type, entry.key))} · {formatBytes(entry.file.size)} · {formatDate(entry.file.modified_at)}</span>{entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>
                     {query && parentPath(entry.key) && <small>{parentPath(entry.key)}</small>}
                   </span>
@@ -328,7 +335,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
               const kind = entry.kind === "folder" ? "folder" : getFileKind(entry.file.content_type, entry.key);
               const isSelected = selected.has(entry.key);
               return (
-                <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${entry.kind === "folder" ? dropClass(entry.key) : ""}`} {...dragProps(entry)} {...(entry.kind === "folder" ? dropProps(entry.key) : {})} onClick={() => entry.kind === "folder" ? onOpenFolder(entry.key) : setPreview(entry.file)}>
+                <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${entry.kind === "folder" ? dropClass(entry.key) : ""}`} {...dragProps(entry)} {...(entry.kind === "folder" ? dropProps(entry.key) : {})} onClick={() => entry.kind === "folder" ? onOpenFolder(entry.key) : openPreview(entry.file)}>
                   <div className="grid-thumb">
                     {/* 有缩略图用缩略图；小图片直接显示原图；其余显示类型图标，避免每个卡片下载完整原图。 */}
                     {entry.kind === "folder" ? <FolderThumbnail previews={(pagination.page?.folder_previews?.[entry.key] ?? []).flatMap(file => {
@@ -341,7 +348,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                   <div className="grid-meta">
                     {/* 卡片本身只响应鼠标；文件名按钮是键盘与读屏用户的打开入口。 */}
                     <button type="button" className="grid-name name-button" title={baseName(entry.key)}
-                      onClick={event => { event.stopPropagation(); if (entry.kind === "folder") onOpenFolder(entry.key); else setPreview(entry.file); }}>
+                      onClick={event => { event.stopPropagation(); if (entry.kind === "folder") onOpenFolder(entry.key); else openPreview(entry.file); }}>
                       {baseName(entry.key)}
                     </button>
                     <span className="grid-sub">
@@ -360,7 +367,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
 
       <footer className="list-footer">
         <span>{loading ? "正在加载" : [folders.length && `${folders.length} 个文件夹`, files.length && `${files.length} 个文件`].filter(Boolean).join(" · ") || "空文件夹"}</span>
-        <Pagination {...pagination} />
+        <Pagination {...pagination} {...pageSize} />
       </footer>
 
       {pendingUpload && <UploadDialog files={pendingUpload} destination={prefix} onClose={() => setPendingUpload(null)}
@@ -380,14 +387,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         }} />}
       {moving && <MoveDialog targets={moving} startPrefix={query ? "" : prefix} onClose={() => setMoving(null)}
         onMove={async (dest, conflict) => { await moveEntries(moving, dest, conflict); setMoving(null); }} />}
-      {preview && <PreviewModal file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)}
+      {preview && <PreviewModal key={previewPage.id} file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)}
+        playlistFiles={previewPage.files}
         poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} onShare={file => { setPreview(file); setSharing(file); }}
-        onImageLoad={image => {
+        onImageLoad={(image, file) => {
           // 预览过的图片顺便补上缩略图和封面图（例如通过 S3 上传、没有缩略图的图片），不必再下载一次原图。
           // 已有封面、矢量图，或已有缩略图且原图不够大（不会生成封面）时跳过。
-          if (preview.thumbnails?.includes("poster") || /\.svg$/i.test(preview.key)
-            || (preview.thumbnails?.includes("thumb") && Math.max(image.naturalWidth, image.naturalHeight) <= 480)) return;
-          const key = preview.key;
+          if (file.thumbnails?.includes("poster") || /\.svg$/i.test(file.key)
+            || (file.thumbnails?.includes("thumb") && Math.max(image.naturalWidth, image.naturalHeight) <= 480)) return;
+          const key = file.key;
           void thumbnailsFromImage(image).then(result => saveThumbnails(key, result)).then(thumbnails => thumbnails && setThumbnails(key, thumbnails)).catch(() => undefined);
         }} />}
       {sharing && <ShareDialog file={sharing} publicBase={session.public_base_url} onClose={() => setSharing(null)}

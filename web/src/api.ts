@@ -113,8 +113,8 @@ export const changePassword = (oldPassword: string, newPassword: string) => post
 
 /* ---------- 用户文件 ---------- */
 
-export const listFiles = (prefix = "", cursor: string | null = null, publicOnly = false) =>
-  request<ListPage>(`/api/user/v1/list?limit=50&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+export const listFiles = (prefix = "", cursor: string | null = null, publicOnly = false, limit = 100) =>
+  request<ListPage>(`/api/user/v1/list?limit=${limit}&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const previewAssets = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`/api/user/v1/preview-assets?path=${encodeURIComponent(path)}`, { signal });
 export const previewList = (path: string, cursor: string | null, signal: AbortSignal) => request<PreviewListPage>(
   `/api/user/v1/preview-list?path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
@@ -133,8 +133,8 @@ export const publicPreviewAssets = (token: string, path: string, access?: string
   if (access) params.set("access", access);
   return request<PreviewAsset[]>(`/api/public/v1/folders/${encodeURIComponent(token)}/preview-assets?${params}`, { signal });
 };
-export const searchFiles = (query: string, cursor = "", publicOnly = false) =>
-  request<ListPage>(`/api/user/v1/search?limit=50&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}`);
+export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100) =>
+  request<ListPage>(`/api/user/v1/search?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}`);
 export const listFolders = (prefix: string, cursor: string | null = null) => request<{ folders: string[]; next_cursor: string | null }>(
   `/api/user/v1/folders?limit=50&prefix=${encodeURIComponent(prefix)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const checkFiles = (paths: string[]) => post<{ paths: string[] }>("/api/user/v1/files/check", { paths });
@@ -151,8 +151,8 @@ export const setPublic = (paths: string[], isPublic: boolean, options: ShareOpti
 /* ---------- 回收站 ---------- */
 export type TrashItem = { id: string; path: string; is_folder: boolean; size: number; item_count: number; deleted_at: number; purge_at: number };
 export const listTrash = () => request<{ items: TrashItem[]; total_size: number; retention_days: number }>("/api/user/v1/trash");
-export const listTrashPage = (cursor: string | null) => request<{ items: TrashItem[]; total: number; total_size: number; retention_days: number; next_cursor: string | null }>(
-  `/api/user/v1/trash?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+export const listTrashPage = (cursor: string | null, limit = 100) => request<{ items: TrashItem[]; total: number; total_size: number; retention_days: number; next_cursor: string | null }>(
+  `/api/user/v1/trash?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const moveToTrash = (paths: string[]) => post<{ items: { id: string; path: string }[] }>("/api/user/v1/trash", { paths });
 export const restoreTrash = (ids: string[]) => post<{ restored: { id: string; path: string }[] }>("/api/user/v1/trash/restore", { ids });
 export const purgeTrash = (ids: string[] | "all") => post<{ purged: number }>("/api/user/v1/trash/purge", ids === "all" ? { all: true } : { ids });
@@ -185,7 +185,7 @@ export const getUpload = (id: string) => request<UploadState>(`/api/user/v1/uplo
 export const completeUpload = (id: string, parts: [number, string][], isPublic?: boolean) => post<FileItem>(`/api/user/v1/uploads/${id}/complete`, { parts, ...(isPublic === undefined ? {} : { public: isPublic }) }, 15 * 60000);
 export const abortUpload = (id: string) => request<void>(`/api/user/v1/uploads/${id}`, { method: "DELETE" });
 export const listPublic = () => request<FileItem[]>("/api/user/v1/public");
-export const listPublicPage = (cursor: string | null = null, limit = 50) => request<{ objects: FileItem[]; total: number; next_cursor: string | null; folder_sizes?: Record<string, number>; folder_previews?: Record<string, FileItem[]> }>(
+export const listPublicPage = (cursor: string | null = null, limit = 100) => request<{ objects: FileItem[]; total: number; next_cursor: string | null; folder_sizes?: Record<string, number>; folder_previews?: Record<string, FileItem[]> }>(
   `/api/user/v1/public?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const contentUrl = (path: string, download = false) => `/api/user/v1/content?path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
 
@@ -253,8 +253,8 @@ export async function loadPublicConfig() {
   return config;
 }
 export const publicObject = (token: string, access?: string | null) => request<PublicObject>(`/api/public/v1/objects/${encodeURIComponent(token)}${access ? `?access=${encodeURIComponent(access)}` : ""}`);
-export const publicFolderList = (token: string, path = "", cursor: string | null = null, access?: string | null) => {
-  const params = new URLSearchParams({ path, limit: "50" });
+export const publicFolderList = (token: string, path = "", cursor: string | null = null, access?: string | null, limit = 100) => {
+  const params = new URLSearchParams({ path, limit: String(limit) });
   if (cursor) params.set("cursor", cursor);
   if (access) params.set("access", access);
   return request<PublicFolderPage>(`/api/public/v1/folders/${encodeURIComponent(token)}/list?${params}`);
@@ -326,7 +326,7 @@ export const checkAdminBot = (id: number) => post<{ id: number; ok: boolean; sta
 export const setAdminBotStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/bots/${id}/status`, { status });
 export type AdminObjectPage = { objects: AdminObject[]; next_cursor: string | null; total: number; public_total: number };
 export const adminObjects = (options: { q?: string; publicOnly?: boolean; cursor?: string | null; limit?: number } = {}, signal?: AbortSignal) => {
-  const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
+  const params = new URLSearchParams({ limit: String(options.limit ?? 100) });
   if (options.q) params.set("q", options.q);
   if (options.publicOnly) params.set("public", "1");
   if (options.cursor) params.set("cursor", options.cursor);

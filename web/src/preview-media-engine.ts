@@ -4,8 +4,14 @@ import APlayer from "aplayer";
 import "aplayer/dist/APlayer.min.css";
 
 export type MediaState = "loading" | "ready" | "buffering" | "failed";
+export type MediaProgress = { currentTime: number; duration: number };
 type Notify = (state: MediaState) => void;
-type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onVideoSize?: (width: number, height: number) => void };
+type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onVideoSize?: (width: number, height: number) => void };
+function mediaProgress(media: HTMLMediaElement): MediaProgress {
+  const duration = Number.isFinite(media.duration) ? Math.max(0, media.duration) : 0;
+  const currentTime = Number.isFinite(media.currentTime) ? Math.max(0, media.currentTime) : 0;
+  return { currentTime: duration ? Math.min(currentTime, duration) : currentTime, duration };
+}
 export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents) {
   // 网页全屏仍留在预览的对话框内，保留焦点锁和无障碍语义。
   Artplayer.FULLSCREEN_WEB_IN_BODY = false;
@@ -54,23 +60,28 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   };
   setCover(poster);
   let switching = Promise.resolve();
+  const updateProgress = () => events?.onProgress?.(mediaProgress(player.video));
   const markReady = () => { setRatio(player.video.videoWidth, player.video.videoHeight); ready = true; notify("ready"); };
   // iOS Safari 在用户点播放前不预加载画面，只会触发 loadedmetadata：读到时长即视为就绪，避免误报“加载较慢”。
-  player.on("video:loadedmetadata", markReady);
+  player.on("video:loadedmetadata", () => { markReady(); updateProgress(); });
   player.on("video:loadeddata", markReady);
   player.on("video:canplay", markReady);
   player.on("video:playing", markReady);
   player.on("video:waiting", () => notify(ready ? "buffering" : "loading"));
   player.on("video:pause", () => { if (ready) notify("ready"); });
-  player.on("video:seeked", () => { if (player.video.readyState >= 2) markReady(); });
+  player.on("video:durationchange", updateProgress);
+  player.on("video:timeupdate", updateProgress);
+  player.on("video:seeked", () => { updateProgress(); if (player.video.readyState >= 2) markReady(); });
   player.on("video:ended", () => { markReady(); events?.onPlaying(false); events?.onEnded(); });
   player.on("video:error", () => notify("failed"));
+  updateProgress();
   return {
     play: () => player.play(),
     pause: () => player.pause(),
-    seek: (time: number) => { player.video.currentTime = time; },
+    seek: (time: number) => { player.video.currentTime = time; updateProgress(); },
     setSource: (nextUrl: string, _name: string, nextCover?: string) => {
       player.pause(); ready = false; notify("loading");
+      events?.onProgress?.({ currentTime: 0, duration: 0 });
       container.style.removeProperty("--preview-video-ratio");
       player.poster = nextCover ?? ""; player.url = nextUrl; setCover(nextCover);
     },
@@ -147,9 +158,10 @@ export function createAudioPlayer(container: HTMLElement, url: string, name: str
     });
   }
   const updateProgress = () => {
-    progress?.setAttribute("aria-valuemax", String(Number.isFinite(player.audio.duration) ? player.audio.duration : 0));
-    progress?.setAttribute("aria-valuenow", String(Math.floor(player.audio.currentTime)));
-    onTime(player.audio.currentTime);
+    const value = mediaProgress(player.audio);
+    progress?.setAttribute("aria-valuemax", String(value.duration));
+    progress?.setAttribute("aria-valuenow", String(Math.floor(value.currentTime)));
+    onTime(value.currentTime); events?.onProgress?.(value);
   };
   let ready = false;
   const markReady = () => { ready = true; notify("ready"); };
@@ -162,11 +174,13 @@ export function createAudioPlayer(container: HTMLElement, url: string, name: str
   const ended = (event: Event) => { event.stopImmediatePropagation(); player.audio.pause(); markReady(); events?.onPlaying(false); events?.onEnded(); };
   player.audio.addEventListener("ended", ended, true);
   player.on("error", () => notify("failed"));
+  player.on("durationchange", updateProgress);
   player.on("timeupdate", updateProgress);
   player.on("seeked", () => { updateProgress(); if (player.audio.readyState >= 2) markReady(); });
+  updateProgress();
   return {
     play: () => player.audio.play(), pause: () => player.audio.pause(),
-    seek: (time: number) => { player.audio.currentTime = time; onTime(time); },
+    seek: (time: number) => { player.audio.currentTime = time; updateProgress(); },
     setSource: (nextUrl: string, nextName: string, nextCover?: string) => {
       player.audio.pause(); ready = false; notify("loading");
       if (title) title.textContent = nextName;

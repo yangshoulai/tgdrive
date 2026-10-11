@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useCursorPage } from "../pagination";
+import { useCursorPage, useFilePageSize } from "../pagination";
 import { SITE } from "../brand";
 import * as api from "../api";
 import { FileVisual, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
@@ -9,6 +9,7 @@ import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination,
 /* ---------- 全部文件 ---------- */
 
 export function Objects({ session }: { session: api.Session }) {
+  const pageSize = useFilePageSize();
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "public">("all");
@@ -17,7 +18,7 @@ export function Objects({ session }: { session: api.Session }) {
   useDocumentTitle(`全部文件 · ${SITE.admin}`);
   // 搜索输入防抖后交给服务端筛选，结果按修改时间分页加载。
   useEffect(() => { const timer = window.setTimeout(() => setQuery(search.trim()), 300); return () => window.clearTimeout(timer); }, [search]);
-  const fetchPage = useCallback((cursor: string | null) => api.adminObjects({ q: query, publicOnly: filter === "public", cursor }), [query, filter]);
+  const fetchPage = useCallback((cursor: string | null) => api.adminObjects({ q: query, publicOnly: filter === "public", cursor, limit: pageSize.pageSize }), [query, filter, pageSize.pageSize]);
   const pagination = useCursorPage(fetchPage);
   const page = pagination.page;
   const load = pagination.reload;
@@ -68,11 +69,11 @@ export function Objects({ session }: { session: api.Session }) {
       {page && (
         <footer className="list-footer">
           <span>共 {page.total.toLocaleString("zh-CN")} 个文件{filter === "all" && page.public_total ? ` · ${page.public_total.toLocaleString("zh-CN")} 个公开` : ""}</span>
-          <Pagination {...pagination} />
+          <Pagination {...pagination} {...pageSize} />
         </footer>
       )}
-      {preview && <PreviewModal file={preview} url={api.adminContentUrl(preview.bucket_id, preview.key)} downloadUrl={api.adminContentUrl(preview.bucket_id, preview.key, true)} assetUrl={key => api.adminContentUrl(preview.bucket_id, key)} loadAssets={(file, signal) => api.adminPreviewAssets(preview.bucket_id, file.key, signal)}
-        loadPlaylist={(file, cursor, signal) => api.adminPreviewList(preview.bucket_id, file.key, cursor, signal)}
+      {preview && <PreviewModal key={`${preview.bucket_id}:${preview.key}`} file={preview} url={api.adminContentUrl(preview.bucket_id, preview.key)} downloadUrl={api.adminContentUrl(preview.bucket_id, preview.key, true)} assetUrl={key => api.adminContentUrl(preview.bucket_id, key)} loadAssets={(file, signal) => api.adminPreviewAssets(preview.bucket_id, file.key, signal)}
+        playlistFiles={shown.filter(file => file.bucket_id === preview.bucket_id)}
         sourceFor={file => ({ url: api.adminContentUrl(preview.bucket_id, file.key), downloadUrl: api.adminContentUrl(preview.bucket_id, file.key, true), poster: api.adminFileThumbnail({ ...preview, ...file }, "poster"), thumbnail: api.adminFileThumbnail({ ...preview, ...file }) })}
         poster={api.adminFileThumbnail(preview, "poster")} thumbnail={api.adminFileThumbnail(preview)} onClose={() => setPreview(null)} />}
       {revoking && <ConfirmDialog title={`撤销“${baseName(revoking.key)}”的公开访问？`} description={`该文件属于 ${revoking.username ?? revoking.bucket_name}。撤销后原链接立即失效，用户可以重新分享。`} confirmLabel="撤销公开访问"

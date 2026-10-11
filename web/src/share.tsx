@@ -1,6 +1,6 @@
 /** 公开分享页：无需登录，只暴露文件名、大小和内容。带密码的分享先验证密码。 */
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { useCursorPage } from "./pagination";
+import { useCursorPage, useFilePageSize } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
 import { FilePreview, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
@@ -121,6 +121,7 @@ type FolderPage = api.PublicFolderPage;
 
 /** 访客只读浏览：进入子文件夹、预览、单文件或打包下载。 */
 function FolderShare({ token, folder, access, onPasswordRequired }: { token: string; folder: api.PublicFolder; access: string | null; onPasswordRequired: () => void }) {
+  const pageSize = useFilePageSize();
   const readPath = () => new URLSearchParams(window.location.search).get("path") ?? "";
   const [path, setPath] = useState(readPath);
   const [layout, setLayout] = useState<"list" | "grid">(() => localStorage.getItem("tgdrive:share-layout") === "grid" ? "grid" : "list");
@@ -137,12 +138,12 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
   const passwordRequired = useRef(onPasswordRequired);
   passwordRequired.current = onPasswordRequired;
   const fetchPage = useCallback(async (cursor: string | null) => {
-    try { return await api.publicFolderList(token, path, cursor, access); }
+    try { return await api.publicFolderList(token, path, cursor, access, pageSize.pageSize); }
     catch (reason) {
       if (reason instanceof api.ApiError && reason.code === "password_required") passwordRequired.current();
       throw new Error(reason instanceof api.ApiError && reason.status === 404 ? "这个文件夹不存在，可能已被分享者移动或删除。" : api.errorMessage(reason, "加载失败，请稍后重试"));
     }
-  }, [token, path, access]);
+  }, [token, path, access, pageSize.pageSize]);
   const pagination = useCursorPage(fetchPage);
   const page = pagination.page;
   const error = pagination.error;
@@ -296,7 +297,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
                 })}
               </div>
             )}
-      <div className="panel-more"><Pagination {...pagination} /></div>
+      <div className="panel-more"><Pagination {...pagination} {...pageSize} /></div>
       <iframe ref={downloadFrame} name={downloadTarget} title="文件下载响应" hidden onLoad={downloadResponse} />
       {preview && (
         <PreviewModal file={{ ...preview, key: preview.path }} onClose={() => setPreview(null)}
@@ -304,7 +305,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
           thumbnail={preview.thumbnails?.includes("thumb") ? api.publicThumbnail(api.publicFolderFile(token, preview.path, false, access)) : undefined}
           url={api.publicFolderFile(token, preview.path, false, access)} downloadUrl={api.publicFolderFile(token, preview.path, true, access)}
           loadAssets={(file, signal) => api.publicPreviewAssets(token, file.key, access, signal)} assetUrl={path => api.publicFolderFile(token, path, false, access)}
-          loadPlaylist={(file, cursor, signal) => api.publicPreviewList(token, file.key, cursor, access ?? null, signal)}
+          playlistFiles={page?.files.map(file => ({ ...file, key: file.path }))}
           sourceFor={file => { const url = api.publicFolderFile(token, file.key, false, access); return { url, downloadUrl: api.publicFolderFile(token, file.key, true, access), poster: file.thumbnails?.includes("thumb") ? api.publicThumbnail(url, "poster") : undefined, thumbnail: file.thumbnails?.includes("thumb") ? api.publicThumbnail(url) : undefined }; }} />
       )}
     </article>

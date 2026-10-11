@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useCursorPage } from "../pagination";
+import { useCallback, useState } from "react";
+import { useCursorPage, useFilePageSize } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
@@ -10,7 +10,9 @@ import { Button, ConfirmDialog, EmptyState, PageHeader, Pagination, SkeletonRows
 /* ---------- 回收站 ---------- */
 
 export function TrashView({ onChanged, onOpenFolder }: { onChanged: () => void; onOpenFolder: (prefix: string) => void }) {
-  const pagination = useCursorPage(api.listTrashPage);
+  const pageSize = useFilePageSize();
+  const fetchPage = useCallback((cursor: string | null) => api.listTrashPage(cursor, pageSize.pageSize), [pageSize.pageSize]);
+  const pagination = useCursorPage(fetchPage);
   const data = pagination.page;
   const load = pagination.reload;
   const [purging, setPurging] = useState<api.TrashItem[] | "all" | null>(null);
@@ -64,7 +66,7 @@ export function TrashView({ onChanged, onOpenFolder }: { onChanged: () => void; 
           </div>
         )}
       </section>
-      {data && <footer className="list-footer"><span>共 {data.total} 项，占用 {formatBytes(data.total_size)}</span><Pagination {...pagination} /></footer>}
+      {data && <footer className="list-footer"><span>共 {data.total} 项，占用 {formatBytes(data.total_size)}</span><Pagination {...pagination} {...pageSize} /></footer>}
       {purging && <ConfirmDialog title={purging === "all" ? "清空回收站？" : `永久删除“${baseName(purging[0].path)}”？`}
         description={purging === "all" ? "回收站中的所有文件都会被永久删除并释放空间，无法恢复。" : "文件会被永久删除并释放空间，无法恢复。"}
         confirmLabel="永久删除" onConfirm={() => purge(purging)} onClose={() => setPurging(null)} />}

@@ -1,6 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "./api";
 
+export const FILE_PAGE_SIZES = [50, 100, 200];
+const FILE_PAGE_SIZE_KEY = "tessera-file-page-size";
+export function useFilePageSize() {
+  const [pageSize, setPageSize] = useState(() => {
+    try {
+      const saved = Number(localStorage.getItem(FILE_PAGE_SIZE_KEY));
+      return FILE_PAGE_SIZES.includes(saved) ? saved : 100;
+    } catch { return 100; }
+  });
+  const changePageSize = useCallback((size: number) => {
+    if (!FILE_PAGE_SIZES.includes(size)) return;
+    setPageSize(size);
+    try { localStorage.setItem(FILE_PAGE_SIZE_KEY, String(size)); } catch { /* 存储不可用时仍可切换。 */ }
+  }, []);
+  return { pageSize, changePageSize };
+}
+
 /** 只保留当前页与游标历史；旧请求不能覆盖切换目录或筛选后的结果。 */
 export function useCursorPage<T extends { next_cursor: string | number | null }>(fetchPage: (cursor: string | null) => Promise<T>) {
   const [page, setPage] = useState<T | null>(null);

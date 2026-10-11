@@ -1,7 +1,8 @@
 /** Tessera 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
-import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type KeyboardEventHandler, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { BRAND } from "./brand";
+import { FILE_PAGE_SIZES } from "./pagination";
 
 /* ---------- 图标 ---------- */
 
@@ -228,7 +229,7 @@ if (typeof document !== "undefined") {
   document.addEventListener("keydown", event => { if (NAVIGATION_KEYS.has(event.key)) root.dataset.input = "keyboard"; }, true);
 }
 
-export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, className = "", expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string }) {
+export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, className = "", initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
@@ -278,8 +279,8 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     if (!node) return;
     modalStack.at(-1)?.setAttribute("inert", "");
     modalStack.push(node);
-    // 只自动聚焦需要输入的控件；没有时聚焦对话框本身，避免窗口按钮一打开就带着焦点框。
-    const preferred = focusable(node).find(item => item.matches("[autofocus], .modal-body input, .modal-body select, .modal-body textarea"));
+    // 表单沿用输入控件优先；预览聚焦对话框，避免播放控件打开时就被选中。
+    const preferred = initialFocus === "auto" ? focusable(node).find(item => item.matches("[autofocus], .modal-body input, .modal-body select, .modal-body textarea")) : undefined;
     (preferred ?? node).focus();
     document.body.classList.add("has-modal");
     const handleKey = (event: KeyboardEvent) => {
@@ -297,8 +298,8 @@ export function Modal({ title, description, onClose, children, footer, actions, 
       const items = focusable(node);
       if (!items.length) { event.preventDefault(); node.focus(); return; }
       const first = items[0], last = items[items.length - 1];
-      if (event.shiftKey && (document.activeElement === first || !node.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && (document.activeElement === last || !node.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+      if (event.shiftKey && (document.activeElement === node || document.activeElement === first || !node.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (document.activeElement === node || document.activeElement === last || !node.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
     };
     document.addEventListener("keydown", handleKey);
     return () => {
@@ -309,10 +310,10 @@ export function Modal({ title, description, onClose, children, footer, actions, 
       else modalStack.at(-1)?.removeAttribute("inert");
       if (wasTop && previous?.isConnected) previous.focus();
     };
-  }, [minimized]);
+  }, [minimized, initialFocus]);
   return createPortal(
     <div ref={backdrop} className={`modal-backdrop${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}${minimized ? " is-minimized" : ""}`} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && !pinned && !minimized && modalStack.at(-1) === ref.current) onClose(); }}>
-      <div ref={ref} className={`modal modal-${size} ${className}${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}`} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1}>
+      <div ref={ref} className={`modal modal-${size} ${className}${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}`} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={onKeyDownCapture}>
         <header className="modal-header">
           {leading ?? (icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>)}
           <div className="modal-heading">
@@ -595,11 +596,15 @@ export function useDocumentTitle(title: string) {
   useEffect(() => { document.title = title; }, [title]);
 }
 
-export function Pagination({ number, hasPrevious, hasNext, loading, previous, next }: {
+export function Pagination({ number, hasPrevious, hasNext, loading, previous, next, pageSize, changePageSize }: {
   number: number; hasPrevious: boolean; hasNext: boolean; loading: boolean; previous: () => void; next: () => void;
+  pageSize?: number; changePageSize?: (size: number) => void;
 }) {
-  if (number === 1 && !hasPrevious && !hasNext && !loading) return null;
+  if (!changePageSize && number === 1 && !hasPrevious && !hasNext && !loading) return null;
   return <nav className="pagination" aria-label="分页">
+    {changePageSize && <label className="pagination-size"><span>每页</span><select className="input" aria-label="每页文件数量" value={pageSize} onChange={event => changePageSize(Number(event.target.value))}>
+      {FILE_PAGE_SIZES.map(size => <option key={size} value={size}>{size} 项</option>)}
+    </select></label>}
     <Button size="sm" disabled={loading || !hasPrevious} onClick={previous}>上一页</Button>
     <span aria-live="polite" aria-atomic="true">第 {number} 页</span>
     <Button size="sm" disabled={loading || !hasNext} onClick={next}>下一页</Button>

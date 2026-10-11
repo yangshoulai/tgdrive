@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useCursorPage } from "../pagination";
+import { useCallback, useEffect, useState } from "react";
+import { useCursorPage, useFilePageSize } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
@@ -10,7 +10,9 @@ import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination,
 /* ---------- 公开分享 ---------- */
 
 export function SharedView({ session, onChanged, onOpenFolder }: { session: api.Session; onChanged: () => void; onOpenFolder: (prefix: string) => void }) {
-  const pagination = useCursorPage(api.listPublicPage);
+  const pageSize = useFilePageSize();
+  const fetchPage = useCallback((cursor: string | null) => api.listPublicPage(cursor, pageSize.pageSize), [pageSize.pageSize]);
+  const pagination = useCursorPage(fetchPage);
   const items = pagination.page?.objects ?? null;
   const error = pagination.error;
   const load = pagination.reload;
@@ -104,7 +106,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                 </div>
               )}
       </section>
-      <footer className="list-footer"><span>共 {pagination.page?.total ?? "—"} 个公开项目</span><Pagination {...pagination} /></footer>
+      <footer className="list-footer"><span>共 {pagination.page?.total ?? "—"} 个公开项目</span><Pagination {...pagination} {...pageSize} /></footer>
       {revoking && <ConfirmDialog title={`停止分享“${baseName(revoking.key)}”？`} description="原链接会立即失效。再次分享时会生成新的链接。" confirmLabel="停止分享"
         onClose={() => setRevoking(null)}
         onConfirm={async () => {
@@ -112,6 +114,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
           catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
         }} />}
       {preview && <PreviewModal file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)}
+        playlistFiles={items ?? undefined}
         poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} />}
     </>
   );
