@@ -206,6 +206,11 @@ class TgDriveASGI(StaticFiles):
                 data, mime, etag = self.user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, "private, max-age=86400")
                 return
+            if path == "/api/admin/v1/thumbnail" and method == "GET":
+                data, mime, etag = self.admin.thumbnail(token, int(query.get("bucket_id", ["0"])[0]),
+                    query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
+                await self._send_thumbnail(tracked_send, headers, data, mime, etag, "private, max-age=86400")
+                return
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
                 await self._content(tracked_send, method, token, query, headers, admin=False)
                 return
@@ -493,6 +498,9 @@ class TgDriveASGI(StaticFiles):
             if method == "GET" and route == "/preview-assets":
                 return 200, await self.admin.preview_assets(token, int(query.get("bucket_id", [""])[0]),
                                                            query.get("path", [""])[0]), {}
+            if method == "GET" and route == "/preview-list":
+                return 200, await self.admin.preview_list(token, int(query.get("bucket_id", [""])[0]),
+                    query.get("path", [""])[0], query.get("cursor", [None])[0] or None), {}
             if method == "POST" and route == "/objects/public":
                 return 200, self.admin.set_object_public(token, csrf, int(payload["bucket_id"]), payload["path"],
                                                          bool(payload["public"])), {}
@@ -566,6 +574,9 @@ class TgDriveASGI(StaticFiles):
                     cursor=query.get("cursor", [""])[0]), {}
             if method == "GET" and route == "/preview-assets":
                 return 200, await self.user.preview_assets(token, query.get("path", [""])[0]), {}
+            if method == "GET" and route == "/preview-list":
+                return 200, await self.user.preview_list(token, query.get("path", [""])[0],
+                                                        query.get("cursor", [None])[0] or None), {}
             if method == "POST" and route == "/public":
                 paths = payload["paths"] if "paths" in payload else [payload["path"]]
                 if not isinstance(paths, list):

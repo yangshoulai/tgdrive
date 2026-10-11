@@ -39,6 +39,8 @@ const ICONS = {
   alert: "M12 3.5 2.5 20h19zM12 10v4.5m0 2.5h.01",
   info: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-10v5m0-8h.01",
   x: "M6 6l12 12M18 6 6 18",
+  pin: "m8 3 8 0-1 5 4 5H5l4-5-1-5M12 13v8",
+  minimize: "M5 16h14",
   maximize: "M5 5h14v14H5z",
   restore: "M8 8h12v12H8zM4 16V4h12",
   fullscreen: "M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5",
@@ -57,6 +59,9 @@ const ICONS = {
   server: "M4 4h16v6H4zm0 10h16v6H4zm3-7h.01M7 17h.01",
   monitor: "M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm4 15h8m-4-3v3",
   play: "M7 4.8v14.4a.8.8 0 0 0 1.2.7l11.3-7.2a.8.8 0 0 0 0-1.4L8.2 4.1a.8.8 0 0 0-1.2.7Z",
+  pause: "M8 5v14M16 5v14",
+  previous: "M5 5v14m13-14L8 12l10 7V5Z",
+  next: "M19 5v14M6 5l10 7-10 7V5Z",
   sun: "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-13v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4",
   moon: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z",
   refresh: "M20 11a8 8 0 0 0-14.6-4.5L4 8m0-4v4h4m-4 5a8 8 0 0 0 14.6 4.5L20 16m0 4v-4h-4",
@@ -223,17 +228,21 @@ if (typeof document !== "undefined") {
   document.addEventListener("keydown", event => { if (NAVIGATION_KEYS.has(event.key)) root.dataset.input = "keyboard"; }, true);
 }
 
-export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, className = "", expandable = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; expandable?: boolean }) {
+export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, className = "", expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
   const [maximized, setMaximized] = useState(false), [fullscreen, setFullscreen] = useState(false), [switchingScreen, setSwitchingScreen] = useState(false);
+  const [pinned, setPinned] = useState(false), [minimized, setMinimized] = useState(false);
   const supportsFullscreen = Boolean(document.fullscreenEnabled && document.documentElement.requestFullscreen);
   const previousFocus = useRef(document.activeElement as HTMLElement | null);
   const closeRef = useRef(onClose);
   const dismissibleRef = useRef(dismissible);
+  const pinnedRef = useRef(pinned);
   closeRef.current = onClose;
   dismissibleRef.current = dismissible;
+  pinnedRef.current = pinned;
+  useEffect(() => { setMinimized(false); }, [windowKey]);
   useEffect(() => {
     if (!expandable) return;
     const node = backdrop.current;
@@ -253,7 +262,17 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     } catch { toast.error("无法进入全屏，可以使用最大化预览。"); }
     finally { setSwitchingScreen(false); }
   }
+  async function minimize() {
+    if (switchingScreen) return;
+    setSwitchingScreen(true);
+    try {
+      if (document.fullscreenElement && backdrop.current?.contains(document.fullscreenElement)) await document.exitFullscreen();
+      setMinimized(true);
+    } catch { toast.error("请先退出全屏，再最小化预览。"); }
+    finally { setSwitchingScreen(false); }
+  }
   useEffect(() => {
+    if (minimized) return;
     const previous = previousFocus.current;
     const node = ref.current;
     if (!node) return;
@@ -268,6 +287,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
       if ((event.target as HTMLElement).closest?.(".menu")) return;
       if (event.key === "Escape") {
         event.preventDefault(); event.stopPropagation();
+        if (pinnedRef.current) return;
         // 全屏中的 Esc 只还原视图，避免同时关掉正在播放的预览。
         if (document.fullscreenElement && backdrop.current?.contains(document.fullscreenElement)) void document.exitFullscreen().catch(() => {});
         else if (dismissibleRef.current) closeRef.current();
@@ -289,10 +309,10 @@ export function Modal({ title, description, onClose, children, footer, actions, 
       else modalStack.at(-1)?.removeAttribute("inert");
       if (wasTop && previous?.isConnected) previous.focus();
     };
-  }, []);
+  }, [minimized]);
   return createPortal(
-    <div ref={backdrop} className={`modal-backdrop${maximized || fullscreen ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}`} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && modalStack.at(-1) === ref.current) onClose(); }}>
-      <div ref={ref} className={`modal modal-${size} ${className}${maximized || fullscreen ? " is-expanded" : ""}`} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} tabIndex={-1}>
+    <div ref={backdrop} className={`modal-backdrop${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}${minimized ? " is-minimized" : ""}`} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && !pinned && !minimized && modalStack.at(-1) === ref.current) onClose(); }}>
+      <div ref={ref} className={`modal modal-${size} ${className}${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}`} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1}>
         <header className="modal-header">
           {leading ?? (icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>)}
           <div className="modal-heading">
@@ -300,8 +320,10 @@ export function Modal({ title, description, onClose, children, footer, actions, 
             {description && <p>{description}</p>}
           </div>
           <div className="modal-window-actions">
-            {actions}
-            {expandable && <>
+            {!minimized && actions}
+            {pinnable && !minimized && <IconButton icon="pin" label={pinned ? "取消固定预览" : "固定预览（仅手动关闭）"} size="sm" active={pinned} onClick={() => setPinned(value => !value)} />}
+            {minimizable && <IconButton icon={minimized ? "restore" : "minimize"} label={minimized ? "恢复预览" : "最小化预览"} size="sm" disabled={switchingScreen} onClick={() => minimized ? setMinimized(false) : void minimize()} />}
+            {expandable && !minimized && <>
               <IconButton icon={maximized ? "restore" : "maximize"} label={maximized ? "还原预览" : "最大化预览"} onClick={() => setMaximized(value => !value)} size="sm" active={maximized} disabled={fullscreen || switchingScreen} />
               {supportsFullscreen && <IconButton icon={fullscreen ? "exitFullscreen" : "fullscreen"} label={fullscreen ? "退出全屏" : "全屏预览"} onClick={() => void toggleFullscreen()} size="sm" active={fullscreen} disabled={switchingScreen} />}
             </>}
@@ -310,6 +332,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
         </header>
         {children && <div className="modal-body">{children}</div>}
         {footer && <footer className="modal-footer">{footer}</footer>}
+        {minimized && minimizedContent && <div className="modal-minimized-controls">{minimizedContent}</div>}
       </div>
     </div>, document.body,
   );

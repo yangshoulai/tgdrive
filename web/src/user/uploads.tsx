@@ -64,7 +64,7 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
   );
 }
 
-type UploadJob = { id: string; file: File; path: string; isPublic: boolean; percent: number; status: "queued" | "uploading" | "done" | "error" | "canceled"; error?: string; result?: api.FileItem; resumed?: boolean; phase?: "hashing"; instant?: boolean };
+type UploadJob = { id: string; file: File; path: string; isPublic: boolean; percent: number; status: "queued" | "uploading" | "done" | "error" | "canceled"; error?: string; result?: api.FileItem; resumed?: boolean; phase?: "hashing"; instant?: boolean; completedAt?: number };
 
 /** 超过这个大小的文件分段上传：每段失败自动重试，网络中断或刷新页面后重新选择同一文件即可续传。 */
 const MULTIPART_THRESHOLD = 64 * 1024 * 1024;
@@ -74,6 +74,8 @@ const PART_CONCURRENCY = 4;
 const FILE_CONCURRENCY = 2;
 /** 小于这个大小的文件不做秒传探测：哈希加一次请求的开销比直接上传还大。 */
 const INSTANT_MIN_SIZE = 1024 * 1024;
+/** 成功反馈留出查看大小、复制分享链接的时间，再逐项收起。 */
+const COMPLETED_VISIBLE_MS = 8000;
 const resumeKey = (path: string, file: File) => `tgdrive:resume:${path}:${file.size}:${file.lastModified}`;
 const sleep = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
 
@@ -165,6 +167,14 @@ export function useUploadQueue(onSettled: () => void) {
     disposed.current = false;
     return () => { disposed.current = true; queue.current = []; aborters.current.forEach(abort => abort()); };
   }, []);
+  useEffect(() => {
+    const completed = jobs.filter(job => job.status === "done" && job.completedAt != null);
+    if (!completed.length) return;
+    const expires = Math.min(...completed.map(job => job.completedAt! + COMPLETED_VISIBLE_MS));
+    const timer = window.setTimeout(() => setJobs(current => current.filter(job =>
+      job.status !== "done" || job.completedAt == null || job.completedAt + COMPLETED_VISIBLE_MS > Date.now())), Math.max(0, expires - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [jobs]);
 
   const workers = useRef(0);
   const tally = useRef({ done: 0, failed: 0, instant: 0 });
@@ -205,7 +215,7 @@ export function useUploadQueue(onSettled: () => void) {
     }
     try {
       const result = await promise;
-      update(job.id, { status: "done", percent: 100, result });
+      update(job.id, { status: "done", percent: 100, result, completedAt: Date.now() });
       tally.current.done++;
       const source = thumbnailSource(job.file.name, job.file.type, job.file.size);
       if (!disposed.current && !result.thumbnails?.length && source) {
@@ -222,7 +232,7 @@ export function useUploadQueue(onSettled: () => void) {
         if (uploadId) void api.abortUpload(uploadId).catch(() => undefined);
       }
       update(job.id, { status: aborted ? "canceled" : "error",
-        error: multipart && !aborted ? `${api.errorMessage(reason, "上传失败，请稍后重试")}。进度已保存，重新上传同一文件即可继续。` : api.errorMessage(reason, "上传失败，请稍后重试") });
+        error: multipart && !aborted ? `${api.errorMessage(reason, "上传失败，请稍后重试")}。进度已保存，点击重试即可继续。` : api.errorMessage(reason, "上传失败，请稍后重试") });
       if (!aborted) tally.current.failed++;
     } finally { aborters.current.delete(job.id); canceled.current.delete(job.id); }
     if (!disposed.current) settled.current();
@@ -238,7 +248,7 @@ export function useUploadQueue(onSettled: () => void) {
     const { done, failed, instant } = tally.current;
     tally.current = { done: 0, failed: 0, instant: 0 };
     if (disposed.current) return;
-    if (failed) toast.error(`${failed} 个文件上传失败，可在上传列表中查看原因`);
+    if (failed) toast.error(`${failed} 个文件上传失败，可在上传列表中重试`);
     else if (done) toast.success(instant === done ? (done === 1 ? "秒传完成" : `${done} 个文件秒传完成`) : `${done === 1 ? "上传完成" : `${done} 个文件上传完成`}${instant ? `（其中 ${instant} 个秒传）` : ""}`);
   }
   function run() {
@@ -250,7 +260,16 @@ export function useUploadQueue(onSettled: () => void) {
   function enqueue(items: { file: File; path: string; isPublic: boolean }[]) {
     const next = items.map(item => ({ ...item, id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, percent: 0, status: "queued" as const }));
     queue.current.push(...next);
-    setJobs(current => [...current.filter(job => job.status === "queued" || job.status === "uploading"), ...next]);
+    setJobs(current => [...current, ...next]);
+    run();
+  }
+  function retry(id: string) {
+    const failed = jobs.find(job => job.id === id && job.status === "error");
+    if (!failed || aborters.current.has(id) || queue.current.some(job => job.id === id)) return;
+    // 保留原始 File 与目标路径，分段上传沿用原来的续传记录。
+    const next: UploadJob = { id, file: failed.file, path: failed.path, isPublic: failed.isPublic, percent: 0, status: "queued" };
+    setJobs(current => current.map(job => job.id === id ? next : job));
+    queue.current.push(next);
     run();
   }
   function cancel(id: string) {
@@ -265,12 +284,13 @@ export function useUploadQueue(onSettled: () => void) {
     setJobs(current => current.map(job => job.status === "queued" ? { ...job, status: "canceled" } : job));
   }
   function clear() { setJobs(current => current.filter(job => job.status === "queued" || job.status === "uploading")); }
-  return { jobs, enqueue, cancel, cancelAll, clear };
+  return { jobs, enqueue, retry, cancel, cancelAll, clear };
 }
 
 export function UploadTray({ queue }: { queue: UploadQueue }) {
   const [collapsed, setCollapsed] = useState(false);
   const { jobs } = queue;
+  useEffect(() => { if (!jobs.length) setCollapsed(false); }, [jobs.length]);
   if (!jobs.length) return null;
   const active = jobs.filter(job => job.status === "queued" || job.status === "uploading").length;
   const failed = jobs.filter(job => job.status === "error").length;
@@ -278,7 +298,7 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
   const completed = jobs.filter(job => job.status === "done").length;
   const allCanceled = canceledCount === jobs.length;
   const overall = jobs.reduce((sum, job) => sum + (job.status === "done" ? 100 : job.percent), 0) / jobs.length;
-  const title = active ? `正在上传 ${jobs.length - active + 1}/${jobs.length}` : failed ? `${failed} 个文件上传失败` : allCanceled ? "上传已取消" : canceledCount ? `${completed} 个完成，${canceledCount} 个已取消` : "上传完成";
+  const title = active ? `正在上传 ${active} 个文件` : failed ? `${failed} 个文件上传失败` : allCanceled ? "上传已取消" : canceledCount ? `${completed} 个完成，${canceledCount} 个已取消` : "上传完成";
   return (
     <aside className={`upload-tray${collapsed ? " is-collapsed" : ""}`} aria-label="上传进度" aria-live="polite">
       <header>
@@ -302,6 +322,7 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
                 {job.status === "uploading" && <small className="muted">{job.phase === "hashing" ? `检查中 ${Math.round(job.percent)}%` : job.percent >= 100 ? "处理中" : `${Math.round(job.percent)}%`}</small>}
                 {job.status === "queued" && <small className="muted">等待中</small>}
                 {(job.status === "uploading" || job.status === "queued") && <IconButton icon="x" size="sm" label={`取消上传 ${job.file.name}`} onClick={() => queue.cancel(job.id)} />}
+                {job.status === "error" && <Button size="sm" icon="refresh" aria-label={`重试上传 ${job.file.name}`} onClick={() => queue.retry(job.id)}>重试</Button>}
                 {job.status === "done" && job.result?.public_token && <IconButton icon="copy" size="sm" label="复制分享链接" onClick={() => void copyText(api.publicLinks(job.result!.public_token!, job.file.name).page, "分享链接已复制")} />}
                 {job.status === "done" && !job.result?.public_token && <Icon name="check" size={16} className="tone-success" />}
               </span>

@@ -17,6 +17,7 @@ export type FileItem = {
   thumbnails?: string[];
 };
 export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subtitle"; language: string | null; size: number; etag: string };
+export type PreviewListPage = { objects: FileItem[]; next_cursor: string | null };
 /** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
 export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number> };
 export type Account = { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
@@ -114,6 +115,17 @@ export const changePassword = (oldPassword: string, newPassword: string) => post
 export const listFiles = (prefix = "", cursor: string | null = null, publicOnly = false) =>
   request<ListPage>(`/api/user/v1/list?limit=50&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const previewAssets = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`/api/user/v1/preview-assets?path=${encodeURIComponent(path)}`, { signal });
+export const previewList = (path: string, cursor: string | null, signal: AbortSignal) => request<PreviewListPage>(
+  `/api/user/v1/preview-list?path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+export const adminPreviewList = (bucketId: number, path: string, cursor: string | null, signal: AbortSignal) => request<PreviewListPage>(
+  `/api/admin/v1/preview-list?bucket_id=${bucketId}&path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+export const publicPreviewList = async (token: string, path: string, cursor: string | null, access: string | null, signal: AbortSignal): Promise<PreviewListPage> => {
+  const params = new URLSearchParams({ path: path.slice(0, path.lastIndexOf("/") + 1), limit: "200" });
+  if (cursor) params.set("cursor", cursor);
+  if (access) params.set("access", access);
+  const page = await request<PublicFolderPage>(`/api/public/v1/folders/${encodeURIComponent(token)}/list?${params}`, { signal });
+  return { objects: page.files.map(file => ({ ...file, key: file.path })), next_cursor: page.next_cursor };
+};
 export const adminPreviewAssets = (bucketId: number, path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`/api/admin/v1/preview-assets?bucket_id=${bucketId}&path=${encodeURIComponent(path)}`, { signal });
 export const publicPreviewAssets = (token: string, path: string, access?: string | null, signal?: AbortSignal) => {
   const params = new URLSearchParams({ path });
@@ -318,6 +330,9 @@ export const adminObjects = (options: { q?: string; publicOnly?: boolean; cursor
 };
 export const setAdminObjectPublic = (bucketId: number, path: string, isPublic: boolean) => post<FileItem>("/api/admin/v1/objects/public", { bucket_id: bucketId, path, public: isPublic });
 export const adminContentUrl = (bucketId: number, path: string, download = false) => `/api/admin/v1/content?bucket_id=${bucketId}&path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
+export const adminFileThumbnail = (file: AdminObject, variant: ThumbnailVariant = "thumb") =>
+  file.thumbnails?.includes("thumb") || file.has_thumbnail
+    ? `/api/admin/v1/thumbnail?bucket_id=${file.bucket_id}&path=${encodeURIComponent(file.key)}&variant=${variant}&v=${file.etag}.${(file.thumbnails ?? []).join(".")}` : undefined;
 export const runAdminGc = (limit = 100) => post<{ processed: number; deleted: number; failed: number; dead: number }>("/api/admin/v1/maintenance/gc", { limit }, 15 * 60000);
 export const runAdminScrub = (limit = 100, deep = false) => post<{ checked: number; wrapped: boolean; bad: { blob_uuid: string; chunks: [number, number][] }[] }>("/api/admin/v1/maintenance/scrub", { limit, deep }, 15 * 60000);
 

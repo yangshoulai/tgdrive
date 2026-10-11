@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { SITE } from "../brand";
 import * as api from "../api";
-import { FileTile, baseName, getFileKind } from "../files";
+import { FileVisual, baseName, getFileKind } from "../files";
 
 import { Badge, Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, formatDate, formatDateTime, useDocumentTitle, type IconName } from "../ui";
 
@@ -79,7 +79,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
               <ul className="recent-list">
                 {files.slice(0, 6).map(item => (
                   <li key={`${item.bucket_id}:${item.key}`}>
-                    <FileTile kind={getFileKind(item.content_type, item.key)} />
+                    <FileVisual kind={getFileKind(item.content_type, item.key)} src={api.adminFileThumbnail(item)} />
                     <span className="recent-copy"><strong>{baseName(item.key)}</strong><small>{item.username ?? item.bucket_name}</small></span>
                     {item.public_token && <Badge tone="public" icon="globe">公开</Badge>}
                     <span className="muted recent-meta">{formatBytes(item.size)}</span>

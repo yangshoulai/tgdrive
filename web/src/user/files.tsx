@@ -14,7 +14,7 @@ import { UploadDialog, type UploadQueue } from "./uploads";
 /* ---------- 文件 ---------- */
 
 type Entry = { kind: "folder"; key: string; size?: number } | { kind: "file"; key: string; file: api.FileItem };
-type SortKey = "name" | "size" | "modified";
+type SortKey = "name" | "type" | "size" | "modified";
 
 export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number }) {
   const [search, setSearch] = useState("");
@@ -34,6 +34,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [dragging, setDragging] = useState(false);
   const lastUploadRevision = useRef(uploadRevision);
   const fileInput = useRef<HTMLInputElement>(null);
+  const breadcrumbNav = useRef<HTMLElement>(null);
   const dragDepth = useRef(0);
   const name = prefix ? baseName(prefix) : "我的文件";
   useDocumentTitle(`${query ? `搜索“${query}”` : name} · ${BRAND}`);
@@ -60,12 +61,27 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   useEffect(() => { setSelected(new Set()); }, [fetchPage, pagination.number]);
   useEffect(() => { setSearch(""); setQuery(""); }, [prefix]);
   useEffect(() => { localStorage.setItem("tgdrive:layout", layout); }, [layout]);
+  useEffect(() => {
+    // 深路径始终先展示当前位置；祖先目录仍可横向滚动或通过键盘访问。
+    const nav = breadcrumbNav.current;
+    if (!nav) return;
+    const revealCurrent = () => { nav.scrollLeft = nav.scrollWidth; };
+    revealCurrent();
+    const observer = new ResizeObserver(revealCurrent);
+    observer.observe(nav);
+    return () => observer.disconnect();
+  }, [prefix, query]);
 
   const entries = useMemo<Entry[]>(() => {
     const direction = sort.desc ? -1 : 1;
     const fileEntries = files
       .filter(file => filter === "all" || file.public_token)
-      .sort((a, b) => direction * (sort.key === "size" ? a.size - b.size : sort.key === "modified" ? a.modified_at - b.modified_at : baseName(a.key).localeCompare(baseName(b.key), "zh-CN", { numeric: true })))
+      .sort((a, b) => {
+        const name = baseName(a.key).localeCompare(baseName(b.key), "zh-CN", { numeric: true });
+        const primary = sort.key === "size" ? a.size - b.size : sort.key === "modified" ? a.modified_at - b.modified_at
+          : sort.key === "type" ? kindLabel(getFileKind(a.content_type, a.key)).localeCompare(kindLabel(getFileKind(b.content_type, b.key)), "zh-CN") : name;
+        return direction * (primary || name);
+      })
       .map(file => ({ kind: "file" as const, key: file.key, file }));
     const folderEntries = [...folders].filter(key => filter === "all" || publicFolders[key])
       .sort((a, b) => sort.key === "size"
@@ -217,12 +233,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <Button variant="primary" icon="upload" onClick={() => fileInput.current?.click()}>上传</Button>
           <input ref={fileInput} type="file" multiple hidden onChange={event => { startUpload(event.target.files); event.target.value = ""; }} />
         </>}>
-        {(prefix || query) && <nav className="breadcrumbs" aria-label="当前位置">
-          <button type="button" className={dropClass("")} {...dropProps("")} onClick={() => onOpenFolder("")} aria-current={!prefix && !query ? "page" : undefined}><Icon name="home" size={15} />我的文件</button>
-          {crumbs.map((part, index) => (
-            <span key={index}><Icon name="chevronRight" size={14} /><button type="button" className={dropClass(`${crumbs.slice(0, index + 1).join("/")}/`)} {...dropProps(`${crumbs.slice(0, index + 1).join("/")}/`)} onClick={() => onOpenFolder(`${crumbs.slice(0, index + 1).join("/")}/`)} aria-current={index === crumbs.length - 1 && !query ? "page" : undefined}>{part}</button></span>
-          ))}
-          {query && <span><Icon name="chevronRight" size={14} /><span className="crumb-current">搜索结果</span></span>}
+        {(prefix || query) && <nav ref={breadcrumbNav} className="breadcrumbs file-breadcrumbs" aria-label="当前位置">
+          <ol>
+            <li><button type="button" className={dropClass("")} {...dropProps("")} onClick={() => onOpenFolder("")} title="我的文件"><Icon name="home" size={15} /><span className="crumb-label">我的文件</span></button></li>
+            {crumbs.map((part, index) => {
+              const path = `${crumbs.slice(0, index + 1).join("/")}/`;
+              return <li key={path}><Icon name="chevronRight" size={12} /><button type="button" className={dropClass(path)} {...dropProps(path)} onClick={() => onOpenFolder(path)} title={part} aria-current={index === crumbs.length - 1 && !query ? "page" : undefined}><span className="crumb-label">{part}</span></button></li>;
+            })}
+            {query && <li><Icon name="chevronRight" size={12} /><span className="crumb-current" aria-current="page">搜索结果</span></li>}
+          </ol>
         </nav>}
       </PageHeader>
 
@@ -242,9 +261,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索全部文件，按回车" label="搜索文件" />
           <div className="toolbar-actions">
             <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />
-            <label className="mobile-file-sort"><span className="sr-only">本页排序</span><select aria-label="本页排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
+            <label className={`mobile-file-sort${layout === "grid" ? " is-grid-sort" : ""}`}><span className="sr-only">本页排序</span><select aria-label="本页排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
               const [key, direction] = event.target.value.split(":"); setSort({ key: key as SortKey, desc: direction === "desc" });
-            }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>
+            }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="type:asc">类型升序</option><option value="type:desc">类型降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>
             <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
           </div>
         </div>
@@ -262,7 +281,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             <div className="data-row data-head" role="row">
               <span role="columnheader" className="cell-check"><Checkbox label="全选本页" checked={allSelected} indeterminate={selected.size > 0 && !allSelected} onChange={value => setSelected(value ? new Set(entries.map(entry => entry.key)) : new Set())} /></span>
               <SortHeader label="名称" column="name" sort={sort} onSort={setSort} className="cell-name" />
-              <span role="columnheader" className="cell-type">类型</span>
+              <SortHeader label="类型" column="type" sort={sort} onSort={setSort} className="cell-type" />
               <SortHeader label="大小" column="size" sort={sort} onSort={setSort} className="cell-size" />
               <SortHeader label="修改时间" column="modified" sort={sort} onSort={setSort} className="cell-date" />
               <span role="columnheader" className="cell-actions"><span className="sr-only">操作</span></span>
@@ -360,7 +379,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       {moving && <MoveDialog targets={moving} startPrefix={query ? "" : prefix} onClose={() => setMoving(null)}
         onMove={async (dest, conflict) => { await moveEntries(moving, dest, conflict); setMoving(null); }} />}
       {preview && <PreviewModal file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)}
-        poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} onShare={() => setSharing(preview)}
+        poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} onShare={file => { setPreview(file); setSharing(file); }}
         onImageLoad={image => {
           // 预览过的图片顺便补上缩略图和封面图（例如通过 S3 上传、没有缩略图的图片），不必再下载一次原图。
           // 已有封面、矢量图，或已有缩略图且原图不够大（不会生成封面）时跳过。
@@ -405,7 +424,7 @@ function SortHeader({ label, column, sort, onSort, className }: { label: string;
   const active = sort.key === column;
   return (
     <span role="columnheader" className={className} aria-sort={active ? (sort.desc ? "descending" : "ascending") : "none"}>
-      <button type="button" className={`sort-button${active ? " is-active" : ""}`} onClick={() => onSort({ key: column, desc: active ? !sort.desc : column !== "name" })}>
+      <button type="button" className={`sort-button${active ? " is-active" : ""}`} onClick={() => onSort({ key: column, desc: active ? !sort.desc : column === "size" || column === "modified" })}>
         {label}<Icon name="chevronDown" size={13} className={active && !sort.desc ? "is-flipped" : ""} />
       </button>
     </span>

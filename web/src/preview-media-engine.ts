@@ -5,7 +5,8 @@ import "aplayer/dist/APlayer.min.css";
 
 export type MediaState = "loading" | "ready" | "buffering" | "failed";
 type Notify = (state: MediaState) => void;
-export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string) {
+type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void };
+export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents) {
   // 网页全屏仍留在预览的对话框内，保留焦点锁和无障碍语义。
   Artplayer.FULLSCREEN_WEB_IN_BODY = false;
   // 不自动重连：播放失败直接交给预览界面显示原因与重试，避免画面上反复出现“重新连接”。
@@ -29,14 +30,28 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   player.on("video:play", () => playButton?.setAttribute("aria-label", "暂停视频"));
   player.on("video:pause", () => playButton?.setAttribute("aria-label", "播放视频"));
   player.on("video:ended", () => playButton?.setAttribute("aria-label", "播放视频"));
+  player.on("video:play", () => events?.onPlaying(true));
+  player.on("video:pause", () => events?.onPlaying(false));
   // 播放器的网页全屏先消费 Esc，不能让外层预览同时关闭。
   const exitWebScreen = (event: KeyboardEvent) => {
     if (event.key === "Escape" && player.fullscreenWeb) { event.preventDefault(); event.stopPropagation(); player.fullscreenWeb = false; }
   };
   document.addEventListener("keydown", exitWebScreen, true);
   let ready = false, destroyed = false, subtitleUrl: string | null = null, version = 0;
+  const setRatio = (width: number, height: number) => {
+    if (!destroyed && width > 0 && height > 0) container.style.setProperty("--preview-video-ratio", String(width / height));
+  };
+  // 封面与视频都使用原始比例；元信息就绪后以实际视频尺寸为准，兼容旧封面。
+  let cover: HTMLImageElement | null = null;
+  const setCover = (src?: string) => {
+    if (cover) { cover.onload = null; cover.src = ""; }
+    cover = src ? new Image() : null;
+    const image = cover;
+    if (image) { image.onload = () => { if (!player.video.videoWidth) setRatio(image.naturalWidth, image.naturalHeight); }; image.src = src!; }
+  };
+  setCover(poster);
   let switching = Promise.resolve();
-  const markReady = () => { ready = true; notify("ready"); };
+  const markReady = () => { setRatio(player.video.videoWidth, player.video.videoHeight); ready = true; notify("ready"); };
   // iOS Safari 在用户点播放前不预加载画面，只会触发 loadedmetadata：读到时长即视为就绪，避免误报“加载较慢”。
   player.on("video:loadedmetadata", markReady);
   player.on("video:loadeddata", markReady);
@@ -45,9 +60,17 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   player.on("video:waiting", () => notify(ready ? "buffering" : "loading"));
   player.on("video:pause", () => { if (ready) notify("ready"); });
   player.on("video:seeked", () => { if (player.video.readyState >= 2) markReady(); });
-  player.on("video:ended", markReady);
+  player.on("video:ended", () => { markReady(); events?.onPlaying(false); events?.onEnded(); });
   player.on("video:error", () => notify("failed"));
   return {
+    play: () => player.play(),
+    pause: () => player.pause(),
+    seek: (time: number) => { player.video.currentTime = time; },
+    setSource: (nextUrl: string, _name: string, nextCover?: string) => {
+      player.pause(); ready = false; notify("loading");
+      container.style.removeProperty("--preview-video-ratio");
+      player.poster = nextCover ?? ""; player.url = nextUrl; setCover(nextCover);
+    },
     /** 字幕选择放在播放器的设置菜单里；没有字幕时不显示这一项。 */
     setSubtitleMenu: (options: { value: string; label: string }[], selected: string, onSelect: (value: string) => void) => {
       if (destroyed) return;
@@ -66,7 +89,11 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       const current = ++version;
       switching = switching.catch(() => {}).then(async () => {
         if (destroyed || current !== version) return;
-        if (!source) { player.subtitle.show = false; return; }
+        if (!source) {
+          player.subtitle.show = false;
+          if (subtitleUrl) { URL.revokeObjectURL(subtitleUrl); subtitleUrl = null; }
+          return;
+        }
         const next = URL.createObjectURL(new Blob([source], { type: "text/plain;charset=utf-8" }));
         try {
           await player.subtitle.switch(next, { type, escape: true });
@@ -80,13 +107,18 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       });
       return switching;
     },
-    destroy: () => { destroyed = true; version++; document.removeEventListener("keydown", exitWebScreen, true); player.destroy(); if (subtitleUrl) URL.revokeObjectURL(subtitleUrl); },
+    destroy: () => {
+      destroyed = true; version++; document.removeEventListener("keydown", exitWebScreen, true);
+      if (cover) { cover.onload = null; cover.src = ""; }
+      player.destroy(); container.style.removeProperty("--preview-video-ratio");
+      if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);
+    },
   };
 }
 
-export function createAudioPlayer(container: HTMLElement, url: string, name: string, notify: Notify, onTime: (time: number) => void, cover?: string) {
+export function createAudioPlayer(container: HTMLElement, url: string, name: string, notify: Notify, onTime: (time: number) => void, cover?: string, events?: PlaybackEvents) {
   const player = new APlayer({ container, theme: getComputedStyle(container).getPropertyValue("--accent").trim(),
-    autoplay: false, preload: "metadata", mutex: true, lrcType: 0,
+    autoplay: false, preload: "metadata", mutex: true, lrcType: 0, loop: "none", order: "list",
     audio: [{ name: "音频", artist: "", url, ...(cover ? { cover } : {}) }] });
   // 文件名通过 textContent 写入，避免第三方模板将它解释为 HTML。
   const title = container.querySelector(".aplayer-title");
@@ -119,10 +151,25 @@ export function createAudioPlayer(container: HTMLElement, url: string, name: str
   let ready = false;
   const markReady = () => { ready = true; notify("ready"); };
   player.on("loadedmetadata", () => { markReady(); updateProgress(); }); player.on("canplay", markReady); player.on("playing", markReady);
+  player.on("play", () => events?.onPlaying(true));
+  player.on("pause", () => events?.onPlaying(false));
   player.on("waiting", () => notify(ready ? "buffering" : "loading"));
-  player.on("pause", () => { if (ready) notify("ready"); }); player.on("ended", markReady);
+  player.on("pause", () => { if (ready) notify("ready"); });
+  // 预览统一决定下一首，拦截 APlayer 自带的单文件回绕，避免两个播放模式同时生效。
+  const ended = (event: Event) => { event.stopImmediatePropagation(); player.audio.pause(); markReady(); events?.onPlaying(false); events?.onEnded(); };
+  player.audio.addEventListener("ended", ended, true);
   player.on("error", () => notify("failed"));
   player.on("timeupdate", updateProgress);
   player.on("seeked", () => { updateProgress(); if (player.audio.readyState >= 2) markReady(); });
-  return { seek: (time: number) => { player.audio.currentTime = time; onTime(time); }, destroy: () => player.destroy() };
+  return {
+    play: () => player.audio.play(), pause: () => player.audio.pause(),
+    seek: (time: number) => { player.audio.currentTime = time; onTime(time); },
+    setSource: (nextUrl: string, nextName: string, nextCover?: string) => {
+      player.audio.pause(); ready = false; notify("loading");
+      if (title) title.textContent = nextName;
+      if (play) play.style.backgroundImage = nextCover ? `url("${nextCover}")` : "";
+      player.audio.src = nextUrl; onTime(0); updateProgress();
+    },
+    destroy: () => { player.audio.removeEventListener("ended", ended, true); player.destroy(); },
+  };
 }

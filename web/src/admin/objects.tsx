@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useCursorPage } from "../pagination";
 import { SITE } from "../brand";
 import * as api from "../api";
-import { FileTile, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileVisual, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
 
 import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type IconName } from "../ui";
 
@@ -41,7 +41,7 @@ export function Objects({ session }: { session: api.Session }) {
               return (
                 <div key={`${item.bucket_id}:${item.key}`} role="row" className="data-row is-clickable" onClick={() => setPreview(item)}>
                   <span role="cell" className="cell-name">
-                    <FileTile kind={getFileKind(item.content_type, item.key)} />
+                    <FileVisual kind={getFileKind(item.content_type, item.key)} src={api.adminFileThumbnail(item)} />
                     <span className="name-stack"><button type="button" className="name-button" onClick={event => { event.stopPropagation(); setPreview(item); }}>{baseName(item.key)}</button>{parentPath(item.key) && <small>/{parentPath(item.key)}</small>}</span>
                     {item.public_token && <Badge tone="public" icon="globe">公开</Badge>}
                   </span>
@@ -71,7 +71,10 @@ export function Objects({ session }: { session: api.Session }) {
           <Pagination {...pagination} />
         </footer>
       )}
-      {preview && <PreviewModal file={preview} url={api.adminContentUrl(preview.bucket_id, preview.key)} downloadUrl={api.adminContentUrl(preview.bucket_id, preview.key, true)} assetUrl={key => api.adminContentUrl(preview.bucket_id, key)} loadAssets={signal => api.adminPreviewAssets(preview.bucket_id, preview.key, signal)} onClose={() => setPreview(null)} />}
+      {preview && <PreviewModal file={preview} url={api.adminContentUrl(preview.bucket_id, preview.key)} downloadUrl={api.adminContentUrl(preview.bucket_id, preview.key, true)} assetUrl={key => api.adminContentUrl(preview.bucket_id, key)} loadAssets={(file, signal) => api.adminPreviewAssets(preview.bucket_id, file.key, signal)}
+        loadPlaylist={(file, cursor, signal) => api.adminPreviewList(preview.bucket_id, file.key, cursor, signal)}
+        sourceFor={file => ({ url: api.adminContentUrl(preview.bucket_id, file.key), downloadUrl: api.adminContentUrl(preview.bucket_id, file.key, true), poster: api.adminFileThumbnail({ ...preview, ...file }, "poster"), thumbnail: api.adminFileThumbnail({ ...preview, ...file }) })}
+        poster={api.adminFileThumbnail(preview, "poster")} thumbnail={api.adminFileThumbnail(preview)} onClose={() => setPreview(null)} />}
       {revoking && <ConfirmDialog title={`撤销“${baseName(revoking.key)}”的公开访问？`} description={`该文件属于 ${revoking.username ?? revoking.bucket_name}。撤销后原链接立即失效，用户可以重新分享。`} confirmLabel="撤销公开访问"
         onClose={() => setRevoking(null)}
         onConfirm={async () => {

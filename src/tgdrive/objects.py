@@ -741,6 +741,16 @@ class ObjectService:
         """在线程池中执行列表查询，避免大目录扫描占用 ASGI 事件循环。"""
         return await self.metadata.run_in_thread(self.list_objects, scope, prefix, delimiter, cursor, limit)
 
+    async def apreview_list(self, scope: Scope, key: str, cursor: str | None = None, limit: int = 200) -> ListPage:
+        """分页读取预览文件所在目录；媒体类型与浏览器可播放性由前端统一判断。"""
+        def read():
+            info = self.head_object(scope, key)
+            if info.key.endswith("/") or key.startswith(".tgdrive/"):
+                raise ValueError("只能读取普通文件的播放列表")
+            directory = key.rpartition("/")[0] + "/" if "/" in key else ""
+            return self.list_objects(scope, directory, "/", cursor, max(1, min(limit, 200)))
+        return await self.metadata.run_in_thread(read)
+
     def preview_assets(self, scope: Scope, key: str) -> list[dict[str, object]]:
         """按同目录、同主文件名查找歌词和字幕，不依赖文件列表当前页。"""
         info = self.head_object(scope, key)

@@ -10,6 +10,8 @@ type Engine = Awaited<ReturnType<typeof loadMediaEngine>>;
 type Player = ReturnType<Engine["createVideoPlayer"]> | ReturnType<Engine["createAudioPlayer"]>;
 type Lyric = { time: number; text: string };
 export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[]>;
+export type PlaybackControls = Pick<Player, "play" | "pause" | "seek">;
+export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onControls?: (controls: PlaybackControls | null) => void };
 
 export function parseLyrics(source: string): Lyric[] {
   const offset = Number(/\[offset\s*:\s*([+-]?\d+)\]/i.exec(source)?.[1] ?? 0) / 1000;
@@ -38,13 +40,15 @@ function assetLabel(asset: PreviewAsset): string {
   return (asset.language && languages[asset.language.toLowerCase()]) || asset.language || `${format} ${asset.kind === "lyrics" ? "歌词" : "字幕"}`.trim();
 }
 
-export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl }: {
+export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, onEnded, onPlaying, onControls }: {
   kind: "video" | "audio"; url: string; name: string; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string;
-}) {
+} & PlaybackProps) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
   const loader = useRef(loadAssets), resolveAsset = useRef(assetUrl);
   loader.current = loadAssets; resolveAsset.current = assetUrl;
+  const callbacks = useRef({ onEnded, onPlaying, onControls }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
+  callbacks.current = { onEnded, onPlaying, onControls }; source.current = { url, name, cover };
   const [state, setState] = useState<MediaState>("loading"), [error, setError] = useState("");
   const [playerReady, setPlayerReady] = useState(false), [slow, setSlow] = useState(false);
   const [assets, setAssets] = useState<PreviewAsset[]>([]), [selected, setSelected] = useState("");
@@ -58,22 +62,37 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
     void loadMediaEngine().then(engine => {
       if (cancelled || !host.current) return;
       const notify = (value: MediaState) => { if (!cancelled) setState(value); };
-      player.current = kind === "video" ? engine.createVideoPlayer(host.current, url, notify, cover)
-        : engine.createAudioPlayer(host.current, url, name, notify, time => {
+      const events = { onEnded: () => callbacks.current.onEnded?.(), onPlaying: (playing: boolean) => callbacks.current.onPlaying?.(playing) };
+      const initial = source.current;
+      player.current = kind === "video" ? engine.createVideoPlayer(host.current, initial.url, notify, initial.cover, events)
+        : engine.createAudioPlayer(host.current, initial.url, initial.name, notify, time => {
           timeRef.current = time; if (!cancelled) setActive(lyricAt(lyricRef.current, time));
-        }, cover);
+        }, initial.cover, events);
+      loadedUrl.current = initial.url;
       setPlayerReady(true);
+      callbacks.current.onControls?.(player.current);
     }).catch(reason => { if (!cancelled) { setError(errorMessage(reason, "播放组件加载失败")); setState("failed"); } });
-    return () => { cancelled = true; player.current?.destroy(); player.current = null; };
-    // 封面只用于初始化播放器，不因封面地址变化而重建正在播放的播放器。
+    return () => { cancelled = true; callbacks.current.onControls?.(null); player.current?.destroy(); player.current = null; };
+    // 切换同类文件只替换媒体源，最小化、恢复与播放模式变化都保留实例。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, url, name]);
+  }, [kind]);
+  useEffect(() => {
+    if (!player.current || loadedUrl.current === url) return;
+    setError(""); setSlow(false); timeRef.current = 0;
+    loadedUrl.current = url;
+    player.current.setSource(url, name, cover);
+    callbacks.current.onControls?.(player.current);
+    // 封面元信息变化不重置已在播放的媒体。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url, playerReady]);
   useEffect(() => {
     if (state !== "loading" && state !== "buffering") { setSlow(false); return; }
     const timer = window.setTimeout(() => setSlow(true), 8000);
     return () => window.clearTimeout(timer);
-  }, [state]);
+  }, [state, url]);
   useEffect(() => {
+    setAssets([]); setSelected(""); setLyrics([]); lyricRef.current = []; setActive(-1); setDiscoveryError("");
+    setFindingAssets(Boolean(loader.current));
     if (!loader.current) return;
     const controller = new AbortController();
     void loader.current(controller.signal).then(items => {
@@ -109,7 +128,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
     }).catch(reason => { if (!controller.signal.aborted) setAssetError(errorMessage(reason, "歌词或字幕加载失败")); })
       .finally(() => { if (!controller.signal.aborted) setAssetBusy(false); });
     return () => { controller.abort(); if (instance && "setSubtitle" in instance) void instance.setSubtitle(null); };
-  }, [selected, assets, playerReady, kind]);
+  }, [selected, assets, playerReady, kind, url]);
   useEffect(() => {
     const row = lyricHost.current?.querySelector<HTMLElement>(`[data-line="${active}"]`);
     if (row && lyricHost.current) lyricHost.current.scrollTo({ top: row.offsetTop - lyricHost.current.clientHeight / 2 + row.clientHeight / 2,

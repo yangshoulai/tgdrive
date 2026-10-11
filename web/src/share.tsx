@@ -3,8 +3,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { useCursorPage } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
-import { FilePreview, FileTile, FileVisual, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
-import { Brand, Button, EmptyState, Field, Icon, Pagination, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime } from "./ui";
+import { FilePreview, FileThumbnail, FileTile, FileVisual, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
+import { Brand, Button, EmptyState, Field, Icon, Pagination, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime } from "./ui";
 
 type Shared = Extract<api.PublicObject, { password_required: false }>;
 
@@ -123,7 +123,9 @@ type FolderPage = api.PublicFolderPage;
 function FolderShare({ token, folder, access, onPasswordRequired }: { token: string; folder: api.PublicFolder; access: string | null; onPasswordRequired: () => void }) {
   const readPath = () => new URLSearchParams(window.location.search).get("path") ?? "";
   const [path, setPath] = useState(readPath);
+  const [layout, setLayout] = useState<"list" | "grid">(() => localStorage.getItem("tgdrive:share-layout") === "grid" ? "grid" : "list");
   const [preview, setPreview] = useState<FolderPage["files"][number] | null>(null);
+  useEffect(() => { localStorage.setItem("tgdrive:share-layout", layout); }, [layout]);
   useEffect(() => {
     const pop = () => setPath(readPath());
     window.addEventListener("popstate", pop);
@@ -169,10 +171,14 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
           </span>
         ))}
       </nav>}
+      <div className="share-folder-toolbar">
+        <span className="muted">{page ? `本页 ${page.folders.length + page.files.length} 项` : "文件夹内容"}</span>
+        <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
+      </div>
       {error ? <EmptyState icon="alert" title="无法打开" description={error} action={path ? <Button onClick={() => open("")}>回到根目录</Button> : <Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         : page === null ? <div className="share-folder-loading"><SkeletonRows rows={4} /></div>
           : empty ? <EmptyState icon="folder" title="这个文件夹是空的" description="分享者之后添加的文件会显示在这里。" />
-            : (
+            : layout === "list" ? (
               <div className="data-table public-folder-table" role="table" aria-label="文件夹内容">
                 <div className="data-row data-head" role="row">
                   <span role="columnheader" className="cell-name">名称</span>
@@ -209,6 +215,34 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
                   );
                 })}
               </div>
+            ) : (
+              <div className="file-grid share-grid">
+                {page.folders.map(item => (
+                  <div key={item.path} className="grid-card" onClick={() => open(item.path)}>
+                    <div className="grid-thumb"><FileThumbnail kind="folder" /></div>
+                    <div className="grid-meta">
+                      <button type="button" className="grid-name name-button" title={item.name} onClick={event => { event.stopPropagation(); open(item.path); }}>{item.name}</button>
+                      <span className="grid-sub" title="包含所有子文件夹中的文件"><span className="grid-kind">文件夹</span>{" · "}<span className="grid-size">{item.size == null ? "—" : formatBytes(item.size)}</span></span>
+                    </div>
+                  </div>
+                ))}
+                {page.files.map(item => {
+                  const kind = getFileKind(item.content_type, item.name);
+                  const content = api.publicFolderFile(token, item.path, false, access);
+                  const download = api.publicFolderFile(token, item.path, true, access);
+                  const openFile = () => canPreview(kind) ? setPreview(item) : window.location.assign(download);
+                  return <div key={item.path} className="grid-card" onClick={openFile}>
+                    <div className="grid-thumb"><FileThumbnail kind={kind} url={item.thumbnails?.includes("thumb") ? api.publicThumbnail(content) : undefined} /></div>
+                    <div className="grid-meta">
+                      <button type="button" className="grid-name name-button" title={item.name} onClick={event => { event.stopPropagation(); openFile(); }}>{item.name}</button>
+                      <span className="grid-sub"><span className="grid-kind">{kindLabel(kind)}</span>{" · "}<span className="grid-size">{formatBytes(item.size)}</span></span>
+                      <span className="grid-menu" onClick={event => event.stopPropagation()}>
+                        <a className="icon-btn icon-btn-ghost icon-btn-sm" href={download} aria-label={`下载 ${item.name}`} title={`下载 ${item.name}`}><Icon name="download" size={16} /></a>
+                      </span>
+                    </div>
+                  </div>;
+                })}
+              </div>
             )}
       <div className="panel-more"><Pagination {...pagination} /></div>
       {preview && (
@@ -216,7 +250,9 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
           poster={preview.thumbnails?.includes("thumb") ? api.publicThumbnail(api.publicFolderFile(token, preview.path, false, access), "poster") : undefined}
           thumbnail={preview.thumbnails?.includes("thumb") ? api.publicThumbnail(api.publicFolderFile(token, preview.path, false, access)) : undefined}
           url={api.publicFolderFile(token, preview.path, false, access)} downloadUrl={api.publicFolderFile(token, preview.path, true, access)}
-          loadAssets={signal => api.publicPreviewAssets(token, preview.path, access, signal)} assetUrl={path => api.publicFolderFile(token, path, false, access)} />
+          loadAssets={(file, signal) => api.publicPreviewAssets(token, file.key, access, signal)} assetUrl={path => api.publicFolderFile(token, path, false, access)}
+          loadPlaylist={(file, cursor, signal) => api.publicPreviewList(token, file.key, cursor, access ?? null, signal)}
+          sourceFor={file => { const url = api.publicFolderFile(token, file.key, false, access); return { url, downloadUrl: api.publicFolderFile(token, file.key, true, access), poster: file.thumbnails?.includes("thumb") ? api.publicThumbnail(url, "poster") : undefined, thumbnail: file.thumbnails?.includes("thumb") ? api.publicThumbnail(url) : undefined }; }} />
       )}
     </article>
   );

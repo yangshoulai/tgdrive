@@ -314,11 +314,15 @@ class AdminApi:
             except ValueError as exc:
                 raise ValueError("cursor 不合法") from exc
         rows = self.objects.metadata.db.execute(
-            "SELECT o.bucket_id,o.key,o.size,o.etag,o.content_type,o.modified_at,o.public_token,o.public_at,"
+            "SELECT o.bucket_id,o.key,o.size,o.etag,o.content_type,o.modified_at,o.public_token,o.public_at,o.blob_uuid,"
             "o.public_expires_at,o.public_downloads,o.public_password IS NOT NULL AS public_has_password,"
             "b.name AS bucket_name,u.username " + base + page_where +
             " ORDER BY o.modified_at DESC, o.bucket_id DESC, o.key DESC LIMIT ?", (*args, *page_args, limit + 1)).fetchall()
         items = [dict(row) for row in rows[:limit]]
+        variants = self.objects.thumbnail_variants([item["blob_uuid"] for item in items])
+        for item in items:
+            thumbnails = variants.get(item.pop("blob_uuid") or "", [])
+            item.update(thumbnails=thumbnails, has_thumbnail="thumb" in thumbnails)
         last = items[-1] if items else None
         totals = self.objects.metadata.cached_read(("admin-objects-total", query, public_only),
             lambda: tuple(self.objects.metadata.db.execute("SELECT COUNT(*), COUNT(o.public_token) " + base, args).fetchone()))
@@ -329,9 +333,21 @@ class AdminApi:
         self.accounts.sessions.require(token, role="admin")
         return await self.objects.get_object(Scope(bucket_id), normalize_user_path(path), start, end)
 
+    def thumbnail(self, token: str, bucket_id: int, path: str, variant: str = "thumb") -> tuple[bytes, str, str]:
+        self.accounts.sessions.require(token, role="admin")
+        return self.objects.get_thumbnail(Scope(bucket_id), normalize_user_path(path), variant)
+
     async def preview_assets(self, token: str, bucket_id: int, path: str):
         self.accounts.sessions.require(token, role="admin")
         return await self.objects.apreview_assets(Scope(bucket_id), normalize_user_path(path))
+
+    async def preview_list(self, token: str, bucket_id: int, path: str, cursor: str | None = None):
+        self.accounts.sessions.require(token, role="admin")
+        page = await self.objects.apreview_list(Scope(bucket_id), normalize_user_path(path), cursor)
+        def serialize():
+            variants = self.objects.thumbnail_variants([item.blob_uuid for item in page.objects])
+            return [UserApi._object_json(item, variants.get(item.blob_uuid or "", ())) for item in page.objects]
+        return {"objects": await self.objects.metadata.run_in_thread(serialize), "next_cursor": page.next_cursor}
 
     def set_object_public(self, token: str, csrf: str, bucket_id: int, path: str, public: bool) -> dict[str, object]:
         """管理员可以撤销任意对象的公开链接，用于处置不当分享。"""
@@ -731,6 +747,11 @@ class UserApi:
 
     async def preview_assets(self, token: str, path: str):
         return await self.objects.apreview_assets(self._scope(token), normalize_user_path(path))
+
+    async def preview_list(self, token: str, path: str, cursor: str | None = None):
+        page = await self.objects.apreview_list(self._scope(token), normalize_user_path(path), cursor)
+        items = await self.objects.metadata.run_in_thread(self._objects_json, page.objects)
+        return {"objects": items, "next_cursor": page.next_cursor}
 
     async def delete(self, token: str, csrf: str, paths: list[str], recursive: bool = False) -> list[dict[str, object]]:
         """删除文件；recursive 为 True 时，以 / 结尾的路径会删除整个文件夹（在服务端分批完成）。"""

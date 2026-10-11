@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useCursorPage } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileVisual, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileThumbnail, FileVisual, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
 
-import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination, SkeletonRows, copyText, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
 /* ---------- 公开分享 ---------- */
 
@@ -16,17 +16,36 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
   const load = pagination.reload;
   const [revoking, setRevoking] = useState<api.FileItem | null>(null);
   const [preview, setPreview] = useState<api.FileItem | null>(null);
+  const [layout, setLayout] = useState<"list" | "grid">(() => localStorage.getItem("tgdrive:share-layout") === "grid" ? "grid" : "list");
+  useEffect(() => { localStorage.setItem("tgdrive:share-layout", layout); }, [layout]);
   useDocumentTitle(`公开分享 · ${BRAND}`);
 
   const links = (file: api.FileItem) => api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url);
+  const fileMenu = (file: api.FileItem, includeCopy = false): MenuItem[] => {
+    const folder = file.key.endsWith("/");
+    return [
+      ...(includeCopy ? [{ label: "复制分享链接", icon: "copy" as const, onSelect: () => void copyText(links(file).page, "分享链接已复制") }] : []),
+      { label: "打开分享页", icon: "external", onSelect: () => window.open(links(file).page, "_blank", "noreferrer") },
+      ...(folder ? [] : [{ label: "复制直链", icon: "link" as const, onSelect: () => void copyText(links(file).direct, "直链已复制") }]),
+      { label: folder ? "打开文件夹" : "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(folder ? file.key : parentPath(file.key)) },
+      { label: "停止分享", icon: "lock", danger: true, divider: true, onSelect: () => setRevoking(file) },
+    ];
+  };
+  const shareBadges = (file: api.FileItem) => <>
+    {file.public_has_password && <Badge icon="lock">密码</Badge>}
+    {file.public_expires_at && (file.public_expires_at * 1000 < Date.now()
+      ? <Badge tone="danger">已过期</Badge>
+      : <span title={formatDateTime(file.public_expires_at)}><Badge tone="warning" icon="pulse">{`至 ${new Date(file.public_expires_at * 1000).toLocaleDateString("zh-CN")}`}</Badge></span>)}
+  </>;
   return (
     <>
-      <PageHeader title="公开分享" description="这些文件和文件夹可以被任何拥有链接的人访问。关闭分享后，链接会立即失效。" />
-      <section className="file-surface">
+      <PageHeader title="公开分享" description="这些文件和文件夹可以被任何拥有链接的人访问。关闭分享后，链接会立即失效。"
+        actions={<Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />} />
+      <section className={`file-surface${layout === "grid" && items?.length && !error ? " is-grid" : ""}`}>
         {error ? <EmptyState icon="alert" title="加载失败" description={error} action={<Button icon="refresh" onClick={() => void load()}>重试</Button>} />
           : items === null ? <SkeletonRows rows={4} />
             : items.length === 0 ? <EmptyState icon="globe" title="还没有公开的内容" description="在“我的文件”中打开文件或文件夹的菜单，选择“公开分享”，或在上传时开启公开访问。" />
-              : (
+              : layout === "list" ? (
                 <div className="data-table shared-table" role="table" aria-label="公开内容">
                   <div className="data-row data-head" role="row">
                     <span role="columnheader" className="cell-name">名称</span>
@@ -47,25 +66,38 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                           <button type="button" className="name-button" onClick={event => { event.stopPropagation(); open(); }}>{baseName(file.key)}</button>
                           <small>{parentPath(file.key) ? `/${parentPath(file.key)}` : "我的文件"}{` · 下载 ${file.public_downloads ?? 0} 次`}</small>
                         </span>
-                        {file.public_has_password && <Badge icon="lock">密码</Badge>}
-                        {file.public_expires_at && (file.public_expires_at * 1000 < Date.now()
-                          ? <Badge tone="danger">已过期</Badge>
-                          : <Badge tone="warning" icon="pulse">{`至 ${formatDate(file.public_expires_at)}`}</Badge>)}
+                        {shareBadges(file)}
                       </span>
                       <span role="cell" className="cell-type muted">{kindLabel(getFileKind(file.content_type, file.key))}</span>
                       <span role="cell" className="cell-size muted" title={folder ? "包含所有子文件夹中的文件" : undefined}>{size == null ? "—" : formatBytes(size)}</span>
                       <span role="cell" className="cell-date muted">{formatDate(file.public_at)}</span>
                       <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
                         <Button size="sm" icon="copy" onClick={() => void copyText(links(file).page, "分享链接已复制")}>复制链接</Button>
-                        <Menu label={`${baseName(file.key)} 的更多操作`} items={[
-                          { label: "打开分享页", icon: "external", onSelect: () => window.open(links(file).page, "_blank", "noreferrer") },
-                          ...(folder ? [] : [{ label: "复制直链", icon: "link" as const, onSelect: () => void copyText(links(file).direct, "直链已复制") }]),
-                          { label: folder ? "打开文件夹" : "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(folder ? file.key : parentPath(file.key)) },
-                          { label: "停止分享", icon: "lock", danger: true, divider: true, onSelect: () => setRevoking(file) },
-                        ]} />
+                        <Menu label={`${baseName(file.key)} 的更多操作`} items={fileMenu(file)} />
                       </span>
                     </div>
                     );
+                  })}
+                </div>
+              ) : (
+                <div className="file-grid shared-grid">
+                  {items.map(file => {
+                    const folder = file.key.endsWith("/");
+                    const kind = folder ? "folder" : getFileKind(file.content_type, file.key);
+                    const size = folder ? pagination.page?.folder_sizes?.[file.key] : file.size;
+                    const open = () => folder ? onOpenFolder(file.key) : setPreview(file);
+                    return <div key={file.key} className="grid-card shared-grid-card" onClick={open}>
+                      <div className="grid-thumb">
+                        <FileThumbnail kind={kind} url={folder ? undefined : api.fileThumbnail(file)} />
+                        <span className="grid-public grid-share-badges">{shareBadges(file)}</span>
+                      </div>
+                      <div className="grid-meta">
+                        <button type="button" className="grid-name name-button" title={baseName(file.key)} onClick={event => { event.stopPropagation(); open(); }}>{baseName(file.key)}</button>
+                        <span className="grid-sub"><span className="grid-kind">{kindLabel(kind)}</span>{" · "}<span className="grid-size">{size == null ? "—" : formatBytes(size)}</span></span>
+                        <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(file.key)} 的更多操作`} items={fileMenu(file, true)} /></span>
+                        <span className="grid-share-meta" title={parentPath(file.key) ? `/${parentPath(file.key)}` : "我的文件"}>{formatDate(file.public_at)} · 下载 {file.public_downloads ?? 0} 次</span>
+                      </div>
+                    </div>;
                   })}
                 </div>
               )}

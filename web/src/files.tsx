@@ -2,7 +2,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as api from "./api";
 import { readPreviewText, type PreviewText } from "./preview-data";
-import { MediaPreview, type AssetLoader } from "./preview-media";
+import { MediaPreview, type AssetLoader, type PlaybackControls, type PlaybackProps } from "./preview-media";
+import { PlaylistControls, useMediaPlaylist, type PlaylistLoader } from "./preview-playlist";
 import { TextPreview } from "./preview-text";
 import { Badge, Button, CopyField, Field, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, toast, type IconName } from "./ui";
 
@@ -72,9 +73,13 @@ export function FileVisual({ kind, src, size = "md" }: { kind: FileKind; src?: s
 }
 
 export function FileThumbnail({ kind, url }: { kind: FileKind; url?: string }) {
+  // 按资源地址重建状态，避免缓存图片的 load 事件被挂载后的 effect 重置。
+  return <ThumbnailImage key={url} kind={kind} url={url} />;
+}
+
+function ThumbnailImage({ kind, url }: { kind: FileKind; url?: string }) {
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   const [attempt, setAttempt] = useState(0);
-  useEffect(() => { setState("loading"); setAttempt(0); }, [url]);
   return <div className={`file-thumbnail thumbnail-${state}`}>
     {(!url || state !== "ready") && <FileTile kind={kind} size="xl" />}
     {url && state !== "failed" && <img key={attempt} src={url} alt="" loading="lazy" onLoad={() => setState("ready")} onError={() => setState("failed")} />}
@@ -119,10 +124,10 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string };
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string } & PlaybackProps;
 export function FilePreview(props: PreviewProps) {
   const [attempt, setAttempt] = useState(0);
-  return <PreviewContent key={`${props.kind}:${props.url}:${attempt}`} {...props} onRetry={() => setAttempt(current => current + 1)} />;
+  return <PreviewContent key={`${props.kind}:${props.kind === "audio" || props.kind === "video" ? "media" : props.url}:${attempt}`} {...props} onRetry={() => setAttempt(current => current + 1)} />;
 }
 
 function PreviewLoading({ onRetry }: { onRetry: () => void }) {
@@ -133,7 +138,7 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, resolveImage, loadAssets, assetUrl, onRetry }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, resolveImage, loadAssets, assetUrl, onRetry, onEnded, onPlaying, onControls }: PreviewProps & { onRetry: () => void }) {
   const [content, setContent] = useState<PreviewText | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
@@ -161,7 +166,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
     </div>
   );
   if (unplayable) return fallback;
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} />;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} onEnded={onEnded} onPlaying={onPlaying} onControls={onControls} />;
   if (mediaFailed) return fallback;
   if (kind === "image" || kind === "pdf") return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
     {!mediaReady && (kind === "image" && poster
@@ -179,9 +184,43 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
   return fallback;
 }
 
-export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, assetUrl, loadAssets }: { file: api.FileItem; url: string; downloadUrl: string; poster?: string; thumbnail?: string; onClose: () => void; onShare?: () => void; onImageLoad?: (image: HTMLImageElement) => void; assetUrl?: (key: string) => string; loadAssets?: AssetLoader }) {
+type PreviewSource = { url: string; downloadUrl: string; poster?: string; thumbnail?: string };
+export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, assetUrl, loadAssets, loadPlaylist, sourceFor }: PreviewSource & { file: api.FileItem; onClose: () => void; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement) => void; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; loadPlaylist?: PlaylistLoader; sourceFor?: (file: api.FileItem) => PreviewSource }) {
   const kind = getFileKind(file.content_type, file.key);
-  const extension = file.key.match(/\.([a-z\d]{1,10})$/i)?.[1].toUpperCase();
+  const media = (kind === "audio" || kind === "video") && isPlayable(file.key, file.content_type);
+  const playlist = useMediaPlaylist(file, kind, media ? loadPlaylist ?? (assetUrl ? (item, cursor, signal) => api.previewList(item.key, cursor, signal) : undefined) : undefined,
+    item => getFileKind(item.content_type, item.key) === kind && isPlayable(item.key, item.content_type) && parentPath(item.key) === parentPath(file.key));
+  const active = media && playlist.current.key !== file.key ? playlist.current : file;
+  const source = active.key === file.key ? { url, downloadUrl, poster, thumbnail } : sourceFor?.(active) ?? {
+    url: api.contentUrl(active.key), downloadUrl: api.contentUrl(active.key, true), poster: api.fileThumbnail(active, "poster"), thumbnail: api.fileThumbnail(active),
+  };
+  const controls = useRef<PlaybackControls | null>(null), pendingPlay = useRef(false), pendingAdvance = useRef(false), currentKey = useRef(active.key);
+  currentKey.current = active.key;
+  const [playing, setPlaying] = useState(false);
+  function play() {
+    if (!controls.current) { pendingPlay.current = true; return; }
+    const key = active.key;
+    void controls.current.play().catch(reason => {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      if (currentKey.current === key) toast.error("自动播放未能开始，请点击播放器继续播放。");
+    });
+  }
+  function select(item: api.FileItem) {
+    pendingAdvance.current = false;
+    if (item.key === active.key) { if (controls.current) { controls.current.seek(0); play(); } else pendingPlay.current = true; return; }
+    pendingPlay.current = true; playlist.select(item);
+  }
+  useEffect(() => {
+    if (playlist.loading || !pendingAdvance.current) return;
+    pendingAdvance.current = false;
+    const next = playlist.next(true);
+    if (next) select(next);
+    // 结束时若目录还在分页加载，等完整列表就绪后再确定下一首。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playlist.loading]);
+  useEffect(() => { pendingPlay.current = false; pendingAdvance.current = false; }, [file.key]);
+  const transport = (compact = false) => <PlaylistControls playlist={playlist} compact={compact} onSelect={select} playing={playing} onToggle={() => playing ? controls.current?.pause() : play()} />;
+  const extension = active.key.match(/\.([a-z\d]{1,10})$/i)?.[1].toUpperCase();
   const typeLabel = extension && kind !== "pdf" && kind !== "folder" ? `${extension === "JPG" ? "JPEG" : extension} ${kindLabel(kind)}` : kindLabel(kind);
   // Markdown 里的相对路径图片按文件所在目录解析为云盘内的文件；解析函数保持稳定，避免重复渲染整篇文档。
   const assetRef = useRef(assetUrl);
@@ -194,27 +233,31 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     if (screen && stage.current?.closest(".modal-backdrop")?.contains(screen)) {
       try { await document.exitFullscreen(); } catch { toast.error("请先退出全屏，再打开分享设置。"); return; }
     }
-    onShare?.();
+    onShare?.(active);
   }
   const resolveImage = useMemo(() => hasAssets ? (src: string) => {
-    const key = resolveRelativeKey(parentPath(file.key), src);
+    const key = resolveRelativeKey(parentPath(active.key), src);
     return key && assetRef.current ? assetRef.current(key) : null;
-  } : undefined, [file.key, hasAssets]);
+  } : undefined, [active.key, hasAssets]);
   // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
-    <Modal size="xl" expandable className={`preview-modal preview-modal-${kind}`} leading={<FileVisual kind={kind} src={thumbnail} size="lg" />} title={baseName(file.key)} onClose={onClose}
+    <Modal size="xl" expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? transport(true) : undefined} className={`preview-modal preview-modal-${kind}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
-        <span title={file.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(file.size)}</span>
-        <span className="preview-meta-date" title={`修改于 ${formatDateTime(file.modified_at)}`}>{formatDate(file.modified_at)}</span>
-        {file.public_token && <span className="preview-meta-public" title="已公开分享"><Icon name="globe" size={12} />公开</span>}
+        <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
+        <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>
+        {active.public_token && <span className="preview-meta-public" title="已公开分享"><Icon name="globe" size={12} />公开</span>}
       </span>}
       actions={<>
-        {onShare && <IconButton icon="link" label={file.public_token ? "管理分享" : "公开分享"} size="sm" onClick={() => void share()} />}
-        <a className="icon-btn icon-btn-ghost icon-btn-sm" href={downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
+        {onShare && <IconButton icon="link" label={active.public_token ? "管理分享" : "公开分享"} size="sm" onClick={() => void share()} />}
+        <a className="icon-btn icon-btn-ghost icon-btn-sm" href={source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
         <span className="modal-actions-divider" aria-hidden="true" />
       </>}>
-      <div ref={stage} className="preview-stage"><FilePreview kind={kind} url={url} name={baseName(file.key)} downloadUrl={downloadUrl} contentType={file.content_type} poster={poster} onImageLoad={onImageLoad} resolveImage={resolveImage} assetUrl={assetUrl}
-        loadAssets={loadAssets ?? (assetUrl ? signal => api.previewAssets(file.key, signal) : undefined)} /></div>
+      <div ref={stage} className={`preview-stage${media ? " has-playlist" : ""}`}><FilePreview kind={kind} url={source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={onImageLoad} resolveImage={resolveImage} assetUrl={assetUrl}
+        onPlaying={setPlaying} onEnded={() => { if (playlist.loading) { pendingAdvance.current = true; return; } const next = playlist.next(true); if (next) select(next); }}
+        onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}
+        loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} />
+        {media && transport()}
+      </div>
     </Modal>
   );
 }
