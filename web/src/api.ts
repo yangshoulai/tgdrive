@@ -15,6 +15,8 @@ export type FileItem = {
   has_thumbnail?: boolean;
   /** 缩略图状态："thumb"、"poster"，或 "none"（已尝试但无法生成）。 */
   thumbnails?: string[];
+  /** 各规格保存时的独立版本，用于浏览器缓存失效。 */
+  thumbnail_versions?: Partial<Record<ThumbnailVariant, string>>;
 };
 export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subtitle"; language: string | null; size: number; etag: string };
 export type PreviewListPage = { objects: FileItem[]; next_cursor: string | null };
@@ -46,6 +48,8 @@ export type PublicFolderPage = {
 export type CreatedClient = { id: number; access_key_id: string; secret: string };
 
 let csrfToken = "";
+let thumbnailBucketId: number | null = null;
+let thumbnailSessionEpoch = 0;
 export function setCsrf(value: string) { csrfToken = value; }
 
 export const PRIVATE_PREFIX = ".tgdrive/private/";
@@ -114,15 +118,22 @@ export const transferPrivate = (paths: string[], destination: string, into: bool
 
 /** remember 为 true 时服务端签发 30 天的长期会话（服务重启后仍有效）；否则 12 小时。 */
 export async function login(username: string, password: string, remember = false): Promise<Session> {
+  thumbnailBucketId = null; thumbnailSessionEpoch++;
   const session = await post<Session>("/api/auth/v1/login", { username, password, remember });
   setCsrf(session.csrf_token);
   return session;
 }
 export async function logout() {
   try { await post<void>("/api/auth/v1/logout"); }
-  finally { setCsrf(""); setPrivateAccess(""); }
+  finally { setCsrf(""); setPrivateAccess(""); thumbnailBucketId = null; thumbnailSessionEpoch++; }
 }
-export const me = () => request<UserMe>("/api/auth/v1/me");
+export async function me() {
+  const epoch = thumbnailSessionEpoch;
+  const account = await request<UserMe>("/api/auth/v1/me");
+  // 切换账号后，上一账号迟到的请求不能覆盖新账号的缓存所属桶。
+  if (epoch === thumbnailSessionEpoch) thumbnailBucketId = account.bucket_id;
+  return account;
+}
 export async function restoreSession(): Promise<Session> {
   const account = await me();
   setCsrf(account.csrf_token);
@@ -180,13 +191,21 @@ export const purgeTrash = (ids: string[] | "all", root = "") => post<{ purged: n
 /* ---------- 缩略图 ---------- */
 export type ThumbnailVariant = "thumb" | "poster";
 export const thumbnailUrl = (path: string, etag: string, variant: ThumbnailVariant = "thumb") =>
-  mediaAccess(`${fileApi("/thumbnail", path)}?path=${encodeURIComponent(path)}&variant=${variant}&v=${encodeURIComponent(etag)}`, path);
+  mediaAccess(`${fileApi("/thumbnail", path)}?path=${encodeURIComponent(path)}&variant=${variant}&v=${encodeURIComponent(etag)}${thumbnailBucketId !== null ? `&bucket_id=${thumbnailBucketId}` : ""}`, path);
 export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb") => post<void>(fileApi("/thumbnail", path), { path, data, variant });
 export const markNoThumbnail = (path: string) => post<void>(fileApi("/thumbnail", path), { path, variant: "none" });
-/** 文件的缩略图地址：有封面图时取 poster（服务端没有 poster 会退回 thumb），没有缩略图返回 undefined。 */
-export const fileThumbnail = (file: FileItem, variant: ThumbnailVariant = "thumb") =>
-  // 地址里带上缩略图状态：之后补生成了封面，地址随之改变，不会继续用缓存里退回的小图。
-  file.thumbnails?.includes("thumb") || file.has_thumbnail ? thumbnailUrl(file.key, `${file.etag}.${(file.thumbnails ?? []).join(".")}`, variant) : undefined;
+function thumbnailSpec(file: FileItem, variant: ThumbnailVariant) {
+  const resolved = variant === "poster" && !file.thumbnails?.includes("poster") ? "thumb" : variant;
+  const revision = file.thumbnail_versions?.[resolved];
+  return { variant: resolved, version: `${file.etag}.${resolved}${revision ? `.${revision}` : ""}` };
+}
+/** 返回所需规格的缩略图地址；封面尚未生成时直接复用小图。 */
+export function fileThumbnail(file: FileItem, variant: ThumbnailVariant = "thumb") {
+  if (!file.thumbnails?.includes("thumb") && !file.has_thumbnail) return undefined;
+  // 小图地址不受 poster 的生成或状态顺序影响，目录四宫格、文件列表和预览头部共用缓存。
+  const spec = thumbnailSpec(file, variant);
+  return thumbnailUrl(file.key, spec.version, spec.variant);
+}
 /** 公开分享里文件的缩略图：在 /p/ 地址上加 thumbnail 参数，沿用分享的权限。 */
 export const publicThumbnail = (contentUrl: string, variant: ThumbnailVariant = "thumb") =>
   `${contentUrl}${contentUrl.includes("?") ? "&" : "?"}thumbnail=${variant}`;
@@ -357,9 +376,11 @@ export const adminObjects = (options: { q?: string; publicOnly?: boolean; cursor
 };
 export const setAdminObjectPublic = (bucketId: number, path: string, isPublic: boolean) => post<FileItem>("/api/admin/v1/objects/public", { bucket_id: bucketId, path, public: isPublic });
 export const adminContentUrl = (bucketId: number, path: string, download = false) => `/api/admin/v1/content?bucket_id=${bucketId}&path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
-export const adminFileThumbnail = (file: AdminObject, variant: ThumbnailVariant = "thumb") =>
-  file.thumbnails?.includes("thumb") || file.has_thumbnail
-    ? `/api/admin/v1/thumbnail?bucket_id=${file.bucket_id}&path=${encodeURIComponent(file.key)}&variant=${variant}&v=${file.etag}.${(file.thumbnails ?? []).join(".")}` : undefined;
+export function adminFileThumbnail(file: AdminObject, variant: ThumbnailVariant = "thumb") {
+  if (!file.thumbnails?.includes("thumb") && !file.has_thumbnail) return undefined;
+  const spec = thumbnailSpec(file, variant);
+  return `/api/admin/v1/thumbnail?bucket_id=${file.bucket_id}&path=${encodeURIComponent(file.key)}&variant=${spec.variant}&v=${encodeURIComponent(spec.version)}`;
+}
 export const runAdminGc = (limit = 100) => post<{ processed: number; deleted: number; failed: number; dead: number }>("/api/admin/v1/maintenance/gc", { limit }, 15 * 60000);
 export const runAdminScrub = (limit = 100, deep = false) => post<{ checked: number; wrapped: boolean; bad: { blob_uuid: string; chunks: [number, number][] }[] }>("/api/admin/v1/maintenance/scrub", { limit, deep }, 15 * 60000);
 

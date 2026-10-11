@@ -321,10 +321,10 @@ class AdminApi:
             "b.name AS bucket_name,u.username " + base + page_where +
             " ORDER BY o.modified_at DESC, o.bucket_id DESC, o.key DESC LIMIT ?", (*args, *page_args, limit + 1)).fetchall()
         items = [dict(row) for row in rows[:limit]]
-        variants = self.objects.thumbnail_variants([item["blob_uuid"] for item in items])
+        versions = self.objects.thumbnail_versions([item["blob_uuid"] for item in items])
         for item in items:
-            thumbnails = variants.get(item.pop("blob_uuid") or "", [])
-            item.update(thumbnails=thumbnails, has_thumbnail="thumb" in thumbnails)
+            thumbnails = versions.get(item.pop("blob_uuid") or "", {})
+            item.update(thumbnails=list(thumbnails), thumbnail_versions=thumbnails, has_thumbnail="thumb" in thumbnails)
         last = items[-1] if items else None
         totals = self.objects.metadata.cached_read(("admin-objects-total", query, public_only),
             lambda: tuple(self.objects.metadata.db.execute("SELECT COUNT(*), COUNT(o.public_token) " + base, args).fetchone()))
@@ -347,8 +347,9 @@ class AdminApi:
         self.accounts.sessions.require(token, role="admin")
         page = await self.objects.apreview_list(Scope(bucket_id), normalize_user_path(path), cursor)
         def serialize():
-            variants = self.objects.thumbnail_variants([item.blob_uuid for item in page.objects])
-            return [UserApi._object_json(item, variants.get(item.blob_uuid or "", ())) for item in page.objects]
+            versions = self.objects.thumbnail_versions([item.blob_uuid for item in page.objects])
+            return [UserApi._object_json(item, tuple(versions.get(item.blob_uuid or "", {})),
+                                        versions.get(item.blob_uuid or "", {})) for item in page.objects]
         return {"objects": await self.objects.metadata.run_in_thread(serialize), "next_cursor": page.next_cursor}
 
     def set_object_public(self, token: str, csrf: str, bucket_id: int, path: str, public: bool) -> dict[str, object]:
@@ -704,8 +705,11 @@ class UserApi:
                 raise ValueError("缩略图数据不是有效的 base64") from exc
         self.objects.set_thumbnail(self._scope(token, csrf=csrf, mutation=True), self._path(path), raw, variant)
 
-    def thumbnail(self, token: str, path: str, variant: str = "thumb") -> tuple[bytes, str, str]:
-        return self.objects.get_thumbnail(self._scope(token), self._path(path), variant)
+    def thumbnail(self, token: str, path: str, variant: str = "thumb", *, bucket_id: int | None = None) -> tuple[bytes, str, str]:
+        scope = self._scope(token)
+        if bucket_id is not None and bucket_id != scope.bucket_id:
+            raise PermissionError("缩略图所属文件空间不匹配")
+        return self.objects.get_thumbnail(scope, self._path(path), variant)
 
     # ---------- 可续传的分段上传 ----------
 
@@ -848,14 +852,15 @@ class UserApi:
 
     def _objects_json(self, items) -> list[dict[str, object]]:
         """序列化一页对象，并用一次查询附上缩略图状态。"""
-        variants = self.objects.thumbnail_variants([item.blob_uuid for item in items])
-        return [self._object_json(item, variants.get(item.blob_uuid or "", ())) for item in items]
+        versions = self.objects.thumbnail_versions([item.blob_uuid for item in items])
+        return [self._object_json(item, tuple(versions.get(item.blob_uuid or "", {})),
+                                  versions.get(item.blob_uuid or "", {})) for item in items]
 
     @staticmethod
-    def _object_json(item, thumbnails: list[str] | tuple[str, ...] = ()) -> dict[str, object]:
+    def _object_json(item, thumbnails: list[str] | tuple[str, ...] = (), thumbnail_versions: dict[str, str] | None = None) -> dict[str, object]:
         meta = {key: value for key, value in item.user_meta.items() if key != ObjectService.THUMBNAIL_META}
         return {"key": item.key, "size": item.size, "etag": item.etag, "content_type": item.content_type,
                 "user_meta": meta, "modified_at": item.modified_at,
-                "has_thumbnail": "thumb" in thumbnails, "thumbnails": list(thumbnails),
+                "has_thumbnail": "thumb" in thumbnails, "thumbnails": list(thumbnails), "thumbnail_versions": thumbnail_versions or {},
                 "public_token": item.public_token, "public_at": item.public_at, "public_expires_at": item.public_expires_at,
                 "public_has_password": item.public_has_password, "public_downloads": item.public_downloads}

@@ -65,7 +65,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const folderSizes = pagination.page?.folder_sizes ?? {};
   const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
   const setThumbnails = (key: string, thumbnails: string[]) =>
-    setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, has_thumbnail: thumbnails.includes("thumb") } : item));
+    setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, thumbnail_versions: undefined, has_thumbnail: thumbnails.includes("thumb") } : item));
   useThumbnailBackfill(files, key => api.contentUrl(key), setThumbnails);
   const setPublicFolders = (update: (items: Record<string, api.FileItem>) => Record<string, api.FileItem>) => pagination.setPage(current => current && { ...current, public_folders: update(current.public_folders ?? {}) });
   useEffect(() => { setSelected(new Set()); }, [fetchPage, pagination.number]);

@@ -362,6 +362,11 @@ class ObjectService:
     THUMBNAIL_LIMITS = {"thumb": 96 * 1024, "poster": 320 * 1024}
 
     @staticmethod
+    def _thumbnail_revision(created_at: float | None) -> str:
+        # 使用微秒版本，重新生成同一文件的封面时也能更新缓存；旧版图片首次转存后会获得新版本。
+        return str(int(created_at * 1_000_000)) if created_at is not None else "legacy"
+
+    @staticmethod
     def _thumbnail_mime(data: bytes) -> str:
         if data.startswith(b"\xff\xd8\xff"):
             return "image/jpeg"
@@ -413,7 +418,7 @@ class ObjectService:
                                                (info.blob_uuid,)).fetchone()
             if row is not None:
                 data = self.engine.open_thumbnail(info.blob_uuid, candidate, row["data"])
-                return data, row["mime"], f"{info.etag}-{candidate}-{int(row['created_at'])}"
+                return data, row["mime"], f"{info.etag}-{candidate}-{self._thumbnail_revision(row['created_at'])}"
         raise NotFoundError("thumbnail not found")
 
     def get_thumbnail(self, scope: Scope, key: str, variant: str = "thumb") -> tuple[bytes, str, str]:
@@ -421,18 +426,21 @@ class ObjectService:
 
     def thumbnail_variants(self, blob_uuids: list[str]) -> dict[str, list[str]]:
         """一页对象的缩略图状态，一次查询：{blob_uuid: ["thumb", "poster"] 或 ["none"]}。"""
+        return {uuid: list(versions) for uuid, versions in self.thumbnail_versions(blob_uuids).items()}
+
+    def thumbnail_versions(self, blob_uuids: list[str]) -> dict[str, dict[str, str]]:
+        """批量读取各规格的独立版本，列表与目录封面复用同一资源地址。"""
         unique = list(dict.fromkeys(uuid for uuid in blob_uuids if uuid))
         if not unique:
             return {}
         marks = ",".join("?" for _ in unique)
-        result: dict[str, list[str]] = {}
+        result: dict[str, dict[str, str]] = {}
         for row in self.metadata.db.execute(
-                f"SELECT blob_uuid, variant FROM thumbnails WHERE blob_uuid IN ({marks}) "
-                f"UNION ALL SELECT blob_uuid, 'thumb' FROM thumbnail_legacy WHERE blob_uuid IN ({marks}) ORDER BY 2 DESC",
+                f"SELECT blob_uuid, variant, created_at FROM thumbnails WHERE blob_uuid IN ({marks}) "
+                f"UNION ALL SELECT blob_uuid, 'thumb', NULL FROM thumbnail_legacy WHERE blob_uuid IN ({marks}) ORDER BY 2 DESC, 3 DESC",
                 (*unique, *unique)):
-            variants = result.setdefault(row["blob_uuid"], [])
-            if row["variant"] not in variants:
-                variants.append(row["variant"])
+            variants = result.setdefault(row["blob_uuid"], {})
+            variants.setdefault(row["variant"], self._thumbnail_revision(row["created_at"]))
         return result
 
     def _adopt_legacy_thumbnail(self, blob_uuid: str) -> bool:
@@ -702,17 +710,20 @@ class ObjectService:
                 # 每个前缀用桶 / 键索引取四项；不先读完整目录，也不逐项查询缩略图。
                 rows = self.metadata.db.execute(
                     f"WITH folders(prefix,upper_key) AS (VALUES {values}) "
-                    "SELECT f.prefix,o.key,o.size,o.etag,o.content_type,o.modified_at FROM folders f "
+                    "SELECT f.prefix,o.key,o.size,o.etag,o.content_type,o.modified_at,t.created_at AS thumbnail_created_at FROM folders f "
                     "JOIN objects o ON o.bucket_id=? AND o.key IN ("
                     "SELECT sample.key FROM objects sample WHERE sample.bucket_id=? "
                     "AND sample.key>f.prefix AND sample.key<f.upper_key AND substr(sample.key,-1)!='/' "
                     "AND (substr(sample.key,1,9)!='.tgdrive/' OR ?=1) AND ("
                     "EXISTS(SELECT 1 FROM thumbnails t WHERE t.blob_uuid=sample.blob_uuid AND t.variant='thumb') "
                     "OR EXISTS(SELECT 1 FROM thumbnail_legacy l WHERE l.blob_uuid=sample.blob_uuid)) "
-                    "ORDER BY sample.key LIMIT 4) ORDER BY f.prefix,o.key", (*params, scope.bucket_id, scope.bucket_id, int(scope.private_access)))
+                    "ORDER BY sample.key LIMIT 4) "
+                    "LEFT JOIN thumbnails t ON t.blob_uuid=o.blob_uuid AND t.variant='thumb' "
+                    "ORDER BY f.prefix,o.key", (*params, scope.bucket_id, scope.bucket_id, int(scope.private_access)))
                 for row in rows:
                     item = {key: row[key] for key in ("key", "size", "etag", "content_type", "modified_at")}
-                    previews[row["prefix"]].append({**item, "thumbnails": ["thumb"], "has_thumbnail": True})
+                    previews[row["prefix"]].append({**item, "thumbnails": ["thumb"], "has_thumbnail": True,
+                        "thumbnail_versions": {"thumb": self._thumbnail_revision(row["thumbnail_created_at"])}})
             return previews
         return self.metadata.cached_read(("folder-previews", scope.bucket_id, tuple(prefixes)), read)
 

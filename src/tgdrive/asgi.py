@@ -234,13 +234,14 @@ class TgDriveASGI(StaticFiles):
                 await self._send(tracked_send, 200, result)
                 return
             if path == "/api/user/v1/thumbnail" and method == "GET":
-                data, mime, etag = file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
-                await self._send_thumbnail(tracked_send, headers, data, mime, etag, "no-store" if private else "private, max-age=86400")
+                bucket_id = int(query["bucket_id"][0]) if "bucket_id" in query else None
+                data, mime, etag = file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0], bucket_id=bucket_id)
+                await self._send_thumbnail(tracked_send, headers, data, mime, etag, "no-store" if private else self._thumbnail_cache_control(query, etag))
                 return
             if path == "/api/admin/v1/thumbnail" and method == "GET":
                 data, mime, etag = self.admin.thumbnail(token, int(query.get("bucket_id", ["0"])[0]),
                     query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
-                await self._send_thumbnail(tracked_send, headers, data, mime, etag, "private, max-age=86400")
+                await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
                 return
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
                 await self._content(tracked_send, method, token, query, headers, admin=False, user=file_user, private=private)
@@ -879,8 +880,21 @@ class TgDriveASGI(StaticFiles):
             "Content-Disposition": f"attachment; filename=\"files.zip\"; filename*=UTF-8''{quote(name, safe='')}",
             "X-Content-Type-Options": "nosniff"}, stream_zip(entries()), "GET")
 
+    @staticmethod
+    def _thumbnail_cache_control(query, etag: str) -> str:
+        parts = etag.rsplit("-", 2)
+        if len(parts) != 3:
+            return "private, no-cache"
+        source, variant, revision = parts
+        # 只有带存储桶、且匹配实际图片版本的地址允许长期缓存，旧地址继续回源验证。
+        if (query.get("bucket_id", [""])[0] and query.get("variant", ["thumb"])[0] == variant
+                and query.get("v", [""])[0] == f"{source}.{variant}.{revision}"):
+            return "private, max-age=2592000, immutable"
+        return "private, no-cache"
+
     async def _send_thumbnail(self, send, headers, data: bytes, mime: str, etag: str, cache_control: str):
-        if headers.get("if-none-match") == f'"{etag}"':
+        validators = [value.strip().removeprefix("W/") for value in headers.get("if-none-match", "").split(",")]
+        if f'"{etag}"' in validators or "*" in validators:
             await self._send(send, 304, None, {"ETag": f'"{etag}"', "Cache-Control": cache_control})
             return
         await self._send_raw(send, 200, {"Content-Type": mime, "ETag": f'"{etag}"', "Cache-Control": cache_control,

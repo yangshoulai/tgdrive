@@ -6,10 +6,15 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from tests.test_public_links import Client
 from tgdrive.app import create_app
-from tgdrive.objects import Scope
+from tgdrive.api import UserApi
+from tgdrive.asgi import TgDriveASGI
+from tgdrive.errors import NotFoundError
+from tgdrive.objects import ObjectService, Scope
 
 WEBP = b"RIFF\x1a\x00\x00\x00WEBPVP8 " + b"\x00" * 14
 JPEG = b"\xff\xd8\xff\xe0" + b"poster-bytes" * 8
@@ -171,6 +176,103 @@ class ThumbnailTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=photo.jpg")[1], WEBP, "live database keeps its thumbnails")
+
+
+class ThumbnailCacheTests(unittest.TestCase):
+    """缓存与授权回归使用替身，不初始化数据库或执行 SQL。"""
+
+    def setUp(self):
+        self.app = object.__new__(TgDriveASGI)
+        self.app.user = SimpleNamespace(thumbnail=Mock(return_value=(WEBP, "image/webp", "content-thumb-123")),
+                                        objects=SimpleNamespace(read_thumbnail=Mock(return_value=(WEBP, "image/webp", "content-thumb-123"))))
+        self.app.admin = SimpleNamespace(thumbnail=Mock(return_value=(WEBP, "image/webp", "content-thumb-123")))
+        self.app.private_space = SimpleNamespace(files=lambda *_: self.app.user)
+        self.app.metrics = self.app.s3 = self.app.s3_host = self.app.static_dir = None
+        self.app.settings = SimpleNamespace(s3_hostname=lambda: None)
+        self.app.json_limit = 1024
+        self.client = Client(self.app)
+
+    def request(self, path, headers=None):
+        return asyncio.run(self.client.request("GET", path, headers=headers))
+
+    def test_long_cache_only_for_current_bucket_and_thumbnail_version(self):
+        for route in ("/api/user/v1/thumbnail", "/api/admin/v1/thumbnail"):
+            for suffix, expected in (
+                ("&bucket_id=9&v=content.thumb.123", "private, max-age=2592000, immutable"),
+                ("&bucket_id=9&v=content.thumb.122", "private, no-cache"),
+                ("&bucket_id=9&v=content.thumb.123&variant=poster", "private, no-cache"),
+                ("&bucket_id=9", "private, no-cache"),
+            ):
+                with self.subTest(route=route, suffix=suffix):
+                    status, headers, data = self.request(route + "?path=a.jpg" + suffix)
+                    self.assertEqual((status, data), (200, WEBP))
+                    self.assertEqual(headers["cache-control"], expected)
+        headers = self.request("/api/user/v1/thumbnail?path=a.jpg&v=content.thumb.123")[1]
+        self.assertEqual(headers["cache-control"], "private, no-cache")
+
+    def test_private_thumbnail_never_uses_persistent_cache(self):
+        status, headers, data = self.request("/api/user/v1/private/thumbnail?path=hidden.jpg&bucket_id=9&v=content.thumb.123")
+        self.assertEqual((status, data), (200, WEBP))
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(headers["referrer-policy"], "no-referrer")
+
+    def test_conditional_response_preserves_policy_and_sends_no_image(self):
+        path = "/api/user/v1/thumbnail?path=a.jpg&bucket_id=9&v=content.thumb.123"
+        for validator in ('"content-thumb-123"', '"old", W/"content-thumb-123"', "*"):
+            with self.subTest(validator=validator):
+                status, headers, data = self.request(path, {"if-none-match": validator})
+                self.assertEqual((status, data), (304, b""))
+                self.assertEqual(headers["cache-control"], "private, max-age=2592000, immutable")
+                self.assertEqual(headers["etag"], '"content-thumb-123"')
+
+    def test_public_thumbnail_revalidates_and_revoked_share_cannot_return_304(self):
+        self.app._public_share = Mock(return_value=(SimpleNamespace(key="a.jpg"), None))
+        status, headers, _ = self.request("/p/share?thumbnail=thumb")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["cache-control"], "public, no-cache")
+        self.assertEqual(self.request("/p/share?thumbnail=thumb", {"if-none-match": headers["etag"]})[0], 304)
+        self.app._public_share.side_effect = NotFoundError("share")
+        self.assertEqual(self.request("/p/share?thumbnail=thumb", {"if-none-match": headers["etag"]})[0], 404)
+
+    def test_bucket_cache_key_cannot_read_another_accounts_thumbnail(self):
+        api = UserApi(Mock(), Mock())
+        api._scope = Mock(return_value=Scope(9))
+        with self.assertRaises(PermissionError):
+            api.thumbnail("session", "a.jpg", bucket_id=10)
+        api.objects.get_thumbnail.assert_not_called()
+        api.thumbnail("session", "a.jpg", bucket_id=9)
+        api.objects.get_thumbnail.assert_called_once_with(Scope(9), "a.jpg", "thumb")
+
+    def test_regeneration_within_one_second_changes_image_version(self):
+        service = ObjectService(Mock(), Mock())
+        service.metadata.db.execute.return_value.fetchone.side_effect = [
+            {"mime": "image/webp", "data": b"sealed", "created_at": 1000.001},
+            {"mime": "image/webp", "data": b"sealed", "created_at": 1000.002},
+        ]
+        service.engine.open_thumbnail.return_value = WEBP
+        info = SimpleNamespace(blob_uuid="blob", etag="content-2")
+        first = service.read_thumbnail(info)[2]
+        second = service.read_thumbnail(info)[2]
+        self.assertNotEqual(first, second)
+        self.assertEqual(TgDriveASGI._thumbnail_cache_control({"bucket_id": ["9"], "v": ["content-2.thumb.1000002000"]}, second),
+                         "private, max-age=2592000, immutable")
+        self.assertEqual(TgDriveASGI._thumbnail_cache_control({"bucket_id": ["9"], "v": ["content-2.thumb.1000001000"]}, second),
+                         "private, no-cache")
+
+    def test_folder_and_file_list_share_same_thumb_revision(self):
+        service = ObjectService(Mock(), Mock())
+        service.metadata.cached_read = lambda key, read: read()
+        row = {"prefix": "album/", "key": "album/a.jpg", "size": 8, "etag": "content", "content_type": "image/jpeg",
+               "modified_at": 1000, "thumbnail_created_at": 1000.001}
+        service.metadata.db.execute.return_value = [row]
+        folder = service.folder_previews(Scope(9), ["album/"])["album/"][0]
+        service.metadata.db.execute.return_value = [
+            {"blob_uuid": "blob", "variant": "thumb", "created_at": 1000.001},
+            {"blob_uuid": "blob", "variant": "poster", "created_at": 1000.002},
+        ]
+        versions = service.thumbnail_versions(["blob", "blob"])
+        self.assertEqual(folder["thumbnail_versions"]["thumb"], versions["blob"]["thumb"])
+        self.assertNotEqual(versions["blob"]["thumb"], versions["blob"]["poster"])
 
 
 if __name__ == "__main__":
