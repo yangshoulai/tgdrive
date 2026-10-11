@@ -9,6 +9,8 @@ export function FolderPicker({ value, onChange, blocked, onReady }: {
   value: string; onChange: (value: string) => void; blocked?: (path: string) => boolean; onReady?: (ready: boolean) => void;
 }) {
   const id = useId();
+  const root = api.isPrivatePath(value) ? api.PRIVATE_PREFIX : "";
+  const rootName = root ? "私密空间" : "我的文件";
   const fetchPage = useCallback((cursor: string | null) => api.listFolders(value, cursor), [value]);
   const pagination = useCursorPage(fetchPage);
   const [creating, setCreating] = useState(false);
@@ -25,7 +27,7 @@ export function FolderPicker({ value, onChange, blocked, onReady }: {
   const cancelCreate = () => { returnToCreate.current = true; setCreating(false); setName(""); setError(""); };
   useEffect(() => { onReady?.(!creating && !busy && !pagination.loading && !pagination.error && pagination.page !== null); }, [creating, busy, pagination.loading, pagination.error, pagination.page, onReady]);
   useEffect(() => { setCreating(false); setName(""); setError(""); }, [value]);
-  const segments = value.split("/").filter(Boolean);
+  const segments = value.slice(root.length).split("/").filter(Boolean);
   const open = (path: string) => { if (path !== value) onChange(path); };
   async function create() {
     if (busy) return;
@@ -40,8 +42,8 @@ export function FolderPicker({ value, onChange, blocked, onReady }: {
   return <div className="move-browser">
     <div className="move-head">
       <nav className="breadcrumbs" aria-label="目标位置">
-        <button type="button" disabled={busy} onClick={() => open("")} aria-current={!value ? "page" : undefined}><Icon name="home" size={15} />我的文件</button>
-        {segments.map((part, index) => <span key={index}><Icon name="chevronRight" size={14} /><button type="button" disabled={busy} onClick={() => open(`${segments.slice(0, index + 1).join("/")}/`)} aria-current={index === segments.length - 1 ? "page" : undefined}>{part}</button></span>)}
+        <button type="button" disabled={busy} onClick={() => open(root)} aria-current={value === root ? "page" : undefined}><Icon name={root ? "lock" : "home"} size={15} />{rootName}</button>
+        {segments.map((part, index) => <span key={index}><Icon name="chevronRight" size={14} /><button type="button" disabled={busy} onClick={() => open(`${root}${segments.slice(0, index + 1).join("/")}/`)} aria-current={index === segments.length - 1 ? "page" : undefined}>{part}</button></span>)}
       </nav>
       {!creating && <Button id={`${id}-create`} size="sm" variant="ghost" icon="folderPlus" onClick={() => setCreating(true)}>新建子文件夹</Button>}
     </div>
@@ -65,7 +67,7 @@ export function FolderPicker({ value, onChange, blocked, onReady }: {
           </button>)}
     </div>
     {(pagination.hasPrevious || pagination.hasNext) && <Pagination {...pagination} />}
-    <p className="muted folder-destination">已选位置：{value ? `/${value}` : "我的文件"}</p>
+    <p className="muted folder-destination">已选位置：{api.privatePathLabel(value)}</p>
   </div>;
 }
 
@@ -78,7 +80,7 @@ export function DestinationPicker({ value, onChange, onReady }: { value: string;
   return <div className="destination-picker">
     <div className="destination-summary">
       <Icon name="folder" size={19} />
-      <div><span className="field-label">目标位置</span><strong title={value ? `/${value}` : "我的文件"}>{value ? `我的文件 / ${value.replace(/\/$/, "")}` : "我的文件"}</strong></div>
+      <div><span className="field-label">目标位置</span><strong title={api.privatePathLabel(value)}>{api.privatePathLabel(value)}</strong></div>
       <Button size="sm" variant="ghost" aria-expanded={expanded} aria-controls={`${id}-browser`} disabled={expanded && !ready} onClick={() => setExpanded(current => !current)}>{expanded ? "收起" : "更改位置"}</Button>
     </div>
     {expanded && <div id={`${id}-browser`} className="destination-browser"><FolderPicker value={value} onChange={onChange} onReady={next => { setReady(next); onReady(next); }} /></div>}

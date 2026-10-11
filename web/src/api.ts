@@ -48,6 +48,15 @@ export type CreatedClient = { id: number; access_key_id: string; secret: string 
 let csrfToken = "";
 export function setCsrf(value: string) { csrfToken = value; }
 
+export const PRIVATE_PREFIX = ".tgdrive/private/";
+let privateAccess = "";
+export const isPrivatePath = (path: string) => path.startsWith(PRIVATE_PREFIX);
+export const privatePathLabel = (path: string) => isPrivatePath(path) ? `私密空间${path.length > PRIVATE_PREFIX.length ? ` / ${path.slice(PRIVATE_PREFIX.length).replace(/\/$/, "")}` : ""}` : path ? `我的文件 / ${path.replace(/\/$/, "")}` : "我的文件";
+export const setPrivateAccess = (access: string) => { privateAccess = access; };
+export const getPrivateAccess = () => privateAccess;
+const fileApi = (route: string, path = "") => `/api/user/v1${isPrivatePath(path) ? "/private" : ""}${route}`;
+const mediaAccess = (url: string, path: string) => isPrivatePath(path) ? `${url}&access=${encodeURIComponent(privateAccess)}` : url;
+
 export class ApiError extends Error {
   constructor(message: string, public status: number, public code: string) { super(message); }
 }
@@ -58,6 +67,7 @@ export function errorMessage(reason: unknown, fallback: string) {
 
 async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 30000): Promise<T> {
   const headers = new Headers(init.headers);
+  if (path.startsWith("/api/user/v1/private/") && !headers.has("X-Private-Access")) headers.set("X-Private-Access", privateAccess);
   if (init.body && !headers.has("Content-Type") && !(init.body instanceof Blob)) headers.set("Content-Type", "application/json");
   if (csrfToken && init.method && init.method !== "GET") headers.set("X-CSRF-Token", csrfToken);
   const controller = new AbortController();
@@ -73,6 +83,7 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
       let code = "request_failed";
       try { const body = await response.json(); message = body.error?.message ?? message; code = body.error?.code ?? code; } catch { /* 保留状态码 */ }
       if (response.status === 401 && path.startsWith("/api/") && !path.endsWith("/login")) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
+      if (code === "private_locked") window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: headers.get("X-Private-Access") }));
       throw new ApiError(message, response.status, code);
     }
     if (response.status === 204) return undefined as T;
@@ -90,6 +101,15 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
 
 const post = <T>(path: string, body?: unknown, timeoutMs?: number) => request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs);
 
+export type PrivateGrant = { access: string; idle_seconds: number };
+export const privateStatus = () => request<{ configured: boolean; idle_seconds: number }>("/api/user/v1/private/status");
+export const setupPrivate = (password: string, idleSeconds: number) => post<PrivateGrant>("/api/user/v1/private/setup", { password, idle_seconds: idleSeconds });
+export const unlockPrivate = (password: string) => post<PrivateGrant>("/api/user/v1/private/unlock", { password });
+export const privateActivity = (active: boolean, playing: boolean) => post<{ remaining_seconds: number }>("/api/user/v1/private/activity", { active, playing });
+export const lockPrivate = (access: string, keepalive = false) => request<void>("/api/user/v1/private/lock", { method: "POST", headers: { "X-Private-Access": access }, keepalive });
+export const configurePrivate = (password: string, idleSeconds: number, newPassword?: string) => post<PrivateGrant>("/api/user/v1/private/settings", { password, idle_seconds: idleSeconds, new_password: newPassword });
+export const transferPrivate = (paths: string[], destination: string, into: boolean, conflict: MoveConflict) => post<{ moved: number; skipped: number }>("/api/user/v1/private/transfer", { paths, destination, into, conflict });
+
 /* ---------- 会话 ---------- */
 
 /** remember 为 true 时服务端签发 30 天的长期会话（服务重启后仍有效）；否则 12 小时。 */
@@ -100,7 +120,7 @@ export async function login(username: string, password: string, remember = false
 }
 export async function logout() {
   try { await post<void>("/api/auth/v1/logout"); }
-  finally { setCsrf(""); }
+  finally { setCsrf(""); setPrivateAccess(""); }
 }
 export const me = () => request<UserMe>("/api/auth/v1/me");
 export async function restoreSession(): Promise<Session> {
@@ -114,10 +134,10 @@ export const changePassword = (oldPassword: string, newPassword: string) => post
 /* ---------- 用户文件 ---------- */
 
 export const listFiles = (prefix = "", cursor: string | null = null, publicOnly = false, limit = 100) =>
-  request<ListPage>(`/api/user/v1/list?limit=${limit}&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-export const previewAssets = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`/api/user/v1/preview-assets?path=${encodeURIComponent(path)}`, { signal });
+  request<ListPage>(`${fileApi("/list", prefix)}?limit=${limit}&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+export const previewAssets = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`${fileApi("/preview-assets", path)}?path=${encodeURIComponent(path)}`, { signal });
 export const previewList = (path: string, cursor: string | null, signal: AbortSignal) => request<PreviewListPage>(
-  `/api/user/v1/preview-list?path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+  `${fileApi("/preview-list", path)}?path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
 export const adminPreviewList = (bucketId: number, path: string, cursor: string | null, signal: AbortSignal) => request<PreviewListPage>(
   `/api/admin/v1/preview-list?bucket_id=${bucketId}&path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
 export const publicPreviewList = async (token: string, path: string, cursor: string | null, access: string | null, signal: AbortSignal): Promise<PreviewListPage> => {
@@ -133,36 +153,36 @@ export const publicPreviewAssets = (token: string, path: string, access?: string
   if (access) params.set("access", access);
   return request<PreviewAsset[]>(`/api/public/v1/folders/${encodeURIComponent(token)}/preview-assets?${params}`, { signal });
 };
-export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100) =>
-  request<ListPage>(`/api/user/v1/search?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}`);
+export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100, root = "") =>
+  request<ListPage>(`${fileApi("/search", root)}?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}`);
 export const listFolders = (prefix: string, cursor: string | null = null) => request<{ folders: string[]; next_cursor: string | null }>(
-  `/api/user/v1/folders?limit=50&prefix=${encodeURIComponent(prefix)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-export const checkFiles = (paths: string[]) => post<{ paths: string[] }>("/api/user/v1/files/check", { paths });
-export const makeFolder = (path: string) => post<FileItem>("/api/user/v1/folders", { path });
+  `${fileApi("/folders", prefix)}?limit=50&prefix=${encodeURIComponent(prefix)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+export const checkFiles = (paths: string[]) => post<{ paths: string[] }>(fileApi("/files/check", paths[0]), { paths });
+export const makeFolder = (path: string) => post<FileItem>(fileApi("/folders", path), { path });
 /** recursive 为 true 时，以 / 结尾的文件夹路径会在服务端连同其中所有内容一起删除。 */
-export const deleteFiles = (paths: string[], recursive = false) => post<{ results: { path: string; deleted: boolean; count?: number }[] }>("/api/user/v1/delete", { paths, recursive });
+export const deleteFiles = (paths: string[], recursive = false) => post<{ results: { path: string; deleted: boolean; count?: number }[] }>(fileApi("/delete", paths[0]), { paths, recursive });
 /** 移动冲突策略：rename 保留两者（自动编号），skip 跳过同名文件，overwrite 覆盖目标。 */
 export type MoveConflict = "rename" | "skip" | "overwrite";
-export const moveFile = (from: string, to: string, conflict: MoveConflict = "skip") => post<{ moved: number; skipped: number }>("/api/user/v1/move", { from, to, conflict });
-export const copyFile = (from: string, to: string) => post<FileItem>("/api/user/v1/copy", { from, to });
+export const moveFile = (from: string, to: string, conflict: MoveConflict = "skip") => post<{ moved: number; skipped: number }>(fileApi("/move", from), { from, to, conflict });
+export const copyFile = (from: string, to: string) => post<FileItem>(fileApi("/copy", from), { from, to });
 export type ShareOptions = { expires_at?: number | null; password?: string | null };
 export const setPublic = (paths: string[], isPublic: boolean, options: ShareOptions = {}) => post<{ objects: FileItem[] }>("/api/user/v1/public", { paths, public: isPublic, ...options });
 
 /* ---------- 回收站 ---------- */
 export type TrashItem = { id: string; path: string; is_folder: boolean; size: number; item_count: number; deleted_at: number; purge_at: number };
 export const listTrash = () => request<{ items: TrashItem[]; total_size: number; retention_days: number }>("/api/user/v1/trash");
-export const listTrashPage = (cursor: string | null, limit = 100) => request<{ items: TrashItem[]; total: number; total_size: number; retention_days: number; next_cursor: string | null }>(
-  `/api/user/v1/trash?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-export const moveToTrash = (paths: string[]) => post<{ items: { id: string; path: string }[] }>("/api/user/v1/trash", { paths });
-export const restoreTrash = (ids: string[]) => post<{ restored: { id: string; path: string }[] }>("/api/user/v1/trash/restore", { ids });
-export const purgeTrash = (ids: string[] | "all") => post<{ purged: number }>("/api/user/v1/trash/purge", ids === "all" ? { all: true } : { ids });
+export const listTrashPage = (cursor: string | null, limit = 100, root = "") => request<{ items: TrashItem[]; total: number; total_size: number; retention_days: number; next_cursor: string | null }>(
+  `${fileApi("/trash", root)}?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+export const moveToTrash = (paths: string[]) => post<{ items: { id: string; path: string }[] }>(fileApi("/trash", paths[0]), { paths });
+export const restoreTrash = (ids: string[], root = "") => post<{ restored: { id: string; path: string }[] }>(fileApi("/trash/restore", root), { ids });
+export const purgeTrash = (ids: string[] | "all", root = "") => post<{ purged: number }>(fileApi("/trash/purge", root), ids === "all" ? { all: true } : { ids });
 
 /* ---------- 缩略图 ---------- */
 export type ThumbnailVariant = "thumb" | "poster";
 export const thumbnailUrl = (path: string, etag: string, variant: ThumbnailVariant = "thumb") =>
-  `/api/user/v1/thumbnail?path=${encodeURIComponent(path)}&variant=${variant}&v=${etag}`;
-export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb") => post<void>("/api/user/v1/thumbnail", { path, data, variant });
-export const markNoThumbnail = (path: string) => post<void>("/api/user/v1/thumbnail", { path, variant: "none" });
+  mediaAccess(`${fileApi("/thumbnail", path)}?path=${encodeURIComponent(path)}&variant=${variant}&v=${encodeURIComponent(etag)}`, path);
+export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb") => post<void>(fileApi("/thumbnail", path), { path, data, variant });
+export const markNoThumbnail = (path: string) => post<void>(fileApi("/thumbnail", path), { path, variant: "none" });
 /** 文件的缩略图地址：有封面图时取 poster（服务端没有 poster 会退回 thumb），没有缩略图返回 undefined。 */
 export const fileThumbnail = (file: FileItem, variant: ThumbnailVariant = "thumb") =>
   // 地址里带上缩略图状态：之后补生成了封面，地址随之改变，不会继续用缓存里退回的小图。
@@ -179,20 +199,21 @@ export type UploadState = { upload_id: string; path: string; completed: boolean;
 export type InstantResult = ({ hit: true } & FileItem) | { hit: false };
 /** 秒传：存储桶里已有内容相同的文件时直接引用；未命中返回 { hit: false }，调用方再走普通上传。 */
 export const instantUpload = (path: string, size: number, fingerprint: string, contentType: string, isPublic?: boolean) =>
-  post<InstantResult>("/api/user/v1/files/instant", { path, size, fingerprint, content_type: contentType || undefined, ...(isPublic === undefined ? {} : { public: isPublic }) });
-export const createUpload = (path: string, contentType: string) => post<{ upload_id: string; part_size: number }>("/api/user/v1/uploads", { path, content_type: contentType });
-export const getUpload = (id: string) => request<UploadState>(`/api/user/v1/uploads/${id}`);
-export const completeUpload = (id: string, parts: [number, string][], isPublic?: boolean) => post<FileItem>(`/api/user/v1/uploads/${id}/complete`, { parts, ...(isPublic === undefined ? {} : { public: isPublic }) }, 15 * 60000);
-export const abortUpload = (id: string) => request<void>(`/api/user/v1/uploads/${id}`, { method: "DELETE" });
+  post<InstantResult>(fileApi("/files/instant", path), { path, size, fingerprint, content_type: contentType || undefined, ...(isPublic === undefined ? {} : { public: isPublic }) });
+export const createUpload = (path: string, contentType: string) => post<{ upload_id: string; part_size: number }>(fileApi("/uploads", path), { path, content_type: contentType });
+export const getUpload = (id: string, path = "") => request<UploadState>(fileApi(`/uploads/${id}`, path));
+export const completeUpload = (id: string, parts: [number, string][], isPublic?: boolean, path = "") => post<FileItem>(fileApi(`/uploads/${id}/complete`, path), { parts, ...(isPublic === undefined ? {} : { public: isPublic }) }, 15 * 60000);
+export const abortUpload = (id: string, path = "") => request<void>(fileApi(`/uploads/${id}`, path), { method: "DELETE" });
 export const listPublic = () => request<FileItem[]>("/api/user/v1/public");
 export const listPublicPage = (cursor: string | null = null, limit = 100) => request<{ objects: FileItem[]; total: number; next_cursor: string | null; folder_sizes?: Record<string, number>; folder_previews?: Record<string, FileItem[]> }>(
   `/api/user/v1/public?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-export const contentUrl = (path: string, download = false) => `/api/user/v1/content?path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
+export const contentUrl = (path: string, download = false) => mediaAccess(`${fileApi("/content", path)}?path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`, path);
 
 export type UploadProgress = { loaded: number; total: number; percent: number };
 /** 用 XHR 上传一个请求体以获得进度；文件体直接流向服务端，不在前端复制。返回的 abort 可取消该请求。 */
 function xhrPut<T>(url: string, body: Blob, contentType: string, onProgress: (progress: UploadProgress) => void): { promise: Promise<T>; abort: () => void } {
   const xhr = new XMLHttpRequest();
+  const access = url.startsWith("/api/user/v1/private/") ? privateAccess : "";
   let timer: number | undefined;
   let timedOut = false;
   const touch = () => { window.clearTimeout(timer); timer = window.setTimeout(() => { timedOut = true; xhr.abort(); }, 5 * 60000); };
@@ -201,6 +222,7 @@ function xhrPut<T>(url: string, body: Blob, contentType: string, onProgress: (pr
     xhr.withCredentials = true;
     xhr.setRequestHeader("Content-Type", contentType);
     if (csrfToken) xhr.setRequestHeader("X-CSRF-Token", csrfToken);
+    if (access) xhr.setRequestHeader("X-Private-Access", access);
     xhr.onprogress = touch;
     xhr.upload.onprogress = event => {
       touch();
@@ -218,6 +240,7 @@ function xhrPut<T>(url: string, body: Blob, contentType: string, onProgress: (pr
       let message = `上传失败（${xhr.status}）`; let code = "upload_failed";
       try { const parsed = JSON.parse(xhr.responseText); message = parsed.error?.message ?? message; code = parsed.error?.code ?? code; } catch { /* 保留状态码 */ }
       if (xhr.status === 401) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
+      if (code === "private_locked") window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: access }));
       reject(new ApiError(message, xhr.status, code));
     };
     touch();
@@ -228,11 +251,11 @@ function xhrPut<T>(url: string, body: Blob, contentType: string, onProgress: (pr
 
 export function uploadFileWithProgress(path: string, file: File, options: { isPublic?: boolean; onProgress: (progress: UploadProgress) => void }): { promise: Promise<FileItem>; abort: () => void } {
   const publicParam = options.isPublic === undefined ? "" : `&public=${options.isPublic ? "1" : "0"}`;
-  return xhrPut<FileItem>(`/api/user/v1/files?path=${encodeURIComponent(path)}${publicParam}`, file, file.type || "application/octet-stream", options.onProgress);
+  return xhrPut<FileItem>(`${fileApi("/files", path)}?path=${encodeURIComponent(path)}${publicParam}`, file, file.type || "application/octet-stream", options.onProgress);
 }
 
-export function uploadPartWithProgress(uploadId: string, partNo: number, blob: Blob, onProgress: (progress: UploadProgress) => void) {
-  return xhrPut<{ part_no: number; size: number; etag: string }>(`/api/user/v1/uploads/${uploadId}/parts/${partNo}`, blob, "application/octet-stream", onProgress);
+export function uploadPartWithProgress(uploadId: string, partNo: number, blob: Blob, onProgress: (progress: UploadProgress) => void, path = "") {
+  return xhrPut<{ part_no: number; size: number; etag: string }>(fileApi(`/uploads/${uploadId}/parts/${partNo}`, path), blob, "application/octet-stream", onProgress);
 }
 
 /* ---------- 用户客户端密钥 ---------- */

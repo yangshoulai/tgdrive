@@ -9,6 +9,7 @@ import { AppShell, FullPageLoading, LoginPage, SetupPage, useSessionGuard, type 
 import { Icon, Progress, formatBytes, toast, usageTone, useDocumentTitle } from "./ui";
 
 import { FilesView } from "./user/files";
+import { PrivateSpaceView } from "./user/private";
 import { UploadTray, useUploadQueue } from "./user/uploads";
 
 import { SharedView } from "./user/shared";
@@ -90,7 +91,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
   return <MainShell session={session} onLogout={() => setSession(null)} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "keys";
+type UserSection = "files" | "shared" | "trash" | "keys" | "private";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -105,7 +106,7 @@ function readLocation(): { section: Section; prefix: string } {
   }
   const params = new URLSearchParams(search);
   const view = params.get("view");
-  return { section: view === "shared" || view === "keys" || view === "trash" ? view : "files", prefix: params.get("path") ?? "" };
+  return { section: view === "shared" || view === "keys" || view === "trash" || view === "private" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
 }
 
 function MainShell({ session, onLogout }: { session: api.Session; onLogout: () => void }) {
@@ -146,12 +147,12 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
     else {
       const params = new URLSearchParams();
       if (section !== "files") params.set("view", section);
-      if (section === "files" && prefix) params.set("path", prefix);
+      if ((section === "files" || section === "private") && prefix) params.set("path", section === "private" ? prefix.replace(api.PRIVATE_PREFIX, "") : prefix);
       const query = params.toString();
       url = query ? `/?${query}` : "/";
     }
     window.history.pushState(null, "", url);
-    setLocation({ section, prefix });
+    setLocation({ section, prefix: section === "private" ? (api.isPrivatePath(prefix) ? prefix : api.PRIVATE_PREFIX + prefix) : prefix });
     document.getElementById("main")?.scrollTo?.({ top: 0 });
   }, []);
   async function logout() {
@@ -181,6 +182,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   } else {
     content = <>
       {section === "files" && <FilesView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={prefix => navigate("files", prefix)} onChanged={refreshUsage} />}
+      {section === "private" && <PrivateSpaceView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={path => navigate("private", path)} onChanged={refreshUsage} onExit={() => navigate("files")} />}
       {section === "shared" && <SharedView session={session} onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
       {section === "keys" && <KeysView bucketName={usage ? `user-${usage.id}` : null} />}
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
@@ -188,6 +190,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   }
   const personal: NavGroup<Section> = { label: isAdmin ? "我的空间" : undefined, workspace: isAdmin, icon: "folder", items: [
     { key: "files", label: "我的文件", icon: "folder" },
+    { key: "private", label: "私密空间", icon: "lock" },
     { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
     { key: "trash", label: "回收站", icon: "trash" },
     { key: "keys", label: "访问密钥", icon: "key" },

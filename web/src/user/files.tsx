@@ -7,16 +7,23 @@ import * as api from "../api";
 import { FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
 import { saveThumbnails, thumbnailsFromImage, useThumbnailBackfill } from "../thumbnails";
 
-import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
+import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, useDocumentTitle, type MenuItem } from "../ui";
 
 import { UploadDialog, type UploadQueue } from "./uploads";
+import { PrivateTransferDialog } from "./private-access";
+import type { PreviewPlayback } from "../files";
+import { usePrivateToast } from "./private-session";
 
 /* ---------- 文件 ---------- */
 
 type Entry = { kind: "folder"; key: string; size?: number } | { kind: "file"; key: string; file: api.FileItem };
 type SortKey = "name" | "type" | "size" | "modified";
 
-export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number }) {
+export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision, onPlayback }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number; onPlayback?: (state: PreviewPlayback) => void }) {
+  const privateSpace = api.isPrivatePath(prefix);
+  const notify = usePrivateToast(privateSpace);
+  const root = privateSpace ? api.PRIVATE_PREFIX : "";
+  const rootName = privateSpace ? "私密空间" : "我的文件";
   const pageSize = useFilePageSize();
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
@@ -28,6 +35,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [previewPage, setPreviewPage] = useState<{ id: number; files: api.FileItem[] }>({ id: 0, files: [] });
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
   const [renaming, setRenaming] = useState<Entry | null>(null);
+  const [transferring, setTransferring] = useState<Entry[] | null>(null);
   const [moving, setMoving] = useState<Entry[] | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const dragKeys = useRef<string[]>([]);
@@ -38,12 +46,12 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const fileInput = useRef<HTMLInputElement>(null);
   const breadcrumbNav = useRef<HTMLElement>(null);
   const dragDepth = useRef(0);
-  const name = prefix ? baseName(prefix) : "我的文件";
+  const name = prefix !== root ? baseName(prefix) : rootName;
   useDocumentTitle(`${query ? `搜索“${query}”` : name} · ${BRAND}`);
 
   const fetchPage = useCallback((cursor: string | null) => query
-    ? api.searchFiles(query, cursor ?? "", filter === "public", pageSize.pageSize)
-    : api.listFiles(prefix, cursor, filter === "public", pageSize.pageSize), [prefix, query, filter, pageSize.pageSize]);
+    ? api.searchFiles(query, cursor ?? "", filter === "public", pageSize.pageSize, root)
+    : api.listFiles(prefix, cursor, filter === "public", pageSize.pageSize), [prefix, query, filter, pageSize.pageSize, root]);
   const pagination = useCursorPage(fetchPage);
   const load = pagination.reload;
   useEffect(() => {
@@ -123,9 +131,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     try {
       const result = await api.setPublic(selectedFiles.map(entry => entry.key), isPublic);
       result.objects.forEach(replaceFile);
-      toast.success(isPublic ? `已公开 ${result.objects.length} 个文件` : `已取消公开 ${result.objects.length} 个文件`);
+      notify.success(isPublic ? `已公开 ${result.objects.length} 个文件` : `已取消公开 ${result.objects.length} 个文件`);
       setSelected(new Set()); onChanged();
-    } catch (reason) { toast.error(api.errorMessage(reason, "更新分享设置失败，请稍后重试")); }
+    } catch (reason) { notify.error(api.errorMessage(reason, "更新分享设置失败，请稍后重试")); }
   }
   /** 删除即移到回收站（可恢复），因此不弹确认框，而是在提示中提供撤销。 */
   async function moveToTrash(targets: Entry[]) {
@@ -133,13 +141,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       const { items } = await api.moveToTrash(targets.map(target => target.key));
       setSelected(new Set());
       await load(); onChanged();
-      toast.success(targets.length === 1 ? `已将“${baseName(targets[0].key)}”移到回收站` : `已将 ${targets.length} 项移到回收站`, {
+      notify.success(targets.length === 1 ? `已将“${baseName(targets[0].key)}”移到回收站` : `已将 ${targets.length} 项移到回收站`, {
         label: "撤销",
-        onClick: () => void api.restoreTrash(items.map(item => item.id))
-          .then(() => { toast.success("已撤销删除"); return load(); }).then(onChanged)
-          .catch(reason => toast.error(api.errorMessage(reason, "撤销失败，请稍后重试"))),
+        onClick: () => void api.restoreTrash(items.map(item => item.id), root)
+          .then(() => { notify.success("已撤销删除"); return load(); }).then(onChanged)
+          .catch(reason => notify.error(api.errorMessage(reason, "撤销失败，请稍后重试"))),
       });
-    } catch (reason) { toast.error(api.errorMessage(reason, "删除失败，请稍后重试")); }
+    } catch (reason) { notify.error(api.errorMessage(reason, "删除失败，请稍后重试")); }
   }
   function startUpload(list: FileList | File[] | null) {
     const picked = Array.from(list ?? []);
@@ -148,8 +156,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   /** 逐项移动；文件夹连同内容一起移动，公开链接随文件保留。 */
   async function moveEntries(targets: Entry[], dest: string, conflict: api.MoveConflict = "rename") {
     const items = targets.filter(target => canMoveInto(target, dest));
-    if (!items.length) { toast.info("所选项目已经在这个文件夹中"); return; }
-    const destName = dest ? baseName(dest) : "我的文件";
+    if (!items.length) { notify.info("所选项目已经在这个文件夹中"); return; }
+    const destName = dest === root ? rootName : baseName(dest);
     let movedItems = 0, skippedFiles = 0;
     const failures: string[] = [];
     for (const target of items) {
@@ -159,9 +167,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         skippedFiles += result.skipped;
       } catch (reason) { failures.push(`${baseName(target.key)}：${api.errorMessage(reason, "移动失败，请稍后重试")}`); }
     }
-    if (movedItems) toast.success(`已将 ${movedItems} 项移动到“${destName}”${skippedFiles ? `，${skippedFiles} 个同名文件已跳过` : ""}`);
-    else if (skippedFiles) toast.error(`“${destName}”中已有同名文件，未移动任何项目`);
-    if (failures.length) toast.error(failures.length === 1 ? failures[0] : `${failures.length} 项移动失败：${failures[0]}`);
+    if (movedItems) notify.success(`已将 ${movedItems} 项移动到“${destName}”${skippedFiles ? `，${skippedFiles} 个同名文件已跳过` : ""}`);
+    else if (skippedFiles) notify.error(`“${destName}”中已有同名文件，未移动任何项目`);
+    if (failures.length) notify.error(failures.length === 1 ? failures[0] : `${failures.length} 项移动失败：${failures[0]}`);
     setSelected(new Set());
     await load();
   }
@@ -205,11 +213,12 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     const entry: Entry = { kind: "file", key: file.key, file };
     const items: MenuItem[] = [
       { label: "下载", icon: "download", onSelect: () => undefined, href: api.contentUrl(file.key, true) },
-      { label: file.public_token ? "管理分享" : "公开分享", icon: "link", onSelect: () => setSharing(file) },
+      ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, onSelect: () => setSharing(file) }] : []),
     ];
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
     items.push({ label: "重命名", icon: "edit", onSelect: () => setRenaming(entry) });
     items.push({ label: "移动到…", icon: "move", onSelect: () => setMoving([entry]) });
+    items.push({ label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([entry]) });
     if (query) items.push({ label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(parentPath(file.key)) });
     items.push({ label: "删除", icon: "trash", danger: true, divider: true, onSelect: () => void moveToTrash([entry]) });
     return items;
@@ -218,14 +227,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     const shared = publicFolders[key];
     return [
       { label: "打开", icon: "folder", onSelect: () => onOpenFolder(key) },
-      { label: shared ? "管理分享" : "公开分享", icon: "link", onSelect: () => setSharing(folderItem(key)) },
+      ...(!privateSpace ? [{ label: shared ? "管理分享" : "公开分享", icon: "link" as const, onSelect: () => setSharing(folderItem(key)) }] : []),
       ...(shared ? [{ label: "复制分享链接", icon: "copy" as const, onSelect: () => void copyText(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "分享链接已复制") }] : []),
       { label: "重命名", icon: "edit", onSelect: () => setRenaming({ kind: "folder", key }) },
       { label: "移动到…", icon: "move", onSelect: () => setMoving([{ kind: "folder", key }]) },
+      { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([{ kind: "folder", key }]) },
       { label: "删除", icon: "trash", danger: true, divider: true, onSelect: () => void moveToTrash([{ kind: "folder", key }]) },
     ];
   }
-  const crumbs = prefix.split("/").filter(Boolean);
+  const crumbs = prefix.slice(root.length).split("/").filter(Boolean);
   const allSelected = entries.length > 0 && entries.every(entry => selected.has(entry.key));
 
   return (
@@ -240,11 +250,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <Button variant="primary" icon="upload" onClick={() => fileInput.current?.click()}>上传</Button>
           <input ref={fileInput} type="file" multiple hidden onChange={event => { startUpload(event.target.files); event.target.value = ""; }} />
         </>}>
-        {(prefix || query) && <nav ref={breadcrumbNav} className="breadcrumbs file-breadcrumbs" aria-label="当前位置">
+        {(prefix !== root || query) && <nav ref={breadcrumbNav} className="breadcrumbs file-breadcrumbs" aria-label="当前位置">
           <ol>
-            <li><button type="button" className={dropClass("")} {...dropProps("")} onClick={() => onOpenFolder("")} title="我的文件"><Icon name="home" size={15} /><span className="crumb-label">我的文件</span></button></li>
+            <li><button type="button" className={dropClass(root)} {...dropProps(root)} onClick={() => onOpenFolder(root)} title={rootName}><Icon name={privateSpace ? "lock" : "home"} size={15} /><span className="crumb-label">{rootName}</span></button></li>
             {crumbs.map((part, index) => {
-              const path = `${crumbs.slice(0, index + 1).join("/")}/`;
+              const path = `${root}${crumbs.slice(0, index + 1).join("/")}/`;
               return <li key={path}><Icon name="chevronRight" size={12} /><button type="button" className={dropClass(path)} {...dropProps(path)} onClick={() => onOpenFolder(path)} title={part} aria-current={index === crumbs.length - 1 && !query ? "page" : undefined}><span className="crumb-label">{part}</span></button></li>;
             })}
             {query && <li><Icon name="chevronRight" size={12} /><span className="crumb-current" aria-current="page">搜索结果</span></li>}
@@ -256,18 +266,19 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         <div className="toolbar selection-bar" role="toolbar" aria-label="批量操作">
           <span className="selection-count">已选择 {selected.size} 项</span>
           <div className="toolbar-actions">
-            {selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
+            {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
             <Button size="sm" icon="move" onClick={() => setMoving(selectedEntries)}>移动</Button>
+            <Button size="sm" icon="lock" onClick={() => setTransferring(selectedEntries)}>{privateSpace ? "移出私密空间" : "移入私密空间"}</Button>
             <Button size="sm" variant="danger" icon="trash" onClick={() => void moveToTrash(selectedEntries)}>删除</Button>
             <IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} />
           </div>
         </div>
       ) : (
         <div className="toolbar">
-          <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索全部文件，按回车" label="搜索文件" />
+          <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder={privateSpace ? "搜索私密空间，按回车" : "搜索全部文件，按回车"} label="搜索文件" />
           <div className="toolbar-actions">
-            <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />
+            {!privateSpace && <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />}
             <label className={`mobile-file-sort${layout === "grid" ? " is-grid-sort" : ""}`}><span className="sr-only">本页排序</span><select aria-label="本页排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
               const [key, direction] = event.target.value.split(":"); setSort({ key: key as SortKey, desc: direction === "desc" });
             }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="type:asc">类型升序</option><option value="type:desc">类型降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>
@@ -303,7 +314,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                 <span role="cell" className="cell-size muted" title="包含所有子文件夹中的文件">{entry.size == null ? "—" : formatBytes(entry.size)}</span>
                 <span role="cell" className="cell-date muted">—</span>
                 <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
-                  <span className="row-quick"><IconButton icon="link" size="sm" label={`分享 ${baseName(entry.key)}`} onClick={() => setSharing(folderItem(entry.key))} /></span>
+                  {!privateSpace && <span className="row-quick"><IconButton icon="link" size="sm" label={`分享 ${baseName(entry.key)}`} onClick={() => setSharing(folderItem(entry.key))} /></span>}
                   <Menu label={`${baseName(entry.key)} 的更多操作`} items={folderMenu(entry.key)} />
                 </span>
               </div>
@@ -315,7 +326,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                   <span className="name-stack">
                     <button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); openPreview(entry.file); }}>{baseName(entry.key)}</button>
                     <span className="file-mobile-meta"><span>{kindLabel(getFileKind(entry.file.content_type, entry.key))} · {formatBytes(entry.file.size)} · {formatDate(entry.file.modified_at)}</span>{entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>
-                    {query && parentPath(entry.key) && <small>{parentPath(entry.key)}</small>}
+                    {query && parentPath(entry.key) && <small>{privateSpace ? api.privatePathLabel(parentPath(entry.key)) : parentPath(entry.key)}</small>}
                   </span>
                   {entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}
                 </span>
@@ -323,7 +334,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                 <span role="cell" className="cell-size muted">{formatBytes(entry.file.size)}</span>
                 <span role="cell" className="cell-date muted" title={formatDateTime(entry.file.modified_at)}>{formatDate(entry.file.modified_at)}</span>
                 <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
-                  <span className="row-quick"><IconButton icon="link" size="sm" label={`分享 ${baseName(entry.key)}`} onClick={() => setSharing(entry.file)} /></span>
+                  {!privateSpace && <span className="row-quick"><IconButton icon="link" size="sm" label={`分享 ${baseName(entry.key)}`} onClick={() => setSharing(entry.file)} /></span>}
                   <Menu label={`${baseName(entry.key)} 的更多操作`} items={fileMenu(entry.file)} />
                 </span>
               </div>
@@ -373,8 +384,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       {pendingUpload && <UploadDialog files={pendingUpload} destination={prefix} onClose={() => setPendingUpload(null)}
         onStart={(list, isPublic, destination) => { setPendingUpload(null); uploads.enqueue(list.map(file => ({ file, path: `${destination}${file.name}`, isPublic }))); }} />}
       {folderOpen && <NameDialog title="新建文件夹" label="文件夹名称" confirm="创建" location={prefix} onClose={() => setFolderOpen(false)}
-        onSubmit={async (value, destination) => { await api.makeFolder(`${destination}${value}`); toast.success(`已创建文件夹“${value}”`); setFolderOpen(false); await load(); }} />}
-      {renaming && <NameDialog title={renaming.kind === "folder" ? "重命名文件夹" : "重命名文件"} label="新名称" confirm="重命名" initial={baseName(renaming.key)} onClose={() => setRenaming(null)}
+        onSubmit={async (value, destination) => { await api.makeFolder(`${destination}${value}`); notify.success(`已创建文件夹“${value}”`); setFolderOpen(false); await load(); }} />}
+      {renaming && <NameDialog privateSpace={privateSpace} title={renaming.kind === "folder" ? "重命名文件夹" : "重命名文件"} label="新名称" confirm="重命名" initial={baseName(renaming.key)} onClose={() => setRenaming(null)}
         onSubmit={async value => {
           const folder = renaming.kind === "folder";
           const target = `${parentPath(renaming.key)}${value}${folder ? "/" : ""}`;
@@ -383,13 +394,14 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           if (entries.some(entry => entry.key === target)) throw new Error("这个位置已有同名项目");
           const result = await api.moveFile(renaming.key, target, "skip");
           if (!result.moved || result.skipped) throw new Error("这个位置已有同名项目");
-          toast.success(`已重命名为“${value}”`); setRenaming(null); await load();
+          notify.success(`已重命名为“${value}”`); setRenaming(null); await load();
         }} />}
-      {moving && <MoveDialog targets={moving} startPrefix={query ? "" : prefix} onClose={() => setMoving(null)}
+      {moving && <MoveDialog targets={moving} startPrefix={query ? root : prefix} onClose={() => setMoving(null)}
         onMove={async (dest, conflict) => { await moveEntries(moving, dest, conflict); setMoving(null); }} />}
+      {transferring && <PrivateTransferDialog paths={transferring.map(item => item.key)} into={!privateSpace} onClose={() => setTransferring(null)} onDone={() => { setSelected(new Set()); void load(); onChanged(); }} />}
       {preview && <PreviewModal key={previewPage.id} file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)}
         playlistFiles={previewPage.files}
-        poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} onShare={file => { setPreview(file); setSharing(file); }}
+        poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} onPlaybackActivity={onPlayback} onShare={privateSpace ? undefined : file => { setPreview(file); setSharing(file); }}
         onImageLoad={(image, file) => {
           // 预览过的图片顺便补上缩略图和封面图（例如通过 S3 上传、没有缩略图的图片），不必再下载一次原图。
           // 已有封面、矢量图，或已有缩略图且原图不够大（不会生成封面）时跳过。
@@ -414,16 +426,17 @@ function canMoveInto(entry: Entry, dest: string) {
 
 function MoveDialog({ targets, startPrefix, onClose, onMove }: { targets: Entry[]; startPrefix: string; onClose: () => void; onMove: (dest: string, conflict: api.MoveConflict) => Promise<void> }) {
   const blocked = (key: string) => targets.some(target => target.kind === "folder" && key.startsWith(target.key));
-  const [browse, setBrowse] = useState(() => blocked(startPrefix) ? "" : startPrefix);
+  const root = api.isPrivatePath(startPrefix) ? api.PRIVATE_PREFIX : "";
+  const [browse, setBrowse] = useState(() => blocked(startPrefix) ? root : startPrefix);
   const [ready, setReady] = useState(false);
   const [conflict, setConflict] = useState<api.MoveConflict>("rename");
   const [busy, setBusy] = useState(false);
   const alreadyHere = targets.every(target => !canMoveInto(target, browse));
   const title = targets.length === 1 ? `移动“${baseName(targets[0].key)}”` : `移动 ${targets.length} 个项目`;
-  return <Modal title={title} description="选择目标文件夹。文件的公开链接在移动后保持不变。" icon="move" onClose={onClose}
+  return <Modal title={title} className={root ? "private-dialog" : ""} description={root ? "选择私密空间中的目标文件夹。" : "选择目标文件夹。文件的公开链接在移动后保持不变。"} icon="move" onClose={onClose}
     footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" loading={busy} disabled={alreadyHere || !ready || blocked(browse)} onClick={() => {
       setBusy(true); void onMove(browse, conflict).finally(() => setBusy(false));
-    }}>{alreadyHere ? "已在此文件夹中" : `移动到“${browse ? baseName(browse) : "我的文件"}”`}</Button></>}>
+    }}>{alreadyHere ? "已在此文件夹中" : `移动到“${browse !== root ? baseName(browse) : root ? "私密空间" : "我的文件"}”`}</Button></>}>
     <FolderPicker value={browse} onChange={next => { setReady(false); setBrowse(next); }} blocked={blocked} onReady={setReady} />
     <div className="move-conflict"><span>遇到同名文件时</span><Segmented label="同名冲突处理" value={conflict} onChange={setConflict} options={[{ value: "rename", label: "保留两者" }, { value: "skip", label: "跳过" }, { value: "overwrite", label: "覆盖" }]} /></div>
     {conflict === "overwrite" && <p className="inline-note tone-warning"><Icon name="alert" size={15} />目标位置的同名文件会被替换且无法恢复。</p>}
@@ -441,7 +454,7 @@ function SortHeader({ label, column, sort, onSort, className }: { label: string;
   );
 }
 
-function NameDialog({ title, label, confirm, initial = "", location, onClose, onSubmit }: { title: string; label: string; confirm: string; initial?: string; location?: string; onClose: () => void; onSubmit: (value: string, destination: string) => Promise<void> }) {
+function NameDialog({ title, label, confirm, initial = "", location, onClose, onSubmit, privateSpace = false }: { title: string; label: string; confirm: string; initial?: string; location?: string; privateSpace?: boolean; onClose: () => void; onSubmit: (value: string, destination: string) => Promise<void> }) {
   const [destination, setDestination] = useState(location ?? "");
   const [ready, setReady] = useState(true);
   const [value, setValue] = useState(initial);
@@ -464,7 +477,7 @@ function NameDialog({ title, label, confirm, initial = "", location, onClose, on
     finally { setBusy(false); }
   }
   return (
-    <Modal title={title} onClose={onClose} dismissible={!busy} size={location === undefined ? "sm" : "md"}
+    <Modal title={title} className={privateSpace || location && api.isPrivatePath(location) ? "private-dialog" : ""} onClose={onClose} dismissible={!busy} size={location === undefined ? "sm" : "md"}
       footer={<><Button disabled={busy} onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="name-form" loading={busy} disabled={!ready || !value.trim()}>{confirm}</Button></>}>
       <form id="name-form" className="form" onSubmit={submit} noValidate>
         <Field label={label} htmlFor="name-input" error={error}>

@@ -8,7 +8,7 @@ Tessera（仓库名 tgdrive）：基于 Telegram Bot + 私有频道的加密分�
 
 ## 目录
 
-- `src/tgdrive/`：后端（src 布局，导入名仍为 `tgdrive`；改动后需 `pip install -e .` 重新安装）。`metadata.py`（SQLite 迁移，当前 schema v12）、`objects.py`（对象/公开链接）、`api.py`（网页会话服务层，按角色校验 Cookie 会话与 CSRF）、`keyapi.py`（`/api/v1` 访问密钥 API）、`asgi.py`（HTTP 路由与流式响应）、`app.py`（应用工厂与 CLI）、`s3/`、`telegram/`。
+- `src/tgdrive/`：后端（src 布局，导入名仍为 `tgdrive`；改动后需 `pip install -e .` 重新安装）。`metadata.py`（SQLite 迁移，当前 schema v13）、`objects.py`（对象/公开链接）、`api.py`（网页会话服务层，按角色校验 Cookie 会话与 CSRF）、`private.py`（私密空间访问授权）、`keyapi.py`（`/api/v1` 访问密钥 API）、`asgi.py`（HTTP 路由与流式响应）、`app.py`（应用工厂与 CLI）、`s3/`、`telegram/`。
 - `web/src/`：前端源码。
   - `ui.tsx`：设计系统基元（按钮、表单、弹窗、菜单、toast、格式化）。新界面必须复用这里的组件。
   - `shell.tsx`：应用外壳、登录页、首次初始化页。
@@ -56,3 +56,4 @@ cd web && node build-apps.mjs                                  # 构建到 web/d
 - 秒传（`tgdrive/fingerprint.py`、`ObjectService.instant_put`、`web/src/fingerprint.ts`）：指纹是 16 MiB 分块 SHA-256 的哈希树，算法是对外约定（见文档站 `/files/instant`），服务端和前端必须保持一致，改动会让已有指纹失效。指纹存在 `blobs.fingerprint`，写入时由 `put_part` 顺带计算（不重读数据）；分段上传只有除最后一段外每段都是 16 MiB 整数倍才有指纹。命中只在调用者自己的桶、授权前缀内查找，回收站前缀 `.tgdrive/` 不参与。新增会创建 Blob 的写入路径时要保证走 `put_part`，并在 `finalize` 后设置指纹。
 - 缩略图（`objects.py` 的 thumbnail 系列方法、`web/src/thumbnails.ts`）：按 Blob 保存在 `thumbnails` 表，规格 `thumb`（≤96 KB，约 320px）、`poster`（≤320 KB，约 960px）与 `none`（已尝试但无法生成）；用该 Blob 的 DEK 派生密钥加密（`BlobEngine.seal_thumbnail`），所以改口令无需重加密、Blob 删除时外键级联删除。不计入配额、不进入备份。生成只在浏览器完成（图片缩放、视频截帧、音频 ID3/FLAC/MP4 内嵌封面），服务端不解码用户文件；网页上传后用本地文件生成，其余文件由 `useThumbnailBackfill` 在浏览目录时补生成。列表接口用 `UserApi._objects_json` 批量附带 `thumbnails` 状态，新增返回文件列表的接口时不要逐项查询。公开分享通过 `/p/<令牌>/<路径>?thumbnail=thumb|poster` 读取，沿用分享的权限并且不计下载次数。旧版存在 `user_meta` 里的明文缩略图在 v12 迁移时移到 `thumbnail_legacy`，解锁后由维护任务或首次读取加密转存。
 - 文件移动使用 `ObjectService.move`：不以 `/` 结尾的源精确匹配单个文件，以 `/` 结尾的源移动整个文件夹；禁止移入自身子文件夹；同名目录标记合并。
+- 私密空间由 `private.py` 管理独立访问密码与会话绑定的短期授权，网页入口为 `/api/user/v1/private/`。`Scope.private_access` 默认关闭，普通网页、管理文件、访问密钥和 S3 不得绕过 `.tgdrive/private/` 与 `.tgdrive/private-trash/` 的保护；内部账号删除和过期回收站维护可以显式授权。新增私密读取需禁用持久缓存，异步写入提交前及文件流逐块重新校验授权，移入必须递归取消公开链接。

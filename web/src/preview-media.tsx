@@ -11,7 +11,7 @@ type Engine = Awaited<ReturnType<typeof loadMediaEngine>>;
 type Player = ReturnType<Engine["createVideoPlayer"]> | ReturnType<Engine["createAudioPlayer"]>;
 type Lyric = { time: number; text: string };
 export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[]>;
-export type PlaybackControls = Pick<Player, "play" | "pause" | "seek">;
+export type PlaybackControls = Pick<Player, "play" | "pause" | "isPlaying" | "seek" | "seekBy" | "adjustVolume">;
 export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number) => void };
 
 function playbackTime(time: number): string {

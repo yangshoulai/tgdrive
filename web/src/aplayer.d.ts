@@ -8,6 +8,7 @@ declare module "aplayer" {
     audio: HTMLAudioElement;
     on(event: string, callback: () => void): void;
     toggle(): void;
+    volume(percentage?: number, nostorage?: boolean): number;
     destroy(): void;
   }
 }

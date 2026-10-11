@@ -14,7 +14,7 @@ from .authn import AuthenticationError, Session, hash_password
 from .errors import NotFoundError, NotReadyError
 from .maintenance import MaintenanceService
 from .metrics import TrafficMetrics
-from .objects import ObjectService, Scope
+from .objects import PRIVATE_PREFIX, ObjectService, Scope
 from .s3.auth import ClientAuthStore
 from .telegram.config import ConfiguredBlobStore, TelegramBotConfigStore
 
@@ -190,6 +190,8 @@ class AdminApi:
             raise ValueError("新密码至少需要 8 个字符")
         try:
             self.accounts.change_password(session, old_password, new_password)
+            if space := getattr(self, "private_space", None):
+                space.revoke_user(session.user_id)
         except AuthenticationError as exc:
             raise ValueError("当前密码不正确") from exc
 
@@ -419,6 +421,8 @@ class AdminApi:
 
 
 class UserApi:
+    _path = staticmethod(normalize_user_path)
+
     def __init__(self, accounts: AccountService, objects: ObjectService,
                  clients: ClientAuthStore | None = None) -> None:
         self.accounts, self.objects, self.clients = accounts, objects, clients
@@ -453,6 +457,8 @@ class UserApi:
             raise ValueError("新密码至少需要 8 个字符")
         try:
             await self.accounts.achange_password(session, old_password, new_password)
+            if space := getattr(self, "private_space", None):
+                space.revoke_user(session.user_id)
         except AuthenticationError as exc:
             raise ValueError("当前密码不正确") from exc
 
@@ -473,6 +479,8 @@ class UserApi:
     def logout(self, token: str) -> None:
         self.accounts.sessions.require(token)
         self.accounts.sessions.revoke(token)
+        if space := getattr(self, "private_space", None):
+            space.revoke_session(token)
 
     def me(self, token: str) -> dict[str, object]:
         # 不检查锁定状态：管理员在锁定时也要能恢复会话并看到解锁入口。
@@ -488,11 +496,11 @@ class UserApi:
     async def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000, public_only: bool = False):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
-        path_prefix = normalize_user_path(prefix) if prefix else ""
+        path_prefix = self._path(prefix) if prefix else ""
         if public_only:
             return await self.objects.metadata.run_in_thread(self._public_directory_page, account.bucket_id, path_prefix, cursor, limit)
         def read_page():
-            scope = Scope(account.bucket_id)
+            scope = self._scope(token)
             page = self.objects.list_objects(scope, path_prefix, "/", cursor, min(limit, 1000))
             return {"objects": self._objects_json(page.objects),
                     "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor,
@@ -518,17 +526,21 @@ class UserApi:
 
     async def folders(self, token: str, *, prefix: str = "", cursor: str = "", limit: int = 50):
         account = self.accounts.account_for_session(self._session(token))
-        prefix = normalize_user_path(prefix, directory=True) if prefix else ""
+        scope = self._scope(token)
+        prefix = self._path(prefix, directory=True) if prefix else ""
+        prefix = prefix or scope.prefix
         limit = max(1, min(limit, 200))
         def read():
+            if scope.authorize is not None:
+                scope.authorize()
             # 包含隐式目录；找到目录后跳过整棵子树，不扫描其中每个文件来去重。
             folders = []
             position = cursor + self.objects._PREFIX_END if cursor else prefix
             while len(folders) <= limit:
                 row = self.objects.metadata.db.execute(
                     "SELECT key FROM objects WHERE bucket_id=? AND key>? AND key<? "
-                    "AND substr(key,1,9)!='.tgdrive/' AND instr(substr(key,?),'/')>0 ORDER BY key LIMIT 1",
-                    (account.bucket_id, position, prefix + self.objects._PREFIX_END, len(prefix) + 1)).fetchone()
+                    "AND (substr(key,1,9)!='.tgdrive/' OR ?=1) AND instr(substr(key,?),'/')>0 ORDER BY key LIMIT 1",
+                    (account.bucket_id, position, prefix + self.objects._PREFIX_END, int(scope.private_access), len(prefix) + 1)).fetchone()
                 if row is None:
                     break
                 folder = prefix + row["key"][len(prefix):].split("/", 1)[0] + "/"
@@ -541,7 +553,7 @@ class UserApi:
         scope = self._scope(token, csrf=csrf, mutation=True)
         if not isinstance(paths, list) or len(paths) > 200 or any(not isinstance(path, str) for path in paths):
             raise ValueError("一次最多检查 200 个文件")
-        keys = [normalize_user_path(path) for path in paths]
+        keys = [self._path(path) for path in paths]
         if not keys:
             return {"paths": []}
         marks = ",".join("?" for _ in keys)
@@ -561,17 +573,22 @@ class UserApi:
     async def search(self, token: str, query: str, cursor: str = "", limit: int = 100, public_only: bool = False):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
+        scope = self._scope(token)
         self.objects._bucket(account.bucket_id)
         limit = max(1, min(limit, 200))
         query = unicodedata.normalize("NFC", query.strip())
         if len(query) > 256:
             raise ValueError("搜索词不能超过 256 个字符")
         def read_page():
+            if scope.authorize is not None:
+                scope.authorize()
             return self.objects.metadata.db.execute(
                 "SELECT * FROM objects "
                 "WHERE bucket_id=? AND key>? AND instr(lower(key),lower(?))>0 "
-                "AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' AND (?=0 OR public_token IS NOT NULL) ORDER BY key LIMIT ?",
-                (account.bucket_id, cursor, query, int(public_only), limit + 1),
+                "AND substr(key,-1)!='/' AND (substr(key,1,9)!='.tgdrive/' OR ?=1) "
+                "AND key>=? AND key<? AND (?=0 OR public_token IS NOT NULL) ORDER BY key LIMIT ?",
+                (account.bucket_id, cursor, query, int(scope.private_access), scope.prefix,
+                 scope.prefix + self.objects._PREFIX_END, int(public_only), limit + 1),
             ).fetchall()
         rows = await self.objects.metadata.run_in_thread(read_page)
         return {"objects": self._objects_json([self.objects._object(row) for row in rows[:limit]]), "common_prefixes": [],
@@ -580,7 +597,7 @@ class UserApi:
     async def folder(self, token: str, csrf: str, path: str) -> dict[str, object]:
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
-        item = await self.objects.put_directory_marker(Scope(account.bucket_id), normalize_user_path(path, directory=True))
+        item = await self.objects.put_directory_marker(self._scope(token), self._path(path, directory=True))
         return self._object_json(item)
 
     async def put(self, token: str, csrf: str, path: str, body: bytes | AsyncIterator[bytes],
@@ -589,11 +606,11 @@ class UserApi:
         """上传对象；public 为 None 时保持原有公开状态，True/False 显式开启或关闭链接。"""
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
-        key = normalize_user_path(path)
-        item = await self.objects.put_object(Scope(account.bucket_id), key, body,
+        key = self._path(path)
+        item = await self.objects.put_object(self._scope(token), key, body,
                                              len(body) if isinstance(body, bytes) else size, content_type)
         if public is not None:
-            item = self.objects.set_public(Scope(account.bucket_id), key, public)
+            item = self.objects.set_public(self._scope(token), key, public)
         return self._object_json(item)
 
     def instant_put(self, token: str, csrf: str, path: str, size: int, fingerprint: str,
@@ -601,8 +618,8 @@ class UserApi:
         """秒传：存储桶内已有内容相同的文件时直接引用它；未命中返回 {"hit": False}，由前端走普通上传。"""
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
-        scope = Scope(account.bucket_id)
-        key = normalize_user_path(path)
+        scope = self._scope(token)
+        key = self._path(path)
         item = self.objects.instant_put(scope, key, int(size), fingerprint, content_type)
         if item is None:
             return {"hit": False}
@@ -615,7 +632,7 @@ class UserApi:
         """开启/关闭公开分享；options 可包含 expires_at（时间戳或 None）与 password（字符串，空为取消）。"""
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
-        return [self._object_json(apply_share(self.objects, Scope(account.bucket_id), normalize_user_path(path), public, options, password_hash=password_hash))
+        return [self._object_json(apply_share(self.objects, self._scope(token), self._path(path), public, options, password_hash=password_hash))
                 for path in paths]
 
     async def aset_public(self, token: str, csrf: str, paths: list[str], public: bool, options=None):
@@ -635,12 +652,16 @@ class UserApi:
         return self._list_trash_scope(self._scope(token), limit=limit, cursor=cursor)
 
     def _list_trash_scope(self, scope: Scope, *, limit: int | None = None, cursor: str = ""):
+        if scope.authorize is not None:
+            scope.authorize()
         if limit is not None:
             limit = max(1, min(limit, 200))
-            where, args = "bucket_id=?", [scope.bucket_id]
-            totals = self.objects.metadata.cached_read(("trash-total", scope.bucket_id),
+            private = scope.prefix == PRIVATE_PREFIX
+            where = "bucket_id=? AND (substr(original_path,1,?)=?)=?"
+            args = [scope.bucket_id, len(PRIVATE_PREFIX), PRIVATE_PREFIX, int(private)]
+            totals = self.objects.metadata.cached_read(("trash-total", scope.bucket_id, private),
                 lambda: tuple(self.objects.metadata.db.execute(
-                    "SELECT COUNT(*),COALESCE(SUM(size),0) FROM trash WHERE bucket_id=?", (scope.bucket_id,)).fetchone()))
+                    f"SELECT COUNT(*),COALESCE(SUM(size),0) FROM trash WHERE {where}", args).fetchone()))
             if cursor:
                 try:
                     deleted, entry_id = cursor.split("|", 1)
@@ -656,12 +677,12 @@ class UserApi:
             last = rows[limit - 1] if len(rows) > limit else None
             return {"items": items, "total": totals[0], "total_size": totals[1], "retention_days": self.objects.TRASH_DAYS,
                     "next_cursor": f"{last['deleted_at']!r}|{last['id']}" if last else None}
-        items = self.objects.list_trash(scope.bucket_id)
+        items = self.objects.list_trash(scope.bucket_id, private=scope.prefix == PRIVATE_PREFIX)
         return {"items": items, "total_size": sum(int(item["size"]) for item in items), "retention_days": self.objects.TRASH_DAYS}
 
     async def trash(self, token: str, csrf: str, paths: list[str]) -> list[dict[str, object]]:
         scope = self._scope(token, csrf=csrf, mutation=True)
-        return await self.objects.trash(scope, [normalize_user_path(path, directory=path.endswith("/")) for path in paths])
+        return await self.objects.trash(scope, [self._path(path, directory=path.endswith("/")) for path in paths])
 
     def restore_trash(self, token: str, csrf: str, ids: list[str]) -> list[dict[str, object]]:
         return self.objects.restore(self._scope(token, csrf=csrf, mutation=True), [str(item) for item in ids])
@@ -681,16 +702,16 @@ class UserApi:
                 raw = base64.b64decode(str(data or "").split(",", 1)[-1], validate=True)
             except binascii.Error as exc:
                 raise ValueError("缩略图数据不是有效的 base64") from exc
-        self.objects.set_thumbnail(self._scope(token, csrf=csrf, mutation=True), normalize_user_path(path), raw, variant)
+        self.objects.set_thumbnail(self._scope(token, csrf=csrf, mutation=True), self._path(path), raw, variant)
 
     def thumbnail(self, token: str, path: str, variant: str = "thumb") -> tuple[bytes, str, str]:
-        return self.objects.get_thumbnail(self._scope(token), normalize_user_path(path), variant)
+        return self.objects.get_thumbnail(self._scope(token), self._path(path), variant)
 
     # ---------- 可续传的分段上传 ----------
 
     async def create_upload(self, token: str, csrf: str, path: str, content_type: str | None) -> dict[str, object]:
         scope = self._scope(token, csrf=csrf, mutation=True)
-        upload_id = await self.objects.create_multipart(scope, normalize_user_path(path), content_type)
+        upload_id = await self.objects.create_multipart(scope, self._path(path), content_type)
         return {"upload_id": upload_id, "path": path, "part_size": 16 * 1024 * 1024}
 
     def get_upload(self, token: str, upload_id: str) -> dict[str, object]:
@@ -739,6 +760,8 @@ class UserApi:
             raise ValueError("新密码至少需要 8 个字符")
         try:
             self.accounts.change_password(session, old_password, new_password)
+            if space := getattr(self, "private_space", None):
+                space.revoke_user(session.user_id)
         except AuthenticationError as exc:
             # 旧密码错误不是会话失效，不能返回 401 触发前端退出登录。
             raise ValueError("当前密码不正确") from exc
@@ -746,13 +769,13 @@ class UserApi:
     async def content(self, token: str, path: str, start: int = 0, end: int | None = None):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
-        return await self.objects.get_object(Scope(account.bucket_id), normalize_user_path(path), start, end)
+        return await self.objects.get_object(self._scope(token), self._path(path), start, end)
 
     async def preview_assets(self, token: str, path: str):
-        return await self.objects.apreview_assets(self._scope(token), normalize_user_path(path))
+        return await self.objects.apreview_assets(self._scope(token), self._path(path))
 
     async def preview_list(self, token: str, path: str, cursor: str | None = None):
-        page = await self.objects.apreview_list(self._scope(token), normalize_user_path(path), cursor)
+        page = await self.objects.apreview_list(self._scope(token), self._path(path), cursor)
         items = await self.objects.metadata.run_in_thread(self._objects_json, page.objects)
         return {"objects": items, "next_cursor": page.next_cursor}
 
@@ -760,8 +783,8 @@ class UserApi:
         """删除文件；recursive 为 True 时，以 / 结尾的路径会删除整个文件夹（在服务端分批完成）。"""
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
-        scope = Scope(account.bucket_id)
-        normalized = [normalize_user_path(path) for path in paths]
+        scope = self._scope(token)
+        normalized = [self._path(path) for path in paths]
         results: list[dict[str, object]] = []
         plain = [key for key in normalized if not (recursive and key.endswith("/"))]
         for key in normalized:
@@ -776,16 +799,16 @@ class UserApi:
     async def move(self, token: str, csrf: str, source: str, target: str, conflict: str = "skip") -> dict[str, int]:
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
-        old = normalize_user_path(source, directory=source.endswith("/"))
-        new = normalize_user_path(target, directory=target.endswith("/"))
-        result = self.objects.move(Scope(account.bucket_id), old, new, conflict)
+        old = self._path(source, directory=source.endswith("/"))
+        new = self._path(target, directory=target.endswith("/"))
+        result = self.objects.move(self._scope(token), old, new, conflict)
         return {"moved": result.moved, "skipped": result.skipped}
 
     async def copy(self, token: str, csrf: str, source: str, target: str) -> dict[str, object]:
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
-        item = await self.objects.copy_object(Scope(account.bucket_id), normalize_user_path(source),
-                                              Scope(account.bucket_id), normalize_user_path(target))
+        item = await self.objects.copy_object(self._scope(token), self._path(source),
+                                              self._scope(token), self._path(target))
         return self._objects_json([item])[0]
 
     def list_clients(self, token: str, *, limit: int | None = None, cursor: int = 0):

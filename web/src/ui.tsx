@@ -121,9 +121,9 @@ export function Button({ variant = "secondary", size = "md", icon, loading, bloc
   );
 }
 
-export function IconButton({ icon, label, onClick, variant = "ghost", size = "md", disabled, active }: { icon: IconName; label: string; onClick?: () => void; variant?: "ghost" | "secondary"; size?: "sm" | "md"; disabled?: boolean; active?: boolean }) {
+export function IconButton({ icon, label, onClick, variant = "ghost", size = "md", disabled, active, shortcut }: { icon: IconName; label: string; onClick?: () => void; variant?: "ghost" | "secondary"; size?: "sm" | "md"; disabled?: boolean; active?: boolean; shortcut?: string }) {
   return (
-    <button type="button" className={`icon-btn icon-btn-${variant} icon-btn-${size}${active ? " is-active" : ""}`} onClick={onClick} aria-label={label} title={label} disabled={disabled} aria-pressed={active}>
+    <button type="button" className={`icon-btn icon-btn-${variant} icon-btn-${size}${active ? " is-active" : ""}`} onClick={onClick} aria-label={label} aria-keyshortcuts={shortcut} title={shortcut ? `${label}（${shortcut.toUpperCase()}）` : label} disabled={disabled} aria-pressed={active}>
       <Icon name={icon} size={size === "sm" ? 16 : 18} />
     </button>
   );
@@ -229,7 +229,12 @@ if (typeof document !== "undefined") {
   document.addEventListener("keydown", event => { if (NAVIGATION_KEYS.has(event.key)) root.dataset.input = "keyboard"; }, true);
 }
 
-export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, className = "", initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string }) {
+/** 输入、选择、进度条与菜单优先使用各自的键盘操作。 */
+export function isShortcutControl(target: Element): boolean {
+  return Boolean(target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='slider'], [role='spinbutton'], [role='combobox'], [role^='menu'], .menu, .art-settings"));
+}
+
+export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, className = "", initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
@@ -258,7 +263,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     if (!backdrop.current || switchingScreen) return;
     setSwitchingScreen(true);
     try {
-      if (document.fullscreenElement === backdrop.current) await document.exitFullscreen();
+      if (document.fullscreenElement && backdrop.current.contains(document.fullscreenElement)) await document.exitFullscreen();
       else await backdrop.current.requestFullscreen();
     } catch { toast.error("无法进入全屏，可以使用最大化预览。"); }
     finally { setSwitchingScreen(false); }
@@ -272,6 +277,31 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     } catch { toast.error("请先退出全屏，再最小化预览。"); }
     finally { setSwitchingScreen(false); }
   }
+  const handleWindowKey: KeyboardEventHandler<HTMLDivElement> = event => {
+    onKeyDownCapture?.(event);
+    if (!windowShortcuts || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
+    const target = event.target as HTMLElement, key = event.key.toLowerCase();
+    if (!event.currentTarget.contains(target) || event.currentTarget.closest("[inert]") || isShortcutControl(target)) return;
+    if ((key !== "i" || !minimizable) && (key !== "f" || !expandable)) return;
+    event.preventDefault(); event.stopPropagation();
+    if (event.repeat || switchingScreen) return;
+    if (key === "i") { if (minimized) setMinimized(false); else void minimize(); }
+    else {
+      setMinimized(false);
+      if (supportsFullscreen) void toggleFullscreen(); else setMaximized(value => !value);
+    }
+  };
+  useEffect(() => {
+    if (!windowShortcuts || !minimizable || !minimized) return;
+    // 小窗口释放页面焦点后，仍可恢复；其他弹窗与输入控件不受影响。
+    const restore = (event: KeyboardEvent) => {
+      if (modalStack.length || event.defaultPrevented || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.key.toLowerCase() !== "i") return;
+      if (!(event.target instanceof Element) || isShortcutControl(event.target)) return;
+      event.preventDefault(); event.stopPropagation(); setMinimized(false);
+    };
+    document.addEventListener("keydown", restore);
+    return () => document.removeEventListener("keydown", restore);
+  }, [windowShortcuts, minimizable, minimized]);
   useEffect(() => {
     if (minimized) return;
     const previous = previousFocus.current;
@@ -313,7 +343,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
   }, [minimized, initialFocus]);
   return createPortal(
     <div ref={backdrop} className={`modal-backdrop${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}${minimized ? " is-minimized" : ""}`} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && !pinned && !minimized && modalStack.at(-1) === ref.current) onClose(); }}>
-      <div ref={ref} className={`modal modal-${size} ${className}${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}`} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={onKeyDownCapture}>
+      <div ref={ref} className={`modal modal-${size} ${className}${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}`} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={handleWindowKey}>
         <header className="modal-header">
           {leading ?? (icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>)}
           <div className="modal-heading">
@@ -323,10 +353,10 @@ export function Modal({ title, description, onClose, children, footer, actions, 
           <div className="modal-window-actions">
             {!minimized && actions}
             {pinnable && !minimized && <IconButton icon="pin" label={pinned ? "取消固定预览" : "固定预览（仅手动关闭）"} size="sm" active={pinned} onClick={() => setPinned(value => !value)} />}
-            {minimizable && <IconButton icon={minimized ? "restore" : "minimize"} label={minimized ? "恢复预览" : "最小化预览"} size="sm" disabled={switchingScreen} onClick={() => minimized ? setMinimized(false) : void minimize()} />}
+            {minimizable && <IconButton icon={minimized ? "restore" : "minimize"} label={minimized ? "恢复预览" : "最小化预览"} shortcut={windowShortcuts ? "i" : undefined} size="sm" disabled={switchingScreen} onClick={() => minimized ? setMinimized(false) : void minimize()} />}
             {expandable && !minimized && <>
               <IconButton icon={maximized ? "restore" : "maximize"} label={maximized ? "还原预览" : "最大化预览"} onClick={() => setMaximized(value => !value)} size="sm" active={maximized} disabled={fullscreen || switchingScreen} />
-              {supportsFullscreen && <IconButton icon={fullscreen ? "exitFullscreen" : "fullscreen"} label={fullscreen ? "退出全屏" : "全屏预览"} onClick={() => void toggleFullscreen()} size="sm" active={fullscreen} disabled={switchingScreen} />}
+              {supportsFullscreen && <IconButton icon={fullscreen ? "exitFullscreen" : "fullscreen"} label={fullscreen ? "退出全屏" : "全屏预览"} shortcut={windowShortcuts ? "f" : undefined} onClick={() => void toggleFullscreen()} size="sm" active={fullscreen} disabled={switchingScreen} />}
             </>}
             <IconButton icon="x" label="关闭" onClick={onClose} size="sm" disabled={!dismissible} />
           </div>
@@ -339,14 +369,14 @@ export function Modal({ title, description, onClose, children, footer, actions, 
   );
 }
 
-export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onClose, danger = true }: { title: string; description: ReactNode; confirmLabel: string; onConfirm: () => Promise<void> | void; onClose: () => void; danger?: boolean }) {
+export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onClose, danger = true, className }: { title: string; description: ReactNode; confirmLabel: string; onConfirm: () => Promise<void> | void; onClose: () => void; danger?: boolean; className?: string }) {
   const [busy, setBusy] = useState(false);
   async function confirm() {
     setBusy(true);
     try { await onConfirm(); } finally { setBusy(false); }
   }
   return (
-    <Modal title={title} description={description} onClose={onClose} dismissible={!busy} size="sm" icon={danger ? "alert" : "info"} tone={danger ? "danger" : "accent"}
+    <Modal className={className} title={title} description={description} onClose={onClose} dismissible={!busy} size="sm" icon={danger ? "alert" : "info"} tone={danger ? "danger" : "accent"}
       footer={<><Button disabled={busy} onClick={onClose}>取消</Button><Button variant={danger ? "danger" : "primary"} loading={busy} onClick={() => void confirm()}>{confirmLabel}</Button></>} />
   );
 }
@@ -429,12 +459,14 @@ function pushToast(tone: Toast["tone"], message: string, action?: ToastAction) {
   listeners.forEach(listener => listener(toasts));
   // 带操作（如撤销）的提示停留更久，给用户反应时间。
   if (tone !== "error") window.setTimeout(() => dismissToast(id), action ? 8000 : 3800);
+  return id;
 }
 function dismissToast(id: number) {
   toasts = toasts.filter(item => item.id !== id);
   listeners.forEach(listener => listener(toasts));
 }
 export const toast = {
+  dismiss: dismissToast,
   success: (message: string, action?: ToastAction) => pushToast("success", message, action),
   error: (message: string) => pushToast("error", message),
   info: (message: string) => pushToast("info", message),

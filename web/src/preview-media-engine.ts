@@ -12,6 +12,10 @@ function mediaProgress(media: HTMLMediaElement): MediaProgress {
   const currentTime = Number.isFinite(media.currentTime) ? Math.max(0, media.currentTime) : 0;
   return { currentTime: duration ? Math.min(currentTime, duration) : currentTime, duration };
 }
+function seekBy(media: HTMLMediaElement, seconds: number) {
+  const { currentTime, duration } = mediaProgress(media);
+  if (duration) media.currentTime = Math.max(0, Math.min(duration, currentTime + seconds));
+}
 export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents) {
   // 网页全屏仍留在预览的对话框内，保留焦点锁和无障碍语义。
   Artplayer.FULLSCREEN_WEB_IN_BODY = false;
@@ -19,7 +23,8 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   Artplayer.RECONNECT_TIME_MAX = 0;
   const player = new Artplayer({ container, url, poster: poster ?? "", lang: "zh-cn", autoplay: false, theme: getComputedStyle(container).getPropertyValue("--accent").trim(),
     setting: true, playbackRate: true, aspectRatio: true, fullscreen: true, fullscreenWeb: true, pip: true,
-    hotkey: true, mutex: true, autoSize: false, moreVideoAttr: { preload: "metadata", playsInline: true } });
+    // 快捷键由预览窗口统一处理，避免全局监听重复跳转或影响最小化后的页面操作。
+    hotkey: false, mutex: true, autoSize: false, moreVideoAttr: { preload: "metadata", playsInline: true } });
   const controls = [["playAndPause", "播放视频"], ["setting", "显示设置"], ["pip", "开启画中画"], ["fullscreenWeb", "网页全屏"], ["fullscreen", "全屏"]];
   for (const [control, label] of controls) {
     const button = container.querySelector<HTMLElement>(`.art-control-${control}`);
@@ -28,7 +33,8 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     button.addEventListener("keydown", event => {
       if (event.key === " " || event.key === "Enter") {
         event.preventDefault(); event.stopPropagation();
-        if (control === "playAndPause") player.toggle(); else button.click();
+        if (event.repeat) return;
+        if (control === "playAndPause") { if (player.video.paused) void player.play(); else player.pause(); } else button.click();
       }
     });
   }
@@ -78,7 +84,10 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   return {
     play: () => player.play(),
     pause: () => player.pause(),
+    isPlaying: () => !player.video.paused,
     seek: (time: number) => { player.video.currentTime = time; updateProgress(); },
+    seekBy: (seconds: number) => { seekBy(player.video, seconds); updateProgress(); },
+    adjustVolume: (delta: number) => { player.volume = Math.max(0, Math.min(1, player.video.volume + delta)); },
     setSource: (nextUrl: string, _name: string, nextCover?: string) => {
       player.pause(); ready = false; notify("loading");
       events?.onProgress?.({ currentTime: 0, duration: 0 });
@@ -140,7 +149,12 @@ export function createAudioPlayer(container: HTMLElement, url: string, name: str
   const play = container.querySelector<HTMLElement>(".aplayer-pic");
   if (play) {
     play.tabIndex = 0; play.setAttribute("role", "button"); play.setAttribute("aria-label", "播放音频");
-    play.addEventListener("keydown", event => { if (event.key === " " || event.key === "Enter") { event.preventDefault(); player.toggle(); } });
+    play.addEventListener("keydown", event => {
+      if (event.key === " " || event.key === "Enter") {
+        event.preventDefault(); event.stopPropagation();
+        if (!event.repeat) { if (player.audio.paused) void player.audio.play(); else player.audio.pause(); }
+      }
+    });
     player.on("play", () => play.setAttribute("aria-label", "暂停音频"));
     player.on("pause", () => play.setAttribute("aria-label", "播放音频"));
   }
@@ -180,7 +194,10 @@ export function createAudioPlayer(container: HTMLElement, url: string, name: str
   updateProgress();
   return {
     play: () => player.audio.play(), pause: () => player.audio.pause(),
+    isPlaying: () => !player.audio.paused,
     seek: (time: number) => { player.audio.currentTime = time; updateProgress(); },
+    seekBy: (seconds: number) => { seekBy(player.audio, seconds); updateProgress(); },
+    adjustVolume: (delta: number) => { player.volume(Math.max(0, Math.min(1, player.audio.volume + delta))); },
     setSource: (nextUrl: string, nextName: string, nextCover?: string) => {
       player.audio.pause(); ready = false; notify("loading");
       if (title) title.textContent = nextName;

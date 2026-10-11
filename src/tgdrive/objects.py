@@ -9,7 +9,8 @@ import secrets
 import time
 import unicodedata
 from collections.abc import AsyncIterator, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Callable
 
 from .blobengine import BlobEngine
 from .errors import InvalidStateError, NotFoundError, QuotaExceededError, ShareExpiredError
@@ -17,11 +18,17 @@ from .fingerprint import combine, is_fingerprint
 from .metadata import Metadata
 
 
+PRIVATE_PREFIX = ".tgdrive/private/"
+PRIVATE_TRASH_PREFIX = ".tgdrive/private-trash/"
+
+
 @dataclass(frozen=True)
 class Scope:
     bucket_id: int
     prefix: str = ""
     perms: str = "rw"
+    private_access: bool = False
+    authorize: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +82,12 @@ class ObjectService:
 
     @staticmethod
     def _check_scope(scope: Scope, key: str, *, write: bool = False) -> None:
+        if scope.authorize is not None:
+            scope.authorize()
+        protected = (PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX)
+        if not scope.private_access and (key.startswith(protected) or
+                (key.endswith("/") and any(prefix.startswith(key) for prefix in protected))):
+            raise PermissionError("私密空间需要单独解锁")
         if scope.perms not in ("ro", "rw"):
             raise PermissionError("invalid scope permissions")
         if write and scope.perms != "rw":
@@ -214,6 +227,7 @@ class ObjectService:
             self.engine.finalize(blob_uuid, [1])
             if result.size:
                 self.metadata.set_fingerprint(blob_uuid, combine(result.size, result.leaves))
+            self._check_scope(scope, key, write=True)
             return self._commit_blob(scope.bucket_id, key, blob_uuid, result.size, result.md5,
                                      content_type, user_meta)
         except Exception:
@@ -226,13 +240,14 @@ class ObjectService:
 
     MIN_PART_SIZE = 5 * 1024 * 1024  # S3 规定：除最后一段外每段至少 5 MiB
 
-    def find_by_fingerprint(self, bucket_id: int, fingerprint: str, size: int, prefix: str = ""):
+    def find_by_fingerprint(self, bucket_id: int, fingerprint: str, size: int, prefix: str = "", *, private_access=False):
         """在同一个存储桶、调用者授权前缀内按内容指纹找一个现有对象；回收站内部前缀不参与。"""
         return self.metadata.db.execute(
             "SELECT o.* FROM objects o JOIN blobs b ON b.uuid = o.blob_uuid "
             "WHERE o.bucket_id = ? AND b.fingerprint = ? AND b.size = ? AND b.status = 'complete' "
-            "AND substr(o.key, 1, ?) = ? AND o.key NOT LIKE '.tgdrive/%' ORDER BY o.modified_at DESC LIMIT 1",
-            (bucket_id, fingerprint, size, len(prefix), prefix)).fetchone()
+            "AND substr(o.key, 1, ?) = ? AND (substr(o.key,1,9)!='.tgdrive/' OR "
+            "(?=1 AND substr(o.key,1,?)=?)) ORDER BY o.modified_at DESC LIMIT 1",
+            (bucket_id, fingerprint, size, len(prefix), prefix, int(private_access), len(PRIVATE_PREFIX), PRIVATE_PREFIX)).fetchone()
 
     def instant_put(self, scope: Scope, key: str, size: int, fingerprint: str,
                     content_type: str | None = None) -> ObjectInfo | None:
@@ -243,7 +258,7 @@ class ObjectService:
         self._check_scope(scope, key, write=True)
         if not is_fingerprint(fingerprint) or size <= 0:
             raise ValueError("无效的内容指纹或文件大小")
-        source = self.find_by_fingerprint(scope.bucket_id, fingerprint, size, scope.prefix)
+        source = self.find_by_fingerprint(scope.bucket_id, fingerprint, size, scope.prefix, private_access=scope.private_access)
         if source is None:
             return None
         return self._commit_blob(scope.bucket_id, key, source["blob_uuid"], source["size"], source["etag"],
@@ -290,6 +305,8 @@ class ObjectService:
 
     def set_public(self, scope: Scope, key: str, public: bool) -> ObjectInfo:
         """开启或关闭对象的公开链接；重复开启返回同一个令牌。"""
+        if public and key.startswith((PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX)):
+            raise PermissionError("私密空间不能公开分享")
         if key.endswith("/"):
             # 文件夹的分享信息保存在它的目录标记行上；只靠前缀存在的“隐式文件夹”先补一个标记。
             self._check_scope(scope, key, write=True)
@@ -448,7 +465,8 @@ class ObjectService:
         entries = []
         for key in keys:
             folder = key.endswith("/")
-            if key.startswith(".tgdrive/"):
+            self._check_scope(scope, key, write=True)
+            if key.startswith(".tgdrive/") and not (scope.private_access and key.startswith(PRIVATE_PREFIX)):
                 raise PermissionError("reserved path")
             stats = self.metadata.db.execute(
                 "SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE bucket_id=? AND "
@@ -457,20 +475,22 @@ class ObjectService:
             if not stats[0]:
                 raise NotFoundError(key)
             entry_id = f"{int(time.time() * 1000)}-{secrets.token_hex(3)}"
-            target = f"{self.TRASH_PREFIX}{entry_id}/{key}"
-            self.move(scope, key, target, "overwrite")
+            target = self._trash_key(entry_id, key)
+            internal = replace(scope, prefix="")
+            self.move(internal, key, target, "overwrite")
             if folder and not self.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, target)).fetchone():
                 # 没有目录标记的“隐式”文件夹在回收站中补一个标记，恢复时才能得到完整的文件夹。
                 # 已有标记时不能覆盖：公开分享信息（令牌、有效期、密码）保存在标记行上，还原后链接要恢复。
-                await self.put_directory_marker(scope, target)
+                await self.put_directory_marker(internal, target)
             with self.metadata.transaction() as db:
                 db.execute("INSERT INTO trash(id,bucket_id,original_path,is_folder,size,item_count,deleted_at) VALUES(?,?,?,?,?,?,?)",
                            (entry_id, scope.bucket_id, key, int(folder), int(stats[1]), int(stats[0]), time.time()))
             entries.append({"id": entry_id, "path": key})
         return entries
 
-    def list_trash(self, bucket_id: int) -> list[dict[str, object]]:
-        rows = self.metadata.db.execute("SELECT * FROM trash WHERE bucket_id=? ORDER BY deleted_at DESC", (bucket_id,))
+    def list_trash(self, bucket_id: int, *, private: bool = False) -> list[dict[str, object]]:
+        rows = self.metadata.db.execute("SELECT * FROM trash WHERE bucket_id=? AND (substr(original_path,1,?)=?)=? "
+                                       "ORDER BY deleted_at DESC", (bucket_id, len(PRIVATE_PREFIX), PRIVATE_PREFIX, int(private)))
         return [{"id": row["id"], "path": row["original_path"], "is_folder": bool(row["is_folder"]), "size": row["size"],
                  "item_count": row["item_count"], "deleted_at": row["deleted_at"],
                  "purge_at": row["deleted_at"] + self.TRASH_DAYS * 86400} for row in rows]
@@ -481,13 +501,19 @@ class ObjectService:
             raise NotFoundError("trash entry not found")
         return row
 
+    def _trash_key(self, entry_id: str, original: str) -> str:
+        if original.startswith(PRIVATE_PREFIX):
+            return f"{PRIVATE_TRASH_PREFIX}{entry_id}/{original[len(PRIVATE_PREFIX):]}"
+        return f"{self.TRASH_PREFIX}{entry_id}/{original}"
+
     def restore(self, scope: Scope, entry_ids: list[str]) -> list[dict[str, object]]:
         """还原到原位置；原位置已有同名文件时自动改名保留两者。"""
         restored = []
         for entry_id in entry_ids:
             row = self._trash_row(scope.bucket_id, entry_id)
-            source = f"{self.TRASH_PREFIX}{entry_id}/{row['original_path']}"
-            self.move(scope, source, row["original_path"], "rename")
+            self._check_scope(scope, row["original_path"], write=True)
+            source = self._trash_key(entry_id, row["original_path"])
+            self.move(replace(scope, prefix=""), source, row["original_path"], "rename")
             with self.metadata.transaction() as db:
                 db.execute("DELETE FROM trash WHERE id=?", (entry_id,))
             restored.append({"id": entry_id, "path": row["original_path"]})
@@ -497,16 +523,26 @@ class ObjectService:
         """永久删除回收站条目；entry_ids 为 None 时清空整个回收站。"""
         if entry_ids is None:
             total = 0
+            condition, params = "bucket_id=?", [scope.bucket_id]
+            if scope.prefix == PRIVATE_PREFIX:
+                condition += " AND substr(original_path,1,?)=?"
+                params.extend((len(PRIVATE_PREFIX), PRIVATE_PREFIX))
+            elif not scope.private_access:
+                condition += " AND substr(original_path,1,?)!=?"
+                params.extend((len(PRIVATE_PREFIX), PRIVATE_PREFIX))
             while True:
                 ids = [row["id"] for row in self.metadata.db.execute(
-                    "SELECT id FROM trash WHERE bucket_id=? ORDER BY deleted_at,id LIMIT 100", (scope.bucket_id,))]
+                    f"SELECT id FROM trash WHERE {condition} ORDER BY deleted_at,id LIMIT 100", params)]
                 if not ids:
                     return total
                 total += await self.purge_trash(scope, ids)
                 await asyncio.sleep(0)
         for entry_id in entry_ids:
-            self._trash_row(scope.bucket_id, entry_id)
-            await self.delete_prefix(scope, f"{self.TRASH_PREFIX}{entry_id}/")
+            row = self._trash_row(scope.bucket_id, entry_id)
+            self._check_scope(scope, row["original_path"], write=True)
+            original = row["original_path"]
+            prefix = PRIVATE_TRASH_PREFIX if original.startswith(PRIVATE_PREFIX) else self.TRASH_PREFIX
+            await self.delete_prefix(replace(scope, prefix=""), f"{prefix}{entry_id}/")
             with self.metadata.transaction() as db:
                 db.execute("DELETE FROM trash WHERE id=?", (entry_id,))
         return len(entry_ids)
@@ -517,12 +553,12 @@ class ObjectService:
         rows = self.metadata.db.execute(
             "SELECT id,bucket_id FROM trash WHERE deleted_at<? ORDER BY deleted_at,id LIMIT 100", (cutoff,)).fetchall()
         for row in rows:
-            await self.purge_trash(Scope(row["bucket_id"]), [row["id"]])
+            await self.purge_trash(Scope(row["bucket_id"], private_access=True), [row["id"]])
         return len(rows)
 
     async def purge_bucket(self, bucket_id: int) -> int:
         """删除存储桶中的全部对象与未完成的分段上传（用于删除用户）。返回删除的对象数。"""
-        scope = Scope(bucket_id)
+        scope = Scope(bucket_id, private_access=True)
         deleted = 0
         while True:
             keys = [row["key"] for row in self.metadata.db.execute(
@@ -544,7 +580,7 @@ class ObjectService:
     def list_public(self, bucket_id: int, limit: int = 1000) -> list[ObjectInfo]:
         self._bucket(bucket_id)
         rows = self.metadata.db.execute(
-            "SELECT * FROM objects WHERE bucket_id=? AND public_token IS NOT NULL ORDER BY public_at DESC LIMIT ?",
+            "SELECT * FROM objects WHERE bucket_id=? AND public_token IS NOT NULL AND substr(key,1,9)!='.tgdrive/' ORDER BY public_at DESC LIMIT ?",
             (bucket_id, limit))
         return [self._object(row) for row in rows]
 
@@ -670,10 +706,10 @@ class ObjectService:
                     "JOIN objects o ON o.bucket_id=? AND o.key IN ("
                     "SELECT sample.key FROM objects sample WHERE sample.bucket_id=? "
                     "AND sample.key>f.prefix AND sample.key<f.upper_key AND substr(sample.key,-1)!='/' "
-                    "AND substr(sample.key,1,9)!='.tgdrive/' AND ("
+                    "AND (substr(sample.key,1,9)!='.tgdrive/' OR ?=1) AND ("
                     "EXISTS(SELECT 1 FROM thumbnails t WHERE t.blob_uuid=sample.blob_uuid AND t.variant='thumb') "
                     "OR EXISTS(SELECT 1 FROM thumbnail_legacy l WHERE l.blob_uuid=sample.blob_uuid)) "
-                    "ORDER BY sample.key LIMIT 4) ORDER BY f.prefix,o.key", (*params, scope.bucket_id, scope.bucket_id))
+                    "ORDER BY sample.key LIMIT 4) ORDER BY f.prefix,o.key", (*params, scope.bucket_id, scope.bucket_id, int(scope.private_access)))
                 for row in rows:
                     item = {key: row[key] for key in ("key", "size", "etag", "content_type", "modified_at")}
                     previews[row["prefix"]].append({**item, "thumbnails": ["thumb"], "has_thumbnail": True})
@@ -728,6 +764,10 @@ class ObjectService:
         if limit <= 0:
             raise ValueError("limit must be positive")
         effective = prefix if prefix else scope.prefix
+        if scope.authorize is not None:
+            scope.authorize()
+        if effective.startswith((PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX)) and not scope.private_access:
+            raise PermissionError("私密空间需要单独解锁")
         if not effective.startswith(scope.prefix):
             raise PermissionError("prefix is outside scope")
         self._bucket(scope.bucket_id)
@@ -752,6 +792,10 @@ class ObjectService:
                 if key.startswith(".tgdrive/") and not effective.startswith(".tgdrive/"):
                     # 系统保留区（回收站）不出现在普通列表中，直接跳过整个子树。
                     position, inclusive, jumped = ".tgdrive/" + self._PREFIX_END, False, True
+                    break
+                protected = next((p for p in (PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX) if key.startswith(p)), None)
+                if protected and not scope.private_access:
+                    position, inclusive, jumped = protected + self._PREFIX_END, False, True
                     break
                 if len(objects) + len(common) == limit:
                     # 已凑满一页且确认还有下一项：以最后返回的位置作为游标。
@@ -789,7 +833,7 @@ class ObjectService:
     def preview_assets(self, scope: Scope, key: str) -> list[dict[str, object]]:
         """按同目录、同主文件名查找歌词和字幕，不依赖文件列表当前页。"""
         info = self.head_object(scope, key)
-        if info.key.endswith("/") or key.startswith(".tgdrive/"):
+        if info.key.endswith("/") or (key.startswith(".tgdrive/") and not scope.private_access):
             raise ValueError("只能查找普通文件的预览附件")
         directory, _, name = key.rpartition("/")
         stem, dot, _ = name.rpartition(".")
@@ -842,13 +886,13 @@ class ObjectService:
     def move_prefix(self, scope: Scope, old: str, new: str, conflict: str = "skip") -> int:
         return self.move(scope, old, new, conflict).moved
 
-    def move(self, scope: Scope, old: str, new: str, conflict: str = "skip") -> MoveResult:
+    def move(self, scope: Scope, old: str, new: str, conflict: str = "skip", *, revoke_public: bool = False) -> MoveResult:
         """移动单个文件（old 不以 / 结尾，精确匹配）或整个文件夹（old 以 / 结尾，前缀匹配）。
 
         文件夹之间的同名目录标记直接合并；文件冲突按 conflict 处理，skip 时计入 skipped。
         """
-        if scope.perms != "rw":
-            raise PermissionError("scope is read-only")
+        self._check_scope(scope, old, write=True)
+        self._check_scope(scope, new, write=True)
         if not old or not new or not old.startswith(scope.prefix) or not new.startswith(scope.prefix):
             raise PermissionError("prefix is outside scope")
         self._bucket(scope.bucket_id)
@@ -890,12 +934,19 @@ class ObjectService:
                                    (existing["size"], scope.bucket_id))
                     else:
                         target = self._free_name(db, scope.bucket_id, target, {t for _, t in moves})
+                # 目录移动会给每个子项增加目标前缀，事务提交前也要校验最终路径长度。
+                self._check_scope(replace(scope, authorize=None), target, write=True)
                 moves.append((row["key"], target))
             token = f"\x01tgdrive-move-{secrets.token_hex(8)}"
             for old_key, _ in moves:
                 db.execute("UPDATE objects SET key=? WHERE bucket_id=? AND key=?", (token + old_key, scope.bucket_id, old_key))
             for old_key, target in moves:
                 db.execute("UPDATE objects SET key=? WHERE bucket_id=? AND key=?", (target, scope.bucket_id, token + old_key))
+                if revoke_public:
+                    db.execute("UPDATE objects SET public_token=NULL,public_at=NULL,public_expires_at=NULL,"
+                               "public_password=NULL,public_downloads=0 WHERE bucket_id=? AND key=?", (scope.bucket_id, target))
+            if scope.authorize is not None:
+                scope.authorize()
             return MoveResult(len(moves), skipped)
 
     @staticmethod
@@ -941,6 +992,7 @@ class ObjectService:
         result = await self.engine.put_part(row["blob_uuid"], part_no, body, bucket_id=scope.bucket_id)
         if size is not None and size != result.size:
             raise ValueError("part size does not match request")
+        self._check_scope(scope, row["key"], write=True)
         now = time.time()
         with self.metadata.transaction() as db:
             db.execute("INSERT OR REPLACE INTO upload_parts(upload_id,part_no,size,md5,uploaded_at,leaves) VALUES(?,?,?,?,?,?)",
@@ -974,6 +1026,7 @@ class ObjectService:
             self.metadata.set_fingerprint(upload["blob_uuid"],
                                           combine(blob_size, b"".join(bytes(records[n]["leaves"]) for n, _ in parts)))
         combined = hashlib.md5(b"".join(bytes.fromhex(records[p[0]]["md5"]) for p in parts)).hexdigest() + f"-{len(parts)}"
+        self._check_scope(scope, upload["key"], write=True)
         info = self._commit_blob(scope.bucket_id, upload["key"], upload["blob_uuid"], blob_size, combined,
                                  upload["content_type"], json.loads(upload["user_meta"] or "{}"))
         with self.metadata.transaction() as db:

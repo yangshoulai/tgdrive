@@ -5,7 +5,7 @@ import { readPreviewText, type PreviewText } from "./preview-data";
 import { MediaPreview, MinimizedPlayback, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
 import { PlaylistControls, PlaylistPanel, usePreviewPlaylist } from "./preview-playlist";
 import { TextPreview } from "./preview-text";
-import { Badge, Button, CopyField, Field, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, toast, type IconName } from "./ui";
+import { Badge, Button, CopyField, Field, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, type IconName } from "./ui";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "text" | "code" | "archive" | "other";
 
@@ -198,7 +198,8 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
 }
 
 type PreviewSource = { url: string; downloadUrl: string; poster?: string; thumbnail?: string };
-export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, assetUrl, loadAssets, playlistFiles, sourceFor }: PreviewSource & { file: api.FileItem; onClose: () => void; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource }) {
+export type PreviewPlayback = { playing: boolean; currentTime: number; state: MediaState };
+export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity }: PreviewSource & { file: api.FileItem; onClose: () => void; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
   const kind = getFileKind(file.content_type, file.key);
   const media = (kind === "audio" || kind === "video") && isPlayable(file.key, file.content_type);
   const browsable = media || kind === "image";
@@ -229,6 +230,10 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState<MediaProgress>({ currentTime: 0, duration: 0 });
   const [mediaState, setMediaState] = useState<MediaState>("loading");
+  const activityCallback = useRef(onPlaybackActivity);
+  activityCallback.current = onPlaybackActivity;
+  useEffect(() => { activityCallback.current?.({ playing: media && playing, currentTime: progress.currentTime, state: mediaState }); }, [media, playing, progress.currentTime, mediaState]);
+  useEffect(() => () => { activityCallback.current?.({ playing: false, currentTime: 0, state: "ready" }); }, []);
   function play() {
     if (!controls.current) { pendingPlay.current = true; return; }
     const key = active.key;
@@ -237,25 +242,37 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       if (currentKey.current === key) toast.error("自动播放未能开始，请点击播放器继续播放。");
     });
   }
+  function togglePlayback() {
+    if (!controls.current) { pendingPlay.current = !pendingPlay.current; return; }
+    // 原生状态先于 React 的画面更新，快速连按也要正确暂停已发起的播放。
+    if (controls.current.isPlaying()) { pendingPlay.current = false; controls.current.pause(); } else play();
+  }
   function select(item: api.FileItem) {
     if (kind === "image") { playlist.select(item); return; }
     if (item.key === active.key) { if (controls.current) { controls.current.seek(0); play(); } else pendingPlay.current = true; return; }
     pendingPlay.current = true; playlist.select(item);
   }
   useEffect(() => { pendingPlay.current = false; }, [file.key]);
-  function navigate(event: KeyboardEvent<HTMLDivElement>) {
-    if (!browsable || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+  function handleShortcut(event: KeyboardEvent<HTMLDivElement>) {
+    if (!browsable || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
+    const key = event.key.toLowerCase(), navigation = key === "arrowleft" || key === "arrowright";
+    if (!navigation && (!media || !["k", " ", "j", "l", "arrowup", "arrowdown"].includes(key))) return;
     const target = event.target as HTMLElement;
     if (!event.currentTarget.contains(target) || event.currentTarget.closest("[inert]")) return;
-    if (target.closest("input, textarea, [contenteditable]:not([contenteditable='false']), [role='slider']")) return;
-    // 原生下拉框和播放器菜单保留方向键操作，但不再传给 ArtPlayer 的全局快进快捷键。
-    if (target.closest("select, [role='combobox'], [role^='menu'], .menu, .art-settings")) { event.stopPropagation(); return; }
+    if (isShortcutControl(target)) return;
+    // 空格继续激活当前按钮，不能同时切换播放状态。
+    if (key === " " && target.closest("button, a, summary, [role='button']")) return;
     event.preventDefault(); event.stopPropagation();
-    if (event.repeat || playlist.items.length < 2) return;
-    const next = event.key === "ArrowLeft" ? playlist.previous() : playlist.next();
-    if (next) select(next);
+    if (navigation) {
+      if (event.repeat || playlist.items.length < 2) return;
+      const next = key === "arrowleft" ? playlist.previous() : playlist.next();
+      if (next) select(next);
+    } else if (key === "k" || key === " ") {
+      if (!event.repeat) togglePlayback();
+    } else if (key === "j" || key === "l") controls.current?.seekBy(key === "j" ? -10 : 10);
+    else controls.current?.adjustVolume(key === "arrowup" ? 0.05 : -0.05);
   }
-  const transport = (compact = false) => <PlaylistControls playlist={playlist} compact={compact} image={kind === "image"} onSelect={select} playing={playing} onToggle={() => playing ? controls.current?.pause() : play()}
+  const transport = (compact = false) => <PlaylistControls playlist={playlist} compact={compact} image={kind === "image"} onSelect={select} playing={playing} onToggle={togglePlayback}
     expanded={playlistExpanded} onExpand={() => setPlaylistExpanded(value => !value)} />;
   const extension = active.key.match(/\.([a-z\d]{1,10})$/i)?.[1].toUpperCase();
   const typeLabel = extension && kind !== "pdf" && kind !== "folder" ? `${extension === "JPG" ? "JPEG" : extension} ${kindLabel(kind)}` : kindLabel(kind);
@@ -308,7 +325,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   } : undefined, [active.key, hasAssets]);
   // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
-    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={navigate} expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} onSeek={time => controls.current?.seek(time)}>{transport(true)}</MinimizedPlayback> : kind === "image" ? transport(true) : undefined} className={`preview-modal preview-modal-${kind}${browsable && playlistExpanded ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
+    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} onSeek={time => controls.current?.seek(time)}>{transport(true)}</MinimizedPlayback> : kind === "image" ? transport(true) : undefined} className={`preview-modal preview-modal-${kind}${browsable && playlistExpanded ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>

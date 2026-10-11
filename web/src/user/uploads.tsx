@@ -12,6 +12,7 @@ import { DestinationPicker } from "./folders";
 /* ---------- 上传 ---------- */
 
 export function UploadDialog({ files, destination: initialDestination, onClose, onStart }: { files: File[]; destination: string; onClose: () => void; onStart: (files: File[], isPublic: boolean, destination: string) => void }) {
+  const privateSpace = api.isPrivatePath(initialDestination);
   const [list, setList] = useState(files);
   const [destination, setDestination] = useState(initialDestination);
   const [ready, setReady] = useState(true);
@@ -19,7 +20,7 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState("");
   const [checkVersion, setCheckVersion] = useState(0);
-  const [isPublic, setIsPublic] = useState(() => localStorage.getItem("tgdrive:upload-public") === "1");
+  const [isPublic, setIsPublic] = useState(() => !privateSpace && localStorage.getItem("tgdrive:upload-public") === "1");
   const total = list.reduce((sum, file) => sum + file.size, 0);
   const conflicts = list.filter(file => existing.has(file.name.normalize("NFC"))).length;
   useEffect(() => { if (!list.length) onClose(); }, [list.length]);
@@ -40,8 +41,8 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
     return () => { active = false; };
   }, [destination, list, checkVersion]);
   return (
-    <Modal title={`上传 ${list.length} 个文件`} description={<>上传到 <strong>{destination ? `/${destination}` : "我的文件"}</strong>，共 {formatBytes(total)}</>} icon="upload" onClose={onClose} size="md"
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" icon="upload" disabled={!ready || checking || Boolean(error) || !list.length} onClick={() => { localStorage.setItem("tgdrive:upload-public", isPublic ? "1" : "0"); onStart(list, isPublic, destination); }}>开始上传</Button></>}>
+    <Modal title={`上传 ${list.length} 个文件`} description={<>上传到 <strong>{api.privatePathLabel(destination)}</strong>，共 {formatBytes(total)}</>} icon="upload" onClose={onClose} size="md" className={privateSpace ? "private-dialog" : ""}
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" icon="upload" disabled={!ready || checking || Boolean(error) || !list.length} onClick={() => { if (!privateSpace) localStorage.setItem("tgdrive:upload-public", isPublic ? "1" : "0"); onStart(list, isPublic, destination); }}>开始上传</Button></>}>
       <DestinationPicker value={destination} onChange={next => { setReady(false); setDestination(next); setChecking(true); }} onReady={setReady} />
       <ul className="upload-pick-list">
         {list.map((file, index) => (
@@ -56,10 +57,10 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
       {checking && <p className="inline-note" role="status"><span className="spinner" />正在检查目标位置的同名文件</p>}
       {error && <div className="form-alert" role="alert"><span>{error}</span><Button size="sm" onClick={() => setCheckVersion(current => current + 1)}>重试</Button></div>}
       {conflicts > 0 && <p className="inline-note tone-warning"><Icon name="alert" size={15} />{conflicts} 个文件与现有文件同名，上传后将替换原文件，已有的公开链接保持不变。</p>}
-      <div className={`share-status${isPublic ? " is-public" : ""}`}>
+      {!privateSpace && <div className={`share-status${isPublic ? " is-public" : ""}`}>
         <Switch checked={isPublic} onChange={setIsPublic} label="上传后公开访问"
           description={isPublic ? "每个文件都会生成独立的公开链接，任何拥有链接的人都可以查看和下载。" : "文件仅自己可见，之后可以随时单独分享。"} />
-      </div>
+      </div>}
     </Modal>
   );
 }
@@ -77,17 +78,21 @@ const INSTANT_MIN_SIZE = 1024 * 1024;
 /** 成功反馈留出查看大小、复制分享链接的时间，再逐项收起。 */
 const COMPLETED_VISIBLE_MS = 8000;
 const resumeKey = (path: string, file: File) => `tgdrive:resume:${path}:${file.size}:${file.lastModified}`;
+const privateResumes = new Map<string, string>();
+const readResume = (key: string) => key.includes(`:${api.PRIVATE_PREFIX}`) ? privateResumes.get(key) ?? null : localStorage.getItem(key);
+const writeResume = (key: string, value: string) => { if (key.includes(`:${api.PRIVATE_PREFIX}`)) privateResumes.set(key, value); else localStorage.setItem(key, value); };
+const removeResume = (key: string) => { privateResumes.delete(key); if (!key.includes(`:${api.PRIVATE_PREFIX}`)) localStorage.removeItem(key); };
 const sleep = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
 
 async function uploadMultipart(job: UploadJob, signal: { aborted: boolean; abort?: () => void },
                                onProgress: (percent: number) => void, onResumed: () => void): Promise<api.FileItem> {
   const storageKey = resumeKey(job.path, job.file);
-  let uploadId = localStorage.getItem(storageKey);
+  let uploadId = readResume(storageKey);
   let partSize = 16 * 1024 * 1024;
   const done = new Map<number, string>();
   if (uploadId) {
     try {
-      const state = await api.getUpload(uploadId);
+      const state = await api.getUpload(uploadId, job.path);
       if (state.completed || state.path !== job.path) throw new Error("stale");
       const count = Math.ceil(job.file.size / partSize);
       for (const part of state.parts) {
@@ -101,7 +106,7 @@ async function uploadMultipart(job: UploadJob, signal: { aborted: boolean; abort
     const created = await api.createUpload(job.path, job.file.type || "application/octet-stream");
     uploadId = created.upload_id;
     partSize = created.part_size;
-    localStorage.setItem(storageKey, uploadId);
+    writeResume(storageKey, uploadId);
   }
   if (signal.aborted) throw new api.ApiError("已取消上传", 0, "upload_aborted");
   const count = Math.max(1, Math.ceil(job.file.size / partSize));
@@ -119,7 +124,7 @@ async function uploadMultipart(job: UploadJob, signal: { aborted: boolean; abort
     const blob = job.file.slice((number - 1) * partSize, Math.min(job.file.size, number * partSize));
     for (let attempt = 0; ; attempt++) {
       if (signal.aborted) throw new api.ApiError("已取消上传", 0, "upload_aborted");
-      const task = api.uploadPartWithProgress(uploadId!, number, blob, progress => { inflight.set(number, progress.loaded); report(); });
+      const task = api.uploadPartWithProgress(uploadId!, number, blob, progress => { inflight.set(number, progress.loaded); report(); }, job.path);
       aborts.add(task.abort);
       try {
         done.set(number, (await task.promise).etag);
@@ -148,8 +153,8 @@ async function uploadMultipart(job: UploadJob, signal: { aborted: boolean; abort
   await Promise.all(Array.from({ length: Math.min(PART_CONCURRENCY, todo.length) }, worker));
   if (signal.aborted) throw new api.ApiError("已取消上传", 0, "upload_aborted");
   if (failure) throw failure;
-  const result = await api.completeUpload(uploadId, [...done.entries()].sort((a, b) => a[0] - b[0]), job.isPublic || undefined);
-  localStorage.removeItem(storageKey);
+  const result = await api.completeUpload(uploadId, [...done.entries()].sort((a, b) => a[0] - b[0]), job.isPublic || undefined, job.path);
+  removeResume(storageKey);
   return result;
 }
 export type UploadQueue = ReturnType<typeof useUploadQueue>;
@@ -227,9 +232,9 @@ export function useUploadQueue(onSettled: () => void) {
       const aborted = reason instanceof api.ApiError && reason.code === "upload_aborted";
       if (aborted && multipart) {
         // 用户主动取消：放弃服务端的分段上传，不再保留续传进度。
-        const uploadId = localStorage.getItem(resumeKey(job.path, job.file));
-        localStorage.removeItem(resumeKey(job.path, job.file));
-        if (uploadId) void api.abortUpload(uploadId).catch(() => undefined);
+        const uploadId = readResume(resumeKey(job.path, job.file));
+        removeResume(resumeKey(job.path, job.file));
+        if (uploadId) void api.abortUpload(uploadId, job.path).catch(() => undefined);
       }
       update(job.id, { status: aborted ? "canceled" : "error",
         error: multipart && !aborted ? `${api.errorMessage(reason, "上传失败，请稍后重试")}。进度已保存，点击重试即可继续。` : api.errorMessage(reason, "上传失败，请稍后重试") });
@@ -283,8 +288,14 @@ export function useUploadQueue(onSettled: () => void) {
     aborters.current.forEach(abort => abort());
     setJobs(current => current.map(job => job.status === "queued" ? { ...job, status: "canceled" } : job));
   }
+  function cancelPrivate() {
+    queue.current = queue.current.filter(job => !api.isPrivatePath(job.path));
+    jobs.filter(job => api.isPrivatePath(job.path)).forEach(job => { canceled.current.add(job.id); aborters.current.get(job.id)?.(); });
+    privateResumes.clear();
+    setJobs(current => current.filter(job => !api.isPrivatePath(job.path)));
+  }
   function clear() { setJobs(current => current.filter(job => job.status === "queued" || job.status === "uploading")); }
-  return { jobs, enqueue, retry, cancel, cancelAll, clear };
+  return { jobs, enqueue, retry, cancel, cancelAll, cancelPrivate, clear };
 }
 
 export function UploadTray({ queue }: { queue: UploadQueue }) {

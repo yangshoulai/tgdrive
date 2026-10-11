@@ -299,6 +299,7 @@ function remember(etag: string) {
  * 一次只处理一个，页面不可见时暂停；图片只补 25 MB 以内的，视频和音频只读取需要的片段。 */
 export function useThumbnailBackfill(files: api.FileItem[], contentUrl: (key: string) => string, onSaved: (key: string, thumbnails: string[]) => void) {
   const saved = useRef(onSaved), resolve = useRef(contentUrl);
+  const privateSkipped = useRef(new Set<string>());
   saved.current = onSaved; resolve.current = contentUrl;
   const pending = files.filter(file => !file.thumbnails?.length && !file.key.endsWith("/"))
     .map(file => ({ file, source: thumbnailSource(file.key, file.content_type, file.size) }))
@@ -316,20 +317,21 @@ export function useThumbnailBackfill(files: api.FileItem[], contentUrl: (key: st
       wait();
     });
     void (async () => {
-      const skip = new Set(skipped());
+      const skip = new Set([...skipped(), ...privateSkipped.current]);
       for (const { file, source } of pending) {
         if (controller.signal.aborted) return;
         if (skip.has(file.etag)) continue;
         await idle();
         if (controller.signal.aborted) return;
+        const skipFile = () => { if (api.isPrivatePath(file.key)) privateSkipped.current.add(file.etag); else remember(file.etag); };
         try {
           const result = await createThumbnails({ url: resolve.current(file.key), size: file.size, signal: controller.signal }, source);
-          if (!result) { remember(file.etag); continue; }
+          if (!result) { skipFile(); continue; }
           const thumbnails = await saveThumbnails(file.key, result);
           if (thumbnails && !controller.signal.aborted) saved.current(file.key, thumbnails);
         } catch {
           if (controller.signal.aborted) return;
-          remember(file.etag);
+          skipFile();
         }
       }
     })();

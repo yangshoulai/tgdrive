@@ -27,6 +27,7 @@ from .errors import (
 from .keyapi import KeyApi, KeyAuthError
 from .metrics import TrafficMetrics
 from .objects import Scope
+from .private import PrivateAccessLogFilter, PrivateLocked, PrivateSpace
 from .settings import SystemSettings
 from .share import ShareAccess
 from .static import StaticFiles
@@ -75,6 +76,12 @@ class TgDriveASGI(StaticFiles):
                  context: AppContext | None = None) -> None:
         self.scheduler = scheduler
         self.admin, self.user, self.s3 = admin, user, s3
+        self.private_space = PrivateSpace(user)
+        user.private_space = self.private_space
+        admin.private_space = self.private_space
+        access_logger = logging.getLogger("uvicorn.access")
+        if not any(isinstance(item, PrivateAccessLogFilter) for item in access_logger.filters):
+            access_logger.addFilter(PrivateAccessLogFilter())
         # /api/v1 只认访问密钥；未注入时使用用户 API 的对象服务与密钥存储。
         self.keys = keys or (KeyApi(user.objects, user.clients) if user.clients is not None else None)
         self.audit = AuditLog(admin.accounts.metadata)
@@ -115,6 +122,7 @@ class TgDriveASGI(StaticFiles):
         host = headers.get("host", "localhost").split(":", 1)[0].lower()
         query = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
         started = False
+        private_response = path.startswith("/api/user/v1/private/")
         request_id = secrets.token_hex(8)
         request_start = time.monotonic()
 
@@ -122,6 +130,11 @@ class TgDriveASGI(StaticFiles):
             nonlocal started
             if message["type"] == "http.response.start":
                 started = True
+                if private_response:
+                    # 覆盖所有分支（流、缩略图、上传和错误），避免浏览器或中间代理保存私密内容。
+                    message["headers"] = [(k, v) for k, v in message.get("headers", [])
+                                          if k.lower() not in (b"cache-control", b"referrer-policy")]
+                    message["headers"].extend([(b"cache-control", b"no-store"), (b"referrer-policy", b"no-referrer")])
                 message["headers"] = [*message.get("headers", []), (b"x-request-id", request_id.encode())]
             elif message["type"] == "http.response.body" and self.metrics is not None:
                 self.metrics.record_out(len(message.get("body", b"")))
@@ -189,10 +202,27 @@ class TgDriveASGI(StaticFiles):
             if path.startswith("/api/v1/"):
                 await self._key_api(tracked_send, method, path[len("/api/v1"):], query, headers, body_stream)
                 return
+            file_user = self.user
+            private = path.startswith("/api/user/v1/private/")
+            access = headers.get("x-private-access", query.get("access", [""])[0])
+            audit_path = path
+            if private:
+                route = path[len("/api/user/v1/private"):]
+                controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer"}
+                allowed = {"/list", "/search", "/folders", "/files", "/files/check", "/files/instant", "/move",
+                           "/copy", "/delete", "/thumbnail", "/content", "/preview-assets", "/preview-list",
+                           "/trash", "/trash/restore", "/trash/purge", "/uploads"}
+                if route not in controls:
+                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?", route):
+                        raise NotFoundError("资源不存在")
+                    file_user = self.private_space.files(token, access)
+                    path = "/api/user/v1" + route
+                if query.get("public", ["0"])[0] in ("1", "true"):
+                    raise PermissionError("私密空间不能公开分享")
             if path == "/api/user/v1/files" and method == "PUT":
                 size = int(headers["content-length"]) if "content-length" in headers else None
                 public = query.get("public", [None])[0]
-                result = await self.user.put(token, csrf, query.get("path", [""])[0], body_stream(),
+                result = await file_user.put(token, csrf, query.get("path", [""])[0], body_stream(),
                                               headers.get("content-type"), size,
                                               None if public is None else public in ("1", "true"))
                 await self._send(tracked_send, 200, result)
@@ -200,12 +230,12 @@ class TgDriveASGI(StaticFiles):
             part_route = re.fullmatch(r"/api/user/v1/uploads/([A-Za-z0-9_-]+)/parts/(\d+)", path)
             if part_route and method == "PUT":
                 size = int(headers["content-length"]) if "content-length" in headers else None
-                result = await self.user.upload_part(token, csrf, part_route.group(1), int(part_route.group(2)), body_stream(), size)
+                result = await file_user.upload_part(token, csrf, part_route.group(1), int(part_route.group(2)), body_stream(), size)
                 await self._send(tracked_send, 200, result)
                 return
             if path == "/api/user/v1/thumbnail" and method == "GET":
-                data, mime, etag = self.user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
-                await self._send_thumbnail(tracked_send, headers, data, mime, etag, "private, max-age=86400")
+                data, mime, etag = file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
+                await self._send_thumbnail(tracked_send, headers, data, mime, etag, "no-store" if private else "private, max-age=86400")
                 return
             if path == "/api/admin/v1/thumbnail" and method == "GET":
                 data, mime, etag = self.admin.thumbnail(token, int(query.get("bucket_id", ["0"])[0]),
@@ -213,7 +243,7 @@ class TgDriveASGI(StaticFiles):
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, "private, max-age=86400")
                 return
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
-                await self._content(tracked_send, method, token, query, headers, admin=False)
+                await self._content(tracked_send, method, token, query, headers, admin=False, user=file_user, private=private)
                 return
             if path.startswith("/api/admin/v1/backups/") and method == "GET":
                 await self._backup_download(tracked_send, token, path.rsplit("/", 1)[-1])
@@ -243,16 +273,20 @@ class TgDriveASGI(StaticFiles):
             payload = json.loads(data) if data else {}
             if not isinstance(payload, dict):
                 raise ValueError("JSON 请求体必须为对象")
-            audit = self._audit_entry(method, path, payload, token, scope)
+            if private and payload.get("public"):
+                raise PermissionError("私密空间不能公开分享")
+            audit = self._audit_entry(method, audit_path, payload, token, scope)
             try:
                 status, result, extra = await self._route(method, path, query, payload, token, csrf,
-                                                          ip=(scope.get("client") or [None])[0])
+                                                          ip=(scope.get("client") or [None])[0], user=file_user, access=access)
             except Exception as exc:
                 if audit:
                     self._write_audit(audit, ok=False, error=exc)
                 raise
             if audit:
                 self._write_audit(audit, ok=True, result=result)
+            if private:
+                extra.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
             await self._send(tracked_send, status, result, extra)
         except Exception as exc:
             error = self._error(exc)
@@ -446,7 +480,8 @@ class TgDriveASGI(StaticFiles):
             raise NotFoundError("接口不存在")
         await self._send(send, 200, result)
 
-    async def _route(self, method, path, query, payload, token, csrf, ip=None):
+    async def _route(self, method, path, query, payload, token, csrf, ip=None, *, user=None, access=""):
+        user = user or self.user
         if path.startswith("/api/admin/v1/"):
             route = path[len("/api/admin/v1"):]
             if method == "GET" and route == "/status":
@@ -524,7 +559,7 @@ class TgDriveASGI(StaticFiles):
                 await self.admin.areset_user_password(token, csrf, int(route.split("/")[2]), payload["password"])
                 return 204, None, {}
             if method == "POST" and route == "/password":
-                await self.user.achange_password(token, csrf, payload["old_password"], payload["new_password"])
+                await user.achange_password(token, csrf, payload["old_password"], payload["new_password"])
                 return 204, None, {}
             if method == "POST" and route == "/passphrase":
                 return 200, await self.admin.achange_passphrase(token, csrf, payload["old_passphrase"], payload["new_passphrase"]), {}
@@ -572,102 +607,120 @@ class TgDriveASGI(StaticFiles):
                                                        bool(payload.get("deep", False))), {}
         elif path.startswith("/api/user/v1/"):
             route = path[len("/api/user/v1"):]
+            if route == "/private/status" and method == "GET":
+                return 200, self.private_space.status(token), {}
+            if route == "/private/setup" and method == "POST":
+                return 201, await self.private_space.setup(token, csrf, payload["password"], payload.get("idle_seconds", 300)), {}
+            if route == "/private/unlock" and method == "POST":
+                return 200, await self.private_space.unlock(token, csrf, payload["password"], ip), {}
+            if route == "/private/lock" and method == "POST":
+                self.private_space.lock(token, csrf, access)
+                return 204, None, {}
+            if route == "/private/activity" and method == "POST":
+                return 200, self.private_space.activity(token, csrf, access,
+                    active=payload.get("active") is True, playing=payload.get("playing") is True), {}
+            if route == "/private/settings" and method == "POST":
+                return 200, await self.private_space.configure(token, csrf, access, payload["password"],
+                    payload.get("idle_seconds", 300), payload.get("new_password")), {}
+            if route == "/private/transfer" and method == "POST":
+                return 200, await self.private_space.transfer(token, csrf, access, payload["paths"],
+                    payload["destination"], payload["into"], payload.get("conflict", "rename")), {}
             if method == "POST" and route == "/login":
-                return self._login(await self.user.alogin(payload["username"], payload["password"], ip, bool(payload.get("remember"))))
+                return self._login(await user.alogin(payload["username"], payload["password"], ip, bool(payload.get("remember"))))
             if method == "POST" and route == "/logout":
-                self.user.accounts.sessions.require(token, csrf=csrf, mutation=True)
-                self.user.logout(token)
+                user.accounts.sessions.require(token, csrf=csrf, mutation=True)
+                user.logout(token)
                 return 204, None, {"Set-Cookie": self._cookie("", expires=True)}
             if method == "GET" and route == "/me":
-                return 200, {**self.user.me(token), **self.settings.public_config()}, {}
+                return 200, {**user.me(token), **self.settings.public_config()}, {}
             if method == "POST" and route == "/password":
-                await self.user.achange_password(token, csrf, payload["old_password"], payload["new_password"])
+                await user.achange_password(token, csrf, payload["old_password"], payload["new_password"])
                 return 204, None, {}
             if method == "GET" and route == "/public":
-                return 200, await self.user.alist_public(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                return 200, await user.alist_public(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=query.get("cursor", [""])[0]), {}
             if method == "GET" and route == "/preview-assets":
-                return 200, await self.user.preview_assets(token, query.get("path", [""])[0]), {}
+                return 200, await user.preview_assets(token, query.get("path", [""])[0]), {}
             if method == "GET" and route == "/preview-list":
-                return 200, await self.user.preview_list(token, query.get("path", [""])[0],
+                return 200, await user.preview_list(token, query.get("path", [""])[0],
                                                         query.get("cursor", [None])[0] or None), {}
             if method == "POST" and route == "/public":
                 paths = payload["paths"] if "paths" in payload else [payload["path"]]
                 if not isinstance(paths, list):
                     raise ValueError("paths 必须为数组")
-                return 200, {"objects": await self.user.aset_public(token, csrf, paths, bool(payload["public"]), self._share_options(payload))}, {}
+                return 200, {"objects": await user.aset_public(token, csrf, paths, bool(payload["public"]), self._share_options(payload))}, {}
             if method == "GET" and route == "/trash":
-                return 200, await self.user.alist_trash(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                return 200, await user.alist_trash(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=query.get("cursor", [""])[0]), {}
             if method == "POST" and route == "/trash":
-                return 200, {"items": await self.user.trash(token, csrf, list(payload["paths"]))}, {}
+                return 200, {"items": await user.trash(token, csrf, list(payload["paths"]))}, {}
             if method == "POST" and route == "/trash/restore":
-                return 200, {"restored": self.user.restore_trash(token, csrf, list(payload["ids"]))}, {}
+                return 200, {"restored": user.restore_trash(token, csrf, list(payload["ids"]))}, {}
             if method == "POST" and route == "/trash/purge":
                 ids = None if payload.get("all") else list(payload["ids"])
-                return 200, {"purged": await self.user.purge_trash(token, csrf, ids)}, {}
+                return 200, {"purged": await user.purge_trash(token, csrf, ids)}, {}
             if method == "POST" and route == "/thumbnail":
-                self.user.set_thumbnail(token, csrf, payload["path"], payload.get("data"), str(payload.get("variant") or "thumb"))
+                user.set_thumbnail(token, csrf, payload["path"], payload.get("data"), str(payload.get("variant") or "thumb"))
                 return 204, None, {}
             if method == "POST" and route == "/files/instant":
                 public = payload.get("public")
-                return 200, self.user.instant_put(token, csrf, payload["path"], payload["size"], payload["fingerprint"],
+                return 200, user.instant_put(token, csrf, payload["path"], payload["size"], payload["fingerprint"],
                                                   payload.get("content_type"), None if public is None else bool(public)), {}
             if method == "POST" and route == "/uploads":
-                return 201, await self.user.create_upload(token, csrf, payload["path"], payload.get("content_type")), {}
+                return 201, await user.create_upload(token, csrf, payload["path"], payload.get("content_type")), {}
             upload_route = re.fullmatch(r"/uploads/([A-Za-z0-9_-]+)(/complete)?", route)
             if upload_route and method == "GET" and not upload_route.group(2):
-                return 200, self.user.get_upload(token, upload_route.group(1)), {}
+                return 200, user.get_upload(token, upload_route.group(1)), {}
             if upload_route and method == "POST" and upload_route.group(2):
                 public = payload.get("public")
-                return 200, await self.user.complete_upload(token, csrf, upload_route.group(1), list(payload["parts"]),
+                return 200, await user.complete_upload(token, csrf, upload_route.group(1), list(payload["parts"]),
                                                             None if public is None else bool(public)), {}
             if upload_route and method == "DELETE" and not upload_route.group(2):
-                await self.user.abort_upload(token, csrf, upload_route.group(1))
+                await user.abort_upload(token, csrf, upload_route.group(1))
                 return 204, None, {}
             if method == "GET" and route == "/search":
-                return 200, await self.user.search(token, query.get("q", [""])[0],
+                return 200, await user.search(token, query.get("q", [""])[0],
                     query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0]),
                     public_only=query.get("public", ["0"])[0] == "1"), {}
             if method == "GET" and route == "/list":
-                return 200, await self.user.list(token, prefix=query.get("prefix", [""])[0],
+                return 200, await user.list(token, prefix=query.get("prefix", [""])[0],
                                                  cursor=query.get("cursor", [None])[0], limit=int(query.get("limit", ["1000"])[0]),
                                                  public_only=query.get("public", ["0"])[0] == "1"), {}
             if method == "GET" and route == "/folders":
-                return 200, await self.user.folders(token, prefix=query.get("prefix", [""])[0],
+                return 200, await user.folders(token, prefix=query.get("prefix", [""])[0],
                     cursor=query.get("cursor", [""])[0], limit=int(query.get("limit", ["50"])[0])), {}
             if method == "POST" and route == "/files/check":
-                return 200, self.user.check_files(token, csrf, payload.get("paths", [])), {}
+                return 200, user.check_files(token, csrf, payload.get("paths", [])), {}
             if method == "POST" and route == "/folders":
-                return 201, await self.user.folder(token, csrf, payload["path"]), {}
+                return 201, await user.folder(token, csrf, payload["path"]), {}
             if method == "POST" and route == "/delete":
-                return 200, {"results": await self.user.delete(token, csrf, payload["paths"], bool(payload.get("recursive", False)))}, {}
+                return 200, {"results": await user.delete(token, csrf, payload["paths"], bool(payload.get("recursive", False)))}, {}
             if method == "POST" and route == "/move":
-                return 200, await self.user.move(token, csrf, payload["from"], payload["to"], payload.get("conflict", "skip")), {}
+                return 200, await user.move(token, csrf, payload["from"], payload["to"], payload.get("conflict", "skip")), {}
             if method == "POST" and route == "/copy":
-                return 201, await self.user.copy(token, csrf, payload["from"], payload["to"]), {}
+                return 201, await user.copy(token, csrf, payload["from"], payload["to"]), {}
             if method == "GET" and route == "/clients":
-                return 200, await self.user.alist_clients(token, limit=int(query["limit"][0]) if "limit" in query else None,
+                return 200, await user.alist_clients(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=int(query.get("cursor", ["0"])[0])), {}
             if method == "POST" and route == "/clients":
-                return 201, self.user.create_client(token, csrf, payload["name"]), {}
+                return 201, user.create_client(token, csrf, payload["name"]), {}
             if method == "POST" and route == "/client-keys/disable":
-                self.user.disable_client_key(token, csrf, payload["access_key_id"])
+                user.disable_client_key(token, csrf, payload["access_key_id"])
                 return 204, None, {}
             if method == "POST" and route == "/client-keys/delete":
-                self.user.delete_client_key(token, csrf, payload["access_key_id"])
+                user.delete_client_key(token, csrf, payload["access_key_id"])
                 return 204, None, {}
         elif path == "/api/public/v1/config" and method == "GET":
             return 200, self.settings.public_config(), {}
         elif re.fullmatch(r"/api/public/v1/objects/[A-Za-z0-9_-]+/unlock", path) and method == "POST":
             token = path.split("/")[5]
             info, password_hash = self._public_share(token)
-            limiter, key = self.user.accounts.sessions, f"share:{token}|{ip or '-'}"
+            limiter, key = user.accounts.sessions, f"share:{token}|{ip or '-'}"
             def check_attempts():
                 if limiter.is_rate_limited(key):
                     raise TooManyAttempts("too many attempts")
             check_attempts()
-            if not password_hash or not await self.user.accounts.password_work.run(verify_password, str(payload.get("password", "")), password_hash, before=check_attempts):
+            if not password_hash or not await user.accounts.password_work.run(verify_password, str(payload.get("password", "")), password_hash, before=check_attempts):
                 limiter.record_failure(key)
                 raise ValueError("访问密码不正确")
             _, current_hash = self._public_share(token)
@@ -684,7 +737,7 @@ class TgDriveASGI(StaticFiles):
                 return 200, {"token": info.public_token, "kind": "folder", "name": info.key.rstrip("/").rsplit("/", 1)[-1],
                              "password_required": False, "modified_at": info.modified_at, "public_at": info.public_at,
                              "expires_at": info.public_expires_at}, {}
-            thumbnails = self.user.objects.thumbnail_variants([info.blob_uuid]).get(info.blob_uuid or "", [])
+            thumbnails = user.objects.thumbnail_variants([info.blob_uuid]).get(info.blob_uuid or "", [])
             return 200, {"token": info.public_token, "kind": "file", "name": info.key.rsplit("/", 1)[-1], "size": info.size,
                          "content_type": info.content_type, "etag": info.etag, "password_required": False, "thumbnails": thumbnails,
                          "modified_at": info.modified_at, "public_at": info.public_at,
@@ -695,10 +748,10 @@ class TgDriveASGI(StaticFiles):
             if password_hash and not self.share_access.check(token, password_hash, query.get("access", [None])[0]):
                 raise SharePasswordRequired("password required")
             if path.endswith("/preview-assets"):
-                root, file = self.user.objects.public_folder_file(token, query.get("path", [""])[0])
-                assets = await self.user.objects.apreview_assets(Scope(root.bucket_id, prefix=root.key), file.key)
+                root, file = user.objects.public_folder_file(token, query.get("path", [""])[0])
+                assets = await user.objects.apreview_assets(Scope(root.bucket_id, prefix=root.key), file.key)
                 return 200, [{**asset, "path": asset["path"][len(root.key):]} for asset in assets], {}
-            return 200, await self.user.objects.list_public_folder(
+            return 200, await user.objects.list_public_folder(
                 token, query.get("path", [""])[0], query.get("cursor", [None])[0] or None, int(query.get("limit", ["200"])[0])), {}
         raise NotFoundError("接口不存在")
 
@@ -720,21 +773,22 @@ class TgDriveASGI(StaticFiles):
         # “保持登录”的会话用持久 Cookie（与服务端有效期一致）；普通会话 12 小时。
         return 200, {k: v for k, v in result.items() if k != "session"}, {"Set-Cookie": self._cookie(token, max_age=round(result["expires_at"] - time.time()))}
 
-    async def _content(self, send, method, token, query, headers, *, admin: bool = False):
+    async def _content(self, send, method, token, query, headers, *, admin: bool = False, user=None, private=False):
+        user = user or self.user
         path = query.get("path", [""])[0]
         if admin:
             bucket_id = int(query.get("bucket_id", [""])[0])
             info, _ = await self.admin.content(token, bucket_id, path)
             opener = lambda start, end: self.admin.content(token, bucket_id, path, start, end)
         else:
-            info, _ = await self.user.content(token, path)
-            opener = lambda start, end: self.user.content(token, path, start, end)
+            info, _ = await user.content(token, path)
+            opener = lambda start, end: user.content(token, path, start, end)
         # 只有与当前内容版本匹配的图片地址才能直接复用；旧地址仍校验版本与权限。
         mime = (info.content_type or "").split(";", 1)[0].strip().lower()
         image = mime.startswith("image/") or (mime in ("", "application/octet-stream")
             and re.search(r"\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$", info.key, re.IGNORECASE))
-        cache_control = "private, no-cache" if image else "private"
-        if (image and query.get("download", ["0"])[0] != "1"
+        cache_control = "no-store" if private else "private, no-cache" if image else "private"
+        if (not private and image and query.get("download", ["0"])[0] != "1"
                 and info.etag and query.get("v", [""])[0] == info.etag):
             cache_control = "private, max-age=604800, immutable"
         await self._stream_object(send, method, info, opener, query, headers, cache_control)
@@ -917,7 +971,9 @@ class TgDriveASGI(StaticFiles):
     @staticmethod
     def _error(exc):
         extra = {}
-        if isinstance(exc, ShareExpiredError):
+        if isinstance(exc, PrivateLocked):
+            status, code, message = 423, "private_locked", str(exc)
+        elif isinstance(exc, ShareExpiredError):
             status, code, message = 410, "share_expired", "分享链接已过期"
         elif isinstance(exc, SharePasswordRequired):
             status, code, message = 403, "password_required", "该分享需要访问密码"
@@ -927,7 +983,9 @@ class TgDriveASGI(StaticFiles):
             extra["WWW-Authenticate"] = 'Bearer realm="tgdrive"'
         # 口令错误不是会话失效：返回 400，避免前端把管理员登出。
         elif isinstance(exc, WrongPassphrase): status, code, message = 400, "wrong_passphrase", "加密口令不正确"
-        elif isinstance(exc, TooManyAttempts): status, code, message = 429, "too_many_attempts", "登录失败次数过多，请 15 分钟后再试"
+        elif isinstance(exc, TooManyAttempts):
+            status, code = 429, "too_many_attempts"
+            message = str(exc) if str(exc).startswith("访问密码") else "登录失败次数过多，请 15 分钟后再试"
         elif isinstance(exc, (AuthenticationError, SessionExpired)): status, code, message = 401, "unauthorized", "登录凭据无效或会话已过期"
         elif isinstance(exc, (CsrfError, PermissionError)): status, code, message = 403, "forbidden", "权限不足或 CSRF 校验失败"
         elif isinstance(exc, WorkBusyError):
