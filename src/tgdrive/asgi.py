@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote
 
 from .api import AdminApi, UserApi
+from .archive import stream_zip
 from .audit import AuditLog
 from .authn import AuthenticationError, CsrfError, SessionExpired, TooManyAttempts, hash_password, verify_password
 from .context import AppContext
@@ -219,6 +220,19 @@ class TgDriveASGI(StaticFiles):
                 return
             if path == "/api/admin/v1/content" and method in ("GET", "HEAD"):
                 await self._content(tracked_send, method, token, query, headers, admin=True)
+                return
+            folder_download = re.fullmatch(r"/api/public/v1/folders/([A-Za-z0-9_-]+)/download", path)
+            if folder_download and method == "POST":
+                if headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+                    raise ValueError("下载请求必须使用表单编码")
+                data = bytearray()
+                async for chunk in body_stream():
+                    if len(data) + len(chunk) > self.json_limit:
+                        await self._send(tracked_send, 413, {"error": {"code": "body_too_large", "message": "所选文件过多，请分批下载"}})
+                        return
+                    data.extend(chunk)
+                form = parse_qs(data.decode("utf-8"), keep_blank_values=True, max_num_fields=1003)
+                await self._public_folder_download(tracked_send, folder_download.group(1), form)
                 return
             data = bytearray()
             async for chunk in body_stream():
@@ -715,7 +729,15 @@ class TgDriveASGI(StaticFiles):
         else:
             info, _ = await self.user.content(token, path)
             opener = lambda start, end: self.user.content(token, path, start, end)
-        await self._stream_object(send, method, info, opener, query, headers, "private")
+        # 只有与当前内容版本匹配的图片地址才能直接复用；旧地址仍校验版本与权限。
+        mime = (info.content_type or "").split(";", 1)[0].strip().lower()
+        image = mime.startswith("image/") or (mime in ("", "application/octet-stream")
+            and re.search(r"\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$", info.key, re.IGNORECASE))
+        cache_control = "private, no-cache" if image else "private"
+        if (image and query.get("download", ["0"])[0] != "1"
+                and info.etag and query.get("v", [""])[0] == info.etag):
+            cache_control = "private, max-age=604800, immutable"
+        await self._stream_object(send, method, info, opener, query, headers, cache_control)
 
     async def _public_content(self, send, method, path, query, headers):
         # 文件分享：/p/<token> 与 /p/<token>/<文件名> 等价，文件名只用于让链接更易读。
@@ -741,9 +763,71 @@ class TgDriveASGI(StaticFiles):
         # 允许 CDN/浏览器存储，但每次使用前必须回源验证（ETag → 304）。关闭分享后回源即得到 404，链接立即失效。
         await self._stream_object(send, method, info, opener, query, headers, "public, no-cache")
 
+    async def _public_folder_download(self, send, token, form):
+        root, password_hash = self._public_share(token)
+        access = form.get("access", [None])[0]
+        if password_hash and not self.share_access.check(token, password_hash, access):
+            raise SharePasswordRequired("password required")
+        if not root.key.endswith("/"):
+            raise NotFoundError("not a shared folder")
+        objects = self.user.objects
+        relative = objects._public_relative(form.get("path", [""])[0])
+        if relative and not relative.endswith("/"):
+            relative += "/"
+        prefix, scope = root.key + relative, Scope(root.bucket_id, root.key, "ro")
+        selected = list(dict.fromkeys(form.get("files", [])))
+        all_files = form.get("all", ["0"])[0] == "1"
+        if not all_files and (not selected or len(selected) > 1000):
+            raise ValueError("请选择 1 至 1000 个文件")
+        keys = []
+        for path in selected:
+            path = objects._public_relative(path)
+            if not path.startswith(relative) or not path[len(relative):] or "/" in path[len(relative):] or "\\" in path:
+                raise ValueError("只能选择当前分享目录中的文件")
+            keys.append(root.key + path)
+        # 所选文件预先校验，避免请求包含不存在的文件时生成不完整下载。
+        chosen = None if all_files else await objects.metadata.run_in_thread(
+            lambda: [objects.head_object(scope, key) for key in keys])
+
+        async def files():
+            if chosen is not None:
+                for info in chosen:
+                    yield info
+                return
+            cursor = None
+            while True:
+                page = await objects.metadata.run_in_thread(lambda: objects.list_objects(scope, prefix, "/", cursor, 200))
+                for info in page.objects:
+                    if info.key != prefix and not info.key.endswith("/"):
+                        yield info
+                if not page.next_cursor:
+                    return
+                cursor = page.next_cursor
+
+        async def entries():
+            found = False
+            async for info in files():
+                current, current_hash = self._public_share(token)
+                if (current.bucket_id, current.key) != (root.bucket_id, root.key):
+                    raise NotFoundError("shared folder changed")
+                if current_hash and not self.share_access.check(token, current_hash, access):
+                    raise SharePasswordRequired("password required")
+                actual, stream = await objects.get_object(scope, info.key)
+                if not found:
+                    objects.count_public_download(root.bucket_id, root.key)
+                    found = True
+                yield actual.key[len(prefix):], actual.size, actual.modified_at, stream
+            if not found:
+                raise ValueError("当前目录没有可下载的文件")
+
+        name = (prefix.rstrip("/").rsplit("/", 1)[-1] or "files") + ".zip"
+        await self._send_stream(send, 200, {"Content-Type": "application/zip", "Cache-Control": "no-store",
+            "Content-Disposition": f"attachment; filename=\"files.zip\"; filename*=UTF-8''{quote(name, safe='')}",
+            "X-Content-Type-Options": "nosniff"}, stream_zip(entries()), "GET")
+
     async def _send_thumbnail(self, send, headers, data: bytes, mime: str, etag: str, cache_control: str):
         if headers.get("if-none-match") == f'"{etag}"':
-            await self._send(send, 304, None, {"ETag": f'"{etag}"'})
+            await self._send(send, 304, None, {"ETag": f'"{etag}"', "Cache-Control": cache_control})
             return
         await self._send_raw(send, 200, {"Content-Type": mime, "ETag": f'"{etag}"', "Cache-Control": cache_control,
                                          "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"}, data)
@@ -751,7 +835,7 @@ class TgDriveASGI(StaticFiles):
     async def _stream_object(self, send, method, info, opener, query, headers, cache_control):
         etag = f'"{info.etag}"'
         if headers.get("if-none-match") in (etag, "*"):
-            await self._send(send, 304, None, {"ETag": etag})
+            await self._send(send, 304, None, {"ETag": etag, "Cache-Control": cache_control})
             return
         requested = headers.get("range") if method == "GET" else None
         if headers.get("if-range") and headers["if-range"] != etag:

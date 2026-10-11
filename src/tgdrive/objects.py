@@ -594,12 +594,15 @@ class ObjectService:
         scope = Scope(root.bucket_id, root.key)
         def read_page():
             page = self.list_objects(scope, prefix, "/", cursor, max(1, min(limit, 500)))
-            return page, self.folder_sizes(scope, page.common_prefixes), self.thumbnail_variants([item.blob_uuid for item in page.objects])
-        page, sizes, thumbnails = await self.metadata.run_in_thread(read_page)
+            return (page, self.folder_sizes(scope, page.common_prefixes),
+                    self.thumbnail_variants([item.blob_uuid for item in page.objects]), self.folder_previews(scope, page.common_prefixes))
+        page, sizes, thumbnails, previews = await self.metadata.run_in_thread(read_page)
         files = [{"name": item.key[len(prefix):], "path": item.key[len(root.key):], "size": item.size, "content_type": item.content_type,
                   "etag": item.etag, "modified_at": item.modified_at, "thumbnails": thumbnails.get(item.blob_uuid or "", [])}
                  for item in page.objects if item.key != prefix and not item.key.endswith("/")]
-        folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):], "size": sizes[value]}
+        folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):], "size": sizes[value],
+                    "previews": [{"name": item["key"].rsplit("/", 1)[-1], "path": item["key"][len(root.key):],
+                                  **{key: data for key, data in item.items() if key != "key"}} for item in previews[value]]}
                    for value in page.common_prefixes]
         if relative and not files and not folders and cursor is None and not self.metadata.db.execute(
                 "SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (root.bucket_id, prefix)).fetchone():
@@ -644,6 +647,38 @@ class ObjectService:
 
     # 跳过一个公共前缀下全部键时使用的上界：U+10FFFF 是最大码点，按 SQLite 二进制排序大于该前缀下的任何键。
     _PREFIX_END = "\U0010ffff"
+
+    def folder_previews(self, scope: Scope, prefixes: list[str]) -> dict[str, list[dict[str, object]]]:
+        """批量取得每个目录最多四张已有缩略图的元信息，不读取原文件或缩略图内容。"""
+        prefixes = list(dict.fromkeys(prefixes))
+        for prefix in prefixes:
+            self._check_scope(scope, prefix)
+            if not prefix.endswith("/"):
+                raise ValueError("folder path must end with /")
+        if not prefixes:
+            return {}
+        def read():
+            previews: dict[str, list[dict[str, object]]] = {prefix: [] for prefix in prefixes}
+            for start in range(0, len(prefixes), 200):
+                batch = prefixes[start:start + 200]
+                values = ",".join("(?,?)" for _ in batch)
+                params = [value for prefix in batch for value in (prefix, prefix + self._PREFIX_END)]
+                # 每个前缀用桶 / 键索引取四项；不先读完整目录，也不逐项查询缩略图。
+                rows = self.metadata.db.execute(
+                    f"WITH folders(prefix,upper_key) AS (VALUES {values}) "
+                    "SELECT f.prefix,o.key,o.size,o.etag,o.content_type,o.modified_at FROM folders f "
+                    "JOIN objects o ON o.bucket_id=? AND o.key IN ("
+                    "SELECT sample.key FROM objects sample WHERE sample.bucket_id=? "
+                    "AND sample.key>f.prefix AND sample.key<f.upper_key AND substr(sample.key,-1)!='/' "
+                    "AND substr(sample.key,1,9)!='.tgdrive/' AND ("
+                    "EXISTS(SELECT 1 FROM thumbnails t WHERE t.blob_uuid=sample.blob_uuid AND t.variant='thumb') "
+                    "OR EXISTS(SELECT 1 FROM thumbnail_legacy l WHERE l.blob_uuid=sample.blob_uuid)) "
+                    "ORDER BY sample.key LIMIT 4) ORDER BY f.prefix,o.key", (*params, scope.bucket_id, scope.bucket_id))
+                for row in rows:
+                    item = {key: row[key] for key in ("key", "size", "etag", "content_type", "modified_at")}
+                    previews[row["prefix"]].append({**item, "thumbnails": ["thumb"], "has_thumbnail": True})
+            return previews
+        return self.metadata.cached_read(("folder-previews", scope.bucket_id, tuple(prefixes)), read)
 
     def folder_sizes(self, scope: Scope, prefixes: list[str]) -> dict[str, int]:
         """只汇总当前页目录下的原始文件大小；由桶和路径范围限制查询，不读取文件内容。"""

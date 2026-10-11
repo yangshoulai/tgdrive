@@ -3,7 +3,7 @@ import { useCursorPage } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileThumbnail, FileVisual, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileThumbnail, FileVisual, FolderThumbnail, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
 
 import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
@@ -88,7 +88,9 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                     const open = () => folder ? onOpenFolder(file.key) : setPreview(file);
                     return <div key={file.key} className="grid-card shared-grid-card" onClick={open}>
                       <div className="grid-thumb">
-                        <FileThumbnail kind={kind} url={folder ? undefined : api.fileThumbnail(file)} />
+                        {folder ? <FolderThumbnail previews={(pagination.page?.folder_previews?.[file.key] ?? []).flatMap(item => {
+                          const url = api.fileThumbnail(item); return url ? [{ ...item, url }] : [];
+                        })} /> : <FileThumbnail kind={kind} url={api.fileThumbnail(file)} />}
                         <span className="grid-public grid-share-badges">{shareBadges(file)}</span>
                       </div>
                       <div className="grid-meta">

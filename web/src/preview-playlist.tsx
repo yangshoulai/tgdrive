@@ -1,7 +1,7 @@
 /** 同目录媒体列表：只加载元信息，选中后才读取媒体内容。 */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { errorMessage, type FileItem, type PreviewListPage } from "./api";
-import { Button, Icon, IconButton } from "./ui";
+import { Button, Icon, IconButton, formatBytes } from "./ui";
 
 export type PlaylistLoader = (file: FileItem, cursor: string | null, signal: AbortSignal) => Promise<PreviewListPage>;
 export type PlaybackMode = "sequence" | "random" | "loop" | "single";
@@ -81,10 +81,10 @@ export function useMediaPlaylist(file: FileItem, kind: string, load: PlaylistLoa
   return { items, current, select, next, previous, mode, changeMode, loading, error, retry: () => setAttempt(value => value + 1) };
 }
 
-export function PlaylistControls({ playlist, onSelect, compact = false, playing, onToggle }: {
+export function PlaylistControls({ playlist, onSelect, compact = false, playing, onToggle, expanded, onExpand }: {
   playlist: ReturnType<typeof useMediaPlaylist>; onSelect: (file: FileItem) => void; compact?: boolean; playing: boolean; onToggle: () => void;
+  expanded?: boolean; onExpand?: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const index = playlist.items.findIndex(file => file.key === playlist.current.key);
   return <section className={`preview-playlist${compact ? " is-compact" : ""}`} aria-label="播放列表">
     <div className="preview-playlist-toolbar">
@@ -98,18 +98,41 @@ export function PlaylistControls({ playlist, onSelect, compact = false, playing,
           {MODES.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
         </select><Icon name="chevronDown" size={12} />
       </label>
-      {!compact && <Button variant="ghost" size="sm" icon="list" className="preview-playlist-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      {!compact && <Button variant="ghost" size="sm" icon="list" className="preview-playlist-toggle" aria-expanded={expanded} aria-controls={expanded ? "preview-playlist-panel" : undefined} onClick={onExpand}>
         播放列表 <span className="preview-playlist-count">{Math.max(0, index) + 1} / {playlist.items.length}</span>
         {playlist.loading && <span className="spinner" />}
+        {!playlist.loading && playlist.error && <span title="播放列表加载失败，展开后可重试"><Icon name="alert" size={12} /></span>}
       </Button>}
     </div>
-    {!compact && playlist.error && <div className="preview-playlist-error" role="status"><span>{playlist.error}</span><Button variant="ghost" size="sm" icon="refresh" onClick={playlist.retry}>重试列表</Button></div>}
-    {!compact && expanded && <ol className="preview-playlist-items" aria-label="同目录的可播放文件">
-      {playlist.items.map((file, position) => <li key={file.key}>
+  </section>;
+}
+
+export function PlaylistPanel({ playlist, onSelect, onCollapse, renderThumbnail, typeLabel }: {
+  playlist: ReturnType<typeof useMediaPlaylist>; onSelect: (file: FileItem) => void; onCollapse: () => void;
+  renderThumbnail: (file: FileItem) => ReactNode; typeLabel: string;
+}) {
+  const list = useRef<HTMLOListElement>(null);
+  const index = playlist.items.findIndex(file => file.key === playlist.current.key);
+  useEffect(() => {
+    const node = list.current;
+    if (!node) return;
+    const reveal = () => { if (node.clientHeight) node.querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest" }); };
+    const observer = new ResizeObserver(reveal);
+    observer.observe(node); reveal();
+    return () => observer.disconnect();
+  }, [playlist.current.key, playlist.items.length]);
+  return <aside id="preview-playlist-panel" className="preview-playlist-panel" aria-label="播放列表">
+    <header><strong>播放列表</strong><span className="preview-playlist-count">{Math.max(0, index) + 1} / {playlist.items.length}</span>
+      <IconButton icon="x" label="收起播放列表" size="sm" onClick={onCollapse} />
+    </header>
+    {playlist.error && <div className="preview-playlist-error" role="status"><span>{playlist.error}</span><Button variant="ghost" size="sm" icon="refresh" onClick={playlist.retry}>重试列表</Button></div>}
+    <ol ref={list} className="preview-playlist-items" aria-label="同目录的可播放文件">
+      {playlist.items.map(file => <li key={file.key}>
         <Button variant="ghost" size="sm" className={file.key === playlist.current.key ? "is-current" : ""} aria-current={file.key === playlist.current.key ? "true" : undefined} title={nameOf(file)} onClick={() => onSelect(file)}>
-          <span className="preview-track-number">{file.key === playlist.current.key ? <Icon name="play" size={12} /> : position + 1}</span><span>{nameOf(file)}</span>
+          {renderThumbnail(file)}<span className="preview-track-description"><strong>{nameOf(file)}</strong><span>{typeLabel} · {formatBytes(file.size)}</span></span>
+          {file.key === playlist.current.key && <Icon name="play" size={12} />}
         </Button>
       </li>)}
-    </ol>}
-  </section>;
+    </ol>
+  </aside>;
 }

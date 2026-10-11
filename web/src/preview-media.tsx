@@ -11,7 +11,7 @@ type Player = ReturnType<Engine["createVideoPlayer"]> | ReturnType<Engine["creat
 type Lyric = { time: number; text: string };
 export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[]>;
 export type PlaybackControls = Pick<Player, "play" | "pause" | "seek">;
-export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onControls?: (controls: PlaybackControls | null) => void };
+export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number) => void };
 
 export function parseLyrics(source: string): Lyric[] {
   const offset = Number(/\[offset\s*:\s*([+-]?\d+)\]/i.exec(source)?.[1] ?? 0) / 1000;
@@ -40,16 +40,17 @@ function assetLabel(asset: PreviewAsset): string {
   return (asset.language && languages[asset.language.toLowerCase()]) || asset.language || `${format} ${asset.kind === "lyrics" ? "歌词" : "字幕"}`.trim();
 }
 
-export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, onEnded, onPlaying, onControls }: {
+export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, onEnded, onPlaying, onControls, onVideoSize }: {
   kind: "video" | "audio"; url: string; name: string; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string;
 } & PlaybackProps) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
   const loader = useRef(loadAssets), resolveAsset = useRef(assetUrl);
   loader.current = loadAssets; resolveAsset.current = assetUrl;
-  const callbacks = useRef({ onEnded, onPlaying, onControls }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
-  callbacks.current = { onEnded, onPlaying, onControls }; source.current = { url, name, cover };
+  const callbacks = useRef({ onEnded, onPlaying, onControls, onVideoSize }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
+  callbacks.current = { onEnded, onPlaying, onControls, onVideoSize }; source.current = { url, name, cover };
   const [state, setState] = useState<MediaState>("loading"), [error, setError] = useState("");
+  const [playing, setPlaying] = useState(false);
   const [playerReady, setPlayerReady] = useState(false), [slow, setSlow] = useState(false);
   const [assets, setAssets] = useState<PreviewAsset[]>([]), [selected, setSelected] = useState("");
   const [findingAssets, setFindingAssets] = useState(Boolean(loadAssets)), [discoveryError, setDiscoveryError] = useState("");
@@ -62,7 +63,9 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
     void loadMediaEngine().then(engine => {
       if (cancelled || !host.current) return;
       const notify = (value: MediaState) => { if (!cancelled) setState(value); };
-      const events = { onEnded: () => callbacks.current.onEnded?.(), onPlaying: (playing: boolean) => callbacks.current.onPlaying?.(playing) };
+      const events = { onEnded: () => callbacks.current.onEnded?.(),
+        onPlaying: (value: boolean) => { if (!cancelled) setPlaying(value); callbacks.current.onPlaying?.(value); },
+        onVideoSize: (width: number, height: number) => callbacks.current.onVideoSize?.(width, height) };
       const initial = source.current;
       player.current = kind === "video" ? engine.createVideoPlayer(host.current, initial.url, notify, initial.cover, events)
         : engine.createAudioPlayer(host.current, initial.url, initial.name, notify, time => {
@@ -172,13 +175,15 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
     : assetError || discoveryError ? ["歌词暂时不可用", assetError || discoveryError]
     : assets.length && !selected ? ["歌词已关闭", "可以在右上角重新开启"]
     : ["暂无同步歌词", "同目录的同名 LRC 歌词会自动显示在这里"];
-  return <div className={`preview-player preview-player-${kind}${cover ? " has-cover" : ""}${waiting && !failed ? " is-waiting" : ""}`}
+  return <div className={`preview-player preview-player-${kind}${cover ? " has-cover" : ""}${waiting && !failed ? " is-waiting" : ""}${playing && !waiting && !failed ? " is-playing" : ""}`}
     style={kind === "audio" && cover ? { "--preview-cover": `url("${cover}")` } as CSSProperties : undefined}>
     <div className="preview-player-surface">
       <div ref={host} className={`preview-player-host ${kind === "video" ? "preview-video-host" : "preview-audio-host"}`} />
       {kind === "video" && (failure || slowNotice)}
     </div>
     {kind === "audio" && <div className="preview-lyrics-region">
+      {!failed && <span className="preview-audio-activity" role="status"><span className="preview-equalizer" aria-hidden="true"><i /><i /><i /><i /></span>
+        {waiting ? state === "buffering" ? "正在缓冲" : "正在加载" : playing ? "正在播放" : "已暂停"}</span>}
       {assets.length > 0 && !failed && <label className="preview-lyrics-picker" title={assets.find(asset => asset.path === selected)?.name}>
         <span className="sr-only">选择歌词</span><Icon name="fileText" size={13} />
         <select value={selected} disabled={findingAssets} onChange={event => setSelected(event.target.value)}>

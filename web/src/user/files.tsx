@@ -4,7 +4,7 @@ import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileThumbnail, FileTile, FileVisual, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
 import { saveThumbnails, thumbnailsFromImage, useThumbnailBackfill } from "../thumbnails";
 
 import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
@@ -331,8 +331,10 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                 <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${entry.kind === "folder" ? dropClass(entry.key) : ""}`} {...dragProps(entry)} {...(entry.kind === "folder" ? dropProps(entry.key) : {})} onClick={() => entry.kind === "folder" ? onOpenFolder(entry.key) : setPreview(entry.file)}>
                   <div className="grid-thumb">
                     {/* 有缩略图用缩略图；小图片直接显示原图；其余显示类型图标，避免每个卡片下载完整原图。 */}
-                    <FileThumbnail kind={kind} url={entry.kind === "file" ? api.fileThumbnail(entry.file)
-                      ?? (kind === "image" && entry.file.size <= 2 * 1024 * 1024 ? api.contentUrl(entry.key) : undefined) : undefined} />
+                    {entry.kind === "folder" ? <FolderThumbnail previews={(pagination.page?.folder_previews?.[entry.key] ?? []).flatMap(file => {
+                      const url = api.fileThumbnail(file); return url ? [{ ...file, url }] : [];
+                    })} /> : <FileThumbnail kind={kind} url={api.fileThumbnail(entry.file)
+                      ?? (kind === "image" && entry.file.size <= 2 * 1024 * 1024 ? api.versionedContentUrl(api.contentUrl(entry.key), entry.file.etag) : undefined)} />}
                     <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                     {(entry.kind === "file" ? entry.file.public_token : publicFolders[entry.key]) && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
                   </div>

@@ -5,7 +5,7 @@ import "aplayer/dist/APlayer.min.css";
 
 export type MediaState = "loading" | "ready" | "buffering" | "failed";
 type Notify = (state: MediaState) => void;
-type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void };
+type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onVideoSize?: (width: number, height: number) => void };
 export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents) {
   // 网页全屏仍留在预览的对话框内，保留焦点锁和无障碍语义。
   Artplayer.FULLSCREEN_WEB_IN_BODY = false;
@@ -39,7 +39,10 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   document.addEventListener("keydown", exitWebScreen, true);
   let ready = false, destroyed = false, subtitleUrl: string | null = null, version = 0;
   const setRatio = (width: number, height: number) => {
-    if (!destroyed && width > 0 && height > 0) container.style.setProperty("--preview-video-ratio", String(width / height));
+    if (!destroyed && width > 0 && height > 0) {
+      container.style.setProperty("--preview-video-ratio", String(width / height));
+      events?.onVideoSize?.(width, height);
+    }
   };
   // 封面与视频都使用原始比例；元信息就绪后以实际视频尺寸为准，兼容旧封面。
   let cover: HTMLImageElement | null = null;

@@ -19,7 +19,7 @@ export type FileItem = {
 export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subtitle"; language: string | null; size: number; etag: string };
 export type PreviewListPage = { objects: FileItem[]; next_cursor: string | null };
 /** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
-export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number> };
+export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number>; folder_previews?: Record<string, FileItem[]> };
 export type Account = { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
 export type ClientKey = { access_key_id: string; status: "active" | "disabled"; created_at: number; last_used_at: number | null };
 export type ClientGrant = { bucket_id: number; bucket_name: string; prefix: string; perms: "ro" | "rw" };
@@ -37,10 +37,11 @@ export type SystemStatus = { initialized: boolean; unlocked: boolean; user_count
 export type PublicFile = { kind: "file"; token: string; password_required: false; name: string; size: number; content_type: string | null; etag: string; modified_at: number; public_at: number | null; expires_at: number | null; thumbnails?: string[] };
 export type PublicFolder = { kind: "folder"; token: string; password_required: false; name: string; modified_at: number; public_at: number | null; expires_at: number | null };
 export type PublicObject = PublicFile | PublicFolder | { token: string; password_required: true };
+export type PublicFolderFile = { name: string; path: string; size: number; content_type: string | null; etag: string; modified_at: number; thumbnails?: string[] };
 export type PublicFolderPage = {
   name: string; path: string; next_cursor: string | null;
-  folders: { name: string; path: string; size?: number }[];
-  files: { name: string; path: string; size: number; content_type: string | null; etag: string; modified_at: number; thumbnails?: string[] }[];
+  folders: { name: string; path: string; size?: number; previews?: PublicFolderFile[] }[];
+  files: PublicFolderFile[];
 };
 export type CreatedClient = { id: number; access_key_id: string; secret: string };
 
@@ -169,6 +170,9 @@ export const fileThumbnail = (file: FileItem, variant: ThumbnailVariant = "thumb
 /** 公开分享里文件的缩略图：在 /p/ 地址上加 thumbnail 参数，沿用分享的权限。 */
 export const publicThumbnail = (contentUrl: string, variant: ThumbnailVariant = "thumb") =>
   `${contentUrl}${contentUrl.includes("?") ? "&" : "?"}thumbnail=${variant}`;
+export const publicFolderDownload = (token: string) => `/api/public/v1/folders/${encodeURIComponent(token)}/download`;
+/** 原图地址带内容版本，覆盖文件后自然更新，同时允许浏览器跨天复用缓存。 */
+export const versionedContentUrl = (url: string, etag: string) => etag ? `${url}${url.includes("?") ? "&" : "?"}v=${encodeURIComponent(etag)}` : url;
 
 /* ---------- 可续传的分段上传 ---------- */
 export type UploadState = { upload_id: string; path: string; completed: boolean; parts: { part_no: number; size: number; etag: string }[] };
@@ -181,7 +185,7 @@ export const getUpload = (id: string) => request<UploadState>(`/api/user/v1/uplo
 export const completeUpload = (id: string, parts: [number, string][], isPublic?: boolean) => post<FileItem>(`/api/user/v1/uploads/${id}/complete`, { parts, ...(isPublic === undefined ? {} : { public: isPublic }) }, 15 * 60000);
 export const abortUpload = (id: string) => request<void>(`/api/user/v1/uploads/${id}`, { method: "DELETE" });
 export const listPublic = () => request<FileItem[]>("/api/user/v1/public");
-export const listPublicPage = (cursor: string | null = null, limit = 50) => request<{ objects: FileItem[]; total: number; next_cursor: string | null; folder_sizes?: Record<string, number> }>(
+export const listPublicPage = (cursor: string | null = null, limit = 50) => request<{ objects: FileItem[]; total: number; next_cursor: string | null; folder_sizes?: Record<string, number>; folder_previews?: Record<string, FileItem[]> }>(
   `/api/user/v1/public?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const contentUrl = (path: string, download = false) => `/api/user/v1/content?path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
 
