@@ -107,7 +107,8 @@ class ThumbnailTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=photo.jpg")[0], 200)
         # 删除并清空回收站后，Blob 回收时缩略图一并删除
         self.call("POST", "/api/user/v1/trash", {"paths": ["photo.jpg"]})
-        self.call("POST", "/api/user/v1/trash/purge", {"all": True})
+        status, body = self.call("POST", "/api/user/v1/trash/purge", {"all": True})[:2]
+        self.assertEqual((status, body["purged"]), (200, 1))
         self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0], 0)
 
     def test_survives_passphrase_change(self):
