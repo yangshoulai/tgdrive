@@ -7,6 +7,7 @@ import base64
 import importlib.metadata
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,17 @@ MIB = 1024 * 1024
 ERRORS = {"live": "暂不支持直播、预告或仍在处理中的视频",
           "formats": "没有可下载的 MP4 格式，请更新 Cookie、调整清晰度或稍后重试；部分 YouTube 格式需要额外的平台校验",
           "empty": "帖子没有可下载的图片或视频，或当前登录状态无法访问",
+          "bot": "YouTube 要求登录确认真人，请导入当前账号的有效 Cookie；仍失败时检查服务器代理出口",
+          "cookie": "平台拒绝了已失效或格式不正确的 Cookie，请重新导入当前登录状态",
+          "login": "该媒体需要登录或年龄验证，请使用有播放权限的账号 Cookie",
+          "region": "该视频受地区限制，当前服务器出口地区无法访问",
+          "rate_limit": "平台限制了请求频率，请稍后重试并检查代理出口",
+          "unavailable": "该媒体已删除、设为私密或限制账号访问，请先确认当前账号在浏览器中可以播放",
+          "js": "YouTube 的 JavaScript 挑战解析失败，请检查运行时，并确认 yt-dlp 与 yt-dlp-ejs 版本匹配",
+          "forbidden": "平台拒绝了解析请求（HTTP 403），请检查账号权限、Cookie 和服务器代理出口",
+          "extractor": "解析组件未能识别平台响应，请检查代理是否返回了验证页面，或更新平台镜像",
+          "components": "平台解析器导入组件失败，请重新构建或更新平台镜像",
+          "transport": "平台解析器使用了尚未适配的网络请求方式，请更新 Tessera 平台适配器",
           "extract": "平台解析失败，请检查链接、更新 Cookie 或稍后重试；服务器出口也可能受到平台限制"}
 ROOTS = {"x": ("x.com", "twitter.com", "twimg.com"),
          "youtube": ("youtube.com", "youtube-nocookie.com", "youtu.be", "googlevideo.com", "ytimg.com", "ggpht.com", "google.com")}
@@ -275,7 +287,19 @@ class PlatformResolver:
                         else:
                             result = reply["result"]
                             if "error" in result:
-                                raise DownloadError(ERRORS.get(result["error"], ERRORS["extract"]))
+                                code = result["error"] if result["error"] in ERRORS else "extract"
+                                error_type = result.get("exception_type", "")
+                                if not isinstance(error_type, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_type):
+                                    error_type = "unknown"
+                                stack = result.get("stack", [])
+                                stack = [frame for frame in stack[:8] if isinstance(frame, str) and
+                                         re.fullmatch(r"[A-Za-z0-9_.-]{1,80}:\d{1,8}:[A-Za-z0-9_<>]{1,80}", frame)] if isinstance(stack, list) else []
+                                logging.getLogger(__name__).warning("platform_extract_failed platform=%s code=%s error_type=%s stack=%s",
+                                    platform, code, error_type, ";".join(stack))
+                                message = ERRORS[code]
+                                if code == "extract" and error_type != "unknown":
+                                    message += f"（解析异常：{error_type}）"
+                                raise DownloadError(message)
                             entries = result["entries"]
                             if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
                                 raise DownloadError("平台媒体数量不正确")

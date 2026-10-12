@@ -9,9 +9,11 @@ import json
 import logging
 import resource
 import sys
+import traceback
 import urllib.request
 from email.message import Message
 from http.cookiejar import Cookie
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urljoin
 
@@ -20,6 +22,31 @@ from .request import filename
 
 WIRE_LIMIT = 12 * 1024 * 1024
 _output = sys.stdout.buffer
+
+
+def extraction_failure(error):
+    # 第三方异常可能包含带签名的 URL 或 Cookie，只返回固定分类和代码位置。
+    detail = str(error)[:16384].lower().replace("\u2019", "'")
+    hints = (
+        ("cookie", ("cookies are no longer valid", "cookies have expired", "invalid cookies", "not a netscape")),
+        ("bot", ("confirm you're not a bot", "unusual traffic", "captcha")),
+        ("region", ("not available in your country", "not available from your location", "geo-restricted")),
+        ("login", ("sign in to confirm your age", "login required", "sign in to", "authentication required")),
+        ("rate_limit", ("http error 429", "too many requests", "rate limit")),
+        ("unavailable", ("video unavailable", "private video", "video has been removed", "video is not available", "members-only")),
+        ("js", ("javascript runtime", "javascript challenge", "challenge solving failed", "signature extraction failed", "n challenge")),
+        ("formats", ("requested format is not available", "no video formats found")),
+        ("forbidden", ("http error 403", "403 forbidden")),
+        ("extractor", ("unable to extract", "unsupported request", "no supporting handlers")),
+    )
+    code = next((code for code, terms in hints if any(term in detail for term in terms)), "extract")
+    if isinstance(error, ImportError):
+        code = "components"
+    elif isinstance(error, PermissionError) and "use parent transport" in detail:
+        code = "transport"
+    frames = traceback.extract_tb(error.__traceback__)[-8:]
+    return {"error": code, "exception_type": type(error).__name__,
+            "stack": [f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames]}
 
 
 def emit(value):
@@ -258,8 +285,8 @@ def main():
         with contextlib.redirect_stdout(sys.stderr):
             result = twitter(payload) if payload["platform"] == "x" else youtube(payload)
         emit({"result": result})
-    except Exception:
-        emit({"result": {"error": "extract"}})
+    except Exception as error:
+        emit({"result": extraction_failure(error)})
 
 
 if __name__ == "__main__":

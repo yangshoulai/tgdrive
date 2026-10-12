@@ -1,6 +1,7 @@
 """网页静态资源和管理员文档的独立服务边界。"""
 
 import asyncio
+import errno
 import mimetypes
 from pathlib import Path
 
@@ -25,11 +26,18 @@ class StaticFiles:
         # 单页应用：真实存在的文件原样返回，其余路径（/、/docs、/s/<令牌>、/admin/...）都交给 index.html，
         # 由前端按路径和登录账号的角色决定显示什么；管理功能的权限由接口按角色校验，与这里无关。
         relative = path.lstrip("/")
-        candidate = (static_dir / relative).resolve() if relative else static_dir / "index.html"
-        if static_dir not in candidate.parents and candidate != static_dir:
+        try:
+            candidate = (static_dir / relative).resolve() if relative else static_dir / "index.html"
+            if static_dir not in candidate.parents and candidate != static_dir:
+                await self._send(send, 404, {"error": {"code": "not_found", "message": "资源不存在"}})
+                return
+            exists = candidate.is_file()
+        except OSError as error:
+            if error.errno not in (errno.ENAMETOOLONG, errno.EINVAL):
+                raise
             await self._send(send, 404, {"error": {"code": "not_found", "message": "资源不存在"}})
             return
-        if not candidate.is_file():
+        if not exists:
             candidate = static_dir / "index.html"
         if not candidate.is_file():
             await self._send(send, 404, {"error": {"code": "not_found", "message": "前端资源未构建"}})
