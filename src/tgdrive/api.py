@@ -216,6 +216,10 @@ class AdminApi:
             raise PermissionError("管理员账号不能删除")
         if confirm != row["username"]:
             raise ValueError("请输入用户名以确认删除")
+        # 先禁止新写入，避免取消后台任务后、清理存储桶期间又出现新任务。
+        self.accounts.set_account_status(user_id, "disabled")
+        if offline := getattr(self, "offline", None):
+            await offline.cancel_user(user_id)
         deleted = await self.objects.purge_bucket(row["bucket_id"]) if row["bucket_id"] is not None else 0
         with self.accounts.metadata.transaction() as tx:
             tx.execute("DELETE FROM clients WHERE owner_user_id=?", (user_id,))

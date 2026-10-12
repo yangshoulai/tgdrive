@@ -15,6 +15,9 @@ import { UploadTray, useUploadQueue } from "./user/uploads";
 import { SharedView } from "./user/shared";
 import { TrashView } from "./user/trash";
 import { KeysView } from "./user/keys";
+import { DownloadsView } from "./user/downloads";
+import { DownloadTray } from "./user/download-tray";
+import { PreviewHost } from "./user/preview-host";
 import { PasswordDialog } from "./user/account";
 import { onThemeChange, setThemePreference, themePreference, type ThemePreference } from "./theme";
 
@@ -91,7 +94,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
   return <MainShell session={session} onLogout={() => setSession(null)} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "keys" | "private";
+type UserSection = "files" | "shared" | "trash" | "keys" | "private" | "downloads";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -106,7 +109,7 @@ function readLocation(): { section: Section; prefix: string } {
   }
   const params = new URLSearchParams(search);
   const view = params.get("view");
-  return { section: view === "shared" || view === "keys" || view === "trash" || view === "private" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
+  return { section: view === "shared" || view === "keys" || view === "trash" || view === "private" || view === "downloads" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
 }
 
 function MainShell({ session, onLogout }: { session: api.Session; onLogout: () => void }) {
@@ -120,6 +123,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   const [status, setStatus] = useState<api.SystemStatus | null>(null);
   const [, setConfigVersion] = useState(0);
   const [uploadRevision, setUploadRevision] = useState(0);
+  const [downloadRevision, setDownloadRevision] = useState(0);
   const refreshTimer = useRef<number | undefined>();
   const refreshUsage = useCallback(() => {
     window.clearTimeout(refreshTimer.current);
@@ -165,6 +169,8 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   const percent = usage?.quota_bytes ? usage.used_bytes / usage.quota_bytes * 100 : 0;
   const unlocked = () => { refreshStatus(); refreshUsage(); };
   const section = location.section;
+  // 文件空间可用时才保留预览和下载托盘；系统锁定、服务未解锁时一并关闭。
+  const workspaceReady = !locked && !(!isAdmin && session.unlocked === false) && !(isAdmin && status === null);
   let content: ReactNode;
   if (isAdminSection(section)) {
     if (!isAdmin) content = <AccessDenied />;
@@ -185,6 +191,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
       {section === "private" && <PrivateSpaceView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={path => navigate("private", path)} onChanged={refreshUsage} onExit={() => navigate("files")} />}
       {section === "shared" && <SharedView session={session} onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
       {section === "keys" && <KeysView bucketName={usage ? `user-${usage.id}` : null} />}
+      {section === "downloads" && <DownloadsView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} onCreated={() => setDownloadRevision(value => value + 1)} />}
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
     </>;
   }
@@ -192,6 +199,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
     { key: "files", label: "我的文件", icon: "folder" },
     { key: "private", label: "私密空间", icon: "lock" },
     { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
+    { key: "downloads", label: "下载任务", icon: "download" },
     { key: "trash", label: "回收站", icon: "trash" },
     { key: "keys", label: "访问密钥", icon: "key" },
   ] };
@@ -223,8 +231,14 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
         { label: "深色", icon: "moon", checked: theme === "dark", onSelect: () => setThemePreference("dark") },
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },
       ] }}>
-      {content}
-      <UploadTray queue={uploads} />
+      <PreviewHost enabled={workspaceReady} privateAllowed={section === "private"}>
+        {content}
+      </PreviewHost>
+      <div className="tray-stack">
+        {workspaceReady && <DownloadTray hidden={section === "downloads"} revision={downloadRevision} onOpenTasks={() => navigate("downloads")}
+          onOpenFolder={prefix => navigate("files", prefix)} onCompleted={() => { setUploadRevision(value => value + 1); refreshUsage(); }} />}
+        <UploadTray queue={uploads} />
+      </div>
       {passwordOpen && <PasswordDialog onClose={() => setPasswordOpen(false)} />}
     </AppShell>
   );

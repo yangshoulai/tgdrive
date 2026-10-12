@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { BRAND, SITE } from "../brand";
 import * as api from "../api";
+import { Resources } from "./resources";
 
 import { Button, Field, Icon, KeyValue, PageHeader, Panel, SkeletonRows, toast, useDocumentTitle } from "../ui";
 
@@ -37,7 +38,7 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
   const dirty = settings !== null && (form.public_base_url !== (settings.public_base_url.value ?? "") || form.s3_endpoint !== (settings.s3_endpoint.value ?? ""));
   return (
     <>
-      <PageHeader title="系统设置" description={`用户和外部工具访问 ${BRAND} 的地址。保存后立即生效，无需重启服务。`} />
+      <PageHeader title="系统设置" description={`配置 ${BRAND} 的访问地址、下载功能与资源预算。`} />
       <div className="stack">
         <Panel title="访问地址">
           <form className="form settings-form" onSubmit={submit} noValidate>
@@ -68,6 +69,7 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
             ["同步工具", s3 ? <code className="mono">aws --endpoint-url {s3} s3 ls s3://user-2/</code> : <span className="muted">未配置</span>],
           ]} />
         </Panel>
+        <Resources />
         <Panel title="部署要求">
           <ul className="plain-list">
             <li>两个域名都需要解析到 {BRAND} 服务，或由反向代理转发到服务端口（默认 8000）。</li>

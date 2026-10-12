@@ -1,5 +1,5 @@
 /** 播放界面与歌词、字幕附件；缓冲状态始终保留播放器。 */
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { errorMessage, type PreviewAsset } from "./api";
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
@@ -111,7 +111,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
     // 切换同类文件只替换媒体源，最小化、恢复与播放模式变化都保留实例。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!player.current || loadedUrl.current === url) return;
     setError(""); setSlow(false); timeRef.current = 0;
     loadedUrl.current = url;

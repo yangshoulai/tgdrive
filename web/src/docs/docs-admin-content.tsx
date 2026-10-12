@@ -24,10 +24,29 @@ function AdminDeploy() {
         [<C>--transfer-concurrency</C>, <C>TGDRIVE_TRANSFER_CONCURRENCY</C>, "4", "全局同时进行的上传分段、下载流与校验任务数"],
         [<C>--bucket-concurrency</C>, <C>TGDRIVE_BUCKET_CONCURRENCY</C>, "2", "每个存储桶同时进行的传输数，所有接入方式共用"],
         [<C>--audit-retention-days</C>, <C>TGDRIVE_AUDIT_RETENTION_DAYS</C>, "0", "0 为永久保留；正数表示将过期日志移入加密归档"],
+        [<C>--resource-mode</C>, <C>TGDRIVE_RESOURCE_MODE</C>, "auto", "auto／low／standard／custom；管理员设置优先"],
+        [<C>--offline-concurrency</C>, <C>TGDRIVE_OFFLINE_CONCURRENCY</C>, "1", "自定义模式的离线任务并发，1–4；容器预算限制实际并发"],
+        [<C>--offline-bandwidth-kib</C>, <C>TGDRIVE_OFFLINE_BANDWIDTH_KIB</C>, "0", "总下载限速，KiB/s；0 不限速"],
+        [<C>--offline-reserve-mib</C>, <C>TGDRIVE_OFFLINE_RESERVE_MIB</C>, "512", "数据目录所在磁盘的最低保留空间，至少 128 MiB"],
+        [<C>--offline-hls</C>, <C>TGDRIVE_OFFLINE_HLS=1</C>, "关闭", "允许 M3U8，仍需本地 FFmpeg；管理员设置优先"],
+        [<C>--offline-x</C>, <C>TGDRIVE_OFFLINE_X=1</C>, "关闭", "允许 X 单帖的图片、视频，需本地平台组件"],
+        [<C>--offline-youtube</C>, <C>TGDRIVE_OFFLINE_YOUTUBE=1</C>, "关闭", "允许 YouTube 单视频、Shorts，需平台组件、JavaScript 运行时和 FFmpeg"],
+        [<C>--offline-max-mib</C>, <C>TGDRIVE_OFFLINE_MAX_MIB</C>, "512", "平台单任务文件大小与临时输入轨上限，MiB；受低资源预算限制"],
+        [<C>--youtube-max-height</C>, <C>TGDRIVE_YOUTUBE_MAX_HEIGHT</C>, "720", "YouTube 清晰度上限；低资源预算最高 720p"],
+        [<C>--offline-proxy</C>, <C>TGDRIVE_OFFLINE_PROXY</C>, "直连", "离线下载出站代理，http://主机:端口 或 socks5://主机:端口，可带用户名密码；管理员设置优先"],
         [<C>--trusted-proxies</C>, <C>TGDRIVE_TRUSTED_PROXIES</C>, "Uvicorn 默认", "信任 X-Forwarded-For/Proto 的代理 IP 或网段，逗号分隔"],
       ]} />
       <Callout tone="danger" title="生产环境必须使用 HTTPS">默认情况下会话 Cookie 带有 Secure 标记，浏览器只会通过 HTTPS 发送。不要在公网环境开启 --insecure-cookies。</Callout>
       <H2>站点结构与角色</H2>
+      <p>「系统设置 → 下载与资源」显示检测预算、配置来源及生效参数。自动模式在 CPU 少于 2 核、内存少于 1 GiB 或无法可靠检测时使用低资源预算；低资源同时下载 1 个任务，标准预设为 2，自定义最多 4，仍受预算限制。低资源下共用的传输名额最多 2、每桶 1，并降低加密上传与下载预读并发。修改并发不终止已有传输，下一轮调度生效。磁盘不足或容器不可回收内存用量超过 90% 时暂停离线任务，释放资源后继续 GET，POST 必须手动继续。内存判断扣除同一 cgroup 的可回收闲置文件缓存，临时内存盘仍计入用量。</p>
+      <p>默认镜像不含 FFmpeg。使用 <C>latest-ffmpeg</C> 或同版本 <C>-ffmpeg</C> 标签，再启用 M3U8；本地构建传入 <C>--build-arg INSTALL_FFMPEG=1</C>。只封装，不转码，最多一个 FFmpeg 进程；输入、输出通过本地管道传递，不缓存完整视频。Telegram 通道保存加密分片；本地存储仍会占用最终文件的磁盘空间。HTTP 断点及离线请求参数包含在数据库备份中，参数已加密；更换加密口令同步重新加密。</p>
+      <p>直连时所有离线来源必须解析到公网 IP，并在连接时固定该地址；若服务器 DNS 返回 <C>198.18.0.0/15</C> Fake-IP，探测和下载都会被拒绝。服务器需要经代理出网时，在「系统设置 → 下载与资源」填写出站代理（支持 HTTP CONNECT 与 SOCKS5，可带用户名密码）。启用后所有离线下载、平台解析和媒体请求都经代理，域名由代理解析。</p>
+      <Callout tone="warning" title="代理模式的内网防护较弱">启用代理后服务端无法核对域名的实际解析结果，只能拒绝字面内网 IP、localhost 和 .local、.lan、.internal 等内部主机名。请确认代理的直连规则不会把请求转发到内网服务。代理密码保存在服务器设置中，控制台只显示 ******；审计只记录是否启用代理。</Callout>
+      <p>连接建立阶段的重置、超时会自动重试 3 次，平台解析请求在网络中断时也会整体重发。任务层面的网络中断、超时及 HTTP 408／425／429／5xx 再自动重试 3 次（10、30、90 秒），文件直链从断点续传；平台解析结果在有效期内复用，不必每次开始都启动解析子进程。自动重试计数只在进程内保存，重启后“等待恢复”的任务照常继续。</p>
+      <p>X／YouTube 使用 <C>latest-platform</C> 或同版本 <C>-platform</C> 镜像，本地构建为 <C>docker build --target platform -t tgdrive:platform .</C>。平台镜像包含固定版本的 gallery-dl、yt-dlp、配套 EJS、Node.js 和 FFmpeg，各平台由管理员单独启用。解析子进程按需启动、最多一个，取消时连同 JavaScript 子进程回收。解析器只通过主进程受控 HTTP 通道访问平台域名（直连时还要求公网 IP），不使用第三方解析网站。YouTube 媒体按解析库要求的 10 MiB 分段逐段请求，避免整文件请求被限速到接近播放速度。</p>
+      <p>「下载与资源」的生效配置列出 yt-dlp、yt-dlp-ejs、gallery-dl、JavaScript 运行时与 FFmpeg 的版本（启动时检测）。yt-dlp 版本号即发布日期，超过 60 天会提示更新：YouTube 经常调整接口，旧版本解析失败时请拉取最新的平台镜像。</p>
+      <p>YouTube 分离轨暂存于数据目录的受限任务缓存，FFmpeg 输出直接进入加密存储，不另存完整成品临时文件。默认 720p、单任务与输入轨缓存最多 512 MiB；低资源预算限制上限。停止、失败清理临时轨，重启清理异常退出遗留缓存。输入轨在临时目录内为明文，目录权限 0700、文件权限 0600；需同时为输入轨和最终本地加密分片保留磁盘空间。平台登录 Cookie 加密保存在任务参数中，随口令轮换重加密。站点改变接口时需要更新可选依赖并重建镜像。</p>
+      <p>删除用户前会先禁用账号并停止后台下载，阻止清理期间再次创建任务；如果清理失败，账号保留禁用状态，可在修复后继续删除或重新启用。</p>
       <p>整个站点是同一个应用、同一个端口，只有一个登录页。账号的角色决定登录后能看到什么：</p>
       <Table head={["角色", "可见内容"]} rows={[
         ["管理员", "侧栏切换「我的空间」与「系统管理」：管理区提供概览、用户、全部文件、存储通道、全部密钥、安全与维护、审计日志、系统设置，还有管理员文档"],

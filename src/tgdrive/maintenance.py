@@ -156,7 +156,8 @@ class Cleaner:
         now = time.time() if now is None else now
         aborted = stale = expired = 0
         with self.metadata.transaction() as db:
-            for row in db.execute("SELECT upload_id, blob_uuid FROM uploads WHERE completed_at IS NULL AND last_activity < ? ORDER BY last_activity LIMIT ?",
+            for row in db.execute("SELECT upload_id, blob_uuid FROM uploads WHERE completed_at IS NULL AND last_activity < ? "
+                                  "AND NOT EXISTS (SELECT 1 FROM offline_tasks t WHERE t.upload_id=uploads.upload_id AND t.status IN ('queued','running','interrupted')) ORDER BY last_activity LIMIT ?",
                                   (now - self.upload_ttl, limit)).fetchall():
                 db.execute("DELETE FROM uploads WHERE upload_id=?", (row["upload_id"],))
                 self._discard_blob(db, row["blob_uuid"], now)

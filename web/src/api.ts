@@ -33,6 +33,15 @@ export type AdminObject = FileItem & { bucket_id: number; bucket_name: string; u
 export type UserMe = { id: number; username: string; role: Role; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; unlocked: boolean; remember?: boolean; csrf_token: string; expires_at: number } & SiteConfig;
 export type SettingValue = { value: string | null; default: string | null; effective: string | null };
 export type SystemSettings = { public_base_url: SettingValue; s3_endpoint: SettingValue };
+export type ResourceConfig = { mode: "auto" | "low" | "standard" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string };
+export type ResourceSettings = { config: ResourceConfig; source: "admin" | "startup"; pressure: string | null;
+  components: { versions: Record<string, string | null>; ytdlp_age_days: number | null };
+  effective: ResourceConfig & { ffmpeg_concurrency: number; streaming: boolean; cache_mib: number; hls_available: boolean; x_available: boolean; youtube_available: boolean; reduced: boolean };
+  detected: { cpu_cores: number; memory_bytes: number | null; container_limits: boolean; disk_total_bytes: number | null; disk_free_bytes: number | null } };
+export type DownloadCandidate = { ticket: string; group: string; name: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform?: "x" | "youtube"; media_type?: "image" | "video" | "audio"; content_type?: string | null; size: number | null; variant: string | null; warnings: string[]; header_names: string[]; body_bytes: number };
+export type DownloadStatus = "queued" | "running" | "stopped" | "interrupted" | "completed" | "failed";
+export type DownloadTask = { id: number; key: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform: "x" | "youtube" | null; phase: "resolving" | "downloading" | "merging" | "saving" | null; status: DownloadStatus; size: number | null; received: number; stored_bytes: number; segments_done: number; segments_total: number; duration: number | null; processed_seconds: number; elapsed_seconds: number; error: string | null; created_at: number; updated_at: number; speed: number; eta_seconds: number | null };
+export type DownloadPage = { tasks: DownloadTask[]; total: number; next_cursor: number | null; capabilities: { hls: boolean; x: boolean; youtube: boolean; concurrency: number; pressure: string | null } };
 export type TrafficPoint = { at: number; in_bytes: number; out_bytes: number };
 export type TrafficMetrics = { total_in_bytes: number; total_out_bytes: number; recent: TrafficPoint[] };
 export type SystemStatus = { initialized: boolean; unlocked: boolean; user_count: number; traffic?: TrafficMetrics };
@@ -321,6 +330,13 @@ export const publicPath = (token: string, name: string, download = false, access
 /* ---------- 管理端 ---------- */
 
 export const adminSettings = (signal?: AbortSignal) => request<SystemSettings>("/api/admin/v1/settings", { signal });
+export const adminResources = () => request<ResourceSettings>("/api/admin/v1/resources");
+export const updateAdminResources = (values: ResourceConfig) => post<ResourceSettings>("/api/admin/v1/resources", values);
+export const listDownloads = (cursor: string | null, status: string, signal?: AbortSignal) => request<DownloadPage>(`/api/user/v1/downloads?limit=50&cursor=${encodeURIComponent(cursor ?? "")}&status=${encodeURIComponent(status)}`, { signal });
+export const parseDownloads = (input: string, signal?: AbortSignal, download_type: "auto" | "http" | "hls" | "x" | "youtube" = "auto", cookies = "") => request<{ candidates: DownloadCandidate[] }>("/api/user/v1/downloads/parse", { method: "POST", body: JSON.stringify({ input, download_type, cookies }), signal }, 180000);
+export const createDownloads = (items: { ticket: string; name: string }[], destination: string) => post<{ tasks: DownloadTask[] }>("/api/user/v1/downloads", { items, destination });
+export const clearDownloads = (status: "completed" | "failed") => post<{ removed: number }>("/api/user/v1/downloads/clear", { status });
+export const controlDownload = (id: number, action: "stop" | "resume" | "restart" | "delete" | "update", item?: { ticket: string }) => post<DownloadTask | undefined>(`/api/user/v1/downloads/${id}/${action}`, { item });
 export const updateAdminSettings = async (values: Partial<Record<keyof SiteConfig, string>>) => {
   const result = await post<SystemSettings>("/api/admin/v1/settings", values);
   setSiteConfig({ public_base_url: result.public_base_url.effective, s3_endpoint: result.s3_endpoint.effective });

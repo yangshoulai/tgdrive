@@ -90,9 +90,15 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     adjustVolume: (delta: number) => { player.volume = Math.max(0, Math.min(1, player.video.volume + delta)); },
     setSource: (nextUrl: string, _name: string, nextCover?: string) => {
       player.pause(); ready = false; notify("loading");
-      events?.onProgress?.({ currentTime: 0, duration: 0 });
       container.style.removeProperty("--preview-video-ratio");
-      player.poster = nextCover ?? ""; player.url = nextUrl; setCover(nextCover);
+      player.poster = nextCover ?? ""; player.url = nextUrl;
+      // 换源后立即重置原生媒体和控件，不能等新文件的 timeupdate 来清掉旧时间与缓冲条。
+      player.video.load(); player.currentTime = 0;
+      player.emit("setBar", "played", 0); player.emit("setBar", "loaded", 0);
+      const time = container.querySelector(".art-control-time");
+      if (time) time.textContent = "00:00 / 00:00";
+      events?.onPlaying(false); events?.onProgress?.({ currentTime: 0, duration: 0 });
+      setCover(nextCover);
     },
     /** 字幕选择放在播放器的设置菜单里；没有字幕时不显示这一项。 */
     setSubtitleMenu: (options: { value: string; label: string }[], selected: string, onSelect: (value: string) => void) => {
@@ -202,7 +208,12 @@ export function createAudioPlayer(container: HTMLElement, url: string, name: str
       player.audio.pause(); ready = false; notify("loading");
       if (title) title.textContent = nextName;
       if (play) play.style.backgroundImage = nextCover ? `url("${nextCover}")` : "";
-      player.audio.src = nextUrl; onTime(0); updateProgress();
+      player.audio.src = nextUrl; player.audio.load(); player.seek(0);
+      // 时长未知时 APlayer.seek 会计算 0 / 0，浏览器忽略 NaN% 并保留旧进度，需显式清零。
+      for (const bar of container.querySelectorAll<HTMLElement>(".aplayer-played, .aplayer-loaded")) bar.style.width = "0%";
+      const duration = container.querySelector(".aplayer-dtime");
+      if (duration) duration.textContent = "00:00";
+      events?.onPlaying(false); updateProgress();
     },
     destroy: () => { player.audio.removeEventListener("ended", ended, true); player.destroy(); },
   };

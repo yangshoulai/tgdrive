@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff>=0.8"]
+platform = ["yt-dlp==2026.8.19", "yt-dlp-ejs==0.8.0", "gallery-dl==1.32.16"]
 
 [project.scripts]
 tgdrive = "tgdrive.app:main"

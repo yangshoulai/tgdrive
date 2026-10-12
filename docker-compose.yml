@@ -2,6 +2,8 @@ services:
   tgdrive:
     build:
       context: .
+      # X／YouTube 使用 target: platform；发布镜像标签为 latest-platform。
+      # target: platform
     image: ghcr.io/yangshoulai/tgdrive:latest
     restart: unless-stopped
     ports:
@@ -10,6 +12,17 @@ services:
       TGDRIVE_DATA_DIR: /data
       TGDRIVE_HOST: 0.0.0.0
       TGDRIVE_PORT: 8000
+      # 管理端「下载与资源」配置优先；auto 会按容器的实际限制选择预算。
+      TGDRIVE_RESOURCE_MODE: auto
+      # M3U8 需要使用 latest-ffmpeg 镜像，或 build.args.INSTALL_FFMPEG: "1"。
+      # TGDRIVE_OFFLINE_HLS: "1"
+      # 平台镜像包含本地解析器、Node.js 与 FFmpeg；也可以在管理端单独启用。
+      # TGDRIVE_OFFLINE_X: "1"
+      # TGDRIVE_OFFLINE_YOUTUBE: "1"
+      # TGDRIVE_OFFLINE_MAX_MIB: "512"
+      # TGDRIVE_YOUTUBE_MAX_HEIGHT: "720"
+      # 服务器需经代理出网时填写；管理端设置优先。启用后由代理解析域名。
+      # TGDRIVE_OFFLINE_PROXY: http://proxy.example:7890
       # 反向代理与容器不在同一网段时填写，例如 172.20.0.0/16。
       # TGDRIVE_TRUSTED_PROXIES: 172.20.0.0/16
     volumes:

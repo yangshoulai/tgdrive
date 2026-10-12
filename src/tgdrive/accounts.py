@@ -198,6 +198,8 @@ class AccountService:
                 raise NotFoundError("user not found")
         if status == "disabled":
             self.sessions.clear_user(account_id)
+            if pause := getattr(self, "on_disable", None):
+                pause(account_id)
 
     def set_quota(self, account_id: int, quota_bytes: int | None) -> None:
         if quota_bytes is not None and quota_bytes < 0:

@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { useCursorPage, useFilePageSize } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
+import { usePreview } from "./preview-host";
 
-import { FileThumbnail, FileVisual, FolderThumbnail, PreviewModal, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileThumbnail, FileVisual, FolderThumbnail, baseName, getFileKind, kindLabel, parentPath } from "../files";
 
 import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
@@ -17,7 +18,9 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
   const error = pagination.error;
   const load = pagination.reload;
   const [revoking, setRevoking] = useState<api.FileItem | null>(null);
-  const [preview, setPreview] = useState<api.FileItem | null>(null);
+  const preview = usePreview();
+  const openPreview = (file: api.FileItem) => preview.open({ file, url: api.contentUrl(file.key), downloadUrl: api.contentUrl(file.key, true),
+    assetUrl: key => api.contentUrl(key), playlistFiles: items ?? undefined, poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file) });
   const [layout, setLayout] = useState<"list" | "grid">(() => localStorage.getItem("tgdrive:share-layout") === "grid" ? "grid" : "list");
   useEffect(() => { localStorage.setItem("tgdrive:share-layout", layout); }, [layout]);
   useDocumentTitle(`公开分享 · ${BRAND}`);
@@ -59,7 +62,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                   {items.map(file => {
                     const folder = file.key.endsWith("/");
                     const size = folder ? pagination.page?.folder_sizes?.[file.key] : file.size;
-                    const open = () => folder ? onOpenFolder(file.key) : setPreview(file);
+                    const open = () => folder ? onOpenFolder(file.key) : openPreview(file);
                     return (
                     <div key={file.key} role="row" className="data-row is-clickable" onClick={open}>
                       <span role="cell" className="cell-name">
@@ -87,7 +90,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                     const folder = file.key.endsWith("/");
                     const kind = folder ? "folder" : getFileKind(file.content_type, file.key);
                     const size = folder ? pagination.page?.folder_sizes?.[file.key] : file.size;
-                    const open = () => folder ? onOpenFolder(file.key) : setPreview(file);
+                    const open = () => folder ? onOpenFolder(file.key) : openPreview(file);
                     return <div key={file.key} className="grid-card shared-grid-card" onClick={open}>
                       <div className="grid-thumb">
                         {folder ? <FolderThumbnail previews={(pagination.page?.folder_previews?.[file.key] ?? []).flatMap(item => {
@@ -113,9 +116,6 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
           try { await api.setPublic([revoking.key], false); toast.success("已停止分享"); setRevoking(null); load(); onChanged(); }
           catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
         }} />}
-      {preview && <PreviewModal file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)}
-        playlistFiles={items ?? undefined}
-        poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} />}
     </>
   );
 }

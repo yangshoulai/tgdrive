@@ -1,5 +1,5 @@
 /** 文件类型识别、预览与公开分享对话框。 */
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import * as api from "./api";
 import { readPreviewText, type PreviewText } from "./preview-data";
 import { MediaPreview, MinimizedPlayback, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
@@ -211,20 +211,6 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   };
   const source = sourceOf(active);
   const [playlistExpanded, setPlaylistExpanded] = useState(() => window.matchMedia("(min-width: 861px)").matches);
-  const [pictureSize, setPictureSize] = useState<{ key: string; width: number; height: number; original: boolean } | null>(null);
-  const pictureRatio = pictureSize?.key === active.key ? pictureSize.width / pictureSize.height : kind === "image" ? 1 : 16 / 9;
-  const pictureWidth = kind === "image" && pictureSize?.key === active.key && pictureSize.original ? pictureSize.width : null;
-  function setPicture(width: number, height: number, original = true) {
-    if (width <= 0 || height <= 0) return;
-    setPictureSize(value => {
-      if (value?.key === active.key) {
-        // 原图优先，避免迟到的旧封面把竖图窗口改回横图比例。
-        if (value.original && !original) return value;
-        if (value.width === width && value.height === height && value.original === original) return value;
-      }
-      return { key: active.key, width, height, original };
-    });
-  }
   const controls = useRef<PlaybackControls | null>(null), pendingPlay = useRef(false), currentKey = useRef(active.key);
   currentKey.current = active.key;
   const [playing, setPlaying] = useState(false);
@@ -281,7 +267,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   assetRef.current = assetUrl;
   const hasAssets = Boolean(assetUrl);
   const stage = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = stage.current, modal = node?.closest<HTMLElement>(".modal"), backdrop = modal?.parentElement;
     const header = modal?.querySelector<HTMLElement>(".modal-header"), toolbar = node?.querySelector<HTMLElement>(".preview-playlist-toolbar");
     if (!browsable || !node || !modal || !backdrop || !header || !toolbar) return;
@@ -289,28 +275,19 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     const resize = () => {
       if (modal.classList.contains("is-minimized")) return;
       const outer = getComputedStyle(backdrop), frame = getComputedStyle(modal);
-      let height = window.innerHeight - parseFloat(outer.paddingTop) - parseFloat(outer.paddingBottom);
+      let height = backdrop.clientHeight - parseFloat(outer.paddingTop) - parseFloat(outer.paddingBottom);
       if (frame.maxHeight.endsWith("px")) height = Math.min(height, parseFloat(frame.maxHeight));
       // 入场动画带缩放变换，布局高度不受动画影响，避免误算可用画布。
       const content = Math.max(0, height - header.offsetHeight - parseFloat(frame.borderTopWidth) - parseFloat(frame.borderBottomWidth));
       node.style.setProperty("--preview-content-height", `${content}px`);
       const playerHeight = Math.max(0, content - toolbar.offsetHeight);
       node.style.setProperty("--preview-player-height", `${playerHeight}px`);
-      if (kind === "video" || kind === "image") {
-        node.style.setProperty("--preview-picture-ratio", String(pictureRatio));
-        if (kind === "image") node.style.setProperty("--preview-picture-width", pictureWidth ? `${pictureWidth}px` : "none");
-        const border = parseFloat(frame.borderLeftWidth) + parseFloat(frame.borderRightWidth);
-        const width = Math.min(window.innerWidth - parseFloat(outer.paddingLeft) - parseFloat(outer.paddingRight), playlistExpanded ? 1360 : 1120);
-        const side = playlistExpanded && window.innerWidth > 860 ? 300 : 0;
-        const picture = Math.min(Math.max(0, width - side - border), playerHeight * pictureRatio, pictureWidth ?? width);
-        modal.style.setProperty("--preview-modal-width", `${Math.min(width, Math.max(320, picture + side + border))}px`);
-      }
     };
     const observer = new ResizeObserver(resize);
     for (const element of [header, toolbar, backdrop]) observer.observe(element);
     window.addEventListener("resize", resize); resize();
     return () => { observer.disconnect(); window.removeEventListener("resize", resize); };
-  }, [browsable, kind, playlistExpanded, pictureRatio, pictureWidth]);
+  }, [browsable, kind, playlistExpanded]);
   async function share() {
     // 分享弹窗 portal 到 body；先退出预览全屏，确保它不会被全屏层遮住。
     const screen = document.fullscreenElement;
@@ -336,8 +313,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         <a className="icon-btn icon-btn-ghost icon-btn-sm" href={source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
         <span className="modal-actions-divider" aria-hidden="true" />
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist" : ""}${browsable && playlistExpanded ? " is-playlist-open" : ""}`}><FilePreview kind={kind} url={kind === "image" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={setPicture} resolveImage={resolveImage} assetUrl={assetUrl}
-        onVideoSize={setPicture}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist" : ""}${browsable && playlistExpanded ? " is-playlist-open" : ""}`}><FilePreview kind={kind} url={kind === "image" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}

@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 13
+    SCHEMA_VERSION = 16
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -312,6 +312,39 @@ class Metadata:
                     )
                 """)
                 db.execute("PRAGMA user_version = 13")
+            if version < 14:
+                self._schema("""
+                    CREATE TABLE IF NOT EXISTS offline_tasks(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        bucket_id INTEGER NOT NULL REFERENCES buckets(id) ON DELETE CASCADE,
+                        key TEXT NOT NULL, source_host TEXT NOT NULL, method TEXT NOT NULL,
+                        kind TEXT NOT NULL CHECK(kind IN ('http','hls')), request_enc BLOB NOT NULL,
+                        status TEXT NOT NULL CHECK(status IN ('queued','running','stopped','interrupted','completed','failed')),
+                        upload_id TEXT, size INTEGER, received INTEGER NOT NULL DEFAULT 0,
+                        stored_bytes INTEGER NOT NULL DEFAULT 0, segments_done INTEGER NOT NULL DEFAULT 0,
+                        segments_total INTEGER NOT NULL DEFAULT 0, duration REAL,
+                        processed_seconds REAL NOT NULL DEFAULT 0, error TEXT,
+                        created_at REAL NOT NULL, updated_at REAL NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS offline_owner_page ON offline_tasks(user_id,id DESC);
+                    CREATE INDEX IF NOT EXISTS offline_queue ON offline_tasks(status,id);
+                    CREATE INDEX IF NOT EXISTS offline_upload ON offline_tasks(upload_id) WHERE upload_id IS NOT NULL
+                """)
+                db.execute("PRAGMA user_version = 14")
+            if version < 15:
+                columns = {row[1] for row in db.execute("PRAGMA table_info(offline_tasks)")}
+                if "platform" not in columns:
+                    db.execute("ALTER TABLE offline_tasks ADD COLUMN platform TEXT CHECK(platform IN ('x','youtube'))")
+                if "phase" not in columns:
+                    db.execute("ALTER TABLE offline_tasks ADD COLUMN phase TEXT")
+                db.execute("PRAGMA user_version = 15")
+            if version < 16:
+                # 离线任务累计的实际运行时间（不含排队与等待恢复），用于完成后展示用时和平均速度。
+                columns = {row[1] for row in db.execute("PRAGMA table_info(offline_tasks)")}
+                if "elapsed_seconds" not in columns:
+                    db.execute("ALTER TABLE offline_tasks ADD COLUMN elapsed_seconds REAL NOT NULL DEFAULT 0")
+                db.execute("PRAGMA user_version = 16")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

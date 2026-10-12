@@ -28,6 +28,9 @@ ACTIONS = {
     "maintenance.gc_retry": "重试回收失败的分片", "backup.create": "创建备份", "backup.download": "下载备份",
     "admin.password": "修改管理员密码", "system.passphrase": "更换加密口令", "user.password_reset": "重置用户密码",
     "user.delete": "删除用户", "trash.purge": "清空回收站",
+    "resources.update": "修改下载与资源配置", "download.create": "创建离线下载",
+    "download.stop": "停止离线下载", "download.resume": "继续离线下载",
+    "download.restart": "重新下载", "download.delete": "删除下载任务", "download.update": "更新下载参数",
 }
 
 

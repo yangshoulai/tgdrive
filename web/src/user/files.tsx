@@ -4,7 +4,7 @@ import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileThumbnail, FileTile, FileVisual, FolderThumbnail, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
 import { saveThumbnails, thumbnailsFromImage, useThumbnailBackfill } from "../thumbnails";
 
 import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, useDocumentTitle, type MenuItem } from "../ui";
@@ -13,6 +13,7 @@ import { UploadDialog, type UploadQueue } from "./uploads";
 import { PrivateTransferDialog } from "./private-access";
 import type { PreviewPlayback } from "../files";
 import { usePrivateToast } from "./private-session";
+import { usePreview } from "./preview-host";
 
 /* ---------- 文件 ---------- */
 
@@ -31,8 +32,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [layout, setLayout] = useState<"list" | "grid">(() => (localStorage.getItem("tgdrive:layout") as "list" | "grid") || "list");
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "name", desc: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [preview, setPreview] = useState<api.FileItem | null>(null);
-  const [previewPage, setPreviewPage] = useState<{ id: number; files: api.FileItem[] }>({ id: 0, files: [] });
+  const preview = usePreview();
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
   const [renaming, setRenaming] = useState<Entry | null>(null);
   const [transferring, setTransferring] = useState<Entry[] | null>(null);
@@ -101,9 +101,20 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     return [...folderEntries, ...fileEntries];
   }, [files, folders, publicFolders, folderSizes, filter, sort]);
   function openPreview(file: api.FileItem) {
-    setPreview(file);
-    // 打开文件时记录本页顺序，预览内管理分享时仍保留这份列表。
-    setPreviewPage(current => ({ id: current.id + 1, files: entries.flatMap(entry => entry.kind === "file" ? [entry.file] : []) }));
+    // 打开文件时记录本页顺序作为播放列表；预览挂在应用外壳上，切换页面后继续播放。
+    preview.open({ file, url: api.contentUrl(file.key), downloadUrl: api.contentUrl(file.key, true), assetUrl: key => api.contentUrl(key),
+      playlistFiles: entries.flatMap(entry => entry.kind === "file" ? [entry.file] : []),
+      poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file), onPlaybackActivity: onPlayback,
+      onShare: privateSpace ? undefined : item => { preview.update(item); setSharing(item); },
+      onImageLoad: (image, item) => {
+        // 预览过的图片顺便补上缩略图和封面图（例如通过 S3 上传、没有缩略图的图片），不必再下载一次原图。
+        // 已有封面、矢量图，或已有缩略图且原图不够大（不会生成封面）时跳过。
+        if (item.thumbnails?.includes("poster") || /\.svg$/i.test(item.key)
+          || (item.thumbnails?.includes("thumb") && Math.max(image.naturalWidth, image.naturalHeight) <= 480)) return;
+        const key = item.key;
+        void thumbnailsFromImage(image).then(result => saveThumbnails(key, result)).then(thumbnails => thumbnails && setThumbnails(key, thumbnails)).catch(() => undefined);
+      },
+    });
   }
   /** 文件夹的分享信息保存在它的目录标记上；还没公开过的文件夹用一个占位对象打开分享对话框。 */
   const folderItem = (key: string): api.FileItem => publicFolders[key] ?? { key, size: 0, etag: "", content_type: "application/x-directory", modified_at: 0 };
@@ -125,7 +136,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     }
     setFiles(current => current.map(item => item.key === updated.key ? { ...item, ...updated } : item));
     setSharing(current => current && current.key === updated.key ? { ...current, ...updated } : current);
-    setPreview(current => current && current.key === updated.key ? { ...current, ...updated } : current);
+    preview.update(updated);
   }
   async function bulkPublic(isPublic: boolean) {
     try {
@@ -399,17 +410,6 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       {moving && <MoveDialog targets={moving} startPrefix={query ? root : prefix} onClose={() => setMoving(null)}
         onMove={async (dest, conflict) => { await moveEntries(moving, dest, conflict); setMoving(null); }} />}
       {transferring && <PrivateTransferDialog paths={transferring.map(item => item.key)} into={!privateSpace} onClose={() => setTransferring(null)} onDone={() => { setSelected(new Set()); void load(); onChanged(); }} />}
-      {preview && <PreviewModal key={previewPage.id} file={preview} url={api.contentUrl(preview.key)} downloadUrl={api.contentUrl(preview.key, true)} assetUrl={key => api.contentUrl(key)}
-        playlistFiles={previewPage.files}
-        poster={api.fileThumbnail(preview, "poster")} thumbnail={api.fileThumbnail(preview)} onClose={() => setPreview(null)} onPlaybackActivity={onPlayback} onShare={privateSpace ? undefined : file => { setPreview(file); setSharing(file); }}
-        onImageLoad={(image, file) => {
-          // 预览过的图片顺便补上缩略图和封面图（例如通过 S3 上传、没有缩略图的图片），不必再下载一次原图。
-          // 已有封面、矢量图，或已有缩略图且原图不够大（不会生成封面）时跳过。
-          if (file.thumbnails?.includes("poster") || /\.svg$/i.test(file.key)
-            || (file.thumbnails?.includes("thumb") && Math.max(image.naturalWidth, image.naturalHeight) <= 480)) return;
-          const key = file.key;
-          void thumbnailsFromImage(image).then(result => saveThumbnails(key, result)).then(thumbnails => thumbnails && setThumbnails(key, thumbnails)).catch(() => undefined);
-        }} />}
       {sharing && <ShareDialog file={sharing} publicBase={session.public_base_url} onClose={() => setSharing(null)}
         update={async (isPublic, options) => (await api.setPublic([sharing.key], isPublic, options)).objects[0]} onChange={file => { replaceFile(file); onChanged(); }} />}
     </div>

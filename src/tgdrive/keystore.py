@@ -113,6 +113,8 @@ class KeyStore:
                 aad = f"telegram-bot:{bot['id']}"
                 plaintext = open_sealed(old_bot_key, bot["token_enc"], aad)
                 bot_secrets.append((bot["id"], seal(new_bot_key, plaintext, aad)))
+            old_offline_key = derive_subkey(old_kek, "offline-request")
+            new_offline_key = derive_subkey(new_kek, "offline-request")
             # 所有重新包裹和 keys 更新在同一个事务里。
             with self.metadata.transaction() as db:
                 db.executemany("UPDATE blobs SET wrapped_dek = ? WHERE uuid = ?", ((w, u) for u, w in wrapped))
@@ -120,6 +122,11 @@ class KeyStore:
                                ((secret, access_key) for access_key, secret in client_secrets))
                 db.executemany("UPDATE telegram_bots SET token_enc = ? WHERE id = ?",
                                ((secret, bot_id) for bot_id, secret in bot_secrets))
+                # 历史任务可能很多，逐条重加密，不把所有请求体再攒到内存里。
+                for task in db.execute("SELECT id,request_enc FROM offline_tasks"):
+                    aad = f"offline:{task['id']}"
+                    plaintext = open_sealed(old_offline_key, task["request_enc"], aad)
+                    db.execute("UPDATE offline_tasks SET request_enc=? WHERE id=?", (seal(new_offline_key, plaintext, aad), task["id"]))
                 db.execute("UPDATE keys SET version = ?, kdf_salt = ?, kdf_params = ?, check_blob = ? WHERE id = 1",
                            (row["version"] + 1, salt, json.dumps(params.as_dict(), separators=(",", ":")), make_check_blob(new_kek)))
             self._kek = new_kek

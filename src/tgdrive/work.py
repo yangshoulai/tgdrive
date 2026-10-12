@@ -38,30 +38,41 @@ class TransferSlots:
     def __init__(self, total: int = 4, per_bucket: int = 2, wait_seconds: float = 30) -> None:
         if total < 1 or per_bucket < 1 or wait_seconds <= 0:
             raise ValueError("传输并发和等待时间必须为正数")
-        self._global = asyncio.Semaphore(total)
-        self._buckets: dict[int | None, list] = {}
-        self.per_bucket, self.wait_seconds = per_bucket, wait_seconds
+        self.total, self.per_bucket, self.wait_seconds = total, per_bucket, wait_seconds
+        self._active = 0
+        self._buckets: dict[int | None, int] = {}
+        self._condition = asyncio.Condition()
+
+    def set_limits(self, total: int, per_bucket: int) -> None:
+        """降低名额不取消现有传输；等待者在释放名额或短周期检查时使用新预算。"""
+        if total < 1 or per_bucket < 1:
+            raise ValueError("传输并发必须为正数")
+        self.total, self.per_bucket = total, per_bucket
 
     @asynccontextmanager
     async def slot(self, bucket_id: int | None):
-        entry = self._buckets.setdefault(bucket_id, [asyncio.Semaphore(self.per_bucket), 0])
-        entry[1] += 1
-        local, global_slot = False, False
+        acquired = False
         try:
             try:
                 async with asyncio.timeout(self.wait_seconds):
-                    await entry[0].acquire()
-                    local = True
-                    await self._global.acquire()
-                    global_slot = True
+                    async with self._condition:
+                        while self._active >= self.total or self._buckets.get(bucket_id, 0) >= self.per_bucket:
+                            try:
+                                async with asyncio.timeout(0.5):
+                                    await self._condition.wait()
+                            except TimeoutError:
+                                pass
+                        self._active += 1
+                        self._buckets[bucket_id] = self._buckets.get(bucket_id, 0) + 1
+                        acquired = True
             except TimeoutError as exc:
                 raise WorkBusyError("传输繁忙，请稍后重试") from exc
             yield
         finally:
-            if global_slot:
-                self._global.release()
-            if local:
-                entry[0].release()
-            entry[1] -= 1
-            if not entry[1]:
-                self._buckets.pop(bucket_id, None)
+            if acquired:
+                async with self._condition:
+                    self._active -= 1
+                    self._buckets[bucket_id] -= 1
+                    if not self._buckets[bucket_id]:
+                        self._buckets.pop(bucket_id)
+                    self._condition.notify_all()

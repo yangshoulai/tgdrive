@@ -73,7 +73,7 @@ class TgDriveASGI(StaticFiles):
                  static_dir: str | Path | None = None,
                  public_base_url: str | None = None, settings: SystemSettings | None = None,
                  keys: KeyApi | None = None, scheduler=None, metrics: TrafficMetrics | None = None,
-                 context: AppContext | None = None) -> None:
+                 context: AppContext | None = None, offline=None, resources=None) -> None:
         self.scheduler = scheduler
         self.admin, self.user, self.s3 = admin, user, s3
         self.private_space = PrivateSpace(user)
@@ -93,16 +93,21 @@ class TgDriveASGI(StaticFiles):
         self.secure_cookies, self.json_limit = secure_cookies, json_limit
         self.metrics = metrics
         self.context = context
+        self.offline, self.resources = offline, resources
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
             while True:
                 message = await receive()
                 if message["type"] == "lifespan.startup":
+                    if self.offline is not None:
+                        self.offline.start()
                     if self.scheduler is not None:
                         self.scheduler.start()
                     await send({"type": "lifespan.startup.complete"})
                 elif message["type"] == "lifespan.shutdown":
+                    if self.offline is not None:
+                        await self.offline.stop()
                     if self.scheduler is not None:
                         await self.scheduler.stop()
                     await send({"type": "lifespan.shutdown.complete"})
@@ -311,14 +316,17 @@ class TgDriveASGI(StaticFiles):
                           "/clients/{}/status": "client.status", "/clients/{}/grants": "client.grant",
                           "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/clients/{}/delete": "client.delete",
                           "/bots": "bot.create", "/bots/{}/status": "bot.status",
-                          "/bots/{}/check": "bot.check", "/objects/public": "object.public", "/settings": "settings.update",
+                          "/bots/{}/check": "bot.check", "/objects/public": "object.public", "/settings": "settings.update", "/resources": "resources.update",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
                           "/backups": "backup.create", "/password": "admin.password", "/passphrase": "system.passphrase",
                           "/users/{}/password": "user.password_reset", "/users/{}/delete": "user.delete"},
         "/api/user/v1": {"/login": "user.login", "/logout": "user.logout", "/password": "user.password",
                          "/clients": "key.create", "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/public": "object.public",
-                         "/trash/purge": "trash.purge"},
+                         "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
+                         "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
+                         "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
+                         "/downloads/clear": "download.clear"},
     }
 
     def _audit_entry(self, method, path, payload, token, scope):
@@ -329,7 +337,7 @@ class TgDriveASGI(StaticFiles):
             if not path.startswith(prefix + "/"):
                 continue
             route = path[len(prefix):]
-            pattern = re.sub(r"^/(users|clients|bots)/\d+/", r"/\1/{}/", route)
+            pattern = re.sub(r"^/(users|clients|bots|downloads)/\d+/", r"/\1/{}/", route)
             action = routes.get(pattern)
             if action is None:
                 return None
@@ -366,6 +374,16 @@ class TgDriveASGI(StaticFiles):
             target, detail = payload.get("name"), {"channel_id": payload.get("channel_id")}
         elif action == "bot.check" and ok:
             detail = {"status": (result or {}).get("status")}
+        elif action == "resources.update":
+            detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib") if key in payload}
+            if "proxy" in payload:
+                # 代理地址可能包含认证信息，审计只记录是否启用。
+                detail["proxy_enabled"] = bool(payload.get("proxy"))
+        elif action == "download.create":
+            detail = {"count": len(payload.get("items", [])) if isinstance(payload.get("items"), list) else 0}
+        elif action == "download.clear":
+            detail = {"status": payload.get("status") if payload.get("status") in ("completed", "failed") else None,
+                      "removed": (result or {}).get("removed") if ok else None}
         elif action == "object.public":
             paths = payload["paths"] if isinstance(payload.get("paths"), list) else [payload.get("path")]
             target = ", ".join(str(item) for item in paths[:5]) + (f" 等 {len(paths)} 项" if len(paths) > 5 else "")
@@ -507,6 +525,11 @@ class TgDriveASGI(StaticFiles):
                 return 200, self.settings.describe(), {}
             if method == "POST" and route == "/settings":
                 return 200, self.settings.update(payload), {}
+            if route == "/resources" and self.resources is not None:
+                if method == "GET":
+                    return 200, self.resources.describe(), {}
+                if method == "POST":
+                    return 200, self.resources.update(payload), {}
             if method == "POST" and route == "/unlock":
                 return 200, await self.admin.aunlock(token, csrf, payload["passphrase"]), {}
             if method == "POST" and route == "/lock":
@@ -608,6 +631,21 @@ class TgDriveASGI(StaticFiles):
                                                        bool(payload.get("deep", False))), {}
         elif path.startswith("/api/user/v1/"):
             route = path[len("/api/user/v1"):]
+            if route.startswith("/downloads") and self.offline is not None:
+                session = user._session(token, csrf=csrf, mutation=method != "GET")
+                account = user.accounts.account_for_session(session)
+                if route == "/downloads/parse" and method == "POST":
+                    return 200, await self.offline.parse(account.id, payload.get("input"), download_type=payload.get("download_type", "auto"), cookies=payload.get("cookies", "")), {"Cache-Control": "no-store"}
+                if route == "/downloads" and method == "GET":
+                    return 200, self.offline.list(account.id, cursor=int(query.get("cursor", ["0"])[0] or "0"), status=query.get("status", [""])[0], limit=int(query.get("limit", ["50"])[0])), {"Cache-Control": "no-store"}
+                if route == "/downloads" and method == "POST":
+                    return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""))}, {"Cache-Control": "no-store"}
+                if route == "/downloads/clear" and method == "POST":
+                    return 200, await self.offline.clear(account.id, payload.get("status")), {"Cache-Control": "no-store"}
+                download = re.fullmatch(r"/downloads/(\d+)/(stop|resume|restart|delete|update)", route)
+                if download and method == "POST":
+                    result = await self.offline.control(account.id, int(download[1]), download[2], item=payload.get("item"))
+                    return (204, None, {}) if result is None else (200, result, {"Cache-Control": "no-store"})
             if route == "/private/status" and method == "GET":
                 return 200, self.private_space.status(token), {}
             if route == "/private/setup" and method == "POST":
