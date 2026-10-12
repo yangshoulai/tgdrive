@@ -73,7 +73,15 @@ def emit(value):
 def fetch(url, method, headers, data=None):
     if data is not None and not isinstance(data, bytes):
         raise ValueError("unsupported body")
-    emit({"fetch": {"url": url, "method": method, "headers": list(headers.items()),
+    normalized = []
+    for key, value in headers.items():
+        # gallery-dl 的 X 登录交易 ID 是 bytes；按 HTTP 编码无损转换后才能进入 JSON 通道。
+        key = key.decode("ascii") if isinstance(key, bytes) else key
+        value = value.decode("latin-1") if isinstance(value, bytes) else value
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("unsupported header")
+        normalized.append((key, value))
+    emit({"fetch": {"url": url, "method": method, "headers": normalized,
                     "body": base64.b64encode(data).decode() if data is not None else None}})
     line = sys.stdin.buffer.readline(WIRE_LIMIT + 1)
     if len(line) > WIRE_LIMIT or not line.endswith(b"\n"):

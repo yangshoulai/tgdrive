@@ -59,6 +59,18 @@ https://x.com/DelphiaLea35937/status/2109286671716110469
 
 只输出固定错误分类、异常类型、代码位置与受控请求阶段；原始异常、签名地址、响应正文、Cookie 和代理密码不进入界面或日志。
 
+### X 登录解析的 TypeError（2026-10-13 补充）
+
+更新后另有一条帖子在导入 Cookie 时返回 `TypeError`。服务器日志的最后两条请求均为 HTTP 200，堆栈止于 `extract_worker.fetch → emit → json.dumps`，没有帖子 API 请求。这是适配器自身的协议错误，不能据此归因于 Cookie 失效、帖子不可用或服务器出口限制。
+
+gallery-dl 1.32.16 在登录解析时先读取 X 网页与脚本，再生成 `x-client-transaction-id`。这个请求头的值是 `bytes`，requests 可以接受，但原适配器直接把请求头列表放进 JSON，因而在发送帖子 API 前报 `Object of type bytes is not JSON serializable`。匿名流程不生成这个请求头，上一轮 X 访客验证没有覆盖此缺陷。
+
+现在在子进程协议边界按 ASCII 转换字节类型的请求头名称，按 HTTP Latin-1 无损转换字节类型的值；保留交易 ID、登录 Cookie 和 CSRF 请求头。请求仍通过主进程的 SafeHttpClient 和原有域名、请求头校验，不让解析库自行联网，也不把登录凭据传给媒体 CDN。
+
+新增回归使用真实 gallery-dl 和解析子进程，覆盖 cURL 中的 Cookie、带点域名与主机域名的 Netscape Cookie。原实现三种输入均复现与服务器一致的错误堆栈；修复后均可生成并转交交易 ID，以登录态请求 TweetDetail 并解析图片／视频。另验证字节请求头和请求体在 JSON 通道中保持原值。相关解析器、平台任务与 HTTP 下载共 41 项测试通过。
+
+真实链接 `https://x.com/goodgirlpupu/status/2073414018522333246` 在本机代理出口使用用户提供的登录 Cookie 验证：X 网页、脚本和登录态 TweetDetail 均返回 HTTP 200，成功解析 1 个视频，读取媒体前 64 KiB 返回 HTTP 206。没有下载完整视频或重启生产服务器；服务器需更新到包含此修复的平台镜像后再验证其出口。用户凭据只在验证进程的内存和标准输入中传递，没有写入源码、测试、日志或提交。
+
 ### HTTP 直链与网络故障
 
 HTTP 直链与平台页是两条路径：前者读取实际文件，后者需要站点解析器取得媒体地址。直链已有 HEAD 被拒绝时回退 GET、强 ETag／Range 续传、POST 不预先发送等处理，本次专项均通过。没有用户提供的独立失败直链，无法推断所有 HTTP 来源都存在同一个缺陷；普通网页也不能当作文件地址下载。直连会拒绝内网、保留地址与 Fake-IP，启用代理时走容器可访问的代理地址。

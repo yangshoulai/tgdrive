@@ -1,6 +1,7 @@
 """平台下载的授权、Cookie 隔离、地址重解析与真实解析器通道回归。"""
 
 import asyncio
+import base64
 import json
 import tempfile
 import unittest
@@ -15,7 +16,7 @@ from tgdrive.objects import Scope
 from tgdrive.metadata import Metadata
 from tgdrive.offline.http import DownloadError, ExpiredMedia, TransientError
 from tgdrive.offline.platforms import PlatformResolver, allowed_url, capabilities, parse_cookies, prepare, site_link
-from tgdrive.offline.request import DownloadRequest
+from tgdrive.offline.request import DownloadRequest, parse_requests
 from tgdrive.offline.resources import ResourceSettings
 from tests.test_offline import MemoryHttp
 
@@ -266,7 +267,18 @@ class ExtractorHttp:
         self.calls.append(request)
         path = urlsplit(request.url).path
         if self.platform.startswith("x"):
-            if path.endswith("guest/activate.json"):
+            if self.platform == "x_logged" and path == "/home":
+                # 用真实库初始化交易 ID，覆盖访客 API 未涉及的登录流程。
+                verification = base64.b64encode(bytes(32)).decode()
+                frames = ''.join(f'<svg id="loading-x-anim-{number}"><path d="M0"></path>'
+                    '<path d="M000000000 0 0 0 0 0 0 0 0 255 255"></path></svg>'
+                    for number in range(4))
+                data = (f'<meta name="twitter-site-verification" content="{verification}">'
+                    '<script>var assets={0:"other",123:"ondemand.s",123:"fixture"};</script>'
+                    + frames).encode()
+            elif self.platform == "x_logged" and path.endswith(".js"):
+                data = b'(a[0], 16);(a[1], 16);(a[2], 16);(a[3], 16);'
+            elif path.endswith("guest/activate.json"):
                 data = {"guest_token": "test-guest-token"}
             else:
                 user = {"id_str": "1", "name": "Test", "screen_name": "test", "created_at": "Wed Oct 10 20:19:24 +0000 2018",
@@ -279,7 +291,14 @@ class ExtractorHttp:
                                          "video_info": {"duration_millis": 6000, "variants": [{"bitrate": 100000, "url": "https://video.twimg.com/test.mp4"}]}}
                                     ]}}}
                 data = {"data": {"tweetResult": {"result": tweet}}}
-                if self.platform in ("x_fallback", "x_empty"):
+                if self.platform == "x_logged":
+                    data = {'data': {'threaded_conversation_with_injections_v2': {'instructions': [
+                        {'type': 'TimelineAddEntries', 'entries': [
+                            {'entryId': 'tweet-123', 'content': {'itemContent': {
+                                'tweet_results': {'result': tweet}}}}
+                        ]}
+                    ]}}}
+                elif self.platform in ("x_fallback", "x_empty"):
                     if path.endswith('/tweet-result'):
                         data = {'id_str': '123', 'user': {'screen_name': 'test'},
                                 'mediaDetails': tweet['legacy']['extended_entities']['media']}
@@ -302,14 +321,41 @@ class ExtractorHttp:
 
 
 class RealExtractors(unittest.IsolatedAsyncioTestCase):
-    async def resolve(self, platform, url, *, cookies="", http=None):
+    async def resolve(self, platform, url, *, cookies="", http=None, request=None):
         tools = capabilities()
         resources = SimpleNamespace(platform_tools=tools, effective=lambda: {"x_enabled": True, "youtube_enabled": True,
             "x_available": tools["x_available"], "youtube_available": tools["youtube_available"], "platform_max_mib": 512, "youtube_max_height": 720})
         http = http if http is not None else ExtractorHttp(platform)
         site, media_id, canonical = site_link(url)
-        entries = await PlatformResolver(http, resources).resolve(prepare(DownloadRequest(url), cookies, site, media_id, canonical), lambda: None)
+        entries = await PlatformResolver(http, resources).resolve(prepare(request or DownloadRequest(url), cookies, site, media_id, canonical), lambda: None)
         return entries, http.calls
+
+    @unittest.skipUnless(capabilities()["x_available"], "未安装可选 X 解析组件")
+    async def test_logged_x_transaction_headers_use_parent_transport(self):
+        url = 'https://x.com/u/status/123'
+        curl = parse_requests(f"curl --url '{url}' -b 'auth_token=login-private; ct0=csrf-private' "
+            "-H 'user-agent: TestBrowser'")[0]
+        cases = [(curl, '')]
+        for domain, include in (('.x.com', 'TRUE'), ('x.com', 'FALSE')):
+            cookies = f'{domain}\t{include}\t/\tTRUE\t0\tauth_token\tlogin-private\n'
+            cookies += f'{domain}\t{include}\t/\tTRUE\t0\tct0\tcsrf-private'
+            cases.append((DownloadRequest(url), cookies))
+        for request, cookies in cases:
+            with self.subTest(format='curl' if request is curl else cookies.split('\t')[0]):
+                entries, calls = await self.resolve('x_logged', url, request=request,
+                    cookies=cookies, http=ExtractorHttp('x_logged'))
+                self.assertEqual([entry['media_type'] for entry in entries], ['image', 'video'])
+                self.assertEqual([urlsplit(call.url).path.rsplit('/', 1)[-1] for call in calls],
+                    ['home', 'ondemand.s.fixturea.js', 'TweetDetail'])
+                headers = {key.lower(): value for key, value in calls[-1].headers}
+                self.assertEqual(headers['x-twitter-auth-type'], 'OAuth2Session')
+                self.assertEqual(headers['x-csrf-token'], 'csrf-private')
+                self.assertIn('auth_token=login-private', headers['cookie'])
+                self.assertIn('ct0=csrf-private', headers['cookie'])
+                self.assertEqual(len(base64.b64decode(headers['x-client-transaction-id'], validate=True)), 54)
+                self.assertNotIn('cookie', {key.lower() for key, _ in calls[1].headers})
+                self.assertFalse({'cookie', 'authorization'} &
+                    {name.lower() for name in entries[1]['tracks'][0]['headers']})
 
     @unittest.skipUnless(capabilities()["x_available"], "未安装可选 X 解析组件")
     async def test_real_x_library_uses_parent_transport(self):

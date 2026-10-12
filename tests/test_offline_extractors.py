@@ -1,13 +1,33 @@
-"""上游错误分类与 YouTube 格式筛选，避免 Cookie 改变客户端后丢失 HLS。"""
+"""解析器请求通道、上游错误分类与 YouTube 格式筛选。"""
 
+import base64
+import io
+import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from tgdrive.offline.extract_worker import extraction_failure, youtube, youtube_entries
+from tgdrive.offline.extract_worker import extraction_failure, fetch, youtube, youtube_entries
 from tgdrive.offline.platforms import capabilities
 
 
 class ExtractorTests(unittest.TestCase):
+    def test_byte_headers_survive_the_json_transport(self):
+        output = io.BytesIO()
+        reply = {'status': 200, 'body': base64.b64encode(b'reply').decode()}
+        stdin = SimpleNamespace(buffer=io.BytesIO(json.dumps(reply).encode() + b'\n'))
+        with patch('tgdrive.offline.extract_worker._output', output), \
+                patch('tgdrive.offline.extract_worker.sys.stdin', stdin):
+            result, body = fetch('https://x.com/i/api/graphql/test/TweetDetail', 'GET',
+                {b'x-client-transaction-id': b'YWJjZA==', 'X-Latin1': b'caf\xe9',
+                 'Cookie': 'auth_token=test-only'}, b'request')
+        sent = json.loads(output.getvalue())['fetch']
+        self.assertEqual(dict(sent['headers']), {
+            'x-client-transaction-id': 'YWJjZA==', 'X-Latin1': 'caf\xe9',
+            'Cookie': 'auth_token=test-only'})
+        self.assertEqual(base64.b64decode(sent['body']), b'request')
+        self.assertEqual((result, body), (reply, b'reply'))
+
     def test_errors_are_classified_without_exposing_details(self):
         for message, expected in (("'Unavailable'", "unavailable"), ("NSFW Tweet", "login"),
             ("Protected Tweet", "login"), ("Could not authenticate you", "cookie"),
