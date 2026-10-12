@@ -24,6 +24,10 @@ class TransientError(DownloadError):
     """连接重置、超时等网络抖动；调用方可以安全重试，内容错误和认证失败不属于此类。"""
 
 
+class ExpiredMedia(DownloadError):
+    """平台媒体地址失效或无权访问，需要重新解析。"""
+
+
 RETRY_STATUS = frozenset((408, 425, 429, 500, 502, 503, 504))
 
 

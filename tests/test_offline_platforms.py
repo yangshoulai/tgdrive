@@ -8,11 +8,12 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from urllib.parse import urlsplit
+from unittest.mock import AsyncMock, patch
 
 from tgdrive.app import create_app
 from tgdrive.objects import Scope
 from tgdrive.metadata import Metadata
-from tgdrive.offline.http import DownloadError
+from tgdrive.offline.http import DownloadError, ExpiredMedia, TransientError
 from tgdrive.offline.platforms import PlatformResolver, allowed_url, capabilities, parse_cookies, prepare, site_link
 from tgdrive.offline.request import DownloadRequest
 from tgdrive.offline.resources import ResourceSettings
@@ -147,6 +148,31 @@ class PlatformTasks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.extracted), 2)
         self.assertTrue(any(url.endswith("version-2.jpg") for _, _, url in http.calls))
 
+    async def test_youtube_403_retries_same_height_with_hls_preferred(self):
+        self.app.resources.ffmpeg = "fixture"
+        self.app.resources.platform_tools["youtube_available"] = True
+        self.app.resources.update({"youtube_enabled": True})
+        sources = []
+        async def resolve(source, check):
+            sources.append(dict(source))
+            return [{**image("https://manifest.googlevideo.com/index.m3u8"),
+                "selection": {"id": "BaW_jenozKc", "index": "1", "height": 720}, "media_type": "video",
+                "name": "video.mp4", "content_type": "video/mp4", "variant": "720p · MP4",
+                "tracks": [{"url": "https://manifest.googlevideo.com/index.m3u8", "headers": {},
+                            "protocol": "hls" if source.get("prefer_hls") else "https"}]}]
+        self.offline.platforms.resolve = resolve
+        candidate = (await self.offline.parse(self.user.id, "https://youtu.be/BaW_jenozKc"))["candidates"][0]
+        task = self.offline.create(self.user.id, [{"ticket": candidate["ticket"], "name": "video.mp4"}], "")[0]
+        row = self.offline._row(task["id"])
+        self.offline._stats[task["id"]] = {}
+        fetched = AsyncMock(side_effect=[ExpiredMedia("HTTP 403"), None])
+        with patch.object(self.offline, "_fetch_entry", fetched):
+            await self.offline._platform(row, self.offline.scope(self.user.id), self.offline._source(row))
+        self.assertEqual(fetched.await_count, 2)
+        self.assertTrue(sources[-1]["prefer_hls"])
+        self.assertEqual(fetched.await_args_list[0].args[2]["selection"], fetched.await_args_list[1].args[2]["selection"])
+        self.assertEqual(fetched.await_args_list[1].args[2]["tracks"][0]["protocol"], "hls")
+
     async def test_transient_failures_retry_automatically_then_give_up(self):
         from tgdrive.offline import service
         from tgdrive.offline.http import TransientError
@@ -239,7 +265,7 @@ class ExtractorHttp:
     async def open(self, request, **_):
         self.calls.append(request)
         path = urlsplit(request.url).path
-        if self.platform == "x":
+        if self.platform.startswith("x"):
             if path.endswith("guest/activate.json"):
                 data = {"guest_token": "test-guest-token"}
             else:
@@ -253,6 +279,17 @@ class ExtractorHttp:
                                          "video_info": {"duration_millis": 6000, "variants": [{"bitrate": 100000, "url": "https://video.twimg.com/test.mp4"}]}}
                                     ]}}}
                 data = {"data": {"tweetResult": {"result": tweet}}}
+                if self.platform in ("x_fallback", "x_empty"):
+                    if path.endswith('/tweet-result'):
+                        data = {'id_str': '123', 'user': {'screen_name': 'test'},
+                                'mediaDetails': tweet['legacy']['extended_entities']['media']}
+                    elif self.platform == "x_fallback":
+                        data = {"data": {"tweetResult": {"result": {"__typename": "TweetTombstone", "tombstone": {}}}}}
+                    else:
+                        data = {"data": {"tweetResult": {"result": {**tweet, "legacy": {
+                            **tweet['legacy'], "extended_entities": {"media": []}}}}}}
+                elif self.platform == "x_login":
+                    data = {"data": {"tweetResult": {"result": {"__typename": "TweetUnavailable", "reason": "NsfwLoggedOut"}}}}
         else:
             data = {"playabilityStatus": {"status": "OK"},
                     "videoDetails": {"videoId": "BaW_jenozKc", "title": "Test video", "lengthSeconds": "6", "author": "test", "channelId": "UCaaaaaaaaaaaaaaaaaaaaaa", "isLiveContent": False},
@@ -265,13 +302,13 @@ class ExtractorHttp:
 
 
 class RealExtractors(unittest.IsolatedAsyncioTestCase):
-    async def resolve(self, platform, url):
+    async def resolve(self, platform, url, *, cookies="", http=None):
         tools = capabilities()
         resources = SimpleNamespace(platform_tools=tools, effective=lambda: {"x_enabled": True, "youtube_enabled": True,
             "x_available": tools["x_available"], "youtube_available": tools["youtube_available"], "platform_max_mib": 512, "youtube_max_height": 720})
-        http = ExtractorHttp(platform)
+        http = http if http is not None else ExtractorHttp(platform)
         site, media_id, canonical = site_link(url)
-        entries = await PlatformResolver(http, resources).resolve(prepare(DownloadRequest(url), "", site, media_id, canonical), lambda: None)
+        entries = await PlatformResolver(http, resources).resolve(prepare(DownloadRequest(url), cookies, site, media_id, canonical), lambda: None)
         return entries, http.calls
 
     @unittest.skipUnless(capabilities()["x_available"], "未安装可选 X 解析组件")
@@ -283,6 +320,20 @@ class RealExtractors(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entries[1]["tracks"][0]["url"], "https://video.twimg.com/test.mp4")
         self.assertGreaterEqual(len(calls), 2)
 
+    @unittest.skipUnless(capabilities()["x_available"], "未安装可选 X 解析组件")
+    async def test_tombstone_tries_official_embed_endpoint(self):
+        for platform in ('x_fallback', 'x_empty'):
+            with self.subTest(platform=platform):
+                entries, calls = await self.resolve(platform, "https://x.com/u/status/123")
+                self.assertEqual([entry["media_type"] for entry in entries], ["image", "video"])
+                self.assertTrue(any(urlsplit(request.url).hostname == "cdn.syndication.twimg.com" for request in calls))
+                self.assertEqual(entries[1]["name"], "test-123-2.mp4")
+
+    @unittest.skipUnless(capabilities()["x_available"], "未安装可选 X 解析组件")
+    async def test_restricted_tweet_is_reported_as_login_required(self):
+        with self.assertRaisesRegex(DownloadError, "登录或年龄验证"):
+            await self.resolve("x_login", "https://x.com/u/status/123")
+
     @unittest.skipUnless(capabilities()["youtube_available"], "未安装可选 YouTube 解析组件")
     async def test_real_youtube_library_and_separate_tracks(self):
         entries, calls = await self.resolve("youtube", "https://youtu.be/BaW_jenozKc")
@@ -293,6 +344,78 @@ class RealExtractors(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(audio["name"].endswith(".m4a"))
         self.assertTrue(audio["tracks"][0]["url"].endswith("audio.m4a"))
         self.assertTrue(all("youtube.com" in request.url for request in calls))
+
+    @unittest.skipUnless(capabilities()["youtube_available"], "未安装可选 YouTube 解析组件")
+    async def test_logged_youtube_keeps_hls_when_optional_clients_return_403(self):
+        http = LoggedYoutubeHttp()
+        entries, calls = await self.resolve("youtube", "https://youtu.be/BaW_jenozKc", cookies=http.cookies, http=http)
+        self.assertEqual([entry['variant'] for entry in entries], ['720p · MP4'])
+        self.assertEqual(entries[0]['tracks'][0]['protocol'], 'hls')
+        players = [request for request in calls if urlsplit(request.url).path == '/youtubei/v1/player']
+        self.assertTrue(any('redirected=1' in request.url for request in players))
+        for request in players:
+            headers = {key.lower(): value for key, value in request.headers}
+            self.assertIn('LOGIN_INFO=login-private', headers['cookie'])
+            self.assertIn('SAPISID=sid-private', headers['cookie'])
+            self.assertTrue(headers['authorization'].startswith('SAPISIDHASH '))
+        self.assertFalse(any('/videoplayback' in request.url for request in calls))
+        manifests = [request for request in calls if urlsplit(request.url).hostname == 'manifest.googlevideo.com']
+        self.assertTrue(manifests)
+        for request in manifests:
+            self.assertFalse({'cookie', 'authorization'} & {key.lower() for key, _ in request.headers})
+
+    @unittest.skipUnless(capabilities()["youtube_available"], "未安装可选 YouTube 解析组件")
+    async def test_parse_403_identifies_stage_without_logging_credentials(self):
+        http = LoggedYoutubeHttp(reject=403)
+        with self.assertLogs('tgdrive.offline.platforms', level='WARNING') as captured:
+            with self.assertRaisesRegex(DownloadError, r'解析请求（HTTP 403，播放 API）'):
+                await self.resolve('youtube', 'https://youtu.be/BaW_jenozKc', cookies=http.cookies, http=http)
+        logs = '\n'.join(captured.output)
+        self.assertIn('stage=extract', logs)
+        self.assertIn('player_api:web_safari:cookie=1:auth=1:403', logs)
+        for secret in ('login-private', 'sid-private', 'SAPISIDHASH', 'token=', 'youtube.com', 'BaW_jenozKc'):
+            self.assertNotIn(secret, logs)
+
+    @unittest.skipUnless(capabilities()["youtube_available"], "未安装可选 YouTube 解析组件")
+    async def test_temporary_parse_service_failure_remains_retryable(self):
+        http = LoggedYoutubeHttp(reject=503)
+        with self.assertLogs('tgdrive.offline.platforms', level='WARNING'):
+            with self.assertRaises(TransientError):
+                await self.resolve('youtube', 'https://youtu.be/BaW_jenozKc', cookies=http.cookies, http=http)
+
+
+class LoggedYoutubeHttp:
+    cookies = 'LOGIN_INFO=login-private; SAPISID=sid-private; __Secure-1PAPISID=first-private; __Secure-3PAPISID=third-private'
+
+    def __init__(self, reject=None):
+        self.calls, self.reject = [], reject
+
+    @asynccontextmanager
+    async def open(self, request, **_):
+        self.calls.append(request)
+        parts = urlsplit(request.url)
+        headers = {key.lower(): value for key, value in request.headers}
+        info = {'playabilityStatus': {'status': 'OK'}, 'videoDetails': {'videoId': 'BaW_jenozKc',
+            'title': 'Test video', 'lengthSeconds': '6', 'author': 'test', 'isLiveContent': False}}
+        reply = None
+        if parts.path == '/youtubei/v1/player':
+            if self.reject or 'Safari/605' not in headers.get('user-agent', ''):
+                reply = Reply(request.url, {'error': {'message': 'Forbidden token=upstream-private'}})
+                reply.status = self.reject or 403
+            elif 'redirected=1' not in parts.query:
+                reply = Reply(request.url, b'')
+                reply.status = 307
+                reply.headers['location'] = '/youtubei/v1/player?redirected=1'
+                reply.raw_headers = list(reply.headers.items())
+            else:
+                info['streamingData'] = {'hlsManifestUrl': 'https://manifest.googlevideo.com/api/manifest/hls_playlist/master.m3u8?token=signed-private'}
+        elif parts.hostname == 'manifest.googlevideo.com':
+            info = b'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS="avc1.4d001f,mp4a.40.2"\nhttps://r1.googlevideo.com/api/manifest/hls_playlist/itag/95/index.m3u8?token=signed-private\n'
+        else:
+            info = ('<html><script>var ytInitialPlayerResponse = ' + json.dumps(info) + ';</script>'
+                    '<script>ytcfg.set({"LOGGED_IN":true,"INNERTUBE_CONTEXT":{"client":{"clientName":"WEB",'
+                    '"clientVersion":"2.20260101"}}});</script></html>').encode()
+        yield reply if reply is not None else Reply(request.url, info)
 
 
 if __name__ == "__main__":

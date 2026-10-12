@@ -21,7 +21,7 @@ from ..work import WorkBusyError
 from .hls import load_playlist, remux
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
 from .request import DownloadRequest, filename, parse_requests, url_filename
-from .platforms import MIB, ExpiredMedia, PlatformResolver, clear_cache, merge_tracks, prepare, site_link, track_stream
+from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_cache, media_request, merge_tracks, prepare, site_link, track_stream
 
 
 PART_SIZE = 16 * 1024 * 1024
@@ -216,20 +216,22 @@ class OfflineDownloads:
                 name = filename(name + extension)
         detected_hls = urlsplit(request.url).path.lower().endswith(".m3u8") or name.lower().endswith(".m3u8") or content_type in ("application/vnd.apple.mpegurl", "application/x-mpegurl")
         hls = download_type == "hls" or download_type == "auto" and detected_hls
-        choices = [(request, None)]
+        choices = [(request, None, None)]
         if hls:
             effective = self.resources.effective()
             if not effective["hls_enabled"] or not effective["hls_available"]:
                 raise ValueError("M3U8 下载尚未启用，请联系管理员安装 FFmpeg 并在系统设置中启用")
             playlist = await load_playlist(self.http, request)
             if playlist.variants:
-                choices = [(replace(request, url=url, credential_origin=request.credential_origin or request.url), label) for url, label in playlist.variants]
+                choices = [(replace(request, url=url, credential_origin=request.credential_origin or request.url), label,
+                            replace(request, url=playlist.audio[url], credential_origin=request.credential_origin or request.url).json() if url in playlist.audio else None)
+                           for url, label in playlist.variants]
             stem = name.rsplit(".", 1)[0] if "." in name else name
             name = filename(stem + ".mp4")
-        for choice, label in choices:
+        for choice, label, audio in choices:
             if len(candidates) >= 32:
                 raise ValueError("解析结果超过 32 个文件，请分批提交")
-            ticket = {"user_id": user_id, "expires": time.time() + 1200, "request": choice.json(), "kind": "hls" if hls else "http", "size": None if hls else size, "content_type": "video/mp4" if hls else content_type}
+            ticket = {"user_id": user_id, "expires": time.time() + 1200, "request": choice.json(), "kind": "hls" if hls else "http", "size": None if hls else size, "content_type": "video/mp4" if hls else content_type, "hls_audio": audio}
             import base64
             encoded = base64.urlsafe_b64encode(seal(self._key("offline-ticket"), json.dumps(ticket, ensure_ascii=False).encode(), "offline-ticket")).decode()
             candidates.append({"ticket": encoded, "name": name, "source_host": urlsplit(choice.url).hostname, "method": choice.method,
@@ -284,7 +286,7 @@ class OfflineDownloads:
                 cursor = db.execute("INSERT INTO offline_tasks(user_id,bucket_id,key,source_host,method,kind,platform,request_enc,status,size,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
                     (user_id, scope.bucket_id, key, source_host, request.method, value["kind"], platform, b"", value["size"], now, now))
                 task_id = cursor.lastrowid
-                self._save_source(task_id, {"request": request.json(), "state": {}, "content_type": value["content_type"], "platform_source": value.get("platform_source")})
+                self._save_source(task_id, {"request": request.json(), "state": {}, "content_type": value["content_type"], "platform_source": value.get("platform_source"), "hls_audio": value.get("hls_audio")})
                 reserved.add(key)
                 ids.append(task_id)
         self._wake.set()
@@ -363,7 +365,7 @@ class OfflineDownloads:
                         if not isinstance(item, dict):
                             raise ValueError("请选择重新解析后的文件")
                         value = replacement
-                        source.update(request=value["request"], content_type=value["content_type"], platform_source=value.get("platform_source"))
+                        source.update(request=value["request"], content_type=value["content_type"], platform_source=value.get("platform_source"), hls_audio=value.get("hls_audio"))
                         self._set(task_id, kind=value["kind"], method=value["request"]["method"], source_host=urlsplit(value["platform_source"]["url"] if value.get("platform") else value["request"]["url"]).hostname, size=value["size"])
                     self._save_source(task_id, source)
                 self._set(task_id, status="stopped" if action == "stop" else "queued", phase=None, error=None)
@@ -725,15 +727,36 @@ class OfflineDownloads:
         try:
             await self._fetch_entry(row, scope, entry)
         except ExpiredMedia:
-            if not reuse:
+            direct_youtube = row["platform"] == "youtube" and any(track.get("protocol") != "hls" for track in entry["tracks"])
+            if not reuse and not direct_youtube:
                 raise
             await self._discard(self._row(row["id"]))
             self._stats[row["id"]].update(received=0, last_bytes=0, speed=0)
+            if direct_youtube:
+                # 登录后的直连格式可能需要额外的播放证明。重新解析时同清晰度优先选 HLS。
+                source["platform_source"]["prefer_hls"] = True
             await self._fetch_entry(row, scope, await self._resolve_entry(row, source))
 
     async def _fetch_entry(self, row, scope, entry):
         self._set(row["id"], phase="downloading", size=entry["size"], duration=entry.get("duration"), received=0, stored_bytes=0)
         config = self.resources.effective()
+        if len(entry["tracks"]) == 1 and entry["tracks"][0].get("protocol") == "hls":
+            request = media_request(row["platform"], entry["tracks"][0])
+            url_check = lambda url: allowed_url(row["platform"], url)
+            playlist = await load_playlist(self.http, request, url_check=url_check)
+            self._set(row["id"], segments_total=len(playlist.segments), size=None)
+            upload_id = await self._begin(row, scope, entry["content_type"])
+            stream = remux(self.http, request, playlist, self.resources.ffmpeg,
+                cache_root=self.cache_root, task_id=row["id"], limit=config["platform_max_mib"] * MIB,
+                reserve=config["reserve_mib"] * MIB, media_type=entry["media_type"], url_check=url_check,
+                check=lambda: self.check(row["user_id"]), progress=lambda **values: self._progress(row["id"], **values),
+                throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase))
+            try:
+                await self._stage(row, scope, upload_id, stream, count_input=False)
+            finally:
+                await stream.aclose()
+            await self._finish(row, scope, upload_id)
+            return
         if len(entry["tracks"]) == 1:
             def sized(size):
                 if size is not None and size > config["platform_max_mib"] * MIB:
@@ -766,10 +789,17 @@ class OfflineDownloads:
         playlist = await load_playlist(self.http, request)
         if playlist.variants:
             raise DownloadError("请选择一个具体清晰度后下载")
-        self._set(row["id"], segments_total=len(playlist.segments), duration=playlist.duration)
+        audio = None
+        if source.get("hls_audio"):
+            audio_request = DownloadRequest.from_json(source["hls_audio"])
+            audio = (audio_request, await load_playlist(self.http, audio_request))
+        self._set(row["id"], phase="downloading", segments_total=len(playlist.segments) + (len(audio[1].segments) if audio else 0), duration=playlist.duration)
         upload_id = await self._begin(row, scope, "video/mp4")
         stream = remux(self.http, request, playlist, self.resources.ffmpeg,
-            check=lambda: self.check(row["user_id"]), progress=lambda **values: self._progress(row["id"], **values), throttle=self.throttle)
+            cache_root=self.cache_root, task_id=row["id"], reserve=self.resources.effective()["reserve_mib"] * MIB,
+            limit=self.objects._quota_room(scope.bucket_id, row["key"]), audio=audio,
+            check=lambda: self.check(row["user_id"]), progress=lambda **values: self._progress(row["id"], **values), throttle=self.throttle,
+            phase=lambda phase: self._set(row["id"], phase=phase))
         try:
             await self._stage(row, scope, upload_id, stream, count_input=False)
         finally:

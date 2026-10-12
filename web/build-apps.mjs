@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { build } from 'esbuild';
-const root=path.dirname(new URL(import.meta.url).pathname);
+const root=path.dirname(fileURLToPath(import.meta.url));
 const previewAssets={};
 // 只给预览引擎使用标准打包器，保留主应用和受保护管理员文档的原有边界。
 if(!process.argv[2] || process.argv[2]==='user') {

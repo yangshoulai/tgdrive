@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from contextlib import asynccontextmanager
 
 from tgdrive.app import create_app
@@ -45,7 +46,7 @@ class RequestTests(unittest.TestCase):
         playlist = parse_playlist(b"#EXTM3U\n#EXTINF:2,\n1.ts\n#EXTINF:3,\n2.ts\n#EXT-X-ENDLIST\n", base)
         self.assertEqual(playlist.duration, 5)
         self.assertEqual(playlist.segments[0][0], "https://example.com/video/1.ts")
-        for text in ("#EXTM3U\n#EXTINF:2,\n1.ts", "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key\"\n#EXTINF:2,\n1.ts\n#EXT-X-ENDLIST", "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\n1.ts\n#EXT-X-ENDLIST", "#EXTM3U\n#EXT-X-DISCONTINUITY\n#EXTINF:2,\n1.ts\n#EXT-X-ENDLIST"):
+        for text in ("#EXTM3U\n#EXTINF:2,\n1.ts", "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key\"\n#EXTINF:2,\n1.ts\n#EXT-X-ENDLIST", "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\n1.ts", "#EXTM3U\n#EXT-X-GAP\n#EXTINF:2,\n1.ts\n#EXT-X-ENDLIST"):
             with self.assertRaises(ValueError):
                 parse_playlist(text.encode(), base)
 
@@ -129,6 +130,46 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         self.offline.http = http
         parsed = await self.offline.parse(self.alice.id, "https://example.com/download/blob")
         self.assertEqual(parsed["candidates"][0]["name"], "blob")
+
+    async def test_hls_separate_audio_survives_ticket_update_and_saves(self):
+        self.app.resources.ffmpeg = "fixture"
+        self.app.resources.update({"hls_enabled": True})
+        class HlsHttp(MemoryHttp):
+            audio = "audio.m3u8"
+            @asynccontextmanager
+            async def open(inner, request, **kwargs):
+                async with self.http.open(request, **kwargs) as response:
+                    response.headers["content-type"] = "application/vnd.apple.mpegurl"
+                    async def read():
+                        if request.url.endswith("master.m3u8"):
+                            return (f'#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",URI="{inner.audio}"\n'
+                                '#EXT-X-STREAM-INF:BANDWIDTH=1000,AUDIO="a"\nvideo.m3u8\n').encode()
+                        return b'#EXTM3U\n#EXTINF:2,\n1.ts\n#EXT-X-ENDLIST\n'
+                    response.read = read
+                    yield response
+        client = HlsHttp()
+        self.offline.http = client
+        async def parse():
+            return (await self.offline.parse(self.alice.id,
+                "curl https://example.com/master.m3u8 -H 'Cookie: secret=hidden'"))["candidates"][0]
+        candidate = await parse()
+        task = self.offline.create(self.alice.id, [{"ticket": candidate["ticket"], "name": "movie.mp4"}], "")[0]
+        client.audio = "updated.m3u8"
+        replacement = await parse()
+        await self.offline.control(self.alice.id, task["id"], "update", item={"ticket": replacement["ticket"]})
+        source = self.offline._source(self.offline._row(task["id"]))
+        self.assertEqual(source["hls_audio"]["url"], "https://example.com/updated.m3u8")
+        self.assertEqual(source["hls_audio"]["credential_origin"], "https://example.com/master.m3u8")
+        calls = []
+        async def remux(*args, **kwargs):
+            calls.append(kwargs)
+            yield b'muxed movie'
+        with patch('tgdrive.offline.service.remux', remux):
+            self.offline.start()
+            await self.wait_for(lambda: self.offline._row(task["id"])["status"] in ("completed", "failed"))
+        self.assertEqual(self.offline._row(task["id"])["status"], "completed")
+        self.assertEqual(calls[0]["audio"][0].url, "https://example.com/updated.m3u8")
+        self.assertEqual(self.offline._row(task["id"])["segments_total"], 2)
 
     async def test_credentials_permissions_and_delete_retains_file(self):
         task = await self.make()

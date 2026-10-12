@@ -18,20 +18,21 @@ import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from .http import DownloadError, TransientError, status_error
+from .http import RETRY_STATUS, DownloadError, ExpiredMedia, TransientError, status_error
 from .request import DownloadRequest, checked_url
 
 
 MIB = 1024 * 1024
 ERRORS = {"live": "暂不支持直播、预告或仍在处理中的视频",
-          "formats": "没有可下载的 MP4 格式，请更新 Cookie、调整清晰度或稍后重试；部分 YouTube 格式需要额外的平台校验",
+          "formats": "平台未提供可下载的 H.264／AAC 格式；可能需要登录、播放证明或允许的服务器出口，请确认浏览器可以播放并检查代理设置",
           "empty": "帖子没有可下载的图片或视频，或当前登录状态无法访问",
           "bot": "YouTube 要求登录确认真人，请导入当前账号的有效 Cookie；仍失败时检查服务器代理出口",
           "cookie": "平台拒绝了已失效或格式不正确的 Cookie，请重新导入当前登录状态",
           "login": "该媒体需要登录或年龄验证，请使用有播放权限的账号 Cookie",
           "region": "该视频受地区限制，当前服务器出口地区无法访问",
           "rate_limit": "平台限制了请求频率，请稍后重试并检查代理出口",
-          "unavailable": "该媒体已删除、设为私密或限制账号访问，请先确认当前账号在浏览器中可以播放",
+          "temporary": "平台解析服务暂时不可用，请稍后重试",
+          "unavailable": "平台未返回这条媒体，可能已删除、被屏蔽或限制登录账号访问；请先确认浏览器中可播放，受限帖子需导入有权限的账号 Cookie",
           "js": "YouTube 的 JavaScript 挑战解析失败，请检查运行时，并确认 yt-dlp 与 yt-dlp-ejs 版本匹配",
           "forbidden": "平台拒绝了解析请求（HTTP 403），请检查账号权限、Cookie 和服务器代理出口",
           "extractor": "解析组件未能识别平台响应，请检查代理是否返回了验证页面，或更新平台镜像",
@@ -42,6 +43,46 @@ ROOTS = {"x": ("x.com", "twitter.com", "twimg.com"),
          "youtube": ("youtube.com", "youtube-nocookie.com", "youtu.be", "googlevideo.com", "ytimg.com", "ggpht.com", "google.com")}
 COOKIE_ROOTS = {"x": ("x.com", "twitter.com"), "youtube": ("youtube.com", "google.com")}
 DEFAULT_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+EXTRACT_STAGES = {"webpage": "网页", "player_api": "播放 API", "metadata_api": "元数据 API",
+                  "player_js": "播放器脚本", "manifest": "播放列表", "media_probe": "媒体探测",
+                  "guest_auth": "访客认证", "tweet_api": "帖子 API", "public_embed": "公开嵌入接口",
+                  "other": "平台接口"}
+
+
+def extract_endpoint(platform, url):
+    """只返回固定请求分类，不能把路径、查询参数或动态 CDN 主机名写入日志。"""
+    parts = urlsplit(url)
+    path, host = parts.path, parts.hostname or ""
+    if platform == "youtube":
+        if path == "/youtubei/v1/player":
+            return "player_api"
+        if path.startswith("/youtubei/"):
+            return "metadata_api"
+        if path.startswith("/s/player/") or path == "/iframe_api":
+            return "player_js"
+        if host.endswith(".googlevideo.com"):
+            return "manifest" if host == "manifest.googlevideo.com" or path.startswith("/api/manifest/") else "media_probe"
+        if host == "youtube.com" or host.endswith(".youtube.com"):
+            return "webpage"
+    else:
+        if path.endswith("/guest/activate.json"):
+            return "guest_auth"
+        if "/graphql/" in path:
+            return "tweet_api"
+        if host == "cdn.syndication.twimg.com":
+            return "public_embed"
+    return "other"
+
+
+def extract_context(platform, value):
+    headers = {key.lower(): content for key, content in value["headers"]}
+    client = "other"
+    if platform == "youtube":
+        client = {"1": "web", "56": "web_embedded", "7": "tv"}.get(headers.get("x-youtube-client-name"), "other")
+        if client == "web" and "Safari/605" in headers.get("user-agent", ""):
+            client = "web_safari"
+    return (f"{extract_endpoint(platform, value['url'])}:{client}:"
+            f"cookie={int(bool(headers.get('cookie')))}:auth={int(bool(headers.get('authorization')))}")
 
 
 def site_link(url: str):
@@ -257,7 +298,8 @@ class PlatformResolver:
             env = {**os.environ, "NODE_OPTIONS": "--max-old-space-size=128", "PYTHONUNBUFFERED": "1"}
             process = await asyncio.create_subprocess_exec(sys.executable, "-m", "tgdrive.offline.extract_worker",
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                limit=2 * MIB, start_new_session=True, env=env)
+                limit=2 * MIB, start_new_session=True, env=env,
+                **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}))
             async def discard_errors():
                 while await process.stderr.read(65536):
                     pass
@@ -266,7 +308,7 @@ class PlatformResolver:
                 async with asyncio.timeout(120):
                     process.stdin.write(json.dumps(payload, ensure_ascii=True).encode() + b"\n")
                     await process.stdin.drain()
-                    requests = 0
+                    requests, trace = 0, []
                     while True:
                         check()
                         try:
@@ -281,25 +323,48 @@ class PlatformResolver:
                             requests += 1
                             if requests > 100:
                                 raise DownloadError("平台解析请求过多，已停止")
-                            value = await self._fetch(platform, reply["fetch"], check)
+                            fetch = reply["fetch"]
+                            context = extract_context(platform, fetch)
+                            try:
+                                value = await self._fetch(platform, fetch, check)
+                            except DownloadError as exc:
+                                trace.append(f"{context}:{'transient' if isinstance(exc, TransientError) else 'source_error'}")
+                                logging.getLogger(__name__).warning("platform_source_failed platform=%s stage=extract requests=%s",
+                                    platform, ";".join(trace[-16:]))
+                                label = EXTRACT_STAGES[extract_endpoint(platform, fetch["url"])]
+                                raise type(exc)(f"{exc}（解析阶段：{label}）") from exc
+                            trace.append(f"{context}:{value['status']}")
+                            trace = trace[-16:]
                             process.stdin.write(json.dumps(value, ensure_ascii=True).encode() + b"\n")
                             await process.stdin.drain()
                         else:
                             result = reply["result"]
                             if "error" in result:
                                 code = result["error"] if result["error"] in ERRORS else "extract"
+                                failed = next((item for item in reversed(trace) if item.rsplit(":", 1)[-1].isdigit() and int(item.rsplit(":", 1)[-1]) >= 400), None)
+                                if failed and code in ("formats", "extract", "extractor"):
+                                    status = int(failed.rsplit(":", 1)[-1])
+                                    if status in (401, 403):
+                                        code = "forbidden"
+                                    elif status in RETRY_STATUS:
+                                        code = "rate_limit" if status == 429 else "temporary"
                                 error_type = result.get("exception_type", "")
                                 if not isinstance(error_type, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_type):
                                     error_type = "unknown"
                                 stack = result.get("stack", [])
                                 stack = [frame for frame in stack[:8] if isinstance(frame, str) and
                                          re.fullmatch(r"[A-Za-z0-9_.-]{1,80}:\d{1,8}:[A-Za-z0-9_<>]{1,80}", frame)] if isinstance(stack, list) else []
-                                logging.getLogger(__name__).warning("platform_extract_failed platform=%s code=%s error_type=%s stack=%s",
-                                    platform, code, error_type, ";".join(stack))
+                                warnings = result.get("warnings", [])
+                                warnings = sorted({warning for warning in warnings if isinstance(warning, str) and warning in ERRORS}) if isinstance(warnings, list) else []
+                                logging.getLogger(__name__).warning("platform_extract_failed platform=%s stage=extract code=%s error_type=%s stack=%s warnings=%s requests=%s",
+                                    platform, code, error_type, ";".join(stack), ",".join(warnings), ";".join(trace))
                                 message = ERRORS[code]
+                                denied = next((item for item in reversed(trace) if item.rsplit(":", 1)[-1] in ("401", "403")), None)
+                                if code == "forbidden" and denied:
+                                    message = f"平台拒绝了解析请求（HTTP {denied.rsplit(':', 1)[-1]}，{EXTRACT_STAGES[denied.split(':', 1)[0]]}），请检查账号权限、Cookie 和服务器代理出口"
                                 if code == "extract" and error_type != "unknown":
                                     message += f"（解析异常：{error_type}）"
-                                raise DownloadError(message)
+                                raise (TransientError if code in ("rate_limit", "temporary") else DownloadError)(message)
                             entries = result["entries"]
                             if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
                                 raise DownloadError("平台媒体数量不正确")
@@ -322,16 +387,19 @@ class PlatformResolver:
                 raise DownloadError("平台解析响应不完整或格式不正确，请稍后重试") from exc
             finally:
                 # 同时回收解析器与 JavaScript 子进程，避免取消任务后继续占用内存。
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if sys.platform == "win32":
+                    if process.returncode is None:
+                        killer = await asyncio.create_subprocess_exec("taskkill", "/PID", str(process.pid), "/T", "/F",
+                            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+                        await killer.wait()
+                else:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 await process.wait()
                 await stderr
-
-
-class ExpiredMedia(DownloadError):
-    """媒体地址失效或无权访问（401/403/404/410）；缓存的解析结果需要重新解析。"""
 
 
 async def track_stream(client, platform, track, *, on_size=None, retries=3):
@@ -350,7 +418,7 @@ async def track_stream(client, platform, track, *, on_size=None, retries=3):
         try:
             async with client.open(request, extra_headers=headers, **options) as response:
                 if response.status in (401, 403, 404, 410):
-                    raise ExpiredMedia(f"平台媒体地址已失效（HTTP {response.status}），需要重新解析")
+                    raise ExpiredMedia(f"平台拒绝了媒体请求（HTTP {response.status}）；地址可能过期，或需要平台播放校验／允许的服务器出口")
                 if response.status == 200 and offset == 0:
                     # 未要求分段，或来源忽略 Range 返回整个文件；这种响应无法原地续读。
                     if on_size:
