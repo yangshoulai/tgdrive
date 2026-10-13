@@ -1033,7 +1033,7 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .preview-player-audio.has-cover .audio-backdrop { background: var(--preview-cover) center / cover no-repeat; filter: blur(64px) saturate(1.6) brightness(.52); }
 .preview-player-audio.is-active .audio-backdrop { animation-play-state: running; }
 @keyframes backdrop-drift { from { transform: scale(1.04) translate(-2%, -1%) rotate(0deg); } to { transform: scale(1.18) translate(2%, 2%) rotate(8deg); } }
-.audio-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: center; gap: 36px; padding: 36px 44px 8px; }
+.audio-body { flex: 1; min-height: 0; overflow: hidden; overflow: clip; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: center; gap: 36px; padding: 36px 44px 8px; }
 .audio-art { position: relative; justify-self: center; width: clamp(120px, calc(var(--preview-player-height, 540px) - 260px), 250px); aspect-ratio: 1; margin-right: 22%; }
 .audio-disc { position: absolute; inset: 3%; border-radius: 50%; transition: transform .8s cubic-bezier(.2, .8, .2, 1); }
 .preview-player-audio.is-active .audio-disc { transform: translateX(36%); }
@@ -1057,8 +1057,10 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .audio-lyrics-picker { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border-radius: 999px; background: var(--media-glass); color: var(--media-ink-2); font-size: var(--text-xs); }
 .audio-lyrics-picker select { max-width: 150px; padding: 0 2px; border: 0; outline: none; background: transparent; color: inherit; font: inherit; text-overflow: ellipsis; appearance: none; cursor: pointer; }
 .audio-lyrics-picker option { color: var(--ink); }
-.audio-lyrics { position: relative; flex: 1; min-height: 0; padding: 22% 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; mask-image: linear-gradient(transparent, #000 22%, #000 78%, transparent); }
+.audio-lyrics { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; mask-image: linear-gradient(transparent, #000 22%, #000 78%, transparent); }
 .audio-lyrics::-webkit-scrollbar { display: none; }
+/* 首尾留白用占位元素按歌词区自身高度计算：百分比内边距按宽度算且不能收缩，矮屏上会把歌词挤到控制条下面。 */
+.audio-lyrics::before, .audio-lyrics::after { display: block; height: 42%; content: ""; }
 .audio-lyric { display: block; width: 100%; padding: 7px 0; border: 0; background: transparent; color: rgba(255, 255, 255, .36); font: inherit; font-size: var(--text-lg); font-weight: 600; line-height: 1.5; text-align: left; white-space: pre-line; cursor: pointer; transform-origin: left center; transition: color .4s, transform .4s cubic-bezier(.2, .8, .2, 1); }
 .audio-lyric:hover { color: rgba(255, 255, 255, .72); }
 .audio-lyric.is-active { color: #fff; transform: scale(1.06); }
@@ -1115,11 +1117,12 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .preview-player-audio .preview-player-slow button { background: var(--media-glass-strong); color: #fff; }
 @container audio-player (max-width: 600px) {
   .audio-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); align-items: start; gap: 18px; padding: 24px 20px 6px; }
-  .audio-art { width: clamp(108px, 34cqw, 176px); margin: 0 auto; translate: -11% 0; }
-  .audio-side { align-items: center; justify-content: flex-start; gap: 12px; text-align: center; }
-  .audio-heading { justify-items: center; }
-  .audio-heading h3 { font-size: var(--text-lg); }
-  .audio-lyrics { align-self: stretch; padding: 14% 0; }
+  .audio-art { width: clamp(84px, min(34cqw, calc(var(--preview-player-height, 540px) * .26)), 176px); margin: 0 auto; translate: -11% 0; }
+  .audio-side { align-self: stretch; height: auto; align-items: center; justify-content: flex-start; gap: 10px; text-align: center; }
+  /* 状态与歌词选择并排一行，给歌词多留一行空间。 */
+  .audio-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 10px; }
+  .audio-heading h3 { width: 100%; font-size: var(--text-lg); }
+  .audio-lyrics { align-self: stretch; }
   .audio-lyric { text-align: center; transform-origin: center; font-size: var(--text-md); }
   .audio-controls { padding: 2px 16px 16px; }
   .audio-buttons-main { gap: 8px; }
