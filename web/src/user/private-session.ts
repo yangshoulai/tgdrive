@@ -51,7 +51,10 @@ export function PrivateSessionProvider({ children, enabled }: { children: ReactN
     const current = state.current;
     const access = current.grant?.access;
     current.revision++; current.grant = null; current.until = 0; current.playing = false; current.playbackOwner = null;
-    if (access && api.getPrivateAccess() === access) api.setPrivateAccess("");
+    if (access && api.getPrivateAccess() === access) {
+      api.setPrivateAccess("");
+      window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: access }));
+    }
     setGrant(null); setRestoring(false);
     if (!access) return;
     for (const area of [...areas.current.values()]) area.onLocked();

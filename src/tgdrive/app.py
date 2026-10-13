@@ -34,7 +34,7 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
                offline_concurrency: int = 1, offline_bandwidth_kib: int = 0,
                offline_reserve_mib: int = 512, offline_hls: bool = False,
                offline_x: bool = False, offline_youtube: bool = False,
-               offline_max_mib: int = 512, youtube_max_height: int = 720,
+               offline_max_mib: int = 512, youtube_max_height: int = 2160,
                offline_proxy: str = "") -> TgDriveASGI:
     root = Path(data_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -170,8 +170,8 @@ def main() -> None:
     parser.add_argument("--offline-hls", action="store_true", default=os.environ.get("TGDRIVE_OFFLINE_HLS", "0") == "1", help="允许 M3U8 封装，仍需本地 FFmpeg")
     parser.add_argument("--offline-x", action="store_true", default=os.environ.get("TGDRIVE_OFFLINE_X", "0") == "1", help="允许 X 单条帖子的图片与视频下载，需本地平台组件")
     parser.add_argument("--offline-youtube", action="store_true", default=os.environ.get("TGDRIVE_OFFLINE_YOUTUBE", "0") == "1", help="允许 YouTube 单视频与 Shorts，需平台组件、JavaScript 运行时和 FFmpeg")
-    parser.add_argument("--offline-max-mib", type=int, default=int(os.environ.get("TGDRIVE_OFFLINE_MAX_MIB", "512")), help="平台下载单任务大小与临时轨缓存上限，MiB")
-    parser.add_argument("--youtube-max-height", type=int, default=int(os.environ.get("TGDRIVE_YOUTUBE_MAX_HEIGHT", "720")))
+    parser.add_argument("--offline-max-mib", type=int, default=int(os.environ.get("TGDRIVE_OFFLINE_MAX_MIB", "512")), help="需临时缓存的音视频输入轨上限，MiB")
+    parser.add_argument("--youtube-max-height", type=int, default=int(os.environ.get("TGDRIVE_YOUTUBE_MAX_HEIGHT", "2160")))
     parser.add_argument("--offline-proxy", default=os.environ.get("TGDRIVE_OFFLINE_PROXY", ""),
                         help="离线下载出站代理，http://主机:端口 或 socks5://主机:端口；启用后由代理解析域名")
     args = parser.parse_args()

@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type MouseEvent } from "react";
 import { useCursorPage, useFilePageSize } from "../pagination";
 import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileThumbnail, FileTile, FileVisual, FolderThumbnail, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileThumbnail, FileTile, FileVisual, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
 import { saveThumbnails, thumbnailsFromImage, thumbnailSource, useThumbnailBackfill } from "../thumbnails";
 
-import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, useDocumentTitle, type MenuItem } from "../ui";
+import { Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 
 import { UploadDialog, type UploadQueue } from "./uploads";
 import { PrivateTransferDialog } from "./private-access";
@@ -19,6 +19,13 @@ import { usePreview } from "./preview-host";
 
 type Entry = { kind: "folder"; key: string; size?: number } | { kind: "file"; key: string; file: api.FileItem };
 type SortKey = "name" | "type" | "size" | "modified";
+
+/** 文件夹大小：未统计时留空，没有内容时写“空”，不显示生硬的“0 B”或“—”。 */
+const folderSize = (size?: number) => size == null ? "" : size === 0 ? "空" : formatBytes(size);
+const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+const DELETE_KEY = IS_MAC ? "⌘⌫" : "Del";
+/** 图标上已经印了格式标签（PDF、DOC…）的类型，网格卡片不再重复显示扩展名。 */
+const LABELLED_KINDS = new Set(["pdf", "document", "spreadsheet", "presentation"]);
 
 export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision, onPlayback }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number; onPlayback?: (state: PreviewPlayback) => void }) {
   const privateSpace = api.isPrivatePath(prefix);
@@ -38,6 +45,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [transferring, setTransferring] = useState<Entry[] | null>(null);
   const [moving, setMoving] = useState<Entry[] | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  /** 键盘焦点所在的项目（方向键移动）；与勾选状态分开，和桌面文件管理器一致。 */
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [context, setContext] = useState<{ x: number; y: number; key: string } | null>(null);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const surface = useRef<HTMLElement>(null);
   const dragKeys = useRef<string[]>([]);
   const [folderOpen, setFolderOpen] = useState(false);
   const [pendingUpload, setPendingUpload] = useState<File[] | null>(null);
@@ -230,38 +242,125 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       const state = thumbnailBackfill.state(file);
       const failed = state?.phase === "waiting" || state?.phase === "failed";
       if (failed) items.push({ label: "查看缩略图失败原因", icon: "info", heading: "缩略图", onSelect: () => notify.info(state.message) });
-      items.push({ label: state?.phase === "generating" ? "缩略图正在生成" : failed ? "重试生成缩略图" : "生成缩略图", icon: "refresh", heading: failed ? undefined : "缩略图",
-        onSelect: () => { if (state?.phase === "generating") { notify.info("缩略图正在生成，请稍候"); return; } thumbnailBackfill.retry(file); } });
+      if (state?.phase !== "generating") items.push({ label: failed ? "重试生成缩略图" : "生成缩略图", icon: "refresh", heading: failed ? undefined : "缩略图",
+        onSelect: () => thumbnailBackfill.retry(file) });
     }
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
-    items.push({ label: "重命名", icon: "edit", onSelect: () => setRenaming(entry) });
+    items.push({ label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming(entry) });
     items.push({ label: "移动到…", icon: "move", onSelect: () => setMoving([entry]) });
     items.push({ label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([entry]) });
     if (query) items.push({ label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(parentPath(file.key)) });
-    items.push({ label: "删除", icon: "trash", danger: true, divider: true, onSelect: () => void moveToTrash([entry]) });
+    items.push({ label: "删除", icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash([entry]) });
     return items;
   }
   function fileVisual(file: api.FileItem) {
-    const state = thumbnailBackfill.state(file);
-    return <span className="file-tile" title={state?.message}>
-      {state?.phase === "generating" ? <span className="spinner spinner-lg" role="status" aria-label="正在生成缩略图" />
-        : <FileVisual kind={getFileKind(file.content_type, file.key)} src={api.fileThumbnail(file)} />}
-    </span>;
+    return <FileVisual kind={getFileKind(file.content_type, file.key)} src={api.fileThumbnail(file)} />;
   }
   function folderMenu(key: string): MenuItem[] {
     const shared = publicFolders[key];
     return [
-      { label: "打开", icon: "folder", onSelect: () => onOpenFolder(key) },
+      { label: "打开", icon: "folder", shortcut: "↵", onSelect: () => onOpenFolder(key) },
+      { label: "下载（ZIP）", icon: "download", onSelect: () => undefined, href: api.archiveUrl([key]) },
       ...(!privateSpace ? [{ label: shared ? "管理分享" : "公开分享", icon: "link" as const, onSelect: () => setSharing(folderItem(key)) }] : []),
       ...(shared ? [{ label: "复制分享链接", icon: "copy" as const, onSelect: () => void copyText(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "分享链接已复制") }] : []),
-      { label: "重命名", icon: "edit", onSelect: () => setRenaming({ kind: "folder", key }) },
+      { label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming({ kind: "folder", key }) },
       { label: "移动到…", icon: "move", onSelect: () => setMoving([{ kind: "folder", key }]) },
       { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([{ kind: "folder", key }]) },
-      { label: "删除", icon: "trash", danger: true, divider: true, onSelect: () => void moveToTrash([{ kind: "folder", key }]) },
+      { label: "删除", icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash([{ kind: "folder", key }]) },
     ];
   }
   const crumbs = prefix.slice(root.length).split("/").filter(Boolean);
   const allSelected = entries.length > 0 && entries.every(entry => selected.has(entry.key));
+  const openEntry = (entry: Entry) => entry.kind === "folder" ? onOpenFolder(entry.key) : openPreview(entry.file);
+  const downloadUrl = (targets: Entry[]) => targets.length === 1 && targets[0].kind === "file"
+    ? api.contentUrl(targets[0].key, true) : api.archiveUrl(targets.map(target => target.key));
+  useEffect(() => { setCursor(current => current && entries.some(entry => entry.key === current) ? current : null); }, [entries]);
+  useEffect(() => {
+    if (!cursor) return;
+    surface.current?.querySelector(`[data-key="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [cursor]);
+
+  /** 网格中按位置找上下左右相邻的项目（文件夹区和文件区是两个网格，按几何位置跨区移动）。 */
+  function neighbour(key: string | null, direction: "up" | "down" | "left" | "right") {
+    const items = Array.from(surface.current?.querySelectorAll<HTMLElement>("[data-key]") ?? []);
+    const index = items.findIndex(item => item.dataset.key === key);
+    if (index < 0) return items[direction === "up" || direction === "left" ? items.length - 1 : 0]?.dataset.key ?? null;
+    if (layout === "list" || direction === "left" || direction === "right") {
+      const step = direction === "up" || direction === "left" ? -1 : 1;
+      return items[Math.max(0, Math.min(items.length - 1, index + step))].dataset.key ?? null;
+    }
+    const current = items[index].getBoundingClientRect(), center = current.left + current.width / 2;
+    const candidates = items.map(item => ({ key: item.dataset.key ?? null, rect: item.getBoundingClientRect() }))
+      .filter(({ rect }) => direction === "down" ? rect.top >= current.bottom - 1 : rect.bottom <= current.top + 1);
+    if (!candidates.length) return key;
+    const row = direction === "down" ? Math.min(...candidates.map(item => item.rect.top)) : Math.max(...candidates.map(item => item.rect.bottom));
+    const sameRow = candidates.filter(item => direction === "down" ? item.rect.top === row : item.rect.bottom === row);
+    return sameRow.reduce((best, item) => Math.abs(item.rect.left + item.rect.width / 2 - center) < Math.abs(best.rect.left + best.rect.width / 2 - center) ? item : best).key;
+  }
+  const handleKey = useRef<(event: KeyboardEvent) => void>(() => undefined);
+  handleKey.current = event => {
+    if (event.defaultPrevented || event.isComposing || document.body.classList.contains("has-modal") || context) return;
+    const target = event.target as Element;
+    if (target instanceof Element && (isShortcutControl(target) || target.closest(".modal, .tray-stack, .sidebar"))) return;
+    // 焦点在按钮或链接上时，空格和回车照常激活它。
+    if ((event.key === " " || event.key === "Enter") && target instanceof Element && target.closest("button, a, summary, [role='button']")) return;
+    const mod = event.metaKey || event.ctrlKey;
+    const current = entries.find(entry => entry.key === cursor) ?? null;
+    const arrows: Record<string, "up" | "down" | "left" | "right"> = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+    let handled = true;
+    if (event.key === "/" && !mod) {
+      surface.current?.closest(".files-view")?.querySelector<HTMLInputElement>(".toolbar input[type=search], .toolbar input")?.focus();
+    } else if (event.key === "?" && !mod) {
+      setShortcutsOpen(true);
+    } else if (arrows[event.key] && !mod && !event.altKey && (layout === "grid" || event.key === "ArrowUp" || event.key === "ArrowDown")) {
+      const next = neighbour(cursor, arrows[event.key]);
+      if (next && event.shiftKey) setSelected(value => new Set([...value, ...(cursor ? [cursor] : []), next]));
+      setCursor(next);
+    } else if ((event.key === "a" || event.key === "A") && mod && !event.shiftKey) {
+      setSelected(new Set(entries.map(entry => entry.key)));
+    } else if (event.key === "Escape" && (selected.size || cursor)) {
+      if (selected.size) setSelected(new Set()); else setCursor(null);
+    } else if (event.key === " " && current && !mod) {
+      toggleSelect(current.key, !selected.has(current.key));
+    } else if (event.key === "Enter" && current && !mod) {
+      openEntry(current);
+    } else if (event.key === "F2" && current) {
+      setRenaming(current);
+    } else if ((event.key === "Delete" || (event.key === "Backspace" && (mod || !IS_MAC))) && (selected.size || current)) {
+      void moveToTrash(selected.size ? selectedEntries : [current!]);
+    } else handled = false;
+    if (handled) { event.preventDefault(); document.documentElement.dataset.input = "keyboard"; }
+  };
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => handleKey.current(event);
+    document.addEventListener("keydown", listener);
+    return () => document.removeEventListener("keydown", listener);
+  }, []);
+  /** 右键：点在已选中的多项之一上时对整个选择操作，否则只针对这一项。 */
+  function contextItems(key: string): MenuItem[] {
+    if (selected.size > 1 && selected.has(key)) {
+      return [
+        { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", onSelect: () => undefined, href: downloadUrl(selectedEntries) },
+        { label: "移动到…", icon: "move", onSelect: () => setMoving(selectedEntries) },
+        { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring(selectedEntries) },
+        { label: `删除 ${selected.size} 项`, icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash(selectedEntries) },
+      ];
+    }
+    const entry = entries.find(item => item.key === key);
+    if (!entry) return [];
+    return entry.kind === "folder" ? folderMenu(entry.key) : [{ label: "打开", icon: "eye", shortcut: "↵", onSelect: () => openPreview(entry.file) }, ...fileMenu(entry.file)];
+  }
+  const rowProps = (entry: Entry) => ({
+    "data-key": entry.key,
+    onMouseDown: () => setCursor(entry.key),
+    onContextMenu: (event: MouseEvent) => {
+      if ((event.target as Element).closest("input, a")) return;
+      event.preventDefault();
+      setCursor(entry.key);
+      setContext({ x: event.clientX, y: event.clientY, key: entry.key });
+    },
+  });
+  const cursorClass = (key: string) => cursor === key ? " is-cursor" : "";
 
   return (
     <div className="files-view"
@@ -291,6 +390,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         <div className="toolbar selection-bar" role="toolbar" aria-label="批量操作">
           <span className="selection-count">已选择 {selected.size} 项</span>
           <div className="toolbar-actions">
+            <a className="btn btn-secondary btn-sm" href={downloadUrl(selectedEntries)}><Icon name="download" size={15} /><span>下载</span></a>
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
             <Button size="sm" icon="move" onClick={() => setMoving(selectedEntries)}>移动</Button>
@@ -312,13 +412,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         </div>
       )}
 
-      <section className={`file-surface${layout === "grid" && !loading && !loadError && entries.length > 0 ? " is-grid" : ""}${dragging ? " is-dragging" : ""}`} aria-label="文件列表">
+      <section ref={surface} className={`file-surface${layout === "grid" && !loading && !loadError && entries.length > 0 ? " is-grid" : ""}${dragging ? " is-dragging" : ""}`} aria-label="文件列表">
         {loading ? <SkeletonRows rows={6} /> : loadError ? (
           <EmptyState icon="alert" title="文件列表加载失败" description={loadError} action={<Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         ) : entries.length === 0 ? (
           query ? <EmptyState icon="search" title={`没有找到包含“${query}”的文件`} description="换个关键词，或检查拼写。" action={<Button onClick={() => { setSearch(""); setQuery(""); }}>清除搜索</Button>} />
             : filter === "public" ? <EmptyState icon="globe" title="这个文件夹里没有公开内容" description="在文件或文件夹的菜单中选择“公开分享”，即可生成任何人可访问的链接。" />
-              : <EmptyState icon="upload" title={prefix ? "这个文件夹是空的" : "上传你的第一个文件"} description="把文件拖到这里，或点击上传按钮。" action={<Button variant="primary" icon="upload" onClick={() => fileInput.current?.click()}>上传文件</Button>} />
+              : <EmptyState icon="upload" title={prefix ? "这个文件夹是空的" : "上传你的第一个文件"} description="把文件拖到这里，或点击上传按钮。" action={<Button icon="upload" onClick={() => fileInput.current?.click()}>选择文件</Button>} />
         ) : layout === "list" ? (
           <div className="data-table file-table" role="table" aria-label="文件">
             <div className="data-row data-head" role="row">
@@ -330,21 +430,21 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
               <span role="columnheader" className="cell-actions"><span className="sr-only">操作</span></span>
             </div>
             {entries.map(entry => entry.kind === "folder" ? (
-              <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}${dropClass(entry.key)}`} {...dragProps(entry)} {...dropProps(entry.key)} onClick={() => onOpenFolder(entry.key)}>
+              <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}${cursorClass(entry.key)}${dropClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} {...dropProps(entry.key)} onClick={() => onOpenFolder(entry.key)}>
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
                 <span role="cell" className="cell-name"><FileTile kind="folder" /><span className="name-stack"><button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
-                  <span className="file-mobile-meta"><span>文件夹 · {entry.size == null ? "—" : formatBytes(entry.size)}</span>{publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span></span>
+                  <span className="file-mobile-meta"><span>{["文件夹", folderSize(entry.size)].filter(Boolean).join(" · ")}</span>{publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span></span>
                   {publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span>
                 <span role="cell" className="cell-type muted">文件夹</span>
-                <span role="cell" className="cell-size muted" title="包含所有子文件夹中的文件">{entry.size == null ? "—" : formatBytes(entry.size)}</span>
-                <span role="cell" className="cell-date muted">—</span>
+                <span role="cell" className="cell-size muted" title="包含所有子文件夹中的文件">{folderSize(entry.size)}</span>
+                <span role="cell" className="cell-date muted" />
                 <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
                   {!privateSpace && <span className="row-quick"><IconButton icon="link" size="sm" label={`分享 ${baseName(entry.key)}`} onClick={() => setSharing(folderItem(entry.key))} /></span>}
                   <Menu label={`${baseName(entry.key)} 的更多操作`} items={folderMenu(entry.key)} />
                 </span>
               </div>
             ) : (
-              <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}`} {...dragProps(entry)} onClick={() => openPreview(entry.file)}>
+              <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}${cursorClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} onClick={() => openPreview(entry.file)}>
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
                 <span role="cell" className="cell-name">
                   {fileVisual(entry.file)}
@@ -365,48 +465,90 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
               </div>
             ))}
           </div>
-        ) : (
-          <div className="file-grid">
-            {entries.map(entry => {
-              const kind = entry.kind === "folder" ? "folder" : getFileKind(entry.file.content_type, entry.key);
-              const isSelected = selected.has(entry.key);
-              const thumbnailWork = entry.kind === "file" ? thumbnailBackfill.state(entry.file) : undefined;
-              return (
-                <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${entry.kind === "folder" ? dropClass(entry.key) : ""}`} {...dragProps(entry)} {...(entry.kind === "folder" ? dropProps(entry.key) : {})} onClick={() => entry.kind === "folder" ? onOpenFolder(entry.key) : openPreview(entry.file)}>
-                  <div className="grid-thumb" title={thumbnailWork?.message}>
-                    {/* 有缩略图用缩略图；小图片直接显示原图；其余显示类型图标，避免每个卡片下载完整原图。 */}
-                    {entry.kind === "folder" ? <FolderThumbnail previews={(pagination.page?.folder_previews?.[entry.key] ?? []).flatMap(file => {
-                      const url = api.fileThumbnail(file); return url ? [{ ...file, url }] : [];
-                    })} /> : <FileThumbnail kind={kind} url={api.fileThumbnail(entry.file)
-                      ?? (kind === "image" && entry.file.size <= 2 * 1024 * 1024 ? api.versionedContentUrl(api.contentUrl(entry.key), entry.file.etag) : undefined)} />}
-                    {thumbnailWork?.phase === "generating" && <span className="thumbnail-generation" role="status"><span className="spinner" />生成中</span>}
-                    <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
-                    {(entry.kind === "file" ? entry.file.public_token : publicFolders[entry.key]) && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
-                  </div>
-                  <div className="grid-meta">
-                    {/* 卡片本身只响应鼠标；文件名按钮是键盘与读屏用户的打开入口。 */}
-                    <button type="button" className="grid-name name-button" title={baseName(entry.key)}
-                      onClick={event => { event.stopPropagation(); if (entry.kind === "folder") onOpenFolder(entry.key); else openPreview(entry.file); }}>
-                      <span className="grid-name-text">{baseName(entry.key)}</span>
-                    </button>
-                    <span className="grid-sub">
-                      <span className="grid-kind">{entry.kind === "folder" ? "文件夹" : kindLabel(kind)}</span>
-                      {" · "}<span className="grid-size">{entry.kind === "folder" ? entry.size == null ? "—" : formatBytes(entry.size) : formatBytes(entry.file.size)}</span>
-                    </span>
-                    <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(entry.key)} 的更多操作`} items={entry.kind === "folder" ? folderMenu(entry.key) : fileMenu(entry.file)} /></span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+        ) : (() => {
+          // 网格：文件夹是一排紧凑的横条，文件才用缩略图卡片，避免文件夹占满一屏的大空卡片。
+          const folderEntries = entries.filter((entry): entry is Extract<Entry, { kind: "folder" }> => entry.kind === "folder");
+          const fileEntries = entries.filter((entry): entry is Extract<Entry, { kind: "file" }> => entry.kind === "file");
+          const both = folderEntries.length > 0 && fileEntries.length > 0;
+          return <div className="grid-layout">
+            {folderEntries.length > 0 && <div className="grid-section">
+              {both && <h2 className="grid-section-title">文件夹</h2>}
+              <div className="folder-strip">
+                {folderEntries.map(entry => {
+                  const isSelected = selected.has(entry.key);
+                  return (
+                    <div key={entry.key} className={`folder-card${isSelected ? " is-selected" : ""}${cursorClass(entry.key)}${dropClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} {...dropProps(entry.key)} onClick={() => onOpenFolder(entry.key)}>
+                      <span className="folder-card-lead">
+                        <FileTile kind="folder" />
+                        <span className="folder-card-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
+                      </span>
+                      <span className="folder-card-copy">
+                        <button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
+                        <span className="folder-card-sub">{publicFolders[entry.key] && <span className="folder-card-public"><Icon name="globe" size={12} />公开</span>}{folderSize(entry.size) || "文件夹"}</span>
+                      </span>
+                      <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(entry.key)} 的更多操作`} items={folderMenu(entry.key)} /></span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>}
+            {fileEntries.length > 0 && <div className="grid-section">
+              {both && <h2 className="grid-section-title">文件</h2>}
+              <div className="file-grid">
+                {fileEntries.map(entry => {
+                  const kind = getFileKind(entry.file.content_type, entry.key);
+                  const isSelected = selected.has(entry.key);
+                  const extension = entry.key.match(/\.([a-z\d]{1,6})$/i)?.[1].toUpperCase();
+                  return (
+                    <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${cursorClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} onClick={() => openPreview(entry.file)}>
+                      <div className="grid-thumb">
+                        {/* 缩略图尚未生成时一直显示类型图标，不在文件列表中拉取原图。 */}
+                        <FileThumbnail kind={kind} url={api.fileThumbnail(entry.file)} />
+                        {!api.fileThumbnail(entry.file) && extension && !LABELLED_KINDS.has(kind) && <span className="grid-extension" aria-hidden="true">{extension}</span>}
+                        <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
+                        {entry.file.public_token && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
+                      </div>
+                      <div className="grid-meta">
+                        {/* 卡片本身只响应鼠标；文件名按钮是键盘与读屏用户的打开入口。 */}
+                        <button type="button" className="grid-name name-button" title={baseName(entry.key)}
+                          onClick={event => { event.stopPropagation(); openPreview(entry.file); }}>
+                          <span className="grid-name-text">{baseName(entry.key)}</span>
+                        </button>
+                        <span className="grid-sub"><span className="grid-size">{formatBytes(entry.file.size)}</span>{" · "}<span className="grid-kind">{formatDate(entry.file.modified_at)}</span></span>
+                        <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(entry.key)} 的更多操作`} items={fileMenu(entry.file)} /></span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>}
+          </div>;
+        })()}
         {dragging && <div className="drop-overlay" aria-hidden="true"><Icon name="upload" size={28} /><strong>松开以上传到“{name}”</strong></div>}
       </section>
 
       <footer className="list-footer">
         <span>{loading ? "正在加载" : [folders.length && `${folders.length} 个文件夹`, files.length && `${files.length} 个文件`].filter(Boolean).join(" · ") || "空文件夹"}</span>
-        <Pagination {...pagination} {...pageSize} />
+        <span className="list-footer-end">
+          <Pagination {...pagination} {...pageSize} />
+          <button type="button" className="link-button shortcut-hint" onClick={() => setShortcutsOpen(true)} aria-keyshortcuts="?"><Icon name="keyboard" size={15} /><span>快捷键</span></button>
+        </span>
       </footer>
+
+      {context && <ContextMenu x={context.x} y={context.y} label={`${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
+      {shortcutsOpen && <Modal title="键盘快捷键" icon="keyboard" size="sm" onClose={() => setShortcutsOpen(false)} footer={<Button onClick={() => setShortcutsOpen(false)}>知道了</Button>}>
+        <KeyValue items={[
+          [<kbd>/</kbd>, "搜索文件"],
+          [<><kbd>↑</kbd> <kbd>↓</kbd>{layout === "grid" && <> <kbd>←</kbd> <kbd>→</kbd></>}</>, "移动焦点；按住 Shift 连续选择"],
+          [<kbd>↵</kbd>, "打开文件或文件夹"],
+          [<kbd>空格</kbd>, "选中或取消选中"],
+          [<kbd>{IS_MAC ? "⌘" : "Ctrl"} A</kbd>, "全选本页"],
+          [<kbd>F2</kbd>, "重命名"],
+          [<kbd>{DELETE_KEY}</kbd>, "移到回收站"],
+          [<kbd>Esc</kbd>, "取消选择"],
+          [<kbd>?</kbd>, "显示本说明"],
+        ]} />
+      </Modal>}
 
       {pendingUpload && <UploadDialog files={pendingUpload} destination={prefix} onClose={() => setPendingUpload(null)}
         onStart={(list, isPublic, destination) => { setPendingUpload(null); uploads.enqueue(list.map(file => ({ file, path: `${destination}${file.name}`, isPublic }))); }} />}

@@ -141,3 +141,61 @@ class ZipStreamTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UserArchiveTests(unittest.IsolatedAsyncioTestCase):
+    """登录用户的打包下载：文件夹递归、相对路径、去重与路径校验。"""
+
+    def setUp(self):
+        from tgdrive.api import UserApi
+        self.data = {"docs/a.txt": b"alpha", "docs/sub/b.txt": b"beta", "note.md": b"# hi", "empty/": b""}
+        info = lambda key: ObjectInfo(3, key, len(self.data[key]), key, "text/plain", {}, 1, key)
+        self.listed = []
+        async def run_in_thread(callback): return callback()
+        def head(scope, key):
+            if key not in self.data: raise NotFoundError(key)
+            return info(key)
+        def page(scope, prefix, delimiter, cursor, limit):
+            self.listed.append((prefix, delimiter))
+            return ListPage([info(key) for key in sorted(self.data) if key.startswith(prefix)], [], None)
+        self.api = UserApi.__new__(UserApi)
+        self.api.objects = SimpleNamespace(metadata=SimpleNamespace(run_in_thread=run_in_thread), head_object=head, list_objects=page)
+        self.api._scope = lambda token, **_: Scope(3)
+        async def content(token, key):
+            async def stream(): yield self.data[key]
+            return head(None, key), stream()
+        self.api.content = content
+
+    async def zip_names(self, paths):
+        name, entries = await self.api.archive("token", paths)
+        body = b"".join([part async for part in stream_zip(entries, nested=True)])
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            return name, {item: archive.read(item) for item in archive.namelist()}
+
+    async def test_folder_recursion_and_dedup(self):
+        name, files = await self.zip_names(["docs/", "docs/a.txt", "note.md"])
+        self.assertEqual(name, "files.zip")
+        self.assertEqual(files, {"docs/a.txt": b"alpha", "docs/sub/b.txt": b"beta", "note.md": b"# hi"})
+        self.assertEqual(self.listed, [("docs/", None)])
+        name, files = await self.zip_names(["docs/sub/"])
+        self.assertEqual((name, files), ("sub.zip", {"sub/b.txt": b"beta"}))
+
+    async def test_rejects_invalid_requests(self):
+        for paths in ([], ["../x"], [".tgdrive/private/a"], ["a"] * 0, [f"f{i}" for i in range(201)]):
+            with self.subTest(paths=paths[:2]):
+                with self.assertRaises((ValueError, PermissionError)):
+                    await self.api.archive("token", paths)
+        with self.assertRaises(NotFoundError):
+            await self.api.archive("token", ["missing.txt"])
+        _, entries = await self.api.archive("token", ["empty/"])
+        with self.assertRaises(ValueError):
+            async for _ in stream_zip(entries, nested=True): pass
+
+    async def test_nested_names_are_opt_in(self):
+        async def stream(): yield b"x"
+        async def entries(name): yield name, 1, 0, stream()
+        with self.assertRaises(ValueError):
+            async for _ in stream_zip(entries("a/b.txt")): pass
+        for bad in ("a/../b", "/a", "a//b", "a/./b"):
+            with self.subTest(name=bad), self.assertRaises(ValueError):
+                async for _ in stream_zip(entries(bad), nested=True): pass

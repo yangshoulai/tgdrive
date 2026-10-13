@@ -3,11 +3,12 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEve
 import * as api from "./api";
 import { readPreviewText, type PreviewText } from "./preview-data";
 import { MediaPreview, MinimizedPlayback, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
-import { PlaylistControls, PlaylistPanel, usePreviewPlaylist } from "./preview-playlist";
+import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip } from "./preview-playlist";
+import { ImageViewer } from "./preview-image";
 import { TextPreview } from "./preview-text";
 import { Badge, Button, CopyField, Field, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, type IconName } from "./ui";
 
-export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "text" | "code" | "archive" | "other";
+export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "text" | "code" | "archive" | "other";
 
 export function getFileKind(type: string | null | undefined, name: string): FileKind {
   const lower = name.toLowerCase();
@@ -18,27 +19,36 @@ export function getFileKind(type: string | null | undefined, name: string): File
   if (mime.startsWith("video/") || /\.(mp4|webm|mov|mkv|avi|m4v|ogv)$/.test(lower)) return "video";
   if (mime.startsWith("audio/") || /\.(mp3|wav|ogg|oga|opus|flac|m4a|aac)$/.test(lower)) return "audio";
   if (mime === "application/pdf" || lower.endsWith(".pdf")) return "pdf";
+  if (/\.(docx?|dotx?|odt|rtf|pages|wps)$/.test(lower) || /wordprocessingml|msword|opendocument\.text/.test(mime)) return "document";
+  if (/\.(xlsx?|xlsm|xltx?|ods|numbers|et)$/.test(lower) || /spreadsheetml|ms-excel|opendocument\.spreadsheet/.test(mime)) return "spreadsheet";
+  if (/\.(pptx?|potx?|odp|key|dps)$/.test(lower) || /presentationml|ms-powerpoint|opendocument\.presentation/.test(mime)) return "presentation";
   if (/\.(js|mjs|cjs|ts|tsx|jsx|py|go|rs|java|c|cc|cpp|cxx|h|hpp|cs|sh|bash|zsh|ps1|bat|html?|css|scss|sass|less|vue|svelte|sql|rb|php|swift|kt|kts|scala|dart|gradle|lua|diff|patch)$/.test(lower) || /(^|\/)(dockerfile|makefile)$/.test(lower)) return "code";
   if (mime.startsWith("text/") || mime === "application/json" || /\.(md|markdown|mdx|rst|txt|json|jsonc|csv|tsv|log|xml|ya?ml|toml|ini|conf|cfg|properties|env|gitignore|editorconfig|lrc|srt|vtt)$/.test(lower) || /(^|\/)\.env(\.[\w.-]+)?$/.test(lower)) return "text";
   if (/\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst|dmg|iso)$/.test(lower) || /zip|compressed|x-tar/.test(mime)) return "archive";
   return "other";
 }
 
-const KIND_LABEL: Record<FileKind, string> = { folder: "文件夹", image: "图片", video: "视频", audio: "音频", pdf: "PDF 文档", text: "文本", code: "源代码", archive: "压缩包", other: "文件" };
+const KIND_LABEL: Record<FileKind, string> = { folder: "文件夹", image: "图片", video: "视频", audio: "音频", pdf: "PDF 文档", document: "文档", spreadsheet: "表格", presentation: "演示文稿", text: "文本", code: "源代码", archive: "压缩包", other: "文件" };
 
 export function kindLabel(kind: FileKind) { return KIND_LABEL[kind]; }
 
-/* 文件类型图标：文件是一张细描边、折角的纸，类型只用纸面中下部的一个彩色记号区分；文件夹是双色扁平文件夹。
- * 纸的描边不随尺寸变粗（non-scaling-stroke），记号随尺寸等比放大。 */
+/* 文件类型图标：文件是一张细描边、折角的纸，类型只靠纸面中下部的单色记号区分（形状或格式标签，不靠颜色）；
+ * 文件夹是双色扁平文件夹。纸的描边不随尺寸变粗（non-scaling-stroke），记号随尺寸等比放大。 */
 const PAPER = "M6.5 2.5h7l5 5v13a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1Z";
 const FOLD = "M13.5 2.5v4a1 1 0 0 0 1 1h4";
+function formatLabel(text: string) {
+  return <><rect className="glyph-fill" x="3.5" y="12.25" width="12" height="6" rx="1.25" /><text className="glyph-label" x="9.5" y="16.6" textAnchor="middle">{text}</text></>;
+}
 const KIND_MARK: Record<Exclude<FileKind, "folder">, ReactNode> = {
   text: <path className="glyph-stroke" d="M8.75 12h6.5M8.75 14.75h6.5M8.75 17.5h4" />,
   code: <path className="glyph-stroke" d="M10.25 12.25 8.5 14.5l1.75 2.25m3.5-4.5 1.75 2.25-1.75 2.25" />,
   image: <><circle className="glyph-fill" cx="14.6" cy="11.6" r="1.25" /><path className="glyph-fill" d="M7.9 18.4 10.6 14.3a.5.5 0 0 1 .83 0l1.7 2.45 1.05-1.2a.5.5 0 0 1 .78.04l1.67 2.4a.25.25 0 0 1-.2.4H8.1a.25.25 0 0 1-.2-.38Z" /></>,
   video: <path className="glyph-fill" d="M10.25 11.6a.6.6 0 0 1 .9-.52l4.6 2.9a.6.6 0 0 1 0 1.02l-4.6 2.9a.6.6 0 0 1-.9-.51Z" />,
   audio: <><path className="glyph-stroke" d="M10.75 17.25V12l4.25-.9v5.25" /><circle className="glyph-fill" cx="9.6" cy="17.3" r="1.3" /><circle className="glyph-fill" cx="13.85" cy="16.4" r="1.3" /></>,
-  pdf: <><rect className="glyph-fill" x="3.5" y="12.25" width="12" height="6" rx="1.25" /><text className="glyph-label" x="9.5" y="16.6" textAnchor="middle">PDF</text></>,
+  pdf: formatLabel("PDF"),
+  document: formatLabel("DOC"),
+  spreadsheet: formatLabel("XLS"),
+  presentation: formatLabel("PPT"),
   archive: <><path className="glyph-stroke" d="M11.5 2.75v1.25m0 1.75V7m0 1.75V10" /><rect className="glyph-fill" x="10" y="11.25" width="3" height="4.25" rx=".75" /></>,
   other: null,
 };
@@ -92,13 +102,10 @@ export function FolderThumbnail({ previews = [] }: { previews?: { key: string; c
 
 function ThumbnailImage({ kind, url }: { kind: FileKind; url?: string }) {
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
-  const [attempt, setAttempt] = useState(0);
   return <div className={`file-thumbnail thumbnail-${state}`}>
     {(!url || state !== "ready") && <FileTile kind={kind} size="xl" />}
-    {url && state !== "failed" && <img key={attempt} src={url} alt="" loading="lazy" onLoad={() => setState("ready")} onError={() => setState("failed")} />}
+    {url && state !== "failed" && <img src={url} alt="" loading="lazy" onLoad={() => setState("ready")} onError={() => setState("failed")} />}
     {url && state === "ready" && (kind === "video" || kind === "audio") && <span className="thumbnail-badge" aria-hidden="true"><Icon name={kind === "video" ? "play" : "audio"} size={12} /></span>}
-    {url && state === "loading" && <span className="thumbnail-loading" aria-label="正在加载缩略图"><span className="spinner" /></span>}
-    {url && state === "failed" && <Button size="sm" variant="ghost" icon="refresh" onClick={event => { event.stopPropagation(); setState("loading"); setAttempt(current => current + 1); }}>重试缩略图</Button>}
   </div>;
 }
 
@@ -137,7 +144,7 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string } & PlaybackProps;
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip } & PlaybackProps;
 export function FilePreview(props: PreviewProps) {
   const [attempt, setAttempt] = useState(0);
   return <PreviewContent key={`${props.kind}:${props.kind === "audio" || props.kind === "video" ? "media" : props.url}:${attempt}`} {...props} onRetry={() => setAttempt(current => current + 1)} />;
@@ -151,7 +158,7 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onLyricLine }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onLyricLine }: PreviewProps & { onRetry: () => void }) {
   const [content, setContent] = useState<PreviewText | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
@@ -179,14 +186,12 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
     </div>
   );
   if (unplayable) return fallback;
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onLyricLine={onLyricLine} />;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onLyricLine={onLyricLine} />;
   if (mediaFailed) return fallback;
-  if (kind === "image" || kind === "pdf") return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
-    {!mediaReady && (kind === "image" && poster
-      // 原图从存储取回并解密需要时间：先显示封面图占位，原图加载完成后淡入替换。
-      ? <div className="preview-media preview-media-poster"><img src={poster} alt="" aria-hidden="true" onLoad={event => onImageSize?.(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight, false)} /><span className="preview-poster-status" role="status"><span className="spinner" />正在加载原图…</span></div>
-      : <div className="preview-media-loader"><PreviewLoading onRetry={onRetry} /></div>)}
-    {kind === "image" && <div className="preview-media preview-media-full"><img src={url} alt={name} onError={() => setMediaFailed(true)} onLoad={event => { const image = event.currentTarget; setMediaReady(true); onImageSize?.(image.naturalWidth, image.naturalHeight, true); onImageLoad?.(image); }} /></div>}
+  // 原图从存储取回并解密需要时间：查看器先显示封面图占位，原图加载完成后淡入替换。
+  if (kind === "image") return <ImageViewer url={url} name={name} poster={poster} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
+  if (kind === "pdf") return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
+    {!mediaReady && <div className="preview-media-loader"><PreviewLoading onRetry={onRetry} /></div>}
     {kind === "pdf" && <iframe className="preview-frame" src={url} title={name} onLoad={() => setMediaReady(true)} onError={() => setMediaFailed(true)} />}
   </div>;
   if (kind === "text" || kind === "code") {
@@ -210,7 +215,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     url: api.contentUrl(item.key), downloadUrl: api.contentUrl(item.key, true), poster: api.fileThumbnail(item, "poster"), thumbnail: api.fileThumbnail(item),
   };
   const source = sourceOf(active);
-  const [playlistExpanded, setPlaylistExpanded] = useState(() => kind === "image" && window.matchMedia("(min-width: 861px)").matches);
+  const [playlistExpanded, setPlaylistExpanded] = useState(false);
   const controls = useRef<PlaybackControls | null>(null), pendingPlay = useRef(false), currentKey = useRef(active.key);
   currentKey.current = active.key;
   const [playing, setPlaying] = useState(false);
@@ -259,8 +264,6 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     } else if (key === "j" || key === "l") controls.current?.seekBy(key === "j" ? -10 : 10);
     else controls.current?.adjustVolume(key === "arrowup" ? 0.05 : -0.05);
   }
-  const transport = (compact = false) => <PlaylistControls playlist={playlist} compact={compact} image={kind === "image"} onSelect={select} playing={playing} onToggle={togglePlayback}
-    expanded={playlistExpanded} onExpand={() => setPlaylistExpanded(value => !value)} />;
   const extension = active.key.match(/\.([a-z\d]{1,10})$/i)?.[1].toUpperCase();
   const typeLabel = extension && kind !== "pdf" && kind !== "folder" ? `${extension === "JPG" ? "JPEG" : extension} ${kindLabel(kind)}` : kindLabel(kind);
   // Markdown 里的相对路径图片按文件所在目录解析为云盘内的文件；解析函数保持稳定，避免重复渲染整篇文档。
@@ -270,9 +273,9 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   const stage = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const node = stage.current, modal = node?.closest<HTMLElement>(".modal"), backdrop = modal?.parentElement;
-    const header = modal?.querySelector<HTMLElement>(".modal-header"), toolbar = node?.querySelector<HTMLElement>(".preview-playlist-toolbar");
-    if (!browsable || !node || !modal || !backdrop || !header || !toolbar) return;
-    // 按实际头部和工具栏高度计算画布，避免窄屏换行挤出列表及百分比高度循环。
+    const header = modal?.querySelector<HTMLElement>(".modal-header");
+    if (!browsable || !node || !modal || !backdrop || !header) return;
+    // 按实际头部高度计算画布，避免窄屏换行挤出内容及百分比高度循环；导航都在播放器内部，不再有单独的工具栏。
     const resize = () => {
       if (modal.classList.contains("is-minimized")) return;
       const outer = getComputedStyle(backdrop), frame = getComputedStyle(modal);
@@ -281,11 +284,10 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       // 入场动画带缩放变换，布局高度不受动画影响，避免误算可用画布。
       const content = Math.max(0, height - header.offsetHeight - parseFloat(frame.borderTopWidth) - parseFloat(frame.borderBottomWidth));
       node.style.setProperty("--preview-content-height", `${content}px`);
-      const playerHeight = Math.max(0, content - toolbar.offsetHeight);
-      node.style.setProperty("--preview-player-height", `${playerHeight}px`);
+      node.style.setProperty("--preview-player-height", `${content}px`);
     };
     const observer = new ResizeObserver(resize);
-    for (const element of [header, toolbar, backdrop]) observer.observe(element);
+    for (const element of [header, backdrop]) observer.observe(element);
     window.addEventListener("resize", resize); resize();
     return () => { observer.disconnect(); window.removeEventListener("resize", resize); };
   }, [browsable, kind, playlistExpanded]);
@@ -301,9 +303,23 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     const key = resolveRelativeKey(parentPath(active.key), src);
     return key && assetRef.current ? assetRef.current(key) : null;
   } : undefined, [active.key, hasAssets]);
+  // 上一个／下一个、播放模式和列表开关都在播放器或图片查看器内部；图片用底部缩略图条代替侧边列表。
+  const index = Math.max(0, playlist.items.findIndex(item => item.key === active.key));
+  const nav: PreviewNav | undefined = browsable ? {
+    index, count: playlist.items.length,
+    onPrevious: () => select(playlist.previous()), onNext: () => { const next = playlist.next(); if (next) select(next); },
+    ...(media ? { mode: playlist.mode, onMode: playlist.changeMode, playlistOpen: playlistExpanded, onPlaylist: () => setPlaylistExpanded(value => !value) } : {}),
+  } : undefined;
+  const strip: PreviewStrip | undefined = kind === "image" ? { items: playlist.items, current: active.key, onSelect: select, thumbnail: item => sourceOf(item).thumbnail } : undefined;
+  const panelOpen = media && playlistExpanded;
   // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
-    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)}>{transport(true)}</MinimizedPlayback> : kind === "image" ? transport(true) : undefined} className={`preview-modal preview-modal-${kind}${api.isPrivatePath(active.key) ? " is-private" : ""}${browsable && playlistExpanded ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
+    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
+      : kind === "image" && nav && nav.count > 1 ? <div className="preview-mini-gallery">
+        <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
+        <span>{nav.index + 1} / {nav.count}</span>
+        <IconButton icon="next" label="下一张" size="sm" onClick={nav.onNext} />
+      </div> : undefined} className={`preview-modal preview-modal-${kind}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>
@@ -314,15 +330,14 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         <a className="icon-btn icon-btn-ghost icon-btn-sm" href={source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
         <span className="modal-actions-divider" aria-hidden="true" />
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist" : ""}${browsable && playlistExpanded ? " is-playlist-open" : ""}`}><FilePreview kind={kind} url={kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${panelOpen ? " is-playlist-open" : ""}`}><FilePreview kind={kind} url={kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}
         onLyricLine={line => setLyric(current => current.key === active.key && current.line === line ? current : { key: active.key, line })}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}
-        loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} />
-        {browsable && transport()}
-        {browsable && playlistExpanded && <PlaylistPanel playlist={playlist} onSelect={select} typeLabel={kindLabel(kind)} image={kind === "image"}
-          onCollapse={() => { setPlaylistExpanded(false); stage.current?.querySelector<HTMLButtonElement>(".preview-playlist-toggle")?.focus(); }}
+        loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} nav={nav} strip={strip} />
+        {panelOpen && <PlaylistPanel playlist={playlist} onSelect={select} typeLabel={kindLabel(kind)}
+          onCollapse={() => setPlaylistExpanded(false)}
           renderThumbnail={item => <FileVisual kind={getFileKind(item.content_type, item.key)} src={sourceOf(item).thumbnail} size="lg" />} />}
       </div>
     </Modal>

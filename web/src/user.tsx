@@ -5,7 +5,7 @@ import { DocsPage } from "./docs/docs";
 
 import { SharePage } from "./share";
 import { ADMIN_MODULES, AdminConsole, AdminDocsGate, LockedGate, type AdminModule } from "./admin";
-import { AppShell, FullPageLoading, LoginPage, SetupPage, useSessionGuard, type NavGroup } from "./shell";
+import { AppShell, FullPageLoading, LoginPage, SetupPage, isPlainClick, useSessionGuard, type NavGroup } from "./shell";
 import { Icon, Progress, formatBytes, toast, usageTone, useDocumentTitle } from "./ui";
 
 import { FilesView } from "./user/files";
@@ -113,6 +113,15 @@ function readLocation(): { section: Section; prefix: string } {
   return { section: view === "shared" || view === "keys" || view === "trash" || view === "private" || view === "downloads" || view === "account" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
 }
 
+function sectionUrl(section: Section, prefix = "") {
+  if (isAdminSection(section)) return section === "overview" ? "/admin" : `/admin/${section}`;
+  const params = new URLSearchParams();
+  if (section !== "files") params.set("view", section);
+  if ((section === "files" || section === "private") && prefix) params.set("path", section === "private" ? prefix.replace(api.PRIVATE_PREFIX, "") : prefix);
+  const query = params.toString();
+  return query ? `/?${query}` : "/";
+}
+
 function MainShell({ session, onLogout }: { session: api.Session; onLogout: () => void }) {
   const isAdmin = session.role === "admin";
   const [location, setLocation] = useState(readLocation);
@@ -146,16 +155,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
     return () => window.removeEventListener("popstate", pop);
   }, []);
   const navigate = useCallback((section: Section, prefix = "") => {
-    let url = "/";
-    if (isAdminSection(section)) url = section === "overview" ? "/admin" : `/admin/${section}`;
-    else {
-      const params = new URLSearchParams();
-      if (section !== "files") params.set("view", section);
-      if ((section === "files" || section === "private") && prefix) params.set("path", section === "private" ? prefix.replace(api.PRIVATE_PREFIX, "") : prefix);
-      const query = params.toString();
-      url = query ? `/?${query}` : "/";
-    }
-    window.history.pushState(null, "", url);
+    window.history.pushState(null, "", sectionUrl(section, prefix));
     setLocation({ section, prefix: section === "private" ? (api.isPrivatePath(prefix) ? prefix : api.PRIVATE_PREFIX + prefix) : prefix });
     document.getElementById("main")?.scrollTo?.({ top: 0 });
   }, []);
@@ -193,7 +193,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
       {section === "private" && <PrivateSpaceView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={path => navigate("private", path)} onChanged={refreshUsage} />}
       {section === "shared" && <SharedView session={session} onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
       {section === "keys" && <KeysView bucketName={usage ? `user-${usage.id}` : null} />}
-      {section === "downloads" && <DownloadsView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} onCreated={() => setDownloadRevision(value => value + 1)} />}
+      {section === "downloads" && <DownloadsView onChanged={refreshUsage} onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCreated={() => setDownloadRevision(value => value + 1)} />}
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
     </>;
   }
@@ -212,19 +212,21 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
     { label: "帮助", items: [{ key: "docs" as Section, label: "使用文档", icon: "book", href: "/docs" }] },
   ];
   return (
-    <AppShell active={section} onNavigate={key => navigate(key)} groups={groups}
+    <AppShell active={section} onNavigate={key => navigate(key)} hrefFor={key => sectionUrl(key)} groups={groups}
       sidebarFooter={<>
-        {isAdmin && (
-          // 正常时只是一行带状态点的小字；锁定时变成醒目的提示条。
-          <button type="button" className={`system-chip${locked ? " is-locked" : ""}`} onClick={() => navigate("maintenance")} title="安全与维护">
-            {locked ? <Icon name="lock" size={15} /> : <span className={`status-dot${status === null ? " is-pending" : ""}`} aria-hidden="true" />}
-            <span><strong>{status === null ? "检查中" : locked ? "系统已锁定" : "系统运行中"}</strong>{locked && <small>输入加密口令后继续使用</small>}</span>
-          </button>
+        {/* 系统正常时不占位置；只有锁定（或状态读取中）才提示，点击进入安全与维护。 */}
+        {isAdmin && locked && (
+          <a className="system-chip is-locked" href={sectionUrl("maintenance")} onClick={event => { if (isPlainClick(event)) { event.preventDefault(); navigate("maintenance"); } }}>
+            <Icon name="lock" size={15} />
+            <span><strong>系统已锁定</strong><small>输入加密口令后继续使用</small></span>
+          </a>
         )}
-        <div className="storage-meter">
-          <div className="storage-meter-head"><span>存储空间</span><strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></div>
-          {usage?.quota_bytes != null && usage.quota_bytes > 0 && <Progress value={percent} tone={usageTone(percent)} label="存储使用率" />}
-          <p>{usage?.quota_bytes != null ? usage.quota_bytes > 0 ? `共 ${formatBytes(usage.quota_bytes)} · 已用 ${Math.round(percent)}%` : "配额为 0，无法上传" : "不限配额"}</p>
+        <div className="storage-meter" title={usage?.quota_bytes == null ? "未设置空间配额" : undefined}>
+          <div className="storage-meter-head"><span>已用空间</span><strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></div>
+          {usage?.quota_bytes != null && <>
+            {usage.quota_bytes > 0 && <Progress value={percent} tone={usageTone(percent)} label="存储使用率" />}
+            <p>{usage.quota_bytes > 0 ? `共 ${formatBytes(usage.quota_bytes)} · ${Math.round(percent)}%` : "配额为 0，无法上传"}</p>
+          </>}
         </div>
       </>}
       account={{ name: session.username, caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", menu: [
@@ -239,7 +241,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
       </PreviewHost>
       <div className="tray-stack">
         {workspaceReady && <DownloadTray hidden={section === "downloads"} revision={downloadRevision} onOpenTasks={() => navigate("downloads")}
-          onOpenFolder={prefix => navigate("files", prefix)} onCompleted={() => { setUploadRevision(value => value + 1); refreshUsage(); }} />}
+          onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCompleted={() => { setUploadRevision(value => value + 1); refreshUsage(); }} />}
         <UploadTray queue={uploads} />
       </div>
       </PrivateSessionProvider>

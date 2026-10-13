@@ -31,8 +31,8 @@ function AdminDeploy() {
         [<C>--offline-hls</C>, <C>TGDRIVE_OFFLINE_HLS=1</C>, "关闭", "允许 M3U8，仍需本地 FFmpeg；管理员设置优先"],
         [<C>--offline-x</C>, <C>TGDRIVE_OFFLINE_X=1</C>, "关闭", "允许 X 单帖的图片、视频，需本地平台组件"],
         [<C>--offline-youtube</C>, <C>TGDRIVE_OFFLINE_YOUTUBE=1</C>, "关闭", "允许 YouTube 单视频、Shorts，需平台组件、JavaScript 运行时和 FFmpeg"],
-        [<C>--offline-max-mib</C>, <C>TGDRIVE_OFFLINE_MAX_MIB</C>, "512", "平台单任务文件大小与临时输入轨上限，MiB；受低资源预算限制"],
-        [<C>--youtube-max-height</C>, <C>TGDRIVE_YOUTUBE_MAX_HEIGHT</C>, "720", "YouTube 清晰度上限；低资源预算最高 720p"],
+        [<C>--offline-max-mib</C>, <C>TGDRIVE_OFFLINE_MAX_MIB</C>, "512", "需临时缓存的音视频输入轨上限，MiB；低资源模式最多 512 MiB"],
+        [<C>--youtube-max-height</C>, <C>TGDRIVE_YOUTUBE_MAX_HEIGHT</C>, "2160", "YouTube 清晰度上限；低资源模式不自动下调"],
         [<C>--offline-proxy</C>, <C>TGDRIVE_OFFLINE_PROXY</C>, "直连", "离线下载出站代理，http://主机:端口 或 socks5://主机:端口，可带用户名密码；管理员设置优先"],
         [<C>--trusted-proxies</C>, <C>TGDRIVE_TRUSTED_PROXIES</C>, "Uvicorn 默认", "信任 X-Forwarded-For/Proto 的代理 IP 或网段，逗号分隔"],
       ]} />
@@ -47,7 +47,7 @@ function AdminDeploy() {
       <p>YouTube 保留 HTTPS 与 HLS 两类格式，登录后也尝试 Safari HLS；直连媒体被拒绝时重新解析一次，优先使用同一清晰度的 HLS。Cookie 不等于 PO Token，也不能解决服务器出口限制。配置代理时让 YouTube 页面、API、JavaScript 和 googlevideo 媒体使用同一稳定出口；跨出口分流或地址过期可能导致解析成功后下载 403。X 主接口返回占位响应时会尝试 X 自己的公开嵌入接口；受限或已删除的媒体仍需平台授权。</p>
       <p>「下载与资源」的生效配置列出 yt-dlp、yt-dlp-ejs、gallery-dl、JavaScript 运行时与 FFmpeg 的版本（启动时检测）。yt-dlp 版本号即发布日期，超过 60 天会提示更新：YouTube 经常调整接口，旧版本解析失败时请拉取最新的平台镜像。</p>
       <p>YouTube 解析只列举格式，不提前试下载默认媒体。解析失败会区分真人验证、登录权限、地区限制、请求频率、Cookie 失效和 JavaScript 挑战失败；挑战失败进一步区分内存不足、脚本组件、运行进程、播放器脚本读取和解码器错误。Node 堆默认 128 MiB，只在明确内存不足时提高至 192 MiB 重试一次；登录客户端的挑战无法解码时还会尝试一次公开访问，登录、私密和年龄限制不会触发此回退，所有尝试仍共用 120 秒时限。容器日志中的 <C>platform_extract_failed</C> 记录固定的 <C>js_reason</C>、<C>js_retries</C>、错误分类、异常类型、代码位置和最近最多 16 次请求的固定阶段／状态码；Cookie 和认证头仅记录是否存在。<C>platform_extract_recovered</C> 记录有限重试后恢复的解析，<C>platform_source_failed</C> 标识解析通道的连接失败。日志不记录原始异常、视频地址或凭据；解析 403 会说明是网页、播放 API 还是播放列表，不能仅凭通用提示认定是服务器出口受限。</p>
-      <p>YouTube 分离轨暂存于数据目录的受限任务缓存，FFmpeg 输出直接进入加密存储，不另存完整成品临时文件。默认 720p、单任务与输入轨缓存最多 512 MiB；低资源预算限制上限。停止、失败清理临时轨，重启清理异常退出遗留缓存。输入轨在临时目录内为明文，目录权限 0700、文件权限 0600；需同时为输入轨和最终本地加密分片保留磁盘空间。平台登录 Cookie 加密保存在任务参数中，随口令轮换重加密。站点改变接口时需要更新可选依赖并重建镜像。</p>
+      <p>YouTube 分离轨暂存于数据目录的受限任务缓存，FFmpeg 输出直接进入加密存储，不另存完整成品临时文件。默认清晰度上限 2160p，低资源模式不自动下调；单轨媒体和合并后的成品流式写入并受用户空间配额约束。需要缓存与合并的输入轨受临时缓存上限控制，低资源模式最多 512 MiB。停止、失败清理临时轨，重启清理异常退出遗留缓存。输入轨在临时目录内为明文，目录权限 0700、文件权限 0600；需同时为输入轨和最终本地加密分片保留磁盘空间。平台登录 Cookie 加密保存在任务参数中，随口令轮换重加密。站点改变接口时需要更新可选依赖并重建镜像。</p>
       <p>删除用户前会先禁用账号并停止后台下载，阻止清理期间再次创建任务；如果清理失败，账号保留禁用状态，可在修复后继续删除或重新启用。</p>
       <p>整个站点是同一个应用、同一个端口，只有一个登录页。账号的角色决定登录后能看到什么：</p>
       <Table head={["角色", "可见内容"]} rows={[

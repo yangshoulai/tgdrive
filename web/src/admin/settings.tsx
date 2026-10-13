@@ -38,7 +38,7 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
   const dirty = settings !== null && (form.public_base_url !== (settings.public_base_url.value ?? "") || form.s3_endpoint !== (settings.s3_endpoint.value ?? ""));
   return (
     <>
-      <PageHeader title="系统设置" description={`配置 ${BRAND} 的访问地址、下载功能与资源预算。`} />
+      <PageHeader title="系统设置" />
       <div className="stack">
         <Panel title="访问地址">
           <form className="form settings-form" onSubmit={submit} noValidate>
@@ -55,10 +55,12 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
               <input id="setting-s3" className="input mono" inputMode="url" placeholder="https://s3.example.com" value={form.s3_endpoint} onChange={event => { setForm({ ...form, s3_endpoint: event.target.value }); setError(""); }} />
             </Field>
             {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
-            <div className="settings-actions">
-              <Button type="submit" variant="primary" loading={busy} disabled={!dirty}>保存</Button>
-              {dirty && <Button variant="ghost" onClick={() => settings && setForm({ public_base_url: settings.public_base_url.value ?? "", s3_endpoint: settings.s3_endpoint.value ?? "" })}>放弃修改</Button>}
-            </div>
+            {/* 有改动时才出现保存栏，不常驻一个灰色的禁用按钮。 */}
+            {(dirty || busy) && <div className="settings-actions">
+              <span className="settings-actions-note">有未保存的修改</span>
+              <Button variant="ghost" disabled={busy} onClick={() => settings && setForm({ public_base_url: settings.public_base_url.value ?? "", s3_endpoint: settings.s3_endpoint.value ?? "" })}>放弃修改</Button>
+              <Button type="submit" variant="primary" loading={busy}>保存</Button>
+            </div>}
           </form>
         </Panel>
         <Panel title="生效后的地址" description="按当前填写的内容预览，用户看到的链接会是这样。">

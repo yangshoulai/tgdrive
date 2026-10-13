@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
-import { Button, Icon, IconButton, Progress, formatBytes } from "../ui";
-import { downloadGlyph, downloadPercent, downloadStatusLabel, isActiveDownload, parentFolder } from "./downloads";
+import { Button, Icon, IconButton, formatBytes } from "../ui";
+import { downloadGlyph, downloadPercent, downloadStatusLabel, downloadTaskFolder, downloadTaskName, isActiveDownload, seconds } from "./downloads";
+import { TrayBar, TrayRing, type TrayState } from "./tray";
+
+const COMPLETED_VISIBLE_MS = 8000;
 
 /**
  * 离线下载在服务器上运行，离开「下载任务」页后仍要能看到进度。
@@ -9,17 +12,23 @@ import { downloadGlyph, downloadPercent, downloadStatusLabel, isActiveDownload, 
  * 在「下载任务」页隐藏并暂停轮询，避免与页面列表重复。
  */
 export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCompleted }: {
-  hidden: boolean; revision: number; onOpenTasks: () => void; onOpenFolder: (prefix: string) => void; onCompleted: () => void;
+  hidden: boolean; revision: number; onOpenTasks: () => void; onOpenFolder: (prefix: string, privateSpace?: boolean) => void; onCompleted: () => void;
 }) {
   const [tracked, setTrackedState] = useState<Map<number, api.DownloadTask>>(new Map());
   const trackedRef = useRef(tracked);
   const setTracked = (next: Map<number, api.DownloadTask>) => { trackedRef.current = next; setTrackedState(next); };
   const [collapsed, setCollapsed] = useState(false);
   const [retrying, setRetrying] = useState(new Set<number>());
+  const completedAt = useRef(new Map<number, number>());
   const completedRef = useRef(onCompleted);
   completedRef.current = onCompleted;
   const anyActive = [...tracked.values()].some(isActiveDownload);
   const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const lockPrivate = () => setTracked(new Map([...trackedRef.current].map(([id, task]) => [id, task.private ? { ...task, key: "私密空间下载" } : task])));
+    window.addEventListener("tessera:private-locked", lockPrivate);
+    return () => window.removeEventListener("tessera:private-locked", lockPrivate);
+  }, []);
   useEffect(() => {
     if (hidden) return;
     const controller = new AbortController();
@@ -29,7 +38,11 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
       for (const task of page.tasks) {
         const previous = next.get(task.id);
         if (previous || isActiveDownload(task)) next.set(task.id, task);
-        if (previous && isActiveDownload(previous) && task.status === "completed") finished = true;
+        if (previous && isActiveDownload(previous) && task.status === "completed") {
+          completedAt.current.set(task.id, Date.now());
+          finished = true;
+        }
+        if (task.status !== "completed") completedAt.current.delete(task.id);
       }
       setTracked(next);
       // 新完成的文件出现在文件列表和用量里。
@@ -45,50 +58,71 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
     return () => document.removeEventListener("visibilitychange", visible);
   }, []);
   const tasks = [...tracked.values()].sort((a, b) => b.id - a.id);
+  useEffect(() => {
+    const completed = tasks.filter(task => task.status === "completed" && completedAt.current.has(task.id));
+    if (!completed.length) return;
+    const expires = Math.min(...completed.map(task => completedAt.current.get(task.id)! + COMPLETED_VISIBLE_MS));
+    const timer = window.setTimeout(() => setTracked(new Map([...trackedRef.current].filter(([id, task]) => {
+      const doneAt = completedAt.current.get(id);
+      if (task.status === "completed" && doneAt != null && doneAt + COMPLETED_VISIBLE_MS <= Date.now()) {
+        completedAt.current.delete(id);
+        return false;
+      }
+      return true;
+    }))), Math.max(0, expires - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [tracked]);
   useEffect(() => { if (!tasks.length) setCollapsed(false); }, [tasks.length]);
   if (hidden || !tasks.length) return null;
   const active = tasks.filter(isActiveDownload);
   const failed = tasks.filter(task => task.status === "failed").length;
   const known = active.filter(task => downloadPercent(task) !== null);
   const overall = known.length ? known.reduce((sum, task) => sum + (downloadPercent(task) ?? 0), 0) / known.length : null;
+  const speed = active.reduce((sum, task) => sum + (task.status === "running" ? task.speed || 0 : 0), 0);
+  const eta = active.reduce<number | null>((longest, task) => task.eta_seconds === null ? longest : Math.max(longest ?? 0, task.eta_seconds), null);
+  const state: TrayState = active.length ? "active" : failed ? "error" : "done";
   const title = active.length ? `正在下载 ${active.length} 个文件` : failed ? `${failed} 个下载失败` : "离线下载完成";
+  const subtitle = active.length ? [speed ? `${formatBytes(speed)}/s` : "等待数据", eta !== null && speed ? `约剩 ${seconds(eta)}` : null, overall !== null ? `${Math.floor(overall)}%` : null].filter(Boolean).join(" · ")
+    : failed ? "可以继续下载，或到任务页查看原因" : "文件已保存到云盘";
   const dismiss = () => setTracked(new Map([...trackedRef.current].filter(([, task]) => isActiveDownload(task))));
   async function retry(task: api.DownloadTask) {
     setRetrying(current => new Set(current).add(task.id));
     try {
-      const updated = await api.controlDownload(task.id, "resume");
+      const updated = await api.controlDownload(task.id, "resume", undefined, task.private);
       if (updated) setTracked(new Map(trackedRef.current).set(task.id, updated));
       setTick(value => value + 1);
     } catch { /* 失败原因在任务页查看 */ }
     finally { setRetrying(current => { const next = new Set(current); next.delete(task.id); return next; }); }
   }
   return (
-    <aside className={`upload-tray download-tray${collapsed ? " is-collapsed" : ""}`} aria-label="离线下载进度" aria-live="polite">
+    <aside className={`upload-tray download-tray is-${state}${collapsed ? " is-collapsed" : ""}`} aria-label="离线下载进度" aria-live="polite">
       <header>
-        <span className={`tray-status${active.length ? " is-active" : failed ? " is-error" : " is-done"}`}><Icon name={active.length ? "download" : failed ? "alert" : "check"} size={16} /></span>
-        <strong>{title}</strong>
+        <TrayRing state={state} percent={overall} icon="download" />
+        <div className="tray-heading"><strong>{title}</strong><small>{subtitle}</small></div>
         <IconButton icon="chevronDown" size="sm" label={collapsed ? "展开" : "收起"} onClick={() => setCollapsed(value => !value)} />
         <IconButton icon="list" size="sm" label="查看下载任务" onClick={onOpenTasks} />
         {!active.length && <IconButton icon="x" size="sm" label="关闭下载列表" onClick={dismiss} />}
       </header>
-      {overall !== null && <Progress value={overall} label="离线下载总体进度" />}
       {!collapsed && (
         <ul>
           {tasks.map(task => {
-            const name = task.key.split("/").at(-1) ?? task.key;
+            const name = downloadTaskName(task);
             const percent = downloadPercent(task);
             const running = isActiveDownload(task);
-            return <li key={task.id}>
-              <span className="download-glyph"><Icon name={downloadGlyph(task)} size={20} /></span>
+            const progress = task.size ? `${formatBytes(task.received)} / ${formatBytes(task.size)}` : task.received ? formatBytes(task.received) : null;
+            const detail = running ? [downloadStatusLabel(task), task.status === "running" && task.phase !== "resolving" ? progress : null, task.status === "running" && task.speed ? `${formatBytes(task.speed)}/s` : null, task.status === "interrupted" ? task.error : null].filter(Boolean).join(" · ")
+              : task.status === "completed" ? formatBytes(task.stored_bytes || task.size || 0) : task.error ?? downloadStatusLabel(task);
+            return <li key={task.id} className={`tray-item is-${task.status}`}>
+              <span className="tray-icon"><span className={`download-glyph download-glyph-${downloadGlyph(task)}`}><Icon name={downloadGlyph(task)} size={18} /></span>
+                {(task.status === "completed" || task.status === "failed") && <span className="tray-badge"><Icon name={task.status === "completed" ? "check" : "alert"} size={10} /></span>}</span>
               <div className="tray-job">
-                <span className="tray-name" title={task.key}>{name}</span>
-                {running ? percent !== null ? <Progress value={percent} label={`${name} 下载进度`} /> : <div className="download-unknown" role="status" aria-label="总大小未知" />
-                  : <small className={task.status === "failed" ? "tone-danger" : "muted"}>{task.status === "completed" ? formatBytes(task.stored_bytes || task.size || 0) : task.error ?? downloadStatusLabel(task)}</small>}
-                {running && <small className="muted">{downloadStatusLabel(task)}{task.status === "running" && task.speed ? ` · ${formatBytes(task.speed)}/s` : ""}{task.status === "interrupted" && task.error ? ` · ${task.error}` : ""}</small>}
+                <span className="tray-name" title={task.key}><span>{name}</span></span>
+                <small className={task.status === "failed" ? "tone-danger" : "muted"}>{detail}</small>
+                {running && <TrayBar percent={percent} paused={task.status !== "running"} label={percent === null ? `${name} 总大小未知` : `${name} 下载进度`} />}
               </div>
               <span className="tray-right">
-                {running && percent !== null && <small className="muted">{Math.floor(percent)}%</small>}
-                {task.status === "completed" && <IconButton icon="folder" size="sm" label={`打开 ${name} 所在目录`} onClick={() => onOpenFolder(parentFolder(task.key))} />}
+                {running && percent !== null && <span className="tray-percent">{Math.floor(percent)}%</span>}
+                {task.status === "completed" && <IconButton icon="folder" size="sm" label={`打开 ${name} 所在目录`} onClick={() => onOpenFolder(downloadTaskFolder(task), task.private)} />}
                 {(task.status === "failed" || task.status === "stopped") && task.method !== "POST" && <Button size="sm" icon="refresh" loading={retrying.has(task.id)} aria-label={`继续下载 ${name}`} onClick={() => void retry(task)}>继续</Button>}
               </span>
             </li>;

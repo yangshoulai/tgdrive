@@ -510,7 +510,6 @@ class UserApi:
             return {"objects": self._objects_json(page.objects),
                     "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor,
                     "folder_sizes": self.objects.folder_sizes(scope, page.common_prefixes),
-                    "folder_previews": self.objects.folder_previews(scope, page.common_prefixes),
                     "public_folders": self._public_folders(account.bucket_id, page.common_prefixes)}
         return await self.objects.metadata.run_in_thread(read_page)
 
@@ -526,7 +525,6 @@ class UserApi:
         return {"objects": [item for item in items if not item["key"].endswith("/")],
                 "common_prefixes": list(folders), "public_folders": folders,
                 "folder_sizes": self.objects.folder_sizes(Scope(bucket_id), list(folders)),
-                "folder_previews": self.objects.folder_previews(Scope(bucket_id), list(folders)),
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
     async def folders(self, token: str, *, prefix: str = "", cursor: str = "", limit: int = 50):
@@ -778,6 +776,50 @@ class UserApi:
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         return await self.objects.get_object(self._scope(token), self._path(path), start, end)
+
+    ARCHIVE_LIMIT = 200
+
+    async def archive(self, token: str, paths: list[str]) -> tuple[str, AsyncIterator[tuple[str, int, float, AsyncIterator[bytes]]]]:
+        """打包下载所选文件与文件夹（递归）。返回压缩包名与条目迭代器；条目逐个按需读取，不在内存中拼接。
+
+        每个条目都经 content 读取，因此私密空间沿用逐块校验授权；文件夹按键集分页列出。"""
+        if not isinstance(paths, list) or not 1 <= len(paths) <= self.ARCHIVE_LIMIT or any(not isinstance(p, str) for p in paths):
+            raise ValueError(f"一次最多打包下载 {self.ARCHIVE_LIMIT} 项")
+        keys = [self._path(p, directory=p.endswith("/")) for p in dict.fromkeys(paths)]
+        # 文件夹与其中的项目同时选择时只打包最外层，避免重复。
+        roots = [k for k in keys if not any(k != other and other.endswith("/") and k.startswith(other) for other in keys)]
+        scope = self._scope(token)
+        # 预先校验所选文件存在，避免下载到一半才发现缺文件。
+        await self.objects.metadata.run_in_thread(lambda: [self.objects.head_object(scope, k) for k in roots if not k.endswith("/")])
+        base = lambda key: key[:key.rstrip("/").rfind("/") + 1]
+
+        async def entries():
+            found = False
+            for key in roots:
+                if not key.endswith("/"):
+                    info, stream = await self.content(token, key)
+                    found = True
+                    yield key[len(base(key)):], info.size, info.modified_at, stream
+                    continue
+                cursor: str | None = None
+                while True:
+                    page = await self.objects.metadata.run_in_thread(
+                        lambda: self.objects.list_objects(self._scope(token), key, None, cursor, 200))
+                    for item in page.objects:
+                        if item.key.endswith("/"):
+                            continue
+                        info, stream = await self.content(token, item.key)
+                        found = True
+                        yield item.key[len(base(key)):], info.size, info.modified_at, stream
+                    if not page.next_cursor:
+                        break
+                    cursor = page.next_cursor
+            if not found:
+                raise ValueError("所选文件夹中没有可下载的文件")
+
+        single = roots[0].rstrip("/").rsplit("/", 1)[-1] if len(roots) == 1 else ""
+        parent = "" if base(roots[0]) == PRIVATE_PREFIX else base(roots[0]).rstrip("/").rsplit("/", 1)[-1]
+        return (single or parent or "files") + ".zip", entries()
 
     async def preview_assets(self, token: str, path: str):
         return await self.objects.apreview_assets(self._scope(token), self._path(path))

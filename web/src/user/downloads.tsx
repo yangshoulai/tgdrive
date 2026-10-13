@@ -17,10 +17,12 @@ const glyph = downloadGlyph;
 export const downloadPercent = (task: api.DownloadTask) => task.status === "completed" ? 100 : task.kind === "hls" && task.duration ? Math.min(95, task.processed_seconds / task.duration * 95) : task.size ? Math.min(99, task.received / task.size * 100) : null;
 export const downloadStatusLabel = (task: api.DownloadTask) => task.status === "running" && task.phase ? { resolving: "解析来源", downloading: "下载媒体", merging: "合并音视频", saving: "完成保存" }[task.phase] : LABEL[task.status];
 export const parentFolder = (key: string) => key.includes("/") ? key.slice(0, key.lastIndexOf("/")) + "/" : "";
+export const downloadTaskName = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? "私密空间下载" : task.key.split("/").at(-1) ?? task.key;
+export const downloadTaskFolder = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? api.PRIVATE_PREFIX : parentFolder(task.key);
 const elapsed = (value: number) => value < 1 ? "不到 1 秒" : value < 60 ? `${Math.round(value)} 秒` : value < 3600 ? `${Math.floor(value / 60)} 分 ${Math.round(value % 60)} 秒` : `${Math.floor(value / 3600)} 小时 ${Math.round(value % 3600 / 60)} 分`;
-const seconds = (value: number) => value >= 3600 ? `${Math.ceil(value / 3600)} 小时` : value >= 60 ? `${Math.ceil(value / 60)} 分钟` : `${Math.ceil(value)} 秒`;
+export const seconds = (value: number) => value >= 3600 ? `${Math.ceil(value / 3600)} 小时` : value >= 60 ? `${Math.ceil(value / 60)} 分钟` : `${Math.ceil(value)} 秒`;
 
-export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChanged: () => void; onOpenFolder: (prefix: string) => void; onCreated?: () => void }) {
+export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChanged: () => void; onOpenFolder: (prefix: string, privateSpace?: boolean) => void; onCreated?: () => void }) {
   useDocumentTitle(`下载任务 · ${BRAND}`);
   const [filter, setFilter] = useState("");
   const [newTask, setNewTask] = useState(false);
@@ -32,6 +34,14 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   const previous = useRef(new Map<number, api.DownloadStatus>());
   const fetchPage = useCallback((next: string | null) => { cursor.current = next; epoch.current++; return api.listDownloads(next, filter); }, [filter]);
   const pagination = useCursorPage(fetchPage);
+  useEffect(() => {
+    const lockPrivate = () => {
+      if (!pagination.page) return;
+      pagination.setPage({ ...pagination.page, tasks: pagination.page.tasks.map(task => task.private ? { ...task, key: "私密空间下载" } : task) });
+    };
+    window.addEventListener("tessera:private-locked", lockPrivate);
+    return () => window.removeEventListener("tessera:private-locked", lockPrivate);
+  }, [pagination.page, pagination.setPage]);
   const hasActive = pagination.page?.tasks.some(active) ?? true;
   useEffect(() => {
     let alive = true, polling = false;
@@ -59,7 +69,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     if (busy.has(task.id)) return;
     setBusy(current => new Set(current).add(task.id));
     try {
-      await api.controlDownload(task.id, action);
+      await api.controlDownload(task.id, action, undefined, task.private);
       setConfirm(current => current?.task.id === task.id && current.action === action ? null : current);
       toast.success(action === "stop" ? "任务已停止" : action === "delete" ? "任务已删除" : "任务已加入下载队列");
       await pagination.reload();
@@ -94,16 +104,16 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
               <div className="download-row download-columns" role="row"><span role="columnheader">文件</span><span role="columnheader">下载进度</span><span role="columnheader">状态</span><span role="columnheader">传输信息</span><span role="columnheader" className="sr-only">操作</span></div>
               {page.tasks.map(task => {
                 const percent = downloadPercent(task);
-                const name = task.key.split("/").at(-1) ?? task.key;
-                const folder = parentFolder(task.key);
+                const name = downloadTaskName(task);
+                const folder = downloadTaskFolder(task);
                 const source = task.platform === "youtube" ? "YouTube" : task.platform === "x" ? "X" : task.source_host;
                 const completed = task.status === "completed";
                 return <div className={`download-row download-task${completed ? " is-completed" : ""}`} role="row" key={task.id}>
                   <div className="download-file" role="cell"><span className={`download-glyph download-glyph-${glyph(task)}`}><Icon name={glyph(task)} size={20} /></span><div className="download-file-copy">
                     <strong title={name}>{name}</strong>
                     <div className="download-file-meta"><span className="download-source" title={source}>{source}{task.kind === "hls" ? " · M3U8" : task.method === "POST" ? " · POST" : ""}</span>
-                      {completed ? <button type="button" className="download-location" title={`打开所在目录：${folder || "我的文件"}`} onClick={() => onOpenFolder(folder)}><Icon name="folder" size={13} /><span>{folder.slice(0, -1) || "我的文件"}</span></button>
-                        : <span className="download-location" title={`保存到 ${folder || "我的文件"}`}><Icon name="folder" size={13} /><span>{folder.slice(0, -1) || "我的文件"}</span></span>}
+                      {completed ? <button type="button" className="download-location" title={`打开所在目录：${api.privatePathLabel(folder)}`} onClick={() => onOpenFolder(folder, task.private)}><Icon name="folder" size={13} /><span>{api.privatePathLabel(folder)}</span></button>
+                        : <span className="download-location" title={`保存到 ${api.privatePathLabel(folder)}`}><Icon name="folder" size={13} /><span>{api.privatePathLabel(folder)}</span></span>}
                     </div>
                     {task.error && <details className="download-task-error"><summary><Icon name="alert" size={13} /><span>查看失败原因</span></summary><p className="download-error">{task.error}</p></details>}
                   </div></div>
@@ -138,8 +148,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       description={clearing === "completed" ? "从列表中移除所有已完成的任务，已保存的文件不受影响。" : "移除所有失败的任务并清理未完成的数据，已保存的文件不受影响。"}
       confirmLabel="清除" danger onClose={() => setClearing(null)} onConfirm={() => clear(clearing)} />}
     {confirm && <ConfirmDialog title={confirm.action === "delete" ? "删除下载任务" : confirm.action === "restart" ? "重新下载文件" : confirm.action === "resume" ? "重新发送下载请求" : "停止下载"}
-      description={confirm.action === "delete" ? <>删除任务“{confirm.task.key}”并清理未完成的数据，已保存的文件会保留。</>
-        : confirm.action === "restart" ? <>清理当前断点并从头下载“{confirm.task.key}”。同名文件会自动改名保存。</>
+      description={confirm.action === "delete" ? <>删除任务“{downloadTaskName(confirm.task)}”并清理未完成的数据，已保存的文件会保留。</>
+        : confirm.action === "restart" ? <>清理当前断点并从头下载“{downloadTaskName(confirm.task)}”。同名文件会自动改名保存。</>
           : confirm.action === "resume" ? "此任务使用 POST 请求，继续下载会重新发送请求和请求体。"
             : confirm.task.kind === "hls" || confirm.task.platform ? "此任务停止后会清理中间数据；继续时从头下载。" : "停止后保留已保存的分段。来源支持且文件未变化时，可从断点继续。"}
       danger={confirm.action === "delete" || confirm.action === "restart"} confirmLabel={confirm.action === "delete" ? "删除任务" : confirm.action === "restart" ? "重新下载" : confirm.action === "resume" ? "重新发送" : "停止下载"}
@@ -178,7 +188,7 @@ function DownloadDialog({ task, onClose, onComplete }: { task: api.DownloadTask 
     if (!candidates || !selected.size || !ready) return;
     setBusy(true); setError("");
     try {
-      if (task) await api.controlDownload(task.id, "update", { ticket: candidates[[...selected][0]].ticket });
+      if (task) await api.controlDownload(task.id, "update", { ticket: candidates[[...selected][0]].ticket }, task.private);
       else await api.createDownloads([...selected].map(index => ({ ticket: candidates[index].ticket, name: candidates[index].name })), destination);
       toast.success(task ? "参数已更新，任务已重新加入队列" : `${selected.size} 个任务已加入下载队列`);
       onComplete();
@@ -215,7 +225,7 @@ function DownloadDialog({ task, onClose, onComplete }: { task: api.DownloadTask 
             </div>
           </div>)}
         </div>
-        {task ? <p className="muted">保存位置：{task.key}</p> : <><DestinationPicker value={destination} onChange={path => { setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示域名。</p></>}
+        {task ? <p className="muted">保存位置：{task.private && !api.isPrivatePath(task.key) ? "私密空间" : api.privatePathLabel(task.key)}</p> : <><DestinationPicker value={destination} allowPrivate onChange={path => { setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示域名。</p></>}
       </>}
       {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
     </div>

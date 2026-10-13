@@ -100,7 +100,7 @@ class PlatformTasks(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def make(self):
-        parsed = await self.offline.parse(self.user.id, "https://x.com/u/status/123", cookies="auth_token=private; ct0=private2")
+        parsed = await self.offline.parse(self.user.id, "https://x.com/u/status/123", cookies="auth_token=cookie-secret; ct0=cookie-secret2")
         candidate = parsed["candidates"][0]
         return self.offline.create(self.user.id, [{"ticket": candidate["ticket"], "name": candidate["name"]}], "downloads/")[0]
 
@@ -108,8 +108,8 @@ class PlatformTasks(unittest.IsolatedAsyncioTestCase):
         task = await self.make()
         self.assertEqual(task["platform"], "x")
         row = self.offline._row(task["id"])
-        self.assertNotIn(b"private", row["request_enc"])
-        self.assertNotIn("private", json.dumps(self.offline.list(self.user.id)))
+        self.assertNotIn(b"cookie-secret", row["request_enc"])
+        self.assertNotIn("cookie-secret", json.dumps(self.offline.list(self.user.id)))
         self.offline.start()
         async with asyncio.timeout(10):
             while self.offline._row(task["id"])["status"] not in ("completed", "failed"):

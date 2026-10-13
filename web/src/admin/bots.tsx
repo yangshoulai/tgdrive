@@ -31,12 +31,13 @@ export function Bots() {
   const active = (bots ?? []).filter(bot => bot.status === "active").length;
   return (
     <>
-      <PageHeader title="存储通道" description="查看各通道的分片容量、启用状态与最近连接检查。"
-        actions={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>添加通道</Button>} />
-      {!error && bots !== null && active === 0 && <p className="inline-note tone-warning banner"><Icon name="alert" size={16} />当前没有启用的通道，新上传的文件会加密后暂存在服务器本地磁盘。</p>}
+      <PageHeader title="存储通道"
+        actions={bots?.length ? <Button variant="primary" icon="plus" onClick={() => setCreating(true)}>添加通道</Button> : undefined} />
+      {/* 还没有通道时只由空状态说明并提供“添加通道”，不再叠加页头按钮和警告横幅。 */}
+      {!error && bots !== null && bots.length > 0 && active === 0 && <p className="inline-note tone-warning banner"><Icon name="alert" size={16} />当前没有启用的通道，新上传的文件会加密后暂存在服务器本地磁盘。</p>}
       <section className="file-surface table-scroll">
         {error ? <EmptyState icon="alert" title="存储通道加载失败" description={error} action={<Button icon="refresh" onClick={load}>重试</Button>} /> : bots === null ? <SkeletonRows rows={3} /> : bots.length === 0 ? (
-          <EmptyState icon="send" title="还没有存储通道" description="在 Telegram 中通过 BotFather 创建 Bot，把它设为私有频道的管理员，然后在这里添加。" action={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>添加通道</Button>} />
+          <EmptyState icon="send" title="还没有存储通道" description="在 Telegram 中通过 BotFather 创建 Bot，把它设为私有频道的管理员，然后在这里添加。添加之前，新上传的文件会加密后暂存在服务器本地磁盘。" action={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>添加通道</Button>} />
         ) : (
           <div className="data-table bots-table" role="table" aria-label="存储通道">
             <div className="data-row data-head" role="row">
@@ -72,7 +73,7 @@ export function Bots() {
           </div>
         )}
       </section>
-      <p className="channel-storage-note">分片是文件加密后拆分的存储单元。统计包含上传中及回收站的分片，大小为加密后的容量；待清理分片和频道中的其他消息不计入。</p>
+      {bots && bots.length > 0 && <p className="channel-storage-note">分片是文件加密后拆分的存储单元。统计包含上传中及回收站的分片，大小为加密后的容量；待清理分片和频道中的其他消息不计入。</p>}
       <details className="settings-disclosure channel-help"><summary><Icon name="shield" size={17} /><span>通道与安全说明</span><Icon name="chevronDown" size={16} /></summary><div className="disclosure-body">
         <ul className="plain-list">
           <li>每个通道由一个 Telegram Bot 和一个私有频道组成，新文件保存到已启用的通道。</li>

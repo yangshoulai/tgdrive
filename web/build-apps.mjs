@@ -32,7 +32,7 @@ if(!process.argv[2] || process.argv[2]==='user') {
   }
   for(const dependency of Object.keys(manifest.dependencies||{})) collectLicense(dependency);
  }
- for(const name of ['artplayer','aplayer','codemirror','@codemirror/legacy-modes','markdown-it','dompurify']) collectLicense(name);
+ for(const name of ['artplayer','codemirror','@codemirror/legacy-modes','markdown-it','dompurify']) collectLicense(name);
  fs.writeFileSync(path.join(dist,'preview-licenses.txt'),licenses.join('\n\n'));
 }
 const configs={

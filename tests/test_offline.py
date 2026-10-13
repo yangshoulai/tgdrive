@@ -272,7 +272,8 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(data)["effective"]["concurrency"], 1)
         self.assertEqual(self.app.engine.transfers.per_bucket, 1)
-        with self.assertRaises(PermissionError):
+        # 私密下载位置需要已解锁的私密授权；未授权是业务校验错误（400），不能让前端当成会话过期。
+        with self.assertRaises(ValueError):
             parsed = await self.offline.parse(self.alice.id, "https://example.com/f")
             self.offline.create(self.alice.id, [{"ticket": parsed["candidates"][0]["ticket"], "name": "f"}], ".tgdrive/private/")
 

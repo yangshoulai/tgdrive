@@ -1,5 +1,5 @@
 /** 用户端与管理端共用的应用外壳、登录页和首次设置页。 */
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
 import { BRAND, SITE } from "./brand";
 import * as api from "./api";
 import { loginWithPasskey, passkeyUnavailable } from "./passkeys";
@@ -8,10 +8,12 @@ import { Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster,
 export type NavItem<K extends string> = { key: K; label: string; icon: IconName; count?: number; href?: string };
 export type NavGroup<K extends string> = { label?: string; workspace?: boolean; icon?: IconName; items: NavItem<K>[] };
 
-export function AppShell<K extends string>({ groups, active, onNavigate, sidebarFooter, account, children }: {
+export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor, sidebarFooter, account, children }: {
   groups: NavGroup<K>[];
   active: K;
   onNavigate: (key: K) => void;
+  /** 每个导航项的真实地址：渲染成链接，⌘/Ctrl/中键点击可在新标签页打开。 */
+  hrefFor: (key: K) => string;
   sidebarFooter?: ReactNode;
   account: { name: string; caption: string; tone?: "accent" | "admin"; menu: MenuItem[] };
   children: ReactNode;
@@ -51,7 +53,8 @@ export function AppShell<K extends string>({ groups, active, onNavigate, sidebar
                 const content = <><Icon name={item.icon} size={17} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
                 return item.href
                   ? <a key={item.key} className="nav-item" href={item.href} target="_blank" rel="noreferrer">{content}</a>
-                  : <button key={item.key} type="button" className={`nav-item${active === item.key ? " is-active" : ""}`} aria-current={active === item.key ? "page" : undefined} onClick={() => onNavigate(item.key)}>{content}</button>;
+                  : <a key={item.key} className={`nav-item${active === item.key ? " is-active" : ""}`} href={hrefFor(item.key)} aria-current={active === item.key ? "page" : undefined}
+                    onClick={event => { if (isPlainClick(event)) { event.preventDefault(); onNavigate(item.key); } }}>{content}</a>;
               })}
             </div>
           ))}
@@ -71,6 +74,11 @@ export function AppShell<K extends string>({ groups, active, onNavigate, sidebar
       <Toaster />
     </div>
   );
+}
+
+/** 普通左键点击由应用内路由处理；带修饰键或非左键的点击交给浏览器（新标签页、新窗口）。 */
+export function isPlainClick(event: MouseEvent<HTMLAnchorElement>) {
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && !event.defaultPrevented;
 }
 
 /* ---------- 登录与首次设置 ---------- */

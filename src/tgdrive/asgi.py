@@ -216,11 +216,12 @@ class TgDriveASGI(StaticFiles):
                 route = path[len("/api/user/v1/private"):]
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
-                allowed = {"/list", "/search", "/folders", "/files", "/files/check", "/files/instant", "/move",
+                allowed = {"/list", "/search", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
                            "/copy", "/delete", "/thumbnail", "/content", "/preview-assets", "/preview-list",
-                           "/trash", "/trash/restore", "/trash/purge", "/uploads"}
+                           "/trash", "/trash/restore", "/trash/purge", "/uploads",
+                           "/downloads", "/downloads/clear"}
                 if route not in controls:
-                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?", route):
+                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?|/downloads/\d+/(?:stop|resume|restart|delete|update)", route):
                         raise NotFoundError("资源不存在")
                     file_user = self.private_space.files(token, access)
                     path = "/api/user/v1" + route
@@ -249,6 +250,12 @@ class TgDriveASGI(StaticFiles):
                 data, mime, etag = self.admin.thumbnail(token, int(query.get("bucket_id", ["0"])[0]),
                     query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
+                return
+            if path == "/api/user/v1/archive" and method == "GET":
+                name, entries = await file_user.archive(token, query.get("path", []))
+                await self._send_stream(tracked_send, 200, {"Content-Type": "application/zip", "Cache-Control": "no-store",
+                    "Content-Disposition": f"attachment; filename=\"files.zip\"; filename*=UTF-8''{quote(name, safe='')}",
+                    "X-Content-Type-Options": "nosniff"}, stream_zip(entries, nested=True), "GET")
                 return
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
                 await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, admin=False, user=file_user, private=private))
@@ -286,7 +293,7 @@ class TgDriveASGI(StaticFiles):
             audit = self._audit_entry(method, audit_path, payload, token, scope)
             try:
                 status, result, extra = await self._route(method, path, query, payload, token, csrf,
-                    ip=(scope.get("client") or [None])[0], user=file_user, access=access,
+                    ip=(scope.get("client") or [None])[0], user=file_user, private=private, access=access,
                     origin=headers.get("origin") or (f"{scope.get('scheme', 'http')}://{headers.get('host', '')}" if method == "GET" else None),
                     passkey_browser=cookies.get("tg_passkey", ""))
             except Exception as exc:
@@ -516,7 +523,7 @@ class TgDriveASGI(StaticFiles):
             raise NotFoundError("接口不存在")
         await self._send(send, 200, result)
 
-    async def _route(self, method, path, query, payload, token, csrf, ip=None, *, user=None, access="", origin=None, passkey_browser=""):
+    async def _route(self, method, path, query, payload, token, csrf, ip=None, *, user=None, private=False, access="", origin=None, passkey_browser=""):
         user = user or self.user
         if path.startswith("/api/admin/v1/"):
             route = path[len("/api/admin/v1"):]
@@ -672,17 +679,19 @@ class TgDriveASGI(StaticFiles):
             if route.startswith("/downloads") and self.offline is not None:
                 session = user._session(token, csrf=csrf, mutation=method != "GET")
                 account = user.accounts.account_for_session(session)
+                private_scope = user._scope(token, csrf=csrf, mutation=method != "GET") if private else None
+                private_activity = (lambda: self.private_space.activity(token, csrf, access, active=True)) if private else None
                 if route == "/downloads/parse" and method == "POST":
                     return 200, await self.offline.parse(account.id, payload.get("input"), download_type=payload.get("download_type", "auto"), cookies=payload.get("cookies", "")), {"Cache-Control": "no-store"}
                 if route == "/downloads" and method == "GET":
-                    return 200, self.offline.list(account.id, cursor=int(query.get("cursor", ["0"])[0] or "0"), status=query.get("status", [""])[0], limit=int(query.get("limit", ["50"])[0])), {"Cache-Control": "no-store"}
+                    return 200, self.offline.list(account.id, cursor=int(query.get("cursor", ["0"])[0] or "0"), status=query.get("status", [""])[0], limit=int(query.get("limit", ["50"])[0]), private_scope=private_scope), {"Cache-Control": "no-store"}
                 if route == "/downloads" and method == "POST":
-                    return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""))}, {"Cache-Control": "no-store"}
+                    return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""), private_scope=private_scope, private_activity=private_activity)}, {"Cache-Control": "no-store"}
                 if route == "/downloads/clear" and method == "POST":
                     return 200, await self.offline.clear(account.id, payload.get("status")), {"Cache-Control": "no-store"}
                 download = re.fullmatch(r"/downloads/(\d+)/(stop|resume|restart|delete|update)", route)
                 if download and method == "POST":
-                    result = await self.offline.control(account.id, int(download[1]), download[2], item=payload.get("item"))
+                    result = await self.offline.control(account.id, int(download[1]), download[2], item=payload.get("item"), private_scope=private_scope, private_activity=private_activity)
                     return (204, None, {}) if result is None else (200, result, {"Cache-Control": "no-store"})
             if route == "/private/status" and method == "GET":
                 return 200, self.private_space.status(token, origin), {}

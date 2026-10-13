@@ -37,13 +37,15 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
   nearQuota.forEach(user => attention.push({ tone: user.used_bytes >= (user.quota_bytes ?? 0) ? "danger" : "warning", icon: "pulse", title: `${user.username} 的空间即将用完`, detail: `已使用 ${formatBytes(user.used_bytes)} / ${formatBytes(user.quota_bytes)}。`, action: "调整配额", module: "users" }));
   return (
     <>
-      <PageHeader title="概览" description="存储、用户和分享的整体情况。" />
+      <PageHeader title="概览" />
       <div className="stat-strip">
         <Stat label="用户" value={String(data.users.total)} detail={`${data.users.active} 个启用`} />
         <Stat label="文件" value={data.objects.total.toLocaleString("zh-CN")} detail="全部用户" />
         <Stat label="已用空间" value={formatBytes(used)} detail="加密前的原始大小" />
         <Stat label="公开链接" value={data.objects.public_total.toLocaleString("zh-CN")} detail="任何人可访问" tone={data.objects.public_total ? "public" : undefined} />
-        <Stat label="存储通道" value={`${activeBots.length}/${data.bots.length}`} detail="启用 / 全部" />
+        {data.bots.length
+          ? <Stat label="存储通道" value={String(activeBots.length)} detail={activeBots.length === data.bots.length ? "全部启用" : `共 ${data.bots.length} 个，${data.bots.length - activeBots.length} 个停用`} />
+          : <Stat label="存储通道" value="未配置" detail="文件暂存在本地磁盘" />}
       </div>
       <div className="overview-columns">
         <div className="overview-column">

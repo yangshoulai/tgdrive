@@ -66,6 +66,19 @@ const ICONS = {
   sun: "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-13v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4",
   moon: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z",
   refresh: "M20 11a8 8 0 0 0-14.6-4.5L4 8m0-4v4h4m-4 5a8 8 0 0 0 14.6 4.5L20 16m0 4v-4h-4",
+  shuffle: "M16 4h4v4M4 20 20 4M20 16v4h-4m-1-5 5 5M4 4l5 5",
+  repeat: "m17 2 3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3m16-3v2a4 4 0 0 1-4 4H4",
+  repeatOne: "m17 2 3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3m16-3v2a4 4 0 0 1-4 4H4m7-9.5 1.5-1v5.5",
+  sequence: "M4 6h11M4 12h11M4 18h7m8-9v9m0 0-2.5-2.5M19 18l2.5-2.5",
+  volume: "M11 5 6 9H3v6h3l5 4zm4.5 3.5a5 5 0 0 1 0 7m3-10a9 9 0 0 1 0 13",
+  volumeLow: "M11 5 6 9H3v6h3l5 4zm4.5 3.5a5 5 0 0 1 0 7",
+  volumeMute: "M11 5 6 9H3v6h3l5 4zm11 4-6 6m0-6 6 6",
+  zoomIn: "m20 20-4.2-4.2M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Zm0-10v6m-3-3h6",
+  zoomOut: "m20 20-4.2-4.2M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Zm-3-7h6",
+  rotate: "M3 12a9 9 0 1 0 3-6.7L3 8m0-5v5h5",
+  chevronLeft: "m15 6-6 6 6 6",
+  fitScreen: "M4 9V5a1 1 0 0 1 1-1h4m6 0h4a1 1 0 0 1 1 1v4m0 6v4a1 1 0 0 1-1 1h-4m-6 0H5a1 1 0 0 1-1-1v-4",
+  keyboard: "M4 6h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm3 4h.01M11 10h.01M15 10h.01M7 14h.01M17 14h.01M10 14h4",
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.3l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-2.2-1.3L14.3 3h-4l-.4 2.4a7.4 7.4 0 0 0-2.2 1.3l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.6l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 2.2 1.3l.4 2.4h4l.4-2.4a7.4 7.4 0 0 0 2.2-1.3l2.4 1 2-3.4-2-1.6c.1-.4.1-.9.1-1.3Z",
 } as const;
 export type IconName = keyof typeof ICONS;
@@ -370,12 +383,18 @@ export function Modal({ title, description, onClose, children, footer, actions, 
           </div>
           <div className="modal-window-actions">
             {!minimized && actions}
-            {pinnable && !minimized && <IconButton icon="pin" label={pinned ? "取消固定预览" : "固定预览（仅手动关闭）"} size="sm" active={pinned} onClick={() => setPinned(value => !value)} />}
-            {minimizable && <IconButton icon={minimized ? "restore" : "minimize"} label={minimized ? "恢复预览" : "最小化预览"} shortcut={windowShortcuts ? "i" : undefined} size="sm" disabled={switchingScreen} onClick={() => minimized ? setMinimized(false) : void minimize()} />}
-            {expandable && !minimized && <>
-              <IconButton icon={maximized ? "restore" : "maximize"} label={maximized ? "还原预览" : "最大化预览"} onClick={() => setMaximized(value => !value)} size="sm" active={maximized} disabled={fullscreen || switchingScreen} />
-              {supportsFullscreen && <IconButton icon={fullscreen ? "exitFullscreen" : "fullscreen"} label={fullscreen ? "退出全屏" : "全屏预览"} shortcut={windowShortcuts ? "f" : undefined} onClick={() => void toggleFullscreen()} size="sm" active={fullscreen} disabled={switchingScreen} />}
-            </>}
+            {/* 常用的只留全屏和关闭；固定、最小化、最大化收进“窗口选项”。固定后显示一个高亮的固定按钮，提醒 Esc 不会关闭。 */}
+            {pinned && !minimized && <IconButton icon="pin" label="取消固定预览" size="sm" active onClick={() => setPinned(false)} />}
+            {minimized && <IconButton icon="restore" label="恢复预览" shortcut={windowShortcuts ? "i" : undefined} size="sm" disabled={switchingScreen} onClick={() => setMinimized(false)} />}
+            {expandable && !minimized && !supportsFullscreen && <IconButton icon={maximized ? "restore" : "maximize"} label={maximized ? "还原预览" : "最大化预览"} onClick={() => setMaximized(value => !value)} size="sm" active={maximized} disabled={switchingScreen} />}
+            {expandable && !minimized && supportsFullscreen && <IconButton icon={fullscreen ? "exitFullscreen" : "fullscreen"} label={fullscreen ? "退出全屏" : "全屏预览"} shortcut={windowShortcuts ? "f" : undefined} onClick={() => void toggleFullscreen()} size="sm" active={fullscreen} disabled={switchingScreen} />}
+            {!minimized && (() => {
+              const items: MenuItem[] = [];
+              if (minimizable) items.push({ label: "最小化", icon: "minimize", shortcut: windowShortcuts ? "I" : undefined, onSelect: () => void minimize() });
+              if (expandable && supportsFullscreen && !fullscreen) items.push({ label: maximized ? "还原大小" : "最大化", icon: maximized ? "restore" : "maximize", onSelect: () => setMaximized(value => !value) });
+              if (pinnable && !pinned) items.push({ label: "固定（仅手动关闭）", icon: "pin", onSelect: () => setPinned(true) });
+              return items.length > 0 && <Menu label="窗口选项" items={items} />;
+            })()}
             <IconButton icon="x" label="关闭" onClick={onClose} size="sm" disabled={!dismissible} />
           </div>
         </header>
@@ -403,69 +422,98 @@ export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onC
   );
 }
 
-export type MenuItem = { label: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean };
-export function Menu({ items, label, icon = "more" }: { items: MenuItem[]; label: string; icon?: IconName }) {
-  const [open, setOpen] = useState(false);
+export type MenuItem = { label: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean; shortcut?: string };
+
+/** 浮层挂载点：全屏时只有全屏元素内的内容可见，所以菜单挂到全屏元素里，否则挂到 body。 */
+const overlayRoot = () => (document.fullscreenElement as HTMLElement | null) ?? document.body;
+
+/** 菜单列表：按锚点（按钮矩形或指针位置）定位，处理方向键、Esc、Tab、点外部与滚动关闭。 */
+function MenuList({ items, label, anchor, onClose, restoreFocus }: { items: MenuItem[]; label: string; anchor: () => { x: number; y: number; bottom?: number; alignRight?: boolean }; onClose: () => void; restoreFocus?: () => void }) {
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
   const list = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useLayoutEffect(() => {
-    if (!open || !trigger.current || !list.current) return;
-    const rect = trigger.current.getBoundingClientRect();
+    if (!list.current) return;
+    const point = anchor();
     const height = list.current.offsetHeight, width = list.current.offsetWidth;
-    const below = rect.bottom + 6 + height < window.innerHeight;
-    setPosition({ top: below ? rect.bottom + 6 : rect.top - height - 6, left: Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)) });
-  }, [open]);
+    const below = (point.bottom ?? point.y) + 6 + height < window.innerHeight;
+    const top = below ? (point.bottom ?? point.y) + (point.bottom === undefined ? 2 : 6) : point.y - height - (point.bottom === undefined ? 2 : 6);
+    const left = point.alignRight ? point.x - width : point.x;
+    setPosition({ top: Math.max(8, top), left: Math.max(8, Math.min(left, window.innerWidth - width - 8)) });
+  }, []);
   useLayoutEffect(() => {
-    if (open && position) list.current?.querySelector<HTMLElement>("[role^=menuitem]")?.focus({ preventScroll: true });
-  }, [open, position]);
+    if (position) list.current?.querySelector<HTMLElement>("[role^=menuitem]")?.focus({ preventScroll: true });
+  }, [position]);
   useEffect(() => {
-    if (!open) return;
-    const close = (event: Event) => { if (!list.current?.contains(event.target as Node) && !trigger.current?.contains(event.target as Node)) setOpen(false); };
+    const close = () => closeRef.current();
+    const outside = (event: Event) => { if (!list.current?.contains(event.target as Node)) close(); };
     const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus(); }
-      if (event.key === "Tab") { event.preventDefault(); setOpen(false); trigger.current?.focus(); }
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); restoreFocus?.(); }
+      if (event.key === "Tab") { event.preventDefault(); close(); restoreFocus?.(); }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
-        const items = Array.from(list.current?.querySelectorAll<HTMLElement>("[role^=menuitem]") ?? []);
-        const index = items.indexOf(document.activeElement as HTMLElement);
-        items[(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+        const entries = Array.from(list.current?.querySelectorAll<HTMLElement>("[role^=menuitem]") ?? []);
+        const index = entries.indexOf(document.activeElement as HTMLElement);
+        entries[(index + (event.key === "ArrowDown" ? 1 : -1) + entries.length) % entries.length]?.focus();
       }
     };
-    const dismiss = () => setOpen(false);
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", key);
-    window.addEventListener("resize", dismiss);
-    document.addEventListener("scroll", dismiss, true);
+    // 推迟到下一帧再监听，避免打开菜单的那次点击（或右键）立即把它关掉。
+    const timer = window.setTimeout(() => {
+      document.addEventListener("mousedown", outside);
+      document.addEventListener("contextmenu", outside);
+    });
+    document.addEventListener("keydown", key, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("blur", close);
+    document.addEventListener("scroll", close, true);
     return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", key);
-      window.removeEventListener("resize", dismiss);
-      document.removeEventListener("scroll", dismiss, true);
+      window.clearTimeout(timer);
+      document.removeEventListener("mousedown", outside);
+      document.removeEventListener("contextmenu", outside);
+      document.removeEventListener("keydown", key, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("blur", close);
+      document.removeEventListener("scroll", close, true);
     };
-  }, [open]);
+  }, []);
+  return createPortal(
+    <div ref={list} className="menu" role="menu" aria-label={label} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }}
+      onClick={event => event.stopPropagation()} onContextMenu={event => event.preventDefault()}>
+      {items.map(item => {
+        const content = <><Icon name={item.icon} size={16} /><span>{item.label}</span>{item.checked ? <span className="menu-check"><Icon name="check" size={15} /></span> : item.shortcut && <kbd className="menu-shortcut">{item.shortcut}</kbd>}</>;
+        // 带标题的分组：标题承担分隔线，选项用 menuitemradio 表示单选状态。
+        const className = `menu-item${item.danger ? " is-danger" : ""}${item.divider && !item.heading ? " has-divider" : ""}`;
+        const role = item.checked === undefined ? "menuitem" : "menuitemradio";
+        const element = item.href
+          ? <a key={item.label} role={role} className={className} href={item.href} onClick={() => onClose()}>{content}</a>
+          : <button key={item.label} type="button" role={role} aria-checked={item.checked === undefined ? undefined : item.checked} className={className} onClick={() => { onClose(); item.onSelect(); }}>{content}</button>;
+        return item.heading ? <Fragment key={item.label}><div className={`menu-heading${item.divider ? " has-divider" : ""}`} role="presentation">{item.heading}</div>{element}</Fragment> : element;
+      })}
+    </div>,
+    overlayRoot(),
+  );
+}
+
+export function Menu({ items, label, icon = "more", size = "sm" }: { items: MenuItem[]; label: string; icon?: IconName; size?: "sm" | "md" }) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
   return (
     <>
-      <button ref={trigger} type="button" className={`icon-btn icon-btn-ghost icon-btn-sm${open ? " is-active" : ""}`} aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open} onClick={event => { event.stopPropagation(); setOpen(value => !value); setPosition(null); }}>
+      <button ref={trigger} type="button" className={`icon-btn icon-btn-ghost icon-btn-${size}${open ? " is-active" : ""}`} aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open}
+        onMouseDown={event => { if (open) event.stopPropagation(); }}
+        onClick={event => { event.stopPropagation(); setOpen(value => !value); }}>
         <Icon name={icon} size={16} />
       </button>
-      {open && createPortal(
-        <div ref={list} className="menu" role="menu" aria-label={label} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }} onClick={event => event.stopPropagation()}>
-          {items.map(item => {
-            const content = <><Icon name={item.icon} size={16} /><span>{item.label}</span>{item.checked && <span className="menu-check"><Icon name="check" size={15} /></span>}</>;
-            // 带标题的分组：标题承担分隔线，选项用 menuitemradio 表示单选状态。
-            const className = `menu-item${item.danger ? " is-danger" : ""}${item.divider && !item.heading ? " has-divider" : ""}`;
-            const role = item.checked === undefined ? "menuitem" : "menuitemradio";
-            const element = item.href
-              ? <a key={item.label} role={role} className={className} href={item.href} onClick={() => setOpen(false)}>{content}</a>
-              : <button key={item.label} type="button" role={role} aria-checked={item.checked === undefined ? undefined : item.checked} className={className} onClick={() => { setOpen(false); item.onSelect(); }}>{content}</button>;
-            return item.heading ? <Fragment key={item.label}><div className={`menu-heading${item.divider ? " has-divider" : ""}`} role="presentation">{item.heading}</div>{element}</Fragment> : element;
-          })}
-        </div>,
-        document.body,
-      )}
+      {open && <MenuList items={items} label={label} onClose={() => setOpen(false)} restoreFocus={() => trigger.current?.focus()}
+        anchor={() => { const rect = trigger.current!.getBoundingClientRect(); return { x: rect.right, y: rect.top, bottom: rect.bottom, alignRight: true }; }} />}
     </>
   );
+}
+
+/** 右键菜单：在指针位置打开，内容与行尾“更多操作”菜单相同。 */
+export function ContextMenu({ items, label, x, y, onClose }: { items: MenuItem[]; label: string; x: number; y: number; onClose: () => void }) {
+  return <MenuList items={items} label={label} onClose={onClose} anchor={() => ({ x, y })} />;
 }
 
 /* ---------- 全局提示 ---------- */
@@ -654,7 +702,8 @@ export function Pagination({ number, hasPrevious, hasNext, loading, previous, ne
   number: number; hasPrevious: boolean; hasNext: boolean; loading: boolean; previous: () => void; next: () => void;
   pageSize?: number; changePageSize?: (size: number) => void;
 }) {
-  if (!changePageSize && number === 1 && !hasPrevious && !hasNext && !loading) return null;
+  // 只有一页时不显示分页（包括每页数量）：数量选择只在内容多于一页时才有意义。
+  if (number === 1 && !hasPrevious && !hasNext) return null;
   return <nav className="pagination" aria-label="分页">
     {changePageSize && <label className="pagination-size"><span>每页</span><select className="input" aria-label="每页文件数量" value={pageSize} onChange={event => changePageSize(Number(event.target.value))}>
       {FILE_PAGE_SIZES.map(size => <option key={size} value={size}>{size} 项</option>)}

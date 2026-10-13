@@ -1,11 +1,20 @@
-/** 开源播放器的独立入口；媒体状态与附件加载由预览界面负责。 */
+/** 视频播放器（ArtPlayer）的独立入口；媒体状态与附件加载由预览界面负责。音乐使用原生 <audio>，见 preview-media.tsx。 */
 import Artplayer from "artplayer";
-import APlayer from "aplayer";
-import "aplayer/dist/APlayer.min.css";
 
 export type MediaState = "loading" | "ready" | "buffering" | "failed";
 export type MediaProgress = { currentTime: number; duration: number };
 type Notify = (state: MediaState) => void;
+type Mode = "sequence" | "random" | "loop" | "single";
+/** 与 preview-playlist.tsx 的 PreviewNav 一致；这里只声明用到的字段，避免引擎包依赖界面模块。 */
+type Navigation = { index: number; count: number; onPrevious: () => void; onNext: () => void; mode?: Mode; onMode?: (mode: Mode) => void; playlistOpen?: boolean; onPlaylist?: () => void };
+const MODE_LABELS: [Mode, string][] = [["sequence", "顺序播放"], ["random", "随机播放"], ["loop", "列表循环"], ["single", "单曲循环"]];
+/** 与 ui.tsx 的图标同一套线条，保持控制条风格一致。 */
+const glyph = (path: string) => `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"/></svg>`;
+const GLYPHS = {
+  previous: glyph("M5 5v14m13-14L8 12l10 7V5Z"),
+  next: glyph("M19 5v14M6 5l10 7-10 7V5Z"),
+  list: glyph("M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"),
+};
 type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onVideoSize?: (width: number, height: number) => void };
 function mediaProgress(media: HTMLMediaElement): MediaProgress {
   const duration = Number.isFinite(media.duration) ? Math.max(0, media.duration) : 0;
@@ -16,13 +25,13 @@ function seekBy(media: HTMLMediaElement, seconds: number) {
   const { currentTime, duration } = mediaProgress(media);
   if (duration) media.currentTime = Math.max(0, Math.min(duration, currentTime + seconds));
 }
-export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents) {
+export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents, navigation?: () => Navigation | undefined) {
   // 网页全屏仍留在预览的对话框内，保留焦点锁和无障碍语义。
   Artplayer.FULLSCREEN_WEB_IN_BODY = false;
   // 不自动重连：播放失败直接交给预览界面显示原因与重试，避免画面上反复出现“重新连接”。
   Artplayer.RECONNECT_TIME_MAX = 0;
-  const player = new Artplayer({ container, url, poster: poster ?? "", lang: "zh-cn", autoplay: false, theme: getComputedStyle(container).getPropertyValue("--accent").trim(),
-    setting: true, playbackRate: true, aspectRatio: true, fullscreen: true, fullscreenWeb: true, pip: true,
+  const player = new Artplayer({ container, url, poster: poster ?? "", lang: "zh-cn", autoplay: false, theme: "#ffffff",
+    setting: true, playbackRate: true, aspectRatio: true, fullscreen: true, fullscreenWeb: true, pip: true, miniProgressBar: true, fastForward: true,
     // 快捷键由预览窗口统一处理，避免全局监听重复跳转或影响最小化后的页面操作。
     hotkey: false, mutex: true, autoSize: false, moreVideoAttr: { preload: "metadata", playsInline: true } });
   const controls = [["playAndPause", "播放视频"], ["setting", "显示设置"], ["pip", "开启画中画"], ["fullscreenWeb", "网页全屏"], ["fullscreen", "全屏"]];
@@ -81,7 +90,33 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   player.on("video:ended", () => { markReady(); events?.onPlaying(false); events?.onEnded(); });
   player.on("video:error", () => notify("failed"));
   updateProgress();
+  /** 上一个／下一个紧跟播放键，播放列表在设置前，播放模式放进设置菜单；只有一个文件时都不显示。 */
+  const refreshNavigation = () => {
+    if (destroyed) return;
+    const nav = navigation?.();
+    const multiple = Boolean(nav && nav.count > 1);
+    const control = (name: string, option: Record<string, unknown> | null) => {
+      if (option) player.controls.update({ name, ...option });
+      else if (container.querySelector(`.art-control-${name}`)) player.controls.remove(name);
+    };
+    control("previous", multiple ? { position: "left", index: 11, html: GLYPHS.previous, tooltip: "上一个", click: () => navigation?.()?.onPrevious() } : null);
+    control("next", multiple ? { position: "left", index: 12, html: GLYPHS.next, tooltip: "下一个", click: () => navigation?.()?.onNext() } : null);
+    control("playlist", multiple && nav?.onPlaylist ? { position: "right", index: 25, html: GLYPHS.list, tooltip: `播放列表 ${nav.index + 1}/${nav.count}`,
+      style: nav.playlistOpen ? { color: "var(--art-theme)" } : {}, click: () => navigation?.()?.onPlaylist?.() } : null);
+    for (const name of ["previous", "next", "playlist"]) {
+      const element = container.querySelector<HTMLElement>(`.art-control-${name}`);
+      if (element) { element.tabIndex = 0; element.setAttribute("role", "button"); element.setAttribute("aria-label", name === "previous" ? "上一个" : name === "next" ? "下一个" : "播放列表"); }
+    }
+    if (multiple && nav?.mode && nav.onMode) {
+      const current = MODE_LABELS.find(([value]) => value === nav.mode) ?? MODE_LABELS[0];
+      const item = { name: "mode", html: "播放模式", tooltip: current[1], width: 180,
+        selector: MODE_LABELS.map(([value, label]) => ({ html: label, value, default: value === current[0] })),
+        onSelect: (option: { value?: Mode; html: string }) => { if (option.value) navigation?.()?.onMode?.(option.value); return option.html; } };
+      if (player.setting.find("mode")) player.setting.update(item); else player.setting.add(item);
+    } else if (player.setting.find("mode")) player.setting.remove("mode");
+  };
   return {
+    refreshNavigation,
     play: () => player.play(),
     pause: () => player.pause(),
     isPlaying: () => !player.video.paused,
@@ -142,79 +177,5 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       player.destroy(); container.style.removeProperty("--preview-video-ratio");
       if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);
     },
-  };
-}
-
-export function createAudioPlayer(container: HTMLElement, url: string, name: string, notify: Notify, onTime: (time: number) => void, cover?: string, events?: PlaybackEvents) {
-  const player = new APlayer({ container, theme: getComputedStyle(container).getPropertyValue("--accent").trim(),
-    autoplay: false, preload: "metadata", mutex: true, lrcType: 0, loop: "none", order: "list",
-    audio: [{ name: "音频", artist: "", url, ...(cover ? { cover } : {}) }] });
-  // 文件名通过 textContent 写入，避免第三方模板将它解释为 HTML。
-  const title = container.querySelector(".aplayer-title");
-  if (title) { title.textContent = name; container.querySelector(".aplayer-music")?.replaceChildren(title); }
-  const play = container.querySelector<HTMLElement>(".aplayer-pic");
-  if (play) {
-    play.tabIndex = 0; play.setAttribute("role", "button"); play.setAttribute("aria-label", "播放音频");
-    play.addEventListener("keydown", event => {
-      if (event.key === " " || event.key === "Enter") {
-        event.preventDefault(); event.stopPropagation();
-        if (!event.repeat) { if (player.audio.paused) void player.audio.play(); else player.audio.pause(); }
-      }
-    });
-    player.on("play", () => play.setAttribute("aria-label", "暂停音频"));
-    player.on("pause", () => play.setAttribute("aria-label", "播放音频"));
-  }
-  container.querySelector(".aplayer-icon-volume-down")?.setAttribute("aria-label", "调整音量");
-  container.querySelector(".aplayer-icon-loop")?.setAttribute("aria-label", "切换循环模式");
-  const progress = container.querySelector<HTMLElement>(".aplayer-bar-wrap");
-  if (progress) {
-    progress.tabIndex = 0; progress.setAttribute("role", "slider"); progress.setAttribute("aria-label", "播放进度");
-    progress.setAttribute("aria-valuemin", "0"); progress.setAttribute("aria-valuemax", "0"); progress.setAttribute("aria-valuenow", "0");
-    progress.addEventListener("keydown", event => {
-      const duration = player.audio.duration;
-      if (!Number.isFinite(duration) || duration <= 0) return;
-      const times: Record<string, number> = { ArrowLeft: player.audio.currentTime - 5, ArrowRight: player.audio.currentTime + 5, Home: 0, End: duration };
-      if (event.key in times) { event.preventDefault(); player.audio.currentTime = Math.max(0, Math.min(duration, times[event.key])); }
-    });
-  }
-  const updateProgress = () => {
-    const value = mediaProgress(player.audio);
-    progress?.setAttribute("aria-valuemax", String(value.duration));
-    progress?.setAttribute("aria-valuenow", String(Math.floor(value.currentTime)));
-    onTime(value.currentTime); events?.onProgress?.(value);
-  };
-  let ready = false;
-  const markReady = () => { ready = true; notify("ready"); };
-  player.on("loadedmetadata", () => { markReady(); updateProgress(); }); player.on("canplay", markReady); player.on("playing", markReady);
-  player.on("play", () => events?.onPlaying(true));
-  player.on("pause", () => events?.onPlaying(false));
-  player.on("waiting", () => notify(ready ? "buffering" : "loading"));
-  player.on("pause", () => { if (ready) notify("ready"); });
-  // 预览统一决定下一首，拦截 APlayer 自带的单文件回绕，避免两个播放模式同时生效。
-  const ended = (event: Event) => { event.stopImmediatePropagation(); player.audio.pause(); markReady(); events?.onPlaying(false); events?.onEnded(); };
-  player.audio.addEventListener("ended", ended, true);
-  player.on("error", () => notify("failed"));
-  player.on("durationchange", updateProgress);
-  player.on("timeupdate", updateProgress);
-  player.on("seeked", () => { updateProgress(); if (player.audio.readyState >= 2) markReady(); });
-  updateProgress();
-  return {
-    play: () => player.audio.play(), pause: () => player.audio.pause(),
-    isPlaying: () => !player.audio.paused,
-    seek: (time: number) => { player.audio.currentTime = time; updateProgress(); },
-    seekBy: (seconds: number) => { seekBy(player.audio, seconds); updateProgress(); },
-    adjustVolume: (delta: number) => { player.volume(Math.max(0, Math.min(1, player.audio.volume + delta))); },
-    setSource: (nextUrl: string, nextName: string, nextCover?: string) => {
-      player.audio.pause(); ready = false; notify("loading");
-      if (title) title.textContent = nextName;
-      if (play) play.style.backgroundImage = nextCover ? `url("${nextCover}")` : "";
-      player.audio.src = nextUrl; player.audio.load(); player.seek(0);
-      // 时长未知时 APlayer.seek 会计算 0 / 0，浏览器忽略 NaN% 并保留旧进度，需显式清零。
-      for (const bar of container.querySelectorAll<HTMLElement>(".aplayer-played, .aplayer-loaded")) bar.style.width = "0%";
-      const duration = container.querySelector(".aplayer-dtime");
-      if (duration) duration.textContent = "00:00";
-      events?.onPlaying(false); updateProgress();
-    },
-    destroy: () => { player.audio.removeEventListener("ended", ended, true); player.destroy(); },
   };
 }

@@ -23,7 +23,7 @@ export type FileItem = {
 export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subtitle"; language: string | null; size: number; etag: string };
 export type PreviewListPage = { objects: FileItem[]; next_cursor: string | null };
 /** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
-export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number>; folder_previews?: Record<string, FileItem[]> };
+export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number> };
 export type Account = { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
 export type ClientKey = { access_key_id: string; status: "active" | "disabled"; created_at: number; last_used_at: number | null };
 export type ClientGrant = { bucket_id: number; bucket_name: string; prefix: string; perms: "ro" | "rw" };
@@ -42,7 +42,7 @@ export type ResourceSettings = { config: ResourceConfig; source: "admin" | "star
   detected: { cpu_cores: number; memory_bytes: number | null; container_limits: boolean; disk_total_bytes: number | null; disk_free_bytes: number | null } };
 export type DownloadCandidate = { ticket: string; group: string; name: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform?: "x" | "youtube"; media_type?: "image" | "video" | "audio"; content_type?: string | null; size: number | null; variant: string | null; warnings: string[]; header_names: string[]; body_bytes: number };
 export type DownloadStatus = "queued" | "running" | "stopped" | "interrupted" | "completed" | "failed";
-export type DownloadTask = { id: number; key: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform: "x" | "youtube" | null; phase: "resolving" | "downloading" | "merging" | "saving" | null; status: DownloadStatus; size: number | null; received: number; stored_bytes: number; segments_done: number; segments_total: number; duration: number | null; processed_seconds: number; elapsed_seconds: number; error: string | null; created_at: number; updated_at: number; speed: number; eta_seconds: number | null };
+export type DownloadTask = { id: number; key: string; private: boolean; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform: "x" | "youtube" | null; phase: "resolving" | "downloading" | "merging" | "saving" | null; status: DownloadStatus; size: number | null; received: number; stored_bytes: number; segments_done: number; segments_total: number; duration: number | null; processed_seconds: number; elapsed_seconds: number; error: string | null; created_at: number; updated_at: number; speed: number; eta_seconds: number | null };
 export type DownloadPage = { tasks: DownloadTask[]; total: number; next_cursor: number | null; capabilities: { hls: boolean; x: boolean; youtube: boolean; concurrency: number; pressure: string | null } };
 export type TrafficPoint = { at: number; in_bytes: number; out_bytes: number };
 export type TrafficMetrics = { total_in_bytes: number; total_out_bytes: number; recent: TrafficPoint[] };
@@ -275,6 +275,8 @@ export const abortUpload = (id: string, path = "") => request<void>(fileApi(`/up
 export const listPublic = () => request<FileItem[]>("/api/user/v1/public");
 export const listPublicPage = (cursor: string | null = null, limit = 100) => request<{ objects: FileItem[]; total: number; next_cursor: string | null; folder_sizes?: Record<string, number>; folder_previews?: Record<string, FileItem[]> }>(
   `/api/user/v1/public?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+/** 打包下载所选文件与文件夹（递归）；文件夹路径以 / 结尾。 */
+export const archiveUrl = (paths: string[]) => mediaAccess(`${fileApi("/archive", paths[0] ?? "")}?${paths.map(path => `path=${encodeURIComponent(path)}`).join("&")}`, paths[0] ?? "");
 export const contentUrl = (path: string, download = false) => mediaAccess(`${fileApi("/content", path)}?path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`, path);
 
 export type UploadProgress = { loaded: number; total: number; percent: number };
@@ -372,11 +374,21 @@ export const publicPath = (token: string, name: string, download = false, access
 export const adminSettings = (signal?: AbortSignal) => request<SystemSettings>("/api/admin/v1/settings", { signal });
 export const adminResources = () => request<ResourceSettings>("/api/admin/v1/resources");
 export const updateAdminResources = (values: ResourceConfig) => post<ResourceSettings>("/api/admin/v1/resources", values);
-export const listDownloads = (cursor: string | null, status: string, signal?: AbortSignal) => request<DownloadPage>(`/api/user/v1/downloads?limit=50&cursor=${encodeURIComponent(cursor ?? "")}&status=${encodeURIComponent(status)}`, { signal });
+export async function listDownloads(cursor: string | null, status: string, signal?: AbortSignal) {
+  const suffix = `?limit=50&cursor=${encodeURIComponent(cursor ?? "")}&status=${encodeURIComponent(status)}`;
+  if (privateAccess) {
+    try { return await request<DownloadPage>(`/api/user/v1/private/downloads${suffix}`, { signal }); }
+    catch (reason) { if (!(reason instanceof ApiError) || reason.code !== "private_locked") throw reason; }
+  }
+  return request<DownloadPage>(`/api/user/v1/downloads${suffix}`, { signal });
+}
 export const parseDownloads = (input: string, signal?: AbortSignal, download_type: "auto" | "http" | "hls" | "x" | "youtube" = "auto", cookies = "") => request<{ candidates: DownloadCandidate[] }>("/api/user/v1/downloads/parse", { method: "POST", body: JSON.stringify({ input, download_type, cookies }), signal }, 180000);
-export const createDownloads = (items: { ticket: string; name: string }[], destination: string) => post<{ tasks: DownloadTask[] }>("/api/user/v1/downloads", { items, destination });
+export const createDownloads = (items: { ticket: string; name: string }[], destination: string) => post<{ tasks: DownloadTask[] }>(`/api/user/v1${isPrivatePath(destination) ? "/private" : ""}/downloads`, { items, destination });
 export const clearDownloads = (status: "completed" | "failed") => post<{ removed: number }>("/api/user/v1/downloads/clear", { status });
-export const controlDownload = (id: number, action: "stop" | "resume" | "restart" | "delete" | "update", item?: { ticket: string }) => post<DownloadTask | undefined>(`/api/user/v1/downloads/${id}/${action}`, { item });
+export const controlDownload = (id: number, action: "stop" | "resume" | "restart" | "delete" | "update", item?: { ticket: string }, privateTask = false) => {
+  const usePrivate = privateTask && Boolean(privateAccess);
+  return post<DownloadTask | undefined>(`/api/user/v1${usePrivate ? "/private" : ""}/downloads/${id}/${action}`, { item });
+};
 export const updateAdminSettings = async (values: Partial<Record<keyof SystemSettings, string>>) => {
   const result = await post<SystemSettings>("/api/admin/v1/settings", values);
   setSiteConfig({ public_base_url: result.public_base_url.effective, s3_endpoint: result.s3_endpoint.effective });

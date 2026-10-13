@@ -1,13 +1,22 @@
 /** 图片与媒体列表沿用打开预览时的当前页及显示顺序。 */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { type FileItem } from "./api";
-import { Button, Icon, IconButton, formatBytes } from "./ui";
+import { Button, Icon, IconButton, formatBytes, type IconName } from "./ui";
 
 export type PlaybackMode = "sequence" | "random" | "loop" | "single";
 const MODES: { value: PlaybackMode; label: string }[] = [
   { value: "sequence", label: "顺序播放" }, { value: "random", label: "随机播放" },
   { value: "loop", label: "列表循环" }, { value: "single", label: "单曲循环" },
 ];
+export const PLAYBACK_MODES = MODES;
+export const MODE_ICONS: Record<PlaybackMode, IconName> = { sequence: "sequence", random: "shuffle", loop: "repeat", single: "repeatOne" };
+/** 播放器自带的导航：上一个／下一个、播放模式与列表开关都放进播放器控制条，不再单独占一条工具栏。 */
+export type PreviewNav = {
+  index: number; count: number; onPrevious: () => void; onNext: () => void;
+  mode?: PlaybackMode; onMode?: (mode: PlaybackMode) => void; playlistOpen?: boolean; onPlaylist?: () => void;
+};
+/** 图片底部的缩略图条：沿用播放列表的文件与当前项。 */
+export type PreviewStrip = { items: FileItem[]; current: string; onSelect: (file: FileItem) => void; thumbnail: (file: FileItem) => string | undefined };
 const MODE_KEY = "tessera-playback-mode";
 const HISTORY_LIMIT = 100;
 function initialMode(): PlaybackMode {
@@ -66,32 +75,6 @@ export function usePreviewPlaylist(file: FileItem, kind: string, files: FileItem
     try { localStorage.setItem(MODE_KEY, value); } catch { /* 本地偏好不可用时仍可切换。 */ }
   }
   return { items, current, select, next, previous, mode, changeMode };
-}
-
-export function PlaylistControls({ playlist, onSelect, compact = false, image = false, playing, onToggle, expanded, onExpand }: {
-  playlist: ReturnType<typeof usePreviewPlaylist>; onSelect: (file: FileItem) => void; compact?: boolean; image?: boolean; playing: boolean; onToggle: () => void;
-  expanded?: boolean; onExpand?: () => void;
-}) {
-  const index = playlist.items.findIndex(file => file.key === playlist.current.key);
-  const label = image ? "图片列表" : "播放列表";
-  return <section className={`preview-playlist${compact ? " is-compact" : ""}`} aria-label={label}>
-    <div className="preview-playlist-toolbar">
-      <div className="preview-transport">
-        <IconButton icon="previous" label="上一个文件" size="sm" disabled={playlist.items.length < 2} onClick={() => onSelect(playlist.previous())} />
-        {compact && !image && <IconButton icon={playing ? "pause" : "play"} label={playing ? "暂停播放" : "继续播放"} size="sm" onClick={onToggle} />}
-        <IconButton icon="next" label="下一个文件" size="sm" disabled={playlist.items.length < 2} onClick={() => { const next = playlist.next(); if (next) onSelect(next); }} />
-      </div>
-      {!image && <label className="preview-playback-mode"><span className="sr-only">播放模式</span>
-        <select aria-label="播放模式" value={playlist.mode} onChange={event => playlist.changeMode(event.target.value as PlaybackMode)}>
-          {MODES.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
-        </select><Icon name="chevronDown" size={12} />
-      </label>}
-      {compact && image && <span className="preview-playlist-count">{Math.max(0, index) + 1} / {playlist.items.length}</span>}
-      {!compact && <Button variant="ghost" size="sm" icon="list" className="preview-playlist-toggle" aria-expanded={expanded} aria-controls={expanded ? "preview-playlist-panel" : undefined} onClick={onExpand}>
-        {label} <span className="preview-playlist-count">{Math.max(0, index) + 1} / {playlist.items.length}</span>
-      </Button>}
-    </div>
-  </section>;
 }
 
 export function PlaylistPanel({ playlist, onSelect, onCollapse, renderThumbnail, typeLabel, image = false }: {

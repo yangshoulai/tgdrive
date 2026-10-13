@@ -17,7 +17,7 @@ export function Maintenance({ status, onStatus, onLocked }: { status: api.System
   useDocumentTitle(`安全与维护 · ${SITE.admin}`);
   return (
     <>
-      <PageHeader title="安全与维护" description="管理自动维护、数据备份与系统安全。" />
+      <PageHeader title="安全与维护" />
       <div className="maintenance-tabs"><Segmented label="维护区域" value={section} onChange={setSection} options={[{ value: "maintenance", label: "维护与备份" }, { value: "security", label: "安全设置" }]} /></div>
       <div className="stack maintenance-section" hidden={section !== "maintenance"}>
         <TasksPanel unlocked={Boolean(unlocked)} />
@@ -44,7 +44,7 @@ export function Maintenance({ status, onStatus, onLocked }: { status: api.System
 
 export function Audit() {
   useDocumentTitle(`审计日志 · ${SITE.admin}`);
-  return <><PageHeader title="审计日志" description="查看登录、权限、分享和系统配置的变更记录。" /><AuditPanel /></>;
+  return <><PageHeader title="审计日志" /><AuditPanel /></>;
 }
 
 const ACTOR_LABEL: Record<api.AuditEvent["actor_type"], string> = { admin: "管理员", user: "用户", key: "访问密钥" };

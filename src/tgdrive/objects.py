@@ -957,6 +957,33 @@ class ObjectService:
                 if revoke_public:
                     db.execute("UPDATE objects SET public_token=NULL,public_at=NULL,public_expires_at=NULL,"
                                "public_password=NULL,public_downloads=0 WHERE bucket_id=? AND key=?", (scope.bucket_id, target))
+            # 下载任务的目标也是文件系统路径；移动目录时同步未完成任务和已移动成品的位置。
+            actual_moves = dict(moves)
+            tasks = db.execute("SELECT id,key,status,upload_id FROM offline_tasks WHERE bucket_id=? AND key>=?",
+                               (scope.bucket_id, old)).fetchall()
+            for task in tasks:
+                task_key = task["key"]
+                if folder:
+                    if not task_key.startswith(old):
+                        continue
+                    if task["status"] == "completed":
+                        target = actual_moves.get(task_key)
+                        if target is None:
+                            continue
+                    else:
+                        target = new + task_key[len(old):]
+                else:
+                    if task_key != old:
+                        continue
+                    target = actual_moves.get(task_key)
+                    if target is None:
+                        # 冲突策略跳过了成品文件，就不能把已完成任务的位置也改掉。
+                        if task["status"] == "completed":
+                            continue
+                        target = new
+                db.execute("UPDATE offline_tasks SET key=?,updated_at=? WHERE id=?", (target, now, task["id"]))
+                if task["upload_id"]:
+                    db.execute("UPDATE uploads SET key=? WHERE upload_id=?", (target, task["upload_id"]))
             if scope.authorize is not None:
                 scope.authorize()
             return MoveResult(len(moves), skipped)

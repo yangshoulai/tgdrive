@@ -32,13 +32,21 @@ class _ArchiveOutput(RawIOBase):
         return parts
 
 
-async def stream_zip(entries: AsyncIterator[tuple[str, int, float, AsyncIterator[bytes]]]):
+def _valid_name(name: str, nested: bool) -> bool:
+    if not name or "\\" in name or "\x00" in name or (not nested and "/" in name):
+        return False
+    parts = name.split("/") if nested else [name]
+    return all(part not in ("", ".", "..") for part in parts)
+
+
+async def stream_zip(entries: AsyncIterator[tuple[str, int, float, AsyncIterator[bytes]]], *, nested: bool = False):
+    """nested 为 True 时允许 a/b.txt 这样的相对路径（打包文件夹）；任何一段都不能为空、. 或 ..。"""
     output = _ArchiveOutput()
     try:
         async with aclosing(entries):
             with ZipFile(output, "w", compression=ZIP_STORED, allowZip64=True) as archive:
                 async for name, size, modified, stream in entries:
-                    if not name or "/" in name or "\\" in name or "\x00" in name or name in (".", ".."):
+                    if not _valid_name(name, nested):
                         raise ValueError("invalid archive filename")
                     # ZIP 不保存时区，统一使用 UTC 并限制在 DOS 时间范围内。
                     info = ZipInfo(name, gmtime(max(315532800, min(4354819198, modified)))[:6])

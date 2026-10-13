@@ -6,8 +6,9 @@ import { fingerprintFile, fingerprintSupported } from "../fingerprint";
 import { FileTile, getFileKind } from "../files";
 import { createThumbnails, saveThumbnails, thumbnailSource } from "../thumbnails";
 
-import { Badge, Button, Icon, IconButton, Modal, Progress, Switch, copyText, formatBytes, toast } from "../ui";
+import { Badge, Button, Icon, IconButton, Modal, Switch, copyText, formatBytes, toast } from "../ui";
 import { DestinationPicker } from "./folders";
+import { TrayBar, TrayRing, type TrayState } from "./tray";
 
 /* ---------- 上传 ---------- */
 
@@ -308,37 +309,46 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
   const canceledCount = jobs.filter(job => job.status === "canceled").length;
   const completed = jobs.filter(job => job.status === "done").length;
   const allCanceled = canceledCount === jobs.length;
-  const overall = jobs.reduce((sum, job) => sum + (job.status === "done" ? 100 : job.percent), 0) / jobs.length;
-  const title = active ? `正在上传 ${active} 个文件` : failed ? `${failed} 个文件上传失败` : allCanceled ? "上传已取消" : canceledCount ? `${completed} 个完成，${canceledCount} 个已取消` : "上传完成";
+  // 总进度按字节计算，大文件不会被一堆小文件的“已完成”冲淡。
+  const counted = jobs.filter(job => job.status !== "canceled");
+  const totalBytes = counted.reduce((sum, job) => sum + job.file.size, 0);
+  const sentBytes = counted.reduce((sum, job) => sum + job.file.size * (job.status === "done" ? 1 : job.status === "error" ? 0 : job.percent / 100), 0);
+  const overall = totalBytes ? sentBytes / totalBytes * 100 : counted.length ? counted.filter(job => job.status === "done").length / counted.length * 100 : 0;
+  const state: TrayState = active ? "active" : failed ? "error" : allCanceled ? "idle" : "done";
+  const title = active ? `正在上传 ${active} 个文件` : failed ? `${failed} 个文件上传失败` : allCanceled ? "上传已取消" : "上传完成";
+  const subtitle = active ? `${formatBytes(sentBytes)} / ${formatBytes(totalBytes)} · ${Math.floor(overall)}%`
+    : failed ? `${completed} 个已完成，可逐个重试` : allCanceled ? `${canceledCount} 个文件` : `${completed} 个文件 · ${formatBytes(totalBytes)}${canceledCount ? ` · ${canceledCount} 个已取消` : ""}`;
   return (
-    <aside className={`upload-tray${collapsed ? " is-collapsed" : ""}`} aria-label="上传进度" aria-live="polite">
+    <aside className={`upload-tray is-${state}${collapsed ? " is-collapsed" : ""}`} aria-label="上传进度" aria-live="polite">
       <header>
-        <span className={`tray-status${active ? " is-active" : failed ? " is-error" : allCanceled ? "" : " is-done"}`}><Icon name={active ? "upload" : failed ? "alert" : allCanceled ? "x" : "check"} size={16} /></span>
-        <strong>{title}</strong>
+        <TrayRing state={state} percent={overall} icon="upload" />
+        <div className="tray-heading"><strong>{title}</strong><small>{subtitle}</small></div>
         <IconButton icon="chevronDown" size="sm" label={collapsed ? "展开" : "收起"} onClick={() => setCollapsed(value => !value)} />
         {!active && <IconButton icon="x" size="sm" label="关闭上传列表" onClick={queue.clear} />}
       </header>
-      {active > 0 && <Progress value={overall} label="总体进度" />}
       {!collapsed && (
         <ul>
-          {jobs.map(job => (
-            <li key={job.id}>
-              <FileTile kind={getFileKind(job.file.type, job.file.name)} />
+          {jobs.map(job => {
+            const running = job.status === "uploading" || job.status === "queued";
+            const detail = job.status === "queued" ? `等待上传 · ${formatBytes(job.file.size)}`
+              : job.status === "uploading" ? job.phase === "hashing" ? `检查是否可秒传 · ${Math.round(job.percent)}%` : job.percent >= 100 ? "正在保存…" : `${formatBytes(job.file.size * job.percent / 100)} / ${formatBytes(job.file.size)}`
+              : job.status === "done" ? `${formatBytes(job.file.size)}${job.instant ? " · 秒传" : job.resumed ? " · 续传完成" : ""}` : job.status === "canceled" ? "已取消" : job.error;
+            return <li key={job.id} className={`tray-item is-${job.status}`}>
+              <span className="tray-icon"><FileTile kind={getFileKind(job.file.type, job.file.name)} />
+                {(job.status === "done" || job.status === "error") && <span className="tray-badge"><Icon name={job.status === "done" ? "check" : "alert"} size={10} /></span>}</span>
               <div className="tray-job">
-                <span className="tray-name">{job.file.name}{job.isPublic && <Icon name="globe" size={13} className="tray-public" />}{job.resumed && <Badge tone="accent">续传</Badge>}{job.instant && <Badge tone="success">秒传</Badge>}</span>
-                {job.status === "uploading" || job.status === "queued" ? <Progress value={job.percent} label={`${job.file.name} 上传进度`} />
-                  : <small className={job.status === "error" ? "tone-danger" : "muted"}>{job.status === "done" ? formatBytes(job.file.size) : job.status === "canceled" ? "已取消" : job.error}</small>}
+                <span className="tray-name" title={job.file.name}><span>{job.file.name}</span>{job.isPublic && <Icon name="globe" size={13} className="tray-public" />}{job.resumed && running && <Badge tone="accent">续传</Badge>}</span>
+                <small className={job.status === "error" ? "tone-danger" : "muted"}>{detail}</small>
+                {running && <TrayBar percent={job.status === "queued" ? 0 : job.percent} paused={job.status === "queued"} label={`${job.file.name} 上传进度`} />}
               </div>
               <span className="tray-right">
-                {job.status === "uploading" && <small className="muted">{job.phase === "hashing" ? `检查中 ${Math.round(job.percent)}%` : job.percent >= 100 ? "处理中" : `${Math.round(job.percent)}%`}</small>}
-                {job.status === "queued" && <small className="muted">等待中</small>}
-                {(job.status === "uploading" || job.status === "queued") && <IconButton icon="x" size="sm" label={`取消上传 ${job.file.name}`} onClick={() => queue.cancel(job.id)} />}
+                {job.status === "uploading" && job.phase !== "hashing" && job.percent < 100 && <span className="tray-percent">{Math.floor(job.percent)}%</span>}
+                {running && <IconButton icon="x" size="sm" label={`取消上传 ${job.file.name}`} onClick={() => queue.cancel(job.id)} />}
                 {job.status === "error" && <Button size="sm" icon="refresh" aria-label={`重试上传 ${job.file.name}`} onClick={() => queue.retry(job.id)}>重试</Button>}
                 {job.status === "done" && job.result?.public_token && <IconButton icon="copy" size="sm" label="复制分享链接" onClick={() => void copyText(api.publicLinks(job.result!.public_token!, job.file.name).page, "分享链接已复制")} />}
-                {job.status === "done" && !job.result?.public_token && <Icon name="check" size={16} className="tone-success" />}
               </span>
-            </li>
-          ))}
+            </li>;
+          })}
         </ul>
       )}
     </aside>

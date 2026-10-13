@@ -390,7 +390,8 @@ class PlatformResolver:
                                 for track in entry["tracks"]:
                                     media_request(platform, track)
                                 size = entry.get("size") or entry.get("estimated_size")
-                                if size and size > config["platform_max_mib"] * MIB:
+                                # 单轨媒体直接流入加密分片，不占用整轨缓存；只有分离音视频需要临时缓存并合并。
+                                if len(entry["tracks"]) > 1 and size and size > config["platform_max_mib"] * MIB:
                                     entry["too_large"] = True
                             return entries
             except (TimeoutError, BrokenPipeError, ConnectionResetError) as exc:
@@ -493,7 +494,7 @@ async def merge_tracks(client, platform, entry, executable, cache_root, task_id,
             files.append(path)
             def sized(size):
                 if size is not None and received + size > limit:
-                    raise DownloadError("视频超过单任务大小上限，请选择更低清晰度")
+                    raise DownloadError("分离音视频轨超过临时缓存预算，请选择较低清晰度或调整资源设置")
             stream = track_stream(client, platform, track, on_size=sized)
             try:
                 with path.open("wb") as output:
@@ -502,7 +503,7 @@ async def merge_tracks(client, platform, entry, executable, cache_root, task_id,
                         check()
                         received += len(piece)
                         if received > limit:
-                            raise DownloadError("视频超过单任务大小上限，请选择更低清晰度")
+                            raise DownloadError("分离音视频轨超过临时缓存预算，请选择较低清晰度或调整资源设置")
                         if shutil.disk_usage(cache_root).free < reserve + len(piece) + 32 * MIB:
                             raise DownloadError("临时磁盘空间不足，请释放空间后重试")
                         await throttle(len(piece))
@@ -532,8 +533,6 @@ async def merge_tracks(client, platform, entry, executable, cache_root, task_id,
                 if not piece:
                     break
                 total += len(piece)
-                if total > limit + 16 * MIB:
-                    raise DownloadError("封装结果超过大小上限")
                 yield piece
             if await process.wait() != 0:
                 raise DownloadError("音视频合并失败，请重新选择 MP4 清晰度")

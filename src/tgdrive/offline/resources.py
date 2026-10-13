@@ -18,7 +18,7 @@ from .platforms import capabilities, tool_version
 MIB = 1024 * 1024
 DEFAULTS = {"mode": "auto", "concurrency": 1, "bandwidth_kib": 0,
             "reserve_mib": 512, "hls_enabled": False, "x_enabled": False, "youtube_enabled": False,
-            "youtube_max_height": 720, "platform_max_mib": 512, "proxy": ""}
+            "youtube_max_height": 2160, "platform_max_mib": 512, "proxy": ""}
 MASK = "******"
 
 
@@ -132,7 +132,7 @@ class ResourceSettings:
         if type(merged["youtube_max_height"]) is not int or merged["youtube_max_height"] not in (360, 480, 720, 1080, 2160):
             raise ValueError("YouTube 清晰度上限不正确")
         if type(merged["platform_max_mib"]) is not int or not 16 <= merged["platform_max_mib"] <= 8192:
-            raise ValueError("平台下载单任务大小上限须为 16–8192 MiB")
+            raise ValueError("平台临时缓存预算须为 16–8192 MiB")
         if not isinstance(merged["proxy"], str):
             raise ValueError("下载代理地址格式不正确")
         merged["proxy"] = normalize_proxy(merged["proxy"])
@@ -155,7 +155,7 @@ class ResourceSettings:
         return {**config, "mode": mode, "concurrency": min(desired, ceiling), "ffmpeg_concurrency": 1,
                 "streaming": True, "cache_mib": platform_limit if config["youtube_enabled"] else 0,
                 "platform_max_mib": platform_limit,
-                "youtube_max_height": min(config["youtube_max_height"], 720) if low or mode == "low" else config["youtube_max_height"],
+                "youtube_max_height": config["youtube_max_height"],
                 "x_available": self.platform_tools["x_available"],
                 "youtube_available": self.platform_tools["youtube_available"] and bool(self.ffmpeg),
                 "hls_available": bool(self.ffmpeg), "reduced": desired > ceiling}

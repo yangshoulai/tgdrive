@@ -5,8 +5,8 @@ import { useCursorPage } from "../pagination";
 import { Button, Field, Icon, Pagination, SkeletonRows } from "../ui";
 
 /** 上传、新建与移动共用的位置浏览器；每次只读取当前目录的一页子目录。 */
-export function FolderPicker({ value, onChange, blocked, onReady }: {
-  value: string; onChange: (value: string) => void; blocked?: (path: string) => boolean; onReady?: (ready: boolean) => void;
+export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate = false }: {
+  value: string; onChange: (value: string) => void; blocked?: (path: string) => boolean; onReady?: (ready: boolean) => void; allowPrivate?: boolean;
 }) {
   const id = useId();
   const root = api.isPrivatePath(value) ? api.PRIVATE_PREFIX : "";
@@ -17,7 +17,16 @@ export function FolderPicker({ value, onChange, blocked, onReady }: {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [privateAvailable, setPrivateAvailable] = useState(Boolean(api.getPrivateAccess()));
   const returnToCreate = useRef(false);
+  useEffect(() => {
+    const locked = () => {
+      setPrivateAvailable(false);
+      if (api.isPrivatePath(value)) onChange("");
+    };
+    window.addEventListener("tessera:private-locked", locked);
+    return () => window.removeEventListener("tessera:private-locked", locked);
+  }, [value, onChange]);
   useEffect(() => {
     if (!creating && returnToCreate.current) {
       document.getElementById(`${id}-create`)?.focus();
@@ -40,6 +49,14 @@ export function FolderPicker({ value, onChange, blocked, onReady }: {
     finally { setBusy(false); }
   }
   return <div className="move-browser">
+    {allowPrivate && <div className="move-scope-toggle" role="group" aria-label="目标空间">
+      <button type="button" className={!root ? "is-active" : ""} aria-pressed={!root} onClick={() => open("")}><Icon name="home" size={15} />我的文件</button>
+      <button type="button" className={root ? "is-active" : ""} aria-pressed={Boolean(root)} disabled={!privateAvailable && !api.getPrivateAccess()} title={!privateAvailable && !api.getPrivateAccess() ? "请先解锁私密空间" : undefined} onClick={() => {
+        const available = Boolean(api.getPrivateAccess()); setPrivateAvailable(available);
+        if (available) open(api.PRIVATE_PREFIX);
+      }}><Icon name="lock" size={15} />私密空间</button>
+      {!privateAvailable && !api.getPrivateAccess() && <span className="muted">需先解锁后选择</span>}
+    </div>}
     <div className="move-head">
       <nav className="breadcrumbs" aria-label="目标位置">
         <button type="button" disabled={busy} onClick={() => open(root)} aria-current={value === root ? "page" : undefined}><Icon name={root ? "lock" : "home"} size={15} />{rootName}</button>
@@ -72,7 +89,7 @@ export function FolderPicker({ value, onChange, blocked, onReady }: {
 }
 
 /** 常见任务直接使用当前位置，需要更改时再展开目录浏览器。 */
-export function DestinationPicker({ value, onChange, onReady }: { value: string; onChange: (path: string) => void; onReady: (ready: boolean) => void }) {
+export function DestinationPicker({ value, onChange, onReady, allowPrivate = false }: { value: string; onChange: (path: string) => void; onReady: (ready: boolean) => void; allowPrivate?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const [ready, setReady] = useState(true);
   const id = useId();
@@ -83,6 +100,6 @@ export function DestinationPicker({ value, onChange, onReady }: { value: string;
       <div><span className="field-label">目标位置</span><strong title={api.privatePathLabel(value)}>{api.privatePathLabel(value)}</strong></div>
       <Button size="sm" variant="ghost" aria-expanded={expanded} aria-controls={`${id}-browser`} disabled={expanded && !ready} onClick={() => setExpanded(current => !current)}>{expanded ? "收起" : "更改位置"}</Button>
     </div>
-    {expanded && <div id={`${id}-browser`} className="destination-browser"><FolderPicker value={value} onChange={onChange} onReady={next => { setReady(next); onReady(next); }} /></div>}
+    {expanded && <div id={`${id}-browser`} className="destination-browser"><FolderPicker value={value} onChange={onChange} allowPrivate={allowPrivate} onReady={next => { setReady(next); onReady(next); }} /></div>}
   </div>;
 }
