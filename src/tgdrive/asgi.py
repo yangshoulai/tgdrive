@@ -696,7 +696,7 @@ class TgDriveASGI(StaticFiles):
                 if route == "/private/passkeys/unlock/verify":
                     return 200, await passkeys.private_unlock(token, csrf, payload.get("request_id"), payload.get("credential"), origin, ip), {}
             if route == "/private/setup" and method == "POST":
-                return 201, await self.private_space.setup(token, csrf, payload["password"], payload.get("idle_seconds", 300)), {}
+                return 201, await self.private_space.setup(token, csrf, payload["password"], payload.get("idle_seconds", self.private_space.DEFAULT_IDLE)), {}
             if route == "/private/unlock" and method == "POST":
                 return 200, await self.private_space.unlock(token, csrf, payload["password"], ip), {}
             if route == "/private/lock" and method == "POST":
@@ -707,7 +707,7 @@ class TgDriveASGI(StaticFiles):
                     active=payload.get("active") is True, playing=payload.get("playing") is True), {}
             if route == "/private/settings" and method == "POST":
                 return 200, await self.private_space.configure(token, csrf, access, payload.get("password"),
-                    payload.get("idle_seconds", 300), payload.get("new_password")), {}
+                    payload.get("idle_seconds"), payload.get("new_password")), {}
             if route == "/private/transfer" and method == "POST":
                 return 200, await self.private_space.transfer(token, csrf, access, payload["paths"],
                     payload["destination"], payload["into"], payload.get("conflict", "rename")), {}
@@ -855,9 +855,10 @@ class TgDriveASGI(StaticFiles):
 
     def _login(self, result):
         token = result["session"]
+        account = self.user.accounts.account_for_session(self.user.accounts.sessions.require(token))
         # 会话 ID 仅放 HttpOnly Cookie，浏览器脚本只需要 CSRF token。
         # “保持登录”的会话用持久 Cookie（与服务端有效期一致）；普通会话 12 小时。
-        return 200, {k: v for k, v in result.items() if k != "session"}, {"Set-Cookie": self._cookie(token, max_age=round(result["expires_at"] - time.time()))}
+        return 200, {**{k: v for k, v in result.items() if k != "session"}, "bucket_id": account.bucket_id}, {"Set-Cookie": self._cookie(token, max_age=round(result["expires_at"] - time.time()))}
 
     async def _content(self, send, method, token, query, headers, *, admin: bool = False, user=None, private=False):
         user = user or self.user
@@ -869,13 +870,17 @@ class TgDriveASGI(StaticFiles):
         else:
             info, _ = await user.content(token, path)
             opener = lambda start, end: user.content(token, path, start, end)
-        # 只有与当前内容版本匹配的图片地址才能直接复用；旧地址仍校验版本与权限。
+            if "bucket_id" in query and int(query["bucket_id"][0]) != info.bucket_id:
+                raise PermissionError("文件缓存不属于当前账号")
+        # 缓存必须同时绑定存储桶与内容版本，不能在切换账号后复用同路径的内容。
         mime = (info.content_type or "").split(";", 1)[0].strip().lower()
         image = mime.startswith("image/") or (mime in ("", "application/octet-stream")
             and re.search(r"\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$", info.key, re.IGNORECASE))
-        cache_control = "no-store" if private else "private, no-cache" if image else "private"
-        if (not private and image and query.get("download", ["0"])[0] != "1"
-                and info.etag and query.get("v", [""])[0] == info.etag):
+        media = mime.startswith(("video/", "audio/")) or (mime in ("", "application/octet-stream")
+            and re.search(r"\.(?:mp4|m4v|mov|webm|mkv|avi|ogv|mp3|m4a|m4b|ogg|oga|opus|wav|flac|aac)$", info.key, re.IGNORECASE))
+        cache_control = "no-store" if private else "private, no-cache" if image or media else "private"
+        if (not private and (image or media) and query.get("download", ["0"])[0] != "1"
+                and query.get("bucket_id", [""])[0] and info.etag and query.get("v", [""])[0] == info.etag):
             cache_control = "private, max-age=604800, immutable"
         await self._stream_object(send, method, info, opener, query, headers, cache_control)
 

@@ -65,6 +65,20 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
         [piece async for piece in self.engine.stream(self.blob, window=64)]
         self.assertEqual(self.store.peak, 1)
 
+    async def test_remote_long_read_starts_small_and_short_range_stays_single(self):
+        self.store.read_window = lambda ref: 128
+        self.engine.read_ahead = 0
+        stream = self.engine.stream(self.blob, window=64)
+        try:
+            self.assertEqual(await anext(stream), self.data[:64])
+            self.assertEqual(await anext(stream), self.data[64:192])
+        finally:
+            await stream.aclose()
+        calls = self.store.calls
+        pieces = [piece async for piece in self.engine.stream(self.blob, 5, 105, window=64)]
+        self.assertEqual(pieces, [self.data[5:105]])
+        self.assertEqual(self.store.calls - calls, 1)
+
     async def test_global_and_bucket_limits_survive_cancellation(self):
         slots = TransferSlots(total=2, per_bucket=1, wait_seconds=0.03)
         async with slots.slot(1):

@@ -5,7 +5,7 @@ import { BRAND } from "../brand";
 import * as api from "../api";
 
 import { FileThumbnail, FileTile, FileVisual, FolderThumbnail, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
-import { saveThumbnails, thumbnailsFromImage, useThumbnailBackfill } from "../thumbnails";
+import { saveThumbnails, thumbnailsFromImage, thumbnailSource, useThumbnailBackfill } from "../thumbnails";
 
 import { Badge, Button, Checkbox, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, useDocumentTitle, type MenuItem } from "../ui";
 
@@ -66,7 +66,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
   const setThumbnails = (key: string, thumbnails: string[]) =>
     setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, thumbnail_versions: undefined, has_thumbnail: thumbnails.includes("thumb") } : item));
-  useThumbnailBackfill(files, key => api.contentUrl(key), setThumbnails);
+  const thumbnailBackfill = useThumbnailBackfill(files, key => api.contentUrl(key), setThumbnails);
   const setPublicFolders = (update: (items: Record<string, api.FileItem>) => Record<string, api.FileItem>) => pagination.setPage(current => current && { ...current, public_folders: update(current.public_folders ?? {}) });
   useEffect(() => { setSelected(new Set()); }, [fetchPage, pagination.number]);
   useEffect(() => { setSearch(""); setQuery(""); }, [prefix]);
@@ -226,6 +226,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       { label: "下载", icon: "download", onSelect: () => undefined, href: api.contentUrl(file.key, true) },
       ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, onSelect: () => setSharing(file) }] : []),
     ];
+    if (!file.thumbnails?.length && thumbnailSource(file.key, file.content_type, file.size)) {
+      const state = thumbnailBackfill.state(file);
+      const failed = state?.phase === "waiting" || state?.phase === "failed";
+      if (failed) items.push({ label: "查看缩略图失败原因", icon: "info", heading: "缩略图", onSelect: () => notify.info(state.message) });
+      items.push({ label: state?.phase === "generating" ? "缩略图正在生成" : failed ? "重试生成缩略图" : "生成缩略图", icon: "refresh", heading: failed ? undefined : "缩略图",
+        onSelect: () => { if (state?.phase === "generating") { notify.info("缩略图正在生成，请稍候"); return; } thumbnailBackfill.retry(file); } });
+    }
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
     items.push({ label: "重命名", icon: "edit", onSelect: () => setRenaming(entry) });
     items.push({ label: "移动到…", icon: "move", onSelect: () => setMoving([entry]) });
@@ -233,6 +240,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     if (query) items.push({ label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(parentPath(file.key)) });
     items.push({ label: "删除", icon: "trash", danger: true, divider: true, onSelect: () => void moveToTrash([entry]) });
     return items;
+  }
+  function fileVisual(file: api.FileItem) {
+    const state = thumbnailBackfill.state(file);
+    return <span className="file-tile" title={state?.message}>
+      {state?.phase === "generating" ? <span className="spinner spinner-lg" role="status" aria-label="正在生成缩略图" />
+        : <FileVisual kind={getFileKind(file.content_type, file.key)} src={api.fileThumbnail(file)} />}
+    </span>;
   }
   function folderMenu(key: string): MenuItem[] {
     const shared = publicFolders[key];
@@ -333,7 +347,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
               <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}`} {...dragProps(entry)} onClick={() => openPreview(entry.file)}>
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
                 <span role="cell" className="cell-name">
-                  <FileVisual kind={getFileKind(entry.file.content_type, entry.key)} src={api.fileThumbnail(entry.file)} />
+                  {fileVisual(entry.file)}
                   <span className="name-stack">
                     <button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); openPreview(entry.file); }}>{baseName(entry.key)}</button>
                     <span className="file-mobile-meta"><span>{kindLabel(getFileKind(entry.file.content_type, entry.key))} · {formatBytes(entry.file.size)} · {formatDate(entry.file.modified_at)}</span>{entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>
@@ -356,14 +370,16 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             {entries.map(entry => {
               const kind = entry.kind === "folder" ? "folder" : getFileKind(entry.file.content_type, entry.key);
               const isSelected = selected.has(entry.key);
+              const thumbnailWork = entry.kind === "file" ? thumbnailBackfill.state(entry.file) : undefined;
               return (
                 <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${entry.kind === "folder" ? dropClass(entry.key) : ""}`} {...dragProps(entry)} {...(entry.kind === "folder" ? dropProps(entry.key) : {})} onClick={() => entry.kind === "folder" ? onOpenFolder(entry.key) : openPreview(entry.file)}>
-                  <div className="grid-thumb">
+                  <div className="grid-thumb" title={thumbnailWork?.message}>
                     {/* 有缩略图用缩略图；小图片直接显示原图；其余显示类型图标，避免每个卡片下载完整原图。 */}
                     {entry.kind === "folder" ? <FolderThumbnail previews={(pagination.page?.folder_previews?.[entry.key] ?? []).flatMap(file => {
                       const url = api.fileThumbnail(file); return url ? [{ ...file, url }] : [];
                     })} /> : <FileThumbnail kind={kind} url={api.fileThumbnail(entry.file)
                       ?? (kind === "image" && entry.file.size <= 2 * 1024 * 1024 ? api.versionedContentUrl(api.contentUrl(entry.key), entry.file.etag) : undefined)} />}
+                    {thumbnailWork?.phase === "generating" && <span className="thumbnail-generation" role="status"><span className="spinner" />生成中</span>}
                     <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                     {(entry.kind === "file" ? entry.file.public_token : publicFolders[entry.key]) && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
                   </div>

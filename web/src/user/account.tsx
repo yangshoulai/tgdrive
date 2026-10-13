@@ -4,9 +4,11 @@ import * as api from "../api";
 import { BRAND } from "../brand";
 import { Avatar, Badge, Button, Icon, Modal, PageHeader, PasswordField, toast, useDocumentTitle } from "../ui";
 import { PasskeysSettings } from "./passkeys";
+import { PrivateIdleSelect } from "./private-access";
+import { usePrivateAccess } from "./private-session";
 
 export function UserSettingsPage({ session }: { session: api.Session }) {
-  const [editing, setEditing] = useState<"password" | "passkeys" | null>(null);
+  const [editing, setEditing] = useState<"password" | "passkeys" | "private" | null>(null);
   const [busy, setBusy] = useState(false);
   useDocumentTitle(`用户设置 · ${BRAND}`);
   return <div className="account-page">
@@ -20,8 +22,56 @@ export function UserSettingsPage({ session }: { session: api.Session }) {
       onOpen={() => setEditing("password")} onClose={() => setEditing(null)} />
     <PasskeysSettings username={session.username} active={editing === "passkeys"} busy={busy} onBusyChange={setBusy}
       onOpen={() => setEditing("passkeys")} onClose={() => setEditing(null)} />
+    <PrivateSettingsSummary editing={editing === "private"} busy={busy} onBusyChange={setBusy}
+      onOpen={() => setEditing("private")} onClose={() => setEditing(null)} />
     <p className="account-page-help"><Icon name="info" size={16} /><span>忘记登录密码？请联系管理员重置。<a className="link" href="/docs/files#private-space" target="_blank" rel="noreferrer">了解登录与私密解锁</a></span></p>
   </div>;
+}
+
+function PrivateSettingsSummary({ editing, busy, onOpen, onClose, onBusyChange }: {
+  editing: boolean; busy: boolean; onOpen: () => void; onClose: () => void; onBusyChange: (value: boolean) => void;
+}) {
+  const access = usePrivateAccess(), id = useId();
+  return <section className="account-section" aria-labelledby={`${id}-title`}>
+    <header className="account-section-heading"><Icon name="shield" size={20} /><div><h2 id={`${id}-title`}>私密空间</h2><p>闲置时自动保护私密文件。</p></div></header>
+    <div className="account-section-content account-passkeys">
+      <div className="account-setting-summary"><div><strong>无操作 {access.idleSeconds / 60} 分钟后锁定</strong><p>私密操作会重新计时，播放时保持解锁。切换页面或刷新后可直接返回。</p></div>
+        {!access.available ? <Badge>系统未解锁</Badge> : access.restoring ? <Badge>检查中</Badge> : access.error ? <Badge tone="warning">状态待确认</Badge> : <Badge tone={access.grant ? "success" : "neutral"}>{access.grant ? "已解锁" : "未解锁"}</Badge>}
+      </div>
+      {access.error && <p className="form-alert" role="alert">{access.error}</p>}
+      <div className="account-private-actions">{access.error && <Button size="sm" disabled={busy || access.restoring} onClick={access.restore}>重试</Button>}{access.grant && <Button icon="lock" size="sm" disabled={busy || access.restoring} onClick={access.lock}>立即锁定</Button>}
+        <Button size="sm" icon="settings" aria-haspopup="dialog" disabled={busy || !access.available || access.restoring || !!access.error} onClick={onOpen}>修改锁定时间</Button>
+      </div>
+      {editing && <PrivateIdleDialog initialIdle={access.idleSeconds} busy={busy} onBusyChange={onBusyChange} onClose={onClose} />}
+    </div>
+  </section>;
+}
+
+function PrivateIdleDialog({ initialIdle, busy, onBusyChange, onClose }: {
+  initialIdle: number; busy: boolean; onBusyChange: (value: boolean) => void; onClose: () => void;
+}) {
+  const id = useId(), mounted = useRef(true), submitting = useRef(false);
+  const [idle, setIdle] = useState(initialIdle), [saving, setSaving] = useState(false), [error, setError] = useState("");
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (busy || submitting.current || idle === initialIdle) return;
+    submitting.current = true; setSaving(true); setError(""); onBusyChange(true);
+    try {
+      const saved = await api.configurePrivate(idle);
+      toast.success(`私密空间将于闲置 ${saved.idle_seconds / 60} 分钟后自动锁定`);
+      if (mounted.current) { onBusyChange(false); onClose(); }
+    } catch (reason) { if (mounted.current) setError(api.errorMessage(reason, "锁定时间未保存，请重试")); }
+    finally { submitting.current = false; if (mounted.current) { setSaving(false); onBusyChange(false); } }
+  }
+  return <Modal className="account-action-dialog" title="私密空间自动锁定" icon="lock" description="选择你自己的闲置锁定时间，默认 30 分钟。" onClose={onClose} dismissible={!busy}
+    footer={<><Button disabled={busy} onClick={onClose}>取消</Button><Button variant="primary" type="submit" form={id} loading={saving} disabled={idle === initialIdle || busy && !saving}>保存时间</Button></>}>
+    <form id={id} className="form" onSubmit={submit} noValidate>
+      <fieldset disabled={busy} className="settings-fieldset"><PrivateIdleSelect value={idle} onChange={value => { setIdle(value); setError(""); }} /></fieldset>
+      <p className="account-editor-note">仅影响你的账号。保存后重新计时，其他登录设备需重新解锁；未解锁时只保存时间设置。</p>
+      {error && <p className="form-alert" role="alert">{error}</p>}
+    </form>
+  </Modal>;
 }
 
 function PasswordSettings({ username, editing, busy, onOpen, onClose, onBusyChange }: {

@@ -116,16 +116,20 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
 
 const post = <T>(path: string, body?: unknown, timeoutMs?: number) => request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs);
 
-export type PrivateGrant = { access: string; idle_seconds: number };
+export type PrivateGrant = { access: string; idle_seconds: number; remaining_seconds?: number };
 export type PasskeyCapability = { available: boolean; origin: string | null; rp_id: string | null; reason: string | null; registered: number };
-export type PrivateStatus = { configured: boolean; idle_seconds: number; passkeys: PasskeyCapability };
+export type PrivateStatus = { configured: boolean; idle_seconds: number; unlocked: boolean; access: string | null; remaining_seconds: number; passkeys: PasskeyCapability };
 export type AccountPasskey = { id: number; name: string; rp_id: string; created_at: number; last_used_at: number | null; login_enabled: boolean };
 export type AccountPasskeys = { capability: PasskeyCapability; passkeys: AccountPasskey[] };
-export const privateStatus = () => request<PrivateStatus>("/api/user/v1/private/status");
+export const privateStatus = (signal?: AbortSignal) => request<PrivateStatus>("/api/user/v1/private/status", { signal });
 export const unlockPrivate = (password: string) => post<PrivateGrant>("/api/user/v1/private/unlock", { password });
-export const privateActivity = (active: boolean, playing: boolean) => post<{ remaining_seconds: number }>("/api/user/v1/private/activity", { active, playing });
+export const privateActivity = (active: boolean, playing: boolean) => post<{ remaining_seconds: number; idle_seconds: number }>("/api/user/v1/private/activity", { active, playing });
 export const lockPrivate = (access: string, keepalive = false) => request<void>("/api/user/v1/private/lock", { method: "POST", headers: { "X-Private-Access": access }, keepalive });
-export const configurePrivate = (idleSeconds: number) => post<PrivateGrant>("/api/user/v1/private/settings", { idle_seconds: idleSeconds });
+export async function configurePrivate(idleSeconds: number) {
+  const result = await post<{ access: string | null; idle_seconds: number; remaining_seconds?: number }>("/api/user/v1/private/settings", { idle_seconds: idleSeconds });
+  window.dispatchEvent(new CustomEvent("tessera:private-policy-changed"));
+  return result;
+}
 export const transferPrivate = (paths: string[], destination: string, into: boolean, conflict: MoveConflict) => post<{ moved: number; skipped: number }>("/api/user/v1/private/transfer", { paths, destination, into, conflict });
 export const passkeyStatus = (signal?: AbortSignal) => request<PasskeyCapability>("/api/auth/v1/passkeys/status", { signal });
 export const accountPasskeys = (signal?: AbortSignal) => request<AccountPasskeys>("/api/auth/v1/passkeys", { signal });
@@ -144,7 +148,7 @@ export async function deletePasskey(id: number, password: string, signal?: Abort
 export const beginPasskeyLogin = (remember: boolean, signal: AbortSignal) => passkeyPost<PasskeyChallenge<AuthenticationOptions>>("login/options", { remember }, signal);
 export async function finishPasskeyLogin(requestId: string, credential: unknown, signal: AbortSignal) {
   const session = await passkeyPost<Session>("login/verify", { request_id: requestId, credential }, signal);
-  thumbnailBucketId = null; thumbnailSessionEpoch++; setPrivateAccess(""); setCsrf(session.csrf_token);
+  thumbnailBucketId = session.bucket_id ?? null; thumbnailSessionEpoch++; setPrivateAccess(""); setCsrf(session.csrf_token);
   return session;
 }
 
@@ -154,6 +158,8 @@ export async function finishPasskeyLogin(requestId: string, credential: unknown,
 export async function login(username: string, password: string, remember = false): Promise<Session> {
   thumbnailBucketId = null; thumbnailSessionEpoch++;
   const session = await post<Session>("/api/auth/v1/login", { username, password, remember });
+  thumbnailBucketId = session.bucket_id ?? null;
+  setPrivateAccess("");
   setCsrf(session.csrf_token);
   return session;
 }
@@ -247,8 +253,14 @@ export function fileThumbnail(file: FileItem, variant: ThumbnailVariant = "thumb
 export const publicThumbnail = (contentUrl: string, variant: ThumbnailVariant = "thumb") =>
   `${contentUrl}${contentUrl.includes("?") ? "&" : "?"}thumbnail=${variant}`;
 export const publicFolderDownload = (token: string) => `/api/public/v1/folders/${encodeURIComponent(token)}/download`;
-/** 原图地址带内容版本，覆盖文件后自然更新，同时允许浏览器跨天复用缓存。 */
-export const versionedContentUrl = (url: string, etag: string) => etag ? `${url}${url.includes("?") ? "&" : "?"}v=${encodeURIComponent(etag)}` : url;
+/** 普通图片和音视频按账号存储桶及内容版本复用缓存；私密响应仍由服务端禁止缓存。 */
+export function versionedContentUrl(url: string, etag: string) {
+  if (!etag) return url;
+  const [path, query = ""] = url.split("?");
+  const params = new URLSearchParams(query); params.set("v", etag);
+  if (path === "/api/user/v1/content" && thumbnailBucketId !== null) params.set("bucket_id", String(thumbnailBucketId));
+  return `${path}?${params}`;
+}
 
 /* ---------- 可续传的分段上传 ---------- */
 export type UploadState = { upload_id: string; path: string; completed: boolean; parts: { part_no: number; size: number; etag: string }[] };
@@ -365,7 +377,7 @@ export const parseDownloads = (input: string, signal?: AbortSignal, download_typ
 export const createDownloads = (items: { ticket: string; name: string }[], destination: string) => post<{ tasks: DownloadTask[] }>("/api/user/v1/downloads", { items, destination });
 export const clearDownloads = (status: "completed" | "failed") => post<{ removed: number }>("/api/user/v1/downloads/clear", { status });
 export const controlDownload = (id: number, action: "stop" | "resume" | "restart" | "delete" | "update", item?: { ticket: string }) => post<DownloadTask | undefined>(`/api/user/v1/downloads/${id}/${action}`, { item });
-export const updateAdminSettings = async (values: Partial<Record<keyof SiteConfig, string>>) => {
+export const updateAdminSettings = async (values: Partial<Record<keyof SystemSettings, string>>) => {
   const result = await post<SystemSettings>("/api/admin/v1/settings", values);
   setSiteConfig({ public_base_url: result.public_base_url.effective, s3_endpoint: result.s3_endpoint.effective });
   return result;

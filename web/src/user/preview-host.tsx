@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import * as api from "../api";
+import { usePrivateAccess } from "./private-session";
 import { PreviewModal } from "../files";
 
 /**
@@ -18,6 +19,8 @@ const HostContext = createContext<Host | null>(null);
 const PAGE_CALLBACKS = ["onShare", "onImageLoad", "onPlaybackActivity"] as const;
 
 export function PreviewHost({ children, privateAllowed, enabled }: { children: ReactNode; privateAllowed: boolean; enabled: boolean }) {
+  const privateSession = usePrivateAccess();
+  privateAllowed = privateAllowed && privateSession.grant !== null;
   const [current, setCurrent] = useState<Current | null>(null);
   const counter = useRef(0);
   const host = useMemo<Host>(() => ({

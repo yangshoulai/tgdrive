@@ -18,6 +18,7 @@ import { KeysView } from "./user/keys";
 import { DownloadsView } from "./user/downloads";
 import { DownloadTray } from "./user/download-tray";
 import { PreviewHost } from "./user/preview-host";
+import { PrivateSessionProvider } from "./user/private-session";
 import { UserSettingsPage } from "./user/account";
 import { onThemeChange, setThemePreference, themePreference, type ThemePreference } from "./theme";
 
@@ -189,7 +190,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   } else {
     content = <>
       {section === "files" && <FilesView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={prefix => navigate("files", prefix)} onChanged={refreshUsage} />}
-      {section === "private" && <PrivateSpaceView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={path => navigate("private", path)} onChanged={refreshUsage} onExit={() => navigate("files")} />}
+      {section === "private" && <PrivateSpaceView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={path => navigate("private", path)} onChanged={refreshUsage} />}
       {section === "shared" && <SharedView session={session} onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
       {section === "keys" && <KeysView bucketName={usage ? `user-${usage.id}` : null} />}
       {section === "downloads" && <DownloadsView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} onCreated={() => setDownloadRevision(value => value + 1)} />}
@@ -227,12 +228,12 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
         </div>
       </>}
       account={{ name: session.username, caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", menu: [
-        { label: "用户设置", icon: "settings", checked: section === "account", onSelect: () => navigate("account") },
-        { label: "跟随系统", icon: "monitor", heading: "外观", divider: true, checked: theme === "system", onSelect: () => setThemePreference("system") },
+        { label: "跟随系统", icon: "monitor", heading: "外观", checked: theme === "system", onSelect: () => setThemePreference("system") },
         { label: "浅色", icon: "sun", checked: theme === "light", onSelect: () => setThemePreference("light") },
         { label: "深色", icon: "moon", checked: theme === "dark", onSelect: () => setThemePreference("dark") },
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },
       ] }}>
+      <PrivateSessionProvider enabled={workspaceReady}>
       <PreviewHost enabled={workspaceReady} privateAllowed={section === "private"}>
         {content}
       </PreviewHost>
@@ -241,6 +242,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
           onOpenFolder={prefix => navigate("files", prefix)} onCompleted={() => { setUploadRevision(value => value + 1); refreshUsage(); }} />}
         <UploadTray queue={uploads} />
       </div>
+      </PrivateSessionProvider>
     </AppShell>
   );
 }

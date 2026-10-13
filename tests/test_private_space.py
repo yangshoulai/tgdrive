@@ -1,5 +1,6 @@
 """私密空间安全边界回归；仅使用替身，不创建数据库、不执行 SQL。"""
 
+import asyncio
 import unittest
 import logging
 from contextlib import nullcontext
@@ -39,7 +40,8 @@ class PrivateSpaceTests(unittest.IsolatedAsyncioTestCase):
         self.user = UserApi(accounts, self.objects)
         self.space = PrivateSpace(self.user)
         self.space._user_row = Mock(side_effect=lambda user_id: self.user_row if user_id == 7 else None)
-        self.space.ensure_config = Mock(return_value={"idle_seconds": 300})
+        self.space._config = Mock(return_value=None)
+        self.space.ensure_config = Mock(return_value={"idle_seconds": 1800})
         self.user.private_space = self.space
 
     def issue(self, idle=60):
@@ -81,11 +83,45 @@ class PrivateSpaceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PrivateLocked):
             self.space.require(self.session.token, access)
         self.sessions.require(self.session.token)
+        renewed = self.issue()
+        self.space.lock(self.session.token, self.session.csrf_token, access)
+        with self.assertRaises(PrivateLocked):
+            self.space.require(self.session.token, renewed)
         access = self.issue()
         self.user.logout(self.session.token)
         self.assertNotIn(access, self.space.grants)
         with self.assertRaises(SessionExpired):
             self.space.require(self.session.token, access)
+
+    async def test_status_restores_only_current_session_without_extending_idle(self):
+        self.space.passkeys.capability = Mock(return_value={})
+        with patch("tgdrive.private.time.monotonic", return_value=100):
+            access = self.issue(1800)
+        with patch("tgdrive.private.time.monotonic", return_value=120):
+            status = self.space.status(self.session.token)
+            self.assertEqual(status["access"], access)
+            self.assertEqual(status["remaining_seconds"], 1780)
+            self.assertEqual(self.space.grants[access].expires_at, 1900)
+            other = self.sessions.create(7, "测试用户", "user")
+            self.assertFalse(self.space.status(other.token)["unlocked"])
+        with patch("tgdrive.private.time.monotonic", return_value=1901):
+            self.assertFalse(self.space.status(self.session.token)["unlocked"])
+        self.assertNotIn(self.session.token, self.space.session_grants)
+
+    async def test_manual_lock_cancels_password_validation_in_progress(self):
+        started, resume = asyncio.Event(), asyncio.Event()
+        async def confirm(*args):
+            started.set()
+            await resume.wait()
+            return self.account, self.user_row
+        self.space.check_password = AsyncMock(side_effect=confirm)
+        pending = asyncio.create_task(self.space.unlock(self.session.token, self.session.csrf_token, "login-password"))
+        await started.wait()
+        self.space.lock(self.session.token, self.session.csrf_token, "")
+        resume.set()
+        with self.assertRaises(PrivateLocked):
+            await pending
+        self.assertFalse(self.space.grants)
 
     async def test_wrong_password_is_rate_limited_without_logging_user_out(self):
         for _ in range(5):
@@ -97,20 +133,36 @@ class PrivateSpaceTests(unittest.IsolatedAsyncioTestCase):
         self.sessions.require(self.session.token)
 
     async def test_account_password_change_revokes_all_previous_windows(self):
-        first, second = self.issue(), self.issue()
+        first = self.issue()
+        other = self.sessions.create(7, "测试用户", "user")
+        second = self.space._issue(other.token, self.account.id, 60)["access"]
         self.user_row["password_hash"] = hash_password("changed-password")
-        for access in (first, second):
+        for token, access in ((self.session.token, first), (other.token, second)):
             with self.assertRaises(PrivateLocked):
-                self.space.require(self.session.token, access)
+                self.space.require(token, access)
         with self.assertRaisesRegex(ValueError, "登录密码不正确"):
             await self.space.unlock(self.session.token, self.session.csrf_token, "login-password")
         updated = await self.space.unlock(self.session.token, self.session.csrf_token, "changed-password")
-        self.metadata.db.execute.return_value.rowcount = 1
+        self.assertEqual(updated["idle_seconds"], 1800)
         renewed = await self.space.configure(self.session.token, self.session.csrf_token, updated["access"], idle=900)
         with self.assertRaises(PrivateLocked):
             self.space.require(self.session.token, updated["access"])
         self.assertEqual(self.space.require(self.session.token, renewed["access"]).idle_seconds, 900)
+        self.assertEqual(self.metadata.db.execute.call_args.args[1][:2], (7, 900))
         self.assertNotIn("changed-password", self.metadata.db.execute.call_args.args[1])
+
+    async def test_locked_settings_validate_idle_without_unlocking_files(self):
+        for idle in (0, 120, True, None):
+            with self.assertRaises(ValueError):
+                await self.space.configure(self.session.token, self.session.csrf_token, "", idle=idle)
+        self.metadata.db.execute.assert_not_called()
+        saved = await self.space.configure(self.session.token, self.session.csrf_token, "", idle=900)
+        self.assertIsNone(saved["access"])
+        self.assertEqual(saved["idle_seconds"], 900)
+        self.assertEqual(self.metadata.db.execute.call_args.args[1][:2], (7, 900))
+        self.assertFalse(self.space.grants)
+        with self.assertRaises(PrivateLocked):
+            self.space.require(self.session.token, "")
 
     async def test_transfer_normalizes_paths_and_moves_outermost_folder(self):
         access = self.issue()

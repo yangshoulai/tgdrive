@@ -3,18 +3,19 @@ import * as api from "../api";
 import { passkeyUnavailable, unlockWithPrivatePasskey } from "../passkeys";
 import { Button, Field, Icon, Modal, Segmented, toast } from "../ui";
 import { FolderPicker } from "./folders";
-import { usePrivateSession } from "./private-session";
+import { usePrivateAccess, usePrivateSession } from "./private-session";
 
 export function PrivateIdleSelect({ value, onChange }: { value: number; onChange: (value: number) => void }) {
   const id = useId();
-  return <Field label="无操作后自动锁定" htmlFor={id} hint="音视频正在播放时保持解锁，暂停后重新计时。">
+  return <Field label="无操作后自动锁定" htmlFor={id} hint="私密操作会重新计时；播放音视频时保持解锁，切换页面不会立即锁定。">
     <select id={id} className="input" value={value} onChange={event => onChange(Number(event.target.value))}>
       <option value={60}>1 分钟</option><option value={300}>5 分钟</option><option value={900}>15 分钟</option><option value={1800}>30 分钟</option>
     </select>
   </Field>;
 }
 
-export function PrivateUnlockForm({ onUnlocked }: { onUnlocked: (grant: api.PrivateGrant) => void }) {
+export function PrivateUnlockForm() {
+  const access = usePrivateAccess();
   const id = useId(), mounted = useRef(true), controller = useRef<AbortController | null>(null);
   const [status, setStatus] = useState<api.PrivateStatus | null>(null);
   const [password, setPassword] = useState("");
@@ -28,15 +29,12 @@ export function PrivateUnlockForm({ onUnlocked }: { onUnlocked: (grant: api.Priv
       .catch(reason => { if (active) setError(api.errorMessage(reason, "无法读取私密空间设置")); });
     return () => { active = false; };
   }, [revision]);
-  function accept(grant: api.PrivateGrant) {
-    if (!mounted.current) { void api.lockPrivate(grant.access).catch(() => undefined); return; }
-    setPassword(""); api.setPrivateAccess(grant.access); onUnlocked(grant);
-  }
   async function quickUnlock() {
     if (busy) return;
+    const accept = access.beginUnlock();
     const operation = new AbortController(); controller.current = operation;
     setBusy(true); setUsingPasskey(true); setError("");
-    try { accept(await unlockWithPrivatePasskey(operation.signal)); }
+    try { accept(await unlockWithPrivatePasskey(operation.signal)); if (mounted.current) setPassword(""); }
     catch (reason) { if (mounted.current) setError(api.errorMessage(reason, "快捷解锁失败，请使用登录密码")); }
     finally { if (mounted.current) { setBusy(false); setUsingPasskey(false); } }
   }
@@ -44,10 +42,11 @@ export function PrivateUnlockForm({ onUnlocked }: { onUnlocked: (grant: api.Priv
     event.preventDefault();
     if (!status || busy) return;
     if (!password) { setError("请输入账号登录密码"); return; }
+    const accept = access.beginUnlock();
     setBusy(true); setError("");
     try {
       const grant = await api.unlockPrivate(password);
-      accept(grant);
+      accept(grant); if (mounted.current) setPassword("");
     } catch (reason) { if (mounted.current) setError(api.errorMessage(reason, "解锁失败，请重试")); }
     finally { if (mounted.current) setBusy(false); }
   }
@@ -65,16 +64,17 @@ export function PrivateUnlockForm({ onUnlocked }: { onUnlocked: (grant: api.Priv
       <input id={`${id}-password`} className="input" type="password" value={password} autoComplete="current-password" autoFocus={!quick} disabled={busy} onChange={event => { setPassword(event.target.value); setError(""); }} />
     </Field>
     <Button type="submit" variant={quick ? "secondary" : "primary"} icon="lock" loading={busy && !usingPasskey} disabled={busy || !password}>使用登录密码解锁</Button>
-    {!quick && <p className="private-passkey-hint">{unavailable || "在账号菜单的「用户设置」中添加通行密钥，可同时用于登录和私密解锁。"}</p>}
+    <p className="private-passkey-hint">解锁后可在当前登录会话内直接返回，闲置 {status.idle_seconds / 60} 分钟自动锁定。可在「用户设置 → 私密空间」中调整时间。</p>
+    {!quick && <p className="private-passkey-hint">{unavailable || "在侧栏的「用户设置」中添加通行密钥，可同时用于登录和私密解锁。"}</p>}
   </form>;
 }
 
 export function PrivateTransferDialog({ paths, into, onClose, onDone }: { paths: string[]; into: boolean; onClose: () => void; onDone: () => void }) {
-  const [grant, setGrant] = useState<api.PrivateGrant | null>(() => into ? null : { access: api.getPrivateAccess(), idle_seconds: 300 });
+  const access = usePrivateAccess(), grant = access.grant;
   const [destination, setDestination] = useState(into ? api.PRIVATE_PREFIX : "");
   const [ready, setReady] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [conflict, setConflict] = useState<api.MoveConflict>("rename");
-  usePrivateSession(into ? grant : null, onClose, ".private-transfer");
+  usePrivateSession(grant, onClose, ".private-transfer");
   async function move() {
     if (!grant || !ready || busy) return;
     setBusy(true); setError("");
@@ -89,11 +89,11 @@ export function PrivateTransferDialog({ paths, into, onClose, onDone }: { paths:
   return <Modal className="private-transfer" title={into ? "移入私密空间" : "移出到我的文件"} icon="lock" onClose={onClose} dismissible={!busy}
     description={into ? "移入后取消这些项目的公开分享，文件夹中的内容一起移动。" : "移出后可以从我的文件访问，公开分享仍保持关闭。"}
     footer={<><Button disabled={busy} onClick={onClose}>取消</Button>{grant && <Button variant="primary" loading={busy} disabled={!ready} onClick={() => void move()}>移动 {paths.length} 个项目</Button>}</>}>
-    {grant ? <>
+    {access.restoring ? <div className="private-loading" role="status"><span className="spinner" />正在检查私密空间</div> : grant ? <>
       <FolderPicker value={destination} onChange={path => { setReady(false); setDestination(path); }} onReady={setReady} />
       <div className="move-conflict"><span>遇到同名文件时</span><Segmented label="同名冲突处理" value={conflict} onChange={setConflict} options={[{ value: "rename", label: "保留两者" }, { value: "skip", label: "跳过" }, { value: "overwrite", label: "覆盖" }]} /></div>
       {conflict === "overwrite" && <p className="inline-note tone-warning"><Icon name="alert" size={15} />目标位置的同名文件会被替换且无法恢复。</p>}
       {error && <p className="form-alert" role="alert">{error}</p>}
-    </> : <PrivateUnlockForm onUnlocked={setGrant} />}
+    </> : access.error ? <div className="form"><p className="form-alert" role="alert">{access.error}</p><Button onClick={access.restore}>重试</Button></div> : <PrivateUnlockForm />}
   </Modal>;
 }

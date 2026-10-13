@@ -212,6 +212,7 @@ class BlobEngine:
         # 远端后端（Telegram）每次请求的开销大，允许它要求更大的读取窗口。
         window_for = getattr(self.store, "read_window", None)
         def windows():
+            first = True
             for chunk in chunks:
                 if chunk.offset is None:
                     raise IntegrityError("complete blob has unassigned chunk offset")
@@ -222,7 +223,11 @@ class BlobEngine:
                 position = max(start, chunk.offset) - chunk.offset
                 hi_exclusive = min(stop, chunk_end) - chunk.offset
                 while position < hi_exclusive:
-                    local_end = min(hi_exclusive, position + max(chunk_window, record.frame_size))
+                    # 大的远端读取先返回小窗口，浏览器可尽快解析文件头并取消／跳到尾部读取索引。
+                    # 短 Range 和本地读取仍一次取齐，后续远端窗口继续复用原来的大窗口与预读预算。
+                    width = min(window, 256 * 1024) if first and chunk_window > window and stop - start > chunk_window else chunk_window
+                    first = False
+                    local_end = min(hi_exclusive, position + max(width, record.frame_size))
                     yield chunk, position, local_end
                     position = local_end
 

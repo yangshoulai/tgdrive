@@ -61,7 +61,7 @@ export function AppShell<K extends string>({ groups, active, onNavigate, sidebar
           <div className="account-row">
             <Avatar name={account.name} tone={account.tone} />
             <span className="account-copy"><strong>{account.name}</strong><small>{account.caption}</small></span>
-            <Menu label="账号菜单" icon="settings" items={account.menu} />
+            <Menu label="账号操作" icon="more" items={account.menu} />
           </div>
         </div>
       </aside>

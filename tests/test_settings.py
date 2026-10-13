@@ -44,6 +44,7 @@ class SettingsTests(unittest.TestCase):
             admin = await self.client.login("admin", "admin", "admin password")
             _, _, data = await self.client.request("GET", "/api/admin/v1/settings", headers=admin)
             self.assertEqual(json.loads(data)["public_base_url"]["effective"], "http://default.test:8001")
+            self.assertNotIn("private_idle_seconds", json.loads(data))
 
             body = json.dumps({"public_base_url": "https://drive.example.com/", "s3_endpoint": "https://s3.example.com"}).encode()
             status, _, data = await self.client.request("POST", "/api/admin/v1/settings", body, admin)
@@ -71,12 +72,16 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("不同的域名", json.loads(data)["error"]["message"])
             status, _, _ = await self.client.request("POST", "/api/admin/v1/settings", json.dumps({"other": "x"}).encode(), admin)
             self.assertEqual(status, 400)
+            status, _, _ = await self.client.request("POST", "/api/admin/v1/settings", b'{"private_idle_seconds":900}', admin)
+            self.assertEqual(status, 400)
             no_csrf = {"cookie": admin["cookie"]}
             status, _, _ = await self.client.request("POST", "/api/admin/v1/settings", b'{"s3_endpoint":"https://s3.x.com"}', no_csrf)
             self.assertEqual(status, 403)
             user = await self.client.login("user", "alice", "alice password")
             status, _, _ = await self.client.request("GET", "/api/admin/v1/settings", headers={"cookie": user["cookie"]})
             self.assertEqual(status, 403)  # 已登录的普通用户：权限不足，而不是会话失效
+            status, _, _ = await self.client.request("POST", "/api/admin/v1/settings", b'{"private_idle_seconds":60}', user)
+            self.assertEqual(status, 403)
         asyncio.run(run())
 
     def test_s3_endpoint_drives_host_routing(self):

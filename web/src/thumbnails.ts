@@ -1,6 +1,6 @@
 /** 缩略图生成：图片缩放、视频截帧、音频内嵌封面。全部在浏览器完成，服务端只保存加密后的结果，不解码用户文件。
  * 两种规格：thumb（最长边 320px，列表与网格）与 poster（最长边 960px，预览封面与占位，仅在原图足够大时生成）。 */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { getFileKind } from "./files";
 
@@ -62,18 +62,26 @@ async function fromBlob(blob: Blob): Promise<ThumbnailSet | null> {
 
 /* ---------- 视频截帧 ---------- */
 
-function waitFor(target: HTMLMediaElement, event: string, signal?: AbortSignal, timeout = 20000, ready?: () => boolean) {
+class VideoThumbnailError extends Error {}
+function videoFailure(target: HTMLMediaElement) {
+  return target.error?.code === 3 ? "浏览器无法解码视频，请确认文件编码受支持"
+    : target.error?.code === 4 ? "浏览器不支持此视频，或无法读取来源"
+    : "视频读取失败，请稍后重试";
+}
+
+function waitFor(target: HTMLMediaElement, event: string | string[], signal?: AbortSignal, timeout = 20000, ready?: () => boolean) {
   return new Promise<void>((resolve, reject) => {
     if (signal?.aborted) { reject(new DOMException("aborted", "AbortError")); return; }
-    if (target.error) { reject(new Error("video decode failed")); return; }
+    if (target.error) { reject(new VideoThumbnailError(videoFailure(target))); return; }
     if (ready?.()) { resolve(); return; }
+    const events = typeof event === "string" ? [event] : event;
     const done = (error?: unknown) => {
-      window.clearTimeout(timer); target.removeEventListener(event, ok); target.removeEventListener("error", failed); signal?.removeEventListener("abort", aborted);
+      window.clearTimeout(timer); events.forEach(name => target.removeEventListener(name, ok)); target.removeEventListener("error", failed); signal?.removeEventListener("abort", aborted);
       if (error) reject(error); else resolve();
     };
-    const ok = () => done(), failed = () => done(new Error("video decode failed")), aborted = () => done(new DOMException("aborted", "AbortError"));
-    const timer = window.setTimeout(() => done(new Error("video timeout")), timeout);
-    target.addEventListener(event, ok, { once: true }); target.addEventListener("error", failed, { once: true }); signal?.addEventListener("abort", aborted, { once: true });
+    const ok = () => { if (!ready || ready()) done(); }, failed = () => done(new VideoThumbnailError(videoFailure(target))), aborted = () => done(new DOMException("aborted", "AbortError"));
+    const timer = window.setTimeout(() => done(new VideoThumbnailError("视频读取或解码超时，可重试生成缩略图")), timeout);
+    events.forEach(name => target.addEventListener(name, ok)); target.addEventListener("error", failed, { once: true }); signal?.addEventListener("abort", aborted, { once: true });
   });
 }
 
@@ -90,7 +98,7 @@ function brightness(video: HTMLVideoElement) {
   return total / (pixels.length / 4);
 }
 
-async function fromVideo(src: string, signal?: AbortSignal): Promise<ThumbnailSet | null> {
+async function fromVideo(src: string, signal?: AbortSignal, onFailure?: (message: string) => void): Promise<ThumbnailSet | null> {
   const video = document.createElement("video");
   video.muted = true; video.playsInline = true; video.preload = "metadata";
   const deadline = performance.now() + 45000;
@@ -101,10 +109,13 @@ async function fromVideo(src: string, signal?: AbortSignal): Promise<ThumbnailSe
     video.src = src;
     await metadata;
     if (video.readyState < 2) {
-      const frame = waitFor(video, "loadeddata", signal, Math.max(1, deadline - performance.now()), () => video.readyState >= 2);
-      // 只请求开头的可解码画面，metadata 预加载无需自动播放或连续缓冲整个视频。
-      video.currentTime = Number.isFinite(video.duration) && video.duration > 0 ? Math.min(0.01, video.duration / 2) : 0.01;
+      const frame = waitFor(video, ["loadeddata", "canplay", "seeked", "timeupdate"], signal, Math.max(1, deadline - performance.now()), () => video.readyState >= 2 && video.videoWidth > 0);
+      // metadata 不保证加载画面；主动解码开头，取得首帧就暂停，最后释放来源以停止后续下载。
+      video.preload = "auto";
+      video.currentTime = Number.isFinite(video.duration) && video.duration > 0 ? Math.min(0.1, video.duration / 2) : 0.1;
+      void video.play().catch(() => undefined);
       await frame;
+      video.pause();
     }
     first = await renderSet(video, video.videoWidth, video.videoHeight);
     if (brightness(video) > 18) return first;
@@ -117,10 +128,12 @@ async function fromVideo(src: string, signal?: AbortSignal): Promise<ThumbnailSe
       await seek;
       if (video.readyState >= 2 && brightness(video) > 18) return await renderSet(video, video.videoWidth, video.videoHeight);
     }
+    if (!first) onFailure?.("视频未能生成可用画面，可重试生成缩略图");
     return first;
   } catch (reason) {
     if (signal?.aborted || reason instanceof DOMException && reason.name === "AbortError") throw reason;
     // 已经取得的首帧优于缺失封面；后续跳转超时不丢弃它。
+    if (!first) onFailure?.(reason instanceof VideoThumbnailError ? reason.message : "浏览器未能截取视频画面，可重试生成缩略图");
     return first;
   } finally {
     video.pause();
@@ -273,14 +286,14 @@ async function audioCover(reader: ByteReader): Promise<Blob | null> {
 
 /* ---------- 入口 ---------- */
 
-type Input = { file: Blob } | { url: string; size: number; signal?: AbortSignal };
+type Input = ({ file: Blob } | { url: string; size: number }) & { signal?: AbortSignal; onFailure?: (message: string) => void };
 
 export async function createThumbnails(input: Input, source: ThumbnailSource): Promise<ThumbnailResult> {
   try {
     if (source === "image") return await fromBlob("file" in input ? input.file : await (await fetch(input.url, { credentials: "include", signal: input.signal })).blob());
     if (source === "video") {
       const url = "file" in input ? URL.createObjectURL(input.file) : input.url;
-      try { return await fromVideo(url, "file" in input ? undefined : input.signal); } finally { if ("file" in input) URL.revokeObjectURL(url); }
+      try { return await fromVideo(url, input.signal, input.onFailure); } finally { if ("file" in input) URL.revokeObjectURL(url); }
     }
     const cover = await audioCover("file" in input ? blobReader(input.file) : urlReader(input.url, input.size, input.signal));
     return cover ? await fromBlob(cover) ?? "none" : "none";
@@ -301,10 +314,12 @@ export async function saveThumbnails(path: string, result: ThumbnailResult): Pro
 
 /* ---------- 后台补生成 ---------- */
 
-const SKIP_KEY = "tessera-thumbnail-skip-v2";
+const SKIP_KEY = "tessera-thumbnail-skip-v3";
 const BACKFILL_IMAGE_LIMIT = 25 * 1024 * 1024;
 const SKIP_TTL = 10 * 60 * 1000;
+const MAX_AUTO_ATTEMPTS = 3;
 type SkippedThumbnail = { etag: string; until: number };
+type ThumbnailWork = { etag: string; phase: "queued" | "generating" | "waiting" | "failed"; message: string };
 
 function skipped(): SkippedThumbnail[] {
   try {
@@ -316,50 +331,109 @@ function remember(etag: string) {
   // 慢网络和暂时的解码失败只冷却十分钟；升级后不继承旧版本永久跳过的名单。
   try { localStorage.setItem(SKIP_KEY, JSON.stringify([...skipped().filter(item => item.etag !== etag), { etag, until: Date.now() + SKIP_TTL }].slice(-300))); } catch { /* 忽略 */ }
 }
+function forget(etag: string) {
+  try { localStorage.setItem(SKIP_KEY, JSON.stringify(skipped().filter(item => item.etag !== etag))); } catch { /* 忽略 */ }
+}
 
 /** 为当前页里还没有缩略图的图片、视频和音频在空闲时依次补生成（例如通过 S3 上传或旧版本上传的文件）。
  * 一次只处理一个，页面不可见时暂停；图片只补 25 MB 以内的，视频和音频只读取需要的片段。 */
 export function useThumbnailBackfill(files: api.FileItem[], contentUrl: (key: string) => string, onSaved: (key: string, thumbnails: string[]) => void) {
   const saved = useRef(onSaved), resolve = useRef(contentUrl);
   const privateSkipped = useRef(new Map<string, number>());
+  const attempts = useRef(new Map<string, number>()), priority = useRef("");
+  const [revision, setRevision] = useState(0), [states, setStates] = useState<Record<string, ThumbnailWork>>({});
   saved.current = onSaved; resolve.current = contentUrl;
   const pending = files.filter(file => !file.thumbnails?.length && !file.key.endsWith("/"))
     .map(file => ({ file, source: thumbnailSource(file.key, file.content_type, file.size) }))
     .filter((item): item is { file: api.FileItem; source: ThumbnailSource } => item.source !== null && !(item.source === "image" && item.file.size > BACKFILL_IMAGE_LIMIT));
   const signature = pending.map(item => `${item.file.key}:${item.file.etag}`).join("|");
   useEffect(() => {
+    setStates(current => Object.fromEntries(pending.flatMap(({ file }) => {
+      const value = current[file.key];
+      if (value?.etag !== file.etag) return [];
+      return [[file.key, value.phase === "generating" ? { ...value, phase: "queued", message: "正在等待生成缩略图" } : value]];
+    })));
+    const identities = new Set(pending.map(({ file }) => `${file.key}:${file.etag}`));
+    for (const identity of attempts.current.keys()) if (!identities.has(identity)) attempts.current.delete(identity);
+    for (const [etag, until] of privateSkipped.current) if (until <= Date.now()) privateSkipped.current.delete(etag);
     if (!pending.length) return;
     const controller = new AbortController();
+    const delay = (milliseconds: number) => new Promise<void>(done => {
+      const finish = () => { window.clearTimeout(timer); controller.signal.removeEventListener("abort", finish); done(); };
+      const timer = window.setTimeout(finish, milliseconds);
+      controller.signal.addEventListener("abort", finish, { once: true });
+    });
     const idle = () => new Promise<void>(done => {
-      const wait = () => {
-        if (document.visibilityState !== "visible") { document.addEventListener("visibilitychange", wait, { once: true }); return; }
-        if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(() => done(), { timeout: 2000 });
-        else setTimeout(done, 300);
+      let timer: number | undefined, callback: number | undefined;
+      const finish = () => {
+        window.clearTimeout(timer); if (callback !== undefined) window.cancelIdleCallback(callback);
+        document.removeEventListener("visibilitychange", wait); controller.signal.removeEventListener("abort", finish); done();
       };
+      const wait = () => {
+        if (document.visibilityState !== "visible") return;
+        document.removeEventListener("visibilitychange", wait);
+        if (typeof window.requestIdleCallback === "function") callback = window.requestIdleCallback(finish, { timeout: 2000 });
+        else timer = window.setTimeout(finish, 300);
+      };
+      controller.signal.addEventListener("abort", finish, { once: true }); document.addEventListener("visibilitychange", wait);
       wait();
     });
     void (async () => {
-      const skip = new Set([...skipped().map(item => item.etag), ...[...privateSkipped.current].filter(([, until]) => until > Date.now()).map(([etag]) => etag)]);
-      for (const { file, source } of pending) {
-        if (controller.signal.aborted) return;
-        if (skip.has(file.etag)) continue;
-        await idle();
-        if (controller.signal.aborted) return;
-        const skipFile = () => { if (api.isPrivatePath(file.key)) privateSkipped.current.set(file.etag, Date.now() + SKIP_TTL); else remember(file.etag); };
-        try {
-          const result = await createThumbnails({ url: resolve.current(file.key), size: file.size, signal: controller.signal }, source);
+      const queue = [...pending].sort((a, b) => Number(b.file.key === priority.current) - Number(a.file.key === priority.current));
+      const completed = new Set<string>();
+      while (!controller.signal.aborted) {
+        let next = Infinity;
+        const cooldowns = new Map(skipped().map(item => [item.etag, item.until]));
+        for (const { file, source } of queue) {
           if (controller.signal.aborted) return;
-          if (!result) { skipFile(); continue; }
-          const thumbnails = await saveThumbnails(file.key, result);
-          if (thumbnails && !controller.signal.aborted) saved.current(file.key, thumbnails);
-        } catch {
+          const identity = `${file.key}:${file.etag}`;
+          if (completed.has(identity) || (attempts.current.get(identity) ?? 0) >= MAX_AUTO_ATTEMPTS) continue;
+          const until = api.isPrivatePath(file.key) ? privateSkipped.current.get(file.etag) ?? 0 : cooldowns.get(file.etag) ?? 0;
+          if (until > Date.now()) { next = Math.min(next, until); continue; }
+          await idle();
           if (controller.signal.aborted) return;
-          skipFile();
+          const count = (attempts.current.get(identity) ?? 0) + 1;
+          const update = (phase: ThumbnailWork["phase"], message: string) => {
+            if (!controller.signal.aborted) setStates(current => ({ ...current, [file.key]: { etag: file.etag, phase, message } }));
+          };
+          let failure = "缩略图暂未生成，可在文件菜单中重试";
+          update("generating", "正在生成缩略图");
+          try {
+            const result = await createThumbnails({ url: api.versionedContentUrl(resolve.current(file.key), file.etag), size: file.size, signal: controller.signal, onFailure: message => { failure = message; } }, source);
+            if (controller.signal.aborted) return;
+            if (result) {
+              const thumbnails = await saveThumbnails(file.key, result);
+              if (controller.signal.aborted) return;
+              if (thumbnails) {
+                completed.add(identity); privateSkipped.current.delete(file.etag); if (!api.isPrivatePath(file.key)) forget(file.etag);
+                saved.current(file.key, thumbnails); continue;
+              }
+            }
+          } catch (reason) {
+            if (controller.signal.aborted) return;
+            failure = api.errorMessage(reason, "缩略图保存失败，可在文件菜单中重试");
+          }
+          const retryAt = Date.now() + SKIP_TTL;
+          attempts.current.set(identity, count);
+          if (api.isPrivatePath(file.key)) privateSkipped.current.set(file.etag, retryAt); else { remember(file.etag); cooldowns.set(file.etag, retryAt); }
+          update(count < MAX_AUTO_ATTEMPTS ? "waiting" : "failed", failure);
+          if (count < MAX_AUTO_ATTEMPTS) next = Math.min(next, retryAt);
         }
+        if (!Number.isFinite(next)) return;
+        await delay(Math.max(1, next - Date.now()));
       }
     })();
     return () => controller.abort();
     // pending 的内容由 signature 表示，避免每次渲染重新开始。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature]);
+  }, [signature, revision]);
+  return {
+    state: (file: api.FileItem) => !file.thumbnails?.length && states[file.key]?.etag === file.etag ? states[file.key] : undefined,
+    retry: (file: api.FileItem) => {
+      if (!pending.some(item => item.file.key === file.key && item.file.etag === file.etag)) return;
+      attempts.current.delete(`${file.key}:${file.etag}`); privateSkipped.current.delete(file.etag);
+      if (!api.isPrivatePath(file.key)) forget(file.etag);
+      priority.current = file.key; setRevision(current => current + 1);
+    },
+  };
 }
