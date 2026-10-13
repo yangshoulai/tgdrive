@@ -371,7 +371,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                     {/* 卡片本身只响应鼠标；文件名按钮是键盘与读屏用户的打开入口。 */}
                     <button type="button" className="grid-name name-button" title={baseName(entry.key)}
                       onClick={event => { event.stopPropagation(); if (entry.kind === "folder") onOpenFolder(entry.key); else openPreview(entry.file); }}>
-                      {baseName(entry.key)}
+                      <span className="grid-name-text">{baseName(entry.key)}</span>
                     </button>
                     <span className="grid-sub">
                       <span className="grid-kind">{entry.kind === "folder" ? "文件夹" : kindLabel(kind)}</span>

@@ -272,7 +272,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
                     <div className="grid-thumb"><FolderThumbnail previews={(item.previews ?? []).map(file => ({ ...file, key: file.path,
                       url: api.publicThumbnail(api.publicFolderFile(token, file.path, false, access)) }))} /></div>
                     <div className="grid-meta">
-                      <button type="button" className="grid-name name-button" title={item.name} onClick={event => { event.stopPropagation(); open(item.path); }}>{item.name}</button>
+                      <button type="button" className="grid-name name-button" title={item.name} onClick={event => { event.stopPropagation(); open(item.path); }}><span className="grid-name-text">{item.name}</span></button>
                       <span className="grid-sub" title="包含所有子文件夹中的文件"><span className="grid-kind">文件夹</span>{" · "}<span className="grid-size">{item.size == null ? "—" : formatBytes(item.size)}</span></span>
                     </div>
                   </div>
@@ -287,7 +287,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
                       <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${item.name}`} checked={selected.has(item.path)} onChange={checked => selectFiles([item.path], checked)} /></span>
                     </div>
                     <div className="grid-meta">
-                      <button type="button" className="grid-name name-button" title={item.name} onClick={event => { event.stopPropagation(); openFile(); }}>{item.name}</button>
+                      <button type="button" className="grid-name name-button" title={item.name} onClick={event => { event.stopPropagation(); openFile(); }}><span className="grid-name-text">{item.name}</span></button>
                       <span className="grid-sub"><span className="grid-kind">{kindLabel(kind)}</span>{" · "}<span className="grid-size">{formatBytes(item.size)}</span></span>
                       <span className="grid-menu" onClick={event => event.stopPropagation()}>
                         <a className="icon-btn icon-btn-ghost icon-btn-sm" href={download} aria-label={`下载 ${item.name}`} title={`下载 ${item.name}`}><Icon name="download" size={16} /></a>

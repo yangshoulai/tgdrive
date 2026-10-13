@@ -744,8 +744,9 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .grid-check { position: absolute; top: 8px; left: 8px; display: grid; padding: 4px; border-radius: var(--radius-xs); background: var(--surface); opacity: 0; transition: opacity .12s; }
 .grid-card:hover .grid-check, .grid-card.is-selected .grid-check, .grid-check:focus-within { opacity: 1; }
 .grid-public { position: absolute; top: 8px; right: 8px; }
-.grid-meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding: 10px 6px 10px 12px; }
-.grid-name { display: block; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.grid-meta { display: grid; min-width: 0; min-height: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding: 10px 6px 10px 12px; }
+.grid-name { display: block; width: 100%; min-width: 0; min-height: 0; overflow: hidden; appearance: none; -webkit-appearance: none; font-size: 13px; font-weight: 500; text-align: left; }
+.grid-name-text { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .grid-sub { grid-row: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: 12px; }
 .grid-menu { grid-row: 1 / 3; grid-column: 2; }
 .shared-grid-card { grid-template-rows: 152px 86px; }
@@ -1399,7 +1400,9 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .folder-preview-grid { width: min(100%, 100px); }
   .folder-preview-cell .file-tile { width: 100%; height: 100%; border-radius: 0; }
   .grid-meta { grid-template-columns: minmax(0, 1fr) 44px; grid-template-rows: 44px 18px; gap: 2px; }
-  .grid-name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 18px; white-space: normal; overflow-wrap: anywhere; }
+  /* 多行截断作用于内部文本，原生按钮另设高度上限，避免文字溢出到元信息行。 */
+  .grid-name { max-height: 36px; line-height: 18px; white-space: normal; }
+  .grid-name-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; max-height: 36px; line-height: 18px; white-space: normal; overflow-wrap: break-word; overflow-wrap: anywhere; }
   .grid-sub { grid-column: 1 / -1; display: flex; align-items: center; gap: 4px; padding-right: 6px; }
   .grid-kind { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .grid-size { flex: none; font-variant-numeric: tabular-nums; }

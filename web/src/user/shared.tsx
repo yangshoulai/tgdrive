@@ -99,7 +99,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                         <span className="grid-public grid-share-badges">{shareBadges(file)}</span>
                       </div>
                       <div className="grid-meta">
-                        <button type="button" className="grid-name name-button" title={baseName(file.key)} onClick={event => { event.stopPropagation(); open(); }}>{baseName(file.key)}</button>
+                        <button type="button" className="grid-name name-button" title={baseName(file.key)} onClick={event => { event.stopPropagation(); open(); }}><span className="grid-name-text">{baseName(file.key)}</span></button>
                         <span className="grid-sub"><span className="grid-kind">{kindLabel(kind)}</span>{" · "}<span className="grid-size">{size == null ? "—" : formatBytes(size)}</span></span>
                         <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(file.key)} 的更多操作`} items={fileMenu(file, true)} /></span>
                         <span className="grid-share-meta" title={parentPath(file.key) ? `/${parentPath(file.key)}` : "我的文件"}>{formatDate(file.public_at)} · 下载 {file.public_downloads ?? 0} 次</span>
