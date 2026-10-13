@@ -178,7 +178,10 @@ class M5Tests(unittest.TestCase):
                 async def request(method, path, body=b"", headers=None):
                     sent = []
                     queue = [{"type": "http.request", "body": body, "more_body": False}]
-                    async def receive(): return queue.pop(0)
+                    async def receive():
+                        if queue:
+                            return queue.pop(0)
+                        await asyncio.Future()
                     async def send(message): sent.append(message)
                     await app({"type": "http", "method": method, "path": path.split("?", 1)[0],
                                "query_string": path.split("?", 1)[1].encode() if "?" in path else b"",
