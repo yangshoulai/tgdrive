@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from tgdrive.api import UserApi, normalize_user_path
+from tgdrive.accounts import AccountService
 from tgdrive.asgi import TgDriveASGI
 from tgdrive.authn import CsrfError, SessionExpired, SessionManager, TooManyAttempts, hash_password
 from tgdrive.objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
@@ -28,11 +29,17 @@ class PrivateSpaceTests(unittest.IsolatedAsyncioTestCase):
         async def run(function, *args, **kwargs):
             return function(*args, **kwargs)
         self.metadata.run_in_thread.side_effect = run
-        accounts = SimpleNamespace(metadata=self.metadata, sessions=self.sessions, password_work=PasswordWork(),
-                                   keystore=SimpleNamespace(unlocked=True), account_for_session=lambda session: self.account)
+        self.user_row = {"id": 7, "username": "测试用户", "status": "active", "role": "user",
+                         "bucket_id": 9, "password_hash": hash_password("login-password")}
+        self.metadata.db.execute.return_value.fetchone.return_value = self.user_row
+        accounts = AccountService(self.metadata, SimpleNamespace(unlocked=True), sessions=self.sessions)
+        accounts.password_work = PasswordWork()
+        accounts.account_for_session = lambda session: self.account
         self.objects = Mock()
         self.user = UserApi(accounts, self.objects)
         self.space = PrivateSpace(self.user)
+        self.space._user_row = Mock(side_effect=lambda user_id: self.user_row if user_id == 7 else None)
+        self.space.ensure_config = Mock(return_value={"idle_seconds": 300})
         self.user.private_space = self.space
 
     def issue(self, idle=60):
@@ -81,27 +88,28 @@ class PrivateSpaceTests(unittest.IsolatedAsyncioTestCase):
             self.space.require(self.session.token, access)
 
     async def test_wrong_password_is_rate_limited_without_logging_user_out(self):
-        encoded = hash_password("private-password")
-        self.space._config = Mock(return_value={"password_hash": encoded, "idle_seconds": 300})
         for _ in range(5):
-            with self.assertRaisesRegex(ValueError, "访问密码不正确"):
+            with self.assertRaisesRegex(ValueError, "登录密码不正确"):
                 await self.space.unlock(self.session.token, self.session.csrf_token, "wrong-password", "127.0.0.1")
         with self.assertRaises(TooManyAttempts):
-            await self.space.unlock(self.session.token, self.session.csrf_token, "private-password", "127.0.0.1")
+            await self.space.unlock(self.session.token, self.session.csrf_token, "login-password", "127.0.0.1")
         self.assertFalse(self.space.grants)
         self.sessions.require(self.session.token)
 
-    async def test_password_change_revokes_all_previous_windows(self):
-        encoded = hash_password("private-password")
-        self.space._config = Mock(return_value={"password_hash": encoded, "idle_seconds": 300})
+    async def test_account_password_change_revokes_all_previous_windows(self):
         first, second = self.issue(), self.issue()
-        self.metadata.db.execute.return_value.rowcount = 1
-        updated = await self.space.configure(self.session.token, self.session.csrf_token, first,
-                                             "private-password", 900, "changed-password")
+        self.user_row["password_hash"] = hash_password("changed-password")
         for access in (first, second):
             with self.assertRaises(PrivateLocked):
                 self.space.require(self.session.token, access)
-        self.assertEqual(self.space.require(self.session.token, updated["access"]).idle_seconds, 900)
+        with self.assertRaisesRegex(ValueError, "登录密码不正确"):
+            await self.space.unlock(self.session.token, self.session.csrf_token, "login-password")
+        updated = await self.space.unlock(self.session.token, self.session.csrf_token, "changed-password")
+        self.metadata.db.execute.return_value.rowcount = 1
+        renewed = await self.space.configure(self.session.token, self.session.csrf_token, updated["access"], idle=900)
+        with self.assertRaises(PrivateLocked):
+            self.space.require(self.session.token, updated["access"])
+        self.assertEqual(self.space.require(self.session.token, renewed["access"]).idle_seconds, 900)
         self.assertNotIn("changed-password", self.metadata.db.execute.call_args.args[1])
 
     async def test_transfer_normalizes_paths_and_moves_outermost_folder(self):

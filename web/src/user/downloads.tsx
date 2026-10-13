@@ -91,23 +91,34 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
         : !page ? <SkeletonRows rows={5} />
           : !page.tasks.length ? <EmptyState icon="download" title={filter ? "没有符合条件的任务" : "还没有下载任务"} description="粘贴文件链接、X 帖子或 YouTube 视频，也可以使用 curl 命令。" action={<Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button>} />
             : <div className="download-list" role="table" aria-label="下载任务">
-              <div className="download-row download-columns" role="row"><span role="columnheader">文件与来源</span><span role="columnheader">进度</span><span role="columnheader">状态</span><span role="columnheader">速度与剩余时间</span><span role="columnheader" className="sr-only">操作</span></div>
+              <div className="download-row download-columns" role="row"><span role="columnheader">文件</span><span role="columnheader">下载进度</span><span role="columnheader">状态</span><span role="columnheader">传输信息</span><span role="columnheader" className="sr-only">操作</span></div>
               {page.tasks.map(task => {
                 const percent = downloadPercent(task);
                 const name = task.key.split("/").at(-1) ?? task.key;
-                return <div className="download-row" role="row" key={task.id}>
-                  <div className="download-file" role="cell"><span className="download-glyph"><Icon name={glyph(task)} size={22} /></span><div><strong title={task.key}>{name}</strong><small>{task.platform === "youtube" ? "YouTube" : task.platform === "x" ? "X" : task.source_host}{task.kind === "hls" ? " · 视频" : task.method === "POST" ? " · POST" : ""}</small><small title={task.key}>保存到 {task.key.includes("/") ? task.key.slice(0, task.key.lastIndexOf("/")) : "我的文件"}</small></div></div>
+                const folder = parentFolder(task.key);
+                const source = task.platform === "youtube" ? "YouTube" : task.platform === "x" ? "X" : task.source_host;
+                const completed = task.status === "completed";
+                return <div className={`download-row download-task${completed ? " is-completed" : ""}`} role="row" key={task.id}>
+                  <div className="download-file" role="cell"><span className={`download-glyph download-glyph-${glyph(task)}`}><Icon name={glyph(task)} size={20} /></span><div className="download-file-copy">
+                    <strong title={name}>{name}</strong>
+                    <div className="download-file-meta"><span className="download-source" title={source}>{source}{task.kind === "hls" ? " · M3U8" : task.method === "POST" ? " · POST" : ""}</span>
+                      {completed ? <button type="button" className="download-location" title={`打开所在目录：${folder || "我的文件"}`} onClick={() => onOpenFolder(folder)}><Icon name="folder" size={13} /><span>{folder.slice(0, -1) || "我的文件"}</span></button>
+                        : <span className="download-location" title={`保存到 ${folder || "我的文件"}`}><Icon name="folder" size={13} /><span>{folder.slice(0, -1) || "我的文件"}</span></span>}
+                    </div>
+                    {task.error && <details className="download-task-error"><summary><Icon name="alert" size={13} /><span>查看失败原因</span></summary><p className="download-error">{task.error}</p></details>}
+                  </div></div>
                   <div className="download-progress" role="cell">
-                    <span>{task.kind === "hls" && task.segments_total ? `${task.segments_done} / ${task.segments_total} 个视频分片` : `${formatBytes(task.received)}${task.size !== null ? ` / ${formatBytes(task.size)}` : " · 大小未知"}`}<b>{percent !== null ? `${Math.floor(percent)}%` : ""}</b></span>
-                    {percent !== null ? <Progress value={percent} tone={task.status === "failed" ? "danger" : task.status === "completed" ? "success" : "accent"} label={`${name}下载进度`} /> : <div className="download-unknown" role="status" aria-label="总大小未知" />}
-                    {task.kind === "hls" && <small>已保存 {formatBytes(task.stored_bytes)}{task.status === "running" && task.segments_done === task.segments_total ? "，正在完成文件" : ""}</small>}
+                    <div className="download-progress-copy"><span>{completed ? formatBytes(task.stored_bytes || task.received)
+                      : task.kind === "hls" && task.segments_total ? `${task.segments_done} / ${task.segments_total} 个分片` : <>{formatBytes(task.received)}<span className="download-total">{task.size !== null ? ` / ${formatBytes(task.size)}` : " · 大小未知"}</span></>}</span><b>{percent !== null ? `${Math.floor(percent)}%` : ""}</b></div>
+                    {!completed && (percent !== null ? <Progress value={percent} tone={task.status === "failed" ? "danger" : task.status === "stopped" ? "neutral" : "accent"} label={`${name}下载进度`} /> : <div className="download-unknown" role="status" aria-label="总大小未知" />)}
+                    {task.kind === "hls" && <small>{completed ? `${task.segments_done} 个分片已保存` : `已保存 ${formatBytes(task.stored_bytes)}${task.status === "running" && task.segments_done === task.segments_total ? "，正在完成文件" : ""}`}</small>}
                   </div>
-                  <div className="download-state" role="cell"><Badge tone={TONE[task.status]} dot>{downloadStatusLabel(task)}</Badge>{task.error && <small className="download-error">{task.error}</small>}{task.status === "completed" && <button type="button" className="link-button" onClick={() => onOpenFolder(parentFolder(task.key))}>打开所在目录</button>}</div>
+                  <div className="download-state" role="cell"><Badge tone={TONE[task.status]} dot={!completed} icon={completed ? "check" : undefined}>{downloadStatusLabel(task)}</Badge></div>
                   <div className="download-speed" role="cell">{task.status === "running"
                     ? <><span>{formatBytes(task.speed)}/s</span>{task.eta_seconds !== null && <small>约剩 {seconds(task.eta_seconds)}</small>}</>
                     // 完成后显示累计用时（不含排队）和平均速度；旧版本完成的任务没有用时记录。
-                    : task.status === "completed" && task.elapsed_seconds > 0 ? <><span>用时 {elapsed(task.elapsed_seconds)}</span><small>平均 {formatBytes(task.stored_bytes / Math.max(task.elapsed_seconds, 0.05))}/s</small></>
-                      : <span>—</span>}</div>
+                    : completed && task.elapsed_seconds > 0 ? <><span>{elapsed(task.elapsed_seconds)}<small className="download-inline-label">用时</small></span><small>平均 {formatBytes(task.stored_bytes / Math.max(task.elapsed_seconds, 0.05))}/s</small></>
+                      : <span className="muted">—</span>}</div>
                   <div className="download-actions" role="cell">{busy.has(task.id) ? <span className="spinner" aria-label="正在处理任务" /> : <Menu label={`${name}的任务操作`} items={[
                     ...(active(task) ? [{ label: "停止下载", icon: "pause" as const, onSelect: () => setConfirm({ task, action: "stop" }) }] : task.status !== "completed" ? [{ label: "继续下载", icon: "play" as const, onSelect: () => task.method === "POST" ? setConfirm({ task, action: "resume" }) : void control(task, "resume") }] : []),
                     { label: "重新下载", icon: "refresh" as const, onSelect: () => setConfirm({ task, action: "restart" }) },
@@ -119,7 +130,9 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
             </div>}
     </Panel>
     <Pagination {...pagination} />
-    <p className="muted download-footnote">支持文件直链{page?.capabilities.hls ? "、M3U8 点播" : ""}{page?.capabilities.x ? "、X 帖子" : ""}{page?.capabilities.youtube ? "、YouTube 视频和 Shorts" : ""}。平台功能由管理员启用。网络中断会自动重试；文件直链满足条件时可续传，平台和 M3U8 任务手动停止后从头下载。删除任务保留已保存的文件。</p>
+    <details className="download-help"><summary><Icon name="info" size={15} /><span>下载说明</span><Icon name="chevronDown" size={14} /></summary>
+      <p>支持文件直链{page?.capabilities.hls ? "、M3U8 点播" : ""}{page?.capabilities.x ? "、X 帖子" : ""}{page?.capabilities.youtube ? "、YouTube 视频和 Shorts" : ""}。平台功能由管理员启用。网络中断会自动重试；文件直链满足条件时可续传，平台和 M3U8 任务手动停止后从头下载。删除任务保留已保存的文件。</p>
+    </details>
     {(newTask || edit) && <DownloadDialog task={edit} onClose={() => { setNewTask(false); setEdit(null); }} onComplete={completed} />}
     {clearing && <ConfirmDialog title={clearing === "completed" ? "清除已完成的任务" : "清除失败的任务"}
       description={clearing === "completed" ? "从列表中移除所有已完成的任务，已保存的文件不受影响。" : "移除所有失败的任务并清理未完成的数据，已保存的文件不受影响。"}

@@ -31,6 +31,9 @@ ACTIONS = {
     "resources.update": "修改下载与资源配置", "download.create": "创建离线下载",
     "download.stop": "停止离线下载", "download.resume": "继续离线下载",
     "download.restart": "重新下载", "download.delete": "删除下载任务", "download.update": "更新下载参数",
+    "passkey.create": "添加通行密钥", "passkey.rename": "重命名通行密钥",
+    "passkey.delete": "移除通行密钥", "passkey.enable": "启用通行密钥登录",
+    "private.passkey.unlock": "通行密钥解锁私密空间",
 }
 
 

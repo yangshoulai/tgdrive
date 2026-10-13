@@ -151,7 +151,7 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onLyricLine }: PreviewProps & { onRetry: () => void }) {
   const [content, setContent] = useState<PreviewText | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
@@ -179,7 +179,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
     </div>
   );
   if (unplayable) return fallback;
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} />;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onLyricLine={onLyricLine} />;
   if (mediaFailed) return fallback;
   if (kind === "image" || kind === "pdf") return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
     {!mediaReady && (kind === "image" && poster
@@ -210,12 +210,13 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     url: api.contentUrl(item.key), downloadUrl: api.contentUrl(item.key, true), poster: api.fileThumbnail(item, "poster"), thumbnail: api.fileThumbnail(item),
   };
   const source = sourceOf(active);
-  const [playlistExpanded, setPlaylistExpanded] = useState(() => window.matchMedia("(min-width: 861px)").matches);
+  const [playlistExpanded, setPlaylistExpanded] = useState(() => kind === "image" && window.matchMedia("(min-width: 861px)").matches);
   const controls = useRef<PlaybackControls | null>(null), pendingPlay = useRef(false), currentKey = useRef(active.key);
   currentKey.current = active.key;
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState<MediaProgress>({ currentTime: 0, duration: 0 });
   const [mediaState, setMediaState] = useState<MediaState>("loading");
+  const [lyric, setLyric] = useState<{ key: string; line: string | null }>({ key: active.key, line: null });
   const activityCallback = useRef(onPlaybackActivity);
   activityCallback.current = onPlaybackActivity;
   useEffect(() => { activityCallback.current?.({ playing: media && playing, currentTime: progress.currentTime, state: mediaState }); }, [media, playing, progress.currentTime, mediaState]);
@@ -302,7 +303,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   } : undefined, [active.key, hasAssets]);
   // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
-    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} onSeek={time => controls.current?.seek(time)}>{transport(true)}</MinimizedPlayback> : kind === "image" ? transport(true) : undefined} className={`preview-modal preview-modal-${kind}${browsable && playlistExpanded ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
+    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)}>{transport(true)}</MinimizedPlayback> : kind === "image" ? transport(true) : undefined} className={`preview-modal preview-modal-${kind}${browsable && playlistExpanded ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>
@@ -316,6 +317,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       <div ref={stage} className={`preview-stage${browsable ? " has-playlist" : ""}${browsable && playlistExpanded ? " is-playlist-open" : ""}`}><FilePreview kind={kind} url={kind === "image" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}
+        onLyricLine={line => setLyric(current => current.key === active.key && current.line === line ? current : { key: active.key, line })}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}
         loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} />
         {browsable && transport()}

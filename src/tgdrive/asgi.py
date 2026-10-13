@@ -76,7 +76,10 @@ class TgDriveASGI(StaticFiles):
                  context: AppContext | None = None, offline=None, resources=None) -> None:
         self.scheduler = scheduler
         self.admin, self.user, self.s3 = admin, user, s3
-        self.private_space = PrivateSpace(user)
+        # 对外地址也是通行密钥的固定来源，不能由任意请求头决定。
+        self.settings = settings or SystemSettings(admin.accounts.metadata, {"public_base_url": public_base_url})
+        self.private_space = PrivateSpace(user, self.settings)
+        self.passkeys = self.private_space.passkeys
         user.private_space = self.private_space
         admin.private_space = self.private_space
         access_logger = logging.getLogger("uvicorn.access")
@@ -86,8 +89,6 @@ class TgDriveASGI(StaticFiles):
         self.keys = keys or (KeyApi(user.objects, user.clients) if user.clients is not None else None)
         self.audit = AuditLog(admin.accounts.metadata)
         self.share_access = ShareAccess(admin.accounts.keystore)
-        # 对外地址由管理员在控制台配置；启动参数 --public-url 只作为默认值。
-        self.settings = settings or SystemSettings(admin.accounts.metadata, {"public_base_url": public_base_url})
         self.s3_host = s3_host.split(":", 1)[0].lower() if s3_host else None
         self.static_dir = Path(static_dir).expanduser().resolve() if static_dir else None
         self.secure_cookies, self.json_limit = secure_cookies, json_limit
@@ -127,7 +128,7 @@ class TgDriveASGI(StaticFiles):
         host = headers.get("host", "localhost").split(":", 1)[0].lower()
         query = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
         started = False
-        private_response = path.startswith("/api/user/v1/private/")
+        private_response = path.startswith("/api/user/v1/private/") or path.startswith("/api/user/v1/passkeys")
         request_id = secrets.token_hex(8)
         request_start = time.monotonic()
 
@@ -168,7 +169,7 @@ class TgDriveASGI(StaticFiles):
                 return
             # 公开直链优先于 S3 路径路由；桶名至少 3 个字符，因此 /p/ 不会与桶冲突。
             if path.startswith("/p/") and method in ("GET", "HEAD"):
-                await self._public_content(tracked_send, method, path, query, headers)
+                await self._until_disconnect(receive, self._public_content(tracked_send, method, path, query, headers))
                 return
             # 管理员配置的 S3 Endpoint 优先于启动参数 --s3-host。
             s3_host = self.settings.s3_hostname() or self.s3_host
@@ -213,7 +214,8 @@ class TgDriveASGI(StaticFiles):
             audit_path = path
             if private:
                 route = path[len("/api/user/v1/private"):]
-                controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer"}
+                controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer",
+                            "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/folders", "/files", "/files/check", "/files/instant", "/move",
                            "/copy", "/delete", "/thumbnail", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads"}
@@ -249,13 +251,13 @@ class TgDriveASGI(StaticFiles):
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
                 return
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
-                await self._content(tracked_send, method, token, query, headers, admin=False, user=file_user, private=private)
+                await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, admin=False, user=file_user, private=private))
                 return
             if path.startswith("/api/admin/v1/backups/") and method == "GET":
                 await self._backup_download(tracked_send, token, path.rsplit("/", 1)[-1])
                 return
             if path == "/api/admin/v1/content" and method in ("GET", "HEAD"):
-                await self._content(tracked_send, method, token, query, headers, admin=True)
+                await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, admin=True))
                 return
             folder_download = re.fullmatch(r"/api/public/v1/folders/([A-Za-z0-9_-]+)/download", path)
             if folder_download and method == "POST":
@@ -284,7 +286,9 @@ class TgDriveASGI(StaticFiles):
             audit = self._audit_entry(method, audit_path, payload, token, scope)
             try:
                 status, result, extra = await self._route(method, path, query, payload, token, csrf,
-                                                          ip=(scope.get("client") or [None])[0], user=file_user, access=access)
+                    ip=(scope.get("client") or [None])[0], user=file_user, access=access,
+                    origin=headers.get("origin") or (f"{scope.get('scheme', 'http')}://{headers.get('host', '')}" if method == "GET" else None),
+                    passkey_browser=cookies.get("tg_passkey", ""))
             except Exception as exc:
                 if audit:
                     self._write_audit(audit, ok=False, error=exc)
@@ -326,7 +330,11 @@ class TgDriveASGI(StaticFiles):
                          "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
-                         "/downloads/clear": "download.clear"},
+                         "/downloads/clear": "download.clear",
+                         "/private/passkeys/unlock/verify": "private.passkey.unlock",
+                         "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
+                         "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
+                         "/passkeys/login/verify": "user.login"},
     }
 
     def _audit_entry(self, method, path, payload, token, scope):
@@ -352,6 +360,8 @@ class TgDriveASGI(StaticFiles):
 
     def _write_audit(self, entry, *, ok, result=None, error=None):
         payload, action = entry["payload"], entry["action"]
+        if action == "user.login" and ok and (result or {}).get("username"):
+            entry = {**entry, "actor": result["username"]}
         if action == "user.login" and ok and (result or {}).get("role") == "admin":
             # 统一登录入口：管理员登录在审计里仍记为 admin.login。
             action, entry = "admin.login", {**entry, "actor_type": "admin"}
@@ -384,6 +394,13 @@ class TgDriveASGI(StaticFiles):
         elif action == "download.clear":
             detail = {"status": payload.get("status") if payload.get("status") in ("completed", "failed") else None,
                       "removed": (result or {}).get("removed") if ok else None}
+        elif action.startswith(("private.passkey.", "passkey.")):
+            # 不记录凭据原文、公钥、挑战或用户填写的凭据名称。
+            identifier = (result or {}).get("id") if action.endswith(".create") and ok else payload.get("id")
+            target = str(identifier) if isinstance(identifier, int) and not isinstance(identifier, bool) else None
+            detail = {"method": "passkey"}
+        elif action in ("user.login", "admin.login") and "credential" in payload:
+            detail = {"method": "passkey"}
         elif action == "object.public":
             paths = payload["paths"] if isinstance(payload.get("paths"), list) else [payload.get("path")]
             target = ", ".join(str(item) for item in paths[:5]) + (f" 等 {len(paths)} 项" if len(paths) > 5 else "")
@@ -499,7 +516,7 @@ class TgDriveASGI(StaticFiles):
             raise NotFoundError("接口不存在")
         await self._send(send, 200, result)
 
-    async def _route(self, method, path, query, payload, token, csrf, ip=None, *, user=None, access=""):
+    async def _route(self, method, path, query, payload, token, csrf, ip=None, *, user=None, access="", origin=None, passkey_browser=""):
         user = user or self.user
         if path.startswith("/api/admin/v1/"):
             route = path[len("/api/admin/v1"):]
@@ -631,6 +648,27 @@ class TgDriveASGI(StaticFiles):
                                                        bool(payload.get("deep", False))), {}
         elif path.startswith("/api/user/v1/"):
             route = path[len("/api/user/v1"):]
+            if route == "/passkeys/status" and method == "GET":
+                return 200, self.passkeys.capability(None, origin), {"Cache-Control": "no-store"}
+            if route == "/passkeys/login/options" and method == "POST":
+                browser_token = secrets.token_urlsafe(32)
+                result = self.passkeys.login_options(origin, browser_token, ip, remember=payload.get("remember") is True)
+                cookie = f"tg_passkey={browser_token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age={self.passkeys.CHALLENGE_SECONDS}"
+                if self.secure_cookies:
+                    cookie += "; Secure"
+                return 200, result, {"Set-Cookie": cookie, "Cache-Control": "no-store"}
+            if route == "/passkeys/login/verify" and method == "POST":
+                session = await self.passkeys.login(passkey_browser, payload.get("request_id"), payload.get("credential"), origin, ip)
+                return self._login(AdminApi._session_payload(session))
+            if route == "/passkeys" and method == "GET":
+                return 200, self.passkeys.list(token, origin), {"Cache-Control": "no-store"}
+            if route == "/passkeys/register/options" and method == "POST":
+                return 200, await self.passkeys.registration_options(token, csrf, payload.get("password"), payload.get("name"), origin, ip), {}
+            if route == "/passkeys/register/verify" and method == "POST":
+                return 201, await self.passkeys.register(token, csrf, payload.get("request_id"), payload.get("credential"), origin, ip), {}
+            if route in ("/passkeys/rename", "/passkeys/delete", "/passkeys/enable-login") and method == "POST":
+                return 200, await self.passkeys.manage(token, csrf, payload.get("password"), payload.get("id"),
+                    name=payload.get("name"), delete=route.endswith("/delete"), enable_login=route.endswith("/enable-login"), ip=ip), {}
             if route.startswith("/downloads") and self.offline is not None:
                 session = user._session(token, csrf=csrf, mutation=method != "GET")
                 account = user.accounts.account_for_session(session)
@@ -647,7 +685,16 @@ class TgDriveASGI(StaticFiles):
                     result = await self.offline.control(account.id, int(download[1]), download[2], item=payload.get("item"))
                     return (204, None, {}) if result is None else (200, result, {"Cache-Control": "no-store"})
             if route == "/private/status" and method == "GET":
-                return 200, self.private_space.status(token), {}
+                return 200, self.private_space.status(token, origin), {}
+            if route == "/private/passkeys" and method == "GET":
+                self.private_space.require(token, access)
+                return 200, self.passkeys.list(token, origin), {}
+            if route.startswith("/private/passkeys/") and method == "POST":
+                passkeys = self.private_space.passkeys
+                if route == "/private/passkeys/unlock/options":
+                    return 200, passkeys.private_options(token, csrf, origin, ip), {}
+                if route == "/private/passkeys/unlock/verify":
+                    return 200, await passkeys.private_unlock(token, csrf, payload.get("request_id"), payload.get("credential"), origin, ip), {}
             if route == "/private/setup" and method == "POST":
                 return 201, await self.private_space.setup(token, csrf, payload["password"], payload.get("idle_seconds", 300)), {}
             if route == "/private/unlock" and method == "POST":
@@ -659,7 +706,7 @@ class TgDriveASGI(StaticFiles):
                 return 200, self.private_space.activity(token, csrf, access,
                     active=payload.get("active") is True, playing=payload.get("playing") is True), {}
             if route == "/private/settings" and method == "POST":
-                return 200, await self.private_space.configure(token, csrf, access, payload["password"],
+                return 200, await self.private_space.configure(token, csrf, access, payload.get("password"),
                     payload.get("idle_seconds", 300), payload.get("new_password")), {}
             if route == "/private/transfer" and method == "POST":
                 return 200, await self.private_space.transfer(token, csrf, access, payload["paths"],
@@ -938,6 +985,30 @@ class TgDriveASGI(StaticFiles):
         await self._send_raw(send, 200, {"Content-Type": mime, "ETag": f'"{etag}"', "Cache-Control": cache_control,
                                          "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"}, data)
 
+    @staticmethod
+    async def _until_disconnect(receive, response):
+        """浏览器停止预加载或 Range 读取后，取消响应并释放分片预读与传输名额。"""
+        async def disconnected():
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    return
+                # GET 的初始 http.request 不表示断连；让响应任务也有执行机会。
+                await asyncio.sleep(0)
+
+        producer = asyncio.create_task(response)
+        listener = asyncio.create_task(disconnected())
+        try:
+            done, _ = await asyncio.wait((producer, listener), return_when=asyncio.FIRST_COMPLETED)
+            if producer in done:
+                return await producer
+            await listener
+        finally:
+            for task in (producer, listener):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(producer, listener, return_exceptions=True)
+
     async def _stream_object(self, send, method, info, opener, query, headers, cache_control):
         etag = f'"{info.etag}"'
         if headers.get("if-none-match") in (etag, "*"):
@@ -1037,7 +1108,7 @@ class TgDriveASGI(StaticFiles):
         elif isinstance(exc, WrongPassphrase): status, code, message = 400, "wrong_passphrase", "加密口令不正确"
         elif isinstance(exc, TooManyAttempts):
             status, code = 429, "too_many_attempts"
-            message = str(exc) if str(exc).startswith("访问密码") else "登录失败次数过多，请 15 分钟后再试"
+            message = str(exc) if str(exc).startswith(("访问密码", "登录", "验证", "通行密钥")) else "登录失败次数过多，请 15 分钟后再试"
         elif isinstance(exc, (AuthenticationError, SessionExpired)): status, code, message = 401, "unauthorized", "登录凭据无效或会话已过期"
         elif isinstance(exc, (CsrfError, PermissionError)): status, code, message = 403, "forbidden", "权限不足或 CSRF 校验失败"
         elif isinstance(exc, WorkBusyError):

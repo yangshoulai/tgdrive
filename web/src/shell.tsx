@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { BRAND, SITE } from "./brand";
 import * as api from "./api";
+import { loginWithPasskey, passkeyUnavailable } from "./passkeys";
 import { Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
 
 export type NavItem<K extends string> = { key: K; label: string; icon: IconName; count?: number; href?: string };
@@ -149,16 +150,39 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const usernameInput = useRef<HTMLInputElement>(null);
+  const [passkeyCapability, setPasskeyCapability] = useState<api.PasskeyCapability | null>(null);
+  const [usingPasskey, setUsingPasskey] = useState(false);
+  const mounted = useRef(true), passkeyController = useRef<AbortController | null>(null);
   useEffect(() => { document.title = `登录 · ${BRAND}`; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    const load = new AbortController();
+    void api.passkeyStatus(load.signal).then(value => { if (mounted.current) setPasskeyCapability(value); }).catch(() => undefined);
+    return () => { mounted.current = false; load.abort(); passkeyController.current?.abort(); };
+  }, []);
+  function accept(session: api.Session) {
+    store(LAST_USERNAME, session.username);
+    store(STAY_SIGNED_IN, remember ? "1" : "0");
+    onSuccess(session);
+  }
+  async function passkeyLogin() {
+    if (busy || !passkeyCapability || passkeyUnavailable(passkeyCapability)) return;
+    const operation = new AbortController(); passkeyController.current = operation;
+    setError(""); setBusy(true); setUsingPasskey(true);
+    try {
+      const session = await loginWithPasskey(remember, operation.signal);
+      if (mounted.current) accept(session);
+    } catch (reason) { if (mounted.current) setError(api.errorMessage(reason, "通行密钥登录失败，请使用密码登录")); }
+    finally { if (mounted.current) { setBusy(false); setUsingPasskey(false); } }
+  }
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (busy) return;
     if (!username.trim() || !password) { setError("请输入用户名和密码"); return; }
     setError(""); setBusy(true);
     try {
       const session = await api.login(username.trim(), password, remember);
-      store(LAST_USERNAME, username.trim());
-      store(STAY_SIGNED_IN, remember ? "1" : "0");
-      onSuccess(session);
+      accept(session);
     } catch (reason) {
       const status = reason instanceof api.ApiError ? reason.status : 0;
       setError(status === 401 ? "用户名或密码不正确" : status === 429 ? "登录失败次数过多，请 15 分钟后再试"
@@ -166,10 +190,12 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
     } finally { setBusy(false); }
   }
   function switchAccount() {
+    if (busy) return;
     store(LAST_USERNAME, "");
     setUsername(""); setPassword(""); setError("");
     usernameInput.current?.focus();
   }
+  const passkeyReason = passkeyCapability ? passkeyUnavailable(passkeyCapability) : null;
   return (
     <AuthLayout admin={false} title="登录" description="登录你的文件空间。"
       footer={<><a href="/docs">使用文档</a><span>没有账号？请联系管理员创建。</span></>}>
@@ -178,22 +204,27 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
         <Field label="用户名" htmlFor="login-username"
           hint={saved && username === saved ? <>上次登录的账号。<button type="button" className="link-button" onClick={switchAccount}>换个账号</button></> : undefined}>
           <input ref={usernameInput} id="login-username" name="username" className="input input-lg" value={username} onChange={event => setUsername(event.target.value)}
-            autoComplete="username" autoCapitalize="none" spellCheck={false} autoFocus={!saved} />
+            autoComplete="username" autoCapitalize="none" spellCheck={false} autoFocus={!saved} disabled={busy} />
         </Field>
         <Field label="密码" htmlFor="login-password" hint={capsLock ? <span className="tone-warning">大写锁定已开启</span> : undefined}>
           <div className="input-affix input-affix-lg">
             <input id="login-password" name="password" className="input input-lg" value={password} onChange={event => setPassword(event.target.value)}
-              type={showPassword ? "text" : "password"} autoComplete="current-password" autoFocus={Boolean(saved)}
+              type={showPassword ? "text" : "password"} autoComplete="current-password" autoFocus={Boolean(saved)} disabled={busy}
               onKeyDown={event => setCapsLock(event.getModifierState("CapsLock"))} onKeyUp={event => setCapsLock(event.getModifierState("CapsLock"))} onBlur={() => setCapsLock(false)} />
-            <button type="button" className="affix-toggle" aria-pressed={showPassword} onClick={() => setShowPassword(value => !value)}>{showPassword ? "隐藏" : "显示"}</button>
+            <button type="button" className="affix-toggle" disabled={busy} aria-pressed={showPassword} onClick={() => setShowPassword(value => !value)}>{showPassword ? "隐藏" : "显示"}</button>
           </div>
         </Field>
         <label className="check-row">
-          <Checkbox checked={remember} onChange={setRemember} label="30 天内保持登录" />
+          <Checkbox checked={remember} onChange={value => { if (!busy) setRemember(value); }} label="30 天内保持登录" />
           <span><strong>30 天内保持登录</strong><small>下次打开无需重新登录。在公共电脑上请不要勾选。</small></span>
         </label>
         {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
-        <Button type="submit" variant="primary" size="lg" block loading={busy}>{busy ? "正在登录" : "登录"}</Button>
+        <Button type="submit" variant="primary" size="lg" block loading={busy && !usingPasskey} disabled={busy}>登录</Button>
+        {passkeyCapability && <>
+          <div className="private-unlock-divider"><span>或使用设备验证</span></div>
+          <Button icon="key" size="lg" block loading={busy && usingPasskey} disabled={busy || Boolean(passkeyReason)} onClick={() => void passkeyLogin()}>通行密钥登录</Button>
+          <p className="login-passkey-hint" role={usingPasskey ? "status" : undefined}>{usingPasskey ? "请在系统提示中完成验证" : passkeyReason || "由设备选择已绑定的账号，无需输入用户名或密码。"}</p>
+        </>}
       </form>
     </AuthLayout>
   );

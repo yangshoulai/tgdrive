@@ -18,7 +18,10 @@ class Client:
         queue = [{"type": "http.request", "body": body, "more_body": False}]
 
         async def receive():
-            return queue.pop(0)
+            if queue:
+                return queue.pop(0)
+            # 请求体结束后连接仍在，直到应用完成响应或主动取消接收。
+            return await asyncio.Future()
 
         async def send(message):
             sent.append(message)

@@ -50,7 +50,7 @@ class InputTests(unittest.TestCase):
                 db.execute("PRAGMA user_version=14")
             metadata.close()
             migrated = Metadata(path)
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 16)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], Metadata.SCHEMA_VERSION)
             self.assertIn("elapsed_seconds", {row[1] for row in migrated.db.execute("PRAGMA table_info(offline_tasks)")})
             self.assertEqual(migrated.db.execute("SELECT value FROM settings WHERE key='platform-test'").fetchone()[0], "preserved")
             self.assertTrue({"platform", "phase"}.issubset({row[1] for row in migrated.db.execute("PRAGMA table_info(offline_tasks)")}))

@@ -163,6 +163,24 @@ export function Field({ label, hint, error, children, htmlFor }: { label: string
   );
 }
 
+export function PasswordField({ label, value, onChange, name, autoComplete = "current-password", hint, error, disabled, autoFocus }: {
+  label: string; value: string; onChange: (value: string) => void; name?: string;
+  autoComplete?: "current-password" | "new-password"; hint?: ReactNode; error?: string; disabled?: boolean; autoFocus?: boolean;
+}) {
+  const id = useId();
+  const [visible, setVisible] = useState(false), [capsLock, setCapsLock] = useState(false);
+  return <div className="password-field">
+    <Field label={label} htmlFor={id} error={error} hint={capsLock ? <span className="tone-warning">大写锁定已开启</span> : hint}>
+      <input id={id} name={name} className="input" type={visible ? "text" : "password"} value={value}
+        onChange={event => onChange(event.target.value)} autoComplete={autoComplete} autoFocus={autoFocus} disabled={disabled}
+        autoCapitalize="none" spellCheck={false} onKeyDown={event => setCapsLock(event.getModifierState("CapsLock"))}
+        onKeyUp={event => setCapsLock(event.getModifierState("CapsLock"))} onBlur={() => setCapsLock(false)} />
+      <Button variant="ghost" size="sm" className="password-field-toggle" disabled={disabled} aria-pressed={visible}
+        aria-controls={id} aria-label={`${visible ? "隐藏" : "显示"}${label}`} onClick={() => setVisible(value => !value)}>{visible ? "隐藏" : "显示"}</Button>
+    </Field>
+  </div>;
+}
+
 export function Switch({ checked, onChange, label, description, disabled }: { checked: boolean; onChange: (value: boolean) => void; label: string; description?: ReactNode; disabled?: boolean }) {
   return (
     <label className={`switch-row${disabled ? " is-disabled" : ""}`}>
@@ -369,7 +387,8 @@ export function Modal({ title, description, onClose, children, footer, actions, 
   );
 }
 
-export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onClose, danger = true, className }: { title: string; description: ReactNode; confirmLabel: string; onConfirm: () => Promise<void> | void; onClose: () => void; danger?: boolean; className?: string }) {
+export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onClose, danger = true, className, children }: { title: string; description: ReactNode; confirmLabel: string; onConfirm: () => Promise<void> | void; onClose: () => void; danger?: boolean; className?: string; children?: ReactNode }) {
+  const id = useId();
   const [busy, setBusy] = useState(false);
   async function confirm() {
     setBusy(true);
@@ -377,7 +396,10 @@ export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onC
   }
   return (
     <Modal className={className} title={title} description={description} onClose={onClose} dismissible={!busy} size="sm" icon={danger ? "alert" : "info"} tone={danger ? "danger" : "accent"}
-      footer={<><Button disabled={busy} onClick={onClose}>取消</Button><Button variant={danger ? "danger" : "primary"} loading={busy} onClick={() => void confirm()}>{confirmLabel}</Button></>} />
+      footer={<><Button disabled={busy} onClick={onClose}>取消</Button><Button variant={danger ? "danger" : "primary"} loading={busy}
+        type={children ? "submit" : "button"} form={children ? id : undefined} onClick={children ? undefined : () => void confirm()}>{confirmLabel}</Button></>}>
+      {children && <form id={id} className="form" noValidate onSubmit={event => { event.preventDefault(); if (!busy) void confirm(); }}>{children}</form>}
+    </Modal>
   );
 }
 

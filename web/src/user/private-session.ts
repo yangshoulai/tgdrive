@@ -53,6 +53,8 @@ export function usePrivateSession(grant: api.PrivateGrant | null, onLocked: () =
     const finish = (keepalive = false) => {
       if (stopped) return;
       stopped = true;
+      // 改设置或移除凭据已换发授权时，旧请求的锁定响应不能关闭新窗口。
+      if (api.getPrivateAccess() !== access) return;
       if (api.getPrivateAccess() === access) api.setPrivateAccess("");
       void api.lockPrivate(access, keepalive).catch(() => undefined);
       onLockedRef.current();

@@ -18,7 +18,7 @@ import { KeysView } from "./user/keys";
 import { DownloadsView } from "./user/downloads";
 import { DownloadTray } from "./user/download-tray";
 import { PreviewHost } from "./user/preview-host";
-import { PasswordDialog } from "./user/account";
+import { UserSettingsPage } from "./user/account";
 import { onThemeChange, setThemePreference, themePreference, type ThemePreference } from "./theme";
 
 /* ---------- 路由 ---------- */
@@ -94,7 +94,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
   return <MainShell session={session} onLogout={() => setSession(null)} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "keys" | "private" | "downloads";
+type UserSection = "files" | "shared" | "trash" | "keys" | "private" | "downloads" | "account";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -109,7 +109,7 @@ function readLocation(): { section: Section; prefix: string } {
   }
   const params = new URLSearchParams(search);
   const view = params.get("view");
-  return { section: view === "shared" || view === "keys" || view === "trash" || view === "private" || view === "downloads" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
+  return { section: view === "shared" || view === "keys" || view === "trash" || view === "private" || view === "downloads" || view === "account" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
 }
 
 function MainShell({ session, onLogout }: { session: api.Session; onLogout: () => void }) {
@@ -117,7 +117,6 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   const [location, setLocation] = useState(readLocation);
   const [usage, setUsage] = useState<Usage | null>(null);
   const [sharedCount, setSharedCount] = useState<number | undefined>();
-  const [passwordOpen, setPasswordOpen] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(themePreference);
   useEffect(() => onThemeChange(setTheme), []);
   const [status, setStatus] = useState<api.SystemStatus | null>(null);
@@ -172,7 +171,9 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   // 文件空间可用时才保留预览和下载托盘；系统锁定、服务未解锁时一并关闭。
   const workspaceReady = !locked && !(!isAdmin && session.unlocked === false) && !(isAdmin && status === null);
   let content: ReactNode;
-  if (isAdminSection(section)) {
+  if (section === "account") {
+    content = <UserSettingsPage session={session} />;
+  } else if (isAdminSection(section)) {
     if (!isAdmin) content = <AccessDenied />;
     else if (status === null) content = <FullPageLoading label="正在读取系统状态" />;
     else content = <AdminConsole module={section} session={session} status={status} onStatus={setStatus} onRefreshStatus={unlocked}
@@ -202,6 +203,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
     { key: "downloads", label: "下载任务", icon: "download" },
     { key: "trash", label: "回收站", icon: "trash" },
     { key: "keys", label: "访问密钥", icon: "key" },
+    { key: "account", label: "用户设置", icon: "settings" },
   ] };
   const groups: NavGroup<Section>[] = [
     personal,
@@ -225,7 +227,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
         </div>
       </>}
       account={{ name: session.username, caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", menu: [
-        { label: "修改密码", icon: "lock", onSelect: () => setPasswordOpen(true) },
+        { label: "用户设置", icon: "settings", checked: section === "account", onSelect: () => navigate("account") },
         { label: "跟随系统", icon: "monitor", heading: "外观", divider: true, checked: theme === "system", onSelect: () => setThemePreference("system") },
         { label: "浅色", icon: "sun", checked: theme === "light", onSelect: () => setThemePreference("light") },
         { label: "深色", icon: "moon", checked: theme === "dark", onSelect: () => setThemePreference("dark") },
@@ -239,7 +241,6 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
           onOpenFolder={prefix => navigate("files", prefix)} onCompleted={() => { setUploadRevision(value => value + 1); refreshUsage(); }} />}
         <UploadTray queue={uploads} />
       </div>
-      {passwordOpen && <PasswordDialog onClose={() => setPasswordOpen(false)} />}
     </AppShell>
   );
 }

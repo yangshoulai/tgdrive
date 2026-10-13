@@ -62,8 +62,11 @@ async function fromBlob(blob: Blob): Promise<ThumbnailSet | null> {
 
 /* ---------- 视频截帧 ---------- */
 
-function waitFor(target: HTMLMediaElement, event: string, signal?: AbortSignal, timeout = 20000) {
+function waitFor(target: HTMLMediaElement, event: string, signal?: AbortSignal, timeout = 20000, ready?: () => boolean) {
   return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException("aborted", "AbortError")); return; }
+    if (target.error) { reject(new Error("video decode failed")); return; }
+    if (ready?.()) { resolve(); return; }
     const done = (error?: unknown) => {
       window.clearTimeout(timer); target.removeEventListener(event, ok); target.removeEventListener("error", failed); signal?.removeEventListener("abort", aborted);
       if (error) reject(error); else resolve();
@@ -89,24 +92,38 @@ function brightness(video: HTMLVideoElement) {
 
 async function fromVideo(src: string, signal?: AbortSignal): Promise<ThumbnailSet | null> {
   const video = document.createElement("video");
-  video.muted = true; video.playsInline = true; video.preload = "auto"; video.src = src;
+  video.muted = true; video.playsInline = true; video.preload = "metadata";
+  const deadline = performance.now() + 45000;
+  let first: ThumbnailSet | null = null;
   try {
-    await waitFor(video, "loadeddata", signal);
-    let duration = video.duration;
-    if (!Number.isFinite(duration)) {
-      // 录屏等方式生成的 WebM 常常没有时长信息：跳到末尾让浏览器算出时长。
-      video.currentTime = 1e9;
-      await waitFor(video, "seeked", signal, 8000).catch(() => undefined);
-      duration = Number.isFinite(video.duration) ? video.duration : 0;
+    // 浏览器用 Range 取得容器索引；MP4 的 moov 可能在文件末尾，不能假设首个存储分片足够。
+    const metadata = waitFor(video, "loadedmetadata", signal, 45000, () => video.readyState >= 1);
+    video.src = src;
+    await metadata;
+    if (video.readyState < 2) {
+      const frame = waitFor(video, "loadeddata", signal, Math.max(1, deadline - performance.now()), () => video.readyState >= 2);
+      // 只请求开头的可解码画面，metadata 预加载无需自动播放或连续缓冲整个视频。
+      video.currentTime = Number.isFinite(video.duration) && video.duration > 0 ? Math.min(0.01, video.duration / 2) : 0.01;
+      await frame;
     }
-    // 依次尝试 10%、30%、50% 处，取第一帧不是黑屏的画面。
-    for (const ratio of duration ? [0.1, 0.3, 0.5] : [0]) {
-      const time = Math.min(duration * ratio, Math.max(0, duration - 0.1));
-      if (Math.abs(video.currentTime - time) > 0.01) { video.currentTime = time; await waitFor(video, "seeked", signal); }
-      if (brightness(video) > 18) break;
+    first = await renderSet(video, video.videoWidth, video.videoHeight);
+    if (brightness(video) > 18) return first;
+    // 只在片头黑屏时看前 1、3 秒；不按总时长跳转，也不为了获取时长扫描 WebM 末尾。
+    for (const candidate of [1, 3]) {
+      const time = Number.isFinite(video.duration) ? Math.min(candidate, Math.max(0, video.duration - 0.1)) : candidate;
+      if (time <= video.currentTime + 0.01 || performance.now() >= deadline) continue;
+      const seek = waitFor(video, "seeked", signal, Math.min(3000, Math.max(1, deadline - performance.now())));
+      video.currentTime = time;
+      await seek;
+      if (video.readyState >= 2 && brightness(video) > 18) return await renderSet(video, video.videoWidth, video.videoHeight);
     }
-    return await renderSet(video, video.videoWidth, video.videoHeight);
+    return first;
+  } catch (reason) {
+    if (signal?.aborted || reason instanceof DOMException && reason.name === "AbortError") throw reason;
+    // 已经取得的首帧优于缺失封面；后续跳转超时不丢弃它。
+    return first;
   } finally {
+    video.pause();
     video.removeAttribute("src"); video.load();
   }
 }
@@ -284,22 +301,27 @@ export async function saveThumbnails(path: string, result: ThumbnailResult): Pro
 
 /* ---------- 后台补生成 ---------- */
 
-const SKIP_KEY = "tessera-thumbnail-skip";
+const SKIP_KEY = "tessera-thumbnail-skip-v2";
 const BACKFILL_IMAGE_LIMIT = 25 * 1024 * 1024;
+const SKIP_TTL = 10 * 60 * 1000;
+type SkippedThumbnail = { etag: string; until: number };
 
-function skipped(): string[] {
-  try { return JSON.parse(localStorage.getItem(SKIP_KEY) || "[]"); } catch { return []; }
+function skipped(): SkippedThumbnail[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(SKIP_KEY) || "[]");
+    return Array.isArray(value) ? value.filter((item): item is SkippedThumbnail => item && typeof item.etag === "string" && typeof item.until === "number" && item.until > Date.now()).slice(-300) : [];
+  } catch { return []; }
 }
 function remember(etag: string) {
-  // 本机暂时生成不了的文件（如浏览器不支持的格式）不再反复下载；只保留最近 300 条。
-  try { localStorage.setItem(SKIP_KEY, JSON.stringify([...skipped().filter(item => item !== etag), etag].slice(-300))); } catch { /* 忽略 */ }
+  // 慢网络和暂时的解码失败只冷却十分钟；升级后不继承旧版本永久跳过的名单。
+  try { localStorage.setItem(SKIP_KEY, JSON.stringify([...skipped().filter(item => item.etag !== etag), { etag, until: Date.now() + SKIP_TTL }].slice(-300))); } catch { /* 忽略 */ }
 }
 
 /** 为当前页里还没有缩略图的图片、视频和音频在空闲时依次补生成（例如通过 S3 上传或旧版本上传的文件）。
  * 一次只处理一个，页面不可见时暂停；图片只补 25 MB 以内的，视频和音频只读取需要的片段。 */
 export function useThumbnailBackfill(files: api.FileItem[], contentUrl: (key: string) => string, onSaved: (key: string, thumbnails: string[]) => void) {
   const saved = useRef(onSaved), resolve = useRef(contentUrl);
-  const privateSkipped = useRef(new Set<string>());
+  const privateSkipped = useRef(new Map<string, number>());
   saved.current = onSaved; resolve.current = contentUrl;
   const pending = files.filter(file => !file.thumbnails?.length && !file.key.endsWith("/"))
     .map(file => ({ file, source: thumbnailSource(file.key, file.content_type, file.size) }))
@@ -317,15 +339,16 @@ export function useThumbnailBackfill(files: api.FileItem[], contentUrl: (key: st
       wait();
     });
     void (async () => {
-      const skip = new Set([...skipped(), ...privateSkipped.current]);
+      const skip = new Set([...skipped().map(item => item.etag), ...[...privateSkipped.current].filter(([, until]) => until > Date.now()).map(([etag]) => etag)]);
       for (const { file, source } of pending) {
         if (controller.signal.aborted) return;
         if (skip.has(file.etag)) continue;
         await idle();
         if (controller.signal.aborted) return;
-        const skipFile = () => { if (api.isPrivatePath(file.key)) privateSkipped.current.add(file.etag); else remember(file.etag); };
+        const skipFile = () => { if (api.isPrivatePath(file.key)) privateSkipped.current.set(file.etag, Date.now() + SKIP_TTL); else remember(file.etag); };
         try {
           const result = await createThumbnails({ url: resolve.current(file.key), size: file.size, signal: controller.signal }, source);
+          if (controller.signal.aborted) return;
           if (!result) { skipFile(); continue; }
           const thumbnails = await saveThumbnails(file.key, result);
           if (thumbnails && !controller.signal.aborted) saved.current(file.key, thumbnails);

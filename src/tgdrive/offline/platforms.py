@@ -33,12 +33,17 @@ ERRORS = {"live": "暂不支持直播、预告或仍在处理中的视频",
           "rate_limit": "平台限制了请求频率，请稍后重试并检查代理出口",
           "temporary": "平台解析服务暂时不可用，请稍后重试",
           "unavailable": "平台未返回这条媒体，可能已删除、被屏蔽或限制登录账号访问；请先确认浏览器中可播放，受限帖子需导入有权限的账号 Cookie",
-          "js": "YouTube 的 JavaScript 挑战解析失败，请检查运行时，并确认 yt-dlp 与 yt-dlp-ejs 版本匹配",
+          "js": "YouTube 的播放器挑战未能解开，请稍后重试或更新平台镜像",
           "forbidden": "平台拒绝了解析请求（HTTP 403），请检查账号权限、Cookie 和服务器代理出口",
           "extractor": "解析组件未能识别平台响应，请检查代理是否返回了验证页面，或更新平台镜像",
           "components": "平台解析器导入组件失败，请重新构建或更新平台镜像",
           "transport": "平台解析器使用了尚未适配的网络请求方式，请更新 Tessera 平台适配器",
           "extract": "平台解析失败，请检查链接、更新 Cookie 或稍后重试；服务器出口也可能受到平台限制"}
+JS_ERRORS = {"memory": "YouTube 挑战脚本超过解析内存预算，请稍后重试，或使用内存更充足的服务器",
+             "components": "YouTube 挑战脚本缺失、版本不匹配或校验失败，请重新构建包含配套 yt-dlp-ejs 的平台镜像",
+             "runtime": "YouTube 的 JavaScript 运行进程启动失败或异常退出，请检查 Node.js／Deno 的版本、权限和容器资源",
+             "player": "无法取得 YouTube 挑战所需的播放器脚本，请检查服务器代理出口后重试",
+             "solver": "当前解析组件无法处理此 YouTube 播放器脚本，公开客户端重试也未取得格式；请更新平台镜像或稍后重试"}
 ROOTS = {"x": ("x.com", "twitter.com", "twimg.com"),
          "youtube": ("youtube.com", "youtube-nocookie.com", "youtu.be", "googlevideo.com", "ytimg.com", "ggpht.com", "google.com")}
 COOKIE_ROOTS = {"x": ("x.com", "twitter.com"), "youtube": ("youtube.com", "google.com")}
@@ -339,10 +344,15 @@ class PlatformResolver:
                             await process.stdin.drain()
                         else:
                             result = reply["result"]
+                            js_reason = result.get("js_reason", "unknown")
+                            if not isinstance(js_reason, str) or js_reason not in JS_ERRORS:
+                                js_reason = "unknown"
+                            js_retries = result.get("js_retries", [])
+                            js_retries = [item for item in js_retries[:2] if isinstance(item, str) and item in ("memory", "public")] if isinstance(js_retries, list) else []
                             if "error" in result:
                                 code = result["error"] if result["error"] in ERRORS else "extract"
                                 failed = next((item for item in reversed(trace) if item.rsplit(":", 1)[-1].isdigit() and int(item.rsplit(":", 1)[-1]) >= 400), None)
-                                if failed and code in ("formats", "extract", "extractor"):
+                                if failed and (code in ("formats", "extract", "extractor") or code == "js" and js_reason == "player"):
                                     status = int(failed.rsplit(":", 1)[-1])
                                     if status in (401, 403):
                                         code = "forbidden"
@@ -356,15 +366,19 @@ class PlatformResolver:
                                          re.fullmatch(r"[A-Za-z0-9_.-]{1,80}:\d{1,8}:[A-Za-z0-9_<>]{1,80}", frame)] if isinstance(stack, list) else []
                                 warnings = result.get("warnings", [])
                                 warnings = sorted({warning for warning in warnings if isinstance(warning, str) and warning in ERRORS}) if isinstance(warnings, list) else []
-                                logging.getLogger(__name__).warning("platform_extract_failed platform=%s stage=extract code=%s error_type=%s stack=%s warnings=%s requests=%s",
-                                    platform, code, error_type, ";".join(stack), ",".join(warnings), ";".join(trace))
-                                message = ERRORS[code]
+                                logging.getLogger(__name__).warning("platform_extract_failed platform=%s stage=extract code=%s error_type=%s stack=%s warnings=%s js_reason=%s js_retries=%s requests=%s",
+                                    platform, code, error_type, ";".join(stack), ",".join(warnings), js_reason, ",".join(js_retries), ";".join(trace))
+                                message = JS_ERRORS.get(js_reason, ERRORS[code]) if code == "js" else ERRORS[code]
+                                if code == "js" and js_reason == "solver" and "public" not in js_retries:
+                                    message = "当前解析组件无法处理此 YouTube 播放器脚本，请更新平台镜像或稍后重试"
                                 denied = next((item for item in reversed(trace) if item.rsplit(":", 1)[-1] in ("401", "403")), None)
                                 if code == "forbidden" and denied:
                                     message = f"平台拒绝了解析请求（HTTP {denied.rsplit(':', 1)[-1]}，{EXTRACT_STAGES[denied.split(':', 1)[0]]}），请检查账号权限、Cookie 和服务器代理出口"
                                 if code == "extract" and error_type != "unknown":
                                     message += f"（解析异常：{error_type}）"
                                 raise (TransientError if code in ("rate_limit", "temporary") else DownloadError)(message)
+                            if js_retries:
+                                logging.getLogger(__name__).info("platform_extract_recovered platform=%s js_retries=%s", platform, ",".join(js_retries))
                             entries = result["entries"]
                             if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
                                 raise DownloadError("平台媒体数量不正确")

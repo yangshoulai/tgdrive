@@ -145,7 +145,7 @@ function ResetPasswordDialog({ user, onClose }: { user: api.Account; onClose: ()
     finally { setBusy(false); }
   }
   return (
-    <Modal title={`重置 ${user.username} 的密码`} description="新密码立即生效，该用户的现有登录会被注销。把新密码通过安全的方式告诉用户，并提醒他登录后修改。" icon="key" onClose={onClose} size="sm"
+    <Modal title={`重置 ${user.username} 的密码`} description="新密码立即用于登录和私密解锁，现有登录会被注销，通行密钥会被移除。请安全告知用户新密码，并提醒他登录后修改或重新添加通行密钥。" icon="key" onClose={onClose} size="sm"
       footer={done ? <Button variant="primary" onClick={onClose}>完成</Button> : <><Button onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="reset-form" loading={busy}>重置密码</Button></>}>
       <form id="reset-form" className="form" onSubmit={submit} noValidate>
         {done ? <Field label="新密码"><CopyField value={password} label="新密码" copyMessage="密码已复制" /></Field> : (

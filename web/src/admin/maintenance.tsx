@@ -52,6 +52,7 @@ const ACTOR_LABEL: Record<api.AuditEvent["actor_type"], string> = { admin: "管�
 function auditDetail(event: api.AuditEvent) {
   const detail = event.detail ?? {};
   const parts: string[] = [];
+  if (detail.method === "passkey") parts.push("通行密钥验证");
   if (typeof detail.status === "string") parts.push(detail.status === "active" ? "启用" : detail.status === "disabled" ? "停用" : detail.status === "ok" ? "连接正常" : detail.status);
   if ("public" in detail) parts.push(detail.public ? "开启" : "关闭");
   if ("quota_bytes" in detail) parts.push(detail.quota_bytes ? `配额 ${formatBytes(Number(detail.quota_bytes))}` : "不限配额");

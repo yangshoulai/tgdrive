@@ -12,19 +12,20 @@ type Player = ReturnType<Engine["createVideoPlayer"]> | ReturnType<Engine["creat
 type Lyric = { time: number; text: string };
 export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[]>;
 export type PlaybackControls = Pick<Player, "play" | "pause" | "isPlaying" | "seek" | "seekBy" | "adjustVolume">;
-export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number) => void };
+export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number) => void; onLyricLine?: (line: string | null) => void };
 
 function playbackTime(time: number): string {
   const seconds = Math.floor(time), hours = Math.floor(seconds / 3600);
   return [...(hours ? [String(hours)] : []), String(Math.floor(seconds / 60) % 60).padStart(2, "0"), String(seconds % 60).padStart(2, "0")].join(":");
 }
-export function MinimizedPlayback({ progress, state, playing, onSeek, children }: {
-  progress: MediaProgress; state: MediaState; playing: boolean; onSeek: (time: number) => void; children: ReactNode;
+export function MinimizedPlayback({ progress, state, playing, lyric, onSeek, children }: {
+  progress: MediaProgress; state: MediaState; playing: boolean; lyric?: string | null; onSeek: (time: number) => void; children: ReactNode;
 }) {
   const time = playbackTime(progress.currentTime), duration = progress.duration ? playbackTime(progress.duration) : "--:--";
   const percent = progress.duration ? progress.currentTime / progress.duration * 100 : 0;
   const status = state === "failed" ? "播放失败" : state === "loading" ? "正在加载" : state === "buffering" ? "正在缓冲" : playing ? "正在播放" : "已暂停";
   return <div className={`preview-mini-player${playing && state === "ready" ? " is-playing" : ""}`}>
+    {lyric !== null && lyric !== undefined && <div className={`preview-mini-lyric${lyric ? "" : " is-empty"}`} aria-hidden={!lyric || undefined}><Icon name="audio" size={13} /><span title={lyric} aria-label={`当前歌词：${lyric}`}>{lyric}</span></div>}
     <div className="preview-mini-timeline">
       <input className="preview-mini-progress" type="range" aria-label="播放进度" aria-valuetext={`已播放 ${time}，共 ${duration}`} min={0} max={progress.duration || 1} step={0.1}
         value={progress.duration ? progress.currentTime : 0} disabled={!progress.duration || state === "failed"} onChange={event => onSeek(Number(event.target.value))}
@@ -66,15 +67,15 @@ function assetLabel(asset: PreviewAsset): string {
   return (asset.language && languages[asset.language.toLowerCase()]) || asset.language || `${format} ${asset.kind === "lyrics" ? "歌词" : "字幕"}`.trim();
 }
 
-export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize }: {
+export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onLyricLine }: {
   kind: "video" | "audio"; url: string; name: string; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string;
 } & PlaybackProps) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
   const loader = useRef(loadAssets), resolveAsset = useRef(assetUrl);
   loader.current = loadAssets; resolveAsset.current = assetUrl;
-  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
-  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize }; source.current = { url, name, cover };
+  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onLyricLine }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
+  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onLyricLine }; source.current = { url, name, cover };
   const [state, setState] = useState<MediaState>("loading"), [error, setError] = useState("");
   const [playing, setPlaying] = useState(false);
   const [playerReady, setPlayerReady] = useState(false), [slow, setSlow] = useState(false);
@@ -82,7 +83,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
   const [findingAssets, setFindingAssets] = useState(Boolean(loadAssets)), [discoveryError, setDiscoveryError] = useState("");
   const [assetBusy, setAssetBusy] = useState(false), [assetError, setAssetError] = useState("");
   const [lyrics, setLyrics] = useState<Lyric[]>([]), [active, setActive] = useState(-1);
-  const lyricRef = useRef(lyrics), timeRef = useRef(0), lyricHost = useRef<HTMLDivElement>(null);
+  const lyricRef = useRef(lyrics), lyricSource = useRef(""), timeRef = useRef(0), lyricHost = useRef<HTMLDivElement>(null);
   lyricRef.current = lyrics;
   useEffect(() => {
     let cancelled = false;
@@ -107,13 +108,14 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
       setPlayerReady(true);
       callbacks.current.onControls?.(player.current);
     }).catch(reason => { if (!cancelled) { setError(errorMessage(reason, "播放组件加载失败")); notify("failed"); } });
-    return () => { cancelled = true; callbacks.current.onControls?.(null); player.current?.destroy(); player.current = null; };
+    return () => { cancelled = true; callbacks.current.onControls?.(null); callbacks.current.onLyricLine?.(null); player.current?.destroy(); player.current = null; };
     // 切换同类文件只替换媒体源，最小化、恢复与播放模式变化都保留实例。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind]);
   useLayoutEffect(() => {
     if (!player.current || loadedUrl.current === url) return;
     setError(""); setSlow(false); timeRef.current = 0;
+    lyricSource.current = ""; callbacks.current.onLyricLine?.(null);
     loadedUrl.current = url;
     player.current.setSource(url, name, cover);
     callbacks.current.onControls?.(player.current);
@@ -126,7 +128,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
     return () => window.clearTimeout(timer);
   }, [state, url]);
   useEffect(() => {
-    setAssets([]); setSelected(""); setLyrics([]); lyricRef.current = []; setActive(-1); setDiscoveryError("");
+    setAssets([]); setSelected(""); setLyrics([]); lyricRef.current = []; lyricSource.current = ""; setActive(-1); setDiscoveryError("");
     setFindingAssets(Boolean(loader.current));
     if (!loader.current) return;
     const controller = new AbortController();
@@ -143,7 +145,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
   useEffect(() => {
     if (!playerReady) return;
     const controller = new AbortController();
-    setAssetError(""); setAssetBusy(false); lyricRef.current = []; setLyrics([]); setActive(-1);
+    setAssetError(""); setAssetBusy(false); lyricRef.current = []; lyricSource.current = ""; setLyrics([]); setActive(-1);
     const instance = player.current;
     if (!selected) { if (instance && "setSubtitle" in instance) void instance.setSubtitle(null); return; }
     const asset = assets.find(item => item.path === selected);
@@ -156,7 +158,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
       if (kind === "audio") {
         const parsed = parseLyrics(value.text);
         if (!parsed.length) throw new Error("歌词没有有效的时间标签");
-        lyricRef.current = parsed; setLyrics(parsed); setActive(lyricAt(parsed, timeRef.current));
+        lyricRef.current = parsed; lyricSource.current = url; setLyrics(parsed); setActive(lyricAt(parsed, timeRef.current));
       } else if (instance && "setSubtitle" in instance) {
         await instance.setSubtitle(value.text, /\.srt$/i.test(asset.name) ? "srt" : "vtt");
       }
@@ -181,6 +183,10 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
   }, [lyrics.length]);
   const waiting = state === "loading" || state === "buffering";
   const failed = state === "failed";
+  // 同时间戳的双语歌词只取第一行；空白间奏保留行高，不让小窗口随每句歌词跳动。
+  const currentLine = kind === "audio" && !failed && selected && !assetBusy && !findingAssets && lyricSource.current === url && lyrics.length
+    ? lyrics[active]?.text.split(/\r?\n/).find(line => line.trim())?.trim() ?? "" : null;
+  useEffect(() => { callbacks.current.onLyricLine?.(currentLine); }, [currentLine, url]);
   const options = assets.map(asset => ({ value: asset.path, label: assetLabel(asset) + (assets.filter(item => assetLabel(item) === assetLabel(asset)).length > 1 ? ` · ${asset.name}` : "") }));
   const optionKey = options.map(option => `${option.value}=${option.label}`).join("|");
   // 视频字幕放进播放器自己的设置菜单；没有找到字幕时不出现这一项，也不再单独占一行提示。

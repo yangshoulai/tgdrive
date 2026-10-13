@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import * as api from "../api";
+import { passkeyUnavailable, unlockWithPrivatePasskey } from "../passkeys";
 import { Button, Field, Icon, Modal, Segmented, toast } from "../ui";
 import { FolderPicker } from "./folders";
 import { usePrivateSession } from "./private-session";
@@ -14,42 +15,57 @@ export function PrivateIdleSelect({ value, onChange }: { value: number; onChange
 }
 
 export function PrivateUnlockForm({ onUnlocked }: { onUnlocked: (grant: api.PrivateGrant) => void }) {
-  const id = useId(), mounted = useRef(true);
-  const [status, setStatus] = useState<{ configured: boolean; idle_seconds: number } | null>(null);
-  const [password, setPassword] = useState(""), [confirmation, setConfirmation] = useState("");
-  const [idle, setIdle] = useState(300), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const id = useId(), mounted = useRef(true), controller = useRef<AbortController | null>(null);
+  const [status, setStatus] = useState<api.PrivateStatus | null>(null);
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const [usingPasskey, setUsingPasskey] = useState(false);
   const [revision, setRevision] = useState(0);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; controller.current?.abort(); }; }, []);
   useEffect(() => {
     let active = true;
-    void api.privateStatus().then(value => { if (active) { setStatus(value); setIdle(value.idle_seconds); setError(""); } })
+    void api.privateStatus().then(value => { if (active) { setStatus(value); setError(""); } })
       .catch(reason => { if (active) setError(api.errorMessage(reason, "无法读取私密空间设置")); });
     return () => { active = false; };
   }, [revision]);
+  function accept(grant: api.PrivateGrant) {
+    if (!mounted.current) { void api.lockPrivate(grant.access).catch(() => undefined); return; }
+    setPassword(""); api.setPrivateAccess(grant.access); onUnlocked(grant);
+  }
+  async function quickUnlock() {
+    if (busy) return;
+    const operation = new AbortController(); controller.current = operation;
+    setBusy(true); setUsingPasskey(true); setError("");
+    try { accept(await unlockWithPrivatePasskey(operation.signal)); }
+    catch (reason) { if (mounted.current) setError(api.errorMessage(reason, "快捷解锁失败，请使用登录密码")); }
+    finally { if (mounted.current) { setBusy(false); setUsingPasskey(false); } }
+  }
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!status || busy) return;
-    if (password.length < 8) { setError("访问密码至少需要 8 个字符"); return; }
-    if (!status.configured && password !== confirmation) { setError("两次输入的访问密码不一致"); return; }
+    if (!password) { setError("请输入账号登录密码"); return; }
     setBusy(true); setError("");
     try {
-      const grant = status.configured ? await api.unlockPrivate(password) : await api.setupPrivate(password, idle);
-      if (!mounted.current) { void api.lockPrivate(grant.access).catch(() => undefined); return; }
-      setPassword(""); setConfirmation(""); api.setPrivateAccess(grant.access); onUnlocked(grant);
+      const grant = await api.unlockPrivate(password);
+      accept(grant);
     } catch (reason) { if (mounted.current) setError(api.errorMessage(reason, "解锁失败，请重试")); }
     finally { if (mounted.current) setBusy(false); }
   }
   if (!status) return <div className="private-loading" role="status">{error ? <><p role="alert">{error}</p><Button onClick={() => setRevision(v => v + 1)}>重试</Button></> : <><span className="spinner" />正在读取私密空间设置</>}</div>;
+  const unavailable = passkeyUnavailable(status.passkeys);
+  const quick = status.passkeys.registered > 0 && !unavailable;
   return <form className="form private-unlock-form" onSubmit={submit} noValidate>
-    <p className="muted">{status.configured ? "输入独立访问密码，解锁文件和文件夹。" : "设置独立访问密码。文件仍使用现有加密存储，并计入账号容量。"}</p>
-    <Field label={status.configured ? "访问密码" : "设置访问密码"} htmlFor={`${id}-password`} error={error}>
-      <input id={`${id}-password`} className="input" type="password" value={password} autoComplete={status.configured ? "current-password" : "new-password"} autoFocus disabled={busy} onChange={event => { setPassword(event.target.value); setError(""); }} />
-    </Field>
-    {!status.configured && <>
-      <Field label="确认访问密码" htmlFor={`${id}-confirm`}><input id={`${id}-confirm`} className="input" type="password" autoComplete="new-password" value={confirmation} disabled={busy} onChange={event => setConfirmation(event.target.value)} /></Field>
-      <PrivateIdleSelect value={idle} onChange={setIdle} />
+    <p className="muted">{quick ? "使用账号通行密钥，或输入登录密码解锁。" : "输入账号登录密码，即可解锁私密文件，无需单独设置密码。"}</p>
+    {quick && <>
+      <Button variant="primary" icon="key" loading={busy && usingPasskey} disabled={busy} onClick={() => void quickUnlock()}>快捷解锁</Button>
+      <p className="private-passkey-hint">使用指纹、面容或设备 PIN，由系统验证。</p>
+      <div className="private-unlock-divider"><span>或使用登录密码</span></div>
     </>}
-    <Button type="submit" variant="primary" icon="lock" loading={busy} disabled={!password}>{status.configured ? "解锁私密空间" : "创建并进入私密空间"}</Button>
+    <Field label="账号登录密码" htmlFor={`${id}-password`} error={error}>
+      <input id={`${id}-password`} className="input" type="password" value={password} autoComplete="current-password" autoFocus={!quick} disabled={busy} onChange={event => { setPassword(event.target.value); setError(""); }} />
+    </Field>
+    <Button type="submit" variant={quick ? "secondary" : "primary"} icon="lock" loading={busy && !usingPasskey} disabled={busy || !password}>使用登录密码解锁</Button>
+    {!quick && <p className="private-passkey-hint">{unavailable || "在账号菜单的「用户设置」中添加通行密钥，可同时用于登录和私密解锁。"}</p>}
   </form>;
 }
 

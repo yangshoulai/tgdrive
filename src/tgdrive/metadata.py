@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 16
+    SCHEMA_VERSION = 18
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -345,6 +345,64 @@ class Metadata:
                 if "elapsed_seconds" not in columns:
                     db.execute("ALTER TABLE offline_tasks ADD COLUMN elapsed_seconds REAL NOT NULL DEFAULT 0")
                 db.execute("PRAGMA user_version = 16")
+            if version < 17:
+                # 凭据仅保存公钥，用户句柄是随机值；私密密码和文件加密方式保持原有约定。
+                columns = {row[1] for row in db.execute("PRAGMA table_info(private_spaces)")}
+                if "webauthn_user_handle" not in columns:
+                    db.execute("ALTER TABLE private_spaces ADD COLUMN webauthn_user_handle BLOB")
+                self._schema("""
+                    CREATE TABLE IF NOT EXISTS private_passkeys(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL REFERENCES private_spaces(user_id) ON DELETE CASCADE,
+                        credential_id BLOB NOT NULL UNIQUE,
+                        public_key BLOB NOT NULL,
+                        sign_count INTEGER NOT NULL CHECK(sign_count>=0),
+                        rp_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        transports TEXT NOT NULL DEFAULT '[]',
+                        backup_eligible INTEGER NOT NULL DEFAULT 0,
+                        backed_up INTEGER NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL,
+                        last_used_at REAL
+                    );
+                    CREATE INDEX IF NOT EXISTS private_passkeys_user ON private_passkeys(user_id,id)
+                """)
+                db.execute("PRAGMA user_version = 17")
+            if version < 18:
+                # 统一账号凭据，保留私密文件和闲置设置；旧凭据确认登录密码后才启用登录。
+                columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+                if "webauthn_user_handle" not in columns:
+                    db.execute("ALTER TABLE users ADD COLUMN webauthn_user_handle BLOB")
+                db.execute("UPDATE users SET webauthn_user_handle=(SELECT p.webauthn_user_handle FROM private_spaces p "
+                           "WHERE p.user_id=users.id) WHERE webauthn_user_handle IS NULL")
+                self._schema("""
+                    CREATE TABLE IF NOT EXISTS account_passkeys(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        credential_id BLOB NOT NULL UNIQUE,
+                        public_key BLOB NOT NULL,
+                        sign_count INTEGER NOT NULL CHECK(sign_count>=0),
+                        rp_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        transports TEXT NOT NULL DEFAULT '[]',
+                        backup_eligible INTEGER NOT NULL DEFAULT 0,
+                        backed_up INTEGER NOT NULL DEFAULT 0,
+                        login_enabled INTEGER NOT NULL DEFAULT 1 CHECK(login_enabled IN (0,1)),
+                        created_at REAL NOT NULL,
+                        last_used_at REAL
+                    );
+                    CREATE INDEX IF NOT EXISTS account_passkeys_user ON account_passkeys(user_id,id)
+                """)
+                db.execute("INSERT INTO account_passkeys(id,user_id,credential_id,public_key,sign_count,rp_id,name,"
+                           "transports,backup_eligible,backed_up,login_enabled,created_at,last_used_at) "
+                           "SELECT id,user_id,credential_id,public_key,sign_count,rp_id,name,transports,backup_eligible,"
+                           "backed_up,0,created_at,last_used_at FROM private_passkeys")
+                db.execute("DROP TABLE private_passkeys")
+                columns = {row[1] for row in db.execute("PRAGMA table_info(private_spaces)")}
+                for column in ("password_hash", "webauthn_user_handle"):
+                    if column in columns:
+                        db.execute(f"ALTER TABLE private_spaces DROP COLUMN {column}")
+                db.execute("PRAGMA user_version = 18")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

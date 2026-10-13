@@ -1,3 +1,5 @@
+import type { AuthenticationOptions, PasskeyChallenge, RegistrationOptions } from "./passkeys";
+
 export type Role = "admin" | "user";
 export type SiteConfig = { public_base_url: string | null; s3_endpoint: string | null };
 export type Session = { csrf_token: string; expires_at: number; username: string; role: Role; bucket_id?: number | null; unlocked?: boolean; remember?: boolean } & Partial<SiteConfig>;
@@ -95,7 +97,7 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
       let message = `请求失败（${response.status}）`;
       let code = "request_failed";
       try { const body = await response.json(); message = body.error?.message ?? message; code = body.error?.code ?? code; } catch { /* 保留状态码 */ }
-      if (response.status === 401 && path.startsWith("/api/") && !path.endsWith("/login")) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
+      if (response.status === 401 && path.startsWith("/api/") && !path.endsWith("/login") && !path.startsWith("/api/auth/v1/passkeys/login/")) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
       if (code === "private_locked") window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: headers.get("X-Private-Access") }));
       throw new ApiError(message, response.status, code);
     }
@@ -115,13 +117,36 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
 const post = <T>(path: string, body?: unknown, timeoutMs?: number) => request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs);
 
 export type PrivateGrant = { access: string; idle_seconds: number };
-export const privateStatus = () => request<{ configured: boolean; idle_seconds: number }>("/api/user/v1/private/status");
-export const setupPrivate = (password: string, idleSeconds: number) => post<PrivateGrant>("/api/user/v1/private/setup", { password, idle_seconds: idleSeconds });
+export type PasskeyCapability = { available: boolean; origin: string | null; rp_id: string | null; reason: string | null; registered: number };
+export type PrivateStatus = { configured: boolean; idle_seconds: number; passkeys: PasskeyCapability };
+export type AccountPasskey = { id: number; name: string; rp_id: string; created_at: number; last_used_at: number | null; login_enabled: boolean };
+export type AccountPasskeys = { capability: PasskeyCapability; passkeys: AccountPasskey[] };
+export const privateStatus = () => request<PrivateStatus>("/api/user/v1/private/status");
 export const unlockPrivate = (password: string) => post<PrivateGrant>("/api/user/v1/private/unlock", { password });
 export const privateActivity = (active: boolean, playing: boolean) => post<{ remaining_seconds: number }>("/api/user/v1/private/activity", { active, playing });
 export const lockPrivate = (access: string, keepalive = false) => request<void>("/api/user/v1/private/lock", { method: "POST", headers: { "X-Private-Access": access }, keepalive });
-export const configurePrivate = (password: string, idleSeconds: number, newPassword?: string) => post<PrivateGrant>("/api/user/v1/private/settings", { password, idle_seconds: idleSeconds, new_password: newPassword });
+export const configurePrivate = (idleSeconds: number) => post<PrivateGrant>("/api/user/v1/private/settings", { idle_seconds: idleSeconds });
 export const transferPrivate = (paths: string[], destination: string, into: boolean, conflict: MoveConflict) => post<{ moved: number; skipped: number }>("/api/user/v1/private/transfer", { paths, destination, into, conflict });
+export const passkeyStatus = (signal?: AbortSignal) => request<PasskeyCapability>("/api/auth/v1/passkeys/status", { signal });
+export const accountPasskeys = (signal?: AbortSignal) => request<AccountPasskeys>("/api/auth/v1/passkeys", { signal });
+const passkeyPost = <T>(route: string, body: unknown, signal?: AbortSignal) => request<T>("/api/auth/v1/passkeys/" + route, { method: "POST", body: JSON.stringify(body), signal });
+export const beginPasskeyRegistration = (password: string, name: string, signal: AbortSignal) => passkeyPost<PasskeyChallenge<RegistrationOptions>>("register/options", { password, name }, signal);
+export const finishPasskeyRegistration = (requestId: string, credential: unknown, signal: AbortSignal) => passkeyPost<{ id: number }>("register/verify", { request_id: requestId, credential }, signal);
+export const beginPrivatePasskeyUnlock = (signal: AbortSignal) => request<PasskeyChallenge<AuthenticationOptions>>("/api/user/v1/private/passkeys/unlock/options", { method: "POST", body: "{}", signal });
+export const finishPrivatePasskeyUnlock = (requestId: string, credential: unknown, signal: AbortSignal) => request<PrivateGrant>("/api/user/v1/private/passkeys/unlock/verify", { method: "POST", body: JSON.stringify({ request_id: requestId, credential }), signal });
+export const renamePasskey = (id: number, password: string, name: string, signal?: AbortSignal) => passkeyPost<{ id: number }>("rename", { id, password, name }, signal);
+export const enablePasskeyLogin = (id: number, password: string, signal?: AbortSignal) => passkeyPost<{ id: number }>("enable-login", { id, password }, signal);
+export async function deletePasskey(id: number, password: string, signal?: AbortSignal) {
+  const result = await passkeyPost<{ id: number }>("delete", { id, password }, signal);
+  if (privateAccess) window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: privateAccess }));
+  return result;
+}
+export const beginPasskeyLogin = (remember: boolean, signal: AbortSignal) => passkeyPost<PasskeyChallenge<AuthenticationOptions>>("login/options", { remember }, signal);
+export async function finishPasskeyLogin(requestId: string, credential: unknown, signal: AbortSignal) {
+  const session = await passkeyPost<Session>("login/verify", { request_id: requestId, credential }, signal);
+  thumbnailBucketId = null; thumbnailSessionEpoch++; setPrivateAccess(""); setCsrf(session.csrf_token);
+  return session;
+}
 
 /* ---------- 会话 ---------- */
 
@@ -149,7 +174,10 @@ export async function restoreSession(): Promise<Session> {
   setSiteConfig(account);
   return { csrf_token: account.csrf_token, expires_at: account.expires_at, username: account.username, role: account.role, bucket_id: account.bucket_id, unlocked: account.unlocked, remember: account.remember, public_base_url: account.public_base_url, s3_endpoint: account.s3_endpoint };
 }
-export const changePassword = (oldPassword: string, newPassword: string) => post<void>("/api/auth/v1/password", { old_password: oldPassword, new_password: newPassword });
+export async function changePassword(oldPassword: string, newPassword: string) {
+  await post<void>("/api/auth/v1/password", { old_password: oldPassword, new_password: newPassword });
+  if (privateAccess) window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: privateAccess }));
+}
 
 /* ---------- 用户文件 ---------- */
 

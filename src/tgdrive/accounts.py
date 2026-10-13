@@ -294,6 +294,32 @@ class AccountService:
             raise AuthenticationError("account is disabled")
         return Account(row["id"], row["username"], row["role"], row["status"], row["bucket_id"])
 
+    async def confirm_password(self, token, csrf, password, *, ip=None, purpose="account"):
+        """已登录后的敏感操作确认；与账号密码更新共用当前哈希并重新校验会话。"""
+        session = self.sessions.require(token, csrf=csrf, mutation=True)
+        account = self.account_for_session(session)
+        if not isinstance(password, str):
+            raise ValueError("请输入登录密码")
+        row = self.metadata.db.execute("SELECT * FROM users WHERE id=?", (account.id,)).fetchone()
+        if row is None or row["status"] != "active":
+            raise AuthenticationError("invalid credentials")
+        identities = [f"{purpose}-user:{account.id}"] + ([f"{purpose}-ip:{ip}"] if ip else [])
+        if any(self.sessions.is_rate_limited(identity) for identity in identities):
+            raise TooManyAttempts("登录密码错误次数过多，请稍后重试")
+        valid = await self.password_work.run(verify_password, password, row["password_hash"])
+        self.sessions.require(token, csrf=csrf, mutation=True)
+        self.account_for_session(session)
+        current = self.metadata.db.execute("SELECT * FROM users WHERE id=?", (account.id,)).fetchone()
+        if current is None or current["password_hash"] != row["password_hash"]:
+            raise ValueError("登录密码已修改，请重新验证")
+        if not valid:
+            for identity in identities:
+                self.sessions.record_failure(identity)
+            raise ValueError("登录密码不正确")
+        for identity in identities:
+            self.sessions.clear_failures(identity)
+        return account, current
+
     def reset_password(self, account_id: int, new_password: str, *, encoded: str | None = None) -> None:
         """管理员为用户设置新密码；该用户的全部会话立即失效。"""
         if len(new_password) < 8:
@@ -302,6 +328,8 @@ class AccountService:
         with self.metadata.transaction() as db:
             if db.execute("UPDATE users SET password_hash=? WHERE id=?", (encoded, account_id)).rowcount != 1:
                 raise NotFoundError("user not found")
+            # 管理员重置是账号恢复流程，不能让已遗失的设备继续以通行密钥登录。
+            db.execute("DELETE FROM account_passkeys WHERE user_id=?", (account_id,))
         self.sessions.clear_user(account_id)
 
     def change_password(self, session: Session, old_password: str, new_password: str, *, encoded: str | None = None, expected_hash: str | None = None) -> None:

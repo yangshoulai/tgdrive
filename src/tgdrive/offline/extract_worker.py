@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import logging
+import os
 import re
 import sys
 import traceback
@@ -26,6 +27,20 @@ WIRE_LIMIT = 12 * 1024 * 1024
 _output = sys.stdout.buffer
 
 
+def javascript_failure(detail):
+    """只把第三方诊断映射为固定原因；播放器代码、签名和原始日志不离开子进程。"""
+    if not any(term in detail for term in ("challenge", "javascript", "node", "deno", "signature", "solver", "heap")):
+        return None
+    hints = (
+        ("memory", ("heap out of memory", "allocation failed", "reached heap limit", "ineffective mark-compacts")),
+        ("components", ("no usable challenge solver", "hash mismatch on challenge solver", "challenge solver lib script version", "challenge solver core script version", "failed to load challenge solver")),
+        ("player", ("failed to load player for js challenge", "unable to download player", "failed to download player")),
+        ("runtime", ("error running node process", "error running deno process", "no supported javascript runtime", "no javascript runtime", "err_access_denied", "permission denied")),
+        ("solver", ("syntaxerror", "referenceerror", "typeerror", "unexpected token", "unable to find n function", "unable to find signature function", "error solving", "invalid js challenge response")),
+    )
+    return next((reason for reason, terms in hints if any(term in detail for term in terms)), None)
+
+
 def extraction_failure(error):
     # 第三方异常可能包含带签名的 URL 或 Cookie，只返回固定分类和代码位置。
     causes, current = [], error
@@ -42,12 +57,15 @@ def extraction_failure(error):
         ("login", ("sign in to confirm your age", "login required", "sign in to", "authentication required", "nsfw", "protected tweet", "not authorized", "age-restricted", "adult content")),
         ("rate_limit", ("http error 429", "too many requests", "rate limit")),
         ("unavailable", ("video unavailable", "private video", "video has been removed", "video is not available", "members-only", "tweet unavailable", "post is unavailable", "tweet has been deleted", "'unavailable'", "tweet tombstone")),
-        ("js", ("javascript runtime", "javascript challenge", "challenge solving failed", "signature extraction failed", "n challenge")),
+        ("js", ("javascript runtime", "javascript challenge", "challenge solving failed", "signature extraction failed", "signature solving failed", "n challenge", "error solving", "js challenge")),
         ("formats", ("requested format is not available", "no video formats found")),
         ("forbidden", ("http error 403", "403 forbidden")),
         ("extractor", ("unable to extract", "unsupported request", "no supporting handlers")),
     )
     code = next((code for code, terms in hints if any(term in detail for term in terms)), "extract")
+    js_reason = javascript_failure(detail)
+    if code == "extract" and js_reason:
+        code = "js"
     if code == "extract" and any(type(cause).__name__ == "AuthRequired" for cause in causes):
         code = "login"
     if code == "extract" and any(type(cause).__name__ == "NotFoundError" for cause in causes):
@@ -61,8 +79,11 @@ def extraction_failure(error):
     elif isinstance(error, PermissionError) and "use parent transport" in detail:
         code = "transport"
     frames = traceback.extract_tb(error.__traceback__)[-8:]
-    return {"error": code, "exception_type": type(error).__name__,
-            "stack": [f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames]}
+    result = {"error": code, "exception_type": type(error).__name__,
+              "stack": [f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames]}
+    if code == "js" and js_reason:
+        result["js_reason"] = js_reason
+    return result
 
 
 def emit(value):
@@ -148,12 +169,15 @@ def youtube(payload):
                 return response
             raise TransportError("redirect limit")
 
-    warnings = []
+    warnings, js_reasons = set(), set()
     class Quiet:
         def debug(self, *_): pass
         def warning(self, text, *_):
-            warnings.append(extraction_failure(ValueError(text))["error"])
-        def error(self, *_): pass
+            failure = extraction_failure(ValueError(text))
+            warnings.add(failure["error"])
+            if failure.get("js_reason"):
+                js_reasons.add(failure["js_reason"])
+        def error(self, text, *_): self.warning(text)
 
     yt_dlp.globals.plugin_dirs.value = []
     options = {"quiet": True, "no_warnings": True, "logger": Quiet(), "noplaylist": True,
@@ -165,24 +189,54 @@ def youtube(payload):
                "extractor_args": {"youtube": {"player_client": ["default", "web_safari"]}},
                "js_runtimes": {payload["runtime"]["name"]: {"path": payload["runtime"]["path"]}},
                "http_headers": {"User-Agent": payload["user_agent"]}}
+    def extract(records):
+        warnings.clear(); js_reasons.clear()
+        try:
+            with yt_dlp.YoutubeDL(options) as downloader:
+                for record in records:
+                    downloader.cookiejar.set_cookie(cookie(record))
+                downloader._request_director.close()
+                downloader._request_director = downloader.build_request_director([TesseraRH])
+                info = downloader.extract_info(payload["url"], download=False)
+            result = youtube_entries(info, payload)
+        except Exception as error:
+            result = extraction_failure(error)
+        if result.get("error") in ("formats", "extract", "extractor"):
+            for code in ("cookie", "bot", "login", "region", "rate_limit", "js", "forbidden"):
+                if code in warnings:
+                    result["error"] = code
+                    break
+        if result.get("error") == "js":
+            reasons = js_reasons | {result.get("js_reason")}
+            result["js_reason"] = next((reason for reason in ("memory", "components", "runtime", "player", "solver") if reason in reasons), "unknown")
+        if "error" in result:
+            result["warnings"] = sorted(warnings)
+        return result
+
+    node_options = os.environ.get("NODE_OPTIONS")
+    retries = []
     try:
-        with yt_dlp.YoutubeDL(options) as downloader:
-            for record in payload["cookies"]:
-                downloader.cookiejar.set_cookie(cookie(record))
-            downloader._request_director.close()
-            downloader._request_director = downloader.build_request_director([TesseraRH])
-            info = downloader.extract_info(payload["url"], download=False)
-        result = youtube_entries(info, payload)
-    except Exception as error:
-        result = extraction_failure(error)
-    if result.get("error") in ("formats", "extract", "extractor"):
-        for code in ("cookie", "bot", "login", "region", "rate_limit", "js", "forbidden"):
-            if code in warnings:
-                result["error"] = code
-                break
-    if "error" in result:
-        result["warnings"] = sorted(set(warnings))
-    return result
+        result = extract(payload["cookies"])
+        if result.get("error") == "js" and result.get("js_reason") == "memory" and payload["runtime"]["name"] == "node":
+            # 少数播放器脚本超出默认 128 MiB 堆；只在明确的 OOM 后增加 64 MiB，重试一次。
+            os.environ["NODE_OPTIONS"] = "--max-old-space-size=192"
+            retries.append("memory")
+            result = extract(payload["cookies"])
+        if (result.get("error") == "js" and payload["cookies"]
+                and result.get("js_reason") not in ("memory", "components", "runtime", "player")):
+            # 登录客户端没有可用格式时，尝试公开客户端。私密／年龄／登录限制不走此回退。
+            retries.append("public")
+            public = extract([])
+            if public.get("entries"):
+                result = public
+        if retries:
+            result["js_retries"] = retries
+        return result
+    finally:
+        if node_options is None:
+            os.environ.pop("NODE_OPTIONS", None)
+        else:
+            os.environ["NODE_OPTIONS"] = node_options
 
 
 def youtube_entries(info, payload):
