@@ -969,7 +969,8 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .preview-modal-video.is-minimized .preview-stage { display: block; height: auto; }
 .preview-modal-video.is-minimized .preview-playlist-panel { display: none; }
 .preview-modal-video.is-minimized .preview-video-host { width: 100%; height: auto; max-height: none; aspect-ratio: 16 / 9; }
-.preview-modal-video.is-minimized :is(.art-bottom, .art-notice, .art-state, .art-settings, .art-contextmenus, .art-layers, .art-mini-progress-bar) { display: none !important; }
+/* ArtPlayer 在控制条自动隐藏时把 art-mini-progress-bar 加在播放器根节点上，不能用它来选择要隐藏的元素。 */
+.preview-modal-video.is-minimized :is(.art-bottom, .art-notice, .art-state, .art-settings, .art-contextmenus, .art-layers) { display: none !important; }
 @keyframes mini-in { from { opacity: 0; transform: translateY(16px) scale(.96); } }
 @keyframes mini-lyric { from { opacity: 0; transform: translateY(6px); } }
 @keyframes mini-wait { 50% { box-shadow: 0 0 0 6px rgba(255, 255, 255, .08); } }
