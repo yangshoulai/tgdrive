@@ -65,7 +65,7 @@ YouTube「解析内容」只列举格式，不提前试下载默认媒体。解�
 
 ### 浏览器脚本
 
-`userscripts/tessera-grabber.user.js` 是一个 Tampermonkey 用户脚本：在 X 帖子操作栏、YouTube 播放页和任意网页右下角加入按钮，列出页面加载过的视频、音频、M3U8、常见文件和大图，可以复制链接或带 User-Agent、Referer、Cookie 的 curl 命令（Cookie 经 `GM_cookie` 读取，包含 HttpOnly），也可以一键发送到 Tessera 离线下载。在 Tampermonkey 中新建脚本并粘贴文件内容即可安装；首次使用在脚本设置中填写 Tessera 地址和网页「访问密钥」页面创建的 `AccessKeyId:Secret`。发送调用 `/api/v1/downloads/parse` 与 `/api/v1/downloads`，任务保存到密钥所属用户的存储桶。
+`userscripts/tessera-grabber.user.js` 是一个 Tampermonkey 用户脚本：在 X 帖子操作栏、YouTube 播放页和任意网页右下角加入按钮，列出页面加载过的视频、音频、M3U8、常见文件和大图，可以复制链接或带 User-Agent、Referer、Cookie 的 curl 命令（Cookie 经 `GM_cookie` 读取，包含 HttpOnly），也可以一键发送到 Tessera 离线下载。在 Tampermonkey 中新建脚本并粘贴文件内容即可安装；首次使用在脚本设置中填写 Tessera 地址和网页「访问密钥」页面创建的 `AccessKeyId:Secret`。发送调用 `/api/v1/downloads/parse` 与 `/api/v1/downloads`，任务保存到密钥所属用户的存储桶。悬浮按钮可拖动并吸附到屏幕两侧；设置中的「显示范围」可以选择“所有网站，排除列表”或“仅列表中的网站”（每行一个域名，含子域名），面板底部和 Tampermonkey 菜单可以一键在当前网站停用或启用，配置的 Tessera 站点上始终不显示。
 
 ## 配置
 
