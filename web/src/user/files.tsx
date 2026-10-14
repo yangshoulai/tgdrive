@@ -7,7 +7,7 @@ import * as api from "../api";
 import { FileThumbnail, FileTile, FileVisual, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
 import { saveThumbnails, thumbnailsFromImage, thumbnailSource, useThumbnailBackfill } from "../thumbnails";
 
-import { Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Pagination, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
+import { Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Pagination, FilterChips, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 
 import { UploadDialog, type UploadQueue } from "./uploads";
 import { PrivateTransferDialog } from "./private-access";
@@ -27,6 +27,11 @@ const DELETE_KEY = IS_MAC ? "⌘⌫" : "Del";
 /** 图标上已经印了格式标签（PDF、DOC…）的类型，网格卡片不再重复显示扩展名。 */
 const LABELLED_KINDS = new Set(["pdf", "document", "spreadsheet", "presentation"]);
 
+const KIND_FILTERS: { value: api.KindFilter; label: string }[] = [
+  { value: "", label: "全部" }, { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" },
+  { value: "document", label: "文档" }, { value: "text", label: "文本" }, { value: "archive", label: "压缩包" },
+];
+
 export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision, onPlayback }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number; onPlayback?: (state: PreviewPlayback) => void }) {
   const privateSpace = api.isPrivatePath(prefix);
   const notify = usePrivateToast(privateSpace);
@@ -36,6 +41,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "public">("all");
+  const [kind, setKind] = useState<api.KindFilter>("");
   const [layout, setLayout] = useState<"list" | "grid">(() => (localStorage.getItem("tgdrive:layout") as "list" | "grid") || "list");
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "name", desc: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -62,8 +68,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   useDocumentTitle(`${query ? `搜索“${query}”` : name} · ${BRAND}`);
 
   const fetchPage = useCallback((cursor: string | null) => query
-    ? api.searchFiles(query, cursor ?? "", filter === "public", pageSize.pageSize, root)
-    : api.listFiles(prefix, cursor, filter === "public", pageSize.pageSize), [prefix, query, filter, pageSize.pageSize, root]);
+    ? api.searchFiles(query, cursor ?? "", filter === "public", pageSize.pageSize, root, kind)
+    : api.listFiles(prefix, cursor, filter === "public", pageSize.pageSize, kind), [prefix, query, filter, kind, pageSize.pageSize, root]);
   const pagination = useCursorPage(fetchPage);
   const load = pagination.reload;
   useEffect(() => {
@@ -407,16 +413,20 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             <label className={`mobile-file-sort${layout === "grid" ? " is-grid-sort" : ""}`}><span className="sr-only">本页排序</span><select aria-label="本页排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
               const [key, direction] = event.target.value.split(":"); setSort({ key: key as SortKey, desc: direction === "desc" });
             }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="type:asc">类型升序</option><option value="type:desc">类型降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>
+            <IconButton icon="refresh" label="刷新" variant="secondary" spinning={pagination.refreshing} disabled={loading} onClick={() => void pagination.refresh().then(message => { if (message) notify.error(message); })} />
             <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
           </div>
         </div>
       )}
 
+      <FilterChips label="文件类型" value={kind} onChange={setKind} options={KIND_FILTERS} />
+
       <section ref={surface} className={`file-surface${layout === "grid" && !loading && !loadError && entries.length > 0 ? " is-grid" : ""}${dragging ? " is-dragging" : ""}`} aria-label="文件列表">
         {loading ? <SkeletonRows rows={6} /> : loadError ? (
           <EmptyState icon="alert" title="文件列表加载失败" description={loadError} action={<Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         ) : entries.length === 0 ? (
-          query ? <EmptyState icon="search" title={`没有找到包含“${query}”的文件`} description="换个关键词，或检查拼写。" action={<Button onClick={() => { setSearch(""); setQuery(""); }}>清除搜索</Button>} />
+          kind && !query ? <EmptyState icon="search" title={`${filter === "public" ? "这个文件夹里没有公开的" : "这个文件夹里没有"}${KIND_FILTERS.find(item => item.value === kind)?.label}`} description="类型筛选只看当前文件夹，不包含子文件夹；搜索时会在全部文件中按类型查找。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
+          : query ? <EmptyState icon="search" title={`没有找到包含“${query}”的${kind ? KIND_FILTERS.find(item => item.value === kind)?.label : "文件"}`} description="换个关键词，或检查拼写。" action={<Button onClick={() => { setSearch(""); setQuery(""); }}>清除搜索</Button>} />
             : filter === "public" ? <EmptyState icon="globe" title="这个文件夹里没有公开内容" description="在文件或文件夹的菜单中选择“公开分享”，即可生成任何人可访问的链接。" />
               : <EmptyState icon="upload" title={prefix ? "这个文件夹是空的" : "上传你的第一个文件"} description="把文件拖到这里，或点击上传按钮。" action={<Button icon="upload" onClick={() => fileInput.current?.click()}>选择文件</Button>} />
         ) : layout === "list" ? (
@@ -528,7 +538,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       </section>
 
       <footer className="list-footer">
-        <span>{loading ? "正在加载" : [folders.length && `${folders.length} 个文件夹`, files.length && `${files.length} 个文件`].filter(Boolean).join(" · ") || "空文件夹"}</span>
+        <span>{loading ? "正在加载" : [folders.length && `${folders.length} 个文件夹`, files.length && `${files.length} 个文件`].filter(Boolean).join(" · ") || (kind || filter === "public" ? "没有符合条件的项目" : "空文件夹")}</span>
         <span className="list-footer-end">
           <Pagination {...pagination} {...pageSize} />
           <button type="button" className="link-button shortcut-hint" onClick={() => setShortcutsOpen(true)} aria-keyshortcuts="?"><Icon name="keyboard" size={15} /><span>快捷键</span></button>

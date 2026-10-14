@@ -77,10 +77,10 @@
   --syntax-fn: #3c5fb8;
 
 
-  /* 标志：三块冷色瓦片 + 一块公开色的纸飞机 */
-  --logo-a: #2f4bd0;
-  --logo-b: #6a82ee;
-  --logo-c: #1e3194;
+  /* 标志：与网页图标一致的暗灰底座 + 三块白色瓦片（透明度递减）+ 公开色纸飞机，浅色与深色模式相同 */
+  --logo-bg: #0b0c13;
+  --logo-tile: #ffffff;
+  --logo-ring: transparent;
   --logo-plane: #f0a22e;
   --logo-fold: #c27a10;
 
@@ -175,11 +175,8 @@
   --syntax-number: #f0b07a;
   --syntax-variable: #ee9ac0;
   --syntax-fn: #9db8f5;
-  --logo-a: #8da0ff;
-  --logo-b: #5f78f0;
-  --logo-c: #b4c0ff;
-  --logo-plane: #f4b252;
-  --logo-fold: #b97616;
+  /* 深色背景上给暗灰底座加一圈细描边，保证轮廓可见 */
+  --logo-ring: rgba(255, 255, 255, .16);
   --glyph-mark: #a3a3ae;
   --glyph-mark-bg: rgba(255, 255, 255, .06);
   --glyph-paper: #1b1b21;
@@ -333,9 +330,8 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 
 .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); }
 .brand-name { font-family: var(--font-display); font-size: var(--text-lg); font-weight: 600; letter-spacing: -.02em; line-height: 1; }
-.logo-a { fill: var(--logo-a); }
-.logo-b { fill: var(--logo-b); }
-.logo-c { fill: var(--logo-c); }
+.logo-bg { fill: var(--logo-bg); stroke: var(--logo-ring); }
+.logo-tile { fill: var(--logo-tile); }
 .logo-plane { fill: var(--logo-plane); stroke: var(--logo-plane); }
 .logo-fold { fill: none; stroke: var(--logo-fold); }
 
@@ -361,6 +357,8 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 .icon-btn-md { width: 34px; height: 34px; }
 .icon-btn-sm { width: 28px; height: 28px; }
 .icon-btn:hover:not(:disabled), .icon-btn.is-active { background: var(--surface-hover); color: var(--ink); }
+.icon-btn.is-spinning svg { animation: spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .icon-btn.is-spinning svg { animation-duration: 2.4s; } }
 .icon-btn-secondary { border-color: var(--line); background: var(--surface); }
 .icon-btn:disabled { opacity: .4; }
 
@@ -431,6 +429,12 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .segmented button { display: inline-flex; flex: none; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--ink-3); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; transition: color .12s, background-color .12s; }
 .segmented button:hover { color: var(--ink); }
 .segmented button.is-active { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line), var(--shadow-sm); }
+.filter-chips { display: flex; gap: 6px; margin: -4px 0 12px; overflow-x: auto; scrollbar-width: none; }
+.filter-chips::-webkit-scrollbar { display: none; }
+.filter-chip { flex: none; height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; transition: color .12s, background-color .12s, border-color .12s; }
+.filter-chip:hover { border-color: var(--line-strong); color: var(--ink); }
+.filter-chip.is-active { border-color: var(--ink); background: var(--ink); color: var(--surface); }
+.filter-chip:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .segmented-count { min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--line-soft); color: var(--ink-2); font-size: var(--text-micro); font-variant-numeric: tabular-nums; text-align: center; }
 
 /* ---------- 浮层 ---------- */
@@ -615,15 +619,15 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .auth-footer a:hover { color: var(--accent); }
 
 .auth-visual { position: relative; display: flex; flex-direction: column; justify-content: space-between; gap: 40px; padding: 56px 56px 52px; overflow: hidden; background: #0b0c13; color: #fff; isolation: isolate; }
-.auth-visual::before { position: absolute; inset: -20% auto auto -10%; z-index: -1; width: 80%; aspect-ratio: 1; background: radial-gradient(closest-side, rgba(70, 96, 230, .32), transparent); content: ""; }
+.auth-visual::before { position: absolute; inset: -20% auto auto -10%; z-index: -1; width: 80%; aspect-ratio: 1; background: radial-gradient(closest-side, rgba(255, 255, 255, .09), transparent); content: ""; }
 .auth-admin .auth-visual { background: #0d0b15; }
 .auth-admin .auth-visual::before { background: radial-gradient(closest-side, rgba(128, 88, 220, .3), transparent); }
 .mosaic { display: grid; grid-template-columns: repeat(16, 1fr); gap: 6px; width: 100%; max-width: 620px; -webkit-mask-image: radial-gradient(ellipse 70% 80% at 45% 35%, #000 35%, transparent 78%); mask-image: radial-gradient(ellipse 70% 80% at 45% 35%, #000 35%, transparent 78%); }
 .mosaic i { aspect-ratio: 1; border-radius: 24%; background: transparent; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .07); animation: tile-in .6s cubic-bezier(.2, .8, .2, 1) backwards; }
 .mosaic .t2 { background: rgba(255, 255, 255, .045); }
-.mosaic .t3 { background: rgba(122, 142, 255, .22); box-shadow: inset 0 0 0 1px rgba(122, 142, 255, .3); }
-.mosaic .t4 { background: rgba(122, 142, 255, .55); box-shadow: none; }
-.mosaic .t5 { background: #7d93ff; box-shadow: none; }
+.mosaic .t3 { background: rgba(255, 255, 255, .12); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16); }
+.mosaic .t4 { background: rgba(255, 255, 255, .32); box-shadow: none; }
+.mosaic .t5 { background: rgba(255, 255, 255, .6); box-shadow: none; }
 .mosaic .plane { border-radius: 16%; background: var(--logo-plane); box-shadow: none; clip-path: polygon(0 0, 100% 0, 100% 100%); }
 @keyframes tile-in { from { opacity: 0; transform: scale(.5); } }
 .auth-visual-copy { display: grid; gap: 22px; max-width: 460px; }
@@ -1568,15 +1572,15 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .auth-visual { position: absolute; inset: 0 0 auto; display: block; height: clamp(180px, 36vh, 340px); height: clamp(180px, 36svh, 340px); padding: 0; background: transparent; pointer-events: none;
     -webkit-mask-image: linear-gradient(var(--ink) 45%, transparent); mask-image: linear-gradient(var(--ink) 45%, transparent); }
   .auth-admin .auth-visual { background: transparent; }
-  .auth-visual::before { inset: -100px -80px auto auto; width: min(560px, 110%); background: radial-gradient(closest-side, var(--accent-soft), transparent); }
+  .auth-visual::before { inset: -100px -80px auto auto; width: min(560px, 110%); background: radial-gradient(closest-side, color-mix(in srgb, var(--ink) 6%, transparent), transparent); }
   .auth-admin .auth-visual::before { inset: -100px -80px auto auto; background: radial-gradient(closest-side, var(--admin-soft), transparent); }
   .auth-visual-copy { display: none; }
   .auth-visual .mosaic { position: absolute; top: -50px; right: -14%; width: min(740px, 130%); max-width: none; gap: 7px; transform: rotate(12deg); }
   .auth-visual .mosaic i { box-shadow: inset 0 0 0 1px var(--line); }
   .auth-visual .mosaic .t2 { background: var(--surface-hover); }
-  .auth-visual .mosaic .t3 { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent); }
-  .auth-visual .mosaic .t4 { background: color-mix(in srgb, var(--accent) 35%, transparent); box-shadow: none; }
-  .auth-visual .mosaic .t5 { background: var(--accent); box-shadow: none; }
+  .auth-visual .mosaic .t3 { background: color-mix(in srgb, var(--ink) 8%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 14%, transparent); }
+  .auth-visual .mosaic .t4 { background: color-mix(in srgb, var(--ink) 24%, transparent); box-shadow: none; }
+  .auth-visual .mosaic .t5 { background: color-mix(in srgb, var(--ink) 72%, transparent); box-shadow: none; }
   .auth-visual .mosaic .plane { box-shadow: none; }
 }
 

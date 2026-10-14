@@ -1,148 +1,225 @@
 <p align="center"><img src="docs/logo.svg" alt="Tessera" width="96"></p>
 
-# Tessera
+<h1 align="center">Tessera</h1>
 
-基于 Telegram Bot 与私有频道的加密分片对象存储。Tessera（仓库、命令行与环境变量仍沿用 `tgdrive` 这个技术名称）提供一个轻量 ASGI 服务、React 用户端与管理端，并兼容一组常用的 S3 操作。
+<p align="center">把 Telegram 私有频道当作存储后端的自托管加密网盘与 S3 兼容对象存储。</p>
 
-## 能力概览
+---
 
-- **加密存储**：AES-256-GCM 分帧加密，Argon2id 派生密钥，支持本地 BlobStore 与 Telegram 私有频道。
-- **对象管理**：桶、目录标记、分页列表、复制、移动、配额和 multipart 上传。
-- **两类 API**：网页 API 使用 HttpOnly Cookie + CSRF；`/api/v1` 和 S3 使用访问密钥与 SigV4。
-- **秒传**：同一存储桶里已有内容相同的文件时直接引用，不传输数据（网页端自动、`/api/v1/files/instant` 供脚本使用）。
-- **公开分享**：`/s/<token>` 分享页与 `/p/<token>/<文件名>` 直链，支持 Range、密码和过期时间。
-- **账号与私密空间**：在「用户设置」中统一管理登录密码和通行密钥，同一凭据可用于登录及私密空间解锁（通行密钥需配置 HTTPS 公开访问地址）；私密空间解锁后在当前登录会话内保留，默认闲置 30 分钟锁定，每个用户可自行调整。私密操作续期，音视频播放时保持解锁，支持移入、移出及独立回收站。
-- **管理控制台**：首次初始化、用户与配额、存储通道、访问密钥、审计与维护操作。
-- **文档站**：`/docs/<页面>` 提供入门、API、S3 兼容性与管理员文档。
+Tessera 把文件在服务端加密、切成分片，通过 Telegram Bot API 保存到你自己的私有频道；文件索引和密钥只保存在本地的 SQLite 数据库中，Telegram 只能看到密文。它提供网页端（文件管理、预览、分享、离线下载）、访问密钥 HTTP API 和一组常用的 S3 操作，面向个人与小团队（数名用户）自托管使用。
 
-## 使用 Docker 启动
+> 仓库、Python 包、命令行、环境变量和镜像使用技术名称 `tgdrive`，产品名称为 Tessera。
 
-需要 Docker 及 Docker Compose。生产配置默认保持 Secure Cookie；本机直接用 HTTP 体验时叠加开发配置：
+## 功能
+
+**存储与加密**
+- 服务端加密：每个文件有独立的数据密钥，由加密口令经 Argon2id 派生的主密钥包装；内容以 16 MiB 分片、64 KiB 帧做 AES-256-GCM 加密。
+- 存储后端：Telegram 私有频道（支持多个 Bot 轮换与故障冷却），未配置 Bot 时使用本地目录，便于开发测试。
+- 内容相同的文件共享同一份加密数据：秒传、服务端复制和保存他人分享都不重复上传。
+
+**网页端**
+- 文件与文件夹管理：上传（大文件分块并行、断点续传）、移动、重命名、回收站、配额、搜索，列表与网格视图，按类型快速筛选。
+- 在线预览：图片、音视频（含播放列表与字幕）、文本、代码与 Markdown；缩略图在浏览器中生成并加密保存。
+- 公开分享：文件和文件夹均可分享，支持密码、有效期和下载次数统计；访客可下载 ZIP，登录用户可把分享保存到自己的空间。
+- 私密空间：需要再次验证（登录密码或通行密钥）才能访问的独立目录，闲置自动锁定。
+- 账号：支持通行密钥（Passkey）登录；管理员控制台管理用户、配额、存储通道、访问密钥、审计日志、备份与维护任务。
+- 内置文档站：`/docs/` 提供使用说明、API 与 S3 兼容性文档；管理员文档仅对管理员会话下发。
+
+**程序访问**
+- `/api/v1`：访问密钥认证的 HTTP API（列表、搜索、上传、下载、移动、复制、删除、公开分享、秒传、离线下载）。
+- S3 兼容网关：SigV4 签名与预签名 URL，可直接使用 rclone、AWS CLI、boto3 等工具（支持范围见下文）。
+- 访问密钥可按存储桶与路径前缀授予只读或读写权限。
+
+**离线下载**
+- 服务器代为下载 HTTP/HTTPS 直链，或解析浏览器复制的 curl / wget 命令，支持停止、继续与自动重试。
+- 可选组件：M3U8（需 FFmpeg）、X 单条帖子的图片与视频、YouTube 单视频与 Shorts（需平台镜像）。
+- 配套 Tampermonkey 脚本，在网页上一键复制资源的 curl 命令或发送到离线下载。
+
+## 工作原理
+
+```text
+浏览器 / API 客户端 / S3 客户端
+              │  HTTPS
+              ▼
+        Tessera 服务（单进程 ASGI）
+   ├─ meta.db（SQLite）：文件索引、账号、被包装的数据密钥
+   ├─ 加密：口令 ─Argon2id→ 主密钥（仅在内存）─包装→ 每个文件的数据密钥
+   │        数据密钥 ─HKDF→ 分片密钥 ─AES-256-GCM→ 分片密文
+   └─ 存储后端：Telegram Bot API → 私有频道（每个分片一条消息）
+                或本地分片目录
+```
+
+分片大小为 16 MiB，以满足 Telegram 云端 Bot API 的文件下载上限（20 MB）。读取时按需下载并解密对应分片，支持 HTTP Range 和视频拖动。
+
+## 安全模型与限制
+
+部署前请了解以下事实：
+
+- **加密口令无法找回。** 所有数据密钥都由它保护，遗失后已存储的文件无法解密。
+- **重启后需要人工解锁。** 主密钥只存在于内存中。服务启动后处于锁定状态，普通用户无法登录，公开链接返回 503，直到管理员登录并输入加密口令。
+- **这不是端到端加密。** 加密在服务端完成，全系统共用一把主密钥；能控制服务器或管理员账号的人在技术上可以读取所有用户的文件。它防护的是 Telegram 侧和存储介质上的数据泄露。
+- **`meta.db` 是唯一的索引。** 丢失数据库后，频道中的分片将无法还原为文件。请定期备份（见下文）。
+- **只支持单进程运行。** 会话、登录限流和 Telegram 客户端池保存在进程内存中，不要使用多个 worker 或让多个实例共享数据目录。
+- **依赖 Telegram 云端 Bot API。** 上传下载速度、限流和可用性受 Telegram 约束，请自行评估是否符合 Telegram 的服务条款和你的使用场景。
+
+## 快速开始（Docker）
+
+需要 Docker 与 Docker Compose。
+
+**本机体验（HTTP）**
 
 ```bash
+git clone https://github.com/yangshoulai/tgdrive.git
+cd tgdrive
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
-打开 <http://127.0.0.1:8000/> 完成首次初始化并登录；文档位于 <http://127.0.0.1:8000/docs/>。管理员和普通用户使用同一个登录页和同一个文档地址，管理员登录后会多看到「系统管理」菜单和文档里的「管理员」分组。
+打开 <http://127.0.0.1:8000/>，按页面提示设置加密口令并创建管理员账号。`docker-compose.dev.yml` 只做一件事：允许在 HTTP 下使用 Cookie（`TGDRIVE_INSECURE_COOKIES=1`），不要用于生产环境。
 
-用户文档只包含文件使用、HTTP API 和 S3 客户端说明。部署、运维、备份和故障排查页面只在管理员会话通过校验后按需加载，普通用户访问 `/docs/deploy` 等路径不会获得这些内容。
+**生产部署**
 
-`docker-compose.dev.yml` 才会设置 `TGDRIVE_INSECURE_COOKIES=1`，只用于本地 HTTP。生产部署应直接使用 `docker-compose.yml`，在反向代理后使用 HTTPS，并设置公开访问地址与 S3 Endpoint。容器默认监听 `8000`，数据目录为 `/data`；`/healthz` 可用于容器和反向代理健康检查。
-
-服务进程以非 root 用户（uid 10001）运行。容器以 root 启动时，入口脚本会先把 `/data` 的所有者修正为 10001 再降权，所以旧版本留下的数据卷和 `./data:/data` 这样的宿主机目录都能直接使用。如果你在 compose 里用 `user:` 指定了其他用户，就需要自己保证 `/data` 对该用户可写，例如 `chown -R <uid> ./data`。
-
-如果使用 GitHub Container Registry 发布的镜像，可将 Compose 中的 `build` 部分删掉，然后执行：
+使用 GitHub Container Registry 上的镜像，删除 `docker-compose.yml` 中的 `build` 部分后执行：
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-镜像地址为 `ghcr.io/yangshoulai/tgdrive`。GitHub Actions 只在推送 `v*` 格式的 tag 时运行，例如：
+请在反向代理后启用 HTTPS，并在控制台「系统设置」中填写公开访问地址与 S3 Endpoint（也可用启动参数设置）。通行密钥要求站点使用 HTTPS 域名。容器监听 `8000` 端口，数据目录为 `/data`，`/healthz` 可用于健康检查。
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+容器以 root 启动，入口脚本在数据目录属主不是 uid 10001 时修正属主，然后降权运行服务，因此命名卷和 `./data:/data` 这类宿主机目录都可直接使用。如果在 Compose 中用 `user:` 指定了其他用户，需要自行保证 `/data` 可写。
 
-### 离线下载与资源配置
+### 镜像
 
-侧栏「下载任务」支持 HTTP/HTTPS 文件直链，也可粘贴浏览器复制的 bash 格式 curl 或 wget 命令。先解析、勾选文件并选择目录，再交给服务器下载。可停止、继续、重新下载、更新过期参数和删除任务；删除任务保留已保存的文件，同名文件自动改名。
+镜像地址为 `ghcr.io/yangshoulai/tgdrive`，每次推送 `v*` 标签时由 GitHub Actions 构建三个变体：
 
-「系统设置 → 下载与资源」提供自动、低资源、标准与自定义模式，管理员配置在重启后保留。自动模式参考 CPU 配额、内存限制和 CPU 亲和性；无法可靠检测时采用低资源预算。1 核／750 MB 建议低资源模式，同时只下载 1 个任务。按数据目录的实际剩余空间保护磁盘，系统盘总容量不是可用容量。未限制资源的 Docker 容器可能看到宿主机预算，可在 Compose 中设置 `cpus: 1.0` 和 `mem_limit: 750m`，或直接选择低资源模式。
+| 标签 | 内容 | 适用场景 |
+| --- | --- | --- |
+| `latest`、`<版本>` | 基础镜像 | 文件存储、分享、直链离线下载 |
+| `latest-ffmpeg`、`<版本>-ffmpeg` | 基础镜像 + FFmpeg | 需要下载 M3U8 |
+| `latest-platform`、`<版本>-platform` | FFmpeg + yt-dlp、gallery-dl、Node.js | 需要下载 X / YouTube 媒体 |
 
-默认镜像不含 FFmpeg。需要 M3U8 时使用同版本的 `-ffmpeg` 镜像（例如 `latest-ffmpeg`），或构建时传入 `--build-arg INSTALL_FFMPEG=1`，然后在管理端启用 M3U8。X／YouTube 使用 `latest-platform` 或同版本的 `-platform` 镜像，本地构建为 `docker build --target platform -t tgdrive:platform .`，再在管理端分别启用平台功能。发布工作流仍只由 `v*` 标签触发，生成轻量、FFmpeg、平台三个变体；小服务器建议拉取 CI 构建的镜像。
+可选功能还需要在控制台「系统设置 → 下载与资源」中启用。本地构建对应变体：`docker build --build-arg INSTALL_FFMPEG=1 .` 或 `docker build --target platform .`。
 
-平台镜像在本地运行 gallery-dl、yt-dlp、配套 EJS 和 Node.js，不依赖第三方解析网站。X 支持单条帖子中的原图与视频；YouTube 支持单视频、Shorts 中实际可用的 H.264／AAC MP4 格式，按清晰度选择，也可只保存 M4A 音轨。支持粘贴 Cookie 请求头或导入 Netscape cookies.txt，只使用对应平台域名的 Cookie。Cookie 加密保存，不从服务器读取桌面浏览器的登录状态。解析时取得的媒体地址随任务加密保存，在有效期内（X 24 小时，YouTube 3 小时且早于地址自带的 expire 10 分钟）直接下载；过期或来源返回 401／403／404／410 时重新解析一次，按已选媒体编号和清晰度匹配，不自动降低清晰度。停止或失败后清理中间数据，再次开始从头下载。网络中断、超时及 HTTP 408／425／429／5xx 会自动重试 3 次，分别等待 10、30、90 秒，任务显示“等待恢复”和重试次数；文件直链从已保存的 16 MiB 分段续传，YouTube 分段读取在任务内原地续读。POST、认证失败、内容变化不自动重试。
+### 连接 Telegram
 
-YouTube 清晰度上限默认为 2160p，低资源模式也不自动下调；单轨媒体直接流式保存并受个人空间配额约束。需要缓存并合并的分离音视频输入轨受临时缓存预算限制，低资源模式最多 512 MiB，合并后的输出不受该缓存上限限制。支持实际可用的 HTTPS 和 HLS 格式，登录后的客户端也尝试 Safari HLS；直连媒体被拒绝时重新解析一次，优先使用同一清晰度的 HLS，不自动降低清晰度。音视频分离时仅缓存受限的输入轨，FFmpeg 合并输出直接进入分片加密存储，不另存完整成品临时文件、不转码。缓存仍占磁盘，需要保留足够空间；磁盘压力停止任务后清理临时轨，服务重启清理上次异常退出的任务缓存。直播、频道／播放列表批量下载、DRM 和额外 PO Token 提供器暂不支持。Cookie 代表账号登录状态，不等于平台的播放证明，也不保证服务器出口被允许；解析器版本固定在 `pyproject.toml` 的 `platform` 可选依赖中，需要随平台变化更新镜像。服务器需要代理出网时，在「系统设置 → 下载与资源」填写出站代理（`http://` 或 `socks5://`，也可用 `--offline-proxy` / `TGDRIVE_OFFLINE_PROXY`）；启用后所有离线下载经代理、由代理解析域名，只能拦截字面内网地址和内部主机名。YouTube 页面、API 和 googlevideo 媒体应使用同一稳定出口，代理分流到不同出口可能导致已解析地址返回 403。直连时服务器 DNS 必须返回真实公网地址，fake-IP／保留网段会被拒绝。YouTube HTTPS 媒体按 10 MiB 分段读取以避免被限速。
+1. 通过 [@BotFather](https://t.me/BotFather) 创建 Bot，获得 token。
+2. 创建一个私有频道，把 Bot 添加为可以发布消息的管理员。
+3. 在控制台「存储通道」中添加 Bot token 与频道，系统会自动检查 token、频道访问和发布权限。
 
-M3U8 支持已结束的 H.264／AAC 点播，包括 MPEG-TS、fMP4 初始化分片、字节范围、时间线跳变、普通 AES-128 和独立音轨，可选择主列表中的清晰度。普通连续 TS 保持管道传输；复杂列表先流式缓存输入分片，受磁盘保留空间与账号剩余配额限制。分片、初始化文件、密钥均由受控 HTTP 客户端获取，再生成只含本地文件名的列表交给 FFmpeg；成品直接进入加密存储，不另存完整 MP4。临时分片和密钥为明文，停止、失败或完成后清理，重启清理遗留缓存。暂不支持直播、低延迟分片、缺失分片、DRM 或 SAMPLE-AES。停止后从头封装；HTTP 仅在强 ETag、长度及实际 Range 响应一致时续传。POST 解析不访问来源，中断后必须手动重新发送。常见平台失败的原因与修复验证见 [离线下载兼容性排查](docs/offline-reliability.md)。
-
-来源 URL、请求头和请求体加密保存，随加密口令轮换重新加密；任务列表和审计不包含这些凭据。直连时每次连接和跳转都验证并固定公网地址，不访问本机、内网或云元数据；跨来源不转发自定义请求头。系统锁定时暂停，解锁后恢复 GET 任务；账号禁用时停止，重新启用后需手动继续。停止／失败的 HTTP 断点沿用 7 天清理期限，过期后从头下载。下载可保存到普通或已解锁的私密空间；私密任务逐段校验解锁授权，锁定后暂停，服务重启后需重新解锁并继续，普通任务列表会隐藏其文件名和路径。
-
-YouTube「解析内容」只列举格式，不提前试下载默认媒体。解析失败时区分网页、播放 API 和播放列表；容器日志记录固定请求阶段、状态码与认证头是否存在，不记录 Cookie 或签名地址。服务器解析 403 需要按该阶段检查登录状态、账号权限和出口，不能仅靠切换媒体下载格式判断原因。
-
-### 浏览器脚本
-
-`userscripts/tessera-grabber.user.js` 是一个 Tampermonkey 用户脚本：在 X 帖子操作栏、YouTube 播放页和任意网页右下角加入按钮，列出页面加载过的视频、音频、M3U8、常见文件和大图，可以复制链接或带 User-Agent、Referer、Cookie 的 curl 命令（Cookie 经 `GM_cookie` 读取，包含 HttpOnly），也可以一键发送到 Tessera 离线下载。在 Tampermonkey 中新建脚本并粘贴文件内容即可安装；首次使用在脚本设置中填写 Tessera 地址和网页「访问密钥」页面创建的 `AccessKeyId:Secret`。发送调用 `/api/v1/downloads/parse` 与 `/api/v1/downloads`，任务保存到密钥所属用户的存储桶。悬浮按钮可拖动并吸附到屏幕两侧；设置中的「显示范围」可以选择“所有网站，排除列表”或“仅列表中的网站”（每行一个域名，含子域名），面板底部和 Tampermonkey 菜单可以一键在当前网站停用或启用，配置的 Tessera 站点上始终不显示。
+启用存储通道后，新写入的文件保存到频道；Bot token 加密后保存在数据库中，接口不会返回明文。可以添加多个 Bot 分担上传和下载。
 
 ## 配置
 
-启动参数和同名环境变量都可用；控制台中的系统设置优先于启动时的默认值。
+启动参数与对应的环境变量等效；控制台中的系统设置优先于启动参数。
 
 | 参数 | 环境变量 | 说明 |
 | --- | --- | --- |
-| `--data-dir` | `TGDRIVE_DATA_DIR` | SQLite 元数据、本地分片和备份目录，默认 `./data` |
-| `--host` | `TGDRIVE_HOST` | 监听地址，默认 `127.0.0.1` |
+| `--data-dir` | `TGDRIVE_DATA_DIR` | 数据目录（元数据库、本地分片、备份），默认 `./data` |
+| `--host` | `TGDRIVE_HOST` | 监听地址，默认 `127.0.0.1`（镜像中为 `0.0.0.0`） |
 | `--port` | `TGDRIVE_PORT` | 监听端口，默认 `8000` |
-| `--static-dir` | `TGDRIVE_STATIC_DIR` | 前端静态文件目录；Docker 镜像已内置 |
-| `--public-url` | `TGDRIVE_PUBLIC_URL` | 分享链接、HTTP API 和文档示例使用的公开地址 |
+| `--static-dir` | `TGDRIVE_STATIC_DIR` | 前端构建产物目录，镜像已内置 |
+| `--public-url` | `TGDRIVE_PUBLIC_URL` | 对外访问地址，用于分享链接、API 与文档示例 |
 | `--s3-endpoint` | `TGDRIVE_S3_ENDPOINT` | S3 客户端使用的完整 Endpoint |
-| `--s3-host` | `TGDRIVE_S3_HOST` | 未配置 S3 Endpoint 时识别 S3 请求的主机名 |
-| `--insecure-cookies` | `TGDRIVE_INSECURE_COOKIES=1` | 仅本地 HTTP 开发使用，生产环境保持关闭 |
-| `--trusted-proxies` | `TGDRIVE_TRUSTED_PROXIES` | 信任 `X-Forwarded-For`/`Proto` 的代理 IP 或网段，逗号分隔；只填写实际代理地址 |
+| `--s3-host` | `TGDRIVE_S3_HOST` | 未设置 S3 Endpoint 时用于识别 S3 请求的主机名 |
+| `--trusted-proxies` | `TGDRIVE_TRUSTED_PROXIES` | 信任其 `X-Forwarded-For` / `X-Forwarded-Proto` 的代理 IP 或网段，逗号分隔 |
+| `--insecure-cookies` | `TGDRIVE_INSECURE_COOKIES=1` | 允许 HTTP 下的会话 Cookie，仅限本地开发 |
+| `--audit-retention-days` | `TGDRIVE_AUDIT_RETENTION_DAYS` | 在线审计日志保留天数，过期记录加密归档；默认 `0` 为永久保留 |
+| `--resource-mode` | `TGDRIVE_RESOURCE_MODE` | 离线下载资源预设：`auto`、`low`、`standard`、`custom` |
+| `--offline-proxy` | `TGDRIVE_OFFLINE_PROXY` | 离线下载的出站代理（`http://` 或 `socks5://`） |
 
-启用 Telegram 存储通道后，新对象会写入私有频道；没有启用 Bot 时，服务会使用本地分片目录，方便离线开发和测试。Bot token 会使用 KEK 派生子密钥加密保存，接口不会返回明文 token。
+离线下载的其他参数（并发、限速、磁盘保留空间、M3U8 / X / YouTube 开关、YouTube 清晰度上限等）见 `tgdrive --help` 与 `docker-compose.yml` 中的注释。`--trusted-proxies` 只应填写实际的反向代理地址；在不受控的网络中使用 `*` 会让客户端可以伪造来源 IP。
+
+## 客户端接入
+
+在网页「访问密钥」页面创建密钥（Secret 只显示一次），每个用户的存储桶名为 `user-<编号>`。
+
+**HTTP API**
+
+```bash
+curl -H "Authorization: Bearer <AccessKeyId>:<Secret>" "https://drive.example.com/api/v1/list?prefix=docs/"
+```
+
+**S3**
+
+```bash
+aws s3 ls s3://user-2/ --endpoint-url https://s3.example.com
+```
+
+S3 网关支持 ListBuckets、HeadBucket、GetBucketLocation、ListObjectsV2、GetObject（含 Range）、HeadObject、PutObject（含 aws-chunked）、DeleteObject、DeleteObjects、CopyObject、分段上传与 UploadPartCopy，以及预签名 URL；**不支持**版本控制、ACL、生命周期、对象锁和 POST 表单上传。完整的接口说明、示例和限制见部署后的文档站 `/docs/`。
+
+## 离线下载
+
+在网页侧栏「下载任务」中粘贴文件直链，或浏览器开发者工具中复制的 bash 格式 curl / wget 命令，解析后选择文件与保存目录，由服务器下载并加密存储。
+
+- 所有出站请求都会校验并固定公网地址，不访问本机、内网或云元数据地址；可配置出站代理。
+- 来源地址、请求头和 Cookie 加密保存，不出现在任务列表和审计日志中。
+- 网络中断、超时和 HTTP 408 / 425 / 429 / 5xx 自动重试；直链按 16 MiB 分段续传。
+- M3U8 仅支持已结束的 H.264 / AAC 点播（含普通 AES-128），不支持直播、DRM 和 SAMPLE-AES；只封装，不转码。
+- X 支持单条帖子中的原图与视频；YouTube 支持单视频与 Shorts 中可用的 H.264 / AAC 格式（默认最高 2160p），可只保存 M4A 音轨。不支持直播、频道或播放列表批量下载、DRM。解析在服务器本地运行，不依赖第三方解析网站；需要时可导入对应平台的 Cookie。
+- 默认镜像不包含 FFmpeg 和平台解析器，请按需选择[镜像变体](#镜像)。资源预算会参考容器的 CPU 和内存限制，小内存服务器建议使用低资源模式。
+
+设计与排障说明：[离线下载](docs/offline-downloads.md)、[平台下载](docs/platform-downloads.md)、[兼容性排查](docs/offline-reliability.md)。
+
+## 浏览器脚本
+
+[`userscripts/tessera-grabber.user.js`](userscripts/tessera-grabber.user.js) 是一个 Tampermonkey 用户脚本：在 X 帖子、YouTube 播放页和普通网页上列出已加载的视频、音频、M3U8、常见文件和大图，可以复制链接或带 Cookie 的 curl 命令，也可以单个或批量发送到 Tessera 离线下载并查看进度。
+
+安装：在 Tampermonkey 中新建脚本并粘贴文件内容，然后在脚本设置中填写 Tessera 地址和访问密钥（需要读写权限）。脚本只调用 `/api/v1` 的离线下载接口，Cookie 只会发送到你配置的服务器。设置中可以按网站选择显示或隐藏，在 Tessera 站点上不显示。
+
+## 备份与恢复
+
+控制台「维护与备份」可以创建加密备份，文件保存在数据目录的 `backups/` 下（`*.tgdbak`）。备份包含元数据库（文件索引、账号、被包装的数据密钥等），不包含分片本身——分片保存在 Telegram 频道或本地分片目录中。请把备份文件复制到服务器以外的位置，并保存好备份时的加密口令。
+
+恢复前先停止服务：
+
+```bash
+tgdrive restore /path/to/tgdrive-20261014-120000.tgdbak --data-dir /var/lib/tgdrive
+```
+
+命令会提示输入备份时的口令，原数据库保留为 `meta.db.before-restore-*`。加密归档的审计日志可用 `tgdrive audit-export <归档文件> --output audit.jsonl` 导出。
 
 ## 本地开发
 
-项目需要 Python 3.12 和 Node.js。先安装依赖：
+需要 Python 3.12+ 与 Node.js 20+。
 
 ```bash
-python -m venv .venv
+python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-cd web
-npm ci
+(cd web && npm ci)
 ```
 
-运行后端测试和前端检查：
-
-```bash
-.venv/bin/python -m unittest discover -s tests -v
-cd web
-node node_modules/typescript/bin/tsc -p tsconfig.app.json
-node build-apps.mjs
-```
-
-本地预览只需要一个进程：先构建前端，再让 API 服务直接托管它。
+构建前端并启动服务（单进程同时提供 API 和网页）：
 
 ```bash
 (cd web && node build-apps.mjs)
 .venv/bin/tgdrive --data-dir /tmp/tgdrive-dev --port 8000 --static-dir web/dist --insecure-cookies
 ```
 
-整个站点是同一个应用、同一个登录页（<http://127.0.0.1:8000/>）。登录后的菜单由账号角色决定：普通用户只有自己的文件空间；管理员在此基础上多出「系统管理」分组（`/admin/...`）和文档里的管理员专属页面。普通用户看不到这些入口，管理接口也会在服务端被拒绝。
+前端没有开发服务器：修改后重新运行 `node build-apps.mjs` 并刷新页面即可，无需重启后端。未配置 Bot 时文件保存在数据目录中的本地分片目录。
 
-改动前端后重新运行 `node build-apps.mjs` 并刷新页面即可，不需要重启服务。验证 UI 时请使用独立的数据目录，避免触发工作区数据的 schema 迁移。前端构建器只支持相对导入以及 `react`、`react/jsx-runtime`，产物目录 `web/dist` 已被 Git 忽略。
+运行全部检查（ruff、单元测试、TypeScript 类型检查、前端构建）：
+
+```bash
+make check PYTHON=.venv/bin/python
+```
+
+更多约定见 [`AGENTS.md`](AGENTS.md)（代码约定）、[`DESIGN.md`](DESIGN.md)（视觉规范）、[`UX-CONTRACT.md`](UX-CONTRACT.md)（交互与路由）和 [`docs/architecture-v2.md`](docs/architecture-v2.md)（架构设计）。
 
 ## 项目结构
 
 ```text
-src/tgdrive/          Python 后端、ASGI 路由、对象服务、S3 与 Telegram 适配器
-web/src/               React + TypeScript 用户端、管理端和共享界面
-web/src/docs/          用户文档、管理员文档和文档排版组件
-web/build-apps.mjs     前端离线打包器（产物 web/dist）
-userscripts/           Tampermonkey 资源抓取脚本（复制 curl、发送到离线下载）
-tests/                 unittest 回归测试
-DESIGN.md              视觉规范
-UX-CONTRACT.md         路由与交互契约
-docs/architecture-v2.md  架构设计记录
-Dockerfile             多阶段镜像构建
-docker-compose.yml    本地启动配置
-.github/workflows/     仅 tag 推送触发的镜像发布流程
+src/tgdrive/            Python 后端：ASGI 路由、对象服务、加密、S3 网关、Telegram 适配、离线下载
+web/src/                React 18 + TypeScript 前端：用户端、管理控制台、文档站
+web/build-apps.mjs      前端打包脚本（产物位于 web/dist，不纳入版本库）
+userscripts/            Tampermonkey 资源抓取脚本
+tests/                  unittest 回归测试
+docs/                   架构设计与离线下载说明
+Dockerfile              多阶段镜像（基础 / FFmpeg / 平台）
+docker-compose*.yml     部署与本地开发配置
+.github/workflows/      推送 v* 标签时构建并发布镜像
 ```
 
-更多接口细节请查看内置文档站和 `docs/architecture-v2.md`。生产环境建议单进程运行；普通会话、登录限流、流量统计和 Telegram 客户端池都保存在进程内存中，服务重启后会话和统计会重新开始；登录时勾选“30 天内保持登录”的会话会保存到数据库（只存令牌哈希），重启并解锁后仍然有效。反向代理示例：
+## 许可证
 
-```bash
-.venv/bin/tgdrive --data-dir /var/lib/tgdrive --trusted-proxies 172.20.0.0/16
-```
-
-不要把 `--trusted-proxies *` 用在不受控的网络中，否则客户端可以伪造来源 IP。
-
-本地检查：
-
-```bash
-make check
-```
+仓库目前没有附带开源许可证文件。在添加许可证之前，代码默认保留所有权利。

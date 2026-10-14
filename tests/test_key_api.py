@@ -141,6 +141,19 @@ class KeyApiTests(unittest.TestCase):
         self.clients.grant(bob, self.bob.bucket_id, "", "rw")
         self.assertEqual(self.json_call("POST", "/api/v1/downloads", {"items": [{"ticket": ticket, "name": "d.bin"}]}, self.bearer(bak, bsecret))[0], 400)
 
+        # 按 ID 查询进度：只返回本用户、密钥可读路径内的任务；只读密钥可以查询，其他用户的密钥看不到。
+        ids = [row[0] for row in self.app.metadata.db.execute("SELECT id FROM offline_tasks ORDER BY id")]
+        query = "/api/v1/downloads?ids=" + ",".join(map(str, ids))
+        status, body = self.json_call("GET", query)
+        self.assertEqual((status, [task["key"] for task in body["tasks"]]), (200, ["web/a.bin", "inbox/b.bin"]))
+        self.assertIn(body["tasks"][0]["status"], ("queued", "running", "completed", "interrupted"))
+        self.assertNotIn("request_enc", body["tasks"][0])
+        self.assertEqual([task["key"] for task in self.json_call("GET", query, headers=scoped)[1]["tasks"]], ["inbox/b.bin"])
+        self.assertEqual(len(self.json_call("GET", query, headers=self.bearer(rak, rsecret))[1]["tasks"]), 2)
+        self.assertEqual(self.json_call("GET", query, headers=self.bearer(bak, bsecret))[1]["tasks"], [])
+        self.assertEqual(self.json_call("GET", "/api/v1/downloads?ids=x")[0], 400)
+        self.assertEqual(self.json_call("GET", "/api/v1/downloads?ids=" + ",".join(map(str, range(1, 102))))[0], 400)
+
 
 if __name__ == "__main__":
     unittest.main()

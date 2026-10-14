@@ -216,8 +216,8 @@ class KeyApi:
 
     # ---------- 离线下载 ----------
 
-    def download_owner(self, principal: KeyPrincipal, bucket: str | None) -> tuple[int, int, list[ClientGrant]]:
-        """离线任务属于密钥的所属用户，只能保存到该用户自己的存储桶，且密钥需要读写授权。"""
+    def _download_user(self, principal: KeyPrincipal, bucket: str | None) -> tuple[int, int]:
+        """离线任务属于密钥的所属用户，只能使用该用户自己的存储桶。返回 (用户 ID, 存储桶 ID)。"""
         row = self.objects.metadata.db.execute(
             "SELECT u.id, u.bucket_id FROM clients c JOIN users u ON u.id=c.owner_user_id WHERE c.id=?",
             (principal.client_id,)).fetchone()
@@ -226,10 +226,21 @@ class KeyApi:
         bucket_id = self._bucket(principal, bucket) if bucket else int(row["bucket_id"])
         if bucket_id != row["bucket_id"]:
             raise PermissionError("离线下载只能保存到密钥所属用户的存储桶")
+        return int(row["id"]), bucket_id
+
+    def download_owner(self, principal: KeyPrincipal, bucket: str | None) -> tuple[int, int, list[ClientGrant]]:
+        """创建离线任务：密钥需要该存储桶的读写授权。"""
+        user_id, bucket_id = self._download_user(principal, bucket)
         writable = [grant for grant in self.clients.grants(principal.client_id, bucket_id) if grant.perms == "rw"]
         if not writable:
             raise PermissionError("该密钥没有写入权限，不能创建离线下载")
-        return int(row["id"]), bucket_id, writable
+        return user_id, bucket_id, writable
+
+    def download_reader(self, principal: KeyPrincipal, bucket: str | None):
+        """查询任务进度：返回 (用户 ID, 判断任务路径是否在密钥可读范围内的函数)。只读密钥也可以查询。"""
+        user_id, bucket_id = self._download_user(principal, bucket)
+        grants = self.clients.grants(principal.client_id, bucket_id)
+        return user_id, lambda key: any(grant.permits(key) for grant in grants)
 
     def download_scope(self, principal: KeyPrincipal, bucket: str | None, destination) -> tuple[int, str, Scope]:
         """返回 (用户 ID, 目标目录, 密钥授权范围)；省略目录时使用最上层的读写授权前缀。"""

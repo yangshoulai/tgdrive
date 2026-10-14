@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.3.0
+// @version      0.5.0
 // @description  在 X、YouTube 和其他网页上快速复制媒体地址与 curl 命令，或一键发送到 Tessera 离线下载
 // @author       yangshoulai
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
@@ -39,6 +39,18 @@
   const DEFAULTS = { server: "", key: "", destination: "", cookies: true, fab: true, siteMode: "exclude", excludeSites: [], includeSites: [] };
   const settings = () => ({ ...DEFAULTS, ...GM_getValue("settings", {}) });
   const saveSettings = value => GM_setValue("settings", { ...settings(), ...value });
+
+  // ---------- 已发送记录 ----------
+
+  // 发送成功的资源地址持久保存（跨页面、跨标签页），列表里标「已发送」，全选与批量发送时自动跳过；任务失败时移除。
+  const SENT_LIMIT = 1000;
+  const sentList = () => GM_getValue("sent", []);
+  const isSent = url => sentList().includes(url);
+  function markSent(urls, sent = true) {
+    const set = new Set(urls);
+    const rest = sentList().filter(url => !set.has(url));
+    GM_setValue("sent", sent ? [...rest, ...set].slice(-SENT_LIMIT) : rest);
+  }
 
   // ---------- 显示范围 ----------
 
@@ -252,7 +264,7 @@
       --bg: #ffffff; --fg: #18181b; --muted: #71717a; --faint: #a1a1aa; --line: #ececef; --soft: #f4f4f5; --hover: #f6f6f7;
       --accent: #2f4bd0; --accent-hover: #2840b4; --accent-soft: rgba(47, 75, 208, .09); --danger: #d14343; --success: #16834f;
       --shadow: 0 1px 2px rgba(0,0,0,.04), 0 12px 32px rgba(15, 18, 40, .14);
-      --logo-a: #2f4bd0; --logo-b: #6a82ee; --logo-c: #1e3194; --logo-plane: #f0a22e; --logo-fold: #c27a10;
+      --logo-bg: #0b0c13; --logo-tile: #fff; --logo-ring: transparent; --logo-plane: #f0a22e; --logo-fold: #c27a10;
       font: 13px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
       color: var(--fg); -webkit-font-smoothing: antialiased;
     }
@@ -261,15 +273,16 @@
         --bg: #1c1c1f; --fg: #f4f4f5; --muted: #a1a1aa; --faint: #71717a; --line: #2e2e33; --soft: #27272b; --hover: #26262a;
         --accent: #7d92ff; --accent-hover: #93a5ff; --accent-soft: rgba(125, 146, 255, .14); --danger: #ff7a7a; --success: #4ade80;
         --shadow: 0 1px 2px rgba(0,0,0,.3), 0 16px 40px rgba(0,0,0,.45);
-        --logo-a: #8da0ff; --logo-b: #5f78f0; --logo-c: #b4c0ff; --logo-plane: #f4b252; --logo-fold: #b97616;
+        --logo-ring: rgba(255, 255, 255, .16);
       }
     }
     svg { display: block; flex: none; }
-    .logo-a { fill: var(--logo-a); } .logo-b { fill: var(--logo-b); } .logo-c { fill: var(--logo-c); }
+    .logo-bg { fill: var(--logo-bg); stroke: var(--logo-ring); } .logo-tile { fill: var(--logo-tile); }
     .logo-plane { fill: var(--logo-plane); stroke: var(--logo-plane); } .logo-fold { fill: none; stroke: var(--logo-fold); }
 
     /* 悬浮按钮：可拖动，松手后吸附到最近的左右边缘 */
-    .fab { position: fixed; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--line); background: var(--bg);
+    /* 按钮本身就是标志：暗灰圆角方块，与浏览器标签页图标一致 */
+    .fab { position: fixed; width: 44px; height: 44px; padding: 0; border-radius: 10px; border: 0; background: transparent;
       box-shadow: var(--shadow); display: grid; place-items: center; cursor: pointer; pointer-events: auto; touch-action: none;
       user-select: none; z-index: 2147483646; transition: top .2s ease, left .2s ease, transform .15s ease, opacity .15s; }
     .fab:hover { transform: scale(1.06); }
@@ -344,6 +357,7 @@
     .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .item-actions { display: flex; gap: 2px; flex: none; }
+    .item-actions:empty { display: none; }
     .empty { display: grid; justify-items: center; gap: 10px; padding: 28px 12px; color: var(--muted); text-align: center; font-size: 12px; }
     .empty .tile { width: 44px; height: 44px; border-radius: 12px; }
     .empty.loading .tile svg { animation: spin 1s linear infinite; }
@@ -357,6 +371,37 @@
     .pick input:checked + .check { background: var(--accent); border-color: var(--accent); color: #fff; }
     .pick input:focus-visible + .check { outline: 2px solid var(--accent); outline-offset: 2px; }
     .warn { color: #b7791f; font-size: 12px; white-space: normal; }
+
+    /* 多选 */
+    .item.selectable { cursor: pointer; }
+    .item.is-selected { background: var(--accent-soft); }
+    .item.is-selected:hover { background: var(--accent-soft); }
+    .item.is-sent:not(.is-selected) .name { color: var(--muted); }
+    .sent-tag { display: inline-block; margin-right: 6px; padding: 0 5px; border-radius: 4px; background: var(--soft); color: var(--success);
+      font-size: 11px; font-weight: 500; line-height: 16px; vertical-align: 1px; }
+    .check.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .select-all { display: flex; align-items: center; gap: 8px; cursor: pointer; border-radius: 6px; }
+    .select-all:focus-visible, .item.selectable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    footer .selection { font-size: 12px; color: var(--muted); }
+
+    /* 批量发送 */
+    .batch-banner { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border-radius: 12px; background: var(--accent-soft);
+      color: var(--fg); text-align: left; }
+    .batch-banner .meta { gap: 6px; }
+    .batch-banner > svg { color: var(--muted); }
+    .overview { display: grid; gap: 8px; }
+    .overview-line { display: flex; align-items: baseline; gap: 8px; }
+    .overview-line strong { font-size: 15px; font-weight: 600; }
+    .progress { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; position: relative; }
+    .progress > span { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--accent); transition: width .3s ease; }
+    .progress.done > span { background: var(--success); }
+    .progress.indeterminate > span { width: 35% !important; animation: slide 1.2s ease-in-out infinite; }
+    @keyframes slide { from { left: -35%; } to { left: 100%; } }
+    .state { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .state.ok { color: var(--success); }
+    .state.err { color: var(--danger); white-space: normal; overflow-wrap: anywhere; }
+    .state.run { color: var(--accent); }
+    .batch-item .meta { gap: 4px; }
 
     /* 表单 */
     .field { display: grid; gap: 6px; }
@@ -415,6 +460,9 @@
     file: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", "M14 2v4a2 2 0 0 0 2 2h4"],
     image: [["rect", { x: 3, y: 3, width: 18, height: 18, rx: 2 }], ["circle", { cx: 9, cy: 9, r: 2 }], "m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"],
     check: ["M20 6 9 17l-5-5"],
+    minus: ["M5 12h14"],
+    retry: ["M3 12a9 9 0 0 1 15-6.7L21 8", "M21 3v5h-5", "M21 12a9 9 0 0 1-15 6.7L3 16", "M3 21v-5h5"],
+    chevron: ["m9 18 6-6-6-6"],
     search: [["circle", { cx: 11, cy: 11, r: 8 }], "m21 21-4.3-4.3"],
     loader: ["M21 12a9 9 0 1 1-6.22-8.56"],
     alert: [["circle", { cx: 12, cy: 12, r: 10 }], "M12 8v4", "M12 16h.01"],
@@ -446,11 +494,12 @@
     const node = document.createElementNS(ns, "svg");
     for (const [key, value] of Object.entries({ viewBox: "0 0 32 32", width: size, height: size, "aria-hidden": "true" })) node.setAttribute(key, value);
     for (const [tag, attrs] of [
-      ["rect", { class: "logo-a", x: 2.5, y: 2.5, width: 13, height: 13, rx: 3 }],
-      ["polygon", { class: "logo-plane", points: "18,4 28,4 28,14", "stroke-width": 3, "stroke-linejoin": "round" }],
-      ["path", { class: "logo-fold", d: "M27.2 4.8 23.4 8.6", "stroke-width": 1.3, "stroke-linecap": "round" }],
-      ["rect", { class: "logo-b", x: 2.5, y: 16.5, width: 13, height: 13, rx: 3 }],
-      ["rect", { class: "logo-c", x: 16.5, y: 16.5, width: 13, height: 13, rx: 3 }],
+      ["rect", { class: "logo-bg", x: .5, y: .5, width: 31, height: 31, rx: 7.5 }],
+      ["rect", { class: "logo-tile", x: 5, y: 5, width: 10, height: 10, rx: 2.4 }],
+      ["rect", { class: "logo-tile", x: 5, y: 17, width: 10, height: 10, rx: 2.4, "fill-opacity": .6 }],
+      ["rect", { class: "logo-tile", x: 17, y: 17, width: 10, height: 10, rx: 2.4, "fill-opacity": .32 }],
+      ["polygon", { class: "logo-plane", points: "18.2,6.2 25.8,6.2 25.8,13.8", "stroke-width": 2.4, "stroke-linejoin": "round" }],
+      ["path", { class: "logo-fold", d: "M25.1 6.9 22.2 9.8", "stroke-width": 1.1, "stroke-linecap": "round" }],
     ]) {
       const child = document.createElementNS(ns, tag);
       for (const [key, value] of Object.entries(attrs)) child.setAttribute(key, value);
@@ -492,7 +541,7 @@
     root = h("div", { className: "root" });
     shadow.append(h("style", {}, STYLE), root);
     badge = h("span", { className: "badge", hidden: true });
-    fab = h("button", { type: "button", className: "fab", title: "Tessera 资源抓取（可拖动）", "aria-label": "Tessera 资源抓取" }, logo(24), badge);
+    fab = h("button", { type: "button", className: "fab", title: "Tessera 资源抓取（可拖动）", "aria-label": "Tessera 资源抓取" }, logo(44), badge);
     enableDrag(fab);
     root.append(fab);
     document.documentElement.append(host);
@@ -599,7 +648,22 @@
     panel?.remove();
     panel = null;
     listeners.delete(renderListIfOpen);
+    clearInterval(liveTimer);
+    liveTimer = 0;
   }
+
+  window.addEventListener("pointerup", () => { pointerDown = false; }, true);
+  window.addEventListener("pointercancel", () => { pointerDown = false; }, true);
+
+  // ESC：有上一级时返回，主面板时关闭。只处理焦点在面板内或页面上没有焦点的情况，不打断网页输入框；全屏时交给网页。
+  window.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || !panel || document.fullscreenElement || event.isComposing) return;
+    const focus = document.activeElement;
+    if (event.target !== host && focus && focus !== document.body && focus !== document.documentElement) return;
+    event.preventDefault();
+    event.stopPropagation();
+    panel.back ? panel.back() : close();
+  }, true);
 
   function toggle(context) {
     if (panel && !context) return close();
@@ -610,12 +674,14 @@
   function frame(title, body, { back, footer } = {}) {
     close();
     const header = h("header", {},
-      back ? iconButton("back", "返回", back, "back") : logo(18),
+      back ? iconButton("back", "返回", back, "back") : logo(20),
       h("span", { className: "title" }, title),
       back ? null : iconButton("settings", "设置", () => openSettings(() => open(currentContext))),
       iconButton("close", "关闭", close));
     panel = h("div", { className: "panel", role: "dialog", "aria-label": title }, header, h("div", { className: "body" }, body),
       footer ? h("footer", {}, footer) : null);
+    panel.back = back;
+    panel.addEventListener("pointerdown", () => { pointerDown = true; });
     root.append(panel);
     placePanel();
     return panel;
@@ -628,20 +694,48 @@
 
   let filter = "all";
   let currentContext = null;
+  let liveTimer = 0;
+  let pointerDown = false;  // 按住鼠标期间不改动列表，避免点击落空
+  const rowCache = new Map();
+  const selected = new Set();  // 已勾选的资源地址，跨筛选保留
+  const BATCH_LIMIT = 50;
 
   /** context: { platform, label, url, scope } —— scope 为 X 帖子元素时只列出这条帖子的图片。 */
   function open(context) {
     mount();
     currentContext = context || platformOf(location.href);
-    frame("Tessera", [currentContext ? platformCard(currentContext) : null, h("div", { className: "section list-host" })], {
-      footer: onTessera() ? null : [
-        h("span", { className: "site", title: location.hostname }, svg("globe", 14), h("span", {}, currentSite())),
-        h("span", { className: "spacer" }),
-        h("button", { type: "button", className: "text-btn", onclick: () => setSiteEnabled(!active) }, active ? "在此网站隐藏" : "在此网站启用"),
-      ],
-    });
+    frame("Tessera", [
+      h("div", { className: "banner-host" }),
+      currentContext ? platformCard(currentContext) : null,
+      h("div", { className: "section list-host" }),
+    ], { footer: [] });
+    panel.dataset.view = "main";
+    renderBanner();
     renderList();
     listeners.add(renderListIfOpen);
+    // 懒加载的图片和换页后的 DOM 不会触发网络嗅探，打开期间定时重新扫描，有变化才更新。
+    clearInterval(liveTimer);
+    liveTimer = setInterval(() => { if (panel && panel.dataset.view === "main") renderList(); }, 1500);
+  }
+
+  /** 底部栏：有勾选时显示批量操作，否则显示当前网站与「在此网站隐藏」。 */
+  function renderFooter() {
+    const footer = panel && panel.dataset.view === "main" && panel.querySelector("footer");
+    if (!footer) return;
+    if (selected.size) {
+      footer.hidden = false;
+      footer.replaceChildren(
+        h("span", { className: "selection" }, `已选 ${selected.size} 项`),
+        h("button", { type: "button", className: "text-btn", onclick: () => { selected.clear(); renderList(); } }, "清除"),
+        h("span", { className: "spacer" }),
+        h("button", { type: "button", className: "btn primary", onclick: () => startBatch([...selected]) }, svg("send"), `发送 ${selected.size} 项`));
+      return;
+    }
+    footer.hidden = onTessera();
+    footer.replaceChildren(
+      h("span", { className: "site", title: location.hostname }, svg("globe", 14), h("span", {}, currentSite())),
+      h("span", { className: "spacer" }),
+      h("button", { type: "button", className: "text-btn", onclick: () => setSiteEnabled(!active) }, active ? "在此网站隐藏" : "在此网站启用"));
   }
 
   function platformCard(context) {
@@ -680,27 +774,85 @@
     return [...merged.values()];
   }
 
+  /** 让 parent 的子节点依次等于 nodes：已在正确位置的节点不移动，新节点插入，多余的移除。 */
+  function syncChildren(parent, nodes) {
+    nodes.forEach((node, index) => { if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] || null); });
+    while (parent.children.length > nodes.length) parent.lastElementChild.remove();
+  }
+
+  /**
+   * 列表原地更新：首次创建骨架，之后只改计数、勾选状态并按地址复用行元素。
+   * 定时刷新和新资源到达都会调用这里，整块替换会让正在进行的点击落空、滚动位置跳动。
+   */
   function renderList() {
     const target = panel && panel.querySelector(".list-host");
-    if (!target) return;
+    if (!target || pointerDown) return;
     const all = collect();
+    const sent = new Set(sentList());
+    const urls = new Set(all.map(item => item.url));
+    for (const url of selected) if (!urls.has(url)) selected.delete(url);
+    for (const url of rowCache.keys()) if (!urls.has(url)) rowCache.delete(url);
     const counts = all.reduce((acc, item) => ({ ...acc, [item.type]: (acc[item.type] || 0) + 1 }), {});
     const types = Object.keys(TYPE_LABEL).filter(type => counts[type]);
     if (filter !== "all" && !counts[filter]) filter = "all";
     const shown = all.filter(item => filter === "all" || item.type === filter);
-    const chip = (value, label) => h("button", { type: "button", className: "chip", "aria-pressed": String(filter === value),
-      onclick: () => { filter = value; renderList(); } }, label);
-    // replaceChildren 会把 null 转成文字 “null”，先过滤掉不显示的部分。
-    target.replaceChildren(...[
-      h("div", { className: "section-head" },
-        h("h2", {}, "页面资源", h("span", { className: "count" }, String(all.length))),
-        h("span", { className: "spacer" }),
-        all.length && !(currentContext && currentContext.scope)
-          ? h("button", { type: "button", className: "text-btn", onclick: () => { items.clear(); refreshFab(); renderList(); } }, "清空") : null),
-      types.length > 1 ? h("div", { className: "chips" }, chip("all", "全部"), types.map(type => chip(type, `${TYPE_LABEL[type]} ${counts[type]}`))) : null,
-      shown.length ? h("div", { className: "list" }, shown.map(row))
-        : emptyState("search", "还没有发现可下载的资源。播放视频或滚动加载图片后再打开。"),
-    ].filter(Boolean));
+    // 全选只作用于当前筛选下显示、且尚未发送过的资源。
+    const pickable = shown.filter(item => !sent.has(item.url));
+    const picked = pickable.filter(item => selected.has(item.url)).length;
+    const allPicked = pickable.length > 0 && picked === pickable.length;
+
+    if (!target.parts) {
+      const parts = {
+        check: h("span", { className: "check" }),
+        count: h("span", { className: "count" }),
+        clear: h("button", { type: "button", className: "text-btn", onclick: () => { items.clear(); refreshFab(); renderList(); } }, "清空"),
+        chips: h("div", { className: "chips" }),
+        list: h("div", { className: "list" }),
+        empty: emptyState("search", "还没有发现可下载的资源。播放视频或滚动加载图片后再打开。"),
+      };
+      parts.selectAll = h("span", { className: "select-all", role: "checkbox", tabindex: "0", onclick: () => target.toggleAll(),
+        onkeydown: event => { if (event.key === " " || event.key === "Enter") { event.preventDefault(); target.toggleAll(); } } }, parts.check);
+      target.replaceChildren(
+        h("div", { className: "section-head" }, parts.selectAll, h("h2", {}, "页面资源", parts.count), h("span", { className: "spacer" }), parts.clear),
+        parts.chips, parts.list, parts.empty);
+      target.parts = parts;
+    }
+    const parts = target.parts;
+    target.toggleAll = () => {
+      if (allPicked) pickable.forEach(item => selected.delete(item.url));
+      else {
+        for (const item of pickable) {
+          if (selected.size >= BATCH_LIMIT) { toast(`一次最多选择 ${BATCH_LIMIT} 项`); break; }
+          selected.add(item.url);
+        }
+      }
+      renderList();
+    };
+    parts.count.textContent = String(all.length);
+    parts.clear.hidden = !all.length || Boolean(currentContext && currentContext.scope);
+    parts.selectAll.hidden = !pickable.length;
+    parts.selectAll.title = allPicked ? "取消全选" : sent.size && shown.length > pickable.length ? "全选（跳过已发送）" : "全选";
+    parts.selectAll.setAttribute("aria-checked", allPicked ? "true" : picked ? "mixed" : "false");
+    parts.check.className = `check${picked ? " on" : ""}`;
+    parts.check.replaceChildren(svg(allPicked ? "check" : "minus", 12, 3));
+    // 筛选标签只在种类或数量变化时重建。
+    const chipKey = types.length > 1 ? `${filter}|${types.map(type => `${type}:${counts[type]}`).join(",")}` : "";
+    if (parts.chips.dataset.key !== chipKey) {
+      parts.chips.dataset.key = chipKey;
+      const chip = (value, label) => h("button", { type: "button", className: "chip", "aria-pressed": String(filter === value),
+        onclick: () => { filter = value; renderList(); } }, label);
+      parts.chips.replaceChildren(...(chipKey ? [chip("all", "全部"), ...types.map(type => chip(type, `${TYPE_LABEL[type]} ${counts[type]}`))] : []));
+    }
+    parts.chips.hidden = !chipKey;
+    syncChildren(parts.list, shown.map(item => {
+      let node = rowCache.get(item.url);
+      if (!node) rowCache.set(item.url, node = row(item));
+      syncRow(node, item, sent.has(item.url));
+      return node;
+    }));
+    parts.list.hidden = !shown.length;
+    parts.empty.hidden = Boolean(shown.length);
+    renderFooter();
   }
 
   function row(item) {
@@ -708,14 +860,36 @@
     try { domain = new URL(item.url).hostname.replace(/^www\./, ""); } catch { /* 忽略 */ }
     const tile = h("span", { className: "tile" }, item.type === "image"
       ? h("img", { src: item.url, alt: "", loading: "lazy", referrerpolicy: "no-referrer" }) : svg(TYPE_ICON[item.type], 18));
-    return h("div", { className: "item" }, tile,
+    // 勾选状态在点击时读取，行元素会被复用。
+    const toggle = () => {
+      if (selected.has(item.url)) selected.delete(item.url);
+      else if (selected.size >= BATCH_LIMIT) return toast(`一次最多选择 ${BATCH_LIMIT} 项`);
+      else selected.add(item.url);
+      renderList();
+    };
+    const node = h("div", { className: "item selectable", role: "checkbox", tabindex: "0",
+      // 点击行的空白处切换勾选；行尾的按钮各自处理，不触发勾选。
+      onclick: event => { if (!event.target.closest("button")) toggle(); },
+      onkeydown: event => { if ((event.key === " " || event.key === "Enter") && event.target === event.currentTarget) { event.preventDefault(); toggle(); } } },
+      h("span", { className: "check" }, svg("check", 12, 3)),
+      tile,
       h("div", { className: "meta" },
         h("div", { className: "name", title: item.url }, fileName(item.url)),
-        h("div", { className: "sub" }, [TYPE_LABEL[item.type], domain].filter(Boolean).join(" · "))),
+        h("div", { className: "sub" }, h("span", { className: "sent-tag" }, "已发送"), h("span", { className: "sub-text" }, [TYPE_LABEL[item.type], domain].filter(Boolean).join(" · ")))),
       h("div", { className: "item-actions" },
         iconButton("link", "复制链接", () => copy(item.url, "已复制链接")),
         iconButton("terminal", "复制 curl 命令", async () => copy(await curlFor(item.url), "已复制 curl 命令")),
         iconButton("send", "发送到 Tessera", () => send(item.url, null), "accent")));
+    return node;
+  }
+
+  function syncRow(node, item, sent) {
+    const on = selected.has(item.url);
+    node.classList.toggle("is-selected", on);
+    node.classList.toggle("is-sent", sent);
+    node.setAttribute("aria-checked", String(on));
+    node.querySelector(".check").classList.toggle("on", on);
+    node.querySelector(".sent-tag").hidden = !sent;
   }
 
   // ----- 发送到 Tessera -----
@@ -743,7 +917,7 @@
           h("button", { type: "button", className: "btn primary", onclick: () => send(url, platform) }, "重试")],
       });
     }
-    renderCandidates(parsed.candidates || [], back);
+    renderCandidates(parsed.candidates || [], back, url);
   }
 
   function formatSize(size) {
@@ -754,7 +928,7 @@
     return `${value.toFixed(index ? 1 : 0)} ${units[index]}`;
   }
 
-  function renderCandidates(candidates, back) {
+  function renderCandidates(candidates, back, url) {
     // 同一组（同一视频的不同清晰度）默认只选第一个；X 帖子的每张图、每个视频各自一组。
     const seen = new Set();
     const checks = candidates.map(candidate => {
@@ -784,6 +958,7 @@
           ...(folder ? { destination: folder } : {}),
         });
         saveSettings({ destination: folder });
+        markSent([url]);
         done(result.tasks || [], back);
       } catch (err) {
         error.textContent = err.message;
@@ -814,6 +989,246 @@
       footer: [h("button", { type: "button", className: "btn ghost", onclick: back }, "返回"), h("span", { className: "spacer" }),
         h("button", { type: "button", className: "btn primary", onclick: () => GM_openInTab(link, { active: true }) }, "查看下载任务")],
     });
+  }
+
+  // ----- 批量发送 -----
+
+  /**
+   * 批次在页面内存中保存：关闭面板后继续解析、创建任务并轮询进度，重新打开时主面板顶部显示入口。
+   * entry.state：waiting → parsing → creating → submitted（之后看 entry.tasks 的服务端状态）或 error。
+   */
+  let batch = null;
+  const TERMINAL = ["completed", "failed", "stopped"];
+  const PHASE = { resolving: "解析媒体…", downloading: "下载中", merging: "合并中…", saving: "保存中…" };
+
+  function startBatch(urls) {
+    if (!settings().server || !settings().key) {
+      toast("请先填写 Tessera 地址和访问密钥");
+      return openSettings(() => open(currentContext));
+    }
+    if (batch && batch.started && !batchDone()) return toast("上一批还在发送，请等待完成后再发送新的一批");
+    // 按资源列表的显示顺序发送，而不是勾选的先后顺序。
+    const listed = collect();
+    const known = new Map(listed.map(item => [item.url, item]));
+    const wanted = new Set(urls);
+    const ordered = [...listed.map(item => item.url).filter(url => wanted.has(url)), ...urls.filter(url => !known.has(url))];
+    batch = { started: false, destination: settings().destination,
+      entries: ordered.slice(0, BATCH_LIMIT).map(url => ({ url, type: known.get(url)?.type || "file", state: "waiting", error: "", tasks: [] })) };
+    openBatch();
+  }
+
+  const entryActive = entry => ["parsing", "creating"].includes(entry.state)
+    || entry.state === "waiting" && batch.started
+    || entry.state === "submitted" && entry.tasks.some(task => !TERMINAL.includes(task.status));
+  const entryOk = entry => entry.state === "submitted" && entry.tasks.length > 0 && entry.tasks.every(task => task.status === "completed");
+  const entryFailed = entry => entry.state === "error" || entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped");
+  const batchDone = () => !batch || batch.started && !batch.entries.some(entryActive);
+
+  async function runBatch() {
+    batch.started = true;
+    selected.clear();
+    batch.destination = batch.destination.trim().replace(/^\/+/, "");
+    saveSettings({ destination: batch.destination });
+    const current = batch;
+    const queue = current.entries.filter(entry => entry.state === "waiting");
+    // 服务端同时最多解析 2 个，这里同样两路并行，避免请求排队超时。
+    const worker = async () => { while (queue.length && batch === current) await sendEntry(queue.shift()); };
+    updateBatch();
+    await Promise.all([worker(), worker()]);
+  }
+
+  async function sendEntry(entry) {
+    entry.state = "parsing"; entry.error = ""; entry.tasks = [];
+    updateBatch();
+    try {
+      const parsed = await api("POST", "/api/v1/downloads/parse", { input: await curlFor(entry.url) });
+      const candidates = parsed.candidates || [];
+      if (!candidates.length) throw new Error("没有可下载的文件");
+      // 每组只取第一个候选（例如 M3U8 的第一个清晰度），与单个发送的默认选择一致。
+      const groups = new Set();
+      const chosen = candidates.filter(candidate => !groups.has(candidate.group) && groups.add(candidate.group));
+      entry.state = "creating";
+      updateBatch();
+      const result = await api("POST", "/api/v1/downloads", {
+        items: chosen.map(candidate => ({ ticket: candidate.ticket, name: candidate.name })),
+        ...(batch.destination ? { destination: batch.destination } : {}),
+      });
+      entry.tasks = result.tasks || [];
+      entry.state = "submitted";
+      markSent([entry.url]);
+    } catch (error) {
+      entry.state = "error";
+      entry.error = error.message;
+      markSent([entry.url], false);
+    }
+    updateBatch();
+    schedulePoll();
+  }
+
+  function retryEntries(entries) {
+    for (const entry of entries) { entry.state = "waiting"; entry.error = ""; entry.tasks = []; }
+    void runBatch();
+  }
+
+  let pollTimer = 0;
+  function schedulePoll(delay = 1500) {
+    if (!pollTimer) pollTimer = setTimeout(poll, delay);
+  }
+  async function poll() {
+    pollTimer = 0;
+    if (!batch) return;
+    const ids = batch.entries.flatMap(entry => entry.tasks.filter(task => !TERMINAL.includes(task.status)).map(task => task.id));
+    if (ids.length) {
+      try {
+        const { tasks } = await api("GET", `/api/v1/downloads?ids=${ids.join(",")}`);
+        const fresh = new Map(tasks.map(task => [task.id, task]));
+        for (const entry of batch.entries) entry.tasks = entry.tasks.map(task => fresh.get(task.id) || task);
+        // 下载失败或被停止的资源不算已发送，下次全选时重新包含。
+        markSent(batch.entries.filter(entry => entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped")).map(entry => entry.url), false);
+      } catch { /* 网络抖动：下一轮再试 */ }
+      updateBatch();
+    }
+    if (batch && batch.entries.some(entryActive)) schedulePoll(2000);
+  }
+
+  function updateBatch() {
+    if (!panel) return;
+    if (panel.dataset.view === "batch") renderBatch();
+    else if (panel.dataset.view === "main") renderBanner();
+  }
+
+  function batchSummary() {
+    const total = batch.entries.length;
+    const ok = batch.entries.filter(entryOk).length;
+    const failed = batch.entries.filter(entryFailed).length;
+    return { total, ok, failed, finished: batchDone() };
+  }
+
+  /** 主面板顶部的批次入口：只创建一次，之后原地更新文字和进度，避免轮询时替换节点吞掉点击。 */
+  function renderBanner() {
+    const target = panel && panel.querySelector(".banner-host");
+    if (!target) return;
+    target.hidden = !batch || !batch.started;
+    if (target.hidden) return target.replaceChildren();
+    let button = target.querySelector(".batch-banner");
+    if (!button) {
+      button = h("button", { type: "button", className: "batch-banner", onclick: openBatch },
+        h("div", { className: "meta" }, h("div", { className: "name" }), h("div", { className: "progress" }, h("span"))), svg("chevron"));
+      target.replaceChildren(button);
+    }
+    const { total, ok, failed, finished } = batchSummary();
+    button.querySelector(".name").textContent = finished
+      ? `批量发送已结束 · 成功 ${ok}${failed ? `，失败 ${failed}` : ""}` : `正在批量发送 · 已完成 ${ok} / ${total}`;
+    button.querySelector(".progress").className = `progress${finished && !failed ? " done" : ""}`;
+    button.querySelector(".progress > span").style.width = `${total ? (ok + failed) / total * 100 : 0}%`;
+  }
+
+  function openBatch() {
+    if (!batch) return open(currentContext);
+    frame("批量发送", h("div", { className: "batch-host", style: "display:grid;gap:16px;grid-template-columns:minmax(0,1fr)" }),
+      { back: () => open(currentContext), footer: [] });
+    panel.dataset.view = "batch";
+    renderBatch();
+  }
+
+  /** 一个条目的状态文字、语气与进度（0–1，null 为不确定进度，undefined 为不显示）。 */
+  function entryStatus(entry) {
+    if (entry.state === "waiting") return { text: batch.started ? "等待中" : TYPE_LABEL[entry.type] };
+    if (entry.state === "parsing") return { text: "解析中…", tone: "run", progress: null };
+    if (entry.state === "creating") return { text: "提交任务…", tone: "run", progress: null };
+    if (entry.state === "error") return { text: entry.error || "发送失败", tone: "err" };
+    const task = entry.tasks.find(item => !TERMINAL.includes(item.status)) || entry.tasks.find(item => item.status !== "completed") || entry.tasks[0];
+    if (!task) return { text: "已提交" };
+    const more = entry.tasks.length > 1 ? `（${entry.tasks.length} 个文件）` : "";
+    if (task.status === "completed") return { text: `已完成 · ${formatSize(task.stored_bytes || task.size)}${more}`, tone: "ok", progress: 1 };
+    if (task.status === "failed") return { text: task.error || "下载失败", tone: "err" };
+    if (task.status === "stopped") return { text: task.error ? `已停止：${task.error}` : "已停止", tone: "err" };
+    if (task.status === "queued") return { text: "排队中", progress: 0 };
+    if (task.status === "interrupted") return { text: task.error || "等待重试", tone: "run", progress: null };
+    const fraction = task.segments_total ? task.segments_done / task.segments_total
+      : task.size ? Math.min(1, (task.received || 0) / task.size) : null;
+    const parts = [PHASE[task.phase] || "下载中"];
+    if (task.phase === "downloading" || !task.phase) {
+      if (fraction != null) parts.push(`${Math.floor(fraction * 100)}%`);
+      else if (task.received) parts.push(formatSize(task.received));
+      if (task.speed) parts.push(`${formatSize(task.speed)}/s`);
+    }
+    return { text: parts.join(" · ") + more, tone: "run", progress: task.phase === "downloading" || !task.phase ? fraction : null };
+  }
+
+  /** 批次条目的行：每个条目只创建一次，轮询时原地更新状态，保证重试按钮可以点到。 */
+  function batchRow(entry) {
+    if (!entry.row) {
+      const tile = h("span", { className: "tile" });
+      const state = h("div", { className: "state" });
+      const bar = h("div", { className: "progress" }, h("span"));
+      const action = h("span", { className: "item-actions" });
+      entry.row = { node: h("div", { className: "item batch-item" }, tile,
+        h("div", { className: "meta" }, h("div", { className: "name", title: entry.url }, fileName(entry.url)), state, bar), action),
+        tile, state, bar, action, icon: "", retry: false };
+    }
+    const { tile, state, bar, action } = entry.row;
+    const status = entryStatus(entry);
+    const iconName = entryOk(entry) ? "check" : TYPE_ICON[entry.type] || "file";
+    if (entry.row.icon !== iconName) { tile.replaceChildren(svg(iconName, 18)); entry.row.icon = iconName; }
+    state.className = `state${status.tone ? " " + status.tone : ""}`;
+    state.textContent = status.text;
+    bar.hidden = status.progress === undefined || entry.state === "waiting";
+    bar.className = `progress${status.progress == null ? " indeterminate" : ""}${status.tone === "ok" ? " done" : ""}`;
+    bar.firstChild.style.width = `${(status.progress || 0) * 100}%`;
+    const retry = batch.started && entryFailed(entry) && !entryActive(entry);
+    if (entry.row.retry !== retry) {
+      action.replaceChildren(...(retry ? [iconButton("retry", "重试", () => retryEntries([entry]))] : []));
+      entry.row.retry = retry;
+    }
+    return entry.row.node;
+  }
+
+  function renderBatch() {
+    const target = panel && panel.dataset.view === "batch" && panel.querySelector(".batch-host");
+    const footer = panel && panel.querySelector("footer");
+    if (!target || !batch) return;
+    const rows = batch.entries.map(batchRow);
+    if (!batch.started) {
+      // 发送前确认保存目录；先写回 batch，避免列表刷新时丢失输入。
+      const destination = h("input", { type: "text", value: batch.destination, placeholder: "留空保存到根目录",
+        oninput: event => { batch.destination = event.target.value; } });
+      target.replaceChildren(
+        h("label", { className: "field" }, h("span", { className: "label" }, "保存到目录"), destination),
+        h("div", { className: "section" }, h("div", { className: "section-head" }, h("h2", {}, "待发送", h("span", { className: "count" }, String(batch.entries.length)))),
+          h("div", { className: "list" }, rows)),
+        h("p", { className: "hint" }, "每项由服务器解析后自动选择第一个可用格式；需要挑选清晰度的视频请单独发送。"));
+      footer.replaceChildren(h("span", { className: "spacer" }),
+        h("button", { type: "button", className: "btn ghost", onclick: () => { batch = null; open(currentContext); } }, "取消"),
+        h("button", { type: "button", className: "btn primary", onclick: () => void runBatch() }, svg("send"), `开始发送 ${batch.entries.length} 项`));
+      footer.dataset.mode = "draft";
+      return;
+    }
+    const { total, ok, failed, finished } = batchSummary();
+    let overview = target.querySelector(".overview");
+    if (!overview || target.querySelector(".field")) {
+      overview = h("div", { className: "overview" },
+        h("div", { className: "overview-line" }, h("strong"), h("span", { className: "sub" })), h("div", { className: "progress" }, h("span")));
+      target.replaceChildren(overview, h("div", { className: "list" }, rows));
+    }
+    overview.querySelector("strong").textContent = finished ? "发送结束" : "正在发送";
+    overview.querySelector(".sub").textContent = `成功 ${ok} / ${total}${failed ? ` · 失败 ${failed}` : ""}${batch.destination ? ` · 保存到 ${batch.destination}` : ""}`;
+    overview.querySelector(".progress").className = `progress${finished && !failed ? " done" : ""}`;
+    overview.querySelector(".progress > span").style.width = `${total ? (ok + failed) / total * 100 : 0}%`;
+    // 底部按钮只在形态变化时重建（运行中／结束、有无失败项），轮询不会替换正在点击的按钮。
+    const failedEntries = batch.entries.filter(entry => entryFailed(entry) && !entryActive(entry));
+    const mode = `${finished ? "done" : "run"}:${failedEntries.length > 0}`;
+    if (footer.dataset.mode === mode) return;
+    footer.dataset.mode = mode;
+    const link = settings().server.replace(/\/+$/, "") + "/?view=downloads";
+    footer.replaceChildren(...[
+      h("button", { type: "button", className: "btn ghost", onclick: () => GM_openInTab(link, { active: true }) }, "查看下载任务"),
+      h("span", { className: "spacer" }),
+      failedEntries.length ? h("button", { type: "button", className: "btn", onclick: () => retryEntries(batch.entries.filter(entry => entryFailed(entry) && !entryActive(entry))) }, "重试失败项") : null,
+      finished
+        ? h("button", { type: "button", className: "btn primary", onclick: () => { batch = null; open(currentContext); } }, "完成")
+        : h("button", { type: "button", className: "btn primary", onclick: close, title: "关闭面板，发送和进度跟踪在后台继续" }, "后台运行"),
+    ].filter(Boolean));
   }
 
   // ----- 设置 -----
@@ -973,6 +1388,34 @@
     decorate();
   }
 
+  // ---------- 单页应用换页 ----------
+
+  // X、YouTube 换页不刷新文档：地址变化时丢掉上一页的资源，主面板切换到新页面。X 的图片查看器（/photo/1）不算换页。
+  const pageKey = href => { try { const url = new URL(href); return url.origin + url.pathname.replace(/\/(photo|video)\/\d+\/?$/, "") + url.search; } catch { return href; } };
+  let currentPage = pageKey(location.href);
+  let navTimer = 0;
+  function checkNavigation(slack = 0) {
+    const key = pageKey(location.href);
+    if (!active || key === currentPage) return;
+    currentPage = key;
+    // 轮询发现得晚，保留刚到达的资源（大概率属于新页面）。
+    const cutoff = Date.now() - slack;
+    for (const [url, item] of items) if (item.time < cutoff) items.delete(url);
+    refreshFab();
+    if (!panel || panel.dataset.view !== "main" || (currentContext && currentContext.scope)) return;
+    const next = platformOf(location.href);
+    if ((next && next.url) !== (currentContext && currentContext.url)) open(next);
+    else renderList();
+  }
+  function watchNavigation() {
+    if (navTimer) return;
+    currentPage = pageKey(location.href);
+    const navigation = page.navigation || window.navigation;
+    try { navigation?.addEventListener("navigatesuccess", () => checkNavigation()); } catch { /* 不支持 Navigation API */ }
+    window.addEventListener("popstate", () => checkNavigation());
+    navTimer = setInterval(() => checkNavigation(1500), 1000);
+  }
+
   // ---------- 启动 ----------
 
   const whenReady = fn => document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", fn, { once: true }) : fn();
@@ -981,6 +1424,7 @@
     if (active) return;
     active = true;
     observeNetwork();
+    watchNavigation();
     whenReady(() => { if (!active) return; mount(); watchDom(); refreshFab(); });
   }
 

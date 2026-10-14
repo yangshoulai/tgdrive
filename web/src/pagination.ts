@@ -24,8 +24,11 @@ export function useCursorPage<T extends { next_cursor: string | number | null }>
   const [history, setHistory] = useState<(string | null)[]>([null]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
   const requestId = useRef(0);
   const pending = useRef(false);
+  const historyRef = useRef(history);
+  historyRef.current = history;
   const load = useCallback(async (cursors: (string | null)[], reset = false) => {
     if (pending.current && !reset) return;
     const id = ++requestId.current;
@@ -42,9 +45,26 @@ export function useCursorPage<T extends { next_cursor: string | number | null }>
     }
   }, [fetchPage]);
   const reload = useCallback(() => load([null], true), [load]);
+  /** 原地刷新当前页：保留页码和已显示的列表，不显示骨架屏；失败时保留原列表并返回错误信息。 */
+  const refresh = useCallback(async (): Promise<string | null> => {
+    if (pending.current) return null;
+    const id = ++requestId.current;
+    const cursors = historyRef.current;
+    pending.current = true;
+    setRefreshing(true);
+    try {
+      const result = await fetchPage(cursors[cursors.length - 1]);
+      if (id === requestId.current) { setPage(result); setError(""); }
+      return null;
+    } catch (reason) {
+      return errorMessage(reason, "刷新失败，请稍后重试");
+    } finally {
+      if (id === requestId.current) { pending.current = false; setRefreshing(false); }
+    }
+  }, [fetchPage]);
   useEffect(() => { void reload(); return () => { requestId.current++; pending.current = false; }; }, [reload]);
   return {
-    page, setPage, loading, error, reload,
+    page, setPage, loading, error, reload, refresh, refreshing,
     number: history.length,
     hasPrevious: history.length > 1,
     hasNext: page?.next_cursor != null,

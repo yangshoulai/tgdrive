@@ -12,9 +12,10 @@ from collections.abc import AsyncIterator
 from .accounts import AccountService
 from .authn import AuthenticationError, Session, hash_password
 from .errors import NotFoundError, NotReadyError
+from .filekinds import kind_clause
 from .maintenance import MaintenanceService
 from .metrics import TrafficMetrics
-from .objects import PRIVATE_PREFIX, ObjectService, Scope
+from .objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
 from .s3.auth import ClientAuthStore
 from .telegram.config import ConfiguredBlobStore, TelegramBotConfigStore
 
@@ -498,10 +499,15 @@ class UserApi:
                 "unlocked": self.accounts.keystore.unlocked, "remember": session.remember,
                 "csrf_token": session.csrf_token, "expires_at": session.expires_at}
 
-    async def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000, public_only: bool = False):
+    async def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000, public_only: bool = False,
+                   kind: str = ""):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         path_prefix = self._path(prefix) if prefix else ""
+        if kind:
+            clause = kind_clause(kind)
+            scope = self._scope(token)
+            return await self.objects.metadata.run_in_thread(self._kind_directory_page, scope, path_prefix, cursor, limit, clause, public_only)
         if public_only:
             return await self.objects.metadata.run_in_thread(self._public_directory_page, account.bucket_id, path_prefix, cursor, limit)
         def read_page():
@@ -525,6 +531,28 @@ class UserApi:
         return {"objects": [item for item in items if not item["key"].endswith("/")],
                 "common_prefixes": list(folders), "public_folders": folders,
                 "folder_sizes": self.objects.folder_sizes(Scope(bucket_id), list(folders)),
+                "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
+
+    def _kind_directory_page(self, scope: Scope, prefix: str, cursor: str | None, limit: int,
+                             clause: tuple[str, list[str]], public_only: bool):
+        """按类型筛选当前目录的文件（不含文件夹），键集分页；扫描范围与「公开」筛选相同，只看直接子项。"""
+        if scope.authorize is not None:
+            scope.authorize()
+        effective = prefix or scope.prefix
+        if effective.startswith((PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX)) and not scope.private_access:
+            raise PermissionError("私密空间需要单独解锁")
+        if not effective.startswith(scope.prefix):
+            raise PermissionError("prefix is outside scope")
+        limit = max(1, min(limit, 200))
+        condition, args = clause
+        rows = self.objects.metadata.db.execute(
+            "SELECT * FROM objects WHERE bucket_id=? AND key>? AND key<? AND key>? AND substr(key,-1)!='/' "
+            "AND (substr(key,1,9)!='.tgdrive/' OR ?=1) AND instr(substr(key,?),'/')=0 "
+            f"AND (?=0 OR public_token IS NOT NULL) AND {condition} ORDER BY key LIMIT ?",
+            (scope.bucket_id, effective, effective + self.objects._PREFIX_END, cursor or "", int(scope.private_access),
+             len(effective) + 1, int(public_only), *args, limit + 1)).fetchall()
+        return {"objects": self._objects_json([self.objects._object(row) for row in rows[:limit]]),
+                "common_prefixes": [], "folder_sizes": {}, "public_folders": {},
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
     async def folders(self, token: str, *, prefix: str = "", cursor: str = "", limit: int = 50):
@@ -573,7 +601,7 @@ class UserApi:
             f"SELECT * FROM objects WHERE bucket_id=? AND public_token IS NOT NULL AND key IN ({marks})", (bucket_id, *prefixes)).fetchall()
         return {row["key"]: self._object_json(self.objects._object(row)) for row in rows}
 
-    async def search(self, token: str, query: str, cursor: str = "", limit: int = 100, public_only: bool = False):
+    async def search(self, token: str, query: str, cursor: str = "", limit: int = 100, public_only: bool = False, kind: str = ""):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         scope = self._scope(token)
@@ -582,6 +610,7 @@ class UserApi:
         query = unicodedata.normalize("NFC", query.strip())
         if len(query) > 256:
             raise ValueError("搜索词不能超过 256 个字符")
+        condition, kind_args = kind_clause(kind) if kind else ("1", [])
         def read_page():
             if scope.authorize is not None:
                 scope.authorize()
@@ -589,9 +618,9 @@ class UserApi:
                 "SELECT * FROM objects "
                 "WHERE bucket_id=? AND key>? AND instr(lower(key),lower(?))>0 "
                 "AND substr(key,-1)!='/' AND (substr(key,1,9)!='.tgdrive/' OR ?=1) "
-                "AND key>=? AND key<? AND (?=0 OR public_token IS NOT NULL) ORDER BY key LIMIT ?",
+                f"AND key>=? AND key<? AND (?=0 OR public_token IS NOT NULL) AND {condition} ORDER BY key LIMIT ?",
                 (account.bucket_id, cursor, query, int(scope.private_access), scope.prefix,
-                 scope.prefix + self.objects._PREFIX_END, int(public_only), limit + 1),
+                 scope.prefix + self.objects._PREFIX_END, int(public_only), *kind_args, limit + 1),
             ).fetchall()
         rows = await self.objects.metadata.run_in_thread(read_page)
         return {"objects": self._objects_json([self.objects._object(row) for row in rows[:limit]]), "common_prefixes": [],

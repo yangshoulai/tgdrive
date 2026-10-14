@@ -524,6 +524,13 @@ class TgDriveASGI(StaticFiles):
                 self._write_audit(entry, ok=False, error=exc)
                 raise
             self._write_audit(entry, ok=True)
+        elif method == "GET" and route == "/downloads" and self.offline is not None:
+            user_id, permits = self.keys.download_reader(principal, bucket)
+            try:
+                ids = [int(value) for value in arg("ids").split(",") if value.strip()]
+            except ValueError as exc:
+                raise ValueError("ids 应为逗号分隔的任务编号") from exc
+            result = {"tasks": self.offline.status_of(user_id, ids, permits)}
         elif method == "POST" and route == "/downloads/parse" and self.offline is not None:
             user_id = self.keys.download_owner(principal, bucket)[0]
             result = await self.offline.parse(user_id, payload.get("input"), download_type=payload.get("download_type", "auto"),
@@ -806,11 +813,11 @@ class TgDriveASGI(StaticFiles):
             if method == "GET" and route == "/search":
                 return 200, await user.search(token, query.get("q", [""])[0],
                     query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0]),
-                    public_only=query.get("public", ["0"])[0] == "1"), {}
+                    public_only=query.get("public", ["0"])[0] == "1", kind=query.get("kind", [""])[0]), {}
             if method == "GET" and route == "/list":
                 return 200, await user.list(token, prefix=query.get("prefix", [""])[0],
                                                  cursor=query.get("cursor", [None])[0], limit=int(query.get("limit", ["1000"])[0]),
-                                                 public_only=query.get("public", ["0"])[0] == "1"), {}
+                                                 public_only=query.get("public", ["0"])[0] == "1", kind=query.get("kind", [""])[0]), {}
             if method == "GET" and route == "/folders":
                 return 200, await user.folders(token, prefix=query.get("prefix", [""])[0],
                     cursor=query.get("cursor", [""])[0], limit=int(query.get("limit", ["50"])[0])), {}

@@ -35,7 +35,7 @@ Tessera（项目与命令行名称仍为 tgdrive）是个人和小团队使用�
 | `--admin` | `#7048B8` | 管理端标识 |
 | `--success` / `--warning` / `--danger` | `#187648` / `#A65416` / `#B63834` | 状态；浅色提示背景上的文字对比度不低于 4.5:1 |
 | `--chart-out` | `#257E8B` | 下载流量，与公开状态区分 |
-| `--logo-a` / `--logo-b` / `--logo-c` / `--logo-plane` / `--logo-fold` | `#2F4BD0` / `#6A82EE` / `#1E3194` / `#F0A22E` / `#C27A10` | 标志的四块瓦片与纸飞机折线 |
+| `--logo-bg` / `--logo-tile` / `--logo-ring` / `--logo-plane` / `--logo-fold` | `#0B0C13` / `#FFFFFF` / 浅色透明、深色 `rgba(255,255,255,.16)` / `#F0A22E` / `#C27A10` | 标志与网页图标同一风格：暗灰底座、三块白色瓦片（不透明度 1／.6／.32）、纸飞机与折线；登录页瓦片墙同样只用白／灰瓦片 |
 | `--glyph-paper` / `--glyph-edge` | `#FFFFFF` / `#C4C4CC` | 文件图标的纸面与描边 |
 | `--glyph-mark` / `--glyph-mark-bg` | `#5F5F6B` / `#F1F1F4` | 文件类型记号与类型底色（所有类型共用；`--tile-*` 令牌都指向它们） |
 | `--folder-back` / `--folder-front` | `#7D90E6` / `#A9B7F3` | 文件夹图标的后片与前片 |
@@ -92,6 +92,7 @@ Tessera（项目与命令行名称仍为 tgdrive）是个人和小团队使用�
 | `Badge` | `neutral` `success` `warning` `danger` `accent` `public`，可带圆点或图标 |
 | `Field` + `.input` | 标签、提示、错误三态；直接包含的输入控件自动关联标签与提示，错误带 `aria-invalid` |
 | `Switch` / `Checkbox` / `Segmented` / `SearchInput` | 原生表单控件增强，保留键盘与读屏语义 |
+| `FilterChips` | 快速筛选标签：28px 高胶囊，细边白底，选中为墨色实底反白；单选（左右方向键切换），一行放不下时横向滚动、不换行 |
 | `Modal` / `ConfirmDialog` | portal 到 body、唯一标题；焦点进入、Tab 循环、Esc 仅关闭最上层、关闭后焦点归还；提交期间可禁止关闭 |
 | `Menu` / `ContextMenu` | 行级“更多”菜单与右键菜单共用 `MenuList`：portal 到 `body`（全屏时挂到全屏元素内），不会被行的 `content-visibility`、`overflow` 裁切；支持方向键、Esc、点外部与滚动关闭；菜单项可带 `shortcut` 提示（如 F2、⌘⌫） |
 | `toast` + `Toaster` | 底部居中；成功 3.8 秒，带操作的提示 8 秒；错误保留至手动关闭或被队列替换，使用 `role="alert"`，最多 4 条；长文件名在任意字符处换行，「撤销」等操作按钮不收缩、不换行 |

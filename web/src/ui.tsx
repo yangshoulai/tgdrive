@@ -93,15 +93,16 @@ export function Icon({ name, size = 18, className }: { name: IconName; size?: nu
 
 /* ---------- 品牌 ---------- */
 
-/** 标志：四块马赛克瓦片（tessera）拼成一个方块，右上角那块切成纸飞机的形状并用公开色强调。 */
-export function LogoMark({ size = 22 }: { size?: number }) {
+/** 标志：与网页图标（build-apps.mjs、docs/logo.svg）同一几何——暗灰圆角底座上三块白色瓦片（透明度递减），右上角是公开色纸飞机。 */
+export function LogoMark({ size = 24 }: { size?: number }) {
   return (
     <svg className="logo-mark" viewBox="0 0 32 32" width={size} height={size} aria-hidden="true">
-      <rect className="logo-a" x="2.5" y="2.5" width="13" height="13" rx="3" />
-      <polygon className="logo-plane" points="18,4 28,4 28,14" strokeWidth="3" strokeLinejoin="round" />
-      <path className="logo-fold" d="M27.2 4.8 23.4 8.6" strokeWidth="1.3" strokeLinecap="round" />
-      <rect className="logo-b" x="2.5" y="16.5" width="13" height="13" rx="3" />
-      <rect className="logo-c" x="16.5" y="16.5" width="13" height="13" rx="3" />
+      <rect className="logo-bg" x=".5" y=".5" width="31" height="31" rx="7.5" />
+      <rect className="logo-tile" x="5" y="5" width="10" height="10" rx="2.4" />
+      <rect className="logo-tile" x="5" y="17" width="10" height="10" rx="2.4" fillOpacity=".6" />
+      <rect className="logo-tile" x="17" y="17" width="10" height="10" rx="2.4" fillOpacity=".32" />
+      <polygon className="logo-plane" points="18.2,6.2 25.8,6.2 25.8,13.8" strokeWidth="2.4" strokeLinejoin="round" />
+      <path className="logo-fold" d="M25.1 6.9 22.2 9.8" strokeWidth="1.1" strokeLinecap="round" />
     </svg>
   );
 }
@@ -134,9 +135,9 @@ export function Button({ variant = "secondary", size = "md", icon, loading, bloc
   );
 }
 
-export function IconButton({ icon, label, onClick, variant = "ghost", size = "md", disabled, active, shortcut }: { icon: IconName; label: string; onClick?: () => void; variant?: "ghost" | "secondary"; size?: "sm" | "md"; disabled?: boolean; active?: boolean; shortcut?: string }) {
+export function IconButton({ icon, label, onClick, variant = "ghost", size = "md", disabled, active, shortcut, spinning }: { icon: IconName; label: string; onClick?: () => void; variant?: "ghost" | "secondary"; size?: "sm" | "md"; disabled?: boolean; active?: boolean; shortcut?: string; spinning?: boolean }) {
   return (
-    <button type="button" className={`icon-btn icon-btn-${variant} icon-btn-${size}${active ? " is-active" : ""}`} onClick={onClick} aria-label={label} aria-keyshortcuts={shortcut} title={shortcut ? `${label}（${shortcut.toUpperCase()}）` : label} disabled={disabled} aria-pressed={active}>
+    <button type="button" className={`icon-btn icon-btn-${variant} icon-btn-${size}${active ? " is-active" : ""}${spinning ? " is-spinning" : ""}`} aria-busy={spinning || undefined} onClick={onClick} aria-label={label} aria-keyshortcuts={shortcut} title={shortcut ? `${label}（${shortcut.toUpperCase()}）` : label} disabled={disabled} aria-pressed={active}>
       <Icon name={icon} size={size === "sm" ? 16 : 18} />
     </button>
   );
@@ -220,6 +221,26 @@ export function SearchInput({ value, onChange, onSubmit, onClear, placeholder, l
       <input value={value} onChange={event => onChange(event.target.value)} placeholder={placeholder} aria-label={label} enterKeyHint="search" />
       {value && <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => { onChange(""); onClear?.(); }}><Icon name="x" size={14} /></button>}
     </form>
+  );
+}
+
+/** 快速筛选标签：单选，一行放不下时横向滚动；键盘用左右方向键切换（与 Segmented 相同的单选语义）。 */
+export function FilterChips<T extends string>({ value, options, onChange, label }: { value: T; options: { value: T; label: string }[]; onChange: (value: T) => void; label: string }) {
+  return (
+    <div className="filter-chips" role="radiogroup" aria-label={label}>
+      {options.map((option, index) => (
+        <button key={option.value} type="button" role="radio" aria-checked={value === option.value} tabIndex={value === option.value ? 0 : -1}
+          className={`filter-chip${value === option.value ? " is-active" : ""}`} onClick={() => onChange(option.value)}
+          onKeyDown={event => {
+            const offset = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+            if (!offset) return;
+            event.preventDefault();
+            const next = (index + offset + options.length) % options.length;
+            onChange(options[next].value);
+            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=radio]")[next]?.focus();
+          }}>{option.label}</button>
+      ))}
+    </div>
   );
 }
 
