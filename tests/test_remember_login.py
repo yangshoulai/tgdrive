@@ -16,8 +16,8 @@ class RememberLoginTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.data = Path(self.temp.name) / "data"
         self.app = create_app(self.data, secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -30,7 +30,7 @@ class RememberLoginTests(unittest.TestCase):
         self.app = create_app(self.data, secure_cookies=False)
         self.client = Client(self.app)
 
-    async def login(self, username="alice", password="alice password", remember=None):
+    async def login(self, username="alice@example.com", password="alice password", remember=None):
         payload = {"username": username, "password": password}
         if remember is not None:
             payload["remember"] = remember
@@ -64,7 +64,7 @@ class RememberLoginTests(unittest.TestCase):
             self.restart()
             self.unlock()
             status, me = await self.me(remembered)
-            self.assertEqual((status, me["username"], me["remember"], me["csrf_token"]), (200, "alice", True, remembered["x-csrf-token"]))
+            self.assertEqual((status, me["username"], me["remember"], me["csrf_token"]), (200, "alice@example.com", True, remembered["x-csrf-token"]))
             self.assertEqual((await self.me(ordinary))[0], 401)
             # 恢复的会话和原来一样能做写操作（CSRF 令牌不变）
             status, _, _ = await self.client.request("PUT", "/api/user/v1/files?path=a.txt", b"x", {**remembered, "content-length": "1"})
@@ -111,7 +111,7 @@ class RememberLoginTests(unittest.TestCase):
 
             self.app.accounts.set_account_status(self.alice.id, "active")
             _, fourth, _ = await self.login(password="another password", remember=True)
-            _, admin, _ = await self.login("admin", "admin password", remember=True)
+            _, admin, _ = await self.login("admin@example.com", "admin password", remember=True)
             status, _, _ = await self.client.request("POST", "/api/admin/v1/lock", b"{}", admin)
             self.assertEqual(status, 204)
             self.restart(); self.unlock()

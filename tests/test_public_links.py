@@ -45,8 +45,8 @@ class PublicLinkTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False, public_base_url="https://drive.example.test/")
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -58,7 +58,7 @@ class PublicLinkTests(unittest.TestCase):
 
     def test_upload_public_and_stream_without_session(self):
         async def run():
-            auth = await self.client.login("user", "alice", "alice password")
+            auth = await self.client.login("user", "alice@example.com", "alice password")
             status, _, data = await self.client.request(
                 "PUT", "/api/user/v1/files?path=docs/hello.txt&public=1", b"hello world",
                 {**auth, "content-type": "text/plain", "content-length": "11"})
@@ -81,7 +81,7 @@ class PublicLinkTests(unittest.TestCase):
 
     def test_link_survives_overwrite_and_move_but_not_revoke(self):
         async def run():
-            auth = await self.client.login("user", "alice", "alice password")
+            auth = await self.client.login("user", "alice@example.com", "alice password")
             await self.client.request("PUT", "/api/user/v1/files?path=a.txt", b"one", {**auth, "content-length": "3"})
             status, _, data = await self.client.request(
                 "POST", "/api/user/v1/public", json.dumps({"path": "a.txt", "public": True}).encode(), auth)
@@ -111,11 +111,11 @@ class PublicLinkTests(unittest.TestCase):
 
     def test_disabled_owner_admin_revoke_and_lock(self):
         async def run():
-            user = await self.client.login("user", "alice", "alice password")
+            user = await self.client.login("user", "alice@example.com", "alice password")
             _, _, data = await self.client.request(
                 "PUT", "/api/user/v1/files?path=x.bin&public=true", b"x", {**user, "content-length": "1"})
             token = json.loads(data)["public_token"]
-            admin = await self.client.login("admin", "admin", "admin password")
+            admin = await self.client.login("admin", "admin@example.com", "admin password")
 
             _, _, data = await self.client.request("GET", "/api/admin/v1/objects", headers=admin)
             self.assertEqual(json.loads(data)["objects"][0]["public_token"], token)
@@ -138,11 +138,11 @@ class PublicLinkTests(unittest.TestCase):
 
     def test_quota_update_and_password_change(self):
         async def run():
-            admin = await self.client.login("admin", "admin", "admin password")
+            admin = await self.client.login("admin", "admin@example.com", "admin password")
             status, _, _ = await self.client.request(
                 "POST", f"/api/admin/v1/users/{self.alice.id}/quota", json.dumps({"quota_bytes": 2}).encode(), admin)
             self.assertEqual(status, 204)
-            user = await self.client.login("user", "alice", "alice password")
+            user = await self.client.login("user", "alice@example.com", "alice password")
             status, _, data = await self.client.request(
                 "PUT", "/api/user/v1/files?path=big.bin", b"abc", {**user, "content-length": "3"})
             self.assertEqual((status, json.loads(data)["error"]["code"]), (413, "quota_exceeded"))
@@ -153,7 +153,7 @@ class PublicLinkTests(unittest.TestCase):
             status, _, _ = await self.client.request("POST", "/api/user/v1/password", json.dumps(
                 {"old_password": "alice password", "new_password": "new password"}).encode(), user)
             self.assertEqual(status, 204)
-            await self.client.login("user", "alice", "new password")
+            await self.client.login("user", "alice@example.com", "new password")
         self.run_async(run())
 
 

@@ -2,7 +2,9 @@ import type { AuthenticationOptions, PasskeyChallenge, RegistrationOptions } fro
 
 export type Role = "admin" | "user";
 export type SiteConfig = { public_base_url: string | null; s3_endpoint: string | null };
-export type Session = { csrf_token: string; expires_at: number; username: string; role: Role; bucket_id?: number | null; unlocked?: boolean; remember?: boolean } & Partial<SiteConfig>;
+/** 账号资料：username 是登录邮箱（旧账号可能仍是用户名，needs_email 为 true）；display_name 优先昵称。 */
+export type Profile = { nickname?: string | null; display_name?: string; avatar_version?: number | null; needs_email?: boolean };
+export type Session = Profile & { csrf_token: string; expires_at: number; username: string; role: Role; bucket_id?: number | null; unlocked?: boolean; remember?: boolean } & Partial<SiteConfig>;
 export type FileItem = {
   key: string;
   size: number;
@@ -24,7 +26,7 @@ export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subti
 export type PreviewListPage = { objects: FileItem[]; next_cursor: string | null };
 /** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
 export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number> };
-export type Account = { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
+export type Account = Profile & { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
 export type ClientKey = { access_key_id: string; status: "active" | "disabled"; created_at: number; last_used_at: number | null };
 export type ClientGrant = { bucket_id: number; bucket_name: string; prefix: string; perms: "ro" | "rw" };
 export type AdminClient = { id: number; name: string; description: string | null; owner_user_id: number | null; owner_username?: string | null; status: "active" | "disabled"; created_at: number; keys: ClientKey[]; grants: ClientGrant[] };
@@ -32,7 +34,7 @@ export type BotRuntime = { failures: number; cooldown_seconds: number; last_sent
 export type BotConfig = { id: number; name: string; channel_id: string; status: "active" | "disabled"; created_at: number; last_check_at: number | null; last_check_status: string | null; runtime?: BotRuntime; chunk_count?: number; stored_bytes?: number };
 export type AdminObject = FileItem & { bucket_id: number; bucket_name: string; username: string | null };
 /** 当前登录账号：管理员和普通用户共用同一个会话接口，角色决定能看到哪些功能。 */
-export type UserMe = { id: number; username: string; role: Role; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; unlocked: boolean; remember?: boolean; csrf_token: string; expires_at: number } & SiteConfig;
+export type UserMe = Profile & { id: number; username: string; role: Role; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; unlocked: boolean; remember?: boolean; csrf_token: string; expires_at: number } & SiteConfig;
 export type SettingValue = { value: string | null; default: string | null; effective: string | null };
 export type SystemSettings = { public_base_url: SettingValue; s3_endpoint: SettingValue };
 export type ResourceConfig = { mode: "auto" | "low" | "standard" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string };
@@ -178,8 +180,19 @@ export async function restoreSession(): Promise<Session> {
   const account = await me();
   setCsrf(account.csrf_token);
   setSiteConfig(account);
-  return { csrf_token: account.csrf_token, expires_at: account.expires_at, username: account.username, role: account.role, bucket_id: account.bucket_id, unlocked: account.unlocked, remember: account.remember, public_base_url: account.public_base_url, s3_endpoint: account.s3_endpoint };
+  return { nickname: account.nickname, display_name: account.display_name, avatar_version: account.avatar_version, needs_email: account.needs_email,
+    csrf_token: account.csrf_token, expires_at: account.expires_at, username: account.username, role: account.role, bucket_id: account.bucket_id, unlocked: account.unlocked, remember: account.remember, public_base_url: account.public_base_url, s3_endpoint: account.s3_endpoint };
 }
+/** 界面显示的名字：优先昵称，其次邮箱 @ 前的部分（服务端的 display_name 规则相同）。 */
+export const displayName = (account: Profile & { username: string }) => account.display_name || account.nickname || account.username.split("@", 1)[0];
+export const avatarUrl = (version: number | null | undefined) => version ? `/api/auth/v1/avatar?v=${version}` : undefined;
+export const adminAvatarUrl = (userId: number, version: number | null | undefined) => version ? `/api/admin/v1/users/${userId}/avatar?v=${version}` : undefined;
+export const updateProfile = (nickname: string) => post<Profile>("/api/auth/v1/profile", { nickname });
+export const changeEmail = (email: string, password: string) => post<Profile & { username: string }>("/api/auth/v1/email", { email, password });
+export const uploadAvatar = (data: string) => post<Profile>("/api/auth/v1/avatar", { data });
+export const deleteAvatar = () => post<Profile>("/api/auth/v1/avatar/delete", {});
+/** 与服务端 accounts.EMAIL_PATTERN 一致的邮箱格式检查。 */
+export const isEmail = (value: string) => value.length <= 254 && /^[A-Za-z0-9._%+-]{1,64}@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/.test(value);
 export async function changePassword(oldPassword: string, newPassword: string) {
   await post<void>("/api/auth/v1/password", { old_password: oldPassword, new_password: newPassword });
   if (privateAccess) window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: privateAccess }));
@@ -189,6 +202,10 @@ export async function changePassword(oldPassword: string, newPassword: string) {
 
 /** 文件类型快速筛选；与服务端 tgdrive/filekinds.py 的 KIND_GROUPS 对应，空串表示全部。 */
 export type KindFilter = "" | "image" | "video" | "audio" | "document" | "text" | "archive";
+export const KIND_FILTERS: { value: KindFilter; label: string }[] = [
+  { value: "", label: "全部" }, { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" },
+  { value: "document", label: "文档" }, { value: "text", label: "文本" }, { value: "archive", label: "压缩包" },
+];
 export const listFiles = (prefix = "", cursor: string | null = null, publicOnly = false, limit = 100, kind: KindFilter = "") =>
   request<ListPage>(`${fileApi("/list", prefix)}?limit=${limit}&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${kind}` : ""}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 export const previewAssets = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`${fileApi("/preview-assets", path)}?path=${encodeURIComponent(path)}`, { signal });
@@ -353,8 +370,9 @@ export async function loadPublicConfig() {
   return config;
 }
 export const publicObject = (token: string, access?: string | null) => request<PublicObject>(`/api/public/v1/objects/${encodeURIComponent(token)}${access ? `?access=${encodeURIComponent(access)}` : ""}`);
-export const publicFolderList = (token: string, path = "", cursor: string | null = null, access?: string | null, limit = 100) => {
+export const publicFolderList = (token: string, path = "", cursor: string | null = null, access?: string | null, limit = 100, kind: KindFilter = "") => {
   const params = new URLSearchParams({ path, limit: String(limit) });
+  if (kind) params.set("kind", kind);
   if (cursor) params.set("cursor", cursor);
   if (access) params.set("access", access);
   return request<PublicFolderPage>(`/api/public/v1/folders/${encodeURIComponent(token)}/list?${params}`);
@@ -390,6 +408,28 @@ export async function listDownloads(cursor: string | null, status: string, signa
   return request<DownloadPage>(`/api/user/v1/downloads${suffix}`, { signal });
 }
 export const parseDownloads = (input: string, signal?: AbortSignal, download_type: "auto" | "http" | "hls" | "x" | "youtube" = "auto", cookies = "") => request<{ candidates: DownloadCandidate[] }>("/api/user/v1/downloads/parse", { method: "POST", body: JSON.stringify({ input, download_type, cookies }), signal }, 180000);
+/**
+ * 资源抓取脚本转交的解析结果：地址 #import=<base64url(JSON)>。片段不会发给服务器；票据加密、绑定账号且 20 分钟过期。
+ * 读取后立即从地址栏和历史记录中移除。
+ */
+export type DownloadImport = { candidates: DownloadCandidate[]; private: boolean; destination: string };
+export function takeDownloadImport(): DownloadImport | null {
+  const match = /^#import=([A-Za-z0-9_-]+)$/.exec(window.location.hash);
+  if (!match) return null;
+  window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+  try {
+    const bytes = Uint8Array.from(atob(match[1].replace(/-/g, "+").replace(/_/g, "/")), char => char.charCodeAt(0));
+    const value = JSON.parse(new TextDecoder().decode(bytes)) as { candidates?: Partial<DownloadCandidate>[]; private?: unknown; destination?: unknown };
+    // 脚本可能只带部分展示字段，缺省值与普通解析结果一致。
+    const candidates: DownloadCandidate[] = Array.isArray(value.candidates) ? value.candidates.filter(item => item && typeof item.ticket === "string" && typeof item.name === "string")
+      .map(item => ({ group: "", source_host: "", method: "GET", kind: "http", size: null, variant: null, warnings: [], header_names: [], body_bytes: 0, ...item } as DownloadCandidate)) : [];
+    if (!candidates.length) return null;
+    // 私密目标只接受私密前缀下的相对目录；普通目标不能指向私密空间或回收站。
+    const destination = typeof value.destination === "string" ? value.destination.replace(/^\/+/, "") : "";
+    return { candidates: candidates.slice(0, 100), private: value.private === true,
+      destination: value.private === true ? PRIVATE_PREFIX : destination.startsWith(".tgdrive/") ? "" : destination };
+  } catch { return null; }
+}
 export const createDownloads = (items: { ticket: string; name: string }[], destination: string) => post<{ tasks: DownloadTask[] }>(`/api/user/v1${isPrivatePath(destination) ? "/private" : ""}/downloads`, { items, destination });
 export const clearDownloads = (status: "completed" | "failed") => post<{ removed: number }>("/api/user/v1/downloads/clear", { status });
 export const controlDownload = (id: number, action: "stop" | "resume" | "restart" | "delete" | "update", item?: { ticket: string }, privateTask = false) => {
@@ -409,7 +449,7 @@ export const adminAudit = (options: { cursor?: number | null; failedOnly?: boole
   return request<{ events: AuditEvent[]; next_cursor: number | null }>(`/api/admin/v1/audit?${params}`);
 };
 export const adminStatus = () => request<SystemStatus>("/api/admin/v1/status");
-export const adminSetup = (passphrase: string, username: string, password: string) => post<{ user_id: number; username: string }>("/api/admin/v1/setup", { passphrase, username, password });
+export const adminSetup = (passphrase: string, username: string, password: string, nickname = "") => post<{ user_id: number; username: string }>("/api/admin/v1/setup", { passphrase, username, password, nickname });
 export const adminUnlock = (passphrase: string) => post<SystemStatus>("/api/admin/v1/unlock", { passphrase });
 export const adminLock = () => post<void>("/api/admin/v1/lock");
 export const adminUsers = () => request<Account[]>("/api/admin/v1/users");
@@ -417,7 +457,7 @@ export type AccountSummary = { total: number; active: number; user_total: number
 export const adminUserSummary = (signal?: AbortSignal) => request<AccountSummary>("/api/admin/v1/users/summary", { signal });
 export const adminUsersPage = (cursor: string | null, q = "", status = "") => request<{ users: Account[]; total: number; next_cursor: number | null }>(
   `/api/admin/v1/users?limit=50&q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-export const createAdminUser = (username: string, password: string, quotaBytes: number | null) => post<{ id: number; username: string; bucket_id: number; quota_bytes: number | null }>("/api/admin/v1/users", { username, password, quota_bytes: quotaBytes });
+export const createAdminUser = (username: string, password: string, quotaBytes: number | null, nickname = "") => post<{ id: number; username: string; bucket_id: number; quota_bytes: number | null }>("/api/admin/v1/users", { username, password, quota_bytes: quotaBytes, nickname });
 export const setAdminUserStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/users/${id}/status`, { status });
 export const resetAdminUserPassword = (id: number, password: string) => post<void>(`/api/admin/v1/users/${id}/password`, { password });
 export const deleteAdminUser = (id: number, confirm: string) => post<{ username: string; deleted_objects: number }>(`/api/admin/v1/users/${id}/delete`, { confirm });

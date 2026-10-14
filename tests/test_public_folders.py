@@ -14,9 +14,9 @@ class PublicFolderTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.app.accounts.create_user("alice", "alice password")
-        self.app.accounts.create_user("bob", "bob password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.app.accounts.create_user("alice@example.com", "alice password")
+        self.app.accounts.create_user("bob@example.com", "bob password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -32,7 +32,7 @@ class PublicFolderTests(unittest.TestCase):
         return status, (json.loads(data) if data and headers.get("content-type", "").startswith("application/json") else data)
 
     async def seed(self):
-        alice = await self.client.login("user", "alice", "alice password")
+        alice = await self.client.login("user", "alice@example.com", "alice password")
         await self.put(alice, "dir/a.txt", b"hello a")
         await self.put(alice, "dir/sub/b.txt", b"bee")
         await self.put(alice, "dir/sub/deep/c.txt", b"sea")
@@ -105,7 +105,7 @@ class PublicFolderTests(unittest.TestCase):
 
     def test_preview_assets_match_names_and_respect_user_and_admin_scope(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
             for path in ("dir/song.live.mp4", "dir/song.live.lrc", "dir/song.live.srt", "dir/song.live.zh_Hans.VTT",
                          "dir/song.live.en.srt", "dir/song.live.sequel.srt", "dir/song.live/sub.srt", "other/song.live.srt"):
                 await self.put(alice, path)
@@ -114,13 +114,13 @@ class PublicFolderTests(unittest.TestCase):
             self.assertEqual([item["name"] for item in assets], ["song.live.en.srt", "song.live.lrc", "song.live.srt", "song.live.zh_Hans.VTT"])
             self.assertEqual([item["language"] for item in assets], ["en", None, None, "zh-Hans"])
             self.assertEqual(assets[1]["kind"], "lyrics")
-            bob = await self.client.login("user", "bob", "bob password")
+            bob = await self.client.login("user", "bob@example.com", "bob password")
             self.assertEqual((await self.api("GET", "/api/user/v1/preview-assets?path=dir/song.live.mp4", bob))[0], 404)
             self.assertEqual((await self.api("GET", "/api/user/v1/preview-assets?path=dir/song.live.mp4"))[0], 401)
             _, me = await self.api("GET", "/api/user/v1/me", alice)
             route = f"/api/admin/v1/preview-assets?bucket_id={me['bucket_id']}&path=dir/song.live.mp4"
             self.assertEqual((await self.api("GET", route, alice))[0], 403)
-            admin = await self.client.login("admin", "admin", "admin password")
+            admin = await self.client.login("admin", "admin@example.com", "admin password")
             status, admin_assets = await self.api("GET", route, admin)
             self.assertEqual((status, admin_assets), (200, assets))
         asyncio.run(run())
@@ -218,7 +218,7 @@ class PublicFolderTests(unittest.TestCase):
             self.assertEqual(page["folder_sizes"], {"dir/sub/": 10})
             status, _ = await self.api("POST", "/api/user/v1/public", alice, {"paths": ["nothing/"], "public": True})
             self.assertEqual(status, 404)
-            bob = await self.client.login("user", "bob", "bob password")
+            bob = await self.client.login("user", "bob@example.com", "bob password")
             status, _ = await self.api("POST", "/api/user/v1/public", bob, {"paths": ["dir/"], "public": True})
             self.assertEqual(status, 404)
             await self.put(bob, "dir/sub/own.txt", b"bob")
@@ -238,7 +238,7 @@ class PublicFolderTests(unittest.TestCase):
 
     def test_explicit_empty_folder_and_key_api(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
             await self.api("POST", "/api/user/v1/folders", alice, {"path": "empty"})
             _, page = await self.api("GET", "/api/user/v1/list", alice)
             self.assertEqual(page["folder_sizes"], {"empty/": 0})

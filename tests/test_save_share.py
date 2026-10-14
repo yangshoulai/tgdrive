@@ -13,9 +13,9 @@ class SaveShareTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
-        self.bob = self.app.accounts.create_user("bob", "bob password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
+        self.bob = self.app.accounts.create_user("bob@example.com", "bob password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -44,8 +44,8 @@ class SaveShareTests(unittest.TestCase):
 
     def test_save_file_and_folder_reference_same_blob(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
-            bob = await self.client.login("user", "bob", "bob password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
+            bob = await self.client.login("user", "bob@example.com", "bob password")
             await self.put(alice, "photos/a.jpg", b"aaaa")
             await self.put(alice, "photos/trip/b.jpg", b"bb")
             await self.put(alice, "report.pdf", b"pdf!")
@@ -88,14 +88,14 @@ class SaveShareTests(unittest.TestCase):
 
             audit = self.app.metadata.db.execute("SELECT actor, target, detail FROM audit_log WHERE action='share.save' AND ok=1 ORDER BY id").fetchall()
             self.assertEqual(len(audit), 4)
-            self.assertEqual((audit[0]["actor"], audit[0]["target"]), ("bob", "inbox"))
+            self.assertEqual((audit[0]["actor"], audit[0]["target"]), ("bob@example.com", "inbox"))
             self.assertNotIn(file_token, json.dumps([dict(item) for item in audit], ensure_ascii=False))
         asyncio.run(run())
 
     def test_selected_paths_stay_inside_share(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
-            bob = await self.client.login("user", "bob", "bob password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
+            bob = await self.client.login("user", "bob@example.com", "bob password")
             await self.put(alice, "dir/a/x.txt", b"1")
             await self.put(alice, "dir/b/x.txt", b"22")
             await self.put(alice, "dir/sub/deep/c.txt", b"333")
@@ -118,8 +118,8 @@ class SaveShareTests(unittest.TestCase):
 
     def test_password_quota_and_revoked_shares(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
-            bob = await self.client.login("user", "bob", "bob password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
+            bob = await self.client.login("user", "bob@example.com", "bob password")
             await self.put(alice, "big.bin", b"x" * 100)
             token = await self.share(alice, "big.bin", password="letmein")
             status, body = await self.api("POST", f"/api/user/v1/shares/{token}/save", bob, {"destination": ""})

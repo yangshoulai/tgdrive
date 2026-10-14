@@ -179,6 +179,43 @@ class KeyApi:
             item = self.objects.set_public(scope, key, public)
         return {"hit": True, **UserApi._object_json(item)}
 
+    async def folders(self, principal: KeyPrincipal, bucket: str | None, prefix: str, cursor: str = "", limit: int = 100):
+        """只列出 prefix 下一层的文件夹（含隐式文件夹），供选择保存目录。
+
+        授权覆盖 prefix 时按键扫描、遇到文件夹跳过整棵子树；prefix 在授权前缀之上时只返回通往授权前缀的那一层。
+        回收站与私密空间（.tgdrive/）永远不出现。writable 表示密钥能否写入 prefix 本身。
+        """
+        bucket_id = self._bucket(principal, bucket)
+        prefix = normalize_user_path(prefix, directory=True) if prefix else ""
+        limit = max(1, min(limit, 200))
+        grants = self._readable(principal, bucket_id)
+        writable = any(grant.perms == "rw" and prefix.startswith(grant.prefix) for grant in grants)
+        if not any(prefix.startswith(grant.prefix) for grant in grants):
+            inside = sorted({prefix + grant.prefix[len(prefix):].split("/", 1)[0] + "/" for grant in grants
+                             if grant.prefix.startswith(prefix) and grant.prefix != prefix})
+            if not inside:
+                raise PermissionError("该密钥无权读取这个路径")
+            inside = [folder for folder in inside if folder > (cursor or "")]
+            return {"prefix": prefix, "folders": inside[:limit], "writable": writable,
+                    "next_cursor": inside[limit - 1] if len(inside) > limit else None}
+        end = self.objects._PREFIX_END
+        def read():
+            folders, position = [], (cursor + end) if cursor else prefix
+            while len(folders) <= limit:
+                row = self.objects.metadata.db.execute(
+                    "SELECT key FROM objects WHERE bucket_id=? AND key>? AND key<? AND substr(key,1,9)!='.tgdrive/' "
+                    "AND instr(substr(key,?),'/')>0 ORDER BY key LIMIT 1",
+                    (bucket_id, position, prefix + end, len(prefix) + 1)).fetchone()
+                if row is None:
+                    break
+                folder = prefix + row["key"][len(prefix):].split("/", 1)[0] + "/"
+                folders.append(folder)
+                position = folder + end
+            return folders
+        folders = await self.objects.metadata.run_in_thread(read)
+        return {"prefix": prefix, "folders": folders[:limit], "writable": writable,
+                "next_cursor": folders[limit - 1] if len(folders) > limit else None}
+
     async def folder(self, principal: KeyPrincipal, bucket: str | None, path: str):
         bucket_id = self._bucket(principal, bucket)
         key = normalize_user_path(path, directory=True)

@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 18
+    SCHEMA_VERSION = 19
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -403,6 +403,20 @@ class Metadata:
                     if column in columns:
                         db.execute(f"ALTER TABLE private_spaces DROP COLUMN {column}")
                 db.execute("PRAGMA user_version = 18")
+            if version < 19:
+                # 账号资料：昵称与头像。登录名仍是 users.username，新账号要求邮箱；旧的非邮箱用户名保留，登录后引导改为邮箱。
+                columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+                if "nickname" not in columns:
+                    db.execute("ALTER TABLE users ADD COLUMN nickname TEXT")
+                self._schema("""
+                    CREATE TABLE IF NOT EXISTS user_avatars(
+                        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        mime TEXT NOT NULL,
+                        data BLOB NOT NULL,
+                        updated_at REAL NOT NULL
+                    )
+                """)
+                db.execute("PRAGMA user_version = 19")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

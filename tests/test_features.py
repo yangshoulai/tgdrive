@@ -18,11 +18,11 @@ class FeatureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password", quota_bytes=50_000_000)
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password", quota_bytes=50_000_000)
         self.scope = Scope(self.alice.bucket_id)
         self.client = Client(self.app)
-        self.user = asyncio.run(self.client.login("user", "alice", "alice password"))
+        self.user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
 
     def tearDown(self):
         self.app.metadata.close()
@@ -155,8 +155,8 @@ class FeatureTests(unittest.TestCase):
         other = self.call("POST", "/api/user/v1/uploads", {"path": "tmp.bin"})[1]["upload_id"]
         self.assertEqual(self.call("DELETE", f"/api/user/v1/uploads/{other}")[0], 204)
         self.assertEqual(self.call("GET", f"/api/user/v1/uploads/{other}")[0], 404)
-        bob = self.app.accounts.create_user("bob", "bob password")
-        bob_session = asyncio.run(self.client.login("user", "bob", "bob password"))
+        bob = self.app.accounts.create_user("bob@example.com", "bob password")
+        bob_session = asyncio.run(self.client.login("user", "bob@example.com", "bob password"))
         self.assertEqual(self.call("GET", f"/api/user/v1/uploads/{upload_id}", headers=bob_session)[0], 404)
         self.assertIsNotNone(bob)
 
@@ -164,9 +164,9 @@ class FeatureTests(unittest.TestCase):
         self.put("a.txt", b"data")
         self.call("POST", "/api/user/v1/clients", {"name": "nas"})
         self.call("POST", "/api/user/v1/trash", {"paths": ["a.txt"]})
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         self.assertEqual(self.call("POST", f"/api/admin/v1/users/{self.alice.id}/delete", {"confirm": "wrong"}, admin)[0], 400)
-        status, body, _ = self.call("POST", f"/api/admin/v1/users/{self.alice.id}/delete", {"confirm": "alice"}, admin)
+        status, body, _ = self.call("POST", f"/api/admin/v1/users/{self.alice.id}/delete", {"confirm": "alice@example.com"}, admin)
         self.assertEqual((status, body["deleted_objects"]), (200, 1))
         db = self.app.metadata.db
         for table, column in (("users", "id"), ("buckets", "id"), ("clients", "owner_user_id")):

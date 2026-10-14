@@ -23,8 +23,8 @@ class MaintenanceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.app = create_app(self.root / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
         self.scope = Scope(self.alice.bucket_id)
         self.client = Client(self.app)
         self.m = self.app.maintenance
@@ -121,7 +121,7 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(asyncio.run(scheduler.tick()), {})
 
     def test_admin_endpoints_and_passphrase_rotation(self):
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         self.put("a.txt", b"before rotation")
         status, body = self.request("POST", "/api/admin/v1/backups", headers=admin)
         self.assertEqual(status, 201)
@@ -211,18 +211,18 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(len(audit.list()["events"]), 1)
 
     def test_password_management(self):
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
-        user = asyncio.run(self.client.login("user", "alice", "alice password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         self.assertEqual(self.request("POST", f"/api/admin/v1/users/{self.alice.id}/password", {"password": "short"}, admin)[0], 400)
         self.assertEqual(self.request("POST", f"/api/admin/v1/users/{self.alice.id}/password", {"password": "reset by admin"}, admin)[0], 204)
         self.assertEqual(self.request("GET", "/api/user/v1/me", headers=user)[0], 401, "existing sessions must be revoked")
-        asyncio.run(self.client.login("user", "alice", "reset by admin"))
+        asyncio.run(self.client.login("user", "alice@example.com", "reset by admin"))
         admin_id = self.app.metadata.db.execute("SELECT id FROM users WHERE role='admin'").fetchone()[0]
         self.assertEqual(self.request("POST", f"/api/admin/v1/users/{admin_id}/password", {"password": "whatever123"}, admin)[0], 403)
         status, body = self.request("POST", "/api/admin/v1/password", {"old_password": "wrong", "new_password": "new admin pass"}, admin)
         self.assertEqual(status, 400)
         self.assertEqual(self.request("POST", "/api/admin/v1/password", {"old_password": "admin password", "new_password": "new admin pass"}, admin)[0], 204)
-        asyncio.run(self.client.login("admin", "admin", "new admin pass"))
+        asyncio.run(self.client.login("admin", "admin@example.com", "new admin pass"))
 
 
 if __name__ == "__main__":

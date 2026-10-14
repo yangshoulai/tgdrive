@@ -30,10 +30,10 @@ class ThumbnailTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.temp.name) / "data"
         self.open_app()
-        self.app.accounts.setup(PASSPHRASE, "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password", quota_bytes=50_000_000)
+        self.app.accounts.setup(PASSPHRASE, "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password", quota_bytes=50_000_000)
         self.scope = Scope(self.alice.bucket_id)
-        self.user = asyncio.run(self.client.login("user", "alice", "alice password"))
+        self.user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
 
     def open_app(self):
         self.app = create_app(self.data_dir, secure_cookies=False)
@@ -132,7 +132,7 @@ class ThumbnailTests(unittest.TestCase):
         self.assertEqual(meta, {"other": "kept"}, "plaintext leaves user_meta during migration")
         self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM thumbnail_legacy").fetchone()[0], 1)
         self.app.accounts.keystore.unlock(PASSPHRASE)
-        self.user = asyncio.run(self.client.login("user", "alice", "alice password"))
+        self.user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         self.assertTrue(self.listed("old.jpg")["has_thumbnail"])
         self.assertEqual(self.app.objects.adopt_legacy_thumbnails(), 1)
         self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM thumbnail_legacy").fetchone()[0], 0)

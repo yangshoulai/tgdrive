@@ -15,7 +15,7 @@ export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor
   /** 每个导航项的真实地址：渲染成链接，⌘/Ctrl/中键点击可在新标签页打开。 */
   hrefFor: (key: K) => string;
   sidebarFooter?: ReactNode;
-  account: { name: string; caption: string; tone?: "accent" | "admin"; menu: MenuItem[] };
+  account: { name: string; caption: string; tone?: "accent" | "admin"; avatar?: string; menu: MenuItem[] };
   children: ReactNode;
 }) {
   const [drawer, setDrawer] = useState(false);
@@ -34,7 +34,7 @@ export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor
       <header className="mobile-bar">
         <button type="button" className="icon-btn icon-btn-ghost" aria-label="打开导航" aria-expanded={drawer} onClick={() => setDrawer(true)}><Icon name="menu" /></button>
         <Brand />
-        <Avatar name={account.name} tone={account.tone} />
+        <Avatar name={account.name} tone={account.tone} src={account.avatar} />
       </header>
       <div className="drawer-scrim" onClick={() => setDrawer(false)} aria-hidden="true" />
       <aside className="sidebar" aria-label="主导航">
@@ -62,7 +62,7 @@ export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor
         <div className="sidebar-bottom">
           {sidebarFooter}
           <div className="account-row">
-            <Avatar name={account.name} tone={account.tone} />
+            <Avatar name={account.name} tone={account.tone} src={account.avatar} />
             <span className="account-copy"><strong>{account.name}</strong><small>{account.caption}</small></span>
             <Menu label="账号操作" icon="more" items={account.menu} />
           </div>
@@ -145,8 +145,8 @@ const stored = (key: string) => { try { return localStorage.getItem(key) ?? ""; 
 const store = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* 隐私模式下无法保存，不影响登录 */ } };
 
 /**
- * 登录页：记住上次的用户名（下次直接输入密码），可选“30 天内保持登录”（长期会话），
- * 以及显示/隐藏密码和大写锁定提示。用户名只保存在本机，不含密码。
+ * 登录页：记住上次的登录邮箱（下次直接输入密码），可选“30 天内保持登录”（长期会话），
+ * 以及显示/隐藏密码和大写锁定提示。邮箱只保存在本机，不含密码。旧账号仍可用原用户名登录。
  */
 export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Session) => void; notice?: ReactNode }) {
   const saved = stored(LAST_USERNAME);
@@ -186,14 +186,14 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
-    if (!username.trim() || !password) { setError("请输入用户名和密码"); return; }
+    if (!username.trim() || !password) { setError("请输入邮箱和密码"); return; }
     setError(""); setBusy(true);
     try {
       const session = await api.login(username.trim(), password, remember);
       accept(session);
     } catch (reason) {
       const status = reason instanceof api.ApiError ? reason.status : 0;
-      setError(status === 401 ? "用户名或密码不正确" : status === 429 ? "登录失败次数过多，请 15 分钟后再试"
+      setError(status === 401 ? "邮箱或密码不正确" : status === 429 ? "登录失败次数过多，请 15 分钟后再试"
         : status === 503 ? "系统当前已锁定，请联系管理员解锁后再登录" : api.errorMessage(reason, "登录失败，请稍后重试"));
     } finally { setBusy(false); }
   }
@@ -209,10 +209,10 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
       footer={<><a href="/docs">使用文档</a><span>没有账号？请联系管理员创建。</span></>}>
       {notice}
       <form className="form" onSubmit={submit} noValidate>
-        <Field label="用户名" htmlFor="login-username"
+        <Field label="邮箱" htmlFor="login-username"
           hint={saved && username === saved ? <>上次登录的账号。<button type="button" className="link-button" onClick={switchAccount}>换个账号</button></> : undefined}>
           <input ref={usernameInput} id="login-username" name="username" className="input input-lg" value={username} onChange={event => setUsername(event.target.value)}
-            autoComplete="username" autoCapitalize="none" spellCheck={false} autoFocus={!saved} disabled={busy} />
+            type="text" inputMode="email" placeholder="name@example.com" autoComplete="username" autoCapitalize="none" spellCheck={false} autoFocus={!saved} disabled={busy} />
         </Field>
         <Field label="密码" htmlFor="login-password" hint={capsLock ? <span className="tone-warning">大写锁定已开启</span> : undefined}>
           <div className="input-affix input-affix-lg">
@@ -231,7 +231,7 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
         {passkeyCapability && <>
           <div className="private-unlock-divider"><span>或使用设备验证</span></div>
           <Button icon="key" size="lg" block loading={busy && usingPasskey} disabled={busy || Boolean(passkeyReason)} onClick={() => void passkeyLogin()}>通行密钥登录</Button>
-          <p className="login-passkey-hint" role={usingPasskey ? "status" : undefined}>{usingPasskey ? "请在系统提示中完成验证" : passkeyReason || "由设备选择已绑定的账号，无需输入用户名或密码。"}</p>
+          <p className="login-passkey-hint" role={usingPasskey ? "status" : undefined}>{usingPasskey ? "请在系统提示中完成验证" : passkeyReason || "由设备选择已绑定的账号，无需输入邮箱或密码。"}</p>
         </>}
       </form>
     </AuthLayout>
@@ -239,7 +239,7 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
 }
 
 export function SetupPage({ onComplete }: { onComplete: () => void }) {
-  const [form, setForm] = useState({ passphrase: "", passphrase2: "", username: "admin", password: "" });
+  const [form, setForm] = useState({ passphrase: "", passphrase2: "", username: "", nickname: "", password: "" });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   useEffect(() => { document.title = `初始化 · ${BRAND}`; }, []);
@@ -249,12 +249,13 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
     const next: Record<string, string> = {};
     if (form.passphrase.length < 12) next.passphrase = "加密口令至少 12 个字符";
     if (form.passphrase !== form.passphrase2) next.passphrase2 = "两次输入的口令不一致";
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$/.test(form.username)) next.username = "2–64 位英文字母、数字、点、下划线或连字符";
+    if (!api.isEmail(form.username.trim())) next.username = "请输入有效的邮箱地址";
+    if (form.nickname.trim().length > 32) next.nickname = "昵称最多 32 个字符";
     if (form.password.length < 8) next.password = "密码至少 8 个字符";
     setErrors(next);
     if (Object.keys(next).length) return;
     setBusy(true);
-    try { await api.adminSetup(form.passphrase, form.username, form.password); onComplete(); }
+    try { await api.adminSetup(form.passphrase, form.username.trim(), form.password, form.nickname.trim()); onComplete(); }
     catch (reason) { setErrors({ form: api.errorMessage(reason, "初始化失败，请稍后重试") }); }
     finally { setBusy(false); }
   }
@@ -268,13 +269,17 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
           <input id="setup-passphrase2" className="input" type="password" autoComplete="new-password" value={form.passphrase2} onChange={set("passphrase2")} />
         </Field>
         <div className="form-row">
-          <Field label="管理员用户名" htmlFor="setup-username" error={errors.username}>
-            <input id="setup-username" className="input" autoComplete="username" value={form.username} onChange={set("username")} />
+          <Field label="管理员邮箱" htmlFor="setup-username" error={errors.username} hint="用于登录，之后可以在用户设置中修改。">
+            <input id="setup-username" className="input" type="text" inputMode="email" placeholder="name@example.com" autoComplete="username"
+              autoCapitalize="none" spellCheck={false} value={form.username} onChange={set("username")} />
           </Field>
-          <Field label="管理员密码" htmlFor="setup-password" error={errors.password}>
-            <input id="setup-password" className="input" type="password" autoComplete="new-password" value={form.password} onChange={set("password")} />
+          <Field label="昵称" htmlFor="setup-nickname" error={errors.nickname} hint="可选，显示在界面上。">
+            <input id="setup-nickname" className="input" autoComplete="nickname" maxLength={32} value={form.nickname} onChange={set("nickname")} />
           </Field>
         </div>
+        <Field label="管理员密码" htmlFor="setup-password" error={errors.password}>
+          <input id="setup-password" className="input" type="password" autoComplete="new-password" value={form.password} onChange={set("password")} />
+        </Field>
         {errors.form && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{errors.form}</div>}
         <Button type="submit" variant="primary" size="lg" block loading={busy}>完成初始化</Button>
       </form>

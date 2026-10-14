@@ -55,6 +55,8 @@ const ICONS = {
   list: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
   gridView: "M4 4h7v7H4zm9 0h7v7h-7zM4 13h7v7H4zm9 0h7v7h-7z",
   edit: "M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16zm9.5-13.5 4 4",
+  user: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm-7 8a7 7 0 0 1 14 0",
+  mail: "M4 6.5A1.5 1.5 0 0 1 5.5 5h13A1.5 1.5 0 0 1 20 6.5v11a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5zm.5-.5 7.5 6 7.5-6",
   move: "M3 7.2A2.2 2.2 0 0 1 5.2 5h3.6l2 2.2h8A2.2 2.2 0 0 1 21 9.4v8.4a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 17.8zM9 13.5h6m-2.5-2.5 2.5 2.5-2.5 2.5",
   shield: "M12 3 4.5 6v6c0 4.4 3.2 7.8 7.5 9 4.3-1.2 7.5-4.6 7.5-9V6z",
   server: "M4 4h16v6H4zm0 10h16v6H4zm3-7h.01M7 17h.01",
@@ -286,7 +288,7 @@ export function isShortcutControl(target: Element): boolean {
   return Boolean(target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='slider'], [role='spinbutton'], [role='combobox'], [role^='menu'], .menu, .art-settings"));
 }
 
-export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, className = "", initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; className?: string; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean }) {
+export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, closable = true, className = "", initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
@@ -416,7 +418,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
               if (pinnable && !pinned) items.push({ label: "固定（仅手动关闭）", icon: "pin", onSelect: () => setPinned(true) });
               return items.length > 0 && <Menu label="窗口选项" items={items} />;
             })()}
-            <IconButton icon="x" label="关闭" onClick={onClose} size="sm" disabled={!dismissible} />
+            {closable && <IconButton icon="x" label="关闭" onClick={onClose} size="sm" disabled={!dismissible} />}
           </div>
         </header>
         {children && <div className="modal-body">{children}</div>}
@@ -684,8 +686,13 @@ export function KeyValue({ items }: { items: [ReactNode, ReactNode][] }) {
   );
 }
 
-export function Avatar({ name, tone = "accent" }: { name: string; tone?: "accent" | "admin" }) {
-  return <span className={`avatar avatar-${tone}`} aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span>;
+/** 有头像图片时显示图片（加载失败退回首字母），否则显示名字的首字母。 */
+export function Avatar({ name, tone = "accent", src, size }: { name: string; tone?: "accent" | "admin"; src?: string; size?: number }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
+  const style = size ? { width: size, height: size, fontSize: Math.round(size * .4) } : undefined;
+  if (src && !failed) return <img className="avatar avatar-image" src={src} alt="" aria-hidden="true" style={style} onError={() => setFailed(true)} />;
+  return <span className={`avatar avatar-${tone}`} aria-hidden="true" style={style}>{Array.from(name.trim() || "?")[0].toUpperCase()}</span>;
 }
 
 /* ---------- 格式化 ---------- */

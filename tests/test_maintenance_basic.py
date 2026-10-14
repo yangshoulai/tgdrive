@@ -46,10 +46,10 @@ class M7Tests(unittest.TestCase):
         async def run():
             with tempfile.TemporaryDirectory() as temp:
                 app = create_app(temp)
-                account = app.accounts.setup("maintenance passphrase", "admin", "admin password")
+                account = app.accounts.setup("maintenance passphrase", "admin@example.com", "admin password")
                 item = await app.objects.put_object(Scope(account.bucket_id), "orphan.txt", b"orphan")
                 await app.objects.delete_objects(Scope(account.bucket_id), [item.key])
-                session = app.accounts.login("admin", "admin password", role="admin")
+                session = app.accounts.login("admin@example.com", "admin password", role="admin")
                 sent = []
                 body = b'{"limit":10}'
                 queue = [{"type": "http.request", "body": body, "more_body": False}]

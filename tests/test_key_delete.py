@@ -13,9 +13,9 @@ class KeyDeleteTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.app.accounts.create_user("alice", "alice password")
-        self.app.accounts.create_user("bob", "bob password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.app.accounts.create_user("alice@example.com", "alice password")
+        self.app.accounts.create_user("bob@example.com", "bob password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -40,7 +40,7 @@ class KeyDeleteTests(unittest.TestCase):
 
     def test_user_deletes_own_key_and_it_stops_working_at_once(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
             key = await self.make_key(alice)
             self.assertEqual(await self.key_api_status(key), 200)
             status, _ = await self.post("/api/user/v1/client-keys/delete", alice, {"access_key_id": key["access_key_id"]})
@@ -57,7 +57,7 @@ class KeyDeleteTests(unittest.TestCase):
 
     def test_disabled_keys_can_be_deleted_too(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
             key = await self.make_key(alice)
             await self.post("/api/user/v1/client-keys/disable", alice, {"access_key_id": key["access_key_id"]})
             status, _ = await self.post("/api/user/v1/client-keys/delete", alice, {"access_key_id": key["access_key_id"]})
@@ -67,8 +67,8 @@ class KeyDeleteTests(unittest.TestCase):
 
     def test_cannot_delete_someone_elses_key(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
-            bob = await self.client.login("user", "bob", "bob password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
+            bob = await self.client.login("user", "bob@example.com", "bob password")
             key = await self.make_key(alice)
             status, _ = await self.post("/api/user/v1/client-keys/delete", bob, {"access_key_id": key["access_key_id"]})
             self.assertEqual(status, 403)
@@ -81,8 +81,8 @@ class KeyDeleteTests(unittest.TestCase):
 
     def test_admin_deletes_a_key_or_a_whole_client_and_it_is_audited_without_secrets(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
-            admin = await self.client.login("admin", "admin", "admin password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
+            admin = await self.client.login("admin", "admin@example.com", "admin password")
             first = await self.make_key(alice, "one")
             second = await self.make_key(alice, "two")
             status, _ = await self.post("/api/admin/v1/client-keys/delete", admin, {"access_key_id": first["access_key_id"]})
@@ -107,7 +107,7 @@ class KeyDeleteTests(unittest.TestCase):
 
     def test_one_key_of_a_client_with_several_keys_keeps_the_client(self):
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
             key = await self.make_key(alice)
             extra, _ = self.app.s3.auth.create_key(key["id"])
             status, _ = await self.post("/api/user/v1/client-keys/delete", alice, {"access_key_id": key["access_key_id"]})

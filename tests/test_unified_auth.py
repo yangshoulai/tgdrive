@@ -13,8 +13,8 @@ class UnifiedAuthTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.app.accounts.create_user("alice", "alice password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.app.accounts.create_user("alice@example.com", "alice password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -32,7 +32,7 @@ class UnifiedAuthTests(unittest.TestCase):
 
     def test_one_cookie_serves_files_and_admin_for_admin_only(self):
         async def run():
-            status, headers, body = await self.login("admin", "admin password")
+            status, headers, body = await self.login("admin@example.com", "admin password")
             self.assertEqual((status, body["role"]), (200, "admin"))
             cookie = headers["set-cookie"]
             self.assertTrue(cookie.startswith("tg_session="))
@@ -48,13 +48,13 @@ class UnifiedAuthTests(unittest.TestCase):
             self.assertEqual([item["key"] for item in json.loads(data)["objects"]], ["mine.txt"])
             status, _, data = await self.client.request("GET", "/api/admin/v1/users", b"", admin)
             self.assertEqual(status, 200)
-            self.assertEqual(sorted(user["username"] for user in json.loads(data)), ["admin", "alice"])
+            self.assertEqual(sorted(user["username"] for user in json.loads(data)), ["admin@example.com", "alice@example.com"])
             status, _, data = await self.client.request("GET", "/api/auth/v1/me", b"", admin)
             me = json.loads(data)
             self.assertEqual((status, me["role"], me["unlocked"], me["bucket_id"] is not None), (200, "admin", True, True))
 
             # 普通用户：同样的入口，只能用文件空间，所有管理接口被拒绝
-            status, headers, body = await self.login("alice", "alice password")
+            status, headers, body = await self.login("alice@example.com", "alice password")
             self.assertEqual((status, body["role"]), (200, "user"))
             alice = self.auth(headers, body)
             status, _, _ = await self.client.request("PUT", "/api/user/v1/files?path=a.txt", b"x", {**alice, "content-length": "1"})
@@ -72,7 +72,7 @@ class UnifiedAuthTests(unittest.TestCase):
 
     def test_logout_clears_the_single_cookie(self):
         async def run():
-            _, headers, body = await self.login("alice", "alice password")
+            _, headers, body = await self.login("alice@example.com", "alice password")
             alice = self.auth(headers, body)
             status, headers, _ = await self.client.request("POST", "/api/auth/v1/logout", b"", alice)
             self.assertEqual(status, 204)
@@ -84,7 +84,7 @@ class UnifiedAuthTests(unittest.TestCase):
 
     def test_password_change_works_for_both_roles_through_one_endpoint(self):
         async def run():
-            for username, old in (("admin", "admin password"), ("alice", "alice password")):
+            for username, old in (("admin@example.com", "admin password"), ("alice@example.com", "alice password")):
                 _, headers, body = await self.login(username, old)
                 auth = self.auth(headers, body)
                 payload = json.dumps({"old_password": old, "new_password": "brand new pass"}).encode()
@@ -96,14 +96,14 @@ class UnifiedAuthTests(unittest.TestCase):
 
     def test_locked_system_only_lets_admin_in_to_unlock(self):
         async def run():
-            _, headers, body = await self.login("admin", "admin password")
+            _, headers, body = await self.login("admin@example.com", "admin password")
             admin = self.auth(headers, body)
             status, _, _ = await self.client.request("POST", "/api/admin/v1/lock", b"{}", admin)
             self.assertEqual(status, 204)
 
-            status, _, body = await self.login("alice", "alice password")
+            status, _, body = await self.login("alice@example.com", "alice password")
             self.assertEqual(status, 503)
-            status, headers, body = await self.login("admin", "admin password")
+            status, headers, body = await self.login("admin@example.com", "admin password")
             self.assertEqual((status, body["role"]), (200, "admin"))
             admin = self.auth(headers, body)
             status, _, data = await self.client.request("GET", "/api/auth/v1/me", b"", admin)
@@ -115,15 +115,15 @@ class UnifiedAuthTests(unittest.TestCase):
             self.assertEqual((status, json.loads(data)["unlocked"]), (200, True))
             status, _, _ = await self.client.request("GET", "/api/user/v1/list", b"", admin)
             self.assertEqual(status, 200)
-            status, _, _ = await self.login("alice", "alice password")
+            status, _, _ = await self.login("alice@example.com", "alice password")
             self.assertEqual(status, 200)
         asyncio.run(run())
 
     def test_failed_logins_do_not_reveal_role_or_lock_state(self):
         async def run():
-            status, _, _ = await self.login("alice", "wrong password")
+            status, _, _ = await self.login("alice@example.com", "wrong password")
             self.assertEqual(status, 401)
-            status, _, _ = await self.login("nobody", "whatever password")
+            status, _, _ = await self.login("nobody@example.com", "whatever password")
             self.assertEqual(status, 401)
         asyncio.run(run())
 

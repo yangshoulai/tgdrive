@@ -144,8 +144,8 @@ class WebSecurityTests(unittest.TestCase):
         static.mkdir()
         (static / "index.html").write_text("<html></html>")
         self.app = create_app(root / "data", secure_cookies=False, static_dir=static)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.app.accounts.create_user("alice", "alice password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.app.accounts.create_user("alice@example.com", "alice password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -155,7 +155,7 @@ class WebSecurityTests(unittest.TestCase):
     def login(self, password, ip):
         async def run():
             sent = []
-            queue = [{"type": "http.request", "body": json.dumps({"username": "alice", "password": password}).encode(), "more_body": False}]
+            queue = [{"type": "http.request", "body": json.dumps({"username": "alice@example.com", "password": password}).encode(), "more_body": False}]
             async def receive():
                 return queue.pop(0)
             async def send(message):

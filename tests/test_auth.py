@@ -41,16 +41,16 @@ class M5Tests(unittest.TestCase):
             metadata = Metadata(Path(temp) / "meta.db")
             keys = KeyStore(metadata)
             accounts = AccountService(metadata, keys)
-            admin = accounts.setup("encryption passphrase", "admin", "admin password")
+            admin = accounts.setup("encryption passphrase", "admin@example.com", "admin password")
             self.assertEqual(admin.role, "admin")
             self.assertTrue(accounts.status()["initialized"])
             self.assertTrue(accounts.status()["unlocked"])
-            session = accounts.login("admin", "admin password", role="admin")
-            user = accounts.create_user("alice", "alice password")
+            session = accounts.login("admin@example.com", "admin password", role="admin")
+            user = accounts.create_user("alice@example.com", "alice password")
             self.assertIsNotNone(user.bucket_id)
             self.assertEqual(accounts.account_for_session(session).bucket_id, admin.bucket_id)
             with self.assertRaises(AuthenticationError):
-                accounts.login("alice", "bad password")
+                accounts.login("alice@example.com", "bad password")
             keys.lock()
             self.assertFalse(accounts.status()["unlocked"])
 
@@ -93,8 +93,8 @@ class M5Tests(unittest.TestCase):
             metadata = Metadata(Path(temp) / "meta.db")
             keys = KeyStore(metadata)
             accounts = AccountService(metadata, keys)
-            accounts.setup("encryption passphrase", "admin", "admin password")
-            user = accounts.create_user("alice", "alice password")
+            accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+            user = accounts.create_user("alice@example.com", "alice password")
             entered, release = threading.Event(), threading.Event()
             def verify(*args):
                 entered.set()
@@ -102,7 +102,7 @@ class M5Tests(unittest.TestCase):
                     raise RuntimeError("校验等待超时")
                 return True
             async def run():
-                pending = asyncio.create_task(accounts.alogin("alice", "alice password"))
+                pending = asyncio.create_task(accounts.alogin("alice@example.com", "alice password"))
                 try:
                     for _ in range(500):
                         if entered.is_set():
@@ -133,22 +133,22 @@ class M5Tests(unittest.TestCase):
                 objects = ObjectService(metadata, BlobEngine(metadata, LocalDiskBlobStore(root / "blobs"), b"0" * 32,
                                                              chunk_size=32, frame_size=8))
                 admin_api = AdminApi(accounts, objects, ClientAuthStore(metadata, keystore=keys))
-                admin_api.setup("encryption passphrase", "admin", "admin password")
+                admin_api.setup("encryption passphrase", "admin@example.com", "admin password")
                 # 初始化后客户端密钥服务必须使用实际解锁的 KEK。
-                admin = admin_api.login("admin", "admin password")
-                user = admin_api.create_user(admin["session"], admin["csrf_token"], "alice", "alice password")
-                self.assertEqual(admin_api.list_users(admin["session"])[1]["username"], "alice")
+                admin = admin_api.login("admin@example.com", "admin password")
+                user = admin_api.create_user(admin["session"], admin["csrf_token"], "alice@example.com", "alice password")
+                self.assertEqual(admin_api.list_users(admin["session"])[1]["username"], "alice@example.com")
                 created_client = admin_api.create_client(admin["session"], admin["csrf_token"], "backup", [])
                 clients = admin_api.list_clients(admin["session"])
                 self.assertEqual(clients[0]["name"], "backup")
                 admin_api.disable_client_key(admin["session"], admin["csrf_token"], created_client["access_key_id"])
                 user_api = UserApi(accounts, objects)
                 # 统一登录：管理员也能登录文件空间并使用自己的存储桶，普通用户的会话调用不了管理接口。
-                admin_session = user_api.login("admin", "admin password")
+                admin_session = user_api.login("admin@example.com", "admin password")
                 self.assertEqual(admin_session["role"], "admin")
                 await user_api.put(admin_session["session"], admin_session["csrf_token"], "mine.txt", b"x", "text/plain")
                 self.assertEqual(user_api.me(admin_session["session"])["role"], "admin")
-                login = user_api.login("alice", "alice password")
+                login = user_api.login("alice@example.com", "alice password")
                 with self.assertRaises(PermissionError):
                     admin_api.list_users(login["session"])
                 await user_api.put(login["session"], login["csrf_token"], "docs/a.txt", b"hello", "text/plain")
@@ -190,10 +190,10 @@ class M5Tests(unittest.TestCase):
 
                 status = await request("GET", "/api/admin/v1/status")
                 self.assertEqual(status[0]["status"], 200)
-                setup = await request("POST", "/api/admin/v1/setup", b'{"passphrase":"encryption passphrase","username":"admin","password":"admin password"}', {"content-type":"application/json"})
+                setup = await request("POST", "/api/admin/v1/setup", b'{"passphrase":"encryption passphrase","username":"admin@example.com","password":"admin password"}', {"content-type":"application/json"})
                 self.assertEqual(setup[0]["status"], 201)
-                app.admin.accounts.create_user("alice", "alice password")
-                login_messages = await request("POST", "/api/user/v1/login", b'{"username":"alice","password":"alice password"}', {"content-type":"application/json"})
+                app.admin.accounts.create_user("alice@example.com", "alice password")
+                login_messages = await request("POST", "/api/user/v1/login", b'{"username":"alice@example.com","password":"alice password"}', {"content-type":"application/json"})
                 login_body = json.loads(login_messages[-1]["body"])
                 cookie = login_messages[0]["headers"]
                 session_cookie = next(value.decode() for key, value in cookie if key.lower() == b"set-cookie").split(";", 1)[0]
@@ -219,7 +219,7 @@ class M5Tests(unittest.TestCase):
         async def run():
             with tempfile.TemporaryDirectory() as temp:
                 app = create_app(temp)
-                account = app.accounts.setup("encryption passphrase", "admin", "admin password")
+                account = app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
                 bucket_id = app.objects.create_bucket("s3-test")
                 client_id = app.s3.auth.create_client("asgi-test")
                 access_key, secret = app.s3.auth.create_key(client_id)

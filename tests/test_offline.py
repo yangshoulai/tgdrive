@@ -85,8 +85,8 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(self.temp.name, secure_cookies=False, run_scheduler=False)
-        self.admin = self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
+        self.admin = self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
         self.offline = self.app.offline
         self.offline.http = self.http = MemoryHttp()
 
@@ -262,12 +262,12 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admin_config_and_web_authorization(self):
         client = Client(self.app)
-        alice = await client.login("user", "alice", "alice password")
+        alice = await client.login("user", "alice@example.com", "alice password")
         status, _, _ = await client.request("POST", "/api/admin/v1/resources", b'{"mode":"low"}', alice)
         self.assertEqual(status, 403)
         status, _, _ = await client.request("POST", "/api/user/v1/downloads/parse", b'{"input":"https://example.com/f"}', {"cookie": alice["cookie"]})
         self.assertEqual(status, 403)
-        admin = await client.login("admin", "admin", "admin password")
+        admin = await client.login("admin", "admin@example.com", "admin password")
         status, _, data = await client.request("POST", "/api/admin/v1/resources", b'{"mode":"low"}', admin)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(data)["effective"]["concurrency"], 1)

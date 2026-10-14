@@ -15,6 +15,7 @@ from typing import Callable
 
 from .blobengine import BlobEngine
 from .errors import InvalidStateError, NotFoundError, QuotaExceededError, ShareExpiredError
+from .filekinds import kind_clause
 from .fingerprint import combine, is_fingerprint
 from .metadata import Metadata
 
@@ -629,16 +630,30 @@ class ObjectService:
             raise NotFoundError("not a shared folder")
         return info
 
-    async def list_public_folder(self, token: str, relative: str = "", cursor: str | None = None, limit: int = 200) -> dict[str, object]:
-        """列出被公开的文件夹（或其中的子文件夹）。内容是实时的：分享之后新增的文件访客也能看到。"""
+    async def list_public_folder(self, token: str, relative: str = "", cursor: str | None = None, limit: int = 200,
+                                 kind: str = "") -> dict[str, object]:
+        """列出被公开的文件夹（或其中的子文件夹）。内容是实时的：分享之后新增的文件访客也能看到。
+
+        kind 按文件类型筛选当前目录的直接子文件（不含文件夹），规则与网页文件列表相同。
+        """
         root = self._public_folder_root(token)
         relative = self._public_relative(relative)
         if relative and not relative.endswith("/"):
             relative += "/"
         prefix = root.key + relative
         scope = Scope(root.bucket_id, root.key)
+        clause = kind_clause(kind) if kind else None
         def read_page():
-            page = self.list_objects(scope, prefix, "/", cursor, max(1, min(limit, 500)))
+            if clause is not None:
+                size = max(1, min(limit, 500))
+                condition, args = clause
+                rows = self.metadata.db.execute(
+                    "SELECT * FROM objects WHERE bucket_id=? AND key>? AND key<? AND key>? AND substr(key,-1)!='/' "
+                    f"AND instr(substr(key,?),'/')=0 AND {condition} ORDER BY key LIMIT ?",
+                    (root.bucket_id, prefix, prefix + self._PREFIX_END, cursor or "", len(prefix) + 1, *args, size + 1)).fetchall()
+                page = ListPage([self._object(row) for row in rows[:size]], [], rows[size - 1]["key"] if len(rows) > size else None)
+            else:
+                page = self.list_objects(scope, prefix, "/", cursor, max(1, min(limit, 500)))
             return (page, self.folder_sizes(scope, page.common_prefixes),
                     self.thumbnail_variants([item.blob_uuid for item in page.objects]), self.folder_previews(scope, page.common_prefixes))
         page, sizes, thumbnails, previews = await self.metadata.run_in_thread(read_page)
@@ -649,7 +664,7 @@ class ObjectService:
                     "previews": [{"name": item["key"].rsplit("/", 1)[-1], "path": item["key"][len(root.key):],
                                   **{key: data for key, data in item.items() if key != "key"}} for item in previews[value]]}
                    for value in page.common_prefixes]
-        if relative and not files and not folders and cursor is None and not self.metadata.db.execute(
+        if relative and not files and not folders and cursor is None and clause is None and not self.metadata.db.execute(
                 "SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (root.bucket_id, prefix)).fetchone():
             raise NotFoundError(relative)
         return {"name": root.key.rstrip("/").rsplit("/", 1)[-1], "path": relative, "folders": folders, "files": files,

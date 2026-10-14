@@ -6,7 +6,7 @@ import hmac
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from cryptography.exceptions import InvalidKey
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
@@ -148,6 +148,12 @@ class SessionManager:
         self._sessions.clear()
         if self.store is not None:
             self.store.delete_all()
+
+    def rename_user(self, user_id: int, username: str) -> None:
+        """登录名变更后同步内存中的会话；持久化会话不保存用户名，恢复时从数据库读取。"""
+        for token, session in list(self._sessions.items()):
+            if session.user_id == user_id:
+                self._sessions[token] = replace(session, username=username)
 
     def clear_user(self, user_id: int, *, keep: str | None = None) -> None:
         """注销某个账号的全部会话；keep 指定要保留的那一个（例如正在修改密码的当前会话）。"""

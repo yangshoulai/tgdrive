@@ -34,7 +34,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
   const attention: { tone: "warning" | "danger" | "accent"; icon: IconName; title: string; detail: string; action: string; module: AdminModule }[] = [];
   if (!activeBots.length) attention.push({ tone: "warning", icon: "send", title: "还没有启用的存储通道", detail: "新上传的文件现在保存在服务器本地磁盘。添加 Telegram Bot 和私有频道后，文件会保存到那里。", action: "添加通道", module: "bots" });
   if (settings && (!settings.public_base_url.effective || !settings.s3_endpoint.effective)) attention.push({ tone: "accent", icon: "globe", title: "尚未配置对外访问地址", detail: `${!settings.public_base_url.effective ? "分享链接目前使用访问者打开的地址生成。" : ""}${!settings.s3_endpoint.effective ? "用户在访问密钥页看不到同步工具要用的服务地址。" : ""}`, action: "去配置", module: "settings" });
-  nearQuota.forEach(user => attention.push({ tone: user.used_bytes >= (user.quota_bytes ?? 0) ? "danger" : "warning", icon: "pulse", title: `${user.username} 的空间即将用完`, detail: `已使用 ${formatBytes(user.used_bytes)} / ${formatBytes(user.quota_bytes)}。`, action: "调整配额", module: "users" }));
+  nearQuota.forEach(user => attention.push({ tone: user.used_bytes >= (user.quota_bytes ?? 0) ? "danger" : "warning", icon: "pulse", title: `${api.displayName(user)} 的空间即将用完`, detail: `已使用 ${formatBytes(user.used_bytes)} / ${formatBytes(user.quota_bytes)}。`, action: "调整配额", module: "users" }));
   return (
     <>
       <PageHeader title="概览" />
@@ -66,7 +66,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
             <div className="usage-chart" aria-label="用户空间使用图表">
               {data.users.top_users.map(user => {
                 const max = Math.max(1, ...data.users.top_users.map(item => item.used_bytes));
-                return <div className="usage-chart-row" key={user.id}><span>{user.username}</span><div className="usage-chart-track"><i style={{ width: `${Math.max(2, user.used_bytes / max * 100)}%` }} /></div><strong>{formatBytes(user.used_bytes)}</strong></div>;
+                return <div className="usage-chart-row" key={user.id}><span title={user.username}>{api.displayName(user)}</span><div className="usage-chart-track"><i style={{ width: `${Math.max(2, user.used_bytes / max * 100)}%` }} /></div><strong>{formatBytes(user.used_bytes)}</strong></div>;
               })}
               {data.users.user_total === 0 && <div className="overview-empty"><p className="muted">暂无普通用户的空间使用数据。</p><Button size="sm" variant="ghost" onClick={() => onNavigate("users")}>管理用户</Button></div>}
             </div>

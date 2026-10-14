@@ -184,9 +184,9 @@ class InstantUploadHttpTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
-        self.bob = self.app.accounts.create_user("bob", "bob password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
+        self.bob = self.app.accounts.create_user("bob@example.com", "bob password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -198,8 +198,8 @@ class InstantUploadHttpTests(unittest.TestCase):
         fp = reference(data, 16 * 1024 * 1024)
 
         async def run():
-            alice = await self.client.login("user", "alice", "alice password")
-            bob = await self.client.login("user", "bob", "bob password")
+            alice = await self.client.login("user", "alice@example.com", "alice password")
+            bob = await self.client.login("user", "bob@example.com", "bob password")
             status, _, _ = await self.client.request("PUT", "/api/user/v1/files?path=a/one.txt", data,
                                                      {**alice, "content-type": "text/plain", "content-length": str(len(data))})
             self.assertEqual(status, 200)

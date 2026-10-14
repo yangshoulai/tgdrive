@@ -14,9 +14,9 @@ class KeyApiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
-        self.bob = self.app.accounts.create_user("bob", "bob password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
+        self.bob = self.app.accounts.create_user("bob@example.com", "bob password")
         self.client = Client(self.app)
         clients = self.app.s3.auth
         self.clients = clients
@@ -40,7 +40,7 @@ class KeyApiTests(unittest.TestCase):
 
     def test_full_file_lifecycle_with_bearer_and_basic(self):
         status, body = self.json_call("GET", "/api/v1/me")
-        self.assertEqual((status, body["owner"], body["grants"][0]["perms"]), (200, "alice", "rw"))
+        self.assertEqual((status, body["owner"], body["grants"][0]["perms"]), (200, "alice@example.com", "rw"))
         status, _, data = self.call("PUT", "/api/v1/files?path=docs/a.txt&public=1", b"hello world",
                                     self.bearer(**{"content-type": "text/plain", "content-length": "11"}))
         self.assertEqual(status, 200, data)
@@ -65,7 +65,7 @@ class KeyApiTests(unittest.TestCase):
             self.assertEqual((status, json.loads(data)["error"]["code"]), (401, "invalid_key"))
             self.assertEqual(response_headers["www-authenticate"], 'Bearer realm="tgdrive"')
         # 网页会话 Cookie 不能访问 /api/v1。
-        session = asyncio.run(self.client.login("user", "alice", "alice password"))
+        session = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         self.assertEqual(self.call("GET", "/api/v1/me", headers=session)[0], 401)
         # 密钥不能访问网页接口 /api/user/v1。
         self.assertEqual(self.call("GET", "/api/user/v1/me")[0], 401)
@@ -153,6 +153,33 @@ class KeyApiTests(unittest.TestCase):
         self.assertEqual(self.json_call("GET", query, headers=self.bearer(bak, bsecret))[1]["tasks"], [])
         self.assertEqual(self.json_call("GET", "/api/v1/downloads?ids=x")[0], 400)
         self.assertEqual(self.json_call("GET", "/api/v1/downloads?ids=" + ",".join(map(str, range(1, 102))))[0], 400)
+
+    def test_folders_lists_one_level_within_grants(self):
+        for path in ("a/x.txt", "a/b/y.txt", "c/z.txt", "top.txt", "inbox/m/n.txt"):
+            self.call("PUT", f"/api/v1/files?path={path}", b"x", self.bearer(**{"content-length": "1"}))
+        self.json_call("POST", "/api/v1/folders", {"path": "empty"})
+        from tgdrive.objects import Scope
+        private = Scope(self.alice.bucket_id, ".tgdrive/private/", private_access=True)
+        asyncio.run(self.app.objects.put_object(private, ".tgdrive/private/secret.txt", b"x", 1))
+        status, body = self.json_call("GET", "/api/v1/folders")
+        self.assertEqual(status, 200, body)
+        self.assertNotIn(".tgdrive/", body["folders"])
+        self.assertTrue(set(["a/", "empty/", "inbox/"]).issubset(body["folders"]))
+        self.assertTrue(body["writable"])
+        self.assertEqual(self.json_call("GET", "/api/v1/folders?prefix=a/")[1]["folders"], ["a/b/"])
+        # 分页：每页 1 个，游标为上一页最后一个文件夹。
+        first = self.json_call("GET", "/api/v1/folders?limit=1")[1]
+        second = self.json_call("GET", f"/api/v1/folders?limit=1&cursor={first['next_cursor']}")[1]
+        self.assertEqual(len(first["folders"]) + len(second["folders"]), 2)
+        self.assertLess(first["folders"][0], second["folders"][0])
+        # 前缀授权：根目录只显示通往授权前缀的一层，授权之外不可读，只读密钥 writable 为 false。
+        cid = self.clients.create_client("scoped", owner_user_id=self.alice.id)
+        ak, secret = self.clients.create_key(cid)
+        self.clients.grant(cid, self.alice.bucket_id, "inbox/m/", "ro")
+        scoped = self.bearer(ak, secret)
+        self.assertEqual(self.json_call("GET", "/api/v1/folders", headers=scoped)[1], {"prefix": "", "folders": ["inbox/"], "writable": False, "next_cursor": None})
+        self.assertEqual(self.json_call("GET", "/api/v1/folders?prefix=inbox/", headers=scoped)[1]["folders"], ["inbox/m/"])
+        self.assertEqual(self.json_call("GET", "/api/v1/folders?prefix=a/", headers=scoped)[0], 403)
 
 
 if __name__ == "__main__":

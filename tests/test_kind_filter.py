@@ -15,11 +15,11 @@ class KindFilterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
         self.scope = Scope(self.alice.bucket_id)
         self.client = Client(self.app)
-        self.session = asyncio.run(self.client.login("user", "alice", "alice password"))
+        self.session = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
 
     def tearDown(self):
         self.app.metadata.close()
@@ -60,6 +60,21 @@ class KindFilterTests(unittest.TestCase):
         self.assertEqual(self.keys("/api/user/v1/search?q=mp4&kind=video"), ["a.MP4", "pub.mp4", "sub/deep.mp4"])
         status, _, _ = asyncio.run(self.client.request("GET", "/api/user/v1/list?prefix=&kind=bogus", headers=self.session))
         self.assertEqual(status, 400)
+
+    def test_public_folder_filters_by_kind(self):
+        for key in ("pub/a.mp4", "pub/b.jpg", "pub/c.txt", "pub/sub/d.mp4", "other.mp4"):
+            self.put(key)
+        token = self.app.objects.set_public(self.scope, "pub/", True).public_token
+        def names(query):
+            status, _, data = asyncio.run(self.client.request("GET", f"/api/public/v1/folders/{token}/list?{query}"))
+            self.assertEqual(status, 200, data)
+            body = json.loads(data)
+            return [item["name"] for item in body["files"]], [item["name"] for item in body["folders"]]
+        self.assertEqual(names("kind=video"), (["a.mp4"], []))
+        self.assertEqual(names("kind=video&path=sub/"), (["d.mp4"], []))
+        self.assertEqual(names("kind=image"), (["b.jpg"], []))
+        self.assertEqual(names(""), (["a.mp4", "b.jpg", "c.txt"], ["sub"]))
+        self.assertEqual(asyncio.run(self.client.request("GET", f"/api/public/v1/folders/{token}/list?kind=bogus"))[0], 400)
 
     def test_kind_filter_keeps_private_space_protected(self):
         private = Scope(self.alice.bucket_id, ".tgdrive/private/", private_access=True)

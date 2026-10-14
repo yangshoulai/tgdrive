@@ -4,7 +4,7 @@ import { useCursorPage, useFilePageSize } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
 import { FilePreview, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
-import { Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, Pagination, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
+import { Brand, Button, Checkbox, EmptyState, Field, FilterChips, Icon, Modal, Pagination, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
 import { LoginPage } from "./shell";
 import { FolderPicker } from "./user/folders";
 
@@ -188,9 +188,10 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
   const [path, setPath] = useState(readPath);
   const [layout, setLayout] = useState<"list" | "grid">(() => localStorage.getItem("tgdrive:share-layout") === "grid" ? "grid" : "list");
   const [preview, setPreview] = useState<FolderPage["files"][number] | null>(null);
+  const [kind, setKind] = useState<api.KindFilter>("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const downloadTarget = useId(), downloadFrame = useRef<HTMLIFrameElement>(null);
-  useEffect(() => { setSelected(new Set()); }, [token, path, access]);
+  useEffect(() => { setSelected(new Set()); }, [token, path, access, kind]);
   useEffect(() => { localStorage.setItem("tgdrive:share-layout", layout); }, [layout]);
   useEffect(() => {
     const pop = () => setPath(readPath());
@@ -200,12 +201,12 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
   const passwordRequired = useRef(onPasswordRequired);
   passwordRequired.current = onPasswordRequired;
   const fetchPage = useCallback(async (cursor: string | null) => {
-    try { return await api.publicFolderList(token, path, cursor, access, pageSize.pageSize); }
+    try { return await api.publicFolderList(token, path, cursor, access, pageSize.pageSize, kind); }
     catch (reason) {
       if (reason instanceof api.ApiError && reason.code === "password_required") passwordRequired.current();
       throw new Error(reason instanceof api.ApiError && reason.status === 404 ? "这个文件夹不存在，可能已被分享者移动或删除。" : api.errorMessage(reason, "加载失败，请稍后重试"));
     }
-  }, [token, path, access, pageSize.pageSize]);
+  }, [token, path, access, pageSize.pageSize, kind]);
   const pagination = useCursorPage(fetchPage);
   const page = pagination.page;
   const error = pagination.error;
@@ -258,7 +259,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
         <div className="share-actions">
           <Button icon="link" onClick={() => void copyText(`${window.location.origin}${window.location.pathname}`, "分享链接已复制")}>复制链接</Button>
           {saveButton({ label: folder.name })}
-          <Button icon="download" disabled={!page || Boolean(error) || !page.files.length && !pagination.hasNext && !pagination.hasPrevious} title="打包下载当前目录的全部文件，不包含子文件夹" onClick={() => downloadFiles(true)}>下载全部文件</Button>
+          <Button icon="download" disabled={!page || Boolean(error) || !kind && !page.files.length && !pagination.hasNext && !pagination.hasPrevious} title="打包下载当前目录的全部文件（不受类型筛选影响），不包含子文件夹" onClick={() => downloadFiles(true)}>下载全部文件</Button>
         </div>
       </header>
       {crumbs.length > 1 && <nav className="share-crumbs" aria-label="文件夹路径">
@@ -280,9 +281,11 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
         </div>
         <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
       </div>
+      <div className="share-folder-filters"><FilterChips label="文件类型" value={kind} onChange={setKind} options={api.KIND_FILTERS} /></div>
       {error ? <EmptyState icon="alert" title="无法打开" description={error} action={path ? <Button onClick={() => open("")}>回到根目录</Button> : <Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         : page === null ? <div className="share-folder-loading"><SkeletonRows rows={4} /></div>
-          : empty ? <EmptyState icon="folder" title="这个文件夹是空的" description="分享者之后添加的文件会显示在这里。" />
+          : empty ? (kind ? <EmptyState icon="search" title={`这个文件夹里没有${api.KIND_FILTERS.find(item => item.value === kind)?.label}`} description="类型筛选只看当前文件夹，不包含子文件夹。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
+            : <EmptyState icon="folder" title="这个文件夹是空的" description="分享者之后添加的文件会显示在这里。" />)
             : layout === "list" ? (
               <div className="data-table public-folder-table" role="table" aria-label="文件夹内容">
                 <div className="data-row data-head" role="row">

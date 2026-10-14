@@ -271,7 +271,7 @@ class Passkeys:
         request_id, item = self._new("register", token, row, origin, name=name)
         options = generate_registration_options(
             rp_id=item.rp_id, rp_name="Tessera", user_name=account.username,
-            user_id=row["webauthn_user_handle"], user_display_name=account.username,
+            user_id=row["webauthn_user_handle"], user_display_name=account.nickname or account.username,
             challenge=item.value, timeout=self.CHALLENGE_SECONDS * 1000,
             authenticator_selection=AuthenticatorSelectionCriteria(
                 authenticator_attachment=AuthenticatorAttachment.PLATFORM,

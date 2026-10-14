@@ -18,8 +18,8 @@ class AdminDocsAccessTests(unittest.TestCase):
                 (static / "index.html").write_text("app", encoding="utf-8")
                 (static / "admin-docs.js").write_text("admin docs", encoding="utf-8")
                 app = create_app(root / "data", secure_cookies=False, static_dir=static)
-                app.accounts.setup("encryption passphrase", "admin", "admin password")
-                app.accounts.create_user("alice", "alice password")
+                app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+                app.accounts.create_user("alice@example.com", "alice password")
                 client = Client(app)
 
                 status, _, _ = await client.request("GET", "/api/admin/v1/docs-bundle.js")
@@ -31,11 +31,11 @@ class AdminDocsAccessTests(unittest.TestCase):
                     status, _, body = await client.request("GET", path)
                     self.assertEqual((path, status, body), (path, 200, b"app"))
 
-                user = await client.login("user", "alice", "alice password")
+                user = await client.login("user", "alice@example.com", "alice password")
                 status, _, _ = await client.request("GET", "/api/admin/v1/docs-bundle.js", headers=user)
                 self.assertEqual(status, 403)
 
-                admin = await client.login("admin", "admin", "admin password")
+                admin = await client.login("admin", "admin@example.com", "admin password")
                 status, headers, body = await client.request("GET", "/api/admin/v1/docs-bundle.js", headers=admin)
                 self.assertEqual(status, 200)
                 self.assertEqual(headers["content-type"], "text/javascript; charset=utf-8")

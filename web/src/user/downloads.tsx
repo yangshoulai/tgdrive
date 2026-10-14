@@ -4,6 +4,8 @@ import * as api from "../api";
 import { useCursorPage } from "../pagination";
 import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, Menu, Modal, PageHeader, Panel, Pagination, Progress, Segmented, SkeletonRows, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
 import { DestinationPicker } from "./folders";
+import { PrivateUnlockForm } from "./private-access";
+import { usePrivateAccess } from "./private-session";
 
 const LABEL: Record<api.DownloadStatus, string> = { queued: "排队中", running: "下载中", interrupted: "等待恢复", stopped: "已停止", completed: "已完成", failed: "失败" };
 const TONE: Record<api.DownloadStatus, Tone> = { queued: "neutral", running: "accent", interrupted: "warning", stopped: "neutral", completed: "success", failed: "danger" };
@@ -26,6 +28,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   useDocumentTitle(`下载任务 · ${BRAND}`);
   const [filter, setFilter] = useState("");
   const [newTask, setNewTask] = useState(false);
+  // 资源抓取脚本选择私密空间等需要网页确认的目标时，把解析结果放在地址片段里打开本页。
+  const [imported, setImported] = useState<api.DownloadImport | null>(api.takeDownloadImport);
   const [edit, setEdit] = useState<api.DownloadTask | null>(null);
   const [confirm, setConfirm] = useState<{ task: api.DownloadTask; action: "stop" | "resume" | "restart" | "delete" } | null>(null);
   const [busy, setBusy] = useState(new Set<number>());
@@ -144,6 +148,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       <p>支持文件直链{page?.capabilities.hls ? "、M3U8 点播" : ""}{page?.capabilities.x ? "、X 帖子" : ""}{page?.capabilities.youtube ? "、YouTube 视频和 Shorts" : ""}。平台功能由管理员启用。网络中断会自动重试；文件直链满足条件时可续传，平台和 M3U8 任务手动停止后从头下载。删除任务保留已保存的文件。</p>
     </details>
     {(newTask || edit) && <DownloadDialog task={edit} onClose={() => { setNewTask(false); setEdit(null); }} onComplete={completed} />}
+    {imported && !newTask && !edit && <DownloadDialog task={null} initial={imported} onClose={() => setImported(null)} onComplete={() => { setImported(null); completed(); }} />}
     {clearing && <ConfirmDialog title={clearing === "completed" ? "清除已完成的任务" : "清除失败的任务"}
       description={clearing === "completed" ? "从列表中移除所有已完成的任务，已保存的文件不受影响。" : "移除所有失败的任务并清理未完成的数据，已保存的文件不受影响。"}
       confirmLabel="清除" danger onClose={() => setClearing(null)} onConfirm={() => clear(clearing)} />}
@@ -157,13 +162,18 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   </>;
 }
 
-function DownloadDialog({ task, onClose, onComplete }: { task: api.DownloadTask | null; onClose: () => void; onComplete: () => void }) {
+function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.DownloadTask | null; initial?: api.DownloadImport; onClose: () => void; onComplete: () => void }) {
   const [input, setInput] = useState("");
   const [downloadType, setDownloadType] = useState<"auto" | "http" | "hls" | "x" | "youtube">("auto");
   const [cookies, setCookies] = useState("");
-  const [candidates, setCandidates] = useState<api.DownloadCandidate[] | null>(null);
-  const [selected, setSelected] = useState(new Set<number>());
-  const [destination, setDestination] = useState("");
+  const [candidates, setCandidates] = useState<api.DownloadCandidate[] | null>(initial?.candidates ?? null);
+  const [selected, setSelected] = useState(() => new Set<number>(initial?.candidates.map((_, index) => index) ?? []));
+  const [destination, setDestination] = useState(initial?.destination ?? "");
+  // 来自脚本的私密目标：未解锁时先在本页解锁，再确认保存位置。
+  const access = usePrivateAccess();
+  const [wantPrivate, setWantPrivate] = useState(Boolean(initial?.private));
+  const needsUnlock = wantPrivate && !access.grant;
+  useEffect(() => { if (wantPrivate && access.grant && !api.isPrivatePath(destination)) setDestination(api.PRIVATE_PREFIX); }, [wantPrivate, access.grant, destination]);
   const [ready, setReady] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -185,19 +195,22 @@ function DownloadDialog({ task, onClose, onComplete }: { task: api.DownloadTask 
     finally { setBusy(false); }
   }
   async function submit() {
-    if (!candidates || !selected.size || !ready) return;
+    if (!candidates || !selected.size || !ready || needsUnlock) return;
     setBusy(true); setError("");
     try {
       if (task) await api.controlDownload(task.id, "update", { ticket: candidates[[...selected][0]].ticket }, task.private);
       else await api.createDownloads([...selected].map(index => ({ ticket: candidates[index].ticket, name: candidates[index].name })), destination);
       toast.success(task ? "参数已更新，任务已重新加入队列" : `${selected.size} 个任务已加入下载队列`);
       onComplete();
-    } catch (reason) { setError(api.errorMessage(reason, "创建任务失败，请稍后重试")); }
+    } catch (reason) {
+      const expired = initial && reason instanceof api.ApiError && reason.status === 400 && /过期|expired/i.test(reason.message);
+      setError(expired ? "解析结果已过期（20 分钟），请回到原网页重新发送。" : api.errorMessage(reason, "创建任务失败，请稍后重试"));
+    }
     finally { setBusy(false); }
   }
-  return <Modal title={task ? "更新下载参数" : "添加下载"} icon="download" size="lg" onClose={onClose} dismissible={!busy}
-    description={task ? "粘贴新的链接或命令，选择文件后从头重新下载。" : "粘贴文件直链、X 帖子、YouTube 视频或 curl 命令。"}
-    footer={<><Button disabled={busy} onClick={onClose}>取消</Button>{candidates ? <><Button variant="ghost" disabled={busy} onClick={() => { setCandidates(null); setError(""); }}>返回编辑</Button><Button variant="primary" loading={busy} disabled={!selected.size || !ready} onClick={() => void submit()}>{task ? "更新并重新下载" : `开始下载${selected.size ? `（${selected.size}）` : ""}`}</Button></> : <Button variant="primary" loading={busy} disabled={!input.trim()} onClick={() => void parse()}>{busy ? "正在读取文件信息" : "解析内容"}</Button>}</>}>
+  return <Modal title={task ? "更新下载参数" : initial ? "确认下载" : "添加下载"} icon="download" size="lg" onClose={onClose} dismissible={!busy}
+    description={task ? "粘贴新的链接或命令，选择文件后从头重新下载。" : initial ? "这些文件由资源抓取脚本转交，确认保存位置后开始下载。" : "粘贴文件直链、X 帖子、YouTube 视频或 curl 命令。"}
+    footer={<><Button disabled={busy} onClick={onClose}>取消</Button>{candidates ? <>{!initial && <Button variant="ghost" disabled={busy} onClick={() => { setCandidates(null); setError(""); }}>返回编辑</Button>}<Button variant="primary" loading={busy} disabled={!selected.size || !ready || needsUnlock} onClick={() => void submit()}>{task ? "更新并重新下载" : `开始下载${selected.size ? `（${selected.size}）` : ""}`}</Button></> : <Button variant="primary" loading={busy} disabled={!input.trim()} onClick={() => void parse()}>{busy ? "正在读取文件信息" : "解析内容"}</Button>}</>}>
     <div className="form">
       {!candidates ? <><Field label="链接或下载命令" hint="平台链接每次一个，多个直链每行一个。命令使用 bash 格式；支持请求头、Cookie、文本 POST 请求体，不执行命令。">
         <textarea className="input mono download-input" rows={8} autoComplete="off" autoCapitalize="none" spellCheck={false} value={input} onChange={event => setInput(event.target.value)} placeholder={"https://example.com/video.mp4\n\ncurl 'https://example.com/file.zip' -H 'Cookie: …'"} />
@@ -225,7 +238,13 @@ function DownloadDialog({ task, onClose, onComplete }: { task: api.DownloadTask 
             </div>
           </div>)}
         </div>
-        {task ? <p className="muted">保存位置：{task.private && !api.isPrivatePath(task.key) ? "私密空间" : api.privatePathLabel(task.key)}</p> : <><DestinationPicker value={destination} allowPrivate onChange={path => { setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示域名。</p></>}
+        {task ? <p className="muted">保存位置：{task.private && !api.isPrivatePath(task.key) ? "私密空间" : api.privatePathLabel(task.key)}</p>
+          : needsUnlock ? <div className="download-import-unlock">
+            <div className="download-import-unlock-head"><Icon name="lock" size={18} /><div><strong>保存到私密空间需要先解锁</strong><p className="muted">解锁只在当前 {BRAND} 页面完成，脚本和原网页拿不到你的密码。</p></div>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setWantPrivate(false); setDestination(""); }}>改存普通目录</Button></div>
+            <PrivateUnlockForm />
+          </div>
+          : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示域名。</p></>}
       </>}
       {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
     </div>

@@ -34,7 +34,7 @@ export function Users() {
       <PageHeader title="用户" description="每个用户拥有独立的存储桶。配额在每次上传提交时强制校验。"
         actions={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>新建用户</Button>} />
       <div className="toolbar">
-        <SearchInput value={search} onChange={setSearch} placeholder="按用户名筛选" label="筛选用户" />
+        <SearchInput value={search} onChange={setSearch} placeholder="按邮箱或昵称筛选" label="筛选用户" />
         <Segmented label="状态" value={status} onChange={setStatus} options={[{ value: "all", label: "全部" }, { value: "active", label: "启用" }, { value: "disabled", label: "已禁用" }]} />
       </div>
       <section className="file-surface">
@@ -47,7 +47,7 @@ export function Users() {
               const percent = user.quota_bytes ? user.used_bytes / user.quota_bytes * 100 : 0;
               return (
                 <div key={user.id} role="row" className="data-row">
-                  <span role="cell" className="cell-user"><Avatar name={user.username} tone={user.role === "admin" ? "admin" : "accent"} /><span className="name-stack"><strong>{user.username}</strong><small>{user.role === "admin" ? "管理员" : `创建于 ${formatDate(user.created_at)}`}</small></span></span>
+                  <span role="cell" className="cell-user"><Avatar name={api.displayName(user)} tone={user.role === "admin" ? "admin" : "accent"} src={api.adminAvatarUrl(user.id, user.avatar_version)} /><span className="name-stack"><strong title={api.displayName(user)}>{api.displayName(user)}{user.role === "admin" && <Badge tone="accent">管理员</Badge>}</strong><small title={user.username}>{user.needs_email ? `用户名 ${user.username} · 未设置邮箱` : user.username}</small></span></span>
                   <span role="cell" className="cell-usage">
                     <span className="usage-text"><strong>{formatBytes(user.used_bytes)}</strong><span className="muted">{user.quota_bytes ? ` / ${formatBytes(user.quota_bytes)}` : " / 不限"}</span></span>
                     {user.quota_bytes ? <Progress value={percent} tone={usageTone(percent)} label={`${user.username} 存储使用率`} /> : null}
@@ -90,32 +90,39 @@ function parseQuota(value: string): number | null | undefined {
 }
 
 function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [form, setForm] = useState({ username: "", password: "", quota: "" });
+  const [form, setForm] = useState({ username: "", nickname: "", password: "", quota: "" });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
     const next: Record<string, string> = {};
     const username = form.username.trim();
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$/.test(username)) next.username = "2–64 位英文字母、数字、点、下划线或连字符";
+    if (!api.isEmail(username)) next.username = "请输入有效的邮箱地址";
+    if (form.nickname.trim().length > 32) next.nickname = "昵称最多 32 个字符";
     if (form.password.length < 8) next.password = "至少 8 个字符";
     const quota = parseQuota(form.quota);
     if (quota === undefined) next.quota = "请输入大于 0 的数字，或留空表示不限";
     setErrors(next);
     if (Object.keys(next).length) return;
     setBusy(true);
-    try { await api.createAdminUser(username, form.password, quota ?? null); toast.success(`已创建用户 ${username}`); onCreated(); }
+    try { await api.createAdminUser(username, form.password, quota ?? null, form.nickname.trim()); toast.success(`已创建用户 ${username.toLowerCase()}`); onCreated(); }
     catch (reason) { setErrors({ username: api.errorMessage(reason, "创建失败，请稍后重试") }); }
     finally { setBusy(false); }
   }
   return (
-    <Modal title="新建用户" description="创建后，用户可以立即用这个账号登录文件空间。" icon="users" onClose={onClose}
+    <Modal title="新建用户" description="创建后，用户可以立即用邮箱和初始密码登录文件空间。" icon="users" onClose={onClose}
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="user-form" loading={busy}>创建用户</Button></>}>
       <form id="user-form" className="form" onSubmit={submit} noValidate>
-        <Field label="用户名" htmlFor="user-name" error={errors.username}>
-          <input id="user-name" className="input" autoComplete="off" value={form.username} onChange={event => setForm({ ...form, username: event.target.value })} autoFocus />
-        </Field>
-        <Field label="初始密码" htmlFor="user-password" error={errors.password} hint="用户登录后可以在账号菜单中修改。">
+        <div className="form-row">
+          <Field label="邮箱" htmlFor="user-name" error={errors.username} hint="用于登录，不能与其他账号重复。">
+            <input id="user-name" className="input" type="text" inputMode="email" placeholder="name@example.com" autoComplete="off" autoCapitalize="none" spellCheck={false}
+              value={form.username} onChange={event => setForm({ ...form, username: event.target.value })} autoFocus />
+          </Field>
+          <Field label="昵称" htmlFor="user-nickname" error={errors.nickname} hint="可选，用户之后可以自己修改。">
+            <input id="user-nickname" className="input" autoComplete="off" maxLength={32} value={form.nickname} onChange={event => setForm({ ...form, nickname: event.target.value })} />
+          </Field>
+        </div>
+        <Field label="初始密码" htmlFor="user-password" error={errors.password} hint="用户登录后可以在「用户设置」中修改。">
           <input id="user-password" className="input" type="password" autoComplete="new-password" value={form.password} onChange={event => setForm({ ...form, password: event.target.value })} />
         </Field>
         <Field label="容量上限" htmlFor="user-quota" error={errors.quota} hint="留空表示不限制。">
@@ -179,7 +186,7 @@ function DeleteUserDialog({ user, onClose, onDeleted }: { user: api.Account; onC
       description={<>该用户的全部文件（{formatBytes(user.used_bytes)}，含回收站）、访问密钥与公开链接都会被<strong>永久删除</strong>，无法恢复。只想暂时阻止登录时，请改用“禁用”。</>}
       footer={<><Button onClick={onClose}>取消</Button><Button variant="danger" type="submit" form="delete-user-form" loading={busy} disabled={confirm !== user.username}>永久删除</Button></>}>
       <form id="delete-user-form" className="form" onSubmit={submit} noValidate>
-        <Field label={`输入用户名 ${user.username} 以确认`} htmlFor="delete-confirm">
+        <Field label={`输入${user.needs_email ? "用户名" : "邮箱"} ${user.username} 以确认`} htmlFor="delete-confirm">
           <input id="delete-confirm" className="input" autoComplete="off" value={confirm} onChange={event => setConfirm(event.target.value)} autoFocus />
         </Field>
       </form>

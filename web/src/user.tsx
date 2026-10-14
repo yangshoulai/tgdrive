@@ -19,7 +19,7 @@ import { DownloadsView } from "./user/downloads";
 import { DownloadTray } from "./user/download-tray";
 import { PreviewHost } from "./user/preview-host";
 import { PrivateSessionProvider } from "./user/private-session";
-import { UserSettingsPage } from "./user/account";
+import { EmailDialog, UserSettingsPage } from "./user/account";
 import { onThemeChange, setThemePreference, themePreference, type ThemePreference } from "./theme";
 
 /* ---------- 路由 ---------- */
@@ -92,7 +92,8 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
   if (checking) return <FullPageLoading label="正在恢复登录状态" />;
   if (!session) return <LoginPage onSuccess={value => { setSession(value); void api.restoreSession().then(setSession).catch(() => undefined); }}
     notice={justInitialized ? <p className="inline-note tone-success"><Icon name="checkCircle" size={15} />初始化完成，系统已解锁。请使用刚创建的管理员账号登录。</p> : undefined} />;
-  return <MainShell session={session} onLogout={() => setSession(null)} />;
+  return <MainShell session={session} onLogout={() => setSession(null)}
+    onSessionChange={patch => setSession(current => current && { ...current, ...patch })} />;
 }
 
 type UserSection = "files" | "shared" | "trash" | "keys" | "private" | "downloads" | "account";
@@ -122,7 +123,7 @@ function sectionUrl(section: Section, prefix = "") {
   return query ? `/?${query}` : "/";
 }
 
-function MainShell({ session, onLogout }: { session: api.Session; onLogout: () => void }) {
+function MainShell({ session, onLogout, onSessionChange }: { session: api.Session; onLogout: () => void; onSessionChange: (patch: Partial<api.Session>) => void }) {
   const isAdmin = session.role === "admin";
   const [location, setLocation] = useState(readLocation);
   const [usage, setUsage] = useState<Usage | null>(null);
@@ -173,7 +174,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
   const workspaceReady = !locked && !(!isAdmin && session.unlocked === false) && !(isAdmin && status === null);
   let content: ReactNode;
   if (section === "account") {
-    content = <UserSettingsPage session={session} />;
+    content = <UserSettingsPage session={session} onSessionChange={onSessionChange} />;
   } else if (isAdminSection(section)) {
     if (!isAdmin) content = <AccessDenied />;
     else if (status === null) content = <FullPageLoading label="正在读取系统状态" />;
@@ -229,7 +230,7 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
           </>}
         </div>
       </>}
-      account={{ name: session.username, caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", menu: [
+      account={{ name: api.displayName(session), caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", avatar: api.avatarUrl(session.avatar_version), menu: [
         { label: "跟随系统", icon: "monitor", heading: "外观", checked: theme === "system", onSelect: () => setThemePreference("system") },
         { label: "浅色", icon: "sun", checked: theme === "light", onSelect: () => setThemePreference("light") },
         { label: "深色", icon: "moon", checked: theme === "dark", onSelect: () => setThemePreference("dark") },
@@ -244,6 +245,8 @@ function MainShell({ session, onLogout }: { session: api.Session; onLogout: () =
           onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCompleted={() => { setUploadRevision(value => value + 1); refreshUsage(); }} />}
         <UploadTray queue={uploads} />
       </div>
+      {/* 旧版用户名账号：登录后必须先设置邮箱（之后用邮箱登录，也为邮箱验证做准备）。 */}
+      {session.needs_email && <EmailDialog session={session} required onSaved={onSessionChange} onLogout={() => void logout()} />}
       </PrivateSessionProvider>
     </AppShell>
   );

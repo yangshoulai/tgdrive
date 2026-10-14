@@ -94,10 +94,10 @@ class S3CopyDeleteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((same.status, self.error_code(same)), (400, "InvalidRequest"))
         replace = await self.call("PUT", "/user-a/b.png", {"x-amz-copy-source": "/user-a/b.png",
                                                            "x-amz-metadata-directive": "REPLACE",
-                                                           "content-type": "image/x-test", "x-amz-meta-owner": "alice"})
+                                                           "content-type": "image/x-test", "x-amz-meta-owner": "alice@example.com"})
         self.assertEqual(replace.status, 200, replace.body)
         info = self.objects.head_object(self.scope, "b.png")
-        self.assertEqual((info.content_type, info.user_meta), ("image/x-test", {"owner": "alice"}))
+        self.assertEqual((info.content_type, info.user_meta), ("image/x-test", {"owner": "alice@example.com"}))
         self.assertEqual(await self.read("b.png"), b"img")
 
     async def test_copy_preconditions_and_quota(self):

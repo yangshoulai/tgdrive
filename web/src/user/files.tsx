@@ -27,10 +27,7 @@ const DELETE_KEY = IS_MAC ? "⌘⌫" : "Del";
 /** 图标上已经印了格式标签（PDF、DOC…）的类型，网格卡片不再重复显示扩展名。 */
 const LABELLED_KINDS = new Set(["pdf", "document", "spreadsheet", "presentation"]);
 
-const KIND_FILTERS: { value: api.KindFilter; label: string }[] = [
-  { value: "", label: "全部" }, { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" },
-  { value: "document", label: "文档" }, { value: "text", label: "文本" }, { value: "archive", label: "压缩包" },
-];
+const KIND_FILTERS = api.KIND_FILTERS;
 
 export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision, onPlayback }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number; onPlayback?: (state: PreviewPlayback) => void }) {
   const privateSpace = api.isPrivatePath(prefix);

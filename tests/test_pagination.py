@@ -15,8 +15,8 @@ class ListingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
         self.objects = self.app.objects
         self.scope = Scope(self.alice.bucket_id)
         self.client = Client(self.app)
@@ -88,7 +88,7 @@ class ListingTests(unittest.TestCase):
     def test_recursive_delete_via_user_and_key_api(self):
         self.put("tree/", "tree/a.txt", "tree/sub/b.txt", "tree-other.txt", "keep/c.txt")
         token = self.objects.set_public(self.scope, "tree/a.txt", True).public_token
-        session = asyncio.run(self.client.login("user", "alice", "alice password"))
+        session = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         status, _, data = asyncio.run(self.client.request("POST", "/api/user/v1/delete",
                                                           json.dumps({"paths": ["tree/"], "recursive": True}).encode(), session))
         self.assertEqual(json.loads(data)["results"], [{"path": "tree/", "deleted": True, "count": 3}])
@@ -128,7 +128,7 @@ class ListingTests(unittest.TestCase):
     def test_admin_objects_paginates_and_filters_on_server(self):
         self.put(*[f"f{index:03d}.txt" for index in range(25)], "folder/")
         self.objects.set_public(self.scope, "f003.txt", True)
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         seen, cursor = [], None
         while True:
             path = "/api/admin/v1/objects?limit=10" + (f"&cursor={cursor}" if cursor else "")
@@ -146,30 +146,30 @@ class ListingTests(unittest.TestCase):
         self.assertEqual((none["objects"], none["total"]), ([], 0))
 
     def test_user_and_client_pages_keep_filters_and_owner_scope(self):
-        bob = self.app.accounts.create_user("bob", "bob password")
+        bob = self.app.accounts.create_user("bob@example.com", "bob password")
         self.app.accounts.set_account_status(bob.id, "disabled")
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
-        alice = asyncio.run(self.client.login("user", "alice", "alice password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        alice = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         def get(path, headers=admin):
             status, _, data = asyncio.run(self.client.request("GET", path, headers=headers))
             self.assertEqual(status, 200, data)
             return json.loads(data)
         first = get("/api/admin/v1/users?limit=1")
         second = get(f"/api/admin/v1/users?limit=1&cursor={first['next_cursor']}")
-        self.assertEqual((first["total"], second["users"][0]["username"]), (3, "alice"))
+        self.assertEqual((first["total"], second["users"][0]["username"]), (3, "alice@example.com"))
         filtered = get("/api/admin/v1/users?limit=1&q=BO&status=disabled")
-        self.assertEqual([user["username"] for user in filtered["users"]], ["bob"])
+        self.assertEqual([user["username"] for user in filtered["users"]], ["bob@example.com"])
         self.assertIsNone(filtered["next_cursor"])
         self.assertIsInstance(get("/api/admin/v1/users"), list)
         for i in range(3):
             self.app.s3.auth.create_client_with_key(f"alice-{i}", owner_user_id=self.alice.id)
-        self.app.s3.auth.create_client_with_key("bob", owner_user_id=bob.id)
+        self.app.s3.auth.create_client_with_key("bob@example.com", owner_user_id=bob.id)
         seen, cursor = [], 0
         while True:
             page = get(f"/api/user/v1/clients?limit=1&cursor={cursor}", alice)
             self.assertEqual(page["total"], 3)
             self.assertEqual(len(page["clients"]), 1)
-            self.assertEqual(page["clients"][0]["owner_username"], "alice")
+            self.assertEqual(page["clients"][0]["owner_username"], "alice@example.com")
             seen.extend(item["id"] for item in page["clients"])
             cursor = page["next_cursor"]
             if cursor is None:
@@ -184,7 +184,7 @@ class ListingTests(unittest.TestCase):
         self.put("docs/", "docs/a.txt", "docs/b.txt", "docs/child/", "docs/child/x.txt", "private.txt")
         for key in ("docs/", "docs/b.txt", "docs/child/", "docs/child/x.txt"):
             self.objects.set_public(self.scope, key, True)
-        alice = asyncio.run(self.client.login("user", "alice", "alice password"))
+        alice = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         seen, cursor = [], ""
         while True:
             status, _, data = asyncio.run(self.client.request("GET", f"/api/user/v1/public?limit=1&cursor={quote(cursor)}", headers=alice))
@@ -211,7 +211,7 @@ class ListingTests(unittest.TestCase):
     def test_folder_picker_paginates_implicit_directories_and_checks_exact_conflicts(self):
         from urllib.parse import quote
         self.put("docs/a.txt", "docs/z.txt", "docs/child/a.txt", "empty/", "照片/portrait.jpg", "root.txt")
-        alice = asyncio.run(self.client.login("user", "alice", "alice password"))
+        alice = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         seen, cursor = [], ""
         while True:
             status, _, data = asyncio.run(self.client.request("GET", f"/api/user/v1/folders?limit=1&cursor={quote(cursor)}", headers=alice))
@@ -239,7 +239,7 @@ class ListingTests(unittest.TestCase):
         from urllib.parse import quote
         self.put("a.txt", "b.txt", "c.txt")
         asyncio.run(self.objects.trash(self.scope, ["a.txt", "b.txt", "c.txt"]))
-        alice = asyncio.run(self.client.login("user", "alice", "alice password"))
+        alice = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         seen, cursor = [], ""
         while True:
             page = json.loads(asyncio.run(self.client.request("GET", f"/api/user/v1/trash?limit=1&cursor={quote(cursor)}", headers=alice))[2])
@@ -249,10 +249,10 @@ class ListingTests(unittest.TestCase):
             if cursor is None:
                 break
         self.assertEqual(len(set(seen)), 3)
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         summary = json.loads(asyncio.run(self.client.request("GET", "/api/admin/v1/users/summary", headers=admin))[2])
         self.assertEqual((summary["total"], summary["active"], summary["user_total"], summary["used_bytes"]), (2, 2, 1, 3))
-        self.assertEqual([user["username"] for user in summary["top_users"]], ["alice"])
+        self.assertEqual([user["username"] for user in summary["top_users"]], ["alice@example.com"])
 
 
 if __name__ == "__main__":

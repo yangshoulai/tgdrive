@@ -246,6 +246,15 @@ class TgDriveASGI(StaticFiles):
                 data, mime, etag = file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0], bucket_id=bucket_id)
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, "no-store" if private else self._thumbnail_cache_control(query, etag))
                 return
+            if path == "/api/user/v1/avatar" and method == "GET":
+                data, mime, etag = self.user.avatar(token)
+                await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._avatar_cache_control(query))
+                return
+            avatar_route = re.fullmatch(r"/api/admin/v1/users/(\d+)/avatar", path)
+            if avatar_route and method == "GET":
+                data, mime, etag = self.admin.user_avatar(token, int(avatar_route.group(1)))
+                await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._avatar_cache_control(query))
+                return
             if path == "/api/admin/v1/thumbnail" and method == "GET":
                 data, mime, etag = self.admin.thumbnail(token, int(query.get("bucket_id", ["0"])[0]),
                     query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
@@ -333,6 +342,8 @@ class TgDriveASGI(StaticFiles):
                           "/backups": "backup.create", "/password": "admin.password", "/passphrase": "system.passphrase",
                           "/users/{}/password": "user.password_reset", "/users/{}/delete": "user.delete"},
         "/api/user/v1": {"/login": "user.login", "/logout": "user.logout", "/password": "user.password",
+                         "/profile": "account.profile", "/email": "account.email", "/avatar": "account.avatar",
+                         "/avatar/delete": "account.avatar_delete",
                          "/clients": "key.create", "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/public": "object.public",
                          "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
@@ -421,6 +432,9 @@ class TgDriveASGI(StaticFiles):
                 detail["expires_at"] = payload["expires_at"]
             if "password" in payload:
                 detail["password"] = "set" if payload["password"] else "cleared"
+        elif action == "account.email":
+            # 新登录邮箱记为目标，便于追溯账号改名；不记录确认用的密码。
+            target = (result or {}).get("username") if ok else None
         elif action == "user.delete":
             detail = {"deleted_objects": (result or {}).get("deleted_objects")} if ok else {}
             target = (result or {}).get("username") if ok else target
@@ -495,6 +509,8 @@ class TgDriveASGI(StaticFiles):
             public = payload.get("public")
             result = await self.keys.instant(principal, bucket, payload["path"], payload["size"], payload["fingerprint"],
                                              payload.get("content_type"), None if public is None else bool(public))
+        elif method == "GET" and route == "/folders":
+            result = await self.keys.folders(principal, bucket, arg("prefix"), arg("cursor"), int(arg("limit", "100")))
         elif method == "POST" and route == "/folders":
             await self._send(send, 201, await self.keys.folder(principal, bucket, payload["path"]))
             return
@@ -558,7 +574,7 @@ class TgDriveASGI(StaticFiles):
             if method == "GET" and route == "/status":
                 return 200, self.admin.status(), {}
             if method == "POST" and route == "/setup":
-                result = await self.admin.asetup(payload["passphrase"], payload["username"], payload["password"])
+                result = await self.admin.asetup(payload["passphrase"], payload["username"], payload["password"], payload.get("nickname"))
                 return 201, result, {}
             if method == "POST" and route == "/login":
                 return self._login(await self.admin.alogin(payload["username"], payload["password"], ip))
@@ -605,7 +621,7 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/users":
                 quota = payload.get("quota_bytes")
                 return 201, await self.admin.acreate_user(token, csrf, payload["username"], payload["password"],
-                                                    int(quota) if quota is not None and quota != "" else None), {}
+                                                    int(quota) if quota is not None and quota != "" else None, payload.get("nickname")), {}
             if method == "POST" and route == "/clients":
                 return 201, self.admin.create_client(token, csrf, payload["name"], payload.get("grants", [])), {}
             if method == "POST" and route == "/bots":
@@ -768,6 +784,14 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/password":
                 await user.achange_password(token, csrf, payload["old_password"], payload["new_password"])
                 return 204, None, {}
+            if method == "POST" and route == "/profile":
+                return 200, user.update_profile(token, csrf, payload.get("nickname")), {}
+            if method == "POST" and route == "/email":
+                return 200, await user.change_email(token, csrf, payload.get("password"), payload.get("email"), ip), {}
+            if method == "POST" and route == "/avatar":
+                return 200, user.set_avatar(token, csrf, payload.get("data")), {}
+            if method == "POST" and route == "/avatar/delete":
+                return 200, user.delete_avatar(token, csrf), {}
             if method == "GET" and route == "/public":
                 return 200, await user.alist_public(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=query.get("cursor", [""])[0]), {}
@@ -884,7 +908,8 @@ class TgDriveASGI(StaticFiles):
                 assets = await user.objects.apreview_assets(Scope(root.bucket_id, prefix=root.key), file.key)
                 return 200, [{**asset, "path": asset["path"][len(root.key):]} for asset in assets], {}
             return 200, await user.objects.list_public_folder(
-                token, query.get("path", [""])[0], query.get("cursor", [None])[0] or None, int(query.get("limit", ["200"])[0])), {}
+                token, query.get("path", [""])[0], query.get("cursor", [None])[0] or None, int(query.get("limit", ["200"])[0]),
+                query.get("kind", [""])[0]), {}
         raise NotFoundError("接口不存在")
 
     @staticmethod
@@ -899,9 +924,15 @@ class TgDriveASGI(StaticFiles):
         info = self.user.objects.resolve_public(token)
         return info, row["public_password"]
 
+    @staticmethod
+    def _avatar_cache_control(query) -> str:
+        # 地址带头像版本时内容不变，可长期私有缓存；否则每次协商。
+        return "private, max-age=31536000, immutable" if query.get("v") else "private, no-cache"
+
     def _login(self, result):
         token = result["session"]
         account = self.user.accounts.account_for_session(self.user.accounts.sessions.require(token))
+        result = {**result, **self.user.accounts.profile(account.id)}
         # 会话 ID 仅放 HttpOnly Cookie，浏览器脚本只需要 CSRF token。
         # “保持登录”的会话用持久 Cookie（与服务端有效期一致）；普通会话 12 小时。
         return 200, {**{k: v for k, v in result.items() if k != "session"}, "bucket_id": account.bucket_id}, {"Set-Cookie": self._cookie(token, max_age=round(result["expires_at"] - time.time()))}

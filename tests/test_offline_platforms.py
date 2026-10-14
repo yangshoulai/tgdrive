@@ -82,8 +82,8 @@ class PlatformTasks(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(self.temp.name, run_scheduler=False, offline_x=True)
-        self.admin = self.app.accounts.setup("test encryption passphrase", "admin", "test admin password")
-        self.user = self.app.accounts.create_user("alice", "test user password")
+        self.admin = self.app.accounts.setup("test encryption passphrase", "admin@example.com", "test admin password")
+        self.user = self.app.accounts.create_user("alice@example.com", "test user password")
         self.offline = self.app.offline
         self.app.resources.platform_tools["x_available"] = True
         self.offline.http = self.http = MemoryHttp()
@@ -218,7 +218,7 @@ class PlatformTasks(unittest.IsolatedAsyncioTestCase):
         self.app.objects.head_object(Scope(self.user.bucket_id), done["key"])
         with self.assertRaises(ValueError):
             await self.offline.clear(self.user.id, "stopped")
-        bob = self.app.accounts.create_user("bob", "test user password")
+        bob = self.app.accounts.create_user("bob@example.com", "test user password")
         self.offline._set(queued["id"], status="completed")
         self.assertEqual(await self.offline.clear(bob.id, "completed"), {"removed": 0})
         self.assertEqual(len(self.offline.list(self.user.id)["tasks"]), 1)

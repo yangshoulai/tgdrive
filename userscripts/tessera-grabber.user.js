@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.5.1
+// @version      0.6.0
 // @description  在 X、YouTube 和其他网页上快速复制媒体地址与 curl 命令，或一键发送到 Tessera 离线下载
 // @author       yangshoulai
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
@@ -36,7 +36,8 @@
   // ---------- 设置 ----------
 
   // siteMode：exclude = 所有网站，排除 excludeSites；include = 只在 includeSites 中的网站。两份列表分开保存，切换模式互不覆盖。
-  const DEFAULTS = { server: "", key: "", destination: "", cookies: true, fab: true, siteMode: "exclude", excludeSites: [], includeSites: [] };
+  // destination 以 / 结尾（空串为根目录）；destinationPrivate 为 true 时保存到私密空间（需在 Tessera 页面解锁确认）。
+  const DEFAULTS = { server: "", key: "", destination: "", destinationPrivate: false, cookies: true, fab: true, siteMode: "exclude", excludeSites: [], includeSites: [] };
   const settings = () => ({ ...DEFAULTS, ...GM_getValue("settings", {}) });
   const saveSettings = value => GM_setValue("settings", { ...settings(), ...value });
 
@@ -416,6 +417,27 @@
       background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; }
     textarea::placeholder { color: var(--faint); font-family: inherit; }
     textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    /* 保存位置：一行摘要 + 「更改」，选择器是覆盖在当前面板上的一层，不丢失面板里的勾选和改名 */
+    .dest { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+    .dest .meta { gap: 1px; }
+    .dest .label { font-size: 11px; }
+    .dest .name { font-weight: 500; }
+    .dest.private { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); background: var(--accent-soft); }
+    /* 选择层覆盖在面板上，面板内容较少时撑高到能浏览目录的高度 */
+    .panel.has-layer { min-height: min(440px, calc(100vh - 96px)); }
+    .layer { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; background: var(--bg); animation: rise .14s ease-out; }
+    .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 12px; color: var(--muted); }
+    .crumbs button { height: 24px; padding: 0 6px; border-radius: 6px; color: var(--muted); }
+    .crumbs button:hover { background: var(--hover); color: var(--fg); }
+    .crumbs button[aria-current] { color: var(--fg); font-weight: 600; }
+    .folder-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 0 10px; border-radius: 8px; text-align: left; color: var(--fg); }
+    .folder-row:hover { background: var(--hover); }
+    .folder-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .folder-row > svg { color: var(--muted); }
+    .new-folder { display: flex; gap: 6px; }
+    .new-folder input { flex: 1; min-width: 0; }
+    .private-note { display: grid; gap: 10px; padding: 14px; border-radius: 10px; background: var(--soft); color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .private-note strong { color: var(--fg); font-size: 13px; }
     .segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 2px; border-radius: 9px; background: var(--soft); }
     .segmented button { height: 30px; border-radius: 7px; font-size: 12px; color: var(--muted); }
     .segmented button[aria-checked=true] { background: var(--bg); color: var(--fg); font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
@@ -452,6 +474,10 @@
   const ICONS = {
     settings: ["M20 7h-9", "M14 17H5", ["circle", { cx: 17, cy: 17, r: 3 }], ["circle", { cx: 7, cy: 7, r: 3 }]],
     close: ["M18 6 6 18", "m6 6 12 12"],
+    folder: ["M3 7.5A1.5 1.5 0 0 1 4.5 6h4.2l2 2h8.8A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"],
+    folderPlus: ["M3 7.5A1.5 1.5 0 0 1 4.5 6h4.2l2 2h8.8A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z", "M12 11v5", "M9.5 13.5h5"],
+    lock: [["rect", { x: 5, y: 11, width: 14, height: 10, rx: 2 }], "M8 11V8a4 4 0 0 1 8 0v3"],
+    home: ["M4 11 12 4l8 7", "M6 10v10h12V10"],
     back: ["m15 18-6-6 6-6"],
     link: ["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71", "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"],
     terminal: ["m4 17 6-6-6-6", "M12 19h8"],
@@ -664,6 +690,7 @@
     if (event.target !== host && focus && focus !== document.body && focus !== document.documentElement) return;
     event.preventDefault();
     event.stopPropagation();
+    if (panel.layer) return panel.layer.close();
     panel.back ? panel.back() : close();
   }, true);
 
@@ -941,6 +968,144 @@
     return `${value.toFixed(index ? 1 : 0)} ${units[index]}`;
   }
 
+  // ----- 保存位置 -----
+
+  const savedDestination = () => ({ path: settings().destination || "", private: Boolean(settings().destinationPrivate) });
+  const rememberDestination = dest => saveSettings({ destination: dest.path, destinationPrivate: dest.private });
+  const destinationLabel = dest => dest.private ? "私密空间" : dest.path ? dest.path.replace(/\/$/, "") : "根目录";
+  const destinationSub = dest => dest.private ? "发送后在 Tessera 页面解锁并确认" : "保存位置";
+
+  /** 保存位置摘要行；点击「更改」在当前面板上打开目录选择层。get/set 由调用方保存状态。 */
+  function destinationRow(get, set) {
+    const name = h("div", { className: "name" }), sub = h("div", { className: "label" }), tile = h("span", { className: "tile" });
+    const row = h("div", { className: "dest" }, tile, h("div", { className: "meta" }, sub, name),
+      h("button", { type: "button", className: "btn ghost", onclick: () => openPicker(get(), dest => { set(dest); update(); }) }, "更改"));
+    function update() {
+      const dest = get();
+      row.className = `dest${dest.private ? " private" : ""}`;
+      tile.replaceChildren(svg(dest.private ? "lock" : "folder", 18));
+      name.textContent = destinationLabel(dest);
+      name.title = name.textContent;
+      sub.textContent = destinationSub(dest);
+    }
+    update();
+    return row;
+  }
+
+  /** 目录选择层：逐级浏览（GET /api/v1/folders）、新建文件夹（POST /api/v1/folders）或选择私密空间。 */
+  function openPicker(initial, onPick) {
+    if (!panel) return;
+    panel.layer?.close();
+    let mode = initial.private ? "private" : "files";
+    let prefix = initial.private ? "" : initial.path;
+    let state = { folders: [], next: null, writable: true, loading: true, error: "" };
+    let request = 0;
+    const body = h("div", { className: "body" });
+    const footer = h("footer", {});
+    const layer = h("div", { className: "layer", role: "dialog", "aria-label": "选择保存位置" },
+      h("header", {}, iconButton("back", "返回", () => closeLayer(), "back"), h("span", { className: "title" }, "选择保存位置")), body, footer);
+    const host = panel;
+    const closeLayer = () => {
+      layer.remove();
+      host.classList.remove("has-layer");
+      if (panel && panel.layer === controller) panel.layer = null;
+    };
+    const controller = { close: closeLayer };
+    panel.layer = controller;
+    host.classList.add("has-layer");
+    panel.append(layer);
+
+    async function load(more = false) {
+      const id = ++request;
+      if (!more) state = { folders: [], next: null, writable: true, loading: true, error: "" };
+      else state.loading = true;
+      render();
+      try {
+        const query = `prefix=${encodeURIComponent(prefix)}&limit=100${more && state.next ? `&cursor=${encodeURIComponent(state.next)}` : ""}`;
+        const page = await api("GET", `/api/v1/folders?${query}`);
+        if (id !== request) return;
+        state = { folders: more ? state.folders.concat(page.folders) : page.folders, next: page.next_cursor, writable: page.writable, loading: false, error: "" };
+      } catch (error) {
+        if (id !== request) return;
+        state = { ...state, loading: false, error: error.message };
+      }
+      render();
+    }
+    const enter = path => { prefix = path; void load(); };
+
+    function render() {
+      const seg = (value, label) => h("button", { type: "button", role: "radio", "aria-checked": String(mode === value),
+        onclick: () => { if (mode !== value) { mode = value; render(); } } }, label);
+      const parts = [h("div", { className: "segmented", role: "radiogroup", "aria-label": "目标空间" }, seg("files", "我的文件"), seg("private", "私密空间"))];
+      if (mode === "private") {
+        parts.push(h("div", { className: "private-note" },
+          h("strong", {}, "保存到私密空间"),
+          h("span", {}, "访问密钥不能直接写入私密空间。发送时服务器先解析文件，再打开一个 Tessera 标签页：在那里用登录密码或通行密钥解锁、选择私密目录后开始下载。"),
+          h("span", {}, "密码只在 Tessera 自己的页面里输入，当前网页和脚本都拿不到。解析结果 20 分钟内有效。")));
+        footer.replaceChildren(h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: closeLayer }, "取消"),
+          h("button", { type: "button", className: "btn primary", onclick: () => { closeLayer(); onPick({ path: "", private: true }); } }, svg("lock"), "选择私密空间"));
+        body.replaceChildren(...parts);
+        return;
+      }
+      const segments = prefix.split("/").filter(Boolean);
+      const crumbs = [h("button", { type: "button", onclick: () => enter(""), ...(segments.length ? {} : { "aria-current": "page" }) }, "根目录")];
+      segments.forEach((segment, index) => {
+        const path = segments.slice(0, index + 1).join("/") + "/";
+        crumbs.push(svg("chevron", 12), h("button", { type: "button", onclick: () => enter(path), ...(index === segments.length - 1 ? { "aria-current": "page" } : {}) }, segment));
+      });
+      parts.push(h("nav", { className: "crumbs", "aria-label": "当前位置" }, crumbs));
+      if (state.error) parts.push(h("div", { className: "error" }, state.error));
+      if (state.folders.length) {
+        parts.push(h("div", { className: "list" }, state.folders.map(folder => h("button", { type: "button", className: "folder-row", onclick: () => enter(folder) },
+          svg("folder", 18), h("span", { className: "name", title: folder }, folder.slice(prefix.length).replace(/\/$/, "")), svg("chevron", 14)))));
+        if (state.next) parts.push(h("button", { type: "button", className: "text-btn", disabled: state.loading, onclick: () => void load(true) }, state.loading ? "加载中…" : "加载更多"));
+      } else if (state.loading) parts.push(emptyState("loader", "正在读取文件夹…", true));
+      else if (!state.error) parts.push(h("p", { className: "hint" }, "这里没有子文件夹。"));
+      // 新建文件夹：建在当前目录下并直接进入。
+      const input = h("input", { type: "text", placeholder: "新文件夹名称", maxLength: 255,
+        onkeydown: event => { if (event.key === "Enter") { event.preventDefault(); void create(); } } });
+      const createButton = h("button", { type: "button", className: "btn", disabled: !state.writable }, svg("folderPlus"), "新建");
+      async function create() {
+        const name = input.value.trim();
+        if (!name) return input.focus();
+        if (/[\\/]/.test(name) || name === "." || name === ".." || name.startsWith(".tgdrive")) return toast("文件夹名称不能包含 / 或 \\");
+        createButton.disabled = true;
+        try { await api("POST", "/api/v1/folders", { path: prefix + name + "/" }); enter(prefix + name + "/"); }
+        catch (error) { toast(error.message); createButton.disabled = false; }
+      }
+      createButton.addEventListener("click", () => void create());
+      if (state.writable) parts.push(h("div", { className: "new-folder" }, input, createButton));
+      else if (!state.loading) parts.push(h("p", { className: "hint" }, "这个访问密钥不能写入当前目录，请进入有读写权限的文件夹。"));
+      footer.replaceChildren(h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: closeLayer }, "取消"),
+        h("button", { type: "button", className: "btn primary", disabled: !state.writable || state.loading && !state.folders.length,
+          onclick: () => { closeLayer(); onPick({ path: prefix, private: false }); } }, `保存到「${destinationLabel({ path: prefix })}」`));
+      body.replaceChildren(...parts);
+    }
+    if (mode === "files") void load(); else render();
+  }
+
+  /**
+   * 把解析结果转交给 Tessera 页面确认（私密空间）：结果放在地址的 # 片段里，不会发给服务器或进入访问日志；
+   * 票据由服务器加密、绑定账号并在 20 分钟后过期，页面读取后立即从地址栏移除。
+   */
+  function handoff(candidates) {
+    const json = JSON.stringify({ private: true, candidates: candidates.map(item => ({ ...item })) });
+    const bytes = new TextEncoder().encode(json);
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    GM_openInTab(`${settings().server.replace(/\/+$/, "")}/?view=downloads#import=${encoded}`, { active: true });
+  }
+
+  function handedOff(count, back) {
+    frame("发送到 Tessera", h("div", { className: "result" },
+      h("span", { className: "tile" }, svg("lock", 22, 2)),
+      h("strong", {}, `已在 Tessera 中打开 ${count} 个文件`),
+      h("div", { className: "sub" }, "请在新打开的 Tessera 标签页里解锁私密空间、确认保存位置后开始下载。解析结果 20 分钟内有效。")), {
+      back, footer: [h("span", { className: "spacer" }), h("button", { type: "button", className: "btn primary", onclick: back }, "完成")],
+    });
+  }
+
   function renderCandidates(candidates, back, url) {
     // 同一组（同一视频的不同清晰度）默认只选第一个；X 帖子的每张图、每个视频各自一组。
     const seen = new Set();
@@ -949,13 +1114,13 @@
       seen.add(candidate.group);
       return h("input", { type: "checkbox", checked: first });
     });
-    const destination = h("input", { type: "text", value: settings().destination, placeholder: "根目录" });
+    let dest = savedDestination();
     const error = h("div", { className: "error", hidden: true });
     const submit = h("button", { type: "button", className: "btn primary" }, "开始下载");
     const refresh = () => {
       const count = checks.filter(check => check.checked).length;
       submit.disabled = count === 0;
-      submit.textContent = count > 1 ? `下载 ${count} 个文件` : "开始下载";
+      submit.textContent = dest.private ? "到 Tessera 确认" : count > 1 ? `下载 ${count} 个文件` : "开始下载";
     };
     checks.forEach(check => check.addEventListener("change", refresh));
     refresh();
@@ -964,13 +1129,16 @@
       if (!chosen.length) return;
       submit.disabled = true;
       error.hidden = true;
-      const folder = destination.value.trim().replace(/^\/+/, "");
+      rememberDestination(dest);
+      if (dest.private) {
+        handoff(chosen);
+        return handedOff(chosen.length, back);
+      }
       try {
         const result = await api("POST", "/api/v1/downloads", {
           items: chosen.map(item => ({ ticket: item.ticket, name: item.name })),
-          ...(folder ? { destination: folder } : {}),
+          destination: dest.path,
         });
-        saveSettings({ destination: folder });
         markSent([url]);
         done(result.tasks || [], back);
       } catch (err) {
@@ -987,7 +1155,7 @@
         (candidate.warnings || []).map(text => h("div", { className: "warn" }, text)))));
     frame("选择要下载的文件", [
       rows.length ? h("div", { className: "list" }, rows) : emptyState("file", "没有可下载的文件"),
-      h("label", { className: "field" }, h("span", { className: "label" }, "保存到目录"), destination),
+      destinationRow(() => dest, value => { dest = value; refresh(); }),
       error,
     ], { back, footer: [h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: back }, "取消"), submit] });
   }
@@ -1025,7 +1193,7 @@
     const known = new Map(listed.map(item => [item.url, item]));
     const wanted = new Set(urls);
     const ordered = [...listed.map(item => item.url).filter(url => wanted.has(url)), ...urls.filter(url => !known.has(url))];
-    batch = { started: false, destination: settings().destination,
+    batch = { started: false, destination: savedDestination(),
       entries: ordered.slice(0, BATCH_LIMIT).map(url => ({ url, type: known.get(url)?.type || "file", state: "waiting", error: "", tasks: [] })) };
     openBatch();
   }
@@ -1033,21 +1201,30 @@
   const entryActive = entry => ["parsing", "creating"].includes(entry.state)
     || entry.state === "waiting" && batch.started
     || entry.state === "submitted" && entry.tasks.some(task => !TERMINAL.includes(task.status));
-  const entryOk = entry => entry.state === "submitted" && entry.tasks.length > 0 && entry.tasks.every(task => task.status === "completed");
+  const entryOk = entry => entry.state === "handoff" || entry.state === "submitted" && entry.tasks.length > 0 && entry.tasks.every(task => task.status === "completed");
   const entryFailed = entry => entry.state === "error" || entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped");
   const batchDone = () => !batch || batch.started && !batch.entries.some(entryActive);
 
   async function runBatch() {
     batch.started = true;
     selected.clear();
-    batch.destination = batch.destination.trim().replace(/^\/+/, "");
-    saveSettings({ destination: batch.destination });
+    rememberDestination(batch.destination);
     const current = batch;
     const queue = current.entries.filter(entry => entry.state === "waiting");
     // 服务端同时最多解析 2 个，这里同样两路并行，避免请求排队超时。
     const worker = async () => { while (queue.length && batch === current) await sendEntry(queue.shift()); };
     updateBatch();
     await Promise.all([worker(), worker()]);
+    // 私密空间：全部解析完后一次性转交 Tessera 页面确认；重试成功的条目再单独转交。
+    if (batch === current && current.destination.private) {
+      const fresh = current.entries.filter(entry => entry.state === "handoff" && !entry.delivered);
+      if (fresh.length) {
+        handoff(fresh.flatMap(entry => entry.candidates));
+        fresh.forEach(entry => { entry.delivered = true; });
+        toast(`已在 Tessera 中打开 ${fresh.length} 项，请在那里解锁并确认`);
+      }
+      updateBatch();
+    }
   }
 
   async function sendEntry(entry) {
@@ -1060,11 +1237,17 @@
       // 每组只取第一个候选（例如 M3U8 的第一个清晰度），与单个发送的默认选择一致。
       const groups = new Set();
       const chosen = candidates.filter(candidate => !groups.has(candidate.group) && groups.add(candidate.group));
+      if (batch.destination.private) {
+        entry.candidates = chosen;
+        entry.state = "handoff";
+        updateBatch();
+        return;
+      }
       entry.state = "creating";
       updateBatch();
       const result = await api("POST", "/api/v1/downloads", {
         items: chosen.map(candidate => ({ ticket: candidate.ticket, name: candidate.name })),
-        ...(batch.destination ? { destination: batch.destination } : {}),
+        destination: batch.destination.path,
       });
       entry.tasks = result.tasks || [];
       entry.state = "submitted";
@@ -1150,6 +1333,7 @@
     if (entry.state === "parsing") return { text: "解析中…", tone: "run", progress: null };
     if (entry.state === "creating") return { text: "提交任务…", tone: "run", progress: null };
     if (entry.state === "error") return { text: entry.error || "发送失败", tone: "err" };
+    if (entry.state === "handoff") return { text: entry.delivered ? "已转交 Tessera 确认" : "已解析，等待转交", tone: "ok" };
     const task = entry.tasks.find(item => !TERMINAL.includes(item.status)) || entry.tasks.find(item => item.status !== "completed") || entry.tasks[0];
     if (!task) return { text: "已提交" };
     const more = entry.tasks.length > 1 ? `（${entry.tasks.length} 个文件）` : "";
@@ -1204,13 +1388,11 @@
     const rows = batch.entries.map(batchRow);
     if (!batch.started) {
       // 发送前确认保存目录；先写回 batch，避免列表刷新时丢失输入。
-      const destination = h("input", { type: "text", value: batch.destination, placeholder: "留空保存到根目录",
-        oninput: event => { batch.destination = event.target.value; } });
       target.replaceChildren(
-        h("label", { className: "field" }, h("span", { className: "label" }, "保存到目录"), destination),
+        destinationRow(() => batch.destination, value => { batch.destination = value; }),
         h("div", { className: "section" }, h("div", { className: "section-head" }, h("h2", {}, "待发送", h("span", { className: "count" }, String(batch.entries.length)))),
           h("div", { className: "list" }, rows)),
-        h("p", { className: "hint" }, "每项由服务器解析后自动选择第一个可用格式；需要挑选清晰度的视频请单独发送。"));
+        h("p", { className: "hint" }, "每项由服务器解析后自动选择第一个可用格式；需要挑选清晰度的视频请单独发送。保存到私密空间时，全部解析完成后打开 Tessera 页面统一确认。"));
       footer.replaceChildren(h("span", { className: "spacer" }),
         h("button", { type: "button", className: "btn ghost", onclick: () => { batch = null; open(currentContext); } }, "取消"),
         h("button", { type: "button", className: "btn primary", onclick: () => void runBatch() }, svg("send"), `开始发送 ${batch.entries.length} 项`));
@@ -1219,13 +1401,13 @@
     }
     const { total, ok, failed, finished } = batchSummary();
     let overview = target.querySelector(".overview");
-    if (!overview || target.querySelector(".field")) {
+    if (!overview || target.querySelector(".dest")) {
       overview = h("div", { className: "overview" },
         h("div", { className: "overview-line" }, h("strong"), h("span", { className: "sub" })), h("div", { className: "progress" }, h("span")));
       target.replaceChildren(overview, h("div", { className: "list" }, rows));
     }
     overview.querySelector("strong").textContent = finished ? "发送结束" : "正在发送";
-    overview.querySelector(".sub").textContent = `成功 ${ok} / ${total}${failed ? ` · 失败 ${failed}` : ""}${batch.destination ? ` · 保存到 ${batch.destination}` : ""}`;
+    overview.querySelector(".sub").textContent = `${batch.destination.private ? "已转交" : "成功"} ${ok} / ${total}${failed ? ` · 失败 ${failed}` : ""} · ${batch.destination.private ? "私密空间（在 Tessera 中确认）" : `保存到 ${destinationLabel(batch.destination)}`}`;
     overview.querySelector(".progress").className = `progress${finished && !failed ? " done" : ""}`;
     overview.querySelector(".progress > span").style.width = `${total ? (ok + failed) / total * 100 : 0}%`;
     // 底部按钮只在形态变化时重建（运行中／结束、有无失败项），轮询不会替换正在点击的按钮。
@@ -1257,7 +1439,7 @@
     const current = settings();
     const server = h("input", { type: "url", value: current.server, placeholder: "https://drive.example.com" });
     const key = h("input", { type: "password", value: current.key, placeholder: "AccessKeyId:Secret", autocomplete: "off" });
-    const destination = h("input", { type: "text", value: current.destination, placeholder: "留空保存到根目录" });
+    let dest = { path: current.destination || "", private: Boolean(current.destinationPrivate) };
     const cookies = h("input", { type: "checkbox", checked: current.cookies });
     const showFab = h("input", { type: "checkbox", checked: current.fab });
     // 显示范围：两种模式各自保留一份列表，切换模式时把输入框内容换成对应列表。
@@ -1287,7 +1469,7 @@
     const read = () => {
       lists[mode] = parseSites();
       return { server: server.value.trim().replace(/\/+$/, ""), key: key.value.trim(),
-        destination: destination.value.trim().replace(/^\/+/, ""), cookies: cookies.checked, fab: showFab.checked,
+        destination: dest.path, destinationPrivate: dest.private, cookies: cookies.checked, fab: showFab.checked,
         siteMode: mode, excludeSites: lists.exclude, includeSites: lists.include };
     };
     const validate = value => {
@@ -1332,7 +1514,7 @@
         h("label", { className: "field" }, h("span", { className: "label" }, "Tessera 地址"), server),
         h("label", { className: "field" }, h("span", { className: "label" }, "访问密钥"), key,
           h("span", { className: "hint" }, "在 Tessera「访问密钥」页面新建，按 Access Key ID:Secret 填写。只保存在 Tampermonkey 中。")),
-        h("label", { className: "field" }, h("span", { className: "label" }, "默认保存目录"), destination),
+        h("div", { className: "field" }, h("span", { className: "label" }, "默认保存位置"), destinationRow(() => dest, value => { dest = value; })),
         status),
       h("div", { className: "divider" }),
       h("div", { className: "group" },

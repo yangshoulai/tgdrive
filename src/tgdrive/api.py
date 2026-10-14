@@ -68,8 +68,8 @@ class AdminApi:
         session = self.accounts.login(username, password, role="admin", ip=ip)
         return self._session_payload(session)
 
-    async def asetup(self, passphrase: str, username: str, password: str):
-        account = await self.accounts.asetup(passphrase, username, password)
+    async def asetup(self, passphrase: str, username: str, password: str, nickname: str | None = None):
+        account = await self.accounts.asetup(passphrase, username, password, nickname=nickname)
         return {"user_id": account.id, "username": account.username, "bucket_id": account.bucket_id}
 
     async def aunlock(self, token: str, csrf: str, passphrase: str):
@@ -100,12 +100,18 @@ class AdminApi:
     async def alogin(self, username: str, password: str, ip: str | None = None):
         return self._session_payload(await self.accounts.alogin(username, password, role="admin", ip=ip))
 
-    async def acreate_user(self, token: str, csrf: str, username: str, password: str, quota_bytes: int | None = None):
+    async def acreate_user(self, token: str, csrf: str, username: str, password: str, quota_bytes: int | None = None,
+                           nickname: str | None = None):
         def authorize():
             self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         authorize()
-        account = await self.accounts.acreate_user(username, password, quota_bytes=quota_bytes, authorize=authorize)
-        return {"id": account.id, "username": account.username, "bucket_id": account.bucket_id, "quota_bytes": quota_bytes}
+        account = await self.accounts.acreate_user(username, password, quota_bytes=quota_bytes, authorize=authorize, nickname=nickname)
+        return {"id": account.id, "username": account.username, "bucket_id": account.bucket_id, "quota_bytes": quota_bytes,
+                "nickname": account.nickname}
+
+    def user_avatar(self, token: str, user_id: int) -> tuple[bytes, str, str]:
+        self.accounts.sessions.require(token, role="admin")
+        return self.accounts.avatar(user_id)
 
     async def areset_user_password(self, token: str, csrf: str, user_id: int, password: str):
         def authorize():
@@ -457,6 +463,30 @@ class UserApi:
             raise NotReadyError("system is locked")
         return AdminApi._session_payload(session)
 
+    # ---------- 账号资料 ----------
+
+    def update_profile(self, token: str, csrf: str, nickname: object) -> dict[str, object]:
+        return self.accounts.update_profile(self.accounts.sessions.require(token, csrf=csrf, mutation=True), nickname)
+
+    async def change_email(self, token: str, csrf: str, password: object, email: object, ip: str | None = None):
+        return await self.accounts.change_email(token, csrf, password, email, ip=ip)
+
+    def set_avatar(self, token: str, csrf: str, data: object) -> dict[str, object]:
+        import base64
+        import binascii
+        session = self.accounts.sessions.require(token, csrf=csrf, mutation=True)
+        try:
+            raw = base64.b64decode(str(data or "").split(",", 1)[-1], validate=True)
+        except binascii.Error as exc:
+            raise ValueError("头像数据不是有效的 base64") from exc
+        return self.accounts.set_avatar(session, raw)
+
+    def delete_avatar(self, token: str, csrf: str) -> dict[str, object]:
+        return self.accounts.delete_avatar(self.accounts.sessions.require(token, csrf=csrf, mutation=True))
+
+    def avatar(self, token: str) -> tuple[bytes, str, str]:
+        return self.accounts.avatar(self.accounts.sessions.require(token).user_id)
+
     async def achange_password(self, token: str, csrf: str, old_password: str, new_password: str) -> None:
         session = self.accounts.sessions.require(token, csrf=csrf, mutation=True)
         if len(new_password) < 8:
@@ -493,7 +523,7 @@ class UserApi:
         session = self.accounts.sessions.require(token)
         account = self.accounts.account_for_session(session)
         bucket = self.objects._bucket(account.bucket_id) if account.bucket_id is not None else None
-        return {"id": account.id, "username": account.username, "role": account.role,
+        return {"id": account.id, "username": account.username, "role": account.role, **self.accounts.profile(account.id),
                 "bucket_id": account.bucket_id, "quota_bytes": bucket["quota_bytes"] if bucket else None,
                 "used_bytes": bucket["used_bytes"] if bucket else 0,
                 "unlocked": self.accounts.keystore.unlocked, "remember": session.remember,

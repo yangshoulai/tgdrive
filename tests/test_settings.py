@@ -14,8 +14,8 @@ class SettingsTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False, public_base_url="http://default.test:8001")
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.app.accounts.create_user("alice", "alice password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.app.accounts.create_user("alice@example.com", "alice password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -27,7 +27,7 @@ class SettingsTests(unittest.TestCase):
         with _tempfile.TemporaryDirectory() as temp:
             app = create_app(Path(temp) / "data", secure_cookies=False)
             with self.assertRaisesRegex(ValueError, "12"):
-                app.accounts.setup("short pass", "admin", "admin password")
+                app.accounts.setup("short pass", "admin@example.com", "admin password")
             self.assertFalse(app.accounts.status()["initialized"])
             app.metadata.close()
 
@@ -41,7 +41,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_admin_updates_addresses_and_everyone_sees_them(self):
         async def run():
-            admin = await self.client.login("admin", "admin", "admin password")
+            admin = await self.client.login("admin", "admin@example.com", "admin password")
             _, _, data = await self.client.request("GET", "/api/admin/v1/settings", headers=admin)
             self.assertEqual(json.loads(data)["public_base_url"]["effective"], "http://default.test:8001")
             self.assertNotIn("private_idle_seconds", json.loads(data))
@@ -53,7 +53,7 @@ class SettingsTests(unittest.TestCase):
 
             _, _, data = await self.client.request("GET", "/api/public/v1/config")
             self.assertEqual(json.loads(data), {"public_base_url": "https://drive.example.com", "s3_endpoint": "https://s3.example.com"})
-            user = await self.client.login("user", "alice", "alice password")
+            user = await self.client.login("user", "alice@example.com", "alice password")
             _, _, data = await self.client.request("GET", "/api/user/v1/me", headers=user)
             self.assertEqual(json.loads(data)["s3_endpoint"], "https://s3.example.com")
 
@@ -65,7 +65,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_validation_and_permissions(self):
         async def run():
-            admin = await self.client.login("admin", "admin", "admin password")
+            admin = await self.client.login("admin", "admin@example.com", "admin password")
             same = json.dumps({"public_base_url": "https://a.example.com", "s3_endpoint": "https://a.example.com:9000"}).encode()
             status, _, data = await self.client.request("POST", "/api/admin/v1/settings", same, admin)
             self.assertEqual(status, 400)
@@ -77,7 +77,7 @@ class SettingsTests(unittest.TestCase):
             no_csrf = {"cookie": admin["cookie"]}
             status, _, _ = await self.client.request("POST", "/api/admin/v1/settings", b'{"s3_endpoint":"https://s3.x.com"}', no_csrf)
             self.assertEqual(status, 403)
-            user = await self.client.login("user", "alice", "alice password")
+            user = await self.client.login("user", "alice@example.com", "alice password")
             status, _, _ = await self.client.request("GET", "/api/admin/v1/settings", headers={"cookie": user["cookie"]})
             self.assertEqual(status, 403)  # 已登录的普通用户：权限不足，而不是会话失效
             status, _, _ = await self.client.request("POST", "/api/admin/v1/settings", b'{"private_idle_seconds":60}', user)
@@ -86,7 +86,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_s3_endpoint_drives_host_routing(self):
         async def run():
-            admin = await self.client.login("admin", "admin", "admin password")
+            admin = await self.client.login("admin", "admin@example.com", "admin password")
             await self.client.request("POST", "/api/admin/v1/settings", json.dumps({"s3_endpoint": "https://s3.example.com"}).encode(), admin)
             # 配置的 S3 主机名收到的非 /api 请求交给 S3 网关（未签名 → S3 错误 XML）。
             status, headers, body = await self.client.request("GET", "/bucket/key", headers={"host": "s3.example.com"})

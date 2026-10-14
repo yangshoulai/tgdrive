@@ -236,11 +236,16 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 
 /* 用户设置保留独立页面，具体账号操作复用弹窗。 */
 .account-page { width: 100%; max-width: 1040px; }
-.account-identity { display: flex; align-items: center; gap: 14px; padding: 20px; border: 1px solid var(--line-soft); border-radius: var(--radius-lg); background: var(--surface-sunken); }
-.account-identity > .avatar { width: 40px; height: 40px; font-size: var(--text-lg); }
-.account-identity-copy { display: grid; gap: 3px; flex: 1; min-width: 0; }
-.account-identity-copy strong { overflow: hidden; color: var(--ink); font-size: var(--text-lg); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.account-identity-copy span { color: var(--ink-3); font-size: var(--text-xs); }
+.account-profile { display: flex; align-items: center; gap: 18px; padding: 20px; border: 1px solid var(--line-soft); border-radius: var(--radius-lg); background: var(--surface-sunken); }
+.account-avatar-button { position: relative; flex: none; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer; }
+.account-avatar-button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+.account-avatar-overlay { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 50%; background: rgba(0, 0, 0, .45); color: #fff; opacity: 0; transition: opacity .15s; }
+.account-avatar-button:hover:not(:disabled) .account-avatar-overlay, .account-avatar-button:focus-visible .account-avatar-overlay { opacity: 1; }
+.account-profile-copy { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.account-profile-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.account-profile-name strong { overflow: hidden; color: var(--ink); font-size: var(--text-xl); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.account-profile-email { overflow: hidden; color: var(--ink-3); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
+.account-profile-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .account-section { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 36px; padding: 28px 0; border-bottom: 1px solid var(--line); }
 .account-section-heading { display: flex; align-items: flex-start; gap: 10px; }
 .account-section-heading > svg { flex: none; margin-top: 1px; color: var(--ink-2); }
@@ -298,7 +303,7 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 .account-page-help .link { display: inline-block; margin-left: 10px; }
 @media (max-width: 760px) {
   .account-section { grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 24px 0; }
-  .account-identity { padding: 16px; }
+  .account-profile { align-items: flex-start; gap: 14px; padding: 16px; }
 }
 @media (max-width: 480px) {
   .account-setting-summary { flex-wrap: wrap; }
@@ -429,6 +434,10 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .segmented button { display: inline-flex; flex: none; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--ink-3); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; transition: color .12s, background-color .12s; }
 .segmented button:hover { color: var(--ink); }
 .segmented button.is-active { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line), var(--shadow-sm); }
+.download-import-unlock { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); }
+.download-import-unlock-head { display: flex; align-items: flex-start; gap: 10px; }
+.download-import-unlock-head > div { flex: 1; min-width: 0; }
+.download-import-unlock-head p { margin: 2px 0 0; font-size: var(--text-xs); }
 .filter-chips { display: flex; gap: 6px; margin: -4px 0 12px; overflow-x: auto; scrollbar-width: none; }
 .filter-chips::-webkit-scrollbar { display: none; }
 .filter-chip { flex: none; height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; transition: color .12s, background-color .12s, border-color .12s; }
@@ -558,6 +567,7 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .avatar { display: grid; width: 32px; height: 32px; flex: none; place-items: center; border-radius: 50%; font-size: var(--text-sm); font-weight: 600; }
 .avatar-accent { background: var(--accent-soft); color: var(--accent-ink); }
 .avatar-admin { background: var(--admin-soft); color: var(--admin); }
+.avatar-image { object-fit: cover; background: var(--surface-hover); }
 
 /* ---------- 应用外壳 ---------- */
 
@@ -706,6 +716,7 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .name-stack { display: grid; min-width: 0; }
 .name-stack strong, .name-stack small, .name-button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .name-stack small { color: var(--ink-3); font-size: var(--text-xs); }
+.name-stack strong .badge { margin-left: 6px; vertical-align: 1px; }
 .data-row .name-stack strong, .data-row .name-stack .name-button { line-height: 1.4; }
 .data-row .name-stack small { font-size: var(--text-xs); line-height: 1.35; }
 .name-button { max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--ink); font-weight: 500; text-align: left; }
@@ -1837,6 +1848,8 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
 .share-crumbs button:hover { background: var(--surface-hover); color: var(--ink); }
 .share-crumbs strong { padding: 0 6px; color: var(--ink); font-weight: 500; }
 .share-folder-loading { padding: 12px 24px; }
+.share-folder-filters { padding: 0 20px 12px; }
+.share-folder-filters .filter-chips { margin: 0; }
 .share-folder-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line); font-size: var(--text-xs); }
 .share-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .share-select-all { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); cursor: pointer; }
@@ -1854,7 +1867,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
 @media (max-width: 860px) {
   .public-folder-table { --cols: 20px minmax(0, 1fr) 76px 80px 44px; }
   .public-folder-table .data-row > .cell-date { display: none; }
-  .share-crumbs, .share-folder-toolbar, .share-folder .public-folder-table .data-row { padding-inline: 16px; }
+  .share-crumbs, .share-folder-toolbar, .share-folder-filters, .share-folder .public-folder-table .data-row { padding-inline: 16px; }
   .share-folder .share-grid { padding: 16px; }
 }
 @media (max-width: 600px) {

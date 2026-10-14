@@ -15,8 +15,8 @@ class OperationsTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False)
-        self.app.accounts.setup("encryption passphrase", "admin", "admin password")
-        self.alice = self.app.accounts.create_user("alice", "alice password")
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
         self.client = Client(self.app)
 
     def tearDown(self):
@@ -31,9 +31,9 @@ class OperationsTests(unittest.TestCase):
         return self.request("GET", "/api/admin/v1/audit", headers=admin)[1]["events"]
 
     def test_security_events_are_recorded_without_secrets(self):
-        self.request("POST", "/api/user/v1/login", {"username": "alice", "password": "WRONG-password"})
-        user = asyncio.run(self.client.login("user", "alice", "alice password"))
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
+        self.request("POST", "/api/user/v1/login", {"username": "alice@example.com", "password": "WRONG-password"})
+        user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         _, created = self.request("POST", "/api/user/v1/clients", {"name": "nas"}, user)
         self.request("POST", "/api/user/v1/password", {"old_password": "alice password", "new_password": "brand new password"}, user)
         self.request("POST", f"/api/admin/v1/users/{self.alice.id}/quota", {"quota_bytes": 1024}, admin)
@@ -46,9 +46,9 @@ class OperationsTests(unittest.TestCase):
         events = self.events(admin)
         summary = [(event["action"], event["actor"], event["ok"]) for event in reversed(events)]
         self.assertEqual(summary, [
-            ("user.login", "alice", False), ("user.login", "alice", True), ("admin.login", "admin", True),
-            ("key.create", "alice", True), ("user.password", "alice", True), ("user.quota", "admin", True),
-            ("settings.update", "admin", True), ("bot.create", "admin", True),
+            ("user.login", "alice@example.com", False), ("user.login", "alice@example.com", True), ("admin.login", "admin@example.com", True),
+            ("key.create", "alice@example.com", True), ("user.password", "alice@example.com", True), ("user.quota", "admin@example.com", True),
+            ("settings.update", "admin@example.com", True), ("bot.create", "admin@example.com", True),
         ])
         key_event = next(event for event in events if event["action"] == "key.create")
         self.assertEqual(key_event["target"], created["access_key_id"])
@@ -64,15 +64,15 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/admin/v1/audit", headers=user)[0], 403)
 
     def test_lock_and_logout_record_the_actor(self):
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         self.request("POST", "/api/admin/v1/lock", headers=admin)
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         events = self.events(admin)
         lock = next(event for event in events if event["action"] == "system.lock")
-        self.assertEqual((lock["actor"], lock["ok"]), ("admin", True))
+        self.assertEqual((lock["actor"], lock["ok"]), ("admin@example.com", True))
 
     def test_audit_pagination(self):
-        admin = asyncio.run(self.client.login("admin", "admin", "admin password"))
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         for _ in range(7):
             self.request("POST", f"/api/admin/v1/users/{self.alice.id}/status", {"status": "active"}, admin)
         first = self.request("GET", "/api/admin/v1/audit?limit=5", headers=admin)[1]
@@ -95,8 +95,8 @@ class OperationsTests(unittest.TestCase):
         for index in range(500):
             manager.record_failure(f"random-{index}")
         self.assertLessEqual(len(manager._failures), 50)
-        manager.record_failure("alice")
-        self.assertIn("alice", manager._failures)
+        manager.record_failure("alice@example.com")
+        self.assertIn("alice@example.com", manager._failures)
         expired = SessionManager(ttl=-1)
         for index in range(20):
             expired.create(index, f"u{index}", "user")
