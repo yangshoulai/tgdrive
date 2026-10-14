@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.5.0
+// @version      0.5.1
 // @description  在 X、YouTube 和其他网页上快速复制媒体地址与 curl 命令，或一键发送到 Tessera 离线下载
 // @author       yangshoulai
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
@@ -98,6 +98,7 @@
   };
   const TYPE_LABEL = { video: "视频", audio: "音频", stream: "M3U8", image: "图片", file: "文件" };
   const items = new Map();
+  const clearedUrls = new Set();  // 当前页面已清空的地址，避免 DOM 扫描或重复请求立即补回
   const listeners = new Set();
 
   function classify(url, initiator) {
@@ -116,7 +117,7 @@
   }
 
   function addItem(url, type, extra = {}) {
-    if (!url || items.has(url)) return;
+    if (!url || items.has(url) || clearedUrls.has(url)) return;
     items.set(url, { url, type, time: Date.now(), ...extra });
     while (items.size > MAX_ITEMS) items.delete(items.keys().next().value);
     listeners.forEach(fn => fn());
@@ -281,15 +282,16 @@
     .logo-plane { fill: var(--logo-plane); stroke: var(--logo-plane); } .logo-fold { fill: none; stroke: var(--logo-fold); }
 
     /* 悬浮按钮：可拖动，松手后吸附到最近的左右边缘 */
-    /* 按钮本身就是标志：暗灰圆角方块，与浏览器标签页图标一致 */
-    .fab { position: fixed; width: 44px; height: 44px; padding: 0; border-radius: 10px; border: 0; background: transparent;
+    /* 小圆形底座内保留品牌标志，减少对网页内容的遮挡 */
+    .fab { position: fixed; width: 36px; height: 36px; padding: 0; border-radius: 50%; border: 1px solid var(--logo-ring); background: var(--logo-bg);
       box-shadow: var(--shadow); display: grid; place-items: center; cursor: pointer; pointer-events: auto; touch-action: none;
       user-select: none; z-index: 2147483646; transition: top .2s ease, left .2s ease, transform .15s ease, opacity .15s; }
+    .fab .logo-bg { fill: none; stroke: none; }
     .fab:hover { transform: scale(1.06); }
     .fab.dragging { transition: none; transform: scale(1.1); cursor: grabbing; }
     .fab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .badge { position: absolute; top: -3px; right: -3px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
-      background: var(--accent); color: #fff; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center;
+    .badge { position: absolute; top: -2px; right: -2px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+      background: var(--accent); color: #fff; font-size: 11px; font-weight: 600; line-height: 16px; text-align: center;
       box-shadow: 0 0 0 2px var(--bg); }
 
     /* 面板 */
@@ -541,7 +543,7 @@
     root = h("div", { className: "root" });
     shadow.append(h("style", {}, STYLE), root);
     badge = h("span", { className: "badge", hidden: true });
-    fab = h("button", { type: "button", className: "fab", title: "Tessera 资源抓取（可拖动）", "aria-label": "Tessera 资源抓取" }, logo(44), badge);
+    fab = h("button", { type: "button", className: "fab", title: "Tessera 资源抓取（可拖动）", "aria-label": "Tessera 资源抓取" }, logo(24), badge);
     enableDrag(fab);
     root.append(fab);
     document.documentElement.append(host);
@@ -554,7 +556,7 @@
 
   // ----- 悬浮按钮拖动 -----
 
-  const FAB = 44, EDGE = 16;
+  const FAB = 36, EDGE = 16;
   /** 位置保存为 { side: "left" | "right", y: 顶部占视口高度的比例 }，跨站点共用。 */
   const fabPosition = () => ({ side: "right", y: null, ...GM_getValue("fabPosition", {}) });
 
@@ -763,7 +765,7 @@
   function collect() {
     const scope = currentContext && currentContext.scope;
     const dom = scanDom(scope || document);
-    if (scope) return dom; // 单条帖子只看它自己的媒体
+    if (scope) return dom.filter(item => !clearedUrls.has(item.url)); // 单条帖子只看它自己的媒体
     const merged = new Map();
     for (const item of [...items.values()].reverse()) merged.set(item.url, item);
     for (const item of dom) if (!merged.has(item.url)) merged.set(item.url, item);
@@ -771,7 +773,18 @@
       const cover = `https://i.ytimg.com/vi/${currentContext.id}/maxresdefault.jpg`;
       merged.set(cover, { url: cover, type: "image", source: "封面" });
     }
-    return [...merged.values()];
+    return [...merged.values()].filter(item => !clearedUrls.has(item.url));
+  }
+
+  function clearResources() {
+    for (const item of collect()) clearedUrls.add(item.url);
+    items.clear();
+    selected.clear();
+    rowCache.clear();
+    filter = "all";
+    refreshFab();
+    renderList();
+    toast("已清空探测记录");
   }
 
   /** 让 parent 的子节点依次等于 nodes：已在正确位置的节点不移动，新节点插入，多余的移除。 */
@@ -805,7 +818,7 @@
       const parts = {
         check: h("span", { className: "check" }),
         count: h("span", { className: "count" }),
-        clear: h("button", { type: "button", className: "text-btn", onclick: () => { items.clear(); refreshFab(); renderList(); } }, "清空"),
+        clear: h("button", { type: "button", className: "text-btn", onclick: clearResources }, "清空"),
         chips: h("div", { className: "chips" }),
         list: h("div", { className: "list" }),
         empty: emptyState("search", "还没有发现可下载的资源。播放视频或滚动加载图片后再打开。"),
@@ -1398,6 +1411,7 @@
     const key = pageKey(location.href);
     if (!active || key === currentPage) return;
     currentPage = key;
+    clearedUrls.clear();
     // 轮询发现得晚，保留刚到达的资源（大概率属于新页面）。
     const cutoff = Date.now() - slack;
     for (const [url, item] of items) if (item.time < cutoff) items.delete(url);
@@ -1437,6 +1451,7 @@
     domObserver = null;
     document.querySelectorAll("[data-tessera-grabber]").forEach(node => node.remove());
     items.clear();
+    clearedUrls.clear();
     close();
     refreshFab();
   }
