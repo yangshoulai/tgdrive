@@ -1,0 +1,436 @@
+// Run with: node --test tests/test_grabber.cjs
+// Execute the real single-file userscript, stubbing only browser/GM boundaries.
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const { webcrypto } = require("node:crypto");
+const { test } = require("node:test");
+
+const source = fs.readFileSync(path.join(__dirname, "../userscripts/tessera-grabber.user.js"), "utf8");
+const instrumented = source.replace(/\s+applySiteState\(\);\s*\}\)\(\);\s*$/, `
+  globalThis.toastMessages = [];
+  toast = message => globalThis.toastMessages.push(message);
+  globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBrowserBatch, close,
+    getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES };
+})();`);
+assert.notEqual(instrumented, source, "userscript test hook must replace only final bootstrap");
+
+const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+const imageResponse = () => new Response(png, { headers: { "Content-Type": "image/png", "Content-Length": String(png.length) } });
+const tick = () => new Promise(resolve => setImmediate(resolve));
+async function until(predicate) {
+  for (let attempt = 0; attempt < 100; ++attempt) {
+    if (predicate()) return;
+    await tick();
+  }
+  throw new Error("transfer did not reach the expected state");
+}
+
+function harness({ fetch, gm, move, remove, cookies = true, cookieApi = true } = {}) {
+  const values = { settings: { server: "https://tessera.example", key: "TEST:secret", cookies } };
+  const requests = [], fetches = [];
+  const window = { addEventListener() {}, fetch: async (url, options) => {
+    fetches.push({ url, options });
+    return fetch ? fetch(url, options) : imageResponse();
+  } };
+  const context = vm.createContext({
+    window, unsafeWindow: window, document: { cookie: "visible=page", querySelectorAll: () => [] },
+    location: new URL("https://gallery.example/album"), navigator: { userAgent: "BrowserTest/1" },
+    URL, Blob, Response, ReadableStream, AbortController, DOMException, TextEncoder, Uint8Array, Uint32Array, crypto: webcrypto,
+    setTimeout: (fn, delay) => fn.name === "poll" ? 0 : setTimeout(fn, delay), clearTimeout, clearInterval,
+    GM_getValue: (key, fallback) => values[key] ?? fallback,
+    GM_setValue: (key, value) => { values[key] = value; },
+    GM_registerMenuCommand() {},
+    GM_cookie: cookieApi ? { list: (_, callback) => callback([{ name: "cf_clearance", value: "test-cookie", httpOnly: true }], null) } : undefined,
+    GM_xmlhttpRequest: details => {
+      const record = { details, aborted: false };
+      requests.push(record);
+      queueMicrotask(() => {
+        if (record.aborted) return;
+        const url = new URL(details.url);
+        if (url.pathname === "/api/v1/move") return move ? move(details, record)
+          : details.onload({ status: 200, responseText: '{"moved":1,"skipped":0}' });
+        if (url.pathname === "/api/v1/delete") return remove ? remove(details, record)
+          : details.onload({ status: 200, responseText: JSON.stringify({ results: JSON.parse(details.data).paths.map(path => ({ path, deleted: true })) }) });
+        if (gm) return gm(details, record);
+        const data = details.method === "PUT" ? { key: url.searchParams.get("path"), size: details.data.size } : { writable: true };
+        details.upload?.onprogress?.({ loaded: details.data?.size || 0 });
+        details.onload({ status: 200, responseText: JSON.stringify(data) });
+      });
+      return { abort() { record.aborted = true; details.onabort?.(); } };
+    },
+  });
+  vm.runInContext(instrumented, context);
+  const api = context.grabber;
+  const entry = (url = "https://images.example/0048.jpg", type = "image") => ({ url, type, state: "waiting", error: "", tasks: [] });
+  const batch = (entries = [entry()]) => {
+    const result = { mode: "browser", started: false, destination: { path: "photos/", private: false }, entries };
+    api.setBatch(result);
+    return result;
+  };
+  return { api, values, requests, fetches, messages: context.toastMessages, entry, batch };
+}
+
+test("browser image upload preserves bytes and isolates credentials", async () => {
+  const h = harness();
+  const current = h.batch();
+  await h.api.runBatch();
+  const entry = current.entries[0];
+  assert.equal(entry.state, "completed");
+  assert.equal(entry.path, "photos/0048.jpg");
+  assert.match(entry.stagePath, /^photos\/\.tessera-upload-[a-f\d]{16}$/);
+  assert.equal(h.fetches[0].options.credentials, "include");
+  assert.equal(h.fetches[0].options.cache, "force-cache");
+  assert.equal(h.fetches[0].options.headers, undefined);
+  const upload = h.requests.find(request => request.details.method === "PUT").details;
+  assert.equal(upload.url, `https://tessera.example/api/v1/files?path=${encodeURIComponent(entry.stagePath)}`);
+  assert.equal(upload.headers.Authorization, "Bearer TEST:secret");
+  assert.equal(upload.headers["Content-Type"], "image/png");
+  assert.equal(upload.headers.Cookie, undefined);
+  assert.equal(upload.cookie, undefined);
+  assert.equal(upload.anonymous, true);
+  assert.deepEqual(new Uint8Array(await upload.data.arrayBuffer()), png);
+  const move = h.requests.find(request => request.details.url.endsWith("/move")).details;
+  assert.deepEqual(JSON.parse(move.data), { from: entry.stagePath, to: entry.path, conflict: "skip" });
+  assert.deepEqual(Array.from(h.values.sent), [entry.url]);
+  assert.equal(h.requests.some(request => request.details.url.includes("/downloads")), false);
+});
+
+test("cross-origin fallback uses source cookies without Tessera authorization", async () => {
+  const h = harness({ fetch: () => { throw new TypeError("CORS"); }, gm: details => {
+    if (details.url.startsWith("https://tessera.example")) {
+      details.onload({ status: 200, responseText: JSON.stringify(details.method === "PUT"
+        ? { key: new URL(details.url).searchParams.get("path"), size: details.data.size } : { writable: true }) });
+    } else details.onload({ status: 200, responseHeaders: "Content-Type: image/png\r\n", response: new Blob([png]) });
+  } });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.equal(current.entries[0].state, "completed");
+  const source = h.requests.find(request => request.details.url.startsWith("https://images.example")).details;
+  assert.equal(source.cookie, "cf_clearance=test-cookie");
+  assert.equal(source.anonymous, false);
+  assert.equal(source.responseType, "blob");
+  assert.equal(source.headers.Authorization, undefined);
+  assert.equal(source.headers.Referer, "https://gallery.example/album");
+});
+
+test("disabled cookies apply to both page requests and extension fallback", async () => {
+  const h = harness({ cookies: false, fetch: () => { throw new TypeError("CORS"); }, gm: details => {
+    details.onload({ status: 200, responseHeaders: "Content-Type: image/png", response: new Blob([png]) });
+  } });
+  await h.api.browserDownload("https://images.example/a.png", "image", {
+    signal: new AbortController().signal, cookies: false, onprogress() {},
+  });
+  assert.equal(h.fetches[0].options.credentials, "omit");
+  assert.equal(h.requests[0].details.anonymous, true);
+  assert.equal(h.requests[0].details.cookie, undefined);
+});
+
+test("document.cookie fallback never crosses hostname boundaries", async () => {
+  const h = harness({ cookieApi: false });
+  assert.equal(await h.api.cookieHeader("https://gallery.example/image.png"), "visible=page");
+  assert.equal(await h.api.cookieHeader("https://evilgallery.example/image.png"), "");
+  assert.equal(await h.api.cookieHeader("https://images.gallery.example/image.png"), "");
+});
+
+for (const [label, response] of [
+  ["Cloudflare HTML with status 200", () => new Response("<!DOCTYPE html><html><title>Just a moment...</title></html>", { headers: { "Content-Type": "text/html" } })],
+  ["HTML disguised as image", () => new Response("<!DOCTYPE html><html>login</html>", { headers: { "Content-Type": "image/jpeg" } })],
+  ["challenge header with image bytes", () => new Response(png, { headers: { "Content-Type": "image/png", "cf-mitigated": "challenge" } })],
+  ["JSON in place of an image", () => new Response('{"error":"login required"}', { headers: { "Content-Type": "application/json" } })],
+  ["JSON disguised as image", () => new Response('{"error":"login required"}', { headers: { "Content-Type": "image/jpeg" } })],
+  ["stream playlist behind an image URL", () => new Response("#EXTM3U\n#EXTINF:10", { headers: { "Content-Type": "application/vnd.apple.mpegurl" } })],
+]) test(`reject ${label} before any upload`, async () => {
+  const h = harness({ fetch: response });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.equal(current.entries[0].state, "error");
+  assert.equal(h.requests.some(request => request.details.method === "PUT"), false);
+  assert.deepEqual(Array.from(h.values.sent || []), []);
+});
+
+test("page 403 tries extension once and reports both refusals", async () => {
+  const h = harness({ fetch: () => new Response("blocked", { status: 403 }), gm: details => details.onload(
+    details.url.startsWith("https://tessera.example") ? { status: 200, responseText: '{"writable":true}' } : { status: 403 }) });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.match(current.entries[0].error, /HTTP 403/);
+  assert.match(current.entries[0].error, /网页请求.*扩展请求/);
+  assert.equal(h.requests.length, 2); // destination preflight + one source request
+  assert.equal(h.requests.some(request => request.details.method === "PUT"), false);
+});
+
+test("page 403 can fall back to extension cookies and headers", async () => {
+  const h = harness({ fetch: () => new Response("blocked", { status: 403 }), gm: details => details.onload(
+    details.url.startsWith("https://tessera.example")
+      ? { status: 200, responseText: JSON.stringify(details.method === "PUT"
+        ? { key: new URL(details.url).searchParams.get("path"), size: details.data.size } : { writable: true }) }
+      : { status: 200, responseHeaders: "Content-Type: image/png", response: new Blob([png]) }) });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.equal(current.entries[0].state, "completed");
+  const source = h.requests.find(request => request.details.url.startsWith("https://images.example")).details;
+  assert.equal(source.cookie, "cf_clearance=test-cookie");
+  assert.equal(source.headers.Authorization, undefined);
+});
+
+test("page 401 remains a login failure without replay", async () => {
+  const h = harness({ fetch: () => new Response("login", { status: 401 }) });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.match(current.entries[0].error, /HTTP 401/);
+  assert.equal(h.requests.length, 1);
+});
+
+test("save the chosen Unicode filename without random suffix", async () => {
+  const h = harness();
+  const current = h.batch();
+  current.entries[0].name = "我的原图.jpg";
+  await h.api.runBatch();
+  assert.equal(current.entries[0].state, "completed");
+  assert.equal(current.entries[0].path, "photos/我的原图.jpg");
+});
+
+test("append extension from actual content only when the chosen name has none", async () => {
+  const h = harness();
+  const current = h.batch();
+  current.entries[0].name = "封面";
+  await h.api.runBatch();
+  assert.equal(current.entries[0].path, "photos/封面.png");
+});
+
+for (const name of ["", "../outside.jpg", "nested/a.jpg", "nested\\a.jpg", ".", "..", ".tgdrive", "a\u0000.jpg", "a.", "图".repeat(74)]) {
+  test(`reject unsafe or invalid save name ${JSON.stringify(name)} before any request`, async () => {
+    const h = harness();
+    const current = h.batch();
+    current.entries[0].name = name;
+    await h.api.runBatch();
+    assert.equal(current.started, false);
+    assert.equal(h.requests.length, 0);
+    assert.equal(h.fetches.length, 0);
+    assert.ok(h.messages.length);
+  });
+}
+
+test("duplicate normalized names cannot start a batch", async () => {
+  const h = harness();
+  const current = h.batch([h.entry("https://images.example/a.jpg"), h.entry("https://images.example/b.jpg")]);
+  current.entries[0].name = " cafe\u0301.jpg ";
+  current.entries[1].name = "caf\u00e9.jpg";
+  await h.api.runBatch();
+  assert.match(h.messages[0], /重复/);
+  assert.equal(current.started, false);
+  assert.equal(h.fetches.length, 0);
+});
+
+test("same-name collision keeps original and deletes only its own staged upload", async () => {
+  const h = harness({ move: details => details.onload({ status: 200, responseText: '{"moved":0,"skipped":1}' }) });
+  const current = h.batch();
+  const entry = current.entries[0];
+  entry.name = "existing.jpg";
+  await h.api.runBatch();
+  assert.equal(entry.state, "error");
+  assert.match(entry.error, /已保留原文件/);
+  const put = h.requests.find(request => request.details.method === "PUT").details;
+  assert.notEqual(new URL(put.url).searchParams.get("path"), "photos/existing.jpg");
+  const cleanup = h.requests.find(request => request.details.url.endsWith("/delete")).details;
+  assert.deepEqual(JSON.parse(cleanup.data).paths, [entry.stagePath]);
+  assert.deepEqual(Array.from(h.values.sent || []), []);
+});
+
+test("rename a failed collision before retry and reuse its staging path", async () => {
+  let moves = 0;
+  const h = harness({ move: details => details.onload({ status: 200, responseText: ++moves === 1 ? '{"moved":0,"skipped":1}' : '{"moved":1,"skipped":0}' }) });
+  const current = h.batch();
+  const entry = current.entries[0];
+  await h.api.runBatch();
+  const stage = entry.stagePath;
+  entry.name = "renamed.jpg";
+  entry.path = null;
+  h.api.retryEntries([entry]);
+  await until(() => !current.running);
+  assert.equal(entry.state, "completed");
+  assert.equal(entry.path, "photos/renamed.jpg");
+  assert.equal(entry.stagePath, stage);
+});
+
+test("move failure cannot mark staged bytes as successfully saved", async () => {
+  const h = harness({ move: details => details.onload({ status: 500, responseText: '{"error":{"message":"move failed"}}' }) });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.equal(current.entries[0].state, "error");
+  assert.equal(h.requests.some(request => request.details.url.endsWith("/delete")), true);
+  assert.deepEqual(Array.from(h.values.sent || []), []);
+});
+
+test("client timeout aborts GM request even without native timeout events", async () => {
+  const h = harness({ gm() {} });
+  await assert.rejects(h.api.api("POST", "/api/v1/test", {}, { timeout: 5 }), /超时/);
+  assert.equal(h.requests[0].aborted, true);
+});
+
+test("reject declared oversize and cancel the response before reading bytes", async () => {
+  let cancelled = false;
+  const h = harness({ fetch: () => new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+    headers: { "Content-Length": String(64 * 1024 * 1024 + 1) },
+  }) });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.match(current.entries[0].error, /64 MiB/);
+  assert.equal(cancelled, true);
+  assert.equal(h.requests.some(request => request.details.method === "PUT"), false);
+});
+
+test("unknown-length source stops at size limit and cancels its stream", async () => {
+  let cancelled = false;
+  const h = harness({ fetch: () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(64 * 1024 * 1024 + 1)); },
+    cancel() { cancelled = true; },
+  })) });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.match(current.entries[0].error, /64 MiB/);
+  assert.equal(cancelled, true);
+  assert.equal(h.requests.some(request => request.details.method === "PUT"), false);
+});
+
+test("extension download aborts at declared size limit", async () => {
+  const h = harness({ fetch: () => { throw new TypeError("CORS"); }, gm: details => {
+    details.onprogress({ loaded: 1, total: 64 * 1024 * 1024 + 1, lengthComputable: true });
+  } });
+  await assert.rejects(h.api.browserDownload("https://images.example/a.jpg", "image", {
+    signal: new AbortController().signal, cookies: true, onprogress() {},
+  }), /64 MiB/);
+  assert.equal(h.requests[0].aborted, true);
+});
+
+test("read-only destination fails before downloading the source", async () => {
+  const h = harness({ gm: details => details.onload({ status: 200, responseText: '{"writable":false}' }) });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.match(current.entries[0].error, /不能写入/);
+  assert.equal(h.fetches.length, 0);
+});
+
+test("browser mode cannot create a private-space transfer", async () => {
+  const h = harness();
+  const current = h.batch();
+  current.destination.private = true;
+  await h.api.runBatch();
+  assert.match(h.messages[0], /仅支持我的文件/);
+  assert.equal(h.fetches.length, 0);
+  assert.equal(h.requests.length, 0);
+  assert.equal(current.started, false);
+});
+
+test("browser mode processes one file at a time", async () => {
+  let active = 0, peak = 0;
+  const h = harness({ fetch: async () => {
+    peak = Math.max(peak, ++active);
+    await tick();
+    --active;
+    return imageResponse();
+  } });
+  const current = h.batch([h.entry("https://images.example/a.png"), h.entry("https://images.example/b.png")]);
+  await h.api.runBatch();
+  assert.equal(peak, 1);
+  assert.equal(current.entries.every(entry => entry.state === "completed"), true);
+});
+
+test("stop aborts active source and prevents queued uploads", async () => {
+  const h = harness({ fetch: (_, { signal }) => new Promise((_, reject) => {
+    signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+  }) });
+  const current = h.batch([h.entry("https://images.example/a.png"), h.entry("https://images.example/b.png")]);
+  const running = h.api.runBatch();
+  await tick();
+  h.api.stopBrowserBatch();
+  await running;
+  assert.equal(current.entries.every(entry => entry.state === "stopped"), true);
+  assert.equal(h.fetches.length, 1);
+  assert.equal(h.requests.some(request => request.details.method === "PUT"), false);
+  assert.deepEqual(Array.from(h.values.sent || []), []);
+});
+
+test("stop aborts active upload; late callbacks cannot mark it sent", async () => {
+  let upload;
+  const h = harness({ gm: details => {
+    if (details.method === "PUT") { upload = details; return; }
+    details.onload({ status: 200, responseText: '{"writable":true}' });
+  } });
+  const current = h.batch();
+  const running = h.api.runBatch();
+  await until(() => Boolean(upload));
+  h.api.stopBrowserBatch();
+  await running;
+  upload.onload({ status: 200, responseText: JSON.stringify({ key: current.entries[0].path, size: png.length }) });
+  await tick();
+  assert.equal(current.entries[0].state, "stopped");
+  assert.equal(h.requests.find(request => request.details.method === "PUT").aborted, true);
+  assert.deepEqual(Array.from(h.values.sent || []), []);
+});
+
+test("retry reuses destination path and marks sent only after confirmed storage", async () => {
+  let uploads = 0;
+  const h = harness({ gm: details => {
+    if (details.method !== "PUT") return details.onload({ status: 200, responseText: '{"writable":true}' });
+    if (++uploads === 1) return details.onload({ status: 503, responseText: '{"error":{"message":"try again"}}' });
+    details.onload({ status: 200, responseText: JSON.stringify({ key: new URL(details.url).searchParams.get("path"), size: details.data.size }) });
+  } });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.equal(current.entries[0].state, "error");
+  assert.deepEqual(Array.from(h.values.sent || []), []);
+  const target = current.entries[0].path;
+  h.api.retryEntries(current.entries);
+  await until(() => !current.running);
+  assert.equal(current.entries[0].state, "completed");
+  assert.equal(current.entries[0].path, target);
+  assert.equal(uploads, 2);
+});
+
+test("successful HTTP response without storage acknowledgement remains failed", async () => {
+  const h = harness({ gm: details => details.onload({ status: 200, responseText: details.method === "PUT" ? "<html>login</html>" : '{"writable":true}' }) });
+  const current = h.batch();
+  await h.api.runBatch();
+  assert.equal(current.entries[0].state, "error");
+  assert.deepEqual(Array.from(h.values.sent || []), []);
+});
+
+test("binary JSON files are not JSON-stringified by the upload wrapper", async () => {
+  const h = harness();
+  const blob = new Blob(['{"a":1}'], { type: "application/json" });
+  await h.api.api("PUT", "/api/v1/files?path=a.json", blob, { binary: true, contentType: "application/json" });
+  assert.equal(h.requests[0].details.data, blob);
+});
+
+test("closing panel leaves transfer running with its original server and key", async () => {
+  let resume;
+  const h = harness({ fetch: () => new Promise(resolve => { resume = () => resolve(imageResponse()); }) });
+  const current = h.batch();
+  const running = h.api.runBatch();
+  await tick();
+  h.api.close();
+  h.values.settings = { server: "https://changed.example", key: "NEW:secret", cookies: false };
+  resume();
+  await running;
+  const upload = h.requests.find(request => request.details.method === "PUT").details;
+  assert.equal(current.entries[0].state, "completed");
+  assert.equal(new URL(upload.url).origin, "https://tessera.example");
+  assert.equal(upload.headers.Authorization, "Bearer TEST:secret");
+});
+
+test("existing offline batch still parses and creates server tasks", async () => {
+  const h = harness({ gm: details => details.onload({ status: 200, responseText: JSON.stringify(
+    details.url.endsWith("/parse") ? { candidates: [{ ticket: "test-ticket", name: "0048.jpg", group: "0" }] }
+      : { tasks: [{ id: 1, status: "completed", key: "photos/0048.jpg" }] }) }) });
+  const current = h.batch();
+  current.mode = "offline";
+  await h.api.runBatch();
+  assert.equal(current.entries[0].state, "submitted");
+  assert.equal(h.fetches.length, 0);
+  assert.deepEqual(h.requests.map(request => new URL(request.details.url).pathname), ["/api/v1/downloads/parse", "/api/v1/downloads"]);
+  assert.equal(JSON.parse(h.requests[1].details.data).items[0].ticket, "test-ticket");
+  assert.deepEqual(Array.from(h.values.sent), [current.entries[0].url]);
+});

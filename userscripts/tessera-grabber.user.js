@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.6.0
-// @description  在 X、YouTube 和其他网页上快速复制媒体地址与 curl 命令，或一键发送到 Tessera 离线下载
+// @version      0.7.2
+// @description  在 X、YouTube 和其他网页上复制资源地址与 curl 命令，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
 // @match        *://*/*
@@ -25,6 +25,7 @@
  * - 资源嗅探：PerformanceObserver 记录页面加载过的视频、音频、M3U8 和常见文件；图片从 DOM 中按尺寸挑选。
  * - 复制：链接，或带 User-Agent、Referer、Cookie 的 curl 命令（Cookie 经 GM_cookie 读取，包含 HttpOnly）。
  * - 发送：调用 Tessera 的 /api/v1/downloads/parse 与 /api/v1/downloads，需要在设置中填写地址和访问密钥。
+ * - 浏览器上传：在当前浏览器读取直链资源，再通过 PUT /api/v1/files 上传；单文件最多 64 MiB，不支持私密空间与流媒体列表。
  * Cookie 只放进你复制的命令或发给你自己配置的 Tessera 服务器，不发往其他地方。
  */
 (function () {
@@ -197,7 +198,7 @@
     return new Promise(resolve => {
       const fallback = () => {
         // 同站资源退回 document.cookie（读不到 HttpOnly）；跨站资源不附带。
-        try { resolve(new URL(url).hostname.endsWith(location.hostname.replace(/^www\./, "")) ? document.cookie : ""); }
+        try { resolve(new URL(url).hostname === location.hostname ? document.cookie : ""); }
         catch { resolve(""); }
       };
       if (typeof GM_cookie === "undefined" || !GM_cookie.list) return fallback();
@@ -235,25 +236,202 @@
 
   // ---------- Tessera API ----------
 
-  function api(method, path, body) {
-    const { server, key } = settings();
-    if (!server || !key) return Promise.reject(new Error("请先在设置中填写 Tessera 地址和访问密钥"));
+  const stoppedError = () => new DOMException("已停止", "AbortError");
+
+  /** 同时收束完成、超时与取消；关闭面板不取消请求，只有显式停止才中止。 */
+  function gmRequest(details, signal, maxBytes) {
+    if (signal?.aborted) return Promise.reject(stoppedError());
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method, url: server.replace(/\/+$/, "") + path, anonymous: true, timeout: 180000,
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        data: body === undefined ? undefined : JSON.stringify(body),
-        onload: response => {
-          let data = null;
-          try { data = response.responseText ? JSON.parse(response.responseText) : null; } catch { /* 非 JSON */ }
-          if (response.status >= 200 && response.status < 300) return resolve(data);
-          const message = data && data.error && data.error.message;
-          reject(new Error(message || `Tessera 返回 HTTP ${response.status}`));
-        },
-        onerror: () => reject(new Error("无法连接 Tessera，请检查地址，并在 Tampermonkey 提示时允许访问该域名")),
-        ontimeout: () => reject(new Error("请求 Tessera 超时")),
-      });
+      let request, timer, settled = false;
+      const finish = (error, response) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        error ? reject(error) : resolve(response);
+      };
+      const abort = () => { finish(stoppedError()); request?.abort(); };
+      const limit = response => {
+        if (!maxBytes) return false;
+        const length = Number((response.responseHeaders || "").match(/^content-length:\s*(\d+)/im)?.[1]) || response.total || 0;
+        if (length <= maxBytes && (response.loaded || 0) <= maxBytes) return false;
+        finish(new Error("资源超过浏览器上传的 64 MiB 上限，请使用服务器下载或先保存到本地"));
+        request?.abort();
+        return true;
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (details.timeout) timer = setTimeout(() => {
+        finish(new Error(details.timeoutMessage || "浏览器请求超时"));
+        request?.abort();
+      }, details.timeout);
+      try {
+        request = GM_xmlhttpRequest({ ...details,
+          onreadystatechange: response => { limit(response); },
+          onprogress: response => { if (!settled && !limit(response)) details.onprogress?.(response); },
+          upload: details.upload ? { onprogress: response => { if (!settled) details.upload.onprogress?.(response); } } : undefined,
+          onload: response => { if (!limit(response)) finish(null, response); },
+          onabort: () => finish(stoppedError()),
+          onerror: () => finish(new Error(details.errorMessage || "浏览器请求失败")),
+          ontimeout: () => finish(new Error(details.timeoutMessage || "浏览器请求超时")),
+        });
+      } catch (error) { finish(error); }
     });
+  }
+
+  async function api(method, path, body, { config = settings(), signal, contentType = "application/json", binary = false, onprogress,
+    timeout = method === "PUT" ? 600000 : 180000 } = {}) {
+    const { server, key } = config;
+    if (!server || !key) return Promise.reject(new Error("请先在设置中填写 Tessera 地址和访问密钥"));
+    const response = await gmRequest({
+      method, url: server.replace(/\/+$/, "") + path, anonymous: true, timeout,
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": contentType },
+      data: body === undefined ? undefined : binary ? body : JSON.stringify(body),
+      upload: onprogress ? { onprogress } : undefined,
+      errorMessage: "无法连接 Tessera，请检查地址，并在 Tampermonkey 提示时允许访问该域名",
+      timeoutMessage: "请求 Tessera 超时",
+    }, signal);
+    let data = null;
+    try { data = response.responseText ? JSON.parse(response.responseText) : null; } catch { /* 非 JSON */ }
+    if (response.status >= 200 && response.status < 300) return data;
+    throw new Error(data?.error?.message || `Tessera 返回 HTTP ${response.status}`);
+  }
+
+  // ---------- 浏览器下载 ----------
+
+  const BROWSER_MAX_BYTES = 64 * 1024 * 1024;
+  const BROWSER_EXTENSIONS = { "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+    "image/avif": ".avif", "image/heic": ".heic", "image/heif": ".heif", "image/bmp": ".bmp", "image/svg+xml": ".svg",
+    "image/tiff": ".tiff", "image/x-icon": ".ico", "image/jxl": ".jxl", "image/jp2": ".jp2",
+    "video/mp4": ".mp4", "video/webm": ".webm", "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "application/pdf": ".pdf" };
+  const browserEligible = item => item.type !== "stream" && !/\.(?:m3u8|mpd)(?:[?#]|$)/i.test(item.url);
+  const sourceHeader = (headers, name) => (headers || "").match(new RegExp(`^${name}:\\s*(.*)$`, "im"))?.[1].trim() || "";
+  const sourceError = (status, pageStatus, extension = false) => new Error(status === 401 || status === 403
+    ? `${pageStatus ? `网页请求 HTTP ${pageStatus}，` : ""}来源拒绝${extension ? "扩展" : "网页"}请求（HTTP ${status}）。直接打开图片与脚本读取的权限可能不同；请先打开原图确认，仍失败时手动保存后上传`
+    : `${extension ? "扩展" : "网页"}下载失败（HTTP ${status}）`);
+
+  async function validateBrowserFile(blob, type, contentType, mitigated) {
+    if (!blob || typeof blob.slice !== "function" || !blob.size) throw new Error("来源未返回文件内容");
+    if (blob.size > BROWSER_MAX_BYTES) throw new Error("资源超过浏览器上传的 64 MiB 上限，请使用服务器下载或先保存到本地");
+    const mime = (contentType || blob.type || "").split(";", 1)[0].trim().toLowerCase();
+    const prefix = await blob.slice(0, 1024).text();
+    if (mitigated === "challenge" || /(?:text\/html|application\/xhtml\+xml)/.test(mime)
+      || /^\s*(?:<!doctype\s+html|<html\b|<head\b|<body\b)/i.test(prefix)
+      || /<title>\s*(?:Just a moment|Attention Required)[\s!|]/i.test(prefix)) {
+      throw new Error("来源返回了登录、验证或拦截页面，未上传；请先在网页中完成验证后重试");
+    }
+    if (/mpegurl|dash\+xml/i.test(mime) || /^\s*#EXTM3U\b/.test(prefix)) throw new Error("流媒体列表请使用服务器下载");
+    const bytes = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
+    const ascii = (start, end) => String.fromCharCode(...bytes.slice(start, end));
+    const detected = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff ? "image/jpeg"
+      : ascii(0, 8) === "\x89PNG\r\n\x1a\n" ? "image/png"
+      : /^GIF8[79]a$/.test(ascii(0, 6)) ? "image/gif"
+      : ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP" ? "image/webp"
+      : ascii(0, 2) === "BM" ? "image/bmp"
+      : ["II*\x00", "MM\x00*"].includes(ascii(0, 4)) ? "image/tiff"
+      : ascii(0, 4) === "\x00\x00\x01\x00" ? "image/x-icon"
+      : bytes[0] === 0xff && bytes[1] === 0x0a || ascii(4, 12) === "JXL \r\n\x87\n" ? "image/jxl"
+      : ascii(4, 12) === "jP  \r\n\x87\n" ? "image/jp2"
+      : ascii(4, 8) === "ftyp" && /avif|avis/.test(ascii(8, 12)) ? "image/avif"
+      : ascii(4, 8) === "ftyp" && /heic|heix|hevc|hevx|mif1|msf1/.test(ascii(8, 12)) ? mime.startsWith("image/") ? mime : "image/heif"
+      : /^\s*(?:<\?xml[^>]*>\s*)?(?:<!--[\s\S]*?-->\s*)*<svg[\s>]/i.test(prefix) ? "image/svg+xml" : "";
+    if (type === "image" && !detected) throw new Error("来源没有返回可识别的图片，未上传；请确认原图可以正常打开");
+    return detected || mime || "application/octet-stream";
+  }
+
+  /** 图片优先尝试浏览器缓存；网页读取失败或返回 403 时，用扩展上下文与来源 Cookie 再请求一次。 */
+  async function browserDownload(url, type, { signal, cookies, onprogress }) {
+    if (!/^https?:\/\//i.test(url) || !browserEligible({ url, type })) throw new Error("浏览器上传只支持 HTTP(S) 文件直链，流媒体和平台视频请使用服务器下载");
+    if (signal.aborted) throw stoppedError();
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 180000);
+    try {
+      const extensionDownload = async pageStatus => {
+        if (controller.signal.aborted) throw stoppedError();
+        const cookie = cookies ? await cookieHeader(url) : "";
+        const source = await gmRequest({ method: "GET", url, responseType: "blob", timeout: 180000,
+          anonymous: !cookies, cookie: cookie || undefined,
+          headers: { "User-Agent": navigator.userAgent, Referer: referer() },
+          onprogress: event => onprogress(event.loaded || 0, event.lengthComputable ? event.total : null),
+          errorMessage: "浏览器无法读取资源，请允许 Tampermonkey 访问来源域名，或手动保存后上传",
+          timeoutMessage: "浏览器下载超时，请重试",
+        }, controller.signal, BROWSER_MAX_BYTES);
+        if (source.status < 200 || source.status >= 300) throw sourceError(source.status, pageStatus, true);
+        const mime = await validateBrowserFile(source.response, type, sourceHeader(source.responseHeaders, "content-type"), sourceHeader(source.responseHeaders, "cf-mitigated"));
+        return { blob: source.response, mime };
+      };
+      let response;
+      try { response = await page.fetch(url, { credentials: cookies ? "include" : "omit", signal: controller.signal,
+        ...(type === "image" ? { cache: "force-cache" } : {}) }); }
+      catch {
+        if (controller.signal.aborted) throw stoppedError();
+        return await extensionDownload();
+      }
+      if (response.status === 403) { await response.body?.cancel(); return await extensionDownload(403); }
+      if (!response.ok) { await response.body?.cancel(); throw sourceError(response.status); }
+      const total = Number(response.headers.get("content-length")) || null;
+      if (total > BROWSER_MAX_BYTES) { await response.body?.cancel(); throw new Error("资源超过浏览器上传的 64 MiB 上限，请使用服务器下载或先保存到本地"); }
+      if (!response.body) throw new Error("浏览器无法读取文件内容，请使用最新版浏览器和 Tampermonkey");
+      const reader = response.body.getReader();
+      const chunks = [];
+      let received = 0, complete = false;
+      try {
+        while (true) {
+          if (controller.signal.aborted) throw stoppedError();
+          const { done, value } = await reader.read();
+          if (done) { complete = true; break; }
+          received += value.byteLength;
+          if (received > BROWSER_MAX_BYTES) throw new Error("资源超过浏览器上传的 64 MiB 上限，请使用服务器下载或先保存到本地");
+          chunks.push(value);
+          onprogress(received, total);
+        }
+      } finally {
+        if (!complete) await reader.cancel().catch(() => {});
+        reader.releaseLock();
+      }
+      const blob = new Blob(chunks, { type: response.headers.get("content-type") || "" });
+      const mime = await validateBrowserFile(blob, type, response.headers.get("content-type"), response.headers.get("cf-mitigated"));
+      return { blob, mime };
+    } catch (error) {
+      if (timedOut) throw new Error("浏览器下载超时，请重试");
+      if (signal.aborted) throw stoppedError();
+      throw error.name === "TypeError" ? new Error("浏览器读取资源时连接中断，请重试") : error;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+    }
+  }
+
+  function defaultSaveName(url) {
+    let name = fileName(url).replace(/[\\/\x00-\x1f\x7f]/g, "_").trim().replace(/^\.+|\.+$/g, "").normalize("NFC") || "file";
+    if (name === ".tgdrive") name = "file";
+    while (new TextEncoder().encode(name).length > 220) name = [...name].slice(0, -1).join("");
+    return name;
+  }
+
+  function saveNameProblem(value) {
+    const name = String(value || "").trim().normalize("NFC");
+    if (!name) return "请填写保存文件名";
+    if (/[\\/\x00-\x1f\x7f]/.test(value)) return "文件名不能包含路径或控制字符";
+    if ([".", "..", ".tgdrive"].includes(name) || name.endsWith(".")) return "请填写有效文件名，不能使用保留名称或以点号结尾";
+    if (new TextEncoder().encode(name).length > 220) return "文件名不能超过 220 字节，请缩短名称";
+    return "";
+  }
+
+  function uploadSaveName(entry, mime) {
+    let name = (entry.name ?? defaultSaveName(entry.url)).trim().normalize("NFC");
+    if (!/\.[^.\s]+$/.test(name)) name += BROWSER_EXTENSIONS[mime] || "";
+    const problem = saveNameProblem(name);
+    if (problem) throw new Error(problem);
+    return name;
+  }
+
+  /** PUT 先写入自己的临时名，再以 skip 移到确认名，目录事务保证同名文件不会被覆盖。 */
+  function browserTemporaryName() {
+    const suffix = [...crypto.getRandomValues(new Uint32Array(2))].map(value => value.toString(16).padStart(8, "0")).join("");
+    return `.tessera-upload-${suffix}`;
   }
 
   // ---------- 界面 ----------
@@ -263,8 +441,9 @@
     * { box-sizing: border-box; margin: 0; }
     [hidden] { display: none !important; }
     .root {
-      --bg: #ffffff; --fg: #18181b; --muted: #71717a; --faint: #a1a1aa; --line: #ececef; --soft: #f4f4f5; --hover: #f6f6f7;
+      --bg: #ffffff; --fg: #18181b; --muted: #71717a; --faint: #a1a1aa; --line: #ececef; --line-strong: #d4d4db; --soft: #f4f4f5; --hover: #f6f6f7;
       --accent: #2f4bd0; --accent-hover: #2840b4; --accent-soft: rgba(47, 75, 208, .09); --danger: #d14343; --success: #16834f;
+      --text-md: 14px; --text-lg: 16px; --radius-lg: 10px; --radius-xl: 12px; --radius-panel: 16px;
       --shadow: 0 1px 2px rgba(0,0,0,.04), 0 12px 32px rgba(15, 18, 40, .14);
       --logo-bg: #0b0c13; --logo-tile: #fff; --logo-ring: transparent; --logo-plane: #f0a22e; --logo-fold: #c27a10;
       font: 13px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
@@ -272,7 +451,7 @@
     }
     @media (prefers-color-scheme: dark) {
       .root {
-        --bg: #1c1c1f; --fg: #f4f4f5; --muted: #a1a1aa; --faint: #71717a; --line: #2e2e33; --soft: #27272b; --hover: #26262a;
+        --bg: #1c1c1f; --fg: #f4f4f5; --muted: #a1a1aa; --faint: #71717a; --line: #2e2e33; --line-strong: #484850; --soft: #27272b; --hover: #26262a;
         --accent: #7d92ff; --accent-hover: #93a5ff; --accent-soft: rgba(125, 146, 255, .14); --danger: #ff7a7a; --success: #4ade80;
         --shadow: 0 1px 2px rgba(0,0,0,.3), 0 16px 40px rgba(0,0,0,.45);
         --logo-ring: rgba(255, 255, 255, .16);
@@ -296,18 +475,21 @@
       box-shadow: 0 0 0 2px var(--bg); }
 
     /* 面板 */
-    .panel { position: fixed; width: min(380px, calc(100vw - 24px)); display: flex; flex-direction: column; overflow: hidden;
-      background: var(--bg); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+    .panel { position: fixed; width: 600px; max-width: calc(100% - 24px); display: flex; flex-direction: column; overflow: hidden;
+      background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-panel); box-shadow: var(--shadow);
       pointer-events: auto; z-index: 2147483647; animation: rise .16s ease-out; }
+    .panel.batch-panel { width: 680px; }
     /* 只做位移不改透明度：动画被节流或暂停时面板仍然完整可见 */
     @keyframes rise { from { transform: translateY(6px); } }
-    header { display: flex; align-items: center; gap: 8px; height: 52px; padding: 0 10px 0 16px; border-bottom: 1px solid var(--line); flex: none; }
-    header .title { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    header { display: flex; align-items: center; gap: 10px; height: 56px; padding: 0 16px 0 24px; border-bottom: 1px solid var(--line); flex: none; }
+    header .title { flex: 1; min-width: 0; font-size: var(--text-lg); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     header .back { margin-left: -6px; }
-    .body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px; display: grid; gap: 20px; align-content: start;
+    .body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 24px; display: grid; gap: 20px; align-content: start;
       grid-template-columns: minmax(0, 1fr); }
-    footer { flex: none; display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+    footer { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 24px; border-top: 1px solid var(--line); }
     footer .spacer { flex: 1; }
+    .footer-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    @media (max-width: 420px) { .footer-actions { flex-basis: 100%; justify-content: flex-end; } }
     footer .site { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 12px; }
     footer .site span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -404,7 +586,39 @@
     .state.ok { color: var(--success); }
     .state.err { color: var(--danger); white-space: normal; overflow-wrap: anywhere; }
     .state.run { color: var(--accent); }
-    .batch-item .meta { gap: 4px; }
+    .batch-host { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr); }
+    .batch-options { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: end; }
+    .batch-options .segmented { padding: 3px; border-radius: var(--radius-lg); }
+    .batch-options .segmented button { display: flex; align-items: center; justify-content: center; gap: 6px; height: 38px; }
+    .batch-options .dest { min-height: 68px; }
+    .batch-list { margin: 0; gap: 10px; }
+    .batch-item { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 10px 12px; padding: 14px 16px;
+      border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--bg); }
+    .batch-item:hover { background: var(--bg); border-color: var(--line-strong); }
+    .batch-item:focus-within { border-color: var(--accent); }
+    .batch-item > .tile { grid-column: 1; grid-row: 1; }
+    .batch-item > .meta { grid-column: 2; grid-row: 1; gap: 2px; align-self: center; }
+    .batch-item > .item-actions { grid-column: 3; grid-row: 1; align-self: center; }
+    .batch-item > .name-edit, .batch-item > .state, .batch-item > .progress { grid-column: 1 / -1; }
+    .batch-item > .state { white-space: normal; overflow-wrap: anywhere; }
+    .name-edit { gap: 6px; }
+    .name-edit input[type=text] { min-width: 0; height: 42px; padding: 0 12px; border-color: var(--line-strong);
+      border-radius: var(--radius-lg); font-size: var(--text-md); transition: border-color .15s, box-shadow .15s; }
+    .name-edit input[type=text]:hover:not(:disabled) { border-color: var(--muted); }
+    .name-edit input[type=text]:focus { border-color: var(--accent); }
+    .name-edit input[type=text][aria-invalid=true] { border-color: var(--danger); }
+    .name-edit input[type=text][aria-invalid=true]:focus { box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 12%, transparent); }
+    .batch-note { display: flex; align-items: flex-start; gap: 8px; }
+    .batch-note > svg { margin-top: 2px; }
+    @media (max-width: 560px) {
+      header { padding-left: 16px; padding-right: 12px; }
+      .body { padding: 16px; }
+      footer { padding: 12px 16px; }
+      .batch-options { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+      .batch-options .dest { min-height: 0; }
+      .batch-item { padding: 12px; }
+      .name-edit input[type=text] { font-size: var(--text-lg); }
+    }
 
     /* 表单 */
     .field { display: grid; gap: 6px; }
@@ -495,6 +709,7 @@
     loader: ["M21 12a9 9 0 1 1-6.22-8.56"],
     alert: [["circle", { cx: 12, cy: 12, r: 10 }], "M12 8v4", "M12 16h.01"],
     download: ["M12 3v12", "m7 10 5 5 5-5", "M5 21h14"],
+    upload: ["M12 16V3", "m7 8 5-5 5 5", "M5 21h14"],
     globe: [["circle", { cx: 12, cy: 12, r: 10 }], "M2 12h20", "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"],
     x: ["M4 4l16 16", "M20 4 4 20"],
     youtube: [["rect", { x: 2, y: 5, width: 20, height: 14, rx: 4 }], "m10 9 5 3-5 3z"],
@@ -637,16 +852,16 @@
     const fabRect = fab && fab.style.display !== "none" ? fab.getBoundingClientRect() : null;
     const left = fabRect ? fabRect.left + FAB / 2 < innerWidth / 2 : false;
     Object.assign(panel.style, { left: "", right: "", top: "", bottom: "" });
-    panel.style[left ? "left" : "right"] = `${Math.max(12, EDGE)}px`;
+    panel.style[left ? "left" : "right"] = "12px";
     if (!fabRect) {
       panel.style.bottom = "20px";
-      panel.style.maxHeight = `${Math.min(640, innerHeight - 40)}px`;
+      panel.style.maxHeight = `${Math.min(760, innerHeight - 40)}px`;
     } else if (fabRect.top + FAB / 2 > innerHeight / 2) {
       panel.style.bottom = `${innerHeight - fabRect.top + 12}px`;
-      panel.style.maxHeight = `${Math.min(640, fabRect.top - 24)}px`;
+      panel.style.maxHeight = `${Math.min(760, fabRect.top - 24)}px`;
     } else {
       panel.style.top = `${fabRect.bottom + 12}px`;
-      panel.style.maxHeight = `${Math.min(640, innerHeight - fabRect.bottom - 24)}px`;
+      panel.style.maxHeight = `${Math.min(760, innerHeight - fabRect.bottom - 24)}px`;
     }
   }
 
@@ -700,14 +915,14 @@
   }
 
   /** 面板骨架：标题栏 + 可滚动内容 + 可选的底部操作栏。 */
-  function frame(title, body, { back, footer } = {}) {
+  function frame(title, body, { back, footer, wide = false } = {}) {
     close();
     const header = h("header", {},
       back ? iconButton("back", "返回", back, "back") : logo(20),
       h("span", { className: "title" }, title),
       back ? null : iconButton("settings", "设置", () => openSettings(() => open(currentContext))),
       iconButton("close", "关闭", close));
-    panel = h("div", { className: "panel", role: "dialog", "aria-label": title }, header, h("div", { className: "body" }, body),
+    panel = h("div", { className: `panel${wide ? " batch-panel" : ""}`, role: "dialog", "aria-label": title }, header, h("div", { className: "body" }, body),
       footer ? h("footer", {}, footer) : null);
     panel.back = back;
     panel.addEventListener("pointerdown", () => { pointerDown = true; });
@@ -752,12 +967,16 @@
     const footer = panel && panel.dataset.view === "main" && panel.querySelector("footer");
     if (!footer) return;
     if (selected.size) {
+      const canUpload = collect().filter(item => selected.has(item.url)).every(browserEligible);
       footer.hidden = false;
       footer.replaceChildren(
         h("span", { className: "selection" }, `已选 ${selected.size} 项`),
         h("button", { type: "button", className: "text-btn", onclick: () => { selected.clear(); renderList(); } }, "清除"),
         h("span", { className: "spacer" }),
-        h("button", { type: "button", className: "btn primary", onclick: () => startBatch([...selected]) }, svg("send"), `发送 ${selected.size} 项`));
+        h("div", { className: "footer-actions" }, h("button", { type: "button", className: "btn", disabled: !canUpload,
+          title: canUpload ? "在当前浏览器下载，再上传到 Tessera" : "流媒体列表请使用服务器下载",
+          onclick: () => startBatch([...selected], "browser") }, svg("upload"), "浏览器上传"),
+        h("button", { type: "button", className: "btn primary", onclick: () => startBatch([...selected]) }, svg("send"), `发送 ${selected.size} 项`)));
       return;
     }
     footer.hidden = onTessera();
@@ -919,6 +1138,7 @@
       h("div", { className: "item-actions" },
         iconButton("link", "复制链接", () => copy(item.url, "已复制链接")),
         iconButton("terminal", "复制 curl 命令", async () => copy(await curlFor(item.url), "已复制 curl 命令")),
+        browserEligible(item) ? iconButton("upload", "浏览器下载并上传", () => startBatch([item.url], "browser")) : null,
         iconButton("send", "发送到 Tessera", () => send(item.url, null), "accent")));
     return node;
   }
@@ -976,10 +1196,10 @@
   const destinationSub = dest => dest.private ? "发送后在 Tessera 页面解锁并确认" : "保存位置";
 
   /** 保存位置摘要行；点击「更改」在当前面板上打开目录选择层。get/set 由调用方保存状态。 */
-  function destinationRow(get, set) {
+  function destinationRow(get, set, allowPrivate = true) {
     const name = h("div", { className: "name" }), sub = h("div", { className: "label" }), tile = h("span", { className: "tile" });
     const row = h("div", { className: "dest" }, tile, h("div", { className: "meta" }, sub, name),
-      h("button", { type: "button", className: "btn ghost", onclick: () => openPicker(get(), dest => { set(dest); update(); }) }, "更改"));
+      h("button", { type: "button", className: "btn ghost", onclick: () => openPicker(get(), dest => { set(dest); update(); }, allowPrivate) }, "更改"));
     function update() {
       const dest = get();
       row.className = `dest${dest.private ? " private" : ""}`;
@@ -993,10 +1213,10 @@
   }
 
   /** 目录选择层：逐级浏览（GET /api/v1/folders）、新建文件夹（POST /api/v1/folders）或选择私密空间。 */
-  function openPicker(initial, onPick) {
+  function openPicker(initial, onPick, allowPrivate = true) {
     if (!panel) return;
     panel.layer?.close();
-    let mode = initial.private ? "private" : "files";
+    let mode = initial.private && allowPrivate ? "private" : "files";
     let prefix = initial.private ? "" : initial.path;
     let state = { folders: [], next: null, writable: true, loading: true, error: "" };
     let request = 0;
@@ -1035,6 +1255,7 @@
 
     function render() {
       const seg = (value, label) => h("button", { type: "button", role: "radio", "aria-checked": String(mode === value),
+        disabled: value === "private" && !allowPrivate, title: value === "private" && !allowPrivate ? "浏览器上传仅支持我的文件" : null,
         onclick: () => { if (mode !== value) { mode = value; render(); } } }, label);
       const parts = [h("div", { className: "segmented", role: "radiogroup", "aria-label": "目标空间" }, seg("files", "我的文件"), seg("private", "私密空间"))];
       if (mode === "private") {
@@ -1176,13 +1397,13 @@
 
   /**
    * 批次在页面内存中保存：关闭面板后继续解析、创建任务并轮询进度，重新打开时主面板顶部显示入口。
-   * entry.state：waiting → parsing → creating → submitted（之后看 entry.tasks 的服务端状态）或 error。
+   * 离线：waiting → parsing → creating → submitted；浏览器：waiting → downloading → uploading → completed。
    */
   let batch = null;
   const TERMINAL = ["completed", "failed", "stopped"];
   const PHASE = { resolving: "解析媒体…", downloading: "下载中", merging: "合并中…", saving: "保存中…" };
 
-  function startBatch(urls) {
+  function startBatch(urls, mode = "offline") {
     if (!settings().server || !settings().key) {
       toast("请先填写 Tessera 地址和访问密钥");
       return openSettings(() => open(currentContext));
@@ -1193,28 +1414,88 @@
     const known = new Map(listed.map(item => [item.url, item]));
     const wanted = new Set(urls);
     const ordered = [...listed.map(item => item.url).filter(url => wanted.has(url)), ...urls.filter(url => !known.has(url))];
-    batch = { started: false, destination: savedDestination(),
-      entries: ordered.slice(0, BATCH_LIMIT).map(url => ({ url, type: known.get(url)?.type || "file", state: "waiting", error: "", tasks: [] })) };
+    const dest = savedDestination();
+    batch = { started: false, mode, destination: mode === "browser" && dest.private ? { path: "", private: false } : dest,
+      entries: ordered.slice(0, BATCH_LIMIT).map(url => ({ url, name: defaultSaveName(url), type: known.get(url)?.type || "file", state: "waiting", error: "", tasks: [] })) };
     openBatch();
   }
 
-  const entryActive = entry => ["parsing", "creating"].includes(entry.state)
+  function batchNameProblems(current) {
+    const problems = new Map(), seen = new Map();
+    if (current.mode !== "browser") return problems;
+    for (const entry of current.entries) {
+      const problem = saveNameProblem(entry.name);
+      if (problem) { problems.set(entry, problem); continue; }
+      const name = entry.name.trim().normalize("NFC");
+      if (seen.has(name)) {
+        problems.set(entry, "本批次保存文件名重复，请修改");
+        problems.set(seen.get(name), "本批次保存文件名重复，请修改");
+      } else seen.set(name, entry);
+    }
+    return problems;
+  }
+
+  function syncBatchNames() {
+    if (!batch) return;
+    const problems = batchNameProblems(batch);
+    for (const entry of batch.entries) {
+      if (!entry.row) continue;
+      const problem = problems.get(entry) || "";
+      entry.row.nameError.textContent = problem;
+      entry.row.nameError.hidden = !problem;
+      entry.row.nameInput.setAttribute("aria-invalid", String(Boolean(problem)));
+      const retry = entry.row.action.querySelector("button");
+      if (retry) retry.disabled = batch.running || Boolean(problem);
+    }
+    if (batch.nameSubmit) batch.nameSubmit.disabled = problems.size > 0;
+    const retryAll = panel?.querySelector("[data-retry-failed]");
+    if (retryAll) retryAll.disabled = batch.running || problems.size > 0;
+  }
+
+  const entryActive = entry => ["parsing", "creating", "downloading", "uploading", "saving"].includes(entry.state)
     || entry.state === "waiting" && batch.started
     || entry.state === "submitted" && entry.tasks.some(task => !TERMINAL.includes(task.status));
-  const entryOk = entry => entry.state === "handoff" || entry.state === "submitted" && entry.tasks.length > 0 && entry.tasks.every(task => task.status === "completed");
-  const entryFailed = entry => entry.state === "error" || entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped");
+  const entryOk = entry => entry.state === "completed" || entry.state === "handoff" || entry.state === "submitted" && entry.tasks.length > 0 && entry.tasks.every(task => task.status === "completed");
+  const entryFailed = entry => ["error", "stopped"].includes(entry.state) || entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped");
   const batchDone = () => !batch || batch.started && !batch.entries.some(entryActive);
 
   async function runBatch() {
+    if (batch.running) return;
+    if (batch.mode === "browser" && batch.destination.private) return toast("浏览器上传仅支持我的文件，请更改保存位置");
+    for (const entry of batch.entries) entry.name ??= defaultSaveName(entry.url);
+    const problem = batchNameProblems(batch).values().next().value;
+    if (problem) return toast(problem);
     batch.started = true;
+    batch.running = true;
+    batch.controller = new AbortController();
+    if (batch.mode === "browser") batch.config ||= settings();
     selected.clear();
     rememberDestination(batch.destination);
     const current = batch;
     const queue = current.entries.filter(entry => entry.state === "waiting");
-    // 服务端同时最多解析 2 个，这里同样两路并行，避免请求排队超时。
-    const worker = async () => { while (queue.length && batch === current) await sendEntry(queue.shift()); };
     updateBatch();
-    await Promise.all([worker(), worker()]);
+    if (current.mode === "browser") {
+      try {
+        const folder = await api("GET", `/api/v1/folders?prefix=${encodeURIComponent(current.destination.path)}&limit=1`, undefined,
+          { config: current.config, signal: current.controller.signal });
+        if (!folder?.writable) throw new Error("访问密钥不能写入所选目录，请更改保存位置或密钥授权");
+      } catch (error) {
+        for (const entry of queue) { entry.state = error.name === "AbortError" ? "stopped" : "error"; entry.error = error.message; }
+        current.running = false;
+        updateBatch();
+        return;
+      }
+    }
+    // 服务端同时最多解析 2 个，这里同样两路并行，避免请求排队超时。
+    const worker = async () => {
+      while (queue.length && batch === current && !current.controller.signal.aborted) {
+        const entry = queue.shift();
+        await (current.mode === "browser" ? uploadEntry(entry, current) : sendEntry(entry));
+      }
+    };
+    updateBatch();
+    await Promise.all(current.mode === "browser" ? [worker()] : [worker(), worker()]);
+    current.running = false;
     // 私密空间：全部解析完后一次性转交 Tessera 页面确认；重试成功的条目再单独转交。
     if (batch === current && current.destination.private) {
       const fresh = current.entries.filter(entry => entry.state === "handoff" && !entry.delivered);
@@ -1225,6 +1506,55 @@
       }
       updateBatch();
     }
+    if (batch === current) updateBatch();
+  }
+
+  async function uploadEntry(entry, current) {
+    entry.state = "downloading"; entry.error = ""; entry.received = 0; entry.total = null; entry.uploaded = 0;
+    updateBatch();
+    const signal = current.controller.signal;
+    let staged = false;
+    try {
+      const { blob, mime } = await browserDownload(entry.url, entry.type, { signal, cookies: current.config.cookies,
+        onprogress: (received, total) => { entry.received = received; entry.total = total; updateBatch(); } });
+      if (signal.aborted) throw stoppedError();
+      entry.size = blob.size;
+      entry.path ||= current.destination.path + uploadSaveName(entry, mime);
+      entry.stagePath ||= current.destination.path + browserTemporaryName();
+      entry.state = "uploading";
+      updateBatch();
+      staged = true;
+      const result = await api("PUT", `/api/v1/files?path=${encodeURIComponent(entry.stagePath)}`, blob,
+        { config: current.config, signal, contentType: mime, binary: true,
+          onprogress: event => { entry.uploaded = event.loaded || 0; updateBatch(); } });
+      if (result?.key !== entry.stagePath || result.size !== blob.size) throw new Error("Tessera 未确认文件保存成功，请检查保存目录后重试");
+      entry.state = "saving";
+      updateBatch();
+      const moved = await api("POST", "/api/v1/move", { from: entry.stagePath, to: entry.path, conflict: "skip" }, { config: current.config, signal });
+      if (moved?.skipped) throw new Error("保存目录已有同名文件，已保留原文件；请修改保存文件名后重试");
+      if (moved?.moved !== 1) throw new Error("Tessera 未确认保存文件名，请检查保存目录后重试");
+      entry.state = "completed";
+      markSent([entry.url]);
+    } catch (error) {
+      let cleanupFailed = false;
+      if (staged) {
+        try {
+          const removed = await api("POST", "/api/v1/delete", { paths: [entry.stagePath] }, { config: current.config, timeout: 10000 });
+          if (!removed?.results?.some(item => item.path === entry.stagePath)) cleanupFailed = true;
+        } catch { cleanupFailed = true; }
+      }
+      entry.state = error.name === "AbortError" ? "stopped" : "error";
+      entry.error = error.message + (cleanupFailed ? `；未完成的上传清理失败，请检查 ${entry.stagePath}` : "");
+      markSent([entry.url], false);
+    }
+    updateBatch();
+  }
+
+  function stopBrowserBatch() {
+    if (!batch || batch.mode !== "browser") return;
+    batch.controller.abort();
+    for (const entry of batch.entries) if (entry.state === "waiting") { entry.state = "stopped"; entry.error = "已停止"; }
+    updateBatch();
   }
 
   async function sendEntry(entry) {
@@ -1262,6 +1592,9 @@
   }
 
   function retryEntries(entries) {
+    if (batch.running) return toast("请等待当前批次完成或停止后再重试");
+    const problem = batchNameProblems(batch).values().next().value;
+    if (problem) return toast(problem);
     for (const entry of entries) { entry.state = "waiting"; entry.error = ""; entry.tasks = []; }
     void runBatch();
   }
@@ -1313,16 +1646,17 @@
       target.replaceChildren(button);
     }
     const { total, ok, failed, finished } = batchSummary();
+    const label = batch.mode === "browser" ? "浏览器上传" : "批量发送";
     button.querySelector(".name").textContent = finished
-      ? `批量发送已结束 · 成功 ${ok}${failed ? `，失败 ${failed}` : ""}` : `正在批量发送 · 已完成 ${ok} / ${total}`;
+      ? `${label}已结束 · 成功 ${ok}${failed ? `，失败 ${failed}` : ""}` : `正在${label} · 已完成 ${ok} / ${total}`;
     button.querySelector(".progress").className = `progress${finished && !failed ? " done" : ""}`;
     button.querySelector(".progress > span").style.width = `${total ? (ok + failed) / total * 100 : 0}%`;
   }
 
   function openBatch() {
     if (!batch) return open(currentContext);
-    frame("批量发送", h("div", { className: "batch-host", style: "display:grid;gap:16px;grid-template-columns:minmax(0,1fr)" }),
-      { back: () => open(currentContext), footer: [] });
+    frame(batch.mode === "browser" ? "浏览器下载并上传" : "批量发送", h("div", { className: "batch-host" }),
+      { back: () => open(currentContext), footer: [], wide: true });
     panel.dataset.view = "batch";
     renderBatch();
   }
@@ -1333,6 +1667,16 @@
     if (entry.state === "parsing") return { text: "解析中…", tone: "run", progress: null };
     if (entry.state === "creating") return { text: "提交任务…", tone: "run", progress: null };
     if (entry.state === "error") return { text: entry.error || "发送失败", tone: "err" };
+    if (entry.state === "stopped") return { text: entry.error || "已停止", tone: "err" };
+    if (entry.state === "saving") return { text: "正在保存文件…", tone: "run", progress: null };
+    if (entry.state === "completed") return { text: `已上传 · ${formatSize(entry.size)} · ${entry.path}`, tone: "ok", progress: 1 };
+    if (entry.state === "downloading" || entry.state === "uploading") {
+      const upload = entry.state === "uploading";
+      const received = upload ? entry.uploaded : entry.received;
+      const total = upload ? entry.size : entry.total;
+      const progress = total ? Math.min(1, received / total) : null;
+      return { text: `${upload ? "上传中" : "浏览器下载中"} · ${progress === null ? formatSize(received) : `${Math.floor(progress * 100)}%`}${upload && progress === 1 ? " · 等待保存确认" : ""}`, tone: "run", progress };
+    }
     if (entry.state === "handoff") return { text: entry.delivered ? "已转交 Tessera 确认" : "已解析，等待转交", tone: "ok" };
     const task = entry.tasks.find(item => !TERMINAL.includes(item.status)) || entry.tasks.find(item => item.status !== "completed") || entry.tasks[0];
     if (!task) return { text: "已提交" };
@@ -1354,22 +1698,36 @@
   }
 
   /** 批次条目的行：每个条目只创建一次，轮询时原地更新状态，保证重试按钮可以点到。 */
+  let nameFieldSequence = 0;
   function batchRow(entry) {
     if (!entry.row) {
       const tile = h("span", { className: "tile" });
       const state = h("div", { className: "state" });
       const bar = h("div", { className: "progress" }, h("span"));
       const action = h("span", { className: "item-actions" });
+      const errorId = `tessera-name-error-${++nameFieldSequence}`;
+      const nameInput = h("input", { type: "text", value: entry.name ?? defaultSaveName(entry.url), "aria-label": `保存文件名：${fileName(entry.url)}`,
+        "aria-describedby": errorId, autocomplete: "off", spellcheck: "false" });
+      const nameError = h("div", { id: errorId, className: "error", hidden: true });
+      const nameField = h("label", { className: "field name-edit" }, h("span", { className: "label" }, "保存文件名"), nameInput, nameError);
+      nameInput.addEventListener("input", () => { entry.name = nameInput.value; entry.path = null; syncBatchNames(); });
+      let domain = "";
+      try { domain = new URL(entry.url).hostname.replace(/^www\./, ""); } catch { /* 忽略无效地址 */ }
       entry.row = { node: h("div", { className: "item batch-item" }, tile,
-        h("div", { className: "meta" }, h("div", { className: "name", title: entry.url }, fileName(entry.url)), state, bar), action),
-        tile, state, bar, action, icon: "", retry: false };
+        h("div", { className: "meta" }, h("div", { className: "name", title: entry.url }, fileName(entry.url)),
+          h("div", { className: "sub", title: domain }, `${TYPE_LABEL[entry.type] || "文件"}${domain ? ` · ${domain}` : ""}`)),
+        action, nameField, state, bar),
+        tile, state, bar, action, nameInput, nameField, nameError, icon: "", retry: false };
     }
     const { tile, state, bar, action } = entry.row;
+    entry.row.nameField.hidden = batch.mode !== "browser" || batch.started && !entryFailed(entry);
+    entry.row.nameInput.disabled = batch.running;
     const status = entryStatus(entry);
     const iconName = entryOk(entry) ? "check" : TYPE_ICON[entry.type] || "file";
     if (entry.row.icon !== iconName) { tile.replaceChildren(svg(iconName, 18)); entry.row.icon = iconName; }
     state.className = `state${status.tone ? " " + status.tone : ""}`;
     state.textContent = status.text;
+    state.hidden = !batch.started;
     bar.hidden = status.progress === undefined || entry.state === "waiting";
     bar.className = `progress${status.progress == null ? " indeterminate" : ""}${status.tone === "ok" ? " done" : ""}`;
     bar.firstChild.style.width = `${(status.progress || 0) * 100}%`;
@@ -1378,6 +1736,8 @@
       action.replaceChildren(...(retry ? [iconButton("retry", "重试", () => retryEntries([entry]))] : []));
       entry.row.retry = retry;
     }
+    const retryButton = action.querySelector("button");
+    if (retryButton) retryButton.disabled = batch.running;
     return entry.row.node;
   }
 
@@ -1386,16 +1746,35 @@
     const footer = panel && panel.querySelector("footer");
     if (!target || !batch) return;
     const rows = batch.entries.map(batchRow);
+    const browser = batch.mode === "browser";
     if (!batch.started) {
+      const chooseMode = (mode, label) => h("button", { type: "button", role: "radio", "aria-checked": String(batch.mode === mode),
+        disabled: mode === "browser" && !batch.entries.every(browserEligible),
+        title: mode === "browser" && !batch.entries.every(browserEligible) ? "流媒体列表请使用服务器下载" : null,
+        onclick: () => {
+          batch.mode = mode;
+          if (mode === "browser" && batch.destination.private) batch.destination = { path: "", private: false };
+          openBatch();
+        } }, svg(mode === "browser" ? "upload" : "download"), label);
       // 发送前确认保存目录；先写回 batch，避免列表刷新时丢失输入。
       target.replaceChildren(
-        destinationRow(() => batch.destination, value => { batch.destination = value; }),
-        h("div", { className: "section" }, h("div", { className: "section-head" }, h("h2", {}, "待发送", h("span", { className: "count" }, String(batch.entries.length)))),
-          h("div", { className: "list" }, rows)),
-        h("p", { className: "hint" }, "每项由服务器解析后自动选择第一个可用格式；需要挑选清晰度的视频请单独发送。保存到私密空间时，全部解析完成后打开 Tessera 页面统一确认。"));
-      footer.replaceChildren(h("span", { className: "spacer" }),
+        h("div", { className: "batch-options" },
+          h("div", { className: "field" }, h("span", { className: "label" }, "传输方式"),
+            h("div", { className: "segmented", role: "radiogroup", "aria-label": "传输方式" }, chooseMode("offline", "服务器下载"), chooseMode("browser", "浏览器上传"))),
+          destinationRow(() => batch.destination, value => { batch.destination = value; }, !browser)),
+        h("div", { className: "section" }, h("div", { className: "section-head" }, h("h2", {}, browser ? "待上传文件" : "待发送资源",
+          h("span", { className: "count" }, String(batch.entries.length)))),
+          browser ? h("p", { className: "hint" }, "可直接修改下方文件名，未填扩展名时自动补上。同名文件会保留。") : null,
+          h("div", { className: "list batch-list" }, rows)),
+        h("p", { className: "hint batch-note" }, svg(browser ? "globe" : "download"), h("span", {}, browser
+          ? "单文件最多 64 MiB，逐项上传到我的文件。请保持网页打开；关闭面板后传输会继续。"
+          : "每项自动选择第一个可用格式；挑选视频清晰度请单独发送。私密文件会转交 Tessera 页面统一确认。")));
+      const submit = h("button", { type: "button", className: "btn primary", onclick: () => void runBatch() }, svg(browser ? "upload" : "send"), `开始${browser ? "上传" : "发送"} ${batch.entries.length} 项`);
+      batch.nameSubmit = submit;
+      footer.replaceChildren(h("span", { className: "selection" }, `${batch.entries.length} 个${browser ? "文件" : "资源"}`), h("span", { className: "spacer" }),
         h("button", { type: "button", className: "btn ghost", onclick: () => { batch = null; open(currentContext); } }, "取消"),
-        h("button", { type: "button", className: "btn primary", onclick: () => void runBatch() }, svg("send"), `开始发送 ${batch.entries.length} 项`));
+        submit);
+      syncBatchNames();
       footer.dataset.mode = "draft";
       return;
     }
@@ -1404,26 +1783,28 @@
     if (!overview || target.querySelector(".dest")) {
       overview = h("div", { className: "overview" },
         h("div", { className: "overview-line" }, h("strong"), h("span", { className: "sub" })), h("div", { className: "progress" }, h("span")));
-      target.replaceChildren(overview, h("div", { className: "list" }, rows));
+      target.replaceChildren(overview, h("div", { className: "list batch-list" }, rows));
     }
-    overview.querySelector("strong").textContent = finished ? "发送结束" : "正在发送";
+    overview.querySelector("strong").textContent = finished ? browser ? "上传结束" : "发送结束" : browser ? "正在浏览器上传" : "正在发送";
     overview.querySelector(".sub").textContent = `${batch.destination.private ? "已转交" : "成功"} ${ok} / ${total}${failed ? ` · 失败 ${failed}` : ""} · ${batch.destination.private ? "私密空间（在 Tessera 中确认）" : `保存到 ${destinationLabel(batch.destination)}`}`;
     overview.querySelector(".progress").className = `progress${finished && !failed ? " done" : ""}`;
     overview.querySelector(".progress > span").style.width = `${total ? (ok + failed) / total * 100 : 0}%`;
     // 底部按钮只在形态变化时重建（运行中／结束、有无失败项），轮询不会替换正在点击的按钮。
     const failedEntries = batch.entries.filter(entry => entryFailed(entry) && !entryActive(entry));
-    const mode = `${finished ? "done" : "run"}:${failedEntries.length > 0}`;
-    if (footer.dataset.mode === mode) return;
+    const mode = `${finished ? "done" : "run"}:${failedEntries.length > 0}:${Boolean(batch.running)}`;
+    if (footer.dataset.mode === mode) { syncBatchNames(); return; }
     footer.dataset.mode = mode;
-    const link = settings().server.replace(/\/+$/, "") + "/?view=downloads";
+    const link = (batch.config || settings()).server.replace(/\/+$/, "") + (browser ? "/?view=files" : "/?view=downloads");
     footer.replaceChildren(...[
-      h("button", { type: "button", className: "btn ghost", onclick: () => GM_openInTab(link, { active: true }) }, "查看下载任务"),
+      h("button", { type: "button", className: "btn ghost", onclick: () => GM_openInTab(link, { active: true }) }, browser ? "查看文件" : "查看下载任务"),
       h("span", { className: "spacer" }),
-      failedEntries.length ? h("button", { type: "button", className: "btn", onclick: () => retryEntries(batch.entries.filter(entry => entryFailed(entry) && !entryActive(entry))) }, "重试失败项") : null,
+      failedEntries.length ? h("button", { type: "button", className: "btn", "data-retry-failed": "", disabled: batch.running, onclick: () => retryEntries(batch.entries.filter(entry => entryFailed(entry) && !entryActive(entry))) }, "重试失败项") : null,
+      browser && !finished ? h("button", { type: "button", className: "btn", onclick: stopBrowserBatch }, "停止") : null,
       finished
         ? h("button", { type: "button", className: "btn primary", onclick: () => { batch = null; open(currentContext); } }, "完成")
         : h("button", { type: "button", className: "btn primary", onclick: close, title: "关闭面板，发送和进度跟踪在后台继续" }, "后台运行"),
     ].filter(Boolean));
+    syncBatchNames();
   }
 
   // ----- 设置 -----
