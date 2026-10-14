@@ -105,6 +105,42 @@ class KeyApiTests(unittest.TestCase):
         self.assertIn("bucket", body["error"]["message"])
         self.assertEqual(self.json_call("GET", f"/api/v1/list?bucket={bob_bucket}", headers=reader)[0], 200)
 
+    def test_offline_downloads_follow_key_owner_and_grants(self):
+        from tests.test_offline import MemoryHttp
+        self.app.offline.http = MemoryHttp()
+        status, body = self.json_call("POST", "/api/v1/downloads/parse", {"input": "https://example.com/a.bin"})
+        self.assertEqual(status, 200, body)
+        ticket = body["candidates"][0]["ticket"]
+        status, body = self.json_call("POST", "/api/v1/downloads", {"items": [{"ticket": ticket, "name": "a.bin"}], "destination": "web"})
+        self.assertEqual((status, body["tasks"][0]["key"]), (201, "web/a.bin"))
+        row = self.app.metadata.db.execute("SELECT user_id, bucket_id FROM offline_tasks").fetchone()
+        self.assertEqual((row["user_id"], row["bucket_id"]), (self.alice.id, self.alice.bucket_id))
+        audit = self.app.metadata.db.execute("SELECT actor_type, actor FROM audit_log WHERE action='download.create'").fetchone()
+        self.assertEqual(tuple(audit), ("key", self.ak))
+        # 前缀授权：省略目录时落到授权前缀，越界或私密目录被拒绝；只读密钥不能解析或创建。
+        cid = self.clients.create_client("grabber", owner_user_id=self.alice.id)
+        ak, secret = self.clients.create_key(cid)
+        self.clients.grant(cid, self.alice.bucket_id, "inbox/", "rw")
+        scoped = self.bearer(ak, secret)
+        status, body = self.json_call("POST", "/api/v1/downloads", {"items": [{"ticket": ticket, "name": "b.bin"}]}, scoped)
+        self.assertEqual((status, body["tasks"][0]["key"]), (201, "inbox/b.bin"))
+        for destination in ("other", ".tgdrive/private/x"):
+            self.assertEqual(self.json_call("POST", "/api/v1/downloads", {"items": [{"ticket": ticket, "name": "c.bin"}], "destination": destination}, scoped)[0], 403)
+        self.assertEqual(self.json_call("POST", "/api/v1/downloads", {"items": [{"ticket": ticket, "name": "../c.bin"}]}, scoped)[0], 400)
+        reader = self.clients.create_client("reader", owner_user_id=self.alice.id)
+        rak, rsecret = self.clients.create_key(reader)
+        self.clients.grant(reader, self.alice.bucket_id, "", "ro")
+        self.assertEqual(self.json_call("POST", "/api/v1/downloads/parse", {"input": "https://example.com/a.bin"}, self.bearer(rak, rsecret))[0], 403)
+        # 不属于用户的密钥、其他用户的票据都不可用。
+        orphan = self.clients.create_client("orphan")
+        oak, osecret = self.clients.create_key(orphan)
+        self.clients.grant(orphan, self.alice.bucket_id, "", "rw")
+        self.assertEqual(self.json_call("POST", "/api/v1/downloads/parse", {"input": "https://example.com/a.bin"}, self.bearer(oak, osecret))[0], 403)
+        bob = self.clients.create_client("bob-cli", owner_user_id=self.bob.id)
+        bak, bsecret = self.clients.create_key(bob)
+        self.clients.grant(bob, self.bob.bucket_id, "", "rw")
+        self.assertEqual(self.json_call("POST", "/api/v1/downloads", {"items": [{"ticket": ticket, "name": "d.bin"}]}, self.bearer(bak, bsecret))[0], 400)
+
 
 if __name__ == "__main__":
     unittest.main()

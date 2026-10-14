@@ -270,8 +270,13 @@ class OfflineDownloads:
             raise ValueError("解析结果已过期或加密口令已变更，请重新解析") from exc
 
     def create(self, user_id: int, items: list, destination: str, *, private_scope: Scope | None = None,
-               private_activity=None) -> list[dict]:
+               private_activity=None, key_scope: Scope | None = None) -> list[dict]:
         regular_scope = self.scope(user_id)
+        if key_scope is not None:
+            # 访问密钥创建的任务只能写入密钥的授权前缀；运行时仍按账号身份校验。
+            if key_scope.bucket_id != regular_scope.bucket_id:
+                raise PermissionError("离线下载只能保存到密钥所属用户的存储桶")
+            regular_scope = replace(regular_scope, prefix=key_scope.prefix, perms=key_scope.perms)
         if not isinstance(items, list) or not 1 <= len(items) <= 32:
             raise ValueError("一次请选择 1–32 个文件")
         if not isinstance(destination, str):

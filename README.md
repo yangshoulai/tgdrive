@@ -63,6 +63,10 @@ M3U8 支持已结束的 H.264／AAC 点播，包括 MPEG-TS、fMP4 初始化分�
 
 YouTube「解析内容」只列举格式，不提前试下载默认媒体。解析失败时区分网页、播放 API 和播放列表；容器日志记录固定请求阶段、状态码与认证头是否存在，不记录 Cookie 或签名地址。服务器解析 403 需要按该阶段检查登录状态、账号权限和出口，不能仅靠切换媒体下载格式判断原因。
 
+### 浏览器脚本
+
+`userscripts/tessera-grabber.user.js` 是一个 Tampermonkey 用户脚本：在 X 帖子操作栏、YouTube 播放页和任意网页右下角加入按钮，列出页面加载过的视频、音频、M3U8、常见文件和大图，可以复制链接或带 User-Agent、Referer、Cookie 的 curl 命令（Cookie 经 `GM_cookie` 读取，包含 HttpOnly），也可以一键发送到 Tessera 离线下载。在 Tampermonkey 中新建脚本并粘贴文件内容即可安装；首次使用在脚本设置中填写 Tessera 地址和网页「访问密钥」页面创建的 `AccessKeyId:Secret`。发送调用 `/api/v1/downloads/parse` 与 `/api/v1/downloads`，任务保存到密钥所属用户的存储桶。
+
 ## 配置
 
 启动参数和同名环境变量都可用；控制台中的系统设置优先于启动时的默认值。
@@ -119,6 +123,7 @@ src/tgdrive/          Python 后端、ASGI 路由、对象服务、S3 与 Telegr
 web/src/               React + TypeScript 用户端、管理端和共享界面
 web/src/docs/          用户文档、管理员文档和文档排版组件
 web/build-apps.mjs     前端离线打包器（产物 web/dist）
+userscripts/           Tampermonkey 资源抓取脚本（复制 curl、发送到离线下载）
 tests/                 unittest 回归测试
 DESIGN.md              视觉规范
 UX-CONTRACT.md         路由与交互契约

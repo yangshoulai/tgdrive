@@ -191,6 +191,8 @@ function DownloadsGuide() {
     <p>解析得到的媒体地址在有效期内直接用于下载，过期或失效时自动重新解析一次。YouTube 支持可用的 HTTPS 和 HLS 格式；直连媒体被拒绝时优先尝试同一清晰度的 HLS，不自动降低清晰度。默认清晰度上限为 2160p，低资源模式不自动下调。单轨媒体直接流式保存并受个人空间配额约束；音视频分离时需要缓存的输入轨受临时缓存预算限制，再合并保存、不转码，合并输出不受该缓存上限限制。任务显示解析、下载、合并和保存阶段；停止后清理中间数据，继续时从头下载。</p>
     <p>暂不支持直播、主页／频道／播放列表批量下载、DRM 或额外的 YouTube PO Token 提供器。Cookie 表示登录状态，不等于平台播放证明；服务器的 IP、地区和账号权限仍可能影响下载。X 的主接口没有返回媒体时会尝试它自己的公开嵌入接口；两处都不可用时会提示媒体受限或不可用，需要先确认有权限的账号能在浏览器播放。选择列表只展示当前可用且符合上限的格式。</p>
     <p>「解析内容」只列举 YouTube 格式，选择后才下载媒体。解析时的 403 会说明被拒绝的是网页、播放 API 还是播放列表；请按提示检查登录状态、账号权限和服务器出口。已经创建任务后的媒体 403 会先自动尝试同清晰度的替代格式。</p>
+    <H2>从浏览器发送</H2>
+    <p>项目仓库中的 <C>userscripts/tessera-grabber.user.js</C> 是一个 Tampermonkey 脚本：在 X 帖子、YouTube 播放页和任意网页的右下角加入按钮，列出页面加载过的视频、M3U8、文件和大图，可复制链接、复制带 Cookie 的 curl 命令，或直接发送到这里的下载任务。在脚本设置中填写本站地址和你在「访问密钥」页面创建的密钥即可使用；它调用的是 <DocLink to="api-files#离线下载">离线下载接口</DocLink>。Cookie 只发送到你配置的服务器。</p>
     <Callout title="暂停与断点">网络中断、超时或来源临时故障（HTTP 429、5xx）会自动重试 3 次，间隔 10、30、90 秒，期间状态为“等待恢复”；文件直链从已保存的分段续传。系统锁定时暂停，解锁后继续 GET 任务；POST 需要手动继续。私密下载会在每段写入时复核解锁授权，手动锁定或授权过期后暂停；服务重启后需重新解锁并继续。锁定后普通下载列表隐藏私密任务的文件名和路径。账号禁用后任务停止，重新启用不会自动开始。停止或失败的 HTTP 断点超过 7 天可能被清理，之后从头下载。</Callout>
   </>;
 }
@@ -536,6 +538,35 @@ if not result["hit"]:
         ]} />
         <Code lang="json" title="请求体" code={`{ "paths": ["docs/old.pdf", "tmp/"], "recursive": true }`} />
         <Code lang="json" title="响应" code={`{ "results": [ { "path": "tmp/", "deleted": true, "count": 128 }, { "path": "docs/old.pdf", "deleted": true } ] }`} />
+      </Endpoint>
+      <H2>离线下载</H2>
+      <p>与网页「下载任务」相同，分两步：先解析，再从结果中选择文件创建任务。任务属于密钥的所属用户，只能保存到该用户自己的存储桶、且在密钥的读写授权前缀内，不能保存到私密空间；进度在网页「下载任务」中查看。管理员创建的、不属于任何用户的密钥返回 403。规则与支持范围见 <DocLink to="downloads">离线下载</DocLink>。</p>
+      <Endpoint method="POST" path="/downloads/parse" auth="key" summary="解析文件直链、curl／wget 命令（bash 格式）、X 帖子或 YouTube 视频，返回可下载的候选文件。需要读写权限。">
+        <Params title="请求体" rows={[
+          ["input", "string", true, "链接（多个每行一个）或命令文本，最多 256 KB"],
+          ["download_type", "string", false, <><C>auto</C>（默认）、<C>http</C>、<C>hls</C>、<C>x</C> 或 <C>youtube</C></>],
+          ["cookies", "string", false, "仅平台链接使用的 Cookie 请求头文本或 Netscape cookies.txt，最多 32 KiB；文件直链请把 Cookie 写在 curl 命令中"],
+        ]} />
+        <Code lang="json" title="响应" code={`{
+  "candidates": [
+    { "ticket": "…", "name": "author-1790000000000000000-1.jpg", "source_host": "x.com",
+      "kind": "http", "platform": "x", "media_type": "image", "size": 284113, "variant": "原图", "warnings": [] }
+  ]
+}`} />
+        <p><C>ticket</C> 是加密的解析结果，20 分钟内有效，只能由同一用户使用；请原样传给创建接口。</p>
+      </Endpoint>
+      <Endpoint method="POST" path="/downloads" auth="key" summary="用解析得到的 ticket 创建下载任务，返回 201 和任务列表。同名文件自动改名。需要读写权限。">
+        <Params title="请求体" rows={[
+          ["items", "object[]", true, <>1–32 项，每项为 <C>{"{ \"ticket\": \"…\", \"name\": \"文件名\" }"}</C>，文件名不能包含路径</>],
+          ["destination", "string", false, "保存目录；省略时使用密钥最上层的读写授权前缀（网页创建的密钥即根目录）"],
+        ]} />
+        <Code lang="bash" code={`
+ticket=$(curl -s -X POST ${site}/api/v1/downloads/parse \\
+  -H "Authorization: Bearer $TGDRIVE_KEY" -H 'Content-Type: application/json' \\
+  -d '{"input": "https://example.com/video.mp4"}' | jq -r '.candidates[0].ticket')
+curl -X POST ${site}/api/v1/downloads \\
+  -H "Authorization: Bearer $TGDRIVE_KEY" -H 'Content-Type: application/json' \\
+  -d "{\\"items\\": [{\\"ticket\\": \\"$ticket\\", \\"name\\": \\"video.mp4\\"}], \\"destination\\": \\"Downloads\\"}"`} />
       </Endpoint>
     </>
   );

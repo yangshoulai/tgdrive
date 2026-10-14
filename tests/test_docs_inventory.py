@@ -10,7 +10,7 @@ class DocsInventoryTests(unittest.TestCase):
     def test_public_api_examples_are_present(self):
         source = (ROOT / "web/src/docs/docs-content.tsx").read_text(encoding="utf-8")
         for route in ('path="/list"', 'path="/search"', 'path="/content"', 'path="/files"',
-                      'path="/files/instant"', 'path="/delete"', 'path="/move"', 'path="/copy"', 'path="/api/v1/public"'):
+                      'path="/files/instant"', 'path="/delete"', 'path="/move"', 'path="/copy"', 'path="/downloads/parse"', 'path="/downloads"','path="/api/v1/public"'):
             self.assertIn(route, source, route)
 
     def test_admin_operations_stay_out_of_public_bundle(self):

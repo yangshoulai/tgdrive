@@ -519,6 +519,22 @@ class TgDriveASGI(StaticFiles):
                 self._write_audit(entry, ok=False, error=exc)
                 raise
             self._write_audit(entry, ok=True)
+        elif method == "POST" and route == "/downloads/parse" and self.offline is not None:
+            user_id = self.keys.download_owner(principal, bucket)[0]
+            result = await self.offline.parse(user_id, payload.get("input"), download_type=payload.get("download_type", "auto"),
+                                              cookies=payload.get("cookies", ""))
+        elif method == "POST" and route == "/downloads" and self.offline is not None:
+            entry = {"action": "download.create", "actor_type": "key", "actor": principal.access_key_id, "payload": payload,
+                     "target_id": None, "ip": None}
+            try:
+                user_id, destination, scope = self.keys.download_scope(principal, bucket, payload.get("destination"))
+                result = {"tasks": self.offline.create(user_id, payload.get("items"), destination, key_scope=scope)}
+            except Exception as exc:
+                self._write_audit(entry, ok=False, error=exc)
+                raise
+            self._write_audit(entry, ok=True)
+            await self._send(send, 201, result)
+            return
         else:
             raise NotFoundError("接口不存在")
         await self._send(send, 200, result)

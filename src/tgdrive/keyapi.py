@@ -214,6 +214,37 @@ class KeyApi:
                                               self._scope(principal, bucket_id, [dst], write=True), dst)
         return UserApi._object_json(item)
 
+    # ---------- 离线下载 ----------
+
+    def download_owner(self, principal: KeyPrincipal, bucket: str | None) -> tuple[int, int, list[ClientGrant]]:
+        """离线任务属于密钥的所属用户，只能保存到该用户自己的存储桶，且密钥需要读写授权。"""
+        row = self.objects.metadata.db.execute(
+            "SELECT u.id, u.bucket_id FROM clients c JOIN users u ON u.id=c.owner_user_id WHERE c.id=?",
+            (principal.client_id,)).fetchone()
+        if row is None or row["bucket_id"] is None:
+            raise PermissionError("离线下载需要使用属于某个用户的访问密钥")
+        bucket_id = self._bucket(principal, bucket) if bucket else int(row["bucket_id"])
+        if bucket_id != row["bucket_id"]:
+            raise PermissionError("离线下载只能保存到密钥所属用户的存储桶")
+        writable = [grant for grant in self.clients.grants(principal.client_id, bucket_id) if grant.perms == "rw"]
+        if not writable:
+            raise PermissionError("该密钥没有写入权限，不能创建离线下载")
+        return int(row["id"]), bucket_id, writable
+
+    def download_scope(self, principal: KeyPrincipal, bucket: str | None, destination) -> tuple[int, str, Scope]:
+        """返回 (用户 ID, 目标目录, 密钥授权范围)；省略目录时使用最上层的读写授权前缀。"""
+        user_id, bucket_id, writable = self.download_owner(principal, bucket)
+        if destination is None:
+            destination = min((grant.prefix for grant in writable), key=len)
+        if not isinstance(destination, str):
+            raise ValueError("目标目录不正确")
+        prefix = normalize_user_path(destination, directory=True) if destination else ""
+        covering = [grant for grant in writable if prefix.startswith(grant.prefix)]
+        if not covering:
+            raise PermissionError("该密钥无权写入这个路径")
+        grant = max(covering, key=lambda item: len(item.prefix))
+        return user_id, prefix, Scope(bucket_id, grant.prefix, "rw")
+
     def set_public(self, principal: KeyPrincipal, bucket: str | None, paths: list[str], public: bool,
                    options: dict[str, object] | None = None, *, password_hash=ObjectService._UNSET):
         bucket_id = self._bucket(principal, bucket)
