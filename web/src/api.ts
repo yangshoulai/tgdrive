@@ -49,8 +49,10 @@ export type DownloadPage = { tasks: DownloadTask[]; total: number; next_cursor: 
 export type TrafficPoint = { at: number; in_bytes: number; out_bytes: number };
 export type TrafficMetrics = { total_in_bytes: number; total_out_bytes: number; recent: TrafficPoint[] };
 export type SystemStatus = { initialized: boolean; unlocked: boolean; user_count: number; traffic?: TrafficMetrics };
-export type PublicFile = { kind: "file"; token: string; password_required: false; name: string; size: number; content_type: string | null; etag: string; modified_at: number; public_at: number | null; expires_at: number | null; thumbnails?: string[] };
-export type PublicFolder = { kind: "folder"; token: string; password_required: false; name: string; modified_at: number; public_at: number | null; expires_at: number | null };
+/** 公开分享页展示的分享者：只有设置了昵称才返回，不含邮箱。 */
+export type PublicSharer = { nickname: string; avatar_version: number | null };
+export type PublicFile = { kind: "file"; token: string; password_required: false; sharer?: PublicSharer | null; name: string; size: number; content_type: string | null; etag: string; modified_at: number; public_at: number | null; expires_at: number | null; thumbnails?: string[] };
+export type PublicFolder = { kind: "folder"; token: string; password_required: false; sharer?: PublicSharer | null; name: string; modified_at: number; public_at: number | null; expires_at: number | null };
 export type PublicObject = PublicFile | PublicFolder | { token: string; password_required: true };
 export type PublicFolderFile = { name: string; path: string; size: number; content_type: string | null; etag: string; modified_at: number; thumbnails?: string[] };
 export type PublicFolderPage = {
@@ -369,6 +371,8 @@ export async function loadPublicConfig() {
   setSiteConfig(config);
   return config;
 }
+export const publicSharerAvatar = (token: string, sharer: PublicSharer, access?: string | null) => sharer.avatar_version
+  ? `/api/public/v1/objects/${encodeURIComponent(token)}/avatar?v=${sharer.avatar_version}${access ? `&access=${encodeURIComponent(access)}` : ""}` : undefined;
 export const publicObject = (token: string, access?: string | null) => request<PublicObject>(`/api/public/v1/objects/${encodeURIComponent(token)}${access ? `?access=${encodeURIComponent(access)}` : ""}`);
 export const publicFolderList = (token: string, path = "", cursor: string | null = null, access?: string | null, limit = 100, kind: KindFilter = "") => {
   const params = new URLSearchParams({ path, limit: String(limit) });

@@ -435,7 +435,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
   const lyricHint = findingAssets || assetBusy ? "正在加载歌词…"
     : assetError || discoveryError ? assetError || discoveryError
     : assets.length && !selected ? "歌词已关闭"
-    : "同目录放一个同名 .lrc 文件，就能在这里看到滚动歌词";
+    : "";
   const showLyrics = lyrics.length > 0 && lyricSource.current === url;
   return <div className={`preview-player preview-player-audio${cover ? " has-cover" : ""}${waiting && !failed ? " is-waiting" : ""}${playing && !waiting && !failed ? " is-playing" : ""}${playing ? " is-active" : ""}`}
     style={cover ? { "--preview-cover": `url("${cover}")` } as CSSProperties : undefined}>
@@ -467,7 +467,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
           </div>
           : <div className="audio-visual">
             <Spectrum analyser={() => audio?.analyser() ?? null} playing={playing && !waiting} />
-            <p className="audio-hint">{lyricHint}</p>
+            {lyricHint && <p className="audio-hint">{lyricHint}</p>}
           </div>)}
       </div>
     </div>

@@ -55,6 +55,7 @@ export function Objects({ session }: { session: api.Session }) {
                       { label: "预览", icon: "eye", onSelect: () => setPreview(item) },
                       { label: "下载", icon: "download", onSelect: () => undefined, href: api.adminContentUrl(item.bucket_id, item.key, true) },
                       ...(links ? [
+                        { label: "打开分享页", icon: "external" as IconName, onSelect: () => window.open(links.page, "_blank", "noreferrer") },
                         { label: "复制分享链接", icon: "copy" as IconName, onSelect: () => void copyText(links.page, "分享链接已复制") },
                         { label: "撤销公开访问", icon: "lock" as IconName, danger: true, divider: true, onSelect: () => setRevoking(item) },
                       ] : []),

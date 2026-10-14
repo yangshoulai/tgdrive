@@ -415,7 +415,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
               const items: MenuItem[] = [];
               if (minimizable) items.push({ label: "最小化", icon: "minimize", shortcut: windowShortcuts ? "I" : undefined, onSelect: () => void minimize() });
               if (expandable && supportsFullscreen && !fullscreen) items.push({ label: maximized ? "还原大小" : "最大化", icon: maximized ? "restore" : "maximize", onSelect: () => setMaximized(value => !value) });
-              if (pinnable && !pinned) items.push({ label: "固定（仅手动关闭）", icon: "pin", onSelect: () => setPinned(true) });
+              if (pinnable && !pinned) items.push({ label: "固定", icon: "pin", onSelect: () => setPinned(true) });
               return items.length > 0 && <Menu label="窗口选项" items={items} />;
             })()}
             {closable && <IconButton icon="x" label="关闭" onClick={onClose} size="sm" disabled={!dismissible} />}

@@ -643,7 +643,7 @@ print(f"${site}/s/{objects[0]['public_token']}")` },
         <Code lang="http" code={`GET /p/K5NOikx6JPtrPYWB/report.pdf
 Range: bytes=0-1048575`} />
       </Endpoint>
-      <Endpoint method="GET" path="/api/public/v1/objects/{token}" auth="public" summary="分享页使用的元数据，不包含所有者和路径。">
+      <Endpoint method="GET" path="/api/public/v1/objects/{token}" auth="public" summary="分享页使用的元数据，不包含所有者账号和路径。分享者设置了昵称时附带 sharer（昵称与头像版本），否则为 null。">
         <Code lang="json" title="响应" code={`{
   "token": "K5NOikx6JPtrPYWB",
   "name": "report.pdf",
@@ -651,8 +651,10 @@ Range: bytes=0-1048575`} />
   "content_type": "application/pdf",
   "etag": "9b2cf535f27731c974343645a3985328",
   "modified_at": 1791367790.12,
-  "public_at": 1791365930.9
+  "public_at": 1791365930.9,
+  "sharer": { "nickname": "小林", "avatar_version": 1791365000123 }
 }`} />
+        <p>有头像时，分享页通过 <C>/api/public/v1/objects/{"{token}"}/avatar?v=</C> 读取；带密码的分享需要先验证密码，验证前元数据只有 <C>password_required</C>，头像返回 403。</p>
       </Endpoint>
       <Endpoint method="GET" path="/api/public/v1/config" auth="public" summary="管理员配置的对外地址，未配置的项为 null。">
         <Code lang="json" title="响应" code={`{ "public_base_url": "https://drive.example.com", "s3_endpoint": "https://s3.example.com" }`} />

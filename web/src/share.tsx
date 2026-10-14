@@ -4,7 +4,7 @@ import { useCursorPage, useFilePageSize } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
 import { FilePreview, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
-import { Brand, Button, Checkbox, EmptyState, Field, FilterChips, Icon, Modal, Pagination, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
+import { Avatar, Brand, Button, Checkbox, EmptyState, Field, FilterChips, Icon, Modal, Pagination, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
 import { LoginPage } from "./shell";
 import { FolderPicker } from "./user/folders";
 
@@ -101,6 +101,7 @@ export function SharePage({ token }: { token: string }) {
                   <span>{formatBytes(file.size)}</span><span>{kindLabel(kind)}</span><span>更新于 {formatDateTime(file.modified_at)}</span>
                   {file.expires_at && <span>链接有效期至 {formatDateTime(file.expires_at)}</span>}
                 </p>
+                <SharerLine token={token} sharer={file.sharer} access={access} />
               </div>
               <div className="share-actions">
                 <Button icon="link" onClick={() => void copyText(`${window.location.origin}${window.location.pathname}`, "分享链接已复制")}>复制链接</Button>
@@ -143,6 +144,12 @@ function SaveDialog({ token, access, request, onClose, onPasswordRequired }: { t
     footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" loading={busy} disabled={!ready} onClick={() => void save()}>保存到“{target}”</Button></>}>
     <FolderPicker value={destination} onChange={next => { setReady(false); setDestination(next); }} onReady={setReady} />
   </Modal>;
+}
+
+/** 分享者：头像与昵称。分享者没有设置昵称时不显示（不退回邮箱）。 */
+function SharerLine({ token, sharer, access }: { token: string; sharer?: api.PublicSharer | null; access: string | null }) {
+  if (!sharer) return null;
+  return <div className="share-sharer"><Avatar name={sharer.nickname} src={api.publicSharerAvatar(token, sharer, access)} size={20} /><span><strong>{sharer.nickname}</strong> 分享</span></div>;
 }
 
 function PasswordGate({ token, onUnlocked }: { token: string; onUnlocked: (grant: string) => void }) {
@@ -255,6 +262,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
         <div className="share-title">
           <h1>{folder.name}</h1>
           <p><span>公开文件夹</span><span>更新于 {formatDateTime(folder.modified_at)}</span>{folder.expires_at && <span>链接有效期至 {formatDateTime(folder.expires_at)}</span>}</p>
+          <SharerLine token={token} sharer={folder.sharer} access={access} />
         </div>
         <div className="share-actions">
           <Button icon="link" onClick={() => void copyText(`${window.location.origin}${window.location.pathname}`, "分享链接已复制")}>复制链接</Button>

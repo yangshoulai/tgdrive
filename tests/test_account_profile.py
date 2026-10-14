@@ -94,6 +94,29 @@ class AccountProfileTests(unittest.TestCase):
         self.assertEqual((status, body["avatar_version"]), (200, None))
         self.assertEqual(self.call("GET", "/api/auth/v1/avatar", headers=alice)[0], 404)
 
+    def test_public_share_shows_sharer_nickname_and_avatar_only(self):
+        from tgdrive.objects import Scope
+        scope = Scope(self.alice.bucket_id)
+        asyncio.run(self.app.objects.put_directory_marker(scope, "docs/"))
+        token = self.app.objects.set_public(scope, "docs/", True).public_token
+        # 没有昵称时不显示分享者，不能退回邮箱或邮箱前缀。
+        status, body, _ = self.call("GET", f"/api/public/v1/objects/{token}")
+        self.assertEqual((status, body["sharer"]), (200, None))
+        self.assertNotIn("alice", json.dumps(body))
+        self.assertEqual(self.call("GET", f"/api/public/v1/objects/{token}/avatar")[0], 404)
+        alice = self.login("alice@example.com", "alice password")
+        self.call("POST", "/api/auth/v1/profile", {"nickname": "爱丽丝"}, alice)
+        version = self.call("POST", "/api/auth/v1/avatar", {"data": base64.b64encode(PNG).decode()}, alice)[1]["avatar_version"]
+        body = self.call("GET", f"/api/public/v1/objects/{token}")[1]
+        self.assertEqual(body["sharer"], {"nickname": "爱丽丝", "avatar_version": version})
+        status, data, _ = self.call("GET", f"/api/public/v1/objects/{token}/avatar?v={version}")
+        self.assertEqual((status, data), (200, PNG))
+        # 带密码的分享：验证前既不返回分享者，也读不到头像。
+        self.app.objects.update_share(scope, "docs/", password="share password")
+        body = self.call("GET", f"/api/public/v1/objects/{token}")[1]
+        self.assertEqual((body["password_required"], "sharer" in body), (True, False))
+        self.assertEqual(self.call("GET", f"/api/public/v1/objects/{token}/avatar")[0], 403)
+
     def test_avatar_is_removed_with_the_account(self):
         alice = self.login("alice@example.com", "alice password")
         self.call("POST", "/api/auth/v1/avatar", {"data": base64.b64encode(PNG).decode()}, alice)

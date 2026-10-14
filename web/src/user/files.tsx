@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type MouseEvent, type ReactNode } from "react";
 import { useCursorPage, useFilePageSize } from "../pagination";
 import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
@@ -239,7 +239,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     const entry: Entry = { kind: "file", key: file.key, file };
     const items: MenuItem[] = [
       { label: "下载", icon: "download", onSelect: () => undefined, href: api.contentUrl(file.key, true) },
-      ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, onSelect: () => setSharing(file) }] : []),
+      ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) }] : []),
     ];
     if (!file.thumbnails?.length && thumbnailSource(file.key, file.content_type, file.size)) {
       const state = thumbnailBackfill.state(file);
@@ -248,6 +248,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       if (state?.phase !== "generating") items.push({ label: failed ? "重试生成缩略图" : "生成缩略图", icon: "refresh", heading: failed ? undefined : "缩略图",
         onSelect: () => thumbnailBackfill.retry(file) });
     }
+    if (file.public_token) items.push({ label: "打开分享页", icon: "external", onSelect: () => window.open(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "_blank", "noreferrer") });
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
     items.push({ label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming(entry) });
     items.push({ label: "移动到…", icon: "move", onSelect: () => setMoving([entry]) });
@@ -264,7 +265,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     return [
       { label: "打开", icon: "folder", shortcut: "↵", onSelect: () => onOpenFolder(key) },
       { label: "下载（ZIP）", icon: "download", onSelect: () => undefined, href: api.archiveUrl([key]) },
-      ...(!privateSpace ? [{ label: shared ? "管理分享" : "公开分享", icon: "link" as const, onSelect: () => setSharing(folderItem(key)) }] : []),
+      ...(!privateSpace ? [{ label: shared ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(folderItem(key)) }] : []),
+      ...(shared ? [{ label: "打开分享页", icon: "external" as const, onSelect: () => window.open(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "_blank", "noreferrer") }] : []),
       ...(shared ? [{ label: "复制分享链接", icon: "copy" as const, onSelect: () => void copyText(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "分享链接已复制") }] : []),
       { label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming({ kind: "folder", key }) },
       { label: "移动到…", icon: "move", onSelect: () => setMoving([{ kind: "folder", key }]) },
@@ -301,17 +303,29 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     return sameRow.reduce((best, item) => Math.abs(item.rect.left + item.rect.width / 2 - center) < Math.abs(best.rect.left + best.rect.width / 2 - center) ? item : best).key;
   }
   const handleKey = useRef<(event: KeyboardEvent) => void>(() => undefined);
+  // 最近一次是否用 Tab 移动了焦点：只有这时按钮上的空格／回车才交给按钮。鼠标点过的按钮会残留焦点，弹窗关闭（含 Esc）
+  // 也会把焦点还给触发按钮，浏览器的 :focus-visible 无法区分；点击页面或用方向键移动焦点项都算回到列表。
+  const tabbed = useRef(false);
   handleKey.current = event => {
+    if (event.key === "Tab") { tabbed.current = true; return; }
     if (event.defaultPrevented || event.isComposing || document.body.classList.contains("has-modal") || context) return;
     const target = event.target as Element;
     if (target instanceof Element && (isShortcutControl(target) || target.closest(".modal, .tray-stack, .sidebar"))) return;
-    // 焦点在按钮或链接上时，空格和回车照常激活它。
-    if ((event.key === " " || event.key === "Enter") && target instanceof Element && target.closest("button, a, summary, [role='button']")) return;
+    const control = target instanceof Element ? target.closest("button, a, summary, [role='button']") : null;
+    if ((event.key === " " || event.key === "Enter") && control && tabbed.current) return;
     const mod = event.metaKey || event.ctrlKey;
     const current = entries.find(entry => entry.key === cursor) ?? null;
     const arrows: Record<string, "up" | "down" | "left" | "right"> = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
     let handled = true;
-    if (event.key === "/" && !mod) {
+    if (event.key === "ArrowUp" && (IS_MAC ? event.metaKey : event.altKey) && !event.shiftKey) {
+      if (query || prefix === root) handled = false;
+      else onOpenFolder(parentPath(prefix));
+    } else if ((event.key === "Home" || event.key === "End") && !mod && entries.length) {
+      const items = surface.current?.querySelectorAll<HTMLElement>("[data-key]");
+      const next = (event.key === "Home" ? items?.[0] : items?.[items.length - 1])?.dataset.key ?? null;
+      if (next && event.shiftKey) setSelected(value => new Set([...value, ...(cursor ? [cursor] : []), next]));
+      setCursor(next);
+    } else if (event.key === "/" && !mod) {
       surface.current?.closest(".files-view")?.querySelector<HTMLInputElement>(".toolbar input[type=search], .toolbar input")?.focus();
     } else if (event.key === "?" && !mod) {
       setShortcutsOpen(true);
@@ -323,21 +337,29 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       setSelected(new Set(entries.map(entry => entry.key)));
     } else if (event.key === "Escape" && (selected.size || cursor)) {
       if (selected.size) setSelected(new Set()); else setCursor(null);
-    } else if (event.key === " " && current && !mod) {
-      toggleSelect(current.key, !selected.has(current.key));
+    } else if (event.key === " " && !mod) {
+      // 还没有焦点项时先落到第一项，避免空格激活残留焦点的按钮或滚动页面。
+      if (current) toggleSelect(current.key, !selected.has(current.key));
+      else setCursor(neighbour(null, "down"));
     } else if (event.key === "Enter" && current && !mod) {
       openEntry(current);
+    } else if ((event.key === "s" || event.key === "S") && !mod && !event.altKey && !event.shiftKey && current && !privateSpace) {
+      setSharing(current.kind === "folder" ? folderItem(current.key) : current.file);
     } else if (event.key === "F2" && current) {
       setRenaming(current);
     } else if ((event.key === "Delete" || (event.key === "Backspace" && (mod || !IS_MAC))) && (selected.size || current)) {
       void moveToTrash(selected.size ? selectedEntries : [current!]);
     } else handled = false;
-    if (handled) { event.preventDefault(); document.documentElement.dataset.input = "keyboard"; }
+    if (handled) { event.preventDefault(); tabbed.current = false; document.documentElement.dataset.input = "keyboard"; }
+    // 残留焦点的按钮不响应回车（例如刚关闭的弹窗的触发按钮）。
+    else if (event.key === "Enter" && control) event.preventDefault();
   };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => handleKey.current(event);
+    const pointer = () => { tabbed.current = false; };
     document.addEventListener("keydown", listener);
-    return () => document.removeEventListener("keydown", listener);
+    document.addEventListener("pointerdown", pointer, true);
+    return () => { document.removeEventListener("keydown", listener); document.removeEventListener("pointerdown", pointer, true); };
   }, []);
   /** 右键：点在已选中的多项之一上时对整个选择操作，否则只针对这一项。 */
   function contextItems(key: string): MenuItem[] {
@@ -547,9 +569,12 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         <KeyValue items={[
           [<kbd>/</kbd>, "搜索文件"],
           [<><kbd>↑</kbd> <kbd>↓</kbd>{layout === "grid" && <> <kbd>←</kbd> <kbd>→</kbd></>}</>, "移动焦点；按住 Shift 连续选择"],
+          [<><kbd>Home</kbd> <kbd>End</kbd></>, "跳到第一项／最后一项"],
           [<kbd>↵</kbd>, "打开文件或文件夹"],
+          [<kbd>{IS_MAC ? "⌘ ↑" : "Alt ↑"}</kbd>, "返回上一级文件夹"],
           [<kbd>空格</kbd>, "选中或取消选中"],
           [<kbd>{IS_MAC ? "⌘" : "Ctrl"} A</kbd>, "全选本页"],
+          ...(!privateSpace ? [[<kbd>S</kbd>, "公开分享或管理分享"] as [ReactNode, ReactNode]] : []),
           [<kbd>F2</kbd>, "重命名"],
           [<kbd>{DELETE_KEY}</kbd>, "移到回收站"],
           [<kbd>Esc</kbd>, "取消选择"],

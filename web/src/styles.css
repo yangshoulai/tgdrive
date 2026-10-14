@@ -434,6 +434,9 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .segmented button { display: inline-flex; flex: none; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--ink-3); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; transition: color .12s, background-color .12s; }
 .segmented button:hover { color: var(--ink); }
 .segmented button.is-active { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line), var(--shadow-sm); }
+/* 工具栏里单独的图标按钮（如刷新）与旁边的分段控件同高、同底色；窄屏下两者都放大到 40px。 */
+.toolbar-actions > .icon-btn { width: 30px; height: 30px; border-color: transparent; background: var(--surface-hover); color: var(--ink-3); }
+.toolbar-actions > .icon-btn:hover:not(:disabled) { color: var(--ink); }
 .download-import-unlock { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); }
 .download-import-unlock-head { display: flex; align-items: flex-start; gap: 10px; }
 .download-import-unlock-head > div { flex: 1; min-width: 0; }
@@ -1333,6 +1336,8 @@ html[data-input="keyboard"] .preview-code-editor .cm-editor.cm-focused { box-sha
 .share-head { display: flex; align-items: center; gap: 14px; padding: 18px 20px; }
 .share-title { flex: 1; min-width: 0; }
 .share-title h1 { font-size: var(--text-xl); font-weight: 600; letter-spacing: -.015em; overflow-wrap: anywhere; }
+.share-sharer { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--ink-3); font-size: var(--text-sm); }
+.share-sharer strong { color: var(--ink-2); font-weight: 500; }
 .share-title p { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 2px; color: var(--ink-3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .share-actions { display: flex; gap: 8px; }
 .share-preview { display: grid; min-height: 280px; border-top: 1px solid var(--line); background: var(--surface-sunken); }

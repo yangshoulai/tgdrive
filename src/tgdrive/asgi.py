@@ -275,6 +275,17 @@ class TgDriveASGI(StaticFiles):
             if path == "/api/admin/v1/content" and method in ("GET", "HEAD"):
                 await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, admin=True))
                 return
+            sharer_avatar = re.fullmatch(r"/api/public/v1/objects/([A-Za-z0-9_-]+)/avatar", path)
+            if sharer_avatar and method == "GET":
+                info, password_hash = self._public_share(sharer_avatar.group(1))
+                if password_hash and not self.share_access.check(sharer_avatar.group(1), password_hash, query.get("access", [None])[0]):
+                    raise SharePasswordRequired("password required")
+                sharer = self.user.accounts.sharer(info.bucket_id)
+                if sharer is None or not sharer["avatar_version"]:
+                    raise NotFoundError("头像不存在")
+                data, mime, etag = self.user.accounts.avatar(int(sharer["user_id"]))
+                await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._avatar_cache_control(query))
+                return
             folder_download = re.fullmatch(r"/api/public/v1/folders/([A-Za-z0-9_-]+)/download", path)
             if folder_download and method == "POST":
                 if headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
@@ -889,15 +900,17 @@ class TgDriveASGI(StaticFiles):
             info, password_hash = self._public_share(token)
             if password_hash and not self.share_access.check(token, password_hash, query.get("access", [None])[0]):
                 return 200, {"token": token, "password_required": True}, {}
+            sharer = user.accounts.sharer(info.bucket_id)
+            sharer = {"nickname": sharer["nickname"], "avatar_version": sharer["avatar_version"]} if sharer else None
             if info.key.endswith("/"):
                 return 200, {"token": info.public_token, "kind": "folder", "name": info.key.rstrip("/").rsplit("/", 1)[-1],
                              "password_required": False, "modified_at": info.modified_at, "public_at": info.public_at,
-                             "expires_at": info.public_expires_at}, {}
+                             "expires_at": info.public_expires_at, "sharer": sharer}, {}
             thumbnails = user.objects.thumbnail_variants([info.blob_uuid]).get(info.blob_uuid or "", [])
             return 200, {"token": info.public_token, "kind": "file", "name": info.key.rsplit("/", 1)[-1], "size": info.size,
                          "content_type": info.content_type, "etag": info.etag, "password_required": False, "thumbnails": thumbnails,
                          "modified_at": info.modified_at, "public_at": info.public_at,
-                         "expires_at": info.public_expires_at}, {}
+                         "expires_at": info.public_expires_at, "sharer": sharer}, {}
         elif re.fullmatch(r"/api/public/v1/folders/[A-Za-z0-9_-]+/(list|preview-assets)", path) and method == "GET":
             token = path.split("/")[5]
             info, password_hash = self._public_share(token)

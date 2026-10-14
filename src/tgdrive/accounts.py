@@ -378,6 +378,14 @@ class AccountService:
             db.execute("DELETE FROM user_avatars WHERE user_id=?", (account.id,))
         return self.profile(account.id)
 
+    def sharer(self, bucket_id: int) -> dict[str, object] | None:
+        """公开分享页展示的分享者：只公开昵称和头像版本，没有昵称时返回 None——不能退回邮箱或邮箱前缀。"""
+        row = self.metadata.db.execute(f"SELECT u.id,{PROFILE_COLUMNS} FROM users u WHERE u.bucket_id=?", (bucket_id,)).fetchone()
+        if row is None or not row["nickname"]:
+            return None
+        version = row["avatar_version"]
+        return {"user_id": row["id"], "nickname": row["nickname"], "avatar_version": int(version * 1000) if version else None}
+
     def avatar(self, user_id: int) -> tuple[bytes, str, str]:
         row = self.metadata.db.execute("SELECT mime,data,updated_at FROM user_avatars WHERE user_id=?", (user_id,)).fetchone()
         if row is None:
