@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.1.1
+// @version      0.1.3
 // @description  在 X、YouTube 和其他网页上快速复制媒体地址与 curl 命令，或一键发送到 Tessera 离线下载
 // @author       yangshoulai
+// @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
 // @match        *://*/*
 // @run-at       document-start
 // @noframes
@@ -208,14 +209,18 @@
     :host { all: initial; }
     * { box-sizing: border-box; }
     .root { --bg: #fff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e5e5ea; --soft: #f5f5f7; --accent: #2f6fed; --danger: #d93025;
+      --logo-a: #2f4bd0; --logo-b: #6a82ee; --logo-c: #1e3194; --logo-plane: #f0a22e; --logo-fold: #c27a10;
       font: 13px/1.45 -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif; color: var(--fg); }
     @media (prefers-color-scheme: dark) {
-      .root { --bg: #1c1c1e; --fg: #f5f5f7; --muted: #a1a1a6; --line: #38383a; --soft: #2c2c2e; --accent: #5b8cff; --danger: #ff6b5f; }
+      .root { --bg: #1c1c1e; --fg: #f5f5f7; --muted: #a1a1a6; --line: #38383a; --soft: #2c2c2e; --accent: #5b8cff; --danger: #ff6b5f;
+        --logo-a: #8da0ff; --logo-b: #5f78f0; --logo-c: #b4c0ff; --logo-plane: #f4b252; --logo-fold: #b97616; }
     }
     .fab { position: fixed; right: 20px; bottom: 20px; width: 44px; height: 44px; border-radius: 22px; border: 1px solid var(--line);
       background: var(--bg); color: var(--fg); box-shadow: 0 4px 16px rgba(0,0,0,.18); cursor: pointer; display: grid; place-items: center;
       z-index: 2147483646; pointer-events: auto; }
     .fab:hover { border-color: var(--accent); }
+    .logo-a { fill: var(--logo-a); } .logo-b { fill: var(--logo-b); } .logo-c { fill: var(--logo-c); }
+    .logo-plane { fill: var(--logo-plane); stroke: var(--logo-plane); } .logo-fold { fill: none; stroke: var(--logo-fold); }
     .badge { position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
       background: var(--accent); color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
     .panel { position: fixed; right: 20px; bottom: 76px; width: min(440px, calc(100vw - 24px)); max-height: min(640px, calc(100vh - 100px));
@@ -223,7 +228,10 @@
       box-shadow: 0 12px 40px rgba(0,0,0,.25); z-index: 2147483647; pointer-events: auto; overflow: hidden; }
     header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
     header strong { flex: 1; font-size: 14px; }
-    .body { overflow: auto; padding: 12px; display: grid; gap: 12px; }
+    .body { overflow: auto; overflow-x: hidden; padding: 12px; display: grid; gap: 12px; }
+    /* 网格列默认至少与内容等宽，不换行的长文件名会把面板撑出横向滚动条；限定为面板宽度后由省略号截断。 */
+    .body, .stack, .card, .list { grid-template-columns: minmax(0, 1fr); }
+    .stack { display: grid; gap: 12px; }
     .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 8px; }
     .title { font-weight: 600; }
     .sub { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
@@ -256,6 +264,29 @@
       padding: 8px 14px; border-radius: 8px; z-index: 2147483647; pointer-events: none; max-width: 80vw; }
     a { color: var(--accent); }
   `;
+
+  /** Tessera 标志，几何与 web/src/ui.tsx 的 LogoMark 一致，颜色取自上面的 --logo-* 令牌。 */
+  function logo(size = 24) {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 32 32");
+    svg.setAttribute("width", size);
+    svg.setAttribute("height", size);
+    svg.setAttribute("aria-hidden", "true");
+    const parts = [
+      ["rect", { class: "logo-a", x: 2.5, y: 2.5, width: 13, height: 13, rx: 3 }],
+      ["polygon", { class: "logo-plane", points: "18,4 28,4 28,14", "stroke-width": 3, "stroke-linejoin": "round" }],
+      ["path", { class: "logo-fold", d: "M27.2 4.8 23.4 8.6", "stroke-width": 1.3, "stroke-linecap": "round" }],
+      ["rect", { class: "logo-b", x: 2.5, y: 16.5, width: 13, height: 13, rx: 3 }],
+      ["rect", { class: "logo-c", x: 16.5, y: 16.5, width: 13, height: 13, rx: 3 }],
+    ];
+    for (const [tag, attrs] of parts) {
+      const node = document.createElementNS(ns, tag);
+      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+      svg.append(node);
+    }
+    return svg;
+  }
 
   // YouTube 等站点启用了 Trusted Types，禁止给 innerHTML 赋字符串：图标和界面一律用 DOM API 创建。
   function icon() {
@@ -296,7 +327,7 @@
     shadow.append(h("style", {}, STYLE), root);
     badge = h("span", { className: "badge", hidden: true });
     fab = h("button", { className: "fab", title: "Tessera 资源抓取", "aria-label": "Tessera 资源抓取", onclick: () => toggle() });
-    fab.append(icon(), badge);
+    fab.append(logo(), badge);
     root.append(fab);
     document.documentElement.append(host);
     refreshFab();
@@ -358,7 +389,7 @@
   function open(context) {
     mount();
     currentContext = context || platformOf(location.href);
-    const body = h("div", { style: "display:grid;gap:12px" });
+    const body = h("div", { className: "stack" });
     if (currentContext) body.append(platformCard(currentContext));
     body.append(h("div", { className: "list-host" }));
     frame("Tessera 资源抓取", body);
@@ -501,7 +532,7 @@
         h("div", { className: "name", title: candidate.name }, candidate.name),
         h("div", { className: "sub" }, [candidate.variant, formatSize(candidate.size), candidate.source_host].filter(Boolean).join(" · ")),
         (candidate.warnings || []).map(text => h("div", { className: "sub" }, "⚠ " + text)))));
-    frame("发送到 Tessera", h("div", { style: "display:grid;gap:12px" },
+    frame("发送到 Tessera", h("div", { className: "stack" },
       h("div", { className: "list" }, rows.length ? rows : h("div", { className: "empty" }, "没有可下载的文件")),
       h("label", { className: "field" }, h("span", { className: "sub" }, "保存到目录"), destination),
       error,
@@ -563,7 +594,7 @@
       toast("设置已保存");
       back ? back() : close();
     });
-    frame("设置", h("div", { style: "display:grid;gap:12px" },
+    frame("设置", h("div", { className: "stack" },
       h("label", { className: "field" }, h("span", {}, "Tessera 地址"), server),
       h("label", { className: "field" }, h("span", {}, "访问密钥"), key,
         h("span", { className: "sub" }, "在 Tessera「访问密钥」页面新建，按「Access Key ID:Secret Access Key」格式填写（Secret 只在创建时显示一次）。密钥只保存在 Tampermonkey 中。")),
