@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .http import RETRY_STATUS, DownloadError, ExpiredMedia, TransientError, status_error
+from .mp4 import with_duration
 from .request import DownloadRequest, checked_url
 
 
@@ -482,7 +483,14 @@ def clear_cache(root: Path):
             shutil.rmtree(path)
 
 
-async def merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, *, check, progress, throttle, phase):
+def merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, **options):
+    """合并为分片 MP4，并用平台给出的时长补写文件头（见 mp4.with_duration）。"""
+    duration = entry.get("duration")
+    return with_duration(_merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, **options),
+                         duration if isinstance(duration, (int, float)) else None)
+
+
+async def _merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, *, check, progress, throttle, phase):
     """只缓存受限的两条输入轨；MP4 输出通过背压直接交给加密存储。"""
     cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if cache_root.is_symlink():

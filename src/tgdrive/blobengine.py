@@ -212,7 +212,9 @@ class BlobEngine:
         # 远端后端（Telegram）每次请求的开销大，允许它要求更大的读取窗口。
         window_for = getattr(self.store, "read_window", None)
         def windows():
-            first = True
+            # 远端长读取从小窗口起步、每次放大 4 倍直到后端窗口：浏览器播放视频时会连发多个开放式 Range
+            # 并很快中断其中大部分，起步小可以让被中断的请求只浪费几百 KB，而不是整整一个后端窗口。
+            ramp = None
             for chunk in chunks:
                 if chunk.offset is None:
                     raise IntegrityError("complete blob has unassigned chunk offset")
@@ -223,10 +225,11 @@ class BlobEngine:
                 position = max(start, chunk.offset) - chunk.offset
                 hi_exclusive = min(stop, chunk_end) - chunk.offset
                 while position < hi_exclusive:
-                    # 大的远端读取先返回小窗口，浏览器可尽快解析文件头并取消／跳到尾部读取索引。
-                    # 短 Range 和本地读取仍一次取齐，后续远端窗口继续复用原来的大窗口与预读预算。
-                    width = min(window, 256 * 1024) if first and chunk_window > window and stop - start > chunk_window else chunk_window
-                    first = False
+                    # 短 Range 和本地读取仍按原窗口一次取齐。
+                    if ramp is None:
+                        ramp = min(window, 256 * 1024) if chunk_window > window and stop - start > chunk_window else chunk_window
+                    width = min(ramp, chunk_window)
+                    ramp = min(ramp * 4, 1 << 40)
                     local_end = min(hi_exclusive, position + max(width, record.frame_size))
                     yield chunk, position, local_end
                     position = local_end
@@ -238,12 +241,14 @@ class BlobEngine:
 
         # 流水线：消费者处理当前窗口时，后面最多 read_ahead 个窗口已在并行取回与解密，
         # 把远端后端每次请求的往返延迟隐藏起来。结果仍按顺序返回。
+        # 预读深度随已交付的窗口数逐步增加：刚开始就被中断的请求（浏览器探测、拖动进度条）不会触发大量预读。
         pending: deque[asyncio.Task[bytes]] = deque()
         source = windows()
+        delivered = 0
         try:
             exhausted = False
             while True:
-                while not exhausted and len(pending) <= self.read_ahead:
+                while not exhausted and len(pending) <= min(self.read_ahead, 2 * delivered):
                     item = next(source, None)
                     if item is None:
                         exhausted = True
@@ -252,6 +257,7 @@ class BlobEngine:
                 if not pending:
                     return
                 yield await pending.popleft()
+                delivered += 1
         finally:
             # 客户端中断或某个窗口失败：取消尚未使用的预读，并等待它们结束以免遗留未处理的异常。
             for task in pending:

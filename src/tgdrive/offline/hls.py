@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 from .http import DownloadError, ExpiredMedia, SafeHttpClient, status_error
+from .mp4 import with_duration
 from .request import DownloadRequest, checked_url
 
 
@@ -278,7 +279,12 @@ async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist
         await stderr
 
 
-async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
+def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist, executable: str, **options):
+    """封装为分片 MP4，并按列表的总时长补写文件头（管道输出时 FFmpeg 写不了时长，浏览器会把视频当成只有几秒）。"""
+    return with_duration(_remux(client, request, playlist, executable, **options), playlist.duration)
+
+
+async def _remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
                 executable: str, *, check, progress, throttle, cache_root: Path | None = None,
                 task_id=0, limit=None, reserve=0, audio=None, media_type="video", url_check=None, phase=None):
     """普通 TS 保持管道传输；复杂列表缓存受控分片，并生成不含外部 URI 的本地 HLS。

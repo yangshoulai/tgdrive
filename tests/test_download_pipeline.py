@@ -79,6 +79,33 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pieces, [self.data[5:105]])
         self.assertEqual(self.store.calls - calls, 1)
 
+    async def test_aborted_remote_read_does_not_prefetch_large_windows(self):
+        # 浏览器播放视频时会连发开放式 Range 并很快中断：只读了首段就中断的请求不应触发预读。
+        self.store.read_window = lambda ref: 1024
+        self.engine.read_ahead = 2
+        stream = self.engine.stream(self.blob, window=16)
+        self.assertEqual(await anext(stream), self.data[:16])
+        await stream.aclose()
+        self.assertEqual(self.store.calls, 1)
+        # 持续读取时窗口按 4 倍放大、预读逐步加深，最终结果不变。
+        calls = self.store.calls
+        self.assertEqual(b"".join([piece async for piece in self.engine.stream(self.blob, window=16)]), self.data)
+        self.assertGreater(self.store.peak, 1)
+        self.assertLess(self.store.calls - calls, len(self.data) // 16)
+
+    def test_telegram_transport_stops_reading_when_cancelled(self):
+        import io
+        import threading
+        from tgdrive.telegram.client import PooledTransport
+        transport = PooledTransport()
+        cancel = threading.Event()
+        class Response(io.BytesIO):
+            def read(self, size=-1):
+                cancel.set()   # 读到第一段后调用方取消
+                return super().read(size)
+        self.assertIsNone(transport._read_body(Response(b"x" * (PooledTransport.READ_PIECE * 4)), cancel))
+        self.assertEqual(transport._read_body(io.BytesIO(b"abc"), threading.Event()), b"abc")
+
     async def test_global_and_bucket_limits_survive_cancellation(self):
         slots = TransferSlots(total=2, per_bucket=1, wait_seconds=0.03)
         async with slots.slot(1):

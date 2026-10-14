@@ -115,7 +115,10 @@ class PooledTransport:
         cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
         return cls(host, port, timeout=self.timeout)
 
-    def _request_sync(self, method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> HttpResponse:
+    READ_PIECE = 256 * 1024
+
+    def _request_sync(self, method: str, url: str, headers: Mapping[str, str], body: bytes | None,
+                      cancel: threading.Event | None = None) -> HttpResponse:
         parts = urlsplit(url)
         scheme, host = parts.scheme, parts.hostname or ""
         port = parts.port or (443 if scheme == "https" else 80)
@@ -129,7 +132,11 @@ class PooledTransport:
             try:
                 connection.request(method, target, body=body, headers=dict(headers))
                 response = connection.getresponse()
-                data = response.read()
+                data = self._read_body(response, cancel)
+                if data is None:
+                    # 调用方已取消（浏览器中断了预览请求）：丢弃这条读了一半的连接，不再继续下载。
+                    connection.close()
+                    raise TelegramTransientError("request cancelled")
             except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError) as exc:
                 connection.close()
                 # 复用的空闲连接可能已被服务器关闭：换新连接重试一次。
@@ -151,8 +158,27 @@ class PooledTransport:
             return HttpResponse(response.status, dict(response.getheaders()), data)
         raise TelegramTransientError("connection failed")
 
+    def _read_body(self, response: http.client.HTTPResponse, cancel: threading.Event | None) -> bytes | None:
+        """分段读取响应体，每段之间检查取消标记；被取消时返回 None。"""
+        if cancel is None:
+            return response.read()
+        pieces: list[bytes] = []
+        while not cancel.is_set():
+            piece = response.read(self.READ_PIECE)
+            if not piece:
+                return b"".join(pieces)
+            pieces.append(piece)
+        return None
+
     async def request(self, method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> HttpResponse:
-        return await asyncio.to_thread(self._request_sync, method, url, headers, body)
+        # 线程里的阻塞读取无法被 asyncio 取消；取消时设置标记，让线程在下一段读取前停下并关闭连接，
+        # 避免被中断的预览请求继续占用 Telegram 带宽和线程池。
+        cancel = threading.Event()
+        try:
+            return await asyncio.to_thread(self._request_sync, method, url, headers, body, cancel)
+        except asyncio.CancelledError:
+            cancel.set()
+            raise
 
     def close(self) -> None:
         with self._lock:

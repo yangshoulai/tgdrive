@@ -21,6 +21,7 @@ from ..objects import PRIVATE_PREFIX, Scope
 from ..work import WorkBusyError
 from .hls import load_playlist, remux
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
+from .mp4 import FragmentIndexer
 from .request import DownloadRequest, filename, parse_requests, url_filename
 from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_cache, media_request, merge_tracks, prepare, site_link, track_stream
 
@@ -715,6 +716,33 @@ class OfflineDownloads:
             self._set(row["id"], stored_bytes=stored)
         return stored
 
+    async def _stage_video(self, row, scope, upload_id, stream):
+        """FFmpeg 输出的分片 MP4：在 moov 后补上 sidx 索引，浏览器才能只读文件头就开始播放和跳转。
+
+        sidx 要等全部分片输出后才能生成，而磁盘不足以暂存整个视频：先在内存里留住开头约 16 MB 作为第 1 段，
+        其余内容从第 2 段起边收边传，结束时把 sidx 插进第 1 段再上传（分段可以乱序上传，提交时按序号拼接）。
+        """
+        indexer = FragmentIndexer()
+        source = indexer.observe(stream)
+        try:
+            head, held = [], 0
+            async for piece in source:
+                self.check(row["user_id"], row["id"])
+                head.append(piece)
+                held += len(piece)
+                if held >= PART_SIZE:
+                    break
+            first = b"".join(head)
+            del head
+            stored = await self._stage(row, scope, upload_id, source, offset=PART_SIZE, count_input=False) - PART_SIZE
+        finally:
+            await source.aclose()
+        index = indexer.sidx()
+        if index and indexer.moov_end is not None and indexer.moov_end <= len(first):
+            first = first[:indexer.moov_end] + index + first[indexer.moov_end:]
+        await self.objects.upload_part(scope, upload_id, 1, first, len(first))
+        self._set(row["id"], stored_bytes=stored + len(first))
+
     async def _finish(self, row, scope, upload_id):
         self.check(row["user_id"], row["id"])
         parts = self.objects.list_parts(scope, upload_id)
@@ -850,7 +878,7 @@ class OfflineDownloads:
                 check=lambda: self.check(row["user_id"], row["id"]), progress=lambda **values: self._progress(row["id"], **values),
                 throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase))
             try:
-                await self._stage(row, scope, upload_id, stream, count_input=False)
+                await self._stage_video(row, scope, upload_id, stream)
             finally:
                 await stream.aclose()
             await self._finish(row, scope, upload_id)
@@ -873,7 +901,7 @@ class OfflineDownloads:
             throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase))
         try:
             # 合并后的成品直接流入加密分片，不占用音视频输入轨的临时缓存预算。
-            await self._stage(row, scope, upload_id, stream, count_input=False)
+            await self._stage_video(row, scope, upload_id, stream)
         finally:
             await stream.aclose()
         await self._finish(row, scope, upload_id)
@@ -898,7 +926,7 @@ class OfflineDownloads:
             check=lambda: self.check(row["user_id"], row["id"]), progress=lambda **values: self._progress(row["id"], **values), throttle=self.throttle,
             phase=lambda phase: self._set(row["id"], phase=phase))
         try:
-            await self._stage(row, scope, upload_id, stream, count_input=False)
+            await self._stage_video(row, scope, upload_id, stream)
         finally:
             await stream.aclose()
         await self._finish(row, scope, upload_id)
