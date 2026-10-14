@@ -217,6 +217,11 @@ export const makeFolder = (path: string) => post<FileItem>(fileApi("/folders", p
 export const deleteFiles = (paths: string[], recursive = false) => post<{ results: { path: string; deleted: boolean; count?: number }[] }>(fileApi("/delete", paths[0]), { paths, recursive });
 /** 移动冲突策略：rename 保留两者（自动编号），skip 跳过同名文件，overwrite 覆盖目标。 */
 export type MoveConflict = "rename" | "skip" | "overwrite";
+/** 他人的分享：own 表示是否为当前账号自己的分享（是则不显示保存按钮）。 */
+export const shareStatus = (token: string) => request<{ own: boolean }>(`/api/user/v1/shares/${encodeURIComponent(token)}/status`);
+/** 把分享保存到自己的文件：引用同一份加密数据，立即完成并计入自己的容量；paths 为分享文件夹内的相对路径，省略时保存整个分享。 */
+export const saveShare = (token: string, destination: string, access: string | null, paths?: string[]) =>
+  post<{ saved: number; bytes: number; items: string[] }>(`/api/user/v1/shares/${encodeURIComponent(token)}/save`, { destination, access, ...(paths ? { paths } : {}) });
 export const moveFile = (from: string, to: string, conflict: MoveConflict = "skip") => post<{ moved: number; skipped: number }>(fileApi("/move", from), { from, to, conflict });
 export const copyFile = (from: string, to: string) => post<FileItem>(fileApi("/copy", from), { from, to });
 export type ShareOptions = { expires_at?: number | null; password?: string | null };

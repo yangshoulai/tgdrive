@@ -43,6 +43,7 @@ cd web && node build-apps.mjs                                  # 构建到 web/d
 - 不加载外部字体或 CDN 资源。
 - 弹出层（菜单、浮层）必须 portal 到 `document.body`（`ui.tsx` 的 `Menu`／`ContextMenu` 共用 `MenuList`，已如此；全屏时挂到全屏元素内）：文件列表的行设置了 `content-visibility: auto`，它会让行成为 `position: fixed` 的包含块并裁剪溢出，放在行里的浮层会被裁掉看不见。窄屏下表格靠 `.file-surface` 横向滚动，每行最后一列（操作按钮）用 `position: sticky` 固定在右侧，表格自身不要再设 `overflow`。
 - 文件夹也能公开：分享信息（令牌、有效期、密码、下载次数）保存在文件夹的**目录标记行**（以 `/` 结尾的对象）上，没有标记的隐式文件夹在分享时补一个。访客只读：`/s/<令牌>` 浏览（`?path=` 为相对路径），`/api/public/v1/folders/<令牌>/list` 列目录，`/p/<令牌>/<相对路径>` 读取文件；相对路径必须经 `ObjectService._public_relative` 校验，不得越出被分享的目录。重写目录标记（新建同名文件夹、移入回收站）时必须保留这些列，不能用新行覆盖。
+- 保存他人分享（`ObjectService.save_public`，网页入口 `/api/user/v1/shares/<令牌>/status|save`）：新对象直接引用来源 Blob（增加 refcount、计入保存者配额），不得复制来源的公开分享列；整个保存在一个事务内完成，相对路径必须经 `_public_relative` 校验；分享者本人保存返回 400，密码分享由路由层用 `share_access` 校验。
 - 公开链接令牌存放在 `objects.public_token`：覆盖写入在 `_commit_blob` 中继承，移动随行保留；禁用账号或锁定系统时 `/p/` 不可访问。新增改写对象行的代码路径时需要保持这一语义。
 - 认证边界：`/api/user/v1`、`/api/admin/v1` 只供网页使用（HttpOnly Cookie + `X-CSRF-Token`）；`/api/v1` 与 S3 只接受访问密钥（`Authorization: Bearer AK:SECRET` / Basic、SigV4），不读取 Cookie。两者授权都走 `ClientAuthStore`（存储桶 + 前缀 + ro/rw），所属用户被禁用时密钥失效。新增程序可调用的能力应加在 `/api/v1`，不要让脚本依赖网页接口。
 - 业务校验失败返回 `ValueError`（400），不要用 `AuthenticationError`（401 会让前端登出）。

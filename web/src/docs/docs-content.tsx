@@ -236,6 +236,14 @@ function SharingGuide() {
       <Callout tone="warning" title="公开链接等同于文件本身">任何拿到链接的人都能下载文件，也可以继续转发。只分享你愿意让任何人看到的内容。分享文件夹时，里面现有的和以后新增的所有文件都会被看到，请确认文件夹里没有不想公开的内容。</Callout>
       <H2>访问者能看到什么</H2>
       <p>分享文件时，分享页只显示文件名、大小、类型和修改时间；分享文件夹时，显示文件夹里的文件名、大小和修改时间。两种情况都不会显示你的用户名、所在的上级文件夹或其他文件。</p>
+      <H2>保存别人的分享</H2>
+      <p>打开别人分享的文件或文件夹时，点击「保存到我的 {BRAND}」，选择目录后即可存进自己的文件；分享文件夹里勾选文件后，也可以用「保存所选」只保存部分文件。还没登录时会先显示登录页，登录后回到分享页继续保存。自己的分享不会显示这个按钮。</p>
+      <ul className="doc-list">
+        <li>内容不需要重新传输，立即完成，计入你自己的存储空间；之后分享者删除原文件或关闭分享，你保存的副本不受影响。</li>
+        <li>保存的副本是你的私有文件，不会继承原来的公开链接。同名文件或文件夹自动改名，不会覆盖已有内容。</li>
+        <li>保存整个文件夹时保留子文件夹结构；「保存所选」的文件直接放进你选择的目录。一次最多保存 10000 个文件，空间不足时不会保存任何内容。</li>
+        <li>有访问密码的分享需要先输入密码；每次保存在分享者那里计为一次下载。只能保存到普通目录，不能直接保存到私密空间。</li>
+      </ul>
     </>
   );
 }
@@ -670,7 +678,7 @@ export const DOC_PAGES: DocPage[] = [
   { slug: "files", group: "使用指南", title: "管理文件", icon: "folder", Content: FilesGuide,
     summary: "上传、整理、预览与搜索文件，以及私密空间、路径规则和容量。", keywords: "上传 移动 重命名 删除 文件夹 私密空间 用户设置 登录密码 通行密钥 快捷解锁 指纹 面容 自动锁定 回收站 预览 播放 快捷键 键盘 全屏 最小化 搜索 配额 拖放" },
   { slug: "sharing", group: "使用指南", title: "公开分享", icon: "globe", Content: SharingGuide,
-    summary: "用分享页和直链把文件公开给任何人，并随时收回。", keywords: "公开 分享 链接 直链 令牌 嵌入 下载" },
+    summary: "用分享页和直链把文件公开给任何人，并随时收回；把别人的分享保存到自己的文件。", keywords: "公开 分享 链接 直链 令牌 嵌入 下载 保存 转存" },
   { slug: "downloads", group: "使用指南", title: "离线下载", icon: "download", Content: DownloadsGuide,
     summary: "提交文件直链、curl／wget、X 帖子与 YouTube 视频，管理服务器下载任务。", keywords: "离线 下载 curl wget cookie http https m3u8 ts ffmpeg 推特 twitter x youtube shorts 停止 继续 续传 进度" },
   { slug: "s3", group: "使用指南", title: "S3 客户端", icon: "key", Content: S3Guide,

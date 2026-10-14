@@ -1,12 +1,16 @@
 /** 公开分享页：无需登录，只暴露文件名、大小和内容。带密码的分享先验证密码。 */
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useCursorPage, useFilePageSize } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
 import { FilePreview, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
-import { Brand, Button, Checkbox, EmptyState, Field, Icon, Pagination, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
+import { Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, Pagination, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
+import { LoginPage } from "./shell";
+import { FolderPicker } from "./user/folders";
 
 type Shared = Extract<api.PublicObject, { password_required: false }>;
+/** 要保存的内容：paths 为分享文件夹内的相对路径，省略时保存整个分享；label 用于对话框标题。 */
+type SaveRequest = { paths?: string[]; label: string };
 
 /** 验证密码后获得的访问凭证按分享令牌保存在本标签页，刷新页面无需重新输入。 */
 const accessKey = (token: string) => `tgdrive:share-access:${token}`;
@@ -34,6 +38,32 @@ export function SharePage({ token }: { token: string }) {
       });
   }, [token]);
   useEffect(() => load(access), [load, access]);
+  // 已登录的访客可以把分享保存到自己的文件；自己的分享不显示保存按钮（由服务端判断，不比对用户名）。
+  const [account, setAccount] = useState<api.Session | null | undefined>(undefined);
+  const [own, setOwn] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState<SaveRequest | null>(null);
+  const [loginFor, setLoginFor] = useState<SaveRequest | null>(null);
+  useEffect(() => { void api.restoreSession().then(setAccount).catch(() => setAccount(null)); }, []);
+  useEffect(() => {
+    setOwn(null);
+    if (account && file) void api.shareStatus(token).then(value => setOwn(value.own)).catch(() => setOwn(false));
+  }, [account, file, token]);
+  const canSave = account === null || (Boolean(account) && own === false);
+  const requestSave = (request: SaveRequest) => account ? setSaving(request) : setLoginFor(request);
+  async function loggedIn(session: api.Session) {
+    const request = loginFor;
+    setLoginFor(null); setAccount(session);
+    document.title = `${file?.name ?? "分享"} · ${BRAND}`;
+    try {
+      if ((await api.shareStatus(token)).own) { toast.info("这是你自己分享的内容，已经在你的文件中"); return; }
+      if (request) setSaving(request);
+    } catch (reason) { toast.error(api.errorMessage(reason, "无法检查分享状态，请刷新后重试")); }
+  }
+  if (loginFor) return <LoginPage onSuccess={session => void loggedIn(session)} notice={
+    <p className="inline-note share-login-note"><Icon name="folderPlus" size={15} /><span>登录后把“{loginFor.label}”保存到你的 {BRAND}。</span>
+      <button type="button" className="link-button" onClick={() => { setLoginFor(null); document.title = `${file?.name ?? "分享"} · ${BRAND}`; }}>返回分享页</button></p>} />;
+  const saveButton = (request: SaveRequest) => canSave && <Button icon="folderPlus" onClick={() => requestSave(request)}
+    title={account ? "保存到你的文件，立即完成并计入你的存储空间" : `登录后保存到你的 ${BRAND}`}>保存到我的 {BRAND}</Button>;
   const single = file?.kind === "file" ? file : null;
   const kind = single ? getFileKind(single.content_type, single.name) : "other";
   const url = single ? api.publicPath(token, single.name, false, access) : "";
@@ -59,7 +89,8 @@ export function SharePage({ token }: { token: string }) {
         ) : !file ? (
           <div className="share-card"><SkeletonRows rows={3} /></div>
         ) : file.kind === "folder" ? (
-          <FolderShare token={token} folder={file} access={access} onPasswordRequired={() => load(access)} />
+          <FolderShare token={token} folder={file} access={access} onPasswordRequired={() => load(access)}
+            saveButton={saveButton} onSaveSelected={canSave ? paths => requestSave({ paths, label: paths.length === 1 ? paths[0].split("/").pop()! : `${paths.length} 个文件` }) : undefined} />
         ) : (
           <article className="share-card">
             <header className="share-head">
@@ -73,6 +104,7 @@ export function SharePage({ token }: { token: string }) {
               </div>
               <div className="share-actions">
                 <Button icon="link" onClick={() => void copyText(`${window.location.origin}${window.location.pathname}`, "分享链接已复制")}>复制链接</Button>
+                {saveButton({ label: file.name })}
                 <a className="btn btn-primary btn-md" href={downloadUrl}><Icon name="download" size={17} /><span>下载</span></a>
               </div>
             </header>
@@ -81,9 +113,36 @@ export function SharePage({ token }: { token: string }) {
         )}
         <p className="share-footnote">这是 {BRAND} 用户分享的{file?.kind === "folder" ? "文件夹" : "文件"}，只有拿到链接的人才能访问。</p>
       </main>
+      {saving && <SaveDialog token={token} access={access} request={saving} onClose={() => setSaving(null)} onPasswordRequired={() => { setSaving(null); load(access); }} />}
       <Toaster />
     </div>
   );
+}
+
+/** 选择保存位置：复用文件页的目录浏览器（只能选普通目录，不能选私密空间）。 */
+function SaveDialog({ token, access, request, onClose, onPasswordRequired }: { token: string; access: string | null; request: SaveRequest; onClose: () => void; onPasswordRequired: () => void }) {
+  const [destination, setDestination] = useState("");
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const target = destination ? destination.replace(/\/$/, "").split("/").pop()! : "我的文件";
+  async function save() {
+    setBusy(true);
+    try {
+      const result = await api.saveShare(token, destination, access, request.paths);
+      onClose();
+      const opened = destination ? `/?path=${encodeURIComponent(destination)}` : "/";
+      const saved = result.items.length === 1 ? `“${result.items[0].replace(/\/$/, "").split("/").pop()}”` : `${result.saved} 个文件`;
+      toast.success(`已把${saved}保存到“${target}”`, { label: "打开", onClick: () => window.open(opened, "_blank", "noopener") });
+    } catch (reason) {
+      if (reason instanceof api.ApiError && reason.code === "password_required") { onPasswordRequired(); return; }
+      toast.error(reason instanceof api.ApiError && reason.status === 413 ? "你的存储空间不足，无法保存" : api.errorMessage(reason, "保存失败，请稍后重试"));
+    } finally { setBusy(false); }
+  }
+  return <Modal title={request.paths && request.paths.length > 1 ? `保存 ${request.label}` : `保存“${request.label}”`} icon="folderPlus" onClose={onClose}
+    description={`保存到你的 ${BRAND} 文件中。内容不需要重新传输，立即完成，并计入你的存储空间；同名时自动改名。`}
+    footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" loading={busy} disabled={!ready} onClick={() => void save()}>保存到“{target}”</Button></>}>
+    <FolderPicker value={destination} onChange={next => { setReady(false); setDestination(next); }} onReady={setReady} />
+  </Modal>;
 }
 
 function PasswordGate({ token, onUnlocked }: { token: string; onUnlocked: (grant: string) => void }) {
@@ -120,7 +179,10 @@ function PasswordGate({ token, onUnlocked }: { token: string; onUnlocked: (grant
 type FolderPage = api.PublicFolderPage;
 
 /** 访客只读浏览：进入子文件夹、预览、单文件或打包下载。 */
-function FolderShare({ token, folder, access, onPasswordRequired }: { token: string; folder: api.PublicFolder; access: string | null; onPasswordRequired: () => void }) {
+function FolderShare({ token, folder, access, onPasswordRequired, saveButton, onSaveSelected }: {
+  token: string; folder: api.PublicFolder; access: string | null; onPasswordRequired: () => void;
+  saveButton: (request: SaveRequest) => ReactNode; onSaveSelected?: (paths: string[]) => void;
+}) {
   const pageSize = useFilePageSize();
   const readPath = () => new URLSearchParams(window.location.search).get("path") ?? "";
   const [path, setPath] = useState(readPath);
@@ -195,6 +257,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
         </div>
         <div className="share-actions">
           <Button icon="link" onClick={() => void copyText(`${window.location.origin}${window.location.pathname}`, "分享链接已复制")}>复制链接</Button>
+          {saveButton({ label: folder.name })}
           <Button icon="download" disabled={!page || Boolean(error) || !page.files.length && !pagination.hasNext && !pagination.hasPrevious} title="打包下载当前目录的全部文件，不包含子文件夹" onClick={() => downloadFiles(true)}>下载全部文件</Button>
         </div>
       </header>
@@ -212,6 +275,7 @@ function FolderShare({ token, folder, access, onPasswordRequired }: { token: str
             indeterminate={selectedOnPage > 0 && selectedOnPage < page!.files.length} onChange={checked => selectFiles(page!.files.map(file => file.path), checked)} /><span>全选本页</span></label>}
           <span className="muted">{selected.size ? `已选择 ${selected.size} 个文件` : page ? `本页 ${page.folders.length + page.files.length} 项` : "文件夹内容"}</span>
           <Button size="sm" variant={selected.size ? "primary" : "secondary"} icon="download" disabled={!selected.size} title="将所选文件打包为 ZIP" onClick={() => downloadFiles()}>下载所选</Button>
+          {onSaveSelected && selected.size > 0 && <Button size="sm" icon="folderPlus" title={`把所选文件保存到你的 ${BRAND}`} onClick={() => onSaveSelected([...selected])}>保存所选</Button>}
           {selected.size > 0 && <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>清空选择</Button>}
         </div>
         <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />

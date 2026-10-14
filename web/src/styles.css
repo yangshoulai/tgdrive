@@ -402,6 +402,8 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 .inline-note.tone-warning { background: var(--warning-soft); color: var(--warning); }
 .inline-note.tone-success { margin-bottom: 18px; background: var(--success-soft); color: var(--success); }
 .inline-note.banner { margin-bottom: 16px; }
+.inline-note.share-login-note { margin-bottom: 18px; flex-wrap: wrap; }
+.share-login-note > span { flex: 1; min-width: 0; }
 
 .switch-row { position: relative; display: flex; align-items: center; gap: 16px; cursor: pointer; }
 .switch-row.is-disabled { cursor: progress; opacity: .7; }
@@ -1669,8 +1671,8 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .share-bar { padding: 0 16px; }
   .share-main { padding: 24px 12px; }
   .share-head { flex-wrap: wrap; padding: 18px; }
-  .share-actions { width: 100%; }
-  .share-actions > * { flex: 1; }
+  .share-actions { width: 100%; flex-wrap: wrap; }
+  .share-actions > * { flex: 1 1 auto; }
   .docs-bar { grid-template-columns: 1fr auto; padding: 0 12px; }
   .docs-bar-links, .docs-search-trigger span, .docs-search-trigger kbd { display: none; }
   .docs-search-trigger { width: 36px; justify-content: center; padding: 0; }

@@ -663,6 +663,108 @@ class ObjectService:
             raise NotFoundError(relative)
         return root, self.head_object(Scope(root.bucket_id), root.key + relative)
 
+    SAVE_PUBLIC_LIMIT = 10000
+
+    def save_public(self, token: str, dst: Scope, destination: str, paths: list[str] | None = None) -> dict[str, object]:
+        """把公开分享的文件或文件夹保存到 dst 的 destination 目录（以 / 结尾，空串为根目录）。
+
+        新对象引用同一个加密 Blob（不搬运数据，计入保存者的配额），不继承来源的公开链接。
+        paths 为分享文件夹内的相对路径（文件或以 / 结尾的子文件夹），平铺保存到目标目录；
+        省略时保存整个分享。同名文件或文件夹自动改名。全部在一个事务内完成，配额不足时不保存任何内容。
+        调用方负责校验分享密码；这里校验有效期、账号状态与相对路径范围。
+        """
+        root = self.resolve_public(token)
+        if root.bucket_id == dst.bucket_id:
+            raise ValueError("这是你自己分享的内容，无需保存")
+        if destination and not destination.endswith("/"):
+            raise ValueError("目标目录不正确")
+        if destination:
+            self._check_scope(dst, destination, write=True)
+        # (来源前缀, 目标前缀)：文件以完整键精确匹配，文件夹按前缀匹配。
+        if not root.key.endswith("/"):
+            if paths:
+                raise ValueError("单个文件的分享不能选择子路径")
+            sources = [(root.key, destination + root.key.rsplit("/", 1)[-1])]
+        elif not paths:
+            sources = [(root.key, destination + root.key.rstrip("/").rsplit("/", 1)[-1] + "/")]
+        else:
+            if len(paths) > self.SAVE_PUBLIC_LIMIT:
+                raise ValueError(f"一次最多保存 {self.SAVE_PUBLIC_LIMIT} 个项目")
+            sources = []
+            for value in dict.fromkeys(paths):
+                relative = self._public_relative(value)
+                if not relative:
+                    raise ValueError("请选择要保存的文件")
+                sources.append((root.key + relative, destination + relative.rstrip("/").rsplit("/", 1)[-1] + ("/" if relative.endswith("/") else "")))
+        for _, target in sources:
+            self._check_scope(dst, target, write=True)
+
+        now = time.time()
+        with self.metadata.transaction() as db:
+            plan: list[tuple] = []  # (来源序号, 来源行或 None, 相对来源的子路径)
+            for index, (source, target) in enumerate(sources):
+                if source.endswith("/"):
+                    rows = db.execute("SELECT * FROM objects WHERE bucket_id=? AND key>=? AND key<? ORDER BY key LIMIT ?",
+                                      (root.bucket_id, source, source + self._PREFIX_END, self.SAVE_PUBLIC_LIMIT + 1)).fetchall()
+                    if not rows:
+                        raise NotFoundError(source[len(root.key):])
+                    plan.extend((index, row, row["key"][len(source):]) for row in rows)
+                    if not any(row["key"] == source for row in rows):
+                        plan.append((index, None, ""))  # 隐式文件夹：补一个目录标记
+                else:
+                    row = db.execute("SELECT * FROM objects WHERE bucket_id=? AND key=?", (root.bucket_id, source)).fetchone()
+                    if row is None:
+                        raise NotFoundError(source[len(root.key):])
+                    plan.append((index, row, ""))
+                if len(plan) > self.SAVE_PUBLIC_LIMIT:
+                    raise ValueError(f"一次最多保存 {self.SAVE_PUBLIC_LIMIT} 个文件，请进入子文件夹分批保存")
+            bucket = db.execute("SELECT quota_bytes, used_bytes FROM buckets WHERE id=?", (dst.bucket_id,)).fetchone()
+            if bucket is None:
+                raise NotFoundError(f"bucket {dst.bucket_id} not found")
+            total = sum(int(row["size"]) for _, row, _ in plan if row is not None)
+            if bucket["quota_bytes"] is not None and int(bucket["used_bytes"]) + total > bucket["quota_bytes"]:
+                raise QuotaExceededError("存储空间不足，无法保存")
+            # 只给每个顶层目标改名：保存出来的文件夹是全新的，内部不会再有冲突。
+            reserved: set[str] = set()  # 本次已占用的顶层名称（不含结尾 /）
+            renamed: list[str] = []
+            def occupied(name: str) -> bool:
+                # 同名文件或同名文件夹（含只有子项、没有目录标记的隐式文件夹）都算占用。
+                return name in reserved or db.execute(
+                    "SELECT 1 FROM objects WHERE bucket_id=? AND (key=? OR (key>=? AND key<?)) LIMIT 1",
+                    (dst.bucket_id, name, name + "/", name + "/" + self._PREFIX_END)).fetchone() is not None
+            for _, target in sources:
+                final = bare = target.rstrip("/")
+                directory, slash, name = bare.rpartition("/")
+                base, dot, ext = name.rpartition(".")
+                if not dot or not base or target.endswith("/"):
+                    base, dot, ext = name, "", ""
+                n = 1
+                while occupied(final):
+                    final, n = f"{directory}{slash}{base} ({n}){dot}{ext}", n + 1
+                reserved.add(final)
+                renamed.append(final + ("/" if target.endswith("/") else ""))
+            saved = 0
+            for index, row, rest in plan:
+                key = renamed[index] + rest
+                self._check_scope(dst, key, write=True)
+                if row is None or row["blob_uuid"] is None:
+                    db.execute("INSERT OR IGNORE INTO objects(bucket_id,key,blob_uuid,size,etag,content_type,user_meta,modified_at) "
+                               "VALUES(?,?,?,?,?,?,?,?)", (dst.bucket_id, key, None, 0,
+                                                          hashlib.md5(b"").hexdigest(), "application/x-directory", "{}", now))
+                else:
+                    db.execute("UPDATE blobs SET refcount = refcount + 1 WHERE uuid = ?", (row["blob_uuid"],))
+                    db.execute("INSERT INTO objects(bucket_id,key,blob_uuid,size,etag,content_type,user_meta,modified_at) "
+                               "VALUES(?,?,?,?,?,?,?,?)", (dst.bucket_id, key, row["blob_uuid"], row["size"], row["etag"],
+                                                          row["content_type"], row["user_meta"], now))
+                    saved += 1
+            db.execute("UPDATE buckets SET used_bytes = used_bytes + ? WHERE id=?", (total, dst.bucket_id))
+            # 每次保存计为一次下载，分享者能看到被转存，以后的下载次数上限也不会被绕过。
+            db.execute("UPDATE objects SET public_downloads=public_downloads+1 WHERE bucket_id=? AND key=?", (root.bucket_id, root.key))
+        return {"saved": saved, "bytes": total, "items": renamed}
+
+    async def asave_public(self, token: str, dst: Scope, destination: str, paths: list[str] | None = None) -> dict[str, object]:
+        return await self.metadata.run_in_thread(self.save_public, token, dst, destination, paths)
+
     async def get_public_object(self, token: str, start: int = 0, end: int | None = None):
         info = self.resolve_public(token)
         return await self.get_object(Scope(info.bucket_id), info.key, start, end)

@@ -861,6 +861,23 @@ class UserApi:
                                               self._scope(token), self._path(target))
         return self._objects_json([item])[0]
 
+    # ---------- 保存他人的分享 ----------
+
+    def share_status(self, token: str, share_token: str) -> dict[str, object]:
+        """只回答分享是否属于当前账号，不向访客透露分享者是谁。"""
+        own = self.objects.resolve_public(share_token).bucket_id == self._scope(token).bucket_id
+        return {"own": own}
+
+    async def save_share(self, token: str, csrf: str, share_token: str, destination, paths) -> dict[str, object]:
+        """把分享保存到自己的文件（普通目录，不能是私密空间）。调用方负责校验分享密码。"""
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        if not isinstance(destination, str):
+            raise ValueError("目标目录不正确")
+        if paths is not None and (not isinstance(paths, list) or not all(isinstance(item, str) for item in paths)):
+            raise ValueError("paths 必须为字符串数组")
+        prefix = self._path(destination, directory=True) if destination else ""
+        return await self.objects.asave_public(share_token, scope, prefix, paths or None)
+
     def list_clients(self, token: str, *, limit: int | None = None, cursor: int = 0):
         session = self._session(token)
         if self.clients is None:

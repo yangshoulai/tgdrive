@@ -337,7 +337,7 @@ class TgDriveASGI(StaticFiles):
                          "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
-                         "/downloads/clear": "download.clear",
+                         "/downloads/clear": "download.clear", "/shares/{}/save": "share.save",
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
@@ -353,6 +353,7 @@ class TgDriveASGI(StaticFiles):
                 continue
             route = path[len(prefix):]
             pattern = re.sub(r"^/(users|clients|bots|downloads)/\d+/", r"/\1/{}/", route)
+            pattern = re.sub(r"^/shares/[A-Za-z0-9_-]+/", "/shares/{}/", pattern)
             action = routes.get(pattern)
             if action is None:
                 return None
@@ -360,7 +361,8 @@ class TgDriveASGI(StaticFiles):
             # 文件空间接口现在也会收到管理员的会话：操作者类型取会话里的真实角色。
             role = "admin" if prefix.endswith("admin/v1") else (session.role if session else "user")
             actor = str(payload.get("username") or "") if action.endswith(".login") or action == "system.setup" else (session.username if session else None)
-            target_id = route.split("/")[2] if pattern.count("{}") else None
+            # 分享令牌本身就是访问凭据，不写入审计。
+            target_id = route.split("/")[2] if pattern.count("{}") and not pattern.startswith("/shares/") else None
             return {"action": action, "actor_type": role, "actor": actor or None, "payload": payload, "target_id": target_id,
                     "ip": (scope.get("client") or [None])[0]}
         return None
@@ -398,6 +400,9 @@ class TgDriveASGI(StaticFiles):
                 detail["proxy_enabled"] = bool(payload.get("proxy"))
         elif action == "download.create":
             detail = {"count": len(payload.get("items", [])) if isinstance(payload.get("items"), list) else 0}
+        elif action == "share.save":
+            target = str(payload.get("destination") or "") or "我的文件"
+            detail = {"saved": (result or {}).get("saved"), "bytes": (result or {}).get("bytes")} if ok else {}
         elif action == "download.clear":
             detail = {"status": payload.get("status") if payload.get("status") in ("completed", "failed") else None,
                       "removed": (result or {}).get("removed") if ok else None}
@@ -692,6 +697,15 @@ class TgDriveASGI(StaticFiles):
             if route in ("/passkeys/rename", "/passkeys/delete", "/passkeys/enable-login") and method == "POST":
                 return 200, await self.passkeys.manage(token, csrf, payload.get("password"), payload.get("id"),
                     name=payload.get("name"), delete=route.endswith("/delete"), enable_login=route.endswith("/enable-login"), ip=ip), {}
+            shared = re.fullmatch(r"/shares/([A-Za-z0-9_-]{8,64})/(status|save)", route)
+            if shared and shared[2] == "status" and method == "GET":
+                return 200, user.share_status(token, shared[1]), {"Cache-Control": "no-store"}
+            if shared and shared[2] == "save" and method == "POST":
+                # 与访客读取文件一致：有密码的分享需要先在分享页通过验证，带上 access 令牌。
+                _, password_hash = self._public_share(shared[1])
+                if password_hash and not self.share_access.check(shared[1], password_hash, payload.get("access")):
+                    raise SharePasswordRequired("password required")
+                return 200, await user.save_share(token, csrf, shared[1], payload.get("destination", ""), payload.get("paths")), {}
             if route.startswith("/downloads") and self.offline is not None:
                 session = user._session(token, csrf=csrf, mutation=method != "GET")
                 account = user.accounts.account_for_session(session)
