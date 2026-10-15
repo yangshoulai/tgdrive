@@ -4,17 +4,24 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import secrets
-import traceback
 import re
+import secrets
 import time
+import traceback
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
 from .api import AdminApi, UserApi
 from .archive import stream_zip
 from .audit import AuditLog
-from .authn import AuthenticationError, CsrfError, SessionExpired, TooManyAttempts, hash_password, verify_password
+from .authn import (
+    AuthenticationError,
+    CsrfError,
+    SessionExpired,
+    TooManyAttempts,
+    hash_password,
+    verify_password,
+)
 from .context import AppContext
 from .errors import (
     IntegrityError,
@@ -31,8 +38,8 @@ from .private import PrivateAccessLogFilter, PrivateLocked, PrivateSpace
 from .settings import SystemSettings
 from .share import ShareAccess
 from .static import StaticFiles
+from .version import __version__
 from .work import WorkBusyError
-
 
 log = logging.getLogger("tgdrive.http")
 
@@ -602,6 +609,9 @@ class TgDriveASGI(StaticFiles):
                                             failed_only=query.get("failed", ["0"])[0] in ("1", "true")), {}
             if method == "GET" and route == "/settings":
                 return 200, self.settings.describe(), {}
+            if method == "GET" and route == "/version":
+                # 只给管理员看：公开接口不暴露版本号。
+                return 200, {"version": __version__}, {}
             if method == "POST" and route == "/settings":
                 return 200, self.settings.update(payload), {}
             if route == "/resources" and self.resources is not None:

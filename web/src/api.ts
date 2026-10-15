@@ -453,6 +453,7 @@ export const adminAudit = (options: { cursor?: number | null; failedOnly?: boole
   return request<{ events: AuditEvent[]; next_cursor: number | null }>(`/api/admin/v1/audit?${params}`);
 };
 export const adminStatus = () => request<SystemStatus>("/api/admin/v1/status");
+export const adminVersion = (signal?: AbortSignal) => request<{ version: string }>("/api/admin/v1/version", { signal });
 export const adminSetup = (passphrase: string, username: string, password: string, nickname = "") => post<{ user_id: number; username: string }>("/api/admin/v1/setup", { passphrase, username, password, nickname });
 export const adminUnlock = (passphrase: string) => post<SystemStatus>("/api/admin/v1/unlock", { passphrase });
 export const adminLock = () => post<void>("/api/admin/v1/lock");

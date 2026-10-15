@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tests.test_public_links import Client
 from tgdrive.app import create_app
+from tgdrive.version import __version__
 
 
 class UnifiedAuthTests(unittest.TestCase):
@@ -49,6 +50,8 @@ class UnifiedAuthTests(unittest.TestCase):
             status, _, data = await self.client.request("GET", "/api/admin/v1/users", b"", admin)
             self.assertEqual(status, 200)
             self.assertEqual(sorted(user["username"] for user in json.loads(data)), ["admin@example.com", "alice@example.com"])
+            status, _, data = await self.client.request("GET", "/api/admin/v1/version", b"", admin)
+            self.assertEqual((status, json.loads(data)["version"]), (200, __version__))
             status, _, data = await self.client.request("GET", "/api/auth/v1/me", b"", admin)
             me = json.loads(data)
             self.assertEqual((status, me["role"], me["unlocked"], me["bucket_id"] is not None), (200, "admin", True, True))
@@ -60,7 +63,7 @@ class UnifiedAuthTests(unittest.TestCase):
             status, _, _ = await self.client.request("PUT", "/api/user/v1/files?path=a.txt", b"x", {**alice, "content-length": "1"})
             self.assertEqual(status, 200)
             for method, path in (("GET", "/api/admin/v1/users"), ("GET", "/api/admin/v1/settings"), ("GET", "/api/admin/v1/audit"),
-                                 ("GET", "/api/admin/v1/objects"), ("GET", "/api/admin/v1/docs-bundle.js")):
+                                 ("GET", "/api/admin/v1/objects"), ("GET", "/api/admin/v1/docs-bundle.js"), ("GET", "/api/admin/v1/version")):
                 status, _, _ = await self.client.request(method, path, b"", alice)
                 self.assertEqual(status, 403, path)
             status, _, _ = await self.client.request("POST", "/api/admin/v1/users", b'{"username":"x","password":"password1"}', alice)

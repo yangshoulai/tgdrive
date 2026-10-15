@@ -2,9 +2,10 @@ services:
   tgdrive:
     build:
       context: .
-      # X／YouTube 使用 target: platform；发布镜像标签为 latest-platform。
+      # X／YouTube 使用 target: platform；发布镜像标签为 1-platform。
       # target: platform
-    image: ghcr.io/yangshoulai/tgdrive:latest
+    # 固定主版本：自动获得 1.x 的修复，不会跨越不兼容的升级。
+    image: ghcr.io/yangshoulai/tgdrive:1
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -14,7 +15,7 @@ services:
       TGDRIVE_PORT: 8000
       # 管理端「下载与资源」配置优先；auto 会按容器的实际限制选择预算。
       TGDRIVE_RESOURCE_MODE: auto
-      # M3U8 需要使用 latest-ffmpeg 镜像，或 build.args.INSTALL_FFMPEG: "1"。
+      # M3U8 需要使用 1-ffmpeg 镜像，或 build.args.INSTALL_FFMPEG: "1"。
       # TGDRIVE_OFFLINE_HLS: "1"
       # 平台镜像包含本地解析器、Node.js 与 FFmpeg；也可以在管理端单独启用。
       # TGDRIVE_OFFLINE_X: "1"

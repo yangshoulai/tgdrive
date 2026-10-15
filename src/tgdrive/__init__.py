@@ -11,6 +11,7 @@ from .keystore import KeyStore
 from .maintenance import MaintenanceService
 from .metadata import Metadata
 from .objects import ObjectService, Scope
+from .version import __version__
 
 __all__ = [
     "Account",
@@ -30,4 +31,5 @@ __all__ = [
     "TgDriveASGI",
     "TgDriveError",
     "UserApi",
+    "__version__",
 ]

@@ -23,6 +23,7 @@ from .s3.auth import ClientAuthStore
 from .s3.gateway import S3Gateway
 from .settings import SystemSettings
 from .telegram.config import ConfiguredBlobStore, TelegramBotConfigStore
+from .version import __version__
 from .work import PasswordWork
 
 
@@ -114,7 +115,9 @@ def restore_main(argv: list[str]) -> None:
 
 def audit_export_main(argv: list[str]) -> None:
     """导出加密审计归档；不读取或修改在线数据库。"""
+    import getpass
     import secrets
+
     from .maintenance import EncryptedSnapshotStore
     parser = argparse.ArgumentParser(description="导出加密审计归档为 JSONL")
     parser.add_argument("archive")
@@ -145,6 +148,7 @@ def main() -> None:
         audit_export_main(sys.argv[2:])
         return
     parser = argparse.ArgumentParser(description="启动 tgdrive ASGI 服务")
+    parser.add_argument("--version", action="version", version=f"tgdrive {__version__}")
     parser.add_argument("--data-dir", default=os.environ.get("TGDRIVE_DATA_DIR", "./data"))
     parser.add_argument("--host", default=os.environ.get("TGDRIVE_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("TGDRIVE_PORT", "8000")))

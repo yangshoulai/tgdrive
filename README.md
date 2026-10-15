@@ -212,13 +212,15 @@ docker compose up -d
 
 ### 镜像
 
-镜像地址为 `ghcr.io/yangshoulai/tgdrive`，每次推送 `v*` 标签时由 GitHub Actions 构建三个变体：
+镜像地址为 `ghcr.io/yangshoulai/tgdrive`，每次发布版本时由 GitHub Actions 构建三个变体：
 
 | 标签 | 内容 | 适用场景 |
 | --- | --- | --- |
-| `latest`、`<版本>` | 基础镜像 | 文件存储、分享、直链离线下载 |
-| `latest-ffmpeg`、`<版本>-ffmpeg` | 基础镜像 + FFmpeg | 需要下载 M3U8 |
-| `latest-platform`、`<版本>-platform` | FFmpeg + yt-dlp、gallery-dl、Node.js | 需要下载 X / YouTube 媒体 |
+| `1`、`1.0`、`1.0.0`、`latest` | 基础镜像 | 文件存储、分享、直链离线下载 |
+| `1-ffmpeg`、`1.0.0-ffmpeg`、`latest-ffmpeg` | 基础镜像 + FFmpeg | 需要下载 M3U8 |
+| `1-platform`、`1.0.0-platform`、`latest-platform` | FFmpeg + yt-dlp、gallery-dl、Node.js | 需要下载 X / YouTube 媒体 |
+
+版本号遵循语义化版本：同一主版本内（`1.x.y`）的升级保持数据库、`/api/v1`、S3 网关兼容，启动时自动迁移数据库。生产环境建议固定主版本标签（如 `1`），这样能自动获得修复又不会跨越不兼容的升级；每个版本的变化见 [CHANGELOG.md](CHANGELOG.md)，升级前建议先做一次加密备份。
 
 可选功能还需要在控制台「系统设置 → 下载与资源」中启用。本地构建对应变体：`docker build --build-arg INSTALL_FFMPEG=1 .` 或 `docker build --target platform .`。
 
@@ -350,6 +352,8 @@ make check PYTHON=.venv/bin/python
 ```
 
 前端没有开发服务器：修改后重新运行 `node build-apps.mjs` 并刷新页面即可，无需重启后端。未配置 Bot 时文件保存在数据目录中的本地分片目录。
+
+发布新版本：同时更新 `pyproject.toml` 与 `web/package.json` 的版本号、在 `CHANGELOG.md` 写明变化，然后推送 `v<版本号>` 标签（CI 会校验标签与 `pyproject.toml` 一致）。
 
 更多约定见 [`AGENTS.md`](AGENTS.md)（代码约定）、[`DESIGN.md`](DESIGN.md)（视觉规范）、[`UX-CONTRACT.md`](UX-CONTRACT.md)（交互与路由）和 [`docs/architecture-v2.md`](docs/architecture-v2.md)（架构设计）。
 

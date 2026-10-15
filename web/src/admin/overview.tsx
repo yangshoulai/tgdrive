@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { SITE } from "../brand";
+import { BRAND, SITE } from "../brand";
 import * as api from "../api";
 import { FileVisual, baseName, getFileKind } from "../files";
 
@@ -13,6 +13,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
   const [data, setData] = useState<{ users: api.AccountSummary; objects: api.AdminObjectPage; bots: api.BotConfig[] } | null>(null);
   useDocumentTitle(`概览 · ${SITE.admin}`);
   const [settings, setSettings] = useState<api.SystemSettings | null>(null);
+  const [version, setVersion] = useState("");
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -20,6 +21,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
     const controller = new AbortController();
     setError("");
     void api.adminSettings(controller.signal).then(value => { if (active) setSettings(value); }).catch(() => undefined);
+    void api.adminVersion(controller.signal).then(value => { if (active) setVersion(value.version); }).catch(() => undefined);
     void Promise.all([api.adminUserSummary(controller.signal), api.adminObjects({ limit: 6 }, controller.signal), api.adminBots(controller.signal)])
       .then(([users, objects, bots]) => { if (active) setData({ users, objects, bots }); })
       .catch(reason => { if (active) setError(api.errorMessage(reason, "概览加载失败，请稍后重试")); });
@@ -37,7 +39,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
   nearQuota.forEach(user => attention.push({ tone: user.used_bytes >= (user.quota_bytes ?? 0) ? "danger" : "warning", icon: "pulse", title: `${api.displayName(user)} 的空间即将用完`, detail: `已使用 ${formatBytes(user.used_bytes)} / ${formatBytes(user.quota_bytes)}。`, action: "调整配额", module: "users" }));
   return (
     <>
-      <PageHeader title="概览" />
+      <PageHeader title="概览" description={version ? `${BRAND} ${version}` : undefined} />
       <div className="stat-strip">
         <Stat label="用户" value={String(data.users.total)} detail={`${data.users.active} 个启用`} />
         <Stat label="文件" value={data.objects.total.toLocaleString("zh-CN")} detail="全部用户" />
