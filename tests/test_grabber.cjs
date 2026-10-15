@@ -11,7 +11,7 @@ const source = fs.readFileSync(path.join(__dirname, "../userscripts/tessera-grab
 const instrumented = source.replace(/\s+applySiteState\(\);\s*\}\)\(\);\s*$/, `
   globalThis.toastMessages = [];
   toast = message => globalThis.toastMessages.push(message);
-  globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBrowserBatch, close,
+  globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBatch, parseEntries, clearEntries, clearBatch, close,
     getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES };
 })();`);
 assert.notEqual(instrumented, source, "userscript test hook must replace only final bootstrap");
@@ -29,7 +29,7 @@ async function until(predicate) {
 
 function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true } = {}) {
   const values = { settings: { server: "https://tessera.example", key: "TEST:secret", cookies } };
-  const requests = [], fetches = [], listeners = [];
+  const requests = [], fetches = [], listeners = [], opened = [];
   const window = { addEventListener(type, listener) { if (type === "message") listeners.push(listener); }, removeEventListener() {},
     open: (url, target) => open ? open(url, target, listeners) : null, fetch: async (url, options) => {
     fetches.push({ url, options });
@@ -38,11 +38,12 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
   const context = vm.createContext({
     window, unsafeWindow: window, document: { cookie: "visible=page", querySelectorAll: () => [] },
     location: new URL("https://gallery.example/album"), navigator: { userAgent: "BrowserTest/1" },
-    URL, Blob, Response, ReadableStream, AbortController, DOMException, TextEncoder, Uint8Array, Uint32Array, crypto: webcrypto,
+    URL, Blob, Response, ReadableStream, AbortController, btoa, DOMException, TextEncoder, Uint8Array, Uint32Array, crypto: webcrypto,
     setTimeout: (fn, delay) => fn.name === "poll" ? 0 : setTimeout(fn, delay), clearTimeout, clearInterval,
     GM_getValue: (key, fallback) => values[key] ?? fallback,
     GM_setValue: (key, value) => { values[key] = value; },
     GM_registerMenuCommand() {},
+    GM_openInTab: url => opened.push(url),
     GM_cookie: cookieApi ? { list: (_, callback) => callback([{ name: "cf_clearance", value: "test-cookie", httpOnly: true }], null) } : undefined,
     GM_xmlhttpRequest: details => {
       const record = { details, aborted: false };
@@ -66,11 +67,11 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
   const api = context.grabber;
   const entry = (url = "https://images.example/0048.jpg", type = "image") => ({ url, type, state: "waiting", error: "", tasks: [] });
   const batch = (entries = [entry()]) => {
-    const result = { mode: "browser", started: false, destination: { path: "photos/", private: false }, entries };
+    const result = { mode: "local", started: false, destination: { path: "photos/", private: false }, entries };
     api.setBatch(result);
     return result;
   };
-  return { api, values, requests, fetches, messages: context.toastMessages, entry, batch };
+  return { api, values, requests, fetches, opened, messages: context.toastMessages, entry, batch };
 }
 
 test("browser image upload preserves bytes and isolates credentials", async () => {
@@ -389,7 +390,7 @@ test("stop aborts active source and prevents queued uploads", async () => {
   const current = h.batch([h.entry("https://images.example/a.png"), h.entry("https://images.example/b.png")]);
   const running = h.api.runBatch();
   await tick();
-  h.api.stopBrowserBatch();
+  h.api.stopBatch();
   await running;
   assert.equal(current.entries.every(entry => entry.state === "stopped"), true);
   assert.equal(h.fetches.length, 1);
@@ -406,7 +407,7 @@ test("stop aborts active upload; late callbacks cannot mark it sent", async () =
   const current = h.batch();
   const running = h.api.runBatch();
   await until(() => Boolean(upload));
-  h.api.stopBrowserBatch();
+  h.api.stopBatch();
   await running;
   upload.onload({ status: 200, responseText: JSON.stringify({ key: current.entries[0].path, size: png.length }) });
   await tick();
@@ -465,16 +466,93 @@ test("closing panel leaves transfer running with its original server and key", a
   assert.equal(upload.headers.Authorization, "Bearer TEST:secret");
 });
 
-test("existing offline batch still parses and creates server tasks", async () => {
+const parseResponse = { candidates: [
+  { ticket: "t-720", name: "clip.mp4", group: "v", variant: "720p", size: 10 },
+  { ticket: "t-1080", name: "clip-1080.mp4", group: "v", variant: "1080p", size: 20 },
+  { ticket: "t-img", name: "cover.jpg", group: "i", size: 5 },
+] };
+
+test("server mode parses first: one row per group with variants and editable names", async () => {
   const h = harness({ gm: details => details.onload({ status: 200, responseText: JSON.stringify(
-    details.url.endsWith("/parse") ? { candidates: [{ ticket: "test-ticket", name: "0048.jpg", group: "0" }] }
-      : { tasks: [{ id: 1, status: "completed", key: "photos/0048.jpg" }] }) }) });
-  const current = h.batch();
-  current.mode = "offline";
+    details.url.endsWith("/parse") ? parseResponse : { tasks: [{ id: 7, status: "queued", key: "photos/x" }] }) }) });
+  const current = h.batch([{ url: "https://cdn.example/clip.m3u8", type: "stream", state: "parsing", error: "", tasks: [], platform: null }]);
+  current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  assert.equal(current.entries.length, 2);
+  const [video, image] = current.entries;
+  assert.equal(video.state, "waiting");
+  assert.equal(video.variants.length, 2);
+  assert.equal(video.candidate.ticket, "t-720");
+  assert.equal(video.type, "video");
+  assert.equal(image.type, "image");
+  video.candidate = video.variants[1];
+  video.name = "我的视频.mp4";
   await h.api.runBatch();
-  assert.equal(current.entries[0].state, "submitted");
+  const creates = h.requests.filter(request => new URL(request.details.url).pathname === "/api/v1/downloads");
+  assert.deepEqual(creates.map(request => JSON.parse(request.details.data)), [
+    { items: [{ ticket: "t-1080", name: "我的视频.mp4" }], destination: "photos/" },
+    { items: [{ ticket: "t-img", name: "cover.jpg" }], destination: "photos/" },
+  ]);
+  assert.equal(video.state, "submitted");
   assert.equal(h.fetches.length, 0);
-  assert.deepEqual(h.requests.map(request => new URL(request.details.url).pathname), ["/api/v1/downloads/parse", "/api/v1/downloads"]);
-  assert.equal(JSON.parse(h.requests[1].details.data).items[0].ticket, "test-ticket");
-  assert.deepEqual(Array.from(h.values.sent), [current.entries[0].url]);
+});
+
+test("server mode to private space hands renamed candidates to the Tessera page", async () => {
+  const h = harness({ gm: details => details.onload({ status: 200, responseText: JSON.stringify(parseResponse) }) });
+  const current = h.batch([{ url: "https://cdn.example/clip.m3u8", type: "stream", state: "parsing", error: "", tasks: [], platform: null }]);
+  current.mode = "server";
+  current.destination = { path: "", private: true };
+  await h.api.parseEntries(current, current.entries.slice());
+  current.entries[1].name = "封面.jpg";
+  await h.api.runBatch();
+  assert.equal(h.opened.length, 1);
+  const match = /\/\?view=downloads#import=([\w-]+)$/.exec(h.opened[0]);
+  const json = JSON.parse(Buffer.from(match[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+  assert.equal(json.private, true);
+  assert.deepEqual(json.candidates.map(item => [item.ticket, item.name]), [["t-720", "clip.mp4"], ["t-img", "封面.jpg"]]);
+  assert.equal(h.requests.some(request => request.details.url.endsWith("/api/v1/downloads")), false);
+  assert.ok(current.entries.every(entry => entry.state === "handoff"));
+});
+
+test("server parse failure is skipped at start and can be re-parsed", async () => {
+  let fail = true;
+  const h = harness({ gm: details => {
+    if (details.url.endsWith("/parse") && fail) return details.onload({ status: 400, responseText: '{"error":{"message":"来源拒绝"}}' });
+    details.onload({ status: 200, responseText: JSON.stringify(details.url.endsWith("/parse") ? { candidates: [parseResponse.candidates[2]] } : { tasks: [{ id: 9, status: "queued" }] }) });
+  } });
+  const current = h.batch([
+    { url: "https://cdn.example/a.jpg", type: "image", state: "parsing", error: "", tasks: [], platform: null },
+  ]);
+  current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  assert.equal(current.entries[0].state, "parse-error");
+  assert.match(current.entries[0].error, /来源拒绝/);
+  fail = false;
+  await h.api.retryEntries([current.entries[0]]);
+  await until(() => current.entries[0].state === "submitted");
+  assert.equal(current.entries[0].candidate.ticket, "t-img");
+});
+
+test("finished rows can be cleared; clearing the last row drops the batch", async () => {
+  const h = harness();
+  const current = h.batch([h.entry("https://images.example/a.jpg"), h.entry("https://images.example/b.jpg")]);
+  await h.api.runBatch();
+  assert.ok(current.entries.every(entry => entry.state === "completed"));
+  h.api.clearEntries([current.entries[0]]);
+  assert.equal(current.entries.length, 1);
+  assert.equal(h.api.getBatch(), current);
+  h.api.clearEntries([current.entries[0]]);
+  assert.equal(h.api.getBatch(), null);
+  // 已保存的文件不受影响：清除不会发出任何删除请求。
+  assert.equal(h.requests.some(request => request.details.url.endsWith("/delete")), false);
+});
+
+test("a running batch cannot be cleared", () => {
+  const h = harness();
+  const current = h.batch();
+  current.started = true;
+  current.entries[0].state = "downloading";
+  h.api.clearBatch();
+  assert.equal(h.api.getBatch(), current);
+  assert.match(h.messages.at(-1), /还有文件在传输/);
 });
