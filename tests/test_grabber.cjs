@@ -13,7 +13,7 @@ const instrumented = source.replace(/\s+applySiteState\(\);\s*\}\)\(\);\s*$/, `
   toast = message => globalThis.toastMessages.push(message);
   globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBatch, parseEntries, clearEntries, clearBatch, close,
     getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES,
-    pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages };
+    pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages, collect, addItem, checkNavigation, setActive: value => { active = value; } };
 })();`);
 assert.notEqual(instrumented, source, "userscript test hook must replace only final bootstrap");
 
@@ -28,7 +28,7 @@ async function until(predicate) {
   throw new Error("transfer did not reach the expected state");
 }
 
-function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true } = {}) {
+function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true, dom } = {}) {
   const values = { settings: { server: "https://tessera.example", key: "TEST:secret", cookies } };
   const requests = [], fetches = [], listeners = [], opened = [];
   const window = { addEventListener(type, listener) { if (type === "message") listeners.push(listener); }, removeEventListener() {},
@@ -37,7 +37,7 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
     return fetch ? fetch(url, options) : imageResponse();
   } };
   const context = vm.createContext({
-    window, unsafeWindow: window, document: { cookie: "visible=page", querySelectorAll: () => [] },
+    window, unsafeWindow: window, document: { cookie: "visible=page", querySelectorAll: selector => dom ? dom(selector) : [] },
     location: new URL("https://gallery.example/album"), navigator: { userAgent: "BrowserTest/1" },
     URL, Blob, Response, ReadableStream, AbortController, btoa, DOMException, TextEncoder, Uint8Array, Uint32Array, crypto: webcrypto,
     setTimeout: (fn, delay) => fn.name === "poll" ? 0 : setTimeout(fn, delay), clearTimeout, clearInterval,
@@ -72,7 +72,7 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
     api.setBatch(result);
     return result;
   };
-  return { api, values, requests, fetches, opened, messages: context.toastMessages, entry, batch };
+  return { api, context, values, requests, fetches, opened, messages: context.toastMessages, entry, batch };
 }
 
 test("browser image upload preserves bytes and isolates credentials", async () => {
@@ -632,4 +632,27 @@ test("sending pages waits for the Tessera page and verifies origin and nonce", a
   assert.equal(posted[0].message.pages.length, 1);
   emit("https://tessera.example", { source: "tessera", nonce, type: "page-ack", ok: true });
   await done;
+});
+
+test("detected resources accumulate across popups and page changes until cleared manually", () => {
+  // 网页每点一个标签弹出一组图片：上一组离开 DOM、地址也可能变化，已探测的资源都要保留，便于一次发送多组。
+  let images = [];
+  const img = src => ({ currentSrc: src, src, naturalWidth: 1200, naturalHeight: 800 });
+  const h = harness({ dom: selector => selector === "img" ? images : [] });
+  const urls = () => [...h.api.collect()].map(item => item.url).sort();
+  images = [1, 2, 3].map(n => img(`https://charts.example/a-${n}.png`));
+  assert.equal(urls().length, 3);
+  images = [1, 2, 3].map(n => img(`https://charts.example/b-${n}.png`));
+  assert.equal(urls().length, 6, "上一个弹窗的图片离开 DOM 后仍保留");
+  h.api.addItem("https://cdn.example/clip.mp4", "video", { source: "网络" });
+  h.api.setActive(true);
+  h.context.location.href = "https://gallery.example/album?tab=2";
+  h.api.checkNavigation();
+  images = [];
+  assert.deepEqual(urls(), [
+    "https://cdn.example/clip.mp4",
+    ...[1, 2, 3].map(n => `https://charts.example/a-${n}.png`),
+    ...[1, 2, 3].map(n => `https://charts.example/b-${n}.png`),
+  ].sort(), "单页应用换页不清除已探测的资源");
+  h.api.setActive(false);
 });

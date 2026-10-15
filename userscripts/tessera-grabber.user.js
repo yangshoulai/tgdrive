@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.11.0
+// @version      0.12.0
 // @description  在 X、YouTube 和其他网页上复制资源地址与 curl 命令，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
@@ -103,8 +103,10 @@
     file: /\.(zip|rar|7z|tar|gz|pdf|apk|ipa|dmg|exe|msi|iso|epub)$/i,
   };
   const TYPE_LABEL = { video: "视频", audio: "音频", stream: "M3U8", image: "图片", file: "文件" };
+  // 已探测的资源一直累积（上限 MAX_ITEMS，超出时丢弃最早的），只有手动「清空」或刷新页面才清除：
+  // 弹窗、标签页切换后旧图片离开 DOM，或单页应用换了地址，之前探测到的资源都要保留，方便一次发送多处的文件。
   const items = new Map();
-  const clearedUrls = new Set();  // 当前页面已清空的地址，避免 DOM 扫描或重复请求立即补回
+  const clearedUrls = new Set();  // 已手动清空的地址，避免 DOM 扫描或重复请求立即补回
   const listeners = new Set();
 
   function classify(url, initiator) {
@@ -122,11 +124,14 @@
     return null;
   }
 
-  function addItem(url, type, extra = {}) {
-    if (!url || items.has(url) || clearedUrls.has(url)) return;
+  function remember(url, type, extra = {}) {
+    if (!url || items.has(url) || clearedUrls.has(url)) return false;
     items.set(url, { url, type, time: Date.now(), ...extra });
     while (items.size > MAX_ITEMS) items.delete(items.keys().next().value);
-    listeners.forEach(fn => fn());
+    return true;
+  }
+  function addItem(url, type, extra = {}) {
+    if (remember(url, type, extra)) listeners.forEach(fn => fn());
   }
 
   let networkObserver = null;
@@ -1203,9 +1208,10 @@
     const scope = currentContext && currentContext.scope;
     const dom = scanDom(scope || document);
     if (scope) return dom.filter(item => !clearedUrls.has(item.url)); // 单条帖子只看它自己的媒体
+    // DOM 中扫描到的资源也记下来：之后它们离开页面（关闭弹窗、切换标签）仍然留在列表里。
+    for (const item of dom) remember(item.url, item.type, { source: item.source });
     const merged = new Map();
     for (const item of [...items.values()].reverse()) merged.set(item.url, item);
-    for (const item of dom) if (!merged.has(item.url)) merged.set(item.url, item);
     if (currentContext && currentContext.platform === "youtube") {
       const cover = `https://i.ytimg.com/vi/${currentContext.id}/maxresdefault.jpg`;
       merged.set(cover, { url: cover, type: "image", source: "封面" });
@@ -2513,18 +2519,15 @@
 
   // ---------- 单页应用换页 ----------
 
-  // X、YouTube 换页不刷新文档：地址变化时丢掉上一页的资源，主面板切换到新页面。X 的图片查看器（/photo/1）不算换页。
+  // X、YouTube 等单页应用换页不刷新文档：地址变化时主面板切换到新页面，已探测的资源保留（只有手动清空或刷新页面才清除）。
+  // X 的图片查看器（/photo/1）不算换页。
   const pageKey = href => { try { const url = new URL(href); return url.origin + url.pathname.replace(/\/(photo|video)\/\d+\/?$/, "") + url.search; } catch { return href; } };
   let currentPage = pageKey(location.href);
   let navTimer = 0;
-  function checkNavigation(slack = 0) {
+  function checkNavigation() {
     const key = pageKey(location.href);
     if (!active || key === currentPage) return;
     currentPage = key;
-    clearedUrls.clear();
-    // 轮询发现得晚，保留刚到达的资源（大概率属于新页面）。
-    const cutoff = Date.now() - slack;
-    for (const [url, item] of items) if (item.time < cutoff) items.delete(url);
     refreshFab();
     if (!panel || panel.dataset.view !== "main" || (currentContext && currentContext.scope)) return;
     const next = platformOf(location.href);
@@ -2537,7 +2540,7 @@
     const navigation = page.navigation || window.navigation;
     try { navigation?.addEventListener("navigatesuccess", () => checkNavigation()); } catch { /* 不支持 Navigation API */ }
     window.addEventListener("popstate", () => checkNavigation());
-    navTimer = setInterval(() => checkNavigation(1500), 1000);
+    navTimer = setInterval(() => checkNavigation(), 1000);
   }
 
   // ---------- 启动 ----------
