@@ -215,9 +215,11 @@ class EncryptedSnapshotStore:
                 try:
                     row, kek = self._capture(target)
                     # 缩略图是可再生的展示缓存，不进入备份，避免备份随媒体数量膨胀；恢复后由浏览器按需补生成。
+                    # 文件助手调用日志只是运维元数据，同样不进入备份。
                     tables = {name for (name,) in target.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                    if tables & {"thumbnails", "thumbnail_legacy"}:
-                        for table in ("thumbnails", "thumbnail_legacy"):
+                    skipped = ("thumbnails", "thumbnail_legacy", "assistant_calls")
+                    if tables & set(skipped):
+                        for table in skipped:
                             if table in tables:
                                 target.execute(f"DELETE FROM {table}")
                         target.commit()
@@ -399,6 +401,7 @@ class MaintenanceService:
         self.backups = BackupService(self.snapshots, backup_dir or Path(metadata.path).parent / "backups")
         self.trash_purger = None  # 由应用工厂注入：async (now) -> int
         self.thumbnail_adopter = None  # 由应用工厂注入：同步 (limit) -> int，把旧版明文缩略图加密转存
+        self.assistant_cleaner = None  # 由应用工厂注入：async (now) -> dict，按保留期清理助手留痕与调用日志
 
     def status(self) -> dict[str, object]:
         state = _get_state(self.metadata, self.STATUS_KEY, {}) or {}
@@ -443,6 +446,8 @@ class MaintenanceScheduler:
             steps.append(("trash", lambda: self._purge(now)))
         if self.service.thumbnail_adopter is not None:
             steps.append(("thumbnails", lambda: self._adopt_thumbnails()))
+        if self.service.assistant_cleaner is not None:
+            steps.append(("assistant", lambda: self.service.assistant_cleaner(now)))
         if self._due("scrub", self.scrub_every, now):
             steps.append(("scrub", lambda: self._scrub()))
         if self._due("backup", self.backup_every, now):

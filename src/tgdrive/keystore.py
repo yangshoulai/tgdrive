@@ -115,6 +115,22 @@ class KeyStore:
                 bot_secrets.append((bot["id"], seal(new_bot_key, plaintext, aad)))
             old_offline_key = derive_subkey(old_kek, "offline-request")
             new_offline_key = derive_subkey(new_kek, "offline-request")
+            # 文件助手：渠道 API Key／请求头逐行重新加密；对话留痕用随机数据密钥加密，只需重新包裹这一把密钥。
+            old_ai_key, new_ai_key = derive_subkey(old_kek, "ai-channel-key"), derive_subkey(new_kek, "ai-channel-key")
+            ai_secrets = []
+            for channel in self.metadata.db.execute("SELECT id, secret, headers FROM ai_channels"):
+                values = []
+                for column in ("secret", "headers"):
+                    aad = f"ai-channel:{channel['id']}:{column}"
+                    sealed = channel[column]
+                    values.append(None if sealed is None else seal(new_ai_key, open_sealed(old_ai_key, sealed, aad), aad))
+                ai_secrets.append((*values, channel["id"]))
+            trace_row = self.metadata.db.execute("SELECT value FROM settings WHERE key='assistant.trace_key'").fetchone()
+            trace_key = None
+            if trace_row is not None:
+                import base64
+                plain = open_sealed(derive_subkey(old_kek, "assistant-trace"), base64.b64decode(trace_row["value"]), "assistant-trace-key")
+                trace_key = base64.b64encode(seal(derive_subkey(new_kek, "assistant-trace"), plain, "assistant-trace-key")).decode()
             # 所有重新包裹和 keys 更新在同一个事务里。
             with self.metadata.transaction() as db:
                 db.executemany("UPDATE blobs SET wrapped_dek = ? WHERE uuid = ?", ((w, u) for u, w in wrapped))
@@ -122,6 +138,9 @@ class KeyStore:
                                ((secret, access_key) for access_key, secret in client_secrets))
                 db.executemany("UPDATE telegram_bots SET token_enc = ? WHERE id = ?",
                                ((secret, bot_id) for bot_id, secret in bot_secrets))
+                db.executemany("UPDATE ai_channels SET secret = ?, headers = ? WHERE id = ?", ai_secrets)
+                if trace_key is not None:
+                    db.execute("UPDATE settings SET value = ? WHERE key = 'assistant.trace_key'", (trace_key,))
                 # 历史任务可能很多，逐条重加密，不把所有请求体再攒到内存里。
                 for task in db.execute("SELECT id,request_enc FROM offline_tasks"):
                     aad = f"offline:{task['id']}"

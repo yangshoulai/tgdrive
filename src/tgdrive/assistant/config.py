@@ -1,0 +1,226 @@
+"""助手的全局设置、Agent 循环上限、工具配置与用户策略。
+
+全局设置存在 settings 表的 `assistant.*` 键里（值为 JSON）；用户策略在 ai_user_policy。所有数值都有服务端硬上限，
+管理员只能在硬上限之内调整（docs/assistant-design.md §3.3、§5）。
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+
+from ..metadata import Metadata
+
+# 名称: (默认值, 最小值, 硬上限, 说明)
+LIMITS: dict[str, tuple[int, int, int, str]] = {
+    "max_steps": (16, 1, 50, "每轮模型调用次数"),
+    "max_tool_calls": (40, 1, 200, "每轮工具调用总数"),
+    "parallel_calls": (8, 1, 16, "单次模型回复中的并行工具调用数"),
+    "repeat_threshold": (3, 2, 10, "相同工具与参数的重复调用次数"),
+    "error_threshold": (5, 1, 20, "连续工具错误次数"),
+    "run_seconds": (300, 30, 1800, "每轮最长运行时间（秒）"),
+    "tool_seconds": (30, 5, 120, "单个工具超时（秒）"),
+    "tool_result_bytes": (12288, 2048, 65536, "单个工具结果长度（字节）"),
+    "run_tokens": (120000, 4000, 1000000, "每轮 token 预算"),
+    "user_concurrency": (1, 1, 4, "每用户同时进行的对话"),
+    "global_concurrency": (4, 1, 32, "全站同时进行的对话"),
+    "user_messages_per_minute": (10, 1, 60, "每用户每分钟消息数"),
+    "max_messages": (400, 20, 2000, "单个对话最多消息数"),
+    "max_conversations": (1000, 10, 10000, "每用户最多保留的对话数"),
+}
+
+SETTINGS: dict[str, tuple[int, int, int]] = {
+    "user_daily_tokens": (200000, 0, 100_000_000),  # 0 表示不限
+    "retention_days": (365, 1, 3650),
+    "call_log_days": (90, 1, 3650),
+}
+
+DEFAULT_NOTICE = ("文件助手会把你的文件名、目录结构，以及它读取的文本文件内容发送给管理员配置的模型服务来理解你的请求。"
+                  "对话会被记录并保留一段时间，管理员无法通过系统查看对话内容。任何修改文件的操作都需要你确认后才会执行。")
+
+LEVELS = ("read", "write", "danger")
+
+
+def _int(value, default: int, low: int, high: int, label: str) -> int:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f"{label}必须是整数")
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{label}必须是整数") from exc
+    if not low <= number <= high:
+        raise ValueError(f"{label}必须在 {low}–{high} 之间")
+    return number
+
+
+class AssistantConfig:
+    """读写 `assistant.*` 设置。读取有进程内缓存，写入后立即失效。"""
+
+    def __init__(self, metadata: Metadata) -> None:
+        self.metadata = metadata
+        self._cache: dict[str, object] | None = None
+        self._lock = threading.Lock()
+
+    def _stored(self) -> dict[str, object]:
+        with self._lock:
+            if self._cache is None:
+                rows = self.metadata.db.execute("SELECT key,value FROM settings WHERE key LIKE 'assistant.%' AND key!='assistant.trace_key'")
+                cache: dict[str, object] = {}
+                for row in rows:
+                    try:
+                        cache[row["key"][len("assistant."):]] = json.loads(row["value"])
+                    except ValueError:
+                        continue
+                self._cache = cache
+            return self._cache
+
+    def _write(self, values: dict[str, object]) -> None:
+        with self.metadata.transaction() as db:
+            for key, value in values.items():
+                if value is None:
+                    db.execute("DELETE FROM settings WHERE key=?", (f"assistant.{key}",))
+                else:
+                    db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                               (f"assistant.{key}", json.dumps(value, ensure_ascii=False, separators=(",", ":"))))
+        with self._lock:
+            self._cache = None
+
+    # ---------- 全局设置 ----------
+
+    @property
+    def enabled(self) -> bool:
+        return self._stored().get("enabled") is True
+
+    @property
+    def default_model(self) -> int | None:
+        value = self._stored().get("default_model")
+        return value if isinstance(value, int) else None
+
+    def setting(self, name: str) -> int:
+        default, low, high = SETTINGS[name]
+        value = self._stored().get(name)
+        return value if isinstance(value, int) and low <= value <= high else default
+
+    @property
+    def notice(self) -> str:
+        value = self._stored().get("notice")
+        return value if isinstance(value, str) and value.strip() else DEFAULT_NOTICE
+
+    def describe_settings(self) -> dict[str, object]:
+        return {"enabled": self.enabled, "default_model": self.default_model,
+                **{name: self.setting(name) for name in SETTINGS},
+                "notice": self.notice, "notice_default": DEFAULT_NOTICE,
+                "bounds": {name: {"default": d, "min": lo, "max": hi} for name, (d, lo, hi) in SETTINGS.items()}}
+
+    def update_settings(self, payload: dict, *, model_exists) -> dict[str, object]:
+        allowed = {"enabled", "default_model", "notice", *SETTINGS}
+        unknown = set(payload) - allowed
+        if unknown:
+            raise ValueError(f"未知设置：{', '.join(sorted(unknown))}")
+        values: dict[str, object] = {}
+        if "default_model" in payload:
+            model = payload["default_model"]
+            if model is not None and (isinstance(model, bool) or not isinstance(model, int) or not model_exists(model)):
+                raise ValueError("默认模型不存在或未启用")
+            values["default_model"] = model
+        for name, (default, low, high) in SETTINGS.items():
+            if name in payload:
+                values[name] = _int(payload[name], default, low, high, name)
+        if "notice" in payload:
+            notice = payload["notice"]
+            if notice is not None and (not isinstance(notice, str) or len(notice) > 2000):
+                raise ValueError("使用说明最多 2000 个字符")
+            values["notice"] = notice.strip() if isinstance(notice, str) and notice.strip() else None
+        if "enabled" in payload:
+            if not isinstance(payload["enabled"], bool):
+                raise ValueError("enabled 必须是布尔值")
+            target = values.get("default_model", self.default_model)
+            if payload["enabled"] and (target is None or not model_exists(target)):
+                raise ValueError("启用前请先设置一个可用的默认模型")
+            values["enabled"] = payload["enabled"]
+        self._write(values)
+        return self.describe_settings()
+
+    # ---------- 上限 ----------
+
+    def limits(self) -> dict[str, int]:
+        stored = self._stored().get("limits")
+        stored = stored if isinstance(stored, dict) else {}
+        result = {}
+        for name, (default, low, high, _) in LIMITS.items():
+            value = stored.get(name)
+            result[name] = value if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high else default
+        return result
+
+    def describe_limits(self) -> dict[str, object]:
+        return {"values": self.limits(),
+                "bounds": {name: {"default": d, "min": lo, "max": hi, "label": label} for name, (d, lo, hi, label) in LIMITS.items()}}
+
+    def update_limits(self, payload: dict) -> dict[str, object]:
+        unknown = set(payload) - set(LIMITS)
+        if unknown:
+            raise ValueError(f"未知上限：{', '.join(sorted(unknown))}")
+        current = self.limits()
+        for name, value in payload.items():
+            default, low, high, label = LIMITS[name]
+            current[name] = _int(value, default, low, high, label)
+        self._write({"limits": current})
+        return self.describe_limits()
+
+    # ---------- 工具配置 ----------
+
+    def tool_settings(self) -> dict[str, dict]:
+        stored = self._stored().get("tools")
+        return stored if isinstance(stored, dict) else {}
+
+    def save_tool_settings(self, value: dict[str, dict]) -> None:
+        self._write({"tools": value})
+
+    # ---------- 用户策略 ----------
+
+    def policy(self, user_id: int) -> dict[str, object]:
+        row = self.metadata.db.execute("SELECT * FROM ai_user_policy WHERE user_id=?", (user_id,)).fetchone()
+        enabled = None if row is None or row["enabled"] is None else bool(row["enabled"])
+        level = row["max_level"] if row is not None and row["max_level"] in LEVELS else None
+        daily = row["daily_tokens"] if row is not None else None
+        return {"enabled": enabled, "max_level": level, "daily_tokens": daily,
+                "effective": {"enabled": enabled is not False, "max_level": level or "write",
+                              "daily_tokens": self.setting("user_daily_tokens") if daily is None else daily},
+                "notice_ack_at": row["notice_ack_at"] if row is not None else None}
+
+    def update_policy(self, user_id: int, payload: dict) -> dict[str, object]:
+        unknown = set(payload) - {"enabled", "max_level", "daily_tokens"}
+        if unknown:
+            raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
+        current = self.policy(user_id)
+        enabled, level, daily = current["enabled"], current["max_level"], current["daily_tokens"]
+        if "enabled" in payload:
+            if payload["enabled"] is not None and not isinstance(payload["enabled"], bool):
+                raise ValueError("enabled 只能是 true、false 或 null（跟随全局）")
+            enabled = payload["enabled"]
+        if "max_level" in payload:
+            if payload["max_level"] is not None and payload["max_level"] not in LEVELS:
+                raise ValueError("最高操作级别只能是 read、write 或 danger")
+            level = payload["max_level"]
+        if "daily_tokens" in payload:
+            value = payload["daily_tokens"]
+            _, low, high = SETTINGS["user_daily_tokens"]
+            daily = None if value is None else _int(value, 0, low, high, "每日 token")
+        with self.metadata.transaction() as db:
+            db.execute("INSERT INTO ai_user_policy(user_id,enabled,max_level,daily_tokens) VALUES(?,?,?,?) "
+                       "ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled,max_level=excluded.max_level,"
+                       "daily_tokens=excluded.daily_tokens",
+                       (user_id, None if enabled is None else int(enabled), level, daily))
+        return self.policy(user_id)
+
+    def acknowledge_notice(self, user_id: int, now: float) -> None:
+        with self.metadata.transaction() as db:
+            db.execute("INSERT INTO ai_user_policy(user_id,notice_ack_at) VALUES(?,?) "
+                       "ON CONFLICT(user_id) DO UPDATE SET notice_ack_at=excluded.notice_ack_at", (user_id, now))
+
+    def purge_all(self) -> None:
+        """清除所有助手数据时同时重置阅读说明记录，渠道与设置保留。"""
+        with self.metadata.transaction() as db:
+            db.execute("UPDATE ai_user_policy SET notice_ack_at=NULL")

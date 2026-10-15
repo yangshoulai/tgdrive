@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, quote
 
 from .api import AdminApi, UserApi
 from .archive import stream_zip
+from .assistant.service import AssistantDenied
 from .audit import AuditLog
 from .authn import (
     AuthenticationError,
@@ -80,7 +81,7 @@ class TgDriveASGI(StaticFiles):
                  static_dir: str | Path | None = None,
                  public_base_url: str | None = None, settings: SystemSettings | None = None,
                  keys: KeyApi | None = None, scheduler=None, metrics: TrafficMetrics | None = None,
-                 context: AppContext | None = None, offline=None, resources=None) -> None:
+                 context: AppContext | None = None, offline=None, resources=None, assistant=None) -> None:
         self.scheduler = scheduler
         self.admin, self.user, self.s3 = admin, user, s3
         # 对外地址也是通行密钥的固定来源，不能由任意请求头决定。
@@ -102,6 +103,7 @@ class TgDriveASGI(StaticFiles):
         self.metrics = metrics
         self.context = context
         self.offline, self.resources = offline, resources
+        self.assistant = assistant
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -279,6 +281,12 @@ class TgDriveASGI(StaticFiles):
             if path.startswith("/api/admin/v1/backups/") and method == "GET":
                 await self._backup_download(tracked_send, token, path.rsplit("/", 1)[-1])
                 return
+            run_events = re.fullmatch(r"/api/user/v1/assistant/runs/([A-Za-z0-9_-]{4,40})/events", path)
+            if run_events and method == "GET" and self.assistant is not None:
+                after = query.get("after", ["0"])[0]
+                events = self.assistant.events(token, run_events[1], int(after) if after.isdigit() else 0)
+                await self._until_disconnect(receive, self._send_events(tracked_send, events))
+                return
             if path == "/api/admin/v1/content" and method in ("GET", "HEAD"):
                 await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, admin=True))
                 return
@@ -358,7 +366,18 @@ class TgDriveASGI(StaticFiles):
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
                           "/backups": "backup.create", "/password": "admin.password", "/passphrase": "system.passphrase",
-                          "/users/{}/password": "user.password_reset", "/users/{}/delete": "user.delete"},
+                          "/users/{}/password": "user.password_reset", "/users/{}/delete": "user.delete",
+                          "/assistant/settings": "assistant.settings", "/assistant/limits": "assistant.settings",
+                          "/assistant/tools": "assistant.tools.update", "/assistant/channels": "assistant.channel.create",
+                          "/assistant/channels/{}/update": "assistant.channel.update",
+                          "/assistant/channels/{}/delete": "assistant.channel.delete",
+                          "/assistant/channels/{}/sync": "assistant.channel.sync",
+                          "/assistant/channels/{}/models": "assistant.model.create",
+                          "/assistant/models/{}/update": "assistant.model.update",
+                          "/assistant/models/{}/delete": "assistant.model.delete",
+                          "/assistant/models/{}/test": "assistant.model.test",
+                          "/assistant/users/{}/policy": "assistant.user_policy",
+                          "/assistant/conversations/delete": "assistant.trace.delete", "/assistant/purge": "assistant.data.purge"},
         "/api/user/v1": {"/login": "user.login", "/logout": "user.logout", "/password": "user.password",
                          "/profile": "account.profile", "/email": "account.email", "/avatar": "account.avatar",
                          "/avatar/delete": "account.avatar_delete",
@@ -370,7 +389,9 @@ class TgDriveASGI(StaticFiles):
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
-                         "/passkeys/login/verify": "user.login"},
+                         "/passkeys/login/verify": "user.login",
+                         "/assistant/scope-requests/{}/confirm": "assistant.scope.confirm",
+                         "/assistant/scope-requests/{}/reject": "assistant.scope.reject"},
     }
 
     def _audit_entry(self, method, path, payload, token, scope):
@@ -383,6 +404,8 @@ class TgDriveASGI(StaticFiles):
             route = path[len(prefix):]
             pattern = re.sub(r"^/(users|clients|bots|downloads)/\d+/", r"/\1/{}/", route)
             pattern = re.sub(r"^/shares/[A-Za-z0-9_-]+/", "/shares/{}/", pattern)
+            pattern = re.sub(r"^/assistant/(channels|models|users)/\d+/", r"/assistant/\1/{}/", pattern)
+            pattern = re.sub(r"^/assistant/scope-requests/[A-Za-z0-9_-]+/", "/assistant/scope-requests/{}/", pattern)
             action = routes.get(pattern)
             if action is None:
                 return None
@@ -391,7 +414,7 @@ class TgDriveASGI(StaticFiles):
             role = "admin" if prefix.endswith("admin/v1") else (session.role if session else "user")
             actor = str(payload.get("username") or "") if action.endswith(".login") or action == "system.setup" else (session.username if session else None)
             # 分享令牌本身就是访问凭据，不写入审计。
-            target_id = route.split("/")[2] if pattern.count("{}") and not pattern.startswith("/shares/") else None
+            target_id = route.split("/")[pattern.split("/").index("{}")] if pattern.count("{}") and not pattern.startswith("/shares/") else None
             return {"action": action, "actor_type": role, "actor": actor or None, "payload": payload, "target_id": target_id,
                     "ip": (scope.get("client") or [None])[0]}
         return None
@@ -464,6 +487,34 @@ class TgDriveASGI(StaticFiles):
             detail = {key: value for key, value in (result or {}).items() if key in ("processed", "deleted", "failed", "checked")}
             if action == "maintenance.scrub":
                 detail["bad"] = len((result or {}).get("bad", []))
+        elif action == "assistant.settings":
+            detail = {"keys": sorted(str(key) for key in payload)[:20],
+                      **{key: payload[key] for key in ("enabled", "default_model") if key in payload}}
+        elif action == "assistant.tools.update":
+            detail = {"tools": {str(name): value.get("enabled") for name, value in payload.items()
+                                if isinstance(value, dict) and "enabled" in value}}
+        elif action in ("assistant.channel.create", "assistant.channel.update"):
+            # 不记录 API Key 与请求头的值，只记录是否修改。
+            detail = {key: payload.get(key) for key in ("name", "kind", "enabled", "concurrency", "timeout") if key in payload}
+            if "api_key" in payload:
+                detail["api_key"] = "changed"
+            if "headers" in payload:
+                detail["headers"] = "changed"
+            if action.endswith(".create"):
+                target = (result or {}).get("id") if ok else None
+        elif action == "assistant.channel.sync" and ok:
+            detail = {key: (result or {}).get(key) for key in ("total", "added", "removed")}
+        elif action == "assistant.model.create":
+            detail = {"model": str(payload.get("model", ""))[:200]}
+        elif action == "assistant.model.update":
+            detail = {key: payload.get(key) for key in ("enabled", "tools", "context_window", "max_output") if key in payload}
+        elif action == "assistant.model.test" and ok:
+            detail = {"ok": (result or {}).get("ok"), "tools": (result or {}).get("tools")}
+        elif action == "assistant.user_policy":
+            detail = {key: payload.get(key) for key in ("enabled", "max_level", "daily_tokens") if key in payload}
+        elif action == "assistant.trace.delete":
+            detail = {"user_id": payload.get("user_id"), "before": payload.get("before"),
+                      "deleted": (result or {}).get("deleted") if ok else None}
         if error is not None:
             detail["error"] = self._error(error)[1]["error"]["code"]
         try:
@@ -629,6 +680,8 @@ class TgDriveASGI(StaticFiles):
                 return 204, None, {"Set-Cookie": self._cookie("", expires=True)}
             if not self.admin.accounts.keystore.unlocked:
                 raise NotReadyError("系统尚未解锁")
+            if route.startswith("/assistant/") and self.assistant is not None:
+                return await self._assistant_admin(method, route[len("/assistant"):], query, payload, session)
             if method == "GET" and route == "/users":
                 return 200, await self.admin.alist_users(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=int(query.get("cursor", ["0"])[0]), query=query.get("q", [""])[0], status=query.get("status", [""])[0]), {}
@@ -750,6 +803,8 @@ class TgDriveASGI(StaticFiles):
                 if password_hash and not self.share_access.check(shared[1], password_hash, payload.get("access")):
                     raise SharePasswordRequired("password required")
                 return 200, await user.save_share(token, csrf, shared[1], payload.get("destination", ""), payload.get("paths")), {}
+            if route.startswith("/assistant/") and self.assistant is not None:
+                return await self._assistant_user(method, route[len("/assistant"):], query, payload, token, csrf)
             if route.startswith("/downloads") and self.offline is not None:
                 session = user._session(token, csrf=csrf, mutation=method != "GET")
                 account = user.accounts.account_for_session(session)
@@ -1157,6 +1212,155 @@ class TgDriveASGI(StaticFiles):
             if hasattr(iterator, "aclose"):
                 await iterator.aclose()
 
+    async def _send_events(self, send, events):
+        """Server-Sent Events：首个事件就绪前若出错，仍按普通 JSON 错误返回。"""
+        iterator = events.__aiter__()
+        try:
+            first = await anext(iterator, None)
+            await send({"type": "http.response.start", "status": 200, "headers": self._headers({
+                "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff"})})
+            event = first
+            while event is not None:
+                if event.get("type") == "ping":
+                    data = b": ping\n\n"
+                else:
+                    data = f"id: {event.get('seq', 0)}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
+                await send({"type": "http.response.body", "body": data, "more_body": True})
+                event = await anext(iterator, None)
+            await send({"type": "http.response.body", "body": b""})
+        finally:
+            await iterator.aclose()
+
+    async def _assistant_user(self, method, route, query, payload, token, csrf):
+        service = self.assistant
+        no_store = {"Cache-Control": "no-store"}
+        if route == "/config" and method == "GET":
+            return 200, service.user_config(token), no_store
+        if route == "/notice/ack" and method == "POST":
+            service.ack_notice(token, csrf)
+            return 204, None, {}
+        if route == "/conversations" and method == "GET":
+            return 200, service.list_conversations(token, cursor=query.get("cursor", [""])[0],
+                                                   archived=query.get("archived", ["0"])[0] in ("1", "true")), no_store
+        if route == "/conversations" and method == "POST":
+            return 201, service.create_conversation(token, csrf, payload), no_store
+        match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})(?:/(update|delete|messages))?", route)
+        if match and match[2] is None and method == "GET":
+            return 200, service.conversation(token, match[1]), no_store
+        if match and match[2] == "update" and method == "POST":
+            return 200, service.update_conversation(token, csrf, match[1], payload), no_store
+        if match and match[2] == "delete" and method == "POST":
+            service.delete_conversation(token, csrf, match[1])
+            return 204, None, {}
+        if match and match[2] == "messages" and method == "POST":
+            return 201, await service.send(token, csrf, match[1], payload), no_store
+        match = re.fullmatch(r"/runs/([A-Za-z0-9_-]{4,40})/stop", route)
+        if match and method == "POST":
+            service.stop(token, csrf, match[1])
+            return 204, None, {}
+        match = re.fullmatch(r"/scope-requests/([A-Za-z0-9_-]{4,40})/(confirm|reject)", route)
+        if match and method == "POST":
+            return 200, await service.decide_scope(token, csrf, match[1], match[2] == "confirm"), no_store
+        raise NotFoundError("资源不存在")
+
+    async def _assistant_admin(self, method, route, query, payload, session):
+        service = self.assistant
+        q = lambda name, default="": query.get(name, [default])[0]
+        number = lambda name: int(q(name)) if q(name).lstrip("-").isdigit() else None
+        moment = lambda name: float(q(name)) if q(name).replace(".", "", 1).isdigit() else None
+        if route == "/overview" and method == "GET":
+            return 200, service.admin_overview(), {}
+        if route == "/settings":
+            if method == "GET":
+                return 200, service.admin_settings(), {}
+            if method == "POST":
+                return 200, service.admin_update_settings(payload), {}
+        if route == "/limits":
+            if method == "GET":
+                return 200, service.admin_limits(), {}
+            if method == "POST":
+                return 200, service.admin_update_limits(payload), {}
+        if route == "/tools":
+            if method == "GET":
+                return 200, service.admin_tools(), {}
+            if method == "POST":
+                return 200, service.admin_update_tools(payload), {}
+        if route == "/channels":
+            if method == "GET":
+                return 200, service.admin_channels(), {}
+            if method == "POST":
+                channel = service.channels.create(payload)
+                try:
+                    channel["sync"] = await service.channels.sync(channel["id"], actor=session.username)
+                except ValueError as exc:
+                    channel["sync_error"] = str(exc)
+                return 201, channel, {}
+        match = re.fullmatch(r"/channels/(\d+)(?:/(update|delete|sync|models))?", route)
+        if match:
+            channel_id = int(match[1])
+            if match[2] is None and method == "GET":
+                return 200, service.channels.get(channel_id), {}
+            if match[2] == "update" and method == "POST":
+                if payload.get("enabled") is False:
+                    service.guard_default(channel_id=channel_id)
+                return 200, service.channels.update(channel_id, payload), {}
+            if match[2] == "delete" and method == "POST":
+                service.admin_delete_channel(channel_id)
+                return 204, None, {}
+            if match[2] == "sync" and method == "POST":
+                return 200, await service.channels.sync(channel_id, actor=session.username), {}
+            if match[2] == "models" and method == "GET":
+                return 200, service.channels.models(channel_id), {}
+            if match[2] == "models" and method == "POST":
+                return 201, service.channels.add_model(channel_id, payload), {}
+        match = re.fullmatch(r"/models/(\d+)/(update|delete|test)", route)
+        if match and method == "POST":
+            model_id = int(match[1])
+            if match[2] == "update":
+                if payload.get("enabled") is False or payload.get("tools") == "no":
+                    service.guard_default(model_id=model_id)
+                return 200, service.channels.update_model(model_id, payload), {}
+            if match[2] == "delete":
+                service.guard_default(model_id=model_id)
+                service.channels.delete_model(model_id)
+                return 204, None, {}
+            return 200, await service.admin_test_model(model_id, session.username), {}
+        match = re.fullmatch(r"/users/(\d+)/policy", route)
+        if match:
+            if method == "GET":
+                return 200, service.admin_policy(int(match[1])), {}
+            if method == "POST":
+                return 200, service.admin_update_policy(int(match[1]), payload), {}
+        if route == "/conversations" and method == "GET":
+            return 200, service.trace.admin_conversations(cursor=q("cursor"), user_id=number("user_id"), model_id=number("model_id"),
+                                                          since=moment("since"), until=moment("until"), action=q("action")), {}
+        match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})", route)
+        if match and method == "GET":
+            return 200, service.trace.admin_conversation(match[1]), {}
+        if route == "/conversations/delete" and method == "POST":
+            user_id, before = payload.get("user_id"), payload.get("before")
+            if user_id is not None and (isinstance(user_id, bool) or not isinstance(user_id, int)):
+                raise ValueError("user_id 必须是整数")
+            if before is not None and (isinstance(before, bool) or not isinstance(before, (int, float))):
+                raise ValueError("before 必须是时间戳")
+            if payload.get("dry_run"):
+                return 200, {"count": service.trace.admin_count(user_id=user_id, before=before)}, {}
+            return 200, {"deleted": service.trace.admin_delete(user_id=user_id, before=before)}, {}
+        if route in ("/calls", "/calls/stats") and method == "GET":
+            filters = {"kind": q("kind"), "status": q("status"), "channel_id": number("channel_id"), "model_id": number("model_id"),
+                       "tool_name": q("tool"), "user_id": number("user_id"), "since": moment("since"), "until": moment("until"),
+                       "conversation_id": q("conversation_id")}
+            if route == "/calls/stats":
+                return 200, service.trace.call_stats(**filters), {}
+            return 200, service.trace.list_calls(cursor=number("cursor") or 0, limit=number("limit") or 50, **filters), {}
+        if route == "/purge" and method == "POST":
+            if payload.get("confirm") != "清除":
+                raise ValueError("请输入“清除”确认")
+            service.admin_purge()
+            return 204, None, {}
+        raise NotFoundError("资源不存在")
+
     @staticmethod
     def _headers(headers):
         return [(k.lower().encode("ascii"), v.encode("latin-1")) for k, v in headers.items()]
@@ -1215,6 +1419,7 @@ class TgDriveASGI(StaticFiles):
             status, code = 429, "too_many_attempts"
             message = str(exc) if str(exc).startswith(("访问密码", "登录", "验证", "通行密钥")) else "登录失败次数过多，请 15 分钟后再试"
         elif isinstance(exc, (AuthenticationError, SessionExpired)): status, code, message = 401, "unauthorized", "登录凭据无效或会话已过期"
+        elif isinstance(exc, AssistantDenied): status, code, message = 403, "assistant_unavailable", str(exc) or "文件助手不可用"
         elif isinstance(exc, (CsrfError, PermissionError)): status, code, message = 403, "forbidden", "权限不足或 CSRF 校验失败"
         elif isinstance(exc, WorkBusyError):
             status, code, message = 503, "transfer_busy", "传输繁忙，请稍后重试"

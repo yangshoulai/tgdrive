@@ -119,6 +119,9 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
 }
 
 const post = <T>(path: string, body?: unknown, timeoutMs?: number) => request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs);
+/** 供独立的接口模块（如 assistant-api.ts）复用同一套错误处理、CSRF 与超时。 */
+export const apiGet = <T>(path: string, signal?: AbortSignal) => request<T>(path, { signal });
+export const apiPost = post;
 
 export type PrivateGrant = { access: string; idle_seconds: number; remaining_seconds?: number };
 export type PasskeyCapability = { available: boolean; origin: string | null; rp_id: string | null; reason: string | null; registered: number };

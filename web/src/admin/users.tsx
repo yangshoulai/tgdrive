@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useCursorPage } from "../pagination";
 import { SITE } from "../brand";
 import * as api from "../api";
+import { AssistantPolicyDialog } from "./assistant";
 
 import { Avatar, Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, usageTone, useDocumentTitle } from "../ui";
 
@@ -17,6 +18,7 @@ export function Users() {
   const [resetTarget, setResetTarget] = useState<api.Account | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<api.Account | null>(null);
   const [disabling, setDisabling] = useState<api.Account | null>(null);
+  const [assistantTarget, setAssistantTarget] = useState<api.Account | null>(null);
   useDocumentTitle(`用户 · ${SITE.admin}`);
   const [search, setSearch] = useState("");
   useEffect(() => { const timer = window.setTimeout(() => setQuery(search.trim()), 300); return () => window.clearTimeout(timer); }, [search]);
@@ -62,6 +64,7 @@ export function Users() {
                         : <Button size="sm" onClick={() => void setUserStatus(user, "active")}>启用</Button>}
                       <Menu label={`${user.username} 的更多操作`} items={[
                         { label: "重置密码", icon: "key", onSelect: () => setResetTarget(user) },
+                        { label: "文件助手设置", icon: "sparkle", onSelect: () => setAssistantTarget(user) },
                         { label: "删除用户", icon: "trash", danger: true, divider: true, onSelect: () => setDeleteTarget(user) },
                       ]} />
                     </>}
@@ -75,6 +78,7 @@ export function Users() {
       <footer className="list-footer"><span>共 {pagination.page?.total ?? "—"} 个用户</span><Pagination {...pagination} /></footer>
       {creating && <CreateUserDialog onClose={() => setCreating(false)} onCreated={() => { setCreating(false); load(); }} />}
       {quotaTarget && <QuotaDialog user={quotaTarget} onClose={() => setQuotaTarget(null)} onSaved={() => { setQuotaTarget(null); load(); }} />}
+      {assistantTarget && <AssistantPolicyDialog user={assistantTarget} onClose={() => setAssistantTarget(null)} />}
       {resetTarget && <ResetPasswordDialog user={resetTarget} onClose={() => setResetTarget(null)} />}
       {deleteTarget && <DeleteUserDialog user={deleteTarget} onClose={() => setDeleteTarget(null)} onDeleted={() => { setDeleteTarget(null); load(); }} />}
       {disabling && <ConfirmDialog title={`禁用 ${disabling.username}？`} description="该用户会被立即登出，无法再登录，其所有公开链接暂停访问。文件不会被删除，可随时重新启用。" confirmLabel="禁用账号"

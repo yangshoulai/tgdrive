@@ -121,7 +121,7 @@ function TrafficChart({ metrics }: { metrics?: api.TrafficMetrics }) {
   </div>;
 }
 
-function Stat({ label, value, detail, tone }: { label: string; value: string; detail: string; tone?: "public" }) {
+export function Stat({ label, value, detail, tone }: { label: string; value: string; detail: string; tone?: "public" }) {
   return <div className={`stat${tone ? ` stat-${tone}` : ""}`}><span className="stat-label">{label}</span><strong className="stat-value">{value}</strong><span className="stat-detail">{detail}</span></div>;
 }
 

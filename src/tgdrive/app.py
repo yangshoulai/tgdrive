@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .accounts import AccountService
 from .api import AdminApi, UserApi
+from .assistant import AssistantService
 from .asgi import TgDriveASGI
 from .blobengine import BlobEngine
 from .blobstore import LocalDiskBlobStore
@@ -78,11 +79,14 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
                          telegram_bots, store, SystemSettings(metadata, {"public_base_url": public_base_url, "s3_endpoint": s3_endpoint}), metrics)
     admin, user = AdminApi(accounts, objects, clients, maintenance, telegram_bots, metrics=metrics, storage=store), UserApi(accounts, objects, clients)
     admin.offline = offline
+    # 文件助手：渠道、对话留痕与调用日志；清理挂在维护任务上。
+    assistant = AssistantService(accounts, objects, offline, user_api=user)
+    maintenance.assistant_cleaner = assistant.cleanup
     app = TgDriveASGI(admin, user,
                       s3=s3, s3_host=s3_host, static_dir=static_dir, secure_cookies=secure_cookies,
                       settings=context.system_settings,
                       scheduler=MaintenanceScheduler(maintenance) if run_scheduler else None, metrics=metrics,
-                      context=context, offline=offline, resources=resources)
+                      context=context, offline=offline, resources=resources, assistant=assistant)
     app.metadata = context.metadata
     app.keystore = context.keystore
     app.engine = context.engine
@@ -92,6 +96,7 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     app.maintenance = context.maintenance
     app.telegram_bots = context.telegram_bots
     app.system_settings = context.system_settings
+    app.assistant = assistant
     return app
 
 

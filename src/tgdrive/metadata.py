@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 19
+    SCHEMA_VERSION = 20
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -417,6 +417,165 @@ class Metadata:
                     )
                 """)
                 db.execute("PRAGMA user_version = 19")
+            if version < 20:
+                # 文件助手（docs/assistant-design.md §14）：模型渠道、对话留痕、调用日志。正文类字段一律为加密 BLOB。
+                self._schema("""
+                    CREATE TABLE IF NOT EXISTS ai_channels(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        kind TEXT NOT NULL CHECK(kind IN ('openai','anthropic')),
+                        base_url TEXT NOT NULL,
+                        secret BLOB,
+                        headers BLOB,
+                        enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+                        concurrency INTEGER NOT NULL DEFAULT 4,
+                        timeout INTEGER NOT NULL DEFAULT 120,
+                        synced_at REAL,
+                        sync_note TEXT,
+                        last_error TEXT,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS ai_models(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        channel_id INTEGER NOT NULL REFERENCES ai_channels(id) ON DELETE CASCADE,
+                        model TEXT NOT NULL,
+                        display_name TEXT,
+                        source TEXT NOT NULL CHECK(source IN ('auto','manual')),
+                        enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+                        tools TEXT NOT NULL DEFAULT 'unknown' CHECK(tools IN ('unknown','yes','no')),
+                        context_window INTEGER,
+                        max_output INTEGER,
+                        removed_upstream INTEGER NOT NULL DEFAULT 0,
+                        sort INTEGER NOT NULL DEFAULT 0,
+                        tested_at REAL,
+                        test_note TEXT,
+                        created_at REAL NOT NULL,
+                        UNIQUE(channel_id, model)
+                    );
+                    CREATE TABLE IF NOT EXISTS ai_user_policy(
+                        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        enabled INTEGER,
+                        max_level TEXT CHECK(max_level IN ('read','write','danger')),
+                        daily_tokens INTEGER,
+                        notice_ack_at REAL
+                    );
+                    CREATE TABLE IF NOT EXISTS assistant_conversations(
+                        id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        title BLOB,
+                        scope_root TEXT NOT NULL,
+                        model_id INTEGER,
+                        archived INTEGER NOT NULL DEFAULT 0,
+                        messages INTEGER NOT NULL DEFAULT 0,
+                        input_tokens INTEGER NOT NULL DEFAULT 0,
+                        output_tokens INTEGER NOT NULL DEFAULT 0,
+                        hidden_at REAL,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS assistant_conversations_by_user ON assistant_conversations(user_id, updated_at DESC, id);
+                    CREATE INDEX IF NOT EXISTS assistant_conversations_by_age ON assistant_conversations(updated_at);
+                    CREATE TABLE IF NOT EXISTS assistant_runs(
+                        id TEXT PRIMARY KEY,
+                        conversation_id TEXT NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+                        model_id INTEGER,
+                        prompt_version TEXT,
+                        status TEXT NOT NULL,
+                        stop_reason TEXT,
+                        steps INTEGER NOT NULL DEFAULT 0,
+                        tool_calls INTEGER NOT NULL DEFAULT 0,
+                        input_tokens INTEGER NOT NULL DEFAULT 0,
+                        output_tokens INTEGER NOT NULL DEFAULT 0,
+                        started_at REAL NOT NULL,
+                        ended_at REAL
+                    );
+                    CREATE INDEX IF NOT EXISTS assistant_runs_by_conversation ON assistant_runs(conversation_id, started_at);
+                    CREATE INDEX IF NOT EXISTS assistant_runs_by_status ON assistant_runs(status);
+                    CREATE TABLE IF NOT EXISTS assistant_messages(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        conversation_id TEXT NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+                        run_id TEXT,
+                        seq INTEGER NOT NULL,
+                        role TEXT NOT NULL CHECK(role IN ('user','assistant','tool','event')),
+                        tool_name TEXT,
+                        body BLOB NOT NULL,
+                        created_at REAL NOT NULL,
+                        UNIQUE(conversation_id, seq)
+                    );
+                    CREATE TABLE IF NOT EXISTS assistant_actions(
+                        id TEXT PRIMARY KEY,
+                        conversation_id TEXT NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+                        run_id TEXT,
+                        user_id INTEGER NOT NULL,
+                        session_hash TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        tool_name TEXT,
+                        status TEXT NOT NULL,
+                        count INTEGER NOT NULL DEFAULT 0,
+                        payload BLOB NOT NULL,
+                        result BLOB,
+                        undo BLOB,
+                        compacted INTEGER NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL,
+                        expires_at REAL NOT NULL,
+                        decided_at REAL,
+                        finished_at REAL
+                    );
+                    CREATE INDEX IF NOT EXISTS assistant_actions_by_status ON assistant_actions(status, expires_at);
+                    CREATE INDEX IF NOT EXISTS assistant_actions_by_conversation ON assistant_actions(conversation_id, created_at);
+                    CREATE TABLE IF NOT EXISTS assistant_collections(
+                        id TEXT PRIMARY KEY,
+                        conversation_id TEXT NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+                        user_id INTEGER NOT NULL,
+                        kind TEXT NOT NULL CHECK(kind IN ('collection','snapshot')),
+                        source TEXT,
+                        rule BLOB,
+                        urls BLOB NOT NULL,
+                        count INTEGER NOT NULL,
+                        created_at REAL NOT NULL,
+                        expires_at REAL NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS assistant_collections_by_expiry ON assistant_collections(expires_at);
+                    CREATE TABLE IF NOT EXISTS assistant_usage(
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        day TEXT NOT NULL,
+                        model_id INTEGER NOT NULL DEFAULT 0,
+                        input_tokens INTEGER NOT NULL DEFAULT 0,
+                        output_tokens INTEGER NOT NULL DEFAULT 0,
+                        runs INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(user_id, day, model_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS assistant_calls(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        kind TEXT NOT NULL CHECK(kind IN ('model','tool','fetch','sync','test')),
+                        run_id TEXT,
+                        conversation_id TEXT,
+                        user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                        actor TEXT,
+                        channel_id INTEGER,
+                        model_id INTEGER,
+                        tool_name TEXT,
+                        action_id TEXT,
+                        host TEXT,
+                        started_at REAL NOT NULL,
+                        duration_ms INTEGER,
+                        ttfb_ms INTEGER,
+                        status TEXT NOT NULL,
+                        http_status INTEGER,
+                        error_code TEXT,
+                        error TEXT,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        cached_tokens INTEGER,
+                        upstream_id TEXT,
+                        items INTEGER
+                    );
+                    CREATE INDEX IF NOT EXISTS assistant_calls_by_time ON assistant_calls(started_at DESC, id);
+                    CREATE INDEX IF NOT EXISTS assistant_calls_by_channel ON assistant_calls(channel_id, started_at DESC);
+                    CREATE INDEX IF NOT EXISTS assistant_calls_by_user ON assistant_calls(user_id, started_at DESC)
+                """)
+                db.execute("PRAGMA user_version = 20")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

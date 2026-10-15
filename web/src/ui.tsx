@@ -81,6 +81,9 @@ const ICONS = {
   chevronLeft: "m15 6-6 6 6 6",
   fitScreen: "M4 9V5a1 1 0 0 1 1-1h4m6 0h4a1 1 0 0 1 1 1v4m0 6v4a1 1 0 0 1-1 1h-4m-6 0H5a1 1 0 0 1-1-1v-4",
   keyboard: "M4 6h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm3 4h.01M11 10h.01M15 10h.01M7 14h.01M17 14h.01M10 14h4",
+  sparkle: "M12 4.5 13.6 9a2 2 0 0 0 1.4 1.4l4.5 1.6-4.5 1.6a2 2 0 0 0-1.4 1.4L12 19.5l-1.6-4.5A2 2 0 0 0 9 13.6L4.5 12 9 10.4A2 2 0 0 0 10.4 9zM18.5 3v3.5M16.75 4.75h3.5",
+  stop: "M7 7h10v10H7z",
+  arrowUp: "M12 19V5m-6 6 6-6 6 6",
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.3l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-2.2-1.3L14.3 3h-4l-.4 2.4a7.4 7.4 0 0 0-2.2 1.3l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.6l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 2.2 1.3l.4 2.4h4l.4-2.4a7.4 7.4 0 0 0 2.2-1.3l2.4 1 2-3.4-2-1.6c.1-.4.1-.9.1-1.3Z",
 } as const;
 export type IconName = keyof typeof ICONS;
@@ -205,6 +208,16 @@ export function Switch({ checked, onChange, label, description, disabled }: { ch
         {description && <span className="switch-description">{description}</span>}
       </span>
       <input type="checkbox" role="switch" className="switch-input" checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} />
+      <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
+    </label>
+  );
+}
+
+/** 表格行内的开关：没有可见文字，只用 aria-label。 */
+export function Toggle({ checked, onChange, label, disabled }: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled?: boolean }) {
+  return (
+    <label className={`toggle${disabled ? " is-disabled" : ""}`} title={label}>
+      <input type="checkbox" role="switch" className="switch-input" aria-label={label} checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} />
       <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
     </label>
   );

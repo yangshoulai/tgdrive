@@ -59,7 +59,7 @@ export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor
             </div>
           ))}
         </nav>
-        <div className="sidebar-bottom">
+        <div className="sidebar-bottom" onClick={event => { if ((event.target as Element).closest("[data-closes-nav]")) setDrawer(false); }}>
           {sidebarFooter}
           <div className="account-row">
             <Avatar name={account.name} tone={account.tone} src={account.avatar} />

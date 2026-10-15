@@ -1,6 +1,7 @@
 /** 系统管理：各页面在 admin/ 目录下，这里只负责按模块分发，以及管理员文档的受保护加载。 */
 import { useEffect } from "react";
 import * as api from "./api";
+import { AssistantAdmin } from "./admin/assistant";
 import { Bots } from "./admin/bots";
 import { Clients } from "./admin/clients";
 import { LockedGate } from "./admin/lock";
@@ -14,12 +15,13 @@ import type { IconName } from "./ui";
 
 export { LockedGate };
 
-export type AdminModule = "overview" | "users" | "objects" | "bots" | "clients" | "maintenance" | "audit" | "settings";
+export type AdminModule = "overview" | "users" | "objects" | "bots" | "assistant" | "clients" | "maintenance" | "audit" | "settings";
 export const ADMIN_MODULES: { key: AdminModule; label: string; icon: IconName }[] = [
   { key: "overview", label: "概览", icon: "home" },
   { key: "users", label: "用户", icon: "users" },
   { key: "objects", label: "全部文件", icon: "box" },
   { key: "bots", label: "存储通道", icon: "send" },
+  { key: "assistant", label: "文件助手", icon: "sparkle" },
   { key: "clients", label: "全部密钥", icon: "key" },
   { key: "maintenance", label: "安全与维护", icon: "shield" },
   { key: "audit", label: "审计日志", icon: "list" },
@@ -42,6 +44,7 @@ export function AdminConsole({ module, session, status, onStatus, onRefreshStatu
       {module === "users" && <Users />}
       {module === "objects" && <Objects session={session} />}
       {module === "bots" && <Bots />}
+      {module === "assistant" && <AssistantAdmin />}
       {module === "clients" && <Clients />}
       {module === "maintenance" && <Maintenance status={status} onStatus={onStatus} onLocked={onLocked} />}
       {module === "audit" && <Audit />}
