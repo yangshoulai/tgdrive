@@ -309,12 +309,29 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   }, []);
 
   // 键盘：Esc 运行中先停止，空闲时关闭；只在焦点位于抽屉内时响应，弹窗与菜单优先。全页模式不关闭。
+  // 打开的弹窗与菜单自己处理 Esc；最小化的预览小窗不算。
+  const overlayOpen = () => Boolean(document.querySelector(".modal-backdrop:not(.is-minimized), .menu"));
   function onKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
-    if (event.key !== "Escape" || event.defaultPrevented || document.querySelector(".modal-backdrop, .menu")) return;
+    if (event.key !== "Escape" || event.defaultPrevented || event.nativeEvent.isComposing || overlayOpen()) return;
     if (!runId && page) return;
     event.preventDefault();
     if (runId) void stop(); else onClose();
   }
+  const escapeRef = useRef(onKeyDown);
+  escapeRef.current = onKeyDown;
+  // 抽屉打开后焦点可能不在抽屉里（输入框尚未可用、点击了消息区等，焦点落回页面）：此时页面本身或助手入口上的 Esc
+  // 同样交给抽屉。捕获阶段先于文件页的 Esc（清除选择）处理；页面上的输入控件与其他元素保留各自的 Esc。
+  useEffect(() => {
+    if (!open || page) return;
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as Element | null;
+      if (event.key !== "Escape" || !target || drawer.current?.contains(target)) return;
+      if (target !== document.body && target !== document.documentElement && !target.closest(".assistant-launch")) return;
+      escapeRef.current({ key: event.key, defaultPrevented: event.defaultPrevented, nativeEvent: event, preventDefault: () => event.preventDefault() } as ReactKeyboardEvent<HTMLElement>);
+    };
+    document.addEventListener("keydown", handler, true);
+    return () => document.removeEventListener("keydown", handler, true);
+  }, [open, page]);
   // ⌘/Ctrl+Shift+O 新对话（输入控件中也生效，因为带修饰键）。
   useEffect(() => {
     if (!open) return;
