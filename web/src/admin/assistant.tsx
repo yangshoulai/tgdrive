@@ -950,7 +950,7 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
           {numberField("user_daily_tokens", "每用户每日 token（0 为不限）", settings.bounds.user_daily_tokens, general.user_daily_tokens, value => setGeneral({ ...general, user_daily_tokens: value }))}
           {numberField("retention_days", "对话留痕保留天数", settings.bounds.retention_days, general.retention_days, value => setGeneral({ ...general, retention_days: value }))}
           {numberField("call_log_days", "调用日志保留天数", settings.bounds.call_log_days, general.call_log_days, value => setGeneral({ ...general, call_log_days: value }))}
-          <Field label="首次使用说明" hint={<>用户第一次打开助手时显示，确认后才能发送消息。<button type="button" className="link" onClick={() => setGeneral({ ...general, notice: settings.notice_default })}>恢复默认说明</button></>}>
+          <Field label="首次使用说明" hint={<>用户第一次打开助手时显示，确认后才能发送消息。<button type="button" className="link-button assistant-notice-reset" onClick={() => setGeneral({ ...general, notice: settings.notice_default })}>恢复默认说明</button></>}>
             <textarea className="input" rows={4} maxLength={2000} value={general.notice} onChange={event => setGeneral({ ...general, notice: event.target.value })} />
           </Field>
         </div>
@@ -1164,8 +1164,8 @@ function CallsTab() {
               </div>
               {expanded === item.id && <div className="assistant-call-detail"><KeyValue items={[
                 ["上游请求 ID", item.upstream_id ? <code className="mono" key="u">{item.upstream_id}</code> : "—"],
-                ["HTTP 状态", item.http_status ?? "—"], ["错误", item.error ? `${item.error_code ?? ""} ${item.error}` : item.error_code ?? "—"],
-                ["条目数", item.items ?? "—"], ["缓存命中 token", tokens(item.cached_tokens)],
+                ["HTTP 状态", item.http_status ?? "—"], ["错误", item.status === "ok" ? "无" : item.error ? `${item.error_code ?? ""} ${item.error}` : item.error_code ?? "—"],
+                [item.kind === "model" || item.kind === "test" ? "返回工具调用数" : "条目数", item.items ?? "—"], ["缓存命中 token", tokens(item.cached_tokens)],
                 ["对话 / 运行", item.conversation_id ? <code className="mono" key="c">{item.conversation_id} / {item.run_id}</code> : "—"],
               ]} /></div>}
             </div>)}

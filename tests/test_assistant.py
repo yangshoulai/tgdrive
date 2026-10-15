@@ -10,7 +10,7 @@ from unittest import mock
 
 from tests.test_public_links import Client
 from tgdrive.app import create_app
-from tgdrive.assistant.providers import Reply, ToolCall, scrub
+from tgdrive.assistant.providers import ProviderError, Reply, ToolCall, ToolDef, scrub
 from tgdrive.objects import Scope
 
 
@@ -213,6 +213,8 @@ class AssistantTests(AssistantCase):
             user = await self.client.login("user", "alice@example.com", "alice password")
             conversation = await self.start_conversation(user, "Downloads/")
             self.model.replies = [call("search_files", kind="video"), answer("有 1 个视频。")]
+            for reply in self.model.replies:
+                reply.status = 200
             status, data = await self.send(user, conversation, "这里有几个视频？", location="Downloads/")
             self.assertEqual(status, 201, data)
             messages = await self.messages(user, conversation)
@@ -234,15 +236,40 @@ class AssistantTests(AssistantCase):
             self.assertEqual(events[-1]["type"], "run_finished")
             self.assertTrue(any(e["type"] == "text_delta" for e in events))
             # 调用日志：模型 2 次 + 工具 1 次 + 起标题 1 次，且不含正文。
-            calls = self.app.metadata.db.execute("SELECT kind, tool_name, error FROM assistant_calls").fetchall()
+            calls = self.app.metadata.db.execute("SELECT kind, tool_name, error, http_status, items FROM assistant_calls ORDER BY id").fetchall()
             self.assertEqual(sorted(r["kind"] for r in calls).count("model"), 3)
             self.assertIn("search_files", [r["tool_name"] for r in calls])
+            model_calls = [row for row in calls if row["kind"] == "model"][:2]
+            self.assertEqual([(row["http_status"], row["items"], row["error"]) for row in model_calls], [(200, 1, None), (200, 0, None)])
             # 用量累计。
             _, config = await self.req("GET", "/api/user/v1/assistant/config", headers=user)
             self.assertGreater(config["usage"]["today"], 0)
             # 对话有了标题。
             _, listing = await self.req("GET", "/api/user/v1/assistant/conversations", headers=user)
             self.assertTrue(listing["conversations"][0]["title"])
+        self.run_async(run())
+
+    def test_model_failure_and_probe_metadata_are_persisted(self):
+        async def run():
+            admin, channel, model = await self.setup_assistant()
+            probe = Reply(status=201, tool_calls=[ToolCall("probe", "list_folder", "{}")], cached_tokens=12)
+            with mock.patch("tgdrive.assistant.channels.providers.chat", mock.AsyncMock(return_value=probe)):
+                await self.service.channels.test(model["id"], ToolDef("list_folder", "列目录", {}), "测试", actor="admin")
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            conversation = await self.start_conversation(user)
+            self.service.chat = mock.AsyncMock(side_effect=ProviderError(
+                "上游回显：机密文件名.txt sk-secret-value-1234", status=401, code="unauthorized"))
+            await self.send(user, conversation, "查看文件")
+            status, data = await self.req("GET", "/api/admin/v1/assistant/calls", headers=admin)
+            self.assertEqual(status, 200)
+            failed = next(row for row in data["calls"] if row["kind"] == "model")
+            self.assertEqual((failed["status"], failed["http_status"], failed["error_code"]), ("error", 401, "unauthorized"))
+            tested = next(row for row in data["calls"] if row["kind"] == "test")
+            self.assertEqual((tested["http_status"], tested["items"], tested["cached_tokens"]), (201, 1, 12))
+            stored = self.app.metadata.db.execute("SELECT error FROM assistant_calls WHERE kind='model'").fetchone()["error"]
+            self.assertIn("unauthorized", stored)
+            self.assertNotIn("机密文件名", stored)
+            self.assertNotIn("sk-secret", json.dumps(data, ensure_ascii=False))
         self.run_async(run())
 
     def test_scope_is_enforced(self):

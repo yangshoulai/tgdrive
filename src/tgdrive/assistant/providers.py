@@ -380,6 +380,7 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
             body.pop("stream_options")
             request = await _open("POST", url, {"Content-Type": "application/json", "Accept": "text/event-stream", **headers},
                                   json.dumps(body, ensure_ascii=False).encode(), endpoint.timeout)
+        reply.status = request.response.status if request.response is not None else None
         calls: dict[int, dict] = {}
         try:
             async for _, data in _events(request):
@@ -423,6 +424,9 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
                         slot["arguments"] += function.get("arguments") or ""
                     if choice.get("finish_reason"):
                         reply.finish = str(choice["finish_reason"])
+        except ProviderError as exc:
+            exc.status = exc.status or reply.status
+            raise
         finally:
             request.close()
         reply.tool_calls = [ToolCall(slot["id"] or f"call_{index}", slot["name"], slot["arguments"])
@@ -437,6 +441,7 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
     request = await _open("POST", _anthropic_url(endpoint.base_url, "/messages"),
                           {"Content-Type": "application/json", "Accept": "text/event-stream", **_anthropic_headers(endpoint)},
                           json.dumps(body, ensure_ascii=False).encode(), endpoint.timeout)
+    reply.status = request.response.status if request.response is not None else None
     blocks: dict[int, dict] = {}
     try:
         async for event, data in _events(request):
@@ -488,6 +493,9 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
                     reply.output_tokens = int(usage["output_tokens"])
             elif kind == "message_stop":
                 break
+    except ProviderError as exc:
+        exc.status = exc.status or reply.status
+        raise
     finally:
         request.close()
     reply.tool_calls = [ToolCall(slot["id"], slot["name"], slot["arguments"] or "{}")

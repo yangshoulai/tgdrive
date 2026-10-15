@@ -389,10 +389,10 @@ propose_* ──▶ pending ──用户确认──▶ running ──▶ done /
 | `host` | 网页抓取只记录主机名与路径，去掉查询串（可能含令牌） |
 | `started_at`、`duration_ms`、`ttfb_ms` | 耗时，`ttfb_ms` 为模型首个 token 时间 |
 | `status` | `ok` / `error` / `timeout` / `cancelled` / `limited`（被上限或限流拦截） |
-| `http_status`、`error_code`、`error` | 错误信息脱敏后最多 500 字：移除 `Authorization`、`api-key`、URL 查询串、形如密钥的长串 |
+| `http_status`、`error_code`、`error` | 模型调用与测试保存实际 HTTP 状态（含成功响应）；连接前失败可为空，HTTP 200 的流仍可能返回错误事件。错误信息脱敏后最多 500 字；模型错误只保留通用说明和错误码，避免上游回显对话正文 |
 | `input_tokens`、`output_tokens`、`cached_tokens` | 来自上游返回的 usage |
 | `upstream_id` | 上游请求 ID（便于向服务商排查） |
-| `items` | 工具处理的条目数（如搜索返回数、提议条目数） |
+| `items` | 工具执行时为处理条目数（如搜索返回数、提议条目数）；模型调用与测试为返回的工具调用数，纯文字回复为 0；同步为模型条目数 |
 
 用途：
 

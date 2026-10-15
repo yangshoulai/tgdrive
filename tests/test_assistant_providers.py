@@ -81,6 +81,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reply.tool_calls[0].name, "search_files")
         self.assertEqual(json.loads(reply.tool_calls[0].arguments), {"query": "x"})
         self.assertEqual((reply.input_tokens, reply.output_tokens, reply.cached_tokens), (120, 30, 100))
+        self.assertEqual(reply.status, 200)
         sent = Upstream.seen[0]
         self.assertEqual(sent["headers"]["Authorization"], "Bearer sk-test-key-123456")
         self.assertEqual(sent["headers"]["X-Extra"], "1")
@@ -107,6 +108,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reply.text, "好的")
         self.assertEqual((reply.tool_calls[0].id, json.loads(reply.tool_calls[0].arguments)), ("toolu_1", {"path": "/"}))
         self.assertEqual((reply.input_tokens, reply.output_tokens, reply.finish), (50, 40, "tool_use"))
+        self.assertEqual(reply.status, 200)
         sent = Upstream.seen[0]
         self.assertEqual(sent["headers"]["x-api-key"], "sk-test-key-123456")
         messages = sent["body"]["messages"]
@@ -134,6 +136,15 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as caught:
             asyncio.run(providers.list_models(endpoint))
         self.assertEqual(caught.exception.code, "connect_error")
+
+    def test_stream_errors_keep_http_status(self):
+        for kind, path in (("openai", "/v1/chat/completions"), ("anthropic", "/v1/messages")):
+            with self.subTest(kind=kind):
+                Upstream.routes[path] = (200, "text/event-stream", sse(
+                    {"type": "error", "error": {"message": "服务暂时不可用"}}))
+                with self.assertRaises(ProviderError) as caught:
+                    asyncio.run(providers.chat(self.endpoint(kind, "/v1"), "m", "s", [], [], max_tokens=None))
+                self.assertEqual((caught.exception.status, caught.exception.code), (200, "upstream_error"))
 
     def test_list_models(self):
         Upstream.routes["/v1/models"] = (200, "application/json", {"data": [{"id": "a", "context_length": 8000}, {"id": "b"}, {"x": 1}]})

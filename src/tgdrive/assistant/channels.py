@@ -432,6 +432,6 @@ class ChannelStore:
             db.execute("UPDATE ai_models SET tested_at=?, test_note=?, tools=? WHERE id=?",
                        (time.time(), note, "yes" if supports else "no", model_id))
         self.log_call(kind="test", channel_id=model["channel_id"], model_id=model_id, actor=actor, started_at=started,
-                      status="ok", duration_ms=duration, ttfb_ms=reply.ttfb_ms, input_tokens=reply.input_tokens,
-                      output_tokens=reply.output_tokens, upstream_id=reply.upstream_id)
+                      status="ok", http_status=reply.status, duration_ms=duration, ttfb_ms=reply.ttfb_ms, input_tokens=reply.input_tokens,
+                      output_tokens=reply.output_tokens, cached_tokens=reply.cached_tokens, upstream_id=reply.upstream_id, items=len(reply.tool_calls))
         return {"ok": True, "tools": "yes" if supports else "no", "note": note, "duration_ms": duration}

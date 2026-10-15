@@ -895,7 +895,7 @@ class AssistantService:
             self._channel_active[model["channel_id"]] = max(0, self._channel_active.get(model["channel_id"], 1) - 1)
         self.trace.log_call(kind="model", run_id=state.id, conversation_id=state.conversation_id, user_id=state.user_id,
                             channel_id=model["channel_id"], model_id=model["id"], started_at=started,
-                            duration_ms=int((time.time() - started) * 1000), ttfb_ms=reply.ttfb_ms, status="ok",
+                            duration_ms=int((time.time() - started) * 1000), ttfb_ms=reply.ttfb_ms, status="ok", http_status=reply.status,
                             input_tokens=reply.input_tokens, output_tokens=reply.output_tokens, cached_tokens=reply.cached_tokens,
                             upstream_id=reply.upstream_id, items=len(reply.tool_calls))
         state.input_tokens += reply.input_tokens
