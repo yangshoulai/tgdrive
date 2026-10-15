@@ -426,8 +426,10 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
   }
 
   const audio = player.current as AudioPlayer | null;
-  const title = name.replace(/\.[^.]+$/, "");
-  const format = name.match(/\.([a-z\d]{1,6})$/i)?.[1].toUpperCase();
+  // 「歌名 - 歌手」或「歌名-歌手」：拆成标题和副标题；格式、大小已在窗口头部显示，这里不再重复。
+  const base = name.replace(/\.[^.]+$/, "");
+  const parts = /^(.+?)\s*[-–—]\s*([^-–—]+)$/.exec(base);
+  const title = parts ? parts[1].trim() : base, artist = parts ? parts[2].trim() : "";
   const toggle = () => { if (!audio) return; if (audio.isPlaying()) audio.pause(); else void audio.play().catch(() => undefined); };
   const modeIndex = PLAYBACK_MODES.findIndex(item => item.value === nav?.mode);
   const nextMode = PLAYBACK_MODES[(modeIndex + 1) % PLAYBACK_MODES.length];
@@ -448,10 +450,10 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
       <div className="audio-side">
         <div className="audio-heading">
           <h3 title={name}>{title}</h3>
+          {artist && <p className="audio-artist">{artist}</p>}
           <p role="status">
             <span className="preview-equalizer" aria-hidden="true"><i /><i /><i /><i /></span>
             <span>{failed ? "播放失败" : waiting ? state === "buffering" ? "正在缓冲" : "正在加载" : playing ? "正在播放" : "已暂停"}</span>
-            {format && <span className="audio-format">{format}</span>}
           </p>
           {assets.length > 0 && !failed && <label className="audio-lyrics-picker" title={assets.find(asset => asset.path === selected)?.name}>
             <span className="sr-only">选择歌词</span><Icon name="fileText" size={13} />
@@ -492,7 +494,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
               onChange={event => audio?.setVolume(Number(event.target.value))}
               onKeyDown={event => { if (event.key.startsWith("Arrow")) event.stopPropagation(); }} />
           </div>
-          {nav?.onPlaylist && nav.count > 1 && <MediaButton icon="list" label={`播放列表（${nav.index + 1} / ${nav.count}）`} active={nav.playlistOpen} onClick={nav.onPlaylist} />}
+          {nav?.onPlaylist && nav.count > 1 && <MediaButton icon="list" className="playlist-toggle" label={`播放列表（${nav.index + 1} / ${nav.count}）`} active={nav.playlistOpen} onClick={nav.onPlaylist} />}
         </div>
       </div>
     </div>

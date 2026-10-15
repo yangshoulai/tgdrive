@@ -276,13 +276,16 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     const header = modal?.querySelector<HTMLElement>(".modal-header");
     if (!browsable || !node || !modal || !backdrop || !header) return;
     // 按实际头部高度计算画布，避免窄屏换行挤出内容及百分比高度循环；导航都在播放器内部，不再有单独的工具栏。
+    // 沉浸式预览的头部浮在画布上（不占高度），播放器用 --preview-header-height 给顶部内容留出位置。
     const resize = () => {
       if (modal.classList.contains("is-minimized")) return;
       const outer = getComputedStyle(backdrop), frame = getComputedStyle(modal);
       let height = backdrop.clientHeight - parseFloat(outer.paddingTop) - parseFloat(outer.paddingBottom);
       if (frame.maxHeight.endsWith("px")) height = Math.min(height, parseFloat(frame.maxHeight));
+      const overlay = getComputedStyle(header).position === "absolute";
+      node.style.setProperty("--preview-header-height", `${header.offsetHeight}px`);
       // 入场动画带缩放变换，布局高度不受动画影响，避免误算可用画布。
-      const content = Math.max(0, height - header.offsetHeight - parseFloat(frame.borderTopWidth) - parseFloat(frame.borderBottomWidth));
+      const content = Math.max(0, height - (overlay ? 0 : header.offsetHeight) - parseFloat(frame.borderTopWidth) - parseFloat(frame.borderBottomWidth));
       node.style.setProperty("--preview-content-height", `${content}px`);
       node.style.setProperty("--preview-player-height", `${content}px`);
     };
@@ -312,6 +315,41 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   } : undefined;
   const strip: PreviewStrip | undefined = kind === "image" ? { items: playlist.items, current: active.key, onSelect: select, thumbnail: item => sourceOf(item).thumbnail } : undefined;
   const panelOpen = media && playlistExpanded;
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+  // 视频与图片：鼠标静止一会儿后隐藏浮在画面上的头部，移动、按键或悬停头部时恢复；暂停的视频始终显示。
+  useEffect(() => {
+    const modal = stage.current?.closest<HTMLElement>(".modal");
+    if (!modal || (kind !== "video" && kind !== "image")) return;
+    let timer = 0;
+    const header = modal.querySelector<HTMLElement>(".modal-header");
+    const wake = () => {
+      modal.classList.remove("is-chrome-idle");
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        if (modal.classList.contains("is-minimized") || header?.matches(":hover, :focus-within") || modal.querySelector(".preview-playlist-panel")) return;
+        if (kind === "video" && !playingRef.current) return;
+        modal.classList.add("is-chrome-idle");
+      }, 2600);
+    };
+    const events = ["pointermove", "pointerdown", "keydown", "wheel"] as const;
+    for (const name of events) modal.addEventListener(name, wake, { passive: true });
+    wake();
+    return () => { window.clearTimeout(timer); modal.classList.remove("is-chrome-idle"); for (const name of events) modal.removeEventListener(name, wake); };
+  }, [kind]);
+  useEffect(() => { if (!playing) stage.current?.closest(".modal")?.classList.remove("is-chrome-idle"); }, [playing]);
+  // 播放列表是浮在右侧的抽屉：点击抽屉外的画面即收起（列表按钮自己负责开关）。
+  useEffect(() => {
+    const node = stage.current;
+    if (!panelOpen || !node) return;
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (!target || target.closest(".preview-playlist-panel, .playlist-toggle, .art-control-playlist")) return;
+      setPlaylistExpanded(false);
+    };
+    node.addEventListener("pointerdown", outside);
+    return () => node.removeEventListener("pointerdown", outside);
+  }, [panelOpen]);
   // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
     <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
@@ -319,7 +357,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>
         <IconButton icon="next" label="下一张" size="sm" onClick={nav.onNext} />
-      </div> : undefined} className={`preview-modal preview-modal-${kind}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
+      </div> : undefined} className={`preview-modal preview-modal-${kind}${browsable ? " is-immersive" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>
@@ -336,9 +374,9 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         onLyricLine={line => setLyric(current => current.key === active.key && current.line === line ? current : { key: active.key, line })}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}
         loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} nav={nav} strip={strip} />
-        {panelOpen && <PlaylistPanel playlist={playlist} onSelect={select} typeLabel={kindLabel(kind)}
+        {panelOpen && <PlaylistPanel playlist={playlist} onSelect={select} typeLabel={kindLabel(kind)} playing={playing}
           onCollapse={() => setPlaylistExpanded(false)}
-          renderThumbnail={item => <FileVisual kind={getFileKind(item.content_type, item.key)} src={sourceOf(item).thumbnail} size="lg" />} />}
+          renderThumbnail={item => <FileVisual kind={getFileKind(item.content_type, item.key)} src={sourceOf(item).thumbnail} size="md" />} />}
       </div>
     </Modal>
   );

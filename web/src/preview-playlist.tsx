@@ -1,7 +1,7 @@
 /** 图片与媒体列表沿用打开预览时的当前页及显示顺序。 */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { type FileItem } from "./api";
-import { Button, Icon, IconButton, formatBytes, type IconName } from "./ui";
+import { Icon, IconButton, formatBytes, type IconName } from "./ui";
 
 export type PlaybackMode = "sequence" | "random" | "loop" | "single";
 const MODES: { value: PlaybackMode; label: string }[] = [
@@ -77,12 +77,19 @@ export function usePreviewPlaylist(file: FileItem, kind: string, files: FileItem
   return { items, current, select, next, previous, mode, changeMode };
 }
 
-export function PlaylistPanel({ playlist, onSelect, onCollapse, renderThumbnail, typeLabel, image = false }: {
+/**
+ * 播放列表抽屉：浮在播放器右侧，不挤压画面；顶部可按文件名过滤（空格分隔多个关键词，都要命中），
+ * 当前项显示律动条（播放中）或序号。点击抽屉外、按 Esc 或右上角按钮收起。
+ */
+export function PlaylistPanel({ playlist, onSelect, onCollapse, renderThumbnail, typeLabel, playing = false, image = false }: {
   playlist: ReturnType<typeof usePreviewPlaylist>; onSelect: (file: FileItem) => void; onCollapse: () => void; image?: boolean;
-  renderThumbnail: (file: FileItem) => ReactNode; typeLabel: string;
+  renderThumbnail: (file: FileItem) => ReactNode; typeLabel: string; playing?: boolean;
 }) {
-  const list = useRef<HTMLOListElement>(null);
+  const list = useRef<HTMLOListElement>(null), search = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState("");
   const index = playlist.items.findIndex(file => file.key === playlist.current.key);
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = terms.length ? playlist.items.filter(file => { const name = nameOf(file).toLowerCase(); return terms.every(term => name.includes(term)); }) : playlist.items;
   useEffect(() => {
     const node = list.current;
     if (!node) return;
@@ -92,17 +99,39 @@ export function PlaylistPanel({ playlist, onSelect, onCollapse, renderThumbnail,
     return () => observer.disconnect();
   }, [playlist.current.key, playlist.items.length]);
   const label = image ? "图片列表" : "播放列表";
-  return <aside id="preview-playlist-panel" className="preview-playlist-panel" aria-label={label}>
-    <header><strong>{label}</strong><span className="preview-playlist-count">{Math.max(0, index) + 1} / {playlist.items.length}</span>
+  return <aside id="preview-playlist-panel" className={`preview-playlist-panel${playing ? " is-playing" : ""}`} aria-label={label}
+    onKeyDown={event => {
+      if (event.key !== "Escape") return;
+      // Esc 先清空过滤词，再收起抽屉；不让它冒泡关闭整个预览。
+      event.preventDefault(); event.stopPropagation();
+      if (query) setQuery(""); else onCollapse();
+    }}>
+    <header>
+      <div className="preview-playlist-title"><strong>{label}</strong>
+        <span className="preview-playlist-count">{terms.length ? `${shown.length} / ${playlist.items.length} 项` : `${Math.max(0, index) + 1} / ${playlist.items.length}`}</span></div>
       <IconButton icon="x" label={`收起${label}`} size="sm" onClick={onCollapse} />
     </header>
+    {playlist.items.length > 1 && <label className="preview-playlist-search">
+      <Icon name="search" size={14} />
+      <input ref={search} type="search" placeholder="过滤文件名" aria-label={`过滤${label}`} value={query} spellCheck={false}
+        onChange={event => setQuery(event.target.value)} />
+      {query && <button type="button" aria-label="清空过滤" title="清空过滤" onClick={() => { setQuery(""); search.current?.focus(); }}><Icon name="x" size={12} /></button>}
+    </label>}
     <ol ref={list} className="preview-playlist-items" aria-label={image ? "本页同目录的图片" : "本页同目录的可播放文件"}>
-      {playlist.items.map(file => <li key={file.key}>
-        <Button variant="ghost" size="sm" className={file.key === playlist.current.key ? "is-current" : ""} aria-current={file.key === playlist.current.key ? "true" : undefined} title={nameOf(file)} onClick={() => onSelect(file)}>
-          {renderThumbnail(file)}<span className="preview-track-description"><strong>{nameOf(file)}</strong><span>{typeLabel} · {formatBytes(file.size)}</span></span>
-          {file.key === playlist.current.key && <Icon name={image ? "check" : "play"} size={12} />}
-        </Button>
-      </li>)}
+      {shown.map(file => {
+        const current = file.key === playlist.current.key;
+        const order = playlist.items.indexOf(file) + 1;
+        return <li key={file.key}>
+          <button type="button" className={`preview-track${current ? " is-current" : ""}`} aria-current={current ? "true" : undefined} title={nameOf(file)} onClick={() => onSelect(file)}>
+            <span className="preview-track-order" aria-hidden="true">{current && !image
+              ? <span className="preview-equalizer"><i /><i /><i /><i /></span> : String(order).padStart(2, "0")}</span>
+            <span className="preview-track-cover">{renderThumbnail(file)}</span>
+            <span className="preview-track-description"><strong>{nameOf(file)}</strong><span>{typeLabel} · {formatBytes(file.size)}</span></span>
+            {!current && <Icon name={image ? "image" : "play"} size={14} className="preview-track-play" />}
+          </button>
+        </li>;
+      })}
+      {!shown.length && <li className="preview-playlist-empty">没有匹配“{query.trim()}”的文件</li>}
     </ol>
   </aside>;
 }
