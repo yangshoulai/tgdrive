@@ -116,6 +116,20 @@ export function LogoMark({ size = 24 }: { size?: number }) {
   );
 }
 
+/** 文件助手标识：实心文件（currentColor）+ 品牌琥珀折角（与 LogoMark 的琥珀片呼应）+ 镂空双眼与浅笑。
+ * 实心形状在 18–20px 仍然清晰；眼睛与嘴用 --surface，深浅色下都与身体拉开对比。运行状态只改变双眼明暗。 */
+export function AssistantMark({ size = 20 }: { size?: number }) {
+  return (
+    <svg className="assistant-mark" viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
+      <path className="assistant-mark-body" d="M7.25 2.5h6.4c.6 0 1.17.24 1.6.66l4.09 4.1c.42.42.66.99.66 1.59v9.4a3.25 3.25 0 0 1-3.25 3.25h-9.5A3.25 3.25 0 0 1 4 18.25V5.75A3.25 3.25 0 0 1 7.25 2.5Z" />
+      <path className="assistant-mark-fold" d="M14.5 2.6v3.65c0 .97.78 1.75 1.75 1.75h3.65Z" />
+      <rect className="assistant-mark-eye" x="8.4" y="10.6" width="2.3" height="4.2" rx="1.15" />
+      <rect className="assistant-mark-eye" x="13.3" y="10.6" width="2.3" height="4.2" rx="1.15" />
+      <path className="assistant-mark-smile" d="M10.3 17.3c1 .6 2.4.6 3.4 0" />
+    </svg>
+  );
+}
+
 export function Brand({ href = "/", suffix, tagline = false }: { href?: string; suffix?: string; /** 在名称下方显示品牌标语 */ tagline?: boolean }) {
   return (
     <a className={`brand${tagline ? " has-tagline" : ""}`} href={href} aria-label={`${BRAND} 首页`}>

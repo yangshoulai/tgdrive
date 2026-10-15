@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { Badge, Button, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, toast, type IconName, type MenuItem } from "../ui";
+import { AssistantMark, Badge, Button, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, toast, type IconName, type MenuItem } from "../ui";
 import type { PageImport } from "./page-import";
 import { Thread, type LiveRun } from "./assistant-thread";
 import { filesBridge, waitForFiles } from "./assistant-bridge";
@@ -31,7 +31,7 @@ export function useAssistantConfig(enabled: boolean) {
 export function AssistantLauncher({ onOpen, open }: { onOpen: () => void; open: boolean }) {
   return (
     <button type="button" className={`assistant-launch${open ? " is-active" : ""}`} onClick={onOpen} data-closes-nav aria-expanded={open} aria-keyshortcuts="Meta+J Control+J">
-      <Icon name="sparkle" size={17} /><span>文件助手</span><kbd>{navigator.platform.includes("Mac") ? "⌘J" : "Ctrl J"}</kbd>
+      <AssistantMark size={18} /><span>文件助手</span><kbd>{navigator.platform.includes("Mac") ? "⌘J" : "Ctrl J"}</kbd>
     </button>
   );
 }
@@ -372,7 +372,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   }} />;
   const header = <header className="assistant-header">
     {<IconButton className={page ? "assistant-mobile-history" : undefined} icon="list" label="对话历史" active={history} onClick={() => { setHistory(value => !value); if (!history) loadConversations(); }} />}
-    <span className={`assistant-brand-mark${runId ? " is-working" : ""}`} aria-hidden="true"><Icon name="sparkle" size={18} /></span>
+    <span className={`assistant-brand-mark${runId ? " is-working" : ""}`} aria-hidden="true"><AssistantMark size={24} /></span>
     <div className="assistant-title"><strong>{detail?.conversation.title || "文件助手"}</strong>
       <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{detail ? conversationScope : "查找、整理，让文件井井有条"}</small></div>
     <IconButton icon="plus" label="新对话（⌘⇧O）" onClick={newConversation} />
@@ -593,7 +593,7 @@ function Welcome({ location, onPick }: { location: string; onPick: (text: string
     { title: "发现重复", description: "看看能节省多少空间", text: "找出当前作用域的重复文件，先不要修改", icon: "copy" },
   ];
   return <div className="assistant-welcome">
-    <span className="assistant-welcome-icon"><Icon name="sparkle" size={28} /></span>
+    <span className="assistant-welcome-icon"><AssistantMark size={36} /></span>
     <span className="assistant-eyebrow">你的文件，有了新帮手</span>
     <h3>让文件，井井有条。</h3>
     <p className="muted">查找、理解、整理，一句话就开始。<br />每一步修改，都由你来决定。</p>

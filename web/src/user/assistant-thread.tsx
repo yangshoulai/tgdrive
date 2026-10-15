@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { Markdown } from "../markdown";
-import { Badge, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
+import { AssistantMark, Badge, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
 const display = (key: string) => "/" + key;
 const baseName = (key: string) => key.replace(/\/$/, "").split("/").pop() || key;
@@ -29,6 +29,10 @@ export function useNow(active: boolean, interval = 1000) {
     return () => window.clearInterval(timer);
   }, [active, interval]);
   return now;
+}
+
+function ActivityDots() {
+  return <span className="ai-activity" aria-hidden="true"><i /><i /><i /></span>;
 }
 
 /* ---------- 分组 ---------- */
@@ -131,7 +135,7 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
   return <div className="ai-turn">
     {turn.user && <UserMessage message={turn.user} />}
     {hasAssistant && <div className={`ai-reply${live ? " is-live" : ""}`}>
-      <span className="ai-avatar" aria-hidden="true"><Icon name="sparkle" size={15} /></span>
+      <span className="ai-avatar" aria-hidden="true"><AssistantMark /></span>
       <div className="ai-reply-body">
         <div className="ai-reply-head"><strong>文件助手</strong>{model && <span className="ai-model" title={model}>{model}</span>}
           {live && <LiveStatus live={live} />}</div>
@@ -259,7 +263,7 @@ function ToolStep({ message, pending }: { message?: ai.ChatMessage; pending?: { 
   const arg = primaryArg(message?.arguments);
   const state = pending ? "is-running" : failed ? "is-error" : "is-ok";
   return <div className={`ai-step ai-tool ${state}${open ? " is-open" : ""}`}>
-    <span className="ai-step-dot" aria-hidden="true">{pending ? <span className="ai-spinner" /> : <Icon name={failed ? "alert" : toolIcon(name)} size={12} />}</span>
+    <span className="ai-step-dot" aria-hidden="true">{pending ? <ActivityDots /> : <Icon name={failed ? "alert" : toolIcon(name)} size={12} />}</span>
     <div className="ai-tool-body">
       <button type="button" className="ai-tool-head" aria-expanded={open} disabled={!message} onClick={() => setOpen(value => !value)}>
         <strong>{message?.label ?? pending?.label ?? name}</strong>
@@ -317,7 +321,7 @@ function PlanCard({ items }: { items: { content: string; status: string }[] }) {
     <CardHead icon="list" title="处理计划" subtitle={`${done} / ${items.length} 已完成`} />
     <Progress value={items.length ? done / items.length * 100 : 0} label="计划进度" />
     <ol>{items.map((item, index) => <li key={index} className={`is-${item.status}`}>
-      <span aria-hidden="true">{item.status === "completed" ? <Icon name="check" size={12} /> : item.status === "in_progress" ? <i className="ai-spinner" /> : index + 1}</span>{item.content}
+      <span aria-hidden="true">{item.status === "completed" ? <Icon name="check" size={12} /> : item.status === "in_progress" ? <ActivityDots /> : index + 1}</span>{item.content}
     </li>)}</ol>
   </section>;
 }
