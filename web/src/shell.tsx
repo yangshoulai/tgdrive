@@ -1,6 +1,6 @@
 /** 用户端与管理端共用的应用外壳、登录页和首次设置页。 */
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
-import { BRAND, SITE } from "./brand";
+import { BRAND, SITE, STORY, TAGLINE } from "./brand";
 import * as api from "./api";
 import { loginWithPasskey, passkeyUnavailable } from "./passkeys";
 import { Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
@@ -39,7 +39,7 @@ export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor
       <div className="drawer-scrim" onClick={() => setDrawer(false)} aria-hidden="true" />
       <aside className="sidebar" aria-label="主导航">
         <div className="sidebar-top">
-          <Brand />
+          <Brand tagline />
           <button type="button" className="icon-btn icon-btn-ghost icon-btn-sm sidebar-close" aria-label="关闭导航" onClick={() => setDrawer(false)}><Icon name="x" size={16} /></button>
         </div>
         {workspaces.length > 1 && <div className="workspace-switch"><Segmented label="工作区" showLabels value={currentWorkspace.label!} options={workspaces.map(group => ({ value: group.label!, label: group.label!, icon: group.icon }))} onChange={label => {
@@ -112,7 +112,10 @@ function AuthHero({ admin }: { admin: boolean }) {
         {MOSAIC.map((tile, index) => <i key={index} className={tile.tone} style={{ animationDelay: `${tile.delay}ms` }} />)}
       </div>
       <div className="auth-visual-copy">
-        <h2>{admin ? "几分钟，搭好你的私人云盘" : "把文件放在一个只属于你的地方"}</h2>
+        {admin ? <h2>几分钟，搭好你的私人云盘</h2> : <div className="auth-motto">
+          <h2>{TAGLINE}</h2>
+          <p>{STORY}</p>
+        </div>}
         <ul className="auth-points">
           {points.map(point => <li key={point.icon}><span className="icon-wrap" aria-hidden="true"><Icon name={point.icon} size={16} /></span><span>{point.text}</span></li>)}
         </ul>
@@ -125,7 +128,7 @@ export function AuthLayout({ admin, title, description, children, footer }: { ad
   return (
     <div className={`auth ${admin ? "auth-admin" : "auth-user"}`}>
       <div className="auth-form-pane">
-        <Brand />
+        <Brand tagline />
         <div className="auth-form-wrap">
           <h1>{title}</h1>
           <p className="auth-description">{description}</p>

@@ -15,6 +15,6 @@
     <path d="M218 22L185 55" stroke="#c27a10" stroke-width="12" stroke-linecap="round"/>
   </g>
   <text x="80" y="289" fill="#fff" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="92" font-weight="600" letter-spacing="-4">Tessera</text>
-  <text x="84" y="355" fill="#d1d1d7" font-family="-apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="30">文件加密保存，由你决定如何分享</text>
-  <text x="84" y="506" fill="#8c8d9b" font-family="-apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="20">私有文件空间</text>
+  <text x="84" y="366" fill="#ececf1" font-family="'Songti SC', 'STSong', 'Noto Serif CJK SC', serif" font-size="44" font-weight="600" letter-spacing="8">千片成璧，唯你可合</text>
+  <text x="84" y="506" fill="#8c8d9b" font-family="-apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="20" letter-spacing="1">加密分片 · 散落在你自己的 Telegram 频道</text>
 </svg>

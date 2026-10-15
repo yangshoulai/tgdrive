@@ -1,7 +1,7 @@
 /** Tessera 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
 import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type KeyboardEventHandler, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { BRAND } from "./brand";
+import { BRAND, TAGLINE } from "./brand";
 import { FILE_PAGE_SIZES } from "./pagination";
 
 /* ---------- 图标 ---------- */
@@ -116,11 +116,11 @@ export function LogoMark({ size = 24 }: { size?: number }) {
   );
 }
 
-export function Brand({ href = "/", suffix }: { href?: string; suffix?: string }) {
+export function Brand({ href = "/", suffix, tagline = false }: { href?: string; suffix?: string; /** 在名称下方显示品牌标语 */ tagline?: boolean }) {
   return (
-    <a className="brand" href={href} aria-label={`${BRAND} 首页`}>
+    <a className={`brand${tagline ? " has-tagline" : ""}`} href={href} aria-label={`${BRAND} 首页`}>
       <LogoMark />
-      <span className="brand-name">{BRAND}</span>
+      {tagline ? <span className="brand-text"><span className="brand-name">{BRAND}</span><span className="brand-tagline">{TAGLINE}</span></span> : <span className="brand-name">{BRAND}</span>}
       {suffix && <span className="brand-suffix">{suffix}</span>}
     </a>
   );

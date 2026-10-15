@@ -110,6 +110,8 @@
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  /* 品牌标语用系统自带的宋体，营造书卷气；不加载外部字体。 */
+  --font-serif: "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", "SimSun", serif;
 
   /* 字号阶梯：界面只用这几档，不写半像素或零散字号（文档站正文另有阅读字号）。 */
   --text-micro: 11px;
@@ -342,6 +344,9 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 
 .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); }
 .brand-name { font-family: var(--font-display); font-size: var(--text-lg); font-weight: 600; letter-spacing: -.02em; line-height: 1; }
+.brand-text { display: grid; gap: 6px; min-width: 0; }
+.brand-tagline { overflow: hidden; color: var(--ink-3); font-family: var(--font-serif); font-size: var(--text-micro); letter-spacing: .28em; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+.brand.has-tagline:hover .brand-tagline { color: var(--ink-2); }
 .logo-bg { fill: var(--logo-bg); stroke: var(--logo-ring); }
 .logo-tile { fill: var(--logo-tile); }
 .logo-plane { fill: var(--logo-plane); stroke: var(--logo-plane); }
@@ -658,6 +663,9 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 @keyframes tile-in { from { opacity: 0; transform: scale(.5); } }
 .auth-visual-copy { display: grid; gap: 22px; max-width: 460px; }
 .auth-visual-copy h2 { margin: 0; font-family: var(--font-display); font-size: var(--text-display); font-weight: 600; letter-spacing: -.025em; line-height: 1.3; }
+.auth-motto { display: grid; gap: 14px; }
+.auth-motto h2 { font-family: var(--font-serif); font-weight: 600; letter-spacing: .14em; }
+.auth-motto p { margin: 0; color: rgba(255, 255, 255, .62); font-family: var(--font-serif); font-size: var(--text-md); letter-spacing: .04em; line-height: 1.9; }
 .auth-points { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
 .auth-points li { display: grid; grid-template-columns: 28px 1fr; gap: 12px; align-items: center; color: rgba(255, 255, 255, .7); font-size: var(--text-sm); line-height: 1.6; }
 .auth-points .icon-wrap { display: grid; width: 28px; height: 28px; place-items: center; border-radius: var(--radius-sm); background: rgba(255, 255, 255, .06); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1); color: rgba(255, 255, 255, .9); }
@@ -1752,6 +1760,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .preview-video-host .art-control-pip, .preview-video-host .art-control-fullscreenWeb { display: none !important; }
   .auth-form-pane { padding: 24px; }
   .share-bar { padding: 0 16px; }
+  .share-bar .brand-tagline { display: none; }
   .share-main { padding: 24px 12px; }
   .share-head { flex-wrap: wrap; padding: 18px; }
   .share-actions { width: 100%; flex-wrap: wrap; }

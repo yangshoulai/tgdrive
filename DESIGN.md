@@ -80,7 +80,8 @@ Tessera（项目与命令行名称仍为 tgdrive）是个人和小团队使用�
 └──────────┴──────────────────────────────────────────┘
 ```
 
-- 侧栏 232px 固定、浅灰底。顶部是品牌与工作区切换（带图标的分段控件「我的空间／系统管理」）；导航项高 36px、圆角 8px，悬停用中性浅色，当前项用浅主色填充、主色文字与图标，并在左侧显示 2px 细标记；分组之间留 20px 并用细线分隔，分组标题 12px 浅灰；数量为小圆胶囊，当前项的数量沿用主色。底部依次为：系统状态（正常时是带绿色状态点的一行小字，锁定时为琥珀色提示条）、存储卡片（白底细边，已用容量为主数字，有配额时显示进度条和「共 X · 已用 N%」，否则写「不限配额」）、账号行（顶部细线分隔）。内容最大宽度 1200px，居中。
+- 品牌标语「千片成璧，唯你可合」（`TAGLINE`）呼应 Tessera「镶嵌画的一片」：文件加密切片、散落存放，只有用户的钥匙能拼合完整。标语统一用宋体令牌 `--font-serif`（系统自带宋体，不加载外部字体）：`<Brand tagline />` 在名称下方以 11px、`--ink-3`、字距 .28em 显示，用于侧栏、登录页表单栏与分享页顶栏（窄屏分享页隐藏）；登录页深色视觉区用它作大标题（宋体、字距 .14em），下方是 14px 宋体的 `STORY` 说明。链接预览的 `og:title` 为「Tessera · 标语」，`og:description` 为 `STORY`，封面卡片同样以宋体展示标语。
+- 侧栏 232px 固定、浅灰底。顶部是品牌（名称下方带标语）与工作区切换（带图标的分段控件「我的空间／系统管理」）；导航项高 36px、圆角 8px，悬停用中性浅色，当前项用浅主色填充、主色文字与图标，并在左侧显示 2px 细标记；分组之间留 20px 并用细线分隔，分组标题 12px 浅灰；数量为小圆胶囊，当前项的数量沿用主色。底部依次为：系统状态（正常时是带绿色状态点的一行小字，锁定时为琥珀色提示条）、存储卡片（白底细边，已用容量为主数字，有配额时显示进度条和「共 X · 已用 N%」，否则写「不限配额」）、账号行（顶部细线分隔）。内容最大宽度 1200px，居中。
 - 我的文件的面包屑使用有序路径，保持单行；当前目录为浅主色底，名称超长时省略并提供完整名称提示。深路径局部横向滚动，进入目录后优先露出当前位置，所有祖先目录仍可点击、键盘聚焦与接收拖放；根目录不重复展示路径栏。
 - 860px 以下侧栏变为抽屉，导航项高 40px，顶部出现 56px 移动栏；抽屉高度使用动态视口高度（`100dvh`，iOS Safari 的 `100vh` 会包含被工具栏遮住的部分），内容超出时整个抽屉可以滚动，底部状态与账号区始终够得着；页面级的满屏高度同样使用 `100dvh` 并以 `100vh` 兜底。我的文件采用两行条目，管理表格局部横向滚动，表单弹窗改为底部抽屉，普通文件预览保留居中浮窗。
 - 侧栏底部只在系统锁定时显示状态提示（点击进入安全与维护），正常运行不占位置。用量是一行「已用空间」小字，不再套卡片；有配额时加一条细进度条和「共 X · N%」，没有配额时只显示已用容量。
@@ -107,7 +108,7 @@ Tessera（项目与命令行名称仍为 tgdrive）是个人和小团队使用�
 | `PageHeader` / `Panel` / `EmptyState` / `SkeletonRows` / `Progress` / `CopyField` / `KeyValue` | 页面结构与状态 |
 | `Pagination` | 统一上一页、页码和下一页；只有一页时不渲染（包括每页数量选择）；加载时禁用翻页并显示状态，窄屏自动换行 |
 
-文件相关组件在 `web/src/files.tsx`：`FileGlyph` / `FileTile`（文件类型图标）、`FileThumbnail`（资源状态）、`FilePreview`、`PreviewModal`、`ShareDialog`。品牌名称和页面标题后缀统一来自 `web/src/brand.ts`（`BRAND`、`SITE`），标志是 `ui.tsx` 里的 `LogoMark`，网页图标在 `build-apps.mjs` 内联，独立的标志文件见 `docs/logo.svg`。文件预览界面在 `preview-text.tsx`、`preview-media.tsx`，音乐与图片界面分别在 `preview-media.tsx`、`preview-image.tsx`，独立引擎使用 CodeMirror、markdown-it、DOMPurify、ArtPlayer；保留 `highlight.ts` 的高亮规则作为补充。源码／Markdown 样式前缀为 `src-*`、`hl-*`、`md`，不要与文档站的 `.code-block` 混用。
+文件相关组件在 `web/src/files.tsx`：`FileGlyph` / `FileTile`（文件类型图标）、`FileThumbnail`（资源状态）、`FilePreview`、`PreviewModal`、`ShareDialog`。品牌名称、标语和页面标题后缀统一来自 `web/src/brand.ts`（`BRAND`、`TAGLINE`、`STORY`、`SITE`），标志是 `ui.tsx` 里的 `LogoMark`，网页图标在 `build-apps.mjs` 内联，独立的标志文件见 `docs/logo.svg`。文件预览界面在 `preview-text.tsx`、`preview-media.tsx`，音乐与图片界面分别在 `preview-media.tsx`、`preview-image.tsx`，独立引擎使用 CodeMirror、markdown-it、DOMPurify、ArtPlayer；保留 `highlight.ts` 的高亮规则作为补充。源码／Markdown 样式前缀为 `src-*`、`hl-*`、`md`，不要与文档站的 `.code-block` 混用。
 
 ## 文案
 

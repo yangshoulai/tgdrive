@@ -1,6 +1,6 @@
 # AGENTS.md
 
-给 AI 代理的项目说明。产品对外名称是 **Tessera**（界面、文档、标题），`tgdrive` 只是仓库、Python 包、命令行、环境变量和镜像的技术名称，不要混用；改名只需改 `web/src/brand.ts` 与 `build-apps.mjs` 里的标题/图标。人类读者请先看 `README.md`。
+给 AI 代理的项目说明。产品对外名称是 **Tessera**（界面、文档、标题），`tgdrive` 只是仓库、Python 包、命令行、环境变量和镜像的技术名称，不要混用；改名只需改 `web/src/brand.ts`（`BRAND`、标语 `TAGLINE`、说明 `STORY`；`build-apps.mjs` 用正则从这里读取三者生成 `<title>` 与 OG／Twitter 元信息，所以必须保持 `export const 名称 = "…";` 的写法）与 `build-apps.mjs` 里的网页图标；链接预览封面是 `web/assets/social-card.svg` 渲染出的 `social-card.png`（1200×630，可用 Chrome headless 截图生成），文案变化时一起更新。人类读者请先看 `README.md`。
 
 ## 项目概览
 

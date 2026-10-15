@@ -72,7 +72,7 @@ export function SharePage({ token }: { token: string }) {
   return (
     <div className="share-page">
       <header className="share-bar">
-        <Brand />
+        <Brand tagline />
         <span className="share-bar-note"><Icon name="globe" size={15} />公开分享</span>
       </header>
       <main className="share-main">
