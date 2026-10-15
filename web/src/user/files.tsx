@@ -29,7 +29,9 @@ const LABELLED_KINDS = new Set(["pdf", "document", "spreadsheet", "presentation"
 
 const KIND_FILTERS = api.KIND_FILTERS;
 
-export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision, onPlayback }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number; onPlayback?: (state: PreviewPlayback) => void }) {
+export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision, onPlayback, incoming, onIncomingTaken }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number; onPlayback?: (state: PreviewPlayback) => void;
+  /** 外部转交来的待上传文件（抓取脚本转交到私密空间），打开上传对话框确认后交给上传队列。 */
+  incoming?: File[] | null; onIncomingTaken?: () => void }) {
   const privateSpace = api.isPrivatePath(prefix);
   const notify = usePrivateToast(privateSpace);
   const root = privateSpace ? api.PRIVATE_PREFIX : "";
@@ -56,6 +58,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const dragKeys = useRef<string[]>([]);
   const [folderOpen, setFolderOpen] = useState(false);
   const [pendingUpload, setPendingUpload] = useState<File[] | null>(null);
+  useEffect(() => { if (incoming?.length) { setPendingUpload(incoming); onIncomingTaken?.(); } }, [incoming, onIncomingTaken]);
   const [dragging, setDragging] = useState(false);
   const lastUploadRevision = useRef(uploadRevision);
   const fileInput = useRef<HTMLInputElement>(null);

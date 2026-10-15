@@ -13,7 +13,6 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 from .http import DownloadError, ExpiredMedia, SafeHttpClient, status_error
-from .mp4 import with_duration
 from .request import DownloadRequest, checked_url
 
 
@@ -204,14 +203,18 @@ def playback_headers(request):
 
 async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
                 executable: str, *, check, progress, throttle, url_check=None):
-    """FFmpeg 只读取本地管道；不把用户 URL、命令或请求头交给它。"""
+    """FFmpeg 只读取本地管道；不把用户 URL、命令或请求头交给它。
+
+    delay_moov 不能省：TS 里的 AAC 带 ADTS 头，解码配置要等 aac_adtstoasc 处理第一个音频包才生成；
+    empty_moov 会在此之前写出 moov，音轨缺少 AudioSpecificConfig，Safari／iOS 识别不了音轨，只播放第一个分片（约 2 秒）。
+    """
     process = await asyncio.create_subprocess_exec(
         executable, "-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1",
         "-protocol_whitelist", "pipe", "-probesize", "1048576", "-analyzeduration", "2000000",
         "-f", "mpegts", "-i", "pipe:0", "-map", "0:v:0", "-map", "0:a:0?",
         "-c", "copy", "-tag:v", "avc1", "-bsf:a", "aac_adtstoasc", "-threads", "1",
         "-max_muxing_queue_size", "64", "-avoid_negative_ts", "make_zero",
-        "-movflags", "empty_moov+frag_keyframe+default_base_moof", "-frag_duration", "2000000",
+        "-movflags", "empty_moov+delay_moov+frag_keyframe+default_base_moof", "-frag_duration", "2000000",
         "-f", "mp4", "pipe:1", stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=131072,
     )
@@ -279,12 +282,7 @@ async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist
         await stderr
 
 
-def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist, executable: str, **options):
-    """封装为分片 MP4，并按列表的总时长补写文件头（管道输出时 FFmpeg 写不了时长，浏览器会把视频当成只有几秒）。"""
-    return with_duration(_remux(client, request, playlist, executable, **options), playlist.duration)
-
-
-async def _remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
+async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
                 executable: str, *, check, progress, throttle, cache_root: Path | None = None,
                 task_id=0, limit=None, reserve=0, audio=None, media_type="video", url_check=None, phase=None):
     """普通 TS 保持管道传输；复杂列表缓存受控分片，并生成不含外部 URI 的本地 HLS。
@@ -410,7 +408,7 @@ async def _remux(client: SafeHttpClient, request: DownloadRequest, playlist: Pla
         process = await asyncio.create_subprocess_exec(executable,
             "-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-max_alloc", "33554432",
             *inputs, *mapping, "-c", "copy", "-tag:v", "avc1", "-bsf:a", "aac_adtstoasc", "-threads", "1", "-max_muxing_queue_size", "64",
-            "-avoid_negative_ts", "make_zero", "-movflags", "empty_moov+frag_keyframe+default_base_moof",
+            "-avoid_negative_ts", "make_zero", "-movflags", "empty_moov+delay_moov+frag_keyframe+default_base_moof",
             "-frag_duration", "2000000", "-f", "mp4", "pipe:1",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=131072)
         async def discard_errors():

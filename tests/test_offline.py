@@ -160,10 +160,12 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         source = self.offline._source(self.offline._row(task["id"]))
         self.assertEqual(source["hls_audio"]["url"], "https://example.com/updated.m3u8")
         self.assertEqual(source["hls_audio"]["credential_origin"], "https://example.com/master.m3u8")
+        from tests.test_mp4_index import fragmented_mp4  # 封装结果会被转成普通 MP4，必须是合法的分片 MP4
+        movie, _ = fragmented_mp4(2)
         calls = []
         async def remux(*args, **kwargs):
             calls.append(kwargs)
-            yield b'muxed movie'
+            yield movie
         with patch('tgdrive.offline.service.remux', remux):
             self.offline.start()
             await self.wait_for(lambda: self.offline._row(task["id"])["status"] in ("completed", "failed"))

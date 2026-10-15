@@ -19,7 +19,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .http import RETRY_STATUS, DownloadError, ExpiredMedia, TransientError, status_error
-from .mp4 import with_duration
 from .request import DownloadRequest, checked_url
 
 
@@ -483,14 +482,7 @@ def clear_cache(root: Path):
             shutil.rmtree(path)
 
 
-def merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, **options):
-    """合并为分片 MP4，并用平台给出的时长补写文件头（见 mp4.with_duration）。"""
-    duration = entry.get("duration")
-    return with_duration(_merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, **options),
-                         duration if isinstance(duration, (int, float)) else None)
-
-
-async def _merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, *, check, progress, throttle, phase):
+async def merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, *, check, progress, throttle, phase):
     """只缓存受限的两条输入轨；MP4 输出通过背压直接交给加密存储。"""
     cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if cache_root.is_symlink():
@@ -525,7 +517,7 @@ async def _merge_tracks(client, platform, entry, executable, cache_root, task_id
             "-protocol_whitelist", "file,pipe", "-f", "mov", "-i", str(files[0]),
             "-protocol_whitelist", "file,pipe", "-f", "mov", "-i", str(files[1]),
             "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-tag:v", "avc1", "-threads", "1",
-            "-max_muxing_queue_size", "64", "-movflags", "empty_moov+frag_keyframe+default_base_moof",
+            "-max_muxing_queue_size", "64", "-movflags", "empty_moov+delay_moov+frag_keyframe+default_base_moof",
             "-frag_duration", "2000000", "-f", "mp4", "pipe:1",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=131072)
         async def discard_errors():

@@ -27,10 +27,11 @@ async function until(predicate) {
   throw new Error("transfer did not reach the expected state");
 }
 
-function harness({ fetch, gm, move, remove, cookies = true, cookieApi = true } = {}) {
+function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true } = {}) {
   const values = { settings: { server: "https://tessera.example", key: "TEST:secret", cookies } };
-  const requests = [], fetches = [];
-  const window = { addEventListener() {}, fetch: async (url, options) => {
+  const requests = [], fetches = [], listeners = [];
+  const window = { addEventListener(type, listener) { if (type === "message") listeners.push(listener); }, removeEventListener() {},
+    open: (url, target) => open ? open(url, target, listeners) : null, fetch: async (url, options) => {
     fetches.push({ url, options });
     return fetch ? fetch(url, options) : imageResponse();
   } };
@@ -313,15 +314,58 @@ test("read-only destination fails before downloading the source", async () => {
   assert.equal(h.fetches.length, 0);
 });
 
-test("browser mode cannot create a private-space transfer", async () => {
+test("browser mode hands private-space files to the Tessera page instead of the key API", async () => {
+  const posted = [];
+  let opened = "";
+  const h = harness({ open: (url, target, listeners) => {
+    opened = url;
+    const nonce = /#receive=([a-f\d]+)&/.exec(url)[1];
+    const reply = data => listeners.forEach(listener => listener({ origin: "https://tessera.example", data: { source: "tessera", nonce, ...data } }));
+    queueMicrotask(() => reply({ type: "transfer-ready" }));
+    return { closed: false, postMessage(data, origin) {
+      posted.push({ data, origin });
+      if (data.type === "file") queueMicrotask(() => reply({ type: "transfer-ack", index: data.index, ok: true }));
+    } };
+  } });
+  const current = h.batch();
+  current.destination = { path: "", private: true };
+  await h.api.runBatch();
+  await until(() => posted.some(message => message.data.type === "end"));
+  const entry = current.entries[0];
+  assert.equal(entry.state, "handoff");
+  assert.equal(entry.delivered, true);
+  assert.match(opened, /^https:\/\/tessera\.example\/\?view=private#receive=[a-f\d]{36}&from=https%3A%2F%2Fgallery\.example$/);
+  const file = posted.find(message => message.data.type === "file");
+  assert.equal(file.origin, "https://tessera.example");
+  assert.equal(file.data.name, "0048.jpg");
+  assert.deepEqual(new Uint8Array(await file.data.blob.arrayBuffer()), png);
+  // 私密空间不经过访问密钥：没有目录检查、上传或移动请求。
+  assert.equal(h.requests.some(request => request.details.url.startsWith("https://tessera.example")), false);
+});
+
+test("blocked popup fails the private transfer before downloading", async () => {
   const h = harness();
   const current = h.batch();
-  current.destination.private = true;
+  current.destination = { path: "", private: true };
   await h.api.runBatch();
-  assert.match(h.messages[0], /仅支持我的文件/);
+  assert.match(current.entries[0].error, /拦截了新标签页/);
   assert.equal(h.fetches.length, 0);
-  assert.equal(h.requests.length, 0);
-  assert.equal(current.started, false);
+});
+
+test("Cloudflare challenge is reported so the user can verify in a tab", async () => {
+  const h = harness({ fetch: () => { throw new TypeError("CORS"); }, gm: details => {
+    if (details.url.startsWith("https://tessera.example")) return details.onload({ status: 200, responseText: '{"writable":true}' });
+    details.onload({ status: 403, responseHeaders: "Server: cloudflare\r\ncf-mitigated: challenge\r\n", response: new Blob(["<title>Just a moment...</title>"]) });
+  } });
+  const current = h.batch();
+  await h.api.runBatch();
+  const entry = current.entries[0];
+  assert.equal(entry.state, "error");
+  assert.equal(entry.challenge, true);
+  assert.match(entry.error, /人机验证/);
+  const source = h.requests.find(request => request.details.url.startsWith("https://images.example")).details;
+  assert.equal(source.headers["User-Agent"], undefined);
+  assert.match(source.headers.Accept, /^image\//);
 });
 
 test("browser mode processes one file at a time", async () => {

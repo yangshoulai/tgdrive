@@ -21,7 +21,7 @@ from ..objects import PRIVATE_PREFIX, Scope
 from ..work import WorkBusyError
 from .hls import load_playlist, remux
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
-from .mp4 import FragmentIndexer
+from .mp4 import Defragmenter
 from .request import DownloadRequest, filename, parse_requests, url_filename
 from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_cache, media_request, merge_tracks, prepare, site_link, track_stream
 
@@ -717,13 +717,14 @@ class OfflineDownloads:
         return stored
 
     async def _stage_video(self, row, scope, upload_id, stream):
-        """FFmpeg 输出的分片 MP4：在 moov 后补上 sidx 索引，浏览器才能只读文件头就开始播放和跳转。
+        """FFmpeg 管道输出的分片 MP4 边收边转成普通 MP4（见 mp4.Defragmenter），浏览器才能快速播放和跳转。
 
-        sidx 要等全部分片输出后才能生成，而磁盘不足以暂存整个视频：先在内存里留住开头约 16 MB 作为第 1 段，
-        其余内容从第 2 段起边收边传，结束时把 sidx 插进第 1 段再上传（分段可以乱序上传，提交时按序号拼接）。
+        moov 要等全部数据输出后才能生成，而磁盘不足以暂存整个视频：先在内存里留住开头约 16 MB 的音视频数据，
+        其余从第 2 段起边收边传；结束时把 ftyp + moov + mdat 头和留住的数据合成第 1 段再上传
+        （分段可以乱序上传，提交时按序号拼接）。
         """
-        indexer = FragmentIndexer()
-        source = indexer.observe(stream)
+        converter = Defragmenter()
+        source = converter.payload(stream)
         try:
             head, held = [], 0
             async for piece in source:
@@ -732,14 +733,11 @@ class OfflineDownloads:
                 held += len(piece)
                 if held >= PART_SIZE:
                     break
-            first = b"".join(head)
-            del head
             stored = await self._stage(row, scope, upload_id, source, offset=PART_SIZE, count_input=False) - PART_SIZE
         finally:
             await source.aclose()
-        index = indexer.sidx()
-        if index and indexer.moov_end is not None and indexer.moov_end <= len(first):
-            first = first[:indexer.moov_end] + index + first[indexer.moov_end:]
+        first = converter.header() + b"".join(head)
+        del head
         await self.objects.upload_part(scope, upload_id, 1, first, len(first))
         self._set(row["id"], stored_bytes=stored + len(first))
 
