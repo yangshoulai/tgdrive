@@ -3,9 +3,12 @@
 import asyncio
 import errno
 import mimetypes
+import re
+from html import escape
 from pathlib import Path
 
 from .errors import NotFoundError
+from .settings import normalize_origin
 
 # 网页（用户端、控制台、文档、分享页）的安全响应头：只允许同源脚本，禁止被其他站点嵌入框架（防点击劫持）。
 PAGE_SECURITY_HEADERS = {
@@ -20,7 +23,7 @@ PAGE_SECURITY_HEADERS = {
 
 
 class StaticFiles:
-    async def _static(self, send, path: str, method: str, *, https: bool = False) -> None:
+    async def _static(self, send, path: str, method: str, *, https: bool = False, origin: str = "") -> None:
         assert self.static_dir is not None
         static_dir = Path(self.static_dir)
         # 单页应用：真实存在的文件原样返回，其余路径（/、/docs、/s/<令牌>、/admin/...）都交给 index.html，
@@ -43,6 +46,17 @@ class StaticFiles:
             await self._send(send, 404, {"error": {"code": "not_found", "message": "前端资源未构建"}})
             return
         data = await asyncio.to_thread(candidate.read_bytes)
+        if candidate.name == "index.html":
+            # 爬虫不执行应用脚本；在原始 HTML 中使用部署地址，兼容未配置地址的首次部署。
+            try:
+                origin = normalize_origin(self.settings.get("public_base_url") or origin, "站点地址") or ""
+            except ValueError:
+                origin = ""
+            if origin:
+                html = data.decode("utf-8")
+                html = re.sub(r'(<meta (?:property="og:(?:url|image)"|name="twitter:image") content=")(/[^\"]*)(")',
+                              lambda match: match[1] + escape(origin + match[2], quote=True) + match[3], html)
+                data = html.encode("utf-8")
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
         headers = {"Content-Type": content_type, "Content-Length": str(len(data)),
                    "Cache-Control": "no-cache" if candidate.name == "index.html" else "public, max-age=31536000, immutable",

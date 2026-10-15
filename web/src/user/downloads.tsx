@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BRAND } from "../brand";
 import * as api from "../api";
 import { useCursorPage } from "../pagination";
-import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, Menu, Modal, PageHeader, Panel, Pagination, Progress, Segmented, SkeletonRows, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
+import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, Menu, Modal, PageHeader, Panel, Pagination, Progress, SearchInput, Segmented, SkeletonRows, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
 import { DestinationPicker } from "./folders";
 import { PrivateUnlockForm } from "./private-access";
 import { usePrivateAccess } from "./private-session";
@@ -27,6 +27,9 @@ export const seconds = (value: number) => value >= 3600 ? `${Math.ceil(value / 3
 export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChanged: () => void; onOpenFolder: (prefix: string, privateSpace?: boolean) => void; onCreated?: () => void }) {
   useDocumentTitle(`下载任务 · ${BRAND}`);
   const [filter, setFilter] = useState("");
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  useEffect(() => { const timer = window.setTimeout(() => setQuery(search.trim()), 300); return () => window.clearTimeout(timer); }, [search]);
   const [newTask, setNewTask] = useState(false);
   // 资源抓取脚本选择私密空间等需要网页确认的目标时，把解析结果放在地址片段里打开本页。
   const [imported, setImported] = useState<api.DownloadImport | null>(api.takeDownloadImport);
@@ -36,16 +39,18 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   const [clearing, setClearing] = useState<"completed" | "failed" | null>(null);
   const cursor = useRef<string | null>(null), epoch = useRef(0);
   const previous = useRef(new Map<number, api.DownloadStatus>());
-  const fetchPage = useCallback((next: string | null) => { cursor.current = next; epoch.current++; return api.listDownloads(next, filter); }, [filter]);
+  const fetchPage = useCallback((next: string | null) => { cursor.current = next; epoch.current++; return api.listDownloads(next, filter, undefined, query); }, [filter, query]);
   const pagination = useCursorPage(fetchPage);
   useEffect(() => {
     const lockPrivate = () => {
+      epoch.current++;
       if (!pagination.page) return;
       pagination.setPage({ ...pagination.page, tasks: pagination.page.tasks.map(task => task.private ? { ...task, key: "私密空间下载" } : task) });
+      void pagination.reload();
     };
     window.addEventListener("tessera:private-locked", lockPrivate);
     return () => window.removeEventListener("tessera:private-locked", lockPrivate);
-  }, [pagination.page, pagination.setPage]);
+  }, [pagination.page, pagination.setPage, pagination.reload]);
   const hasActive = pagination.page?.tasks.some(active) ?? true;
   useEffect(() => {
     let alive = true, polling = false;
@@ -55,12 +60,12 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       if (polling || document.visibilityState === "hidden") return;
       polling = true;
       const revision = epoch.current;
-      void api.listDownloads(cursor.current, filter, controller.signal).then(page => {
+      void api.listDownloads(cursor.current, filter, controller.signal, query).then(page => {
         if (alive && revision === epoch.current) pagination.setPage(page);
       }).catch(() => undefined).finally(() => { polling = false; });
     }, hasActive ? 3000 : 15000);
     return () => { alive = false; window.clearInterval(timer); controller.abort(); };
-  }, [filter, pagination.setPage, hasActive]);
+  }, [filter, query, pagination.setPage, hasActive]);
   const page = pagination.page;
   useEffect(() => {
     for (const task of page?.tasks ?? []) {
@@ -92,6 +97,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   return <>
     <PageHeader title="下载任务" description="交给服务器下载，关闭页面后继续保存到你的文件空间。"
       actions={<><Button icon="refresh" onClick={() => void pagination.reload()} disabled={pagination.loading}>刷新</Button><Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button></>} />
+    <div className="toolbar download-search"><SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索文件名、保存路径或来源域名" label="搜索下载任务" /></div>
     <div className="download-toolbar"><Segmented label="任务状态" showLabels value={filter} onChange={setFilter} options={[
       { value: "", label: "全部" }, { value: "active", label: "进行中" }, { value: "stopped", label: "已停止" }, { value: "completed", label: "已完成" }, { value: "failed", label: "失败" },
     ]} /><span className="download-toolbar-meta"><span className="muted">{page ? `${page.total} 个任务` : "正在读取任务"}</span>
@@ -103,7 +109,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     <Panel flush>
       {pagination.error ? <EmptyState icon="alert" title="任务加载失败" description={pagination.error} action={<Button onClick={() => void pagination.reload()}>重试</Button>} />
         : !page ? <SkeletonRows rows={5} />
-          : !page.tasks.length ? <EmptyState icon="download" title={filter ? "没有符合条件的任务" : "还没有下载任务"} description="粘贴文件链接、X 帖子或 YouTube 视频，也可以使用 curl 命令。" action={<Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button>} />
+          : !page.tasks.length ? <EmptyState icon="download" title={query || filter ? "没有符合条件的任务" : "还没有下载任务"} description={query || filter ? "试试其他关键词或任务状态。" : "粘贴文件链接、X 帖子或 YouTube 视频，也可以使用 curl 命令。"} action={query || filter ? <Button onClick={() => { setSearch(""); setQuery(""); setFilter(""); }}>清除筛选</Button> : <Button icon="plus" onClick={() => setNewTask(true)}>添加下载</Button>} />
             : <div className="download-list" role="table" aria-label="下载任务">
               <div className="download-row download-columns" role="row"><span role="columnheader">文件</span><span role="columnheader">下载进度</span><span role="columnheader">状态</span><span role="columnheader">传输信息</span><span role="columnheader" className="sr-only">操作</span></div>
               {page.tasks.map(task => {
@@ -143,7 +149,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
               })}
             </div>}
     </Panel>
-    <Pagination {...pagination} />
+    {(pagination.hasPrevious || pagination.hasNext) && <footer className="list-footer download-footer"><Pagination {...pagination} /></footer>}
     <details className="download-help"><summary><Icon name="info" size={15} /><span>下载说明</span><Icon name="chevronDown" size={14} /></summary>
       <p>支持文件直链{page?.capabilities.hls ? "、M3U8 点播" : ""}{page?.capabilities.x ? "、X 帖子" : ""}{page?.capabilities.youtube ? "、YouTube 视频和 Shorts" : ""}。平台功能由管理员启用。网络中断会自动重试；文件直链满足条件时可续传，平台和 M3U8 任务手动停止后从头下载。删除任务保留已保存的文件。</p>
     </details>

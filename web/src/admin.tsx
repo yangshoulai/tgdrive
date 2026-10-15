@@ -6,7 +6,6 @@ import { Bots } from "./admin/bots";
 import { Clients } from "./admin/clients";
 import { LockedGate } from "./admin/lock";
 import { Audit, Maintenance } from "./admin/maintenance";
-import { Objects } from "./admin/objects";
 import { Overview } from "./admin/overview";
 import { Settings } from "./admin/settings";
 import { Users } from "./admin/users";
@@ -15,11 +14,10 @@ import type { IconName } from "./ui";
 
 export { LockedGate };
 
-export type AdminModule = "overview" | "users" | "objects" | "bots" | "assistant" | "clients" | "maintenance" | "audit" | "settings";
+export type AdminModule = "overview" | "users" | "bots" | "assistant" | "clients" | "maintenance" | "audit" | "settings";
 export const ADMIN_MODULES: { key: AdminModule; label: string; icon: IconName }[] = [
   { key: "overview", label: "概览", icon: "home" },
   { key: "users", label: "用户", icon: "users" },
-  { key: "objects", label: "全部文件", icon: "box" },
   { key: "bots", label: "存储通道", icon: "send" },
   { key: "assistant", label: "文件助手", icon: "sparkle" },
   { key: "clients", label: "全部密钥", icon: "key" },
@@ -42,7 +40,6 @@ export function AdminConsole({ module, session, status, onStatus, onRefreshStatu
     <>
       {module === "overview" && <Overview onNavigate={onNavigate} status={status} />}
       {module === "users" && <Users />}
-      {module === "objects" && <Objects session={session} />}
       {module === "bots" && <Bots />}
       {module === "assistant" && <AssistantAdmin />}
       {module === "clients" && <Clients />}

@@ -71,6 +71,29 @@ class OperationsTests(unittest.TestCase):
         lock = next(event for event in events if event["action"] == "system.lock")
         self.assertEqual((lock["actor"], lock["ok"]), ("admin@example.com", True))
 
+    def test_file_privacy_is_enforced_on_write_and_legacy_reads(self):
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        from tgdrive.audit import AuditLog
+        audit = AuditLog(self.app.metadata)
+        audit.record("object.public", actor_type="user", actor="alice@example.com", ok=True,
+                     target="私人报告.pdf", detail={"public": True, "count": 1, "path": "私人报告.pdf"})
+        audit.record("client.grant", actor_type="user", actor="alice@example.com", ok=True,
+                     detail={"prefix": "私人目录/", "perms": "ro", "bucket_id": self.alice.bucket_id})
+        audit.record("key.create", actor_type="user", actor="alice@example.com", ok=True,
+                     detail={"name": "私人目录备份"})
+        raw = self.app.metadata.db.execute("SELECT target,detail FROM audit_log WHERE action='object.public'").fetchone()
+        self.assertIsNone(raw["target"])
+        self.assertNotIn("私人", raw["detail"])
+        # 模拟升级前已经写入的记录；读取时脱敏，不修改历史数据库行。
+        with self.app.metadata.transaction() as db:
+            db.execute("INSERT INTO audit_log(ts,actor_type,actor,action,target,ok,detail) VALUES(1,'user','alice@example.com','share.save',?,1,?)",
+                       ("私人旧目录/", json.dumps({"saved": 2, "destination": "私人旧目录/"})))
+        events = self.events(admin)
+        dump = json.dumps(events, ensure_ascii=False)
+        self.assertNotIn("私人", dump)
+        legacy = next(event for event in events if event["action"] == "share.save")
+        self.assertEqual((legacy["target"], legacy["detail"]), (None, {"saved": 2}))
+
     def test_audit_pagination(self):
         admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         for _ in range(7):

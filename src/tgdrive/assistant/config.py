@@ -27,6 +27,8 @@ LIMITS: dict[str, tuple[int, int, int, str]] = {
     "user_messages_per_minute": (10, 1, 60, "每用户每分钟消息数"),
     "max_messages": (400, 20, 2000, "单个对话最多消息数"),
     "max_conversations": (1000, 10, 10000, "每用户最多保留的对话数"),
+    "action_items": (10000, 100, 20000, "单个待确认操作最多条目数"),
+    "download_urls": (2000, 32, 5000, "单次下载提议最多链接数"),
 }
 
 SETTINGS: dict[str, tuple[int, int, int]] = {

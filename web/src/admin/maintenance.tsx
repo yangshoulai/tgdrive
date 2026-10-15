@@ -55,6 +55,8 @@ function auditDetail(event: api.AuditEvent) {
   if (detail.method === "passkey") parts.push("通行密钥验证");
   if (typeof detail.status === "string") parts.push(detail.status === "active" ? "启用" : detail.status === "disabled" ? "停用" : detail.status === "ok" ? "连接正常" : detail.status);
   if ("public" in detail) parts.push(detail.public ? "开启" : "关闭");
+  if (typeof detail.count === "number") parts.push(`${detail.count} 项`);
+  if (typeof detail.saved === "number") parts.push(`保存 ${detail.saved} 项`);
   if ("quota_bytes" in detail) parts.push(detail.quota_bytes ? `配额 ${formatBytes(Number(detail.quota_bytes))}` : "不限配额");
   if (typeof detail.name === "string") parts.push(detail.name);
   if (typeof detail.public_base_url === "string" || typeof detail.s3_endpoint === "string") parts.push(Object.entries(detail).map(([key, value]) => `${key === "s3_endpoint" ? "S3" : "公开地址"}：${value || "默认"}`).join("，"));
@@ -68,7 +70,7 @@ function AuditPanel() {
   const pagination = useCursorPage(fetchPage);
   const events = pagination.page?.events ?? null;
   return (
-    <Panel title="活动记录" description="不会记录密码、加密口令、访问令牌或密钥 Secret。" flush
+    <Panel title="活动记录" description="记录账号、安全操作和结果，不记录文件名、路径、来源链接或凭据。" flush
       actions={<Segmented label="筛选" value={failedOnly ? "failed" : "all"} onChange={value => setFailedOnly(value === "failed")} options={[{ value: "all", label: "全部" }, { value: "failed", label: "仅失败" }]} />}>
       {pagination.error ? <EmptyState icon="alert" title="审计日志加载失败" description={pagination.error} action={<Button onClick={() => void pagination.reload()}>重试</Button>} /> : events === null ? <SkeletonRows rows={4} /> : events.length === 0 ? <EmptyState icon="shield" title={failedOnly ? "没有失败的操作" : "还没有记录"} /> : (
         <>

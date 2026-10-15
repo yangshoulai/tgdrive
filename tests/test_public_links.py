@@ -109,7 +109,7 @@ class PublicLinkTests(unittest.TestCase):
             self.assertEqual((await self.client.request("GET", "/p/doesnotexist123"))[0], 404)
         self.run_async(run())
 
-    def test_disabled_owner_admin_revoke_and_lock(self):
+    def test_disabled_owner_share_revocation_and_lock(self):
         async def run():
             user = await self.client.login("user", "alice@example.com", "alice password")
             _, _, data = await self.client.request(
@@ -117,8 +117,7 @@ class PublicLinkTests(unittest.TestCase):
             token = json.loads(data)["public_token"]
             admin = await self.client.login("admin", "admin@example.com", "admin password")
 
-            _, _, data = await self.client.request("GET", "/api/admin/v1/objects", headers=admin)
-            self.assertEqual(json.loads(data)["objects"][0]["public_token"], token)
+            self.assertEqual((await self.client.request("GET", "/api/admin/v1/objects", headers=admin))[0], 403)
 
             self.app.accounts.set_account_status(self.alice.id, "disabled")
             self.assertEqual((await self.client.request("GET", f"/p/{token}"))[0], 404)
@@ -127,6 +126,11 @@ class PublicLinkTests(unittest.TestCase):
 
             status, _, _ = await self.client.request("POST", "/api/admin/v1/objects/public", json.dumps(
                 {"bucket_id": self.alice.bucket_id, "path": "x.bin", "public": False}).encode(), admin)
+            self.assertEqual(status, 403)
+            self.assertEqual((await self.client.request("GET", f"/p/{token}"))[0], 200)
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            status, _, _ = await self.client.request("POST", "/api/user/v1/public",
+                json.dumps({"path": "x.bin", "public": False}).encode(), user)
             self.assertEqual(status, 200)
             self.assertEqual((await self.client.request("GET", f"/p/{token}"))[0], 404)
 

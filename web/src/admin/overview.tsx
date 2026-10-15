@@ -1,16 +1,15 @@
 import { useEffect, useState } from "react";
 import { BRAND, SITE } from "../brand";
 import * as api from "../api";
-import { FileVisual, baseName, getFileKind } from "../files";
 
-import { Badge, Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, formatDate, formatDateTime, useDocumentTitle, type IconName } from "../ui";
+import { Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, formatDateTime, useDocumentTitle, type IconName } from "../ui";
 
 import type { AdminModule } from "../admin";
 
 /* ---------- 概览 ---------- */
 
 export function Overview({ onNavigate, status }: { onNavigate: (module: AdminModule) => void; status: api.SystemStatus }) {
-  const [data, setData] = useState<{ users: api.AccountSummary; objects: api.AdminObjectPage; bots: api.BotConfig[] } | null>(null);
+  const [data, setData] = useState<{ users: api.AccountSummary; objects: api.AdminObjectSummary; bots: api.BotConfig[] } | null>(null);
   useDocumentTitle(`概览 · ${SITE.admin}`);
   const [settings, setSettings] = useState<api.SystemSettings | null>(null);
   const [version, setVersion] = useState("");
@@ -22,7 +21,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
     setError("");
     void api.adminSettings(controller.signal).then(value => { if (active) setSettings(value); }).catch(() => undefined);
     void api.adminVersion(controller.signal).then(value => { if (active) setVersion(value.version); }).catch(() => undefined);
-    void Promise.all([api.adminUserSummary(controller.signal), api.adminObjects({ limit: 6 }, controller.signal), api.adminBots(controller.signal)])
+    void Promise.all([api.adminUserSummary(controller.signal), api.adminObjectSummary(controller.signal), api.adminBots(controller.signal)])
       .then(([users, objects, bots]) => { if (active) setData({ users, objects, bots }); })
       .catch(reason => { if (active) setError(api.errorMessage(reason, "概览加载失败，请稍后重试")); });
     return () => { active = false; controller.abort(); };
@@ -30,7 +29,6 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
   if (error) return <><PageHeader title="概览" /><Panel><EmptyState icon="alert" title="概览加载失败" description={error} action={<Button onClick={() => setAttempt(value => value + 1)}>重试</Button>} /></Panel></>;
   if (!data) return <><PageHeader title="概览" /><Panel><SkeletonRows rows={4} /></Panel></>;
   const used = data.users.used_bytes;
-  const files = data.objects.objects;
   const activeBots = data.bots.filter(bot => bot.status === "active");
   const nearQuota = data.users.near_quota;
   const attention: { tone: "warning" | "danger" | "accent"; icon: IconName; title: string; detail: string; action: string; module: AdminModule }[] = [];
@@ -77,21 +75,6 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
         <div className="overview-column">
           <Panel title="近一小时流量" description="只统计服务启动以来的流量，重启后重新累计。">
             <TrafficChart metrics={status.traffic} />
-          </Panel>
-          <Panel title="最近上传" flush actions={<Button size="sm" variant="ghost" onClick={() => onNavigate("objects")}>查看全部</Button>}>
-            {files.length === 0 ? <EmptyState icon="box" title="还没有文件" description="用户上传的文件会显示在这里。" /> : (
-              <ul className="recent-list">
-                {files.slice(0, 6).map(item => (
-                  <li key={`${item.bucket_id}:${item.key}`}>
-                    <FileVisual kind={getFileKind(item.content_type, item.key)} src={api.adminFileThumbnail(item)} />
-                    <span className="recent-copy"><strong>{baseName(item.key)}</strong><small>{item.username ?? item.bucket_name}</small></span>
-                    {item.public_token && <Badge tone="public" icon="globe">公开</Badge>}
-                    <span className="muted recent-meta">{formatBytes(item.size)}</span>
-                    <span className="muted recent-meta">{formatDate(item.modified_at)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
           </Panel>
         </div>
       </div>

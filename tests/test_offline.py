@@ -104,6 +104,33 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
             while not predicate():
                 await asyncio.sleep(0.01)
 
+    async def test_search_paginates_and_respects_owner_and_private_names(self):
+        parsed = await self.offline.parse(self.alice.id, "https://example.com/file.bin")
+        ticket = parsed["candidates"][0]["ticket"]
+        items = [{"ticket": ticket, "name": f"Report-{index}.bin"} for index in range(3)]
+        tasks = self.offline.create(self.alice.id, items, "notes/")
+        private_scope = Scope(self.alice.bucket_id, private_access=True)
+        self.offline.create(self.alice.id, [{"ticket": ticket, "name": "secret-memo.bin"}],
+                            ".tgdrive/private/", private_scope=private_scope)
+        page = self.offline.list(self.alice.id, query="REPORT", status="active", limit=2)
+        following = self.offline.list(self.alice.id, query="REPORT", status="active", limit=2, cursor=page["next_cursor"])
+        self.assertEqual((page["total"], following["total"]), (3, 3))
+        self.assertEqual([task["id"] for task in page["tasks"] + following["tasks"]], [task["id"] for task in reversed(tasks)])
+        self.assertEqual(self.offline.list(self.alice.id, query="notes/")["total"], 3)
+        self.assertEqual(self.offline.list(self.alice.id, query="EXAMPLE.COM")["total"], 4)
+        self.assertEqual(self.offline.list(self.admin.id, query="Report")["total"], 0)
+        self.assertEqual(self.offline.list(self.alice.id, query="secret-memo")["total"], 0)
+        self.assertEqual(self.offline.list(self.alice.id, query="secret-memo", private_scope=private_scope)["total"], 1)
+        self.assertEqual(self.offline.list(self.alice.id, query="私密空间下载")["tasks"][0]["key"], "私密空间下载")
+        self.assertEqual(self.offline.list(self.alice.id, query="Report", status="completed")["total"], 0)
+        self.assertEqual(self.offline.list(self.alice.id, query="%_")["total"], 0)
+        with self.assertRaises(ValueError):
+            self.offline.list(self.alice.id, query="x" * 201)
+        client = Client(self.app)
+        headers = await client.login("user", "alice@example.com", "alice password")
+        status, _, body = await client.request("GET", "/api/user/v1/downloads?q=REPORT&limit=2&status=active", headers=headers)
+        self.assertEqual((status, json.loads(body)["total"], len(json.loads(body)["tasks"])), (200, 3, 2))
+
     async def test_elapsed_time_recorded_and_reset_on_restart(self):
         task = await self.make()
         self.offline.start()

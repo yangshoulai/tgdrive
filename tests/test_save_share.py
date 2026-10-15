@@ -88,7 +88,7 @@ class SaveShareTests(unittest.TestCase):
 
             audit = self.app.metadata.db.execute("SELECT actor, target, detail FROM audit_log WHERE action='share.save' AND ok=1 ORDER BY id").fetchall()
             self.assertEqual(len(audit), 4)
-            self.assertEqual((audit[0]["actor"], audit[0]["target"]), ("bob@example.com", "inbox"))
+            self.assertEqual((audit[0]["actor"], audit[0]["target"]), ("bob@example.com", None))
             self.assertNotIn(file_token, json.dumps([dict(item) for item in audit], ensure_ascii=False))
         asyncio.run(run())
 

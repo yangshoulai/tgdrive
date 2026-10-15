@@ -121,8 +121,7 @@ class PublicFolderTests(unittest.TestCase):
             route = f"/api/admin/v1/preview-assets?bucket_id={me['bucket_id']}&path=dir/song.live.mp4"
             self.assertEqual((await self.api("GET", route, alice))[0], 403)
             admin = await self.client.login("admin", "admin@example.com", "admin password")
-            status, admin_assets = await self.api("GET", route, admin)
-            self.assertEqual((status, admin_assets), (200, assets))
+            self.assertEqual((await self.api("GET", route, admin))[0], 403)
         asyncio.run(run())
 
     def test_public_preview_assets_require_folder_grant_and_cannot_escape(self):

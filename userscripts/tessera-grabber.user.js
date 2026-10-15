@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.10.0
+// @version      0.11.0
 // @description  在 X、YouTube 和其他网页上复制资源地址与 curl 命令，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
@@ -28,6 +28,8 @@
  *   服务器下载：调用 /api/v1/downloads/parse 与 /api/v1/downloads，由服务器下载；
  *   本地下载：当前浏览器读取直链资源，再通过 PUT /api/v1/files 上传；单文件最多 64 MiB，不支持流媒体列表。
  *   私密空间：服务器下载转交解析结果、本地下载把文件 postMessage 给新打开的 Tessera 页面，由用户在那里解锁并确认。
+ * - 发给文件助手：把当前已渲染页面的结构快照（图片候选与分页链接，不含正文）postMessage 给新打开的 Tessera 页面，
+ *   可以逐页暂存后一起发送；由用户在 Tessera 的助手对话框里点击发送，不经过访问密钥。
  * Cookie 只放进你复制的命令或发给你自己配置的 Tessera 服务器，不发往其他地方。
  */
 (function () {
@@ -698,6 +700,7 @@
     .status { font-size: 12px; color: var(--muted); display: flex; gap: 6px; align-items: flex-start; }
     .status.ok { color: var(--success); }
     .status.error, .error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+    .actions-row { display: flex; flex-wrap: wrap; gap: 8px; }
 
     /* 完成 */
     .result { display: grid; justify-items: center; gap: 8px; padding: 16px 0 4px; text-align: center; }
@@ -896,6 +899,7 @@
     globe: [["circle", { cx: 12, cy: 12, r: 10 }], "M2 12h20", "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"],
     x: ["M4 4l16 16", "M20 4 4 20"],
     youtube: [["rect", { x: 2, y: 5, width: 20, height: 14, rx: 4 }], "m10 9 5 3-5 3z"],
+    sparkle: ["M12 3v4", "M12 17v4", "M3 12h4", "M17 12h4", "m6.3 6.3 2.1 2.1", "m15.6 15.6 2.1 2.1", "m6.3 17.7 2.1-2.1", "m15.6 8.4 2.1-2.1"],
   };
   const TYPE_ICON = { video: "video", audio: "audio", stream: "stream", image: "image", file: "file" };
 
@@ -1168,6 +1172,8 @@
     footer.replaceChildren(
       h("span", { className: "site", title: location.hostname }, svg("globe", 14), h("span", {}, currentSite())),
       h("span", { className: "spacer" }),
+      h("button", { type: "button", className: "text-btn", title: "把这个页面的图片结构交给 Tessera 文件助手分析",
+        onclick: () => openAssistant() }, "发给文件助手"),
       h("button", { type: "button", className: "text-btn", onclick: () => setSiteEnabled(!active) }, active ? "在此网站隐藏" : "在此网站启用"));
   }
 
@@ -1540,6 +1546,192 @@
           .finally(() => setTimeout(() => window.removeEventListener("message", onMessage), 60000));
       },
     };
+  }
+
+  // ----- 发给文件助手（docs/assistant-design.md §9.1） -----
+
+  /**
+   * 页面结构快照：与服务端解析 HTML 得到的「规范页」相同（web.py）。图片按元素路径（最近 4 层「标签.首个类名」，数字替换为 *）
+   * 聚类，记录 src（currentSrc）、data-* 懒加载地址、srcset 最大项与外层链接；链接只保留像「下一页」或页码的那些。不含正文。
+   */
+  const ASSISTANT_MAX_PAGES = 50, ASSISTANT_MAX_IMAGES = 5000, ASSISTANT_MAX_BYTES = 2 * 1024 * 1024, ASSISTANT_TTL = 86400000;
+  const NEXT_TEXT = /^\s*(下一页|下页|后页|下一张|next(\s*page)?|older|more|›|»|>|→)\s*[›»>→]?\s*$/i;
+  const LAZY_ATTRS = ["data-src", "data-original", "data-lazy-src", "data-lazy", "data-url"];
+
+  function segmentOf(node) {
+    const tag = node.tagName.toLowerCase();
+    const first = (node.getAttribute("class") || "").split(/\s+/).find(Boolean) || "";
+    const cls = first.replace(/[^A-Za-z0-9_-]/g, "").replace(/\d+/g, "*").slice(0, 30);
+    return cls ? `${tag}.${cls}` : tag;
+  }
+  function pathOf(node) {
+    const chain = [];
+    for (let current = node; current && current.nodeType === 1 && chain.length < 4; current = current.parentElement) {
+      if (current.tagName.toLowerCase() === "html") break;
+      chain.unshift(segmentOf(current));
+    }
+    return chain.join(">");
+  }
+  function absolute(value, base) {
+    if (!value) return null;
+    try {
+      const url = new URL(value.trim(), base);
+      return /^https?:$/.test(url.protocol) && url.href.length <= 2048 ? url.href.split("#")[0] : null;
+    } catch { return null; }
+  }
+  function largestSrcset(value) {
+    let best = null, size = -1;
+    for (const part of (value || "").split(",")) {
+      const [url, descriptor] = part.trim().split(/\s+/);
+      if (!url) continue;
+      const match = /^([\d.]+)([wx])$/.exec(descriptor || "");
+      const current = match ? parseFloat(match[1]) * (match[2] === "w" ? 1 : 1000) : 1;
+      if (current > size) { best = url; size = current; }
+    }
+    return best;
+  }
+  function pageSnapshot(doc = document, url = location.href) {
+    const images = [];
+    for (const img of [...(doc.images || [])].slice(0, 2000)) {
+      if (host && host.contains && host.contains(img)) continue;
+      const width = img.naturalWidth || Number(img.getAttribute("width")) || null;
+      const height = img.naturalHeight || Number(img.getAttribute("height")) || null;
+      if (width && height && width < 32 && height < 32) continue;
+      const urls = {};
+      const src = absolute(img.currentSrc || img.getAttribute("src"), url);
+      if (src) urls.src = src;
+      for (const name of LAZY_ATTRS) { const value = absolute(img.getAttribute(name), url); if (value) urls[name] = value; }
+      const srcset = absolute(largestSrcset(img.getAttribute("srcset") || img.getAttribute("data-srcset")), url);
+      if (srcset) urls.srcset = srcset;
+      const anchor = img.closest && img.closest("a[href]");
+      const href = anchor && absolute(anchor.getAttribute("href"), url);
+      if (href) urls.href = href;
+      if (Object.keys(urls).length) images.push({ path: pathOf(img), urls, w: width, h: height });
+    }
+    const links = [];
+    for (const anchor of [...doc.querySelectorAll("a[href], link[rel~=next]")]) {
+      const text = (anchor.textContent || "").replace(/\s+/g, " ").trim().slice(0, 60);
+      const rel = (anchor.getAttribute("rel") || "").toLowerCase();
+      if (!rel.split(/\s+/).includes("next") && !NEXT_TEXT.test(text) && !/^\d{1,4}$/.test(text)) continue;
+      const href = absolute(anchor.getAttribute("href"), url);
+      if (href) links.push({ path: pathOf(anchor), href, text, rel });
+      if (links.length >= 60) break;
+    }
+    return { url: absolute(url, url) || url, title: (doc.title || "").replace(/\s+/g, " ").trim().slice(0, 200), images, links };
+  }
+
+  /** 多页暂存（GM_setValue "assistant-pages"）：同一来源最多 50 页、5,000 个图片候选、2 MB，24 小时过期。 */
+  function assistantPages(origin = location.origin) {
+    const stored = GM_getValue("assistant-pages", null);
+    if (!stored || stored.origin !== origin || Date.now() - stored.savedAt > ASSISTANT_TTL) return [];
+    return Array.isArray(stored.pages) ? stored.pages : [];
+  }
+  function addAssistantPage(snapshot, origin = location.origin) {
+    const pages = assistantPages(origin).filter(page => page.url !== snapshot.url);
+    const next = [...pages, snapshot];
+    const images = next.reduce((sum, page) => sum + page.images.length, 0);
+    if (next.length > ASSISTANT_MAX_PAGES) throw new Error(`最多暂存 ${ASSISTANT_MAX_PAGES} 页，请先发送`);
+    if (images > ASSISTANT_MAX_IMAGES) throw new Error(`图片候选超过 ${ASSISTANT_MAX_IMAGES} 个，请先发送已暂存的页面`);
+    if (new TextEncoder().encode(JSON.stringify(next)).length > ASSISTANT_MAX_BYTES) throw new Error("暂存的快照超过 2 MB，请先发送");
+    GM_setValue("assistant-pages", { origin, savedAt: Date.now(), pages: next });
+    return next;
+  }
+  const clearAssistantPages = () => GM_setValue("assistant-pages", null);
+
+  /**
+   * 打开 Tessera 页面并转交快照：必须在点击事件里同步 window.open；页面报到后 postMessage 发送，收到确认后清空暂存。
+   * 协议与 web/src/user/page-import.ts 一致，只认 Tessera 的 origin 与本次的随机 nonce。
+   */
+  function sendAssistantPages(server, pages) {
+    const origin = new URL(server).origin;
+    const nonce = [...crypto.getRandomValues(new Uint8Array(18))].map(value => value.toString(16).padStart(2, "0")).join("");
+    const tab = page.open(`${origin}/?view=files#assistant-page=${nonce}&from=${encodeURIComponent(location.origin)}`, "_blank");
+    if (!tab) throw new Error("浏览器拦截了新标签页，请允许当前网站打开弹出窗口后重试");
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { finish(); reject(new Error("Tessera 页面没有响应：请确认已在新标签页登录 Tessera；部分网站禁止跨站窗口通信")); }, 300000);
+      const finish = () => { clearTimeout(timer); window.removeEventListener("message", onMessage); };
+      const onMessage = event => {
+        const data = event.data;
+        if (event.origin !== origin || !data || data.source !== "tessera" || data.nonce !== nonce) return;
+        if (data.type === "page-ready") tab.postMessage({ source: "tessera-grabber", nonce, type: "page-snapshot", pages }, origin);
+        if (data.type === "page-ack") { finish(); if (data.ok) resolve(); else reject(new Error(data.error || "Tessera 页面拒收了快照")); }
+      };
+      window.addEventListener("message", onMessage);
+    });
+  }
+
+  let scrolling = null;
+  /** 先滚动到底部：触发懒加载，最多 30 秒或 200 屏，连续 3 次高度不变即停止；可随时停止。 */
+  function autoScroll(onDone) {
+    const started = Date.now();
+    let screens = 0, stable = 0, height = 0;
+    const step = () => {
+      const current = document.documentElement.scrollHeight;
+      stable = current === height ? stable + 1 : 0;
+      height = current;
+      if (stable >= 3 || screens >= 200 || Date.now() - started > 30000 || !scrolling) { stopScroll(); onDone(); return; }
+      window.scrollBy(0, innerHeight * .9);
+      screens += 1;
+      scrolling = setTimeout(step, 450);
+    };
+    scrolling = setTimeout(step, 0);
+  }
+  const stopScroll = () => { clearTimeout(scrolling); scrolling = null; };
+
+  function openAssistant() {
+    mount();
+    const server = settings().server;
+    const status = h("div", { className: "status", hidden: true });
+    const summary = h("div", { className: "hint" });
+    const scrollButton = h("button", { type: "button", className: "btn" });
+    const addButton = h("button", { type: "button", className: "btn" }, svg("folderPlus"), "加入本页并继续");
+    const sendButton = h("button", { type: "button", className: "btn primary" });
+    const show = (text, error = false) => { status.hidden = false; status.className = `status${error ? " error" : ""}`; status.textContent = text; };
+    const refresh = () => {
+      const pages = assistantPages();
+      const here = pages.some(page => page.url === location.href);
+      const total = pages.length + (here ? 0 : 1);
+      summary.textContent = pages.length
+        ? `已暂存 ${pages.length} 页（${pages.reduce((sum, page) => sum + page.images.length, 0)} 个图片候选）。翻到下一页后点「加入本页并继续」，最后一起发送。`
+        : "把当前页面的图片结构（不含正文）交给 Tessera 文件助手分析，再由你在 Tessera 里确认保存。需要多页时，逐页加入后一起发送。";
+      sendButton.replaceChildren(svg("send"), total > 1 ? `发送 ${total} 页给助手` : "发送本页给助手");
+      scrollButton.replaceChildren(svg(scrolling ? "close" : "download"), scrolling ? "停止滚动" : "先滚动到底部");
+    };
+    scrollButton.onclick = () => {
+      if (scrolling) { stopScroll(); refresh(); return; }
+      autoScroll(() => { refresh(); show("已滚动到底部，懒加载的图片已出现在快照里"); });
+      refresh();
+    };
+    addButton.onclick = () => {
+      try {
+        const pages = addAssistantPage(pageSnapshot());
+        show(`已加入第 ${pages.length} 页。请自己翻到下一页，再打开面板继续加入。`);
+      } catch (error) { show(error.message, true); }
+      refresh();
+    };
+    sendButton.onclick = () => {
+      if (!server) { show("请先在设置中填写 Tessera 服务器地址", true); return; }
+      let pages;
+      try {
+        const current = pageSnapshot();
+        const stored = assistantPages().filter(page => page.url !== current.url);
+        pages = [...stored, current];
+        const images = pages.reduce((sum, page) => sum + page.images.length, 0);
+        if (pages.length > ASSISTANT_MAX_PAGES || images > ASSISTANT_MAX_IMAGES) throw new Error("页数或图片候选超过上限，请减少暂存的页面");
+        if (!images) throw new Error("这个页面没有找到图片，可以先滚动到底部再试");
+        const pending = sendAssistantPages(server, pages);
+        show("已打开 Tessera，正在转交快照…");
+        pending.then(() => { clearAssistantPages(); refresh(); show("已转交。请在 Tessera 的文件助手里确认后发送。"); })
+          .catch(error => show(error.message, true));
+      } catch (error) { show(error.message, true); }
+    };
+    refresh();
+    frame("发给文件助手", [
+      h("div", { className: "section" }, summary, status),
+      h("div", { className: "section actions-row" }, scrollButton, addButton),
+    ], { back: () => { stopScroll(); open(currentContext); }, subtitle: location.hostname,
+      footer: [h("button", { type: "button", className: "text-btn", onclick: () => { clearAssistantPages(); refresh(); show("已清空暂存的页面"); } }, "清空暂存"),
+        h("span", { className: "spacer" }), sendButton] });
   }
 
   // ----- 保存到 Tessera：本地下载与服务器下载共用的确认与进度页 -----

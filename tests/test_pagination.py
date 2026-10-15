@@ -1,4 +1,4 @@
-"""M14：SQL 键集分页列表、按前缀删除、管理端全部文件分页与密钥搜索。"""
+"""M14：SQL 键集分页列表、按前缀删除、管理端文件隐私边界与密钥搜索。"""
 import asyncio
 import json
 import random
@@ -125,25 +125,37 @@ class ListingTests(unittest.TestCase):
             cursor = body["next_cursor"]
         self.assertEqual(sorted(keys), sorted(f"pub/{index}.log" for index in range(30)))
 
-    def test_admin_objects_paginates_and_filters_on_server(self):
+    def test_admin_only_gets_aggregate_file_counts(self):
         self.put(*[f"f{index:03d}.txt" for index in range(25)], "folder/")
         self.objects.set_public(self.scope, "f003.txt", True)
         admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
-        seen, cursor = [], None
-        while True:
-            path = "/api/admin/v1/objects?limit=10" + (f"&cursor={cursor}" if cursor else "")
-            body = json.loads(asyncio.run(self.client.request("GET", path, headers=admin))[2])
-            seen += [item["key"] for item in body["objects"]]
-            self.assertEqual((body["total"], body["public_total"]), (25, 1))
-            cursor = body["next_cursor"]
-            if not cursor:
-                break
-            cursor = __import__("urllib.parse").parse.quote(cursor)
-        self.assertEqual(sorted(seen), [f"f{index:03d}.txt" for index in range(25)])
-        filtered = json.loads(asyncio.run(self.client.request("GET", "/api/admin/v1/objects?q=ALICE&public=1", headers=admin))[2])
-        self.assertEqual([item["key"] for item in filtered["objects"]], ["f003.txt"])
-        none = json.loads(asyncio.run(self.client.request("GET", "/api/admin/v1/objects?q=nomatch", headers=admin))[2])
-        self.assertEqual((none["objects"], none["total"]), ([], 0))
+        for route in ("objects", "content", "thumbnail", "preview-assets", "preview-list"):
+            for method in ("GET", "HEAD"):
+                status, _, data = asyncio.run(self.client.request(method,
+                    f"/api/admin/v1/{route}?bucket_id={self.alice.bucket_id}&path=f003.txt", headers=admin))
+                self.assertEqual(status, 403, (route, data))
+        status, _, data = asyncio.run(self.client.request("GET", "/api/admin/v1/objects/summary", headers=admin))
+        self.assertEqual((status, json.loads(data)), (200, {"total": 25, "public_total": 1}))
+        # 管理员在个人空间中仍可上传和读取自己的文件，不能伪造存储桶读取他人的内容。
+        asyncio.run(self.client.request("PUT", "/api/user/v1/files?path=own.txt", b"own", admin))
+        self.assertEqual(asyncio.run(self.client.request("GET", "/api/user/v1/content?path=own.txt", headers=admin))[2], b"own")
+        self.assertEqual(asyncio.run(self.client.request("GET", "/api/user/v1/content?path=f003.txt", headers=admin))[0], 404)
+
+    def test_admin_cannot_grant_access_to_other_users_files(self):
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        payload = {"name": "foreign", "grants": [{"bucket_id": self.alice.bucket_id, "prefix": "", "perms": "ro"}]}
+        status, _, _ = asyncio.run(self.client.request("POST", "/api/admin/v1/clients", json.dumps(payload).encode(), admin))
+        self.assertEqual(status, 403)
+        self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM clients").fetchone()[0], 0)
+        cid = self.app.s3.auth.create_client("alice client", owner_user_id=self.alice.id)
+        self.app.s3.auth.grant(cid, self.alice.bucket_id, "private-folder/", "ro")
+        payload = {"bucket_id": self.alice.bucket_id, "prefix": "", "perms": "ro"}
+        status, _, _ = asyncio.run(self.client.request("POST", f"/api/admin/v1/clients/{cid}/grants", json.dumps(payload).encode(), admin))
+        self.assertEqual(status, 403)
+        _, _, data = asyncio.run(self.client.request("GET", "/api/admin/v1/clients?limit=50", headers=admin))
+        self.assertNotIn("alice client", data.decode())
+        self.assertNotIn("private-folder", data.decode())
+        self.assertTrue(json.loads(data)["clients"][0]["grants"][0]["path_hidden"])
 
     def test_user_and_client_pages_keep_filters_and_owner_scope(self):
         bob = self.app.accounts.create_user("bob@example.com", "bob password")

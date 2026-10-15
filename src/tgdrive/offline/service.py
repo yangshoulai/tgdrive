@@ -7,6 +7,7 @@ import json
 import mimetypes
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import replace
 from email.message import Message
@@ -22,7 +23,7 @@ from ..work import WorkBusyError
 from .hls import load_playlist, remux
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
 from .mp4 import Defragmenter
-from .request import DownloadRequest, filename, parse_requests, url_filename
+from .request import DownloadRequest, checked_url, filename, parse_requests, url_filename
 from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_cache, media_request, merge_tracks, prepare, site_link, track_stream
 
 
@@ -258,6 +259,15 @@ class OfflineDownloads:
         self.scope(user_id)
         return candidates
 
+    def direct_ticket(self, user_id: int, url: str, *, referer: str | None = None, name: str | None = None) -> str:
+        """为普通 GET 直链签发任务票据，不预先访问来源（文件助手批量保存相册图片时使用，信息在下载时再校验）。"""
+        headers = []
+        if referer:
+            headers.append(("Referer", checked_url(referer)))
+        request = DownloadRequest(checked_url(url), headers=headers, name=filename(name) if name else None)
+        return self._encode_ticket({"user_id": user_id, "expires": time.time() + 1200, "request": request.json(), "kind": "http",
+                                    "size": None, "content_type": None})
+
     def _ticket(self, user_id, token):
         import base64
         try:
@@ -355,7 +365,7 @@ class OfflineDownloads:
         result["eta_seconds"] = max(0, (row["size"] - result["received"]) / speed) if result["speed"] and row["size"] and row["kind"] == "http" else None
         return result
 
-    def list(self, user_id, *, cursor=0, status="", limit=50, private_scope: Scope | None = None):
+    def list(self, user_id, *, cursor=0, status="", query="", limit=50, private_scope: Scope | None = None):
         self.scope(user_id)
         reveal_private = bool(private_scope and private_scope.private_access)
         if reveal_private and private_scope.authorize is not None:
@@ -369,6 +379,16 @@ class OfflineDownloads:
         elif status:
             where += " AND status=?"
             args.append(status)
+        query = unicodedata.normalize("NFC", query.strip())
+        if len(query) > 200:
+            raise ValueError("搜索内容不能超过 200 个字符")
+        if query:
+            # 锁定时按可见的占位名称搜索，不能通过命中数探测私密文件名或目录。
+            visible_key = "key" if reveal_private else "CASE WHEN substr(key,1,?)=? THEN '私密空间下载' ELSE key END"
+            where += f" AND instr(lower(({visible_key}) || ' ' || source_host),lower(?))>0"
+            if not reveal_private:
+                args.extend((len(PRIVATE_PREFIX), PRIVATE_PREFIX))
+            args.append(query)
         total = self.metadata.db.execute(f"SELECT COUNT(*) FROM offline_tasks WHERE {where}", args).fetchone()[0]
         if cursor:
             where += " AND id<?"

@@ -54,6 +54,13 @@ class ToolContext:
     state: dict                # 本轮共享状态（如已读取的文件数）
     create_scope_request: Callable[[str, str], Awaitable[str]] | None = None
     quota: dict = field(default_factory=dict)
+    conversation_id: str = ""
+    limits: dict = field(default_factory=dict)
+    # 生成待确认操作：(kind, payload, 条目数) → {"action_id", "expires_at"}
+    propose: Callable[[str, dict, int], Awaitable[dict]] | None = None
+    # 网页工具：结果集存取与隔离的结构分析调用
+    trace: object | None = None
+    analyze: Callable[[dict, str], Awaitable[dict]] | None = None
 
     @property
     def db(self):
@@ -114,6 +121,7 @@ class ToolSpec:
     params: dict = field(default_factory=dict)  # 名称: (默认, 最小, 硬上限, 说明)
     depends: tuple[str, ...] = ()
     warning: str | None = None
+    timeout: int | None = None  # 秒；网页抓取等长任务可超过通用的单个工具超时
 
     def definition(self) -> ToolDef:
         return ToolDef(self.name, self.description, self.parameters)

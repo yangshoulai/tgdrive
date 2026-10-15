@@ -6,14 +6,15 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, SearchInput, Segmented,
+import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SearchInput, Segmented,
   SkeletonRows, Switch, Toggle, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
 import { Stat } from "./overview";
 
-type Tab = "overview" | "channels" | "tools" | "limits" | "conversations" | "calls";
+type Tab = "overview" | "channels" | "tools" | "limits" | "usage" | "conversations" | "calls";
 const TABS: { value: Tab; label: string }[] = [
   { value: "overview", label: "概览" }, { value: "channels", label: "渠道与模型" }, { value: "tools", label: "工具" },
-  { value: "limits", label: "限制与额度" }, { value: "conversations", label: "对话记录" }, { value: "calls", label: "调用日志" },
+  { value: "limits", label: "限制与额度" }, { value: "usage", label: "用量" }, { value: "conversations", label: "对话记录" },
+  { value: "calls", label: "调用日志" },
 ];
 const LEVELS: Record<ai.ToolLevel, { label: string; tone: Tone }> = {
   read: { label: "只读", tone: "neutral" }, meta: { label: "交互", tone: "neutral" }, scope: { label: "需确认", tone: "accent" },
@@ -66,6 +67,7 @@ export function AssistantAdmin() {
       {tab === "channels" && <ChannelsTab settings={settings} onChanged={changed} />}
       {tab === "tools" && <ToolsTab />}
       {tab === "limits" && <LimitsTab settings={settings} onSaved={setSettings} />}
+      {tab === "usage" && <UsageTab />}
       {tab === "conversations" && <ConversationsTab />}
       {tab === "calls" && <CallsTab />}
       {enabling && <ConfirmDialog title="启用文件助手？" danger={false} confirmLabel="启用"
@@ -185,6 +187,85 @@ function UsageBars({ days }: { days: { day: string; total: number }[] }) {
   </div>;
 }
 
+/* ---------- 用量报表 ---------- */
+
+const STOP_REASONS: Record<string, string> = {
+  completed: "正常完成", waiting_user: "等待用户", stopped: "用户停止", limit: "触达上限", loop: "重复调用", errors: "连续出错",
+  timeout: "超时", session: "登录失效", disabled: "助手停用", model: "模型停用", daily_limit: "额度用完", server_restart: "服务重启",
+  internal: "内部错误", locked: "系统锁定", account: "账号停用",
+};
+const ACTION_STATUS: Record<string, string> = { done: "已完成", partial: "部分完成", failed: "失败", rejected: "已拒绝", expired: "已过期",
+  cancelled: "已取消", undone: "已撤销", pending: "待确认", running: "执行中", interrupted: "已中断" };
+
+function UsageTab() {
+  const [days, setDays] = useState("30");
+  const [report, setReport] = useState<ai.UsageReport | null>(null);
+  const [error, setError] = useState("");
+  const load = useCallback(() => {
+    setReport(null); setError("");
+    void ai.adminUsage(Number(days)).then(setReport).catch(reason => setError(api.errorMessage(reason, "用量加载失败")));
+  }, [days]);
+  useEffect(load, [load]);
+  const sum = (row: { input_tokens: number | null; output_tokens: number | null }) => (row.input_tokens ?? 0) + (row.output_tokens ?? 0);
+  return <>
+    <div className="toolbar">
+      <div className="toolbar-actions">
+        <select className="input input-sm" aria-label="时间范围" value={days} onChange={event => setDays(event.target.value)}>
+          <option value="7">近 7 天</option><option value="30">近 30 天</option><option value="90">近 90 天</option><option value="365">近一年</option>
+        </select>
+      </div>
+      <Button icon="refresh" onClick={load}>刷新</Button>
+    </div>
+    {error ? <EmptyState icon="alert" title="加载失败" description={error} action={<Button onClick={load}>重试</Button>} />
+      : report === null ? <SkeletonRows rows={6} /> : <div className="assistant-admin-stack">
+        <div className="stat-strip assistant-stats">
+          <Stat label="Token" value={tokens(report.totals.input_tokens + report.totals.output_tokens)} detail={`输入 ${tokens(report.totals.input_tokens)} · 输出 ${tokens(report.totals.output_tokens)}`} />
+          <Stat label="运行次数" value={report.totals.runs.toLocaleString("zh-CN")} detail={`自 ${report.since}`} />
+          <Stat label="使用人数" value={report.totals.users.toLocaleString("zh-CN")} detail="有用量的账号" />
+          <Stat label="人均 Token" value={tokens(report.totals.users ? Math.round((report.totals.input_tokens + report.totals.output_tokens) / report.totals.users) : 0)} detail="所选范围" />
+        </div>
+        <Panel title="每日 Token 用量" description="输入与输出合计。">
+          {report.by_day.length ? <UsageBars days={report.by_day.map(row => ({ day: row.day, total: sum(row) }))} /> : <p className="muted">暂无用量数据</p>}
+        </Panel>
+        <div className="assistant-usage-grid">
+          <Panel title="按用户" description="用量最多的 50 个账号。">
+            <UsageTable rows={report.by_user.map(row => [row.nickname || row.username || `#${row.user_id}`, row])} empty="暂无用户用量" />
+          </Panel>
+          <Panel title="按模型" description="对话所用模型（含标题生成与结构分析）。">
+            <UsageTable rows={report.by_model.map(row => [row.model_label || row.model_name ? `${row.channel_name ?? ""} / ${row.model_label || row.model_name}` : "已删除的模型", row])} empty="暂无模型用量" />
+          </Panel>
+        </div>
+        <div className="assistant-usage-grid">
+          <Panel title="工具调用" description="次数、出错率与平均耗时，用于调整工具与上限。">
+            {report.tools.length ? <div className="data-table assistant-usage-table" role="table" aria-label="工具调用">
+              <div className="data-row data-head" role="row"><span role="columnheader">工具</span><span role="columnheader">次数</span><span role="columnheader">出错</span><span role="columnheader">平均耗时</span></div>
+              {report.tools.map(row => <div className="data-row" role="row" key={row.tool_name}>
+                <span role="cell" className="mono cell-truncate">{row.tool_name}</span><span role="cell">{row.calls.toLocaleString("zh-CN")}</span>
+                <span role="cell">{row.calls ? percent(row.errors / row.calls) : "—"}</span><span role="cell">{ms(row.avg_ms)}</span>
+              </div>)}
+            </div> : <p className="muted">暂无工具调用</p>}
+          </Panel>
+          <Panel title="结束原因与操作" description="触达上限过多时可适当放宽限制；操作按类型与结果统计。">
+            <KeyValue items={report.stops.map(row => [STOP_REASONS[row.reason] ?? (row.reason || "进行中"), `${row.runs.toLocaleString("zh-CN")} 次`])} />
+            {report.actions.length > 0 && <KeyValue items={report.actions.map(row => [`${ai.ACTION_KINDS[row.kind] ?? row.kind} · ${ACTION_STATUS[row.status] ?? row.status}`,
+              `${row.actions} 个（${(row.items ?? 0).toLocaleString("zh-CN")} 项）`])} />}
+          </Panel>
+        </div>
+      </div>}
+  </>;
+}
+
+function UsageTable({ rows, empty }: { rows: [string, { input_tokens: number | null; output_tokens: number | null; runs: number | null }][]; empty: string }) {
+  if (!rows.length) return <p className="muted">{empty}</p>;
+  return <div className="data-table assistant-usage-table" role="table">
+    <div className="data-row data-head" role="row"><span role="columnheader">名称</span><span role="columnheader">Token</span><span role="columnheader">输入 / 输出</span><span role="columnheader">运行</span></div>
+    {rows.map(([label, row], index) => <div className="data-row" role="row" key={index}>
+      <span role="cell" className="cell-truncate" title={label}>{label}</span><span role="cell">{tokens((row.input_tokens ?? 0) + (row.output_tokens ?? 0))}</span>
+      <span role="cell" className="muted">{tokens(row.input_tokens)} / {tokens(row.output_tokens)}</span><span role="cell">{(row.runs ?? 0).toLocaleString("zh-CN")}</span>
+    </div>)}
+  </div>;
+}
+
 /* ---------- 渠道与模型 ---------- */
 
 function ChannelsTab({ settings, onChanged }: { settings: ai.AssistantSettings | null; onChanged: () => void }) {
@@ -207,7 +288,7 @@ function ChannelsTab({ settings, onChanged }: { settings: ai.AssistantSettings |
       {channels.length === 0 ? <Panel><EmptyState icon="server" title="还没有模型渠道" description="渠道是一个模型服务的接口地址和 API Key。支持 OpenAI 兼容接口（OpenAI、DeepSeek、通义、Kimi、OpenRouter、Ollama 等）和 Anthropic。"
         action={<Button variant="primary" icon="plus" onClick={() => setEditing("new")}>添加渠道</Button>} /></Panel> : (
         <div className="assistant-channels">
-          <Panel title="渠道" flush actions={<Button size="sm" icon="plus" onClick={() => setEditing("new")}>添加</Button>}>
+          <Panel title="模型渠道" description="选择渠道，管理连接与模型。" className="assistant-channel-nav" flush actions={<Button size="sm" icon="plus" onClick={() => setEditing("new")}>添加</Button>}>
             <ul className="assistant-channel-list" role="listbox" aria-label="渠道">
               {channels.map(item => <li key={item.id}>
                 <button type="button" role="option" aria-selected={item.id === selected} className={item.id === selected ? "is-active" : ""} onClick={() => setSelected(item.id)}>
@@ -274,7 +355,7 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onChanged }: {
   const shown = (models ?? []).filter(model => (filter === "all" || model.enabled === (filter === "enabled"))
     && (!search.trim() || `${model.model} ${model.display_name ?? ""}`.toLowerCase().includes(search.trim().toLowerCase())));
   return (
-    <Panel flush title={<span className="assistant-channel-title">{channel.name}<Badge>{KIND_LABEL[channel.kind]}</Badge>{!channel.enabled && <Badge>已停用</Badge>}</span>}
+    <Panel flush className="assistant-channel-detail" title={<span className="assistant-channel-title"><span className="assistant-channel-symbol"><Icon name="server" size={20} /></span><span>{channel.name}<small>{KIND_LABEL[channel.kind]}</small></span><Badge tone={channel.enabled ? "success" : "neutral"} dot>{channel.enabled ? "已启用" : "已停用"}</Badge></span>}
       actions={<>
         <Button size="sm" icon="refresh" loading={syncing} onClick={() => void sync()}>同步模型</Button>
         <Button size="sm" icon="edit" onClick={onEdit}>编辑</Button>
@@ -294,6 +375,7 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onChanged }: {
           ...(channel.last_error ? [["最近错误", <span className="tone-danger" key="error">{channel.last_error}</span>] as [ReactNode, ReactNode]] : []),
         ]} />
       </div>
+      <div className="assistant-model-heading"><h3>可用模型 <span>{models?.length ?? "—"}</span></h3><p>同步发现的新模型默认停用，测试通过后即可启用。</p></div>
       <div className="toolbar assistant-model-toolbar">
         <SearchInput value={search} onChange={setSearch} placeholder="搜索模型" label="搜索模型" />
         <div className="toolbar-actions">
@@ -345,6 +427,7 @@ function parseHeaders(text: string): Record<string, string> | string {
 }
 
 function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | null; onClose: () => void; onSaved: (channel: ai.AiChannel) => void }) {
+  const [clearHeaders, setClearHeaders] = useState(false);
   const [form, setForm] = useState({ name: channel?.name ?? "", kind: channel?.kind ?? "openai" as ai.AiChannel["kind"], base_url: channel?.base_url ?? "",
     api_key: "", headers: "", concurrency: String(channel?.concurrency ?? 4), timeout: String(channel?.timeout ?? 120), enabled: channel?.enabled ?? true });
   const [error, setError] = useState("");
@@ -359,7 +442,7 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
       concurrency: Number(form.concurrency), timeout: Number(form.timeout) };
     if (!channel) input.kind = form.kind;
     if (form.api_key.trim()) input.api_key = form.api_key.trim();
-    if (form.headers.trim() || !channel) input.headers = headers;
+    if (clearHeaders || form.headers.trim() || !channel) input.headers = clearHeaders ? {} : headers;
     setBusy(true); setError("");
     try {
       const saved = channel ? await ai.updateAdminChannel(channel.id, input) : await ai.createAdminChannel(input);
@@ -372,10 +455,11 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
     finally { setBusy(false); }
   }
   return (
-    <Modal title={channel ? `编辑渠道 ${channel.name}` : "添加模型渠道"} icon="server" onClose={onClose} dismissible={!busy}
+    <Modal title={channel ? "编辑模型渠道" : "添加模型渠道"} icon="server" onClose={onClose} dismissible={!busy}
       description={channel ? "API Key 留空表示不修改。" : "保存后会自动同步模型列表，新模型默认停用。API Key 加密保存，不会再次显示。"}
       footer={<><Button onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" type="submit" form="channel-form" loading={busy}>{channel ? "保存" : "添加并同步"}</Button></>}>
-      <form id="channel-form" className="form" onSubmit={submit} noValidate>
+      <form id="channel-form" className="form assistant-config-form" onSubmit={submit} noValidate>
+        <div className="assistant-form-section"><h3>连接信息</h3><p>填写模型服务提供的接口地址与凭据。</p></div>
         <div className="form-row">
           <Field label="名称"><input className="input" value={form.name} maxLength={40} placeholder="例如：DeepSeek" onChange={event => setForm({ ...form, name: event.target.value })} autoFocus /></Field>
           <Field label="类型" hint={channel ? "创建后不能修改" : undefined}>
@@ -387,16 +471,21 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
         <Field label="Base URL" hint={`例如 ${KIND_EXAMPLE[form.kind]}${form.kind === "openai" ? "；本地 Ollama 为 http://127.0.0.1:11434/v1" : ""}`}>
           <input className="input mono" value={form.base_url} placeholder={KIND_EXAMPLE[form.kind]} autoCapitalize="none" spellCheck={false} onChange={event => setForm({ ...form, base_url: event.target.value })} />
         </Field>
-        <Field label="API Key" hint={channel?.api_key ? `当前：${channel.api_key}` : "本地模型可留空"}>
-          <input className="input mono" type="password" autoComplete="new-password" value={form.api_key} placeholder={channel?.api_key ? "留空表示不修改" : ""} onChange={event => setForm({ ...form, api_key: event.target.value })} />
-        </Field>
+        <PasswordField label="API Key" name="channel-api-key" autoComplete="off" value={form.api_key} onChange={api_key => setForm({ ...form, api_key })}
+          hint={channel?.api_key ? `已保存 ${channel.api_key}；留空保留，填写新值替换。` : "仅用于连接模型服务，加密保存；本地模型可留空。"} />
+        <details className="settings-disclosure assistant-advanced">
+          <summary><Icon name="settings" size={16} /><span>高级设置</span><span className="disclosure-meta">请求头、并发与超时</span><Icon name="chevronDown" size={16} /></summary>
+          <div className="disclosure-body form">
         <Field label="附加请求头" hint={`每行一个，格式为 名称: 值；值加密保存。${channel?.header_names.length ? `当前：${channel.header_names.join("、")}（留空表示不修改）` : ""}`}>
-          <textarea className="input mono" rows={2} value={form.headers} placeholder="HTTP-Referer: https://drive.example.com" onChange={event => setForm({ ...form, headers: event.target.value })} />
+          <textarea className="input mono" rows={3} disabled={clearHeaders} value={form.headers} placeholder="HTTP-Referer: https://drive.example.com" onChange={event => setForm({ ...form, headers: event.target.value })} />
         </Field>
+        {Boolean(channel?.header_names.length) && <Switch label="移除已保存的请求头" description="保存后清除当前渠道的附加请求头。" checked={clearHeaders} onChange={setClearHeaders} />}
         <div className="form-row">
           <Field label="并发请求数" hint="1–32"><input className="input" type="number" min={1} max={32} value={form.concurrency} onChange={event => setForm({ ...form, concurrency: event.target.value })} /></Field>
           <Field label="超时（秒）" hint="10–600"><input className="input" type="number" min={10} max={600} value={form.timeout} onChange={event => setForm({ ...form, timeout: event.target.value })} /></Field>
         </div>
+          </div>
+        </details>
         <Switch checked={form.enabled} onChange={enabled => setForm({ ...form, enabled })} label="启用渠道" description="停用后其下所有模型对用户不可见。" />
         {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
       </form>
@@ -406,37 +495,45 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
 
 function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number; model: ai.AiModel | null; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({ model: model?.model ?? "", display_name: model?.display_name ?? "", context_window: model?.context_window ? String(model.context_window) : "",
-    max_output: model?.max_output ? String(model.max_output) : "", tools: model?.tools ?? "unknown" as ai.ToolSupport });
+    max_output: model?.max_output ? String(model.max_output) : "", tools: model?.tools ?? "unknown" as ai.ToolSupport, sort: String(model?.sort ?? 0) });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const number = (value: string) => value.trim() ? Number(value) : null;
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!model && !form.model.trim()) { setError("请填写模型 ID"); return; }
+    for (const [key, label, high] of [["context_window", "上下文窗口", 10000000], ["max_output", "最大输出", 1000000], ["sort", "显示顺序", 100000]] as const) {
+      const value = number(form[key]);
+      if (value !== null && (!Number.isInteger(value) || value < 0 || value > high)) { setError(`${label}必须是 0–${high.toLocaleString("zh-CN")} 的整数`); return; }
+    }
     setBusy(true); setError("");
     try {
-      if (model) await ai.updateAdminModel(model.id, { display_name: form.display_name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output), tools: form.tools });
-      else await ai.addAdminModel(channelId, { model: form.model.trim(), display_name: form.display_name.trim() || null, context_window: number(form.context_window) });
+      if (model) await ai.updateAdminModel(model.id, { display_name: form.display_name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output), tools: form.tools, sort: Number(form.sort) });
+      else await ai.addAdminModel(channelId, { model: form.model.trim(), display_name: form.display_name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output), tools: form.tools, sort: Number(form.sort) });
       toast.success(model ? "模型已保存" : "模型已添加，默认停用");
       onSaved();
     } catch (reason) { setError(api.errorMessage(reason, "保存失败")); }
     finally { setBusy(false); }
   }
   return (
-    <Modal title={model ? `编辑 ${model.label}` : "手动添加模型"} size="sm" onClose={onClose} dismissible={!busy}
+    <Modal title={model ? "模型配置" : "手动添加模型"} description={model ? `正在配置 ${model.model}` : "模型 ID 需与服务商接口一致，新模型默认停用。"} icon="sparkle" onClose={onClose} dismissible={!busy}
       footer={<><Button onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" type="submit" form="model-form" loading={busy}>保存</Button></>}>
-      <form id="model-form" className="form" onSubmit={submit} noValidate>
+      <form id="model-form" className="form assistant-config-form" onSubmit={submit} noValidate>
         {!model && <Field label="模型 ID" hint="与上游接口中的 model 参数一致。"><input className="input mono" value={form.model} onChange={event => setForm({ ...form, model: event.target.value })} autoFocus /></Field>}
         <Field label="显示名" hint="用户在模型选择器里看到的名称，留空使用模型 ID。"><input className="input" value={form.display_name} maxLength={80} onChange={event => setForm({ ...form, display_name: event.target.value })} /></Field>
         <div className="form-row">
           <Field label="上下文窗口" hint="token 数，用于决定何时压缩历史。"><input className="input" type="number" min={0} value={form.context_window} onChange={event => setForm({ ...form, context_window: event.target.value })} /></Field>
-          {model && <Field label="最大输出" hint="留空由服务决定。"><input className="input" type="number" min={0} value={form.max_output} onChange={event => setForm({ ...form, max_output: event.target.value })} /></Field>}
+          <Field label="最大输出" hint="留空由服务决定。"><input className="input" type="number" min={0} value={form.max_output} onChange={event => setForm({ ...form, max_output: event.target.value })} /></Field>
         </div>
-        {model && <Field label="工具调用" hint="“测试”会自动更新此项。不支持工具调用的模型不会出现在用户的选择器里。">
+        <div className="assistant-form-section"><h3>能力与展示</h3><p>工具调用支持决定模型是否可供文件助手使用。</p></div>
+        <div className="form-row">
+        <Field label="工具调用" hint="“测试”会自动更新此项。不支持工具调用的模型不会出现在用户的选择器里。">
           <select className="input" value={form.tools} onChange={event => setForm({ ...form, tools: event.target.value as ai.ToolSupport })}>
             <option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option>
           </select>
-        </Field>}
+        </Field>
+        <Field label="显示顺序" hint="数字越小越靠前。"><input className="input" type="number" min={0} max={100000} value={form.sort} onChange={event => setForm({ ...form, sort: event.target.value })} /></Field>
+        </div>
         {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
       </form>
     </Modal>
@@ -544,7 +641,7 @@ function ToolParamsDialog({ tool, values, onClose, onApply }: { tool: ai.AdminTo
 
 const LIMIT_GROUPS: { title: string; description: string; keys: string[] }[] = [
   { title: "Agent 循环", description: "每一轮对话（一条用户消息触发的处理）的上限。触达后助手会总结已完成的部分并停止。", keys: ["max_steps", "max_tool_calls", "parallel_calls", "repeat_threshold", "error_threshold", "run_seconds", "tool_seconds", "tool_result_bytes", "run_tokens"] },
-  { title: "并发与容量", description: "单进程部署：并发过高会占用内存与模型服务额度。", keys: ["user_concurrency", "global_concurrency", "user_messages_per_minute", "max_messages", "max_conversations"] },
+  { title: "并发与容量", description: "单进程部署：并发过高会占用内存与模型服务额度。", keys: ["user_concurrency", "global_concurrency", "user_messages_per_minute", "max_messages", "max_conversations", "action_items", "download_urls"] },
 ];
 
 function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | null; onSaved: (settings: ai.AssistantSettings) => void }) {
@@ -567,6 +664,14 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
     || general.call_log_days !== String(settings.call_log_days) || general.notice !== settings.notice;
   async function submit(event: FormEvent) {
     event.preventDefault();
+    for (const [key, value] of Object.entries(form)) {
+      const bound = limits!.bounds[key], parsed = Number(value);
+      if (!value.trim() || !Number.isInteger(parsed) || parsed < bound.min || parsed > bound.max) { setError(`${bound.label}必须在 ${bound.min}–${bound.max} 之间`); return; }
+    }
+    for (const key of ["user_daily_tokens", "retention_days", "call_log_days"]) {
+      const bound = settings!.bounds[key], parsed = Number(general[key]);
+      if (!general[key].trim() || !Number.isInteger(parsed) || parsed < bound.min || parsed > bound.max) { setError(`${key === "user_daily_tokens" ? "每日额度" : "保留天数"}必须在 ${bound.min}–${bound.max} 之间`); return; }
+    }
     setBusy(true); setError("");
     try {
       const values = Object.fromEntries(Object.entries(form).map(([key, value]) => [key, Number(value)]));
@@ -584,18 +689,18 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
   );
   return (
     <form className="assistant-limits" onSubmit={submit} noValidate>
-      {LIMIT_GROUPS.map(group => <Panel key={group.title} title={group.title} description={group.description}>
+      {LIMIT_GROUPS.map(group => <Panel key={group.title} title={group.title} description={group.description} className="assistant-limit-panel">
         <div className="assistant-limit-grid">{group.keys.map(key => numberField(key, limits.bounds[key].label, limits.bounds[key], form[key] ?? "", value => setForm({ ...form, [key]: value })))}</div>
       </Panel>)}
-      <Panel title="额度与保留期" description="每个用户的默认额度可在“用户”页按人覆盖。">
+      <Panel title="额度与保留期" description="每个用户的默认额度可在“用户”页按人覆盖。" className="assistant-limit-panel">
         <div className="assistant-limit-grid">
           {numberField("user_daily_tokens", "每用户每日 token（0 为不限）", settings.bounds.user_daily_tokens, general.user_daily_tokens, value => setGeneral({ ...general, user_daily_tokens: value }))}
           {numberField("retention_days", "对话留痕保留天数", settings.bounds.retention_days, general.retention_days, value => setGeneral({ ...general, retention_days: value }))}
           {numberField("call_log_days", "调用日志保留天数", settings.bounds.call_log_days, general.call_log_days, value => setGeneral({ ...general, call_log_days: value }))}
         </div>
-        <Field label="首次使用说明" hint="用户第一次打开助手时显示，确认后才能发送消息。">
+        <div className="assistant-notice-setting form settings-form"><Field label="首次使用说明" hint="用户第一次打开助手时显示，确认后才能发送消息。">
           <textarea className="input" rows={3} maxLength={2000} value={general.notice} onChange={event => setGeneral({ ...general, notice: event.target.value })} />
-        </Field>
+        </Field></div>
         <Button size="sm" variant="ghost" onClick={() => setGeneral({ ...general, notice: settings.notice_default })}>恢复默认说明</Button>
       </Panel>
       {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}

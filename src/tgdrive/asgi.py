@@ -209,11 +209,18 @@ class TgDriveASGI(StaticFiles):
                     await self._send(tracked_send, 404, {"error": {"code": "not_found", "message": "资源不存在"}})
                     return
                 https = scope.get("scheme") == "https"
-                await self._static(tracked_send, path, method, https=https)
+                await self._static(tracked_send, path, method, https=https,
+                                   origin=f"{scope.get('scheme', 'http')}://{headers.get('host', 'localhost')}")
                 return
             if path == "/api/admin/v1/docs-bundle.js" and method in ("GET", "HEAD"):
                 await self._admin_docs_bundle(tracked_send, method, token)
                 return
+            if path in {"/api/admin/v1/objects", "/api/admin/v1/content", "/api/admin/v1/thumbnail",
+                        "/api/admin/v1/preview-assets", "/api/admin/v1/preview-list", "/api/admin/v1/objects/public"}:
+                # 旧管理入口显式拒绝访问，避免只隐藏菜单后仍能枚举或读取用户文件。
+                session = self.admin.accounts.sessions.require(token, role="admin")
+                self.admin.accounts.account_for_session(session)
+                raise PermissionError("系统管理不提供用户文件访问，请在我的空间管理自己的文件")
             if path.startswith("/api/v1/"):
                 await self._key_api(tracked_send, method, path[len("/api/v1"):], query, headers, body_stream)
                 return
@@ -264,11 +271,6 @@ class TgDriveASGI(StaticFiles):
                 data, mime, etag = self.admin.user_avatar(token, int(avatar_route.group(1)))
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._avatar_cache_control(query))
                 return
-            if path == "/api/admin/v1/thumbnail" and method == "GET":
-                data, mime, etag = self.admin.thumbnail(token, int(query.get("bucket_id", ["0"])[0]),
-                    query.get("path", [""])[0], query.get("variant", ["thumb"])[0])
-                await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
-                return
             if path == "/api/user/v1/archive" and method == "GET":
                 name, entries = await file_user.archive(token, query.get("path", []))
                 await self._send_stream(tracked_send, 200, {"Content-Type": "application/zip", "Cache-Control": "no-store",
@@ -276,7 +278,7 @@ class TgDriveASGI(StaticFiles):
                     "X-Content-Type-Options": "nosniff"}, stream_zip(entries, nested=True), "GET")
                 return
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
-                await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, admin=False, user=file_user, private=private))
+                await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, user=file_user, private=private))
                 return
             if path.startswith("/api/admin/v1/backups/") and method == "GET":
                 await self._backup_download(tracked_send, token, path.rsplit("/", 1)[-1])
@@ -286,9 +288,6 @@ class TgDriveASGI(StaticFiles):
                 after = query.get("after", ["0"])[0]
                 events = self.assistant.events(token, run_events[1], int(after) if after.isdigit() else 0)
                 await self._until_disconnect(receive, self._send_events(tracked_send, events))
-                return
-            if path == "/api/admin/v1/content" and method in ("GET", "HEAD"):
-                await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, admin=True))
                 return
             sharer_avatar = re.fullmatch(r"/api/public/v1/objects/([A-Za-z0-9_-]+)/avatar", path)
             if sharer_avatar and method == "GET":
@@ -315,8 +314,11 @@ class TgDriveASGI(StaticFiles):
                 await self._public_folder_download(tracked_send, folder_download.group(1), form)
                 return
             data = bytearray()
+            # 抓取脚本转交的页面快照最多 2 MB（JSON 编码后略大），其余接口沿用通用上限。
+            body_limit = max(self.json_limit, 3 * 1024 * 1024) if re.fullmatch(
+                r"/api/user/v1/assistant/conversations/[A-Za-z0-9_-]{4,40}/snapshots", path) else self.json_limit
             async for chunk in body_stream():
-                if len(data) + len(chunk) > self.json_limit:
+                if len(data) + len(chunk) > body_limit:
                     await self._send(tracked_send, 413, {"error": {"code": "body_too_large", "message": "JSON 请求体过大"}})
                     return
                 data.extend(chunk)
@@ -362,7 +364,7 @@ class TgDriveASGI(StaticFiles):
                           "/clients/{}/status": "client.status", "/clients/{}/grants": "client.grant",
                           "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/clients/{}/delete": "client.delete",
                           "/bots": "bot.create", "/bots/{}/status": "bot.status",
-                          "/bots/{}/check": "bot.check", "/objects/public": "object.public", "/settings": "settings.update", "/resources": "resources.update",
+                          "/bots/{}/check": "bot.check", "/settings": "settings.update", "/resources": "resources.update",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
                           "/backups": "backup.create", "/password": "admin.password", "/passphrase": "system.passphrase",
@@ -391,7 +393,11 @@ class TgDriveASGI(StaticFiles):
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
                          "/passkeys/login/verify": "user.login",
                          "/assistant/scope-requests/{}/confirm": "assistant.scope.confirm",
-                         "/assistant/scope-requests/{}/reject": "assistant.scope.reject"},
+                         "/assistant/scope-requests/{}/reject": "assistant.scope.reject",
+                         "/assistant/actions/{}/confirm": "assistant.action.confirm",
+                         "/assistant/actions/{}/reject": "assistant.action.reject",
+                         "/assistant/actions/{}/cancel": "assistant.action.cancel",
+                         "/assistant/actions/{}/undo": "assistant.action.undo"},
     }
 
     def _audit_entry(self, method, path, payload, token, scope):
@@ -405,7 +411,7 @@ class TgDriveASGI(StaticFiles):
             pattern = re.sub(r"^/(users|clients|bots|downloads)/\d+/", r"/\1/{}/", route)
             pattern = re.sub(r"^/shares/[A-Za-z0-9_-]+/", "/shares/{}/", pattern)
             pattern = re.sub(r"^/assistant/(channels|models|users)/\d+/", r"/assistant/\1/{}/", pattern)
-            pattern = re.sub(r"^/assistant/scope-requests/[A-Za-z0-9_-]+/", "/assistant/scope-requests/{}/", pattern)
+            pattern = re.sub(r"^/assistant/(scope-requests|actions)/[A-Za-z0-9_-]+/", r"/assistant/\1/{}/", pattern)
             action = routes.get(pattern)
             if action is None:
                 return None
@@ -436,11 +442,11 @@ class TgDriveASGI(StaticFiles):
             detail = {"quota_bytes": payload.get("quota_bytes")}
         elif action == "key.create":
             target = (result or {}).get("access_key_id") if ok else None
-            detail = {"name": payload.get("name")}
+            detail = {}
         elif action in ("key.disable", "key.delete"):
             target = payload.get("access_key_id")
         elif action == "client.grant":
-            detail = {key: payload.get(key) for key in ("bucket_id", "prefix", "perms")}
+            detail = {key: payload.get(key) for key in ("bucket_id", "perms")}
         elif action == "bot.create":
             target, detail = payload.get("name"), {"channel_id": payload.get("channel_id")}
         elif action == "bot.check" and ok:
@@ -453,7 +459,6 @@ class TgDriveASGI(StaticFiles):
         elif action == "download.create":
             detail = {"count": len(payload.get("items", [])) if isinstance(payload.get("items"), list) else 0}
         elif action == "share.save":
-            target = str(payload.get("destination") or "") or "我的文件"
             detail = {"saved": (result or {}).get("saved"), "bytes": (result or {}).get("bytes")} if ok else {}
         elif action == "download.clear":
             detail = {"status": payload.get("status") if payload.get("status") in ("completed", "failed") else None,
@@ -467,8 +472,7 @@ class TgDriveASGI(StaticFiles):
             detail = {"method": "passkey"}
         elif action == "object.public":
             paths = payload["paths"] if isinstance(payload.get("paths"), list) else [payload.get("path")]
-            target = ", ".join(str(item) for item in paths[:5]) + (f" 等 {len(paths)} 项" if len(paths) > 5 else "")
-            detail = {"public": bool(payload.get("public")), **({"bucket_id": payload["bucket_id"]} if "bucket_id" in payload else {})}
+            detail = {"count": len(paths), "public": bool(payload.get("public")), **({"bucket_id": payload["bucket_id"]} if "bucket_id" in payload else {})}
             if "expires_at" in payload:
                 detail["expires_at"] = payload["expires_at"]
             if "password" in payload:
@@ -512,6 +516,9 @@ class TgDriveASGI(StaticFiles):
             detail = {"ok": (result or {}).get("ok"), "tools": (result or {}).get("tools")}
         elif action == "assistant.user_policy":
             detail = {key: payload.get(key) for key in ("enabled", "max_level", "daily_tokens") if key in payload}
+        elif action.startswith("assistant.action.") and ok:
+            # 只记录操作类型、状态与条目数，不记录路径、链接等条目内容。
+            detail = {key: (result or {}).get(key) for key in ("kind", "status", "count")}
         elif action == "assistant.trace.delete":
             detail = {"user_id": payload.get("user_id"), "before": payload.get("before"),
                       "deleted": (result or {}).get("deleted") if ok else None}
@@ -706,19 +713,8 @@ class TgDriveASGI(StaticFiles):
                 bot_id = int(route.split("/")[2])
                 self.admin.set_bot_status(token, csrf, bot_id, payload["status"])
                 return 204, None, {}
-            if method == "GET" and route == "/objects":
-                return 200, await self.admin.list_objects(token, limit=int(query.get("limit", ["100"])[0]),
-                                                         cursor=query.get("cursor", [None])[0] or None, query=query.get("q", [""])[0],
-                                                         public_only=query.get("public", ["0"])[0] in ("1", "true")), {}
-            if method == "GET" and route == "/preview-assets":
-                return 200, await self.admin.preview_assets(token, int(query.get("bucket_id", [""])[0]),
-                                                           query.get("path", [""])[0]), {}
-            if method == "GET" and route == "/preview-list":
-                return 200, await self.admin.preview_list(token, int(query.get("bucket_id", [""])[0]),
-                    query.get("path", [""])[0], query.get("cursor", [None])[0] or None), {}
-            if method == "POST" and route == "/objects/public":
-                return 200, self.admin.set_object_public(token, csrf, int(payload["bucket_id"]), payload["path"],
-                                                         bool(payload["public"])), {}
+            if method == "GET" and route == "/objects/summary":
+                return 200, await self.admin.object_summary(token), {}
             if route.startswith("/users/") and method == "POST" and route.endswith("/delete"):
                 return 200, await self.admin.delete_user(token, csrf, int(route.split("/")[2]), str(payload.get("confirm", ""))), {}
             if route.startswith("/users/") and method == "POST" and route.endswith("/password"):
@@ -813,7 +809,7 @@ class TgDriveASGI(StaticFiles):
                 if route == "/downloads/parse" and method == "POST":
                     return 200, await self.offline.parse(account.id, payload.get("input"), download_type=payload.get("download_type", "auto"), cookies=payload.get("cookies", "")), {"Cache-Control": "no-store"}
                 if route == "/downloads" and method == "GET":
-                    return 200, self.offline.list(account.id, cursor=int(query.get("cursor", ["0"])[0] or "0"), status=query.get("status", [""])[0], limit=int(query.get("limit", ["50"])[0]), private_scope=private_scope), {"Cache-Control": "no-store"}
+                    return 200, self.offline.list(account.id, cursor=int(query.get("cursor", ["0"])[0] or "0"), status=query.get("status", [""])[0], query=query.get("q", [""])[0], limit=int(query.get("limit", ["50"])[0]), private_scope=private_scope), {"Cache-Control": "no-store"}
                 if route == "/downloads" and method == "POST":
                     return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""), private_scope=private_scope, private_activity=private_activity)}, {"Cache-Control": "no-store"}
                 if route == "/downloads/clear" and method == "POST":
@@ -1015,18 +1011,13 @@ class TgDriveASGI(StaticFiles):
         # “保持登录”的会话用持久 Cookie（与服务端有效期一致）；普通会话 12 小时。
         return 200, {**{k: v for k, v in result.items() if k != "session"}, "bucket_id": account.bucket_id}, {"Set-Cookie": self._cookie(token, max_age=round(result["expires_at"] - time.time()))}
 
-    async def _content(self, send, method, token, query, headers, *, admin: bool = False, user=None, private=False):
+    async def _content(self, send, method, token, query, headers, *, user=None, private=False):
         user = user or self.user
         path = query.get("path", [""])[0]
-        if admin:
-            bucket_id = int(query.get("bucket_id", [""])[0])
-            info, _ = await self.admin.content(token, bucket_id, path)
-            opener = lambda start, end: self.admin.content(token, bucket_id, path, start, end)
-        else:
-            info, _ = await user.content(token, path)
-            opener = lambda start, end: user.content(token, path, start, end)
-            if "bucket_id" in query and int(query["bucket_id"][0]) != info.bucket_id:
-                raise PermissionError("文件缓存不属于当前账号")
+        info, _ = await user.content(token, path)
+        opener = lambda start, end: user.content(token, path, start, end)
+        if "bucket_id" in query and int(query["bucket_id"][0]) != info.bucket_id:
+            raise PermissionError("文件缓存不属于当前账号")
         # 缓存必须同时绑定存储桶与内容版本，不能在切换账号后复用同路径的内容。
         mime = (info.content_type or "").split(";", 1)[0].strip().lower()
         image = mime.startswith("image/") or (mime in ("", "application/octet-stream")
@@ -1262,6 +1253,21 @@ class TgDriveASGI(StaticFiles):
         match = re.fullmatch(r"/scope-requests/([A-Za-z0-9_-]{4,40})/(confirm|reject)", route)
         if match and method == "POST":
             return 200, await service.decide_scope(token, csrf, match[1], match[2] == "confirm"), no_store
+        match = re.fullmatch(r"/actions/([A-Za-z0-9_-]{4,40})(?:/(items|confirm|reject|cancel|undo))?", route)
+        if match and match[2] is None and method == "GET":
+            return 200, service.action_detail(token, match[1]), no_store
+        if match and match[2] == "items" and method == "GET":
+            offset = query.get("offset", ["0"])[0]
+            return 200, service.action_items(token, match[1], int(offset) if offset.isdigit() else 0), no_store
+        if match and match[2] in ("confirm", "reject") and method == "POST":
+            return 200, await service.decide_action(token, csrf, match[1], match[2] == "confirm", payload), no_store
+        if match and match[2] == "cancel" and method == "POST":
+            return 200, service.cancel_action(token, csrf, match[1]), no_store
+        if match and match[2] == "undo" and method == "POST":
+            return 200, await service.undo_action(token, csrf, match[1]), no_store
+        match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})/snapshots", route)
+        if match and method == "POST":
+            return 201, service.upload_snapshot(token, csrf, match[1], payload), no_store
         raise NotFoundError("资源不存在")
 
     async def _assistant_admin(self, method, route, query, payload, session):
@@ -1271,6 +1277,9 @@ class TgDriveASGI(StaticFiles):
         moment = lambda name: float(q(name)) if q(name).replace(".", "", 1).isdigit() else None
         if route == "/overview" and method == "GET":
             return 200, service.admin_overview(), {}
+        if route == "/usage" and method == "GET":
+            days = q("days", "30")
+            return 200, service.trace.usage_report(days=int(days) if days.isdigit() else 30), {}
         if route == "/settings":
             if method == "GET":
                 return 200, service.admin_settings(), {}

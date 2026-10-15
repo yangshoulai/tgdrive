@@ -134,7 +134,7 @@ class AdminApi:
 
     async def alist_clients(self, token: str, **options):
         self.accounts.sessions.require(token, role="admin")
-        return await self.accounts.metadata.run_in_thread(self.clients.list_clients, **options)
+        return await self.accounts.metadata.run_in_thread(self.list_clients, token, **options)
 
     def logout(self, token: str) -> None:
         self.accounts.sessions.revoke(token)
@@ -242,14 +242,24 @@ class AdminApi:
         self.accounts.set_quota(user_id, quota_bytes)
 
     def create_client(self, token: str, csrf: str, name: str, grants: list[dict[str, object]]) -> dict[str, object]:
-        self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        session = self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        account = self.accounts.account_for_session(session)
+        if any(int(grant["bucket_id"]) != account.bucket_id for grant in grants):
+            raise PermissionError("访问密钥只能授权自己的存储桶")
         client_id, access_key, secret = self.clients.create_client_with_key(
-            name, grants=[(int(grant["bucket_id"]), str(grant.get("prefix", "")), str(grant.get("perms", "ro"))) for grant in grants])
+            name, owner_user_id=account.id,
+            grants=[(int(grant["bucket_id"]), str(grant.get("prefix", "")), str(grant.get("perms", "ro"))) for grant in grants])
         return {"id": client_id, "access_key_id": access_key, "secret": secret}
 
     def list_clients(self, token: str, *, limit: int | None = None, cursor: int = 0):
-        self.accounts.sessions.require(token, role="admin")
-        return self.clients.list_clients(limit=limit, cursor=cursor)
+        session = self.accounts.sessions.require(token, role="admin")
+        result = self.clients.list_clients(limit=limit, cursor=cursor)
+        for item in result if isinstance(result, list) else result["clients"]:
+            if item["owner_user_id"] != session.user_id:
+                # 管理密钥的状态与归属即可，不暴露用户填写的名称、说明和文件夹路径。
+                item["name"], item["description"] = f"访问凭据 #{item['id']}", None
+                item["grants"] = [{**grant, "prefix": "", "path_hidden": True} for grant in item["grants"]]
+        return result
 
     def set_client_status(self, token: str, csrf: str, client_id: int, status: str) -> None:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
@@ -268,7 +278,11 @@ class AdminApi:
         self.clients.delete_client(client_id)
 
     def grant_client(self, token: str, csrf: str, client_id: int, bucket_id: int, prefix: str, perms: str) -> None:
-        self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        session = self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        account = self.accounts.account_for_session(session)
+        client = self.accounts.metadata.db.execute("SELECT owner_user_id FROM clients WHERE id=?", (client_id,)).fetchone()
+        if client is None or client["owner_user_id"] != account.id or bucket_id != account.bucket_id:
+            raise PermissionError("只能修改自己密钥的授权，且不能访问其他存储桶")
         self.clients.grant(client_id, bucket_id, prefix, perms)
 
     async def list_bots(self, token: str) -> list[dict[str, object]]:
@@ -299,74 +313,15 @@ class AdminApi:
             raise NotReadyError("Telegram Bot 配置尚未启用")
         self.telegram_bots.set_status(bot_id, status)
 
-    async def list_objects(self, token: str, *, limit: int = 100, cursor: str | None = None, query: str = "",
-                           public_only: bool = False) -> dict[str, object]:
-        return await self.accounts.metadata.run_in_thread(
-            self._list_objects_sync, token, limit=limit, cursor=cursor, query=query, public_only=public_only)
-
-    def _list_objects_sync(self, token: str, *, limit: int = 100, cursor: str | None = None, query: str = "",
-                            public_only: bool = False) -> dict[str, object]:
-        """全部文件：按修改时间倒序的键集分页，筛选在 SQL 中完成。不包含文件夹标记。"""
+    async def object_summary(self, token: str) -> dict[str, int]:
+        """系统概览只读取汇总数量，不返回任何用户文件元信息。"""
         self.accounts.sessions.require(token, role="admin")
-        limit = max(1, min(limit, 200))
-        where = ["substr(o.key,-1)!='/'", "substr(o.key,1,9)!='.tgdrive/'"]
-        args: list[object] = []
-        query = unicodedata.normalize("NFC", query.strip())
-        if query:
-            where.append("instr(lower(o.key || ' ' || ifnull(u.username,'') || ' ' || b.name), lower(?))>0")
-            args.append(query)
-        if public_only:
-            where.append("o.public_token IS NOT NULL")
-        base = ("FROM objects o JOIN buckets b ON b.id=o.bucket_id LEFT JOIN users u ON u.bucket_id=o.bucket_id "
-                "WHERE " + " AND ".join(where))
-        page_where, page_args = "", []
-        if cursor:
-            try:
-                modified, bucket_id, key = cursor.split("|", 2)
-                page_where, page_args = " AND (o.modified_at,o.bucket_id,o.key) < (?,?,?)", [float(modified), int(bucket_id), key]
-            except ValueError as exc:
-                raise ValueError("cursor 不合法") from exc
-        rows = self.objects.metadata.db.execute(
-            "SELECT o.bucket_id,o.key,o.size,o.etag,o.content_type,o.modified_at,o.public_token,o.public_at,o.blob_uuid,"
-            "o.public_expires_at,o.public_downloads,o.public_password IS NOT NULL AS public_has_password,"
-            "b.name AS bucket_name,u.username " + base + page_where +
-            " ORDER BY o.modified_at DESC, o.bucket_id DESC, o.key DESC LIMIT ?", (*args, *page_args, limit + 1)).fetchall()
-        items = [dict(row) for row in rows[:limit]]
-        versions = self.objects.thumbnail_versions([item["blob_uuid"] for item in items])
-        for item in items:
-            thumbnails = versions.get(item.pop("blob_uuid") or "", {})
-            item.update(thumbnails=list(thumbnails), thumbnail_versions=thumbnails, has_thumbnail="thumb" in thumbnails)
-        last = items[-1] if items else None
-        totals = self.objects.metadata.cached_read(("admin-objects-total", query, public_only),
-            lambda: tuple(self.objects.metadata.db.execute("SELECT COUNT(*), COUNT(o.public_token) " + base, args).fetchone()))
-        return {"objects": items, "total": totals[0], "public_total": totals[1],
-                "next_cursor": f"{last['modified_at']!r}|{last['bucket_id']}|{last['key']}" if len(rows) > limit and last else None}
-
-    async def content(self, token: str, bucket_id: int, path: str, start: int = 0, end: int | None = None):
-        self.accounts.sessions.require(token, role="admin")
-        return await self.objects.get_object(Scope(bucket_id), normalize_user_path(path), start, end)
-
-    def thumbnail(self, token: str, bucket_id: int, path: str, variant: str = "thumb") -> tuple[bytes, str, str]:
-        self.accounts.sessions.require(token, role="admin")
-        return self.objects.get_thumbnail(Scope(bucket_id), normalize_user_path(path), variant)
-
-    async def preview_assets(self, token: str, bucket_id: int, path: str):
-        self.accounts.sessions.require(token, role="admin")
-        return await self.objects.apreview_assets(Scope(bucket_id), normalize_user_path(path))
-
-    async def preview_list(self, token: str, bucket_id: int, path: str, cursor: str | None = None):
-        self.accounts.sessions.require(token, role="admin")
-        page = await self.objects.apreview_list(Scope(bucket_id), normalize_user_path(path), cursor)
-        def serialize():
-            versions = self.objects.thumbnail_versions([item.blob_uuid for item in page.objects])
-            return [UserApi._object_json(item, tuple(versions.get(item.blob_uuid or "", {})),
-                                        versions.get(item.blob_uuid or "", {})) for item in page.objects]
-        return {"objects": await self.objects.metadata.run_in_thread(serialize), "next_cursor": page.next_cursor}
-
-    def set_object_public(self, token: str, csrf: str, bucket_id: int, path: str, public: bool) -> dict[str, object]:
-        """管理员可以撤销任意对象的公开链接，用于处置不当分享。"""
-        self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
-        return UserApi._object_json(self.objects.set_public(Scope(bucket_id), normalize_user_path(path), public))
+        def read():
+            return self.objects.metadata.cached_read(("admin-object-summary",), lambda: dict(
+                self.objects.metadata.db.execute(
+                    "SELECT COUNT(*) AS total,COUNT(public_token) AS public_total FROM objects "
+                    "WHERE substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/'").fetchone()))
+        return await self.accounts.metadata.run_in_thread(read)
 
     async def run_gc(self, token: str, csrf: str, limit: int = 100) -> dict[str, int]:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)

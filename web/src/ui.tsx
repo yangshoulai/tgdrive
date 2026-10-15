@@ -140,9 +140,9 @@ export function Button({ variant = "secondary", size = "md", icon, loading, bloc
   );
 }
 
-export function IconButton({ icon, label, onClick, variant = "ghost", size = "md", disabled, active, shortcut, spinning }: { icon: IconName; label: string; onClick?: () => void; variant?: "ghost" | "secondary"; size?: "sm" | "md"; disabled?: boolean; active?: boolean; shortcut?: string; spinning?: boolean }) {
+export function IconButton({ icon, label, onClick, variant = "ghost", size = "md", disabled, active, shortcut, spinning, className = "" }: { className?: string; icon: IconName; label: string; onClick?: () => void; variant?: "ghost" | "secondary"; size?: "sm" | "md"; disabled?: boolean; active?: boolean; shortcut?: string; spinning?: boolean }) {
   return (
-    <button type="button" className={`icon-btn icon-btn-${variant} icon-btn-${size}${active ? " is-active" : ""}${spinning ? " is-spinning" : ""}`} aria-busy={spinning || undefined} onClick={onClick} aria-label={label} aria-keyshortcuts={shortcut} title={shortcut ? `${label}（${shortcut.toUpperCase()}）` : label} disabled={disabled} aria-pressed={active}>
+    <button type="button" className={`icon-btn icon-btn-${variant} icon-btn-${size}${active ? " is-active" : ""}${spinning ? " is-spinning" : ""} ${className}`} aria-busy={spinning || undefined} onClick={onClick} aria-label={label} aria-keyshortcuts={shortcut} title={shortcut ? `${label}（${shortcut.toUpperCase()}）` : label} disabled={disabled} aria-pressed={active}>
       <Icon name={icon} size={size === "sm" ? 16 : 18} />
     </button>
   );
@@ -184,7 +184,7 @@ export function Field({ label, hint, error, children, htmlFor }: { label: string
 
 export function PasswordField({ label, value, onChange, name, autoComplete = "current-password", hint, error, disabled, autoFocus }: {
   label: string; value: string; onChange: (value: string) => void; name?: string;
-  autoComplete?: "current-password" | "new-password"; hint?: ReactNode; error?: string; disabled?: boolean; autoFocus?: boolean;
+  autoComplete?: "current-password" | "new-password" | "off"; hint?: ReactNode; error?: string; disabled?: boolean; autoFocus?: boolean;
 }) {
   const id = useId();
   const [visible, setVisible] = useState(false), [capsLock, setCapsLock] = useState(false);
@@ -458,7 +458,7 @@ export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onC
   );
 }
 
-export type MenuItem = { label: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean; shortcut?: string };
+export type MenuItem = { label: string; description?: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean; shortcut?: string };
 
 /** 浮层挂载点：全屏时只有全屏元素内的内容可见，所以菜单挂到全屏元素里，否则挂到 body。 */
 const overlayRoot = () => (document.fullscreenElement as HTMLElement | null) ?? document.body;
@@ -483,6 +483,7 @@ function MenuList({ items, label, anchor, onClose, restoreFocus }: { items: Menu
   }, [position]);
   useEffect(() => {
     const close = () => closeRef.current();
+    const scrolled = (event: Event) => { if (!list.current?.contains(event.target as Node)) close(); };
     const outside = (event: Event) => { if (!list.current?.contains(event.target as Node)) close(); };
     const key = (event: KeyboardEvent) => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); restoreFocus?.(); }
@@ -502,7 +503,7 @@ function MenuList({ items, label, anchor, onClose, restoreFocus }: { items: Menu
     document.addEventListener("keydown", key, true);
     window.addEventListener("resize", close);
     window.addEventListener("blur", close);
-    document.addEventListener("scroll", close, true);
+    document.addEventListener("scroll", scrolled, true);
     return () => {
       window.clearTimeout(timer);
       document.removeEventListener("mousedown", outside);
@@ -510,16 +511,16 @@ function MenuList({ items, label, anchor, onClose, restoreFocus }: { items: Menu
       document.removeEventListener("keydown", key, true);
       window.removeEventListener("resize", close);
       window.removeEventListener("blur", close);
-      document.removeEventListener("scroll", close, true);
+      document.removeEventListener("scroll", scrolled, true);
     };
   }, []);
   return createPortal(
-    <div ref={list} className="menu" role="menu" aria-label={label} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }}
+    <div ref={list} className={`menu${items.some(item => item.description !== undefined) ? " has-descriptions" : ""}`} role="menu" aria-label={label} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }}
       onClick={event => event.stopPropagation()} onContextMenu={event => event.preventDefault()}>
       {items.map(item => {
-        const content = <><Icon name={item.icon} size={16} /><span>{item.label}</span>{item.checked ? <span className="menu-check"><Icon name="check" size={15} /></span> : item.shortcut && <kbd className="menu-shortcut">{item.shortcut}</kbd>}</>;
+        const content = <><Icon name={item.icon} size={16} /><span className="menu-copy"><span>{item.label}</span>{item.description !== undefined && <small title={item.description}>{item.description}</small>}</span>{item.checked ? <span className="menu-check"><Icon name="check" size={15} /></span> : item.shortcut && <kbd className="menu-shortcut">{item.shortcut}</kbd>}</>;
         // 带标题的分组：标题承担分隔线，选项用 menuitemradio 表示单选状态。
-        const className = `menu-item${item.danger ? " is-danger" : ""}${item.divider && !item.heading ? " has-divider" : ""}`;
+        const className = `menu-item${item.description !== undefined ? " has-description" : ""}${item.danger ? " is-danger" : ""}${item.divider && !item.heading ? " has-divider" : ""}`;
         const role = item.checked === undefined ? "menuitem" : "menuitemradio";
         const element = item.href
           ? <a key={item.label} role={role} className={className} href={item.href} onClick={() => onClose()}>{content}</a>
@@ -531,18 +532,18 @@ function MenuList({ items, label, anchor, onClose, restoreFocus }: { items: Menu
   );
 }
 
-export function Menu({ items, label, icon = "more", size = "sm" }: { items: MenuItem[]; label: string; icon?: IconName; size?: "sm" | "md" }) {
+export function Menu({ items, label, icon = "more", size = "sm", children, className = "", align = "end" }: { align?: "start" | "end"; items: MenuItem[]; label: string; icon?: IconName; size?: "sm" | "md"; children?: ReactNode; className?: string }) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   return (
     <>
-      <button ref={trigger} type="button" className={`icon-btn icon-btn-ghost icon-btn-${size}${open ? " is-active" : ""}`} aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open}
+      <button ref={trigger} type="button" className={`icon-btn icon-btn-ghost icon-btn-${size}${open ? " is-active" : ""} ${className}`} aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open}
         onMouseDown={event => { if (open) event.stopPropagation(); }}
         onClick={event => { event.stopPropagation(); setOpen(value => !value); }}>
-        <Icon name={icon} size={16} />
+        {children ?? <Icon name={icon} size={16} />}
       </button>
       {open && <MenuList items={items} label={label} onClose={() => setOpen(false)} restoreFocus={() => trigger.current?.focus()}
-        anchor={() => { const rect = trigger.current!.getBoundingClientRect(); return { x: rect.right, y: rect.top, bottom: rect.bottom, alignRight: true }; }} />}
+        anchor={() => { const rect = trigger.current!.getBoundingClientRect(); return { x: align === "start" ? rect.left : rect.right, y: rect.top, bottom: rect.bottom, alignRight: align === "end" }; }} />}
     </>
   );
 }

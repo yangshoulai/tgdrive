@@ -1,6 +1,6 @@
 """审计日志：记录安全相关操作的结果。
 
-只记录显式挑选的字段，绝不写入口令、密码、Bot token 或访问密钥 Secret。
+只记录安全操作的元数据，不记录用户文件名、路径、来源凭据或密钥 Secret。
 """
 
 from __future__ import annotations
@@ -41,6 +41,29 @@ class AuditLog:
     def __init__(self, metadata: Metadata) -> None:
         self.metadata = metadata
 
+    @staticmethod
+    def _redact(action, target, detail):
+        # 写入、历史记录展示和归档共用边界，旧日志也不能通过管理接口泄露文件信息。
+        allowed = {
+            "object.public": {"public", "count", "bucket_id", "expires_at", "password", "error"},
+            "share.save": {"saved", "bytes", "error"},
+            "client.grant": {"bucket_id", "perms", "error"},
+            "key.create": {"error"},
+        }
+        if action in ("object.public", "share.save"):
+            target = None
+        if action in allowed:
+            detail = {key: value for key, value in (detail or {}).items() if key in allowed[action]}
+        return target, detail or None
+
+    @classmethod
+    def _safe_row(cls, row):
+        item = dict(row)
+        detail = json.loads(item["detail"]) if item["detail"] else None
+        item["target"], detail = cls._redact(item["action"], item["target"], detail)
+        item["detail"] = json.dumps(detail, ensure_ascii=False, separators=(",", ":")) if detail else None
+        return item
+
     def archive(self, directory: str | Path, keystore, *, days: int, now: float | None = None,
                 limit: int = 500) -> dict[str, object]:
         """先可靠写入加密 JSONL 归档，再移出在线日志；默认保留策略不调用此方法。"""
@@ -59,7 +82,7 @@ class AuditLog:
                                  "kdf_params": json.loads(key["kdf_params"]), "key_version": key["version"],
                                  "kind": "audit-jsonl", "created_at": time.time()}, separators=(",", ":")).encode()
         from .maintenance import EncryptedSnapshotStore
-        data = b"".join(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":")).encode() + b"\n" for row in rows)
+        data = b"".join(json.dumps(self._safe_row(row), ensure_ascii=False, separators=(",", ":")).encode() + b"\n" for row in rows)
         payload = EncryptedSnapshotStore.MAGIC_V2 + len(header).to_bytes(4, "big") + header
         payload += seal(derive_subkey(kek, "snapshot"), data, EncryptedSnapshotStore.AAD + header)
         directory = Path(directory)
@@ -86,6 +109,7 @@ class AuditLog:
 
     def record(self, action: str, *, actor_type: str, actor: str | None, ok: bool, target: str | None = None,
                detail: dict[str, object] | None = None, ip: str | None = None) -> None:
+        target, detail = self._redact(action, target, detail)
         with self.metadata.transaction() as db:
             db.execute("INSERT INTO audit_log(ts,actor_type,actor,action,target,ip,ok,detail) VALUES(?,?,?,?,?,?,?,?)",
                        (time.time(), actor_type, actor, action, target, ip, int(ok),
@@ -109,5 +133,5 @@ class AuditLog:
         items = [{"id": row["id"], "ts": row["ts"], "actor_type": row["actor_type"], "actor": row["actor"],
                   "action": row["action"], "label": ACTIONS.get(row["action"], row["action"]), "target": row["target"],
                   "ip": row["ip"], "ok": bool(row["ok"]), "detail": json.loads(row["detail"]) if row["detail"] else None}
-                 for row in rows[:limit]]
+                 for row in map(self._safe_row, rows[:limit])]
         return {"events": items, "next_cursor": items[-1]["id"] if len(rows) > limit else None}

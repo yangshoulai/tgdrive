@@ -12,7 +12,8 @@ const instrumented = source.replace(/\s+applySiteState\(\);\s*\}\)\(\);\s*$/, `
   globalThis.toastMessages = [];
   toast = message => globalThis.toastMessages.push(message);
   globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBatch, parseEntries, clearEntries, clearBatch, close,
-    getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES };
+    getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES,
+    pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages };
 })();`);
 assert.notEqual(instrumented, source, "userscript test hook must replace only final bootstrap");
 
@@ -555,4 +556,80 @@ test("a running batch cannot be cleared", () => {
   h.api.clearBatch();
   assert.equal(h.api.getBatch(), current);
   assert.match(h.messages.at(-1), /还有文件在传输/);
+});
+
+
+// ---------- 发给文件助手 ----------
+
+function element(tag, attrs = {}, parent = null, extra = {}) {
+  return { nodeType: 1, tagName: tag.toUpperCase(), parentElement: parent, getAttribute: name => attrs[name] ?? null,
+    closest: selector => { for (let node = parent; node; node = node.parentElement) if (node.tagName === "A" && node.getAttribute("href")) return node; return null; },
+    ...extra };
+}
+
+test("page snapshot clusters images by element path and keeps only pagination links", () => {
+  const h = harness();
+  const html = element("html");
+  const body = element("body", {}, html);
+  const grid = element("div", { class: "gallery grid-3" }, body);
+  const link1 = element("a", { href: "/full/1.jpg", class: "item-12" }, grid);
+  const link2 = element("a", { href: "/full/2.jpg", class: "item-13" }, grid);
+  const doc = {
+    title: "  相册  第 1 页 ",
+    images: [
+      element("img", { class: "thumb", src: "/t/1.jpg", srcset: "/s/1.jpg 400w, /l/1.jpg 1600w" }, link1, { currentSrc: "https://gallery.example/s/1.jpg", naturalWidth: 400, naturalHeight: 300 }),
+      element("img", { class: "thumb", "data-src": "/lazy/2.jpg", src: "data:image/gif;base64,R0lGOD" }, link2, { naturalWidth: 0 }),
+      element("img", { class: "icon", src: "/i.png" }, body, { naturalWidth: 16, naturalHeight: 16 }),
+    ],
+    querySelectorAll: () => [
+      element("a", { href: "/album?page=2", class: "next" }, body, { textContent: " 下一页 " }),
+      element("a", { href: "/about" }, body, { textContent: "关于我们" }),
+      element("a", { href: "/album?page=3" }, body, { textContent: "3" }),
+    ],
+  };
+  const snapshot = h.api.pageSnapshot(doc, "https://gallery.example/album?page=1");
+  assert.equal(snapshot.title, "相册 第 1 页");
+  assert.equal(snapshot.images.length, 2, "tiny icons are skipped");
+  assert.equal(snapshot.images[0].path, "body>div.gallery>a.item-*>img.thumb");
+  assert.equal(snapshot.images[1].path, snapshot.images[0].path, "numeric class suffixes cluster together");
+  assert.equal(snapshot.images[0].urls.srcset, "https://gallery.example/l/1.jpg");
+  assert.equal(snapshot.images[0].urls.href, "https://gallery.example/full/1.jpg");
+  assert.equal(snapshot.images[1].urls["data-src"], "https://gallery.example/lazy/2.jpg");
+  assert.equal(snapshot.images[1].urls.src, undefined, "data: URLs are dropped");
+  assert.equal(snapshot.links.map(link => link.text).join("|"), "下一页|3");
+});
+
+test("assistant page storage enforces limits, origin and expiry", () => {
+  const h = harness();
+  const page = (n, images = 1) => ({ url: `https://gallery.example/p/${n}`, title: "", images: Array.from({ length: images }, (_, i) => ({ path: "img", urls: { src: `https://cdn.example/${n}-${i}.jpg` } })), links: [] });
+  h.api.addAssistantPage(page(1));
+  h.api.addAssistantPage(page(1));
+  assert.equal(h.api.assistantPages().length, 1, "same URL replaces the stored page");
+  h.api.addAssistantPage(page(2));
+  assert.equal(h.api.assistantPages().length, 2);
+  assert.equal(h.api.assistantPages("https://other.example").length, 0, "other origins do not see the pages");
+  assert.throws(() => h.api.addAssistantPage(page(3, 5000)), /图片候选/);
+  h.values["assistant-pages"].savedAt -= 25 * 3600 * 1000;
+  assert.equal(h.api.assistantPages().length, 0, "pages expire after 24 hours");
+});
+
+test("sending pages waits for the Tessera page and verifies origin and nonce", async () => {
+  let posted = [];
+  let listenersRef;
+  const tab = { closed: false, postMessage: (message, origin) => posted.push({ message, origin }) };
+  const h = harness({ open: (url, target, listeners) => { listenersRef = listeners; tab.url = url; return tab; } });
+  const pages = [{ url: "https://gallery.example/album", title: "", images: [{ path: "img", urls: { src: "https://cdn.example/1.jpg" } }], links: [] }];
+  const done = h.api.sendAssistantPages("https://tessera.example/", pages);
+  const nonce = /assistant-page=([0-9a-f]+)&from=https%3A%2F%2Fgallery.example/.exec(tab.url)[1];
+  const emit = (origin, data) => listenersRef.forEach(listener => listener({ origin, data }));
+  emit("https://evil.example", { source: "tessera", nonce, type: "page-ready" });
+  emit("https://tessera.example", { source: "tessera", nonce: "wrong", type: "page-ready" });
+  assert.equal(posted.length, 0, "foreign origins and nonces are ignored");
+  emit("https://tessera.example", { source: "tessera", nonce, type: "page-ready" });
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].origin, "https://tessera.example");
+  assert.equal(posted[0].message.type, "page-snapshot");
+  assert.equal(posted[0].message.pages.length, 1);
+  emit("https://tessera.example", { source: "tessera", nonce, type: "page-ack", ok: true });
+  await done;
 });

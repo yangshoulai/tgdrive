@@ -19,6 +19,7 @@ import { DownloadsView } from "./user/downloads";
 import { DownloadTray } from "./user/download-tray";
 import { PreviewHost } from "./user/preview-host";
 import { AssistantDrawer, AssistantLauncher, useAssistantConfig, useAssistantShortcut } from "./user/assistant";
+import { takePageImportRequest, usePageImport } from "./user/page-import";
 import { PrivateSessionProvider } from "./user/private-session";
 import { EmailDialog, UserSettingsPage } from "./user/account";
 import { onThemeChange, setThemePreference, themePreference, type ThemePreference } from "./theme";
@@ -97,7 +98,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
     onSessionChange={patch => setSession(current => current && { ...current, ...patch })} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "keys" | "private" | "downloads" | "account";
+type UserSection = "files" | "shared" | "trash" | "keys" | "private" | "downloads" | "account" | "assistantPage";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -112,14 +113,17 @@ function readLocation(): { section: Section; prefix: string } {
   }
   const params = new URLSearchParams(search);
   const view = params.get("view");
+  // 文件助手全页：prefix 字段沿用为对话编号（?view=assistant&c=<对话>）。
+  if (view === "assistant") return { section: "assistantPage", prefix: params.get("c") ?? "" };
   return { section: view === "shared" || view === "keys" || view === "trash" || view === "private" || view === "downloads" || view === "account" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
 }
 
 function sectionUrl(section: Section, prefix = "") {
   if (isAdminSection(section)) return section === "overview" ? "/admin" : `/admin/${section}`;
   const params = new URLSearchParams();
-  if (section !== "files") params.set("view", section);
+  if (section !== "files") params.set("view", section === "assistantPage" ? "assistant" : section);
   if ((section === "files" || section === "private") && prefix) params.set("path", section === "private" ? prefix.replace(api.PRIVATE_PREFIX, "") : prefix);
+  if (section === "assistantPage" && prefix) params.set("c", prefix);
   const query = params.toString();
   return query ? `/?${query}` : "/";
 }
@@ -174,15 +178,28 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const assistant = useAssistantConfig(assistantReady);
   const assistantAvailable = Boolean(assistant.config?.available);
   const [assistantOpen, setAssistantOpen] = useState(false);
-  const toggleAssistant = useCallback(() => setAssistantOpen(value => !value), []);
+  const assistantPage = location.section === "assistantPage";
+  const toggleAssistant = useCallback(() => { if (!assistantPage) setAssistantOpen(value => !value); }, [assistantPage]);
   useAssistantShortcut(assistantAvailable, toggleAssistant);
   useEffect(() => { if (!assistantAvailable) setAssistantOpen(false); }, [assistantAvailable]);
+  useEffect(() => { if (assistantPage) setAssistantOpen(false); }, [assistantPage]);
+  // 抓取脚本「发给文件助手」：收到页面快照后打开助手，由用户确认发送。
+  const [pageImportRequest] = useState(takePageImportRequest);
+  const [pageImport, clearPageImport] = usePageImport(pageImportRequest);
+  useEffect(() => { if (pageImport && assistantAvailable && !assistantPage) setAssistantOpen(true); }, [Boolean(pageImport), assistantAvailable]);
+  const filesChanged = useCallback(() => { setUploadRevision(value => value + 1); setDownloadRevision(value => value + 1); refreshUsage(); }, [refreshUsage]);
   const unlocked = () => { refreshStatus(); refreshUsage(); };
   const section = location.section;
   // 文件空间可用时才保留预览和下载托盘；系统锁定、服务未解锁时一并关闭。
   const workspaceReady = !locked && !(!isAdmin && session.unlocked === false) && !(isAdmin && status === null);
   let content: ReactNode;
-  if (section === "account") {
+  if (section === "assistantPage") {
+    content = !assistantAvailable || !assistant.config ? (assistant.config ? <AccessDenied /> : <FullPageLoading label="正在读取文件助手" />)
+      : <AssistantDrawer mode="page" open config={assistant.config} onClose={() => navigate("files")} onConfigChanged={assistant.refresh}
+          location={{ view: "assistant", prefix: "" }} initialConversation={location.prefix || null} onFilesChanged={filesChanged}
+          pageImport={pageImport} onPageImportDone={clearPageImport}
+          onConversationChange={id => { if ((id ?? "") !== (new URLSearchParams(window.location.search).get("c") ?? "")) window.history.replaceState(null, "", sectionUrl("assistantPage", id ?? "")); }} />;
+  } else if (section === "account") {
     content = <UserSettingsPage session={session} onSessionChange={onSessionChange} />;
   } else if (isAdminSection(section)) {
     if (!isAdmin) content = <AccessDenied />;
@@ -231,7 +248,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
             <span><strong>系统已锁定</strong><small>输入加密口令后继续使用</small></span>
           </a>
         )}
-        {assistantAvailable && <AssistantLauncher open={assistantOpen} onOpen={toggleAssistant} />}
+        {assistantAvailable && <AssistantLauncher open={assistantOpen || assistantPage} onOpen={toggleAssistant} />}
         <div className="storage-meter" title={usage?.quota_bytes == null ? "未设置空间配额" : undefined}>
           <div className="storage-meter-head"><span>已用空间</span><strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></div>
           {usage?.quota_bytes != null && <>
@@ -255,8 +272,10 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
           onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCompleted={() => { setUploadRevision(value => value + 1); refreshUsage(); }} />}
         <UploadTray queue={uploads} />
       </div>
-      {assistantAvailable && assistant.config && <AssistantDrawer open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)}
-        onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" ? location.prefix : "" }} />}
+      {assistantAvailable && assistant.config && !assistantPage && <AssistantDrawer open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)}
+        onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" ? location.prefix : "" }}
+        onFilesChanged={filesChanged} pageImport={pageImport} onPageImportDone={clearPageImport}
+        onOpenPage={id => { setAssistantOpen(false); navigate("assistantPage", id ?? ""); }} />}
       {/* 旧版用户名账号：登录后必须先设置邮箱（之后用邮箱登录，也为邮箱验证做准备）。 */}
       {session.needs_email && <EmailDialog session={session} required onSaved={onSessionChange} onLogout={() => void logout()} />}
       </PrivateSessionProvider>

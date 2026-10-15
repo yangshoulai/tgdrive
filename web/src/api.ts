@@ -28,11 +28,10 @@ export type PreviewListPage = { objects: FileItem[]; next_cursor: string | null 
 export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number> };
 export type Account = Profile & { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
 export type ClientKey = { access_key_id: string; status: "active" | "disabled"; created_at: number; last_used_at: number | null };
-export type ClientGrant = { bucket_id: number; bucket_name: string; prefix: string; perms: "ro" | "rw" };
+export type ClientGrant = { bucket_id: number; bucket_name: string; prefix: string; perms: "ro" | "rw"; path_hidden?: boolean };
 export type AdminClient = { id: number; name: string; description: string | null; owner_user_id: number | null; owner_username?: string | null; status: "active" | "disabled"; created_at: number; keys: ClientKey[]; grants: ClientGrant[] };
 export type BotRuntime = { failures: number; cooldown_seconds: number; last_sent_at: number; state: "enabled" | "draining" | "disabled" } | null;
 export type BotConfig = { id: number; name: string; channel_id: string; status: "active" | "disabled"; created_at: number; last_check_at: number | null; last_check_status: string | null; runtime?: BotRuntime; chunk_count?: number; stored_bytes?: number };
-export type AdminObject = FileItem & { bucket_id: number; bucket_name: string; username: string | null };
 /** 当前登录账号：管理员和普通用户共用同一个会话接口，角色决定能看到哪些功能。 */
 export type UserMe = Profile & { id: number; username: string; role: Role; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; unlocked: boolean; remember?: boolean; csrf_token: string; expires_at: number } & SiteConfig;
 export type SettingValue = { value: string | null; default: string | null; effective: string | null };
@@ -216,8 +215,6 @@ export const listFiles = (prefix = "", cursor: string | null = null, publicOnly 
 export const previewAssets = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`${fileApi("/preview-assets", path)}?path=${encodeURIComponent(path)}`, { signal });
 export const previewList = (path: string, cursor: string | null, signal: AbortSignal) => request<PreviewListPage>(
   `${fileApi("/preview-list", path)}?path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
-export const adminPreviewList = (bucketId: number, path: string, cursor: string | null, signal: AbortSignal) => request<PreviewListPage>(
-  `/api/admin/v1/preview-list?bucket_id=${bucketId}&path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
 export const publicPreviewList = async (token: string, path: string, cursor: string | null, access: string | null, signal: AbortSignal): Promise<PreviewListPage> => {
   const params = new URLSearchParams({ path: path.slice(0, path.lastIndexOf("/") + 1), limit: "200" });
   if (cursor) params.set("cursor", cursor);
@@ -225,7 +222,6 @@ export const publicPreviewList = async (token: string, path: string, cursor: str
   const page = await request<PublicFolderPage>(`/api/public/v1/folders/${encodeURIComponent(token)}/list?${params}`, { signal });
   return { objects: page.files.map(file => ({ ...file, key: file.path })), next_cursor: page.next_cursor };
 };
-export const adminPreviewAssets = (bucketId: number, path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`/api/admin/v1/preview-assets?bucket_id=${bucketId}&path=${encodeURIComponent(path)}`, { signal });
 export const publicPreviewAssets = (token: string, path: string, access?: string | null, signal?: AbortSignal) => {
   const params = new URLSearchParams({ path });
   if (access) params.set("access", access);
@@ -406,8 +402,10 @@ export const publicPath = (token: string, name: string, download = false, access
 export const adminSettings = (signal?: AbortSignal) => request<SystemSettings>("/api/admin/v1/settings", { signal });
 export const adminResources = () => request<ResourceSettings>("/api/admin/v1/resources");
 export const updateAdminResources = (values: ResourceConfig) => post<ResourceSettings>("/api/admin/v1/resources", values);
-export async function listDownloads(cursor: string | null, status: string, signal?: AbortSignal) {
-  const suffix = `?limit=50&cursor=${encodeURIComponent(cursor ?? "")}&status=${encodeURIComponent(status)}`;
+export async function listDownloads(cursor: string | null, status: string, signal?: AbortSignal, query = "") {
+  const params = new URLSearchParams({ limit: "50", cursor: cursor ?? "", status });
+  if (query) params.set("q", query);
+  const suffix = `?${params}`;
   if (privateAccess) {
     try { return await request<DownloadPage>(`/api/user/v1/private/downloads${suffix}`, { signal }); }
     catch (reason) { if (!(reason instanceof ApiError) || reason.code !== "private_locked") throw reason; }
@@ -489,21 +487,8 @@ export const adminBots = (signal?: AbortSignal) => request<BotConfig[]>("/api/ad
 export const createAdminBot = (name: string, token: string, channelId: string) => post<BotConfig>("/api/admin/v1/bots", { name, token, channel_id: channelId });
 export const checkAdminBot = (id: number) => post<{ id: number; ok: boolean; status: string }>(`/api/admin/v1/bots/${id}/check`);
 export const setAdminBotStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/bots/${id}/status`, { status });
-export type AdminObjectPage = { objects: AdminObject[]; next_cursor: string | null; total: number; public_total: number };
-export const adminObjects = (options: { q?: string; publicOnly?: boolean; cursor?: string | null; limit?: number } = {}, signal?: AbortSignal) => {
-  const params = new URLSearchParams({ limit: String(options.limit ?? 100) });
-  if (options.q) params.set("q", options.q);
-  if (options.publicOnly) params.set("public", "1");
-  if (options.cursor) params.set("cursor", options.cursor);
-  return request<AdminObjectPage>(`/api/admin/v1/objects?${params}`, { signal });
-};
-export const setAdminObjectPublic = (bucketId: number, path: string, isPublic: boolean) => post<FileItem>("/api/admin/v1/objects/public", { bucket_id: bucketId, path, public: isPublic });
-export const adminContentUrl = (bucketId: number, path: string, download = false) => `/api/admin/v1/content?bucket_id=${bucketId}&path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
-export function adminFileThumbnail(file: AdminObject, variant: ThumbnailVariant = "thumb") {
-  if (!file.thumbnails?.includes("thumb") && !file.has_thumbnail) return undefined;
-  const spec = thumbnailSpec(file, variant);
-  return `/api/admin/v1/thumbnail?bucket_id=${file.bucket_id}&path=${encodeURIComponent(file.key)}&variant=${spec.variant}&v=${encodeURIComponent(spec.version)}`;
-}
+export type AdminObjectSummary = { total: number; public_total: number };
+export const adminObjectSummary = (signal?: AbortSignal) => request<AdminObjectSummary>("/api/admin/v1/objects/summary", { signal });
 export const runAdminGc = (limit = 100) => post<{ processed: number; deleted: number; failed: number; dead: number }>("/api/admin/v1/maintenance/gc", { limit }, 15 * 60000);
 export const runAdminScrub = (limit = 100, deep = false) => post<{ checked: number; wrapped: boolean; bad: { blob_uuid: string; chunks: [number, number][] }[] }>("/api/admin/v1/maintenance/scrub", { limit, deep }, 15 * 60000);
 

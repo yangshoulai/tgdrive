@@ -21,7 +21,7 @@ export function Clients() {
   }
   return (
     <>
-      <PageHeader title="全部访问密钥" description="用户创建的访问凭据，可用于 HTTP API 和 S3。管理员可以查看归属与授权范围并停用密钥，但看不到 Secret。" />
+      <PageHeader title="全部访问密钥" description="可查看归属与权限并停用密钥；其他账号的自定义名称、目录路径与 Secret 不会展示。" />
       <section className="file-surface">
         {pagination.error ? <EmptyState icon="alert" title="访问密钥加载失败" description={pagination.error} action={<Button onClick={() => void load()}>重试</Button>} /> : clients === null ? <SkeletonRows rows={3} /> : clients.length === 0 ? <EmptyState icon="key" title="还没有访问密钥" description="用户在自己的“访问密钥”页面创建后会显示在这里。" /> : (
           <div className="data-table clients-table" role="table" aria-label="访问密钥">
@@ -37,7 +37,7 @@ export function Clients() {
                 <span role="cell" className="name-stack"><strong>{client.name}</strong>
                   <small className="mono">{client.keys.map(key => key.status === "active" ? key.access_key_id : `${key.access_key_id}（已禁用）`).join("，") || "无密钥"}</small></span>
                 <span role="cell" className="muted">{client.owner_user_id ? client.owner_username ?? `用户 ${client.owner_user_id}` : "管理员创建"}</span>
-                <span role="cell" className="grant-list">{client.grants.length ? client.grants.map(grant => <Badge key={`${grant.bucket_id}:${grant.prefix}`} tone={grant.perms === "rw" ? "accent" : "neutral"}>{grant.bucket_name}/{grant.prefix || "*"} {grant.perms === "rw" ? "读写" : "只读"}</Badge>) : <span className="muted">无授权</span>}</span>
+                <span role="cell" className="grant-list">{client.grants.length ? client.grants.map((grant, index) => <Badge key={`${grant.bucket_id}:${index}`} tone={grant.perms === "rw" ? "accent" : "neutral"}>{grant.bucket_name}/{grant.path_hidden ? "路径已隐藏" : grant.prefix || "*"} {grant.perms === "rw" ? "读写" : "只读"}</Badge>) : <span className="muted">无授权</span>}</span>
                 <span role="cell">
                   {stopped ? <Badge dot>已停用</Badge>
                     : activeKeys === 0 ? <Badge dot>已禁用</Badge>

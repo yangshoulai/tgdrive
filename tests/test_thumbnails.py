@@ -197,7 +197,7 @@ class ThumbnailCacheTests(unittest.TestCase):
         return asyncio.run(self.client.request("GET", path, headers=headers))
 
     def test_long_cache_only_for_current_bucket_and_thumbnail_version(self):
-        for route in ("/api/user/v1/thumbnail", "/api/admin/v1/thumbnail"):
+        for route in ("/api/user/v1/thumbnail",):
             for suffix, expected in (
                 ("&bucket_id=9&v=content.thumb.123", "private, max-age=2592000, immutable"),
                 ("&bucket_id=9&v=content.thumb.122", "private, no-cache"),

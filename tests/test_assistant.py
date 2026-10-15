@@ -8,10 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.test_public_links import Client
 from tgdrive.app import create_app
 from tgdrive.assistant.providers import Reply, ToolCall, scrub
 from tgdrive.objects import Scope
-from tests.test_public_links import Client
 
 
 class ScriptedModel:
@@ -43,7 +43,9 @@ def answer(text):
     return Reply(text=text, input_tokens=50, output_tokens=10)
 
 
-class AssistantTests(unittest.TestCase):
+class AssistantCase(unittest.TestCase):
+    """助手测试的公共夹具（不含测试用例，供其他测试文件复用）。"""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False, run_scheduler=False)
@@ -105,6 +107,9 @@ class AssistantTests(unittest.TestCase):
     async def messages(self, user, conversation_id):
         _, data = await self.req("GET", f"/api/user/v1/assistant/conversations/{conversation_id}", headers=user)
         return data["messages"]
+
+
+class AssistantTests(AssistantCase):
 
     # ---------- 渠道与模型 ----------
 
@@ -351,8 +356,9 @@ class AssistantTests(unittest.TestCase):
             self.assertIn("清空回收站", tools[0]["result"]["content"])
             self.assertIn("不是文本文件", tools[1]["result"]["error"])
             self.assertIn("达到上限", tools[3]["result"]["error"])
-            # 文本里的“指令”只是数据：P1 没有写入工具，模型拿到的工具定义里也没有任何写操作。
-            self.assertFalse([name for name in self.model.calls[1]["tools"] if name.startswith("propose_")])
+            # 文本里的“指令”只是数据：默认的「普通写入」级别看不到不可恢复的工具，也不会产生任何待确认操作。
+            self.assertNotIn("propose_purge_trash", self.model.calls[1]["tools"])
+            self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM assistant_actions").fetchone()[0], 0)
         self.run_async(run())
 
     def test_stop_and_daily_budget(self):
@@ -499,6 +505,73 @@ class AssistantTests(unittest.TestCase):
             self.assertEqual(tools["3"]["result"]["folders"], ["/empty/"])
             self.assertEqual(tools["5"]["result"]["files"][0]["path"], "/b/3.mp4")
             self.assertEqual((tools["6"]["result"]["kind"], tools["6"]["result"]["files"]), ("folder", 2))
+        self.run_async(run())
+
+    def test_tool_budget_does_not_execute_extra_calls(self):
+        async def run():
+            admin, _, _ = await self.setup_assistant()
+            await self.req("POST", "/api/admin/v1/assistant/limits", {"max_tool_calls": 1}, admin)
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            conversation = await self.start_conversation(user)
+            self.model.replies = [Reply(tool_calls=[ToolCall(f"id_{n}", "get_context", "{}") for n in range(3)]), answer("已达到上限")]
+            await self.send(user, conversation, "查上下文")
+            tools = [m for m in await self.messages(user, conversation) if m["role"] == "tool"]
+            self.assertEqual([m["status"] for m in tools], ["ok", "error", "error"])
+            self.assertEqual(self.app.metadata.db.execute("SELECT tool_calls FROM assistant_runs").fetchone()[0], 1)
+        self.run_async(run())
+
+    def test_tool_disabled_while_model_is_replying_cannot_run(self):
+        async def run():
+            await self.setup_assistant()
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            conversation = await self.start_conversation(user)
+
+            def disable_then_call(messages, tools):
+                self.service.admin_update_tools({"storage_stats": {"enabled": False}})
+                return call("storage_stats")
+
+            self.model.replies = [disable_then_call, answer("工具已关闭")]
+            await self.send(user, conversation, "统计")
+            tool = next(m for m in await self.messages(user, conversation) if m["role"] == "tool")
+            self.assertEqual(tool["status"], "error")
+            self.assertIn("未启用", tool["result"]["error"])
+        self.run_async(run())
+
+    def test_event_buffer_is_bounded_and_replays_via_resync(self):
+        async def run():
+            await self.setup_assistant()
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            conversation = await self.start_conversation(user)
+            self.model.replies = [answer("已保存的回复")]
+            _, result = await self.send(user, conversation, "你好")
+            state = self.service.runs[result["run_id"]]
+            with mock.patch("tgdrive.assistant.service.EVENT_BYTES", 256):
+                for n in range(8):
+                    await state.emit({"type": "text_delta", "text": str(n) * 100})
+                self.assertLessEqual(sum(r.event_bytes for r in self.service.runs.values()), 256)
+            token = user["cookie"].split("=", 1)[1]
+            replay = [event async for event in self.service.events(token, state.id)]
+            self.assertEqual([event["type"] for event in replay], ["resync", "run_finished"])
+            self.assertIn("已保存的回复", [m.get("text") for m in await self.messages(user, conversation)])
+        self.run_async(run())
+
+    def test_admin_metadata_never_decrypts_or_echoes_upstream_content(self):
+        async def run():
+            admin, channel, model = await self.setup_assistant()
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            conversation = await self.start_conversation(user)
+            self.model.replies = [answer("保密正文")]
+            await self.send(user, conversation, "机密文件名.txt")
+            self.service.trace.log_call(kind="model", conversation_id=conversation, user_id=self.alice.id,
+                                        channel_id=channel["id"], model_id=model["id"], status="error", error="上游回显：机密文件名.txt")
+            with mock.patch.object(self.service.trace, "_open", side_effect=AssertionError("管理端不能解密正文")):
+                for path in ("overview", "conversations", f"conversations/{conversation}", "calls", "calls/stats", "usage", "channels"):
+                    status, data = await self.req("GET", f"/api/admin/v1/assistant/{path}", headers=admin)
+                    self.assertEqual(status, 200, path)
+                    dumped = json.dumps(data, ensure_ascii=False)
+                    self.assertNotIn("保密正文", dumped)
+                    self.assertNotIn("机密文件名", dumped)
+            self.assertNotIn("short-secret", scrub("Authorization: short-secret\nX-Api-Key: short-secret"))
         self.run_async(run())
 
 

@@ -62,3 +62,28 @@ def kind_clause(kind: str) -> tuple[str, list[str]]:
                 params += args
         earlier.append((sql, args))
     return "(" + " OR ".join(clauses) + ")", params
+
+
+def _like(value: str, pattern: str) -> bool:
+    # SQL LIKE 的 Python 版：% 匹配任意串（规则里没有用到 _），比较前统一小写。
+    parts = pattern.split("%")
+    if len(parts) == 1:
+        return value == pattern
+    if not value.startswith(parts[0]) or not value.endswith(parts[-1]) or len(value) < len(parts[0]) + len(parts[-1]):
+        return False
+    position = len(parts[0])
+    for middle in parts[1:-1]:
+        found = value.find(middle, position, len(value) - len(parts[-1]))
+        if found < 0:
+            return False
+        position = found + len(middle)
+    return True
+
+
+def kind_of(key: str, content_type: str | None) -> str | None:
+    """按与 kind_clause 相同的规则判断单个对象属于哪个筛选项（image／video／…），都不属于时返回 None。"""
+    mime, name = (content_type or "").lower(), key.lower()
+    for rule, mimes, keys in _RULES:
+        if any(_like(mime, pattern) for pattern in mimes) or any(_like(name, pattern) for pattern in keys):
+            return next((group for group, members in KIND_GROUPS.items() if rule in members), None)
+    return None

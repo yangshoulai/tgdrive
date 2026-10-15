@@ -9,6 +9,36 @@ from tgdrive.app import create_app
 
 
 class AdminDocsAccessTests(unittest.TestCase):
+    def test_social_metadata_uses_public_origin_and_head_matches_get(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                static = root / "static"
+                static.mkdir()
+                (static / "index.html").write_text('<head><meta property="og:url" content="/">'
+                    '<meta property="og:image" content="/social.png"><meta name="twitter:image" content="/social.png"></head>', encoding="utf-8")
+                (static / "social.png").write_bytes(b"image")
+                app = create_app(root / "data", secure_cookies=False, static_dir=static,
+                                 public_base_url="https://drive.example.com")
+                client = Client(app)
+                try:
+                    status, headers, body = await client.request("GET", "/", headers={"host": "internal:8000"})
+                    self.assertEqual(status, 200)
+                    self.assertIn(b'content="https://drive.example.com/"', body)
+                    self.assertEqual(body.count(b'content="https://drive.example.com/social.png"'), 2)
+                    self.assertNotIn(b"internal", body)
+                    status, head, data = await client.request("HEAD", "/")
+                    self.assertEqual((status, data, head["content-length"]), (200, b"", headers["content-length"]))
+                    self.assertEqual((await client.request("GET", "/social.png"))[2], b"image")
+                    app.settings.defaults.clear()
+                    status, _, body = await client.request("GET", "/s/private-token?path=hidden", headers={"host": "drive.local:8100"})
+                    self.assertEqual(status, 200)
+                    self.assertIn(b'content="http://drive.local:8100/"', body)
+                    self.assertNotIn(b"private-token", body)
+                finally:
+                    app.metadata.close()
+        asyncio.run(run())
+
     def test_admin_docs_bundle_requires_admin_session(self):
         async def run():
             with tempfile.TemporaryDirectory() as temp:

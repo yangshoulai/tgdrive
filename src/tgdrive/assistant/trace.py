@@ -172,14 +172,16 @@ class TraceStore:
                        "WHERE id=(SELECT conversation_id FROM assistant_runs WHERE id=?)", (input_tokens, output_tokens, run_id))
 
     def interrupt_stale_runs(self) -> int:
-        """服务启动时：上次进程留下的 running 标记为 interrupted，它们产生的待确认操作作废。"""
+        """服务启动时：上次进程留下的 running 标记为 interrupted，它们产生的待确认操作作废；执行到一半的操作记为中断。"""
+        now = time.time()
         with self.metadata.transaction() as db:
             count = db.execute("UPDATE assistant_runs SET status='interrupted', stop_reason='server_restart', ended_at=? "
-                               "WHERE status='running'", (time.time(),)).rowcount
-            db.execute("UPDATE assistant_actions SET status='expired', decided_at=? WHERE status='pending'", (time.time(),))
+                               "WHERE status='running'", (now,)).rowcount
+            db.execute("UPDATE assistant_actions SET status='expired', decided_at=? WHERE status='pending'", (now,))
+            db.execute("UPDATE assistant_actions SET status='interrupted', finished_at=? WHERE status IN ('running','undoing')", (now,))
         return count
 
-    # ---------- 待确认操作（P1 只有作用域变更） ----------
+    # ---------- 待确认操作 ----------
 
     def create_action(self, conversation_id: str, run_id: str, user_id: int, session_hash: str, kind: str, tool_name: str,
                       payload: dict, *, count: int, ttl: float = 900, keep_pending: int = 5) -> str:
@@ -197,19 +199,83 @@ class TraceStore:
         return action_id
 
     def action(self, user_id: int, action_id: str):
-        row = self.metadata.db.execute("SELECT * FROM assistant_actions WHERE id=? AND user_id=?", (action_id, user_id)).fetchone()
+        row = self.metadata.db.execute("SELECT a.* FROM assistant_actions a JOIN assistant_conversations c ON c.id=a.conversation_id "
+                                       "WHERE a.id=? AND a.user_id=? AND c.hidden_at IS NULL", (action_id, user_id)).fetchone()
         if row is None:
             raise NotFoundError("操作不存在")
         return row
 
+    SAMPLES = 20
+
+    def action_payload(self, row) -> dict:
+        return self._open(row["payload"], f"assistant-action:{row['id']}")
+
     def action_json(self, row) -> dict[str, object]:
+        """卡片数据：完整条目只在 /items 分页读取，这里只带前 20 条样例。"""
         status = row["status"]
         if status == "pending" and row["expires_at"] <= time.time():
             status = "expired"
+        payload = self.action_payload(row)
+        if isinstance(payload, dict) and "items" in payload:
+            payload = {**{key: value for key, value in payload.items() if key != "items"}, "samples": payload["items"][:self.SAMPLES]}
         return {"id": row["id"], "kind": row["kind"], "tool_name": row["tool_name"], "status": status, "count": row["count"],
-                "payload": self._open(row["payload"], f"assistant-action:{row['id']}"),
-                "result": self._open(row["result"], f"assistant-action:{row['id']}:result"),
-                "created_at": row["created_at"], "expires_at": row["expires_at"], "decided_at": row["decided_at"]}
+                "payload": payload, "result": self._open(row["result"], f"assistant-action:{row['id']}:result"),
+                "undoable": row["undo"] is not None and status in ("done", "partial", "cancelled")
+                and (row["finished_at"] or 0) > time.time() - 86400,
+                "created_at": row["created_at"], "expires_at": row["expires_at"], "decided_at": row["decided_at"],
+                "finished_at": row["finished_at"]}
+
+    def action_items(self, row, *, offset: int = 0, limit: int = 100) -> dict[str, object]:
+        payload = self.action_payload(row)
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        limit = max(1, min(limit, 500))
+        page = items[offset:offset + limit]
+        return {"items": page, "skipped": payload.get("skipped", []) if offset == 0 and isinstance(payload, dict) else [],
+                "total": len(items), "next_offset": offset + limit if offset + limit < len(items) else None,
+                "compacted": bool(row["compacted"])}
+
+    def start_action(self, action_id: str) -> bool:
+        """pending → running（只成功一次）。"""
+        now = time.time()
+        with self.metadata.transaction() as db:
+            return db.execute("UPDATE assistant_actions SET status='running', decided_at=? WHERE id=? AND status='pending' "
+                              "AND expires_at>?", (now, action_id, now)).rowcount == 1
+
+    def action_recorder(self, action_id: str, conversation_id: str):
+        """只写入本次已授权操作的结果。锁定后也能加密收尾，保住已执行部分的撤销记录。"""
+        key = self._key()
+
+        def encrypt(value, aad):
+            return seal(key, json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(), aad)
+
+        def finish(status: str, result: dict, undo: dict | None, event: dict) -> None:
+            now = time.time()
+            with self.metadata.transaction() as db:
+                changed = db.execute("UPDATE assistant_actions SET status=?, finished_at=?, result=?, undo=? WHERE id=?",
+                                     (status, now, encrypt(result, f"assistant-action:{action_id}:result"),
+                                      None if undo is None else encrypt(undo, f"assistant-action:{action_id}:undo"), action_id)).rowcount
+                if not changed:  # 对话或账号已经被清除，不重新创建任何记录。
+                    return
+                seq = db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM assistant_messages WHERE conversation_id=?", (conversation_id,)).fetchone()[0]
+                db.execute("INSERT INTO assistant_messages(conversation_id,seq,role,body,created_at) VALUES(?,?,'event',?,?)",
+                           (conversation_id, seq, encrypt(event, f"assistant:{conversation_id}:{seq}"), now))
+                db.execute("UPDATE assistant_conversations SET messages=messages+1, updated_at=? WHERE id=?", (now, conversation_id))
+        return finish
+
+    def action_undo(self, row) -> dict | None:
+        return self._open(row["undo"], f"assistant-action:{row['id']}:undo")
+
+    def take_undo(self, action_id: str) -> bool:
+        """把可撤销的操作标为 undoing（只成功一次），撤销数据保留到撤销完成。"""
+        with self.metadata.transaction() as db:
+            return db.execute("UPDATE assistant_actions SET status='undoing' WHERE id=? AND undo IS NOT NULL "
+                              "AND status IN ('done','partial','cancelled') AND finished_at>?",
+                              (action_id, time.time() - 86400)).rowcount == 1
+
+    def finish_undo(self, action_id: str, result: dict) -> None:
+        with self.metadata.transaction() as db:
+            db.execute("UPDATE assistant_actions SET status='undone', undo=NULL, result=? WHERE id=?",
+                       (self._seal(result, f"assistant-action:{action_id}:result"), action_id))
 
     def actions(self, conversation_id: str) -> list[dict[str, object]]:
         rows = self.metadata.db.execute("SELECT * FROM assistant_actions WHERE conversation_id=? ORDER BY created_at",
@@ -230,6 +296,61 @@ class TraceStore:
         with self.metadata.transaction() as db:
             db.execute("UPDATE assistant_actions SET status='expired', decided_at=? WHERE session_hash=? AND status='pending'",
                        (time.time(), session_hash))
+
+    def pending_actions(self, conversation_id: str) -> list[dict[str, object]]:
+        rows = self.metadata.db.execute("SELECT id, kind, count FROM assistant_actions WHERE conversation_id=? AND status='pending' "
+                                        "AND expires_at>? ORDER BY created_at", (conversation_id, time.time())).fetchall()
+        return [dict(row) for row in rows]
+
+    def expire_actions(self, conversation_id: str | None = None, *, user_id: int | None = None, tool_names: list[str] | None = None) -> int:
+        where, args = ["status='pending'"], [time.time()]
+        if conversation_id is not None:
+            where.append("conversation_id=?")
+            args.append(conversation_id)
+        if user_id is not None:
+            where.append("user_id=?")
+            args.append(user_id)
+        if tool_names:
+            where.append(f"tool_name IN ({','.join('?' * len(tool_names))})")
+            args += tool_names
+        with self.metadata.transaction() as db:
+            return db.execute(f"UPDATE assistant_actions SET status='expired', decided_at=? WHERE {' AND '.join(where)}", args).rowcount
+
+    # ---------- 网页结果集与页面快照（24 小时） ----------
+
+    def create_collection(self, conversation_id: str, user_id: int, kind: str, *, source: str | None, rule: dict | None,
+                          urls: list, count: int, ttl: float = 86400) -> str:
+        collection_id = ("s_" if kind == "snapshot" else "g_") + secrets.token_urlsafe(12)
+        now = time.time()
+        with self.metadata.transaction() as db:
+            db.execute("INSERT INTO assistant_collections(id,conversation_id,user_id,kind,source,rule,urls,count,created_at,expires_at) "
+                       "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       (collection_id, conversation_id, user_id, kind, source,
+                        None if rule is None else self._seal(rule, f"assistant-collection:{collection_id}:rule"),
+                        self._seal(urls, f"assistant-collection:{collection_id}"), count, now, now + ttl))
+        return collection_id
+
+    def collection(self, user_id: int, collection_id: str, *, kind: str | None = None) -> dict[str, object]:
+        row = self.metadata.db.execute("SELECT * FROM assistant_collections WHERE id=? AND user_id=? AND expires_at>?",
+                                       (collection_id, user_id, time.time())).fetchone()
+        if row is None or (kind is not None and row["kind"] != kind):
+            raise NotFoundError("结果集不存在或已过期（保留 24 小时）")
+        return {"id": row["id"], "conversation_id": row["conversation_id"], "kind": row["kind"], "source": row["source"],
+                "count": row["count"], "created_at": row["created_at"], "expires_at": row["expires_at"],
+                "rule": self._open(row["rule"], f"assistant-collection:{row['id']}:rule"),
+                "urls": self._open(row["urls"], f"assistant-collection:{row['id']}")}
+
+    def update_collection(self, collection_id: str, *, rule: dict | None = None, urls: list | None = None) -> None:
+        sets, args = [], []
+        if rule is not None:
+            sets.append("rule=?")
+            args.append(self._seal(rule, f"assistant-collection:{collection_id}:rule"))
+        if urls is not None:
+            sets += ["urls=?", "count=?"]
+            args += [self._seal(urls, f"assistant-collection:{collection_id}"), len(urls)]
+        if sets:
+            with self.metadata.transaction() as db:
+                db.execute(f"UPDATE assistant_collections SET {','.join(sets)} WHERE id=?", (*args, collection_id))
 
     # ---------- 用量 ----------
 
@@ -255,6 +376,40 @@ class TraceStore:
             f"SELECT day, model_id, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(runs) AS runs "
             f"FROM assistant_usage WHERE {where} GROUP BY day, model_id ORDER BY day", args).fetchall()
         return [dict(row) for row in rows]
+
+    def usage_report(self, *, days: int = 30) -> dict[str, object]:
+        """管理端用量报表：按日、按用户、按模型汇总 token 与运行次数，以及工具调用次数、错误率与被上限拦截的运行。"""
+        days = max(1, min(days, 400))
+        since_day = today(time.time() - (days - 1) * 86400)
+        since = time.mktime(time.strptime(since_day, "%Y-%m-%d"))
+        db = self.metadata.db
+        by_day = [dict(row) for row in db.execute(
+            "SELECT day, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(runs) AS runs, "
+            "COUNT(DISTINCT user_id) AS users FROM assistant_usage WHERE day>=? GROUP BY day ORDER BY day", (since_day,))]
+        by_user = [dict(row) for row in db.execute(
+            "SELECT a.user_id, u.username, u.nickname, SUM(a.input_tokens) AS input_tokens, SUM(a.output_tokens) AS output_tokens, "
+            "SUM(a.runs) AS runs FROM assistant_usage a LEFT JOIN users u ON u.id=a.user_id WHERE a.day>=? GROUP BY a.user_id "
+            "ORDER BY SUM(a.input_tokens+a.output_tokens) DESC LIMIT 50", (since_day,))]
+        by_model = [dict(row) for row in db.execute(
+            "SELECT a.model_id, m.model AS model_name, m.display_name AS model_label, ch.name AS channel_name, "
+            "SUM(a.input_tokens) AS input_tokens, SUM(a.output_tokens) AS output_tokens, SUM(a.runs) AS runs "
+            "FROM assistant_usage a LEFT JOIN ai_models m ON m.id=a.model_id LEFT JOIN ai_channels ch ON ch.id=m.channel_id "
+            "WHERE a.day>=? GROUP BY a.model_id ORDER BY SUM(a.input_tokens+a.output_tokens) DESC LIMIT 50", (since_day,))]
+        tools = [dict(row) for row in db.execute(
+            "SELECT tool_name, COUNT(*) AS calls, COALESCE(SUM(status!='ok'),0) AS errors, CAST(AVG(duration_ms) AS INTEGER) AS avg_ms "
+            "FROM assistant_calls WHERE kind='tool' AND started_at>=? AND tool_name IS NOT NULL GROUP BY tool_name "
+            "ORDER BY calls DESC LIMIT 60", (since,))]
+        stops = [dict(row) for row in db.execute(
+            "SELECT COALESCE(stop_reason,'') AS reason, COUNT(*) AS runs FROM assistant_runs WHERE started_at>=? "
+            "GROUP BY stop_reason ORDER BY runs DESC", (since,))]
+        actions = [dict(row) for row in db.execute(
+            "SELECT kind, status, COUNT(*) AS actions, SUM(count) AS items FROM assistant_actions WHERE created_at>=? AND kind!='scope' "
+            "GROUP BY kind, status ORDER BY actions DESC", (since,))]
+        totals = {"input_tokens": sum(int(r["input_tokens"] or 0) for r in by_day), "output_tokens": sum(int(r["output_tokens"] or 0) for r in by_day),
+                  "runs": sum(int(r["runs"] or 0) for r in by_day),
+                  "users": int(db.execute("SELECT COUNT(DISTINCT user_id) FROM assistant_usage WHERE day>=?", (since_day,)).fetchone()[0])}
+        return {"days": days, "since": since_day, "totals": totals, "by_day": by_day, "by_user": by_user, "by_model": by_model,
+                "tools": tools, "stops": stops, "actions": actions}
 
     # ---------- 调用日志 ----------
 
@@ -284,7 +439,15 @@ class TraceStore:
             "FROM assistant_calls c LEFT JOIN users u ON u.id=c.user_id LEFT JOIN ai_channels ch ON ch.id=c.channel_id "
             f"LEFT JOIN ai_models m ON m.id=c.model_id WHERE {' AND '.join(where) or '1'} ORDER BY c.id DESC LIMIT ?",
             (*args, limit + 1)).fetchall()
-        return {"calls": [dict(row) for row in rows[:limit]], "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None}
+        return {"calls": [self._call_json(row) for row in rows[:limit]], "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None}
+
+    @staticmethod
+    def _call_json(row) -> dict:
+        item = dict(row)
+        # 上游错误可能回显用户输入；历史日志同样不能向管理端暴露正文。
+        if item.get("error") and item["kind"] in ("model", "fetch"):
+            item["error"] = "模型请求失败" if item["kind"] == "model" else "网页抓取失败"
+        return item
 
     @staticmethod
     def _call_filter(**filters) -> tuple[list[str], list]:
@@ -334,7 +497,7 @@ class TraceStore:
                 continue
             ok = sum(1 for row in rows if row["status"] == "ok")
             durations = sorted(row["duration_ms"] for row in rows if row["duration_ms"] is not None)
-            error = next((row["error"] for row in rows if row["status"] != "ok" and row["error"]), None)
+            error = "模型请求失败" if any(row["status"] != "ok" and row["error"] for row in rows) else None
             result[channel["id"]] = {"requests": len(rows), "success_rate": ok / len(rows),
                                      "p95_ms": durations[min(len(durations) - 1, int(len(durations) * 0.95))] if durations else None,
                                      "last_error": error, "unhealthy": ok / len(rows) < 0.5}
@@ -454,7 +617,25 @@ class TraceStore:
                                         "DELETE FROM assistant_collections WHERE id=?", (now,))
         with self.metadata.transaction() as db:
             report["actions_expired"] = db.execute(
-                "UPDATE assistant_actions SET status='expired', decided_at=? WHERE status='pending' AND expires_at<=?", (now, now)).rowcount
-            db.execute("UPDATE assistant_actions SET undo=NULL WHERE undo IS NOT NULL AND finished_at<?", (now - 86400,))
-            report["usage"] = db.execute("DELETE FROM assistant_usage WHERE day<?", (today(now - 400 * 86400),)).rowcount
+                "UPDATE assistant_actions SET status='expired', decided_at=? WHERE id IN "
+                "(SELECT id FROM assistant_actions WHERE status='pending' AND expires_at<=? LIMIT ?)", (now, now, batch)).rowcount
+            db.execute("UPDATE assistant_actions SET undo=NULL WHERE id IN "
+                       "(SELECT id FROM assistant_actions WHERE undo IS NOT NULL AND finished_at<? LIMIT ?)", (now - 86400, batch))
+            report["usage"] = db.execute("DELETE FROM assistant_usage WHERE rowid IN "
+                                                 "(SELECT rowid FROM assistant_usage WHERE day<? LIMIT ?)", (today(now - 400 * 86400), batch)).rowcount
+        # 终态 30 天后把完整条目压缩成摘要（类型、条目数、前 20 条样例）。
+        rows = self.metadata.db.execute(
+            "SELECT * FROM assistant_actions WHERE compacted=0 AND status NOT IN ('pending','running','undoing') "
+            "AND COALESCE(finished_at, decided_at, created_at)<? LIMIT ?", (now - 30 * 86400, batch)).fetchall()
+        for row in rows:
+            try:
+                payload = self.action_payload(row)
+            except Exception:
+                continue
+            if isinstance(payload, dict) and "items" in payload:
+                payload = {**payload, "items": payload["items"][:self.SAMPLES], "skipped": payload.get("skipped", [])[:self.SAMPLES]}
+            with self.metadata.transaction() as db:
+                db.execute("UPDATE assistant_actions SET payload=?, compacted=1 WHERE id=?",
+                           (self._seal(payload, f"assistant-action:{row['id']}"), row["id"]))
+            report["actions_compacted"] += 1
         return report

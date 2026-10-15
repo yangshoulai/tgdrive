@@ -74,6 +74,17 @@ const query = (values: Record<string, string | number | undefined | null>) => {
 };
 
 export const adminOverview = (signal?: AbortSignal) => get<AssistantOverview>(`${ADMIN}/overview`, signal);
+type TokenRow = { input_tokens: number | null; output_tokens: number | null; runs: number | null };
+export type UsageReport = {
+  days: number; since: string; totals: { input_tokens: number; output_tokens: number; runs: number; users: number };
+  by_day: (TokenRow & { day: string; users: number })[];
+  by_user: (TokenRow & { user_id: number; username: string | null; nickname: string | null })[];
+  by_model: (TokenRow & { model_id: number; model_name: string | null; model_label: string | null; channel_name: string | null })[];
+  tools: { tool_name: string; calls: number; errors: number; avg_ms: number | null }[];
+  stops: { reason: string; runs: number }[];
+  actions: { kind: string; status: string; actions: number; items: number | null }[];
+};
+export const adminUsage = (days: number, signal?: AbortSignal) => get<UsageReport>(`${ADMIN}/usage${query({ days })}`, signal);
 export const adminSettings = () => get<AssistantSettings>(`${ADMIN}/settings`);
 export const updateAdminSettings = (values: Partial<Omit<AssistantSettings, "bounds" | "notice_default" | "notice">> & { notice?: string | null }) => post<AssistantSettings>(`${ADMIN}/settings`, values);
 export const adminLimits = () => get<AssistantLimits>(`${ADMIN}/limits`);
@@ -86,7 +97,7 @@ export const updateAdminChannel = (id: number, input: ChannelInput) => post<AiCh
 export const deleteAdminChannel = (id: number) => post<void>(`${ADMIN}/channels/${id}/delete`);
 export const syncAdminChannel = (id: number) => post<{ total: number; added: number; restored: number; removed: number; note: string }>(`${ADMIN}/channels/${id}/sync`, undefined, 120000);
 export const adminChannelModels = (id: number) => get<AiModel[]>(`${ADMIN}/channels/${id}/models`);
-export const addAdminModel = (channelId: number, input: { model: string; display_name?: string | null; context_window?: number | null }) => post<AiModel>(`${ADMIN}/channels/${channelId}/models`, input);
+export const addAdminModel = (channelId: number, input: { model: string; display_name?: string | null; context_window?: number | null; max_output?: number | null; tools?: ToolSupport; sort?: number }) => post<AiModel>(`${ADMIN}/channels/${channelId}/models`, input);
 export const updateAdminModel = (id: number, input: Partial<Pick<AiModel, "display_name" | "enabled" | "tools" | "context_window" | "max_output" | "sort">>) => post<AiModel>(`${ADMIN}/models/${id}/update`, input);
 export const deleteAdminModel = (id: number) => post<void>(`${ADMIN}/models/${id}/delete`);
 export const testAdminModel = (id: number) => post<{ ok: boolean; tools: ToolSupport; note: string; duration_ms: number }>(`${ADMIN}/models/${id}/test`, undefined, 150000);
@@ -111,30 +122,65 @@ export type Conversation = { id: string; title: string | null; scope: string; mo
 export type ToolEvent =
   | { type: "plan"; items: { content: string; status: "pending" | "in_progress" | "completed" }[] }
   | { type: "question"; question: string; options: string[] }
-  | { type: "scope_request"; action_id: string; from: string; to: string; reason: string };
+  | { type: "scope_request"; action_id: string; from: string; to: string; reason: string }
+  | { type: "action"; action_id: string; kind: string; count: number };
+export type SnapshotAttachment = { type: "snapshot"; id: string; source: string; pages: number; images: number };
 export type ChatMessage = {
   seq: number; run_id: string | null; role: "user" | "assistant" | "tool" | "event"; tool_name?: string | null; created_at?: number;
   text?: string; scope?: string; location?: string;
   tool_calls?: { id: string; name: string; arguments: string }[]; model_id?: number; input_tokens?: number; output_tokens?: number;
   call_id?: string; name?: string; label?: string; arguments?: Record<string, unknown>; status?: "ok" | "error"; summary?: string;
   result?: unknown; items?: number | null; duration_ms?: number; truncated?: boolean; event?: ToolEvent | null;
-  type?: string; retry?: boolean; action_id?: string;
+  type?: string; retry?: boolean; action_id?: string; attachment?: SnapshotAttachment;
 };
-export type AssistantAction = { id: string; kind: string; tool_name: string | null; status: "pending" | "confirmed" | "rejected" | "expired" | "done" | "failed"; count: number; payload: { from?: string; to?: string; reason?: string } | null; created_at: number; expires_at: number; decided_at: number | null };
+export const ACTION_KINDS: Record<string, string> = {
+  rename: "批量改名", move: "移动", organize: "整理文件", mkdir: "新建文件夹", trash: "移入回收站", restore: "从回收站恢复",
+  purge: "彻底删除", unshare: "取消公开", downloads: "离线下载", download_control: "下载任务操作",
+};
+export type ActionStatus = "pending" | "confirmed" | "rejected" | "expired" | "running" | "done" | "partial" | "failed" | "cancelled"
+  | "interrupted" | "undoing" | "undone";
+/** 冻结的条目：移动类为 from/to（对象键），其余为 path / id / url 等。 */
+export type ActionItem = { from?: string; to?: string; path?: string; id?: string | number; name?: string; url?: string; host?: string;
+  size?: number; folder?: boolean; op?: string; status?: string; variant?: string | null };
+export type ActionResult = { ok: number; skipped: number; failed: number; total: number; reasons: Record<string, number>;
+  failures: { path: string; reason: string; status: "skipped" | "failed" }[] };
+export type AssistantAction = {
+  id: string; kind: string; tool_name: string | null; status: ActionStatus; count: number;
+  payload: {
+    from?: string; to?: string; reason?: string; kind?: string; title?: string; scope?: string; summary?: string; size?: number;
+    conflicts?: number; danger?: boolean; samples?: ActionItem[]; skipped?: { path: string; reason: string }[];
+    options?: { target?: string; hosts?: string[]; source?: string | null; op?: string; by?: string; folders?: string[] };
+  } | null;
+  result: ActionResult | null; undoable?: boolean; progress?: { done: number; total: number; ok: number; skipped: number; failed: number };
+  created_at: number; expires_at: number; decided_at: number | null; finished_at?: number | null;
+};
 export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; actions: AssistantAction[]; active_run: string | null };
 export type RunEvent = { seq: number; type: string; [key: string]: unknown };
 
 const USER = "/api/user/v1/assistant";
 export const assistantConfig = (signal?: AbortSignal) => get<AssistantConfig>(`${USER}/config`, signal);
 export const acknowledgeNotice = () => post<void>(`${USER}/notice/ack`, {});
-export const conversations = (cursor?: string | null) => get<{ conversations: Conversation[]; next_cursor: string | null }>(`${USER}/conversations${query({ cursor })}`);
+export const conversations = (cursor?: string | null, archived = false) => get<{ conversations: Conversation[]; next_cursor: string | null }>(`${USER}/conversations${query({ cursor, archived: archived ? "1" : undefined })}`);
 export const createConversation = (location: string, modelId?: number | null) => post<ConversationDetail>(`${USER}/conversations`, { location, model_id: modelId ?? undefined });
 export const conversation = (id: string) => get<ConversationDetail>(`${USER}/conversations/${encodeURIComponent(id)}`);
 export const updateConversation = (id: string, input: { title?: string; archived?: boolean }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
 export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
-export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root" }) =>
+export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root"; snapshot_id?: string }) =>
   post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/messages`, input);
 export const stopRun = (runId: string) => post<void>(`${USER}/runs/${encodeURIComponent(runId)}/stop`, {});
+export const action = (id: string) => get<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}`);
+export const actionItems = (id: string, offset = 0) =>
+  get<{ items: ActionItem[]; skipped: { path: string; reason: string }[]; total: number; next_offset: number | null; compacted: boolean }>(
+    `${USER}/actions/${encodeURIComponent(id)}/items${query({ offset: offset || undefined })}`);
+export const confirmAction = (id: string, input: { acknowledge?: boolean; count?: number } = {}) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/confirm`, input);
+export const rejectAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/reject`, {});
+export const cancelAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/cancel`, {});
+export const undoAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/undo`, {});
+/** 抓取脚本转交的已渲染页面快照（规范页列表），上传后随消息提交 snapshot_id。 */
+export type SnapshotPage = { url: string; title?: string; images: { path: string; urls: Record<string, string>; w?: number | null; h?: number | null }[];
+  links?: { path: string; href: string; text: string; rel?: string }[] };
+export const uploadSnapshot = (conversationId: string, pages: SnapshotPage[]) =>
+  post<{ snapshot_id: string; source: string; pages: number; images: number }>(`${USER}/conversations/${encodeURIComponent(conversationId)}/snapshots`, { pages });
 export const decideScope = (actionId: string, approve: boolean) => post<{ status: string; scope: string; run_id?: string }>(`${USER}/scope-requests/${encodeURIComponent(actionId)}/${approve ? "confirm" : "reject"}`, {});
 
 /**

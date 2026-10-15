@@ -32,6 +32,7 @@ _SECRETISH = re.compile(r"(?i)(sk-[A-Za-z0-9_\-]{6,}|bearer\s+\S+|api[-_]?key\S*
 def scrub(text: object, limit: int = 300) -> str:
     """移除形如密钥的长串与查询参数，截断到 limit 个字符。"""
     value = str(text or "")
+    value = re.sub(r"(?i)(authorization|x-api-key|api[-_]?key|proxy-authorization)\s*[\"\']?\s*[:=]\s*[\"\']?[^\r\n,;]+", "•••", value)
     value = re.sub(r"https?://\S+", lambda m: m.group(0).split("?", 1)[0], value)
     value = _SECRETISH.sub("•••", value)
     value = " ".join(value.split())
