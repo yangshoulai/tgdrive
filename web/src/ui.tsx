@@ -1,5 +1,5 @@
 /** Tessera 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
-import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type KeyboardEventHandler, type ReactNode } from "react";
+import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type KeyboardEventHandler, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { BRAND } from "./brand";
 import { FILE_PAGE_SIZES } from "./pagination";
@@ -305,7 +305,7 @@ export function isShortcutControl(target: Element): boolean {
   return Boolean(target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='slider'], [role='spinbutton'], [role='combobox'], [role^='menu'], .menu, .art-settings"));
 }
 
-export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, closable = true, className = "", initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean }) {
+export function Modal({ title, description, onClose, children, footer, actions, size = "md", icon, leading, tone, dismissible = true, closable = true, className = "", initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false, movable = false }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean; /** 拖动头部移动窗口（正常与最小化分别记住位置，最大化与全屏时不生效） */ movable?: boolean }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
@@ -319,7 +319,49 @@ export function Modal({ title, description, onClose, children, footer, actions, 
   closeRef.current = onClose;
   dismissibleRef.current = dismissible;
   pinnedRef.current = pinned;
-  useEffect(() => { setMinimized(false); }, [windowKey]);
+  const [offsets, setOffsets] = useState<Record<"normal" | "mini", { x: number; y: number }>>({ normal: { x: 0, y: 0 }, mini: { x: 0, y: 0 } });
+  const [moving, setMoving] = useState(false);
+  const expanded = !minimized && (maximized || fullscreen);
+  const offset = offsets[minimized ? "mini" : "normal"];
+  useEffect(() => { setMinimized(false); setOffsets({ normal: { x: 0, y: 0 }, mini: { x: 0, y: 0 } }); }, [windowKey]);
+  /** 把位移限制在视口内（四周留 8px），头部的窗口按钮始终可见；窗口比视口大时只保证左上角不出界。 */
+  const clampOffset = (rect: DOMRect, base: { x: number; y: number }, dx: number, dy: number) => {
+    const edge = 8, limit = (start: number, end: number, size: number, delta: number) =>
+      Math.max(edge - start, Math.min(Math.max(edge - start, size - edge - end), delta));
+    return { x: base.x + limit(rect.left, rect.right, window.innerWidth, dx), y: base.y + limit(rect.top, rect.bottom, window.innerHeight, dy) };
+  };
+  function startMove(event: ReactPointerEvent<HTMLElement>) {
+    const node = ref.current;
+    if (!movable || !node || expanded || event.button !== 0 || !event.isPrimary) return;
+    if ((event.target as Element).closest("button, a, input, select, textarea, [role='button'], .menu")) return;
+    // 窄屏的预览几乎占满屏幕，只允许拖动最小化的小窗。
+    if (!minimized && !window.matchMedia("(min-width: 641px)").matches) return;
+    event.preventDefault();
+    const mode = minimized ? "mini" : "normal", base = offsets[mode], rect = node.getBoundingClientRect();
+    const startX = event.clientX, startY = event.clientY;
+    setMoving(true);
+    const move = (next: PointerEvent) => setOffsets(current => ({ ...current, [mode]: clampOffset(rect, base, next.clientX - startX, next.clientY - startY) }));
+    const end = () => {
+      setMoving(false);
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", end); window.addEventListener("pointercancel", end);
+  }
+  useEffect(() => {
+    if (!movable || (!offset.x && !offset.y)) return;
+    // 窗口缩小后把已移动的窗口拉回可见区域。
+    const fit = () => {
+      const node = ref.current;
+      if (!node) return;
+      const mode = minimized ? "mini" : "normal";
+      setOffsets(current => {
+        const next = clampOffset(node.getBoundingClientRect(), current[mode], 0, 0);
+        return next.x === current[mode].x && next.y === current[mode].y ? current : { ...current, [mode]: next };
+      });
+    };
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [movable, minimized, offset.x, offset.y]);
   useEffect(() => {
     if (!expandable) return;
     const node = backdrop.current;
@@ -414,8 +456,9 @@ export function Modal({ title, description, onClose, children, footer, actions, 
   }, [minimized, initialFocus]);
   return createPortal(
     <div ref={backdrop} className={`modal-backdrop${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}${minimized ? " is-minimized" : ""}`} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && !pinned && !minimized && modalStack.at(-1) === ref.current) onClose(); }}>
-      <div ref={ref} className={`modal modal-${size} ${className}${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}`} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={handleWindowKey}>
-        <header className="modal-header">
+      <div ref={ref} className={`modal modal-${size} ${className}${expanded ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}${movable && !expanded ? " is-movable" : ""}${moving ? " is-moving" : ""}`}
+        style={movable && !expanded && (offset.x || offset.y) ? { translate: `${offset.x}px ${offset.y}px` } : undefined} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={handleWindowKey}>
+        <header className="modal-header" onPointerDown={movable ? startMove : undefined}>
           {leading ?? (icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>)}
           <div className="modal-heading">
             <h2 id={`${id}-title`} title={title}>{title}</h2>

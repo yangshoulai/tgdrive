@@ -147,7 +147,8 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip } & PlaybackProps;
 export function FilePreview(props: PreviewProps) {
   const [attempt, setAttempt] = useState(0);
-  return <PreviewContent key={`${props.kind}:${props.kind === "audio" || props.kind === "video" ? "media" : props.url}:${attempt}`} {...props} onRetry={() => setAttempt(current => current + 1)} />;
+  // 音视频与图片切换时复用同一个播放器／查看器（图片的缩略图条才能从上一张平滑滚动到下一张），其他类型按地址重建。
+  return <PreviewContent key={`${props.kind}:${props.kind === "audio" || props.kind === "video" || props.kind === "image" ? "media" : props.url}:${attempt}`} {...props} onRetry={() => setAttempt(current => current + 1)} />;
 }
 
 function PreviewLoading({ onRetry }: { onRetry: () => void }) {
@@ -163,6 +164,8 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
   const [mediaReady, setMediaReady] = useState(false);
+  // 图片复用组件，切换到下一张时清除上一张的失败状态。
+  useEffect(() => { if (kind === "image") setMediaFailed(false); }, [url, kind]);
   useEffect(() => {
     if (kind !== "text" && kind !== "code") return;
     setContent(null); setError("");
@@ -352,7 +355,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   }, [panelOpen]);
   // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
-    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
+    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable movable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
       : kind === "image" && nav && nav.count > 1 ? <div className="preview-mini-gallery">
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>

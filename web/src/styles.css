@@ -473,6 +473,12 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .modal-backdrop.is-fullscreen .modal { border-radius: 0; }
 .modal-backdrop.is-minimized { inset: auto auto 20px 50%; z-index: 55; display: block; width: min(380px, calc(100vw - 32px)); padding: 0; transform: translateX(-50%); background: transparent; backdrop-filter: none; animation: none; }
 .modal.is-minimized { max-width: none; max-height: none; border-radius: var(--radius-lg); }
+.modal.is-movable .modal-header { cursor: grab; }
+.modal.is-movable .modal-header :is(button, a) { cursor: pointer; }
+.modal.is-moving, .modal.is-moving * { cursor: grabbing !important; user-select: none; }
+.modal.is-moving { transition: none; }
+@media (max-width: 640px) { .modal.is-movable:not(.is-minimized) .modal-header { cursor: auto; } }
+.modal.is-minimized.is-movable .modal-header { touch-action: none; }
 .modal.is-minimized .modal-header { padding: 10px 8px 10px 12px; gap: 8px; }
 .modal.is-minimized .modal-heading h2 { overflow: hidden; font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
 .modal.is-minimized .modal-body, .modal.is-minimized .modal-footer, .modal.is-minimized .preview-meta-date, .modal.is-minimized .preview-meta-public { display: none; }

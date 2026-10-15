@@ -91,7 +91,10 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
   };
   useEffect(() => { wake(); return () => window.clearTimeout(idleTimer.current); }, []);
 
-  // + / - / 0 / R 快捷键；左右切换由外层预览统一处理。
+  // + / - / 0 / R 快捷键。左右切换通常由外层预览在焦点位于弹窗内时处理；焦点因点击页面空白等原因
+  // 落到 body 时外层收不到按键，这里兜底处理（外层已处理的会 preventDefault，不会重复切换）。
+  const navRef = useRef(nav);
+  navRef.current = nav;
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
@@ -103,6 +106,11 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
         "-": () => zoomAt(viewRef.current.scale / 1.4), "0": () => setView(FIT),
         r: () => { setRotation(value => value + 90); setView(FIT); }, R: () => { setRotation(value => value + 90); setView(FIT); },
       };
+      const current = navRef.current;
+      if (current && current.count > 1 && !event.shiftKey) {
+        actions.ArrowLeft = () => { if (!event.repeat) current.onPrevious(); };
+        actions.ArrowRight = () => { if (!event.repeat) current.onNext(); };
+      }
       const action = actions[event.key];
       if (!action) return;
       event.preventDefault(); action(); wake();
@@ -149,10 +157,17 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
       if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) { if (dx > 0) nav.onPrevious(); else nav.onNext(); }
     }
   }
-  const stripList = useRef<HTMLOListElement>(null);
+  const stripList = useRef<HTMLOListElement>(null), stripPlaced = useRef(false);
   useEffect(() => {
-    stripList.current?.querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest", inline: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
-  }, [strip?.current]);
+    const list = stripList.current, item = list?.querySelector<HTMLElement>('[aria-current="true"]');
+    if (!list || !item) return;
+    // 只滚动缩略图条本身（scrollIntoView 还会滚动外层容器）；首次打开直接定位，之后从上一张平滑滚到下一张。
+    const box = list.getBoundingClientRect(), rect = item.getBoundingClientRect();
+    const left = list.scrollLeft + rect.left - box.left - (list.clientWidth - rect.width) / 2;
+    const smooth = stripPlaced.current && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    list.scrollTo({ left: Math.max(0, left), behavior: smooth ? "smooth" : "instant" });
+    stripPlaced.current = true;
+  }, [strip?.current, strip?.items.length]);
 
   const transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale}) rotate(${rotation}deg)`;
   const sized = display ? { width: display.width, height: display.height } : undefined;
