@@ -85,6 +85,7 @@ class TraceStore:
     def conversation_json(self, row) -> dict[str, object]:
         return {"id": row["id"], "title": self._open(row["title"], f"assistant:{row['id']}:title"),
                 "scope_root": row["scope_root"], "model_id": row["model_id"], "archived": bool(row["archived"]),
+                "access_mode": row["access_mode"] if row["access_mode"] in ("approval", "full") else "approval",
                 "messages": row["messages"], "created_at": row["created_at"], "updated_at": row["updated_at"]}
 
     def list_conversations(self, user_id: int, *, cursor: str = "", limit: int = 50, archived: bool = False) -> dict[str, object]:
@@ -104,7 +105,7 @@ class TraceStore:
         return {"conversations": items, "next_cursor": next_cursor}
 
     def update_conversation(self, user_id: int, conversation_id: str, *, title=None, archived=None, scope_root=None,
-                            model_id=None) -> None:
+                            model_id=None, access_mode=None) -> None:
         self.conversation(user_id, conversation_id)
         sets, args = [], []
         if title is not None:
@@ -119,6 +120,9 @@ class TraceStore:
         if model_id is not None:
             sets.append("model_id=?")
             args.append(model_id)
+        if access_mode is not None:
+            sets.append("access_mode=?")
+            args.append(access_mode)
         if sets:
             with self.metadata.transaction() as db:
                 db.execute(f"UPDATE assistant_conversations SET {','.join(sets)} WHERE id=?", (*args, conversation_id))
@@ -392,9 +396,15 @@ class TraceStore:
             "ORDER BY SUM(a.input_tokens+a.output_tokens) DESC LIMIT 50", (since_day,))]
         by_model = [dict(row) for row in db.execute(
             "SELECT a.model_id, m.model AS model_name, m.display_name AS model_label, ch.name AS channel_name, "
+            "m.input_price, m.output_price, "
             "SUM(a.input_tokens) AS input_tokens, SUM(a.output_tokens) AS output_tokens, SUM(a.runs) AS runs "
             "FROM assistant_usage a LEFT JOIN ai_models m ON m.id=a.model_id LEFT JOIN ai_channels ch ON ch.id=m.channel_id "
             "WHERE a.day>=? GROUP BY a.model_id ORDER BY SUM(a.input_tokens+a.output_tokens) DESC LIMIT 50", (since_day,))]
+        # 估算费用（美元）：按模型目录价格（美元／百万 token）计算，没有价格的模型为 None。
+        for row in by_model:
+            priced = row["input_price"] is not None or row["output_price"] is not None
+            row["cost"] = ((row["input_tokens"] or 0) * (row["input_price"] or 0) + (row["output_tokens"] or 0) * (row["output_price"] or 0)) / 1e6 \
+                if priced else None
         tools = [dict(row) for row in db.execute(
             "SELECT tool_name, COUNT(*) AS calls, COALESCE(SUM(status!='ok'),0) AS errors, CAST(AVG(duration_ms) AS INTEGER) AS avg_ms "
             "FROM assistant_calls WHERE kind='tool' AND started_at>=? AND tool_name IS NOT NULL GROUP BY tool_name "
@@ -407,7 +417,8 @@ class TraceStore:
             "GROUP BY kind, status ORDER BY actions DESC", (since,))]
         totals = {"input_tokens": sum(int(r["input_tokens"] or 0) for r in by_day), "output_tokens": sum(int(r["output_tokens"] or 0) for r in by_day),
                   "runs": sum(int(r["runs"] or 0) for r in by_day),
-                  "users": int(db.execute("SELECT COUNT(DISTINCT user_id) FROM assistant_usage WHERE day>=?", (since_day,)).fetchone()[0])}
+                  "users": int(db.execute("SELECT COUNT(DISTINCT user_id) FROM assistant_usage WHERE day>=?", (since_day,)).fetchone()[0]),
+                  "cost": round(sum(row["cost"] or 0 for row in by_model), 4) if any(row["cost"] is not None for row in by_model) else None}
         return {"days": days, "since": since_day, "totals": totals, "by_day": by_day, "by_user": by_user, "by_model": by_model,
                 "tools": tools, "stops": stops, "actions": actions}
 

@@ -84,6 +84,10 @@ const ICONS = {
   sparkle: "M12 4.5 13.6 9a2 2 0 0 0 1.4 1.4l4.5 1.6-4.5 1.6a2 2 0 0 0-1.4 1.4L12 19.5l-1.6-4.5A2 2 0 0 0 9 13.6L4.5 12 9 10.4A2 2 0 0 0 10.4 9zM18.5 3v3.5M16.75 4.75h3.5",
   stop: "M7 7h10v10H7z",
   arrowUp: "M12 19V5m-6 6 6-6 6 6",
+  zap: "M13 3 5 13.5h6L10 21l8-10.5h-6z",
+  brain: "M9.5 4.5A2.5 2.5 0 0 0 7 7v.2A3 3 0 0 0 5 10a3 3 0 0 0 1 2.2A3 3 0 0 0 7.5 17a2.5 2.5 0 0 0 4.5 1.5V6a1.5 1.5 0 0 0-2.5-1.5ZM14.5 4.5A2.5 2.5 0 0 1 17 7v.2A3 3 0 0 1 19 10a3 3 0 0 1-1 2.2 3 3 0 0 1-1.5 4.8 2.5 2.5 0 0 1-4.5 1.5",
+  cursor: "m5 4 13 5.5-5.5 2-2 5.5zm8 8 5 5",
+  wrench: "M14.7 6.3a4 4 0 0 0-5.2 5.2L4 17v3h3l5.5-5.5a4 4 0 0 0 5.2-5.2l-2.5 2.5-2.7-.3-.3-2.7z",
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.3l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-2.2-1.3L14.3 3h-4l-.4 2.4a7.4 7.4 0 0 0-2.2 1.3l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.6l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 2.2 1.3l.4 2.4h4l.4-2.4a7.4 7.4 0 0 0 2.2-1.3l2.4 1 2-3.4-2-1.6c.1-.4.1-.9.1-1.3Z",
 } as const;
 export type IconName = keyof typeof ICONS;
@@ -458,7 +462,7 @@ export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onC
   );
 }
 
-export type MenuItem = { label: string; description?: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean; shortcut?: string };
+export type MenuItem = { label: string; description?: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean; shortcut?: string; disabled?: boolean };
 
 /** 浮层挂载点：全屏时只有全屏元素内的内容可见，所以菜单挂到全屏元素里，否则挂到 body。 */
 const overlayRoot = () => (document.fullscreenElement as HTMLElement | null) ?? document.body;
@@ -524,7 +528,7 @@ function MenuList({ items, label, anchor, onClose, restoreFocus }: { items: Menu
         const role = item.checked === undefined ? "menuitem" : "menuitemradio";
         const element = item.href
           ? <a key={item.label} role={role} className={className} href={item.href} onClick={() => onClose()}>{content}</a>
-          : <button key={item.label} type="button" role={role} aria-checked={item.checked === undefined ? undefined : item.checked} className={className} onClick={() => { onClose(); item.onSelect(); }}>{content}</button>;
+          : <button key={item.label} type="button" role={role} aria-checked={item.checked === undefined ? undefined : item.checked} className={className} disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>{content}</button>;
         return item.heading ? <Fragment key={item.label}><div className={`menu-heading${item.divider ? " has-divider" : ""}`} role="presentation">{item.heading}</div>{element}</Fragment> : element;
       })}
     </div>,

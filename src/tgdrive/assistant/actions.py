@@ -12,6 +12,7 @@ import asyncio
 import collections
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -22,10 +23,29 @@ BATCH = 500
 END = "\U0010ffff"
 KINDS = {
     "rename": "批量改名", "move": "移动", "organize": "整理文件", "mkdir": "新建文件夹", "trash": "移入回收站",
-    "restore": "从回收站恢复", "purge": "彻底删除", "unshare": "取消公开", "downloads": "离线下载", "download_control": "下载任务操作",
+    "restore": "从回收站恢复", "purge": "彻底删除", "unshare": "取消公开", "share": "公开分享", "downloads": "离线下载",
+    "download_control": "下载任务操作",
 }
 MOVE_KINDS = ("rename", "move", "organize")
 DANGER_KINDS = ("purge",)
+# 完全访问模式下仍然必须由用户确认的类型：不可恢复，或会让数据对外可见。
+CONFIRM_KINDS = ("purge", "share")
+
+
+def share_options(payload: dict, confirm: dict | None) -> dict[str, object]:
+    """确认时用户在卡片中填写的分享设置：有效天数（覆盖提议值）与访问密码（不经过模型，也不写入操作记录）。"""
+    confirm = confirm or {}
+    options = payload.get("options") or {}
+    days = confirm.get("expires_days", options.get("expires_days"))
+    if days is not None and (isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 365):
+        raise ValueError("有效天数必须在 0–365 之间（0 表示永久）")
+    password = confirm.get("password")
+    if password is not None and (not isinstance(password, str) or (password and not 4 <= len(password) <= 128)):
+        raise ValueError("访问密码需要 4–128 个字符")
+    result: dict[str, object] = {"expires_at": time.time() + days * 86400 if days else None}
+    if password:
+        result["password"] = password
+    return result
 
 
 def directory_version(db, bucket_id: int, prefix: str, *, limit: int = 20000) -> tuple[str, int]:
@@ -49,6 +69,7 @@ class Progress:
     failed: int = 0
     reasons: collections.Counter = field(default_factory=collections.Counter)
     failures: list = field(default_factory=list)
+    links: list = field(default_factory=list)  # 公开分享：只写入操作结果给用户看，不进入模型上下文
 
     def skip(self, path: str, reason: str) -> None:
         self.skipped += 1
@@ -63,8 +84,11 @@ class Progress:
             self.failures.append({"path": path, "reason": reason, "status": "failed"})
 
     def result(self) -> dict[str, object]:
-        return {"ok": self.ok, "skipped": self.skipped, "failed": self.failed, "total": self.total,
-                "reasons": dict(self.reasons.most_common(10)), "failures": self.failures}
+        result = {"ok": self.ok, "skipped": self.skipped, "failed": self.failed, "total": self.total,
+                  "reasons": dict(self.reasons.most_common(10)), "failures": self.failures}
+        if self.links:
+            result["links"] = self.links
+        return result
 
     def status(self) -> str:
         if self.cancel:
@@ -124,13 +148,14 @@ class ActionExecutor:
 
     async def execute(self, *, user_id: int, bucket_id: int, payload: dict, progress: Progress,
                       on_progress: Callable[[], None] | None = None,
-                      authorized: Callable[[], bool] | None = None) -> dict | None:
+                      authorized: Callable[[], bool] | None = None, confirm: dict | None = None) -> dict | None:
         """执行冻结的条目，返回撤销数据（不可撤销的类型返回 None）。"""
         kind = payload["kind"]
         scope_root = payload.get("scope", "")
         scope = Scope(bucket_id, scope_root)
-        undo: dict[str, list] = {"moves": [], "trash": [], "mkdir": []}
+        undo: dict[str, list] = {"moves": [], "trash": [], "mkdir": [], "unshare": []}
         items = payload.get("items", [])
+        share = share_options(payload, confirm) if kind == "share" else {}
         if kind == "downloads":
             await self._downloads(user_id, scope_root, payload, progress, on_progress, authorized)
             return None
@@ -139,7 +164,7 @@ class ActionExecutor:
                 progress.cancel = True
                 break
             try:
-                await self._one(kind, user_id, bucket_id, scope_root, scope, item, progress, undo)
+                await self._one(kind, user_id, bucket_id, scope_root, scope, item, progress, undo, share)
             except (PermissionError, ValueError, NotFoundError) as exc:
                 progress.fail(self._label(kind, item), str(exc) or "操作不被允许")
             except asyncio.CancelledError:
@@ -167,7 +192,7 @@ class ActionExecutor:
             return f"任务 #{item['id']}"
         return display(item.get("path", ""))
 
-    async def _one(self, kind, user_id, bucket_id, scope_root, scope, item, progress: Progress, undo) -> None:
+    async def _one(self, kind, user_id, bucket_id, scope_root, scope, item, progress: Progress, undo, share=None) -> None:
         if kind in MOVE_KINDS:
             source, target = item["from"], item["to"]
             reason = self._check_source(bucket_id, scope_root, item, source)
@@ -241,6 +266,24 @@ class ActionExecutor:
                 return
             self.objects.set_public(scope, key, False)
             progress.ok += 1
+        elif kind == "share":
+            key = item["path"]
+            if not self._inside(scope_root, key):
+                progress.skip(display(key), "不在作用域内")
+                return
+            if not self._exists(bucket_id, key):
+                progress.skip(display(key), "已不存在")
+                return
+            from ..api import apply_share
+            row = self.db.execute("SELECT public_token FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone()
+            was_public = bool(row and row["public_token"])
+            options = dict(share or {})
+            info = apply_share(self.objects, scope, key, True, options)
+            progress.ok += 1
+            progress.links.append({"path": key, "token": info.public_token, "folder": key.endswith("/"),
+                                   "expires_at": info.public_expires_at, "password": info.public_has_password})
+            if not was_public:
+                undo["unshare"].append(key)
         elif kind == "download_control":
             if self.offline is None:
                 raise ValueError("离线下载未启用")
@@ -337,6 +380,18 @@ class ActionExecutor:
                 progress.ok += 1
             except (PermissionError, ValueError, NotFoundError) as exc:
                 progress.fail(display(row["original_path"]), str(exc))
+        for key in data.get("unshare", []):
+            if progress.cancel or (authorized is not None and not authorized()):
+                break
+            row = self.db.execute("SELECT public_token FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone()
+            if row is None or row["public_token"] is None:
+                progress.skip(display(key), "已经不是公开状态")
+                continue
+            try:
+                self.objects.set_public(scope, key, False)
+                progress.ok += 1
+            except (PermissionError, ValueError, NotFoundError) as exc:
+                progress.fail(display(key), str(exc))
         for key in reversed(data.get("mkdir", [])):
             if progress.cancel or (authorized is not None and not authorized()):
                 break

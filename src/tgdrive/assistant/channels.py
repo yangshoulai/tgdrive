@@ -44,9 +44,10 @@ def normalize_base_url(value: object) -> str:
 
 
 class ChannelStore:
-    def __init__(self, metadata: Metadata, keystore: KeyStore, *, log_call: Callable[..., None] | None = None) -> None:
+    def __init__(self, metadata: Metadata, keystore: KeyStore, *, log_call: Callable[..., None] | None = None, catalog=None) -> None:
         self.metadata, self.keystore = metadata, keystore
         self.log_call = log_call or (lambda **_: None)
+        self.catalog = catalog
 
     def _key(self) -> bytes:
         return derive_subkey(self.keystore.require_kek(), "ai-channel-key")
@@ -200,10 +201,18 @@ class ChannelStore:
 
     @staticmethod
     def _model_json(row) -> dict[str, object]:
+        try:
+            capabilities = json.loads(row["capabilities"] or "{}")
+            manual = json.loads(row["manual_fields"] or "[]")
+        except ValueError:
+            capabilities, manual = {}, []
         return {"id": row["id"], "channel_id": row["channel_id"], "model": row["model"],
                 "display_name": row["display_name"], "label": row["display_name"] or row["model"],
                 "source": row["source"], "enabled": bool(row["enabled"]), "tools": row["tools"],
                 "context_window": row["context_window"], "max_output": row["max_output"],
+                "input_price": row["input_price"], "output_price": row["output_price"],
+                "capabilities": {name: capabilities.get(name) for name in ("tools", "reasoning", "vision", "structured")},
+                "catalog_id": row["catalog_id"], "manual_fields": manual,
                 "removed_upstream": bool(row["removed_upstream"]), "sort": row["sort"],
                 "tested_at": row["tested_at"], "test_note": row["test_note"]}
 
@@ -243,16 +252,23 @@ class ChannelStore:
         with self.metadata.transaction() as db:
             if db.execute("SELECT 1 FROM ai_models WHERE channel_id=? AND model=?", (channel_id, model.strip())).fetchone():
                 raise ValueError("该渠道已有同名模型")
+            manual = [name for name in ("context_window", "max_output", "tools", "input_price", "output_price") if values.get(name) is not None
+                      and not (name == "tools" and values[name] == "unknown")]
             cursor = db.execute(
-                "INSERT INTO ai_models(channel_id,model,display_name,source,enabled,tools,context_window,max_output,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO ai_models(channel_id,model,display_name,source,enabled,tools,context_window,max_output,input_price,output_price,"
+                "manual_fields,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (channel_id, model.strip(), values.get("display_name"), "manual", values.get("enabled", 0),
-                 values.get("tools", "unknown"), values.get("context_window"), values.get("max_output"), now))
-        return self.model(int(cursor.lastrowid))
+                 values.get("tools", "unknown"), values.get("context_window"), values.get("max_output"),
+                 values.get("input_price"), values.get("output_price"), json.dumps(manual), now))
+            model_id = int(cursor.lastrowid)
+            if self.catalog is not None:
+                row = db.execute("SELECT * FROM ai_models WHERE id=?", (model_id,)).fetchone()
+                self.catalog.apply(db, row, self.catalog.match(model.strip()))
+        return self.model(model_id)
 
     @staticmethod
     def _model_fields(payload: dict) -> dict[str, object]:
-        allowed = {"display_name", "enabled", "tools", "context_window", "max_output", "sort"}
+        allowed = {"display_name", "enabled", "tools", "context_window", "max_output", "sort", "input_price", "output_price"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
@@ -270,30 +286,47 @@ class ChannelStore:
             if payload["tools"] not in ("unknown", "yes", "no"):
                 raise ValueError("工具调用支持只能是 unknown、yes 或 no")
             values["tools"] = payload["tools"]
-        for name, high in (("context_window", 10_000_000), ("max_output", 1_000_000), ("sort", 100000)):
+        for name, high in (("context_window", 100_000_000), ("max_output", 10_000_000), ("sort", 100000)):
             if name in payload:
                 value = payload[name]
                 if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= high):
                     raise ValueError(f"{name} 必须是 0–{high} 的整数")
                 values[name] = value
+        for name in ("input_price", "output_price"):
+            if name in payload:
+                value = payload[name]
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100000):
+                    raise ValueError("价格必须是 0–100000 之间的数字（美元／百万 token）")
+                values[name] = None if value is None else float(value)
         return values
 
     def update_model(self, model_id: int, payload: dict) -> dict[str, object]:
-        self.model(model_id)
-        values = self._model_fields(payload)
-        if values:
-            with self.metadata.transaction() as db:
-                db.execute(f"UPDATE ai_models SET {','.join(f'{name}=?' for name in values)} WHERE id=?", (*values.values(), model_id))
+        current = self.model(model_id)
+        reset = payload.get("reset_catalog")
+        if reset is not None and not isinstance(reset, bool):
+            raise ValueError("reset_catalog 必须是布尔值")
+        values = self._model_fields({k: v for k, v in payload.items() if k != "reset_catalog"})
+        # 与当前值不同的目录字段视为管理员手动设置，之后目录同步不再覆盖。
+        manual = set(current["manual_fields"])
+        for name in ("context_window", "max_output", "tools", "input_price", "output_price"):
+            if name in values and values[name] != current[name]:
+                manual.add(name)
+        if reset:
+            manual.clear()
+        values["manual_fields"] = json.dumps(sorted(manual))
+        with self.metadata.transaction() as db:
+            db.execute(f"UPDATE ai_models SET {','.join(f'{name}=?' for name in values)} WHERE id=?", (*values.values(), model_id))
+            if reset and self.catalog is not None:
+                row = db.execute("SELECT * FROM ai_models WHERE id=?", (model_id,)).fetchone()
+                self.catalog.apply(db, row, self.catalog.match(row["model"]))
         return self.model(model_id)
 
     def delete_model(self, model_id: int) -> None:
-        model = self.model(model_id)
-        if model["source"] == "auto" and not model["removed_upstream"]:
-            raise ValueError("自动同步的模型不能删除，可以停用它")
+        self.model(model_id)
         with self.metadata.transaction() as db:
             db.execute("DELETE FROM ai_models WHERE id=?", (model_id,))
 
-    async def sync(self, channel_id: int, *, actor: str | None = None) -> dict[str, object]:
+    async def _upstream(self, channel_id: int, actor: str | None) -> list[dict]:
         endpoint = self.endpoint(channel_id)
         started = time.time()
         try:
@@ -303,35 +336,79 @@ class ChannelStore:
                           http_status=exc.status, error_code=exc.code, error=str(exc))
             with self.metadata.transaction() as db:
                 db.execute("UPDATE ai_channels SET last_error=?, updated_at=? WHERE id=?", (str(exc), time.time(), channel_id))
-            raise ValueError(f"同步失败：{exc}") from exc
-        now = time.time()
-        seen = {item["model"]: item for item in upstream}
-        added = restored = removed = 0
+            raise ValueError(f"读取模型列表失败：{exc}") from exc
+        self.log_call(kind="sync", channel_id=channel_id, actor=actor, started_at=started, status="ok",
+                      duration_ms=int((time.time() - started) * 1000), items=len(upstream))
+        return upstream
+
+    def _mark_upstream(self, channel_id: int, names: set[str], now: float) -> tuple[int, int]:
+        removed = restored = 0
         with self.metadata.transaction() as db:
-            existing = {row["model"]: row for row in db.execute("SELECT * FROM ai_models WHERE channel_id=?", (channel_id,))}
-            for index, (name, item) in enumerate(seen.items()):
-                row = existing.get(name)
-                if row is None:
-                    # 新发现的模型默认停用，避免误开昂贵或不支持工具调用的模型。
-                    db.execute("INSERT INTO ai_models(channel_id,model,display_name,source,enabled,context_window,sort,created_at) "
-                               "VALUES(?,?,?,?,0,?,?,?)", (channel_id, name, item["display_name"], "auto",
-                                                          item["context_window"], index, now))
-                    added += 1
-                else:
-                    if row["removed_upstream"]:
-                        restored += 1
-                    db.execute("UPDATE ai_models SET removed_upstream=0, context_window=COALESCE(context_window,?) WHERE id=?",
-                               (item["context_window"], row["id"]))
-            for name, row in existing.items():
-                if name not in seen and row["source"] == "auto" and not row["removed_upstream"]:
+            for row in db.execute("SELECT id, model, source, removed_upstream FROM ai_models WHERE channel_id=?", (channel_id,)).fetchall():
+                if row["model"] in names and row["removed_upstream"]:
+                    db.execute("UPDATE ai_models SET removed_upstream=0 WHERE id=?", (row["id"],))
+                    restored += 1
+                elif row["model"] not in names and row["source"] == "auto" and not row["removed_upstream"]:
                     db.execute("UPDATE ai_models SET removed_upstream=1 WHERE id=?", (row["id"],))
                     removed += 1
-            note = f"上游 {len(seen)} 个模型，新增 {added} 个" + (f"，{removed} 个已移除" if removed else "")
-            db.execute("UPDATE ai_channels SET synced_at=?, sync_note=?, last_error=NULL, updated_at=? WHERE id=?",
-                       (now, note, now, channel_id))
-        self.log_call(kind="sync", channel_id=channel_id, actor=actor, started_at=started, status="ok",
-                      duration_ms=int((time.time() - started) * 1000), items=len(seen))
-        return {"total": len(seen), "added": added, "restored": restored, "removed": removed, "note": note}
+        return removed, restored
+
+    async def discover(self, channel_id: int, *, actor: str | None = None) -> dict[str, object]:
+        """读取上游模型列表并附上目录匹配，不写入模型表（由管理员勾选后 add_models 加入）。"""
+        upstream = await self._upstream(channel_id, actor)
+        now = time.time()
+        names = {item["model"] for item in upstream}
+        removed, restored = self._mark_upstream(channel_id, names, now)
+        added = {row["model"]: row["id"] for row in self.metadata.db.execute("SELECT id, model FROM ai_models WHERE channel_id=?", (channel_id,))}
+        items = []
+        for item in upstream:
+            entry = self.catalog.match(item["model"]) if self.catalog is not None else None
+            items.append({"model": item["model"], "display_name": item["display_name"] or (entry["name"] if entry else None),
+                          "context_window": (entry or {}).get("context_window") or item["context_window"],
+                          "max_output": (entry or {}).get("max_output"),
+                          "input_price": (entry or {}).get("input_price"), "output_price": (entry or {}).get("output_price"),
+                          "capabilities": (entry or {}).get("capabilities") or {}, "catalog_id": entry["id"] if entry else None,
+                          "added": item["model"] in added, "model_id": added.get(item["model"])})
+        note = f"上游 {len(upstream)} 个模型，已加入 {sum(1 for item in items if item['added'])} 个" + (f"，{removed} 个已从上游移除" if removed else "")
+        with self.metadata.transaction() as db:
+            db.execute("UPDATE ai_channels SET synced_at=?, sync_note=?, last_error=NULL, updated_at=? WHERE id=?", (now, note, now, channel_id))
+        return {"models": items, "total": len(items), "removed": removed, "restored": restored, "note": note}
+
+    async def add_models(self, channel_id: int, names: object, *, actor: str | None = None) -> dict[str, object]:
+        """把管理员选中的上游模型加入渠道：按目录带入上下文、价格与能力；目录确认支持工具调用的直接启用。"""
+        self._row(channel_id)
+        if not isinstance(names, list) or not 1 <= len(names) <= 500 or not all(isinstance(n, str) and 0 < len(n) <= 200 for n in names):
+            raise ValueError("请选择 1–500 个模型")
+        upstream = {item["model"]: item for item in await self._upstream(channel_id, actor)}
+        missing = [name for name in names if name not in upstream]
+        if missing:
+            raise ValueError(f"上游没有这些模型：{', '.join(missing[:5])}")
+        now = time.time()
+        added = enabled = 0
+        with self.metadata.transaction() as db:
+            existing = {row["model"] for row in db.execute("SELECT model FROM ai_models WHERE channel_id=?", (channel_id,))}
+            sort = db.execute("SELECT COALESCE(MAX(sort),-1)+1 FROM ai_models WHERE channel_id=?", (channel_id,)).fetchone()[0]
+            for name in dict.fromkeys(names):
+                if name in existing:
+                    continue
+                item = upstream[name]
+                entry = self.catalog.match(name) if self.catalog is not None else None
+                on = bool(entry and entry["capabilities"].get("tools") is True)
+                cursor = db.execute("INSERT INTO ai_models(channel_id,model,display_name,source,enabled,context_window,sort,created_at) "
+                                    "VALUES(?,?,?,?,?,?,?,?)", (channel_id, name, item["display_name"] or (entry["name"] if entry else None),
+                                                                "auto", int(on), item["context_window"], sort, now))
+                sort += 1
+                if self.catalog is not None:
+                    row = db.execute("SELECT * FROM ai_models WHERE id=?", (cursor.lastrowid,)).fetchone()
+                    self.catalog.apply(db, row, entry)
+                added += 1
+                enabled += int(on)
+        return {"added": added, "enabled": enabled}
+
+    async def sync(self, channel_id: int, *, actor: str | None = None) -> dict[str, object]:
+        """检查上游：只更新已加入模型的“上游已移除”标记，不新增模型。"""
+        result = await self.discover(channel_id, actor=actor)
+        return {"total": result["total"], "added": 0, "restored": result["restored"], "removed": result["removed"], "note": result["note"]}
 
     async def test(self, model_id: int, tool: ToolDef, prompt: str, *, actor: str | None = None) -> dict[str, object]:
         model = self.model(model_id)

@@ -5,9 +5,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { Markdown } from "../markdown";
-import { Badge, Button, Checkbox, EmptyState, Icon, IconButton, Menu, Modal, Progress, Segmented, SkeletonRows, formatBytes, formatDateTime, toast, type IconName, type MenuItem, type Tone } from "../ui";
+import { Badge, Button, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, toast, type IconName, type MenuItem } from "../ui";
 import type { PageImport } from "./page-import";
+import { Thread, type LiveRun } from "./assistant-thread";
+import { filesBridge, waitForFiles } from "./assistant-bridge";
 
 const WIDTH_KEY = "tessera-assistant-width";
 const MIN_WIDTH = 360, MAX_WIDTH = 720;
@@ -35,16 +36,20 @@ export function AssistantLauncher({ onOpen, open }: { onOpen: () => void; open: 
   );
 }
 
-type Activity = { text: string; kind: "thinking" | "tool" | "queued" } | null;
+export type AssistantNavigate = (view: "files" | "trash" | "downloads" | "shared", prefix?: string) => void;
+const FULL_ACK_KEY = "tessera-assistant-full-ack";
+const EMPTY_LIVE: LiveRun = { reasoning: "", reasoningStartedAt: null, streaming: "", tools: [], phase: "thinking" };
 
 export function AssistantDrawer({ open, config, location, onClose, onConfigChanged, mode = "drawer", initialConversation, onOpenPage,
-  onConversationChange, onFilesChanged, pageImport, onPageImportDone }: {
+  onConversationChange, onFilesChanged, pageImport, onPageImportDone, onNavigate }: {
   open: boolean; config: ai.AssistantConfig; location: AssistantLocation; onClose: () => void; onConfigChanged: () => void;
   /** drawer：右侧抽屉；page：全页（左侧对话列表常驻，消息流居中）。 */
   mode?: "drawer" | "page"; initialConversation?: string | null; onOpenPage?: (conversationId: string | null) => void;
   onConversationChange?: (conversationId: string | null) => void; onFilesChanged?: () => void;
   /** 抓取脚本转交的页面快照：用户点击发送时随消息上传。 */
   pageImport?: PageImport | null; onPageImportDone?: () => void;
+  /** 浏览器工具 ui_navigate 等：在 Tessera 中打开页面。全页模式不提供（会离开对话页）。 */
+  onNavigate?: AssistantNavigate;
 }) {
   const page = mode === "page";
   const [width, setWidth] = useState(() => { const saved = Number(localStorage.getItem(WIDTH_KEY)); return saved >= MIN_WIDTH && saved <= MAX_WIDTH ? saved : 480; });
@@ -59,8 +64,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [modelId, setModelId] = useState<number | null>(null);
   const [scopeChoice, setScopeChoice] = useState<"conversation" | "location" | "root">("conversation");
   const [runId, setRunId] = useState<string | null>(null);
-  const [streaming, setStreaming] = useState("");
-  const [activity, setActivity] = useState<Activity>(null);
+  const [live, setLive] = useState<LiveRun | null>(null);
+  const [pendingMode, setPendingMode] = useState<ai.AccessMode>("approval");
+  const [fullPrompt, setFullPrompt] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [sending, setSending] = useState(false);
   const [capabilities, setCapabilities] = useState(false);
@@ -143,21 +149,46 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const atBottomRef = useRef(true);
   atBottomRef.current = atBottom;
 
+  // 浏览器工具：在当前页面执行后回传结果。只执行仍在有效期内、尚未处理的调用（断线重放时不重复操作页面）。
+  const handledCalls = useRef(new Set<string>());
+  const clientContext = useRef({ location, onNavigate, page });
+  clientContext.current = { location, onNavigate, page };
+  const runClientCall = useCallback(async (runId: string, event: ai.RunEvent) => {
+    const callId = String(event.call_id ?? "");
+    if (!callId || handledCalls.current.has(callId) || Number(event.expires_at ?? 0) * 1000 < Date.now()) return;
+    handledCalls.current.add(callId);
+    let outcome: { result?: Record<string, unknown>; error?: string };
+    try { outcome = { result: await executeClientTool(String(event.name), (event.args ?? {}) as Record<string, unknown>, clientContext.current) }; }
+    catch (reason) { outcome = { error: reason instanceof Error ? reason.message : "页面操作失败" }; }
+    await ai.sendClientResult(runId, callId, outcome).catch(() => undefined);
+  }, []);
+
   const follow = useCallback((id: string) => {
     unsubscribe.current?.();
     const version = selection.current;
     setReconnecting(false);
-    setRunId(id); setStreaming(""); setActivity({ text: "正在思考…", kind: "thinking" });
+    setRunId(id); setLive({ ...EMPTY_LIVE });
     unsubscribe.current = ai.subscribeRun(id, event => {
       if (version !== selection.current) return;
       switch (event.type) {
-        case "queued": setActivity({ text: `排队中，前面还有 ${event.position} 个`, kind: "queued" }); break;
-        case "run_started": case "thinking": case "stream_reset": setActivity({ text: "正在思考…", kind: "thinking" }); setStreaming(""); break;
-        case "text_delta": setStreaming(text => text + String(event.text ?? "")); setActivity(null); window.requestAnimationFrame(() => scrollToEnd()); break;
-        case "tool_started": setActivity({ text: `正在调用 ${String(event.label ?? event.name)}…`, kind: "tool" }); break;
+        case "queued": setLive(value => ({ ...(value ?? EMPTY_LIVE), phase: "queued", queue: Number(event.position) })); break;
+        case "run_started": case "thinking": case "stream_reset":
+          setLive(value => ({ ...EMPTY_LIVE, tools: value?.tools ?? [] })); break;
+        case "reasoning_delta":
+          setLive(value => { const current = value ?? EMPTY_LIVE; return { ...current, phase: "thinking", reasoning: current.reasoning + String(event.text ?? ""), reasoningStartedAt: current.reasoningStartedAt ?? Date.now() }; });
+          window.requestAnimationFrame(() => scrollToEnd()); break;
+        case "text_delta":
+          setLive(value => { const current = value ?? EMPTY_LIVE; return { ...current, phase: "writing", streaming: current.streaming + String(event.text ?? "") }; });
+          window.requestAnimationFrame(() => scrollToEnd()); break;
+        case "tool_started":
+          setLive(value => { const current = value ?? EMPTY_LIVE; return { ...current, phase: "tool", tools: [...current.tools, { callId: String(event.call_id), name: String(event.name), label: String(event.label ?? event.name) }] }; });
+          window.requestAnimationFrame(() => scrollToEnd()); break;
+        case "client_call": void runClientCall(id, event); break;
         case "message": {
           const message = event.message as ai.ChatMessage;
-          if (message.role === "assistant") setStreaming("");
+          // 落库的消息到达后，去掉对应的实时内容（思考与文字随助手消息，工具随工具消息）。
+          if (message.role === "assistant") setLive(value => value && { ...value, reasoning: "", reasoningStartedAt: null, streaming: "" });
+          if (message.role === "tool") setLive(value => value && { ...value, tools: value.tools.filter(tool => tool.callId !== message.call_id) });
           setDetail(current => current && !current.messages.some(item => item.seq === message.seq)
             ? { ...current, messages: [...current.messages, message] } : current);
           const actionEvent = message.event;
@@ -171,23 +202,23 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           break;
         }
         case "resync":
-          setStreaming("");
+          setLive(value => value && { ...value, streaming: "", reasoning: "" });
           setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => { if (version === selection.current) setDetail(fresh); }).catch(() => undefined); return current; });
           break;
         case "title": setDetail(current => current && { ...current, conversation: { ...current.conversation, title: String(event.title) } }); loadConversations(); break;
         case "run_finished": case "stream_failed":
-          setRunId(null); setActivity(null); setStreaming(""); unsubscribe.current = null;
+          setRunId(null); setLive(null); unsubscribe.current = null;
           onConfigChanged();
           setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => setDetail(value => value?.conversation.id === fresh.conversation.id ? fresh : value)).catch(() => undefined); return current; });
           break;
       }
     }, value => { if (version === selection.current) setReconnecting(value); });
-  }, [onConfigChanged, loadConversations, scrollToEnd]);
+  }, [onConfigChanged, loadConversations, scrollToEnd, runClientCall]);
 
   async function openConversation(id: string) {
     const version = ++selection.current;
     unsubscribe.current?.(); unsubscribe.current = null;
-    setRunId(null); setStreaming(""); setActivity(null); setHistory(false); setReconnecting(false); setLoading(true); setScopeChoice("conversation");
+    setRunId(null); setLive(null); setHistory(false); setReconnecting(false); setLoading(true); setScopeChoice("conversation");
     try {
       const value = await ai.conversation(id);
       if (version !== selection.current) return;
@@ -202,7 +233,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     selection.current += 1;
     setLoading(false); setReconnecting(false);
     unsubscribe.current?.(); unsubscribe.current = null;
-    setDetail(null); setRunId(null); setStreaming(""); setActivity(null); setHistory(false); setScopeChoice("conversation"); setDraft("");
+    setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeChoice("conversation"); setDraft(""); setPendingMode("approval");
     window.setTimeout(() => input.current?.focus(), 30);
   }
 
@@ -216,7 +247,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     try {
       let current = detail;
       if (!current) {
-        current = await ai.createConversation(scopeChoice === "root" ? "" : locationKey, modelId);
+        current = await ai.createConversation(scopeChoice === "root" ? "" : locationKey, modelId, config.full_access ? pendingMode : "approval");
         if (version !== selection.current) return;
         setDetail(current);
         loadConversations();
@@ -257,6 +288,20 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   async function acknowledge() {
     try { await ai.acknowledgeNotice(); onConfigChanged(); }
     catch (reason) { toast.error(api.errorMessage(reason, "操作失败")); }
+  }
+
+  // 访问模式：新对话先记在本地，创建时提交；已有对话立即保存。切换到完全访问前确认一次说明。
+  const accessMode: ai.AccessMode = detail ? detail.conversation.access_mode : pendingMode;
+  async function chooseMode(next: ai.AccessMode, confirmed = false) {
+    if (next === accessMode) return;
+    if (next === "full" && !confirmed && localStorage.getItem(FULL_ACK_KEY) !== "1") { setFullPrompt(true); return; }
+    if (!detail) { setPendingMode(next); return; }
+    try {
+      await ai.updateConversation(detail.conversation.id, { access_mode: next });
+      const fresh = await ai.conversation(detail.conversation.id);
+      setDetail(value => value?.conversation.id === fresh.conversation.id ? fresh : value);
+      window.requestAnimationFrame(() => scrollToEnd(true));
+    } catch (reason) { toast.error(api.errorMessage(reason, "切换失败")); }
   }
 
   const reloadDetail = useCallback(() => {
@@ -310,8 +355,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   }} />;
   const header = <header className="assistant-header">
     {<IconButton className={page ? "assistant-mobile-history" : undefined} icon="list" label="对话历史" active={history} onClick={() => { setHistory(value => !value); if (!history) loadConversations(); }} />}
-    <span className="assistant-brand-mark" aria-hidden="true"><Icon name="sparkle" size={18} /></span>
-    <div className="assistant-title"><strong>{detail?.conversation.title || "文件助手"}</strong><small>{detail ? conversationScope : "查找、整理，让文件井井有条"}</small></div>
+    <span className={`assistant-brand-mark${runId ? " is-working" : ""}`} aria-hidden="true"><Icon name="sparkle" size={18} /></span>
+    <div className="assistant-title"><strong>{detail?.conversation.title || "文件助手"}</strong>
+      <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{detail ? conversationScope : "查找、整理，让文件井井有条"}</small></div>
     <IconButton icon="plus" label="新对话（⌘⇧O）" onClick={newConversation} />
     {!page && onOpenPage && <IconButton icon="maximize" label="在全页打开" onClick={() => onOpenPage(currentId)} />}
     {!page && <IconButton icon="x" label="关闭" onClick={onClose} />}
@@ -323,11 +369,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} onAccept={() => void acknowledge()} />
           : loading ? <SkeletonRows rows={4} />
           : !detail ? <Welcome location={effectiveScope} onPick={text => { setDraft(text); input.current?.focus(); }} />
-          : <Messages detail={detail} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
+          : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
               onRetry={lastUser?.text ? () => void send(lastUser.text) : undefined} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
-        {streaming && <div className="assistant-msg is-assistant is-streaming"><ResponseHeading model={selectedModel?.label} streaming /><div className="assistant-response"><Markdown source={streaming} /><i className="assistant-caret" aria-hidden="true" /></div></div>}
-        {activity && <p className="assistant-activity" role="status"><span className="assistant-pulse" aria-hidden="true" />{activity.text}</p>}
-        {reconnecting && <p className="assistant-activity" role="status"><Icon name="refresh" size={14} />重新连接中…</p>}
+        {reconnecting && <p className="ai-notice" role="status"><Icon name="refresh" size={14} /><span>重新连接中…</span></p>}
       </div>
     </div>
     {unseen && <button type="button" className="assistant-unseen" onClick={() => scrollToEnd(true)}><Icon name="chevronDown" size={14} />有新消息</button>}</div>
@@ -337,7 +381,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         <div className="assistant-context-row">
           <ScopeChip scope={effectiveScope} conversationScope={detail ? conversationScope : null} location={currentLocation}
             privateView={location.view === "private"} choice={scopeChoice} onChoose={setScopeChoice} />
-          <button type="button" className="assistant-capability-button" onClick={() => setCapabilities(true)} title="查看助手能力"><Icon name="settings" size={14} /><span>能力</span></button>
+          <ModeChip mode={accessMode} allowed={config.full_access} onChoose={next => void chooseMode(next)} />
         </div>
         <textarea ref={input} className="assistant-input" rows={2} value={draft} maxLength={DRAFT_LIMIT}
           placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : "想找什么，或想怎样整理？"}
@@ -347,11 +391,14 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
         <div className="assistant-controls">
           <Menu label="选择模型" align="start" className="assistant-model" items={config.models.map(model => ({ label: model.label,
-            description: `${model.channel_name ?? "模型渠道"}${model.id === config.default_model ? " · 默认模型" : ""}`, icon: "server", checked: model.id === modelId,
+            description: [model.channel_name ?? "模型渠道", model.capabilities?.reasoning ? "推理" : "", model.capabilities?.vision ? "识图" : "",
+              model.context_window ? `${Math.round(model.context_window / 1000)}K 上下文` : "", model.id === config.default_model ? "默认" : ""].filter(Boolean).join(" · "),
+            icon: model.capabilities?.reasoning ? "brain" : "server", checked: model.id === modelId,
             onSelect: () => setModelId(model.id) }))}>
-            <Icon name="server" size={14} /><span>{selectedModel?.label ?? "选择模型"}</span><Icon name="chevronDown" size={12} />
+            <Icon name={selectedModel?.capabilities?.reasoning ? "brain" : "server"} size={14} /><span>{selectedModel?.label ?? "选择模型"}</span><Icon name="chevronDown" size={12} />
           </Menu>
-          <span className="assistant-enter-hint">Enter 发送</span>
+          <button type="button" className="assistant-capability-button" onClick={() => setCapabilities(true)} title="查看助手能力"><Icon name="sparkle" size={14} /><span>能力</span></button>
+          <span className="assistant-enter-hint">Enter 发送 · Shift+Enter 换行</span>
           {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
             : <button type="button" className="assistant-send" aria-label="发送" title="发送（Enter）" disabled={!draft.trim() || sending || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)} onClick={() => void send()}>
               {sending ? <span className="spinner" aria-hidden="true" /> : <Icon name="arrowUp" size={18} />}</button>}
@@ -359,11 +406,21 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       </div>
       <div className={`assistant-footnote${usageRatio >= 0.8 ? " tone-warning" : ""}`}>
         <span title={`今日已用 ${usage.today.toLocaleString("zh-CN")} token${usage.limit ? ` / ${usage.limit.toLocaleString("zh-CN")}` : ""}`}>{usage.limit ? `今日 ${Math.min(100, Math.round(usageRatio * 100))}%` : "今日不限额"}</span>
-        <span><Icon name="shield" size={11} />修改文件前会请你确认</span>
+        <span>{accessMode === "full" ? <><Icon name="zap" size={11} />普通修改自动执行，可在卡片上撤销</> : <><Icon name="shield" size={11} />修改文件前会请你确认</>}</span>
       </div>
     </div>
   </>;
-  const dialogs = capabilities && <CapabilitiesDialog config={config} onClose={() => setCapabilities(false)} onPick={text => { setCapabilities(false); setDraft(text); input.current?.focus(); }} />;
+  const dialogs = <>
+    {capabilities && <CapabilitiesDialog config={config} onClose={() => setCapabilities(false)} onPick={text => { setCapabilities(false); setDraft(text); input.current?.focus(); }} />}
+    {fullPrompt && <Modal title="切换到完全访问？" icon="zap" onClose={() => setFullPrompt(false)}
+      footer={<><Button onClick={() => setFullPrompt(false)}>取消</Button><Button variant="primary" onClick={() => { localStorage.setItem(FULL_ACK_KEY, "1"); setFullPrompt(false); void chooseMode("full", true); }}>切换</Button></>}>
+      <ul className="assistant-mode-points">
+        <li><Icon name="zap" size={15} /><span><strong>普通修改自动执行</strong>改名、移动、整理、新建文件夹、移入回收站等不再逐项询问，结果直接显示在对话里。</span></li>
+        <li><Icon name="restore" size={15} /><span><strong>24 小时内可以撤销</strong>每个自动执行的操作都保留卡片，可以一键撤销。</span></li>
+        <li><Icon name="shield" size={15} /><span><strong>这些仍需你确认</strong>彻底删除、公开分享、超过 1,000 项的操作，以及对话中读取过文件内容或网页之后的修改。</span></li>
+      </ul>
+    </Modal>}
+  </>;
 
   if (page) return (
     <section className="assistant-page" aria-label="文件助手" onKeyDown={onKeyDown}>
@@ -388,6 +445,45 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       {dialogs}
     </aside>
   );
+}
+
+/** 在用户当前页面执行浏览器工具（docs/assistant-design.md §19.7）。参数已经过服务端校验，这里只做页面操作。 */
+async function executeClientTool(name: string, args: Record<string, unknown>,
+  context: { location: AssistantLocation; onNavigate?: AssistantNavigate; page: boolean }): Promise<Record<string, unknown>> {
+  const { location, onNavigate, page } = context;
+  const bridge = filesBridge();
+  if (name === "ui_get_view") {
+    if (location.view === "private") return { view: "private" };
+    if (location.view !== "files" || !bridge) return { view: page ? "assistant" : location.view };
+    return { view: "files", path: "/" + bridge.prefix, selected: bridge.selected().map(key => "/" + key),
+      visible: bridge.visible().map(item => ({ path: "/" + item.key, ...(item.size !== undefined ? { size: item.size } : {}) })), total: bridge.total() };
+  }
+  if (page || !onNavigate) throw new Error("当前在助手全页，无法操作文件页；请在文件页打开助手抽屉后再试");
+  const open = async (folder: string) => {
+    if (location.view !== "files" || bridge?.prefix !== folder) onNavigate("files", folder);
+    const ready = await waitForFiles(folder);
+    if (!ready) throw new Error("目录没有在页面上打开");
+    return ready;
+  };
+  if (name === "ui_navigate") {
+    const view = String(args.view ?? "files") as Parameters<AssistantNavigate>[0];
+    onNavigate(view, view === "files" ? String(args.path ?? "") : "");
+    return { ok: true };
+  }
+  if (name === "ui_select") {
+    const target = await open(String(args.folder ?? ""));
+    const keys = (args.paths as string[] | undefined) ?? [];
+    const count = target.select(keys);
+    return { selected: count, missing: keys.length - count };
+  }
+  if (name === "ui_preview") {
+    const key = String(args.path ?? "");
+    const folder = key.includes("/") ? key.slice(0, key.lastIndexOf("/") + 1) : "";
+    const target = await open(folder);
+    if (!target.preview(key)) throw new Error("当前页没有找到这个文件（可能在其他分页）");
+    return { ok: true };
+  }
+  throw new Error("这个浏览器工具不受支持");
 }
 
 function SnapshotChip({ value, onRemove }: { value: PageImport; onRemove: () => void }) {
@@ -423,6 +519,17 @@ function ScopeChip({ scope, conversationScope, location, privateView, choice, on
       <Icon name={privateView ? "shield" : "folder"} size={14} /><span className="assistant-scope-label">{privateView ? "普通文件" : "作用于"}</span><span className="assistant-scope-text">{scope}</span><Icon name="chevronDown" size={12} />
     </Menu>
   </span>;
+}
+
+function ModeChip({ mode, allowed, onChoose }: { mode: ai.AccessMode; allowed: boolean; onChoose: (mode: ai.AccessMode) => void }) {
+  const items: MenuItem[] = [
+    { label: "审批模式", description: "每次修改都由你在卡片上确认", icon: "shield", heading: "修改文件时", checked: mode === "approval", onSelect: () => onChoose("approval") },
+    { label: "完全访问", description: allowed ? "普通修改自动执行，可撤销" : "管理员未开启", icon: "zap", checked: mode === "full", disabled: !allowed,
+      onSelect: () => onChoose("full") },
+  ];
+  return <Menu label="访问模式" align="start" className={`assistant-mode${mode === "full" ? " is-full" : ""}`} items={items}>
+    <Icon name={mode === "full" ? "zap" : "shield"} size={14} /><span>{mode === "full" ? "完全访问" : "审批"}</span><Icon name="chevronDown" size={12} />
+  </Menu>;
 }
 
 function CapabilitiesDialog({ config, onClose, onPick }: { config: ai.AssistantConfig; onClose: () => void; onPick: (text: string) => void }) {
@@ -478,320 +585,6 @@ function Welcome({ location, onPick }: { location: string; onPick: (text: string
     </button>)}</div>
     <div className="assistant-welcome-scope"><Icon name="folder" size={13} /><span>从 <code title={location}>{location}</code> 开始</span></div>
   </div>;
-}
-
-function ResponseHeading({ model, streaming = false }: { model?: string; streaming?: boolean }) {
-  return <div className="assistant-response-heading"><span className="assistant-response-mark"><Icon name="sparkle" size={13} /></span><strong>文件助手</strong>
-    {model && <span className="assistant-response-model" title={model}>{model}</span>}{streaming && <span className="assistant-live-label">正在生成</span>}</div>;
-}
-
-function copyMessage(text: string) {
-  void navigator.clipboard?.writeText(text).then(() => toast.success("已复制")).catch(() => toast.error("复制失败，请手动选择文本"));
-}
-
-/* ---------- 消息流 ---------- */
-
-type Block = { kind: "message"; message: ai.ChatMessage } | { kind: "tools"; messages: ai.ChatMessage[] };
-
-function blocks(messages: ai.ChatMessage[]): Block[] {
-  const result: Block[] = [];
-  const plans = new Map<string | null | undefined, number>();
-  for (const message of messages) if (message.event?.type === "plan") plans.set(message.run_id, message.seq);
-  for (const message of messages) {
-    if (message.event?.type === "plan" && plans.get(message.run_id) !== message.seq) continue;
-    if (message.role === "assistant" && !message.text?.trim()) continue;
-    if (message.role === "tool" && !message.event) {
-      const last = result.at(-1);
-      if (last?.kind === "tools") last.messages.push(message);
-      else result.push({ kind: "tools", messages: [message] });
-      continue;
-    }
-    result.push({ kind: "message", message });
-  }
-  return result;
-}
-
-function Messages({ detail, modelLabel, running, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
-  detail: ai.ConversationDetail; modelLabel: (id: number | null | undefined) => string; running: boolean; onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: () => void;
-  onActionChanged: () => void; onFilesChanged?: () => void;
-}) {
-  const items = useMemo(() => blocks(detail.messages), [detail.messages]);
-  const lastQuestion = [...detail.messages].reverse().find(message => message.event?.type === "question");
-  const answered = lastQuestion ? detail.messages.some(message => message.role === "user" && message.seq > lastQuestion.seq) : true;
-  return <>
-    {items.map((block, index) => block.kind === "tools" ? <ToolGroup key={`t${block.messages[0].seq}`} messages={block.messages} />
-      : <MessageView key={block.message.seq} message={block.message} model={modelLabel(block.message.model_id)} actions={detail.actions} running={running}
-          selectedAnswer={block.message.event?.type === "question" ? detail.messages.find(message => message.role === "user" && message.seq > block.message.seq)?.text : undefined}
-          canAnswer={!running && !answered && block.message.seq === lastQuestion?.seq} onAnswer={onAnswer} onScope={onScope}
-          onRetry={index === items.length - 1 ? onRetry : undefined} onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />)}
-  </>;
-}
-
-function MessageView({ message, model, actions, running, canAnswer, selectedAnswer, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
-  message: ai.ChatMessage; model: string; actions: ai.AssistantAction[]; running: boolean; canAnswer: boolean; selectedAnswer?: string;
-  onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: () => void;
-  onActionChanged: () => void; onFilesChanged?: () => void;
-}) {
-  if (message.role === "user") return <div className="assistant-msg is-user">
-    {message.attachment && <span className="assistant-attachment is-sent"><Icon name="globe" size={14} />
-      <span>{message.attachment.source.replace(/^https?:\/\//, "")} 的页面快照 · {message.attachment.pages} 页 · {message.attachment.images.toLocaleString("zh-CN")} 个图片候选</span></span>}
-    <div className="assistant-bubble">{message.text}</div>
-    <span className="assistant-meta">{message.created_at ? formatDateTime(message.created_at) : ""}
-      <button type="button" className="assistant-copy" onClick={() => copyMessage(message.text ?? "")}>复制</button></span>
-  </div>;
-  if (message.role === "assistant") return <div className="assistant-msg is-assistant">
-    <ResponseHeading model={model} /><div className="assistant-response"><Markdown source={message.text ?? ""} /></div>
-    <span className="assistant-meta">{message.output_tokens ? `${message.input_tokens ?? 0}+${message.output_tokens} token` : ""}
-      <button type="button" className="assistant-copy" onClick={() => copyMessage(message.text ?? "")}>复制</button></span>
-  </div>;
-  if (message.role === "event") {
-    if (message.type === "summary" || message.type === "model_switched" || message.type === "scope_changed" || message.type === "scope_rejected"
-      || message.type === "stopped" || message.type === "limit" || message.type === "action_result") {
-      return <p className="assistant-event">{message.text}</p>;
-    }
-    return <p className="assistant-event is-error"><Icon name="alert" size={14} />{message.text}
-      {message.retry && onRetry && !running && <button type="button" className="assistant-copy" onClick={onRetry}>重试</button>}</p>;
-  }
-  const event = message.event;
-  if (event?.type === "plan") return <div className="assistant-card assistant-plan">
-    <span className="assistant-card-head"><Icon name="list" size={16} /><strong>处理计划</strong><Badge>{event.items.filter(item => item.status === "completed").length} / {event.items.length}</Badge></span>
-    <ul>{event.items.map((item, index) => <li key={index} className={`is-${item.status}`}><Icon name={item.status === "completed" ? "checkCircle" : item.status === "in_progress" ? "play" : "chevronRight"} size={14} />{item.content}</li>)}</ul>
-  </div>;
-  if (event?.type === "question") return <div className="assistant-card assistant-question">
-    <span className="assistant-card-head"><Icon name="info" size={16} /><strong>需要你的选择</strong>{selectedAnswer && <Badge tone="success">已回答</Badge>}</span><p>{event.question}</p>
-    <div className="assistant-options">{event.options.map(option => <Button key={option} size="sm" variant={selectedAnswer === option ? "primary" : "secondary"} icon={selectedAnswer === option ? "check" : undefined} disabled={!canAnswer} onClick={() => onAnswer(option)}>{option}</Button>)}</div>
-  </div>;
-  if (event?.type === "scope_request") {
-    const action = actions.find(item => item.id === event.action_id);
-    if (!action && running) return <div className="assistant-card"><SkeletonRows rows={2} /></div>;
-    const status = action?.status ?? "expired";
-    return <div className={`assistant-card assistant-scope-card is-${status}`}>
-      <span className="assistant-card-head"><Icon name="folder" size={16} /><strong>助手请求扩大作用域</strong>
-        {status !== "pending" && <Badge tone={status === "confirmed" ? "success" : "neutral"}>{status === "confirmed" ? "已允许" : status === "rejected" ? "已拒绝" : "已过期"}</Badge>}</span>
-      <p><code>{action?.payload?.from ?? event.from}</code> → <code>{action?.payload?.to ?? event.to}</code></p>
-      {(action?.payload?.reason ?? event.reason) && <p className="muted">原因：{action?.payload?.reason ?? event.reason}</p>}
-      {status === "pending" && <div className="assistant-options">
-        <Button size="sm" onClick={() => onScope(event.action_id, false)}>拒绝</Button>
-        <Button size="sm" variant="primary" onClick={() => onScope(event.action_id, true)} aria-label={`允许把作用域扩大到 ${action?.payload?.to ?? event.to}`}>允许</Button>
-      </div>}
-    </div>;
-  }
-  if (event?.type === "action") {
-    const action = actions.find(item => item.id === event.action_id);
-    return <ActionCard id={event.action_id} action={action} fallback={event} onChanged={onActionChanged} onFilesChanged={onFilesChanged} />;
-  }
-  return <ToolGroup messages={[message]} />;
-}
-
-/* ---------- 待确认操作卡片（全部由服务端冻结的数据渲染，不使用模型生成的描述） ---------- */
-
-const ACTION_ICONS: Record<string, IconName> = { rename: "edit", move: "move", organize: "folder", mkdir: "folderPlus", trash: "trash",
-  restore: "restore", purge: "trash", unshare: "link", downloads: "download", download_control: "download" };
-const STATUS_LABEL: Record<string, [string, Tone]> = {
-  pending: ["待确认", "accent"], running: ["执行中", "accent"], done: ["已完成", "success"], partial: ["部分完成", "warning"],
-  failed: ["执行失败", "danger"], cancelled: ["已取消", "neutral"], rejected: ["已拒绝", "neutral"], expired: ["已过期", "neutral"],
-  interrupted: ["已中断", "warning"], undoing: ["撤销中", "accent"], undone: ["已撤销", "neutral"],
-};
-const MOVE_KINDS = ["rename", "move", "organize"];
-const name = (key: string) => key.replace(/\/$/, "").split("/").pop() ?? key;
-const parent = (key: string) => { const trimmed = key.replace(/\/$/, ""); return trimmed.includes("/") ? trimmed.slice(0, trimmed.lastIndexOf("/") + 1) : ""; };
-
-function describeItem(kind: string, item: ai.ActionItem): [string, string | null] {
-  if (MOVE_KINDS.includes(kind) && item.from && item.to) {
-    if (kind === "rename" || parent(item.from) === parent(item.to)) return [name(item.from), name(item.to)];
-    return [display(item.from), display(parent(item.to))];
-  }
-  if (kind === "downloads") return [item.name ?? "", item.host ?? null];
-  if (kind === "download_control") return [`#${item.id} ${name(item.path ?? "")}`, null];
-  return [display(item.path ?? ""), null];
-}
-
-function useNow(active: boolean) {
-  const [now, setNow] = useState(() => Date.now() / 1000);
-  useEffect(() => {
-    if (!active) return;
-    const timer = window.setInterval(() => setNow(Date.now() / 1000), 1000);
-    return () => window.clearInterval(timer);
-  }, [active]);
-  return now;
-}
-
-function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
-  id: string; action?: ai.AssistantAction; fallback: { kind: string; count: number }; onChanged: () => void; onFilesChanged?: () => void;
-}) {
-  const [value, setValue] = useState<ai.AssistantAction | undefined>(action);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [acknowledged, setAcknowledged] = useState(false);
-  const [armed, setArmed] = useState(false);
-  const [details, setDetails] = useState(false);
-  useEffect(() => { if (action) setValue(current => !current || action.status !== current.status || action.finished_at !== current.finished_at ? action : current); }, [action]);
-  const status = value?.status ?? "pending";
-  const live = status === "running" || status === "undoing";
-  const now = useNow(status === "pending");
-  const expired = status === "pending" && value != null && value.expires_at <= now;
-  // 执行中轮询进度；进入终态后刷新对话。无论终态来自轮询还是对话刷新，只要经历过执行就刷新文件列表。
-  useEffect(() => {
-    if (!live) return;
-    let stopped = false;
-    const timer = window.setInterval(() => {
-      void ai.action(id).then(fresh => {
-        if (stopped) return;
-        setValue(fresh);
-        if (fresh.status !== "running" && fresh.status !== "undoing") onChanged();
-      }).catch(() => undefined);
-    }, 1000);
-    return () => { stopped = true; window.clearInterval(timer); };
-  }, [live, id]);
-  const touched = useRef(false);
-  useEffect(() => {
-    if (live) touched.current = true;
-    else if (touched.current && status !== "pending") { touched.current = false; onFilesChanged?.(); }
-  }, [live, status]);
-
-  async function run(label: string, task: () => Promise<ai.AssistantAction>, after?: (fresh: ai.AssistantAction) => void) {
-    setBusy(label);
-    try {
-      const fresh = await task();
-      if (fresh.status === "running" || fresh.status === "undoing" || label === "undo") touched.current = true;
-      setValue(fresh);
-      after?.(fresh);
-      onChanged();
-    } catch (reason) { toast.error(api.errorMessage(reason, "操作失败")); onChanged(); }
-    finally { setBusy(null); setArmed(false); }
-  }
-
-  if (!value) return <div className="assistant-card assistant-action is-loading"><SkeletonRows rows={2} /></div>;
-  const payload = value.payload ?? {};
-  const kind = value.kind || fallback.kind;
-  const danger = Boolean(payload.danger);
-  const many = value.count > 1000;
-  const [label, tone] = STATUS_LABEL[expired ? "expired" : status] ?? [status, "neutral" as Tone];
-  const samples = payload.samples ?? [];
-  const progress = value.progress;
-  const result = value.result;
-  const verb = `${payload.title ?? ai.ACTION_KINDS[kind] ?? kind} ${value.count.toLocaleString("zh-CN")} 项`;
-  return <div className={`assistant-card assistant-action is-${expired ? "expired" : status}${danger ? " is-danger" : ""}`}>
-    <span className="assistant-card-head">
-      <Icon name={ACTION_ICONS[kind] ?? "check"} size={16} />
-      <strong>{payload.title ?? kind}</strong>
-      <Badge tone={danger && status === "pending" && !expired ? "danger" : tone}>{danger && status === "pending" && !expired ? "不可恢复" : label}</Badge>
-      {status === "pending" && !expired && <small className="assistant-card-time">{formatClock(value.expires_at)} 过期</small>}
-    </span>
-    <p className="assistant-action-summary">{payload.summary}</p>
-    <p className="assistant-action-meta muted">作用域 <code>{display(payload.scope ?? "")}</code>
-      {payload.size ? ` · ${formatBytes(payload.size)}` : ""}
-      {kind === "downloads" && payload.options?.target != null ? <> · 保存到 <code>{display(payload.options.target)}</code></> : null}</p>
-    {samples.length > 0 && <ul className="assistant-action-items">
-      {samples.slice(0, 6).map((item, index) => { const [left, right] = describeItem(kind, item); return <li key={index}>
-        <span className="cell-truncate" title={left}>{left}</span>{right != null && <><Icon name="chevronRight" size={12} /><span className="cell-truncate" title={right}>{right}</span></>}
-      </li>; })}
-    </ul>}
-    <div className="assistant-action-links">
-      {(value.count > 6 || (payload.conflicts ?? 0) > 0) && <button type="button" className="assistant-copy" onClick={() => setDetails(true)}>
-        查看全部 {value.count.toLocaleString("zh-CN")} 项{payload.conflicts ? ` · ${payload.conflicts} 项将跳过` : ""}</button>}
-      {kind === "downloads" && payload.options?.hosts?.length ? <span className="muted">来源 {payload.options.hosts.join("、")}</span> : null}
-    </div>
-    {live && progress && <div className="assistant-action-progress">
-      <Progress value={progress.total ? progress.done / progress.total * 100 : 0} label="执行进度" />
-      <small className="muted">{progress.done.toLocaleString("zh-CN")} / {progress.total.toLocaleString("zh-CN")}</small>
-    </div>}
-    {result && !live && <p className="assistant-action-result">
-      成功 {result.ok} 项{result.skipped ? ` · 跳过 ${result.skipped} 项` : ""}{result.failed ? ` · 失败 ${result.failed} 项` : ""}
-      {Object.keys(result.reasons ?? {}).length > 0 && <small className="muted">（{Object.entries(result.reasons).map(([reason, count]) => `${reason} ${count}`).join("；")}）</small>}
-    </p>}
-    {kind === "downloads" && result?.failed ? <p className="muted assistant-action-hint">部分图片需要来源页的登录或防盗链，可以在来源页用抓取脚本的「本地下载」保存。</p> : null}
-    {status === "pending" && !expired && <>
-      {danger && <label className="assistant-ack"><Checkbox checked={acknowledged} onChange={setAcknowledged} label="我了解此操作不可恢复" /><span>我了解此操作不可恢复</span></label>}
-      <div className="assistant-options">
-        <Button size="sm" disabled={Boolean(busy)} loading={busy === "reject"} onClick={() => void run("reject", () => ai.rejectAction(id))}>拒绝</Button>
-        <Button size="sm" variant={danger ? "danger" : "primary"} disabled={Boolean(busy) || (danger && !acknowledged)} loading={busy === "confirm"}
-          aria-label={`确认执行：${verb}`}
-          onClick={() => { if (many && !armed) { setArmed(true); return; }
-            void run("confirm", () => ai.confirmAction(id, { acknowledge: danger ? acknowledged : undefined, count: many ? value.count : undefined })); }}>
-          {many && armed ? `确认执行 ${value.count.toLocaleString("zh-CN")} 项` : "确认执行"}</Button>
-      </div>
-    </>}
-    {live && status === "running" && <div className="assistant-options"><Button size="sm" loading={busy === "cancel"} onClick={() => void run("cancel", () => ai.cancelAction(id))}>取消</Button></div>}
-    {value.undoable && !live && <div className="assistant-options">
-      <Button size="sm" icon="restore" loading={busy === "undo"} onClick={() => void run("undo", () => ai.undoAction(id))}>撤销</Button>
-    </div>}
-    {details && <ActionItemsDialog action={value} onClose={() => setDetails(false)} />}
-  </div>;
-}
-
-function formatClock(seconds: number) {
-  const date = new Date(seconds * 1000);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function ActionItemsDialog({ action, onClose }: { action: ai.AssistantAction; onClose: () => void }) {
-  const [items, setItems] = useState<ai.ActionItem[] | null>(null);
-  const [skipped, setSkipped] = useState<{ path: string; reason: string }[]>([]);
-  const [next, setNext] = useState<number | null>(null);
-  const [compacted, setCompacted] = useState(false);
-  const load = useCallback((offset: number) => {
-    void ai.actionItems(action.id, offset).then(page => {
-      setItems(current => offset ? [...(current ?? []), ...page.items] : page.items);
-      if (!offset) { setSkipped(page.skipped); setCompacted(page.compacted); }
-      setNext(page.next_offset);
-    }).catch(reason => { toast.error(api.errorMessage(reason, "条目加载失败")); setItems([]); });
-  }, [action.id]);
-  useEffect(() => load(0), [load]);
-  const failures = action.result?.failures ?? [];
-  return <Modal title={`${action.payload?.title ?? "操作"}：全部条目`} description={action.payload?.summary} size="lg" onClose={onClose}
-    footer={<Button onClick={onClose}>关闭</Button>}>
-    {compacted && <p className="inline-note">这个操作已超过 30 天，只保留了前 20 条样例。</p>}
-    {failures.length > 0 && <section className="assistant-action-section"><h4>执行时跳过或失败</h4>
-      <ul className="assistant-action-items is-plain">{failures.map((item, index) => <li key={index}><span className="cell-truncate">{item.path}</span><small className="muted">{item.reason}</small></li>)}</ul></section>}
-    {skipped.length > 0 && <section className="assistant-action-section"><h4>提议时已跳过（{skipped.length}）</h4>
-      <ul className="assistant-action-items is-plain">{skipped.map((item, index) => <li key={index}><span className="cell-truncate">{item.path}</span><small className="muted">{item.reason}</small></li>)}</ul></section>}
-    <section className="assistant-action-section"><h4>将要执行（{action.count.toLocaleString("zh-CN")}）</h4>
-      {items === null ? <SkeletonRows rows={4} /> : <ul className="assistant-action-items is-plain">
-        {items.map((item, index) => { const [left, right] = describeItem(action.kind, item); return <li key={index}>
-          <span className="cell-truncate" title={left}>{left}</span>{right != null && <><Icon name="chevronRight" size={12} /><span className="cell-truncate" title={right}>{right}</span></>}
-        </li>; })}
-      </ul>}
-      {next !== null && <Button size="sm" onClick={() => load(next)}>加载更多</Button>}
-    </section>
-  </Modal>;
-}
-
-function ToolGroup({ messages }: { messages: ai.ChatMessage[] }) {
-  const rows = <div className="assistant-tools">{messages.map(message => <ToolRow key={message.seq} message={message} />)}</div>;
-  if (messages.length <= 3) return rows;
-  const failed = messages.filter(message => message.status === "error").length;
-  return <details className="assistant-tool-group"><summary className="assistant-tool-summary"><Icon name="chevronRight" size={14} />
-    <span>完成 {messages.length} 项工具查询{failed ? ` · ${failed} 项出错` : ""}</span></summary>{rows}</details>;
-}
-
-function ToolRow({ message }: { message: ai.ChatMessage }) {
-  const [open, setOpen] = useState(false);
-  const failed = message.status === "error";
-  const args = message.arguments && Object.keys(message.arguments).length ? summarizeArgs(message.arguments) : "";
-  return <div className={`assistant-tool${failed ? " is-error" : ""}${open ? " is-open" : ""}`}>
-    <button type="button" className="assistant-tool-row" aria-expanded={open} onClick={() => setOpen(value => !value)}>
-      <Icon name={failed ? "alert" : "check"} size={14} />
-      <strong>{message.label ?? message.name}</strong>
-      {args && <span className="assistant-tool-args">{args}</span>}
-      <span className="assistant-tool-summary-text">{message.summary}</span>
-      <span className="assistant-tool-time">{message.duration_ms != null ? (message.duration_ms >= 1000 ? `${(message.duration_ms / 1000).toFixed(1)}s` : `${message.duration_ms}ms`) : ""}</span>
-    </button>
-    {!open && message.status === "ok" && message.name === "collect_gallery" && Array.isArray((message.result as { samples?: unknown })?.samples) &&
-      <div className="assistant-collection">{((message.result as { samples: string[] }).samples).map(url => <span key={url} className="assistant-chip-static" title={url}>{urlName(url)}</span>)}</div>}
-    {open && <div className="assistant-tool-detail">
-      {message.arguments && Object.keys(message.arguments).length > 0 && <><small>参数</small><pre>{JSON.stringify(message.arguments, null, 2)}</pre></>}
-      <small>结果{message.truncated ? "（已截断）" : ""}</small><pre>{JSON.stringify(message.result, null, 2)}</pre>
-    </div>}
-  </div>;
-}
-
-function urlName(url: string) {
-  const value = url.split("?")[0].split("/").pop() || url;
-  try { return decodeURIComponent(value); } catch { return value; }
-}
-
-function summarizeArgs(args: Record<string, unknown>) {
-  return Object.entries(args).slice(0, 3).map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`).join(" · ").slice(0, 80);
 }
 
 /* ---------- 对话历史 ---------- */

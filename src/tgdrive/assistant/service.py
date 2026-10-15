@@ -15,14 +15,17 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import SimpleNamespace
 
 from ..api import normalize_user_path
 from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
-from . import prompts, providers, web, web_tools, write_tools  # noqa: F401  导入即注册工具
-from .actions import DANGER_KINDS, KINDS, ActionExecutor, Progress
+from . import client_tools, prompts, providers, web, web_tools, write_tools  # noqa: F401  导入即注册工具
+from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
+from .catalog import CatalogStore
 from .channels import ChannelStore
 from .config import LIMITS, AssistantConfig
+from .guard import SecretGuard
 from .providers import ProviderError, ToolDef
 from .tools import (
     TOOLS,
@@ -42,6 +45,13 @@ EVENT_KEEP_SECONDS = 600
 EVENT_BYTES = 64 * 1024 * 1024
 MAX_TEXT = 8000
 STORED_RESULT = 256 * 1024
+CLIENT_TIMEOUT = 45
+CLIENT_RESULT_BYTES = 64 * 1024
+AUTO_WAIT = 25
+ACCESS_MODES = ("approval", "full")
+# 读取不可信外部内容的工具：结果进入上下文后，完全访问模式下的修改仍需确认（§19.5）。
+TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "collect_gallery": "分析过网页",
+               "parse_download_source": "解析过外部链接"}
 
 
 def session_hash(token: str) -> str:
@@ -74,6 +84,12 @@ class RunState:
     finished_at: float | None = None
     task: asyncio.Task | None = None
     changed: asyncio.Condition = field(default_factory=asyncio.Condition)
+    # 浏览器工具：等待页面回传结果的调用（call_id → Future）
+    client_waiters: dict = field(default_factory=dict)
+    # 本轮读取过的不可信外部内容（之后的修改在完全访问下也需要确认）
+    tainted: str | None = None
+    listeners: int = 0
+    thinking: dict = field(default_factory=dict)
 
     async def emit(self, event: dict) -> None:
         self.seq += 1
@@ -106,7 +122,10 @@ class AssistantService:
         self.metadata, self.keystore = accounts.metadata, accounts.keystore
         self.config = AssistantConfig(self.metadata)
         self.trace = TraceStore(self.metadata, self.keystore)
-        self.channels = ChannelStore(self.metadata, self.keystore, log_call=self.trace.log_call)
+        self.catalog = CatalogStore(self.metadata, self.config, log_call=self.trace.log_call)
+        self.channels = ChannelStore(self.metadata, self.keystore, log_call=self.trace.log_call, catalog=self.catalog)
+        self.guard = SecretGuard(self.channels, offline)
+        self.on_audit: Callable[[str, int, dict], None] | None = None  # 由 HTTP 层注入：自动执行的操作写审计
         self.chat = providers.chat  # 测试可替换为脚本化的假模型
         self.executor = ActionExecutor(objects, offline)
         self.executions: dict[str, Progress] = {}
@@ -142,6 +161,12 @@ class AssistantService:
         available, reason = self._availability(user_id)
         if not available:
             raise AssistantDenied(reason)
+
+    def _full_access(self, user_id: int) -> bool:
+        """管理员是否允许该账号使用完全访问：用户策略优先，未设置时跟随全局设置。"""
+        policy = self.config.policy(user_id)
+        allowed = policy.get("full_access")
+        return bool(self.config.full_access_default if allowed is None else allowed)
 
     def _tool_settings(self) -> dict[str, dict]:
         return self.config.tool_settings()
@@ -195,7 +220,7 @@ class AssistantService:
                 "default_model": self.config.default_model, "tools": tools, "max_level": level,
                 "usage": {"today": self.trace.tokens_today(account.id), "limit": daily or None},
                 "notice": self.config.notice, "notice_ack": policy["notice_ack_at"] is not None,
-                "retention_days": self.config.setting("retention_days")}
+                "retention_days": self.config.setting("retention_days"), "full_access": self._full_access(account.id)}
 
     def ack_notice(self, token: str, csrf: str) -> None:
         _, account = self._session(token, csrf=csrf, mutation=True)
@@ -222,15 +247,27 @@ class AssistantService:
         self._require_available(account.id)
         scope_root = self._location(payload.get("location"))
         model_id = self._choose_model(payload.get("model_id"), None)
+        mode = self._access_mode(account.id, payload.get("access_mode", "approval"))
         conversation_id = self.trace.create_conversation(account.id, scope_root, model_id,
                                                          keep=self.config.limits()["max_conversations"])
+        if mode != "approval":
+            self.trace.update_conversation(account.id, conversation_id, access_mode=mode)
         return self.conversation(token, conversation_id)
+
+    def _access_mode(self, user_id: int, value: object) -> str:
+        if value not in ACCESS_MODES:
+            raise ValueError("访问模式只能是 approval 或 full")
+        if value == "full" and not self._full_access(user_id):
+            raise ValueError("管理员未允许你使用完全访问模式")
+        return str(value)
 
     def conversation(self, token: str, conversation_id: str) -> dict[str, object]:
         _, account = self._session(token)
         row = self.trace.conversation(account.id, conversation_id)
         item = self.trace.conversation_json(row)
         item["scope"] = display(item.pop("scope_root"))
+        if item["access_mode"] == "full" and not self._full_access(account.id):
+            item["access_mode"] = "approval"
         return {"conversation": item, "messages": [self._public_message(m) for m in self.trace.messages(conversation_id, limit=2000)],
                 "actions": [self._action_view(action) for action in self.trace.actions(conversation_id)],
                 "active_run": self._active_run(conversation_id)}
@@ -242,17 +279,27 @@ class AssistantService:
 
     def update_conversation(self, token: str, csrf: str, conversation_id: str, payload: dict) -> dict[str, object]:
         _, account = self._session(token, csrf=csrf, mutation=True)
-        unknown = set(payload) - {"title", "archived"}
+        unknown = set(payload) - {"title", "archived", "access_mode"}
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
+        mode = self._access_mode(account.id, payload["access_mode"]) if "access_mode" in payload else None
         title = payload.get("title")
         if title is not None and (not isinstance(title, str) or not 1 <= len(title.strip()) <= 60):
             raise ValueError("标题需要 1–60 个字符")
         archived = payload.get("archived")
         if archived is not None and not isinstance(archived, bool):
             raise ValueError("archived 必须是布尔值")
-        self.trace.update_conversation(account.id, conversation_id, title=title.strip() if title else None, archived=archived)
-        return self.trace.conversation_json(self.trace.conversation(account.id, conversation_id))
+        self.trace.update_conversation(account.id, conversation_id, title=title.strip() if title else None, archived=archived,
+                                       access_mode=mode)
+        if mode is not None:
+            self.trace.append(conversation_id, None, "event", {
+                "type": "mode_changed", "text": "已切换到完全访问：普通修改会自动执行" if mode == "full" else "已切换到审批模式：每次修改都需要你确认",
+                "model_text": "[系统事件] 用户切换到完全访问模式。普通修改会在生成提议后自动执行；彻底删除、公开分享、超过 1000 项，"
+                              "以及本轮读取过文件内容或网页之后的修改，仍需要用户确认。" if mode == "full" else
+                              "[系统事件] 用户切换到审批模式，所有修改都需要用户在卡片上确认。"})
+        item = self.trace.conversation_json(self.trace.conversation(account.id, conversation_id))
+        item["scope"] = display(item.pop("scope_root"))
+        return item
 
     def delete_conversation(self, token: str, csrf: str, conversation_id: str) -> None:
         _, account = self._session(token, csrf=csrf, mutation=True)
@@ -382,6 +429,14 @@ class AssistantService:
             yield {"seq": after + 1, "type": "run_finished", "status": row["status"], "stop_reason": row["stop_reason"], "replay": True}
             return
         cursor = after
+        state.listeners += 1
+        try:
+            async for event in self._event_loop(token, state, cursor):
+                yield event
+        finally:
+            state.listeners -= 1
+
+    async def _event_loop(self, token: str, state: RunState, cursor: int):
         while True:
             # 长连接也重验权限，不能在退出或隐藏对话后继续获得正文。
             _, current = self._session(token)
@@ -403,6 +458,48 @@ class AssistantService:
                         await asyncio.wait_for(state.changed.wait(), 15)
                     except TimeoutError:
                         yield {"type": "ping"}
+
+    # ---------- 浏览器工具 ----------
+
+    def client_result(self, token: str, csrf: str, run_id: str, payload: dict) -> None:
+        """对话框回传浏览器工具的执行结果：只接受发起这个 run 的登录会话、正在等待中的调用。"""
+        _, account = self._session(token, csrf=csrf, mutation=True)
+        state = self._run_for(account.id, run_id)
+        if session_hash(state.token) != session_hash(token):
+            raise PermissionError("只能在发起对话的登录会话中回传")
+        call_id = payload.get("call_id")
+        future = state.client_waiters.get(call_id) if isinstance(call_id, str) else None
+        if future is None or future.done():
+            raise ValueError("这个调用已经结束")
+        if len(json.dumps(payload, ensure_ascii=False).encode()) > CLIENT_RESULT_BYTES:
+            future.set_result({"error": "页面返回的数据过大"})
+            raise ValueError("回传数据过大")
+        result = payload.get("result")
+        error = payload.get("error")
+        future.set_result({"error": str(error)[:200]} if error else result if isinstance(result, dict) else {"error": "页面没有返回结果"})
+
+    async def _client_call(self, state: RunState, call_id: str, name: str, arguments: dict) -> dict:
+        if state.listeners <= 0:
+            return {"error": "浏览器未连接：用户的对话框没有打开，无法操作页面"}
+        future = asyncio.get_running_loop().create_future()
+        state.client_waiters[call_id] = future
+        try:
+            await state.emit({"type": "client_call", "call_id": call_id, "name": name, "args": arguments,
+                              "expires_at": time.time() + CLIENT_TIMEOUT})
+            return await asyncio.wait_for(future, CLIENT_TIMEOUT)
+        except TimeoutError:
+            return {"error": "浏览器没有响应：对话框可能已关闭"}
+        finally:
+            state.client_waiters.pop(call_id, None)
+
+    def _conversation_taint(self, conversation_id: str) -> str | None:
+        """最近一次摘要之后，对话里是否有读取外部内容的工具结果（它们仍在模型上下文中）。"""
+        names = list(TAINT_TOOLS)
+        row = self.metadata.db.execute(
+            f"SELECT tool_name FROM assistant_messages WHERE conversation_id=? AND role='tool' AND tool_name IN ({','.join('?' * len(names))}) "
+            "AND seq > COALESCE((SELECT MAX(seq) FROM assistant_messages WHERE conversation_id=? AND role='event' AND tool_name='summary'),0) "
+            "ORDER BY seq DESC LIMIT 1", (conversation_id, *names, conversation_id)).fetchone()
+        return TAINT_TOOLS.get(row["tool_name"]) if row else None
 
     # ---------- 作用域请求 ----------
 
@@ -497,16 +594,28 @@ class AssistantService:
             raise ValueError("这是不可恢复的操作，请先勾选「我了解此操作不可恢复」")
         if row["count"] > 1000 and payload.get("count") != row["count"]:
             raise ValueError(f"条目较多，请再次确认执行 {row['count']} 项")
+        action_payload = self.trace.action_payload(row)
+        confirm = None
+        if row["kind"] == "share":
+            # 卡片中填写的有效期与访问密码只在这次请求的内存里使用，不写入操作记录、审计或对话。
+            share = payload.get("share") if isinstance(payload.get("share"), dict) else {}
+            confirm = {key: share[key] for key in ("expires_days", "password") if key in share}
+            share_options(action_payload, confirm)
         if not self.trace.start_action(action_id):
             raise ValueError("该操作已处理或已过期")
-        action_payload = self.trace.action_payload(row)
+        self._launch_action(row, account, token, action_payload, confirm, "已确认")
+        return self.action_detail(token, action_id)
+
+    def _launch_action(self, row, account, token: str, payload: dict, confirm: dict | None, decision: str) -> asyncio.Task:
+        action_id = row["id"]
         record = self.trace.action_recorder(action_id, row["conversation_id"])
         progress = Progress(total=row["count"])
         self.executions[action_id] = progress
-        self._action_event(row, "已确认", None, f"已确认：{KINDS.get(row['kind'], row['kind'])} {row['count']} 项")
-        task = asyncio.get_running_loop().create_task(self._run_action(row, account, action_payload, progress, token, record))
+        if decision == "已确认":
+            self._action_event(row, decision, None, f"已确认：{KINDS.get(row['kind'], row['kind'])} {row['count']} 项")
+        task = asyncio.get_running_loop().create_task(self._run_action(row, account, payload, progress, token, record, confirm, decision))
         self._execution_tasks[action_id] = task
-        return self.action_detail(token, action_id)
+        return task
 
     def _action_authorized(self, token: str, row) -> bool:
         try:
@@ -517,12 +626,13 @@ class AssistantService:
         except (AuthenticationError, NotFoundError, NotReadyError, PermissionError):
             return False
 
-    async def _run_action(self, row, account, payload: dict, progress: Progress, token: str, record) -> None:
+    async def _run_action(self, row, account, payload: dict, progress: Progress, token: str, record, confirm: dict | None = None,
+                          decision: str = "已确认") -> dict:
         action_id = row["id"]
         undo = None
         try:
             undo = await self.executor.execute(user_id=account.id, bucket_id=account.bucket_id, payload=payload, progress=progress,
-                                               authorized=lambda: self._action_authorized(token, row))
+                                               authorized=lambda: self._action_authorized(token, row), confirm=confirm)
             status = progress.status()
         except asyncio.CancelledError:
             progress.cancel = True
@@ -539,14 +649,23 @@ class AssistantService:
         text = (f"{label}：成功 {result['ok']} 项" + (f"，跳过 {result['skipped']} 项" if result["skipped"] else "")
                 + (f"，失败 {result['failed']} 项" if result["failed"] else ""))
         try:
-            record(status, result, undo, {"type": "action_result", "action_id": action_id, "text": text,
-                                         "model_text": prompts.action_event(action_id, KINDS.get(row["kind"], row["kind"]), row["count"], "已确认", result)})
+            # 自动执行的结果已经作为工具结果交给模型，这里的事件只给界面看，不再重复写给模型。
+            event = {"type": "action_result", "action_id": action_id, "text": ("自动执行" + text) if decision == "自动执行" else text}
+            if decision != "自动执行":
+                event["model_text"] = prompts.action_event(action_id, KINDS.get(row["kind"], row["kind"]), row["count"], decision, result)
+            record(status, result, undo, event)
         except Exception:
             log.error("assistant action bookkeeping failed id=%s", action_id)
+        if decision == "自动执行" and self.on_audit is not None:
+            try:
+                self.on_audit("assistant.action.auto", account.id, {"kind": row["kind"], "status": status, "count": row["count"]})
+            except Exception:
+                log.error("assistant audit failed id=%s", action_id)
         self._execution_tasks.pop(action_id, None)
         # 进度在内存里多保留一会儿，便于界面读取最终计数。
         await asyncio.sleep(0)
         self.executions.pop(action_id, None)
+        return {"status": status, **result}
 
     def cancel_action(self, token: str, csrf: str, action_id: str) -> dict[str, object]:
         _, account = self._session(token, csrf=csrf, mutation=True)
@@ -657,13 +776,27 @@ class AssistantService:
         if summary:
             result.append({"role": "user", "content": summary})
         pending: dict[str, str] = {}
+        # 工具调用尚未全部返回时出现的事件（例如完全访问下自动执行的结果）先暂存，等结果齐了再放进去，
+        # 否则会把这些调用截断成「已取消」。
+        deferred: list[dict] = []
+
+        def flush() -> None:
+            nonlocal pending
+            for call_id, name in pending.items():
+                result.append({"role": "tool", "tool_call_id": call_id,
+                               "content": prompts.wrap_result(name, "error", {"error": "已取消"}, False)})
+            pending = {}
+            result.extend(deferred)
+            deferred.clear()
+
         for message in selected:
             role = message["role"]
+            if role == "event":
+                if message.get("model_text"):
+                    (deferred if pending else result).append({"role": "user", "content": message["model_text"]})
+                continue
             if role != "tool" and pending:
-                for call_id, name in pending.items():
-                    result.append({"role": "tool", "tool_call_id": call_id,
-                                   "content": prompts.wrap_result(name, "error", {"error": "已取消"}, False)})
-                pending = {}
+                flush()
             if role == "user":
                 attachment = message.get("attachment")
                 note = (f"\n\n[附件] 用户通过抓取脚本发来了 {attachment['source']} 的页面快照 snapshot_id={attachment['id']}"
@@ -678,11 +811,9 @@ class AssistantService:
                 if message.get("call_id") in pending:
                     pending.pop(message["call_id"])
                     result.append({"role": "tool", "tool_call_id": message["call_id"], "content": message["model_content"]})
-            elif role == "event" and message.get("model_text"):
-                result.append({"role": "user", "content": message["model_text"]})
-        for call_id, name in pending.items():
-            result.append({"role": "tool", "tool_call_id": call_id,
-                           "content": prompts.wrap_result(name, "error", {"error": "已取消"}, False)})
+                    if not pending:
+                        flush()
+        flush()
         return result
 
     @staticmethod
@@ -719,7 +850,7 @@ class AssistantService:
             return False
         self.trace.append(state.conversation_id, state.id, "event", {
             "type": "summary", "text": "较早的对话已压缩为摘要", "upto": keep_from - 1,
-            "model_text": "[对话摘要（较早的消息已压缩）]\n" + reply.text.strip()})
+            "model_text": "[对话摘要（较早的消息已压缩）]\n" + reply.text.strip()}, tool_name="summary")
         return True
 
     async def _model_call(self, state: RunState, model: dict, endpoint, system: str, messages: list[dict], tools: list[ToolDef], *,
@@ -729,12 +860,21 @@ class AssistantService:
         started = time.time()
         try:
             async def on_text(text: str) -> None:
-                await state.emit({"type": "text_delta", "text": text})
+                if state.thinking.get("start") is not None and state.thinking.get("end") is None:
+                    state.thinking["end"] = time.monotonic()
+                await state.emit({"type": "text_delta", "text": self.guard.redact(text)})
+
+            async def on_reasoning(text: str) -> None:
+                now = time.monotonic()
+                state.thinking.setdefault("start", now)
+                state.thinking["last"] = now
+                await state.emit({"type": "reasoning_delta", "text": self.guard.redact(text)})
             for attempt in range(2):
                 try:
                     self._validate(state)
+                    state.thinking = {}
                     reply = await self.chat(endpoint, model["model"], system, messages, tools, max_tokens=max_tokens,
-                                            on_text=on_text if stream else None)
+                                            **({"on_text": on_text, "on_reasoning": on_reasoning} if stream else {}))
                     break
                 except ProviderError as exc:
                     self.trace.log_call(kind="model", run_id=state.id, conversation_id=state.conversation_id, user_id=state.user_id,
@@ -817,10 +957,41 @@ class AssistantService:
             async def propose(kind: str, payload: dict, count: int) -> dict:
                 if count > limits["action_items"]:
                     raise ToolError(f"匹配 {count} 项，超过单次上限 {limits['action_items']}，请缩小范围。")
+                # 完全访问：普通修改自动确认执行；不可恢复、公开分享、超过 1000 项、读取过外部内容之后仍需确认（§19.5）。
+                auto = False
+                current = self.trace.conversation(state.user_id, state.conversation_id, include_hidden=True)
+                if current["access_mode"] == "full" and self._full_access(state.user_id):
+                    taint = state.tainted or self._conversation_taint(state.conversation_id)
+                    if kind in CONFIRM_KINDS:
+                        reason = "彻底删除与公开分享总是需要你确认"
+                    elif count > 1000:
+                        reason = "条目超过 1,000 项，需要你确认"
+                    elif taint:
+                        reason = f"对话中{taint}，为防止内容里的诱导指令，这次修改需要你确认"
+                    else:
+                        reason, auto = None, True
+                    payload = {**payload, "auto": True} if auto else {**payload, "confirm_reason": reason}
                 action_id = self.trace.create_action(state.conversation_id, state.id, state.user_id, session_hash(state.token), kind,
                                                      call.name, payload, count=count)
                 row = self.trace.action(state.user_id, action_id)
-                return {"action_id": action_id, "expires_at": row["expires_at"]}
+                created: dict = {"action_id": action_id, "expires_at": row["expires_at"]}
+                if payload.get("confirm_reason"):
+                    created["confirm_reason"] = payload["confirm_reason"]
+                if auto and self.trace.start_action(action_id):
+                    task = self._launch_action(row, SimpleNamespace(id=state.user_id, bucket_id=state.bucket_id), state.token,
+                                               payload, None, "自动执行")
+                    try:
+                        outcome = await asyncio.wait_for(asyncio.shield(task), min(AUTO_WAIT, max(2, limits["tool_seconds"] - 3)))
+                    except TimeoutError:
+                        outcome = {"status": "running"}
+                    created.update(auto=True, outcome={key: outcome.get(key) for key in ("status", "ok", "skipped", "failed", "reasons")})
+                return created
+
+            def taint(reason: str) -> None:
+                state.tainted = state.tainted or reason
+
+            async def client(name: str, arguments: dict) -> dict:
+                return await self._client_call(state, call.id, name, arguments)
 
             async def analyze(summary: dict, goal: str) -> dict:
                 model = self.channels.model(state.model_id)
@@ -835,11 +1006,11 @@ class AssistantService:
                                   scope_request, {"used_bytes": usage["used_bytes"] if usage else None,
                                                   "quota_bytes": usage["quota_bytes"] if usage else None},
                                   conversation_id=state.conversation_id, limits=limits, propose=propose, trace=self.trace,
-                                  analyze=analyze)
+                                  analyze=analyze, client=client, taint=taint)
             timeout = max(limits["tool_seconds"], spec.timeout or 0)
             output = await asyncio.wait_for(spec.handler(context, arguments), timeout)
-            payload, truncated = self._fit(output.result, limits["tool_result_bytes"])
-            summary, items, event = output.summary, output.items, output.event
+            payload, truncated = self._fit(self.guard.redact_value(output.result), limits["tool_result_bytes"])
+            summary, items, event = self.guard.redact(output.summary), output.items, self.guard.redact_value(output.event)
             ends_turn = output.ends_turn
         except TimeoutError:
             status, payload, truncated, ends_turn = "error", {"error": "工具执行超时，请缩小范围后重试"}, False, False
@@ -919,7 +1090,10 @@ class AssistantService:
                 system = prompts.system_prompt(date=now.strftime("%Y-%m-%d"), timezone=str(now.tzinfo), scope_root=display(scope_root),
                                                can_write=any(spec.level in ("write", "danger") for spec in tools.values()),
                                                can_read_text="read_text_file" in tools, can_web="analyze_page" in tools,
-                                               can_danger=any(spec.level == "danger" for spec in tools.values()))
+                                               can_danger=any(spec.level == "danger" for spec in tools.values()),
+                                               can_share="propose_share" in tools, can_browser="ui_get_view" in tools,
+                                               access_mode="full" if conversation["access_mode"] == "full"
+                                               and self._full_access(state.user_id) else "approval")
                 pending = self.trace.pending_actions(state.conversation_id)
                 history.append({"role": "user", "content": prompts.context_block(
                     scope_root=display(scope_root), view=state.view, location=display(state.location),
@@ -935,8 +1109,13 @@ class AssistantService:
                 steps += 1
                 self._validate(state)
                 calls = reply.tool_calls if not forced_final else []
-                assistant = {"text": reply.text, "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
+                assistant = {"text": self.guard.redact(reply.text), "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
                              "model_id": model["id"], "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens}
+                if reply.reasoning.strip():
+                    started_at = state.thinking.get("start")
+                    ended_at = state.thinking.get("end") or state.thinking.get("last")
+                    assistant["reasoning"] = self.guard.redact(reply.reasoning.strip())
+                    assistant["reasoning_ms"] = int((ended_at - started_at) * 1000) if started_at and ended_at else None
                 seq = self.trace.append(state.conversation_id, state.id, "assistant", assistant)
                 await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "assistant", **assistant}})
                 if not calls:
@@ -1161,6 +1340,16 @@ class AssistantService:
         """维护任务：按保留期清理留痕与调用日志。"""
         return await self.metadata.run_in_thread(lambda: self.trace.cleanup(
             retention_days=self.config.setting("retention_days"), call_log_days=self.config.setting("call_log_days"), now=now))
+
+    async def sync_catalog_if_due(self, now: float | None = None) -> dict[str, object]:
+        """维护任务：每天同步一次模型目录。只在已经配置过模型渠道后自动同步，未使用助手的部署不访问外网。"""
+        if not self.metadata.db.execute("SELECT 1 FROM ai_channels LIMIT 1").fetchone() or not self.catalog.due(now):
+            return {"skipped": True}
+        try:
+            result = await self.catalog.sync()
+        except ValueError as exc:
+            return {"error": str(exc)[:200]}
+        return {key: result[key] for key in ("total", "added", "updated", "models")}
 
 
 def _fmt(size: int | None) -> str:

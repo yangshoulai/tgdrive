@@ -104,6 +104,11 @@ class TgDriveASGI(StaticFiles):
         self.context = context
         self.offline, self.resources = offline, resources
         self.assistant = assistant
+        if assistant is not None:
+            def audit_auto(action: str, user_id: int, detail: dict) -> None:
+                row = admin.accounts.metadata.db.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
+                self.audit.record(action, actor_type="user", actor=row["username"] if row else None, ok=True, detail=detail)
+            assistant.on_audit = audit_auto
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -375,6 +380,10 @@ class TgDriveASGI(StaticFiles):
                           "/assistant/channels/{}/delete": "assistant.channel.delete",
                           "/assistant/channels/{}/sync": "assistant.channel.sync",
                           "/assistant/channels/{}/models": "assistant.model.create",
+                          "/assistant/channels/{}/models/batch": "assistant.model.create",
+                          "/assistant/catalog": "assistant.catalog.create", "/assistant/catalog/update": "assistant.catalog.update",
+                          "/assistant/catalog/delete": "assistant.catalog.delete", "/assistant/catalog/sync": "assistant.catalog.sync",
+                          "/assistant/catalog/settings": "assistant.catalog.settings",
                           "/assistant/models/{}/update": "assistant.model.update",
                           "/assistant/models/{}/delete": "assistant.model.delete",
                           "/assistant/models/{}/test": "assistant.model.test",
@@ -493,7 +502,7 @@ class TgDriveASGI(StaticFiles):
                 detail["bad"] = len((result or {}).get("bad", []))
         elif action == "assistant.settings":
             detail = {"keys": sorted(str(key) for key in payload)[:20],
-                      **{key: payload[key] for key in ("enabled", "default_model") if key in payload}}
+                      **{key: payload[key] for key in ("enabled", "default_model", "full_access") if key in payload}}
         elif action == "assistant.tools.update":
             detail = {"tools": {str(name): value.get("enabled") for name, value in payload.items()
                                 if isinstance(value, dict) and "enabled" in value}}
@@ -509,13 +518,22 @@ class TgDriveASGI(StaticFiles):
         elif action == "assistant.channel.sync" and ok:
             detail = {key: (result or {}).get(key) for key in ("total", "added", "removed")}
         elif action == "assistant.model.create":
-            detail = {"model": str(payload.get("model", ""))[:200]}
+            if isinstance(payload.get("models"), list):
+                detail = {"models": [str(name)[:200] for name in payload["models"][:50]], "added": (result or {}).get("added") if ok else None}
+            else:
+                detail = {"model": str(payload.get("model", ""))[:200]}
+        elif action in ("assistant.catalog.create", "assistant.catalog.update", "assistant.catalog.delete"):
+            detail = {"id": str(payload.get("id") or f"{payload.get('provider')}/{payload.get('model')}")[:260]}
+        elif action == "assistant.catalog.sync" and ok:
+            detail = {key: (result or {}).get(key) for key in ("total", "added", "updated")}
+        elif action == "assistant.catalog.settings":
+            detail = {key: payload.get(key) for key in ("url", "auto_sync") if key in payload}
         elif action == "assistant.model.update":
             detail = {key: payload.get(key) for key in ("enabled", "tools", "context_window", "max_output") if key in payload}
         elif action == "assistant.model.test" and ok:
             detail = {"ok": (result or {}).get("ok"), "tools": (result or {}).get("tools")}
         elif action == "assistant.user_policy":
-            detail = {key: payload.get(key) for key in ("enabled", "max_level", "daily_tokens") if key in payload}
+            detail = {key: payload.get(key) for key in ("enabled", "max_level", "daily_tokens", "full_access") if key in payload}
         elif action.startswith("assistant.action.") and ok:
             # 只记录操作类型、状态与条目数，不记录路径、链接等条目内容。
             detail = {key: (result or {}).get(key) for key in ("kind", "status", "count")}
@@ -1246,9 +1264,12 @@ class TgDriveASGI(StaticFiles):
             return 204, None, {}
         if match and match[2] == "messages" and method == "POST":
             return 201, await service.send(token, csrf, match[1], payload), no_store
-        match = re.fullmatch(r"/runs/([A-Za-z0-9_-]{4,40})/stop", route)
+        match = re.fullmatch(r"/runs/([A-Za-z0-9_-]{4,40})/(stop|client-results)", route)
         if match and method == "POST":
-            service.stop(token, csrf, match[1])
+            if match[2] == "stop":
+                service.stop(token, csrf, match[1])
+            else:
+                service.client_result(token, csrf, match[1], payload)
             return 204, None, {}
         match = re.fullmatch(r"/scope-requests/([A-Za-z0-9_-]{4,40})/(confirm|reject)", route)
         if match and method == "POST":
@@ -1299,12 +1320,36 @@ class TgDriveASGI(StaticFiles):
             if method == "GET":
                 return 200, service.admin_channels(), {}
             if method == "POST":
-                channel = service.channels.create(payload)
-                try:
-                    channel["sync"] = await service.channels.sync(channel["id"], actor=session.username)
-                except ValueError as exc:
-                    channel["sync_error"] = str(exc)
-                return 201, channel, {}
+                # 新渠道不自动加入模型：界面随后打开「选择模型」，由管理员勾选需要的模型。
+                return 201, service.channels.create(payload), {}
+        if route == "/catalog" and method == "GET":
+            return 200, {"status": service.catalog.status(), "providers": service.catalog.providers(),
+                         **service.catalog.entries(query=q("q"), provider=q("provider"), cursor=q("cursor"), limit=number("limit") or 100)}, {}
+        if route == "/catalog" and method == "POST":
+            return 201, service.catalog.create(payload), {}
+        if route == "/catalog/update" and method == "POST":
+            entry_id = payload.get("id")
+            if not isinstance(entry_id, str):
+                raise ValueError("请指定目录条目")
+            return 200, service.catalog.update(entry_id, {k: v for k, v in payload.items() if k != "id"}), {}
+        if route == "/catalog/delete" and method == "POST":
+            if not isinstance(payload.get("id"), str):
+                raise ValueError("请指定目录条目")
+            service.catalog.delete(payload["id"])
+            return 204, None, {}
+        if route == "/catalog/sync" and method == "POST":
+            return 200, await service.catalog.sync(actor=session.username), {}
+        if route == "/catalog/settings" and method == "POST":
+            return 200, service.catalog.update_settings(payload), {}
+        match = re.fullmatch(r"/channels/(\d+)/(discover|models/batch)", route)
+        if match:
+            channel_id = int(match[1])
+            if match[2] == "discover" and method == "GET":
+                return 200, await service.channels.discover(channel_id, actor=session.username), {}
+            if match[2] == "models/batch" and method == "POST":
+                result = await service.channels.add_models(channel_id, payload.get("models"), actor=session.username)
+                service.guard.invalidate()
+                return 201, result, {}
         match = re.fullmatch(r"/channels/(\d+)(?:/(update|delete|sync|models))?", route)
         if match:
             channel_id = int(match[1])
@@ -1313,6 +1358,7 @@ class TgDriveASGI(StaticFiles):
             if match[2] == "update" and method == "POST":
                 if payload.get("enabled") is False:
                     service.guard_default(channel_id=channel_id)
+                service.guard.invalidate()
                 return 200, service.channels.update(channel_id, payload), {}
             if match[2] == "delete" and method == "POST":
                 service.admin_delete_channel(channel_id)

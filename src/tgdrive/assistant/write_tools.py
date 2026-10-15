@@ -32,11 +32,14 @@ from .tools import (
 SCAN_LIMIT = 50000
 NAME_BYTES = 220
 
-MATCH = {"type": "object", "description": "匹配条件：path 为目录（省略为作用域根），其余条件取交集，只匹配文件",
+MATCH = {"type": "object", "description": "匹配条件：path 为目录（省略为作用域根），其余条件取交集；默认只匹配文件",
          "properties": {"path": PATH, "glob": {"type": "string", "description": "文件名通配符，如 IMG_*.jpg"},
                         "regex": {"type": "string", "description": "文件名正则（不区分大小写），分组可在模板中用 {1}{2} 引用"},
                         "kind": KIND, "ext": {"type": "array", "items": {"type": "string"}, "description": "扩展名列表"},
                         "recursive": {"type": "boolean", "description": "是否包含子目录，默认 false"}}}
+RENAME_MATCH = {**MATCH, "description": "匹配条件：path 为目录（省略为作用域根），其余条件取交集。type=folder 时匹配文件夹（kind、ext 不适用）",
+                "properties": {**MATCH["properties"], "type": {"type": "string", "enum": ["file", "folder"],
+                                                                "description": "匹配文件（默认）或文件夹"}}}
 CONFLICT = {"type": "string", "enum": ["skip", "suffix"], "description": "目标重名时：skip 跳过（默认），suffix 自动加 (1)(2)"}
 
 
@@ -71,9 +74,13 @@ def _valid_key(key: str) -> str:
 def _match_rows(ctx: ToolContext, match: object, *, limit: int) -> list:
     if not isinstance(match, dict):
         raise ToolError("参数 match 不正确：需要对象")
-    unknown = set(match) - {"path", "glob", "regex", "kind", "ext", "recursive"}
+    unknown = set(match) - {"path", "glob", "regex", "kind", "ext", "recursive", "type"}
     if unknown:
         raise ToolError(f"参数 match 不支持 {', '.join(sorted(unknown))}")
+    if match.get("type") not in (None, "file", "folder"):
+        raise ToolError("参数 match.type 只能是 file 或 folder")
+    if match.get("type") == "folder":
+        return _match_folders(ctx, match, limit=limit)
     prefix = ctx.resolve(match.get("path"), directory=True)
     glob = _str(match, "glob", limit=100)
     pattern = _regex(_str(match, "regex", limit=100)) if match.get("regex") else None
@@ -107,6 +114,50 @@ def _match_rows(ctx: ToolContext, match: object, *, limit: int) -> list:
             rows.append(row)
             if len(rows) > limit:
                 break
+        return rows
+
+    return read
+
+
+def _folder_row(ctx: ToolContext, folder: str, *, limit: int) -> dict:
+    version, count = directory_version(ctx.db, ctx.bucket_id, folder, limit=limit)
+    if count > limit:
+        raise ToolError(f"文件夹 {ctx.display(folder)} 超过单次上限，请指定更小的目录")
+    stats = ctx.db.execute("SELECT COALESCE(SUM(size),0), MAX(modified_at) FROM objects WHERE bucket_id=? AND key>=? AND key<?",
+                           (ctx.bucket_id, folder, folder + END)).fetchone()
+    return {"key": folder, "etag": None, "directory_version": version, "size": int(stats[0]), "modified_at": stats[1],
+            "content_type": None}
+
+
+def _match_folders(ctx: ToolContext, match: dict, *, limit: int):
+    """按目录匹配：直接子目录（含只靠前缀存在的隐式目录）；recursive 时包含各级子目录。"""
+    if match.get("kind") or match.get("ext"):
+        raise ToolError("匹配文件夹时不能使用 kind 或 ext")
+    prefix = ctx.resolve(match.get("path"), directory=True)
+    glob = _str(match, "glob", limit=100)
+    pattern = _regex(_str(match, "regex", limit=100)) if match.get("regex") else None
+    recursive = bool(match.get("recursive"))
+
+    def read():
+        folders: set[str] = set()
+        for (key,) in ctx.db.execute("SELECT key FROM objects WHERE bucket_id=? AND key>? AND key<? AND substr(key,1,9)!='.tgdrive/' "
+                                     "ORDER BY key LIMIT ?", (ctx.bucket_id, prefix, prefix + END, SCAN_LIMIT + 1)):
+            parts = key[len(prefix):].split("/")[:-1]
+            if not recursive:
+                parts = parts[:1]
+            for depth in range(1, len(parts) + 1):
+                folders.add(prefix + "/".join(parts[:depth]) + "/")
+        rows = []
+        for folder in sorted(folders):
+            name = _name_of(folder)
+            if glob and not fnmatch.fnmatch(name.lower(), glob.lower()):
+                continue
+            if pattern is not None and not pattern.search(name):
+                continue
+            if len(rows) >= limit:
+                rows.append({"key": folder})
+                break
+            rows.append(_folder_row(ctx, folder, limit=_item_limit(ctx)))
         return rows
 
     return read
@@ -161,7 +212,8 @@ class Targets:
 
 
 def _move_item(row) -> dict:
-    return {"from": row["key"], "to": None, "folder": row["key"].endswith("/"), "etag": row["etag"], "modified_at": row["modified_at"],
+    folder = row["key"].endswith("/")
+    return {"from": row["key"], "to": None, "folder": folder, "etag": row["etag"], "modified_at": None if folder else row["modified_at"],
             "directory_version": row.get("directory_version") if isinstance(row, dict) else None, "size": int(row["size"] or 0)}
 
 
@@ -181,11 +233,22 @@ async def _propose(ctx: ToolContext, kind: str, items: list[dict], *, skipped: l
     created = await ctx.propose(kind, payload, len(items))
     describe = sample or (lambda item: str(item))
     samples = [describe(item) for item in items[:20]]
-    return ToolOutput({"action_id": created["action_id"], "kind": kind, "count": len(items), "conflicts": len(skipped),
-                       "samples": samples, "expires_at": datetime.fromtimestamp(created["expires_at"]).isoformat(timespec="seconds"),
-                       "status": "已生成待确认操作，等待用户在界面卡片上确认；确认前不会执行任何修改"},
-                      f"{summary}（待确认）", items=len(items),
-                      event={"type": "action", "action_id": created["action_id"], "kind": kind, "count": len(items)})
+    result = {"action_id": created["action_id"], "kind": kind, "count": len(items), "conflicts": len(skipped), "samples": samples}
+    event = {"type": "action", "action_id": created["action_id"], "kind": kind, "count": len(items)}
+    if created.get("auto"):
+        # 完全访问模式：操作已自动执行（或仍在执行），把结果直接交给模型。
+        outcome = created.get("outcome") or {}
+        if outcome.get("status") == "running":
+            result["status"] = "已在完全访问模式下自动开始执行，条目较多仍在进行，完成后对话中会出现结果"
+        else:
+            result["status"] = "已在完全访问模式下自动执行完毕（用户可在卡片上撤销）"
+            result["result"] = {key: outcome.get(key) for key in ("ok", "skipped", "failed", "reasons")}
+        return ToolOutput(result, f"{summary}（已自动执行）", items=len(items), event={**event, "auto": True})
+    result["expires_at"] = datetime.fromtimestamp(created["expires_at"]).isoformat(timespec="seconds")
+    result["status"] = "已生成待确认操作，等待用户在界面卡片上确认；确认前不会执行任何修改"
+    if created.get("confirm_reason"):
+        result["status"] += f"（当前为完全访问模式，但{created['confirm_reason']}）"
+    return ToolOutput(result, f"{summary}（待确认）", items=len(items), event=event)
 
 
 def _arrow(item: dict) -> str:
@@ -215,7 +278,7 @@ def render_name(template: str, row, n: int, groups: tuple) -> str:
         if var == "mtime":
             if spec and not re.fullmatch(r"[%A-Za-z0-9 _.\-]+", spec):
                 raise ToolError("mtime 的格式只能包含 %Y %m %d %H %M %S 与 - _ . 空格")
-            return datetime.fromtimestamp(row["modified_at"]).strftime(spec or "%Y-%m-%d")
+            return datetime.fromtimestamp(row["modified_at"] or 0).strftime(spec or "%Y-%m-%d")
         if spec:
             raise ToolError(f"模板变量 {{{var}}} 不支持格式")
         if var == "name":
@@ -237,12 +300,13 @@ def render_name(template: str, row, n: int, groups: tuple) -> str:
 
 
 @tool("propose_rename", "批量改名", "write", "write",
-      "生成批量改名的待确认操作，不会立即执行，也不能跨目录（移动请用 propose_move）。\n"
-      "- 规则模式：match 指定范围，template 指定新文件名。可用变量：{name} 原文件名、{stem} 不含扩展名、{ext} 含点的扩展名、"
-      "{n} 序号（{n:03} 补零，按 sort 排序后从 start 开始）、{parent} 所在目录名、{mtime:%Y-%m-%d} 修改时间、{1}{2} match.regex 的分组。\n"
-      "- 映射模式：mapping 为 [{from, to}]，最多 200 项，from 为文件路径，to 只能是新文件名。\n"
-      "返回待确认操作的编号、条目数、冲突数和前 20 条样例。",
-      {"match": MATCH, "template": {"type": "string", "description": "新文件名模板，如 {mtime:%Y%m%d}_{n:03}{ext}"},
+      "生成批量改名的待确认操作（文件或文件夹），不会立即执行，也不能跨目录（移动请用 propose_move）。\n"
+      "- 规则模式：match 指定范围（match.type=folder 时改文件夹名），template 指定新名称。可用变量：{name} 原名称、{stem} 不含扩展名、"
+      "{ext} 含点的扩展名（文件夹为空）、{n} 序号（{n:03} 补零，按 sort 排序后从 start 开始）、{parent} 所在目录名、"
+      "{mtime:%Y-%m-%d} 修改时间（文件夹取其中最新文件）、{1}{2} match.regex 的分组。\n"
+      "- 映射模式：mapping 为 [{from, to}]，最多 200 项，from 为文件或文件夹路径，to 只能是新名称。\n"
+      "同一次提议不能同时改名某个文件夹和它的下级。返回待确认操作的编号、条目数、冲突数和前 20 条样例。",
+      {"match": RENAME_MATCH, "template": {"type": "string", "description": "新名称模板，如 {mtime:%Y%m%d}_{n:03}{ext}"},
        "mapping": {"type": "array", "items": {"type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}},
                                               "required": ["from", "to"]}, "description": "逐个指定新名称（≤200 项）"},
        "sort": {"type": "string", "enum": ["name", "mtime"], "description": "{n} 的排序依据，默认 name"},
@@ -256,39 +320,37 @@ async def propose_rename(ctx: ToolContext, args: dict) -> ToolOutput:
     if mapping:
         if not isinstance(mapping, list) or not 1 <= len(mapping) <= 200:
             raise ToolError("参数 mapping 需要 1–200 项")
-        sources = []
+        plan = []
         for entry in mapping:
             if not isinstance(entry, dict) or not isinstance(entry.get("from"), str) or not isinstance(entry.get("to"), str):
                 raise ToolError("mapping 的每一项需要 from 与 to")
-            key = ctx.resolve(entry["from"])
-            if not key or key.endswith("/"):
-                raise ToolError("mapping.from 必须是文件路径")
-            sources.append((key, _check_name(entry["to"].strip())))
-        rows = {row["key"]: row for row in ctx.db.execute(
-            f"SELECT * FROM objects WHERE bucket_id=? AND key IN ({','.join('?' * len(sources))})",
-            (ctx.bucket_id, *[key for key, _ in sources]))}
-        plan = []
-        for key, name in sources:
-            row = rows.get(key)
-            if row is None:
-                skipped.append({"path": ctx.display(key), "reason": "文件不存在"})
+            name = _check_name(entry["to"].strip().strip("/"))
+            rows, missing = _source_rows(ctx, [entry["from"]])
+            if missing:
+                skipped.append({"path": missing[0]["path"], "reason": "不存在"})
                 continue
-            plan.append((row, name))
+            plan.append((rows[0], name))
     else:
-        rows = await _rows(ctx, args.get("match") or {}, _item_limit(ctx))
+        match = args.get("match") or {}
+        rows = await _rows(ctx, match, _item_limit(ctx))
         if (args.get("sort") or "name") == "mtime":
-            rows.sort(key=lambda row: (row["modified_at"], row["key"]))
+            rows.sort(key=lambda row: (row["modified_at"] or 0, row["key"]))
         elif args.get("sort") not in (None, "name"):
             raise ToolError("参数 sort 不正确")
         start = _int(args, "start", 1, 0, 10**9)
-        pattern = _regex(_str(args["match"], "regex", limit=100)) if isinstance(args.get("match"), dict) and args["match"].get("regex") else None
+        pattern = _regex(_str(match, "regex", limit=100)) if isinstance(match, dict) and match.get("regex") else None
         plan = []
         for index, row in enumerate(rows):
             groups = pattern.search(_name_of(row["key"])).groups() if pattern else ()
-            plan.append((row, _check_name(render_name(template, row, start + index, groups).strip())))
+            plan.append((row, _check_name(render_name(template, row, start + index, groups).strip().strip("/"))))
+    folders = sorted(row["key"] for row, _ in plan if row["key"].endswith("/"))
     for row, name in plan:
         source = row["key"]
-        target = _parent_of(source) + name
+        folder = source.endswith("/")
+        if any(source != other and source.startswith(other) for other in folders):
+            skipped.append({"path": ctx.display(source), "reason": "上级文件夹也在改名，请分两次进行"})
+            continue
+        target = _parent_of(source) + name + ("/" if folder else "")
         if target == source:
             continue
         _valid_key(target)
@@ -297,8 +359,10 @@ async def propose_rename(ctx: ToolContext, args: dict) -> ToolOutput:
             skipped.append({"path": ctx.display(source), "reason": f"{name} 已存在"})
             continue
         items.append({**_move_item(row), "to": claimed})
+    folders_count = sum(1 for item in items if item["folder"])
+    noun = "个文件夹" if folders_count == len(items) else "个文件" if not folders_count else "项"
     return await _propose(ctx, "rename", items, skipped=skipped, sample=_arrow,
-                          summary=f"重命名 {len(items)} 个文件" + (f"，{len(skipped)} 项重名将跳过" if skipped else ""))
+                          summary=f"重命名 {len(items)} {noun}" + (f"，{len(skipped)} 项将跳过" if skipped else ""))
 
 
 # ---------- 移动与整理 ----------
@@ -325,12 +389,7 @@ def _source_rows(ctx: ToolContext, paths: object) -> tuple[list, list]:
         if exists is None:
             missing.append({"path": ctx.display(key), "reason": "不存在"})
             continue
-        version, count = directory_version(ctx.db, ctx.bucket_id, folder, limit=_item_limit(ctx))
-        if count > _item_limit(ctx):
-            raise ToolError(f"文件夹 {ctx.display(folder)} 超过单次上限，请指定更小的目录")
-        stats = ctx.db.execute("SELECT COALESCE(SUM(size),0) FROM objects WHERE bucket_id=? AND key>=? AND key<?",
-                               (ctx.bucket_id, folder, folder + END)).fetchone()
-        rows.append({"key": folder, "etag": None, "directory_version": version, "size": int(stats[0]), "modified_at": None, "content_type": None})
+        rows.append(_folder_row(ctx, folder, limit=_item_limit(ctx)))
     return rows, missing
 
 
@@ -542,6 +601,36 @@ async def propose_unshare(ctx: ToolContext, args: dict) -> ToolOutput:
         items.append({"path": row["key"]})
     return await _propose(ctx, "unshare", items, skipped=skipped, sample=lambda item: "/" + item["path"],
                           summary=f"取消 {len(items)} 个公开链接")
+
+
+@tool("propose_share", "公开分享", "write", "write",
+      "生成公开分享文件或文件夹的待确认操作；已公开的项目会按新设置调整有效期与密码。确认卡片中用户可以修改有效期，"
+      "并在卡片里自行输入访问密码（不要向用户索要密码，也不要把密码写进参数）。执行后链接只显示给用户，你不会拿到链接。"
+      "公开分享总是需要用户确认。",
+      {"paths": {"type": "array", "items": {"type": "string"}, "description": "文件或文件夹路径（≤200 个）"},
+       "expires_days": {"type": "integer", "description": "有效天数 1–365，0 或省略表示永久有效"},
+       "require_password": {"type": "boolean", "description": "是否建议设置访问密码（由用户在卡片中填写）"}}, ("paths",))
+async def propose_share(ctx: ToolContext, args: dict) -> ToolOutput:
+    paths = args.get("paths")
+    if not isinstance(paths, list) or not 1 <= len(paths) <= 200:
+        raise ToolError("参数 paths 需要 1–200 个路径")
+    days = _int(args, "expires_days", 0, 0, 365)
+    require = args.get("require_password") is True
+    rows, skipped = _source_rows(ctx, paths)
+    items, seen = [], set()
+    for row in rows:
+        key = row["key"]
+        if key in seen:
+            continue
+        seen.add(key)
+        current = ctx.db.execute("SELECT public_token FROM objects WHERE bucket_id=? AND key=?", (ctx.bucket_id, key)).fetchone()
+        items.append({"path": key, "folder": key.endswith("/"), "public": bool(current and current["public_token"]),
+                      "size": int(row["size"] or 0)})
+    already = sum(item["public"] for item in items)
+    summary = (f"公开分享 {len(items)} 项" + (f"（其中 {already} 项已公开，将更新设置）" if already else "")
+               + (f"，{days} 天后失效" if days else "，永久有效") + ("，建议设置访问密码" if require else ""))
+    return await _propose(ctx, "share", items, skipped=skipped, sample=lambda item: "/" + item["path"], summary=summary,
+                          options={"expires_days": days or None, "require_password": require})
 
 
 @tool("propose_download_control", "下载任务操作", "write", "write",

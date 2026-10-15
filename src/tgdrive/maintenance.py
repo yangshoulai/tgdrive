@@ -402,6 +402,7 @@ class MaintenanceService:
         self.trash_purger = None  # 由应用工厂注入：async (now) -> int
         self.thumbnail_adopter = None  # 由应用工厂注入：同步 (limit) -> int，把旧版明文缩略图加密转存
         self.assistant_cleaner = None  # 由应用工厂注入：async (now) -> dict，按保留期清理助手留痕与调用日志
+        self.assistant_catalog = None  # 由应用工厂注入：async (now) -> dict，每天同步一次模型目录
 
     def status(self) -> dict[str, object]:
         state = _get_state(self.metadata, self.STATUS_KEY, {}) or {}
@@ -448,6 +449,8 @@ class MaintenanceScheduler:
             steps.append(("thumbnails", lambda: self._adopt_thumbnails()))
         if self.service.assistant_cleaner is not None:
             steps.append(("assistant", lambda: self.service.assistant_cleaner(now)))
+        if self.service.assistant_catalog is not None:
+            steps.append(("assistant_catalog", lambda: self.service.assistant_catalog(now)))
         if self._due("scrub", self.scrub_every, now):
             steps.append(("scrub", lambda: self._scrub()))
         if self._due("backup", self.backup_every, now):

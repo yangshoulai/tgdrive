@@ -274,7 +274,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       </div>
       {assistantAvailable && assistant.config && !assistantPage && <AssistantDrawer open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)}
         onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" ? location.prefix : "" }}
-        onFilesChanged={filesChanged} pageImport={pageImport} onPageImportDone={clearPageImport}
+        onFilesChanged={filesChanged} pageImport={pageImport} onPageImportDone={clearPageImport} onNavigate={(view, prefix) => navigate(view, prefix ?? "")}
         onOpenPage={id => { setAssistantOpen(false); navigate("assistantPage", id ?? ""); }} />}
       {/* 旧版用户名账号：登录后必须先设置邮箱（之后用邮箱登录，也为邮箱验证做准备）。 */}
       {session.needs_email && <EmailDialog session={session} required onSaved={onSessionChange} onLogout={() => void logout()} />}

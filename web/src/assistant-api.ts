@@ -2,11 +2,29 @@
 import { apiGet as get, apiPost as post } from "./api";
 
 export type ToolSupport = "unknown" | "yes" | "no";
+export type Capabilities = { tools?: boolean | null; reasoning?: boolean | null; vision?: boolean | null; structured?: boolean | null };
 export type AiModel = {
   id: number; channel_id: number; model: string; display_name: string | null; label: string; source: "auto" | "manual";
   enabled: boolean; tools: ToolSupport; context_window: number | null; max_output: number | null; removed_upstream: boolean;
+  input_price: number | null; output_price: number | null; capabilities: Capabilities; catalog_id: string | null; manual_fields: string[];
   sort: number; tested_at: number | null; test_note: string | null; channel_name?: string;
 };
+/** 渠道上游模型与目录匹配结果（尚未加入时 added=false）。 */
+export type UpstreamModel = {
+  model: string; display_name: string | null; context_window: number | null; max_output: number | null; input_price: number | null;
+  output_price: number | null; capabilities: Capabilities; catalog_id: string | null; added: boolean; model_id: number | null;
+};
+export type CatalogEntry = {
+  id: string; provider: string; model: string; name: string | null; family: string | null; context_window: number | null; max_output: number | null;
+  input_price: number | null; output_price: number | null; cache_price: number | null; capabilities: Capabilities; knowledge: string | null;
+  released: string | null; source: "models.dev" | "openrouter" | "manual"; updated_at: number;
+};
+export type CatalogStatus = {
+  url: string; default_url: string; auto_sync: boolean; synced_at: number | null; note: string | null; error: string | null;
+  total: number; manual: number; providers: number;
+};
+export type CatalogInput = { provider?: string; model?: string; name?: string | null; context_window?: number | null; max_output?: number | null;
+  input_price?: number | null; output_price?: number | null; cache_price?: number | null; capabilities?: Capabilities };
 export type ChannelHealth = { requests: number; success_rate: number | null; p95_ms: number | null; last_error: string | null; unhealthy: boolean };
 export type AiChannel = {
   id: number; name: string; kind: "openai" | "anthropic"; base_url: string; api_key: string | null; header_names: string[];
@@ -23,7 +41,7 @@ export type AdminTool = {
 };
 export type Bound = { default: number; min: number; max: number; label?: string };
 export type AssistantSettings = {
-  enabled: boolean; default_model: number | null; user_daily_tokens: number; retention_days: number; call_log_days: number;
+  enabled: boolean; default_model: number | null; full_access: boolean; user_daily_tokens: number; retention_days: number; call_log_days: number;
   notice: string; notice_default: string; bounds: Record<string, Bound>;
 };
 export type AssistantLimits = { values: Record<string, number>; bounds: Record<string, Bound & { label: string }> };
@@ -37,8 +55,8 @@ export type AssistantOverview = {
   storage: Record<string, number>;
 };
 export type UserPolicy = {
-  enabled: boolean | null; max_level: "read" | "write" | "danger" | null; daily_tokens: number | null;
-  effective: { enabled: boolean; max_level: "read" | "write" | "danger"; daily_tokens: number };
+  enabled: boolean | null; max_level: "read" | "write" | "danger" | null; daily_tokens: number | null; full_access: boolean | null;
+  effective: { enabled: boolean; max_level: "read" | "write" | "danger"; daily_tokens: number; full_access: boolean };
   usage: { today: number; days30: number };
 };
 export type AdminConversation = {
@@ -76,10 +94,10 @@ const query = (values: Record<string, string | number | undefined | null>) => {
 export const adminOverview = (signal?: AbortSignal) => get<AssistantOverview>(`${ADMIN}/overview`, signal);
 type TokenRow = { input_tokens: number | null; output_tokens: number | null; runs: number | null };
 export type UsageReport = {
-  days: number; since: string; totals: { input_tokens: number; output_tokens: number; runs: number; users: number };
+  days: number; since: string; totals: { input_tokens: number; output_tokens: number; runs: number; users: number; cost: number | null };
   by_day: (TokenRow & { day: string; users: number })[];
   by_user: (TokenRow & { user_id: number; username: string | null; nickname: string | null })[];
-  by_model: (TokenRow & { model_id: number; model_name: string | null; model_label: string | null; channel_name: string | null })[];
+  by_model: (TokenRow & { model_id: number; model_name: string | null; model_label: string | null; channel_name: string | null; cost: number | null })[];
   tools: { tool_name: string; calls: number; errors: number; avg_ms: number | null }[];
   stops: { reason: string; runs: number }[];
   actions: { kind: string; status: string; actions: number; items: number | null }[];
@@ -97,12 +115,22 @@ export const updateAdminChannel = (id: number, input: ChannelInput) => post<AiCh
 export const deleteAdminChannel = (id: number) => post<void>(`${ADMIN}/channels/${id}/delete`);
 export const syncAdminChannel = (id: number) => post<{ total: number; added: number; restored: number; removed: number; note: string }>(`${ADMIN}/channels/${id}/sync`, undefined, 120000);
 export const adminChannelModels = (id: number) => get<AiModel[]>(`${ADMIN}/channels/${id}/models`);
-export const addAdminModel = (channelId: number, input: { model: string; display_name?: string | null; context_window?: number | null; max_output?: number | null; tools?: ToolSupport; sort?: number }) => post<AiModel>(`${ADMIN}/channels/${channelId}/models`, input);
-export const updateAdminModel = (id: number, input: Partial<Pick<AiModel, "display_name" | "enabled" | "tools" | "context_window" | "max_output" | "sort">>) => post<AiModel>(`${ADMIN}/models/${id}/update`, input);
+type ModelFields = Partial<Pick<AiModel, "display_name" | "enabled" | "tools" | "context_window" | "max_output" | "sort" | "input_price" | "output_price">>;
+export const addAdminModel = (channelId: number, input: ModelFields & { model: string }) => post<AiModel>(`${ADMIN}/channels/${channelId}/models`, input);
+export const updateAdminModel = (id: number, input: ModelFields & { reset_catalog?: boolean }) => post<AiModel>(`${ADMIN}/models/${id}/update`, input);
+export const discoverChannelModels = (id: number) => get<{ models: UpstreamModel[]; total: number; removed: number; note: string }>(`${ADMIN}/channels/${id}/discover`);
+export const addChannelModels = (id: number, models: string[]) => post<{ added: number; enabled: number }>(`${ADMIN}/channels/${id}/models/batch`, { models }, 120000);
+export const adminCatalog = (filters: { q?: string; provider?: string; cursor?: string | null }) =>
+  get<{ status: CatalogStatus; providers: { provider: string; count: number }[]; entries: CatalogEntry[]; next_cursor: string | null }>(`${ADMIN}/catalog${query(filters)}`);
+export const syncCatalog = () => post<{ total: number; added: number; updated: number; models: number; note: string }>(`${ADMIN}/catalog/sync`, {}, 120000);
+export const updateCatalogSettings = (input: { url?: string | null; auto_sync?: boolean }) => post<CatalogStatus>(`${ADMIN}/catalog/settings`, input);
+export const createCatalogEntry = (input: CatalogInput) => post<CatalogEntry>(`${ADMIN}/catalog`, input);
+export const updateCatalogEntry = (id: string, input: CatalogInput) => post<CatalogEntry>(`${ADMIN}/catalog/update`, { id, ...input });
+export const deleteCatalogEntry = (id: string) => post<void>(`${ADMIN}/catalog/delete`, { id });
 export const deleteAdminModel = (id: number) => post<void>(`${ADMIN}/models/${id}/delete`);
 export const testAdminModel = (id: number) => post<{ ok: boolean; tools: ToolSupport; note: string; duration_ms: number }>(`${ADMIN}/models/${id}/test`, undefined, 150000);
 export const adminPolicy = (userId: number) => get<UserPolicy>(`${ADMIN}/users/${userId}/policy`);
-export const updateAdminPolicy = (userId: number, input: Partial<Pick<UserPolicy, "enabled" | "max_level" | "daily_tokens">>) => post<UserPolicy>(`${ADMIN}/users/${userId}/policy`, input);
+export const updateAdminPolicy = (userId: number, input: Partial<Pick<UserPolicy, "enabled" | "max_level" | "daily_tokens" | "full_access">>) => post<UserPolicy>(`${ADMIN}/users/${userId}/policy`, input);
 export const adminConversations = (cursor: string | null, filters: { user_id?: number; model_id?: number; since?: number; until?: number; action?: string }) =>
   get<{ conversations: AdminConversation[]; next_cursor: string | null }>(`${ADMIN}/conversations${query({ cursor, ...filters })}`);
 export const adminConversation = (id: string) => get<AdminConversationDetail>(`${ADMIN}/conversations/${encodeURIComponent(id)}`);
@@ -117,39 +145,51 @@ export type UserTool = { name: string; label: string; group: string; group_label
 export type AssistantConfig = {
   available: boolean; reason: string | null; models: AiModel[]; default_model: number | null; tools: UserTool[];
   max_level: "read" | "write" | "danger"; usage: { today: number; limit: number | null }; notice: string; notice_ack: boolean; retention_days: number;
+  full_access: boolean;
 };
-export type Conversation = { id: string; title: string | null; scope: string; model_id: number | null; archived: boolean; messages: number; created_at: number; updated_at: number; active_run?: string | null };
+export type AccessMode = "approval" | "full";
+export type Conversation = { id: string; title: string | null; scope: string; model_id: number | null; archived: boolean; messages: number;
+  access_mode: AccessMode; created_at: number; updated_at: number; active_run?: string | null };
+export type BrowserEvent =
+  | { type: "browser"; action: "download"; items: { path: string; folder: boolean }[]; size: number }
+  | { type: "browser"; action: "open"; url: string; host: string; title: string | null }
+  | { type: "browser"; action: "copy"; text: string; title: string | null };
 export type ToolEvent =
   | { type: "plan"; items: { content: string; status: "pending" | "in_progress" | "completed" }[] }
   | { type: "question"; question: string; options: string[] }
   | { type: "scope_request"; action_id: string; from: string; to: string; reason: string }
-  | { type: "action"; action_id: string; kind: string; count: number };
+  | { type: "action"; action_id: string; kind: string; count: number; auto?: boolean }
+  | BrowserEvent;
 export type SnapshotAttachment = { type: "snapshot"; id: string; source: string; pages: number; images: number };
 export type ChatMessage = {
   seq: number; run_id: string | null; role: "user" | "assistant" | "tool" | "event"; tool_name?: string | null; created_at?: number;
   text?: string; scope?: string; location?: string;
   tool_calls?: { id: string; name: string; arguments: string }[]; model_id?: number; input_tokens?: number; output_tokens?: number;
+  reasoning?: string; reasoning_ms?: number | null;
   call_id?: string; name?: string; label?: string; arguments?: Record<string, unknown>; status?: "ok" | "error"; summary?: string;
   result?: unknown; items?: number | null; duration_ms?: number; truncated?: boolean; event?: ToolEvent | null;
   type?: string; retry?: boolean; action_id?: string; attachment?: SnapshotAttachment;
 };
 export const ACTION_KINDS: Record<string, string> = {
   rename: "批量改名", move: "移动", organize: "整理文件", mkdir: "新建文件夹", trash: "移入回收站", restore: "从回收站恢复",
-  purge: "彻底删除", unshare: "取消公开", downloads: "离线下载", download_control: "下载任务操作",
+  purge: "彻底删除", unshare: "取消公开", share: "公开分享", downloads: "离线下载", download_control: "下载任务操作",
 };
 export type ActionStatus = "pending" | "confirmed" | "rejected" | "expired" | "running" | "done" | "partial" | "failed" | "cancelled"
   | "interrupted" | "undoing" | "undone";
 /** 冻结的条目：移动类为 from/to（对象键），其余为 path / id / url 等。 */
 export type ActionItem = { from?: string; to?: string; path?: string; id?: string | number; name?: string; url?: string; host?: string;
   size?: number; folder?: boolean; op?: string; status?: string; variant?: string | null };
+export type ShareLink = { path: string; token: string; folder: boolean; expires_at: number | null; password: boolean };
 export type ActionResult = { ok: number; skipped: number; failed: number; total: number; reasons: Record<string, number>;
-  failures: { path: string; reason: string; status: "skipped" | "failed" }[] };
+  failures: { path: string; reason: string; status: "skipped" | "failed" }[]; links?: ShareLink[] };
 export type AssistantAction = {
   id: string; kind: string; tool_name: string | null; status: ActionStatus; count: number;
   payload: {
     from?: string; to?: string; reason?: string; kind?: string; title?: string; scope?: string; summary?: string; size?: number;
     conflicts?: number; danger?: boolean; samples?: ActionItem[]; skipped?: { path: string; reason: string }[];
-    options?: { target?: string; hosts?: string[]; source?: string | null; op?: string; by?: string; folders?: string[] };
+    options?: { target?: string; hosts?: string[]; source?: string | null; op?: string; by?: string; folders?: string[];
+      expires_days?: number | null; require_password?: boolean };
+    auto?: boolean; confirm_reason?: string;
   } | null;
   result: ActionResult | null; undoable?: boolean; progress?: { done: number; total: number; ok: number; skipped: number; failed: number };
   created_at: number; expires_at: number; decided_at: number | null; finished_at?: number | null;
@@ -161,18 +201,22 @@ const USER = "/api/user/v1/assistant";
 export const assistantConfig = (signal?: AbortSignal) => get<AssistantConfig>(`${USER}/config`, signal);
 export const acknowledgeNotice = () => post<void>(`${USER}/notice/ack`, {});
 export const conversations = (cursor?: string | null, archived = false) => get<{ conversations: Conversation[]; next_cursor: string | null }>(`${USER}/conversations${query({ cursor, archived: archived ? "1" : undefined })}`);
-export const createConversation = (location: string, modelId?: number | null) => post<ConversationDetail>(`${USER}/conversations`, { location, model_id: modelId ?? undefined });
+export const createConversation = (location: string, modelId?: number | null, accessMode: AccessMode = "approval") =>
+  post<ConversationDetail>(`${USER}/conversations`, { location, model_id: modelId ?? undefined, access_mode: accessMode });
 export const conversation = (id: string) => get<ConversationDetail>(`${USER}/conversations/${encodeURIComponent(id)}`);
-export const updateConversation = (id: string, input: { title?: string; archived?: boolean }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
+export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
 export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
 export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root"; snapshot_id?: string }) =>
   post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/messages`, input);
 export const stopRun = (runId: string) => post<void>(`${USER}/runs/${encodeURIComponent(runId)}/stop`, {});
+/** 回传浏览器工具的执行结果（只有发起这个运行的登录会话可以回传）。 */
+export const sendClientResult = (runId: string, callId: string, outcome: { result?: Record<string, unknown>; error?: string }) =>
+  post<void>(`${USER}/runs/${encodeURIComponent(runId)}/client-results`, { call_id: callId, ...outcome });
 export const action = (id: string) => get<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}`);
 export const actionItems = (id: string, offset = 0) =>
   get<{ items: ActionItem[]; skipped: { path: string; reason: string }[]; total: number; next_offset: number | null; compacted: boolean }>(
     `${USER}/actions/${encodeURIComponent(id)}/items${query({ offset: offset || undefined })}`);
-export const confirmAction = (id: string, input: { acknowledge?: boolean; count?: number } = {}) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/confirm`, input);
+export const confirmAction = (id: string, input: { acknowledge?: boolean; count?: number; share?: { expires_days?: number; password?: string } } = {}) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/confirm`, input);
 export const rejectAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/reject`, {});
 export const cancelAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/cancel`, {});
 export const undoAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/undo`, {});

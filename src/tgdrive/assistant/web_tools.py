@@ -78,6 +78,8 @@ async def parse_download_source(ctx: ToolContext, args: dict) -> ToolOutput:
     except (ValueError, DownloadError) as exc:
         raise ToolError(f"无法识别：{exc}") from exc
     candidates = parsed["candidates"]
+    if ctx.taint is not None:
+        ctx.taint("解析了外部链接")
     collection_id = ctx.trace.create_collection(ctx.conversation_id, ctx.user_id, "collection", source=None,
                                                 rule={"type": "parsed"}, urls=candidates, count=len(candidates), ttl=1200)
     view = [{"index": index, "name": item["name"], "size": item.get("size"), "variant": item.get("variant"), "kind": item.get("kind"),
@@ -97,6 +99,8 @@ async def parse_download_source(ctx: ToolContext, args: dict) -> ToolOutput:
 async def analyze_page(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.analyze is None or ctx.trace is None:
         raise ToolError("当前无法分析网页")
+    if ctx.taint is not None:
+        ctx.taint("分析了网页")
     url, snapshot_id = _str(args, "url", limit=web.URL_BYTES), _str(args, "snapshot_id", limit=40)
     goal = _str(args, "goal", limit=300) or "保存页面中的主体图片"
     if bool(url) == bool(snapshot_id):

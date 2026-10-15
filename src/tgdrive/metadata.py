@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 20
+    SCHEMA_VERSION = 21
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -576,6 +576,37 @@ class Metadata:
                     CREATE INDEX IF NOT EXISTS assistant_calls_by_user ON assistant_calls(user_id, started_at DESC)
                 """)
                 db.execute("PRAGMA user_version = 20")
+            if version < 21:
+                # 文件助手 P5（docs/assistant-design.md §19）：模型目录、渠道模型的目录信息与价格、对话访问模式。
+                self._schema("""
+                    CREATE TABLE IF NOT EXISTS ai_catalog(
+                        id TEXT PRIMARY KEY,
+                        provider TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        name TEXT,
+                        family TEXT,
+                        context_window INTEGER,
+                        max_output INTEGER,
+                        input_price REAL,
+                        output_price REAL,
+                        cache_price REAL,
+                        capabilities TEXT NOT NULL DEFAULT '{}',
+                        knowledge TEXT,
+                        released TEXT,
+                        source TEXT NOT NULL,
+                        updated_at REAL NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS ai_catalog_by_model ON ai_catalog(model)
+                """)
+                for table, column, definition in (
+                        ("ai_models", "catalog_id", "TEXT"), ("ai_models", "input_price", "REAL"), ("ai_models", "output_price", "REAL"),
+                        ("ai_models", "capabilities", "TEXT NOT NULL DEFAULT '{}'"),
+                        ("ai_models", "manual_fields", "TEXT NOT NULL DEFAULT '[]'"),
+                        ("ai_user_policy", "full_access", "INTEGER"),
+                        ("assistant_conversations", "access_mode", "TEXT NOT NULL DEFAULT 'approval'")):
+                    if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                db.execute("PRAGMA user_version = 21")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

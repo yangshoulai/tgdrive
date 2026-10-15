@@ -82,6 +82,7 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     # 文件助手：渠道、对话留痕与调用日志；清理挂在维护任务上。
     assistant = AssistantService(accounts, objects, offline, user_api=user)
     maintenance.assistant_cleaner = assistant.cleanup
+    maintenance.assistant_catalog = assistant.sync_catalog_if_due
     app = TgDriveASGI(admin, user,
                       s3=s3, s3_host=s3_host, static_dir=static_dir, secure_cookies=secure_cookies,
                       settings=context.system_settings,

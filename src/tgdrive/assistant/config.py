@@ -89,11 +89,23 @@ class AssistantConfig:
         with self._lock:
             self._cache = None
 
+    def raw(self, name: str) -> object:
+        """其他模块保存在 assistant.* 下的结构化状态（如模型目录设置）。"""
+        return self._stored().get(name)
+
+    def write_raw(self, name: str, value: object) -> None:
+        self._write({name: value})
+
     # ---------- 全局设置 ----------
 
     @property
     def enabled(self) -> bool:
         return self._stored().get("enabled") is True
+
+    @property
+    def full_access_default(self) -> bool:
+        """是否默认允许用户使用完全访问模式（用户策略可单独覆盖）。"""
+        return self._stored().get("full_access") is True
 
     @property
     def default_model(self) -> int | None:
@@ -111,13 +123,13 @@ class AssistantConfig:
         return value if isinstance(value, str) and value.strip() else DEFAULT_NOTICE
 
     def describe_settings(self) -> dict[str, object]:
-        return {"enabled": self.enabled, "default_model": self.default_model,
+        return {"enabled": self.enabled, "default_model": self.default_model, "full_access": self.full_access_default,
                 **{name: self.setting(name) for name in SETTINGS},
                 "notice": self.notice, "notice_default": DEFAULT_NOTICE,
                 "bounds": {name: {"default": d, "min": lo, "max": hi} for name, (d, lo, hi) in SETTINGS.items()}}
 
     def update_settings(self, payload: dict, *, model_exists) -> dict[str, object]:
-        allowed = {"enabled", "default_model", "notice", *SETTINGS}
+        allowed = {"enabled", "default_model", "notice", "full_access", *SETTINGS}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"未知设置：{', '.join(sorted(unknown))}")
@@ -130,6 +142,10 @@ class AssistantConfig:
         for name, (default, low, high) in SETTINGS.items():
             if name in payload:
                 values[name] = _int(payload[name], default, low, high, name)
+        if "full_access" in payload:
+            if not isinstance(payload["full_access"], bool):
+                raise ValueError("full_access 必须是布尔值")
+            values["full_access"] = payload["full_access"] or None
         if "notice" in payload:
             notice = payload["notice"]
             if notice is not None and (not isinstance(notice, str) or len(notice) > 2000):
@@ -187,17 +203,19 @@ class AssistantConfig:
         enabled = None if row is None or row["enabled"] is None else bool(row["enabled"])
         level = row["max_level"] if row is not None and row["max_level"] in LEVELS else None
         daily = row["daily_tokens"] if row is not None else None
-        return {"enabled": enabled, "max_level": level, "daily_tokens": daily,
+        full = None if row is None or row["full_access"] is None else bool(row["full_access"])
+        return {"enabled": enabled, "max_level": level, "daily_tokens": daily, "full_access": full,
                 "effective": {"enabled": enabled is not False, "max_level": level or "write",
-                              "daily_tokens": self.setting("user_daily_tokens") if daily is None else daily},
+                              "daily_tokens": self.setting("user_daily_tokens") if daily is None else daily,
+                              "full_access": self.full_access_default if full is None else full},
                 "notice_ack_at": row["notice_ack_at"] if row is not None else None}
 
     def update_policy(self, user_id: int, payload: dict) -> dict[str, object]:
-        unknown = set(payload) - {"enabled", "max_level", "daily_tokens"}
+        unknown = set(payload) - {"enabled", "max_level", "daily_tokens", "full_access"}
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
         current = self.policy(user_id)
-        enabled, level, daily = current["enabled"], current["max_level"], current["daily_tokens"]
+        enabled, level, daily, full = current["enabled"], current["max_level"], current["daily_tokens"], current["full_access"]
         if "enabled" in payload:
             if payload["enabled"] is not None and not isinstance(payload["enabled"], bool):
                 raise ValueError("enabled 只能是 true、false 或 null（跟随全局）")
@@ -210,11 +228,15 @@ class AssistantConfig:
             value = payload["daily_tokens"]
             _, low, high = SETTINGS["user_daily_tokens"]
             daily = None if value is None else _int(value, 0, low, high, "每日 token")
+        if "full_access" in payload:
+            if payload["full_access"] is not None and not isinstance(payload["full_access"], bool):
+                raise ValueError("full_access 只能是 true、false 或 null（跟随全局）")
+            full = payload["full_access"]
         with self.metadata.transaction() as db:
-            db.execute("INSERT INTO ai_user_policy(user_id,enabled,max_level,daily_tokens) VALUES(?,?,?,?) "
+            db.execute("INSERT INTO ai_user_policy(user_id,enabled,max_level,daily_tokens,full_access) VALUES(?,?,?,?,?) "
                        "ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled,max_level=excluded.max_level,"
-                       "daily_tokens=excluded.daily_tokens",
-                       (user_id, None if enabled is None else int(enabled), level, daily))
+                       "daily_tokens=excluded.daily_tokens,full_access=excluded.full_access",
+                       (user_id, None if enabled is None else int(enabled), level, daily, None if full is None else int(full)))
         return self.policy(user_id)
 
     def acknowledge_notice(self, user_id: int, now: float) -> None:

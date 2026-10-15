@@ -6,13 +6,13 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SearchInput, Segmented,
+import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SearchInput, Segmented,
   SkeletonRows, Switch, Toggle, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
 import { Stat } from "./overview";
 
-type Tab = "overview" | "channels" | "tools" | "limits" | "usage" | "conversations" | "calls";
+type Tab = "overview" | "channels" | "catalog" | "tools" | "limits" | "usage" | "conversations" | "calls";
 const TABS: { value: Tab; label: string }[] = [
-  { value: "overview", label: "概览" }, { value: "channels", label: "渠道与模型" }, { value: "tools", label: "工具" },
+  { value: "overview", label: "概览" }, { value: "channels", label: "渠道与模型" }, { value: "catalog", label: "模型目录" }, { value: "tools", label: "工具" },
   { value: "limits", label: "限制与额度" }, { value: "usage", label: "用量" }, { value: "conversations", label: "对话记录" },
   { value: "calls", label: "调用日志" },
 ];
@@ -25,6 +25,14 @@ const KIND_EXAMPLE = { openai: "https://api.deepseek.com/v1", anthropic: "https:
 
 export const tokens = (value: number | null | undefined) => value == null ? "—" : value >= 1e6 ? `${(value / 1e6).toFixed(1)}M` : value >= 1e4 ? `${(value / 1e3).toFixed(1)}K` : value.toLocaleString("zh-CN");
 const ms = (value: number | null | undefined) => value == null ? "—" : value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${value}ms`;
+/** 美元／百万 token 的价格。 */
+export const price = (value: number | null | undefined) => value == null ? "—" : value === 0 ? "免费" : `$${value >= 10 ? value.toFixed(0) : value >= 1 ? value.toFixed(2).replace(/\.?0+$/, "") : value.toFixed(3).replace(/\.?0+$/, "")}`;
+const CAPABILITY_LABELS: [keyof ai.Capabilities, string][] = [["tools", "工具"], ["reasoning", "推理"], ["vision", "识图"], ["structured", "结构化"]];
+function CapabilityBadges({ value, tools }: { value: ai.Capabilities; tools?: ai.ToolSupport }) {
+  const items = CAPABILITY_LABELS.filter(([key]) => key === "tools" ? (tools ? tools === "yes" : value.tools) : value[key]);
+  return <span className="assistant-caps">{items.map(([key, label]) => <span key={key} className={`assistant-cap is-${key}`}>{label}</span>)}
+    {tools === "no" && <span className="assistant-cap is-off">不支持工具</span>}</span>;
+}
 const percent = (value: number | null | undefined) => value == null ? "—" : `${(value * 100).toFixed(value < 0.1 && value > 0 ? 1 : 0)}%`;
 
 function readTab(): Tab {
@@ -56,15 +64,16 @@ export function AssistantAdmin() {
   const changed = () => setRevision(value => value + 1);
   return (
     <>
-      <PageHeader title="文件助手" description="用户可以通过对话查询、整理自己的文件。写入操作需要用户逐项确认。"
+      <PageHeader title="文件助手"
         actions={settings && <div className="assistant-master">
           <Badge tone={settings.enabled ? "success" : settings.default_model ? "neutral" : "warning"} dot>{settings.enabled ? "已启用" : settings.default_model ? "未启用" : "未配置可用模型"}</Badge>
           <Switch label="启用文件助手" checked={settings.enabled} disabled={!settings.enabled && !settings.default_model}
             onChange={value => value ? setEnabling(true) : void setEnabled(false)} />
         </div>} />
-      <div className="assistant-tabs"><Segmented label="文件助手设置" showLabels value={tab} onChange={choose} options={TABS} /></div>
+      <div className="maintenance-tabs assistant-tabs"><Segmented label="文件助手设置" showLabels value={tab} onChange={choose} options={TABS} /></div>
       {tab === "overview" && <OverviewTab revision={revision} settings={settings} onNavigate={choose} onChanged={changed} />}
       {tab === "channels" && <ChannelsTab settings={settings} onChanged={changed} />}
+      {tab === "catalog" && <CatalogTab />}
       {tab === "tools" && <ToolsTab />}
       {tab === "limits" && <LimitsTab settings={settings} onSaved={setSettings} />}
       {tab === "usage" && <UsageTab />}
@@ -95,7 +104,7 @@ function OverviewTab({ revision, settings, onNavigate, onChanged }: { revision: 
   if (!data) return <Panel><SkeletonRows rows={4} /></Panel>;
   const steps = [
     { done: data.channels > 0, label: "添加一个模型渠道", tab: "channels" as Tab },
-    { done: data.usable_models > 0, label: "启用至少一个模型", tab: "channels" as Tab },
+    { done: data.usable_models > 0, label: "从渠道选择模型并启用", tab: "channels" as Tab },
     { done: Boolean(settings?.default_model), label: "设为默认模型", tab: "channels" as Tab },
     { done: data.enabled, label: "打开右上角的总开关", tab: "overview" as Tab },
   ];
@@ -222,7 +231,7 @@ function UsageTab() {
           <Stat label="Token" value={tokens(report.totals.input_tokens + report.totals.output_tokens)} detail={`输入 ${tokens(report.totals.input_tokens)} · 输出 ${tokens(report.totals.output_tokens)}`} />
           <Stat label="运行次数" value={report.totals.runs.toLocaleString("zh-CN")} detail={`自 ${report.since}`} />
           <Stat label="使用人数" value={report.totals.users.toLocaleString("zh-CN")} detail="有用量的账号" />
-          <Stat label="人均 Token" value={tokens(report.totals.users ? Math.round((report.totals.input_tokens + report.totals.output_tokens) / report.totals.users) : 0)} detail="所选范围" />
+          <Stat label="估算费用" value={report.totals.cost == null ? "—" : `$${report.totals.cost.toFixed(report.totals.cost >= 10 ? 0 : 2)}`} detail="按模型目录价格估算，仅供参考" />
         </div>
         <Panel title="每日 Token 用量" description="输入与输出合计。">
           {report.by_day.length ? <UsageBars days={report.by_day.map(row => ({ day: row.day, total: sum(row) }))} /> : <p className="muted">暂无用量数据</p>}
@@ -232,7 +241,7 @@ function UsageTab() {
             <UsageTable rows={report.by_user.map(row => [row.nickname || row.username || `#${row.user_id}`, row])} empty="暂无用户用量" />
           </Panel>
           <Panel title="按模型" description="对话所用模型（含标题生成与结构分析）。">
-            <UsageTable rows={report.by_model.map(row => [row.model_label || row.model_name ? `${row.channel_name ?? ""} / ${row.model_label || row.model_name}` : "已删除的模型", row])} empty="暂无模型用量" />
+            <UsageTable rows={report.by_model.map(row => [row.model_label || row.model_name ? `${row.channel_name ?? ""} / ${row.model_label || row.model_name}` : "已删除的模型", row])} empty="暂无模型用量" cost />
           </Panel>
         </div>
         <div className="assistant-usage-grid">
@@ -255,13 +264,14 @@ function UsageTab() {
   </>;
 }
 
-function UsageTable({ rows, empty }: { rows: [string, { input_tokens: number | null; output_tokens: number | null; runs: number | null }][]; empty: string }) {
+function UsageTable({ rows, empty, cost = false }: { rows: [string, { input_tokens: number | null; output_tokens: number | null; runs: number | null; cost?: number | null }][]; empty: string; cost?: boolean }) {
   if (!rows.length) return <p className="muted">{empty}</p>;
   return <div className="data-table assistant-usage-table" role="table">
-    <div className="data-row data-head" role="row"><span role="columnheader">名称</span><span role="columnheader">Token</span><span role="columnheader">输入 / 输出</span><span role="columnheader">运行</span></div>
+    <div className="data-row data-head" role="row"><span role="columnheader">名称</span><span role="columnheader">Token</span><span role="columnheader">输入 / 输出</span><span role="columnheader">{cost ? "估算费用" : "运行"}</span></div>
     {rows.map(([label, row], index) => <div className="data-row" role="row" key={index}>
       <span role="cell" className="cell-truncate" title={label}>{label}</span><span role="cell">{tokens((row.input_tokens ?? 0) + (row.output_tokens ?? 0))}</span>
-      <span role="cell" className="muted">{tokens(row.input_tokens)} / {tokens(row.output_tokens)}</span><span role="cell">{(row.runs ?? 0).toLocaleString("zh-CN")}</span>
+      <span role="cell" className="muted">{tokens(row.input_tokens)} / {tokens(row.output_tokens)}</span>
+      <span role="cell">{cost ? (row.cost == null ? "—" : `$${row.cost.toFixed(row.cost >= 10 ? 0 : 2)}`) : (row.runs ?? 0).toLocaleString("zh-CN")}</span>
     </div>)}
   </div>;
 }
@@ -273,6 +283,7 @@ function ChannelsTab({ settings, onChanged }: { settings: ai.AssistantSettings |
   const [selected, setSelected] = useState<number | null>(null);
   const [editing, setEditing] = useState<ai.AiChannel | "new" | null>(null);
   const [deleting, setDeleting] = useState<ai.AiChannel | null>(null);
+  const [picking, setPicking] = useState<number | null>(null);
   const [error, setError] = useState("");
   const load = useCallback(() => {
     setError("");
@@ -299,12 +310,14 @@ function ChannelsTab({ settings, onChanged }: { settings: ai.AssistantSettings |
               </li>)}
             </ul>
           </Panel>
-          {channel && <ChannelDetail key={channel.id} channel={channel} defaultModel={settings?.default_model ?? null}
-            onEdit={() => setEditing(channel)} onDelete={() => setDeleting(channel)} onChanged={() => { load(); onChanged(); }} />}
+          {channel && <ChannelDetail key={`${channel.id}-${picking === null}`} channel={channel} defaultModel={settings?.default_model ?? null}
+            onEdit={() => setEditing(channel)} onDelete={() => setDeleting(channel)} onPick={() => setPicking(channel.id)} onChanged={() => { load(); onChanged(); }} />}
         </div>
       )}
       {editing && <ChannelDialog channel={editing === "new" ? null : editing} onClose={() => setEditing(null)}
-        onSaved={saved => { setEditing(null); setSelected(saved.id); load(); onChanged(); }} />}
+        onSaved={(saved, created) => { setEditing(null); setSelected(saved.id); load(); onChanged(); if (created) setPicking(saved.id); }} />}
+      {picking !== null && <ModelPickerDialog channel={channels.find(item => item.id === picking) ?? null} channelId={picking}
+        onClose={() => setPicking(null)} onAdded={() => { load(); onChanged(); }} />}
       {deleting && <ConfirmDialog title={`删除渠道 ${deleting.name}？`} confirmLabel="删除渠道" onClose={() => setDeleting(null)}
         description="渠道下的模型一并删除，已有对话中的引用会显示为“已删除的模型”。调用日志保留。"
         onConfirm={async () => {
@@ -315,7 +328,7 @@ function ChannelsTab({ settings, onChanged }: { settings: ai.AssistantSettings |
   );
 }
 
-function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onChanged }: { channel: ai.AiChannel; defaultModel: number | null; onEdit: () => void; onDelete: () => void; onChanged: () => void }) {
+function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onPick, onChanged }: { channel: ai.AiChannel; defaultModel: number | null; onEdit: () => void; onDelete: () => void; onPick: () => void; onChanged: () => void }) {
   const [models, setModels] = useState<ai.AiModel[] | null>(null);
   const [filter, setFilter] = useState<"all" | "enabled" | "disabled">("all");
   const [search, setSearch] = useState("");
@@ -327,8 +340,8 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onChanged }: {
   useEffect(load, [load]);
   async function sync() {
     setSyncing(true);
-    try { const result = await ai.syncAdminChannel(channel.id); toast.success(`${result.note}${result.added ? "，新模型默认停用" : ""}`); load(); onChanged(); }
-    catch (reason) { toast.error(api.errorMessage(reason, "同步失败")); }
+    try { const result = await ai.syncAdminChannel(channel.id); toast.success(result.note); load(); onChanged(); }
+    catch (reason) { toast.error(api.errorMessage(reason, "检查失败")); }
     finally { setSyncing(false); }
   }
   async function update(model: ai.AiModel, input: Parameters<typeof ai.updateAdminModel>[1], message?: string) {
@@ -357,9 +370,10 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onChanged }: {
   return (
     <Panel flush className="assistant-channel-detail" title={<span className="assistant-channel-title"><span className="assistant-channel-symbol"><Icon name="server" size={20} /></span><span>{channel.name}<small>{KIND_LABEL[channel.kind]}</small></span><Badge tone={channel.enabled ? "success" : "neutral"} dot>{channel.enabled ? "已启用" : "已停用"}</Badge></span>}
       actions={<>
-        <Button size="sm" icon="refresh" loading={syncing} onClick={() => void sync()}>同步模型</Button>
+        <Button size="sm" variant="primary" icon="plus" onClick={onPick}>选择模型</Button>
         <Button size="sm" icon="edit" onClick={onEdit}>编辑</Button>
         <Menu label={`${channel.name} 的更多操作`} items={[
+          { label: syncing ? "正在检查上游…" : "检查上游", description: "标记上游已经下线的模型", icon: "refresh", onSelect: () => void sync() },
           channel.enabled
             ? { label: "停用渠道", icon: "lock", onSelect: () => void ai.updateAdminChannel(channel.id, { enabled: false }).then(() => { toast.success("渠道已停用"); onChanged(); }).catch(reason => toast.error(api.errorMessage(reason, "停用失败"))) }
             : { label: "启用渠道", icon: "unlock", onSelect: () => void ai.updateAdminChannel(channel.id, { enabled: true }).then(() => { toast.success("渠道已启用"); onChanged(); }).catch(reason => toast.error(api.errorMessage(reason, "启用失败"))) },
@@ -375,35 +389,36 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onChanged }: {
           ...(channel.last_error ? [["最近错误", <span className="tone-danger" key="error">{channel.last_error}</span>] as [ReactNode, ReactNode]] : []),
         ]} />
       </div>
-      <div className="assistant-model-heading"><h3>可用模型 <span>{models?.length ?? "—"}</span></h3><p>同步发现的新模型默认停用，测试通过后即可启用。</p></div>
+      <div className="assistant-model-heading"><h3>已加入的模型 <span>{models?.length ?? "—"}</span></h3><p>上下文、价格与能力来自模型目录，可在模型配置中手动覆盖。启用的模型出现在用户的模型选择器里。</p></div>
       <div className="toolbar assistant-model-toolbar">
         <SearchInput value={search} onChange={setSearch} placeholder="搜索模型" label="搜索模型" />
         <div className="toolbar-actions">
           <Segmented label="筛选模型" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "enabled", label: "已启用" }, { value: "disabled", label: "未启用" }]} />
-          <Button size="sm" icon="plus" onClick={() => setAdding(true)}>手动添加</Button>
+          <Button size="sm" icon="plus" variant="ghost" onClick={() => setAdding(true)}>手动添加</Button>
         </div>
       </div>
-      {models === null ? <SkeletonRows rows={3} /> : shown.length === 0 ? <EmptyState icon="box" title={models.length ? "没有匹配的模型" : "还没有模型"} description={models.length ? undefined : "点击“同步模型”从上游加载，或手动添加模型 ID。"} /> : (
+      {models === null ? <SkeletonRows rows={3} /> : shown.length === 0 ? <EmptyState icon="box" title={models.length ? "没有匹配的模型" : "还没有加入模型"}
+        description={models.length ? undefined : "从这个渠道的模型列表中选择需要的模型，系统会按模型目录自动填好上下文、价格与能力。"}
+        action={models.length ? undefined : <Button variant="primary" icon="plus" onClick={onPick}>选择模型</Button>} /> : (
         <div className="file-surface table-scroll"><div className="data-table assistant-models-table" role="table" aria-label="模型">
-          <div className="data-row data-head" role="row"><span role="columnheader">启用</span><span role="columnheader">模型</span><span role="columnheader">工具调用</span><span role="columnheader">上下文</span><span role="columnheader">来源</span><span role="columnheader"><span className="sr-only">操作</span></span></div>
+          <div className="data-row data-head" role="row"><span role="columnheader">启用</span><span role="columnheader">模型</span><span role="columnheader">上下文</span><span role="columnheader">价格（$/M）</span><span role="columnheader"><span className="sr-only">操作</span></span></div>
           {shown.map(model => (
             <div className="data-row" role="row" key={model.id}>
               <span role="cell"><Toggle label={`启用 ${model.label}`} checked={model.enabled}
                 onChange={value => void update(model, { enabled: value }, value && model.tools !== "yes" ? "已启用。建议先点“测试”确认它支持工具调用" : undefined)} /></span>
               <span role="cell" className="name-stack">
                 <strong>{model.label}{model.id === defaultModel && <Badge tone="accent">默认</Badge>}{model.removed_upstream && <Badge tone="warning">上游已移除</Badge>}</strong>
-                {(model.display_name || model.test_note) && <small className="mono" title={model.test_note ?? undefined}>
-                  {[model.display_name ? model.model : "", model.test_note ?? ""].filter(Boolean).join(" · ")}</small>}
+                <small className="assistant-model-sub"><code className="mono" title={model.test_note ?? model.model}>{model.model}</code>
+                  <CapabilityBadges value={model.capabilities} tools={model.tools} />{!model.catalog_id && <span className="assistant-cap is-off">目录未收录</span>}</small>
               </span>
-              <span role="cell">{model.tools === "yes" ? <Badge tone="success">支持</Badge> : model.tools === "no" ? <Badge tone="danger">不支持</Badge> : <Badge>未知</Badge>}</span>
               <span role="cell" className="muted">{model.context_window ? tokens(model.context_window) : "—"}</span>
-              <span role="cell" className="muted">{model.source === "auto" ? "自动" : "手动"}</span>
+              <span role="cell" className="muted">{model.input_price == null && model.output_price == null ? "—" : `${price(model.input_price)} / ${price(model.output_price)}`}</span>
               <span role="cell" className="cell-actions">
                 <Button size="sm" variant="ghost" loading={testing === model.id} onClick={() => void test(model)}>测试</Button>
                 <Menu label={`${model.label} 的操作`} items={[
                   { label: "设为默认", icon: "check", onSelect: () => void setDefault(model) },
                   { label: "编辑", icon: "edit", onSelect: () => setEditingModel(model) },
-                  ...(model.source === "manual" || model.removed_upstream ? [{ label: "删除", icon: "trash" as const, danger: true, divider: true, onSelect: () => void remove(model) }] : []),
+                  ...(model.id !== defaultModel ? [{ label: "从系统移除", icon: "trash" as const, danger: true, divider: true, onSelect: () => void remove(model) }] : []),
                 ]} />
               </span>
             </div>
@@ -426,7 +441,7 @@ function parseHeaders(text: string): Record<string, string> | string {
   return result;
 }
 
-function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | null; onClose: () => void; onSaved: (channel: ai.AiChannel) => void }) {
+function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | null; onClose: () => void; onSaved: (channel: ai.AiChannel, created: boolean) => void }) {
   const [clearHeaders, setClearHeaders] = useState(false);
   const [form, setForm] = useState({ name: channel?.name ?? "", kind: channel?.kind ?? "openai" as ai.AiChannel["kind"], base_url: channel?.base_url ?? "",
     api_key: "", headers: "", concurrency: String(channel?.concurrency ?? 4), timeout: String(channel?.timeout ?? 120), enabled: channel?.enabled ?? true });
@@ -446,18 +461,15 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
     setBusy(true); setError("");
     try {
       const saved = channel ? await ai.updateAdminChannel(channel.id, input) : await ai.createAdminChannel(input);
-      if (!channel) {
-        if (saved.sync_error) toast.error(`渠道已添加，但${saved.sync_error}`);
-        else if (saved.sync) toast.success(`渠道已添加，发现 ${saved.sync.total} 个模型，已全部设为未启用`);
-      } else toast.success("渠道已保存");
-      onSaved(saved);
+      toast.success(channel ? "渠道已保存" : "渠道已添加，请选择要加入的模型");
+      onSaved(saved, !channel);
     } catch (reason) { setError(api.errorMessage(reason, "保存失败")); }
     finally { setBusy(false); }
   }
   return (
     <Modal title={channel ? "编辑模型渠道" : "添加模型渠道"} icon="server" onClose={onClose} dismissible={!busy}
-      description={channel ? "API Key 留空表示不修改。" : "保存后会自动同步模型列表，新模型默认停用。API Key 加密保存，不会再次显示。"}
-      footer={<><Button onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" type="submit" form="channel-form" loading={busy}>{channel ? "保存" : "添加并同步"}</Button></>}>
+      description={channel ? "API Key 留空表示不修改。" : "保存后从这个渠道的模型列表中选择要加入的模型。API Key 加密保存，不会再次显示。"}
+      footer={<><Button onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" type="submit" form="channel-form" loading={busy}>{channel ? "保存" : "添加并选择模型"}</Button></>}>
       <form id="channel-form" className="form assistant-config-form" onSubmit={submit} noValidate>
         <div className="assistant-form-section"><h3>连接信息</h3><p>填写模型服务提供的接口地址与凭据。</p></div>
         <div className="form-row">
@@ -494,50 +506,283 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
 }
 
 function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number; model: ai.AiModel | null; onClose: () => void; onSaved: () => void }) {
-  const [form, setForm] = useState({ model: model?.model ?? "", display_name: model?.display_name ?? "", context_window: model?.context_window ? String(model.context_window) : "",
-    max_output: model?.max_output ? String(model.max_output) : "", tools: model?.tools ?? "unknown" as ai.ToolSupport, sort: String(model?.sort ?? 0) });
+  const initial = (value: number | null | undefined) => value == null ? "" : String(value);
+  const [form, setForm] = useState({ model: model?.model ?? "", display_name: model?.display_name ?? "", context_window: initial(model?.context_window),
+    max_output: initial(model?.max_output), tools: model?.tools ?? "unknown" as ai.ToolSupport, sort: String(model?.sort ?? 0),
+    input_price: initial(model?.input_price), output_price: initial(model?.output_price) });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const number = (value: string) => value.trim() ? Number(value) : null;
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!model && !form.model.trim()) { setError("请填写模型 ID"); return; }
-    for (const [key, label, high] of [["context_window", "上下文窗口", 10000000], ["max_output", "最大输出", 1000000], ["sort", "显示顺序", 100000]] as const) {
+    for (const [key, label, high] of [["context_window", "上下文窗口", 100000000], ["max_output", "最大输出", 10000000], ["sort", "显示顺序", 100000]] as const) {
       const value = number(form[key]);
       if (value !== null && (!Number.isInteger(value) || value < 0 || value > high)) { setError(`${label}必须是 0–${high.toLocaleString("zh-CN")} 的整数`); return; }
     }
+    for (const key of ["input_price", "output_price"] as const) {
+      const value = number(form[key]);
+      if (value !== null && (!Number.isFinite(value) || value < 0 || value > 100000)) { setError("价格必须是 0–100000 之间的数字"); return; }
+    }
+    const values = { display_name: form.display_name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output),
+      tools: form.tools, sort: Number(form.sort), input_price: number(form.input_price), output_price: number(form.output_price) };
     setBusy(true); setError("");
     try {
-      if (model) await ai.updateAdminModel(model.id, { display_name: form.display_name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output), tools: form.tools, sort: Number(form.sort) });
-      else await ai.addAdminModel(channelId, { model: form.model.trim(), display_name: form.display_name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output), tools: form.tools, sort: Number(form.sort) });
+      if (model) await ai.updateAdminModel(model.id, values);
+      else await ai.addAdminModel(channelId, { model: form.model.trim(), ...values });
       toast.success(model ? "模型已保存" : "模型已添加，默认停用");
       onSaved();
     } catch (reason) { setError(api.errorMessage(reason, "保存失败")); }
     finally { setBusy(false); }
   }
+  async function reset() {
+    if (!model) return;
+    setBusy(true);
+    try { await ai.updateAdminModel(model.id, { reset_catalog: true }); toast.success("已恢复为模型目录中的信息"); onSaved(); }
+    catch (reason) { setError(api.errorMessage(reason, "恢复失败")); }
+    finally { setBusy(false); }
+  }
+  const manual = new Set(model?.manual_fields ?? []);
+  const tag = (field: string) => manual.has(field) ? "（已手动修改）" : "";
   return (
-    <Modal title={model ? "模型配置" : "手动添加模型"} description={model ? `正在配置 ${model.model}` : "模型 ID 需与服务商接口一致，新模型默认停用。"} icon="sparkle" onClose={onClose} dismissible={!busy}
-      footer={<><Button onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" type="submit" form="model-form" loading={busy}>保存</Button></>}>
+    <Modal title={model ? "模型配置" : "手动添加模型"} description={model ? (model.catalog_id ? `正在配置 ${model.model} · 目录条目 ${model.catalog_id}` : `正在配置 ${model.model} · 模型目录未收录`) : "模型 ID 需与服务商接口一致，新模型默认停用。"}
+      icon="server" onClose={onClose} dismissible={!busy}
+      footer={<>{model && manual.size > 0 && model.catalog_id && <Button variant="ghost" icon="restore" disabled={busy} onClick={() => void reset()}>恢复目录值</Button>}
+        <Button onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" type="submit" form="model-form" loading={busy}>保存</Button></>}>
       <form id="model-form" className="form assistant-config-form" onSubmit={submit} noValidate>
         {!model && <Field label="模型 ID" hint="与上游接口中的 model 参数一致。"><input className="input mono" value={form.model} onChange={event => setForm({ ...form, model: event.target.value })} autoFocus /></Field>}
         <Field label="显示名" hint="用户在模型选择器里看到的名称，留空使用模型 ID。"><input className="input" value={form.display_name} maxLength={80} onChange={event => setForm({ ...form, display_name: event.target.value })} /></Field>
+        <div className="assistant-form-section"><h3>上下文与输出</h3><p>来自模型目录；修改后会标记为手动值，之后目录同步不再覆盖。</p></div>
         <div className="form-row">
-          <Field label="上下文窗口" hint="token 数，用于决定何时压缩历史。"><input className="input" type="number" min={0} value={form.context_window} onChange={event => setForm({ ...form, context_window: event.target.value })} /></Field>
-          <Field label="最大输出" hint="留空由服务决定。"><input className="input" type="number" min={0} value={form.max_output} onChange={event => setForm({ ...form, max_output: event.target.value })} /></Field>
+          <Field label={`上下文窗口${tag("context_window")}`} hint="token 数，用于决定何时压缩历史。"><input className="input" type="number" min={0} value={form.context_window} onChange={event => setForm({ ...form, context_window: event.target.value })} /></Field>
+          <Field label={`最大输出${tag("max_output")}`} hint="留空由服务决定。"><input className="input" type="number" min={0} value={form.max_output} onChange={event => setForm({ ...form, max_output: event.target.value })} /></Field>
+        </div>
+        <div className="form-row">
+          <Field label={`输入价格${tag("input_price")}`} hint="美元／百万 token，用于估算费用。"><input className="input" type="number" min={0} step="any" value={form.input_price} onChange={event => setForm({ ...form, input_price: event.target.value })} /></Field>
+          <Field label={`输出价格${tag("output_price")}`} hint="美元／百万 token。"><input className="input" type="number" min={0} step="any" value={form.output_price} onChange={event => setForm({ ...form, output_price: event.target.value })} /></Field>
         </div>
         <div className="assistant-form-section"><h3>能力与展示</h3><p>工具调用支持决定模型是否可供文件助手使用。</p></div>
         <div className="form-row">
-        <Field label="工具调用" hint="“测试”会自动更新此项。不支持工具调用的模型不会出现在用户的选择器里。">
-          <select className="input" value={form.tools} onChange={event => setForm({ ...form, tools: event.target.value as ai.ToolSupport })}>
-            <option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option>
-          </select>
-        </Field>
-        <Field label="显示顺序" hint="数字越小越靠前。"><input className="input" type="number" min={0} max={100000} value={form.sort} onChange={event => setForm({ ...form, sort: event.target.value })} /></Field>
+          <Field label={`工具调用${tag("tools")}`} hint="“测试”会自动更新此项。不支持工具调用的模型不会出现在用户的选择器里。">
+            <select className="input" value={form.tools} onChange={event => setForm({ ...form, tools: event.target.value as ai.ToolSupport })}>
+              <option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option>
+            </select>
+          </Field>
+          <Field label="显示顺序" hint="数字越小越靠前。"><input className="input" type="number" min={0} max={100000} value={form.sort} onChange={event => setForm({ ...form, sort: event.target.value })} /></Field>
         </div>
         {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
       </form>
     </Modal>
   );
+}
+
+/** 从渠道的上游模型列表中勾选要加入的模型；目录匹配到的上下文、价格与能力一并展示。 */
+function ModelPickerDialog({ channel, channelId, onClose, onAdded }: { channel: ai.AiChannel | null; channelId: number; onClose: () => void; onAdded: () => void }) {
+  const [items, setItems] = useState<ai.UpstreamModel[] | null>(null);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [toolsOnly, setToolsOnly] = useState(false);
+  const [chosen, setChosen] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    setItems(null); setError("");
+    void ai.discoverChannelModels(channelId).then(result => setItems(result.models)).catch(reason => setError(api.errorMessage(reason, "读取模型列表失败")));
+  }, [channelId]);
+  useEffect(load, [load]);
+  const shown = (items ?? []).filter(item => (!toolsOnly || item.capabilities.tools)
+    && (!search.trim() || `${item.model} ${item.display_name ?? ""}`.toLowerCase().includes(search.trim().toLowerCase())));
+  const available = shown.filter(item => !item.added);
+  const allChosen = available.length > 0 && available.every(item => chosen.has(item.model));
+  function toggle(model: string, value: boolean) { setChosen(current => { const next = new Set(current); if (value) next.add(model); else next.delete(model); return next; }); }
+  async function submit() {
+    setBusy(true);
+    try {
+      const result = await ai.addChannelModels(channelId, [...chosen]);
+      toast.success(`已加入 ${result.added} 个模型${result.enabled ? `，其中 ${result.enabled} 个支持工具调用，已启用` : "，测试后即可启用"}`);
+      onAdded(); onClose();
+    } catch (reason) { toast.error(api.errorMessage(reason, "加入失败")); }
+    finally { setBusy(false); }
+  }
+  return (
+    <Modal title="选择模型" description={`从 ${channel?.name ?? "渠道"} 的模型列表中勾选要加入的模型。上下文、价格与能力来自模型目录。`} icon="server" size="lg" onClose={onClose} dismissible={!busy}
+      footer={<><span className="assistant-picker-count">已选择 {chosen.size} 个</span><Button onClick={onClose} disabled={busy}>取消</Button>
+        <Button variant="primary" loading={busy} disabled={!chosen.size} onClick={() => void submit()}>加入 {chosen.size || ""} 个模型</Button></>}>
+      <div className="toolbar assistant-picker-toolbar">
+        <SearchInput value={search} onChange={setSearch} placeholder="搜索模型 ID 或名称" label="搜索模型" />
+        <div className="toolbar-actions">
+          <Segmented label="筛选" value={toolsOnly ? "tools" : "all"} onChange={value => setToolsOnly(value === "tools")} options={[{ value: "all", label: "全部" }, { value: "tools", label: "支持工具调用" }]} />
+        </div>
+      </div>
+      {error ? <EmptyState icon="alert" title="读取模型列表失败" description={error} action={<Button onClick={load}>重试</Button>} />
+        : items === null ? <SkeletonRows rows={6} />
+        : shown.length === 0 ? <EmptyState icon="box" title={items.length ? "没有匹配的模型" : "上游没有返回模型"} description={items.length ? undefined : "可以关闭后用“手动添加”填写模型 ID。"} />
+        : <div className="file-surface table-scroll assistant-picker"><div className="data-table assistant-picker-table" role="table" aria-label="上游模型">
+          <div className="data-row data-head" role="row">
+            <span role="columnheader" className="cell-check"><Checkbox label="全选" checked={allChosen} indeterminate={!allChosen && available.some(item => chosen.has(item.model))}
+              onChange={value => setChosen(current => { const next = new Set(current); for (const item of available) { if (value) next.add(item.model); else next.delete(item.model); } return next; })} /></span>
+            <span role="columnheader">模型</span><span role="columnheader">上下文</span><span role="columnheader">价格（$/M）</span>
+          </div>
+          {shown.map(item => <label key={item.model} role="row" className={`data-row${item.added ? " is-disabled" : chosen.has(item.model) ? " is-selected" : ""}`}>
+            <span role="cell" className="cell-check">{item.added ? <Icon name="check" size={15} /> : <Checkbox label={`选择 ${item.model}`} checked={chosen.has(item.model)} onChange={value => toggle(item.model, value)} />}</span>
+            <span role="cell" className="name-stack"><strong>{item.display_name ?? item.model}{item.added && <Badge>已加入</Badge>}</strong>
+              <small className="assistant-model-sub"><code className="mono">{item.model}</code><CapabilityBadges value={item.capabilities} />
+                {!item.catalog_id && <span className="assistant-cap is-off">目录未收录</span>}</small></span>
+            <span role="cell" className="muted">{item.context_window ? tokens(item.context_window) : "—"}</span>
+            <span role="cell" className="muted">{item.input_price == null && item.output_price == null ? "—" : `${price(item.input_price)} / ${price(item.output_price)}`}</span>
+          </label>)}
+        </div></div>}
+    </Modal>
+  );
+}
+
+/* ---------- 模型目录 ---------- */
+
+function CatalogTab() {
+  const [data, setData] = useState<Awaited<ReturnType<typeof ai.adminCatalog>> | null>(null);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  const [provider, setProvider] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const [editing, setEditing] = useState<ai.CatalogEntry | "new" | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [more, setMore] = useState(false);
+  const load = useCallback((cursor: string | null = null) => {
+    if (!cursor) setError("");
+    void ai.adminCatalog({ q: query, provider, cursor }).then(value => setData(current => cursor && current ? { ...value, entries: [...current.entries, ...value.entries] } : value))
+      .catch(reason => setError(api.errorMessage(reason, "模型目录加载失败"))).finally(() => setMore(false));
+  }, [query, provider]);
+  useEffect(() => { const timer = window.setTimeout(() => setQuery(search.trim()), 250); return () => window.clearTimeout(timer); }, [search]);
+  useEffect(() => load(), [load]);
+  async function sync() {
+    setSyncing(true);
+    try { const result = await ai.syncCatalog(); toast.success(`模型目录已同步：${result.note}${result.models ? `，更新了 ${result.models} 个渠道模型` : ""}`); load(); }
+    catch (reason) { toast.error(api.errorMessage(reason, "同步失败")); load(); }
+    finally { setSyncing(false); }
+  }
+  async function remove(entry: ai.CatalogEntry) {
+    try { await ai.deleteCatalogEntry(entry.id); toast.success("已删除手动条目"); load(); }
+    catch (reason) { toast.error(api.errorMessage(reason, "删除失败")); }
+  }
+  if (error && !data) return <Panel><EmptyState icon="alert" title="模型目录加载失败" description={error} action={<Button onClick={() => load()}>重试</Button>} /></Panel>;
+  if (!data) return <Panel><SkeletonRows rows={6} /></Panel>;
+  const status = data.status;
+  return <div className="assistant-admin-stack">
+    <Panel title="数据来源" description="模型目录记录上下文、输出上限、能力与价格。渠道加入模型时按模型 ID 自动匹配；手动新增或编辑过的条目不会被同步覆盖。"
+      actions={<><Button size="sm" icon="settings" onClick={() => setSettingsOpen(true)}>来源设置</Button><Button size="sm" variant="primary" icon="refresh" loading={syncing} onClick={() => void sync()}>立即同步</Button></>}>
+      <KeyValue items={[
+        ["来源", <code className="mono" key="url">{status.url}</code>],
+        ["自动同步", status.auto_sync ? "每天一次（配置了模型渠道后）" : "已关闭"],
+        ["上次同步", status.synced_at ? `${formatDateTime(status.synced_at)}${status.note ? `，${status.note}` : ""}` : "尚未同步"],
+        ["收录", `${status.total.toLocaleString("zh-CN")} 个模型 · ${status.providers} 个服务商 · 手动 ${status.manual} 个`],
+        ...(status.error ? [["最近错误", <span className="tone-danger" key="error">{status.error}</span>] as [ReactNode, ReactNode]] : []),
+      ]} />
+    </Panel>
+    <Panel flush title="目录条目" actions={<Button size="sm" icon="plus" onClick={() => setEditing("new")}>手动新增</Button>}>
+      <div className="toolbar assistant-model-toolbar">
+        <SearchInput value={search} onChange={setSearch} placeholder="搜索模型 ID 或名称" label="搜索目录" />
+        <div className="toolbar-actions">
+          <select className="input input-sm" aria-label="服务商" value={provider} onChange={event => setProvider(event.target.value)}>
+            <option value="">全部服务商</option>{data.providers.map(item => <option key={item.provider} value={item.provider}>{item.provider}（{item.count}）</option>)}
+          </select>
+        </div>
+      </div>
+      {data.entries.length === 0 ? <EmptyState icon="box" title={status.total ? "没有匹配的条目" : "目录是空的"} description={status.total ? undefined : "点击“立即同步”从数据来源获取模型信息，或手动新增。"} />
+        : <div className="file-surface table-scroll"><div className="data-table assistant-catalog-table" role="table" aria-label="模型目录">
+          <div className="data-row data-head" role="row"><span role="columnheader">模型</span><span role="columnheader">上下文</span><span role="columnheader">最大输出</span>
+            <span role="columnheader">价格（$/M）</span><span role="columnheader">来源</span><span role="columnheader"><span className="sr-only">操作</span></span></div>
+          {data.entries.map(entry => <div className="data-row" role="row" key={entry.id}>
+            <span role="cell" className="name-stack"><strong>{entry.name ?? entry.model}</strong>
+              <small className="assistant-model-sub"><code className="mono">{entry.id}</code><CapabilityBadges value={entry.capabilities} /></small></span>
+            <span role="cell" className="muted">{tokens(entry.context_window)}</span>
+            <span role="cell" className="muted">{tokens(entry.max_output)}</span>
+            <span role="cell" className="muted">{`${price(entry.input_price)} / ${price(entry.output_price)}`}</span>
+            <span role="cell">{entry.source === "manual" ? <Badge tone="accent">手动</Badge> : <span className="muted">{entry.source}</span>}</span>
+            <span role="cell" className="cell-actions"><Menu label={`${entry.id} 的操作`} items={[
+              { label: "编辑", icon: "edit", onSelect: () => setEditing(entry) },
+              ...(entry.source === "manual" ? [{ label: "删除", icon: "trash" as const, danger: true, divider: true, onSelect: () => void remove(entry) }] : []),
+            ]} /></span>
+          </div>)}
+        </div></div>}
+      {data.next_cursor && <div className="panel-more"><Button size="sm" variant="ghost" loading={more} onClick={() => { setMore(true); load(data.next_cursor); }}>加载更多</Button></div>}
+    </Panel>
+    {editing && <CatalogEntryDialog entry={editing === "new" ? null : editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
+    {settingsOpen && <CatalogSettingsDialog status={status} onClose={() => setSettingsOpen(false)} onSaved={() => { setSettingsOpen(false); load(); }} />}
+  </div>;
+}
+
+function CatalogSettingsDialog({ status, onClose, onSaved }: { status: ai.CatalogStatus; onClose: () => void; onSaved: () => void }) {
+  const [url, setUrl] = useState(status.url === status.default_url ? "" : status.url);
+  const [auto, setAuto] = useState(status.auto_sync);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true); setError("");
+    try { await ai.updateCatalogSettings({ url: url.trim() || null, auto_sync: auto }); toast.success("来源设置已保存"); onSaved(); }
+    catch (reason) { setError(api.errorMessage(reason, "保存失败")); }
+    finally { setBusy(false); }
+  }
+  return <Modal title="模型目录来源" icon="settings" onClose={onClose} dismissible={!busy}
+    footer={<><Button onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" type="submit" form="catalog-settings" loading={busy}>保存</Button></>}>
+    <form id="catalog-settings" className="form" onSubmit={submit} noValidate>
+      <Field label="数据地址" hint={<>留空使用默认的 <code>{status.default_url}</code>。也支持 OpenRouter 的 <code>/api/v1/models</code> 格式。</>}>
+        <input className="input mono" value={url} placeholder={status.default_url} onChange={event => setUrl(event.target.value)} />
+      </Field>
+      <Switch label="每天自动同步" description="由维护任务执行；只有配置了模型渠道后才会访问外网。" checked={auto} onChange={setAuto} />
+      {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+    </form>
+  </Modal>;
+}
+
+function CatalogEntryDialog({ entry, onClose, onSaved }: { entry: ai.CatalogEntry | null; onClose: () => void; onSaved: () => void }) {
+  const text = (value: number | null | undefined) => value == null ? "" : String(value);
+  const [form, setForm] = useState({ provider: entry?.provider ?? "", model: entry?.model ?? "", name: entry?.name ?? "",
+    context_window: text(entry?.context_window), max_output: text(entry?.max_output), input_price: text(entry?.input_price),
+    output_price: text(entry?.output_price), cache_price: text(entry?.cache_price) });
+  const [caps, setCaps] = useState<ai.Capabilities>(entry?.capabilities ?? { tools: null, reasoning: null, vision: null, structured: null });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const number = (value: string) => value.trim() ? Number(value) : null;
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const values: ai.CatalogInput = { name: form.name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output),
+      input_price: number(form.input_price), output_price: number(form.output_price), cache_price: number(form.cache_price), capabilities: caps };
+    for (const [key, value] of Object.entries(values)) if (typeof value === "number" && (!Number.isFinite(value) || value < 0)) { setError(`${key} 不正确`); return; }
+    setBusy(true); setError("");
+    try {
+      if (entry) await ai.updateCatalogEntry(entry.id, values);
+      else await ai.createCatalogEntry({ provider: form.provider.trim(), model: form.model.trim(), ...values });
+      toast.success(entry ? "目录条目已保存，之后同步不会覆盖它" : "已新增目录条目");
+      onSaved();
+    } catch (reason) { setError(api.errorMessage(reason, "保存失败")); }
+    finally { setBusy(false); }
+  }
+  const capability = (key: keyof ai.Capabilities, label: string) => <Field label={label} key={key}>
+    <select className="input" value={caps[key] == null ? "" : caps[key] ? "yes" : "no"} onChange={event => setCaps({ ...caps, [key]: event.target.value === "" ? null : event.target.value === "yes" })}>
+      <option value="">未知</option><option value="yes">支持</option><option value="no">不支持</option></select></Field>;
+  return <Modal title={entry ? "编辑目录条目" : "手动新增目录条目"} description={entry ? `${entry.id}${entry.source !== "manual" ? " · 保存后转为手动条目，之后同步不会覆盖" : ""}` : "渠道加入模型时会按模型 ID 匹配这里的条目。"}
+    icon="box" onClose={onClose} dismissible={!busy}
+    footer={<><Button onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" type="submit" form="catalog-entry" loading={busy}>保存</Button></>}>
+    <form id="catalog-entry" className="form assistant-config-form" onSubmit={submit} noValidate>
+      {!entry && <div className="form-row">
+        <Field label="服务商" hint="如 openai、deepseek、local"><input className="input mono" value={form.provider} onChange={event => setForm({ ...form, provider: event.target.value })} autoFocus /></Field>
+        <Field label="模型 ID" hint="与渠道中的模型 ID 一致"><input className="input mono" value={form.model} onChange={event => setForm({ ...form, model: event.target.value })} /></Field>
+      </div>}
+      <Field label="名称"><input className="input" value={form.name} maxLength={120} onChange={event => setForm({ ...form, name: event.target.value })} /></Field>
+      <div className="form-row">
+        <Field label="上下文窗口"><input className="input" type="number" min={1} value={form.context_window} onChange={event => setForm({ ...form, context_window: event.target.value })} /></Field>
+        <Field label="最大输出"><input className="input" type="number" min={1} value={form.max_output} onChange={event => setForm({ ...form, max_output: event.target.value })} /></Field>
+      </div>
+      <div className="form-row">
+        <Field label="输入价格" hint="美元／百万 token"><input className="input" type="number" min={0} step="any" value={form.input_price} onChange={event => setForm({ ...form, input_price: event.target.value })} /></Field>
+        <Field label="输出价格" hint="美元／百万 token"><input className="input" type="number" min={0} step="any" value={form.output_price} onChange={event => setForm({ ...form, output_price: event.target.value })} /></Field>
+      </div>
+      <div className="form-row">{capability("tools", "工具调用")}{capability("reasoning", "推理")}</div>
+      <div className="form-row">{capability("vision", "图片输入")}{capability("structured", "结构化输出")}</div>
+      {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+    </form>
+  </Modal>;
 }
 
 /* ---------- 工具 ---------- */
@@ -687,21 +932,28 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
       <input className="input" type="number" min={bound.min} max={bound.max} value={value} onChange={event => onChange(event.target.value)} />
     </Field>
   );
+  async function setFullAccess(value: boolean) {
+    try { onSaved(await ai.updateAdminSettings({ full_access: value })); toast.success(value ? "已允许用户使用完全访问模式" : "已关闭完全访问模式"); }
+    catch (reason) { toast.error(api.errorMessage(reason, "保存失败")); }
+  }
   return (
     <form className="assistant-limits" onSubmit={submit} noValidate>
-      {LIMIT_GROUPS.map(group => <Panel key={group.title} title={group.title} description={group.description} className="assistant-limit-panel">
-        <div className="assistant-limit-grid">{group.keys.map(key => numberField(key, limits.bounds[key].label, limits.bounds[key], form[key] ?? "", value => setForm({ ...form, [key]: value })))}</div>
+      <Panel title="访问模式" description="审批模式下，每次修改文件都由用户在卡片上确认。完全访问模式下，普通修改自动执行并保留 24 小时撤销。">
+        <Switch label="允许用户切换到完全访问" checked={settings.full_access} onChange={value => void setFullAccess(value)}
+          description="彻底删除、公开分享、超过 1,000 项的操作，以及对话读取过文件内容或网页之后的修改，仍然需要用户确认。可在“用户”页按人单独允许或禁止。" />
+      </Panel>
+      {LIMIT_GROUPS.map(group => <Panel key={group.title} title={group.title} description={group.description}>
+        <div className="form settings-form assistant-limit-form">{group.keys.map(key => numberField(key, limits.bounds[key].label, limits.bounds[key], form[key] ?? "", value => setForm({ ...form, [key]: value })))}</div>
       </Panel>)}
-      <Panel title="额度与保留期" description="每个用户的默认额度可在“用户”页按人覆盖。" className="assistant-limit-panel">
-        <div className="assistant-limit-grid">
+      <Panel title="额度与保留期" description="每个用户的默认额度可在“用户”页按人覆盖。">
+        <div className="form settings-form assistant-limit-form">
           {numberField("user_daily_tokens", "每用户每日 token（0 为不限）", settings.bounds.user_daily_tokens, general.user_daily_tokens, value => setGeneral({ ...general, user_daily_tokens: value }))}
           {numberField("retention_days", "对话留痕保留天数", settings.bounds.retention_days, general.retention_days, value => setGeneral({ ...general, retention_days: value }))}
           {numberField("call_log_days", "调用日志保留天数", settings.bounds.call_log_days, general.call_log_days, value => setGeneral({ ...general, call_log_days: value }))}
+          <Field label="首次使用说明" hint={<>用户第一次打开助手时显示，确认后才能发送消息。<button type="button" className="link" onClick={() => setGeneral({ ...general, notice: settings.notice_default })}>恢复默认说明</button></>}>
+            <textarea className="input" rows={4} maxLength={2000} value={general.notice} onChange={event => setGeneral({ ...general, notice: event.target.value })} />
+          </Field>
         </div>
-        <div className="assistant-notice-setting form settings-form"><Field label="首次使用说明" hint="用户第一次打开助手时显示，确认后才能发送消息。">
-          <textarea className="input" rows={3} maxLength={2000} value={general.notice} onChange={event => setGeneral({ ...general, notice: event.target.value })} />
-        </Field></div>
-        <Button size="sm" variant="ghost" onClick={() => setGeneral({ ...general, notice: settings.notice_default })}>恢复默认说明</Button>
       </Panel>
       {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
       {(dirty || busy) && <div className="settings-actions assistant-sticky-actions"><span className="settings-actions-note">有未保存的修改</span><Button variant="ghost" disabled={busy} onClick={() => reset(limits, settings)}>放弃修改</Button><Button type="submit" variant="primary" loading={busy}>保存</Button></div>}
@@ -929,13 +1181,14 @@ function CallsTab() {
 
 export function AssistantPolicyDialog({ user, onClose }: { user: api.Account; onClose: () => void }) {
   const [policy, setPolicy] = useState<ai.UserPolicy | null>(null);
-  const [form, setForm] = useState({ enabled: "inherit", max_level: "inherit", daily_tokens: "" });
+  const [form, setForm] = useState({ enabled: "inherit", max_level: "inherit", daily_tokens: "", full_access: "inherit" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     void ai.adminPolicy(user.id).then(value => {
       setPolicy(value);
-      setForm({ enabled: value.enabled === null ? "inherit" : value.enabled ? "on" : "off", max_level: value.max_level ?? "inherit", daily_tokens: value.daily_tokens === null ? "" : String(value.daily_tokens) });
+      setForm({ enabled: value.enabled === null ? "inherit" : value.enabled ? "on" : "off", max_level: value.max_level ?? "inherit", daily_tokens: value.daily_tokens === null ? "" : String(value.daily_tokens),
+        full_access: value.full_access === null ? "inherit" : value.full_access ? "on" : "off" });
     }).catch(reason => setError(api.errorMessage(reason, "加载失败")));
   }, [user.id]);
   async function submit(event: FormEvent) {
@@ -944,7 +1197,8 @@ export function AssistantPolicyDialog({ user, onClose }: { user: api.Account; on
     try {
       await ai.updateAdminPolicy(user.id, { enabled: form.enabled === "inherit" ? null : form.enabled === "on",
         max_level: form.max_level === "inherit" ? null : form.max_level as "read" | "write" | "danger",
-        daily_tokens: form.daily_tokens.trim() === "" ? null : Number(form.daily_tokens) });
+        daily_tokens: form.daily_tokens.trim() === "" ? null : Number(form.daily_tokens),
+        full_access: form.full_access === "inherit" ? null : form.full_access === "on" });
       toast.success(`已更新 ${api.displayName(user)} 的文件助手设置`); onClose();
     } catch (reason) { setError(api.errorMessage(reason, "保存失败")); }
     finally { setBusy(false); }
@@ -958,6 +1212,10 @@ export function AssistantPolicyDialog({ user, onClose }: { user: api.Account; on
         <Field label="最高操作级别" hint="只读：只能查询与统计；普通写入：可提议改名、移动、移入回收站等；含不可恢复操作：还可提议清空回收站。所有写入仍需用户逐项确认。">
           <select className="input" value={form.max_level} onChange={event => setForm({ ...form, max_level: event.target.value })}>
             <option value="inherit">跟随全局（普通写入）</option><option value="read">只读</option><option value="write">普通写入</option><option value="danger">含不可恢复操作</option></select></Field>
+        <Field label="完全访问模式" hint="允许后，用户可以让普通修改自动执行（仍可撤销）。">
+          <select className="input" value={form.full_access} onChange={event => setForm({ ...form, full_access: event.target.value })}>
+            <option value="inherit">跟随“限制与额度”中的全局设置</option>
+            <option value="on">允许</option><option value="off">不允许</option></select></Field>
         <Field label="每日 token" hint={`留空跟随全局（当前 ${policy.effective.daily_tokens ? tokens(policy.effective.daily_tokens) : "不限"}），0 表示不限。`}>
           <input className="input" type="number" min={0} value={form.daily_tokens} onChange={event => setForm({ ...form, daily_tokens: event.target.value })} /></Field>
         <KeyValue items={[["今日用量", tokens(policy.usage.today)], ["近 30 天", tokens(policy.usage.days30)]]} />

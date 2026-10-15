@@ -21,7 +21,7 @@ class ScriptedModel:
         self.replies = list(replies)
         self.calls = []
 
-    async def __call__(self, endpoint, model, system, messages, tools, *, max_tokens, on_text=None):
+    async def __call__(self, endpoint, model, system, messages, tools, *, max_tokens, on_text=None, on_reasoning=None):
         self.calls.append({"system": system, "messages": messages, "tools": [t.name for t in tools], "model": model})
         if not self.replies:
             reply = Reply(text="好的。", input_tokens=10, output_tokens=5)
@@ -29,6 +29,8 @@ class ScriptedModel:
             reply = self.replies.pop(0)
             if callable(reply):
                 reply = reply(messages, tools)
+        if on_reasoning and reply.reasoning:
+            await on_reasoning(reply.reasoning)
         if on_text and reply.text:
             await on_text(reply.text)
         return reply
@@ -73,17 +75,26 @@ class AssistantCase(unittest.TestCase):
         await self.app.objects.put_object(scope, key, data)
 
     async def setup_assistant(self, admin=None):
-        """建渠道（同步被替换为固定列表）、启用模型、设为默认并打开总开关。"""
+        """建渠道、从上游列表（被替换为固定列表）选择模型加入、启用、设为默认并打开总开关。"""
         admin = admin or await self.client.login("admin", "admin@example.com", "admin password")
-        with mock.patch("tgdrive.assistant.channels.providers.list_models",
-                        mock.AsyncMock(return_value=[{"model": "test-model", "display_name": "测试模型", "context_window": 64000}])):
+        upstream = mock.AsyncMock(return_value=[{"model": "test-model", "display_name": "测试模型", "context_window": 64000},
+                                                {"model": "other-model", "display_name": None, "context_window": None}])
+        with mock.patch("tgdrive.assistant.channels.providers.list_models", upstream):
             status, channel = await self.req("POST", "/api/admin/v1/assistant/channels",
                                              {"name": "测试", "kind": "openai", "base_url": "http://127.0.0.1:9/v1", "api_key": "sk-secret-value-1234"}, admin)
-        self.assertEqual(status, 201, channel)
-        self.assertEqual(channel["sync"]["added"], 1)
+            self.assertEqual(status, 201, channel)
+            _, models = await self.req("GET", f"/api/admin/v1/assistant/channels/{channel['id']}/models", headers=admin)
+            self.assertEqual(models, [], "新渠道不会自动加入模型")
+            status, found = await self.req("GET", f"/api/admin/v1/assistant/channels/{channel['id']}/discover", headers=admin)
+            self.assertEqual(status, 200, found)
+            self.assertEqual([item["model"] for item in found["models"]], ["test-model", "other-model"])
+            status, added = await self.req("POST", f"/api/admin/v1/assistant/channels/{channel['id']}/models/batch", {"models": ["test-model"]}, admin)
+            self.assertEqual(status, 201, added)
+            self.assertEqual(added["added"], 1)
         _, models = await self.req("GET", f"/api/admin/v1/assistant/channels/{channel['id']}/models", headers=admin)
+        self.assertEqual([item["model"] for item in models], ["test-model"])
         model = models[0]
-        self.assertFalse(model["enabled"], "新同步的模型默认停用")
+        self.assertFalse(model["enabled"], "目录中没有工具调用信息的模型默认停用")
         status, model = await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"enabled": True, "tools": "yes"}, admin)
         self.assertEqual(status, 200, model)
         status, settings = await self.req("POST", "/api/admin/v1/assistant/settings", {"default_model": model["id"], "enabled": True}, admin)
@@ -138,18 +149,19 @@ class AssistantTests(AssistantCase):
             self.assertIn("你好", texts)
         self.run_async(run())
 
-    def test_sync_marks_removed_models_and_keeps_new_ones_disabled(self):
+    def test_check_upstream_marks_removed_models_without_adding(self):
         async def run():
             admin, channel, model = await self.setup_assistant()
             with mock.patch("tgdrive.assistant.channels.providers.list_models",
                             mock.AsyncMock(return_value=[{"model": "other", "display_name": None, "context_window": None}])):
                 status, result = await self.req("POST", f"/api/admin/v1/assistant/channels/{channel['id']}/sync", {}, admin)
             self.assertEqual(status, 200, result)
-            self.assertEqual((result["added"], result["removed"]), (1, 1))
+            # 检查上游只标记已移除的模型，不会新增。
+            self.assertEqual((result["added"], result["removed"]), (0, 1))
             _, models = await self.req("GET", f"/api/admin/v1/assistant/channels/{channel['id']}/models", headers=admin)
             by_name = {m["model"]: m for m in models}
             self.assertTrue(by_name["test-model"]["removed_upstream"])
-            self.assertFalse(by_name["other"]["enabled"])
+            self.assertNotIn("other", by_name)
             # 默认模型不能被停用。
             status, _ = await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"enabled": False}, admin)
             self.assertEqual(status, 400)

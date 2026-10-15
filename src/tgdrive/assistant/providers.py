@@ -18,6 +18,9 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 
+REASONING_LIMIT = 20000
+
+
 class ProviderError(Exception):
     """模型服务返回错误或无法连接。message 已脱敏，可以展示与写入调用日志。"""
 
@@ -56,6 +59,7 @@ class ToolCall:
 @dataclass
 class Reply:
     text: str = ""
+    reasoning: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish: str = ""
     input_tokens: int = 0
@@ -328,10 +332,25 @@ def _anthropic_messages(messages: list[dict]) -> tuple[list[dict], str]:
 
 
 async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict], tools: list[ToolDef], *,
-               max_tokens: int | None, on_text: Callable[[str], Awaitable[None]] | None = None) -> Reply:
-    """流式调用模型，逐段回调文本，返回完整回复（含工具调用与用量）。"""
+               max_tokens: int | None, on_text: Callable[[str], Awaitable[None]] | None = None,
+               on_reasoning: Callable[[str], Awaitable[None]] | None = None) -> Reply:
+    """流式调用模型，逐段回调文本与思考过程，返回完整回复（含工具调用与用量）。
+
+    思考过程来自 OpenAI 兼容实现的 delta.reasoning_content／delta.reasoning 与 Anthropic 的 thinking_delta，
+    只用于展示，不回传给模型。
+    """
     started = time.monotonic()
     reply = Reply()
+
+    async def think(text: str) -> None:
+        if not text:
+            return
+        if reply.ttfb_ms is None:
+            reply.ttfb_ms = int((time.monotonic() - started) * 1000)
+        if len(reply.reasoning) < REASONING_LIMIT:
+            reply.reasoning += text[:REASONING_LIMIT - len(reply.reasoning)]
+        if on_reasoning is not None:
+            await on_reasoning(text)
 
     async def emit(text: str) -> None:
         if not text:
@@ -386,6 +405,10 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
                     if not isinstance(choice, dict):
                         continue
                     delta = choice.get("delta") or {}
+                    for name in ("reasoning_content", "reasoning"):
+                        if isinstance(delta.get(name), str):
+                            await think(delta[name])
+                            break
                     if isinstance(delta.get("content"), str):
                         await emit(delta["content"])
                     for call in delta.get("tool_calls") or []:
@@ -445,11 +468,15 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
                         reply.ttfb_ms = int((time.monotonic() - started) * 1000)
                 elif block.get("type") == "text" and block.get("text"):
                     await emit(block["text"])
+                elif block.get("type") == "thinking" and block.get("thinking"):
+                    await think(block["thinking"])
             elif kind == "content_block_delta":
                 delta = payload.get("delta") or {}
                 index = int(payload.get("index") or 0)
                 if delta.get("type") == "text_delta":
                     await emit(delta.get("text") or "")
+                elif delta.get("type") == "thinking_delta":
+                    await think(delta.get("thinking") or "")
                 elif delta.get("type") == "input_json_delta" and index in blocks:
                     blocks[index]["arguments"] += delta.get("partial_json") or ""
             elif kind == "message_delta":

@@ -14,6 +14,7 @@ import { PrivateTransferDialog } from "./private-access";
 import type { PreviewPlayback } from "../files";
 import { usePrivateToast } from "./private-session";
 import { usePreview } from "./preview-host";
+import { useFilesBridge } from "./assistant-bridge";
 
 /* ---------- 文件 ---------- */
 
@@ -134,6 +135,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       },
     });
   }
+  // 文件助手的浏览器工具读取当前目录、可见条目与选中状态（私密空间不登记）。
+  useFilesBridge(!privateSpace && !query, prefix, {
+    ready: () => !loading && pagination.page !== null,
+    visible: () => entries.slice(0, 200).map(entry => ({ key: entry.key, size: entry.kind === "file" ? entry.file.size : entry.size })),
+    total: () => entries.length,
+    selected: () => [...selected],
+    select: keys => { const found = keys.filter(key => entries.some(entry => entry.key === key)); setSelected(new Set(found)); return found.length; },
+    preview: key => { const entry = entries.find(item => item.key === key && item.kind === "file"); if (entry?.kind !== "file") return false; openPreview(entry.file); return true; },
+  });
   /** 文件夹的分享信息保存在它的目录标记上；还没公开过的文件夹用一个占位对象打开分享对话框。 */
   const folderItem = (key: string): api.FileItem => publicFolders[key] ?? { key, size: 0, etag: "", content_type: "application/x-directory", modified_at: 0 };
   const selectedEntries = entries.filter(entry => selected.has(entry.key));

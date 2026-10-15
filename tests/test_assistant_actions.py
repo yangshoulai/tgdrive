@@ -27,7 +27,9 @@ def gallery_page(page: int, last: int = 3) -> dict:
     return web.parse_html(GALLERY.format(page=page, next=nxt), f"https://photos.example.com/album?page={page}")
 
 
-class AssistantActionTests(AssistantCase):
+class ActionHelpers:
+    """待确认操作测试共用的辅助方法（与 AssistantCase 一起混入）。"""
+
     async def tool_results(self, user, conversation):
         return [m for m in await self.messages(user, conversation) if m["role"] == "tool"]
 
@@ -51,6 +53,9 @@ class AssistantActionTests(AssistantCase):
     def keys(self):
         return sorted(row["key"] for row in self.app.metadata.db.execute("SELECT key FROM objects WHERE bucket_id=?", (self.alice.bucket_id,)))
 
+
+
+class AssistantActionTests(ActionHelpers, AssistantCase):
     # ---------- 冻结、确认与撤销 ----------
 
     def test_rename_requires_confirmation_from_same_session_and_can_be_undone(self):

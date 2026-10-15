@@ -61,6 +61,10 @@ class ToolContext:
     # 网页工具：结果集存取与隔离的结构分析调用
     trace: object | None = None
     analyze: Callable[[dict, str], Awaitable[dict]] | None = None
+    # 浏览器工具：在用户打开的 Tessera 页面里执行，返回页面回传的结果（docs/assistant-design.md §19.7）
+    client: Callable[[str, dict], Awaitable[dict]] | None = None
+    # 标记本轮已读取不可信的外部内容（文本文件、网页、浏览器页面）：之后的修改即使在完全访问下也需要确认
+    taint: Callable[[str], None] | None = None
 
     @property
     def db(self):
@@ -127,7 +131,7 @@ class ToolSpec:
         return ToolDef(self.name, self.description, self.parameters)
 
 
-GROUPS = {"context": "上下文", "browse": "浏览与查询", "write": "提议写入", "web": "网页与下载"}
+GROUPS = {"context": "上下文", "browse": "浏览与查询", "write": "提议写入", "web": "网页与下载", "browser": "浏览器"}
 TOOLS: dict[str, ToolSpec] = {}
 
 
@@ -764,9 +768,14 @@ async def read_text_file(ctx: ToolContext, args: dict) -> ToolOutput:
         if text.count("�") > max(8, len(text) // 50):
             raise ToolError("文件不是 UTF-8 文本，无法读取")
     read_files.add(key)
+    if ctx.taint is not None:
+        ctx.taint("读取了文件内容")
+    from .guard import redact_content
+    text, hidden = redact_content(text)
     truncated = end < size
     return ToolOutput({"path": ctx.display(key), "size": size, "offset": offset, "bytes": len(head), "truncated": truncated,
-                       "next_offset": end if truncated else None, "content": text},
+                       "next_offset": end if truncated else None, "content": text,
+                       **({"note": f"内容中 {hidden} 处疑似密钥已隐藏"} if hidden else {})},
                       f"{ctx.display(key)}（{_fmt(len(head))}{'，已截断' if truncated else ''}）", items=len(head))
 
 
