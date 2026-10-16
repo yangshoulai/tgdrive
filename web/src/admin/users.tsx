@@ -58,14 +58,14 @@ export function Users() {
                   <span role="cell" className="muted" title={formatDateTime(user.last_login_at)}>{user.last_login_at ? formatDate(user.last_login_at) : "从未登录"}</span>
                   <span role="cell" className="cell-actions">
                     {user.role === "admin" ? <span className="muted cell-note">管理员账号不可禁用</span> : <>
-                      <Button size="sm" variant="ghost" onClick={() => setQuotaTarget(user)}>调整配额</Button>
-                      {user.status === "active"
-                        ? <Button size="sm" variant="ghost" className="btn-ghost-danger" onClick={() => setDisabling(user)}>禁用</Button>
-                        : <Button size="sm" onClick={() => void setUserStatus(user, "active")}>启用</Button>}
                       <Menu label={`${user.username} 的更多操作`} items={[
+                        { label: "调整配额", icon: "server", onSelect: () => setQuotaTarget(user) },
                         { label: "重置密码", icon: "key", onSelect: () => setResetTarget(user) },
                         { label: "文件助手设置", icon: "sparkle", onSelect: () => setAssistantTarget(user) },
-                        { label: "删除用户", icon: "trash", danger: true, divider: true, onSelect: () => setDeleteTarget(user) },
+                        user.status === "active"
+                          ? { label: "禁用账号", icon: "lock", danger: true, divider: true, onSelect: () => setDisabling(user) }
+                          : { label: "启用账号", icon: "unlock", divider: true, onSelect: () => void setUserStatus(user, "active") },
+                        { label: "删除用户", icon: "trash", danger: true, onSelect: () => setDeleteTarget(user) },
                       ]} />
                     </>}
                   </span>

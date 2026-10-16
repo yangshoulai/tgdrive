@@ -24,6 +24,7 @@ const ICONS = {
   users: "M16 20v-1.5A3.5 3.5 0 0 0 12.5 15h-5A3.5 3.5 0 0 0 4 18.5V20m6-8a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm6-5a2.5 2.5 0 0 1 0 5m4 8v-1.5a3.5 3.5 0 0 0-2.5-3.35",
   send: "M21 3 3 10.5l7 2.5m11-10-8 18-3-8m11-10L10 13",
   box: "M4 7.5 12 3l8 4.5v9L12 21l-8-4.5zm0 0 8 4.5 8-4.5M12 12v9",
+  chat: "M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-9l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z",
   pulse: "M3 12h4l2-6 4 12 2-6h6",
   search: "m20 20-4.2-4.2M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z",
   upload: "M12 15V4m0 0L7.5 8.5M12 4l4.5 4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3",
@@ -707,6 +708,36 @@ export function Panel({ title, description, actions, children, flush, className 
         </header>
       )}
       <div className={flush ? "panel-body is-flush" : "panel-body"}>{children}</div>
+    </section>
+  );
+}
+
+export type GuideStep = { title: ReactNode; body?: ReactNode };
+/**
+ * 配置页的「配置指南」：带编号的步骤卡片，可折叠。用户手动展开／收起后记在 localStorage（tessera-guide-<id>），
+ * 没有记录时按 defaultOpen 决定，通常传「尚未配置」，让第一次进来的管理员直接看到步骤。
+ */
+export function SetupGuide({ id, title = "配置指南", description, steps, docHref, defaultOpen = false }: { id: string; title?: string; description?: ReactNode; steps: GuideStep[]; docHref?: string; defaultOpen?: boolean }) {
+  const key = `tessera-guide-${id}`;
+  const [stored, setStored] = useState<boolean | null>(() => { try { const value = localStorage.getItem(key); return value === null ? null : value === "open"; } catch { return null; } });
+  const open = stored ?? defaultOpen;
+  const toggle = () => { const next = !open; setStored(next); try { localStorage.setItem(key, next ? "open" : "closed"); } catch { /* 存储不可用时只在本次生效。 */ } };
+  const body = useId();
+  return (
+    <section className={`setup-guide${open ? " is-open" : ""}`}>
+      <button type="button" className="setup-guide-toggle" aria-expanded={open} aria-controls={body} onClick={toggle}>
+        <span className="setup-guide-icon"><Icon name="book" size={16} /></span>
+        <span className="setup-guide-heading"><strong>{title}</strong>{description && <small>{description}</small>}</span>
+        <span className="setup-guide-count">{steps.length} 步</span>
+        <Icon name="chevronDown" size={16} className="setup-guide-chevron" />
+      </button>
+      {open && <div id={body} className="setup-guide-body">
+        <ol className="setup-guide-steps">{steps.map((step, index) => <li key={index}>
+          <span className="setup-guide-number" aria-hidden="true">{index + 1}</span>
+          <div><strong>{step.title}</strong>{step.body && <div className="setup-guide-text">{step.body}</div>}</div>
+        </li>)}</ol>
+        {docHref && <a className="setup-guide-doc link" href={docHref} target="_blank" rel="noreferrer">查看完整文档<Icon name="external" size={13} /></a>}
+      </div>}
     </section>
   );
 }

@@ -34,19 +34,22 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
     const controller = new AbortController();
     void api.listDownloads(null, "", controller.signal).then(page => {
       const next = new Map(trackedRef.current);
-      let finished = false;
+      const finished = new Set<string>();
       for (const task of page.tasks) {
         const previous = next.get(task.id);
         if (previous || isActiveDownload(task)) next.set(task.id, task);
         if (previous && isActiveDownload(previous) && task.status === "completed") {
           completedAt.current.set(task.id, Date.now());
-          finished = true;
+          finished.add(downloadTaskFolder(task));
         }
         if (task.status !== "completed") completedAt.current.delete(task.id);
       }
       setTracked(next);
-      // 新完成的文件出现在文件列表和用量里。
-      if (finished) completedRef.current();
+      // 新完成的文件出现在用量里；正在浏览保存目录的文件页按事件里的目录自行刷新（其他目录不受影响）。
+      if (finished.size) {
+        completedRef.current();
+        window.dispatchEvent(new CustomEvent("tessera:downloads-completed", { detail: { folders: [...finished] } }));
+      }
     }).catch(() => undefined);
     // 有进行中的任务时 3 秒刷新；否则 30 秒检查一次其他窗口新建的任务。
     const timer = window.setTimeout(() => setTick(value => value + 1), anyActive ? 3000 : 30000);

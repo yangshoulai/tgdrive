@@ -269,7 +269,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       </PreviewHost>
       <div className="tray-stack">
         {workspaceReady && <DownloadTray hidden={section === "downloads"} revision={downloadRevision} onOpenTasks={() => navigate("downloads")}
-          onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCompleted={() => { setUploadRevision(value => value + 1); refreshUsage(); }} />}
+          onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCompleted={refreshUsage} />}
         <UploadTray queue={uploads} />
       </div>
       {assistantAvailable && assistant.config && !assistantPage && <AssistantDrawer open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)}

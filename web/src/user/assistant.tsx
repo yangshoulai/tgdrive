@@ -83,6 +83,15 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<ComposerHandle>(null);
   const drawer = useRef<HTMLElement>(null);
+  // 手机上 iOS 弹出键盘时 100dvh 不会变小，按可视区域高度收缩抽屉，输入框不被键盘挡住。
+  useEffect(() => {
+    const viewport = window.visualViewport, node = drawer.current;
+    if (!open || !viewport || !node) return;
+    const sync = () => node.style.setProperty("--assistant-viewport", `${Math.round(viewport.height)}px`);
+    sync();
+    viewport.addEventListener("resize", sync);
+    return () => { viewport.removeEventListener("resize", sync); node.style.removeProperty("--assistant-viewport"); };
+  }, [open]);
   const unsubscribe = useRef<(() => void) | null>(null);
   const selection = useRef(0);
   const currentId = detail?.conversation.id ?? null;
@@ -678,17 +687,26 @@ function ConversationList({ items, current, onOpen, onChanged, archived, onArchi
 }) {
   const [renaming, setRenaming] = useState<ai.Conversation | null>(null);
   const [title, setTitle] = useState("");
-  const groups = groupByDate(items ?? []);
+  const [search, setSearch] = useState("");
+  const terms = search.trim().toLowerCase();
+  const shown = (items ?? []).filter(item => !terms || (item.title || "新对话").toLowerCase().includes(terms) || item.scope.toLowerCase().includes(terms));
+  const groups = groupByDate(shown);
   return <div className="assistant-history">
-    <div className="assistant-history-filter"><Segmented label="对话分类" showLabels value={archived ? "archived" : "recent"} onChange={value => onArchiveView(value === "archived")}
-      options={[{ value: "recent", label: "最近对话" }, { value: "archived", label: "已归档" }]} /></div>
-    {items === null ? <SkeletonRows rows={5} /> : items.length === 0 ? <EmptyState icon="list" title={archived ? "还没有归档的对话" : "还没有对话"} description="对话会保留在这里，随时可以继续。" /> : null}
+    <div className="assistant-history-filter">
+      <label className="assistant-history-search"><Icon name="search" size={14} />
+        <input type="search" placeholder="搜索对话" aria-label="搜索对话" value={search} spellCheck={false} onChange={event => setSearch(event.target.value)} /></label>
+      <Segmented label="对话分类" showLabels value={archived ? "archived" : "recent"} onChange={value => onArchiveView(value === "archived")}
+        options={[{ value: "recent", label: "最近" }, { value: "archived", label: "已归档" }]} />
+    </div>
+    {items === null ? <SkeletonRows rows={5} /> : items.length === 0 ? <EmptyState icon="list" title={archived ? "还没有归档的对话" : "还没有对话"} description="对话会保留在这里，随时可以继续。" />
+      : !shown.length ? <p className="assistant-history-empty">没有标题包含“{search.trim()}”的对话</p> : null}
     {groups.map(([label, list]) => <section key={label}>
       <h4>{label}</h4>
-      <ul>{list.map(item => <li key={item.id} className={item.id === current ? "is-active" : ""}>
-        <button type="button" className="assistant-history-item" onClick={() => onOpen(item.id)}>
-          <span className="name-stack"><strong>{item.title || "新对话"}</strong><small>{item.scope} · {item.messages} 条消息</small></span>
-          {item.active_run && <span className="assistant-pulse" aria-label="进行中" />}
+      <ul>{list.map(item => <li key={item.id} className={`assistant-history-row${item.id === current ? " is-active" : ""}`}>
+        <button type="button" className="assistant-history-item" onClick={() => onOpen(item.id)} aria-current={item.id === current ? "true" : undefined}>
+          <span className="assistant-history-icon" aria-hidden="true"><Icon name={item.active_run ? "pulse" : "chat"} size={15} />{item.active_run && <i className="assistant-pulse" />}</span>
+          <span className="name-stack"><strong>{item.title || "新对话"}</strong>
+            <small><span className="assistant-history-scope" title={item.scope}>{item.scope === "/" ? "全部文件" : item.scope.replace(/^\/|\/$/g, "")}</span><span>{relativeTime(item.updated_at)}</span><span>{item.messages} 条消息</span></small></span>
         </button>
         <Menu label={`${item.title || "对话"} 的操作`} items={[
           { label: "重命名", icon: "edit", onSelect: () => { setRenaming(item); setTitle(item.title ?? ""); } },
@@ -707,6 +725,19 @@ function ConversationList({ items, current, onOpen, onChanged, archived, onArchi
       }}><input className="input" value={title} maxLength={60} onChange={event => setTitle(event.target.value)} autoFocus aria-label="对话标题" /></form>
     </Modal>}
   </div>;
+}
+
+/** 对话列表里的更新时间：刚刚、N 分钟前、N 小时前、昨天、N 天前，再早显示日期。 */
+function relativeTime(seconds: number) {
+  const diff = Date.now() / 1000 - seconds;
+  if (diff < 60) return "刚刚";
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  const date = new Date(seconds * 1000), today = new Date();
+  const days = Math.round((new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime() - new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()) / 86400000);
+  if (days === 0) return `${Math.floor(diff / 3600)} 小时前`;
+  if (days === 1) return "昨天";
+  if (days < 7) return `${days} 天前`;
+  return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
 }
 
 function groupByDate(items: ai.Conversation[]): [string, ai.Conversation[]][] {

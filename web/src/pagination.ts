@@ -25,7 +25,8 @@ export function useDirectory<T extends { next_cursor: string | number | null }>(
     const controller = new AbortController();
     request.current = controller;
     const progressive = !keep;
-    if (keep && !quiet) setRefreshing(true);
+    // 刷新（keep）保留现有列表；后台刷新（quiet）连「刷新中」状态也不显示。只有重新加载才清空列表、显示骨架屏。
+    if (keep) { if (!quiet) setRefreshing(true); }
     else { shown.current = false; setPage(null); setLoading(true); setLoadingMore(false); setRefreshing(false); setTruncated(false); setError(""); }
     try {
       let cursor: string | null = null, result: T | null = null, pages = 0;

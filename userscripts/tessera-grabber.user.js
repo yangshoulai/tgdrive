@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.13.0
+// @version      0.14.0
 // @description  在 X、YouTube 和其他网页上复制资源地址与 curl 命令，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      MIT
@@ -188,7 +188,20 @@
     return null;
   }
 
+  // 资源大小与图片尺寸按地址缓存（单条帖子等范围视图里的条目不进入 items，也能显示）。
+  const resourceMeta = new Map();
+  function noteMeta(url, size, dims) {
+    const meta = resourceMeta.get(url) || {};
+    let changed = false;
+    if (size > 0 && !meta.size) { meta.size = size; changed = true; }
+    if (dims && dims[0] && dims[1] && !meta.dims) { meta.dims = dims; changed = true; }
+    if (changed) { resourceMeta.set(url, meta); syncMeta(url); }
+  }
+  /** 资源计时里的大小只用于图片与文件：音视频通常按范围请求，计时只反映已加载的一段。跨域且未允许计时的资源为 0。 */
+  const timingSize = (entry, type) => type === "image" || type === "file" ? entry.decodedBodySize || entry.encodedBodySize || 0 : 0;
+
   function remember(url, type, extra = {}) {
+    if (url) noteMeta(url, extra.size, extra.dims);
     if (!url || items.has(url) || clearedUrls.has(url)) return false;
     items.set(url, { url, type, time: Date.now(), ...extra });
     while (items.size > MAX_ITEMS) items.delete(items.keys().next().value);
@@ -206,7 +219,7 @@
       networkObserver = new Observer(list => {
         for (const entry of list.getEntries()) {
           const type = classify(entry.name, entry.initiatorType);
-          if (type) addItem(entry.name, type, { source: "网络" });
+          if (type) addItem(entry.name, type, { source: "网络", size: timingSize(entry, type) });
         }
       });
       networkObserver.observe({ type: "resource", buffered: true });
@@ -224,7 +237,7 @@
     let changed = false;
     for (const entry of entries.slice(resourceIndex)) {
       const type = classify(entry.name, entry.initiatorType);
-      if (type && remember(entry.name, type, { source: "网络" })) changed = true;
+      if (type && remember(entry.name, type, { source: "网络", size: timingSize(entry, type) })) changed = true;
     }
     resourceIndex = entries.length;
     if (changed) listeners.forEach(fn => fn());
@@ -256,7 +269,11 @@
       if (!src || !/^https?:/.test(src)) return;
       const big = img.naturalWidth >= 320 && img.naturalHeight >= 200;
       const twitter = /pbs\.twimg\.com\/media\//.test(src);
-      if (big || twitter) found.push({ url: upgradeImage(src), type: "image", source: "页面" });
+      if (big || twitter) {
+        const url = upgradeImage(src);
+        // 升级成原图的地址尺寸未知，等列表里的预览图加载后再记录。
+        found.push({ url, type: "image", source: "页面", dims: url === src ? [img.naturalWidth, img.naturalHeight] : null });
+      }
     });
     return found;
   }
@@ -1312,9 +1329,9 @@
   function collect() {
     const scope = currentContext && currentContext.scope;
     const dom = scanDom(scope || document);
-    if (scope) return dom.filter(item => !clearedUrls.has(item.url)); // 单条帖子只看它自己的媒体
+    if (scope) { for (const item of dom) noteMeta(item.url, 0, item.dims); return dom.filter(item => !clearedUrls.has(item.url)); } // 单条帖子只看它自己的媒体
     // DOM 中扫描到的资源也记下来：之后它们离开页面（关闭弹窗、切换标签）仍然留在列表里。
-    for (const item of dom) remember(item.url, item.type, { source: item.source });
+    for (const item of dom) remember(item.url, item.type, { source: item.source, dims: item.dims });
     const merged = new Map();
     for (const item of [...items.values()].reverse()) merged.set(item.url, item);
     if (currentContext && currentContext.platform === "youtube") {
@@ -1428,10 +1445,9 @@
   }
 
   function row(item) {
-    let domain = "";
-    try { domain = new URL(item.url).hostname.replace(/^www\./, ""); } catch { /* 忽略 */ }
     const tile = h("span", { className: "tile" }, item.type === "image"
-      ? h("img", { src: item.url, alt: "", loading: "lazy", referrerpolicy: "no-referrer" }) : svg(TYPE_ICON[item.type], 18));
+      ? h("img", { src: item.url, alt: "", loading: "lazy", referrerpolicy: "no-referrer",
+        onload: event => noteMeta(item.url, 0, [event.currentTarget.naturalWidth, event.currentTarget.naturalHeight]) }) : svg(TYPE_ICON[item.type], 18));
     // 勾选状态在点击时读取，行元素会被复用。
     const toggle = () => {
       if (selected.has(item.url)) selected.delete(item.url);
@@ -1447,7 +1463,7 @@
       tile,
       h("div", { className: "meta" },
         h("div", { className: "name", title: item.url }, fileName(item.url)),
-        h("div", { className: "sub" }, h("span", { className: "sent-tag" }, "已发送"), h("span", { className: "sub-text" }, [TYPE_LABEL[item.type], domain].filter(Boolean).join(" · ")))),
+        h("div", { className: "sub" }, h("span", { className: "sent-tag" }, "已发送"), h("span", { className: "sub-text" }, describe(item)))),
       h("div", { className: "item-actions" },
         // 次要操作在桌面悬停或键盘聚焦时浮现，不占用文件名的宽度；触屏设备始终显示。
         h("span", { className: "secondary" },
@@ -1458,7 +1474,79 @@
         browserEligible(item) ? iconButton("download", "本地下载（当前浏览器下载后上传）", () => startBatch([item.url], "local"))
           : h("button", { type: "button", className: "icon-btn", disabled: true, title: "流媒体列表请使用服务器下载", "aria-label": "本地下载不可用" }, svg("download")),
         iconButton("send", "服务器下载", () => startBatch([item.url], "server"), "accent")));
+    node.dataset.url = item.url;
+    watchSize(node, item);
     return node;
+  }
+
+  // ---------- 资源大小探测 ----------
+  // 行进入可见区域后才探测，最多同时 3 个：先 HEAD 读 Content-Length；没有时用 GET Range: bytes=0-0 读 Content-Range，
+  // 收到响应头即中止。结果按地址缓存，失败（验证页、403、超时）不再重试；M3U8 只是播放列表，不探测。
+  const PROBE_LIMIT = 3;
+  const probeQueue = [];
+  const probed = new Set();
+  let probing = 0, sizeObserver = null;
+  function describe(item) {
+    let domain = "";
+    try { domain = new URL(item.url).hostname.replace(/^www\./, ""); } catch { /* 忽略 */ }
+    const meta = resourceMeta.get(item.url) || {};
+    return [TYPE_LABEL[item.type], item.type === "stream" ? "播放列表" : meta.size ? formatSize(meta.size) : "",
+      meta.dims ? `${meta.dims[0]}×${meta.dims[1]}` : "", domain].filter(Boolean).join(" · ");
+  }
+  function syncMeta(url) {
+    const node = rowCache.get(url), item = node && (items.get(url) || { url, type: node.dataset.type });
+    const text = node?.querySelector(".sub-text");
+    if (text && item.type) { const value = describe(item); if (text.textContent !== value) text.textContent = value; }
+  }
+  function watchSize(node, item) {
+    node.dataset.type = item.type;
+    if (typeof IntersectionObserver !== "function") return wantSize(item);
+    sizeObserver ??= new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        sizeObserver.unobserve(entry.target);
+        wantSize({ url: entry.target.dataset.url, type: entry.target.dataset.type });
+      }
+    });
+    sizeObserver.observe(node);
+  }
+  function wantSize(item) {
+    if (item.type === "stream" || resourceMeta.get(item.url)?.size || probed.has(item.url)) return;
+    probed.add(item.url);
+    probeQueue.push(item.url);
+    pumpProbes();
+  }
+  function pumpProbes() {
+    while (probing < PROBE_LIMIT && probeQueue.length) {
+      const url = probeQueue.shift();
+      probing += 1;
+      requestSize(url).then(size => noteMeta(url, size)).finally(() => { probing -= 1; pumpProbes(); });
+    }
+  }
+  async function requestSize(url) {
+    return await probeSize(url, "HEAD") || await probeSize(url, "GET", { Range: "bytes=0-0" });
+  }
+  function probeSize(url, method, headers) {
+    return new Promise(resolve => {
+      let request = null, done = false;
+      const finish = size => { if (done) return; done = true; clearTimeout(timer); resolve(size || 0); };
+      const timer = setTimeout(() => { finish(0); request?.abort(); }, 15000);
+      const read = response => {
+        if (done || !response?.status || (response.readyState ?? 4) < 2) return false;
+        const headersText = response.responseHeaders;
+        const total = response.status >= 400 || isChallenge(response.status, headersText) ? 0
+          : Number(sourceHeader(headersText, "content-range").match(/\/(\d+)\s*$/)?.[1])
+            || (method === "HEAD" || response.status === 200 ? Number(sourceHeader(headersText, "content-length")) : 0);
+        finish(total);
+        if (method !== "HEAD") request?.abort();
+        return true;
+      };
+      try {
+        request = gm.xhr({ method, url, headers, timeout: 15000, onreadystatechange: read,
+          onload: response => { if (!read({ ...response, readyState: 4 })) finish(0); },
+          onerror: () => finish(0), ontimeout: () => finish(0), onabort: () => finish(0) });
+      } catch { finish(0); }
+    });
   }
 
   function syncRow(node, item, sent) {
@@ -2322,7 +2410,7 @@
           } }, entry.variants.map(variant => h("option", {}, variant.variant || variant.name)));
         sub.append(select);
       } else if (entry.candidate?.variant) sub.append(h("span", {}, entry.candidate.variant));
-      if (entry.candidate) sub.append(size);
+      if (entry.candidate || batch.mode === "local") sub.append(size);
       const warnings = h("div", { className: "warn" }, (entry.candidate?.warnings || []).join("；"));
       warnings.hidden = !entry.candidate?.warnings?.length;
       entry.row = { node: h("div", { className: "item batch-item" }, h("span", { className: "tile-wrap" }, tile, badge),
@@ -2337,6 +2425,7 @@
     nameText.hidden = editable;
     nameText.textContent = entry.name || fileName(entry.url);
     if (entry.candidate) size.textContent = formatSize(entry.candidate.size);
+    else if (resourceMeta.get(entry.url)?.size) size.textContent = formatSize(resourceMeta.get(entry.url).size);
     const status = entryStatus(entry);
     badge.hidden = !entryOk(entry);
     sub.hidden = Boolean(status.text);

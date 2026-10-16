@@ -3,7 +3,7 @@ import { useCursorPage } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, KeyValue, Modal, PageHeader, Pagination, Panel, Segmented, SkeletonRows, copyText, formatDate, toast, useDocumentTitle } from "../ui";
+import { Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Pagination, Panel, Segmented, SkeletonRows, copyText, formatDate, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 访问密钥 ---------- */
 
@@ -47,8 +47,11 @@ export function KeysView({ bucketName }: { bucketName: string | null }) {
                   <span role="cell">{key.status === "active" && client.status === "active" ? <Badge tone="success" dot>启用</Badge> : <Badge dot>已禁用</Badge>}</span>
                   <span role="cell" className="muted">{key.last_used_at ? formatDate(key.last_used_at) : "从未使用"}</span>
                   <span role="cell" className="cell-actions">
-                    {key.status === "active" && <Button size="sm" variant="ghost" onClick={() => setDisabling({ client: client.name, key: key.access_key_id })}>禁用</Button>}
-                    <Button size="sm" variant="ghost" className="btn-ghost-danger" onClick={() => setDeleting({ client: client.name, key: key.access_key_id })}>删除</Button>
+                    <IconButton icon="copy" size="sm" label="复制 Access Key" onClick={() => void copyText(key.access_key_id, "Access Key 已复制")} />
+                    <Menu label={`${client.name} 的更多操作`} items={[
+                      ...(key.status === "active" ? [{ label: "禁用", icon: "lock" as const, onSelect: () => setDisabling({ client: client.name, key: key.access_key_id }) }] : []),
+                      { label: "删除", icon: "trash", danger: true, divider: key.status === "active", onSelect: () => setDeleting({ client: client.name, key: key.access_key_id }) },
+                    ]} />
                   </span>
                 </div>
               )))}

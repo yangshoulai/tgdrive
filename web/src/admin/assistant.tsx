@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SearchInput, Segmented,
+import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SetupGuide, SearchInput, Segmented,
   SkeletonRows, Switch, Toggle, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
 import { Stat } from "./overview";
 
@@ -278,6 +278,24 @@ function UsageTable({ rows, empty, cost = false }: { rows: [string, { input_toke
 
 /* ---------- 渠道与模型 ---------- */
 
+const CHANNEL_STEPS = [
+  { title: "在模型服务商处创建 API Key", body: <p>在服务商控制台创建 Key 并确认账户有余额或额度。Key 保存后只以密文存在，界面只显示掩码。</p> },
+  { title: "添加渠道，填写 Base URL", body: <>
+    <p>大多数服务选「OpenAI 兼容」，Claude 官方接口选「Anthropic」。常用地址：</p>
+    <table><thead><tr><th>服务</th><th>类型</th><th>Base URL</th></tr></thead><tbody>
+      <tr><td>OpenAI</td><td>OpenAI 兼容</td><td><code>https://api.openai.com/v1</code></td></tr>
+      <tr><td>DeepSeek</td><td>OpenAI 兼容</td><td><code>https://api.deepseek.com/v1</code></td></tr>
+      <tr><td>通义千问</td><td>OpenAI 兼容</td><td><code>https://dashscope.aliyuncs.com/compatible-mode/v1</code></td></tr>
+      <tr><td>Kimi</td><td>OpenAI 兼容</td><td><code>https://api.moonshot.cn/v1</code></td></tr>
+      <tr><td>OpenRouter</td><td>OpenAI 兼容</td><td><code>https://openrouter.ai/api/v1</code></td></tr>
+      <tr><td>Ollama（本机）</td><td>OpenAI 兼容</td><td><code>http://127.0.0.1:11434/v1</code>；在 Docker 中运行时改用宿主机地址</td></tr>
+      <tr><td>Anthropic</td><td>Anthropic</td><td><code>https://api.anthropic.com</code></td></tr>
+    </tbody></table>
+  </> },
+  { title: "选择要用的模型", body: <p>在渠道详情中点「选择模型」列出上游提供的模型，勾选后加入；再点模型行的「测试」确认能正常回复。工具调用能力和上下文长度会从模型目录自动补全，没有匹配时请手动填写。</p> },
+  { title: "设为默认模型并启用助手", body: <p>在模型行的菜单中选「设为默认」，再打开页面右上角的「启用文件助手」。用户只能使用已启用的模型，额度与工具范围在「限制与额度」「工具」中调整。</p> },
+];
+
 function ChannelsTab({ settings, onChanged }: { settings: ai.AssistantSettings | null; onChanged: () => void }) {
   const [channels, setChannels] = useState<ai.AiChannel[] | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
@@ -296,6 +314,8 @@ function ChannelsTab({ settings, onChanged }: { settings: ai.AssistantSettings |
   if (!channels) return <Panel><SkeletonRows rows={4} /></Panel>;
   return (
     <>
+      <SetupGuide id="assistant-channels" title="接入模型指南" description="渠道是模型服务的接口地址加 API Key，接好后选择模型、设为默认。" docHref="/docs/admin-assistant"
+        defaultOpen={channels.length === 0} steps={CHANNEL_STEPS} />
       {channels.length === 0 ? <Panel><EmptyState icon="server" title="还没有模型渠道" description="渠道是一个模型服务的接口地址和 API Key。支持 OpenAI 兼容接口（OpenAI、DeepSeek、通义、Kimi、OpenRouter、Ollama 等）和 Anthropic。"
         action={<Button variant="primary" icon="plus" onClick={() => setEditing("new")}>添加渠道</Button>} /></Panel> : (
         <div className="assistant-channels">

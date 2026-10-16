@@ -3,7 +3,7 @@ import { useCursorPage } from "../pagination";
 import { SITE } from "../brand";
 import * as api from "../api";
 
-import { Badge, Button, ConfirmDialog, EmptyState, PageHeader, Pagination, SkeletonRows, toast, useDocumentTitle } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination, SkeletonRows, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 访问密钥 ---------- */
 
@@ -45,9 +45,11 @@ export function Clients() {
                         : <Badge tone="success" dot>启用</Badge>}
                 </span>
                 <span role="cell" className="cell-actions">
-                  {stopped ? <Button size="sm" onClick={() => void setStatus(client, "active")}>启用</Button>
-                    : activeKeys > 0 && <Button size="sm" variant="ghost" onClick={() => setDisabling(client)}>停用</Button>}
-                  <Button size="sm" variant="ghost" className="btn-ghost-danger" onClick={() => setDeleting(client)}>删除</Button>
+                  <Menu label={`${client.name} 的操作`} items={[
+                    ...(stopped ? [{ label: "启用", icon: "unlock" as const, onSelect: () => void setStatus(client, "active") }]
+                      : activeKeys > 0 ? [{ label: "停用", icon: "lock" as const, onSelect: () => setDisabling(client) }] : []),
+                    { label: "删除", icon: "trash", danger: true, divider: stopped || activeKeys > 0, onSelect: () => setDeleting(client) },
+                  ]} />
                 </span>
               </div>
               );

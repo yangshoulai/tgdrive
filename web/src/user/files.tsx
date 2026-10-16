@@ -78,19 +78,33 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const load = pagination.reload;
   /** 修改后的原地刷新：保留列表、滚动位置与选择，读完后整体替换；失败时保留原列表并提示。 */
   const refreshList = useCallback(() => pagination.refresh().then(message => { if (message) notify.error(message); }), [pagination.refresh, notify]);
-  // 批量上传时每个文件完成都会递增 uploadRevision：合并成后台刷新（静止 800 ms 或最长 3 秒一次），不转刷新按钮，避免列表持续闪动。
-  const uploadRefresh = useRef<{ timer?: number; since?: number }>({});
+  // 上传与离线下载完成后的后台刷新：静止 800 ms 后合并执行（最长等 3 秒），两次刷新至少相隔 3 秒；
+  // 不显示刷新状态、不清空列表，未变化的行原地保留，避免批量任务逐个完成时列表持续闪动。
+  const backgroundRefresh = useRef<{ timer?: number; since?: number; last?: number }>({});
   const quietRefresh = useRef(pagination.refresh);
   quietRefresh.current = pagination.refresh;
+  const scheduleRefresh = useCallback(() => {
+    const state = backgroundRefresh.current, now = Date.now();
+    state.since ??= now;
+    window.clearTimeout(state.timer);
+    const due = Math.max(Math.min(now + 800, state.since + 3000), (state.last ?? 0) + 3000);
+    state.timer = window.setTimeout(() => { state.since = undefined; state.last = Date.now(); void quietRefresh.current(true); }, Math.max(0, due - now));
+  }, []);
   useEffect(() => {
     if (lastUploadRevision.current === uploadRevision) return;
     lastUploadRevision.current = uploadRevision;
-    const state = uploadRefresh.current, now = Date.now();
-    state.since ??= now;
-    window.clearTimeout(state.timer);
-    state.timer = window.setTimeout(() => { state.since = undefined; void quietRefresh.current(true); }, Math.max(0, Math.min(800, state.since + 3000 - now)));
-  }, [uploadRevision]);
-  useEffect(() => () => window.clearTimeout(uploadRefresh.current.timer), []);
+    scheduleRefresh();
+  }, [uploadRevision, scheduleRefresh]);
+  // 离线下载完成：只有保存目录就是当前目录（或正在搜索）时才刷新。
+  useEffect(() => {
+    const completed = (event: Event) => {
+      const folders = (event as CustomEvent<{ folders: string[] }>).detail?.folders ?? [];
+      if (query || folders.includes(prefix)) scheduleRefresh();
+    };
+    window.addEventListener("tessera:downloads-completed", completed);
+    return () => window.removeEventListener("tessera:downloads-completed", completed);
+  }, [prefix, query, scheduleRefresh]);
+  useEffect(() => () => window.clearTimeout(backgroundRefresh.current.timer), []);
   const loading = pagination.loading;
   const loadError = pagination.error;
   const files = useMemo(() => (pagination.page?.objects ?? []).filter(item => !item.key.endsWith("/")), [pagination.page]);

@@ -3,7 +3,7 @@ import { BRAND, SITE } from "../brand";
 import * as api from "../api";
 import { Resources } from "./resources";
 
-import { Button, Field, Icon, KeyValue, PageHeader, Panel, SkeletonRows, toast, useDocumentTitle } from "../ui";
+import { Button, Field, Icon, KeyValue, PageHeader, Panel, SetupGuide, SkeletonRows, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 系统设置 ---------- */
 
@@ -39,6 +39,25 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
   return (
     <>
       <PageHeader title="系统设置" />
+      <SetupGuide id="system-settings" title="访问地址配置指南" description="让分享链接、使用文档和同步工具指向正确的域名。" docHref="/docs/deploy"
+        defaultOpen={!settings?.public_base_url.value && !settings?.public_base_url.default} steps={[
+          { title: "准备域名", body: <p>网站用一个域名（如 <code>drive.example.com</code>）；如果要给 rclone、AWS CLI 等同步工具使用，再准备一个<strong>独立</strong>的域名（如 <code>s3.example.com</code>）。两个域名都解析到运行 {BRAND} 的服务器。</p> },
+          { title: "配置反向代理和 HTTPS", body: <>
+            <p>两个域名都转发到服务端口（默认 8000），并保留原始 <code>Host</code>：同步工具靠域名区分，签名校验也依赖它。不要缓冲响应，否则大文件下载和视频拖动会变慢。nginx 示例：</p>
+            <pre><code>{`location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    client_max_body_size 0;
+}`}</code></pre>
+            <p>生产环境必须使用 HTTPS，登录 Cookie 只会经 HTTPS 发送。</p>
+          </> },
+          { title: "填写下方地址并保存", body: <p>公开访问地址填网站域名，同步工具地址填 S3 域名，都要带 <code>https://</code>。保存后「生效后的地址」会显示用户看到的链接样式。</p> },
+          { title: "验证", body: <p>在无痕窗口打开一个分享链接确认能访问；用访问密钥运行 <code>aws --endpoint-url https://s3.example.com s3 ls</code> 确认同步工具能列出存储桶。修改地址后，已发出的旧链接仍指向旧域名，令牌本身保持有效。</p> },
+        ]} />
       <div className="stack">
         <Panel title="访问地址">
           <form className="form settings-form" onSubmit={submit} noValidate>
@@ -72,14 +91,6 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
           ]} />
         </Panel>
         <Resources />
-        <Panel title="部署要求">
-          <ul className="plain-list">
-            <li>两个域名都需要解析到 {BRAND} 服务，或由反向代理转发到服务端口（默认 8000）。</li>
-            <li>反向代理必须保留原始 <code>Host</code> 请求头：同步工具的地址靠域名区分，签名校验也依赖它。</li>
-            <li>公开访问地址需要能访问 <code>/s/</code>、<code>/p/</code> 与 <code>/api/</code> 路径；代理不要缓冲整个文件，否则大文件下载和视频拖动会变慢。</li>
-            <li>修改地址后，已经发出的旧分享链接仍指向旧域名，令牌本身保持有效。</li>
-          </ul>
-        </Panel>
       </div>
     </>
   );

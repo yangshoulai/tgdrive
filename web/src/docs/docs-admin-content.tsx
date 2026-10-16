@@ -1,11 +1,49 @@
 /** 管理员专属文档内容，只由受保护的管理员文档 bundle 引入。 */
 import {
-  C, Callout, Code, H2, Table, useDocsConfig,
+  C, Callout, Code, H2, Lead, Step, Steps, Table, useDocsConfig,
 } from "./docs-ui";
 import { BRAND } from "../brand";
 import type { DocPage } from "./docs-content";
 
 /* ---------------------------------------------------------------- 管理员 */
+
+/** 存储通道的完整步骤；控制台「存储通道」页的配置指南（admin/bots.tsx 的 STORAGE_STEPS）是它的精简版，两处同步修改。 */
+function AdminStorageChannels() {
+  return (
+    <>
+      <Lead>{BRAND} 把文件加密切成分片后，由 Telegram Bot 上传到你自己的私有频道。一个存储通道 = 一个 Bot + 一个私有频道。没有启用的通道时，新上传的文件会加密后暂存在服务器本地磁盘。</Lead>
+      <H2>添加第一个通道</H2>
+      <Steps>
+        <Step title="创建 Bot，获取 token">
+          <p>在 Telegram 中打开 <C>@BotFather</C>，发送 <C>/newbot</C>，依次输入显示名称和用户名（必须以 <C>bot</C> 结尾）。BotFather 回复的 <C>123456789:AAH…</C> 就是 token。token 等同于 Bot 的密码，请妥善保管；不要在 BotFather 中用 <C>/revoke</C> 重新生成，旧 token 失效后，该通道里已保存的分片将无法读取。</p>
+        </Step>
+        <Step title="新建私有频道">
+          <p>选择「新建频道」，类型选私有。频道只存放密文分片，无需其他成员。分片消息看起来是一串无意义的文件，不要在频道中手动删除，否则对应文件将无法读取。</p>
+        </Step>
+        <Step title="把 Bot 设为频道管理员">
+          <p>频道设置 →「管理员」→「添加管理员」→ 搜索 Bot 用户名。权限只需<strong>发布消息</strong>，其余可以全部关闭。拥有发布权限的 Bot 可以删除自己发出的消息，垃圾回收依赖这一点。</p>
+        </Step>
+        <Step title="获取频道 ID">
+          <p>私有频道 ID 形如 <C>-1001234567890</C>。可以把频道里的任意消息转发给 <C>@userinfobot</C> 或 <C>@RawDataBot</C> 查看；也可以在网页版 <C>web.telegram.org</C> 打开频道，把地址栏 <C>#-</C> 之后的数字前面加上 <C>-100</C>。</p>
+        </Step>
+        <Step title="在控制台添加">
+          <p>「系统管理 → 存储通道 → 添加通道」，填写显示名称、token 与频道 ID。保存时会依次检查 token、频道是否可访问、Bot 是否为管理员并能发布消息，失败原因显示在「最近连接检查」列，例如：</p>
+          <Table head={["检查结果", "处理方法"]} rows={[
+            ["token 无效，或 Bot 已被移出频道", "重新从 BotFather 复制 token；确认 Bot 仍在频道中"],
+            ["找不到该频道", "确认 ID 带 -100 前缀，且 Bot 已被加入频道"],
+            ["Bot 不是该频道的管理员", "按第 3 步把 Bot 设为管理员"],
+            ["Bot 没有在频道中发布消息的权限", "在管理员权限中打开「发布消息」"],
+            ["无法连接 Telegram", "检查服务器能否访问 api.telegram.org"],
+          ]} />
+        </Step>
+      </Steps>
+      <H2>多个通道</H2>
+      <p>所有启用的通道共同承担上传，每个分片记录它所在的通道。Telegram 对单个 Bot 有发送频率限制，上传量大时建议准备 2–3 个通道。停用通道只是不再接收新分片，已有分片照常读取，所以停用的通道仍要保留 Bot 与频道，不要退出频道或删除频道消息。</p>
+      <Callout tone="warning" title="不要在多个部署之间共用频道">每个 {BRAND} 实例应使用自己的频道。垃圾回收只会删除本实例记录的分片消息，共用频道会让排查和清理变得困难。</Callout>
+    </>
+  );
+}
+
 
 function AdminDeploy() {
   return (
@@ -233,6 +271,8 @@ function Faq() {
 
 
 export const ADMIN_DOC_PAGES: DocPage[] = [
+  { slug: "storage-channels", group: "管理员", title: "存储通道", icon: "send", Content: AdminStorageChannels,
+    summary: "用 BotFather 创建 Bot、准备私有频道、获取频道 ID 并在控制台添加存储通道。", keywords: "telegram bot botfather token 频道 channel id -100 存储通道 管理员 权限 userinfobot" },
   { slug: "deploy", group: "管理员", title: "部署与运维", icon: "server", Content: AdminDeploy,
     summary: "启动参数、反向代理、锁定与解锁、维护任务和备份。", keywords: "部署 nginx 反向代理 https 参数 环境变量 解锁 垃圾回收 校验 备份" },
   { slug: "admin-assistant", group: "管理员", title: "文件助手", icon: "sparkle", Content: AdminAssistant,

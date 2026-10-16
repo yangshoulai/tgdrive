@@ -14,7 +14,8 @@ const instrumented = source.replace(/\s+gm\.load\(\)\.then\([\s\S]*\}\);\s*\}\)\
   globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBatch, parseEntries, clearEntries, clearBatch, close,
     getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES,
     pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages, collect, addItem, checkNavigation, setActive: value => { active = value; },
-    ready: gm.load(), gm, HAS_MENU, dormantFab, copy: text => gm.copy(text), openTab: url => gm.openTab(url) };
+    ready: gm.load(), gm, HAS_MENU, dormantFab, copy: text => gm.copy(text), openTab: url => gm.openTab(url),
+    requestSize, wantSize, describe, noteMeta, timingSize, probeState: () => ({ probing, queued: probeQueue.length }) };
 })();`);
 assert.notEqual(instrumented, source, "userscript test hook must replace only final bootstrap");
 
@@ -740,4 +741,54 @@ test("sync GM: settings and clipboard keep using GM_* directly", async () => {
   assert.equal(h.api.dormantFab(), false);
   h.api.copy("text");
   assert.deepEqual(h.copied, ["text"]);
+});
+
+for (const manager of ["sync", "async"]) {
+  test(`resource sizes come from timing, HEAD, or a one-byte range probe (${manager})`, async () => {
+    const seen = [];
+    const h = harness({ manager, gm: (details, record) => {
+      seen.push({ method: details.method, url: details.url, headers: details.headers });
+      const url = new URL(details.url);
+      if (url.pathname === "/head.mp4") return details.onload({ status: 200, readyState: 4, responseHeaders: "content-type: video/mp4\r\ncontent-length: 1048576\r\n" });
+      if (url.pathname === "/range.zip") {
+        if (details.method === "HEAD") return details.onload({ status: 405, readyState: 4, responseHeaders: "" });
+        // 响应头一到就读出总大小并中止，不下载内容。
+        return details.onreadystatechange({ status: 206, readyState: 2, responseHeaders: "content-range: bytes 0-0/5000\r\ncontent-length: 1\r\n" });
+      }
+      details.onload({ status: 403, readyState: 4, responseHeaders: "server: cloudflare\r\n" });
+    } });
+    await h.ready;
+    assert.equal(h.api.timingSize({ decodedBodySize: 2048 }, "image"), 2048);
+    assert.equal(h.api.timingSize({ decodedBodySize: 2048 }, "video"), 0, "media timing only covers a loaded range");
+    h.api.noteMeta("https://cdn.example/a.jpg", 2048, [1920, 1080]);
+    assert.equal(h.api.describe({ url: "https://cdn.example/a.jpg", type: "image" }), "图片 · 2.0 KB · 1920×1080 · cdn.example");
+    assert.equal(await h.api.requestSize("https://media.example/head.mp4"), 1048576);
+    assert.equal(await h.api.requestSize("https://files.example/range.zip"), 5000);
+    assert.equal(await h.api.requestSize("https://blocked.example/x.bin"), 0);
+    assert.deepEqual(seen.filter(item => item.url.includes("range.zip")).map(item => item.method), ["HEAD", "GET"]);
+    assert.equal(seen.find(item => item.method === "GET").headers.Range, "bytes=0-0");
+    for (const request of seen) {
+      assert.equal(request.headers?.Authorization, undefined, "Tessera key must not reach the source");
+      assert.equal(request.headers?.["User-Agent"], undefined);
+    }
+    const range = h.requests.find(request => request.details.url.includes("range.zip") && request.details.method === "GET");
+    assert.equal(range.aborted, true, "range probe stops after headers");
+  });
+}
+
+test("size probing runs at most three requests and skips playlists", async () => {
+  const pending = [];
+  const h = harness({ gm: details => { pending.push(details); } });
+  for (let i = 0; i < 5; i++) h.api.wantSize({ url: `https://media.example/${i}.mp4`, type: "video" });
+  h.api.wantSize({ url: "https://media.example/list.m3u8", type: "stream" });
+  h.api.wantSize({ url: "https://media.example/0.mp4", type: "video" });
+  await until(() => pending.length === 3);
+  const state = h.api.probeState();
+  assert.equal(state.probing, 3);
+  assert.equal(state.queued, 2);
+  pending[0].onload({ status: 200, readyState: 4, responseHeaders: "content-length: 10\r\n" });
+  await until(() => pending.length === 4);
+  assert.ok(!pending.some(details => details.url.includes("m3u8")));
+  assert.equal(pending.filter(details => details.url.endsWith("/0.mp4")).length, 1, "each address is probed once");
+  assert.equal(h.api.describe({ url: "https://media.example/0.mp4", type: "video" }), "视频 · 10 B · media.example");
 });

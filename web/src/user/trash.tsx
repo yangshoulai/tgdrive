@@ -6,7 +6,7 @@ import { usePrivateToast } from "./private-session";
 
 import { FileTile, baseName, getFileKind, parentPath } from "../files";
 
-import { Button, ConfirmDialog, EmptyState, PageHeader, SkeletonRows, formatBytes, formatDate, useDocumentTitle } from "../ui";
+import { Button, ConfirmDialog, EmptyState, Menu, PageHeader, SkeletonRows, formatBytes, formatDate, useDocumentTitle } from "../ui";
 
 /* ---------- 回收站 ---------- */
 
@@ -59,8 +59,10 @@ export function TrashView({ onChanged, onOpenFolder, root = "" }: { onChanged: (
                 <span role="cell" className="muted">{formatBytes(item.size)}</span>
                 <span role="cell" className="name-stack"><span className="muted">{formatDate(item.deleted_at)}</span><small>{days(item.purge_at)} 天后永久删除</small></span>
                 <span role="cell" className="cell-actions">
-                  <Button size="sm" variant="ghost" icon="refresh" onClick={() => void restore([item])}>还原</Button>
-                  <Button size="sm" variant="ghost" className="btn-ghost-danger" onClick={() => setPurging([item])}>永久删除</Button>
+                  <Button size="sm" variant="ghost" icon="rotate" onClick={() => void restore([item])}>还原</Button>
+                  <Menu label={`${baseName(item.path)} 的更多操作`} items={[
+                    { label: "永久删除", icon: "trash", danger: true, onSelect: () => setPurging([item]) },
+                  ]} />
                 </span>
               </div>
             ))}

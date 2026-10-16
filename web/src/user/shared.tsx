@@ -6,7 +6,7 @@ import { usePreview } from "./preview-host";
 
 import { FileFilters, FileThumbnail, FileVisual, FolderThumbnail, baseName, getFileKind, kindLabel, matchesKindFilter, parentPath, type EntryFilter } from "../files";
 
-import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, PageHeader, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
 /* ---------- 公开分享 ---------- */
 
@@ -59,6 +59,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                     <span role="columnheader" className="cell-name">名称</span>
                     <span role="columnheader" className="cell-type">类型</span>
                     <span role="columnheader" className="cell-size">大小</span>
+                    <span role="columnheader" className="cell-count">下载</span>
                     <span role="columnheader" className="cell-date">分享时间</span>
                     <span role="columnheader" className="cell-actions"><span className="sr-only">操作</span></span>
                   </div>
@@ -72,15 +73,19 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                         <FileVisual kind={folder ? "folder" : getFileKind(file.content_type, file.key)} src={folder ? undefined : api.fileThumbnail(file)} />
                         <span className="name-stack">
                           <button type="button" className="name-button" onClick={event => { event.stopPropagation(); open(); }}>{baseName(file.key)}</button>
-                          <small>{parentPath(file.key) ? `/${parentPath(file.key)}` : "我的文件"}{` · 下载 ${file.public_downloads ?? 0} 次`}</small>
+                          {/* 位置是次要信息：小号三级色，带文件夹图标的面包屑，和文件名明显区分。 */}
+                          <small className="item-location" title={`位于 /${parentPath(file.key)}`}><Icon name="folder" size={12} />
+                            <span>{["我的文件", ...parentPath(file.key).split("/").filter(Boolean)].join(" › ")}</span>
+                            <span className="item-location-count">· 下载 {file.public_downloads ?? 0} 次</span></small>
                         </span>
                         {shareBadges(file)}
                       </span>
                       <span role="cell" className="cell-type muted">{kindLabel(getFileKind(file.content_type, file.key))}</span>
                       <span role="cell" className="cell-size muted" title={folder ? "包含所有子文件夹中的文件" : undefined}>{size == null ? "—" : formatBytes(size)}</span>
+                      <span role="cell" className="cell-count muted">{(file.public_downloads ?? 0).toLocaleString("zh-CN")} 次</span>
                       <span role="cell" className="cell-date muted">{formatDate(file.public_at)}</span>
                       <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
-                        <Button size="sm" icon="copy" onClick={() => void copyText(links(file).page, "分享链接已复制")}>复制链接</Button>
+                        <IconButton icon="copy" size="sm" label="复制分享链接" onClick={() => void copyText(links(file).page, "分享链接已复制")} />
                         <Menu label={`${baseName(file.key)} 的更多操作`} items={fileMenu(file)} />
                       </span>
                     </div>
