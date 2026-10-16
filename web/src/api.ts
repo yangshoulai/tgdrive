@@ -217,14 +217,24 @@ export async function changePassword(oldPassword: string, newPassword: string) {
 
 /* ---------- 用户文件 ---------- */
 
-/** 文件类型快速筛选；与服务端 tgdrive/filekinds.py 的 KIND_GROUPS 对应，空串表示全部。 */
-export type KindFilter = "" | "image" | "video" | "audio" | "document" | "text" | "archive";
-export const KIND_FILTERS: { value: KindFilter; label: string }[] = [
-  { value: "", label: "全部" }, { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" },
+/** 文件类型快速筛选；与服务端 tgdrive/filekinds.py 的 KIND_GROUPS 对应。可多选：值是按 KIND_FILTERS 顺序以逗号连接的类型（"image,video"），空串表示全部。 */
+export type KindName = "image" | "video" | "audio" | "document" | "text" | "archive";
+export type KindFilter = string;
+export const KIND_FILTERS: { value: KindName; label: string }[] = [
+  { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" },
   { value: "document", label: "文档" }, { value: "text", label: "文本" }, { value: "archive", label: "压缩包" },
 ];
+export const kindValues = (filter: KindFilter): KindName[] => KIND_FILTERS.map(item => item.value).filter(value => filter.split(",").includes(value));
+/** 切换某个类型的选中状态，结果保持固定顺序，便于比较与作为请求参数。 */
+export const toggleKind = (filter: KindFilter, kind: KindName): KindFilter => {
+  const values = new Set(kindValues(filter));
+  if (values.has(kind)) values.delete(kind); else values.add(kind);
+  return KIND_FILTERS.map(item => item.value).filter(value => values.has(value)).join(",");
+};
+/** 「图片、视频」；用于空状态等提示文案。 */
+export const kindFilterLabel = (filter: KindFilter) => kindValues(filter).map(value => KIND_FILTERS.find(item => item.value === value)!.label).join("、") || "文件";
 export const listFiles = (prefix = "", cursor: string | null = null, publicOnly = false, limit = 100, kind: KindFilter = "", signal?: AbortSignal) =>
-  request<ListPage>(`${fileApi("/list", prefix)}?limit=${limit}&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${kind}` : ""}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+  request<ListPage>(`${fileApi("/list", prefix)}?limit=${limit}&prefix=${encodeURIComponent(prefix)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
 export const previewAssets = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`${fileApi("/preview-assets", path)}?path=${encodeURIComponent(path)}`, { signal });
 export const previewList = (path: string, cursor: string | null, signal: AbortSignal) => request<PreviewListPage>(
   `${fileApi("/preview-list", path)}?path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
@@ -241,7 +251,11 @@ export const publicPreviewAssets = (token: string, path: string, access?: string
   return request<PreviewAsset[]>(`/api/public/v1/folders/${encodeURIComponent(token)}/preview-assets?${params}`, { signal });
 };
 export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100, root = "", kind: KindFilter = "", signal?: AbortSignal) =>
-  request<ListPage>(`${fileApi("/search", root)}?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${kind}` : ""}`, { signal });
+  request<ListPage>(`${fileApi("/search", root)}?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}`, { signal });
+/** 目录统计（含子文件夹）：数量、总大小、按类型分组（与 KIND_FILTERS 同组，另有 other）、最大的文件。 */
+export type FolderStats = { prefix: string; files: number; folders: number; bytes: number; direct_files: number; direct_folders: number;
+  kinds: { kind: KindName | "other"; count: number; bytes: number }[]; largest: { key: string; size: number; content_type: string | null }[]; latest_modified: number | null };
+export const folderStats = (prefix: string, signal?: AbortSignal) => request<FolderStats>(`${fileApi("/stats", prefix)}?prefix=${encodeURIComponent(prefix)}`, { signal });
 export const listFolders = (prefix: string, cursor: string | null = null, signal?: AbortSignal) => request<{ folders: string[]; next_cursor: string | null }>(
   `${fileApi("/folders", prefix)}?limit=50&prefix=${encodeURIComponent(prefix)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
 export const checkFiles = (paths: string[]) => post<{ paths: string[] }>(fileApi("/files/check", paths[0]), { paths });

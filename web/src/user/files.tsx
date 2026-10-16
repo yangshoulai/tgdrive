@@ -4,8 +4,9 @@ import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
+import { FolderStatsDialog } from "./folder-stats";
 import { FileFilters, FileThumbnail, FileTile, FileVisual, ShareDialog, baseName, getFileKind, kindLabel, parentPath, type EntryFilter } from "../files";
-import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator } from "../thumbnails";
+import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator, videoFrameUsable } from "../thumbnails";
 
 import { Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 
@@ -28,7 +29,6 @@ const DELETE_KEY = IS_MAC ? "⌘⌫" : "Del";
 /** 图标上已经印了格式标签（PDF、DOC…）的类型，网格卡片不再重复显示扩展名。 */
 const LABELLED_KINDS = new Set(["pdf", "document", "spreadsheet", "presentation"]);
 
-const KIND_FILTERS = api.KIND_FILTERS;
 const SEARCH_PAGES = 5;
 const COLLATOR = new Intl.Collator("zh-CN", { numeric: true });
 
@@ -57,6 +57,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [cursor, setCursor] = useState<string | null>(null);
   const [context, setContext] = useState<{ x: number; y: number; key: string } | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [statsFor, setStatsFor] = useState<{ prefix: string; title: string } | null>(null);
   const surface = useRef<HTMLElement>(null);
   const dragKeys = useRef<string[]>([]);
   const [folderOpen, setFolderOpen] = useState(false);
@@ -185,7 +186,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         savePreviewThumbnail(item, () => thumbnailsFromImage(image), true);
       },
       onVideoFrame: (video, item) => {
-        if (item.thumbnails?.length || video.readyState < 2 || !video.videoWidth) return;
+        // 等到当前画面不是片头黑屏再截取；画面来自播放器已经解码的数据，不额外读取视频。
+        if (item.thumbnails?.length || previewThumbnailAttempts.current.has(`${item.key}:${item.etag}`) || !videoFrameUsable(video)) return;
         const source = video.currentSrc;
         savePreviewThumbnail(item, () => video.currentSrc === source ? thumbnailsFromVideo(video) : Promise.resolve(null));
       },
@@ -336,6 +338,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     return [
       { label: "打开", icon: "folder", shortcut: "↵", onSelect: () => onOpenFolder(key) },
       { label: "下载（ZIP）", icon: "download", onSelect: () => undefined, href: api.archiveUrl([key]) },
+      { label: "目录统计", icon: "chart", onSelect: () => setStatsFor({ prefix: key, title: baseName(key) }) },
       ...(!privateSpace ? [{ label: shared ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(folderItem(key)) }] : []),
       ...(shared ? [{ label: "打开分享页", icon: "external" as const, onSelect: () => window.open(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "_blank", "noreferrer") }] : []),
       ...(shared ? [{ label: "复制分享链接", icon: "copy" as const, onSelect: () => void copyText(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "分享链接已复制") }] : []),
@@ -516,6 +519,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             <label className={`mobile-file-sort${layout === "grid" ? " is-grid-sort" : ""}`}><span className="sr-only">排序</span><select aria-label="排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
               const [key, direction] = event.target.value.split(":"); setSort({ key: key as SortKey, desc: direction === "desc" });
             }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="type:asc">类型升序</option><option value="type:desc">类型降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>
+            <IconButton icon="chart" label="目录统计" variant="secondary" onClick={() => setStatsFor({ prefix, title: name })} />
             <IconButton icon="refresh" label="刷新" variant="secondary" spinning={pagination.refreshing} disabled={loading} onClick={() => void refreshList()} />
             <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
           </div>
@@ -530,8 +534,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         ) : entries.length === 0 ? (
           entryFilter === "folder" ? <EmptyState icon="folder" title="没有符合条件的文件夹" description={query ? "搜索目前按文件名查找文件；清除搜索可浏览当前目录的文件夹。" : "当前目录没有符合筛选条件的文件夹。"} action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
           : entryFilter === "file" && !kind && !query ? <EmptyState icon="file" title="这个目录没有符合条件的文件" description="文件筛选只看当前目录，不包含子文件夹中的内容。" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
-          : kind && !query ? <EmptyState icon="search" title={`${filter === "public" ? "这个文件夹里没有公开的" : "这个文件夹里没有"}${KIND_FILTERS.find(item => item.value === kind)?.label}`} description="类型筛选只看当前文件夹，不包含子文件夹；搜索时会在全部文件中按类型查找。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
-          : query ? <EmptyState icon="search" title={`没有找到包含“${query}”的${kind ? KIND_FILTERS.find(item => item.value === kind)?.label : "文件"}`} description="换个关键词，或检查拼写。" action={<Button onClick={() => { setSearch(""); setQuery(""); }}>清除搜索</Button>} />
+          : kind && !query ? <EmptyState icon="search" title={`${filter === "public" ? "这个文件夹里没有公开的" : "这个文件夹里没有"}${api.kindFilterLabel(kind)}`} description="类型筛选只看当前文件夹，不包含子文件夹；搜索时会在全部文件中按类型查找。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
+          : query ? <EmptyState icon="search" title={`没有找到包含“${query}”的${kind ? api.kindFilterLabel(kind) : "文件"}`} description="换个关键词，或检查拼写。" action={<Button onClick={() => { setSearch(""); setQuery(""); }}>清除搜索</Button>} />
             : filter === "public" ? <EmptyState icon="globe" title="这个文件夹里没有公开内容" description="在文件或文件夹的菜单中选择“公开分享”，即可生成任何人可访问的链接。" />
               : <EmptyState icon="upload" title={prefix ? "这个文件夹是空的" : "上传你的第一个文件"} description="把文件拖到这里，或点击上传按钮。" action={<Button icon="upload" onClick={() => fileInput.current?.click()}>选择文件</Button>} />
         ) : layout === "list" ? (
@@ -644,7 +648,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       </section>
 
       <footer className="list-footer">
-        <span>{loading ? "正在加载" : [entries.some(item => item.kind === "folder") && `${entries.filter(item => item.kind === "folder").length} 个文件夹`, entries.some(item => item.kind === "file") && `${entries.filter(item => item.kind === "file").length} 个文件`].filter(Boolean).join(" · ") || (kind || entryFilter !== "all" || filter === "public" ? "没有符合条件的项目" : "空文件夹")}</span>
+        <span className="list-footer-summary">{loading ? "正在加载" : [entries.some(item => item.kind === "folder") && `${entries.filter(item => item.kind === "folder").length} 个文件夹`, entries.some(item => item.kind === "file") && `${entries.filter(item => item.kind === "file").length} 个文件`, entries.some(item => item.kind === "file") && formatBytes(entries.reduce((sum, item) => sum + (item.kind === "file" ? item.file.size : 0), 0))].filter(Boolean).join(" · ") || (kind || entryFilter !== "all" || filter === "public" ? "没有符合条件的项目" : "空文件夹")}
+          {!loading && !query && <button type="button" className="link-button" onClick={() => setStatsFor({ prefix, title: name })}><Icon name="chart" size={14} /><span>目录统计</span></button>}</span>
         <span className="list-footer-end">
           {pagination.loadingMore ? <span role="status">正在读取其余项目…</span>
             : pagination.truncated && <span role="status">仅显示前 {SEARCH_PAGES * 200} 个结果，请细化关键词</span>}
@@ -653,6 +658,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       </footer>
 
       {context && <ContextMenu x={context.x} y={context.y} label={`${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
+      {statsFor && <FolderStatsDialog prefix={statsFor.prefix} title={statsFor.prefix === root ? rootName : api.privatePathLabel(statsFor.prefix).replace(/\/$/, "")} onClose={() => setStatsFor(null)} onOpenFolder={onOpenFolder} />}
       {shortcutsOpen && <Modal title="键盘快捷键" icon="keyboard" size="sm" onClose={() => setShortcutsOpen(false)} footer={<Button onClick={() => setShortcutsOpen(false)}>知道了</Button>}>
         <KeyValue items={[
           [<kbd>/</kbd>, "搜索文件"],

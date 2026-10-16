@@ -15,29 +15,34 @@ const ENTRY_FILTERS: { value: EntryFilter; label: string }[] = [
   { value: "all", label: "全部" }, { value: "folder", label: "文件夹" }, { value: "file", label: "文件" },
 ];
 
-const TYPE_FILTERS = api.KIND_FILTERS.filter(option => option.value);
-
-/** 一行筛选：先选项目（全部／文件夹／文件），分隔线后是文件类型；选类型即切到「文件」，再次点击取消，选文件夹会清除类型。 */
+/** 一行筛选：先选项目（全部／文件夹／文件），分隔线后是文件类型（可多选，取并集）；选类型即切到「文件」，
+ * 取消全部类型保持「文件」，选文件夹或全部会清除类型。 */
 export function FileFilters({ entry, kind, onEntryChange, onKindChange }: {
   entry: EntryFilter; kind: api.KindFilter; onEntryChange: (value: EntryFilter) => void; onKindChange: (value: api.KindFilter) => void;
 }) {
+  const chosen = api.kindValues(kind);
   return <div className="file-filters">
     <FilterChips label="项目" value={entry} options={ENTRY_FILTERS} onChange={value => {
       onEntryChange(value); if (value !== "file") onKindChange("");
     }} />
     <span className="file-filters-divider" aria-hidden="true" />
-    <FilterChips label="文件类型" value={kind} options={TYPE_FILTERS} clearValue="" onChange={value => {
-      onKindChange(value); if (value) onEntryChange("file");
-    }} />
+    <div className="filter-chips" role="group" aria-label="文件类型（可多选）">
+      {api.KIND_FILTERS.map(option => {
+        const active = chosen.includes(option.value);
+        return <button key={option.value} type="button" aria-pressed={active} className={`filter-chip is-multi${active ? " is-active" : ""}`}
+          onClick={() => { const next = api.toggleKind(kind, option.value); onKindChange(next); if (next) onEntryChange("file"); }}>
+          {active && <Icon name="check" size={12} />}{option.label}</button>;
+      })}
+      {chosen.length > 1 && <button type="button" className="filter-chip-clear" onClick={() => onKindChange("")}>清除</button>}
+    </div>
   </div>;
 }
 
 export function matchesKindFilter(file: { content_type?: string | null; key: string }, filter: api.KindFilter): boolean {
   if (!filter) return true;
   const kind = getFileKind(file.content_type, file.key);
-  if (filter === "document") return ["pdf", "document", "spreadsheet", "presentation"].includes(kind);
-  if (filter === "text") return kind === "text" || kind === "code";
-  return kind === filter;
+  return api.kindValues(filter).some(value => value === "document" ? ["pdf", "document", "spreadsheet", "presentation"].includes(kind)
+    : value === "text" ? kind === "text" || kind === "code" : kind === value);
 }
 
 export function getFileKind(type: string | null | undefined, name: string): FileKind {

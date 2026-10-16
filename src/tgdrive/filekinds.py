@@ -47,13 +47,16 @@ def _match(mimes: list[str], keys: list[str]) -> tuple[str, list[str]]:
 
 
 def kind_clause(kind: str) -> tuple[str, list[str]]:
-    """返回 (SQL 条件, 参数)，用于 objects 表；kind 不是已知筛选项时抛 ValueError（400）。"""
-    if kind not in KIND_GROUPS:
+    """返回 (SQL 条件, 参数)，用于 objects 表。kind 可以是逗号分隔的多个筛选项（取并集，例如 "image,video"）；
+    含未知筛选项时抛 ValueError（400）。"""
+    names = [item.strip() for item in kind.split(",") if item.strip()]
+    if not names or len(names) > len(KIND_GROUPS) or any(name not in KIND_GROUPS for name in names):
         raise ValueError("未知的文件类型筛选")
+    wanted = set().union(*(KIND_GROUPS[name] for name in names))
     clauses, params, earlier = [], [], []
     for name, mimes, keys in _RULES:
         sql, args = _match(mimes, keys)
-        if name in KIND_GROUPS[kind]:
+        if name in wanted:
             if earlier:
                 clauses.append(f"({sql} AND NOT ({' OR '.join(part for part, _ in earlier)}))")
                 params += args + [value for _, values in earlier for value in values]
@@ -62,6 +65,18 @@ def kind_clause(kind: str) -> tuple[str, list[str]]:
                 params += args
         earlier.append((sql, args))
     return "(" + " OR ".join(clauses) + ")", params
+
+
+def kind_case() -> tuple[str, list[str]]:
+    """返回 (SQL CASE 表达式, 参数)：把对象归入界面上的筛选组（image/video/audio/document/text/archive），
+    其余归为 other。按规则顺序先命中优先，与 kind_clause 和前端 getFileKind 一致，用于目录统计的 GROUP BY。"""
+    group_of = {name: group for group, names in KIND_GROUPS.items() for name in names}
+    branches, params = [], []
+    for name, mimes, keys in _RULES:
+        sql, args = _match(mimes, keys)
+        branches.append(f"WHEN {sql} THEN ?")
+        params += [*args, group_of.get(name, "other")]
+    return "CASE " + " ".join(branches) + " ELSE 'other' END", params
 
 
 def _like(value: str, pattern: str) -> bool:

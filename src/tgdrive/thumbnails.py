@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import NotFoundError, NotReadyError, QuotaExceededError
-from .filekinds import kind_clause, kind_of
+from .filekinds import kind_of
 from .objects import PRIVATE_PREFIX, ObjectInfo, Scope
 from .thumbnail_cache import ThumbnailCache, ThumbnailCacheMiss
 
@@ -27,6 +27,10 @@ IMAGE_LIMIT = 60 * MIB
 READ_LIMITS = {"image": IMAGE_LIMIT, "video": 64 * MIB, "audio": 32 * MIB}
 TIMEOUT = 45
 CLIENT_TIMEOUT = 90
+# 网页预览图片／视频时浏览器手里已有解码好的画面，先等它生成；超时后后台再用同一批已接收的密文接管。
+PREVIEW_GRACE = 30
+# 缓存不足时只在收到新数据后重试，并逐次拉长间隔；多次仍不足就放弃，避免边播放边反复启动解码器。
+MISS_LIMIT = 6
 MAX_PIXELS = 40_000_000
 VIDEO_PIXELS = 4096 * 2160
 # 不允许播放列表、concat、SVG 等会加载其他资源的格式。HTTP 请求还统一经过下面的本地代理。
@@ -176,6 +180,7 @@ class _Job:
     state: str = "queued"
     detail: str = "等待处理"
     revision: int = 0
+    misses: int = 0
 
 
 @dataclass
@@ -186,7 +191,7 @@ class _Lease:
 
 
 class ThumbnailService:
-    """单并发协作队列。自动任务禁止回源；队列重建只查元数据，不读取文件。"""
+    """单并发协作队列。任务只来自写入、实际读取与用户手动请求；自动任务禁止回源，不扫描整库补图。"""
 
     def __init__(self, accounts, objects, resources):
         self.accounts, self.objects, self.resources = accounts, objects, resources
@@ -199,7 +204,6 @@ class ThumbnailService:
         self._runner = self._loop = self._active = self._task = None
         self._wake = asyncio.Event()
         self._pending, self._leases, self._history = OrderedDict(), {}, OrderedDict()
-        self._cursor, self._scan_at = (0, ""), 0
         self._remote_bytes = 0
 
     def _dispatch(self, action, *args):
@@ -213,7 +217,6 @@ class ThumbnailService:
     def start(self):
         if self._runner is None and self.resources.ffmpeg:
             self.objects.engine.thumbnail_cache = self.cache
-            self._cursor, self._scan_at = (0, ""), 0
             self._loop = asyncio.get_running_loop()
             self._runner = asyncio.create_task(self._run())
 
@@ -241,10 +244,15 @@ class ThumbnailService:
                 state="waiting_client" if delay == CLIENT_TIMEOUT else "queued",
                 detail="等待上传端生成" if delay == CLIENT_TIMEOUT else "等待处理"))
 
-    def observe(self, info):
-        # 用户真正读取文件时登记；接下来的已交付密文会进入缓存，不另开原文件请求。
+    def observe(self, info, *, client=False):
+        """用户真正读取文件时登记；接下来交付的密文会进入缓存，不另开原文件请求。
+        client 表示读取者是登录的网页：图片和视频由预览页用已解码的画面生成，后台只在超时后接管。"""
         if self._eligible(info) and not self._has_thumbnail(info.blob_uuid):
-            self._dispatch(self._enqueue, _Job(info, time.monotonic() + 2))
+            if client and source_kind(info) in ("image", "video"):
+                job = _Job(info, time.monotonic() + PREVIEW_GRACE, state="waiting_client", detail="等待预览页用已加载的画面生成")
+            else:
+                job = _Job(info, time.monotonic() + 2)
+            self._dispatch(self._enqueue, job)
 
     def wants_data(self, info):
         return self._eligible(info) and not self._has_thumbnail(info.blob_uuid)
@@ -284,7 +292,8 @@ class ThumbnailService:
     def _received(self, blob):
         job = self._pending.get(blob)
         if job is not None and job.state == "waiting_data" and blob not in self._leases:
-            job.state, job.detail, job.ready_at = "queued", "已收到新数据", time.monotonic() + 2
+            job.state, job.detail = "queued", "已收到新数据"
+            job.ready_at = time.monotonic() + min(60, 2 << job.misses)
             self._wake.set()
 
     def _changed(self, bucket):
@@ -375,19 +384,6 @@ class ThumbnailService:
         self._enqueue(_Job(info, force=True, remote=True, detail="用户请求生成"))
         return {"accepted": True}
 
-    def _scan(self):
-        clauses, args = zip(*(kind_clause(kind) for kind in READ_LIMITS))
-        rows = self.metadata.db.execute(
-            "SELECT o.* FROM objects o JOIN buckets b ON b.id=o.bucket_id "
-            "LEFT JOIN users u ON u.id=b.owner_user_id WHERE o.blob_uuid IS NOT NULL AND o.size>0 "
-            "AND (substr(o.key,1,9)!='.tgdrive/' OR substr(o.key,1,?)=?) "
-            "AND (b.owner_user_id IS NULL OR u.status='active') "
-            "AND (o.bucket_id,o.key)>(?,?) AND NOT EXISTS "
-            "(SELECT 1 FROM thumbnails t WHERE t.blob_uuid=o.blob_uuid) "
-            "AND (" + " OR ".join(clauses) + ") ORDER BY o.bucket_id,o.key LIMIT 64",
-            (len(PRIVATE_PREFIX), PRIVATE_PREFIX, *self._cursor, *(value for values in args for value in values))).fetchall()
-        return [self.objects._object(row) for row in rows]
-
     def _record(self, job, state, detail):
         blob = job.info.blob_uuid
         self._history[blob] = {"id": hashlib.sha256(blob.encode()).hexdigest()[:12], "kind": source_kind(job.info),
@@ -425,7 +421,8 @@ class ThumbnailService:
                             self.cache.drop(blob)
                             continue
                         if not job.remote and not self.cache.revision(blob):
-                            job.state, job.detail = "waiting_data", "等待上传或实际预览数据；不会自动回源"
+                            # 没有任何已接收的数据：不占队列名额，等文件被实际读取时 observe 再登记。
+                            self._pending.pop(blob, None)
                             continue
                         job.state, job.detail = "running", "使用已接收缓存" if not job.remote else "优先使用缓存，必要时按预算回源"
                         job.revision = self.cache.revision(blob)
@@ -438,11 +435,16 @@ class ThumbnailService:
                             self._record(job, "done", "缩略图处理完成")
                             self.cache.drop(blob)
                         except ThumbnailCacheMiss:
-                            job.state, job.detail = "waiting_data", "缓存数据不足，等待上传或实际预览；不会自动回源"
+                            job.misses += 1
+                            job.state, job.detail = "waiting_data", "已接收的数据还不够，等待继续播放或下载；不会自动回源"
                             if job.remote and not started_remote:
                                 job.state, job.ready_at = "queued", 0
+                            elif job.misses >= MISS_LIMIT:
+                                self._pending.pop(blob, None)
+                                self._record(job, "failed", "已接收的数据不足以生成，可在文件菜单手动生成")
+                                self.cache.drop(blob)
                             elif self.cache.revision(blob) != job.revision:
-                                job.state, job.ready_at = "queued", time.monotonic() + 2
+                                job.state, job.ready_at = "queued", time.monotonic() + min(60, 2 << job.misses)
                         except asyncio.CancelledError:
                             if asyncio.current_task().cancelling():
                                 raise
@@ -452,16 +454,6 @@ class ThumbnailService:
                         finally:
                             self._active = self._task = None
                         continue
-                    if time.monotonic() >= self._scan_at:
-                        page = await self.metadata.run_in_thread(self._scan)
-                        if page:
-                            self._cursor = (page[-1].bucket_id, page[-1].key)
-                            for info in page:
-                                if self._eligible(info) and info.blob_uuid not in self._history:
-                                    self._enqueue(_Job(info))
-                            self._scan_at = time.monotonic() + 1
-                        else:
-                            self._cursor, self._scan_at = (0, ""), time.monotonic() + 300
                 await asyncio.wait_for(self._wake.wait(), 1)
             except TimeoutError:
                 pass

@@ -128,7 +128,7 @@ function sectionUrl(section: Section, prefix = "") {
   return query ? `/?${query}` : "/";
 }
 
-/** 侧栏容量：点开显示分项（我的文件、回收站、私密空间、助手附件、缩略图）；系统区的内容同样计入配额。 */
+/** 侧栏容量：点开按「用户数据」（我的文件、回收站、私密空间）与「系统数据」（缩略图、助手附件）分组显示；两者都计入配额。 */
 function StorageMeter({ usage, percent }: { usage: Usage | null; percent: number }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<api.StorageUsage | null>(null);
@@ -139,8 +139,12 @@ function StorageMeter({ usage, percent }: { usage: Usage | null; percent: number
     void api.storageUsage().then(value => { if (alive) setDetail(value); }).catch(() => undefined);
     return () => { alive = false; };
   }, [open, usage?.used_bytes]);
-  const rows: [string, IconName, number][] = detail ? [["我的文件", "folder", detail.files], ["回收站", "trash", detail.trash],
-    ["私密空间", "lock", detail.private], ["助手附件", "paperclip", detail.assistant], ["缩略图", "image", detail.thumbnails ?? 0]] : [];
+  type Row = [string, IconName, number];
+  const groups: { label: string; hint: string; rows: Row[] }[] = detail ? [
+    { label: "用户数据", hint: "你保存的文件", rows: [["我的文件", "folder", detail.files], ["回收站", "trash", detail.trash], ["私密空间", "lock", detail.private]] },
+    { label: "系统数据", hint: "自动生成的缩略图与文件助手对话附件", rows: [["缩略图", "image", detail.thumbnails ?? 0], ["助手附件", "paperclip", detail.assistant]] },
+  ] : [];
+  const total = groups.reduce((sum, group) => sum + group.rows.reduce((value, row) => value + row[2], 0), 0);
   return <div className={`storage-meter${open ? " is-open" : ""}`} title={usage?.quota_bytes == null ? "未设置空间配额" : undefined}>
     <button type="button" className="storage-meter-head" aria-expanded={open} aria-controls={`${id}-detail`} onClick={() => setOpen(value => !value)}>
       <span>已用空间<Icon name="chevronDown" size={12} /></span><strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></button>
@@ -148,10 +152,18 @@ function StorageMeter({ usage, percent }: { usage: Usage | null; percent: number
       {usage.quota_bytes > 0 && <Progress value={percent} tone={usageTone(percent)} label="存储使用率" />}
       <p>{usage.quota_bytes > 0 ? `共 ${formatBytes(usage.quota_bytes)} · ${Math.round(percent)}%` : "配额为 0，无法上传"}</p>
     </>}
-    {open && <ul id={`${id}-detail`} className="storage-meter-detail" aria-label="已用空间分项">
-      {detail ? rows.map(([label, icon, size]) => <li key={label}><Icon name={icon} size={12} /><span>{label}</span><strong>{formatBytes(size)}</strong></li>)
-        : <li className="is-loading"><span>正在统计…</span></li>}
-    </ul>}
+    {open && <div id={`${id}-detail`} className="storage-meter-detail" aria-label="已用空间分项">
+      {!detail ? <p className="storage-meter-loading">正在统计…</p> : <>
+        {total > 0 && <div className="storage-split" aria-hidden="true">{groups.map((group, index) => {
+          const size = group.rows.reduce((value, row) => value + row[2], 0);
+          return size > 0 ? <span key={group.label} className={`is-${index ? "system" : "user"}`} style={{ flexGrow: size }} /> : null;
+        })}</div>}
+        {groups.map((group, index) => <section key={group.label} className="storage-group" title={group.hint}>
+          <h4><i className={`storage-dot is-${index ? "system" : "user"}`} aria-hidden="true" /><span>{group.label}</span><strong>{formatBytes(group.rows.reduce((value, row) => value + row[2], 0))}</strong></h4>
+          <ul>{group.rows.map(([label, icon, size]) => <li key={label}><Icon name={icon} size={12} /><span>{label}</span><strong>{formatBytes(size)}</strong></li>)}</ul>
+        </section>)}
+      </>}
+    </div>}
   </div>;
 }
 

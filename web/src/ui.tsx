@@ -26,6 +26,7 @@ const ICONS = {
   box: "M4 7.5 12 3l8 4.5v9L12 21l-8-4.5zm0 0 8 4.5 8-4.5M12 12v9",
   chat: "M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-9l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z",
   pulse: "M3 12h4l2-6 4 12 2-6h6",
+  chart: "M4 20V10m6 10V4m6 16v-7m4 7H3",
   search: "m20 20-4.2-4.2M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z",
   upload: "M12 15V4m0 0L7.5 8.5M12 4l4.5 4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3",
   download: "M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3",
@@ -830,9 +831,9 @@ export function Avatar({ name, tone = "accent", src, size }: { name: string; ton
 export function formatBytes(value: number | null | undefined) {
   if (!value) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const index = Math.max(0, Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1));
   const amount = value / 1024 ** index;
-  return `${index === 0 ? amount : amount >= 100 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+  return `${index === 0 ? Math.round(amount) : amount >= 100 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
 }
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });

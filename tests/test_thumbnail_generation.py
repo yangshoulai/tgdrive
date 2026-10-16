@@ -84,23 +84,71 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         saved = await self.put("still-saved.jpg")
         self.assertEqual(self.objects.head_object(self.scope, saved.key).blob_uuid, saved.blob_uuid)
 
-    async def test_restart_scan_generates_without_browser_and_skips_system_files(self):
+    async def test_commit_generates_from_received_cache_and_skips_system_files(self):
         info = await self.put()
         private = Scope(self.scope.bucket_id, PRIVATE_PREFIX, private_access=True, authorize=lambda: None)
-        await self.put(PRIVATE_PREFIX + "secret.jpg", private)
-        await self.put(".tgdrive/assistant/attachment.jpg")
-        await self.put("report.pdf")
-        self.assertEqual([item.key for item in self.worker._scan()], [PRIVATE_PREFIX + "secret.jpg", info.key])
+        secret = await self.put(PRIVATE_PREFIX + "secret.jpg", private)
+        attachment = await self.put(".tgdrive/assistant/attachment.jpg")
+        report = await self.put("report.pdf")
+        self.assertFalse(self.worker._eligible(attachment))
+        self.assertFalse(self.worker._eligible(report))
         channel, render = self.renderer({"thumb": JPEG})
         with channel, render:
             self.worker.start()
-            async with asyncio.timeout(3):
-                while not self.variants(info):
+            for item in (info, secret, attachment, report):
+                self.worker.enqueue(item)
+            async with asyncio.timeout(4):
+                while not (self.variants(info) and self.variants(secret)):
                     await asyncio.sleep(0.01)
             await self.worker.stop()
         self.assertEqual(self.variants(info), ["thumb"])
+        self.assertEqual(self.variants(attachment), [])
         stored = self.metadata.db.execute("SELECT data FROM thumbnails WHERE blob_uuid=?", (info.blob_uuid,)).fetchone()[0]
         self.assertNotIn(JPEG, bytes(stored))
+
+    async def test_jobs_without_received_data_leave_the_queue(self):
+        info = await self.put()
+        self.worker.cache.drop(info.blob_uuid)
+        channel, render = self.renderer({"thumb": JPEG})
+        with channel, render as decoder:
+            self.worker.start()
+            self.worker._enqueue(_Job(info))
+            async with asyncio.timeout(3):
+                while info.blob_uuid in self.worker._pending:
+                    await asyncio.sleep(0.01)
+            decoder.assert_not_awaited()
+        self.assertNotIn(info.blob_uuid, self.worker._history, "复制、秒传等没有数据的任务不进入队列记录")
+
+    async def test_web_preview_waits_for_browser_before_backend_takes_over(self):
+        self.worker._loop = asyncio.get_running_loop()
+        image, song = await self.put("photo.jpg"), await self.put("song.mp3")
+        self.worker.observe(image, client=True)
+        self.worker.observe(song, client=True)
+        await asyncio.sleep(0)
+        self.assertEqual(self.worker._pending[image.blob_uuid].state, "waiting_client")
+        self.assertEqual(self.worker._pending[song.blob_uuid].state, "queued", "浏览器取不到音频缓冲，直接由后台处理")
+
+    async def test_cache_misses_back_off_and_give_up(self):
+        info = await self.put("clip.mp4")
+        channel, render = self.renderer({})
+        with channel, render as decoder:
+            decoder.side_effect = ThumbnailCacheMiss("partial")
+            self.worker.start()
+            job = _Job(info)
+            self.worker._enqueue(job)
+            for attempt in range(1, 7):
+                async with asyncio.timeout(3):
+                    while decoder.await_count < attempt:
+                        await asyncio.sleep(0.01)
+                await asyncio.sleep(0.02)
+                if attempt < 6:
+                    self.assertEqual(job.state, "waiting_data")
+                    self.worker._received(info.blob_uuid)
+                    self.assertGreaterEqual(job.ready_at - __import__("time").monotonic(), 2 << job.misses - 1)
+                    job.ready_at = 0
+                    self.worker._wake.set()
+        self.assertNotIn(info.blob_uuid, self.worker._pending)
+        self.assertEqual(self.worker._history[info.blob_uuid]["state"], "failed")
 
     async def test_quota_keeps_small_thumbnail_and_no_cover_is_not_repeated(self):
         info = await self.put()

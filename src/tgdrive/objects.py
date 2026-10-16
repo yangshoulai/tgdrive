@@ -333,7 +333,7 @@ class ObjectService:
             return info, empty()
         if self.thumbnail_service is not None and self.thumbnail_service.wants_data(info):
             self._cache_upload(info.blob_uuid, key, info.content_type)
-            self.thumbnail_service.observe(info)
+            self.thumbnail_service.observe(info, client=scope.thumbnail_client)
         return info, self.engine.stream(info.blob_uuid, start, end, bucket_id=scope.bucket_id)
 
     def head_object(self, scope: Scope, key: str) -> ObjectInfo:

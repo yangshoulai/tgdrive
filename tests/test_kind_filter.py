@@ -58,8 +58,12 @@ class KindFilterTests(unittest.TestCase):
         self.assertEqual(self.keys("/api/user/v1/list?prefix=&kind=video&public=1"), ["pub.mp4"])
         self.assertEqual(self.keys("/api/user/v1/list?prefix=sub/&kind=video"), ["sub/deep.mp4"])
         self.assertEqual(self.keys("/api/user/v1/search?q=mp4&kind=video"), ["a.MP4", "pub.mp4", "sub/deep.mp4"])
-        status, _, _ = asyncio.run(self.client.request("GET", "/api/user/v1/list?prefix=&kind=bogus", headers=self.session))
-        self.assertEqual(status, 400)
+        # 多选取并集，顺序无关；任一项未知整体拒绝。
+        self.assertEqual(self.keys("/api/user/v1/list?prefix=&kind=video,image"), sorted(expected["video"] + expected["image"]))
+        self.assertEqual(self.keys("/api/user/v1/list?prefix=&kind=archive%2Caudio"), ["e.mp3", "h.zip"])
+        for bogus in ("bogus", "video,bogus", ","):
+            status, _, _ = asyncio.run(self.client.request("GET", f"/api/user/v1/list?prefix=&kind={bogus}", headers=self.session))
+            self.assertEqual(status, 400, bogus)
 
     def test_public_folder_filters_by_kind(self):
         for key in ("pub/a.mp4", "pub/b.jpg", "pub/c.txt", "pub/sub/d.mp4", "other.mp4"):
@@ -73,6 +77,7 @@ class KindFilterTests(unittest.TestCase):
         self.assertEqual(names("kind=video"), (["a.mp4"], []))
         self.assertEqual(names("kind=video&path=sub/"), (["d.mp4"], []))
         self.assertEqual(names("kind=image"), (["b.jpg"], []))
+        self.assertEqual(names("kind=image,video"), (["a.mp4", "b.jpg"], []))
         self.assertEqual(names(""), (["a.mp4", "b.jpg", "c.txt"], ["sub"]))
         self.assertEqual(asyncio.run(self.client.request("GET", f"/api/public/v1/folders/{token}/list?kind=bogus"))[0], 400)
 
@@ -81,6 +86,26 @@ class KindFilterTests(unittest.TestCase):
         asyncio.run(self.app.objects.put_object(private, ".tgdrive/private/secret.mp4", b"x", 1))
         self.assertEqual(self.keys("/api/user/v1/list?prefix=&kind=video"), [])
         status, _, _ = asyncio.run(self.client.request("GET", "/api/user/v1/list?prefix=.tgdrive/private/&kind=video", headers=self.session))
+        self.assertIn(status, (400, 403))
+
+    def test_folder_stats_group_by_kind_recursively_and_skip_system_area(self):
+        for key, content_type in [("a/x.jpg", None), ("a/b/y.mp4", None), ("a/b/c/z.txt", None), ("a/empty/", None),
+                                  ("a/clip.ts", "video/mp2t"), ("top.zip", None)]:
+            self.put(key, content_type)
+        private = Scope(self.alice.bucket_id, ".tgdrive/private/", private_access=True)
+        asyncio.run(self.app.objects.put_object(private, ".tgdrive/private/secret.mp4", b"x", 1))
+        def stats(prefix):
+            status, _, data = asyncio.run(self.client.request("GET", f"/api/user/v1/stats?prefix={quote(prefix)}", headers=self.session))
+            return status, json.loads(data)
+        status, body = stats("a/")
+        self.assertEqual(status, 200, body)
+        self.assertEqual((body["files"], body["folders"], body["direct_files"], body["direct_folders"]), (4, 3, 2, 2))
+        self.assertEqual({item["kind"]: item["count"] for item in body["kinds"]}, {"image": 1, "video": 1, "text": 1, "other": 1})
+        self.assertEqual(len(body["largest"]), 4)
+        status, body = stats("")
+        self.assertEqual(body["files"], 5, "根目录不统计 .tgdrive/ 系统区")
+        self.assertNotIn("secret", json.dumps(body))
+        status, _ = stats(".tgdrive/private/")
         self.assertIn(status, (400, 403))
 
 

@@ -296,7 +296,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
       <div className="share-folder-filters"><FileFilters entry={entryFilter} kind={kind} onEntryChange={setEntryFilter} onKindChange={setKind} /></div>
       {error ? <EmptyState icon="alert" title="无法打开" description={error} action={path ? <Button onClick={() => open("")}>回到根目录</Button> : <Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         : page === null ? <div className="share-folder-loading"><SkeletonRows rows={4} /></div>
-          : empty ? (entryFilter === "folder" ? <EmptyState icon="folder" title="这个目录没有子文件夹" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} /> : kind ? <EmptyState icon="search" title={`这个文件夹里没有${api.KIND_FILTERS.find(item => item.value === kind)?.label}`} description="类型筛选只看当前文件夹，不包含子文件夹。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
+          : empty ? (entryFilter === "folder" ? <EmptyState icon="folder" title="这个目录没有子文件夹" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} /> : kind ? <EmptyState icon="search" title={`这个文件夹里没有${api.kindFilterLabel(kind)}`} description="类型筛选只看当前文件夹，不包含子文件夹。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
             : entryFilter === "file" ? <EmptyState icon="file" title="这个目录没有文件" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
               : <EmptyState icon="folder" title="这个文件夹是空的" description="分享者之后添加的文件会显示在这里。" />)
             : layout === "list" ? (

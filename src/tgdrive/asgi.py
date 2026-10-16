@@ -242,7 +242,7 @@ class TgDriveASGI(StaticFiles):
                 route = path[len("/api/user/v1/private"):]
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
-                allowed = {"/list", "/search", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
+                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
                            "/downloads", "/downloads/clear", "/downloads/batch"}
@@ -980,6 +980,8 @@ class TgDriveASGI(StaticFiles):
                 return 200, await user.list(token, prefix=query.get("prefix", [""])[0],
                                                  cursor=query.get("cursor", [None])[0], limit=int(query.get("limit", ["1000"])[0]),
                                                  public_only=query.get("public", ["0"])[0] == "1", kind=query.get("kind", [""])[0]), {}
+            if method == "GET" and route == "/stats":
+                return 200, await user.stats(token, query.get("prefix", [""])[0]), {"Cache-Control": "no-store"}
             if method == "GET" and route == "/folders":
                 return 200, await user.folders(token, prefix=query.get("prefix", [""])[0],
                     cursor=query.get("cursor", [""])[0], limit=int(query.get("limit", ["50"])[0])), {}

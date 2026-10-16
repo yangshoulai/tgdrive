@@ -13,7 +13,7 @@ from dataclasses import replace
 from .accounts import AccountService
 from .authn import AuthenticationError, Session, hash_password
 from .errors import NotFoundError, NotReadyError
-from .filekinds import kind_clause
+from .filekinds import kind_case, kind_clause
 from .maintenance import MaintenanceService
 from .metrics import TrafficMetrics
 from .objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
@@ -560,6 +560,53 @@ class UserApi:
                 "common_prefixes": [], "folder_sizes": {}, "public_folders": {},
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
+    STATS_LARGEST = 5
+
+    async def stats(self, token: str, prefix: str = "") -> dict[str, object]:
+        """目录统计（含所有子文件夹）：文件与文件夹数量、总大小、按类型分组的数量与大小、最大的几个文件。
+        只在 (bucket_id, key) 索引的范围内聚合，不把对象读进内存；根目录不含 .tgdrive/ 系统区。"""
+        self._session(token)
+        scope = self._scope(token)
+        prefix = self._path(prefix, directory=True) if prefix else ""
+        effective = prefix or scope.prefix
+        if effective.startswith((PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX)) and not scope.private_access:
+            raise PermissionError("私密空间需要单独解锁")
+        if not effective.startswith(scope.prefix):
+            raise PermissionError("prefix is outside scope")
+        case, case_args = kind_case()
+
+        def read():
+            if scope.authorize is not None:
+                scope.authorize()
+            db = self.objects.metadata.db
+            # 根目录排除系统区（回收站、私密空间、缩略图与助手附件）；私密空间的范围本身就在系统区内。
+            where = "bucket_id=? AND key>=? AND key<? AND (substr(key,1,9)!='.tgdrive/' OR ?=1)"
+            args = (scope.bucket_id, effective, effective + self.objects._PREFIX_END, int(effective.startswith(".tgdrive/")))
+            kinds = [{"kind": row[0], "count": row[1], "bytes": row[2]} for row in db.execute(
+                f"SELECT {case} AS kind, COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE {where} AND substr(key,-1)!='/' "
+                "GROUP BY kind ORDER BY 3 DESC, 2 DESC", (*case_args, *args))]
+            largest = [{"key": row["key"], "size": row["size"], "content_type": row["content_type"]} for row in db.execute(
+                f"SELECT key,size,content_type FROM objects WHERE {where} AND substr(key,-1)!='/' ORDER BY size DESC, key LIMIT ?",
+                (*args, self.STATS_LARGEST))]
+            # 文件夹包括目录标记与只由文件路径隐含的文件夹：按键顺序流式读取，只记住出现过的文件夹路径。
+            folders, direct_files, direct_folders, latest = set(), 0, set(), 0.0
+            for key, modified in db.execute(f"SELECT key, modified_at FROM objects WHERE {where}", args):
+                relative = key[len(effective):]
+                parts = relative.split("/")
+                for depth in range(1, len(parts)):
+                    folders.add("/".join(parts[:depth]))
+                if len(parts) == 1 and relative:
+                    direct_files += 1
+                elif parts[0]:
+                    direct_folders.add(parts[0])
+                if not key.endswith("/"):
+                    latest = max(latest, float(modified or 0))
+            return {"prefix": effective if prefix else "", "files": sum(item["count"] for item in kinds),
+                    "bytes": sum(item["bytes"] for item in kinds), "folders": len(folders),
+                    "direct_files": direct_files, "direct_folders": len(direct_folders), "kinds": kinds,
+                    "largest": largest, "latest_modified": latest or None}
+        return await self.objects.metadata.run_in_thread(read)
+
     async def folders(self, token: str, *, prefix: str = "", cursor: str = "", limit: int = 50):
         account = self.accounts.account_for_session(self._session(token))
         scope = self._scope(token)
@@ -837,7 +884,8 @@ class UserApi:
     async def content(self, token: str, path: str, start: int = 0, end: int | None = None):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
-        return await self.objects.get_object(self._scope(token), self._path(path), start, end)
+        # 网页读取：图片、视频的缩略图优先由预览页用已加载的画面生成，后台稍后才接管。
+        return await self.objects.get_object(replace(self._scope(token), thumbnail_client=True), self._path(path), start, end)
 
     ARCHIVE_LIMIT = 200
 

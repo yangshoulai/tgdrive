@@ -6,6 +6,8 @@
   /* 中性色：白色工作区 + 浅灰侧栏，靠细线而不是阴影分层 */
   --canvas: #ffffff;
   --surface: #ffffff;
+  /* 图表分类色（固定顺序，已校验色觉差异与对比度）：只用于统计图，文件图标仍用中性色。 */
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4; --series-6: #6250d6; --series-other: #a3a3ad;
   --surface-sunken: #f7f7f8;
   --surface-hover: #f1f1f3;
   --line: #e4e4e8;
@@ -140,6 +142,7 @@
 /* 深色主题：data-theme 由 theme.ts（及页面加载前的 theme-*.js）按用户偏好或系统外观设置。 */
 :root[data-theme="dark"] {
   --canvas: #0e0e11;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-6: #9085e9; --series-other: #5c5c66;
   --surface: #0e0e11;
   --surface-sunken: #141418;
   --surface-hover: #1c1c21;
@@ -470,6 +473,10 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .filter-chip:hover { border-color: var(--line-strong); color: var(--ink); }
 .filter-chip.is-active { border-color: var(--ink); background: var(--ink); color: var(--surface); }
 .filter-chip:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.filter-chip.is-multi { display: inline-flex; align-items: center; gap: 4px; }
+.filter-chip-clear { flex: none; height: 28px; padding: 0 6px; border: 0; background: transparent; color: var(--ink-3); font-size: var(--text-sm); cursor: pointer; }
+.filter-chip-clear:hover { color: var(--ink); }
+.filter-chip-clear:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-xs); }
 .segmented-count { min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--line-soft); color: var(--ink-2); font-size: var(--text-micro); font-variant-numeric: tabular-nums; text-align: center; }
 
 /* ---------- 浮层 ---------- */
@@ -644,9 +651,19 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .storage-meter.is-open .storage-meter-head > span svg { transform: rotate(180deg); }
 .storage-meter-head:hover { color: var(--ink-2); }
 .storage-meter-head:focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--radius-xs); }
-.storage-meter-detail { display: grid; gap: 4px; margin: 2px 0 0; padding: 6px 0 0; border-top: 1px solid var(--line); list-style: none; }
+.storage-meter-detail { display: grid; gap: 10px; margin: 2px 0 0; padding: 8px 0 0; border-top: 1px solid var(--line); }
+.storage-meter-loading { color: var(--ink-3); font-size: var(--text-xs); }
+/* 用户数据与系统数据的占比条：两段按大小伸缩，颜色与分组标题前的圆点对应。 */
+.storage-split { display: flex; gap: 2px; height: 4px; overflow: hidden; border-radius: var(--radius-xs); }
+.storage-split > span { min-width: 2px; border-radius: var(--radius-xs); }
+.storage-split > .is-user, .storage-dot.is-user { background: var(--accent); }
+.storage-split > .is-system, .storage-dot.is-system { background: var(--ink-3); }
+.storage-group { display: grid; gap: 4px; }
+.storage-group h4 { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 6px; margin: 0; color: var(--ink-2); font-size: var(--text-xs); font-weight: 600; }
+.storage-dot { justify-self: center; width: 6px; height: 6px; border-radius: 50%; }
+.storage-group ul { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
 .storage-meter-detail li { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 6px; color: var(--ink-3); font-size: var(--text-xs); }
-.storage-meter-detail li.is-loading { grid-template-columns: minmax(0, 1fr); }
+.storage-meter-detail li > svg { opacity: .8; }
 .storage-meter-detail strong { color: var(--ink-2); font-weight: 500; font-variant-numeric: tabular-nums; }
 .storage-meter-head strong { color: var(--ink-2); font-size: var(--text-xs); font-weight: 600; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
 .storage-meter p { color: var(--ink-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
@@ -917,6 +934,8 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .move-list .skeleton-row { padding: 0 10px; }
 .move-conflict { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; color: var(--ink-2); font-size: var(--text-sm); }
 
+.list-footer-summary { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; }
+.list-footer-summary > .link-button { display: inline-flex; align-items: center; gap: 5px; }
 .list-footer-end { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-left: auto; }
 .link-button.shortcut-hint { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-3); font-size: var(--text-xs); text-decoration: none; }
 .link-button.shortcut-hint:hover { color: var(--ink); }
@@ -2170,35 +2189,43 @@ button.download-location { cursor: pointer; }
 button.download-location:hover { color: var(--accent); }
 button.download-location:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--radius-xs); }
 .download-surface { overflow-x: auto; }
-.download-surface > .download-list { --cols: 20px minmax(180px, 1.6fr) minmax(128px, 1fr) 112px 96px minmax(144px, 1fr) 60px; min-width: 900px; }
 .download-list .data-head > .cell-actions { background: var(--surface-sunken); box-shadow: none; }
+/* 列：选择 | 文件（名称与来源） | 进度 | 保存到 | 状态 | 操作。数字用等宽数字，进度条与说明同宽，行高随说明变化但不超过两行。 */
+.download-surface > .download-list { --cols: 20px minmax(220px, 1.5fr) minmax(200px, 1.1fr) minmax(120px, .8fr) 92px 64px; min-width: 880px; }
+.download-list .data-row:not(.data-head) { min-height: 60px; padding-block: 8px; }
+.download-list .cell-name { gap: 12px; }
+.download-host { overflow: hidden; color: var(--ink-3); text-overflow: ellipsis; white-space: nowrap; }
+.download-progress { display: grid; gap: 4px; min-width: 0; font-variant-numeric: tabular-nums; }
+.download-progress > small { overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.download-progress.is-interrupted > small { color: var(--warning); }
+.download-progress.is-done { gap: 1px; }
+.download-figure { color: var(--ink-2); font-size: var(--text-sm); }
+.download-progress-bar { display: flex; align-items: center; gap: 8px; min-height: 16px; }
+.download-progress-bar > .progress, .download-progress-bar > .download-unknown { flex: 1; min-width: 40px; }
+.download-percent { flex: none; min-width: 32px; color: var(--ink-2); font-size: var(--text-xs); text-align: right; }
+.download-unknown { position: relative; height: 4px; overflow: hidden; border-radius: var(--radius-xs); background: var(--line); }
+/* 总大小未知时不画虚构的百分比，下载中用一段往复移动的高光表示仍在进行。 */
+.download-unknown.is-running::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 30%; border-radius: inherit; background: var(--accent); animation: download-sweep 1.4s ease-in-out infinite alternate; }
+@keyframes download-sweep { from { transform: translateX(0); } to { transform: translateX(233%); } }
+@media (prefers-reduced-motion: reduce) { .download-unknown.is-running::after { animation: none; width: 100%; opacity: .35; } }
+.download-failure { display: flex; align-items: flex-start; gap: 6px; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--danger); font: inherit; font-size: var(--text-xs); line-height: 1.5; text-align: left; cursor: pointer; }
+.download-failure > svg { flex: none; margin-top: 2px; }
+.download-failure > span { display: -webkit-box; min-width: 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+.download-failure.is-expanded > span { display: block; }
+.download-failure:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: var(--radius-xs); }
+.download-state { display: flex; min-width: 0; }
 .download-list .name-stack { flex: 1; gap: 2px; }
 .download-name { font-weight: 500; }
-.download-value { display: grid; gap: 1px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.download-value small, .download-state > small { color: var(--ink-3); font-size: var(--text-micro); }
-.download-state { display: grid; justify-items: start; gap: 2px; min-width: 0; }
-.download-state > small { white-space: nowrap; }
 /* 保留筛选工具栏的响应式占位，勾选后表头复选框不移动。 */
 .download-selection { min-height: 44px; flex-wrap: nowrap; align-items: center; }
 .download-selection .toolbar-actions { width: auto; flex-wrap: nowrap; }
 .download-location { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; }
 .download-location > svg { flex: none; }
 .download-location > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.download-progress-row { display: flex; align-items: center; gap: 6px; max-width: 180px; min-height: 14px; }
-.download-progress-row > .progress, .download-progress-row > .download-unknown { flex: 1; min-width: 24px; }
-.download-progress-copy { flex: none; color: var(--ink-3); font-size: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .download-summary { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .download-summary::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .download-summary.is-active { color: var(--accent-ink); }
 .download-summary.is-failed { color: var(--danger); }
-.download-unknown { height: 4px; border-radius: var(--radius-xs); background: var(--line); }
-.download-error { color: var(--danger); font-size: var(--text-xs); overflow-wrap: anywhere; }
-.download-task-error { max-width: 100%; min-width: 0; }
-.download-task-error summary { display: flex; align-items: center; gap: 5px; max-width: 100%; color: var(--danger); font-size: var(--text-xs); cursor: pointer; list-style: none; }
-.download-task-error summary > svg { flex: none; }
-.download-task-error summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.download-task-error summary::-webkit-details-marker { display: none; }
-.download-task-error p { margin: 6px 0 0; line-height: 1.7; }
 .download-help { margin-top: 16px; color: var(--ink-3); font-size: var(--text-xs); line-height: 1.7; }
 .download-help summary { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; list-style: none; }
 .download-help summary::-webkit-details-marker { display: none; }
@@ -2226,7 +2253,7 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 /* 窄屏保留各列并在容器内横向滚动，行尾操作沿用表格的固定列。 */
 @media (max-width: 860px) {
   .download-controls { min-height: 48px; }
-  .download-surface > .download-list { --cols: 20px minmax(180px, 1.6fr) minmax(128px, 1fr) 112px 96px minmax(144px, 1fr) 96px; }
+  .download-surface > .download-list { --cols: 20px minmax(200px, 1.5fr) minmax(180px, 1.1fr) minmax(120px, .8fr) 92px 96px; }
 }
 @media (max-width: 640px) {
   .download-selection { padding-left: 10px; }
@@ -2234,6 +2261,17 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
   .download-selection .selection-count { white-space: nowrap; }
   /* 四个按钮同时出现时宽度不够，窄屏只写「N 项」。 */
   .download-selection-prefix { display: none; }
+  /* 手机上不横向滚动：每个任务排成三行——名称与操作、进度、保存位置与状态。 */
+  .download-surface > .download-list { min-width: 0; }
+  .download-list .data-head { grid-template-columns: 20px minmax(0, 1fr); }
+  .download-list .data-head > :nth-child(n + 3) { display: none; }
+  .download-list .download-item { grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-areas: "check name actions" ". progress progress" ". place state"; gap: 8px 12px; padding: 12px 14px; }
+  .download-item > :nth-child(1) { grid-area: check; }
+  .download-item > :nth-child(2) { grid-area: name; }
+  .download-item > :nth-child(3) { grid-area: progress; }
+  .download-item > :nth-child(4) { grid-area: place; align-self: center; }
+  .download-item > :nth-child(5) { grid-area: state; justify-content: flex-end; }
+  .download-list .download-item > .cell-actions { grid-area: actions; position: static; box-shadow: none; background: transparent; }
 }
 @media (max-width: 860px) {
   .resource-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
@@ -3006,4 +3044,46 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 @media (max-width: 760px) {
   .assistant-capability-button:has(+ .assistant-attach-button) { margin-right: 0; }
   .assistant-capability-button + .assistant-attach-button { margin-right: auto; }
+}
+
+/* ---------- 目录统计 ---------- */
+
+.folder-stats { display: grid; gap: 22px; }
+.folder-stats-figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.folder-stats-figures > div { display: grid; gap: 2px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); min-width: 0; }
+.folder-stats-figures span { color: var(--ink-3); font-size: var(--text-xs); }
+.folder-stats-figures strong { color: var(--ink); font-size: var(--text-xl); font-weight: 600; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.folder-stats-figures small { overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.folder-stats-section { display: grid; gap: 10px; }
+.folder-stats-section > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.folder-stats-section h3 { margin: 0; color: var(--ink); font-size: var(--text-sm); font-weight: 600; }
+.folder-stats-measure { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--radius-sm); background: var(--surface-sunken); }
+.folder-stats-measure button { height: 24px; padding: 0 10px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--ink-3); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+.folder-stats-measure button.is-active { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+.folder-stats-measure button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+/* 一条横向堆叠条：段之间 2px 间隙，两端圆角；每段的提示给出数量、大小与占比，下表是同一数据的文字版。 */
+.folder-stats-bar { display: flex; gap: 2px; height: 12px; overflow: hidden; border-radius: var(--radius-xs); }
+.folder-stats-bar > span { min-width: 3px; border-radius: 2px; transition: flex-grow .2s ease; }
+.kind-image { --kind: var(--series-1); } .kind-video { --kind: var(--series-2); } .kind-audio { --kind: var(--series-3); }
+.kind-document { --kind: var(--series-4); } .kind-text { --kind: var(--series-5); } .kind-archive { --kind: var(--series-6); } .kind-other { --kind: var(--series-other); }
+.folder-stats-bar > span, .folder-stats-swatch { background: var(--kind); }
+.folder-stats-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.folder-stats-table th, .folder-stats-table td { padding: 7px 0; border-bottom: 1px solid var(--line-soft); text-align: right; }
+.folder-stats-table th:first-child { text-align: left; }
+.folder-stats-table thead th { color: var(--ink-3); font-size: var(--text-xs); font-weight: 500; }
+.folder-stats-table tbody th { display: flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 500; }
+.folder-stats-table td { width: 22%; color: var(--ink-2); }
+.folder-stats-table tbody tr:last-child > * { border-bottom: 0; }
+.folder-stats-swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.folder-stats-largest { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.folder-stats-largest li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 6px 0; }
+.folder-stats-largest .file-tile { transform: scale(.85); }
+.folder-stats-name { display: grid; min-width: 0; }
+.folder-stats-name strong { overflow: hidden; color: var(--ink); font-size: var(--text-sm); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.folder-stats-name small, .folder-stats-name .link-button { justify-self: start; max-width: 100%; overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.folder-stats-size { color: var(--ink-2); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .folder-stats-figures { grid-template-columns: minmax(0, 1fr); }
+  .folder-stats-figures > div { grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; }
+  .folder-stats-figures small { grid-column: 1 / -1; }
 }

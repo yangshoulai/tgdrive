@@ -419,48 +419,68 @@ function BrowserCard({ event }: { event: ai.BrowserEvent }) {
   </section>;
 }
 
-/** 生成缩略图：用户点击后在当前页面逐个生成并保存（与目录补生成同一套逻辑），结束后通知文件页刷新所在目录。
- * 卡片卸载（切换对话、关闭页面）时停止；已保存的不受影响，再次点击会重新处理全部条目。 */
+/** 生成缩略图：用户点击后逐个提交给服务器后台生成（优先复用服务器已收到的数据，必要时按预算读取存储），
+ * 不经浏览器下载原文件，避免为补图产生出站流量。队列满时等待后继续提交；服务器没有 FFmpeg 时才在当前页面生成。
+ * 卡片卸载（切换对话、关闭页面）时停止提交；已提交的任务继续在后台完成。 */
 function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action: "thumbnails" }> }) {
-  type Run = { phase: "idle" | "running" | "done" | "stopped"; done: number; none: number; failed: number; current: string };
-  const [state, setState] = useState<Run>({ phase: "idle", done: 0, none: 0, failed: 0, current: "" });
+  type Run = { phase: "idle" | "running" | "done" | "stopped"; done: number; none: number; failed: number; current: string; local: boolean };
+  const [state, setState] = useState<Run>({ phase: "idle", done: 0, none: 0, failed: 0, current: "", local: false });
   const controller = useRef<AbortController | null>(null);
   useEffect(() => () => controller.current?.abort(), []);
+  const pause = (signal: AbortSignal) => new Promise<void>(resolve => { const timer = window.setTimeout(resolve, 5000); signal.addEventListener("abort", () => { window.clearTimeout(timer); resolve(); }, { once: true }); });
   async function start() {
     const signal = (controller.current = new AbortController()).signal;
     const counts = { done: 0, none: 0, failed: 0 }, folders = new Set<string>();
-    setState({ phase: "running", ...counts, current: "" });
+    let local = false;
+    setState({ phase: "running", ...counts, current: "", local });
     for (const item of event.items) {
       if (signal.aborted) break;
       setState(value => ({ ...value, current: item.path }));
       const source = thumbnailSource(item.path, item.content_type, item.size);
+      if (!source) { counts.none++; setState(value => ({ ...value, ...counts })); continue; }
       try {
-        const saved = await generateLoadedThumbnails({ key: item.path, etag: item.etag }, claimSignal => source ? createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source) : Promise.resolve("none"), event.regenerate, signal);
-        if (!saved) counts.failed++; else if (saved.includes("none")) counts.none++; else counts.done++;
-        if (saved) folders.add(parentPath(item.path));
+        if (!local) {
+          for (;;) {
+            try { await api.generateThumbnail({ key: item.path, etag: item.etag }); counts.done++; folders.add(parentPath(item.path)); break; }
+            catch (reason) {
+              const message = api.errorMessage(reason, "");
+              if (message.includes("队列已满") && !signal.aborted) { await pause(signal); if (signal.aborted) break; continue; }
+              if (message.includes("FFmpeg")) { local = true; setState(value => ({ ...value, local })); }
+              else throw reason;
+              break;
+            }
+          }
+        }
+        if (local && !signal.aborted) {
+          // 服务器无法生成时的退路：在当前页面读取文件生成（会产生下载流量）。
+          const saved = await generateLoadedThumbnails({ key: item.path, etag: item.etag }, claimSignal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source), event.regenerate, signal);
+          if (!saved) counts.failed++; else if (saved.includes("none")) counts.none++; else counts.done++;
+          if (saved) folders.add(parentPath(item.path));
+        }
       } catch {
         if (signal.aborted) break;
         counts.failed++;
       }
       setState(value => ({ ...value, ...counts }));
     }
-    if (folders.size) window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [...folders] } }));
+    // 后台生成需要一点时间：稍后通知文件页刷新所在目录，只读元数据，不读取原文件。
+    if (folders.size) for (const delay of local ? [0] : [5000, 30000, 120000]) window.setTimeout(() => window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [...folders] } })), delay);
     setState(value => ({ ...value, ...counts, phase: signal.aborted ? "stopped" : "done", current: "" }));
   }
   const total = event.items.length, processed = state.done + state.none + state.failed;
-  const summary = [`已生成 ${state.done} 个`, state.none ? `${state.none} 个没有封面` : "", state.failed ? `${state.failed} 个失败` : ""].filter(Boolean).join("，");
+  const summary = [state.local ? `已生成 ${state.done} 个` : `已提交 ${state.done} 个`, state.none ? `${state.none} 个不支持` : "", state.failed ? `${state.failed} 个失败` : ""].filter(Boolean).join("，");
   return <section className="ai-card ai-browser">
-    <CardHead icon="image" title={`为 ${total} 个文件生成缩略图`} subtitle={event.regenerate ? "包括重做旧版缩略图 · 在当前页面生成" : "在当前页面生成"} />
+    <CardHead icon="image" title={`为 ${total} 个文件生成缩略图`} subtitle={`${event.regenerate ? "包括重做旧版缩略图 · " : ""}${state.local ? "在当前页面生成" : "由服务器后台生成"}`} />
     {state.phase === "idle" ? <ul className="ai-list">{event.items.slice(0, 5).map(item => <li key={item.path}><Icon name="file" size={13} /><span className="cell-truncate">{display(item.path)}</span></li>)}
       {total > 5 && <li className="ai-list-more">等 {total} 个文件</li>}</ul>
       : <div className="ai-thumbnail-progress">
         <Progress value={total ? processed / total * 100 : 100} label={`${processed} / ${total}`} />
-        <p className="cell-truncate">{state.phase === "running" ? `正在处理 ${display(state.current)}` : summary}</p>
+        <p className="cell-truncate">{state.phase === "running" ? `正在提交 ${display(state.current)}` : summary}</p>
       </div>}
-    <footer className="ai-card-foot"><span>{state.phase === "idle" ? "网格图与封面计入你的已用空间；生成期间保持页面打开"
-      : state.phase === "running" ? `${processed} / ${total}` : state.phase === "stopped" ? `已停止 · ${summary}` : "已完成"}</span>
+    <footer className="ai-card-foot"><span>{state.phase === "idle" ? "网格图与封面计入你的已用空间；服务器优先复用已收到的数据"
+      : state.phase === "running" ? `${processed} / ${total}` : state.phase === "stopped" ? `已停止 · ${summary}` : state.local ? "已完成" : "已全部提交，完成后自动刷新"}</span>
       {state.phase === "running" ? <Button size="sm" onClick={() => controller.current?.abort()}>停止</Button>
-        : <Button size="sm" variant={state.phase === "idle" ? "primary" : "secondary"} icon={state.phase === "idle" ? "image" : "refresh"} onClick={() => void start()}>{state.phase === "idle" ? "生成" : "重新生成"}</Button>}
+        : <Button size="sm" variant={state.phase === "idle" ? "primary" : "secondary"} icon={state.phase === "idle" ? "image" : "refresh"} onClick={() => void start()}>{state.phase === "idle" ? "生成" : "重新提交"}</Button>}
     </footer>
   </section>;
 }

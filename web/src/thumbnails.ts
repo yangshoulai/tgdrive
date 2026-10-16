@@ -64,6 +64,13 @@ export function thumbnailsFromVideo(video: HTMLVideoElement): Promise<ThumbnailS
   return video.readyState >= 2 ? renderSet(video, video.videoWidth, video.videoHeight).catch(() => null) : Promise.resolve(null);
 }
 
+/** 预览中的当前画面是否适合做封面：跳过片头黑屏；播放 5 秒后仍然很暗就接受，避免一直等不到。
+ * 跨域或解码受限导致读不了像素时视为可用，交给 renderSet 自己判断。 */
+export function videoFrameUsable(video: HTMLVideoElement): boolean {
+  if (video.readyState < 2 || !video.videoWidth) return false;
+  try { return brightness(video) > 18 || video.currentTime >= 5; } catch { return true; }
+}
+
 async function fromBlob(blob: Blob): Promise<ThumbnailSet | null> {
   const bitmap = await createImageBitmap(blob);
   try { return await renderSet(bitmap, bitmap.width, bitmap.height); } finally { bitmap.close(); }
