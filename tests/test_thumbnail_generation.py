@@ -14,7 +14,7 @@ from tgdrive.errors import NotFoundError, NotReadyError
 from tgdrive.keystore import KeyStore
 from tgdrive.metadata import Metadata
 from tgdrive.objects import ObjectService, PRIVATE_PREFIX, Scope
-from tgdrive.thumbnails import ThumbnailBudget, ThumbnailService, _RangeInput, _Job
+from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailService, _RangeInput, _Job
 from tgdrive.thumbnail_cache import ThumbnailCacheMiss
 
 
@@ -354,6 +354,76 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(info.blob_uuid, self.worker._leases)
         self.engine.store.get = AsyncMock(side_effect=AssertionError("不能回源"))
         self.assertEqual(b"".join([part async for part in self.engine.stream(info.blob_uuid, cache_only=True)]), bytes(range(128)))
+
+    def age(self, info, seconds=3600):
+        self.metadata.db.execute("UPDATE objects SET modified_at=modified_at-? WHERE bucket_id=? AND key=?", (seconds, info.bucket_id, info.key))
+
+    def remote_renderer(self, result, remote=0):
+        # 补图任务会从存储读取：替身来源报告读取量，用来核对每日额度。
+        entry = Mock()
+        entry.return_value.__aenter__ = AsyncMock(return_value=SimpleNamespace(remote_bytes=remote))
+        entry.return_value.__aexit__ = AsyncMock(return_value=False)
+        return patch("tgdrive.thumbnails._RangeInput", entry), patch.object(self.worker, "_render", AsyncMock(return_value=result))
+
+    async def test_backfill_generates_old_files_without_cache_and_counts_daily_reads(self):
+        old, fresh = await self.put("old.jpg"), await self.put("fresh.jpg")
+        private = Scope(self.scope.bucket_id, PRIVATE_PREFIX, private_access=True, authorize=lambda: None)
+        secret = await self.put(PRIVATE_PREFIX + "secret.mp3", private)
+        for info in (old, fresh, secret):
+            self.worker.cache.drop(info.blob_uuid)
+        self.age(old); self.age(secret)
+        channel, render = self.remote_renderer({"thumb": JPEG}, remote=3 * MIB)
+        with channel as source, render:
+            self.worker.start()
+            self.worker._backfill_at = 0
+            async with asyncio.timeout(4):
+                while not (self.variants(old) and self.variants(secret)):
+                    await asyncio.sleep(0.01)
+            self.assertTrue(all(call.kwargs.get("cache_only") is False for call in source.call_args_list), "补图允许按预算读取存储")
+        self.assertEqual(self.variants(fresh), [], "刚写入的文件先留给上传端与缓存处理")
+        self.assertEqual(self.worker.backfill_status()["used_bytes"], 6 * MIB)
+
+    async def test_backfill_respects_daily_limit_and_switch(self):
+        info = await self.put()
+        self.worker.cache.drop(info.blob_uuid)
+        self.age(info)
+        self.worker.configure_backfill(0)
+        channel, render = self.remote_renderer({"thumb": JPEG})
+        with channel, render as decoder:
+            self.worker.start()
+            self.worker._backfill_at = 0
+            await asyncio.sleep(0.2)
+            decoder.assert_not_awaited()
+            self.worker.configure_backfill(1)
+            self.worker._charge_backfill(MIB)
+            self.worker._backfill_at = 0
+            await asyncio.sleep(0.2)
+            decoder.assert_not_awaited()
+            self.worker.configure_backfill(-1)
+            async with asyncio.timeout(3):
+                while not self.variants(info):
+                    await asyncio.sleep(0.01)
+        self.assertIsNone(self.worker.backfill_status()["daily_bytes"])
+        for bad in (True, "4096", -2, 2 ** 40):
+            with self.assertRaises(ValueError):
+                self.worker.configure_backfill(bad)
+
+    async def test_backfill_marks_undecodable_file_once(self):
+        info = await self.put("broken.mp4")
+        self.worker.cache.drop(info.blob_uuid)
+        self.age(info)
+        channel, render = self.remote_renderer({})
+        with channel, render as decoder:
+            decoder.side_effect = ThumbnailError("当前解码器未能生成缩略图")
+            self.worker.start()
+            self.worker._backfill_at = 0
+            async with asyncio.timeout(3):
+                while not self.variants(info):
+                    await asyncio.sleep(0.01)
+            self.worker._backfill_at = 0
+            await asyncio.sleep(0.2)
+            self.assertEqual(decoder.await_count, 1, "记为无法生成后不再自动重试")
+        self.assertEqual(self.variants(info), ["none"])
 
 
 if __name__ == "__main__":

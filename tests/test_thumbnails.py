@@ -290,7 +290,7 @@ class ThumbnailCacheTests(unittest.TestCase):
     def test_long_cache_only_for_current_bucket_and_thumbnail_version(self):
         for route in ("/api/user/v1/thumbnail",):
             for suffix, expected in (
-                ("&bucket_id=9&v=content.thumb.123", "private, max-age=2592000, immutable"),
+                ("&bucket_id=9&v=content.thumb.123", "private, max-age=31536000, immutable"),
                 ("&bucket_id=9&v=content.thumb.122", "private, no-cache"),
                 ("&bucket_id=9&v=content.thumb.123&variant=poster", "private, no-cache"),
                 ("&bucket_id=9", "private, no-cache"),
@@ -302,11 +302,20 @@ class ThumbnailCacheTests(unittest.TestCase):
         headers = self.request("/api/user/v1/thumbnail?path=a.jpg&v=content.thumb.123")[1]
         self.assertEqual(headers["cache-control"], "private, no-cache")
 
-    def test_private_thumbnail_never_uses_persistent_cache(self):
-        status, headers, data = self.request("/api/user/v1/private/thumbnail?path=hidden.jpg&bucket_id=9&v=content.thumb.123")
+    def test_private_thumbnail_uses_session_grant_and_long_version_cache(self):
+        # 地址里不带解锁令牌，浏览器缓存键在多次解锁之间保持不变；授权取自登录会话当前的私密授权。
+        seen = []
+        self.app.private_space = SimpleNamespace(session_grants={"session-token": "grant"},
+                                                 files=lambda token, access: seen.append((token, access)) or self.app.user)
+        status, headers, data = self.request("/api/user/v1/private/thumbnail?path=hidden.jpg&bucket_id=9&v=content.thumb.123",
+                                             {"cookie": "tg_session=session-token"})
         self.assertEqual((status, data), (200, WEBP))
-        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(seen, [("session-token", "grant")])
+        self.assertEqual(headers["cache-control"], "private, max-age=31536000, immutable")
         self.assertEqual(headers["referrer-policy"], "no-referrer")
+        status, headers, _ = self.request("/api/user/v1/private/thumbnail?path=hidden.jpg&bucket_id=9&v=content.thumb.122",
+                                          {"cookie": "tg_session=session-token"})
+        self.assertEqual(headers["cache-control"], "private, no-cache", "旧版本地址仍需回源验证")
 
     def test_conditional_response_preserves_policy_and_sends_no_image(self):
         path = "/api/user/v1/thumbnail?path=a.jpg&bucket_id=9&v=content.thumb.123"
@@ -314,7 +323,7 @@ class ThumbnailCacheTests(unittest.TestCase):
             with self.subTest(validator=validator):
                 status, headers, data = self.request(path, {"if-none-match": validator})
                 self.assertEqual((status, data), (304, b""))
-                self.assertEqual(headers["cache-control"], "private, max-age=2592000, immutable")
+                self.assertEqual(headers["cache-control"], "private, max-age=31536000, immutable")
                 self.assertEqual(headers["etag"], '"content-thumb-123"')
 
     def test_public_thumbnail_revalidates_and_revoked_share_cannot_return_304(self):
@@ -348,7 +357,7 @@ class ThumbnailCacheTests(unittest.TestCase):
         second = asyncio.run(service.read_thumbnail(info))[2]
         self.assertNotEqual(first, second)
         self.assertEqual(TgDriveASGI._thumbnail_cache_control({"bucket_id": ["9"], "v": ["content-2.thumb.1000002000"]}, second),
-                         "private, max-age=2592000, immutable")
+                         "private, max-age=31536000, immutable")
         self.assertEqual(TgDriveASGI._thumbnail_cache_control({"bucket_id": ["9"], "v": ["content-2.thumb.1000001000"]}, second),
                          "private, no-cache")
 

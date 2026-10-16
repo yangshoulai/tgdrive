@@ -131,19 +131,38 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
     return () => window.clearInterval(timer);
   }, [active, load]);
   const labels: Record<string, string> = { queued: "待处理", running: "处理中", waiting_client: "等待浏览器", waiting_data: "等待数据", done: "已完成", failed: "失败", cancelled: "已取消" };
+  const [saving, setSaving] = useState(false);
+  async function changeBackfill(value: string) {
+    setSaving(true);
+    try { const backfill = await api.setThumbnailBackfill(Number(value)); setStatus(current => current && { ...current, backfill }); toast.success("自动补图设置已保存"); }
+    catch (reason) { toast.error(api.errorMessage(reason, "保存失败，请稍后重试")); }
+    finally { setSaving(false); }
+  }
+  const backfill = status?.backfill;
+  const dailyMib = backfill ? backfill.daily_bytes === null ? -1 : Math.round(backfill.daily_bytes / 1048576) : 4096;
+  const presets = [0, 1024, 4096, 16384, 65536, -1];
   const kinds = { image: "图片", video: "视频", audio: "音频" };
-  return <Panel title="缩略图队列" description="自动任务只使用已接收的数据；手动生成才允许回源读取。此处仅显示任务编号与处理情况。"
+  return <Panel title="缩略图队列" description="优先使用上传和预览时已收到的数据；仍缺缩略图的文件由自动补图按预算从存储读取（只产生入站流量）。此处仅显示任务编号与处理情况。"
     actions={<Button size="sm" icon="refresh" onClick={load}>刷新</Button>}>
     {error ? <EmptyState icon="alert" title="队列读取失败" description={error} /> : !status ? <SkeletonRows rows={2} /> : <>
       <KeyValue items={[["队列", `${status.jobs.length} / ${status.capacity}`], ["当前处理", `${status.jobs.filter(job => job.state === "running").length} 项`],
-        ["缓存", `${formatBytes(status.cache.bytes)} / ${formatBytes(status.cache.limit_bytes)}`], ["手动回源读取", formatBytes(status.remote_bytes)]]} />
+        ["缓存", `${formatBytes(status.cache.bytes)} / ${formatBytes(status.cache.limit_bytes)}`], ["从存储读取（本次运行）", formatBytes(status.remote_bytes)],
+        ["今日自动补图", status.backfill.daily_bytes === 0 ? "已关闭" : `${formatBytes(status.backfill.used_bytes)} / ${status.backfill.daily_bytes === null ? "不限制" : formatBytes(status.backfill.daily_bytes)}`]]} />
+      <div className="thumbnail-backfill">
+        <Field label="自动补图每日读取上限" hint={`上传或修改超过 ${Math.round(status.backfill.age_seconds / 60)} 分钟仍没有缩略图的图片、视频、音频，由后台从存储读取生成（单个文件图片 60、视频 64、音频 32 MiB 以内），保证最终都有缩略图。关闭后只能等实际预览或手动生成。`}>
+          <select className="input" value={presets.includes(dailyMib) ? String(dailyMib) : "custom"} disabled={saving} onChange={event => void changeBackfill(event.target.value)}>
+            {!presets.includes(dailyMib) && <option value="custom" disabled>{formatBytes(dailyMib * 1048576)}</option>}
+            {presets.map(value => <option key={value} value={value}>{value === 0 ? "关闭" : value === -1 ? "不限制" : formatBytes(value * 1048576)}</option>)}
+          </select>
+        </Field>
+      </div>
       {!status.available && <p className="inline-note tone-warning">服务器未安装 FFmpeg，后台生成不可用；网页仍可用本地文件或已加载的画面生成。</p>}
       {!status.unlocked && <p className="inline-note">系统已锁定，后台任务暂停。</p>}
       {status.pressure && <p className="inline-note tone-warning">{status.pressure}</p>}
       {status.jobs.length === 0 ? <p className="muted">当前没有待处理的缩略图任务。</p> : <div className="table-scroll"><div className="data-table thumbnail-jobs-table" role="table" aria-label="缩略图任务">
         <div className="data-row data-head" role="row"><span role="columnheader">任务</span><span role="columnheader">类型</span><span role="columnheader">状态</span><span role="columnheader">说明</span></div>
         {status.jobs.map(job => <div className="data-row" role="row" key={job.id}><span role="cell" className="mono">{job.id}</span><span role="cell">{kinds[job.kind]}</span>
-          <span role="cell"><Badge tone={job.state === "running" ? "accent" : "neutral"}>{labels[job.state] ?? job.state}</Badge></span>
+          <span role="cell"><Badge tone={job.state === "running" ? "accent" : "neutral"}>{job.backfill && job.state === "queued" ? "自动补图" : labels[job.state] ?? job.state}</Badge></span>
           <span role="cell" className="muted">{job.detail}{job.wait_seconds ? `（${job.wait_seconds} 秒）` : ""}</span></div>)}
       </div></div>}
       {status.recent.length > 0 && <details><summary>最近处理记录（{status.recent.length}）</summary><ul className="task-list">

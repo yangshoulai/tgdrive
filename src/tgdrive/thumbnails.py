@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json
 import logging
 import os
 import re
@@ -16,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import NotFoundError, NotReadyError, QuotaExceededError
-from .filekinds import kind_of
+from .filekinds import kind_clause, kind_of
 from .objects import PRIVATE_PREFIX, ObjectInfo, Scope
 from .thumbnail_cache import ThumbnailCache, ThumbnailCacheMiss
 
@@ -31,6 +33,12 @@ CLIENT_TIMEOUT = 90
 PREVIEW_GRACE = 30
 # 缓存不足时只在收到新数据后重试，并逐次拉长间隔；多次仍不足就放弃，避免边播放边反复启动解码器。
 MISS_LIMIT = 6
+# 自动补图：上传或修改超过 BACKFILL_AGE 秒仍没有缩略图的文件（缓存已过期、复制或秒传、服务器重启等），
+# 由后台按单文件预算从存储读取生成，保证最终都有缩略图。只产生存储到服务器的入站流量，每天总量受管理员设置限制。
+BACKFILL_AGE = 600
+BACKFILL_DEFAULT_MIB = 4096
+BACKFILL_KEY, BACKFILL_USAGE_KEY = "thumbnails.backfill", "thumbnails.backfill_usage"
+BACKFILL_RETRY = 6 * 3600
 MAX_PIXELS = 40_000_000
 VIDEO_PIXELS = 4096 * 2160
 # 不允许播放列表、concat、SVG 等会加载其他资源的格式。HTTP 请求还统一经过下面的本地代理。
@@ -44,6 +52,10 @@ class ThumbnailError(Exception):
 
 class ThumbnailBudget(ThumbnailError):
     pass
+
+
+class ThumbnailRetry(ThumbnailBudget):
+    """暂时无法继续（服务器资源不足、已读分片缓存被回收），稍后可以再试，不能记为「无法生成」。"""
 
 
 def source_kind(info: ObjectInfo) -> str | None:
@@ -72,7 +84,7 @@ class _RangeInput:
 
     def _charge(self, ref, size):
         if ref in self._fetched:
-            raise ThumbnailBudget("已读分片缓存被回收，停止生成以避免重复下载")
+            raise ThumbnailRetry("已读分片缓存被回收，停止生成以避免重复下载")
         if size > self.remote_remaining:
             raise ThumbnailBudget("手动缩略图读取量超过预算")
         self.remote_remaining -= size
@@ -181,6 +193,7 @@ class _Job:
     detail: str = "等待处理"
     revision: int = 0
     misses: int = 0
+    backfill: bool = False
 
 
 @dataclass
@@ -205,6 +218,8 @@ class ThumbnailService:
         self._wake = asyncio.Event()
         self._pending, self._leases, self._history = OrderedDict(), {}, OrderedDict()
         self._remote_bytes = 0
+        # 补图扫描的键集游标、下一次扫描时间与暂时失败后推迟重试的 Blob（进程内，重启后重新尝试）。
+        self._backfill_cursor, self._backfill_at, self._backfill_skip, self._backfill_failures = (0, ""), 0.0, {}, {}
 
     def _dispatch(self, action, *args):
         loop = self._loop
@@ -217,6 +232,7 @@ class ThumbnailService:
     def start(self):
         if self._runner is None and self.resources.ffmpeg:
             self.objects.engine.thumbnail_cache = self.cache
+            self._backfill_cursor, self._backfill_at = (0, ""), time.monotonic() + 30
             self._loop = asyncio.get_running_loop()
             self._runner = asyncio.create_task(self._run())
 
@@ -263,16 +279,16 @@ class ThumbnailService:
             return False
         previous = self._pending.get(blob)
         if previous is not None:
-            if job.remote:
-                previous.force, previous.remote, previous.ready_at = True, True, 0
+            if job.remote and not job.backfill:
+                previous.force, previous.remote, previous.backfill, previous.ready_at = True, True, False, 0
                 if self._active is not previous:
                     previous.state, previous.detail = "queued", "用户请求重新生成"
             return True
         if len(self._pending) >= 128:
             # 缺图扫描可以重建自动任务；优先让出等待数据的名额给新上传与明确的手动请求。
-            victim = next((key for key, item in self._pending.items() if item.state == "waiting_data" and key not in self._leases), None)
+            victim = next((key for key, item in self._pending.items() if (item.state == "waiting_data" or item.backfill) and key not in self._leases and item is not self._active), None)
             if victim is None:
-                if job.remote:
+                if job.remote and not job.backfill:
                     raise ValueError("缩略图队列已满，请稍后重试")
                 return False
             self._pending.pop(victim)
@@ -384,6 +400,96 @@ class ThumbnailService:
         self._enqueue(_Job(info, force=True, remote=True, detail="用户请求生成"))
         return {"accepted": True}
 
+    # ---------- 自动补图 ----------
+
+    def _setting(self, key):
+        row = self.metadata.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        try:
+            return json.loads(row["value"]) if row else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def _save_setting(self, key, value):
+        with self.metadata.transaction() as db:
+            db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                       (key, json.dumps(value, separators=(",", ":"))))
+
+    def backfill_limit(self):
+        """每日自动补图的读取上限（字节）；0 表示关闭，None 表示不限制。"""
+        value = self._setting(BACKFILL_KEY).get("daily_mib", BACKFILL_DEFAULT_MIB)
+        if not isinstance(value, int) or isinstance(value, bool):
+            value = BACKFILL_DEFAULT_MIB
+        return None if value < 0 else value * MIB
+
+    def configure_backfill(self, daily_mib):
+        if isinstance(daily_mib, bool) or not isinstance(daily_mib, int) or daily_mib < -1 or daily_mib > 1024 * 1024:
+            raise ValueError("每日读取上限必须是 0 到 1048576 MiB 之间的整数，-1 表示不限制")
+        self._save_setting(BACKFILL_KEY, {"daily_mib": daily_mib})
+        self._backfill_at = 0
+        self._wake.set()
+        return self.backfill_status()
+
+    @staticmethod
+    def _today():
+        return datetime.date.today().isoformat()
+
+    def _backfill_used(self):
+        usage = self._setting(BACKFILL_USAGE_KEY)
+        return int(usage.get("bytes", 0)) if usage.get("day") == self._today() else 0
+
+    def _charge_backfill(self, size):
+        if size > 0:
+            self._save_setting(BACKFILL_USAGE_KEY, {"day": self._today(), "bytes": self._backfill_used() + size})
+
+    def _backfill_room(self):
+        limit = self.backfill_limit()
+        return None if limit is None else max(0, limit - self._backfill_used())
+
+    def backfill_status(self):
+        limit = self.backfill_limit()
+        return {"daily_bytes": limit, "used_bytes": self._backfill_used(), "age_seconds": BACKFILL_AGE,
+                "pending": sum(1 for job in self._pending.values() if job.backfill)}
+
+    def _backfill_page(self):
+        """按键集分页找出较早写入、仍没有任何缩略图记录（含「无法生成」）的媒体文件；只读元数据。"""
+        clauses, args = kind_clause("image,video,audio")
+        rows = self.metadata.db.execute(
+            "SELECT o.* FROM objects o JOIN buckets b ON b.id=o.bucket_id "
+            "LEFT JOIN users u ON u.id=b.owner_user_id WHERE o.blob_uuid IS NOT NULL AND o.size>0 "
+            "AND (substr(o.key,1,9)!='.tgdrive/' OR substr(o.key,1,?)=?) "
+            "AND (b.owner_user_id IS NULL OR u.status='active') AND o.modified_at<? "
+            "AND (o.bucket_id,o.key)>(?,?) AND NOT EXISTS (SELECT 1 FROM thumbnails t WHERE t.blob_uuid=o.blob_uuid) "
+            f"AND {clauses} ORDER BY o.bucket_id,o.key LIMIT 32",
+            (len(PRIVATE_PREFIX), PRIVATE_PREFIX, time.time() - BACKFILL_AGE, *self._backfill_cursor, *args)).fetchall()
+        return [self.objects._object(row) for row in rows]
+
+    async def _plan_backfill(self):
+        """队列里没有更便宜的任务时补充最多 4 个补图任务；预算用完或扫描到末尾后暂停一段时间。"""
+        if time.monotonic() < self._backfill_at or sum(1 for job in self._pending.values() if job.backfill) >= 4:
+            return False
+        room = self._backfill_room()
+        if room is not None and room < 2 * MIB:
+            self._backfill_at = time.monotonic() + 600
+            return False
+        page = await self.metadata.run_in_thread(self._backfill_page)
+        if not page:
+            # 一轮扫描结束：下一轮从头开始，覆盖这段时间里新变得「较早」的文件。
+            self._backfill_cursor, self._backfill_at = (0, ""), time.monotonic() + 1800
+            return False
+        self._backfill_cursor = (page[-1].bucket_id, page[-1].key)
+        now, added = time.monotonic(), False
+        for key, until in list(self._backfill_skip.items()):
+            if until <= now:
+                self._backfill_skip.pop(key)
+        for info in page:
+            blob = info.blob_uuid
+            if not self._eligible(info) or blob in self._pending or blob in self._leases or blob in self._backfill_skip:
+                continue
+            if sum(1 for job in self._pending.values() if job.backfill) >= 4:
+                break
+            added = self._enqueue(_Job(info, remote=True, backfill=True, detail="自动补图：按预算读取存储")) or added
+        return added
+
     def _record(self, job, state, detail):
         blob = job.info.blob_uuid
         self._history[blob] = {"id": hashlib.sha256(blob.encode()).hexdigest()[:12], "kind": source_kind(job.info),
@@ -395,14 +501,14 @@ class ThumbnailService:
     def status(self):
         self._expire_clients()
         jobs = [{"id": hashlib.sha256(blob.encode()).hexdigest()[:12], "kind": source_kind(job.info),
-                 "state": job.state, "detail": job.detail, "manual": job.remote,
+                 "state": job.state, "detail": job.detail, "manual": job.remote and not job.backfill, "backfill": job.backfill,
                  "wait_seconds": max(0, int(job.ready_at - time.monotonic()))} for blob, job in self._pending.items()]
         pressure = self.resources.pressure()
         return {"available": bool(self.resources.ffmpeg), "unlocked": self.keystore.unlocked,
                 "pressure": pressure, "jobs": jobs, "recent": list(reversed(self._history.values())),
                 "cache": self.cache.status(), "remote_bytes": self._remote_bytes,
                 "client_timeout_seconds": CLIENT_TIMEOUT, "task_timeout_seconds": TIMEOUT,
-                "automatic_remote_reads": False, "capacity": 128}
+                "automatic_remote_reads": False, "capacity": 128, "backfill": self.backfill_status()}
 
     async def _run(self):
         while True:
@@ -412,8 +518,9 @@ class ThumbnailService:
                     self._expire_clients()
                     now = time.monotonic()
                     ready = (item for item in self._pending.values() if item.state == "queued" and item.ready_at <= now and item.info.blob_uuid not in self._leases)
-                    # 明确的手动请求优先；自动任务先处理图片和音频，避免视频阻塞轻量封面。
-                    job = min(ready, key=lambda item: (not item.remote, {"image": 0, "audio": 1, "video": 2}[source_kind(item.info)]), default=None)
+                    # 明确的手动请求优先，其次是只用缓存的自动任务，最后才是需要读取存储的补图；同级先图片和音频。
+                    job = min(ready, key=lambda item: (2 if item.backfill else 0 if item.remote else 1,
+                                                       {"image": 0, "audio": 1, "video": 2}[source_kind(item.info)]), default=None)
                     if job is not None:
                         blob = job.info.blob_uuid
                         if not job.force and self._has_thumbnail(blob):
@@ -424,15 +531,26 @@ class ThumbnailService:
                             # 没有任何已接收的数据：不占队列名额，等文件被实际读取时 observe 再登记。
                             self._pending.pop(blob, None)
                             continue
+                        budget = None
+                        if job.backfill:
+                            room = self._backfill_room()
+                            budget = READ_LIMITS[source_kind(job.info)] if room is None else min(READ_LIMITS[source_kind(job.info)], room - MIB)
+                            if budget < MIB:
+                                # 今日补图额度用完：保留任务，明天或调高上限后继续。
+                                job.ready_at, job.detail = now + 600, "今日自动补图读取量已用完"
+                                self._backfill_at = now + 600
+                                continue
                         job.state, job.detail = "running", "使用已接收缓存" if not job.remote else "优先使用缓存，必要时按预算回源"
                         job.revision = self.cache.revision(blob)
                         self._active = job
                         started_remote = job.remote
-                        self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote))
+                        before = self._remote_bytes
+                        self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote, budget=budget,
+                                                                       give_up=job.backfill))
                         try:
                             await self._task
                             self._pending.pop(blob, None)
-                            self._record(job, "done", "缩略图处理完成")
+                            self._record(job, "done", "自动补图完成" if job.backfill else "缩略图处理完成")
                             self.cache.drop(blob)
                         except ThumbnailCacheMiss:
                             job.misses += 1
@@ -450,9 +568,23 @@ class ThumbnailService:
                                 raise
                         except Exception as exc:
                             self._pending.pop(blob, None)
+                            if job.backfill and not isinstance(exc, (NotFoundError, PermissionError)):
+                                # 超时、资源不足等暂时性失败：几小时后再试；连续 3 次仍失败就记为「无法生成」，不再消耗补图额度。
+                                # 解码器确定无法处理的已在 generate 中记录。
+                                failures = self._backfill_failures[blob] = self._backfill_failures.get(blob, 0) + 1
+                                self._backfill_skip[blob] = time.monotonic() + BACKFILL_RETRY
+                                if failures >= 3:
+                                    try:
+                                        await self.objects.set_thumbnail(self._scope(job.info, None), job.info.key, None, "none")
+                                    except Exception:
+                                        pass
                             self._record(job, "failed", "处理超时" if isinstance(exc, TimeoutError) else "当前数据或解码器无法生成，可手动重试")
                         finally:
                             self._active = self._task = None
+                            if job.backfill:
+                                self._charge_backfill(self._remote_bytes - before)
+                        continue
+                    if self._backfill_room() != 0 and await self._plan_backfill():
                         continue
                 await asyncio.wait_for(self._wake.wait(), 1)
             except TimeoutError:
@@ -479,7 +611,10 @@ class ThumbnailService:
         self.objects._check_scope(scope, info.key, write=True)
         return scope
 
-    async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False):
+    async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False,
+                       budget=None, give_up=False):
+        """生成并保存缩略图。give_up 用于自动补图：解码器确定无法处理或单文件预算不够时记为「无法生成」，
+        以后不再自动重试（文件菜单仍可手动重新生成）。"""
         kind = source_kind(info)
         if not self._eligible(info) or not self.resources.ffmpeg:
             return
@@ -488,10 +623,16 @@ class ThumbnailService:
         if not force and self._has_thumbnail(info.blob_uuid):
             return
         async with asyncio.timeout(TIMEOUT):
-            async with _RangeInput(self.objects.engine, info, scope.authorize, READ_LIMITS[kind], cache_only=not allow_remote) as source:
+            async with _RangeInput(self.objects.engine, info, scope.authorize, budget or READ_LIMITS[kind], cache_only=not allow_remote) as source:
                 try:
                     with tempfile.TemporaryDirectory(prefix="tessera-thumbnail-") as directory:
-                        images = await self._render(source, kind, Path(directory), scope.authorize)
+                        try:
+                            images = await self._render(source, kind, Path(directory), scope.authorize)
+                        except ThumbnailError as exc:
+                            # 资源压力属于暂时失败；读取预算不够（只在没有缩小预算时）或解码失败才是确定的结果。
+                            if not give_up or isinstance(exc, ThumbnailRetry) or isinstance(exc, ThumbnailBudget) and budget and budget < READ_LIMITS[kind]:
+                                raise
+                            images = None
                 finally:
                     self._remote_bytes += source.remote_bytes if isinstance(source.remote_bytes, int) else 0
             scope.authorize()
@@ -554,7 +695,7 @@ class ThumbnailService:
                 if source.failure:
                     raise source.failure
                 if self.resources.pressure():
-                    raise ThumbnailBudget("服务器资源不足，稍后再生成")
+                    raise ThumbnailRetry("服务器资源不足，稍后再生成")
                 await asyncio.wait({waiting}, timeout=0.25)
             output = await stderr
             if source.failure:

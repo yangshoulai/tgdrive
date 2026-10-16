@@ -287,8 +287,10 @@ export const purgeTrash = (ids: string[] | "all", root = "") => post<{ purged: n
 export type ThumbnailVariant = "thumb" | "grid" | "poster";
 /** 所需规格缺失时依次退回（与服务端 THUMBNAIL_FALLBACK 一致）：网格图与封面互为替代，最后用小图。 */
 const THUMBNAIL_FALLBACK: Record<ThumbnailVariant, ThumbnailVariant[]> = { thumb: ["thumb"], grid: ["grid", "poster", "thumb"], poster: ["poster", "grid", "thumb"] };
+/** 缩略图地址只由路径、规格与内容版本组成（私密空间也不带解锁令牌，服务端按登录会话的私密授权校验），
+ * 浏览器据此长期缓存；删除、覆盖或重新生成后版本变化，地址随之变化。 */
 export const thumbnailUrl = (path: string, etag: string, variant: ThumbnailVariant = "thumb") =>
-  mediaAccess(`${fileApi("/thumbnail", path)}?path=${encodeURIComponent(path)}&variant=${variant}&v=${encodeURIComponent(etag)}${thumbnailBucketId !== null ? `&bucket_id=${thumbnailBucketId}` : ""}`, path);
+  `${fileApi("/thumbnail", path)}?path=${encodeURIComponent(path)}&variant=${variant}&v=${encodeURIComponent(etag)}${thumbnailBucketId !== null ? `&bucket_id=${thumbnailBucketId}` : ""}`;
 export type ThumbnailClaim = { etag?: string; ticket?: string };
 export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb", claim: ThumbnailClaim = {}) => post<void>(fileApi("/thumbnail", path), { path, data, variant, ...claim });
 export const markNoThumbnail = (path: string, claim: ThumbnailClaim = {}) => post<void>(fileApi("/thumbnail", path), { path, variant: "none", ...claim });
@@ -520,10 +522,14 @@ export const changePassphrase = (oldPassphrase: string, newPassphrase: string) =
 export type MaintenanceTask = { at: number; error?: string; [key: string]: unknown };
 export type MaintenanceStatus = { gc_pending: number; gc_dead: number; cleanup?: MaintenanceTask; gc?: MaintenanceTask; scrub?: MaintenanceTask; backup?: MaintenanceTask; trash?: MaintenanceTask };
 export const maintenanceStatus = () => request<MaintenanceStatus>("/api/admin/v1/maintenance/status");
-export type ThumbnailJob = { id: string; kind: "image" | "video" | "audio"; state: string; detail: string; at?: number; wait_seconds?: number; manual?: boolean };
+export type ThumbnailJob = { id: string; kind: "image" | "video" | "audio"; state: string; detail: string; at?: number; wait_seconds?: number; manual?: boolean; backfill?: boolean };
+/** 自动补图：daily_bytes 为 null 表示不限制，0 表示关闭。 */
+export type ThumbnailBackfill = { daily_bytes: number | null; used_bytes: number; age_seconds: number; pending: number };
 export type ThumbnailQueueStatus = { available: boolean; unlocked: boolean; pressure: string | null; jobs: ThumbnailJob[]; recent: ThumbnailJob[];
-  cache: { bytes: number; limit_bytes: number; ttl_seconds: number }; remote_bytes: number; client_timeout_seconds: number; task_timeout_seconds: number; capacity: number };
+  cache: { bytes: number; limit_bytes: number; ttl_seconds: number }; remote_bytes: number; client_timeout_seconds: number; task_timeout_seconds: number; capacity: number; backfill: ThumbnailBackfill };
 export const thumbnailQueue = () => request<ThumbnailQueueStatus>("/api/admin/v1/maintenance/thumbnails");
+/** daily_mib：每日自动补图读取上限（MiB），0 关闭，-1 不限制。 */
+export const setThumbnailBackfill = (dailyMib: number) => post<ThumbnailBackfill>("/api/admin/v1/maintenance/thumbnails", { daily_mib: dailyMib });
 export const runCleanup = () => post<{ aborted_uploads: number; stale_blobs: number; expired_upload_records: number }>("/api/admin/v1/maintenance/cleanup");
 export const retryDeadGc = () => post<{ requeued: number }>("/api/admin/v1/maintenance/gc/retry");
 export type Backup = { name: string; size: number; created_at: number };

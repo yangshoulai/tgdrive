@@ -148,6 +148,7 @@ class TgDriveASGI(StaticFiles):
         query = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
         started = False
         private_response = path.startswith("/api/user/v1/private/") or path.startswith("/api/user/v1/passkeys")
+        private_thumbnail = path == "/api/user/v1/private/thumbnail" and scope.get("method") == "GET"
         request_id = secrets.token_hex(8)
         request_start = time.monotonic()
 
@@ -156,10 +157,12 @@ class TgDriveASGI(StaticFiles):
             if message["type"] == "http.response.start":
                 started = True
                 if private_response:
-                    # 覆盖所有分支（流、缩略图、上传和错误），避免浏览器或中间代理保存私密内容。
+                    # 覆盖所有分支（流、上传和错误），避免浏览器或中间代理保存私密内容。唯一例外是成功返回的私密缩略图：
+                    # 它沿用按内容版本的长期私有缓存（Cache-Control: private，中间代理不保存），地址随删除、覆盖而变化。
+                    keep_cache = private_thumbnail and message.get("status") in (200, 304)
                     message["headers"] = [(k, v) for k, v in message.get("headers", [])
-                                          if k.lower() not in (b"cache-control", b"referrer-policy")]
-                    message["headers"].extend([(b"cache-control", b"no-store"), (b"referrer-policy", b"no-referrer")])
+                                          if k.lower() not in ((b"referrer-policy",) if keep_cache else (b"cache-control", b"referrer-policy"))]
+                    message["headers"].extend(([] if keep_cache else [(b"cache-control", b"no-store")]) + [(b"referrer-policy", b"no-referrer")])
                 message["headers"] = [*message.get("headers", []), (b"x-request-id", request_id.encode())]
             elif message["type"] == "http.response.body" and self.metrics is not None:
                 self.metrics.record_out(len(message.get("body", b"")))
@@ -237,6 +240,9 @@ class TgDriveASGI(StaticFiles):
             file_user = self.user
             private = path.startswith("/api/user/v1/private/")
             access = headers.get("x-private-access", query.get("access", [""])[0])
+            if not access and private and method == "GET" and path == "/api/user/v1/private/thumbnail" and token:
+                # 私密缩略图地址不带解锁令牌，浏览器才能跨解锁长期缓存；授权取自同一登录会话当前的私密授权。
+                access = self.private_space.session_grants.get(token, "")
             audit_path = path
             if private:
                 route = path[len("/api/user/v1/private"):]
@@ -270,7 +276,8 @@ class TgDriveASGI(StaticFiles):
             if path == "/api/user/v1/thumbnail" and method == "GET":
                 bucket_id = int(query["bucket_id"][0]) if "bucket_id" in query else None
                 data, mime, etag = await file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0], bucket_id=bucket_id)
-                await self._send_thumbnail(tracked_send, headers, data, mime, etag, "no-store" if private else self._thumbnail_cache_control(query, etag))
+                # 私密空间的缩略图同样按版本地址长期缓存：只有授权通过才会返回，删除或覆盖后地址随内容版本变化。
+                await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
                 return
             if path == "/api/user/v1/avatar" and method == "GET":
                 data, mime, etag = self.user.avatar(token)
@@ -396,6 +403,7 @@ class TgDriveASGI(StaticFiles):
                           "/bots/{}/check": "bot.check", "/settings": "settings.update", "/resources": "resources.update",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
+                          "/maintenance/thumbnails": "maintenance.thumbnails",
                           "/backups": "backup.create", "/password": "admin.password", "/passphrase": "system.passphrase",
                           "/users/{}/password": "user.password_reset", "/users/{}/delete": "user.delete",
                           "/assistant/settings": "assistant.settings", "/assistant/limits": "assistant.settings",
@@ -485,6 +493,8 @@ class TgDriveASGI(StaticFiles):
             target, detail = payload.get("name"), {"channel_id": payload.get("channel_id")}
         elif action == "bot.check" and ok:
             detail = {"status": (result or {}).get("status")}
+        elif action == "maintenance.thumbnails":
+            detail = {"daily_mib": payload.get("daily_mib")}
         elif action == "resources.update":
             detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib") if key in payload}
             if "proxy" in payload:
@@ -778,6 +788,8 @@ class TgDriveASGI(StaticFiles):
                 return 200, self.admin.maintenance_status(token), {}
             if method == "GET" and route == "/maintenance/thumbnails":
                 return 200, self.thumbnails.status(), {"Cache-Control": "no-store"}
+            if method == "POST" and route == "/maintenance/thumbnails":
+                return 200, self.thumbnails.configure_backfill(payload.get("daily_mib")), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/maintenance/cleanup":
                 return 200, await self.admin.run_cleanup(token, csrf), {}
             if method == "POST" and route == "/maintenance/gc/retry":
@@ -1193,7 +1205,7 @@ class TgDriveASGI(StaticFiles):
         # 只有带存储桶、且匹配实际图片版本的地址允许长期缓存，旧地址继续回源验证。
         if (query.get("bucket_id", [""])[0] and query.get("variant", ["thumb"])[0] == variant
                 and query.get("v", [""])[0] == f"{source}.{variant}.{revision}"):
-            return "private, max-age=2592000, immutable"
+            return "private, max-age=31536000, immutable"
         return "private, no-cache"
 
     async def _send_thumbnail(self, send, headers, data: bytes, mime: str, etag: str, cache_control: str):
