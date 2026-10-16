@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useCursorPage } from "../pagination";
 import { SITE } from "../brand";
 import * as api from "../api";
+import * as ai from "../assistant-api";
 
 import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, PageHeader, Pagination, Panel, Segmented, SkeletonRows, Switch, formatBytes, formatDateTime, toast, useDocumentTitle } from "../ui";
 
@@ -49,19 +50,37 @@ export function Audit() {
 
 const ACTOR_LABEL: Record<api.AuditEvent["actor_type"], string> = { admin: "管理员", user: "用户", key: "访问密钥" };
 
+const STATUS_LABEL: Record<string, string> = {
+  active: "启用", disabled: "停用", ok: "连接正常", completed: "已完成", pending: "待确认", confirmed: "已确认", rejected: "已拒绝",
+  expired: "已过期", running: "执行中", done: "已完成", partial: "部分完成", failed: "失败", cancelled: "已取消",
+  interrupted: "已中断", undoing: "撤销中", undone: "已撤销",
+};
+const count = (value: unknown, label: string) => typeof value === "number" ? `${label} ${value.toLocaleString("zh-CN")} 项` : null;
+
 function auditDetail(event: api.AuditEvent) {
   const detail = event.detail ?? {};
-  const parts: string[] = [];
+  const parts: (string | null)[] = [];
   if (detail.method === "passkey") parts.push("通行密钥验证");
-  if (typeof detail.status === "string") parts.push(detail.status === "active" ? "启用" : detail.status === "disabled" ? "停用" : detail.status === "ok" ? "连接正常" : detail.status);
+  if (typeof detail.kind === "string") parts.push(ai.ACTION_KINDS[detail.kind] ?? detail.kind);
+  if (typeof detail.status === "string") parts.push(STATUS_LABEL[detail.status] ?? detail.status);
+  if (typeof detail.enabled === "boolean") parts.push(detail.enabled ? "启用" : "停用");
   if ("public" in detail) parts.push(detail.public ? "开启" : "关闭");
+  if (detail.password === "set" || detail.password === "cleared") parts.push(detail.password === "set" ? "设置访问密码" : "清除访问密码");
+  if (typeof detail.expires_at === "number") parts.push(`有效期至 ${formatDateTime(detail.expires_at)}`);
   if (typeof detail.count === "number") parts.push(`${detail.count} 项`);
   if (typeof detail.saved === "number") parts.push(`保存 ${detail.saved} 项`);
+  parts.push(count(detail.removed, "移除"), count(detail.purged, "清除"), count(detail.deleted_objects, "删除文件"), count(detail.deleted, "删除"),
+    count(detail.added, "新增"), count(detail.updated, "更新"), count(detail.processed, "处理"), count(detail.checked, "校验"));
+  if (typeof detail.bad === "number" && detail.bad) parts.push(`异常 ${detail.bad} 项`);
   if ("quota_bytes" in detail) parts.push(detail.quota_bytes ? `配额 ${formatBytes(Number(detail.quota_bytes))}` : "不限配额");
   if (typeof detail.name === "string") parts.push(detail.name);
+  if (typeof detail.model === "string") parts.push(detail.model);
+  if (Array.isArray(detail.models)) parts.push(`${detail.models.length} 个模型`);
+  if (detail.api_key === "changed") parts.push("更换 API Key");
+  if (typeof detail.full_access === "boolean") parts.push(detail.full_access ? "允许完全访问" : "关闭完全访问");
   if (typeof detail.public_base_url === "string" || typeof detail.s3_endpoint === "string") parts.push(Object.entries(detail).map(([key, value]) => `${key === "s3_endpoint" ? "S3" : "公开地址"}：${value || "默认"}`).join("，"));
   if (typeof detail.error === "string") parts.push(`错误：${detail.error}`);
-  return parts.join("，");
+  return parts.filter(Boolean).join("，");
 }
 
 function AuditPanel() {
@@ -78,15 +97,15 @@ function AuditPanel() {
             <div className="data-row data-head" role="row">
               <span role="columnheader">时间</span><span role="columnheader">操作者</span><span role="columnheader">操作</span><span role="columnheader">对象与详情</span><span role="columnheader">结果</span>
             </div>
-            {events.map(event => (
+            {events.map(event => { const detail = auditDetail(event); return (
               <div key={event.id} role="row" className="data-row">
                 <span role="cell" className="muted" title={event.ip ? `来源 IP：${event.ip}` : undefined}>{formatDateTime(event.ts)}</span>
                 <span role="cell" className="name-stack"><strong>{event.actor ?? "—"}</strong><small>{ACTOR_LABEL[event.actor_type] ?? event.actor_type}</small></span>
-                <span role="cell">{event.label}</span>
-                <span role="cell" className="name-stack"><span className="mono audit-target">{event.target ?? ""}</span><small>{auditDetail(event)}</small></span>
+                <span role="cell" className="audit-action" title={event.action}>{event.label}</span>
+                <span role="cell" className="name-stack audit-detail">{event.target && <span className="mono audit-target" title={event.target}>{event.target}</span>}{detail && <small title={detail}>{detail}</small>}</span>
                 <span role="cell">{event.ok ? <Badge tone="success" dot>成功</Badge> : <Badge tone="danger" dot>失败</Badge>}</span>
               </div>
-            ))}
+            ); })}
           </div></div>
           <div className="panel-more"><Pagination {...pagination} /></div>
         </>

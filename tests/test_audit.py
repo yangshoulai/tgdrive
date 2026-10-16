@@ -128,3 +128,13 @@ class OperationsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuditLabelTests(unittest.TestCase):
+    def test_every_audited_action_has_a_label(self):
+        # 控制台直接展示 label；漏掉的动作会显示成 assistant.action.confirm 这样的英文代码并撑乱表格。
+        from tgdrive.asgi import TgDriveASGI
+        from tgdrive.audit import ACTIONS
+        actions = {action for routes in TgDriveASGI._AUDITED.values() for action in routes.values()}
+        actions |= {"assistant.action.auto"}  # 完全访问模式自动执行，由助手服务直接写入
+        self.assertEqual(sorted(actions - ACTIONS.keys()), [])

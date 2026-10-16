@@ -34,6 +34,20 @@ ACTIONS = {
     "passkey.create": "添加通行密钥", "passkey.rename": "重命名通行密钥",
     "passkey.delete": "移除通行密钥", "passkey.enable": "启用通行密钥登录",
     "private.passkey.unlock": "通行密钥解锁私密空间",
+    "account.profile": "修改账号资料", "account.email": "更改登录邮箱", "account.avatar": "更换头像",
+    "account.avatar_delete": "移除头像", "download.clear": "清除下载记录", "share.save": "保存他人分享",
+    "assistant.settings": "修改文件助手设置", "assistant.tools.update": "修改助手工具",
+    "assistant.channel.create": "添加模型渠道", "assistant.channel.update": "修改模型渠道",
+    "assistant.channel.delete": "删除模型渠道", "assistant.channel.sync": "检查渠道上游模型",
+    "assistant.model.create": "添加模型", "assistant.model.update": "修改模型", "assistant.model.delete": "移除模型",
+    "assistant.model.test": "测试模型", "assistant.catalog.create": "添加模型目录条目",
+    "assistant.catalog.update": "修改模型目录条目", "assistant.catalog.delete": "删除模型目录条目",
+    "assistant.catalog.sync": "同步模型目录", "assistant.catalog.settings": "修改模型目录设置",
+    "assistant.user_policy": "修改用户助手策略", "assistant.trace.delete": "删除助手对话记录",
+    "assistant.data.purge": "清理助手数据", "assistant.scope.confirm": "确认扩大助手作用域",
+    "assistant.scope.reject": "拒绝扩大助手作用域", "assistant.action.confirm": "确认助手操作",
+    "assistant.action.reject": "拒绝助手操作", "assistant.action.cancel": "取消助手操作",
+    "assistant.action.undo": "撤销助手操作", "assistant.action.auto": "自动执行助手操作",
 }
 
 
