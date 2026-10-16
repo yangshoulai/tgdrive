@@ -117,7 +117,8 @@ function group(messages: ai.ChatMessage[]): Item[] {
 
 export function Thread({ detail, live, liveModel, modelLabel, running, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
   detail: ai.ConversationDetail; live: LiveRun | null; liveModel?: string; modelLabel: (id: number | null | undefined) => string; running: boolean;
-  onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: () => void;
+  /** 从这条用户消息重新回答（丢弃之后的记录）。 */
+  onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: (seq: number) => void;
   onActionChanged: () => void; onFilesChanged?: () => void;
 }) {
   const items = useMemo(() => group(detail.messages), [detail.messages]);
@@ -129,7 +130,7 @@ export function Thread({ detail, live, liveModel, modelLabel, running, onAnswer,
       : <TurnView key={item.turn.key} turn={item.turn} live={item === lastTurn && running ? live : null}
           model={item.turn.modelId != null ? modelLabel(item.turn.modelId) : item === lastTurn && running ? liveModel ?? "" : ""}
           actions={detail.actions} messages={detail.messages} canAnswer={!running && !answered} questionSeq={lastQuestion?.seq}
-          onAnswer={onAnswer} onScope={onScope} onRetry={item === lastTurn && !running ? onRetry : undefined}
+          onAnswer={onAnswer} onScope={onScope} onRetry={!running ? onRetry : undefined}
           onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />)}
     {running && live && (!lastTurn || lastTurn.kind !== "turn") && <TurnView turn={{ key: "live", steps: [], cards: [], notices: [], runId: null, input: 0, output: 0 }}
       live={live} model="" actions={[]} messages={[]} canAnswer={false} onAnswer={onAnswer} onScope={onScope} onActionChanged={onActionChanged} />}
@@ -144,10 +145,11 @@ function SystemEvent({ message }: { message: ai.ChatMessage }) {
 
 function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
   turn: Turn; live: LiveRun | null; model: string; actions: ai.AssistantAction[]; messages: ai.ChatMessage[]; canAnswer: boolean; questionSeq?: number;
-  onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: () => void;
+  onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: (seq: number) => void;
   onActionChanged: () => void; onFilesChanged?: () => void;
 }) {
   const steps = [...turn.steps];
+  const retry = turn.user && onRetry ? () => onRetry(turn.user!.seq) : undefined;
   if (live) {
     if (live.reasoning) steps.push({ kind: "thinking", key: "live-thinking", text: live.reasoning, ms: null, live: true, startedAt: live.reasoningStartedAt });
     for (const tool of live.tools) steps.push({ kind: "tool", key: `live-${tool.callId}`, pending: tool });
@@ -156,7 +158,7 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
   const mark = useMarkState(live);
   const hasAssistant = steps.length > 0 || turn.cards.length > 0 || turn.answer || streaming || turn.notices.length > 0 || live;
   return <div className="ai-turn">
-    {turn.user && <UserMessage message={turn.user} />}
+    {turn.user && <UserMessage message={turn.user} onRetry={retry} />}
     {hasAssistant && <div className={`ai-reply${live ? " is-live" : ""}`}>
       <span className="ai-avatar" aria-hidden="true"><AssistantMark state={mark} /></span>
       <div className="ai-reply-body">
@@ -169,7 +171,7 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
         {(turn.answer || streaming) && <div className="ai-answer">
           <Markdown source={streaming || turn.answer?.text || ""} />{streaming && <i className="ai-caret" aria-hidden="true" />}
         </div>}
-        {turn.notices.map(notice => <Notice key={notice.seq} message={notice} onRetry={notice.retry ? onRetry : undefined} />)}
+        {turn.notices.map(notice => <Notice key={notice.seq} message={notice} onRetry={notice.retry ? retry : undefined} />)}
         {!live && (turn.answer || turn.output > 0) && <div className="ai-reply-foot">
           {turn.endedAt && <span>{formatDateTime(turn.endedAt)}</span>}
           {turn.output > 0 && <span title="本轮输入 / 输出 token">{turn.input.toLocaleString("zh-CN")} / {turn.output.toLocaleString("zh-CN")} token</span>}
@@ -186,16 +188,15 @@ function LiveStatus({ live }: { live: LiveRun }) {
   return <span className="ai-live" role="status"><i aria-hidden="true" /><span className="ai-shimmer">{label}</span></span>;
 }
 
-function UserMessage({ message }: { message: ai.ChatMessage }) {
+function UserMessage({ message, onRetry }: { message: ai.ChatMessage; onRetry?: () => void }) {
   return <div className="ai-user">
     {message.attachment && <span className="ai-attachment"><Icon name="globe" size={13} />
       <span>{message.attachment.source.replace(/^https?:\/\//, "")} · {message.attachment.pages} 页 · {message.attachment.images.toLocaleString("zh-CN")} 个图片候选</span></span>}
-    {Boolean(message.mentions?.length) && <span className="ai-mentions">{message.mentions!.map(path => <span key={path} className="assistant-mention-chip" title={path}>
-      <Icon name={path.endsWith("/") ? "folder" : "file"} size={12} /><span>{path.replace(/\/$/, "").split("/").at(-1)}</span></span>)}</span>}
-    {/* 用户输入的 Markdown（列表、加粗、代码等）与回复使用同一个安全渲染器，不执行原始 HTML。 */}
-    <div className="ai-bubble"><Markdown source={message.text ?? ""} /></div>
+    {/* 用户输入的 Markdown（列表、加粗、代码等）与回复使用同一个安全渲染器，不执行原始 HTML；@ 引用就地显示为胶囊。 */}
+    <div className="ai-bubble"><Markdown source={message.text ?? ""} mentions={message.mentions} /></div>
     <span className="ai-user-meta">{message.created_at ? formatDateTime(message.created_at) : ""}
-      <button type="button" onClick={() => copyMessage(message.text ?? "")}>复制</button></span>
+      {onRetry && <button type="button" onClick={onRetry} title="从这条消息重新回答，之后的记录会被丢弃"><Icon name="refresh" size={12} />重试</button>}
+      <button type="button" onClick={() => copyMessage(message.text ?? "")}><Icon name="copy" size={12} />复制</button></span>
   </div>;
 }
 

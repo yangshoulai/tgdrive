@@ -210,6 +210,9 @@ export const deleteConversation = (id: string) => post<void>(`${USER}/conversati
 export type ClientEnvironment = { browser: string; browser_version: string; os: string; language: string; timezone: string; origin: string };
 export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root" | "path"; scope_path?: string; mentions?: string[]; snapshot_id?: string; environment?: ClientEnvironment }) =>
   post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/messages`, input);
+/** 从自己的某条消息重新回答：服务端丢弃这条消息及之后的记录，以同样的内容（引用、附件）开始新运行。 */
+export const retryMessage = (id: string, input: { seq: number; model_id?: number; location: string; view: string; environment?: ClientEnvironment }) =>
+  post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/retry`, input);
 export const stopRun = (runId: string) => post<void>(`${USER}/runs/${encodeURIComponent(runId)}/stop`, {});
 export const shareLink = (conversationId: string, path: string) =>
   get<{ token: string; public_base_url: string | null }>(`${USER}/conversations/${encodeURIComponent(conversationId)}/share-link${query({ path })}`);

@@ -88,14 +88,22 @@ export function useMentions({ draft, setDraft, input, location, enabled }: {
     window.setTimeout(() => { node.focus(); node.setSelectionRange(position, position); }, 0);
   }
 
-  function remove(key: string) {
-    setDraft(draft.split(`@/${key} `).join("").split(`@/${key}`).join(""));
-    setMentions(current => current.filter(item => item.key !== key));
-  }
-
-  /** 候选列表打开时接管方向键、回车、Tab 与 Esc；返回 true 表示已处理。 */
+  /** 候选列表打开时接管方向键、回车、Tab 与 Esc；光标紧跟在引用之后按退格整段删除。返回 true 表示已处理。 */
   function onKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
-    if (!token || event.nativeEvent.isComposing) return false;
+    if (event.nativeEvent.isComposing) return false;
+    const node = input.current;
+    if (event.key === "Backspace" && node && node.selectionStart === node.selectionEnd && !event.altKey && !event.metaKey && !event.ctrlKey) {
+      const caret = node.selectionStart;
+      const hit = present.find(item => draft.slice(0, caret).endsWith(`@/${item.key}`));
+      if (hit) {
+        event.preventDefault();
+        const start = caret - hit.key.length - 2;
+        setDraft(draft.slice(0, start) + draft.slice(caret));
+        window.setTimeout(() => { node.setSelectionRange(start, start); sync(); }, 0);
+        return true;
+      }
+    }
+    if (!token) return false;
     if (event.key === "Escape") { event.preventDefault(); setToken(null); return true; }
     if (!items.length) return false;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -118,5 +126,5 @@ export function useMentions({ draft, setDraft, input, location, enabled }: {
     </button>) : <p className="assistant-mention-empty">{loading ? "正在查找…" : token.query ? "没有匹配的文件" : "这里还没有文件"}</p>}
   </div> : null;
 
-  return { mentions: present, menu, sync, onKeyDown, remove, reset: () => { setMentions([]); setToken(null); } };
+  return { mentions: present, open: token !== null, menu, sync, onKeyDown, reset: () => { setMentions([]); setToken(null); } };
 }

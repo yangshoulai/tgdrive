@@ -150,6 +150,23 @@ class TraceStore:
             db.execute("UPDATE assistant_messages SET body=? WHERE conversation_id=? AND seq=?",
                        (self._seal(body, f"assistant:{conversation_id}:{seq}"), conversation_id, seq))
 
+    def message(self, conversation_id: str, seq: int) -> dict[str, object] | None:
+        found = self.messages(conversation_id, after=seq - 1, limit=1)
+        return found[0] if found and found[0]["seq"] == seq else None
+
+    def truncate(self, conversation_id: str, seq: int) -> int:
+        """删除 seq 及之后的消息（重试）；这些运行留下的待确认操作一并失效。返回删除的条数。"""
+        now = time.time()
+        with self.metadata.transaction() as db:
+            runs = [row[0] for row in db.execute("SELECT DISTINCT run_id FROM assistant_messages WHERE conversation_id=? AND seq>=? "
+                                                 "AND run_id IS NOT NULL", (conversation_id, seq))]
+            if runs:
+                db.execute(f"UPDATE assistant_actions SET status='expired', decided_at=? WHERE conversation_id=? AND status='pending' "
+                           f"AND run_id IN ({','.join('?' * len(runs))})", (now, conversation_id, *runs))
+            removed = db.execute("DELETE FROM assistant_messages WHERE conversation_id=? AND seq>=?", (conversation_id, seq)).rowcount
+            db.execute("UPDATE assistant_conversations SET messages=MAX(0, messages-?), updated_at=? WHERE id=?", (removed, now, conversation_id))
+        return removed
+
     def messages(self, conversation_id: str, *, after: int = 0, limit: int = 500) -> list[dict[str, object]]:
         rows = self.metadata.db.execute(
             "SELECT * FROM assistant_messages WHERE conversation_id=? AND seq>? ORDER BY seq LIMIT ?",

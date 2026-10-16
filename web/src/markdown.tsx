@@ -3,8 +3,17 @@
 import { Fragment, useMemo, type ReactNode } from "react";
 import { CodeFence } from "./code";
 import { languageOf } from "./highlight";
+import { Icon } from "./ui";
 
-type Ctx = { refs: Map<string, { url: string; title?: string }>; resolveImage?: (src: string) => string | null; depth: number };
+type Ctx = { refs: Map<string, { url: string; title?: string }>; resolveImage?: (src: string) => string | null; depth: number;
+  /** 文件助手的 @ 引用（如 "/电影/"，按长度降序）：正文中的 @路径 显示为胶囊。 */
+  mentions?: string[] };
+
+/** @ 引用胶囊：文件夹以 / 结尾，只显示最后一级名称，完整路径放在提示里。 */
+export function MentionPill({ path }: { path: string }) {
+  const folder = path.endsWith("/");
+  return <span className="md-mention" title={path}><Icon name={folder ? "folder" : "file"} size={12} /><span>{path.replace(/\/$/, "").split("/").at(-1) || "/"}</span></span>;
+}
 
 const PUNCT = /[!-/:-@[-`{-~]/;
 const CJK = /[　-鿿＀-￯]/;
@@ -122,6 +131,10 @@ function inline(text: string, ctx: Ctx): ReactNode[] {
       if (/ {2,}$/.test(buf)) { buf = buf.replace(/ +$/, ""); add(key => <br key={key} />); }
       else buf += "\n";
       i++; continue;
+    }
+    if (ch === "@" && ctx.mentions?.length && (i === 0 || /\s/.test(text[i - 1]))) {
+      const path = ctx.mentions.find(item => text.startsWith(item, i + 1));
+      if (path) { add(key => <MentionPill key={key} path={path} />); i += path.length + 1; continue; }
     }
     if (ch === "`") {
       const run = /^`+/.exec(text.slice(i))![0].length;
@@ -377,7 +390,7 @@ function blocks(lines: string[], ctx: Ctx, tight = false): ReactNode[] {
   return out;
 }
 
-function parse(source: string, resolveImage?: (src: string) => string | null): ReactNode[] {
+function parse(source: string, resolveImage?: (src: string) => string | null, mentions?: string[]): ReactNode[] {
   const lines = source.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n");
   const head: ReactNode[] = [];
   if (lines[0]?.trim() === "---") {
@@ -397,10 +410,11 @@ function parse(source: string, resolveImage?: (src: string) => string | null): R
     if (definition) refs.set(normalizeLabel(definition[1]), { url: definition[2], title: definition[3] });
     else content.push(line);
   }
-  return [...head, ...blocks(content, { refs, resolveImage, depth: 0 })];
+  return [...head, ...blocks(content, { refs, resolveImage, depth: 0, mentions })];
 }
 
-export function Markdown({ source, resolveImage }: { source: string; resolveImage?: (src: string) => string | null }) {
-  const nodes = useMemo(() => parse(source, resolveImage), [source, resolveImage]);
+export function Markdown({ source, resolveImage, mentions }: { source: string; resolveImage?: (src: string) => string | null; mentions?: string[] }) {
+  const sorted = useMemo(() => mentions?.length ? [...mentions].sort((a, b) => b.length - a.length) : undefined, [mentions?.join("\n")]); // eslint-disable-line react-hooks/exhaustive-deps
+  const nodes = useMemo(() => parse(source, resolveImage, sorted), [source, resolveImage, sorted]);
   return <div className="md">{nodes}</div>;
 }

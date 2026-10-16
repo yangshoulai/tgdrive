@@ -2691,13 +2691,36 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .ai-bubble .md .src-fence * { color: inherit; }
 .ai-mentions { display: flex; max-width: 86%; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .assistant-composer { position: relative; }
-.assistant-mention-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 8px 12px 0; }
-.assistant-mention-chip { display: inline-flex; max-width: 220px; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line)); border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: var(--text-xs); line-height: 18px; }
-.ai-mentions .assistant-mention-chip { padding-right: 8px; }
-.assistant-mention-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.assistant-mention-chip > button { display: grid; width: 18px; height: 18px; flex: none; place-items: center; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
-.assistant-mention-chip > button:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-.assistant-mention-hint { display: inline-flex; align-items: center; gap: 4px; color: var(--warning); font-size: var(--text-xs); }
+.assistant-mention-hint { display: flex; align-items: center; gap: 4px; margin: 0; padding: 8px 14px 0; color: var(--warning); font-size: var(--text-xs); }
+/* 输入框即时渲染：透明文字的 textarea 叠在逐字对齐的镜像上。镜像只改颜色、底色与描边（假粗体），不改字宽、字号和行高。 */
+.assistant-input-wrap { position: relative; }
+.assistant-input-mirror, .assistant-input-wrap .assistant-input { padding: 8px 14px 10px; font: inherit; font-size: var(--text-md); line-height: 22px; letter-spacing: normal; tab-size: 4;
+  white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; scrollbar-gutter: stable; }
+.assistant-input-mirror { position: absolute; inset: 0; overflow: hidden; color: var(--ink); pointer-events: none; }
+.assistant-input-wrap .assistant-input { position: relative; z-index: 1; color: transparent; caret-color: var(--ink); }
+.assistant-input-wrap .assistant-input::placeholder { color: var(--ink-3); }
+.assistant-input-wrap .assistant-input::selection { background: var(--selection); color: transparent; }
+.assistant-input-wrap:has(.assistant-input:disabled) .assistant-input-mirror { opacity: .5; }
+.cx-mark { color: var(--ink-3); }
+.cx-strong, .cx-heading { -webkit-text-stroke: .45px currentColor; }
+.cx-heading.cx-mark { -webkit-text-stroke: 0; }
+.cx-em { color: var(--accent-ink); }
+.cx-del { color: var(--ink-3); text-decoration: line-through; }
+.cx-code, .cx-code-line { border-radius: var(--radius-xs); background: var(--surface-sunken); box-shadow: 0 0 0 1px var(--surface-sunken); color: var(--syntax-keyword, var(--accent-ink)); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.cx-list, .cx-quote-mark { color: var(--accent); -webkit-text-stroke: .3px currentColor; }
+.cx-quote { color: var(--ink-2); }
+.cx-link { color: var(--accent-ink); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent); text-underline-offset: 3px; }
+.cx-mention { border-radius: var(--radius-xs); background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft), inset 0 -1px 0 color-mix(in srgb, var(--accent) 30%, transparent); color: var(--accent-ink); -webkit-text-stroke: .3px currentColor;
+  box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+/* 消息里的 @ 引用胶囊（Markdown 渲染）。 */
+.md-mention { margin: 0 1px; padding: 1px 7px 1px 5px; border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent-ink); font-size: .92em; font-weight: 500; white-space: nowrap; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.md-mention > svg { margin-right: 3px; vertical-align: -1px; }
+.ai-bubble .md-mention { border-color: color-mix(in srgb, var(--on-primary) 26%, transparent); background: color-mix(in srgb, var(--on-primary) 16%, transparent); color: var(--on-primary); }
+/* 深色气泡里的选区：保持文字为气泡前景色，否则全局选区把文字改成正文色后看不清。 */
+.ai-bubble ::selection { background: color-mix(in srgb, var(--on-primary) 32%, transparent); color: var(--on-primary); }
+.assistant-scope.is-following .assistant-scope-label { color: var(--accent-ink); }
+@media (hover: none) { .ai-user-meta { opacity: 1; } }
 .assistant-mention-menu { position: absolute; right: 16px; bottom: calc(100% - 6px); left: 16px; z-index: 5; display: grid; max-height: min(320px, 46vh); overflow-y: auto; padding: 4px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg); animation: assistant-appear .14s ease-out; overscroll-behavior: contain; }
 .assistant-mention-head { position: sticky; top: -4px; z-index: 1; display: flex; align-items: center; gap: 6px; margin: -4px -4px 2px; padding: 8px 12px; border-bottom: 1px solid var(--line-soft); background: var(--surface); color: var(--ink-3); font-size: var(--text-xs); }
 .assistant-mention-head > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -47,6 +47,42 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             self.assertEqual(detail["conversation"]["scope"], "/")
         self.run_async(run())
 
+    def test_retry_discards_later_messages_and_reruns_with_same_references(self):
+        async def run():
+            _, user, conversation = await self.ready(files=("Docs/a.md",), location="Docs/")
+            self.model.replies = [answer("第一次回答"), answer("第二次回答")]
+            await self.send(user, conversation, "看看 @/Docs/a.md", mentions=["/Docs/a.md"])
+            await self.send(user, conversation, "第二个问题")
+            messages = await self.messages(user, conversation)
+            first = next(m for m in messages if m["role"] == "user")
+            reply = next(m for m in messages if m["role"] == "assistant")
+            retry = f"/api/user/v1/assistant/conversations/{conversation}/retry"
+            status, data = await self.req("POST", retry, {"seq": reply["seq"]}, user)
+            self.assertEqual(status, 400, data)
+            status, data = await self.req("POST", retry, {"seq": "1"}, user)
+            self.assertEqual(status, 400, data)
+            self.model.replies = [answer("重试后的回答")]
+            status, data = await self.req("POST", retry, {"seq": first["seq"], "location": "Docs/"}, user)
+            self.assertEqual(status, 201, data)
+            await self.service.runs[data["run_id"]].task
+            self.assertEqual(data["message_seq"], first["seq"])
+            messages = await self.messages(user, conversation)
+            texts = [m.get("text") for m in messages if m["role"] in ("user", "assistant")]
+            self.assertEqual(texts, ["看看 @/Docs/a.md", "重试后的回答"])
+            self.assertEqual(messages[0]["mentions"], ["/Docs/a.md"])
+            # 发给模型的历史里不再有被丢弃的轮次，引用说明仍然保留。
+            last = str(self.model.calls[-1]["messages"])
+            self.assertNotIn("第二个问题", last)
+            self.assertNotIn("第一次回答", last)
+            self.assertIn("[引用]", last)
+            _, detail = await self.req("GET", f"/api/user/v1/assistant/conversations/{conversation}", headers=user)
+            self.assertEqual(detail["conversation"]["messages"], len(messages))
+            # 被引用的文件已删除时，重试按当前状态校验引用。
+            await self.app.objects.delete_objects(Scope(self.alice.bucket_id), ["Docs/a.md"])
+            status, data = await self.req("POST", retry, {"seq": first["seq"]}, user)
+            self.assertEqual(status, 400, data)
+        self.run_async(run())
+
     def test_notice_acknowledgement_expires_when_notice_changes(self):
         async def run():
             admin, user, conversation = await self.ready()

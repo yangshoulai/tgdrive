@@ -367,16 +367,9 @@ class AssistantService:
             raise ValueError("请输入消息")
         if len(text) > MAX_TEXT:
             raise ValueError(f"消息最多 {MAX_TEXT} 个字符")
-        limits = self.config.limits()
+        limits = self._admit(account.id, row)
         if row["messages"] >= limits["max_messages"]:
             raise ValueError("这个对话已经很长了，请新建对话继续")
-        if self._active_run(conversation_id):
-            raise ValueError("上一条消息还在处理，请稍候或先停止")
-        active = sum(1 for run in self.runs.values() if run.user_id == account.id and run.finished_at is None)
-        if active >= limits["user_concurrency"]:
-            raise ValueError("你有其他对话正在处理，请稍候")
-        self._check_budget(account.id)
-        self._check_rate(account.id, limits)
         model_id = self._choose_model(payload.get("model_id"), row["model_id"])
         view = payload.get("view") if isinstance(payload.get("view"), str) and len(payload.get("view")) <= 20 else "files"
         location = self._location(payload.get("location"))
@@ -388,11 +381,7 @@ class AssistantService:
         new_scope = self._location(payload.get("scope_path")) if choice == "path" else \
             {"location": location, "root": ""}.get(choice or "conversation", scope_root)
         mentions = self._mentions(account.bucket_id, payload.get("mentions"), new_scope)
-        if model_id != row["model_id"]:
-            self.trace.update_conversation(account.id, conversation_id, model_id=model_id)
-            if row["model_id"] is not None:
-                model = self.channels.model(model_id)
-                self.trace.append(conversation_id, None, "event", {"type": "model_switched", "text": f"已切换到 {model['label']}"})
+        self._switch_model(account.id, row, model_id)
         if new_scope != scope_root:
             # 用户在界面上直接切换作用域，属于用户本人的操作，不需要再确认。
             self.trace.expire_actions(conversation_id)
@@ -412,6 +401,58 @@ class AssistantService:
                 raise ValueError("快照不属于这个对话")
             body["attachment"] = {"type": "snapshot", "id": snapshot_id, "source": snapshot["source"],
                                   "pages": len(snapshot["urls"]), "images": snapshot["count"]}
+        run_id = self.trace.start_run(conversation_id, model_id, prompts.PROMPT_VERSION)
+        message_seq = self.trace.append(conversation_id, run_id, "user", body)
+        state = self._start(run_id, conversation_id, account, token, model_id, view, location,
+                            environment=knowledge.client_environment(payload.get("environment")))
+        return {"run_id": state.id, "message_seq": message_seq}
+
+    def _admit(self, user_id: int, row) -> dict:
+        """开始新运行前的共同检查：对话空闲、用户并发、每日额度与频率。"""
+        limits = self.config.limits()
+        if self._active_run(row["id"]):
+            raise ValueError("上一条消息还在处理，请稍候或先停止")
+        active = sum(1 for run in self.runs.values() if run.user_id == user_id and run.finished_at is None)
+        if active >= limits["user_concurrency"]:
+            raise ValueError("你有其他对话正在处理，请稍候")
+        self._check_budget(user_id)
+        self._check_rate(user_id, limits)
+        return limits
+
+    def _switch_model(self, user_id: int, row, model_id: int) -> None:
+        if model_id == row["model_id"]:
+            return
+        self.trace.update_conversation(user_id, row["id"], model_id=model_id)
+        if row["model_id"] is not None:
+            model = self.channels.model(model_id)
+            self.trace.append(row["id"], None, "event", {"type": "model_switched", "text": f"已切换到 {model['label']}"})
+
+    async def retry(self, token: str, csrf: str, conversation_id: str, payload: dict) -> dict[str, object]:
+        """从自己的某条消息重新回答：丢弃这条消息及之后的全部记录，再以同样的内容（引用、附件）开始新运行。
+        被丢弃部分里待确认的操作随之失效；已经执行的文件操作不会撤销。"""
+        session, account = self._session(token, csrf=csrf, mutation=True)
+        self._require_available(account.id)
+        if self.config.policy(account.id)["notice_ack_at"] is None:
+            raise ValueError("请先阅读并确认文件助手的使用说明")
+        row = self.trace.conversation(account.id, conversation_id)
+        seq = payload.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+            raise ValueError("消息编号不正确")
+        self._admit(account.id, row)
+        message = self.trace.message(conversation_id, seq)
+        if message is None or message["role"] != "user":
+            raise ValueError("只能从你发送的消息重试")
+        model_id = self._choose_model(payload.get("model_id"), row["model_id"])
+        view = payload.get("view") if isinstance(payload.get("view"), str) and len(payload.get("view")) <= 20 else message.get("view", "files")
+        location = self._location(payload.get("location")) if payload.get("location") is not None else self._location(message.get("location"))
+        body = {key: message[key] for key in ("text", "attachment") if key in message}
+        body.update({"location": display(location), "view": view, "scope": display(row["scope_root"])})
+        # 引用按当前作用域重新校验：期间文件可能被移动或删除。
+        mentions = self._mentions(account.bucket_id, message.get("mentions"), row["scope_root"])
+        if mentions:
+            body["mentions"] = [display(key) for key in mentions]
+        self.trace.truncate(conversation_id, seq)
+        self._switch_model(account.id, row, model_id)
         run_id = self.trace.start_run(conversation_id, model_id, prompts.PROMPT_VERSION)
         message_seq = self.trace.append(conversation_id, run_id, "user", body)
         state = self._start(run_id, conversation_id, account, token, model_id, view, location,

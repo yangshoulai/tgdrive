@@ -5,14 +5,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { AssistantMark, Badge, Button, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, toast, type IconName, type MenuItem } from "../ui";
+import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, toast, type IconName, type MenuItem } from "../ui";
 import type { PageImport } from "./page-import";
 import { Thread, useMarkState, type LiveRun } from "./assistant-thread";
 import { filesBridge, waitForFiles } from "./assistant-bridge";
 import { assistantEnvironment } from "./assistant-environment";
 import { commonFolder, useMentions } from "./assistant-mentions";
+import { ComposeMirror } from "./assistant-compose";
 import { FolderPicker } from "./folders";
 
+/** 作用域选择「当前位置」：随文件页切换目录。 */
+const HERE = "\u0000here";
 const WIDTH_KEY = "tessera-assistant-width";
 const MIN_WIDTH = 360, MAX_WIDTH = 720;
 const display = (key: string) => "/" + key;
@@ -65,8 +68,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState("");
   const [modelId, setModelId] = useState<number | null>(null);
-  // 用户为下一条消息选定的作用域目录（对象键，"" 为全部普通文件）；null 表示沿用对话作用域。
+  // 用户为下一条消息选定的作用域目录（对象键，"" 为全部普通文件）；null 表示沿用对话作用域，HERE 表示跟随文件页的当前位置。
   const [scopeTarget, setScopeTarget] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState<{ seq: number; later: number } | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveRun | null>(null);
   const [pendingMode, setPendingMode] = useState<ai.AccessMode>("approval");
@@ -84,6 +88,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const currentId = detail?.conversation.id ?? null;
   const locationKey = location.view === "files" ? location.prefix : "";
   const headerMark = useMarkState(runId ? live ?? EMPTY_LIVE : null);
+  const chosenScope = scopeTarget === HERE ? locationKey : scopeTarget;
+  const mirror = useRef<HTMLDivElement>(null);
   const mention = useMentions({ draft, setDraft, input, location: locationKey, enabled: config.notice_ack && !(config.usage.limit && config.usage.today >= config.usage.limit) });
 
   useEffect(() => {
@@ -253,8 +259,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     try {
       // 引用超出作用域时，扩大到作用域与所有引用的公共上级目录（界面已提示，属于用户发送的操作）。
       const mentions = text === draft ? mention.mentions.map(item => item.key) : [];
-      const baseScope = scopeTarget ?? (detail ? detail.conversation.scope.replace(/^\//, "") : locationKey);
-      const target = mentions.some(key => !key.startsWith(baseScope)) ? commonFolder([baseScope || "/", ...mentions].filter(key => key !== "/")) : scopeTarget;
+      const baseScope = chosenScope ?? (detail ? detail.conversation.scope.replace(/^\//, "") : locationKey);
+      const target = mentions.some(key => !key.startsWith(baseScope)) ? commonFolder([baseScope || "/", ...mentions].filter(key => key !== "/")) : chosenScope;
       let current = detail;
       if (!current) {
         current = await ai.createConversation(target ?? locationKey, modelId, config.full_access ? pendingMode : "approval");
@@ -271,7 +277,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         mentions: mentions.length ? mentions.map(display) : undefined, snapshot_id: snapshotId, environment: assistantEnvironment() });
       if (version !== selection.current) return;
       if (snapshotId) onPageImportDone?.();
-      setDraft(""); setScopeTarget(null); mention.reset();
+      // 「跟随当前位置」是持续的选择（新对话默认如此），发送后保留；其他临时选择随这条消息生效后清除。
+      const following = scopeTarget === HERE || (!detail && scopeTarget === null);
+      setDraft(""); setScopeTarget(following ? HERE : null); mention.reset();
       if (input.current) input.current.style.height = "";
       const fresh = await ai.conversation(current.conversation.id).catch(() => null);
       if (version !== selection.current) return;
@@ -285,6 +293,28 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   async function stop() {
     if (!runId) return;
     try { await ai.stopRun(runId); } catch (reason) { toast.error(api.errorMessage(reason, "停止失败")); }
+  }
+
+  /** 从某条用户消息重新回答：之后还有其他轮次时先确认，因为它们会被丢弃。 */
+  function retryFrom(seq: number) {
+    if (!detail || runId || sending) return;
+    const later = detail.messages.filter(message => message.role === "user" && message.seq > seq).length;
+    if (later) setRetrying({ seq, later }); else void retry(seq);
+  }
+  async function retry(seq: number) {
+    if (!detail || runId || sending) return;
+    setSending(true);
+    const version = selection.current, id = detail.conversation.id;
+    try {
+      const result = await ai.retryMessage(id, { seq, model_id: modelId ?? undefined, location: locationKey, view: location.view, environment: assistantEnvironment() });
+      if (version !== selection.current) return;
+      const fresh = await ai.conversation(id).catch(() => null);
+      if (version !== selection.current) return;
+      if (fresh) setDetail(fresh);
+      follow(result.run_id);
+      window.requestAnimationFrame(() => scrollToEnd(true));
+    } catch (reason) { toast.error(api.errorMessage(reason, "重试失败")); }
+    finally { setSending(false); }
   }
 
   async function decideScope(actionId: string, approve: boolean) {
@@ -319,29 +349,32 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => setDetail(value => value?.conversation.id === fresh.conversation.id ? fresh : value)).catch(() => undefined); return current; });
   }, []);
 
-  // 键盘：Esc 运行中先停止，空闲时关闭；只在焦点位于抽屉内时响应，弹窗与菜单优先。全页模式不关闭。
-  // 打开的弹窗与菜单自己处理 Esc；最小化的预览小窗不算。
-  const overlayOpen = () => Boolean(document.querySelector(".modal-backdrop:not(.is-minimized), .menu"));
+  // 键盘：Esc 运行中先停止，空闲时关闭。全页模式只停止运行，不关闭。
+  function escape() { if (runId) void stop(); else if (!page) onClose(); }
   function onKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
-    if (event.key !== "Escape" || event.defaultPrevented || event.nativeEvent.isComposing || overlayOpen()) return;
-    if (!runId && page) return;
+    if (!page || event.key !== "Escape" || event.defaultPrevented || event.nativeEvent.isComposing || !runId) return;
+    if (document.querySelector(".modal-backdrop:not(.is-minimized), .menu")) return;
     event.preventDefault();
-    if (runId) void stop(); else onClose();
+    escape();
   }
-  const escapeRef = useRef(onKeyDown);
-  escapeRef.current = onKeyDown;
-  // 抽屉打开后焦点可能不在抽屉里（输入框尚未可用、点击了消息区等，焦点落回页面）：此时页面本身或助手入口上的 Esc
-  // 同样交给抽屉。捕获阶段先于文件页的 Esc（清除选择）处理；页面上的输入控件与其他元素保留各自的 Esc。
+  const escapeRef = useRef(escape);
+  escapeRef.current = escape;
+  // 抽屉打开时 Esc 优先交给抽屉：在 window 捕获阶段处理，先于文件页（清除选择）、预览窗口与其他弹窗的 Esc。
+  // 只在这些情况下让行：焦点在某个弹窗或菜单里（由它自己关闭）、抽屉自己打开的对话框还在、@ 候选列表打开（先关闭候选）、输入法组字中。
+  const mentionOpen = useRef(false);
+  mentionOpen.current = mention.open;
   useEffect(() => {
     if (!open || page) return;
     const handler = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
       const target = event.target as Element | null;
-      if (event.key !== "Escape" || !target || drawer.current?.contains(target)) return;
-      if (target !== document.body && target !== document.documentElement && !target.closest(".assistant-launch")) return;
-      escapeRef.current({ key: event.key, defaultPrevented: event.defaultPrevented, nativeEvent: event, preventDefault: () => event.preventDefault() } as ReactKeyboardEvent<HTMLElement>);
+      if (target?.closest?.(".menu, .modal-backdrop:not(.is-minimized) .modal")) return;
+      if (document.querySelector(".menu, .modal-backdrop:not(.is-minimized) .assistant-dialog") || mentionOpen.current) return;
+      event.preventDefault(); event.stopPropagation();
+      escapeRef.current();
     };
-    document.addEventListener("keydown", handler, true);
-    return () => document.removeEventListener("keydown", handler, true);
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
   }, [open, page]);
   // ⌘/Ctrl+Shift+O 新对话（输入控件中也生效，因为带修饰键）。
   useEffect(() => {
@@ -370,14 +403,13 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   const conversationScope = detail?.conversation.scope ?? display(locationKey);
   const currentLocation = display(locationKey);
-  const effectiveScope = scopeTarget !== null ? display(scopeTarget) : conversationScope;
+  const effectiveScope = chosenScope !== null ? display(chosenScope) : conversationScope;
   const scopeKey = effectiveScope.replace(/^\//, "");
   const outside = mention.mentions.filter(item => !item.key.startsWith(scopeKey));
   const expandedScope = outside.length ? display(commonFolder([scopeKey, ...mention.mentions.map(item => item.key)].filter(Boolean))) : null;
   const usage = config.usage;
   const usageRatio = usage.limit ? usage.today / usage.limit : 0;
   const exhausted = Boolean(usage.limit && usage.today >= usage.limit);
-  const lastUser = [...(detail?.messages ?? [])].reverse().find(message => message.role === "user");
 
   const selectedModel = config.models.find(model => model.id === modelId);
   const modelLabel = (id: number | null | undefined) => config.models.find(model => model.id === id)?.label ?? "文件助手";
@@ -401,7 +433,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           : loading ? <SkeletonRows rows={4} />
           : !detail ? <Welcome location={effectiveScope} onPick={text => { setDraft(text); input.current?.focus(); }} />
           : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
-              onRetry={lastUser?.text ? () => void send(lastUser.text) : undefined} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
+              onRetry={retryFrom} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
         {reconnecting && <p className="ai-notice" role="status"><Icon name="refresh" size={14} /><span>重新连接中…</span></p>}
       </div>
     </div>
@@ -412,22 +444,22 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       <div className={`assistant-compose-box${runId ? " is-running" : ""}`}>
         <div className="assistant-context-row">
           <ScopeChip scope={effectiveScope} conversationScope={detail ? conversationScope : null} location={currentLocation}
-            privateView={location.view === "private"} changed={scopeTarget !== null} onChoose={setScopeTarget} />
+            privateView={location.view === "private"} changed={scopeTarget !== null} following={scopeTarget === HERE || (!detail && scopeTarget === null)} onChoose={setScopeTarget} />
           <ModeChip mode={accessMode} allowed={config.full_access} onChoose={next => void chooseMode(next)} />
         </div>
-        {mention.mentions.length > 0 && <div className="assistant-mention-chips">
-          {mention.mentions.map(item => <span key={item.key} className="assistant-mention-chip"><Icon name={item.folder ? "folder" : "file"} size={12} />
-            <span title={display(item.key)}>{item.key.replace(/\/$/, "").split("/").at(-1)}</span>
-            <button type="button" aria-label={`移除引用 ${display(item.key)}`} onClick={() => mention.remove(item.key)}><Icon name="x" size={11} /></button></span>)}
-          {expandedScope && <span className="assistant-mention-hint"><Icon name="info" size={12} />引用不在 {effectiveScope} 内，发送时作用域扩大到 {expandedScope}</span>}
-        </div>}
-        <textarea ref={input} className="assistant-input" rows={2} value={draft} maxLength={DRAFT_LIMIT}
-          placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : "想找什么，或想怎样整理？输入 @ 引用文件"}
-          disabled={!config.notice_ack || exhausted} aria-label="给文件助手的消息"
-          onChange={event => { setDraft(event.target.value); mention.sync(); }}
-          onSelect={mention.sync} onBlur={() => window.setTimeout(mention.sync, 120)}
-          onInput={event => { const node = event.currentTarget; node.style.height = "auto"; node.style.height = `${Math.min(node.scrollHeight, 8 * 22)}px`; }}
-          onKeyDown={event => { if (mention.onKeyDown(event)) return; if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
+        {expandedScope && <p className="assistant-mention-hint"><Icon name="info" size={12} />引用不在 {effectiveScope} 内，发送时作用域扩大到 {expandedScope}</p>}
+        {/* 透明文字的输入框叠在镜像上：镜像即时显示 Markdown 标记与 @ 引用，光标、选区与输入法仍由原生输入框处理。 */}
+        <div className="assistant-input-wrap">
+          <ComposeMirror ref={mirror} text={draft} mentions={mention.mentions.map(item => display(item.key))} />
+          <textarea ref={input} className="assistant-input" rows={2} value={draft} maxLength={DRAFT_LIMIT} spellCheck={false}
+            placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : "想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown"}
+            disabled={!config.notice_ack || exhausted} aria-label="给文件助手的消息"
+            onChange={event => { setDraft(event.target.value); mention.sync(); }}
+            onSelect={mention.sync} onBlur={() => window.setTimeout(mention.sync, 120)}
+            onScroll={event => { if (mirror.current) mirror.current.scrollTop = event.currentTarget.scrollTop; }}
+            onInput={event => { const node = event.currentTarget; node.style.height = "auto"; node.style.height = `${Math.min(node.scrollHeight, 8 * 22)}px`; }}
+            onKeyDown={event => { if (mention.onKeyDown(event)) return; if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
+        </div>
         <div className="assistant-controls">
           <Menu label="选择模型" align="start" className="assistant-model" items={config.models.map(model => ({ label: model.label,
             description: [model.channel_name ?? "模型渠道", model.capabilities?.reasoning ? "推理" : "", model.capabilities?.vision ? "识图" : "",
@@ -451,7 +483,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   </>;
   const dialogs = <>
     {capabilities && <CapabilitiesDialog config={config} onClose={() => setCapabilities(false)} onPick={text => { setCapabilities(false); setDraft(text); input.current?.focus(); }} />}
-    {fullPrompt && <Modal title="切换到完全访问？" icon="zap" onClose={() => setFullPrompt(false)}
+    {retrying && <ConfirmDialog className="assistant-dialog" title="从这条消息重新回答？" confirmLabel="重新回答"
+      description={`之后的 ${retrying.later} 轮对话会从记录中删除，无法恢复；其中已经执行的文件操作不会撤销，待确认的操作会失效。`}
+      onClose={() => setRetrying(null)} onConfirm={() => { const seq = retrying.seq; setRetrying(null); void retry(seq); }} />}
+    {fullPrompt && <Modal className="assistant-dialog" title="切换到完全访问？" icon="zap" onClose={() => setFullPrompt(false)}
       footer={<><Button onClick={() => setFullPrompt(false)}>取消</Button><Button variant="primary" onClick={() => { localStorage.setItem(FULL_ACK_KEY, "1"); setFullPrompt(false); void chooseMode("full", true); }}>切换</Button></>}>
       <ul className="assistant-mode-points">
         <li><Icon name="zap" size={15} /><span><strong>普通修改自动执行</strong>改名、移动、整理、新建文件夹、移入回收站等不再逐项询问，结果直接显示在对话里。</span></li>
@@ -543,23 +578,25 @@ function groupModels(models: ai.AiModel[]) {
 
 /* ---------- 输入区 ---------- */
 
-function ScopeChip({ scope, conversationScope, location, privateView, changed, onChoose }: {
+function ScopeChip({ scope, conversationScope, location, privateView, changed, following, onChoose }: {
   scope: string; conversationScope: string | null; location: string; privateView: boolean;
-  changed: boolean; onChoose: (target: string | null) => void;
+  /** changed：为下一条消息另选了作用域；following：作用域跟随文件页的当前位置。 */
+  changed: boolean; following: boolean; onChoose: (target: string | null) => void;
 }) {
   const [browsing, setBrowsing] = useState(false);
   const key = (path: string) => path.replace(/^\//, "");
   const differs = conversationScope !== null && conversationScope !== location && !changed;
   const items: MenuItem[] = [
     ...(conversationScope !== null ? [{ label: "对话作用域", description: conversationScope, icon: "folder" as IconName, heading: "助手可以访问的范围", checked: !changed, onSelect: () => onChoose(null) }] : []),
-    { label: "当前位置", description: location, icon: "folder", heading: conversationScope === null ? "助手可以访问的范围" : undefined,
-      checked: scope === location && (changed || conversationScope === null), onSelect: () => onChoose(conversationScope === null ? null : key(location)) },
-    { label: "全部普通文件", description: "/ · 不包含私密空间", icon: "home", checked: scope === "/", onSelect: () => onChoose("") },
+    { label: "当前位置", description: `跟随文件页 · ${location}`, icon: "folder", heading: conversationScope === null ? "助手可以访问的范围" : undefined,
+      checked: following, onSelect: () => onChoose(conversationScope === null ? null : HERE) },
+    { label: "全部普通文件", description: "/ · 不包含私密空间", icon: "home", checked: scope === "/" && !following, onSelect: () => onChoose("") },
     { label: "浏览目录…", description: "在目录树中选择", icon: "move", divider: true, onSelect: () => setBrowsing(true) },
   ];
-  return <span className={`assistant-scope${differs ? " has-hint" : ""}`} title={privateView ? "私密空间不对助手开放，作用域为普通文件" : differs ? `当前位置 ${location} 与对话作用域不同` : `助手只处理 ${scope} 内的普通文件`}>
+  return <span className={`assistant-scope${differs ? " has-hint" : ""}${following ? " is-following" : ""}`} title={privateView ? "私密空间不对助手开放，作用域为普通文件"
+    : differs ? `当前位置 ${location} 与对话作用域不同` : following ? `跟随当前位置：助手只处理 ${scope} 内的普通文件` : `助手只处理 ${scope} 内的普通文件`}>
     <Menu label="切换作用域" align="start" className="assistant-scope-trigger" items={items}>
-      <Icon name={privateView ? "shield" : "folder"} size={14} /><span className="assistant-scope-label">{privateView ? "普通文件" : "作用于"}</span><span className="assistant-scope-text">{scope}</span><Icon name="chevronDown" size={12} />
+      <Icon name={privateView ? "shield" : "folder"} size={14} /><span className="assistant-scope-label">{privateView ? "普通文件" : following ? "跟随" : "作用于"}</span><span className="assistant-scope-text">{scope}</span><Icon name="chevronDown" size={12} />
     </Menu>
     {browsing && <ScopeDialog initial={key(scope)} onClose={() => setBrowsing(false)} onChoose={target => { setBrowsing(false); onChoose(target === key(conversationScope ?? "") && conversationScope !== null ? null : target); }} />}
   </span>;
@@ -569,7 +606,7 @@ function ScopeChip({ scope, conversationScope, location, privateView, changed, o
 function ScopeDialog({ initial, onClose, onChoose }: { initial: string; onClose: () => void; onChoose: (target: string) => void }) {
   const [value, setValue] = useState(initial);
   const [ready, setReady] = useState(false);
-  return <Modal title="选择作用域" description="助手只会查看和整理这个目录中的普通文件。" icon="folder" onClose={onClose} className="assistant-scope-dialog"
+  return <Modal title="选择作用域" description="助手只会查看和整理这个目录中的普通文件。" icon="folder" onClose={onClose} className="assistant-dialog assistant-scope-dialog"
     footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!ready} onClick={() => onChoose(value)}>作用于 {display(value)}</Button></>}>
     <FolderPicker value={value} onChange={setValue} onReady={setReady} creatable={false} />
   </Modal>;
@@ -592,7 +629,7 @@ function CapabilitiesDialog({ config, onClose, onPick }: { config: ai.AssistantC
   const examples = ["统计当前目录的空间占用，按类型分组", "找出最大的 10 个文件", "找出重复文件，看看能省多少空间", "最近 7 天新增了哪些文件？", "回收站里有什么，什么时候会被清除？", "读一下 README.md，帮我总结要点"];
   return (
     <Modal title="助手能做什么" description={`你的账号权限：${config.max_level === "read" ? "只读" : config.max_level === "danger" ? "可提议包括不可恢复的操作" : "可提议普通写入"}。修改文件的操作总是需要你确认。`}
-      icon="sparkle" onClose={onClose} footer={<Button onClick={onClose}>关闭</Button>}>
+      icon="sparkle" className="assistant-dialog" onClose={onClose} footer={<Button onClick={onClose}>关闭</Button>}>
       <div className="assistant-capabilities">
         {[...groups.entries()].map(([group, tools]) => <section key={group}>
           <h3>{group}</h3>
@@ -669,7 +706,7 @@ function ConversationList({ items, current, onOpen, onChanged, archived, onArchi
       </li>)}</ul>
     </section>)}
     {more && <Button size="sm" variant="ghost" className="assistant-history-more" loading={loadingMore} onClick={onMore}>加载更多对话</Button>}
-    {renaming && <Modal title="重命名对话" size="sm" onClose={() => setRenaming(null)}
+    {renaming && <Modal className="assistant-dialog" title="重命名对话" size="sm" onClose={() => setRenaming(null)}
       footer={<><Button onClick={() => setRenaming(null)}>取消</Button><Button variant="primary" type="submit" form="rename-conversation">保存</Button></>}>
       <form id="rename-conversation" className="form" onSubmit={event => {
         event.preventDefault();
