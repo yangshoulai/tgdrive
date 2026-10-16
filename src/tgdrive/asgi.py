@@ -240,9 +240,9 @@ class TgDriveASGI(StaticFiles):
                 allowed = {"/list", "/search", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
                            "/copy", "/delete", "/thumbnail", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
-                           "/downloads", "/downloads/clear"}
+                           "/downloads", "/downloads/clear", "/downloads/batch"}
                 if route not in controls:
-                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?|/downloads/\d+/(?:stop|resume|restart|delete|update)", route):
+                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?|/downloads/\d+/(?:stop|resume|restart|delete|update|source)", route):
                         raise NotFoundError("资源不存在")
                     file_user = self.private_space.files(token, access)
                     path = "/api/user/v1" + route
@@ -415,7 +415,7 @@ class TgDriveASGI(StaticFiles):
                          "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
-                         "/downloads/clear": "download.clear", "/shares/{}/save": "share.save",
+                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/shares/{}/save": "share.save",
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
@@ -491,6 +491,10 @@ class TgDriveASGI(StaticFiles):
             detail = {"saved": (result or {}).get("saved"), "bytes": (result or {}).get("bytes")} if ok else {}
         elif action == "assistant.attachment.save":
             detail = {"bytes": (result or {}).get("size")} if ok else {}
+        elif action == "download.batch":
+            ids = payload.get("ids")
+            detail = {"action": payload.get("action") if payload.get("action") in ("stop", "resume", "delete") else None,
+                      "count": len(ids) if isinstance(ids, list) else 0, "done": (result or {}).get("done") if ok else None}
         elif action == "download.clear":
             detail = {"status": payload.get("status") if payload.get("status") in ("completed", "failed") else None,
                       "removed": (result or {}).get("removed") if ok else None}
@@ -856,6 +860,11 @@ class TgDriveASGI(StaticFiles):
                     return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""), private_scope=private_scope, private_activity=private_activity)}, {"Cache-Control": "no-store"}
                 if route == "/downloads/clear" and method == "POST":
                     return 200, await self.offline.clear(account.id, payload.get("status")), {"Cache-Control": "no-store"}
+                if route == "/downloads/batch" and method == "POST":
+                    return 200, await self.offline.batch(account.id, payload.get("action"), payload.get("ids"), private_scope=private_scope, private_activity=private_activity), {"Cache-Control": "no-store"}
+                source = re.fullmatch(r"/downloads/(\d+)/source", route)
+                if source and method == "GET":
+                    return 200, self.offline.source(account.id, int(source[1]), private_scope=private_scope), {"Cache-Control": "no-store"}
                 download = re.fullmatch(r"/downloads/(\d+)/(stop|resume|restart|delete|update)", route)
                 if download and method == "POST":
                     result = await self.offline.control(account.id, int(download[1]), download[2], item=payload.get("item"), private_scope=private_scope, private_activity=private_activity)

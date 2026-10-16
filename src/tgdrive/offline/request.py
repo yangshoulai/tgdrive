@@ -244,6 +244,27 @@ def _command(words: list[str]) -> list[DownloadRequest]:
     return [DownloadRequest(url, method, list(normalized), body, follow, name, list(dict.fromkeys(warnings))) for url in urls]
 
 
+def _quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def command_text(request: DownloadRequest) -> str:
+    """把已保存的请求还原成 parse_requests 能解析回同一请求的文本（bash 单引号）。没有额外参数的 GET 只给出链接。"""
+    if request.method == "GET" and not request.headers and request.body is None and request.follow_redirects and not request.name:
+        return request.url
+    words = ["curl " + _quote(request.url)]
+    if request.follow_redirects:
+        words.append("-L")
+    if request.method == "POST" and request.body is None:
+        words.append("-X POST")
+    words.extend("-H " + _quote(f"{key}: {value}") for key, value in request.headers)
+    if request.body is not None:
+        words.append("--data-raw " + _quote(request.body))
+    if request.name:
+        words.append("-o " + _quote(request.name))
+    return " \\\n  ".join(words)
+
+
 def parse_requests(text: str) -> list[DownloadRequest]:
     if not isinstance(text, str) or not text.strip() or len(text.encode()) > 262144:
         raise ValueError("请输入链接或命令，内容最多 256 KB")

@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BRAND } from "../brand";
 import * as api from "../api";
 import { useCursorPage } from "../pagination";
-import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Panel, Pagination, Progress, SearchInput, Segmented, SkeletonRows, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
-import { FileTile, getFileKind } from "../files";
+import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Panel, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
+import { FileTile, FileVisual, getFileKind } from "../files";
 import { DestinationPicker } from "./folders";
 import { PrivateUnlockForm } from "./private-access";
 import { usePrivateAccess } from "./private-session";
@@ -22,6 +22,30 @@ export const parentFolder = (key: string) => key.includes("/") ? key.slice(0, ke
 export const downloadTaskName = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? "私密空间下载" : task.key.split("/").at(-1) ?? task.key;
 export const downloadTaskFolder = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? api.PRIVATE_PREFIX : parentFolder(task.key);
 const elapsed = (value: number) => value < 1 ? "不到 1 秒" : value < 60 ? `${Math.round(value)} 秒` : value < 3600 ? `${Math.floor(value / 60)} 分 ${Math.round(value % 60)} 秒` : `${Math.floor(value / 3600)} 小时 ${Math.round(value % 3600 / 60)} 分`;
+/** 列表里的来源文字：去掉协议，省略的查询参数用「?…」表示。 */
+const sourceLabel = (source: { url: string; has_query: boolean }) => source.url.replace(/^https?:\/\//, "") + (source.has_query ? "?…" : "");
+/** 完整来源地址：列表只带不含查询串的地址，有省略参数时再向服务端读取。 */
+const fullSource = async (task: api.DownloadTask) => task.source && !task.source.has_query ? task.source.url : (await api.downloadSource(task.id, task.private)).url;
+async function copySource(task: api.DownloadTask) {
+  // Safari 要求在点击当下写剪贴板：用 ClipboardItem 承接异步读取的结果。
+  if (task.source?.has_query && typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "text/plain": fullSource(task).then(url => new Blob([url], { type: "text/plain" })) })]);
+      toast.success("来源链接已复制");
+    } catch (reason) { toast.error(api.errorMessage(reason, "无法复制来源链接")); }
+    return;
+  }
+  try { await copyText(await fullSource(task), "来源链接已复制"); }
+  catch (reason) { toast.error(api.errorMessage(reason, "无法读取来源链接")); }
+}
+function openSource(task: api.DownloadTask) {
+  if (task.source && !task.source.has_query) { window.open(task.source.url, "_blank", "noopener,noreferrer"); return; }
+  // 先在点击当下打开空白页，避免读取完整地址后被浏览器当成弹窗拦截。
+  const view = window.open("", "_blank");
+  if (view) view.opener = null;
+  void fullSource(task).then(url => { if (view) view.location.replace(url); else window.open(url, "_blank", "noopener,noreferrer"); })
+    .catch(reason => { view?.close(); toast.error(api.errorMessage(reason, "无法读取来源链接")); });
+}
 export const seconds = (value: number) => value >= 3600 ? `${Math.ceil(value / 3600)} 小时` : value >= 60 ? `${Math.ceil(value / 60)} 分钟` : `${Math.ceil(value)} 秒`;
 
 export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChanged: () => void; onOpenFolder: (prefix: string, privateSpace?: boolean) => void; onCreated?: () => void }) {
@@ -37,6 +61,9 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   const [confirm, setConfirm] = useState<{ task: api.DownloadTask; action: "stop" | "resume" | "restart" | "delete" } | null>(null);
   const [busy, setBusy] = useState(new Set<number>());
   const [clearing, setClearing] = useState<"completed" | "failed" | null>(null);
+  const [selected, setSelected] = useState(new Set<number>());
+  const [bulk, setBulk] = useState<"stop" | "delete" | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const cursor = useRef<string | null>(null), epoch = useRef(0);
   const previous = useRef(new Map<number, api.DownloadStatus>());
   const fetchPage = useCallback((next: string | null) => { cursor.current = next; epoch.current++; return api.listDownloads(next, filter, undefined, query); }, [filter, query]);
@@ -67,6 +94,30 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     return () => { alive = false; window.clearInterval(timer); controller.abort(); };
   }, [filter, query, pagination.setPage, hasActive]);
   const page = pagination.page;
+  // 切换筛选或搜索后清空选择；翻页与轮询时只保留仍在当前页的任务。
+  useEffect(() => setSelected(new Set()), [filter, query]);
+  useEffect(() => {
+    if (!page) return;
+    setSelected(current => {
+      const ids = new Set(page.tasks.map(task => task.id));
+      return [...current].every(id => ids.has(id)) ? current : new Set([...current].filter(id => ids.has(id)));
+    });
+  }, [page]);
+  const chosen = page?.tasks.filter(task => selected.has(task.id)) ?? [];
+  const allSelected = Boolean(page?.tasks.length) && chosen.length === page?.tasks.length;
+  async function runBulk(action: "stop" | "resume" | "delete") {
+    if (!chosen.length || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const { done, skipped } = await api.batchDownloads(action, chosen.map(task => task.id), chosen.some(task => task.private));
+      setBulk(null); setSelected(new Set());
+      const verb = action === "stop" ? "停止" : action === "delete" ? "删除" : "加入下载队列";
+      const note = skipped ? `，${skipped} 个已跳过${action === "resume" ? "（POST 任务需逐个确认，私密任务需先解锁）" : ""}` : "";
+      if (done) toast.success(`已${verb} ${done} 个任务${note}`); else toast.info(`没有可${action === "resume" ? "继续" : verb}的任务${note}`);
+      await pagination.reload();
+    } catch (reason) { toast.error(api.errorMessage(reason, "批量操作失败，请稍后重试")); }
+    finally { setBulkBusy(false); }
+  }
   useEffect(() => {
     for (const task of page?.tasks ?? []) {
       if (task.status === "completed" && previous.current.has(task.id) && previous.current.get(task.id) !== "completed") onChanged();
@@ -98,7 +149,15 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     <PageHeader title="下载任务" description="交给服务器下载，关闭页面后继续保存到你的文件空间。"
       actions={<><Button icon="refresh" onClick={() => void pagination.reload()} disabled={pagination.loading}>刷新</Button><Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button></>} />
     <div className="toolbar download-search"><SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索文件名、保存路径或来源域名" label="搜索下载任务" /></div>
-    <div className="download-toolbar"><Segmented label="任务状态" showLabels value={filter} onChange={setFilter} options={[
+    {chosen.length > 0 ? <div className="toolbar selection-bar download-selection" role="toolbar" aria-label="批量操作">
+      <span className="download-select-all"><Checkbox checked={allSelected} indeterminate={!allSelected} label="选择本页全部任务" onChange={checked => setSelected(checked ? new Set(page?.tasks.map(task => task.id)) : new Set())} /><span className="selection-count"><span className="download-selection-prefix">已选择 </span>{chosen.length} 项</span></span>
+      <div className="toolbar-actions">
+        {chosen.some(active) && <Button size="sm" icon="pause" disabled={bulkBusy} onClick={() => setBulk("stop")}>停止</Button>}
+        {chosen.some(task => ["stopped", "failed"].includes(task.status)) && <Button size="sm" icon="play" loading={bulkBusy && !bulk} disabled={bulkBusy} onClick={() => void runBulk("resume")}>继续</Button>}
+        <Button size="sm" variant="danger" icon="trash" disabled={bulkBusy} onClick={() => setBulk("delete")}>删除</Button>
+        <IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} />
+      </div>
+    </div> : <div className="download-toolbar">{page && page.tasks.length > 0 && <span className="download-select-all"><Checkbox checked={false} label="选择本页全部任务" onChange={checked => checked && setSelected(new Set(page.tasks.map(task => task.id)))} /></span>}<Segmented label="任务状态" showLabels value={filter} onChange={setFilter} options={[
       { value: "", label: "全部" }, { value: "active", label: "进行中" }, { value: "stopped", label: "已停止" }, { value: "completed", label: "已完成" }, { value: "failed", label: "失败" },
     ]} /><span className="download-toolbar-meta">
       {/* 进行中与失败的数量来自当前页（新任务排在最前），方便一眼看出需要处理的任务。 */}
@@ -108,7 +167,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       <Menu label="清理任务" icon="trash" items={[
         { label: "清除已完成的任务", icon: "checkCircle", onSelect: () => setClearing("completed") },
         { label: "清除失败的任务", icon: "alert", onSelect: () => setClearing("failed") },
-      ]} /></span></div>
+      ]} /></span></div>}
     {page?.capabilities.pressure && <p className="inline-note tone-warning" role="status"><Icon name="alert" size={16} />{page.capabilities.pressure}</p>}
     <Panel flush>
       {pagination.error ? <EmptyState icon="alert" title="任务加载失败" description={pagination.error} action={<Button onClick={() => void pagination.reload()}>重试</Button>} />
@@ -124,26 +183,37 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                 const running = task.status === "running";
                 const kind = task.kind === "hls" ? "video" : task.private && !api.isPrivatePath(task.key) ? "other" : getFileKind(null, task.key);
                 const location = api.privatePathLabel(folder);
+                const file = completed ? task.file : null;
+                const thumbnail = file ? api.fileThumbnail(file) : undefined;
                 // 每行一个快捷操作：进行中停止、停止或失败后继续、完成后打开所在目录；其余在「更多」菜单。
                 const quick = active(task) ? <IconButton icon="pause" size="sm" label="停止下载" onClick={() => setConfirm({ task, action: "stop" })} />
                   : completed ? <IconButton icon="folder" size="sm" label={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)} />
                     : <IconButton icon="play" size="sm" label="继续下载" onClick={() => task.method === "POST" ? setConfirm({ task, action: "resume" }) : void control(task, "resume")} />;
-                return <div className={`download-item is-${task.status}`} role="listitem" key={task.id}>
-                  <FileTile kind={kind} />
+                const checked = selected.has(task.id);
+                return <div className={`download-item is-${task.status}${checked ? " is-selected" : ""}`} role="listitem" key={task.id}>
+                  <span className="download-check"><Checkbox checked={checked} label={`选择 ${name}`} onChange={value => setSelected(current => { const next = new Set(current); if (value) next.add(task.id); else next.delete(task.id); return next; })} /></span>
+                  {thumbnail && file ? <FileVisual kind={getFileKind(file.content_type, file.key)} src={thumbnail} size="lg" /> : <FileTile kind={kind} size="lg" />}
                   <div className="download-body">
                     <div className="download-head">
                       <strong title={name}>{name}</strong>
                       <Badge tone={TONE[task.status]} dot={!completed} icon={completed ? "check" : undefined}>{downloadStatusLabel(task)}</Badge>
                     </div>
                     <div className="download-meta">
-                      <span className="download-source" title={source}>{source}{task.kind === "hls" ? " · M3U8" : task.method === "POST" ? " · POST" : ""}</span>
+                      {/* 带查询参数（可能含签名）的地址不直接写进链接，点击时再读取完整地址打开。 */}
+                      <span className="download-origin">
+                        {task.source?.has_query ? <button type="button" className="download-source" title={`${task.source.url}?…（打开完整链接）`} onClick={() => openSource(task)}>{sourceLabel(task.source)}</button>
+                          : task.source ? <a className="download-source" href={task.source.url} target="_blank" rel="noopener noreferrer" title={task.source.url}>{sourceLabel(task.source)}</a>
+                          : <span className="download-source" title={source}>{source}</span>}
+                        {(task.kind === "hls" || task.method === "POST") && <span className="download-figure">{task.kind === "hls" ? "M3U8" : "POST"}</span>}
+                      </span>
                       {completed ? <button type="button" className="download-location" title={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)}><Icon name="folder" size={12} /><span>{location}</span></button>
                         : <span className="download-location" title={`保存到 ${location}`}><Icon name="folder" size={12} /><span>{location}</span></span>}
-                      {completed ? <>
+                      {/* 大小与用时放在同一组里：窄屏换行时整组另起一行，分隔点不会落在行首。 */}
+                      {completed ? <span className="download-figures">
                         <span className="download-figure">{formatBytes(task.stored_bytes || task.received)}</span>
                         {/* 完成后显示累计用时（不含排队）和平均速度；旧版本完成的任务没有用时记录。 */}
                         {task.elapsed_seconds > 0 && <span className="download-figure">用时 {elapsed(task.elapsed_seconds)} · 平均 {formatBytes(task.stored_bytes / Math.max(task.elapsed_seconds, 0.05))}/s</span>}
-                      </> : task.kind === "hls" && task.segments_total ? <span className="download-figure">{task.segments_done} / {task.segments_total} 个分片 · 已保存 {formatBytes(task.stored_bytes)}</span>
+                      </span> : task.kind === "hls" && task.segments_total ? <span className="download-figure">{task.segments_done} / {task.segments_total} 个分片 · 已保存 {formatBytes(task.stored_bytes)}</span>
                         : !task.received && task.size === null ? (task.status === "queued" ? <span className="download-figure">等待开始</span> : null)
                           : <span className="download-figure">{formatBytes(task.received)}{task.size !== null ? ` / ${formatBytes(task.size)}` : " · 大小未知"}</span>}
                     </div>
@@ -157,7 +227,11 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                     {task.error && <details className="download-task-error"><summary><Icon name="alert" size={13} /><span>查看失败原因</span></summary><p className="download-error">{task.error}</p></details>}
                   </div>
                   <div className="download-actions">{busy.has(task.id) ? <span className="spinner" aria-label="正在处理任务" /> : <>{quick}<Menu label={`${name}的更多操作`} items={[
-                    { label: "重新下载", icon: "refresh" as const, onSelect: () => setConfirm({ task, action: "restart" }) },
+                    ...(task.source ? [
+                      { label: "复制来源链接", icon: "copy" as const, onSelect: () => void copySource(task) },
+                      { label: "打开来源链接", icon: "external" as const, onSelect: () => openSource(task) },
+                    ] : []),
+                    { label: "重新下载", icon: "refresh" as const, divider: Boolean(task.source), onSelect: () => setConfirm({ task, action: "restart" }) },
                     { label: "更新下载参数", icon: "settings" as const, onSelect: () => setEdit(task) },
                     { label: "删除任务", icon: "trash" as const, danger: true, divider: true, onSelect: () => setConfirm({ task, action: "delete" }) },
                   ]} /></>}</div>
@@ -174,6 +248,9 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     {clearing && <ConfirmDialog title={clearing === "completed" ? "清除已完成的任务" : "清除失败的任务"}
       description={clearing === "completed" ? "从列表中移除所有已完成的任务，已保存的文件不受影响。" : "移除所有失败的任务并清理未完成的数据，已保存的文件不受影响。"}
       confirmLabel="清除" danger onClose={() => setClearing(null)} onConfirm={() => clear(clearing)} />}
+    {bulk && <ConfirmDialog title={bulk === "delete" ? `删除 ${chosen.length} 个下载任务` : `停止 ${chosen.length} 个下载任务`}
+      description={bulk === "delete" ? "删除所选任务并清理未完成的数据，已保存的文件会保留。" : "文件直链停止后保留已保存的分段，来源支持时可从断点继续；平台和 M3U8 任务继续时从头下载。"}
+      danger={bulk === "delete"} confirmLabel={bulk === "delete" ? "删除任务" : "停止下载"} onClose={() => setBulk(null)} onConfirm={() => runBulk(bulk)} />}
     {confirm && <ConfirmDialog title={confirm.action === "delete" ? "删除下载任务" : confirm.action === "restart" ? "重新下载文件" : confirm.action === "resume" ? "重新发送下载请求" : "停止下载"}
       description={confirm.action === "delete" ? <>删除任务“{downloadTaskName(confirm.task)}”并清理未完成的数据，已保存的文件会保留。</>
         : confirm.action === "restart" ? <>清理当前断点并从头下载“{downloadTaskName(confirm.task)}”。同名文件会自动改名保存。</>
@@ -188,6 +265,21 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
   const [input, setInput] = useState("");
   const [downloadType, setDownloadType] = useState<"auto" | "http" | "hls" | "x" | "youtube">("auto");
   const [cookies, setCookies] = useState("");
+  const [cookiesOpen, setCookiesOpen] = useState(false);
+  // 更新参数时回填原来的链接、请求头与平台 Cookie，用户只需修改失效的部分。
+  const [prefill, setPrefill] = useState<"loading" | "ready" | "failed">(task ? "loading" : "ready");
+  useEffect(() => {
+    if (!task) return;
+    let alive = true;
+    void api.downloadSource(task.id, task.private).then(value => {
+      if (!alive) return;
+      setInput(current => current || value.input);
+      setDownloadType(value.download_type);
+      if (value.cookies) { setCookies(value.cookies); setCookiesOpen(true); }
+      setPrefill("ready");
+    }).catch(() => { if (alive) setPrefill("failed"); });
+    return () => { alive = false; };
+  }, [task]);
   const [candidates, setCandidates] = useState<api.DownloadCandidate[] | null>(initial?.candidates ?? null);
   const [selected, setSelected] = useState(() => new Set<number>(initial?.candidates.map((_, index) => index) ?? []));
   const [destination, setDestination] = useState(initial?.destination ?? "");
@@ -231,13 +323,14 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
     finally { setBusy(false); }
   }
   return <Modal title={task ? "更新下载参数" : initial ? "确认下载" : "添加下载"} icon="download" size="lg" onClose={onClose} dismissible={!busy}
-    description={task ? "粘贴新的链接或命令，选择文件后从头重新下载。" : initial ? "这些文件由资源抓取脚本转交，确认保存位置后开始下载。" : "粘贴文件直链、X 帖子、YouTube 视频或 curl 命令。"}
-    footer={<><Button disabled={busy} onClick={onClose}>取消</Button>{candidates ? <>{!initial && <Button variant="ghost" disabled={busy} onClick={() => { setCandidates(null); setError(""); }}>返回编辑</Button>}<Button variant="primary" loading={busy} disabled={!selected.size || !ready || needsUnlock} onClick={() => void submit()}>{task ? "更新并重新下载" : `开始下载${selected.size ? `（${selected.size}）` : ""}`}</Button></> : <Button variant="primary" loading={busy} disabled={!input.trim()} onClick={() => void parse()}>{busy ? "正在读取文件信息" : "解析内容"}</Button>}</>}>
+    description={task ? "已填入原来的链接和请求参数，修改后重新解析，选择文件后从头重新下载。" : initial ? "这些文件由资源抓取脚本转交，确认保存位置后开始下载。" : "粘贴文件直链、X 帖子、YouTube 视频或 curl 命令。"}
+    footer={<><Button disabled={busy} onClick={onClose}>取消</Button>{candidates ? <>{!initial && <Button variant="ghost" disabled={busy} onClick={() => { setCandidates(null); setError(""); }}>返回编辑</Button>}<Button variant="primary" loading={busy} disabled={!selected.size || !ready || needsUnlock} onClick={() => void submit()}>{task ? "更新并重新下载" : `开始下载${selected.size ? `（${selected.size}）` : ""}`}</Button></> : <Button variant="primary" loading={busy || prefill === "loading"} disabled={!input.trim()} onClick={() => void parse()}>{busy ? "正在读取文件信息" : "解析内容"}</Button>}</>}>
     <div className="form">
-      {!candidates ? <><Field label="链接或下载命令" hint="平台链接每次一个，多个直链每行一个。命令使用 bash 格式；支持请求头、Cookie、文本 POST 请求体，不执行命令。">
-        <textarea className="input mono download-input" rows={8} autoComplete="off" autoCapitalize="none" spellCheck={false} value={input} onChange={event => setInput(event.target.value)} placeholder={"https://example.com/video.mp4\n\ncurl 'https://example.com/file.zip' -H 'Cookie: …'"} />
+      {!candidates ? <>{prefill === "failed" && <p className="inline-note tone-warning" role="status"><Icon name="alert" size={16} />无法读取原来的下载参数，请重新粘贴链接或命令。</p>}
+        <Field label="链接或下载命令" hint={task ? "已填入原来的参数，可直接修改失效的值（如过期的签名或 Cookie）；命令使用 bash 格式，不执行命令。" : "平台链接每次一个，多个直链每行一个。命令使用 bash 格式；支持请求头、Cookie、文本 POST 请求体，不执行命令。"}>
+        <textarea className="input mono download-input" rows={8} autoComplete="off" autoCapitalize="none" spellCheck={false} value={input} disabled={prefill === "loading"} onChange={event => setInput(event.target.value)} placeholder={"https://example.com/video.mp4\n\ncurl 'https://example.com/file.zip' -H 'Cookie: …'"} />
       </Field><Field label="下载类型" hint="平台链接自动解析媒体；无法识别的播放列表可选择 M3U8。"><select className="input" value={downloadType} onChange={event => setDownloadType(event.target.value as typeof downloadType)}><option value="auto">自动识别</option><option value="http">文件直链</option><option value="hls">M3U8 视频</option><option value="x">X 单条帖子</option><option value="youtube">YouTube 视频 / Shorts</option></select></Field>
-        <details className="download-cookie-options"><summary>平台登录 Cookie（可选）</summary><div className="form">
+        <details className="download-cookie-options" open={cookiesOpen} onToggle={event => setCookiesOpen(event.currentTarget.open)}><summary>平台登录 Cookie（可选）</summary><div className="form">
           <Field label="Cookie 文本" hint="支持 Netscape cookies.txt 或 name=value 文本。仅用于平台解析，加密保存；不填写时尝试公开访问。"><textarea className="input mono download-cookie-input" rows={4} autoComplete="off" autoCapitalize="none" spellCheck={false} value={cookies} onChange={event => setCookies(event.target.value)} placeholder="粘贴当前平台的 Cookie，或导入 cookies.txt" /></Field>
           <Field label="导入 cookies.txt" hint="最多 32 KiB；只使用对应平台域名的 Cookie。"><input className="input download-cookie-file" type="file" accept=".txt,text/plain" disabled={busy} onChange={event => {
             const file = event.target.files?.[0];
@@ -266,7 +359,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
               <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setWantPrivate(false); setDestination(""); }}>改存普通目录</Button></div>
             <PrivateUnlockForm />
           </div>
-          : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示域名。</p></>}
+          : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示不含查询参数的来源地址。</p></>}
       </>}
       {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
     </div>

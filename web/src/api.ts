@@ -43,7 +43,13 @@ export type ResourceSettings = { config: ResourceConfig; source: "admin" | "star
   detected: { cpu_cores: number; memory_bytes: number | null; container_limits: boolean; disk_total_bytes: number | null; disk_free_bytes: number | null } };
 export type DownloadCandidate = { ticket: string; group: string; name: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform?: "x" | "youtube"; media_type?: "image" | "video" | "audio"; content_type?: string | null; size: number | null; variant: string | null; warnings: string[]; header_names: string[]; body_bytes: number };
 export type DownloadStatus = "queued" | "running" | "stopped" | "interrupted" | "completed" | "failed";
-export type DownloadTask = { id: number; key: string; private: boolean; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform: "x" | "youtube" | null; phase: "resolving" | "downloading" | "merging" | "saving" | null; status: DownloadStatus; size: number | null; received: number; stored_bytes: number; segments_done: number; segments_total: number; duration: number | null; processed_seconds: number; elapsed_seconds: number; error: string | null; created_at: number; updated_at: number; speed: number; eta_seconds: number | null };
+export type DownloadTask = { id: number; key: string; private: boolean; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform: "x" | "youtube" | null; phase: "resolving" | "downloading" | "merging" | "saving" | null; status: DownloadStatus; size: number | null; received: number; stored_bytes: number; segments_done: number; segments_total: number; duration: number | null; processed_seconds: number; elapsed_seconds: number; error: string | null; created_at: number; updated_at: number; speed: number; eta_seconds: number | null;
+  /** 来源地址：直链去掉查询串（has_query 表示有被省略的参数，完整地址经 downloadSource 读取）；私密空间锁定时为 null。 */
+  source?: { url: string; has_query: boolean } | null;
+  /** 已完成且文件仍在原位置时的文件信息与缩略图状态；文件已删除时为 null。 */
+  file?: DownloadFile | null };
+export type DownloadFile = Pick<FileItem, "key" | "size" | "etag" | "content_type" | "thumbnails" | "thumbnail_versions">;
+export type DownloadSource = { input: string; download_type: "http" | "hls" | "x" | "youtube"; cookies: string; url: string };
 export type DownloadPage = { tasks: DownloadTask[]; total: number; next_cursor: number | null; capabilities: { hls: boolean; x: boolean; youtube: boolean; concurrency: number; pressure: string | null } };
 export type TrafficPoint = { at: number; in_bytes: number; out_bytes: number };
 export type TrafficMetrics = { total_in_bytes: number; total_out_bytes: number; recent: TrafficPoint[] };
@@ -271,13 +277,14 @@ export const thumbnailUrl = (path: string, etag: string, variant: ThumbnailVaria
   mediaAccess(`${fileApi("/thumbnail", path)}?path=${encodeURIComponent(path)}&variant=${variant}&v=${encodeURIComponent(etag)}${thumbnailBucketId !== null ? `&bucket_id=${thumbnailBucketId}` : ""}`, path);
 export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb") => post<void>(fileApi("/thumbnail", path), { path, data, variant });
 export const markNoThumbnail = (path: string) => post<void>(fileApi("/thumbnail", path), { path, variant: "none" });
-function thumbnailSpec(file: FileItem, variant: ThumbnailVariant) {
+type ThumbnailFile = Pick<FileItem, "key" | "etag" | "thumbnails" | "has_thumbnail" | "thumbnail_versions">;
+function thumbnailSpec(file: ThumbnailFile, variant: ThumbnailVariant) {
   const resolved = THUMBNAIL_FALLBACK[variant].find(item => item === "thumb" || file.thumbnails?.includes(item)) ?? "thumb";
   const revision = file.thumbnail_versions?.[resolved];
   return { variant: resolved, version: `${file.etag}.${resolved}${revision ? `.${revision}` : ""}` };
 }
 /** 返回所需规格的缩略图地址；网格图或封面尚未生成时按退回顺序复用已有的规格。 */
-export function fileThumbnail(file: FileItem, variant: ThumbnailVariant = "thumb") {
+export function fileThumbnail(file: ThumbnailFile, variant: ThumbnailVariant = "thumb") {
   if (!file.thumbnails?.includes("thumb") && !file.has_thumbnail) return undefined;
   // 小图地址不受 poster 的生成或状态顺序影响，目录四宫格、文件列表和预览头部共用缓存。
   const spec = thumbnailSpec(file, variant);
@@ -460,6 +467,11 @@ export const controlDownload = (id: number, action: "stop" | "resume" | "restart
   const usePrivate = privateTask && Boolean(privateAccess);
   return post<DownloadTask | undefined>(`/api/user/v1${usePrivate ? "/private" : ""}/downloads/${id}/${action}`, { item });
 };
+const downloadRoute = (privateTask: boolean) => `/api/user/v1${privateTask && privateAccess ? "/private" : ""}/downloads`;
+/** 「更新下载参数」回填用的完整链接与请求参数（仅任务所有者；私密任务需已解锁）。 */
+export const downloadSource = (id: number, privateTask = false) => request<DownloadSource>(`${downloadRoute(privateTask)}/${id}/source`);
+export const batchDownloads = (action: "stop" | "resume" | "delete", ids: number[], privateTasks = false) =>
+  post<{ done: number; skipped: number }>(`${downloadRoute(privateTasks)}/batch`, { action, ids });
 export const updateAdminSettings = async (values: Partial<Record<keyof SystemSettings, string>>) => {
   const result = await post<SystemSettings>("/api/admin/v1/settings", values);
   setSiteConfig({ public_base_url: result.public_base_url.effective, s3_endpoint: result.s3_endpoint.effective });

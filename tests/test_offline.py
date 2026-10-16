@@ -12,7 +12,7 @@ from tgdrive.errors import NotFoundError
 from tgdrive.objects import Scope
 from tgdrive.offline.hls import parse_playlist
 from tgdrive.offline.http import DownloadError, SafeHttpClient, public_ip
-from tgdrive.offline.request import parse_requests
+from tgdrive.offline.request import command_text, parse_requests
 from tgdrive.offline.resources import ResourceSettings
 from tests.test_public_links import Client
 
@@ -28,6 +28,18 @@ class RequestTests(unittest.TestCase):
         self.assertEqual((request.method, request.body, request.name), ("POST", "a=b", "file.zip"))
         request = parse_requests("curl https://example.com/f --data-raw $'a=hello\\nworld'")[0]
         self.assertEqual(request.body, "a=hello\nworld")
+
+    def test_command_text_round_trips(self):
+        for text in ("https://example.com/a b".replace(" ", "%20"),
+                     "curl 'https://example.com/f?sig=1' -H \"Cookie: a='quoted'\" -H 'Referer: https://example.com/' -o 'name.bin'",
+                     "curl https://example.com/f --data-raw $'a=1\\nb=2'",
+                     "curl https://example.com/f -X POST"):
+            with self.subTest(text=text):
+                original = parse_requests(text)[0]
+                again = parse_requests(command_text(original))[0]
+                self.assertEqual((again.url, again.method, again.headers, again.body, again.follow_redirects, again.name),
+                                 (original.url, original.method, original.headers, original.body, original.follow_redirects, original.name))
+        self.assertEqual(command_text(parse_requests("https://example.com/plain")[0]), "https://example.com/plain")
 
     def test_dangerous_or_unknown_arguments_rejected(self):
         for text in ("curl https://example.com/f; whoami", "curl $(whoami)", "curl \"https://example.com/$SECRET\"", "curl -k https://example.com/f", "curl --proxy http://secret https://example.com/f", "curl -d @/etc/passwd https://example.com/f", "wget --load-cookies cookies https://example.com/f", "curl https://example.com/f -H 'Host: localhost'", "magnet:?xt=x", "file:///etc/passwd"):
@@ -130,6 +142,76 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         headers = await client.login("user", "alice@example.com", "alice password")
         status, _, body = await client.request("GET", "/api/user/v1/downloads?q=REPORT&limit=2&status=active", headers=headers)
         self.assertEqual((status, json.loads(body)["total"], len(json.loads(body)["tasks"])), (200, 3, 2))
+
+    async def test_list_source_link_and_prefill_respect_secrets_and_private(self):
+        task = await self.make("curl 'https://example.com/file.bin?signature=topsecret' -H 'Cookie: secret=hidden' -L")
+        listed = self.offline.list(self.alice.id)["tasks"][0]
+        self.assertEqual(listed["source"], {"url": "https://example.com/file.bin", "has_query": True})
+        self.assertNotIn("topsecret", json.dumps(self.offline.list(self.alice.id)))
+        source = self.offline.source(self.alice.id, task["id"])
+        self.assertEqual(source["url"], "https://example.com/file.bin?signature=topsecret")
+        self.assertEqual(source["download_type"], "http")
+        request = parse_requests(source["input"])[0]
+        self.assertEqual((request.url, request.headers), ("https://example.com/file.bin?signature=topsecret", [("Cookie", "secret=hidden")]))
+        with self.assertRaises(NotFoundError):
+            self.offline.source(self.admin.id, task["id"])
+        private_scope = Scope(self.alice.bucket_id, private_access=True)
+        parsed = await self.offline.parse(self.alice.id, "https://private.example.com/memo.bin")
+        hidden = self.offline.create(self.alice.id, [{"ticket": parsed["candidates"][0]["ticket"], "name": "memo.bin"}], ".tgdrive/private/", private_scope=private_scope)[0]
+        locked = next(item for item in self.offline.list(self.alice.id)["tasks"] if item["id"] == hidden["id"])
+        self.assertIsNone(locked["source"])
+        self.assertNotIn("private.example.com/memo", json.dumps(self.offline.list(self.alice.id)))
+        with self.assertRaises(ValueError):
+            self.offline.source(self.alice.id, hidden["id"])
+        self.assertEqual(self.offline.source(self.alice.id, hidden["id"], private_scope=private_scope)["input"], "https://private.example.com/memo.bin")
+        unlocked = next(item for item in self.offline.list(self.alice.id, private_scope=private_scope)["tasks"] if item["id"] == hidden["id"])
+        self.assertEqual(unlocked["source"]["url"], "https://private.example.com/memo.bin")
+        client = Client(self.app)
+        headers = await client.login("user", "alice@example.com", "alice password")
+        status, _, body = await client.request("GET", f"/api/user/v1/downloads/{task['id']}/source", headers=headers)
+        self.assertEqual((status, json.loads(body)["url"]), (200, "https://example.com/file.bin?signature=topsecret"))
+        status, _, _ = await client.request("GET", f"/api/user/v1/downloads/{hidden['id']}/source", headers=headers)
+        self.assertEqual(status, 400)
+
+    async def test_completed_task_reports_file_and_thumbnails(self):
+        task = await self.make()
+        self.offline.start()
+        await self.wait_for(lambda: self.offline._row(task["id"])["status"] == "completed")
+        listed = self.offline.list(self.alice.id)["tasks"][0]
+        self.assertEqual((listed["file"]["key"], listed["file"]["thumbnails"]), ("downloads/file.bin", []))
+        scope = Scope(self.alice.bucket_id)
+        await self.app.objects.set_thumbnail(scope, "downloads/file.bin", b"RIFF\x1a\x00\x00\x00WEBPVP8 " + b"\x00" * 14)
+        listed = self.offline.list(self.alice.id)["tasks"][0]
+        self.assertEqual(listed["file"]["thumbnails"], ["thumb"])
+        self.assertIn("thumb", listed["file"]["thumbnail_versions"])
+        # 移动文件时任务记录随行更新；文件删除后退回普通图标。
+        self.app.objects.move(scope, "downloads/file.bin", "elsewhere/file.bin")
+        self.assertEqual(self.offline.list(self.alice.id)["tasks"][0]["file"]["key"], "elsewhere/file.bin")
+        await self.app.objects.delete_objects(scope, ["elsewhere/file.bin"])
+        self.assertIsNone(self.offline.list(self.alice.id)["tasks"][0]["file"])
+
+    async def test_batch_actions_skip_unsupported_and_foreign_tasks(self):
+        first, second = await self.make(), await self.make()
+        posted = await self.make("curl https://example.com/post --data-raw 'a=b'")
+        result = await self.offline.batch(self.alice.id, "stop", [first["id"], second["id"], posted["id"]])
+        self.assertEqual(result, {"done": 3, "skipped": 0})
+        # POST 任务继续会重新发送请求体，批量继续时跳过，需逐个确认。
+        result = await self.offline.batch(self.alice.id, "resume", [first["id"], posted["id"]])
+        self.assertEqual(result, {"done": 1, "skipped": 1})
+        self.assertEqual((self.offline._row(first["id"])["status"], self.offline._row(posted["id"])["status"]), ("queued", "stopped"))
+        self.assertEqual(await self.offline.batch(self.admin.id, "delete", [first["id"]]), {"done": 0, "skipped": 1})
+        for payload in ({"action": "restart", "ids": [first["id"]]}, {"action": "delete", "ids": []}, {"action": "delete", "ids": ["1"]}, {"action": "delete", "ids": list(range(1, 102))}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                await self.offline.batch(self.alice.id, payload["action"], payload["ids"])
+        client = Client(self.app)
+        headers = await client.login("user", "alice@example.com", "alice password")
+        body = json.dumps({"action": "delete", "ids": [first["id"], second["id"], posted["id"], 999999]}).encode()
+        status, _, data = await client.request("POST", "/api/user/v1/downloads/batch", body, headers)
+        self.assertEqual((status, json.loads(data)), (200, {"done": 3, "skipped": 1}))
+        self.assertEqual(self.offline.list(self.alice.id)["total"], 0)
+        audit = self.app.metadata.db.execute("SELECT action,detail FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(audit["action"], "download.batch")
+        self.assertEqual(json.loads(audit["detail"]), {"action": "delete", "count": 4, "done": 3})
 
     async def test_elapsed_time_recorded_and_reset_on_restart(self):
         task = await self.make()

@@ -11,7 +11,7 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import replace
 from email.message import Message
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 from cryptography.exceptions import InvalidTag
 
@@ -23,7 +23,7 @@ from ..work import WorkBusyError
 from .hls import load_playlist, remux
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
 from .mp4 import Defragmenter
-from .request import DownloadRequest, checked_url, filename, parse_requests, url_filename
+from .request import DownloadRequest, checked_url, command_text, filename, parse_requests, url_filename
 from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_cache, media_request, merge_tracks, prepare, site_link, track_stream
 
 
@@ -76,8 +76,30 @@ class OfflineDownloads:
     def _key(self, label="offline-request"):
         return derive_subkey(self.keystore.require_kek(), label)
 
-    def _source(self, row):
-        return json.loads(open_sealed(self._key(), row["request_enc"], f"offline:{row['id']}"))
+    def _source(self, row, key=None):
+        return json.loads(open_sealed(key or self._key(), row["request_enc"], f"offline:{row['id']}"))
+
+    def _source_link(self, row, key) -> dict | None:
+        """列表展示用的来源地址：平台任务给出规范链接；直链去掉查询串（可能带签名），完整参数只经 source 接口读取。"""
+        try:
+            value = self._source(row, key)
+            url = value["platform_source"]["url"] if row["platform"] else value["request"]["url"]
+            parts = urlsplit(url)
+        except (ValueError, InvalidTag, KeyError, TypeError):
+            return None
+        if row["platform"]:
+            return {"url": url, "has_query": False}
+        return {"url": urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")), "has_query": bool(parts.query)}
+
+    def _private_view(self, row, private_scope: Scope | None) -> bool:
+        """私密任务的文件名、来源和参数只在当前会话已解锁私密空间时可见。"""
+        if not row["key"].startswith(PRIVATE_PREFIX):
+            return True
+        if (private_scope is None or not private_scope.private_access or private_scope.bucket_id != row["bucket_id"]):
+            return False
+        if private_scope.authorize is not None:
+            private_scope.authorize()
+        return True
 
     def _save_source(self, task_id, value):
         encrypted = seal(self._key(), json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(), f"offline:{task_id}")
@@ -393,14 +415,90 @@ class OfflineDownloads:
         if cursor:
             where += " AND id<?"
             args.append(cursor)
-        rows = self.metadata.db.execute(f"SELECT {','.join(PUBLIC_FIELDS)} FROM offline_tasks WHERE {where} ORDER BY id DESC LIMIT ?", (*args, limit + 1)).fetchall()
+        rows = self.metadata.db.execute(f"SELECT {','.join(PUBLIC_FIELDS)},bucket_id,request_enc FROM offline_tasks WHERE {where} ORDER BY id DESC LIMIT ?", (*args, limit + 1)).fetchall()
         effective = self.resources.effective()
-        return {"tasks": [self.public(row, reveal_private=reveal_private) for row in rows[:limit]], "total": total,
+        key = self._key()
+        tasks = []
+        for row in rows[:limit]:
+            task = self.public(row, reveal_private=reveal_private)
+            visible = reveal_private or not task["private"]
+            task["source"] = self._source_link(row, key) if visible else None
+            task["file"] = None
+            tasks.append(task)
+        self._attach_files(user_id, [(task, row) for task, row in zip(tasks, rows) if task["status"] == "completed" and (reveal_private or not task["private"])])
+        return {"tasks": tasks, "total": total,
                 "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None,
                 "capabilities": {"hls": effective["hls_enabled"] and effective["hls_available"],
                     "x": effective["x_enabled"] and effective["x_available"],
                     "youtube": effective["youtube_enabled"] and effective["youtube_available"],
                     "concurrency": effective["concurrency"], "pressure": self.resources.pressure()}}
+
+    def _attach_files(self, user_id, pairs):
+        """已完成任务对应的文件（仍在原位置时）与缩略图状态：每页两次查询，不逐项读取。"""
+        if not pairs:
+            return
+        bucket = pairs[0][1]["bucket_id"]
+        keys = list(dict.fromkeys(row["key"] for _, row in pairs))
+        found = {}
+        for start in range(0, len(keys), 200):
+            chunk = keys[start:start + 200]
+            for item in self.metadata.db.execute(f"SELECT key,size,etag,content_type,blob_uuid FROM objects WHERE bucket_id=? AND key IN ({','.join('?' * len(chunk))})", (bucket, *chunk)):
+                found[item["key"]] = item
+        versions = self.objects.thumbnail_versions([item["blob_uuid"] for item in found.values()])
+        for task, row in pairs:
+            item = found.get(row["key"])
+            if item is None or row["bucket_id"] != bucket:
+                continue
+            states = versions.get(item["blob_uuid"] or "", {})
+            task["file"] = {"key": item["key"], "size": item["size"], "etag": item["etag"], "content_type": item["content_type"],
+                            "thumbnails": list(states), "thumbnail_versions": states}
+
+    def source(self, user_id: int, task_id: int, *, private_scope: Scope | None = None) -> dict:
+        """「更新下载参数」回填：还原成可再次解析的链接或 curl 命令（含用户提交过的请求头与请求体，只返回给任务所有者）。"""
+        self.scope(user_id)
+        row = self._row(task_id, user_id)
+        if not self._private_view(row, private_scope):
+            raise ValueError("请先解锁私密空间后查看下载参数")
+        value = self._source(row)
+        request = DownloadRequest.from_json(value["request"])
+        request.warnings = []
+        platform = row["platform"]
+        result = {"input": command_text(request),
+                  "download_type": platform or row["kind"], "cookies": "",
+                  "url": value["platform_source"]["url"] if platform else request.url}
+        if platform:
+            # 平台 Cookie 已解析为记录：还原成 cookies.txt，重新解析时得到同一组 Cookie；请求头里的 Cookie 仍在命令中。
+            header_cookies = {item.strip().partition("=")[0] for key, header in request.headers if key.lower() == "cookie" for item in header.split(";") if item.strip()}
+            lines = [f"{cookie['domain']}\t{'TRUE' if cookie['include_subdomains'] else 'FALSE'}\t{cookie['path']}\t{'TRUE' if cookie['secure'] else 'FALSE'}\t{cookie['expires'] or 0}\t{cookie['name']}\t{cookie['value']}"
+                     for cookie in value["platform_source"].get("cookies") or [] if cookie["name"] not in header_cookies]
+            result["cookies"] = "\n".join(lines)
+        return result
+
+    async def batch(self, user_id, action, ids, *, private_scope: Scope | None = None, private_activity=None) -> dict:
+        """多选操作：逐项走 control 的同一套校验；单项失败（如私密空间未解锁、POST 任务需单独确认）计入 skipped。"""
+        if action not in ("stop", "resume", "delete"):
+            raise ValueError("批量操作只支持停止、继续和删除")
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or not all(type(value) is int and value > 0 for value in ids):
+            raise ValueError("请选择 1–100 个任务")
+        self.scope(user_id)
+        done, skipped = 0, 0
+        for task_id in dict.fromkeys(ids):
+            try:
+                row = self._row(task_id, user_id)
+                if action == "resume" and (row["status"] not in ("stopped", "failed", "interrupted") or row["method"] == "POST"):
+                    # 继续 POST 任务会重新发送请求体，必须逐个确认。
+                    skipped += 1
+                    continue
+                if action == "stop" and row["status"] not in ACTIVE:
+                    skipped += 1
+                    continue
+                await self.control(user_id, task_id, action, private_scope=private_scope, private_activity=private_activity)
+                done += 1
+            except NotFoundError:
+                skipped += 1
+            except (ValueError, PermissionError, Paused):
+                skipped += 1
+        return {"done": done, "skipped": skipped}
 
     def status_of(self, user_id: int, ids: list[int], permits: Callable[[str], bool]) -> list[dict]:
         """按 ID 查询任务状态（访问密钥轮询进度用）：只返回该用户、路径被 permits 允许的普通任务，不含私密任务。"""
