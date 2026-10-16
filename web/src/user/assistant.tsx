@@ -5,9 +5,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type DragEvent as ReactDragEvent } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, toast, type IconName, type MenuItem } from "../ui";
+import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, formatBytes, toast, type IconName, type MenuItem } from "../ui";
 import type { PageImport } from "./page-import";
-import { Thread, ThreadNavigation, useMarkState, type LiveRun } from "./assistant-thread";
+import { Thread, useMarkState, type LiveRun } from "./assistant-thread";
 import { AttachmentTray, useAttachments } from "./assistant-attachments";
 import { filesBridge, waitForFiles } from "./assistant-bridge";
 import { assistantEnvironment } from "./assistant-environment";
@@ -259,7 +259,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     selection.current += 1;
     setLoading(false); setReconnecting(false);
     unsubscribe.current?.(); unsubscribe.current = null;
-    setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeTarget(null); mention.reset(); setDraft(""); setPendingMode("approval"); attachments.clear();
+    setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeTarget(null); mention.reset(); setDraft(""); setPendingMode("approval"); attachments.clear(true);
     window.setTimeout(() => input.current?.focus(), 30);
   }
 
@@ -292,7 +292,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       }
       const result = await ai.sendMessage(current.conversation.id, { text: message, model_id: modelId ?? undefined, location: locationKey, view: location.view,
         ...(current === detail && target !== null ? { scope: "path" as const, scope_path: display(target) } : {}),
-        mentions: mentions.length ? mentions.map(display) : undefined, attachments: withFiles ? attachments.paths.map(display) : undefined,
+        mentions: mentions.length ? mentions.map(display) : undefined, attachments: withFiles ? attachments.ids : undefined,
         snapshot_id: snapshotId, environment: assistantEnvironment() });
       if (version !== selection.current) return;
       if (snapshotId) onPageImportDone?.();
@@ -464,8 +464,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} onAccept={() => void acknowledge()} />
           : loading ? <SkeletonRows rows={4} />
           : !detail ? <Welcome location={effectiveScope} onPick={text => { setDraft(text); input.current?.focus(); }} />
-          : <ThreadNavigation.Provider value={!page && onNavigate ? folder => onNavigate("files", folder) : null}><Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
-              onRetry={retryFrom} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} /></ThreadNavigation.Provider>}
+          : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
+              onRetry={retryFrom} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
         {reconnecting && <p className="ai-notice" role="status"><Icon name="refresh" size={14} /><span>重新连接中…</span></p>}
       </div>
     </div>
@@ -716,6 +716,7 @@ function ConversationList({ items, current, onOpen, onChanged, archived, onArchi
   archived: boolean; onArchiveView: (value: boolean) => void; more: boolean; loadingMore: boolean; onMore: () => void;
 }) {
   const [renaming, setRenaming] = useState<ai.Conversation | null>(null);
+  const [deleting, setDeleting] = useState<ai.Conversation | null>(null);
   const [title, setTitle] = useState("");
   const [search, setSearch] = useState("");
   const terms = search.trim().toLowerCase();
@@ -741,11 +742,12 @@ function ConversationList({ items, current, onOpen, onChanged, archived, onArchi
         <Menu label={`${item.title || "对话"} 的操作`} items={[
           { label: "重命名", icon: "edit", onSelect: () => { setRenaming(item); setTitle(item.title ?? ""); } },
           { label: archived ? "移回最近对话" : "归档", icon: "archive", onSelect: () => void ai.updateConversation(item.id, { archived: !archived }).then(() => { toast.success(archived ? "已移回最近对话" : "已归档"); onChanged(); }).catch(reason => toast.error(api.errorMessage(reason, "操作失败"))) },
-          { label: "删除", icon: "trash", danger: true, divider: true, onSelect: () => void ai.deleteConversation(item.id).then(() => { toast.success("对话已删除"); onChanged(item.id); }).catch(reason => toast.error(api.errorMessage(reason, "删除失败"))) },
+          { label: "删除", icon: "trash", danger: true, divider: true, onSelect: () => setDeleting(item) },
         ]} />
       </li>)}</ul>
     </section>)}
     {more && <Button size="sm" variant="ghost" className="assistant-history-more" loading={loadingMore} onClick={onMore}>加载更多对话</Button>}
+    {deleting && <DeleteConversationDialog item={deleting} onClose={() => setDeleting(null)} onDeleted={() => { setDeleting(null); onChanged(deleting.id); }} />}
     {renaming && <Modal className="assistant-dialog" title="重命名对话" size="sm" onClose={() => setRenaming(null)}
       footer={<><Button onClick={() => setRenaming(null)}>取消</Button><Button variant="primary" type="submit" form="rename-conversation">保存</Button></>}>
       <form id="rename-conversation" className="form" onSubmit={event => {
@@ -755,6 +757,27 @@ function ConversationList({ items, current, onOpen, onChanged, archived, onArchi
       }}><input className="input" value={title} maxLength={60} onChange={event => setTitle(event.target.value)} autoFocus aria-label="对话标题" /></form>
     </Modal>}
   </div>;
+}
+
+/** 删除对话会同时删除它的附件（附件属于对话），确认框写明数量与大小。 */
+function DeleteConversationDialog({ item, onClose, onDeleted }: { item: ai.Conversation; onClose: () => void; onDeleted: () => void }) {
+  const [files, setFiles] = useState<{ count: number; size: number } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void ai.attachmentStats().then(stats => {
+      const found = stats.conversations.find(entry => entry.conversation_id === item.id);
+      if (alive) setFiles({ count: found?.count ?? 0, size: found?.size ?? 0 });
+    }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [item.id]);
+  return <ConfirmDialog className="assistant-dialog" title="删除这个对话？" confirmLabel="删除"
+    description={<>「{item.title || "新对话"}」删除后不再可见。{files?.count
+      ? <>其中的 <strong>{files.count} 个附件（{formatBytes(files.size)}）</strong>会一起删除并释放空间；需要保留的附件请先在消息里「保存到我的文件」。</> : null}</>}
+    onClose={onClose}
+    onConfirm={async () => {
+      try { await ai.deleteConversation(item.id); toast.success("对话已删除"); onDeleted(); }
+      catch (reason) { toast.error(api.errorMessage(reason, "删除失败")); }
+    }} />;
 }
 
 /** 对话列表里的更新时间：刚刚、N 分钟前、N 小时前、昨天、N 天前，再早显示日期。 */

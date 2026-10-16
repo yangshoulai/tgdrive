@@ -197,31 +197,10 @@ function renderMention(path: string) {
     <span>{path.replace(/\/$/, "").split("/").at(-1) || "/"}</span></span>;
 }
 
-/** 打开文件所在目录（由抽屉提供；全页模式没有文件页时为 null）。 */
-export const ThreadNavigation = createContext<((folder: string) => void) | null>(null);
-
-/** 用户上传的附件：图片点开预览（同一条消息的图片可左右切换），其他文件打开所在目录。 */
-function UserAttachments({ paths }: { paths: string[] }) {
-  const preview = usePreview();
-  const openFolder = useContext(ThreadNavigation);
-  const folderOf = (path: string) => path.slice(1, path.lastIndexOf("/") + 1);
-  async function openImage(path: string, all: string[]) {
-    try {
-      const page = await api.listFiles(folderOf(path), null, false, 1000, "image");
-      const items = page.objects.filter(item => all.includes("/" + item.key));
-      const file = items.find(item => "/" + item.key === path);
-      if (!file) { toast.error("这个附件已被移动或删除"); return; }
-      preview.open({ file, url: api.contentUrl(file.key), downloadUrl: api.contentUrl(file.key, true), playlistFiles: items,
-        poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file) });
-    } catch (reason) { toast.error(api.errorMessage(reason, "打开失败")); }
-  }
-  return <MessageAttachments paths={paths} onOpenImage={(path, all) => void openImage(path, all)}
-    onOpenFolder={path => openFolder ? openFolder(folderOf(path)) : toast.info(`文件保存在 ${path}`)} />;
-}
-
 function UserMessage({ message, onRetry }: { message: ai.ChatMessage; onRetry?: () => void }) {
   return <div className="ai-user">
-    {message.attachments?.length ? <UserAttachments paths={message.attachments} /> : null}
+    {message.attachments?.length ? <MessageAttachments items={message.attachments.filter(item => typeof item === "object" && item?.id)}
+      location={(message.location ?? "").replace(/^\//, "")} /> : null}
     {message.attachment && <span className="ai-attachment"><Icon name="globe" size={13} />
       <span>{message.attachment.source.replace(/^https?:\/\//, "")} · {message.attachment.pages} 页 · {message.attachment.images.toLocaleString("zh-CN")} 个图片候选</span></span>}
     {/* 用户输入的 Markdown（列表、加粗、代码等）与回复使用同一个安全渲染器，不执行原始 HTML；@ 引用就地显示为胶囊。 */}
@@ -299,6 +278,7 @@ function Thinking({ text, ms, live, startedAt }: { text: string; ms: number | nu
 }
 
 const TOOL_ICONS: [RegExp, IconName][] = [
+  [/^propose_save_attachment/, "paperclip"],
   [/^(list_folder|folder_tree|find_empty)/, "folder"], [/^(search_files|find_large|find_duplicates)/, "search"],
   [/^(storage_stats|trash_stats)/, "pulse"], [/^(list_trash)/, "trash"], [/^read_text_file/, "fileText"], [/^get_file_info/, "file"],
   [/^(list_public|propose_share|propose_unshare)/, "link"], [/download/, "download"], [/^(analyze_page|collect_gallery|parse_download)/, "globe"],
@@ -462,7 +442,8 @@ function ShareBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
 /* ---------- 待确认操作 ---------- */
 
 const ACTION_ICONS: Record<string, IconName> = { rename: "edit", move: "move", organize: "folder", mkdir: "folderPlus", trash: "trash",
-  restore: "restore", purge: "trash", unshare: "link", share: "link", downloads: "download", download_control: "download" };
+  restore: "restore", purge: "trash", unshare: "link", share: "link", downloads: "download", download_control: "download",
+  save_attachment: "paperclip" };
 const STATUS_LABEL: Record<string, [string, Tone]> = {
   pending: ["待确认", "accent"], running: ["执行中", "accent"], done: ["已完成", "success"], partial: ["部分完成", "warning"],
   failed: ["执行失败", "danger"], cancelled: ["已取消", "neutral"], rejected: ["已拒绝", "neutral"], expired: ["已过期", "neutral"],
@@ -480,6 +461,9 @@ function ItemRow({ kind, item }: { kind: string; item: ai.ActionItem }) {
     </li>;
   }
   if (kind === "downloads") return <li className="ai-diff-row"><Icon name="download" size={13} /><span className="cell-truncate" title={item.name}>{item.name}</span>{item.host && <small>{item.host}</small>}</li>;
+  if (kind === "save_attachment") return <li className="ai-diff-row"><Icon name="paperclip" size={13} />
+    <span className="cell-truncate" title={item.name}>{(item.name ?? "").replace(/^附件:/, "")}</span><Icon name="chevronRight" size={12} />
+    <ins className="cell-truncate" title={display(item.path ?? "")}>{display(parentOf(item.path ?? ""))}</ins></li>;
   if (kind === "download_control") return <li className="ai-diff-row"><Icon name="download" size={13} /><span className="cell-truncate">#{item.id} {baseName(item.path ?? "")}</span></li>;
   return <li className="ai-diff-row"><Icon name={item.folder || item.path?.endsWith("/") ? "folder" : "file"} size={13} />
     <span className="cell-truncate" title={display(item.path ?? "")}>{display(item.path ?? "")}</span></li>;

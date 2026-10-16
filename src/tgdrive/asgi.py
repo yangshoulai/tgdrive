@@ -288,6 +288,25 @@ class TgDriveASGI(StaticFiles):
             if path.startswith("/api/admin/v1/backups/") and method == "GET":
                 await self._backup_download(tracked_send, token, path.rsplit("/", 1)[-1])
                 return
+            attachment = re.fullmatch(r"/api/user/v1/assistant/attachments(?:/([0-9a-f]{32})/(content|thumbnail))?", path)
+            if attachment and self.assistant is not None and (method == "PUT" or attachment[1]):
+                # 对话附件（§22.5）：上传与读取是流式的，不经过 JSON 请求体。
+                if attachment[1] is None:
+                    size = int(headers["content-length"]) if "content-length" in headers else None
+                    result = await self.assistant.upload_attachment(token, csrf, query.get("name", [""])[0], headers.get("content-type"),
+                                                                    body_stream(), size)
+                    await self._send(tracked_send, 201, result)
+                elif attachment[2] == "content" and method in ("GET", "HEAD"):
+                    attachment_id = attachment[1]
+                    info, _ = await self.assistant.attachment_content(token, attachment_id)
+                    opener = lambda start, end: self.assistant.attachment_content(token, attachment_id, start, end)
+                    await self._until_disconnect(receive, self._stream_object(tracked_send, method, info, opener, query, headers, "private, no-cache"))
+                elif attachment[2] == "thumbnail" and method == "GET":
+                    data, mime, etag = self.assistant.read_attachment_thumbnail(token, attachment[1], query.get("variant", ["thumb"])[0])
+                    await self._send_thumbnail(tracked_send, headers, data, mime, etag, "private, no-cache")
+                else:
+                    raise NotFoundError("资源不存在")
+                return
             run_events = re.fullmatch(r"/api/user/v1/assistant/runs/([A-Za-z0-9_-]{4,40})/events", path)
             if run_events and method == "GET" and self.assistant is not None:
                 after = query.get("after", ["0"])[0]
@@ -406,7 +425,8 @@ class TgDriveASGI(StaticFiles):
                          "/assistant/actions/{}/confirm": "assistant.action.confirm",
                          "/assistant/actions/{}/reject": "assistant.action.reject",
                          "/assistant/actions/{}/cancel": "assistant.action.cancel",
-                         "/assistant/actions/{}/undo": "assistant.action.undo"},
+                         "/assistant/actions/{}/undo": "assistant.action.undo",
+                         "/assistant/attachments/{}/save": "assistant.attachment.save"},
     }
 
     def _audit_entry(self, method, path, payload, token, scope):
@@ -420,7 +440,7 @@ class TgDriveASGI(StaticFiles):
             pattern = re.sub(r"^/(users|clients|bots|downloads)/\d+/", r"/\1/{}/", route)
             pattern = re.sub(r"^/shares/[A-Za-z0-9_-]+/", "/shares/{}/", pattern)
             pattern = re.sub(r"^/assistant/(channels|models|users)/\d+/", r"/assistant/\1/{}/", pattern)
-            pattern = re.sub(r"^/assistant/(scope-requests|actions)/[A-Za-z0-9_-]+/", r"/assistant/\1/{}/", pattern)
+            pattern = re.sub(r"^/assistant/(scope-requests|actions|attachments)/[A-Za-z0-9_-]+/", r"/assistant/\1/{}/", pattern)
             action = routes.get(pattern)
             if action is None:
                 return None
@@ -469,6 +489,8 @@ class TgDriveASGI(StaticFiles):
             detail = {"count": len(payload.get("items", [])) if isinstance(payload.get("items"), list) else 0}
         elif action == "share.save":
             detail = {"saved": (result or {}).get("saved"), "bytes": (result or {}).get("bytes")} if ok else {}
+        elif action == "assistant.attachment.save":
+            detail = {"bytes": (result or {}).get("size")} if ok else {}
         elif action == "download.clear":
             detail = {"status": payload.get("status") if payload.get("status") in ("completed", "failed") else None,
                       "removed": (result or {}).get("removed") if ok else None}
@@ -817,6 +839,8 @@ class TgDriveASGI(StaticFiles):
                 if password_hash and not self.share_access.check(shared[1], password_hash, payload.get("access")):
                     raise SharePasswordRequired("password required")
                 return 200, await user.save_share(token, csrf, shared[1], payload.get("destination", ""), payload.get("paths")), {}
+            if route == "/usage" and method == "GET" and not private:
+                return 200, user.usage(token), {"Cache-Control": "no-store"}
             if route.startswith("/assistant/") and self.assistant is not None:
                 return await self._assistant_user(method, route[len("/assistant"):], query, payload, token, csrf)
             if route.startswith("/downloads") and self.offline is not None:
@@ -1290,6 +1314,17 @@ class TgDriveASGI(StaticFiles):
             return 200, service.cancel_action(token, csrf, match[1]), no_store
         if match and match[2] == "undo" and method == "POST":
             return 200, await service.undo_action(token, csrf, match[1]), no_store
+        if route == "/attachments/stats" and method == "GET":
+            return 200, service.attachment_stats(token), no_store
+        match = re.fullmatch(r"/attachments/([0-9a-f]{32})/(thumbnails|discard|save)", route)
+        if match and method == "POST":
+            if match[2] == "thumbnails":
+                service.attachment_thumbnail(token, csrf, match[1], payload.get("data"), str(payload.get("variant") or "thumb"))
+                return 204, None, {}
+            if match[2] == "discard":
+                service.discard_attachment(token, csrf, match[1])
+                return 204, None, {}
+            return 200, service.save_attachment(token, csrf, match[1], payload), no_store
         match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})/snapshots", route)
         if match and method == "POST":
             return 201, service.upload_snapshot(token, csrf, match[1], payload), no_store

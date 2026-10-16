@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { BRAND } from "./brand";
 import * as api from "./api";
 import { DocsPage } from "./docs/docs";
@@ -6,7 +6,7 @@ import { DocsPage } from "./docs/docs";
 import { SharePage } from "./share";
 import { ADMIN_MODULES, AdminConsole, AdminDocsGate, LockedGate, type AdminModule } from "./admin";
 import { AppShell, FullPageLoading, LoginPage, SetupPage, isPlainClick, useSessionGuard, type NavGroup } from "./shell";
-import { Icon, Progress, formatBytes, toast, usageTone, useDocumentTitle } from "./ui";
+import { Icon, Progress, formatBytes, toast, usageTone, useDocumentTitle, type IconName } from "./ui";
 
 import { FilesView } from "./user/files";
 import { PrivateSpaceView } from "./user/private";
@@ -128,6 +128,33 @@ function sectionUrl(section: Section, prefix = "") {
   return query ? `/?${query}` : "/";
 }
 
+/** 侧栏容量：点开显示分项（我的文件、回收站、私密空间、助手附件）；系统区的内容同样计入配额。 */
+function StorageMeter({ usage, percent }: { usage: Usage | null; percent: number }) {
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<api.StorageUsage | null>(null);
+  const id = useId();
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    void api.storageUsage().then(value => { if (alive) setDetail(value); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [open, usage?.used_bytes]);
+  const rows: [string, IconName, number][] = detail ? [["我的文件", "folder", detail.files], ["回收站", "trash", detail.trash],
+    ["私密空间", "lock", detail.private], ["助手附件", "paperclip", detail.assistant]] : [];
+  return <div className={`storage-meter${open ? " is-open" : ""}`} title={usage?.quota_bytes == null ? "未设置空间配额" : undefined}>
+    <button type="button" className="storage-meter-head" aria-expanded={open} aria-controls={`${id}-detail`} onClick={() => setOpen(value => !value)}>
+      <span>已用空间<Icon name="chevronDown" size={12} /></span><strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></button>
+    {usage?.quota_bytes != null && <>
+      {usage.quota_bytes > 0 && <Progress value={percent} tone={usageTone(percent)} label="存储使用率" />}
+      <p>{usage.quota_bytes > 0 ? `共 ${formatBytes(usage.quota_bytes)} · ${Math.round(percent)}%` : "配额为 0，无法上传"}</p>
+    </>}
+    {open && <ul id={`${id}-detail`} className="storage-meter-detail" aria-label="已用空间分项">
+      {detail ? rows.map(([label, icon, size]) => <li key={label}><Icon name={icon} size={12} /><span>{label}</span><strong>{formatBytes(size)}</strong></li>)
+        : <li className="is-loading"><span>正在统计…</span></li>}
+    </ul>}
+  </div>;
+}
+
 function MainShell({ session, onLogout, onSessionChange }: { session: api.Session; onLogout: () => void; onSessionChange: (patch: Partial<api.Session>) => void }) {
   const isAdmin = session.role === "admin";
   const [location, setLocation] = useState(readLocation);
@@ -200,7 +227,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
           pageImport={pageImport} onPageImportDone={clearPageImport}
           onConversationChange={id => { if ((id ?? "") !== (new URLSearchParams(window.location.search).get("c") ?? "")) window.history.replaceState(null, "", sectionUrl("assistantPage", id ?? "")); }} />;
   } else if (section === "account") {
-    content = <UserSettingsPage session={session} onSessionChange={onSessionChange} />;
+    content = <UserSettingsPage session={session} onSessionChange={onSessionChange} assistant={assistantAvailable} onOpenConversation={id => navigate("assistantPage", id)} />;
   } else if (isAdminSection(section)) {
     if (!isAdmin) content = <AccessDenied />;
     else if (status === null) content = <FullPageLoading label="正在读取系统状态" />;
@@ -249,13 +276,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
           </a>
         )}
         {assistantAvailable && <AssistantLauncher open={assistantOpen || assistantPage} onOpen={toggleAssistant} />}
-        <div className="storage-meter" title={usage?.quota_bytes == null ? "未设置空间配额" : undefined}>
-          <div className="storage-meter-head"><span>已用空间</span><strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></div>
-          {usage?.quota_bytes != null && <>
-            {usage.quota_bytes > 0 && <Progress value={percent} tone={usageTone(percent)} label="存储使用率" />}
-            <p>{usage.quota_bytes > 0 ? `共 ${formatBytes(usage.quota_bytes)} · ${Math.round(percent)}%` : "配额为 0，无法上传"}</p>
-          </>}
-        </div>
+        <StorageMeter usage={usage} percent={percent} />
       </>}
       account={{ name: api.displayName(session), caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", avatar: api.avatarUrl(session.avatar_version), menu: [
         { label: "跟随系统", icon: "monitor", heading: "外观", checked: theme === "system", onSelect: () => setThemePreference("system") },

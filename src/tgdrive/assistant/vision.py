@@ -10,6 +10,8 @@ from ..errors import NotFoundError
 from ..filekinds import kind_of
 from ..objects import ObjectService, Scope
 
+ATTACHMENT_ROOT = ".tgdrive/assistant/"  # 对话附件的系统区（attachments.ROOT）
+
 # 原图上限：默认 4 MB，管理员可调到 10 MB（各家接口对单张图片的限制在 5–20 MB 之间）。
 DEFAULT_ORIGINAL_BYTES = 4 * 1024 * 1024
 MAX_ORIGINAL_BYTES = 10 * 1024 * 1024
@@ -41,17 +43,20 @@ def is_image(key: str, content_type: str | None) -> bool:
     return kind_of(key, content_type) == "image"
 
 
-async def load_image(objects: ObjectService, bucket_id: int, key: str, *, max_bytes: int = DEFAULT_ORIGINAL_BYTES) -> dict:
-    """返回 {"mime", "data", "source", "size"}；不能发送时抛 ImageUnavailable。调用方负责授权（作用域或附件白名单）。"""
-    if not key or key.endswith("/") or key.startswith(".tgdrive"):
+async def load_image(objects: ObjectService, bucket_id: int, key: str, *, max_bytes: int = DEFAULT_ORIGINAL_BYTES,
+                     label: str | None = None) -> dict:
+    """返回 {"mime", "data", "source", "size"}；不能发送时抛 ImageUnavailable。调用方负责授权（作用域或本对话的附件）。"""
+    # 系统区只有对话附件可读（调用方已按本对话的附件表授权）；私密空间与回收站永远不可读。
+    if not key or key.endswith("/") or (key.startswith(".tgdrive") and not key.startswith(ATTACHMENT_ROOT)):
         raise ImageUnavailable("该路径不能读取")
+    label = label or "/" + key  # 给用户与模型看的名称：附件显示为「附件:名称」，不暴露存放位置
     scope = Scope(bucket_id, "")
     try:
         info = objects.head_object(scope, key)
     except NotFoundError as exc:
-        raise ImageUnavailable(f"找不到图片 /{key}") from exc
+        raise ImageUnavailable(f"找不到图片 {label}") from exc
     if not is_image(key, info.content_type):
-        raise NotAnImage(f"/{key} 不是图片")
+        raise NotAnImage(f"{label} 不是图片")
     try:
         data, _, _ = await objects.metadata.run_in_thread(objects.get_thumbnail, scope, key, "poster")
         mime = sniff(data)
@@ -60,7 +65,7 @@ async def load_image(objects: ObjectService, bucket_id: int, key: str, *, max_by
     except NotFoundError:
         pass
     if info.size > max(1, min(max_bytes, MAX_ORIGINAL_BYTES)):
-        raise ImageUnavailable(f"/{key} 还没有预览图，原图又超过 {max_bytes // (1024 * 1024)} MB。"
+        raise ImageUnavailable(f"{label} 还没有预览图，原图又超过 {max_bytes // (1024 * 1024)} MB。"
                                "请在文件页打开所在文件夹，等待预览图生成后再试")
     _, stream = await objects.get_object(scope, key)
     chunks = []
@@ -69,6 +74,6 @@ async def load_image(objects: ObjectService, bucket_id: int, key: str, *, max_by
     data = b"".join(chunks)
     mime = sniff(data)
     if mime is None:
-        raise ImageUnavailable(f"/{key} 的格式不受支持（只支持 JPEG、PNG、WebP、GIF），也还没有预览图。"
+        raise ImageUnavailable(f"{label} 的格式不受支持（只支持 JPEG、PNG、WebP、GIF），也还没有预览图。"
                                "请在文件页打开所在文件夹生成预览图后再试")
     return {"mime": mime, "data": data, "source": "original", "size": info.size}

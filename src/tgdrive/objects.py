@@ -777,6 +777,39 @@ class ObjectService:
             db.execute("UPDATE objects SET public_downloads=public_downloads+1 WHERE bucket_id=? AND key=?", (root.bucket_id, root.key))
         return {"saved": saved, "bytes": total, "items": renamed}
 
+    def link_copy(self, source_bucket: int, source_key: str, dst: Scope, target: str) -> ObjectInfo:
+        """把一个文件以「引用同一个加密 Blob」的方式另存为 dst 中的普通文件：不搬运数据，计入目标配额，
+        不继承公开链接；目标已存在时自动改名为「名称 (n).扩展名」。调用方负责授权来源。"""
+        if not target or target.endswith("/"):
+            raise ValueError("目标文件名不正确")
+        self._check_scope(dst, target, write=True)
+        now = time.time()
+        with self.metadata.transaction() as db:
+            row = db.execute("SELECT * FROM objects WHERE bucket_id=? AND key=?", (source_bucket, source_key)).fetchone()
+            if row is None or not row["blob_uuid"]:
+                raise NotFoundError(source_key)
+            bucket = db.execute("SELECT quota_bytes, used_bytes FROM buckets WHERE id=?", (dst.bucket_id,)).fetchone()
+            if bucket is None:
+                raise NotFoundError(f"bucket {dst.bucket_id} not found")
+            if bucket["quota_bytes"] is not None and int(bucket["used_bytes"]) + int(row["size"]) > bucket["quota_bytes"]:
+                raise QuotaExceededError("存储空间不足，无法保存")
+            directory, slash, name = target.rpartition("/")
+            base, dot, ext = name.rpartition(".")
+            if not dot or not base:
+                base, dot, ext = name, "", ""
+            final, n = target, 1
+            while db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND (key=? OR (key>=? AND key<?)) LIMIT 1",
+                             (dst.bucket_id, final, final + "/", final + "/" + self._PREFIX_END)).fetchone() is not None:
+                final, n = f"{directory}{slash}{base} ({n}){dot}{ext}", n + 1
+            self._check_scope(dst, final, write=True)
+            db.execute("UPDATE blobs SET refcount = refcount + 1 WHERE uuid = ?", (row["blob_uuid"],))
+            db.execute("INSERT INTO objects(bucket_id,key,blob_uuid,size,etag,content_type,user_meta,modified_at) "
+                       "VALUES(?,?,?,?,?,?,?,?)", (dst.bucket_id, final, row["blob_uuid"], row["size"], row["etag"],
+                                                  row["content_type"], row["user_meta"], now))
+            db.execute("UPDATE buckets SET used_bytes = used_bytes + ? WHERE id=?", (row["size"], dst.bucket_id))
+        return self._object(self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id=? AND key=?",
+                                                      (dst.bucket_id, final)).fetchone())
+
     async def asave_public(self, token: str, dst: Scope, destination: str, paths: list[str] | None = None) -> dict[str, object]:
         return await self.metadata.run_in_thread(self.save_public, token, dst, destination, paths)
 

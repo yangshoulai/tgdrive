@@ -170,17 +170,20 @@ export type ChatMessage = {
   reasoning?: string; reasoning_ms?: number | null;
   call_id?: string; name?: string; label?: string; arguments?: Record<string, unknown>; status?: "ok" | "error"; summary?: string;
   result?: unknown; items?: number | null; duration_ms?: number; truncated?: boolean; event?: ToolEvent | null;
-  type?: string; retry?: boolean; action_id?: string; attachment?: SnapshotAttachment; mentions?: string[]; attachments?: string[]; attachments_missing?: number;
+  type?: string; retry?: boolean; action_id?: string; attachment?: SnapshotAttachment; mentions?: string[]; attachments?: MessageAttachment[];
 };
+/** 消息里的对话附件：name 是对话内的显示名（模型以「附件:名称」称呼）。 */
+export type MessageAttachment = { id: string; name: string; size: number; content_type: string | null; image: boolean };
 export const ACTION_KINDS: Record<string, string> = {
   rename: "批量改名", move: "移动", organize: "整理文件", mkdir: "新建文件夹", trash: "移入回收站", restore: "从回收站恢复",
   purge: "彻底删除", unshare: "取消公开", share: "公开分享", downloads: "离线下载", download_control: "下载任务操作",
+  save_attachment: "保存附件",
 };
 export type ActionStatus = "pending" | "confirmed" | "rejected" | "expired" | "running" | "done" | "partial" | "failed" | "cancelled"
   | "interrupted" | "undoing" | "undone";
 /** 冻结的条目：移动类为 from/to（对象键），其余为 path / id / url 等。 */
 export type ActionItem = { from?: string; to?: string; path?: string; id?: string | number; name?: string; url?: string; host?: string;
-  size?: number; folder?: boolean; op?: string; status?: string; variant?: string | null };
+  size?: number; folder?: boolean; op?: string; status?: string; variant?: string | null; attachment?: string };
 export type ShareLink = { path: string; token: string; folder: boolean; expires_at: number | null; password: boolean };
 export type ActionResult = { ok: number; skipped: number; failed: number; total: number; reasons: Record<string, number>;
   failures: { path: string; reason: string; status: "skipped" | "failed" }[]; links?: ShareLink[] };
@@ -196,7 +199,8 @@ export type AssistantAction = {
   result: ActionResult | null; undoable?: boolean; progress?: { done: number; total: number; ok: number; skipped: number; failed: number };
   created_at: number; expires_at: number; decided_at: number | null; finished_at?: number | null;
 };
-export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; actions: AssistantAction[]; active_run: string | null };
+export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; actions: AssistantAction[]; active_run: string | null;
+  attachments?: { count: number; size: number } };
 export type RunEvent = { seq: number; type: string; [key: string]: unknown };
 
 const USER = "/api/user/v1/assistant";
@@ -208,6 +212,17 @@ export const createConversation = (location: string, modelId?: number | null, ac
 export const conversation = (id: string) => get<ConversationDetail>(`${USER}/conversations/${encodeURIComponent(id)}`);
 export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
 export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
+const attachmentPath = (id: string, tail: string) => `${USER}/attachments/${encodeURIComponent(id)}/${tail}`;
+export const attachmentContentUrl = (id: string, download = false) => attachmentPath(id, `content${download ? "?download=1" : ""}`);
+export const attachmentThumbnailUrl = (id: string, variant: "thumb" | "poster" = "thumb") => attachmentPath(id, `thumbnail?variant=${variant}`);
+export const setAttachmentThumbnail = (id: string, data: string | null, variant: "thumb" | "poster" | "none") =>
+  post<void>(attachmentPath(id, "thumbnails"), { data, variant });
+export const discardAttachment = (id: string) => post<void>(attachmentPath(id, "discard"), {});
+/** 另存为普通文件：path 为目标文件夹（以 / 结尾）；同名自动改名。 */
+export const saveAttachment = (id: string, path: string) => post<{ path: string; size: number }>(attachmentPath(id, "save"), { path });
+export type AttachmentStats = { count: number; size: number; pending: { count: number; size: number };
+  conversations: { conversation_id: string; title: string | null; archived: boolean; count: number; size: number; latest: number }[] };
+export const attachmentStats = () => get<AttachmentStats>(`${USER}/attachments/stats`);
 export type ClientEnvironment = { browser: string; browser_version: string; os: string; language: string; timezone: string; origin: string };
 export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root" | "path"; scope_path?: string; mentions?: string[]; attachments?: string[]; snapshot_id?: string; environment?: ClientEnvironment }) =>
   post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/messages`, input);

@@ -349,9 +349,19 @@ export function uploadFileWithProgress(path: string, file: File, options: { isPu
   return xhrPut<FileItem>(`${fileApi("/files", path)}?path=${encodeURIComponent(path)}${publicParam}`, file, file.type || "application/octet-stream", options.onProgress);
 }
 
+/** 文件助手对话附件：保存在系统区，不出现在我的文件（docs/assistant-design.md §22.5）。 */
+export type AssistantAttachment = { id: string; name: string; size: number; content_type: string | null; image: boolean; conversation_id?: string | null };
+export function uploadAttachmentWithProgress(file: File, name: string, onProgress: (progress: UploadProgress) => void) {
+  return xhrPut<AssistantAttachment>(`/api/user/v1/assistant/attachments?name=${encodeURIComponent(name)}`, file, file.type || "application/octet-stream", onProgress);
+}
+
 export function uploadPartWithProgress(uploadId: string, partNo: number, blob: Blob, onProgress: (progress: UploadProgress) => void, path = "") {
   return xhrPut<{ part_no: number; size: number; etag: string }>(fileApi(`/uploads/${uploadId}/parts/${partNo}`, path), blob, "application/octet-stream", onProgress);
 }
+
+/** 已用空间分项：我的文件、回收站、私密空间与助手附件。 */
+export type StorageUsage = { total: number; quota_bytes: number | null; files: number; trash: number; private: number; assistant: number };
+export const storageUsage = () => request<StorageUsage>("/api/user/v1/usage");
 
 /* ---------- 用户客户端密钥 ---------- */
 

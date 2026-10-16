@@ -22,7 +22,9 @@ from zoneinfo import ZoneInfo
 from ..api import normalize_user_path
 from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
+from ..objects import Scope
 from . import client_tools, http_tools, knowledge, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
+from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
 from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
 from .catalog import CatalogStore
 from .channels import ChannelStore
@@ -53,8 +55,6 @@ AUTO_WAIT = 25
 ACCESS_MODES = ("approval", "full")
 MAX_MENTIONS = 20
 # 聊天框附件：统一保存在普通文件区域的这个目录下（§22.5），每条消息最多 10 个。
-ATTACHMENT_ROOT = "助手附件/"
-MAX_ATTACHMENTS = 10
 # 读取不可信外部内容的工具：结果进入上下文后，完全访问模式下的修改仍需确认（§19.5）。
 TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "collect_gallery": "分析过网页",
                "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应", "view_image": "查看过图片内容"}
@@ -132,6 +132,7 @@ class AssistantService:
         self.metadata, self.keystore = accounts.metadata, accounts.keystore
         self.config = AssistantConfig(self.metadata)
         self.trace = TraceStore(self.metadata, self.keystore)
+        self.attachments = AttachmentStore(self.metadata, objects)
         self.catalog = CatalogStore(self.metadata, self.config, log_call=self.trace.log_call)
         self.channels = ChannelStore(self.metadata, self.keystore, log_call=self.trace.log_call, catalog=self.catalog)
         self.guard = SecretGuard(self.channels, offline)
@@ -232,39 +233,6 @@ class AssistantService:
                 keys.append(key)
         return keys
 
-    def _attachments(self, bucket_id: int, value: object, *, strict: bool = True) -> tuple[list[str], int]:
-        """聊天框附件：必须位于「助手附件/」下、存在的普通文件，不要求在作用域内（只读工具对它们有白名单例外）。
-        strict=False 用于重试：已不存在的附件跳过，返回跳过的数量。"""
-        if value in (None, []):
-            return [], 0
-        if not isinstance(value, list) or len(value) > MAX_ATTACHMENTS or not all(isinstance(item, str) for item in value):
-            raise ValueError(f"一条消息最多 {MAX_ATTACHMENTS} 个附件")
-        keys: list[str] = []
-        missing = 0
-        for item in value:
-            try:
-                key = normalize_user_path(item.strip().lstrip("/"))
-            except (PermissionError, ValueError) as exc:
-                raise ValueError(f"附件路径不正确：{item}") from exc
-            if not key.startswith(ATTACHMENT_ROOT) or key.endswith("/"):
-                raise ValueError(f"附件必须保存在 /{ATTACHMENT_ROOT} 下")
-            if self.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone() is None:
-                if strict:
-                    raise ValueError(f"附件 {display(key)} 不存在，可能还没有上传完成")
-                missing += 1
-                continue
-            if key not in keys:
-                keys.append(key)
-        return keys, missing
-
-    def _readable(self, conversation_id: str) -> frozenset:
-        """对话的附件白名单：所有用户消息上传过的附件（对象键）。"""
-        keys: set[str] = set()
-        for message in self.trace.messages(conversation_id, limit=5000):
-            if message["role"] == "user" and isinstance(message.get("attachments"), list):
-                keys.update(str(path).lstrip("/") for path in message["attachments"])
-        return frozenset(keys)
-
     # ---------- 用户端：配置 ----------
 
     def user_config(self, token: str) -> dict[str, object]:
@@ -338,12 +306,13 @@ class AssistantService:
             item["access_mode"] = "approval"
         return {"conversation": item, "messages": [self._public_message(m) for m in self.trace.messages(conversation_id, limit=2000)],
                 "actions": [self._action_view(action) for action in self.trace.actions(conversation_id)],
-                "active_run": self._active_run(conversation_id)}
+                "active_run": self._active_run(conversation_id),
+                "attachments": self.attachments.conversation_usage(account.id, conversation_id)}
 
     @staticmethod
     def _public_message(message: dict) -> dict:
         """发给浏览器的消息：去掉只给模型看的包装文本。"""
-        return {key: value for key, value in message.items() if key not in ("model_content",)}
+        return {key: value for key, value in message.items() if key not in ("model_content", "images")}
 
     def update_conversation(self, token: str, csrf: str, conversation_id: str, payload: dict) -> dict[str, object]:
         _, account = self._session(token, csrf=csrf, mutation=True)
@@ -376,6 +345,74 @@ class AssistantService:
             self.runs[run_id].task.cancel()
         self.trace.hide_conversation(account.id, conversation_id)
         self.trace.expire_actions(conversation_id)
+        self.attachments.delete_for_conversation(conversation_id)
+
+    # ---------- 用户端：对话附件（§22.5） ----------
+
+    async def upload_attachment(self, token: str, csrf: str, name: str, content_type: str | None, body, size: int | None) -> dict:
+        _, account = self._session(token, csrf=csrf, mutation=True)
+        self._require_available(account.id)
+        return await self.attachments.upload(account.id, account.bucket_id, unquote(name or ""), content_type, body, size)
+
+    def attachment_thumbnail(self, token: str, csrf: str, attachment_id: str, data: str | None, variant: str = "thumb") -> None:
+        import base64
+        import binascii
+        _, account = self._session(token, csrf=csrf, mutation=True)
+        raw = None
+        if variant != "none":
+            try:
+                raw = base64.b64decode(str(data or "").split(",", 1)[-1], validate=True)
+            except binascii.Error as exc:
+                raise ValueError("缩略图数据不是有效的 base64") from exc
+        self.attachments.set_thumbnail(account.id, attachment_id, raw, variant)
+
+    def read_attachment_thumbnail(self, token: str, attachment_id: str, variant: str = "thumb"):
+        _, account = self._session(token)
+        return self.attachments.thumbnail(account.id, attachment_id, variant)
+
+    async def attachment_content(self, token: str, attachment_id: str, start: int = 0, end: int | None = None):
+        _, account = self._session(token)
+        return await self.attachments.content(account.id, attachment_id, start, end)
+
+    def discard_attachment(self, token: str, csrf: str, attachment_id: str) -> None:
+        _, account = self._session(token, csrf=csrf, mutation=True)
+        self.attachments.discard(account.id, attachment_id)
+
+    def save_attachment(self, token: str, csrf: str, attachment_id: str, payload: dict) -> dict[str, object]:
+        """另存为普通文件：path 为目标文件夹（以 / 结尾）或完整文件路径；同名自动改名。"""
+        _, account = self._session(token, csrf=csrf, mutation=True)
+        row = self.attachments.row(account.id, attachment_id)
+        target = self._save_target(payload.get("path"), row["name"])
+        info = self.attachments.save(account.id, attachment_id, Scope(account.bucket_id), target)
+        return {"path": display(info.key), "size": info.size, "attachment_id": attachment_id}
+
+    @staticmethod
+    def _save_target(value: object, name: str) -> str:
+        if not isinstance(value, str) or len(value) > 1024:
+            raise ValueError("请选择保存位置")
+        text = value.strip()
+        bare = text.strip("/")
+        if not bare:
+            return name
+        folder = text.endswith("/")
+        try:
+            key = normalize_user_path(bare, directory=folder)
+        except PermissionError as exc:
+            raise ValueError("不能保存到私密空间或系统区域") from exc
+        except ValueError as exc:
+            raise ValueError("保存位置不正确") from exc
+        return key + name if folder else key
+
+    def attachment_stats(self, token: str) -> dict[str, object]:
+        _, account = self._session(token)
+        stats = self.attachments.stats(account.id)
+        for item in stats["conversations"]:
+            try:
+                conversation = self.trace.conversation_json(self.trace.conversation(account.id, item["conversation_id"]))
+                item.update(title=conversation.get("title"), archived=conversation.get("archived"))
+            except (NotFoundError, PermissionError, ValueError):
+                item.update(title=None, archived=False)
+        return stats
 
     # ---------- 用户端：发送与运行 ----------
 
@@ -419,7 +456,7 @@ class AssistantService:
         new_scope = self._location(payload.get("scope_path")) if choice == "path" else \
             {"location": location, "root": ""}.get(choice or "conversation", scope_root)
         mentions = self._mentions(account.bucket_id, payload.get("mentions"), new_scope)
-        attachments, _ = self._attachments(account.bucket_id, payload.get("attachments"))
+        attachments = self.attachments.check(account.id, conversation_id, payload.get("attachments"))
         self._switch_model(account.id, row, model_id)
         if new_scope != scope_root:
             # 用户在界面上直接切换作用域，属于用户本人的操作，不需要再确认。
@@ -431,8 +468,6 @@ class AssistantService:
         body = {"text": text.strip(), "location": display(location), "view": view, "scope": display(new_scope)}
         if mentions:
             body["mentions"] = [display(key) for key in mentions]
-        if attachments:
-            body["attachments"] = [display(key) for key in attachments]
         snapshot_id = payload.get("snapshot_id")
         if snapshot_id is not None:
             if not isinstance(snapshot_id, str):
@@ -443,10 +478,19 @@ class AssistantService:
             body["attachment"] = {"type": "snapshot", "id": snapshot_id, "source": snapshot["source"],
                                   "pages": len(snapshot["urls"]), "images": snapshot["count"]}
         run_id = self.trace.start_run(conversation_id, model_id, prompts.PROMPT_VERSION)
-        message_seq = self.trace.append(conversation_id, run_id, "user", body)
+        message_seq = self._append_user(account.id, conversation_id, run_id, body, attachments)
         state = self._start(run_id, conversation_id, account, token, model_id, view, location,
                             environment=knowledge.client_environment(payload.get("environment")))
         return {"run_id": state.id, "message_seq": message_seq}
+
+    def _append_user(self, user_id: int, conversation_id: str, run_id: str, body: dict, attachments: list[str],
+                     keep: frozenset = frozenset()) -> int:
+        """写入用户消息并把附件绑定到它；正文里保存附件的显示名与基本信息（不含存放位置）。"""
+        seq = self.trace.append(conversation_id, run_id, "user", body)
+        if attachments:
+            body["attachments"] = self.attachments.bind(user_id, conversation_id, seq, attachments, keep=keep)
+            self.trace.update_message(conversation_id, seq, body)
+        return seq
 
     def _admit(self, user_id: int, row) -> dict:
         """开始新运行前的共同检查：对话空闲、用户并发、每日额度与频率。"""
@@ -492,15 +536,14 @@ class AssistantService:
         mentions = self._mentions(account.bucket_id, message.get("mentions"), row["scope_root"])
         if mentions:
             body["mentions"] = [display(key) for key in mentions]
-        attachments, missing = self._attachments(account.bucket_id, message.get("attachments"), strict=False)
-        if attachments:
-            body["attachments"] = [display(key) for key in attachments]
-        if missing:
-            body["attachments_missing"] = missing
+        # 重发这条消息的附件（改绑到新消息）；被截断的其他消息上的附件随之删除。
+        attachments = self.attachments.message_ids(conversation_id, seq)
+        keep = frozenset(attachments)
+        self.attachments.delete_after(conversation_id, seq, keep=keep)
         self.trace.truncate(conversation_id, seq)
         self._switch_model(account.id, row, model_id)
         run_id = self.trace.start_run(conversation_id, model_id, prompts.PROMPT_VERSION)
-        message_seq = self.trace.append(conversation_id, run_id, "user", body)
+        message_seq = self._append_user(account.id, conversation_id, run_id, body, attachments, keep)
         state = self._start(run_id, conversation_id, account, token, model_id, view, location,
                             environment=knowledge.client_environment(payload.get("environment")))
         return {"run_id": state.id, "message_seq": message_seq}
@@ -902,6 +945,7 @@ class AssistantService:
         识图（§22.3）：只有当前这一轮（run_id）的用户消息与 view_image 结果带 image_refs，由 _attach_images 读取图片；
         更早轮次的图片换成文字占位，不重复发送。"""
         messages = self.trace.messages(conversation_id, limit=5000)
+        files = self.attachments.for_conversation(conversation_id)
         start, upto = 0, None
         summary = None
         for index, message in enumerate(messages):
@@ -945,17 +989,21 @@ class AssistantService:
                 mentioned = message.get("mentions")
                 if isinstance(mentioned, list) and mentioned:
                     note += "\n\n[引用] 用户用 @ 明确引用了这些路径（以 / 结尾的是文件夹）：" + "、".join(str(path) for path in mentioned)
-                uploaded = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+                uploaded = [item for item in message.get("attachments") or [] if isinstance(item, dict) and item.get("name")] \
+                    if isinstance(message.get("attachments"), list) else []
                 if uploaded:
-                    note += "\n\n[附件] 用户在聊天框上传了这些文件（只读工具可以直接读取它们，即使不在作用域内）：" + "、".join(str(path) for path in uploaded)
-                if message.get("attachments_missing"):
-                    note += f"\n\n[附件] 另有 {message['attachments_missing']} 个附件已被移动或删除，无法再读取。"
-                candidates = [str(path) for path in [*(mentioned if isinstance(mentioned, list) else []), *uploaded]
+                    note += "\n\n[附件] 用户随消息上传了这些文件，用「附件:名称」读取（只读；要放进文件夹请用 propose_save_attachment）：" + \
+                        "、".join(f"{ATTACHMENT_PREFIX}{item['name']}（{'图片' if item.get('image') else '文件'}，{_fmt(int(item.get('size') or 0))}）"
+                                 for item in uploaded)
+                candidates = [str(path) for path in (mentioned if isinstance(mentioned, list) else [])
                               if isinstance(path, str) and not path.endswith("/")]
+                candidates += [ATTACHMENT_PREFIX + item["name"] for item in uploaded if item["name"] in files]
+                keys = {path: files[path[len(ATTACHMENT_PREFIX):]] if path.startswith(ATTACHMENT_PREFIX) else path.lstrip("/")
+                        for path in candidates}
                 pictures = [path for path in candidates if vision.is_image(path, None)]
                 item = {"role": "user", "content": message["text"] + note}
                 if candidates and can_see and message.get("run_id") == run_id:
-                    item["image_refs"] = [path.lstrip("/") for path in dict.fromkeys(candidates)]
+                    item["image_refs"] = list(dict.fromkeys(keys[path] for path in candidates))
                 elif pictures and can_see:
                     item["content"] += "\n\n[图片] " + "、".join(pictures) + " 是之前消息里的图片，内容不再附上；需要时调用 view_image 查看。"
                 elif pictures:
@@ -994,6 +1042,8 @@ class AssistantService:
         """把 image_refs 换成图片数据（同一轮内缓存）。用户消息里不是图片的引用直接忽略；读不出的图片写进文字说明。"""
         limit = self.config.limits()["message_images"]
         max_bytes = int(tool_params(self._tool_settings(), "view_image").get("max_bytes", vision.DEFAULT_ORIGINAL_BYTES))
+        names = {key: name for name, key in self.attachments.for_conversation(state.conversation_id).items()}
+        label = lambda key: ATTACHMENT_PREFIX + names[key] if key in names else "/" + key
         for message in history:
             refs = message.pop("image_refs", None)
             if not refs:
@@ -1004,7 +1054,9 @@ class AssistantService:
                 cached = state.images.get(key)
                 if cached is None:
                     try:
-                        cached = await vision.load_image(self.objects, state.bucket_id, key, max_bytes=max_bytes)
+                        if key.startswith(vision.ATTACHMENT_ROOT) and key not in names:
+                            raise vision.ImageUnavailable("附件已随对话删除")
+                        cached = await vision.load_image(self.objects, state.bucket_id, key, max_bytes=max_bytes, label=label(key))
                     except vision.NotAnImage:
                         cached = False
                     except vision.ImageUnavailable as exc:
@@ -1015,9 +1067,9 @@ class AssistantService:
                 if isinstance(cached, str):
                     notes.append(cached)
                 elif message["role"] == "user" and len(images) >= limit:
-                    notes.append(f"/{key} 超过每条消息 {limit} 张的上限，没有附上；需要时调用 view_image 查看")
+                    notes.append(f"{label(key)} 超过每条消息 {limit} 张的上限，没有附上；需要时调用 view_image 查看")
                 else:
-                    images.append({"mime": cached["mime"], "data": cached["data"], "path": "/" + key})
+                    images.append({"mime": cached["mime"], "data": cached["data"], "path": label(key)})
             if images:
                 message["images"] = images
                 state.tainted = state.tainted or "查看了图片内容"
@@ -1221,7 +1273,8 @@ class AssistantService:
                                   analyze=analyze, client=client, taint=taint,
                                   public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
                                   redact=self.guard.redact,
-                                  readable=shared.setdefault("readable", self._readable(state.conversation_id)) if spec.level == "read" else frozenset(),
+                                  attachments=shared.setdefault("attachments", self.attachments.for_conversation(state.conversation_id)),
+                                  read_only=spec.level == "read",
                                   vision=self.channels.vision(self.channels.model(state.model_id)))
             timeout = max(limits["tool_seconds"], spec.timeout or 0)
             output = await asyncio.wait_for(spec.handler(context, arguments), timeout)
@@ -1559,13 +1612,24 @@ class AssistantService:
         for run in self.runs.values():
             if run.finished_at is None and run.task:
                 run.task.cancel()
+        self.attachments.purge_all()
         self.trace.purge_all()
         self.config.purge_all()
 
     async def cleanup(self, now: float | None = None) -> dict[str, int]:
-        """维护任务：按保留期清理留痕与调用日志。"""
-        return await self.metadata.run_in_thread(lambda: self.trace.cleanup(
-            retention_days=self.config.setting("retention_days"), call_log_days=self.config.setting("call_log_days"), now=now))
+        """维护任务：按保留期清理留痕与调用日志；附件先于对话删除，之后再兜底清理残留与超时未发送的附件。"""
+        def work():
+            now_ = now or time.time()
+            expired = [row[0] for row in self.metadata.db.execute(
+                "SELECT id FROM assistant_conversations WHERE updated_at<? LIMIT 2000",
+                (now_ - self.config.setting("retention_days") * 86400,))]
+            for conversation_id in expired:
+                self.attachments.delete_for_conversation(conversation_id)
+            report = self.trace.cleanup(retention_days=self.config.setting("retention_days"),
+                                        call_log_days=self.config.setting("call_log_days"), now=now_)
+            report["attachments"] = self.attachments.cleanup(now_)
+            return report
+        return await self.metadata.run_in_thread(work)
 
     async def sync_catalog_if_due(self, now: float | None = None) -> dict[str, object]:
         """维护任务：每天同步一次模型目录。只在已经配置过模型渠道后自动同步，未使用助手的部署不访问外网。"""

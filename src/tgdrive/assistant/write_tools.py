@@ -13,6 +13,7 @@ from datetime import datetime
 from ..api import normalize_user_path
 from ..filekinds import kind_clause, kind_of
 from .actions import KINDS, directory_version
+from .attachments import PREFIX as ATTACHMENT_PREFIX
 from .tools import (
     END,
     KIND,
@@ -601,6 +602,37 @@ async def propose_unshare(ctx: ToolContext, args: dict) -> ToolOutput:
         items.append({"path": row["key"]})
     return await _propose(ctx, "unshare", items, skipped=skipped, sample=lambda item: "/" + item["path"],
                           summary=f"取消 {len(items)} 个公开链接")
+
+
+@tool("propose_save_attachment", "保存附件", "write", "write",
+      "把用户随消息上传的附件另存为普通文件（附件本身只能读取，随对话删除；保存出来的文件不受影响）。"
+      "目标以 / 结尾表示保存到该文件夹并沿用附件名；同名时自动改名。",
+      {"items": {"type": "array", "description": "要保存的附件（≤10 个）", "items": {"type": "object", "properties": {
+          "attachment": {"type": "string", "description": "附件名称，如 附件:截图.png"},
+          "target": {"type": "string", "description": "目标文件夹（以 / 结尾）或完整文件路径"}}, "required": ["attachment", "target"]}}},
+      ("items",))
+async def propose_save_attachment(ctx: ToolContext, args: dict) -> ToolOutput:
+    entries = args.get("items")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 10:
+        raise ToolError("参数 items 需要 1–10 项")
+    items, skipped = [], []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("attachment"), str) or not isinstance(entry.get("target"), str):
+            raise ToolError("每项需要 attachment 与 target")
+        name = entry["attachment"].strip()
+        if not name.startswith(ATTACHMENT_PREFIX):
+            raise ToolError(f"{name} 不是附件名称，附件名称形如 {ATTACHMENT_PREFIX}截图.png")
+        key = ctx.attachment(name)
+        row = ctx.db.execute("SELECT id, size FROM assistant_attachments WHERE key=? AND user_id=?", (key, ctx.user_id)).fetchone()
+        if row is None:
+            skipped.append({"path": name, "reason": "附件已不存在"})
+            continue
+        target = ctx.resolve(entry["target"], directory=entry["target"].strip().endswith("/"))
+        if not target or target.endswith("/"):
+            target += name[len(ATTACHMENT_PREFIX):]
+        items.append({"attachment": row["id"], "name": name, "path": _valid_key(target), "size": int(row["size"])})
+    return await _propose(ctx, "save_attachment", items, skipped=skipped,
+                          sample=lambda item: f"{item['name']} → /{item['path']}", summary=f"保存 {len(items)} 个附件到我的文件")
 
 
 @tool("propose_share", "公开分享", "write", "write",

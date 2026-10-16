@@ -1,13 +1,16 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import * as api from "../api";
+import * as ai from "../assistant-api";
 import { BRAND } from "../brand";
-import { Avatar, Badge, Button, Field, Icon, Modal, PageHeader, PasswordField, toast, useDocumentTitle } from "../ui";
+import { Avatar, Badge, Button, Field, Icon, Modal, PageHeader, PasswordField, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
 import { PasskeysSettings } from "./passkeys";
 import { PrivateIdleSelect } from "./private-access";
 import { usePrivateAccess } from "./private-session";
 
-export function UserSettingsPage({ session, onSessionChange }: { session: api.Session; onSessionChange: (patch: Partial<api.Session>) => void }) {
+export function UserSettingsPage({ session, onSessionChange, assistant = false, onOpenConversation }: { session: api.Session; onSessionChange: (patch: Partial<api.Session>) => void;
+  /** 文件助手可用时显示「助手附件」统计（没有附件且助手不可用时隐藏） */
+  assistant?: boolean; onOpenConversation?: (id: string) => void }) {
   const [editing, setEditing] = useState<"password" | "passkeys" | "private" | "nickname" | "email" | null>(null);
   const [busy, setBusy] = useState(false);
   useDocumentTitle(`用户设置 · ${BRAND}`);
@@ -23,8 +26,41 @@ export function UserSettingsPage({ session, onSessionChange }: { session: api.Se
       onOpen={() => setEditing("passkeys")} onClose={() => setEditing(null)} />
     <PrivateSettingsSummary editing={editing === "private"} busy={busy} onBusyChange={setBusy}
       onOpen={() => setEditing("private")} onClose={() => setEditing(null)} />
+    <AssistantAttachmentsSummary assistant={assistant} onOpenConversation={onOpenConversation} />
     <p className="account-page-help"><Icon name="info" size={16} /><span>忘记登录密码？请联系管理员重置。<a className="link" href="/docs/files#private-space" target="_blank" rel="noreferrer">了解登录与私密解锁</a></span></p>
   </div>;
+}
+
+/** 助手附件：随对话保存、计入已用空间，不提供单独删除（docs/assistant-design.md §22.5）。 */
+function AssistantAttachmentsSummary({ assistant, onOpenConversation }: { assistant: boolean; onOpenConversation?: (id: string) => void }) {
+  const id = useId();
+  const [stats, setStats] = useState<ai.AttachmentStats | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    ai.attachmentStats().then(value => { if (alive) setStats(value); }).catch(reason => { if (alive) setError(api.errorMessage(reason, "附件统计加载失败")); });
+    return () => { alive = false; };
+  }, []);
+  if (!assistant && !stats?.count) return null;
+  return <section className="account-section" aria-labelledby={`${id}-title`}>
+    <header className="account-section-heading"><Icon name="paperclip" size={20} /><div><h2 id={`${id}-title`}>助手附件</h2><p>随消息上传给文件助手的文件，计入已用空间。</p></div></header>
+    <div className="account-section-content">
+      <div className="account-setting-summary"><div>
+        <strong>{stats ? `${stats.count.toLocaleString("zh-CN")} 个附件，共 ${formatBytes(stats.size)}` : error ? "统计暂不可用" : "正在统计…"}</strong>
+        <p>附件属于对话，不出现在我的文件。删除对话会同时删除它的附件；想长期保留时，在消息里的附件菜单选择「保存到我的文件」。</p>
+      </div></div>
+      {error && <p className="form-alert" role="alert">{error}</p>}
+      {stats && stats.conversations.length > 0 && <ul className="account-attachments" aria-label="各对话的附件">
+        {stats.conversations.map(item => <li key={item.conversation_id}>
+          <Icon name="chat" size={15} />
+          <span className="account-attachments-title"><strong title={item.title ?? "未命名对话"}>{item.title || "未命名对话"}</strong>
+            <small>{item.count} 个 · {formatBytes(item.size)} · {formatDate(item.latest)}{item.archived ? " · 已归档" : ""}</small></span>
+          {onOpenConversation && <Button size="sm" variant="ghost" onClick={() => onOpenConversation(item.conversation_id)}>打开对话</Button>}
+        </li>)}
+      </ul>}
+      {stats && stats.pending.count > 0 && <p className="account-attachments-note"><Icon name="info" size={13} />另有 {stats.pending.count} 个尚未发送的附件（{formatBytes(stats.pending.size)}），24 小时内未发送会自动删除。</p>}
+    </div>
+  </section>;
 }
 
 function PrivateSettingsSummary({ editing, busy, onOpen, onClose, onBusyChange }: {

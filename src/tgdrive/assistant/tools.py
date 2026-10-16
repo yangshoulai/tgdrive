@@ -22,6 +22,7 @@ from ..api import normalize_user_path
 from ..errors import NotFoundError
 from ..filekinds import KIND_GROUPS, kind_clause
 from ..objects import ObjectService, Scope
+from .attachments import PREFIX as ATTACHMENT_PREFIX, ROOT as ATTACHMENT_ROOT
 from .providers import ToolDef
 from .knowledge import HELP
 
@@ -72,8 +73,10 @@ class ToolContext:
     public_config: dict = field(default_factory=dict)
     environment: dict = field(default_factory=dict)
     redact: Callable[[str], str] | None = None
-    # 只读工具的附件白名单：对话中用户上传的附件（对象键），精确命中时可以越过作用域（§22.5）。写入工具始终为空。
-    readable: frozenset = frozenset()
+    # 对话附件（§22.5）：{显示名: 对象键}。模型用「附件:显示名」称呼它们；只有只读工具（read_only）能读取，
+    # 写入工具收到这种名称时报错，另存为普通文件要用 propose_save_attachment。
+    attachments: dict = field(default_factory=dict)
+    read_only: bool = False
     # 当前模型能否识图，以及识图的参数（原图上限）
     vision: bool = False
 
@@ -85,13 +88,25 @@ class ToolContext:
         return Scope(self.bucket_id, self.scope_root)
 
     def scope_for(self, key: str) -> Scope:
-        """读取单个对象用的范围：白名单里的附件不受作用域前缀限制，其余仍是对话作用域。"""
-        return Scope(self.bucket_id, "") if key in self.readable else self.scope()
+        """读取单个对象用的范围：本对话的附件不受作用域前缀限制，其余仍是对话作用域。"""
+        return Scope(self.bucket_id, "") if self.read_only and key in self.attachments.values() else self.scope()
 
     # ---------- 路径 ----------
 
     def display(self, key: str) -> str:
+        if key.startswith(ATTACHMENT_ROOT):
+            name = next((name for name, value in self.attachments.items() if value == key), None)
+            return ATTACHMENT_PREFIX + (name or "（已删除的附件）")
         return "/" + key
+
+    def attachment(self, value: str) -> str:
+        """「附件:显示名」→ 对象键。"""
+        name = value[len(ATTACHMENT_PREFIX):].strip()
+        key = self.attachments.get(name)
+        if key is None:
+            known = "、".join(ATTACHMENT_PREFIX + item for item in list(self.attachments)[:20]) or "（这个对话没有附件）"
+            raise ToolError(f"找不到附件 {name}。这个对话的附件有：{known}")
+        return key
 
     def resolve(self, value: object, *, directory: bool = False, allow_root: bool = True) -> str:
         """把模型给出的路径解析为对象键（目录以 / 结尾，作用域根为 "" 时根目录是 ""）。"""
@@ -100,6 +115,10 @@ class ToolContext:
         if not isinstance(value, str) or len(value) > 1024:
             raise ToolError("路径参数不正确")
         text = unicodedata.normalize("NFC", value.strip())
+        if text.startswith(ATTACHMENT_PREFIX):
+            if not self.read_only:
+                raise ToolError("附件只能读取，不能移动、改名或删除。要把附件放进文件夹，请调用 propose_save_attachment 另存为普通文件。")
+            return self.attachment(text)
         if text in ("/", "", "."):
             key = "" if text == "/" else self.scope_root
         else:
@@ -120,8 +139,6 @@ class ToolContext:
             raise ToolError(f"路径 {value} 不合法") from exc
         if key + "/" == self.scope_root:
             key = self.scope_root
-        if key in self.readable:
-            return key
         if not key.startswith(self.scope_root):
             raise ToolError(f"路径 {self.display(key)} 不在当前作用域 {self.display(self.scope_root)} 内。"
                             "如用户明确要求处理该目录，请调用 request_scope。")
@@ -829,7 +846,8 @@ async def view_image(ctx: ToolContext, args: dict) -> ToolOutput:
     if key not in viewed and len(viewed) >= int(ctx.params.get("max_images_per_run", 10)):
         raise ToolError(f"本轮已查看 {len(viewed)} 张图片，达到上限。请先总结已看到的内容，或让用户缩小范围后继续。")
     try:
-        image = await vision.load_image(ctx.objects, ctx.bucket_id, key, max_bytes=int(ctx.params.get("max_bytes", vision.DEFAULT_ORIGINAL_BYTES)))
+        image = await vision.load_image(ctx.objects, ctx.bucket_id, key, max_bytes=int(ctx.params.get("max_bytes", vision.DEFAULT_ORIGINAL_BYTES)),
+                                       label=ctx.display(key))
     except vision.ImageUnavailable as exc:
         raise ToolError(str(exc)) from exc
     viewed.add(key)

@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 21
+    SCHEMA_VERSION = 22
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -607,6 +607,26 @@ class Metadata:
                     if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 db.execute("PRAGMA user_version = 21")
+            if version < 22:
+                # 文件助手对话附件（docs/assistant-design.md §22.5）：对象存于 .tgdrive/assistant/<id>/，这里登记归属与对话。
+                self._schema("""
+                    CREATE TABLE IF NOT EXISTS assistant_attachments(
+                        id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        bucket_id INTEGER NOT NULL,
+                        key TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        size INTEGER NOT NULL,
+                        content_type TEXT,
+                        conversation_id TEXT,
+                        message_seq INTEGER,
+                        created_at REAL NOT NULL,
+                        bound_at REAL
+                    );
+                    CREATE INDEX IF NOT EXISTS assistant_attachments_by_user ON assistant_attachments(user_id, conversation_id);
+                    CREATE INDEX IF NOT EXISTS assistant_attachments_by_conversation ON assistant_attachments(conversation_id, message_seq)
+                """)
+                db.execute("PRAGMA user_version = 22")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

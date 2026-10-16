@@ -48,6 +48,7 @@ ACTIONS = {
     "assistant.scope.reject": "拒绝扩大助手作用域", "assistant.action.confirm": "确认助手操作",
     "assistant.action.reject": "拒绝助手操作", "assistant.action.cancel": "取消助手操作",
     "assistant.action.undo": "撤销助手操作", "assistant.action.auto": "自动执行助手操作",
+    "assistant.attachment.save": "保存助手附件到我的文件",
 }
 
 
@@ -61,10 +62,11 @@ class AuditLog:
         allowed = {
             "object.public": {"public", "count", "bucket_id", "expires_at", "password", "error"},
             "share.save": {"saved", "bytes", "error"},
+            "assistant.attachment.save": {"bytes", "error"},
             "client.grant": {"bucket_id", "perms", "error"},
             "key.create": {"error"},
         }
-        if action in ("object.public", "share.save"):
+        if action in ("object.public", "share.save", "assistant.attachment.save"):
             target = None
         if action in allowed:
             detail = {key: value for key, value in (detail or {}).items() if key in allowed[action]}

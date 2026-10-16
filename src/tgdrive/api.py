@@ -484,6 +484,24 @@ class UserApi:
                 "unlocked": self.accounts.keystore.unlocked, "remember": session.remember,
                 "csrf_token": session.csrf_token, "expires_at": session.expires_at}
 
+    def usage(self, token: str) -> dict[str, object]:
+        """已用空间分项：回收站、私密空间（含其回收站）与助手对话附件都位于 .tgdrive/ 系统区，其余是我的文件。
+        每项是 (bucket_id, key) 索引上的范围求和，不扫描整个存储桶。"""
+        scope = self._scope(token)
+        bucket = self.objects._bucket(scope.bucket_id)
+        db = self.objects.metadata.db
+
+        def total(prefix: str) -> int:
+            return int(db.execute("SELECT COALESCE(SUM(size),0) FROM objects WHERE bucket_id=? AND key>=? AND key<?",
+                                  (scope.bucket_id, prefix, prefix + "\U0010ffff")).fetchone()[0])
+
+        trash = total(".tgdrive/trash/")
+        private = total(".tgdrive/private/") + total(".tgdrive/private-trash/")
+        assistant = total(".tgdrive/assistant/")
+        used = int(bucket["used_bytes"])
+        return {"total": used, "quota_bytes": bucket["quota_bytes"], "trash": trash, "private": private, "assistant": assistant,
+                "files": max(0, used - trash - private - assistant)}
+
     async def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000, public_only: bool = False,
                    kind: str = ""):
         session = self._session(token)

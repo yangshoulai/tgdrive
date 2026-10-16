@@ -1,6 +1,7 @@
 """文件助手识图与聊天框附件（docs/assistant-design.md §22）。"""
 import json
 import unittest
+from urllib.parse import quote
 
 from tests.test_assistant import AssistantCase, answer, call
 from tgdrive.assistant import providers
@@ -9,7 +10,15 @@ from tgdrive.objects import Scope
 
 JPEG = b"\xff\xd8\xff\xe0" + b"poster-jpeg" * 20
 PNG = b"\x89PNG\r\n\x1a\n" + b"original-png" * 20
-SHOT = "助手附件/2026-10/截图 1.png"
+SHOT = "截图 1.png"
+
+
+async def upload(case, user, name, data, content_type="application/octet-stream"):
+    """经对话附件接口上传，返回附件信息。"""
+    status, headers, body = await case.client.request("PUT", f"/api/user/v1/assistant/attachments?name={quote(name)}", data,
+                                                      {**user, "content-type": content_type})
+    case.assertEqual(status, 201, body)
+    return json.loads(body)
 
 
 class VisionTests(AssistantCase):
@@ -23,8 +32,8 @@ class VisionTests(AssistantCase):
         await self.put("相册/cat.jpg", b"large original that is not used" * 10)
         self.app.objects.set_thumbnail(Scope(self.alice.bucket_id), "相册/cat.jpg", JPEG, "poster")
         await self.put("相册/notes.txt", b"hello")
-        await self.put(SHOT, PNG)
         await self.put("文档/readme.txt", b"doc")
+        self.shot = await upload(self, user, SHOT, PNG, "image/png")
         return admin, user, model
 
     @staticmethod
@@ -37,18 +46,20 @@ class VisionTests(AssistantCase):
             conversation = await self.start_conversation(user)
             self.model.replies = [answer("一只猫和一张截图。"), answer("好的。")]
             status, data = await self.send(user, conversation, "描述一下 @/相册/cat.jpg 和附件", scope="path", scope_path="/相册/",
-                                           mentions=["/相册/cat.jpg", "/相册/notes.txt"], attachments=["/" + SHOT])
+                                           mentions=["/相册/cat.jpg", "/相册/notes.txt"], attachments=[self.shot["id"]])
             self.assertEqual(status, 201, data)
             first = self.user_messages(self.model.calls[0])[-1]
             self.assertEqual([(image["path"], image["mime"]) for image in first["images"]],
-                             [("/相册/cat.jpg", "image/jpeg"), ("/" + SHOT, "image/png")])
+                             [("/相册/cat.jpg", "image/jpeg"), ("附件:" + SHOT, "image/png")])
             self.assertEqual(first["images"][0]["data"], JPEG, "优先发送预览图")
             self.assertEqual(first["images"][1]["data"], PNG, "没有预览图时发送受支持格式的小原图")
             self.assertIn("[附件]", first["content"])
+            self.assertIn("附件:" + SHOT, first["content"])
+            self.assertNotIn(".tgdrive", json.dumps(self.model.calls[0]["messages"], ensure_ascii=False, default=str), "模型看不到存放位置")
             self.assertIn("view_image", self.model.calls[0]["tools"])
             # 附件在作用域外也允许；留痕只保存路径，不保存图片字节。
             stored = [m for m in await self.messages(user, conversation) if m["role"] == "user"][0]
-            self.assertEqual(stored["attachments"], ["/" + SHOT])
+            self.assertEqual([(item["id"], item["name"], item["image"]) for item in stored["attachments"]], [(self.shot["id"], SHOT, True)])
             self.assertNotIn("images", stored)
             await self.send(user, conversation, "谢谢")
             earlier, latest = self.user_messages(self.model.calls[-1])[-2:]
@@ -74,18 +85,19 @@ class VisionTests(AssistantCase):
         async def scenario():
             _, user, _ = await self.prepare(can_see=True)
             conversation = await self.start_conversation(user)
-            self.model.replies = [call("view_image", path="/" + SHOT), call("propose_move", sources=["/" + SHOT], target="/文档/"),
+            self.model.replies = [call("view_image", path="附件:" + SHOT), call("propose_move", sources=["附件:" + SHOT], target="/文档/"),
                                   answer("看过了。")]
-            status, data = await self.send(user, conversation, "看看附件", scope="path", scope_path="/文档/", attachments=["/" + SHOT])
+            status, data = await self.send(user, conversation, "看看附件", scope="path", scope_path="/文档/", attachments=[self.shot["id"]])
             self.assertEqual(status, 201, data)
             tool = [m for m in self.model.calls[1]["messages"] if m["role"] == "tool"][-1]
-            self.assertEqual([(image["path"], image["mime"]) for image in tool["images"]], [("/" + SHOT, "image/png")])
+            self.assertEqual([(image["path"], image["mime"]) for image in tool["images"]], [("附件:" + SHOT, "image/png")])
             messages = await self.messages(user, conversation)
             viewed, moved = [m for m in messages if m["role"] == "tool"]
             self.assertEqual(viewed["status"], "ok")
-            self.assertEqual(viewed["images"], [SHOT], "留痕只保存图片引用")
-            self.assertEqual(moved["status"], "error", "写入工具没有附件白名单例外")
-            self.assertIn("作用域", moved["result"]["error"])
+            self.assertEqual(viewed["result"]["path"], "附件:" + SHOT)
+            self.assertNotIn("images", viewed, "图片引用只留在服务端")
+            self.assertEqual(moved["status"], "error", "写入工具不能处理附件")
+            self.assertIn("propose_save_attachment", moved["result"]["error"])
             self.assertEqual(self.service._conversation_taint(conversation), "查看过图片内容")
         self.run_async(scenario())
 
@@ -93,8 +105,8 @@ class VisionTests(AssistantCase):
         async def scenario():
             _, user, _ = await self.prepare(can_see=True)
             conversation = await self.start_conversation(user)
-            for attachments, reason in ((["/相册/cat.jpg"], "必须保存在"), (["/助手附件/2026-10/missing.png"], "不存在"),
-                                        (["/" + SHOT] * 11, "最多 10 个"), (["/.tgdrive/private/a.png"], "附件")):
+            for attachments, reason in ((["/相册/cat.jpg"], "不存在"), (["0" * 32], "不存在"),
+                                        ([self.shot["id"]] * 11, "最多 10 个"), ("abc", "最多 10 个")):
                 status, data = await self.send(user, conversation, "看看", attachments=attachments)
                 self.assertEqual(status, 400, attachments)
                 self.assertIn(reason, json.dumps(data, ensure_ascii=False))
@@ -117,13 +129,20 @@ class VisionTests(AssistantCase):
                                             "images": [{"mime": "image/png", "data": b"x" * 2_000_000, "path": "/a.png"}]}])
         self.assertLess(estimate, 2000)
 
-    def test_resolve_allowlist_is_exact(self):
+    def test_attachment_names_resolve_for_read_tools_only(self):
+        key = ".tgdrive/assistant/" + "a" * 32 + "/" + SHOT
         context = ToolContext(1, self.alice.bucket_id, "文档/", self.app.objects, None, "files", "", {}, {},
-                              readable=frozenset({SHOT}))
-        self.assertEqual(context.resolve("/" + SHOT), SHOT)
-        self.assertEqual(context.scope_for(SHOT).prefix, "")
+                              attachments={SHOT: key}, read_only=True)
+        self.assertEqual(context.resolve("附件:" + SHOT), key)
+        self.assertEqual(context.scope_for(key).prefix, "")
+        self.assertEqual(context.display(key), "附件:" + SHOT)
+        for value in ("附件:other.png", "/.tgdrive/assistant/" + "a" * 32 + "/" + SHOT):
+            with self.assertRaises(ToolError):
+                context.resolve(value)
+        writer = ToolContext(1, self.alice.bucket_id, "文档/", self.app.objects, None, "files", "", {}, {}, attachments={SHOT: key})
         with self.assertRaises(ToolError):
-            context.resolve("/助手附件/2026-10/other.png")
+            writer.resolve("附件:" + SHOT)
+        self.assertEqual(writer.scope_for(key).prefix, "文档/")
 
 
 class ProviderImageFormatTests(unittest.TestCase):

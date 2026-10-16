@@ -24,7 +24,7 @@ END = "\U0010ffff"
 KINDS = {
     "rename": "批量改名", "move": "移动", "organize": "整理文件", "mkdir": "新建文件夹", "trash": "移入回收站",
     "restore": "从回收站恢复", "purge": "彻底删除", "unshare": "取消公开", "share": "公开分享", "downloads": "离线下载",
-    "download_control": "下载任务操作",
+    "download_control": "下载任务操作", "save_attachment": "保存附件",
 }
 MOVE_KINDS = ("rename", "move", "organize")
 DANGER_KINDS = ("purge",)
@@ -153,7 +153,7 @@ class ActionExecutor:
         kind = payload["kind"]
         scope_root = payload.get("scope", "")
         scope = Scope(bucket_id, scope_root)
-        undo: dict[str, list] = {"moves": [], "trash": [], "mkdir": [], "unshare": []}
+        undo: dict[str, list] = {"moves": [], "trash": [], "mkdir": [], "unshare": [], "created": []}
         items = payload.get("items", [])
         share = share_options(payload, confirm) if kind == "share" else {}
         if kind == "downloads":
@@ -284,6 +284,19 @@ class ActionExecutor:
                                    "expires_at": info.public_expires_at, "password": info.public_has_password})
             if not was_public:
                 undo["unshare"].append(key)
+        elif kind == "save_attachment":
+            # 对话附件另存为普通文件（§22.5）：引用同一个 Blob；附件须仍属于本人且未被删除。
+            target = item["path"]
+            row = self.db.execute("SELECT key FROM assistant_attachments WHERE id=? AND user_id=?", (item["attachment"], user_id)).fetchone()
+            if row is None:
+                progress.skip(display(target), "附件已随对话删除")
+                return
+            if not self._inside(scope_root, target):
+                progress.skip(display(target), "不在作用域内")
+                return
+            info = self.objects.link_copy(bucket_id, row["key"], scope, target)
+            progress.ok += 1
+            undo["created"].append([info.key, info.etag])
         elif kind == "download_control":
             if self.offline is None:
                 raise ValueError("离线下载未启用")
@@ -389,6 +402,21 @@ class ActionExecutor:
                 continue
             try:
                 self.objects.set_public(scope, key, False)
+                progress.ok += 1
+            except (PermissionError, ValueError, NotFoundError) as exc:
+                progress.fail(display(key), str(exc))
+        for key, etag in data.get("created", []):
+            if progress.cancel or (authorized is not None and not authorized()):
+                break
+            row = self.db.execute("SELECT etag FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone()
+            if row is None:
+                progress.skip(display(key), "已不存在")
+                continue
+            if row["etag"] != etag:
+                progress.skip(display(key), "已被修改")
+                continue
+            try:
+                self.objects._delete_objects_sync(scope, [key])
                 progress.ok += 1
             except (PermissionError, ValueError, NotFoundError) as exc:
                 progress.fail(display(key), str(exc))
