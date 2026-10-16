@@ -1,12 +1,14 @@
 /** 预览引擎独立打包并按需加载，普通文件列表不下载播放器和文本编辑器。 */
 type TextEngine = typeof import("./preview-text-engine");
 type MediaEngine = typeof import("./preview-media-engine");
+type ComposerEngine = typeof import("./composer-engine");
 type Asset = { js: string; css?: string };
 declare global {
   interface Window {
-    tesseraPreviewAssets: { text: Asset; media: Asset };
+    tesseraPreviewAssets: { text: Asset; media: Asset; composer: Asset };
     TesseraTextPreview?: TextEngine;
     TesseraMediaPreview?: MediaEngine;
+    TesseraComposer?: ComposerEngine;
   }
 }
 
@@ -41,4 +43,10 @@ export async function loadMediaEngine(): Promise<MediaEngine> {
   await load(window.tesseraPreviewAssets.media);
   if (!window.TesseraMediaPreview) throw new Error("播放组件未能启动");
   return window.TesseraMediaPreview;
+}
+/** 文件助手的输入框（CodeMirror）：打开助手时才加载。 */
+export async function loadComposerEngine(): Promise<ComposerEngine> {
+  await load(window.tesseraPreviewAssets.composer);
+  if (!window.TesseraComposer) throw new Error("输入框组件未能启动");
+  return window.TesseraComposer;
 }

@@ -11,7 +11,7 @@ import { Thread, useMarkState, type LiveRun } from "./assistant-thread";
 import { filesBridge, waitForFiles } from "./assistant-bridge";
 import { assistantEnvironment } from "./assistant-environment";
 import { commonFolder, useMentions } from "./assistant-mentions";
-import { ComposeMirror } from "./assistant-compose";
+import { AssistantComposer, type ComposerHandle } from "./assistant-composer";
 import { FolderPicker } from "./folders";
 
 /** 作用域选择「当前位置」：随文件页切换目录。 */
@@ -81,7 +81,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [atBottom, setAtBottom] = useState(true);
   const [unseen, setUnseen] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
-  const input = useRef<HTMLTextAreaElement>(null);
+  const input = useRef<ComposerHandle>(null);
   const drawer = useRef<HTMLElement>(null);
   const unsubscribe = useRef<(() => void) | null>(null);
   const selection = useRef(0);
@@ -89,8 +89,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const locationKey = location.view === "files" ? location.prefix : "";
   const headerMark = useMarkState(runId ? live ?? EMPTY_LIVE : null);
   const chosenScope = scopeTarget === HERE ? locationKey : scopeTarget;
-  const mirror = useRef<HTMLDivElement>(null);
-  const mention = useMentions({ draft, setDraft, input, location: locationKey, enabled: config.notice_ack && !(config.usage.limit && config.usage.today >= config.usage.limit) });
+  const mention = useMentions({ draft, location: locationKey, enabled: config.notice_ack && !(config.usage.limit && config.usage.today >= config.usage.limit),
+    onPick: (from, path) => input.current?.insertMention(from, path) });
 
   useEffect(() => {
     if (!config.models.some(model => model.id === modelId)) {
@@ -142,7 +142,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     const previous = document.activeElement as HTMLElement | null;
     const trap = (event: KeyboardEvent) => {
       if (event.key !== "Tab" || !window.matchMedia("(max-width: 760px)").matches || document.querySelector(".menu, .modal-backdrop")) return;
-      const nodes = Array.from(drawer.current?.querySelectorAll<HTMLElement>('button:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]') ?? [])
+      const nodes = Array.from(drawer.current?.querySelectorAll<HTMLElement>('button:not(:disabled), textarea:not(:disabled), [contenteditable="true"], select:not(:disabled), a[href], [tabindex="0"]') ?? [])
         .filter(node => node.getClientRects().length > 0);
       const first = nodes[0], last = nodes.at(-1);
       if (event.shiftKey && (document.activeElement === first || !drawer.current?.contains(document.activeElement))) { event.preventDefault(); last?.focus(); }
@@ -280,7 +280,6 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       // 「跟随当前位置」是持续的选择（新对话默认如此），发送后保留；其他临时选择随这条消息生效后清除。
       const following = scopeTarget === HERE || (!detail && scopeTarget === null);
       setDraft(""); setScopeTarget(following ? HERE : null); mention.reset();
-      if (input.current) input.current.style.height = "";
       const fresh = await ai.conversation(current.conversation.id).catch(() => null);
       if (version !== selection.current) return;
       if (fresh) setDetail(fresh);
@@ -448,18 +447,11 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           <ModeChip mode={accessMode} allowed={config.full_access} onChoose={next => void chooseMode(next)} />
         </div>
         {expandedScope && <p className="assistant-mention-hint"><Icon name="info" size={12} />引用不在 {effectiveScope} 内，发送时作用域扩大到 {expandedScope}</p>}
-        {/* 透明文字的输入框叠在镜像上：镜像即时显示 Markdown 标记与 @ 引用，光标、选区与输入法仍由原生输入框处理。 */}
-        <div className="assistant-input-wrap">
-          <ComposeMirror ref={mirror} text={draft} mentions={mention.mentions.map(item => display(item.key))} />
-          <textarea ref={input} className="assistant-input" rows={2} value={draft} maxLength={DRAFT_LIMIT} spellCheck={false}
-            placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : "想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown"}
-            disabled={!config.notice_ack || exhausted} aria-label="给文件助手的消息"
-            onChange={event => { setDraft(event.target.value); mention.sync(); }}
-            onSelect={mention.sync} onBlur={() => window.setTimeout(mention.sync, 120)}
-            onScroll={event => { if (mirror.current) mirror.current.scrollTop = event.currentTarget.scrollTop; }}
-            onInput={event => { const node = event.currentTarget; node.style.height = "auto"; node.style.height = `${Math.min(node.scrollHeight, 8 * 22)}px`; }}
-            onKeyDown={event => { if (mention.onKeyDown(event)) return; if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
-        </div>
+        {/* 输入框即时渲染 Markdown、@ 引用胶囊、链接与列表；内容仍是 Markdown 纯文本。 */}
+        <AssistantComposer ref={input} value={draft} onChange={setDraft} onSubmit={() => void send()} maxLength={DRAFT_LIMIT}
+          placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : "想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown"}
+          disabled={!config.notice_ack || exhausted} mentions={mention.known.map(item => display(item.key))}
+          onToken={mention.setToken} onKey={mention.onKey} />
         <div className="assistant-controls">
           <Menu label="选择模型" align="start" className="assistant-model" items={config.models.map(model => ({ label: model.label,
             description: [model.channel_name ?? "模型渠道", model.capabilities?.reasoning ? "推理" : "", model.capabilities?.vision ? "识图" : "",

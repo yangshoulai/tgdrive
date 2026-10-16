@@ -6,17 +6,17 @@ import ts from 'typescript';
 import { build } from 'esbuild';
 const root=path.dirname(fileURLToPath(import.meta.url));
 const previewAssets={};
-// 只给预览引擎使用标准打包器，保留主应用和受保护管理员文档的原有边界。
+// 只给按需加载的引擎（文本与媒体预览、助手输入框）使用标准打包器，保留主应用和受保护管理员文档的原有边界。
 if(!process.argv[2] || process.argv[2]==='user') {
  const dist=path.join(root,'dist');fs.mkdirSync(dist,{recursive:true});
- for(const [kind,globalName] of [['text','TesseraTextPreview'],['media','TesseraMediaPreview']]) {
-  const result=await build({entryPoints:[path.join(root,`src/preview-${kind}-engine.ts`)],bundle:true,write:false,
-   outfile:path.join(dist,`preview-${kind}.js`),format:'iife',globalName,minify:true,target:'es2022',legalComments:'inline'});
+ for(const [kind,globalName,base] of [['text','TesseraTextPreview','preview-text'],['media','TesseraMediaPreview','preview-media'],['composer','TesseraComposer','composer']]) {
+  const result=await build({entryPoints:[path.join(root,`src/${base}-engine.ts`)],bundle:true,write:false,
+   outfile:path.join(dist,`${base}.js`),format:'iife',globalName,minify:true,target:'es2022',legalComments:'inline'});
   const hash=crypto.createHash('sha256');for(const file of result.outputFiles) hash.update(file.contents);
   // 保留已有哈希引擎文件，让已打开的页面仍能按旧清单延迟加载组件。
   const version=hash.digest('hex').slice(0,12);const assets={};
   for(const file of result.outputFiles) {
-   const extension=path.extname(file.path).slice(1);const name=`preview-${kind}-${version}.${extension}`;
+   const extension=path.extname(file.path).slice(1);const name=`${base}-${version}.${extension}`;
    fs.writeFileSync(path.join(dist,name),file.contents);assets[extension]=`/${name}`;
   }
   previewAssets[kind]=assets;

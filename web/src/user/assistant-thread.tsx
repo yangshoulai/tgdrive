@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { Markdown } from "../markdown";
+import { FileGlyph, getFileKind } from "../files";
 import { AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
 const display = (key: string) => "/" + key;
@@ -188,12 +189,18 @@ function LiveStatus({ live }: { live: LiveRun }) {
   return <span className="ai-live" role="status"><i aria-hidden="true" /><span className="ai-shimmer">{label}</span></span>;
 }
 
+/** 消息里的 @ 引用：与文件列表相同的类型图标 + 名称，完整路径在提示里。 */
+function renderMention(path: string) {
+  return <span className="md-mention" title={path}><FileGlyph kind={path.endsWith("/") ? "folder" : getFileKind(null, path)} size={14} />
+    <span>{path.replace(/\/$/, "").split("/").at(-1) || "/"}</span></span>;
+}
+
 function UserMessage({ message, onRetry }: { message: ai.ChatMessage; onRetry?: () => void }) {
   return <div className="ai-user">
     {message.attachment && <span className="ai-attachment"><Icon name="globe" size={13} />
       <span>{message.attachment.source.replace(/^https?:\/\//, "")} · {message.attachment.pages} 页 · {message.attachment.images.toLocaleString("zh-CN")} 个图片候选</span></span>}
     {/* 用户输入的 Markdown（列表、加粗、代码等）与回复使用同一个安全渲染器，不执行原始 HTML；@ 引用就地显示为胶囊。 */}
-    <div className="ai-bubble"><Markdown source={message.text ?? ""} mentions={message.mentions} /></div>
+    <div className="ai-bubble"><Markdown source={message.text ?? ""} mentions={message.mentions} renderMention={renderMention} linkIcon /></div>
     <span className="ai-user-meta">{message.created_at ? formatDateTime(message.created_at) : ""}
       {onRetry && <button type="button" onClick={onRetry} title="从这条消息重新回答，之后的记录会被丢弃"><Icon name="refresh" size={12} />重试</button>}
       <button type="button" onClick={() => copyMessage(message.text ?? "")}><Icon name="copy" size={12} />复制</button></span>

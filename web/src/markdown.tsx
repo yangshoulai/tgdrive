@@ -7,7 +7,9 @@ import { Icon } from "./ui";
 
 type Ctx = { refs: Map<string, { url: string; title?: string }>; resolveImage?: (src: string) => string | null; depth: number;
   /** 文件助手的 @ 引用（如 "/电影/"，按长度降序）：正文中的 @路径 显示为胶囊。 */
-  mentions?: string[] };
+  mentions?: string[]; renderMention?: (path: string) => ReactNode;
+  /** 链接前加地球图标（用户消息）。 */
+  linkIcon?: boolean };
 
 /** @ 引用胶囊：文件夹以 / 结尾，只显示最后一级名称，完整路径放在提示里。 */
 export function MentionPill({ path }: { path: string }) {
@@ -118,7 +120,7 @@ function inline(text: string, ctx: Ctx): ReactNode[] {
   const add = (make: (key: number) => ReactNode) => { flush(); out.push(make(out.length)); };
   const nested = (value: string) => ctx.depth > 6 ? [value] : inline(value, { ...ctx, depth: ctx.depth + 1 });
   const link = (key: number, href: string | null, children: ReactNode, title?: string) => href
-    ? <a key={key} href={href} title={title} target="_blank" rel="noreferrer noopener">{children}</a>
+    ? <a key={key} href={href} title={title} target="_blank" rel="noreferrer noopener" className={ctx.linkIcon ? "md-link-chip" : undefined}>{ctx.linkIcon && <Icon name="globe" size={13} />}{children}</a>
     : <Fragment key={key}>{children}</Fragment>;
 
   while (i < text.length) {
@@ -134,7 +136,7 @@ function inline(text: string, ctx: Ctx): ReactNode[] {
     }
     if (ch === "@" && ctx.mentions?.length && (i === 0 || /\s/.test(text[i - 1]))) {
       const path = ctx.mentions.find(item => text.startsWith(item, i + 1));
-      if (path) { add(key => <MentionPill key={key} path={path} />); i += path.length + 1; continue; }
+      if (path) { add(key => <Fragment key={key}>{ctx.renderMention ? ctx.renderMention(path) : <MentionPill path={path} />}</Fragment>); i += path.length + 1; continue; }
     }
     if (ch === "`") {
       const run = /^`+/.exec(text.slice(i))![0].length;
@@ -390,7 +392,7 @@ function blocks(lines: string[], ctx: Ctx, tight = false): ReactNode[] {
   return out;
 }
 
-function parse(source: string, resolveImage?: (src: string) => string | null, mentions?: string[]): ReactNode[] {
+function parse(source: string, resolveImage?: (src: string) => string | null, extra: Pick<Ctx, "mentions" | "renderMention" | "linkIcon"> = {}): ReactNode[] {
   const lines = source.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n");
   const head: ReactNode[] = [];
   if (lines[0]?.trim() === "---") {
@@ -410,11 +412,12 @@ function parse(source: string, resolveImage?: (src: string) => string | null, me
     if (definition) refs.set(normalizeLabel(definition[1]), { url: definition[2], title: definition[3] });
     else content.push(line);
   }
-  return [...head, ...blocks(content, { refs, resolveImage, depth: 0, mentions })];
+  return [...head, ...blocks(content, { refs, resolveImage, depth: 0, ...extra })];
 }
 
-export function Markdown({ source, resolveImage, mentions }: { source: string; resolveImage?: (src: string) => string | null; mentions?: string[] }) {
+export function Markdown({ source, resolveImage, mentions, renderMention, linkIcon }: { source: string; resolveImage?: (src: string) => string | null;
+  mentions?: string[]; renderMention?: (path: string) => ReactNode; linkIcon?: boolean }) {
   const sorted = useMemo(() => mentions?.length ? [...mentions].sort((a, b) => b.length - a.length) : undefined, [mentions?.join("\n")]); // eslint-disable-line react-hooks/exhaustive-deps
-  const nodes = useMemo(() => parse(source, resolveImage, sorted), [source, resolveImage, sorted]);
+  const nodes = useMemo(() => parse(source, resolveImage, { mentions: sorted, renderMention, linkIcon }), [source, resolveImage, sorted, renderMention, linkIcon]);
   return <div className="md">{nodes}</div>;
 }

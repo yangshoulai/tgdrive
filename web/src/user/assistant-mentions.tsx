@@ -1,5 +1,5 @@
 /** 输入框里的 @ 引用：输入 @ 列出当前目录，继续输入在全部普通文件中搜索；选中后插入 @/路径，发送时随消息提交。 */
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import { FileTile, baseName, getFileKind, parentPath } from "../files";
 import { Icon } from "../ui";
@@ -7,14 +7,7 @@ import { Icon } from "../ui";
 export type Mention = { key: string; folder: boolean };
 type Candidate = Mention & { name: string; parent: string };
 
-const TOKEN = /(?:^|\s)@([^\s@]{0,60})$/;
 const LIMIT = 20;
-
-/** 当前光标前正在输入的 @ 片段；没有时返回 null。 */
-function tokenAt(text: string, caret: number) {
-  const match = TOKEN.exec(text.slice(0, caret));
-  return match ? { query: match[1], start: caret - match[1].length - 1 } : null;
-}
 
 const candidate = (key: string, folder: boolean): Candidate => ({ key, folder, name: baseName(key), parent: "/" + parentPath(key) });
 
@@ -32,22 +25,26 @@ export function commonFolder(keys: string[]): string {
   return parts.length ? parts.join("/") + "/" : "";
 }
 
-export function useMentions({ draft, setDraft, input, location, enabled }: {
-  draft: string; setDraft: (value: string) => void; input: RefObject<HTMLTextAreaElement>; location: string; enabled: boolean;
+export function useMentions({ draft, location, enabled, onPick }: {
+  draft: string; location: string; enabled: boolean;
+  /** 选中候选后由输入框把 @ 片段替换为 @/路径。 */
+  onPick: (from: number, path: string) => void;
 }) {
   const [mentions, setMentions] = useState<Mention[]>([]);
-  const [token, setToken] = useState<{ query: string; start: number } | null>(null);
+  const [token, setTokenState] = useState<{ query: string; from: number } | null>(null);
   const [items, setItems] = useState<Candidate[]>([]);
   const [active, setActive] = useState(0);
   const [loading, setLoading] = useState(false);
+  // Esc 关闭候选后，同一个 @ 片段不再弹出，直到光标离开或片段变化。
+  const dismissed = useRef<number | null>(null);
   // 文本里已删掉的引用不再提交。
   const present = mentions.filter(item => draft.includes(`@/${item.key}`));
 
-  function sync() {
-    const node = input.current;
-    if (!node || !enabled) { setToken(null); return; }
-    const next = node.selectionStart === node.selectionEnd ? tokenAt(node.value, node.selectionStart) : null;
-    setToken(current => current?.query === next?.query && current?.start === next?.start ? current : next);
+  function setToken(next: { query: string; from: number } | null) {
+    if (!enabled || !next) { dismissed.current = null; setTokenState(null); return; }
+    if (dismissed.current === next.from) return;
+    dismissed.current = null;
+    setTokenState(current => current?.query === next.query && current?.from === next.from ? current : next);
   }
 
   useEffect(() => {
@@ -74,44 +71,23 @@ export function useMentions({ draft, setDraft, input, location, enabled }: {
   }, [token?.query, location]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function choose(item: Candidate) {
-    const node = input.current;
-    if (!node || !token) return;
-    // 替换范围按 @ 片段本身计算，不读当前光标：上一次插入后的光标还原可能晚于后续输入。
-    const end = token.start + 1 + token.query.length;
-    const inserted = `@/${item.key} `;
-    const next = draft.slice(0, token.start) + inserted + draft.slice(end).replace(/^ /, "");
-    setDraft(next);
+    if (!token) return;
     setMentions(current => current.some(value => value.key === item.key) ? current : [...current, { key: item.key, folder: item.folder }]);
-    setToken(null);
-    const position = token.start + inserted.length;
-    // 等 React 写回新文本后再放置光标；不依赖动画帧，后台标签页里同样生效。
-    window.setTimeout(() => { node.focus(); node.setSelectionRange(position, position); }, 0);
+    setTokenState(null);
+    onPick(token.from, `/${item.key}`);
   }
 
-  /** 候选列表打开时接管方向键、回车、Tab 与 Esc；光标紧跟在引用之后按退格整段删除。返回 true 表示已处理。 */
-  function onKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
-    if (event.nativeEvent.isComposing) return false;
-    const node = input.current;
-    if (event.key === "Backspace" && node && node.selectionStart === node.selectionEnd && !event.altKey && !event.metaKey && !event.ctrlKey) {
-      const caret = node.selectionStart;
-      const hit = present.find(item => draft.slice(0, caret).endsWith(`@/${item.key}`));
-      if (hit) {
-        event.preventDefault();
-        const start = caret - hit.key.length - 2;
-        setDraft(draft.slice(0, start) + draft.slice(caret));
-        window.setTimeout(() => { node.setSelectionRange(start, start); sync(); }, 0);
-        return true;
-      }
-    }
-    if (!token) return false;
-    if (event.key === "Escape") { event.preventDefault(); setToken(null); return true; }
+  /** 候选列表打开时接管方向键、回车、Tab 与 Esc；返回 true 表示已处理（并已阻止默认行为）。 */
+  function onKey(event: KeyboardEvent) {
+    if (!token || event.isComposing) return false;
+    const handled = () => { event.preventDefault(); event.stopPropagation(); return true; };
+    if (event.key === "Escape") { dismissed.current = token.from; setTokenState(null); return handled(); }
     if (!items.length) return false;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
       setActive(value => (value + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length);
-      return true;
+      return handled();
     }
-    if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); choose(items[active]); return true; }
+    if (event.key === "Enter" || event.key === "Tab") { choose(items[active]); return handled(); }
     return false;
   }
 
@@ -126,5 +102,5 @@ export function useMentions({ draft, setDraft, input, location, enabled }: {
     </button>) : <p className="assistant-mention-empty">{loading ? "正在查找…" : token.query ? "没有匹配的文件" : "这里还没有文件"}</p>}
   </div> : null;
 
-  return { mentions: present, open: token !== null, menu, sync, onKeyDown, reset: () => { setMentions([]); setToken(null); } };
+  return { mentions: present, known: mentions, open: token !== null, menu, setToken, onKey, reset: () => { setMentions([]); setTokenState(null); dismissed.current = null; } };
 }
