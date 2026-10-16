@@ -2519,8 +2519,9 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .ai-divider > span { display: inline-flex; max-width: 80%; align-items: center; gap: 5px; padding: 3px 10px; border: 1px solid var(--line-soft); border-radius: 999px; background: var(--surface); overflow-wrap: anywhere; }
 
 /* 一轮对话 */
-.ai-turn { display: grid; gap: 18px; min-width: 0; animation: assistant-appear .22s ease-out; }
-.ai-user { display: grid; justify-items: end; gap: 6px; min-width: 0; }
+/* 单列网格要写明 minmax(0, 1fr)：默认的 auto 列会被长内容撑到最大内容宽度，气泡的 86% 上限随之失效。 */
+.ai-turn { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; min-width: 0; animation: assistant-appear .22s ease-out; }
+.ai-user { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: end; gap: 6px; min-width: 0; }
 .ai-bubble { max-width: 86%; padding: 10px 14px; border-radius: var(--radius-lg) var(--radius-lg) var(--radius-xs) var(--radius-lg); background: var(--primary); color: var(--on-primary); font-size: var(--text-md); line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: var(--shadow-sm); }
 .ai-attachment { display: inline-flex; max-width: 86%; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-sunken); color: var(--ink-2); font-size: var(--text-xs); }
 .ai-attachment > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2558,6 +2559,9 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .ai-notice.is-warning { background: var(--warning-soft); color: var(--warning); }
 
 /* 过程时间线 */
+/* 消息流里的单列网格统一限定列宽，长路径、长文件名只能在列内折行或省略，不能把列撑宽。新增单列网格时加到这里。 */
+.ai-reply-body, .ai-process, .ai-process-steps, .ai-thinking-body, .ai-tool-body, .ai-tool-detail, .ai-kv, .ai-tool-output,
+.ai-card, .ai-card-title, .ai-diff, .ai-list, .ai-links, .ai-choices, .ai-plan ol, .assistant-title { grid-template-columns: minmax(0, 1fr); }
 .ai-process { display: grid; min-width: 0; }
 .ai-process.is-collapsible { border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--surface-sunken); }
 .ai-process-toggle { display: flex; width: 100%; min-width: 0; align-items: center; gap: 8px; padding: 8px 12px; border: 0; background: none; color: var(--ink-2); font: inherit; font-size: var(--text-xs); text-align: left; cursor: pointer; }
@@ -2723,9 +2727,9 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .cx-link { color: var(--accent-ink); }
 .cx-link-icon, .cx-chip { color: var(--accent-ink); }
 .cx-link-icon > svg { display: inline-block; margin-right: 3px; vertical-align: -2px; }
-.cx-chip { display: inline-flex; max-width: 100%; align-items: center; gap: 4px; margin: 0 1px; padding: 0 5px 0 3px; border-radius: var(--radius-xs); font-weight: 500; line-height: 22px; vertical-align: top; cursor: default; }
-.cx-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cx-chip > svg { flex: none; }
+/* 胶囊是行内元素：名称过长时在胶囊内折行（底色随行断开），不撑宽输入框产生横向滚动条。 */
+.cx-chip { margin: 0 1px; padding: 1px 5px 1px 3px; border-radius: var(--radius-xs); font-weight: 500; overflow-wrap: anywhere; word-break: break-all; box-decoration-break: clone; -webkit-box-decoration-break: clone; cursor: default; }
+.cx-chip > svg { display: inline-block; margin-right: 4px; vertical-align: -2px; }
 .cx-chip:hover { background: var(--accent-soft); }
 .cx-bullet { display: inline-block; width: .9em; color: var(--accent); font-weight: 700; text-align: center; }
 .cx-ol-marker { color: var(--accent-ink); font-variant-numeric: tabular-nums; font-weight: 600; }
@@ -2739,7 +2743,7 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .cx-fence-line { padding: 0 8px !important; color: var(--ink-3); }
 /* 消息里的 @ 引用胶囊（Markdown 渲染）。 */
 .md-mention { margin: 0 1px; padding: 1px 7px 1px 5px; border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); border-radius: 999px;
-  background: var(--accent-soft); color: var(--accent-ink); font-size: .92em; font-weight: 500; white-space: nowrap; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  background: var(--accent-soft); color: var(--accent-ink); font-size: .92em; font-weight: 500; overflow-wrap: anywhere; word-break: break-all; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
 .md-mention > svg, .md-link-chip > svg { display: inline-block; margin-right: 3px; vertical-align: -2px; }
 .md a.md-link-chip { word-break: break-all; }
 .ai-bubble .md a.md-link-chip { text-decoration-color: color-mix(in srgb, var(--on-primary) 45%, transparent); text-underline-offset: 3px; }
