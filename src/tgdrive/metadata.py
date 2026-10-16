@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 22
+    SCHEMA_VERSION = 23
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -627,6 +627,25 @@ class Metadata:
                     CREATE INDEX IF NOT EXISTS assistant_attachments_by_conversation ON assistant_attachments(conversation_id, message_seq)
                 """)
                 db.execute("PRAGMA user_version = 22")
+            if version < 23:
+                # 缩略图分规格存放：thumb（列表小图）仍加密存在这里；grid（网格）与 poster（预览封面）存为
+                # 系统区对象 .tgdrive/thumbnails/<blob>/<规格>，这里只记录所在存储桶与键（data 为空）。
+                # CHECK 约束要加入 grid，只能重建表；旧的 poster 由维护任务分批转存到对象。
+                self._schema("""
+                    CREATE TABLE thumbnails_v23(
+                        blob_uuid TEXT NOT NULL REFERENCES blobs(uuid) ON DELETE CASCADE,
+                        variant TEXT NOT NULL CHECK(variant IN ('thumb','grid','poster','none')),
+                        mime TEXT NOT NULL, data BLOB NOT NULL, created_at REAL NOT NULL,
+                        bucket_id INTEGER, object_key TEXT,
+                        PRIMARY KEY(blob_uuid, variant)
+                    ) WITHOUT ROWID;
+                    INSERT INTO thumbnails_v23(blob_uuid,variant,mime,data,created_at)
+                        SELECT blob_uuid,variant,mime,data,created_at FROM thumbnails;
+                    DROP TABLE thumbnails;
+                    ALTER TABLE thumbnails_v23 RENAME TO thumbnails;
+                    CREATE INDEX IF NOT EXISTS thumbnails_by_object ON thumbnails(bucket_id, object_key) WHERE object_key IS NOT NULL
+                """)
+                db.execute("PRAGMA user_version = 23")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

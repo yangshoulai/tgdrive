@@ -138,14 +138,19 @@ class ObjectService:
             raise NotFoundError(key)
         return row
 
-    def _release_blob(self, db, blob_uuid: str, now: float) -> None:
+    def _release_blob(self, db, blob_uuid: str, now: float, bucket_id: int | None = None) -> None:
+        """引用计数减一。bucket_id 是刚删掉引用的存储桶：该桶已不再引用这个 Blob 时，一并删除存在这个桶里的大缩略图。"""
         row = db.execute("SELECT refcount FROM blobs WHERE uuid = ?", (blob_uuid,)).fetchone()
         if row is None:
             return
         count = int(row["refcount"]) - 1
         if count > 0:
             db.execute("UPDATE blobs SET refcount = ? WHERE uuid = ?", (count, blob_uuid))
+            if bucket_id is not None and not db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND blob_uuid=? LIMIT 1",
+                                                        (bucket_id, blob_uuid)).fetchone():
+                self._drop_thumbnail_objects(db, blob_uuid, now, bucket_id)
             return
+        self._drop_thumbnail_objects(db, blob_uuid, now)
         refs = [r[0] for r in db.execute("SELECT blob_ref FROM chunks WHERE blob_uuid = ?", (blob_uuid,))]
         db.executemany("INSERT INTO gc_queue(blob_ref,enqueued_at) VALUES(?,?)", ((ref, now) for ref in refs))
         # 已完成的分段上传记录仍引用该 Blob（用于幂等重试），必须先删除，否则外键约束会阻止删除和覆盖。
@@ -168,14 +173,15 @@ class ObjectService:
             db.execute("UPDATE blobs SET refcount = refcount + 1 WHERE uuid = ?", (blob_uuid,))
             db.execute("DELETE FROM objects WHERE bucket_id = ? AND key = ?", (bucket_id, key))
             if old and old["blob_uuid"]:
-                self._release_blob(db, old["blob_uuid"], now)
+                self._release_blob(db, old["blob_uuid"], now, bucket_id)
             # 覆盖写入保留原公开链接，已分享的地址不会因为更新内容而失效。
             share = [old[name] if old else None for name in ("public_token", "public_at", "public_expires_at", "public_password")]
             downloads = old["public_downloads"] if old else 0
             db.execute("INSERT INTO objects(bucket_id,key,blob_uuid,size,etag,content_type,user_meta,modified_at,"
                        "public_token,public_at,public_expires_at,public_password,public_downloads) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (bucket_id, key, blob_uuid, size, etag, content_type, meta_json, now, *share, downloads))
-            db.execute("UPDATE buckets SET used_bytes = ? WHERE id = ?", (new_used, bucket_id))
+            # 相对更新：释放旧 Blob 时可能顺带删除了该桶里的大缩略图，那部分已在上面扣减。
+            db.execute("UPDATE buckets SET used_bytes = used_bytes - ? + ? WHERE id = ?", (old_size, size, bucket_id))
         row = self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id = ? AND key = ?", (bucket_id, key)).fetchone()
         return self._object(row)
 
@@ -280,7 +286,7 @@ class ObjectService:
             old = db.execute("SELECT * FROM objects WHERE bucket_id = ? AND key = ?", (scope.bucket_id, key)).fetchone()
             db.execute("DELETE FROM objects WHERE bucket_id = ? AND key = ?", (scope.bucket_id, key))
             if old and old["blob_uuid"]:
-                self._release_blob(db, old["blob_uuid"], now)
+                self._release_blob(db, old["blob_uuid"], now, scope.bucket_id)
             old_size = old["size"] if old else 0
             # 文件夹的公开分享（令牌、有效期、密码、下载次数）保存在目录标记行上：重写标记时必须保留。
             share = [old[name] if old else None for name in ("public_token", "public_at", "public_expires_at", "public_password")]
@@ -357,11 +363,17 @@ class ObjectService:
         with self.metadata.transaction() as db:
             db.execute("UPDATE objects SET public_downloads=public_downloads+1 WHERE bucket_id=? AND key=?", (bucket_id, key))
 
-    # ---------- 缩略图（按 Blob 加密保存：移动、复制、秒传自动共享，覆盖内容后自然失效；不计入配额） ----------
+    # ---------- 缩略图（按 Blob 保存：移动、复制、秒传自动共享，覆盖内容后自然失效） ----------
+    # thumb：列表小图（约 160px，旧版为 320px），用该 Blob 的 DEK 派生密钥加密后存在 thumbnails 表，不计入配额；
+    # grid：网格图（约 640px）与 poster：预览封面（约 960px）存为系统区对象 .tgdrive/thumbnails/<blob>/<规格>，
+    # 计入生成它的存储桶的配额，表中只记录所在存储桶与键。该桶不再引用源文件时随之删除，其他用户浏览时重新生成。
 
     THUMBNAIL_META = "tgdrive-thumbnail"  # 旧版存放位置，仅用于从 user_meta 中剔除
-    # thumb：列表与网格（最长边约 320px）；poster：预览封面与占位（约 960px）。
-    THUMBNAIL_LIMITS = {"thumb": 96 * 1024, "poster": 320 * 1024}
+    THUMBNAIL_PREFIX = ".tgdrive/thumbnails/"
+    THUMBNAIL_LIMITS = {"thumb": 96 * 1024, "grid": 160 * 1024, "poster": 320 * 1024}
+    STORED_THUMBNAILS = frozenset({"grid", "poster"})
+    # 请求的规格不存在时依次退回：网格图与封面互为替代，最后用列表小图。
+    THUMBNAIL_FALLBACK = {"thumb": ("thumb",), "grid": ("grid", "poster", "thumb"), "poster": ("poster", "grid", "thumb")}
 
     @staticmethod
     def _thumbnail_revision(created_at: float | None) -> str:
@@ -384,9 +396,27 @@ class ObjectService:
             raise ValueError("只有文件可以设置缩略图")
         return info, info.blob_uuid
 
-    def set_thumbnail(self, scope: Scope, key: str, data: bytes | None, variant: str = "thumb") -> None:
+    def _drop_thumbnail_objects(self, db, blob_uuid: str, now: float, bucket_id: int | None = None) -> None:
+        """删除某个 Blob 存为系统区对象的缩略图（可只删某个存储桶里的），并释放空间。"""
+        sql = "SELECT variant, bucket_id, object_key FROM thumbnails WHERE blob_uuid=? AND object_key IS NOT NULL"
+        rows = db.execute(sql + (" AND bucket_id=?" if bucket_id is not None else ""),
+                          (blob_uuid,) if bucket_id is None else (blob_uuid, bucket_id)).fetchall()
+        for row in rows:
+            self._drop_object_row(db, row["bucket_id"], row["object_key"], now)
+            db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=?", (blob_uuid, row["variant"]))
+
+    def _drop_object_row(self, db, bucket_id: int, key: str, now: float) -> None:
+        old = db.execute("SELECT blob_uuid, size FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone()
+        if old is None:
+            return
+        db.execute("DELETE FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key))
+        db.execute("UPDATE buckets SET used_bytes = MAX(0, used_bytes - ?) WHERE id=?", (old["size"], bucket_id))
+        if old["blob_uuid"]:
+            self._release_blob(db, old["blob_uuid"], now)
+
+    async def set_thumbnail(self, scope: Scope, key: str, data: bytes | None, variant: str = "thumb") -> None:
         """保存一种规格的缩略图；variant='none' 记录“已尝试但无法生成”，避免各端反复尝试。"""
-        _, blob_uuid = self._thumbnail_blob(scope, key, write=True)
+        info, blob_uuid = self._thumbnail_blob(scope, key, write=True)
         now = time.time()
         if variant == "none":
             with self.metadata.transaction() as db:
@@ -400,31 +430,105 @@ class ObjectService:
         if not data or len(data) > limit:
             raise ValueError("缩略图过大")
         mime = self._thumbnail_mime(data)
+        if variant in self.STORED_THUMBNAILS:
+            await self._store_thumbnail(info.bucket_id, blob_uuid, variant, mime, data, scope)
+            return
         sealed = self.engine.seal_thumbnail(blob_uuid, variant, data)
         with self.metadata.transaction() as db:
             db.execute("INSERT OR REPLACE INTO thumbnails(blob_uuid,variant,mime,data,created_at) VALUES(?,?,?,?,?)",
                        (blob_uuid, variant, mime, sealed, now))
             db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant='none'", (blob_uuid,))
-            if variant == "thumb":
-                db.execute("DELETE FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,))
+            db.execute("DELETE FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,))
 
-    def read_thumbnail(self, info: ObjectInfo, variant: str = "thumb") -> tuple[bytes, str, str]:
-        """返回 (图片, MIME, ETag)。没有 poster 时退回 thumb；旧版明文缩略图在首次读取时加密转存。"""
+    async def _store_thumbnail(self, bucket_id: int, blob_uuid: str, variant: str, mime: str, data: bytes,
+                               scope: Scope | None = None) -> None:
+        """大缩略图写成系统区对象（经 put_object 加密、计入配额），提交前复核源文件仍引用该 Blob。"""
+        key = f"{self.THUMBNAIL_PREFIX}{blob_uuid}/{variant}"
+        await self.put_object(Scope(bucket_id), key, data, len(data), mime)
+        now = time.time()
+        with self.metadata.transaction() as db:
+            if scope is not None and scope.authorize is not None:
+                scope.authorize()
+            alive = db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND blob_uuid=? LIMIT 1", (bucket_id, blob_uuid)).fetchone()
+            previous = db.execute("SELECT bucket_id, object_key FROM thumbnails WHERE blob_uuid=? AND variant=?",
+                                  (blob_uuid, variant)).fetchone()
+            if not alive:
+                # 生成期间源文件被删除或覆盖：丢弃刚写入的对象。
+                self._drop_object_row(db, bucket_id, key, now)
+                if previous is not None and previous["bucket_id"] == bucket_id and previous["object_key"] == key:
+                    db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=?", (blob_uuid, variant))
+                return
+            if previous is not None and previous["object_key"] and (previous["bucket_id"], previous["object_key"]) != (bucket_id, key):
+                # 同一个 Blob 只保留一份：别的存储桶里的旧版本删掉。
+                self._drop_object_row(db, previous["bucket_id"], previous["object_key"], now)
+            db.execute("INSERT OR REPLACE INTO thumbnails(blob_uuid,variant,mime,data,created_at,bucket_id,object_key) "
+                       "VALUES(?,?,?,x'',?,?,?)", (blob_uuid, variant, mime, now, bucket_id, key))
+            db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant='none'", (blob_uuid,))
+
+    async def read_thumbnail(self, info: ObjectInfo, variant: str = "thumb") -> tuple[bytes, str, str]:
+        """返回 (图片, MIME, ETag)。所需规格缺失时按 THUMBNAIL_FALLBACK 退回；旧版明文缩略图在首次读取时加密转存。"""
         if variant not in self.THUMBNAIL_LIMITS or not info.blob_uuid:
             raise NotFoundError("thumbnail not found")
-        for candidate in ((variant, "thumb") if variant == "poster" else (variant,)):
-            row = self.metadata.db.execute("SELECT mime, data, created_at FROM thumbnails WHERE blob_uuid=? AND variant=?",
-                                           (info.blob_uuid, candidate)).fetchone()
+        db = self.metadata.db
+        for candidate in self.THUMBNAIL_FALLBACK[variant]:
+            sql = "SELECT mime, data, created_at, bucket_id, object_key FROM thumbnails WHERE blob_uuid=? AND variant=?"
+            row = db.execute(sql, (info.blob_uuid, candidate)).fetchone()
             if row is None and candidate == "thumb" and self._adopt_legacy_thumbnail(info.blob_uuid):
-                row = self.metadata.db.execute("SELECT mime, data, created_at FROM thumbnails WHERE blob_uuid=? AND variant='thumb'",
-                                               (info.blob_uuid,)).fetchone()
-            if row is not None:
-                data = self.engine.open_thumbnail(info.blob_uuid, candidate, row["data"])
-                return data, row["mime"], f"{info.etag}-{candidate}-{self._thumbnail_revision(row['created_at'])}"
+                row = db.execute(sql, (info.blob_uuid, "thumb")).fetchone()
+            if row is None:
+                continue
+            etag = f"{info.etag}-{candidate}-{self._thumbnail_revision(row['created_at'])}"
+            if not row["object_key"]:
+                return self.engine.open_thumbnail(info.blob_uuid, candidate, row["data"]), row["mime"], etag
+            stored = db.execute("SELECT blob_uuid FROM objects WHERE bucket_id=? AND key=?",
+                                (row["bucket_id"], row["object_key"])).fetchone()
+            if stored is None or not stored["blob_uuid"]:
+                # 所在存储桶已删除：去掉记录，下次浏览时重新生成。
+                with self.metadata.transaction() as tx:
+                    tx.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=? AND object_key=?",
+                               (info.blob_uuid, candidate, row["object_key"]))
+                continue
+            return await self.engine.read(stored["blob_uuid"]), row["mime"], etag
         raise NotFoundError("thumbnail not found")
 
-    def get_thumbnail(self, scope: Scope, key: str, variant: str = "thumb") -> tuple[bytes, str, str]:
-        return self.read_thumbnail(self._object(self._lookup(scope, key)), variant)
+    async def get_thumbnail(self, scope: Scope, key: str, variant: str = "thumb") -> tuple[bytes, str, str]:
+        return await self.read_thumbnail(self._object(self._lookup(scope, key)), variant)
+
+    async def migrate_thumbnails(self, limit: int = 100) -> int:
+        """维护任务：把旧版存在数据库里的封面图（poster）分批转存为系统区对象，释放服务器磁盘。
+        对象写入引用该 Blob 的第一个存储桶；没有任何对象引用时直接删除记录。每批数量受 Telegram 发送频率限制。"""
+        rows = self.metadata.db.execute("SELECT blob_uuid, variant, mime, data FROM thumbnails WHERE variant IN ('grid','poster') "
+                                        "AND object_key IS NULL AND length(data) > 0 LIMIT ?", (limit,)).fetchall()
+        moved = 0
+        for row in rows:
+            blob_uuid, variant = row["blob_uuid"], row["variant"]
+            owner = self.metadata.db.execute("SELECT bucket_id FROM objects WHERE blob_uuid=? ORDER BY bucket_id LIMIT 1",
+                                             (blob_uuid,)).fetchone()
+            try:
+                if owner is None:
+                    raise QuotaExceededError("没有引用该文件的存储桶")
+                data = self.engine.open_thumbnail(blob_uuid, variant, row["data"])
+                await self._store_thumbnail(owner["bucket_id"], blob_uuid, variant, row["mime"], data)
+                moved += 1
+            except QuotaExceededError:
+                # 没有归属或配额已满：不再保留这张大图，界面退回列表小图，之后浏览时重新生成。
+                with self.metadata.transaction() as db:
+                    db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=? AND object_key IS NULL", (blob_uuid, variant))
+        return moved
+
+    def sweep_thumbnail_objects(self, limit: int = 500, *, older_than: float = 3600) -> int:
+        """维护任务：删除没有登记的大缩略图对象（例如从不含缩略图表的备份恢复后），释放配额。
+        只处理写入超过一小时的对象，避开正在保存、尚未登记的那一刻。"""
+        prefix = self.THUMBNAIL_PREFIX
+        rows = self.metadata.db.execute(
+            "SELECT o.bucket_id, o.key FROM objects o WHERE o.key >= ? AND o.key < ? AND o.modified_at < ? "
+            "AND NOT EXISTS(SELECT 1 FROM thumbnails t WHERE t.bucket_id=o.bucket_id AND t.object_key=o.key) LIMIT ?",
+            (prefix, prefix + self._PREFIX_END, time.time() - older_than, limit)).fetchall()
+        now = time.time()
+        with self.metadata.transaction() as db:
+            for row in rows:
+                self._drop_object_row(db, row["bucket_id"], row["key"], now)
+        return len(rows)
 
     def thumbnail_variants(self, blob_uuids: list[str]) -> dict[str, list[str]]:
         """一页对象的缩略图状态，一次查询：{blob_uuid: ["thumb", "poster"] 或 ["none"]}。"""
@@ -830,7 +934,7 @@ class ObjectService:
                     continue
                 if row["blob_uuid"]:
                     db.execute("DELETE FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key))
-                    self._release_blob(db, row["blob_uuid"], now)
+                    self._release_blob(db, row["blob_uuid"], now, scope.bucket_id)
                 else:
                     db.execute("DELETE FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key))
                 db.execute("UPDATE buckets SET used_bytes = used_bytes - ? WHERE id=?", (row["size"], scope.bucket_id))
@@ -1091,7 +1195,7 @@ class ObjectService:
                     if conflict == "overwrite":
                         db.execute("DELETE FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, target))
                         if existing["blob_uuid"]:
-                            self._release_blob(db, existing["blob_uuid"], now)
+                            self._release_blob(db, existing["blob_uuid"], now, scope.bucket_id)
                         db.execute("UPDATE buckets SET used_bytes = used_bytes - ? WHERE id=?",
                                    (existing["size"], scope.bucket_id))
                     else:

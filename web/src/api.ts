@@ -17,7 +17,7 @@ export type FileItem = {
   public_has_password?: boolean;
   public_downloads?: number;
   has_thumbnail?: boolean;
-  /** 缩略图状态："thumb"、"poster"，或 "none"（已尝试但无法生成）。 */
+  /** 缩略图状态："thumb"、"grid"、"poster"，或 "none"（已尝试但无法生成）。 */
   thumbnails?: string[];
   /** 各规格保存时的独立版本，用于浏览器缓存失效。 */
   thumbnail_versions?: Partial<Record<ThumbnailVariant, string>>;
@@ -65,6 +65,13 @@ let csrfToken = "";
 let thumbnailBucketId: number | null = null;
 let thumbnailSessionEpoch = 0;
 export function setCsrf(value: string) { csrfToken = value; }
+/** 页面卸载时仍要送达的小请求（fetch keepalive，带 CSRF）；不等待结果。 */
+export function postKeepalive(url: string, body: unknown) {
+  try {
+    void fetch(url, { method: "POST", credentials: "include", keepalive: true, body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json", ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}) } }).catch(() => undefined);
+  } catch { /* 页面正在关闭 */ }
+}
 
 export const PRIVATE_PREFIX = ".tgdrive/private/";
 let privateAccess = "";
@@ -257,17 +264,19 @@ export const restoreTrash = (ids: string[], root = "") => post<{ restored: { id:
 export const purgeTrash = (ids: string[] | "all", root = "") => post<{ purged: number }>(fileApi("/trash/purge", root), ids === "all" ? { all: true } : { ids });
 
 /* ---------- 缩略图 ---------- */
-export type ThumbnailVariant = "thumb" | "poster";
+export type ThumbnailVariant = "thumb" | "grid" | "poster";
+/** 所需规格缺失时依次退回（与服务端 THUMBNAIL_FALLBACK 一致）：网格图与封面互为替代，最后用小图。 */
+const THUMBNAIL_FALLBACK: Record<ThumbnailVariant, ThumbnailVariant[]> = { thumb: ["thumb"], grid: ["grid", "poster", "thumb"], poster: ["poster", "grid", "thumb"] };
 export const thumbnailUrl = (path: string, etag: string, variant: ThumbnailVariant = "thumb") =>
   mediaAccess(`${fileApi("/thumbnail", path)}?path=${encodeURIComponent(path)}&variant=${variant}&v=${encodeURIComponent(etag)}${thumbnailBucketId !== null ? `&bucket_id=${thumbnailBucketId}` : ""}`, path);
 export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb") => post<void>(fileApi("/thumbnail", path), { path, data, variant });
 export const markNoThumbnail = (path: string) => post<void>(fileApi("/thumbnail", path), { path, variant: "none" });
 function thumbnailSpec(file: FileItem, variant: ThumbnailVariant) {
-  const resolved = variant === "poster" && !file.thumbnails?.includes("poster") ? "thumb" : variant;
+  const resolved = THUMBNAIL_FALLBACK[variant].find(item => item === "thumb" || file.thumbnails?.includes(item)) ?? "thumb";
   const revision = file.thumbnail_versions?.[resolved];
   return { variant: resolved, version: `${file.etag}.${resolved}${revision ? `.${revision}` : ""}` };
 }
-/** 返回所需规格的缩略图地址；封面尚未生成时直接复用小图。 */
+/** 返回所需规格的缩略图地址；网格图或封面尚未生成时按退回顺序复用已有的规格。 */
 export function fileThumbnail(file: FileItem, variant: ThumbnailVariant = "thumb") {
   if (!file.thumbnails?.includes("thumb") && !file.has_thumbnail) return undefined;
   // 小图地址不受 poster 的生成或状态顺序影响，目录四宫格、文件列表和预览头部共用缓存。
@@ -359,8 +368,8 @@ export function uploadPartWithProgress(uploadId: string, partNo: number, blob: B
   return xhrPut<{ part_no: number; size: number; etag: string }>(fileApi(`/uploads/${uploadId}/parts/${partNo}`, path), blob, "application/octet-stream", onProgress);
 }
 
-/** 已用空间分项：我的文件、回收站、私密空间与助手附件。 */
-export type StorageUsage = { total: number; quota_bytes: number | null; files: number; trash: number; private: number; assistant: number };
+/** 已用空间分项：我的文件、回收站、私密空间、助手附件与缩略图（网格图和预览封面；列表小图不计入）。 */
+export type StorageUsage = { total: number; quota_bytes: number | null; files: number; trash: number; private: number; assistant: number; thumbnails?: number };
 export const storageUsage = () => request<StorageUsage>("/api/user/v1/usage");
 
 /* ---------- 用户客户端密钥 ---------- */

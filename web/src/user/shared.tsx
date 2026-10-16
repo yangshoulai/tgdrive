@@ -103,7 +103,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                       <div className="grid-thumb">
                         {folder ? <FolderThumbnail previews={(pagination.page?.folder_previews?.[file.key] ?? []).flatMap(item => {
                           const url = api.fileThumbnail(item); return url ? [{ ...item, url }] : [];
-                        })} /> : <FileThumbnail kind={kind} url={api.fileThumbnail(file)} />}
+                        })} /> : <FileThumbnail kind={kind} url={api.fileThumbnail(file, "grid")} placeholder={api.fileThumbnail(file)} />}
                         <span className="grid-public grid-share-badges">{shareBadges(file)}</span>
                       </div>
                       <div className="grid-meta">

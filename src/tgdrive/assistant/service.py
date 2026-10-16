@@ -373,7 +373,7 @@ class AssistantService:
         self._require_available(account.id)
         return await self.attachments.upload(account.id, account.bucket_id, unquote(name or ""), content_type, body, size)
 
-    def attachment_thumbnail(self, token: str, csrf: str, attachment_id: str, data: str | None, variant: str = "thumb") -> None:
+    async def attachment_thumbnail(self, token: str, csrf: str, attachment_id: str, data: str | None, variant: str = "thumb") -> None:
         import base64
         import binascii
         _, account = self._session(token, csrf=csrf, mutation=True)
@@ -383,11 +383,11 @@ class AssistantService:
                 raw = base64.b64decode(str(data or "").split(",", 1)[-1], validate=True)
             except binascii.Error as exc:
                 raise ValueError("缩略图数据不是有效的 base64") from exc
-        self.attachments.set_thumbnail(account.id, attachment_id, raw, variant)
+        await self.attachments.set_thumbnail(account.id, attachment_id, raw, variant)
 
-    def read_attachment_thumbnail(self, token: str, attachment_id: str, variant: str = "thumb"):
+    async def read_attachment_thumbnail(self, token: str, attachment_id: str, variant: str = "thumb"):
         _, account = self._session(token)
-        return self.attachments.thumbnail(account.id, attachment_id, variant)
+        return await self.attachments.thumbnail(account.id, attachment_id, variant)
 
     async def attachment_content(self, token: str, attachment_id: str, start: int = 0, end: int | None = None):
         _, account = self._session(token)
@@ -396,6 +396,10 @@ class AssistantService:
     def discard_attachment(self, token: str, csrf: str, attachment_id: str) -> None:
         _, account = self._session(token, csrf=csrf, mutation=True)
         self.attachments.discard(account.id, attachment_id)
+
+    def discard_pending_attachments(self, token: str, csrf: str) -> dict[str, int]:
+        _, account = self._session(token, csrf=csrf, mutation=True)
+        return self.attachments.discard_pending(account.id)
 
     def save_attachment(self, token: str, csrf: str, attachment_id: str, payload: dict) -> dict[str, object]:
         """另存为普通文件：path 为目标文件夹（以 / 结尾）或完整文件路径；同名自动改名。"""

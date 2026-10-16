@@ -30,7 +30,7 @@ class VisionTests(AssistantCase):
             self.assertTrue(model["capabilities"]["vision"])
         user = await self.client.login("user", "alice@example.com", "alice password")
         await self.put("相册/cat.jpg", b"large original that is not used" * 10)
-        self.app.objects.set_thumbnail(Scope(self.alice.bucket_id), "相册/cat.jpg", JPEG, "poster")
+        await self.app.objects.set_thumbnail(Scope(self.alice.bucket_id), "相册/cat.jpg", JPEG, "poster")
         await self.put("相册/notes.txt", b"hello")
         await self.put("文档/readme.txt", b"doc")
         self.shot = await upload(self, user, SHOT, PNG, "image/png")

@@ -4,6 +4,7 @@
   由对话框执行并回传结果；对话框没有打开时返回「浏览器未连接」。
 - 需要用户手势的动作（ui_download、browser_open_url、ui_copy）：浏览器不允许脚本自动下载、弹出新窗口或写剪贴板，
   所以只在对话里生成一张动作卡片，用户点击后执行；工具立即返回。
+- ui_generate_thumbnails：缩略图只能在浏览器生成且大图计入用户空间，同样只生成卡片，由用户点击后在对话框里逐个生成。
 - 路径一律经 ctx.resolve 校验在作用域内且不在 .tgdrive/；页面回传的数据同样按不可信数据包装。
 """
 
@@ -12,6 +13,7 @@ from __future__ import annotations
 import time
 from urllib.parse import urlsplit
 
+from ..filekinds import kind_of
 from .tools import END, PATH, ToolContext, ToolError, ToolOutput, _str, tool
 
 VIEWS = {"files": "文件", "trash": "回收站", "downloads": "下载任务", "shared": "公开分享"}
@@ -200,3 +202,47 @@ async def ui_copy(ctx: ToolContext, args: dict) -> ToolOutput:
     title = _str(args, "title", limit=60)
     return ToolOutput({"status": "已在对话中显示复制按钮"}, title or "可复制的文本",
                       event={"type": "browser", "action": "copy", "text": text, "title": title or None})
+
+
+THUMBNAIL_KINDS = {"image", "video", "audio"}
+THUMBNAIL_LIMIT = 300
+
+
+@tool("ui_generate_thumbnails", "生成缩略图", "browser", "read",
+      "为图片、视频和音乐补生成缩略图（列表小图、网格图与预览封面）。缩略图只能在用户的浏览器里生成，并且网格图与封面会计入用户空间，"
+      "所以工具只在对话中显示「生成缩略图」卡片，由用户点击后开始，工具立即返回。path 可以是文件或目录；recursive 包含子目录；"
+      "regenerate 时也重新生成已有但缺少网格图的旧版缩略图（例如用户觉得网格视图模糊）。单次最多 300 个文件。",
+      {"path": PATH, "recursive": {"type": "boolean", "description": "目录是否包含子目录，默认否"},
+       "regenerate": {"type": "boolean", "description": "是否重新生成缺少网格图的旧缩略图，默认否"}}, ("path",))
+async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
+    key = ctx.resolve(_str(args, "path", limit=1024))
+    recursive, regenerate = args.get("recursive") is True, args.get("regenerate") is True
+    single = None if key.endswith("/") or not key else ctx.db.execute(
+        "SELECT key, size, etag, content_type, blob_uuid FROM objects WHERE bucket_id=? AND key=?", (ctx.bucket_id, key)).fetchone()
+    if single is not None:
+        rows = [single]
+    else:
+        folder = key.rstrip("/") + "/" if key else ctx.scope_root
+        rows = ctx.db.execute("SELECT key, size, etag, content_type, blob_uuid FROM objects WHERE bucket_id=? AND key>=? AND key<? "
+                              "AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' ORDER BY key LIMIT 5000",
+                              (ctx.bucket_id, folder, folder + END)).fetchall()
+        if not rows and ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
+                                       (ctx.bucket_id, folder, folder + END)).fetchone() is None:
+            raise ToolError(f"{ctx.display(folder)} 不存在")
+        if not recursive:
+            rows = [row for row in rows if "/" not in row["key"][len(folder):]]
+    media = [row for row in rows if row["blob_uuid"] and kind_of(row["key"], row["content_type"]) in THUMBNAIL_KINDS]
+    variants = ctx.objects.thumbnail_variants([row["blob_uuid"] for row in media])
+    # 没有任何记录的需要生成；regenerate 时缺少网格图的（旧版 320px 小图、曾经失败的）也重新生成。
+    todo = [row for row in media if not variants.get(row["blob_uuid"])
+            or regenerate and "grid" not in variants[row["blob_uuid"]]]
+    items = [{"path": row["key"], "size": int(row["size"] or 0), "etag": row["etag"], "content_type": row["content_type"]}
+             for row in todo[:THUMBNAIL_LIMIT]]
+    payload = {"media_files": len(media), "need": len(todo), "in_card": len(items)}
+    if not items:
+        return ToolOutput({**payload, "status": "没有需要生成缩略图的文件"}, "没有需要生成的缩略图")
+    if len(todo) > len(items):
+        payload["note"] = f"还有 {len(todo) - len(items)} 个文件，用户完成这一批后可以再调用一次"
+    return ToolOutput({**payload, "status": "已在对话中显示生成缩略图卡片，等待用户点击"}, f"准备为 {len(items)} 个文件生成缩略图",
+                      items=len(items), event={"type": "browser", "action": "thumbnails", "items": items,
+                                                "regenerate": regenerate})

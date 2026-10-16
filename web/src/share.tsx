@@ -363,7 +363,8 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                   const download = api.publicFolderFile(token, item.path, true, access);
                   const openFile = () => canPreview(kind) ? setPreview(item) : window.location.assign(download);
                   return <div key={item.path} className={`grid-card${selected.has(item.path) ? " is-selected" : ""}`} onClick={openFile}>
-                    <div className="grid-thumb"><FileThumbnail kind={kind} url={item.thumbnails?.includes("thumb") ? api.publicThumbnail(content) : undefined} />
+                    <div className="grid-thumb"><FileThumbnail kind={kind} url={item.thumbnails?.includes("thumb") ? api.publicThumbnail(content, "grid") : undefined}
+                      placeholder={item.thumbnails?.includes("thumb") ? api.publicThumbnail(content) : undefined} />
                       <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${item.name}`} checked={selected.has(item.path)} onChange={checked => selectFiles([item.path], checked)} /></span>
                     </div>
                     <div className="grid-meta">

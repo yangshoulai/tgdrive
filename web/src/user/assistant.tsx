@@ -256,6 +256,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     finally { if (version === selection.current) setLoading(false); }
   }
 
+  // 关闭抽屉即放弃输入框里尚未发送的附件（§22.5）：附件只属于发出的消息，不留下没有对话的附件。
+  useEffect(() => { if (!open) attachments.clear(true); }, [open]);
+
   function newConversation() {
     selection.current += 1;
     setLoading(false); setReconnecting(false);
@@ -499,7 +502,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           </Menu>
           <button type="button" className="assistant-capability-button" onClick={() => setCapabilities(true)} title="查看助手能力"><Icon name="sparkle" size={14} /><span>能力</span></button>
           {canAttach && <button type="button" className="assistant-attach-button" onClick={() => filePicker.current?.click()} aria-label="添加附件"
-            title={`添加附件（也可以粘贴或拖入），保存到 /助手附件/${canSee ? "；图片会发给模型识别" : ""}`}><Icon name="paperclip" size={15} /></button>}
+            title={`添加附件（也可以粘贴或拖入），随对话保存${canSee ? "；图片会发给模型识别" : ""}`}><Icon name="paperclip" size={15} /></button>}
           <input ref={filePicker} type="file" multiple hidden onChange={event => { addFiles([...(event.target.files ?? [])]); event.target.value = ""; input.current?.focus(); }} />
           <span className="assistant-enter-hint">@ 引用 · Enter 发送 · Shift+Enter 换行</span>
           {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>

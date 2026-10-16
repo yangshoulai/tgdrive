@@ -115,7 +115,7 @@ function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
       context = new Context();
       const source = context.createMediaElementSource(audio);
       analyser = context.createAnalyser();
-      analyser.fftSize = 256; analyser.smoothingTimeConstant = .78;
+      analyser.fftSize = 512; analyser.smoothingTimeConstant = .86;
       source.connect(analyser); analyser.connect(context.destination);
     } catch { analyser = null; }
   };
@@ -163,13 +163,21 @@ function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
 
 const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-/** 频谱：有 Web Audio 时画真实频率，否则播放时用平滑的伪随机律动；暂停后柱子缓缓落下。 */
+/** 频谱：有 Web Audio 时画真实频率，否则播放时用平滑的伪随机律动；暂停后柱子缓缓落下。
+ * 相邻柱子取不相邻的频段（固定的打乱顺序）并各有增益，外形中间高两侧低，跳动有参差而不整齐划一；上升、回落都放慢。 */
 function Spectrum({ analyser, playing, bars = 48 }: { analyser: () => AnalyserNode | null; playing: boolean; bars?: number }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const node = canvas.current, context = node?.getContext("2d");
     if (!node || !context) return;
-    const levels = new Float32Array(bars), phases = Float32Array.from({ length: bars }, (_, index) => index * 1.7 % 6.28);
+    // 固定种子的伪随机数：每次打开的律动形状一致，但柱子之间互不相同。
+    let seed = 7;
+    const random = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const levels = new Float32Array(bars), gains = Float32Array.from({ length: bars }, () => .7 + random() * .45);
+    const phases = Float32Array.from({ length: bars * 2 }, () => random() * 6.28), speeds = Float32Array.from({ length: bars * 2 }, (_, index) => (index % 2 ? .45 : .9) + random() * .7);
+    const order = Array.from({ length: bars }, (_, index) => index);
+    for (let index = bars - 1; index > 0; index--) { const swap = Math.floor(random() * (index + 1)); [order[index], order[swap]] = [order[swap], order[index]]; }
+    const envelope = Float32Array.from({ length: bars }, (_, index) => .35 + .65 * Math.pow(Math.sin(Math.PI * (index + .5) / bars), .7));
     let frame = 0, data: Uint8Array<ArrayBuffer> | null = null, start = performance.now();
     const still = reducedMotion();
     const draw = (now: number) => {
@@ -179,22 +187,31 @@ function Spectrum({ analyser, playing, bars = 48 }: { analyser: () => AnalyserNo
       context.clearRect(0, 0, width, height);
       const source = playing && !still ? analyser() : null;
       if (source) { data ??= new Uint8Array(new ArrayBuffer(source.frequencyBinCount)); source.getByteFrequencyData(data); }
+      const t = (now - start) / 1000;
+      // 整体响度：频段很窄的乐曲（纯音、独奏）也让每根柱子按自己的增益和慢速起伏一起律动。
+      let loudness = 0;
+      if (source && data) { for (let bin = 1; bin < data.length * .5; bin++) loudness += data[bin]; loudness /= data.length * .5 * 255; }
       let moving = false;
       const gap = Math.max(2, width / bars * .35), barWidth = Math.max(2, (width - gap * (bars - 1)) / bars);
       for (let index = 0; index < bars; index++) {
         let target = .06;
         if (playing && !still) {
           if (source && data) {
-            // 左右对称：低频在中间、向两侧过渡到高频；高频能量弱，按距离适当提升，避免一侧总是平的。
-            const distance = Math.abs(index - (bars - 1) / 2) / ((bars - 1) / 2);
-            const bin = Math.min(data.length - 1, Math.floor(1 + Math.pow(distance, 1.5) * data.length * .5));
-            target = Math.max(.06, Math.min(1, Math.pow(data[bin] / 255, 1.2) * (1 + distance * .9)));
+            // 频段按对数分布在可听的前 70% 频率上，高频能量弱，按频段位置适当提升。
+            const band = order[index] / bars, span = data.length * .7;
+            const from = Math.floor(Math.pow(band, 1.6) * span) + 1, to = Math.max(from + 1, Math.floor(Math.pow(band + 1 / bars, 1.6) * span) + 1);
+            let sum = 0;
+            for (let bin = from; bin < to && bin < data.length; bin++) sum += data[bin];
+            const value = sum / Math.max(1, Math.min(to, data.length) - from) / 255;
+            const sway = .55 + .45 * (Math.sin(t * speeds[index * 2] + phases[index * 2]) + 1) / 2;
+            const floor = Math.min(1, loudness * 2.4) * sway * gains[index] * envelope[index] * .8;
+            target = Math.max(.06, floor, Math.min(1, Math.pow(value, 1.35) * (1 + band * 1.1) * gains[index] * envelope[index] * 1.25));
           } else {
-            const t = (now - start) / 1000;
-            target = .18 + .5 * Math.pow((Math.sin(t * (1.6 + index % 5 * .37) + phases[index]) + 1) / 2, 2) * Math.sin(Math.PI * (index + .5) / bars);
+            const wave = (Math.sin(t * speeds[index * 2] + phases[index * 2]) + 1) / 2, drift = (Math.sin(t * speeds[index * 2 + 1] + phases[index * 2 + 1]) + 1) / 2;
+            target = .1 + .72 * Math.pow(wave * .65 + drift * .35, 1.6) * gains[index] * envelope[index];
           }
-        } else if (still && playing) target = .3 * Math.sin(Math.PI * (index + .5) / bars) + .06;
-        levels[index] += (target - levels[index]) * (target > levels[index] ? .35 : .12);
+        } else if (still && playing) target = .3 * envelope[index] * gains[index] + .06;
+        levels[index] += (target - levels[index]) * (target > levels[index] ? .16 : .06);
         if (Math.abs(target - levels[index]) > .002) moving = true;
         const barHeight = Math.max(3, levels[index] * height);
         const x = index * (barWidth + gap), y = (height - barHeight) / 2;

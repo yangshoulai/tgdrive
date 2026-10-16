@@ -75,6 +75,12 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
                                      audit_retention_days=audit_retention_days)
     maintenance.trash_purger = objects.purge_expired_trash  # 回收站条目保留 30 天后自动永久删除
     maintenance.thumbnail_adopter = objects.adopt_legacy_thumbnails  # 旧版明文缩略图解锁后加密转存
+
+    async def migrate_thumbnails() -> dict[str, int]:
+        # 每轮最多转存 60 张：每张是一条 Telegram 消息，避免挤占正常上传的发送频率。
+        return {"moved": await objects.migrate_thumbnails(60),
+                "swept": await objects.metadata.run_in_thread(objects.sweep_thumbnail_objects, 500)}
+    maintenance.thumbnail_migrator = migrate_thumbnails
     context = AppContext(metadata, keystore, engine, accounts, objects, clients, s3, maintenance,
                          telegram_bots, store, SystemSettings(metadata, {"public_base_url": public_base_url, "s3_endpoint": s3_endpoint}), metrics)
     admin, user = AdminApi(accounts, objects, clients, maintenance, telegram_bots, metrics=metrics, storage=store), UserApi(accounts, objects, clients)

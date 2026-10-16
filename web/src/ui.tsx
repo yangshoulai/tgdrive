@@ -549,7 +549,7 @@ export type MenuItem = { label: string; description?: string; icon: IconName; on
 const overlayRoot = () => (document.fullscreenElement as HTMLElement | null) ?? document.body;
 
 /** 菜单列表：按锚点（按钮矩形或指针位置）定位，处理方向键、Esc、Tab、点外部与滚动关闭。 */
-function MenuList({ items, label, anchor, onClose, restoreFocus }: { items: MenuItem[]; label: string; anchor: () => { x: number; y: number; bottom?: number; alignRight?: boolean }; onClose: () => void; restoreFocus?: () => void }) {
+function MenuList({ items, label, anchor, onClose, restoreFocus, dark }: { items: MenuItem[]; label: string; anchor: () => { x: number; y: number; bottom?: number; alignRight?: boolean }; onClose: () => void; restoreFocus?: () => void; dark?: boolean }) {
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const list = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
@@ -600,7 +600,7 @@ function MenuList({ items, label, anchor, onClose, restoreFocus }: { items: Menu
     };
   }, []);
   return createPortal(
-    <div ref={list} className={`menu${items.some(item => item.description !== undefined) ? " has-descriptions" : ""}`} role="menu" aria-label={label} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }}
+    <div ref={list} className={`menu${items.some(item => item.description !== undefined) ? " has-descriptions" : ""}${dark ? " is-dark" : ""}`} role="menu" aria-label={label} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }}
       onClick={event => event.stopPropagation()} onContextMenu={event => event.preventDefault()}>
       {items.map(item => {
         const content = <><Icon name={item.icon} size={16} /><span className="menu-copy"><span>{item.label}</span>{item.description !== undefined && <small title={item.description}>{item.description}</small>}</span>{item.checked ? <span className="menu-check"><Icon name="check" size={15} /></span> : item.shortcut && <kbd className="menu-shortcut">{item.shortcut}</kbd>}</>;
@@ -627,7 +627,8 @@ export function Menu({ items, label, icon = "more", size = "sm", children, class
         onClick={event => { event.stopPropagation(); setOpen(value => !value); }}>
         {children ?? <Icon name={icon} size={16} />}
       </button>
-      {open && <MenuList items={items} label={label} onClose={() => setOpen(false)} restoreFocus={() => trigger.current?.focus()}
+      {/* 深色画布（预览窗口）里打开的菜单跟随深色配色，不在暗色画面上弹出白色面板。 */}
+      {open && <MenuList items={items} label={label} dark={Boolean(trigger.current?.closest(".is-dark-surface"))} onClose={() => setOpen(false)} restoreFocus={() => trigger.current?.focus()}
         anchor={() => { const rect = trigger.current!.getBoundingClientRect(); return { x: align === "start" ? rect.left : rect.right, y: rect.top, bottom: rect.bottom, alignRight: align === "end" }; }} />}
     </>
   );

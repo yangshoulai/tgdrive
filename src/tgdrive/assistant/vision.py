@@ -58,7 +58,7 @@ async def load_image(objects: ObjectService, bucket_id: int, key: str, *, max_by
     if not is_image(key, info.content_type):
         raise NotAnImage(f"{label} 不是图片")
     try:
-        data, _, _ = await objects.metadata.run_in_thread(objects.get_thumbnail, scope, key, "poster")
+        data, _, _ = await objects.get_thumbnail(scope, key, "poster")
         mime = sniff(data)
         if mime:
             return {"mime": mime, "data": data, "source": "poster", "size": info.size}

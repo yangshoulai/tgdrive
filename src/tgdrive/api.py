@@ -485,7 +485,7 @@ class UserApi:
                 "csrf_token": session.csrf_token, "expires_at": session.expires_at}
 
     def usage(self, token: str) -> dict[str, object]:
-        """已用空间分项：回收站、私密空间（含其回收站）与助手对话附件都位于 .tgdrive/ 系统区，其余是我的文件。
+        """已用空间分项：回收站、私密空间（含其回收站）、助手对话附件与大缩略图都位于 .tgdrive/ 系统区，其余是我的文件。
         每项是 (bucket_id, key) 索引上的范围求和，不扫描整个存储桶。"""
         scope = self._scope(token)
         bucket = self.objects._bucket(scope.bucket_id)
@@ -498,9 +498,10 @@ class UserApi:
         trash = total(".tgdrive/trash/")
         private = total(".tgdrive/private/") + total(".tgdrive/private-trash/")
         assistant = total(".tgdrive/assistant/")
+        thumbnails = total(self.objects.THUMBNAIL_PREFIX)
         used = int(bucket["used_bytes"])
         return {"total": used, "quota_bytes": bucket["quota_bytes"], "trash": trash, "private": private, "assistant": assistant,
-                "files": max(0, used - trash - private - assistant)}
+                "thumbnails": thumbnails, "files": max(0, used - trash - private - assistant - thumbnails)}
 
     async def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000, public_only: bool = False,
                    kind: str = ""):
@@ -728,7 +729,7 @@ class UserApi:
 
     # ---------- 缩略图 ----------
 
-    def set_thumbnail(self, token: str, csrf: str, path: str, data: str | None, variant: str = "thumb") -> None:
+    async def set_thumbnail(self, token: str, csrf: str, path: str, data: str | None, variant: str = "thumb") -> None:
         import base64
         import binascii
         raw = None
@@ -737,13 +738,13 @@ class UserApi:
                 raw = base64.b64decode(str(data or "").split(",", 1)[-1], validate=True)
             except binascii.Error as exc:
                 raise ValueError("缩略图数据不是有效的 base64") from exc
-        self.objects.set_thumbnail(self._scope(token, csrf=csrf, mutation=True), self._path(path), raw, variant)
+        await self.objects.set_thumbnail(self._scope(token, csrf=csrf, mutation=True), self._path(path), raw, variant)
 
-    def thumbnail(self, token: str, path: str, variant: str = "thumb", *, bucket_id: int | None = None) -> tuple[bytes, str, str]:
+    async def thumbnail(self, token: str, path: str, variant: str = "thumb", *, bucket_id: int | None = None) -> tuple[bytes, str, str]:
         scope = self._scope(token)
         if bucket_id is not None and bucket_id != scope.bucket_id:
             raise PermissionError("缩略图所属文件空间不匹配")
-        return self.objects.get_thumbnail(scope, self._path(path), variant)
+        return await self.objects.get_thumbnail(scope, self._path(path), variant)
 
     # ---------- 可续传的分段上传 ----------
 

@@ -9,7 +9,8 @@ import * as ai from "../assistant-api";
 import { Markdown } from "../markdown";
 import { MessageAttachments } from "./assistant-attachments";
 import { usePreview } from "./preview-host";
-import { FileGlyph, getFileKind } from "../files";
+import { FileGlyph, getFileKind, parentPath } from "../files";
+import { createThumbnails, saveThumbnails, thumbnailSource } from "../thumbnails";
 import { AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
 const display = (key: string) => "/" + key;
@@ -278,7 +279,7 @@ function Thinking({ text, ms, live, startedAt }: { text: string; ms: number | nu
 }
 
 const TOOL_ICONS: [RegExp, IconName][] = [
-  [/^propose_save_attachment/, "paperclip"],
+  [/^propose_save_attachment/, "paperclip"], [/^ui_generate_thumbnails/, "image"],
   [/^(list_folder|folder_tree|find_empty)/, "folder"], [/^(search_files|find_large|find_duplicates)/, "search"],
   [/^(storage_stats|trash_stats)/, "pulse"], [/^(list_trash)/, "trash"], [/^read_text_file/, "fileText"], [/^get_file_info/, "file"],
   [/^(list_public|propose_share|propose_unshare)/, "link"], [/download/, "download"], [/^(analyze_page|collect_gallery|parse_download)/, "globe"],
@@ -392,6 +393,7 @@ function ScopeCard({ event, action, running, onScope }: { event: Extract<ai.Tool
 function BrowserCard({ event }: { event: ai.BrowserEvent }) {
   const [done, setDone] = useState(false);
   if (event.action === "share") return <ShareBrowserCard event={event} />;
+  if (event.action === "thumbnails") return <ThumbnailsBrowserCard event={event} />;
   if (event.action === "download") {
     const keys = event.items.map(item => item.path);
     const single = event.items.length === 1 && !event.items[0].folder;
@@ -414,6 +416,53 @@ function BrowserCard({ event }: { event: ai.BrowserEvent }) {
     <pre className="ai-copy-text">{event.text}</pre>
     <footer className="ai-card-foot"><span>{done ? "已复制到剪贴板" : `${event.text.length.toLocaleString("zh-CN")} 个字符`}</span>
       <Button size="sm" variant="primary" icon={done ? "check" : "copy"} onClick={() => void copyText(event.text).then(ok => setDone(ok))}>复制</Button></footer>
+  </section>;
+}
+
+/** 生成缩略图：用户点击后在当前页面逐个生成并保存（与目录补生成同一套逻辑），结束后通知文件页刷新所在目录。
+ * 卡片卸载（切换对话、关闭页面）时停止；已保存的不受影响，再次点击会重新处理全部条目。 */
+function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action: "thumbnails" }> }) {
+  type Run = { phase: "idle" | "running" | "done" | "stopped"; done: number; none: number; failed: number; current: string };
+  const [state, setState] = useState<Run>({ phase: "idle", done: 0, none: 0, failed: 0, current: "" });
+  const controller = useRef<AbortController | null>(null);
+  useEffect(() => () => controller.current?.abort(), []);
+  async function start() {
+    const signal = (controller.current = new AbortController()).signal;
+    const counts = { done: 0, none: 0, failed: 0 }, folders = new Set<string>();
+    setState({ phase: "running", ...counts, current: "" });
+    for (const item of event.items) {
+      if (signal.aborted) break;
+      setState(value => ({ ...value, current: item.path }));
+      const source = thumbnailSource(item.path, item.content_type, item.size);
+      try {
+        const result = source ? await createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal }, source) : "none";
+        const saved = await saveThumbnails(item.path, result);
+        if (!saved) counts.failed++; else if (saved.includes("none")) counts.none++; else counts.done++;
+        if (saved) folders.add(parentPath(item.path));
+      } catch {
+        if (signal.aborted) break;
+        counts.failed++;
+      }
+      setState(value => ({ ...value, ...counts }));
+    }
+    if (folders.size) window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [...folders] } }));
+    setState(value => ({ ...value, ...counts, phase: signal.aborted ? "stopped" : "done", current: "" }));
+  }
+  const total = event.items.length, processed = state.done + state.none + state.failed;
+  const summary = [`已生成 ${state.done} 个`, state.none ? `${state.none} 个没有封面` : "", state.failed ? `${state.failed} 个失败` : ""].filter(Boolean).join("，");
+  return <section className="ai-card ai-browser">
+    <CardHead icon="image" title={`为 ${total} 个文件生成缩略图`} subtitle={event.regenerate ? "包括重做旧版缩略图 · 在当前页面生成" : "在当前页面生成"} />
+    {state.phase === "idle" ? <ul className="ai-list">{event.items.slice(0, 5).map(item => <li key={item.path}><Icon name="file" size={13} /><span className="cell-truncate">{display(item.path)}</span></li>)}
+      {total > 5 && <li className="ai-list-more">等 {total} 个文件</li>}</ul>
+      : <div className="ai-thumbnail-progress">
+        <Progress value={total ? processed / total * 100 : 100} label={`${processed} / ${total}`} />
+        <p className="cell-truncate">{state.phase === "running" ? `正在处理 ${display(state.current)}` : summary}</p>
+      </div>}
+    <footer className="ai-card-foot"><span>{state.phase === "idle" ? "网格图与封面计入你的已用空间；生成期间保持页面打开"
+      : state.phase === "running" ? `${processed} / ${total}` : state.phase === "stopped" ? `已停止 · ${summary}` : "已完成"}</span>
+      {state.phase === "running" ? <Button size="sm" onClick={() => controller.current?.abort()}>停止</Button>
+        : <Button size="sm" variant={state.phase === "idle" ? "primary" : "secondary"} icon={state.phase === "idle" ? "image" : "refresh"} onClick={() => void start()}>{state.phase === "idle" ? "生成" : "重新生成"}</Button>}
+    </footer>
   </section>;
 }
 

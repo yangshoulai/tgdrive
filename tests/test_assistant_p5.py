@@ -147,6 +147,29 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             self.assertEqual(status, 400)
         self.run_async(run())
 
+    def test_generate_thumbnails_card_lists_only_media_that_needs_it(self):
+        async def run():
+            files = ("相册/a.jpg", "相册/b.png", "相册/c.mp4", "相册/notes.txt", "相册/sub/d.jpg", "其他/e.jpg")
+            _, user, conversation = await self.ready(files, location="相册/")
+            webp = b"RIFF\x1a\x00\x00\x00WEBPVP8 " + b"\x00" * 14
+            await self.app.objects.set_thumbnail(Scope(self.alice.bucket_id), "相册/b.png", webp)
+            self.model.replies = [call("ui_generate_thumbnails", path="/相册/"), answer("点击卡片生成")]
+            await self.send(user, conversation, "补一下缩略图")
+            event = (await self.tool_results(user, conversation))[-1]["event"]
+            self.assertEqual((event["action"], event["regenerate"]), ("thumbnails", False))
+            self.assertEqual([item["path"] for item in event["items"]], ["相册/a.jpg", "相册/c.mp4"], "跳过已有缩略图、非媒体与子目录")
+            self.assertTrue(all(item["etag"] and item["size"] for item in event["items"]))
+            self.model.replies = [call("ui_generate_thumbnails", path="/相册/", recursive=True, regenerate=True), answer("好")]
+            await self.send(user, conversation, "重做旧缩略图")
+            event = (await self.tool_results(user, conversation))[-1]["event"]
+            self.assertEqual([item["path"] for item in event["items"]], ["相册/a.jpg", "相册/b.png", "相册/c.mp4", "相册/sub/d.jpg"],
+                             "regenerate 包含缺少网格图的旧缩略图")
+            self.model.replies = [call("ui_generate_thumbnails", path="/其他/"), answer("好")]
+            await self.send(user, conversation, "其他目录")
+            result = (await self.tool_results(user, conversation))[-1]
+            self.assertEqual((result["status"], result["event"]), ("error", None), "作用域外的目录不生成卡片")
+        self.run_async(run())
+
     def test_http_json_redaction_download_proposal_and_persistent_taint(self):
         async def run():
             admin, user, conversation = await self.ready()

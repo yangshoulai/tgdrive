@@ -264,7 +264,7 @@ class TgDriveASGI(StaticFiles):
                 return
             if path == "/api/user/v1/thumbnail" and method == "GET":
                 bucket_id = int(query["bucket_id"][0]) if "bucket_id" in query else None
-                data, mime, etag = file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0], bucket_id=bucket_id)
+                data, mime, etag = await file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0], bucket_id=bucket_id)
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, "no-store" if private else self._thumbnail_cache_control(query, etag))
                 return
             if path == "/api/user/v1/avatar" and method == "GET":
@@ -302,7 +302,7 @@ class TgDriveASGI(StaticFiles):
                     opener = lambda start, end: self.assistant.attachment_content(token, attachment_id, start, end)
                     await self._until_disconnect(receive, self._stream_object(tracked_send, method, info, opener, query, headers, "private, no-cache"))
                 elif attachment[2] == "thumbnail" and method == "GET":
-                    data, mime, etag = self.assistant.read_attachment_thumbnail(token, attachment[1], query.get("variant", ["thumb"])[0])
+                    data, mime, etag = await self.assistant.read_attachment_thumbnail(token, attachment[1], query.get("variant", ["thumb"])[0])
                     await self._send_thumbnail(tracked_send, headers, data, mime, etag, "private, no-cache")
                 else:
                     raise NotFoundError("资源不存在")
@@ -930,7 +930,7 @@ class TgDriveASGI(StaticFiles):
                 ids = None if payload.get("all") else list(payload["ids"])
                 return 200, {"purged": await user.purge_trash(token, csrf, ids)}, {}
             if method == "POST" and route == "/thumbnail":
-                user.set_thumbnail(token, csrf, payload["path"], payload.get("data"), str(payload.get("variant") or "thumb"))
+                await user.set_thumbnail(token, csrf, payload["path"], payload.get("data"), str(payload.get("variant") or "thumb"))
                 return 204, None, {}
             if method == "POST" and route == "/files/instant":
                 public = payload.get("public")
@@ -1084,7 +1084,7 @@ class TgDriveASGI(StaticFiles):
             root, info = self.user.objects.public_folder_file(token, rest)
         if "thumbnail" in query:
             # 缩略图沿用分享的权限边界（密码、目录范围、账号状态），不计入下载次数。
-            data, mime, etag = self.user.objects.read_thumbnail(info, query["thumbnail"][0])
+            data, mime, etag = await self.user.objects.read_thumbnail(info, query["thumbnail"][0])
             await self._send_thumbnail(send, headers, data, mime, etag, "public, no-cache")
             return
 
@@ -1316,10 +1316,12 @@ class TgDriveASGI(StaticFiles):
             return 200, await service.undo_action(token, csrf, match[1]), no_store
         if route == "/attachments/stats" and method == "GET":
             return 200, service.attachment_stats(token), no_store
+        if route == "/attachments/discard-pending" and method == "POST":
+            return 200, service.discard_pending_attachments(token, csrf), no_store
         match = re.fullmatch(r"/attachments/([0-9a-f]{32})/(thumbnails|discard|save)", route)
         if match and method == "POST":
             if match[2] == "thumbnails":
-                service.attachment_thumbnail(token, csrf, match[1], payload.get("data"), str(payload.get("variant") or "thumb"))
+                await service.attachment_thumbnail(token, csrf, match[1], payload.get("data"), str(payload.get("variant") or "thumb"))
                 return 204, None, {}
             if match[2] == "discard":
                 service.discard_attachment(token, csrf, match[1])

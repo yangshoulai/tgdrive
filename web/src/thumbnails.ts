@@ -1,16 +1,18 @@
 /** 缩略图生成：图片缩放、视频截帧、音频内嵌封面。全部在浏览器完成，服务端只保存加密后的结果，不解码用户文件。
- * 两种规格：thumb（最长边 320px，列表与网格）与 poster（最长边 960px，预览封面与占位，仅在原图足够大时生成）。 */
+ * 三种规格：thumb（最长边 160px，列表、目录四宫格）、grid（640px，网格卡片）与 poster（960px，预览封面与占位）；
+ * 后两种只在原图明显更大时生成，存为系统区对象并计入用户空间。旧文件没有 grid 时网格退回 poster 或旧版 320px 的 thumb。 */
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { getFileKind } from "./files";
 
 export type ThumbnailSource = "image" | "video" | "audio";
-export type ThumbnailSet = { thumb: string; poster?: string };
+export type ThumbnailSet = { thumb: string; grid?: string; poster?: string };
 /** 生成结果：图片集合；"none" 表示确定无法生成（如音频没有封面）；null 表示这次没成功，可以稍后再试。 */
 export type ThumbnailResult = ThumbnailSet | "none" | null;
 
-const THUMB = { size: 320, budget: 90 * 1024 };
-const POSTER = { size: 960, budget: 300 * 1024 };
+const THUMB = { size: 160, budget: 24 * 1024 };
+const GRID = { size: 640, budget: 120 * 1024 };
+const POSTER = { size: 960, budget: 220 * 1024 };
 const IMAGE_LIMIT = 60 * 1024 * 1024;
 
 export function thumbnailSource(name: string, type: string | null | undefined, size: number): ThumbnailSource | null {
@@ -45,9 +47,11 @@ async function renderSet(source: CanvasImageSource, width: number, height: numbe
   if (!width || !height) return null;
   const thumb = await encode(source, width, height, THUMB);
   if (!thumb) return null;
-  // 原图明显大于缩略图时才额外生成封面，避免把小图放大或重复保存同样的内容。
-  const poster = Math.max(width, height) > THUMB.size * 1.5 ? await encode(source, width, height, POSTER) ?? undefined : undefined;
-  return { thumb, poster };
+  // 原图明显大于上一级规格时才生成下一级，避免把小图放大或重复保存同样的内容。
+  const longest = Math.max(width, height);
+  const grid = longest > THUMB.size * 1.5 ? await encode(source, width, height, GRID) ?? undefined : undefined;
+  const poster = longest > GRID.size * 1.25 ? await encode(source, width, height, POSTER) ?? undefined : undefined;
+  return { thumb, grid, poster };
 }
 
 /** 已加载的 <img>（例如预览弹窗里的原图）直接生成，不必重新下载。 */
@@ -308,8 +312,13 @@ export async function saveThumbnails(path: string, result: ThumbnailResult): Pro
   if (!result) return null;
   if (result === "none") { await api.markNoThumbnail(path); return ["none"]; }
   await api.setThumbnail(path, result.thumb, "thumb");
-  if (result.poster) await api.setThumbnail(path, result.poster, "poster").catch(() => undefined);
-  return result.poster ? ["thumb", "poster"] : ["thumb"];
+  // 网格图与封面写入系统区（计入空间）；失败（如空间不足）时界面退回小图，不影响列表。
+  const saved = ["thumb"];
+  for (const variant of ["grid", "poster"] as const) {
+    const data = result[variant];
+    if (data && await api.setThumbnail(path, data, variant).then(() => true, () => false)) saved.push(variant);
+  }
+  return saved;
 }
 
 /* ---------- 后台补生成 ---------- */

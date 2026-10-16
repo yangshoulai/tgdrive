@@ -1,5 +1,5 @@
 /** 文件助手的接口：用户端 /api/user/v1/assistant 与管理端 /api/admin/v1/assistant（docs/assistant-design.md §13）。 */
-import { apiGet as get, apiPost as post } from "./api";
+import { apiGet as get, apiPost as post, postKeepalive } from "./api";
 
 export type ToolSupport = "unknown" | "yes" | "no";
 export type Capabilities = { tools?: boolean | null; reasoning?: boolean | null; vision?: boolean | null; structured?: boolean | null };
@@ -155,7 +155,8 @@ export type BrowserEvent =
   | { type: "browser"; action: "download"; items: { path: string; folder: boolean }[]; size: number }
   | { type: "browser"; action: "open"; url: string; host: string; title: string | null }
   | { type: "browser"; action: "share"; path: string; conversation_id: string }
-  | { type: "browser"; action: "copy"; text: string; title: string | null };
+  | { type: "browser"; action: "copy"; text: string; title: string | null }
+  | { type: "browser"; action: "thumbnails"; items: { path: string; size: number; etag: string; content_type: string | null }[]; regenerate: boolean };
 export type ToolEvent =
   | { type: "plan"; items: { content: string; status: "pending" | "in_progress" | "completed" }[] }
   | { type: "question"; question: string; options: string[] }
@@ -216,10 +217,14 @@ export const updateConversation = (id: string, input: { title?: string; archived
 export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
 const attachmentPath = (id: string, tail: string) => `${USER}/attachments/${encodeURIComponent(id)}/${tail}`;
 export const attachmentContentUrl = (id: string, download = false) => attachmentPath(id, `content${download ? "?download=1" : ""}`);
-export const attachmentThumbnailUrl = (id: string, variant: "thumb" | "poster" = "thumb") => attachmentPath(id, `thumbnail?variant=${variant}`);
-export const setAttachmentThumbnail = (id: string, data: string | null, variant: "thumb" | "poster" | "none") =>
+export const attachmentThumbnailUrl = (id: string, variant: "thumb" | "grid" | "poster" = "thumb") => attachmentPath(id, `thumbnail?variant=${variant}`);
+export const setAttachmentThumbnail = (id: string, data: string | null, variant: "thumb" | "grid" | "poster" | "none") =>
   post<void>(attachmentPath(id, "thumbnails"), { data, variant });
 export const discardAttachment = (id: string) => post<void>(attachmentPath(id, "discard"), {});
+/** 页面关闭时放弃未发送的附件：keepalive 请求在卸载后仍会送达。 */
+export const discardAttachmentsOnUnload = (ids: string[]) => ids.forEach(id => postKeepalive(attachmentPath(id, "discard"), {}));
+/** 清除自己全部未发送的附件（用户设置「助手附件」）。 */
+export const discardPendingAttachments = () => post<{ removed: number; size: number }>(`${USER}/attachments/discard-pending`, {});
 /** 另存为普通文件：path 为目标文件夹（以 / 结尾）；同名自动改名。 */
 export const saveAttachment = (id: string, path: string) => post<{ path: string; size: number }>(attachmentPath(id, "save"), { path });
 export type AttachmentStats = { count: number; size: number; pending: { count: number; size: number };

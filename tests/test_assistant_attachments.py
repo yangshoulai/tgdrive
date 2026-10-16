@@ -174,3 +174,18 @@ class AttachmentTests(AssistantCase):
                 await __import__("asyncio").sleep(0.02)
             self.assertEqual(self.keys("相册/"), ["相册/照片.png"])
         self.run_async(scenario())
+
+    def test_discard_pending_only_removes_unsent(self):
+        async def scenario():
+            user, conversation = await self.prepare()
+            sent = await upload(self, user, "sent.txt", b"sent")
+            self.model.replies = [answer("好")]
+            await self.send(user, conversation, "附件", attachments=[sent["id"]])
+            await upload(self, user, "draft-1.txt", b"12345")
+            await upload(self, user, "draft-2.txt", b"678")
+            status, result = await self.req("POST", "/api/user/v1/assistant/attachments/discard-pending", {}, user)
+            self.assertEqual((status, result), (200, {"removed": 2, "size": 8}))
+            ids = [row[0] for row in self.app.metadata.db.execute("SELECT id FROM assistant_attachments")]
+            self.assertEqual(ids, [sent["id"]], "已发送的附件不受影响")
+            self.assertEqual(self.used(), 4)
+        self.run_async(scenario())

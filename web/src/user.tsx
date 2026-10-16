@@ -128,7 +128,7 @@ function sectionUrl(section: Section, prefix = "") {
   return query ? `/?${query}` : "/";
 }
 
-/** 侧栏容量：点开显示分项（我的文件、回收站、私密空间、助手附件）；系统区的内容同样计入配额。 */
+/** 侧栏容量：点开显示分项（我的文件、回收站、私密空间、助手附件、缩略图）；系统区的内容同样计入配额。 */
 function StorageMeter({ usage, percent }: { usage: Usage | null; percent: number }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<api.StorageUsage | null>(null);
@@ -140,7 +140,7 @@ function StorageMeter({ usage, percent }: { usage: Usage | null; percent: number
     return () => { alive = false; };
   }, [open, usage?.used_bytes]);
   const rows: [string, IconName, number][] = detail ? [["我的文件", "folder", detail.files], ["回收站", "trash", detail.trash],
-    ["私密空间", "lock", detail.private], ["助手附件", "paperclip", detail.assistant]] : [];
+    ["私密空间", "lock", detail.private], ["助手附件", "paperclip", detail.assistant], ["缩略图", "image", detail.thumbnails ?? 0]] : [];
   return <div className={`storage-meter${open ? " is-open" : ""}`} title={usage?.quota_bytes == null ? "未设置空间配额" : undefined}>
     <button type="button" className="storage-meter-head" aria-expanded={open} aria-controls={`${id}-detail`} onClick={() => setOpen(value => !value)}>
       <span>已用空间<Icon name="chevronDown" size={12} /></span><strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></button>

@@ -112,9 +112,10 @@ export function FileVisual({ kind, src, size = "md" }: { kind: FileKind; src?: s
   return <span className={`file-tile file-visual tile-${size}`} aria-hidden="true"><img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} /></span>;
 }
 
-export function FileThumbnail({ kind, url }: { kind: FileKind; url?: string }) {
+/** placeholder：大图加载完成前先显示的小图（网格卡片用列表小图占位，通常已在浏览器缓存里）。 */
+export function FileThumbnail({ kind, url, placeholder }: { kind: FileKind; url?: string; placeholder?: string }) {
   // 按资源地址重建状态，避免缓存图片的 load 事件被挂载后的 effect 重置。
-  return <ThumbnailImage key={url} kind={kind} url={url} />;
+  return <ThumbnailImage key={url} kind={kind} url={url} placeholder={placeholder === url ? undefined : placeholder} />;
 }
 
 /** 文件夹只展示已有的小缩略图；空目录或尚未生成缩略图时保留文件夹图标。 */
@@ -130,12 +131,15 @@ export function FolderThumbnail({ previews = [] }: { previews?: { key: string; c
   </div>;
 }
 
-function ThumbnailImage({ kind, url }: { kind: FileKind; url?: string }) {
+function ThumbnailImage({ kind, url, placeholder }: { kind: FileKind; url?: string; placeholder?: string }) {
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
+  const [fallback, setFallback] = useState<"loading" | "ready" | "failed">("loading");
+  const covered = state === "ready" || (placeholder && fallback === "ready");
   return <div className={`file-thumbnail thumbnail-${state}`}>
-    {(!url || state !== "ready") && <FileTile kind={kind} size="xl" />}
+    {(!url || !covered) && <FileTile kind={kind} size="xl" />}
+    {url && placeholder && state !== "ready" && fallback !== "failed" && <img className="thumbnail-placeholder" src={placeholder} alt="" loading="lazy" onLoad={() => setFallback("ready")} onError={() => setFallback("failed")} />}
     {url && state !== "failed" && <img src={url} alt="" loading="lazy" onLoad={() => setState("ready")} onError={() => setState("failed")} />}
-    {url && state === "ready" && (kind === "video" || kind === "audio") && <span className="thumbnail-badge" aria-hidden="true"><Icon name={kind === "video" ? "play" : "audio"} size={12} /></span>}
+    {url && covered && (kind === "video" || kind === "audio") && <span className="thumbnail-badge" aria-hidden="true"><Icon name={kind === "video" ? "play" : "audio"} size={12} /></span>}
   </div>;
 }
 
@@ -399,7 +403,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>
         <IconButton icon="next" label="下一张" size="sm" onClick={nav.onNext} />
-      </div> : undefined} className={`preview-modal preview-modal-${kind}${immersive ? " is-immersive" : ""}${reading ? " is-reading" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
+      </div> : undefined} className={`preview-modal preview-modal-${kind}${immersive ? " is-immersive" : ""}${immersive || kind === "pdf" ? " is-dark-surface" : ""}${reading ? " is-reading" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>

@@ -36,6 +36,16 @@ function AssistantAttachmentsSummary({ assistant, onOpenConversation }: { assist
   const id = useId();
   const [stats, setStats] = useState<ai.AttachmentStats | null>(null);
   const [error, setError] = useState("");
+  const [clearing, setClearing] = useState(false);
+  async function clearPending() {
+    setClearing(true);
+    try {
+      const result = await ai.discardPendingAttachments();
+      toast.success(`已清除 ${result.removed} 个未发送的附件，释放 ${formatBytes(result.size)}`);
+      setStats(await ai.attachmentStats());
+    } catch (reason) { toast.error(api.errorMessage(reason, "清除失败")); }
+    finally { setClearing(false); }
+  }
   useEffect(() => {
     let alive = true;
     ai.attachmentStats().then(value => { if (alive) setStats(value); }).catch(reason => { if (alive) setError(api.errorMessage(reason, "附件统计加载失败")); });
@@ -58,7 +68,9 @@ function AssistantAttachmentsSummary({ assistant, onOpenConversation }: { assist
           {onOpenConversation && <Button size="sm" variant="ghost" onClick={() => onOpenConversation(item.conversation_id)}>打开对话</Button>}
         </li>)}
       </ul>}
-      {stats && stats.pending.count > 0 && <p className="account-attachments-note"><Icon name="info" size={13} />另有 {stats.pending.count} 个尚未发送的附件（{formatBytes(stats.pending.size)}），24 小时内未发送会自动删除。</p>}
+      {stats && stats.pending.count > 0 && <div className="account-attachments-note"><Icon name="info" size={13} />
+        <span>另有 {stats.pending.count} 个尚未发送的附件（{formatBytes(stats.pending.size)}），2 小时内未发送会自动删除。</span>
+        <Button size="sm" variant="ghost" loading={clearing} onClick={() => void clearPending()}>立即清除</Button></div>}
     </div>
   </section>;
 }

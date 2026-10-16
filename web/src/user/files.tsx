@@ -101,7 +101,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       const folders = (event as CustomEvent<{ folders: string[] }>).detail?.folders ?? [];
       if (query || folders.includes(prefix)) scheduleRefresh();
     };
-    // 文件助手的附件上传完成（保存到 /助手附件/<年-月>/）时同样按目录判断。
+    // 其他入口（如文件助手把附件保存到我的文件）写入文件后同样按目录判断。
     window.addEventListener("tessera:downloads-completed", completed);
     window.addEventListener("tessera:files-added", completed);
     return () => { window.removeEventListener("tessera:downloads-completed", completed); window.removeEventListener("tessera:files-added", completed); };
@@ -168,9 +168,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       onShare: privateSpace ? undefined : item => { preview.update(item); setSharing(item); },
       onImageLoad: (image, item) => {
         // 预览过的图片顺便补上缩略图和封面图（例如通过 S3 上传、没有缩略图的图片），不必再下载一次原图。
-        // 已有封面、矢量图，或已有缩略图且原图不够大（不会生成封面）时跳过。
-        if (item.thumbnails?.includes("poster") || /\.svg$/i.test(item.key)
-          || (item.thumbnails?.includes("thumb") && Math.max(image.naturalWidth, image.naturalHeight) <= 480)) return;
+        // 只在能补上缺少的规格时生成（阈值与 thumbnails.ts 的 renderSet 一致）：没有小图；原图超过 240px 却没有网格图或封面；
+        // 原图超过 800px 却没有封面。旧版文件的 960px 封面可以代替网格图，不重复生成；矢量图跳过。
+        const longest = Math.max(image.naturalWidth, image.naturalHeight), has = (variant: string) => item.thumbnails?.includes(variant);
+        const missing = !has("thumb") || (longest > 240 && !has("grid") && !has("poster")) || (longest > 800 && !has("poster"));
+        if (!missing || /\.svg$/i.test(item.key)) return;
         const key = item.key;
         void thumbnailsFromImage(image).then(result => saveThumbnails(key, result)).then(thumbnails => thumbnails && setThumbnails(key, thumbnails)).catch(() => undefined);
       },
@@ -602,7 +604,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                     <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${cursorClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} onClick={() => openPreview(entry.file)}>
                       <div className="grid-thumb">
                         {/* 缩略图尚未生成时一直显示类型图标，不在文件列表中拉取原图。 */}
-                        <FileThumbnail kind={kind} url={api.fileThumbnail(entry.file)} />
+                        <FileThumbnail kind={kind} url={api.fileThumbnail(entry.file, "grid")} placeholder={api.fileThumbnail(entry.file)} />
                         {!api.fileThumbnail(entry.file) && extension && !LABELLED_KINDS.has(kind) && <span className="grid-extension" aria-hidden="true">{extension}</span>}
                         <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                         {entry.file.public_token && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}

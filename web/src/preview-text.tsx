@@ -21,6 +21,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   const [ready, setReady] = useState(false);
   const [headings, setHeadings] = useState<Heading[]>([]);
   const [outline, setOutline] = useState(false);
+  const [active, setActive] = useState(-1);
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<ReturnType<Awaited<ReturnType<typeof loadTextEngine>>["createTextView"]> | null>(null);
   const resolver = useRef(resolveImage); resolver.current = resolveImage;
@@ -74,9 +75,32 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     return () => document.removeEventListener("pointerdown", outside);
   }, [outline]);
 
+  // 目录跟随滚动：当前标题是最后一个越过阅读区顶部的标题；滚到底时是最后一个标题。
+  useEffect(() => {
+    const node = host.current;
+    if (!ready || mode !== "render" || !headings.length || !node) return;
+    const nodes = [...node.querySelectorAll<HTMLElement>("h1, h2, h3")];
+    const scroller = scrollParent(node);
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const top = (scroller === document.documentElement ? 0 : scroller.getBoundingClientRect().top)
+        + (parseFloat(getComputedStyle(nodes[0]).scrollMarginTop) || 0) + 8;
+      let index = 0;
+      nodes.forEach((heading, position) => { if (heading.getBoundingClientRect().top <= top) index = position; });
+      if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) index = nodes.length - 1;
+      setActive(index);
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
+    update();
+    scroller.addEventListener("scroll", schedule, { passive: true });
+    return () => { scroller.removeEventListener("scroll", schedule); cancelAnimationFrame(frame); };
+  }, [ready, mode, headings]);
+
   const copy = () => void copyText(content.text, content.truncated ? "已复制预览内容" : "内容已复制");
   const jump = (heading: Heading) => {
     host.current?.querySelectorAll("h1, h2, h3")[heading.index]?.scrollIntoView({ block: "start", behavior: "smooth" });
+    setActive(heading.index);
     if (window.matchMedia("(max-width: 640px)").matches) setOutline(false);
   };
   const toolbar = immersive ? <div className="preview-text-tools">
@@ -113,15 +137,39 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
       {truncated && <div className="preview-notice">{truncated}</div>}
       {status && <div className="preview-text-status"><span>{status}</span><span>{markdown ? "Markdown 源码" : "可选择并复制内容"}</span></div>}
     </>}
-    {outline && <aside className="preview-playlist-panel preview-outline-panel" aria-label="目录"
-      onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOutline(false); } }}>
-      <OutlineList headings={headings} onJump={jump} onClose={() => setOutline(false)} />
-    </aside>}
+    {outline && (() => {
+      const panel = <aside className="preview-playlist-panel preview-outline-panel" aria-label="目录"
+        onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOutline(false); } }}>
+        <OutlineList headings={headings} active={active} onJump={jump} onClose={() => setOutline(false)} />
+      </aside>;
+      // 纸张在 .preview-text 里滚动：目录挂到外层舞台上，才能固定在右侧而不随正文滚走。
+      const stage = host.current?.closest<HTMLElement>(".preview-stage");
+      return stage ? createPortal(panel, stage) : panel;
+    })()}
   </div>;
 }
 
-function OutlineList({ headings, onJump, onClose }: { headings: Heading[]; onJump: (heading: Heading) => void; onClose: () => void }) {
+/** 最近的可滚动祖先（沉浸式纸张是 .preview-text，内嵌预览是文档自身）。 */
+function scrollParent(node: HTMLElement): HTMLElement {
+  for (let current: HTMLElement | null = node; current; current = current.parentElement) {
+    const overflow = getComputedStyle(current).overflowY;
+    if ((overflow === "auto" || overflow === "scroll") && current.scrollHeight > current.clientHeight) return current;
+  }
+  return document.documentElement;
+}
+
+function OutlineList({ headings, active, onJump, onClose }: { headings: Heading[]; active: number; onJump: (heading: Heading) => void; onClose: () => void }) {
   const [query, setQuery] = useState("");
+  const list = useRef<HTMLOListElement>(null);
+  // 当前标题保持在目录可见范围内（只滚动目录自身，不影响正文）。
+  useEffect(() => {
+    const item = list.current?.querySelector<HTMLElement>(".preview-outline-item.is-active");
+    const box = list.current;
+    if (!item || !box) return;
+    const top = item.offsetTop - box.offsetTop, bottom = top + item.offsetHeight;
+    if (top < box.scrollTop) box.scrollTop = top - 8;
+    else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight + 8;
+  }, [active]);
   const terms = query.trim().toLowerCase();
   const shown = terms ? headings.filter(heading => heading.text.toLowerCase().includes(terms)) : headings;
   const top = Math.min(...headings.map(heading => heading.level));
@@ -134,9 +182,10 @@ function OutlineList({ headings, onJump, onClose }: { headings: Heading[]; onJum
       <Icon name="search" size={14} />
       <input type="search" placeholder="过滤标题" aria-label="过滤标题" value={query} spellCheck={false} onChange={event => setQuery(event.target.value)} />
     </label>}
-    <ol className="preview-playlist-items preview-outline-items">
+    <ol ref={list} className="preview-playlist-items preview-outline-items">
       {shown.map(heading => <li key={heading.index}>
-        <button type="button" className="preview-outline-item" data-level={heading.level - top} onClick={() => onJump(heading)}>{heading.text}</button>
+        <button type="button" className={`preview-outline-item${heading.index === active ? " is-active" : ""}`} data-level={heading.level - top}
+          aria-current={heading.index === active ? "location" : undefined} onClick={() => onJump(heading)}>{heading.text}</button>
       </li>)}
       {!shown.length && <li className="preview-playlist-empty">没有匹配“{query.trim()}”的标题</li>}
     </ol>

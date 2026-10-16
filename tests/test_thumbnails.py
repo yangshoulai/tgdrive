@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from tests.test_public_links import Client
 from tgdrive.app import create_app
@@ -75,6 +75,73 @@ class ThumbnailTests(unittest.TestCase):
         # ETag 不变时返回 304
         etag = self.call("GET", "/api/user/v1/thumbnail?path=movie.mp4")[2]["etag"]
         self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=movie.mp4", headers={**self.user, "if-none-match": etag})[0], 304)
+
+    def used(self):
+        return self.app.metadata.db.execute("SELECT used_bytes FROM buckets WHERE id=?", (self.alice.bucket_id,)).fetchone()[0]
+
+    def stored_keys(self):
+        return [row[0] for row in self.app.metadata.db.execute(
+            "SELECT key FROM objects WHERE bucket_id=? AND key LIKE '.tgdrive/thumbnails/%' ORDER BY key", (self.alice.bucket_id,))]
+
+    def test_grid_and_poster_are_system_objects_counted_in_quota(self):
+        info = self.put("photo.jpg", b"original")
+        self.assertEqual(self.set_thumb("photo.jpg", WEBP), 204)
+        self.assertEqual(self.used(), 8, "列表小图存在数据库里，不计入配额")
+        self.assertEqual(self.set_thumb("photo.jpg", JPEG, "grid"), 204)
+        self.assertEqual(self.set_thumb("photo.jpg", JPEG + b"!", "poster"), 204)
+        self.assertEqual(self.stored_keys(), [f".tgdrive/thumbnails/{info.blob_uuid}/grid", f".tgdrive/thumbnails/{info.blob_uuid}/poster"])
+        rows = dict(self.app.metadata.db.execute("SELECT variant, length(data) FROM thumbnails WHERE blob_uuid=?", (info.blob_uuid,)).fetchall())
+        self.assertEqual((rows["grid"], rows["poster"]), (0, 0), "大图不再存进数据库")
+        self.assertEqual(self.used(), 8 + len(JPEG) * 2 + 1)
+        usage = self.call("GET", "/api/user/v1/usage")[1]
+        self.assertEqual((usage["thumbnails"], usage["files"]), (len(JPEG) * 2 + 1, 8))
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=photo.jpg&variant=grid")[1], JPEG)
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=photo.jpg&variant=poster")[1], JPEG + b"!")
+        self.assertEqual(sorted(self.listed("photo.jpg")["thumbnails"]), ["grid", "poster", "thumb"])
+        self.assertEqual([item["key"] for item in self.call("GET", "/api/user/v1/list")[1]["objects"]], ["photo.jpg"], "系统区不出现在列表")
+        # 重新生成覆盖旧对象，不重复计入配额。
+        self.assertEqual(self.set_thumb("photo.jpg", JPEG, "poster"), 204)
+        self.assertEqual(self.used(), 8 + len(JPEG) * 2)
+        # 覆盖内容后旧 Blob 的大图随之删除。
+        self.put("photo.jpg", b"changed!")
+        self.assertEqual((self.stored_keys(), self.used()), ([], 8))
+
+    def test_grid_falls_back_and_deleting_file_frees_thumbnail_objects(self):
+        self.put("clip.mp4")
+        self.set_thumb("clip.mp4", WEBP)
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=clip.mp4&variant=grid")[1], WEBP, "没有网格图时退回小图")
+        self.set_thumb("clip.mp4", JPEG, "poster")
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=clip.mp4&variant=grid")[1], JPEG, "网格图退回封面")
+        self.call("POST", "/api/user/v1/copy", {"from": "clip.mp4", "to": "copy.mp4"})
+        asyncio.run(self.app.objects.delete_objects(self.scope, ["clip.mp4"]))
+        self.assertEqual(len(self.stored_keys()), 1, "同一存储桶还有副本引用时保留")
+        asyncio.run(self.app.objects.delete_objects(self.scope, ["copy.mp4"]))
+        self.assertEqual((self.stored_keys(), self.used()), ([], 0))
+        self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0], 0)
+
+    def test_maintenance_moves_database_posters_and_sweeps_orphans(self):
+        info = self.put("old.jpg")
+        sealed = self.app.engine.seal_thumbnail(info.blob_uuid, "poster", JPEG)
+        with self.app.metadata.transaction() as db:
+            db.execute("INSERT INTO thumbnails(blob_uuid,variant,mime,data,created_at) VALUES(?,?,?,?,?)",
+                       (info.blob_uuid, "poster", "image/jpeg", sealed, 1.0))
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=old.jpg&variant=poster")[1], JPEG, "旧版数据库封面仍可读取")
+        result = asyncio.run(self.app.maintenance.thumbnail_migrator())
+        self.assertEqual(result["moved"], 1)
+        row = self.app.metadata.db.execute("SELECT length(data), object_key FROM thumbnails WHERE blob_uuid=?", (info.blob_uuid,)).fetchone()
+        self.assertEqual(tuple(row), (0, f".tgdrive/thumbnails/{info.blob_uuid}/poster"))
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=old.jpg&variant=poster")[1], JPEG)
+        # 没有登记的对象（例如从备份恢复后）在一小时后清理。
+        asyncio.run(self.app.objects.put_object(self.scope, ".tgdrive/thumbnails/stray/grid", JPEG))
+        self.assertEqual(self.app.objects.sweep_thumbnail_objects(), 0, "刚写入的对象不清理")
+        self.assertEqual(self.app.objects.sweep_thumbnail_objects(older_than=-1), 1)
+        self.assertEqual(self.stored_keys(), [f".tgdrive/thumbnails/{info.blob_uuid}/poster"])
+
+    def test_migration_rebuilds_thumbnail_table(self):
+        columns = [row[1] for row in self.app.metadata.db.execute("PRAGMA table_info(thumbnails)")]
+        self.assertIn("object_key", columns)
+        self.put("x.jpg")
+        self.assertEqual(self.set_thumb("x.jpg", JPEG, "grid"), 204, "新规格通过 CHECK 约束")
 
     def test_limits_and_unknown_variant(self):
         self.put("a.jpg")
@@ -184,9 +251,9 @@ class ThumbnailCacheTests(unittest.TestCase):
 
     def setUp(self):
         self.app = object.__new__(TgDriveASGI)
-        self.app.user = SimpleNamespace(thumbnail=Mock(return_value=(WEBP, "image/webp", "content-thumb-123")),
-                                        objects=SimpleNamespace(read_thumbnail=Mock(return_value=(WEBP, "image/webp", "content-thumb-123"))))
-        self.app.admin = SimpleNamespace(thumbnail=Mock(return_value=(WEBP, "image/webp", "content-thumb-123")))
+        self.app.user = SimpleNamespace(thumbnail=AsyncMock(return_value=(WEBP, "image/webp", "content-thumb-123")),
+                                        objects=SimpleNamespace(read_thumbnail=AsyncMock(return_value=(WEBP, "image/webp", "content-thumb-123"))))
+        self.app.admin = SimpleNamespace(thumbnail=AsyncMock(return_value=(WEBP, "image/webp", "content-thumb-123")))
         self.app.private_space = SimpleNamespace(files=lambda *_: self.app.user)
         self.app.metrics = self.app.s3 = self.app.s3_host = self.app.static_dir = None
         self.app.settings = SimpleNamespace(s3_hostname=lambda: None)
@@ -237,23 +304,24 @@ class ThumbnailCacheTests(unittest.TestCase):
 
     def test_bucket_cache_key_cannot_read_another_accounts_thumbnail(self):
         api = UserApi(Mock(), Mock())
+        api.objects.get_thumbnail = AsyncMock()
         api._scope = Mock(return_value=Scope(9))
         with self.assertRaises(PermissionError):
-            api.thumbnail("session", "a.jpg", bucket_id=10)
+            asyncio.run(api.thumbnail("session", "a.jpg", bucket_id=10))
         api.objects.get_thumbnail.assert_not_called()
-        api.thumbnail("session", "a.jpg", bucket_id=9)
+        asyncio.run(api.thumbnail("session", "a.jpg", bucket_id=9))
         api.objects.get_thumbnail.assert_called_once_with(Scope(9), "a.jpg", "thumb")
 
     def test_regeneration_within_one_second_changes_image_version(self):
         service = ObjectService(Mock(), Mock())
         service.metadata.db.execute.return_value.fetchone.side_effect = [
-            {"mime": "image/webp", "data": b"sealed", "created_at": 1000.001},
-            {"mime": "image/webp", "data": b"sealed", "created_at": 1000.002},
+            {"mime": "image/webp", "data": b"sealed", "created_at": 1000.001, "bucket_id": None, "object_key": None},
+            {"mime": "image/webp", "data": b"sealed", "created_at": 1000.002, "bucket_id": None, "object_key": None},
         ]
         service.engine.open_thumbnail.return_value = WEBP
         info = SimpleNamespace(blob_uuid="blob", etag="content-2")
-        first = service.read_thumbnail(info)[2]
-        second = service.read_thumbnail(info)[2]
+        first = asyncio.run(service.read_thumbnail(info))[2]
+        second = asyncio.run(service.read_thumbnail(info))[2]
         self.assertNotEqual(first, second)
         self.assertEqual(TgDriveASGI._thumbnail_cache_control({"bucket_id": ["9"], "v": ["content-2.thumb.1000002000"]}, second),
                          "private, max-age=2592000, immutable")

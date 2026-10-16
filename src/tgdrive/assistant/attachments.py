@@ -19,7 +19,7 @@ PREFIX = "附件:"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_PENDING = 20
 MAX_PER_MESSAGE = 10
-PENDING_TTL = 86400
+PENDING_TTL = 2 * 3600  # 兜底：页面关闭时前端已放弃未发送的附件，这里清理没能送达的
 NAME_BYTES = 200
 
 
@@ -83,13 +83,13 @@ class AttachmentStore:
                        "VALUES(?,?,?,?,?,?,?,?)", (attachment_id, user_id, bucket_id, key, name, info.size, mime, time.time()))
         return self.json(self.row(user_id, attachment_id))
 
-    def set_thumbnail(self, user_id: int, attachment_id: str, data: bytes | None, variant: str) -> None:
+    async def set_thumbnail(self, user_id: int, attachment_id: str, data: bytes | None, variant: str) -> None:
         row = self.row(user_id, attachment_id)
-        self.objects.set_thumbnail(Scope(row["bucket_id"]), row["key"], data, variant)
+        await self.objects.set_thumbnail(Scope(row["bucket_id"]), row["key"], data, variant)
 
-    def thumbnail(self, user_id: int, attachment_id: str, variant: str):
+    async def thumbnail(self, user_id: int, attachment_id: str, variant: str):
         row = self.row(user_id, attachment_id)
-        return self.objects.get_thumbnail(Scope(row["bucket_id"]), row["key"], variant)
+        return await self.objects.get_thumbnail(Scope(row["bucket_id"]), row["key"], variant)
 
     async def content(self, user_id: int, attachment_id: str, start: int = 0, end: int | None = None):
         row = self.row(user_id, attachment_id)
@@ -179,6 +179,13 @@ class AttachmentStore:
             raise ValueError("已发送的附件随对话保存，删除对话时会一起删除")
         self._delete([row])
 
+    def discard_pending(self, user_id: int) -> dict[str, int]:
+        """清除自己全部未发送的附件（用户设置「助手附件」）。"""
+        rows = self.metadata.db.execute("SELECT * FROM assistant_attachments WHERE user_id=? AND conversation_id IS NULL",
+                                        (user_id,)).fetchall()
+        size = sum(int(row["size"]) for row in rows)
+        return {"removed": self._delete(rows), "size": size}
+
     def delete_for_conversation(self, conversation_id: str) -> int:
         return self._delete(self.metadata.db.execute("SELECT * FROM assistant_attachments WHERE conversation_id=?",
                                                      (conversation_id,)).fetchall())
@@ -193,7 +200,7 @@ class AttachmentStore:
         return self._delete(self.metadata.db.execute("SELECT * FROM assistant_attachments").fetchall())
 
     def cleanup(self, now: float | None = None, *, batch: int = 500) -> int:
-        """维护任务：超过 24 小时仍未发送的附件，以及对话已删除（隐藏或已清理）却残留的附件。"""
+        """维护任务：超过 2 小时仍未发送的附件，以及对话已删除（隐藏或已清理）却残留的附件。"""
         now = now or time.time()
         rows = self.metadata.db.execute(
             "SELECT a.* FROM assistant_attachments a LEFT JOIN assistant_conversations c ON c.id=a.conversation_id "

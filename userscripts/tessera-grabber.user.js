@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.14.1
+// @version      0.15.0
 // @description  在 X、YouTube 和其他网页上复制资源地址与 curl 命令，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      MIT
@@ -972,12 +972,50 @@
     .toast { border-radius: 12px; padding: 9px 16px; background: rgba(20, 21, 30, .92); color: #fff;
       -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); box-shadow: 0 12px 30px -8px rgba(0, 0, 0, .45); }
 
+    /* 行内「更多」只在底部抽屉里出现；桌面仍是悬停浮现的次要操作。 */
+    .more-btn { display: none; }
+    .panel.is-sheet .item .secondary, .panel.is-sheet .item .local-btn { display: none; }
+    .panel.is-sheet .more-btn { display: grid; }
+    .panel.is-sheet .list:not(.grid) .item { gap: 10px; }
+    .panel.is-sheet .list.grid .item-actions { top: 8px; right: 8px; }
+    .panel.is-sheet .list.grid .item-actions .icon-btn { width: 32px; height: 32px; min-width: 32px; min-height: 32px; }
+
+    /* 底部抽屉：贴底通栏，顶部圆角加拖动条示意，底部让出 Home 指示条。 */
+    .panel.is-sheet { max-width: none; border-width: 1px 0 0; border-radius: 20px 20px 0 0; transform-origin: bottom center;
+      box-shadow: 0 -12px 40px -12px rgba(0, 0, 0, .35); animation: sheet-up .24s cubic-bezier(.2, .9, .3, 1); }
+    .panel.is-sheet::after { content: ""; position: absolute; top: 6px; left: 50%; width: 36px; height: 4px; margin-left: -18px; border-radius: 2px;
+      background: var(--faint); opacity: .55; pointer-events: none; z-index: 4; }
+    .panel.is-sheet > header { padding-top: 6px; }
+    .panel.is-sheet > footer, .panel.is-sheet .layer > footer { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+    .panel.is-sheet:not(:has(> footer)) > .body { padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+    @keyframes sheet-up { from { transform: translateY(24px); } }
+    .panel.is-sheet > footer .footer-actions { flex: 1 1 100%; }
+    .panel.is-sheet > footer .footer-actions > .btn { flex: 1 1 0; min-width: 0; }
+
+    /* 面板内的操作菜单（同样只做位移动画，不改透明度） */
+    .action-sheet { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; justify-content: flex-end; padding: 10px;
+      padding-bottom: calc(10px + env(safe-area-inset-bottom)); background: rgba(10, 11, 18, .32); }
+    .action-card { display: grid; gap: 2px; padding: 6px; border-radius: 16px; background: var(--bg); border: 1px solid var(--line);
+      box-shadow: 0 18px 40px -12px rgba(0, 0, 0, .4); animation: sheet-up .2s cubic-bezier(.2, .9, .3, 1); }
+    .action-head { display: grid; gap: 2px; padding: 8px 12px 10px; margin-bottom: 2px; border-bottom: 1px solid var(--line); min-width: 0; }
+    .action-head strong { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .action-head span { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .action-item { display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 0 12px; border-radius: 10px; text-align: left; color: var(--fg); }
+    .action-item svg { color: var(--muted); flex: none; }
+    .action-item:hover:not(:disabled), .action-item:focus-visible { background: var(--soft); outline: none; }
+    .action-item.accent, .action-item.accent svg { color: var(--accent); }
+    .action-label { display: grid; gap: 1px; min-width: 0; }
+    .action-label small { color: var(--muted); font-size: 11px; }
+    .action-cancel { min-height: 44px; margin-top: 4px; border-radius: 10px; background: var(--soft); font-weight: 500; }
+    @media (prefers-reduced-motion: reduce) { .panel.is-sheet, .action-sheet, .action-card { animation: none; } }
+
     /* 窄屏把操作放到独立一行，避免触屏按钮挤掉名称或越过面板。 */
     @media (max-width: 560px) {
-      .list:not(.grid) > .item.selectable { display: grid; grid-template-columns: 18px 44px minmax(0, 1fr); gap: 6px 10px; }
-      .list:not(.grid) > .item.selectable > .item-actions { grid-column: 2 / -1; justify-content: flex-end; flex-wrap: wrap; }
-      .batch-item { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 6px 12px; }
-      .batch-item > .item-actions { grid-column: 2 / -1; justify-content: flex-end; flex-wrap: wrap; }
+      /* 确认页：重试／移除放在名称右侧一列（顶端对齐），不再单独占一行。 */
+      .batch-item { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: start; gap: 6px 8px; }
+      .batch-item > .item-actions { grid-column: 3; grid-row: 1; align-self: start; flex-wrap: nowrap; gap: 0; margin-right: -4px; }
+      .batch-item > .item-actions:empty { display: none; }
+      .batch-item:has(> .item-actions:empty) { grid-template-columns: 44px minmax(0, 1fr); }
       .batch-item .sub { overflow-wrap: anywhere; }
       .overview-line { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px 12px; }
       .overview-line .stats { grid-column: 2; justify-content: flex-start; }
@@ -1011,6 +1049,7 @@
     file: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", "M14 2v4a2 2 0 0 0 2 2h4"],
     image: [["rect", { x: 3, y: 3, width: 18, height: 18, rx: 2 }], ["circle", { cx: 9, cy: 9, r: 2 }], "m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"],
     check: ["M20 6 9 17l-5-5"],
+    more: [["circle", { cx: 5, cy: 12, r: 1.2 }], ["circle", { cx: 12, cy: 12, r: 1.2 }], ["circle", { cx: 19, cy: 12, r: 1.2 }]],
     minus: ["M5 12h14"],
     retry: ["M3 12a9 9 0 0 1 15-6.7L21 8", "M21 3v5h-5", "M21 12a9 9 0 0 1-15 6.7L3 16", "M3 21v-5h5"],
     chevron: ["m9 18 6-6-6-6"],
@@ -1170,8 +1209,7 @@
     const sheet = innerWidth <= 560;
     panel.classList.toggle("is-sheet", sheet);
     if (sheet) {
-      Object.assign(panel.style, { left: "calc(12px + env(safe-area-inset-left))", right: "calc(12px + env(safe-area-inset-right))",
-        bottom: "calc(8px + env(safe-area-inset-bottom))", maxHeight: `${Math.min(760, Math.round(innerHeight * 0.86))}px` });
+      Object.assign(panel.style, { left: "0", right: "0", bottom: "0", maxHeight: `${Math.min(760, Math.round(innerHeight * 0.88))}px` });
       return;
     }
     panel.style[left ? "left" : "right"] = "12px";
@@ -1485,12 +1523,48 @@
           iconButton("terminal", "复制 curl 命令", async () => copy(await curlFor(item.url), "已复制 curl 命令")),
           iconButton("external", "在新标签页打开", () => gm.openTab(item.url)),
           h("span", { className: "action-sep", "aria-hidden": "true" })),
-        browserEligible(item) ? iconButton("download", "本地下载（当前浏览器下载后上传）", () => startBatch([item.url], "local"))
-          : h("button", { type: "button", className: "icon-btn", disabled: true, title: "流媒体列表请使用服务器下载", "aria-label": "本地下载不可用" }, svg("download")),
+        browserEligible(item) ? iconButton("download", "本地下载（当前浏览器下载后上传）", () => startBatch([item.url], "local"), "local-btn")
+          : h("button", { type: "button", className: "icon-btn local-btn", disabled: true, title: "流媒体列表请使用服务器下载", "aria-label": "本地下载不可用" }, svg("download")),
+        // 窄屏（底部抽屉）只留「更多」和服务器下载，其余操作收进面板内的操作菜单，行保持一行高。
+        iconButton("more", "更多操作", () => openRowActions(item), "more-btn"),
         iconButton("send", "服务器下载", () => startBatch([item.url], "server"), "accent")));
     node.dataset.url = item.url;
     watchSize(node, item);
     return node;
+  }
+
+  function openRowActions(item) {
+    const local = browserEligible(item);
+    openActionSheet(fileName(item.url), describe(item), [
+      { icon: "link", label: "复制链接", run: () => copy(item.url, "已复制链接") },
+      { icon: "terminal", label: "复制 curl 命令", run: async () => copy(await curlFor(item.url), "已复制 curl 命令") },
+      { icon: "external", label: "在新标签页打开", run: () => gm.openTab(item.url) },
+      { icon: "download", label: "本地下载", hint: local ? "当前浏览器下载后上传" : "流媒体列表请使用服务器下载", disabled: !local, run: () => startBatch([item.url], "local") },
+      { icon: "send", label: "服务器下载", accent: true, run: () => startBatch([item.url], "server") },
+    ]);
+  }
+
+  /** 面板内的操作菜单：从面板底部升起，点空白处、取消或 Esc 关闭（经 panel.layer），不替换面板内容。 */
+  function openActionSheet(title, subtitle, actions) {
+    if (!panel) return;
+    panel.layer?.close();
+    const host = panel, opener = shadow.activeElement;
+    const closeSheet = () => {
+      sheet.remove();
+      if (panel && panel.layer === controller) panel.layer = null;
+      if (opener?.isConnected) opener.focus();
+    };
+    const controller = { close: closeSheet };
+    const sheet = h("div", { className: "action-sheet", onclick: event => { if (event.target === event.currentTarget) closeSheet(); } },
+      h("div", { className: "action-card", role: "menu", "aria-label": title },
+        h("div", { className: "action-head" }, h("strong", { title }, title), subtitle ? h("span", {}, subtitle) : null),
+        actions.map(action => h("button", { type: "button", role: "menuitem", className: `action-item${action.accent ? " accent" : ""}`, disabled: action.disabled,
+          onclick: () => { host.layer = null; sheet.remove(); action.run(); } },
+          svg(action.icon, 18), h("span", { className: "action-label" }, action.label, action.hint ? h("small", {}, action.hint) : null))),
+        h("button", { type: "button", className: "action-cancel", onclick: closeSheet }, "取消")));
+    panel.layer = controller;
+    host.append(sheet);
+    sheet.querySelector(".action-item:not(:disabled)")?.focus({ preventScroll: true });
   }
 
   // ---------- 资源大小探测 ----------

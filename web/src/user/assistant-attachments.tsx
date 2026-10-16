@@ -39,7 +39,9 @@ async function saveThumbnails(id: string, file: File) {
   if (!result) return;
   if (result === "none") { await ai.setAttachmentThumbnail(id, null, "none"); return; }
   await ai.setAttachmentThumbnail(id, result.thumb, "thumb");
-  if (result.poster) await ai.setAttachmentThumbnail(id, result.poster, "poster").catch(() => undefined);
+  // 消息里与识图都用封面：只存一张大图，没有 960px 封面时用 640px 的网格图代替（同样是合法的封面尺寸）。
+  const cover = result.poster ?? result.grid;
+  if (cover) await ai.setAttachmentThumbnail(id, cover, "poster").catch(() => undefined);
 }
 
 export function useAttachments() {
@@ -112,7 +114,18 @@ export function useAttachments() {
     return [];
   }), []);
 
-  useEffect(() => () => { aborts.current.forEach(abort => abort()); }, []);
+  // 页面关闭、刷新或组件卸载时，未发送的附件立即删除，不留下没有对话的附件占用空间。
+  const latest = useRef(items);
+  latest.current = items;
+  useEffect(() => {
+    const unload = () => ai.discardAttachmentsOnUnload(latest.current.flatMap(item => item.uploaded ? [item.uploaded.id] : []));
+    window.addEventListener("pagehide", unload);
+    return () => {
+      window.removeEventListener("pagehide", unload);
+      aborts.current.forEach(abort => abort());
+      unload();
+    };
+  }, []);
 
   const pending = items.some(item => item.status === "uploading" || item.status === "processing");
   const failed = items.some(item => item.status === "error");
