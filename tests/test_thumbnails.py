@@ -163,6 +163,30 @@ class ThumbnailTests(unittest.TestCase):
         self.assertEqual(self.set_thumb("song.mp3", None, "none"), 204)
         self.assertEqual(self.listed("song.mp3")["thumbnails"], ["thumb"], "marker never hides an existing thumbnail")
 
+    def test_queue_is_admin_only_and_contains_no_file_identity(self):
+        info = self.put("secret-subdirectory/photo.jpg")
+        self.call("POST", "/api/user/v1/thumbnail/claim", {"path": info.key, "etag": info.etag})
+        self.assertEqual(self.call("GET", "/api/admin/v1/maintenance/thumbnails")[0], 403)
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        status, queue, headers = self.call("GET", "/api/admin/v1/maintenance/thumbnails", headers=admin)
+        self.assertEqual(status, 200)
+        self.assertFalse(queue["automatic_remote_reads"])
+        self.assertNotIn("secret-subdirectory", json.dumps(queue))
+        self.assertNotIn("photo.jpg", json.dumps(queue))
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(self.call("GET", "/api/user/v1/maintenance/thumbnails")[0], 404)
+
+    def test_browser_generation_ticket_cannot_write_to_overwritten_file(self):
+        info = self.put("photo.jpg")
+        status, lease, _ = self.call("POST", "/api/user/v1/thumbnail/claim", {"path": info.key, "etag": info.etag})
+        self.assertEqual(status, 200)
+        self.assertTrue(lease["token"])
+        self.put("photo.jpg", b"changed content")
+        status, _, _ = self.call("POST", "/api/user/v1/thumbnail", {"path": info.key, "etag": info.etag,
+            "ticket": lease["token"], "variant": "thumb", "data": base64.b64encode(WEBP).decode()})
+        self.assertEqual(status, 400)
+        self.assertFalse(self.listed(info.key)["has_thumbnail"])
+
     def test_shared_by_copy_and_dropped_with_content(self):
         self.put("photo.jpg")
         self.set_thumb("photo.jpg", WEBP)

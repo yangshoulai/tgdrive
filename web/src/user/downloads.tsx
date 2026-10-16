@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BRAND } from "../brand";
 import * as api from "../api";
 import { useCursorPage } from "../pagination";
-import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Panel, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
+import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
 import { FileTile, FileVisual, getFileKind } from "../files";
 import { DestinationPicker } from "./folders";
 import { PrivateUnlockForm } from "./private-access";
@@ -22,8 +22,6 @@ export const parentFolder = (key: string) => key.includes("/") ? key.slice(0, ke
 export const downloadTaskName = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? "私密空间下载" : task.key.split("/").at(-1) ?? task.key;
 export const downloadTaskFolder = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? api.PRIVATE_PREFIX : parentFolder(task.key);
 const elapsed = (value: number) => value < 1 ? "不到 1 秒" : value < 60 ? `${Math.round(value)} 秒` : value < 3600 ? `${Math.floor(value / 60)} 分 ${Math.round(value % 60)} 秒` : `${Math.floor(value / 3600)} 小时 ${Math.round(value % 3600 / 60)} 分`;
-/** 列表里的来源文字：去掉协议，省略的查询参数用「?…」表示。 */
-const sourceLabel = (source: { url: string; has_query: boolean }) => source.url.replace(/^https?:\/\//, "") + (source.has_query ? "?…" : "");
 /** 完整来源地址：列表只带不含查询串的地址，有省略参数时再向服务端读取。 */
 const fullSource = async (task: api.DownloadTask) => task.source && !task.source.has_query ? task.source.url : (await api.downloadSource(task.id, task.private)).url;
 async function copySource(task: api.DownloadTask) {
@@ -149,38 +147,52 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     <PageHeader title="下载任务" description="交给服务器下载，关闭页面后继续保存到你的文件空间。"
       actions={<><Button icon="refresh" onClick={() => void pagination.reload()} disabled={pagination.loading}>刷新</Button><Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button></>} />
     <div className="toolbar download-search"><SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索文件名、保存路径或来源域名" label="搜索下载任务" /></div>
-    {chosen.length > 0 ? <div className="toolbar selection-bar download-selection" role="toolbar" aria-label="批量操作">
-      <span className="download-select-all"><Checkbox checked={allSelected} indeterminate={!allSelected} label="选择本页全部任务" onChange={checked => setSelected(checked ? new Set(page?.tasks.map(task => task.id)) : new Set())} /><span className="selection-count"><span className="download-selection-prefix">已选择 </span>{chosen.length} 项</span></span>
-      <div className="toolbar-actions">
-        {chosen.some(active) && <Button size="sm" icon="pause" disabled={bulkBusy} onClick={() => setBulk("stop")}>停止</Button>}
-        {chosen.some(task => ["stopped", "failed"].includes(task.status)) && <Button size="sm" icon="play" loading={bulkBusy && !bulk} disabled={bulkBusy} onClick={() => void runBulk("resume")}>继续</Button>}
-        <Button size="sm" variant="danger" icon="trash" disabled={bulkBusy} onClick={() => setBulk("delete")}>删除</Button>
-        <IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} />
-      </div>
-    </div> : <div className="download-toolbar">{page && page.tasks.length > 0 && <span className="download-select-all"><Checkbox checked={false} label="选择本页全部任务" onChange={checked => checked && setSelected(new Set(page.tasks.map(task => task.id)))} /></span>}<Segmented label="任务状态" showLabels value={filter} onChange={setFilter} options={[
-      { value: "", label: "全部" }, { value: "active", label: "进行中" }, { value: "stopped", label: "已停止" }, { value: "completed", label: "已完成" }, { value: "failed", label: "失败" },
-    ]} /><span className="download-toolbar-meta">
-      {/* 进行中与失败的数量来自当前页（新任务排在最前），方便一眼看出需要处理的任务。 */}
-      {page && !filter && page.tasks.some(active) && <span className="download-summary is-active">进行中 {page.tasks.filter(active).length}</span>}
-      {page && !filter && page.tasks.some(task => task.status === "failed") && <span className="download-summary is-failed">失败 {page.tasks.filter(task => task.status === "failed").length}</span>}
-      <span className="muted">{page ? `${page.total} 个任务` : "正在读取任务"}</span>
-      <Menu label="清理任务" icon="trash" items={[
-        { label: "清除已完成的任务", icon: "checkCircle", onSelect: () => setClearing("completed") },
-        { label: "清除失败的任务", icon: "alert", onSelect: () => setClearing("failed") },
-      ]} /></span></div>}
+    <div className="download-controls">
+      {chosen.length > 0 && <div className="toolbar selection-bar download-selection" role="toolbar" aria-label="批量操作">
+        <span className="selection-count"><span className="download-selection-prefix">已选择 </span>{chosen.length} 项</span>
+        <div className="toolbar-actions">
+          {chosen.some(active) && <Button size="sm" icon="pause" disabled={bulkBusy} onClick={() => setBulk("stop")}>停止</Button>}
+          {chosen.some(task => ["stopped", "failed"].includes(task.status)) && <Button size="sm" icon="play" loading={bulkBusy && !bulk} disabled={bulkBusy} onClick={() => void runBulk("resume")}>继续</Button>}
+          <Button size="sm" variant="danger" icon="trash" disabled={bulkBusy} onClick={() => setBulk("delete")}>删除</Button>
+          <IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} />
+        </div>
+      </div>}
+      <div className={`download-toolbar${chosen.length ? " is-selecting" : ""}`} aria-hidden={chosen.length > 0}><Segmented label="任务状态" showLabels value={filter} onChange={setFilter} options={[
+        { value: "", label: "全部" }, { value: "active", label: "进行中" }, { value: "stopped", label: "已停止" }, { value: "completed", label: "已完成" }, { value: "failed", label: "失败" },
+      ]} /><span className="download-toolbar-meta">
+        {/* 进行中与失败的数量来自当前页（新任务排在最前），方便一眼看出需要处理的任务。 */}
+        {page && !filter && page.tasks.some(active) && <span className="download-summary is-active">进行中 {page.tasks.filter(active).length}</span>}
+        {page && !filter && page.tasks.some(task => task.status === "failed") && <span className="download-summary is-failed">失败 {page.tasks.filter(task => task.status === "failed").length}</span>}
+        <span className="muted">{page ? `${page.total} 个任务` : "正在读取任务"}</span>
+        <Menu label="清理任务" icon="trash" items={[
+          { label: "清除已完成的任务", icon: "checkCircle", onSelect: () => setClearing("completed") },
+          { label: "清除失败的任务", icon: "alert", onSelect: () => setClearing("failed") },
+        ]} /></span></div>
+    </div>
     {page?.capabilities.pressure && <p className="inline-note tone-warning" role="status"><Icon name="alert" size={16} />{page.capabilities.pressure}</p>}
-    <Panel flush>
+    <div className="file-surface download-surface">
       {pagination.error ? <EmptyState icon="alert" title="任务加载失败" description={pagination.error} action={<Button onClick={() => void pagination.reload()}>重试</Button>} />
         : !page ? <SkeletonRows rows={5} />
           : !page.tasks.length ? <EmptyState icon="download" title={query || filter ? "没有符合条件的任务" : "还没有下载任务"} description={query || filter ? "试试其他关键词或任务状态。" : "粘贴文件链接、X 帖子或 YouTube 视频，也可以使用 curl 命令。"} action={query || filter ? <Button onClick={() => { setSearch(""); setQuery(""); setFilter(""); }}>清除筛选</Button> : <Button icon="plus" onClick={() => setNewTask(true)}>添加下载</Button>} />
-            : <div className="download-list" role="list" aria-label="下载任务">
+            : <div className="data-table download-list" role="table" aria-label="下载任务">
+              <div className="data-row data-head" role="row">
+                <span className="cell-check" role="columnheader"><Checkbox checked={allSelected} indeterminate={chosen.length > 0 && !allSelected} label="选择本页全部任务" onChange={checked => setSelected(checked ? new Set(page.tasks.map(task => task.id)) : new Set())} /></span>
+                <span role="columnheader">文件名</span>
+                <span role="columnheader">目标目录</span>
+                <span className="cell-size" role="columnheader">大小</span>
+                <span role="columnheader">速度</span>
+                <span role="columnheader">状态（失败原因）</span>
+                <span className="cell-actions" role="columnheader"><span className="sr-only">操作</span></span>
+              </div>
               {page.tasks.map(task => {
                 const percent = downloadPercent(task);
                 const name = downloadTaskName(task);
                 const folder = downloadTaskFolder(task);
-                const source = task.platform === "youtube" ? "YouTube" : task.platform === "x" ? "X" : task.source_host;
                 const completed = task.status === "completed";
                 const running = task.status === "running";
+                const saved = task.stored_bytes || task.received;
+                const received = task.kind === "hls" ? saved : task.received;
+                const averageSpeed = completed && task.elapsed_seconds > 0 ? saved / Math.max(task.elapsed_seconds, 0.05) : null;
                 const kind = task.kind === "hls" ? "video" : task.private && !api.isPrivatePath(task.key) ? "other" : getFileKind(null, task.key);
                 const location = api.privatePathLabel(folder);
                 const file = completed ? task.file : null;
@@ -190,43 +202,38 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                   : completed ? <IconButton icon="folder" size="sm" label={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)} />
                     : <IconButton icon="play" size="sm" label="继续下载" onClick={() => task.method === "POST" ? setConfirm({ task, action: "resume" }) : void control(task, "resume")} />;
                 const checked = selected.has(task.id);
-                return <div className={`download-item is-${task.status}${checked ? " is-selected" : ""}`} role="listitem" key={task.id}>
-                  <span className="download-check"><Checkbox checked={checked} label={`选择 ${name}`} onChange={value => setSelected(current => { const next = new Set(current); if (value) next.add(task.id); else next.delete(task.id); return next; })} /></span>
-                  {thumbnail && file ? <FileVisual kind={getFileKind(file.content_type, file.key)} src={thumbnail} size="lg" /> : <FileTile kind={kind} size="lg" />}
-                  <div className="download-body">
-                    <div className="download-head">
-                      <strong title={name}>{name}</strong>
-                      <Badge tone={TONE[task.status]} dot={!completed} icon={completed ? "check" : undefined}>{downloadStatusLabel(task)}</Badge>
+                return <div className={`data-row download-item is-${task.status}${checked ? " is-selected" : ""}`} role="row" key={task.id}>
+                  <span className="cell-check" role="cell"><Checkbox checked={checked} label={`选择 ${name}`} onChange={value => setSelected(current => { const next = new Set(current); if (value) next.add(task.id); else next.delete(task.id); return next; })} /></span>
+                  <div className="cell-name" role="cell">
+                    {thumbnail && file ? <FileVisual kind={getFileKind(file.content_type, file.key)} src={thumbnail} /> : <FileTile kind={kind} />}
+                    <div className="name-stack">
+                      <strong className="download-name" title={name}>{name}</strong>
+                      {!completed && task.status !== "failed" && <div className="download-progress-row">
+                        {percent !== null ? <Progress value={percent} tone={task.status === "stopped" ? "neutral" : "accent"} label={`${name}下载进度`} /> : <div className="download-unknown" role="status" aria-label="总大小未知" />}
+                        {percent !== null ? <span className="download-progress-copy">{Math.floor(percent)}%</span>
+                          : task.kind === "hls" && task.segments_total > 0 && <span className="download-progress-copy">{task.segments_done}/{task.segments_total} 分片</span>}
+                      </div>}
                     </div>
-                    <div className="download-meta">
-                      {/* 带查询参数（可能含签名）的地址不直接写进链接，点击时再读取完整地址打开。 */}
-                      <span className="download-origin">
-                        {task.source?.has_query ? <button type="button" className="download-source" title={`${task.source.url}?…（打开完整链接）`} onClick={() => openSource(task)}>{sourceLabel(task.source)}</button>
-                          : task.source ? <a className="download-source" href={task.source.url} target="_blank" rel="noopener noreferrer" title={task.source.url}>{sourceLabel(task.source)}</a>
-                          : <span className="download-source" title={source}>{source}</span>}
-                        {(task.kind === "hls" || task.method === "POST") && <span className="download-figure">{task.kind === "hls" ? "M3U8" : "POST"}</span>}
-                      </span>
-                      {completed ? <button type="button" className="download-location" title={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)}><Icon name="folder" size={12} /><span>{location}</span></button>
-                        : <span className="download-location" title={`保存到 ${location}`}><Icon name="folder" size={12} /><span>{location}</span></span>}
-                      {/* 大小与用时放在同一组里：窄屏换行时整组另起一行，分隔点不会落在行首。 */}
-                      {completed ? <span className="download-figures">
-                        <span className="download-figure">{formatBytes(task.stored_bytes || task.received)}</span>
-                        {/* 完成后显示累计用时（不含排队）和平均速度；旧版本完成的任务没有用时记录。 */}
-                        {task.elapsed_seconds > 0 && <span className="download-figure">用时 {elapsed(task.elapsed_seconds)} · 平均 {formatBytes(task.stored_bytes / Math.max(task.elapsed_seconds, 0.05))}/s</span>}
-                      </span> : task.kind === "hls" && task.segments_total ? <span className="download-figure">{task.segments_done} / {task.segments_total} 个分片 · 已保存 {formatBytes(task.stored_bytes)}</span>
-                        : !task.received && task.size === null ? (task.status === "queued" ? <span className="download-figure">等待开始</span> : null)
-                          : <span className="download-figure">{formatBytes(task.received)}{task.size !== null ? ` / ${formatBytes(task.size)}` : " · 大小未知"}</span>}
-                    </div>
-                    {!completed && task.status !== "failed" && <div className="download-progress-row">
-                      {percent !== null ? <Progress value={percent} tone={task.status === "stopped" ? "neutral" : "accent"} label={`${name}下载进度`} /> : <div className="download-unknown" role="status" aria-label="总大小未知" />}
-                      <span className="download-progress-copy">{percent !== null && <b>{Math.floor(percent)}%</b>}
-                        {running && <span>{formatBytes(task.speed)}/s</span>}
-                        {running && task.eta_seconds !== null && <span>约剩 {seconds(task.eta_seconds)}</span>}
-                        {running && task.kind === "hls" && task.segments_done === task.segments_total && <span>正在完成文件</span>}</span>
-                    </div>}
-                    {task.error && <details className="download-task-error"><summary><Icon name="alert" size={13} /><span>查看失败原因</span></summary><p className="download-error">{task.error}</p></details>}
                   </div>
-                  <div className="download-actions">{busy.has(task.id) ? <span className="spinner" aria-label="正在处理任务" /> : <>{quick}<Menu label={`${name}的更多操作`} items={[
+                  <div role="cell" className="muted">
+                    {completed ? <button type="button" className="download-location" title={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)}><Icon name="folder" size={12} /><span>{location}</span></button>
+                      : <span className="download-location" title={`保存到 ${location}`}><Icon name="folder" size={12} /><span>{location}</span></span>}
+                  </div>
+                  <div className="cell-size download-value muted" role="cell">
+                    <span>{completed ? formatBytes(saved) : task.size !== null ? formatBytes(task.size) : "未知"}</span>
+                    {!completed && received > 0 && <small>{task.kind === "hls" && task.stored_bytes > 0 ? "已保存" : "已下载"} {formatBytes(received)}</small>}
+                  </div>
+                  <div className="download-value muted" role="cell">
+                    <span>{running ? `${formatBytes(task.speed)}/s` : averageSpeed !== null ? `${formatBytes(averageSpeed)}/s` : "—"}</span>
+                    {averageSpeed !== null && <small>平均速度</small>}
+                  </div>
+                  <div className="download-state" role="cell">
+                    <Badge tone={TONE[task.status]} dot={!completed} icon={completed ? "check" : undefined}>{downloadStatusLabel(task)}</Badge>
+                    {task.error ? <details className="download-task-error"><summary title={task.error}><Icon name="alert" size={13} /><span>{task.error}</span></summary><p className="download-error">{task.error}</p></details>
+                      : running && task.eta_seconds !== null ? <small>约剩 {seconds(task.eta_seconds)}</small>
+                        : completed && task.elapsed_seconds > 0 ? <small>用时 {elapsed(task.elapsed_seconds)}</small> : null}
+                  </div>
+                  <div className="cell-actions" role="cell">{busy.has(task.id) ? <span className="spinner" aria-label="正在处理任务" /> : <>{quick}<Menu label={`${name}的更多操作`} items={[
                     ...(task.source ? [
                       { label: "复制来源链接", icon: "copy" as const, onSelect: () => void copySource(task) },
                       { label: "打开来源链接", icon: "external" as const, onSelect: () => openSource(task) },
@@ -238,7 +245,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                 </div>;
               })}
             </div>}
-    </Panel>
+    </div>
     {(pagination.hasPrevious || pagination.hasNext) && <footer className="list-footer download-footer"><Pagination {...pagination} /></footer>}
     <details className="download-help"><summary><Icon name="info" size={15} /><span>下载说明</span><Icon name="chevronDown" size={14} /></summary>
       <p>支持文件直链{page?.capabilities.hls ? "、M3U8 点播" : ""}{page?.capabilities.x ? "、X 帖子" : ""}{page?.capabilities.youtube ? "、YouTube 视频和 Shorts" : ""}。平台功能由管理员启用。网络中断会自动重试；文件直链满足条件时可续传，平台和 M3U8 任务手动停止后从头下载。删除任务保留已保存的文件。</p>

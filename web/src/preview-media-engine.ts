@@ -15,7 +15,7 @@ const GLYPHS = {
   next: glyph("M19 5v14M6 5l10 7-10 7V5Z"),
   list: glyph("M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"),
 };
-type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onVideoSize?: (width: number, height: number) => void };
+type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onVideoSize?: (width: number, height: number) => void; onVideoFrame?: (video: HTMLVideoElement) => void };
 function mediaProgress(media: HTMLMediaElement): MediaProgress {
   const duration = Number.isFinite(media.duration) ? Math.max(0, media.duration) : 0;
   const currentTime = Number.isFinite(media.currentTime) ? Math.max(0, media.currentTime) : 0;
@@ -76,7 +76,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   setCover(poster);
   let switching = Promise.resolve();
   const updateProgress = () => events?.onProgress?.(mediaProgress(player.video));
-  const markReady = () => { setRatio(player.video.videoWidth, player.video.videoHeight); ready = true; notify("ready"); };
+  const markReady = () => { setRatio(player.video.videoWidth, player.video.videoHeight); ready = true; notify("ready"); if (player.video.readyState >= 2) events?.onVideoFrame?.(player.video); };
   // iOS Safari 在用户点播放前不预加载画面，只会触发 loadedmetadata：读到时长即视为就绪，避免误报“加载较慢”。
   player.on("video:loadedmetadata", () => { markReady(); updateProgress(); });
   player.on("video:loadeddata", markReady);
@@ -85,7 +85,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   player.on("video:waiting", () => notify(ready ? "buffering" : "loading"));
   player.on("video:pause", () => { if (ready) notify("ready"); });
   player.on("video:durationchange", updateProgress);
-  player.on("video:timeupdate", updateProgress);
+  player.on("video:timeupdate", () => { updateProgress(); if (player.video.readyState >= 2) events?.onVideoFrame?.(player.video); });
   player.on("video:seeked", () => { updateProgress(); if (player.video.readyState >= 2) markReady(); });
   player.on("video:ended", () => { markReady(); events?.onPlaying(false); events?.onEnded(); });
   player.on("video:error", () => notify("failed"));

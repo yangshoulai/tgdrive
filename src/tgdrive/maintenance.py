@@ -214,7 +214,7 @@ class EncryptedSnapshotStore:
                 target = sqlite3.connect(plain_path)
                 try:
                     row, kek = self._capture(target)
-                    # 缩略图是可再生的展示缓存，不进入备份，避免备份随媒体数量膨胀；恢复后由浏览器按需补生成。
+                    # 缩略图是可再生的展示缓存，不进入备份；恢复后由后台生成器或浏览器补生成。
                     # 文件助手调用日志只是运维元数据，同样不进入备份。
                     tables = {name for (name,) in target.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                     skipped = ("thumbnails", "thumbnail_legacy", "assistant_calls")

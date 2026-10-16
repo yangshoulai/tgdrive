@@ -275,8 +275,12 @@ export type ThumbnailVariant = "thumb" | "grid" | "poster";
 const THUMBNAIL_FALLBACK: Record<ThumbnailVariant, ThumbnailVariant[]> = { thumb: ["thumb"], grid: ["grid", "poster", "thumb"], poster: ["poster", "grid", "thumb"] };
 export const thumbnailUrl = (path: string, etag: string, variant: ThumbnailVariant = "thumb") =>
   mediaAccess(`${fileApi("/thumbnail", path)}?path=${encodeURIComponent(path)}&variant=${variant}&v=${encodeURIComponent(etag)}${thumbnailBucketId !== null ? `&bucket_id=${thumbnailBucketId}` : ""}`, path);
-export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb") => post<void>(fileApi("/thumbnail", path), { path, data, variant });
-export const markNoThumbnail = (path: string) => post<void>(fileApi("/thumbnail", path), { path, variant: "none" });
+export type ThumbnailClaim = { etag?: string; ticket?: string };
+export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb", claim: ThumbnailClaim = {}) => post<void>(fileApi("/thumbnail", path), { path, data, variant, ...claim });
+export const markNoThumbnail = (path: string, claim: ThumbnailClaim = {}) => post<void>(fileApi("/thumbnail", path), { path, variant: "none", ...claim });
+export const claimThumbnail = (file: Pick<FileItem, "key" | "etag">, force = false) => post<{ token: string | null; expires_in?: number }>(fileApi("/thumbnail/claim", file.key), { path: file.key, etag: file.etag, force });
+export const releaseThumbnail = (file: Pick<FileItem, "key" | "etag">, ticket: string) => post<void>(fileApi("/thumbnail/release", file.key), { path: file.key, etag: file.etag, ticket });
+export const generateThumbnail = (file: Pick<FileItem, "key" | "etag">) => post<{ accepted: boolean }>(fileApi("/thumbnail/generate", file.key), { path: file.key, etag: file.etag });
 type ThumbnailFile = Pick<FileItem, "key" | "etag" | "thumbnails" | "has_thumbnail" | "thumbnail_versions">;
 function thumbnailSpec(file: ThumbnailFile, variant: ThumbnailVariant) {
   const resolved = THUMBNAIL_FALLBACK[variant].find(item => item === "thumb" || file.thumbnails?.includes(item)) ?? "thumb";
@@ -502,6 +506,10 @@ export const changePassphrase = (oldPassphrase: string, newPassphrase: string) =
 export type MaintenanceTask = { at: number; error?: string; [key: string]: unknown };
 export type MaintenanceStatus = { gc_pending: number; gc_dead: number; cleanup?: MaintenanceTask; gc?: MaintenanceTask; scrub?: MaintenanceTask; backup?: MaintenanceTask; trash?: MaintenanceTask };
 export const maintenanceStatus = () => request<MaintenanceStatus>("/api/admin/v1/maintenance/status");
+export type ThumbnailJob = { id: string; kind: "image" | "video" | "audio"; state: string; detail: string; at?: number; wait_seconds?: number; manual?: boolean };
+export type ThumbnailQueueStatus = { available: boolean; unlocked: boolean; pressure: string | null; jobs: ThumbnailJob[]; recent: ThumbnailJob[];
+  cache: { bytes: number; limit_bytes: number; ttl_seconds: number }; remote_bytes: number; client_timeout_seconds: number; task_timeout_seconds: number; capacity: number };
+export const thumbnailQueue = () => request<ThumbnailQueueStatus>("/api/admin/v1/maintenance/thumbnails");
 export const runCleanup = () => post<{ aborted_uploads: number; stale_blobs: number; expired_upload_records: number }>("/api/admin/v1/maintenance/cleanup");
 export const retryDeadGc = () => post<{ requeued: number }>("/api/admin/v1/maintenance/gc/retry");
 export type Backup = { name: string; size: number; created_at: number };

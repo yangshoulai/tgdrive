@@ -22,6 +22,7 @@ export function Maintenance({ status, onStatus, onLocked }: { status: api.System
       <div className="maintenance-tabs"><Segmented label="维护区域" value={section} onChange={setSection} options={[{ value: "maintenance", label: "维护与备份" }, { value: "security", label: "安全设置" }]} /></div>
       <div className="stack maintenance-section" hidden={section !== "maintenance"}>
         <TasksPanel unlocked={Boolean(unlocked)} />
+        <ThumbnailTasksPanel active={section === "maintenance"} />
         <BackupsPanel unlocked={Boolean(unlocked)} />
       </div>
       <div className="stack maintenance-section" hidden={section !== "security"}>
@@ -117,6 +118,40 @@ function AuditPanel() {
 function since(seconds?: number) {
   if (!seconds) return "从未运行";
   return formatDateTime(seconds);
+}
+
+function ThumbnailTasksPanel({ active }: { active: boolean }) {
+  const [status, setStatus] = useState<api.ThumbnailQueueStatus | null>(null);
+  const [error, setError] = useState("");
+  const load = useCallback(() => { void api.thumbnailQueue().then(value => { setStatus(value); setError(""); }).catch(reason => setError(api.errorMessage(reason, "缩略图队列读取失败"))); }, []);
+  useEffect(() => {
+    if (!active) return;
+    load();
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") load(); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [active, load]);
+  const labels: Record<string, string> = { queued: "待处理", running: "处理中", waiting_client: "等待浏览器", waiting_data: "等待数据", done: "已完成", failed: "失败", cancelled: "已取消" };
+  const kinds = { image: "图片", video: "视频", audio: "音频" };
+  return <Panel title="缩略图队列" description="自动任务只使用已接收的数据；手动生成才允许回源读取。此处仅显示任务编号与处理情况。"
+    actions={<Button size="sm" icon="refresh" onClick={load}>刷新</Button>}>
+    {error ? <EmptyState icon="alert" title="队列读取失败" description={error} /> : !status ? <SkeletonRows rows={2} /> : <>
+      <KeyValue items={[["队列", `${status.jobs.length} / ${status.capacity}`], ["当前处理", `${status.jobs.filter(job => job.state === "running").length} 项`],
+        ["缓存", `${formatBytes(status.cache.bytes)} / ${formatBytes(status.cache.limit_bytes)}`], ["手动回源读取", formatBytes(status.remote_bytes)]]} />
+      {!status.available && <p className="inline-note tone-warning">服务器未安装 FFmpeg，后台生成不可用；网页仍可用本地文件或已加载的画面生成。</p>}
+      {!status.unlocked && <p className="inline-note">系统已锁定，后台任务暂停。</p>}
+      {status.pressure && <p className="inline-note tone-warning">{status.pressure}</p>}
+      {status.jobs.length === 0 ? <p className="muted">当前没有待处理的缩略图任务。</p> : <div className="table-scroll"><div className="data-table thumbnail-jobs-table" role="table" aria-label="缩略图任务">
+        <div className="data-row data-head" role="row"><span role="columnheader">任务</span><span role="columnheader">类型</span><span role="columnheader">状态</span><span role="columnheader">说明</span></div>
+        {status.jobs.map(job => <div className="data-row" role="row" key={job.id}><span role="cell" className="mono">{job.id}</span><span role="cell">{kinds[job.kind]}</span>
+          <span role="cell"><Badge tone={job.state === "running" ? "accent" : "neutral"}>{labels[job.state] ?? job.state}</Badge></span>
+          <span role="cell" className="muted">{job.detail}{job.wait_seconds ? `（${job.wait_seconds} 秒）` : ""}</span></div>)}
+      </div></div>}
+      {status.recent.length > 0 && <details><summary>最近处理记录（{status.recent.length}）</summary><ul className="task-list">
+        {status.recent.slice(0, 20).map(job => <li key={job.id}><span className="mono">{job.id}</span><span className="attention-copy"><strong>{kinds[job.kind]} · {labels[job.state] ?? job.state}</strong><small>{job.detail}</small></span><small className="muted">{job.at ? formatDateTime(job.at) : ""}</small></li>)}
+      </ul></details>}
+      <p className="muted">浏览器生成权 {status.client_timeout_seconds} 秒，后台单次处理 {status.task_timeout_seconds} 秒。缓存最长保留 {Math.round(status.cache.ttl_seconds / 60)} 分钟，进程重启后等待新的上传或预览数据。</p>
+    </>}
+  </Panel>;
 }
 
 /** 自动任务每 10 分钟运行一次（完整性校验与备份每天一次）；这里显示最近结果并允许立即运行。 */

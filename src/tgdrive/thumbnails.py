@@ -1,0 +1,592 @@
+"""缩略图协作队列：自动任务只用已接收密文，手动任务才允许有预算地回源。"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+import secrets
+import hashlib
+import tempfile
+import time
+from collections import OrderedDict
+from contextlib import aclosing
+from dataclasses import dataclass
+from pathlib import Path
+
+from .errors import NotFoundError, NotReadyError, QuotaExceededError
+from .filekinds import kind_clause, kind_of
+from .objects import PRIVATE_PREFIX, ObjectInfo, Scope
+from .thumbnail_cache import ThumbnailCache, ThumbnailCacheMiss
+
+
+log = logging.getLogger("tgdrive.thumbnails")
+MIB = 1024 * 1024
+IMAGE_LIMIT = 60 * MIB
+READ_LIMITS = {"image": IMAGE_LIMIT, "video": 64 * MIB, "audio": 32 * MIB}
+TIMEOUT = 45
+CLIENT_TIMEOUT = 90
+MAX_PIXELS = 40_000_000
+VIDEO_PIXELS = 4096 * 2160
+# 不允许播放列表、concat、SVG 等会加载其他资源的格式。HTTP 请求还统一经过下面的本地代理。
+FORMATS = ("mov,matroska,webm,avi,ogg,mp3,flac,wav,aac,aiff,asf,flv,mpeg,mpegts,ape,wv,"
+           "jpeg_pipe,png_pipe,webp_pipe,gif,bmp_pipe,tiff_pipe,ico,jxl_pipe,avif,heif")
+
+
+class ThumbnailError(Exception):
+    pass
+
+
+class ThumbnailBudget(ThumbnailError):
+    pass
+
+
+def source_kind(info: ObjectInfo) -> str | None:
+    kind = kind_of(info.key, info.content_type)
+    if not info.blob_uuid or not info.size or info.key.endswith("/"):
+        return None
+    if kind == "image":
+        if info.size > IMAGE_LIMIT or info.key.lower().endswith(".svg") or "svg" in (info.content_type or "").lower():
+            return None
+    return kind if kind in READ_LIMITS else None
+
+
+class _RangeInput:
+    """只提供一个 Blob 的短期本地 HTTP/代理入口，支持解码器跳到尾部索引再回读画面。"""
+
+    def __init__(self, engine, info, authorize, budget, *, cache_only=False):
+        self.engine, self.info, self.authorize = engine, info, authorize
+        self.remaining, self.failure = budget, None
+        self.remote_remaining, self.remote_bytes = budget + MIB, 0
+        self._fetched = set()
+        self.cache_only = cache_only
+        self.path = "/" + secrets.token_urlsafe(32)
+        self.server = None
+        self.tasks = set()
+        self.slots = asyncio.Semaphore(2)
+
+    def _charge(self, ref, size):
+        if ref in self._fetched:
+            raise ThumbnailBudget("已读分片缓存被回收，停止生成以避免重复下载")
+        if size > self.remote_remaining:
+            raise ThumbnailBudget("手动缩略图读取量超过预算")
+        self.remote_remaining -= size
+        self.remote_bytes += size
+        self._fetched.add(ref)
+
+    async def __aenter__(self):
+        self.server = await asyncio.start_server(self._serve, "127.0.0.1", 0, limit=8192)
+        port = self.server.sockets[0].getsockname()[1]
+        self.origin = f"http://127.0.0.1:{port}"
+        self.url = self.origin + self.path
+        return self
+
+    async def __aexit__(self, *_):
+        self.server.close()
+        tasks = list(self.tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await self.server.wait_closed()
+
+    def _range(self, value):
+        size = self.info.size
+        if value is None:
+            return 0, size, 200
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", value)
+        if not match or not any(match.groups()):
+            raise ValueError("invalid range")
+        left, right = match.groups()
+        start = int(left) if left else max(0, size - int(right))
+        end = min(size, int(right) + 1) if left and right else size
+        if start >= end:
+            raise ValueError("invalid range")
+        return start, end, 206
+
+    async def _serve(self, reader, writer):
+        task = asyncio.current_task()
+        if len(self.tasks) >= 4:
+            writer.close()
+            return
+        self.tasks.add(task)
+        started = False
+        try:
+            async with self.slots:
+                header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+                lines = header.decode("iso-8859-1").split("\r\n")
+                method, target, _ = lines[0].split(" ", 2)
+                headers = dict(line.split(":", 1) for line in lines[1:] if ":" in line)
+                headers = {key.lower(): value.strip() for key, value in headers.items()}
+                # 代理请求使用绝对地址；其他主机、路径和方法一律拒绝，不能借此让解码器出站。
+                if method not in ("GET", "HEAD") or target not in (self.path, self.url) or headers.get("host") != self.origin[7:]:
+                    writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+                    return
+                self.authorize()
+                start, end, status = self._range(headers.get("range"))
+                response = [f"HTTP/1.1 {status} OK", f"Content-Length: {end - start}",
+                            "Content-Type: application/octet-stream", "Accept-Ranges: bytes",
+                            "Cache-Control: no-store", "Connection: close"]
+                if status == 206:
+                    response.append(f"Content-Range: bytes {start}-{end - 1}/{self.info.size}")
+                writer.write(("\r\n".join(response) + "\r\n\r\n").encode("ascii"))
+                started = True
+                await writer.drain()
+                if method == "HEAD":
+                    return
+                while start < end:
+                    self.authorize()
+                    # 每次最多读 1 MiB，避免解码器一次开放式 Range 触发大窗口预读，绕过累计读取预算。
+                    stop = min(end, start + MIB)
+                    if stop - start > self.remaining:
+                        raise ThumbnailBudget("缩略图读取量超过预算")
+                    self.remaining -= stop - start
+                    async with aclosing(self.engine.stream(self.info.blob_uuid, start, stop,
+                                                          window=MIB, bucket_id=self.info.bucket_id,
+                                                          cache_only=self.cache_only,
+                                                          read_budget=None if self.cache_only else self._charge)) as source:
+                        async for piece in source:
+                            self.authorize()
+                            writer.write(piece)
+                            await writer.drain()
+                    start = stop
+        except (ConnectionError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+            # FFmpeg 跳转或退出会中断旧连接；不把这种正常中断当作文件损坏。
+            pass
+        except Exception as exc:
+            self.failure = exc
+            if not started:
+                writer.write(b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except ConnectionError:
+                pass
+            self.tasks.discard(task)
+
+
+@dataclass
+class _Job:
+    info: ObjectInfo
+    ready_at: float = 0
+    force: bool = False
+    remote: bool = False
+    state: str = "queued"
+    detail: str = "等待处理"
+    revision: int = 0
+
+
+@dataclass
+class _Lease:
+    info: ObjectInfo
+    token: str
+    until: float
+
+
+class ThumbnailService:
+    """单并发协作队列。自动任务禁止回源；队列重建只查元数据，不读取文件。"""
+
+    def __init__(self, accounts, objects, resources):
+        self.accounts, self.objects, self.resources = accounts, objects, resources
+        self.metadata, self.keystore = objects.metadata, accounts.keystore
+        self.cache = ThumbnailCache()
+        objects.thumbnail_service = self
+        objects.engine.thumbnail_cache = self.cache if resources.ffmpeg else None
+        objects.on_change = lambda bucket: self._dispatch(self._changed, bucket)
+        self.cache.on_data = lambda blob: self._dispatch(self._received, blob)
+        self._runner = self._loop = self._active = self._task = None
+        self._wake = asyncio.Event()
+        self._pending, self._leases, self._history = OrderedDict(), {}, OrderedDict()
+        self._cursor, self._scan_at = (0, ""), 0
+        self._remote_bytes = 0
+
+    def _dispatch(self, action, *args):
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(action, *args)
+            except RuntimeError:
+                pass
+
+    def start(self):
+        if self._runner is None and self.resources.ffmpeg:
+            self.objects.engine.thumbnail_cache = self.cache
+            self._cursor, self._scan_at = (0, ""), 0
+            self._loop = asyncio.get_running_loop()
+            self._runner = asyncio.create_task(self._run())
+
+    async def stop(self):
+        self._loop = None
+        if self._runner is not None:
+            self._runner.cancel()
+            await asyncio.gather(self._runner, return_exceptions=True)
+            self._runner = None
+        self._pending.clear()
+        self._leases.clear()
+        self.cache.close()
+
+    @staticmethod
+    def _eligible(info):
+        return source_kind(info) is not None and (not info.key.startswith(".tgdrive/") or info.key.startswith(PRIVATE_PREFIX))
+
+    def _has_thumbnail(self, blob):
+        return self.metadata.db.execute("SELECT 1 FROM thumbnails WHERE blob_uuid=? LIMIT 1", (blob,)).fetchone() is not None
+
+    def enqueue(self, info: ObjectInfo, scope: Scope | None = None):
+        if self._eligible(info):
+            delay = CLIENT_TIMEOUT if scope and scope.thumbnail_client else 1
+            self._dispatch(self._enqueue, _Job(info, time.monotonic() + delay,
+                state="waiting_client" if delay == CLIENT_TIMEOUT else "queued",
+                detail="等待上传端生成" if delay == CLIENT_TIMEOUT else "等待处理"))
+
+    def observe(self, info):
+        # 用户真正读取文件时登记；接下来的已交付密文会进入缓存，不另开原文件请求。
+        if self._eligible(info) and not self._has_thumbnail(info.blob_uuid):
+            self._dispatch(self._enqueue, _Job(info, time.monotonic() + 2))
+
+    def wants_data(self, info):
+        return self._eligible(info) and not self._has_thumbnail(info.blob_uuid)
+
+    def _enqueue(self, job):
+        blob = job.info.blob_uuid
+        if not job.force and self._has_thumbnail(blob):
+            return False
+        previous = self._pending.get(blob)
+        if previous is not None:
+            if job.remote:
+                previous.force, previous.remote, previous.ready_at = True, True, 0
+                if self._active is not previous:
+                    previous.state, previous.detail = "queued", "用户请求重新生成"
+            return True
+        if len(self._pending) >= 128:
+            # 缺图扫描可以重建自动任务；优先让出等待数据的名额给新上传与明确的手动请求。
+            victim = next((key for key, item in self._pending.items() if item.state == "waiting_data" and key not in self._leases), None)
+            if victim is None:
+                if job.remote:
+                    raise ValueError("缩略图队列已满，请稍后重试")
+                return False
+            self._pending.pop(victim)
+        self._pending[blob] = job
+        self._wake.set()
+        return True
+
+    def _expire_clients(self):
+        now = time.monotonic()
+        for blob, lease in list(self._leases.items()):
+            if lease.until <= now:
+                self._leases.pop(blob)
+        for blob, job in self._pending.items():
+            if job.state == "waiting_client" and blob not in self._leases and job.ready_at <= now:
+                job.state, job.detail = "queued", "上传端超时，服务端接管缓存数据"
+
+    def _received(self, blob):
+        job = self._pending.get(blob)
+        if job is not None and job.state == "waiting_data" and blob not in self._leases:
+            job.state, job.detail, job.ready_at = "queued", "已收到新数据", time.monotonic() + 2
+            self._wake.set()
+
+    def _changed(self, bucket):
+        for blob, job in list(self._pending.items()):
+            if job.info.bucket_id != bucket:
+                continue
+            try:
+                self._scope(job.info, None).authorize()
+            except NotFoundError:
+                rows = self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id=? AND blob_uuid=? "
+                    "AND (substr(key,1,9)!='.tgdrive/' OR substr(key,1,?)=?) LIMIT 8",
+                    (bucket, blob, len(PRIVATE_PREFIX), PRIVATE_PREFIX)).fetchall()
+                replacement = next((self.objects._object(row) for row in rows if self._eligible(self.objects._object(row))), None)
+                if replacement is not None:
+                    # 改名或仍有副本时沿用同一份缓存，只撤销旧路径的浏览器票据。
+                    self._leases.pop(blob, None)
+                    job.info, job.state, job.detail, job.ready_at = replacement, "queued", "文件位置已更新，复用原缓存", 0
+                    if self._active is job and self._task is not None:
+                        self._task.cancel()
+                    continue
+                self._cancel(job)
+            except PermissionError:
+                self._cancel(job)
+            except NotReadyError:
+                pass  # 系统锁定时保留任务，恢复解锁后再处理。
+        self._wake.set()
+
+    def _cancel(self, job):
+        blob = job.info.blob_uuid
+        self._pending.pop(blob, None)
+        self._leases.pop(blob, None)
+        if self._active is job and self._task is not None:
+            self._task.cancel()
+        self._record(job, "cancelled", "文件已删除、移动、覆盖或账号不可用")
+        self.cache.drop(blob)
+
+    def claim(self, scope, key, etag, *, force=False):
+        self._expire_clients()
+        info = self.objects.head_object(scope, key)
+        self.objects._check_scope(scope, key, write=True)
+        if info.etag != etag:
+            raise ValueError("文件内容已变化，请刷新后重试")
+        if not self._eligible(info) or (not force and self._has_thumbnail(info.blob_uuid)):
+            return {"token": None}
+        blob, now = info.blob_uuid, time.monotonic()
+        lease = self._leases.get(blob)
+        if self._active is not None and self._active.info.blob_uuid == blob or lease is not None and lease.until > now:
+            return {"token": None}
+        job = self._pending.get(blob) or _Job(info, force=force)
+        if not self._enqueue(job):
+            return {"token": None}
+        lease = _Lease(info, secrets.token_urlsafe(24), now + CLIENT_TIMEOUT)
+        self._leases[blob] = lease
+        job.state, job.detail, job.ready_at = "waiting_client", "浏览器正在复用本地或预览数据", lease.until
+        return {"token": lease.token, "expires_in": CLIENT_TIMEOUT}
+
+    def check_claim(self, info, token):
+        lease = self._leases.get(info.blob_uuid)
+        if lease is None or not secrets.compare_digest(lease.token, token) or lease.until <= time.monotonic() or (
+                lease.info.bucket_id, lease.info.key, lease.info.etag) != (info.bucket_id, info.key, info.etag):
+            raise ValueError("缩略图生成授权已失效，结果已丢弃")
+
+    def release(self, scope, key, etag, token):
+        info = self.objects.head_object(scope, key)
+        if info.etag != etag:
+            raise ValueError("文件内容已变化，结果已丢弃")
+        self.check_claim(info, token)
+        self._leases.pop(info.blob_uuid, None)
+        job = self._pending.get(info.blob_uuid)
+        if job is not None:
+            if self._has_thumbnail(info.blob_uuid):
+                self._pending.pop(info.blob_uuid, None)
+                self._record(job, "done", "浏览器已生成，无需回源")
+                self.cache.drop(info.blob_uuid)
+            else:
+                job.state, job.detail, job.ready_at = "queued", "上传端未完成，服务端接管缓存数据", 0
+        self._wake.set()
+
+    def request(self, scope, key, etag):
+        self.objects._check_scope(scope, key, write=True)
+        info = self.objects.head_object(scope, key)
+        if info.etag != etag:
+            raise ValueError("文件内容已变化，请刷新后重试")
+        if not self._eligible(info):
+            raise ValueError("此文件不支持生成缩略图")
+        if not self.resources.ffmpeg:
+            raise ValueError("服务器未安装 FFmpeg，无法执行手动生成")
+        self._enqueue(_Job(info, force=True, remote=True, detail="用户请求生成"))
+        return {"accepted": True}
+
+    def _scan(self):
+        clauses, args = zip(*(kind_clause(kind) for kind in READ_LIMITS))
+        rows = self.metadata.db.execute(
+            "SELECT o.* FROM objects o JOIN buckets b ON b.id=o.bucket_id "
+            "LEFT JOIN users u ON u.id=b.owner_user_id WHERE o.blob_uuid IS NOT NULL AND o.size>0 "
+            "AND (substr(o.key,1,9)!='.tgdrive/' OR substr(o.key,1,?)=?) "
+            "AND (b.owner_user_id IS NULL OR u.status='active') "
+            "AND (o.bucket_id,o.key)>(?,?) AND NOT EXISTS "
+            "(SELECT 1 FROM thumbnails t WHERE t.blob_uuid=o.blob_uuid) "
+            "AND (" + " OR ".join(clauses) + ") ORDER BY o.bucket_id,o.key LIMIT 64",
+            (len(PRIVATE_PREFIX), PRIVATE_PREFIX, *self._cursor, *(value for values in args for value in values))).fetchall()
+        return [self.objects._object(row) for row in rows]
+
+    def _record(self, job, state, detail):
+        blob = job.info.blob_uuid
+        self._history[blob] = {"id": hashlib.sha256(blob.encode()).hexdigest()[:12], "kind": source_kind(job.info),
+            "state": state, "detail": detail, "at": time.time()}
+        self._history.move_to_end(blob)
+        while len(self._history) > 50:
+            self._history.popitem(last=False)
+
+    def status(self):
+        self._expire_clients()
+        jobs = [{"id": hashlib.sha256(blob.encode()).hexdigest()[:12], "kind": source_kind(job.info),
+                 "state": job.state, "detail": job.detail, "manual": job.remote,
+                 "wait_seconds": max(0, int(job.ready_at - time.monotonic()))} for blob, job in self._pending.items()]
+        pressure = self.resources.pressure()
+        return {"available": bool(self.resources.ffmpeg), "unlocked": self.keystore.unlocked,
+                "pressure": pressure, "jobs": jobs, "recent": list(reversed(self._history.values())),
+                "cache": self.cache.status(), "remote_bytes": self._remote_bytes,
+                "client_timeout_seconds": CLIENT_TIMEOUT, "task_timeout_seconds": TIMEOUT,
+                "automatic_remote_reads": False, "capacity": 128}
+
+    async def _run(self):
+        while True:
+            try:
+                self._wake.clear()
+                if self.keystore.unlocked and not self.resources.pressure():
+                    self._expire_clients()
+                    now = time.monotonic()
+                    ready = (item for item in self._pending.values() if item.state == "queued" and item.ready_at <= now and item.info.blob_uuid not in self._leases)
+                    # 明确的手动请求优先；自动任务先处理图片和音频，避免视频阻塞轻量封面。
+                    job = min(ready, key=lambda item: (not item.remote, {"image": 0, "audio": 1, "video": 2}[source_kind(item.info)]), default=None)
+                    if job is not None:
+                        blob = job.info.blob_uuid
+                        if not job.force and self._has_thumbnail(blob):
+                            self._pending.pop(blob)
+                            self.cache.drop(blob)
+                            continue
+                        if not job.remote and not self.cache.revision(blob):
+                            job.state, job.detail = "waiting_data", "等待上传或实际预览数据；不会自动回源"
+                            continue
+                        job.state, job.detail = "running", "使用已接收缓存" if not job.remote else "优先使用缓存，必要时按预算回源"
+                        job.revision = self.cache.revision(blob)
+                        self._active = job
+                        started_remote = job.remote
+                        self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote))
+                        try:
+                            await self._task
+                            self._pending.pop(blob, None)
+                            self._record(job, "done", "缩略图处理完成")
+                            self.cache.drop(blob)
+                        except ThumbnailCacheMiss:
+                            job.state, job.detail = "waiting_data", "缓存数据不足，等待上传或实际预览；不会自动回源"
+                            if job.remote and not started_remote:
+                                job.state, job.ready_at = "queued", 0
+                            elif self.cache.revision(blob) != job.revision:
+                                job.state, job.ready_at = "queued", time.monotonic() + 2
+                        except asyncio.CancelledError:
+                            if asyncio.current_task().cancelling():
+                                raise
+                        except Exception as exc:
+                            self._pending.pop(blob, None)
+                            self._record(job, "failed", "处理超时" if isinstance(exc, TimeoutError) else "当前数据或解码器无法生成，可手动重试")
+                        finally:
+                            self._active = self._task = None
+                        continue
+                    if time.monotonic() >= self._scan_at:
+                        page = await self.metadata.run_in_thread(self._scan)
+                        if page:
+                            self._cursor = (page[-1].bucket_id, page[-1].key)
+                            for info in page:
+                                if self._eligible(info) and info.blob_uuid not in self._history:
+                                    self._enqueue(_Job(info))
+                            self._scan_at = time.monotonic() + 1
+                        else:
+                            self._cursor, self._scan_at = (0, ""), time.monotonic() + 300
+                await asyncio.wait_for(self._wake.wait(), 1)
+            except TimeoutError:
+                pass
+            except Exception as exc:
+                log.debug("后台缩略图暂未生成：%s", type(exc).__name__)
+                await asyncio.sleep(1)
+
+    def _scope(self, info, original):
+        # 私密空间只是网页访问锁，文件仍使用系统 KEK；内部后台任务不保存或借用网页解锁票据。
+        kek = self.keystore.require_kek()
+        def authorize():
+            if self.keystore.require_kek() is not kek:
+                raise NotReadyError("加密状态已变化")
+            row = self.metadata.db.execute(
+                "SELECT o.blob_uuid,b.owner_user_id,u.status FROM objects o JOIN buckets b ON b.id=o.bucket_id "
+                "LEFT JOIN users u ON u.id=b.owner_user_id WHERE o.bucket_id=? AND o.key=?",
+                (info.bucket_id, info.key)).fetchone()
+            if row is None or row["blob_uuid"] != info.blob_uuid:
+                raise NotFoundError("源文件已删除、移动或覆盖")
+            if row["owner_user_id"] is not None and row["status"] != "active":
+                raise PermissionError("账号已禁用或删除")
+        scope = Scope(info.bucket_id, private_access=info.key.startswith(PRIVATE_PREFIX), authorize=authorize)
+        self.objects._check_scope(scope, info.key, write=True)
+        return scope
+
+    async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False):
+        kind = source_kind(info)
+        if not self._eligible(info) or not self.resources.ffmpeg:
+            return
+        scope = self._scope(info, None)
+        self.cache.prepare(info.blob_uuid, info.key, info.content_type)
+        if not force and self._has_thumbnail(info.blob_uuid):
+            return
+        async with asyncio.timeout(TIMEOUT):
+            async with _RangeInput(self.objects.engine, info, scope.authorize, READ_LIMITS[kind], cache_only=not allow_remote) as source:
+                try:
+                    with tempfile.TemporaryDirectory(prefix="tessera-thumbnail-") as directory:
+                        images = await self._render(source, kind, Path(directory), scope.authorize)
+                finally:
+                    self._remote_bytes += source.remote_bytes if isinstance(source.remote_bytes, int) else 0
+            scope.authorize()
+            if not force and self._has_thumbnail(info.blob_uuid):
+                return
+            if images is None:
+                await self.objects.set_thumbnail(scope, info.key, None, "none")
+                return
+            saved = []
+            for variant, data in images.items():
+                scope.authorize()
+                try:
+                    await self.objects.set_thumbnail(scope, info.key, data, variant)
+                    saved.append(variant)
+                except QuotaExceededError:
+                    break
+            if force:
+                self.objects.finish_thumbnail_set(scope, info.key, saved)
+
+    async def _render(self, source, kind, directory, authorize):
+        selector = "V:0" if kind == "video" else "v:0"
+        filters = [f"[0:{selector}]split=3[t][g][p]"]
+        for label, variant, size in (("t", "thumb", 160), ("g", "grid", 640), ("p", "poster", 960)):
+            filters.append(f"[{label}]scale=w='max(2,min({size},iw))':h='max(2,min({size},ih))':"
+                           f"force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuvj420p[{variant}]")
+        options = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-max_alloc", str(192 * MIB),
+                   "-threads", "1", "-filter_complex_threads", "1", "-protocol_whitelist", "http,tcp",
+                   "-format_whitelist", FORMATS, "-probesize", str(MIB), "-analyzeduration", "1000000",
+                   "-max_pixels", str(VIDEO_PIXELS if kind == "video" else MAX_PIXELS)]
+        options += ["-i", source.url, "-filter_complex", ";".join(filters)]
+        for variant in ("thumb", "grid", "poster"):
+            options += ["-map", f"[{variant}]", "-an", "-sn", "-dn", "-frames:v", "1", "-threads", "1",
+                        "-c:v", "mjpeg", "-q:v", "8", "-f", "image2", "-update", "1", str(directory / f"{variant}.jpg")]
+        # 强制 HTTP 经仅服务当前文件的本地代理，清掉宿主机代理配置，拒绝媒体中的外部引用。
+        env = {key: value for key, value in os.environ.items()
+               if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
+        env.update(http_proxy=source.origin, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
+        process = await asyncio.create_subprocess_exec(self.resources.ffmpeg, *options, env=env,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        waiting = asyncio.create_task(process.wait())
+
+        async def errors():
+            output = bytearray()
+            while piece := await process.stderr.read(4096):
+                output.extend(piece[:max(0, 8192 - len(output))])
+            return bytes(output)
+
+        stderr = asyncio.create_task(errors())
+        try:
+            # Linux 容器额外限制整个解码进程；其他系统仍有像素、单次分配、线程与超时限制。
+            import resource
+            if hasattr(resource, "prlimit"):
+                memory = min(512 * MIB, max(192 * MIB, (self.resources.detected["memory_bytes"] or 1536 * MIB) // 3))
+                try:
+                    resource.prlimit(process.pid, resource.RLIMIT_AS, (memory, memory))
+                except ProcessLookupError:
+                    pass  # 很小的图片可能已经处理完毕。
+            while not waiting.done():
+                authorize()
+                if source.failure:
+                    raise source.failure
+                if self.resources.pressure():
+                    raise ThumbnailBudget("服务器资源不足，稍后再生成")
+                await asyncio.wait({waiting}, timeout=0.25)
+            output = await stderr
+            if source.failure:
+                raise source.failure
+            if process.returncode:
+                if kind == "audio" and b"matches no streams" in output:
+                    return None
+                raise ThumbnailError("当前解码器未能生成缩略图")
+            images = {}
+            for variant, limit in self.objects.THUMBNAIL_LIMITS.items():
+                path = directory / f"{variant}.jpg"
+                if path.is_file() and 0 < path.stat().st_size <= limit:
+                    images[variant] = path.read_bytes()
+            if "thumb" not in images:
+                raise ThumbnailError("未能提取画面或封面")
+            # 缩小前尺寸未知时，FFmpeg 可能输出同样大小的图片；不重复保存同一张图。
+            for variant in ("poster", "grid"):
+                if images.get(variant) == images.get("grid" if variant == "poster" else "thumb"):
+                    images.pop(variant, None)
+            return images
+        finally:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await asyncio.gather(waiting, stderr, return_exceptions=True)

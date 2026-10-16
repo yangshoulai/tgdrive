@@ -81,7 +81,7 @@ class TgDriveASGI(StaticFiles):
                  static_dir: str | Path | None = None,
                  public_base_url: str | None = None, settings: SystemSettings | None = None,
                  keys: KeyApi | None = None, scheduler=None, metrics: TrafficMetrics | None = None,
-                 context: AppContext | None = None, offline=None, resources=None, assistant=None) -> None:
+                 context: AppContext | None = None, offline=None, resources=None, assistant=None, thumbnails=None) -> None:
         self.scheduler = scheduler
         self.admin, self.user, self.s3 = admin, user, s3
         # 对外地址也是通行密钥的固定来源，不能由任意请求头决定。
@@ -103,6 +103,7 @@ class TgDriveASGI(StaticFiles):
         self.metrics = metrics
         self.context = context
         self.offline, self.resources = offline, resources
+        self.thumbnails = thumbnails
         self.assistant = assistant
         if assistant is not None:
             def audit_auto(action: str, user_id: int, detail: dict) -> None:
@@ -115,6 +116,8 @@ class TgDriveASGI(StaticFiles):
             while True:
                 message = await receive()
                 if message["type"] == "lifespan.startup":
+                    if self.thumbnails is not None:
+                        self.thumbnails.start()
                     if self.offline is not None:
                         self.offline.start()
                     if self.scheduler is not None:
@@ -123,6 +126,8 @@ class TgDriveASGI(StaticFiles):
                 elif message["type"] == "lifespan.shutdown":
                     if self.offline is not None:
                         await self.offline.stop()
+                    if self.thumbnails is not None:
+                        await self.thumbnails.stop()
                     if self.scheduler is not None:
                         await self.scheduler.stop()
                     await send({"type": "lifespan.shutdown.complete"})
@@ -238,7 +243,7 @@ class TgDriveASGI(StaticFiles):
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
-                           "/copy", "/delete", "/thumbnail", "/content", "/preview-assets", "/preview-list",
+                           "/copy", "/delete", "/thumbnail", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
                            "/downloads", "/downloads/clear", "/downloads/batch"}
                 if route not in controls:
@@ -771,6 +776,8 @@ class TgDriveASGI(StaticFiles):
                 return 200, await self.admin.achange_passphrase(token, csrf, payload["old_passphrase"], payload["new_passphrase"]), {}
             if method == "GET" and route == "/maintenance/status":
                 return 200, self.admin.maintenance_status(token), {}
+            if method == "GET" and route == "/maintenance/thumbnails":
+                return 200, self.thumbnails.status(), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/maintenance/cleanup":
                 return 200, await self.admin.run_cleanup(token, csrf), {}
             if method == "POST" and route == "/maintenance/gc/retry":
@@ -939,8 +946,16 @@ class TgDriveASGI(StaticFiles):
                 ids = None if payload.get("all") else list(payload["ids"])
                 return 200, {"purged": await user.purge_trash(token, csrf, ids)}, {}
             if method == "POST" and route == "/thumbnail":
-                await user.set_thumbnail(token, csrf, payload["path"], payload.get("data"), str(payload.get("variant") or "thumb"))
+                await user.set_thumbnail(token, csrf, payload["path"], payload.get("data"), str(payload.get("variant") or "thumb"),
+                                         etag=payload.get("etag"), ticket=payload.get("ticket"))
                 return 204, None, {}
+            if method == "POST" and route == "/thumbnail/claim":
+                return 200, user.thumbnail_claim(token, csrf, payload["path"], str(payload["etag"]), bool(payload.get("force"))), {"Cache-Control": "no-store"}
+            if method == "POST" and route == "/thumbnail/release":
+                user.thumbnail_release(token, csrf, payload["path"], str(payload["etag"]), str(payload["ticket"]))
+                return 204, None, {}
+            if method == "POST" and route == "/thumbnail/generate":
+                return 202, user.thumbnail_generate(token, csrf, payload["path"], str(payload["etag"])), {}
             if method == "POST" and route == "/files/instant":
                 public = payload.get("public")
                 return 200, user.instant_put(token, csrf, payload["path"], payload["size"], payload["fingerprint"],

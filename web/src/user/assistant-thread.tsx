@@ -10,7 +10,7 @@ import { Markdown } from "../markdown";
 import { MessageAttachments } from "./assistant-attachments";
 import { usePreview } from "./preview-host";
 import { FileGlyph, getFileKind, parentPath } from "../files";
-import { createThumbnails, saveThumbnails, thumbnailSource } from "../thumbnails";
+import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
 import { AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
 const display = (key: string) => "/" + key;
@@ -435,8 +435,7 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
       setState(value => ({ ...value, current: item.path }));
       const source = thumbnailSource(item.path, item.content_type, item.size);
       try {
-        const result = source ? await createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal }, source) : "none";
-        const saved = await saveThumbnails(item.path, result);
+        const saved = await generateLoadedThumbnails({ key: item.path, etag: item.etag }, claimSignal => source ? createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source) : Promise.resolve("none"), event.regenerate, signal);
         if (!saved) counts.failed++; else if (saved.includes("none")) counts.none++; else counts.done++;
         if (saved) folders.add(parentPath(item.path));
       } catch {

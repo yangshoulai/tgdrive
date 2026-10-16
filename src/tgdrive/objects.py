@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import secrets
 import time
@@ -22,6 +23,7 @@ from .metadata import Metadata
 
 PRIVATE_PREFIX = ".tgdrive/private/"
 PRIVATE_TRASH_PREFIX = ".tgdrive/private-trash/"
+log = logging.getLogger("tgdrive.objects")
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class Scope:
     perms: str = "rw"
     private_access: bool = False
     authorize: Callable[[], None] | None = None
+    thumbnail_client: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,20 @@ class PartInfo:
 class ObjectService:
     def __init__(self, metadata: Metadata, engine: BlobEngine) -> None:
         self.metadata, self.engine = metadata, engine
+        self.on_commit: Callable[[ObjectInfo, Scope | None], None] | None = None
+        self.on_change: Callable[[int], None] | None = None
+        self.thumbnail_service = None
+
+    def _changed(self, bucket_id: int) -> None:
+        if self.on_change is not None:
+            try:
+                self.on_change(bucket_id)
+            except Exception as exc:
+                log.debug("对象变更通知暂未投递：%s", type(exc).__name__)
+
+    def _cache_upload(self, blob_uuid: str, key: str, content_type: str | None) -> None:
+        if self.engine.thumbnail_cache is not None:
+            self.engine.thumbnail_cache.prepare(blob_uuid, key, content_type)
 
     @staticmethod
     def _check_scope(scope: Scope, key: str, *, write: bool = False) -> None:
@@ -158,7 +175,7 @@ class ObjectService:
         db.execute("DELETE FROM blobs WHERE uuid = ?", (blob_uuid,))
 
     def _commit_blob(self, bucket_id: int, key: str, blob_uuid: str, size: int, etag: str,
-                     content_type: str | None, user_meta: dict[str, str] | None) -> ObjectInfo:
+                     content_type: str | None, user_meta: dict[str, str] | None, *, scope: Scope | None = None) -> ObjectInfo:
         now = time.time()
         meta_json = json.dumps(user_meta or {}, ensure_ascii=False, separators=(",", ":"))
         with self.metadata.transaction() as db:
@@ -183,7 +200,14 @@ class ObjectService:
             # 相对更新：释放旧 Blob 时可能顺带删除了该桶里的大缩略图，那部分已在上面扣减。
             db.execute("UPDATE buckets SET used_bytes = used_bytes - ? + ? WHERE id = ?", (old_size, size, bucket_id))
         row = self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id = ? AND key = ?", (bucket_id, key)).fetchone()
-        return self._object(row)
+        info = self._object(row)
+        self._changed(bucket_id)
+        if self.on_commit is not None:
+            try:
+                self.on_commit(info, scope)
+            except Exception as exc:
+                log.debug("对象已保存，后台通知暂未投递：%s", type(exc).__name__)
+        return info
 
     def _quota_room(self, bucket_id: int, key: str, *, reserved: int = 0) -> int | None:
         """写入 key 时还能容纳的字节数；None 表示不限。已有同名对象的大小会被释放，计入可用空间。"""
@@ -226,6 +250,7 @@ class ObjectService:
         self._check_scope(scope, key, write=True)
         body = self._guard_quota(body, self._quota_room(scope.bucket_id, key), size)
         blob_uuid = self.engine.begin_blob()
+        self._cache_upload(blob_uuid, key, content_type)
         try:
             result = await self.engine.put_part(blob_uuid, 1, body, bucket_id=scope.bucket_id)
             if size is not None and result.size != size:
@@ -237,7 +262,7 @@ class ObjectService:
                 self.metadata.set_fingerprint(blob_uuid, combine(result.size, result.leaves))
             self._check_scope(scope, key, write=True)
             return self._commit_blob(scope.bucket_id, key, blob_uuid, result.size, result.md5,
-                                     content_type, user_meta)
+                                     content_type, user_meta, scope=scope)
         except Exception:
             # 已写入后端的分片由 orphan cleanup/GC 处理；元数据中的临时 blob 可立即入队。
             try:
@@ -271,7 +296,7 @@ class ObjectService:
             return None
         return self._commit_blob(scope.bucket_id, key, source["blob_uuid"], source["size"], source["etag"],
                                  content_type if content_type else source["content_type"],
-                                 json.loads(source["user_meta"] or "{}"))
+                                 json.loads(source["user_meta"] or "{}"), scope=scope)
 
     async def put_directory_marker(self, scope: Scope, key: str) -> ObjectInfo:
         return self._write_directory_marker(scope, key)
@@ -306,6 +331,9 @@ class ObjectService:
                 if False:
                     yield b""
             return info, empty()
+        if self.thumbnail_service is not None and self.thumbnail_service.wants_data(info):
+            self._cache_upload(info.blob_uuid, key, info.content_type)
+            self.thumbnail_service.observe(info)
         return info, self.engine.stream(info.blob_uuid, start, end, bucket_id=scope.bucket_id)
 
     def head_object(self, scope: Scope, key: str) -> ObjectInfo:
@@ -464,6 +492,20 @@ class ObjectService:
             db.execute("INSERT OR REPLACE INTO thumbnails(blob_uuid,variant,mime,data,created_at,bucket_id,object_key) "
                        "VALUES(?,?,?,x'',?,?,?)", (blob_uuid, variant, mime, now, bucket_id, key))
             db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant='none'", (blob_uuid,))
+
+    def finish_thumbnail_set(self, scope: Scope, key: str, variants: list[str]) -> None:
+        """重新生成成功后移除未生成的旧规格；失败期间始终保留原来的缩略图。"""
+        if "thumb" not in variants:
+            return
+        _, blob = self._thumbnail_blob(scope, key, write=True)
+        with self.metadata.transaction() as db:
+            rows = db.execute("SELECT variant,bucket_id,object_key FROM thumbnails WHERE blob_uuid=?", (blob,)).fetchall()
+            for row in rows:
+                if row["variant"] in variants:
+                    continue
+                if row["object_key"]:
+                    self._drop_object_row(db, row["bucket_id"], row["object_key"], time.time())
+                db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=?", (blob, row["variant"]))
 
     async def read_thumbnail(self, info: ObjectInfo, variant: str = "thumb") -> tuple[bytes, str, str]:
         """返回 (图片, MIME, ETag)。所需规格缺失时按 THUMBNAIL_FALLBACK 退回；旧版明文缩略图在首次读取时加密转存。"""
@@ -939,6 +981,7 @@ class ObjectService:
                     db.execute("DELETE FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key))
                 db.execute("UPDATE buckets SET used_bytes = used_bytes - ? WHERE id=?", (row["size"], scope.bucket_id))
                 results.append(DeleteResult(key, True))
+        self._changed(scope.bucket_id)
         return results
 
     async def delete_objects(self, scope: Scope, keys: list[str]) -> list[DeleteResult]:
@@ -1147,7 +1190,7 @@ class ObjectService:
             return await self.put_directory_marker(dst, dst_key)
         return self._commit_blob(dst.bucket_id, dst_key, source["blob_uuid"], source["size"], source["etag"],
                                  content_type if content_type is not None else source["content_type"],
-                                 metadata if metadata is not None else json.loads(source["user_meta"] or "{}"))
+                                 metadata if metadata is not None else json.loads(source["user_meta"] or "{}"), scope=dst)
 
     def move_prefix(self, scope: Scope, old: str, new: str, conflict: str = "skip") -> int:
         return self.move(scope, old, new, conflict).moved
@@ -1240,7 +1283,9 @@ class ObjectService:
                     db.execute("UPDATE uploads SET key=? WHERE upload_id=?", (target, task["upload_id"]))
             if scope.authorize is not None:
                 scope.authorize()
-            return MoveResult(len(moves), skipped)
+            result = MoveResult(len(moves), skipped)
+        self._changed(scope.bucket_id)
+        return result
 
     @staticmethod
     def _free_name(db, bucket_id: int, target: str, reserved: set[str]) -> str:
@@ -1261,6 +1306,7 @@ class ObjectService:
         self._check_scope(scope, key, write=True)
         self._bucket(scope.bucket_id)
         upload_id, blob_uuid, now = secrets.token_urlsafe(24), self.engine.begin_blob(), time.time()
+        self._cache_upload(blob_uuid, key, content_type)
         with self.metadata.transaction() as db:
             db.execute("INSERT INTO uploads(upload_id,bucket_id,key,blob_uuid,content_type,user_meta,created_at,last_activity) "
                        "VALUES(?,?,?,?,?,?,?,?)", (upload_id, scope.bucket_id, key, blob_uuid, content_type,
@@ -1278,6 +1324,8 @@ class ObjectService:
     async def upload_part(self, scope: Scope, upload_id: str, part_no: int,
                           body: AsyncIterator[bytes] | Iterable[bytes] | bytes, size: int | None = None) -> PartInfo:
         row = self._upload(scope, upload_id)
+        if self.engine.thumbnail_cache is not None:
+            self._cache_upload(row["blob_uuid"], row["key"], row["content_type"] if "content_type" in row.keys() else None)
         # 同一次分段上传中其他分段已占用的大小也计入预检。
         others = self.metadata.db.execute("SELECT COALESCE(SUM(size),0) FROM upload_parts WHERE upload_id=? AND part_no!=?",
                                           (upload_id, part_no)).fetchone()[0]
@@ -1321,7 +1369,7 @@ class ObjectService:
         combined = hashlib.md5(b"".join(bytes.fromhex(records[p[0]]["md5"]) for p in parts)).hexdigest() + f"-{len(parts)}"
         self._check_scope(scope, upload["key"], write=True)
         info = self._commit_blob(scope.bucket_id, upload["key"], upload["blob_uuid"], blob_size, combined,
-                                 upload["content_type"], json.loads(upload["user_meta"] or "{}"))
+                                 upload["content_type"], json.loads(upload["user_meta"] or "{}"), scope=scope)
         with self.metadata.transaction() as db:
             db.execute("UPDATE uploads SET completed_at=?, result_etag=? WHERE upload_id=?", (time.time(), combined, upload_id))
         return info

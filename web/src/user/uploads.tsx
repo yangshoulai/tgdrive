@@ -4,7 +4,7 @@ import * as api from "../api";
 
 import { fingerprintFile, fingerprintSupported } from "../fingerprint";
 import { FileTile, getFileKind } from "../files";
-import { createThumbnails, saveThumbnails, thumbnailSource } from "../thumbnails";
+import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
 
 import { Badge, Button, Icon, IconButton, Modal, Switch, copyText, formatBytes, toast } from "../ui";
 import { DestinationPicker } from "./folders";
@@ -226,7 +226,7 @@ export function useUploadQueue(onSettled: () => void) {
       const source = thumbnailSource(job.file.name, job.file.type, job.file.size);
       if (!disposed.current && !result.thumbnails?.length && source) {
         // 用本地文件生成缩略图（图片缩放、视频截帧、音频封面），不需要再下载；失败不影响上传结果。
-        void createThumbnails({ file: job.file }, source).then(value => !disposed.current ? saveThumbnails(job.path, value) : null)
+        void generateLoadedThumbnails(result, signal => createThumbnails({ file: job.file, signal }, source))
           .then(() => { if (!disposed.current) settled.current(); }).catch(() => undefined);
       }
     } catch (reason) {

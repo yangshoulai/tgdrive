@@ -1229,7 +1229,7 @@ make_check_blob(kek) / verify_check_blob(kek, blob)
 
 **预览安全：** 白名单类型才用 `inline`，其余一律 `attachment`；预览响应带 `nosniff` 和 `Content-Security-Policy: sandbox`；所有由文件内容生成的 HTML（Markdown、Office）先经 DOMPurify 清洗；pdf.js 不执行脚本；超过大小上限的文件只提供下载。
 
-**缩略图（已实现，与原设想不同）：** 实际实现没有使用独立的 `thumbs.db`，而是在 `meta.db` 的 `thumbnails` 表中按 Blob 保存，用该 Blob 的 DEK 派生密钥加密；仍不进入快照（备份时清空该表），详见 AGENTS.md。以下为原始设想，仅作记录。
+**缩略图（已实现，与原设想不同）：** 小图在 meta.db 按 Blob 加密保存，大图作为系统区对象计入配额。网页上传优先本地生成，浏览器处理前经 /thumbnail/claim 取得同 Blob 的生成权（90 秒）；保存带 ETag 与票据，/thumbnail/release 主动交还，失败或过期后服务端接管，过期结果不能写入。上传、下载任务与真实预览已传输的密文由 thumbnail_cache.py 短期缓存（匿名临时文件，总计 128 MiB／每 Blob 65 MiB／15 分钟），不保存明文或额外密钥。自动队列只使用缓存，缺失进入 waiting_data，收到新数据才继续，禁止为补图自动回源 TG。图片预览复用原图、视频截播放器当前已解码画面，不额外 seek／播放；原生音频的缓冲字节无法从浏览器取出，后台复用已经交付的数据提取封面。只有明确点击文件菜单「生成／重新生成缩略图」（POST /thumbnail/generate）才允许后台回源；按完整密文分片计预算，图片 60、视频 64、音频 32 MiB，另预留 1 MiB 帧开销，取回分片缓存复用。后台单并发、队列上限 128、单次处理保存共 45 秒。私密内部任务不依赖网页解锁，仍校验系统 KEK、账号与源 Blob；网页读取继续校验私密授权。ObjectService.on_change 在删除、覆盖、移动及移入回收站时取消旧任务和票据，读写过程也复核版本。GET /api/admin/v1/maintenance/thumbnails 只供管理员，在「安全与维护」展示匿名编号、类型、状态、缓存与手动读取量，不返回文件名、路径、账号或私密内容。重启后扫描恢复缺图任务，缓存丢失则等待真实读取或手动生成，不自动重新下载。以下为原始设想，仅作记录。
 
 **缩略图（M8）：** 图片和视频首帧在浏览器端生成，通过用户 API 存入 `thumbs.db`（可再生的缓存，不占用 Telegram 消息，不进入快照）。S3 客户端上传的文件没有缩略图，用户端首次浏览时对小图（如小于 5 MiB）懒生成。
 

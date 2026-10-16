@@ -13,7 +13,7 @@ FROM node:22-bookworm-slim AS platform-js
 # 运行阶段：API 服务同时托管用户端根路径和 /admin/ 管理端。
 FROM python:3.12-slim AS runtime
 
-# 默认保留轻量镜像；带 FFmpeg 的变体只做视频封装，不引入常驻服务。
+# 默认保留轻量镜像；带 FFmpeg 的变体支持视频封装与图片／音视频缩略图后台生成。
 ARG INSTALL_FFMPEG=0
 RUN if [ "$INSTALL_FFMPEG" = "1" ]; then \
       apt-get update && apt-get install -y --no-install-recommends ffmpeg \

@@ -24,6 +24,7 @@ from .s3.auth import ClientAuthStore
 from .s3.gateway import S3Gateway
 from .settings import SystemSettings
 from .telegram.config import ConfiguredBlobStore, TelegramBotConfigStore
+from .thumbnails import ThumbnailService
 from .version import __version__
 from .work import PasswordWork
 
@@ -67,6 +68,8 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     # 小容器不能在下载缓冲之外再同时分配两份口令计算内存。
     accounts.password_work = PasswordWork(1 if resources.effective()["concurrency"] == 1 else 2)
     offline = OfflineDownloads(accounts, objects, resources)
+    thumbnails = ThumbnailService(accounts, objects, resources)
+    objects.on_commit = thumbnails.enqueue
     accounts.on_disable = offline.pause_user
     clients = ClientAuthStore(metadata, keystore=keystore)
     s3 = S3Gateway(objects, clients)
@@ -93,7 +96,7 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
                       s3=s3, s3_host=s3_host, static_dir=static_dir, secure_cookies=secure_cookies,
                       settings=context.system_settings,
                       scheduler=MaintenanceScheduler(maintenance) if run_scheduler else None, metrics=metrics,
-                      context=context, offline=offline, resources=resources, assistant=assistant)
+                      context=context, offline=offline, resources=resources, assistant=assistant, thumbnails=thumbnails)
     app.metadata = context.metadata
     app.keystore = context.keystore
     app.engine = context.engine

@@ -5,7 +5,7 @@ import { BRAND } from "../brand";
 import * as api from "../api";
 
 import { FileFilters, FileThumbnail, FileTile, FileVisual, ShareDialog, baseName, getFileKind, kindLabel, parentPath, type EntryFilter } from "../files";
-import { saveThumbnails, thumbnailsFromImage, thumbnailSource, useThumbnailBackfill } from "../thumbnails";
+import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator } from "../thumbnails";
 
 import { Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 
@@ -116,7 +116,16 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
   const setThumbnails = (key: string, thumbnails: string[]) =>
     setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, thumbnail_versions: undefined, has_thumbnail: thumbnails.includes("thumb") } : item));
-  const thumbnailBackfill = useThumbnailBackfill(files, key => api.contentUrl(key), setThumbnails);
+  const thumbnailGenerator = useThumbnailGenerator(files, () => { notify.success("已提交缩略图生成请求"); scheduleRefresh(); });
+  const previewThumbnailAttempts = useRef(new Set<string>());
+  function savePreviewThumbnail(item: api.FileItem, produce: () => ReturnType<typeof thumbnailsFromImage>, force = false) {
+    const identity = `${item.key}:${item.etag}`;
+    if (previewThumbnailAttempts.current.has(identity)) return;
+    previewThumbnailAttempts.current.add(identity);
+    void generateLoadedThumbnails(item, produce, force).then(thumbnails => {
+      if (thumbnails) { setThumbnails(item.key, thumbnails); scheduleRefresh(); }
+    }).catch(() => undefined);
+  }
   const setPublicFolders = (update: (items: Record<string, api.FileItem>) => Record<string, api.FileItem>) => pagination.setPage(current => current && { ...current, public_folders: update(current.public_folders ?? {}) });
   useEffect(() => { setSelected(new Set()); }, [fetchPage, entryFilter]);
   useEffect(() => { setSearch(""); setQuery(""); }, [prefix]);
@@ -173,8 +182,12 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         const longest = Math.max(image.naturalWidth, image.naturalHeight), has = (variant: string) => item.thumbnails?.includes(variant);
         const missing = !has("thumb") || (longest > 240 && !has("grid") && !has("poster")) || (longest > 800 && !has("poster"));
         if (!missing || /\.svg$/i.test(item.key)) return;
-        const key = item.key;
-        void thumbnailsFromImage(image).then(result => saveThumbnails(key, result)).then(thumbnails => thumbnails && setThumbnails(key, thumbnails)).catch(() => undefined);
+        savePreviewThumbnail(item, () => thumbnailsFromImage(image), true);
+      },
+      onVideoFrame: (video, item) => {
+        if (item.thumbnails?.length || video.readyState < 2 || !video.videoWidth) return;
+        const source = video.currentSrc;
+        savePreviewThumbnail(item, () => video.currentSrc === source ? thumbnailsFromVideo(video) : Promise.resolve(null));
       },
     });
   }
@@ -298,12 +311,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       { label: "下载", icon: "download", onSelect: () => undefined, href: api.contentUrl(file.key, true) },
       ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) }] : []),
     ];
-    if (!file.thumbnails?.length && thumbnailSource(file.key, file.content_type, file.size)) {
-      const state = thumbnailBackfill.state(file);
-      const failed = state?.phase === "waiting" || state?.phase === "failed";
+    if (thumbnailSource(file.key, file.content_type, file.size)) {
+      const state = thumbnailGenerator.state(file);
+      const failed = state?.phase === "failed";
+      const pending = state?.phase === "queued";
       if (failed) items.push({ label: "查看缩略图失败原因", icon: "info", heading: "缩略图", onSelect: () => notify.info(state.message) });
-      if (state?.phase !== "generating") items.push({ label: failed ? "重试生成缩略图" : "生成缩略图", icon: "refresh", heading: failed ? undefined : "缩略图",
-        onSelect: () => thumbnailBackfill.retry(file) });
+      items.push({ label: pending ? state.message : failed ? "重试生成缩略图" : file.thumbnails?.length ? "重新生成缩略图" : "生成缩略图", icon: "refresh", heading: failed ? undefined : "缩略图", disabled: pending,
+        onSelect: () => void thumbnailGenerator.generate(file) });
     }
     if (file.public_token) items.push({ label: "打开分享页", icon: "external", onSelect: () => window.open(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "_blank", "noreferrer") });
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });

@@ -1,4 +1,4 @@
-/** 缩略图生成：图片缩放、视频截帧、音频内嵌封面。全部在浏览器完成，服务端只保存加密后的结果，不解码用户文件。
+/** 浏览器缩略图生成：图片缩放、视频截帧、音频内嵌封面；网页上传优先复用本地文件，后台服务另行补生成。
  * 三种规格：thumb（最长边 160px，列表、目录四宫格）、grid（640px，网格卡片）与 poster（960px，预览封面与占位）；
  * 后两种只在原图明显更大时生成，存为系统区对象并计入用户空间。旧文件没有 grid 时网格退回 poster 或旧版 320px 的 thumb。 */
 import { useEffect, useRef, useState } from "react";
@@ -57,6 +57,11 @@ async function renderSet(source: CanvasImageSource, width: number, height: numbe
 /** 已加载的 <img>（例如预览弹窗里的原图）直接生成，不必重新下载。 */
 export function thumbnailsFromImage(image: HTMLImageElement): Promise<ThumbnailSet | null> {
   return renderSet(image, image.naturalWidth, image.naturalHeight).catch(() => null);
+}
+
+/** 只截取播放器已经解码的当前画面，不创建媒体来源、不跳转、不额外读取视频。 */
+export function thumbnailsFromVideo(video: HTMLVideoElement): Promise<ThumbnailSet | null> {
+  return video.readyState >= 2 ? renderSet(video, video.videoWidth, video.videoHeight).catch(() => null) : Promise.resolve(null);
 }
 
 async function fromBlob(blob: Blob): Promise<ThumbnailSet | null> {
@@ -308,141 +313,81 @@ export async function createThumbnails(input: Input, source: ThumbnailSource): P
 }
 
 /** 保存生成结果；返回保存后的缩略图状态，供界面立即更新。 */
-export async function saveThumbnails(path: string, result: ThumbnailResult): Promise<string[] | null> {
+export async function saveThumbnails(path: string, result: ThumbnailResult, claim: api.ThumbnailClaim = {}): Promise<string[] | null> {
   if (!result) return null;
-  if (result === "none") { await api.markNoThumbnail(path); return ["none"]; }
-  await api.setThumbnail(path, result.thumb, "thumb");
+  if (result === "none") { await api.markNoThumbnail(path, claim); return ["none"]; }
+  await api.setThumbnail(path, result.thumb, "thumb", claim);
   // 网格图与封面写入系统区（计入空间）；失败（如空间不足）时界面退回小图，不影响列表。
   const saved = ["thumb"];
   for (const variant of ["grid", "poster"] as const) {
     const data = result[variant];
-    if (data && await api.setThumbnail(path, data, variant).then(() => true, () => false)) saved.push(variant);
+    if (data && await api.setThumbnail(path, data, variant, claim).then(() => true, () => false)) saved.push(variant);
   }
   return saved;
 }
 
-/* ---------- 后台补生成 ---------- */
-
-const SKIP_KEY = "tessera-thumbnail-skip-v3";
-const BACKFILL_IMAGE_LIMIT = 25 * 1024 * 1024;
-const SKIP_TTL = 10 * 60 * 1000;
-const MAX_AUTO_ATTEMPTS = 3;
-type SkippedThumbnail = { etag: string; until: number };
-type ThumbnailWork = { etag: string; phase: "queued" | "generating" | "waiting" | "failed"; message: string };
-
-function skipped(): SkippedThumbnail[] {
+/** 浏览器取得有期限的生成权后才处理本地／已加载数据；失败主动交还，页面关闭则由服务端超时接管。 */
+export async function generateLoadedThumbnails(file: Pick<api.FileItem, "key" | "etag">, produce: (signal: AbortSignal) => Promise<ThumbnailResult>, force = false, signal?: AbortSignal): Promise<string[] | null> {
+  if (signal?.aborted) return null;
+  const lease = await api.claimThumbnail(file, force);
+  if (!lease.token) return null;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  let timer = 0;
   try {
-    const value: unknown = JSON.parse(localStorage.getItem(SKIP_KEY) || "[]");
-    return Array.isArray(value) ? value.filter((item): item is SkippedThumbnail => item && typeof item.etag === "string" && typeof item.until === "number" && item.until > Date.now()).slice(-300) : [];
-  } catch { return []; }
-}
-function remember(etag: string) {
-  // 慢网络和暂时的解码失败只冷却十分钟；升级后不继承旧版本永久跳过的名单。
-  try { localStorage.setItem(SKIP_KEY, JSON.stringify([...skipped().filter(item => item.etag !== etag), { etag, until: Date.now() + SKIP_TTL }].slice(-300))); } catch { /* 忽略 */ }
-}
-function forget(etag: string) {
-  try { localStorage.setItem(SKIP_KEY, JSON.stringify(skipped().filter(item => item.etag !== etag))); } catch { /* 忽略 */ }
+    if (signal?.aborted) return null;
+    const result = await Promise.race([produce(controller.signal), new Promise<never>((_, reject) => {
+      timer = window.setTimeout(() => { controller.abort(); reject(new Error("缩略图生成超时")); }, 60000);
+    })]);
+    if (controller.signal.aborted) return null;
+    return await saveThumbnails(file.key, result, { etag: file.etag, ticket: lease.token });
+  } finally {
+    controller.abort(); window.clearTimeout(timer); signal?.removeEventListener("abort", abort);
+    await api.releaseThumbnail(file, lease.token).catch(() => undefined);
+  }
 }
 
-/** 为当前页里还没有缩略图的图片、视频和音频在空闲时依次补生成（例如通过 S3 上传或旧版本上传的文件）。
- * 一次只处理一个，页面不可见时暂停；图片只补 25 MB 以内的，视频和音频只读取需要的片段。 */
-export function useThumbnailBackfill(files: api.FileItem[], contentUrl: (key: string) => string, onSaved: (key: string, thumbnails: string[]) => void) {
-  const saved = useRef(onSaved), resolve = useRef(contentUrl);
-  const privateSkipped = useRef(new Map<string, number>());
-  const attempts = useRef(new Map<string, number>()), priority = useRef("");
-  const [revision, setRevision] = useState(0), [states, setStates] = useState<Record<string, ThumbnailWork>>({});
-  saved.current = onSaved; resolve.current = contentUrl;
-  const pending = files.filter(file => !file.thumbnails?.length && !file.key.endsWith("/"))
-    .map(file => ({ file, source: thumbnailSource(file.key, file.content_type, file.size) }))
-    .filter((item): item is { file: api.FileItem; source: ThumbnailSource } => item.source !== null && !(item.source === "image" && item.file.size > BACKFILL_IMAGE_LIMIT));
-  const signature = pending.map(item => `${item.file.key}:${item.file.etag}`).join("|");
+/* ---------- 用户主动提交后台生成 ---------- */
+
+type ThumbnailWork = { etag: string; phase: "queued" | "failed"; message: string };
+
+/** 只提交用户点击的任务；不在浏览器读取原文件，也不向普通用户轮询后台队列。 */
+export function useThumbnailGenerator(files: api.FileItem[], onQueued: () => void) {
+  const [states, setStates] = useState<Record<string, ThumbnailWork>>({});
+  const current = useRef(files), queued = useRef(onQueued), mounted = useRef(true);
+  const requests = useRef(new Set<string>());
+  const refreshTimers = useRef<number[]>([]);
+  current.current = files; queued.current = onQueued;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; refreshTimers.current.forEach(window.clearTimeout); }; }, []);
   useEffect(() => {
-    setStates(current => Object.fromEntries(pending.flatMap(({ file }) => {
-      const value = current[file.key];
-      if (value?.etag !== file.etag) return [];
-      return [[file.key, value.phase === "generating" ? { ...value, phase: "queued", message: "正在等待生成缩略图" } : value]];
-    })));
-    const identities = new Set(pending.map(({ file }) => `${file.key}:${file.etag}`));
-    for (const identity of attempts.current.keys()) if (!identities.has(identity)) attempts.current.delete(identity);
-    for (const [etag, until] of privateSkipped.current) if (until <= Date.now()) privateSkipped.current.delete(etag);
-    if (!pending.length) return;
-    const controller = new AbortController();
-    const delay = (milliseconds: number) => new Promise<void>(done => {
-      const finish = () => { window.clearTimeout(timer); controller.signal.removeEventListener("abort", finish); done(); };
-      const timer = window.setTimeout(finish, milliseconds);
-      controller.signal.addEventListener("abort", finish, { once: true });
+    const identities = new Map(files.map(file => [file.key, file.etag]));
+    setStates(previous => {
+      const entries = Object.entries(previous).filter(([key, state]) => identities.get(key) === state.etag);
+      return entries.length === Object.keys(previous).length ? previous : Object.fromEntries(entries);
     });
-    const idle = () => new Promise<void>(done => {
-      let timer: number | undefined, callback: number | undefined;
-      const finish = () => {
-        window.clearTimeout(timer); if (callback !== undefined) window.cancelIdleCallback(callback);
-        document.removeEventListener("visibilitychange", wait); controller.signal.removeEventListener("abort", finish); done();
-      };
-      const wait = () => {
-        if (document.visibilityState !== "visible") return;
-        document.removeEventListener("visibilitychange", wait);
-        if (typeof window.requestIdleCallback === "function") callback = window.requestIdleCallback(finish, { timeout: 2000 });
-        else timer = window.setTimeout(finish, 300);
-      };
-      controller.signal.addEventListener("abort", finish, { once: true }); document.addEventListener("visibilitychange", wait);
-      wait();
-    });
-    void (async () => {
-      const queue = [...pending].sort((a, b) => Number(b.file.key === priority.current) - Number(a.file.key === priority.current));
-      const completed = new Set<string>();
-      while (!controller.signal.aborted) {
-        let next = Infinity;
-        const cooldowns = new Map(skipped().map(item => [item.etag, item.until]));
-        for (const { file, source } of queue) {
-          if (controller.signal.aborted) return;
-          const identity = `${file.key}:${file.etag}`;
-          if (completed.has(identity) || (attempts.current.get(identity) ?? 0) >= MAX_AUTO_ATTEMPTS) continue;
-          const until = api.isPrivatePath(file.key) ? privateSkipped.current.get(file.etag) ?? 0 : cooldowns.get(file.etag) ?? 0;
-          if (until > Date.now()) { next = Math.min(next, until); continue; }
-          await idle();
-          if (controller.signal.aborted) return;
-          const count = (attempts.current.get(identity) ?? 0) + 1;
-          const update = (phase: ThumbnailWork["phase"], message: string) => {
-            if (!controller.signal.aborted) setStates(current => ({ ...current, [file.key]: { etag: file.etag, phase, message } }));
-          };
-          let failure = "缩略图暂未生成，可在文件菜单中重试";
-          update("generating", "正在生成缩略图");
-          try {
-            const result = await createThumbnails({ url: api.versionedContentUrl(resolve.current(file.key), file.etag), size: file.size, signal: controller.signal, onFailure: message => { failure = message; } }, source);
-            if (controller.signal.aborted) return;
-            if (result) {
-              const thumbnails = await saveThumbnails(file.key, result);
-              if (controller.signal.aborted) return;
-              if (thumbnails) {
-                completed.add(identity); privateSkipped.current.delete(file.etag); if (!api.isPrivatePath(file.key)) forget(file.etag);
-                saved.current(file.key, thumbnails); continue;
-              }
-            }
-          } catch (reason) {
-            if (controller.signal.aborted) return;
-            failure = api.errorMessage(reason, "缩略图保存失败，可在文件菜单中重试");
-          }
-          const retryAt = Date.now() + SKIP_TTL;
-          attempts.current.set(identity, count);
-          if (api.isPrivatePath(file.key)) privateSkipped.current.set(file.etag, retryAt); else { remember(file.etag); cooldowns.set(file.etag, retryAt); }
-          update(count < MAX_AUTO_ATTEMPTS ? "waiting" : "failed", failure);
-          if (count < MAX_AUTO_ATTEMPTS) next = Math.min(next, retryAt);
-        }
-        if (!Number.isFinite(next)) return;
-        await delay(Math.max(1, next - Date.now()));
-      }
-    })();
-    return () => controller.abort();
-    // pending 的内容由 signature 表示，避免每次渲染重新开始。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature, revision]);
+  }, [files]);
   return {
-    state: (file: api.FileItem) => !file.thumbnails?.length && states[file.key]?.etag === file.etag ? states[file.key] : undefined,
-    retry: (file: api.FileItem) => {
-      if (!pending.some(item => item.file.key === file.key && item.file.etag === file.etag)) return;
-      attempts.current.delete(`${file.key}:${file.etag}`); privateSkipped.current.delete(file.etag);
-      if (!api.isPrivatePath(file.key)) forget(file.etag);
-      priority.current = file.key; setRevision(current => current + 1);
+    state: (file: api.FileItem) => states[file.key]?.etag === file.etag ? states[file.key] : undefined,
+    generate: async (file: api.FileItem) => {
+      const identity = `${file.key}:${file.etag}`;
+      if (requests.current.has(identity)) return;
+      requests.current.add(identity);
+      setStates(previous => ({ ...previous, [file.key]: { etag: file.etag, phase: "queued", message: "正在提交生成请求" } }));
+      try {
+        await api.generateThumbnail(file);
+        if (mounted.current && current.current.some(item => item.key === file.key && item.etag === file.etag)) {
+          setStates(previous => { const next = { ...previous }; delete next[file.key]; return next; });
+          queued.current();
+          // 用户提交后的有界元数据刷新，不查询任务队列，也不读取原文件。
+          refreshTimers.current.forEach(window.clearTimeout);
+          refreshTimers.current = [3000, 15000, 60000, 150000].map(delay => window.setTimeout(() => {
+            if (mounted.current) window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [file.key.slice(0, file.key.lastIndexOf("/") + 1)] } }));
+          }, delay));
+        }
+      } catch (reason) {
+        if (mounted.current) setStates(previous => ({ ...previous, [file.key]: { etag: file.etag, phase: "failed", message: api.errorMessage(reason, "提交失败，请重试") } }));
+      } finally { requests.current.delete(identity); }
     },
   };
 }

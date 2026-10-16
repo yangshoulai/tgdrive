@@ -14,7 +14,7 @@ type VideoPlayer = ReturnType<Engine["createVideoPlayer"]>;
 type Lyric = { time: number; text: string };
 export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[]>;
 export type PlaybackControls = { play: () => Promise<void>; pause: () => void; isPlaying: () => boolean; seek: (time: number) => void; seekBy: (seconds: number) => void; adjustVolume: (delta: number) => void };
-export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number) => void; onLyricLine?: (line: string | null) => void };
+export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onLyricLine?: (line: string | null) => void };
 type Player = PlaybackControls & { setSource: (url: string, name: string, cover?: string) => void; destroy: () => void };
 
 function playbackTime(time: number): string {
@@ -263,15 +263,15 @@ function MediaButton({ icon, label, onClick, disabled, active, className = "" }:
 
 /* ---------- 统一入口 ---------- */
 
-export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onLyricLine }: {
+export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onLyricLine }: {
   kind: "video" | "audio"; url: string; name: string; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav;
 } & PlaybackProps) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
   const loader = useRef(loadAssets), resolveAsset = useRef(assetUrl);
   loader.current = loadAssets; resolveAsset.current = assetUrl;
-  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onLyricLine }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
-  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onLyricLine }; source.current = { url, name, cover };
+  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onLyricLine }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
+  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onLyricLine }; source.current = { url, name, cover };
   const navRef = useRef(nav);
   navRef.current = nav;
   const [state, setState] = useState<MediaState>("loading"), [error, setError] = useState("");
@@ -315,7 +315,8 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
         if (cancelled || !host.current) return;
         const events = { onEnded: () => callbacks.current.onEnded?.(), onPlaying: playingChanged,
           onProgress: (value: MediaProgress) => { if (!cancelled) callbacks.current.onProgress?.(value); },
-          onVideoSize: (width: number, height: number) => callbacks.current.onVideoSize?.(width, height) };
+          onVideoSize: (width: number, height: number) => callbacks.current.onVideoSize?.(width, height),
+          onVideoFrame: (video: HTMLVideoElement) => callbacks.current.onVideoFrame?.(video) };
         const initial = source.current;
         const video = engine.createVideoPlayer(host.current, initial.url, notify, initial.cover, events, () => navRef.current);
         player.current = video;

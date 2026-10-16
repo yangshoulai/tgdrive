@@ -29,6 +29,7 @@ from .errors import IntegrityError, InvalidStateError, NotFoundError
 from .fingerprint import BLOCK_SIZE, BlockHasher
 from .keystore import KeyStore
 from .metadata import BlobRecord, ChunkRecord, Metadata
+from .thumbnail_cache import ThumbnailCacheMiss
 from .work import TransferSlots
 
 
@@ -61,6 +62,8 @@ class BlobEngine:
         self.read_ahead = 2
         self.fingerprint_block = BLOCK_SIZE
         self.transfers = TransferSlots(transfer_concurrency, bucket_concurrency)
+        self.thumbnail_cache = None
+        self._thumbnail_read_lock = asyncio.Lock()
 
     def _kek(self) -> bytes:
         if self.keystore is not None:
@@ -179,6 +182,8 @@ class BlobEngine:
         # 16 MB 的 AES-GCM 加密放到线程里，避免阻塞事件循环（cryptography 会释放 GIL）。
         encrypted, salt = await asyncio.to_thread(encrypt_chunk, fk, plain)
         ref = await self.store.put(f"{blob_uuid}:{part_no}:{sub_idx}", encrypted)
+        if self.thumbnail_cache is not None:
+            await asyncio.to_thread(self.thumbnail_cache.put, blob_uuid, ref, 0, encrypted)
         return ChunkRecord(blob_uuid, part_no, sub_idx, None, len(plain), len(encrypted), salt,
                            hashlib.sha256(encrypted).hexdigest(), ref)
 
@@ -188,14 +193,15 @@ class BlobEngine:
         return self.metadata.finalize_blob(blob_uuid, part_order)
 
     async def stream(self, blob_uuid: str, start: int = 0, end: int | None = None,
-                     *, window: int = 1024 * 1024, bucket_id: int | None = None) -> AsyncIterator[bytes]:
+                     *, window: int = 1024 * 1024, bucket_id: int | None = None,
+                     cache_only: bool = False, read_budget=None) -> AsyncIterator[bytes]:
         async with self.transfers.slot(bucket_id):
-            async with aclosing(self._stream(blob_uuid, start, end, window=window)) as source:
+            async with aclosing(self._stream(blob_uuid, start, end, window=window, cache_only=cache_only, read_budget=read_budget)) as source:
                 async for piece in source:
                     yield piece
 
     async def _stream(self, blob_uuid: str, start: int = 0, end: int | None = None,
-                      *, window: int = 1024 * 1024) -> AsyncIterator[bytes]:
+                      *, window: int = 1024 * 1024, cache_only: bool = False, read_budget=None) -> AsyncIterator[bytes]:
         record = self.metadata.get_blob(blob_uuid)
         if record.status != "complete" or record.size is None:
             raise InvalidStateError("blob is not complete")
@@ -234,9 +240,38 @@ class BlobEngine:
                     yield chunk, position, local_end
                     position = local_end
 
+        async def read_cipher(chunk: ChunkRecord, cipher_start: int, cipher_end: int) -> bytes:
+            cache = self.thumbnail_cache
+            encrypted = None
+            if cache is not None:
+                try:
+                    encrypted = await asyncio.to_thread(cache.get, blob_uuid, chunk.blob_ref, cipher_start, cipher_end)
+                except ThumbnailCacheMiss:
+                    pass
+            if encrypted is None:
+                if cache_only:
+                    raise ThumbnailCacheMiss("等待已接收的数据，不自动回源")
+                if read_budget is not None:
+                    # 手动生成按完整密文分片计预算并缓存一次；TG 不支持 Range 时也不会重复下载同一分片。
+                    read_budget(chunk.blob_ref, chunk.cipher_size)
+                    whole = await self.store.get(chunk.blob_ref)
+                    if cache is not None:
+                        await asyncio.to_thread(cache.put, blob_uuid, chunk.blob_ref, 0, whole)
+                    encrypted = whole[cipher_start:cipher_end]
+                else:
+                    encrypted = await self.store.get(chunk.blob_ref, cipher_start, cipher_end)
+                    if cache is not None:
+                        await asyncio.to_thread(cache.put, blob_uuid, chunk.blob_ref, cipher_start, encrypted)
+            return encrypted
+
         async def fetch(chunk: ChunkRecord, lo: int, hi_exclusive: int) -> bytes:
             cipher_start, cipher_end, _, _ = cipher_range(record.frame_size, chunk.plain_size, lo, hi_exclusive - 1)
-            encrypted = await self.store.get(chunk.blob_ref, cipher_start, cipher_end)
+            if read_budget is not None:
+                # 解码器可能并发读头部和尾部；共享同一分片的首次取回，避免两个请求同时缓存未命中。
+                async with self._thumbnail_read_lock:
+                    encrypted = await read_cipher(chunk, cipher_start, cipher_end)
+            else:
+                encrypted = await read_cipher(chunk, cipher_start, cipher_end)
             return await asyncio.to_thread(decrypt_range, fk, chunk.salt, chunk.plain_size, encrypted, lo, hi_exclusive - 1)
 
         # 流水线：消费者处理当前窗口时，后面最多 read_ahead 个窗口已在并行取回与解密，
@@ -248,7 +283,7 @@ class BlobEngine:
         try:
             exhausted = False
             while True:
-                while not exhausted and len(pending) <= min(self.read_ahead, 2 * delivered):
+                while not exhausted and len(pending) <= (0 if read_budget is not None else min(self.read_ahead, 2 * delivered)):
                     item = next(source, None)
                     if item is None:
                         exhausted = True
@@ -294,3 +329,5 @@ class BlobEngine:
 
     async def delete(self, blob_uuid: str) -> None:
         self.metadata.delete_blob(blob_uuid, time.time())
+        if self.thumbnail_cache is not None:
+            self.thumbnail_cache.drop(blob_uuid)

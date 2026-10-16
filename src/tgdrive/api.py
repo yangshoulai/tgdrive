@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 from .accounts import AccountService
 from .authn import AuthenticationError, Session, hash_password
@@ -643,7 +644,7 @@ class UserApi:
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
         key = self._path(path)
-        item = await self.objects.put_object(self._scope(token), key, body,
+        item = await self.objects.put_object(replace(self._scope(token), thumbnail_client=True), key, body,
                                              len(body) if isinstance(body, bytes) else size, content_type)
         if public is not None:
             item = self.objects.set_public(self._scope(token), key, public)
@@ -654,7 +655,7 @@ class UserApi:
         """秒传：存储桶内已有内容相同的文件时直接引用它；未命中返回 {"hit": False}，由前端走普通上传。"""
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
-        scope = self._scope(token)
+        scope = replace(self._scope(token), thumbnail_client=True)
         key = self._path(path)
         item = self.objects.instant_put(scope, key, int(size), fingerprint, content_type)
         if item is None:
@@ -729,7 +730,8 @@ class UserApi:
 
     # ---------- 缩略图 ----------
 
-    async def set_thumbnail(self, token: str, csrf: str, path: str, data: str | None, variant: str = "thumb") -> None:
+    async def set_thumbnail(self, token: str, csrf: str, path: str, data: str | None, variant: str = "thumb",
+                            *, etag: str | None = None, ticket: str | None = None) -> None:
         import base64
         import binascii
         raw = None
@@ -738,7 +740,34 @@ class UserApi:
                 raw = base64.b64decode(str(data or "").split(",", 1)[-1], validate=True)
             except binascii.Error as exc:
                 raise ValueError("缩略图数据不是有效的 base64") from exc
-        await self.objects.set_thumbnail(self._scope(token, csrf=csrf, mutation=True), self._path(path), raw, variant)
+        scope, key = self._scope(token, csrf=csrf, mutation=True), self._path(path)
+        if etag is not None or ticket is not None:
+            info = self.objects.head_object(scope, key)
+            def authorize():
+                if scope.authorize is not None:
+                    scope.authorize()
+                current = self.objects.head_object(replace(scope, authorize=None), key)
+                if current.etag != etag or current.blob_uuid != info.blob_uuid:
+                    raise ValueError("文件已删除或覆盖，缩略图结果已丢弃")
+                if ticket is not None:
+                    self.objects.thumbnail_service.check_claim(current, ticket)
+            authorize()
+            guarded = replace(scope, authorize=authorize)
+        else:
+            guarded = scope  # 兼容旧客户端；新版客户端均带内容版本和生成票据。
+        await self.objects.set_thumbnail(guarded, key, raw, variant)
+
+    def thumbnail_claim(self, token, csrf, path, etag, force=False):
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        return self.objects.thumbnail_service.claim(scope, self._path(path), etag, force=force)
+
+    def thumbnail_release(self, token, csrf, path, etag, ticket):
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        self.objects.thumbnail_service.release(scope, self._path(path), etag, ticket)
+
+    def thumbnail_generate(self, token, csrf, path, etag):
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        return self.objects.thumbnail_service.request(scope, self._path(path), etag)
 
     async def thumbnail(self, token: str, path: str, variant: str = "thumb", *, bucket_id: int | None = None) -> tuple[bytes, str, str]:
         scope = self._scope(token)
@@ -766,7 +795,7 @@ class UserApi:
         return {"part_no": part.part_no, "size": part.size, "etag": part.etag}
 
     async def complete_upload(self, token: str, csrf: str, upload_id: str, parts: list, public: bool | None) -> dict[str, object]:
-        scope = self._scope(token, csrf=csrf, mutation=True)
+        scope = replace(self._scope(token, csrf=csrf, mutation=True), thumbnail_client=True)
         info = await self.objects.complete_multipart(scope, upload_id, [(int(number), str(etag)) for number, etag in parts])
         if public is not None:
             info = self.objects.set_public(scope, info.key, public)

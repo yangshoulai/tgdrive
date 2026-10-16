@@ -16,7 +16,7 @@ type Host = { open: (owner: string, request: PreviewRequest) => void; update: (f
 
 const HostContext = createContext<Host | null>(null);
 // 只属于打开页面的回调；页面卸载后从预览中移除，避免调用已卸载页面的状态。
-const PAGE_CALLBACKS = ["onShare", "onImageLoad", "onPlaybackActivity"] as const;
+const PAGE_CALLBACKS = ["onShare", "onImageLoad", "onVideoFrame", "onPlaybackActivity"] as const;
 
 export function PreviewHost({ children, privateAllowed, enabled }: { children: ReactNode; privateAllowed: boolean; enabled: boolean }) {
   const privateSession = usePrivateAccess();
