@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
 from ..metadata import Metadata
 
@@ -37,8 +38,12 @@ SETTINGS: dict[str, tuple[int, int, int]] = {
     "call_log_days": (90, 1, 3650),
 }
 
-DEFAULT_NOTICE = ("文件助手会把你的文件名、目录结构，以及它读取的文本文件内容发送给管理员配置的模型服务来理解你的请求。"
-                  "对话会被记录并保留一段时间，管理员无法通过系统查看对话内容。任何修改文件的操作都需要你确认后才会执行。")
+DEFAULT_NOTICE = ("文件助手会把你的文件名、目录结构，以及它读取的文本文件和外部 HTTP 响应发送给管理员配置的模型服务来理解你的请求。\n\n"
+                  "为提供适合设备的操作步骤，还会提供浏览器名称及主版本、操作系统、语言、时区和当前站点地址。\n\n"
+                  "对话加密保存并保留一段时间，管理员无法通过系统查看正文。文件修改按当前访问模式执行；公开分享、彻底删除和读取外部内容后的修改仍需确认。")
+
+# 默认使用说明的修订时间：说明内容（发送哪些数据）变化时更新它，之前的确认记录失效，用户需重新阅读。
+DEFAULT_NOTICE_SINCE = 1792080000.0  # 2026-10-16：增加外部 HTTP 响应与客户端环境
 
 LEVELS = ("read", "write", "danger")
 
@@ -122,6 +127,12 @@ class AssistantConfig:
         value = self._stored().get("notice")
         return value if isinstance(value, str) and value.strip() else DEFAULT_NOTICE
 
+    @property
+    def notice_since(self) -> float:
+        """在这之前的确认不再有效：默认说明的修订时间与管理员最近一次修改说明的时间取较晚者。"""
+        updated = self._stored().get("notice_updated_at")
+        return max(DEFAULT_NOTICE_SINCE, float(updated) if isinstance(updated, (int, float)) and not isinstance(updated, bool) else 0.0)
+
     def describe_settings(self) -> dict[str, object]:
         return {"enabled": self.enabled, "default_model": self.default_model, "full_access": self.full_access_default,
                 **{name: self.setting(name) for name in SETTINGS},
@@ -151,6 +162,8 @@ class AssistantConfig:
             if notice is not None and (not isinstance(notice, str) or len(notice) > 2000):
                 raise ValueError("使用说明最多 2000 个字符")
             values["notice"] = notice.strip() if isinstance(notice, str) and notice.strip() else None
+            if values["notice"] != self._stored().get("notice"):
+                values["notice_updated_at"] = time.time()
         if "enabled" in payload:
             if not isinstance(payload["enabled"], bool):
                 raise ValueError("enabled 必须是布尔值")
@@ -208,7 +221,8 @@ class AssistantConfig:
                 "effective": {"enabled": enabled is not False, "max_level": level or "write",
                               "daily_tokens": self.setting("user_daily_tokens") if daily is None else daily,
                               "full_access": self.full_access_default if full is None else full},
-                "notice_ack_at": row["notice_ack_at"] if row is not None else None}
+                "notice_ack_at": row["notice_ack_at"] if row is not None and row["notice_ack_at"] is not None
+                and row["notice_ack_at"] >= self.notice_since else None}
 
     def update_policy(self, user_id: int, payload: dict) -> dict[str, object]:
         unknown = set(payload) - {"enabled", "max_level", "daily_tokens", "full_access"}

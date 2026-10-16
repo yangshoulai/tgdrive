@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import time
 from urllib.parse import urlsplit
 
 from .tools import END, PATH, ToolContext, ToolError, ToolOutput, _str, tool
@@ -149,6 +150,28 @@ async def ui_download(ctx: ToolContext, args: dict) -> ToolOutput:
     return ToolOutput({"status": "已在对话中显示下载按钮，等待用户点击", "items": len(items), "size": size},
                       f"准备下载 {len(items)} 项", items=len(items),
                       event={"type": "browser", "action": "download", "items": items, "size": size})
+
+
+def shared_object(ctx: ToolContext, path: object):
+    key = ctx.resolve(path, allow_root=False)
+    row = ctx.db.execute("SELECT public_token, public_expires_at FROM objects WHERE bucket_id=? AND key=?",
+                         (ctx.bucket_id, key)).fetchone()
+    if row is None or not row["public_token"]:
+        raise ToolError("该文件或文件夹尚未公开分享，请先由用户确认创建分享")
+    if row["public_expires_at"] is not None and row["public_expires_at"] <= time.time():
+        raise ToolError("该分享已过期，请在分享设置中调整有效期")
+    return key, row
+
+
+@tool("ui_open_share", "打开已有分享", "browser", "read",
+      "为作用域内已公开分享的文件或文件夹显示「打开分享页」按钮，由用户点击后在新标签页打开。"
+      "提供文件路径即可，无需知道分享令牌；不会创建分享，未公开或已过期时返回提示。",
+      {"path": PATH}, ("path",))
+async def ui_open_share(ctx: ToolContext, args: dict) -> ToolOutput:
+    key, _ = shared_object(ctx, _str(args, "path", limit=1024))
+    return ToolOutput({"status": "已显示打开分享页按钮，等待用户点击", "path": ctx.display(key)},
+                      f"打开 {ctx.display(key)} 的分享页",
+                      event={"type": "browser", "action": "share", "path": key, "conversation_id": ctx.conversation_id})
 
 
 @tool("browser_open_url", "打开网页", "browser", "read",

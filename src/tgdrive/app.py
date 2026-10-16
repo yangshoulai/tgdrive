@@ -80,7 +80,7 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     admin, user = AdminApi(accounts, objects, clients, maintenance, telegram_bots, metrics=metrics, storage=store), UserApi(accounts, objects, clients)
     admin.offline = offline
     # 文件助手：渠道、对话留痕与调用日志；清理挂在维护任务上。
-    assistant = AssistantService(accounts, objects, offline, user_api=user)
+    assistant = AssistantService(accounts, objects, offline, user_api=user, settings=context.system_settings)
     maintenance.assistant_cleaner = assistant.cleanup
     maintenance.assistant_catalog = assistant.sync_catalog_if_due
     app = TgDriveASGI(admin, user,

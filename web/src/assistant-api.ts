@@ -153,6 +153,7 @@ export type Conversation = { id: string; title: string | null; scope: string; mo
 export type BrowserEvent =
   | { type: "browser"; action: "download"; items: { path: string; folder: boolean }[]; size: number }
   | { type: "browser"; action: "open"; url: string; host: string; title: string | null }
+  | { type: "browser"; action: "share"; path: string; conversation_id: string }
   | { type: "browser"; action: "copy"; text: string; title: string | null };
 export type ToolEvent =
   | { type: "plan"; items: { content: string; status: "pending" | "in_progress" | "completed" }[] }
@@ -206,9 +207,12 @@ export const createConversation = (location: string, modelId?: number | null, ac
 export const conversation = (id: string) => get<ConversationDetail>(`${USER}/conversations/${encodeURIComponent(id)}`);
 export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
 export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
-export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root"; snapshot_id?: string }) =>
+export type ClientEnvironment = { browser: string; browser_version: string; os: string; language: string; timezone: string; origin: string };
+export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root"; snapshot_id?: string; environment?: ClientEnvironment }) =>
   post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/messages`, input);
 export const stopRun = (runId: string) => post<void>(`${USER}/runs/${encodeURIComponent(runId)}/stop`, {});
+export const shareLink = (conversationId: string, path: string) =>
+  get<{ token: string; public_base_url: string | null }>(`${USER}/conversations/${encodeURIComponent(conversationId)}/share-link${query({ path })}`);
 /** 回传浏览器工具的执行结果（只有发起这个运行的登录会话可以回传）。 */
 export const sendClientResult = (runId: string, callId: string, outcome: { result?: Record<string, unknown>; error?: string }) =>
   post<void>(`${USER}/runs/${encodeURIComponent(runId)}/client-results`, { call_id: callId, ...outcome });

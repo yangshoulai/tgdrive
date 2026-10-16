@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
-import { useCursorPage, useFilePageSize } from "../pagination";
+import { useDirectory, mergeObjectPages } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 import { usePreview } from "./preview-host";
 
-import { FileThumbnail, FileVisual, FolderThumbnail, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileFilters, FileThumbnail, FileVisual, FolderThumbnail, baseName, getFileKind, kindLabel, matchesKindFilter, parentPath, type EntryFilter } from "../files";
 
-import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Pagination, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, Menu, PageHeader, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
 /* ---------- 公开分享 ---------- */
 
 export function SharedView({ session, onChanged, onOpenFolder }: { session: api.Session; onChanged: () => void; onOpenFolder: (prefix: string) => void }) {
-  const pageSize = useFilePageSize();
-  const fetchPage = useCallback((cursor: string | null) => api.listPublicPage(cursor, pageSize.pageSize), [pageSize.pageSize]);
-  const pagination = useCursorPage(fetchPage);
-  const items = pagination.page?.objects ?? null;
+  const fetchPage = useCallback((cursor: string | null, signal: AbortSignal) => api.listPublicPage(cursor, 200, signal), []);
+  const pagination = useDirectory(fetchPage, mergeObjectPages);
+  const [entryFilter, setEntryFilter] = useState<EntryFilter>("all");
+  const [kind, setKind] = useState<api.KindFilter>("");
+  const items = pagination.page?.objects.filter(file => (entryFilter === "all" || (file.key.endsWith("/") ? entryFilter === "folder" : entryFilter === "file")) && matchesKindFilter(file, kind)) ?? null;
   const error = pagination.error;
   const load = pagination.reload;
   const [revoking, setRevoking] = useState<api.FileItem | null>(null);
@@ -46,9 +47,11 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
     <>
       <PageHeader title="公开分享" description="这些文件和文件夹可以被任何拥有链接的人访问。关闭分享后，链接会立即失效。"
         actions={<Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />} />
+      <FileFilters entry={entryFilter} kind={kind} onEntryChange={setEntryFilter} onKindChange={setKind} />
       <section className={`file-surface${layout === "grid" && items?.length && !error ? " is-grid" : ""}`}>
         {error ? <EmptyState icon="alert" title="加载失败" description={error} action={<Button icon="refresh" onClick={() => void load()}>重试</Button>} />
           : items === null ? <SkeletonRows rows={4} />
+            : items.length === 0 && (entryFilter !== "all" || kind) ? <EmptyState icon="search" title="没有符合筛选条件的公开项目" action={<Button onClick={() => { setEntryFilter("all"); setKind(""); }}>清除筛选</Button>} />
             : items.length === 0 ? <EmptyState icon="globe" title="还没有公开的内容" description="在“我的文件”中打开文件或文件夹的菜单，选择“公开分享”，或在上传时开启公开访问。" />
               : layout === "list" ? (
                 <div className="data-table shared-table" role="table" aria-label="公开内容">
@@ -109,7 +112,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                 </div>
               )}
       </section>
-      <footer className="list-footer"><span>共 {pagination.page?.total ?? "—"} 个公开项目</span><Pagination {...pagination} {...pageSize} /></footer>
+      <footer className="list-footer"><span>共 {items?.length ?? "—"} 个公开项目</span>{pagination.loadingMore && <span role="status">正在读取其余项目…</span>}</footer>
       {revoking && <ConfirmDialog title={`停止分享“${baseName(revoking.key)}”？`} description="原链接会立即失效。再次分享时会生成新的链接。" confirmLabel="停止分享"
         onClose={() => setRevoking(null)}
         onConfirm={async () => {

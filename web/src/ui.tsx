@@ -258,12 +258,15 @@ export function SearchInput({ value, onChange, onSubmit, onClear, placeholder, l
 }
 
 /** 快速筛选标签：单选，一行放不下时横向滚动；键盘用左右方向键切换（与 Segmented 相同的单选语义）。 */
-export function FilterChips<T extends string>({ value, options, onChange, label }: { value: T; options: { value: T; label: string }[]; onChange: (value: T) => void; label: string }) {
+/** 胶囊单选组；传入 clearValue 时可以再次点击已选项取消（此时没有选中项，第一项保持可 Tab 到达）。 */
+export function FilterChips<T extends string>({ value, options, onChange, label, clearValue }: { value: T; options: { value: T; label: string }[]; onChange: (value: T) => void; label: string; clearValue?: T }) {
+  const focusable = options.some(option => option.value === value) ? value : options[0]?.value;
   return (
     <div className="filter-chips" role="radiogroup" aria-label={label}>
       {options.map((option, index) => (
-        <button key={option.value} type="button" role="radio" aria-checked={value === option.value} tabIndex={value === option.value ? 0 : -1}
-          className={`filter-chip${value === option.value ? " is-active" : ""}`} onClick={() => onChange(option.value)}
+        <button key={option.value} type="button" role="radio" aria-checked={value === option.value} tabIndex={focusable === option.value ? 0 : -1}
+          className={`filter-chip${value === option.value ? " is-active" : ""}`}
+          onClick={() => onChange(clearValue !== undefined && value === option.value ? clearValue : option.value)}
           onKeyDown={event => {
             const offset = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
             if (!offset) return;
@@ -276,6 +279,7 @@ export function FilterChips<T extends string>({ value, options, onChange, label 
     </div>
   );
 }
+
 
 export function Segmented<T extends string>({ value, options, onChange, label, disabled, showLabels = false }: { value: T; options: { value: T; label: string; icon?: IconName; count?: number }[]; onChange: (value: T) => void; label: string; disabled?: boolean; /** 有图标时同时显示文字（默认只显示图标） */ showLabels?: boolean }) {
   return (

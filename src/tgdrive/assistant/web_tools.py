@@ -288,7 +288,7 @@ async def propose_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
                 items.append({"ticket": entry["ticket"], "name": entry["name"], "host": entry.get("source_host"),
                               "size": entry.get("size") or 0, "variant": entry.get("variant")})
             else:
-                items.append({"url": entry["url"], "referer": entry.get("referer"), "name": url_filename(entry["url"]),
+                items.append({"url": entry["url"], "referer": entry.get("referer"), "name": entry.get("name") or url_filename(entry["url"]),
                               "host": urlsplit(entry["url"]).hostname})
     else:
         if not isinstance(urls, list) or not all(isinstance(url, str) for url in urls):

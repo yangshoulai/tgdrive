@@ -19,7 +19,7 @@ let current: FilesBridge | null = null;
 export function filesBridge() { return current; }
 
 /** 等待文件页打开指定目录并加载完成（跳转后的新页面需要一点时间）。 */
-export async function waitForFiles(prefix: string, timeout = 5000): Promise<FilesBridge | null> {
+export async function waitForFiles(prefix: string, timeout = 30000): Promise<FilesBridge | null> {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (current && current.prefix === prefix && current.ready()) return current;

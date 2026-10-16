@@ -1,10 +1,10 @@
 /** 公开分享页：无需登录，只暴露文件名、大小和内容。带密码的分享先验证密码。 */
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { useCursorPage, useFilePageSize } from "./pagination";
+import { useDirectory, useRenderLimit, mergePublicFolderPages } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
-import { FilePreview, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, canPreview, getFileKind, kindLabel } from "./files";
-import { Avatar, Brand, Button, Checkbox, EmptyState, Field, FilterChips, Icon, Modal, Pagination, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
+import { FileFilters, FilePreview, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, canPreview, getFileKind, kindLabel, type EntryFilter } from "./files";
+import { Avatar, Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
 import { LoginPage } from "./shell";
 import { FolderPicker } from "./user/folders";
 
@@ -190,15 +190,15 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
   token: string; folder: api.PublicFolder; access: string | null; onPasswordRequired: () => void;
   saveButton: (request: SaveRequest) => ReactNode; onSaveSelected?: (paths: string[]) => void;
 }) {
-  const pageSize = useFilePageSize();
   const readPath = () => new URLSearchParams(window.location.search).get("path") ?? "";
   const [path, setPath] = useState(readPath);
   const [layout, setLayout] = useState<"list" | "grid">(() => localStorage.getItem("tgdrive:share-layout") === "grid" ? "grid" : "list");
   const [preview, setPreview] = useState<FolderPage["files"][number] | null>(null);
+  const [entryFilter, setEntryFilter] = useState<EntryFilter>("all");
   const [kind, setKind] = useState<api.KindFilter>("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const downloadTarget = useId(), downloadFrame = useRef<HTMLIFrameElement>(null);
-  useEffect(() => { setSelected(new Set()); }, [token, path, access, kind]);
+  useEffect(() => { setSelected(new Set()); }, [token, path, access, kind, entryFilter]);
   useEffect(() => { localStorage.setItem("tgdrive:share-layout", layout); }, [layout]);
   useEffect(() => {
     const pop = () => setPath(readPath());
@@ -207,15 +207,15 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
   }, []);
   const passwordRequired = useRef(onPasswordRequired);
   passwordRequired.current = onPasswordRequired;
-  const fetchPage = useCallback(async (cursor: string | null) => {
-    try { return await api.publicFolderList(token, path, cursor, access, pageSize.pageSize, kind); }
+  const fetchPage = useCallback(async (cursor: string | null, signal: AbortSignal) => {
+    try { return await api.publicFolderList(token, path, cursor, access, 200, kind, signal); }
     catch (reason) {
       if (reason instanceof api.ApiError && reason.code === "password_required") passwordRequired.current();
       throw new Error(reason instanceof api.ApiError && reason.status === 404 ? "这个文件夹不存在，可能已被分享者移动或删除。" : api.errorMessage(reason, "加载失败，请稍后重试"));
     }
-  }, [token, path, access, pageSize.pageSize, kind]);
-  const pagination = useCursorPage(fetchPage);
-  const page = pagination.page;
+  }, [token, path, access, kind]);
+  const pagination = useDirectory(fetchPage, mergePublicFolderPages);
+  const page = pagination.page && { ...pagination.page, files: entryFilter === "folder" ? [] : pagination.page.files, folders: entryFilter === "file" ? [] : pagination.page.folders };
   const error = pagination.error;
   const load = pagination.reload;
   function open(next: string) {
@@ -226,6 +226,10 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
   const crumbs = [{ label: folder.name, path: "" }, ...segments.map((label, index) => ({ label, path: `${segments.slice(0, index + 1).join("/")}/` }))];
   const empty = page !== null && page.folders.length === 0 && page.files.length === 0;
   const selectedOnPage = page?.files.filter(file => selected.has(file.path)).length ?? 0;
+  // 大文件夹分批挂载：先渲染文件夹，再按滚动追加文件。
+  const rendered = useRenderLimit<unknown>([...(page?.folders ?? []), ...(page?.files ?? [])], fetchPage);
+  const shownFolders = page?.folders.slice(0, rendered.visible.length) ?? [];
+  const shownFiles = page?.files.slice(0, Math.max(0, rendered.visible.length - shownFolders.length)) ?? [];
   function selectFiles(paths: string[], checked: boolean) {
     const next = new Set(selected);
     for (const path of paths) { if (checked) next.add(path); else next.delete(path); }
@@ -267,7 +271,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
         <div className="share-actions">
           <Button icon="link" onClick={() => void copyText(`${window.location.origin}${window.location.pathname}`, "分享链接已复制")}>复制链接</Button>
           {saveButton({ label: folder.name })}
-          <Button icon="download" disabled={!page || Boolean(error) || !kind && !page.files.length && !pagination.hasNext && !pagination.hasPrevious} title="打包下载当前目录的全部文件（不受类型筛选影响），不包含子文件夹" onClick={() => downloadFiles(true)}>下载全部文件</Button>
+          <Button icon="download" disabled={!page || Boolean(error) || !kind && !pagination.loadingMore && !pagination.page?.files.length} title="打包下载当前目录的全部文件（不受类型筛选影响），不包含子文件夹" onClick={() => downloadFiles(true)}>下载全部文件</Button>
         </div>
       </header>
       {crumbs.length > 1 && <nav className="share-crumbs" aria-label="文件夹路径">
@@ -280,24 +284,25 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
       </nav>}
       <div className="share-folder-toolbar">
         <div className="share-selection">
-          {layout === "grid" && Boolean(page?.files.length) && <label className="share-select-all"><Checkbox label="全选本页文件" checked={selectedOnPage === page!.files.length}
-            indeterminate={selectedOnPage > 0 && selectedOnPage < page!.files.length} onChange={checked => selectFiles(page!.files.map(file => file.path), checked)} /><span>全选本页</span></label>}
-          <span className="muted">{selected.size ? `已选择 ${selected.size} 个文件` : page ? `本页 ${page.folders.length + page.files.length} 项` : "文件夹内容"}</span>
+          {layout === "grid" && Boolean(page?.files.length) && <label className="share-select-all"><Checkbox label="全选当前文件" checked={selectedOnPage === page!.files.length}
+            indeterminate={selectedOnPage > 0 && selectedOnPage < page!.files.length} onChange={checked => selectFiles(page!.files.map(file => file.path), checked)} /><span>全选当前文件</span></label>}
+          <span className="muted">{selected.size ? `已选择 ${selected.size} 个文件` : page ? `共 ${page.folders.length + page.files.length} 项` : "文件夹内容"}</span>
           <Button size="sm" variant={selected.size ? "primary" : "secondary"} icon="download" disabled={!selected.size} title="将所选文件打包为 ZIP" onClick={() => downloadFiles()}>下载所选</Button>
           {onSaveSelected && selected.size > 0 && <Button size="sm" icon="folderPlus" title={`把所选文件保存到你的 ${BRAND}`} onClick={() => onSaveSelected([...selected])}>保存所选</Button>}
           {selected.size > 0 && <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>清空选择</Button>}
         </div>
         <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
       </div>
-      <div className="share-folder-filters"><FilterChips label="文件类型" value={kind} onChange={setKind} options={api.KIND_FILTERS} /></div>
+      <div className="share-folder-filters"><FileFilters entry={entryFilter} kind={kind} onEntryChange={setEntryFilter} onKindChange={setKind} /></div>
       {error ? <EmptyState icon="alert" title="无法打开" description={error} action={path ? <Button onClick={() => open("")}>回到根目录</Button> : <Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         : page === null ? <div className="share-folder-loading"><SkeletonRows rows={4} /></div>
-          : empty ? (kind ? <EmptyState icon="search" title={`这个文件夹里没有${api.KIND_FILTERS.find(item => item.value === kind)?.label}`} description="类型筛选只看当前文件夹，不包含子文件夹。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
-            : <EmptyState icon="folder" title="这个文件夹是空的" description="分享者之后添加的文件会显示在这里。" />)
+          : empty ? (entryFilter === "folder" ? <EmptyState icon="folder" title="这个目录没有子文件夹" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} /> : kind ? <EmptyState icon="search" title={`这个文件夹里没有${api.KIND_FILTERS.find(item => item.value === kind)?.label}`} description="类型筛选只看当前文件夹，不包含子文件夹。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
+            : entryFilter === "file" ? <EmptyState icon="file" title="这个目录没有文件" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
+              : <EmptyState icon="folder" title="这个文件夹是空的" description="分享者之后添加的文件会显示在这里。" />)
             : layout === "list" ? (
               <div className="data-table public-folder-table" role="table" aria-label="文件夹内容">
                 <div className="data-row data-head" role="row">
-                  <span role="columnheader" className="cell-check"><Checkbox label="全选本页文件" checked={page.files.length > 0 && selectedOnPage === page.files.length}
+                  <span role="columnheader" className="cell-check"><Checkbox label="全选当前文件" checked={page.files.length > 0 && selectedOnPage === page.files.length}
                     indeterminate={selectedOnPage > 0 && selectedOnPage < page.files.length} onChange={checked => selectFiles(page.files.map(file => file.path), checked)} /></span>
                   <span role="columnheader" className="cell-name">名称</span>
                   <span role="columnheader" className="cell-type">类型</span>
@@ -305,7 +310,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                   <span role="columnheader" className="cell-date">修改时间</span>
                   <span role="columnheader" className="cell-actions"><span className="sr-only">操作</span></span>
                 </div>
-                {page.folders.map(item => (
+                {shownFolders.map(item => (
                   <div key={item.path} role="row" className="data-row is-clickable" onClick={() => open(item.path)}>
                     <span role="cell" className="cell-check" />
                     <span role="cell" className="cell-name"><FileTile kind="folder" /><span className="public-file-details">
@@ -318,7 +323,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                     <span role="cell" className="cell-actions" />
                   </div>
                 ))}
-                {page.files.map(item => {
+                {shownFiles.map(item => {
                   const kind = getFileKind(item.content_type, item.name);
                   const previewable = canPreview(kind);
                   const download = api.publicFolderFile(token, item.path, true, access);
@@ -342,7 +347,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
               </div>
             ) : (
               <div className="file-grid share-grid">
-                {page.folders.map(item => (
+                {shownFolders.map(item => (
                   <div key={item.path} className="grid-card" onClick={() => open(item.path)}>
                     <div className="grid-thumb"><FolderThumbnail previews={(item.previews ?? []).map(file => ({ ...file, key: file.path,
                       url: api.publicThumbnail(api.publicFolderFile(token, file.path, false, access)) }))} /></div>
@@ -352,7 +357,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                     </div>
                   </div>
                 ))}
-                {page.files.map(item => {
+                {shownFiles.map(item => {
                   const kind = getFileKind(item.content_type, item.name);
                   const content = api.publicFolderFile(token, item.path, false, access);
                   const download = api.publicFolderFile(token, item.path, true, access);
@@ -372,7 +377,8 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                 })}
               </div>
             )}
-      <div className="panel-more"><Pagination {...pagination} {...pageSize} /></div>
+      {rendered.more && !error && <div ref={rendered.sentinel} className="list-sentinel" aria-hidden="true" />}
+      {pagination.loadingMore && <p className="muted" role="status">正在读取其余项目…</p>}
       <iframe ref={downloadFrame} name={downloadTarget} title="文件下载响应" hidden onLoad={downloadResponse} />
       {preview && (
         <PreviewModal file={{ ...preview, key: preview.path }} onClose={() => setPreview(null)}

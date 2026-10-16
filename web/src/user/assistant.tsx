@@ -9,6 +9,7 @@ import { AssistantMark, Badge, Button, EmptyState, Icon, IconButton, Menu, Modal
 import type { PageImport } from "./page-import";
 import { Thread, type LiveRun } from "./assistant-thread";
 import { filesBridge, waitForFiles } from "./assistant-bridge";
+import { assistantEnvironment } from "./assistant-environment";
 
 const WIDTH_KEY = "tessera-assistant-width";
 const MIN_WIDTH = 360, MAX_WIDTH = 720;
@@ -257,7 +258,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         snapshotId = (await ai.uploadSnapshot(current.conversation.id, importedPages)).snapshot_id;
       }
       const result = await ai.sendMessage(current.conversation.id, { text: message, model_id: modelId ?? undefined, location: locationKey, view: location.view,
-        scope: current === detail ? scopeChoice : undefined, snapshot_id: snapshotId });
+        scope: current === detail ? scopeChoice : undefined, snapshot_id: snapshotId, environment: assistantEnvironment() });
       if (version !== selection.current) return;
       if (snapshotId) onPageImportDone?.();
       setDraft(""); setScopeChoice("conversation");

@@ -1254,7 +1254,7 @@ class TgDriveASGI(StaticFiles):
                                                    archived=query.get("archived", ["0"])[0] in ("1", "true")), no_store
         if route == "/conversations" and method == "POST":
             return 201, service.create_conversation(token, csrf, payload), no_store
-        match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})(?:/(update|delete|messages))?", route)
+        match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})(?:/(update|delete|messages|share-link))?", route)
         if match and match[2] is None and method == "GET":
             return 200, service.conversation(token, match[1]), no_store
         if match and match[2] == "update" and method == "POST":
@@ -1264,6 +1264,8 @@ class TgDriveASGI(StaticFiles):
             return 204, None, {}
         if match and match[2] == "messages" and method == "POST":
             return 201, await service.send(token, csrf, match[1], payload), no_store
+        if match and match[2] == "share-link" and method == "GET":
+            return 200, service.share_link(token, match[1], query.get("path", [""])[0]), no_store
         match = re.fullmatch(r"/runs/([A-Za-z0-9_-]{4,40})/(stop|client-results)", route)
         if match and method == "POST":
             if match[2] == "stop":

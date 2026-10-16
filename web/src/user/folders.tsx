@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import * as api from "../api";
 import { FileTile, baseName } from "../files";
-import { useCursorPage } from "../pagination";
-import { Button, Field, Icon, Pagination, SkeletonRows } from "../ui";
+import { useDirectory, mergeFolderPages } from "../pagination";
+import { Button, Field, Icon, SkeletonRows } from "../ui";
 
-/** 上传、新建与移动共用的位置浏览器；每次只读取当前目录的一页子目录。 */
+/** 上传、新建与移动共用的位置浏览器；自动列完当前目录的全部子目录。 */
 export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate = false }: {
   value: string; onChange: (value: string) => void; blocked?: (path: string) => boolean; onReady?: (ready: boolean) => void; allowPrivate?: boolean;
 }) {
   const id = useId();
   const root = api.isPrivatePath(value) ? api.PRIVATE_PREFIX : "";
   const rootName = root ? "私密空间" : "我的文件";
-  const fetchPage = useCallback((cursor: string | null) => api.listFolders(value, cursor), [value]);
-  const pagination = useCursorPage(fetchPage);
+  const fetchPage = useCallback((cursor: string | null, signal: AbortSignal) => api.listFolders(value, cursor, signal), [value]);
+  const pagination = useDirectory(fetchPage, mergeFolderPages);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -34,7 +34,7 @@ export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate =
     }
   }, [creating, id]);
   const cancelCreate = () => { returnToCreate.current = true; setCreating(false); setName(""); setError(""); };
-  useEffect(() => { onReady?.(!creating && !busy && !pagination.loading && !pagination.error && pagination.page !== null); }, [creating, busy, pagination.loading, pagination.error, pagination.page, onReady]);
+  useEffect(() => { onReady?.(!creating && !busy && !pagination.loading && !pagination.loadingMore && !pagination.error && pagination.page !== null); }, [creating, busy, pagination.loading, pagination.loadingMore, pagination.error, pagination.page, onReady]);
   useEffect(() => { setCreating(false); setName(""); setError(""); }, [value]);
   const segments = value.slice(root.length).split("/").filter(Boolean);
   const open = (path: string) => { if (path !== value) onChange(path); };
@@ -83,7 +83,7 @@ export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate =
             <FileTile kind="folder" /><span className="move-name">{baseName(path)}</span><Icon name="chevronRight" size={16} />
           </button>)}
     </div>
-    {(pagination.hasPrevious || pagination.hasNext) && <Pagination {...pagination} />}
+    {pagination.loadingMore && <p className="muted" role="status">正在读取其余文件夹…</p>}
     <p className="muted folder-destination">已选位置：{api.privatePathLabel(value)}</p>
   </div>;
 }

@@ -16,12 +16,14 @@ import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from ..api import normalize_user_path
 from ..errors import NotFoundError
 from ..filekinds import KIND_GROUPS, kind_clause
 from ..objects import ObjectService, Scope
 from .providers import ToolDef
+from .knowledge import HELP
 
 END = "\U0010ffff"
 KIND_LABELS = {"image": "图片", "video": "视频", "audio": "音频", "document": "文档", "text": "文本与代码", "archive": "压缩包"}
@@ -65,6 +67,9 @@ class ToolContext:
     client: Callable[[str, dict], Awaitable[dict]] | None = None
     # 标记本轮已读取不可信的外部内容（文本文件、网页、浏览器页面）：之后的修改即使在完全访问下也需要确认
     taint: Callable[[str], None] | None = None
+    public_config: dict = field(default_factory=dict)
+    environment: dict = field(default_factory=dict)
+    redact: Callable[[str], str] | None = None
 
     @property
     def db(self):
@@ -215,13 +220,28 @@ CURSOR = {"type": "string", "description": "上一页返回的 cursor"}
 # ---------- 上下文 ----------
 
 @tool("get_context", "读取上下文", "context", "read",
-      "返回当前作用域、用户所在页面、当前时间与时区、存储用量。", fixed=True)
+      "返回当前作用域、用户所在页面、当前时间与时区、存储用量、公共访问地址与客户端环境。", fixed=True)
 async def get_context(ctx: ToolContext, args: dict) -> ToolOutput:
-    now = datetime.now().astimezone()
+    now = datetime.now(ZoneInfo(ctx.environment["timezone"])) if ctx.environment.get("timezone") else datetime.now().astimezone()
     return ToolOutput({"scope": ctx.display(ctx.scope_root), "view": ctx.view, "location": ctx.display(ctx.location),
                        "now": now.isoformat(timespec="seconds"), "timezone": str(now.tzinfo),
-                       "used_bytes": ctx.quota.get("used_bytes"), "quota_bytes": ctx.quota.get("quota_bytes")},
+                       "used_bytes": ctx.quota.get("used_bytes"), "quota_bytes": ctx.quota.get("quota_bytes"),
+                       "public_config": ctx.public_config, "environment": {"agent_runtime": "server", "client_reported": ctx.environment}},
                       f"作用域 {ctx.display(ctx.scope_root)}")
+
+
+@tool("get_system_help", "系统使用指南", "context", "read",
+      "读取 Tessera 的用户使用说明与公共访问地址：通行密钥、文件与私密空间、分享、HTTP API、S3、离线下载、文件助手。"
+      "回答使用方法与接口问题时参考它；不提供账号凭据、管理员文档或部署信息。",
+      {"topic": {"type": "string", "enum": list(HELP), "description": "要查询的主题，默认 overview"}}, fixed=True)
+async def get_system_help(ctx: ToolContext, args: dict) -> ToolOutput:
+    topic = args.get("topic", "overview")
+    if not isinstance(topic, str) or topic not in HELP:
+        raise ToolError("未知的帮助主题")
+    title, path, content = HELP[topic]
+    site = ctx.public_config.get("public_base_url") or ""
+    return ToolOutput({"topic": topic, "title": title, "content": content, "documentation": site + path,
+                       "public_config": ctx.public_config, "topics": list(HELP)}, title)
 
 
 @tool("request_scope", "请求切换作用域", "context", "scope",

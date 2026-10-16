@@ -352,6 +352,7 @@ function ScopeCard({ event, action, running, onScope }: { event: Extract<ai.Tool
 
 function BrowserCard({ event }: { event: ai.BrowserEvent }) {
   const [done, setDone] = useState(false);
+  if (event.action === "share") return <ShareBrowserCard event={event} />;
   if (event.action === "download") {
     const keys = event.items.map(item => item.path);
     const single = event.items.length === 1 && !event.items[0].folder;
@@ -374,6 +375,28 @@ function BrowserCard({ event }: { event: ai.BrowserEvent }) {
     <pre className="ai-copy-text">{event.text}</pre>
     <footer className="ai-card-foot"><span>{done ? "已复制到剪贴板" : `${event.text.length.toLocaleString("zh-CN")} 个字符`}</span>
       <Button size="sm" variant="primary" icon={done ? "check" : "copy"} onClick={() => void copyText(event.text).then(ok => setDone(ok))}>复制</Button></footer>
+  </section>;
+}
+
+function ShareBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action: "share" }> }) {
+  const [href, setHref] = useState("");
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setHref(""); setError("");
+    void ai.shareLink(event.conversation_id, event.path).then(result => {
+      if (active) setHref(api.publicLinks(result.token, baseName(event.path), result.public_base_url).page);
+    }).catch(reason => { if (active) setError(api.errorMessage(reason, "分享链接读取失败")); });
+    return () => { active = false; };
+  }, [event.conversation_id, event.path, retry]);
+  return <section className="ai-card ai-browser">
+    <CardHead icon="external" title={`打开“${baseName(event.path)}”的分享页`} subtitle="已有公开分享" />
+    {error && <p role="alert">{error}</p>}
+    <footer className="ai-card-foot"><span>在新标签页中打开</span>
+      {href ? <a className="btn btn-primary btn-sm" href={href} target="_blank" rel="noopener noreferrer"><Icon name="external" size={14} />打开分享页</a>
+        : <Button size="sm" loading={!error} disabled={!error} onClick={() => setRetry(value => value + 1)}>{error ? "重试" : "读取分享链接"}</Button>}
+    </footer>
   </section>;
 }
 

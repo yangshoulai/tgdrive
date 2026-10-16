@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type MouseEvent, type ReactNode } from "react";
-import { useCursorPage, useFilePageSize } from "../pagination";
+import { useDirectory, useRenderLimit, mergeFilePages } from "../pagination";
 import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
 
-import { FileThumbnail, FileTile, FileVisual, ShareDialog, baseName, getFileKind, kindLabel, parentPath } from "../files";
+import { FileFilters, FileThumbnail, FileTile, FileVisual, ShareDialog, baseName, getFileKind, kindLabel, parentPath, type EntryFilter } from "../files";
 import { saveThumbnails, thumbnailsFromImage, thumbnailSource, useThumbnailBackfill } from "../thumbnails";
 
-import { Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Pagination, FilterChips, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
+import { Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 
 import { UploadDialog, type UploadQueue } from "./uploads";
 import { PrivateTransferDialog } from "./private-access";
@@ -29,6 +29,8 @@ const DELETE_KEY = IS_MAC ? "⌘⌫" : "Del";
 const LABELLED_KINDS = new Set(["pdf", "document", "spreadsheet", "presentation"]);
 
 const KIND_FILTERS = api.KIND_FILTERS;
+const SEARCH_PAGES = 5;
+const COLLATOR = new Intl.Collator("zh-CN", { numeric: true });
 
 export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision, onPlayback, incoming, onIncomingTaken }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number; onPlayback?: (state: PreviewPlayback) => void;
   /** 外部转交来的待上传文件（抓取脚本转交到私密空间），打开上传对话框确认后交给上传队列。 */
@@ -37,10 +39,10 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const notify = usePrivateToast(privateSpace);
   const root = privateSpace ? api.PRIVATE_PREFIX : "";
   const rootName = privateSpace ? "私密空间" : "我的文件";
-  const pageSize = useFilePageSize();
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "public">("all");
+  const [entryFilter, setEntryFilter] = useState<EntryFilter>("all");
   const [kind, setKind] = useState<api.KindFilter>("");
   const [layout, setLayout] = useState<"list" | "grid">(() => (localStorage.getItem("tgdrive:layout") as "list" | "grid") || "list");
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "name", desc: false });
@@ -68,14 +70,17 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const name = prefix !== root ? baseName(prefix) : rootName;
   useDocumentTitle(`${query ? `搜索“${query}”` : name} · ${BRAND}`);
 
-  const fetchPage = useCallback((cursor: string | null) => query
-    ? api.searchFiles(query, cursor ?? "", filter === "public", pageSize.pageSize, root, kind)
-    : api.listFiles(prefix, cursor, filter === "public", pageSize.pageSize, kind), [prefix, query, filter, kind, pageSize.pageSize, root]);
-  const pagination = useCursorPage(fetchPage);
+  const fetchPage = useCallback((cursor: string | null, signal: AbortSignal) => query
+    ? api.searchFiles(query, cursor ?? "", filter === "public", 200, root, kind, signal)
+    : api.listFiles(prefix, cursor, filter === "public", 200, kind, signal), [prefix, query, filter, kind, root]);
+  // 目录连续展示全部项目；搜索最多读取 SEARCH_PAGES 页，结果过多时提示细化关键词。
+  const pagination = useDirectory(fetchPage, mergeFilePages, query ? SEARCH_PAGES : Infinity);
   const load = pagination.reload;
+  /** 修改后的原地刷新：保留列表、滚动位置与选择，读完后整体替换；失败时保留原列表并提示。 */
+  const refreshList = useCallback(() => pagination.refresh().then(message => { if (message) notify.error(message); }), [pagination.refresh, notify]);
   useEffect(() => {
-    if (lastUploadRevision.current !== uploadRevision) { lastUploadRevision.current = uploadRevision; void load(); }
-  }, [uploadRevision, load]);
+    if (lastUploadRevision.current !== uploadRevision) { lastUploadRevision.current = uploadRevision; void refreshList(); }
+  }, [uploadRevision, refreshList]);
   const loading = pagination.loading;
   const loadError = pagination.error;
   const files = useMemo(() => (pagination.page?.objects ?? []).filter(item => !item.key.endsWith("/")), [pagination.page]);
@@ -87,7 +92,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, thumbnail_versions: undefined, has_thumbnail: thumbnails.includes("thumb") } : item));
   const thumbnailBackfill = useThumbnailBackfill(files, key => api.contentUrl(key), setThumbnails);
   const setPublicFolders = (update: (items: Record<string, api.FileItem>) => Record<string, api.FileItem>) => pagination.setPage(current => current && { ...current, public_folders: update(current.public_folders ?? {}) });
-  useEffect(() => { setSelected(new Set()); }, [fetchPage, pagination.number]);
+  useEffect(() => { setSelected(new Set()); }, [fetchPage, entryFilter]);
   useEffect(() => { setSearch(""); setQuery(""); }, [prefix]);
   useEffect(() => { localStorage.setItem("tgdrive:layout", layout); }, [layout]);
   useEffect(() => {
@@ -103,24 +108,34 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
 
   const entries = useMemo<Entry[]>(() => {
     const direction = sort.desc ? -1 : 1;
+    // 名称与类型先算好再排序：大目录有数千项，比较函数里重复解析会拖慢每次提交。
     const fileEntries = files
       .filter(file => filter === "all" || file.public_token)
+      .map(file => ({ file, name: baseName(file.key), type: sort.key === "type" ? kindLabel(getFileKind(file.content_type, file.key)) : "" }))
       .sort((a, b) => {
-        const name = baseName(a.key).localeCompare(baseName(b.key), "zh-CN", { numeric: true });
-        const primary = sort.key === "size" ? a.size - b.size : sort.key === "modified" ? a.modified_at - b.modified_at
-          : sort.key === "type" ? kindLabel(getFileKind(a.content_type, a.key)).localeCompare(kindLabel(getFileKind(b.content_type, b.key)), "zh-CN") : name;
+        const name = COLLATOR.compare(a.name, b.name);
+        const primary = sort.key === "size" ? a.file.size - b.file.size : sort.key === "modified" ? a.file.modified_at - b.file.modified_at
+          : sort.key === "type" ? COLLATOR.compare(a.type, b.type) : name;
         return direction * (primary || name);
       })
-      .map(file => ({ kind: "file" as const, key: file.key, file }));
+      .map(({ file }) => ({ kind: "file" as const, key: file.key, file }));
     const folderEntries = [...folders].filter(key => filter === "all" || publicFolders[key])
       .sort((a, b) => sort.key === "size"
-        ? direction * ((folderSizes[a] ?? 0) - (folderSizes[b] ?? 0)) || a.localeCompare(b, "zh-CN", { numeric: true })
-        : (sort.key === "name" ? direction : 1) * a.localeCompare(b, "zh-CN", { numeric: true }))
+        ? direction * ((folderSizes[a] ?? 0) - (folderSizes[b] ?? 0)) || COLLATOR.compare(a, b)
+        : (sort.key === "name" ? direction : 1) * COLLATOR.compare(a, b))
       .map(key => ({ kind: "folder" as const, key, size: folderSizes[key] }));
-    return [...folderEntries, ...fileEntries];
-  }, [files, folders, publicFolders, folderSizes, filter, sort]);
+    return [...(entryFilter === "file" ? [] : folderEntries), ...(entryFilter === "folder" ? [] : fileEntries)];
+  }, [files, folders, publicFolders, folderSizes, filter, sort, entryFilter]);
+  useEffect(() => {
+    if (loading || pagination.loadingMore || loadError) return;
+    const keys = new Set(entries.map(entry => entry.key));
+    setSelected(current => {
+      const next = new Set([...current].filter(key => keys.has(key)));
+      return next.size === current.size ? current : next;
+    });
+  }, [entries, loading, pagination.loadingMore, loadError]);
   function openPreview(file: api.FileItem) {
-    // 打开文件时记录本页顺序作为播放列表；预览挂在应用外壳上，切换页面后继续播放。
+    // 打开文件时记录当前结果顺序作为播放列表；预览挂在应用外壳上，切换页面后继续播放。
     preview.open({ file, url: api.contentUrl(file.key), downloadUrl: api.contentUrl(file.key, true), assetUrl: key => api.contentUrl(key),
       playlistFiles: entries.flatMap(entry => entry.kind === "file" ? [entry.file] : []),
       poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file), onPlaybackActivity: onPlayback,
@@ -137,7 +152,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   }
   // 文件助手的浏览器工具读取当前目录、可见条目与选中状态（私密空间不登记）。
   useFilesBridge(!privateSpace && !query, prefix, {
-    ready: () => !loading && pagination.page !== null,
+    ready: () => !loading && !pagination.loadingMore && !loadError && pagination.page !== null,
     visible: () => entries.slice(0, 200).map(entry => ({ key: entry.key, size: entry.kind === "file" ? entry.file.size : entry.size })),
     total: () => entries.length,
     selected: () => [...selected],
@@ -148,6 +163,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const folderItem = (key: string): api.FileItem => publicFolders[key] ?? { key, size: 0, etag: "", content_type: "application/x-directory", modified_at: 0 };
   const selectedEntries = entries.filter(entry => selected.has(entry.key));
   const selectedFiles = selectedEntries.filter((entry): entry is Extract<Entry, { kind: "file" }> => entry.kind === "file");
+  const downloadLimit = () => notify.error("一次最多打包 200 项，请减少选择，或直接下载整个文件夹");
 
   function toggleSelect(key: string, value: boolean) {
     setSelected(current => { const next = new Set(current); if (value) next.add(key); else next.delete(key); return next; });
@@ -179,11 +195,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     try {
       const { items } = await api.moveToTrash(targets.map(target => target.key));
       setSelected(new Set());
-      await load(); onChanged();
+      await refreshList(); onChanged();
       notify.success(targets.length === 1 ? `已将“${baseName(targets[0].key)}”移到回收站` : `已将 ${targets.length} 项移到回收站`, {
         label: "撤销",
         onClick: () => void api.restoreTrash(items.map(item => item.id), root)
-          .then(() => { notify.success("已撤销删除"); return load(); }).then(onChanged)
+          .then(() => { notify.success("已撤销删除"); return refreshList(); }).then(onChanged)
           .catch(reason => notify.error(api.errorMessage(reason, "撤销失败，请稍后重试"))),
       });
     } catch (reason) { notify.error(api.errorMessage(reason, "删除失败，请稍后重试")); }
@@ -210,7 +226,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     else if (skippedFiles) notify.error(`“${destName}”中已有同名文件，未移动任何项目`);
     if (failures.length) notify.error(failures.length === 1 ? failures[0] : `${failures.length} 项移动失败：${failures[0]}`);
     setSelected(new Set());
-    await load();
+    await refreshList();
   }
   function dragProps(entry: Entry) {
     return {
@@ -293,10 +309,22 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const downloadUrl = (targets: Entry[]) => targets.length === 1 && targets[0].kind === "file"
     ? api.contentUrl(targets[0].key, true) : api.archiveUrl(targets.map(target => target.key));
   useEffect(() => { setCursor(current => current && entries.some(entry => entry.key === current) ? current : null); }, [entries]);
+  const rendered = useRenderLimit(entries, fetchPage);
+  // 焦点项可能还没挂载（End、跨批移动）：先放宽渲染范围，等它出现在 DOM 后只滚动一次，之后滚动加载不再拉回焦点。
+  const pendingScroll = useRef<string | null>(null);
   useEffect(() => {
     if (!cursor) return;
-    surface.current?.querySelector(`[data-key="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
+    pendingScroll.current = cursor;
+    rendered.reveal(entries.findIndex(entry => entry.key === cursor));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cursor]);
+  useEffect(() => {
+    const key = pendingScroll.current;
+    const node = key && surface.current?.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (!node) return;
+    pendingScroll.current = null;
+    node.scrollIntoView({ block: "nearest" });
+  }, [cursor, rendered.visible]);
 
   /** 网格中按位置找上下左右相邻的项目（文件夹区和文件区是两个网格，按几何位置跨区移动）。 */
   function neighbour(key: string | null, direction: "up" | "down" | "left" | "right") {
@@ -334,8 +362,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       if (query || prefix === root) handled = false;
       else onOpenFolder(parentPath(prefix));
     } else if ((event.key === "Home" || event.key === "End") && !mod && entries.length) {
-      const items = surface.current?.querySelectorAll<HTMLElement>("[data-key]");
-      const next = (event.key === "Home" ? items?.[0] : items?.[items.length - 1])?.dataset.key ?? null;
+      const next = (event.key === "Home" ? entries[0] : entries[entries.length - 1]).key;
       if (next && event.shiftKey) setSelected(value => new Set([...value, ...(cursor ? [cursor] : []), next]));
       setCursor(next);
     } else if (event.key === "/" && !mod) {
@@ -378,7 +405,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   function contextItems(key: string): MenuItem[] {
     if (selected.size > 1 && selected.has(key)) {
       return [
-        { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", onSelect: () => undefined, href: downloadUrl(selectedEntries) },
+        { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", onSelect: selectedEntries.length > 200 ? downloadLimit : () => undefined,
+          href: selectedEntries.length > 200 ? undefined : downloadUrl(selectedEntries) },
         { label: "移动到…", icon: "move", onSelect: () => setMoving(selectedEntries) },
         { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring(selectedEntries) },
         { label: `删除 ${selected.size} 项`, icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash(selectedEntries) },
@@ -428,7 +456,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         <div className="toolbar selection-bar" role="toolbar" aria-label="批量操作">
           <span className="selection-count">已选择 {selected.size} 项</span>
           <div className="toolbar-actions">
-            <a className="btn btn-secondary btn-sm" href={downloadUrl(selectedEntries)}><Icon name="download" size={15} /><span>下载</span></a>
+            {selectedEntries.length > 200 ? <Button size="sm" icon="download" onClick={downloadLimit}>下载</Button>
+              : <a className="btn btn-secondary btn-sm" href={downloadUrl(selectedEntries)}><Icon name="download" size={15} /><span>下载</span></a>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
             <Button size="sm" icon="move" onClick={() => setMoving(selectedEntries)}>移动</Button>
@@ -442,36 +471,38 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder={privateSpace ? "搜索私密空间，按回车" : "搜索全部文件，按回车"} label="搜索文件" />
           <div className="toolbar-actions">
             {!privateSpace && <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />}
-            <label className={`mobile-file-sort${layout === "grid" ? " is-grid-sort" : ""}`}><span className="sr-only">本页排序</span><select aria-label="本页排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
+            <label className={`mobile-file-sort${layout === "grid" ? " is-grid-sort" : ""}`}><span className="sr-only">排序</span><select aria-label="排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
               const [key, direction] = event.target.value.split(":"); setSort({ key: key as SortKey, desc: direction === "desc" });
             }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="type:asc">类型升序</option><option value="type:desc">类型降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>
-            <IconButton icon="refresh" label="刷新" variant="secondary" spinning={pagination.refreshing} disabled={loading} onClick={() => void pagination.refresh().then(message => { if (message) notify.error(message); })} />
+            <IconButton icon="refresh" label="刷新" variant="secondary" spinning={pagination.refreshing} disabled={loading} onClick={() => void refreshList()} />
             <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
           </div>
         </div>
       )}
 
-      <FilterChips label="文件类型" value={kind} onChange={setKind} options={KIND_FILTERS} />
+      <FileFilters entry={entryFilter} kind={kind} onEntryChange={setEntryFilter} onKindChange={setKind} />
 
       <section ref={surface} className={`file-surface${layout === "grid" && !loading && !loadError && entries.length > 0 ? " is-grid" : ""}${dragging ? " is-dragging" : ""}`} aria-label="文件列表">
         {loading ? <SkeletonRows rows={6} /> : loadError ? (
           <EmptyState icon="alert" title="文件列表加载失败" description={loadError} action={<Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         ) : entries.length === 0 ? (
-          kind && !query ? <EmptyState icon="search" title={`${filter === "public" ? "这个文件夹里没有公开的" : "这个文件夹里没有"}${KIND_FILTERS.find(item => item.value === kind)?.label}`} description="类型筛选只看当前文件夹，不包含子文件夹；搜索时会在全部文件中按类型查找。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
+          entryFilter === "folder" ? <EmptyState icon="folder" title="没有符合条件的文件夹" description={query ? "搜索目前按文件名查找文件；清除搜索可浏览当前目录的文件夹。" : "当前目录没有符合筛选条件的文件夹。"} action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
+          : entryFilter === "file" && !kind && !query ? <EmptyState icon="file" title="这个目录没有符合条件的文件" description="文件筛选只看当前目录，不包含子文件夹中的内容。" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
+          : kind && !query ? <EmptyState icon="search" title={`${filter === "public" ? "这个文件夹里没有公开的" : "这个文件夹里没有"}${KIND_FILTERS.find(item => item.value === kind)?.label}`} description="类型筛选只看当前文件夹，不包含子文件夹；搜索时会在全部文件中按类型查找。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
           : query ? <EmptyState icon="search" title={`没有找到包含“${query}”的${kind ? KIND_FILTERS.find(item => item.value === kind)?.label : "文件"}`} description="换个关键词，或检查拼写。" action={<Button onClick={() => { setSearch(""); setQuery(""); }}>清除搜索</Button>} />
             : filter === "public" ? <EmptyState icon="globe" title="这个文件夹里没有公开内容" description="在文件或文件夹的菜单中选择“公开分享”，即可生成任何人可访问的链接。" />
               : <EmptyState icon="upload" title={prefix ? "这个文件夹是空的" : "上传你的第一个文件"} description="把文件拖到这里，或点击上传按钮。" action={<Button icon="upload" onClick={() => fileInput.current?.click()}>选择文件</Button>} />
         ) : layout === "list" ? (
           <div className="data-table file-table" role="table" aria-label="文件">
             <div className="data-row data-head" role="row">
-              <span role="columnheader" className="cell-check"><Checkbox label="全选本页" checked={allSelected} indeterminate={selected.size > 0 && !allSelected} onChange={value => setSelected(value ? new Set(entries.map(entry => entry.key)) : new Set())} /></span>
+              <span role="columnheader" className="cell-check"><Checkbox label="全选当前结果" checked={allSelected} indeterminate={selected.size > 0 && !allSelected} onChange={value => setSelected(value ? new Set(entries.map(entry => entry.key)) : new Set())} /></span>
               <SortHeader label="名称" column="name" sort={sort} onSort={setSort} className="cell-name" />
               <SortHeader label="类型" column="type" sort={sort} onSort={setSort} className="cell-type" />
               <SortHeader label="大小" column="size" sort={sort} onSort={setSort} className="cell-size" />
               <SortHeader label="修改时间" column="modified" sort={sort} onSort={setSort} className="cell-date" />
               <span role="columnheader" className="cell-actions"><span className="sr-only">操作</span></span>
             </div>
-            {entries.map(entry => entry.kind === "folder" ? (
+            {rendered.visible.map(entry => entry.kind === "folder" ? (
               <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}${cursorClass(entry.key)}${dropClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} {...dropProps(entry.key)} onClick={() => onOpenFolder(entry.key)}>
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
                 <span role="cell" className="cell-name"><FileTile kind="folder" /><span className="name-stack"><button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
@@ -509,8 +540,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           </div>
         ) : (() => {
           // 网格：文件夹是一排紧凑的横条，文件才用缩略图卡片，避免文件夹占满一屏的大空卡片。
-          const folderEntries = entries.filter((entry): entry is Extract<Entry, { kind: "folder" }> => entry.kind === "folder");
-          const fileEntries = entries.filter((entry): entry is Extract<Entry, { kind: "file" }> => entry.kind === "file");
+          const folderEntries = rendered.visible.filter((entry): entry is Extract<Entry, { kind: "folder" }> => entry.kind === "folder");
+          const fileEntries = rendered.visible.filter((entry): entry is Extract<Entry, { kind: "file" }> => entry.kind === "file");
           const both = folderEntries.length > 0 && fileEntries.length > 0;
           return <div className="grid-layout">
             {folderEntries.length > 0 && <div className="grid-section">
@@ -566,13 +597,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             </div>}
           </div>;
         })()}
+        {rendered.more && !loading && !loadError && <div ref={rendered.sentinel} className="list-sentinel" aria-hidden="true" />}
         {dragging && <div className="drop-overlay" aria-hidden="true"><Icon name="upload" size={28} /><strong>松开以上传到“{name}”</strong></div>}
       </section>
 
       <footer className="list-footer">
-        <span>{loading ? "正在加载" : [folders.length && `${folders.length} 个文件夹`, files.length && `${files.length} 个文件`].filter(Boolean).join(" · ") || (kind || filter === "public" ? "没有符合条件的项目" : "空文件夹")}</span>
+        <span>{loading ? "正在加载" : [entries.some(item => item.kind === "folder") && `${entries.filter(item => item.kind === "folder").length} 个文件夹`, entries.some(item => item.kind === "file") && `${entries.filter(item => item.kind === "file").length} 个文件`].filter(Boolean).join(" · ") || (kind || entryFilter !== "all" || filter === "public" ? "没有符合条件的项目" : "空文件夹")}</span>
         <span className="list-footer-end">
-          <Pagination {...pagination} {...pageSize} />
+          {pagination.loadingMore ? <span role="status">正在读取其余项目…</span>
+            : pagination.truncated && <span role="status">仅显示前 {SEARCH_PAGES * 200} 个结果，请细化关键词</span>}
           <button type="button" className="link-button shortcut-hint" onClick={() => setShortcutsOpen(true)} aria-keyshortcuts="?"><Icon name="keyboard" size={15} /><span>快捷键</span></button>
         </span>
       </footer>
@@ -586,7 +619,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           [<kbd>↵</kbd>, "打开文件或文件夹"],
           [<kbd>{IS_MAC ? "⌘ ↑" : "Alt ↑"}</kbd>, "返回上一级文件夹"],
           [<kbd>空格</kbd>, "选中或取消选中"],
-          [<kbd>{IS_MAC ? "⌘" : "Ctrl"} A</kbd>, "全选本页"],
+          [<kbd>{IS_MAC ? "⌘" : "Ctrl"} A</kbd>, "全选当前结果"],
           ...(!privateSpace ? [[<kbd>S</kbd>, "公开分享或管理分享"] as [ReactNode, ReactNode]] : []),
           [<kbd>F2</kbd>, "重命名"],
           [<kbd>{DELETE_KEY}</kbd>, "移到回收站"],
@@ -598,7 +631,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       {pendingUpload && <UploadDialog files={pendingUpload} destination={prefix} onClose={() => setPendingUpload(null)}
         onStart={(list, isPublic, destination) => { setPendingUpload(null); uploads.enqueue(list.map(file => ({ file, path: `${destination}${file.name}`, isPublic }))); }} />}
       {folderOpen && <NameDialog title="新建文件夹" label="文件夹名称" confirm="创建" location={prefix} onClose={() => setFolderOpen(false)}
-        onSubmit={async (value, destination) => { await api.makeFolder(`${destination}${value}`); notify.success(`已创建文件夹“${value}”`); setFolderOpen(false); await load(); }} />}
+        onSubmit={async (value, destination) => { await api.makeFolder(`${destination}${value}`); notify.success(`已创建文件夹“${value}”`); setFolderOpen(false); await refreshList(); }} />}
       {renaming && <NameDialog privateSpace={privateSpace} title={renaming.kind === "folder" ? "重命名文件夹" : "重命名文件"} label="新名称" confirm="重命名" initial={baseName(renaming.key)} onClose={() => setRenaming(null)}
         onSubmit={async value => {
           const folder = renaming.kind === "folder";
@@ -608,11 +641,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           if (entries.some(entry => entry.key === target)) throw new Error("这个位置已有同名项目");
           const result = await api.moveFile(renaming.key, target, "skip");
           if (!result.moved || result.skipped) throw new Error("这个位置已有同名项目");
-          notify.success(`已重命名为“${value}”`); setRenaming(null); await load();
+          notify.success(`已重命名为“${value}”`); setRenaming(null); await refreshList();
         }} />}
       {moving && <MoveDialog targets={moving} startPrefix={query ? root : prefix} onClose={() => setMoving(null)}
         onMove={async (dest, conflict) => { await moveEntries(moving, dest, conflict); setMoving(null); }} />}
-      {transferring && <PrivateTransferDialog paths={transferring.map(item => item.key)} into={!privateSpace} onClose={() => setTransferring(null)} onDone={() => { setSelected(new Set()); void load(); onChanged(); }} />}
+      {transferring && <PrivateTransferDialog paths={transferring.map(item => item.key)} into={!privateSpace} onClose={() => setTransferring(null)} onDone={() => { setSelected(new Set()); void refreshList(); onChanged(); }} />}
       {sharing && <ShareDialog file={sharing} publicBase={session.public_base_url} onClose={() => setSharing(null)}
         update={async (isPublic, options) => (await api.setPublic([sharing.key], isPublic, options)).objects[0]} onChange={file => { replaceFile(file); onChanged(); }} />}
     </div>

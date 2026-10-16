@@ -1,5 +1,104 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "./api";
+import type { ListPage, PublicFolderPage } from "./api";
+
+/**
+ * 目录连续浏览：自动读完有界游标接口，切换位置时取消旧请求。
+ * 首次读取按第 1、2、4、8… 页逐步展示，总渲染量与目录大小成线性；refresh 保留原列表与滚动位置，
+ * 读完后整体替换，并会中断仍在进行的读取，保证修改后看到的是最新结果。maxPages 用于搜索等需要上限的场景。
+ */
+export function useDirectory<T extends { next_cursor: string | number | null }>(
+  fetchPage: (cursor: string | null, signal: AbortSignal) => Promise<T>, merge: (previous: T, next: T) => T,
+  maxPages = Infinity,
+) {
+  const [page, setPage] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+  const [error, setError] = useState("");
+  const request = useRef<AbortController | null>(null);
+  const shown = useRef(false);
+  const load = useCallback(async (keep = false): Promise<string | null> => {
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    const progressive = !keep;
+    if (keep) setRefreshing(true);
+    else { shown.current = false; setPage(null); setLoading(true); setLoadingMore(false); setRefreshing(false); setTruncated(false); setError(""); }
+    try {
+      let cursor: string | null = null, result: T | null = null, pages = 0;
+      const seen = new Set<string>();
+      do {
+        const next = await fetchPage(cursor, controller.signal);
+        if (controller.signal.aborted) return null;
+        result = result === null ? next : merge(result, next);
+        pages += 1;
+        cursor = next.next_cursor === null ? null : String(next.next_cursor);
+        if (cursor !== null && seen.has(cursor)) throw new Error("目录读取未能继续，请刷新后重试");
+        if (cursor !== null) seen.add(cursor);
+        if (cursor !== null && pages >= maxPages) break;
+        if (progressive && cursor !== null && (pages & (pages - 1)) === 0) {
+          shown.current = true; setPage(result); setLoading(false); setLoadingMore(true);
+        }
+      } while (cursor !== null);
+      shown.current = true;
+      setPage(result); setTruncated(cursor !== null); setError("");
+      return null;
+    } catch (reason) {
+      if (controller.signal.aborted) return null;
+      const message = errorMessage(reason, "目录加载失败，请重试");
+      if (!shown.current) setError(message);
+      return message;
+    } finally {
+      if (request.current === controller) {
+        request.current = null;
+        setLoading(false); setLoadingMore(false); setRefreshing(false);
+      }
+    }
+  }, [fetchPage, merge, maxPages]);
+  const reload = useCallback(() => load(), [load]);
+  const refresh = useCallback(() => load(true), [load]);
+  useEffect(() => { void reload(); return () => { request.current?.abort(); request.current = null; }; }, [reload]);
+  return { page, setPage, loading, loadingMore, refreshing, truncated, error, reload, refresh };
+}
+
+/**
+ * 长列表分批挂载：数据已全部读入，界面先渲染 step 项，底部哨兵接近视口时再追加，避免一次创建数千行卡住主线程。
+ * 排序、全选和快捷键仍作用于完整数据；reveal(index) 让键盘焦点或助手选中的远处项目先被渲染出来。
+ */
+export function useRenderLimit<T>(items: T[], reset: unknown, step = 400) {
+  const [limit, setLimit] = useState(step);
+  useEffect(() => { setLimit(step); }, [reset, step]);
+  const sentinel = useRef<HTMLDivElement | null>(null);
+  const more = items.length > limit;
+  useEffect(() => {
+    const node = sentinel.current;
+    if (!more || !node) return;
+    // limit 变化时重建观察器：哨兵仍在视口附近时会立即再触发一次，快速滚动也能接上。
+    const observer = new IntersectionObserver(records => {
+      if (records.some(record => record.isIntersecting)) setLimit(value => value + step);
+    }, { rootMargin: "1600px 0px" });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [more, limit, step]);
+  const reveal = useCallback((index: number) => setLimit(value => index < value ? value : index + step), [step]);
+  return { visible: more ? items.slice(0, limit) : items, more, sentinel, reveal };
+}
+
+export const mergeFilePages = (a: ListPage, b: ListPage): ListPage => ({
+  ...b, objects: [...a.objects, ...b.objects], common_prefixes: [...new Set([...a.common_prefixes, ...b.common_prefixes])],
+  public_folders: { ...a.public_folders, ...b.public_folders }, folder_sizes: { ...a.folder_sizes, ...b.folder_sizes },
+});
+export const mergePublicFolderPages = (a: PublicFolderPage, b: PublicFolderPage): PublicFolderPage => ({
+  ...b, files: [...a.files, ...b.files], folders: [...a.folders, ...b.folders],
+});
+export const mergeObjectPages = <T extends { objects: unknown[]; folder_sizes?: Record<string, number>; folder_previews?: Record<string, unknown[]> }>(a: T, b: T): T => ({
+  ...b, objects: [...a.objects, ...b.objects],
+  folder_sizes: { ...a.folder_sizes, ...b.folder_sizes }, folder_previews: { ...a.folder_previews, ...b.folder_previews },
+});
+export const mergeTrashPages = <T extends { items: unknown[] }>(a: T, b: T): T => ({ ...b, items: [...a.items, ...b.items] });
+export const mergeFolderPages = <T extends { folders: string[] }>(a: T, b: T): T => ({ ...b, folders: [...new Set([...a.folders, ...b.folders])] });
 
 export const FILE_PAGE_SIZES = [50, 100, 200];
 const FILE_PAGE_SIZE_KEY = "tessera-file-page-size";

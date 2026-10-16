@@ -24,7 +24,7 @@ _PATTERNS = re.compile("|".join([
     r"\bAIza[0-9A-Za-z_\-]{35}\b",
     r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
     r"(?i:\bbearer\s+[A-Za-z0-9._~+/\-]{20,}=*)",
-    r"(?<![A-Za-z0-9])(?i:api[_-]?key|secret[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)\s*[:=]\s*[\"']?[^\s\"']{8,}",
+    r"(?<![A-Za-z0-9])(?i:api[_-]?key|secret[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)[\"']?\s*[:=]\s*[\"']?[^\s\"']{8,}",
 ]))
 
 
@@ -37,7 +37,7 @@ def redact_content(text: str) -> tuple[str, int]:
         count += 1
         value = match.group(0)
         # 「password = xxx」这类保留键名，便于模型理解上下文。
-        key = re.match(r"(?i)((?:api[_-]?key|secret[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)\s*[:=]\s*[\"']?)", value)
+        key = re.match(r"(?i)((?:api[_-]?key|secret[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)[\"']?\s*[:=]\s*[\"']?)", value)
         return (key.group(1) if key else "") + HIDDEN
 
     return _PATTERNS.sub(replace, text), count

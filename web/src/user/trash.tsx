@@ -1,20 +1,19 @@
 import { useCallback, useState } from "react";
-import { useCursorPage, useFilePageSize } from "../pagination";
+import { useDirectory, mergeTrashPages } from "../pagination";
 import { BRAND } from "../brand";
 import * as api from "../api";
 import { usePrivateToast } from "./private-session";
 
 import { FileTile, baseName, getFileKind, parentPath } from "../files";
 
-import { Button, ConfirmDialog, EmptyState, PageHeader, Pagination, SkeletonRows, formatBytes, formatDate, useDocumentTitle } from "../ui";
+import { Button, ConfirmDialog, EmptyState, PageHeader, SkeletonRows, formatBytes, formatDate, useDocumentTitle } from "../ui";
 
 /* ---------- 回收站 ---------- */
 
 export function TrashView({ onChanged, onOpenFolder, root = "" }: { onChanged: () => void; onOpenFolder: (prefix: string) => void; root?: string }) {
   const notify = usePrivateToast(Boolean(root));
-  const pageSize = useFilePageSize();
-  const fetchPage = useCallback((cursor: string | null) => api.listTrashPage(cursor, pageSize.pageSize, root), [pageSize.pageSize, root]);
-  const pagination = useCursorPage(fetchPage);
+  const fetchPage = useCallback((cursor: string | null, signal: AbortSignal) => api.listTrashPage(cursor, 200, root, signal), [root]);
+  const pagination = useDirectory(fetchPage, mergeTrashPages);
   const data = pagination.page;
   const load = pagination.reload;
   const [purging, setPurging] = useState<api.TrashItem[] | "all" | null>(null);
@@ -68,7 +67,7 @@ export function TrashView({ onChanged, onOpenFolder, root = "" }: { onChanged: (
           </div>
         )}
       </section>
-      {data && <footer className="list-footer"><span>共 {data.total} 项，占用 {formatBytes(data.total_size)}</span><Pagination {...pagination} {...pageSize} /></footer>}
+      {data && <footer className="list-footer"><span>共 {data.total} 项，占用 {formatBytes(data.total_size)}</span>{pagination.loadingMore && <span role="status">正在读取其余项目…</span>}</footer>}
       {purging && <ConfirmDialog className={root ? "private-dialog" : undefined} title={purging === "all" ? "清空回收站？" : `永久删除“${baseName(purging[0].path)}”？`}
         description={purging === "all" ? "回收站中的所有文件都会被永久删除并释放空间，无法恢复。" : "文件会被永久删除并释放空间，无法恢复。"}
         confirmLabel="永久删除" onConfirm={() => purge(purging)} onClose={() => setPurging(null)} />}

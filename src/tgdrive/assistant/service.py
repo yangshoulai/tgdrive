@@ -16,11 +16,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import SimpleNamespace
+from urllib.parse import unquote
+from zoneinfo import ZoneInfo
 
 from ..api import normalize_user_path
 from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
-from . import client_tools, prompts, providers, web, web_tools, write_tools  # noqa: F401  导入即注册工具
+from . import client_tools, http_tools, knowledge, prompts, providers, web, web_tools, write_tools  # noqa: F401  导入即注册工具
 from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
 from .catalog import CatalogStore
 from .channels import ChannelStore
@@ -51,7 +53,7 @@ AUTO_WAIT = 25
 ACCESS_MODES = ("approval", "full")
 # 读取不可信外部内容的工具：结果进入上下文后，完全访问模式下的修改仍需确认（§19.5）。
 TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "collect_gallery": "分析过网页",
-               "parse_download_source": "解析过外部链接"}
+               "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应"}
 
 
 def session_hash(token: str) -> str:
@@ -90,6 +92,7 @@ class RunState:
     tainted: str | None = None
     listeners: int = 0
     thinking: dict = field(default_factory=dict)
+    environment: dict = field(default_factory=dict)
 
     async def emit(self, event: dict) -> None:
         self.seq += 1
@@ -117,8 +120,9 @@ class StopRun(Exception):
 
 
 class AssistantService:
-    def __init__(self, accounts, objects, offline=None, *, user_api=None) -> None:
+    def __init__(self, accounts, objects, offline=None, *, user_api=None, settings=None) -> None:
         self.accounts, self.objects, self.offline, self.user_api = accounts, objects, offline, user_api
+        self.settings = settings
         self.metadata, self.keystore = accounts.metadata, accounts.keystore
         self.config = AssistantConfig(self.metadata)
         self.trace = TraceStore(self.metadata, self.keystore)
@@ -379,16 +383,31 @@ class AssistantService:
                                   "pages": len(snapshot["urls"]), "images": snapshot["count"]}
         run_id = self.trace.start_run(conversation_id, model_id, prompts.PROMPT_VERSION)
         message_seq = self.trace.append(conversation_id, run_id, "user", body)
-        state = self._start(run_id, conversation_id, account, token, model_id, view, location)
+        state = self._start(run_id, conversation_id, account, token, model_id, view, location,
+                            environment=knowledge.client_environment(payload.get("environment")))
         return {"run_id": state.id, "message_seq": message_seq}
 
-    def _start(self, run_id: str, conversation_id: str, account, token: str, model_id: int, view: str, location: str) -> RunState:
+    def _start(self, run_id: str, conversation_id: str, account, token: str, model_id: int, view: str, location: str,
+               *, environment: dict | None = None) -> RunState:
         state = RunState(run_id, conversation_id, account.id, account.bucket_id, token, model_id, view, location)
+        state.environment = environment if environment is not None else next(
+            (run.environment for run in reversed(self.runs.values()) if run.conversation_id == conversation_id and run.token == token), {})
         state.trim_events = self._gc_runs
         self.runs[run_id] = state
         state.task = asyncio.get_running_loop().create_task(self._run(state))
         self._gc_runs()
         return state
+
+    def share_link(self, token: str, conversation_id: str, path: str) -> dict:
+        """分享令牌只按需交给界面，不存入工具消息或发送给模型。"""
+        _, account = self._session(token)
+        self._require_available(account.id)
+        if "ui_open_share" not in self._user_tools(account.id):
+            raise PermissionError("打开分享工具已关闭")
+        conversation = self.trace.conversation(account.id, conversation_id)
+        context = ToolContext(account.id, account.bucket_id, conversation["scope_root"], self.objects, None, "files", "", {}, {})
+        _, row = client_tools.shared_object(context, "/" + path.lstrip("/"))
+        return {"token": row["public_token"], "public_base_url": self.settings.get("public_base_url") if self.settings else None}
 
     def _gc_runs(self) -> None:
         now = time.time()
@@ -946,6 +965,11 @@ class AssistantService:
             if not isinstance(parsed, dict):
                 raise ToolError("工具参数必须是对象")
             arguments = parsed
+            if call.name == "http_request":
+                url = arguments.get("url")
+                decoded = unquote(url) if isinstance(url, str) else ""
+                if self.guard.redact_value(arguments) != arguments or self.guard.redact(decoded) != decoded:
+                    raise ToolError("HTTP 请求不能携带系统凭据")
             conversation = self.trace.conversation(state.user_id, state.conversation_id, include_hidden=True)
             usage = self.objects.metadata.db.execute("SELECT quota_bytes, used_bytes FROM buckets WHERE id=?", (state.bucket_id,)).fetchone()
 
@@ -1006,7 +1030,9 @@ class AssistantService:
                                   scope_request, {"used_bytes": usage["used_bytes"] if usage else None,
                                                   "quota_bytes": usage["quota_bytes"] if usage else None},
                                   conversation_id=state.conversation_id, limits=limits, propose=propose, trace=self.trace,
-                                  analyze=analyze, client=client, taint=taint)
+                                  analyze=analyze, client=client, taint=taint,
+                                  public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
+                                  redact=self.guard.redact)
             timeout = max(limits["tool_seconds"], spec.timeout or 0)
             output = await asyncio.wait_for(spec.handler(context, arguments), timeout)
             payload, truncated = self._fit(self.guard.redact_value(output.result), limits["tool_result_bytes"])
@@ -1084,7 +1110,7 @@ class AssistantService:
                     compacted = await self._compact(state, model, endpoint)
                     if compacted:
                         history = self._history(state.conversation_id, model["context_window"])
-                now = datetime.now().astimezone()
+                now = datetime.now(ZoneInfo(state.environment["timezone"])) if state.environment.get("timezone") else datetime.now().astimezone()
                 usage = self.objects.metadata.db.execute("SELECT quota_bytes, used_bytes FROM buckets WHERE id=?",
                                                          (state.bucket_id,)).fetchone()
                 system = prompts.system_prompt(date=now.strftime("%Y-%m-%d"), timezone=str(now.tzinfo), scope_root=display(scope_root),
@@ -1092,6 +1118,8 @@ class AssistantService:
                                                can_read_text="read_text_file" in tools, can_web="analyze_page" in tools,
                                                can_danger=any(spec.level == "danger" for spec in tools.values()),
                                                can_share="propose_share" in tools, can_browser="ui_get_view" in tools,
+                                               can_http="http_request" in tools,
+                                               public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
                                                access_mode="full" if conversation["access_mode"] == "full"
                                                and self._full_access(state.user_id) else "approval")
                 pending = self.trace.pending_actions(state.conversation_id)
