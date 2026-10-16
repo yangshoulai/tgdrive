@@ -101,8 +101,10 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       const folders = (event as CustomEvent<{ folders: string[] }>).detail?.folders ?? [];
       if (query || folders.includes(prefix)) scheduleRefresh();
     };
+    // 文件助手的附件上传完成（保存到 /助手附件/<年-月>/）时同样按目录判断。
     window.addEventListener("tessera:downloads-completed", completed);
-    return () => window.removeEventListener("tessera:downloads-completed", completed);
+    window.addEventListener("tessera:files-added", completed);
+    return () => { window.removeEventListener("tessera:downloads-completed", completed); window.removeEventListener("tessera:files-added", completed); };
   }, [prefix, query, scheduleRefresh]);
   useEffect(() => () => window.clearTimeout(backgroundRefresh.current.timer), []);
   const loading = pagination.loading;

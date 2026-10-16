@@ -115,7 +115,8 @@ export const updateAdminChannel = (id: number, input: ChannelInput) => post<AiCh
 export const deleteAdminChannel = (id: number) => post<void>(`${ADMIN}/channels/${id}/delete`);
 export const syncAdminChannel = (id: number) => post<{ total: number; added: number; restored: number; removed: number; note: string }>(`${ADMIN}/channels/${id}/sync`, undefined, 120000);
 export const adminChannelModels = (id: number) => get<AiModel[]>(`${ADMIN}/channels/${id}/models`);
-type ModelFields = Partial<Pick<AiModel, "display_name" | "enabled" | "tools" | "context_window" | "max_output" | "sort" | "input_price" | "output_price">>;
+type ModelFields = Partial<Pick<AiModel, "display_name" | "enabled" | "tools" | "context_window" | "max_output" | "sort" | "input_price" | "output_price">>
+  & { /** 图片输入：auto 跟随模型目录，yes／no 为手动设置。 */ vision?: "auto" | "yes" | "no" };
 export const addAdminModel = (channelId: number, input: ModelFields & { model: string }) => post<AiModel>(`${ADMIN}/channels/${channelId}/models`, input);
 export const updateAdminModel = (id: number, input: ModelFields & { reset_catalog?: boolean }) => post<AiModel>(`${ADMIN}/models/${id}/update`, input);
 export const discoverChannelModels = (id: number) => get<{ models: UpstreamModel[]; total: number; removed: number; note: string }>(`${ADMIN}/channels/${id}/discover`);
@@ -169,7 +170,7 @@ export type ChatMessage = {
   reasoning?: string; reasoning_ms?: number | null;
   call_id?: string; name?: string; label?: string; arguments?: Record<string, unknown>; status?: "ok" | "error"; summary?: string;
   result?: unknown; items?: number | null; duration_ms?: number; truncated?: boolean; event?: ToolEvent | null;
-  type?: string; retry?: boolean; action_id?: string; attachment?: SnapshotAttachment; mentions?: string[];
+  type?: string; retry?: boolean; action_id?: string; attachment?: SnapshotAttachment; mentions?: string[]; attachments?: string[]; attachments_missing?: number;
 };
 export const ACTION_KINDS: Record<string, string> = {
   rename: "批量改名", move: "移动", organize: "整理文件", mkdir: "新建文件夹", trash: "移入回收站", restore: "从回收站恢复",
@@ -208,7 +209,7 @@ export const conversation = (id: string) => get<ConversationDetail>(`${USER}/con
 export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
 export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
 export type ClientEnvironment = { browser: string; browser_version: string; os: string; language: string; timezone: string; origin: string };
-export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root" | "path"; scope_path?: string; mentions?: string[]; snapshot_id?: string; environment?: ClientEnvironment }) =>
+export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root" | "path"; scope_path?: string; mentions?: string[]; attachments?: string[]; snapshot_id?: string; environment?: ClientEnvironment }) =>
   post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/messages`, input);
 /** 从自己的某条消息重新回答：服务端丢弃这条消息及之后的记录，以同样的内容（引用、附件）开始新运行。 */
 export const retryMessage = (id: string, input: { seq: number; model_id?: number; location: string; view: string; environment?: ClientEnvironment }) =>

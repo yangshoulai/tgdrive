@@ -266,7 +266,6 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       <PrivateSessionProvider enabled={workspaceReady}>
       <PreviewHost enabled={workspaceReady} privateAllowed={section === "private"}>
         {content}
-      </PreviewHost>
       <div className="tray-stack">
         {workspaceReady && <DownloadTray hidden={section === "downloads"} revision={downloadRevision} onOpenTasks={() => navigate("downloads")}
           onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCompleted={refreshUsage} />}
@@ -276,6 +275,8 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" ? location.prefix : "" }}
         onFilesChanged={filesChanged} pageImport={pageImport} onPageImportDone={clearPageImport} onNavigate={(view, prefix) => navigate(view, prefix ?? "")}
         onOpenPage={id => { setAssistantOpen(false); navigate("assistantPage", id ?? ""); }} />}
+      {/* 助手抽屉也在预览宿主内：消息里的附件图片直接打开预览。 */}
+      </PreviewHost>
       {/* 旧版用户名账号：登录后必须先设置邮箱（之后用邮箱登录，也为邮箱验证做准备）。 */}
       {session.needs_email && <EmailDialog session={session} required onSaved={onSessionChange} onLogout={() => void logout()} />}
       </PrivateSessionProvider>

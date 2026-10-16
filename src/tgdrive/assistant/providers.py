@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import http.client
 import json
 import re
@@ -277,14 +278,37 @@ async def list_models(endpoint: Endpoint) -> list[dict]:
     return result
 
 
+def _data_url(image: dict) -> str:
+    return f"data:{image['mime']};base64,{base64.b64encode(image['data']).decode()}"
+
+
+def _openai_images(images: list[dict]) -> list[dict]:
+    return [{"type": "image_url", "image_url": {"url": _data_url(image)}} for image in images]
+
+
 def _openai_messages(system: str, messages: list[dict]) -> list[dict]:
+    """识图（§22.4）：用户消息的图片放进内容数组；工具消息只能是文本，view_image 的图片在这一批工具结果之后
+    合并成一条用户消息，保持 assistant → tool… 的顺序。"""
     result: list[dict] = [{"role": "system", "content": system}]
+    tool_images: list[dict] = []
+
+    def flush_tool_images() -> None:
+        if tool_images:
+            paths = "、".join(image.get("path", "") for image in tool_images)
+            result.append({"role": "user", "content": [{"type": "text", "text": f"[view_image 返回的图片] {paths}"},
+                                                       *_openai_images(tool_images)]})
+            tool_images.clear()
+
     for message in messages:
         role = message["role"]
+        if role != "tool":
+            flush_tool_images()
         if role == "system":
             result.append({"role": "system", "content": message["content"]})
         elif role == "user":
-            result.append({"role": "user", "content": message["content"]})
+            images = message.get("images") or []
+            result.append({"role": "user", "content": [{"type": "text", "text": message["content"]}, *_openai_images(images)]
+                           if images else message["content"]})
         elif role == "assistant":
             item: dict = {"role": "assistant", "content": message.get("content") or None}
             if message.get("tool_calls"):
@@ -294,7 +318,14 @@ def _openai_messages(system: str, messages: list[dict]) -> list[dict]:
             result.append(item)
         elif role == "tool":
             result.append({"role": "tool", "tool_call_id": message["tool_call_id"], "content": message["content"]})
+            tool_images.extend(message.get("images") or [])
+    flush_tool_images()
     return result
+
+
+def _anthropic_images(images: list[dict]) -> list[dict]:
+    return [{"type": "image", "source": {"type": "base64", "media_type": image["mime"], "data": base64.b64encode(image["data"]).decode()}}
+            for image in images]
 
 
 def _anthropic_messages(messages: list[dict]) -> tuple[list[dict], str]:
@@ -313,9 +344,11 @@ def _anthropic_messages(messages: list[dict]) -> tuple[list[dict], str]:
         if role == "system":
             extra_system.append(message["content"])
         elif role == "user":
-            push("user", [{"type": "text", "text": message["content"] or " "}])
+            push("user", [{"type": "text", "text": message["content"] or " "}, *_anthropic_images(message.get("images") or [])])
         elif role == "tool":
-            push("user", [{"type": "tool_result", "tool_use_id": message["tool_call_id"], "content": message["content"]}])
+            images = message.get("images") or []
+            content = [{"type": "text", "text": message["content"]}, *_anthropic_images(images)] if images else message["content"]
+            push("user", [{"type": "tool_result", "tool_use_id": message["tool_call_id"], "content": content}])
         elif role == "assistant":
             blocks: list[dict] = []
             if message.get("content"):

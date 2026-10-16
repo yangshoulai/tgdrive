@@ -2907,3 +2907,52 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
   .setup-guide-count { display: none; }
   .setup-guide-body { padding: 2px 12px 14px 16px; }
 }
+
+/* ---------- 文件助手附件（§22.5） ---------- */
+.assistant-attach-button { display: inline-grid; width: 28px; height: 28px; flex: none; place-items: center; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink-3); cursor: pointer; }
+.assistant-attach-button:hover { background: var(--surface-hover); color: var(--ink); }
+.assistant-attach-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.assistant-uploads { display: grid; gap: 6px; padding: 8px 10px 0; }
+/* 附件卡片自动换行，超过两行在托盘内纵向滚动，不出现横向滚动条。 */
+.assistant-uploads > ul { display: grid; max-height: 124px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; margin: 0; padding: 0 0 2px; overflow-x: hidden; overflow-y: auto; list-style: none; overscroll-behavior: contain; }
+.assistant-upload { position: relative; display: flex; min-width: 0; align-items: center; gap: 8px; padding: 6px 28px 6px 6px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); }
+.assistant-upload.is-error { border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); background: var(--danger-soft); }
+.assistant-upload-media { position: relative; display: grid; width: 44px; height: 44px; flex: none; overflow: hidden; place-items: center; border-radius: var(--radius-sm); background: var(--surface); }
+.assistant-upload-media > img { width: 100%; height: 100%; object-fit: cover; }
+.assistant-upload-progress { position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--surface) 55%, transparent); color: var(--accent); }
+.assistant-upload-progress.is-error { background: color-mix(in srgb, var(--danger-soft) 70%, transparent); color: var(--danger); }
+.assistant-upload-ring { width: 24px; height: 24px; transform: rotate(-90deg); }
+.assistant-upload-ring circle { fill: none; stroke-width: 2.5; }
+.assistant-upload-ring circle:first-child { stroke: color-mix(in srgb, var(--accent) 18%, transparent); }
+.assistant-upload-ring circle:last-child { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .2s; }
+.assistant-upload-text { display: grid; min-width: 0; flex: 1; gap: 1px; }
+.assistant-upload-text strong { overflow: hidden; color: var(--ink); font-size: var(--text-xs); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-upload-text small { overflow: hidden; color: var(--ink-3); font-size: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; }
+.assistant-upload.is-error .assistant-upload-text small { color: var(--danger); }
+.assistant-upload-remove, .assistant-upload-action { position: absolute; display: grid; width: 20px; height: 20px; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--ink-3); cursor: pointer; }
+.assistant-upload-remove { top: 4px; right: 4px; }
+.assistant-upload-action { right: 4px; bottom: 4px; color: var(--danger); }
+.assistant-upload-remove:hover, .assistant-upload-action:hover { background: var(--surface-hover); color: var(--ink); }
+.assistant-upload-hint { display: flex; align-items: center; gap: 4px; margin: 0; color: var(--warning); font-size: var(--text-micro); }
+.assistant-drop { position: absolute; inset: 8px; z-index: 6; display: grid; place-items: center; border: 2px dashed color-mix(in srgb, var(--accent) 55%, transparent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--accent-soft) 82%, transparent); color: var(--accent-ink); pointer-events: none; }
+.assistant-drop > span { display: inline-flex; align-items: center; gap: 8px; font-size: var(--text-md); font-weight: 600; }
+.assistant-page-main { position: relative; }
+/* 用户消息上方的附件：图片网格（最多 4 张，+N）与文件胶囊，右对齐贴着气泡。 */
+.ai-files { display: grid; max-width: 86%; justify-items: end; gap: 6px; }
+.ai-files-grid { display: grid; width: min(280px, 100%); grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.ai-files-grid.is-1 { width: min(220px, 100%); grid-template-columns: minmax(0, 1fr); }
+.ai-files-grid.is-3 > :first-child { grid-row: span 2; }
+.ai-files-image { position: relative; aspect-ratio: 1; overflow: hidden; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); cursor: zoom-in; }
+.ai-files-grid.is-1 .ai-files-image { aspect-ratio: 4 / 3; }
+.ai-files-grid.is-3 .ai-files-image:first-child { aspect-ratio: auto; }
+.ai-files-image img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.ai-files-image:hover img { opacity: .92; }
+.ai-files-more { position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--primary) 55%, transparent); color: var(--on-primary); font-size: var(--text-lg); font-weight: 600; }
+.ai-files-files { display: flex; max-width: 100%; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.ai-files-file { display: inline-flex; max-width: 100%; align-items: center; gap: 5px; padding: 3px 9px 3px 6px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-2); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+.ai-files-file > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-files-file:hover { border-color: var(--accent); color: var(--accent-ink); }
+@media (max-width: 760px) {
+  .assistant-capability-button:has(+ .assistant-attach-button) { margin-right: 0; }
+  .assistant-capability-button + .assistant-attach-button { margin-right: auto; }
+}

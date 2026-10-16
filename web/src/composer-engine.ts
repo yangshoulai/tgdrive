@@ -19,6 +19,8 @@ export type ComposerOptions = {
   onToken: (token: ComposerToken | null) => void;
   /** 宿主先处理的按键（@ 候选列表的方向键、回车、Esc）；返回 true 表示已处理。 */
   onKey: (event: KeyboardEvent) => boolean;
+  /** 剪贴板里有文件（截图、在访达／资源管理器里复制的文件）时交给宿主作为附件；返回 true 表示已接管，不再粘贴文字。 */
+  onPasteFiles?: (files: File[]) => boolean;
   /** 已选中的引用路径（"/电影/"、"/a/b.txt"）；只有这些 @路径 显示为胶囊。 */
   mentions: () => string[];
   /** 图标元素：文件类型（folder、image…）或 "globe"。 */
@@ -256,7 +258,15 @@ export function createComposer(parent: HTMLElement, options: ComposerOptions) {
     hint.of(placeholderText(options.placeholder)),
     EditorView.contentAttributes.of({ "aria-label": options.label, "aria-multiline": "true", spellcheck: "false", autocapitalize: "off", autocorrect: "off" }),
     EditorState.transactionFilter.of(tr => tr.docChanged && tr.newDoc.length > options.maxLength && tr.newDoc.length > tr.startState.doc.length ? [] : tr),
-    Prec.highest(EditorView.domEventHandlers({ keydown: event => options.onKey(event) })),
+    Prec.highest(EditorView.domEventHandlers({
+      keydown: event => options.onKey(event),
+      paste: event => {
+        const files = [...(event.clipboardData?.files ?? [])];
+        if (!files.length || !options.onPasteFiles?.(files)) return false;
+        event.preventDefault();
+        return true;
+      },
+    })),
     Prec.high(keymap.of([
       { key: "Enter", run: view => continueList(view) || (inFence(view.state, view.state.selection.main.head) ? insertNewline(view) : submit()) },
       { key: "Shift-Enter", run: view => continueList(view) || insertNewline(view) },

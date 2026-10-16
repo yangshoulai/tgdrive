@@ -252,6 +252,7 @@ class ChannelStore:
         with self.metadata.transaction() as db:
             if db.execute("SELECT 1 FROM ai_models WHERE channel_id=? AND model=?", (channel_id, model.strip())).fetchone():
                 raise ValueError("该渠道已有同名模型")
+            vision = values.pop("vision", None)
             manual = [name for name in ("context_window", "max_output", "tools", "input_price", "output_price") if values.get(name) is not None
                       and not (name == "tools" and values[name] == "unknown")]
             cursor = db.execute(
@@ -264,11 +265,13 @@ class ChannelStore:
             if self.catalog is not None:
                 row = db.execute("SELECT * FROM ai_models WHERE id=?", (model_id,)).fetchone()
                 self.catalog.apply(db, row, self.catalog.match(model.strip()))
+        if vision in ("yes", "no"):
+            return self.update_model(model_id, {"vision": vision})
         return self.model(model_id)
 
     @staticmethod
     def _model_fields(payload: dict) -> dict[str, object]:
-        allowed = {"display_name", "enabled", "tools", "context_window", "max_output", "sort", "input_price", "output_price"}
+        allowed = {"display_name", "enabled", "tools", "context_window", "max_output", "sort", "input_price", "output_price", "vision"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
@@ -286,6 +289,11 @@ class ChannelStore:
             if payload["tools"] not in ("unknown", "yes", "no"):
                 raise ValueError("工具调用支持只能是 unknown、yes 或 no")
             values["tools"] = payload["tools"]
+        if "vision" in payload:
+            # 图片输入：auto 跟随模型目录，yes／no 为管理员手动设置（目录同步不覆盖）。
+            if payload["vision"] not in ("auto", "yes", "no"):
+                raise ValueError("图片输入支持只能是 auto、yes 或 no")
+            values["vision"] = payload["vision"]
         for name, high in (("context_window", 100_000_000), ("max_output", 10_000_000), ("sort", 100000)):
             if name in payload:
                 value = payload[name]
@@ -311,15 +319,28 @@ class ChannelStore:
         for name in ("context_window", "max_output", "tools", "input_price", "output_price"):
             if name in values and values[name] != current[name]:
                 manual.add(name)
+        vision = values.pop("vision", None)
+        if vision in ("yes", "no"):
+            manual.add("vision")
+            values["capabilities"] = json.dumps({**current["capabilities"], "vision": vision == "yes"})
+        elif vision == "auto":
+            # 先清空手动值，再按目录重新匹配；目录没有这个模型时就是「未知」，按不支持处理。
+            manual.discard("vision")
+            values["capabilities"] = json.dumps({**current["capabilities"], "vision": None})
         if reset:
             manual.clear()
         values["manual_fields"] = json.dumps(sorted(manual))
         with self.metadata.transaction() as db:
             db.execute(f"UPDATE ai_models SET {','.join(f'{name}=?' for name in values)} WHERE id=?", (*values.values(), model_id))
-            if reset and self.catalog is not None:
+            if (reset or vision == "auto") and self.catalog is not None:
                 row = db.execute("SELECT * FROM ai_models WHERE id=?", (model_id,)).fetchone()
                 self.catalog.apply(db, row, self.catalog.match(row["model"]))
         return self.model(model_id)
+
+    @staticmethod
+    def vision(model: dict) -> bool:
+        """只有目录或管理员明确声明支持图片输入才发送图片；未知按不支持处理。"""
+        return (model.get("capabilities") or {}).get("vision") is True
 
     def delete_model(self, model_id: int) -> None:
         self.model(model_id)

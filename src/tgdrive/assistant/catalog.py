@@ -434,6 +434,13 @@ class CatalogStore:
         if row["tested_at"] is not None:
             values.pop("tools", None)
         updates = {name: value for name, value in values.items() if name not in manual and value is not None}
+        if "vision" in manual and "capabilities" in updates:
+            # 管理员手动设置的图片输入支持在目录同步时保留，其余能力仍跟随目录。
+            try:
+                current = json.loads(row["capabilities"] or "{}")
+            except ValueError:
+                current = {}
+            updates["capabilities"] = json.dumps({**json.loads(updates["capabilities"]), "vision": current.get("vision")})
         updates["catalog_id"] = entry["id"] if entry else None
         changed = {name: value for name, value in updates.items() if row[name] != value}
         if changed:

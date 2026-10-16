@@ -3,10 +3,12 @@
  * 卡片（提问、作用域、待确认操作、浏览器动作）与最终回复。运行中的思考与工具调用来自事件流（live）。
  * 卡片全部由服务端冻结的数据渲染，不使用模型生成的描述。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { Markdown } from "../markdown";
+import { MessageAttachments } from "./assistant-attachments";
+import { usePreview } from "./preview-host";
 import { FileGlyph, getFileKind } from "../files";
 import { AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
@@ -195,8 +197,31 @@ function renderMention(path: string) {
     <span>{path.replace(/\/$/, "").split("/").at(-1) || "/"}</span></span>;
 }
 
+/** 打开文件所在目录（由抽屉提供；全页模式没有文件页时为 null）。 */
+export const ThreadNavigation = createContext<((folder: string) => void) | null>(null);
+
+/** 用户上传的附件：图片点开预览（同一条消息的图片可左右切换），其他文件打开所在目录。 */
+function UserAttachments({ paths }: { paths: string[] }) {
+  const preview = usePreview();
+  const openFolder = useContext(ThreadNavigation);
+  const folderOf = (path: string) => path.slice(1, path.lastIndexOf("/") + 1);
+  async function openImage(path: string, all: string[]) {
+    try {
+      const page = await api.listFiles(folderOf(path), null, false, 1000, "image");
+      const items = page.objects.filter(item => all.includes("/" + item.key));
+      const file = items.find(item => "/" + item.key === path);
+      if (!file) { toast.error("这个附件已被移动或删除"); return; }
+      preview.open({ file, url: api.contentUrl(file.key), downloadUrl: api.contentUrl(file.key, true), playlistFiles: items,
+        poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file) });
+    } catch (reason) { toast.error(api.errorMessage(reason, "打开失败")); }
+  }
+  return <MessageAttachments paths={paths} onOpenImage={(path, all) => void openImage(path, all)}
+    onOpenFolder={path => openFolder ? openFolder(folderOf(path)) : toast.info(`文件保存在 ${path}`)} />;
+}
+
 function UserMessage({ message, onRetry }: { message: ai.ChatMessage; onRetry?: () => void }) {
   return <div className="ai-user">
+    {message.attachments?.length ? <UserAttachments paths={message.attachments} /> : null}
     {message.attachment && <span className="ai-attachment"><Icon name="globe" size={13} />
       <span>{message.attachment.source.replace(/^https?:\/\//, "")} · {message.attachment.pages} 页 · {message.attachment.images.toLocaleString("zh-CN")} 个图片候选</span></span>}
     {/* 用户输入的 Markdown（列表、加粗、代码等）与回复使用同一个安全渲染器，不执行原始 HTML；@ 引用就地显示为胶囊。 */}

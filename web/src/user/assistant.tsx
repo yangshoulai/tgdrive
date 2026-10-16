@@ -2,12 +2,13 @@
  * 文件助手抽屉（docs/assistant-design.md §12.2）。挂在 MainShell：切换页面、打开预览时对话不中断。
  * 运行在服务端进行，这里通过 SSE 订阅事件；断线后按 seq 续读。写入类操作的确认卡片由服务端数据渲染。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type DragEvent as ReactDragEvent } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, toast, type IconName, type MenuItem } from "../ui";
 import type { PageImport } from "./page-import";
-import { Thread, useMarkState, type LiveRun } from "./assistant-thread";
+import { Thread, ThreadNavigation, useMarkState, type LiveRun } from "./assistant-thread";
+import { AttachmentTray, useAttachments } from "./assistant-attachments";
 import { filesBridge, waitForFiles } from "./assistant-bridge";
 import { assistantEnvironment } from "./assistant-environment";
 import { commonFolder, useMentions } from "./assistant-mentions";
@@ -79,6 +80,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [sending, setSending] = useState(false);
   const [capabilities, setCapabilities] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
+  const attachments = useAttachments();
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
+  const filePicker = useRef<HTMLInputElement>(null);
   const [unseen, setUnseen] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<ComposerHandle>(null);
@@ -254,13 +259,17 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     selection.current += 1;
     setLoading(false); setReconnecting(false);
     unsubscribe.current?.(); unsubscribe.current = null;
-    setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeTarget(null); mention.reset(); setDraft(""); setPendingMode("approval");
+    setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeTarget(null); mention.reset(); setDraft(""); setPendingMode("approval"); attachments.clear();
     window.setTimeout(() => input.current?.focus(), 30);
   }
 
   async function send(text = draft) {
-    const message = text.trim();
+    // 附件只随输入框里的消息发送（不随卡片上的快捷回答）；只有附件没有文字时补一句说明。
+    const withFiles = text === draft && attachments.items.length > 0;
+    const message = text.trim() || (withFiles ? "请查看这些附件" : "");
     if (!message || runId || sending) return;
+    if (withFiles && attachments.pending) { toast.error("附件还在上传或生成预览图，请稍候"); return; }
+    if (withFiles && attachments.failed) { toast.error("有附件上传失败，请重试或移除后再发送"); return; }
     if (pageImport && !pageImport.pages) { toast.error(pageImport.error || "页面快照还在接收，请稍候"); return; }
     if (!config.notice_ack) return;
     setSending(true);
@@ -283,12 +292,14 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       }
       const result = await ai.sendMessage(current.conversation.id, { text: message, model_id: modelId ?? undefined, location: locationKey, view: location.view,
         ...(current === detail && target !== null ? { scope: "path" as const, scope_path: display(target) } : {}),
-        mentions: mentions.length ? mentions.map(display) : undefined, snapshot_id: snapshotId, environment: assistantEnvironment() });
+        mentions: mentions.length ? mentions.map(display) : undefined, attachments: withFiles ? attachments.paths.map(display) : undefined,
+        snapshot_id: snapshotId, environment: assistantEnvironment() });
       if (version !== selection.current) return;
       if (snapshotId) onPageImportDone?.();
       // 「跟随当前位置」是持续的选择（新对话默认如此），发送后保留；其他临时选择随这条消息生效后清除。
       const following = scopeTarget === HERE || (!detail && scopeTarget === null);
       setDraft(""); setScopeTarget(following ? HERE : null); mention.reset();
+      if (withFiles) attachments.clear();
       const fresh = await ai.conversation(current.conversation.id).catch(() => null);
       if (version !== selection.current) return;
       if (fresh) setDetail(fresh);
@@ -420,6 +431,19 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const exhausted = Boolean(usage.limit && usage.today >= usage.limit);
 
   const selectedModel = config.models.find(model => model.id === modelId);
+  const canSee = selectedModel?.capabilities?.vision === true;
+  // 私密空间不对助手开放，也不在那里添加附件（附件保存在普通文件区域）。
+  const canAttach = config.notice_ack && !exhausted && location.view !== "private";
+  const addFiles = (files: File[], pasted = false) => { if (!canAttach || !files.length) return false; attachments.add(files, pasted); return true; };
+  const hasFiles = (event: ReactDragEvent) => [...event.dataTransfer.types].includes("Files");
+  const dropProps = {
+    onDragEnter: (event: ReactDragEvent) => { if (!canAttach || !hasFiles(event)) return; event.preventDefault(); dragDepth.current++; setDragging(true); },
+    onDragOver: (event: ReactDragEvent) => { if (!canAttach || !hasFiles(event)) return; event.preventDefault(); event.dataTransfer.dropEffect = "copy"; },
+    onDragLeave: () => { if (dragDepth.current > 0 && --dragDepth.current === 0) setDragging(false); },
+    onDrop: (event: ReactDragEvent) => { if (!canAttach || !hasFiles(event)) return; event.preventDefault(); dragDepth.current = 0; setDragging(false);
+      addFiles([...event.dataTransfer.files]); input.current?.focus(); },
+  };
+  const dropOverlay = dragging && <div className="assistant-drop" aria-hidden="true"><span><Icon name="paperclip" size={22} />松开以添加为附件</span></div>;
   const modelLabel = (id: number | null | undefined) => config.models.find(model => model.id === id)?.label ?? "文件助手";
   const historyList = <ConversationList archived={archived} onArchiveView={setArchived} more={historyCursor !== null} loadingMore={historyBusy} onMore={() => void moreConversations()} items={conversations} current={currentId} onOpen={id => void openConversation(id)} onChanged={(deleted) => {
     loadConversations(); if (deleted && deleted === currentId) newConversation(); else reloadDetail();
@@ -440,8 +464,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} onAccept={() => void acknowledge()} />
           : loading ? <SkeletonRows rows={4} />
           : !detail ? <Welcome location={effectiveScope} onPick={text => { setDraft(text); input.current?.focus(); }} />
-          : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
-              onRetry={retryFrom} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
+          : <ThreadNavigation.Provider value={!page && onNavigate ? folder => onNavigate("files", folder) : null}><Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
+              onRetry={retryFrom} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} /></ThreadNavigation.Provider>}
         {reconnecting && <p className="ai-notice" role="status"><Icon name="refresh" size={14} /><span>重新连接中…</span></p>}
       </div>
     </div>
@@ -456,11 +480,12 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           <ModeChip mode={accessMode} allowed={config.full_access} onChoose={next => void chooseMode(next)} />
         </div>
         {expandedScope && <p className="assistant-mention-hint"><Icon name="info" size={12} />引用不在 {effectiveScope} 内，发送时作用域扩大到 {expandedScope}</p>}
+        <AttachmentTray attachments={attachments} canSee={canSee} />
         {/* 输入框即时渲染 Markdown、@ 引用胶囊、链接与列表；内容仍是 Markdown 纯文本。 */}
         <AssistantComposer ref={input} value={draft} onChange={setDraft} onSubmit={() => void send()} maxLength={DRAFT_LIMIT}
           placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : "想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown"}
           disabled={!config.notice_ack || exhausted} mentions={mention.known.map(item => display(item.key))}
-          onToken={mention.setToken} onKey={mention.onKey} />
+          onToken={mention.setToken} onKey={mention.onKey} onPasteFiles={files => addFiles(files, true)} />
         <div className="assistant-controls">
           <Menu label="选择模型" align="start" className="assistant-model" items={config.models.map(model => ({ label: model.label,
             description: [model.channel_name ?? "模型渠道", model.capabilities?.reasoning ? "推理" : "", model.capabilities?.vision ? "识图" : "",
@@ -470,9 +495,13 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
             <Icon name={selectedModel?.capabilities?.reasoning ? "brain" : "server"} size={14} /><span>{selectedModel?.label ?? "选择模型"}</span><Icon name="chevronDown" size={12} />
           </Menu>
           <button type="button" className="assistant-capability-button" onClick={() => setCapabilities(true)} title="查看助手能力"><Icon name="sparkle" size={14} /><span>能力</span></button>
+          {canAttach && <button type="button" className="assistant-attach-button" onClick={() => filePicker.current?.click()} aria-label="添加附件"
+            title={`添加附件（也可以粘贴或拖入），保存到 /助手附件/${canSee ? "；图片会发给模型识别" : ""}`}><Icon name="paperclip" size={15} /></button>}
+          <input ref={filePicker} type="file" multiple hidden onChange={event => { addFiles([...(event.target.files ?? [])]); event.target.value = ""; input.current?.focus(); }} />
           <span className="assistant-enter-hint">@ 引用 · Enter 发送 · Shift+Enter 换行</span>
           {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
-            : <button type="button" className="assistant-send" aria-label="发送" title="发送（Enter）" disabled={!draft.trim() || sending || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)} onClick={() => void send()}>
+            : <button type="button" className="assistant-send" aria-label="发送" disabled={(!draft.trim() && !attachments.items.length) || attachments.pending || sending || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)}
+              title={attachments.pending ? "附件处理中" : "发送（Enter）"} onClick={() => void send()}>
               {sending ? <span className="spinner" aria-hidden="true" /> : <Icon name="arrowUp" size={18} />}</button>}
         </div>
       </div>
@@ -498,18 +527,18 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   </>;
 
   if (page) return (
-    <section className="assistant-page" aria-label="文件助手" onKeyDown={onKeyDown}>
+    <section className="assistant-page" aria-label="文件助手" onKeyDown={onKeyDown} {...dropProps}>
       <aside className="assistant-page-side" aria-label="对话列表">
         <div className="assistant-page-side-head"><strong>对话</strong><Button size="sm" icon="plus" onClick={newConversation}>新对话</Button></div>
         {historyList}
       </aside>
-      <div className="assistant-page-main">{header}{history ? historyList : body}</div>
+      <div className="assistant-page-main">{header}{history ? historyList : body}{dropOverlay}</div>
       {dialogs}
     </section>
   );
   return (
     <aside ref={drawer} className={`assistant-drawer${open ? " is-open" : ""}`} style={{ "--assistant-width": `${width}px` } as CSSProperties}
-      aria-label="文件助手" aria-hidden={!open} onKeyDown={onKeyDown} {...(!open ? { inert: "" } as object : {})}>
+      aria-label="文件助手" aria-hidden={!open} onKeyDown={onKeyDown} {...dropProps} {...(!open ? { inert: "" } as object : {})}>
       <div className="assistant-resize" onPointerDown={startResize} role="separator" tabIndex={open ? 0 : -1} aria-label="调整助手宽度" aria-orientation="vertical"
         aria-valuemin={MIN_WIDTH} aria-valuemax={MAX_WIDTH} aria-valuenow={width}
         onKeyDown={event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault();
@@ -517,6 +546,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           setWidth(next); localStorage.setItem(WIDTH_KEY, String(next)); }} />
       {header}
       {history ? historyList : body}
+      {dropOverlay}
       {dialogs}
     </aside>
   );

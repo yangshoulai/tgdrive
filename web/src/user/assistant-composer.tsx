@@ -15,15 +15,17 @@ export const AssistantComposer = forwardRef<ComposerHandle, {
   /** 已选中的引用（"/电影/" 形式），这些 @路径 显示为胶囊。 */
   mentions: string[];
   onToken: (token: ComposerToken | null) => void; onKey: (event: KeyboardEvent) => boolean;
-}>(function AssistantComposer({ value, onChange, onSubmit, disabled, placeholder, maxLength, mentions, onToken, onKey }, ref) {
+  /** 粘贴文件（截图等）：返回 true 表示已作为附件接管。 */
+  onPasteFiles?: (files: File[]) => boolean;
+}>(function AssistantComposer({ value, onChange, onSubmit, disabled, placeholder, maxLength, mentions, onToken, onKey, onPasteFiles }, ref) {
   const host = useRef<HTMLDivElement>(null);
   const templates = useRef<HTMLDivElement>(null);
   const fallback = useRef<HTMLTextAreaElement>(null);
   const editor = useRef<Composer | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   // 引擎回调读取最新的 props，不必随渲染重建编辑器。
-  const latest = useRef({ value, onChange, onSubmit, onToken, onKey, mentions });
-  latest.current = { value, onChange, onSubmit, onToken, onKey, mentions };
+  const latest = useRef({ value, onChange, onSubmit, onToken, onKey, mentions, onPasteFiles });
+  latest.current = { value, onChange, onSubmit, onToken, onKey, mentions, onPasteFiles };
 
   useImperativeHandle(ref, () => ({
     focus: () => { if (editor.current) editor.current.focus(); else fallback.current?.focus(); },
@@ -50,6 +52,7 @@ export const AssistantComposer = forwardRef<ComposerHandle, {
         value: latest.current.value, placeholder, label: "给文件助手的消息", maxLength, disabled,
         onChange: next => latest.current.onChange(next), onSubmit: () => latest.current.onSubmit(),
         onToken: token => latest.current.onToken(token), onKey: event => latest.current.onKey(event),
+        onPasteFiles: files => latest.current.onPasteFiles?.(files) ?? false,
         mentions: () => latest.current.mentions, icon,
       });
       setState("ready");
@@ -67,6 +70,7 @@ export const AssistantComposer = forwardRef<ComposerHandle, {
     <div ref={host} className="assistant-editor-host" />
     {state !== "ready" && <textarea ref={fallback} className="assistant-input" rows={2} value={value} maxLength={maxLength} placeholder={placeholder} disabled={disabled} aria-label="给文件助手的消息"
       onChange={event => onChange(event.target.value)}
+      onPaste={event => { const files = [...event.clipboardData.files]; if (files.length && onPasteFiles?.(files)) event.preventDefault(); }}
       onKeyDown={event => {
         if (onKey(event.nativeEvent)) { event.preventDefault(); return; }
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); onSubmit(); }

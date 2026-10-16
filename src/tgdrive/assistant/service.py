@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from ..api import normalize_user_path
 from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
-from . import client_tools, http_tools, knowledge, prompts, providers, web, web_tools, write_tools  # noqa: F401  导入即注册工具
+from . import client_tools, http_tools, knowledge, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
 from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
 from .catalog import CatalogStore
 from .channels import ChannelStore
@@ -52,9 +52,12 @@ CLIENT_RESULT_BYTES = 64 * 1024
 AUTO_WAIT = 25
 ACCESS_MODES = ("approval", "full")
 MAX_MENTIONS = 20
+# 聊天框附件：统一保存在普通文件区域的这个目录下（§22.5），每条消息最多 10 个。
+ATTACHMENT_ROOT = "助手附件/"
+MAX_ATTACHMENTS = 10
 # 读取不可信外部内容的工具：结果进入上下文后，完全访问模式下的修改仍需确认（§19.5）。
 TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "collect_gallery": "分析过网页",
-               "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应"}
+               "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应", "view_image": "查看过图片内容"}
 
 
 def session_hash(token: str) -> str:
@@ -94,6 +97,8 @@ class RunState:
     listeners: int = 0
     thinking: dict = field(default_factory=dict)
     environment: dict = field(default_factory=dict)
+    # 本轮已读取的图片（对象键 → {"mime","data",…} 或不能发送的原因）。只在内存中，不进入留痕。
+    images: dict = field(default_factory=dict)
 
     async def emit(self, event: dict) -> None:
         self.seq += 1
@@ -226,6 +231,39 @@ class AssistantService:
             if key not in keys:
                 keys.append(key)
         return keys
+
+    def _attachments(self, bucket_id: int, value: object, *, strict: bool = True) -> tuple[list[str], int]:
+        """聊天框附件：必须位于「助手附件/」下、存在的普通文件，不要求在作用域内（只读工具对它们有白名单例外）。
+        strict=False 用于重试：已不存在的附件跳过，返回跳过的数量。"""
+        if value in (None, []):
+            return [], 0
+        if not isinstance(value, list) or len(value) > MAX_ATTACHMENTS or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"一条消息最多 {MAX_ATTACHMENTS} 个附件")
+        keys: list[str] = []
+        missing = 0
+        for item in value:
+            try:
+                key = normalize_user_path(item.strip().lstrip("/"))
+            except (PermissionError, ValueError) as exc:
+                raise ValueError(f"附件路径不正确：{item}") from exc
+            if not key.startswith(ATTACHMENT_ROOT) or key.endswith("/"):
+                raise ValueError(f"附件必须保存在 /{ATTACHMENT_ROOT} 下")
+            if self.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone() is None:
+                if strict:
+                    raise ValueError(f"附件 {display(key)} 不存在，可能还没有上传完成")
+                missing += 1
+                continue
+            if key not in keys:
+                keys.append(key)
+        return keys, missing
+
+    def _readable(self, conversation_id: str) -> frozenset:
+        """对话的附件白名单：所有用户消息上传过的附件（对象键）。"""
+        keys: set[str] = set()
+        for message in self.trace.messages(conversation_id, limit=5000):
+            if message["role"] == "user" and isinstance(message.get("attachments"), list):
+                keys.update(str(path).lstrip("/") for path in message["attachments"])
+        return frozenset(keys)
 
     # ---------- 用户端：配置 ----------
 
@@ -381,6 +419,7 @@ class AssistantService:
         new_scope = self._location(payload.get("scope_path")) if choice == "path" else \
             {"location": location, "root": ""}.get(choice or "conversation", scope_root)
         mentions = self._mentions(account.bucket_id, payload.get("mentions"), new_scope)
+        attachments, _ = self._attachments(account.bucket_id, payload.get("attachments"))
         self._switch_model(account.id, row, model_id)
         if new_scope != scope_root:
             # 用户在界面上直接切换作用域，属于用户本人的操作，不需要再确认。
@@ -392,6 +431,8 @@ class AssistantService:
         body = {"text": text.strip(), "location": display(location), "view": view, "scope": display(new_scope)}
         if mentions:
             body["mentions"] = [display(key) for key in mentions]
+        if attachments:
+            body["attachments"] = [display(key) for key in attachments]
         snapshot_id = payload.get("snapshot_id")
         if snapshot_id is not None:
             if not isinstance(snapshot_id, str):
@@ -451,6 +492,11 @@ class AssistantService:
         mentions = self._mentions(account.bucket_id, message.get("mentions"), row["scope_root"])
         if mentions:
             body["mentions"] = [display(key) for key in mentions]
+        attachments, missing = self._attachments(account.bucket_id, message.get("attachments"), strict=False)
+        if attachments:
+            body["attachments"] = [display(key) for key in attachments]
+        if missing:
+            body["attachments_missing"] = missing
         self.trace.truncate(conversation_id, seq)
         self._switch_model(account.id, row, model_id)
         run_id = self.trace.start_run(conversation_id, model_id, prompts.PROMPT_VERSION)
@@ -850,8 +896,11 @@ class AssistantService:
             await asyncio.sleep(0.2)
         self._channel_active[channel_id] = self._channel_active.get(channel_id, 0) + 1
 
-    def _history(self, conversation_id: str, context_window: int | None) -> list[dict]:
-        """把留痕还原成发给模型的消息。最近一次摘要之前的内容用摘要代替；缺少结果的工具调用补上「已取消」。"""
+    def _history(self, conversation_id: str, context_window: int | None, *, run_id: str | None = None,
+                 can_see: bool = False) -> list[dict]:
+        """把留痕还原成发给模型的消息。最近一次摘要之前的内容用摘要代替；缺少结果的工具调用补上「已取消」。
+        识图（§22.3）：只有当前这一轮（run_id）的用户消息与 view_image 结果带 image_refs，由 _attach_images 读取图片；
+        更早轮次的图片换成文字占位，不重复发送。"""
         messages = self.trace.messages(conversation_id, limit=5000)
         start, upto = 0, None
         summary = None
@@ -896,7 +945,22 @@ class AssistantService:
                 mentioned = message.get("mentions")
                 if isinstance(mentioned, list) and mentioned:
                     note += "\n\n[引用] 用户用 @ 明确引用了这些路径（以 / 结尾的是文件夹）：" + "、".join(str(path) for path in mentioned)
-                result.append({"role": "user", "content": message["text"] + note})
+                uploaded = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+                if uploaded:
+                    note += "\n\n[附件] 用户在聊天框上传了这些文件（只读工具可以直接读取它们，即使不在作用域内）：" + "、".join(str(path) for path in uploaded)
+                if message.get("attachments_missing"):
+                    note += f"\n\n[附件] 另有 {message['attachments_missing']} 个附件已被移动或删除，无法再读取。"
+                candidates = [str(path) for path in [*(mentioned if isinstance(mentioned, list) else []), *uploaded]
+                              if isinstance(path, str) and not path.endswith("/")]
+                pictures = [path for path in candidates if vision.is_image(path, None)]
+                item = {"role": "user", "content": message["text"] + note}
+                if candidates and can_see and message.get("run_id") == run_id:
+                    item["image_refs"] = [path.lstrip("/") for path in dict.fromkeys(candidates)]
+                elif pictures and can_see:
+                    item["content"] += "\n\n[图片] " + "、".join(pictures) + " 是之前消息里的图片，内容不再附上；需要时调用 view_image 查看。"
+                elif pictures:
+                    item["content"] += "\n\n[图片] 当前模型不能识图，只能按文件名和类型处理这些图片：" + "、".join(pictures)
+                result.append(item)
             elif role == "assistant":
                 calls = message.get("tool_calls") or []
                 result.append({"role": "assistant", "content": message.get("text") or "", "tool_calls": calls})
@@ -904,7 +968,13 @@ class AssistantService:
             elif role == "tool":
                 if message.get("call_id") in pending:
                     pending.pop(message["call_id"])
-                    result.append({"role": "tool", "tool_call_id": message["call_id"], "content": message["model_content"]})
+                    item = {"role": "tool", "tool_call_id": message["call_id"], "content": message["model_content"]}
+                    refs = message.get("images") if isinstance(message.get("images"), list) else []
+                    if refs and can_see and message.get("run_id") == run_id:
+                        item["image_refs"] = [str(key) for key in refs]
+                    elif refs:
+                        item["content"] += "\n[图片已在之前查看过，内容不再附上；需要时重新调用 view_image]"
+                    result.append(item)
                     if not pending:
                         flush()
         flush()
@@ -912,7 +982,49 @@ class AssistantService:
 
     @staticmethod
     def _estimate(messages: list[dict]) -> int:
-        return sum(len(json.dumps(m, ensure_ascii=False)) for m in messages) // 2
+        """粗略估算 token：图片不按 base64 长度计算，每张按固定值计（§22.3）。"""
+        total = 0
+        for message in messages:
+            pictures = len(message.get("images") or message.get("image_refs") or [])
+            text = {key: value for key, value in message.items() if key not in ("images", "image_refs")}
+            total += len(json.dumps(text, ensure_ascii=False)) // 2 + pictures * vision.IMAGE_TOKENS
+        return total
+
+    async def _attach_images(self, state: RunState, history: list[dict]) -> None:
+        """把 image_refs 换成图片数据（同一轮内缓存）。用户消息里不是图片的引用直接忽略；读不出的图片写进文字说明。"""
+        limit = self.config.limits()["message_images"]
+        max_bytes = int(tool_params(self._tool_settings(), "view_image").get("max_bytes", vision.DEFAULT_ORIGINAL_BYTES))
+        for message in history:
+            refs = message.pop("image_refs", None)
+            if not refs:
+                continue
+            images: list[dict] = []
+            notes: list[str] = []
+            for key in refs:
+                cached = state.images.get(key)
+                if cached is None:
+                    try:
+                        cached = await vision.load_image(self.objects, state.bucket_id, key, max_bytes=max_bytes)
+                    except vision.NotAnImage:
+                        cached = False
+                    except vision.ImageUnavailable as exc:
+                        cached = str(exc)
+                    state.images[key] = cached
+                if cached is False:
+                    continue
+                if isinstance(cached, str):
+                    notes.append(cached)
+                elif message["role"] == "user" and len(images) >= limit:
+                    notes.append(f"/{key} 超过每条消息 {limit} 张的上限，没有附上；需要时调用 view_image 查看")
+                else:
+                    images.append({"mime": cached["mime"], "data": cached["data"], "path": "/" + key})
+            if images:
+                message["images"] = images
+                state.tainted = state.tainted or "查看了图片内容"
+                if message["role"] == "user":
+                    message["content"] += "\n\n[图片] 已随这条消息附上：" + "、".join(item["path"] for item in images)
+            if notes:
+                message["content"] += "\n\n[图片] " + "；".join(notes)
 
     async def _compact(self, state: RunState, model: dict, endpoint) -> bool:
         """压缩较早的历史：保留最近两轮用户消息及其后的全部内容原文，之前的部分（连同旧摘要）交给模型概括。"""
@@ -1030,6 +1142,7 @@ class AssistantService:
         label = TOOLS[call.name].label if call.name in TOOLS else call.name
         await state.emit({"type": "tool_started", "call_id": call.id, "name": call.name, "label": label})
         status, summary, items, event = "ok", "", None, None
+        images: list[str] = []
         try:
             if spec is None:
                 raise ToolError(f"工具 {call.name} 不存在或管理员未启用")
@@ -1107,12 +1220,15 @@ class AssistantService:
                                   conversation_id=state.conversation_id, limits=limits, propose=propose, trace=self.trace,
                                   analyze=analyze, client=client, taint=taint,
                                   public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
-                                  redact=self.guard.redact)
+                                  redact=self.guard.redact,
+                                  readable=shared.setdefault("readable", self._readable(state.conversation_id)) if spec.level == "read" else frozenset(),
+                                  vision=self.channels.vision(self.channels.model(state.model_id)))
             timeout = max(limits["tool_seconds"], spec.timeout or 0)
             output = await asyncio.wait_for(spec.handler(context, arguments), timeout)
             payload, truncated = self._fit(self.guard.redact_value(output.result), limits["tool_result_bytes"])
             summary, items, event = self.guard.redact(output.summary), output.items, self.guard.redact_value(output.event)
             ends_turn = output.ends_turn
+            images = list(output.images)
         except TimeoutError:
             status, payload, truncated, ends_turn = "error", {"error": "工具执行超时，请缩小范围后重试"}, False, False
             summary = "超时"
@@ -1139,6 +1255,9 @@ class AssistantService:
         body = {"call_id": call.id, "name": call.name, "label": label, "arguments": arguments, "status": status,
                 "summary": summary[:300], "result": stored, "items": items, "duration_ms": duration, "truncated": truncated,
                 "event": event, "model_content": model_content, "ends_turn": ends_turn}
+        if images and status == "ok":
+            # 只保存图片引用（对象键），图片本身在当前这一轮发给模型时再读取。
+            body["images"] = images
         return body
 
     async def _run(self, state: RunState) -> None:
@@ -1161,7 +1280,10 @@ class AssistantService:
                 self._validate(state)
                 model = self.channels.model(state.model_id)
                 endpoint = self.channels.endpoint(model["channel_id"])
+                can_see = self.channels.vision(model)
                 tools = self._user_tools(state.user_id)
+                if not can_see:
+                    tools.pop("view_image", None)
                 conversation = self.trace.conversation(state.user_id, state.conversation_id, include_hidden=True)
                 scope_root = conversation["scope_root"]
                 if forced_final is None:
@@ -1179,12 +1301,13 @@ class AssistantService:
                                    "model_text": prompts.limit_reached(forced_final)}
                         seq = self.trace.append(state.conversation_id, state.id, "event", message)
                         await state.emit({"type": "message", "message": {"seq": seq, "role": "event", **message}})
-                history = self._history(state.conversation_id, model["context_window"])
+                history = self._history(state.conversation_id, model["context_window"], run_id=state.id, can_see=can_see)
                 window = model["context_window"] or 32000
                 if self._estimate(history) > window * 0.7 and len(history) > 6 and not compacted:
                     compacted = await self._compact(state, model, endpoint)
                     if compacted:
-                        history = self._history(state.conversation_id, model["context_window"])
+                        history = self._history(state.conversation_id, model["context_window"], run_id=state.id, can_see=can_see)
+                await self._attach_images(state, history)
                 now = datetime.now(ZoneInfo(state.environment["timezone"])) if state.environment.get("timezone") else datetime.now().astimezone()
                 usage = self.objects.metadata.db.execute("SELECT quota_bytes, used_bytes FROM buckets WHERE id=?",
                                                          (state.bucket_id,)).fetchone()
@@ -1193,7 +1316,7 @@ class AssistantService:
                                                can_read_text="read_text_file" in tools, can_web="analyze_page" in tools,
                                                can_danger=any(spec.level == "danger" for spec in tools.values()),
                                                can_share="propose_share" in tools, can_browser="ui_get_view" in tools,
-                                               can_http="http_request" in tools,
+                                               can_http="http_request" in tools, can_view_images=can_see,
                                                public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
                                                access_mode="full" if conversation["access_mode"] == "full"
                                                and self._full_access(state.user_id) else "approval")

@@ -525,11 +525,14 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
   );
 }
 
+const initialVision = (model: ai.AiModel | null): "auto" | "yes" | "no" =>
+  model?.manual_fields.includes("vision") ? (model.capabilities.vision === true ? "yes" : "no") : "auto";
+
 function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number; model: ai.AiModel | null; onClose: () => void; onSaved: () => void }) {
   const initial = (value: number | null | undefined) => value == null ? "" : String(value);
   const [form, setForm] = useState({ model: model?.model ?? "", display_name: model?.display_name ?? "", context_window: initial(model?.context_window),
     max_output: initial(model?.max_output), tools: model?.tools ?? "unknown" as ai.ToolSupport, sort: String(model?.sort ?? 0),
-    input_price: initial(model?.input_price), output_price: initial(model?.output_price) });
+    input_price: initial(model?.input_price), output_price: initial(model?.output_price), vision: initialVision(model) });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const number = (value: string) => value.trim() ? Number(value) : null;
@@ -545,7 +548,9 @@ function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number
       if (value !== null && (!Number.isFinite(value) || value < 0 || value > 100000)) { setError("价格必须是 0–100000 之间的数字"); return; }
     }
     const values = { display_name: form.display_name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output),
-      tools: form.tools, sort: Number(form.sort), input_price: number(form.input_price), output_price: number(form.output_price) };
+      tools: form.tools, sort: Number(form.sort), input_price: number(form.input_price), output_price: number(form.output_price),
+      // 只在改动时提交：提交会把它标记为手动值或恢复为跟随目录。
+      ...(form.vision !== initialVision(model) ? { vision: form.vision } : {}) };
     setBusy(true); setError("");
     try {
       if (model) await ai.updateAdminModel(model.id, values);
@@ -590,6 +595,13 @@ function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number
           </Field>
           <Field label="显示顺序" hint="数字越小越靠前。"><input className="input" type="number" min={0} max={100000} value={form.sort} onChange={event => setForm({ ...form, sort: event.target.value })} /></Field>
         </div>
+        <Field label={`图片输入（识图）${tag("vision")}`} hint={`支持时，用户 @ 或上传的图片会以预览图发给模型，并可使用「查看图片」工具。${!model?.catalog_id ? "模型目录未收录这个模型，跟随目录时按不支持处理。"
+          : manual.has("vision") ? "已手动设置，改回「跟随模型目录」后使用目录中的值。"
+          : `模型目录中为「${model.capabilities.vision === true ? "支持" : model.capabilities.vision === false ? "不支持" : "未声明（按不支持处理）"}」。`}`}>
+          <select className="input" value={form.vision} onChange={event => setForm({ ...form, vision: event.target.value as "auto" | "yes" | "no" })}>
+            <option value="auto">跟随模型目录</option><option value="yes">支持</option><option value="no">不支持</option>
+          </select>
+        </Field>
         {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
       </form>
     </Modal>
