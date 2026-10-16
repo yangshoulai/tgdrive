@@ -2408,13 +2408,13 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 @media (max-width: 1100px) { .assistant-usage-grid { grid-template-columns: minmax(0, 1fr); } }
 
 /* 带说明的选择菜单：名称、路径、选中状态各占固定位置，长目录不挤压名称。 */
-.menu.has-descriptions { width: 288px; max-width: calc(100vw - 16px); max-height: min(480px, calc(100dvh - 32px)); overflow-y: auto; }
+.menu.has-descriptions { width: 256px; max-width: calc(100vw - 16px); max-height: min(480px, calc(100dvh - 32px)); overflow-y: auto; }
 .menu-item > svg { flex: none; }
-.menu-item .menu-copy { display: grid; min-width: 0; gap: 3px; }
+.menu-item .menu-copy { display: grid; min-width: 0; gap: 1px; line-height: 1.35; }
 .menu-item .menu-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.menu-item .menu-copy small { overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.menu-item .menu-copy small { overflow: hidden; color: var(--ink-3); font-size: var(--text-micro); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .menu-item .menu-check { width: 16px; flex: none; }
-.menu-item.has-description { height: auto; min-height: 56px; padding: 8px 10px; }
+.menu-item.has-description { height: auto; min-height: 42px; padding: 5px 8px; }
 .menu-item.has-description[aria-checked="true"] { background: var(--accent-soft); }
 .menu-item.has-description[aria-checked="true"] .menu-copy > span { color: var(--accent-ink); font-weight: 500; }
 .assistant-brand-mark { display: grid; width: 32px; height: 32px; flex: none; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line)); border-radius: var(--radius-md); background: var(--accent-soft); color: var(--accent); }
