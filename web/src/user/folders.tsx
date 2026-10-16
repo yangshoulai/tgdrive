@@ -5,8 +5,10 @@ import { useDirectory, mergeFolderPages } from "../pagination";
 import { Button, Field, Icon, SkeletonRows } from "../ui";
 
 /** 上传、新建与移动共用的位置浏览器；自动列完当前目录的全部子目录。 */
-export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate = false }: {
+export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate = false, creatable = true }: {
   value: string; onChange: (value: string) => void; blocked?: (path: string) => boolean; onReady?: (ready: boolean) => void; allowPrivate?: boolean;
+  /** 只选择位置、不应在这里写入时（如助手作用域）关闭新建子文件夹 */
+  creatable?: boolean;
 }) {
   const id = useId();
   const root = api.isPrivatePath(value) ? api.PRIVATE_PREFIX : "";
@@ -62,7 +64,7 @@ export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate =
         <button type="button" disabled={busy} onClick={() => open(root)} aria-current={value === root ? "page" : undefined}><Icon name={root ? "lock" : "home"} size={15} />{rootName}</button>
         {segments.map((part, index) => <span key={index}><Icon name="chevronRight" size={14} /><button type="button" disabled={busy} onClick={() => open(`${root}${segments.slice(0, index + 1).join("/")}/`)} aria-current={index === segments.length - 1 ? "page" : undefined}>{part}</button></span>)}
       </nav>
-      {!creating && <Button id={`${id}-create`} size="sm" variant="ghost" icon="folderPlus" onClick={() => setCreating(true)}>新建子文件夹</Button>}
+      {creatable && !creating && <Button id={`${id}-create`} size="sm" variant="ghost" icon="folderPlus" onClick={() => setCreating(true)}>新建子文件夹</Button>}
     </div>
     <div className="move-list" aria-label="子文件夹">
       {creating && <div className="move-new">

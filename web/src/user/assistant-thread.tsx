@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { Markdown } from "../markdown";
-import { AssistantMark, Badge, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
+import { AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
 const display = (key: string) => "/" + key;
 const baseName = (key: string) => key.replace(/\/$/, "").split("/").pop() || key;
@@ -19,6 +19,28 @@ export type LiveRun = {
   reasoning: string; reasoningStartedAt: number | null; streaming: string;
   tools: { callId: string; name: string; label: string }[]; phase: "queued" | "thinking" | "tool" | "writing" | null; queue?: number;
 };
+
+/** 运行阶段到头像动效：调用工具时咬合扫描，输出回复时呼吸，其余（排队、思考）环绕。 */
+export function markState(live: LiveRun | null | undefined): AssistantMarkState {
+  if (!live) return "idle";
+  return live.phase === "tool" ? "tool" : live.phase === "writing" ? "writing" : "thinking";
+}
+
+/** 头像状态：工具调用通常只有几毫秒，每次开始调用后至少保持一个动效周期（1.4 秒）的「咬合扫描」，避免一闪而过。 */
+export function useMarkState(live: LiveRun | null | undefined): AssistantMarkState {
+  const raw = markState(live);
+  const tools = live?.tools.length ?? 0;
+  const [holdUntil, setHoldUntil] = useState(0);
+  const [, rerender] = useState(0);
+  useEffect(() => { if (tools) setHoldUntil(Date.now() + 1400); }, [tools]);
+  useEffect(() => {
+    const wait = holdUntil - Date.now();
+    if (wait <= 0) return;
+    const timer = window.setTimeout(() => rerender(value => value + 1), wait);
+    return () => window.clearTimeout(timer);
+  }, [holdUntil]);
+  return live && raw !== "tool" && Date.now() < holdUntil ? "tool" : raw;
+}
 
 export function useNow(active: boolean, interval = 1000) {
   const [now, setNow] = useState(() => Date.now());
@@ -131,11 +153,12 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
     for (const tool of live.tools) steps.push({ kind: "tool", key: `live-${tool.callId}`, pending: tool });
   }
   const streaming = live?.streaming ?? "";
+  const mark = useMarkState(live);
   const hasAssistant = steps.length > 0 || turn.cards.length > 0 || turn.answer || streaming || turn.notices.length > 0 || live;
   return <div className="ai-turn">
     {turn.user && <UserMessage message={turn.user} />}
     {hasAssistant && <div className={`ai-reply${live ? " is-live" : ""}`}>
-      <span className="ai-avatar" aria-hidden="true"><AssistantMark /></span>
+      <span className="ai-avatar" aria-hidden="true"><AssistantMark state={mark} /></span>
       <div className="ai-reply-body">
         <div className="ai-reply-head"><strong>文件助手</strong>{model && <span className="ai-model" title={model}>{model}</span>}
           {live && <LiveStatus live={live} />}</div>
@@ -167,7 +190,10 @@ function UserMessage({ message }: { message: ai.ChatMessage }) {
   return <div className="ai-user">
     {message.attachment && <span className="ai-attachment"><Icon name="globe" size={13} />
       <span>{message.attachment.source.replace(/^https?:\/\//, "")} · {message.attachment.pages} 页 · {message.attachment.images.toLocaleString("zh-CN")} 个图片候选</span></span>}
-    <div className="ai-bubble">{message.text}</div>
+    {Boolean(message.mentions?.length) && <span className="ai-mentions">{message.mentions!.map(path => <span key={path} className="assistant-mention-chip" title={path}>
+      <Icon name={path.endsWith("/") ? "folder" : "file"} size={12} /><span>{path.replace(/\/$/, "").split("/").at(-1)}</span></span>)}</span>}
+    {/* 用户输入的 Markdown（列表、加粗、代码等）与回复使用同一个安全渲染器，不执行原始 HTML。 */}
+    <div className="ai-bubble"><Markdown source={message.text ?? ""} /></div>
     <span className="ai-user-meta">{message.created_at ? formatDateTime(message.created_at) : ""}
       <button type="button" onClick={() => copyMessage(message.text ?? "")}>复制</button></span>
   </div>;

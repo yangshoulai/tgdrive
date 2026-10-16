@@ -7,9 +7,11 @@ import * as api from "../api";
 import * as ai from "../assistant-api";
 import { AssistantMark, Badge, Button, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, toast, type IconName, type MenuItem } from "../ui";
 import type { PageImport } from "./page-import";
-import { Thread, type LiveRun } from "./assistant-thread";
+import { Thread, useMarkState, type LiveRun } from "./assistant-thread";
 import { filesBridge, waitForFiles } from "./assistant-bridge";
 import { assistantEnvironment } from "./assistant-environment";
+import { commonFolder, useMentions } from "./assistant-mentions";
+import { FolderPicker } from "./folders";
 
 const WIDTH_KEY = "tessera-assistant-width";
 const MIN_WIDTH = 360, MAX_WIDTH = 720;
@@ -63,7 +65,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState("");
   const [modelId, setModelId] = useState<number | null>(null);
-  const [scopeChoice, setScopeChoice] = useState<"conversation" | "location" | "root">("conversation");
+  // 用户为下一条消息选定的作用域目录（对象键，"" 为全部普通文件）；null 表示沿用对话作用域。
+  const [scopeTarget, setScopeTarget] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveRun | null>(null);
   const [pendingMode, setPendingMode] = useState<ai.AccessMode>("approval");
@@ -80,6 +83,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const selection = useRef(0);
   const currentId = detail?.conversation.id ?? null;
   const locationKey = location.view === "files" ? location.prefix : "";
+  const headerMark = useMarkState(runId ? live ?? EMPTY_LIVE : null);
+  const mention = useMentions({ draft, setDraft, input, location: locationKey, enabled: config.notice_ack && !(config.usage.limit && config.usage.today >= config.usage.limit) });
 
   useEffect(() => {
     if (!config.models.some(model => model.id === modelId)) {
@@ -219,7 +224,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   async function openConversation(id: string) {
     const version = ++selection.current;
     unsubscribe.current?.(); unsubscribe.current = null;
-    setRunId(null); setLive(null); setHistory(false); setReconnecting(false); setLoading(true); setScopeChoice("conversation");
+    setRunId(null); setLive(null); setHistory(false); setReconnecting(false); setLoading(true); setScopeTarget(null); mention.reset();
     try {
       const value = await ai.conversation(id);
       if (version !== selection.current) return;
@@ -234,7 +239,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     selection.current += 1;
     setLoading(false); setReconnecting(false);
     unsubscribe.current?.(); unsubscribe.current = null;
-    setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeChoice("conversation"); setDraft(""); setPendingMode("approval");
+    setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeTarget(null); mention.reset(); setDraft(""); setPendingMode("approval");
     window.setTimeout(() => input.current?.focus(), 30);
   }
 
@@ -246,9 +251,13 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     setSending(true);
     const version = selection.current;
     try {
+      // 引用超出作用域时，扩大到作用域与所有引用的公共上级目录（界面已提示，属于用户发送的操作）。
+      const mentions = text === draft ? mention.mentions.map(item => item.key) : [];
+      const baseScope = scopeTarget ?? (detail ? detail.conversation.scope.replace(/^\//, "") : locationKey);
+      const target = mentions.some(key => !key.startsWith(baseScope)) ? commonFolder([baseScope || "/", ...mentions].filter(key => key !== "/")) : scopeTarget;
       let current = detail;
       if (!current) {
-        current = await ai.createConversation(scopeChoice === "root" ? "" : locationKey, modelId, config.full_access ? pendingMode : "approval");
+        current = await ai.createConversation(target ?? locationKey, modelId, config.full_access ? pendingMode : "approval");
         if (version !== selection.current) return;
         setDetail(current);
         loadConversations();
@@ -258,10 +267,11 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         snapshotId = (await ai.uploadSnapshot(current.conversation.id, importedPages)).snapshot_id;
       }
       const result = await ai.sendMessage(current.conversation.id, { text: message, model_id: modelId ?? undefined, location: locationKey, view: location.view,
-        scope: current === detail ? scopeChoice : undefined, snapshot_id: snapshotId, environment: assistantEnvironment() });
+        ...(current === detail && target !== null ? { scope: "path" as const, scope_path: display(target) } : {}),
+        mentions: mentions.length ? mentions.map(display) : undefined, snapshot_id: snapshotId, environment: assistantEnvironment() });
       if (version !== selection.current) return;
       if (snapshotId) onPageImportDone?.();
-      setDraft(""); setScopeChoice("conversation");
+      setDraft(""); setScopeTarget(null); mention.reset();
       if (input.current) input.current.style.height = "";
       const fresh = await ai.conversation(current.conversation.id).catch(() => null);
       if (version !== selection.current) return;
@@ -360,7 +370,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   const conversationScope = detail?.conversation.scope ?? display(locationKey);
   const currentLocation = display(locationKey);
-  const effectiveScope = scopeChoice === "location" ? currentLocation : scopeChoice === "root" ? "/" : conversationScope;
+  const effectiveScope = scopeTarget !== null ? display(scopeTarget) : conversationScope;
+  const scopeKey = effectiveScope.replace(/^\//, "");
+  const outside = mention.mentions.filter(item => !item.key.startsWith(scopeKey));
+  const expandedScope = outside.length ? display(commonFolder([scopeKey, ...mention.mentions.map(item => item.key)].filter(Boolean))) : null;
   const usage = config.usage;
   const usageRatio = usage.limit ? usage.today / usage.limit : 0;
   const exhausted = Boolean(usage.limit && usage.today >= usage.limit);
@@ -373,7 +386,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   }} />;
   const header = <header className="assistant-header">
     {<IconButton className={page ? "assistant-mobile-history" : undefined} icon="list" label="对话历史" active={history} onClick={() => { setHistory(value => !value); if (!history) loadConversations(); }} />}
-    <span className={`assistant-brand-mark${runId ? " is-working" : ""}`} aria-hidden="true"><AssistantMark size={24} /></span>
+    <span className={`assistant-brand-mark${runId ? " is-working" : ""}`} aria-hidden="true"><AssistantMark size={24} state={headerMark} /></span>
     <div className="assistant-title"><strong>{detail?.conversation.title || "文件助手"}</strong>
       <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{detail ? conversationScope : "查找、整理，让文件井井有条"}</small></div>
     <IconButton icon="plus" label="新对话（⌘⇧O）" onClick={newConversation} />
@@ -395,18 +408,26 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     {unseen && <button type="button" className="assistant-unseen" onClick={() => scrollToEnd(true)}><Icon name="chevronDown" size={14} />有新消息</button>}</div>
     <div className="assistant-composer">
       {pageImport && <SnapshotChip value={pageImport} onRemove={() => onPageImportDone?.()} />}
-      <div className="assistant-compose-box">
+      {mention.menu}
+      <div className={`assistant-compose-box${runId ? " is-running" : ""}`}>
         <div className="assistant-context-row">
           <ScopeChip scope={effectiveScope} conversationScope={detail ? conversationScope : null} location={currentLocation}
-            privateView={location.view === "private"} choice={scopeChoice} onChoose={setScopeChoice} />
+            privateView={location.view === "private"} changed={scopeTarget !== null} onChoose={setScopeTarget} />
           <ModeChip mode={accessMode} allowed={config.full_access} onChoose={next => void chooseMode(next)} />
         </div>
+        {mention.mentions.length > 0 && <div className="assistant-mention-chips">
+          {mention.mentions.map(item => <span key={item.key} className="assistant-mention-chip"><Icon name={item.folder ? "folder" : "file"} size={12} />
+            <span title={display(item.key)}>{item.key.replace(/\/$/, "").split("/").at(-1)}</span>
+            <button type="button" aria-label={`移除引用 ${display(item.key)}`} onClick={() => mention.remove(item.key)}><Icon name="x" size={11} /></button></span>)}
+          {expandedScope && <span className="assistant-mention-hint"><Icon name="info" size={12} />引用不在 {effectiveScope} 内，发送时作用域扩大到 {expandedScope}</span>}
+        </div>}
         <textarea ref={input} className="assistant-input" rows={2} value={draft} maxLength={DRAFT_LIMIT}
-          placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : "想找什么，或想怎样整理？"}
+          placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : "想找什么，或想怎样整理？输入 @ 引用文件"}
           disabled={!config.notice_ack || exhausted} aria-label="给文件助手的消息"
-          onChange={event => setDraft(event.target.value)}
+          onChange={event => { setDraft(event.target.value); mention.sync(); }}
+          onSelect={mention.sync} onBlur={() => window.setTimeout(mention.sync, 120)}
           onInput={event => { const node = event.currentTarget; node.style.height = "auto"; node.style.height = `${Math.min(node.scrollHeight, 8 * 22)}px`; }}
-          onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
+          onKeyDown={event => { if (mention.onKeyDown(event)) return; if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
         <div className="assistant-controls">
           <Menu label="选择模型" align="start" className="assistant-model" items={config.models.map(model => ({ label: model.label,
             description: [model.channel_name ?? "模型渠道", model.capabilities?.reasoning ? "推理" : "", model.capabilities?.vision ? "识图" : "",
@@ -416,7 +437,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
             <Icon name={selectedModel?.capabilities?.reasoning ? "brain" : "server"} size={14} /><span>{selectedModel?.label ?? "选择模型"}</span><Icon name="chevronDown" size={12} />
           </Menu>
           <button type="button" className="assistant-capability-button" onClick={() => setCapabilities(true)} title="查看助手能力"><Icon name="sparkle" size={14} /><span>能力</span></button>
-          <span className="assistant-enter-hint">Enter 发送 · Shift+Enter 换行</span>
+          <span className="assistant-enter-hint">@ 引用 · Enter 发送 · Shift+Enter 换行</span>
           {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
             : <button type="button" className="assistant-send" aria-label="发送" title="发送（Enter）" disabled={!draft.trim() || sending || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)} onClick={() => void send()}>
               {sending ? <span className="spinner" aria-hidden="true" /> : <Icon name="arrowUp" size={18} />}</button>}
@@ -522,21 +543,36 @@ function groupModels(models: ai.AiModel[]) {
 
 /* ---------- 输入区 ---------- */
 
-function ScopeChip({ scope, conversationScope, location, privateView, choice, onChoose }: {
+function ScopeChip({ scope, conversationScope, location, privateView, changed, onChoose }: {
   scope: string; conversationScope: string | null; location: string; privateView: boolean;
-  choice: "conversation" | "location" | "root"; onChoose: (choice: "conversation" | "location" | "root") => void;
+  changed: boolean; onChoose: (target: string | null) => void;
 }) {
-  const differs = conversationScope !== null && conversationScope !== location && choice === "conversation";
+  const [browsing, setBrowsing] = useState(false);
+  const key = (path: string) => path.replace(/^\//, "");
+  const differs = conversationScope !== null && conversationScope !== location && !changed;
   const items: MenuItem[] = [
-    ...(conversationScope !== null ? [{ label: "对话作用域", description: conversationScope, icon: "folder" as IconName, heading: "助手可以访问的范围", checked: choice === "conversation", onSelect: () => onChoose("conversation") }] : []),
-    { label: "当前位置", description: location, icon: "folder", heading: conversationScope === null ? "助手可以访问的范围" : undefined, checked: conversationScope === null ? choice !== "root" : choice === "location", onSelect: () => onChoose(conversationScope === null ? "conversation" : "location") },
-    { label: "全部普通文件", description: "/ · 不包含私密空间", icon: "home", checked: choice === "root", onSelect: () => onChoose("root") },
+    ...(conversationScope !== null ? [{ label: "对话作用域", description: conversationScope, icon: "folder" as IconName, heading: "助手可以访问的范围", checked: !changed, onSelect: () => onChoose(null) }] : []),
+    { label: "当前位置", description: location, icon: "folder", heading: conversationScope === null ? "助手可以访问的范围" : undefined,
+      checked: scope === location && (changed || conversationScope === null), onSelect: () => onChoose(conversationScope === null ? null : key(location)) },
+    { label: "全部普通文件", description: "/ · 不包含私密空间", icon: "home", checked: scope === "/", onSelect: () => onChoose("") },
+    { label: "浏览目录…", description: "在目录树中选择", icon: "move", divider: true, onSelect: () => setBrowsing(true) },
   ];
   return <span className={`assistant-scope${differs ? " has-hint" : ""}`} title={privateView ? "私密空间不对助手开放，作用域为普通文件" : differs ? `当前位置 ${location} 与对话作用域不同` : `助手只处理 ${scope} 内的普通文件`}>
     <Menu label="切换作用域" align="start" className="assistant-scope-trigger" items={items}>
       <Icon name={privateView ? "shield" : "folder"} size={14} /><span className="assistant-scope-label">{privateView ? "普通文件" : "作用于"}</span><span className="assistant-scope-text">{scope}</span><Icon name="chevronDown" size={12} />
     </Menu>
+    {browsing && <ScopeDialog initial={key(scope)} onClose={() => setBrowsing(false)} onChoose={target => { setBrowsing(false); onChoose(target === key(conversationScope ?? "") && conversationScope !== null ? null : target); }} />}
   </span>;
+}
+
+/** 目录树选择作用域：复用上传与移动的位置浏览器，私密空间与系统区域不在其中。 */
+function ScopeDialog({ initial, onClose, onChoose }: { initial: string; onClose: () => void; onChoose: (target: string) => void }) {
+  const [value, setValue] = useState(initial);
+  const [ready, setReady] = useState(false);
+  return <Modal title="选择作用域" description="助手只会查看和整理这个目录中的普通文件。" icon="folder" onClose={onClose} className="assistant-scope-dialog"
+    footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!ready} onClick={() => onChoose(value)}>作用于 {display(value)}</Button></>}>
+    <FolderPicker value={value} onChange={setValue} onReady={setReady} creatable={false} />
+  </Modal>;
 }
 
 function ModeChip({ mode, allowed, onChoose }: { mode: ai.AccessMode; allowed: boolean; onChoose: (mode: ai.AccessMode) => void }) {

@@ -51,6 +51,7 @@ CLIENT_TIMEOUT = 45
 CLIENT_RESULT_BYTES = 64 * 1024
 AUTO_WAIT = 25
 ACCESS_MODES = ("approval", "full")
+MAX_MENTIONS = 20
 # 读取不可信外部内容的工具：结果进入上下文后，完全访问模式下的修改仍需确认（§19.5）。
 TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "collect_gallery": "分析过网页",
                "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应"}
@@ -200,6 +201,31 @@ class AssistantService:
         if text.startswith(".tgdrive"):
             return ""  # 私密空间、回收站等系统区域不能作为作用域
         return normalize_user_path(text, directory=True)
+
+    def _mentions(self, bucket_id: int, value: object, scope_root: str) -> list[str]:
+        """@ 引用的文件或文件夹：必须是作用域内、存在的普通文件；超出作用域时由界面先扩大作用域再发送。"""
+        if value in (None, []):
+            return []
+        if not isinstance(value, list) or len(value) > MAX_MENTIONS or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"一次最多引用 {MAX_MENTIONS} 个文件或文件夹")
+        keys: list[str] = []
+        for item in value:
+            text = item.strip().lstrip("/")
+            try:
+                key = normalize_user_path(text, directory=text.endswith("/"))
+            except PermissionError as exc:
+                raise ValueError("不能引用私密空间或系统区域的内容") from exc
+            except ValueError as exc:
+                raise ValueError(f"引用的路径不正确：{item}") from exc
+            if not key.startswith(scope_root):
+                raise ValueError(f"引用的 {display(key)} 不在作用域 {display(scope_root)} 内")
+            query = ("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1", (bucket_id, key, key + "\U0010ffff")) \
+                if key.endswith("/") else ("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key))
+            if self.metadata.db.execute(*query).fetchone() is None:
+                raise ValueError(f"引用的 {display(key)} 不存在")
+            if key not in keys:
+                keys.append(key)
+        return keys
 
     # ---------- 用户端：配置 ----------
 
@@ -356,9 +382,12 @@ class AssistantService:
         location = self._location(payload.get("location"))
         scope_root = row["scope_root"]
         choice = payload.get("scope")
-        if choice not in (None, "conversation", "location", "root"):
+        if choice not in (None, "conversation", "location", "root", "path"):
             raise ValueError("作用域选项不正确")
-        new_scope = {"location": location, "root": ""}.get(choice or "conversation", scope_root)
+        # path：用户在目录树中选定的目录（同样排除私密空间与系统区域），属于用户本人的操作。
+        new_scope = self._location(payload.get("scope_path")) if choice == "path" else \
+            {"location": location, "root": ""}.get(choice or "conversation", scope_root)
+        mentions = self._mentions(account.bucket_id, payload.get("mentions"), new_scope)
         if model_id != row["model_id"]:
             self.trace.update_conversation(account.id, conversation_id, model_id=model_id)
             if row["model_id"] is not None:
@@ -372,6 +401,8 @@ class AssistantService:
                 "type": "scope_changed", "text": f"作用域：{display(scope_root)} → {display(new_scope)}",
                 "model_text": f"[系统事件] 用户把作用域从 {display(scope_root)} 切换为 {display(new_scope)}。"})
         body = {"text": text.strip(), "location": display(location), "view": view, "scope": display(new_scope)}
+        if mentions:
+            body["mentions"] = [display(key) for key in mentions]
         snapshot_id = payload.get("snapshot_id")
         if snapshot_id is not None:
             if not isinstance(snapshot_id, str):
@@ -821,6 +852,9 @@ class AssistantService:
                 note = (f"\n\n[附件] 用户通过抓取脚本发来了 {attachment['source']} 的页面快照 snapshot_id={attachment['id']}"
                         f"（{attachment['pages']} 页，{attachment['images']} 个图片候选）。需要时用 analyze_page(snapshot_id=…) 分析。"
                         if isinstance(attachment, dict) and attachment.get("type") == "snapshot" else "")
+                mentioned = message.get("mentions")
+                if isinstance(mentioned, list) and mentioned:
+                    note += "\n\n[引用] 用户用 @ 明确引用了这些路径（以 / 结尾的是文件夹）：" + "、".join(str(path) for path in mentioned)
                 result.append({"role": "user", "content": message["text"] + note})
             elif role == "assistant":
                 calls = message.get("tool_calls") or []

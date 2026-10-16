@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.12.0
+// @version      0.13.0
 // @description  在 X、YouTube 和其他网页上复制资源地址与 curl 命令，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
@@ -17,6 +17,13 @@
 // @grant        GM_unregisterMenuCommand
 // @grant        GM_openInTab
 // @grant        unsafeWindow
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.deleteValue
+// @grant        GM.openInTab
+// @grant        GM.setClipboard
+// @grant        GM.xmlHttpRequest
+// @inject-into  content
 // @connect      *
 // ==/UserScript==
 
@@ -31,6 +38,8 @@
  * - 发给文件助手：把当前已渲染页面的结构快照（图片候选与分页链接，不含正文）postMessage 给新打开的 Tessera 页面，
  *   可以逐页暂存后一起发送；由用户在 Tessera 的助手对话框里点击发送，不经过访问密钥。
  * Cookie 只放进你复制的命令或发给你自己配置的 Tessera 服务器，不发往其他地方。
+ * 兼容两类脚本管理器：Tampermonkey／Violentmonkey 的同步 GM_* API，以及 iOS Userscripts（Safari）只提供的异步 GM.* API；
+ * 后者没有 GM_cookie 和菜单命令，启动前先把存储读入内存，未启用的网站保留一个淡化的悬浮按钮作为入口。
  */
 (function () {
   "use strict";
@@ -38,24 +47,78 @@
   const page = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   const MAX_ITEMS = 150;
 
+  // ---------- 脚本管理器兼容层 ----------
+
+  // Tampermonkey／Violentmonkey 提供同步 GM_*；iOS Userscripts 只有异步 GM.*（以及 GM_xmlhttpRequest），没有 GM_cookie 与菜单命令。
+  // 存储统一走内存缓存：异步环境启动前一次读入，写入先改缓存再异步保存，其余代码保持同步读写。
+  const GMA = typeof GM !== "undefined" ? GM : null;
+  const SYNC_STORE = typeof GM_getValue === "function" && typeof GM_setValue === "function";
+  const HAS_MENU = typeof GM_registerMenuCommand === "function";
+  const STORE_KEYS = ["settings", "sent", "fabPosition", "assistant-pages"];
+  const cache = new Map();
+  const gm = {
+    get(key, fallback) {
+      if (SYNC_STORE) return GM_getValue(key, fallback);
+      return cache.has(key) ? cache.get(key) : fallback;
+    },
+    set(key, value) {
+      if (SYNC_STORE) return GM_setValue(key, value);
+      cache.set(key, value);
+      const done = value === null || value === undefined ? GMA?.deleteValue?.(key) : GMA?.setValue?.(key, value);
+      Promise.resolve(done).catch(() => { /* 保存失败时本页仍使用内存中的值 */ });
+    },
+    /** 异步存储读入内存；切回标签页时重新读取，拿到其他标签页写入的已发送记录与设置。 */
+    async load() {
+      if (SYNC_STORE || !GMA?.getValue) return;
+      await Promise.all(STORE_KEYS.map(async key => {
+        try {
+          const value = await GMA.getValue(key);
+          if (value === undefined) cache.delete(key); else cache.set(key, value);
+        } catch { /* 读取失败沿用默认值 */ }
+      }));
+    },
+    openTab(url) {
+      if (typeof GM_openInTab === "function") return GM_openInTab(url, { active: true });
+      if (GMA?.openInTab) return void Promise.resolve(GMA.openInTab(url, false)).catch(() => window.open(url, "_blank"));
+      window.open(url, "_blank");
+    },
+    copy(text) {
+      if (typeof GM_setClipboard === "function") return GM_setClipboard(text, "text");
+      if (GMA?.setClipboard) return void Promise.resolve(GMA.setClipboard(text, "text/plain")).catch(() => navigator.clipboard?.writeText(text));
+      navigator.clipboard?.writeText(text);
+    },
+    /** 返回带 abort() 的请求句柄；GM.xmlHttpRequest 返回的 Promise 本身也带 abort。 */
+    xhr(details) {
+      if (typeof GM_xmlhttpRequest === "function") return GM_xmlhttpRequest(details);
+      if (GMA?.xmlHttpRequest) {
+        const request = GMA.xmlHttpRequest(details);
+        Promise.resolve(request).catch(() => { /* 结果经回调处理 */ });
+        return request;
+      }
+      throw new Error("当前脚本管理器不支持跨域请求，请使用 Tampermonkey、Violentmonkey 或 Userscripts");
+    },
+    menu(label, fn) { return HAS_MENU ? GM_registerMenuCommand(label, fn) : null; },
+    unmenu(id) { if (id != null && typeof GM_unregisterMenuCommand === "function") GM_unregisterMenuCommand(id); },
+  };
+
   // ---------- 设置 ----------
 
   // siteMode：exclude = 所有网站，排除 excludeSites；include = 只在 includeSites 中的网站。两份列表分开保存，切换模式互不覆盖。
   // destination 以 / 结尾（空串为根目录）；destinationPrivate 为 true 时保存到私密空间（需在 Tessera 页面解锁确认）。
   const DEFAULTS = { server: "", key: "", destination: "", destinationPrivate: false, cookies: true, fab: true, view: "list", siteMode: "exclude", excludeSites: [], includeSites: [] };
-  const settings = () => ({ ...DEFAULTS, ...GM_getValue("settings", {}) });
-  const saveSettings = value => GM_setValue("settings", { ...settings(), ...value });
+  const settings = () => ({ ...DEFAULTS, ...gm.get("settings", {}) });
+  const saveSettings = value => gm.set("settings", { ...settings(), ...value });
 
   // ---------- 已发送记录 ----------
 
   // 发送成功的资源地址持久保存（跨页面、跨标签页），列表里标「已发送」，全选与批量发送时自动跳过；任务失败时移除。
   const SENT_LIMIT = 1000;
-  const sentList = () => GM_getValue("sent", []);
+  const sentList = () => gm.get("sent", []);
   const isSent = url => sentList().includes(url);
   function markSent(urls, sent = true) {
     const set = new Set(urls);
     const rest = sentList().filter(url => !set.has(url));
-    GM_setValue("sent", sent ? [...rest, ...set].slice(-SENT_LIMIT) : rest);
+    gm.set("sent", sent ? [...rest, ...set].slice(-SENT_LIMIT) : rest);
   }
 
   // ---------- 显示范围 ----------
@@ -90,7 +153,7 @@
     const add = value.siteMode === "include" ? enabled : !enabled;
     saveSettings({ [key]: add ? [...keep, currentSite()] : keep });
     applySiteState();
-    toast(enabled ? `已在 ${currentSite()} 上启用` : `已在 ${currentSite()} 上隐藏，可从 Tampermonkey 菜单恢复`);
+    toast(enabled ? `已在 ${currentSite()} 上启用` : HAS_MENU ? `已在 ${currentSite()} 上隐藏，可从脚本管理器菜单恢复` : `已在 ${currentSite()} 上隐藏，点淡化的悬浮按钮可重新启用`);
   }
 
   // ---------- 资源嗅探 ----------
@@ -147,6 +210,23 @@
       });
       networkObserver.observe({ type: "resource", buffered: true });
     } catch { networkObserver = null; /* 浏览器不支持资源计时 */ }
+    // Safari 扩展的内容脚本环境里观察器可能收不到页面资源：同时定时读取资源计时列表补齐（重复地址由 remember 去重）。
+    if (!resourcePoll) resourcePoll = setInterval(pollResources, 2000);
+    pollResources();
+  }
+  let resourcePoll = null, resourceIndex = 0;
+  function pollResources() {
+    const timeline = page.performance || window.performance;
+    let entries;
+    try { entries = timeline?.getEntriesByType?.("resource") || []; } catch { return; }
+    if (entries.length < resourceIndex) resourceIndex = 0; // 页面清空了资源缓冲区
+    let changed = false;
+    for (const entry of entries.slice(resourceIndex)) {
+      const type = classify(entry.name, entry.initiatorType);
+      if (type && remember(entry.name, type, { source: "网络" })) changed = true;
+    }
+    resourceIndex = entries.length;
+    if (changed) listeners.forEach(fn => fn());
   }
 
   function upgradeImage(src) {
@@ -274,7 +354,7 @@
         request?.abort();
       }, details.timeout);
       try {
-        request = GM_xmlhttpRequest({ ...details,
+        request = gm.xhr({ ...details,
           onreadystatechange: response => { limit(response); },
           onprogress: response => { if (!settled && !limit(response)) details.onprogress?.(response); },
           upload: details.upload ? { onprogress: response => { if (!settled) details.upload.onprogress?.(response); } } : undefined,
@@ -508,6 +588,16 @@
       background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-panel); box-shadow: var(--shadow);
       pointer-events: auto; z-index: 2147483647; animation: rise .16s ease-out; }
     .panel.batch-panel { width: 680px; }
+    .panel.is-sheet { width: auto; max-width: none; }
+    .fab.is-dormant { opacity: .38; transform: scale(.82); }
+    .fab.is-dormant:hover, .fab.is-dormant:focus-visible { opacity: 1; transform: none; }
+    .fab.is-dormant .badge { display: none; }
+    /* 触屏：输入框 16px 字号，避免 iOS Safari 聚焦时自动放大页面；按钮保留 44px 触控范围。 */
+    @media (hover: none) and (pointer: coarse) {
+      input[type=text], input[type=password], input[type=url], textarea, select, .variant { font-size: 16px; }
+      .icon-btn { min-width: 40px; min-height: 40px; }
+      .btn { min-height: 40px; }
+    }
     /* 只做位移不改透明度：动画被节流或暂停时面板仍然完整可见 */
     @keyframes rise { from { transform: translateY(6px); } }
     header { display: flex; align-items: center; gap: 10px; height: 56px; padding: 0 16px 0 24px; border-bottom: 1px solid var(--line); flex: none; }
@@ -991,7 +1081,7 @@
 
   const FAB = 42, EDGE = 16;
   /** 位置保存为 { side: "left" | "right", y: 顶部占视口高度的比例 }，跨站点共用。 */
-  const fabPosition = () => ({ side: "right", y: null, ...GM_getValue("fabPosition", {}) });
+  const fabPosition = () => ({ side: "right", y: null, ...gm.get("fabPosition", {}) });
 
   function placeFab() {
     if (!fab) return;
@@ -1025,7 +1115,7 @@
       button.classList.remove("dragging");
       if (!moved) return;
       const rect = button.getBoundingClientRect();
-      GM_setValue("fabPosition", { side: rect.left + FAB / 2 < innerWidth / 2 ? "left" : "right", y: rect.top / innerHeight });
+      gm.set("fabPosition", { side: rect.left + FAB / 2 < innerWidth / 2 ? "left" : "right", y: rect.top / innerHeight });
       placeFab();
       setTimeout(placePanel, 210);
       // 拖动结束时浏览器可能紧接着派发 click：短时间内吞掉它，避免松手就打开面板。
@@ -1044,6 +1134,14 @@
     const fabRect = fab && fab.style.display !== "none" ? fab.getBoundingClientRect() : null;
     const left = fabRect ? fabRect.left + FAB / 2 < innerWidth / 2 : false;
     Object.assign(panel.style, { left: "", right: "", top: "", bottom: "" });
+    // 手机等窄屏：面板贴底展开成底部抽屉，左右与底部避开安全区域（刘海、Home 指示条）。
+    const sheet = innerWidth <= 560;
+    panel.classList.toggle("is-sheet", sheet);
+    if (sheet) {
+      Object.assign(panel.style, { left: "calc(8px + env(safe-area-inset-left))", right: "calc(8px + env(safe-area-inset-right))",
+        bottom: "calc(8px + env(safe-area-inset-bottom))", maxHeight: `${Math.min(760, Math.round(innerHeight * 0.86))}px` });
+      return;
+    }
     panel.style[left ? "left" : "right"] = "12px";
     if (!fabRect) {
       panel.style.bottom = "20px";
@@ -1057,13 +1155,19 @@
     }
   }
 
+  /** 无菜单的管理器在非 Tessera 页面需要淡化按钮兜底。 */
+  const dormantFab = () => !HAS_MENU && !onTessera();
+
   function refreshFab() {
     if (!fab) return;
     const count = [...items.values()].filter(item => item.type !== "image").length;
     badge.hidden = count === 0;
     fab.classList.toggle("has-items", count > 0);
     badge.textContent = count > 99 ? "99+" : String(count);
-    fab.style.display = !settings().fab || !active || document.fullscreenElement ? "none" : "";
+    // 正常显示：已启用且设置里打开了悬浮按钮。没有菜单命令时，未启用或关闭悬浮按钮也保留一个淡化按钮，否则无法再打开设置。
+    const dormant = !(settings().fab && active) && dormantFab();
+    fab.classList.toggle("is-dormant", dormant);
+    fab.style.display = document.fullscreenElement || !(settings().fab && active) && !dormant ? "none" : "";
   }
 
   function toast(message) {
@@ -1076,7 +1180,7 @@
   }
 
   function copy(text, message = "已复制") {
-    GM_setClipboard(text, "text");
+    gm.copy(text);
     toast(message);
   }
 
@@ -1348,7 +1452,7 @@
         h("span", { className: "secondary" },
           iconButton("link", "复制链接", () => copy(item.url, "已复制链接")),
           iconButton("terminal", "复制 curl 命令", async () => copy(await curlFor(item.url), "已复制 curl 命令")),
-          iconButton("external", "在新标签页打开", () => GM_openInTab(item.url, { active: true })),
+          iconButton("external", "在新标签页打开", () => gm.openTab(item.url)),
           h("span", { className: "action-sep", "aria-hidden": "true" })),
         browserEligible(item) ? iconButton("download", "本地下载（当前浏览器下载后上传）", () => startBatch([item.url], "local"))
           : h("button", { type: "button", className: "icon-btn", disabled: true, title: "流媒体列表请使用服务器下载", "aria-label": "本地下载不可用" }, svg("download")),
@@ -1505,7 +1609,7 @@
     let binary = "";
     for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
     const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    GM_openInTab(`${settings().server.replace(/\/+$/, "")}/?view=downloads#import=${encoded}`, { active: true });
+    gm.openTab(`${settings().server.replace(/\/+$/, "")}/?view=downloads#import=${encoded}`);
   }
 
   /**
@@ -1628,7 +1732,7 @@
 
   /** 多页暂存（GM_setValue "assistant-pages"）：同一来源最多 50 页、5,000 个图片候选、2 MB，24 小时过期。 */
   function assistantPages(origin = location.origin) {
-    const stored = GM_getValue("assistant-pages", null);
+    const stored = gm.get("assistant-pages", null);
     if (!stored || stored.origin !== origin || Date.now() - stored.savedAt > ASSISTANT_TTL) return [];
     return Array.isArray(stored.pages) ? stored.pages : [];
   }
@@ -1639,10 +1743,10 @@
     if (next.length > ASSISTANT_MAX_PAGES) throw new Error(`最多暂存 ${ASSISTANT_MAX_PAGES} 页，请先发送`);
     if (images > ASSISTANT_MAX_IMAGES) throw new Error(`图片候选超过 ${ASSISTANT_MAX_IMAGES} 个，请先发送已暂存的页面`);
     if (new TextEncoder().encode(JSON.stringify(next)).length > ASSISTANT_MAX_BYTES) throw new Error("暂存的快照超过 2 MB，请先发送");
-    GM_setValue("assistant-pages", { origin, savedAt: Date.now(), pages: next });
+    gm.set("assistant-pages", { origin, savedAt: Date.now(), pages: next });
     return next;
   }
-  const clearAssistantPages = () => GM_setValue("assistant-pages", null);
+  const clearAssistantPages = () => gm.set("assistant-pages", null);
 
   /**
    * 打开 Tessera 页面并转交快照：必须在点击事件里同步 window.open；页面报到后 postMessage 发送，收到确认后清空暂存。
@@ -2249,7 +2353,7 @@
     if (entry.row.actionKey !== actionKey) {
       action.replaceChildren(...[
         retry && entry.challenge ? h("button", { type: "button", className: "btn small", title: "在新标签页打开资源，完成人机验证后回来重试",
-          onclick: () => GM_openInTab(entry.url, { active: true }) }, svg("shield", 14), "打开验证") : null,
+          onclick: () => gm.openTab(entry.url) }, svg("shield", 14), "打开验证") : null,
         retry ? h("button", { type: "button", className: "icon-btn", title: batch.started ? "重试" : "重新解析", "aria-label": "重试", "data-retry": "",
           onclick: () => batch.started ? retryEntries([entry]) : void parseEntries(batch, [entry]) }, svg("retry")) : null,
         removable ? iconButton("close", batch.started ? "从列表清除" : "移除", () => batch.started ? clearEntries([entry]) : removeEntry(entry), "row-clear") : null,
@@ -2344,7 +2448,7 @@
     const server = (batch.config || settings()).server.replace(/\/+$/, "");
     const link = server + (handedOff ? "/?view=private" : local ? "/?view=files" : "/?view=downloads");
     footer.replaceChildren(...[
-      h("button", { type: "button", className: "btn ghost", onclick: () => GM_openInTab(link, { active: true }) }, local || handedOff ? "查看文件" : "查看下载任务"),
+      h("button", { type: "button", className: "btn ghost", onclick: () => gm.openTab(link) }, local || handedOff ? "查看文件" : "查看下载任务"),
       h("span", { className: "spacer" }),
       switchable.length ? h("button", { type: "button", className: "btn ghost", title: "服务器被来源拒绝时，用当前浏览器读取后上传",
         onclick: () => startBatch([...new Set(switchable.map(entry => entry.url))], "local") }, "失败项改用本地下载") : null,
@@ -2560,6 +2664,9 @@
     active = false;
     networkObserver?.disconnect();
     networkObserver = null;
+    clearInterval(resourcePoll);
+    resourcePoll = null;
+    resourceIndex = 0;
     domObserver?.disconnect();
     domObserver = null;
     document.querySelectorAll("[data-tessera-grabber]").forEach(node => node.remove());
@@ -2571,18 +2678,28 @@
 
   let siteMenu = null;
   function updateMenu() {
-    if (siteMenu != null && typeof GM_unregisterMenuCommand === "function") GM_unregisterMenuCommand(siteMenu);
+    gm.unmenu(siteMenu);
+    siteMenu = null;
     if (onTessera()) return;
-    siteMenu = GM_registerMenuCommand(active ? `在 ${currentSite()} 上停用` : `在 ${currentSite()} 上启用`, () => setSiteEnabled(!active));
+    siteMenu = gm.menu(active ? `在 ${currentSite()} 上停用` : `在 ${currentSite()} 上启用`, () => setSiteEnabled(!active));
   }
 
   function applySiteState() {
     siteEnabled() ? activate() : deactivate();
+    // 没有菜单命令的管理器（iOS Userscripts）：未启用的网站也挂载一个淡化的悬浮按钮，作为重新启用与打开设置的唯一入口。
+    if (!active && dormantFab()) whenReady(() => { if (!active && dormantFab()) { mount(); refreshFab(); } });
     updateMenu();
   }
 
-  GM_registerMenuCommand("打开资源面板", () => open());
-  GM_registerMenuCommand("设置", () => openSettings());
-  // Tessera 站点和被排除的网站上不嗅探、不加按钮；需要时仍可从 Tampermonkey 菜单打开面板或设置。
-  applySiteState();
+  gm.menu("打开资源面板", () => open());
+  gm.menu("设置", () => openSettings());
+  // Tessera 站点和被排除的网站上不嗅探、不加按钮；需要时可从脚本管理器菜单（或无菜单时的淡化按钮）打开面板或设置。
+  gm.load().then(() => {
+    applySiteState();
+    if (!SYNC_STORE) document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      const before = siteEnabled();
+      void gm.load().then(() => { if (siteEnabled() !== before) applySiteState(); else refreshFab(); });
+    });
+  });
 })();

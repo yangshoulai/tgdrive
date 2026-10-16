@@ -5,7 +5,7 @@ import { readPreviewText, type PreviewText } from "./preview-data";
 import { MediaPreview, MinimizedPlayback, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
 import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip } from "./preview-playlist";
 import { ImageViewer } from "./preview-image";
-import { TextPreview } from "./preview-text";
+import { PreviewToolsContext, TextPreview } from "./preview-text";
 import { Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, type IconName } from "./ui";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "text" | "code" | "archive" | "other";
@@ -230,7 +230,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
   if (kind === "text" || kind === "code") {
     if (error) return fallback;
     if (content === null) return <PreviewLoading onRetry={onRetry} />;
-    return <TextPreview content={content} name={name} downloadUrl={downloadUrl} resolveImage={resolveImage} onError={reason => setError(api.errorMessage(reason, "文本组件加载失败"))} />;
+    return <TextPreview content={content} name={name} code={kind === "code"} downloadUrl={downloadUrl} resolveImage={resolveImage} onError={reason => setError(api.errorMessage(reason, "文本组件加载失败"))} />;
   }
   return fallback;
 }
@@ -241,6 +241,10 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   const kind = getFileKind(file.content_type, file.key);
   const media = (kind === "audio" || kind === "video") && isPlayable(file.key, file.content_type);
   const browsable = media || kind === "image";
+  // 文本与代码也用沉浸式窗口（深色画布 + 浮动头部），但没有播放列表与左右切换。
+  const reading = kind === "text" || kind === "code";
+  const immersive = browsable || reading;
+  const [textTools, setTextTools] = useState<HTMLElement | null>(null);
   const playlist = usePreviewPlaylist(file, kind, playlistFiles,
     item => getFileKind(item.content_type, item.key) === kind && (kind === "image" || isPlayable(item.key, item.content_type)) && parentPath(item.key) === parentPath(file.key));
   const active = browsable && playlist.current.key !== file.key ? playlist.current : file;
@@ -307,7 +311,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   useLayoutEffect(() => {
     const node = stage.current, modal = node?.closest<HTMLElement>(".modal"), backdrop = modal?.parentElement;
     const header = modal?.querySelector<HTMLElement>(".modal-header");
-    if (!browsable || !node || !modal || !backdrop || !header) return;
+    if (!immersive || !node || !modal || !backdrop || !header) return;
     // 按实际头部高度计算画布，避免窄屏换行挤出内容及百分比高度循环；导航都在播放器内部，不再有单独的工具栏。
     // 沉浸式预览的头部浮在画布上（不占高度），播放器用 --preview-header-height 给顶部内容留出位置。
     const resize = () => {
@@ -326,7 +330,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     for (const element of [header, backdrop]) observer.observe(element);
     window.addEventListener("resize", resize); resize();
     return () => { observer.disconnect(); window.removeEventListener("resize", resize); };
-  }, [browsable, kind, playlistExpanded]);
+  }, [immersive, kind, playlistExpanded]);
   async function share() {
     // 分享弹窗 portal 到 body；先退出预览全屏，确保它不会被全屏层遮住。
     const screen = document.fullscreenElement;
@@ -350,10 +354,11 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   const panelOpen = media && playlistExpanded;
   const playingRef = useRef(playing);
   playingRef.current = playing;
-  // 视频与图片：鼠标静止一会儿后隐藏浮在画面上的头部，移动、按键或悬停头部时恢复；暂停的视频始终显示。
+  // 视频、图片与文本：鼠标静止一会儿后隐藏浮在画面上的头部，移动、滚动、按键或悬停头部时恢复；暂停的视频始终显示。
+  // 文本在选中文字、打开查找或目录时保持头部可见。
   useEffect(() => {
     const modal = stage.current?.closest<HTMLElement>(".modal");
-    if (!modal || (kind !== "video" && kind !== "image")) return;
+    if (!modal || (kind !== "video" && kind !== "image" && !reading)) return;
     let timer = 0;
     const header = modal.querySelector<HTMLElement>(".modal-header");
     const wake = () => {
@@ -362,14 +367,18 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       timer = window.setTimeout(() => {
         if (modal.classList.contains("is-minimized") || header?.matches(":hover, :focus-within") || modal.querySelector(".preview-playlist-panel")) return;
         if (kind === "video" && !playingRef.current) return;
+        if (reading && (modal.querySelector(".cm-panels, .preview-outline-panel") || !window.getSelection()?.isCollapsed && modal.contains(window.getSelection()?.anchorNode ?? null))) return;
         modal.classList.add("is-chrome-idle");
       }, 2600);
     };
     const events = ["pointermove", "pointerdown", "keydown", "wheel"] as const;
     for (const name of events) modal.addEventListener(name, wake, { passive: true });
+    // 触屏滚动阅读时没有 pointermove：滚动只延后隐藏，不立刻唤出头部，避免遮挡正在读的内容。
+    const scroll = () => { window.clearTimeout(timer); if (!modal.classList.contains("is-chrome-idle")) wake(); };
+    modal.addEventListener("scroll", scroll, { capture: true, passive: true });
     wake();
-    return () => { window.clearTimeout(timer); modal.classList.remove("is-chrome-idle"); for (const name of events) modal.removeEventListener(name, wake); };
-  }, [kind]);
+    return () => { window.clearTimeout(timer); modal.classList.remove("is-chrome-idle"); for (const name of events) modal.removeEventListener(name, wake); modal.removeEventListener("scroll", scroll, { capture: true }); };
+  }, [kind, reading]);
   useEffect(() => { if (!playing) stage.current?.closest(".modal")?.classList.remove("is-chrome-idle"); }, [playing]);
   // 播放列表是浮在右侧的抽屉：点击抽屉外的画面即收起（列表按钮自己负责开关）。
   useEffect(() => {
@@ -390,23 +399,24 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>
         <IconButton icon="next" label="下一张" size="sm" onClick={nav.onNext} />
-      </div> : undefined} className={`preview-modal preview-modal-${kind}${browsable ? " is-immersive" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
+      </div> : undefined} className={`preview-modal preview-modal-${kind}${immersive ? " is-immersive" : ""}${reading ? " is-reading" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>
         {active.public_token && <span className="preview-meta-public" title="已公开分享"><Icon name="globe" size={12} />公开</span>}
       </span>}
       actions={<>
+        {reading && <span className="preview-header-tools" ref={setTextTools} />}
         {onShare && <IconButton icon="link" label={active.public_token ? "管理分享" : "公开分享"} size="sm" onClick={() => void share()} />}
         <a className="icon-btn icon-btn-ghost icon-btn-sm" href={source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
         <span className="modal-actions-divider" aria-hidden="true" />
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${panelOpen ? " is-playlist-open" : ""}`}><FilePreview kind={kind} url={kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}`}><PreviewToolsContext.Provider value={reading ? textTools : null}><FilePreview kind={kind} url={kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}
         onLyricLine={line => setLyric(current => current.key === active.key && current.line === line ? current : { key: active.key, line })}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}
-        loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} nav={nav} strip={strip} />
+        loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} nav={nav} strip={strip} /></PreviewToolsContext.Provider>
         {panelOpen && <PlaylistPanel playlist={playlist} onSelect={select} typeLabel={kindLabel(kind)} playing={playing}
           onCollapse={() => setPlaylistExpanded(false)}
           renderThumbnail={item => <FileVisual kind={getFileKind(item.content_type, item.key)} src={sourceOf(item).thumbnail} size="md" />} />}

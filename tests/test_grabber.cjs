@@ -8,12 +8,13 @@ const { webcrypto } = require("node:crypto");
 const { test } = require("node:test");
 
 const source = fs.readFileSync(path.join(__dirname, "../userscripts/tessera-grabber.user.js"), "utf8");
-const instrumented = source.replace(/\s+applySiteState\(\);\s*\}\)\(\);\s*$/, `
+const instrumented = source.replace(/\s+gm\.load\(\)\.then\([\s\S]*\}\);\s*\}\)\(\);\s*$/, `
   globalThis.toastMessages = [];
   toast = message => globalThis.toastMessages.push(message);
   globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBatch, parseEntries, clearEntries, clearBatch, close,
     getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES,
-    pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages, collect, addItem, checkNavigation, setActive: value => { active = value; } };
+    pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages, collect, addItem, checkNavigation, setActive: value => { active = value; },
+    ready: gm.load(), gm, HAS_MENU, dormantFab, copy: text => gm.copy(text), openTab: url => gm.openTab(url) };
 })();`);
 assert.notEqual(instrumented, source, "userscript test hook must replace only final bootstrap");
 
@@ -28,41 +29,56 @@ async function until(predicate) {
   throw new Error("transfer did not reach the expected state");
 }
 
-function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true, dom } = {}) {
+/** manager: "sync" 模拟 Tampermonkey／Violentmonkey（GM_*），"async" 模拟 iOS Userscripts（只有异步 GM.*，无 GM_cookie 与菜单命令）。 */
+function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true, dom, manager = "sync" } = {}) {
   const values = { settings: { server: "https://tessera.example", key: "TEST:secret", cookies } };
-  const requests = [], fetches = [], listeners = [], opened = [];
+  const requests = [], fetches = [], listeners = [], opened = [], copied = [];
   const window = { addEventListener(type, listener) { if (type === "message") listeners.push(listener); }, removeEventListener() {},
     open: (url, target) => open ? open(url, target, listeners) : null, fetch: async (url, options) => {
     fetches.push({ url, options });
     return fetch ? fetch(url, options) : imageResponse();
   } };
+  const xmlHttpRequest = details => {
+    const record = { details, aborted: false };
+    requests.push(record);
+    queueMicrotask(() => {
+      if (record.aborted) return;
+      const url = new URL(details.url);
+      if (url.pathname === "/api/v1/move") return move ? move(details, record)
+        : details.onload({ status: 200, responseText: '{"moved":1,"skipped":0}' });
+      if (url.pathname === "/api/v1/delete") return remove ? remove(details, record)
+        : details.onload({ status: 200, responseText: JSON.stringify({ results: JSON.parse(details.data).paths.map(path => ({ path, deleted: true })) }) });
+      if (gm) return gm(details, record);
+      const data = details.method === "PUT" ? { key: url.searchParams.get("path"), size: details.data.size } : { writable: true };
+      details.upload?.onprogress?.({ loaded: details.data?.size || 0 });
+      details.onload({ status: 200, responseText: JSON.stringify(data) });
+    });
+    return { abort() { record.aborted = true; details.onabort?.(); } };
+  };
   const context = vm.createContext({
     window, unsafeWindow: window, document: { cookie: "visible=page", querySelectorAll: selector => dom ? dom(selector) : [] },
     location: new URL("https://gallery.example/album"), navigator: { userAgent: "BrowserTest/1" },
     URL, Blob, Response, ReadableStream, AbortController, btoa, DOMException, TextEncoder, Uint8Array, Uint32Array, crypto: webcrypto,
     setTimeout: (fn, delay) => fn.name === "poll" ? 0 : setTimeout(fn, delay), clearTimeout, clearInterval,
-    GM_getValue: (key, fallback) => values[key] ?? fallback,
-    GM_setValue: (key, value) => { values[key] = value; },
-    GM_registerMenuCommand() {},
-    GM_openInTab: url => opened.push(url),
-    GM_cookie: cookieApi ? { list: (_, callback) => callback([{ name: "cf_clearance", value: "test-cookie", httpOnly: true }], null) } : undefined,
-    GM_xmlhttpRequest: details => {
-      const record = { details, aborted: false };
-      requests.push(record);
-      queueMicrotask(() => {
-        if (record.aborted) return;
-        const url = new URL(details.url);
-        if (url.pathname === "/api/v1/move") return move ? move(details, record)
-          : details.onload({ status: 200, responseText: '{"moved":1,"skipped":0}' });
-        if (url.pathname === "/api/v1/delete") return remove ? remove(details, record)
-          : details.onload({ status: 200, responseText: JSON.stringify({ results: JSON.parse(details.data).paths.map(path => ({ path, deleted: true })) }) });
-        if (gm) return gm(details, record);
-        const data = details.method === "PUT" ? { key: url.searchParams.get("path"), size: details.data.size } : { writable: true };
-        details.upload?.onprogress?.({ loaded: details.data?.size || 0 });
-        details.onload({ status: 200, responseText: JSON.stringify(data) });
-      });
-      return { abort() { record.aborted = true; details.onabort?.(); } };
-    },
+    ...(manager === "sync" ? {
+      GM_getValue: (key, fallback) => values[key] ?? fallback,
+      GM_setValue: (key, value) => { values[key] = value; },
+      GM_registerMenuCommand() {},
+      GM_openInTab: url => opened.push(url),
+      GM_setClipboard: text => copied.push(text),
+      GM_cookie: cookieApi ? { list: (_, callback) => callback([{ name: "cf_clearance", value: "test-cookie", httpOnly: true }], null) } : undefined,
+      GM_xmlhttpRequest: xmlHttpRequest,
+    } : {
+      GM: {
+        getValue: async key => values[key] === undefined ? undefined : structuredClone(values[key]),
+        setValue: async (key, value) => { values[key] = structuredClone(value); },
+        deleteValue: async key => { delete values[key]; },
+        openInTab: async url => { opened.push(url); return {}; },
+        setClipboard: async text => { copied.push(text); return true; },
+        // Userscripts 的 GM.xmlHttpRequest 返回带 abort 的 Promise，回调照常触发。
+        xmlHttpRequest: details => Object.assign(Promise.resolve(), xmlHttpRequest(details)),
+      },
+    }),
   });
   vm.runInContext(instrumented, context);
   const api = context.grabber;
@@ -72,7 +88,7 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
     api.setBatch(result);
     return result;
   };
-  return { api, context, values, requests, fetches, opened, messages: context.toastMessages, entry, batch };
+  return { api, context, values, requests, fetches, opened, copied, ready: api.ready, messages: context.toastMessages, entry, batch };
 }
 
 test("browser image upload preserves bytes and isolates credentials", async () => {
@@ -655,4 +671,73 @@ test("detected resources accumulate across popups and page changes until cleared
     ...[1, 2, 3].map(n => `https://charts.example/b-${n}.png`),
   ].sort(), "单页应用换页不清除已探测的资源");
   h.api.setActive(false);
+});
+
+// ---------- iOS Userscripts（只有异步 GM.*）：关键流程与 Tampermonkey 环境一致 ----------
+
+test("async GM: settings preload, browser upload and sent records persist through GM.setValue", async () => {
+  const h = harness({ manager: "async" });
+  await h.ready;
+  assert.equal(h.api.HAS_MENU, false);
+  assert.equal(h.api.dormantFab(), true);
+  const current = h.batch();
+  await h.api.runBatch();
+  const entry = current.entries[0];
+  assert.equal(entry.state, "completed");
+  const upload = h.requests.find(request => request.details.method === "PUT").details;
+  assert.equal(upload.headers.Authorization, "Bearer TEST:secret");
+  assert.deepEqual(new Uint8Array(await upload.data.arrayBuffer()), png);
+  await tick();
+  assert.deepEqual(Array.from(h.values.sent), [entry.url]);
+});
+
+test("async GM: server mode parses and creates download tasks", async () => {
+  const h = harness({ manager: "async", gm: details => details.onload({ status: 200, responseText: JSON.stringify(
+    details.url.endsWith("/parse") ? parseResponse : { tasks: [{ id: 7, status: "queued", key: "photos/x" }] }) }) });
+  await h.ready;
+  const current = h.batch([{ url: "https://cdn.example/clip.m3u8", type: "stream", state: "parsing", error: "", tasks: [], platform: null }]);
+  current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  await h.api.runBatch();
+  const creates = h.requests.filter(request => new URL(request.details.url).pathname === "/api/v1/downloads");
+  assert.equal(creates.length, 2);
+  assert.equal(current.entries[0].state, "submitted");
+});
+
+test("async GM: without GM_cookie only same-host document cookies are used", async () => {
+  const h = harness({ manager: "async" });
+  await h.ready;
+  assert.equal(await h.api.cookieHeader("https://gallery.example/image.png"), "visible=page");
+  assert.equal(await h.api.cookieHeader("https://cdn.example/image.png"), "");
+});
+
+test("async GM: tabs, clipboard and stopping an upload use the GM.* API", async () => {
+  let upload;
+  const h = harness({ manager: "async", gm: details => {
+    if (details.method === "PUT") { upload = details; return; }
+    details.onload({ status: 200, responseText: '{"writable":true}' });
+  } });
+  await h.ready;
+  h.api.openTab("https://tessera.example/?view=downloads");
+  h.api.copy("curl 'https://cdn.example/a.mp4'");
+  await tick();
+  assert.deepEqual(h.opened, ["https://tessera.example/?view=downloads"]);
+  assert.deepEqual(h.copied, ["curl 'https://cdn.example/a.mp4'"]);
+  const current = h.batch();
+  const running = h.api.runBatch();
+  await until(() => Boolean(upload));
+  h.api.stopBatch();
+  await running;
+  assert.equal(current.entries[0].state, "stopped");
+  assert.equal(h.requests.find(request => request.details.method === "PUT").aborted, true);
+  assert.deepEqual(Array.from(h.values.sent || []), []);
+});
+
+test("sync GM: settings and clipboard keep using GM_* directly", async () => {
+  const h = harness();
+  await h.ready;
+  assert.equal(h.api.HAS_MENU, true);
+  assert.equal(h.api.dormantFab(), false);
+  h.api.copy("text");
+  assert.deepEqual(h.copied, ["text"]);
 });

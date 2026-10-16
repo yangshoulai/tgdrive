@@ -22,6 +22,31 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
         conversation = await self.start_conversation(user, location)
         return admin, user, conversation
 
+    def test_mentions_and_scope_path_are_validated_and_reach_the_model(self):
+        async def run():
+            admin, user, conversation = await self.ready(files=("Docs/a.md", "Docs/sub/b.txt", "Other/c.txt", ".tgdrive/private/p.txt"), location="Docs/")
+            self.model.replies = [answer("好的")]
+            status, data = await self.send(user, conversation, "总结 @/Docs/a.md", mentions=["/Docs/a.md", "/Docs/sub/"])
+            self.assertEqual(status, 201, data)
+            user_message = [m for m in await self.messages(user, conversation) if m["role"] == "user"][-1]
+            self.assertEqual(user_message["mentions"], ["/Docs/a.md", "/Docs/sub/"])
+            self.assertIn("[引用]", str(self.model.calls))
+            self.assertIn("/Docs/sub/", str(self.model.calls))
+            for mentions in (["/Other/c.txt"], ["/.tgdrive/private/p.txt"], ["/Docs/missing.txt"], ["/Docs/x"] * 21):
+                status, data = await self.send(user, conversation, "看看", mentions=mentions)
+                self.assertEqual(status, 400, (mentions, data))
+            # 目录树选定其他目录：作用域随之切换，引用在新作用域内校验。
+            self.model.replies = [answer("好的")]
+            status, data = await self.send(user, conversation, "看看 @/Other/c.txt", scope="path", scope_path="/Other/", mentions=["/Other/c.txt"])
+            self.assertEqual(status, 201, data)
+            _, detail = await self.req("GET", f"/api/user/v1/assistant/conversations/{conversation}", headers=user)
+            self.assertEqual(detail["conversation"]["scope"], "/Other/")
+            status, data = await self.send(user, conversation, "看看", scope="path", scope_path="/.tgdrive/private/")
+            self.assertEqual(status, 201, data)
+            _, detail = await self.req("GET", f"/api/user/v1/assistant/conversations/{conversation}", headers=user)
+            self.assertEqual(detail["conversation"]["scope"], "/")
+        self.run_async(run())
+
     def test_notice_acknowledgement_expires_when_notice_changes(self):
         async def run():
             admin, user, conversation = await self.ready()

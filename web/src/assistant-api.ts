@@ -169,7 +169,7 @@ export type ChatMessage = {
   reasoning?: string; reasoning_ms?: number | null;
   call_id?: string; name?: string; label?: string; arguments?: Record<string, unknown>; status?: "ok" | "error"; summary?: string;
   result?: unknown; items?: number | null; duration_ms?: number; truncated?: boolean; event?: ToolEvent | null;
-  type?: string; retry?: boolean; action_id?: string; attachment?: SnapshotAttachment;
+  type?: string; retry?: boolean; action_id?: string; attachment?: SnapshotAttachment; mentions?: string[];
 };
 export const ACTION_KINDS: Record<string, string> = {
   rename: "批量改名", move: "移动", organize: "整理文件", mkdir: "新建文件夹", trash: "移入回收站", restore: "从回收站恢复",
@@ -208,7 +208,7 @@ export const conversation = (id: string) => get<ConversationDetail>(`${USER}/con
 export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
 export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
 export type ClientEnvironment = { browser: string; browser_version: string; os: string; language: string; timezone: string; origin: string };
-export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root"; snapshot_id?: string; environment?: ClientEnvironment }) =>
+export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root" | "path"; scope_path?: string; mentions?: string[]; snapshot_id?: string; environment?: ClientEnvironment }) =>
   post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/messages`, input);
 export const stopRun = (runId: string) => post<void>(`${USER}/runs/${encodeURIComponent(runId)}/stop`, {});
 export const shareLink = (conversationId: string, path: string) =>
