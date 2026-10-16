@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.14.0
+// @version      0.14.1
 // @description  在 X、YouTube 和其他网页上复制资源地址与 curl 命令，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      MIT
@@ -602,20 +602,14 @@
       box-shadow: 0 0 0 2px var(--bg); }
 
     /* 面板 */
-    .panel { position: fixed; width: 600px; max-width: calc(100% - 24px); display: flex; flex-direction: column; overflow: hidden;
+    .panel { position: fixed; width: 480px; max-width: calc(100% - 24px); display: flex; flex-direction: column; overflow: hidden;
       background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-panel); box-shadow: var(--shadow);
       pointer-events: auto; z-index: 2147483647; animation: rise .16s ease-out; }
-    .panel.batch-panel { width: 680px; }
-    .panel.is-sheet { width: auto; max-width: none; }
+    .panel.batch-panel { width: 560px; }
+    .panel.is-sheet { width: auto; }
     .fab.is-dormant { opacity: .38; transform: scale(.82); }
     .fab.is-dormant:hover, .fab.is-dormant:focus-visible { opacity: 1; transform: none; }
     .fab.is-dormant .badge { display: none; }
-    /* 触屏：输入框 16px 字号，避免 iOS Safari 聚焦时自动放大页面；按钮保留 44px 触控范围。 */
-    @media (hover: none) and (pointer: coarse) {
-      input[type=text], input[type=password], input[type=url], textarea, select, .variant { font-size: 16px; }
-      .icon-btn { min-width: 40px; min-height: 40px; }
-      .btn { min-height: 40px; }
-    }
     /* 只做位移不改透明度：动画被节流或暂停时面板仍然完整可见 */
     @keyframes rise { from { transform: translateY(6px); } }
     header { display: flex; align-items: center; gap: 10px; height: 56px; padding: 0 16px 0 24px; border-bottom: 1px solid var(--line); flex: none; }
@@ -746,7 +740,7 @@
     .name-input[type=text][aria-invalid=true]:focus { box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 12%, transparent); }
     .btn.small { height: 28px; padding: 0 10px; font-size: 12px; gap: 4px; border-radius: 7px; }
     .action-sep { width: 1px; height: 16px; margin: 0 4px; background: var(--line); align-self: center; }
-    .variant { height: 24px; max-width: 180px; padding: 0 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+    .variant { height: 24px; min-width: 0; max-width: min(180px, 100%); padding: 0 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
       color: var(--fg); font: inherit; font-size: 12px; }
     .variant:focus { outline: none; border-color: var(--accent); }
     .batch-item .sub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; white-space: normal; }
@@ -782,7 +776,8 @@
     .panel.has-layer { min-height: min(440px, calc(100vh - 96px)); }
     .layer { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; background: var(--bg); animation: rise .14s ease-out; }
     .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 12px; color: var(--muted); }
-    .crumbs button { height: 24px; padding: 0 6px; border-radius: 6px; color: var(--muted); }
+    .crumbs button { height: 24px; max-width: 100%; padding: 0 6px; border-radius: 6px; color: var(--muted);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .crumbs button:hover { background: var(--hover); color: var(--fg); }
     .crumbs button[aria-current] { color: var(--fg); font-weight: 600; }
     .folder-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 0 10px; border-radius: 8px; text-align: left; color: var(--fg); }
@@ -826,10 +821,9 @@
       max-width: 80vw; animation: rise .16s ease-out; }
 
     /* ===== 视觉层：毛玻璃面板、品牌渐变与网格视图（覆盖上面的基础样式） ===== */
-    .panel { width: 480px; background: var(--glass); border: 1px solid var(--glass-line); box-shadow: var(--shadow);
+    .panel { background: var(--glass); border: 1px solid var(--glass-line); box-shadow: var(--shadow);
       -webkit-backdrop-filter: blur(24px) saturate(1.6); backdrop-filter: blur(24px) saturate(1.6);
       animation: pop .22s cubic-bezier(.2, .9, .3, 1.2); transform-origin: bottom right; }
-    .panel.batch-panel { width: 560px; }
     /* 只做缩放位移不改透明度：动画被节流或暂停时面板仍然完整可见 */
     @keyframes pop { from { transform: translateY(8px) scale(.97); } }
     /* 顶部一抹品牌光晕 */
@@ -915,7 +909,7 @@
       -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
     .list.grid .item-actions .icon-btn.accent { background: var(--grad); }
     @media (hover: none) { .list.grid .item-actions, .list.grid .check { opacity: 1; } }
-    @media (max-width: 420px) { .list.grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 560px) { .list.grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
     /* 卡片、保存位置与进度 */
     .hero { border-radius: 14px; background: var(--soft); box-shadow: inset 0 0 0 1px var(--line); }
@@ -977,6 +971,26 @@
     .empty .tile { background: var(--soft); }
     .toast { border-radius: 12px; padding: 9px 16px; background: rgba(20, 21, 30, .92); color: #fff;
       -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); box-shadow: 0 12px 30px -8px rgba(0, 0, 0, .45); }
+
+    /* 窄屏把操作放到独立一行，避免触屏按钮挤掉名称或越过面板。 */
+    @media (max-width: 560px) {
+      .list:not(.grid) > .item.selectable { display: grid; grid-template-columns: 18px 44px minmax(0, 1fr); gap: 6px 10px; }
+      .list:not(.grid) > .item.selectable > .item-actions { grid-column: 2 / -1; justify-content: flex-end; flex-wrap: wrap; }
+      .batch-item { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 6px 12px; }
+      .batch-item > .item-actions { grid-column: 2 / -1; justify-content: flex-end; flex-wrap: wrap; }
+      .batch-item .sub { overflow-wrap: anywhere; }
+      .overview-line { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px 12px; }
+      .overview-line .stats { grid-column: 2; justify-content: flex-start; }
+      footer .btn { max-width: 100%; height: auto; min-height: 40px; padding-top: 8px; padding-bottom: 8px;
+        white-space: normal; overflow-wrap: anywhere; }
+    }
+    /* 放在控件基础样式之后，确保 iOS Safari 聚焦输入时不因小字号自动放大页面。 */
+    @media (hover: none) and (pointer: coarse) {
+      input[type=text], input[type=password], input[type=url], textarea, select, .variant { font-size: 16px; }
+      .variant { min-height: 36px; }
+      .icon-btn { min-width: 40px; min-height: 40px; }
+      .btn { min-height: 40px; }
+    }
   `;
 
   // 线条图标（24×24，描边）。YouTube 等站点启用了 Trusted Types，禁止给 innerHTML 赋字符串，所有节点都用 DOM API 创建。
@@ -1156,7 +1170,7 @@
     const sheet = innerWidth <= 560;
     panel.classList.toggle("is-sheet", sheet);
     if (sheet) {
-      Object.assign(panel.style, { left: "calc(8px + env(safe-area-inset-left))", right: "calc(8px + env(safe-area-inset-right))",
+      Object.assign(panel.style, { left: "calc(12px + env(safe-area-inset-left))", right: "calc(12px + env(safe-area-inset-right))",
         bottom: "calc(8px + env(safe-area-inset-bottom))", maxHeight: `${Math.min(760, Math.round(innerHeight * 0.86))}px` });
       return;
     }
