@@ -200,7 +200,9 @@ export type AssistantAction = {
   created_at: number; expires_at: number; decided_at: number | null; finished_at?: number | null;
 };
 export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; actions: AssistantAction[]; active_run: string | null;
-  attachments?: { count: number; size: number } };
+  attachments?: { count: number; size: number };
+  /** 上下文占用：最近一次模型调用的输入加输出 token 与模型窗口（§23） */
+  context?: { used: number; window: number } | null };
 export type RunEvent = { seq: number; type: string; [key: string]: unknown };
 
 const USER = "/api/user/v1/assistant";

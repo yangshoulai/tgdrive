@@ -365,12 +365,13 @@ class AssistantActionTests(ActionHelpers, AssistantCase):
     def test_compaction_keeps_recent_turns(self):
         async def run():
             admin, _, model = await self.setup_assistant()
-            await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"context_window": 1000}, admin)
+            # 系统提示词与工具定义约 1.3 万 token 也计入窗口（§23），窗口取 2 万。
+            await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"context_window": 20000}, admin)
             user = await self.client.login("user", "alice@example.com", "alice password")
             conversation = await self.start_conversation(user)
             for index in range(3):
-                self.model.replies = [answer(f"第 {index} 轮回答 " + "很长的内容" * 60)]
-                await self.send(user, conversation, f"第 {index} 个问题 " + "背景" * 60)
+                self.model.replies = [answer(f"第 {index} 轮回答 " + "很长的内容" * 240)]
+                await self.send(user, conversation, f"第 {index} 个问题 " + "背景" * 600)
             self.model.replies = [Reply(text="摘要：用户问了三个问题"), answer("第四轮")]
             await self.send(user, conversation, "最新的问题")
             summary = [m for m in await self.messages(user, conversation) if m.get("type") == "summary"]

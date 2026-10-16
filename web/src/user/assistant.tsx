@@ -232,6 +232,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => { if (version === selection.current) setDetail(fresh); }).catch(() => undefined); return current; });
           break;
         case "title": setDetail(current => current && { ...current, conversation: { ...current.conversation, title: String(event.title) } }); loadConversations(); break;
+        case "context": setDetail(current => current && { ...current, context: { used: Number(event.used) || 0, window: Number(event.window) || 32000 } }); break;
         case "run_finished": case "stream_failed":
           setRunId(null); setLive(null); unsubscribe.current = null;
           onConfigChanged();
@@ -428,6 +429,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const expandedScope = outside.length ? display(commonFolder([scopeKey, ...mention.mentions.map(item => item.key)].filter(Boolean))) : null;
   const usage = config.usage;
   const usageRatio = usage.limit ? usage.today / usage.limit : 0;
+  const context = detail?.context ?? null;
+  const contextRatio = context ? context.used / Math.max(1, context.window) : 0;
   const exhausted = Boolean(usage.limit && usage.today >= usage.limit);
 
   const selectedModel = config.models.find(model => model.id === modelId);
@@ -506,7 +509,12 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         </div>
       </div>
       <div className={`assistant-footnote${usageRatio >= 0.8 ? " tone-warning" : ""}`}>
-        <span title={`今日已用 ${usage.today.toLocaleString("zh-CN")} token${usage.limit ? ` / ${usage.limit.toLocaleString("zh-CN")}` : ""}`}>{usage.limit ? `今日 ${Math.min(100, Math.round(usageRatio * 100))}%` : "今日不限额"}</span>
+        <span className="assistant-footnote-meters">
+          <span title={`今日已用 ${usage.today.toLocaleString("zh-CN")} token${usage.limit ? ` / ${usage.limit.toLocaleString("zh-CN")}` : ""}`}>{usage.limit ? `今日 ${Math.min(100, Math.round(usageRatio * 100))}%` : "今日不限额"}</span>
+          {context && <span className={contextRatio >= 0.8 ? "tone-warning" : undefined}
+            title={`这个对话最近一次请求约 ${context.used.toLocaleString("zh-CN")} token，模型上下文 ${context.window.toLocaleString("zh-CN")} token。较早的内容会自动压缩为摘要。`}>
+            上下文 {Math.min(100, Math.round(contextRatio * 100))}%{contextRatio >= 0.8 ? " · 建议新建对话" : ""}</span>}
+        </span>
         <span>{accessMode === "full" ? <><Icon name="zap" size={11} />普通修改自动执行，可在卡片上撤销</> : <><Icon name="shield" size={11} />修改文件前会请你确认</>}</span>
       </div>
     </div>

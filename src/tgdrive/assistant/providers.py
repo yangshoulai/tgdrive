@@ -152,6 +152,24 @@ async def _open(method: str, url: str, headers: dict[str, str], body: bytes | No
     return request
 
 
+# 各家「上下文超长」的错误码与文案（OpenAI context_length_exceeded、Anthropic prompt is too long、各类兼容服务）。
+_OVERFLOW = re.compile(r"context[_ ]length[_ ]exceeded|maximum context length|context window|prompt is too long|"
+                       r"input is too long|too many (input )?tokens|exceeds? the (model'?s? )?(maximum|max) (context|input)|"
+                       r"reduce the length|上下文.{0,6}(超出|过长|超过)", re.I)
+
+
+def is_overflow(*texts: object) -> bool:
+    return any(isinstance(text, str) and _OVERFLOW.search(text) for text in texts)
+
+
+def _error_detail(error: object) -> tuple[str, bool]:
+    """错误对象 → (脱敏前的说明, 是否上下文超长)。"""
+    if isinstance(error, dict):
+        message = str(error.get("message") or error.get("type") or "")
+        return message, is_overflow(message, error.get("code"), error.get("type"))
+    return str(error or ""), is_overflow(str(error or ""))
+
+
 def _status_error(status: int, raw: bytes) -> ProviderError:
     message = ""
     try:
@@ -165,6 +183,8 @@ def _status_error(status: int, raw: bytes) -> ProviderError:
             message = data.get("message") or data.get("detail") or ""
     except ValueError:
         message = raw[:200].decode("utf-8", "replace")
+    if status in (400, 413, 422) and (is_overflow(message) or is_overflow(raw[:2000].decode("utf-8", "replace"))):
+        return ProviderError(f"对话内容超出模型的上下文长度：{scrub(message)}", status=status, code="context_overflow")
     labels = {401: "API Key 无效或未授权", 403: "没有权限访问该模型", 404: "接口地址或模型不存在", 429: "请求过于频繁或额度不足"}
     prefix = labels.get(status, f"模型服务返回错误（HTTP {status}）")
     text = f"{prefix}：{scrub(message)}" if message else prefix
@@ -426,7 +446,8 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
                 if not isinstance(chunk, dict):
                     continue
                 if isinstance(chunk.get("error"), dict):
-                    raise ProviderError(f"模型服务返回错误：{scrub(chunk['error'].get('message'))}", code="upstream_error")
+                    message, overflow = _error_detail(chunk["error"])
+                    raise ProviderError(f"模型服务返回错误：{scrub(message)}", code="context_overflow" if overflow else "upstream_error")
                 reply.upstream_id = reply.upstream_id or (chunk.get("id") if isinstance(chunk.get("id"), str) else None)
                 usage = chunk.get("usage")
                 if isinstance(usage, dict):
@@ -487,8 +508,9 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
             kind = payload.get("type") or event
             if kind == "error":
                 error = payload.get("error") or {}
-                raise ProviderError(f"模型服务返回错误：{scrub(error.get('message') if isinstance(error, dict) else error)}",
-                                    code="upstream_error", retryable=isinstance(error, dict) and error.get("type") == "overloaded_error")
+                message, overflow = _error_detail(error)
+                raise ProviderError(f"模型服务返回错误：{scrub(message)}", code="context_overflow" if overflow else "upstream_error",
+                                    retryable=isinstance(error, dict) and error.get("type") == "overloaded_error")
             if kind == "message_start":
                 message = payload.get("message") or {}
                 reply.upstream_id = message.get("id")

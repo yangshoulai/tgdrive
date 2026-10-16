@@ -125,6 +125,10 @@ class StopRun(Exception):
         self.reason, self.text = reason, text
 
 
+class ContextFull(Exception):
+    """压缩与兜底之后上下文仍超过窗口 85%（§23）。"""
+
+
 class AssistantService:
     def __init__(self, accounts, objects, offline=None, *, user_api=None, settings=None) -> None:
         self.accounts, self.objects, self.offline, self.user_api = accounts, objects, offline, user_api
@@ -304,10 +308,25 @@ class AssistantService:
         item["scope"] = display(item.pop("scope_root"))
         if item["access_mode"] == "full" and not self._full_access(account.id):
             item["access_mode"] = "approval"
-        return {"conversation": item, "messages": [self._public_message(m) for m in self.trace.messages(conversation_id, limit=2000)],
+        messages = self.trace.messages(conversation_id, limit=2000)
+        return {"conversation": item, "messages": [self._public_message(m) for m in messages], "context": self._context_usage(row, messages),
                 "actions": [self._action_view(action) for action in self.trace.actions(conversation_id)],
                 "active_run": self._active_run(conversation_id),
                 "attachments": self.attachments.conversation_usage(account.id, conversation_id)}
+
+    def _context_usage(self, row, messages: list[dict]) -> dict | None:
+        """上下文占用（§23）：最近一次模型调用的输入加输出 token（下一次请求至少包含这些）与当前模型窗口。"""
+        last = next((m for m in reversed(messages) if m["role"] == "assistant" and (m.get("input_tokens") or m.get("prompt_estimate"))), None)
+        if last is None:
+            return None
+        actual = int(last.get("input_tokens") or 0)
+        estimate = last.get("prompt_estimate") if isinstance(last.get("prompt_estimate"), int) else 0
+        used = (actual if actual * 4 >= estimate else estimate) + int(last.get("output_tokens") or 0)
+        try:
+            window = self.channels.model(row["model_id"] or last.get("model_id"))["context_window"]
+        except (NotFoundError, TypeError, KeyError):
+            window = None
+        return {"used": used, "window": window or 32000}
 
     @staticmethod
     def _public_message(message: dict) -> dict:
@@ -940,10 +959,12 @@ class AssistantService:
         self._channel_active[channel_id] = self._channel_active.get(channel_id, 0) + 1
 
     def _history(self, conversation_id: str, context_window: int | None, *, run_id: str | None = None,
-                 can_see: bool = False) -> list[dict]:
+                 can_see: bool = False, meta: dict | None = None) -> list[dict]:
         """把留痕还原成发给模型的消息。最近一次摘要之前的内容用摘要代替；缺少结果的工具调用补上「已取消」。
         识图（§22.3）：只有当前这一轮（run_id）的用户消息与 view_image 结果带 image_refs，由 _attach_images 读取图片；
-        更早轮次的图片换成文字占位，不重复发送。"""
+        更早轮次的图片换成文字占位，不重复发送。
+        上下文（§23）：早于最近两轮用户消息的工具结果只发摘要行；工具消息带 _run（属于本轮）与 _slim（摘要行）供 _shrink 使用。
+        meta 收集最近一条助手消息的实际用量（model_id、input_tokens、prompt_estimate），用于 _measure。"""
         messages = self.trace.messages(conversation_id, limit=5000)
         files = self.attachments.for_conversation(conversation_id)
         start, upto = 0, None
@@ -956,6 +977,8 @@ class AssistantService:
             selected = [m for m in messages if m["seq"] > upto and not (m["role"] == "event" and m.get("type") == "summary")]
         else:
             selected = messages[start:]
+        users = [m["seq"] for m in selected if m["role"] == "user"]
+        recent_from = users[-2] if len(users) >= 2 else (users[-1] if users else 0)
         result: list[dict] = []
         if summary:
             result.append({"role": "user", "content": summary})
@@ -1013,11 +1036,17 @@ class AssistantService:
                 calls = message.get("tool_calls") or []
                 result.append({"role": "assistant", "content": message.get("text") or "", "tool_calls": calls})
                 pending = {call["id"]: call["name"] for call in calls}
+                if meta is not None and message.get("input_tokens"):
+                    meta.update(model_id=message.get("model_id"), input_tokens=int(message["input_tokens"]),
+                                output_tokens=int(message.get("output_tokens") or 0), prompt_estimate=message.get("prompt_estimate"))
             elif role == "tool":
                 if message.get("call_id") in pending:
                     pending.pop(message["call_id"])
-                    item = {"role": "tool", "tool_call_id": message["call_id"], "content": message["model_content"]}
-                    refs = message.get("images") if isinstance(message.get("images"), list) else []
+                    slim = _slim_result(message)
+                    old_turn = message["seq"] < recent_from
+                    item = {"role": "tool", "tool_call_id": message["call_id"], "content": slim if old_turn else message["model_content"],
+                            "_run": message.get("run_id") == run_id and run_id is not None, "_slim": slim}
+                    refs = message.get("images") if isinstance(message.get("images"), list) and not old_turn else []
                     if refs and can_see and message.get("run_id") == run_id:
                         item["image_refs"] = [str(key) for key in refs]
                     elif refs:
@@ -1034,9 +1063,56 @@ class AssistantService:
         total = 0
         for message in messages:
             pictures = len(message.get("images") or message.get("image_refs") or [])
-            text = {key: value for key, value in message.items() if key not in ("images", "image_refs")}
+            text = {key: value for key, value in message.items() if key not in ("images", "image_refs") and not key.startswith("_")}
             total += len(json.dumps(text, ensure_ascii=False)) // 2 + pictures * vision.IMAGE_TOKENS
         return total
+
+    @staticmethod
+    def _measure(meta: dict, model_id: int, estimate: int) -> int:
+        """§23：最近一次同模型调用的实际 input_tokens 加上之后的估算增量；没有实际用量时用估算。
+        实际值不到当时估算的四分之一视为不可信（部分兼容服务的用量字段不准），也退回估算。"""
+        if (meta.get("model_id") == model_id and meta.get("input_tokens") and isinstance(meta.get("prompt_estimate"), int)
+                and meta["input_tokens"] * 4 >= meta["prompt_estimate"]):
+            return max(estimate // 2, meta["input_tokens"] + estimate - meta["prompt_estimate"])
+        return estimate
+
+    def _shrink(self, history: list[dict], used: int, target: float) -> int:
+        """§23 单轮兜底：本轮较早的工具结果从旧到新换成摘要行（最近一批保留原文），直到估算占用低于 target。"""
+        last_assistant = max((index for index, item in enumerate(history) if item["role"] == "assistant"), default=-1)
+        for index, item in enumerate(history):
+            if used <= target:
+                break
+            if index > last_assistant or item["role"] != "tool" or not item.get("_run") or item["content"] == item.get("_slim"):
+                continue
+            before = self._estimate([item])
+            item["content"] = item["_slim"]
+            item.pop("image_refs", None)
+            used -= before - self._estimate([item])
+        return used
+
+    async def _context(self, state: RunState, model: dict, endpoint, can_see: bool, fixed: int, *,
+                       allow_compact: bool, force: bool = False) -> tuple[list[dict], int, int, bool]:
+        """准备发给模型的历史（§23）：瘦身 → 估算 → 必要时模型摘要 → 本轮兜底。
+        返回 (历史, 估算占用, 原始估算, 是否压缩过)。force 用于渠道报上下文超长后的重试。"""
+        window = model["context_window"] or 32000
+        meta: dict = {}
+        history = self._history(state.conversation_id, model["context_window"], run_id=state.id, can_see=can_see, meta=meta)
+        raw = self._estimate(history) + fixed
+        used = self._measure(meta, model["id"], raw)
+        compacted = False
+        if (force or (allow_compact and used > window * 0.7 and len(history) > 6)):
+            compacted = await self._compact(state, model, endpoint)
+            if compacted:
+                meta = {}
+                history = self._history(state.conversation_id, model["context_window"], run_id=state.id, can_see=can_see, meta=meta)
+                raw = self._estimate(history) + fixed
+                used = self._measure(meta, model["id"], raw)
+        target = window * (0.5 if force else 0.85)
+        if used > target:
+            shrunk = self._shrink(history, used, target)
+            raw -= used - shrunk
+            used = shrunk
+        return history, used, raw, compacted
 
     async def _attach_images(self, state: RunState, history: list[dict]) -> None:
         """把 image_refs 换成图片数据（同一轮内缓存）。用户消息里不是图片的引用直接忽略；读不出的图片写进文字说明。"""
@@ -1328,7 +1404,7 @@ class AssistantService:
             errors = 0
             shared: dict = {}
             forced_final: str | None = None
-            compacted = False
+            compacted = overflowed = False
             while True:
                 self._validate(state)
                 model = self.channels.model(state.model_id)
@@ -1354,13 +1430,6 @@ class AssistantService:
                                    "model_text": prompts.limit_reached(forced_final)}
                         seq = self.trace.append(state.conversation_id, state.id, "event", message)
                         await state.emit({"type": "message", "message": {"seq": seq, "role": "event", **message}})
-                history = self._history(state.conversation_id, model["context_window"], run_id=state.id, can_see=can_see)
-                window = model["context_window"] or 32000
-                if self._estimate(history) > window * 0.7 and len(history) > 6 and not compacted:
-                    compacted = await self._compact(state, model, endpoint)
-                    if compacted:
-                        history = self._history(state.conversation_id, model["context_window"], run_id=state.id, can_see=can_see)
-                await self._attach_images(state, history)
                 now = datetime.now(ZoneInfo(state.environment["timezone"])) if state.environment.get("timezone") else datetime.now().astimezone()
                 usage = self.objects.metadata.db.execute("SELECT quota_bytes, used_bytes FROM buckets WHERE id=?",
                                                          (state.bucket_id,)).fetchone()
@@ -1374,22 +1443,49 @@ class AssistantService:
                                                access_mode="full" if conversation["access_mode"] == "full"
                                                and self._full_access(state.user_id) else "approval")
                 pending = self.trace.pending_actions(state.conversation_id)
-                history.append({"role": "user", "content": prompts.context_block(
+                context_block = {"role": "user", "content": prompts.context_block(
                     scope_root=display(scope_root), view=state.view, location=display(state.location),
                     used=_fmt(usage["used_bytes"] if usage else 0),
                     quota="不限" if not usage or usage["quota_bytes"] is None else _fmt(usage["quota_bytes"]),
                     remaining_steps=max(0, limits["max_steps"] - steps), remaining_tools=max(0, limits["max_tool_calls"] - tool_calls),
-                    pending="；".join(f"#{a['id']}（{KINDS.get(a['kind'], a['kind'])}，{a['count']} 项）" for a in pending) or "无")})
+                    pending="；".join(f"#{a['id']}（{KINDS.get(a['kind'], a['kind'])}，{a['count']} 项）" for a in pending) or "无")}
                 definitions = [] if forced_final else [spec.definition() for spec in tools.values()]
+                # 系统提示词、工具定义与动态上下文块也占窗口（§23）。
+                fixed = (len(system) + len(json.dumps([vars(item) for item in definitions], ensure_ascii=False))) // 2 \
+                    + self._estimate([context_block])
+                window = model["context_window"] or 32000
+                history, used, estimate, did = await self._context(state, model, endpoint, can_see, fixed, allow_compact=not compacted)
+                compacted = compacted or did
+                if used > window * 0.85:
+                    raise ContextFull()
+                await self._attach_images(state, history)
+                history.append(context_block)
                 remaining = max(5.0, deadline + (60 if forced_final else 0) - time.monotonic())
                 await state.emit({"type": "thinking"})
-                reply = await asyncio.wait_for(self._model_call(state, model, endpoint, system, history, definitions,
-                                                                max_tokens=model["max_output"]), remaining)
+                try:
+                    reply = await asyncio.wait_for(self._model_call(state, model, endpoint, system, _clean(history), definitions,
+                                                                    max_tokens=model["max_output"]), remaining)
+                except ProviderError as exc:
+                    if exc.code != "context_overflow" or overflowed:
+                        raise
+                    # 渠道报上下文超长：强制摘要并把本轮工具结果瘦身到窗口一半，重试一次（§23）。
+                    overflowed = True
+                    history, used, estimate, did = await self._context(state, model, endpoint, can_see, fixed,
+                                                                       allow_compact=True, force=True)
+                    compacted = compacted or did
+                    await self._attach_images(state, history)
+                    history.append(context_block)
+                    remaining = max(5.0, deadline + (60 if forced_final else 0) - time.monotonic())
+                    reply = await asyncio.wait_for(self._model_call(state, model, endpoint, system, _clean(history), definitions,
+                                                                    max_tokens=model["max_output"]), remaining)
+                actual = reply.input_tokens if reply.input_tokens * 4 >= estimate else estimate
+                await state.emit({"type": "context", "used": actual + reply.output_tokens, "window": window})
                 steps += 1
                 self._validate(state)
                 calls = reply.tool_calls if not forced_final else []
                 assistant = {"text": self.guard.redact(reply.text), "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
-                             "model_id": model["id"], "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens}
+                             "model_id": model["id"], "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens,
+                             "prompt_estimate": estimate}
                 if reply.reasoning.strip():
                     started_at = state.thinking.get("start")
                     ended_at = state.thinking.get("end") or state.thinking.get("last")
@@ -1444,12 +1540,19 @@ class AssistantService:
                 await state.emit({"type": "message", "message": {"seq": seq, "role": "event", **message}})
             except Exception:
                 pass
+        except ContextFull:
+            status, stop_reason = "stopped", "context"
+            await self._context_full(state)
         except TimeoutError:
             status, stop_reason = "failed", "timeout"
             await self._fail(state, "本轮运行超时，请缩小范围后重试")
         except ProviderError as exc:
-            status, stop_reason = "failed", exc.code
-            await self._fail(state, f"模型请求失败：{exc}", retry=True)
+            if exc.code == "context_overflow":
+                status, stop_reason = "stopped", "context"
+                await self._context_full(state)
+            else:
+                status, stop_reason = "failed", exc.code
+                await self._fail(state, f"模型请求失败：{exc}", retry=True)
         except Exception:
             log.error("assistant run failed id=%s", state.id)
             status, stop_reason = "failed", "internal"
@@ -1472,6 +1575,16 @@ class AssistantService:
             state.finished_at = time.time()
             await state.emit({"type": "run_finished", "status": status, "stop_reason": stop_reason,
                               "usage": {"today": self.trace.tokens_today(state.user_id)}})
+
+    async def _context_full(self, state: RunState) -> None:
+        """压缩与兜底之后仍放不下：结束本轮，不再请求渠道（§23）。"""
+        message = {"type": "limit", "text": "对话上下文已满，请新建对话继续",
+                   "model_text": "[系统事件] 上一轮因对话上下文已满而停止。请简要总结已完成的部分，并建议用户新建对话继续。"}
+        try:
+            seq = self.trace.append(state.conversation_id, state.id, "event", message)
+            await state.emit({"type": "message", "message": {"seq": seq, "role": "event", **message}})
+        except Exception:
+            pass
 
     async def _fail(self, state: RunState, text: str, *, retry: bool = False) -> None:
         message = {"type": "error", "text": text, "retry": retry}
@@ -1640,6 +1753,17 @@ class AssistantService:
         except ValueError as exc:
             return {"error": str(exc)[:200]}
         return {key: result[key] for key in ("total", "added", "updated", "models")}
+
+
+def _slim_result(message: dict) -> str:
+    """工具结果的摘要行（§23）：只含工具名、状态与留痕里的一行摘要。"""
+    status = "成功" if message.get("status") == "ok" else "出错"
+    return f"[已省略原始结果] {message.get('name') or message.get('tool_name') or '工具'} {status}：{message.get('summary') or '无摘要'}"
+
+
+def _clean(history: list[dict]) -> list[dict]:
+    """去掉只供内部使用的 _ 开头字段。"""
+    return [{key: value for key, value in item.items() if not key.startswith("_")} for item in history]
 
 
 def _fmt(size: int | None) -> str:
