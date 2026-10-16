@@ -5,11 +5,12 @@ import type { ListPage, PublicFolderPage } from "./api";
 /**
  * 目录连续浏览：自动读完有界游标接口，切换位置时取消旧请求。
  * 首次读取按第 1、2、4、8… 页逐步展示，总渲染量与目录大小成线性；refresh 保留原列表与滚动位置，
- * 读完后整体替换，并会中断仍在进行的读取，保证修改后看到的是最新结果。maxPages 用于搜索等需要上限的场景。
+ * 读完后整体替换，并会中断仍在进行的读取，保证修改后看到的是最新结果。maxPages 用于搜索等需要上限的场景；
+ * reconcile 在刷新替换时复用未变化的条目对象，避免整表重绘；refresh(true) 为后台刷新，不显示刷新中状态。
  */
 export function useDirectory<T extends { next_cursor: string | number | null }>(
   fetchPage: (cursor: string | null, signal: AbortSignal) => Promise<T>, merge: (previous: T, next: T) => T,
-  maxPages = Infinity,
+  maxPages = Infinity, reconcile?: (previous: T, next: T) => T,
 ) {
   const [page, setPage] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
@@ -19,12 +20,12 @@ export function useDirectory<T extends { next_cursor: string | number | null }>(
   const [error, setError] = useState("");
   const request = useRef<AbortController | null>(null);
   const shown = useRef(false);
-  const load = useCallback(async (keep = false): Promise<string | null> => {
+  const load = useCallback(async (keep = false, quiet = false): Promise<string | null> => {
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
     const progressive = !keep;
-    if (keep) setRefreshing(true);
+    if (keep && !quiet) setRefreshing(true);
     else { shown.current = false; setPage(null); setLoading(true); setLoadingMore(false); setRefreshing(false); setTruncated(false); setError(""); }
     try {
       let cursor: string | null = null, result: T | null = null, pages = 0;
@@ -43,7 +44,9 @@ export function useDirectory<T extends { next_cursor: string | number | null }>(
         }
       } while (cursor !== null);
       shown.current = true;
-      setPage(result); setTruncated(cursor !== null); setError("");
+      const final = result;
+      setPage(current => keep && current && final && reconcile ? reconcile(current, final) : final);
+      setTruncated(cursor !== null); setError("");
       return null;
     } catch (reason) {
       if (controller.signal.aborted) return null;
@@ -56,9 +59,9 @@ export function useDirectory<T extends { next_cursor: string | number | null }>(
         setLoading(false); setLoadingMore(false); setRefreshing(false);
       }
     }
-  }, [fetchPage, merge, maxPages]);
+  }, [fetchPage, merge, maxPages, reconcile]);
   const reload = useCallback(() => load(), [load]);
-  const refresh = useCallback(() => load(true), [load]);
+  const refresh = useCallback((quiet = false) => load(true, quiet), [load]);
   useEffect(() => { void reload(); return () => { request.current?.abort(); request.current = null; }; }, [reload]);
   return { page, setPage, loading, loadingMore, refreshing, truncated, error, reload, refresh };
 }
@@ -90,6 +93,20 @@ export const mergeFilePages = (a: ListPage, b: ListPage): ListPage => ({
   ...b, objects: [...a.objects, ...b.objects], common_prefixes: [...new Set([...a.common_prefixes, ...b.common_prefixes])],
   public_folders: { ...a.public_folders, ...b.public_folders }, folder_sizes: { ...a.folder_sizes, ...b.folder_sizes },
 });
+/** 刷新后复用内容未变的文件对象：行、缩略图与补生成队列不会因为对象换新而重新渲染或重启。 */
+export const reconcileFilePage = (previous: ListPage, next: ListPage): ListPage => {
+  const known = new Map(previous.objects.map(item => [item.key, item]));
+  const same = (a: object, b: object) => JSON.stringify(a) === JSON.stringify(b);
+  const objects = next.objects.map(item => { const old = known.get(item.key); return old && same(old, item) ? old : item; });
+  const changed = objects.length !== previous.objects.length || objects.some((item, index) => item !== previous.objects[index]);
+  if (!changed && same({ ...previous, objects: [] }, { ...next, objects: [] })) return previous;
+  return {
+    ...next, objects: changed ? objects : previous.objects,
+    common_prefixes: same(previous.common_prefixes, next.common_prefixes) ? previous.common_prefixes : next.common_prefixes,
+    public_folders: same(previous.public_folders ?? {}, next.public_folders ?? {}) ? previous.public_folders : next.public_folders,
+    folder_sizes: same(previous.folder_sizes ?? {}, next.folder_sizes ?? {}) ? previous.folder_sizes : next.folder_sizes,
+  };
+};
 export const mergePublicFolderPages = (a: PublicFolderPage, b: PublicFolderPage): PublicFolderPage => ({
   ...b, files: [...a.files, ...b.files], folders: [...a.folders, ...b.folders],
 });

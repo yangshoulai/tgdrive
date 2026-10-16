@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type MouseEvent, type ReactNode } from "react";
-import { useDirectory, useRenderLimit, mergeFilePages } from "../pagination";
+import { useDirectory, useRenderLimit, mergeFilePages, reconcileFilePage } from "../pagination";
 import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
@@ -74,13 +74,23 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     ? api.searchFiles(query, cursor ?? "", filter === "public", 200, root, kind, signal)
     : api.listFiles(prefix, cursor, filter === "public", 200, kind, signal), [prefix, query, filter, kind, root]);
   // 目录连续展示全部项目；搜索最多读取 SEARCH_PAGES 页，结果过多时提示细化关键词。
-  const pagination = useDirectory(fetchPage, mergeFilePages, query ? SEARCH_PAGES : Infinity);
+  const pagination = useDirectory(fetchPage, mergeFilePages, query ? SEARCH_PAGES : Infinity, reconcileFilePage);
   const load = pagination.reload;
   /** 修改后的原地刷新：保留列表、滚动位置与选择，读完后整体替换；失败时保留原列表并提示。 */
   const refreshList = useCallback(() => pagination.refresh().then(message => { if (message) notify.error(message); }), [pagination.refresh, notify]);
+  // 批量上传时每个文件完成都会递增 uploadRevision：合并成后台刷新（静止 800 ms 或最长 3 秒一次），不转刷新按钮，避免列表持续闪动。
+  const uploadRefresh = useRef<{ timer?: number; since?: number }>({});
+  const quietRefresh = useRef(pagination.refresh);
+  quietRefresh.current = pagination.refresh;
   useEffect(() => {
-    if (lastUploadRevision.current !== uploadRevision) { lastUploadRevision.current = uploadRevision; void refreshList(); }
-  }, [uploadRevision, refreshList]);
+    if (lastUploadRevision.current === uploadRevision) return;
+    lastUploadRevision.current = uploadRevision;
+    const state = uploadRefresh.current, now = Date.now();
+    state.since ??= now;
+    window.clearTimeout(state.timer);
+    state.timer = window.setTimeout(() => { state.since = undefined; void quietRefresh.current(true); }, Math.max(0, Math.min(800, state.since + 3000 - now)));
+  }, [uploadRevision]);
+  useEffect(() => () => window.clearTimeout(uploadRefresh.current.timer), []);
   const loading = pagination.loading;
   const loadError = pagination.error;
   const files = useMemo(() => (pagination.page?.objects ?? []).filter(item => !item.key.endsWith("/")), [pagination.page]);
