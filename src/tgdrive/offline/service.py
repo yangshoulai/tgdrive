@@ -17,7 +17,7 @@ from cryptography.exceptions import InvalidTag
 
 from ..api import normalize_user_path
 from ..crypto import derive_subkey, open_sealed, seal
-from ..errors import NotFoundError, NotReadyError, QuotaExceededError
+from ..errors import IntegrityError, NotFoundError, NotReadyError, QuotaExceededError
 from ..objects import PRIVATE_PREFIX, Scope
 from ..work import WorkBusyError
 from .hls import load_playlist, remux
@@ -85,7 +85,7 @@ class OfflineDownloads:
             value = self._source(row, key)
             url = value["platform_source"]["url"] if row["platform"] else value["request"]["url"]
             parts = urlsplit(url)
-        except (ValueError, InvalidTag, KeyError, TypeError):
+        except (ValueError, InvalidTag, KeyError, TypeError, IntegrityError):  # 来源记录损坏时列表照常显示，只是不带来源链接
             return None
         if row["platform"]:
             return {"url": url, "has_query": False}
@@ -387,7 +387,8 @@ class OfflineDownloads:
         result["eta_seconds"] = max(0, (row["size"] - result["received"]) / speed) if result["speed"] and row["size"] and row["kind"] == "http" else None
         return result
 
-    def list(self, user_id, *, cursor=0, status="", query="", limit=50, private_scope: Scope | None = None):
+    def list(self, user_id, *, cursor=0, status="", query="", limit=50, private_scope: Scope | None = None, ids=None):
+        """任务列表（键集分页）。ids 用于托盘跟踪：只返回这些编号中属于该用户的任务（最多 100 个），不分页。"""
         self.scope(user_id)
         reveal_private = bool(private_scope and private_scope.private_access)
         if reveal_private and private_scope.authorize is not None:
@@ -396,6 +397,12 @@ class OfflineDownloads:
             raise ValueError("任务筛选或分页参数不正确")
         limit = max(1, min(limit, 100))
         where, args = "user_id=?", [user_id]
+        if ids is not None:
+            if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or not all(type(value) is int for value in ids):
+                raise ValueError("ids 最多 100 个任务编号")
+            where += f" AND id IN ({','.join('?' * len(ids))})"
+            args.extend(ids)
+            cursor, limit = 0, len(ids)
         if status == "active":
             where += " AND status IN ('queued','running','interrupted')"
         elif status:

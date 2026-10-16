@@ -874,7 +874,11 @@ class TgDriveASGI(StaticFiles):
                 if route == "/downloads/parse" and method == "POST":
                     return 200, await self.offline.parse(account.id, payload.get("input"), download_type=payload.get("download_type", "auto"), cookies=payload.get("cookies", "")), {"Cache-Control": "no-store"}
                 if route == "/downloads" and method == "GET":
-                    return 200, self.offline.list(account.id, cursor=int(query.get("cursor", ["0"])[0] or "0"), status=query.get("status", [""])[0], query=query.get("q", [""])[0], limit=int(query.get("limit", ["50"])[0]), private_scope=private_scope), {"Cache-Control": "no-store"}
+                    try:
+                        ids = [int(value) for value in query["ids"][0].split(",") if value.strip()] if "ids" in query else None
+                    except ValueError as exc:
+                        raise ValueError("ids 应为逗号分隔的任务编号") from exc
+                    return 200, self.offline.list(account.id, cursor=int(query.get("cursor", ["0"])[0] or "0"), status=query.get("status", [""])[0], query=query.get("q", [""])[0], limit=int(query.get("limit", ["50"])[0]), private_scope=private_scope, ids=ids), {"Cache-Control": "no-store"}
                 if route == "/downloads" and method == "POST":
                     return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""), private_scope=private_scope, private_activity=private_activity)}, {"Cache-Control": "no-store"}
                 if route == "/downloads/clear" and method == "POST":

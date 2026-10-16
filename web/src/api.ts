@@ -452,9 +452,11 @@ export const publicPath = (token: string, name: string, download = false, access
 export const adminSettings = (signal?: AbortSignal) => request<SystemSettings>("/api/admin/v1/settings", { signal });
 export const adminResources = () => request<ResourceSettings>("/api/admin/v1/resources");
 export const updateAdminResources = (values: ResourceConfig) => post<ResourceSettings>("/api/admin/v1/resources", values);
-export async function listDownloads(cursor: string | null, status: string, signal?: AbortSignal, query = "") {
-  const params = new URLSearchParams({ limit: "50", cursor: cursor ?? "", status });
+/** ids：只读取这些任务（最多 100 个，托盘跟踪用）；limit 为每页数量（最多 100）。 */
+export async function listDownloads(cursor: string | null, status: string, signal?: AbortSignal, query = "", options: { ids?: number[]; limit?: number } = {}) {
+  const params = new URLSearchParams({ limit: String(options.limit ?? 50), cursor: cursor ?? "", status });
   if (query) params.set("q", query);
+  if (options.ids) params.set("ids", options.ids.join(","));
   const suffix = `?${params}`;
   if (privateAccess) {
     try { return await request<DownloadPage>(`/api/user/v1/private/downloads${suffix}`, { signal }); }

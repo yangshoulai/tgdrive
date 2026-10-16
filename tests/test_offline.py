@@ -213,6 +213,22 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audit["action"], "download.batch")
         self.assertEqual(json.loads(audit["detail"]), {"action": "delete", "count": 4, "done": 3})
 
+    async def test_list_by_ids_for_tray_reads_beyond_first_page(self):
+        tasks = [await self.make() for _ in range(3)]
+        foreign = await self.make()
+        self.app.metadata.db.execute("UPDATE offline_tasks SET user_id=? WHERE id=?", (self.admin.id, foreign["id"]))
+        listed = self.offline.list(self.alice.id, ids=[tasks[0]["id"], tasks[2]["id"], foreign["id"]], limit=1)
+        self.assertEqual(sorted(task["id"] for task in listed["tasks"]), sorted([tasks[0]["id"], tasks[2]["id"]]), "只返回自己的任务，不受 limit 影响")
+        self.assertIsNone(listed["next_cursor"])
+        for ids in ([], ["1"], list(range(1, 102))):
+            with self.subTest(ids=ids), self.assertRaises(ValueError):
+                self.offline.list(self.alice.id, ids=ids)
+        client = Client(self.app)
+        headers = await client.login("user", "alice@example.com", "alice password")
+        status, _, data = await client.request("GET", f"/api/user/v1/downloads?ids={tasks[1]['id']}", b"", headers)
+        self.assertEqual((status, [task["id"] for task in json.loads(data)["tasks"]]), (200, [tasks[1]["id"]]))
+        self.assertEqual((await client.request("GET", "/api/user/v1/downloads?ids=a", b"", headers))[0], 400)
+
     async def test_elapsed_time_recorded_and_reset_on_restart(self):
         task = await self.make()
         self.offline.start()

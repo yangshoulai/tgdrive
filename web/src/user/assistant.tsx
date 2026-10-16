@@ -112,6 +112,13 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     }
   }, [config, detail?.conversation.model_id, modelId]);
   useEffect(() => { if (open) window.setTimeout(() => input.current?.focus(), 60); }, [open, currentId]);
+  // 抽屉占用的右侧宽度（含 16px 边距）写到根元素上，上传／下载托盘与最小化预览据此居中在剩余区域，不被抽屉挡住。
+  useEffect(() => {
+    if (page || !open) return;
+    const root = document.documentElement;
+    root.style.setProperty("--assistant-occupied", `${width + 32}px`);
+    return () => { root.style.removeProperty("--assistant-occupied"); };
+  }, [page, open, width]);
   useEffect(() => () => unsubscribe.current?.(), []);
   useEffect(() => {
     if (page) return;

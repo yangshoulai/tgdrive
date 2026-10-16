@@ -494,7 +494,7 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .modal-backdrop.is-fullscreen, .modal-backdrop:fullscreen { padding: 0; background: var(--surface); }
 .modal.is-expanded { width: 100%; height: 100%; min-height: 0; max-width: none; max-height: 100%; border-radius: var(--radius-md); }
 .modal-backdrop.is-fullscreen .modal { border-radius: 0; }
-.modal-backdrop.is-minimized { inset: auto auto 20px 50%; z-index: 55; display: block; width: min(380px, calc(100vw - 32px)); padding: 0; transform: translateX(-50%); background: transparent; backdrop-filter: none; animation: none; }
+.modal-backdrop.is-minimized { inset: auto auto 20px max(calc(min(380px, 100vw - 32px) / 2 + 16px), calc((100vw - var(--assistant-occupied, 0px)) / 2)); z-index: 55; display: block; width: min(380px, calc(100vw - 32px)); padding: 0; transform: translateX(-50%); background: transparent; backdrop-filter: none; animation: none; }
 .modal.is-minimized { max-width: none; max-height: none; border-radius: var(--radius-lg); }
 .modal.is-movable .modal-header { cursor: grab; }
 .modal.is-movable .modal-header :is(button, a) { cursor: pointer; }
@@ -515,11 +515,12 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .modal.is-minimized .modal-heading h2 { overflow: hidden; font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
 .modal.is-minimized .modal-body, .modal.is-minimized .modal-footer, .modal.is-minimized .preview-meta-date, .modal.is-minimized .preview-meta-public { display: none; }
 .modal-minimized-controls { border-top: 1px solid var(--line-soft); }
-@media (max-width: 1180px) {
-  body:has(.modal-backdrop.is-minimized) .tray-stack { bottom: calc(176px + env(safe-area-inset-bottom)); max-height: calc(100dvh - 196px); }
-  /* 最小化的视频保留画面，卡片更高。 */
-  body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom: calc(min(380px, 100vw - 32px) * .5625 + 186px + env(safe-area-inset-bottom)); max-height: calc(100dvh - 420px); }
-}
+/* 托盘与最小化预览都在底部中间：有最小化预览时托盘叠在它上方。 */
+body:has(.modal-backdrop.is-minimized) .tray-stack { bottom: calc(176px + env(safe-area-inset-bottom)); max-height: calc(100dvh - 196px); }
+/* 最小化的视频保留画面，卡片更高。 */
+body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom: calc(min(380px, 100vw - 32px) * .5625 + 186px + env(safe-area-inset-bottom)); max-height: calc(100dvh - 420px); }
+/* 1100px 以下助手抽屉占满屏幕，托盘与最小化预览回到视口中线。 */
+@media (max-width: 1100px) { .tray-stack { --tray-center: 50%; } .modal-backdrop.is-minimized { left: 50%; } }
 .modal.is-expanded .modal-body { flex: 1; min-height: 0; }
 .modal-heading { flex: 1; min-width: 0; padding-top: 4px; }
 .modal-heading h2 { font-size: var(--text-lg); font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
@@ -1486,7 +1487,10 @@ html[data-input="keyboard"] .preview-code-editor .cm-editor.cm-focused { box-sha
 .upload-pick-name { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 上传与离线下载托盘叠放在右下角，各自保持独立的卡片。 */
-.tray-stack { position: fixed; right: 20px; bottom: 20px; z-index: 50; display: flex; flex-direction: column; gap: 10px; width: min(380px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); }
+/* 上传与离线下载托盘在页面底部居中；文件助手抽屉打开时居中在抽屉左侧的剩余区域（--assistant-occupied 由抽屉写入），
+   与最小化预览共用同一条中线，后者在下方、托盘叠在它上面。 */
+.tray-stack { --tray-center: max(calc(min(380px, 100vw - 32px) / 2 + 16px), calc((100vw - var(--assistant-occupied, 0px)) / 2));
+  position: fixed; left: var(--tray-center); bottom: 20px; z-index: 50; display: flex; flex-direction: column; gap: 10px; width: min(380px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); transform: translateX(-50%); }
 .tray-stack:empty { display: none; }
 /* 上传／离线下载托盘：头部环形总进度 + 标题与摘要，行内细进度条；进行中的行悬停时百分比换成取消按钮。 */
 .upload-tray { position: relative; display: flex; flex: none; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-xl); background: color-mix(in srgb, var(--surface) 92%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); animation: tray-in .32s cubic-bezier(.2, .8, .2, 1); }
@@ -1908,7 +1912,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .preview-modal:not(.is-minimized) .modal-header { flex-wrap: wrap; padding: 12px 12px 10px; gap: 8px; }
   .preview-modal:not(.is-minimized) .modal-window-actions { width: 100%; justify-content: flex-end; }
   .preview-playlist-toggle { font-size: var(--text-xs); padding: 0 4px; }
-  .modal-backdrop.is-minimized { bottom: max(16px, env(safe-area-inset-bottom)); }
+  .modal-backdrop.is-minimized { left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); }
   .preview-video-host .art-control-pip, .preview-video-host .art-control-fullscreenWeb { display: none !important; }
   .auth-form-pane { padding: 24px; }
   .share-bar { padding: 0 16px; }
@@ -1932,7 +1936,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .doc-cards, .doc-pager { grid-template-columns: minmax(0, 1fr); }
   .doc-params dl > div { grid-template-columns: minmax(0, 1fr); }
   .docs-search-backdrop { padding: 12px; }
-  .tray-stack { right: 12px; bottom: 12px; max-height: calc(100dvh - 24px); }
+  .tray-stack { --tray-center: 50%; bottom: 12px; max-height: calc(100dvh - 24px); }
   .unlock-form { grid-template-columns: minmax(0, 1fr); }
 }
 

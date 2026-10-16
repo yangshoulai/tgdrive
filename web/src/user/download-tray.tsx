@@ -32,10 +32,31 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
   useEffect(() => {
     if (hidden) return;
     const controller = new AbortController();
-    void api.listDownloads(null, "", controller.signal).then(page => {
+    // 读取全部进行中的任务（每页 100 个，最多 20 页），再按编号补读已跟踪但不再进行中的任务，取得它们的最终状态。
+    // 不能只读第一页：一次添加超过一页的任务时，托盘会漏掉其余任务，标题数量也会偏少。
+    const read = async () => {
+      const seen = new Map<number, api.DownloadTask>();
+      let cursor: string | null = null;
+      for (let page = 0; page < 20; page++) {
+        const result: api.DownloadPage = await api.listDownloads(cursor, "active", controller.signal, "", { limit: 100 });
+        for (const task of result.tasks) seen.set(task.id, task);
+        if (!result.next_cursor) break;
+        cursor = String(result.next_cursor);
+      }
+      const rest = [...trackedRef.current.keys()].filter(id => !seen.has(id));
+      for (let start = 0; start < rest.length; start += 100) {
+        const result = await api.listDownloads(null, "", controller.signal, "", { ids: rest.slice(start, start + 100) });
+        for (const task of result.tasks) seen.set(task.id, task);
+      }
+      return [...seen.values()];
+    };
+    void read().then(tasks => {
       const next = new Map(trackedRef.current);
       const finished = new Set<string>();
-      for (const task of page.tasks) {
+      // 已跟踪却读不到的任务已被删除（例如在任务页或另一个窗口），从托盘移除。
+      const present = new Set(tasks.map(task => task.id));
+      for (const id of [...next.keys()]) if (!present.has(id)) { next.delete(id); completedAt.current.delete(id); }
+      for (const task of tasks) {
         const previous = next.get(task.id);
         if (previous || isActiveDownload(task)) next.set(task.id, task);
         if (previous && isActiveDownload(previous) && task.status === "completed") {
