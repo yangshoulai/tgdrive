@@ -118,6 +118,39 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const setThumbnails = (key: string, thumbnails: string[]) =>
     setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, thumbnail_versions: undefined, has_thumbnail: thumbnails.includes("thumb") } : item));
   const thumbnailGenerator = useThumbnailGenerator(files, () => { notify.success("已提交缩略图生成请求"); scheduleRefresh(); });
+  // 预览打开时，把页面上最新的文件信息（补上的缩略图、覆盖后的新版本）同步给预览的当前文件与底部列表。
+  useEffect(() => { preview.sync(files); }, [files, preview.sync]);
+  // 等待缩略图：当前列表里有缺缩略图的图片、视频、音频时，只查询这些文件的缩略图状态（不重读整个目录），
+  // 间隔 10 秒起逐次加倍到 5 分钟，页面隐藏时跳过，最长等 1 小时；文件被删除或覆盖时改为整页后台刷新。
+  const waitingThumbnails = useMemo(() => files
+    .filter(item => !item.thumbnails?.length && thumbnailSource(item.key, item.content_type, item.size))
+    .sort((a, b) => b.modified_at - a.modified_at).slice(0, 200), [files]);
+  const waitingKey = waitingThumbnails.map(item => `${item.key}\n${item.etag}`).join("\n");
+  useEffect(() => {
+    if (!waitingThumbnails.length || loading) return;
+    let delay = 10000, timer = 0, stopped = false;
+    const controller = new AbortController(), started = Date.now(), waiting = waitingThumbnails;
+    const tick = async () => {
+      if (document.visibilityState === "visible") {
+        try {
+          const { files: states } = await api.thumbnailStatus(waiting.map(item => item.key), controller.signal);
+          if (stopped) return;
+          if (waiting.some(item => !states[item.key] || states[item.key].etag !== item.etag)) scheduleRefresh();
+          const ready = new Map(Object.entries(states).filter(([, state]) => state.thumbnails?.length));
+          if (ready.size) setFiles(current => current.map(item => {
+            const state = ready.get(item.key);
+            return state && state.etag === item.etag ? { ...item, ...state } : item;
+          }));
+        } catch { if (stopped) return; }
+      }
+      if (stopped || Date.now() - started > 3600_000) return;
+      delay = Math.min(delay * 2, 300_000);
+      timer = window.setTimeout(() => void tick(), delay);
+    };
+    timer = window.setTimeout(() => void tick(), delay);
+    return () => { stopped = true; window.clearTimeout(timer); controller.abort(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waitingKey, loading]);
   const previewThumbnailAttempts = useRef(new Set<string>());
   function savePreviewThumbnail(item: api.FileItem, produce: () => ReturnType<typeof thumbnailsFromImage>, force = false) {
     const identity = `${item.key}:${item.etag}`;

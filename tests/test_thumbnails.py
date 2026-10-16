@@ -163,6 +163,20 @@ class ThumbnailTests(unittest.TestCase):
         self.assertEqual(self.set_thumb("song.mp3", None, "none"), 204)
         self.assertEqual(self.listed("song.mp3")["thumbnails"], ["thumb"], "marker never hides an existing thumbnail")
 
+    def test_thumbnail_status_returns_only_listed_files(self):
+        first, second = self.put("a.jpg"), self.put("b.jpg")
+        self.assertEqual(self.set_thumb("a.jpg", WEBP), 204)
+        status, body, headers = self.call("POST", "/api/user/v1/thumbnail/status", {"paths": ["a.jpg", "b.jpg", "gone.jpg"]})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(set(body["files"]), {"a.jpg", "b.jpg"}, "不存在的路径不出现，页面据此整页刷新")
+        self.assertEqual(body["files"]["a.jpg"]["thumbnails"], ["thumb"])
+        self.assertEqual((body["files"]["a.jpg"]["etag"], body["files"]["b.jpg"]["thumbnails"]), (first.etag, []))
+        self.assertNotIn("key", body["files"]["a.jpg"])
+        self.assertEqual(headers["cache-control"], "no-store")
+        for paths in ([], ["x"] * 201, "a.jpg", [1]):
+            self.assertEqual(self.call("POST", "/api/user/v1/thumbnail/status", {"paths": paths})[0], 400, paths)
+        self.assertIn(self.call("POST", "/api/user/v1/thumbnail/status", {"paths": [".tgdrive/private/x.jpg"]})[0], (400, 403))
+
     def test_queue_is_admin_only_and_contains_no_file_identity(self):
         info = self.put("secret-subdirectory/photo.jpg")
         self.call("POST", "/api/user/v1/thumbnail/claim", {"path": info.key, "etag": info.etag})

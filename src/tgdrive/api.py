@@ -804,6 +804,27 @@ class UserApi:
             guarded = scope  # 兼容旧客户端；新版客户端均带内容版本和生成票据。
         await self.objects.set_thumbnail(guarded, key, raw, variant)
 
+    THUMBNAIL_STATUS_LIMIT = 200
+
+    def thumbnail_status(self, token: str, paths: list) -> dict[str, object]:
+        """页面等待缩略图时的轻量查询：只返回所列文件当前的 ETag 与缩略图状态，不读取列表或文件内容。
+        已删除或不在授权范围内的路径不出现在结果里，由页面按需整页刷新。"""
+        if not isinstance(paths, list) or not 1 <= len(paths) <= self.THUMBNAIL_STATUS_LIMIT or any(not isinstance(path, str) for path in paths):
+            raise ValueError(f"一次最多查询 {self.THUMBNAIL_STATUS_LIMIT} 个文件")
+        scope = self._scope(token)
+        keys = []
+        for path in dict.fromkeys(paths):
+            key = self._path(path)
+            self.objects._check_scope(scope, key)
+            keys.append(key)
+        if scope.authorize is not None:
+            scope.authorize()
+        rows = self.objects.metadata.db.execute(
+            f"SELECT * FROM objects WHERE bucket_id=? AND key IN ({','.join('?' * len(keys))})", (scope.bucket_id, *keys)).fetchall()
+        items = [self.objects._object(row) for row in rows]
+        return {"files": {item["key"]: {name: item[name] for name in ("etag", "size", "modified_at", "has_thumbnail", "thumbnails", "thumbnail_versions")}
+                          for item in self._objects_json(items)}}
+
     def thumbnail_claim(self, token, csrf, path, etag, force=False):
         scope = self._scope(token, csrf=csrf, mutation=True)
         return self.objects.thumbnail_service.claim(scope, self._path(path), etag, force=force)

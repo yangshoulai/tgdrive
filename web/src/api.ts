@@ -296,6 +296,10 @@ export const setThumbnail = (path: string, data: string, variant: ThumbnailVaria
 export const markNoThumbnail = (path: string, claim: ThumbnailClaim = {}) => post<void>(fileApi("/thumbnail", path), { path, variant: "none", ...claim });
 export const claimThumbnail = (file: Pick<FileItem, "key" | "etag">, force = false) => post<{ token: string | null; expires_in?: number }>(fileApi("/thumbnail/claim", file.key), { path: file.key, etag: file.etag, force });
 export const releaseThumbnail = (file: Pick<FileItem, "key" | "etag">, ticket: string) => post<void>(fileApi("/thumbnail/release", file.key), { path: file.key, etag: file.etag, ticket });
+export type ThumbnailState = Pick<FileItem, "etag" | "size" | "modified_at" | "has_thumbnail" | "thumbnails" | "thumbnail_versions">;
+/** 只查询所列文件的 ETag 与缩略图状态（最多 200 个）；不存在或无权访问的路径不在结果中。 */
+export const thumbnailStatus = (paths: string[], signal?: AbortSignal) => request<{ files: Record<string, ThumbnailState> }>(fileApi("/thumbnail/status", paths[0]),
+  { method: "POST", body: JSON.stringify({ paths }), signal });
 export const generateThumbnail = (file: Pick<FileItem, "key" | "etag">) => post<{ accepted: boolean }>(fileApi("/thumbnail/generate", file.key), { path: file.key, etag: file.etag });
 type ThumbnailFile = Pick<FileItem, "key" | "etag" | "thumbnails" | "has_thumbnail" | "thumbnail_versions">;
 function thumbnailSpec(file: ThumbnailFile, variant: ThumbnailVariant) {

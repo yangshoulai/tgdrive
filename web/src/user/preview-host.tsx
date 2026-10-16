@@ -12,7 +12,7 @@ import { PreviewModal } from "../files";
 type ModalProps = ComponentProps<typeof PreviewModal>;
 export type PreviewRequest = Omit<ModalProps, "onClose">;
 type Current = { id: number; owner: string; request: PreviewRequest };
-type Host = { open: (owner: string, request: PreviewRequest) => void; update: (file: api.FileItem) => void; release: (owner: string) => void };
+type Host = { open: (owner: string, request: PreviewRequest) => void; update: (file: api.FileItem) => void; sync: (owner: string, files: api.FileItem[]) => void; release: (owner: string) => void };
 
 const HostContext = createContext<Host | null>(null);
 // 只属于打开页面的回调；页面卸载后从预览中移除，避免调用已卸载页面的状态。
@@ -26,6 +26,20 @@ export function PreviewHost({ children, privateAllowed, enabled }: { children: R
   const host = useMemo<Host>(() => ({
     open: (owner, request) => setCurrent({ id: ++counter.current, owner, request }),
     update: file => setCurrent(value => value && value.request.file.key === file.key ? { ...value, request: { ...value.request, file: { ...value.request.file, ...file } } } : value),
+    // 打开预览的页面刷新了文件信息（补上缩略图、覆盖后的新版本）：同步给预览的当前文件与列表，成员与顺序不变。
+    sync: (owner, files) => setCurrent(value => {
+      if (!value || value.owner !== owner) return value;
+      const latest = new Map(files.map(item => [item.key, item]));
+      let changed = false;
+      const playlistFiles = value.request.playlistFiles?.map(item => {
+        const next = latest.get(item.key);
+        if (!next || next === item) return item;
+        changed = true; return next;
+      });
+      const file = latest.get(value.request.file.key) ?? value.request.file;
+      if (!changed && file === value.request.file) return value;
+      return { ...value, request: { ...value.request, file, playlistFiles } };
+    }),
     release: owner => setCurrent(value => {
       if (!value || value.owner !== owner) return value;
       if (api.isPrivatePath(value.request.file.key)) return null;
@@ -51,5 +65,6 @@ export function usePreview() {
   return {
     open: useCallback((request: PreviewRequest) => host.open(owner, request), [host, owner]),
     update: host.update,
+    sync: useCallback((files: api.FileItem[]) => host.sync(owner, files), [host, owner]),
   };
 }

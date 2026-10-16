@@ -501,6 +501,15 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .modal.is-moving, .modal.is-moving * { cursor: grabbing !important; user-select: none; }
 .modal.is-moving { transition: none; }
 @media (max-width: 640px) { .modal.is-movable:not(.is-minimized) .modal-header { cursor: auto; } }
+/* 可调整大小的窗口：右下角 16px 拖动角（两道斜线），拖动时不触发过渡；调整过的尺寸按名称记在本机。 */
+.modal { position: relative; }
+.modal.is-sized .modal-body { flex: 1; min-height: 0; }
+.modal-resize { position: absolute; right: 2px; bottom: 2px; z-index: 6; width: 16px; height: 16px; border-radius: 0 0 var(--radius-lg) 0; cursor: nwse-resize; touch-action: none; opacity: .55; transition: opacity .12s;
+  background: linear-gradient(135deg, transparent 0 55%, currentColor 55% 61%, transparent 61% 72%, currentColor 72% 78%, transparent 78%); color: var(--ink-3); }
+.modal:hover > .modal-resize, .modal.is-resizing > .modal-resize { opacity: 1; }
+.is-dark-surface > .modal-resize { color: rgba(255, 255, 255, .6); }
+.modal.is-resizing, .modal.is-resizing * { cursor: nwse-resize !important; user-select: none; }
+@media (max-width: 640px) { .modal-resize { display: none; } }
 .modal.is-minimized.is-movable .modal-header { touch-action: none; }
 .modal.is-minimized .modal-header { padding: 10px 8px 10px 12px; gap: 8px; }
 .modal.is-minimized .modal-heading h2 { overflow: hidden; font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
@@ -987,7 +996,8 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .preview-modal-image .preview-stage > .preview-resource { grid-column: 1; grid-row: 1; min-height: 0; align-self: start; }
 .preview-stage.has-playlist .preview-video-host { max-height: var(--preview-player-height, none); }
 .preview-modal-video, .preview-modal-image { container: preview-window / inline-size; }
-.preview-modal-video:not(.is-expanded):not(.is-minimized), .preview-modal-image:not(.is-expanded):not(.is-minimized) { max-width: 1120px; }
+/* 大屏上给图片与视频更大的默认窗口：最多 1480px 或视口宽度的 88%。用户拖动调整过尺寸后以 .is-sized 的内联尺寸为准。 */
+.preview-modal-video:not(.is-expanded):not(.is-minimized):not(.is-sized), .preview-modal-image:not(.is-expanded):not(.is-minimized):not(.is-sized) { max-width: min(1480px, 88vw); }
 .preview-modal-video .preview-stage, .preview-modal-image .preview-stage { min-height: 0; }
 /* 固定画布与窗口尺寸，封面、原图及视频元信息只影响画布内的等比显示。 */
 .preview-modal-image .preview-loading { min-height: 0; }
@@ -1268,6 +1278,7 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 }
 .preview-modal.is-reading.is-chrome-idle:not(.is-minimized) .preview-stage { cursor: auto; }
 .preview-modal.is-reading:not(.is-minimized) .preview-stage.is-reading { position: relative; display: block; height: min(var(--preview-content-height, 72vh), 860px); min-height: 280px; background: var(--media-canvas); }
+.preview-modal.is-reading.is-sized:not(.is-minimized) .preview-stage.is-reading { height: var(--preview-content-height, 72vh); }
 .preview-modal.is-reading.is-expanded:not(.is-minimized) .preview-stage.is-reading { height: auto; }
 .preview-stage.is-reading .preview-text { position: absolute; inset: 0; display: block; }
 /* 代码与 Markdown 源码靠纵向 flex 把编辑器限制在舞台高度内，由编辑器自己滚动；上一条的选择器优先级更高，必须在这里恢复 flex。 */
@@ -1385,7 +1396,7 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 
 /* 图片：深色画布、模糊背景、可缩放平移的原图，悬浮工具栏和底部缩略图条。 */
 .preview-modal-image .preview-stage { background: var(--media-canvas); }
-.image-viewer { position: relative; isolation: isolate; display: flex; flex-direction: column; overflow: hidden; overflow: clip; height: min(600px, var(--preview-player-height, calc(100dvh - 220px))); background: var(--media-canvas); color: #fff; user-select: none; -webkit-user-select: none; }
+.image-viewer { position: relative; isolation: isolate; display: flex; flex-direction: column; overflow: hidden; overflow: clip; height: min(max(600px, 78dvh), var(--preview-player-height, calc(100dvh - 220px))); background: var(--media-canvas); color: #fff; user-select: none; -webkit-user-select: none; }
 .image-backdrop { position: absolute; inset: -12%; z-index: -1; background-position: center; background-size: cover; filter: blur(52px) saturate(1.4) brightness(.42); opacity: .8; transform: scale(1.1); }
 .image-canvas { position: relative; display: grid; flex: 1; min-height: 0; place-items: center; overflow: hidden; overflow: clip; touch-action: none; cursor: zoom-in; }
 .image-viewer.is-zoomed .image-canvas { cursor: grab; }
@@ -1423,6 +1434,8 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .image-strip img { width: 100%; height: 100%; object-fit: cover; }
 @media (hover: none) { .image-arrow { display: none; } .image-toolbar { bottom: 12px; } .image-viewer:has(.image-strip) .image-toolbar { bottom: 84px; } }
 .preview-modal.is-expanded :is(.image-viewer, .preview-player-audio) { height: 100%; }
+/* 拖动调整过大小的窗口：图片画布占满窗口给出的高度。 */
+.preview-modal.is-sized:not(.is-minimized) .image-viewer { height: var(--preview-player-height, 100%); }
 .preview-modal.is-expanded .audio-art { width: clamp(160px, 34vh, 340px); }
 .share-card .image-viewer { height: min(70dvh, 640px); }
 @media (prefers-reduced-motion: reduce) {

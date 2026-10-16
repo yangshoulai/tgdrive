@@ -249,7 +249,7 @@ class TgDriveASGI(StaticFiles):
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
-                           "/copy", "/delete", "/thumbnail", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/content", "/preview-assets", "/preview-list",
+                           "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
                            "/downloads", "/downloads/clear", "/downloads/batch"}
                 if route not in controls:
@@ -961,6 +961,8 @@ class TgDriveASGI(StaticFiles):
                 await user.set_thumbnail(token, csrf, payload["path"], payload.get("data"), str(payload.get("variant") or "thumb"),
                                          etag=payload.get("etag"), ticket=payload.get("ticket"))
                 return 204, None, {}
+            if method == "POST" and route == "/thumbnail/status":
+                return 200, user.thumbnail_status(token, payload.get("paths")), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/thumbnail/claim":
                 return 200, user.thumbnail_claim(token, csrf, payload["path"], str(payload["etag"]), bool(payload.get("force"))), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/thumbnail/release":

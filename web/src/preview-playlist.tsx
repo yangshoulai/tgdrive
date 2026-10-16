@@ -27,10 +27,9 @@ const nameOf = (file: FileItem) => file.key.slice(file.key.lastIndexOf("/") + 1)
 
 export function usePreviewPlaylist(file: FileItem, kind: string, files: FileItem[] | undefined, accepts: (file: FileItem) => boolean) {
   const [selection, setSelection] = useState({ origin: file.key, file });
-  const current = selection.origin === file.key ? selection.file : file;
   const [mode, setMode] = useState<PlaybackMode>(initialMode);
   const history = useRef<string[]>([]), returning = useRef(false);
-  const items = useMemo(() => {
+  const base = useMemo(() => {
     const seen = new Set<string>();
     return (files ?? [file]).filter(item => {
       if (!accepts(item) || seen.has(item.key)) return false;
@@ -39,6 +38,14 @@ export function usePreviewPlaylist(file: FileItem, kind: string, files: FileItem
     // 最小化后浏览其他页时，保留打开预览时的列表，不引入其他页的文件。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file.key, kind]);
+  // 列表成员固定，但每一项用页面传来的最新信息（例如刚补上的缩略图）；页面已不包含的项保留原样。
+  const items = useMemo(() => {
+    const latest = new Map((files ?? []).map(item => [item.key, item]));
+    latest.set(file.key, file);
+    return base.map(item => latest.get(item.key) ?? item);
+  }, [base, files, file]);
+  const chosen = selection.origin === file.key ? selection.file : file;
+  const current = items.find(item => item.key === chosen.key) ?? chosen;
   useEffect(() => {
     setSelection(current => current.origin === file.key && current.file === file ? current : { origin: file.key, file });
     history.current = []; returning.current = false;

@@ -257,8 +257,14 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   const playlist = usePreviewPlaylist(file, kind, playlistFiles,
     item => getFileKind(item.content_type, item.key) === kind && (kind === "image" || isPlayable(item.key, item.content_type)) && parentPath(item.key) === parentPath(file.key));
   const active = browsable && playlist.current.key !== file.key ? playlist.current : file;
-  const sourceOf = (item: api.FileItem): PreviewSource => item.key === file.key ? { url, downloadUrl, poster, thumbnail } : sourceFor?.(item) ?? {
+  const derived = (item: api.FileItem): PreviewSource => sourceFor?.(item) ?? {
     url: api.contentUrl(item.key), downloadUrl: api.contentUrl(item.key, true), poster: api.fileThumbnail(item, "poster"), thumbnail: api.fileThumbnail(item),
+  };
+  // 打开的文件沿用传入的地址；缩略图按最新的文件信息计算，页面补上缩略图后预览头部与底部列表随之更新。
+  const sourceOf = (item: api.FileItem): PreviewSource => {
+    if (item.key !== file.key) return derived(item);
+    const latest = derived(item);
+    return { url, downloadUrl, poster: latest.poster ?? poster, thumbnail: latest.thumbnail ?? thumbnail };
   };
   const source = sourceOf(active);
   const [playlistExpanded, setPlaylistExpanded] = useState(false);
@@ -336,7 +342,8 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       node.style.setProperty("--preview-player-height", `${content}px`);
     };
     const observer = new ResizeObserver(resize);
-    for (const element of [header, backdrop]) observer.observe(element);
+    // 也观察窗口本身：用户拖动调整大小后按新的最大高度重新计算画布。
+    for (const element of [header, backdrop, modal]) observer.observe(element);
     window.addEventListener("resize", resize); resize();
     return () => { observer.disconnect(); window.removeEventListener("resize", resize); };
   }, [immersive, kind, playlistExpanded]);
@@ -403,7 +410,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   }, [panelOpen]);
   // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
-    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable movable windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
+    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable movable resizable={kind === "audio" ? undefined : `preview-${kind === "code" ? "text" : kind}`} windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
       : kind === "image" && nav && nav.count > 1 ? <div className="preview-mini-gallery">
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>
