@@ -29,7 +29,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/tgdrive
 
 WORKDIR /app
-COPY pyproject.toml ./
+COPY pyproject.toml LICENSE ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
