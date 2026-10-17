@@ -2156,14 +2156,17 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .file-mobile-meta .badge { flex: none; font-size: var(--text-micro); padding: 1px 5px; }
   .mobile-file-sort { display: flex; }
   .mobile-file-sort select { height: 40px; }
-  /* 文件页顶部：标题与按钮同一行，「新建文件夹」只留图标；工具栏第二行不换行，排序框占满剩余宽度，
-     目录统计改用列表底部的链接。 */
-  .files-view .page-header { flex-direction: row; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; }
-  .files-view .page-header-main { flex: 1 1 0; min-width: 0; }
-  .files-view .page-header-main > .breadcrumbs { margin-bottom: 4px; }
-  .files-view .page-header-actions { flex: none; flex-wrap: nowrap; }
-  .btn-mobile-icon { width: 40px; padding: 0; justify-content: center; }
-  .btn-mobile-icon > span { display: none; }
+  /* 文件页顶部分两行：面包屑与目录名占满整行（长目录名不再挤在窄栏里折成多行），按钮在下一行靠右并保留文字；
+     工具栏第二行不换行，排序框占满剩余宽度，目录统计改用列表底部的链接。 */
+  .files-view .page-header { flex-direction: column; align-items: stretch; gap: 12px; }
+  .files-view .page-header-main { flex: initial; }
+  .files-view .page-header-main > .breadcrumbs { margin-bottom: 6px; }
+  .files-view .page-header-actions { justify-content: flex-end; flex-wrap: nowrap; }
+  /* 窄屏面包屑：每一项都限宽，当前位置也不会比屏幕宽，滚到末尾时能完整看到它的省略号。 */
+  .file-breadcrumbs .crumb-label { max-width: 8em; }
+  .file-breadcrumbs button[aria-current="page"] .crumb-label { max-width: min(16em, 52vw); }
+  /* 根目录只留图标（名称仍在按钮的 title 与读屏文本中），常见的两三级路径不必横向滚动。 */
+  .file-breadcrumbs li:first-child button:not([aria-current="page"]) .crumb-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .files-view .toolbar { gap: 8px; }
   .files-view .toolbar > .toolbar-actions { flex-wrap: nowrap; gap: 6px; }
   .files-view .toolbar .mobile-file-sort { flex: 1 1 auto; }

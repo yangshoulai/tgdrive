@@ -171,8 +171,10 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     if (!nav) return;
     const revealCurrent = () => { nav.scrollLeft = nav.scrollWidth; };
     revealCurrent();
+    // 同时观察导航与其内容：字体加载完成或目录名变化只改变内容宽度，导航本身的尺寸不变。
     const observer = new ResizeObserver(revealCurrent);
     observer.observe(nav);
+    if (nav.firstElementChild) observer.observe(nav.firstElementChild);
     return () => observer.disconnect();
   }, [prefix, query]);
 
@@ -516,7 +518,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); startUpload(event.dataTransfer.files); }}>
       <PageHeader title={query ? `搜索“${query}”` : name}
         actions={<>
-          <Button icon="folderPlus" className="btn-mobile-icon" aria-label="新建文件夹" title="新建文件夹" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
+          <Button icon="folderPlus" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
           <Button variant="primary" icon="upload" onClick={() => fileInput.current?.click()}>上传</Button>
           <input ref={fileInput} type="file" multiple hidden onChange={event => { startUpload(event.target.files); event.target.value = ""; }} />
         </>}>
