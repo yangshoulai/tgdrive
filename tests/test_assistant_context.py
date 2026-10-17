@@ -74,7 +74,7 @@ class ContextTests(AssistantCase):
             self.assertEqual(len(self.model.calls), 1, "放不下时不再请求渠道")
             self.assertEqual(self.service.runs[data["run_id"]].stop_reason, "context")
             events = [m for m in await self.messages(user, conversation) if m["role"] == "event"]
-            self.assertIn("对话上下文已满", events[-1]["text"])
+            self.assertIn("请新建对话继续", events[-1]["text"])
         self.run_async(scenario())
 
     def test_channel_overflow_compacts_and_retries_once(self):
@@ -98,7 +98,7 @@ class ContextTests(AssistantCase):
             status, data = await self.send(user, conversation, "再问一次")
             self.assertEqual(self.service.runs[data["run_id"]].stop_reason, "context")
             last = [m for m in await self.messages(user, conversation) if m["role"] == "event"][-1]
-            self.assertIn("对话上下文已满", last["text"])
+            self.assertIn("请新建对话继续", last["text"])
         self.run_async(scenario())
 
     def test_measure_uses_actual_usage_and_ignores_implausible_values(self):

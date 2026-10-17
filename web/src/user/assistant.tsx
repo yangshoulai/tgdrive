@@ -528,7 +528,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       <div className="assistant-thread-inner">
         {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} privateMode={privateMode} onAccept={() => void acknowledge()} />
           : loading ? <SkeletonRows rows={4} />
-          : !detail ? <Welcome location={effectiveScope} privateMode={privateMode} onPick={text => { setDraft(text); input.current?.focus(); }} />
+          : !detail ? <Welcome location={effectiveScope} view={location.view} privateMode={privateMode} onPick={text => { setDraft(text); input.current?.focus(); }} />
           : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
               onRetry={retryFrom} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
         {reconnecting && <p className="ai-notice" role="status"><Icon name="refresh" size={14} /><span>重新连接中…</span></p>}
@@ -808,7 +808,29 @@ function NoticeCard({ notice, retention, privateMode, onAccept }: { notice: stri
   );
 }
 
-function Welcome({ location, privateMode, onPick }: { location: string; privateMode?: boolean; onPick: (text: string) => void }) {
+/** 按所在页面给出的建议：回收站、公开分享、下载任务各有更贴切的问题，其他页面用通用的四个。 */
+const PAGE_STARTERS: Record<string, { title: string; description: string; text: string; icon: IconName }[]> = {
+  trash: [
+    { title: "回收站里有什么", description: "按类型和大小汇总", text: "回收站里有哪些内容？按类型汇总大小", icon: "trash" },
+    { title: "最占空间的", description: "找出可以彻底删除的", text: "回收站里最大的 10 个项目是什么？先不要删除", icon: "search" },
+    { title: "找回文件", description: "按名称在回收站里查找", text: "我误删了一个文件，帮我在回收站里找找", icon: "refresh" },
+    { title: "即将清除的", description: "看看哪些快到期了", text: "回收站里哪些项目放得最久？", icon: "chart" },
+  ],
+  shared: [
+    { title: "检查公开内容", description: "列出所有分享与有效期", text: "列出我公开分享的全部内容，标出有效期和是否设置了密码", icon: "globe" },
+    { title: "收回旧分享", description: "找出很久以前的分享", text: "哪些分享已经公开超过 30 天？先不要取消", icon: "chart" },
+    { title: "无密码的分享", description: "看看哪些任何人都能打开", text: "哪些分享没有设置访问密码？", icon: "lock" },
+    { title: "分享一个文件", description: "生成链接并设置有效期", text: "帮我公开分享一个文件，有效期 7 天", icon: "link" },
+  ],
+  downloads: [
+    { title: "下载进度", description: "正在进行与排队的任务", text: "现在有哪些下载任务在进行？", icon: "download" },
+    { title: "失败的任务", description: "原因与处理建议", text: "列出失败的下载任务，并说明原因", icon: "alert" },
+    { title: "下载网页里的文件", description: "粘贴链接即可", text: "帮我下载这个链接里的文件：", icon: "link" },
+    { title: "整理下载的文件", description: "按类型归档", text: "看看最近下载完成的文件，再帮我按类型整理", icon: "folder" },
+  ],
+};
+
+function Welcome({ location, view, privateMode, onPick }: { location: string; view?: string; privateMode?: boolean; onPick: (text: string) => void }) {
   if (privateMode) return <div className="assistant-welcome is-private">
     <span className="assistant-welcome-icon"><AssistantMark size={36} /></span>
     <span className="assistant-eyebrow"><Icon name="lock" size={12} />私密对话</span>
@@ -823,7 +845,7 @@ function Welcome({ location, privateMode, onPick }: { location: string; privateM
       <Icon name={example.icon} size={18} /><strong>{example.title}</strong><small>{example.description}</small><Icon name="chevronRight" size={13} />
     </button>)}</div>
   </div>;
-  const examples: { title: string; description: string; text: string; icon: IconName }[] = [
+  const examples: { title: string; description: string; text: string; icon: IconName }[] = (view && PAGE_STARTERS[view]) || [
     { title: "看懂空间", description: "用量与文件分布", text: `统计 ${location} 的空间占用，按类型分组`, icon: "pulse" },
     { title: "找到大文件", description: "发现空间占用大户", text: "这里最大的 10 个文件是什么？", icon: "search" },
     { title: "整理文件", description: "按类型自动归类", text: "先看看当前目录的文件，再帮我按类型整理", icon: "folder" },

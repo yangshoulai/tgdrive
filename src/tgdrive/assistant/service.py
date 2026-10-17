@@ -86,6 +86,20 @@ def _urls(text: object) -> set[str]:
     return {match.rstrip(".,;:!?)]}").split("#", 1)[0] for match in URL_PATTERN.findall(text)}
 
 
+PROVIDER_FAILURES = {
+    "unauthorized": "模型服务拒绝了请求，请联系管理员检查文件助手的设置。",
+    "forbidden": "模型服务拒绝了请求，请联系管理员检查文件助手的设置。",
+    "rate_limited": "模型服务现在太忙，请稍等片刻后重试。",
+    "not_found": "所选模型暂时不可用，请换一个模型，或联系管理员。",
+    "stream_error": "与模型服务的连接中断了，请重试。",
+}
+
+
+def provider_failure_text(code: str) -> str:
+    """模型请求失败时给用户看的说明：只写原因与下一步，不带上游错误原文。"""
+    return PROVIDER_FAILURES.get(code, "模型服务暂时出错，请稍后重试；如果一直失败，请联系管理员。")
+
+
 @dataclass
 class PrivateBinding:
     """私密对话与登录会话、私密授权的绑定：每个登录会话最多一个私密对话。"""
@@ -1237,15 +1251,15 @@ class AssistantService:
 
     def _validate(self, state: RunState) -> None:
         if not self.keystore.unlocked:
-            raise StopRun("locked", "系统已锁定")
+            raise StopRun("locked", "服务正在等待管理员完成启动，这次回复已停止。请稍后再试。")
         session = self.accounts.sessions.peek(state.token)
         if session is None or session.user_id != state.user_id:
             self.trace.expire_session_actions(session_hash(state.token))
-            raise StopRun("session", "登录已失效")
+            raise StopRun("session", "登录已过期，请重新登录后继续。")
         try:
             self.accounts.account_for_session(session)
         except (AuthenticationError, NotFoundError) as exc:
-            raise StopRun("account", "账号已停用") from exc
+            raise StopRun("account", "这个账号已停用，请联系管理员。") from exc
         if state.private:
             # 私密对话：每一步都复核私密授权，失效立即结束且不再请求模型（§24.2）。
             if state.conversation_id not in self.private_chats:
@@ -1261,7 +1275,7 @@ class AssistantService:
             raise StopRun("model", "所选模型已停用或不能用于私密对话，请换一个模型" if state.private else "所选模型已停用，请换一个模型")
         daily = int(self.config.policy(state.user_id)["effective"]["daily_tokens"])
         if daily and self.trace.tokens_today(state.user_id) >= daily:
-            raise StopRun("daily_limit", "今日助手额度已用完")
+            raise StopRun("daily_limit", "今天的助手额度已经用完，明天 0 点恢复。需要更多额度请联系管理员。")
 
     async def _acquire(self, state: RunState) -> None:
         """全局并发：超过上限时排队，并推送排队位置。"""
@@ -1896,18 +1910,19 @@ class AssistantService:
             await self._context_full(state)
         except TimeoutError:
             status, stop_reason = "failed", "timeout"
-            await self._fail(state, "本轮运行超时，请缩小范围后重试")
+            await self._fail(state, "这次处理时间太长，已经停止。可以缩小范围（例如指定某个文件夹）后再试。")
         except ProviderError as exc:
             if exc.code == "context_overflow":
                 status, stop_reason = "stopped", "context"
                 await self._context_full(state)
             else:
                 status, stop_reason = "failed", exc.code
-                await self._fail(state, f"模型请求失败：{exc}", retry=True)
+                # 用户只看到原因与下一步；上游的原始错误（已脱敏）留在调用日志里给管理员排查。
+                await self._fail(state, provider_failure_text(exc.code), retry=True)
         except Exception:
             log.error("assistant run failed id=%s", state.id)
             status, stop_reason = "failed", "internal"
-            await self._fail(state, "助手内部错误，请稍后重试")
+            await self._fail(state, "助手出了点问题，没有完成这次回复。请稍后重试。", retry=True)
         finally:
             if acquired:
                 self._release()
@@ -1930,7 +1945,7 @@ class AssistantService:
 
     async def _context_full(self, state: RunState) -> None:
         """压缩与兜底之后仍放不下：结束本轮，不再请求渠道（§23）。"""
-        message = {"type": "limit", "text": "对话上下文已满，请新建对话继续",
+        message = {"type": "limit", "text": "这个对话已经很长，助手记不下更多内容了。请新建对话继续。",
                    "model_text": "[系统事件] 上一轮因对话上下文已满而停止。请简要总结已完成的部分，并建议用户新建对话继续。"}
         try:
             seq = self.trace.append(state.conversation_id, state.id, "event", message)
@@ -1954,7 +1969,7 @@ class AssistantService:
         title = first.strip().splitlines()[0][:20] if first.strip() else "新对话"
         try:
             if state.input_tokens + state.output_tokens >= self.config.limits()["run_tokens"]:
-                raise StopRun("limit", "本轮预算已用完")
+                raise StopRun("limit", "这次回复的处理量已到上限，已经停止。可以缩小范围后继续。")
             model = self.channels.model(state.model_id)
             endpoint = self.channels.endpoint(model["channel_id"])
             reply = await asyncio.wait_for(self._model_call(state, model, endpoint, "你负责给对话起标题。",

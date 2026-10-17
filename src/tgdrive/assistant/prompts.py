@@ -92,7 +92,9 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
 ## 回复风格
 - 使用简体中文，简洁直接。数字用易读单位（如 1.2 GB）。
 - 列表超过 10 项时只给概要和前几项，告诉用户可以在文件页查看完整内容。
-- 路径用 `代码格式`。"""
+- 路径用 `代码格式`。
+- 用界面上的叫法和用户说话：「访问范围」（不说作用域）、「我的文件」「私密空间」「回收站」「分享链接」「下载任务」；不提工具名或函数名、token、对象键、存储桶、数据库、分片等实现细节。
+- 需要用户自己操作时，说清楚在界面哪里点（例如“在文件的 ⋯ 菜单里选择「公开分享」”）；做不到的事直接说明原因和替代办法。"""
 
 
 def context_block(*, scope_root: str, view: str, location: str, used: str, quota: str, remaining_steps: int,

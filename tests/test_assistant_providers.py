@@ -156,5 +156,17 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("limit=1000", Upstream.seen[-1]["path"])
 
 
+class FailureTextTests(unittest.TestCase):
+    def test_user_sees_reason_and_next_step_not_upstream_text(self):
+        from tgdrive.assistant.service import provider_failure_text
+        # 用户看到的说明按错误类别给出下一步，不包含上游原文、HTTP 状态码或英文内部信息。
+        for code in ("unauthorized", "forbidden", "rate_limited", "not_found", "stream_error", "upstream_error", "anything"):
+            text = provider_failure_text(code)
+            self.assertNotRegex(text, r"[A-Za-z]{3,}|HTTP|\d{3}")
+            self.assertTrue(text.endswith("。"))
+        self.assertIn("管理员", provider_failure_text("unauthorized"))
+        self.assertIn("重试", provider_failure_text("rate_limited"))
+
+
 if __name__ == "__main__":
     unittest.main()
