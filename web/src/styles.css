@@ -844,33 +844,37 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .grid-layout { display: grid; gap: 20px; }
 .grid-section { display: grid; gap: 10px; }
 .grid-section-title { color: var(--ink-3); font-size: var(--text-xs); font-weight: 500; }
-.folder-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
-.folder-card { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-width: 0; height: 52px; padding: 0 4px 0 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); cursor: pointer; transition: border-color .12s, background-color .12s; }
+.folder-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 10px; }
+/* 文件夹卡片：左侧 48px 封面（内部图片拼成的预览或文件夹图标），名称最多两行，下面是公开状态与大小。 */
+.folder-card { position: relative; display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-width: 0; min-height: 72px; padding: 10px 4px 10px 10px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); cursor: pointer; transition: border-color .12s, background-color .12s, box-shadow .12s; }
 .folder-card:hover { border-color: var(--line-strong); background: var(--surface-hover); }
-.folder-card.is-selected { border-color: var(--accent); background: var(--accent-soft); }
+.folder-card.is-selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent); }
 .folder-card.is-drop-target { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
-.folder-card-lead { position: relative; display: grid; place-items: center; width: 28px; height: 28px; }
-/* 勾选框盖在文件夹图标上：悬停或已选中时出现，不额外占位。 */
-.folder-card-check { position: absolute; inset: 0; display: grid; place-items: center; border-radius: var(--radius-xs); background: inherit; opacity: 0; transition: opacity .12s; }
+.folder-card-lead { position: relative; display: grid; place-items: center; width: 48px; height: 48px; border-radius: var(--radius-md); background: var(--surface-sunken); }
+.folder-card-lead > .file-tile { background: transparent; }
+.folder-cover { position: relative; display: grid; gap: 2px; width: 48px; height: 48px; overflow: hidden; border-radius: var(--radius-md); background: var(--line-soft); }
+.folder-cover.is-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.folder-cover.is-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
+.folder-cover img { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: cover; background: var(--surface-sunken); }
+.folder-cover-mark { position: absolute; right: 2px; bottom: 2px; display: grid; place-items: center; width: 20px; height: 18px; border-radius: var(--radius-xs); background: var(--surface); box-shadow: var(--shadow-sm); }
+/* 勾选框浮在封面左上角：悬停或已选中时出现，不遮住封面，也不额外占位。 */
+.folder-card-check { position: absolute; top: -6px; left: -6px; display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow-sm); opacity: 0; transition: opacity .12s; }
 .folder-card:hover .folder-card-check, .folder-card.is-selected .folder-card-check, .folder-card-check:focus-within { opacity: 1; }
-.folder-card:hover .folder-card-lead > .file-tile, .folder-card.is-selected .folder-card-lead > .file-tile { visibility: hidden; }
-.folder-card-copy { display: grid; min-width: 0; }
-.folder-card-copy .name-button { overflow: hidden; font-size: var(--text-sm); font-weight: 500; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-.folder-card-sub { display: flex; align-items: center; gap: 6px; overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); white-space: nowrap; }
+.folder-card-copy { display: grid; gap: 4px; min-width: 0; }
+.folder-card-name { display: block; min-width: 0; max-height: 40px; overflow: hidden; font-size: var(--text-sm); font-weight: 500; line-height: 20px; text-align: left; }
+.folder-card-name-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; white-space: normal; }
+.folder-card-sub { display: flex; align-items: center; gap: 6px; overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .folder-card-public { display: inline-flex; align-items: center; gap: 3px; color: var(--public-ink); }
-.folder-card .grid-menu { grid-row: auto; grid-column: auto; }
+.folder-card .grid-menu { grid-row: auto; grid-column: auto; align-self: start; }
 .grid-extension { position: absolute; bottom: 8px; right: 10px; color: var(--ink-3); font-size: var(--text-micro); font-weight: 600; letter-spacing: .04em; }
 /* 键盘焦点所在项：只在键盘操作时显示，不干扰鼠标用户。 */
+/* 触屏没有悬停：勾选框常驻，仍浮在封面角上。 */
 @media (hover: none) {
-  .folder-card { grid-template-columns: 22px 28px minmax(0, 1fr) auto; padding-left: 10px; }
-  .folder-card-lead { display: contents; }
-  .folder-card-check { position: static; opacity: 1; }
-  .folder-card .folder-card-lead > .file-tile { visibility: visible; grid-column: 2; grid-row: 1; }
-  .folder-card-check { grid-column: 1; grid-row: 1; }
+  .folder-card-check { opacity: 1; }
 }
 :root[data-input="keyboard"] .data-row.is-cursor { box-shadow: inset 2px 0 0 var(--accent); background: var(--surface-hover); }
 :root[data-input="keyboard"] .grid-card.is-cursor, :root[data-input="keyboard"] .folder-card.is-cursor { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-.grid-card { position: relative; min-width: 0; display: grid; grid-template-rows: auto 56px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); cursor: pointer; transition: border-color .12s, box-shadow .12s; }
+.grid-card { position: relative; min-width: 0; display: grid; grid-template-rows: auto auto; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); cursor: pointer; transition: border-color .12s, box-shadow .12s; }
 .grid-card:hover { border-color: var(--line-strong); box-shadow: var(--shadow-md); }
 .grid-card.is-selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .grid-thumb { position: relative; width: 100%; aspect-ratio: 4 / 3; min-width: 0; min-height: 0; overflow: hidden; display: grid; place-items: center; border-bottom: 1px solid var(--line-soft); background: var(--surface-sunken); }
@@ -878,9 +882,10 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .grid-check { position: absolute; top: 8px; left: 8px; display: grid; padding: 4px; border-radius: var(--radius-xs); background: var(--surface); opacity: 0; transition: opacity .12s; }
 .grid-card:hover .grid-check, .grid-card.is-selected .grid-check, .grid-check:focus-within { opacity: 1; }
 .grid-public { position: absolute; top: 8px; right: 8px; }
-.grid-meta { display: grid; min-width: 0; min-height: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding: 10px 6px 10px 12px; }
+.grid-meta { display: grid; min-width: 0; min-height: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: start; row-gap: 4px; padding: 10px 4px 10px 12px; }
 .grid-name { display: block; width: 100%; min-width: 0; min-height: 0; overflow: hidden; appearance: none; -webkit-appearance: none; font-size: var(--text-sm); font-weight: 500; text-align: left; }
-.grid-name-text { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 文件名最多两行：同一批文件常有相同的前缀，只显示一行时难以区分。 */
+.grid-name-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-width: 0; max-height: 40px; overflow: hidden; line-height: 20px; overflow-wrap: anywhere; white-space: normal; }
 .grid-sub { grid-row: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: var(--text-xs); }
 .grid-menu { grid-row: 1 / 3; grid-column: 2; }
 .shared-grid-card { grid-template-rows: auto 86px; }
@@ -1839,7 +1844,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .files-view .page-header-main { flex: initial; }
   .files-view .page-header-actions { justify-content: flex-end; }
   .shortcut-hint { display: none; }
-  .folder-strip { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .folder-strip { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
   .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .mobile-bar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; justify-content: space-between; height: 56px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
   /* iOS Safari 的 100vh 包含被工具栏遮住的部分：抽屉用动态视口高度，并整体可滚动，底部状态与账号区始终够得着。 */
@@ -2151,6 +2156,20 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .file-mobile-meta .badge { flex: none; font-size: var(--text-micro); padding: 1px 5px; }
   .mobile-file-sort { display: flex; }
   .mobile-file-sort select { height: 40px; }
+  /* 文件页顶部：标题与按钮同一行，「新建文件夹」只留图标；工具栏第二行不换行，排序框占满剩余宽度，
+     目录统计改用列表底部的链接。 */
+  .files-view .page-header { flex-direction: row; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; }
+  .files-view .page-header-main { flex: 1 1 0; min-width: 0; }
+  .files-view .page-header-main > .breadcrumbs { margin-bottom: 4px; }
+  .files-view .page-header-actions { flex: none; flex-wrap: nowrap; }
+  .btn-mobile-icon { width: 40px; padding: 0; justify-content: center; }
+  .btn-mobile-icon > span { display: none; }
+  .files-view .toolbar { gap: 8px; }
+  .files-view .toolbar > .toolbar-actions { flex-wrap: nowrap; gap: 6px; }
+  .files-view .toolbar .mobile-file-sort { flex: 1 1 auto; }
+  .files-view .toolbar .mobile-file-sort select { width: 100%; max-width: none; }
+  .files-view .toolbar .toolbar-stats { display: none; }
+  .list-footer .shortcut-hint { display: none; }
   .selection-bar { align-items: flex-start; }
   .selection-bar .toolbar-actions { width: 100%; justify-content: flex-start; }
   .modal { max-height: calc(100dvh - 24px); }

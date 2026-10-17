@@ -117,6 +117,20 @@ export function FileVisual({ kind, src, size = "md" }: { kind: FileKind; src?: s
   return <span className={`file-tile file-visual tile-${size}`} aria-hidden="true"><img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} /></span>;
 }
 
+/** 网格视图文件夹卡片左侧的封面：用文件夹里已有的列表小图拼成 1／2／4 格，没有时显示文件夹图标。
+ *  角上保留一个小文件夹标记，有封面时也能一眼认出是文件夹。 */
+export function FolderCover({ previews = [] }: { previews?: { key: string; url: string }[] }) {
+  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set());
+  const usable = previews.filter(item => !failed.has(item.key));
+  const shown = usable.slice(0, usable.length >= 4 ? 4 : usable.length >= 2 ? 2 : 1);
+  if (!shown.length) return <FileTile kind="folder" size="lg" />;
+  return <span className={`folder-cover is-${shown.length}`} aria-hidden="true">
+    {shown.map(item => <img key={item.key} src={item.url} alt="" loading="lazy" decoding="async"
+      onError={() => setFailed(current => new Set(current).add(item.key))} />)}
+    <span className="folder-cover-mark"><FileGlyph kind="folder" size={14} /></span>
+  </span>;
+}
+
 /** placeholder：大图加载完成前先显示的小图（网格卡片用列表小图占位，通常已在浏览器缓存里）。 */
 export function FileThumbnail({ kind, url, placeholder }: { kind: FileKind; url?: string; placeholder?: string }) {
   // 按资源地址重建状态，避免缓存图片的 load 事件被挂载后的 effect 重置。

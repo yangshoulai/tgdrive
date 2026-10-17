@@ -1013,6 +1013,8 @@ class ObjectService:
     # 跳过一个公共前缀下全部键时使用的上界：U+10FFFF 是最大码点，按 SQLite 二进制排序大于该前缀下的任何键。
     _PREFIX_END = "\U0010ffff"
 
+    PREVIEW_SAMPLE = 64
+
     def folder_previews(self, scope: Scope, prefixes: list[str]) -> dict[str, list[dict[str, object]]]:
         """批量取得每个目录最多四张已有缩略图的元信息，不读取原文件或缩略图内容。"""
         prefixes = list(dict.fromkeys(prefixes))
@@ -1029,18 +1031,22 @@ class ObjectService:
                 values = ",".join("(?,?)" for _ in batch)
                 params = [value for prefix in batch for value in (prefix, prefix + self._PREFIX_END)]
                 # 每个前缀用桶 / 键索引取四项；不先读完整目录，也不逐项查询缩略图。
+                # 只在每个目录按键排序的前 PREVIEW_SAMPLE 个文件里找有缩略图的：大目录里的文件都没有缩略图时，
+                # 不能为了凑四张预览扫描整个目录（文件列表每页最多一千个目录都会执行一次）。
                 rows = self.metadata.db.execute(
                     f"WITH folders(prefix,upper_key) AS (VALUES {values}) "
                     "SELECT f.prefix,o.key,o.size,o.etag,o.content_type,o.modified_at,t.created_at AS thumbnail_created_at FROM folders f "
                     "JOIN objects o ON o.bucket_id=? AND o.key IN ("
-                    "SELECT sample.key FROM objects sample WHERE sample.bucket_id=? "
-                    "AND sample.key>f.prefix AND sample.key<f.upper_key AND substr(sample.key,-1)!='/' "
-                    "AND (substr(sample.key,1,9)!='.tgdrive/' OR ?=1) AND ("
+                    "SELECT sample.key FROM objects sample WHERE sample.bucket_id=? AND sample.key IN ("
+                    "SELECT head.key FROM objects head WHERE head.bucket_id=? "
+                    "AND head.key>f.prefix AND head.key<f.upper_key AND substr(head.key,-1)!='/' "
+                    "AND (substr(head.key,1,9)!='.tgdrive/' OR ?=1) ORDER BY head.key LIMIT ?) AND ("
                     "EXISTS(SELECT 1 FROM thumbnails t WHERE t.blob_uuid=sample.blob_uuid AND t.variant='thumb') "
                     "OR EXISTS(SELECT 1 FROM thumbnail_legacy l WHERE l.blob_uuid=sample.blob_uuid)) "
                     "ORDER BY sample.key LIMIT 4) "
                     "LEFT JOIN thumbnails t ON t.blob_uuid=o.blob_uuid AND t.variant='thumb' "
-                    "ORDER BY f.prefix,o.key", (*params, scope.bucket_id, scope.bucket_id, int(scope.private_access)))
+                    "ORDER BY f.prefix,o.key", (*params, scope.bucket_id, scope.bucket_id, scope.bucket_id,
+                                                  int(scope.private_access), self.PREVIEW_SAMPLE))
                 for row in rows:
                     item = {key: row[key] for key in ("key", "size", "etag", "content_type", "modified_at")}
                     previews[row["prefix"]].append({**item, "thumbnails": ["thumb"], "has_thumbnail": True,

@@ -521,6 +521,8 @@ class UserApi:
             return {"objects": self._objects_json(page.objects),
                     "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor,
                     "folder_sizes": self.objects.folder_sizes(scope, page.common_prefixes),
+                    # 网格视图的文件夹封面：每个文件夹最多四张已有的列表小图，只读元数据。
+                    "folder_previews": self.objects.folder_previews(scope, page.common_prefixes),
                     "public_folders": self._public_folders(account.bucket_id, page.common_prefixes)}
         return await self.objects.metadata.run_in_thread(read_page)
 

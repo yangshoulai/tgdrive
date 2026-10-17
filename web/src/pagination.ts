@@ -93,6 +93,7 @@ export function useRenderLimit<T>(items: T[], reset: unknown, step = 400) {
 export const mergeFilePages = (a: ListPage, b: ListPage): ListPage => ({
   ...b, objects: [...a.objects, ...b.objects], common_prefixes: [...new Set([...a.common_prefixes, ...b.common_prefixes])],
   public_folders: { ...a.public_folders, ...b.public_folders }, folder_sizes: { ...a.folder_sizes, ...b.folder_sizes },
+  folder_previews: { ...a.folder_previews, ...b.folder_previews },
 });
 /** 刷新后复用内容未变的文件对象：行、缩略图与补生成队列不会因为对象换新而重新渲染或重启。 */
 export const reconcileFilePage = (previous: ListPage, next: ListPage): ListPage => {
@@ -106,6 +107,7 @@ export const reconcileFilePage = (previous: ListPage, next: ListPage): ListPage 
     common_prefixes: same(previous.common_prefixes, next.common_prefixes) ? previous.common_prefixes : next.common_prefixes,
     public_folders: same(previous.public_folders ?? {}, next.public_folders ?? {}) ? previous.public_folders : next.public_folders,
     folder_sizes: same(previous.folder_sizes ?? {}, next.folder_sizes ?? {}) ? previous.folder_sizes : next.folder_sizes,
+    folder_previews: same(previous.folder_previews ?? {}, next.folder_previews ?? {}) ? previous.folder_previews : next.folder_previews,
   };
 };
 export const mergePublicFolderPages = (a: PublicFolderPage, b: PublicFolderPage): PublicFolderPage => ({

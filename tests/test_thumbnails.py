@@ -309,6 +309,22 @@ class ThumbnailTests(unittest.TestCase):
             connection.close()
         self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=photo.jpg")[1], WEBP, "live database keeps its thumbnails")
 
+    def test_file_list_returns_bounded_folder_previews(self):
+        for index in range(3):
+            self.put(f"album/{index}.jpg", f"photo {index}".encode())
+            self.assertEqual(self.set_thumb(f"album/{index}.jpg", WEBP), 204)
+        self.put("album/notes.txt", b"text")
+        page = self.call("GET", "/api/user/v1/list")[1]
+        self.assertEqual([item["key"] for item in page["folder_previews"]["album/"]], ["album/0.jpg", "album/1.jpg", "album/2.jpg"])
+        # 只在每个目录的前 PREVIEW_SAMPLE 个文件里找：前面全是没有缩略图的文件时不扫描整个目录。
+        self.app.objects.PREVIEW_SAMPLE = 2
+        for index in range(3):
+            self.put(f"big/{index:02}.bin", b"x")
+        self.put("big/zz.jpg", b"late photo")
+        self.assertEqual(self.set_thumb("big/zz.jpg", WEBP), 204)
+        page = self.call("GET", "/api/user/v1/list")[1]
+        self.assertEqual(page["folder_previews"]["big/"], [])
+
 
 class ThumbnailCacheTests(unittest.TestCase):
     """缓存与授权回归使用替身，不初始化数据库或执行 SQL。"""

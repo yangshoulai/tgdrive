@@ -5,7 +5,7 @@ import { BRAND } from "../brand";
 import * as api from "../api";
 
 import { FolderStatsDialog } from "./folder-stats";
-import { FileFilters, FileThumbnail, FileTile, FileVisual, ShareDialog, baseName, getFileKind, kindLabel, parentPath, type EntryFilter } from "../files";
+import { FileFilters, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, baseName, getFileKind, kindLabel, parentPath, type EntryFilter } from "../files";
 import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator, videoFrameUsable } from "../thumbnails";
 
 import { Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
@@ -114,6 +114,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const folders = pagination.page?.common_prefixes ?? [];
   const publicFolders = pagination.page?.public_folders ?? {};
   const folderSizes = pagination.page?.folder_sizes ?? {};
+  const folderPreviews = pagination.page?.folder_previews ?? {};
   const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
   const setThumbnails = (key: string, thumbnails: string[]) =>
     setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, thumbnail_versions: undefined, has_thumbnail: thumbnails.includes("thumb") } : item));
@@ -514,7 +515,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); startUpload(event.dataTransfer.files); }}>
       <PageHeader title={query ? `搜索“${query}”` : name}
         actions={<>
-          <Button icon="folderPlus" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
+          <Button icon="folderPlus" className="btn-mobile-icon" aria-label="新建文件夹" title="新建文件夹" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
           <Button variant="primary" icon="upload" onClick={() => fileInput.current?.click()}>上传</Button>
           <input ref={fileInput} type="file" multiple hidden onChange={event => { startUpload(event.target.files); event.target.value = ""; }} />
         </>}>
@@ -552,7 +553,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             <label className={`mobile-file-sort${layout === "grid" ? " is-grid-sort" : ""}`}><span className="sr-only">排序</span><select aria-label="排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
               const [key, direction] = event.target.value.split(":"); setSort({ key: key as SortKey, desc: direction === "desc" });
             }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="type:asc">类型升序</option><option value="type:desc">类型降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>
-            <IconButton icon="chart" label="目录统计" variant="secondary" onClick={() => setStatsFor({ prefix, title: name })} />
+            <IconButton icon="chart" label="目录统计" variant="secondary" className="toolbar-stats" onClick={() => setStatsFor({ prefix, title: name })} />
             <IconButton icon="refresh" label="刷新" variant="secondary" spinning={pagination.refreshing} disabled={loading} onClick={() => void refreshList()} />
             <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
           </div>
@@ -618,7 +619,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             ))}
           </div>
         ) : (() => {
-          // 网格：文件夹是一排紧凑的横条，文件才用缩略图卡片，避免文件夹占满一屏的大空卡片。
+          // 网格：文件夹是紧凑的横向卡片（左侧用内部图片拼成封面，名称最多两行），文件才用缩略图卡片，避免文件夹占满一屏的大空卡片。
           const folderEntries = rendered.visible.filter((entry): entry is Extract<Entry, { kind: "folder" }> => entry.kind === "folder");
           const fileEntries = rendered.visible.filter((entry): entry is Extract<Entry, { kind: "file" }> => entry.kind === "file");
           const both = folderEntries.length > 0 && fileEntries.length > 0;
@@ -631,11 +632,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                   return (
                     <div key={entry.key} className={`folder-card${isSelected ? " is-selected" : ""}${cursorClass(entry.key)}${dropClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} {...dropProps(entry.key)} onClick={() => onOpenFolder(entry.key)}>
                       <span className="folder-card-lead">
-                        <FileTile kind="folder" />
+                        <FolderCover previews={(folderPreviews[entry.key] ?? []).flatMap(item => { const url = api.fileThumbnail(item); return url ? [{ key: item.key, url }] : []; })} />
                         <span className="folder-card-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                       </span>
                       <span className="folder-card-copy">
-                        <button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
+                        <button type="button" className="name-button folder-card-name" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}><span className="folder-card-name-text">{baseName(entry.key)}</span></button>
                         <span className="folder-card-sub">{publicFolders[entry.key] && <span className="folder-card-public"><Icon name="globe" size={12} />公开</span>}{folderSize(entry.size) || "文件夹"}</span>
                       </span>
                       <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(entry.key)} 的更多操作`} items={folderMenu(entry.key)} /></span>
