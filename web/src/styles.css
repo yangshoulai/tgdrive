@@ -2230,8 +2230,10 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
 .share-crumbs button:hover { background: var(--surface-hover); color: var(--ink); }
 .share-crumbs strong { padding: 0 6px; color: var(--ink); font-weight: 500; }
 .share-folder-loading { padding: 12px 24px; }
-.share-folder-filters { padding: 0 20px 12px; }
+.share-folder-filters { display: grid; gap: 12px; padding: 0 20px 12px; }
 .share-folder-filters .filter-chips, .share-folder-filters .file-filters { margin: 0; }
+.share-folder-search { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.share-folder-search .search-input { flex: 1; width: auto; min-width: 0; }
 .share-folder-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line); font-size: var(--text-xs); }
 .share-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .share-select-all { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); cursor: pointer; }

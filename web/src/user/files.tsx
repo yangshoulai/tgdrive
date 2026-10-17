@@ -5,7 +5,7 @@ import { BRAND } from "../brand";
 import * as api from "../api";
 
 import { FolderStatsDialog } from "./folder-stats";
-import { FileFilters, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, baseName, getFileKind, kindLabel, parentPath, type EntryFilter } from "../files";
+import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type EntryFilter, type FileSort } from "../files";
 import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator, videoFrameUsable } from "../thumbnails";
 
 import { Notice, ButtonLink, Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
@@ -21,7 +21,6 @@ import { useFilesBridge } from "./assistant-bridge";
 /* ---------- 文件 ---------- */
 
 type Entry = { kind: "folder"; key: string; size?: number } | { kind: "file"; key: string; file: api.FileItem };
-type SortKey = "name" | "type" | "size" | "modified";
 
 /** 文件夹大小：未统计时留空，没有内容时写“空”，不显示生硬的“0 B”或“—”。 */
 const folderSize = (size?: number) => size == null ? "" : size === 0 ? "空" : formatBytes(size);
@@ -46,7 +45,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [entryFilter, setEntryFilter] = useState<EntryFilter>("all");
   const [kind, setKind] = useState<api.KindFilter>("");
   const [layout, setLayout] = useState<"list" | "grid">(() => (localStorage.getItem("tgdrive:layout") as "list" | "grid") || "list");
-  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "name", desc: false });
+  const [sort, setSort] = useState<FileSort>({ key: "name", desc: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const preview = usePreview();
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
@@ -348,7 +347,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   function fileMenu(file: api.FileItem): MenuItem[] {
     const entry: Entry = { kind: "file", key: file.key, file };
     const items: MenuItem[] = [
-      { label: "下载", icon: "download", onSelect: () => undefined, href: api.versionedContentUrl(api.contentUrl(file.key, true), file.etag) },
+      { label: "下载", icon: "download", onSelect: () => undefined, href: api.versionedContentUrl(api.contentUrl(file.key, true), file.etag, file.size) },
       ...cacheMenuItems(cacheQueue, file).filter(item => !item.danger),
       ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) }] : []),
     ];
@@ -392,7 +391,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const allSelected = entries.length > 0 && entries.every(entry => selected.has(entry.key));
   const openEntry = (entry: Entry) => entry.kind === "folder" ? onOpenFolder(entry.key) : openPreview(entry.file);
   const downloadUrl = (targets: Entry[]) => targets.length === 1 && targets[0].kind === "file"
-    ? api.versionedContentUrl(api.contentUrl(targets[0].key, true), targets[0].file.etag) : api.archiveUrl(targets.map(target => target.key));
+    ? api.versionedContentUrl(api.contentUrl(targets[0].key, true), targets[0].file.etag, targets[0].file.size) : api.archiveUrl(targets.map(target => target.key));
   useEffect(() => { setCursor(current => current && entries.some(entry => entry.key === current) ? current : null); }, [entries]);
   const rendered = useRenderLimit(entries, fetchPage);
   // 列表只显示手动缓存的状态（索引由 CacheTasksProvider 统一读取），不逐个文件查询本机缓存。
@@ -562,9 +561,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder={privateSpace ? "搜索私密空间，按回车" : "搜索全部文件，按回车"} label="搜索文件" />
           <div className="toolbar-actions">
             {!privateSpace && <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />}
-            <label className={`mobile-file-sort${layout === "grid" ? " is-grid-sort" : ""}`}><span className="sr-only">排序</span><select aria-label="排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
-              const [key, direction] = event.target.value.split(":"); setSort({ key: key as SortKey, desc: direction === "desc" });
-            }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="type:asc">类型升序</option><option value="type:desc">类型降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>
+            <FileSortSelect sort={sort} onSort={setSort} grid={layout === "grid"} />
             <IconButton icon="chart" label="目录统计" variant="secondary" className="toolbar-stats" onClick={() => setStatsFor({ prefix, title: name })} />
             <IconButton icon="refresh" label="刷新" variant="secondary" spinning={pagination.refreshing} disabled={loading} onClick={() => void refreshList()} />
             <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
@@ -773,17 +770,6 @@ function MoveDialog({ targets, startPrefix, onClose, onMove }: { targets: Entry[
     <div className="move-conflict"><span>遇到同名文件时</span><Segmented label="同名冲突处理" value={conflict} onChange={setConflict} options={[{ value: "rename", label: "保留两者" }, { value: "skip", label: "跳过" }, { value: "overwrite", label: "覆盖" }]} /></div>
     {conflict === "overwrite" && <Notice tone="warning">目标位置的同名文件会被替换且无法恢复。</Notice>}
   </Modal>;
-}
-
-function SortHeader({ label, column, sort, onSort, className }: { label: string; column: SortKey; sort: { key: SortKey; desc: boolean }; onSort: (sort: { key: SortKey; desc: boolean }) => void; className: string }) {
-  const active = sort.key === column;
-  return (
-    <span role="columnheader" className={className} aria-sort={active ? (sort.desc ? "descending" : "ascending") : "none"}>
-      <button type="button" className={`sort-button${active ? " is-active" : ""}`} onClick={() => onSort({ key: column, desc: active ? !sort.desc : column === "size" || column === "modified" })}>
-        {label}<Icon name="chevronDown" size={13} className={active && !sort.desc ? "is-flipped" : ""} />
-      </button>
-    </span>
-  );
 }
 
 function NameDialog({ title, label, confirm, initial = "", location, onClose, onSubmit, privateSpace = false }: { title: string; label: string; confirm: string; initial?: string; location?: string; privateSpace?: boolean; onClose: () => void; onSubmit: (value: string, destination: string) => Promise<void> }) {

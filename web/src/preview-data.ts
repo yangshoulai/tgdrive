@@ -1,4 +1,5 @@
 /** 预览文本只进行有上限的流式读取；服务端忽略 Range 时也不会下载完整大文件。 */
+export const TEXT_PREVIEW_LIMIT = 16 * 1024 * 1024;
 export type PreviewText = { text: string; truncated: boolean; total: number | null };
 export async function readPreviewText(url: string, limit: number, signal: AbortSignal): Promise<PreviewText> {
   const response = await fetch(url, { credentials: "include", headers: { Range: `bytes=0-${limit}` }, signal });

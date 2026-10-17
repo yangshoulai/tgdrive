@@ -86,8 +86,12 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
   // 文件列表只取一次「缓存索引」，不逐个文件查询；单独关注的文件（预览中的文件）另外批量查询完整状态。
   useEffect(() => {
     if (!enabled || !available) return;
-    let disposed = false, pending = false, timer: number | undefined;
-    const schedule = (delay: number) => { clearTimeout(timer); timer = window.setTimeout(() => void refresh(), delay); };
+    let disposed = false, pending = false, refreshAgain = false, timer: number | undefined;
+    const schedule = (delay: number) => {
+      clearTimeout(timer);
+      if (pending) { refreshAgain = true; return; }
+      timer = window.setTimeout(() => void refresh(), delay);
+    };
     async function refresh() {
       if (disposed || pending) return;
       pending = true;
@@ -117,8 +121,8 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
         if (!disposed) setCached(new Map(list.map(({ id, ...state }) => [id, state])));
       } catch { if (!disposed) setCached(new Map()); }
       pending = false;
-      // 手动缓存在本页或其他标签页操作后会广播 tessera:cache-changed；自动缓存随预览写入，空闲时 20 秒兜底刷新一次。
-      if (!disposed) schedule(jobsRef.current.some(isRunning) ? 2000 : 20000);
+      // 写入提交后由 Worker 广播变化；查询中到达的通知不能丢弃，空闲时仍每 20 秒兜底刷新。
+      if (!disposed) { const delay = refreshAgain ? 80 : jobsRef.current.some(isRunning) ? 2000 : 20000; refreshAgain = false; schedule(delay); }
     }
     refreshRef.current = () => schedule(80);
     const visible = () => { if (!document.hidden) schedule(0); };
@@ -128,7 +132,7 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
   }, [enabled, available, privateReady]);
   const watch = useCallback((owner: string, files: CacheFile[]) => {
     watching.current.set(owner, files); refreshRef.current();
-    return () => { watching.current.delete(owner); };
+    return () => { watching.current.delete(owner); refreshRef.current(); };
   }, []);
   const canCache = useCallback((file: CacheFile) => ready.current.enabled && cacheSupported() && (!api.isPrivatePath(file.key) || ready.current.privateReady), []);
   const enqueueMany = useCallback((files: CacheFile[]) => {
@@ -251,9 +255,10 @@ function buttonState(queue: Queue, file: CacheFile, indexOnly = false) {
   const running = job && isRunning(job);
   const complete = !running && Boolean(state?.complete);
   const bytes = running ? job.bytes : state?.bytes ?? 0;
+  const present = Boolean(indexed || state?.complete || bytes);
   const percent = percentOf(bytes, running ? job.size : file.size, complete);
   const label = running ? job.status === "queued" ? "排队中" : "正在缓存" : complete ? "已缓存" : job?.status === "error" ? "重试缓存" : bytes ? "继续缓存" : "缓存到本机";
-  return { running, complete, bytes, percent, label, error: job?.status === "error", manual: Boolean(indexed?.manual) };
+  return { running, complete, present, bytes, percent, label, error: job?.status === "error", manual: Boolean(indexed?.manual) };
 }
 
 export function FileCacheButton({ file }: { file: CacheFile }) {
@@ -275,7 +280,7 @@ export function FileCacheStatus({ file, className = "" }: { file: CacheFile; cla
   const queue = useContext(CacheContext);
   if (!queue?.available) return null;
   const state = buttonState(queue, file, true);
-  if (!state.running && !state.error && !state.bytes) return null;
+  if (!state.running && !state.error && !state.present) return null;
   const name = nameOf(file), origin = state.manual ? "is-manual" : "is-auto";
   const [label, text, tone] = state.running ? [`${state.label} ${name} · ${state.percent}%`, `${state.percent}%`, "is-active"]
     : state.error ? [`缓存失败，点击重试：${name}`, "重试", "is-error"]
@@ -293,7 +298,7 @@ export function cacheMenuItems(queue: Queue | null, file: CacheFile): MenuItem[]
   if (!queue?.available || !queue.canCache(file)) return [];
   const state = buttonState(queue, file);
   return [{ label: state.complete && !state.manual ? "标记为手动缓存" : state.label, icon: "monitor", onSelect: () => state.running ? queue.setExpanded(true) : state.complete && state.manual ? queue.inspect(file) : queue.enqueue(file) },
-    ...(state.bytes || state.running ? [{ label: "清除本机缓存", icon: "trash" as const, divider: true, danger: true, onSelect: () => queue.remove(file) }] : [])];
+    ...(state.present || state.running ? [{ label: "清除本机缓存", icon: "trash" as const, divider: true, danger: true, onSelect: () => queue.remove(file) }] : [])];
 }
 
 /** 批量操作：选中的文件里可以缓存、已有缓存的分别有哪些（文件夹不参与）。 */
@@ -302,7 +307,7 @@ export function cacheSelection(queue: Queue | null, files: CacheFile[]) {
   const usable = files.filter(queue.canCache);
   return {
     cacheable: usable.filter(file => { const state = buttonState(queue, file); return !state.running && !(state.complete && state.manual); }),
-    cached: usable.filter(file => buttonState(queue, file).bytes > 0),
+    cached: usable.filter(file => { const state = buttonState(queue, file); return state.present || state.running; }),
   };
 }
 

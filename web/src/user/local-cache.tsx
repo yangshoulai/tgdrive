@@ -69,7 +69,7 @@ export function LocalCacheSettings() {
       {error && <Notice tone="danger">{error}</Notice>}
       {adminOff ? <Notice>管理员已关闭浏览器本地缓存，这台设备上的普通文件缓存已清除。</Notice>
         : settings && <Switch checked={settings.enabled} disabled={busy} onChange={value => void update({ enabled: value }, value ? "已开启本机缓存" : "已关闭本机缓存并清除数据")}
-          label="在这台设备上缓存文件" description="自动保存看过的图片、音乐、视频片段和缩略图；也可以在文件菜单或勾选文件后「缓存到本机」保存完整文件。文件列表用「本机」标记手动缓存、「自动」标记自动缓存。" />}
+          label="在这台设备上缓存文件" description="自动保存预览过的内容，包括图片、音视频、Markdown、文本、代码、PDF 和缩略图；任意文件都可以通过「缓存到本机」完整保存。文件列表用「本机」标记手动缓存、「自动」标记自动缓存。" />}
       {stats && <div className="local-cache-figures folder-stats-figures">
         <div><span>普通文件</span><strong>{formatBytes(stats.normal.bytes)}</strong><small>上限 {sizeLabel(normalLimit)} · {stats.normal.count.toLocaleString("zh-CN")} 项</small></div>
         <div><span>私密文件</span><strong>{formatBytes(stats.private.bytes)}</strong><small>{privateOn ? `上限 ${sizeLabel(privateLimit)} · ${stats.private.count} 项` : "未开启"}</small></div>

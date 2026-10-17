@@ -1,7 +1,7 @@
 /** 文件类型识别、预览与公开分享对话框。 */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import * as api from "./api";
-import { readPreviewText, type PreviewText } from "./preview-data";
+import { readPreviewText, TEXT_PREVIEW_LIMIT, type PreviewText } from "./preview-data";
 import { MediaPreview, MinimizedPlayback, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
 import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip } from "./preview-playlist";
 import { ImageViewer } from "./preview-image";
@@ -12,6 +12,7 @@ import { Notice, ButtonLink, Badge, Button, CopyField, Field, FilterChips, Icon,
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "text" | "code" | "archive" | "other";
 
 export type EntryFilter = "all" | "folder" | "file";
+export type FileSort = { key: "name" | "type" | "size" | "modified"; desc: boolean };
 const ENTRY_FILTERS: { value: EntryFilter; label: string }[] = [
   { value: "all", label: "全部" }, { value: "folder", label: "文件夹" }, { value: "file", label: "文件" },
 ];
@@ -37,6 +38,24 @@ export function FileFilters({ entry, kind, onEntryChange, onKindChange }: {
       {chosen.length > 1 && <button type="button" className="filter-chip-clear" onClick={() => onKindChange("")}>清除</button>}
     </div>
   </div>;
+}
+
+export function SortHeader({ label, column, sort, onSort, className }: {
+  label: string; column: FileSort["key"]; sort: FileSort; onSort: (sort: FileSort) => void; className: string;
+}) {
+  const active = sort.key === column;
+  return <span role="columnheader" className={className} aria-sort={active ? (sort.desc ? "descending" : "ascending") : "none"}>
+    <button type="button" className={`sort-button${active ? " is-active" : ""}`} onClick={() => onSort({ key: column, desc: active ? !sort.desc : column === "size" || column === "modified" })}>
+      {label}<Icon name="chevronDown" size={13} className={active && !sort.desc ? "is-flipped" : ""} />
+    </button>
+  </span>;
+}
+
+/** 列表在窄屏显示，网格始终显示；与表头共用同一个排序状态。 */
+export function FileSortSelect({ sort, onSort, grid }: { sort: FileSort; onSort: (sort: FileSort) => void; grid: boolean }) {
+  return <label className={`mobile-file-sort${grid ? " is-grid-sort" : ""}`}><span className="sr-only">排序</span><select aria-label="排序" value={`${sort.key}:${sort.desc ? "desc" : "asc"}`} onChange={event => {
+    const [key, direction] = event.target.value.split(":"); onSort({ key: key as FileSort["key"], desc: direction === "desc" });
+  }}><option value="name:asc">名称升序</option><option value="name:desc">名称降序</option><option value="type:asc">类型升序</option><option value="type:desc">类型降序</option><option value="size:desc">容量从大到小</option><option value="size:asc">容量从小到大</option><option value="modified:desc">最近修改优先</option><option value="modified:asc">最早修改优先</option></select><Icon name="chevronDown" size={14} /></label>;
 }
 
 export function matchesKindFilter(file: { content_type?: string | null; key: string }, filter: api.KindFilter): boolean {
@@ -181,9 +200,6 @@ export function isPlayable(name: string, type?: string | null) {
 }
 export function canPreview(kind: FileKind) { return PREVIEWABLE.includes(kind); }
 
-/** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-const TEXT_PREVIEW_LIMIT = 512 * 1024;
-
 /** 把 Markdown 里的相对路径图片解析为云盘内的绝对键；越出根目录或带协议的地址返回 null。 */
 export function resolveRelativeKey(baseDir: string, src: string): string | null {
   if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//")) return null;
@@ -224,7 +240,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
     if (kind !== "text" && kind !== "code") return;
     setContent(null); setError("");
     const controller = new AbortController();
-    // 文本预览只读取前 512 KB，避免大日志拖垮页面。
+    // 按统一的预览上限读取，避免无界加载大日志。
     void readPreviewText(url, TEXT_PREVIEW_LIMIT, controller.signal)
       .then(value => { if (!controller.signal.aborted) setContent(value); })
       .catch(reason => { if (!controller.signal.aborted) setError(api.errorMessage(reason, "无法读取文件，请稍后重试")); });
@@ -457,10 +473,10 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         {reading && <span className="preview-header-tools" ref={setTextTools} />}
         {onShare && <IconButton icon="link" label={active.public_token ? "管理分享" : "公开分享"} size="sm" onClick={() => void share()} />}
         {ownSource && <FileCacheButton file={active} />}
-        <a className="icon-btn icon-btn-ghost icon-btn-sm" href={ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag) : source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
+        <a className="icon-btn icon-btn-ghost icon-btn-sm" href={ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag, active.size) : source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
         <span className="modal-actions-divider" aria-hidden="true" />
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}`}><PreviewToolsContext.Provider value={reading ? textTools : null}><FilePreview kind={kind} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag) : source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}`}><PreviewToolsContext.Provider value={reading ? textTools : null}><FilePreview kind={kind} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag, active.size) : source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height) => setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height })}
         onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}

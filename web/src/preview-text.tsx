@@ -6,7 +6,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import { createPortal } from "react-dom";
 import { loadTextEngine } from "./preview-runtime";
 import { Button, Icon, IconButton, Segmented, Switch, copyText, formatBytes } from "./ui";
-import type { PreviewText } from "./preview-data";
+import { TEXT_PREVIEW_LIMIT, type PreviewText } from "./preview-data";
 
 /** 沉浸式预览头部里放文本工具的元素；为 null 时文本预览使用内嵌工具栏。 */
 export const PreviewToolsContext = createContext<HTMLElement | null>(null);
@@ -68,7 +68,18 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   const markdown = /\.(md|markdown|mdx)$/i.test(name);
   // 纸张：Markdown 预览与纯文本；深色通栏：代码文件与 Markdown 源码。
   const paper = immersive && (mode === "render" || !code && !markdown);
-  const lineCount = useMemo(() => content.text.split(/\r\n?|\n/).length, [content.text]);
+  const lineCount = useMemo(() => {
+    // 大文本只统计换行，避免 split 为每一行额外分配字符串。
+    let count = 1;
+    for (let index = 0; index < content.text.length; index++) {
+      if (content.text[index] === "\n") count++;
+      else if (content.text[index] === "\r") {
+        count++;
+        if (content.text[index + 1] === "\n") index++;
+      }
+    }
+    return count;
+  }, [content.text]);
   const compact = content.text.length <= 1200 && lineCount <= 8;
   useEffect(() => {
     let cancelled = false;
@@ -159,7 +170,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     </div>}
   </div>;
   const status = mode === "source" && ready ? (content.text.length ? `${lineCount.toLocaleString()} 行` : "文件内容为空") : null;
-  const truncated = content.truncated && <span>仅显示前 {formatBytes(512 * 1024)}{content.total ? `（共 ${formatBytes(content.total)}）` : ""}，<a href={downloadUrl}>下载完整文件</a></span>;
+  const truncated = content.truncated && <span>仅显示前 {formatBytes(TEXT_PREVIEW_LIMIT)}{content.total ? `（共 ${formatBytes(content.total)}）` : ""}，<a href={downloadUrl}>下载完整文件</a></span>;
 
   return <div className={`preview-text${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${content.truncated ? " is-truncated" : ""}${immersive ? paper ? " is-paper" : " is-code" : ""}`}>
     {immersive ? createPortal(toolbar, tools) : toolbar}

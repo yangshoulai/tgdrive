@@ -379,12 +379,16 @@ export function fileThumbnail(file: ThumbnailFile, variant: ThumbnailVariant = "
 export const publicThumbnail = (contentUrl: string, variant: ThumbnailVariant = "thumb") =>
   `${contentUrl}${contentUrl.includes("?") ? "&" : "?"}thumbnail=${variant}`;
 export const publicFolderDownload = (token: string) => `/api/public/v1/folders/${encodeURIComponent(token)}/download`;
-/** 普通图片和音视频按账号存储桶及内容版本复用缓存；私密响应仍由服务端禁止缓存。 */
-export function versionedContentUrl(url: string, etag: string) {
+/** 内容地址绑定版本；本机缓存用同版本的原始大小校验条目，避免把缺失的响应长度当成空文件。 */
+export function versionedContentUrl(url: string, etag: string, size?: number, preview = false) {
   if (!etag) return url;
   const [path, query = ""] = url.split("?");
   const params = new URLSearchParams(query); params.set("v", etag);
   if (path === "/api/user/v1/content" && thumbnailBucketId !== null) params.set("bucket_id", String(thumbnailBucketId));
+  if (/^\/api\/user\/v1\/(?:private\/)?content$/.test(path)) {
+    if (size !== undefined && Number.isSafeInteger(size) && size >= 0) params.set("size", String(size));
+    if (preview) params.set("preview", "1");
+  }
   return `${path}?${params}`;
 }
 

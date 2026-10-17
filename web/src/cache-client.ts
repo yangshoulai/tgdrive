@@ -7,7 +7,7 @@ import { type DeviceSettings, type FileCacheState, type Kind, readSettings, setM
 export type CacheFile = Pick<api.FileItem, "key" | "etag" | "size" | "content_type">;
 export type { FileCacheState } from "./cache-store";
 export const cacheFileId = (file: CacheFile) => `${api.isPrivatePath(file.key) ? "p" : "n"}:${file.etag}`;
-const fileUrl = (file: CacheFile) => api.versionedContentUrl(api.contentUrl(file.key), file.etag);
+const fileUrl = (file: CacheFile) => api.versionedContentUrl(api.contentUrl(file.key), file.etag, file.size);
 const changed = () => window.dispatchEvent(new Event("tessera:cache-changed"));
 
 export type CachePolicy = { enabled: boolean; private_enabled: boolean; private_ttl_days: number };
@@ -33,6 +33,7 @@ export function startLocalCache() {
   navigator.serviceWorker.addEventListener("message", event => {
     // Service Worker 重启后没有私密授权时会来问；只回答同一页面当前持有的授权。
     if (event.data?.type === "tessera-cache:context?") event.ports[0]?.postMessage({ access: api.getPrivateAccess() });
+    if (event.data?.type === "tessera-cache:changed") changed();
   });
   window.addEventListener("tessera:private-access", event => notify("tessera-cache:access", { access: (event as CustomEvent<string>).detail }));
   window.addEventListener("tessera:logout", () => notify("tessera-cache:logout"));

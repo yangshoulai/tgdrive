@@ -20,7 +20,7 @@ type TierContext = {
   tier: Tier; ns: string; key: Bytes; info: CryptoKey; bucketId: number | null; access: string; signal: AbortSignal;
   materials: Map<string, Promise<Bytes>>; derived: Map<string, Promise<EntryKeys>>;
 };
-type Route = { tier: Tier; etag: string; version: string; path: string; access: string; bucketId: number | null; thumb: boolean };
+type Route = { tier: Tier; etag: string; version: string; path: string; access: string; bucketId: number | null; thumb: boolean; size?: number; preview?: boolean };
 type Opened = { tier: TierContext; entry: EntryRecord; info: EntryInfo; key: CryptoKey; request: Request; cap: number };
 type Source = { start: number; response: Response; controller: AbortController };
 type Manual = { id: string; owner: string; route: Route; request: Request; controller: AbortController; opened?: Opened; running: boolean };
@@ -40,7 +40,9 @@ function routeOf(request: Request): Route | null {
   const bucketId = bucket && /^\d+$/.test(bucket) ? Number(bucket) : null;
   if (match[2] === "content") {
     if (tier === "n" && bucketId === null) return null;
-    return { tier, etag: version, version, path: params.get("path") ?? "", access: params.get("access") ?? "", bucketId, thumb: false };
+    const rawSize = params.get("size");
+    const size = rawSize !== null && /^\d+$/.test(rawSize) && Number.isSafeInteger(Number(rawSize)) ? Number(rawSize) : undefined;
+    return { tier, etag: version, version, path: params.get("path") ?? "", access: params.get("access") ?? "", bucketId, thumb: false, size, preview: params.get("preview") === "1" };
   }
   const etag = params.get("etag");
   if (!etag) return null;
@@ -235,8 +237,9 @@ async function askAccess(signal: AbortSignal): Promise<string> {
 /* ---------- 读写 ---------- */
 
 const etagOf = (response: Response) => (response.headers.get("etag") ?? "").replace(/^W\//, "");
-/** 这些请求即使回源也不会建立条目（页面、PDF 内嵌等）：没有本机条目时直接回源，免得先发一次对齐请求再丢弃。 */
+/** 非预览的页面与内嵌内容直接回源；PDF 预览显式带 preview=1，沿用文件预览的缓存规则。 */
 const UNCACHED_DESTINATIONS = new Set(["document", "iframe", "frame", "embed", "object", "script", "style", "font", "worker", "sharedworker", "manifest", "report"]);
+const PREVIEW_FRAME_DESTINATIONS = new Set(["document", "iframe", "frame", "embed", "object"]);
 const direct = (request: Request) => fetch(request, { cache: "no-store" });
 
 async function openEntry(request: Request, route: Route): Promise<{ context: TierContext; base: Bytes } | null> {
@@ -259,7 +262,11 @@ async function handle(request: Request, route: Route): Promise<Response> {
   const now = Date.now();
   let entry = await getEntry(key);
   let info = entry ? await openInfo(context.info, entry) : null;
-  if (entry && !info) { await deleteEntries([key]); entry = undefined; }
+  // 旧版可能把缺失的 Content-Length 写成 0；大小不符时清掉条目，让本次读取正常回源。
+  if (entry && (!info || route.size !== undefined && info.size !== route.size)) {
+    await deleteEntries([key]); entry = undefined; info = null;
+    infoMemo.delete(key); manualCache = null; itemCache = null;
+  }
   const preferences = await currentSettings();
   const download = new URL(request.url).searchParams.get("download") === "1";
   // 自动缓存的单个文件最多占这一层容量的一半，看一个长视频不会把其他缓存全部挤掉；手动缓存可以用满。
@@ -270,12 +277,17 @@ async function handle(request: Request, route: Route): Promise<Response> {
     if (info.kind === "video" && !preferences.video && !info.manual) return direct(request);
     if (now - entry.accessed > 60_000) void touchEntry(key, now).catch(() => undefined);
     if (download) info = { ...info, disposition: `attachment; filename*=UTF-8''${encodeURIComponent(route.path.split("/").at(-1) || "file")}` };
-    if (!info.size) return new Response(null, { headers: { "Content-Type": info.type, "Content-Length": "0", "Content-Disposition": info.disposition, "Cache-Control": "no-store", "X-Tessera-Cache": "hit", ETag: info.version } });
+    if (!info.size) return new Response(null, { status: range ? 416 : 200, headers: {
+      "Content-Type": info.type, "Content-Length": "0", "Content-Disposition": info.disposition,
+      "Cache-Control": "no-store", "X-Tessera-Cache": "hit", ETag: info.version,
+      ...(range ? { "Content-Range": "bytes */0" } : {}),
+    } });
     return build({ tier: context, entry, info, key: keys.key, request, cap }, range ?? null);
   }
   if (download) return direct(request);
   // 关闭自动缓存视频（Safari 默认）时，播放器的每次拖动都只发原始请求，不能变成两次回源。
-  if (UNCACHED_DESTINATIONS.has(request.destination) || request.destination === "video" && !preferences.video) return direct(request);
+  if (UNCACHED_DESTINATIONS.has(request.destination) && !(route.preview && PREVIEW_FRAME_DESTINATIONS.has(request.destination))
+      || request.destination === "video" && !preferences.video) return direct(request);
   // 第一次读取：按块对齐向服务端请求，从响应得知大小与类型后建立条目。
   const start = range ? Math.floor(range.start / BLOCK) * BLOCK : 0;
   const end = range?.end != null ? Math.min(Number.MAX_SAFE_INTEGER, (Math.floor(range.end / BLOCK) + 1) * BLOCK - 1) : null;
@@ -290,28 +302,37 @@ async function handle(request: Request, route: Route): Promise<Response> {
     if (range) headers.set("Range", `bytes=${start}-${end ?? ""}`);
     const upstream = await fetch(request, { cache: "no-store", signal: controller.signal, headers });
     if (upstream.status === 401) { dropKeys(); return direct(request); }
-    const total = upstream.status === 206 ? Number(/\/(\d+)$/.exec(upstream.headers.get("content-range") ?? "")?.[1])
-      : upstream.status === 200 ? Number(upstream.headers.get("content-length")) : NaN;
-    const validator = etagOf(upstream);
+    // 空文本的 Range 返回 416；额外用 HEAD 验证版本后，也能登记真正的空文件。
+    const emptyRange = route.preview && route.size === 0 && upstream.status === 416 && upstream.headers.get("content-range") === "bytes */0";
+    const metadata = emptyRange ? await fetch(request, { method: "HEAD", cache: "no-store", signal: controller.signal }) : upstream;
+    const rawSize = metadata.headers.get("content-length")?.trim();
+    const total = emptyRange && metadata.ok ? 0 : upstream.status === 206 ? Number(/\/(\d+)$/.exec(upstream.headers.get("content-range") ?? "")?.[1])
+      : upstream.status === 200 ? route.size ?? (rawSize && /^\d+$/.test(rawSize) ? Number(rawSize) : NaN) : NaN;
+    const validator = etagOf(metadata);
     const bypass = () => {
       // 对齐后的响应不能直接用于原始 Range，版本变化等降级路径必须重发原始请求。
       if (range) { controller.abort(); return direct(request); }
       handedOff = true;
       return upstream;
     };
-    if (!Number.isSafeInteger(total) || total <= 0 || !upstream.body || (!route.thumb && validator !== `"${route.etag}"`)) return bypass();
-    const type = upstream.headers.get("content-type") ?? "application/octet-stream";
+    if (!Number.isSafeInteger(total) || total < 0 || total === 0 && !route.preview || total > 0 && !upstream.body
+        || (!route.thumb && (validator !== `"${route.etag}"` || route.size !== undefined && total !== route.size))) return bypass();
+    const type = metadata.headers.get("content-type") ?? "application/octet-stream";
     const kind: Kind = route.thumb ? "thumb" : kindOf(type, request.destination);
-    if (kind === "other" || kind === "video" && !preferences.video) return bypass();
+    if (kind === "other" && !route.preview || kind === "video" && !preferences.video) return bypass();
     const record: EntryRecord = { key, ns: context.ns, tier: context.tier, id: keys.id, blocks: [], bytes: 0, accessed: now, created: now,
       ...(context.tier === "n" ? { kind } : {}), manual: false, info: null };
-    info = { etag: route.etag, version: validator, size: total, type, disposition: upstream.headers.get("content-disposition") ?? "inline", path: route.path, kind };
+    info = { etag: route.etag, version: validator, size: total, type, disposition: metadata.headers.get("content-disposition") ?? "inline", path: route.path, kind };
     record.info = await sealInfo(context.info, record, info);
     context.signal.throwIfAborted();
     entry = await ensureEntry(record);
     const stored = await openInfo(context.info, entry);
     if (!stored) return bypass();
     context.signal.throwIfAborted();
+    if (!stored.size) {
+      await cacheChanged(true).catch(() => undefined);
+      handedOff = true; return upstream;
+    }
     const first = upstream.status === 200 ? 0 : start;
     const response = build({ tier: context, entry, info: stored, key: keys.key, request, cap }, range ?? null,
       { start: first, response: upstream, controller });
@@ -369,6 +390,7 @@ function build(opened: Opened, range: { start: number; end: number | null } | nu
 async function* produce(opened: Opened, span: { start: number; end: number }, signal: AbortSignal,
   active: { controller: AbortController | undefined }, initial?: Source): AsyncGenerator<Uint8Array> {
   const { info } = opened;
+  const finishPreviewBlock = info.kind === "other" && new URL(opened.request.url).searchParams.get("preview") === "1";
   const last = Math.floor((info.size - 1) / BLOCK);
   let pos = span.start;
   try {
@@ -427,12 +449,22 @@ async function* produce(opened: Opened, span: { start: number; end: number }, si
         while (pos <= span.end) {
           const { value, done } = await reader.read();
           if (done) break;
-          await writer.push(value);
+          await writer.push(value.subarray(0, Math.max(0, fetchEnd - offset + 1)));
           signal.throwIfAborted();
           const chunkStart = offset;
           offset += value.length;
           const to = Math.min(value.length, span.end - chunkStart + 1);
           const from = Math.max(0, pos - chunkStart);
+          // 预览可能按上限截断；交付最后一段前补齐当前缓存块（最多额外不到 1 MiB），避免随后的取消让整块丢失。
+          if (finishPreviewBlock && opened.cap > 0 && to > from && chunkStart + to > span.end) {
+            while (offset <= fetchEnd) {
+              signal.throwIfAborted();
+              const tail = await reader.read();
+              if (tail.done) break;
+              await writer.push(tail.value.subarray(0, Math.max(0, fetchEnd - offset + 1))); offset += tail.value.length;
+            }
+            if (offset <= fetchEnd) throw new Error("服务器提前结束了响应");
+          }
           if (to > from) { yield value.subarray(from, to); pos = chunkStart + to; }
         }
       } finally {
@@ -495,6 +527,7 @@ class BlockWriter {
       this.strict?.signal.throwIfAborted();
       this.strict?.stored();
       scheduleEvict();
+      if (this.opened.info.kind !== "thumb") await cacheChanged(fileCacheState(updated, this.opened.info.size).complete).catch(() => undefined);
     } catch (error) {
       if (this.strict) {
         if (error instanceof DOMException && error.name === "QuotaExceededError") throw new Error("浏览器存储空间不足，请清理本机缓存后重试");
@@ -574,7 +607,9 @@ async function startManual(owner: string, id: string, url: string) {
     value.context.signal.addEventListener("abort", abort, { once: true });
     try {
       const response = await verifyManual(job);
-      const size = Number(response.headers.get("content-length"));
+      // 文本经过代理压缩后，HEAD 可能不含原始长度；同 ETag 的列表大小优先，未知长度不能转成 0。
+      const rawSize = response.headers.get("content-length")?.trim();
+      const size = route.size ?? (rawSize && /^\d+$/.test(rawSize) ? Number(rawSize) : NaN);
       if (!Number.isSafeInteger(size) || size < 0) throw new Error("服务器未提供有效的文件大小");
       const preferences = await currentSettings();
       const budget = tierBudget(preferences, route.tier), cap = budget;
@@ -592,7 +627,7 @@ async function startManual(owner: string, id: string, url: string) {
       entry = await ensureEntry(record);
       job.controller.signal.throwIfAborted();
       await updateEntryInfo(entry.key, record.info, true);
-      manualCache = null;
+      infoMemo.delete(entry.key); manualCache = null; itemCache = null;
       job.controller.signal.throwIfAborted();
       job.opened = { tier: value.context, entry, info, key: value.keys.key, request, cap };
       await enforce();
@@ -601,6 +636,7 @@ async function startManual(owner: string, id: string, url: string) {
         throw new Error("浏览器存储空间不足，请清理本机缓存后重试");
       job.controller.signal.throwIfAborted();
       const state = fileCacheState(entry, size);
+      await cacheChanged(state.complete).catch(() => undefined);
       if (state.complete) stopManual();
       return { busy: false, ...state };
     } finally { value.context.signal.removeEventListener("abort", abort); }
@@ -668,7 +704,8 @@ async function removeFile(url: string) {
   const value = await manualOpened(url);
   if (manual?.route.etag === value.route.etag && manual.route.tier === value.route.tier) stopManual();
   await deleteEntries([value.key]);
-  itemCache = null; manualCache = null;
+  infoMemo.delete(value.key);
+  await cacheChanged(true).catch(() => undefined);
 }
 
 /* ---------- 缓存索引：文件列表据此标记自动缓存与手动缓存的文件 ---------- */
@@ -677,6 +714,16 @@ type IndexState = { id: string; bytes: number; size: number; complete: boolean; 
 let manualCache: { ns: string; withPrivate: boolean; at: number; items: IndexState[] } | null = null;
 /** 条目的 etag 与大小在写入后不变：按条目键记住解密结果，索引重建时只解密新条目。 */
 const infoMemo = new Map<string, { etag: string; size: number; manual: boolean; thumb: boolean }>();
+
+let lastCacheNotice = 0;
+/** 只广播状态变化，不携带文件名与私密信息；分块进度最多每两秒通知一次，完成时立即通知。 */
+async function cacheChanged(complete = false) {
+  manualCache = null; itemCache = null;
+  const now = Date.now();
+  if (!complete && now - lastCacheNotice < 2000) return;
+  lastCacheNotice = now;
+  for (const client of await sw.clients.matchAll({ type: "window" })) client.postMessage({ type: "tessera-cache:changed" });
+}
 
 /** 当前账号已缓存的文件（不含缩略图），键与 cacheFileId 相同；私密层只在私密空间已解锁时包含。 */
 async function cacheIndex(withPrivate: boolean): Promise<IndexState[]> {
@@ -690,7 +737,7 @@ async function cacheIndex(withPrivate: boolean): Promise<IndexState[]> {
     if (!tierContext || entry.kind === "thumb") continue;
     seen.add(entry.key);
     let known = infoMemo.get(entry.key);
-    if (!known) {
+    if (!known || known.size < entry.bytes) {
       const info = await openInfo(tierContext.info, entry);
       if (!info) continue;
       known = { etag: info.etag, size: info.size, manual: Boolean(info.manual), thumb: info.kind === "thumb" };

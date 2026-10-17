@@ -1,10 +1,10 @@
 /** 公开分享页：无需登录，只暴露文件名、大小和内容。带密码的分享先验证密码。 */
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useDirectory, useRenderLimit, mergePublicFolderPages } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
-import { FileFilters, FilePreview, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, canPreview, getFileKind, kindLabel, type EntryFilter } from "./files";
-import { Notice, ButtonLink, Avatar, Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
+import { FileFilters, FilePreview, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, SortHeader, canPreview, getFileKind, kindLabel, type EntryFilter, type FileSort } from "./files";
+import { Notice, ButtonLink, Avatar, Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, SearchInput, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
 import { LoginPage } from "./shell";
 import { FolderPicker } from "./user/folders";
 
@@ -184,6 +184,7 @@ function PasswordGate({ token, onUnlocked }: { token: string; onUnlocked: (grant
 /* ---------- 分享的文件夹 ---------- */
 
 type FolderPage = api.PublicFolderPage;
+const FOLDER_COLLATOR = new Intl.Collator("zh-CN", { numeric: true });
 
 /** 访客只读浏览：进入子文件夹、预览、单文件或打包下载。 */
 function FolderShare({ token, folder, access, onPasswordRequired, saveButton, onSaveSelected }: {
@@ -196,15 +197,19 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
   const [preview, setPreview] = useState<FolderPage["files"][number] | null>(null);
   const [entryFilter, setEntryFilter] = useState<EntryFilter>("all");
   const [kind, setKind] = useState<api.KindFilter>("");
+  const [nameFilter, setNameFilter] = useState("");
+  const [sort, setSort] = useState<FileSort>({ key: "name", desc: false });
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const downloadTarget = useId(), downloadFrame = useRef<HTMLIFrameElement>(null);
-  useEffect(() => { setSelected(new Set()); }, [token, path, access, kind, entryFilter]);
+  const clearFilters = useCallback(() => { setNameFilter(""); setEntryFilter("all"); setKind(""); }, []);
+  const changePath = useCallback((next: string) => { setPath(next); clearFilters(); setPreview(null); }, [clearFilters]);
+  useEffect(() => { setSelected(new Set()); }, [token, path, access, kind, entryFilter, nameFilter]);
   useEffect(() => { localStorage.setItem("tgdrive:share-layout", layout); }, [layout]);
   useEffect(() => {
-    const pop = () => setPath(readPath());
+    const pop = () => changePath(readPath());
     window.addEventListener("popstate", pop);
     return () => window.removeEventListener("popstate", pop);
-  }, []);
+  }, [changePath]);
   const passwordRequired = useRef(onPasswordRequired);
   passwordRequired.current = onPasswordRequired;
   const fetchPage = useCallback(async (cursor: string | null, signal: AbortSignal) => {
@@ -215,12 +220,35 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
     }
   }, [token, path, access, kind]);
   const pagination = useDirectory(fetchPage, mergePublicFolderPages);
-  const page = pagination.page && { ...pagination.page, files: entryFilter === "folder" ? [] : pagination.page.files, folders: entryFilter === "file" ? [] : pagination.page.folders };
+  const query = nameFilter.trim().toLowerCase();
+  // 所有游标结果先合并再过滤、排序，分批挂载只影响渲染，不影响全选与预览顺序。
+  const page = useMemo<FolderPage | null>(() => {
+    const source = pagination.page;
+    if (!source) return null;
+    const direction = sort.desc ? -1 : 1;
+    const files = entryFilter === "folder" ? [] : source.files.filter(file => file.name.toLowerCase().includes(query))
+      .map(file => ({ file, type: sort.key === "type" ? kindLabel(getFileKind(file.content_type, file.name)) : "" }))
+      .sort((a, b) => {
+        const name = FOLDER_COLLATOR.compare(a.file.name, b.file.name);
+        const primary = sort.key === "size" ? a.file.size - b.file.size : sort.key === "modified" ? a.file.modified_at - b.file.modified_at
+          : sort.key === "type" ? FOLDER_COLLATOR.compare(a.type, b.type) : name;
+        return direction * (primary || name);
+      }).map(({ file }) => file);
+    const folders = entryFilter === "file" ? [] : source.folders.filter(folder => folder.name.toLowerCase().includes(query))
+      .sort((a, b) => {
+        const name = FOLDER_COLLATOR.compare(a.name, b.name);
+        if (sort.key !== "size") return (sort.key === "name" ? direction : 1) * name;
+        if (a.size == null) return b.size == null ? name : 1;
+        if (b.size == null) return -1;
+        return direction * (a.size - b.size) || name;
+      });
+    return { ...source, files, folders };
+  }, [pagination.page, entryFilter, query, sort]);
   const error = pagination.error;
   const load = pagination.reload;
   function open(next: string) {
     window.history.pushState(null, "", next ? `?path=${encodeURIComponent(next)}` : window.location.pathname);
-    setPath(next);
+    changePath(next);
   }
   const segments = path.split("/").filter(Boolean);
   const crumbs = [{ label: folder.name, path: "" }, ...segments.map((label, index) => ({ label, path: `${segments.slice(0, index + 1).join("/")}/` }))];
@@ -271,7 +299,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
         <div className="share-actions">
           <Button icon="link" onClick={() => void copyText(`${window.location.origin}${window.location.pathname}`, "分享链接已复制")}>复制链接</Button>
           {saveButton({ label: folder.name })}
-          <Button icon="download" disabled={!page || Boolean(error) || !kind && !pagination.loadingMore && !pagination.page?.files.length} title="打包下载当前目录的全部文件（不受类型筛选影响），不包含子文件夹" onClick={() => downloadFiles(true)}>下载全部文件</Button>
+          <Button icon="download" disabled={!page || Boolean(error) || !kind && !pagination.loadingMore && !pagination.page?.files.length} title="打包下载当前目录的全部文件（不受文件名或类型筛选影响），不包含子文件夹" onClick={() => downloadFiles(true)}>下载全部文件</Button>
         </div>
       </header>
       {crumbs.length > 1 && <nav className="share-crumbs" aria-label="文件夹路径">
@@ -286,17 +314,24 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
         <div className="share-selection">
           {layout === "grid" && Boolean(page?.files.length) && <label className="share-select-all"><Checkbox label="全选当前文件" checked={selectedOnPage === page!.files.length}
             indeterminate={selectedOnPage > 0 && selectedOnPage < page!.files.length} onChange={checked => selectFiles(page!.files.map(file => file.path), checked)} /><span>全选当前文件</span></label>}
-          <span className="muted">{selected.size ? `已选择 ${selected.size} 个文件` : page ? `共 ${page.folders.length + page.files.length} 项` : "文件夹内容"}</span>
+          <span className="muted">{selected.size ? `已选择 ${selected.size} 个文件` : page ? `${query || kind || entryFilter !== "all" ? "筛选出" : "共"} ${page.folders.length + page.files.length} 项` : "文件夹内容"}</span>
           <Button size="sm" variant={selected.size ? "primary" : "secondary"} icon="download" disabled={!selected.size} title="将所选文件打包为 ZIP" onClick={() => downloadFiles()}>下载所选</Button>
           {onSaveSelected && selected.size > 0 && <Button size="sm" icon="folderPlus" title={`把所选文件保存到你的 ${BRAND}`} onClick={() => onSaveSelected([...selected])}>保存所选</Button>}
           {selected.size > 0 && <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>清空选择</Button>}
         </div>
         <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
       </div>
-      <div className="share-folder-filters"><FileFilters entry={entryFilter} kind={kind} onEntryChange={setEntryFilter} onKindChange={setKind} /></div>
+      <div className="share-folder-filters">
+        <div className="share-folder-search">
+          <SearchInput value={nameFilter} onChange={setNameFilter} placeholder="按名称过滤当前文件夹" label="过滤当前文件夹内容" />
+          <FileSortSelect sort={sort} onSort={setSort} grid={layout === "grid"} />
+        </div>
+        <FileFilters entry={entryFilter} kind={kind} onEntryChange={setEntryFilter} onKindChange={setKind} />
+      </div>
       {error ? <EmptyState icon="alert" title="无法打开" description={error} action={path ? <Button onClick={() => open("")}>回到根目录</Button> : <Button icon="refresh" onClick={() => void load()}>重试</Button>} />
-        : page === null ? <div className="share-folder-loading"><SkeletonRows rows={4} /></div>
-          : empty ? (entryFilter === "folder" ? <EmptyState icon="folder" title="这个目录没有子文件夹" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} /> : kind ? <EmptyState icon="search" title={`这个文件夹里没有${api.kindFilterLabel(kind)}`} description="类型筛选只看当前文件夹，不包含子文件夹。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
+        : page === null || empty && pagination.loadingMore ? <div className="share-folder-loading"><SkeletonRows rows={4} /></div>
+          : empty ? (query ? <EmptyState icon="search" title="没有符合条件的项目" description="文件名过滤只匹配当前文件夹，可更换关键词或清除筛选。" action={<Button onClick={clearFilters}>清除筛选</Button>} />
+            : entryFilter === "folder" ? <EmptyState icon="folder" title="这个目录没有子文件夹" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} /> : kind ? <EmptyState icon="search" title={`这个文件夹里没有${api.kindFilterLabel(kind)}`} description="类型筛选只看当前文件夹，不包含子文件夹。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
             : entryFilter === "file" ? <EmptyState icon="file" title="这个目录没有文件" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
               : <EmptyState icon="folder" title="这个文件夹是空的" description="分享者之后添加的文件会显示在这里。" />)
             : layout === "list" ? (
@@ -304,10 +339,10 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                 <div className="data-row data-head" role="row">
                   <span role="columnheader" className="cell-check"><Checkbox label="全选当前文件" checked={page.files.length > 0 && selectedOnPage === page.files.length}
                     indeterminate={selectedOnPage > 0 && selectedOnPage < page.files.length} onChange={checked => selectFiles(page.files.map(file => file.path), checked)} /></span>
-                  <span role="columnheader" className="cell-name">名称</span>
-                  <span role="columnheader" className="cell-type">类型</span>
-                  <span role="columnheader" className="cell-size">大小</span>
-                  <span role="columnheader" className="cell-date">修改时间</span>
+                  <SortHeader label="名称" column="name" sort={sort} onSort={setSort} className="cell-name" />
+                  <SortHeader label="类型" column="type" sort={sort} onSort={setSort} className="cell-type" />
+                  <SortHeader label="大小" column="size" sort={sort} onSort={setSort} className="cell-size" />
+                  <SortHeader label="修改时间" column="modified" sort={sort} onSort={setSort} className="cell-date" />
                   <span role="columnheader" className="cell-actions"><span className="sr-only">操作</span></span>
                 </div>
                 {shownFolders.map(item => (
