@@ -520,7 +520,7 @@ class TgDriveASGI(StaticFiles):
                 # 代理地址可能包含认证信息，审计只记录是否启用。
                 detail["proxy_enabled"] = bool(payload.get("proxy"))
         elif action == "client_cache.update":
-            detail = {key: payload.get(key) for key in ("enabled", "max_mib", "entry_mib", "private_enabled", "private_max_mib", "private_ttl_days") if key in payload}
+            detail = {key: payload.get(key) for key in ("enabled", "private_enabled", "private_ttl_days") if key in payload}
         elif action == "download.create":
             detail = {"count": len(payload.get("items", [])) if isinstance(payload.get("items"), list) else 0}
         elif action == "share.save":

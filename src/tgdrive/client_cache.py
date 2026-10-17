@@ -26,15 +26,14 @@ WRAP_PURPOSE = "client-cache"
 WRAP_AAD = "client-cache-key"
 DEVICE = re.compile(r"[A-Za-z0-9_-]{22,64}")
 BATCH = 500
+# 管理员只决定是否允许缓存、是否允许私密缓存及其保留期（安全策略）；占用多少空间由用户在各自设备上设置，
+# 浏览器配额是硬上限。旧版本保存过的容量字段（max_mib、entry_mib、private_max_mib）读取时忽略。
 DEFAULT_POLICY = {
     "enabled": True,            # 是否允许浏览器缓存普通文件
-    "max_mib": 4096,            # 每台设备普通层上限
-    "entry_mib": 2048,          # 单个文件最多缓存的字节数（视频按块稀疏保存）
     "private_enabled": False,   # 是否允许用户在信任的设备上缓存私密文件
-    "private_max_mib": 1024,
     "private_ttl_days": 7,      # 私密条目多少天未访问即清除
 }
-LIMITS = {"max_mib": (64, 1024 * 1024), "entry_mib": (16, 64 * 1024), "private_max_mib": (16, 1024 * 1024), "private_ttl_days": (1, 90)}
+LIMITS = {"private_ttl_days": (1, 90)}
 
 
 def _b64(value: bytes) -> str:
@@ -89,7 +88,8 @@ class ClientCache:
     def policy(self) -> dict:
         row = self.metadata.db.execute("SELECT value FROM settings WHERE key=?", (POLICY_KEY,)).fetchone()
         try:
-            return normalize_policy(json.loads(row["value"]) if row else None)
+            stored = json.loads(row["value"]) if row else None
+            return normalize_policy({key: value for key, value in stored.items() if key in DEFAULT_POLICY} if isinstance(stored, dict) else None)
         except (ValueError, TypeError):
             return dict(DEFAULT_POLICY)
 

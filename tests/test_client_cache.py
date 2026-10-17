@@ -82,7 +82,8 @@ class ClientCacheTests(unittest.TestCase):
         self.assertEqual(self.call("POST", "/api/user/v1/cache/session", {"device": DEVICE}, {})[0], 401)
         self.assertEqual(self.call("POST", "/api/user/v1/cache/session", {"device": "short"})[0], 400)
         self.assertEqual(self.call("POST", "/api/admin/v1/client-cache", {"enabled": False})[0], 403, "普通用户不能修改策略")
-        self.assertEqual(self.call("POST", "/api/admin/v1/client-cache", {"max_mib": 1}, self.admin)[0], 400)
+        self.assertEqual(self.call("POST", "/api/admin/v1/client-cache", {"max_mib": 1}, self.admin)[0], 400, "容量由用户在设备上设置")
+        self.assertEqual(self.call("POST", "/api/admin/v1/client-cache", {"private_ttl_days": 0}, self.admin)[0], 400)
         self.assertEqual(self.call("POST", "/api/admin/v1/client-cache", {"enabled": False}, self.admin)[0], 200)
         self.assertNotIn("key", self.session())
 
@@ -124,3 +125,13 @@ class ClientCacheTests(unittest.TestCase):
         status, _, _ = self.call("GET", "/api/user/v1/content?path=evil.js", headers={**self.user, "service-worker": "script"})
         self.assertEqual(status, 403)
         self.assertEqual(self.call("GET", "/api/user/v1/content?path=evil.js")[0], 200)
+
+
+    def test_stored_capacity_fields_from_older_versions_are_ignored(self):
+        # 旧版保存的容量字段不能让整个策略回落到默认值（否则管理员开启的私密缓存会被悄悄关掉）。
+        with self.app.metadata.transaction() as db:
+            db.execute("INSERT INTO settings(key,value) VALUES('client_cache.policy',?)",
+                       (json.dumps({"enabled": True, "max_mib": 4096, "entry_mib": 2048, "private_enabled": True, "private_max_mib": 1024, "private_ttl_days": 3}),))
+        policy = self.call("GET", "/api/admin/v1/client-cache", headers=self.admin)[1]
+        self.assertEqual(policy, {"enabled": True, "private_enabled": True, "private_ttl_days": 3})
+        self.assertEqual(self.session()["policy"], policy)

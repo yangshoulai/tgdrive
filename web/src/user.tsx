@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { BRAND } from "./brand";
 import * as api from "./api";
-import { startLocalCache } from "./cache-client";
+import { type CacheStats, cacheStats, cacheSupported, startLocalCache } from "./cache-client";
 import { DocsPage } from "./docs/docs";
 
 import { SharePage } from "./share";
@@ -132,16 +132,21 @@ function sectionUrl(section: Section, prefix = "") {
   return query ? `/?${query}` : "/";
 }
 
-/** 侧栏容量：点开按「用户数据」（我的文件、回收站、私密空间）与「系统数据」（缩略图、助手附件）分组显示；两者都计入配额。 */
-function StorageMeter({ usage, percent }: { usage: Usage | null; percent: number }) {
+/** 侧栏容量：点开按「用户数据」（我的文件、回收站、私密空间）与「系统数据」（缩略图、助手附件）分组显示，两者都计入配额；
+ * 另列「本机缓存」（这台设备浏览器里的副本，不计入配额，也不参与上方占比条），点「管理」进入用户设置。 */
+function StorageMeter({ usage, percent, onOpenCache }: { usage: Usage | null; percent: number; onOpenCache: () => void }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<api.StorageUsage | null>(null);
+  const [local, setLocal] = useState<CacheStats | null>(null);
   const id = useId();
   useEffect(() => {
     if (!open) return;
     let alive = true;
     void api.storageUsage().then(value => { if (alive) setDetail(value); }).catch(() => undefined);
-    return () => { alive = false; };
+    const readLocal = () => { if (cacheSupported()) void cacheStats().then(value => { if (alive) setLocal(value); }).catch(() => { if (alive) setLocal(null); }); };
+    readLocal();
+    window.addEventListener("tessera:cache-changed", readLocal);
+    return () => { alive = false; window.removeEventListener("tessera:cache-changed", readLocal); };
   }, [open, usage?.used_bytes]);
   type Row = [string, IconName, number];
   const groups: { label: string; hint: string; rows: Row[] }[] = detail ? [
@@ -166,6 +171,14 @@ function StorageMeter({ usage, percent }: { usage: Usage | null; percent: number
           <h4><i className={`storage-dot is-${index ? "system" : "user"}`} aria-hidden="true" /><span>{group.label}</span><strong>{formatBytes(group.rows.reduce((value, row) => value + row[2], 0))}</strong></h4>
           <ul>{group.rows.map(([label, icon, size]) => <li key={label}><Icon name={icon} size={12} /><span>{label}</span><strong>{formatBytes(size)}</strong></li>)}</ul>
         </section>)}
+        {local && <section className="storage-group storage-local" title="这台设备的浏览器保存的加密副本，不计入空间配额">
+          <h4><Icon name="monitor" size={12} /><span>本机缓存</span><strong>{formatBytes(local.normal.bytes + local.private.bytes)}</strong></h4>
+          <ul>
+            <li><Icon name="folder" size={12} /><span>普通文件</span><strong>{formatBytes(local.normal.bytes)}</strong></li>
+            {(local.private.count > 0 || local.settings.private) && <li><Icon name="lock" size={12} /><span>私密文件</span><strong>{formatBytes(local.private.bytes)}</strong></li>}
+          </ul>
+          <p className="storage-local-note">{local.settings.enabled && local.policy?.enabled !== false ? "不计入配额" : "已关闭"} · <button type="button" className="link-button" onClick={onOpenCache}>管理</button></p>
+        </section>}
       </>}
     </div>}
   </div>;
@@ -293,7 +306,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
           </a>
         )}
         {assistantAvailable && <AssistantLauncher open={assistantOpen || assistantPage} onOpen={toggleAssistant} />}
-        <StorageMeter usage={usage} percent={percent} />
+        <StorageMeter usage={usage} percent={percent} onOpenCache={() => navigate("account", "cache")} />
       </>}
       account={{ name: api.displayName(session), caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", avatar: api.avatarUrl(session.avatar_version), menu: [
         // 用户设置（含访问密钥）从头像菜单进入，不占侧栏位置。

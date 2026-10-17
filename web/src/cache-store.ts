@@ -28,7 +28,7 @@ export function fileCacheState(entry: EntryRecord | undefined, size: number): Fi
   return { bytes: entry?.bytes ?? 0, size, complete: Boolean(entry && entry.bytes === size && entry.blocks.length === count && entry.blocks.every((value, index) => value === index)) };
 }
 export type DeviceSettings = { enabled: boolean; maxMiB: number; video: boolean; private: boolean; privateMaxMiB: number };
-export const SIZE_CHOICES = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+export const SIZE_CHOICES = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
 
 /* ---------- IndexedDB ---------- */
 

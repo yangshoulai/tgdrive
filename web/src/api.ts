@@ -469,7 +469,7 @@ export const adminSettings = (signal?: AbortSignal) => request<SystemSettings>("
 export const adminResources = () => request<ResourceSettings>("/api/admin/v1/resources");
 export const updateAdminResources = (values: ResourceConfig) => post<ResourceSettings>("/api/admin/v1/resources", values);
 /** 浏览器本地缓存策略（docs/client-cache-design.md §5）。 */
-export type ClientCachePolicy = { enabled: boolean; max_mib: number; entry_mib: number; private_enabled: boolean; private_max_mib: number; private_ttl_days: number };
+export type ClientCachePolicy = { enabled: boolean; private_enabled: boolean; private_ttl_days: number };
 export const adminClientCache = () => request<ClientCachePolicy>("/api/admin/v1/client-cache");
 export const updateAdminClientCache = (values: Partial<ClientCachePolicy>) => post<ClientCachePolicy>("/api/admin/v1/client-cache", values);
 /** ids：只读取这些任务（最多 100 个，托盘跟踪用）；limit 为每页数量（最多 100）。 */

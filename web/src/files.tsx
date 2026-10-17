@@ -433,7 +433,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   }, [panelOpen]);
   // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
   return (
-    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable movable resizable={kind === "audio" ? undefined : `preview-${kind === "code" ? "text" : kind}`} windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
+    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable movable resizable={kind === "audio" ? undefined : `preview-${kind === "code" ? "text" : kind}`} aspectRatio={kind === "video" ? videoRatio : undefined} windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
       : kind === "image" && nav && nav.count > 1 ? <div className="preview-mini-gallery">
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>

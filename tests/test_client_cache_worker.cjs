@@ -24,7 +24,7 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
   const files = new Map(Object.entries(fixtures).map(([name, data], index) => [name, { data, etag: `version-${index}`, valid: true }]));
   const state = { clock: 0, authenticated: true, unlocked: true, key: new Uint8Array(32).fill(1), privateKey: new Uint8Array(32).fill(2), keysHook: null, originHook: null };
   const preferences = { enabled: true, maxMiB: 1024, video: true, private: true, privateMaxMiB: 256 };
-  const policy = { enabled: true, max_mib: 4096, entry_mib: 2048, private_enabled: true, private_max_mib: 1024, private_ttl_days: 7 };
+  const policy = { enabled: true, private_enabled: true, private_ttl_days: 7 };
   const requests = [];
   const clone = value => value === undefined ? undefined : structuredClone(value);
   const memory = {
@@ -137,6 +137,7 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
       if (!result?.ok) throw new Error(result?.error || "没有响应");
       return result.value;
     },
+    async dispatchFetch(event) { listeners.get("fetch")(event); },
     origins: () => requests.filter(request => new URL(request.url).pathname.endsWith("/content")),
     keyRequests: () => requests.filter(request => new URL(request.url).pathname.endsWith("/cache/keys")),
   };
@@ -331,10 +332,11 @@ test("手动补全复用自动缓存的稀疏块，不重复回源", async t => 
   assert.deepEqual(reads, [`bytes=${store.BLOCK}-${2 * store.BLOCK - 1}`, `bytes=0-${store.BLOCK - 1}`, `bytes=${2 * store.BLOCK}-${h.files.get("file.bin").data.length - 1}`]);
 });
 
-for (const limit of ["entry", "device"]) test(`手动缓存预检拒绝超过${limit === "entry" ? "单文件" : "设备"}上限的文件`, async t => {
-  const h = harness(t);
-  if (limit === "entry") h.policy.entry_mib = 1; else h.preferences.maxMiB = 1;
-  await assert.rejects(h.ask("tessera-cache:start", { id: "oversize", url: h.url("file.bin") }), /超过/);
+for (const tier of ["normal", "private"]) test(`手动缓存预检拒绝超过设备${tier === "normal" ? "普通层" : "私密层"}上限的文件`, async t => {
+  const h = harness(t, { "file.bin": bytes(3 * store.BLOCK + 137), [SECRET]: bytes(2 * store.BLOCK) });
+  if (tier === "normal") h.preferences.maxMiB = 1; else h.preferences.privateMaxMiB = 1;
+  const name = tier === "normal" ? "file.bin" : SECRET;
+  await assert.rejects(h.ask("tessera-cache:start", { id: "oversize", url: h.url(name) }), /超过本机缓存容量/);
   assert.equal(h.origins().filter(request => request.method === "GET").length, 0);
   assert.equal(h.entries.size, 0);
 });
@@ -444,4 +446,56 @@ test("清除缓存可以中止仍在预检的任务，迟到响应不能重建�
   waiting.resolve();
   await assert.rejects(pending, /AbortError/);
   assert.equal(h.entries.size, 0);
+});
+
+test("关闭自动缓存视频时，播放器的 Range 请求只回源一次", async t => {
+  const h = harness(t, { "movie.mp4": bytes(3 * store.BLOCK) });
+  h.files.get("movie.mp4").type = "video/mp4";
+  h.preferences.video = false;
+  let response;
+  const request = new Request(h.url("movie.mp4"), { headers: { Range: "bytes=1234-" } });
+  Object.defineProperty(request, "destination", { value: "video" });
+  const before = h.origins().length;
+  // 直接驱动 fetch 事件，模拟 <video> 发出的请求（Node 的 Request 没有 destination）。
+  await h.dispatchFetch({ request, respondWith: value => { response = value; } });
+  const data = Buffer.from(await (await response).arrayBuffer());
+  assert.deepEqual(data, h.files.get("movie.mp4").data.subarray(1234));
+  assert.equal(h.origins().length - before, 1);
+  assert.equal(h.origins().at(-1).headers.get("Range"), "bytes=1234-");
+  assert.equal(h.entries.size, 0);
+});
+
+test("已缓存文件列表在 Worker 内搜索、筛选、分页，并可按条件移除", async t => {
+  const fixtures = {};
+  for (let index = 0; index < 7; index++) fixtures[`photos/p${index}.png`] = bytes(1000 + index);
+  fixtures["music/song.mp3"] = bytes(2 * store.BLOCK + 5);
+  const h = harness(t, fixtures);
+  h.files.get("music/song.mp3").type = "audio/mpeg";
+  for (const name of Object.keys(fixtures)) await h.read(name, name.endsWith(".mp3") ? { range: "bytes=0-100" } : {});
+  const all = await h.ask("tessera-cache:items", { filter: { limit: 3 } });
+  assert.equal(all.total, 8);
+  assert.equal(all.items.length, 3);
+  const next = await h.ask("tessera-cache:items", { filter: { limit: 3, offset: 6 } });
+  assert.equal(next.items.length, 2);
+  const audio = await h.ask("tessera-cache:items", { filter: { kind: "audio" } });
+  assert.equal(JSON.stringify(audio.items.map(item => [item.path, item.complete])), JSON.stringify([["music/song.mp3", false]]));
+  const partial = await h.ask("tessera-cache:items", { filter: { status: "partial" } });
+  assert.equal(partial.total, 1);
+  const search = await h.ask("tessera-cache:items", { filter: { query: "P3.PNG", sort: "name" } });
+  assert.equal(search.items.map(item => item.path).join(), "photos/p3.png");
+  const bySize = await h.ask("tessera-cache:items", { filter: { kind: "image", sort: "size", limit: 1 } });
+  assert.equal(bySize.items[0].path, "photos/p6.png");
+  assert.equal(await h.ask("tessera-cache:remove-items", { filter: { kind: "image" } }), 7);
+  assert.equal((await h.ask("tessera-cache:items", { filter: {} })).total, 1);
+  const summary = await h.ask("tessera-cache:stats");
+  assert.equal(summary.normal.count, 1);
+  assert.equal(summary.items, undefined, "统计不再解密条目");
+});
+
+test("自动缓存的单个文件最多占设备容量的一半，超出部分照常播放", async t => {
+  const h = harness(t, { "big.bin": bytes(4 * store.BLOCK) });
+  h.preferences.maxMiB = 4;
+  const { data } = await h.read("big.bin");
+  assert.deepEqual(data, h.files.get("big.bin").data);
+  assert.equal([...h.entries.values()][0].bytes, 2 * store.BLOCK);
 });

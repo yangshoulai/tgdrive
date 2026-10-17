@@ -10,12 +10,13 @@ export const cacheFileId = (file: CacheFile) => `${api.isPrivatePath(file.key) ?
 const fileUrl = (file: CacheFile) => api.versionedContentUrl(api.contentUrl(file.key), file.etag);
 const changed = () => window.dispatchEvent(new Event("tessera:cache-changed"));
 
-export type CachePolicy = { enabled: boolean; max_mib: number; entry_mib: number; private_enabled: boolean; private_max_mib: number; private_ttl_days: number };
+export type CachePolicy = { enabled: boolean; private_enabled: boolean; private_ttl_days: number };
 export type CacheStats = {
   namespace: string | null; policy: CachePolicy | null; settings: DeviceSettings;
   normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>> }; private: { bytes: number; count: number }; others: { bytes: number; count: number };
-  items: { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number }[];
 };
+export type CachedItem = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean };
+export type CachedItemFilter = { query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
 
 export const cacheSupported = () => typeof window !== "undefined" && window.isSecureContext && "serviceWorker" in navigator
   && typeof indexedDB !== "undefined" && Boolean(globalThis.crypto?.subtle);
@@ -72,7 +73,15 @@ async function ask<T>(type: string, extra: Record<string, unknown> = {}, timeout
   });
 }
 
+/** 只读统计（不解密条目），侧栏与设置页都可以频繁调用。 */
 export const cacheStats = () => ask<CacheStats>("tessera-cache:stats");
+/** 已缓存文件的分页列表；搜索、筛选与排序在 Worker 内完成，每页最多 200 项。 */
+export const cachedItems = (filter: CachedItemFilter) => ask<{ total: number; bytes: number; items: CachedItem[] }>("tessera-cache:items", { filter }, 30000);
+export async function removeCachedItems(filter: CachedItemFilter) {
+  const removed = await ask<number>("tessera-cache:remove-items", { filter }, 60000);
+  changed();
+  return removed;
+}
 export const clearCache = async (scope: "normal" | "private" | "others" | "all" | "entry", key?: string) => { await ask<void>("tessera-cache:clear", { scope, key }, 30000); changed(); };
 export const loadSettings = () => readSettings(navigator.userAgent);
 

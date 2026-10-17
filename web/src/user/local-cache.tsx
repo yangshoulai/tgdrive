@@ -1,9 +1,9 @@
-import { type ReactNode, useCallback, useEffect, useId, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 
 import * as api from "../api";
-import { type CacheStats, cacheStats, cacheSupported, clearCache, isStandalone, loadSettings, resetAllDevices, saveSettings, storageEstimate } from "../cache-client";
+import { type CacheStats, type CachedItem, type CachedItemFilter, cacheStats, cacheSupported, cachedItems, clearCache, isStandalone, loadSettings, removeCachedItems, resetAllDevices, saveSettings, storageEstimate } from "../cache-client";
 import { type DeviceSettings, type Kind, SIZE_CHOICES, webkitOnly } from "../cache-store";
-import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, Switch, formatBytes, formatDate, toast } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, Field, FilterChips, Icon, SearchInput, Switch, formatBytes, formatDate, toast } from "../ui";
 
 const KIND_LABEL: Record<Kind, string> = { image: "图片", video: "视频", audio: "音频", thumb: "缩略图", other: "其他" };
 const KIND_ORDER: Kind[] = ["image", "video", "audio", "thumb", "other"];
@@ -18,12 +18,13 @@ export function LocalCacheSettings() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<"private" | "reset" | null>(null);
+  const [revision, setRevision] = useState(0);
   const supported = cacheSupported();
 
   const refresh = useCallback(async () => {
     try {
       const [value, current, storage] = await Promise.all([cacheStats(), loadSettings(), storageEstimate()]);
-      setStats(value); setSettings(current); setEstimate(storage); setError("");
+      setStats(value); setSettings(current); setEstimate(storage); setError(""); setRevision(value => value + 1);
     } catch (reason) {
       setSettings(await loadSettings().catch(() => null));
       setError(api.errorMessage(reason, "本机缓存状态读取失败"));
@@ -57,15 +58,9 @@ export function LocalCacheSettings() {
     finally { setBusy(false); }
   }
 
-  async function remove(key: string) {
-    try { await clearCache("entry", key); await refresh(); }
-    catch (reason) { toast.error(api.errorMessage(reason, "移除失败")); }
-  }
-
   const policy = stats?.policy ?? null;
   const adminOff = policy !== null && !policy.enabled;
-  const normalLimit = settings ? Math.min(settings.maxMiB, policy?.max_mib ?? settings.maxMiB) : 0;
-  const privateLimit = settings ? Math.min(settings.privateMaxMiB, policy?.private_max_mib ?? settings.privateMaxMiB) : 0;
+  const normalLimit = settings?.maxMiB ?? 0, privateLimit = settings?.privateMaxMiB ?? 0;
   const kinds = KIND_ORDER.map(kind => ({ kind, bytes: stats?.normal.kinds[kind] ?? 0 })).filter(item => item.bytes > 0);
   const privateOn = Boolean(settings?.private && policy?.private_enabled);
 
@@ -91,8 +86,8 @@ export function LocalCacheSettings() {
     </Section>
 
     {settings && !adminOff && <Section icon="settings" title="容量与内容" description="只对这台设备上的这个浏览器生效。">
-      <CacheSizeSelect label="最多占用" value={settings.maxMiB} limit={policy?.max_mib} disabled={busy || !settings.enabled}
-        hint="超出后自动移除最久没有打开的文件。" onChange={value => void update({ maxMiB: value }, "已保存")} />
+      <CacheSizeSelect label="最多占用" value={settings.maxMiB} disabled={busy || !settings.enabled} quota={estimate?.quota}
+        hint="超出后自动移除最久没有打开的文件；自动缓存的单个文件最多占一半。" onChange={value => void update({ maxMiB: value }, "已保存")} />
       <Switch checked={settings.video} disabled={busy || !settings.enabled} onChange={value => void update({ video: value }, "已保存")} label="自动缓存视频片段"
         description={webkitOnly(navigator.userAgent) ? "Safari 对缓存视频的支持还不稳定，如果开启后播放异常，请关闭此项。" : "按看过的片段保存，拖回已看过的位置时不必重新下载。"} />
     </Section>}
@@ -107,20 +102,11 @@ export function LocalCacheSettings() {
           ? <Button size="sm" disabled={busy} onClick={() => void update({ private: false }, "已关闭并清除私密缓存")}>关闭并清除</Button>
           : <Button size="sm" icon="shield" disabled={busy || !settings.enabled} onClick={() => setConfirm("private")}>信任这台设备</Button>}
       </div>
-      {settings.private && <CacheSizeSelect label="私密文件最多占用" value={settings.privateMaxMiB} limit={policy.private_max_mib} disabled={busy}
+      {settings.private && <CacheSizeSelect label="私密文件最多占用" value={settings.privateMaxMiB} disabled={busy} quota={estimate?.quota}
         onChange={value => void update({ privateMaxMiB: value }, "已保存")} />}
     </Section>}
 
-    {stats && stats.items.length > 0 && <Section icon="list" title="已缓存的文件" description="最近打开的文件；移除只删除本机副本，不影响文件本身。">
-      <ul className="account-attachments local-cache-items" aria-label="已缓存的文件">
-        {stats.items.map(item => <li key={item.key}>
-          <Icon name={item.kind === "video" ? "video" : item.kind === "audio" ? "audio" : item.kind === "image" ? "image" : "file"} size={15} />
-          <span className="account-attachments-title"><strong title={item.path}>{baseName(item.path)}</strong>
-            <small>{item.bytes >= item.size ? formatBytes(item.size) : `已缓存 ${formatBytes(item.bytes)} / ${formatBytes(item.size)}`} · {formatDate(item.accessed / 1000)}</small></span>
-          <Button size="sm" variant="ghost" onClick={() => void remove(item.key)}>移除</Button>
-        </li>)}
-      </ul>
-    </Section>}
+    {stats && stats.normal.count > 0 && <CachedFiles revision={revision} onChanged={() => void refresh()} />}
 
     <Section icon="trash" title="清理" description="清除只影响这台设备。">
       <div className="account-private-actions">
@@ -154,14 +140,94 @@ function Section({ icon, title, description, children }: { icon: "monitor" | "se
   </section>;
 }
 
-function CacheSizeSelect({ label, value, limit, hint, disabled, onChange }: { label: string; value: number; limit?: number; hint?: string; disabled?: boolean; onChange: (value: number) => void }) {
+/** 容量由用户按设备决定；浏览器配额是硬上限，超过配额的选项仍可选，但会在说明里提示。 */
+function CacheSizeSelect({ label, value, hint, quota, disabled, onChange }: { label: string; value: number; hint?: string; quota?: number; disabled?: boolean; onChange: (value: number) => void }) {
   const id = useId();
-  const choices = SIZE_CHOICES.filter(choice => !limit || choice <= limit);
-  const effective = limit ? Math.min(value, limit) : value;
-  if (!choices.includes(effective)) choices.push(effective);
-  return <Field label={label} htmlFor={id} hint={hint ?? (limit && value > limit ? `管理员限制每台设备最多 ${sizeLabel(limit)}` : undefined)}>
-    <select id={id} className="input local-cache-select" value={effective} disabled={disabled} onChange={event => onChange(Number(event.target.value))}>
-      {choices.sort((a, b) => a - b).map(choice => <option key={choice} value={choice}>{sizeLabel(choice)}</option>)}
+  const choices = SIZE_CHOICES.includes(value) ? SIZE_CHOICES : [...SIZE_CHOICES, value].sort((a, b) => a - b);
+  const over = Boolean(quota && value * 1048576 > quota);
+  return <Field label={label} htmlFor={id} hint={[hint, quota ? `这个浏览器最多可用约 ${formatBytes(quota)}${over ? "，实际以浏览器为准" : ""}。` : ""].filter(Boolean).join("")}>
+    <select id={id} className="input local-cache-select" value={value} disabled={disabled} onChange={event => onChange(Number(event.target.value))}>
+      {choices.map(choice => <option key={choice} value={choice}>{sizeLabel(choice)}</option>)}
     </select>
   </Field>;
+}
+
+const PAGE = 50;
+const KIND_FILTERS: { value: Kind | ""; label: string }[] = [{ value: "", label: "全部" }, { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" }, { value: "other", label: "其他" }];
+const STATUS_FILTERS: { value: "" | "complete" | "partial"; label: string }[] = [{ value: "", label: "全部状态" }, { value: "complete", label: "完整" }, { value: "partial", label: "部分" }];
+const folderOf = (path: string) => { const parts = path.replace(/\/$/, "").split("/"); parts.pop(); return parts.join("/"); };
+const ITEM_ICON: Record<Kind, "image" | "video" | "audio" | "file"> = { image: "image", video: "video", audio: "audio", thumb: "image", other: "file" };
+
+/** 已缓存的文件：Worker 内搜索、筛选、排序与分页，页面只挂载已加载的几页（每页 50 项）。 */
+function CachedFiles({ revision, onChanged }: { revision: number; onChanged: () => void }) {
+  const [query, setQuery] = useState(""), [search, setSearch] = useState("");
+  const [kind, setKind] = useState<Kind | "">(""), [status, setStatus] = useState<"" | "complete" | "partial">("");
+  const [sort, setSort] = useState<"recent" | "size" | "name">("recent");
+  const [page, setPage] = useState<{ total: number; bytes: number; items: CachedItem[] } | null>(null);
+  const [loading, setLoading] = useState(false), [error, setError] = useState("");
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  const request = useRef(0);
+  useEffect(() => { const timer = window.setTimeout(() => setSearch(query), 250); return () => window.clearTimeout(timer); }, [query]);
+  const filter: CachedItemFilter = { query: search, kind, status, sort };
+  const filtered = Boolean(search.trim() || kind || status);
+  const load = useCallback(async (offset: number) => {
+    const id = ++request.current;
+    setLoading(true);
+    try {
+      const value = await cachedItems({ query: search, kind, status, sort, offset, limit: PAGE });
+      if (id !== request.current) return;
+      setPage(current => offset && current ? { ...value, items: [...current.items, ...value.items] } : value);
+      setError("");
+    } catch (reason) { if (id === request.current) setError(api.errorMessage(reason, "已缓存的文件读取失败")); }
+    finally { if (id === request.current) setLoading(false); }
+  }, [search, kind, status, sort]);
+  useEffect(() => { void load(0); }, [load, revision]);
+
+  async function remove(item: CachedItem) {
+    try {
+      await clearCache("entry", item.key);
+      setPage(current => current && { total: current.total - 1, bytes: current.bytes - item.bytes, items: current.items.filter(entry => entry.key !== item.key) });
+      onChanged();
+    } catch (reason) { toast.error(api.errorMessage(reason, "移除失败")); }
+  }
+
+  const rest = page ? page.total - page.items.length : 0;
+  return <Section icon="list" title="已缓存的文件" description="移除只删除这台设备上的副本，不影响文件本身。缩略图不在此列出。">
+    <div className="local-cache-toolbar">
+      <SearchInput value={query} onChange={setQuery} placeholder="搜索文件名或路径" label="搜索已缓存的文件" />
+      <select className="input local-cache-sort" aria-label="排序" value={sort} onChange={event => setSort(event.target.value as typeof sort)}>
+        <option value="recent">最近打开</option><option value="size">占用最大</option><option value="name">按名称</option>
+      </select>
+    </div>
+    <div className="local-cache-filters">
+      <FilterChips label="按类型筛选" value={kind} onChange={setKind} options={KIND_FILTERS} />
+      <FilterChips label="按缓存状态筛选" value={status} onChange={setStatus} options={STATUS_FILTERS} />
+    </div>
+    {error && <p className="form-alert" role="alert"><Icon name="alert" size={15} />{error}</p>}
+    {page && <p className="local-cache-count muted" aria-live="polite">{filtered ? `找到 ${page.total.toLocaleString("zh-CN")} 个文件，共 ${formatBytes(page.bytes)}` : `共 ${page.total.toLocaleString("zh-CN")} 个文件，${formatBytes(page.bytes)}`}</p>}
+    {page && page.items.length === 0 ? <p className="local-cache-empty muted">{filtered ? "没有符合条件的文件。" : "还没有缓存的文件。"}</p>
+      : page && <ul className={`account-attachments local-cache-items${loading ? " is-loading" : ""}`} aria-label="已缓存的文件" aria-busy={loading}>
+        {page.items.map(item => {
+          const folder = folderOf(item.path), percent = item.size ? Math.min(99, Math.floor(item.bytes / item.size * 100)) : 0;
+          return <li key={item.key}>
+            <Icon name={ITEM_ICON[item.kind]} size={15} />
+            <span className="account-attachments-title"><strong title={item.path}>{baseName(item.path)}</strong>
+              <small>{folder && <span className="local-cache-folder" title={api.privatePathLabel(folder + "/")}>{api.privatePathLabel(folder + "/")}</span>}
+                <span>{item.complete ? `完整 · ${formatBytes(item.size)}` : `已缓存 ${percent}% · ${formatBytes(item.bytes)} / ${formatBytes(item.size)}`}</span>
+                <span>{formatDate(item.accessed / 1000)}打开</span></small></span>
+            {item.manual && <Badge>手动</Badge>}
+            <Button size="sm" variant="ghost" onClick={() => void remove(item)}>移除</Button>
+          </li>;
+        })}
+      </ul>}
+    {page && (rest > 0 || filtered && page.total > 0) && <div className="local-cache-more">
+      {rest > 0 && <Button size="sm" loading={loading} onClick={() => void load(page.items.length)}>显示更多（还有 {rest.toLocaleString("zh-CN")} 个）</Button>}
+      {filtered && page.total > 0 && <Button size="sm" variant="ghost" onClick={() => setConfirmBulk(true)}>移除这 {page.total.toLocaleString("zh-CN")} 个文件</Button>}
+    </div>}
+    {confirmBulk && page && <ConfirmDialog title="移除筛选出的缓存？" confirmLabel="移除" description={`将移除 ${page.total.toLocaleString("zh-CN")} 个文件在这台设备上的缓存（${formatBytes(page.bytes)}），文件本身不受影响。`}
+      onClose={() => setConfirmBulk(false)} onConfirm={async () => {
+        try { const removed = await removeCachedItems(filter); toast.success(`已移除 ${removed.toLocaleString("zh-CN")} 个文件的缓存`); setConfirmBulk(false); onChanged(); }
+        catch (reason) { toast.error(api.errorMessage(reason, "移除失败")); }
+      }} />}
+  </Section>;
 }

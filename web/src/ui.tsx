@@ -347,8 +347,24 @@ export function isShortcutControl(target: Element): boolean {
   return Boolean(target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='slider'], [role='spinbutton'], [role='combobox'], [role^='menu'], .menu, .art-settings"));
 }
 
-export function Modal({ title, description, onClose, children, footer, actions, size: modalSize = "md", icon, leading, tone, dismissible = true, closable = true, className = "", style, initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false, movable = false, resizable }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; style?: CSSProperties; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean; /** 拖动头部移动窗口（正常与最小化分别记住位置，最大化与全屏时不生效） */ movable?: boolean;
-  /** 桌面上拖动四边或四角调整窗口大小；值是记住尺寸用的名称（同名窗口共用），双击边角还原默认大小。手机、最大化、全屏与最小化时不生效。 */ resizable?: string }) {
+/** 窗口四周 8px（含圆角被裁掉的角落）也是缩放区：返回方向，离窗口更远时返回 null。 */
+function resizeEdge(rect: DOMRect, x: number, y: number, band = 8): ResizeDirection | null {
+  if (x < rect.left - band || x > rect.right + band || y < rect.top - band || y > rect.bottom + band) return null;
+  const vertical = y <= rect.top + 16 ? "n" : y >= rect.bottom - 16 ? "s" : "";
+  const horizontal = x <= rect.left + 16 ? "w" : x >= rect.right - 16 ? "e" : "";
+  return (vertical + horizontal || null) as ResizeDirection | null;
+}
+
+/** 把记住的窗口尺寸换算到新的宽高比：保持面积，再整体缩小到视口之内。 */
+function fitAspect(size: { width: number; height: number }, ratio: number) {
+  const width = Math.sqrt(size.width * size.height * ratio), height = width / ratio;
+  const scale = Math.min(1, (window.innerWidth - 16) / width, (window.innerHeight - 16) / height);
+  return { width: Math.round(width * scale), height: Math.round(height * scale) };
+}
+
+export function Modal({ title, description, onClose, children, footer, actions, size: modalSize = "md", icon, leading, tone, dismissible = true, closable = true, className = "", style, initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false, movable = false, resizable, aspectRatio }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; style?: CSSProperties; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean; /** 拖动头部移动窗口（正常与最小化分别记住位置，最大化与全屏时不生效） */ movable?: boolean;
+  /** 桌面上拖动四边或四角调整窗口大小；值是记住尺寸用的名称（同名窗口共用），双击边角还原默认大小。手机、最大化、全屏与最小化时不生效。 */ resizable?: string;
+  /** 调整大小时保持的宽高比（视频窗口），按住 Shift 自由调整；记住的尺寸按面积换算到当前比例，同名窗口的横竖内容不会互相留下黑边。 */ aspectRatio?: number }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
@@ -379,6 +395,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     return () => { media.removeEventListener("change", sync); resizeCleanup.current?.(); };
   }, []);
   const sized = Boolean(resizable && windowPointer && size && !expanded && !minimized);
+  const shown = sized && size ? aspectRatio ? fitAspect(size, aspectRatio) : size : null;
   const positionable = movable && !expanded && (minimized || windowPointer);
   function startResize(event: ReactPointerEvent<HTMLElement>, direction: ResizeDirection) {
     const node = ref.current;
@@ -400,8 +417,15 @@ export function Modal({ title, description, onClose, children, footer, actions, 
       if (next.pointerId !== pointerId) return;
       const dx = next.clientX - startX, dy = next.clientY - startY;
       if (!dx && !dy) return;
-      const width = west || east ? Math.round(Math.max(minWidth, Math.min(maxWidth, rect.width + (west ? -dx : dx)))) : rect.width;
-      const height = north || south ? Math.round(Math.max(minHeight, Math.min(maxHeight, rect.height + (north ? -dy : dy)))) : rect.height;
+      let width = west || east ? Math.round(Math.max(minWidth, Math.min(maxWidth, rect.width + (west ? -dx : dx)))) : rect.width;
+      let height = north || south ? Math.round(Math.max(minHeight, Math.min(maxHeight, rect.height + (north ? -dy : dy)))) : rect.height;
+      if (aspectRatio && !next.shiftKey) {
+        // 保持比例：角上按变化更大的方向驱动，边上由被拖动的那一维驱动，另一维随之计算并一起受上下限约束。
+        const byWidth = (west || east) && (!(north || south) || Math.abs(width - rect.width) / rect.width >= Math.abs(height - rect.height) / rect.height);
+        const low = Math.max(minWidth, minHeight * aspectRatio), high = Math.min(maxWidth, maxHeight * aspectRatio);
+        width = Math.round(Math.max(Math.min(low, high), Math.min(high, byWidth ? width : height * aspectRatio)));
+        height = Math.round(width / aspectRatio);
+      }
       latest = { width, height };
       changed = true;
       setSize(latest);
@@ -431,6 +455,10 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     try { localStorage.removeItem(sizeKey); } catch { /* 忽略 */ }
   }
   const offset = offsets[minimized ? "mini" : "normal"];
+  const resizeEnabled = Boolean(resizable && windowPointer && !expanded && !minimized);
+  /** 窗口有圆角且裁剪溢出，角上的缩放区有一部分落在遮罩上：按下遮罩时先判断是否在窗口边缘，在则开始缩放，不能当作点击外部关闭窗口。 */
+  const edgeOf = (event: { clientX: number; clientY: number; target: EventTarget; currentTarget: EventTarget }) =>
+    resizeEnabled && event.target === event.currentTarget && ref.current ? resizeEdge(ref.current.getBoundingClientRect(), event.clientX, event.clientY) : null;
   useEffect(() => { setMinimized(false); setOffsets({ normal: { x: 0, y: 0 }, mini: { x: 0, y: 0 } }); }, [windowKey]);
   /** 把位移限制在视口内（四周留 8px），头部的窗口按钮始终可见；窗口比视口大时只保证左上角不出界。 */
   const clampOffset = (rect: DOMRect, base: { x: number; y: number }, dx: number, dy: number) => {
@@ -563,10 +591,13 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     };
   }, [minimized, initialFocus]);
   return createPortal(
-    <div ref={backdrop} className={`modal-backdrop${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}${minimized ? " is-minimized" : ""}`} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && !pinned && !minimized && modalStack.at(-1) === ref.current) onClose(); }}>
+    <div ref={backdrop} className={`modal-backdrop${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}${minimized ? " is-minimized" : ""}`} role="presentation"
+      onPointerDown={event => { const edge = edgeOf(event); if (edge) startResize(event, edge); }}
+      onPointerMove={event => { if (!resizing) event.currentTarget.style.cursor = (() => { const edge = edgeOf(event); return edge ? RESIZE_CURSORS[edge] : ""; })(); }}
+      onMouseDown={event => { if (event.target === event.currentTarget && !edgeOf(event) && dismissible && !pinned && !minimized && modalStack.at(-1) === ref.current) onClose(); }}>
       <div ref={ref} className={`modal modal-${modalSize} ${className}${expanded ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}${positionable ? " is-movable" : ""}${moving ? " is-moving" : ""}${sized ? " is-sized" : ""}${resizing ? " is-resizing" : ""}`}
         style={{ ...style, ...(positionable && (offset.x || offset.y) ? { translate: `${offset.x}px ${offset.y}px` } : {}), ...(resizing ? { "--modal-resize-cursor": RESIZE_CURSORS[resizing] } : {}),
-          ...(sized && size ? { "--modal-width": `${size.width}px`, "--modal-height": `${size.height}px` } : {}) } as CSSProperties} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={handleWindowKey}>
+          ...(shown ? { "--modal-width": `${shown.width}px`, "--modal-height": `${shown.height}px` } : {}) } as CSSProperties} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={handleWindowKey}>
         <header className="modal-header" onPointerDown={movable ? startMove : undefined}>
           {leading ?? (icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>)}
           <div className="modal-heading">

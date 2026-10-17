@@ -1,12 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { beginFileCache, cachedFiles, cacheFileId, cacheSupported, cancelFileCache, removeFileCache, stepFileCache, type CacheFile, type FileCacheState } from "../cache-client";
+import { beginFileCache, cachedFiles, cacheFileId, cacheStats, cacheSupported, cancelFileCache, removeFileCache, stepFileCache, type CacheFile, type FileCacheState } from "../cache-client";
 import { Button, ConfirmDialog, Icon, IconButton, KeyValue, Modal, formatBytes, type MenuItem } from "../ui";
 import { usePrivateAccess } from "./private-session";
 import { TrayBar, TrayRing } from "./tray";
 
 type CacheJob = { id: string; file: CacheFile; status: "queued" | "active" | "done" | "error" | "canceled"; bytes: number; size: number; error: string; waiting: boolean };
 type Queue = {
+  /** 浏览器支持且用户与管理员都没有关闭本机缓存；否则不显示缓存按钮与菜单项。 */
+  available: boolean;
   jobs: CacheJob[]; states: Map<string, FileCacheState>; expanded: boolean; setExpanded: (value: boolean) => void;
   watch: (owner: string, files: CacheFile[]) => () => void; enqueue: (file: CacheFile) => void;
   cancel: (id: string) => void; retry: (id: string) => void; clear: () => void;
@@ -39,6 +41,15 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
   const watching = useRef(new Map<string, CacheFile[]>()), ready = useRef({ enabled, privateReady });
   ready.current = { enabled, privateReady };
   const refreshRef = useRef<() => void>(() => undefined);
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    if (!enabled || !cacheSupported()) { setAvailable(false); return; }
+    let alive = true;
+    const read = () => void cacheStats().then(value => { if (alive) setAvailable(value.settings.enabled && value.policy?.enabled !== false); }).catch(() => undefined);
+    read();
+    window.addEventListener("tessera:cache-changed", read);
+    return () => { alive = false; window.removeEventListener("tessera:cache-changed", read); };
+  }, [enabled]);
   const update = useCallback((apply: (value: CacheJob[]) => CacheJob[]) => { jobsRef.current = apply(jobsRef.current); setJobs(jobsRef.current); }, []);
   const cancel = useCallback((id: string) => {
     if (active.current?.id === id) { active.current.controller.abort(); cancelFileCache(id); }
@@ -62,7 +73,7 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
 
   // 可见文件合并为一批查询；不逐行轮询，也不扫描整个本机缓存。
   useEffect(() => {
-    if (!enabled || !cacheSupported()) return;
+    if (!enabled || !available) return;
     let disposed = false, pending = false, timer: number | undefined;
     const schedule = (delay: number) => { clearTimeout(timer); timer = window.setTimeout(() => void refresh(), delay); };
     async function refresh() {
@@ -90,14 +101,15 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
         }
       }
       pending = false;
-      if (!disposed) schedule(jobsRef.current.some(isRunning) ? 2000 : 20000);
+      // 空闲时状态只会因预览自动缓存而变化，一分钟刷新一次即可；私密空间每次查询都要向服务端验权。
+      if (!disposed) schedule(jobsRef.current.some(isRunning) ? 2000 : 60000);
     }
     refreshRef.current = () => schedule(80);
     const visible = () => { if (!document.hidden) schedule(0); };
     window.addEventListener("tessera:cache-changed", refreshRef.current); window.addEventListener("focus", visible); document.addEventListener("visibilitychange", visible);
     schedule(0);
     return () => { disposed = true; clearTimeout(timer); window.removeEventListener("tessera:cache-changed", refreshRef.current); window.removeEventListener("focus", visible); document.removeEventListener("visibilitychange", visible); refreshRef.current = () => undefined; };
-  }, [enabled, privateReady]);
+  }, [enabled, available, privateReady]);
   const watch = useCallback((owner: string, files: CacheFile[]) => {
     watching.current.set(owner, files); refreshRef.current();
     return () => { watching.current.delete(owner); };
@@ -149,9 +161,9 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
     })();
   }, [jobs, enabled, privateReady, wake, update]);
 
-  const visibleJobs = enabled ? jobs.filter(job => !api.isPrivatePath(job.file.key) || privateReady) : [];
-  const value: Queue = useMemo(() => ({ jobs: visibleJobs, states, expanded, setExpanded, watch, enqueue, cancel, retry,
-    clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: setRemoving }), [visibleJobs, states, expanded, watch, enqueue, cancel, retry, update]);
+  const visibleJobs = useMemo(() => enabled ? jobs.filter(job => !api.isPrivatePath(job.file.key) || privateReady) : [], [enabled, jobs, privateReady]);
+  const value: Queue = useMemo(() => ({ available, jobs: visibleJobs, states, expanded, setExpanded, watch, enqueue, cancel, retry,
+    clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: setRemoving }), [available, visibleJobs, states, expanded, watch, enqueue, cancel, retry, update]);
   const detailState = details && states.get(cacheFileId(details));
   const showDetails = enabled && details && (!api.isPrivatePath(details.key) || privateReady);
   const showRemoving = enabled && removing && (!api.isPrivatePath(removing.key) || privateReady);
@@ -192,10 +204,11 @@ function buttonState(queue: Queue, file: CacheFile) {
 
 export function FileCacheButton({ file }: { file: CacheFile }) {
   const queue = useContext(CacheContext);
-  if (!queue) return null;
-  const state = buttonState(queue, file), supported = cacheSupported();
-  const label = supported ? `${state.label} ${nameOf(file)}${state.bytes || state.complete ? ` · ${state.percent}%` : ""}` : "当前浏览器不支持本机缓存";
-  return <button type="button" className={`icon-btn icon-btn-ghost icon-btn-sm file-cache-button${state.complete ? " is-complete" : ""}${state.running ? " is-active" : ""}`} title={label} aria-label={label} disabled={!supported}
+  // 不支持（如未启用 HTTPS 的部署）或已关闭时整个按钮都不显示，不在每一行留下禁用的按钮。
+  if (!queue?.available) return null;
+  const state = buttonState(queue, file);
+  const label = `${state.label} ${nameOf(file)}${state.bytes || state.complete ? ` · ${state.percent}%` : ""}`;
+  return <button type="button" className={`icon-btn icon-btn-ghost icon-btn-sm file-cache-button${state.complete ? " is-complete" : ""}${state.running ? " is-active" : ""}`} title={label} aria-label={label}
     onClick={event => { event.stopPropagation(); if (state.running) queue.setExpanded(true); else if (state.complete) queue.inspect(file); else queue.enqueue(file); }}>
     {state.bytes && !state.complete ? <><svg className="file-cache-ring" viewBox="0 0 20 20" aria-hidden="true" style={{ "--tray-progress": state.percent } as CSSProperties}><circle className="tray-ring-track" cx="10" cy="10" r="8" /><circle className="tray-ring-value" cx="10" cy="10" r="8" pathLength="100" /></svg><span>{state.percent}%</span></>
       : <Icon name={state.complete ? "check" : state.error ? "refresh" : state.running ? "pulse" : "monitor"} size={16} />}
@@ -203,7 +216,7 @@ export function FileCacheButton({ file }: { file: CacheFile }) {
 }
 
 export function cacheMenuItems(queue: Queue | null, file: CacheFile): MenuItem[] {
-  if (!queue || !cacheSupported()) return [];
+  if (!queue?.available) return [];
   const state = buttonState(queue, file);
   return [{ label: state.label, icon: "monitor", onSelect: () => state.running ? queue.setExpanded(true) : state.complete ? queue.inspect(file) : queue.enqueue(file) },
     ...(state.bytes ? [{ label: "移除本机缓存", icon: "trash" as const, divider: true, danger: true, onSelect: () => queue.remove(file) }] : [])];

@@ -13,7 +13,8 @@ import {
 const sw = self as unknown as ServiceWorkerGlobalScope;
 const MiB = 1 << 20;
 
-type Policy = { enabled: boolean; max_mib: number; entry_mib: number; private_enabled: boolean; private_max_mib: number; private_ttl_days: number };
+/** 管理员策略只有开关与私密保留期；容量全部来自设备设置（tierBudget）。 */
+type Policy = { enabled: boolean; private_enabled: boolean; private_ttl_days: number };
 type EntryKeys = { id: string; key: CryptoKey };
 type TierContext = {
   tier: Tier; ns: string; key: Bytes; info: CryptoKey; bucketId: number | null; access: string; signal: AbortSignal;
@@ -58,6 +59,9 @@ let askedAt = 0;
 const revocation = { n: new AbortController(), p: new AbortController() };
 type PrivateBatch = { waiters: Map<string, (value: Bytes | null) => void>; timer: number };
 const pendingPrivate = new Map<TierContext, PrivateBatch>();
+
+/** 设备设置中这一层的容量（字节）。 */
+const tierBudget = (preferences: DeviceSettings, tier: Tier) => (tier === "n" ? preferences.maxMiB : preferences.privateMaxMiB) * MiB;
 
 async function currentSettings() {
   if (!settings || Date.now() - settings.at > 5000) settings = { value: await readSettings(navigator.userAgent), at: Date.now() };
@@ -231,6 +235,8 @@ async function askAccess(signal: AbortSignal): Promise<string> {
 /* ---------- 读写 ---------- */
 
 const etagOf = (response: Response) => (response.headers.get("etag") ?? "").replace(/^W\//, "");
+/** 这些请求即使回源也不会建立条目（页面、PDF 内嵌等）：没有本机条目时直接回源，免得先发一次对齐请求再丢弃。 */
+const UNCACHED_DESTINATIONS = new Set(["document", "iframe", "frame", "embed", "object", "script", "style", "font", "worker", "sharedworker", "manifest", "report"]);
 const direct = (request: Request) => fetch(request, { cache: "no-store" });
 
 async function openEntry(request: Request, route: Route): Promise<{ context: TierContext; base: Bytes } | null> {
@@ -256,7 +262,8 @@ async function handle(request: Request, route: Route): Promise<Response> {
   if (entry && !info) { await deleteEntries([key]); entry = undefined; }
   const preferences = await currentSettings();
   const download = new URL(request.url).searchParams.get("download") === "1";
-  const cap = Math.max(BLOCK, (policy?.entry_mib ?? 2048) * MiB);
+  // 自动缓存的单个文件最多占这一层容量的一半，看一个长视频不会把其他缓存全部挤掉；手动缓存可以用满。
+  const cap = Math.max(BLOCK, Math.floor(tierBudget(preferences, route.tier) / 2));
   context.signal.throwIfAborted();
   if (entry && info) {
     if (download && !fileCacheState(entry, info.size).complete) return direct(request);
@@ -267,6 +274,8 @@ async function handle(request: Request, route: Route): Promise<Response> {
     return build({ tier: context, entry, info, key: keys.key, request, cap }, range ?? null);
   }
   if (download) return direct(request);
+  // 关闭自动缓存视频（Safari 默认）时，播放器的每次拖动都只发原始请求，不能变成两次回源。
+  if (UNCACHED_DESTINATIONS.has(request.destination) || request.destination === "video" && !preferences.video) return direct(request);
   // 第一次读取：按块对齐向服务端请求，从响应得知大小与类型后建立条目。
   const start = range ? Math.floor(range.start / BLOCK) * BLOCK : 0;
   const end = range?.end != null ? Math.min(Number.MAX_SAFE_INTEGER, (Math.floor(range.end / BLOCK) + 1) * BLOCK - 1) : null;
@@ -568,11 +577,8 @@ async function startManual(owner: string, id: string, url: string) {
       const size = Number(response.headers.get("content-length"));
       if (!Number.isSafeInteger(size) || size < 0) throw new Error("服务器未提供有效的文件大小");
       const preferences = await currentSettings();
-      const budget = Math.min(route.tier === "n" ? preferences.maxMiB : preferences.privateMaxMiB,
-        route.tier === "n" ? policy?.max_mib ?? 0 : policy?.private_max_mib ?? 0) * MiB;
-      const cap = (policy?.entry_mib ?? 0) * MiB;
-      if (size > cap) throw new Error("文件超过管理员设置的单文件缓存上限");
-      if (size > budget) throw new Error("文件超过本机缓存容量，请先提高本机缓存上限");
+      const budget = tierBudget(preferences, route.tier), cap = budget;
+      if (size > budget) throw new Error("文件超过本机缓存容量，请先在「用户设置 → 本机缓存」中提高上限");
       let entry = await getEntry(value.key);
       let info = entry ? await openInfo(value.context.info, entry) : null;
       if (entry && (!info || info.size !== size)) { await deleteEntries([value.key]); entry = undefined; }
@@ -660,6 +666,7 @@ async function removeFile(url: string) {
   const value = await manualOpened(url);
   if (manual?.route.etag === value.route.etag && manual.route.tier === value.route.tier) stopManual();
   await deleteEntries([value.key]);
+  itemCache = null;
 }
 
 /* ---------- 淘汰与对账 ---------- */
@@ -677,8 +684,7 @@ function scheduleEvict(delay = 3000, ratio = 1) {
 async function enforce(factor = 1) {
   const preferences = await currentSettings();
   if (!lastNamespace) return;
-  const normalBudget = Math.min(preferences.maxMiB, policy?.max_mib ?? preferences.maxMiB) * MiB;
-  const privateBudget = Math.min(preferences.privateMaxMiB, policy?.private_max_mib ?? preferences.privateMaxMiB) * MiB;
+  const normalBudget = tierBudget(preferences, "n"), privateBudget = tierBudget(preferences, "p");
   // 为手动任务预留剩余空间，普通预览的延迟淘汰也不能删除正在补全的条目。
   for (const tier of ["n", "p"] as const) {
     const opened = manual?.opened;
@@ -754,29 +760,65 @@ async function reconcile() {
 type Stats = {
   namespace: string | null; policy: Policy | null; settings: DeviceSettings;
   normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>> }; private: { bytes: number; count: number }; others: { bytes: number; count: number };
-  items: { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number }[];
 };
 
+/** 只读明文字段（字节数、条目数、大类），不解密任何条目：侧栏与设置页的统计都用它。 */
 async function stats(): Promise<Stats> {
   const context = await normalContext();
   const namespace = context?.ns ?? (lastNamespace || null);
-  const entries = await listEntries();
   const result: Stats = { namespace, policy, settings: await currentSettings(), normal: { bytes: 0, count: 0, kinds: {} },
-    private: { bytes: 0, count: 0 }, others: { bytes: 0, count: 0 }, items: [] };
-  for (const entry of entries) {
+    private: { bytes: 0, count: 0 }, others: { bytes: 0, count: 0 } };
+  for (const entry of await listEntries()) {
     const bucket = entry.ns !== namespace ? result.others : entry.tier === "p" ? result.private : result.normal;
     bucket.bytes += entry.bytes; bucket.count += 1;
     if (bucket === result.normal && entry.kind) result.normal.kinds[entry.kind] = (result.normal.kinds[entry.kind] ?? 0) + entry.bytes;
   }
-  if (context) {
-    const mine = entries.filter(entry => entry.ns === context.ns && entry.tier === "n" && entry.kind !== "thumb")
-      .sort((a, b) => b.accessed - a.accessed).slice(0, 300);
-    for (const entry of mine) {
-      const info = await openInfo(context.info, entry);
-      if (info) result.items.push({ key: entry.key, path: info.path, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed });
-    }
-  }
   return result;
+}
+
+type Item = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean };
+type ItemQuery = { query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
+let itemCache: { ns: string; at: number; items: Item[] } | null = null;
+
+/** 普通层已缓存文件的完整索引：解密一次后在内存里保留 15 秒，翻页、搜索与筛选都不再解密。缩略图不列出。 */
+async function allItems(): Promise<Item[]> {
+  const context = await normalContext();
+  if (!context) return [];
+  if (itemCache && itemCache.ns === context.ns && Date.now() - itemCache.at < 15_000) return itemCache.items;
+  const items: Item[] = [];
+  for (const entry of await listEntries(context.ns, "n")) {
+    if (entry.kind === "thumb") continue;
+    const info = await openInfo(context.info, entry);
+    if (info) items.push({ key: entry.key, path: info.path, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed,
+      manual: Boolean(info.manual), complete: fileCacheState(entry, info.size).complete });
+  }
+  context.signal.throwIfAborted();
+  itemCache = { ns: context.ns, at: Date.now(), items };
+  return items;
+}
+
+async function matchItems(options: ItemQuery) {
+  const query = (options.query ?? "").trim().toLowerCase();
+  return (await allItems()).filter(item => (!query || item.path.toLowerCase().includes(query))
+    && (!options.kind || (options.kind === "other" ? !["image", "video", "audio"].includes(item.kind) : item.kind === options.kind))
+    && (!options.status || (options.status === "complete") === item.complete));
+}
+
+async function listItems(options: ItemQuery) {
+  const matched = await matchItems(options);
+  const order = options.sort ?? "recent";
+  matched.sort(order === "size" ? (a, b) => b.bytes - a.bytes : order === "name" ? (a, b) => a.path.localeCompare(b.path, "zh-CN") : (a, b) => b.accessed - a.accessed);
+  const offset = Math.max(0, options.offset ?? 0), limit = Math.max(1, Math.min(200, options.limit ?? 50));
+  return { total: matched.length, bytes: matched.reduce((sum, item) => sum + item.bytes, 0), items: matched.slice(offset, offset + limit) };
+}
+
+/** 按同样的条件移除（「移除筛选出的文件」）；只作用于当前账号的普通层。 */
+async function removeItems(options: ItemQuery) {
+  const keys = new Set((await matchItems(options)).map(item => item.key));
+  if (manual?.opened && keys.has(manual.opened.entry.key)) stopManual();
+  await deleteEntries([...keys]);
+  itemCache = null;
+  return keys.size;
 }
 
 async function clear(scope: string, key?: string) {
@@ -789,6 +831,7 @@ async function clear(scope: string, key?: string) {
   if (manual && (scope === "all" || scope === "normal" && manual.route.tier === "n" || scope === "private" && manual.route.tier === "p"
     || victims.some(entry => entry.key === manual?.opened?.entry.key))) stopManual();
   await deleteEntries(victims.map(entry => entry.key));
+  itemCache = null;
 }
 
 sw.addEventListener("message", event => {
@@ -806,6 +849,8 @@ sw.addEventListener("message", event => {
     case "tessera-cache:settings": settings = null; stopManual(); dropKeys("p"); reply(Promise.resolve(null)); break;
     case "tessera-cache:nudge": if (Date.now() - lastReconcile > 5000) scheduleReconcile(3000); break;
     case "tessera-cache:stats": reply(stats()); break;
+    case "tessera-cache:items": reply(listItems((data as { filter?: ItemQuery }).filter ?? {})); break;
+    case "tessera-cache:remove-items": reply(removeItems((data as { filter?: ItemQuery }).filter ?? {})); break;
     case "tessera-cache:clear": reply(clear(data.scope ?? "normal", data.key)); break;
     case "tessera-cache:reset": dropKeys(); reply(clear("all")); break;
     case "tessera-cache:files": reply(fileStates(data.urls ?? [])); break;
