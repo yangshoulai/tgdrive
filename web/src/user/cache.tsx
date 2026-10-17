@@ -5,7 +5,9 @@ import { Button, ConfirmDialog, Icon, IconButton, KeyValue, Modal, formatBytes, 
 import { usePrivateAccess } from "./private-session";
 import { TrayBar, TrayRing } from "./tray";
 
-type CacheJob = { id: string; file: CacheFile; status: "queued" | "active" | "done" | "error" | "canceled"; bytes: number; size: number; error: string; waiting: boolean };
+type CacheJob = { id: string; file: CacheFile; status: "queued" | "active" | "done" | "error" | "canceled"; bytes: number; size: number; error: string; waiting: boolean; completedAt?: number };
+/** 与上传、离线下载托盘一致：完成的项目显示 8 秒后自动移出，失败与取消的保留到用户处理；没有项目时托盘消失。 */
+const COMPLETED_VISIBLE_MS = 8000;
 type Queue = {
   /** 浏览器支持且用户与管理员都没有关闭本机缓存；否则不显示缓存按钮与菜单项。 */
   available: boolean;
@@ -130,6 +132,14 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
       return [...value.filter(job => job !== found), { id: crypto.randomUUID(), file, status: "queued", bytes: statesRef.current.get(cacheFileId(file))?.bytes ?? found?.bytes ?? 0, size: file.size, error: "", waiting: false }];
     });
   }, [update]);
+  useEffect(() => {
+    const completed = jobs.filter(job => job.status === "done" && job.completedAt != null);
+    if (!completed.length) return;
+    const expires = Math.min(...completed.map(job => job.completedAt! + COMPLETED_VISIBLE_MS));
+    const timer = window.setTimeout(() => update(current => current.filter(job =>
+      job.status !== "done" || job.completedAt == null || job.completedAt + COMPLETED_VISIBLE_MS > Date.now())), Math.max(0, expires - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [jobs, update]);
   const retry = useCallback((id: string) => { const job = jobsRef.current.find(job => job.id === id); if (job) enqueue(job.file); }, [enqueue]);
 
   useEffect(() => {
@@ -157,7 +167,7 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
         progress(result);
         let state: FileCacheState = result;
         while (!state.complete) { state = await stepFileCache(job.id, controller.signal, progress); progress(state); }
-        patch({ status: "done" });
+        patch({ status: "done", completedAt: Date.now() });
       } catch (reason) {
         if (!controller.signal.aborted) patch({ status: "error", error: api.errorMessage(reason, "缓存失败，请重试") });
       } finally {
