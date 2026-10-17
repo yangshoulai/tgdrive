@@ -6,8 +6,8 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SetupGuide, SearchInput, Segmented,
-  SkeletonRows, Switch, Toggle, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
+import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SetupGuide, SearchInput, Segmented,
+  SkeletonRows, Switch, Tabs, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
 import { Stat } from "./overview";
 
 type Tab = "overview" | "channels" | "catalog" | "tools" | "limits" | "usage" | "conversations" | "calls";
@@ -70,7 +70,7 @@ export function AssistantAdmin() {
           <Switch label="启用文件助手" checked={settings.enabled} disabled={!settings.enabled && !settings.default_model}
             onChange={value => value ? setEnabling(true) : void setEnabled(false)} />
         </div>} />
-      <div className="maintenance-tabs assistant-tabs"><Segmented label="文件助手设置" showLabels value={tab} onChange={choose} options={TABS} /></div>
+      <Tabs label="文件助手设置" value={tab} onChange={choose} options={TABS} />
       {tab === "overview" && <OverviewTab revision={revision} settings={settings} onNavigate={choose} onChanged={changed} />}
       {tab === "channels" && <ChannelsTab settings={settings} onChanged={changed} />}
       {tab === "catalog" && <CatalogTab />}
@@ -153,7 +153,7 @@ function OverviewTab({ revision, settings, onNavigate, onChanged }: { revision: 
               ["消息", `${(data.storage.assistant_messages ?? 0).toLocaleString("zh-CN")} 条 · 约 ${formatSize(data.storage.message_bytes ?? 0)}`],
               ["调用日志", `${(data.storage.assistant_calls ?? 0).toLocaleString("zh-CN")} 条`],
             ]} />
-            <div className="assistant-danger-zone"><Button variant="ghost" className="btn-ghost-danger" icon="trash" onClick={() => { setConfirmText(""); setPurging(true); }}>清除所有助手数据</Button></div>
+            <div className="assistant-danger-zone"><Button variant="ghost-danger" icon="trash" onClick={() => { setConfirmText(""); setPurging(true); }}>清除所有助手数据</Button></div>
           </Panel>
         </div>
       </div>
@@ -424,7 +424,7 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onPick, onChan
           <div className="data-row data-head" role="row"><span role="columnheader">启用</span><span role="columnheader">模型</span><span role="columnheader">上下文</span><span role="columnheader">价格（$/M）</span><span role="columnheader"><span className="sr-only">操作</span></span></div>
           {shown.map(model => (
             <div className="data-row" role="row" key={model.id}>
-              <span role="cell"><Toggle label={`启用 ${model.label}`} checked={model.enabled}
+              <span role="cell"><Switch compact label={`启用 ${model.label}`} checked={model.enabled}
                 onChange={value => void update(model, { enabled: value }, value && model.tools !== "yes" ? "已启用。建议先点“测试”确认它支持工具调用" : undefined)} /></span>
               <span role="cell" className="name-stack">
                 <strong>{model.label}{model.id === defaultModel && <Badge tone="accent">默认</Badge>}{model.removed_upstream && <Badge tone="warning">上游已移除</Badge>}
@@ -522,7 +522,7 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
           </div>
         </details>
         <Switch checked={form.enabled} onChange={enabled => setForm({ ...form, enabled })} label="启用渠道" description="停用后其下所有模型对用户不可见。" />
-        {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+        {error && <Notice tone="danger">{error}</Notice>}
       </form>
     </Modal>
   );
@@ -607,7 +607,7 @@ function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number
         </Field>
         <Switch label="允许用于私密对话" checked={form.private_ok} onChange={value => setForm({ ...form, private_ok: value })}
           description="私密对话会把私密空间里的文件名、目录结构以及读取的文本和图片发给这个模型，只为你信任的模型服务开启。全局开关在“限制与额度”。" />
-        {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+        {error && <Notice tone="danger">{error}</Notice>}
       </form>
     </Modal>
   );
@@ -767,7 +767,7 @@ function CatalogSettingsDialog({ status, onClose, onSaved }: { status: ai.Catalo
         <input className="input mono" value={url} placeholder={status.default_url} onChange={event => setUrl(event.target.value)} />
       </Field>
       <Switch label="每天自动同步" description="由维护任务执行；只有配置了模型渠道后才会访问外网。" checked={auto} onChange={setAuto} />
-      {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+      {error && <Notice tone="danger">{error}</Notice>}
     </form>
   </Modal>;
 }
@@ -817,7 +817,7 @@ function CatalogEntryDialog({ entry, onClose, onSaved }: { entry: ai.CatalogEntr
       </div>
       <div className="form-row">{capability("tools", "工具调用")}{capability("reasoning", "推理")}</div>
       <div className="form-row">{capability("vision", "图片输入")}{capability("structured", "结构化输出")}</div>
-      {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+      {error && <Notice tone="danger">{error}</Notice>}
     </form>
   </Modal>;
 }
@@ -862,8 +862,8 @@ function ToolsTab() {
   if (!tools) return error ? <Panel><EmptyState icon="alert" title="工具加载失败" description={error} action={<Button onClick={load}>重试</Button>} /></Panel> : <Panel><SkeletonRows rows={6} /></Panel>;
   return (
     <>
-      <p className="inline-note banner"><Icon name="info" size={16} />停用的工具不会发送给模型，模型不知道它存在。需要确认的写入操作始终需要用户在界面上逐项确认，不能关闭。改动在下一次模型调用时生效。
-        锁形开关只控制私密对话：关闭后这个工具只在普通对话中提供。</p>
+      <Notice className="banner">停用的工具不会发送给模型，模型不知道它存在。需要确认的写入操作始终需要用户在界面上逐项确认，不能关闭。改动在下一次模型调用时生效。
+        锁形开关只控制私密对话：关闭后这个工具只在普通对话中提供。</Notice>
       {groups.map(([group, items]) => (
         <Panel key={group} title={group} flush className="assistant-tool-group"
           actions={items.some(tool => !tool.fixed) && <Button size="sm" variant="ghost" onClick={() => {
@@ -883,16 +883,16 @@ function ToolsTab() {
                 <span className="assistant-tool-actions">
                   {tool.params.length > 0 && <Button size="sm" variant="ghost" onClick={() => setParamsFor(tool)}>参数…</Button>}
                   {!tool.fixed && ["allow", "limited", "only"].includes(tool.private) && <span className="assistant-tool-private-toggle" title="在私密对话中提供"><Icon name="lock" size={13} />
-                    <Toggle label={`在私密对话中提供 ${tool.label}`} disabled={!tool.on} checked={(draft[tool.name]?.private_enabled ?? tool.private_enabled) as boolean} onChange={value => togglePrivate(tool.name, value)} /></span>}
+                    <Switch compact label={`在私密对话中提供 ${tool.label}`} disabled={!tool.on} checked={(draft[tool.name]?.private_enabled ?? tool.private_enabled) as boolean} onChange={value => togglePrivate(tool.name, value)} /></span>}
                   {tool.fixed ? <span className="muted">固定启用</span>
-                    : <Toggle label={`启用 ${tool.label}`} checked={(draft[tool.name]?.enabled ?? tool.enabled) as boolean} onChange={value => toggle(tool.name, value)} />}
+                    : <Switch compact label={`启用 ${tool.label}`} checked={(draft[tool.name]?.enabled ?? tool.enabled) as boolean} onChange={value => toggle(tool.name, value)} />}
                 </span>
               </li>
             ))}
           </ul>
         </Panel>
       ))}
-      {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+      {error && <Notice tone="danger">{error}</Notice>}
       {(dirty || busy) && <div className="settings-actions assistant-sticky-actions"><span className="settings-actions-note">有未保存的修改</span><Button variant="ghost" disabled={busy} onClick={() => setDraft({})}>放弃修改</Button><Button variant="primary" loading={busy} onClick={() => void save()}>保存工具配置</Button></div>}
       {paramsFor && <ToolParamsDialog tool={paramsFor} values={draft[paramsFor.name] ?? {}} onClose={() => setParamsFor(null)}
         onApply={values => { setDraft(current => ({ ...current, [paramsFor.name]: { ...current[paramsFor.name], ...values } })); setParamsFor(null); }} />}
@@ -920,7 +920,7 @@ function ToolParamsDialog({ tool, values, onClose, onApply }: { tool: ai.AdminTo
         {tool.params.map(param => <Field key={param.name} label={param.label} hint={`默认 ${param.default}，范围 ${param.min}–${param.max}（硬上限）`}>
           <input className="input" type="number" min={param.min} max={param.max} value={form[param.name]} onChange={event => setForm({ ...form, [param.name]: event.target.value })} />
         </Field>)}
-        {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+        {error && <Notice tone="danger">{error}</Notice>}
         <p className="muted">应用后点击页面底部的“保存工具配置”才会生效。</p>
       </form>
     </Modal>
@@ -1008,7 +1008,7 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
           </Field>
         </div>
       </Panel>
-      {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+      {error && <Notice tone="danger">{error}</Notice>}
       {(dirty || busy) && <div className="settings-actions assistant-sticky-actions"><span className="settings-actions-note">有未保存的修改</span><Button variant="ghost" disabled={busy} onClick={() => reset(limits, settings)}>放弃修改</Button><Button type="submit" variant="primary" loading={busy}>保存</Button></div>}
     </form>
   );
@@ -1051,7 +1051,7 @@ function ConversationsTab() {
   }
   return (
     <>
-      <p className="inline-note banner"><Icon name="lock" size={16} />对话正文加密保存，只有用户本人能查看。这里只显示统计信息，用于了解使用情况和清理数据。</p>
+      <Notice icon="lock" className="banner">对话正文加密保存，只有用户本人能查看。这里只显示统计信息，用于了解使用情况和清理数据。</Notice>
       <div className="toolbar">
         <div className="toolbar-actions">
           <select className="input input-sm" aria-label="用户" value={userId} onChange={event => setUserId(event.target.value)}>
@@ -1136,8 +1136,8 @@ function DeleteConversationsDialog({ users, onClose, onDeleted }: { users: api.A
       }}>
       <Field label="用户"><select className="input" value={userId} onChange={event => setUserId(event.target.value)}><option value="">全部用户</option>{users.map(user => <option key={user.id} value={user.id}>{api.displayName(user)}</option>)}</select></Field>
       <Field label="最后活动早于" hint="留空表示不限日期。"><input className="input" type="date" value={before} onChange={event => setBefore(event.target.value)} /></Field>
-      {count !== null && <p className="inline-note"><Icon name="info" size={16} />符合条件的对话：{count} 个</p>}
-      {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+      {count !== null && <Notice>符合条件的对话：{count} 个</Notice>}
+      {error && <Notice tone="danger">{error}</Notice>}
     </ConfirmDialog>
   );
 }
@@ -1261,7 +1261,7 @@ export function AssistantPolicyDialog({ user, onClose }: { user: api.Account; on
   return (
     <Modal title={`${api.displayName(user)} · 文件助手`} icon="sparkle" size="sm" onClose={onClose} dismissible={!busy}
       footer={<><Button onClick={onClose} disabled={busy}>取消</Button><Button variant="primary" type="submit" form="policy-form" loading={busy} disabled={!policy}>保存</Button></>}>
-      {!policy ? (error ? <p className="form-alert">{error}</p> : <SkeletonRows rows={3} />) : <form id="policy-form" className="form" onSubmit={submit} noValidate>
+      {!policy ? (error ? <Notice tone="danger">{error}</Notice> : <SkeletonRows rows={3} />) : <form id="policy-form" className="form" onSubmit={submit} noValidate>
         <Field label="使用权限"><select className="input" value={form.enabled} onChange={event => setForm({ ...form, enabled: event.target.value })}>
           <option value="inherit">跟随全局（允许）</option><option value="on">允许</option><option value="off">禁止</option></select></Field>
         <Field label="最高操作级别" hint="只读：只能查询与统计；普通写入：可提议改名、移动、移入回收站等；含不可恢复操作：还可提议清空回收站。所有写入仍需用户逐项确认。">
@@ -1278,7 +1278,7 @@ export function AssistantPolicyDialog({ user, onClose }: { user: api.Account; on
         <Field label="每日 token" hint={`留空跟随全局（当前 ${policy.effective.daily_tokens ? tokens(policy.effective.daily_tokens) : "不限"}），0 表示不限。`}>
           <input className="input" type="number" min={0} value={form.daily_tokens} onChange={event => setForm({ ...form, daily_tokens: event.target.value })} /></Field>
         <KeyValue items={[["今日用量", tokens(policy.usage.today)], ["近 30 天", tokens(policy.usage.days30)]]} />
-        {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+        {error && <Notice tone="danger">{error}</Notice>}
       </form>}
     </Modal>
   );

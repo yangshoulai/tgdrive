@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import * as api from "../api";
 import { passkeyUnavailable, unlockWithPrivatePasskey } from "../passkeys";
-import { Button, Field, Icon, Modal, Segmented, toast } from "../ui";
+import { Notice, Button, Field, Icon, Modal, Segmented, toast } from "../ui";
 import { FolderPicker } from "./folders";
 import { usePrivateAccess, usePrivateSession } from "./private-session";
 
@@ -92,8 +92,8 @@ export function PrivateTransferDialog({ paths, into, onClose, onDone }: { paths:
     {access.restoring ? <div className="private-loading" role="status"><span className="spinner" />正在检查私密空间</div> : grant ? <>
       <FolderPicker value={destination} onChange={path => { setReady(false); setDestination(path); }} onReady={setReady} />
       <div className="move-conflict"><span>遇到同名文件时</span><Segmented label="同名冲突处理" value={conflict} onChange={setConflict} options={[{ value: "rename", label: "保留两者" }, { value: "skip", label: "跳过" }, { value: "overwrite", label: "覆盖" }]} /></div>
-      {conflict === "overwrite" && <p className="inline-note tone-warning"><Icon name="alert" size={15} />目标位置的同名文件会被替换且无法恢复。</p>}
-      {error && <p className="form-alert" role="alert">{error}</p>}
-    </> : access.error ? <div className="form"><p className="form-alert" role="alert">{access.error}</p><Button onClick={access.restore}>重试</Button></div> : <PrivateUnlockForm />}
+      {conflict === "overwrite" && <Notice tone="warning">目标位置的同名文件会被替换且无法恢复。</Notice>}
+      {error && <Notice tone="danger">{error}</Notice>}
+    </> : access.error ? <div className="form"><Notice tone="danger">{access.error}</Notice><Button onClick={access.restore}>重试</Button></div> : <PrivateUnlockForm />}
   </Modal>;
 }

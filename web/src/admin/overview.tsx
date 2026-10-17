@@ -68,7 +68,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
                 const max = Math.max(1, ...data.users.top_users.map(item => item.used_bytes));
                 return <div className="usage-chart-row" key={user.id}><span title={user.username}>{api.displayName(user)}</span><div className="usage-chart-track"><i style={{ width: `${Math.max(2, user.used_bytes / max * 100)}%` }} /></div><strong>{formatBytes(user.used_bytes)}</strong></div>;
               })}
-              {data.users.user_total === 0 && <div className="overview-empty"><p className="muted">暂无普通用户的空间使用数据。</p><Button size="sm" variant="ghost" onClick={() => onNavigate("users")}>管理用户</Button></div>}
+              {data.users.user_total === 0 && <EmptyState compact icon="users" title="还没有普通用户" description="创建用户后，这里会按空间使用量排列。" action={<Button size="sm" onClick={() => onNavigate("users")}>管理用户</Button>} />}
             </div>
           </Panel>
         </div>

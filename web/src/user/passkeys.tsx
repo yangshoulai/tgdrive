@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import * as api from "../api";
 import { passkeyUnavailable, registerPasskey, type PasskeyRegistrationStage } from "../passkeys";
-import { Badge, Button, ConfirmDialog, Field, Icon, Menu, Modal, PasswordField, formatDate, toast } from "../ui";
+import { Notice, Badge, Button, ConfirmDialog, EmptyState, Field, Icon, Menu, Modal, PasswordField, formatDate, toast } from "../ui";
 
 type Editor = { kind: "add" } | { kind: "rename" | "enable"; passkey: api.AccountPasskey };
 type Action = Editor["kind"] | "delete";
@@ -143,7 +143,7 @@ export function PasskeysSettings({ username, active, busy, onBusyChange, onOpen,
               { label: "移除", icon: "trash", danger: true, onSelect: () => open({ kind: "delete", passkey: item }) },
             ]} />}</span>
           </li>)}
-        </ul> : <div className="account-passkey-empty"><Icon name="key" size={24} /><div><h3>还没有通行密钥</h3><p>添加后，下次登录可以直接在设备上确认。登录密码始终可以使用。</p></div></div>}
+        </ul> : <EmptyState compact icon="key" title="还没有通行密钥" description="添加后，下次登录可以直接在设备上确认。登录密码始终可以使用。" />}
         {limited && <p className="account-editor-note">每个账号最多添加 10 个通行密钥。移除不再使用的凭据后，即可添加新的。</p>}
         <p className="account-editor-note">凭据可能由系统同步到你的其他设备。Tessera 不会接收指纹、面容数据或通行密钥私钥。</p>
       </>}
@@ -162,7 +162,7 @@ export function PasskeysSettings({ username, active, busy, onBusyChange, onOpen,
           <PasswordField label="当前登录密码" name="password" value={password} onChange={changePassword} error={errors.password} hint="用于确认身份，仅在本次操作中使用。" disabled={busy} autoFocus={editor.kind === "enable"} />
           {action === "add" && <div className="account-passkey-progress"><ol aria-label="添加通行密钥进展">{["确认密码", "设备验证", "保存"].map((label, index) => <li key={label} className={index < stageIndex ? "is-complete" : index === stageIndex ? "is-current" : ""} aria-current={index === stageIndex ? "step" : undefined}>{index < stageIndex ? <Icon name="checkCircle" size={15} /> : index === stageIndex ? <span className="spinner" /> : <i aria-hidden="true" />}{label}</li>)}</ol>
             <p role="status">{stage === "checking" ? "正在确认登录密码…" : stage === "device" ? "请在设备提示中完成指纹、面容或 PIN 验证。" : "正在保存通行密钥，请稍候…"}</p></div>}
-          {error && <p className="form-alert" role="alert">{error}</p>}
+          {error && <Notice tone="danger">{error}</Notice>}
       </form>
     </Modal>}
     {deleting && <ConfirmDialog title="移除通行密钥" confirmLabel="移除通行密钥" onClose={() => close(deleting.id)} onConfirm={remove}
@@ -170,7 +170,7 @@ export function PasskeysSettings({ username, active, busy, onBusyChange, onOpen,
       <input className="sr-only" name="username" autoComplete="username" value={username} readOnly tabIndex={-1} aria-hidden="true" />
       <div ref={deleteField}><PasswordField label="当前登录密码" value={password} onChange={changePassword} error={errors.password} disabled={busy} autoFocus /></div>
       <p className="account-editor-note">当前账号保持登录；其他设备需要重新登录，所有私密窗口会锁定。你仍可使用登录密码。</p>
-      {error && <p className="form-alert" role="alert">{error}</p>}
+      {error && <Notice tone="danger">{error}</Notice>}
     </ConfirmDialog>}
   </section>;
 }

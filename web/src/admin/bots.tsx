@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { SITE } from "../brand";
 import * as api from "../api";
 
-import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, SetupGuide, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle } from "../ui";
+import { Notice, Badge, Button, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, SetupGuide, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 存储通道 ---------- */
 
@@ -52,7 +52,7 @@ export function Bots() {
       {bots !== null && <SetupGuide id="storage-channels" description="在 Telegram 中准备 Bot 和私有频道，大约需要 5 分钟。" steps={STORAGE_STEPS}
         docHref="/docs/storage-channels" defaultOpen={!error && active === 0} />}
       {/* 还没有通道时只由空状态说明并提供“添加通道”，不再叠加页头按钮和警告横幅。 */}
-      {!error && bots !== null && bots.length > 0 && active === 0 && <p className="inline-note tone-warning banner"><Icon name="alert" size={16} />当前没有启用的通道，新上传的文件会加密后暂存在服务器本地磁盘。</p>}
+      {!error && bots !== null && bots.length > 0 && active === 0 && <Notice tone="warning" className="banner">当前没有启用的通道，新上传的文件会加密后暂存在服务器本地磁盘。</Notice>}
       <section className="file-surface table-scroll">
         {error ? <EmptyState icon="alert" title="存储通道加载失败" description={error} action={<Button icon="refresh" onClick={load}>重试</Button>} /> : bots === null ? <SkeletonRows rows={3} /> : bots.length === 0 ? (
           <EmptyState icon="send" title="还没有存储通道" description="在 Telegram 中通过 BotFather 创建 Bot，把它设为私有频道的管理员，然后在这里添加。添加之前，新上传的文件会加密后暂存在服务器本地磁盘。" action={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>添加通道</Button>} />

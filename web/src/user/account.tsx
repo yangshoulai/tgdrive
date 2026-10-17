@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { BRAND } from "../brand";
-import { Avatar, Badge, Button, EmptyState, Field, Icon, Modal, PageHeader, PasswordField, Segmented, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
+import { Notice, Avatar, Badge, Button, EmptyState, Field, Icon, Modal, PageHeader, PasswordField, Tabs, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
 import { KeysView } from "./keys";
 import { LocalCacheSettings } from "./local-cache";
 import { PasskeysSettings } from "./passkeys";
@@ -27,7 +27,7 @@ export function UserSettingsPage({ session, onSessionChange, assistant = false, 
     <PageHeader title="用户设置" description={tab === "keys" ? "让同步工具（如 rclone、AWS CLI）或你自己的脚本访问你的文件。密钥只能访问你自己的文件，随时可以停用。"
       : tab === "cache" ? "看过的图片、音乐、视频片段和缩略图加密保存在这台设备的浏览器里，再次打开时不必重新下载。"
       : "管理你的个人资料和登录方式，登录方式也用于解锁私密空间。"} />
-    {onTabChange && <div className="maintenance-tabs settings-tabs"><Segmented label="用户设置" showLabels value={tab} onChange={onTabChange} options={SETTINGS_TABS} /></div>}
+    {onTabChange && <Tabs label="用户设置" value={tab} onChange={onTabChange} options={SETTINGS_TABS} />}
     {tab === "cache" ? <LocalCacheSettings />
       : tab === "keys" ? keysAvailable ? <KeysView bucketName={bucketName} embedded />
       : <EmptyState icon="lock" title="暂时无法管理访问密钥" description="系统解锁后才能查看和创建访问密钥。" />
@@ -83,7 +83,7 @@ function AssistantAttachmentsSummary({ assistant, onOpenConversation }: { assist
         <strong>{stats ? `${stats.count.toLocaleString("zh-CN")} 个附件，共 ${formatBytes(stats.size)}` : error ? "统计暂不可用" : "正在统计…"}</strong>
         <p>附件属于对话，不出现在我的文件。删除对话会同时删除它的附件；想长期保留时，在消息里的附件菜单选择「保存到我的文件」。</p>
       </div></div>
-      {error && <p className="form-alert" role="alert">{error}</p>}
+      {error && <Notice tone="danger">{error}</Notice>}
       {stats && stats.conversations.length > 0 && <ul className="account-attachments" aria-label="各对话的附件">
         {stats.conversations.map(item => <li key={item.conversation_id}>
           <Icon name="chat" size={15} />
@@ -109,7 +109,7 @@ function PrivateSettingsSummary({ editing, busy, onOpen, onClose, onBusyChange }
       <div className="account-setting-summary"><div><strong>无操作 {access.idleSeconds / 60} 分钟后锁定</strong><p>私密操作会重新计时，播放时保持解锁。切换页面或刷新后可直接返回。</p></div>
         {!access.available ? <Badge>系统未解锁</Badge> : access.restoring ? <Badge>检查中</Badge> : access.error ? <Badge tone="warning">状态待确认</Badge> : <Badge tone={access.grant ? "success" : "neutral"}>{access.grant ? "已解锁" : "未解锁"}</Badge>}
       </div>
-      {access.error && <p className="form-alert" role="alert">{access.error}</p>}
+      {access.error && <Notice tone="danger">{access.error}</Notice>}
       <div className="account-private-actions">{access.error && <Button size="sm" disabled={busy || access.restoring} onClick={access.restore}>重试</Button>}{access.grant && <Button icon="lock" size="sm" disabled={busy || access.restoring} onClick={access.lock}>立即锁定</Button>}
         <Button size="sm" icon="settings" aria-haspopup="dialog" disabled={busy || !access.available || access.restoring || !!access.error} onClick={onOpen}>修改锁定时间</Button>
       </div>
@@ -140,7 +140,7 @@ function PrivateIdleDialog({ initialIdle, busy, onBusyChange, onClose }: {
     <form id={id} className="form" onSubmit={submit} noValidate>
       <fieldset disabled={busy} className="settings-fieldset"><PrivateIdleSelect value={idle} onChange={value => { setIdle(value); setError(""); }} /></fieldset>
       <p className="account-editor-note">仅影响你的账号。保存后重新计时，其他登录设备需重新解锁；未解锁时只保存时间设置。</p>
-      {error && <p className="form-alert" role="alert">{error}</p>}
+      {error && <Notice tone="danger">{error}</Notice>}
     </form>
   </Modal>;
 }
@@ -210,7 +210,7 @@ function ChangePasswordDialog({ id, username, busy, onBusyChange, onCancel, onSa
     <PasswordField label="确认新密码" name="confirm" value={form.confirm} onChange={value => change("confirm", value)} autoComplete="new-password" error={errors.confirm}
       hint={form.confirm && form.confirm === form.next && form.next.length >= 8 ? <span className="tone-success">两次输入一致</span> : undefined} disabled={busy} />
     <p className="account-editor-note">修改后，其他设备需要重新登录，私密空间需要重新解锁。已添加的通行密钥仍可使用。</p>
-    {error && <p className="form-alert" role="alert">{error}</p>}
+    {error && <Notice tone="danger">{error}</Notice>}
     </form>
   </Modal>;
 }
@@ -358,7 +358,7 @@ export function EmailDialog({ session, required = false, onClose, onSaved, onLog
       <PasswordField label="当前登录密码" name="password" value={password} error={errors.password} disabled={saving}
         onChange={value => { setPassword(value); setErrors(previous => ({ ...previous, password: "" })); setError(""); }} />
       <p className="account-editor-note">目前只检查邮箱格式，不会发送验证邮件。当前登录保持有效，其他设备下次登录时使用新邮箱。</p>
-      {error && <p className="form-alert" role="alert">{error}</p>}
+      {error && <Notice tone="danger">{error}</Notice>}
     </form>
   </Modal>;
 }

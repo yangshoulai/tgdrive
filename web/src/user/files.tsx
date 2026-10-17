@@ -8,7 +8,7 @@ import { FolderStatsDialog } from "./folder-stats";
 import { FileFilters, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, baseName, getFileKind, kindLabel, parentPath, type EntryFilter } from "../files";
 import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator, videoFrameUsable } from "../thumbnails";
 
-import { Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
+import { Notice, ButtonLink, Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 
 import { UploadDialog, type UploadQueue } from "./uploads";
 import { PrivateTransferDialog } from "./private-access";
@@ -544,7 +544,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <span className="selection-count">已选择 {selected.size} 项</span>
           <div className="toolbar-actions">
             {selectedEntries.length > 200 ? <Button size="sm" icon="download" onClick={downloadLimit}>下载</Button>
-              : <a className="btn btn-secondary btn-sm" href={downloadUrl(selectedEntries)}><Icon name="download" size={15} /><span>下载</span></a>}
+              : <ButtonLink variant="secondary" size="sm" icon="download" href={downloadUrl(selectedEntries)}>下载</ButtonLink>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
             <Button size="sm" icon="move" onClick={() => setMoving(selectedEntries)}>移动</Button>
@@ -767,7 +767,7 @@ function MoveDialog({ targets, startPrefix, onClose, onMove }: { targets: Entry[
     }}>{alreadyHere ? "已在此文件夹中" : `移动到“${browse !== root ? baseName(browse) : root ? "私密空间" : "我的文件"}”`}</Button></>}>
     <FolderPicker value={browse} onChange={next => { setReady(false); setBrowse(next); }} blocked={blocked} onReady={setReady} />
     <div className="move-conflict"><span>遇到同名文件时</span><Segmented label="同名冲突处理" value={conflict} onChange={setConflict} options={[{ value: "rename", label: "保留两者" }, { value: "skip", label: "跳过" }, { value: "overwrite", label: "覆盖" }]} /></div>
-    {conflict === "overwrite" && <p className="inline-note tone-warning"><Icon name="alert" size={15} />目标位置的同名文件会被替换且无法恢复。</p>}
+    {conflict === "overwrite" && <Notice tone="warning">目标位置的同名文件会被替换且无法恢复。</Notice>}
   </Modal>;
 }
 

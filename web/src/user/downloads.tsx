@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BRAND } from "../brand";
 import * as api from "../api";
 import { useCursorPage } from "../pagination";
-import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
+import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
 import { FileTile, FileVisual, getFileKind } from "../files";
 import { DestinationPicker } from "./folders";
 import { PrivateUnlockForm } from "./private-access";
@@ -169,7 +169,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
           { label: "清除失败的任务", icon: "alert", onSelect: () => setClearing("failed") },
         ]} /></span></div>
     </div>
-    {page?.capabilities.pressure && <p className="inline-note tone-warning" role="status"><Icon name="alert" size={16} />{page.capabilities.pressure}</p>}
+    {page?.capabilities.pressure && <Notice tone="warning" role="status">{page.capabilities.pressure}</Notice>}
     <div className="file-surface download-surface">
       {pagination.error ? <EmptyState icon="alert" title="任务加载失败" description={pagination.error} action={<Button onClick={() => void pagination.reload()}>重试</Button>} />
         : !page ? <SkeletonRows rows={5} />
@@ -347,7 +347,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
     description={task ? "已填入原来的链接和请求参数，修改后重新解析，选择文件后从头重新下载。" : initial ? "这些文件由资源抓取脚本转交，确认保存位置后开始下载。" : "粘贴文件直链、X 帖子、YouTube 视频或 curl 命令。"}
     footer={<><Button disabled={busy} onClick={onClose}>取消</Button>{candidates ? <>{!initial && <Button variant="ghost" disabled={busy} onClick={() => { setCandidates(null); setError(""); }}>返回编辑</Button>}<Button variant="primary" loading={busy} disabled={!selected.size || !ready || needsUnlock} onClick={() => void submit()}>{task ? "更新并重新下载" : `开始下载${selected.size ? `（${selected.size}）` : ""}`}</Button></> : <Button variant="primary" loading={busy || prefill === "loading"} disabled={!input.trim()} onClick={() => void parse()}>{busy ? "正在读取文件信息" : "解析内容"}</Button>}</>}>
     <div className="form">
-      {!candidates ? <>{prefill === "failed" && <p className="inline-note tone-warning" role="status"><Icon name="alert" size={16} />无法读取原来的下载参数，请重新粘贴链接或命令。</p>}
+      {!candidates ? <>{prefill === "failed" && <Notice tone="warning" role="status">无法读取原来的下载参数，请重新粘贴链接或命令。</Notice>}
         <Field label="链接或下载命令" hint={task ? "已填入原来的参数，可直接修改失效的值（如过期的签名或 Cookie）；命令使用 bash 格式，不执行命令。" : "平台链接每次一个，多个直链每行一个。命令使用 bash 格式；支持请求头、Cookie、文本 POST 请求体，不执行命令。"}>
         <textarea className="input mono download-input" rows={8} autoComplete="off" autoCapitalize="none" spellCheck={false} value={input} disabled={prefill === "loading"} onChange={event => setInput(event.target.value)} placeholder={"https://example.com/video.mp4\n\ncurl 'https://example.com/file.zip' -H 'Cookie: …'"} />
       </Field><Field label="下载类型" hint="平台链接自动解析媒体；无法识别的播放列表可选择 M3U8。"><select className="input" value={downloadType} onChange={event => setDownloadType(event.target.value as typeof downloadType)}><option value="auto">自动识别</option><option value="http">文件直链</option><option value="hls">M3U8 视频</option><option value="x">X 单条帖子</option><option value="youtube">YouTube 视频 / Shorts</option></select></Field>
@@ -382,7 +382,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
           </div>
           : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示不含查询参数的来源地址。</p></>}
       </>}
-      {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+      {error && <Notice tone="danger">{error}</Notice>}
     </div>
   </Modal>;
 }

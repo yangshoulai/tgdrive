@@ -13,7 +13,7 @@ import { FileGlyph, getFileKind, parentPath } from "../files";
 import { FolderPicker } from "./folders";
 import { passkeyUnavailable, privatePasskeyAssertion } from "../passkeys";
 import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
-import { AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
+import { Notice as InlineNotice, ButtonLink, AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
 /** 对象键的显示路径：私密空间的条目显示为相对私密空间根的路径。 */
 const display = (key: string) => "/" + (api.isPrivatePath(key) ? key.slice(api.PRIVATE_PREFIX.length) : key);
@@ -419,14 +419,14 @@ function BrowserCard({ event }: { event: ai.BrowserEvent }) {
       <CardHead icon="download" title={single ? `下载 ${baseName(keys[0])}` : `下载 ${event.items.length} 项（ZIP）`} subtitle={`${formatBytes(event.size)} · 保存到这台电脑`} />
       {!single && <ul className="ai-list">{event.items.slice(0, 5).map(item => <li key={item.path}><Icon name={item.folder ? "folder" : "file"} size={13} /><span className="cell-truncate">{display(item.path)}</span></li>)}</ul>}
       <footer className="ai-card-foot"><span>{done ? "已开始下载" : "浏览器需要你点击后才能下载"}</span>
-        <a className="btn btn-primary btn-sm" href={href} onClick={() => setDone(true)} download><Icon name="download" size={14} />下载</a></footer>
+        <ButtonLink variant="primary" size="sm" icon="download" href={href} onClick={() => setDone(true)} download>下载</ButtonLink></footer>
     </section>;
   }
   if (event.action === "open") return <section className="ai-card ai-browser">
     <CardHead icon="external" title={event.title || "打开网页"} subtitle={event.host} />
     <p className="ai-url" title={event.url}>{event.url}</p>
     <footer className="ai-card-foot"><span>在新标签页中打开</span>
-      <a className="btn btn-primary btn-sm" href={event.url} target="_blank" rel="noopener noreferrer"><Icon name="external" size={14} />打开</a></footer>
+      <ButtonLink variant="primary" size="sm" icon="external" href={event.url} target="_blank" rel="noopener noreferrer">打开</ButtonLink></footer>
   </section>;
   return <section className="ai-card ai-browser">
     <CardHead icon="copy" title={event.title || "可复制的文本"} />
@@ -519,7 +519,7 @@ function ShareBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
     <CardHead icon="external" title={`打开“${baseName(event.path)}”的分享页`} subtitle="已有公开分享" />
     {error && <p role="alert">{error}</p>}
     <footer className="ai-card-foot"><span>在新标签页中打开</span>
-      {href ? <a className="btn btn-primary btn-sm" href={href} target="_blank" rel="noopener noreferrer"><Icon name="external" size={14} />打开分享页</a>
+      {href ? <ButtonLink variant="primary" size="sm" icon="external" href={href} target="_blank" rel="noopener noreferrer">打开分享页</ButtonLink>
         : <Button size="sm" loading={!error} disabled={!error} onClick={() => setRetry(value => value + 1)}>{error ? "重试" : "读取分享链接"}</Button>}
     </footer>
   </section>;
@@ -757,7 +757,7 @@ function ActionItemsDialog({ action, onClose }: { action: ai.AssistantAction; on
   const failures = action.result?.failures ?? [];
   return <Modal title={`${action.payload?.title ?? "操作"}：全部条目`} description={action.payload?.summary} size="lg" onClose={onClose}
     footer={<Button onClick={onClose}>关闭</Button>}>
-    {compacted && <p className="inline-note">这个操作已超过 30 天，只保留了前 20 条样例。</p>}
+    {compacted && <InlineNotice>这个操作已超过 30 天，只保留了前 20 条样例。</InlineNotice>}
     {failures.length > 0 && <section className="ai-items-section"><h4>执行时跳过或失败</h4>
       <ul className="ai-diff is-plain">{failures.map((item, index) => <li key={index} className="ai-diff-row"><span className="cell-truncate">{item.path}</span><small>{item.reason}</small></li>)}</ul></section>}
     {skipped.length > 0 && <section className="ai-items-section"><h4>提议时已跳过（{skipped.length}）</h4>

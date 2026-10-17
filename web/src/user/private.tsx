@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import { BRAND } from "../brand";
-import { Button, Icon, PageHeader, formatBytes, useDocumentTitle } from "../ui";
+import { Notice, Button, Icon, PageHeader, formatBytes, useDocumentTitle } from "../ui";
 import { FilesView } from "./files";
 import { TrashView } from "./trash";
 import { PRIVATE_SECTION_EVENT, setPrivateSection } from "./assistant-bridge";
@@ -53,7 +53,7 @@ export function PrivateSpaceView({ session, prefix, onOpenFolder, onChanged, upl
     <section className="private-gate" aria-label="解锁私密空间">
       <span className="locked-icon"><Icon name="lock" size={26} /></span>
       <h2>{access.restoring ? "正在检查解锁状态" : "解锁后查看私密文件"}</h2>
-      {access.restoring ? <div className="private-loading" role="status"><span className="spinner" />正在检查私密空间</div> : access.error ? <div className="form"><p className="form-alert" role="alert">{access.error}</p><Button onClick={access.restore}>重试</Button></div>
+      {access.restoring ? <div className="private-loading" role="status"><span className="spinner" />正在检查私密空间</div> : access.error ? <div className="form"><Notice tone="danger">{access.error}</Notice><Button onClick={access.restore}>重试</Button></div>
         : <PrivateUnlockForm />}
     </section>
   </>;

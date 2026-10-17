@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type Reac
 import { BRAND, SITE, STORY, TAGLINE } from "./brand";
 import * as api from "./api";
 import { loginWithPasskey, passkeyUnavailable } from "./passkeys";
-import { Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
+import { Notice, Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
 
 export type NavItem<K extends string> = { key: K; label: string; icon: IconName; count?: number; href?: string };
 /** 侧栏分组：有标题的分组可以点击展开／收起（状态保存在本机）；workspace 指明所属工作区（管理员的「我的空间／系统管理」）。 */
@@ -272,7 +272,7 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
           <Checkbox checked={remember} onChange={value => { if (!busy) setRemember(value); }} label="30 天内保持登录" />
           <span><strong>30 天内保持登录</strong><small>下次打开无需重新登录。在公共电脑上请不要勾选。</small></span>
         </label>
-        {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+        {error && <Notice tone="danger">{error}</Notice>}
         <Button type="submit" variant="primary" size="lg" block loading={busy && !usingPasskey} disabled={busy}>登录</Button>
         {passkeyCapability && <>
           <div className="private-unlock-divider"><span>或使用设备验证</span></div>
@@ -326,7 +326,7 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
         <Field label="管理员密码" htmlFor="setup-password" error={errors.password}>
           <input id="setup-password" className="input" type="password" autoComplete="new-password" value={form.password} onChange={set("password")} />
         </Field>
-        {errors.form && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{errors.form}</div>}
+        {errors.form && <Notice tone="danger">{errors.form}</Notice>}
         <Button type="submit" variant="primary" size="lg" block loading={busy}>完成初始化</Button>
       </form>
     </AuthLayout>

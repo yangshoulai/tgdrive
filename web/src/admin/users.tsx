@@ -4,7 +4,7 @@ import { SITE } from "../brand";
 import * as api from "../api";
 import { AssistantPolicyDialog } from "./assistant";
 
-import { Avatar, Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, usageTone, useDocumentTitle } from "../ui";
+import { Notice, Avatar, Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, usageTone, useDocumentTitle } from "../ui";
 
 /* ---------- 用户 ---------- */
 
@@ -219,7 +219,7 @@ function QuotaDialog({ user, onClose, onSaved }: { user: api.Account; onClose: (
         <Field label="容量上限" htmlFor="quota-value" error={error} hint="留空表示不限制。">
           <div className="input-affix"><input id="quota-value" className="input" inputMode="decimal" value={value} onChange={event => { setValue(event.target.value); setError(""); }} autoFocus /><span>GB</span></div>
         </Field>
-        {quota && quota < user.used_bytes ? <p className="inline-note tone-warning"><Icon name="alert" size={15} />新配额小于已用空间，用户将无法继续上传，现有文件不受影响。</p> : null}
+        {quota && quota < user.used_bytes ? <Notice tone="warning">新配额小于已用空间，用户将无法继续上传，现有文件不受影响。</Notice> : null}
       </form>
     </Modal>
   );

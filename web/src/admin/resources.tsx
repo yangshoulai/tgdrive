@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import * as api from "../api";
-import { Button, Field, Icon, KeyValue, Panel, SkeletonRows, Switch, formatBytes, toast } from "../ui";
+import { Notice, Button, Field, Icon, KeyValue, Panel, SkeletonRows, Switch, formatBytes, toast } from "../ui";
 
 const MODES = { auto: "自动", low: "低资源", standard: "标准", custom: "自定义" };
 
@@ -24,7 +24,7 @@ export function Resources() {
   }
   const dirty = settings && JSON.stringify(form) !== JSON.stringify(settings.config);
   return <Panel title="下载与资源" description="自动选择保守的资源预设，也可以固定模式；手动配置在重启后保留。">
-    {!settings || !form ? error ? <div className="form"><p className="form-alert" role="alert">{error}</p><Button onClick={load}>重试</Button></div> : <SkeletonRows rows={3} /> : <div className="resource-layout">
+    {!settings || !form ? error ? <div className="form"><Notice tone="danger">{error}</Notice><Button onClick={load}>重试</Button></div> : <SkeletonRows rows={3} /> : <div className="resource-layout">
       <form className="form" onSubmit={submit}>
         <Field label="资源模式" hint="自动模式按启动时检测到的 CPU 和内存选档。容器预算不足时，实际并发会降低。">
           <select className="input" value={form.mode} onChange={event => setForm({ ...form, mode: event.target.value as api.ResourceConfig["mode"] })}>{Object.entries(MODES).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select>
@@ -65,15 +65,15 @@ export function Resources() {
         <Field label="出站代理" hint="所有离线下载和平台解析都经此代理，域名由代理解析；留空为直连。支持 http:// 与 socks5://，密码保存后以 ****** 显示。">
           <input className="input mono" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="http://127.0.0.1:7890" value={form.proxy} onChange={event => setForm({ ...form, proxy: event.target.value })} />
         </Field>
-        {form.proxy.trim() && <p className="inline-note tone-warning"><Icon name="alert" size={16} />启用代理后无法在本机核对域名解析结果，只能拦截内网 IP 与内部主机名；请确认代理不会把请求转发到内网服务。</p>}
+        {form.proxy.trim() && <Notice tone="warning">启用代理后无法在本机核对域名解析结果，只能拦截内网 IP 与内部主机名；请确认代理不会把请求转发到内网服务。</Notice>}
         <div className="resource-hls"><Switch checked={form.hls_enabled} onChange={enabled => setForm({ ...form, hls_enabled: enabled })} label="允许下载 M3U8 视频" description="仅支持已结束、未加密的连续 TS 点播视频，保存为 MP4。" /></div>
         <div className="resource-hls"><Switch checked={form.x_enabled} onChange={enabled => setForm({ ...form, x_enabled: enabled })} label="允许下载 X 帖子媒体" description="解析单条帖子中的图片与视频，按文件勾选下载。" /></div>
         <div className="resource-hls"><Switch checked={form.youtube_enabled} onChange={enabled => setForm({ ...form, youtube_enabled: enabled })} label="允许下载 YouTube 视频" description="支持单个视频和 Shorts，选择可用 MP4 清晰度；合并时不转码。" /></div>
         {(form.x_enabled || form.youtube_enabled) && <Field label="平台临时缓存上限（MiB）" hint="仅限制需要缓存并合并的音视频轨；单轨媒体直接流式保存，仍受用户空间配额限制。低资源预算最高 512 MiB。"><input className="input" type="number" min={16} max={8192} step={1} required value={form.platform_max_mib} onChange={event => setForm({ ...form, platform_max_mib: Number(event.target.value) })} /></Field>}
         {form.youtube_enabled && <Field label="YouTube 清晰度上限" hint="默认上限为 2160p；低资源模式不会自动下调。仅显示来源实际提供且满足临时缓存预算的格式。"><select className="input" value={form.youtube_max_height} onChange={event => setForm({ ...form, youtube_max_height: Number(event.target.value) })}>{[360, 480, 720, 1080, 2160].map(height => <option key={height} value={height}>{height}p</option>)}</select></Field>}
-        {(!settings.effective.x_available || !settings.effective.youtube_available) && <p className="inline-note tone-warning"><Icon name="alert" size={16} />平台功能需要使用带解析组件的镜像；YouTube 还需要 JavaScript 运行时和 FFmpeg，安装后重启生效。</p>}
-        {!settings.effective.hls_available && <p className="inline-note tone-warning"><Icon name="alert" size={16} />未检测到 FFmpeg。使用带 FFmpeg 的镜像后重启服务才能下载 M3U8。</p>}
-        {error && <div className="form-alert" role="alert">{error}</div>}
+        {(!settings.effective.x_available || !settings.effective.youtube_available) && <Notice tone="warning">平台功能需要使用带解析组件的镜像；YouTube 还需要 JavaScript 运行时和 FFmpeg，安装后重启生效。</Notice>}
+        {!settings.effective.hls_available && <Notice tone="warning">未检测到 FFmpeg。使用带 FFmpeg 的镜像后重启服务才能下载 M3U8。</Notice>}
+        {error && <Notice tone="danger">{error}</Notice>}
         {(dirty || busy) && <div className="settings-actions"><span className="settings-actions-note">有未保存的修改</span><Button variant="ghost" disabled={busy} onClick={() => setForm(settings.config)}>放弃修改</Button><Button type="submit" variant="primary" loading={busy}>保存资源配置</Button></div>}
       </form>
       <div className="resource-effective"><h3>当前生效配置</h3><KeyValue items={[

@@ -4,7 +4,7 @@ import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 
-import { Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, PageHeader, Pagination, Panel, Segmented, SkeletonRows, Switch, formatBytes, formatDateTime, toast, useDocumentTitle } from "../ui";
+import { Notice, ButtonLink, Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, PageHeader, Pagination, Panel, Segmented, SkeletonRows, Tabs, Switch, formatBytes, formatDateTime, toast, useDocumentTitle } from "../ui";
 
 import { UnlockForm } from "./lock";
 
@@ -19,7 +19,7 @@ export function Maintenance({ status, onStatus, onLocked }: { status: api.System
   return (
     <>
       <PageHeader title="安全与维护" />
-      <div className="maintenance-tabs"><Segmented label="维护区域" value={section} onChange={setSection} options={[{ value: "maintenance", label: "维护与备份" }, { value: "security", label: "安全设置" }]} /></div>
+      <Tabs label="维护区域" value={section} onChange={setSection} options={[{ value: "maintenance", label: "维护与备份" }, { value: "security", label: "安全设置" }]} />
       <div className="stack maintenance-section" hidden={section !== "maintenance"}>
         <TasksPanel unlocked={Boolean(unlocked)} />
         <ThumbnailTasksPanel active={section === "maintenance"} />
@@ -156,9 +156,9 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
           </select>
         </Field>
       </div>
-      {!status.available && <p className="inline-note tone-warning">服务器未安装 FFmpeg，后台生成不可用；网页仍可用本地文件或已加载的画面生成。</p>}
-      {!status.unlocked && <p className="inline-note">系统已锁定，后台任务暂停。</p>}
-      {status.pressure && <p className="inline-note tone-warning">{status.pressure}</p>}
+      {!status.available && <Notice tone="warning">服务器未安装 FFmpeg，后台生成不可用；网页仍可用本地文件或已加载的画面生成。</Notice>}
+      {!status.unlocked && <Notice>系统已锁定，后台任务暂停。</Notice>}
+      {status.pressure && <Notice tone="warning">{status.pressure}</Notice>}
       {status.jobs.length === 0 ? <p className="muted">当前没有待处理的缩略图任务。</p> : <div className="table-scroll"><div className="data-table thumbnail-jobs-table" role="table" aria-label="缩略图任务">
         <div className="data-row data-head" role="row"><span role="columnheader">任务</span><span role="columnheader">类型</span><span role="columnheader">状态</span><span role="columnheader">说明</span></div>
         {status.jobs.map(job => <div className="data-row" role="row" key={job.id}><span role="cell" className="mono">{job.id}</span><span role="cell">{kinds[job.kind]}</span>
@@ -262,7 +262,7 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
               <span role="cell" className="mono">{backup.name}</span>
               <span role="cell" className="muted">{formatBytes(backup.size)}</span>
               <span role="cell" className="muted">{formatDateTime(backup.created_at)}</span>
-              <span role="cell" className="cell-actions"><a className="btn btn-ghost btn-sm" href={api.backupUrl(backup.name)} download><Icon name="download" size={15} /><span>下载</span></a></span>
+              <span role="cell" className="cell-actions"><ButtonLink variant="ghost" size="sm" icon="download" href={api.backupUrl(backup.name)} download>下载</ButtonLink></span>
             </div>
           ))}
         </div></div>
@@ -308,8 +308,8 @@ function PassphrasePanel() {
       <form className="form passphrase-form" onSubmit={submit} noValidate>
         {field("old", "当前加密口令")}
         <div className="form-row">{field("next", "新加密口令")}{field("confirm", "确认新口令")}</div>
-        {errors.form && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{errors.form}</div>}
-        <p className="inline-note tone-warning"><Icon name="alert" size={15} />之前的备份仍需用当时的旧口令恢复。新口令同样无法找回，请先保存到密码管理器。</p>
+        {errors.form && <Notice tone="danger">{errors.form}</Notice>}
+        <Notice tone="warning">之前的备份仍需用当时的旧口令恢复。新口令同样无法找回，请先保存到密码管理器。</Notice>
         <div><Button type="submit" variant="primary" loading={busy}>更换口令</Button></div>
       </form>
     </Panel>

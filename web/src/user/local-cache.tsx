@@ -3,7 +3,7 @@ import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 
 import * as api from "../api";
 import { type CacheStats, type CachedItem, type CachedItemFilter, cacheStats, cacheSupported, cachedItems, clearCache, isStandalone, loadSettings, removeCachedItems, resetAllDevices, saveSettings, storageEstimate } from "../cache-client";
 import { type DeviceSettings, type Kind, SIZE_CHOICES, webkitOnly } from "../cache-store";
-import { Badge, Button, ConfirmDialog, EmptyState, Field, FilterChips, Icon, SearchInput, Switch, formatBytes, formatDate, toast } from "../ui";
+import { Notice, Badge, Button, ConfirmDialog, EmptyState, Field, FilterChips, Icon, SearchInput, Switch, formatBytes, formatDate, toast } from "../ui";
 
 const KIND_LABEL: Record<Kind, string> = { image: "图片", video: "视频", audio: "音频", thumb: "缩略图", other: "其他" };
 const KIND_ORDER: Kind[] = ["image", "video", "audio", "thumb", "other"];
@@ -66,8 +66,8 @@ export function LocalCacheSettings() {
 
   return <>
     <Section icon="monitor" title="本机缓存" description="文件内容按块加密保存在这个浏览器里，只有登录同一账号时才能解开。">
-      {error && <p className="form-alert" role="alert"><Icon name="alert" size={15} />{error}</p>}
-      {adminOff ? <p className="inline-note"><Icon name="info" size={15} />管理员已关闭浏览器本地缓存，这台设备上的普通文件缓存已清除。</p>
+      {error && <Notice tone="danger">{error}</Notice>}
+      {adminOff ? <Notice>管理员已关闭浏览器本地缓存，这台设备上的普通文件缓存已清除。</Notice>
         : settings && <Switch checked={settings.enabled} disabled={busy} onChange={value => void update({ enabled: value }, value ? "已开启本机缓存" : "已关闭本机缓存并清除数据")}
           label="在这台设备上缓存文件" description="自动保存看过的图片、音乐、视频片段和缩略图；也可点击文件旁的缓存按钮保存完整文件，供预览和下载复用。" />}
       {stats && <div className="local-cache-figures folder-stats-figures">
@@ -81,8 +81,8 @@ export function LocalCacheSettings() {
         </div>
         <ul className="local-cache-legend">{kinds.map(item => <li key={item.kind}><i className={`folder-stats-swatch kind-${item.kind}`} aria-hidden="true" />{KIND_LABEL[item.kind]} {formatBytes(item.bytes)}</li>)}</ul>
       </div>}
-      {settings && webkitOnly(navigator.userAgent) && !isStandalone() && <p className="inline-note"><Icon name="info" size={15} />
-        Safari 会清除 7 天内没有访问过的网站数据。把 Tessera 添加到主屏幕后打开，缓存可以保留得更久。</p>}
+      {settings && webkitOnly(navigator.userAgent) && !isStandalone() && <Notice>
+        Safari 会清除 7 天内没有访问过的网站数据。把 Tessera 添加到主屏幕后打开，缓存可以保留得更久。</Notice>}
     </Section>
 
     {settings && !adminOff && <Section icon="settings" title="容量与内容" description="只对这台设备上的这个浏览器生效。">
@@ -203,7 +203,7 @@ function CachedFiles({ revision, onChanged }: { revision: number; onChanged: () 
       <FilterChips label="按类型筛选" value={kind} onChange={setKind} options={KIND_FILTERS} />
       <FilterChips label="按缓存状态筛选" value={status} onChange={setStatus} options={STATUS_FILTERS} />
     </div>
-    {error && <p className="form-alert" role="alert"><Icon name="alert" size={15} />{error}</p>}
+    {error && <Notice tone="danger">{error}</Notice>}
     {page && <p className="local-cache-count muted" aria-live="polite">{filtered ? `找到 ${page.total.toLocaleString("zh-CN")} 个文件，共 ${formatBytes(page.bytes)}` : `共 ${page.total.toLocaleString("zh-CN")} 个文件，${formatBytes(page.bytes)}`}</p>}
     {page && page.items.length === 0 ? <p className="local-cache-empty muted">{filtered ? "没有符合条件的文件。" : "还没有缓存的文件。"}</p>
       : page && <ul className={`account-attachments local-cache-items${loading ? " is-loading" : ""}`} aria-label="已缓存的文件" aria-busy={loading}>

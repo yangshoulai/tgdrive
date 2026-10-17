@@ -6,7 +6,7 @@ import { fingerprintFile, fingerprintSupported } from "../fingerprint";
 import { FileTile, getFileKind } from "../files";
 import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
 
-import { Badge, Button, Icon, IconButton, Modal, Switch, copyText, formatBytes, toast } from "../ui";
+import { Notice, Badge, Button, Icon, IconButton, Modal, Switch, copyText, formatBytes, toast } from "../ui";
 import { DestinationPicker } from "./folders";
 import { TrayBar, TrayRing, type TrayState } from "./tray";
 
@@ -55,9 +55,9 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
           </li>
         ))}
       </ul>
-      {checking && <p className="inline-note" role="status"><span className="spinner" />正在检查目标位置的同名文件</p>}
-      {error && <div className="form-alert" role="alert"><span>{error}</span><Button size="sm" onClick={() => setCheckVersion(current => current + 1)}>重试</Button></div>}
-      {conflicts > 0 && <p className="inline-note tone-warning"><Icon name="alert" size={15} />{conflicts} 个文件与现有文件同名，上传后将替换原文件，已有的公开链接保持不变。</p>}
+      {checking && <Notice icon={false} role="status"><span className="spinner" />正在检查目标位置的同名文件</Notice>}
+      {error && <Notice tone="danger"><span>{error}</span><Button size="sm" onClick={() => setCheckVersion(current => current + 1)}>重试</Button></Notice>}
+      {conflicts > 0 && <Notice tone="warning">{conflicts} 个文件与现有文件同名，上传后将替换原文件，已有的公开链接保持不变。</Notice>}
       {!privateSpace && <div className={`share-status${isPublic ? " is-public" : ""}`}>
         <Switch checked={isPublic} onChange={setIsPublic} label="上传后公开访问"
           description={isPublic ? "每个文件都会生成独立的公开链接，任何拥有链接的人都可以查看和下载。" : "文件仅自己可见，之后可以随时单独分享。"} />

@@ -4,7 +4,7 @@ import { useDirectory, useRenderLimit, mergePublicFolderPages } from "./paginati
 import { BRAND } from "./brand";
 import * as api from "./api";
 import { FileFilters, FilePreview, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, canPreview, getFileKind, kindLabel, type EntryFilter } from "./files";
-import { Avatar, Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
+import { Notice, ButtonLink, Avatar, Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
 import { LoginPage } from "./shell";
 import { FolderPicker } from "./user/folders";
 
@@ -60,8 +60,8 @@ export function SharePage({ token }: { token: string }) {
     } catch (reason) { toast.error(api.errorMessage(reason, "无法检查分享状态，请刷新后重试")); }
   }
   if (loginFor) return <LoginPage onSuccess={session => void loggedIn(session)} notice={
-    <p className="inline-note share-login-note"><Icon name="folderPlus" size={15} /><span>登录后把“{loginFor.label}”保存到你的 {BRAND}。</span>
-      <button type="button" className="link-button" onClick={() => { setLoginFor(null); document.title = `${file?.name ?? "分享"} · ${BRAND}`; }}>返回分享页</button></p>} />;
+    <Notice icon="folderPlus" className="share-login-note"><span>登录后把“{loginFor.label}”保存到你的 {BRAND}。</span>
+      <button type="button" className="link-button" onClick={() => { setLoginFor(null); document.title = `${file?.name ?? "分享"} · ${BRAND}`; }}>返回分享页</button></Notice>} />;
   const saveButton = (request: SaveRequest) => canSave && <Button icon="folderPlus" onClick={() => requestSave(request)}
     title={account ? "保存到你的文件，立即完成并计入你的存储空间" : `登录后保存到你的 ${BRAND}`}>保存到我的 {BRAND}</Button>;
   const single = file?.kind === "file" ? file : null;
@@ -106,7 +106,7 @@ export function SharePage({ token }: { token: string }) {
               <div className="share-actions">
                 <Button icon="link" onClick={() => void copyText(`${window.location.origin}${window.location.pathname}`, "分享链接已复制")}>复制链接</Button>
                 {saveButton({ label: file.name })}
-                <a className="btn btn-primary btn-md" href={downloadUrl}><Icon name="download" size={17} /><span>下载</span></a>
+                <ButtonLink variant="primary" size="md" icon="download" href={downloadUrl}>下载</ButtonLink>
               </div>
             </header>
             {canPreview(kind) && <div className="share-preview"><FilePreview kind={kind} url={url} name={file.name} downloadUrl={downloadUrl} contentType={file.content_type} poster={hasThumbnail ? api.publicThumbnail(url, "poster") : undefined} /></div>}

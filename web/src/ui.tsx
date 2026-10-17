@@ -1,5 +1,5 @@
 /** Tessera 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
-import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type KeyboardEventHandler, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type CSSProperties, type KeyboardEventHandler, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { BRAND, TAGLINE } from "./brand";
 import { FILE_PAGE_SIZES } from "./pagination";
@@ -163,8 +163,10 @@ export function Brand({ href = "/", suffix, tagline = false }: { href?: string; 
 
 /* ---------- 按钮 ---------- */
 
+/** ghost-danger：安静的危险操作（如「取消密码」「清除全部」），不抢主按钮的位置。 */
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "ghost-danger";
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
-  variant?: "primary" | "secondary" | "ghost" | "danger";
+  variant?: ButtonVariant;
   size?: "sm" | "md" | "lg";
   icon?: IconName;
   loading?: boolean;
@@ -176,6 +178,16 @@ export function Button({ variant = "secondary", size = "md", icon, loading, bloc
       {loading ? <span className="spinner" aria-hidden="true" /> : icon && <Icon name={icon} size={size === "sm" ? 15 : 17} />}
       {children && <span>{children}</span>}
     </button>
+  );
+}
+
+/** 外观与 Button 一致的链接：下载、打开新页面等需要真实地址的操作用它，不要手写 btn 类名。 */
+export function ButtonLink({ variant = "secondary", size = "md", icon, className = "", children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement> & { variant?: ButtonVariant; size?: "sm" | "md" | "lg"; icon?: IconName }) {
+  return (
+    <a className={`btn btn-${variant} btn-${size} ${className}`} {...rest}>
+      {icon && <Icon name={icon} size={size === "sm" ? 15 : 17} />}
+      {children && <span>{children}</span>}
+    </a>
   );
 }
 
@@ -239,7 +251,14 @@ export function PasswordField({ label, value, onChange, name, autoComplete = "cu
   </div>;
 }
 
-export function Switch({ checked, onChange, label, description, disabled }: { checked: boolean; onChange: (value: boolean) => void; label: string; description?: ReactNode; disabled?: boolean }) {
+/** 开关。默认是带标题与说明的设置行；compact 用于表格行内，没有可见文字，标题作为 aria-label 与悬停提示。 */
+export function Switch({ checked, onChange, label, description, disabled, compact = false }: { checked: boolean; onChange: (value: boolean) => void; label: string; description?: ReactNode; disabled?: boolean; compact?: boolean }) {
+  if (compact) return (
+    <label className={`toggle${disabled ? " is-disabled" : ""}`} title={label}>
+      <input type="checkbox" role="switch" className="switch-input" aria-label={label} checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} />
+      <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
+    </label>
+  );
   return (
     <label className={`switch-row${disabled ? " is-disabled" : ""}`}>
       <span className="switch-copy">
@@ -247,16 +266,6 @@ export function Switch({ checked, onChange, label, description, disabled }: { ch
         {description && <span className="switch-description">{description}</span>}
       </span>
       <input type="checkbox" role="switch" className="switch-input" checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} />
-      <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
-    </label>
-  );
-}
-
-/** 表格行内的开关：没有可见文字，只用 aria-label。 */
-export function Toggle({ checked, onChange, label, disabled }: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled?: boolean }) {
-  return (
-    <label className={`toggle${disabled ? " is-disabled" : ""}`} title={label}>
-      <input type="checkbox" role="switch" className="switch-input" aria-label={label} checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} />
       <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
     </label>
   );
@@ -301,6 +310,34 @@ export function FilterChips<T extends string>({ value, options, onChange, label,
   );
 }
 
+
+/**
+ * 页面级标签页（设置页、控制台的分区）：下划线样式，窄屏横向滚动。只负责切换，内容由调用方按 value 渲染；
+ * 方向键、Home／End 在标签间移动并立即切换（与 Segmented 相同）。同一组里的少量选项筛选请用 Segmented。
+ */
+export function Tabs<T extends string>({ value, options, onChange, label, className = "" }: { value: T; options: { value: T; label: string; icon?: IconName; count?: number }[]; onChange: (value: T) => void; label: string; className?: string }) {
+  return (
+    <div className={`tabs ${className}`} role="tablist" aria-label={label}>
+      {options.map((option, index) => (
+        <button key={option.value} type="button" role="tab" aria-selected={value === option.value} tabIndex={value === option.value ? 0 : -1}
+          className={`tab${value === option.value ? " is-active" : ""}`} onClick={() => onChange(option.value)}
+          onKeyDown={event => {
+            const offset = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+            if (!offset && event.key !== "Home" && event.key !== "End") return;
+            event.preventDefault();
+            const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : (index + offset + options.length) % options.length;
+            onChange(options[next].value);
+            const target = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next];
+            target?.focus(); target?.scrollIntoView({ block: "nearest", inline: "nearest" });
+          }}>
+          {option.icon && <Icon name={option.icon} size={15} />}
+          <span>{option.label}</span>
+          {option.count !== undefined && option.count > 0 && <span className="tab-count">{option.count}</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function Segmented<T extends string>({ value, options, onChange, label, disabled, showLabels = false }: { value: T; options: { value: T; label: string; icon?: IconName; count?: number }[]; onChange: (value: T) => void; label: string; disabled?: boolean; /** 有图标时同时显示文字（默认只显示图标） */ showLabels?: boolean }) {
   return (
@@ -847,9 +884,20 @@ export function SetupGuide({ id, title = "配置指南", description, steps, doc
   );
 }
 
-export function EmptyState({ icon = "folder", title, description, action }: { icon?: IconName; title: string; description?: ReactNode; action?: ReactNode }) {
+/**
+ * 页面内提示：info 普通说明、warning 需要留意的后果、success 完成、danger 错误（表单提交失败等，默认 role="alert"）。
+ * 图标按语气自动选择，icon={false} 不显示图标（例如前面已经有加载圈）。不要再手写 inline-note／form-alert 类名。
+ */
+export function Notice({ tone = "info", icon, role, className = "", children }: { tone?: "info" | "warning" | "success" | "danger"; icon?: IconName | false; role?: "alert" | "status"; className?: string; children: ReactNode }) {
+  const glyph = icon === false ? null : icon ?? (tone === "success" ? "checkCircle" : tone === "info" ? "info" : "alert");
+  const base = tone === "danger" ? "form-alert" : `inline-note${tone === "info" ? "" : ` tone-${tone}`}`;
+  return <div className={`${base} ${className}`.trim()} role={role ?? (tone === "danger" ? "alert" : undefined)}>{glyph && <Icon name={glyph} size={16} />}<span className="notice-body">{children}</span></div>;
+}
+
+/** 空状态。页面级用默认尺寸；面板、弹窗与设置分组里用 compact（更小的内边距，左对齐的图标与文字）。 */
+export function EmptyState({ icon = "folder", title, description, action, compact = false }: { icon?: IconName; title: string; description?: ReactNode; action?: ReactNode; compact?: boolean }) {
   return (
-    <div className="empty-state">
+    <div className={`empty-state${compact ? " is-compact" : ""}`}>
       <span className="empty-icon"><Icon name={icon} size={22} /></span>
       <h3>{title}</h3>
       {description && <p>{description}</p>}

@@ -4,7 +4,7 @@ import * as api from "../api";
 import { ClientCachePolicy } from "./client-cache";
 import { Resources } from "./resources";
 
-import { Button, Field, Icon, KeyValue, PageHeader, Panel, SetupGuide, SkeletonRows, toast, useDocumentTitle } from "../ui";
+import { Notice, Button, Field, Icon, KeyValue, PageHeader, Panel, SetupGuide, SkeletonRows, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 系统设置 ---------- */
 
@@ -74,7 +74,7 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
                 : <>留空时，用户在访问密钥页看不到这个地址。</>}</>}>
               <input id="setting-s3" className="input mono" inputMode="url" placeholder="https://s3.example.com" value={form.s3_endpoint} onChange={event => { setForm({ ...form, s3_endpoint: event.target.value }); setError(""); }} />
             </Field>
-            {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
+            {error && <Notice tone="danger">{error}</Notice>}
             {/* 有改动时才出现保存栏，不常驻一个灰色的禁用按钮。 */}
             {(dirty || busy) && <div className="settings-actions">
               <span className="settings-actions-note">有未保存的修改</span>

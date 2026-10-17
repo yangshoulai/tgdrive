@@ -7,7 +7,7 @@ import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip }
 import { ImageViewer } from "./preview-image";
 import { FileCacheButton, useCacheFiles } from "./user/cache";
 import { PreviewToolsContext, TextPreview } from "./preview-text";
-import { Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, type IconName } from "./ui";
+import { Notice, ButtonLink, Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, type IconName } from "./ui";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "text" | "code" | "archive" | "other";
 
@@ -239,7 +239,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
       <h3>{failed ? "预览加载失败" : unplayable ? `浏览器无法播放${extension ? ` ${extension} ` : "此"}格式` : "此类型不支持在线预览"}</h3>
       <p>{error || (failed ? "文件未能加载或当前浏览器不支持此格式。" : unplayable ? "请下载后用本地播放器打开。" : "下载后使用本地应用打开。")}</p>
       <div className="preview-recovery">{failed ? <Button size="sm" icon="refresh" onClick={onRetry}>重试</Button>
-        : <a className="btn btn-primary btn-sm" href={downloadUrl}><Icon name="download" size={15} /><span>下载文件</span></a>}</div>
+        : <ButtonLink variant="primary" size="sm" icon="download" href={downloadUrl}>下载文件</ButtonLink>}</div>
     </div>
   );
   if (unplayable) return fallback;
@@ -499,14 +499,14 @@ export function ShareDialog({ file, publicBase, onClose, onChange, update }: {
   }
   return (
     <Modal title={folder ? "分享文件夹" : "分享文件"} description={name} icon="link" onClose={onClose} dismissible={!busy}
-      footer={<>{links && <a className="btn btn-ghost btn-md" href={links.page} target="_blank" rel="noreferrer"><Icon name="external" size={17} /><span>打开分享页</span></a>}<Button disabled={busy} onClick={onClose}>完成</Button></>}>
+      footer={<>{links && <ButtonLink variant="ghost" size="md" icon="external" href={links.page} target="_blank" rel="noreferrer">打开分享页</ButtonLink>}<Button disabled={busy} onClick={onClose}>完成</Button></>}>
       <div className={`share-status${isPublic ? " is-public" : ""}`}>
         <Switch checked={isPublic} disabled={busy} onChange={value => void apply(value)} label={isPublic ? "任何拥有链接的人都可以访问" : "仅自己可见"}
           description={isPublic
             ? (file.public_has_password ? `访问者需要输入密码才能查看和下载${folder ? "里面的文件" : ""}。` : folder ? "访问者可浏览、预览和下载全部内容，包括子文件夹。" : "访问者无需登录即可预览和下载。")
             : "开启公开访问后生成分享链接，可随时关闭。"} />
       </div>
-      {error && <div className="form-alert" role="alert">{error}</div>}
+      {error && <Notice tone="danger">{error}</Notice>}
       <p className="share-save-status" role="status">{busy ? "正在保存设置…" : "更改自动保存"}</p>
       {links && <>
         <Field label="分享链接" hint={folder ? "文件夹内容更新后，分享页会同步展示。" : "发送此链接，对方可预览和下载文件。"}>
@@ -525,7 +525,7 @@ export function ShareDialog({ file, publicBase, onClose, onChange, update }: {
               {file.public_has_password && !editingPassword ? <div className="share-password-set">
                 <Badge tone="accent" icon="lock">已设置</Badge>
                 <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditingPassword(true)}>修改</Button>
-                <Button size="sm" variant="ghost" className="btn-ghost-danger" disabled={busy} onClick={() => void apply(true, { password: null }, "已取消访问密码")}>取消密码</Button>
+                <Button size="sm" variant="ghost-danger" disabled={busy} onClick={() => void apply(true, { password: null }, "已取消访问密码")}>取消密码</Button>
               </div> : <form className="share-password-form" noValidate onSubmit={event => { event.preventDefault(); void savePassword(); }}>
                 <input id="share-password" className="input" type="text" autoComplete="off" placeholder="不设置则无需密码" value={password} disabled={busy} onChange={event => { setPassword(event.target.value); setError(""); }} />
                 <Button size="sm" type="submit" disabled={busy || !password}>设置密码</Button>

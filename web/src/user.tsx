@@ -7,7 +7,7 @@ import { DocsPage } from "./docs/docs";
 import { SharePage } from "./share";
 import { ADMIN_MODULES, AdminConsole, AdminDocsGate, LockedGate, type AdminModule } from "./admin";
 import { AppShell, FullPageLoading, LoginPage, SetupPage, isPlainClick, useSessionGuard, type NavGroup } from "./shell";
-import { Icon, Progress, formatBytes, toast, usageTone, useDocumentTitle, type IconName } from "./ui";
+import { Notice, Button, ButtonLink, Icon, Progress, formatBytes, toast, usageTone, useDocumentTitle, type IconName } from "./ui";
 
 import { FilesView } from "./user/files";
 import { PrivateSpaceView } from "./user/private";
@@ -52,7 +52,7 @@ function AccessDenied() {
       <span className="locked-icon"><Icon name="lock" size={26} /></span>
       <h1>没有访问权限</h1>
       <p>这个页面只对管理员开放。如果你需要使用它，请联系管理员。</p>
-      <a className="btn btn-secondary btn-md" href="/">回到我的文件</a>
+      <ButtonLink variant="secondary" size="md" href="/">回到我的文件</ButtonLink>
     </div>
   );
 }
@@ -76,7 +76,7 @@ function UnavailableGate() {
       <span className="locked-icon"><Icon name="lock" size={26} /></span>
       <h1>服务暂时不可用</h1>
       <p>系统刚刚重启，需要管理员输入加密口令后才能继续使用。请稍后再试，或联系管理员。</p>
-      <button type="button" className="btn btn-secondary btn-md" onClick={() => window.location.reload()}>重新检查</button>
+      <Button onClick={() => window.location.reload()}>重新检查</Button>
     </div>
   );
 }
@@ -94,7 +94,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
   const { session, setSession, checking } = useSessionGuard(api.restoreSession);
   if (checking) return <FullPageLoading label="正在恢复登录状态" />;
   if (!session) return <LoginPage onSuccess={value => { setSession(value); void api.restoreSession().then(setSession).catch(() => undefined); }}
-    notice={justInitialized ? <p className="inline-note tone-success"><Icon name="checkCircle" size={15} />初始化完成，系统已解锁。请使用刚创建的管理员账号登录。</p> : undefined} />;
+    notice={justInitialized ? <Notice tone="success">初始化完成，系统已解锁。请使用刚创建的管理员账号登录。</Notice> : undefined} />;
   return <MainShell session={session} onLogout={() => setSession(null)}
     onSessionChange={patch => setSession(current => current && { ...current, ...patch })} />;
 }
