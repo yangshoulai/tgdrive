@@ -419,6 +419,28 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.02)
         self.assertEqual(self.offline._row(task["id"])["status"], "stopped")
 
+    async def test_transfer_concurrency_is_admin_setting_applied_immediately(self):
+        resources, transfers = self.app.resources, self.app.engine.transfers
+        resources.detected.update(cpu_cores=4, memory_bytes=8 * 1024 ** 3)
+        saved = resources.update({"mode": "standard", "transfer_concurrency": 8, "bucket_concurrency": 3})
+        self.assertEqual((saved["effective"]["transfer_concurrency"], saved["effective"]["bucket_concurrency"]), (8, 3))
+        self.assertEqual((transfers.total, transfers.per_bucket), (8, 3), "保存后立即生效，不需要重启")
+        for bad in ({"transfer_concurrency": 0}, {"transfer_concurrency": 17}, {"transfer_concurrency": 2, "bucket_concurrency": 3},
+                    {"bucket_concurrency": True}):
+            with self.assertRaises(ValueError):
+                resources.update(bad)
+        low = resources.update({"mode": "low"})["effective"]
+        self.assertEqual((low["transfer_concurrency"], low["bucket_concurrency"], low["transfer_reduced"]), (2, 1, True))
+        self.assertEqual((transfers.total, transfers.per_bucket), (2, 1))
+        resources.update({"mode": "standard"})
+        resources.detected.update(memory_bytes=512 * 1024 ** 2)
+        self.assertEqual(resources.effective()["transfer_concurrency"], 5, "按内存留出余量")
+        # 旧版保存的配置没有这两项时，用启动参数补齐。
+        with self.app.metadata.transaction() as db:
+            db.execute("UPDATE settings SET value=? WHERE key=?", ('{"mode":"standard"}', ResourceSettings.KEY))
+        restored = ResourceSettings(self.app.metadata, resources.data_dir, {"transfer_concurrency": 6, "bucket_concurrency": 2})
+        self.assertEqual(restored.config()["transfer_concurrency"], 6)
+
     async def test_lock_unlock_resumes_get(self):
         self.http.size = 20 * 1024 * 1024
         task = await self.make()

@@ -36,10 +36,10 @@ export type BotConfig = { id: number; name: string; channel_id: string; status: 
 export type UserMe = Profile & { id: number; username: string; role: Role; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; unlocked: boolean; remember?: boolean; csrf_token: string; expires_at: number } & SiteConfig;
 export type SettingValue = { value: string | null; default: string | null; effective: string | null };
 export type SystemSettings = { public_base_url: SettingValue; s3_endpoint: SettingValue };
-export type ResourceConfig = { mode: "auto" | "low" | "standard" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string };
+export type ResourceConfig = { mode: "auto" | "low" | "standard" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number };
 export type ResourceSettings = { config: ResourceConfig; source: "admin" | "startup"; pressure: string | null;
   components: { versions: Record<string, string | null>; ytdlp_age_days: number | null };
-  effective: ResourceConfig & { ffmpeg_concurrency: number; streaming: boolean; cache_mib: number; hls_available: boolean; x_available: boolean; youtube_available: boolean; reduced: boolean };
+  effective: ResourceConfig & { ffmpeg_concurrency: number; streaming: boolean; cache_mib: number; hls_available: boolean; x_available: boolean; youtube_available: boolean; reduced: boolean; transfer_reduced: boolean };
   detected: { cpu_cores: number; memory_bytes: number | null; container_limits: boolean; disk_total_bytes: number | null; disk_free_bytes: number | null } };
 export type DownloadCandidate = { ticket: string; group: string; name: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform?: "x" | "youtube"; media_type?: "image" | "video" | "audio"; content_type?: string | null; size: number | null; variant: string | null; warnings: string[]; header_names: string[]; body_bytes: number };
 export type DownloadStatus = "queued" | "running" | "stopped" | "interrupted" | "completed" | "failed";

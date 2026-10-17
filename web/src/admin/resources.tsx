@@ -34,6 +34,15 @@ export function Resources() {
           <Field label="总下载限速（KiB/s）" hint="0 表示不限速。"><input className="input" type="number" min={0} max={1048576} step={1} required value={form.bandwidth_kib} onChange={event => setForm({ ...form, bandwidth_kib: Number(event.target.value) })} /></Field>
           <Field label="磁盘保留空间（MiB）" hint="至少 128；不足时等待释放空间。"><input className="input" type="number" min={128} max={1048576} step={1} required value={form.reserve_mib} onChange={event => setForm({ ...form, reserve_mib: Number(event.target.value) })} /></Field>
         </div>
+        <div className="form-row">
+          <Field label="服务器同时读取数" hint="下载、预览、播放与 S3 读取共用，1–16。每路约占 24 MB 内存。">
+            <input className="input" type="number" min={1} max={16} step={1} required value={form.transfer_concurrency}
+              onChange={event => { const value = Number(event.target.value); setForm({ ...form, transfer_concurrency: value, bucket_concurrency: Math.min(form.bucket_concurrency, Math.max(1, value)) }); }} />
+          </Field>
+          <Field label="每个账号同时读取数" hint="单个账号最多占用的读取数，不超过服务器总数。">
+            <input className="input" type="number" min={1} max={form.transfer_concurrency || 1} step={1} required value={form.bucket_concurrency} onChange={event => setForm({ ...form, bucket_concurrency: Number(event.target.value) })} />
+          </Field>
+        </div>
         <Field label="出站代理" hint="所有离线下载和平台解析都经此代理，域名由代理解析；留空为直连。支持 http:// 与 socks5://，密码保存后以 ****** 显示。">
           <input className="input mono" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="http://127.0.0.1:7890" value={form.proxy} onChange={event => setForm({ ...form, proxy: event.target.value })} />
         </Field>
@@ -53,6 +62,7 @@ export function Resources() {
         ["资源模式", MODES[settings.effective.mode]],
         ["离线下载并发", `${settings.effective.concurrency} 个任务`],
         ["视频封装并发", "1 个任务"],
+        ["文件读取并发", `服务器 ${settings.effective.transfer_concurrency} 路 · 每个账号 ${settings.effective.bucket_concurrency} 路`],
         ["检测到的 CPU", `${settings.detected.cpu_cores.toFixed(2)} 核`],
         ["检测到的内存", settings.detected.memory_bytes ? formatBytes(settings.detected.memory_bytes) : "无法可靠检测，采用保守预算"],
         ["磁盘剩余空间", settings.detected.disk_free_bytes !== null ? formatBytes(settings.detected.disk_free_bytes) : "未知"],
@@ -63,7 +73,7 @@ export function Resources() {
         ["X 解析组件", settings.effective.x_available ? "可用" : "未安装"],
         ["YouTube 解析组件", settings.effective.youtube_available ? "可用" : "组件不完整"],
         ...Object.entries(settings.components.versions).map(([name, version]) => [`${name} 版本`, version ?? "未安装"] as [string, string]),
-      ]} />{settings.components.ytdlp_age_days !== null && settings.components.ytdlp_age_days > 60 && <p className="tone-warning">yt-dlp 已发布 {settings.components.ytdlp_age_days} 天。YouTube 经常调整接口，解析失败时请拉取最新的平台镜像。</p>}{settings.effective.reduced && <p className="tone-warning">当前资源预算不足，并发已降低。</p>}{settings.pressure && <p className="tone-warning">{settings.pressure}</p>}<p className="muted">降低并发不会终止现有任务，后续调度使用新配置。离线任务与文件上传、下载共享传输预算。</p></div>
+      ]} />{settings.components.ytdlp_age_days !== null && settings.components.ytdlp_age_days > 60 && <p className="tone-warning">yt-dlp 已发布 {settings.components.ytdlp_age_days} 天。YouTube 经常调整接口，解析失败时请拉取最新的平台镜像。</p>}{settings.effective.reduced && <p className="tone-warning">当前资源预算不足，并发已降低。</p>}{settings.effective.transfer_reduced && <p className="tone-warning">文件读取并发已按{settings.effective.mode === "low" ? "低资源模式（最多 2 路、每个账号 1 路）" : "检测到的内存"}降低。</p>}{settings.pressure && <p className="tone-warning">{settings.pressure}</p>}<p className="muted">降低并发不会终止现有任务或传输，后续调度使用新配置。名额占满时新的读取最多排队 30 秒；缩略图大图使用独立通道，不占这里的名额。</p></div>
     </div>}
   </Panel>;
 }

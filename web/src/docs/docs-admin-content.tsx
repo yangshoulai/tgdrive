@@ -59,8 +59,8 @@ function AdminDeploy() {
         [<C>--s3-endpoint</C>, <C>TGDRIVE_S3_ENDPOINT</C>, "无", "S3 Endpoint 的默认值，控制台设置优先"],
         [<C>--s3-host</C>, <C>TGDRIVE_S3_HOST</C>, "无", "未配置 S3 Endpoint 时用于识别 S3 请求的域名"],
         [<C>--insecure-cookies</C>, <C>TGDRIVE_INSECURE_COOKIES=1</C>, "关闭", "允许通过 HTTP 发送会话 Cookie，只用于本机开发"],
-        [<C>--transfer-concurrency</C>, <C>TGDRIVE_TRANSFER_CONCURRENCY</C>, "4", "全局同时进行的上传分段、下载流与校验任务数"],
-        [<C>--bucket-concurrency</C>, <C>TGDRIVE_BUCKET_CONCURRENCY</C>, "2", "每个存储桶同时进行的传输数，所有接入方式共用"],
+        [<C>--transfer-concurrency</C>, <C>TGDRIVE_TRANSFER_CONCURRENCY</C>, "4", "全局同时读取文件内容的数量（下载、预览、播放、S3 读取与校验），1–16；只是默认值，控制台保存后以控制台为准"],
+        [<C>--bucket-concurrency</C>, <C>TGDRIVE_BUCKET_CONCURRENCY</C>, "2", "每个存储桶（账号）同时读取的数量，所有接入方式共用，不超过全局数；只是默认值"],
         [<C>--audit-retention-days</C>, <C>TGDRIVE_AUDIT_RETENTION_DAYS</C>, "0", "0 为永久保留；正数表示将过期日志移入加密归档"],
         [<C>--resource-mode</C>, <C>TGDRIVE_RESOURCE_MODE</C>, "auto", "auto／low／standard／custom；管理员设置优先"],
         [<C>--offline-concurrency</C>, <C>TGDRIVE_OFFLINE_CONCURRENCY</C>, "1", "自定义模式的离线任务并发，1–4；容器预算限制实际并发"],
@@ -76,7 +76,7 @@ function AdminDeploy() {
       ]} />
       <Callout tone="danger" title="生产环境必须使用 HTTPS">默认情况下会话 Cookie 带有 Secure 标记，浏览器只会通过 HTTPS 发送。不要在公网环境开启 --insecure-cookies。</Callout>
       <H2>站点结构与角色</H2>
-      <p>「系统设置 → 下载与资源」显示检测预算、配置来源及生效参数。自动模式在 CPU 少于 2 核、内存少于 1 GiB 或无法可靠检测时使用低资源预算；低资源同时下载 1 个任务，标准预设为 2，自定义最多 4，仍受预算限制。低资源下共用的传输名额最多 2、每桶 1，并降低加密上传与下载预读并发。修改并发不终止已有传输，下一轮调度生效。磁盘不足或容器不可回收内存用量超过 90% 时暂停离线任务，释放资源后继续 GET，POST 必须手动继续。内存判断扣除同一 cgroup 的可回收闲置文件缓存，临时内存盘仍计入用量。</p>
+      <p>「系统设置 → 下载与资源」显示检测预算、配置来源及生效参数。自动模式在 CPU 少于 2 核、内存少于 1 GiB 或无法可靠检测时使用低资源预算；低资源同时下载 1 个任务，标准预设为 2，自定义最多 4，仍受预算限制。「服务器同时读取数」与「每个账号同时读取数」（文件读取并发，1–16）在此随时修改，保存后立即生效，启动参数只作默认值；每路约占 24 MB 内存，实际值不超过检测内存的四分之一可承受的路数，低资源下最多 2、每账号 1，并降低加密上传与下载预读并发。名额占满时新的读取最多排队 30 秒，超时返回 503；缩略图大图走独立的 4 路通道，不占这些名额。修改并发不终止已有传输，下一轮调度生效。磁盘不足或容器不可回收内存用量超过 90% 时暂停离线任务，释放资源后继续 GET，POST 必须手动继续。内存判断扣除同一 cgroup 的可回收闲置文件缓存，临时内存盘仍计入用量。</p>
       <p>默认镜像不含 FFmpeg。使用 <C>latest-ffmpeg</C> 或同版本 <C>-ffmpeg</C> 标签，再启用 M3U8；本地构建传入 <C>--build-arg INSTALL_FFMPEG=1</C>。只封装，不转码，最多一个 FFmpeg 进程。连续 TS 使用管道；fMP4、字节范围、时间线跳变、AES-128 或独立音轨先缓存输入分片，再用重写后的本地列表封装。FFmpeg 不访问外部 URL，分片、初始化文件与密钥都经受控 HTTP 客户端获取。缓存受磁盘保留空间与账号剩余配额限制，完成或中断后清理；成品直接进入加密存储。Telegram 通道保存加密分片；本地存储仍会占用最终文件的磁盘空间。HTTP 断点及离线请求参数包含在数据库备份中，参数已加密；更换加密口令同步重新加密。</p>
       <p>直连时所有离线来源必须解析到公网 IP，并在连接时固定该地址；若服务器 DNS 返回 <C>198.18.0.0/15</C> Fake-IP，探测和下载都会被拒绝。服务器需要经代理出网时，在「系统设置 → 下载与资源」填写出站代理（支持 HTTP CONNECT 与 SOCKS5，可带用户名密码）。启用后所有离线下载、平台解析和媒体请求都经代理，域名由代理解析。</p>
       <Callout tone="warning" title="代理模式的内网防护较弱">启用代理后服务端无法核对域名的实际解析结果，只能拒绝字面内网 IP、localhost 和 .local、.lan、.internal 等内部主机名。请确认代理的直连规则不会把请求转发到内网服务。代理密码保存在服务器设置中，控制台只显示 ******；审计只记录是否启用代理。</Callout>

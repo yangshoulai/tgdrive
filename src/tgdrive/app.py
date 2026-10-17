@@ -57,11 +57,13 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     resources = ResourceSettings(metadata, root, {"mode": resource_mode, "concurrency": offline_concurrency,
         "bandwidth_kib": offline_bandwidth_kib, "reserve_mib": offline_reserve_mib, "hls_enabled": offline_hls,
         "x_enabled": offline_x, "youtube_enabled": offline_youtube,
-        "platform_max_mib": offline_max_mib, "youtube_max_height": youtube_max_height, "proxy": offline_proxy})
+        "platform_max_mib": offline_max_mib, "youtube_max_height": youtube_max_height, "proxy": offline_proxy,
+        # 启动参数只是默认值；管理员在「下载与资源」保存后以控制台设置为准，随时生效。
+        "transfer_concurrency": max(1, min(16, transfer_concurrency)),
+        "bucket_concurrency": max(1, min(16, bucket_concurrency, transfer_concurrency))})
     def apply_resources(config):
         low = config["mode"] == "low" or config["concurrency"] == 1
-        engine.transfers.set_limits(min(transfer_concurrency, 2) if low else transfer_concurrency,
-                                   1 if low else bucket_concurrency)
+        engine.transfers.set_limits(config["transfer_concurrency"], config["bucket_concurrency"])
         engine.upload_concurrency, engine.read_ahead = (1, 1) if low else (3, 2)
     resources.on_change = apply_resources
     apply_resources(resources.effective())

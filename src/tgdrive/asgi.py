@@ -497,7 +497,7 @@ class TgDriveASGI(StaticFiles):
         elif action == "maintenance.thumbnails":
             detail = {"daily_mib": payload.get("daily_mib")}
         elif action == "resources.update":
-            detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib") if key in payload}
+            detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency") if key in payload}
             if "proxy" in payload:
                 # 代理地址可能包含认证信息，审计只记录是否启用。
                 detail["proxy_enabled"] = bool(payload.get("proxy"))

@@ -18,7 +18,10 @@ from .platforms import capabilities, tool_version
 MIB = 1024 * 1024
 DEFAULTS = {"mode": "auto", "concurrency": 1, "bandwidth_kib": 0,
             "reserve_mib": 512, "hls_enabled": False, "x_enabled": False, "youtube_enabled": False,
-            "youtube_max_height": 2160, "platform_max_mib": 512, "proxy": ""}
+            "youtube_max_height": 2160, "platform_max_mib": 512, "proxy": "",
+            "transfer_concurrency": 4, "bucket_concurrency": 2}
+# 文件读取并发（下载、预览、播放、S3 读取共用）：每路约占 (预读窗口数 + 1) × 8 MB 内存。
+TRANSFER_MEMORY = 24 * MIB
 MASK = "******"
 
 
@@ -133,6 +136,11 @@ class ResourceSettings:
             raise ValueError("YouTube 清晰度上限不正确")
         if type(merged["platform_max_mib"]) is not int or not 16 <= merged["platform_max_mib"] <= 8192:
             raise ValueError("平台临时缓存预算须为 16–8192 MiB")
+        for key, high in (("transfer_concurrency", 16), ("bucket_concurrency", 16)):
+            if type(merged[key]) is not int or not 1 <= merged[key] <= high:
+                raise ValueError("文件读取并发须为 1–16")
+        if merged["bucket_concurrency"] > merged["transfer_concurrency"]:
+            raise ValueError("每个账号的读取并发不能超过服务器总数")
         if not isinstance(merged["proxy"], str):
             raise ValueError("下载代理地址格式不正确")
         merged["proxy"] = normalize_proxy(merged["proxy"])
@@ -141,7 +149,8 @@ class ResourceSettings:
     def config(self):
         if self._config is None:
             row = self.metadata.db.execute("SELECT value FROM settings WHERE key=?", (self.KEY,)).fetchone()
-            self._config = self.validate(json.loads(row[0])) if row else dict(self.defaults)
+            # 旧版保存的配置没有后来新增的项，用启动参数补齐，而不是模块默认值。
+            self._config = self.validate({**self.defaults, **json.loads(row[0])}) if row else dict(self.defaults)
         return dict(self._config)
 
     def effective(self):
@@ -152,7 +161,16 @@ class ResourceSettings:
         desired = config["concurrency"] if mode == "custom" else (1 if mode == "low" else 2)
         ceiling = 1 if low else min(4, max(1, int(memory / (256 * MIB)) - 2))
         platform_limit = min(config["platform_max_mib"], 512) if low or mode == "low" else config["platform_max_mib"]
+        # 文件读取并发：低资源模式最多 2 路、每个账号 1 路；另按检测到的内存留出余量（每路约 24 MB，最多占四分之一）。
+        transfer = config["transfer_concurrency"]
+        if mode == "low":
+            transfer = min(transfer, 2)
+        if memory:
+            transfer = min(transfer, max(2, memory // 4 // TRANSFER_MEMORY))
+        bucket = min(config["bucket_concurrency"], transfer, 1 if mode == "low" else 16)
         return {**config, "mode": mode, "concurrency": min(desired, ceiling), "ffmpeg_concurrency": 1,
+                "transfer_concurrency": transfer, "bucket_concurrency": bucket,
+                "transfer_reduced": (transfer, bucket) != (config["transfer_concurrency"], config["bucket_concurrency"]),
                 "streaming": True, "cache_mib": platform_limit if config["youtube_enabled"] else 0,
                 "platform_max_mib": platform_limit,
                 "youtube_max_height": config["youtube_max_height"],
