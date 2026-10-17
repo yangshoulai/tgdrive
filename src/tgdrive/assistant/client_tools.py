@@ -263,3 +263,113 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
     return ToolOutput({**payload, "status": "已在对话中显示生成缩略图卡片，等待用户点击"}, f"准备为 {len(items)} 个文件生成缩略图",
                       items=len(items), event={"type": "browser", "action": "thumbnails", "items": items,
                                                 "regenerate": regenerate})
+
+
+# ---------- 本机缓存（§26）：缓存只在用户浏览器里，服务端只负责校验路径并列出文件 ----------
+
+CACHE_LIMIT = 300
+CACHE_STATES = {"none", "partial", "auto", "manual", "caching"}
+CACHE_PATHS = {"type": "array", "items": {"type": "string"}, "description": "文件或文件夹路径（≤200 个）"}
+
+
+def _cache_rows(ctx: ToolContext, paths: object, *, recursive: bool, limit: int, required: bool = True) -> tuple[list, int]:
+    """把文件与目录展开成作用域内的文件行（去重、跳过系统区），返回 (前 limit 行, 总数)。"""
+    if paths is None and not required:
+        return [], 0
+    if not isinstance(paths, list) or not 1 <= len(paths) <= 200:
+        raise ToolError("参数 paths 需要 1–200 个路径")
+    rows: dict[str, object] = {}
+    for value in dict.fromkeys(paths):
+        key = ctx.resolve(value)
+        single = None if not key or key.endswith("/") else ctx.db.execute(
+            "SELECT key, size, etag, content_type FROM objects WHERE bucket_id=? AND key=?", (ctx.bucket_id, key)).fetchone()
+        if single is not None:
+            rows.setdefault(single["key"], single)
+            continue
+        folder = key.rstrip("/") + "/" if key else ctx.scope_root
+        found = ctx.db.execute("SELECT key, size, etag, content_type FROM objects WHERE bucket_id=? AND key>=? AND key<? "
+                               f"AND substr(key,-1)!='/' AND {ctx.hide()} ORDER BY key LIMIT 5000",
+                               (ctx.bucket_id, folder, folder + END)).fetchall()
+        if not recursive:
+            found = [row for row in found if "/" not in row["key"][len(folder):]]
+        if not found and ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
+                                        (ctx.bucket_id, folder, folder + END)).fetchone() is None:
+            raise ToolError(f"{ctx.display(key)} 不存在")
+        for row in found:
+            rows.setdefault(row["key"], row)
+    items = [row for row in rows.values() if row["etag"]]
+    return items[:limit], len(items)
+
+
+def _cache_item(row) -> dict:
+    return {"path": row["key"], "size": int(row["size"] or 0), "etag": row["etag"], "content_type": row["content_type"]}
+
+
+@tool("ui_cache_status", "查看本机缓存", "browser", "read",
+      "查询这台设备（用户当前使用的浏览器）上的本机缓存：不传 paths 时只返回占用与上限；传入文件或文件夹时逐个返回缓存状态"
+      "（none 未缓存、partial 部分、auto 自动缓存、manual 手动缓存、caching 正在缓存）。文件夹只看直接包含的文件，最多 200 个。",
+      {"paths": CACHE_PATHS}, timeout=50)
+async def ui_cache_status(ctx: ToolContext, args: dict) -> ToolOutput:
+    rows, total = _cache_rows(ctx, args.get("paths"), recursive=False, limit=200, required=False)
+    sent = {row["key"]: row for row in rows}
+    result = await _call(ctx, "ui_cache_status", {"items": [_cache_item(row) for row in rows]})
+    if result.get("available") is not True:
+        reason = str(result.get("reason") or "这台设备不能使用本机缓存")[:200]
+        return ToolOutput({"available": False, "reason": reason}, "本机缓存不可用")
+    device = result.get("device") if isinstance(result.get("device"), dict) else {}
+    number = lambda value: value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+    payload: dict = {"available": True, "device": {
+        "normal_bytes": number(device.get("normal_bytes")), "normal_limit_bytes": number(device.get("normal_limit_bytes")),
+        "private_bytes": number(device.get("private_bytes")), "private_enabled": device.get("private_enabled") is True}}
+    items, counts, reported = [], {}, set()
+    for item in (result.get("items") or [])[:200]:
+        if not isinstance(item, dict) or item.get("path") not in sent or item["path"] in reported:
+            continue  # 只接受自己发出的路径，每个路径一次
+        reported.add(item["path"])
+        state = item.get("state") if item.get("state") in CACHE_STATES else "none"
+        counts[state] = counts.get(state, 0) + 1
+        entry = {"path": ctx.display(item["path"]), "state": state, "size": int(sent[item["path"]]["size"] or 0)}
+        percent = number(item.get("percent"))
+        if state in ("partial", "caching") and percent is not None:
+            entry["percent"] = min(percent, 100)
+        items.append(entry)
+    if rows:
+        payload["items"] = items
+        payload["counts"] = counts
+        if total > len(rows):
+            payload["note"] = f"共 {total} 个文件，只查询了前 {len(rows)} 个"
+    if result.get("private_note"):
+        payload["private_note"] = str(result["private_note"])[:200]
+    cached = sum(value for key, value in counts.items() if key != "none")
+    return ToolOutput(payload, f"本机缓存：{cached} / {len(items)} 个文件已缓存" if rows else "本机缓存占用", items=len(items))
+
+
+def _cache_card(ctx: ToolContext, args: dict, action: str) -> ToolOutput:
+    rows, total = _cache_rows(ctx, args.get("paths"), recursive=args.get("recursive") is True, limit=CACHE_LIMIT)
+    if not rows:
+        return ToolOutput({"status": "没有可处理的文件"}, "没有文件")
+    items = [_cache_item(row) for row in rows]
+    size = sum(item["size"] for item in items)
+    payload = {"status": "已在对话中显示卡片，等待用户点击", "files": len(items), "size": size}
+    if total > len(items):
+        payload["note"] = f"还有 {total - len(items)} 个文件，用户完成这一批后可以再调用一次"
+    verb = "缓存" if action == "cache" else "清除缓存"
+    return ToolOutput(payload, f"准备{verb} {len(items)} 个文件", items=len(items),
+                      event={"type": "browser", "action": action, "items": items, "size": size, **({"private": True} if ctx.private else {})})
+
+
+@tool("ui_cache_files", "缓存到本机", "browser", "read",
+      "把文件保存到这台设备的本机缓存，之后预览和下载直接读取本机数据（适合即将离线使用或反复打开的文件）。"
+      "会占用设备空间，所以只在对话中显示「缓存到本机」卡片，由用户点击后开始，工具立即返回。path 可以是文件或文件夹；"
+      "recursive 包含子目录；单次最多 300 个文件。",
+      {"paths": CACHE_PATHS, "recursive": {"type": "boolean", "description": "文件夹是否包含子目录，默认否"}}, ("paths",))
+async def ui_cache_files(ctx: ToolContext, args: dict) -> ToolOutput:
+    return _cache_card(ctx, args, "cache")
+
+
+@tool("ui_clear_cache", "清除本机缓存", "browser", "read",
+      "删除这台设备上指定文件的本机缓存（云端文件不受影响）。只在对话中显示「清除」卡片，由用户点击后执行，工具立即返回。"
+      "参数同 ui_cache_files；单次最多 300 个文件。",
+      {"paths": CACHE_PATHS, "recursive": {"type": "boolean", "description": "文件夹是否包含子目录，默认否"}}, ("paths",))
+async def ui_clear_cache(ctx: ToolContext, args: dict) -> ToolOutput:
+    return _cache_card(ctx, args, "uncache")

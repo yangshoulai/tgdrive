@@ -415,6 +415,53 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             self.assertEqual((await self.tool_results(user, conversation))[-1]["status"], "error")
         self.run_async(run())
 
+    def test_cache_tools_cards(self):
+        async def run():
+            _, user, conversation = await self.ready(["Photos/a.jpg", "Photos/b.png", "Photos/sub/c.jpg", "Other/x.txt"], location="Photos/")
+            self.model.replies = [call("ui_cache_files", paths=["/Photos/"]), call("ui_cache_files", paths=["/Photos/"], recursive=True),
+                                  call("ui_clear_cache", paths=["/Photos/a.jpg", "/Photos/a.jpg"]), call("ui_cache_files", paths=["/Other/"]),
+                                  call("ui_cache_files", paths=["/.tgdrive/private/y"]), answer("点击卡片")]
+            await self.send(user, conversation, "把照片缓存到本机")
+            tools = await self.tool_results(user, conversation)
+            self.assertEqual(tools[0]["event"]["action"], "cache")
+            self.assertEqual([item["path"] for item in tools[0]["event"]["items"]], ["Photos/a.jpg", "Photos/b.png"], "默认不含子目录")
+            self.assertTrue(all(item["etag"] and item["size"] for item in tools[0]["event"]["items"]))
+            self.assertEqual(tools[0]["event"]["size"], sum(item["size"] for item in tools[0]["event"]["items"]))
+            self.assertEqual(len(tools[1]["event"]["items"]), 3)
+            self.assertEqual((tools[2]["event"]["action"], [item["path"] for item in tools[2]["event"]["items"]]), ("uncache", ["Photos/a.jpg"]))
+            self.assertEqual((tools[3]["status"], tools[3]["event"]), ("error", None), "作用域外不生成卡片")
+            self.assertEqual(tools[4]["status"], "error", "系统区不生成卡片")
+        self.run_async(run())
+
+    def test_cache_status_round_trip_keeps_only_sent_paths(self):
+        async def run():
+            _, user, conversation = await self.ready(["Photos/a.jpg", "Photos/b.png"], location="Photos/")
+            self.model.replies = [call("ui_cache_status", paths=["/Photos/"]), answer("查好了")]
+            status, data = await self.req("POST", f"/api/user/v1/assistant/conversations/{conversation}/messages", {"text": "缓存了吗"}, user)
+            state = self.service.runs[data["run_id"]]
+            state.listeners += 1
+            for _ in range(100):
+                calls = [e for e in state.events if e["type"] == "client_call"]
+                if calls:
+                    break
+                await asyncio.sleep(0.01)
+            event = calls[0]
+            self.assertEqual(event["name"], "ui_cache_status")
+            self.assertEqual([item["path"] for item in event["args"]["items"]], ["Photos/a.jpg", "Photos/b.png"])
+            result = {"available": True, "device": {"normal_bytes": 10, "normal_limit_bytes": 1024, "private_bytes": 0, "private_enabled": False},
+                      "items": [{"path": "Photos/a.jpg", "state": "manual"}, {"path": "Photos/b.png", "state": "partial", "percent": 40},
+                                {"path": "Secret/x.txt", "state": "manual"}, {"path": "Photos/a.jpg", "state": "auto"}]}
+            status, _ = await self.req("POST", f"/api/user/v1/assistant/runs/{data['run_id']}/client-results",
+                                       {"call_id": event["call_id"], "result": result}, user)
+            self.assertEqual(status, 204)
+            await state.task
+            tool = (await self.tool_results(user, conversation))[-1]["result"]
+            self.assertEqual([(item["path"], item["state"]) for item in tool["items"]],
+                             [("/Photos/a.jpg", "manual"), ("/Photos/b.png", "partial")], "未发出与重复的路径被丢弃")
+            self.assertEqual(tool["items"][1]["percent"], 40)
+            self.assertEqual(tool["device"]["normal_limit_bytes"], 1024)
+        self.run_async(run())
+
     # ---------- 思考与秘密 ----------
 
     def test_reasoning_is_stored_but_not_sent_back(self):

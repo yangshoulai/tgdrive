@@ -5,6 +5,7 @@ import { Button, ConfirmDialog, Icon, IconButton, KeyValue, Modal, formatBytes, 
 import { usePrivateAccess } from "./private-session";
 import { TrayBar, TrayRing } from "./tray";
 
+export type CacheReport = { state: "none" | "partial" | "auto" | "manual" | "caching"; percent?: number; blocked?: string };
 type CacheJob = { id: string; file: CacheFile; status: "queued" | "active" | "done" | "error" | "canceled"; bytes: number; size: number; error: string; waiting: boolean; completedAt?: number };
 /** 与上传、离线下载托盘一致：完成的项目显示 8 秒后自动移出，失败与取消的保留到用户处理；没有项目时托盘消失。 */
 const COMPLETED_VISIBLE_MS = 8000;
@@ -18,6 +19,10 @@ type Queue = {
   canCache: (file: CacheFile) => boolean; enqueue: (file: CacheFile) => void; enqueueMany: (files: CacheFile[]) => void;
   cancel: (id: string) => void; retry: (id: string) => void; clear: () => void;
   inspect: (file: CacheFile) => void; remove: (files: CacheFile | CacheFile[]) => void;
+  /** 不弹确认直接清除（文件助手卡片：点击卡片本身就是确认）。 */
+  forget: (files: CacheFile[]) => Promise<void>;
+  /** 文件助手查询用：重新读取一次缓存索引，返回每个文件的状态。 */
+  report: (files: CacheFile[]) => Promise<CacheReport[]>;
 };
 const CacheContext = createContext<Queue | null>(null);
 const nameOf = (file: CacheFile) => file.key.split("/").at(-1) || file.key;
@@ -187,10 +192,32 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
     })();
   }, [jobs, enabled, privateReady, wake, update]);
 
+  const forget = useCallback(async (files: CacheFile[]) => {
+    const ids = new Set(files.map(cacheFileId));
+    jobsRef.current.filter(job => ids.has(cacheFileId(job.file))).forEach(job => cancel(job.id));
+    try { for (const file of files) await removeFileCache(file); }
+    finally {
+      update(value => value.filter(job => !ids.has(cacheFileId(job.file))));
+      setStates(value => { const next = new Map(value); ids.forEach(id => next.delete(id)); return next; });
+      setCached(value => { const next = new Map(value); ids.forEach(id => next.delete(id)); return next; });
+    }
+  }, [cancel, update]);
+  const report = useCallback(async (files: CacheFile[]): Promise<CacheReport[]> => {
+    const index = new Map((await cacheIndex(ready.current.privateReady)).map(({ id, ...state }) => [id, state]));
+    return files.map(file => {
+      if (api.isPrivatePath(file.key) && !ready.current.privateReady) return { state: "none", blocked: "这台设备没有开启私密文件缓存，或私密空间未解锁" };
+      const job = jobsRef.current.find(job => cacheFileId(job.file) === cacheFileId(file) && isRunning(job));
+      if (job) return { state: "caching", percent: percentOf(job.bytes, job.size) };
+      const state = index.get(cacheFileId(file));
+      if (!state?.bytes) return { state: "none" };
+      if (!state.complete) return { state: "partial", percent: percentOf(state.bytes, state.size || file.size) };
+      return { state: state.manual ? "manual" : "auto" };
+    });
+  }, []);
   const visibleJobs = useMemo(() => enabled ? jobs.filter(job => !api.isPrivatePath(job.file.key) || privateReady) : [], [enabled, jobs, privateReady]);
   const value: Queue = useMemo(() => ({ available, jobs: visibleJobs, states, cached, expanded, setExpanded, watch, canCache, enqueue, enqueueMany, cancel, retry,
-    clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: files => setRemoving(Array.isArray(files) ? files : [files]) }),
-  [available, visibleJobs, states, cached, expanded, watch, canCache, enqueue, enqueueMany, cancel, retry, update]);
+    clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: files => setRemoving(Array.isArray(files) ? files : [files]), forget, report }),
+  [available, visibleJobs, states, cached, expanded, watch, canCache, enqueue, enqueueMany, cancel, retry, update, forget, report]);
   const detailState = details && (states.get(cacheFileId(details)) ?? cached.get(cacheFileId(details)));
   const detailManual = Boolean(details && cached.get(cacheFileId(details))?.manual);
   const showDetails = enabled && details && (!api.isPrivatePath(details.key) || privateReady);
@@ -204,17 +231,7 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
     </Modal>}
     {showRemoving && <ConfirmDialog title="清除本机缓存" className={removing.some(file => api.isPrivatePath(file.key)) ? "private-dialog" : ""} confirmLabel="清除缓存" onClose={() => setRemoving(null)}
       description={removing.length === 1 ? `清除“${nameOf(removing[0])}”在这台设备上的缓存？云端文件不受影响。` : `清除这 ${removing.length} 个文件在这台设备上的缓存？云端文件不受影响。`}
-      onConfirm={async () => {
-        const ids = new Set(removing.map(cacheFileId));
-        jobsRef.current.filter(job => ids.has(cacheFileId(job.file))).forEach(job => cancel(job.id));
-        try { for (const file of removing) await removeFileCache(file); }
-        finally {
-          update(value => value.filter(job => !ids.has(cacheFileId(job.file))));
-          setStates(value => { const next = new Map(value); ids.forEach(id => next.delete(id)); return next; });
-          setCached(value => { const next = new Map(value); ids.forEach(id => next.delete(id)); return next; });
-          setRemoving(null);
-        }
-      }} />}
+      onConfirm={async () => { try { await forget(removing); } finally { setRemoving(null); } }} />}
   </CacheContext.Provider>;
 }
 

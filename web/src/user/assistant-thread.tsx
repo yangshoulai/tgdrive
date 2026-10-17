@@ -13,6 +13,8 @@ import { FileGlyph, getFileKind, parentPath } from "../files";
 import { FolderPicker } from "./folders";
 import { passkeyUnavailable, privatePasskeyAssertion } from "../passkeys";
 import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
+import { useCacheQueue } from "./cache";
+import { cacheFileId, cacheStats, cacheSupported } from "../cache-client";
 import { Notice as InlineNotice, ButtonLink, AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
 /** 对象键的显示路径：私密空间的条目显示为相对私密空间根的路径。 */
@@ -410,6 +412,7 @@ function BrowserCard({ event }: { event: ai.BrowserEvent }) {
   const [done, setDone] = useState(false);
   if (event.action === "share") return <ShareBrowserCard event={event} />;
   if (event.action === "thumbnails") return <ThumbnailsBrowserCard event={event} />;
+  if (event.action === "cache" || event.action === "uncache") return <CacheBrowserCard event={event} />;
   if (event.action === "download") {
     const keys = event.items.map(item => item.path);
     const single = event.items.length === 1 && !event.items[0].folder;
@@ -498,6 +501,52 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
       : state.phase === "running" ? `${processed} / ${total}` : state.phase === "stopped" ? `已停止 · ${summary}` : state.local ? "已完成" : "已全部提交，完成后自动刷新"}</span>
       {state.phase === "running" ? <Button size="sm" onClick={() => controller.current?.abort()}>停止</Button>
         : <Button size="sm" variant={state.phase === "idle" ? "primary" : "secondary"} icon={state.phase === "idle" ? "image" : "refresh"} onClick={() => void start()}>{state.phase === "idle" ? "生成" : "重新提交"}</Button>}
+    </footer>
+  </section>;
+}
+
+/** 本机缓存卡片（§26）：缓存会占用这台设备的空间、清除会删除设备上的副本，都等用户点击；卡片点击即确认，不再弹窗。 */
+function CacheBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action: "cache" | "uncache" }> }) {
+  const queue = useCacheQueue();
+  const [limit, setLimit] = useState<number | null>(null);
+  const [phase, setPhase] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [error, setError] = useState("");
+  const caching = event.action === "cache";
+  useEffect(() => {
+    if (!caching || !queue?.available) return;
+    let alive = true;
+    void cacheStats().then(stats => { if (alive) setLimit(stats.settings.maxMiB * 1048576); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [caching, queue?.available]);
+  const files = event.items.map(item => ({ key: item.path, etag: item.etag, size: item.size, content_type: item.content_type }));
+  const usable = queue?.available ? files.filter(queue.canCache) : [];
+  const present = usable.filter(file => (queue?.cached.get(cacheFileId(file))?.bytes ?? 0) > 0 || queue?.jobs.some(job => cacheFileId(job.file) === cacheFileId(file)));
+  const targets = caching ? usable : present;
+  const blocked = !cacheSupported() ? "这个浏览器不能使用本机缓存（需要 https:// 访问与较新的浏览器，无痕模式不可用）"
+    : !queue?.available ? "这台设备的本机缓存已关闭，可在「用户设置 → 本机缓存」开启"
+    : !usable.length && event.private ? "私密文件需要先在「用户设置 → 本机缓存」信任这台设备，并保持私密空间解锁"
+    : !caching && !present.length && phase === "idle" ? "这些文件在这台设备上没有缓存" : "";
+  const total = event.items.length;
+  async function run() {
+    if (!queue || !targets.length) return;
+    if (caching) { queue.enqueueMany(targets); setPhase("done"); return; }
+    setPhase("busy"); setError("");
+    try { await queue.forget(targets); setPhase("done"); }
+    catch (reason) { setError(api.errorMessage(reason, "清除失败，请稍后重试")); setPhase("error"); }
+  }
+  const skipped = caching ? total - usable.length : 0;
+  const note = phase === "done" ? caching ? "已加入缓存队列，进度见页面底部的托盘" : `已清除 ${targets.length} 个文件的本机缓存`
+    : blocked || (caching ? `占用这台设备约 ${formatBytes(event.size)}${skipped ? `，${skipped} 个文件无法缓存` : ""}` : `${present.length} 个文件有缓存，云端文件不受影响`);
+  return <section className={`ai-card ai-browser${event.private ? " is-private" : ""}`}>
+    <CardHead icon={caching ? "monitor" : "trash"} title={caching ? `缓存 ${total} 个文件到本机` : `清除 ${total} 个文件的本机缓存`}
+      subtitle={`${formatBytes(event.size)} · 只影响这台设备`} />
+    <ul className="ai-list">{event.items.slice(0, 5).map(item => <li key={item.path}><Icon name="file" size={13} /><span className="cell-truncate">{display(item.path)}</span></li>)}
+      {total > 5 && <li className="ai-list-more">等 {total} 个文件</li>}</ul>
+    {caching && limit !== null && event.size > limit && phase === "idle" && <p className="ai-card-note"><Icon name="alert" size={13} />超过这台设备的缓存上限（{formatBytes(limit)}），较早打开的缓存会被移除。可在「用户设置 → 本机缓存」调大上限。</p>}
+    {error && <p className="ai-card-note tone-danger" role="alert">{error}</p>}
+    <footer className="ai-card-foot"><span>{note}</span>
+      {phase === "done" ? <Icon name="check" size={16} />
+        : <Button size="sm" variant={caching ? "primary" : "danger"} icon={caching ? "monitor" : "trash"} loading={phase === "busy"} disabled={Boolean(blocked) || !targets.length} onClick={() => void run()}>{caching ? "缓存到本机" : "清除"}</Button>}
     </footer>
   </section>;
 }

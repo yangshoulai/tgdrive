@@ -168,7 +168,9 @@ export type BrowserEvent =
   | { type: "browser"; action: "open"; url: string; host: string; title: string | null }
   | { type: "browser"; action: "share"; path: string; conversation_id: string }
   | { type: "browser"; action: "copy"; text: string; title: string | null; private?: boolean }
-  | { type: "browser"; action: "thumbnails"; items: { path: string; size: number; etag: string; content_type: string | null }[]; regenerate: boolean };
+  | { type: "browser"; action: "thumbnails"; items: { path: string; size: number; etag: string; content_type: string | null }[]; regenerate: boolean }
+  | { type: "browser"; action: "cache"; items: { path: string; size: number; etag: string; content_type: string | null }[]; size: number; private?: boolean }
+  | { type: "browser"; action: "uncache"; items: { path: string; size: number; etag: string; content_type: string | null }[]; size: number; private?: boolean };
 export type ToolEvent =
   | { type: "plan"; items: { content: string; status: "pending" | "in_progress" | "completed" }[] }
   | { type: "question"; question: string; options: string[] }

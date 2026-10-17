@@ -15,6 +15,8 @@ import { assistantEnvironment } from "./assistant-environment";
 import { commonFolder, useMentions } from "./assistant-mentions";
 import { AssistantComposer, type ComposerHandle } from "./assistant-composer";
 import { FolderPicker } from "./folders";
+import { useCacheQueue } from "./cache";
+import { cacheStats, cacheSupported, type CacheFile } from "../cache-client";
 
 /** 作用域选择「当前位置」：随文件页切换目录。 */
 const HERE = "\u0000here";
@@ -233,8 +235,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   // 浏览器工具：在当前页面执行后回传结果。只执行仍在有效期内、尚未处理的调用（断线重放时不重复操作页面）。
   const handledCalls = useRef(new Set<string>());
-  const clientContext = useRef({ location, onNavigate, page, privateMode });
-  clientContext.current = { location, onNavigate, page, privateMode };
+  const cacheQueue = useCacheQueue();
+  const clientContext = useRef({ location, onNavigate, page, privateMode, cacheQueue });
+  clientContext.current = { location, onNavigate, page, privateMode, cacheQueue };
   const runClientCall = useCallback(async (runId: string, event: ai.RunEvent) => {
     const callId = String(event.call_id ?? "");
     if (!callId || handledCalls.current.has(callId) || Number(event.expires_at ?? 0) * 1000 < Date.now()) return;
@@ -626,8 +629,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
 /** 在用户当前页面执行浏览器工具（docs/assistant-design.md §19.7）。参数已经过服务端校验，这里只做页面操作。 */
 async function executeClientTool(name: string, args: Record<string, unknown>,
-  context: { location: AssistantLocation; onNavigate?: AssistantNavigate; page: boolean; privateMode: boolean }): Promise<Record<string, unknown>> {
+  context: { location: AssistantLocation; onNavigate?: AssistantNavigate; page: boolean; privateMode: boolean; cacheQueue: ReturnType<typeof useCacheQueue> }): Promise<Record<string, unknown>> {
   const { location, onNavigate, page } = context;
+  if (name === "ui_cache_status") return cacheStatus(args, context.cacheQueue);
   if (context.privateMode) return executePrivateTool(name, args, location, onNavigate);
   const bridge = filesBridge();
   if (name === "ui_get_view") {
@@ -662,6 +666,22 @@ async function executeClientTool(name: string, args: Record<string, unknown>,
     return { ok: true };
   }
   throw new Error("这个浏览器工具不受支持");
+}
+
+/** 本机缓存查询（§26）：只回答服务端发来的文件；缓存索引在这台设备的浏览器里，服务端看不到。 */
+async function cacheStatus(args: Record<string, unknown>, queue: ReturnType<typeof useCacheQueue>): Promise<Record<string, unknown>> {
+  if (!cacheSupported()) return { available: false, reason: "这个浏览器不能使用本机缓存：需要通过 https:// 地址访问并使用较新的浏览器，无痕模式下不可用" };
+  if (!queue?.available) return { available: false, reason: "这台设备的本机缓存已关闭（可在「用户设置 → 本机缓存」开启），或管理员不允许使用" };
+  const stats = await cacheStats();
+  const items = (Array.isArray(args.items) ? args.items : []) as (CacheFile & { path: string })[];
+  const files = items.map(item => ({ key: item.path, etag: item.etag, size: item.size, content_type: item.content_type }));
+  const reports = files.length ? await queue.report(files) : [];
+  const blocked = reports.find(report => report.blocked)?.blocked;
+  return { available: true,
+    device: { normal_bytes: stats.normal.bytes, normal_limit_bytes: stats.settings.maxMiB * 1048576, private_bytes: stats.private.bytes,
+      private_enabled: Boolean(stats.settings.private && stats.policy?.private_enabled) },
+    items: files.map((file, index) => ({ path: file.key, state: reports[index].state, ...(reports[index].percent !== undefined ? { percent: reports[index].percent } : {}) })),
+    ...(blocked ? { private_note: blocked } : {}) };
 }
 
 /** 私密对话的浏览器工具（§24.5.4）：只读取和操作私密空间页面；路径是带私密前缀的对象键，服务端会再次校验。 */

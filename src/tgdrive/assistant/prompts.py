@@ -35,6 +35,9 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
             abilities.append("- 打开已有分享：调用 ui_open_share(path)，由界面解析真实分享链接，用户点击卡片打开；不要猜令牌或把文件路径当分享地址。")
         abilities.append("- 生成缩略图：用户说缩略图缺失、没有封面或网格视图模糊时，调用 ui_generate_thumbnails(path, recursive, regenerate)，"
                          "由用户点击卡片后交给服务器后台生成；网格图与封面计入用户空间。")
+        abilities.append("- 本机缓存：本机缓存在用户当前使用的浏览器里。用 ui_cache_status 查询文件是否已缓存及设备占用；"
+                         "用户要离线使用、反复打开或想释放设备空间时，用 ui_cache_files／ui_clear_cache 生成卡片，由用户点击执行。"
+                         "本机缓存不是备份，也不占用账号空间。")
     if can_http:
         abilities.append("- 公共 HTTP 查询：http_request 支持 GET/HEAD，读取 JSON、文本或二进制样例；保存资源用 propose_downloads。"
                          "请求在服务器执行，不携带用户浏览器的 Cookie，也不能访问本机或内网。仅按用户要求查询，不把文件内容或凭据发送到外部接口。")
