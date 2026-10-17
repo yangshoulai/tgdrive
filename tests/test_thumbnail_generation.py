@@ -1,7 +1,6 @@
 """缩略图协作：缓存零回源、生成权超时、源版本、取消与私密空间访问边界。"""
 
 import asyncio
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +13,7 @@ from tgdrive.errors import NotFoundError, NotReadyError
 from tgdrive.keystore import KeyStore
 from tgdrive.metadata import Metadata
 from tgdrive.objects import ObjectService, PRIVATE_PREFIX, Scope
-from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailService, _RangeInput, _Job
+from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailRetry, ThumbnailService, _RangeInput, _Job
 from tgdrive.thumbnail_cache import ThumbnailCacheMiss
 
 
@@ -231,7 +230,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_timeout_terminates_decoder_and_drains_its_pipes(self):
         ended = asyncio.Event()
-        process = SimpleNamespace(returncode=None, stderr=asyncio.StreamReader())
+        process = SimpleNamespace(pid=0, returncode=None, stderr=asyncio.StreamReader())
 
         async def wait():
             await ended.wait()
@@ -244,7 +243,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
 
         process.wait, process.kill = wait, Mock(side_effect=kill)
         source = SimpleNamespace(url="http://127.0.0.1/input", origin="http://127.0.0.1", failure=None)
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)), patch.dict(sys.modules, {"resource": SimpleNamespace()}):
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
             with self.assertRaises(TimeoutError):
                 async with asyncio.timeout(0.02):
                     await self.worker._render(source, "video", Path(self.temp.name), lambda: None)
@@ -424,6 +423,65 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.2)
             self.assertEqual(decoder.await_count, 1, "记为无法生成后不再自动重试")
         self.assertEqual(self.variants(info), ["none"])
+
+    async def test_decoder_environment_failure_is_retried_not_marked_undecodable(self):
+        # 旧版用 RLIMIT_AS 限制解码器，FFmpeg 7 在加载库或创建线程时就失败，结果所有文件都被误记为「无法生成」。
+        directory = Path(self.temp.name) / "fake-ffmpeg"
+        directory.mkdir()
+        for name, (message, code) in {"threads": ("pthread_create() failed: Resource temporarily unavailable", 1),
+                                       "killed": ("", -9), "broken": ("Invalid data found when processing input", 1)}.items():
+            script = directory / name
+            script.write_text("#!/bin/sh\n" + (f"echo '{message}' >&2\n" if message else "") +
+                              ("kill -9 $$\n" if code < 0 else f"exit {code}\n"))
+            script.chmod(0o755)
+        source = SimpleNamespace(url="http://127.0.0.1:9/x", origin="http://127.0.0.1:9", failure=None)
+        for name, expected in (("threads", ThumbnailRetry), ("killed", ThumbnailRetry), ("broken", ThumbnailError)):
+            self.worker.resources.ffmpeg = str(directory / name)
+            with self.assertRaises(ThumbnailError) as caught:
+                await self.worker._render(source, "image", directory, lambda: None)
+            self.assertIs(type(caught.exception), expected, name)
+        info = await self.put("photo.jpg")
+        self.worker.cache.drop(info.blob_uuid)
+        self.age(info)
+        channel, render = self.remote_renderer({})
+        with channel, render as decoder:
+            decoder.side_effect = ThumbnailRetry("解码器运行环境受限，稍后再生成")
+            self.worker.start()
+            self.worker._backfill_at = 0
+            async with asyncio.timeout(3):
+                while not decoder.await_count:
+                    await asyncio.sleep(0.01)
+                while self.worker._active is not None or info.blob_uuid in self.worker._pending:
+                    await asyncio.sleep(0.01)
+            for _ in range(3):
+                self.worker._backfill_skip.clear()
+                self.worker._backfill_at = 0
+                self.worker._wake.set()
+                await asyncio.sleep(0.15)
+        self.assertGreaterEqual(decoder.await_count, 3)
+        self.assertEqual(self.variants(info), [], "运行环境问题不能把文件记为无法生成")
+
+    async def test_backfill_cursor_keeps_files_beyond_the_queue_limit(self):
+        infos = [await self.put(f"batch/{index:02}.jpg") for index in range(10)]
+        for info in infos:
+            self.worker.cache.drop(info.blob_uuid)
+            self.age(info)
+        channel, render = self.remote_renderer({"thumb": JPEG})
+        with channel, render:
+            self.worker.start()
+            self.worker._backfill_at = 0
+            async with asyncio.timeout(4):
+                while not all(self.variants(info) for info in infos):
+                    await asyncio.sleep(0.01)
+
+    async def test_repair_clears_old_undecodable_marks_once(self):
+        info = await self.put("old.jpg")
+        await self.objects.set_thumbnail(self.scope, info.key, None, "none")
+        self.worker._repair()
+        self.assertEqual(self.variants(info), [], "升级后重新交给补图")
+        await self.objects.set_thumbnail(self.scope, info.key, None, "none")
+        self.worker._repair()
+        self.assertEqual(self.variants(info), ["none"], "只执行一次，之后的确定结果保留")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,23 @@ VIDEO_PIXELS = 4096 * 2160
 # 不允许播放列表、concat、SVG 等会加载其他资源的格式。HTTP 请求还统一经过下面的本地代理。
 FORMATS = ("mov,matroska,webm,avi,ogg,mp3,flac,wav,aac,aiff,asf,flv,mpeg,mpegts,ape,wv,"
            "jpeg_pipe,png_pipe,webp_pipe,gif,bmp_pipe,tiff_pipe,ico,jxl_pipe,avif,heif")
+# 解码器输出里出现这些内容说明是运行环境（线程、内存、动态库）的问题，而不是文件本身无法解码。
+ENVIRONMENT_ERRORS = (b"pthread_create", b"Cannot allocate memory", b"Resource temporarily unavailable",
+                      b"error while loading shared libraries", b"failed to map segment")
+# 一次性清理：修复前运行环境问题会被误记为「无法生成」，升级后清掉这些记录让补图重新处理。
+REPAIR_KEY = "thumbnails.repair"
+
+
+def _resident(pid):
+    """Linux 上进程当前的常驻内存字节数；其他系统或进程已退出时返回 0。"""
+    try:
+        with open(f"/proc/{pid}/status", "rb") as status:
+            for line in status:
+                if line.startswith(b"VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
 
 
 class ThumbnailError(Exception):
@@ -231,6 +248,10 @@ class ThumbnailService:
 
     def start(self):
         if self._runner is None and self.resources.ffmpeg:
+            try:
+                self._repair()
+            except Exception as exc:
+                log.warning("缩略图记录修复暂未完成：%s", type(exc).__name__)
             self.objects.engine.thumbnail_cache = self.cache
             self._backfill_cursor, self._backfill_at = (0, ""), time.monotonic() + 30
             self._loop = asyncio.get_running_loop()
@@ -473,22 +494,31 @@ class ThumbnailService:
             return False
         page = await self.metadata.run_in_thread(self._backfill_page)
         if not page:
-            # 一轮扫描结束：下一轮从头开始，覆盖这段时间里新变得「较早」的文件。
-            self._backfill_cursor, self._backfill_at = (0, ""), time.monotonic() + 1800
+            # 一轮扫描结束：下一轮从头开始，覆盖这段时间里新变得「较早」的文件（只查元数据，开销很小）。
+            self._backfill_cursor, self._backfill_at = (0, ""), time.monotonic() + BACKFILL_AGE
             return False
-        self._backfill_cursor = (page[-1].bucket_id, page[-1].key)
         now, added = time.monotonic(), False
         for key, until in list(self._backfill_skip.items()):
             if until <= now:
                 self._backfill_skip.pop(key)
         for info in page:
+            if sum(1 for job in self._pending.values() if job.backfill) >= 4:
+                break
+            # 游标只越过已经看过的文件；名额满时这一页剩下的文件下次接着处理，不能等到下一轮。
+            self._backfill_cursor = (info.bucket_id, info.key)
             blob = info.blob_uuid
             if not self._eligible(info) or blob in self._pending or blob in self._leases or blob in self._backfill_skip:
                 continue
-            if sum(1 for job in self._pending.values() if job.backfill) >= 4:
-                break
             added = self._enqueue(_Job(info, remote=True, backfill=True, detail="自动补图：按预算读取存储")) or added
         return added
+
+    def _repair(self):
+        """升级后执行一次：清掉旧版因解码器运行环境受限而误记的「无法生成」，交给自动补图重新处理。"""
+        if self._setting(REPAIR_KEY).get("version", 0) >= 1:
+            return
+        with self.metadata.transaction() as db:
+            db.execute("DELETE FROM thumbnails WHERE variant='none'")
+        self._save_setting(REPAIR_KEY, {"version": 1})
 
     def _record(self, job, state, detail):
         blob = job.info.blob_uuid
@@ -570,15 +600,17 @@ class ThumbnailService:
                             self._pending.pop(blob, None)
                             if job.backfill and not isinstance(exc, (NotFoundError, PermissionError)):
                                 # 超时、资源不足等暂时性失败：几小时后再试；连续 3 次仍失败就记为「无法生成」，不再消耗补图额度。
-                                # 解码器确定无法处理的已在 generate 中记录。
-                                failures = self._backfill_failures[blob] = self._backfill_failures.get(blob, 0) + 1
+                                # 解码器确定无法处理的已在 generate 中记录；运行环境受限（ThumbnailRetry）只推迟，不计次数。
+                                failures = self._backfill_failures.get(blob, 0) + (not isinstance(exc, ThumbnailRetry))
+                                self._backfill_failures[blob] = failures
                                 self._backfill_skip[blob] = time.monotonic() + BACKFILL_RETRY
                                 if failures >= 3:
                                     try:
                                         await self.objects.set_thumbnail(self._scope(job.info, None), job.info.key, None, "none")
                                     except Exception:
                                         pass
-                            self._record(job, "failed", "处理超时" if isinstance(exc, TimeoutError) else "当前数据或解码器无法生成，可手动重试")
+                            self._record(job, "failed", "处理超时" if isinstance(exc, TimeoutError)
+                                         else str(exc) if isinstance(exc, ThumbnailRetry) else "当前数据或解码器无法生成，可手动重试")
                         finally:
                             self._active = self._task = None
                             if job.backfill:
@@ -681,21 +713,18 @@ class ThumbnailService:
             return bytes(output)
 
         stderr = asyncio.create_task(errors())
+        # 按实际占用的物理内存（RSS）巡检，不用 RLIMIT_AS：FFmpeg 7 为每路输入、输出和滤镜各开线程，
+        # 加上动态库映射，虚拟地址空间远大于实际用量，限制地址空间会让它在加载库或创建线程时直接失败。
+        memory = min(512 * MIB, max(192 * MIB, (self.resources.detected["memory_bytes"] or 1536 * MIB) // 3))
         try:
-            # Linux 容器额外限制整个解码进程；其他系统仍有像素、单次分配、线程与超时限制。
-            import resource
-            if hasattr(resource, "prlimit"):
-                memory = min(512 * MIB, max(192 * MIB, (self.resources.detected["memory_bytes"] or 1536 * MIB) // 3))
-                try:
-                    resource.prlimit(process.pid, resource.RLIMIT_AS, (memory, memory))
-                except ProcessLookupError:
-                    pass  # 很小的图片可能已经处理完毕。
             while not waiting.done():
                 authorize()
                 if source.failure:
                     raise source.failure
                 if self.resources.pressure():
                     raise ThumbnailRetry("服务器资源不足，稍后再生成")
+                if _resident(process.pid) > memory:
+                    raise ThumbnailError("解码所需内存超过上限")
                 await asyncio.wait({waiting}, timeout=0.25)
             output = await stderr
             if source.failure:
@@ -703,6 +732,9 @@ class ThumbnailService:
             if process.returncode:
                 if kind == "audio" and b"matches no streams" in output:
                     return None
+                if process.returncode < 0 or any(sign in output for sign in ENVIRONMENT_ERRORS):
+                    # 被系统终止、线程或内存不足、缺少动态库都是运行环境的问题，不能据此把文件记为「无法生成」。
+                    raise ThumbnailRetry("解码器运行环境受限，稍后再生成")
                 raise ThumbnailError("当前解码器未能生成缩略图")
             images = {}
             for variant, limit in self.objects.THUMBNAIL_LIMITS.items():
