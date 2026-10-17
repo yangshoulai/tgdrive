@@ -871,6 +871,9 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .file-cache-status:hover { color: var(--ink); }
 .file-cache-status:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .file-cache-status.is-complete { background: var(--success-soft); color: var(--success); }
+/* 自动缓存：浏览器顺带保存、空间不够时先被移除，用描边的浅色标记，与手动缓存的实心标记区分。 */
+.file-cache-status.is-auto { background: transparent; box-shadow: inset 0 0 0 1px var(--line); color: var(--ink-3); }
+.file-cache-status.is-auto:hover { color: var(--ink); }
 .file-cache-status.is-active { color: var(--accent); }
 .file-cache-status.is-error { background: var(--danger-soft); color: var(--danger); }
 .file-cache-status .file-cache-ring { width: 12px; height: 12px; stroke-width: 2.6; }
@@ -3258,28 +3261,17 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .local-cache-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0; list-style: none; color: var(--ink-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .local-cache-legend li { display: inline-flex; align-items: center; gap: 6px; }
 .local-cache-select { max-width: 220px; }
-.local-cache-items { margin-top: 0; }
+.local-cache-note { margin: 0; font-size: var(--text-sm); }
 .local-cache-reset { padding-top: 14px; border-top: 1px solid var(--line); }
 .kind-thumb { --kind: var(--series-6); }
 @media (max-width: 720px) {
   .local-cache-figures { grid-template-columns: minmax(0, 1fr); }
 }
-.local-cache-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.local-cache-toolbar > .search-input { flex: 1 1 240px; min-width: 0; }
-.local-cache-sort { width: auto; min-width: 120px; }
-.local-cache-filters { display: flex; flex-wrap: wrap; gap: 8px 16px; }
-.local-cache-count { font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-.local-cache-empty { padding: 12px 0; font-size: var(--text-sm); }
-.local-cache-items .account-attachments-title small { display: flex; flex-wrap: wrap; gap: 0 10px; min-width: 0; }
-.local-cache-folder { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
-.local-cache-items li { grid-template-columns: 15px minmax(0, 1fr) auto auto; }
-.local-cache-more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 /* 侧栏「本机缓存」：与上方计入配额的两组用分隔线隔开，不参与占比条。 */
 .storage-local { padding-top: 8px; border-top: 1px dashed var(--line); }
 .storage-local h4 > svg { justify-self: center; color: var(--ink-3); }
 .storage-meter .storage-local-note { color: var(--ink-3); font-size: var(--text-xs); }
 .storage-local-note .link-button { font-size: var(--text-xs); }
-.local-cache-items.is-loading { opacity: .6; transition: opacity var(--duration-fast); }
 
 /* 手机上的普通预览窗口（PDF、不支持的类型）：头部保持一行——去掉文件图标、全屏按钮与分隔线，标题省略，操作按钮靠右。 */
 @media (max-width: 560px) {

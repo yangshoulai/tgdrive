@@ -106,9 +106,10 @@ export async function cachedFiles(files: CacheFile[]) {
     result.push(...await ask<(FileCacheState & { busy: boolean })[]>("tessera-cache:files", { urls: files.slice(index, index + 200).map(fileUrl) }, 30000));
   return result;
 }
-/** 手动缓存过的文件（键与 cacheFileId 相同）；文件列表只为它们显示状态。私密层只在私密空间已解锁时包含。 */
-export const manualCachedFiles = (withPrivate: boolean) =>
-  ask<(FileCacheState & { id: string })[]>("tessera-cache:manual", { private: withPrivate }, 30000);
+export type CachedFileState = FileCacheState & { manual: boolean };
+/** 已缓存文件的索引（键与 cacheFileId 相同，不含缩略图），文件列表据此区分自动缓存与手动缓存。私密层只在私密空间已解锁时包含。 */
+export const cacheIndex = (withPrivate: boolean) =>
+  ask<(CachedFileState & { id: string })[]>("tessera-cache:index", { private: withPrivate }, 30000);
 export const beginFileCache = (file: CacheFile, id: string, signal: AbortSignal) => ask<({ busy: true } | ({ busy: false } & FileCacheState))>("tessera-cache:start", { url: fileUrl(file), id }, 30000, undefined, signal);
 export const stepFileCache = (id: string, signal: AbortSignal, progress: (state: FileCacheState) => void) => ask<FileCacheState>("tessera-cache:step", { id }, 120000, progress, signal);
 export function cancelFileCache(id?: string) {

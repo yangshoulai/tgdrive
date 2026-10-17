@@ -671,27 +671,36 @@ async function removeFile(url: string) {
   itemCache = null; manualCache = null;
 }
 
-/* ---------- 手动缓存索引：文件列表只为用户手动缓存过的文件显示状态 ---------- */
+/* ---------- 缓存索引：文件列表据此标记自动缓存与手动缓存的文件 ---------- */
 
-type ManualState = { id: string; bytes: number; size: number; complete: boolean };
-let manualCache: { ns: string; withPrivate: boolean; at: number; items: ManualState[] } | null = null;
+type IndexState = { id: string; bytes: number; size: number; complete: boolean; manual: boolean };
+let manualCache: { ns: string; withPrivate: boolean; at: number; items: IndexState[] } | null = null;
+/** 条目的 etag 与大小在写入后不变：按条目键记住解密结果，索引重建时只解密新条目。 */
+const infoMemo = new Map<string, { etag: string; size: number; manual: boolean; thumb: boolean }>();
 
-/** 只解密带手动标记的条目；1.11.0 留下的无标记条目解密一次补上标记（私密层要等私密授权可用时补）。
- * 私密层复用已有的私密上下文，不逐个文件申请条目密钥。 */
-async function manualIndex(withPrivate: boolean): Promise<ManualState[]> {
+/** 当前账号已缓存的文件（不含缩略图），键与 cacheFileId 相同；私密层只在私密空间已解锁时包含。 */
+async function cacheIndex(withPrivate: boolean): Promise<IndexState[]> {
   const context = await normalContext();
   if (!context) return [];
-  if (manualCache && manualCache.ns === context.ns && manualCache.withPrivate === withPrivate && Date.now() - manualCache.at < 10_000) return manualCache.items;
+  if (manualCache && manualCache.ns === context.ns && manualCache.withPrivate === withPrivate && Date.now() - manualCache.at < 5_000) return manualCache.items;
   const secret = withPrivate ? await privateContext({ tier: "p", etag: "", version: "", path: "", access: "", bucketId: null, thumb: false }) : null;
-  const items: ManualState[] = [], flags: [string, boolean][] = [];
+  const items: IndexState[] = [], flags: [string, boolean][] = [], seen = new Set<string>();
   for (const entry of await listEntries(context.ns)) {
     const tierContext = entry.tier === "n" ? context : secret;
-    if (entry.manual === false || !tierContext || entry.kind === "thumb") continue;
-    const info = await openInfo(tierContext.info, entry);
-    if (!info) continue;
-    if (entry.manual === undefined) flags.push([entry.key, Boolean(info.manual)]);
-    if (info.manual) items.push({ id: `${entry.tier}:${info.etag}`, ...fileCacheState(entry, info.size) });
+    if (!tierContext || entry.kind === "thumb") continue;
+    seen.add(entry.key);
+    let known = infoMemo.get(entry.key);
+    if (!known) {
+      const info = await openInfo(tierContext.info, entry);
+      if (!info) continue;
+      known = { etag: info.etag, size: info.size, manual: Boolean(info.manual), thumb: info.kind === "thumb" };
+      infoMemo.set(entry.key, known);
+      if (entry.manual === undefined) flags.push([entry.key, known.manual]);
+    }
+    if (known.thumb) continue;
+    items.push({ id: `${entry.tier}:${known.etag}`, ...fileCacheState(entry, known.size), manual: entry.manual ?? known.manual });
   }
+  for (const key of infoMemo.keys()) if (!seen.has(key) && infoMemo.size > seen.size) infoMemo.delete(key);
   await setManualFlags(flags);
   context.signal.throwIfAborted();
   manualCache = { ns: context.ns, withPrivate, at: Date.now(), items };
@@ -883,7 +892,7 @@ sw.addEventListener("message", event => {
     case "tessera-cache:clear": reply(clear(data.scope ?? "normal", data.key)); break;
     case "tessera-cache:reset": dropKeys(); reply(clear("all")); break;
     case "tessera-cache:files": reply(fileStates(data.urls ?? [])); break;
-    case "tessera-cache:manual": reply(manualIndex((data as { private?: boolean }).private === true)); break;
+    case "tessera-cache:index": reply(cacheIndex((data as { private?: boolean }).private === true)); break;
     case "tessera-cache:start": reply(startManual(owner, data.id ?? "", data.url ?? "")); break;
     case "tessera-cache:step": reply(stepManual(owner, data.id ?? "", value => port?.postMessage({ progress: value }))); break;
     case "tessera-cache:cancel":

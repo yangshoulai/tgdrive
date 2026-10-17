@@ -15,7 +15,7 @@ import { PrivateTransferDialog } from "./private-access";
 import type { PreviewPlayback } from "../files";
 import { usePrivateToast } from "./private-session";
 import { usePreview } from "./preview-host";
-import { FileCacheStatus, cacheMenuItems, useCacheQueue } from "./cache";
+import { FileCacheStatus, cacheMenuItems, cacheSelection, useCacheQueue } from "./cache";
 import { useFilesBridge } from "./assistant-bridge";
 
 /* ---------- 文件 ---------- */
@@ -397,6 +397,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const rendered = useRenderLimit(entries, fetchPage);
   // 列表只显示手动缓存的状态（索引由 CacheTasksProvider 统一读取），不逐个文件查询本机缓存。
   const cacheQueue = useCacheQueue();
+  const selectionCache = cacheSelection(cacheQueue, selectedFiles.map(entry => entry.file));
   // 焦点项可能还没挂载（End、跨批移动）：先放宽渲染范围，等它出现在 DOM 后只滚动一次，之后滚动加载不再拉回焦点。
   const pendingScroll = useRef<string | null>(null);
   useEffect(() => {
@@ -496,6 +497,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           href: selectedEntries.length > 200 ? undefined : downloadUrl(selectedEntries) },
         { label: "移动到…", icon: "move", onSelect: () => setMoving(selectedEntries) },
         { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring(selectedEntries) },
+        ...(selectionCache.cacheable.length ? [{ label: `缓存 ${selectionCache.cacheable.length} 个文件到本机`, icon: "monitor" as const, onSelect: () => cacheQueue?.enqueueMany(selectionCache.cacheable) }] : []),
+        ...(selectionCache.cached.length ? [{ label: `清除 ${selectionCache.cached.length} 个文件的本机缓存`, icon: "trash" as const, danger: true, divider: true, onSelect: () => cacheQueue?.remove(selectionCache.cached) }] : []),
         { label: `删除 ${selected.size} 项`, icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash(selectedEntries) },
       ];
     }
@@ -545,6 +548,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <div className="toolbar-actions">
             {selectedEntries.length > 200 ? <Button size="sm" icon="download" onClick={downloadLimit}>下载</Button>
               : <ButtonLink variant="secondary" size="sm" icon="download" href={downloadUrl(selectedEntries)}>下载</ButtonLink>}
+            {selectionCache.cacheable.length > 0 && <Button size="sm" icon="monitor" onClick={() => cacheQueue?.enqueueMany(selectionCache.cacheable)}>缓存到本机</Button>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
             <Button size="sm" icon="move" onClick={() => setMoving(selectedEntries)}>移动</Button>

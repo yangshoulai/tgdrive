@@ -501,7 +501,7 @@ test("自动缓存的单个文件最多占设备容量的一半，超出部分�
   assert.equal([...h.entries.values()][0].bytes, 2 * store.BLOCK);
 });
 
-test("文件列表只取手动缓存索引：自动缓存不列出，旧条目首次补标记", async t => {
+test("文件列表只取一次缓存索引：区分自动与手动，旧条目首次补标记", async t => {
   const h = harness(t, { "auto.png": bytes(2048), "kept.bin": bytes(2 * store.BLOCK + 9), "half.bin": bytes(3 * store.BLOCK), [SECRET]: bytes(65536) });
   await h.read("auto.png");
   const ids = name => `${name.startsWith(".tgdrive/private/") ? "p" : "n"}:${h.files.get(name).etag}`;
@@ -515,9 +515,12 @@ test("文件列表只取手动缓存索引：自动缓存不列出，旧条目�
   // 模拟 1.11.0 留下的条目：明文没有手动标记，只有加密 info 里有。
   for (const entry of h.entries.values()) delete entry.manual;
   const keysBefore = h.keyRequests().length;
-  const normal = await h.ask("tessera-cache:manual", { private: false });
+  const normal = await h.ask("tessera-cache:index", { private: false });
   const byId = Object.fromEntries(normal.map(item => [item.id, item]));
-  assert.deepEqual(Object.keys(byId).sort(), [ids("half.bin"), ids("kept.bin")].sort());
+  assert.deepEqual(Object.keys(byId).sort(), [ids("auto.png"), ids("half.bin"), ids("kept.bin")].sort());
+  assert.equal(byId[ids("auto.png")].manual, false);
+  assert.equal(byId[ids("kept.bin")].manual, true);
+  assert.equal(byId[ids("half.bin")].manual, true);
   assert.equal(byId[ids("kept.bin")].complete, true);
   assert.equal(byId[ids("half.bin")].complete, false);
   assert.equal(byId[ids("half.bin")].bytes, store.BLOCK);
@@ -525,6 +528,7 @@ test("文件列表只取手动缓存索引：自动缓存不列出，旧条目�
   const flags = [...h.entries.values()].filter(entry => entry.tier === "n").map(entry => entry.manual).sort();
   assert.equal(JSON.stringify(flags), JSON.stringify([false, true, true]), "普通层旧条目已补上标记");
   await h.message("tessera-cache:access", { access: "grant" });
-  const withPrivate = await h.ask("tessera-cache:manual", { private: true });
-  assert.ok(withPrivate.some(item => item.id === ids(SECRET) && item.complete));
+  const withPrivate = await h.ask("tessera-cache:index", { private: true });
+  assert.ok(withPrivate.some(item => item.id === ids(SECRET) && item.complete && item.manual));
+  assert.ok(!normal.some(item => item.id === ids(SECRET)), "未解锁时不包含私密层");
 });
