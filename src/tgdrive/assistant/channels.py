@@ -214,6 +214,7 @@ class ChannelStore:
                 "capabilities": {name: capabilities.get(name) for name in ("tools", "reasoning", "vision", "structured")},
                 "catalog_id": row["catalog_id"], "manual_fields": manual,
                 "removed_upstream": bool(row["removed_upstream"]), "sort": row["sort"],
+                "private_ok": bool(row["private_ok"]),
                 "tested_at": row["tested_at"], "test_note": row["test_note"]}
 
     def models(self, channel_id: int | None = None) -> list[dict[str, object]]:
@@ -230,17 +231,20 @@ class ChannelStore:
             raise NotFoundError("模型不存在")
         return self._model_json(row)
 
-    def usable(self) -> list[dict[str, object]]:
-        """用户可选的模型：渠道启用、模型启用、未确认不支持工具调用。"""
+    def usable(self, *, private: bool = False) -> list[dict[str, object]]:
+        """用户可选的模型：渠道启用、模型启用、未确认不支持工具调用；private 时只列允许私密对话的模型。"""
         rows = self.metadata.db.execute(
             "SELECT m.*, c.name AS channel_name FROM ai_models m JOIN ai_channels c ON c.id=m.channel_id "
-            "WHERE c.enabled=1 AND m.enabled=1 AND m.tools!='no' ORDER BY c.id, m.sort, m.id").fetchall()
+            "WHERE c.enabled=1 AND m.enabled=1 AND m.tools!='no'" + (" AND m.private_ok=1" if private else "")
+            + " ORDER BY c.id, m.sort, m.id").fetchall()
         return [{**self._model_json(row), "channel_name": row["channel_name"]} for row in rows]
 
-    def is_usable(self, model_id: int) -> bool:
+    def is_usable(self, model_id: int, *, private: bool = False) -> bool:
+        """private：私密对话只能使用管理员标记为允许私密对话的模型（docs/assistant-design.md §24.4）。"""
         return self.metadata.db.execute(
             "SELECT 1 FROM ai_models m JOIN ai_channels c ON c.id=m.channel_id "
-            "WHERE m.id=? AND c.enabled=1 AND m.enabled=1 AND m.tools!='no'", (model_id,)).fetchone() is not None
+            "WHERE m.id=? AND c.enabled=1 AND m.enabled=1 AND m.tools!='no'" + (" AND m.private_ok=1" if private else ""),
+            (model_id,)).fetchone() is not None
 
     def add_model(self, channel_id: int, payload: dict) -> dict[str, object]:
         self._row(channel_id)
@@ -271,7 +275,8 @@ class ChannelStore:
 
     @staticmethod
     def _model_fields(payload: dict) -> dict[str, object]:
-        allowed = {"display_name", "enabled", "tools", "context_window", "max_output", "sort", "input_price", "output_price", "vision"}
+        allowed = {"display_name", "enabled", "tools", "context_window", "max_output", "sort", "input_price", "output_price", "vision",
+                   "private_ok"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
@@ -285,6 +290,10 @@ class ChannelStore:
             if not isinstance(payload["enabled"], bool):
                 raise ValueError("enabled 必须是布尔值")
             values["enabled"] = int(payload["enabled"])
+        if "private_ok" in payload:
+            if not isinstance(payload["private_ok"], bool):
+                raise ValueError("private_ok 必须是布尔值")
+            values["private_ok"] = int(payload["private_ok"])
         if "tools" in payload:
             if payload["tools"] not in ("unknown", "yes", "no"):
                 raise ValueError("工具调用支持只能是 unknown、yes 或 no")

@@ -17,7 +17,7 @@ import { TrashView } from "./user/trash";
 import { DownloadsView } from "./user/downloads";
 import { DownloadTray } from "./user/download-tray";
 import { PreviewHost } from "./user/preview-host";
-import { AssistantDrawer, AssistantLauncher, useAssistantConfig, useAssistantShortcut } from "./user/assistant";
+import { AssistantDock, AssistantDrawer, AssistantLauncher, useAssistantConfig, useAssistantShortcut } from "./user/assistant";
 import { takePageImportRequest, usePageImport } from "./user/page-import";
 import { PrivateSessionProvider } from "./user/private-session";
 import { EmailDialog, UserSettingsPage } from "./user/account";
@@ -308,8 +308,9 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
           onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCompleted={refreshUsage} />}
         <UploadTray queue={uploads} />
       </div>
-      {assistantAvailable && assistant.config && !assistantPage && <AssistantDrawer open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)}
-        onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" ? location.prefix : "" }}
+      {/* 私密空间页面已解锁时显示私密对话（§24.8），其他页面显示普通对话。 */}
+      {assistantAvailable && assistant.config && !assistantPage && <AssistantDock open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)}
+        onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" || section === "private" ? location.prefix : "" }}
         onFilesChanged={filesChanged} pageImport={pageImport} onPageImportDone={clearPageImport} onNavigate={(view, prefix) => navigate(view, prefix ?? "")}
         onOpenPage={id => { setAssistantOpen(false); navigate("assistantPage", id ?? ""); }} />}
       {/* 助手抽屉也在预览宿主内：消息里的附件图片直接打开预览。 */}

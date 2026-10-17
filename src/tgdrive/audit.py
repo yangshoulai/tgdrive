@@ -49,6 +49,9 @@ ACTIONS = {
     "assistant.action.reject": "拒绝助手操作", "assistant.action.cancel": "取消助手操作",
     "assistant.action.undo": "撤销助手操作", "assistant.action.auto": "自动执行助手操作",
     "assistant.attachment.save": "保存助手附件到我的文件",
+    "private.assistant.action.confirm": "确认私密对话操作", "private.assistant.action.reject": "拒绝私密对话操作",
+    "private.assistant.action.cancel": "取消私密对话操作", "private.assistant.action.undo": "撤销私密对话操作",
+    "private.assistant.move_out": "助手移出私密空间", "private.assistant.move_in": "助手移入私密空间",
 }
 
 

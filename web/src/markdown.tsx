@@ -8,6 +8,8 @@ import { Icon } from "./ui";
 type Ctx = { refs: Map<string, { url: string; title?: string }>; resolveImage?: (src: string) => string | null; depth: number;
   /** 文件助手的 @ 引用（如 "/电影/"，按长度降序）：正文中的 @路径 显示为胶囊。 */
   mentions?: string[]; renderMention?: (path: string) => ReactNode;
+  /** 只放行允许的链接（私密对话只认对话中出现过的地址），其余显示为文字。 */
+  allowLink?: (href: string) => boolean;
   /** 链接前加地球图标（用户消息）。 */
   linkIcon?: boolean };
 
@@ -119,7 +121,9 @@ function inline(text: string, ctx: Ctx): ReactNode[] {
   const flush = () => { if (buf) { out.push(buf); buf = ""; } };
   const add = (make: (key: number) => ReactNode) => { flush(); out.push(make(out.length)); };
   const nested = (value: string) => ctx.depth > 6 ? [value] : inline(value, { ...ctx, depth: ctx.depth + 1 });
-  const link = (key: number, href: string | null, children: ReactNode, title?: string) => href
+  const link = (key: number, href: string | null, children: ReactNode, title?: string) => href && ctx.allowLink && !/^mailto:/i.test(href) && !ctx.allowLink(href)
+    ? <span key={key} className="md-link-blocked" title="这个地址没有在对话中出现过，不能直接打开">{children}</span>
+    : href
     ? <a key={key} href={href} title={title} target="_blank" rel="noreferrer noopener" className={ctx.linkIcon ? "md-link-chip" : undefined}>{ctx.linkIcon && <Icon name="globe" size={13} />}{children}</a>
     : <Fragment key={key}>{children}</Fragment>;
 
@@ -392,7 +396,7 @@ function blocks(lines: string[], ctx: Ctx, tight = false): ReactNode[] {
   return out;
 }
 
-function parse(source: string, resolveImage?: (src: string) => string | null, extra: Pick<Ctx, "mentions" | "renderMention" | "linkIcon"> = {}): ReactNode[] {
+function parse(source: string, resolveImage?: (src: string) => string | null, extra: Pick<Ctx, "mentions" | "renderMention" | "linkIcon" | "allowLink"> = {}): ReactNode[] {
   const lines = source.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n");
   const head: ReactNode[] = [];
   if (lines[0]?.trim() === "---") {
@@ -415,9 +419,9 @@ function parse(source: string, resolveImage?: (src: string) => string | null, ex
   return [...head, ...blocks(content, { refs, resolveImage, depth: 0, ...extra })];
 }
 
-export function Markdown({ source, resolveImage, mentions, renderMention, linkIcon }: { source: string; resolveImage?: (src: string) => string | null;
-  mentions?: string[]; renderMention?: (path: string) => ReactNode; linkIcon?: boolean }) {
+export function Markdown({ source, resolveImage, mentions, renderMention, linkIcon, allowLink }: { source: string; resolveImage?: (src: string) => string | null;
+  mentions?: string[]; renderMention?: (path: string) => ReactNode; linkIcon?: boolean; allowLink?: (href: string) => boolean }) {
   const sorted = useMemo(() => mentions?.length ? [...mentions].sort((a, b) => b.length - a.length) : undefined, [mentions?.join("\n")]); // eslint-disable-line react-hooks/exhaustive-deps
-  const nodes = useMemo(() => parse(source, resolveImage, { mentions: sorted, renderMention, linkIcon }), [source, resolveImage, sorted, renderMention, linkIcon]);
+  const nodes = useMemo(() => parse(source, resolveImage, { mentions: sorted, renderMention, linkIcon, allowLink }), [source, resolveImage, sorted, renderMention, linkIcon, allowLink]);
   return <div className="md">{nodes}</div>;
 }

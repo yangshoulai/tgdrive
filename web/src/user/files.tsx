@@ -228,7 +228,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     });
   }
   // 文件助手的浏览器工具读取当前目录、可见条目与选中状态（私密空间不登记）。
-  useFilesBridge(!privateSpace && !query, prefix, {
+  // 私密空间也登记（prefix 带私密前缀），只有私密对话读取。
+  useFilesBridge(!query, prefix, {
     ready: () => !loading && !pagination.loadingMore && !loadError && pagination.page !== null,
     visible: () => entries.slice(0, 200).map(entry => ({ key: entry.key, size: entry.kind === "file" ? entry.file.size : entry.size })),
     total: () => entries.length,

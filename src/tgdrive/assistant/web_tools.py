@@ -73,6 +73,8 @@ async def parse_download_source(ctx: ToolContext, args: dict) -> ToolOutput:
     text = _str(args, "text", limit=16384)
     if not text:
         raise ToolError("请提供链接")
+    # 私密对话：链接或命令必须原样来自用户消息（§24.5.2），模型不能补充请求头或参数。
+    ctx.check_url(text, "text")
     try:
         parsed = await ctx.offline.parse(ctx.user_id, text)
     except (ValueError, DownloadError) as exc:
@@ -105,6 +107,10 @@ async def analyze_page(ctx: ToolContext, args: dict) -> ToolOutput:
     goal = _str(args, "goal", limit=300) or "保存页面中的主体图片"
     if bool(url) == bool(snapshot_id):
         raise ToolError("请在 url 与 snapshot_id 中二选一")
+    if snapshot_id and ctx.private:
+        raise ToolError("私密对话不接受抓取脚本的页面快照，请让用户在消息里给出网页链接")
+    if url:
+        ctx.check_url(url.strip(), "user")
     if snapshot_id:
         snapshot = _record(ctx, snapshot_id, kind="snapshot")
         pages, start_url, source = snapshot["urls"], snapshot["urls"][0]["url"], snapshot["source"]
@@ -294,6 +300,7 @@ async def propose_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
         if not isinstance(urls, list) or not all(isinstance(url, str) for url in urls):
             raise ToolError("参数 urls 需要链接列表")
         for url in dict.fromkeys(urls):
+            ctx.check_url(url.strip(), "user")
             try:
                 clean = checked_url(url.strip())
             except ValueError as exc:

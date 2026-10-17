@@ -9,7 +9,8 @@ import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButt
 import type { PageImport } from "./page-import";
 import { Thread, useMarkState, type LiveRun } from "./assistant-thread";
 import { AttachmentTray, useAttachments } from "./assistant-attachments";
-import { filesBridge, waitForFiles } from "./assistant-bridge";
+import { filesBridge, getPrivateSection, openPrivateSection, waitForFiles } from "./assistant-bridge";
+import { usePrivateAccess } from "./private-session";
 import { assistantEnvironment } from "./assistant-environment";
 import { commonFolder, useMentions } from "./assistant-mentions";
 import { AssistantComposer, type ComposerHandle } from "./assistant-composer";
@@ -35,6 +36,44 @@ export function useAssistantConfig(enabled: boolean) {
   return { config, refresh };
 }
 
+type DrawerProps = Parameters<typeof AssistantDrawer>[0];
+
+/**
+ * 抽屉的宿主（§24.8）：在私密空间页面、私密空间已解锁且账号可以使用私密对话时显示私密对话抽屉，
+ * 其他页面显示普通对话。普通抽屉一直挂着（切回时对话还在）；私密抽屉离开私密空间或锁定即卸载，
+ * 私密对话保留在服务器内存里，回到私密空间时重新打开。锁定时收起抽屉，不把普通对话顶上来。
+ */
+export function AssistantDock(props: DrawerProps) {
+  const privateView = props.location.view === "private" && Boolean(props.config.private_available);
+  const { grant } = usePrivateAccess();
+  const access = privateView ? grant?.access ?? "" : "";
+  const [privateConfig, setPrivateConfig] = useState<{ access: string; config: ai.AssistantConfig | null } | null>(null);
+  const refresh = useCallback(() => {
+    if (!access) { setPrivateConfig(null); return; }
+    void ai.assistantConfig(undefined, true).then(config => setPrivateConfig({ access, config }))
+      .catch(() => setPrivateConfig({ access, config: null }));
+  }, [access]);
+  useEffect(refresh, [refresh]);
+  const current = privateConfig?.access === access ? privateConfig : null;
+  const loading = Boolean(access) && !current;
+  const config = current?.config?.available ? current.config : null;
+  const { onClose, open } = props;
+  const shown = useRef(false);
+  useEffect(() => {
+    if (config) { shown.current = true; return; }
+    if (!shown.current || access) return;
+    shown.current = false;
+    // 在私密空间页面锁定（手动或闲置）：收起抽屉；离开私密空间页面则直接切回普通对话。
+    if (privateView && open) onClose();
+  }, [Boolean(config), access]);
+  return <>
+    <AssistantDrawer {...props} open={props.open && !config && !loading} />
+    {config && <AssistantDrawer key={access} open={props.open} config={config} location={props.location} onClose={props.onClose}
+      onConfigChanged={() => { refresh(); props.onConfigChanged(); }}
+      onFilesChanged={props.onFilesChanged} onNavigate={props.onNavigate} privateMode />}
+  </>;
+}
+
 export function AssistantLauncher({ onOpen, open }: { onOpen: () => void; open: boolean }) {
   return (
     <button type="button" className={`assistant-launch${open ? " is-active" : ""}`} onClick={onOpen} data-closes-nav aria-expanded={open} aria-keyshortcuts="Meta+J Control+J">
@@ -43,12 +82,12 @@ export function AssistantLauncher({ onOpen, open }: { onOpen: () => void; open: 
   );
 }
 
-export type AssistantNavigate = (view: "files" | "trash" | "downloads" | "shared", prefix?: string) => void;
+export type AssistantNavigate = (view: "files" | "trash" | "downloads" | "shared" | "private", prefix?: string) => void;
 const FULL_ACK_KEY = "tessera-assistant-full-ack";
 const EMPTY_LIVE: LiveRun = { reasoning: "", reasoningStartedAt: null, streaming: "", tools: [], phase: "thinking" };
 
 export function AssistantDrawer({ open, config, location, onClose, onConfigChanged, mode = "drawer", initialConversation, onOpenPage,
-  onConversationChange, onFilesChanged, pageImport, onPageImportDone, onNavigate }: {
+  onConversationChange, onFilesChanged, pageImport, onPageImportDone, onNavigate, privateMode = false }: {
   open: boolean; config: ai.AssistantConfig; location: AssistantLocation; onClose: () => void; onConfigChanged: () => void;
   /** drawer：右侧抽屉；page：全页（左侧对话列表常驻，消息流居中）。 */
   mode?: "drawer" | "page"; initialConversation?: string | null; onOpenPage?: (conversationId: string | null) => void;
@@ -57,6 +96,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   pageImport?: PageImport | null; onPageImportDone?: () => void;
   /** 浏览器工具 ui_navigate 等：在 Tessera 中打开页面。全页模式不提供（会离开对话页）。 */
   onNavigate?: AssistantNavigate;
+  /** 私密对话（§24）：作用域固定为私密空间，对话只在服务器内存中，没有历史、附件与全页模式。 */
+  privateMode?: boolean;
 }) {
   const page = mode === "page";
   const [width, setWidth] = useState(() => { const saved = Number(localStorage.getItem(WIDTH_KEY)); return saved >= MIN_WIDTH && saved <= MAX_WIDTH ? saved : 480; });
@@ -100,10 +141,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const unsubscribe = useRef<(() => void) | null>(null);
   const selection = useRef(0);
   const currentId = detail?.conversation.id ?? null;
-  const locationKey = location.view === "files" ? location.prefix : "";
+  const locationKey = location.view === "files" || privateMode && location.view === "private" ? location.prefix : privateMode ? api.PRIVATE_PREFIX : "";
   const headerMark = useMarkState(runId ? live ?? EMPTY_LIVE : null);
   const chosenScope = scopeTarget === HERE ? locationKey : scopeTarget;
-  const mention = useMentions({ draft, location: locationKey, enabled: config.notice_ack && !(config.usage.limit && config.usage.today >= config.usage.limit),
+  const mention = useMentions({ draft, location: locationKey, enabled: !privateMode && config.notice_ack && !(config.usage.limit && config.usage.today >= config.usage.limit),
     onPick: (from, path) => input.current?.insertMention(from, path) });
 
   useEffect(() => {
@@ -120,10 +161,11 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     return () => { root.style.removeProperty("--assistant-occupied"); };
   }, [page, open, width]);
   useEffect(() => () => unsubscribe.current?.(), []);
+  // 普通与私密抽屉可能同时挂着：只由打开的那个设置，关闭时移除。
   useEffect(() => {
-    if (page) return;
+    if (page || !open) return;
     const root = document.documentElement;
-    root.classList.toggle("assistant-open", open);
+    root.classList.add("assistant-open");
     return () => root.classList.remove("assistant-open");
   }, [open, page]);
   // 全页地址随当前对话更新；初始对话还没加载出来时不要把地址改成「新对话」。
@@ -143,10 +185,17 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   const loadConversations = useCallback(() => {
     setConversations(null);
-    void ai.conversations(null, archived).then(result => { setConversations(result.conversations); setHistoryCursor(result.next_cursor); })
+    void ai.conversations(null, archived, privateMode).then(result => { setConversations(result.conversations); setHistoryCursor(result.next_cursor); })
       .catch(reason => { setConversations([]); toast.error(api.errorMessage(reason, "对话列表加载失败")); });
-  }, [archived]);
+  }, [archived, privateMode]);
   useEffect(() => { if (open) loadConversations(); }, [open, loadConversations]);
+  // 私密对话每个登录会话最多一个：回到私密空间时直接接上还在内存里的那个。
+  const resumed = useRef(false);
+  useEffect(() => {
+    if (!privateMode || resumed.current || !conversations) return;
+    resumed.current = true;
+    if (conversations[0] && !detail) void openConversation(conversations[0].id);
+  }, [privateMode, conversations]);
   async function moreConversations() {
     if (!historyCursor || historyBusy) return;
     setHistoryBusy(true);
@@ -184,8 +233,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   // 浏览器工具：在当前页面执行后回传结果。只执行仍在有效期内、尚未处理的调用（断线重放时不重复操作页面）。
   const handledCalls = useRef(new Set<string>());
-  const clientContext = useRef({ location, onNavigate, page });
-  clientContext.current = { location, onNavigate, page };
+  const clientContext = useRef({ location, onNavigate, page, privateMode });
+  clientContext.current = { location, onNavigate, page, privateMode };
   const runClientCall = useCallback(async (runId: string, event: ai.RunEvent) => {
     const callId = String(event.call_id ?? "");
     if (!callId || handledCalls.current.has(callId) || Number(event.expires_at ?? 0) * 1000 < Date.now()) return;
@@ -292,7 +341,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       const target = mentions.some(key => !key.startsWith(baseScope)) ? commonFolder([baseScope || "/", ...mentions].filter(key => key !== "/")) : chosenScope;
       let current = detail;
       if (!current) {
-        current = await ai.createConversation(target ?? locationKey, modelId, config.full_access ? pendingMode : "approval");
+        current = await ai.createConversation(privateMode ? locationKey : target ?? locationKey, modelId, config.full_access ? pendingMode : "approval", privateMode);
         if (version !== selection.current) return;
         setDetail(current);
         loadConversations();
@@ -302,7 +351,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         snapshotId = (await ai.uploadSnapshot(current.conversation.id, importedPages)).snapshot_id;
       }
       const result = await ai.sendMessage(current.conversation.id, { text: message, model_id: modelId ?? undefined, location: locationKey, view: location.view,
-        ...(current === detail && target !== null ? { scope: "path" as const, scope_path: display(target) } : {}),
+        ...(current === detail && target !== null && !privateMode ? { scope: "path" as const, scope_path: display(target) } : {}),
         mentions: mentions.length ? mentions.map(display) : undefined, attachments: withFiles ? attachments.ids : undefined,
         snapshot_id: snapshotId, environment: assistantEnvironment() });
       if (version !== selection.current) return;
@@ -357,7 +406,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   }
 
   async function acknowledge() {
-    try { await ai.acknowledgeNotice(); onConfigChanged(); }
+    try { await ai.acknowledgeNotice(privateMode); onConfigChanged(); }
     catch (reason) { toast.error(api.errorMessage(reason, "操作失败")); }
   }
 
@@ -446,7 +495,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const selectedModel = config.models.find(model => model.id === modelId);
   const canSee = selectedModel?.capabilities?.vision === true;
   // 私密空间不对助手开放，也不在那里添加附件（附件保存在普通文件区域）。
-  const canAttach = config.notice_ack && !exhausted && location.view !== "private";
+  const canAttach = config.notice_ack && !exhausted && location.view !== "private" && !privateMode;
   const addFiles = (files: File[], pasted = false) => { if (!canAttach || !files.length) return false; attachments.add(files, pasted); return true; };
   const hasFiles = (event: ReactDragEvent) => [...event.dataTransfer.types].includes("Files");
   const dropProps = {
@@ -462,21 +511,23 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     loadConversations(); if (deleted && deleted === currentId) newConversation(); else reloadDetail();
   }} />;
   const header = <header className="assistant-header">
-    {<IconButton className={page ? "assistant-mobile-history" : undefined} icon="list" label="对话历史" active={history} onClick={() => { setHistory(value => !value); if (!history) loadConversations(); }} />}
+    {!privateMode && <IconButton className={page ? "assistant-mobile-history" : undefined} icon="list" label="对话历史" active={history} onClick={() => { setHistory(value => !value); if (!history) loadConversations(); }} />}
     <span className={`assistant-brand-mark${runId ? " is-working" : ""}`} aria-hidden="true"><AssistantMark size={24} state={headerMark} /></span>
-    <div className="assistant-title"><strong>{detail?.conversation.title || "文件助手"}</strong>
-      <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{detail ? conversationScope : "查找、整理，让文件井井有条"}</small></div>
-    <IconButton icon="plus" label="新对话（⌘⇧O）" onClick={newConversation} />
-    {!page && onOpenPage && <IconButton icon="maximize" label="在全页打开" onClick={() => onOpenPage(currentId)} />}
+    {privateMode ? <div className="assistant-title"><strong><span className="assistant-private-tag"><Icon name="lock" size={11} />私密</span>{detail?.conversation.title || "私密对话"}</strong>
+      <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{selectedModel?.label ?? "未选择模型"} · 锁定后对话会被清除</small></div>
+    : <div className="assistant-title"><strong>{detail?.conversation.title || "文件助手"}</strong>
+      <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{detail ? conversationScope : "查找、整理，让文件井井有条"}</small></div>}
+    <IconButton icon="plus" label={privateMode ? "新的私密对话（⌘⇧O，当前对话会被清除）" : "新对话（⌘⇧O）"} onClick={newConversation} />
+    {!page && onOpenPage && !privateMode && <IconButton icon="maximize" label="在全页打开" onClick={() => onOpenPage(currentId)} />}
     {!page && <IconButton icon="x" label="关闭" onClick={onClose} />}
   </header>;
   const body = <>
     <div className="assistant-scroll-area"><div className="assistant-thread" ref={scroller} role="log" aria-live="polite" aria-relevant="additions"
       onScroll={event => { const node = event.currentTarget; const bottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; setAtBottom(bottom); if (bottom) setUnseen(false); }}>
       <div className="assistant-thread-inner">
-        {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} onAccept={() => void acknowledge()} />
+        {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} privateMode={privateMode} onAccept={() => void acknowledge()} />
           : loading ? <SkeletonRows rows={4} />
-          : !detail ? <Welcome location={effectiveScope} onPick={text => { setDraft(text); input.current?.focus(); }} />
+          : !detail ? <Welcome location={effectiveScope} privateMode={privateMode} onPick={text => { setDraft(text); input.current?.focus(); }} />
           : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
               onRetry={retryFrom} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
         {reconnecting && <p className="ai-notice" role="status"><Icon name="refresh" size={14} /><span>重新连接中…</span></p>}
@@ -488,15 +539,17 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       {mention.menu}
       <div className={`assistant-compose-box${runId ? " is-running" : ""}`}>
         <div className="assistant-context-row">
-          <ScopeChip scope={effectiveScope} conversationScope={detail ? conversationScope : null} location={currentLocation}
-            privateView={location.view === "private"} changed={scopeTarget !== null} following={scopeTarget === HERE || (!detail && scopeTarget === null)} onChoose={setScopeTarget} />
+          {privateMode ? <span className="assistant-scope is-private" title="私密对话只处理私密空间里的文件，不能访问普通文件">
+            <span className="assistant-scope-trigger"><Icon name="lock" size={14} /><span className="assistant-scope-label">私密空间</span></span></span>
+          : <ScopeChip scope={effectiveScope} conversationScope={detail ? conversationScope : null} location={currentLocation}
+            privateView={location.view === "private"} changed={scopeTarget !== null} following={scopeTarget === HERE || (!detail && scopeTarget === null)} onChoose={setScopeTarget} />}
           <ModeChip mode={accessMode} allowed={config.full_access} onChoose={next => void chooseMode(next)} />
         </div>
         {expandedScope && <p className="assistant-mention-hint"><Icon name="info" size={12} />引用不在 {effectiveScope} 内，发送时作用域扩大到 {expandedScope}</p>}
         <AttachmentTray attachments={attachments} canSee={canSee} />
         {/* 输入框即时渲染 Markdown、@ 引用胶囊、链接与列表；内容仍是 Markdown 纯文本。 */}
         <AssistantComposer ref={input} value={draft} onChange={setDraft} onSubmit={() => void send()} maxLength={DRAFT_LIMIT}
-          placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : "想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown"}
+          placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : privateMode ? "在私密空间里想找什么，或想怎样整理？支持 Markdown" : "想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown"}
           disabled={!config.notice_ack || exhausted} mentions={mention.known.map(item => display(item.key))}
           onToken={mention.setToken} onKey={mention.onKey} onPasteFiles={files => addFiles(files, true)} />
         <div className="assistant-controls">
@@ -511,7 +564,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           {canAttach && <button type="button" className="assistant-attach-button" onClick={() => filePicker.current?.click()} aria-label="添加附件"
             title={`添加附件（也可以粘贴或拖入），随对话保存${canSee ? "；图片会发给模型识别" : ""}`}><Icon name="paperclip" size={15} /></button>}
           <input ref={filePicker} type="file" multiple hidden onChange={event => { addFiles([...(event.target.files ?? [])]); event.target.value = ""; input.current?.focus(); }} />
-          <span className="assistant-enter-hint">@ 引用 · Enter 发送 · Shift+Enter 换行</span>
+          <span className="assistant-enter-hint">{privateMode ? "Enter 发送 · Shift+Enter 换行" : "@ 引用 · Enter 发送 · Shift+Enter 换行"}</span>
           {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
             : <button type="button" className="assistant-send" aria-label="发送" disabled={(!draft.trim() && !attachments.items.length) || attachments.pending || sending || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)}
               title={attachments.pending ? "附件处理中" : "发送（Enter）"} onClick={() => void send()}>
@@ -530,7 +583,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     </div>
   </>;
   const dialogs = <>
-    {capabilities && <CapabilitiesDialog config={config} onClose={() => setCapabilities(false)} onPick={text => { setCapabilities(false); setDraft(text); input.current?.focus(); }} />}
+    {capabilities && <CapabilitiesDialog config={config} privateMode={privateMode} onClose={() => setCapabilities(false)} onPick={text => { setCapabilities(false); setDraft(text); input.current?.focus(); }} />}
     {retrying && <ConfirmDialog className="assistant-dialog" title="从这条消息重新回答？" confirmLabel="重新回答"
       description={`之后的 ${retrying.later} 轮对话会从记录中删除，无法恢复；其中已经执行的文件操作不会撤销，待确认的操作会失效。`}
       onClose={() => setRetrying(null)} onConfirm={() => { const seq = retrying.seq; setRetrying(null); void retry(seq); }} />}
@@ -555,8 +608,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     </section>
   );
   return (
-    <aside ref={drawer} className={`assistant-drawer${open ? " is-open" : ""}`} style={{ "--assistant-width": `${width}px` } as CSSProperties}
-      aria-label="文件助手" aria-hidden={!open} onKeyDown={onKeyDown} {...dropProps} {...(!open ? { inert: "" } as object : {})}>
+    <aside ref={drawer} className={`assistant-drawer${open ? " is-open" : ""}${privateMode ? " is-private" : ""}`} style={{ "--assistant-width": `${width}px` } as CSSProperties}
+      aria-label={privateMode ? "文件助手（私密对话）" : "文件助手"} aria-hidden={!open} onKeyDown={onKeyDown} {...dropProps} {...(!open ? { inert: "" } as object : {})}>
       <div className="assistant-resize" onPointerDown={startResize} role="separator" tabIndex={open ? 0 : -1} aria-label="调整助手宽度" aria-orientation="vertical"
         aria-valuemin={MIN_WIDTH} aria-valuemax={MAX_WIDTH} aria-valuenow={width}
         onKeyDown={event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault();
@@ -572,8 +625,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
 /** 在用户当前页面执行浏览器工具（docs/assistant-design.md §19.7）。参数已经过服务端校验，这里只做页面操作。 */
 async function executeClientTool(name: string, args: Record<string, unknown>,
-  context: { location: AssistantLocation; onNavigate?: AssistantNavigate; page: boolean }): Promise<Record<string, unknown>> {
+  context: { location: AssistantLocation; onNavigate?: AssistantNavigate; page: boolean; privateMode: boolean }): Promise<Record<string, unknown>> {
   const { location, onNavigate, page } = context;
+  if (context.privateMode) return executePrivateTool(name, args, location, onNavigate);
   const bridge = filesBridge();
   if (name === "ui_get_view") {
     if (location.view === "private") return { view: "private" };
@@ -604,6 +658,49 @@ async function executeClientTool(name: string, args: Record<string, unknown>,
     const folder = key.includes("/") ? key.slice(0, key.lastIndexOf("/") + 1) : "";
     const target = await open(folder);
     if (!target.preview(key)) throw new Error("当前页没有找到这个文件（可能在其他分页）");
+    return { ok: true };
+  }
+  throw new Error("这个浏览器工具不受支持");
+}
+
+/** 私密对话的浏览器工具（§24.5.4）：只读取和操作私密空间页面；路径是带私密前缀的对象键，服务端会再次校验。 */
+async function executePrivateTool(name: string, args: Record<string, unknown>, location: AssistantLocation, onNavigate?: AssistantNavigate): Promise<Record<string, unknown>> {
+  const inPrivate = location.view === "private";
+  const privateBridge = () => { const bridge = filesBridge(); return bridge && api.isPrivatePath(bridge.prefix) ? bridge : null; };
+  if (name === "ui_get_view") {
+    if (!inPrivate) return { view: location.view };
+    const section = getPrivateSection(), bridge = privateBridge();
+    if (section === "trash" || !bridge) return { view: "private", section };
+    return { view: "private", section: "files", path: bridge.prefix, selected: bridge.selected(),
+      visible: bridge.visible().map(item => ({ path: item.key, ...(item.size !== undefined ? { size: item.size } : {}) })), total: bridge.total() };
+  }
+  if (!onNavigate) throw new Error("当前页面无法执行这个操作");
+  const open = async (folder: string) => {
+    const bridge = privateBridge();
+    if (!inPrivate || getPrivateSection() !== "files" || bridge?.prefix !== folder) { onNavigate("private", folder); openPrivateSection("files"); }
+    const ready = await waitForFiles(folder);
+    if (!ready) throw new Error("目录没有在页面上打开");
+    return ready;
+  };
+  if (name === "ui_navigate") {
+    const view = String(args.view ?? "files");
+    if (view === "downloads") onNavigate("downloads");
+    else {
+      if (!inPrivate || view === "files") onNavigate("private", view === "files" ? String(args.path ?? api.PRIVATE_PREFIX) : api.PRIVATE_PREFIX);
+      openPrivateSection(view === "trash" ? "trash" : "files");
+    }
+    return { ok: true };
+  }
+  if (name === "ui_select") {
+    const target = await open(String(args.folder ?? api.PRIVATE_PREFIX));
+    const keys = (args.paths as string[] | undefined) ?? [];
+    const count = target.select(keys);
+    return { selected: count, missing: keys.length - count };
+  }
+  if (name === "ui_preview") {
+    const key = String(args.path ?? "");
+    const target = await open(key.slice(0, key.lastIndexOf("/") + 1) || api.PRIVATE_PREFIX);
+    if (!target.preview(key)) throw new Error("当前页没有找到这个文件");
     return { ok: true };
   }
   throw new Error("这个浏览器工具不受支持");
@@ -672,18 +769,19 @@ function ModeChip({ mode, allowed, onChoose }: { mode: ai.AccessMode; allowed: b
   </Menu>;
 }
 
-function CapabilitiesDialog({ config, onClose, onPick }: { config: ai.AssistantConfig; onClose: () => void; onPick: (text: string) => void }) {
+function CapabilitiesDialog({ config, privateMode, onClose, onPick }: { config: ai.AssistantConfig; privateMode?: boolean; onClose: () => void; onPick: (text: string) => void }) {
   const groups = new Map<string, ai.UserTool[]>();
   for (const tool of config.tools) groups.set(tool.group_label, [...(groups.get(tool.group_label) ?? []), tool]);
-  const examples = ["统计当前目录的空间占用，按类型分组", "找出最大的 10 个文件", "找出重复文件，看看能省多少空间", "最近 7 天新增了哪些文件？", "回收站里有什么，什么时候会被清除？", "读一下 README.md，帮我总结要点"];
+  const examples = privateMode ? ["统计私密空间的空间占用，按类型分组", "私密空间里最大的 10 个文件是什么？", "找出私密空间里的重复文件", "私密回收站里有什么？"]
+    : ["统计当前目录的空间占用，按类型分组", "找出最大的 10 个文件", "找出重复文件，看看能省多少空间", "最近 7 天新增了哪些文件？", "回收站里有什么，什么时候会被清除？", "读一下 README.md，帮我总结要点"];
   return (
-    <Modal title="助手能做什么" description={`你的账号权限：${config.max_level === "read" ? "只读" : config.max_level === "danger" ? "可提议包括不可恢复的操作" : "可提议普通写入"}。修改文件的操作总是需要你确认。`}
+    <Modal title={privateMode ? "私密对话能做什么" : "助手能做什么"} description={`你的账号权限：${config.max_level === "read" ? "只读" : config.max_level === "danger" ? "可提议包括不可恢复的操作" : "可提议普通写入"}。修改文件的操作总是需要你确认。${privateMode ? "私密对话只处理私密空间，联网只访问你在消息里给出的链接。" : ""}`}
       icon="sparkle" className="assistant-dialog" onClose={onClose} footer={<Button onClick={onClose}>关闭</Button>}>
       <div className="assistant-capabilities">
         {[...groups.entries()].map(([group, tools]) => <section key={group}>
           <h3>{group}</h3>
           <ul>{tools.map(tool => <li key={tool.name} className={tool.available ? "" : "is-off"}>
-            <span className="name-stack"><strong>{tool.label}</strong><small>{tool.description}</small></span>
+            <span className="name-stack"><strong>{tool.label}</strong><small>{tool.description}{tool.note ? ` ${tool.note}` : ""}</small></span>
             {tool.available ? (tool.level === "scope" ? <Badge tone="accent">需确认</Badge> : tool.warning ? <Badge tone="warning">{tool.warning}</Badge> : null)
               : <Badge>{tool.reason}</Badge>}
           </li>)}</ul>
@@ -696,19 +794,34 @@ function CapabilitiesDialog({ config, onClose, onPick }: { config: ai.AssistantC
 
 /* ---------- 空状态 ---------- */
 
-function NoticeCard({ notice, retention, onAccept }: { notice: string; retention: number; onAccept: () => void }) {
+function NoticeCard({ notice, retention, privateMode, onAccept }: { notice: string; retention: number; privateMode?: boolean; onAccept: () => void }) {
   return (
     <div className="assistant-notice">
-      <span className="assistant-notice-icon"><Icon name="shield" size={20} /></span>
-      <h3>使用前请了解</h3>
+      <span className="assistant-notice-icon"><Icon name={privateMode ? "lock" : "shield"} size={20} /></span>
+      <h3>{privateMode ? "使用私密对话前请了解" : "使用前请了解"}</h3>
       <p>{notice}</p>
-      <p className="muted">对话保留 {retention} 天；你可以随时删除对话，删除后对你不再可见，并在保留期满后彻底清除。</p>
+      <p className="muted">{privateMode ? "私密对话只保存在服务器内存中，不写入对话记录，也不能归档或在全页打开。"
+        : `对话保留 ${retention} 天；你可以随时删除对话，删除后对你不再可见，并在保留期满后彻底清除。`}</p>
       <Button variant="primary" onClick={onAccept}>我知道了</Button>
     </div>
   );
 }
 
-function Welcome({ location, onPick }: { location: string; onPick: (text: string) => void }) {
+function Welcome({ location, privateMode, onPick }: { location: string; privateMode?: boolean; onPick: (text: string) => void }) {
+  if (privateMode) return <div className="assistant-welcome is-private">
+    <span className="assistant-welcome-icon"><AssistantMark size={36} /></span>
+    <span className="assistant-eyebrow"><Icon name="lock" size={12} />私密对话</span>
+    <h3>只在私密空间里工作。</h3>
+    <p className="muted">助手只能看到私密空间，对话不保存，锁定后立即清除。<br />联网只访问你在消息里给出的链接。</p>
+    <div className="assistant-starters">{[
+      { title: "看懂空间", description: "用量与文件分布", text: "统计私密空间的空间占用，按类型分组", icon: "pulse" as IconName },
+      { title: "找到大文件", description: "发现空间占用大户", text: "私密空间里最大的 10 个文件是什么？", icon: "search" as IconName },
+      { title: "整理文件", description: "按类型自动归类", text: "先看看当前目录的文件，再帮我按类型整理", icon: "folder" as IconName },
+      { title: "发现重复", description: "看看能节省多少空间", text: "找出私密空间里的重复文件，先不要修改", icon: "copy" as IconName },
+    ].map(example => <button type="button" key={example.title} onClick={() => onPick(example.text)}>
+      <Icon name={example.icon} size={18} /><strong>{example.title}</strong><small>{example.description}</small><Icon name="chevronRight" size={13} />
+    </button>)}</div>
+  </div>;
   const examples: { title: string; description: string; text: string; icon: IconName }[] = [
     { title: "看懂空间", description: "用量与文件分布", text: `统计 ${location} 的空间占用，按类型分组`, icon: "pulse" },
     { title: "找到大文件", description: "发现空间占用大户", text: "这里最大的 10 个文件是什么？", icon: "search" },

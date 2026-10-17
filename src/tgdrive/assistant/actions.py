@@ -4,6 +4,8 @@
 - 每项执行前复核：源仍存在、版本（etag）未变、仍在冻结时的作用域内、不在 .tgdrive/；不满足的跳过并计入结果。
 - 按批执行，批间让出事件循环；用户可随时取消，已执行的部分保留。
 - 改名、移动、整理、新建文件夹、移入回收站记录撤销数据，24 小时内可撤销（同样复核版本）。
+- 私密对话（§24）：冻结时的作用域是私密空间前缀，执行用带 private_access 与授权复核的作用域；
+  移出（move_out）与移入（move_in）是仅有的跨区操作，目标目录在确认时决定，不可撤销。
 """
 
 from __future__ import annotations
@@ -17,19 +19,21 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ..errors import NotFoundError
-from ..objects import ObjectService, Scope
+from ..objects import PRIVATE_PREFIX, ObjectService, Scope
 
 BATCH = 500
 END = "\U0010ffff"
 KINDS = {
     "rename": "批量改名", "move": "移动", "organize": "整理文件", "mkdir": "新建文件夹", "trash": "移入回收站",
     "restore": "从回收站恢复", "purge": "彻底删除", "unshare": "取消公开", "share": "公开分享", "downloads": "离线下载",
-    "download_control": "下载任务操作", "save_attachment": "保存附件",
+    "download_control": "下载任务操作", "save_attachment": "保存附件", "move_out": "移出私密空间", "move_in": "移入私密空间",
 }
 MOVE_KINDS = ("rename", "move", "organize")
 DANGER_KINDS = ("purge",)
-# 完全访问模式下仍然必须由用户确认的类型：不可恢复，或会让数据对外可见。
-CONFIRM_KINDS = ("purge", "share")
+# 完全访问模式下仍然必须由用户确认的类型：不可恢复，或会让数据对外可见；跨区移动的目标由用户在卡片上决定。
+CONFIRM_KINDS = ("purge", "share", "move_out", "move_in")
+# 私密对话中总是需要确认的类型（§24.5.1）：离线下载会访问外部地址并写入私密空间。
+PRIVATE_CONFIRM_KINDS = ("downloads", "download_control")
 
 
 def share_options(payload: dict, confirm: dict | None) -> dict[str, object]:
@@ -99,7 +103,8 @@ class Progress:
 
 
 def display(key: str) -> str:
-    return "/" + key
+    """给用户与模型看的路径：私密空间内的路径相对私密空间根显示，不暴露系统区前缀。"""
+    return "/" + (key[len(PRIVATE_PREFIX):] if key.startswith(PRIVATE_PREFIX) else key)
 
 
 class ActionExecutor:
@@ -114,6 +119,8 @@ class ActionExecutor:
 
     @staticmethod
     def _inside(scope_root: str, key: str) -> bool:
+        if scope_root.startswith(PRIVATE_PREFIX):
+            return key.startswith(scope_root)
         return key.startswith(scope_root) and not key.startswith(".tgdrive/") and key != ".tgdrive"
 
     def _version(self, bucket_id: int, key: str):
@@ -146,18 +153,30 @@ class ActionExecutor:
 
     # ---------- 执行 ----------
 
+    @staticmethod
+    def _scope(bucket_id: int, scope_root: str, guard: Callable[[], None] | None) -> Scope:
+        """私密空间的操作带 private_access，并在对象层每次读写时复核私密授权。"""
+        if scope_root.startswith(PRIVATE_PREFIX):
+            return Scope(bucket_id, scope_root, private_access=True, authorize=guard)
+        return Scope(bucket_id, scope_root)
+
     async def execute(self, *, user_id: int, bucket_id: int, payload: dict, progress: Progress,
                       on_progress: Callable[[], None] | None = None,
-                      authorized: Callable[[], bool] | None = None, confirm: dict | None = None) -> dict | None:
-        """执行冻结的条目，返回撤销数据（不可撤销的类型返回 None）。"""
+                      authorized: Callable[[], bool] | None = None, confirm: dict | None = None,
+                      guard: Callable[[], None] | None = None) -> dict | None:
+        """执行冻结的条目，返回撤销数据（不可撤销的类型返回 None）。guard 在私密操作中复核授权（失效时抛错）。"""
         kind = payload["kind"]
         scope_root = payload.get("scope", "")
-        scope = Scope(bucket_id, scope_root)
+        scope = self._scope(bucket_id, scope_root, guard)
+        if kind in ("move_out", "move_in"):
+            await self._cross(kind, bucket_id, scope_root, payload, progress, authorized, confirm or {}, guard)
+            return None
         undo: dict[str, list] = {"moves": [], "trash": [], "mkdir": [], "unshare": [], "created": []}
         items = payload.get("items", [])
         share = share_options(payload, confirm) if kind == "share" else {}
         if kind == "downloads":
-            await self._downloads(user_id, scope_root, payload, progress, on_progress, authorized)
+            await self._downloads(user_id, scope_root, payload, progress, on_progress, authorized,
+                                  scope if scope_root.startswith(PRIVATE_PREFIX) else None)
             return None
         for index, item in enumerate(items):
             if progress.cancel or (authorized is not None and not authorized()):
@@ -307,12 +326,54 @@ class ActionExecutor:
             if row["key"] != item["path"] or not self._inside(scope_root, row["key"]):
                 progress.skip(f"任务 #{item['id']}", "任务保存位置已变化或不在作用域内")
                 return
-            await self.offline.control(user_id, item["id"], item["op"])
+            await self.offline.control(user_id, item["id"], item["op"],
+                                       private_scope=scope if scope_root.startswith(PRIVATE_PREFIX) else None)
             progress.ok += 1
         else:
             raise ValueError("未知操作类型")
 
-    async def _downloads(self, user_id, scope_root, payload, progress: Progress, on_progress, authorized=None) -> None:
+    async def _cross(self, kind, bucket_id, scope_root, payload, progress: Progress, authorized, confirm: dict, guard) -> None:
+        """跨区移动（§24.5.3）：move_out 从私密空间移到普通目录，move_in 从普通目录移入私密空间。
+        目标目录由用户在卡片上确认（confirm.target），同名时自动改名；逐项复核源版本，不可撤销。"""
+        target = confirm.get("target", (payload.get("options") or {}).get("target", ""))
+        if not isinstance(target, str) or len(target) > 1024:
+            raise ValueError("目标目录不正确")
+        from ..api import normalize_user_path
+        relative = target.strip().strip("/")
+        if kind == "move_out":
+            folder = normalize_user_path(relative, directory=True) if relative else ""
+        else:
+            folder = PRIVATE_PREFIX + (normalize_user_path(relative, directory=True) if relative else "")
+        scope = Scope(bucket_id, "", private_access=True, authorize=guard)
+        for item in payload.get("items", []):
+            if progress.cancel or (authorized is not None and not authorized()):
+                progress.cancel = True
+                break
+            source = item["from"]
+            label = display(source)
+            try:
+                if kind == "move_out" and not source.startswith(PRIVATE_PREFIX):
+                    progress.skip(label, "不在私密空间内")
+                elif kind == "move_in" and not self._inside(scope_root, source):
+                    progress.skip(label, "不在作用域内")
+                elif (reason := self._check_source(bucket_id, PRIVATE_PREFIX if kind == "move_out" else scope_root, item, source)):
+                    progress.skip(label, reason)
+                elif kind == "move_in" and folder.startswith(source):
+                    progress.skip(label, "不能移入它自己的子目录")
+                else:
+                    name = source.rstrip("/").rsplit("/", 1)[-1] + ("/" if source.endswith("/") else "")
+                    # 与私密空间页面的「移入／移出」一致：同名自动改名，移入时递归取消公开链接。
+                    result = self.objects.move(scope, source, folder + name, "rename", revoke_public=kind == "move_in")
+                    if result.moved:
+                        progress.ok += 1
+                    else:
+                        progress.skip(label, "目标已存在同名项目")
+            except (PermissionError, ValueError, NotFoundError) as exc:
+                progress.fail(label, str(exc) or "操作不被允许")
+            progress.done += 1
+            await asyncio.sleep(0)
+
+    async def _downloads(self, user_id, scope_root, payload, progress: Progress, on_progress, authorized=None, private_scope=None) -> None:
         if self.offline is None:
             raise ValueError("离线下载未启用")
         target = payload["options"]["target"]
@@ -336,7 +397,8 @@ class ActionExecutor:
                     progress.done += 1
             if prepared:
                 try:
-                    self.offline.create(user_id, prepared, target)
+                    # 私密对话的离线下载是私密任务：保存目录在私密空间内，创建与写入都复核私密授权。
+                    self.offline.create(user_id, prepared, target, private_scope=private_scope)
                     progress.ok += len(prepared)
                 except (ValueError, PermissionError, NotFoundError) as exc:
                     for label in labels:
@@ -348,9 +410,10 @@ class ActionExecutor:
 
     # ---------- 撤销 ----------
 
-    async def undo(self, *, bucket_id: int, payload: dict, data: dict, authorized: Callable[[], bool] | None = None) -> dict[str, object]:
+    async def undo(self, *, bucket_id: int, payload: dict, data: dict, authorized: Callable[[], bool] | None = None,
+                   guard: Callable[[], None] | None = None) -> dict[str, object]:
         scope_root = payload.get("scope", "")
-        scope = Scope(bucket_id, scope_root)
+        scope = self._scope(bucket_id, scope_root, guard)
         progress = Progress(total=sum(len(value) for value in data.values()))
         for target, source, version in reversed(data.get("moves", [])):
             if authorized is not None and not authorized():

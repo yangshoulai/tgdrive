@@ -4,6 +4,7 @@ import { BRAND } from "../brand";
 import { Button, Icon, PageHeader, formatBytes, useDocumentTitle } from "../ui";
 import { FilesView } from "./files";
 import { TrashView } from "./trash";
+import { PRIVATE_SECTION_EVENT, setPrivateSection } from "./assistant-bridge";
 import type { UploadQueue } from "./uploads";
 import { PrivateUnlockForm } from "./private-access";
 import { usePrivateAccess, usePrivateSession } from "./private-session";
@@ -39,6 +40,13 @@ export function PrivateSpaceView({ session, prefix, onOpenFolder, onChanged, upl
   const unlocked = usePrivateSession(grant, () => { uploadsRef.current.cancelPrivate(); setTrash(false); },
     ".private-space, .preview-modal.is-private, .private-dialog, .private-transfer");
   useEffect(() => () => { uploadsRef.current.cancelPrivate(); }, []);
+  // 私密对话的浏览器工具读取和切换当前显示的是私密文件还是私密回收站。
+  useEffect(() => { setPrivateSection(trash ? "trash" : "files"); return () => setPrivateSection("files"); }, [trash]);
+  useEffect(() => {
+    const listener = (event: Event) => setTrash((event as CustomEvent<string>).detail === "trash");
+    window.addEventListener(PRIVATE_SECTION_EVENT, listener);
+    return () => window.removeEventListener(PRIVATE_SECTION_EVENT, listener);
+  }, []);
   if (!grant) return <>
     <PageHeader title="私密空间" description="使用账号登录密码或通行密钥解锁，无操作后自动锁定。" />
     {transfer && <TransferNotice transfer={transfer} unlocked={false} onDiscard={discardTransfer} />}

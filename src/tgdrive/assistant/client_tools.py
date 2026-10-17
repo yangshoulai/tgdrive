@@ -6,6 +6,8 @@
   所以只在对话里生成一张动作卡片，用户点击后执行；工具立即返回。
 - ui_generate_thumbnails：缩略图只能在浏览器生成且大图计入用户空间，同样只生成卡片，由用户点击后在对话框里逐个生成。
 - 路径一律经 ctx.resolve 校验在作用域内且不在 .tgdrive/；页面回传的数据同样按不可信数据包装。
+- 私密对话（§24.5.4）：只由持有同一私密授权的抽屉执行，读取与跳转只作用于私密空间页面；
+  打开网页只能用对话中出现过的完整地址，复制卡片完整显示文本。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from ..filekinds import kind_of
 from .tools import END, PATH, ToolContext, ToolError, ToolOutput, _str, tool
 
 VIEWS = {"files": "文件", "trash": "回收站", "downloads": "下载任务", "shared": "公开分享"}
+PRIVATE_VIEWS = {"files": "私密空间", "trash": "私密回收站", "downloads": "私密下载任务"}
 
 
 async def _call(ctx: ToolContext, name: str, args: dict) -> dict:
@@ -35,6 +38,10 @@ def _inside(ctx: ToolContext, value: object) -> str | None:
     if not isinstance(value, str):
         return None
     key = value.lstrip("/")
+    if ctx.private:
+        # 私密页面回传的是相对私密空间根的路径（也接受完整对象键）。
+        key = key if key.startswith(ctx.base) else ctx.base + key
+        return ctx.display(key) if key.startswith(ctx.scope_root) and ".." not in key.split("/") else None
     if key.startswith(".tgdrive/") or not key.startswith(ctx.scope_root):
         return None
     return "/" + key
@@ -46,8 +53,14 @@ def _inside(ctx: ToolContext, value: object) -> str | None:
 async def ui_get_view(ctx: ToolContext, args: dict) -> ToolOutput:
     result = await _call(ctx, "ui_get_view", {})
     view = str(result.get("view") or "")[:20]
-    if view == "private":
-        return ToolOutput({"view": "private", "note": "用户正在私密空间，助手无法查看或操作其中的内容"}, "私密空间（不开放）")
+    if ctx.private and view != "private":
+        # 私密对话只读取私密空间页面；用户在其他页面时不返回那里的条目。
+        return ToolOutput({"view": view, "note": "用户当前不在私密空间页面，无法读取那里的内容"}, "不在私密空间页面")
+    if not ctx.private and view == "private":
+        return ToolOutput({"view": "private", "note": "用户正在私密空间，普通对话无法查看其中的内容；请用户在私密空间里打开助手（私密对话）"},
+                          "私密空间（不开放）")
+    if ctx.private:
+        view = str(result.get("section") or "files")[:20]
     selected = [path for path in (_inside(ctx, item) for item in (result.get("selected") or [])[:1000]) if path]
     visible = []
     for item in (result.get("visible") or [])[:200]:
@@ -58,12 +71,13 @@ async def ui_get_view(ctx: ToolContext, args: dict) -> ToolOutput:
                                 **({"size": item["size"]} if isinstance(item.get("size"), int) else {})})
     path = _inside(ctx, result.get("path")) if view == "files" else None
     hidden = len(result.get("selected") or []) - len(selected)
-    payload = {"view": view, "view_label": VIEWS.get(view, view), "path": path, "selected": selected, "visible": visible,
+    views = PRIVATE_VIEWS if ctx.private else VIEWS
+    payload = {"view": view, "view_label": views.get(view, view), "path": path, "selected": selected, "visible": visible,
                "visible_total": result.get("total") if isinstance(result.get("total"), int) else len(visible),
                "preview": _inside(ctx, result.get("preview"))}
     if hidden > 0:
         payload["note"] = f"{hidden} 个选中项不在当前作用域内，已省略"
-    label = VIEWS.get(view, view or "未知页面")
+    label = views.get(view, view or "未知页面")
     return ToolOutput(payload, f"{label}{' ' + path if path else ''} · 已选中 {len(selected)} 项", items=len(visible))
 
 
@@ -73,15 +87,16 @@ async def ui_get_view(ctx: ToolContext, args: dict) -> ToolOutput:
       {"view": {"type": "string", "enum": list(VIEWS), "description": "页面，默认 files"}, "path": PATH}, timeout=50)
 async def ui_navigate(ctx: ToolContext, args: dict) -> ToolOutput:
     view = args.get("view") or "files"
-    if view not in VIEWS:
-        raise ToolError("参数 view 不正确")
+    views = PRIVATE_VIEWS if ctx.private else VIEWS
+    if view not in views:
+        raise ToolError("参数 view 不正确" + ("：私密对话只能打开 files（私密空间）、trash（私密回收站）、downloads（私密下载任务）" if ctx.private else ""))
     path = ctx.resolve(args.get("path"), directory=True) if view == "files" else None
     if path is not None and path and ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
                                                     (ctx.bucket_id, path, path + END)).fetchone() is None:
         raise ToolError(f"目录 {ctx.display(path)} 不存在")
     await _call(ctx, "ui_navigate", {"view": view, "path": path})
     return ToolOutput({"status": "已打开", "view": view, "path": ctx.display(path) if path is not None else None},
-                      f"打开{VIEWS[view]}" + (f" {ctx.display(path)}" if path else ""))
+                      f"打开{views[view]}" + (f" {ctx.display(path)}" if path and path != ctx.base else ""))
 
 
 @tool("ui_select", "选中文件", "browser", "read",
@@ -187,6 +202,7 @@ async def browser_open_url(ctx: ToolContext, args: dict) -> ToolOutput:
         raise ToolError("网页地址不正确") from exc
     if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
         raise ToolError("只能打开 http(s) 网页，且地址中不能包含账号密码")
+    ctx.check_url(url, "seen")
     title = _str(args, "title", limit=60)
     return ToolOutput({"status": "已在对话中显示打开按钮，等待用户点击", "host": parts.hostname}, f"打开 {parts.hostname}",
                       event={"type": "browser", "action": "open", "url": url, "host": parts.hostname, "title": title or None})
@@ -201,7 +217,8 @@ async def ui_copy(ctx: ToolContext, args: dict) -> ToolOutput:
         raise ToolError("参数 text 需要 1–10000 个字符")
     title = _str(args, "title", limit=60)
     return ToolOutput({"status": "已在对话中显示复制按钮"}, title or "可复制的文本",
-                      event={"type": "browser", "action": "copy", "text": text, "title": title or None})
+                      event={"type": "browser", "action": "copy", "text": text, "title": title or None,
+                             **({"private": True} if ctx.private else {})})
 
 
 THUMBNAIL_KINDS = {"image", "video", "audio"}
@@ -224,7 +241,7 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
     else:
         folder = key.rstrip("/") + "/" if key else ctx.scope_root
         rows = ctx.db.execute("SELECT key, size, etag, content_type, blob_uuid FROM objects WHERE bucket_id=? AND key>=? AND key<? "
-                              "AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' ORDER BY key LIMIT 5000",
+                              f"AND substr(key,-1)!='/' AND {ctx.hide()} ORDER BY key LIMIT 5000",
                               (ctx.bucket_id, folder, folder + END)).fetchall()
         if not rows and ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
                                        (ctx.bucket_id, folder, folder + END)).fetchone() is None:

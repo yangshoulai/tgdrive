@@ -5,6 +5,8 @@
 - 路径对模型一律显示为以 / 开头的完整路径（如 /Downloads/a.txt）；以 / 开头按完整路径解析，否则相对作用域根。
   解析后必须落在作用域根之内，且不能进入 .tgdrive/（回收站、私密空间）。
 - 所有查询走 SQL 范围扫描并限制条数，不在 Python 中取全量。
+- 私密对话（§24）：ToolContext.base 为私密空间前缀，模型看到的 / 是私密空间根；SQL 里排除系统区的条件改用 ctx.hide()，
+  作用域带 private_access 与逐次复核授权的 authorize。每个工具在私密对话中的可用性登记在 PRIVATE（§24.5.1）。
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from zoneinfo import ZoneInfo
 from ..api import normalize_user_path
 from ..errors import NotFoundError
 from ..filekinds import KIND_GROUPS, kind_clause
-from ..objects import ObjectService, Scope
+from ..objects import PRIVATE_PREFIX, ObjectService, Scope
 from .attachments import PREFIX as ATTACHMENT_PREFIX, ROOT as ATTACHMENT_ROOT
 from .providers import ToolDef
 from .knowledge import HELP
@@ -79,17 +81,49 @@ class ToolContext:
     read_only: bool = False
     # 当前模型能否识图，以及识图的参数（原图上限）
     vision: bool = False
+    # 私密对话（§24）：base 为私密空间前缀，模型看到的 / 即私密空间根；authorize 每次读写前复核私密授权。
+    base: str = ""
+    authorize: Callable[[], None] | None = None
+    # 地址规则（§24.5.2）：判断地址能否被服务端请求（user）或交给用户点击打开（seen）。普通对话为 None，不限制。
+    url_allowed: Callable[[str, str], bool] | None = None
+    # 本轮或对话中是否读取过外部内容（返回原因）：私密对话据此拒绝提议移出与彻底删除。
+    tainted: Callable[[], str | None] | None = None
 
     @property
     def db(self):
         return self.objects.metadata.db
 
+    @property
+    def private(self) -> bool:
+        return bool(self.base)
+
+    def hide(self, column: str = "key") -> str:
+        """排除系统区（回收站、私密空间、附件等）的 SQL 条件。私密对话的范围本身就在私密前缀内，不再排除。"""
+        return "1" if self.base else f"substr({column},1,9)!='.tgdrive/'"
+
     def scope(self) -> Scope:
-        return Scope(self.bucket_id, self.scope_root)
+        return Scope(self.bucket_id, self.scope_root, private_access=self.private, authorize=self.authorize)
 
     def scope_for(self, key: str) -> Scope:
         """读取单个对象用的范围：本对话的附件不受作用域前缀限制，其余仍是对话作用域。"""
         return Scope(self.bucket_id, "") if self.read_only and key in self.attachments.values() else self.scope()
+
+    async def read(self, key: str, start: int = 0, end: int | None = None):
+        """读取对象内容；私密对话每个数据块之前都复核授权（锁定后立即停止）。"""
+        _, stream = await self.objects.get_object(self.scope_for(key), key, start, end)
+        try:
+            async for chunk in stream:
+                if self.authorize is not None:
+                    self.authorize()
+                yield chunk
+        finally:
+            await stream.aclose()
+
+    def check_url(self, url: str, level: str = "user") -> None:
+        """私密对话的地址规则：服务端请求只用用户消息里给出的地址，需要用户点击的只用对话中出现过的完整地址。"""
+        if self.url_allowed is not None and not self.url_allowed(url, level):
+            raise ToolError("这个地址不是用户在消息里给出的，私密对话不能使用。请让用户在消息里给出完整链接。" if level == "user" else
+                            "私密对话只能打开对话中出现过的完整地址，不能拼接或改写。请让用户在消息里给出链接。")
 
     # ---------- 路径 ----------
 
@@ -97,7 +131,19 @@ class ToolContext:
         if key.startswith(ATTACHMENT_ROOT):
             name = next((name for name, value in self.attachments.items() if value == key), None)
             return ATTACHMENT_PREFIX + (name or "（已删除的附件）")
+        if self.base and key.startswith(self.base):
+            return "/" + key[len(self.base):]
         return "/" + key
+
+    def valid_key(self, key: str) -> str:
+        """校验写入目标的对象键（私密对话按私密空间内的相对路径校验）。"""
+        relative = key[len(self.base):] if self.base and key.startswith(self.base) else key
+        if self.base and not key.startswith(self.base):
+            raise ToolError("私密对话只能在私密空间内操作")
+        try:
+            return self.base + normalize_user_path(relative, directory=relative.endswith("/"))
+        except (PermissionError, ValueError) as exc:
+            raise ToolError(f"路径 {self.display(key)} 不合法") from exc
 
     def attachment(self, value: str) -> str:
         """「附件:显示名」→ 对象键。"""
@@ -120,19 +166,20 @@ class ToolContext:
                 raise ToolError("附件只能读取，不能移动、改名或删除。要把附件放进文件夹，请调用 propose_save_attachment 另存为普通文件。")
             return self.attachment(text)
         if text in ("/", "", "."):
-            key = "" if text == "/" else self.scope_root
+            key = self.base if text == "/" else self.scope_root
         else:
-            key = text.lstrip("/") if text.startswith("/") else self.scope_root + text
+            key = self.base + text.lstrip("/") if text.startswith("/") else self.scope_root + text
             if key.endswith("/") or directory:
                 key = key.rstrip("/") + "/"
-        if key == "":
-            if not allow_root or self.scope_root:
+        relative = key[len(self.base):]
+        if relative == "":
+            if not allow_root or self.scope_root != self.base:
                 raise ToolError(f"路径 / 不在当前作用域 {self.display(self.scope_root)} 内。如用户明确要求处理该目录，请调用 request_scope。")
-            return ""
-        if key == ".tgdrive/" or key.startswith(".tgdrive/") or key == ".tgdrive":
+            return self.base
+        if relative == ".tgdrive/" or relative.startswith(".tgdrive/") or relative == ".tgdrive":
             raise ToolError("该路径属于系统保留区域，助手无法访问。")
         try:
-            key = normalize_user_path(key, directory=directory or key.endswith("/"))
+            key = self.base + normalize_user_path(relative, directory=directory or relative.endswith("/"))
         except PermissionError as exc:
             raise ToolError("该路径属于系统保留区域，助手无法访问。") from exc
         except ValueError as exc:
@@ -164,9 +211,64 @@ class ToolSpec:
     def definition(self) -> ToolDef:
         return ToolDef(self.name, self.description, self.parameters)
 
+    @property
+    def private(self) -> str:
+        """在私密对话中的可用性：allow 可用、limited 受限、only 只用于私密对话、never 不提供、na 不适用（§24.5.1）。"""
+        return PRIVATE.get(self.name, ("never", "未登记私密空间规则"))[0]
+
+    @property
+    def private_note(self) -> str | None:
+        return PRIVATE.get(self.name, ("never", "未登记私密空间规则"))[1]
+
 
 GROUPS = {"context": "上下文", "browse": "浏览与查询", "write": "提议写入", "web": "网页与下载", "browser": "浏览器"}
 TOOLS: dict[str, ToolSpec] = {}
+
+# 私密对话中的工具规则（docs/assistant-design.md §24.5.1）。原则是尽量与普通对话一致，只在数据会离开私密空间、
+# 地址可能由模型决定、或功能在私密空间里没有意义时改变行为。新增工具必须在这里登记，未登记的视为不提供。
+PRIVATE: dict[str, tuple[str, str | None]] = {
+    "get_context": ("allow", "作用域显示为私密空间"),
+    "get_system_help": ("allow", None),
+    "ask_user": ("allow", None),
+    "update_plan": ("allow", None),
+    "request_scope": ("na", "私密对话的作用域固定为私密空间"),
+    **{name: ("allow", "只在私密空间内") for name in ("list_folder", "folder_tree", "get_file_info", "search_files", "storage_stats",
+                                                     "find_large_files", "find_empty_folders", "list_recent")},
+    "find_duplicates": ("allow", "只在私密空间内比较，不与普通文件比对"),
+    "read_text_file": ("allow", "每个数据块都复核私密授权"),
+    "view_image": ("allow", "每个数据块都复核私密授权"),
+    "list_trash": ("allow", "读取私密回收站"),
+    "trash_stats": ("allow", "读取私密回收站"),
+    "list_downloads": ("allow", "只列出私密下载任务"),
+    "get_download": ("allow", "只读取私密下载任务"),
+    "list_public_links": ("na", "私密文件不能公开"),
+    "propose_unshare": ("na", "私密文件不能公开"),
+    "ui_open_share": ("na", "私密文件不能公开"),
+    "propose_share": ("never", "私密文件不能公开分享；需要分享时先移出私密空间"),
+    **{name: ("allow", "源与目标都必须在私密空间内") for name in ("propose_rename", "propose_move", "propose_organize",
+                                                             "propose_create_folders")},
+    "propose_trash": ("allow", "移入私密回收站"),
+    "propose_restore": ("allow", "从私密回收站恢复"),
+    "propose_purge_trash": ("limited", "读取外部内容后不能提议，完全访问下也需要确认"),
+    "propose_move_out": ("only", "移出私密空间：读取内容后不能提议，确认时重新验证身份"),
+    "propose_move_to_private": ("na", "已经在私密空间中"),
+    "ui_get_view": ("allow", "只读取私密空间页面"),
+    "ui_navigate": ("allow", "只打开私密空间内的位置"),
+    "ui_select": ("allow", "只作用于私密空间页面"),
+    "ui_preview": ("allow", "使用私密预览"),
+    "ui_download": ("allow", "经私密下载接口下载，锁定后失效"),
+    "ui_generate_thumbnails": ("allow", "走私密缩略图生成"),
+    "ui_copy": ("limited", "卡片显示完整文本，提示可能进入剪贴板历史"),
+    "browser_open_url": ("limited", "只能打开对话中出现过的完整地址"),
+    "propose_downloads": ("limited", "只用用户在消息里给出的链接，保存到私密空间"),
+    "parse_download_source": ("limited", "只用用户在消息里给出的链接"),
+    "propose_download_control": ("allow", "只能操作私密下载任务"),
+    "analyze_page": ("limited", "起始地址必须是用户在消息里给出的链接，不接受抓取脚本快照"),
+    "collect_gallery": ("limited", "只按隔离分析的规则翻页，不离开起始网站"),
+    "get_collection": ("limited", "只读取本对话的结果集"),
+    "http_request": ("limited", "只访问用户在消息里给出的链接"),
+    "propose_save_attachment": ("never", "私密对话暂不提供附件"),
+}
 
 
 def tool(name: str, label: str, group: str, level: str, description: str, properties: dict | None = None,
@@ -354,17 +456,17 @@ async def list_folder(ctx: ToolContext, args: dict) -> ToolOutput:
         folders = []
         if not cursor:
             page = ctx.objects.list_objects(ctx.scope(), prefix, "/", None, 200)
-            names = [p for p in page.common_prefixes if not p.startswith(".tgdrive/")]
+            names = [p for p in page.common_prefixes if ctx.private or not p.startswith(".tgdrive/")]
             sizes = ctx.objects.folder_sizes(ctx.scope(), names) if names else {}
             folders = [{"path": ctx.display(p), "size": sizes.get(p, 0)} for p in names]
         order = {"name": "key", "size": "size DESC, key", "modified": "modified_at DESC, key"}[sort]
         where = ("bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND instr(substr(key,?),'/')=0 "
-                 f"AND substr(key,1,9)!='.tgdrive/' AND {condition}")
+                 f"AND {ctx.hide()} AND {condition}")
         params: list = [ctx.bucket_id, prefix, prefix + END, len(prefix) + 1, *kind_args]
         offset = 0
         if sort == "name" and cursor:
             where += " AND key>?"
-            params.append(cursor.lstrip("/"))
+            params.append(ctx.base + cursor.lstrip("/"))
         elif cursor:
             try:
                 offset = int(cursor)
@@ -400,7 +502,7 @@ async def folder_tree(ctx: ToolContext, args: dict) -> ToolOutput:
                 continue
             page = ctx.objects.list_objects(ctx.scope(), prefix, "/", None, 200)
             for child in page.common_prefixes:
-                if child.startswith(".tgdrive/"):
+                if child.startswith(".tgdrive/") and not ctx.private:
                     continue
                 if len(nodes) >= 200:
                     truncated = True
@@ -432,7 +534,7 @@ async def get_file_info(ctx: ToolContext, args: dict) -> ToolOutput:
                 return {**_file(ctx, row), "kind": "file", "public": row["public_token"] is not None}
         folder = key if key.endswith("/") or not key else key + "/"
         stats = ctx.db.execute("SELECT COUNT(*), COALESCE(SUM(size),0), MAX(modified_at) FROM objects WHERE bucket_id=? AND key>=? "
-                               "AND key<? AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/'",
+                               f"AND key<? AND substr(key,-1)!='/' AND {ctx.hide()}",
                                (ctx.bucket_id, folder, folder + END)).fetchone()
         marker = ctx.db.execute("SELECT public_token FROM objects WHERE bucket_id=? AND key=?", (ctx.bucket_id, folder)).fetchone()
         exists = marker is not None or ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>? AND key<? LIMIT 1",
@@ -477,7 +579,7 @@ async def search_files(ctx: ToolContext, args: dict) -> ToolOutput:
     glob = _str(args, "glob", limit=100)
     pattern = _regex(_str(args, "regex", limit=100)) if args.get("regex") else None
     condition, kind_args = _kind(args)
-    where = [f"bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' AND {condition}"]
+    where = [f"bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND {ctx.hide()} AND {condition}"]
     params: list = [ctx.bucket_id, prefix, prefix + END, *kind_args]
     if query:
         where.append("instr(lower(key),lower(?))>0")
@@ -500,7 +602,7 @@ async def search_files(ctx: ToolContext, args: dict) -> ToolOutput:
     cursor = _str(args, "cursor", limit=2048).lstrip("/")
     if cursor:
         where.append("key>?")
-        params.append(cursor)
+        params.append(ctx.base + cursor)
 
     def read():
         matched, scanned, last = [], 0, None
@@ -521,7 +623,7 @@ async def search_files(ctx: ToolContext, args: dict) -> ToolOutput:
 
     matched, last, more = await _thread(ctx, read)
     files = matched[:limit]
-    next_cursor = ("/" + last.lstrip("/")) if more and last else None
+    next_cursor = (last if last.startswith("/") else ctx.display(last)) if more and last else None
     total_note = f"{len(files)}{'+' if next_cursor else ''} 项"
     return ToolOutput({"files": files, "next_cursor": next_cursor,
                        "note": "还有更多结果，可用 cursor 继续" if next_cursor else None}, total_note, items=len(files))
@@ -536,7 +638,7 @@ async def storage_stats(ctx: ToolContext, args: dict) -> ToolOutput:
     group = args.get("group_by")
     if group not in ("kind", "ext", "folder", "year", "month"):
         raise ToolError("参数 group_by 不正确")
-    base = "bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/'"
+    base = f"bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND {ctx.hide()}"
     params = [ctx.bucket_id, prefix, prefix + END]
 
     def read():
@@ -591,7 +693,7 @@ async def find_large_files(ctx: ToolContext, args: dict) -> ToolOutput:
 
     def read():
         return [_file(ctx, row) for row in ctx.db.execute(
-            "SELECT * FROM objects WHERE bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' "
+            f"SELECT * FROM objects WHERE bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND {ctx.hide()} "
             f"AND {condition} ORDER BY size DESC LIMIT ?", (ctx.bucket_id, prefix, prefix + END, *kind_args, limit))]
 
     files = await _thread(ctx, read)
@@ -609,14 +711,14 @@ async def find_duplicates(ctx: ToolContext, args: dict) -> ToolOutput:
         rows = ctx.db.execute(
             "SELECT COALESCE(b.fingerprint, o.blob_uuid) AS content, COUNT(*) AS copies, MAX(o.size) AS size "
             "FROM objects o JOIN blobs b ON b.uuid=o.blob_uuid WHERE o.bucket_id=? AND o.key>? AND o.key<? "
-            "AND substr(o.key,-1)!='/' AND substr(o.key,1,9)!='.tgdrive/' AND o.size>=? "
+            f"AND substr(o.key,-1)!='/' AND {ctx.hide('o.key')} AND o.size>=? "
             "GROUP BY content HAVING copies>1 ORDER BY size*(copies-1) DESC LIMIT 50",
             (ctx.bucket_id, prefix, prefix + END, max(min_size, 1))).fetchall()
         groups = []
         for row in rows:
             paths = [ctx.display(r["key"]) for r in ctx.db.execute(
                 "SELECT o.key FROM objects o JOIN blobs b ON b.uuid=o.blob_uuid WHERE o.bucket_id=? AND o.key>? AND o.key<? "
-                "AND substr(o.key,-1)!='/' AND substr(o.key,1,9)!='.tgdrive/' AND COALESCE(b.fingerprint, o.blob_uuid)=? "
+                f"AND substr(o.key,-1)!='/' AND {ctx.hide('o.key')} AND COALESCE(b.fingerprint, o.blob_uuid)=? "
                 "ORDER BY o.key LIMIT 10", (ctx.bucket_id, prefix, prefix + END, row["content"]))]
             groups.append({"copies": int(row["copies"]), "size": int(row["size"]),
                            "reclaimable": int(row["size"]) * (int(row["copies"]) - 1), "paths": paths})
@@ -634,7 +736,7 @@ async def find_empty_folders(ctx: ToolContext, args: dict) -> ToolOutput:
     def read():
         return [ctx.display(row["key"]) for row in ctx.db.execute(
             "SELECT o.key FROM objects o WHERE o.bucket_id=? AND o.key>? AND o.key<? AND substr(o.key,-1)='/' "
-            "AND substr(o.key,1,9)!='.tgdrive/' AND NOT EXISTS (SELECT 1 FROM objects c WHERE c.bucket_id=o.bucket_id "
+            f"AND {ctx.hide('o.key')} AND NOT EXISTS (SELECT 1 FROM objects c WHERE c.bucket_id=o.bucket_id "
             "AND c.key>o.key AND c.key<o.key||char(1114111) AND substr(c.key,-1)!='/') ORDER BY o.key LIMIT 200",
             (ctx.bucket_id, prefix, prefix + END))]
 
@@ -653,7 +755,7 @@ async def list_recent(ctx: ToolContext, args: dict) -> ToolOutput:
 
     def read():
         return [_file(ctx, row) for row in ctx.db.execute(
-            "SELECT * FROM objects WHERE bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/' "
+            f"SELECT * FROM objects WHERE bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND {ctx.hide()} "
             f"AND modified_at>=? AND {condition} ORDER BY modified_at DESC LIMIT ?",
             (ctx.bucket_id, prefix, prefix + END, time.time() - days * 86400, *kind_args, limit))]
 
@@ -662,8 +764,8 @@ async def list_recent(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 def _trash_where(ctx: ToolContext) -> tuple[str, list]:
-    # 回收站是整个账号的，但助手只看原路径在作用域内的条目；私密空间的条目一律排除。
-    return ("bucket_id=? AND substr(original_path,1,9)!='.tgdrive/' AND original_path>=? AND original_path<?",
+    # 回收站是整个账号的，但助手只看原路径在作用域内的条目；普通对话排除私密空间的条目，私密对话只看私密回收站。
+    return (f"bucket_id=? AND {ctx.hide('original_path')} AND original_path>=? AND original_path<?",
             [ctx.bucket_id, ctx.scope_root, ctx.scope_root + END])
 
 
@@ -715,14 +817,14 @@ async def trash_stats(ctx: ToolContext, args: dict) -> ToolOutput:
       {"cursor": CURSOR, "limit": {"type": "integer", "description": "1–200，默认 100"}})
 async def list_public_links(ctx: ToolContext, args: dict) -> ToolOutput:
     limit = _int(args, "limit", 100, 1, 200)
-    cursor = _str(args, "cursor", limit=2048).lstrip("/")
+    cursor = ctx.base + _str(args, "cursor", limit=2048).lstrip("/") if args.get("cursor") else ""
     if cursor and not cursor.startswith(ctx.scope_root):
         raise ToolError("参数 cursor 不正确")
 
     def read():
         return ctx.db.execute(
             f"SELECT * FROM objects WHERE bucket_id=? AND key{'>' if cursor else '>='}? AND key<? AND public_token IS NOT NULL "
-            "AND substr(key,1,9)!='.tgdrive/' ORDER BY key LIMIT ?",
+            f"AND {ctx.hide()} ORDER BY key LIMIT ?",
             (ctx.bucket_id, cursor or ctx.scope_root, ctx.scope_root + END, limit + 1)).fetchall()
 
     rows = await _thread(ctx, read)
@@ -736,9 +838,9 @@ async def list_public_links(ctx: ToolContext, args: dict) -> ToolOutput:
     return ToolOutput({"items": items, "next_cursor": next_cursor}, f"{len(items)} 项", items=len(items))
 
 
-def _download(row: dict) -> dict:
+def _download(ctx: ToolContext, row: dict) -> dict:
     return {key: row.get(key) for key in ("id", "status", "phase", "source_host", "kind", "platform", "size", "received",
-                                          "error", "created_at", "updated_at")} | {"path": "/" + row["key"]}
+                                          "error", "created_at", "updated_at")} | {"path": ctx.display(row["key"])}
 
 
 @tool("list_downloads", "下载任务", "browse", "read",
@@ -753,7 +855,8 @@ async def list_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
         raise ToolError("参数 status 不正确")
     cursor = _int(args, "cursor", 0, 0, 2**62)
     page = ctx.offline.list(ctx.user_id, cursor=cursor, status=status, limit=50)
-    tasks = [_download(task) for task in page["tasks"] if not task.get("private")]
+    # 普通对话只看普通任务，私密对话只看私密任务（§24.5.1）。
+    tasks = [_download(ctx, task) for task in page["tasks"] if bool(task.get("private")) == ctx.private]
     return ToolOutput({"tasks": tasks, "total": page["total"], "next_cursor": page["next_cursor"]},
                       f"{len(tasks)} 个任务", items=len(tasks))
 
@@ -767,10 +870,10 @@ async def get_download(ctx: ToolContext, args: dict) -> ToolOutput:
     from ..offline.service import PUBLIC_FIELDS
     row = ctx.db.execute(f"SELECT {','.join(PUBLIC_FIELDS)} FROM offline_tasks WHERE id=? AND user_id=?",
                          (task_id, ctx.user_id)).fetchone()
-    if row is None or row["key"].startswith(".tgdrive/"):
+    if row is None or row["key"].startswith(".tgdrive/") != ctx.private or (ctx.private and not row["key"].startswith(ctx.base)):
         raise ToolError("找不到该任务")
     task = ctx.offline.public(row)
-    return ToolOutput(_download(task), f"任务 #{task_id} · {task['status']}")
+    return ToolOutput(_download(ctx, task), f"任务 #{task_id} · {task['status']}")
 
 
 @tool("read_text_file", "读取文本内容", "browse", "read",
@@ -803,9 +906,8 @@ async def read_text_file(ctx: ToolContext, args: dict) -> ToolOutput:
     end = min(size, offset + length)
     head = b""
     if size:
-        _, stream = await ctx.objects.get_object(ctx.scope_for(key), key, offset, end)
         chunks = []
-        async for chunk in stream:
+        async for chunk in ctx.read(key, offset, end):
             chunks.append(chunk)
         head = b"".join(chunks)
     if b"\x00" in head[:8192] and not head.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -847,7 +949,7 @@ async def view_image(ctx: ToolContext, args: dict) -> ToolOutput:
         raise ToolError(f"本轮已查看 {len(viewed)} 张图片，达到上限。请先总结已看到的内容，或让用户缩小范围后继续。")
     try:
         image = await vision.load_image(ctx.objects, ctx.bucket_id, key, max_bytes=int(ctx.params.get("max_bytes", vision.DEFAULT_ORIGINAL_BYTES)),
-                                       label=ctx.display(key))
+                                       label=ctx.display(key), scope=ctx.scope() if ctx.private else None)
     except vision.ImageUnavailable as exc:
         raise ToolError(str(exc)) from exc
     viewed.add(key)
@@ -861,13 +963,25 @@ async def view_image(ctx: ToolContext, args: dict) -> ToolOutput:
 
 # ---------- 配置 ----------
 
-def effective_tools(settings: dict[str, dict], level: str) -> dict[str, ToolSpec]:
-    """全局启用 ∩ 用户最高操作级别允许 ∩ 依赖满足。"""
+def private_enabled(settings: dict[str, dict], spec: ToolSpec) -> bool:
+    """私密对话中是否启用：工具本身启用、规则允许、管理员没有单独在私密对话中停用（null 跟随普通开关）。"""
+    if spec.private not in ("allow", "limited", "only"):
+        return False
+    entry = settings.get(spec.name, {})
+    on = spec.fixed or bool(entry.get("enabled", spec.default_enabled))
+    return on and entry.get("private_enabled") is not False
+
+
+def effective_tools(settings: dict[str, dict], level: str, *, private: bool = False) -> dict[str, ToolSpec]:
+    """全局启用 ∩ 用户最高操作级别允许 ∩ 依赖满足；私密对话再按 PRIVATE 规则与 private_enabled 过滤（§24.6）。"""
     allowed = {"read": {"read", "meta", "scope"}, "write": {"read", "meta", "scope", "write"},
                "danger": {"read", "meta", "scope", "write", "danger"}}[level]
     enabled = {}
     for name, spec in TOOLS.items():
-        on = spec.fixed or bool(settings.get(name, {}).get("enabled", spec.default_enabled))
+        if private:
+            on = private_enabled(settings, spec)
+        else:
+            on = spec.private != "only" and (spec.fixed or bool(settings.get(name, {}).get("enabled", spec.default_enabled)))
         if on and spec.level in allowed:
             enabled[name] = spec
     return {name: spec for name, spec in enabled.items() if all(dep in enabled for dep in spec.depends)}
@@ -888,6 +1002,8 @@ def describe_tools(settings: dict[str, dict]) -> list[dict]:
              "level": spec.level, "description": spec.description, "fixed": spec.fixed,
              "enabled": spec.fixed or bool(settings.get(spec.name, {}).get("enabled", spec.default_enabled)),
              "default_enabled": spec.default_enabled, "depends": list(spec.depends), "warning": spec.warning,
+             "private": spec.private, "private_note": spec.private_note,
+             "private_enabled": settings.get(spec.name, {}).get("private_enabled") is not False,
              "params": [{"name": p, "label": label, "default": d, "min": lo, "max": hi,
                          "value": tool_params(settings, spec.name)[p]} for p, (d, lo, hi, label) in spec.params.items()]}
             for spec in TOOLS.values()]
@@ -911,6 +1027,18 @@ def validate_tool_settings(payload: object, current: dict[str, dict]) -> dict[st
                 if spec.fixed and not item:
                     raise ValueError(f"{spec.label}是固定工具，不能停用")
                 entry["enabled"] = item
+            elif key == "private_enabled":
+                # 只在私密对话中停用（true 等同于跟随普通开关，不单独保存）。
+                if not isinstance(item, bool):
+                    raise ValueError("private_enabled 必须是布尔值")
+                if spec.private not in ("allow", "limited", "only"):
+                    raise ValueError(f"{spec.label}在私密对话中不可用，不能单独启用")
+                if spec.fixed and not item:
+                    raise ValueError(f"{spec.label}是固定工具，不能在私密对话中停用")
+                if item:
+                    entry.pop("private_enabled", None)
+                else:
+                    entry["private_enabled"] = False
             elif key in spec.params:
                 default, low, high, label = spec.params[key]
                 if isinstance(item, bool) or not isinstance(item, int) or not low <= item <= high:

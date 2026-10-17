@@ -52,6 +52,8 @@ class PrivateSpace:
         self.session_grants: dict[str, str] = {}
         self.pending_unlocks: dict[str, dict[object, int]] = {}
         self.passkeys = Passkeys(user, settings, self)
+        # 授权被撤销时的回调（文件助手据此清除私密对话，docs/assistant-design.md §24.2）。
+        self.listeners: list = []
 
     def _account(self, token, csrf=None, mutation=False):
         session = self.user._session(token, csrf=csrf, mutation=mutation)
@@ -89,6 +91,12 @@ class PrivateSpace:
         grant = self.grants.pop(access, None)
         if grant is not None and self.session_grants.get(grant.session) == access:
             self.session_grants.pop(grant.session, None)
+        if grant is not None:
+            for listener in self.listeners:
+                try:
+                    listener(access)
+                except Exception:
+                    logging.getLogger(__name__).error("private grant listener failed")
 
     @classmethod
     def _idle(cls, value):

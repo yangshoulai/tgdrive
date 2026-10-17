@@ -88,6 +88,12 @@ export async function unlockWithPrivatePasskey(signal: AbortSignal) {
   return api.finishPrivatePasskeyUnlock(challenge.request_id, credential, signal);
 }
 
+/** 私密对话里把文件移出私密空间前的重新验证（§24.5.3）：只取得通行密钥断言，随确认请求一起提交，不签发新的私密授权。 */
+export async function privatePasskeyAssertion(signal: AbortSignal) {
+  const challenge = await api.beginPrivatePasskeyUnlock(signal);
+  return { request_id: challenge.request_id, credential: await authenticate(challenge.options, signal) };
+}
+
 export async function loginWithPasskey(remember: boolean, signal: AbortSignal) {
   const challenge = await api.beginPasskeyLogin(remember, signal);
   const credential = await authenticate(challenge.options, signal);

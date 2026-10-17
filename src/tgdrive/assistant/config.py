@@ -46,6 +46,12 @@ DEFAULT_NOTICE = ("文件助手会把你的文件名、目录结构，以及它�
 # 默认使用说明的修订时间：说明内容（发送哪些数据）变化时更新它，之前的确认记录失效，用户需重新阅读。
 DEFAULT_NOTICE_SINCE = 1792141500.0  # 2026-10-16 17:05：增加图片（识图与聊天框附件）
 
+# 私密对话（docs/assistant-design.md §24.4）的单独说明：首次在私密空间使用前确认，内容变化时更新 PRIVATE_NOTICE_SINCE。
+PRIVATE_NOTICE = ("私密对话会把私密空间中的文件名、目录结构，以及助手读取的文本和图片发送给管理员允许用于私密对话的模型服务。\n\n"
+                  "私密对话不保存：锁定私密空间、闲置自动锁定或服务重启后，对话会被清除；管理员看不到对话内容。\n\n"
+                  "联网、分析网页和离线下载只访问你在消息里给出的链接；把文件移出私密空间需要重新验证身份。")
+PRIVATE_NOTICE_SINCE = 1792209600.0  # 2026-10-17 12:00：私密对话
+
 LEVELS = ("read", "write", "danger")
 
 
@@ -114,6 +120,11 @@ class AssistantConfig:
         return self._stored().get("full_access") is True
 
     @property
+    def private_default(self) -> bool:
+        """是否默认允许用户在私密空间使用助手（私密对话，§24.4）；用户策略可单独覆盖。"""
+        return self._stored().get("private") is True
+
+    @property
     def default_model(self) -> int | None:
         value = self._stored().get("default_model")
         return value if isinstance(value, int) else None
@@ -136,12 +147,13 @@ class AssistantConfig:
 
     def describe_settings(self) -> dict[str, object]:
         return {"enabled": self.enabled, "default_model": self.default_model, "full_access": self.full_access_default,
+                "private": self.private_default, "private_notice": PRIVATE_NOTICE,
                 **{name: self.setting(name) for name in SETTINGS},
                 "notice": self.notice, "notice_default": DEFAULT_NOTICE,
                 "bounds": {name: {"default": d, "min": lo, "max": hi} for name, (d, lo, hi) in SETTINGS.items()}}
 
     def update_settings(self, payload: dict, *, model_exists) -> dict[str, object]:
-        allowed = {"enabled", "default_model", "notice", "full_access", *SETTINGS}
+        allowed = {"enabled", "default_model", "notice", "full_access", "private", *SETTINGS}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"未知设置：{', '.join(sorted(unknown))}")
@@ -158,6 +170,10 @@ class AssistantConfig:
             if not isinstance(payload["full_access"], bool):
                 raise ValueError("full_access 必须是布尔值")
             values["full_access"] = payload["full_access"] or None
+        if "private" in payload:
+            if not isinstance(payload["private"], bool):
+                raise ValueError("private 必须是布尔值")
+            values["private"] = payload["private"] or None
         if "notice" in payload:
             notice = payload["notice"]
             if notice is not None and (not isinstance(notice, str) or len(notice) > 2000):
@@ -218,19 +234,24 @@ class AssistantConfig:
         level = row["max_level"] if row is not None and row["max_level"] in LEVELS else None
         daily = row["daily_tokens"] if row is not None else None
         full = None if row is None or row["full_access"] is None else bool(row["full_access"])
-        return {"enabled": enabled, "max_level": level, "daily_tokens": daily, "full_access": full,
+        private = None if row is None or row["private"] is None else bool(row["private"])
+        return {"enabled": enabled, "max_level": level, "daily_tokens": daily, "full_access": full, "private": private,
                 "effective": {"enabled": enabled is not False, "max_level": level or "write",
                               "daily_tokens": self.setting("user_daily_tokens") if daily is None else daily,
-                              "full_access": self.full_access_default if full is None else full},
+                              "full_access": self.full_access_default if full is None else full,
+                              "private": self.private_default if private is None else private},
                 "notice_ack_at": row["notice_ack_at"] if row is not None and row["notice_ack_at"] is not None
-                and row["notice_ack_at"] >= self.notice_since else None}
+                and row["notice_ack_at"] >= self.notice_since else None,
+                "private_notice_ack_at": row["private_notice_ack_at"] if row is not None and row["private_notice_ack_at"] is not None
+                and row["private_notice_ack_at"] >= PRIVATE_NOTICE_SINCE else None}
 
     def update_policy(self, user_id: int, payload: dict) -> dict[str, object]:
-        unknown = set(payload) - {"enabled", "max_level", "daily_tokens", "full_access"}
+        unknown = set(payload) - {"enabled", "max_level", "daily_tokens", "full_access", "private"}
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
         current = self.policy(user_id)
         enabled, level, daily, full = current["enabled"], current["max_level"], current["daily_tokens"], current["full_access"]
+        private = current["private"]
         if "enabled" in payload:
             if payload["enabled"] is not None and not isinstance(payload["enabled"], bool):
                 raise ValueError("enabled 只能是 true、false 或 null（跟随全局）")
@@ -247,11 +268,16 @@ class AssistantConfig:
             if payload["full_access"] is not None and not isinstance(payload["full_access"], bool):
                 raise ValueError("full_access 只能是 true、false 或 null（跟随全局）")
             full = payload["full_access"]
+        if "private" in payload:
+            if payload["private"] is not None and not isinstance(payload["private"], bool):
+                raise ValueError("private 只能是 true、false 或 null（跟随全局）")
+            private = payload["private"]
         with self.metadata.transaction() as db:
-            db.execute("INSERT INTO ai_user_policy(user_id,enabled,max_level,daily_tokens,full_access) VALUES(?,?,?,?,?) "
+            db.execute("INSERT INTO ai_user_policy(user_id,enabled,max_level,daily_tokens,full_access,private) VALUES(?,?,?,?,?,?) "
                        "ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled,max_level=excluded.max_level,"
-                       "daily_tokens=excluded.daily_tokens,full_access=excluded.full_access",
-                       (user_id, None if enabled is None else int(enabled), level, daily, None if full is None else int(full)))
+                       "daily_tokens=excluded.daily_tokens,full_access=excluded.full_access,private=excluded.private",
+                       (user_id, None if enabled is None else int(enabled), level, daily, None if full is None else int(full),
+                        None if private is None else int(private)))
         return self.policy(user_id)
 
     def acknowledge_notice(self, user_id: int, now: float) -> None:
@@ -259,7 +285,12 @@ class AssistantConfig:
             db.execute("INSERT INTO ai_user_policy(user_id,notice_ack_at) VALUES(?,?) "
                        "ON CONFLICT(user_id) DO UPDATE SET notice_ack_at=excluded.notice_ack_at", (user_id, now))
 
+    def acknowledge_private_notice(self, user_id: int, now: float) -> None:
+        with self.metadata.transaction() as db:
+            db.execute("INSERT INTO ai_user_policy(user_id,private_notice_ack_at) VALUES(?,?) "
+                       "ON CONFLICT(user_id) DO UPDATE SET private_notice_ack_at=excluded.private_notice_ack_at", (user_id, now))
+
     def purge_all(self) -> None:
         """清除所有助手数据时同时重置阅读说明记录，渠道与设置保留。"""
         with self.metadata.transaction() as db:
-            db.execute("UPDATE ai_user_policy SET notice_ack_at=NULL")
+            db.execute("UPDATE ai_user_policy SET notice_ack_at=NULL, private_notice_ack_at=NULL")

@@ -10,10 +10,13 @@ import { Markdown } from "../markdown";
 import { MessageAttachments } from "./assistant-attachments";
 import { usePreview } from "./preview-host";
 import { FileGlyph, getFileKind, parentPath } from "../files";
+import { FolderPicker } from "./folders";
+import { passkeyUnavailable, privatePasskeyAssertion } from "../passkeys";
 import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
 import { AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
-const display = (key: string) => "/" + key;
+/** 对象键的显示路径：私密空间的条目显示为相对私密空间根的路径。 */
+const display = (key: string) => "/" + (api.isPrivatePath(key) ? key.slice(api.PRIVATE_PREFIX.length) : key);
 const baseName = (key: string) => key.replace(/\/$/, "").split("/").pop() || key;
 const parentOf = (key: string) => { const trimmed = key.replace(/\/$/, ""); return trimmed.includes("/") ? trimmed.slice(0, trimmed.lastIndexOf("/") + 1) : ""; };
 const seconds = (ms: number) => ms < 1000 ? "不到 1 秒" : `${Math.round(ms / 1000)} 秒`;
@@ -119,6 +122,9 @@ function group(messages: ai.ChatMessage[]): Item[] {
 
 /* ---------- 消息流 ---------- */
 
+/** 私密对话的链接放行规则：只有对话中出现过的地址可以点击（§24.8）；普通对话不限制。 */
+const LinkContext = createContext<((href: string) => boolean) | undefined>(undefined);
+
 export function Thread({ detail, live, liveModel, modelLabel, running, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
   detail: ai.ConversationDetail; live: LiveRun | null; liveModel?: string; modelLabel: (id: number | null | undefined) => string; running: boolean;
   /** 从这条用户消息重新回答（丢弃之后的记录）。 */
@@ -129,7 +135,13 @@ export function Thread({ detail, live, liveModel, modelLabel, running, onAnswer,
   const lastQuestion = [...detail.messages].reverse().find(message => message.event?.type === "question");
   const answered = lastQuestion ? detail.messages.some(message => message.role === "user" && message.seq > lastQuestion.seq) : true;
   const lastTurn = [...items].reverse().find(item => item.kind === "turn");
-  return <>
+  const links = detail.links;
+  const allowLink = useMemo(() => {
+    if (!links) return undefined;
+    const allowed = new Set(links);
+    return (href: string) => { const value = href.split("#", 1)[0]; return allowed.has(value) || allowed.has(value.replace(/\/$/, "")); };
+  }, [links]);
+  return <LinkContext.Provider value={allowLink}>
     {items.map(item => item.kind === "event" ? <SystemEvent key={`e${item.message.seq}`} message={item.message} />
       : <TurnView key={item.turn.key} turn={item.turn} live={item === lastTurn && running ? live : null}
           model={item.turn.modelId != null ? modelLabel(item.turn.modelId) : item === lastTurn && running ? liveModel ?? "" : ""}
@@ -138,7 +150,7 @@ export function Thread({ detail, live, liveModel, modelLabel, running, onAnswer,
           onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />)}
     {running && live && (!lastTurn || lastTurn.kind !== "turn") && <TurnView turn={{ key: "live", steps: [], cards: [], notices: [], runId: null, input: 0, output: 0 }}
       live={live} model="" actions={[]} messages={[]} canAnswer={false} onAnswer={onAnswer} onScope={onScope} onActionChanged={onActionChanged} />}
-  </>;
+  </LinkContext.Provider>;
 }
 
 function SystemEvent({ message }: { message: ai.ChatMessage }) {
@@ -160,6 +172,7 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
   }
   const streaming = live?.streaming ?? "";
   const mark = useMarkState(live);
+  const allowLink = useContext(LinkContext);
   const hasAssistant = steps.length > 0 || turn.cards.length > 0 || turn.answer || streaming || turn.notices.length > 0 || live;
   return <div className="ai-turn">
     {turn.user && <UserMessage message={turn.user} onRetry={retry} />}
@@ -173,7 +186,7 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
           selectedAnswer={card.event?.type === "question" ? messages.find(message => message.role === "user" && message.seq > card.seq)?.text : undefined}
           canAnswer={canAnswer && card.seq === questionSeq} onAnswer={onAnswer} onScope={onScope} onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />)}
         {(turn.answer || streaming) && <div className="ai-answer">
-          <Markdown source={streaming || turn.answer?.text || ""} />{streaming && <i className="ai-caret" aria-hidden="true" />}
+          <Markdown source={streaming || turn.answer?.text || ""} allowLink={allowLink} />{streaming && <i className="ai-caret" aria-hidden="true" />}
         </div>}
         {turn.notices.map(notice => <Notice key={notice.seq} message={notice} onRetry={notice.retry ? retry : undefined} />)}
         {!live && (turn.answer || turn.output > 0) && <div className="ai-reply-foot">
@@ -248,8 +261,12 @@ function Process({ steps, live }: { steps: Step[]; live: boolean }) {
 
 function StepView({ step }: { step: Step }) {
   if (step.kind === "thinking") return <Thinking text={step.text} ms={step.ms} live={step.live} startedAt={step.startedAt ?? null} />;
-  if (step.kind === "note") return <div className="ai-step ai-note"><span className="ai-step-dot" aria-hidden="true" /><div className="ai-note-text"><Markdown source={step.text} /></div></div>;
+  if (step.kind === "note") return <div className="ai-step ai-note"><span className="ai-step-dot" aria-hidden="true" /><div className="ai-note-text"><NoteMarkdown text={step.text} /></div></div>;
   return <ToolStep message={step.message} pending={step.pending} />;
+}
+
+function NoteMarkdown({ text }: { text: string }) {
+  return <Markdown source={text} allowLink={useContext(LinkContext)} />;
 }
 
 function Thinking({ text, ms, live, startedAt }: { text: string; ms: number | null; live?: boolean; startedAt: number | null }) {
@@ -414,6 +431,7 @@ function BrowserCard({ event }: { event: ai.BrowserEvent }) {
   return <section className="ai-card ai-browser">
     <CardHead icon="copy" title={event.title || "可复制的文本"} />
     <pre className="ai-copy-text">{event.text}</pre>
+    {event.private && <p className="ai-card-note"><Icon name="lock" size={13} />复制后内容会离开私密空间：剪贴板可以被其他应用读取，锁定后也不会清除。</p>}
     <footer className="ai-card-foot"><span>{done ? "已复制到剪贴板" : `${event.text.length.toLocaleString("zh-CN")} 个字符`}</span>
       <Button size="sm" variant="primary" icon={done ? "check" : "copy"} onClick={() => void copyText(event.text).then(ok => setDone(ok))}>复制</Button></footer>
   </section>;
@@ -511,13 +529,15 @@ function ShareBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
 
 const ACTION_ICONS: Record<string, IconName> = { rename: "edit", move: "move", organize: "folder", mkdir: "folderPlus", trash: "trash",
   restore: "restore", purge: "trash", unshare: "link", share: "link", downloads: "download", download_control: "download",
-  save_attachment: "paperclip" };
+  save_attachment: "paperclip", move_out: "unlock", move_in: "lock" };
 const STATUS_LABEL: Record<string, [string, Tone]> = {
   pending: ["待确认", "accent"], running: ["执行中", "accent"], done: ["已完成", "success"], partial: ["部分完成", "warning"],
   failed: ["执行失败", "danger"], cancelled: ["已取消", "neutral"], rejected: ["已拒绝", "neutral"], expired: ["已过期", "neutral"],
   interrupted: ["已中断", "warning"], undoing: ["撤销中", "accent"], undone: ["已撤销", "neutral"],
 };
 const MOVE_KINDS = ["rename", "move", "organize"];
+/** 跨区移动（§24.5.3）：目标目录由用户在卡片上选择。 */
+const CROSS_KINDS = ["move_out", "move_in"];
 const SHARE_DAYS = [{ value: 0, label: "永久有效" }, { value: 1, label: "1 天" }, { value: 7, label: "7 天" }, { value: 30, label: "30 天" }, { value: 90, label: "90 天" }];
 
 function ItemRow({ kind, item }: { kind: string; item: ai.ActionItem }) {
@@ -532,6 +552,8 @@ function ItemRow({ kind, item }: { kind: string; item: ai.ActionItem }) {
   if (kind === "save_attachment") return <li className="ai-diff-row"><Icon name="paperclip" size={13} />
     <span className="cell-truncate" title={item.name}>{(item.name ?? "").replace(/^附件:/, "")}</span><Icon name="chevronRight" size={12} />
     <ins className="cell-truncate" title={display(item.path ?? "")}>{display(parentOf(item.path ?? ""))}</ins></li>;
+  if (CROSS_KINDS.includes(kind) && item.from) return <li className="ai-diff-row"><Icon name={item.folder ? "folder" : "file"} size={13} />
+    <span className="cell-truncate" title={display(item.from)}>{display(item.from)}</span></li>;
   if (kind === "download_control") return <li className="ai-diff-row"><Icon name="download" size={13} /><span className="cell-truncate">#{item.id} {baseName(item.path ?? "")}</span></li>;
   return <li className="ai-diff-row"><Icon name={item.folder || item.path?.endsWith("/") ? "folder" : "file"} size={13} />
     <span className="cell-truncate" title={display(item.path ?? "")}>{display(item.path ?? "")}</span></li>;
@@ -552,6 +574,11 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
   const [details, setDetails] = useState(false);
   const [shareDays, setShareDays] = useState<number | null>(null);
   const [password, setPassword] = useState("");
+  const [target, setTarget] = useState<string | null>(null);
+  const [targetReady, setTargetReady] = useState(false);
+  const [verify, setVerify] = useState("");
+  // 通行密钥断言只用于这一次确认：随确认请求提交，不在界面里保存。
+  const passkeyAssertion = useRef<{ request_id: string; credential: unknown } | null>(null);
   useEffect(() => { if (action) setValue(current => !current || action.status !== current.status || action.finished_at !== current.finished_at ? action : current); }, [action]);
   const status = value?.status ?? "pending";
   const live = status === "running" || status === "undoing";
@@ -599,8 +626,15 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
   const progress = value.progress;
   const result = value.result;
   const days = shareDays ?? payload.options?.expires_days ?? 0;
-  const iconTone: Tone = danger ? "danger" : share ? "public" : status === "done" ? "success" : "accent";
-  return <section className={`ai-card ai-action is-${expired ? "expired" : status}${danger ? " is-danger" : ""}`}>
+  const cross = CROSS_KINDS.includes(kind);
+  const moveOut = kind === "move_out";
+  // 移出的目标是普通目录（对象键）；移入的目标是私密空间里的目录（对象键带私密前缀，提交时去掉）。
+  const chosen = target ?? (moveOut ? payload.options?.target ?? "" : api.PRIVATE_PREFIX);
+  const unlocked = Boolean(api.getPrivateAccess());
+  const crossBlocked = cross && (!targetReady || (moveOut ? !verify && !password : !unlocked));
+  const crossInput = () => ({ target: moveOut ? chosen : chosen.slice(api.PRIVATE_PREFIX.length) });
+  const iconTone: Tone = danger || moveOut ? "danger" : share ? "public" : status === "done" ? "success" : "accent";
+  return <section className={`ai-card ai-action is-${expired ? "expired" : status}${danger || moveOut ? " is-danger" : ""}`}>
     <CardHead icon={ACTION_ICONS[kind] ?? "check"} tone={iconTone} title={payload.title ?? ai.ACTION_KINDS[kind] ?? kind} subtitle={payload.summary}
       badge={<Badge tone={danger && pending ? "danger" : tone} icon={auto && !pending ? "zap" : undefined}>{danger && pending ? "不可恢复" : auto && status === "done" ? "已自动执行" : label}</Badge>} />
     <div className="ai-chips">
@@ -608,6 +642,7 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
       <span>{value.count.toLocaleString("zh-CN")} 项</span>
       {payload.size ? <span>{formatBytes(payload.size)}</span> : null}
       {kind === "downloads" && payload.options?.target != null && <span><Icon name="download" size={12} />保存到 {display(payload.options.target)}</span>}
+      {cross && !pending && <span><Icon name={moveOut ? "unlock" : "lock"} size={12} />{moveOut ? "移到普通文件" : "移入私密空间"}</span>}
       {(payload.conflicts ?? 0) > 0 && <span className="tone-warning">{payload.conflicts} 项将跳过</span>}
     </div>
     {payload.confirm_reason && pending && <p className="ai-card-note"><Icon name="shield" size={13} />{payload.confirm_reason}</p>}
@@ -620,6 +655,15 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
         <input className="input input-sm" type="password" autoComplete="new-password" value={password} placeholder="4 位以上，留空为不设密码"
           onChange={event => setPassword(event.target.value)} /></label>
       <small>密码只用于这次分享，不会发送给助手或模型。</small>
+    </div>}
+    {cross && pending && <div className="ai-cross-form">
+      <div className="ai-cross-label"><Icon name={moveOut ? "folder" : "lock"} size={13} />
+        <span>{moveOut ? "移到「我的文件」中的" : "移入「私密空间」中的"} <strong>{display(chosen)}</strong></span></div>
+      {moveOut || unlocked ? <div className="ai-cross-picker"><FolderPicker value={chosen} onChange={setTarget} onReady={setTargetReady} /></div>
+        : <p className="ai-card-note"><Icon name="lock" size={13} />请先在私密空间页面解锁，再选择位置并确认移入。</p>}
+      {moveOut && <MoveOutVerify password={password} onPassword={value => { setPassword(value); setVerify(""); }} verified={Boolean(verify)}
+        onPasskey={async signal => { passkeyAssertion.current = await privatePasskeyAssertion(signal); setPassword(""); setVerify("passkey"); }} />}
+      <small>{moveOut ? "移出后文件不再受私密空间保护；同名时自动改名，不能撤销。" : "移入后公开链接会被取消；目标位置不会告诉助手。同名时自动改名，不能撤销。"}</small>
     </div>}
     {result?.links && result.links.length > 0 && <ul className="ai-links">{result.links.map(link => {
       const url = api.publicLinks(link.token, baseName(link.path)).page;
@@ -643,18 +687,58 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
       <span>{pending ? `${formatClock(value.expires_at)} 前有效` : live ? "正在执行，可以随时取消" : "24 小时内可以撤销"}</span>
       {pending && <>
         <Button size="sm" disabled={Boolean(busy)} loading={busy === "reject"} onClick={() => void run("reject", () => ai.rejectAction(id))}>拒绝</Button>
-        <Button size="sm" variant={danger ? "danger" : "primary"} disabled={Boolean(busy) || (danger && !acknowledged) || (share && password.length > 0 && password.length < 4)}
+        <Button size="sm" variant={danger || moveOut ? "danger" : "primary"} disabled={Boolean(busy) || (danger && !acknowledged) || (share && password.length > 0 && password.length < 4) || crossBlocked}
           loading={busy === "confirm"} aria-label={`确认执行：${payload.title ?? kind} ${value.count} 项`}
           onClick={() => { if (many && !armed) { setArmed(true); return; }
+            if (cross) {
+              void run("confirm", async () => {
+                const input: ai.ConfirmInput = crossInput();
+                if (moveOut) {
+                  if (password) input.password = password;
+                  else input.passkey = passkeyAssertion.current ?? undefined;
+                }
+                try { return await ai.confirmAction(id, input); }
+                finally { setPassword(""); setVerify(""); passkeyAssertion.current = null; }
+              });
+              return;
+            }
             void run("confirm", () => ai.confirmAction(id, { acknowledge: danger ? acknowledged : undefined, count: many ? value.count : undefined,
               share: share ? { expires_days: days, ...(password ? { password } : {}) } : undefined })); }}>
-          {many && armed ? `确认执行 ${value.count.toLocaleString("zh-CN")} 项` : share ? "确认分享" : "确认执行"}</Button>
+          {many && armed ? `确认执行 ${value.count.toLocaleString("zh-CN")} 项` : share ? "确认分享" : moveOut ? "验证并移出" : kind === "move_in" ? "确认移入" : "确认执行"}</Button>
       </>}
       {live && status === "running" && <Button size="sm" loading={busy === "cancel"} onClick={() => void run("cancel", () => ai.cancelAction(id))}>取消</Button>}
       {value.undoable && !live && <Button size="sm" icon="restore" loading={busy === "undo"} onClick={() => void run("undo", () => ai.undoAction(id))}>撤销</Button>}
     </footer>}
     {details && <ActionItemsDialog action={value} onClose={() => setDetails(false)} />}
   </section>;
+}
+
+/** 移出私密空间前的重新验证：登录密码或通行密钥，只对这一次确认有效（§24.5.3）。 */
+function MoveOutVerify({ password, onPassword, verified, onPasskey }: {
+  password: string; onPassword: (value: string) => void; verified: boolean; onPasskey: (signal: AbortSignal) => Promise<void>;
+}) {
+  const [status, setStatus] = useState<api.PrivateStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const controller = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const signal = (controller.current = new AbortController()).signal;
+    void api.privateStatus(signal).then(setStatus).catch(() => undefined);
+    return () => controller.current?.abort();
+  }, []);
+  const unavailable = status ? passkeyUnavailable(status.passkeys) : "";
+  const passkeys = Boolean(status && status.passkeys.registered > 0 && !unavailable);
+  async function usePasskey() {
+    setBusy(true);
+    try { await onPasskey((controller.current ??= new AbortController()).signal); }
+    catch (reason) { if (!(reason instanceof DOMException && reason.name === "AbortError")) toast.error(api.errorMessage(reason, "通行密钥验证失败")); }
+    finally { setBusy(false); }
+  }
+  return <div className="ai-verify">
+    <label><span>重新验证身份</span>
+      <input className="input input-sm" type="password" autoComplete="current-password" value={password} placeholder={verified ? "已使用通行密钥验证" : "账号登录密码"}
+        disabled={verified} onChange={event => onPassword(event.target.value)} /></label>
+    {passkeys && <Button size="sm" icon={verified ? "check" : "key"} loading={busy} disabled={busy || verified} onClick={() => void usePasskey()}>{verified ? "已验证" : "通行密钥"}</Button>}
+  </div>;
 }
 
 function ActionItemsDialog({ action, onClose }: { action: ai.AssistantAction; onClose: () => void }) {

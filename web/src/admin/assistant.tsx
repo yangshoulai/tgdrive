@@ -427,7 +427,8 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onPick, onChan
               <span role="cell"><Toggle label={`启用 ${model.label}`} checked={model.enabled}
                 onChange={value => void update(model, { enabled: value }, value && model.tools !== "yes" ? "已启用。建议先点“测试”确认它支持工具调用" : undefined)} /></span>
               <span role="cell" className="name-stack">
-                <strong>{model.label}{model.id === defaultModel && <Badge tone="accent">默认</Badge>}{model.removed_upstream && <Badge tone="warning">上游已移除</Badge>}</strong>
+                <strong>{model.label}{model.id === defaultModel && <Badge tone="accent">默认</Badge>}{model.removed_upstream && <Badge tone="warning">上游已移除</Badge>}
+                  {model.private_ok && <Badge icon="lock" tone="public">私密对话</Badge>}</strong>
                 <small className="assistant-model-sub"><code className="mono" title={model.test_note ?? model.model}>{model.model}</code>
                   <CapabilityBadges value={model.capabilities} tools={model.tools} />{!model.catalog_id && <span className="assistant-cap is-off">目录未收录</span>}</small>
               </span>
@@ -438,6 +439,8 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onPick, onChan
                 <Menu label={`${model.label} 的操作`} items={[
                   { label: "设为默认", icon: "check", onSelect: () => void setDefault(model) },
                   { label: "编辑", icon: "edit", onSelect: () => setEditingModel(model) },
+                  { label: model.private_ok ? "不再用于私密对话" : "允许用于私密对话", icon: "lock", onSelect: () => void update(model, { private_ok: !model.private_ok },
+                    model.private_ok ? "已不再用于私密对话" : "已允许用于私密对话：私密空间中的文件名与内容会发送给这个模型") },
                   ...(model.id !== defaultModel ? [{ label: "从系统移除", icon: "trash" as const, danger: true, divider: true, onSelect: () => void remove(model) }] : []),
                 ]} />
               </span>
@@ -532,7 +535,7 @@ function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number
   const initial = (value: number | null | undefined) => value == null ? "" : String(value);
   const [form, setForm] = useState({ model: model?.model ?? "", display_name: model?.display_name ?? "", context_window: initial(model?.context_window),
     max_output: initial(model?.max_output), tools: model?.tools ?? "unknown" as ai.ToolSupport, sort: String(model?.sort ?? 0),
-    input_price: initial(model?.input_price), output_price: initial(model?.output_price), vision: initialVision(model) });
+    input_price: initial(model?.input_price), output_price: initial(model?.output_price), vision: initialVision(model), private_ok: Boolean(model?.private_ok) });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const number = (value: string) => value.trim() ? Number(value) : null;
@@ -548,7 +551,7 @@ function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number
       if (value !== null && (!Number.isFinite(value) || value < 0 || value > 100000)) { setError("价格必须是 0–100000 之间的数字"); return; }
     }
     const values = { display_name: form.display_name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output),
-      tools: form.tools, sort: Number(form.sort), input_price: number(form.input_price), output_price: number(form.output_price),
+      tools: form.tools, sort: Number(form.sort), input_price: number(form.input_price), output_price: number(form.output_price), private_ok: form.private_ok,
       // 只在改动时提交：提交会把它标记为手动值或恢复为跟随目录。
       ...(form.vision !== initialVision(model) ? { vision: form.vision } : {}) };
     setBusy(true); setError("");
@@ -602,6 +605,8 @@ function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number
             <option value="auto">跟随模型目录</option><option value="yes">支持</option><option value="no">不支持</option>
           </select>
         </Field>
+        <Switch label="允许用于私密对话" checked={form.private_ok} onChange={value => setForm({ ...form, private_ok: value })}
+          description="私密对话会把私密空间里的文件名、目录结构以及读取的文本和图片发给这个模型，只为你信任的模型服务开启。全局开关在“限制与额度”。" />
         {error && <div className="form-alert" role="alert"><Icon name="alert" size={16} />{error}</div>}
       </form>
     </Modal>
@@ -819,9 +824,12 @@ function CatalogEntryDialog({ entry, onClose, onSaved }: { entry: ai.CatalogEntr
 
 /* ---------- 工具 ---------- */
 
+/** 工具在私密对话中的可用性（§24.5.1），说明来自服务端。 */
+const PRIVATE_LABELS: Record<ai.PrivateMode, string> = { allow: "私密对话可用", limited: "私密对话有限制", only: "仅私密对话", never: "私密对话不提供", na: "私密对话不适用" };
+
 function ToolsTab() {
   const [tools, setTools] = useState<ai.AdminTool[] | null>(null);
-  const [draft, setDraft] = useState<Record<string, { enabled?: boolean; [param: string]: boolean | number | undefined }>>({});
+  const [draft, setDraft] = useState<Record<string, { enabled?: boolean; private_enabled?: boolean; [param: string]: boolean | number | undefined }>>({});
   const [paramsFor, setParamsFor] = useState<ai.AdminTool | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -841,6 +849,7 @@ function ToolsTab() {
   }, [effective]);
   const dirty = Object.keys(draft).length > 0;
   function toggle(name: string, value: boolean) { setDraft(current => ({ ...current, [name]: { ...current[name], enabled: value } })); }
+  function togglePrivate(name: string, value: boolean) { setDraft(current => ({ ...current, [name]: { ...current[name], private_enabled: value } })); }
   async function save() {
     setBusy(true); setError("");
     try {
@@ -853,7 +862,8 @@ function ToolsTab() {
   if (!tools) return error ? <Panel><EmptyState icon="alert" title="工具加载失败" description={error} action={<Button onClick={load}>重试</Button>} /></Panel> : <Panel><SkeletonRows rows={6} /></Panel>;
   return (
     <>
-      <p className="inline-note banner"><Icon name="info" size={16} />停用的工具不会发送给模型，模型不知道它存在。需要确认的写入操作始终需要用户在界面上逐项确认，不能关闭。改动在下一次模型调用时生效。</p>
+      <p className="inline-note banner"><Icon name="info" size={16} />停用的工具不会发送给模型，模型不知道它存在。需要确认的写入操作始终需要用户在界面上逐项确认，不能关闭。改动在下一次模型调用时生效。
+        锁形开关只控制私密对话：关闭后这个工具只在普通对话中提供。</p>
       {groups.map(([group, items]) => (
         <Panel key={group} title={group} flush className="assistant-tool-group"
           actions={items.some(tool => !tool.fixed) && <Button size="sm" variant="ghost" onClick={() => {
@@ -868,9 +878,12 @@ function ToolsTab() {
                     {tool.warning && <span className="tone-warning assistant-tool-warning"><Icon name="alert" size={13} />{tool.warning}</span>}</span>
                   <small>{tool.description}</small>
                   {tool.blocked && <small className="tone-warning">依赖 {tool.depends.join("、")}，已随之停用</small>}
+                  <small className={`assistant-tool-private is-${tool.private}`}><Icon name="lock" size={12} />{PRIVATE_LABELS[tool.private]}{tool.private_note ? `：${tool.private_note}` : ""}</small>
                 </span>
                 <span className="assistant-tool-actions">
                   {tool.params.length > 0 && <Button size="sm" variant="ghost" onClick={() => setParamsFor(tool)}>参数…</Button>}
+                  {!tool.fixed && ["allow", "limited", "only"].includes(tool.private) && <span className="assistant-tool-private-toggle" title="在私密对话中提供"><Icon name="lock" size={13} />
+                    <Toggle label={`在私密对话中提供 ${tool.label}`} disabled={!tool.on} checked={(draft[tool.name]?.private_enabled ?? tool.private_enabled) as boolean} onChange={value => togglePrivate(tool.name, value)} /></span>}
                   {tool.fixed ? <span className="muted">固定启用</span>
                     : <Toggle label={`启用 ${tool.label}`} checked={(draft[tool.name]?.enabled ?? tool.enabled) as boolean} onChange={value => toggle(tool.name, value)} />}
                 </span>
@@ -964,6 +977,10 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
       <input className="input" type="number" min={bound.min} max={bound.max} value={value} onChange={event => onChange(event.target.value)} />
     </Field>
   );
+  async function setPrivate(value: boolean) {
+    try { onSaved(await ai.updateAdminSettings({ private: value })); toast.success(value ? "已开放私密对话" : "已关闭私密对话，进行中的私密对话已清除"); }
+    catch (reason) { toast.error(api.errorMessage(reason, "保存失败")); }
+  }
   async function setFullAccess(value: boolean) {
     try { onSaved(await ai.updateAdminSettings({ full_access: value })); toast.success(value ? "已允许用户使用完全访问模式" : "已关闭完全访问模式"); }
     catch (reason) { toast.error(api.errorMessage(reason, "保存失败")); }
@@ -973,6 +990,10 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
       <Panel title="访问模式" description="审批模式下，每次修改文件都由用户在卡片上确认。完全访问模式下，普通修改自动执行并保留 24 小时撤销。">
         <Switch label="允许用户切换到完全访问" checked={settings.full_access} onChange={value => void setFullAccess(value)}
           description="彻底删除、公开分享、超过 1,000 项的操作，以及对话读取过文件内容或网页之后的修改，仍然需要用户确认。可在“用户”页按人单独允许或禁止。" />
+      </Panel>
+      <Panel title="私密对话" description="用户在已解锁的私密空间里使用助手。对话只在服务器内存中，锁定、闲置或重启后清除，管理员看不到内容。">
+        <Switch label="允许用户使用私密对话" checked={settings.private} onChange={value => void setPrivate(value)}
+          description="还需要至少一个在模型配置中「允许用于私密对话」的模型；可在“用户”页按人单独允许或禁止。关闭时立即清除所有进行中的私密对话。" />
       </Panel>
       {LIMIT_GROUPS.map(group => <Panel key={group.title} title={group.title} description={group.description}>
         <div className="form settings-form assistant-limit-form">{group.keys.map(key => numberField(key, limits.bounds[key].label, limits.bounds[key], form[key] ?? "", value => setForm({ ...form, [key]: value })))}</div>
@@ -1213,14 +1234,15 @@ function CallsTab() {
 
 export function AssistantPolicyDialog({ user, onClose }: { user: api.Account; onClose: () => void }) {
   const [policy, setPolicy] = useState<ai.UserPolicy | null>(null);
-  const [form, setForm] = useState({ enabled: "inherit", max_level: "inherit", daily_tokens: "", full_access: "inherit" });
+  const [form, setForm] = useState({ enabled: "inherit", max_level: "inherit", daily_tokens: "", full_access: "inherit", private: "inherit" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     void ai.adminPolicy(user.id).then(value => {
       setPolicy(value);
       setForm({ enabled: value.enabled === null ? "inherit" : value.enabled ? "on" : "off", max_level: value.max_level ?? "inherit", daily_tokens: value.daily_tokens === null ? "" : String(value.daily_tokens),
-        full_access: value.full_access === null ? "inherit" : value.full_access ? "on" : "off" });
+        full_access: value.full_access === null ? "inherit" : value.full_access ? "on" : "off",
+        private: value.private === null ? "inherit" : value.private ? "on" : "off" });
     }).catch(reason => setError(api.errorMessage(reason, "加载失败")));
   }, [user.id]);
   async function submit(event: FormEvent) {
@@ -1230,7 +1252,8 @@ export function AssistantPolicyDialog({ user, onClose }: { user: api.Account; on
       await ai.updateAdminPolicy(user.id, { enabled: form.enabled === "inherit" ? null : form.enabled === "on",
         max_level: form.max_level === "inherit" ? null : form.max_level as "read" | "write" | "danger",
         daily_tokens: form.daily_tokens.trim() === "" ? null : Number(form.daily_tokens),
-        full_access: form.full_access === "inherit" ? null : form.full_access === "on" });
+        full_access: form.full_access === "inherit" ? null : form.full_access === "on",
+        private: form.private === "inherit" ? null : form.private === "on" });
       toast.success(`已更新 ${api.displayName(user)} 的文件助手设置`); onClose();
     } catch (reason) { setError(api.errorMessage(reason, "保存失败")); }
     finally { setBusy(false); }
@@ -1246,6 +1269,10 @@ export function AssistantPolicyDialog({ user, onClose }: { user: api.Account; on
             <option value="inherit">跟随全局（普通写入）</option><option value="read">只读</option><option value="write">普通写入</option><option value="danger">含不可恢复操作</option></select></Field>
         <Field label="完全访问模式" hint="允许后，用户可以让普通修改自动执行（仍可撤销）。">
           <select className="input" value={form.full_access} onChange={event => setForm({ ...form, full_access: event.target.value })}>
+            <option value="inherit">跟随“限制与额度”中的全局设置</option>
+            <option value="on">允许</option><option value="off">不允许</option></select></Field>
+        <Field label="私密对话" hint="允许后，用户可以在已解锁的私密空间里使用助手；禁止时立即清除该用户进行中的私密对话。">
+          <select className="input" value={form.private} onChange={event => setForm({ ...form, private: event.target.value })}>
             <option value="inherit">跟随“限制与额度”中的全局设置</option>
             <option value="on">允许</option><option value="off">不允许</option></select></Field>
         <Field label="每日 token" hint={`留空跟随全局（当前 ${policy.effective.daily_tokens ? tokens(policy.effective.daily_tokens) : "不限"}），0 表示不限。`}>

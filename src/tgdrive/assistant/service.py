@@ -2,6 +2,10 @@
 
 每条用户消息触发一个 run，在服务端以 asyncio 任务运行，与 HTTP 连接解耦：事件进入内存环形缓冲（断线后按 seq 续读），
 消息与工具调用同时落库。每一步模型调用前都重新校验：系统已解锁、会话有效、账号可用、助手与模型仍启用、额度未用尽。
+
+私密对话（§24）：同一个助手在私密空间里的模式。对话只存在内存（private_chat.MemoryTrace），绑定登录会话与私密授权
+（access）；每个接口、每一步与每次读取都复核授权，授权失效（锁定、闲置、退出、改密、重启）即清除对话。
+私密对话只经 /api/user/v1/private/assistant/... 访问（带 access），普通接口不接受私密对话的编号。
 """
 
 from __future__ import annotations
@@ -11,6 +15,8 @@ import collections
 import hashlib
 import json
 import logging
+import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,13 +28,14 @@ from zoneinfo import ZoneInfo
 from ..api import normalize_user_path
 from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
-from ..objects import Scope
+from ..objects import PRIVATE_PREFIX, Scope
 from . import client_tools, http_tools, knowledge, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
 from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
-from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
+from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, PRIVATE_CONFIRM_KINDS, ActionExecutor, Progress, share_options
 from .catalog import CatalogStore
 from .channels import ChannelStore
-from .config import LIMITS, AssistantConfig
+from .config import LIMITS, PRIVATE_NOTICE, AssistantConfig
+from .private_chat import MemoryTrace, RoutedTrace, is_private
 from .guard import SecretGuard
 from .providers import ProviderError, ToolDef
 from .tools import (
@@ -65,7 +72,26 @@ def session_hash(token: str) -> str:
 
 
 def display(key: str) -> str:
-    return "/" + key
+    """路径显示：私密空间内的路径相对私密空间根，不暴露系统区前缀。"""
+    return "/" + (key[len(PRIVATE_PREFIX):] if key.startswith(PRIVATE_PREFIX) else key)
+
+
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'`）】」』，。；、]+", re.IGNORECASE)
+
+
+def _urls(text: object) -> set[str]:
+    """文本中出现的 http(s) 地址（去掉锚点与结尾标点），用于私密对话的地址规则（§24.5.2）。"""
+    if not isinstance(text, str):
+        return set()
+    return {match.rstrip(".,;:!?)]}").split("#", 1)[0] for match in URL_PATTERN.findall(text)}
+
+
+@dataclass
+class PrivateBinding:
+    """私密对话与登录会话、私密授权的绑定：每个登录会话最多一个私密对话。"""
+    token: str
+    access: str
+    user_id: int
 
 
 @dataclass
@@ -99,6 +125,12 @@ class RunState:
     environment: dict = field(default_factory=dict)
     # 本轮已读取的图片（对象键 → {"mime","data",…} 或不能发送的原因）。只在内存中，不进入留痕。
     images: dict = field(default_factory=dict)
+    # 私密对话：发起这个 run 的私密授权（§24.2）。普通对话为 None。
+    access: str | None = None
+
+    @property
+    def private(self) -> bool:
+        return self.access is not None
 
     async def emit(self, event: dict) -> None:
         self.seq += 1
@@ -135,7 +167,13 @@ class AssistantService:
         self.settings = settings
         self.metadata, self.keystore = accounts.metadata, accounts.keystore
         self.config = AssistantConfig(self.metadata)
-        self.trace = TraceStore(self.metadata, self.keystore)
+        self.memory = MemoryTrace()
+        self.trace = RoutedTrace(TraceStore(self.metadata, self.keystore), self.memory)
+        # 私密空间授权（PrivateSpace），由 HTTP 层注入；未注入时私密对话不可用。
+        self.private_space = None
+        self.private_chats: dict[str, PrivateBinding] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: int | None = None
         self.attachments = AttachmentStore(self.metadata, objects)
         self.catalog = CatalogStore(self.metadata, self.config, log_call=self.trace.log_call)
         self.channels = ChannelStore(self.metadata, self.keystore, log_call=self.trace.log_call, catalog=self.catalog)
@@ -163,19 +201,119 @@ class AssistantService:
             raise PermissionError("该账号没有文件空间")
         return session, account
 
-    def _availability(self, user_id: int) -> tuple[bool, str | None]:
+    def _availability(self, user_id: int, *, private: bool = False) -> tuple[bool, str | None]:
         if not self.config.enabled:
             return False, "管理员尚未启用文件助手"
-        if not self.config.policy(user_id)["effective"]["enabled"]:
+        policy = self.config.policy(user_id)["effective"]
+        if not policy["enabled"]:
             return False, "管理员未对你的账号开放文件助手"
+        if private:
+            if self.private_space is None or not policy["private"]:
+                return False, "管理员未开放私密对话"
+            if not self.channels.usable(private=True):
+                return False, "管理员还没有允许任何模型用于私密对话"
+            return True, None
         if not self.channels.usable():
             return False, "暂无可用的模型"
         return True, None
 
-    def _require_available(self, user_id: int) -> None:
-        available, reason = self._availability(user_id)
+    def _require_available(self, user_id: int, *, private: bool = False) -> None:
+        available, reason = self._availability(user_id, private=private)
         if not available:
             raise AssistantDenied(reason)
+
+    # ---------- 私密对话的授权绑定（§24.2） ----------
+
+    def on_private_forget(self, access: str) -> None:
+        """PrivateSpace 撤销授权（锁定、退出、改密、禁用、过期清理）时调用。"""
+        if any(binding.access == access for binding in self.private_chats.values()):
+            self.forget_private(access=access)
+
+    def _grant(self, token: str, access: str) -> None:
+        """复核私密授权；失效时清除这个会话的私密对话并抛出 PrivateLocked。"""
+        from ..private import PrivateLocked
+        if self.private_space is None:
+            raise PrivateLocked("私密空间不可用")
+        try:
+            self.private_space.require(token, access)
+        except PrivateLocked:
+            self.forget_private(access=access)
+            raise
+
+    def _check_private(self, token: str, conversation_id: str, access: str | None) -> None:
+        """私密对话必须带同一登录会话当前有效的私密授权；普通接口不接受私密对话，私密接口也不接受普通对话。"""
+        if not is_private(conversation_id):
+            if access is not None:
+                raise NotFoundError("对话不存在")
+            return
+        binding = self.private_chats.get(conversation_id)
+        if access is None or binding is None or binding.token != token or binding.access != access:
+            raise NotFoundError("对话不存在")
+        self._grant(token, access)
+
+    def forget_private(self, *, access: str | None = None, token: str | None = None, user_id: int | None = None) -> None:
+        """清除私密对话（授权失效、锁定、退出、管理员关闭）：取消运行、作废操作、丢弃内存中的全部内容。
+        授权复核可能发生在工作线程（对象层的 authorize），这时转交事件循环线程执行。"""
+        if self._loop is not None and threading.get_ident() != self._loop_thread:
+            try:
+                self._loop.call_soon_threadsafe(lambda: self.forget_private(access=access, token=token, user_id=user_id))
+            except RuntimeError:
+                pass  # 事件循环已关闭
+            return
+        for conversation_id, binding in list(self.private_chats.items()):
+            if (access is not None and binding.access != access) or (token is not None and binding.token != token) \
+                    or (user_id is not None and binding.user_id != user_id):
+                continue
+            self.private_chats.pop(conversation_id, None)
+            for run in list(self.runs.values()):
+                if run.conversation_id == conversation_id:
+                    if run.finished_at is None and run.task is not None:
+                        run.task.cancel()
+                    run.events.clear()
+                    self.runs.pop(run.id, None)
+            for action_id, progress in list(self.executions.items()):
+                if is_private(action_id) and self.memory.action_rows.get(action_id, {}).get("conversation_id") == conversation_id:
+                    progress.cancel = True
+            self.memory.drop(conversation_id)
+
+    def sweep_private(self) -> None:
+        """授权是惰性过期的：定期复核每个私密对话的授权，过期即清除。"""
+        if self.private_space is None:
+            return
+        for binding in list(self.private_chats.values()):
+            try:
+                self.private_space.require(binding.token, binding.access)
+            except Exception:
+                self.forget_private(access=binding.access)
+
+    def _url_pool(self, conversation_id: str) -> tuple[set[str], set[str], list[str]]:
+        """私密对话中出现过的地址：用户消息里的（user）、成功的工具结果里的（seen），以及用户消息原文。"""
+        user, seen, texts = set(), set(), []
+        for message in self.memory.messages(conversation_id, limit=5000):
+            if message["role"] == "user":
+                user |= _urls(message.get("text"))
+                texts.append(str(message.get("text") or ""))
+            elif message["role"] == "tool" and message.get("status") == "ok":
+                # 只认成功的工具结果：错误文案可能回显模型自己给出的地址。
+                seen |= _urls(message.get("model_content"))
+        return user, seen, texts
+
+    def _url_allowed(self, conversation_id: str):
+        """§24.5.2：user = 用户消息里原样出现的地址；seen = 用户地址加上本对话工具结果里出现过的地址。"""
+        def allowed(url: str, level: str) -> bool:
+            if not isinstance(url, str):
+                return False
+            candidate = url.strip().split("#", 1)[0]
+            user, seen, texts = self._url_pool(conversation_id)
+            if level == "text":
+                # 解析下载来源的文本（链接或 curl 命令）：原样出现在用户消息里，或每一行都是用户给出的链接。
+                text = url.strip()
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                return bool(text) and (any(text in item for item in texts)
+                                       or all(line.split("#", 1)[0] in user for line in lines))
+            pool = user if level == "user" else user | seen
+            return candidate in pool or candidate.rstrip(".,;:!?)]}") in pool
+        return allowed
 
     def _full_access(self, user_id: int) -> bool:
         """管理员是否允许该账号使用完全访问：用户策略优先，未设置时跟随全局设置。"""
@@ -186,17 +324,19 @@ class AssistantService:
     def _tool_settings(self) -> dict[str, dict]:
         return self.config.tool_settings()
 
-    def _user_tools(self, user_id: int):
+    def _user_tools(self, user_id: int, *, private: bool = False):
         level = self.config.policy(user_id)["effective"]["max_level"]
-        return effective_tools(self._tool_settings(), level)
+        return effective_tools(self._tool_settings(), level, private=private)
 
-    def _choose_model(self, requested: object, fallback: int | None) -> int:
+    def _choose_model(self, requested: object, fallback: int | None, *, private: bool = False) -> int:
         for candidate in (requested, fallback, self.config.default_model):
-            if isinstance(candidate, int) and not isinstance(candidate, bool) and self.channels.is_usable(candidate):
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and self.channels.is_usable(candidate, private=private):
                 return candidate
-        usable = self.channels.usable()
+        if private and isinstance(requested, int) and not isinstance(requested, bool):
+            raise ValueError("这个模型不能用于私密对话，请选择管理员允许的模型")
+        usable = self.channels.usable(private=private)
         if not usable:
-            raise AssistantDenied("暂无可用的模型")
+            raise AssistantDenied("管理员还没有允许任何模型用于私密对话" if private else "暂无可用的模型")
         return int(usable[0]["id"])
 
     @staticmethod
@@ -212,6 +352,20 @@ class AssistantService:
             return ""  # 私密空间、回收站等系统区域不能作为作用域
         return normalize_user_path(text, directory=True)
 
+    @staticmethod
+    def _private_location(value: object) -> str:
+        """私密对话的当前位置：相对私密空间根的路径，返回私密前缀下的对象键。"""
+        if value in (None, "", "/"):
+            return PRIVATE_PREFIX
+        if not isinstance(value, str):
+            raise ValueError("位置参数不正确")
+        text = value.strip().lstrip("/")
+        if text.startswith(PRIVATE_PREFIX):
+            text = text[len(PRIVATE_PREFIX):]
+        if not text or text.startswith(".tgdrive"):
+            return PRIVATE_PREFIX
+        return PRIVATE_PREFIX + normalize_user_path(text, directory=True)
+
     def _mentions(self, bucket_id: int, value: object, scope_root: str) -> list[str]:
         """@ 引用的文件或文件夹：必须是作用域内、存在的普通文件；超出作用域时由界面先扩大作用域再发送。"""
         if value in (None, []):
@@ -219,10 +373,12 @@ class AssistantService:
         if not isinstance(value, list) or len(value) > MAX_MENTIONS or not all(isinstance(item, str) for item in value):
             raise ValueError(f"一次最多引用 {MAX_MENTIONS} 个文件或文件夹")
         keys: list[str] = []
+        base = PRIVATE_PREFIX if scope_root.startswith(PRIVATE_PREFIX) else ""
         for item in value:
             text = item.strip().lstrip("/")
             try:
-                key = normalize_user_path(text, directory=text.endswith("/"))
+                # 私密对话的引用相对私密空间根；普通对话的引用不能进入私密空间或系统区域。
+                key = base + normalize_user_path(text, directory=text.endswith("/"))
             except PermissionError as exc:
                 raise ValueError("不能引用私密空间或系统区域的内容") from exc
             except ValueError as exc:
@@ -239,37 +395,71 @@ class AssistantService:
 
     # ---------- 用户端：配置 ----------
 
-    def user_config(self, token: str) -> dict[str, object]:
+    def user_config(self, token: str, access: str | None = None) -> dict[str, object]:
         session, account = self._session(token)
-        available, reason = self._availability(account.id)
+        private = access is not None
+        if private:
+            self._grant(token, access)
+        available, reason = self._availability(account.id, private=private)
         policy = self.config.policy(account.id)
         level = policy["effective"]["max_level"]
-        enabled = self._user_tools(account.id) if available else {}
+        enabled = self._user_tools(account.id, private=private) if available else {}
         tools = []
         for item in describe_tools(self._tool_settings()):
+            if private and item["private"] in ("na",):
+                continue  # 私密空间里没有意义的工具不列出
+            if not private and item["private"] == "only":
+                continue
             reason_off = None
             if not item["enabled"]:
                 reason_off = "管理员已关闭"
+            elif private and item["private"] == "never":
+                reason_off = item["private_note"] or "私密对话不提供"
+            elif private and not item["private_enabled"]:
+                reason_off = "管理员已在私密对话中关闭"
             elif item["name"] not in enabled:
                 reason_off = "你的账号仅允许只读" if level == "read" else "暂不可用"
             tools.append({"name": item["name"], "label": item["label"], "group": item["group"], "group_label": item["group_label"],
                           "level": item["level"], "description": item["description"].split("。")[0] + "。",
-                          "available": reason_off is None, "reason": reason_off, "warning": item["warning"]})
+                          "available": reason_off is None, "reason": reason_off, "warning": item["warning"],
+                          **({"note": item["private_note"]} if private and item["private"] == "limited" else {})})
         daily = int(policy["effective"]["daily_tokens"])
-        return {"available": available, "reason": reason, "models": self.channels.usable() if available else [],
+        return {"available": available, "reason": reason, "models": self.channels.usable(private=private) if available else [],
                 "default_model": self.config.default_model, "tools": tools, "max_level": level,
                 "usage": {"today": self.trace.tokens_today(account.id), "limit": daily or None},
-                "notice": self.config.notice, "notice_ack": policy["notice_ack_at"] is not None,
-                "retention_days": self.config.setting("retention_days"), "full_access": self._full_access(account.id)}
+                # 私密对话还没确认过普通说明时，两份说明一起展示、一次确认（§24.4）。
+                "notice": (PRIVATE_NOTICE if policy["notice_ack_at"] is not None else f"{self.config.notice}\n\n{PRIVATE_NOTICE}")
+                if private else self.config.notice,
+                "notice_ack": policy["notice_ack_at"] is not None and (not private or policy["private_notice_ack_at"] is not None),
+                "retention_days": self.config.setting("retention_days"), "full_access": self._full_access(account.id),
+                "private": private, "private_available": self._availability(account.id, private=True)[0]}
 
-    def ack_notice(self, token: str, csrf: str) -> None:
+    def ack_notice(self, token: str, csrf: str, access: str | None = None) -> None:
         _, account = self._session(token, csrf=csrf, mutation=True)
+        if access is not None:
+            self._grant(token, access)
+            now = time.time()
+            if self.config.policy(account.id)["notice_ack_at"] is None:
+                self.config.acknowledge_notice(account.id, now)
+            self.config.acknowledge_private_notice(account.id, now)
+            return
         self.config.acknowledge_notice(account.id, time.time())
 
     # ---------- 用户端：对话 ----------
 
-    def list_conversations(self, token: str, *, cursor: str = "", archived: bool = False) -> dict[str, object]:
+    def list_conversations(self, token: str, *, cursor: str = "", archived: bool = False, access: str | None = None) -> dict[str, object]:
         _, account = self._session(token)
+        if access is not None:
+            # 私密对话：每个登录会话最多一个，只在授权有效时列出。
+            self._grant(token, access)
+            items = []
+            for conversation_id, binding in self.private_chats.items():
+                if binding.token == token and binding.access == access and binding.user_id == account.id:
+                    item = self.trace.conversation_json(self.trace.conversation(account.id, conversation_id))
+                    item["scope"] = display(item.pop("scope_root"))
+                    item["active_run"] = self._active_run(conversation_id)
+                    items.append(item)
+            return {"conversations": items, "next_cursor": None}
         result = self.trace.list_conversations(account.id, cursor=cursor, archived=archived)
         for item in result["conversations"]:
             item["scope"] = display(item.pop("scope_root"))
@@ -282,8 +472,10 @@ class AssistantService:
                 return run.id
         return None
 
-    def create_conversation(self, token: str, csrf: str, payload: dict) -> dict[str, object]:
+    def create_conversation(self, token: str, csrf: str, payload: dict, access: str | None = None) -> dict[str, object]:
         _, account = self._session(token, csrf=csrf, mutation=True)
+        if access is not None:
+            return self._create_private(token, account, payload, access)
         self._require_available(account.id)
         scope_root = self._location(payload.get("location"))
         model_id = self._choose_model(payload.get("model_id"), None)
@@ -294,6 +486,19 @@ class AssistantService:
             self.trace.update_conversation(account.id, conversation_id, access_mode=mode)
         return self.conversation(token, conversation_id)
 
+    def _create_private(self, token: str, account, payload: dict, access: str) -> dict[str, object]:
+        """私密对话（§24.3）：作用域固定为私密空间根；同一登录会话已有私密对话时先清除旧的（新建对话）。"""
+        self._grant(token, access)
+        self._require_available(account.id, private=True)
+        model_id = self._choose_model(payload.get("model_id"), None, private=True)
+        mode = self._access_mode(account.id, payload.get("access_mode", "approval"))
+        self.forget_private(token=token)
+        conversation_id = self.memory.create_conversation(account.id, PRIVATE_PREFIX, model_id)
+        if mode != "approval":
+            self.memory.update_conversation(account.id, conversation_id, access_mode=mode)
+        self.private_chats[conversation_id] = PrivateBinding(token, access, account.id)
+        return self.conversation(token, conversation_id, access)
+
     def _access_mode(self, user_id: int, value: object) -> str:
         if value not in ACCESS_MODES:
             raise ValueError("访问模式只能是 approval 或 full")
@@ -301,8 +506,9 @@ class AssistantService:
             raise ValueError("管理员未允许你使用完全访问模式")
         return str(value)
 
-    def conversation(self, token: str, conversation_id: str) -> dict[str, object]:
+    def conversation(self, token: str, conversation_id: str, access: str | None = None) -> dict[str, object]:
         _, account = self._session(token)
+        self._check_private(token, conversation_id, access)
         row = self.trace.conversation(account.id, conversation_id)
         item = self.trace.conversation_json(row)
         item["scope"] = display(item.pop("scope_root"))
@@ -312,7 +518,9 @@ class AssistantService:
         return {"conversation": item, "messages": [self._public_message(m) for m in messages], "context": self._context_usage(row, messages),
                 "actions": [self._action_view(action) for action in self.trace.actions(conversation_id)],
                 "active_run": self._active_run(conversation_id),
-                "attachments": self.attachments.conversation_usage(account.id, conversation_id)}
+                "attachments": self.attachments.conversation_usage(account.id, conversation_id),
+                # 私密对话的回复里只有「已出现地址」可以点击（§24.8），其余链接显示为文字。
+                **({"links": sorted(set().union(*self._url_pool(conversation_id)[:2]))[:500]} if is_private(conversation_id) else {})}
 
     def _context_usage(self, row, messages: list[dict]) -> dict | None:
         """上下文占用（§23）：最近一次模型调用的输入加输出 token（下一次请求至少包含这些）与当前模型窗口。"""
@@ -333,8 +541,10 @@ class AssistantService:
         """发给浏览器的消息：去掉只给模型看的包装文本。"""
         return {key: value for key, value in message.items() if key not in ("model_content", "images")}
 
-    def update_conversation(self, token: str, csrf: str, conversation_id: str, payload: dict) -> dict[str, object]:
+    def update_conversation(self, token: str, csrf: str, conversation_id: str, payload: dict,
+                            access: str | None = None) -> dict[str, object]:
         _, account = self._session(token, csrf=csrf, mutation=True)
+        self._check_private(token, conversation_id, access)
         unknown = set(payload) - {"title", "archived", "access_mode"}
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
@@ -357,8 +567,16 @@ class AssistantService:
         item["scope"] = display(item.pop("scope_root"))
         return item
 
-    def delete_conversation(self, token: str, csrf: str, conversation_id: str) -> None:
+    def delete_conversation(self, token: str, csrf: str, conversation_id: str, access: str | None = None) -> None:
         _, account = self._session(token, csrf=csrf, mutation=True)
+        if is_private(conversation_id):
+            # 「清除对话」：内存中的内容全部丢弃，不留任何记录。
+            binding = self.private_chats.get(conversation_id)
+            if access is None or binding is None or binding.token != token or binding.access != access:
+                raise NotFoundError("对话不存在")
+            self.forget_private(access=access)
+            return
+        self._check_private(token, conversation_id, access)
         run_id = self._active_run(conversation_id)
         if run_id and self.runs[run_id].user_id == account.id and self.runs[run_id].task:
             self.runs[run_id].task.cancel()
@@ -453,12 +671,24 @@ class AssistantService:
         if daily and self.trace.tokens_today(user_id) >= daily:
             raise ValueError("今日助手额度已用完，明天 0 点后重置")
 
-    async def send(self, token: str, csrf: str, conversation_id: str, payload: dict) -> dict[str, object]:
+    def _private_send(self, token: str, csrf: str, account, access: str | None) -> None:
+        """私密对话发送前：授权有效、私密对话已开放并确认过单独说明；发送算一次交互，续期闲置计时（§24.2）。"""
+        if access is None:
+            return
+        self._require_available(account.id, private=True)
+        if self.config.policy(account.id)["private_notice_ack_at"] is None:
+            raise ValueError("请先阅读并确认私密对话的使用说明")
+        self.private_space.activity(token, csrf, access, active=True)
+
+    async def send(self, token: str, csrf: str, conversation_id: str, payload: dict, access: str | None = None) -> dict[str, object]:
         session, account = self._session(token, csrf=csrf, mutation=True)
-        self._require_available(account.id)
+        self._check_private(token, conversation_id, access)
+        private = access is not None
+        self._require_available(account.id, private=private)
         policy = self.config.policy(account.id)
         if policy["notice_ack_at"] is None:
             raise ValueError("请先阅读并确认文件助手的使用说明")
+        self._private_send(token, csrf, account, access)
         row = self.trace.conversation(account.id, conversation_id)
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -468,18 +698,27 @@ class AssistantService:
         limits = self._admit(account.id, row)
         if row["messages"] >= limits["max_messages"]:
             raise ValueError("这个对话已经很长了，请新建对话继续")
-        model_id = self._choose_model(payload.get("model_id"), row["model_id"])
+        model_id = self._choose_model(payload.get("model_id"), row["model_id"], private=private)
         view = payload.get("view") if isinstance(payload.get("view"), str) and len(payload.get("view")) <= 20 else "files"
-        location = self._location(payload.get("location"))
         scope_root = row["scope_root"]
         choice = payload.get("scope")
-        if choice not in (None, "conversation", "location", "root", "path"):
-            raise ValueError("作用域选项不正确")
-        # path：用户在目录树中选定的目录（同样排除私密空间与系统区域），属于用户本人的操作。
-        new_scope = self._location(payload.get("scope_path")) if choice == "path" else \
-            {"location": location, "root": ""}.get(choice or "conversation", scope_root)
+        if private:
+            # 私密对话的作用域固定为私密空间根；位置相对私密空间根，不能指向私密空间以外。
+            location = self._private_location(payload.get("location"))
+            if choice not in (None, "conversation") or payload.get("scope_path") is not None:
+                raise ValueError("私密对话的作用域固定为私密空间")
+            if payload.get("attachments") or payload.get("snapshot_id") is not None:
+                raise ValueError("私密对话暂不支持附件与页面快照")
+            new_scope = scope_root
+        else:
+            location = self._location(payload.get("location"))
+            if choice not in (None, "conversation", "location", "root", "path"):
+                raise ValueError("作用域选项不正确")
+            # path：用户在目录树中选定的目录（同样排除私密空间与系统区域），属于用户本人的操作。
+            new_scope = self._location(payload.get("scope_path")) if choice == "path" else \
+                {"location": location, "root": ""}.get(choice or "conversation", scope_root)
         mentions = self._mentions(account.bucket_id, payload.get("mentions"), new_scope)
-        attachments = self.attachments.check(account.id, conversation_id, payload.get("attachments"))
+        attachments = [] if private else self.attachments.check(account.id, conversation_id, payload.get("attachments"))
         self._switch_model(account.id, row, model_id)
         if new_scope != scope_root:
             # 用户在界面上直接切换作用域，属于用户本人的操作，不需要再确认。
@@ -503,7 +742,7 @@ class AssistantService:
         run_id = self.trace.start_run(conversation_id, model_id, prompts.PROMPT_VERSION)
         message_seq = self._append_user(account.id, conversation_id, run_id, body, attachments)
         state = self._start(run_id, conversation_id, account, token, model_id, view, location,
-                            environment=knowledge.client_environment(payload.get("environment")))
+                            environment=knowledge.client_environment(payload.get("environment")), access=access)
         return {"run_id": state.id, "message_seq": message_seq}
 
     def _append_user(self, user_id: int, conversation_id: str, run_id: str, body: dict, attachments: list[str],
@@ -535,13 +774,16 @@ class AssistantService:
             model = self.channels.model(model_id)
             self.trace.append(row["id"], None, "event", {"type": "model_switched", "text": f"已切换到 {model['label']}"})
 
-    async def retry(self, token: str, csrf: str, conversation_id: str, payload: dict) -> dict[str, object]:
+    async def retry(self, token: str, csrf: str, conversation_id: str, payload: dict, access: str | None = None) -> dict[str, object]:
         """从自己的某条消息重新回答：丢弃这条消息及之后的全部记录，再以同样的内容（引用、附件）开始新运行。
         被丢弃部分里待确认的操作随之失效；已经执行的文件操作不会撤销。"""
         session, account = self._session(token, csrf=csrf, mutation=True)
-        self._require_available(account.id)
+        self._check_private(token, conversation_id, access)
+        private = access is not None
+        self._require_available(account.id, private=private)
         if self.config.policy(account.id)["notice_ack_at"] is None:
             raise ValueError("请先阅读并确认文件助手的使用说明")
+        self._private_send(token, csrf, account, access)
         row = self.trace.conversation(account.id, conversation_id)
         seq = payload.get("seq")
         if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
@@ -550,9 +792,10 @@ class AssistantService:
         message = self.trace.message(conversation_id, seq)
         if message is None or message["role"] != "user":
             raise ValueError("只能从你发送的消息重试")
-        model_id = self._choose_model(payload.get("model_id"), row["model_id"])
+        model_id = self._choose_model(payload.get("model_id"), row["model_id"], private=private)
         view = payload.get("view") if isinstance(payload.get("view"), str) and len(payload.get("view")) <= 20 else message.get("view", "files")
-        location = self._location(payload.get("location")) if payload.get("location") is not None else self._location(message.get("location"))
+        place = self._private_location if private else self._location
+        location = place(payload.get("location")) if payload.get("location") is not None else place(message.get("location"))
         body = {key: message[key] for key in ("text", "attachment") if key in message}
         body.update({"location": display(location), "view": view, "scope": display(row["scope_root"])})
         # 引用按当前作用域重新校验：期间文件可能被移动或删除。
@@ -568,15 +811,17 @@ class AssistantService:
         run_id = self.trace.start_run(conversation_id, model_id, prompts.PROMPT_VERSION)
         message_seq = self._append_user(account.id, conversation_id, run_id, body, attachments, keep)
         state = self._start(run_id, conversation_id, account, token, model_id, view, location,
-                            environment=knowledge.client_environment(payload.get("environment")))
+                            environment=knowledge.client_environment(payload.get("environment")), access=access)
         return {"run_id": state.id, "message_seq": message_seq}
 
     def _start(self, run_id: str, conversation_id: str, account, token: str, model_id: int, view: str, location: str,
-               *, environment: dict | None = None) -> RunState:
-        state = RunState(run_id, conversation_id, account.id, account.bucket_id, token, model_id, view, location)
+               *, environment: dict | None = None, access: str | None = None) -> RunState:
+        state = RunState(run_id, conversation_id, account.id, account.bucket_id, token, model_id, view, location, access=access)
         state.environment = environment if environment is not None else next(
             (run.environment for run in reversed(self.runs.values()) if run.conversation_id == conversation_id and run.token == token), {})
         state.trim_events = self._gc_runs
+        if self._loop is None:
+            self._loop, self._loop_thread = asyncio.get_running_loop(), threading.get_ident()
         self.runs[run_id] = state
         state.task = asyncio.get_running_loop().create_task(self._run(state))
         self._gc_runs()
@@ -585,6 +830,7 @@ class AssistantService:
     def share_link(self, token: str, conversation_id: str, path: str) -> dict:
         """分享令牌只按需交给界面，不存入工具消息或发送给模型。"""
         _, account = self._session(token)
+        self._check_private(token, conversation_id, None)
         self._require_available(account.id)
         if "ui_open_share" not in self._user_tools(account.id):
             raise PermissionError("打开分享工具已关闭")
@@ -595,6 +841,7 @@ class AssistantService:
 
     def _gc_runs(self) -> None:
         now = time.time()
+        self.sweep_private()
         for run_id, run in list(self.runs.items()):
             if run.finished_at is not None and now - run.finished_at > EVENT_KEEP_SECONDS:
                 self.runs.pop(run_id, None)
@@ -607,22 +854,29 @@ class AssistantService:
                 run.event_bytes -= size
                 total -= size
 
-    def _run_for(self, user_id: int, run_id: str) -> RunState:
+    def _run_for(self, user_id: int, run_id: str, token: str | None = None, access: str | None = None) -> RunState:
         state = self.runs.get(run_id)
         if state is None or state.user_id != user_id:
             raise NotFoundError("运行不存在或已结束")
+        if token is not None:
+            self._check_private(token, state.conversation_id, access)
         return state
 
-    def stop(self, token: str, csrf: str, run_id: str) -> None:
+    def stop(self, token: str, csrf: str, run_id: str, access: str | None = None) -> None:
         _, account = self._session(token, csrf=csrf, mutation=True)
-        state = self._run_for(account.id, run_id)
+        state = self._run_for(account.id, run_id, token, access)
         if state.finished_at is None and state.task is not None:
             state.task.cancel()
 
-    async def events(self, token: str, run_id: str, after: int = 0):
+    async def events(self, token: str, run_id: str, after: int = 0, access: str | None = None):
         """事件流：先补发缓冲中 seq>after 的事件，再等待新事件，run 结束后关闭。"""
         _, account = self._session(token)
         state = self.runs.get(run_id)
+        if is_private(run_id) or access is not None:
+            # 私密对话的运行只在内存里；已清除的运行不再补发任何内容。
+            if state is None or state.user_id != account.id:
+                raise NotFoundError("运行不存在")
+            self._check_private(token, state.conversation_id, access)
         if state is None or state.user_id != account.id:
             row = self.metadata.db.execute(
                 "SELECT r.status, r.stop_reason FROM assistant_runs r JOIN assistant_conversations c ON c.id=r.conversation_id "
@@ -634,15 +888,16 @@ class AssistantService:
         cursor = after
         state.listeners += 1
         try:
-            async for event in self._event_loop(token, state, cursor):
+            async for event in self._event_loop(token, state, cursor, access):
                 yield event
         finally:
             state.listeners -= 1
 
-    async def _event_loop(self, token: str, state: RunState, cursor: int):
+    async def _event_loop(self, token: str, state: RunState, cursor: int, access: str | None = None):
         while True:
-            # 长连接也重验权限，不能在退出或隐藏对话后继续获得正文。
+            # 长连接也重验权限，不能在退出或隐藏对话后继续获得正文；私密对话还要复核私密授权。
             _, current = self._session(token)
+            self._check_private(token, state.conversation_id, access)
             self.trace.conversation(current.id, state.conversation_id)
             if (state.events and state.events[0]["seq"] > cursor + 1) or (not state.events and state.seq > cursor):
                 cursor = state.seq
@@ -664,10 +919,11 @@ class AssistantService:
 
     # ---------- 浏览器工具 ----------
 
-    def client_result(self, token: str, csrf: str, run_id: str, payload: dict) -> None:
-        """对话框回传浏览器工具的执行结果：只接受发起这个 run 的登录会话、正在等待中的调用。"""
+    def client_result(self, token: str, csrf: str, run_id: str, payload: dict, access: str | None = None) -> None:
+        """对话框回传浏览器工具的执行结果：只接受发起这个 run 的登录会话、正在等待中的调用；
+        私密对话只接受持有同一私密授权的页面回传（§24.5.4）。"""
         _, account = self._session(token, csrf=csrf, mutation=True)
-        state = self._run_for(account.id, run_id)
+        state = self._run_for(account.id, run_id, token, access)
         if session_hash(state.token) != session_hash(token):
             raise PermissionError("只能在发起对话的登录会话中回传")
         call_id = payload.get("call_id")
@@ -698,6 +954,9 @@ class AssistantService:
     def _conversation_taint(self, conversation_id: str) -> str | None:
         """最近一次摘要之后，对话里是否有读取外部内容的工具结果（它们仍在模型上下文中）。"""
         names = list(TAINT_TOOLS)
+        if is_private(conversation_id):
+            name = self.memory.taint(conversation_id, names)
+            return TAINT_TOOLS.get(name) if name else None
         row = self.metadata.db.execute(
             f"SELECT tool_name FROM assistant_messages WHERE conversation_id=? AND role='tool' AND tool_name IN ({','.join('?' * len(names))}) "
             "AND seq > COALESCE((SELECT MAX(seq) FROM assistant_messages WHERE conversation_id=? AND role='event' AND tool_name='summary'),0) "
@@ -709,6 +968,7 @@ class AssistantService:
     async def decide_scope(self, token: str, csrf: str, action_id: str, approve: bool) -> dict[str, object]:
         session, account = self._session(token, csrf=csrf, mutation=True)
         row = self.trace.action(account.id, action_id)
+        self._check_private(token, row["conversation_id"], None)
         if row["kind"] != "scope":
             raise ValueError("操作类型不正确")
         if row["session_hash"] != session_hash(token):
@@ -755,13 +1015,18 @@ class AssistantService:
                                              "skipped": progress.skipped, "failed": progress.failed}}
         return action
 
-    def action_detail(self, token: str, action_id: str) -> dict[str, object]:
-        _, account = self._session(token)
-        return self._action_view(self.trace.action_json(self.trace.action(account.id, action_id)))
-
-    def action_items(self, token: str, action_id: str, offset: int = 0) -> dict[str, object]:
-        _, account = self._session(token)
+    def _action_row(self, token: str, account, action_id: str, access: str | None):
         row = self.trace.action(account.id, action_id)
+        self._check_private(token, row["conversation_id"], access)
+        return row
+
+    def action_detail(self, token: str, action_id: str, access: str | None = None) -> dict[str, object]:
+        _, account = self._session(token)
+        return self._action_view(self.trace.action_json(self._action_row(token, account, action_id, access)))
+
+    def action_items(self, token: str, action_id: str, offset: int = 0, access: str | None = None) -> dict[str, object]:
+        _, account = self._session(token)
+        row = self._action_row(token, account, action_id, access)
         if row["kind"] == "scope":
             raise ValueError("作用域请求没有条目")
         return self.trace.action_items(row, offset=max(0, offset))
@@ -774,10 +1039,34 @@ class AssistantService:
         except NotFoundError:
             pass
 
-    async def decide_action(self, token: str, csrf: str, action_id: str, approve: bool, payload: dict) -> dict[str, object]:
+    async def _cross_confirm(self, token: str, csrf: str, row, payload: dict, access: str | None, origin, ip) -> dict:
+        """跨区移动的确认（§24.5.3）：目标目录由用户在卡片上决定。移出必须当场重新验证账号密码或通行密钥，
+        验证只对这一次确认有效；移入需要当前登录会话已解锁私密空间。"""
+        target = payload.get("target")
+        if target is not None and (not isinstance(target, str) or len(target) > 1024):
+            raise ValueError("目标目录不正确")
+        confirm = {} if target is None else {"target": target}
+        if row["kind"] == "move_out":
+            password, passkey = payload.get("password"), payload.get("passkey")
+            if isinstance(password, str) and password:
+                await self.private_space.check_password(token, csrf, password, ip)
+            elif isinstance(passkey, dict):
+                await self.private_space.passkeys.private_unlock(token, csrf, passkey.get("request_id"), passkey.get("credential"), origin, ip)
+            else:
+                raise ValueError("移出私密空间需要重新验证身份：请输入登录密码或使用通行密钥")
+            self._grant(token, access)
+        else:
+            grant = self.private_space.session_grants.get(token) if self.private_space is not None else None
+            if not grant:
+                raise ValueError("请先解锁私密空间，再确认移入")
+            self._grant(token, grant)
+        return confirm
+
+    async def decide_action(self, token: str, csrf: str, action_id: str, approve: bool, payload: dict,
+                            access: str | None = None, *, origin=None, ip=None) -> dict[str, object]:
         """用户确认或拒绝待确认操作：只能由生成它的登录会话、带 CSRF、在过期前决定一次。"""
         session, account = self._session(token, csrf=csrf, mutation=True)
-        row = self.trace.action(account.id, action_id)
+        row = self._action_row(token, account, action_id, access)
         self.trace.conversation(account.id, row["conversation_id"])
         if row["kind"] == "scope":
             raise ValueError("操作类型不正确")
@@ -787,9 +1076,10 @@ class AssistantService:
             if not self.trace.decide_action(action_id, "rejected"):
                 raise ValueError("该操作已处理或已过期")
             self._action_event(row, "已拒绝", None, f"已拒绝：{KINDS.get(row['kind'], row['kind'])} {row['count']} 项")
-            return self.action_detail(token, action_id)
-        self._require_available(account.id)
-        tools = self._user_tools(account.id)
+            return self.action_detail(token, action_id, access)
+        private = access is not None
+        self._require_available(account.id, private=private)
+        tools = self._user_tools(account.id, private=private)
         if row["tool_name"] not in tools:
             self.trace.expire_actions(row["conversation_id"], tool_names=[row["tool_name"]])
             raise ValueError("管理员已停用生成这个操作的工具，或你的账号不再允许这类操作；操作已作废")
@@ -799,6 +1089,10 @@ class AssistantService:
             raise ValueError(f"条目较多，请再次确认执行 {row['count']} 项")
         action_payload = self.trace.action_payload(row)
         confirm = None
+        if row["kind"] in ("move_out", "move_in"):
+            if self.private_space is None:
+                raise ValueError("私密空间不可用")
+            confirm = await self._cross_confirm(token, csrf, row, payload, access, origin, ip)
         if row["kind"] == "share":
             # 卡片中填写的有效期与访问密码只在这次请求的内存里使用，不写入操作记录、审计或对话。
             share = payload.get("share") if isinstance(payload.get("share"), dict) else {}
@@ -806,36 +1100,57 @@ class AssistantService:
             share_options(action_payload, confirm)
         if not self.trace.start_action(action_id):
             raise ValueError("该操作已处理或已过期")
-        self._launch_action(row, account, token, action_payload, confirm, "已确认")
-        return self.action_detail(token, action_id)
+        self._launch_action(row, account, token, action_payload, confirm, "已确认", access)
+        if row["kind"] in ("move_out", "move_in") and self.on_audit is not None:
+            # 跨区移动单独审计，只记条目数（§24.9）。
+            self.on_audit("private.assistant." + row["kind"], account.id, {"count": row["count"]})
+        return self.action_detail(token, action_id, access)
 
-    def _launch_action(self, row, account, token: str, payload: dict, confirm: dict | None, decision: str) -> asyncio.Task:
+    def _guard(self, token: str, access: str | None, kind: str):
+        """私密操作执行中的授权复核：私密对话用发起时的授权；移入用当前登录会话的授权。"""
+        if access is not None:
+            return lambda: self._grant(token, access)
+        if kind == "move_in" and self.private_space is not None:
+            def current() -> None:
+                from ..private import PrivateLocked
+                grant = self.private_space.session_grants.get(token)
+                if not grant:
+                    raise PrivateLocked("私密空间已锁定")
+                self.private_space.require(token, grant)
+            return current
+        return None
+
+    def _launch_action(self, row, account, token: str, payload: dict, confirm: dict | None, decision: str,
+                       access: str | None = None) -> asyncio.Task:
         action_id = row["id"]
         record = self.trace.action_recorder(action_id, row["conversation_id"])
         progress = Progress(total=row["count"])
         self.executions[action_id] = progress
         if decision == "已确认":
             self._action_event(row, decision, None, f"已确认：{KINDS.get(row['kind'], row['kind'])} {row['count']} 项")
-        task = asyncio.get_running_loop().create_task(self._run_action(row, account, payload, progress, token, record, confirm, decision))
+        task = asyncio.get_running_loop().create_task(self._run_action(row, account, payload, progress, token, record, confirm, decision,
+                                                                       access))
         self._execution_tasks[action_id] = task
         return task
 
-    def _action_authorized(self, token: str, row) -> bool:
+    def _action_authorized(self, token: str, row, access: str | None = None) -> bool:
         try:
             _, account = self._session(token)
-            self._require_available(account.id)
+            self._require_available(account.id, private=access is not None)
+            self._check_private(token, row["conversation_id"], access)
             self.trace.conversation(account.id, row["conversation_id"])
-            return row["user_id"] == account.id and row["tool_name"] in self._user_tools(account.id)
+            return row["user_id"] == account.id and row["tool_name"] in self._user_tools(account.id, private=access is not None)
         except (AuthenticationError, NotFoundError, NotReadyError, PermissionError):
             return False
 
     async def _run_action(self, row, account, payload: dict, progress: Progress, token: str, record, confirm: dict | None = None,
-                          decision: str = "已确认") -> dict:
+                          decision: str = "已确认", access: str | None = None) -> dict:
         action_id = row["id"]
         undo = None
         try:
             undo = await self.executor.execute(user_id=account.id, bucket_id=account.bucket_id, payload=payload, progress=progress,
-                                               authorized=lambda: self._action_authorized(token, row), confirm=confirm)
+                                               authorized=lambda: self._action_authorized(token, row, access), confirm=confirm,
+                                               guard=self._guard(token, access, row["kind"]))
             status = progress.status()
         except asyncio.CancelledError:
             progress.cancel = True
@@ -870,20 +1185,20 @@ class AssistantService:
         self.executions.pop(action_id, None)
         return {"status": status, **result}
 
-    def cancel_action(self, token: str, csrf: str, action_id: str) -> dict[str, object]:
+    def cancel_action(self, token: str, csrf: str, action_id: str, access: str | None = None) -> dict[str, object]:
         _, account = self._session(token, csrf=csrf, mutation=True)
-        row = self.trace.action(account.id, action_id)
+        row = self._action_row(token, account, action_id, access)
         progress = self.executions.get(action_id)
         if row["status"] != "running" or progress is None:
             raise ValueError("操作不在执行中")
         progress.cancel = True
-        return self.action_detail(token, action_id)
+        return self.action_detail(token, action_id, access)
 
-    async def undo_action(self, token: str, csrf: str, action_id: str) -> dict[str, object]:
+    async def undo_action(self, token: str, csrf: str, action_id: str, access: str | None = None) -> dict[str, object]:
         _, account = self._session(token, csrf=csrf, mutation=True)
-        row = self.trace.action(account.id, action_id)
+        row = self._action_row(token, account, action_id, access)
         self.trace.conversation(account.id, row["conversation_id"])
-        if not self._action_authorized(token, row):
+        if not self._action_authorized(token, row, access):
             raise PermissionError("当前不能执行这类操作")
         data = self.trace.action_undo(row)
         if data is None or not self.trace.take_undo(action_id):
@@ -891,19 +1206,24 @@ class AssistantService:
         payload = self.trace.action_payload(row)
         try:
             result = await self.executor.undo(bucket_id=account.bucket_id, payload=payload, data=data,
-                                              authorized=lambda: self._action_authorized(token, row))
+                                              authorized=lambda: self._action_authorized(token, row, access),
+                                              guard=self._guard(token, access, row["kind"]))
         except Exception:
-            with self.metadata.transaction() as db:
-                db.execute("UPDATE assistant_actions SET status=? WHERE id=? AND status='undoing'", (row["status"], action_id))
+            if is_private(action_id):
+                self.memory.restore_action(action_id, row["status"])
+            else:
+                with self.metadata.transaction() as db:
+                    db.execute("UPDATE assistant_actions SET status=? WHERE id=? AND status='undoing'", (row["status"], action_id))
             raise
         self.trace.finish_undo(action_id, result)
         self._action_event(row, "已撤销", result, f"已撤销：恢复 {result['ok']} 项" + (f"，{result['skipped']} 项无法恢复" if result["skipped"] else ""))
-        return self.action_detail(token, action_id)
+        return self.action_detail(token, action_id, access)
 
     # ---------- 页面快照（抓取脚本） ----------
 
     def upload_snapshot(self, token: str, csrf: str, conversation_id: str, payload: dict) -> dict[str, object]:
         _, account = self._session(token, csrf=csrf, mutation=True)
+        self._check_private(token, conversation_id, None)
         self._require_available(account.id)
         self.trace.conversation(account.id, conversation_id)
         if "analyze_page" not in self._user_tools(account.id):
@@ -926,11 +1246,19 @@ class AssistantService:
             self.accounts.account_for_session(session)
         except (AuthenticationError, NotFoundError) as exc:
             raise StopRun("account", "账号已停用") from exc
-        available, reason = self._availability(state.user_id)
+        if state.private:
+            # 私密对话：每一步都复核私密授权，失效立即结束且不再请求模型（§24.2）。
+            if state.conversation_id not in self.private_chats:
+                raise StopRun("private_locked", "私密空间已锁定，对话已清除")
+            try:
+                self._grant(state.token, state.access)
+            except PermissionError as exc:
+                raise StopRun("private_locked", "私密空间已锁定，对话已清除") from exc
+        available, reason = self._availability(state.user_id, private=state.private)
         if not available:
             raise StopRun("disabled", reason or "文件助手不可用")
-        if not self.channels.is_usable(state.model_id):
-            raise StopRun("model", "所选模型已停用，请换一个模型")
+        if not self.channels.is_usable(state.model_id, private=state.private):
+            raise StopRun("model", "所选模型已停用或不能用于私密对话，请换一个模型" if state.private else "所选模型已停用，请换一个模型")
         daily = int(self.config.policy(state.user_id)["effective"]["daily_tokens"])
         if daily and self.trace.tokens_today(state.user_id) >= daily:
             raise StopRun("daily_limit", "今日助手额度已用完")
@@ -1118,12 +1446,15 @@ class AssistantService:
             used = shrunk
         return history, used, raw, compacted
 
+    def _private_scope(self, state: RunState) -> Scope:
+        return Scope(state.bucket_id, PRIVATE_PREFIX, private_access=True, authorize=lambda: self._grant(state.token, state.access))
+
     async def _attach_images(self, state: RunState, history: list[dict]) -> None:
         """把 image_refs 换成图片数据（同一轮内缓存）。用户消息里不是图片的引用直接忽略；读不出的图片写进文字说明。"""
         limit = self.config.limits()["message_images"]
         max_bytes = int(tool_params(self._tool_settings(), "view_image").get("max_bytes", vision.DEFAULT_ORIGINAL_BYTES))
         names = {key: name for name, key in self.attachments.for_conversation(state.conversation_id).items()}
-        label = lambda key: ATTACHMENT_PREFIX + names[key] if key in names else "/" + key
+        label = lambda key: ATTACHMENT_PREFIX + names[key] if key in names else display(key)
         for message in history:
             refs = message.pop("image_refs", None)
             if not refs:
@@ -1136,7 +1467,8 @@ class AssistantService:
                     try:
                         if key.startswith(vision.ATTACHMENT_ROOT) and key not in names:
                             raise vision.ImageUnavailable("附件已随对话删除")
-                        cached = await vision.load_image(self.objects, state.bucket_id, key, max_bytes=max_bytes, label=label(key))
+                        cached = await vision.load_image(self.objects, state.bucket_id, key, max_bytes=max_bytes, label=label(key),
+                                                         scope=self._private_scope(state) if state.private else None)
                     except vision.NotAnImage:
                         cached = False
                     except vision.ImageUnavailable as exc:
@@ -1268,7 +1600,7 @@ class AssistantService:
     async def _execute(self, state: RunState, call, tools: dict, limits: dict, shared: dict) -> dict:
         """执行一个工具调用，返回要落库的工具消息正文。"""
         self._validate(state)
-        spec = self._user_tools(state.user_id).get(call.name)
+        spec = self._user_tools(state.user_id, private=state.private).get(call.name)
         started = time.time()
         arguments: dict = {}
         label = TOOLS[call.name].label if call.name in TOOLS else call.name
@@ -1306,8 +1638,12 @@ class AssistantService:
                 current = self.trace.conversation(state.user_id, state.conversation_id, include_hidden=True)
                 if current["access_mode"] == "full" and self._full_access(state.user_id):
                     taint = state.tainted or self._conversation_taint(state.conversation_id)
-                    if kind in CONFIRM_KINDS:
+                    if kind in ("move_out", "move_in"):
+                        reason = "移出或移入私密空间总是需要你确认"
+                    elif kind in CONFIRM_KINDS:
                         reason = "彻底删除与公开分享总是需要你确认"
+                    elif state.private and kind in PRIVATE_CONFIRM_KINDS:
+                        reason = "私密对话中的下载操作总是需要你确认"
                     elif count > 1000:
                         reason = "条目超过 1,000 项，需要你确认"
                     elif taint:
@@ -1345,6 +1681,8 @@ class AssistantService:
                                                max_tokens=800, stream=False)
                 return web.parse_analysis(reply.text)
 
+            private = {"base": PRIVATE_PREFIX, "authorize": lambda: self._grant(state.token, state.access),
+                       "url_allowed": self._url_allowed(state.conversation_id)} if state.private else {}
             context = ToolContext(state.user_id, state.bucket_id, conversation["scope_root"], self.objects, self.offline,
                                   state.view, state.location, tool_params(self._tool_settings(), call.name), shared,
                                   scope_request, {"used_bytes": usage["used_bytes"] if usage else None,
@@ -1355,7 +1693,8 @@ class AssistantService:
                                   redact=self.guard.redact,
                                   attachments=shared.setdefault("attachments", self.attachments.for_conversation(state.conversation_id)),
                                   read_only=spec.level == "read",
-                                  vision=self.channels.vision(self.channels.model(state.model_id)))
+                                  vision=self.channels.vision(self.channels.model(state.model_id)),
+                                  tainted=lambda: state.tainted or self._conversation_taint(state.conversation_id), **private)
             timeout = max(limits["tool_seconds"], spec.timeout or 0)
             output = await asyncio.wait_for(spec.handler(context, arguments), timeout)
             payload, truncated = self._fit(self.guard.redact_value(output.result), limits["tool_result_bytes"])
@@ -1414,7 +1753,7 @@ class AssistantService:
                 model = self.channels.model(state.model_id)
                 endpoint = self.channels.endpoint(model["channel_id"])
                 can_see = self.channels.vision(model)
-                tools = self._user_tools(state.user_id)
+                tools = self._user_tools(state.user_id, private=state.private)
                 if not can_see:
                     tools.pop("view_image", None)
                 conversation = self.trace.conversation(state.user_id, state.conversation_id, include_hidden=True)
@@ -1445,9 +1784,15 @@ class AssistantService:
                                                can_http="http_request" in tools, can_view_images=can_see,
                                                public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
                                                access_mode="full" if conversation["access_mode"] == "full"
-                                               and self._full_access(state.user_id) else "approval")
+                                               and self._full_access(state.user_id) else "approval",
+                                               private=state.private, can_move_private="propose_move_to_private" in tools)
                 pending = self.trace.pending_actions(state.conversation_id)
+                remaining = None
+                if state.private and self.private_space is not None:
+                    grant = self.private_space.grants.get(state.access)
+                    remaining = max(0, int(grant.expires_at - time.monotonic())) if grant is not None else 0
                 context_block = {"role": "user", "content": prompts.context_block(
+                    private_remaining=remaining,
                     scope_root=display(scope_root), view=state.view, location=display(state.location),
                     used=_fmt(usage["used_bytes"] if usage else 0),
                     quota="不限" if not usage or usage["quota_bytes"] is None else _fmt(usage["quota_bytes"]),
@@ -1564,7 +1909,8 @@ class AssistantService:
         finally:
             if acquired:
                 self._release()
-            if status == "completed" or stop_reason == "waiting_user":
+            if (status == "completed" or stop_reason == "waiting_user") and not state.private:
+                # 私密对话不生成标题（§24.3）。
                 try:
                     await self._title(state)
                 except Exception:
@@ -1654,7 +2000,10 @@ class AssistantService:
         return self.config.describe_settings()
 
     def admin_update_settings(self, payload: dict) -> dict[str, object]:
-        return self.config.update_settings(payload, model_exists=self.channels.is_usable)
+        result = self.config.update_settings(payload, model_exists=self.channels.is_usable)
+        if payload.get("enabled") is False or payload.get("private") is False:
+            self.forget_private()  # 关闭助手或私密对话：立即清除所有进行中的私密对话
+        return result
 
     def admin_limits(self) -> dict[str, object]:
         return self.config.describe_limits()
@@ -1721,6 +2070,8 @@ class AssistantService:
             for run in self.runs.values():
                 if run.user_id == user_id and run.finished_at is None and run.task:
                     run.task.cancel()
+        if payload.get("enabled") is False or payload.get("private") is False:
+            self.forget_private(user_id=user_id)
         return self.admin_policy(user_id)
 
     def admin_purge(self) -> None:
@@ -1729,12 +2080,15 @@ class AssistantService:
         for run in self.runs.values():
             if run.finished_at is None and run.task:
                 run.task.cancel()
+        self.forget_private()
         self.attachments.purge_all()
         self.trace.purge_all()
         self.config.purge_all()
 
     async def cleanup(self, now: float | None = None) -> dict[str, int]:
         """维护任务：按保留期清理留痕与调用日志；附件先于对话删除，之后再兜底清理残留与超时未发送的附件。"""
+        self.sweep_private()
+
         def work():
             now_ = now or time.time()
             expired = [row[0] for row in self.metadata.db.execute(

@@ -1,5 +1,5 @@
 /** 文件助手的接口：用户端 /api/user/v1/assistant 与管理端 /api/admin/v1/assistant（docs/assistant-design.md §13）。 */
-import { apiGet as get, apiPost as post, postKeepalive } from "./api";
+import { apiGet as get, apiPost as post, getPrivateAccess, postKeepalive } from "./api";
 
 export type ToolSupport = "unknown" | "yes" | "no";
 export type Capabilities = { tools?: boolean | null; reasoning?: boolean | null; vision?: boolean | null; structured?: boolean | null };
@@ -8,6 +8,8 @@ export type AiModel = {
   enabled: boolean; tools: ToolSupport; context_window: number | null; max_output: number | null; removed_upstream: boolean;
   input_price: number | null; output_price: number | null; capabilities: Capabilities; catalog_id: string | null; manual_fields: string[];
   sort: number; tested_at: number | null; test_note: string | null; channel_name?: string;
+  /** 允许用于私密对话（§24.6，默认关闭） */
+  private_ok?: boolean;
 };
 /** 渠道上游模型与目录匹配结果（尚未加入时 added=false）。 */
 export type UpstreamModel = {
@@ -38,11 +40,16 @@ export type ToolParam = { name: string; label: string; default: number; min: num
 export type AdminTool = {
   name: string; label: string; group: string; group_label: string; level: ToolLevel; description: string; fixed: boolean;
   enabled: boolean; default_enabled: boolean; depends: string[]; warning: string | null; params: ToolParam[];
+  /** 私密对话中的可用性（§24.5.1）：allow 照常、limited 有限制、only 仅私密对话、never 不提供、na 不适用。 */
+  private: PrivateMode; private_note: string | null; private_enabled: boolean;
 };
+export type PrivateMode = "allow" | "limited" | "only" | "never" | "na";
 export type Bound = { default: number; min: number; max: number; label?: string };
 export type AssistantSettings = {
   enabled: boolean; default_model: number | null; full_access: boolean; user_daily_tokens: number; retention_days: number; call_log_days: number;
   notice: string; notice_default: string; bounds: Record<string, Bound>;
+  /** 全局允许私密对话（默认关闭） */
+  private: boolean;
 };
 export type AssistantLimits = { values: Record<string, number>; bounds: Record<string, Bound & { label: string }> };
 export type UsagePoint = { day: string; model_id: number; input_tokens: number; output_tokens: number; runs: number };
@@ -56,7 +63,8 @@ export type AssistantOverview = {
 };
 export type UserPolicy = {
   enabled: boolean | null; max_level: "read" | "write" | "danger" | null; daily_tokens: number | null; full_access: boolean | null;
-  effective: { enabled: boolean; max_level: "read" | "write" | "danger"; daily_tokens: number; full_access: boolean };
+  private: boolean | null;
+  effective: { enabled: boolean; max_level: "read" | "write" | "danger"; daily_tokens: number; full_access: boolean; private: boolean };
   usage: { today: number; days30: number };
 };
 export type AdminConversation = {
@@ -115,7 +123,7 @@ export const updateAdminChannel = (id: number, input: ChannelInput) => post<AiCh
 export const deleteAdminChannel = (id: number) => post<void>(`${ADMIN}/channels/${id}/delete`);
 export const syncAdminChannel = (id: number) => post<{ total: number; added: number; restored: number; removed: number; note: string }>(`${ADMIN}/channels/${id}/sync`, undefined, 120000);
 export const adminChannelModels = (id: number) => get<AiModel[]>(`${ADMIN}/channels/${id}/models`);
-type ModelFields = Partial<Pick<AiModel, "display_name" | "enabled" | "tools" | "context_window" | "max_output" | "sort" | "input_price" | "output_price">>
+type ModelFields = Partial<Pick<AiModel, "display_name" | "enabled" | "tools" | "context_window" | "max_output" | "sort" | "input_price" | "output_price" | "private_ok">>
   & { /** 图片输入：auto 跟随模型目录，yes／no 为手动设置。 */ vision?: "auto" | "yes" | "no" };
 export const addAdminModel = (channelId: number, input: ModelFields & { model: string }) => post<AiModel>(`${ADMIN}/channels/${channelId}/models`, input);
 export const updateAdminModel = (id: number, input: ModelFields & { reset_catalog?: boolean }) => post<AiModel>(`${ADMIN}/models/${id}/update`, input);
@@ -131,7 +139,7 @@ export const deleteCatalogEntry = (id: string) => post<void>(`${ADMIN}/catalog/d
 export const deleteAdminModel = (id: number) => post<void>(`${ADMIN}/models/${id}/delete`);
 export const testAdminModel = (id: number) => post<{ ok: boolean; tools: ToolSupport; note: string; duration_ms: number }>(`${ADMIN}/models/${id}/test`, undefined, 150000);
 export const adminPolicy = (userId: number) => get<UserPolicy>(`${ADMIN}/users/${userId}/policy`);
-export const updateAdminPolicy = (userId: number, input: Partial<Pick<UserPolicy, "enabled" | "max_level" | "daily_tokens" | "full_access">>) => post<UserPolicy>(`${ADMIN}/users/${userId}/policy`, input);
+export const updateAdminPolicy = (userId: number, input: Partial<Pick<UserPolicy, "enabled" | "max_level" | "daily_tokens" | "full_access" | "private">>) => post<UserPolicy>(`${ADMIN}/users/${userId}/policy`, input);
 export const adminConversations = (cursor: string | null, filters: { user_id?: number; model_id?: number; since?: number; until?: number; action?: string }) =>
   get<{ conversations: AdminConversation[]; next_cursor: string | null }>(`${ADMIN}/conversations${query({ cursor, ...filters })}`);
 export const adminConversation = (id: string) => get<AdminConversationDetail>(`${ADMIN}/conversations/${encodeURIComponent(id)}`);
@@ -142,11 +150,15 @@ export const purgeAssistantData = () => post<void>(`${ADMIN}/purge`, { confirm: 
 
 /* ---------- 用户端 ---------- */
 
-export type UserTool = { name: string; label: string; group: string; group_label: string; level: ToolLevel; description: string; available: boolean; reason: string | null; warning: string | null };
+export type UserTool = { name: string; label: string; group: string; group_label: string; level: ToolLevel; description: string; available: boolean; reason: string | null; warning: string | null;
+  /** 私密对话中「有限制」的工具的说明 */
+  note?: string };
 export type AssistantConfig = {
   available: boolean; reason: string | null; models: AiModel[]; default_model: number | null; tools: UserTool[];
   max_level: "read" | "write" | "danger"; usage: { today: number; limit: number | null }; notice: string; notice_ack: boolean; retention_days: number;
   full_access: boolean;
+  /** 这份配置是否属于私密对话；private_available：当前账号能否使用私密对话（不需要已解锁）。 */
+  private?: boolean; private_available?: boolean;
 };
 export type AccessMode = "approval" | "full";
 export type Conversation = { id: string; title: string | null; scope: string; model_id: number | null; archived: boolean; messages: number;
@@ -155,7 +167,7 @@ export type BrowserEvent =
   | { type: "browser"; action: "download"; items: { path: string; folder: boolean }[]; size: number }
   | { type: "browser"; action: "open"; url: string; host: string; title: string | null }
   | { type: "browser"; action: "share"; path: string; conversation_id: string }
-  | { type: "browser"; action: "copy"; text: string; title: string | null }
+  | { type: "browser"; action: "copy"; text: string; title: string | null; private?: boolean }
   | { type: "browser"; action: "thumbnails"; items: { path: string; size: number; etag: string; content_type: string | null }[]; regenerate: boolean };
 export type ToolEvent =
   | { type: "plan"; items: { content: string; status: "pending" | "in_progress" | "completed" }[] }
@@ -178,7 +190,7 @@ export type MessageAttachment = { id: string; name: string; size: number; conten
 export const ACTION_KINDS: Record<string, string> = {
   rename: "批量改名", move: "移动", organize: "整理文件", mkdir: "新建文件夹", trash: "移入回收站", restore: "从回收站恢复",
   purge: "彻底删除", unshare: "取消公开", share: "公开分享", downloads: "离线下载", download_control: "下载任务操作",
-  save_attachment: "保存附件",
+  save_attachment: "保存附件", move_out: "移出私密空间", move_in: "移入私密空间",
 };
 export type ActionStatus = "pending" | "confirmed" | "rejected" | "expired" | "running" | "done" | "partial" | "failed" | "cancelled"
   | "interrupted" | "undoing" | "undone";
@@ -203,18 +215,26 @@ export type AssistantAction = {
 export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; actions: AssistantAction[]; active_run: string | null;
   attachments?: { count: number; size: number };
   /** 上下文占用：最近一次模型调用的输入加输出 token 与模型窗口（§23） */
-  context?: { used: number; window: number } | null };
+  context?: { used: number; window: number } | null;
+  /** 私密对话：对话中出现过的地址，回复里只有这些链接可以点击（§24.8） */
+  links?: string[] };
 export type RunEvent = { seq: number; type: string; [key: string]: unknown };
 
 const USER = "/api/user/v1/assistant";
-export const assistantConfig = (signal?: AbortSignal) => get<AssistantConfig>(`${USER}/config`, signal);
-export const acknowledgeNotice = () => post<void>(`${USER}/notice/ack`, {});
-export const conversations = (cursor?: string | null, archived = false) => get<{ conversations: Conversation[]; next_cursor: string | null }>(`${USER}/conversations${query({ cursor, archived: archived ? "1" : undefined })}`);
-export const createConversation = (location: string, modelId?: number | null, accessMode: AccessMode = "approval") =>
-  post<ConversationDetail>(`${USER}/conversations`, { location, model_id: modelId ?? undefined, access_mode: accessMode });
-export const conversation = (id: string) => get<ConversationDetail>(`${USER}/conversations/${encodeURIComponent(id)}`);
-export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
-export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
+/** 私密对话（§24）：同一套接口挂在私密空间下，请求自动带上当前的私密授权（X-Private-Access）。
+ * 私密对话、运行与操作的编号以 pc_／pr_／pa_ 开头，按编号选择路径；不带编号的接口显式传 privateMode。 */
+const PRIVATE_USER = "/api/user/v1/private/assistant";
+export const isPrivateId = (id: string | null | undefined) => /^p[crag]_/.test(id ?? "");
+const root = (privateMode: boolean) => privateMode ? PRIVATE_USER : USER;
+const by = (id: string) => root(isPrivateId(id));
+export const assistantConfig = (signal?: AbortSignal, privateMode = false) => get<AssistantConfig>(`${root(privateMode)}/config`, signal);
+export const acknowledgeNotice = (privateMode = false) => post<void>(`${root(privateMode)}/notice/ack`, {});
+export const conversations = (cursor?: string | null, archived = false, privateMode = false) => get<{ conversations: Conversation[]; next_cursor: string | null }>(`${root(privateMode)}/conversations${query({ cursor, archived: archived ? "1" : undefined })}`);
+export const createConversation = (location: string, modelId?: number | null, accessMode: AccessMode = "approval", privateMode = false) =>
+  post<ConversationDetail>(`${root(privateMode)}/conversations`, { location, model_id: modelId ?? undefined, access_mode: accessMode });
+export const conversation = (id: string) => get<ConversationDetail>(`${by(id)}/conversations/${encodeURIComponent(id)}`);
+export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${by(id)}/conversations/${encodeURIComponent(id)}/update`, input);
+export const deleteConversation = (id: string) => post<void>(`${by(id)}/conversations/${encodeURIComponent(id)}/delete`, {});
 const attachmentPath = (id: string, tail: string) => `${USER}/attachments/${encodeURIComponent(id)}/${tail}`;
 export const attachmentContentUrl = (id: string, download = false) => attachmentPath(id, `content${download ? "?download=1" : ""}`);
 export const attachmentThumbnailUrl = (id: string, variant: "thumb" | "grid" | "poster" = "thumb") => attachmentPath(id, `thumbnail?variant=${variant}`);
@@ -232,24 +252,27 @@ export type AttachmentStats = { count: number; size: number; pending: { count: n
 export const attachmentStats = () => get<AttachmentStats>(`${USER}/attachments/stats`);
 export type ClientEnvironment = { browser: string; browser_version: string; os: string; language: string; timezone: string; origin: string };
 export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root" | "path"; scope_path?: string; mentions?: string[]; attachments?: string[]; snapshot_id?: string; environment?: ClientEnvironment }) =>
-  post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/messages`, input);
+  post<{ run_id: string; message_seq: number }>(`${by(id)}/conversations/${encodeURIComponent(id)}/messages`, input);
 /** 从自己的某条消息重新回答：服务端丢弃这条消息及之后的记录，以同样的内容（引用、附件）开始新运行。 */
 export const retryMessage = (id: string, input: { seq: number; model_id?: number; location: string; view: string; environment?: ClientEnvironment }) =>
-  post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/retry`, input);
-export const stopRun = (runId: string) => post<void>(`${USER}/runs/${encodeURIComponent(runId)}/stop`, {});
+  post<{ run_id: string; message_seq: number }>(`${by(id)}/conversations/${encodeURIComponent(id)}/retry`, input);
+export const stopRun = (runId: string) => post<void>(`${by(runId)}/runs/${encodeURIComponent(runId)}/stop`, {});
 export const shareLink = (conversationId: string, path: string) =>
   get<{ token: string; public_base_url: string | null }>(`${USER}/conversations/${encodeURIComponent(conversationId)}/share-link${query({ path })}`);
 /** 回传浏览器工具的执行结果（只有发起这个运行的登录会话可以回传）。 */
 export const sendClientResult = (runId: string, callId: string, outcome: { result?: Record<string, unknown>; error?: string }) =>
-  post<void>(`${USER}/runs/${encodeURIComponent(runId)}/client-results`, { call_id: callId, ...outcome });
-export const action = (id: string) => get<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}`);
+  post<void>(`${by(runId)}/runs/${encodeURIComponent(runId)}/client-results`, { call_id: callId, ...outcome });
+export const action = (id: string) => get<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}`);
 export const actionItems = (id: string, offset = 0) =>
   get<{ items: ActionItem[]; skipped: { path: string; reason: string }[]; total: number; next_offset: number | null; compacted: boolean }>(
-    `${USER}/actions/${encodeURIComponent(id)}/items${query({ offset: offset || undefined })}`);
-export const confirmAction = (id: string, input: { acknowledge?: boolean; count?: number; share?: { expires_days?: number; password?: string } } = {}) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/confirm`, input);
-export const rejectAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/reject`, {});
-export const cancelAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/cancel`, {});
-export const undoAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/undo`, {});
+    `${by(id)}/actions/${encodeURIComponent(id)}/items${query({ offset: offset || undefined })}`);
+/** 跨区移动（§24.5.3）：target 为卡片上选择的目标目录（相对路径）；移出私密空间还要带登录密码或通行密钥断言。 */
+export type ConfirmInput = { acknowledge?: boolean; count?: number; share?: { expires_days?: number; password?: string };
+  target?: string; password?: string; passkey?: { request_id: string; credential: unknown } };
+export const confirmAction = (id: string, input: ConfirmInput = {}) => post<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}/confirm`, input);
+export const rejectAction = (id: string) => post<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}/reject`, {});
+export const cancelAction = (id: string) => post<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}/cancel`, {});
+export const undoAction = (id: string) => post<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}/undo`, {});
 /** 抓取脚本转交的已渲染页面快照（规范页列表），上传后随消息提交 snapshot_id。 */
 export type SnapshotPage = { url: string; title?: string; images: { path: string; urls: Record<string, string>; w?: number | null; h?: number | null }[];
   links?: { path: string; href: string; text: string; rel?: string }[] };
@@ -265,7 +288,9 @@ export function subscribeRun(runId: string, onEvent: (event: RunEvent) => void, 
   let after = 0, closed = false, source: EventSource | null = null, timer = 0, retries = 0;
   const open = () => {
     if (closed) return;
-    source = new EventSource(`${USER}/runs/${encodeURIComponent(runId)}/events?after=${after}`);
+    // EventSource 不能带请求头：私密运行把授权放在查询参数里（每次重连都取最新的授权）。
+    const access = isPrivateId(runId) ? `&access=${encodeURIComponent(getPrivateAccess())}` : "";
+    source = new EventSource(`${by(runId)}/runs/${encodeURIComponent(runId)}/events?after=${after}${access}`);
     source.onmessage = message => {
       retries = 0;
       onReconnecting?.(false);

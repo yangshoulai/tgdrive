@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ..errors import NotFoundError
 from ..filekinds import kind_of
-from ..objects import ObjectService, Scope
+from ..objects import PRIVATE_PREFIX, ObjectService, Scope
 
 ATTACHMENT_ROOT = ".tgdrive/assistant/"  # 对话附件的系统区（attachments.ROOT）
 
@@ -44,13 +44,16 @@ def is_image(key: str, content_type: str | None) -> bool:
 
 
 async def load_image(objects: ObjectService, bucket_id: int, key: str, *, max_bytes: int = DEFAULT_ORIGINAL_BYTES,
-                     label: str | None = None) -> dict:
-    """返回 {"mime", "data", "source", "size"}；不能发送时抛 ImageUnavailable。调用方负责授权（作用域或本对话的附件）。"""
-    # 系统区只有对话附件可读（调用方已按本对话的附件表授权）；私密空间与回收站永远不可读。
-    if not key or key.endswith("/") or (key.startswith(".tgdrive") and not key.startswith(ATTACHMENT_ROOT)):
+                     label: str | None = None, scope: Scope | None = None) -> dict:
+    """返回 {"mime", "data", "source", "size"}；不能发送时抛 ImageUnavailable。调用方负责授权（作用域或本对话的附件）。
+    scope 只由私密对话传入（§24）：带 private_access 与逐块复核的 authorize，只能读取私密空间内的图片。"""
+    private = scope is not None and scope.private_access
+    # 系统区只有对话附件可读（调用方已按本对话的附件表授权）；私密空间只在私密对话中可读，回收站永远不可读。
+    if not key or key.endswith("/") or (key.startswith(".tgdrive") and not key.startswith(ATTACHMENT_ROOT)
+                                         and not (private and key.startswith(PRIVATE_PREFIX))):
         raise ImageUnavailable("该路径不能读取")
     label = label or "/" + key  # 给用户与模型看的名称：附件显示为「附件:名称」，不暴露存放位置
-    scope = Scope(bucket_id, "")
+    scope = scope if private else Scope(bucket_id, "")
     try:
         info = objects.head_object(scope, key)
     except NotFoundError as exc:
@@ -70,6 +73,8 @@ async def load_image(objects: ObjectService, bucket_id: int, key: str, *, max_by
     _, stream = await objects.get_object(scope, key)
     chunks = []
     async for chunk in stream:
+        if scope.authorize is not None:
+            scope.authorize()
         chunks.append(chunk)
     data = b"".join(chunks)
     mime = sniff(data)

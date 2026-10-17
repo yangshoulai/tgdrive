@@ -2623,6 +2623,27 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .assistant-title small { display: flex; align-items: center; gap: 6px; }
 .assistant-full-tag { display: inline-flex; flex: none; align-items: center; gap: 3px; padding: 0 6px; border-radius: var(--radius-xs); background: var(--warning-soft); color: var(--warning); font-size: var(--text-micro); font-weight: 500; line-height: 18px; }
 
+/* 私密对话（§24.8）：与私密空间的锁形标记同色，和普通对话区分 */
+.assistant-private-tag { display: inline-flex; flex: none; align-items: center; gap: 3px; margin-right: 6px; padding: 0 6px; border-radius: var(--radius-xs); background: var(--warning-soft); color: var(--warning); font-size: var(--text-micro); font-weight: 500; line-height: 18px; vertical-align: 2px; }
+.assistant-drawer.is-private .assistant-header { background: linear-gradient(120deg, var(--warning-soft), var(--surface) 60%); }
+.assistant-drawer.is-private .assistant-compose-box { border-color: color-mix(in srgb, var(--warning) 35%, var(--line)); }
+.assistant-scope.is-private .assistant-scope-trigger { display: inline-flex; height: 30px; align-items: center; gap: 6px; padding: 0 6px; color: var(--warning); }
+.assistant-scope.is-private .assistant-scope-label { color: var(--warning); }
+.assistant-welcome.is-private .assistant-eyebrow { display: inline-flex; align-items: center; gap: 4px; color: var(--warning); }
+.md-link-blocked { color: var(--ink-2); text-decoration: underline dotted var(--line-strong); text-underline-offset: 3px; cursor: help; word-break: break-all; }
+.ai-cross-form { display: grid; gap: 8px; padding: 10px; border-radius: var(--radius-md); background: var(--surface-sunken); }
+.ai-cross-label { display: flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: var(--text-xs); }
+.ai-cross-label strong { color: var(--ink); font-family: var(--font-mono); font-weight: 500; word-break: break-all; }
+.ai-cross-picker .move-list { min-height: 96px; max-height: 180px; background: var(--surface); }
+.ai-cross-form > small { color: var(--ink-3); font-size: var(--text-micro); line-height: 1.6; }
+.ai-verify { display: flex; align-items: flex-end; gap: 8px; }
+.ai-verify label { display: grid; flex: 1; min-width: 0; gap: 4px; color: var(--ink-2); font-size: var(--text-xs); }
+.ai-verify .input { width: 100%; }
+.assistant-tool-private { display: inline-flex; align-items: center; gap: 4px; }
+.assistant-tool-copy .assistant-tool-private.is-never, .assistant-tool-copy .assistant-tool-private.is-na { color: var(--ink-3); }
+.assistant-tool-copy .assistant-tool-private.is-limited, .assistant-tool-copy .assistant-tool-private.is-only { color: var(--warning); }
+.assistant-tool-private-toggle { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-3); }
+
 /* 输入区：模式按钮 */
 .assistant-mode { display: inline-flex; width: auto; height: 30px; flex: none; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-family: var(--font); font-size: var(--text-xs); }
 .assistant-mode:hover { background: var(--surface-hover); color: var(--ink); }

@@ -2,7 +2,8 @@ import { useEffect, useRef } from "react";
 
 /**
  * 浏览器工具的页面桥（docs/assistant-design.md §19.7）：文件页把当前目录、可见条目和选中状态登记在这里，
- * 助手对话框执行 ui_get_view／ui_select／ui_preview 时读取或操作。私密空间页面不登记。
+ * 助手对话框执行 ui_get_view／ui_select／ui_preview 时读取或操作。私密空间页面也登记（prefix 带私密前缀），
+ * 只有私密对话（§24.5.4）会读取它；普通对话在私密页面只得到 view=private。
  */
 export type FilesBridge = {
   prefix: string;
@@ -41,4 +42,14 @@ export function useFilesBridge(enabled: boolean, prefix: string, bridge: Omit<Fi
     current = value;
     return () => { if (current === value) current = null; };
   }, [enabled, prefix]);
+}
+
+/** 私密空间页面当前显示的是私密文件还是私密回收站（私密对话的 ui_get_view／ui_navigate 使用）。 */
+let privateSection: "files" | "trash" = "files";
+export const getPrivateSection = () => privateSection;
+export const setPrivateSection = (value: "files" | "trash") => { privateSection = value; };
+/** 私密对话的 ui_navigate 切换私密文件／私密回收站：私密空间页面监听这个事件。 */
+export const PRIVATE_SECTION_EVENT = "tessera:private-section";
+export function openPrivateSection(value: "files" | "trash") {
+  window.dispatchEvent(new CustomEvent(PRIVATE_SECTION_EVENT, { detail: value }));
 }

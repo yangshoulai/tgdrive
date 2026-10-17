@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 24
+    SCHEMA_VERSION = 25
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -650,6 +650,17 @@ class Metadata:
                 # 缩略图地址按内容版本（ETag）而不是路径标识，移动或改名后浏览器缓存仍然有效；读取时按桶与 ETag 找到可访问的文件。
                 self._schema("CREATE INDEX IF NOT EXISTS objects_by_etag ON objects(bucket_id, etag)")
                 db.execute("PRAGMA user_version = 24")
+            if version < 25:
+                # 私密对话（docs/assistant-design.md §24）：模型是否允许私密对话、用户策略与单独的说明确认；
+                # 私密对话本身只在内存中，调用日志只记 private 标记，不关联对话。
+                for table, column, definition in (
+                        ("ai_models", "private_ok", "INTEGER NOT NULL DEFAULT 0"),
+                        ("ai_user_policy", "private", "INTEGER"),
+                        ("ai_user_policy", "private_notice_ack_at", "REAL"),
+                        ("assistant_calls", "private", "INTEGER NOT NULL DEFAULT 0")):
+                    if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                db.execute("PRAGMA user_version = 25")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

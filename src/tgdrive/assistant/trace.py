@@ -22,7 +22,7 @@ from .providers import scrub
 
 CALL_FIELDS = ("kind", "run_id", "conversation_id", "user_id", "actor", "channel_id", "model_id", "tool_name", "action_id",
                "host", "started_at", "duration_ms", "ttfb_ms", "status", "http_status", "error_code", "error",
-               "input_tokens", "output_tokens", "cached_tokens", "upstream_id", "items")
+               "input_tokens", "output_tokens", "cached_tokens", "upstream_id", "items", "private")
 
 
 def today(now: float | None = None) -> str:
@@ -444,6 +444,7 @@ class TraceStore:
     def log_call(self, **fields) -> None:
         values = {name: fields.get(name) for name in CALL_FIELDS}
         values["started_at"] = values["started_at"] or time.time()
+        values["private"] = int(bool(values["private"]))
         if values["error"]:
             values["error"] = scrub(values["error"], 500)
         try:

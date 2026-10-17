@@ -110,6 +110,9 @@ class TgDriveASGI(StaticFiles):
                 row = admin.accounts.metadata.db.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
                 self.audit.record(action, actor_type="user", actor=row["username"] if row else None, ok=True, detail=detail)
             assistant.on_audit = audit_auto
+            # 私密对话（docs/assistant-design.md §24）：授权由私密空间管理，撤销时清除对话。
+            assistant.private_space = self.private_space
+            self.private_space.listeners.append(assistant.on_private_forget)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -244,7 +247,12 @@ class TgDriveASGI(StaticFiles):
                 # 私密缩略图地址不带解锁令牌，浏览器才能跨解锁长期缓存；授权取自同一登录会话当前的私密授权。
                 access = self.private_space.session_grants.get(token, "")
             audit_path = path
-            if private:
+            if private and path.startswith("/api/user/v1/private/assistant/"):
+                # 私密对话的接口：与普通助手接口相同，额外带私密授权（access），只能访问私密对话。
+                if self.assistant is None or path.startswith("/api/user/v1/private/assistant/attachments"):
+                    raise NotFoundError("资源不存在")
+                path = "/api/user/v1" + path[len("/api/user/v1/private"):]
+            elif private:
                 route = path[len("/api/user/v1/private"):]
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
@@ -323,7 +331,8 @@ class TgDriveASGI(StaticFiles):
             run_events = re.fullmatch(r"/api/user/v1/assistant/runs/([A-Za-z0-9_-]{4,40})/events", path)
             if run_events and method == "GET" and self.assistant is not None:
                 after = query.get("after", ["0"])[0]
-                events = self.assistant.events(token, run_events[1], int(after) if after.isdigit() else 0)
+                events = self.assistant.events(token, run_events[1], int(after) if after.isdigit() else 0,
+                                               access=access if private else None)
                 await self._until_disconnect(receive, self._send_events(tracked_send, events))
                 return
             sharer_avatar = re.fullmatch(r"/api/public/v1/objects/([A-Za-z0-9_-]+)/avatar", path)
@@ -440,7 +449,11 @@ class TgDriveASGI(StaticFiles):
                          "/assistant/actions/{}/reject": "assistant.action.reject",
                          "/assistant/actions/{}/cancel": "assistant.action.cancel",
                          "/assistant/actions/{}/undo": "assistant.action.undo",
-                         "/assistant/attachments/{}/save": "assistant.attachment.save"},
+                         "/assistant/attachments/{}/save": "assistant.attachment.save",
+                         "/private/assistant/actions/{}/confirm": "private.assistant.action.confirm",
+                         "/private/assistant/actions/{}/reject": "private.assistant.action.reject",
+                         "/private/assistant/actions/{}/cancel": "private.assistant.action.cancel",
+                         "/private/assistant/actions/{}/undo": "private.assistant.action.undo"},
     }
 
     def _audit_entry(self, method, path, payload, token, scope):
@@ -455,6 +468,7 @@ class TgDriveASGI(StaticFiles):
             pattern = re.sub(r"^/shares/[A-Za-z0-9_-]+/", "/shares/{}/", pattern)
             pattern = re.sub(r"^/assistant/(channels|models|users)/\d+/", r"/assistant/\1/{}/", pattern)
             pattern = re.sub(r"^/assistant/(scope-requests|actions|attachments)/[A-Za-z0-9_-]+/", r"/assistant/\1/{}/", pattern)
+            pattern = re.sub(r"^/private/assistant/actions/[A-Za-z0-9_-]+/", "/private/assistant/actions/{}/", pattern)
             action = routes.get(pattern)
             if action is None:
                 return None
@@ -575,8 +589,8 @@ class TgDriveASGI(StaticFiles):
         elif action == "assistant.model.test" and ok:
             detail = {"ok": (result or {}).get("ok"), "tools": (result or {}).get("tools")}
         elif action == "assistant.user_policy":
-            detail = {key: payload.get(key) for key in ("enabled", "max_level", "daily_tokens", "full_access") if key in payload}
-        elif action.startswith("assistant.action.") and ok:
+            detail = {key: payload.get(key) for key in ("enabled", "max_level", "daily_tokens", "full_access", "private") if key in payload}
+        elif action.startswith(("assistant.action.", "private.assistant.action.")) and ok:
             # 只记录操作类型、状态与条目数，不记录路径、链接等条目内容。
             detail = {key: (result or {}).get(key) for key in ("kind", "status", "count")}
         elif action == "assistant.trace.delete":
@@ -872,7 +886,8 @@ class TgDriveASGI(StaticFiles):
                 return 200, {"part_concurrency": effective.get("web_part_concurrency", 4),
                              "file_concurrency": effective.get("web_file_concurrency", 2)}, {"Cache-Control": "no-store"}
             if route.startswith("/assistant/") and self.assistant is not None:
-                return await self._assistant_user(method, route[len("/assistant"):], query, payload, token, csrf)
+                return await self._assistant_user(method, route[len("/assistant"):], query, payload, token, csrf,
+                                                  access=access if private else None, origin=origin, ip=ip)
             if route.startswith("/downloads") and self.offline is not None:
                 session = user._session(token, csrf=csrf, mutation=method != "GET")
                 account = user.accounts.account_for_session(session)
@@ -1316,55 +1331,62 @@ class TgDriveASGI(StaticFiles):
         finally:
             await iterator.aclose()
 
-    async def _assistant_user(self, method, route, query, payload, token, csrf):
+    async def _assistant_user(self, method, route, query, payload, token, csrf, *, access=None, origin=None, ip=None):
         service = self.assistant
         no_store = {"Cache-Control": "no-store"}
+        if access is not None and not re.match(r"/(config|notice/ack|conversations|runs/|actions/)", route):
+            # 私密对话只开放这些接口：作用域请求、附件、快照、分享链接都不适用（§24.5.1）。
+            raise NotFoundError("资源不存在")
+        if access is not None and not access:
+            from .private import PrivateLocked
+            raise PrivateLocked("请先解锁私密空间")
         if route == "/config" and method == "GET":
-            return 200, service.user_config(token), no_store
+            return 200, service.user_config(token, access), no_store
         if route == "/notice/ack" and method == "POST":
-            service.ack_notice(token, csrf)
+            service.ack_notice(token, csrf, access)
             return 204, None, {}
         if route == "/conversations" and method == "GET":
             return 200, service.list_conversations(token, cursor=query.get("cursor", [""])[0],
-                                                   archived=query.get("archived", ["0"])[0] in ("1", "true")), no_store
+                                                   archived=query.get("archived", ["0"])[0] in ("1", "true"), access=access), no_store
         if route == "/conversations" and method == "POST":
-            return 201, service.create_conversation(token, csrf, payload), no_store
+            return 201, service.create_conversation(token, csrf, payload, access), no_store
         match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})(?:/(update|delete|messages|retry|share-link))?", route)
         if match and match[2] is None and method == "GET":
-            return 200, service.conversation(token, match[1]), no_store
+            return 200, service.conversation(token, match[1], access), no_store
         if match and match[2] == "update" and method == "POST":
-            return 200, service.update_conversation(token, csrf, match[1], payload), no_store
+            return 200, service.update_conversation(token, csrf, match[1], payload, access), no_store
         if match and match[2] == "delete" and method == "POST":
-            service.delete_conversation(token, csrf, match[1])
+            service.delete_conversation(token, csrf, match[1], access)
             return 204, None, {}
         if match and match[2] == "messages" and method == "POST":
-            return 201, await service.send(token, csrf, match[1], payload), no_store
+            return 201, await service.send(token, csrf, match[1], payload, access), no_store
         if match and match[2] == "retry" and method == "POST":
-            return 201, await service.retry(token, csrf, match[1], payload), no_store
-        if match and match[2] == "share-link" and method == "GET":
+            return 201, await service.retry(token, csrf, match[1], payload, access), no_store
+        if match and match[2] == "share-link" and method == "GET" and access is None:
             return 200, service.share_link(token, match[1], query.get("path", [""])[0]), no_store
         match = re.fullmatch(r"/runs/([A-Za-z0-9_-]{4,40})/(stop|client-results)", route)
         if match and method == "POST":
             if match[2] == "stop":
-                service.stop(token, csrf, match[1])
+                service.stop(token, csrf, match[1], access)
             else:
-                service.client_result(token, csrf, match[1], payload)
+                service.client_result(token, csrf, match[1], payload, access)
             return 204, None, {}
         match = re.fullmatch(r"/scope-requests/([A-Za-z0-9_-]{4,40})/(confirm|reject)", route)
         if match and method == "POST":
             return 200, await service.decide_scope(token, csrf, match[1], match[2] == "confirm"), no_store
         match = re.fullmatch(r"/actions/([A-Za-z0-9_-]{4,40})(?:/(items|confirm|reject|cancel|undo))?", route)
         if match and match[2] is None and method == "GET":
-            return 200, service.action_detail(token, match[1]), no_store
+            return 200, service.action_detail(token, match[1], access), no_store
         if match and match[2] == "items" and method == "GET":
             offset = query.get("offset", ["0"])[0]
-            return 200, service.action_items(token, match[1], int(offset) if offset.isdigit() else 0), no_store
+            return 200, service.action_items(token, match[1], int(offset) if offset.isdigit() else 0, access), no_store
         if match and match[2] in ("confirm", "reject") and method == "POST":
-            return 200, await service.decide_action(token, csrf, match[1], match[2] == "confirm", payload), no_store
+            return 200, await service.decide_action(token, csrf, match[1], match[2] == "confirm", payload, access,
+                                                    origin=origin, ip=ip), no_store
         if match and match[2] == "cancel" and method == "POST":
-            return 200, service.cancel_action(token, csrf, match[1]), no_store
+            return 200, service.cancel_action(token, csrf, match[1], access), no_store
         if match and match[2] == "undo" and method == "POST":
-            return 200, await service.undo_action(token, csrf, match[1]), no_store
+            return 200, await service.undo_action(token, csrf, match[1], access), no_store
         if route == "/attachments/stats" and method == "GET":
             return 200, service.attachment_stats(token), no_store
         if route == "/attachments/discard-pending" and method == "POST":
