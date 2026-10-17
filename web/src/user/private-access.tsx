@@ -47,7 +47,7 @@ export function PrivateUnlockForm() {
     try {
       const grant = await api.unlockPrivate(password);
       accept(grant); if (mounted.current) setPassword("");
-    } catch (reason) { if (mounted.current) setError(api.errorMessage(reason, "解锁失败，请重试")); }
+    } catch (reason) { if (mounted.current) setError(api.errorMessage(reason, "解锁失败，请稍后重试")); }
     finally { if (mounted.current) setBusy(false); }
   }
   if (!status) return <div className="private-loading" role="status">{error ? <><p role="alert">{error}</p><Button onClick={() => setRevision(v => v + 1)}>重试</Button></> : <><span className="spinner" />正在读取私密空间设置</>}</div>;
@@ -83,7 +83,7 @@ export function PrivateTransferDialog({ paths, into, onClose, onDone }: { paths:
       if (!result.moved && result.skipped) { setError("目标位置已有同名项目，未移动任何内容"); return; }
       toast.success(`${into ? "已移入私密空间" : "已移出到我的文件"}${result.skipped ? `，${result.skipped} 个同名文件已跳过` : ""}`);
       onDone(); onClose();
-    } catch (reason) { setError(api.errorMessage(reason, "移动失败，请重试")); }
+    } catch (reason) { setError(api.errorMessage(reason, "移动失败，请稍后重试")); }
     finally { setBusy(false); }
   }
   return <Modal className="private-transfer" title={into ? "移入私密空间" : "移出到我的文件"} icon="lock" onClose={onClose} dismissible={!busy}

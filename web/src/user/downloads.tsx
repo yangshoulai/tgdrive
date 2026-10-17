@@ -131,7 +131,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       setConfirm(current => current?.task.id === task.id && current.action === action ? null : current);
       toast.success(action === "stop" ? "任务已停止" : action === "delete" ? "任务已删除" : "任务已加入下载队列");
       await pagination.reload();
-    } catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); }
     finally { setBusy(current => { const next = new Set(current); next.delete(task.id); return next; }); }
   }
   async function clear(status: "completed" | "failed") {
@@ -267,7 +267,7 @@ function DownloadProgress({ task, name }: { task: api.DownloadTask; name: string
   const received = task.kind === "hls" ? saved : task.received;
   const running = task.status === "running";
   const detail = [
-    task.status === "queued" && !received ? "等待开始" : task.size ? `${formatBytes(received)} / ${formatBytes(task.size)}` : received ? `已下载 ${formatBytes(received)}` : task.kind === "hls" && task.segments_total ? `${task.segments_done}/${task.segments_total} 分片` : "大小未知",
+    task.status === "queued" && !received ? "等待开始" : task.size ? `${formatBytes(received)} / ${formatBytes(task.size)}` : received ? `已下载 ${formatBytes(received)}` : task.kind === "hls" && task.segments_total ? `${task.segments_done}/${task.segments_total} 段` : "大小未知",
     running && task.speed > 0 && `${formatBytes(task.speed)}/s`,
     running && task.eta_seconds !== null && `约剩 ${seconds(task.eta_seconds)}`,
     task.status === "interrupted" && task.error,
@@ -353,10 +353,10 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
       </Field><Field label="下载类型" hint="平台链接自动解析媒体；无法识别的播放列表可选择 M3U8。"><select className="input" value={downloadType} onChange={event => setDownloadType(event.target.value as typeof downloadType)}><option value="auto">自动识别</option><option value="http">文件直链</option><option value="hls">M3U8 视频</option><option value="x">X 单条帖子</option><option value="youtube">YouTube 视频 / Shorts</option></select></Field>
         <details className="download-cookie-options" open={cookiesOpen} onToggle={event => setCookiesOpen(event.currentTarget.open)}><summary>平台登录 Cookie（可选）</summary><div className="form">
           <Field label="Cookie 文本" hint="支持 Netscape cookies.txt 或 name=value 文本。仅用于平台解析，加密保存；不填写时尝试公开访问。"><textarea className="input mono download-cookie-input" rows={4} autoComplete="off" autoCapitalize="none" spellCheck={false} value={cookies} onChange={event => setCookies(event.target.value)} placeholder="粘贴当前平台的 Cookie，或导入 cookies.txt" /></Field>
-          <Field label="导入 cookies.txt" hint="最多 32 KiB；只使用对应平台域名的 Cookie。"><input className="input download-cookie-file" type="file" accept=".txt,text/plain" disabled={busy} onChange={event => {
+          <Field label="导入 cookies.txt" hint="最多 32 KB；只使用对应平台域名的 Cookie。"><input className="input download-cookie-file" type="file" accept=".txt,text/plain" disabled={busy} onChange={event => {
             const file = event.target.files?.[0];
             if (!file) return;
-            if (file.size > 32768) { setError("Cookie 文件不能超过 32 KiB"); return; }
+            if (file.size > 32768) { setError("Cookie 文件不能超过 32 KB"); return; }
             void file.text().then(value => { setCookies(value); setError(""); }).catch(() => setError("无法读取 Cookie 文件，请粘贴文本"));
           }} /></Field>
         </div></details></> : <>

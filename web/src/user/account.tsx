@@ -30,7 +30,7 @@ export function UserSettingsPage({ session, onSessionChange, assistant = false, 
     {onTabChange && <Tabs label="用户设置" value={tab} onChange={onTabChange} options={SETTINGS_TABS} />}
     {tab === "cache" ? <LocalCacheSettings />
       : tab === "keys" ? keysAvailable ? <KeysView bucketName={bucketName} embedded />
-      : <EmptyState icon="lock" title="暂时无法管理访问密钥" description="系统解锁后才能查看和创建访问密钥。" />
+      : <EmptyState icon="lock" title="暂时无法管理访问密钥" description="服务正在等待管理员完成启动，稍后再来查看和创建访问密钥。" />
       : <AccountSettings session={session} onSessionChange={onSessionChange} assistant={assistant} onOpenConversation={onOpenConversation} />}
   </div>;
 }
@@ -68,12 +68,12 @@ function AssistantAttachmentsSummary({ assistant, onOpenConversation }: { assist
       const result = await ai.discardPendingAttachments();
       toast.success(`已清除 ${result.removed} 个未发送的附件，释放 ${formatBytes(result.size)}`);
       setStats(await ai.attachmentStats());
-    } catch (reason) { toast.error(api.errorMessage(reason, "清除失败")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "清除失败，请稍后重试")); }
     finally { setClearing(false); }
   }
   useEffect(() => {
     let alive = true;
-    ai.attachmentStats().then(value => { if (alive) setStats(value); }).catch(reason => { if (alive) setError(api.errorMessage(reason, "附件统计加载失败")); });
+    ai.attachmentStats().then(value => { if (alive) setStats(value); }).catch(reason => { if (alive) setError(api.errorMessage(reason, "附件统计加载失败，请稍后重试")); });
     return () => { alive = false; };
   }, []);
   if (!assistant && !stats?.count) return null;

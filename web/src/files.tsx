@@ -227,7 +227,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
     // 文本预览只读取前 512 KB，避免大日志拖垮页面。
     void readPreviewText(url, TEXT_PREVIEW_LIMIT, controller.signal)
       .then(value => { if (!controller.signal.aborted) setContent(value); })
-      .catch(reason => { if (!controller.signal.aborted) setError(api.errorMessage(reason, "无法读取文件")); });
+      .catch(reason => { if (!controller.signal.aborted) setError(api.errorMessage(reason, "无法读取文件，请稍后重试")); });
     return () => controller.abort();
   }, [url, kind]);
   const failed = Boolean(mediaFailed || error);
@@ -254,7 +254,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
   if (kind === "text" || kind === "code") {
     if (error) return fallback;
     if (content === null) return <PreviewLoading onRetry={onRetry} />;
-    return <TextPreview content={content} name={name} code={kind === "code"} downloadUrl={downloadUrl} resolveImage={resolveImage} onError={reason => setError(api.errorMessage(reason, "文本组件加载失败"))} />;
+    return <TextPreview content={content} name={name} code={kind === "code"} downloadUrl={downloadUrl} resolveImage={resolveImage} onError={reason => setError(api.errorMessage(reason, "文本预览没有加载出来，请刷新页面后重试"))} />;
   }
   return fallback;
 }

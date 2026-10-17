@@ -99,7 +99,7 @@ export function PasskeysSettings({ username, active, busy, onBusyChange, onOpen,
     } catch (reason) {
       if (mounted.current) {
         if (operation.signal.aborted) { close(); toast.info("设备验证已取消"); }
-        else setError(api.errorMessage(reason, "操作未完成，请重试"));
+        else setError(api.errorMessage(reason, "操作没有完成，请稍后重试"));
       }
     } finally { finish(); }
   }

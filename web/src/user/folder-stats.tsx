@@ -18,7 +18,7 @@ export function FolderStatsDialog({ prefix, title, onClose, onOpenFolder }: { pr
   useEffect(() => {
     const controller = new AbortController();
     setStats(null); setError("");
-    void api.folderStats(prefix, controller.signal).then(setStats).catch(reason => { if (!controller.signal.aborted) setError(api.errorMessage(reason, "统计读取失败")); });
+    void api.folderStats(prefix, controller.signal).then(setStats).catch(reason => { if (!controller.signal.aborted) setError(api.errorMessage(reason, "统计读取失败，请稍后重试")); });
     return () => controller.abort();
   }, [prefix, retry]);
   const kinds = stats ? KIND_ORDER.flatMap(kind => stats.kinds.filter(item => item.kind === kind)) : [];

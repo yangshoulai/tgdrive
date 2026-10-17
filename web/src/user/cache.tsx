@@ -169,7 +169,7 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
         while (!state.complete) { state = await stepFileCache(job.id, controller.signal, progress); progress(state); }
         patch({ status: "done", completedAt: Date.now() });
       } catch (reason) {
-        if (!controller.signal.aborted) patch({ status: "error", error: api.errorMessage(reason, "缓存失败，请重试") });
+        if (!controller.signal.aborted) patch({ status: "error", error: api.errorMessage(reason, "缓存失败，请稍后重试") });
       } finally {
         cancelFileCache(job.id);
         if (active.current === running) active.current = null;

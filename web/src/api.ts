@@ -100,6 +100,50 @@ export class ApiError extends Error {
   constructor(message: string, public status: number, public code: string) { super(message); }
 }
 
+/**
+ * 服务端有些错误只给出英文的内部说明（这些文字也是 S3 与访问密钥接口的约定，不能在服务端改）。
+ * 网页显示前换成用户能理解的说法；没有收录、又不含中文的说明，按状态码给出通用提示。
+ */
+const SERVER_MESSAGES: Record<string, string> = {
+  "invalid path": "名称或路径不合法，请换一个名称",
+  "reserved path": "这个位置由系统保留，不能使用",
+  "path is too long": "路径太长，请缩短文件或文件夹名称",
+  "prefix is outside scope": "没有访问这个位置的权限",
+  "object key is outside scope prefix": "没有访问这个位置的权限",
+  "scope is read-only": "这个位置只能查看，不能修改",
+  "user not found": "账号不存在或已被删除",
+  "system is locked": "服务正在等待管理员完成启动，请稍后再试",
+  "invalid credentials": "邮箱或密码不正确",
+  "invalid password": "密码不正确",
+  "public link not found": "分享链接不存在或已失效",
+  "public link has expired": "分享链接已过期",
+  "not a shared folder": "这个链接分享的不是文件夹",
+  "shared folder changed": "分享的文件夹已有变化，请刷新页面",
+  "trash entry not found": "回收站里找不到这个项目，可能已被还原或清除",
+  "upload not found": "上传已过期，请重新上传",
+  "thumbnail not found": "缩略图还没有生成",
+  "source unavailable": "来源暂时无法访问，请稍后重试",
+  "invalid range": "文件读取范围不正确，请刷新页面后重试",
+  "the administrator account cannot be disabled": "管理员账号不能禁用",
+  "存储桶配额不足": "空间不足，请先清理不需要的文件或联系管理员扩容",
+};
+function statusMessage(status: number) {
+  if (status === 403) return "没有权限执行这个操作";
+  if (status === 404) return "要找的内容不存在，可能已被移动或删除";
+  if (status === 409) return "内容已经发生变化，请刷新页面后重试";
+  if (status === 413) return "内容太大，无法提交";
+  if (status === 429) return "操作太频繁，请稍后再试";
+  if (status >= 500) return "服务暂时不可用，请稍后重试";
+  return `操作没有完成（${status}），请稍后重试`;
+}
+export function friendlyServerMessage(message: string, status: number, admin = false) {
+  const known = SERVER_MESSAGES[message.trim().toLowerCase()];
+  if (known) return known;
+  // 控制台保留原始说明，方便管理员排查。
+  if (admin && message.trim()) return message;
+  return /[\u4e00-\u9fff]/.test(message) ? message : statusMessage(status);
+}
+
 export function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error && reason.message ? reason.message : fallback;
 }
@@ -121,9 +165,9 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
   try {
     const response = await fetch(path, { ...init, signal: controller.signal, credentials: "include", headers });
     if (!response.ok) {
-      let message = `请求失败（${response.status}）`;
+      let message = statusMessage(response.status);
       let code = "request_failed";
-      try { const body = await response.json(); message = body.error?.message ?? message; code = body.error?.code ?? code; } catch { /* 保留状态码 */ }
+      try { const body = await response.json(); message = friendlyServerMessage(body.error?.message ?? "", response.status, path.startsWith("/api/admin/")); code = body.error?.code ?? code; } catch { /* 保留状态码对应的提示 */ }
       if (response.status === 401 && path.startsWith("/api/") && !path.endsWith("/login") && !path.startsWith("/api/auth/v1/passkeys/login/")) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
       if (code === "private_locked") window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: headers.get("X-Private-Access") }));
       throw new ApiError(message, response.status, code);
@@ -386,11 +430,11 @@ function xhrPut<T>(url: string, body: Blob, contentType: string, onProgress: (pr
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress({ loaded: body.size, total: body.size, percent: 100 });
-        try { resolve(JSON.parse(xhr.responseText) as T); } catch { reject(new ApiError("服务器返回格式异常", xhr.status, "invalid_response")); }
+        try { resolve(JSON.parse(xhr.responseText) as T); } catch { reject(new ApiError("上传结果无法识别，请刷新页面确认文件是否已保存", xhr.status, "invalid_response")); }
         return;
       }
       let message = `上传失败（${xhr.status}）`; let code = "upload_failed";
-      try { const parsed = JSON.parse(xhr.responseText); message = parsed.error?.message ?? message; code = parsed.error?.code ?? code; } catch { /* 保留状态码 */ }
+      try { const parsed = JSON.parse(xhr.responseText); message = parsed.error?.message ? friendlyServerMessage(parsed.error.message, xhr.status) : message; code = parsed.error?.code ?? code; } catch { /* 保留状态码 */ }
       if (xhr.status === 401) window.dispatchEvent(new CustomEvent("tgdrive:session-expired"));
       if (code === "private_locked") window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: access }));
       reject(new ApiError(message, xhr.status, code));

@@ -122,7 +122,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
         onClose={() => setRevoking(null)}
         onConfirm={async () => {
           try { await api.setPublic([revoking.key], false); toast.success("已停止分享"); setRevoking(null); load(); onChanged(); }
-          catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
+          catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); }
         }} />}
     </>
   );

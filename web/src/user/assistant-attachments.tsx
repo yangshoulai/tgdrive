@@ -70,7 +70,7 @@ export function useAttachments() {
     } catch (reason) {
       aborts.current.delete(item.id);
       if (reason instanceof api.ApiError && reason.code === "upload_aborted") return;
-      update(item.id, { status: "error", error: api.errorMessage(reason, "上传失败") });
+      update(item.id, { status: "error", error: api.errorMessage(reason, "上传失败，请稍后重试") });
     }
   }, [update]);
 
@@ -221,7 +221,7 @@ function SaveAttachmentDialog({ item, initial, onClose }: { item: ai.MessageAtta
       window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [value] } }));
       onClose();
     } catch (reason) {
-      toast.error(api.errorMessage(reason, "保存失败"));
+      toast.error(api.errorMessage(reason, "保存失败，请稍后重试"));
       setBusy(false);
     }
   }

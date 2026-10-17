@@ -21,7 +21,7 @@ function TransferNotice({ transfer, unlocked, onDiscard }: { transfer: TransferS
   return <div className={`transfer-notice${transfer.error ? " is-error" : ""}`} role="status">
     <Icon name={transfer.error ? "alert" : transfer.ended ? "upload" : "download"} size={16} />
     <span className="transfer-notice-text"><strong>来自资源抓取脚本</strong><span className="muted">{transfer.request.origin.replace(/^https?:\/\//, "")}</span>{text}
-      {transfer.rejected > 0 && <span className="muted">已拒收 {transfer.rejected} 个（为空、超过 64 MiB 或超出数量）</span>}</span>
+      {transfer.rejected > 0 && <span className="muted">已拒收 {transfer.rejected} 个（为空、超过 64 MB 或超出数量）</span>}</span>
     {(transfer.ended || transfer.error) && <Button size="sm" variant="ghost" onClick={onDiscard}>{count && !transfer.error ? "放弃" : "关闭"}</Button>}
   </div>;
 }

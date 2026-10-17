@@ -323,7 +323,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
         loadedUrl.current = initial.url;
         setPlayerReady(true);
         callbacks.current.onControls?.(video);
-      }).catch(reason => { if (!cancelled) { setError(errorMessage(reason, "播放组件加载失败")); notify("failed"); } });
+      }).catch(reason => { if (!cancelled) { setError(errorMessage(reason, "播放器没有加载出来，请刷新页面后重试")); notify("failed"); } });
     }
     return () => { cancelled = true; callbacks.current.onControls?.(null); callbacks.current.onLyricLine?.(null); player.current?.destroy(); player.current = null; setPlayerReady(false); };
     // 切换同类文件只替换媒体源，最小化、恢复与播放模式变化都保留实例。
@@ -386,7 +386,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
       } else if (subtitles) {
         await subtitles.setSubtitle(value.text, /\.srt$/i.test(asset.name) ? "srt" : "vtt");
       }
-    }).catch(reason => { if (!controller.signal.aborted) setAssetError(errorMessage(reason, "歌词或字幕加载失败")); })
+    }).catch(reason => { if (!controller.signal.aborted) setAssetError(errorMessage(reason, "歌词或字幕没有加载出来")); })
       .finally(() => { if (!controller.signal.aborted) setAssetBusy(false); });
     return () => { controller.abort(); if (subtitles) void subtitles.setSubtitle(null); };
   }, [selected, assets, playerReady, kind, url]);

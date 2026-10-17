@@ -1611,23 +1611,23 @@ class TgDriveASGI(StaticFiles):
         elif isinstance(exc, TooManyAttempts):
             status, code = 429, "too_many_attempts"
             message = str(exc) if str(exc).startswith(("访问密码", "登录", "验证", "通行密钥")) else "登录失败次数过多，请 15 分钟后再试"
-        elif isinstance(exc, (AuthenticationError, SessionExpired)): status, code, message = 401, "unauthorized", "登录凭据无效或会话已过期"
+        elif isinstance(exc, (AuthenticationError, SessionExpired)): status, code, message = 401, "unauthorized", "登录已过期，请重新登录"
         elif isinstance(exc, AssistantDenied): status, code, message = 403, "assistant_unavailable", str(exc) or "文件助手不可用"
-        elif isinstance(exc, (CsrfError, PermissionError)): status, code, message = 403, "forbidden", "权限不足或 CSRF 校验失败"
+        elif isinstance(exc, (CsrfError, PermissionError)): status, code, message = 403, "forbidden", "没有权限执行这个操作"
         elif isinstance(exc, WorkBusyError):
             status, code, message = 503, "transfer_busy", "传输繁忙，请稍后重试"
             extra["Retry-After"] = "5"
-        elif isinstance(exc, NotReadyError): status, code, message = 503, "locked", "系统尚未解锁"
-        elif isinstance(exc, NotFoundError): status, code, message = 404, "not_found", "请求的资源不存在"
+        elif isinstance(exc, NotReadyError): status, code, message = 503, "locked", "服务正在等待管理员完成启动，请稍后再试"
+        elif isinstance(exc, NotFoundError): status, code, message = 404, "not_found", "要找的内容不存在，可能已被移动或删除"
         elif isinstance(exc, InvalidRange):
             status, code, message = 416, "range_not_satisfiable", "请求的字节范围不可满足"
             extra["Content-Range"] = f"bytes */{exc.size}"
         elif isinstance(exc, IntegrityError): status, code, message = 500, "integrity_error", "文件完整性校验失败"
-        elif isinstance(exc, QuotaExceededError): status, code, message = 413, "quota_exceeded", "已超过当前用户的存储配额"
+        elif isinstance(exc, QuotaExceededError): status, code, message = 413, "quota_exceeded", "空间不足，请先清理不需要的文件或联系管理员扩容"
         elif isinstance(exc, ValueError):
             status, code, message = 400, "bad_request", str(exc) or "请求参数不合法"
         elif isinstance(exc, (KeyError, TypeError)): status, code, message = 400, "bad_request", "请求参数不合法"
-        else: status, code, message = 500, "internal_error", "内部服务错误"
+        else: status, code, message = 500, "internal_error", "服务出现问题，请稍后重试"
         return status, {"error": {"code": code, "message": message}}, extra
 
     def _cookie(self, value, *, expires=False, max_age: int | None = None):

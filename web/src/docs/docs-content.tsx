@@ -466,7 +466,7 @@ print(session.get(f"{base}/list", params={"prefix": "docs/"}).json())` },
       ]} />
       <H2>错误</H2>
       <p>出错时返回对应的 HTTP 状态码和统一的 JSON 结构：</p>
-      <Code lang="json" code={`{ "error": { "code": "quota_exceeded", "message": "已超过当前用户的存储配额" } }`} />
+      <Code lang="json" code={`{ "error": { "code": "quota_exceeded", "message": "空间不足，请先清理不需要的文件或联系管理员扩容" } }`} />
       <Table head={["状态码", "code", "含义与处理"]} rows={[
         ["400", <C>bad_request</C>, "参数缺失、路径不合法，或多桶密钥未指定 bucket；message 中有具体原因"],
         ["401", <C>invalid_key</C>, "缺少 Authorization 头，或密钥错误、已禁用、已删除"],

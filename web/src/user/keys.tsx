@@ -74,7 +74,7 @@ export function KeysView({ bucketName, embedded = false }: { bucketName: string 
         onClose={() => setDisabling(null)}
         onConfirm={async () => {
           try { await api.disableUserKey(disabling.key); toast.success("密钥已禁用"); setDisabling(null); load(); }
-          catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
+          catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); }
         }} />}
     </>
   );

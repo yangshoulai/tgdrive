@@ -75,7 +75,7 @@ function UnavailableGate() {
     <div className="locked-gate">
       <span className="locked-icon"><Icon name="lock" size={26} /></span>
       <h1>服务暂时不可用</h1>
-      <p>系统刚刚重启，需要管理员输入加密口令后才能继续使用。请稍后再试，或联系管理员。</p>
+      <p>服务刚刚重启，正在等待管理员完成启动。请稍后再试，或联系管理员。</p>
       <Button onClick={() => window.location.reload()}>重新检查</Button>
     </div>
   );
@@ -154,12 +154,12 @@ function StorageMeter({ usage, percent, onOpenCache }: { usage: Usage | null; pe
     { label: "系统数据", hint: "自动生成的缩略图与文件助手对话附件", rows: [["缩略图", "image", detail.thumbnails ?? 0], ["助手附件", "paperclip", detail.assistant]] },
   ] : [];
   const total = groups.reduce((sum, group) => sum + group.rows.reduce((value, row) => value + row[2], 0), 0);
-  return <div className={`storage-meter${open ? " is-open" : ""}`} title={usage?.quota_bytes == null ? "未设置空间配额" : undefined}>
+  return <div className={`storage-meter${open ? " is-open" : ""}`} title={usage?.quota_bytes == null ? "空间不限" : undefined}>
     <button type="button" className="storage-meter-head" aria-expanded={open} aria-controls={`${id}-detail`} onClick={() => setOpen(value => !value)}>
       <span>已用空间<Icon name="chevronDown" size={12} /></span><strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></button>
     {usage?.quota_bytes != null && <>
       {usage.quota_bytes > 0 && <Progress value={percent} tone={usageTone(percent)} label="存储使用率" />}
-      <p>{usage.quota_bytes > 0 ? `共 ${formatBytes(usage.quota_bytes)} · ${Math.round(percent)}%` : "配额为 0，无法上传"}</p>
+      <p>{usage.quota_bytes > 0 ? `共 ${formatBytes(usage.quota_bytes)} · ${Math.round(percent)}%` : "没有可用空间，暂时无法上传"}</p>
     </>}
     {open && <div id={`${id}-detail`} className="storage-meter-detail" aria-label="已用空间分项">
       {!detail ? <p className="storage-meter-loading">正在统计…</p> : <>
@@ -171,13 +171,13 @@ function StorageMeter({ usage, percent, onOpenCache }: { usage: Usage | null; pe
           <h4><i className={`storage-dot is-${index ? "system" : "user"}`} aria-hidden="true" /><span>{group.label}</span><strong>{formatBytes(group.rows.reduce((value, row) => value + row[2], 0))}</strong></h4>
           <ul>{group.rows.map(([label, icon, size]) => <li key={label}><Icon name={icon} size={12} /><span>{label}</span><strong>{formatBytes(size)}</strong></li>)}</ul>
         </section>)}
-        {local && <section className="storage-group storage-local" title="这台设备的浏览器保存的加密副本，不计入空间配额">
+        {local && <section className="storage-group storage-local" title="这台设备的浏览器里保存的副本，不占用你的空间">
           <h4><Icon name="monitor" size={12} /><span>本机缓存</span><strong>{formatBytes(local.normal.bytes + local.private.bytes)}</strong></h4>
           <ul>
             <li><Icon name="folder" size={12} /><span>普通文件</span><strong>{formatBytes(local.normal.bytes)}</strong></li>
             {(local.private.count > 0 || local.settings.private) && <li><Icon name="lock" size={12} /><span>私密文件</span><strong>{formatBytes(local.private.bytes)}</strong></li>}
           </ul>
-          <p className="storage-local-note">{local.settings.enabled && local.policy?.enabled !== false ? "不计入配额" : "已关闭"} · <button type="button" className="link-button" onClick={onOpenCache}>管理</button></p>
+          <p className="storage-local-note">{local.settings.enabled && local.policy?.enabled !== false ? "不占用空间" : "已关闭"} · <button type="button" className="link-button" onClick={onOpenCache}>管理</button></p>
         </section>}
       </>}
     </div>}

@@ -119,7 +119,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
   const setThumbnails = (key: string, thumbnails: string[]) =>
     setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, thumbnail_versions: undefined, has_thumbnail: thumbnails.includes("thumb") } : item));
-  const thumbnailGenerator = useThumbnailGenerator(files, () => { notify.success("已提交缩略图生成请求"); scheduleRefresh(); });
+  const thumbnailGenerator = useThumbnailGenerator(files, () => { notify.success("正在生成缩略图，完成后自动显示"); scheduleRefresh(); });
   // 预览打开时，把页面上最新的文件信息（补上的缩略图、覆盖后的新版本）同步给预览的当前文件与底部列表。
   useEffect(() => { preview.sync(files); }, [files, preview.sync]);
   // 等待缩略图：当前列表里有缺缩略图的图片、视频、音频时，只查询这些文件的缩略图状态（不重读整个目录），
@@ -801,7 +801,7 @@ function NameDialog({ title, label, confirm, initial = "", location, onClose, on
     if (/[/\\]/.test(trimmed) || trimmed === "." || trimmed === "..") { setError("名称不能包含斜杠，也不能是 . 或 .."); return; }
     setBusy(true);
     try { await onSubmit(trimmed, destination); }
-    catch (reason) { setError(api.errorMessage(reason, "操作失败，请稍后重试")); }
+    catch (reason) { setError(api.errorMessage(reason, "操作没有完成，请稍后重试")); }
     finally { setBusy(false); }
   }
   return (

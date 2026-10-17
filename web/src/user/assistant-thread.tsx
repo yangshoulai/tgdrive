@@ -191,7 +191,6 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
         {turn.notices.map(notice => <Notice key={notice.seq} message={notice} onRetry={notice.retry ? retry : undefined} />)}
         {!live && (turn.answer || turn.output > 0) && <div className="ai-reply-foot">
           {turn.endedAt && <span>{formatDateTime(turn.endedAt)}</span>}
-          {turn.output > 0 && <span title="本轮输入 / 输出 token">{turn.input.toLocaleString("zh-CN")} / {turn.output.toLocaleString("zh-CN")} token</span>}
           {turn.answer?.text && <button type="button" onClick={() => copyMessage(turn.answer?.text ?? "")}><Icon name="copy" size={12} />复制</button>}
         </div>}
       </div>
@@ -398,7 +397,7 @@ function ScopeCard({ event, action, running, onScope }: { event: Extract<ai.Tool
   if (!action && running) return <section className="ai-card"><SkeletonRows rows={2} /></section>;
   const status = action?.status ?? "expired";
   return <section className={`ai-card ai-scope is-${status}`}>
-    <CardHead icon="folder" tone="warning" title="助手请求扩大作用域" subtitle={action?.payload?.reason ?? event.reason}
+    <CardHead icon="folder" tone="warning" title="助手请求访问更大的范围" subtitle={action?.payload?.reason ?? event.reason}
       badge={status !== "pending" ? <Badge tone={status === "confirmed" ? "success" : "neutral"}>{status === "confirmed" ? "已允许" : status === "rejected" ? "已拒绝" : "已过期"}</Badge> : undefined} />
     <div className="ai-scope-path"><code>{action?.payload?.from ?? event.from}</code><Icon name="chevronRight" size={14} /><code>{action?.payload?.to ?? event.to}</code></div>
     {status === "pending" && <footer className="ai-card-foot"><span>允许后助手可以处理新范围内的普通文件</span>
@@ -512,7 +511,7 @@ function ShareBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
     setHref(""); setError("");
     void ai.shareLink(event.conversation_id, event.path).then(result => {
       if (active) setHref(api.publicLinks(result.token, baseName(event.path), result.public_base_url).page);
-    }).catch(reason => { if (active) setError(api.errorMessage(reason, "分享链接读取失败")); });
+    }).catch(reason => { if (active) setError(api.errorMessage(reason, "分享链接读取失败，请稍后重试")); });
     return () => { active = false; };
   }, [event.conversation_id, event.path, retry]);
   return <section className="ai-card ai-browser">
@@ -609,7 +608,7 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
       if (fresh.status === "running" || fresh.status === "undoing" || label === "undo") touched.current = true;
       setValue(fresh);
       onChanged();
-    } catch (reason) { toast.error(api.errorMessage(reason, "操作失败")); onChanged(); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); onChanged(); }
     finally { setBusy(null); setArmed(false); }
   }, [onChanged]);
 
@@ -751,7 +750,7 @@ function ActionItemsDialog({ action, onClose }: { action: ai.AssistantAction; on
       setItems(current => offset ? [...(current ?? []), ...page.items] : page.items);
       if (!offset) { setSkipped(page.skipped); setCompacted(page.compacted); }
       setNext(page.next_offset);
-    }).catch(reason => { toast.error(api.errorMessage(reason, "条目加载失败")); setItems([]); });
+    }).catch(reason => { toast.error(api.errorMessage(reason, "条目加载失败，请稍后重试")); setItems([]); });
   }, [action.id]);
   useEffect(() => load(0), [load]);
   const failures = action.result?.failures ?? [];

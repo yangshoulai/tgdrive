@@ -186,7 +186,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const loadConversations = useCallback(() => {
     setConversations(null);
     void ai.conversations(null, archived, privateMode).then(result => { setConversations(result.conversations); setHistoryCursor(result.next_cursor); })
-      .catch(reason => { setConversations([]); toast.error(api.errorMessage(reason, "对话列表加载失败")); });
+      .catch(reason => { setConversations([]); toast.error(api.errorMessage(reason, "对话列表加载失败，请稍后重试")); });
   }, [archived, privateMode]);
   useEffect(() => { if (open) loadConversations(); }, [open, loadConversations]);
   // 私密对话每个登录会话最多一个：回到私密空间时直接接上还在内存里的那个。
@@ -203,7 +203,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       const result = await ai.conversations(historyCursor, archived);
       setConversations(current => [...(current ?? []), ...result.conversations.filter(item => !current?.some(old => old.id === item.id))]);
       setHistoryCursor(result.next_cursor);
-    } catch (reason) { toast.error(api.errorMessage(reason, "加载失败")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "加载失败，请稍后重试")); }
     finally { setHistoryBusy(false); }
   }
   // 桌面允许继续操作文件；窄屏抽屉占满视口时约束焦点，关闭后回到入口。
@@ -308,7 +308,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       setDetail(value); setModelId(value.conversation.model_id);
       if (value.active_run) follow(value.active_run);
       window.requestAnimationFrame(() => scrollToEnd(true));
-    } catch (reason) { toast.error(api.errorMessage(reason, "对话加载失败")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "对话加载失败，请稍后重试")); }
     finally { if (version === selection.current) setLoading(false); }
   }
 
@@ -365,13 +365,13 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       if (fresh) setDetail(fresh);
       follow(result.run_id);
       window.requestAnimationFrame(() => scrollToEnd(true));
-    } catch (reason) { toast.error(api.errorMessage(reason, "发送失败")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "发送失败，请稍后重试")); }
     finally { setSending(false); }
   }
 
   async function stop() {
     if (!runId) return;
-    try { await ai.stopRun(runId); } catch (reason) { toast.error(api.errorMessage(reason, "停止失败")); }
+    try { await ai.stopRun(runId); } catch (reason) { toast.error(api.errorMessage(reason, "停止失败，请稍后重试")); }
   }
 
   /** 从某条用户消息重新回答：之后还有其他轮次时先确认，因为它们会被丢弃。 */
@@ -392,7 +392,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       if (fresh) setDetail(fresh);
       follow(result.run_id);
       window.requestAnimationFrame(() => scrollToEnd(true));
-    } catch (reason) { toast.error(api.errorMessage(reason, "重试失败")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "重新生成失败，请稍后重试")); }
     finally { setSending(false); }
   }
 
@@ -402,12 +402,12 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       const fresh = await ai.conversation(detail!.conversation.id);
       setDetail(fresh);
       if (result.run_id) follow(result.run_id);
-    } catch (reason) { toast.error(api.errorMessage(reason, "操作失败")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); }
   }
 
   async function acknowledge() {
     try { await ai.acknowledgeNotice(privateMode); onConfigChanged(); }
-    catch (reason) { toast.error(api.errorMessage(reason, "操作失败")); }
+    catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); }
   }
 
   // 访问模式：新对话先记在本地，创建时提交；已有对话立即保存。切换到完全访问前确认一次说明。
@@ -421,7 +421,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       const fresh = await ai.conversation(detail.conversation.id);
       setDetail(value => value?.conversation.id === fresh.conversation.id ? fresh : value);
       window.requestAnimationFrame(() => scrollToEnd(true));
-    } catch (reason) { toast.error(api.errorMessage(reason, "切换失败")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "切换模型失败，请稍后重试")); }
   }
 
   const reloadDetail = useCallback(() => {
@@ -546,7 +546,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
             privateView={location.view === "private"} changed={scopeTarget !== null} following={scopeTarget === HERE || (!detail && scopeTarget === null)} onChoose={setScopeTarget} />}
           <ModeChip mode={accessMode} allowed={config.full_access} onChoose={next => void chooseMode(next)} />
         </div>
-        {expandedScope && <p className="assistant-mention-hint"><Icon name="info" size={12} />引用不在 {effectiveScope} 内，发送时作用域扩大到 {expandedScope}</p>}
+        {expandedScope && <p className="assistant-mention-hint"><Icon name="info" size={12} />引用的文件不在 {effectiveScope} 内，发送后助手可访问的范围会扩大到 {expandedScope}</p>}
         <AttachmentTray attachments={attachments} canSee={canSee} />
         {/* 输入框即时渲染 Markdown、@ 引用胶囊、链接与列表；内容仍是 Markdown 纯文本。 */}
         <AssistantComposer ref={input} value={draft} onChange={setDraft} onSubmit={() => void send()} maxLength={DRAFT_LIMIT}
@@ -574,10 +574,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       </div>
       <div className={`assistant-footnote${usageRatio >= 0.8 ? " tone-warning" : ""}`}>
         <span className="assistant-footnote-meters">
-          <span title={`今日已用 ${usage.today.toLocaleString("zh-CN")} token${usage.limit ? ` / ${usage.limit.toLocaleString("zh-CN")}` : ""}`}>{usage.limit ? `今日 ${Math.min(100, Math.round(usageRatio * 100))}%` : "今日不限额"}</span>
+          <span title={usage.limit ? `今天的使用额度已用 ${Math.min(100, Math.round(usageRatio * 100))}%，明天 0 点恢复` : "今天的使用不限额度"}>{usage.limit ? `今日额度 ${Math.min(100, Math.round(usageRatio * 100))}%` : "今日不限额"}</span>
           {context && <span className={contextRatio >= 0.8 ? "tone-warning" : undefined}
-            title={`这个对话最近一次请求约 ${context.used.toLocaleString("zh-CN")} token，模型上下文 ${context.window.toLocaleString("zh-CN")} token。较早的内容会自动压缩为摘要。`}>
-            上下文 {Math.min(100, Math.round(contextRatio * 100))}%{contextRatio >= 0.8 ? " · 建议新建对话" : ""}</span>}
+            title="助手一次能记住的对话内容有限；接近上限时，较早的内容会自动压缩为摘要，新建对话效果更好。">
+            对话长度 {Math.min(100, Math.round(contextRatio * 100))}%{contextRatio >= 0.8 ? " · 建议新建对话" : ""}</span>}
         </span>
         <span>{accessMode === "full" ? <><Icon name="zap" size={11} />普通修改自动执行，可在卡片上撤销</> : <><Icon name="shield" size={11} />修改文件前会请你确认</>}</span>
       </div>
@@ -734,15 +734,15 @@ function ScopeChip({ scope, conversationScope, location, privateView, changed, f
   const key = (path: string) => path.replace(/^\//, "");
   const differs = conversationScope !== null && conversationScope !== location && !changed;
   const items: MenuItem[] = [
-    ...(conversationScope !== null ? [{ label: "对话作用域", description: conversationScope, icon: "folder" as IconName, heading: "助手可以访问的范围", checked: !changed, onSelect: () => onChoose(null) }] : []),
+    ...(conversationScope !== null ? [{ label: "助手可访问的范围", description: conversationScope, icon: "folder" as IconName, heading: "助手可以访问的范围", checked: !changed, onSelect: () => onChoose(null) }] : []),
     { label: "当前位置", description: `跟随文件页 · ${location}`, icon: "folder", heading: conversationScope === null ? "助手可以访问的范围" : undefined,
       checked: following, onSelect: () => onChoose(conversationScope === null ? null : HERE) },
     { label: "全部普通文件", description: "/ · 不包含私密空间", icon: "home", checked: scope === "/" && !following, onSelect: () => onChoose("") },
     { label: "浏览目录…", description: "在目录树中选择", icon: "move", divider: true, onSelect: () => setBrowsing(true) },
   ];
-  return <span className={`assistant-scope${differs ? " has-hint" : ""}${following ? " is-following" : ""}`} title={privateView ? "私密空间不对助手开放，作用域为普通文件"
-    : differs ? `当前位置 ${location} 与对话作用域不同` : following ? `跟随当前位置：助手只处理 ${scope} 内的普通文件` : `助手只处理 ${scope} 内的普通文件`}>
-    <Menu label="切换作用域" align="start" className="assistant-scope-trigger" items={items}>
+  return <span className={`assistant-scope${differs ? " has-hint" : ""}${following ? " is-following" : ""}`} title={privateView ? "私密空间不对助手开放，只能访问普通文件"
+    : differs ? `当前位置 ${location} 不在这个对话的访问范围内` : following ? `跟随当前位置：助手只处理 ${scope} 内的普通文件` : `助手只处理 ${scope} 内的普通文件`}>
+    <Menu label="更改访问范围" align="start" className="assistant-scope-trigger" items={items}>
       <Icon name={privateView ? "shield" : "folder"} size={14} /><span className="assistant-scope-label">{privateView ? "普通文件" : following ? "跟随" : "作用于"}</span><span className="assistant-scope-text">{scope}</span><Icon name="chevronDown" size={12} />
     </Menu>
     {browsing && <ScopeDialog initial={key(scope)} onClose={() => setBrowsing(false)} onChoose={target => { setBrowsing(false); onChoose(target === key(conversationScope ?? "") && conversationScope !== null ? null : target); }} />}
@@ -753,7 +753,7 @@ function ScopeChip({ scope, conversationScope, location, privateView, changed, f
 function ScopeDialog({ initial, onClose, onChoose }: { initial: string; onClose: () => void; onChoose: (target: string) => void }) {
   const [value, setValue] = useState(initial);
   const [ready, setReady] = useState(false);
-  return <Modal title="选择作用域" description="助手只会查看和整理这个目录中的普通文件。" icon="folder" onClose={onClose} className="assistant-dialog assistant-scope-dialog"
+  return <Modal title="选择访问范围" description="助手只会查看和整理这个目录中的普通文件。" icon="folder" onClose={onClose} className="assistant-dialog assistant-scope-dialog"
     footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!ready} onClick={() => onChoose(value)}>作用于 {display(value)}</Button></>}>
     <FolderPicker value={value} onChange={setValue} onReady={setReady} creatable={false} />
   </Modal>;
@@ -827,7 +827,7 @@ function Welcome({ location, privateMode, onPick }: { location: string; privateM
     { title: "看懂空间", description: "用量与文件分布", text: `统计 ${location} 的空间占用，按类型分组`, icon: "pulse" },
     { title: "找到大文件", description: "发现空间占用大户", text: "这里最大的 10 个文件是什么？", icon: "search" },
     { title: "整理文件", description: "按类型自动归类", text: "先看看当前目录的文件，再帮我按类型整理", icon: "folder" },
-    { title: "发现重复", description: "看看能节省多少空间", text: "找出当前作用域的重复文件，先不要修改", icon: "copy" },
+    { title: "发现重复", description: "看看能节省多少空间", text: "找出这里的重复文件，先不要修改", icon: "copy" },
   ];
   return <div className="assistant-welcome">
     <span className="assistant-welcome-icon"><AssistantMark size={36} /></span>
@@ -873,7 +873,7 @@ function ConversationList({ items, current, onOpen, onChanged, archived, onArchi
         </button>
         <Menu label={`${item.title || "对话"} 的操作`} items={[
           { label: "重命名", icon: "edit", onSelect: () => { setRenaming(item); setTitle(item.title ?? ""); } },
-          { label: archived ? "移回最近对话" : "归档", icon: "archive", onSelect: () => void ai.updateConversation(item.id, { archived: !archived }).then(() => { toast.success(archived ? "已移回最近对话" : "已归档"); onChanged(); }).catch(reason => toast.error(api.errorMessage(reason, "操作失败"))) },
+          { label: archived ? "移回最近对话" : "归档", icon: "archive", onSelect: () => void ai.updateConversation(item.id, { archived: !archived }).then(() => { toast.success(archived ? "已移回最近对话" : "已归档"); onChanged(); }).catch(reason => toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试"))) },
           { label: "删除", icon: "trash", danger: true, divider: true, onSelect: () => setDeleting(item) },
         ]} />
       </li>)}</ul>
@@ -885,7 +885,7 @@ function ConversationList({ items, current, onOpen, onChanged, archived, onArchi
       <form id="rename-conversation" className="form" onSubmit={event => {
         event.preventDefault();
         if (!title.trim()) return;
-        void ai.updateConversation(renaming.id, { title: title.trim() }).then(() => { setRenaming(null); onChanged(); }).catch(reason => toast.error(api.errorMessage(reason, "保存失败")));
+        void ai.updateConversation(renaming.id, { title: title.trim() }).then(() => { setRenaming(null); onChanged(); }).catch(reason => toast.error(api.errorMessage(reason, "保存失败，请稍后重试")));
       }}><input className="input" value={title} maxLength={60} onChange={event => setTitle(event.target.value)} autoFocus aria-label="对话标题" /></form>
     </Modal>}
   </div>;
@@ -908,7 +908,7 @@ function DeleteConversationDialog({ item, onClose, onDeleted }: { item: ai.Conve
     onClose={onClose}
     onConfirm={async () => {
       try { await ai.deleteConversation(item.id); toast.success("对话已删除"); onDeleted(); }
-      catch (reason) { toast.error(api.errorMessage(reason, "删除失败")); }
+      catch (reason) { toast.error(api.errorMessage(reason, "删除失败，请稍后重试")); }
     }} />;
 }
 

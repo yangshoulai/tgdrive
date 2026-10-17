@@ -27,13 +27,13 @@ export function LocalCacheSettings() {
       setStats(value); setSettings(current); setEstimate(storage); setError(""); setRevision(value => value + 1);
     } catch (reason) {
       setSettings(await loadSettings().catch(() => null));
-      setError(api.errorMessage(reason, "本机缓存状态读取失败"));
+      setError(api.errorMessage(reason, "本机缓存状态读取失败，请刷新页面后重试"));
     }
   }, []);
   useEffect(() => { if (supported) void refresh(); }, [supported, refresh]);
 
   if (!supported) return <EmptyState icon="monitor" title="这个浏览器不能使用本机缓存"
-    description="本机缓存需要通过 HTTPS 访问，并且浏览器支持 Service Worker 与 IndexedDB。隐私（无痕）模式下也无法使用。不影响正常浏览文件。" />;
+    description="需要通过 https:// 地址访问，并使用较新的 Chrome、Edge、Firefox 或 Safari；隐私（无痕）模式下无法使用。不影响正常浏览和下载文件。" />;
 
   async function update(patch: Partial<DeviceSettings>, message?: string) {
     if (!settings) return;
@@ -47,14 +47,14 @@ export function LocalCacheSettings() {
       setSettings(next);
       if (message) toast.success(message);
       await refresh();
-    } catch (reason) { toast.error(api.errorMessage(reason, "保存失败")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "保存失败，请稍后重试")); }
     finally { setBusy(false); }
   }
 
   async function wipe(scope: "normal" | "private" | "others", message: string) {
     setBusy(true);
     try { await clearCache(scope); toast.success(message); await refresh(); }
-    catch (reason) { toast.error(api.errorMessage(reason, "清除失败")); }
+    catch (reason) { toast.error(api.errorMessage(reason, "清除失败，请稍后重试")); }
     finally { setBusy(false); }
   }
 
@@ -65,7 +65,7 @@ export function LocalCacheSettings() {
   const privateOn = Boolean(settings?.private && policy?.private_enabled);
 
   return <>
-    <Section icon="monitor" title="本机缓存" description="文件内容按块加密保存在这个浏览器里，只有登录同一账号时才能解开。">
+    <Section icon="monitor" title="本机缓存" description="看过的文件加密保存在这个浏览器里，再次打开更快，只有登录你的账号才能打开。">
       {error && <Notice tone="danger">{error}</Notice>}
       {adminOff ? <Notice>管理员已关闭浏览器本地缓存，这台设备上的普通文件缓存已清除。</Notice>
         : settings && <Switch checked={settings.enabled} disabled={busy} onChange={value => void update({ enabled: value }, value ? "已开启本机缓存" : "已关闭本机缓存并清除数据")}
@@ -92,7 +92,7 @@ export function LocalCacheSettings() {
     </Section>
 
 
-    {settings && policy?.private_enabled && <Section icon="shield" title="私密文件" description="锁定后无法解开；每次读取都需要服务器确认私密空间已解锁、文件仍在私密空间中。">
+    {settings && policy?.private_enabled && <Section icon="shield" title="私密文件" description="私密空间锁定后，这些副本无法打开；文件被移出私密空间后也不再使用。">
       <div className="account-setting-summary"><div>
         <strong>{settings.private ? "这台设备会缓存私密文件" : "不缓存私密文件"}</strong>
         <p>只在你信任的个人设备上开启。超过 {policy.private_ttl_days} 天没有打开的私密文件会被自动清除。</p>
@@ -128,7 +128,7 @@ export function LocalCacheSettings() {
       description="所有设备上已有的本机缓存都将失效，之后打开文件需要重新下载。这台设备上的缓存会立即清除。"
       onClose={() => setConfirm(null)} onConfirm={async () => {
         try { await resetAllDevices(); toast.success("已重置，其他设备的缓存会在下次使用时清除"); setConfirm(null); await refresh(); }
-        catch (reason) { toast.error(api.errorMessage(reason, "重置失败")); }
+        catch (reason) { toast.error(api.errorMessage(reason, "重置失败，请稍后重试")); }
       }} />}
   </>;
 }
@@ -179,7 +179,7 @@ function CachedFiles({ revision, onChanged }: { revision: number; onChanged: () 
       if (id !== request.current) return;
       setPage(current => offset && current ? { ...value, items: [...current.items, ...value.items] } : value);
       setError("");
-    } catch (reason) { if (id === request.current) setError(api.errorMessage(reason, "已缓存的文件读取失败")); }
+    } catch (reason) { if (id === request.current) setError(api.errorMessage(reason, "已缓存的文件读取失败，请稍后重试")); }
     finally { if (id === request.current) setLoading(false); }
   }, [search, kind, status, sort]);
   useEffect(() => { void load(0); }, [load, revision]);
@@ -189,7 +189,7 @@ function CachedFiles({ revision, onChanged }: { revision: number; onChanged: () 
       await clearCache("entry", item.key);
       setPage(current => current && { total: current.total - 1, bytes: current.bytes - item.bytes, items: current.items.filter(entry => entry.key !== item.key) });
       onChanged();
-    } catch (reason) { toast.error(api.errorMessage(reason, "移除失败")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "移除失败，请稍后重试")); }
   }
 
   const rest = page ? page.total - page.items.length : 0;
@@ -228,7 +228,7 @@ function CachedFiles({ revision, onChanged }: { revision: number; onChanged: () 
     {confirmBulk && page && <ConfirmDialog title="移除筛选出的缓存？" confirmLabel="移除" description={`将移除 ${page.total.toLocaleString("zh-CN")} 个文件在这台设备上的缓存（${formatBytes(page.bytes)}），文件本身不受影响。`}
       onClose={() => setConfirmBulk(false)} onConfirm={async () => {
         try { const removed = await removeCachedItems(filter); toast.success(`已移除 ${removed.toLocaleString("zh-CN")} 个文件的缓存`); setConfirmBulk(false); onChanged(); }
-        catch (reason) { toast.error(api.errorMessage(reason, "移除失败")); }
+        catch (reason) { toast.error(api.errorMessage(reason, "移除失败，请稍后重试")); }
       }} />}
   </Section>;
 }
