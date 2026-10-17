@@ -5,7 +5,7 @@ import { errorMessage, type PreviewAsset } from "./api";
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
 import { MODE_ICONS, PLAYBACK_MODES, type PreviewNav } from "./preview-playlist";
-import { Button, Icon, type IconName } from "./ui";
+import { Button, Icon, Menu, type IconName } from "./ui";
 import type { MediaProgress, MediaState } from "./preview-media-engine";
 export type { MediaProgress, MediaState } from "./preview-media-engine";
 
@@ -163,9 +163,9 @@ function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
 
 const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-/** 频谱：有 Web Audio 时画真实频率，否则播放时用平滑的伪随机律动；暂停后柱子缓缓落下。
+/** 频谱：有 Web Audio 时画真实频率，否则播放时用平滑的伪随机律动；加载或缓冲时是一道缓缓流过的波；暂停后柱子落下并淡出，不留一排小点。
  * 相邻柱子取不相邻的频段（固定的打乱顺序）并各有增益，外形中间高两侧低，跳动有参差而不整齐划一；上升、回落都放慢。 */
-function Spectrum({ analyser, playing, bars = 48 }: { analyser: () => AnalyserNode | null; playing: boolean; bars?: number }) {
+function Spectrum({ analyser, playing, loading = false, bars = 48 }: { analyser: () => AnalyserNode | null; playing: boolean; loading?: boolean; bars?: number }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const node = canvas.current, context = node?.getContext("2d");
@@ -211,6 +211,8 @@ function Spectrum({ analyser, playing, bars = 48 }: { analyser: () => AnalyserNo
             target = .1 + .72 * Math.pow(wave * .65 + drift * .35, 1.6) * gains[index] * envelope[index];
           }
         } else if (still && playing) target = .3 * envelope[index] * gains[index] + .06;
+        else if (loading && !still) target = .08 + .34 * Math.pow((Math.sin(index * .32 - t * 3.4) + 1) / 2, 2) * envelope[index];
+        else if (loading) target = .16 * envelope[index] + .06;
         levels[index] += (target - levels[index]) * (target > levels[index] ? .16 : .06);
         if (Math.abs(target - levels[index]) > .002) moving = true;
         const barHeight = Math.max(3, levels[index] * height);
@@ -220,12 +222,12 @@ function Spectrum({ analyser, playing, bars = 48 }: { analyser: () => AnalyserNo
         context.roundRect(x, y, barWidth, barHeight, barWidth / 2);
         context.fill();
       }
-      if ((playing && !still) || moving) frame = requestAnimationFrame(draw);
+      if (((playing || loading) && !still) || moving) frame = requestAnimationFrame(draw);
     };
     frame = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(frame);
-  }, [analyser, playing, bars]);
-  return <canvas ref={canvas} className="audio-spectrum" aria-hidden="true" />;
+  }, [analyser, playing, loading, bars]);
+  return <canvas ref={canvas} className={`audio-spectrum${playing || loading ? "" : " is-idle"}`} aria-hidden="true" />;
 }
 
 /** 进度条：已播放、已缓冲两层，悬停显示目标时间；拖动时不被播放进度覆盖。 */
@@ -452,7 +454,11 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
   const modeIndex = PLAYBACK_MODES.findIndex(item => item.value === nav?.mode);
   const nextMode = PLAYBACK_MODES[(modeIndex + 1) % PLAYBACK_MODES.length];
   const volumeIcon: IconName = volume.muted || volume.level === 0 ? "volumeMute" : volume.level < .5 ? "volumeLow" : "volume";
-  const lyricHint = findingAssets || assetBusy ? "正在加载歌词…"
+  const lyricsLoading = (findingAssets || assetBusy) && !failed;
+  const status = failed ? { tone: "failed", text: "播放失败" } : waiting ? { tone: "waiting", text: state === "buffering" ? "正在缓冲" : "正在加载" }
+    : playing ? { tone: "playing", text: "正在播放" } : { tone: "paused", text: "已暂停" };
+  const lyricLabel = selected ? options.find(option => option.value === selected)?.label ?? "歌词" : "";
+  const lyricHint = lyricsLoading ? ""
     : assetError || discoveryError ? assetError || discoveryError
     : assets.length && !selected ? "歌词已关闭"
     : "";
@@ -469,26 +475,24 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
         <div className="audio-heading">
           <h3 title={name}>{title}</h3>
           {artist && <p className="audio-artist">{artist}</p>}
-          <p role="status">
-            <span className="preview-equalizer" aria-hidden="true"><i /><i /><i /><i /></span>
-            <span>{failed ? "播放失败" : waiting ? state === "buffering" ? "正在缓冲" : "正在加载" : playing ? "正在播放" : "已暂停"}</span>
+          <p role="status" className={`audio-status is-${status.tone}`}>
+            {status.tone === "playing" ? <span className="preview-equalizer" aria-hidden="true"><i /><i /><i /><i /></span>
+              : status.tone === "waiting" ? <span className="audio-status-spinner" aria-hidden="true" />
+              : status.tone === "failed" ? <Icon name="alert" size={13} /> : <Icon name="pause" size={12} />}
+            <span>{status.text}</span>
           </p>
-          {assets.length > 0 && !failed && <label className="audio-lyrics-picker" title={assets.find(asset => asset.path === selected)?.name}>
-            <span className="sr-only">选择歌词</span><Icon name="fileText" size={13} />
-            <select value={selected} disabled={findingAssets} onChange={event => setSelected(event.target.value)}>
-              <option value="">关闭歌词</option>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select><Icon name="chevronDown" size={12} />
-          </label>}
         </div>
         {failure || (showLyrics
           ? <div className="audio-lyrics" ref={lyricHost} aria-label="同步歌词，点击跳转">
             {lyrics.map((line, index) => <button type="button" key={index} data-line={index} className={`audio-lyric${active === index ? " is-active" : ""}${index < active ? " is-past" : ""}`}
               aria-current={active === index ? "true" : undefined} onClick={() => audio?.seek(line.time)}>{line.text || "♪"}</button>)}
           </div>
-          : <div className="audio-visual">
-            <Spectrum analyser={() => audio?.analyser() ?? null} playing={playing && !waiting} />
-            {lyricHint && <p className="audio-hint">{lyricHint}</p>}
-          </div>)}
+          : lyricsLoading
+            ? <div className="audio-lyrics-skeleton" role="status" aria-label="正在加载歌词"><i /><i /><i /><i /><i /></div>
+            : <div className="audio-visual">
+              <Spectrum analyser={() => audio?.analyser() ?? null} playing={playing && !waiting} loading={waiting && !failed} />
+              {lyricHint && <p className="audio-hint">{lyricHint}</p>}
+            </div>)}
       </div>
     </div>
     <div className="audio-controls">
@@ -505,6 +509,12 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
           <MediaButton icon="next" label="下一首" disabled={!nav || nav.count < 2} onClick={nav?.onNext} />
         </div>
         <div className="audio-buttons-end">
+          {assets.length > 0 && !failed && <Menu label={selected ? `歌词：${lyricLabel}（点击切换）` : "歌词已关闭（点击选择）"} align="end" above
+            className={`audio-button audio-lyrics-button${selected ? " is-active" : ""}`}
+            items={[{ label: "关闭歌词", icon: "x", checked: !selected, heading: "歌词", onSelect: () => setSelected("") },
+              ...options.map(option => ({ label: option.label, icon: "fileText" as const, checked: selected === option.value, onSelect: () => setSelected(option.value) }))]}>
+            <Icon name="fileText" size={20} />
+          </Menu>}
           <div className="audio-volume">
             <MediaButton icon={volumeIcon} label={volume.muted ? "取消静音" : "静音"} onClick={() => audio?.toggleMute()} />
             <input type="range" min={0} max={1} step={0.01} aria-label="音量" value={volume.muted ? 0 : volume.level}

@@ -689,7 +689,7 @@ export type MenuItem = { label: string; description?: string; icon: IconName; on
 const overlayRoot = () => (document.fullscreenElement as HTMLElement | null) ?? document.body;
 
 /** 菜单列表：按锚点（按钮矩形或指针位置）定位，处理方向键、Esc、Tab、点外部与滚动关闭。 */
-function MenuList({ items, label, anchor, onClose, restoreFocus, dark }: { items: MenuItem[]; label: string; anchor: () => { x: number; y: number; bottom?: number; alignRight?: boolean }; onClose: () => void; restoreFocus?: () => void; dark?: boolean }) {
+function MenuList({ items, label, anchor, onClose, restoreFocus, dark }: { items: MenuItem[]; label: string; anchor: () => { x: number; y: number; bottom?: number; alignRight?: boolean; above?: boolean }; onClose: () => void; restoreFocus?: () => void; dark?: boolean }) {
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const list = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
@@ -698,7 +698,8 @@ function MenuList({ items, label, anchor, onClose, restoreFocus, dark }: { items
     if (!list.current) return;
     const point = anchor();
     const height = list.current.offsetHeight, width = list.current.offsetWidth;
-    const below = (point.bottom ?? point.y) + 6 + height < window.innerHeight;
+    // 默认向下展开，放不下才向上；贴着底部控制条的菜单（above）优先向上，放不下才向下。
+    const below = point.above && point.y - 6 - height >= 8 ? false : (point.bottom ?? point.y) + 6 + height < window.innerHeight;
     const top = below ? (point.bottom ?? point.y) + (point.bottom === undefined ? 2 : 6) : point.y - height - (point.bottom === undefined ? 2 : 6);
     const left = point.alignRight ? point.x - width : point.x;
     setPosition({ top: Math.max(8, top), left: Math.max(8, Math.min(left, window.innerWidth - width - 8)) });
@@ -757,7 +758,7 @@ function MenuList({ items, label, anchor, onClose, restoreFocus, dark }: { items
   );
 }
 
-export function Menu({ items, label, icon = "more", size = "sm", children, className = "", align = "end" }: { align?: "start" | "end"; items: MenuItem[]; label: string; icon?: IconName; size?: "sm" | "md"; children?: ReactNode; className?: string }) {
+export function Menu({ items, label, icon = "more", size = "sm", children, className = "", align = "end", above = false }: { align?: "start" | "end"; above?: boolean; items: MenuItem[]; label: string; icon?: IconName; size?: "sm" | "md"; children?: ReactNode; className?: string }) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   return (
@@ -769,7 +770,7 @@ export function Menu({ items, label, icon = "more", size = "sm", children, class
       </button>
       {/* 深色画布（预览窗口）里打开的菜单跟随深色配色，不在暗色画面上弹出白色面板。 */}
       {open && <MenuList items={items} label={label} dark={Boolean(trigger.current?.closest(".is-dark-surface"))} onClose={() => setOpen(false)} restoreFocus={() => trigger.current?.focus()}
-        anchor={() => { const rect = trigger.current!.getBoundingClientRect(); return { x: align === "start" ? rect.left : rect.right, y: rect.top, bottom: rect.bottom, alignRight: align === "end" }; }} />}
+        anchor={() => { const rect = trigger.current!.getBoundingClientRect(); return { x: align === "start" ? rect.left : rect.right, y: rect.top, bottom: rect.bottom, alignRight: align === "end", above }; }} />}
     </>
   );
 }
