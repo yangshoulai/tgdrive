@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import * as api from "../api";
 import * as ai from "../assistant-api";
@@ -42,10 +42,11 @@ function AccountSettings({ session, onSessionChange, assistant, onOpenConversati
   return <>
     <ProfileCard session={session} busy={busy} onBusyChange={setBusy} onSessionChange={onSessionChange} onEditNickname={() => setEditing("nickname")} />
     {editing === "nickname" && <NicknameDialog session={session} onClose={() => setEditing(null)} onSaved={profile => { onSessionChange(profile); setEditing(null); }} />}
-    <EmailSettings session={session} busy={busy} onOpen={() => setEditing("email")} />
-    {editing === "email" && <EmailDialog session={session} onClose={() => setEditing(null)} onSaved={profile => { onSessionChange(profile); setEditing(null); }} />}
+    {/* 登录邮箱与登录密码合成一个「登录方式」分组。 */}
     <PasswordSettings username={session.username} editing={editing === "password"} busy={busy} onBusyChange={setBusy}
-      onOpen={() => setEditing("password")} onClose={() => setEditing(null)} />
+      onOpen={() => setEditing("password")} onClose={() => setEditing(null)}
+      email={<EmailSettings session={session} busy={busy} onOpen={() => setEditing("email")} />} />
+    {editing === "email" && <EmailDialog session={session} onClose={() => setEditing(null)} onSaved={profile => { onSessionChange(profile); setEditing(null); }} />}
     <PasskeysSettings username={session.username} active={editing === "passkeys"} busy={busy} onBusyChange={setBusy}
       onOpen={() => setEditing("passkeys")} onClose={() => setEditing(null)} />
     <PrivateSettingsSummary editing={editing === "private"} busy={busy} onBusyChange={setBusy}
@@ -145,15 +146,16 @@ function PrivateIdleDialog({ initialIdle, busy, onBusyChange, onClose }: {
   </Modal>;
 }
 
-function PasswordSettings({ username, editing, busy, onOpen, onClose, onBusyChange }: {
-  username: string; editing: boolean; busy: boolean; onOpen: () => void; onClose: () => void; onBusyChange: (value: boolean) => void;
+function PasswordSettings({ username, editing, busy, onOpen, onClose, onBusyChange, email }: {
+  username: string; editing: boolean; busy: boolean; onOpen: () => void; onClose: () => void; onBusyChange: (value: boolean) => void; email?: ReactNode;
 }) {
   const id = useId();
   const [updated, setUpdated] = useState(false);
   return <section className="account-section" aria-labelledby={`${id}-title`}>
-    <header className="account-section-heading"><Icon name="lock" size={20} /><div><h2 id={`${id}-title`}>登录密码</h2><p>账号登录和私密空间共用。</p></div></header>
+    <header className="account-section-heading"><Icon name="lock" size={20} /><div><h2 id={`${id}-title`}>登录方式</h2><p>用邮箱和密码登录；密码也用于解锁私密空间。</p></div></header>
     <div className="account-section-content">
-      <div className="account-setting-summary"><div><strong>{updated ? "密码已更新" : "密码已设置"}</strong><p>使用当前登录密码确认后，即可设置新密码。</p></div>
+      {email}
+      <div className="account-setting-summary"><div><strong>{updated ? "密码已更新" : "登录密码已设置"}</strong><p>使用当前登录密码确认后，即可设置新密码。</p></div>
         <Button disabled={busy} aria-haspopup="dialog" onClick={() => { setUpdated(false); onOpen(); }}>修改密码</Button>
       </div>
       {editing ? <ChangePasswordDialog id={`${id}-form`} username={username} busy={busy} onBusyChange={onBusyChange}
@@ -303,17 +305,12 @@ function NicknameDialog({ session, onClose, onSaved }: { session: api.Session; o
   </Modal>;
 }
 
+/** 「登录方式」分组里的邮箱一行。 */
 function EmailSettings({ session, busy, onOpen }: { session: api.Session; busy: boolean; onOpen: () => void }) {
-  const id = useId();
-  return <section className="account-section" aria-labelledby={`${id}-title`}>
-    <header className="account-section-heading"><Icon name="mail" size={20} /><div><h2 id={`${id}-title`}>登录邮箱</h2><p>使用邮箱和密码登录。</p></div></header>
-    <div className="account-section-content">
-      <div className="account-setting-summary"><div><strong>{session.needs_email ? "尚未设置登录邮箱" : session.username}</strong>
+  return <div className="account-setting-summary"><div><strong>{session.needs_email ? "尚未设置登录邮箱" : session.username}</strong>
         <p>{session.needs_email ? `当前仍使用旧用户名「${session.username}」登录，请改为邮箱。` : "修改后请使用新邮箱登录，通行密钥不受影响。"}</p></div>
         <Button variant={session.needs_email ? "primary" : "secondary"} disabled={busy} aria-haspopup="dialog" onClick={onOpen}>{session.needs_email ? "设置邮箱" : "修改邮箱"}</Button>
-      </div>
-    </div>
-  </section>;
+      </div>;
 }
 
 /**

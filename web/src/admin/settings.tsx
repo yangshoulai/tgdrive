@@ -4,16 +4,40 @@ import * as api from "../api";
 import { ClientCachePolicy } from "./client-cache";
 import { Resources } from "./resources";
 
-import { Notice, Button, Field, Icon, KeyValue, PageHeader, Panel, SetupGuide, SkeletonRows, toast, useDocumentTitle } from "../ui";
+import { Button, Field, KeyValue, Notice, PageHeader, Panel, SetupGuide, SkeletonRows, Tabs, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 系统设置 ---------- */
 
+/** 系统设置分三个标签：访问地址、下载与资源、浏览器缓存；当前标签记在地址的 ?tab= 中，刷新后保留。 */
+type SettingsTab = "address" | "resources" | "cache";
+const SETTINGS_TABS: { value: SettingsTab; label: string; icon: "globe" | "download" | "monitor" }[] = [
+  { value: "address", label: "访问地址", icon: "globe" }, { value: "resources", label: "下载与资源", icon: "download" }, { value: "cache", label: "浏览器缓存", icon: "monitor" },
+];
+const readTab = (): SettingsTab => { const value = new URLSearchParams(window.location.search).get("tab"); return value === "resources" || value === "cache" ? value : "address"; };
+
 export function Settings({ onSaved }: { onSaved: () => void }) {
+  const [tab, setTab] = useState<SettingsTab>(readTab);
+  useDocumentTitle(`系统设置 · ${SITE.admin}`);
+  const choose = (value: SettingsTab) => {
+    setTab(value);
+    const url = new URL(window.location.href);
+    if (value === "address") url.searchParams.delete("tab"); else url.searchParams.set("tab", value);
+    window.history.replaceState(null, "", url.pathname + url.search);
+  };
+  return <>
+    <PageHeader title="系统设置" />
+    <Tabs label="系统设置" value={tab} onChange={choose} options={SETTINGS_TABS} />
+    {tab === "address" && <AccessSettings onSaved={onSaved} />}
+    {tab === "resources" && <Resources />}
+    {tab === "cache" && <ClientCachePolicy />}
+  </>;
+}
+
+function AccessSettings({ onSaved }: { onSaved: () => void }) {
   const [settings, setSettings] = useState<api.SystemSettings | null>(null);
   const [form, setForm] = useState({ public_base_url: "", s3_endpoint: "" });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  useDocumentTitle(`系统设置 · ${SITE.admin}`);
   useEffect(() => {
     void api.adminSettings().then(value => {
       setSettings(value);
@@ -32,14 +56,13 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
     } catch (reason) { setError(api.errorMessage(reason, "保存失败，请稍后重试")); }
     finally { setBusy(false); }
   }
-  if (!settings && !error) return <><PageHeader title="系统设置" /><Panel><SkeletonRows rows={3} /></Panel></>;
+  if (!settings && !error) return <Panel><SkeletonRows rows={3} /></Panel>;
   const trimmed = (value: string) => value.trim().replace(/\/+$/, "");
   const site = trimmed(form.public_base_url) || settings?.public_base_url.default || api.detectedSiteOrigin();
   const s3 = trimmed(form.s3_endpoint) || settings?.s3_endpoint.default || null;
   const dirty = settings !== null && (form.public_base_url !== (settings.public_base_url.value ?? "") || form.s3_endpoint !== (settings.s3_endpoint.value ?? ""));
   return (
     <>
-      <PageHeader title="系统设置" />
       <SetupGuide id="system-settings" title="访问地址配置指南" description="让分享链接、使用文档和同步工具指向正确的域名。" docHref="/docs/deploy"
         defaultOpen={!settings?.public_base_url.value && !settings?.public_base_url.default} steps={[
           { title: "准备域名", body: <p>网站用一个域名（如 <code>drive.example.com</code>）；如果要给 rclone、AWS CLI 等同步工具使用，再准备一个<strong>独立</strong>的域名（如 <code>s3.example.com</code>）。两个域名都解析到运行 {BRAND} 的服务器。</p> },
@@ -91,8 +114,6 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
             ["同步工具", s3 ? <code className="mono">aws --endpoint-url {s3} s3 ls s3://user-2/</code> : <span className="muted">未配置</span>],
           ]} />
         </Panel>
-        <Resources />
-        <ClientCachePolicy />
       </div>
     </>
   );

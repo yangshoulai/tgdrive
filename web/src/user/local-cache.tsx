@@ -3,7 +3,7 @@ import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 
 import * as api from "../api";
 import { type CacheStats, type CachedItem, type CachedItemFilter, cacheStats, cacheSupported, cachedItems, clearCache, isStandalone, loadSettings, removeCachedItems, resetAllDevices, saveSettings, storageEstimate } from "../cache-client";
 import { type DeviceSettings, type Kind, SIZE_CHOICES, webkitOnly } from "../cache-store";
-import { Notice, Badge, Button, ConfirmDialog, EmptyState, Field, FilterChips, Icon, SearchInput, Switch, formatBytes, formatDate, toast } from "../ui";
+import { Notice, Badge, Button, ConfirmDialog, Disclosure, EmptyState, Field, FilterChips, Icon, SearchInput, Switch, formatBytes, formatDate, toast } from "../ui";
 
 const KIND_LABEL: Record<Kind, string> = { image: "图片", video: "视频", audio: "音频", thumb: "缩略图", other: "其他" };
 const KIND_ORDER: Kind[] = ["image", "video", "audio", "thumb", "other"];
@@ -81,16 +81,16 @@ export function LocalCacheSettings() {
         </div>
         <ul className="local-cache-legend">{kinds.map(item => <li key={item.kind}><i className={`folder-stats-swatch kind-${item.kind}`} aria-hidden="true" />{KIND_LABEL[item.kind]} {formatBytes(item.bytes)}</li>)}</ul>
       </div>}
-      {settings && webkitOnly(navigator.userAgent) && !isStandalone() && <Notice>
-        Safari 会清除 7 天内没有访问过的网站数据。把 Tessera 添加到主屏幕后打开，缓存可以保留得更久。</Notice>}
-    </Section>
-
-    {settings && !adminOff && <Section icon="settings" title="容量与内容" description="只对这台设备上的这个浏览器生效。">
+      {settings && !adminOff && settings.enabled && <div className="local-cache-options">
       <CacheSizeSelect label="最多占用" value={settings.maxMiB} disabled={busy || !settings.enabled} quota={estimate?.quota}
         hint="超出后自动移除最久没有打开的文件；自动缓存的单个文件最多占一半。" onChange={value => void update({ maxMiB: value }, "已保存")} />
       <Switch checked={settings.video} disabled={busy || !settings.enabled} onChange={value => void update({ video: value }, "已保存")} label="自动缓存视频片段"
         description={webkitOnly(navigator.userAgent) ? "Safari 对缓存视频的支持还不稳定，如果开启后播放异常，请关闭此项。" : "按看过的片段保存，拖回已看过的位置时不必重新下载。"} />
-    </Section>}
+      </div>}
+      {settings && webkitOnly(navigator.userAgent) && !isStandalone() && <Notice>
+        Safari 会清除 7 天内没有访问过的网站数据。把 Tessera 添加到主屏幕后打开，缓存可以保留得更久。</Notice>}
+    </Section>
+
 
     {settings && policy?.private_enabled && <Section icon="shield" title="私密文件" description="锁定后无法解开；每次读取都需要服务器确认私密空间已解锁、文件仍在私密空间中。">
       <div className="account-setting-summary"><div>
@@ -108,16 +108,17 @@ export function LocalCacheSettings() {
 
     {stats && stats.normal.count > 0 && <CachedFiles revision={revision} onChanged={() => void refresh()} />}
 
-    <Section icon="trash" title="清理" description="清除只影响这台设备。">
+    <Section icon="trash" title="清理" description="清除只影响这台设备，文件本身不受影响。">
       <div className="account-private-actions">
         <Button size="sm" disabled={busy || !stats?.normal.count} onClick={() => void wipe("normal", "已清除普通文件缓存")}>清除普通文件缓存</Button>
         {(stats?.private.count ?? 0) > 0 && <Button size="sm" disabled={busy} onClick={() => void wipe("private", "已清除私密文件缓存")}>清除私密文件缓存</Button>}
         {(stats?.others.count ?? 0) > 0 && <Button size="sm" disabled={busy} onClick={() => void wipe("others", "已清除其他账号的缓存")}>清除其他账号的缓存（{formatBytes(stats!.others.bytes)}）</Button>}
       </div>
-      <div className="account-setting-summary local-cache-reset"><div>
-        <strong>重置所有设备的缓存</strong>
-        <p>让你在所有设备上的本机缓存都无法再解开，例如设备丢失时。修改登录密码也会有同样效果。</p>
-      </div><Button size="sm" variant="danger" disabled={busy} onClick={() => setConfirm("reset")}>重置</Button></div>
+      <Disclosure title="重置所有设备的缓存" description="设备丢失时使用：让你在所有设备上的本机缓存都无法再解开。">
+        <div className="account-setting-summary local-cache-reset"><div>
+          <p>之后在任何设备上打开文件都需要重新下载。修改登录密码也会有同样效果。</p>
+        </div><Button size="sm" variant="danger" disabled={busy} onClick={() => setConfirm("reset")}>重置</Button></div>
+      </Disclosure>
     </Section>
 
     {confirm === "private" && <ConfirmDialog danger={false} title="信任这台设备？" confirmLabel="开启"

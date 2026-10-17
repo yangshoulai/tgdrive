@@ -884,6 +884,21 @@ export function SetupGuide({ id, title = "配置指南", description, steps, doc
   );
 }
 
+/** 折叠区：设置页的「高级参数」、检测信息等不常用的内容。默认收起，标题行说明里面有什么。 */
+export function Disclosure({ title, description, defaultOpen = false, children }: { title: string; description?: ReactNode; defaultOpen?: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const id = useId();
+  return (
+    <div className={`disclosure${open ? " is-open" : ""}`}>
+      <button type="button" className="disclosure-toggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen(value => !value)}>
+        <Icon name="chevronRight" size={14} />
+        <span><strong>{title}</strong>{description && <small>{description}</small>}</span>
+      </button>
+      {open && <div className="disclosure-body" id={id}>{children}</div>}
+    </div>
+  );
+}
+
 /**
  * 页面内提示：info 普通说明、warning 需要留意的后果、success 完成、danger 错误（表单提交失败等，默认 role="alert"）。
  * 图标按语气自动选择，icon={false} 不显示图标（例如前面已经有加载圈）。不要再手写 inline-note／form-alert 类名。

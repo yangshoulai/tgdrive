@@ -277,6 +277,7 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 .account-section-heading h2 { font-size: var(--text-lg); font-weight: 600; }
 .account-section-heading p { margin-top: 6px; color: var(--ink-3); font-size: var(--text-sm); line-height: 1.7; }
 .account-section-content { min-width: 0; }
+.account-section-content > .account-setting-summary + .account-setting-summary { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
 .account-setting-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .account-setting-summary > div { min-width: 0; }
 .account-setting-summary strong { font-size: var(--text-md); font-weight: 500; }
@@ -352,6 +353,15 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 .tone-warning { color: var(--warning); }
 .tone-danger { color: var(--danger); }
 .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+/* 设置页的一组开关：行之间用细线分开。 */
+.switch-list { display: grid; }
+.switch-list > .switch-row { padding: 12px 0; border-top: 1px solid var(--line-soft); }
+.switch-list > .switch-row:first-child { border-top: 0; padding-top: 4px; }
+.panel-body > .key-value + .disclosure, .panel-body > .inline-note + .disclosure, .panel-body > .key-value + .inline-note, .panel-body > .inline-note + .inline-note { margin-top: 14px; }
+.local-cache-options { display: grid; gap: 14px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+.disclosure-list { display: grid; gap: 8px; }
+.assistant-subnav { margin: -8px 0 20px; }
+.resource-footnote { font-size: var(--text-xs); line-height: 1.7; }
 
 .spinner { width: 15px; height: 15px; flex: none; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; opacity: .75; animation: spin .7s linear infinite; }
 .spinner-lg { width: 24px; height: 24px; color: var(--accent); }
@@ -615,6 +625,17 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .empty-state.is-compact h3 { align-self: center; }
 .empty-state.is-compact p { max-width: none; line-height: 1.7; }
 .empty-state.is-compact .empty-action { margin-top: 8px; }
+/* 折叠区：标题行是整行按钮，箭头旋转表示展开。 */
+.disclosure { border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+.disclosure-toggle { display: flex; width: 100%; align-items: flex-start; gap: 8px; padding: 10px 12px; border: 0; border-radius: inherit; background: none; color: var(--ink); font-family: inherit; text-align: left; cursor: pointer; transition: background-color var(--duration-fast); }
+.disclosure-toggle:hover { background: var(--surface-hover); }
+.disclosure-toggle > svg { flex: none; margin-top: 3px; color: var(--ink-3); transition: transform var(--duration-base) var(--ease-out); }
+.disclosure.is-open .disclosure-toggle > svg { transform: rotate(90deg); }
+.disclosure-toggle > span { display: grid; gap: 2px; min-width: 0; }
+.disclosure-toggle strong { font-size: var(--text-sm); font-weight: 600; }
+.disclosure-toggle small { color: var(--ink-3); font-size: var(--text-xs); }
+.disclosure-body { display: grid; gap: 14px; padding: 4px 14px 14px 34px; }
+@media (prefers-reduced-motion: reduce) { .disclosure-toggle > svg { transition: none; } }
 /* 页面级标签页：下划线样式，窄屏横向滚动。 */
 .tabs { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
@@ -2361,12 +2382,6 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .download-candidate-copy { flex: 1; min-width: 0; }
 .download-candidate-copy p { font-size: var(--text-xs); margin: 6px 0 0; overflow-wrap: anywhere; }
 .download-candidate-copy summary { margin-top: 6px; color: var(--ink-2); font-size: var(--text-xs); cursor: pointer; }
-.resource-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .9fr); gap: 32px; }
-.resource-effective { padding-left: 24px; border-left: 1px solid var(--line); min-width: 0; }
-.resource-effective h3 { margin: 0 0 16px; font-size: var(--text-md); font-weight: 600; }
-.resource-effective p { margin-top: 16px; font-size: var(--text-xs); line-height: 1.7; }
-.resource-hls { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.resource-hls .switch-row { width: 100%; }
 /* 窄屏保留各列并在容器内横向滚动，行尾操作沿用表格的固定列。 */
 @media (max-width: 860px) {
   .download-controls { min-height: 48px; }
@@ -2391,8 +2406,6 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
   .download-list .download-item > .cell-actions { grid-area: actions; position: static; box-shadow: none; background: transparent; }
 }
 @media (max-width: 860px) {
-  .resource-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
-  .resource-effective { border-left: 0; border-top: 1px solid var(--line); padding: 24px 0 0; }
 }
 
 /* ---------- 文件助手（docs/assistant-design.md §12） ---------- */

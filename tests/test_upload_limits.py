@@ -62,7 +62,7 @@ class SettingsTests(unittest.TestCase):
     def test_admin_settings_apply_immediately_and_web_reads_them(self):
         resources, engine = self.app.resources, self.app.objects.engine
         store = engine.store
-        saved = resources.update({"mode": "standard", "upload_concurrency": 6, "upload_kib": 2048, "bot_interval_ms": 2500,
+        saved = resources.update({"mode": "auto", "upload_concurrency": 6, "upload_kib": 2048, "bot_interval_ms": 2500,
                                   "web_part_concurrency": 6, "web_file_concurrency": 3})["effective"]
         self.assertEqual((saved["upload_concurrency"], saved["upload_reduced"]), (6, False))
         self.assertEqual((engine.upload_slots.limit, engine.upload_rate.rate, store.bot_interval), (6, 2048 * 1024, 2.5))
@@ -76,7 +76,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(asyncio.run(self.client.request("GET", "/api/user/v1/upload-config", b"", {}))[0], 401)
         low = resources.update({"mode": "low"})["effective"]
         self.assertEqual((low["upload_concurrency"], low["web_part_concurrency"], low["upload_reduced"]), (2, 2, True))
-        resources.update({"mode": "standard"})
+        # 自定义模式不按低资源档收紧，只按检测到的内存留余量（自动模式在 1 GB 以下会选低资源档）。
+        resources.update({"mode": "custom"})
         resources.detected.update(memory_bytes=512 * 1024 ** 2)
         self.assertEqual(resources.effective()["upload_concurrency"], 4, "每个分片约 32 MB，最多占内存的四分之一")
         for bad in ({"upload_concurrency": 0}, {"upload_kib": -1}, {"bot_interval_ms": 10001}, {"web_part_concurrency": 9},

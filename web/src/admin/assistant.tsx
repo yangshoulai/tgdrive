@@ -7,15 +7,21 @@ import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SetupGuide, SearchInput, Segmented,
-  SkeletonRows, Switch, Tabs, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
+  SkeletonRows, Switch, Tabs, Disclosure, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
 import { Stat } from "./overview";
 
 type Tab = "overview" | "channels" | "catalog" | "tools" | "limits" | "usage" | "conversations" | "calls";
-const TABS: { value: Tab; label: string }[] = [
-  { value: "overview", label: "概览" }, { value: "channels", label: "渠道与模型" }, { value: "catalog", label: "模型目录" }, { value: "tools", label: "工具" },
-  { value: "limits", label: "限制与额度" }, { value: "usage", label: "用量" }, { value: "conversations", label: "对话记录" },
-  { value: "calls", label: "调用日志" },
+/** 控制台五个标签，相关的页面并在一起，用分段切换；每个分段仍有自己的地址（/admin/assistant/<分段>），旧链接不受影响。 */
+type Group = "overview" | "models" | "access" | "usage" | "conversations";
+const GROUPS: { value: Group; label: string; sections: { value: Tab; label: string }[] }[] = [
+  { value: "overview", label: "概览", sections: [{ value: "overview", label: "概览" }] },
+  { value: "models", label: "渠道与模型", sections: [{ value: "channels", label: "模型渠道" }, { value: "catalog", label: "模型目录" }] },
+  { value: "access", label: "权限与工具", sections: [{ value: "limits", label: "权限与额度" }, { value: "tools", label: "工具" }] },
+  { value: "usage", label: "用量与日志", sections: [{ value: "usage", label: "用量统计" }, { value: "calls", label: "调用日志" }] },
+  { value: "conversations", label: "对话记录", sections: [{ value: "conversations", label: "对话记录" }] },
 ];
+const TABS = GROUPS.flatMap(group => group.sections);
+const groupOf = (tab: Tab) => GROUPS.find(group => group.sections.some(section => section.value === tab))!;
 const LEVELS: Record<ai.ToolLevel, { label: string; tone: Tone }> = {
   read: { label: "只读", tone: "neutral" }, meta: { label: "交互", tone: "neutral" }, scope: { label: "需确认", tone: "accent" },
   write: { label: "需确认", tone: "warning" }, danger: { label: "不可恢复", tone: "danger" },
@@ -70,7 +76,8 @@ export function AssistantAdmin() {
           <Switch label="启用文件助手" checked={settings.enabled} disabled={!settings.enabled && !settings.default_model}
             onChange={value => value ? setEnabling(true) : void setEnabled(false)} />
         </div>} />
-      <Tabs label="文件助手设置" value={tab} onChange={choose} options={TABS} />
+      <Tabs label="文件助手设置" value={groupOf(tab).value} onChange={group => choose(GROUPS.find(item => item.value === group)!.sections[0].value)} options={GROUPS} />
+      {groupOf(tab).sections.length > 1 && <div className="assistant-subnav"><Segmented label={groupOf(tab).label} value={tab} onChange={choose} options={groupOf(tab).sections} /></div>}
       {tab === "overview" && <OverviewTab revision={revision} settings={settings} onNavigate={choose} onChanged={changed} />}
       {tab === "channels" && <ChannelsTab settings={settings} onChanged={changed} />}
       {tab === "catalog" && <CatalogTab />}
@@ -995,9 +1002,6 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
         <Switch label="允许用户使用私密对话" checked={settings.private} onChange={value => void setPrivate(value)}
           description="还需要至少一个在模型配置中「允许用于私密对话」的模型；可在“用户”页按人单独允许或禁止。关闭时立即清除所有进行中的私密对话。" />
       </Panel>
-      {LIMIT_GROUPS.map(group => <Panel key={group.title} title={group.title} description={group.description}>
-        <div className="form settings-form assistant-limit-form">{group.keys.map(key => numberField(key, limits.bounds[key].label, limits.bounds[key], form[key] ?? "", value => setForm({ ...form, [key]: value })))}</div>
-      </Panel>)}
       <Panel title="额度与保留期" description="每个用户的默认额度可在“用户”页按人覆盖。">
         <div className="form settings-form assistant-limit-form">
           {numberField("user_daily_tokens", "每用户每日 token（0 为不限）", settings.bounds.user_daily_tokens, general.user_daily_tokens, value => setGeneral({ ...general, user_daily_tokens: value }))}
@@ -1007,6 +1011,11 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
             <textarea className="input" rows={4} maxLength={2000} value={general.notice} onChange={event => setGeneral({ ...general, notice: event.target.value })} />
           </Field>
         </div>
+      </Panel>
+      <Panel title="运行上限" description="每轮对话的调用次数、耗时与内容长度。默认值适合大多数模型，经常触达上限时再调整（见「用量与日志」的结束原因）。">
+        <div className="disclosure-list">{LIMIT_GROUPS.map(group => <Disclosure key={group.title} title={group.title} description={group.description}>
+          <div className="form settings-form assistant-limit-form">{group.keys.map(key => numberField(key, limits.bounds[key].label, limits.bounds[key], form[key] ?? "", value => setForm({ ...form, [key]: value })))}</div>
+        </Disclosure>)}</div>
       </Panel>
       {error && <Notice tone="danger">{error}</Notice>}
       {(dirty || busy) && <div className="settings-actions assistant-sticky-actions"><span className="settings-actions-note">有未保存的修改</span><Button variant="ghost" disabled={busy} onClick={() => reset(limits, settings)}>放弃修改</Button><Button type="submit" variant="primary" loading={busy}>保存</Button></div>}

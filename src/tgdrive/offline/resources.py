@@ -128,7 +128,10 @@ class ResourceSettings:
         if not isinstance(value, dict) or set(value) - set(DEFAULTS):
             raise ValueError("下载资源配置包含未知参数")
         merged = {**DEFAULTS, **value}
-        if merged["mode"] not in ("auto", "low", "standard", "custom"):
+        # 1.13 起「标准」并入「自动」：旧配置、启动参数与接口里的 standard 一律按 auto 处理（硬件足够时自动就是标准档）。
+        if merged["mode"] == "standard":
+            merged["mode"] = "auto"
+        if merged["mode"] not in ("auto", "low", "custom"):
             raise ValueError("资源模式不正确")
         for key, low, high in (("concurrency", 1, 4), ("bandwidth_kib", 0, 1048576), ("reserve_mib", 128, 1048576)):
             if type(merged[key]) is not int or not low <= merged[key] <= high:

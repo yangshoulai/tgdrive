@@ -187,7 +187,7 @@ def main() -> None:
     parser.add_argument("--bucket-concurrency", type=int, default=int(os.environ.get("TGDRIVE_BUCKET_CONCURRENCY", "2")))
     parser.add_argument("--audit-retention-days", type=int, default=int(os.environ.get("TGDRIVE_AUDIT_RETENTION_DAYS", "0")),
                         help="审计日志归档期限；0 为永久保留，正数表示归档指定天数以前的记录")
-    parser.add_argument("--resource-mode", choices=("auto", "low", "standard", "custom"), default=os.environ.get("TGDRIVE_RESOURCE_MODE", "auto"), help="资源预设；管理员配置优先，容器预算始终限制实际并发")
+    parser.add_argument("--resource-mode", choices=("auto", "low", "standard", "custom"), default=os.environ.get("TGDRIVE_RESOURCE_MODE", "auto"), help="资源预设；管理员配置优先，容器预算始终限制实际并发。standard 是旧值，按 auto 处理")
     parser.add_argument("--offline-concurrency", type=int, default=int(os.environ.get("TGDRIVE_OFFLINE_CONCURRENCY", "1")))
     parser.add_argument("--offline-bandwidth-kib", type=int, default=int(os.environ.get("TGDRIVE_OFFLINE_BANDWIDTH_KIB", "0")), help="离线下载总限速，KiB/s；0 不限速")
     parser.add_argument("--offline-reserve-mib", type=int, default=int(os.environ.get("TGDRIVE_OFFLINE_RESERVE_MIB", "512")))
