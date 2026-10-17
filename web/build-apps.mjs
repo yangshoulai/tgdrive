@@ -21,6 +21,9 @@ if(!process.argv[2] || process.argv[2]==='user') {
   }
   previewAssets[kind]=assets;
  }
+ // 浏览器本地缓存的 Service Worker（docs/client-cache-design.md）：地址固定为 /sw.js（作用域 /），服务端按 no-cache 返回。
+ const worker=await build({entryPoints:[path.join(root,'src/sw/cache-worker.ts')],bundle:true,write:false,outfile:path.join(dist,'sw.js'),format:'iife',minify:true,target:'es2022'});
+ fs.writeFileSync(path.join(dist,'sw.js'),worker.outputFiles[0].contents);
  const licenses=[];const seen=new Set();
  function collectLicense(name) {
   if(seen.has(name)) return;seen.add(name);

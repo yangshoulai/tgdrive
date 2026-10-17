@@ -15,6 +15,7 @@ import { PrivateTransferDialog } from "./private-access";
 import type { PreviewPlayback } from "../files";
 import { usePrivateToast } from "./private-session";
 import { usePreview } from "./preview-host";
+import { FileCacheButton, cacheMenuItems, useCacheFiles } from "./cache";
 import { useFilesBridge } from "./assistant-bridge";
 
 /* ---------- 文件 ---------- */
@@ -347,7 +348,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   function fileMenu(file: api.FileItem): MenuItem[] {
     const entry: Entry = { kind: "file", key: file.key, file };
     const items: MenuItem[] = [
-      { label: "下载", icon: "download", onSelect: () => undefined, href: api.contentUrl(file.key, true) },
+      { label: "下载", icon: "download", onSelect: () => undefined, href: api.versionedContentUrl(api.contentUrl(file.key, true), file.etag) },
+      ...cacheMenuItems(cacheQueue, file).filter(item => !item.danger),
       ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) }] : []),
     ];
     if (thumbnailSource(file.key, file.content_type, file.size)) {
@@ -364,6 +366,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     items.push({ label: "移动到…", icon: "move", onSelect: () => setMoving([entry]) });
     items.push({ label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([entry]) });
     if (query) items.push({ label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(parentPath(file.key)) });
+    items.push(...cacheMenuItems(cacheQueue, file).filter(item => item.danger));
     items.push({ label: "删除", icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash([entry]) });
     return items;
   }
@@ -389,9 +392,10 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const allSelected = entries.length > 0 && entries.every(entry => selected.has(entry.key));
   const openEntry = (entry: Entry) => entry.kind === "folder" ? onOpenFolder(entry.key) : openPreview(entry.file);
   const downloadUrl = (targets: Entry[]) => targets.length === 1 && targets[0].kind === "file"
-    ? api.contentUrl(targets[0].key, true) : api.archiveUrl(targets.map(target => target.key));
+    ? api.versionedContentUrl(api.contentUrl(targets[0].key, true), targets[0].file.etag) : api.archiveUrl(targets.map(target => target.key));
   useEffect(() => { setCursor(current => current && entries.some(entry => entry.key === current) ? current : null); }, [entries]);
   const rendered = useRenderLimit(entries, fetchPage);
+  const cacheQueue = useCacheFiles(rendered.visible.flatMap(entry => entry.kind === "file" ? [entry.file] : []));
   // 焦点项可能还没挂载（End、跨批移动）：先放宽渲染范围，等它出现在 DOM 后只滚动一次，之后滚动加载不再拉回焦点。
   const pendingScroll = useRef<string | null>(null);
   useEffect(() => {
@@ -615,7 +619,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                 <span role="cell" className="cell-size muted">{formatBytes(entry.file.size)}</span>
                 <span role="cell" className="cell-date muted" title={formatDateTime(entry.file.modified_at)}>{formatDate(entry.file.modified_at)}</span>
                 <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
-                  {!privateSpace && <span className="row-quick"><IconButton icon="link" size="sm" label={`分享 ${baseName(entry.key)}`} onClick={() => setSharing(entry.file)} /></span>}
+                  <FileCacheButton file={entry.file} />
                   <Menu label={`${baseName(entry.key)} 的更多操作`} items={fileMenu(entry.file)} />
                 </span>
               </div>
@@ -663,6 +667,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                         {!api.fileThumbnail(entry.file) && extension && !LABELLED_KINDS.has(kind) && <span className="grid-extension" aria-hidden="true">{extension}</span>}
                         <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                         {entry.file.public_token && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
+                        <span className="grid-cache" onClick={event => event.stopPropagation()}><FileCacheButton file={entry.file} /></span>
                       </div>
                       <div className="grid-meta">
                         {/* 卡片本身只响应鼠标；文件名按钮是键盘与读屏用户的打开入口。 */}

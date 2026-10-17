@@ -131,6 +131,13 @@ class KeyStore:
                 import base64
                 plain = open_sealed(derive_subkey(old_kek, "assistant-trace"), base64.b64decode(trace_row["value"]), "assistant-trace-key")
                 trace_key = base64.b64encode(seal(derive_subkey(new_kek, "assistant-trace"), plain, "assistant-trace-key")).decode()
+            # 浏览器缓存主密钥同样只重新包裹，已缓存在各设备上的数据仍可解开。
+            cache_row = self.metadata.db.execute("SELECT value FROM settings WHERE key='client_cache.key'").fetchone()
+            cache_key = None
+            if cache_row is not None:
+                import base64
+                plain = open_sealed(derive_subkey(old_kek, "client-cache"), base64.b64decode(cache_row["value"]), "client-cache-key")
+                cache_key = base64.b64encode(seal(derive_subkey(new_kek, "client-cache"), plain, "client-cache-key")).decode()
             # 所有重新包裹和 keys 更新在同一个事务里。
             with self.metadata.transaction() as db:
                 db.executemany("UPDATE blobs SET wrapped_dek = ? WHERE uuid = ?", ((w, u) for u, w in wrapped))
@@ -141,6 +148,8 @@ class KeyStore:
                 db.executemany("UPDATE ai_channels SET secret = ?, headers = ? WHERE id = ?", ai_secrets)
                 if trace_key is not None:
                     db.execute("UPDATE settings SET value = ? WHERE key = 'assistant.trace_key'", (trace_key,))
+                if cache_key is not None:
+                    db.execute("UPDATE settings SET value = ? WHERE key = 'client_cache.key'", (cache_key,))
                 # 历史任务可能很多，逐条重加密，不把所有请求体再攒到内存里。
                 for task in db.execute("SELECT id,request_enc FROM offline_tasks"):
                     aad = f"offline:{task['id']}"

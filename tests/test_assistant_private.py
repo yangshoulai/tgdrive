@@ -126,6 +126,33 @@ class PrivateAssistantTests(ActionHelpers, AssistantCase):
             self.assertNotIn("pc_", json.dumps(records))
         self.run_async(run())
 
+    def test_mentions_are_relative_to_private_root(self):
+        async def run():
+            admin, _, model = await self.setup_assistant()
+            await self.enable_private(admin, model)
+            await self.put(".tgdrive/private/相册/猫.jpg", b"\xff\xd8\xff\xe0 image")
+            await self.put("相册/狗.jpg", b"\xff\xd8\xff\xe0 image")
+            user = await self.unlock(await self.client.login("user", "alice@example.com", "alice password"))
+            conversation = await self.private_conversation(user)
+            self.model.replies = [answer("好的")]
+            status, data = await self.req("POST", f"{PRIVATE}/conversations/{conversation}/messages",
+                                          {"text": "看看 @/相册/猫.jpg", "mentions": ["/相册/猫.jpg"]}, user)
+            self.assertEqual(status, 201, data)
+            await self.service.runs[data["run_id"]].task
+            _, detail = await self.req("GET", f"{PRIVATE}/conversations/{conversation}", headers=user)
+            sent = next(m for m in detail["messages"] if m["role"] == "user")
+            self.assertEqual(sent["mentions"], ["/相册/猫.jpg"], "显示路径相对私密空间根")
+            # 识图读取的是私密空间里的对象。
+            history = self.service._history(conversation, None, run_id=data["run_id"], can_see=True)
+            refs = next(item["image_refs"] for item in history if item.get("image_refs"))
+            self.assertEqual(refs, [".tgdrive/private/相册/猫.jpg"])
+            # 普通文件不能被私密对话引用。
+            status, data = await self.req("POST", f"{PRIVATE}/conversations/{conversation}/messages",
+                                          {"text": "@/相册/狗.jpg", "mentions": ["/相册/狗.jpg"]}, user)
+            self.assertEqual(status, 400)
+            self.assertIn("不存在", data["error"]["message"])
+        self.run_async(run())
+
     def test_lock_clears_conversation_and_stops_requests(self):
         async def run():
             admin, _, model = await self.setup_assistant()

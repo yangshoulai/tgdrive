@@ -85,7 +85,12 @@ export const PRIVATE_PREFIX = ".tgdrive/private/";
 let privateAccess = "";
 export const isPrivatePath = (path: string) => path.startsWith(PRIVATE_PREFIX);
 export const privatePathLabel = (path: string) => isPrivatePath(path) ? `私密空间${path.length > PRIVATE_PREFIX.length ? ` / ${path.slice(PRIVATE_PREFIX.length).replace(/\/$/, "")}` : ""}` : path ? `我的文件 / ${path.replace(/\/$/, "")}` : "我的文件";
-export const setPrivateAccess = (access: string) => { privateAccess = access; };
+/** 授权变化同时广播给本机缓存（cache-client.ts）：锁定后 Service Worker 立即丢弃私密密钥。 */
+export const setPrivateAccess = (access: string) => {
+  const changed = access !== privateAccess;
+  privateAccess = access;
+  if (changed && typeof window !== "undefined") window.dispatchEvent(new CustomEvent("tessera:private-access", { detail: access }));
+};
 export const getPrivateAccess = () => privateAccess;
 const fileApi = (route: string, path = "") => `/api/user/v1${isPrivatePath(path) ? "/private" : ""}${route}`;
 const mediaAccess = (url: string, path: string) => isPrivatePath(path) ? `${url}&access=${encodeURIComponent(privateAccess)}` : url;
@@ -97,6 +102,9 @@ export class ApiError extends Error {
 export function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error && reason.message ? reason.message : fallback;
 }
+
+/** 会删除、覆盖或移动文件的接口：成功后通知本机缓存尽快对账（docs/client-cache-design.md §4）。 */
+const FILE_MUTATIONS = /^\/api\/user\/v1(?:\/private)?\/(?:delete|move|copy|transfer|trash\/purge|trash\/restore|uploads\/[A-Za-z0-9_-]+\/complete|files(?:\/instant)?|assistant\/actions\/[A-Za-z0-9_-]+\/(?:confirm|undo))(?:\?|$)/;
 
 async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 30000): Promise<T> {
   const headers = new Headers(init.headers);
@@ -119,6 +127,7 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
       if (code === "private_locked") window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: headers.get("X-Private-Access") }));
       throw new ApiError(message, response.status, code);
     }
+    if (init.method && init.method !== "GET" && FILE_MUTATIONS.test(path)) window.dispatchEvent(new CustomEvent("tessera:files-mutated"));
     if (response.status === 204) return undefined as T;
     return await response.json() as T;
   } catch (reason) {
@@ -186,8 +195,10 @@ export async function login(username: string, password: string, remember = false
 }
 export async function logout() {
   try { await post<void>("/api/auth/v1/logout"); }
-  finally { setCsrf(""); setPrivateAccess(""); thumbnailBucketId = null; thumbnailSessionEpoch++; }
+  finally { setCsrf(""); setPrivateAccess(""); thumbnailBucketId = null; thumbnailSessionEpoch++; window.dispatchEvent(new CustomEvent("tessera:logout")); }
 }
+/** 浏览器本地缓存：重置纪元后所有设备上的缓存都无法再解开。 */
+export const resetClientCache = () => post<{ ok: boolean }>("/api/user/v1/cache/reset", {});
 export async function me() {
   const epoch = thumbnailSessionEpoch;
   const account = await request<UserMe>("/api/auth/v1/me");
@@ -457,6 +468,10 @@ export const publicPath = (token: string, name: string, download = false, access
 export const adminSettings = (signal?: AbortSignal) => request<SystemSettings>("/api/admin/v1/settings", { signal });
 export const adminResources = () => request<ResourceSettings>("/api/admin/v1/resources");
 export const updateAdminResources = (values: ResourceConfig) => post<ResourceSettings>("/api/admin/v1/resources", values);
+/** 浏览器本地缓存策略（docs/client-cache-design.md §5）。 */
+export type ClientCachePolicy = { enabled: boolean; max_mib: number; entry_mib: number; private_enabled: boolean; private_max_mib: number; private_ttl_days: number };
+export const adminClientCache = () => request<ClientCachePolicy>("/api/admin/v1/client-cache");
+export const updateAdminClientCache = (values: Partial<ClientCachePolicy>) => post<ClientCachePolicy>("/api/admin/v1/client-cache", values);
 /** ids：只读取这些任务（最多 100 个，托盘跟踪用）；limit 为每页数量（最多 100）。 */
 export async function listDownloads(cursor: string | null, status: string, signal?: AbortSignal, query = "", options: { ids?: number[]; limit?: number } = {}) {
   const params = new URLSearchParams({ limit: String(options.limit ?? 50), cursor: cursor ?? "", status });

@@ -1,10 +1,11 @@
 /** 文件类型识别、预览与公开分享对话框。 */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import * as api from "./api";
 import { readPreviewText, type PreviewText } from "./preview-data";
 import { MediaPreview, MinimizedPlayback, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
 import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip } from "./preview-playlist";
 import { ImageViewer } from "./preview-image";
+import { FileCacheButton, useCacheFiles } from "./user/cache";
 import { PreviewToolsContext, TextPreview } from "./preview-text";
 import { Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, type IconName } from "./ui";
 
@@ -281,6 +282,10 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     return { url, downloadUrl, poster: latest.poster ?? poster, thumbnail: latest.thumbnail ?? thumbnail };
   };
   const source = sourceOf(active);
+  const ownSource = /^\/api\/user\/v1\/(?:private\/)?content\?/.test(source.url);
+  useCacheFiles([active], ownSource);
+  const [videoSize, setVideoSize] = useState<{ key: string; etag: string; ratio: number } | null>(null);
+  const videoRatio = videoSize?.key === active.key && videoSize.etag === active.etag ? videoSize.ratio : 16 / 9;
   const [playlistExpanded, setPlaylistExpanded] = useState(false);
   const controls = useRef<PlaybackControls | null>(null), pendingPlay = useRef(false), currentKey = useRef(active.key);
   currentKey.current = active.key;
@@ -346,12 +351,16 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     const resize = () => {
       if (modal.classList.contains("is-minimized")) return;
       const outer = getComputedStyle(backdrop), frame = getComputedStyle(modal);
-      let height = backdrop.clientHeight - parseFloat(outer.paddingTop) - parseFloat(outer.paddingBottom);
-      if (frame.maxHeight.endsWith("px")) height = Math.min(height, parseFloat(frame.maxHeight));
+      let available = backdrop.clientHeight - parseFloat(outer.paddingTop) - parseFloat(outer.paddingBottom);
+      if (frame.maxHeight.endsWith("px")) available = Math.min(available, parseFloat(frame.maxHeight));
+      modal.style.setProperty("--preview-available-height", `${available}px`);
       const overlay = getComputedStyle(header).position === "absolute";
       node.style.setProperty("--preview-header-height", `${header.offsetHeight}px`);
       // 入场动画带缩放变换，布局高度不受动画影响，避免误算可用画布。
-      const content = Math.max(0, height - (overlay ? 0 : header.offsetHeight) - parseFloat(frame.borderTopWidth) - parseFloat(frame.borderBottomWidth));
+      // 手动尺寸与扩展窗口以实际高度为准；视频默认窗口也有按比例计算的明确高度。
+      const fixed = kind === "video" || modal.classList.contains("is-sized") || modal.classList.contains("is-expanded");
+      const height = fixed ? modal.clientHeight : available - parseFloat(frame.borderTopWidth) - parseFloat(frame.borderBottomWidth);
+      const content = Math.max(0, height - (overlay ? 0 : header.offsetHeight));
       node.style.setProperty("--preview-content-height", `${content}px`);
       node.style.setProperty("--preview-player-height", `${content}px`);
     };
@@ -429,7 +438,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>
         <IconButton icon="next" label="下一张" size="sm" onClick={nav.onNext} />
-      </div> : undefined} className={`preview-modal preview-modal-${kind}${immersive ? " is-immersive" : ""}${immersive || kind === "pdf" ? " is-dark-surface" : ""}${reading ? " is-reading" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
+      </div> : undefined} className={`preview-modal preview-modal-${kind}${immersive ? " is-immersive" : ""}${immersive || kind === "pdf" ? " is-dark-surface" : ""}${reading ? " is-reading" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} style={kind === "video" ? { "--preview-video-ratio": videoRatio } as CSSProperties : undefined} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>
@@ -438,11 +447,13 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       actions={<>
         {reading && <span className="preview-header-tools" ref={setTextTools} />}
         {onShare && <IconButton icon="link" label={active.public_token ? "管理分享" : "公开分享"} size="sm" onClick={() => void share()} />}
-        <a className="icon-btn icon-btn-ghost icon-btn-sm" href={source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
+        {ownSource && <FileCacheButton file={active} />}
+        <a className="icon-btn icon-btn-ghost icon-btn-sm" href={ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag) : source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
         <span className="modal-actions-divider" aria-hidden="true" />
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}`}><PreviewToolsContext.Provider value={reading ? textTools : null}><FilePreview kind={kind} url={kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}`}><PreviewToolsContext.Provider value={reading ? textTools : null}><FilePreview kind={kind} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag) : source.url} name={baseName(active.key)} downloadUrl={ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag) : source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
+        onVideoSize={(width, height) => setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height })}
         onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}
         onLyricLine={line => setLyric(current => current.key === active.key && current.line === line ? current : { key: active.key, line })}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}

@@ -57,6 +57,13 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
     const limitX = Math.max(0, (width - box.width) / 2), limitY = Math.max(0, (height - box.height) / 2);
     return { scale, x: Math.max(-limitX, Math.min(limitX, next.x)), y: Math.max(-limitY, Math.min(limitY, next.y)) };
   };
+  // 窗口缩放后重新限制平移，避免放大过的图片偏离新的画布边界。
+  useLayoutEffect(() => {
+    setView(current => {
+      const next = clampView(current);
+      return next.scale === current.scale && next.x === current.x && next.y === current.y ? current : next;
+    });
+  }, [box.width, box.height, display?.width, display?.height, turned, maxScale]);
   /** 以画布内某点为中心缩放（点坐标相对画布中心），该点下的像素保持不动。 */
   const zoomAt = (scale: number, point = { x: 0, y: 0 }) => setView(current => {
     const target = Math.max(1, Math.min(maxScale, scale)), ratio = target / current.scale;

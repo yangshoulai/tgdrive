@@ -1,4 +1,5 @@
-/** 输入框里的 @ 引用：输入 @ 列出当前目录，继续输入在全部普通文件中搜索；选中后插入 @/路径，发送时随消息提交。 */
+/** 输入框里的 @ 引用：输入 @ 列出当前目录，继续输入在全部普通文件中搜索；选中后插入 @/路径，发送时随消息提交。
+ * 私密对话（root 为私密前缀）只列出和搜索私密空间，候选路径相对私密空间根（服务端按同样的约定校验）。 */
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import { FileTile, baseName, getFileKind, parentPath } from "../files";
@@ -25,8 +26,10 @@ export function commonFolder(keys: string[]): string {
   return parts.length ? parts.join("/") + "/" : "";
 }
 
-export function useMentions({ draft, location, enabled, onPick }: {
+export function useMentions({ draft, location, enabled, onPick, root = "" }: {
   draft: string; location: string; enabled: boolean;
+  /** 文件区域的根：普通对话为 ""，私密对话为私密前缀。location 是带根的对象键。 */
+  root?: string;
   /** 选中候选后由输入框把 @ 片段替换为 @/路径。 */
   onPick: (from: number, path: string) => void;
 }) {
@@ -54,21 +57,25 @@ export function useMentions({ draft, location, enabled, onPick }: {
       setLoading(true);
       try {
         const query = token.query.trim().toLowerCase();
+        // 只保留根下的条目并去掉根：普通对话排除系统区域，私密对话只留私密空间（不含私密回收站）。
+        const inside = (key: string) => root ? key.startsWith(root) : !key.startsWith(".tgdrive/");
+        const relative = (key: string) => key.slice(root.length);
         const here = await api.listFiles(location, null, false, 60, "", controller.signal);
-        const folders = here.common_prefixes.filter(key => !key.startsWith(".tgdrive/")).map(key => candidate(key, true));
-        const files = here.objects.filter(item => !item.key.endsWith("/")).map(item => candidate(item.key, false));
+        const folders = here.common_prefixes.filter(inside).map(key => candidate(relative(key), true));
+        const files = here.objects.filter(item => !item.key.endsWith("/") && inside(item.key)).map(item => candidate(relative(item.key), false));
         let found = [...folders, ...files].filter(item => !query || item.name.toLowerCase().includes(query));
         if (query) {
-          const search = await api.searchFiles(token.query.trim(), "", false, LIMIT, "", "", controller.signal);
+          const search = await api.searchFiles(token.query.trim(), "", false, LIMIT, root, "", controller.signal);
           const seen = new Set(found.map(item => item.key));
-          found = [...found, ...search.objects.filter(item => !seen.has(item.key) && !item.key.endsWith("/")).map(item => candidate(item.key, false))];
+          found = [...found, ...search.objects.filter(item => !item.key.endsWith("/") && inside(item.key) && !seen.has(relative(item.key)))
+            .map(item => candidate(relative(item.key), false))];
         }
         if (!controller.signal.aborted) { setItems(found.slice(0, LIMIT)); setActive(0); }
       } catch { if (!controller.signal.aborted) setItems([]); }
       finally { if (!controller.signal.aborted) setLoading(false); }
     }, token.query ? 160 : 0);
     return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [token?.query, location]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token?.query, location, root]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function choose(item: Candidate) {
     if (!token) return;
@@ -92,7 +99,7 @@ export function useMentions({ draft, location, enabled, onPick }: {
   }
 
   const menu = token ? <div className="assistant-mention-menu" role="listbox" aria-label="引用文件或文件夹">
-    <div className="assistant-mention-head"><Icon name="at" size={13} /><span>{token.query ? `搜索“${token.query}”` : `当前位置 /${location}`}</span><kbd>↑↓</kbd><kbd>Enter</kbd></div>
+    <div className="assistant-mention-head"><Icon name="at" size={13} /><span>{token.query ? `搜索“${token.query}”` : `当前位置 /${location.slice(root.length)}`}</span><kbd>↑↓</kbd><kbd>Enter</kbd></div>
     {items.length ? items.map((item, index) => <button key={item.key} type="button" role="option" aria-selected={index === active}
       className={`assistant-mention-item${index === active ? " is-active" : ""}`}
       onMouseDown={event => event.preventDefault()} onMouseEnter={() => setActive(index)} onClick={() => choose(item)}>

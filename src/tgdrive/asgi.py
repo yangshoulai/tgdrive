@@ -15,6 +15,7 @@ from .api import AdminApi, UserApi
 from .archive import stream_zip
 from .assistant.service import AssistantDenied
 from .audit import AuditLog
+from .client_cache import ClientCache
 from .authn import (
     AuthenticationError,
     CsrfError,
@@ -88,6 +89,7 @@ class TgDriveASGI(StaticFiles):
         self.settings = settings or SystemSettings(admin.accounts.metadata, {"public_base_url": public_base_url})
         self.private_space = PrivateSpace(user, self.settings)
         self.passkeys = self.private_space.passkeys
+        self.client_cache = ClientCache(user, self.private_space)
         user.private_space = self.private_space
         admin.private_space = self.private_space
         access_logger = logging.getLogger("uvicorn.access")
@@ -151,7 +153,6 @@ class TgDriveASGI(StaticFiles):
         query = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
         started = False
         private_response = path.startswith("/api/user/v1/private/") or path.startswith("/api/user/v1/passkeys")
-        private_thumbnail = path == "/api/user/v1/private/thumbnail" and scope.get("method") == "GET"
         request_id = secrets.token_hex(8)
         request_start = time.monotonic()
 
@@ -160,12 +161,11 @@ class TgDriveASGI(StaticFiles):
             if message["type"] == "http.response.start":
                 started = True
                 if private_response:
-                    # 覆盖所有分支（流、上传和错误），避免浏览器或中间代理保存私密内容。唯一例外是成功返回的私密缩略图：
-                    # 它沿用按内容版本的长期私有缓存（Cache-Control: private，中间代理不保存），地址随删除、覆盖而变化。
-                    keep_cache = private_thumbnail and message.get("status") in (200, 304)
+                    # 覆盖所有分支（流、上传和错误，含私密缩略图），避免浏览器 HTTP 缓存或中间代理保存私密明文；
+                    # 需要本机缓存时由 Service Worker 加密保存（docs/client-cache-design.md）。
                     message["headers"] = [(k, v) for k, v in message.get("headers", [])
-                                          if k.lower() not in ((b"referrer-policy",) if keep_cache else (b"cache-control", b"referrer-policy"))]
-                    message["headers"].extend(([] if keep_cache else [(b"cache-control", b"no-store")]) + [(b"referrer-policy", b"no-referrer")])
+                                          if k.lower() not in (b"cache-control", b"referrer-policy")]
+                    message["headers"].extend([(b"cache-control", b"no-store"), (b"referrer-policy", b"no-referrer")])
                 message["headers"] = [*message.get("headers", []), (b"x-request-id", request_id.encode())]
             elif message["type"] == "http.response.body" and self.metrics is not None:
                 self.metrics.record_out(len(message.get("body", b"")))
@@ -191,6 +191,10 @@ class TgDriveASGI(StaticFiles):
                     await self._send_raw(tracked_send, 200, {"Content-Type": "application/json; charset=utf-8"}, b"")
                 else:
                     await self._send(tracked_send, 200, {"status": "ok"})
+                return
+            if headers.get("service-worker") == "script" and path != "/sw.js":
+                # 浏览器注册 Service Worker 时会带这个请求头。用户上传的 .js 与站点同源，不能被注册成常驻脚本。
+                await self._send(tracked_send, 403, {"error": {"code": "forbidden", "message": "不允许注册为 Service Worker"}})
                 return
             # 公开直链优先于 S3 路径路由；桶名至少 3 个字符，因此 /p/ 不会与桶冲突。
             if path.startswith("/p/") and method in ("GET", "HEAD"):
@@ -244,7 +248,7 @@ class TgDriveASGI(StaticFiles):
             private = path.startswith("/api/user/v1/private/")
             access = headers.get("x-private-access", query.get("access", [""])[0])
             if not access and private and method == "GET" and path == "/api/user/v1/private/thumbnail" and token:
-                # 私密缩略图地址不带解锁令牌，浏览器才能跨解锁长期缓存；授权取自同一登录会话当前的私密授权。
+                # 私密缩略图地址不带解锁令牌，同一版本在多次解锁之间地址不变（便于本机加密缓存按版本命中）；授权取自同一登录会话当前的私密授权。
                 access = self.private_space.session_grants.get(token, "")
             audit_path = path
             if private and path.startswith("/api/user/v1/private/assistant/"):
@@ -254,7 +258,7 @@ class TgDriveASGI(StaticFiles):
                 path = "/api/user/v1" + path[len("/api/user/v1/private"):]
             elif private:
                 route = path[len("/api/user/v1/private"):]
-                controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer",
+                controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/content", "/preview-assets", "/preview-list",
@@ -410,7 +414,7 @@ class TgDriveASGI(StaticFiles):
                           "/clients/{}/status": "client.status", "/clients/{}/grants": "client.grant",
                           "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/clients/{}/delete": "client.delete",
                           "/bots": "bot.create", "/bots/{}/status": "bot.status",
-                          "/bots/{}/check": "bot.check", "/settings": "settings.update", "/resources": "resources.update",
+                          "/bots/{}/check": "bot.check", "/settings": "settings.update", "/resources": "resources.update", "/client-cache": "client_cache.update",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
                           "/maintenance/thumbnails": "maintenance.thumbnails",
@@ -438,7 +442,7 @@ class TgDriveASGI(StaticFiles):
                          "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
-                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/shares/{}/save": "share.save",
+                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/shares/{}/save": "share.save", "/cache/reset": "client_cache.reset",
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
@@ -515,6 +519,8 @@ class TgDriveASGI(StaticFiles):
             if "proxy" in payload:
                 # 代理地址可能包含认证信息，审计只记录是否启用。
                 detail["proxy_enabled"] = bool(payload.get("proxy"))
+        elif action == "client_cache.update":
+            detail = {key: payload.get(key) for key in ("enabled", "max_mib", "entry_mib", "private_enabled", "private_max_mib", "private_ttl_days") if key in payload}
         elif action == "download.create":
             detail = {"count": len(payload.get("items", [])) if isinstance(payload.get("items"), list) else 0}
         elif action == "share.save":
@@ -746,6 +752,11 @@ class TgDriveASGI(StaticFiles):
                 return 200, {"version": __version__}, {}
             if method == "POST" and route == "/settings":
                 return 200, self.settings.update(payload), {}
+            if route == "/client-cache":
+                if method == "GET":
+                    return 200, self.client_cache.policy(), {}
+                if method == "POST":
+                    return 200, self.client_cache.configure(payload), {}
             if route == "/resources" and self.resources is not None:
                 if method == "GET":
                     return 200, self.resources.describe(), {}
@@ -879,6 +890,15 @@ class TgDriveASGI(StaticFiles):
                 return 200, await user.save_share(token, csrf, shared[1], payload.get("destination", ""), payload.get("paths")), {}
             if route == "/usage" and method == "GET" and not private:
                 return 200, user.usage(token), {"Cache-Control": "no-store"}
+            if route.startswith("/cache/") and method == "POST" and not private:
+                # 浏览器本地缓存：只下发密钥与核对引用，响应一律不进入 HTTP 缓存。读取类接口不要求 CSRF，
+                # 以便 Service Worker 在页面不在前台时也能取得密钥；重置纪元是修改操作，要求 CSRF。
+                if route == "/cache/session":
+                    return 200, self.client_cache.session(token, payload.get("device")), {"Cache-Control": "no-store"}
+                if route == "/cache/check":
+                    return 200, self.client_cache.check(token, payload.get("etags")), {"Cache-Control": "no-store"}
+                if route == "/cache/reset":
+                    return 200, self.client_cache.reset(token, csrf), {"Cache-Control": "no-store"}
             if route == "/upload-config" and method == "GET" and not private:
                 # 网页上传的并发由管理员在「下载与资源」配置；只返回这几个数值，不暴露其他资源配置。
                 user._scope(token)
@@ -914,6 +934,10 @@ class TgDriveASGI(StaticFiles):
                 if download and method == "POST":
                     result = await self.offline.control(account.id, int(download[1]), download[2], item=payload.get("item"), private_scope=private_scope, private_activity=private_activity)
                     return (204, None, {}) if result is None else (200, result, {"Cache-Control": "no-store"})
+            if route == "/private/cache/session" and method == "POST":
+                return 200, self.client_cache.private_session(token, access, payload.get("device")), {}
+            if route == "/private/cache/keys" and method == "POST":
+                return 200, self.client_cache.private_keys(token, access, payload.get("device"), payload.get("etags")), {}
             if route == "/private/status" and method == "GET":
                 return 200, self.private_space.status(token, origin), {}
             if route == "/private/passkeys" and method == "GET":

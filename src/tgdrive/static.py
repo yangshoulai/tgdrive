@@ -59,7 +59,8 @@ class StaticFiles:
                 data = html.encode("utf-8")
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
         headers = {"Content-Type": content_type, "Content-Length": str(len(data)),
-                   "Cache-Control": "no-cache" if candidate.name == "index.html" else "public, max-age=31536000, immutable",
+                   # sw.js 的地址固定，必须每次校验，浏览器才能及时取得新版本（其余资源文件名带内容哈希）。
+                   "Cache-Control": "no-cache" if candidate.name in ("index.html", "sw.js") else "public, max-age=31536000, immutable",
                    **PAGE_SECURITY_HEADERS}
         if https:
             headers["Strict-Transport-Security"] = "max-age=31536000"

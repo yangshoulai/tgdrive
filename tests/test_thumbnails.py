@@ -358,8 +358,9 @@ class ThumbnailCacheTests(unittest.TestCase):
         headers = self.request("/api/user/v1/thumbnail?path=a.jpg&v=content.thumb.123")[1]
         self.assertEqual(headers["cache-control"], "private, no-cache")
 
-    def test_private_thumbnail_uses_session_grant_and_long_version_cache(self):
-        # 地址里不带解锁令牌，浏览器缓存键在多次解锁之间保持不变；授权取自登录会话当前的私密授权。
+    def test_private_thumbnail_uses_session_grant_and_is_never_http_cached(self):
+        # 地址里不带解锁令牌，同一版本在多次解锁之间地址不变；授权取自登录会话当前的私密授权。
+        # 私密明文不进入浏览器 HTTP 缓存，本机缓存只能由 Service Worker 加密保存（docs/client-cache-design.md）。
         seen = []
         self.app.private_space = SimpleNamespace(session_grants={"session-token": "grant"},
                                                  files=lambda token, access: seen.append((token, access)) or self.app.user)
@@ -367,11 +368,8 @@ class ThumbnailCacheTests(unittest.TestCase):
                                              {"cookie": "tg_session=session-token"})
         self.assertEqual((status, data), (200, WEBP))
         self.assertEqual(seen, [("session-token", "grant")])
-        self.assertEqual(headers["cache-control"], "private, max-age=31536000, immutable")
+        self.assertEqual(headers["cache-control"], "no-store")
         self.assertEqual(headers["referrer-policy"], "no-referrer")
-        status, headers, _ = self.request("/api/user/v1/private/thumbnail?path=hidden.jpg&bucket_id=9&v=content.thumb.122",
-                                          {"cookie": "tg_session=session-token"})
-        self.assertEqual(headers["cache-control"], "private, no-cache", "旧版本地址仍需回源验证")
 
     def test_conditional_response_preserves_policy_and_sends_no_image(self):
         path = "/api/user/v1/thumbnail?path=a.jpg&bucket_id=9&v=content.thumb.123"

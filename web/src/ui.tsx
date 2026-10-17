@@ -1,5 +1,5 @@
 /** Tessera 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
-import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type KeyboardEventHandler, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type KeyboardEventHandler, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { BRAND, TAGLINE } from "./brand";
 import { FILE_PAGE_SIZES } from "./pagination";
@@ -329,6 +329,9 @@ export function Segmented<T extends string>({ value, options, onChange, label, d
 const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 const modalStack: HTMLElement[] = [];
 const focusable = (node: HTMLElement) => Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(item => item.tabIndex >= 0 && item.getClientRects().length > 0);
+const WINDOW_POINTER = "(min-width: 861px) and (hover: hover) and (pointer: fine)";
+const RESIZE_CURSORS = { n: "ns-resize", e: "ew-resize", s: "ns-resize", w: "ew-resize", ne: "nesw-resize", se: "nwse-resize", sw: "nesw-resize", nw: "nwse-resize" } as const;
+type ResizeDirection = keyof typeof RESIZE_CURSORS;
 
 /* 焦点框只在键盘导航时显示：Tab、方向键等切到键盘模式，指针按下切回指针模式。
  * Esc、Enter 不改变模式，所以鼠标打开的弹窗按 Esc 关闭后，焦点归还到原按钮时也不会出现焦点框。 */
@@ -344,8 +347,8 @@ export function isShortcutControl(target: Element): boolean {
   return Boolean(target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='slider'], [role='spinbutton'], [role='combobox'], [role^='menu'], .menu, .art-settings"));
 }
 
-export function Modal({ title, description, onClose, children, footer, actions, size: modalSize = "md", icon, leading, tone, dismissible = true, closable = true, className = "", initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false, movable = false, resizable }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean; /** 拖动头部移动窗口（正常与最小化分别记住位置，最大化与全屏时不生效） */ movable?: boolean;
-  /** 右下角拖动调整窗口大小；值是记住尺寸用的名称（同名窗口共用），双击拖动角还原默认大小。窄屏、最大化、全屏与最小化时不生效。 */ resizable?: string }) {
+export function Modal({ title, description, onClose, children, footer, actions, size: modalSize = "md", icon, leading, tone, dismissible = true, closable = true, className = "", style, initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false, movable = false, resizable }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; style?: CSSProperties; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean; /** 拖动头部移动窗口（正常与最小化分别记住位置，最大化与全屏时不生效） */ movable?: boolean;
+  /** 桌面上拖动四边或四角调整窗口大小；值是记住尺寸用的名称（同名窗口共用），双击边角还原默认大小。手机、最大化、全屏与最小化时不生效。 */ resizable?: string }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
@@ -366,30 +369,62 @@ export function Modal({ title, description, onClose, children, footer, actions, 
   const [size, setSize] = useState<{ width: number; height: number } | null>(() => {
     try { const value = sizeKey ? JSON.parse(localStorage.getItem(sizeKey) ?? "null") : null; return value && value.width > 0 && value.height > 0 ? value : null; } catch { return null; }
   });
-  const [resizing, setResizing] = useState(false);
-  const sized = Boolean(resizable && size && !expanded && !minimized);
-  function startResize(event: ReactPointerEvent<HTMLElement>) {
+  const [windowPointer, setWindowPointer] = useState(() => window.matchMedia(WINDOW_POINTER).matches);
+  const [resizing, setResizing] = useState<ResizeDirection | null>(null);
+  const resizeCleanup = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    const media = window.matchMedia(WINDOW_POINTER);
+    const sync = () => { resizeCleanup.current?.(); setResizing(null); setWindowPointer(media.matches); };
+    media.addEventListener("change", sync);
+    return () => { media.removeEventListener("change", sync); resizeCleanup.current?.(); };
+  }, []);
+  const sized = Boolean(resizable && windowPointer && size && !expanded && !minimized);
+  const positionable = movable && !expanded && (minimized || windowPointer);
+  function startResize(event: ReactPointerEvent<HTMLElement>, direction: ResizeDirection) {
     const node = ref.current;
-    if (!resizable || !node || expanded || minimized || event.button !== 0 || !event.isPrimary) return;
+    if (!resizable || !windowPointer || !node || expanded || minimized || event.pointerType === "touch" || event.button !== 0 || !event.isPrimary) return;
     event.preventDefault(); event.stopPropagation();
+    resizeCleanup.current?.();
     const rect = node.getBoundingClientRect(), startX = event.clientX, startY = event.clientY, base = offsets.normal;
-    const maxWidth = window.innerWidth - 16, maxHeight = window.innerHeight - 16;
-    let latest = { width: rect.width, height: rect.height };
-    setResizing(true);
+    const outer = backdrop.current && getComputedStyle(backdrop.current);
+    const west = direction.includes("w"), east = direction.includes("e"), north = direction.includes("n"), south = direction.includes("s");
+    const maxWidth = Math.min(west ? rect.right - 8 : window.innerWidth - 8 - rect.left, window.innerWidth - (outer ? parseFloat(outer.paddingLeft) + parseFloat(outer.paddingRight) : 0));
+    const maxHeight = Math.min(north ? rect.bottom - 8 : window.innerHeight - 8 - rect.top, window.innerHeight - (outer ? parseFloat(outer.paddingTop) + parseFloat(outer.paddingBottom) : 0));
+    // 自动适配的竖屏或矮窗口可能小于常规最小尺寸，开始拖动时不强制放大。
+    const minWidth = Math.min(420, rect.width, maxWidth), minHeight = Math.min(300, rect.height, maxHeight);
+    const handle = event.currentTarget, pointerId = event.pointerId;
+    handle.setPointerCapture(pointerId);
+    let latest = { width: rect.width, height: rect.height }, changed = false;
+    setResizing(direction);
     const move = (next: PointerEvent) => {
-      const width = Math.round(Math.max(420, Math.min(maxWidth, rect.width + next.clientX - startX)));
-      const height = Math.round(Math.max(300, Math.min(maxHeight, rect.height + next.clientY - startY)));
+      if (next.pointerId !== pointerId) return;
+      const dx = next.clientX - startX, dy = next.clientY - startY;
+      if (!dx && !dy) return;
+      const width = west || east ? Math.round(Math.max(minWidth, Math.min(maxWidth, rect.width + (west ? -dx : dx)))) : rect.width;
+      const height = north || south ? Math.round(Math.max(minHeight, Math.min(maxHeight, rect.height + (north ? -dy : dy)))) : rect.height;
       latest = { width, height };
+      changed = true;
       setSize(latest);
-      // 窗口居中显示：尺寸变化时同步平移一半，让左上角保持不动，拖动角跟手。
-      setOffsets(current => ({ ...current, normal: { x: base.x + (width - rect.width) / 2, y: base.y + (height - rect.height) / 2 } }));
+      // 弹窗由网格居中：补偿尺寸变化引起的位移，让拖动边的对侧保持不动。
+      setOffsets(current => ({ ...current, normal: {
+        x: base.x + (west ? -1 : east ? 1 : 0) * (width - rect.width) / 2,
+        y: base.y + (north ? -1 : south ? 1 : 0) * (height - rect.height) / 2,
+      } }));
     };
-    const end = () => {
-      setResizing(false);
-      try { localStorage.setItem(sizeKey, JSON.stringify(latest)); } catch { /* 隐私模式不保存 */ }
+    const cleanup = () => {
       window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end);
+      window.removeEventListener("resize", end);
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+      resizeCleanup.current = null;
     };
+    const end = (next: Event) => {
+      if (next instanceof PointerEvent && next.pointerId !== pointerId) return;
+      cleanup(); setResizing(null);
+      if (changed) try { localStorage.setItem(sizeKey, JSON.stringify(latest)); } catch { /* 隐私模式不保存 */ }
+    };
+    resizeCleanup.current = cleanup;
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", end); window.addEventListener("pointercancel", end);
+    window.addEventListener("resize", end);
   }
   function resetSize() {
     setSize(null); setOffsets(current => ({ ...current, normal: { x: 0, y: 0 } }));
@@ -408,7 +443,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     if (!movable || !node || expanded || event.button !== 0 || !event.isPrimary) return;
     if ((event.target as Element).closest("button, a, input, select, textarea, [role='button'], .menu")) return;
     // 窄屏的预览几乎占满屏幕，只允许拖动最小化的小窗。
-    if (!minimized && !window.matchMedia("(min-width: 641px)").matches) return;
+    if (!minimized && !windowPointer) return;
     event.preventDefault();
     const mode = minimized ? "mini" : "normal", base = offsets[mode], rect = node.getBoundingClientRect();
     const startX = event.clientX, startY = event.clientY;
@@ -529,9 +564,9 @@ export function Modal({ title, description, onClose, children, footer, actions, 
   }, [minimized, initialFocus]);
   return createPortal(
     <div ref={backdrop} className={`modal-backdrop${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}${minimized ? " is-minimized" : ""}`} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && dismissible && !pinned && !minimized && modalStack.at(-1) === ref.current) onClose(); }}>
-      <div ref={ref} className={`modal modal-${modalSize} ${className}${expanded ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}${movable && !expanded ? " is-movable" : ""}${moving ? " is-moving" : ""}${sized ? " is-sized" : ""}${resizing ? " is-resizing" : ""}`}
-        style={{ ...(movable && !expanded && (offset.x || offset.y) ? { translate: `${offset.x}px ${offset.y}px` } : {}),
-          ...(sized && size ? { width: `min(${size.width}px, 100vw - 16px)`, maxWidth: "none", height: `min(${size.height}px, 100dvh - 16px)`, maxHeight: `min(${size.height}px, 100dvh - 16px)` } : {}) }} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={handleWindowKey}>
+      <div ref={ref} className={`modal modal-${modalSize} ${className}${expanded ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}${positionable ? " is-movable" : ""}${moving ? " is-moving" : ""}${sized ? " is-sized" : ""}${resizing ? " is-resizing" : ""}`}
+        style={{ ...style, ...(positionable && (offset.x || offset.y) ? { translate: `${offset.x}px ${offset.y}px` } : {}), ...(resizing ? { "--modal-resize-cursor": RESIZE_CURSORS[resizing] } : {}),
+          ...(sized && size ? { "--modal-width": `${size.width}px`, "--modal-height": `${size.height}px` } : {}) } as CSSProperties} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={handleWindowKey}>
         <header className="modal-header" onPointerDown={movable ? startMove : undefined}>
           {leading ?? (icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>)}
           <div className="modal-heading">
@@ -558,7 +593,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
         {children && <div className="modal-body">{children}</div>}
         {footer && <footer className="modal-footer">{footer}</footer>}
         {minimized && minimizedContent && <div className="modal-minimized-controls">{minimizedContent}</div>}
-        {resizable && !expanded && !minimized && <span className="modal-resize" aria-hidden="true" title="拖动调整窗口大小，双击还原" onPointerDown={startResize} onDoubleClick={resetSize} />}
+        {resizable && windowPointer && !expanded && !minimized && (Object.keys(RESIZE_CURSORS) as ResizeDirection[]).map(direction => <span key={direction} className={`modal-resize modal-resize-${direction}`} aria-hidden="true" title="拖动调整窗口大小，双击还原" onPointerDown={event => startResize(event, direction)} onDoubleClick={resetSize} />)}
       </div>
     </div>, document.body,
   );

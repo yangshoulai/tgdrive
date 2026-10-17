@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 25
+    SCHEMA_VERSION = 26
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -661,6 +661,11 @@ class Metadata:
                     if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 db.execute("PRAGMA user_version = 25")
+            if version < 26:
+                # 浏览器本地缓存（docs/client-cache-design.md）：纪元参与缓存密钥派生，「重置所有设备的缓存」只需加一。
+                if "cache_epoch" not in {row[1] for row in db.execute("PRAGMA table_info(users)")}:
+                    db.execute("ALTER TABLE users ADD COLUMN cache_epoch INTEGER NOT NULL DEFAULT 0")
+                db.execute("PRAGMA user_version = 26")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

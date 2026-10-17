@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { BRAND, SITE } from "../brand";
 import * as api from "../api";
+import { ClientCachePolicy } from "./client-cache";
 import { Resources } from "./resources";
 
 import { Button, Field, Icon, KeyValue, PageHeader, Panel, SetupGuide, SkeletonRows, toast, useDocumentTitle } from "../ui";
@@ -91,6 +92,7 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
           ]} />
         </Panel>
         <Resources />
+        <ClientCachePolicy />
       </div>
     </>
   );

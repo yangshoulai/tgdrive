@@ -79,6 +79,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   const markReady = () => { setRatio(player.video.videoWidth, player.video.videoHeight); ready = true; notify("ready"); if (player.video.readyState >= 2) events?.onVideoFrame?.(player.video); };
   // iOS Safari 在用户点播放前不预加载画面，只会触发 loadedmetadata：读到时长即视为就绪，避免误报“加载较慢”。
   player.on("video:loadedmetadata", () => { markReady(); updateProgress(); });
+  player.on("video:resize", () => setRatio(player.video.videoWidth, player.video.videoHeight));
   player.on("video:loadeddata", markReady);
   player.on("video:canplay", markReady);
   player.on("video:playing", markReady);
@@ -89,6 +90,9 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   player.on("video:seeked", () => { updateProgress(); if (player.video.readyState >= 2) markReady(); });
   player.on("video:ended", () => { markReady(); events?.onPlaying(false); events?.onEnded(); });
   player.on("video:error", () => notify("failed"));
+  // ArtPlayer 默认只监听浏览器窗口；弹窗拖动改变容器尺寸时也要更新比例与控件布局。
+  const observer = new ResizeObserver(() => player.emit("resize"));
+  observer.observe(container);
   updateProgress();
   /** 上一个／下一个紧跟播放键，播放列表在设置前，播放模式放进设置菜单；只有一个文件时都不显示。 */
   const refreshNavigation = () => {
@@ -172,7 +176,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       return switching;
     },
     destroy: () => {
-      destroyed = true; version++; document.removeEventListener("keydown", exitWebScreen, true);
+      destroyed = true; version++; observer.disconnect(); document.removeEventListener("keydown", exitWebScreen, true);
       if (cover) { cover.onload = null; cover.src = ""; }
       player.destroy(); container.style.removeProperty("--preview-video-ratio");
       if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);

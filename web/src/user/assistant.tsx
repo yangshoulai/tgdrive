@@ -144,7 +144,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const locationKey = location.view === "files" || privateMode && location.view === "private" ? location.prefix : privateMode ? api.PRIVATE_PREFIX : "";
   const headerMark = useMarkState(runId ? live ?? EMPTY_LIVE : null);
   const chosenScope = scopeTarget === HERE ? locationKey : scopeTarget;
-  const mention = useMentions({ draft, location: locationKey, enabled: !privateMode && config.notice_ack && !(config.usage.limit && config.usage.today >= config.usage.limit),
+  const mention = useMentions({ draft, location: locationKey, root: privateMode ? api.PRIVATE_PREFIX : "", enabled: config.notice_ack && !(config.usage.limit && config.usage.today >= config.usage.limit),
     onPick: (from, path) => input.current?.insertMention(from, path) });
 
   useEffect(() => {
@@ -485,7 +485,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const effectiveScope = chosenScope !== null ? display(chosenScope) : conversationScope;
   const scopeKey = effectiveScope.replace(/^\//, "");
   const outside = mention.mentions.filter(item => !item.key.startsWith(scopeKey));
-  const expandedScope = outside.length ? display(commonFolder([scopeKey, ...mention.mentions.map(item => item.key)].filter(Boolean))) : null;
+  // 私密对话的作用域固定为私密空间，引用不会超出。
+  const expandedScope = outside.length && !privateMode ? display(commonFolder([scopeKey, ...mention.mentions.map(item => item.key)].filter(Boolean))) : null;
   const usage = config.usage;
   const usageRatio = usage.limit ? usage.today / usage.limit : 0;
   const context = detail?.context ?? null;
@@ -549,7 +550,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         <AttachmentTray attachments={attachments} canSee={canSee} />
         {/* 输入框即时渲染 Markdown、@ 引用胶囊、链接与列表；内容仍是 Markdown 纯文本。 */}
         <AssistantComposer ref={input} value={draft} onChange={setDraft} onSubmit={() => void send()} maxLength={DRAFT_LIMIT}
-          placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : privateMode ? "在私密空间里想找什么，或想怎样整理？支持 Markdown" : "想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown"}
+          placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : privateMode ? "在私密空间里想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown" : "想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown"}
           disabled={!config.notice_ack || exhausted} mentions={mention.known.map(item => display(item.key))}
           onToken={mention.setToken} onKey={mention.onKey} onPasteFiles={files => addFiles(files, true)} />
         <div className="assistant-controls">
@@ -564,7 +565,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           {canAttach && <button type="button" className="assistant-attach-button" onClick={() => filePicker.current?.click()} aria-label="添加附件"
             title={`添加附件（也可以粘贴或拖入），随对话保存${canSee ? "；图片会发给模型识别" : ""}`}><Icon name="paperclip" size={15} /></button>}
           <input ref={filePicker} type="file" multiple hidden onChange={event => { addFiles([...(event.target.files ?? [])]); event.target.value = ""; input.current?.focus(); }} />
-          <span className="assistant-enter-hint">{privateMode ? "Enter 发送 · Shift+Enter 换行" : "@ 引用 · Enter 发送 · Shift+Enter 换行"}</span>
+          <span className="assistant-enter-hint">@ 引用 · Enter 发送 · Shift+Enter 换行</span>
           {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
             : <button type="button" className="assistant-send" aria-label="发送" disabled={(!draft.trim() && !attachments.items.length) || attachments.pending || sending || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)}
               title={attachments.pending ? "附件处理中" : "发送（Enter）"} onClick={() => void send()}>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { BRAND } from "./brand";
 import * as api from "./api";
+import { startLocalCache } from "./cache-client";
 import { DocsPage } from "./docs/docs";
 
 import { SharePage } from "./share";
@@ -17,6 +18,7 @@ import { TrashView } from "./user/trash";
 import { DownloadsView } from "./user/downloads";
 import { DownloadTray } from "./user/download-tray";
 import { PreviewHost } from "./user/preview-host";
+import { CacheTasksProvider, CacheTray } from "./user/cache";
 import { AssistantDock, AssistantDrawer, AssistantLauncher, useAssistantConfig, useAssistantShortcut } from "./user/assistant";
 import { takePageImportRequest, usePageImport } from "./user/page-import";
 import { PrivateSessionProvider } from "./user/private-session";
@@ -114,8 +116,8 @@ function readLocation(): { section: Section; prefix: string } {
   const view = params.get("view");
   // 文件助手全页：prefix 字段沿用为对话编号（?view=assistant&c=<对话>）。
   if (view === "assistant") return { section: "assistantPage", prefix: params.get("c") ?? "" };
-  // 用户设置分「账号」与「访问密钥」两个标签页，prefix 字段沿用为标签名；旧地址 ?view=keys 打开访问密钥标签。
-  if (view === "account" || view === "keys") return { section: "account", prefix: view === "keys" || params.get("tab") === "keys" ? "keys" : "" };
+  // 用户设置分「账号」「访问密钥」「本机缓存」三个标签页，prefix 字段沿用为标签名；旧地址 ?view=keys 打开访问密钥标签。
+  if (view === "account" || view === "keys") return { section: "account", prefix: view === "keys" ? "keys" : params.get("tab") === "keys" || params.get("tab") === "cache" ? params.get("tab")! : "" };
   return { section: view === "shared" || view === "trash" || view === "private" || view === "downloads" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
 }
 
@@ -125,7 +127,7 @@ function sectionUrl(section: Section, prefix = "") {
   if (section !== "files") params.set("view", section === "assistantPage" ? "assistant" : section);
   if ((section === "files" || section === "private") && prefix) params.set("path", section === "private" ? prefix.replace(api.PRIVATE_PREFIX, "") : prefix);
   if (section === "assistantPage" && prefix) params.set("c", prefix);
-  if (section === "account" && prefix === "keys") params.set("tab", "keys");
+  if (section === "account" && (prefix === "keys" || prefix === "cache")) params.set("tab", prefix);
   const query = params.toString();
   return query ? `/?${query}` : "/";
 }
@@ -176,6 +178,8 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const [sharedCount, setSharedCount] = useState<number | undefined>();
   const [theme, setTheme] = useState<ThemePreference>(themePreference);
   useEffect(() => onThemeChange(setTheme), []);
+  // 浏览器本地缓存（docs/client-cache-design.md）：登录后注册 Service Worker，不支持的浏览器保持现状。
+  useEffect(() => startLocalCache(), []);
   const [status, setStatus] = useState<api.SystemStatus | null>(null);
   const [, setConfigVersion] = useState(0);
   const [uploadRevision, setUploadRevision] = useState(0);
@@ -242,7 +246,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
           onConversationChange={id => { if ((id ?? "") !== (new URLSearchParams(window.location.search).get("c") ?? "")) window.history.replaceState(null, "", sectionUrl("assistantPage", id ?? "")); }} />;
   } else if (section === "account") {
     content = <UserSettingsPage session={session} onSessionChange={onSessionChange} assistant={assistantAvailable} onOpenConversation={id => navigate("assistantPage", id)}
-      tab={location.prefix === "keys" ? "keys" : "account"} onTabChange={tab => navigate("account", tab === "keys" ? "keys" : "")}
+      tab={location.prefix === "keys" || location.prefix === "cache" ? location.prefix : "account"} onTabChange={tab => navigate("account", tab === "account" ? "" : tab)}
       bucketName={usage ? `user-${usage.id}` : null} keysAvailable={workspaceReady && !locked} />;
   } else if (isAdminSection(section)) {
     if (!isAdmin) content = <AccessDenied />;
@@ -301,12 +305,14 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },
       ] }}>
       <PrivateSessionProvider enabled={workspaceReady}>
+      <CacheTasksProvider enabled={workspaceReady} privateAllowed={section === "private"}>
       <PreviewHost enabled={workspaceReady} privateAllowed={section === "private"}>
         {content}
       <div className="tray-stack">
         {workspaceReady && <DownloadTray hidden={section === "downloads"} revision={downloadRevision} onOpenTasks={() => navigate("downloads")}
           onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCompleted={refreshUsage} />}
         <UploadTray queue={uploads} />
+        <CacheTray />
       </div>
       {/* 私密空间页面已解锁时显示私密对话（§24.8），其他页面显示普通对话。 */}
       {assistantAvailable && assistant.config && !assistantPage && <AssistantDock open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)}
@@ -315,6 +321,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         onOpenPage={id => { setAssistantOpen(false); navigate("assistantPage", id ?? ""); }} />}
       {/* 助手抽屉也在预览宿主内：消息里的附件图片直接打开预览。 */}
       </PreviewHost>
+      </CacheTasksProvider>
       {/* 旧版用户名账号：登录后必须先设置邮箱（之后用邮箱登录，也为邮箱验证做准备）。 */}
       {session.needs_email && <EmailDialog session={session} required onSaved={onSessionChange} onLogout={() => void logout()} />}
       </PrivateSessionProvider>

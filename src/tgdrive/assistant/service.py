@@ -1353,7 +1353,9 @@ class AssistantService:
                 candidates = [str(path) for path in (mentioned if isinstance(mentioned, list) else [])
                               if isinstance(path, str) and not path.endswith("/")]
                 candidates += [ATTACHMENT_PREFIX + item["name"] for item in uploaded if item["name"] in files]
-                keys = {path: files[path[len(ATTACHMENT_PREFIX):]] if path.startswith(ATTACHMENT_PREFIX) else path.lstrip("/")
+                # 引用保存的是显示路径：私密对话相对私密空间根，读取图片时补回私密前缀。
+                base = PRIVATE_PREFIX if is_private(conversation_id) else ""
+                keys = {path: files[path[len(ATTACHMENT_PREFIX):]] if path.startswith(ATTACHMENT_PREFIX) else base + path.lstrip("/")
                         for path in candidates}
                 pictures = [path for path in candidates if vision.is_image(path, None)]
                 item = {"role": "user", "content": message["text"] + note}
