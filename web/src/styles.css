@@ -2133,7 +2133,19 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
 .md :not(pre) > code { padding: .15em .4em; border-radius: var(--radius-xs); background: color-mix(in srgb, var(--ink) 8%, transparent); font-size: .88em; }
 .md pre { margin: 0 0 1em; padding: 16px; overflow-x: auto; background: var(--surface-sunken); font-size: var(--text-sm); line-height: 1.7; }
 .md .src-fence pre { margin: 0; }
-.md img { max-width: 100%; height: auto; border-radius: var(--radius-sm); }
+.md img { max-width: 100%; height: auto; border-radius: var(--radius-sm); vertical-align: middle; }
+/* README 常见的 HTML：align 属性按原意对齐；details 可展开；kbd 键帽。 */
+.md [align="center"] { text-align: center; }
+.md [align="right"] { text-align: right; }
+.md details { margin: 0 0 1em; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.md summary { cursor: pointer; font-weight: 600; }
+.md kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: var(--radius-xs); background: var(--surface-sunken); font-family: var(--font-mono); font-size: .85em; }
+/* 外部图片占位：点击后加载本文档的全部外部图片。 */
+.md .md-remote-image { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; margin: 2px 0; padding: 3px 8px; border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-2); font: inherit; font-size: var(--text-xs); vertical-align: middle; cursor: pointer; }
+.md .md-remote-image span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.md .md-remote-image small { color: var(--accent-ink); }
+.md .md-remote-image:hover { border-color: var(--accent); }
+.md .md-missing-image { color: var(--ink-3); font-size: var(--text-xs); }
 .md-table-wrap { margin: 0 0 1em; overflow-x: auto; }
 .md table { border-collapse: collapse; font-size: .95em; }
 .md th, .md td { padding: 7px 13px; border: 1px solid var(--line); text-align: left; }
@@ -3268,3 +3280,13 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .storage-meter .storage-local-note { color: var(--ink-3); font-size: var(--text-xs); }
 .storage-local-note .link-button { font-size: var(--text-xs); }
 .local-cache-items.is-loading { opacity: .6; transition: opacity var(--duration-fast); }
+
+/* 手机上的普通预览窗口（PDF、不支持的类型）：头部保持一行——去掉文件图标、全屏按钮与分隔线，标题省略，操作按钮靠右。 */
+@media (max-width: 560px) {
+  .preview-modal:not(.is-immersive):not(.is-minimized) .modal-header { flex-wrap: nowrap; }
+  .preview-modal:not(.is-immersive):not(.is-minimized) .modal-header > .file-tile,
+  .preview-modal:not(.is-immersive):not(.is-minimized) .modal-window-actions > [aria-keyshortcuts="f"],
+  .preview-modal:not(.is-immersive):not(.is-minimized) .modal-window-actions > .modal-actions-divider { display: none; }
+  .preview-modal:not(.is-immersive):not(.is-minimized) .modal-heading { flex: 1; min-width: 0; }
+  .preview-modal:not(.is-immersive):not(.is-minimized) .modal-window-actions { flex: none; width: auto; gap: 0; }
+}

@@ -80,7 +80,7 @@ export function createTextView(container: HTMLElement, source: string, name: str
 
 const escape = (value: string) => value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]!));
 export function renderMarkdown(source: string, resolveImage?: (src: string) => string | null): string {
-  const md = new MarkdownIt({ html: false, linkify: true, highlight: (code, tag) =>
+  const md = new MarkdownIt({ html: true, linkify: true, highlight: (code, tag) =>
     highlight(code, languageOf(tag)).map(token => token.type ? `<span class="hl-${token.type}">${escape(token.text)}</span>` : escape(token.text)).join("") });
   md.core.ruler.after("inline", "task_lists", state => {
     state.tokens.forEach((token, index) => {
@@ -109,13 +109,33 @@ export function renderMarkdown(source: string, resolveImage?: (src: string) => s
     return link ? link(tokens, index, options, env, renderer) : renderer.renderToken(tokens, index, options);
   };
   md.renderer.rules.image = (tokens, index) => {
-    const token = tokens[index], src = String(token.attrGet("src") ?? "");
-    const resolved = /^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(src) ? src : resolveImage?.(src);
-    if (!resolved) return safeLink(src) ? `<a href="${escape(src)}" rel="noreferrer noopener">${escape(token.content || "图片")}</a>` : escape(token.content);
-    return `<img src="${escape(resolved)}" alt="${escape(token.content)}" loading="lazy">`;
+    const token = tokens[index];
+    return `<img src="${escape(String(token.attrGet("src") ?? ""))}" alt="${escape(token.content)}">`;
   };
   md.renderer.rules.table_open = () => '<div class="md-table-wrap"><table>';
   md.renderer.rules.table_close = () => '</table></div>';
-  // 禁止原始 HTML，输出仍经过清洗，防止插件或未来扩展绕过内容边界。
-  return DOMPurify.sanitize(md.render(source), { ADD_ATTR: ["loading"], FORBID_TAGS: ["style", "form", "iframe"], FORBID_ATTR: ["style"] });
+  // 允许 README 里常见的少量 HTML（居中的 div、picture、details、kbd 等），全部经 DOMPurify 清洗：
+  // 不执行脚本、不加载样式与框架；图片只加载同目录（含子目录）的文件和内嵌 data 图片，外部图片先换成占位，由用户点击后再加载；
+  // picture 的 source 一律去掉（srcset 可能指向外部地址），保留其中的 img；链接只放行 http(s) 与 mailto。
+  const purify = DOMPurify;
+  purify.addHook("afterSanitizeAttributes", node => {
+    const element = node as Element;
+    if (element.tagName === "IMG") {
+      const src = element.getAttribute("src") ?? "";
+      element.removeAttribute("srcset");
+      element.setAttribute("loading", "lazy");
+      if (/^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(src)) return;
+      if (/^https?:\/\//i.test(src)) { element.removeAttribute("src"); element.setAttribute("data-remote-src", src); return; }
+      const resolved = src ? resolveImage?.(src) : null;
+      if (resolved) element.setAttribute("src", resolved);
+      else { element.removeAttribute("src"); element.setAttribute("data-missing", ""); }
+    } else if (element.tagName === "A") {
+      if (!safeLink(element.getAttribute("href") ?? "")) element.removeAttribute("href");
+      element.setAttribute("rel", "noreferrer noopener");
+      element.removeAttribute("target");
+    } else if (element.tagName === "INPUT" && !(element.getAttribute("type") === "checkbox" && element.hasAttribute("disabled"))) element.remove();
+  });
+  try {
+    return purify.sanitize(md.render(source), { ADD_ATTR: ["loading"], FORBID_TAGS: ["style", "form", "iframe", "source", "video", "audio", "object", "embed", "select", "textarea"], FORBID_ATTR: ["style", "id"] });
+  } finally { purify.removeHook("afterSanitizeAttributes"); }
 }

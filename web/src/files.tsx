@@ -233,15 +233,24 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
   const failed = Boolean(mediaFailed || error);
   const extension = name.match(/\.([a-z\d]{1,8})$/i)?.[1].toUpperCase();
   const unplayable = (kind === "video" || kind === "audio") && !isPlayable(name, contentType);
+  const lower = (extension ?? "").toLowerCase();
+  // 不支持在线查看的常见类型给出具体的打开方式，其余用通用说明。
+  const advice = /^(docx?|xlsx?|pptx?|odt|ods|odp|pages|numbers|key|rtf)$/.test(lower) ? "Office 与办公文档请下载后用 Word、Excel、Keynote 等应用打开。"
+    : /^(zip|rar|7z|tar|gz|tgz|bz2|xz|zst)$/.test(lower) ? "压缩包不能在线查看，下载后解压即可使用。"
+    : /^(exe|msi|dmg|pkg|apk|ipa|deb|rpm|iso|img)$/.test(lower) ? "安装包与磁盘映像请下载后在对应的系统中打开。"
+    : "下载后用本地应用打开。";
   const fallback = (
     <div className="preview-fallback">
       <FileTile kind={kind} size="xl" />
-      <h3>{failed ? "预览加载失败" : unplayable ? `浏览器无法播放${extension ? ` ${extension} ` : "此"}格式` : "此类型不支持在线预览"}</h3>
-      <p>{error || (failed ? "文件未能加载或当前浏览器不支持此格式。" : unplayable ? "请下载后用本地播放器打开。" : "下载后使用本地应用打开。")}</p>
-      <div className="preview-recovery">{failed ? <Button size="sm" icon="refresh" onClick={onRetry}>重试</Button>
-        : <ButtonLink variant="primary" size="sm" icon="download" href={downloadUrl}>下载文件</ButtonLink>}</div>
+      <h3>{failed ? "预览没有加载出来" : unplayable ? `浏览器无法播放${extension ? ` ${extension} ` : "这种"}格式` : `${extension ? `${extension} 文件` : "这种文件"}暂不支持在线查看`}</h3>
+      <p>{error || (failed ? "可能是网络中断，或浏览器不支持这个格式。可以重试，或下载后打开。" : unplayable ? "请下载后用本地播放器打开，例如 VLC、IINA。" : advice)}</p>
+      <div className="preview-recovery">
+        {failed && <Button size="sm" icon="refresh" onClick={onRetry}>重试</Button>}
+        <ButtonLink variant={failed ? "secondary" : "primary"} size="sm" icon="download" href={downloadUrl}>下载文件</ButtonLink>
+      </div>
     </div>
   );
+
   if (unplayable) return fallback;
   if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onLyricLine={onLyricLine} />;
   if (mediaFailed) return fallback;

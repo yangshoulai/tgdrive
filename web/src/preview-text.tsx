@@ -13,6 +13,43 @@ export const PreviewToolsContext = createContext<HTMLElement | null>(null);
 
 type Heading = { index: number; level: number; text: string };
 
+/**
+ * Markdown 里的外部图片默认不加载（打开文档不应向第三方暴露访问记录），先换成占位按钮；点任意一个后加载本文档的全部外部图片。
+ * 找不到的本地图片显示替代文字。只用 DOM API 创建节点。
+ */
+function holdRemoteImages(root: HTMLElement) {
+  for (const image of root.querySelectorAll<HTMLImageElement>("img[data-remote-src]")) {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "md-remote-image"; button.dataset.remoteSrc = image.dataset.remoteSrc ?? ""; button.title = `外部图片：${image.dataset.remoteSrc}`;
+    const label = document.createElement("span"); label.textContent = image.alt || "外部图片";
+    const hint = document.createElement("small"); hint.textContent = "点击加载";
+    button.append(label, hint);
+    image.replaceWith(button);
+  }
+  const missing = (image: HTMLImageElement) => {
+    const text = document.createElement("span"); text.className = "md-missing-image"; text.textContent = image.alt || "图片";
+    text.title = "找不到这张图片，或它不是浏览器能显示的格式";
+    image.replaceWith(text);
+  };
+  for (const image of root.querySelectorAll<HTMLImageElement>("img[data-missing]")) missing(image);
+  // 相对路径的图片可能不存在：加载失败时同样换成替代文字，不留破图标。
+  for (const image of root.querySelectorAll<HTMLImageElement>("img")) {
+    if (image.complete && image.naturalWidth === 0 && image.getAttribute("src")) missing(image);
+    else image.addEventListener("error", () => missing(image), { once: true });
+  }
+}
+function loadRemoteImages(root: HTMLElement) {
+  for (const button of root.querySelectorAll<HTMLButtonElement>("button.md-remote-image")) {
+    const image = document.createElement("img");
+    image.src = button.dataset.remoteSrc ?? ""; image.alt = button.querySelector("span")?.textContent ?? ""; image.loading = "lazy"; image.referrerPolicy = "no-referrer";
+    image.addEventListener("error", () => {
+      const text = document.createElement("span"); text.className = "md-missing-image"; text.textContent = image.alt || "外部图片"; text.title = "外部图片无法加载";
+      image.replaceWith(text);
+    }, { once: true });
+    button.replaceWith(image);
+  }
+}
+
 export function TextPreview({ content, name, code = false, downloadUrl, resolveImage, onError }: {
   content: PreviewText; name: string; code?: boolean; downloadUrl: string; resolveImage?: (src: string) => string | null; onError: (reason: unknown) => void;
 }) {
@@ -40,6 +77,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
       if (cancelled || !host.current) return;
       if (mode === "render") {
         host.current.innerHTML = engine.renderMarkdown(content.text, resolver.current);
+        holdRemoteImages(host.current);
         setHeadings([...host.current.querySelectorAll("h1, h2, h3")].map((node, index) => ({ index, level: Number(node.tagName[1]), text: node.textContent?.trim() || "（无标题）" })));
       } else editor.current = engine.createTextView(host.current, content.text, name);
       setReady(true);
@@ -125,9 +163,11 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
 
   return <div className={`preview-text${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${content.truncated ? " is-truncated" : ""}${immersive ? paper ? " is-paper" : " is-code" : ""}`}>
     {immersive ? createPortal(toolbar, tools) : toolbar}
-    {!ready && <div className="preview-engine-loading" role="status"><span className="spinner" />正在加载文本组件…</div>}
+    {!ready && <div className="preview-engine-loading" role="status"><span className="spinner" />正在准备预览…</div>}
     <div className={immersive ? "preview-sheet" : undefined}>
       <div ref={host} className={mode === "render" ? "preview-doc md" : "preview-code-editor"} onClick={event => {
+        const remote = (event.target as Element).closest("button.md-remote-image");
+        if (remote && host.current) { event.preventDefault(); loadRemoteImages(host.current); return; }
         const button = (event.target as Element).closest<HTMLButtonElement>("button[data-copy-code]");
         const code = button?.closest(".src-fence")?.querySelector("code");
         if (code) void copyText(code.textContent ?? "", "代码已复制");
