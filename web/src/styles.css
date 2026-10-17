@@ -1017,7 +1017,8 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .settings-disclosure[open] > summary > svg:last-child { transform: rotate(180deg); }
 .disclosure-meta { margin-left: auto; color: var(--ink-3); font-size: var(--text-xs); font-weight: 400; }
 .settings-disclosure > summary .disclosure-meta + svg { margin-left: 0; }
-.disclosure-body { padding: 4px 0 16px; }
+/* 旧式 details 的内容通栏排列，只在自身范围内清除左右内边距。 */
+.settings-disclosure > .disclosure-body { padding: 4px 0 16px; }
 .share-save-status { margin-top: -8px; color: var(--ink-3); font-size: var(--text-xs); }
 .preview-recovery { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
 .file-thumbnail { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; }
