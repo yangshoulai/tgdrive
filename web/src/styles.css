@@ -638,10 +638,23 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .sidebar { position: sticky; top: 0; display: flex; height: 100vh; height: 100dvh; flex-direction: column; border-right: 1px solid var(--line); background: var(--surface-sunken); }
 .sidebar-top { display: flex; align-items: center; justify-content: space-between; height: 68px; padding: 0 14px 0 22px; }
 .sidebar-close { display: none; }
-.sidebar-nav { display: grid; align-content: start; flex: 1; gap: 20px; padding: 8px 12px 20px; overflow-y: auto; }
-.nav-group { display: grid; gap: 4px; }
-.nav-group + .nav-group { padding-top: 16px; border-top: 1px solid var(--line); }
-.nav-group-label { padding: 0 10px 4px; color: var(--ink-3); font-size: var(--text-xs); font-weight: 500; }
+.sidebar-nav { display: grid; align-content: start; flex: 1; gap: 14px; padding: 4px 12px 16px; overflow-y: auto; scrollbar-width: thin; }
+.sidebar-action { padding: 0 12px 12px; }
+/* 分组：标题是可点击的小字按钮，右侧箭头指示展开状态；列表用网格行高过渡收起，收起后不能被 Tab 到。 */
+.nav-group { display: grid; gap: 2px; }
+.nav-group-toggle { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 0; border-radius: var(--radius-sm); background: none; color: var(--ink-3); font-family: inherit; font-size: var(--text-xs); font-weight: 500; text-align: left; cursor: pointer; transition: color .12s, background-color .12s; }
+.nav-group-toggle > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-group-toggle > svg { flex: none; opacity: 0; transition: transform .2s cubic-bezier(.2, .8, .2, 1), opacity .12s; }
+.nav-group-toggle:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); color: var(--ink-2); }
+.nav-group-toggle:hover > svg, .nav-group-toggle:focus-visible > svg, .nav-group.is-collapsed .nav-group-toggle > svg { opacity: 1; }
+.nav-group.is-collapsed .nav-group-toggle > svg { transform: rotate(-90deg); }
+.nav-group-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--accent); }
+.nav-group-items { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .2s cubic-bezier(.2, .8, .2, 1); }
+.nav-group.is-collapsed .nav-group-items { grid-template-rows: 0fr; }
+.nav-group-list { display: grid; gap: 2px; min-height: 0; overflow: hidden; }
+.nav-group.is-collapsed .nav-group-list { visibility: hidden; transition: visibility 0s .2s; }
+@media (hover: none) { .nav-group-toggle > svg { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .nav-group-items, .nav-group-toggle > svg, .nav-group.is-collapsed .nav-group-list { transition: none; } }
 /* 当前项用主色区分，细标记与图标共同提示所在页面。 */
 .nav-item { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; height: 36px; padding: 0 10px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--ink-2); font-size: var(--text-sm); font-weight: 500; text-align: left; text-decoration: none; transition: background-color .12s, color .12s; }
 .nav-item > svg { flex: none; color: var(--ink-3); transition: color .12s; }
@@ -654,14 +667,18 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .nav-count { display: inline-grid; min-width: 20px; height: 20px; padding: 0 6px; place-items: center; border-radius: 999px; background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink-2); font-size: var(--text-xs); font-weight: 500; font-variant-numeric: tabular-nums; }
 .nav-item.is-active .nav-count { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent-ink); }
 .nav-external { color: var(--ink-3); }
-.sidebar-bottom { display: grid; gap: 10px; padding: 12px; }
-.account-row { display: flex; align-items: center; gap: 10px; padding: 12px 2px 0 6px; border-top: 1px solid var(--line); }
+.sidebar-bottom { display: grid; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--line); }
+.sidebar-links { display: grid; }
+.sidebar-link { display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 10px; border-radius: var(--radius-md); color: var(--ink-3); font-size: var(--text-xs); font-weight: 500; text-decoration: none; transition: background-color .12s, color .12s; }
+.sidebar-link > span { flex: 1; }
+.sidebar-link:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--ink); }
+.account-row { display: flex; align-items: center; gap: 10px; padding: 10px 2px 0 6px; border-top: 1px solid var(--line); }
 .account-copy { display: grid; flex: 1; min-width: 0; }
 .account-copy strong { overflow: hidden; font-size: var(--text-sm); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .account-copy small { color: var(--ink-3); font-size: var(--text-xs); }
 
 /* 存储卡片：已用容量是主数字，配额与百分比作为说明；有配额时显示进度条。 */
-.storage-meter { display: grid; gap: 6px; padding: 4px 10px 2px; }
+.storage-meter { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
 .storage-meter-head { display: flex; align-items: baseline; justify-content: space-between; color: var(--ink-3); font-size: var(--text-xs); font-weight: 500; width: 100%; padding: 0; border: 0; background: none; cursor: pointer; text-align: left; font-family: inherit; }
 .storage-meter-head > span { display: inline-flex; align-items: center; gap: 2px; }
 .storage-meter-head > span svg { transition: transform .15s ease; }
@@ -2413,7 +2430,7 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .assistant-call-detail code { word-break: break-all; }
 
 /* 侧栏入口 */
-.assistant-launch { display: flex; width: 100%; align-items: center; gap: 10px; margin-bottom: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); color: var(--ink); font-size: var(--text-sm); cursor: pointer; transition: background-color .12s, border-color .12s; }
+.assistant-launch { display: flex; width: 100%; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); color: var(--ink); font-size: var(--text-sm); cursor: pointer; transition: background-color .12s, border-color .12s; }
 .assistant-launch:hover { background: var(--surface-hover); }
 .assistant-launch.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
 .assistant-launch svg { color: var(--accent); }

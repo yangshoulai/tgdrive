@@ -184,6 +184,17 @@ function StorageMeter({ usage, percent, onOpenCache }: { usage: Usage | null; pe
   </div>;
 }
 
+/** 系统管理的菜单：概览单独一组（无标题），其余按 ADMIN_MODULES 的 group 依次分组。 */
+function adminGroups(): NavGroup<Section>[] {
+  const result: NavGroup<Section>[] = [];
+  for (const { group, ...item } of ADMIN_MODULES) {
+    const last = result[result.length - 1];
+    if (last && last.label === group) last.items.push(item);
+    else result.push({ label: group, workspace: "系统管理", items: [item] });
+  }
+  return result;
+}
+
 function MainShell({ session, onLogout, onSessionChange }: { session: api.Session; onLogout: () => void; onSessionChange: (patch: Partial<api.Session>) => void }) {
   const isAdmin = session.role === "admin";
   const [location, setLocation] = useState(readLocation);
@@ -283,20 +294,25 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
     </>;
   }
-  const personal: NavGroup<Section> = { label: isAdmin ? "我的空间" : undefined, workspace: isAdmin, icon: "folder", items: [
-    { key: "files", label: "我的文件", icon: "folder" },
-    { key: "private", label: "私密空间", icon: "lock" },
-    { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
-    { key: "downloads", label: "下载任务", icon: "download" },
-    { key: "trash", label: "回收站", icon: "trash" },
-  ] };
+  // 个人空间与系统管理都按用途分组；管理员在两个工作区之间切换，侧栏只显示当前工作区的分组。
+  const personalWorkspace = isAdmin ? "我的空间" : undefined;
   const groups: NavGroup<Section>[] = [
-    personal,
-    ...(isAdmin ? [{ label: "系统管理", workspace: true, icon: "shield" as const, items: ADMIN_MODULES }] : []),
-    { label: "帮助", items: [{ key: "docs" as Section, label: "使用文档", icon: "book", href: "/docs" }] },
+    { label: "文件", workspace: personalWorkspace, items: [
+      { key: "files", label: "我的文件", icon: "folder" },
+      { key: "private", label: "私密空间", icon: "lock" },
+      { key: "trash", label: "回收站", icon: "trash" },
+    ] },
+    { label: "分享与传输", workspace: personalWorkspace, items: [
+      { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
+      { key: "downloads", label: "下载任务", icon: "download" },
+    ] },
+    ...(isAdmin ? adminGroups() : []),
   ];
   return (
     <AppShell active={section} onNavigate={key => navigate(key)} hrefFor={key => sectionUrl(key)} groups={groups}
+      workspaces={isAdmin ? [{ label: "我的空间", icon: "folder" }, { label: "系统管理", icon: "shield" }] : []}
+      sidebarAction={assistantAvailable ? <AssistantLauncher open={assistantOpen || assistantPage} onOpen={toggleAssistant} /> : undefined}
+      links={[{ label: "使用文档", icon: "book", href: "/docs" }]}
       sidebarFooter={<>
         {/* 系统正常时不占位置；只有锁定（或状态读取中）才提示，点击进入安全与维护。 */}
         {isAdmin && locked && (
@@ -305,7 +321,6 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
             <span><strong>系统已锁定</strong><small>输入加密口令后继续使用</small></span>
           </a>
         )}
-        {assistantAvailable && <AssistantLauncher open={assistantOpen || assistantPage} onOpen={toggleAssistant} />}
         <StorageMeter usage={usage} percent={percent} onOpenCache={() => navigate("account", "cache")} />
       </>}
       account={{ name: api.displayName(session), caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", avatar: api.avatarUrl(session.avatar_version), menu: [

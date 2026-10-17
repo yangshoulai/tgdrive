@@ -6,21 +6,45 @@ import { loginWithPasskey, passkeyUnavailable } from "./passkeys";
 import { Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
 
 export type NavItem<K extends string> = { key: K; label: string; icon: IconName; count?: number; href?: string };
-export type NavGroup<K extends string> = { label?: string; workspace?: boolean; icon?: IconName; items: NavItem<K>[] };
+/** 侧栏分组：有标题的分组可以点击展开／收起（状态保存在本机）；workspace 指明所属工作区（管理员的「我的空间／系统管理」）。 */
+export type NavGroup<K extends string> = { label?: string; workspace?: string; items: NavItem<K>[] };
+export type NavWorkspace = { label: string; icon: IconName };
+export type NavLink = { label: string; icon: IconName; href: string };
 
-export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor, sidebarFooter, account, children }: {
+const COLLAPSED_GROUPS = "tessera:nav-collapsed";
+function readCollapsed(): string[] {
+  try { const value = JSON.parse(localStorage.getItem(COLLAPSED_GROUPS) ?? "[]"); return Array.isArray(value) ? value.filter(item => typeof item === "string") : []; }
+  catch { return []; }
+}
+
+export function AppShell<K extends string>({ groups, workspaces = [], active, onNavigate, hrefFor, sidebarAction, sidebarFooter, links = [], account, children }: {
   groups: NavGroup<K>[];
+  workspaces?: NavWorkspace[];
   active: K;
   onNavigate: (key: K) => void;
   /** 每个导航项的真实地址：渲染成链接，⌘/Ctrl/中键点击可在新标签页打开。 */
   hrefFor: (key: K) => string;
+  /** 导航上方的常用入口（文件助手）。 */
+  sidebarAction?: ReactNode;
   sidebarFooter?: ReactNode;
+  /** 底部的外部链接（使用文档），在新标签页打开。 */
+  links?: NavLink[];
   account: { name: string; caption: string; tone?: "accent" | "admin"; avatar?: string; menu: MenuItem[] };
   children: ReactNode;
 }) {
   const [drawer, setDrawer] = useState(false);
-  const workspaces = groups.filter(group => group.workspace && group.label);
-  const currentWorkspace = workspaces.find(group => group.items.some(item => item.key === active)) ?? workspaces[0];
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+  const groupOf = (key: K) => groups.find(group => group.items.some(item => item.key === key));
+  const currentWorkspace = workspaces.find(workspace => workspace.label === groupOf(active)?.workspace) ?? workspaces[0];
+  const saveCollapsed = (next: string[]) => {
+    setCollapsed(next);
+    try { localStorage.setItem(COLLAPSED_GROUPS, JSON.stringify(next)); } catch { /* 隐私模式下不保存，只影响下次打开 */ }
+  };
+  // 进入某个页面时，展开它所在的分组：当前页总是看得见。
+  useEffect(() => {
+    const label = groupOf(active)?.label;
+    if (label && collapsed.includes(label)) saveCollapsed(collapsed.filter(item => item !== label));
+  }, [active]);
   useEffect(() => { setDrawer(false); }, [active]);
   useEffect(() => {
     if (!drawer) return;
@@ -28,6 +52,7 @@ export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor
     document.addEventListener("keydown", close);
     return () => document.removeEventListener("keydown", close);
   }, [drawer]);
+  const visible = groups.filter(group => !group.workspace || !currentWorkspace || group.workspace === currentWorkspace.label);
   return (
     <div className={`shell${drawer ? " drawer-open" : ""}`}>
       <a className="skip-link" href="#main">跳到主要内容</a>
@@ -38,30 +63,47 @@ export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor
         <Menu label="账号操作" items={account.menu} size="md" className="mobile-account"><Avatar name={account.name} tone={account.tone} src={account.avatar} /></Menu>
       </header>
       <div className="drawer-scrim" onClick={() => setDrawer(false)} aria-hidden="true" />
-      <aside className="sidebar" aria-label="主导航">
+      {/* 手机抽屉：点任何导航项（包括当前页）、外部链接或标记了 data-closes-nav 的入口后都收起。 */}
+      <aside className="sidebar" aria-label="主导航" onClick={event => { if ((event.target as Element).closest("a[href], [data-closes-nav]")) setDrawer(false); }}>
         <div className="sidebar-top">
           <Brand tagline />
           <button type="button" className="icon-btn icon-btn-ghost icon-btn-sm sidebar-close" aria-label="关闭导航" onClick={() => setDrawer(false)}><Icon name="x" size={16} /></button>
         </div>
-        {workspaces.length > 1 && <div className="workspace-switch"><Segmented label="工作区" showLabels value={currentWorkspace.label!} options={workspaces.map(group => ({ value: group.label!, label: group.label!, icon: group.icon }))} onChange={label => {
-          const group = workspaces.find(item => item.label === label); if (group?.items[0]) onNavigate(group.items[0].key);
+        {workspaces.length > 1 && currentWorkspace && <div className="workspace-switch"><Segmented label="工作区" showLabels value={currentWorkspace.label} options={workspaces.map(item => ({ value: item.label, label: item.label, icon: item.icon }))} onChange={label => {
+          const first = groups.find(group => group.workspace === label)?.items[0]; if (first) onNavigate(first.key);
         }} /></div>}
+        {sidebarAction && <div className="sidebar-action">{sidebarAction}</div>}
         <nav className="sidebar-nav">
-          {groups.filter(group => workspaces.length < 2 || !group.workspace || group === currentWorkspace).map((group, index) => (
-            <div className="nav-group" key={group.label ?? index}>
-              {group.label && !group.workspace && <p className="nav-group-label">{group.label}</p>}
-              {group.items.map(item => {
-                const content = <><Icon name={item.icon} size={17} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
-                return item.href
-                  ? <a key={item.key} className="nav-item" href={item.href} target="_blank" rel="noreferrer">{content}</a>
-                  : <a key={item.key} className={`nav-item${active === item.key ? " is-active" : ""}`} href={hrefFor(item.key)} aria-current={active === item.key ? "page" : undefined}
-                    onClick={event => { if (isPlainClick(event)) { event.preventDefault(); onNavigate(item.key); } }}>{content}</a>;
-              })}
-            </div>
-          ))}
+          {visible.map((group, index) => {
+            const folded = Boolean(group.label && collapsed.includes(group.label));
+            const holdsActive = group.items.some(item => item.key === active);
+            const id = `nav-group-${index}`;
+            const items = group.items.map(item => {
+              const content = <><Icon name={item.icon} size={17} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
+              return item.href
+                ? <a key={item.key} className="nav-item" href={item.href} target="_blank" rel="noreferrer">{content}</a>
+                : <a key={item.key} className={`nav-item${active === item.key ? " is-active" : ""}`} href={hrefFor(item.key)} aria-current={active === item.key ? "page" : undefined}
+                  onClick={event => { if (isPlainClick(event)) { event.preventDefault(); onNavigate(item.key); } }}>{content}</a>;
+            });
+            if (!group.label) return <div className="nav-group" key={`group-${index}`}><div className="nav-group-list">{items}</div></div>;
+            return (
+              <div className={`nav-group is-collapsible${folded ? " is-collapsed" : ""}`} key={group.label}>
+                <button type="button" className="nav-group-toggle" aria-expanded={!folded} aria-controls={id}
+                  onClick={() => saveCollapsed(folded ? collapsed.filter(item => item !== group.label) : [...collapsed, group.label!])}>
+                  <span>{group.label}</span>
+                  {folded && holdsActive && <span className="nav-group-dot" aria-hidden="true" />}
+                  <Icon name="chevronDown" size={12} />
+                </button>
+                <div className="nav-group-items" id={id}><div className="nav-group-list">{items}</div></div>
+              </div>
+            );
+          })}
         </nav>
-        <div className="sidebar-bottom" onClick={event => { if ((event.target as Element).closest("[data-closes-nav]")) setDrawer(false); }}>
+        <div className="sidebar-bottom">
           {sidebarFooter}
+          {links.length > 0 && <div className="sidebar-links">
+            {links.map(link => <a key={link.href} className="sidebar-link" href={link.href} target="_blank" rel="noreferrer"><Icon name={link.icon} size={15} /><span>{link.label}</span><Icon name="external" size={12} className="nav-external" /></a>)}
+          </div>}
           <div className="account-row">
             <Avatar name={account.name} tone={account.tone} src={account.avatar} />
             <span className="account-copy"><strong>{account.name}</strong><small>{account.caption}</small></span>
