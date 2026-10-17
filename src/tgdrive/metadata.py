@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 23
+    SCHEMA_VERSION = 24
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -646,6 +646,10 @@ class Metadata:
                     CREATE INDEX IF NOT EXISTS thumbnails_by_object ON thumbnails(bucket_id, object_key) WHERE object_key IS NOT NULL
                 """)
                 db.execute("PRAGMA user_version = 23")
+            if version < 24:
+                # 缩略图地址按内容版本（ETag）而不是路径标识，移动或改名后浏览器缓存仍然有效；读取时按桶与 ETag 找到可访问的文件。
+                self._schema("CREATE INDEX IF NOT EXISTS objects_by_etag ON objects(bucket_id, etag)")
+                db.execute("PRAGMA user_version = 24")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

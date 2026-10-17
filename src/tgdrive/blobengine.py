@@ -30,7 +30,12 @@ from .fingerprint import BLOCK_SIZE, BlockHasher
 from .keystore import KeyStore
 from .metadata import BlobRecord, ChunkRecord, Metadata
 from .thumbnail_cache import ThumbnailCacheMiss
-from .work import TransferSlots
+from .work import TransferSlots, WorkBusyError
+
+# 小对象读取通道：并发数、单个对象上限与排队等待时间。
+SMALL_READ_CONCURRENCY = 4
+SMALL_READ_LIMIT = 1024 * 1024
+SMALL_READ_WAIT = 60
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,8 @@ class BlobEngine:
         self.read_ahead = 2
         self.fingerprint_block = BLOCK_SIZE
         self.transfers = TransferSlots(transfer_concurrency, bucket_concurrency)
+        # 缩略图大图等小对象的独立读取通道：网格视图会一次请求几十张，不能和下载、预览争抢传输名额。
+        self.small_reads = asyncio.Semaphore(SMALL_READ_CONCURRENCY)
         self.thumbnail_cache = None
         self._thumbnail_read_lock = asyncio.Lock()
 
@@ -298,6 +305,22 @@ class BlobEngine:
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+
+    async def read_small(self, blob_uuid: str, limit: int = SMALL_READ_LIMIT) -> bytes:
+        """读取一个小对象（缩略图大图），不占传输名额；等待过久时返回 WorkBusyError，浏览器稍后重试。"""
+        record = self.metadata.get_blob(blob_uuid)
+        if record.size is not None and record.size > limit:
+            raise ValueError("object is too large for a small read")
+        try:
+            async with asyncio.timeout(SMALL_READ_WAIT):
+                await self.small_reads.acquire()
+        except TimeoutError as exc:
+            raise WorkBusyError("传输繁忙，请稍后重试") from exc
+        try:
+            parts = [part async for part in self._stream(blob_uuid)]
+        finally:
+            self.small_reads.release()
+        return b"".join(parts)
 
     async def read(self, blob_uuid: str, start: int = 0, end: int | None = None) -> bytes:
         parts = [part async for part in self.stream(blob_uuid, start, end)]

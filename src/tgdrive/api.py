@@ -837,10 +837,14 @@ class UserApi:
         scope = self._scope(token, csrf=csrf, mutation=True)
         return self.objects.thumbnail_service.request(scope, self._path(path), etag)
 
-    async def thumbnail(self, token: str, path: str, variant: str = "thumb", *, bucket_id: int | None = None) -> tuple[bytes, str, str]:
+    async def thumbnail(self, token: str, path: str, variant: str = "thumb", *, bucket_id: int | None = None,
+                        etag: str = "") -> tuple[bytes, str, str]:
         scope = self._scope(token)
         if bucket_id is not None and bucket_id != scope.bucket_id:
             raise PermissionError("缩略图所属文件空间不匹配")
+        if etag and not path:
+            # 网页地址按内容版本标识，不含路径：移动、改名后浏览器缓存继续有效。
+            return await self.objects.get_thumbnail_by_etag(scope, etag, variant, accept=self._path)
         return await self.objects.get_thumbnail(scope, self._path(path), variant)
 
     # ---------- 可续传的分段上传 ----------

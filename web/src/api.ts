@@ -289,8 +289,9 @@ export type ThumbnailVariant = "thumb" | "grid" | "poster";
 const THUMBNAIL_FALLBACK: Record<ThumbnailVariant, ThumbnailVariant[]> = { thumb: ["thumb"], grid: ["grid", "poster", "thumb"], poster: ["poster", "grid", "thumb"] };
 /** 缩略图地址只由路径、规格与内容版本组成（私密空间也不带解锁令牌，服务端按登录会话的私密授权校验），
  * 浏览器据此长期缓存；删除、覆盖或重新生成后版本变化，地址随之变化。 */
-export const thumbnailUrl = (path: string, etag: string, variant: ThumbnailVariant = "thumb") =>
-  `${fileApi("/thumbnail", path)}?path=${encodeURIComponent(path)}&variant=${variant}&v=${encodeURIComponent(etag)}${thumbnailBucketId !== null ? `&bucket_id=${thumbnailBucketId}` : ""}`;
+/** 缩略图地址按内容版本（ETag）标识，不含路径：文件移动或改名后浏览器缓存仍然有效；路径只用来区分私密空间接口。 */
+export const thumbnailUrl = (path: string, etag: string, version: string, variant: ThumbnailVariant = "thumb") =>
+  `${fileApi("/thumbnail", path)}?etag=${encodeURIComponent(etag)}&variant=${variant}&v=${encodeURIComponent(version)}${thumbnailBucketId !== null ? `&bucket_id=${thumbnailBucketId}` : ""}`;
 export type ThumbnailClaim = { etag?: string; ticket?: string };
 export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb", claim: ThumbnailClaim = {}) => post<void>(fileApi("/thumbnail", path), { path, data, variant, ...claim });
 export const markNoThumbnail = (path: string, claim: ThumbnailClaim = {}) => post<void>(fileApi("/thumbnail", path), { path, variant: "none", ...claim });
@@ -312,7 +313,7 @@ export function fileThumbnail(file: ThumbnailFile, variant: ThumbnailVariant = "
   if (!file.thumbnails?.includes("thumb") && !file.has_thumbnail) return undefined;
   // 小图地址不受 poster 的生成或状态顺序影响，目录四宫格、文件列表和预览头部共用缓存。
   const spec = thumbnailSpec(file, variant);
-  return thumbnailUrl(file.key, spec.version, spec.variant);
+  return thumbnailUrl(file.key, file.etag, spec.version, spec.variant);
 }
 /** 公开分享里文件的缩略图：在 /p/ 地址上加 thumbnail 参数，沿用分享的权限。 */
 export const publicThumbnail = (contentUrl: string, variant: ThumbnailVariant = "thumb") =>

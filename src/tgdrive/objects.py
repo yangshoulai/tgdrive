@@ -530,11 +530,34 @@ class ObjectService:
                     tx.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=? AND object_key=?",
                                (info.blob_uuid, candidate, row["object_key"]))
                 continue
-            return await self.engine.read(stored["blob_uuid"]), row["mime"], etag
+            # 大图很小（≤320 KB），走独立的小读取通道，不占用普通下载与预览的传输名额。
+            return await self.engine.read_small(stored["blob_uuid"]), row["mime"], etag
         raise NotFoundError("thumbnail not found")
 
     async def get_thumbnail(self, scope: Scope, key: str, variant: str = "thumb") -> tuple[bytes, str, str]:
         return await self.read_thumbnail(self._object(self._lookup(scope, key)), variant)
+
+    async def get_thumbnail_by_etag(self, scope: Scope, etag: str, variant: str = "thumb", *,
+                                    accept: Callable[[str], object] | None = None) -> tuple[bytes, str, str]:
+        """按内容版本读取缩略图：地址不含路径，移动或改名后浏览器缓存仍然有效。
+        只考虑调用者用路径同样能读取的文件（accept 复核网页路径规则，_check_scope 复核前缀与私密空间）。"""
+        if not etag or len(etag) > 128:
+            raise NotFoundError("thumbnail not found")
+        self._bucket(scope.bucket_id)
+        rows = self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id=? AND etag=? AND blob_uuid IS NOT NULL "
+                                        "AND substr(key,-1)!='/' ORDER BY key LIMIT 16", (scope.bucket_id, etag)).fetchall()
+        for row in rows:
+            try:
+                if accept is not None:
+                    accept(row["key"])
+                self._check_scope(scope, row["key"])
+            except (PermissionError, ValueError):
+                continue
+            try:
+                return await self.read_thumbnail(self._object(row), variant)
+            except NotFoundError:
+                continue  # 相同内容的另一份副本可能已有缩略图。
+        raise NotFoundError("thumbnail not found")
 
     async def migrate_thumbnails(self, limit: int = 100) -> int:
         """维护任务：把旧版存在数据库里的封面图（poster）分批转存为系统区对象，释放服务器磁盘。

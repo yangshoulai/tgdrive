@@ -275,7 +275,8 @@ class TgDriveASGI(StaticFiles):
                 return
             if path == "/api/user/v1/thumbnail" and method == "GET":
                 bucket_id = int(query["bucket_id"][0]) if "bucket_id" in query else None
-                data, mime, etag = await file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0], bucket_id=bucket_id)
+                data, mime, etag = await file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0],
+                                                             bucket_id=bucket_id, etag=query.get("etag", [""])[0])
                 # 私密空间的缩略图同样按版本地址长期缓存：只有授权通过才会返回，删除或覆盖后地址随内容版本变化。
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
                 return

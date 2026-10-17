@@ -119,6 +119,32 @@ class ThumbnailTests(unittest.TestCase):
         self.assertEqual((self.stored_keys(), self.used()), ([], 0))
         self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0], 0)
 
+    def test_etag_address_survives_move_and_keeps_access_boundaries(self):
+        info = self.put("album/photo.jpg", b"same content")
+        self.assertEqual(self.set_thumb("album/photo.jpg", WEBP), 204)
+        self.assertEqual(self.set_thumb("album/photo.jpg", JPEG, "poster"), 204)
+        url = f"/api/user/v1/thumbnail?etag={info.etag}&variant=poster&bucket_id={self.alice.bucket_id}"
+        self.assertEqual(self.call("GET", url)[1], JPEG)
+        self.app.objects.move(self.scope, "album/photo.jpg", "moved/photo.jpg")
+        self.assertEqual(self.call("GET", url)[1], JPEG, "地址不含路径，移动后同一地址仍可读取")
+        self.assertEqual(self.call("GET", url.replace("poster", "thumb"))[1], WEBP)
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?etag=unknown&variant=thumb")[0], 404)
+        # 其他账号不能凭 ETag 读取；私密空间与系统区的副本也不能经普通接口读取。
+        bob = self.app.accounts.create_user("bob@example.com", "bob password", quota_bytes=50_000_000)
+        asyncio.run(self.app.objects.put_object(Scope(bob.bucket_id), "copy.jpg", b"same content"))
+        other = asyncio.run(self.client.login("user", "bob@example.com", "bob password"))
+        self.assertEqual(self.call("GET", f"/api/user/v1/thumbnail?etag={info.etag}&variant=thumb", headers=other)[0], 404)
+        self.app.objects.move(Scope(self.alice.bucket_id, private_access=True), "moved/photo.jpg", ".tgdrive/private/photo.jpg")
+        self.assertEqual(self.call("GET", url)[0], 404)
+
+    def test_stored_thumbnails_do_not_wait_for_transfer_slots(self):
+        self.put("photo.jpg")
+        self.assertEqual(self.set_thumb("photo.jpg", JPEG, "grid"), 204)
+        transfers = self.app.objects.engine.transfers
+        transfers.wait_seconds, transfers._active = 0.05, transfers.total
+        status, data, _ = self.call("GET", "/api/user/v1/thumbnail?path=photo.jpg&variant=grid")
+        self.assertEqual((status, data), (200, JPEG), "下载占满名额时网格图仍可读取")
+
     def test_maintenance_moves_database_posters_and_sweeps_orphans(self):
         info = self.put("old.jpg")
         sealed = self.app.engine.seal_thumbnail(info.blob_uuid, "poster", JPEG)
