@@ -17,6 +17,8 @@ export type EntryRecord = {
   blocks: number[]; bytes: number; accessed: number; created: number;
   /** 只有普通层记录大类，供「本机缓存」页统计；私密层不记录。 */
   kind?: Kind;
+  /** 用户手动缓存过（与加密 info 里的 manual 一致）：文件列表只为这些条目显示状态，不必逐个解密。1.11.0 留下的条目没有这个字段，首次建立索引时补上。 */
+  manual?: boolean;
   info: ArrayBuffer | null;
 };
 export type EntryInfo = { etag: string; version: string; size: number; type: string; disposition: string; path: string; kind: Kind; manual?: boolean };
@@ -125,12 +127,26 @@ export function touchEntry(key: string, time: number): Promise<void> {
 }
 
 /** 元信息更新不能覆盖预览或另一个读取刚刚提交的块列表。 */
-export function updateEntryInfo(key: string, info: ArrayBuffer): Promise<void> {
+export function updateEntryInfo(key: string, info: ArrayBuffer, manual?: boolean): Promise<void> {
   return run(["entries"], "readwrite", async tx => {
     const store = tx.objectStore("entries");
     const entry = await done(store.get(key)) as EntryRecord | undefined;
     if (!entry) throw new Error("缓存已被清理，请重试");
-    entry.info = info; store.put(entry);
+    entry.info = info;
+    if (manual !== undefined) entry.manual = manual;
+    store.put(entry);
+  });
+}
+
+/** 只更新手动标记（为旧条目补字段），不覆盖并发写入的块列表。 */
+export function setManualFlags(flags: [string, boolean][]): Promise<void> {
+  if (!flags.length) return Promise.resolve();
+  return run(["entries"], "readwrite", async tx => {
+    const store = tx.objectStore("entries");
+    for (const [key, manual] of flags) {
+      const entry = await done(store.get(key)) as EntryRecord | undefined;
+      if (entry) { entry.manual = manual; store.put(entry); }
+    }
   });
 }
 

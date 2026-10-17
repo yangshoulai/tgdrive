@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { beginFileCache, cachedFiles, cacheFileId, cacheStats, cacheSupported, cancelFileCache, removeFileCache, stepFileCache, type CacheFile, type FileCacheState } from "../cache-client";
+import { beginFileCache, cachedFiles, cacheFileId, cacheStats, cacheSupported, cancelFileCache, manualCachedFiles, removeFileCache, stepFileCache, type CacheFile, type FileCacheState } from "../cache-client";
 import { Button, ConfirmDialog, Icon, IconButton, KeyValue, Modal, formatBytes, type MenuItem } from "../ui";
 import { usePrivateAccess } from "./private-session";
 import { TrayBar, TrayRing } from "./tray";
@@ -9,7 +9,8 @@ type CacheJob = { id: string; file: CacheFile; status: "queued" | "active" | "do
 type Queue = {
   /** 浏览器支持且用户与管理员都没有关闭本机缓存；否则不显示缓存按钮与菜单项。 */
   available: boolean;
-  jobs: CacheJob[]; states: Map<string, FileCacheState>; expanded: boolean; setExpanded: (value: boolean) => void;
+  /** states：预览等单独关注的文件（含自动缓存）；manual：手动缓存过的文件，文件列表只看这一份。 */
+  jobs: CacheJob[]; states: Map<string, FileCacheState>; manual: Map<string, FileCacheState>; expanded: boolean; setExpanded: (value: boolean) => void;
   watch: (owner: string, files: CacheFile[]) => () => void; enqueue: (file: CacheFile) => void;
   cancel: (id: string) => void; retry: (id: string) => void; clear: () => void;
   inspect: (file: CacheFile) => void; remove: (file: CacheFile) => void;
@@ -35,6 +36,7 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
   const [jobs, setJobs] = useState<CacheJob[]>([]), jobsRef = useRef(jobs);
   const [states, setStates] = useState(new Map<string, FileCacheState>());
   const statesRef = useRef(states); statesRef.current = states;
+  const [manual, setManual] = useState(new Map<string, FileCacheState>());
   const [expanded, setExpanded] = useState(true), [wake, setWake] = useState(0);
   const [details, setDetails] = useState<CacheFile | null>(null), [removing, setRemoving] = useState<CacheFile | null>(null);
   const active = useRef<{ id: string; controller: AbortController } | null>(null);
@@ -60,6 +62,7 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
     selected.forEach(job => { if (active.current?.id === job.id) { active.current.controller.abort(); cancelFileCache(job.id); } });
     update(value => privateOnly ? value.filter(job => !api.isPrivatePath(job.file.key)) : []);
     setStates(value => new Map([...value].filter(([key]) => privateOnly && !key.startsWith("p:"))));
+    setManual(value => new Map([...value].filter(([key]) => privateOnly && !key.startsWith("p:"))));
     setDetails(value => value && (!privateOnly || api.isPrivatePath(value.key)) ? null : value);
     setRemoving(value => value && (!privateOnly || api.isPrivatePath(value.key)) ? null : value);
   }, [update]);
@@ -71,7 +74,7 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
     return () => { window.removeEventListener("pagehide", stop); window.removeEventListener("tessera:logout", stop); window.removeEventListener("tessera:private-locked", locked); active.current?.controller.abort(); cancelFileCache(active.current?.id); };
   }, [reset]);
 
-  // 可见文件合并为一批查询；不逐行轮询，也不扫描整个本机缓存。
+  // 文件列表只取一次「手动缓存索引」，不逐个文件查询；单独关注的文件（预览中的文件）另外批量查询完整状态。
   useEffect(() => {
     if (!enabled || !available) return;
     let disposed = false, pending = false, timer: number | undefined;
@@ -100,8 +103,12 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
           if (!disposed) setStates(previous => { const next = new Map(previous); group.forEach(file => next.delete(cacheFileId(file))); return next; });
         }
       }
+      try {
+        const list = await manualCachedFiles(ready.current.privateReady);
+        if (!disposed) setManual(new Map(list.map(({ id, ...state }) => [id, state])));
+      } catch { if (!disposed) setManual(new Map()); }
       pending = false;
-      // 空闲时状态只会因预览自动缓存而变化，一分钟刷新一次即可；私密空间每次查询都要向服务端验权。
+      // 空闲时手动缓存只会在本页或其他标签页操作后变化（会广播 tessera:cache-changed），一分钟兜底刷新一次。
       if (!disposed) schedule(jobsRef.current.some(isRunning) ? 2000 : 60000);
     }
     refreshRef.current = () => schedule(80);
@@ -162,17 +169,17 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
   }, [jobs, enabled, privateReady, wake, update]);
 
   const visibleJobs = useMemo(() => enabled ? jobs.filter(job => !api.isPrivatePath(job.file.key) || privateReady) : [], [enabled, jobs, privateReady]);
-  const value: Queue = useMemo(() => ({ available, jobs: visibleJobs, states, expanded, setExpanded, watch, enqueue, cancel, retry,
-    clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: setRemoving }), [available, visibleJobs, states, expanded, watch, enqueue, cancel, retry, update]);
-  const detailState = details && states.get(cacheFileId(details));
+  const value: Queue = useMemo(() => ({ available, jobs: visibleJobs, states, manual, expanded, setExpanded, watch, enqueue, cancel, retry,
+    clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: setRemoving }), [available, visibleJobs, states, manual, expanded, watch, enqueue, cancel, retry, update]);
+  const detailState = details && (states.get(cacheFileId(details)) ?? manual.get(cacheFileId(details)));
   const showDetails = enabled && details && (!api.isPrivatePath(details.key) || privateReady);
   const showRemoving = enabled && removing && (!api.isPrivatePath(removing.key) || privateReady);
   return <CacheContext.Provider value={value}>
     {children}
     {showDetails && <Modal title="本机缓存" description={nameOf(details)} icon="monitor" size="sm" className={api.isPrivatePath(details.key) ? "private-dialog" : ""} onClose={() => setDetails(null)}
-      footer={<>{!detailState?.complete && <Button icon="monitor" onClick={() => { enqueue(details); setDetails(null); }}>继续缓存</Button>}<Button variant="ghost" onClick={() => setDetails(null)}>完成</Button></>}>
+      footer={<>{(!detailState?.complete || !manual.has(cacheFileId(details))) && <Button icon="monitor" onClick={() => { enqueue(details); setDetails(null); }}>{detailState?.complete ? "标记为手动缓存" : "继续缓存"}</Button>}<Button variant="ghost" onClick={() => setDetails(null)}>完成</Button></>}>
       <KeyValue items={[["已缓存", `${formatBytes(detailState?.bytes ?? 0)} / ${formatBytes(details.size)}`]]} />
-      <p className="muted">{detailState?.complete ? "完整文件已缓存，预览和下载时优先读取本机数据。" : "已完成的部分会保留，继续缓存只补齐缺失内容。"}仍需登录及有效授权；空间不足或浏览器清理时，缓存可能被移除。</p>
+      <p className="muted">{detailState?.complete ? manual.has(cacheFileId(details)) ? "完整文件已缓存，预览和下载时优先读取本机数据。" : "打开时已自动缓存完整文件，预览和下载优先读取本机数据。自动缓存不会显示在文件列表里，标记为手动缓存后会在列表中显示。" : "已完成的部分会保留，继续缓存只补齐缺失内容。"}仍需登录及有效授权；空间不足或浏览器清理时，缓存可能被移除。</p>
     </Modal>}
     {showRemoving && <ConfirmDialog title="移除本机缓存" className={api.isPrivatePath(removing.key) ? "private-dialog" : ""} description={`移除“${nameOf(removing)}”的本机缓存？云端文件不受影响。`} confirmLabel="移除缓存" onClose={() => setRemoving(null)} onConfirm={async () => {
       jobsRef.current.filter(job => cacheFileId(job.file) === cacheFileId(removing)).forEach(job => cancel(job.id));
@@ -192,8 +199,10 @@ export function useCacheFiles(files: CacheFile[], enabled = true) {
   return queue;
 }
 
-function buttonState(queue: Queue, file: CacheFile) {
-  const state = queue.states.get(cacheFileId(file)), job = queue.jobs.find(job => cacheFileId(job.file) === cacheFileId(file));
+export const useCacheQueue = () => useContext(CacheContext);
+
+function buttonState(queue: Queue, file: CacheFile, manualOnly = false) {
+  const state = (manualOnly ? undefined : queue.states.get(cacheFileId(file))) ?? queue.manual.get(cacheFileId(file)), job = queue.jobs.find(job => cacheFileId(job.file) === cacheFileId(file));
   const running = job && isRunning(job);
   const complete = !running && Boolean(state?.complete);
   const bytes = running ? job.bytes : state?.bytes ?? 0;
@@ -207,11 +216,32 @@ export function FileCacheButton({ file }: { file: CacheFile }) {
   // 不支持（如未启用 HTTPS 的部署）或已关闭时整个按钮都不显示，不在每一行留下禁用的按钮。
   if (!queue?.available) return null;
   const state = buttonState(queue, file);
-  const label = `${state.label} ${nameOf(file)}${state.bytes || state.complete ? ` · ${state.percent}%` : ""}`;
+  // 预览头部也提示自动缓存的完整文件（方案 A：列表不显示自动缓存，只在这里说明「已在本机」）。
+  const automatic = state.complete && !queue.manual.has(cacheFileId(file));
+  const label = state.complete ? `${automatic ? "已在本机（自动缓存）" : "已缓存到本机"}：${nameOf(file)}` : `${state.label} ${nameOf(file)}${state.bytes ? ` · ${state.percent}%` : ""}`;
   return <button type="button" className={`icon-btn icon-btn-ghost icon-btn-sm file-cache-button${state.complete ? " is-complete" : ""}${state.running ? " is-active" : ""}`} title={label} aria-label={label}
     onClick={event => { event.stopPropagation(); if (state.running) queue.setExpanded(true); else if (state.complete) queue.inspect(file); else queue.enqueue(file); }}>
     {state.bytes && !state.complete ? <><svg className="file-cache-ring" viewBox="0 0 20 20" aria-hidden="true" style={{ "--tray-progress": state.percent } as CSSProperties}><circle className="tray-ring-track" cx="10" cy="10" r="8" /><circle className="tray-ring-value" cx="10" cy="10" r="8" pathLength="100" /></svg><span>{state.percent}%</span></>
       : <Icon name={state.complete ? "check" : state.error ? "refresh" : state.running ? "pulse" : "monitor"} size={16} />}
+  </button>;
+}
+
+/** 文件列表与网格卡片上的缓存状态：只显示手动缓存过的文件与正在进行的任务，自动缓存不显示。没有状态时什么也不渲染。 */
+export function FileCacheStatus({ file, className = "" }: { file: CacheFile; className?: string }) {
+  const queue = useContext(CacheContext);
+  if (!queue?.available) return null;
+  const state = buttonState(queue, file, true);
+  if (!state.running && !state.error && !state.bytes) return null;
+  const name = nameOf(file);
+  const [label, text, tone] = state.running ? [`${state.label} ${name} · ${state.percent}%`, `${state.percent}%`, "is-active"]
+    : state.error ? [`缓存失败，点击重试：${name}`, "重试", "is-error"]
+    : state.complete ? [`已缓存到本机：${name}`, "本机", "is-complete"]
+    : [`已缓存 ${state.percent}%，点击继续：${name}`, `${state.percent}%`, "is-partial"];
+  return <button type="button" className={`file-cache-status ${tone} ${className}`} title={label} aria-label={label}
+    onClick={event => { event.stopPropagation(); if (state.running) queue.setExpanded(true); else if (state.complete) queue.inspect(file); else queue.enqueue(file); }}>
+    {state.complete ? <Icon name="check" size={12} /> : state.error ? <Icon name="refresh" size={12} />
+      : <svg className="file-cache-ring" viewBox="0 0 20 20" aria-hidden="true" style={{ "--tray-progress": state.percent } as CSSProperties}><circle className="tray-ring-track" cx="10" cy="10" r="8" /><circle className="tray-ring-value" cx="10" cy="10" r="8" pathLength="100" /></svg>}
+    <span>{text}</span>
   </button>;
 }
 

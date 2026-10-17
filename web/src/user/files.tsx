@@ -15,7 +15,7 @@ import { PrivateTransferDialog } from "./private-access";
 import type { PreviewPlayback } from "../files";
 import { usePrivateToast } from "./private-session";
 import { usePreview } from "./preview-host";
-import { FileCacheButton, cacheMenuItems, useCacheFiles } from "./cache";
+import { FileCacheStatus, cacheMenuItems, useCacheQueue } from "./cache";
 import { useFilesBridge } from "./assistant-bridge";
 
 /* ---------- 文件 ---------- */
@@ -395,7 +395,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     ? api.versionedContentUrl(api.contentUrl(targets[0].key, true), targets[0].file.etag) : api.archiveUrl(targets.map(target => target.key));
   useEffect(() => { setCursor(current => current && entries.some(entry => entry.key === current) ? current : null); }, [entries]);
   const rendered = useRenderLimit(entries, fetchPage);
-  const cacheQueue = useCacheFiles(rendered.visible.flatMap(entry => entry.kind === "file" ? [entry.file] : []));
+  // 列表只显示手动缓存的状态（索引由 CacheTasksProvider 统一读取），不逐个文件查询本机缓存。
+  const cacheQueue = useCacheQueue();
   // 焦点项可能还没挂载（End、跨批移动）：先放宽渲染范围，等它出现在 DOM 后只滚动一次，之后滚动加载不再拉回焦点。
   const pendingScroll = useRef<string | null>(null);
   useEffect(() => {
@@ -610,16 +611,17 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                   {fileVisual(entry.file)}
                   <span className="name-stack">
                     <button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); openPreview(entry.file); }}>{baseName(entry.key)}</button>
-                    <span className="file-mobile-meta"><span>{kindLabel(getFileKind(entry.file.content_type, entry.key))} · {formatBytes(entry.file.size)} · {formatDate(entry.file.modified_at)}</span>{entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}</span>
+                    <span className="file-mobile-meta"><span>{kindLabel(getFileKind(entry.file.content_type, entry.key))} · {formatBytes(entry.file.size)} · {formatDate(entry.file.modified_at)}</span>{entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}<FileCacheStatus file={entry.file} /></span>
                     {query && parentPath(entry.key) && <small>{privateSpace ? api.privatePathLabel(parentPath(entry.key)) : parentPath(entry.key)}</small>}
                   </span>
                   {entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}
+                  <FileCacheStatus file={entry.file} className="cell-cache" />
                 </span>
                 <span role="cell" className="cell-type muted">{kindLabel(getFileKind(entry.file.content_type, entry.key))}</span>
                 <span role="cell" className="cell-size muted">{formatBytes(entry.file.size)}</span>
                 <span role="cell" className="cell-date muted" title={formatDateTime(entry.file.modified_at)}>{formatDate(entry.file.modified_at)}</span>
                 <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
-                  <FileCacheButton file={entry.file} />
+                  {!privateSpace && <span className="row-quick"><IconButton icon="link" size="sm" label={`分享 ${baseName(entry.key)}`} onClick={() => setSharing(entry.file)} /></span>}
                   <Menu label={`${baseName(entry.key)} 的更多操作`} items={fileMenu(entry.file)} />
                 </span>
               </div>
@@ -667,7 +669,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                         {!api.fileThumbnail(entry.file) && extension && !LABELLED_KINDS.has(kind) && <span className="grid-extension" aria-hidden="true">{extension}</span>}
                         <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                         {entry.file.public_token && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
-                        <span className="grid-cache" onClick={event => event.stopPropagation()}><FileCacheButton file={entry.file} /></span>
+                        <FileCacheStatus file={entry.file} className="grid-cache" />
                       </div>
                       <div className="grid-meta">
                         {/* 卡片本身只响应鼠标；文件名按钮是键盘与读屏用户的打开入口。 */}

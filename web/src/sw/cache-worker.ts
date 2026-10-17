@@ -7,7 +7,7 @@
 import {
   BLOCK, type Bytes, type DeviceSettings, type EntryInfo, type EntryRecord, type Kind, type Tier,
   aesKey, b64u, blockAad, deleteEntries, deviceId, ensureEntry, evict, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
-  kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, touchEntry, updateEntryInfo,
+  kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, setManualFlags, touchEntry, updateEntryInfo,
 } from "../cache-store";
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
@@ -304,7 +304,7 @@ async function handle(request: Request, route: Route): Promise<Response> {
     const kind: Kind = route.thumb ? "thumb" : kindOf(type, request.destination);
     if (kind === "other" || kind === "video" && !preferences.video) return bypass();
     const record: EntryRecord = { key, ns: context.ns, tier: context.tier, id: keys.id, blocks: [], bytes: 0, accessed: now, created: now,
-      ...(context.tier === "n" ? { kind } : {}), info: null };
+      ...(context.tier === "n" ? { kind } : {}), manual: false, info: null };
     info = { etag: route.etag, version: validator, size: total, type, disposition: upstream.headers.get("content-disposition") ?? "inline", path: route.path, kind };
     record.info = await sealInfo(context.info, record, info);
     context.signal.throwIfAborted();
@@ -586,12 +586,13 @@ async function startManual(owner: string, id: string, url: string) {
       info = { etag: route.etag, version: etagOf(response), path: route.path, type, size, kind,
         disposition: response.headers.get("content-disposition") ?? "inline", manual: true };
       const record: EntryRecord = { key: value.key, ns: value.context.ns, tier: route.tier, id: value.keys.id, blocks: [], bytes: 0,
-        created: now, accessed: now, ...(route.tier === "n" ? { kind } : {}), info: null };
+        created: now, accessed: now, ...(route.tier === "n" ? { kind } : {}), manual: true, info: null };
       record.info = await sealInfo(value.context.info, record, info);
       job.controller.signal.throwIfAborted();
       entry = await ensureEntry(record);
       job.controller.signal.throwIfAborted();
-      await updateEntryInfo(entry.key, record.info);
+      await updateEntryInfo(entry.key, record.info, true);
+      manualCache = null;
       job.controller.signal.throwIfAborted();
       job.opened = { tier: value.context, entry, info, key: value.keys.key, request, cap };
       await enforce();
@@ -657,6 +658,7 @@ async function stepManual(owner: string, id: string, progress: (value: unknown) 
     job.controller.signal.throwIfAborted();
     const state = fileCacheState(await getEntry(entry.key), opened.info.size);
     if (state.complete) { await verifyManual(job); if (manual === job) stopManual(); }
+    manualCache = null;
     return state;
   } catch (error) { if (manual === job) stopManual(); throw error; }
   finally { job.opened?.tier.signal.removeEventListener("abort", abort); job.running = false; }
@@ -666,7 +668,34 @@ async function removeFile(url: string) {
   const value = await manualOpened(url);
   if (manual?.route.etag === value.route.etag && manual.route.tier === value.route.tier) stopManual();
   await deleteEntries([value.key]);
-  itemCache = null;
+  itemCache = null; manualCache = null;
+}
+
+/* ---------- 手动缓存索引：文件列表只为用户手动缓存过的文件显示状态 ---------- */
+
+type ManualState = { id: string; bytes: number; size: number; complete: boolean };
+let manualCache: { ns: string; withPrivate: boolean; at: number; items: ManualState[] } | null = null;
+
+/** 只解密带手动标记的条目；1.11.0 留下的无标记条目解密一次补上标记（私密层要等私密授权可用时补）。
+ * 私密层复用已有的私密上下文，不逐个文件申请条目密钥。 */
+async function manualIndex(withPrivate: boolean): Promise<ManualState[]> {
+  const context = await normalContext();
+  if (!context) return [];
+  if (manualCache && manualCache.ns === context.ns && manualCache.withPrivate === withPrivate && Date.now() - manualCache.at < 10_000) return manualCache.items;
+  const secret = withPrivate ? await privateContext({ tier: "p", etag: "", version: "", path: "", access: "", bucketId: null, thumb: false }) : null;
+  const items: ManualState[] = [], flags: [string, boolean][] = [];
+  for (const entry of await listEntries(context.ns)) {
+    const tierContext = entry.tier === "n" ? context : secret;
+    if (entry.manual === false || !tierContext || entry.kind === "thumb") continue;
+    const info = await openInfo(tierContext.info, entry);
+    if (!info) continue;
+    if (entry.manual === undefined) flags.push([entry.key, Boolean(info.manual)]);
+    if (info.manual) items.push({ id: `${entry.tier}:${info.etag}`, ...fileCacheState(entry, info.size) });
+  }
+  await setManualFlags(flags);
+  context.signal.throwIfAborted();
+  manualCache = { ns: context.ns, withPrivate, at: Date.now(), items };
+  return items;
 }
 
 /* ---------- 淘汰与对账 ---------- */
@@ -817,7 +846,7 @@ async function removeItems(options: ItemQuery) {
   const keys = new Set((await matchItems(options)).map(item => item.key));
   if (manual?.opened && keys.has(manual.opened.entry.key)) stopManual();
   await deleteEntries([...keys]);
-  itemCache = null;
+  itemCache = null; manualCache = null;
   return keys.size;
 }
 
@@ -831,7 +860,7 @@ async function clear(scope: string, key?: string) {
   if (manual && (scope === "all" || scope === "normal" && manual.route.tier === "n" || scope === "private" && manual.route.tier === "p"
     || victims.some(entry => entry.key === manual?.opened?.entry.key))) stopManual();
   await deleteEntries(victims.map(entry => entry.key));
-  itemCache = null;
+  itemCache = null; manualCache = null;
 }
 
 sw.addEventListener("message", event => {
@@ -854,6 +883,7 @@ sw.addEventListener("message", event => {
     case "tessera-cache:clear": reply(clear(data.scope ?? "normal", data.key)); break;
     case "tessera-cache:reset": dropKeys(); reply(clear("all")); break;
     case "tessera-cache:files": reply(fileStates(data.urls ?? [])); break;
+    case "tessera-cache:manual": reply(manualIndex((data as { private?: boolean }).private === true)); break;
     case "tessera-cache:start": reply(startManual(owner, data.id ?? "", data.url ?? "")); break;
     case "tessera-cache:step": reply(stepManual(owner, data.id ?? "", value => port?.postMessage({ progress: value }))); break;
     case "tessera-cache:cancel":

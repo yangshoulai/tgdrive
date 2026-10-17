@@ -42,7 +42,8 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
       }
     },
     touchEntry: async (key, accessed) => { if (entries.has(key)) entries.get(key).accessed = accessed; },
-    updateEntryInfo: async (key, info) => { if (!entries.has(key)) throw new Error("缓存已被清理"); entries.get(key).info = clone(info); },
+    updateEntryInfo: async (key, info, manual) => { if (!entries.has(key)) throw new Error("缓存已被清理"); entries.get(key).info = clone(info); if (manual !== undefined) entries.get(key).manual = manual; },
+    setManualFlags: async flags => { for (const [key, manual] of flags) if (entries.has(key)) entries.get(key).manual = manual; },
     evict: async (items, target, keep) => {
       let total = items.reduce((sum, entry) => sum + entry.bytes, 0);
       const victims = [];
@@ -498,4 +499,32 @@ test("自动缓存的单个文件最多占设备容量的一半，超出部分�
   const { data } = await h.read("big.bin");
   assert.deepEqual(data, h.files.get("big.bin").data);
   assert.equal([...h.entries.values()][0].bytes, 2 * store.BLOCK);
+});
+
+test("文件列表只取手动缓存索引：自动缓存不列出，旧条目首次补标记", async t => {
+  const h = harness(t, { "auto.png": bytes(2048), "kept.bin": bytes(2 * store.BLOCK + 9), "half.bin": bytes(3 * store.BLOCK), [SECRET]: bytes(65536) });
+  await h.read("auto.png");
+  const ids = name => `${name.startsWith(".tgdrive/private/") ? "p" : "n"}:${h.files.get(name).etag}`;
+  await h.ask("tessera-cache:start", { id: "kept", url: h.url("kept.bin") });
+  while (!(await h.ask("tessera-cache:step", { id: "kept" })).complete) { /* 补完 */ }
+  await h.ask("tessera-cache:start", { id: "half", url: h.url("half.bin") });
+  await h.ask("tessera-cache:cancel", { id: "half" });
+  await h.read("half.bin", { range: `bytes=0-${store.BLOCK - 1}` });
+  await h.ask("tessera-cache:start", { id: "secret", url: h.url(SECRET) });
+  await h.ask("tessera-cache:step", { id: "secret" });
+  // 模拟 1.11.0 留下的条目：明文没有手动标记，只有加密 info 里有。
+  for (const entry of h.entries.values()) delete entry.manual;
+  const keysBefore = h.keyRequests().length;
+  const normal = await h.ask("tessera-cache:manual", { private: false });
+  const byId = Object.fromEntries(normal.map(item => [item.id, item]));
+  assert.deepEqual(Object.keys(byId).sort(), [ids("half.bin"), ids("kept.bin")].sort());
+  assert.equal(byId[ids("kept.bin")].complete, true);
+  assert.equal(byId[ids("half.bin")].complete, false);
+  assert.equal(byId[ids("half.bin")].bytes, store.BLOCK);
+  assert.equal(h.keyRequests().length, keysBefore, "列表状态不逐个申请私密条目密钥");
+  const flags = [...h.entries.values()].filter(entry => entry.tier === "n").map(entry => entry.manual).sort();
+  assert.equal(JSON.stringify(flags), JSON.stringify([false, true, true]), "普通层旧条目已补上标记");
+  await h.message("tessera-cache:access", { access: "grant" });
+  const withPrivate = await h.ask("tessera-cache:manual", { private: true });
+  assert.ok(withPrivate.some(item => item.id === ids(SECRET) && item.complete));
 });

@@ -796,12 +796,21 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .cell-name, .cell-user { display: flex; align-items: center; gap: 10px; }
 .cell-size, .cell-date { font-variant-numeric: tabular-nums; }
 .cell-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
-/* 缓存是文件行唯一的快捷操作；触屏与空闲状态也能直接找到入口。 */
+/* 预览头部的缓存按钮：已缓存显示勾，部分缓存显示进度环与百分比。 */
 .file-cache-button { display: inline-flex; flex: none; gap: 4px; width: auto; min-width: 28px; padding-inline: 6px; font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
 .file-cache-button.is-active { color: var(--accent); }
 .file-cache-button.is-complete { color: var(--success); }
 .file-cache-ring { width: 18px; height: 18px; fill: none; stroke-width: 2; transform: rotate(-90deg); }
-.grid-cache { position: absolute; right: 8px; bottom: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+/* 列表与网格的缓存状态：只为手动缓存与进行中的任务显示，跟在文件名后，与「公开」徽标同一高度。 */
+.file-cache-status { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 20px; padding: 0 6px; border: 0; border-radius: var(--radius-xs); background: var(--surface-sunken); color: var(--ink-3); font: inherit; font-size: var(--text-micro); font-weight: 500; font-variant-numeric: tabular-nums; cursor: pointer; }
+.file-cache-status:hover { color: var(--ink); }
+.file-cache-status:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.file-cache-status.is-complete { background: var(--success-soft); color: var(--success); }
+.file-cache-status.is-active { color: var(--accent); }
+.file-cache-status.is-error { background: var(--danger-soft); color: var(--danger); }
+.file-cache-status .file-cache-ring { width: 12px; height: 12px; stroke-width: 2.6; }
+.grid-cache { position: absolute; right: 8px; bottom: 8px; box-shadow: 0 0 0 1px var(--line); background: var(--surface); }
+.grid-cache.is-complete { background: var(--surface); }
 .cell-strong { font-weight: 600; }
 .cell-usage { display: grid; gap: 6px; max-width: 220px; }
 .usage-text { font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
@@ -837,7 +846,7 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .sort-button.is-active { color: var(--ink); }
 .is-flipped { transform: rotate(180deg); }
 
-.file-table { --cols: 20px minmax(0, 1fr) 88px 96px 132px 104px; }
+.file-table { --cols: 20px minmax(0, 1fr) 88px 96px 132px 76px; }
 .shared-table { --cols: minmax(0, 1fr) 80px 88px 72px 104px 76px; }
 .keys-table { --cols: minmax(120px, 1fr) minmax(0, 1.4fr) 90px 110px 76px; }
 .users-table { --cols: minmax(160px, 1.2fr) minmax(160px, 1fr) 90px 110px 120px; }
@@ -1901,7 +1910,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .file-surface > .data-table { min-width: 680px; }
   .table-scroll > .data-table { min-width: 680px; }
   .panel > .data-table { min-width: 680px; overflow-x: auto; }
-  .file-table { --cols: 20px minmax(220px, 1fr) 88px 96px 132px 116px; }
+  .file-table { --cols: 20px minmax(220px, 1fr) 88px 96px 132px 76px; }
   .shared-table { --cols: minmax(220px, 1fr) 80px 88px 72px 104px 76px; }
   .users-table { --cols: minmax(160px, 1.2fr) minmax(160px, 1fr) 90px 110px 120px; }
   .objects-table { --cols: minmax(220px, 2fr) minmax(100px, .7fr) 88px 90px 110px 44px; }
@@ -2167,12 +2176,12 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .mobile-bar > .mobile-account { border-radius: 50%; }
   .search-input { height: 40px; }
   .breadcrumbs button { min-height: 36px; }
-  .file-surface > .file-table { min-width: 0; --cols: 24px minmax(0, 1fr) 104px; }
+  .file-surface > .file-table { min-width: 0; --cols: 24px minmax(0, 1fr) 44px; }
   .file-table .data-row { gap: 8px; min-height: 76px; padding: 10px 12px; contain-intrinsic-size: 76px; }
   .file-table .data-head { min-height: 44px; padding-block: 0; }
   .file-table .cell-name { gap: 10px; }
   .file-table .name-stack { gap: 4px; }
-  .file-table .cell-type, .file-table .cell-size, .file-table .cell-date, .file-table .cell-name > .badge { display: none; }
+  .file-table .cell-type, .file-table .cell-size, .file-table .cell-date, .file-table .cell-name > .badge, .file-table .cell-name > .cell-cache { display: none; }
   .file-table .cell-actions:last-child { position: static; padding-left: 0; box-shadow: none; background: transparent; }
   .file-mobile-meta { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--ink-3); font-size: var(--text-xs); }
   .file-mobile-meta > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
