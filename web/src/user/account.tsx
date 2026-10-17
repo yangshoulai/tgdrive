@@ -52,7 +52,7 @@ function AccountSettings({ session, onSessionChange, assistant, onOpenConversati
     <PrivateSettingsSummary editing={editing === "private"} busy={busy} onBusyChange={setBusy}
       onOpen={() => setEditing("private")} onClose={() => setEditing(null)} />
     <AssistantAttachmentsSummary assistant={assistant} onOpenConversation={onOpenConversation} />
-    <p className="account-page-help"><Icon name="info" size={16} /><span>忘记登录密码？请联系管理员重置。<a className="link" href="/docs/files#private-space" target="_blank" rel="noreferrer">了解登录与私密解锁</a></span></p>
+    <p className="account-page-help"><Icon name="info" size={16} /><span>忘记登录密码？请联系管理员重置。<a className="link" href="/docs/account" target="_blank" rel="noreferrer">了解账号与登录方式</a></span></p>
   </>;
 }
 

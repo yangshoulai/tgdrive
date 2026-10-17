@@ -108,7 +108,7 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
                 "timezone": "Asia/Singapore", "origin": "http://localhost:8170", "user_agent": "不要收集的完整UA"})
             tools = await self.tool_results(user, conversation)
             self.assertIn("验证并添加", tools[0]["result"]["content"])
-            self.assertEqual(tools[0]["result"]["documentation"], "https://files.example.com/docs/files#private-space")
+            self.assertEqual(tools[0]["result"]["documentation"], "https://files.example.com/docs/account#passkeys")
             context = tools[1]["result"]
             self.assertEqual(context["environment"]["agent_runtime"], "server")
             self.assertEqual(context["environment"]["client_reported"]["browser"], "Safari")
