@@ -511,6 +511,8 @@ function CacheBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
   const [limit, setLimit] = useState<number | null>(null);
   const [phase, setPhase] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [error, setError] = useState("");
+  // 执行后缓存状态会变化（清除后 present 为空），完成提示用点击时的数量。
+  const [handled, setHandled] = useState(0);
   const caching = event.action === "cache";
   useEffect(() => {
     if (!caching || !queue?.available) return;
@@ -525,17 +527,18 @@ function CacheBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
   const blocked = !cacheSupported() ? "这个浏览器不能使用本机缓存（需要 https:// 访问与较新的浏览器，无痕模式不可用）"
     : !queue?.available ? "这台设备的本机缓存已关闭，可在「用户设置 → 本机缓存」开启"
     : !usable.length && event.private ? "私密文件需要先在「用户设置 → 本机缓存」信任这台设备，并保持私密空间解锁"
-    : !caching && !present.length && phase === "idle" ? "这些文件在这台设备上没有缓存" : "";
+    : !caching && !present.length && phase !== "done" ? "这些文件在这台设备上没有缓存" : "";
   const total = event.items.length;
   async function run() {
     if (!queue || !targets.length) return;
+    setHandled(targets.length);
     if (caching) { queue.enqueueMany(targets); setPhase("done"); return; }
     setPhase("busy"); setError("");
     try { await queue.forget(targets); setPhase("done"); }
     catch (reason) { setError(api.errorMessage(reason, "清除失败，请稍后重试")); setPhase("error"); }
   }
   const skipped = caching ? total - usable.length : 0;
-  const note = phase === "done" ? caching ? "已加入缓存队列，进度见页面底部的托盘" : `已清除 ${targets.length} 个文件的本机缓存`
+  const note = phase === "done" ? caching ? `已把 ${handled} 个文件加入缓存队列，进度见页面底部的托盘` : `已清除 ${handled} 个文件的本机缓存`
     : blocked || (caching ? `占用这台设备约 ${formatBytes(event.size)}${skipped ? `，${skipped} 个文件无法缓存` : ""}` : `${present.length} 个文件有缓存，云端文件不受影响`);
   return <section className={`ai-card ai-browser${event.private ? " is-private" : ""}`}>
     <CardHead icon={caching ? "monitor" : "trash"} title={caching ? `缓存 ${total} 个文件到本机` : `清除 ${total} 个文件的本机缓存`}
