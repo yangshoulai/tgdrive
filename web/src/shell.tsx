@@ -34,7 +34,8 @@ export function AppShell<K extends string>({ groups, active, onNavigate, hrefFor
       <header className="mobile-bar">
         <button type="button" className="icon-btn icon-btn-ghost" aria-label="打开导航" aria-expanded={drawer} onClick={() => setDrawer(true)}><Icon name="menu" /></button>
         <Brand />
-        <Avatar name={account.name} tone={account.tone} src={account.avatar} />
+        {/* 窄屏顶栏的头像直接打开账号菜单（用户设置、访问密钥、外观、退出），不必先展开侧栏。 */}
+        <Menu label="账号操作" items={account.menu} size="md" className="mobile-account"><Avatar name={account.name} tone={account.tone} src={account.avatar} /></Menu>
       </header>
       <div className="drawer-scrim" onClick={() => setDrawer(false)} aria-hidden="true" />
       <aside className="sidebar" aria-label="主导航">

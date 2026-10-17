@@ -3,19 +3,39 @@ import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { BRAND } from "../brand";
-import { Avatar, Badge, Button, Field, Icon, Modal, PageHeader, PasswordField, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
+import { Avatar, Badge, Button, EmptyState, Field, Icon, Modal, PageHeader, PasswordField, Segmented, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
+import { KeysView } from "./keys";
 import { PasskeysSettings } from "./passkeys";
 import { PrivateIdleSelect } from "./private-access";
 import { usePrivateAccess } from "./private-session";
 
-export function UserSettingsPage({ session, onSessionChange, assistant = false, onOpenConversation }: { session: api.Session; onSessionChange: (patch: Partial<api.Session>) => void;
+export type SettingsTab = "account" | "keys";
+const SETTINGS_TABS: { value: SettingsTab; label: string; icon: "user" | "key" }[] = [{ value: "account", label: "账号", icon: "user" }, { value: "keys", label: "访问密钥", icon: "key" }];
+
+/** 用户设置：从头像菜单进入，分「账号」与「访问密钥」两个标签页（地址 ?view=account&tab=keys，旧地址 ?view=keys 仍可用）。 */
+export function UserSettingsPage({ session, onSessionChange, assistant = false, onOpenConversation, tab = "account", onTabChange, bucketName = null, keysAvailable = true }: {
+  session: api.Session; onSessionChange: (patch: Partial<api.Session>) => void;
   /** 文件助手可用时显示「助手附件」统计（没有附件且助手不可用时隐藏） */
-  assistant?: boolean; onOpenConversation?: (id: string) => void }) {
+  assistant?: boolean; onOpenConversation?: (id: string) => void;
+  tab?: SettingsTab; onTabChange?: (tab: SettingsTab) => void; bucketName?: string | null;
+  /** 系统锁定或服务尚未解锁时不能管理访问密钥 */
+  keysAvailable?: boolean }) {
+  useDocumentTitle(`${tab === "keys" ? "访问密钥" : "用户设置"} · ${BRAND}`);
+  return <div className="account-page">
+    <PageHeader title="用户设置" description={tab === "keys" ? "让同步工具（如 rclone、AWS CLI）或你自己的脚本访问你的文件。密钥只能访问你自己的文件，随时可以停用。"
+      : "管理你的个人资料和登录方式，登录方式也用于解锁私密空间。"} />
+    {onTabChange && <div className="maintenance-tabs settings-tabs"><Segmented label="用户设置" showLabels value={tab} onChange={onTabChange} options={SETTINGS_TABS} /></div>}
+    {tab === "keys" ? keysAvailable ? <KeysView bucketName={bucketName} embedded />
+      : <EmptyState icon="lock" title="暂时无法管理访问密钥" description="系统解锁后才能查看和创建访问密钥。" />
+      : <AccountSettings session={session} onSessionChange={onSessionChange} assistant={assistant} onOpenConversation={onOpenConversation} />}
+  </div>;
+}
+
+function AccountSettings({ session, onSessionChange, assistant, onOpenConversation }: { session: api.Session; onSessionChange: (patch: Partial<api.Session>) => void;
+  assistant: boolean; onOpenConversation?: (id: string) => void }) {
   const [editing, setEditing] = useState<"password" | "passkeys" | "private" | "nickname" | "email" | null>(null);
   const [busy, setBusy] = useState(false);
-  useDocumentTitle(`用户设置 · ${BRAND}`);
-  return <div className="account-page">
-    <PageHeader title="用户设置" description="管理你的个人资料和登录方式，登录方式也用于解锁私密空间。" />
+  return <>
     <ProfileCard session={session} busy={busy} onBusyChange={setBusy} onSessionChange={onSessionChange} onEditNickname={() => setEditing("nickname")} />
     {editing === "nickname" && <NicknameDialog session={session} onClose={() => setEditing(null)} onSaved={profile => { onSessionChange(profile); setEditing(null); }} />}
     <EmailSettings session={session} busy={busy} onOpen={() => setEditing("email")} />
@@ -28,7 +48,7 @@ export function UserSettingsPage({ session, onSessionChange, assistant = false, 
       onOpen={() => setEditing("private")} onClose={() => setEditing(null)} />
     <AssistantAttachmentsSummary assistant={assistant} onOpenConversation={onOpenConversation} />
     <p className="account-page-help"><Icon name="info" size={16} /><span>忘记登录密码？请联系管理员重置。<a className="link" href="/docs/files#private-space" target="_blank" rel="noreferrer">了解登录与私密解锁</a></span></p>
-  </div>;
+  </>;
 }
 
 /** 助手附件：随对话保存、计入已用空间，不提供单独删除（docs/assistant-design.md §22.5）。 */

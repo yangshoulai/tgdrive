@@ -7,7 +7,8 @@ import { Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, IconB
 
 /* ---------- 访问密钥 ---------- */
 
-export function KeysView({ bucketName }: { bucketName: string | null }) {
+/** embedded：放在用户设置的标签页里，不再显示页面标题，新建按钮移到密钥列表上。 */
+export function KeysView({ bucketName, embedded = false }: { bucketName: string | null; embedded?: boolean }) {
   const pagination = useCursorPage(api.userClientsPage);
   const clients = pagination.page?.clients ?? null;
   const load = pagination.reload;
@@ -15,14 +16,14 @@ export function KeysView({ bucketName }: { bucketName: string | null }) {
   const [created, setCreated] = useState<(api.CreatedClient & { name: string }) | null>(null);
   const [disabling, setDisabling] = useState<{ client: string; key: string } | null>(null);
   const [deleting, setDeleting] = useState<{ client: string; key: string } | null>(null);
-  useDocumentTitle(`访问密钥 · ${BRAND}`);
+  useDocumentTitle(embedded ? null : `访问密钥 · ${BRAND}`);
 
   const endpoint = api.s3Endpoint();
   const bucket = clients?.[0]?.grants[0]?.bucket_name ?? bucketName ?? "你的存储桶";
   return (
     <>
-      <PageHeader title="访问密钥" description="让同步工具（如 rclone、AWS CLI）或你自己的脚本访问你的文件。密钥只能访问你自己的文件，随时可以停用。"
-        actions={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>新建访问密钥</Button>} />
+      {!embedded && <PageHeader title="访问密钥" description="让同步工具（如 rclone、AWS CLI）或你自己的脚本访问你的文件。密钥只能访问你自己的文件，随时可以停用。"
+        actions={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>新建访问密钥</Button>} />}
       <div className="stack">
         <Panel title="连接信息" description="创建密钥后，把下面的信息填进你的工具即可。具体写法见使用文档。">
           <KeyValue items={[
@@ -32,7 +33,8 @@ export function KeysView({ bucketName }: { bucketName: string | null }) {
             ["区域", <code>us-east-1</code>],
           ]} />
         </Panel>
-        <Panel title="已创建的密钥" flush actions={clients && clients.length > 0 ? <Badge>{pagination.page?.total}</Badge> : undefined}>
+        <Panel title="已创建的密钥" flush actions={<>{clients && clients.length > 0 && <Badge>{pagination.page?.total}</Badge>}
+          {embedded && <Button variant="primary" size="sm" icon="plus" onClick={() => setCreating(true)}>新建访问密钥</Button>}</>}>
           {pagination.error ? <EmptyState icon="alert" title="访问密钥加载失败" description={pagination.error} action={<Button onClick={() => void load()}>重试</Button>} /> : clients === null ? <SkeletonRows rows={3} /> : clients.length === 0 ? (
             <EmptyState icon="key" title="还没有访问密钥" description="创建密钥后，就可以用命令行工具同步和备份文件。" action={<Button icon="plus" onClick={() => setCreating(true)}>新建访问密钥</Button>} />
           ) : (

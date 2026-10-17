@@ -11,8 +11,8 @@ from ..settings import normalize_origin
 
 HELP = {
     "overview": ("入门", "/docs/quickstart", "Tessera 是加密文件空间，支持上传、文件夹、预览、公开分享、私密空间、离线下载、HTTP API 与 S3。"
-                 "账号资料、登录密码和通行密钥在侧栏「用户设置」管理，程序凭据在「访问密钥」管理。"),
-    "passkeys": ("通行密钥", "/docs/files#private-space", "进入侧栏「用户设置」，点击「添加通行密钥」，为设备命名，输入当前登录密码，"
+                 "账号资料、登录密码和通行密钥在头像菜单的「用户设置」管理，程序凭据在「用户设置 → 访问密钥」管理。"),
+    "passkeys": ("通行密钥", "/docs/files#private-space", "从头像菜单进入「用户设置」，点击「添加通行密钥」，为设备命名，输入当前登录密码，"
                 "点击「验证并添加」，按设备提示完成指纹、面容或 PIN 验证。最多 10 项，可重命名、移除；敏感操作需在本站确认密码。"
                 "之后可在登录页用「通行密钥登录」，也可快捷解锁私密空间。需要支持的浏览器、设备锁屏和 HTTPS；本地开发可用 localhost。"
                 "普通 HTTP 内网地址不支持，更换域名需重新绑定。密码只在本站表单输入，不要发给助手。"),
@@ -31,7 +31,7 @@ HELP = {
             "密钥只访问所属用户、授权桶与路径的普通文件，分只读/读写，不能访问私密空间。"
             "完整文件接口见 /docs/api-files，授权说明见 /docs/api-permissions。"
             "网页 /api/user/v1 与 /api/admin/v1 使用 HttpOnly Cookie 与 CSRF，仅供本站网页使用，不用于外部脚本。"),
-    "s3": ("S3 客户端", "/docs/s3", "可用 rclone、AWS CLI、boto3，使用侧栏「访问密钥」创建的 AccessKeyId/SecretAccessKey。"
+    "s3": ("S3 客户端", "/docs/s3", "可用 rclone、AWS CLI、boto3，使用「用户设置 → 访问密钥」创建的 AccessKeyId/SecretAccessKey。"
            "配置公开 S3 Endpoint、路径风格寻址、region=us-east-1；桶名称以账号页面实际显示为准，不猜测。"
            "支持对象上传、读取、Range、列表、复制、删除与分段上传等已文档化能力，不承诺完整 AWS S3 功能。私密空间不开放。"),
     "downloads": ("离线下载", "/docs/downloads", "在侧栏「离线下载」提交直链或 curl/wget；按管理员开启能力可解析 M3U8、X、YouTube。"

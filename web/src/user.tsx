@@ -14,7 +14,6 @@ import { UploadTray, useUploadQueue } from "./user/uploads";
 
 import { SharedView } from "./user/shared";
 import { TrashView } from "./user/trash";
-import { KeysView } from "./user/keys";
 import { DownloadsView } from "./user/downloads";
 import { DownloadTray } from "./user/download-tray";
 import { PreviewHost } from "./user/preview-host";
@@ -98,7 +97,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
     onSessionChange={patch => setSession(current => current && { ...current, ...patch })} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "keys" | "private" | "downloads" | "account" | "assistantPage";
+type UserSection = "files" | "shared" | "trash" | "private" | "downloads" | "account" | "assistantPage";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -115,7 +114,9 @@ function readLocation(): { section: Section; prefix: string } {
   const view = params.get("view");
   // 文件助手全页：prefix 字段沿用为对话编号（?view=assistant&c=<对话>）。
   if (view === "assistant") return { section: "assistantPage", prefix: params.get("c") ?? "" };
-  return { section: view === "shared" || view === "keys" || view === "trash" || view === "private" || view === "downloads" || view === "account" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
+  // 用户设置分「账号」与「访问密钥」两个标签页，prefix 字段沿用为标签名；旧地址 ?view=keys 打开访问密钥标签。
+  if (view === "account" || view === "keys") return { section: "account", prefix: view === "keys" || params.get("tab") === "keys" ? "keys" : "" };
+  return { section: view === "shared" || view === "trash" || view === "private" || view === "downloads" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
 }
 
 function sectionUrl(section: Section, prefix = "") {
@@ -124,6 +125,7 @@ function sectionUrl(section: Section, prefix = "") {
   if (section !== "files") params.set("view", section === "assistantPage" ? "assistant" : section);
   if ((section === "files" || section === "private") && prefix) params.set("path", section === "private" ? prefix.replace(api.PRIVATE_PREFIX, "") : prefix);
   if (section === "assistantPage" && prefix) params.set("c", prefix);
+  if (section === "account" && prefix === "keys") params.set("tab", "keys");
   const query = params.toString();
   return query ? `/?${query}` : "/";
 }
@@ -239,7 +241,9 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
           pageImport={pageImport} onPageImportDone={clearPageImport}
           onConversationChange={id => { if ((id ?? "") !== (new URLSearchParams(window.location.search).get("c") ?? "")) window.history.replaceState(null, "", sectionUrl("assistantPage", id ?? "")); }} />;
   } else if (section === "account") {
-    content = <UserSettingsPage session={session} onSessionChange={onSessionChange} assistant={assistantAvailable} onOpenConversation={id => navigate("assistantPage", id)} />;
+    content = <UserSettingsPage session={session} onSessionChange={onSessionChange} assistant={assistantAvailable} onOpenConversation={id => navigate("assistantPage", id)}
+      tab={location.prefix === "keys" ? "keys" : "account"} onTabChange={tab => navigate("account", tab === "keys" ? "keys" : "")}
+      bucketName={usage ? `user-${usage.id}` : null} keysAvailable={workspaceReady && !locked} />;
   } else if (isAdminSection(section)) {
     if (!isAdmin) content = <AccessDenied />;
     else if (status === null) content = <FullPageLoading label="正在读取系统状态" />;
@@ -258,7 +262,6 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       {section === "files" && <FilesView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={prefix => navigate("files", prefix)} onChanged={refreshUsage} />}
       {section === "private" && <PrivateSpaceView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={path => navigate("private", path)} onChanged={refreshUsage} />}
       {section === "shared" && <SharedView session={session} onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
-      {section === "keys" && <KeysView bucketName={usage ? `user-${usage.id}` : null} />}
       {section === "downloads" && <DownloadsView onChanged={refreshUsage} onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCreated={() => setDownloadRevision(value => value + 1)} />}
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
     </>;
@@ -269,8 +272,6 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
     { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
     { key: "downloads", label: "下载任务", icon: "download" },
     { key: "trash", label: "回收站", icon: "trash" },
-    { key: "keys", label: "访问密钥", icon: "key" },
-    { key: "account", label: "用户设置", icon: "settings" },
   ] };
   const groups: NavGroup<Section>[] = [
     personal,
@@ -291,7 +292,10 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         <StorageMeter usage={usage} percent={percent} />
       </>}
       account={{ name: api.displayName(session), caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", avatar: api.avatarUrl(session.avatar_version), menu: [
-        { label: "跟随系统", icon: "monitor", heading: "外观", checked: theme === "system", onSelect: () => setThemePreference("system") },
+        // 用户设置（含访问密钥）从头像菜单进入，不占侧栏位置。
+        { label: "用户设置", icon: "settings", onSelect: () => navigate("account") },
+        { label: "访问密钥", icon: "key", onSelect: () => navigate("account", "keys") },
+        { label: "跟随系统", icon: "monitor", heading: "外观", divider: true, checked: theme === "system", onSelect: () => setThemePreference("system") },
         { label: "浅色", icon: "sun", checked: theme === "light", onSelect: () => setThemePreference("light") },
         { label: "深色", icon: "moon", checked: theme === "dark", onSelect: () => setThemePreference("dark") },
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },

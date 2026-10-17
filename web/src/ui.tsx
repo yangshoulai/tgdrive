@@ -889,8 +889,9 @@ export function formatDateTime(seconds: number | null | undefined) {
   return `${dateFormatter.format(date)} ${timeFormatter.format(date)}`;
 }
 
-export function useDocumentTitle(title: string) {
-  useEffect(() => { document.title = title; }, [title]);
+/** title 为 null 时不修改（组件嵌在其他页面里，由外层页面设置标题）。 */
+export function useDocumentTitle(title: string | null) {
+  useEffect(() => { if (title !== null) document.title = title; }, [title]);
 }
 
 export function Pagination({ number, hasPrevious, hasNext, loading, previous, next, pageSize, changePageSize }: {

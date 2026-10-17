@@ -2136,6 +2136,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .btn-sm, .segmented button { min-height: 36px; }
   .menu-item { min-height: 40px; }
   .mobile-bar > .icon-btn { width: 44px; height: 44px; }
+  .mobile-bar > .mobile-account { border-radius: 50%; }
   .search-input { height: 40px; }
   .breadcrumbs button { min-height: 36px; }
   .file-surface > .file-table { min-width: 0; --cols: 24px minmax(0, 1fr) 44px; }

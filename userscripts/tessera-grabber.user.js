@@ -2729,7 +2729,7 @@
       h("div", { className: "group" },
         h("label", { className: "field" }, h("span", { className: "label" }, "Tessera 地址"), server),
         h("label", { className: "field" }, h("span", { className: "label" }, "访问密钥"), key,
-          h("span", { className: "hint" }, "在 Tessera「访问密钥」页面新建，按 Access Key ID:Secret 填写。只保存在 Tampermonkey 中。")),
+          h("span", { className: "hint" }, "在 Tessera 头像菜单「用户设置 → 访问密钥」中新建，按 Access Key ID:Secret 填写。只保存在 Tampermonkey 中。")),
         h("div", { className: "field" }, h("span", { className: "label" }, "默认保存位置"), destinationRow(() => dest, value => { dest = value; })),
         status),
       h("div", { className: "divider" }),
