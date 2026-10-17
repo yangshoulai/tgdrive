@@ -30,7 +30,7 @@ from .fingerprint import BLOCK_SIZE, BlockHasher
 from .keystore import KeyStore
 from .metadata import BlobRecord, ChunkRecord, Metadata
 from .thumbnail_cache import ThumbnailCacheMiss
-from .work import TransferSlots, WorkBusyError
+from .work import Limiter, RateLimiter, TransferSlots, WorkBusyError
 
 # 小对象读取通道：并发数、单个对象上限与排队等待时间。
 SMALL_READ_CONCURRENCY = 4
@@ -69,6 +69,10 @@ class BlobEngine:
         self.transfers = TransferSlots(transfer_concurrency, bucket_concurrency)
         # 缩略图大图等小对象的独立读取通道：网格视图会一次请求几十张，不能和下载、预览争抢传输名额。
         self.small_reads = asyncio.Semaphore(SMALL_READ_CONCURRENCY)
+        # 全局写入存储（Telegram 发送）的分片数与平均速率，由「下载与资源」配置随时调整。
+        # 每个在途分片约占明文加密文两份内存（约 32 MB）。
+        self.upload_slots = Limiter(4)
+        self.upload_rate = RateLimiter(0)
         self.thumbnail_cache = None
         self._thumbnail_read_lock = asyncio.Lock()
 
@@ -187,8 +191,10 @@ class BlobEngine:
 
     async def _store_chunk(self, fk: FileKey, blob_uuid: str, part_no: int, sub_idx: int, plain: bytes) -> ChunkRecord:
         # 16 MB 的 AES-GCM 加密放到线程里，避免阻塞事件循环（cryptography 会释放 GIL）。
-        encrypted, salt = await asyncio.to_thread(encrypt_chunk, fk, plain)
-        ref = await self.store.put(f"{blob_uuid}:{part_no}:{sub_idx}", encrypted)
+        async with self.upload_slots.slot():
+            encrypted, salt = await asyncio.to_thread(encrypt_chunk, fk, plain)
+            await self.upload_rate.consume(len(encrypted))
+            ref = await self.store.put(f"{blob_uuid}:{part_no}:{sub_idx}", encrypted)
         if self.thumbnail_cache is not None:
             await asyncio.to_thread(self.thumbnail_cache.put, blob_uuid, ref, 0, encrypted)
         return ChunkRecord(blob_uuid, part_no, sub_idx, None, len(plain), len(encrypted), salt,

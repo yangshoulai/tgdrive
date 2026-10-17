@@ -497,7 +497,7 @@ class TgDriveASGI(StaticFiles):
         elif action == "maintenance.thumbnails":
             detail = {"daily_mib": payload.get("daily_mib")}
         elif action == "resources.update":
-            detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency") if key in payload}
+            detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency", "upload_concurrency", "upload_kib", "bot_interval_ms", "web_part_concurrency", "web_file_concurrency") if key in payload}
             if "proxy" in payload:
                 # 代理地址可能包含认证信息，审计只记录是否启用。
                 detail["proxy_enabled"] = bool(payload.get("proxy"))
@@ -865,6 +865,12 @@ class TgDriveASGI(StaticFiles):
                 return 200, await user.save_share(token, csrf, shared[1], payload.get("destination", ""), payload.get("paths")), {}
             if route == "/usage" and method == "GET" and not private:
                 return 200, user.usage(token), {"Cache-Control": "no-store"}
+            if route == "/upload-config" and method == "GET" and not private:
+                # 网页上传的并发由管理员在「下载与资源」配置；只返回这几个数值，不暴露其他资源配置。
+                user._scope(token)
+                effective = self.resources.effective() if self.resources is not None else {}
+                return 200, {"part_concurrency": effective.get("web_part_concurrency", 4),
+                             "file_concurrency": effective.get("web_file_concurrency", 2)}, {"Cache-Control": "no-store"}
             if route.startswith("/assistant/") and self.assistant is not None:
                 return await self._assistant_user(method, route[len("/assistant"):], query, payload, token, csrf)
             if route.startswith("/downloads") and self.offline is not None:

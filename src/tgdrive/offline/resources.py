@@ -19,7 +19,11 @@ MIB = 1024 * 1024
 DEFAULTS = {"mode": "auto", "concurrency": 1, "bandwidth_kib": 0,
             "reserve_mib": 512, "hls_enabled": False, "x_enabled": False, "youtube_enabled": False,
             "youtube_max_height": 2160, "platform_max_mib": 512, "proxy": "",
-            "transfer_concurrency": 4, "bucket_concurrency": 2}
+            "transfer_concurrency": 4, "bucket_concurrency": 2,
+            "upload_concurrency": 4, "upload_kib": 0, "bot_interval_ms": 1000,
+            "web_part_concurrency": 4, "web_file_concurrency": 2}
+# 写入存储（Telegram 发送）的每个在途分片约占明文与密文两份内存。
+UPLOAD_MEMORY = 32 * MIB
 # 文件读取并发（下载、预览、播放、S3 读取共用）：每路约占 (预读窗口数 + 1) × 8 MB 内存。
 TRANSFER_MEMORY = 24 * MIB
 MASK = "******"
@@ -141,6 +145,13 @@ class ResourceSettings:
                 raise ValueError("文件读取并发须为 1–16")
         if merged["bucket_concurrency"] > merged["transfer_concurrency"]:
             raise ValueError("每个账号的读取并发不能超过服务器总数")
+        for key, low, high, message in (("upload_concurrency", 1, 16, "同时写入存储的分片数须为 1–16"),
+                                        ("upload_kib", 0, 1048576, "上传限速须为 0–1048576 KiB/s"),
+                                        ("bot_interval_ms", 0, 10000, "Bot 发送间隔须为 0–10000 毫秒"),
+                                        ("web_part_concurrency", 1, 8, "网页单个文件的分段并发须为 1–8"),
+                                        ("web_file_concurrency", 1, 4, "网页同时上传的文件数须为 1–4")):
+            if type(merged[key]) is not int or not low <= merged[key] <= high:
+                raise ValueError(message)
         if not isinstance(merged["proxy"], str):
             raise ValueError("下载代理地址格式不正确")
         merged["proxy"] = normalize_proxy(merged["proxy"])
@@ -168,8 +179,17 @@ class ResourceSettings:
         if memory:
             transfer = min(transfer, max(2, memory // 4 // TRANSFER_MEMORY))
         bucket = min(config["bucket_concurrency"], transfer, 1 if mode == "low" else 16)
+        # 上传名额同样按低资源模式与内存收紧；网页分段并发在低资源下最多 2，避免服务端同时缓冲太多 16 MB 分段。
+        upload = config["upload_concurrency"]
+        if mode == "low":
+            upload = min(upload, 2)
+        if memory:
+            upload = min(upload, max(1, memory // 4 // UPLOAD_MEMORY))
+        web_parts = min(config["web_part_concurrency"], 2) if mode == "low" else config["web_part_concurrency"]
         return {**config, "mode": mode, "concurrency": min(desired, ceiling), "ffmpeg_concurrency": 1,
                 "transfer_concurrency": transfer, "bucket_concurrency": bucket,
+                "upload_concurrency": upload, "web_part_concurrency": web_parts,
+                "upload_reduced": (upload, web_parts) != (config["upload_concurrency"], config["web_part_concurrency"]),
                 "transfer_reduced": (transfer, bucket) != (config["transfer_concurrency"], config["bucket_concurrency"]),
                 "streaming": True, "cache_mib": platform_limit if config["youtube_enabled"] else 0,
                 "platform_max_mib": platform_limit,

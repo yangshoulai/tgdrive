@@ -70,10 +70,18 @@ type UploadJob = { id: string; file: File; path: string; isPublic: boolean; perc
 
 /** 超过这个大小的文件分段上传：每段失败自动重试，网络中断或刷新页面后重新选择同一文件即可续传。 */
 const MULTIPART_THRESHOLD = 64 * 1024 * 1024;
-/** 同一个大文件同时上传的分段数；服务端分段互相独立，并行可以掩盖单连接的往返延迟。 */
-const PART_CONCURRENCY = 4;
-/** 同时上传的文件数，小文件批量上传时不必逐个等待。 */
-const FILE_CONCURRENCY = 2;
+/** 上传并发由管理员在「下载与资源」配置：parts 是同一个大文件同时上传的分段数（并行可以掩盖单连接的往返延迟），
+ *  files 是同时上传的文件数。读取失败时沿用上次的值；每分钟最多读取一次，开始上传时刷新。 */
+const uploadLimits = { parts: 4, files: 2, loadedAt: 0 };
+async function refreshUploadLimits() {
+  if (Date.now() - uploadLimits.loadedAt < 60_000) return;
+  uploadLimits.loadedAt = Date.now();
+  try {
+    const config = await api.uploadConfig();
+    uploadLimits.parts = Math.max(1, Math.min(8, config.part_concurrency));
+    uploadLimits.files = Math.max(1, Math.min(4, config.file_concurrency));
+  } catch { /* 沿用当前值 */ }
+}
 /** 小于这个大小的文件不做秒传探测：哈希加一次请求的开销比直接上传还大。 */
 const INSTANT_MIN_SIZE = 1024 * 1024;
 /** 成功反馈留出查看大小、复制分享链接的时间，再逐项收起。 */
@@ -151,7 +159,7 @@ async function uploadMultipart(job: UploadJob, signal: { aborted: boolean; abort
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(PART_CONCURRENCY, todo.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(uploadLimits.parts, todo.length) }, worker));
   if (signal.aborted) throw new api.ApiError("已取消上传", 0, "upload_aborted");
   if (failure) throw failure;
   const result = await api.completeUpload(uploadId, [...done.entries()].sort((a, b) => a[0] - b[0]), job.isPublic || undefined, job.path);
@@ -258,7 +266,7 @@ export function useUploadQueue(onSettled: () => void) {
     else if (done) toast.success(instant === done ? (done === 1 ? "秒传完成" : `${done} 个文件秒传完成`) : `${done === 1 ? "上传完成" : `${done} 个文件上传完成`}${instant ? `（其中 ${instant} 个秒传）` : ""}`);
   }
   function run() {
-    while (workers.current < FILE_CONCURRENCY && queue.current.length > 0) {
+    while (workers.current < uploadLimits.files && queue.current.length > 0) {
       workers.current++;
       void worker();
     }
@@ -267,7 +275,9 @@ export function useUploadQueue(onSettled: () => void) {
     const next = items.map(item => ({ ...item, id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, percent: 0, status: "queued" as const }));
     queue.current.push(...next);
     setJobs(current => [...current, ...next]);
+    // 先按当前值开始；读到管理员的新配置后，若允许更多文件同时上传就补上。
     run();
+    void refreshUploadLimits().then(run);
   }
   function retry(id: string) {
     const failed = jobs.find(job => job.id === id && job.status === "error");

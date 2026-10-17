@@ -122,6 +122,13 @@ class ConfiguredBlobStore(BlobStore):
         self.metadata, self.keystore, self.local, self.config = metadata, keystore, local, config
         self._telegram: TelegramBlobStore | None = None
         self._signature: tuple[tuple[int, str, str], ...] | None = None
+        # 同一个 Bot 两次发送之间的最短间隔（秒），由「下载与资源」配置；重建 Bot 池时沿用。
+        self.bot_interval = 1.0
+
+    def set_bot_interval(self, seconds: float) -> None:
+        self.bot_interval = max(0.0, seconds)
+        if self._telegram is not None:
+            self._telegram.pool.min_interval = self.bot_interval
 
     def _build(self) -> TelegramBlobStore | None:
         """读写共用一个缓存的 Bot 池：停用的 Bot 仍用于读取和删除，但不参与上传。
@@ -144,7 +151,7 @@ class ConfiguredBlobStore(BlobStore):
             token = self.config.token(int(row["id"]))
             state = BotState.ENABLED if row["status"] == "active" else BotState.DISABLED
             pool_bots.append(PoolBot(str(row["id"]), TelegramClient(token), row["channel_id"], state))
-        self._telegram, self._signature = TelegramBlobStore(BotPool(pool_bots)), signature
+        self._telegram, self._signature = TelegramBlobStore(BotPool(pool_bots, min_interval=self.bot_interval)), signature
         return self._telegram
 
     @staticmethod

@@ -43,6 +43,25 @@ export function Resources() {
             <input className="input" type="number" min={1} max={form.transfer_concurrency || 1} step={1} required value={form.bucket_concurrency} onChange={event => setForm({ ...form, bucket_concurrency: Number(event.target.value) })} />
           </Field>
         </div>
+        <div className="form-row">
+          <Field label="同时写入存储的分片数" hint="所有上传共用，1–16。每个分片 16 MB，约占 32 MB 内存。">
+            <input className="input" type="number" min={1} max={16} step={1} required value={form.upload_concurrency} onChange={event => setForm({ ...form, upload_concurrency: Number(event.target.value) })} />
+          </Field>
+          <Field label="上传限速（KiB/s）" hint="写入存储的平均速率，所有上传共用；0 表示不限速。">
+            <input className="input" type="number" min={0} max={1048576} step={1} required value={form.upload_kib} onChange={event => setForm({ ...form, upload_kib: Number(event.target.value) })} />
+          </Field>
+        </div>
+        <Field label="每个 Bot 的发送间隔（毫秒）" hint="同一个 Bot 两次发送之间至少相隔的时间，0–10000。多个 Bot 轮流发送，间隔各自计算；过短容易被 Telegram 限流，限流后会自动退避。">
+          <input className="input" type="number" min={0} max={10000} step={100} required value={form.bot_interval_ms} onChange={event => setForm({ ...form, bot_interval_ms: Number(event.target.value) })} />
+        </Field>
+        <div className="form-row">
+          <Field label="网页单个文件的分段并发" hint="大于 64 MB 的文件分段上传时同时发送的分段数，1–8。">
+            <input className="input" type="number" min={1} max={8} step={1} required value={form.web_part_concurrency} onChange={event => setForm({ ...form, web_part_concurrency: Number(event.target.value) })} />
+          </Field>
+          <Field label="网页同时上传的文件数" hint="1–4；网页在开始上传时读取，最长 1 分钟后生效。">
+            <input className="input" type="number" min={1} max={4} step={1} required value={form.web_file_concurrency} onChange={event => setForm({ ...form, web_file_concurrency: Number(event.target.value) })} />
+          </Field>
+        </div>
         <Field label="出站代理" hint="所有离线下载和平台解析都经此代理，域名由代理解析；留空为直连。支持 http:// 与 socks5://，密码保存后以 ****** 显示。">
           <input className="input mono" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="http://127.0.0.1:7890" value={form.proxy} onChange={event => setForm({ ...form, proxy: event.target.value })} />
         </Field>
@@ -63,6 +82,9 @@ export function Resources() {
         ["离线下载并发", `${settings.effective.concurrency} 个任务`],
         ["视频封装并发", "1 个任务"],
         ["文件读取并发", `服务器 ${settings.effective.transfer_concurrency} 路 · 每个账号 ${settings.effective.bucket_concurrency} 路`],
+        ["写入存储", `${settings.effective.upload_concurrency} 个分片 · ${settings.effective.upload_kib ? `${settings.effective.upload_kib.toLocaleString("zh-CN")} KiB/s` : "不限速"}`],
+        ["Bot 发送间隔", `${settings.effective.bot_interval_ms} 毫秒`],
+        ["网页上传", `每个文件 ${settings.effective.web_part_concurrency} 段 · 同时 ${settings.effective.web_file_concurrency} 个文件`],
         ["检测到的 CPU", `${settings.detected.cpu_cores.toFixed(2)} 核`],
         ["检测到的内存", settings.detected.memory_bytes ? formatBytes(settings.detected.memory_bytes) : "无法可靠检测，采用保守预算"],
         ["磁盘剩余空间", settings.detected.disk_free_bytes !== null ? formatBytes(settings.detected.disk_free_bytes) : "未知"],
@@ -73,7 +95,7 @@ export function Resources() {
         ["X 解析组件", settings.effective.x_available ? "可用" : "未安装"],
         ["YouTube 解析组件", settings.effective.youtube_available ? "可用" : "组件不完整"],
         ...Object.entries(settings.components.versions).map(([name, version]) => [`${name} 版本`, version ?? "未安装"] as [string, string]),
-      ]} />{settings.components.ytdlp_age_days !== null && settings.components.ytdlp_age_days > 60 && <p className="tone-warning">yt-dlp 已发布 {settings.components.ytdlp_age_days} 天。YouTube 经常调整接口，解析失败时请拉取最新的平台镜像。</p>}{settings.effective.reduced && <p className="tone-warning">当前资源预算不足，并发已降低。</p>}{settings.effective.transfer_reduced && <p className="tone-warning">文件读取并发已按{settings.effective.mode === "low" ? "低资源模式（最多 2 路、每个账号 1 路）" : "检测到的内存"}降低。</p>}{settings.pressure && <p className="tone-warning">{settings.pressure}</p>}<p className="muted">降低并发不会终止现有任务或传输，后续调度使用新配置。名额占满时新的读取最多排队 30 秒；缩略图大图使用独立通道，不占这里的名额。</p></div>
+      ]} />{settings.components.ytdlp_age_days !== null && settings.components.ytdlp_age_days > 60 && <p className="tone-warning">yt-dlp 已发布 {settings.components.ytdlp_age_days} 天。YouTube 经常调整接口，解析失败时请拉取最新的平台镜像。</p>}{settings.effective.reduced && <p className="tone-warning">当前资源预算不足，并发已降低。</p>}{settings.effective.upload_reduced && <p className="tone-warning">上传并发已按{settings.effective.mode === "low" ? "低资源模式（写入最多 2 个分片、网页每个文件最多 2 段）" : "检测到的内存"}降低。</p>}{settings.effective.transfer_reduced && <p className="tone-warning">文件读取并发已按{settings.effective.mode === "low" ? "低资源模式（最多 2 路、每个账号 1 路）" : "检测到的内存"}降低。</p>}{settings.pressure && <p className="tone-warning">{settings.pressure}</p>}<p className="muted">降低并发不会终止现有任务或传输，后续调度使用新配置。名额占满时新的读取最多排队 30 秒；缩略图大图使用独立通道，不占这里的名额。</p></div>
     </div>}
   </Panel>;
 }

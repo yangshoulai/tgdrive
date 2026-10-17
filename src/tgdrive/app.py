@@ -64,6 +64,9 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     def apply_resources(config):
         low = config["mode"] == "low" or config["concurrency"] == 1
         engine.transfers.set_limits(config["transfer_concurrency"], config["bucket_concurrency"])
+        engine.upload_slots.set_limit(config["upload_concurrency"])
+        engine.upload_rate.set_rate(config["upload_kib"] * 1024)
+        store.set_bot_interval(config["bot_interval_ms"] / 1000)
         engine.upload_concurrency, engine.read_ahead = (1, 1) if low else (3, 2)
     resources.on_change = apply_resources
     apply_resources(resources.effective())

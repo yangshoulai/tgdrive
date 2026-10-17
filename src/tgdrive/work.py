@@ -1,8 +1,9 @@
-"""限制高内存密码计算的并发；会话与数据库变更仍在事件循环中执行。"""
+"""并发与速率限制：密码计算、文件读取名额、写入存储的上传名额与上传限速。"""
 
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 
 
@@ -76,3 +77,60 @@ class TransferSlots:
                     if not self._buckets[bucket_id]:
                         self._buckets.pop(bucket_id)
                     self._condition.notify_all()
+
+
+class Limiter:
+    """可随时调整上限的并发名额；调低时不打断已获准的任务，后续排队按新上限放行。"""
+
+    def __init__(self, limit: int) -> None:
+        if limit < 1:
+            raise ValueError("并发必须为正数")
+        self.limit, self._active = limit, 0
+        self._condition = asyncio.Condition()
+
+    def set_limit(self, limit: int) -> None:
+        if limit < 1:
+            raise ValueError("并发必须为正数")
+        self.limit = limit
+        # 在事件循环外调用时不能直接 notify；等待者也会每 0.5 秒自行检查。
+
+    @asynccontextmanager
+    async def slot(self):
+        async with self._condition:
+            while self._active >= self.limit:
+                try:
+                    async with asyncio.timeout(0.5):
+                        await self._condition.wait()
+                except TimeoutError:
+                    pass
+            self._active += 1
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._active -= 1
+                self._condition.notify_all()
+
+
+class RateLimiter:
+    """按字节计的平均速率限制；rate 为 0 表示不限速。按预约时刻排队，不同调用者共享同一速率。"""
+
+    def __init__(self, rate: int = 0) -> None:
+        self.rate, self._next = 0, 0.0
+        self.set_rate(rate)
+
+    def set_rate(self, rate: int) -> None:
+        if rate < 0:
+            raise ValueError("限速不能为负数")
+        self.rate = rate
+
+    async def consume(self, size: int) -> None:
+        rate = self.rate
+        if not rate or size <= 0:
+            self._next = 0.0
+            return
+        now = time.monotonic()
+        start = max(now, self._next)
+        self._next = start + size / rate
+        if start > now:
+            await asyncio.sleep(start - now)

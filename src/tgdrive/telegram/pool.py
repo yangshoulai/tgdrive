@@ -1,4 +1,4 @@
-"""Telegram Bot 池：选择可用 Bot，并按频道维度限速。"""
+"""Telegram Bot 池：轮流选择可用 Bot，每个 Bot 两次发送之间至少间隔 min_interval 秒。"""
 
 from __future__ import annotations
 

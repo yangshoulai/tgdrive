@@ -36,10 +36,10 @@ export type BotConfig = { id: number; name: string; channel_id: string; status: 
 export type UserMe = Profile & { id: number; username: string; role: Role; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; unlocked: boolean; remember?: boolean; csrf_token: string; expires_at: number } & SiteConfig;
 export type SettingValue = { value: string | null; default: string | null; effective: string | null };
 export type SystemSettings = { public_base_url: SettingValue; s3_endpoint: SettingValue };
-export type ResourceConfig = { mode: "auto" | "low" | "standard" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number };
+export type ResourceConfig = { mode: "auto" | "low" | "standard" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number };
 export type ResourceSettings = { config: ResourceConfig; source: "admin" | "startup"; pressure: string | null;
   components: { versions: Record<string, string | null>; ytdlp_age_days: number | null };
-  effective: ResourceConfig & { ffmpeg_concurrency: number; streaming: boolean; cache_mib: number; hls_available: boolean; x_available: boolean; youtube_available: boolean; reduced: boolean; transfer_reduced: boolean };
+  effective: ResourceConfig & { ffmpeg_concurrency: number; streaming: boolean; cache_mib: number; hls_available: boolean; x_available: boolean; youtube_available: boolean; reduced: boolean; transfer_reduced: boolean; upload_reduced: boolean };
   detected: { cpu_cores: number; memory_bytes: number | null; container_limits: boolean; disk_total_bytes: number | null; disk_free_bytes: number | null } };
 export type DownloadCandidate = { ticket: string; group: string; name: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform?: "x" | "youtube"; media_type?: "image" | "video" | "audio"; content_type?: string | null; size: number | null; variant: string | null; warnings: string[]; header_names: string[]; body_bytes: number };
 export type DownloadStatus = "queued" | "running" | "stopped" | "interrupted" | "completed" | "failed";
@@ -301,6 +301,8 @@ export type ThumbnailState = Pick<FileItem, "etag" | "size" | "modified_at" | "h
 /** 只查询所列文件的 ETag 与缩略图状态（最多 200 个）；不存在或无权访问的路径不在结果中。 */
 export const thumbnailStatus = (paths: string[], signal?: AbortSignal) => request<{ files: Record<string, ThumbnailState> }>(fileApi("/thumbnail/status", paths[0]),
   { method: "POST", body: JSON.stringify({ paths }), signal });
+/** 网页上传并发：由管理员在「下载与资源」配置。 */
+export const uploadConfig = () => request<{ part_concurrency: number; file_concurrency: number }>("/api/user/v1/upload-config");
 export const generateThumbnail = (file: Pick<FileItem, "key" | "etag">) => post<{ accepted: boolean }>(fileApi("/thumbnail/generate", file.key), { path: file.key, etag: file.etag });
 type ThumbnailFile = Pick<FileItem, "key" | "etag" | "thumbnails" | "has_thumbnail" | "thumbnail_versions">;
 function thumbnailSpec(file: ThumbnailFile, variant: ThumbnailVariant) {
