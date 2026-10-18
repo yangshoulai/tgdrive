@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import { Button, Icon, IconButton, formatBytes } from "../ui";
 import { downloadGlyph, downloadPercent, downloadStatusLabel, downloadTaskFolder, downloadTaskName, isActiveDownload, seconds } from "./downloads";
-import { TrayBar, TrayRing, type TrayState } from "./tray";
+import { TrayProgressRing, TrayRing, type TrayState } from "./tray";
 
 const COMPLETED_VISIBLE_MS = 8000;
 
@@ -131,6 +131,7 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
         <ul>
           {tasks.map(task => {
             const name = downloadTaskName(task);
+            const location = api.privatePathLabel(downloadTaskFolder(task));
             const percent = downloadPercent(task);
             const running = isActiveDownload(task);
             const progress = task.size ? `${formatBytes(task.received)} / ${formatBytes(task.size)}` : task.received ? formatBytes(task.received) : null;
@@ -138,14 +139,14 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
               : task.status === "completed" ? formatBytes(task.stored_bytes || task.size || 0) : task.error ?? downloadStatusLabel(task);
             return <li key={task.id} className={`tray-item is-${task.status}`}>
               <span className="tray-icon"><span className={`download-glyph download-glyph-${downloadGlyph(task)}`}><Icon name={downloadGlyph(task)} size={18} /></span>
-                {(task.status === "completed" || task.status === "failed") && <span className="tray-badge"><Icon name={task.status === "completed" ? "check" : "alert"} size={10} /></span>}</span>
+                {(task.status === "queued" || task.status === "completed" || task.status === "failed") && <span className="tray-badge" role="img" aria-label={downloadStatusLabel(task)} title={downloadStatusLabel(task)}><Icon name={task.status === "queued" ? "clock" : task.status === "completed" ? "check" : "alert"} size={10} /></span>}</span>
               <div className="tray-job">
-                <span className="tray-name" title={task.key}><span>{name}</span></span>
-                <small className={task.status === "failed" ? "tone-danger" : "muted"}>{detail}</small>
-                {running && <TrayBar percent={percent} paused={task.status !== "running"} label={percent === null ? `${name} 总大小未知` : `${name} 下载进度`} />}
+                <span className="tray-name" title={name}><span>{name}</span></span>
+                <small className="tray-destination muted" title={`保存到 ${location}`}><Icon name={task.private ? "lock" : "folder"} size={12} /><span>{location}</span></small>
+                {task.status !== "queued" && <small className={task.status === "failed" ? "tone-danger" : "muted"}>{detail}</small>}
               </div>
               <span className="tray-right">
-                {running && percent !== null && <span className="tray-percent">{Math.floor(percent)}%</span>}
+                {running && <TrayProgressRing percent={percent} paused={task.status !== "running"} label={`${name}：${downloadStatusLabel(task)}`} />}
                 {task.status === "completed" && <IconButton icon="folder" size="sm" label={`打开 ${name} 所在目录`} onClick={() => onOpenFolder(downloadTaskFolder(task), task.private)} />}
                 {(task.status === "failed" || task.status === "stopped") && task.method !== "POST" && <Button size="sm" icon="refresh" loading={retrying.has(task.id)} aria-label={`继续下载 ${name}`} onClick={() => void retry(task)}>继续</Button>}
               </span>

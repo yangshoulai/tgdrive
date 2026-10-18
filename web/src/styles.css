@@ -1748,6 +1748,15 @@ button.upload-tree-name { cursor: pointer; }
 .tray-ring.is-idle { color: var(--ink-3); }
 .tray-ring.is-idle .tray-ring-track { stroke: var(--line); }
 .tray-ring:is(.is-done, .is-error) > :last-child { animation: tray-pop .4s cubic-bezier(.2, 1.4, .4, 1); }
+.tray-progress { display: grid; flex: none; }
+.tray-progress .tray-ring { width: 28px; height: 28px; }
+.tray-progress .tray-ring > svg:last-child { width: 12px; height: 12px; animation: none; }
+.tray-progress.is-paused .tray-ring { color: var(--ink-3); }
+.tray-progress.is-paused .tray-ring-track { stroke: var(--line); }
+@media (prefers-reduced-motion: reduce) {
+  .tray-progress .tray-ring.is-indeterminate > svg:first-child { animation: none; }
+  .tray-progress .tray-ring-value { transition: none; }
+}
 .upload-tray ul { flex: 1 1 auto; max-height: 300px; min-height: 0; margin: 0; padding: 4px; overflow-y: auto; border-top: 1px solid var(--line-soft); list-style: none; overscroll-behavior: contain; }
 .tray-item { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 7px 6px 7px 8px; border-radius: var(--radius-md); animation: tray-row var(--duration-slow) var(--ease-out) backwards; transition: background-color var(--duration-fast), opacity var(--duration-base); }
 .tray-item:hover { background: var(--surface-hover); }
@@ -1756,9 +1765,13 @@ button.upload-tree-name { cursor: pointer; }
 .tray-icon .download-glyph { width: 32px; height: 36px; }
 .tray-badge { position: absolute; right: -4px; bottom: -3px; display: grid; width: 16px; height: 16px; place-items: center; border: 2px solid var(--surface); border-radius: 50%; background: var(--success); color: #fff; animation: tray-pop .4s cubic-bezier(.2, 1.4, .4, 1); }
 .tray-item:is(.is-error, .is-failed) .tray-badge { background: var(--danger); }
+.download-tray .tray-item.is-queued .tray-badge { background: var(--surface-sunken); color: var(--ink-3); }
 .tray-job { display: grid; flex: 1; gap: 3px; min-width: 0; }
 .tray-job small { overflow: hidden; font-size: var(--text-xs); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .tray-job .tone-danger { white-space: normal; overflow-wrap: anywhere; }
+.tray-destination { display: flex; align-items: center; gap: 4px; }
+.tray-destination svg { flex: none; }
+.tray-destination > span { overflow: hidden; text-overflow: ellipsis; }
 .tray-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--text-sm); white-space: nowrap; }
 .tray-name > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .tray-public { flex: none; color: var(--public); }
