@@ -1,0 +1,62 @@
+- generic [ref=f3e3]:
+  - link "跳到主要内容" [ref=f3e4] [cursor=pointer]:
+    - /url: "#main"
+  - complementary "主导航" [ref=f3e5]:
+    - generic [ref=f3e6]:
+      - link "Tessera 首页" [ref=f3e7] [cursor=pointer]:
+        - /url: /
+        - generic [ref=f3e15]:
+          - generic [ref=f3e16]: Tessera
+          - generic [ref=f3e17]: 千片成璧，唯你可合
+      - button "收起侧栏" [ref=f3e18] [cursor=pointer]
+    - radiogroup "工作区" [ref=f3e22]:
+      - radio "我的空间" [ref=f3e23] [cursor=pointer]
+      - radio "系统管理" [checked] [ref=f3e27] [cursor=pointer]
+    - navigation [ref=f3e31]:
+      - link "概览" [ref=f3e34] [cursor=pointer]:
+        - /url: /admin
+      - generic [ref=f3e38]:
+        - button "账号与访问" [expanded] [ref=f3e39] [cursor=pointer]
+        - generic [ref=f3e44]:
+          - link "用户" [ref=f3e45] [cursor=pointer]:
+            - /url: /admin/users
+          - link "全部密钥" [ref=f3e49] [cursor=pointer]:
+            - /url: /admin/clients
+      - generic [ref=f3e53]:
+        - button "存储与服务" [expanded] [ref=f3e54] [cursor=pointer]
+        - generic [ref=f3e59]:
+          - link "存储通道" [ref=f3e60] [cursor=pointer]:
+            - /url: /admin/bots
+          - link "文件助手" [ref=f3e64] [cursor=pointer]:
+            - /url: /admin/assistant
+      - generic [ref=f3e68]:
+        - button "安全与运维" [expanded] [ref=f3e69] [cursor=pointer]
+        - generic [ref=f3e74]:
+          - link "安全与维护" [ref=f3e75] [cursor=pointer]:
+            - /url: /admin/maintenance
+          - link "审计日志" [ref=f3e79] [cursor=pointer]:
+            - /url: /admin/audit
+          - link "系统设置" [ref=f3e83] [cursor=pointer]:
+            - /url: /admin/settings
+    - generic [ref=f3e87]:
+      - generic "空间不限" [ref=f3e88]:
+        - button [ref=f3e89] [cursor=pointer]:
+          - generic [ref=f3e90]: 已用空间
+          - strong [ref=f3e93]: 0 B
+      - link "使用文档" [ref=f3e95] [cursor=pointer]:
+        - /url: /docs
+      - generic [ref=f3e101]:
+        - generic [aria-hidden] [ref=f3e102]: 注
+        - generic [ref=f3e103]:
+          - strong [ref=f3e104]: 注册验证
+          - generic [ref=f3e105]: 管理员
+        - button "账号操作" [ref=f3e106] [cursor=pointer]
+  - main [ref=f3e111]:
+    - generic [ref=f3e112]:
+      - heading "系统设置" [level=1] [ref=f3e115]
+      - tablist "系统设置" [ref=f3e116]:
+        - tab "访问地址" [ref=f3e117] [cursor=pointer]
+        - tab "下载与资源" [ref=f3e121] [cursor=pointer]
+        - tab "浏览器缓存" [ref=f3e125] [cursor=pointer]
+        - tab "注册" [selected] [ref=f3e129] [cursor=pointer]
+      - generic "正在加载" [ref=f3e135]

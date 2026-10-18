@@ -1,4 +1,4 @@
-"""网页静态资源和管理员文档的独立服务边界。"""
+"""网页静态资源服务。"""
 
 import asyncio
 import errno
@@ -7,7 +7,6 @@ import re
 from html import escape
 from pathlib import Path
 
-from .errors import NotFoundError
 from .settings import normalize_origin
 
 # 网页（用户端、控制台、文档、分享页）的安全响应头：只允许同源脚本，禁止被其他站点嵌入框架（防点击劫持）。
@@ -66,20 +65,3 @@ class StaticFiles:
             headers["Strict-Transport-Security"] = "max-age=31536000"
         await send({"type": "http.response.start", "status": 200, "headers": self._headers(headers)})
         await send({"type": "http.response.body", "body": b"" if method == "HEAD" else data})
-
-    async def _admin_docs_bundle(self, send, method: str, token: str) -> None:
-        """只向管理员会话返回管理员文档代码，避免普通用户从前端 bundle 读取运维内容。"""
-        session = self.admin.accounts.sessions.require(token, role="admin")
-        self.admin.accounts.account_for_session(session)
-        if self.static_dir is None:
-            raise NotFoundError("管理员文档未构建")
-        candidate = Path(self.static_dir) / "admin-docs.js"
-        if not candidate.is_file():
-            raise NotFoundError("管理员文档未构建")
-        data = await asyncio.to_thread(candidate.read_bytes)
-        await self._send_raw(send, 200, {
-            "Content-Type": "text/javascript; charset=utf-8",
-            "Cache-Control": "no-store",
-            **PAGE_SECURITY_HEADERS,
-        }, b"" if method == "HEAD" else data)
-

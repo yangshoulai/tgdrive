@@ -368,7 +368,7 @@ python3.12 -m venv .venv
 
 ## 使用文档
 
-每个实例的 `/docs/` 内置用户指南与接口参考；管理员文档仅对管理员会话下发。公开文档可访问 [tessera.yangshoulai.xyz/docs](https://tessera.yangshoulai.xyz/docs/)，无需登录文档站。该部署实例不开放注册。
+每个实例的 `/docs/` 内置使用指南、接口参考与部署管理指南，所有内容均公开，访客无需登录即可阅读。文档可访问 [tessera.yangshoulai.xyz/docs](https://tessera.yangshoulai.xyz/docs/)。该部署实例不开放注册。
 
 - [快速上手](https://tessera.yangshoulai.xyz/docs/quickstart) · [文件与预览](https://tessera.yangshoulai.xyz/docs/files) · [账号与设置](https://tessera.yangshoulai.xyz/docs/account)
 - [文件助手](https://tessera.yangshoulai.xyz/docs/assistant) · [下载与资源抓取](https://tessera.yangshoulai.xyz/docs/downloads) · [分享](https://tessera.yangshoulai.xyz/docs/sharing)

@@ -1,0 +1,47 @@
+- generic [ref=f11e3]:
+  - generic [ref=f11e4]:
+    - link "Tessera 首页" [ref=f11e5] [cursor=pointer]:
+      - /url: /
+      - generic [ref=f11e13]:
+        - generic [ref=f11e14]: Tessera
+        - generic [ref=f11e15]: 千片成璧，唯你可合
+    - generic [ref=f11e16]:
+      - heading "创建账号" [level=1] [ref=f11e17]
+      - paragraph [ref=f11e18]: 注册你的文件空间。
+      - generic [ref=f11e19]:
+        - generic [ref=f11e20]:
+          - generic [ref=f11e21]: 邮箱
+          - textbox "邮箱" [active] [ref=f11e22]
+          - paragraph [ref=f11e23]: 用作登录账号。
+        - generic [ref=f11e24]:
+          - generic [ref=f11e25]: 登录密码
+          - generic [ref=f11e26]:
+            - textbox "登录密码" [ref=f11e27]
+            - button "显示" [ref=f11e28] [cursor=pointer]
+          - paragraph [ref=f11e29]: 至少 8 个字符。
+        - generic [ref=f11e30]:
+          - generic [ref=f11e31]: 确认密码
+          - textbox "确认密码" [ref=f11e32]
+        - generic [ref=f11e33]:
+          - generic [ref=f11e34]: 邀请码
+          - textbox "邀请码" [ref=f11e35]: 3tZpLBTc9NnPuEFXuzCoC7xc
+          - paragraph [ref=f11e36]: 来自邀请链接，已自动填入且不能更改。每个邀请码仅可使用一次。
+        - button "创建账号" [ref=f11e37] [cursor=pointer]
+    - contentinfo [ref=f11e39]:
+      - link "使用文档" [ref=f11e40] [cursor=pointer]:
+        - /url: /docs
+      - generic [ref=f11e41]:
+        - text: 已有账号？
+        - link "登录" [ref=f11e42] [cursor=pointer]:
+          - /url: /
+  - generic [ref=f11e189]:
+    - generic [ref=f11e190]:
+      - heading "千片成璧，唯你可合" [level=2] [ref=f11e191]
+      - paragraph [ref=f11e192]: 每个文件都被加密、切成碎片，散落在你自己的 Telegram 频道；只有你的钥匙，能把它们重新拼合完整。
+    - list [ref=f11e193]:
+      - listitem [ref=f11e194]:
+        - generic [ref=f11e198]: 上传、整理、预览各种文件，在任何设备上都能找到它们。
+      - listitem [ref=f11e199]:
+        - generic [ref=f11e203]: 一键生成分享链接，可以设置有效期和访问密码。
+      - listitem [ref=f11e204]:
+        - generic [ref=f11e208]: 文件加密保存，由你控制是否公开分享。

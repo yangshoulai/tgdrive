@@ -6,7 +6,7 @@ import { type CacheStats, cacheStats, cacheSupported, startLocalCache } from "./
 import { DocsPage } from "./docs/docs";
 
 import { SharePage } from "./share";
-import { ADMIN_MODULES, AdminConsole, AdminDocsGate, LockedGate, type AdminModule } from "./admin";
+import { ADMIN_MODULES, AdminConsole, LockedGate, type AdminModule } from "./admin";
 import { AppShell, FullPageLoading, LoginPage, SetupPage, isPlainClick, useSessionGuard, type NavGroup } from "./shell";
 import { Notice, Button, ButtonLink, Icon, Progress, formatBytes, toast, usageTone, useDocumentTitle, type IconName } from "./ui";
 
@@ -36,12 +36,12 @@ import { onThemeChange, setThemePreference, themePreference, type ThemePreferenc
 export function App() {
   const path = window.location.pathname;
   if (path === "/register" || path === "/register/") return <RegisterPage />;
-  if (path === "/docs" || path.startsWith("/docs/")) return <DocsEntry />;
+  if (path === "/docs" || path.startsWith("/docs/")) return <DocsPage />;
   const share = path.match(/^\/s\/([A-Za-z0-9_-]+)/);
   if (share) return <SharePage token={share[1]} />;
   if (/^\/admin\/docs(?:\/|$)/.test(path)) {
-    // 旧的管理员文档地址：现在所有人共用 /docs，管理员会在其中多看到管理员专属的几页。
-    window.location.replace(path.replace(/^\/admin\/docs/, "/docs") + window.location.search);
+    // 旧文档地址统一跳转，保留具体页面、查询参数与页内锚点。
+    window.location.replace(path.replace(/^\/admin\/docs/, "/docs") + window.location.search + window.location.hash);
     return <FullPageLoading label="正在跳转到文档" />;
   }
   return <Workspace />;
@@ -57,17 +57,6 @@ function AccessDenied() {
       <ButtonLink variant="secondary" size="md" href="/">回到我的文件</ButtonLink>
     </div>
   );
-}
-
-/**
- * 文档页：所有人共用 /docs。未登录和普通用户看到用户文档；管理员会话会改为加载管理员文档，
- * 其中多出部署、运维等专属页面。这部分代码只能由管理员会话从受保护的接口取得，普通用户拿不到。
- */
-function DocsEntry() {
-  const [role, setRole] = useState<api.Role | null | undefined>(undefined);  // undefined：检查中，null：未登录
-  useEffect(() => { void api.restoreSession().then(session => setRole(session.role)).catch(() => setRole(null)); }, []);
-  if (role === undefined) return <FullPageLoading label="正在打开文档" />;
-  return role === "admin" ? <AdminDocsGate onFailed={() => setRole(null)} /> : <DocsPage />;
 }
 
 /** 系统锁定期间，普通用户只能等待管理员解锁。 */

@@ -1,0 +1,41 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - link "Tessera 首页" [ref=e5] [cursor=pointer]:
+      - /url: /
+      - generic [ref=e13]:
+        - generic [ref=e14]: Tessera
+        - generic [ref=e15]: 千片成璧，唯你可合
+    - generic [ref=e16]:
+      - heading "登录" [level=1] [ref=e17]
+      - paragraph [ref=e18]: 登录你的文件空间。
+      - generic [ref=e19]:
+        - generic [ref=e20]:
+          - generic [ref=e21]: 邮箱
+          - textbox "邮箱" [active] [ref=e22]:
+            - /placeholder: name@example.com
+        - generic [ref=e23]:
+          - generic [ref=e24]: 密码
+          - generic [ref=e25]:
+            - textbox "密码" [ref=e26]
+            - button "显示" [ref=e27] [cursor=pointer]
+        - generic [ref=e28] [cursor=pointer]:
+          - checkbox "30 天内保持登录" [ref=e29]
+          - generic [ref=e30]:
+            - strong [ref=e31]: 30 天内保持登录
+            - generic [ref=e32]: 下次打开无需重新登录。在公共电脑上请不要勾选。
+        - button "登录" [ref=e33] [cursor=pointer]
+    - contentinfo [ref=e35]:
+      - link "使用文档" [ref=e36] [cursor=pointer]:
+        - /url: /docs
+      - generic [ref=e37]: 没有账号？请联系管理员创建。
+  - generic [ref=e184]:
+    - generic [ref=e185]:
+      - heading "千片成璧，唯你可合" [level=2] [ref=e186]
+      - paragraph [ref=e187]: 每个文件都被加密、切成碎片，散落在你自己的 Telegram 频道；只有你的钥匙，能把它们重新拼合完整。
+    - list [ref=e188]:
+      - listitem [ref=e189]:
+        - generic [ref=e193]: 上传、整理、预览各种文件，在任何设备上都能找到它们。
+      - listitem [ref=e194]:
+        - generic [ref=e198]: 一键生成分享链接，可以设置有效期和访问密码。
+      - listitem [ref=e199]:
+        - generic [ref=e203]: 文件加密保存，由你控制是否公开分享。

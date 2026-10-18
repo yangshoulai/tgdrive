@@ -1,11 +1,11 @@
-/** 管理员专属文档内容，只由受保护的管理员文档 bundle 引入。 */
+/** 部署与管理指南，与使用指南一起公开展示。 */
 import {
   C, Callout, Code, H2, Lead, Step, Steps, Table, useDocsConfig,
 } from "./docs-ui";
 import { BRAND } from "../brand";
 import type { DocPage } from "./docs-content";
 
-/* ---------------------------------------------------------------- 管理员 */
+/* ---------------------------------------------------------------- 部署与管理 */
 
 /** 存储通道的完整步骤；控制台「存储通道」页的配置指南（admin/bots.tsx 的 STORAGE_STEPS）是它的精简版，两处同步修改。 */
 function AdminStorageChannels() {
@@ -89,14 +89,14 @@ function AdminDeploy() {
       <p>删除用户前会先禁用账号并停止后台下载，阻止清理期间再次创建任务；如果清理失败，账号保留禁用状态，可在修复后继续删除或重新启用。</p>
       <p>整个站点是同一个应用、同一个端口，只有一个登录页。账号的角色决定登录后能看到什么：</p>
       <Table head={["角色", "可见内容"]} rows={[
-        ["管理员", "侧栏切换「我的空间」与「系统管理」：管理区提供概览、用户、存储通道、全部密钥、安全与维护、审计日志、系统设置，还有管理员文档"],
+        ["管理员", "侧栏切换「我的空间」与「系统管理」：管理区提供概览、用户、存储通道、全部密钥、安全与维护、审计日志、系统设置"],
         ["普通用户", "自己的文件空间；看不到「系统管理」菜单，直接输入 /admin/ 开头的地址只会看到「没有访问权限」"],
       ]} />
-      <p>权限由服务端按会话里的角色强制校验，隐藏菜单只是体验层面的处理：管理接口（<C>/api/admin/</C>）对普通用户一律返回 403，管理员文档的代码也只会发给管理员会话。全站只有一个会话 Cookie（<C>tg_session</C>），同一个浏览器同一时间只登录一个账号。</p>
+      <p>权限由服务端按会话里的角色强制校验，隐藏菜单只是体验层面的处理：管理接口（<C>/api/admin/</C>）对普通用户一律返回 403。全站只有一个会话 Cookie（<C>tg_session</C>），同一个浏览器同一时间只登录一个账号。</p>
       <Table head={["路径", "内容"]} rows={[
         [<C>/</C>, "登录与文件空间（所有账号共用）"],
         [<C>/admin</C>, "系统管理（仅管理员）：/admin/users、/admin/objects 等"],
-        [<C>/docs</C>, "文档：所有人共用这个地址；管理员登录后会多出「管理员」分组（部署与运维、常见问题）"],
+        [<C>/docs</C>, "公开文档：使用指南、API 参考、部署与管理，访客无需登录即可查看全部内容"],
         [<C>/s/&lt;令牌&gt;</C>, "公开分享页，无需登录"],
         [<><C>/api/</C>、<C>/p/</C></>, "接口与公开直链"],
         ["S3 Endpoint", "单独的域名，转发全部路径到同一个服务"],
@@ -298,12 +298,12 @@ function Faq() {
 
 
 export const ADMIN_DOC_PAGES: DocPage[] = [
-  { slug: "storage-channels", group: "管理员", title: "存储通道", icon: "send", Content: AdminStorageChannels,
+  { slug: "storage-channels", group: "部署与管理", title: "存储通道", icon: "send", Content: AdminStorageChannels,
     summary: "用 BotFather 创建 Bot、准备私有频道、获取频道 ID 并在控制台添加存储通道。", keywords: "telegram bot botfather token 频道 channel id -100 存储通道 管理员 权限 userinfobot" },
-  { slug: "deploy", group: "管理员", title: "部署与运维", icon: "server", Content: AdminDeploy,
+  { slug: "deploy", group: "部署与管理", title: "部署与运维", icon: "server", Content: AdminDeploy,
     summary: "启动参数、反向代理、锁定与解锁、维护任务和备份。", keywords: "部署 nginx 反向代理 https 参数 环境变量 解锁 垃圾回收 校验 备份" },
-  { slug: "admin-assistant", group: "管理员", title: "文件助手", icon: "sparkle", Content: AdminAssistant,
+  { slug: "admin-assistant", group: "部署与管理", title: "文件助手", icon: "sparkle", Content: AdminAssistant,
     summary: "接入模型渠道、启用助手，配置工具、上限与用户额度，了解对话记录的隐私边界。", keywords: "ai 助手 文件助手 模型 渠道 openai anthropic api key 工具 上限 额度 token 调用日志 对话记录 清理 模型目录 models.dev 价格 完全访问 审批 识图 图片输入 vision 附件 view_image 私密对话 私密空间 private_ok" },
-  { slug: "faq", group: "管理员", title: "常见问题", icon: "info", Content: Faq,
+  { slug: "faq", group: "部署与管理", title: "常见问题", icon: "info", Content: Faq,
     summary: "登录、S3 签名、配额、分享链接等常见问题的排查方法。", keywords: "问题 排错 锁定 口令 签名 配额 失效 视频" },
 ];

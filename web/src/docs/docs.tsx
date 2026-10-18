@@ -1,10 +1,13 @@
-/** 文档站：多页面、侧栏导航、页内目录与搜索。管理员文档由独立受保护 bundle 挂载。 */
+/** 公开文档站：所有访客共用完整目录、正文与搜索。 */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import * as api from "../api";
 import { SITE } from "../brand";
 import { DOC_PAGES, type DocPage } from "./docs-content";
+import { ADMIN_DOC_PAGES } from "./docs-admin-content";
 import { ConfigContext, Lead, NAV_EVENT, navigateDocs, useDocsConfig, type DocsConfig } from "./docs-ui";
 import { Brand, Icon } from "../ui";
+
+const ALL_DOC_PAGES = [...DOC_PAGES, ...ADMIN_DOC_PAGES];
 
 function currentSlug(basePath: string, pages: DocPage[]) {
   const prefix = new RegExp(`^${basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\/?`);
@@ -14,7 +17,7 @@ function currentSlug(basePath: string, pages: DocPage[]) {
 
 /* ---------- 页面外壳 ---------- */
 
-export function DocsPage({ pages = DOC_PAGES, basePath = "/docs", home = { label: "文件空间", href: "/" } }: { pages?: DocPage[]; basePath?: string; home?: { label: string; href: string } }) {
+export function DocsPage({ pages = ALL_DOC_PAGES, basePath = "/docs", home = { label: "文件空间", href: "/" } }: { pages?: DocPage[]; basePath?: string; home?: { label: string; href: string } }) {
   const [current, setCurrent] = useState(() => currentSlug(basePath, pages));
   const [config, setConfig] = useState<DocsConfig>(() => ({ site: api.userSiteOrigin(), s3: api.s3Endpoint() ?? "https://s3.example.com", s3Configured: Boolean(api.s3Endpoint()), basePath }));
   const [toc, setToc] = useState<{ id: string; text: string; level: number }[]>([]);

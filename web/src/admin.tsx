@@ -1,5 +1,4 @@
-/** 系统管理：各页面在 admin/ 目录下，这里只负责按模块分发，以及管理员文档的受保护加载。 */
-import { useEffect } from "react";
+/** 系统管理：各页面在 admin/ 目录下，这里只负责按模块分发。 */
 import * as api from "./api";
 import { AssistantAdmin } from "./admin/assistant";
 import { Bots } from "./admin/bots";
@@ -9,7 +8,6 @@ import { Audit, Maintenance } from "./admin/maintenance";
 import { Overview } from "./admin/overview";
 import { Settings } from "./admin/settings";
 import { Users } from "./admin/users";
-import { FullPageLoading } from "./shell";
 import type { IconName } from "./ui";
 
 export { LockedGate };
@@ -49,17 +47,4 @@ export function AdminConsole({ module, session, status, onStatus, onRefreshStatu
       {module === "settings" && <Settings onSaved={onConfigSaved} />}
     </>
   );
-}
-
-/** 管理员文档的代码只在管理员会话下由 /api/admin/v1/docs-bundle.js 下发；加载失败（会话刚好失效等）时退回用户文档。 */
-export function AdminDocsGate({ onFailed }: { onFailed: () => void }) {
-  useEffect(() => {
-    const script = document.createElement("script");
-    script.src = "/api/admin/v1/docs-bundle.js";
-    script.async = true;
-    script.onerror = onFailed;
-    document.head.appendChild(script);
-    return () => script.remove();
-  }, []);
-  return <div id="admin-docs-root"><FullPageLoading label="正在加载文档" /></div>;
 }

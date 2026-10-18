@@ -228,16 +228,9 @@ class TgDriveASGI(StaticFiles):
                     await self._send_raw(tracked_send, response.status, response.headers, response.body)
                 return
             if self.static_dir is not None and method in ("GET", "HEAD") and not path.startswith("/api/"):
-                # 管理员文档代码只能通过下方受保护的 API 返回，不能绕过会话直接读取静态文件。
-                if path.endswith("/admin-docs.js"):
-                    await self._send(tracked_send, 404, {"error": {"code": "not_found", "message": "资源不存在"}})
-                    return
                 https = scope.get("scheme") == "https"
                 await self._static(tracked_send, path, method, https=https,
                                    origin=f"{scope.get('scheme', 'http')}://{headers.get('host', 'localhost')}")
-                return
-            if path == "/api/admin/v1/docs-bundle.js" and method in ("GET", "HEAD"):
-                await self._admin_docs_bundle(tracked_send, method, token)
                 return
             if path in {"/api/admin/v1/objects", "/api/admin/v1/content", "/api/admin/v1/thumbnail",
                         "/api/admin/v1/preview-assets", "/api/admin/v1/preview-list", "/api/admin/v1/objects/public"}:

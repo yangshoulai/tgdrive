@@ -1,0 +1,139 @@
+- generic [ref=f10e3]:
+  - link "跳到主要内容" [ref=f10e4] [cursor=pointer]:
+    - /url: "#main"
+  - banner [ref=f10e5]:
+    - button "打开导航" [ref=f10e6] [cursor=pointer]
+    - link "Tessera 首页" [ref=f10e9] [cursor=pointer]:
+      - /url: /
+      - generic [ref=f10e17]: Tessera
+    - button "账号操作" [ref=f10e18] [cursor=pointer]:
+      - generic [aria-hidden] [ref=f10e19]: 注
+  - main [ref=f10e20]:
+    - generic [ref=f10e21]:
+      - heading "系统设置" [level=1] [ref=f10e27]
+      - tablist "系统设置" [ref=f10e28]:
+        - tab "访问地址" [ref=f10e29] [cursor=pointer]
+        - tab "下载与资源" [ref=f10e33] [cursor=pointer]
+        - tab "浏览器缓存" [ref=f10e37] [cursor=pointer]
+        - tab "注册" [selected] [ref=f10e41] [cursor=pointer]
+      - generic [ref=f10e45]:
+        - generic [ref=f10e46]:
+          - generic [ref=f10e48]:
+            - heading "访客注册" [level=2] [ref=f10e49]
+            - paragraph [ref=f10e50]: 关闭注册后，入口隐藏，注册接口和已有邀请链接暂停使用。已有账号仍可正常登录。
+          - generic [ref=f10e52]:
+            - generic [ref=f10e53]:
+              - generic [ref=f10e54] [cursor=pointer]:
+                - generic [ref=f10e55]:
+                  - generic [ref=f10e56]: 开放注册
+                  - generic [ref=f10e57]: 允许访客通过邮箱创建账号。
+                - switch "开放注册 允许访客通过邮箱创建账号。" [checked]
+              - generic [ref=f10e60] [cursor=pointer]:
+                - generic [ref=f10e61]:
+                  - generic [ref=f10e62]: 邮箱验证码
+                  - generic [ref=f10e63]: 通过邮件验证邮箱归属，需要先配置下方邮件服务器。
+                - switch "邮箱验证码 通过邮件验证邮箱归属，需要先配置下方邮件服务器。" [checked]
+              - generic [ref=f10e66] [cursor=pointer]:
+                - generic [ref=f10e67]:
+                  - generic [ref=f10e68]: 邀请码
+                  - generic [ref=f10e69]: 凭管理员创建的一次性邀请码注册。两种方式都开启时，访客任选一种。
+                - switch "邀请码 凭管理员创建的一次性邀请码注册。两种方式都开启时，访客任选一种。" [checked]
+            - generic [ref=f10e72]:
+              - generic [ref=f10e73]: 新用户默认额度（GiB）
+              - spinbutton "新用户默认额度（GiB）" [ref=f10e74]: "5"
+              - paragraph [ref=f10e75]: 留空表示不限，0 表示暂不允许上传。仅影响之后通过邮箱验证码注册的用户，以及之后创建的邀请码。
+            - generic [ref=f10e76]:
+              - heading "邮件服务器" [level=3] [ref=f10e77]
+              - paragraph [ref=f10e78]: 支持 SSL/TLS 与 STARTTLS。使用邮箱服务商提供的 SMTP 地址和授权码，保存后可发送测试邮件。
+            - generic [ref=f10e79]:
+              - generic [ref=f10e80]: SMTP 服务器
+              - textbox "SMTP 服务器" [ref=f10e81]:
+                - /placeholder: smtp.example.com
+                - text: smtp.registration.test
+              - paragraph [ref=f10e82]: 只填写主机名，例如 smtp.example.com。
+            - generic [ref=f10e83]:
+              - generic [ref=f10e84]: 连接加密
+              - generic [ref=f10e85]:
+                - combobox "连接加密" [ref=f10e86]:
+                  - option "SSL/TLS" [selected]
+                  - option "STARTTLS"
+                - spinbutton "SMTP 端口" [ref=f10e87]: "465"
+              - paragraph [ref=f10e88]: SSL/TLS 常用 465 端口，STARTTLS 常用 587 端口。以邮箱服务商的说明为准。
+            - generic [ref=f10e89]:
+              - generic [ref=f10e90]: 邮件账号
+              - textbox "邮件账号" [ref=f10e91]: mailer@registration.test
+              - paragraph [ref=f10e92]: 通常为完整邮箱地址。只有服务商明确支持免认证中继时才留空。
+            - generic [ref=f10e93]:
+              - generic [ref=f10e94]: 密码或授权码
+              - generic [ref=f10e95]:
+                - textbox "密码或授权码" [ref=f10e96]:
+                  - /placeholder: 已保存，留空不修改
+                - generic [ref=f10e97] [cursor=pointer]:
+                  - generic [ref=f10e98]: 清除已保存的邮件密码
+                  - switch "清除已保存的邮件密码"
+              - paragraph [ref=f10e102]: 已加密保存，留空保留原值。更换邮件账号时请一并更新。
+            - generic [ref=f10e103]:
+              - generic [ref=f10e104]: 发件邮箱
+              - textbox "发件邮箱" [ref=f10e105]: noreply@registration.test
+              - paragraph [ref=f10e106]: 需为邮件服务商允许发送的地址。
+            - generic [ref=f10e107]:
+              - generic [ref=f10e108]: 发件人名称
+              - textbox "发件人名称" [ref=f10e109]: Tessera
+            - generic [ref=f10e110]:
+              - generic [ref=f10e111]: 测试收件邮箱
+              - generic [ref=f10e112]:
+                - textbox "测试收件邮箱" [ref=f10e113]:
+                  - /placeholder: name@example.com
+                - button "发送测试" [ref=f10e114] [cursor=pointer]
+              - paragraph [ref=f10e116]: 使用已保存的配置发送，可同时检查验证码邮件的排版。
+        - generic [ref=f10e117]:
+          - generic [ref=f10e118]:
+            - generic [ref=f10e119]:
+              - heading "邀请码" [level=2] [ref=f10e120]
+              - paragraph [ref=f10e121]: 每个邀请码仅供一人注册，必须在失效时间前使用。额度在创建时确定，之后修改默认额度不会改变已有邀请码。
+            - button "创建邀请码" [ref=f10e123] [cursor=pointer]
+          - generic [ref=f10e127]:
+            - generic [ref=f10e128]:
+              - generic [ref=f10e129]: 邀请码状态
+              - combobox "邀请码状态" [ref=f10e130]:
+                - option "全部邀请码" [selected]
+                - option "可使用"
+                - option "已使用"
+                - option "已过期"
+                - option "已撤销"
+              - button "刷新" [ref=f10e131] [cursor=pointer]
+            - table "邀请码" [ref=f10e136]:
+              - row "邀请码 用户额度 失效时间 状态 操作" [ref=f10e137]:
+                - columnheader "邀请码" [ref=f10e138]
+                - columnheader "用户额度" [ref=f10e139]
+                - columnheader "失效时间" [ref=f10e140]
+                - columnheader "状态" [ref=f10e141]
+                - columnheader "操作"
+              - row [ref=f10e143]:
+                - cell "3tZpLBTc9NnPuEFXuzCoC7xc" [ref=f10e144]
+                - cell "2.5 GB" [ref=f10e145]
+                - cell "2026/10/25 22:01" [ref=f10e146]
+                - cell "可使用" [ref=f10e147]
+                - cell [ref=f10e149]:
+                  - button "复制链接" [ref=f10e150] [cursor=pointer]
+                  - button "邀请码 3 的更多操作" [ref=f10e154] [cursor=pointer]
+              - row [ref=f10e223]:
+                - cell "NtDWKWsJYFBDg-dENdYkkQtj" [ref=f10e160]
+                - cell "2.5 GB" [ref=f10e161]
+                - cell "2026/10/25 22:01" [ref=f10e162]
+                - cell "已撤销" [ref=f10e224]
+                - cell [ref=f10e165]:
+                  - button "复制链接" [disabled] [ref=f10e166]
+                  - button "邀请码 2 的更多操作" [ref=f10e170] [cursor=pointer]
+              - row [ref=f10e175]:
+                - cell "gJMDD1NV6SEtY0LakhFbcH94" [ref=f10e176]
+                - cell "2.5 GB" [ref=f10e177]
+                - cell "2026/10/25 22:01" [ref=f10e178]
+                - cell "已使用" [ref=f10e179]
+                - cell [ref=f10e181]:
+                  - button "复制链接" [disabled] [ref=f10e182]
+                  - button "邀请码 1 的更多操作" [ref=f10e186] [cursor=pointer]
+            - generic [ref=f10e191]: 共 3 个邀请码
+  - status [ref=f10e225]:
+    - generic [ref=f10e228]: 邀请码已撤销
+    - button "关闭提示" [ref=f10e229] [cursor=pointer]

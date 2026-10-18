@@ -16,12 +16,16 @@ class DocsInventoryTests(unittest.TestCase):
                       'path="/files/instant"', 'path="/delete"', 'path="/move"', 'path="/copy"', 'path="/downloads/parse"', 'path="/downloads"', 'path="/downloads?ids="', 'path="/api/v1/public"'):
             self.assertIn(route, source, route)
 
-    def test_admin_operations_stay_out_of_public_bundle(self):
-        public = (ROOT / "web/src/docs/docs-content.tsx").read_text(encoding="utf-8")
-        admin = (ROOT / "web/src/docs/docs-admin-content.tsx").read_text(encoding="utf-8")
+    def test_shared_docs_include_deployment_and_management_guides(self):
+        entry = (ROOT / "web/src/docs/docs.tsx").read_text(encoding="utf-8")
+        management = (ROOT / "web/src/docs/docs-admin-content.tsx").read_text(encoding="utf-8")
+        self.assertIn('from "./docs-admin-content"', entry)
+        self.assertRegex(entry, r"\[\s*\.\.\.DOC_PAGES,\s*\.\.\.ADMIN_DOC_PAGES\s*\]")
         for marker in ("--trusted-proxies", "meta.db.v", "反向代理示例"):
-            self.assertNotIn(marker, public)
-            self.assertIn(marker, admin)
+            self.assertIn(marker, management)
+        sources = (ROOT / "web/src/docs/docs-content.tsx").read_text(encoding="utf-8") + management
+        slugs = re.findall(r'slug: "([a-z0-9-]+)"', sources)
+        self.assertEqual(len(slugs), len(set(slugs)), "公开文档不能包含重复页面地址")
 
     def test_assistant_help_links_point_to_existing_pages(self):
         source = (ROOT / "web/src/docs/docs-content.tsx").read_text(encoding="utf-8")

@@ -6,7 +6,7 @@ import ts from 'typescript';
 import { build } from 'esbuild';
 const root=path.dirname(fileURLToPath(import.meta.url));
 const previewAssets={};
-// 只给按需加载的引擎（文本与媒体预览、助手输入框）使用标准打包器，保留主应用和受保护管理员文档的原有边界。
+// 只给按需加载的引擎（文本与媒体预览、助手输入框）使用标准打包器，主应用沿用自写打包器。
 if(!process.argv[2] || process.argv[2]==='user') {
  const dist=path.join(root,'dist');fs.mkdirSync(dist,{recursive:true});
  for(const [kind,globalName,base] of [['text','TesseraTextPreview','preview-text'],['media','TesseraMediaPreview','preview-media'],['composer','TesseraComposer','composer'],['pdf','TesseraPdfPreview','preview-pdf']]) {
@@ -47,12 +47,11 @@ if(!process.argv[2] || process.argv[2]==='user') {
  fs.writeFileSync(path.join(dist,'preview-licenses.txt'),licenses.join('\n\n'));
 }
 const configs={
- // 整个站点是同一个应用（用户端 + 按角色显示的系统管理）；管理员文档单独打包，只能经 /api/admin/v1/docs-bundle.js 在管理员会话下获取。
- user:{entry:'user',exportName:'App',outputDir:'',runtime:true,assetPrefix:'/'},
- 'admin-docs':{entry:'admin-docs',exportName:'AdminDocsPage',outputDir:'',runtime:false,assetPrefix:'/'},
+ // 整个站点是同一个应用，包含文件空间、按角色显示的系统管理与完整的公开文档。
+ user:{entry:'user',exportName:'App',outputDir:'',assetPrefix:'/'},
 };
 // 单一站点：全部产物都在 dist/，由同一个服务进程托管；不带参数时全部构建。
-for(const app of process.argv[2] ? [process.argv[2]] : ['user','admin-docs']) {
+for(const app of process.argv[2] ? [process.argv[2]] : ['user']) {
  const config=configs[app];
  if(!config) throw Error('未知应用');
  const modules={};
@@ -70,14 +69,13 @@ for(const app of process.argv[2] ? [process.argv[2]] : ['user','admin-docs']) {
   modules[id]=code; return id;
  }
  const entry=visit(path.join(root,'src',config.entry+'.tsx'));
- const mountId=config.runtime?'root':'admin-docs-root';
+ const mountId='root';
  const sourceBundle=`(()=>{const React=window.React;const ReactDOM=window.ReactDOM;const cache={};const modules={${Object.entries(modules).map(([id,code])=>JSON.stringify(id)+':function(module,exports,require){'+code+'}').join(',')}};function require(id){if(id==='react')return window.React;if(id==='react-dom')return window.ReactDOM;if(id==='react/jsx-runtime')return {jsx:(t,p,k)=>React.createElement(t,{...p,key:k}),jsxs:(t,p,k)=>React.createElement(t,{...p,key:k}),Fragment:React.Fragment};if(cache[id])return cache[id].exports;const m={exports:{}};cache[id]=m;modules[id](m,m.exports,require);return m.exports;}const Entry=require(${JSON.stringify(entry)});const App=Entry.${config.exportName};ReactDOM.createRoot(document.getElementById(${JSON.stringify(mountId)})).render(React.createElement(App));})();`;
- const bundle=(config.runtime?`window.tesseraPreviewAssets=${JSON.stringify(previewAssets)};`:'')+sourceBundle;
+ const bundle=`window.tesseraPreviewAssets=${JSON.stringify(previewAssets)};`+sourceBundle;
  const css=fs.readFileSync(path.join(root,'src/styles.css'),'utf8');
  const hash=crypto.createHash('sha256').update(bundle+css).digest('hex').slice(0,12);
  const dist=path.join(root,'dist',config.outputDir);fs.mkdirSync(dist,{recursive:true});
- if(config.runtime) for(const old of fs.readdirSync(dist)) if(/^app-[0-9a-f]+\.(js|css)$/.test(old)) fs.unlinkSync(path.join(dist,old));
- if(!config.runtime) { fs.writeFileSync(path.join(dist,`${app}.js`),bundle); console.log(`${app}: ${dist}/${app}.js`); continue; }
+ for(const old of fs.readdirSync(dist)) if(/^app-[0-9a-f]+\.(js|css)$/.test(old)) fs.unlinkSync(path.join(dist,old));
  fs.writeFileSync(path.join(dist,`app-${hash}.js`),bundle);fs.writeFileSync(path.join(dist,`app-${hash}.css`),css);
  // 外观主题在首帧前应用（CSP 不允许内联脚本，所以单独成文件放在 head）；存储键与解析规则需和 src/theme.ts 一致。
  const themeInit=`(()=>{let p=null;try{p=localStorage.getItem("tessera-theme")}catch{}const d=p==="dark"||(p!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light"})();`;

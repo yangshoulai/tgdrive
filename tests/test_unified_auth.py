@@ -63,7 +63,7 @@ class UnifiedAuthTests(unittest.TestCase):
             status, _, _ = await self.client.request("PUT", "/api/user/v1/files?path=a.txt", b"x", {**alice, "content-length": "1"})
             self.assertEqual(status, 200)
             for method, path in (("GET", "/api/admin/v1/users"), ("GET", "/api/admin/v1/settings"), ("GET", "/api/admin/v1/audit"),
-                                 ("GET", "/api/admin/v1/objects"), ("GET", "/api/admin/v1/docs-bundle.js"), ("GET", "/api/admin/v1/version")):
+                                 ("GET", "/api/admin/v1/objects"), ("GET", "/api/admin/v1/version")):
                 status, _, _ = await self.client.request(method, path, b"", alice)
                 self.assertEqual(status, 403, path)
             status, _, _ = await self.client.request("POST", "/api/admin/v1/users", b'{"username":"x","password":"password1"}', alice)

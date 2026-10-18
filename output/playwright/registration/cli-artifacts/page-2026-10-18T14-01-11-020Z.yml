@@ -1,0 +1,173 @@
+- generic [ref=f3e1]:
+  - generic [ref=f3e3]:
+    - link "跳到主要内容" [ref=f3e4] [cursor=pointer]:
+      - /url: "#main"
+    - complementary "主导航" [ref=f3e5]:
+      - generic [ref=f3e6]:
+        - link "Tessera 首页" [ref=f3e7] [cursor=pointer]:
+          - /url: /
+          - generic [ref=f3e15]:
+            - generic [ref=f3e16]: Tessera
+            - generic [ref=f3e17]: 千片成璧，唯你可合
+        - button "收起侧栏" [ref=f3e18] [cursor=pointer]
+      - radiogroup "工作区" [ref=f3e22]:
+        - radio "我的空间" [ref=f3e23] [cursor=pointer]
+        - radio "系统管理" [checked] [ref=f3e27] [cursor=pointer]
+      - navigation [ref=f3e31]:
+        - link "概览" [ref=f3e34] [cursor=pointer]:
+          - /url: /admin
+        - generic [ref=f3e38]:
+          - button "账号与访问" [expanded] [ref=f3e39] [cursor=pointer]
+          - generic [ref=f3e44]:
+            - link "用户" [ref=f3e45] [cursor=pointer]:
+              - /url: /admin/users
+            - link "全部密钥" [ref=f3e49] [cursor=pointer]:
+              - /url: /admin/clients
+        - generic [ref=f3e53]:
+          - button "存储与服务" [expanded] [ref=f3e54] [cursor=pointer]
+          - generic [ref=f3e59]:
+            - link "存储通道" [ref=f3e60] [cursor=pointer]:
+              - /url: /admin/bots
+            - link "文件助手" [ref=f3e64] [cursor=pointer]:
+              - /url: /admin/assistant
+        - generic [ref=f3e68]:
+          - button "安全与运维" [expanded] [ref=f3e69] [cursor=pointer]
+          - generic [ref=f3e74]:
+            - link "安全与维护" [ref=f3e75] [cursor=pointer]:
+              - /url: /admin/maintenance
+            - link "审计日志" [ref=f3e79] [cursor=pointer]:
+              - /url: /admin/audit
+            - link "系统设置" [ref=f3e83] [cursor=pointer]:
+              - /url: /admin/settings
+      - generic [ref=f3e87]:
+        - generic "空间不限" [ref=f3e88]:
+          - button [ref=f3e89] [cursor=pointer]:
+            - generic [ref=f3e90]: 已用空间
+            - strong [ref=f3e93]: 0 B
+        - link "使用文档" [ref=f3e95] [cursor=pointer]:
+          - /url: /docs
+        - generic [ref=f3e101]:
+          - generic [aria-hidden] [ref=f3e102]: 注
+          - generic [ref=f3e103]:
+            - strong [ref=f3e104]: 注册验证
+            - generic [ref=f3e105]: 管理员
+          - button "账号操作" [ref=f3e106] [cursor=pointer]
+    - main [ref=f3e111]:
+      - generic [ref=f3e112]:
+        - heading "系统设置" [level=1] [ref=f3e115]
+        - tablist "系统设置" [ref=f3e116]:
+          - tab "访问地址" [ref=f3e117] [cursor=pointer]
+          - tab "下载与资源" [ref=f3e121] [cursor=pointer]
+          - tab "浏览器缓存" [ref=f3e125] [cursor=pointer]
+          - tab "注册" [selected] [ref=f3e129] [cursor=pointer]
+        - generic [ref=f3e152]:
+          - generic [ref=f3e153]:
+            - generic [ref=f3e155]:
+              - heading "访客注册" [level=2] [ref=f3e156]
+              - paragraph [ref=f3e157]: 关闭注册后，入口隐藏，注册接口和已有邀请链接暂停使用。已有账号仍可正常登录。
+            - generic [ref=f3e159]:
+              - generic [ref=f3e160]:
+                - generic [ref=f3e161] [cursor=pointer]:
+                  - generic [ref=f3e162]:
+                    - generic [ref=f3e163]: 开放注册
+                    - generic [ref=f3e164]: 允许访客通过邮箱创建账号。
+                  - switch "开放注册 允许访客通过邮箱创建账号。" [checked]
+                - generic [ref=f3e167] [cursor=pointer]:
+                  - generic [ref=f3e168]:
+                    - generic [ref=f3e169]: 邮箱验证码
+                    - generic [ref=f3e170]: 通过邮件验证邮箱归属，需要先配置下方邮件服务器。
+                  - switch "邮箱验证码 通过邮件验证邮箱归属，需要先配置下方邮件服务器。" [checked]
+                - generic [ref=f3e173] [cursor=pointer]:
+                  - generic [ref=f3e174]:
+                    - generic [ref=f3e175]: 邀请码
+                    - generic [ref=f3e176]: 凭管理员创建的一次性邀请码注册。两种方式都开启时，访客任选一种。
+                  - switch "邀请码 凭管理员创建的一次性邀请码注册。两种方式都开启时，访客任选一种。" [checked]
+              - generic [ref=f3e179]:
+                - generic [ref=f3e180]: 新用户默认额度（GiB）
+                - spinbutton "新用户默认额度（GiB）" [ref=f3e181]: "5"
+                - paragraph [ref=f3e182]: 留空表示不限，0 表示暂不允许上传。仅影响之后通过邮箱验证码注册的用户，以及之后创建的邀请码。
+              - generic [ref=f3e215]:
+                - heading "邮件服务器" [level=3] [ref=f3e216]
+                - paragraph [ref=f3e217]: 支持 SSL/TLS 与 STARTTLS。使用邮箱服务商提供的 SMTP 地址和授权码，保存后可发送测试邮件。
+              - generic [ref=f3e218]:
+                - generic [ref=f3e219]: SMTP 服务器
+                - textbox "SMTP 服务器" [ref=f3e220]:
+                  - /placeholder: smtp.example.com
+                  - text: smtp.registration.test
+                - paragraph [ref=f3e221]: 只填写主机名，例如 smtp.example.com。
+              - generic [ref=f3e222]:
+                - generic [ref=f3e223]: 连接加密
+                - generic [ref=f3e224]:
+                  - combobox "连接加密" [ref=f3e225]:
+                    - option "SSL/TLS" [selected]
+                    - option "STARTTLS"
+                  - spinbutton "SMTP 端口" [ref=f3e226]: "465"
+                - paragraph [ref=f3e227]: SSL/TLS 常用 465 端口，STARTTLS 常用 587 端口。以邮箱服务商的说明为准。
+              - generic [ref=f3e228]:
+                - generic [ref=f3e229]: 邮件账号
+                - textbox "邮件账号" [ref=f3e230]: mailer@registration.test
+                - paragraph [ref=f3e231]: 通常为完整邮箱地址。只有服务商明确支持免认证中继时才留空。
+              - generic [ref=f3e232]:
+                - generic [ref=f3e233]: 密码或授权码
+                - generic [ref=f3e234]:
+                  - textbox "密码或授权码" [ref=f3e235]:
+                    - /placeholder: 已保存，留空不修改
+                  - generic "清除已保存的邮件密码" [ref=f3e251] [cursor=pointer]:
+                    - switch "清除已保存的邮件密码"
+                - paragraph [ref=f3e236]: 已加密保存，留空保留原值。更换邮件账号时请一并更新。
+              - generic [ref=f3e237]:
+                - generic [ref=f3e238]: 发件邮箱
+                - textbox "发件邮箱" [ref=f3e239]: noreply@registration.test
+                - paragraph [ref=f3e240]: 需为邮件服务商允许发送的地址。
+              - generic [ref=f3e241]:
+                - generic [ref=f3e242]: 发件人名称
+                - textbox "发件人名称" [ref=f3e243]: Tessera
+              - generic [ref=f3e244]:
+                - generic [ref=f3e245]: 测试收件邮箱
+                - generic [ref=f3e246]:
+                  - textbox "测试收件邮箱" [ref=f3e247]:
+                    - /placeholder: name@example.com
+                    - text: preview@registration.test
+                  - button "发送测试" [ref=f3e248] [cursor=pointer]
+                - paragraph [ref=f3e250]: 使用已保存的配置发送，可同时检查验证码邮件的排版。
+              - generic [ref=f3e261]: 测试邮件已发送至 preview@registration.test，请检查收件箱或垃圾邮件。
+          - generic [ref=f3e183]:
+            - generic [ref=f3e185]:
+              - heading "邀请码" [level=2] [ref=f3e186]
+              - paragraph [ref=f3e187]: 每个邀请码仅供一人注册，必须在失效时间前使用。额度在创建时确定，之后修改默认额度不会改变已有邀请码。
+            - generic [ref=f3e188]:
+              - generic [ref=f3e189]:
+                - generic [ref=f3e190]: 邀请码状态
+                - combobox "邀请码状态" [ref=f3e191]:
+                  - option "全部邀请码" [selected]
+                  - option "可使用"
+                  - option "已使用"
+                  - option "已过期"
+                  - option "已撤销"
+                - button "刷新" [ref=f3e192] [cursor=pointer]
+              - generic [ref=f3e197]:
+                - heading "还没有邀请码" [level=3] [ref=f3e201]
+                - button "创建邀请码" [ref=f3e203] [cursor=pointer]
+              - generic [ref=f3e207]: 共 0 个邀请码
+  - dialog [ref=f3e266]:
+    - banner [ref=f3e267]:
+      - generic [ref=f3e271]:
+        - heading "创建邀请码" [level=2] [ref=f3e272]
+        - paragraph [ref=f3e273]: 每个邀请码仅能使用一次。批量创建的所有邀请码使用相同的额度与失效时间。
+      - button "关闭" [ref=f3e275] [cursor=pointer]
+    - generic [ref=f3e279]:
+      - generic [ref=f3e280]:
+        - generic [ref=f3e281]: 数量
+        - spinbutton "数量" [active] [ref=f3e282]: "1"
+        - paragraph [ref=f3e283]: 一次最多创建 100 个。
+      - generic [ref=f3e284]:
+        - generic [ref=f3e285]: 失效时间
+        - textbox "失效时间" [ref=f3e286]: 2026-10-25T22:01
+        - paragraph [ref=f3e287]: 按当前设备的本地时间填写。
+      - generic [ref=f3e288]:
+        - generic [ref=f3e289]: 用户额度（GiB）
+        - spinbutton "用户额度（GiB）" [ref=f3e290]: "5"
+        - paragraph [ref=f3e291]: 已填入当前新用户默认额度，可为这批受邀者单独调整。留空不限，0 表示暂不允许上传。
+    - contentinfo [ref=f3e292]:
+      - button "取消" [ref=f3e293] [cursor=pointer]
+      - button "创建邀请码" [ref=f3e295] [cursor=pointer]

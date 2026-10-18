@@ -1,0 +1,51 @@
+- generic [ref=f4e3]:
+  - generic [ref=f4e4]:
+    - link "Tessera 首页" [ref=f4e5] [cursor=pointer]:
+      - /url: /
+      - generic [ref=f4e13]:
+        - generic [ref=f4e14]: Tessera
+        - generic [ref=f4e15]: 千片成璧，唯你可合
+    - generic [ref=f4e16]:
+      - heading "登录" [level=1] [ref=f4e17]
+      - paragraph [ref=f4e18]: 登录你的文件空间。
+      - generic [ref=f4e19]:
+        - generic [ref=f4e20]:
+          - generic [ref=f4e21]: 邮箱
+          - textbox "邮箱" [ref=f4e22]:
+            - /placeholder: name@example.com
+            - text: admin@registration.test
+          - paragraph [ref=f4e23]:
+            - text: 上次登录的账号。
+            - button "换个账号" [ref=f4e24] [cursor=pointer]
+        - generic [ref=f4e25]:
+          - generic [ref=f4e26]: 密码
+          - generic [ref=f4e27]:
+            - textbox "密码" [active] [ref=f4e28]
+            - button "显示" [ref=f4e29] [cursor=pointer]
+        - generic [ref=f4e30] [cursor=pointer]:
+          - checkbox "30 天内保持登录" [ref=f4e31]
+          - generic [ref=f4e32]:
+            - strong [ref=f4e33]: 30 天内保持登录
+            - generic [ref=f4e34]: 下次打开无需重新登录。在公共电脑上请不要勾选。
+        - button "登录" [ref=f4e35] [cursor=pointer]
+        - generic [ref=f4e37]: 或使用设备验证
+        - button "通行密钥登录" [disabled] [ref=f4e39]
+        - paragraph [ref=f4e43]: 请使用已配置的 HTTPS 公开访问地址；本地开发请使用 localhost
+    - contentinfo [ref=f4e44]:
+      - link "使用文档" [ref=f4e45] [cursor=pointer]:
+        - /url: /docs
+      - generic [ref=f4e46]:
+        - text: 还没有账号？
+        - link "注册账号" [ref=f4e47] [cursor=pointer]:
+          - /url: /register
+  - generic [ref=f4e194]:
+    - generic [ref=f4e195]:
+      - heading "千片成璧，唯你可合" [level=2] [ref=f4e196]
+      - paragraph [ref=f4e197]: 每个文件都被加密、切成碎片，散落在你自己的 Telegram 频道；只有你的钥匙，能把它们重新拼合完整。
+    - list [ref=f4e198]:
+      - listitem [ref=f4e199]:
+        - generic [ref=f4e203]: 上传、整理、预览各种文件，在任何设备上都能找到它们。
+      - listitem [ref=f4e204]:
+        - generic [ref=f4e208]: 一键生成分享链接，可以设置有效期和访问密码。
+      - listitem [ref=f4e209]:
+        - generic [ref=f4e213]: 文件加密保存，由你控制是否公开分享。
