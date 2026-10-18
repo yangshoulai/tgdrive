@@ -1,449 +1,383 @@
 <div align="center">
 
-<img src="docs/logo.svg" alt="Tessera" width="88">
+<img src="docs/logo.svg" alt="Tessera 标志" width="80">
 
 # Tessera
 
-**把 Telegram 私有频道变成你的加密网盘。**
+**千片成璧，唯你可合。**
 
-自托管加密存储 · AI 文件助手 · 离线下载 · 网页资源抓取 · HTTP API / S3
+把 Telegram 私有频道变成你的加密网盘。
 
-[![Version](https://img.shields.io/github/v/tag/yangshoulai/tgdrive?sort=semver&label=version&color=0b0c13)](https://github.com/yangshoulai/tgdrive/tags)
-[![Docker](https://img.shields.io/github/actions/workflow/status/yangshoulai/tgdrive/docker.yml?label=docker%20image&logo=docker&logoColor=white)](https://github.com/yangshoulai/tgdrive/pkgs/container/tgdrive)
-[![Python](https://img.shields.io/badge/python-3.12%2B-3776ab?logo=python&logoColor=white)](pyproject.toml)
-[![React](https://img.shields.io/badge/react-18-149eca?logo=react&logoColor=white)](web/package.json)
-[![S3](https://img.shields.io/badge/S3-compatible-f0a22e)](#客户端接入)
+文件管理与沉浸预览 · AI 文件助手 · 离线下载与网页收集 · HTTP API / S3
+
+[![Version](https://img.shields.io/github/v/tag/yangshoulai/tgdrive?sort=semver&label=version&color=0b0c13)](https://github.com/yangshoulai/tgdrive/releases)
+[![Docker](https://img.shields.io/github/actions/workflow/status/yangshoulai/tgdrive/docker.yml?label=docker&logo=docker&logoColor=white)](https://github.com/yangshoulai/tgdrive/actions/workflows/docker.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-0b0c13)](LICENSE)
 
-[**快速开始**](#快速开始) · [**功能特性**](#功能特性) · [**文件助手**](#文件助手) · [**离线下载**](#离线下载) · [**油猴脚本**](#油猴脚本) · [**在线文档**](https://tessera.yangshoulai.xyz/docs/)
-
-<br>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/grid-dark.png">
-  <img src="docs/screenshots/grid.png" alt="Tessera 文件网格视图" width="100%">
-</picture>
+[功能特点](#功能特点) · [界面预览](#界面预览) · [快速开始](#快速开始) · [文件助手](#文件助手) · [网页资源抓取](#网页资源抓取) · [使用文档](#使用文档)
 
 </div>
 
-## 简介
+<a id="简介"></a>
 
-Tessera 是面向个人与小团队的自托管网盘：在服务端加密文件、切成分片，通过 Telegram Bot API 保存到**你自己的私有频道**。文件索引与包装后的数据密钥保存在服务器本地的 SQLite 数据库中，Telegram 接收的是密文分片。
+Tessera 是面向个人与小团队的**自托管文件空间**。文件在服务器上加密、切成分片，经 Telegram Bot API 保存到你自己的私有频道；文件索引与加密后的数据密钥保存在本地 SQLite 中。
 
-从上传、预览、整理到分享，都可以在网页中完成；文件助手用自然语言协助查找与批量整理，离线下载和配套油猴脚本负责把网页资源收进网盘。需要接入现有工具时，还可以使用 HTTP API 与 S3 兼容网关。
+日常上传、整理、预览和分享都在网页里完成。文件助手协助查找与批量整理，离线下载和资源抓取脚本把网页内容收进网盘；已有的脚本、rclone、AWS CLI 等工具可以通过 HTTP API 或 S3 兼容网关接入。
 
-**一个容器、单个 Python 进程，使用 SQLite 管理元数据，无需额外部署数据库或消息队列。** 文件助手和平台下载按需启用；未配置 Telegram 时也可使用本地存储体验。
+**一个容器、单个服务进程，无需额外部署数据库或消息队列。** 未配置 Telegram 时可先使用本地存储体验；模型服务、FFmpeg 与平台下载组件按需启用。
 
-> 作者自用的部署实例位于 **<https://tessera.yangshoulai.xyz>**，不开放注册；其中的[文档站](https://tessera.yangshoulai.xyz/docs/)对所有人公开，可以先在那里了解完整的使用说明与 API。
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/grid-dark.png">
+  <img src="docs/screenshots/grid.png" alt="Tessera 文件网格：侧栏导航、文件类型筛选与相册缩略图" width="100%">
+</picture>
 
-<table>
-<tr>
-<td width="33%" valign="top">
+<a id="功能特性"></a>
 
-### 🔐 加密存储，自行掌控
+## 功能特点
 
-Argon2id 派生主密钥，每个文件独立数据密钥，AES-256-GCM 分帧加密。Telegram 只看到密文分片。
-
-</td>
-<td width="33%" valign="top">
-
-### 🗂️ 日常文件体验
-
-分块上传与秒传、连续目录浏览、搜索与筛选；图片、音视频、Markdown 和代码沉浸预览，支持深色与手机端。
-
-</td>
-<td width="33%" valign="top">
-
-### ✨ AI 文件助手
-
-用对话查找文件、统计用量、批量改名与归类。限定目录范围，修改以操作卡片呈现，默认确认后执行。
-
-</td>
-</tr>
-<tr>
-<td valign="top">
-
-### ⬇️ 服务器离线下载
-
-粘贴直链或 curl / wget 命令，服务器下载后加密保存；可选 M3U8、X 与 YouTube，关闭网页后继续运行。
-
-</td>
-<td valign="top">
-
-### 🧭 网页资源抓取
-
-油猴脚本收集网页资源，批量发送服务器下载，或由浏览器读取后上传；支持桌面脚本管理器与 iOS Safari。
-
-</td>
-<td valign="top">
-
-### 🔗 分享与工具接入
-
-文件和文件夹分享、密码与有效期、私密空间；通过 HTTP API / S3 接入脚本、rclone、AWS CLI 等工具。
-
-</td>
-</tr>
-</table>
-
-## 截图
-
-<table>
-<tr>
-<td width="50%"><img src="docs/screenshots/files.png" alt="文件列表"><p align="center"><sub>文件管理：连续浏览、组合筛选、列表与网格切换</sub></p></td>
-<td width="50%"><img src="docs/screenshots/image.png" alt="图片预览"><p align="center"><sub>图片查看器：缩放、旋转、同目录胶片条</sub></p></td>
-</tr>
-<tr>
-<td><img src="docs/screenshots/music.png" alt="音乐播放器"><p align="center"><sub>音乐播放器：滚动歌词、播放列表、最小化后继续播放</sub></p></td>
-<td><img src="docs/screenshots/markdown.png" alt="Markdown 预览"><p align="center"><sub>沉浸阅读：Markdown 排版、标题目录、渲染与源码切换</sub></p></td>
-</tr>
-<tr>
-<td><img src="docs/screenshots/assistant.png" alt="文件助手与待确认改名方案"><p align="center"><sub>文件助手：自然语言整理、访问范围、操作确认卡片</sub></p></td>
-<td><img src="docs/screenshots/downloads.png" alt="离线下载任务"><p align="center"><sub>离线下载：队列、阶段进度、停止与继续</sub></p></td>
-</tr>
-<tr>
-<td><img src="docs/screenshots/share.png" alt="公开分享页"><p align="center"><sub>文件夹分享页：访客浏览、打包下载、保存到自己的 Tessera</sub></p></td>
-<td><img src="docs/screenshots/admin-users.png" alt="管理控制台"><p align="center"><sub>管理控制台：用户与配额、存储通道、审计、维护</sub></p></td>
-</tr>
-<tr>
-<td><img src="docs/screenshots/docs.png" alt="内置文档站"><p align="center"><sub>内置文档站：使用指南、API 参考、S3 兼容性，⌘K 搜索</sub></p></td>
-<td><img src="docs/screenshots/login.png" alt="登录页"><p align="center"><sub>登录：账号密码或通行密钥（Passkey）</sub></p></td>
-</tr>
-</table>
-
-<p align="center"><img src="docs/screenshots/mobile-grid.png" alt="手机端" width="260"><br><sub>手机端</sub></p>
-
-<sub>截图均来自当前源码构建的独立本地实例，使用合成文件与示例账号；助手使用固定回复的演示模型，下载任务状态为演示数据，不代表真实模型效果或下载测速。油猴脚本截图见下文。</sub>
-
-## 功能特性
-
-<details open>
-<summary><b>存储与加密</b></summary>
-
-- 每个文件有独立的数据密钥，由加密口令经 **Argon2id** 派生的主密钥包装；内容以 16 MiB 分片、64 KiB 帧做 **AES-256-GCM** 加密。
-- 存储后端为 Telegram 私有频道，支持多个 Bot 轮换与故障冷却；未配置 Bot 时使用本地目录，便于开发测试。
-- **秒传**在当前用户有权访问的普通文件中匹配内容指纹；服务端复制和保存他人分享复用已有加密数据，避免重复上传，仍计入目标账号配额。
-- 读取时按需下载并解密对应分片，支持 HTTP Range 与视频拖动。
-
-</details>
-
-<details open>
-<summary><b>网页端</b></summary>
-
-- **文件管理**：大文件分块并行上传与断点续传，移动、重命名、回收站、配额、按文件名搜索；目录连续浏览、组合筛选、列表 / 网格视图与键盘快捷键。
-- **在线预览**：图片查看器，音视频播放（播放列表、字幕、歌词），文本、代码与 Markdown（含标题目录）；预览可固定、最小化与跨页播放，图片／视频／音频封面支持服务器后台生成（需 FFmpeg），网页上传可用本地文件生成，也可由用户手动生成，结果加密保存。
-- **公开分享**：文件和文件夹均可分享，支持密码、有效期和下载次数统计；访客可打包下载 ZIP，登录用户可把分享保存到自己的空间。
-- **私密空间**：需要再次验证（登录密码或通行密钥）才能访问的独立目录，闲置自动锁定，独立回收站。
-- **账号与管理**：邮箱登录，头像与昵称，通行密钥登录；管理员控制台管理用户、配额、存储通道、访问密钥、审计日志、备份与维护任务。
-- **内置文档站**：`/docs/` 提供使用说明、API 与 S3 兼容性文档；管理员文档仅对管理员会话下发。
-- **本机缓存**：所有可预览文件读过的内容（图片、音视频、Markdown、文本、代码、PDF）与缩略图自动加密缓存在浏览器里，也可手动把任意文件完整缓存到本机；完整与部分缓存都能逐项或批量清除。容量按设备设置，私密文件只在信任的设备上缓存，管理员可整体关闭。
-- 深色模式（跟随系统或手动切换）与手机端适配。
-
-</details>
-
-<details open>
-<summary><b>AI 文件助手</b></summary>
-
-- 用自然语言搜索、统计、查重、读取文本，生成改名、移动、归类、分享与离线下载方案。
-- 在侧边抽屉中处理当前目录与所选文件，支持 `@` 引用、流式回复、工具时间线与历史对话。
-- 默认审批模式；管理员可按需允许完全访问。系统目录不对助手开放；私密空间只能在单独的私密对话中处理，对话不落盘，锁定即结束。
-- 管理员自备 OpenAI 兼容或 Anthropic 模型渠道，也可连接本地模型服务；支持模型目录、工具开关、用户策略与用量额度。
-
-</details>
-
-<details open>
-<summary><b>程序访问</b></summary>
-
-- `/api/v1`：访问密钥认证的 HTTP API，覆盖列表、搜索、上传、下载、移动、复制、删除、公开分享、秒传与离线下载。
-- **S3 兼容网关**：SigV4 签名与预签名 URL，可直接使用 rclone、AWS CLI、boto3 等工具。
-- 访问密钥可按存储桶与路径前缀授予只读或读写权限，所属用户被禁用时自动失效。
-
-</details>
-
-<details open>
-<summary><b>离线下载</b></summary>
-
-- 服务器代为下载 HTTP(S) 直链，或解析浏览器复制的 bash 格式 curl / wget 命令；支持任务搜索、状态筛选、停止、继续、更新参数与自动重试。
-- 可选组件：M3U8 点播封装、X 单条帖子的图片与视频、YouTube 单视频与 Shorts，也可仅保存音轨。
-- 配套[油猴脚本](#油猴脚本)，提供资源嗅探、批量保存、浏览器下载后上传、私密空间转交与「发给文件助手」。
-
-</details>
-
-## 工作原理
-
-```mermaid
-flowchart LR
-    subgraph clients["客户端"]
-        web["浏览器"]
-        api["HTTP API"]
-        s3["S3 客户端"]
-    end
-    clients -- HTTPS --> app["Tessera<br/>单进程 ASGI 服务"]
-    app --- db[("meta.db<br/>索引 · 账号 · 包装后的数据密钥")]
-    app -- "加密分片（每片一条消息）" --> tg["Telegram<br/>私有频道"]
-```
-
-| 层级 | 做法 |
+| 能力 | 可以做什么 |
 | --- | --- |
-| 主密钥 | 加密口令经 Argon2id 派生，只存在于进程内存中 |
-| 数据密钥 | 每个文件一把，用主密钥包装后存入 `meta.db`；更换口令只需重新包装，不必重新加密文件 |
-| 分片加密 | 数据密钥经 HKDF 派生分片密钥，内容按 64 KiB 帧做 AES-256-GCM 认证加密 |
-| 分片大小 | 默认 16 MiB，上传与读取按分片处理，大文件不必整体放入内存 |
+| **文件管理** | 分块并行上传、断点续传、秒传；搜索、组合筛选、排序、拖放移动、打包下载、批量操作与回收站。大目录连续浏览，列表和网格按需切换。 |
+| **沉浸预览** | 图片缩放、旋转与胶片条；音视频播放、字幕、歌词和播放列表；Markdown、代码与 PDF 阅读。预览可调整大小、固定、最小化，音视频跨页继续播放。 |
+| **AI 文件助手** | 用对话查询文件、统计用量、查重、总结文本，生成改名、移动、归类与下载方案；限定访问范围，默认确认后修改。支持识图模型、附件与独立的私密对话。 |
+| **分享与私密** | 文件、文件夹分享，访问密码、有效期与下载统计；访客可筛选、排序、打包下载，登录后保存到自己的空间。私密空间额外验证、闲置锁定，使用独立回收站。 |
+| **离线下载** | 服务器下载直链、curl / wget 请求、M3U8、X 与 YouTube 媒体，关闭网页后继续；可搜索任务、停止、继续和更新过期参数。 |
+| **网页资源收集** | 配套浏览器脚本嗅探图片、音视频与文件，批量交给服务器，或由浏览器读取后上传；支持桌面脚本管理器及 iOS Safari。 |
+| **加密本机缓存** | 自动缓存预览读过的内容与缩略图，也可完整缓存任意类型文件；按设备设置容量，完整、部分缓存均可清除。管理员允许后，私密文件可逐台设备开启缓存。 |
+| **账号与接入** | 多用户、配额、昵称头像与通行密钥；按目录授权访问密钥，同一套密钥接入 HTTP API 与 S3。控制台提供存储通道、用量、审计、备份与维护。 |
 
-## 安全模型与限制
+界面支持浅色、深色与跟随系统，适配电脑和手机；桌面侧栏可收起成图标栏。界面与预览引擎资源随应用分发，无需外部字体或 CDN。
 
-部署前请了解以下事实：
+<a id="截图"></a>
 
-- **加密口令无法找回。** 所有数据密钥都由它保护，遗失后已存储的文件无法解密。
-- **重启后需要人工解锁。** 主密钥只存在于内存中。服务启动后处于锁定状态，普通用户无法登录，公开链接返回 503，直到管理员登录并输入加密口令。
-- **管理界面遵循账号隔离。** 系统管理只提供文件数量、容量等统计，不提供用户文件列表、预览或下载；助手管理页只显示对话元数据与用量，不下发对话正文。审计不记录文件名、路径或来源凭据。
-- **这不是端到端加密。** 加密在服务端完成，全系统共用一把主密钥；能控制服务器或管理员账号的人在技术上可以读取所有用户的文件。它防护的是 Telegram 侧和存储介质上的数据泄露。
-- **文件助手会向所选模型服务发送上下文。** 包括对话、访问范围内的文件名、目录结构，以及工具实际读取的文本与结果；首次使用需确认说明。私密空间只在管理员允许的私密对话中使用（对话只保存在服务器内存里），使用外部模型时请同时考虑其数据政策与调用费用。
-- **`meta.db` 是唯一的索引。** 丢失数据库后，频道中的分片将无法还原为文件。请定期[备份](#备份与恢复)。
-- **只支持单进程运行。** 会话、登录限流和 Telegram 客户端池保存在进程内存中，不要使用多个 worker 或让多个实例共享数据目录。
-- **依赖 Telegram 云端 Bot API。** 上传下载速度、限流和可用性受 Telegram 约束，请自行评估是否符合 Telegram 的服务条款和你的使用场景。
+## 界面预览
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/files.png" alt="文件列表，包含名称、类型、大小、修改时间排序和组合筛选"><p align="center"><sub>文件管理：列表、组合筛选、排序与批量操作</sub></p></td>
+<td width="50%"><img src="docs/screenshots/pdf.png" alt="PDF 沉浸式阅读器，显示翻页、缩放与目录工具"><p align="center"><sub>PDF：连续阅读、缩放、跳页、目录与文字选择</sub></p></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/music.png" alt="音乐播放器与同目录播放列表"><p align="center"><sub>音乐：歌词、播放列表与跨页播放</sub></p></td>
+<td><img src="docs/screenshots/assistant.png" alt="文件助手抽屉中的照片改名确认卡片"><p align="center"><sub>文件助手：访问范围、执行过程与待确认方案</sub></p></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/share.png" alt="访客文件夹分享页中的筛选、排序与打包下载"><p align="center"><sub>文件夹分享：筛选、排序、下载与保存</sub></p></td>
+<td><img src="docs/screenshots/cache.png" alt="本机缓存设置，包含分类用量、容量上限、自动缓存与清理操作"><p align="center"><sub>本机缓存：设备容量、分类用量与自动缓存</sub></p></td>
+</tr>
+</table>
+
+<details>
+<summary><b>更多界面：图片、Markdown、下载任务、控制台与文档站</b></summary>
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/image.png" alt="图片沉浸预览与同目录缩略图胶片条"><p align="center"><sub>图片查看器</sub></p></td>
+<td width="50%"><img src="docs/screenshots/markdown.png" alt="Markdown 阅读与标题目录"><p align="center"><sub>Markdown 阅读</sub></p></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/downloads.png" alt="离线下载的演示任务，包含进行中、排队、完成和停止状态"><p align="center"><sub>离线下载任务</sub></p></td>
+<td><img src="docs/screenshots/admin-users.png" alt="管理控制台中的示例用户与配额"><p align="center"><sub>账号与配额管理</sub></p></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/docs.png" alt="内置文档站的使用指南与接口文档入口"><p align="center"><sub>内置文档站</sub></p></td>
+<td><img src="docs/screenshots/login.png" alt="Tessera 账号登录与通行密钥入口"><p align="center"><sub>登录与设备验证</sub></p></td>
+</tr>
+</table>
+
+</details>
+
+<p align="center">
+<img src="docs/screenshots/mobile-grid.png" alt="手机端双列文件网格" width="260">
+<img src="docs/screenshots/mobile-pdf.png" alt="手机端 PDF 阅读器" width="260">
+<br><sub>手机上的文件浏览与 PDF 阅读</sub>
+</p>
+
+<sub>截图来自本地运行的 Tessera，文件、账号和相册均为合成示例。助手使用固定回复的演示模型；下载列表使用演示任务状态，不代表模型能力或真实下载速度。</sub>
 
 ## 快速开始
 
-需要 Docker 与 Docker Compose。
-
-**本机体验（HTTP）**
+需要 **Docker 与 Docker Compose**。对外使用时准备 HTTPS 站点；使用 Telegram 存储还需确保服务器能连接 Telegram Bot API。
 
 ```bash
 git clone https://github.com/yangshoulai/tgdrive.git
 cd tgdrive
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+docker compose pull
 ```
 
-打开 <http://127.0.0.1:8000/>，按页面提示设置加密口令并创建管理员账号。未配置 Telegram 时先使用本地分片目录；随后可以[连接 Telegram](#连接-telegram)、[启用文件助手](#文件助手)或选择下载所需的镜像。`docker-compose.dev.yml` 允许在 HTTP 下使用 Cookie（`TGDRIVE_INSECURE_COOKIES=1`），仅用于本机体验与开发。
+### 1. 选择运行方式
 
-**生产部署**
-
-使用 GitHub Container Registry 上的镜像，删除 `docker-compose.yml` 中的 `build` 部分后执行：
+**本机体验：** 使用 HTTP 开发配置，无需先配置 Telegram 或模型服务。
 
 ```bash
-docker compose pull
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-build
 ```
 
-请在反向代理后启用 HTTPS，并在控制台「系统设置」中填写公开访问地址与 S3 Endpoint（也可用启动参数设置）。通行密钥要求站点使用 HTTPS 域名。容器监听 `8000` 端口，数据目录为 `/data`，`/healthz` 可用于健康检查。
+打开 <http://localhost:8000/>。开发配置启用 `TGDRIVE_INSECURE_COOKIES=1`，只用于本机或受信任的开发环境，不要用它对外部署。通行密钥在本地使用 `localhost`，对外使用 HTTPS 域名。
 
-> [!NOTE]
-> 容器以 root 启动，入口脚本在数据目录属主不是 uid 10001 时修正属主，然后降权运行服务，因此命名卷和 `./data:/data` 这类宿主机目录都可直接使用。如果在 Compose 中用 `user:` 指定了其他用户，需要自行保证 `/data` 可写。
+**长期部署：** 配置反向代理与 HTTPS，使用默认配置启动。
 
-### 镜像
+```bash
+docker compose up -d --no-build
+```
 
-镜像地址为 `ghcr.io/yangshoulai/tgdrive`，每次发布版本时由 GitHub Actions 构建三个变体：
+通过自己的 HTTPS 地址访问。反向代理需保留 `Host`、正确传递 HTTPS 协议与客户端地址，允许大文件请求和长连接；上传、下载与 SSE 不应被代理缓冲或过早超时。容器监听 `8000` 端口，`/healthz` 提供健康检查。
 
-| 标签 | 内容 | 适用场景 |
-| --- | --- | --- |
-| `1`、`1.3`、`1.3.1`、`latest` | 基础镜像 | 文件存储、预览、分享、文件助手、直链离线下载 |
-| `1-ffmpeg`、`1.3-ffmpeg`、`1.3.1-ffmpeg`、`latest-ffmpeg` | 基础镜像 + FFmpeg | 服务器自动生成图片／音视频缩略图、下载 M3U8 |
-| `1-platform`、`1.3-platform`、`1.3.1-platform`、`latest-platform` | FFmpeg + yt-dlp、gallery-dl、Node.js | 还需要下载 X / YouTube 媒体 |
+以上命令使用预构建镜像；从源码构建可改用 `docker compose up -d --build`。数据保存在 Compose 的 `tgdrive-data` 命名卷中，容器重建后继续使用原卷。
 
-版本号遵循语义化版本：同一主版本内（`1.x.y`）的升级保持数据库、`/api/v1`、S3 网关兼容，启动时自动迁移数据库。生产环境建议固定主版本标签（如 `1`），这样能自动获得修复又不会跨越不兼容的升级；每个版本的变化见 [CHANGELOG.md](CHANGELOG.md)，升级前建议先做一次加密备份。
+默认入口脚本在必要时修正数据目录权限，再以 uid `10001` 运行服务。若在 Compose 中自行指定 `user:`，需保证 `/data` 对该用户可写。
 
-表中以 `1.3.1` 举例，实际版本见[发布记录](https://github.com/yangshoulai/tgdrive/releases)。下载功能还需要在控制台「系统设置 → 下载与资源」中启用；文件助手在「文件助手」页单独配置。使用预构建变体时也要调整 Compose 中的 `image` 标签；本地构建对应变体可用 `docker build --build-arg INSTALL_FFMPEG=1 .` 或 `docker build --target platform .`。
+### 2. 完成初始化
 
-### 连接 Telegram
+1. 按页面提示设置**加密口令**，创建管理员账号。
+2. 在「系统管理 → 系统设置 → 访问地址」填写公开访问地址与 S3 Endpoint；按部署网络配置可信代理。
+3. 在「存储通道」连接 Telegram。未配置通道时，新文件先保存在本地分片目录。
+4. 按需创建其他账号、设置配额，启用文件助手或下载组件。
 
-1. 通过 [@BotFather](https://t.me/BotFather) 创建 Bot，获得 token。
-2. 创建一个私有频道，把 Bot 添加为可以发布消息的管理员。
-3. 在控制台「存储通道」中添加 Bot token 与频道，系统会自动检查 token、频道访问和发布权限。
+> [!IMPORTANT]
+> **加密口令和账号登录密码是两回事。** 加密口令用于解锁存储，无法找回；服务重启后，需由管理员登录并再次解锁。请同时保管好口令与数据库备份。
 
-启用存储通道后，新写入的文件保存到频道；Bot token 加密后保存在数据库中，接口不会返回明文。可以添加多个 Bot 分担上传和下载。
+<a id="连接-telegram"></a>
 
-## 配置
+### 3. 连接 Telegram
 
-启动参数与对应的环境变量等效；控制台中的系统设置优先于启动参数。
+1. 通过 [@BotFather](https://t.me/BotFather) 创建 Bot，取得 token。
+2. 新建**私有频道**，把 Bot 添加为具有发布消息权限的管理员。
+3. 取得以 `-100` 开头的频道 ID。
+4. 在「存储通道 → 添加通道」填写显示名称、token 和频道 ID。保存后会检查 token、频道访问与发消息权限；页面内也有完整配置指南。
 
-| 参数 | 环境变量 | 说明 |
-| --- | --- | --- |
-| `--data-dir` | `TGDRIVE_DATA_DIR` | 数据目录（元数据库、本地分片、备份），默认 `./data` |
-| `--host` | `TGDRIVE_HOST` | 监听地址，默认 `127.0.0.1`（镜像中为 `0.0.0.0`） |
-| `--port` | `TGDRIVE_PORT` | 监听端口，默认 `8000` |
-| `--public-url` | `TGDRIVE_PUBLIC_URL` | 对外访问地址，用于分享链接、API 与文档示例 |
-| `--s3-endpoint` | `TGDRIVE_S3_ENDPOINT` | S3 客户端使用的完整 Endpoint |
-| `--trusted-proxies` | `TGDRIVE_TRUSTED_PROXIES` | 信任其 `X-Forwarded-For` / `X-Forwarded-Proto` 的代理 IP 或网段，逗号分隔 |
-| `--insecure-cookies` | `TGDRIVE_INSECURE_COOKIES=1` | 允许 HTTP 下的会话 Cookie，仅限本地开发 |
+启用后，新分片写入 Telegram；原有本地分片不会自动迁移，仍需保留本地数据。可以增加通道分担上传，停用的通道不再接收新分片，已有分片仍可读取。token 加密保存在数据库中。
+
+<a id="镜像"></a>
+
+### 镜像与组件
+
+镜像地址：`ghcr.io/yangshoulai/tgdrive`。按需要修改 Compose 的 `image` 标签：
+
+| 变体 | 滚动标签 | 固定版本示例 | 包含的能力 |
+| --- | --- | --- | --- |
+| 基础 | `1`、`latest` | `1.16.1` | 文件管理、全部网页预览、分享、文件助手、HTTP API / S3、直链下载 |
+| FFmpeg | `1-ffmpeg`、`latest-ffmpeg` | `1.16.1-ffmpeg` | 基础能力 + 服务器生成媒体缩略图、M3U8 封装 |
+| 平台 | `1-platform`、`latest-platform` | `1.16.1-platform` | FFmpeg 变体 + X / YouTube 下载所需的 yt-dlp、gallery-dl 与 Node.js |
+
+另提供次版本标签（如 `1.16` 及对应后缀）。`1` 跟随主版本内的更新，完整版本标签用于固定部署；当前版本见[发布记录](https://github.com/yangshoulai/tgdrive/releases)。同一主版本内保持数据库、HTTP API 与 S3 的兼容，具体变化及升级说明见 [CHANGELOG.md](CHANGELOG.md)。
+
+安装组件后，仍需在「系统设置 → 下载与资源」启用对应下载来源。文件助手的总开关与模型在控制台「文件助手」中配置，不因镜像变体而自动启用。
 
 <details>
-<summary>更多参数</summary>
-
-| 参数 | 环境变量 | 说明 |
-| --- | --- | --- |
-| `--static-dir` | `TGDRIVE_STATIC_DIR` | 前端构建产物目录，镜像已内置 |
-| `--s3-host` | `TGDRIVE_S3_HOST` | 未设置 S3 Endpoint 时用于识别 S3 请求的主机名 |
-| `--audit-retention-days` | `TGDRIVE_AUDIT_RETENTION_DAYS` | 在线审计日志保留天数，过期记录加密归档；默认 `0` 为永久保留 |
-| `--resource-mode` | `TGDRIVE_RESOURCE_MODE` | 离线下载资源预设：`auto`、`low`、`custom`（旧值 `standard` 按 `auto` 处理） |
-| `--offline-proxy` | `TGDRIVE_OFFLINE_PROXY` | 离线下载的出站代理（`http://` 或 `socks5://`） |
-
-离线下载的其他参数（并发、限速、磁盘保留空间、M3U8 / X / YouTube 开关、YouTube 清晰度上限等）见 `tgdrive --help` 与 `docker-compose.yml` 中的注释。
-
-</details>
-
-> [!WARNING]
-> `--trusted-proxies` 只应填写实际的反向代理地址；在不受控的网络中使用 `*` 会让客户端可以伪造来源 IP。
-
-## 客户端接入
-
-在网页头像菜单的「设置 → 访问密钥」创建密钥（Secret 只显示一次），每个用户的存储桶名为 `user-<编号>`。
+<summary>从源码构建其他镜像变体</summary>
 
 ```bash
-# HTTP API
-curl -H "Authorization: Bearer <AccessKeyId>:<Secret>" "https://drive.example.com/api/v1/list?prefix=docs/"
+# 带 FFmpeg 的基础镜像
+docker build --build-arg INSTALL_FFMPEG=1 -t tessera:ffmpeg .
 
-# S3（路径风格）
-aws s3 ls s3://user-2/ --endpoint-url https://s3.example.com
+# 包含平台下载组件的镜像
+docker build --target platform -t tessera:platform .
 ```
 
-| S3 操作 | 支持情况 |
-| --- | --- |
-| ListBuckets、HeadBucket、GetBucketLocation | ✅ |
-| ListObjectsV2、GetObject（含 Range）、HeadObject | ✅ |
-| PutObject（含 aws-chunked）、DeleteObject、DeleteObjects | ✅ |
-| CopyObject、分段上传、UploadPartCopy | ✅ |
-| 预签名 URL | ✅ |
-| 版本控制、ACL、生命周期、对象锁、POST 表单上传 | ❌ |
-
-完整的接口说明、示例和限制见[文档站](https://tessera.yangshoulai.xyz/docs/)。
+</details>
 
 ## 文件助手
 
-**把查找与整理文件，变成可以检查、确认的对话。** 在侧栏打开「文件助手」，或按 `⌘J` / `Ctrl+J`，可以一边浏览文件，一边让助手处理当前目录；输入 `@` 引用具体文件或文件夹。
+在侧栏打开「文件助手」，或按 `⌘J` / `Ctrl+J`，一边浏览文件，一边处理当前目录。输入 `@` 引用文件与文件夹；支持识图的模型还可以查看图片。
 
 | 你可以这样说 | 助手可以协助完成 |
 | --- | --- |
-| “这里的文件按类型统计一下” | 汇总文件数量、大小与分组 |
-| “找出最大的 10 个视频，有没有重复照片” | 查询大文件，按内容指纹查找完全相同的文件 |
+| “统计这个文件夹的类型和占用，找出最大的文件” | 汇总容量、分类与大文件 |
+| “这里有没有重复照片” | 按内容指纹查找完全相同的文件 |
 | “总结这篇旅行手记” | 在读取上限内获取文本，再生成摘要 |
 | “把这些照片统一改成旅途加序号” | 展示新旧名称与冲突情况，生成待确认方案 |
-| “把这个相册分享 7 天” | 生成分享卡片，由你设置密码并确认 |
+| “这个相册缓存到本机了吗” | 查询当前浏览器的缓存状态，生成缓存或清除卡片 |
 | “把这个网页相册保存到摄影目录” | 分析图片与分页线索，生成待确认的下载方案 |
 
-- **范围可控**：对话可以限定到当前目录或指定目录；助手请求扩大范围时需要确认。手动切换范围、引用范围外文件也会改变对话的可访问范围，发送前可检查输入框下方的范围按钮。普通对话不能访问私密空间与系统目录；私密空间解锁后，可在其中打开单独的私密对话（需管理员允许）。
-- **先看方案再执行**：默认审批模式下，修改需要在卡片上确认；支持撤销的操作可在 24 小时内撤销。管理员允许时可切换到完全访问，普通修改自动执行；公开分享、彻底删除、超过 1,000 项的操作及读取过文件正文或外部内容后的修改仍需确认。
-- **过程可追溯**：流式显示回复、思考内容（模型提供时）和工具调用；对话可重命名、归档、删除或从某条消息重试。
-- **模型自行选择**：支持 OpenAI 兼容接口与 Anthropic，可连接云端服务或本机、内网模型。能否稳定完成工具调用取决于所选模型与渠道。
+- **范围由你决定。** 可以限定当前目录或指定目录，发送前可检查输入框下方的访问范围。普通对话不进入私密空间或系统目录；私密空间解锁后可打开单独的私密对话，需管理员允许。
+- **修改可以先审阅。** 默认审批模式，由你确认操作卡片后执行。管理员允许时可切换完全访问；公开分享、彻底删除、大批量操作及读取过文件内容或外部内容后的修改仍需确认。改名、移动等可撤销操作在 24 小时内提供撤销入口。
+- **模型与额度自行配置。** 管理员添加 OpenAI 兼容或 Anthropic 渠道，选择支持工具调用的模型，也可连接本地或内网模型服务。首次使用需确认数据使用说明；应用不附带模型额度，实际效果取决于模型与渠道。
+- **私密对话不落盘。** 仅保存在服务器内存，锁定、退出或重启后清除。使用外部模型时，相关上下文仍会发送给该模型服务。
 
-**启用方式**：管理员进入「文件助手 → 渠道与模型」，添加渠道、选择支持工具调用的模型并测试，设为默认模型后打开总开关。控制台分「概览」「渠道与模型」「权限与工具」「用量与日志」「对话记录」五个标签，可进一步配置工具、每轮上限、每日 token 额度与用户策略；默认关闭，不附带模型额度。
+启用入口：「文件助手 → 渠道与模型」配置渠道、模型和默认模型，再在「概览」打开总开关；「权限与工具」设置工具范围与用户策略，「用量与日志」查看调用情况。
 
-> [!NOTE]
-> 对话正文与渠道凭据加密保存在本地，管理界面只提供对话元数据和用量统计。执行工具时，相关文件名、文本内容和工具结果仍会发送给管理员配置的模型服务。请先阅读首次使用说明；本地加密不能替代模型服务的数据政策。
-
-使用说明：[文件助手指南](https://tessera.yangshoulai.xyz/docs/assistant) · 实现与权限设计：[设计文档](docs/assistant-design.md)
+[使用指南](https://tessera.yangshoulai.xyz/docs/assistant) · [权限与实现设计](docs/assistant-design.md)
 
 ## 离线下载
 
-**把下载交给服务器，完成后直接进入网盘。** 在侧栏「下载任务」中粘贴链接或 bash 格式 curl / wget 命令，解析候选文件、选择清晰度与保存目录后开始。任务持久保存在服务器，关闭网页后继续运行；服务重启后需要先解锁系统，私密下载还需重新授权。
+在「下载任务」中粘贴链接或 bash 格式 curl / wget 命令，解析候选、选择保存目录后开始。任务由服务器持久保存，关闭网页不影响执行；重启后先解锁系统，私密任务还需重新解锁并继续。
 
-| 来源 | 支持范围 | 部署要求 |
+| 来源 | 支持范围 | 需要的镜像 |
 | --- | --- | --- |
-| HTTP(S) 文件直链 | 单条或多条链接，curl / wget 的请求头、Cookie、GET / POST 与文本请求体 | 基础镜像 |
-| M3U8 点播 | H.264 / AAC，支持 TS、fMP4、字节范围、普通 AES-128 与独立音轨，封装为 MP4 | FFmpeg 镜像并启用功能 |
-| X | 单条帖子中的原图与视频 | 平台镜像并启用功能 |
-| YouTube / Shorts | 单个视频的可用 H.264 / AAC 格式，可选清晰度或仅音频 M4A，默认上限 2160p | 平台镜像并启用功能 |
+| HTTP(S) 直链 | 单条或多条链接；curl / wget 的请求头、Cookie、GET / POST 与文本请求体 | 基础 |
+| M3U8 点播 | H.264 / AAC，TS、fMP4、字节范围、普通 AES-128 与独立音轨，封装为 MP4 | FFmpeg |
+| X | 单条帖子中的图片与视频 | 平台 |
+| YouTube / Shorts | 单个视频可用的 H.264 / AAC 格式，可选清晰度或只保存 M4A 音轨 | 平台 |
 
-- **任务管理**：搜索与状态筛选、停止 / 继续、重新下载、更新过期链接或 Cookie；解析、下载、合并、保存分阶段显示，完成后才能标记为「已完成」。删除任务保留已保存文件。
-- **断点与重试**：网络中断、超时和 HTTP 408 / 425 / 429 / 5xx 自动重试。GET 直链在来源支持且文件版本一致时，从已保存的 16 MiB 分段续传；M3U8 与平台视频停止后重新下载，POST 不自动重发。
-- **普通与私密目录**：网页端可保存到「我的文件」或已解锁的「私密空间」；私密授权过期或锁定时暂停，任务列表隐藏真实名称和路径。同名文件自动改名，保留原文件。
-- **来源保护**：来源地址、请求头与 Cookie 加密保存，任务列表只显示来源域名；出站请求统一校验地址，直连固定公网 IP，也可配置出站代理。
-- **资源预算**：并发、限速和缓存受资源配置约束，小内存服务器可选低资源模式。平台解析在服务器本地运行，不依赖第三方解析网站。
+支持任务搜索、状态筛选、批量操作、停止与继续、更新过期链接或 Cookie。GET 直链在来源支持且版本一致时从已保存分段续传；网络临时故障会自动重试。POST 不自动重发，M3U8 与平台视频继续时从头处理。
 
-不支持磁力 / 种子、直播、DRM、SAMPLE-AES，或频道 / 播放列表批量下载；视频只封装、不转码。平台可用性还受来源权限、Cookie、地区与服务器出口影响，解析成功不保证来源始终允许下载。完整规则见[离线下载指南](https://tessera.yangshoulai.xyz/docs/downloads)。
+下载可保存到普通目录或已解锁的私密空间；同名文件自动改名。并发、限速、磁盘保留空间、临时缓存与 YouTube 清晰度由管理员配置。临时缓存上限主要约束需合并的输入轨，不是所有文件统一的大小上限。
 
-设计与排障说明：[离线下载](docs/offline-downloads.md) · [平台下载](docs/platform-downloads.md) · [兼容性排查](docs/offline-reliability.md)
+不支持磁力 / 种子、直播、DRM、SAMPLE-AES 或频道 / 播放列表批量下载；视频只封装、不转码。来源权限、Cookie、地区和服务器出口会影响下载，解析成功不保证来源始终允许读取。
 
+[使用指南](https://tessera.yangshoulai.xyz/docs/downloads) · [离线下载设计](docs/offline-downloads.md) · [平台下载](docs/platform-downloads.md) · [排障说明](docs/offline-reliability.md)
+
+<a id="油猴脚本"></a>
 <a id="浏览器脚本"></a>
 
-## 油猴脚本
+## 网页资源抓取
 
-**浏览网页时，把值得保留的资源直接收进 Tessera。** 配套的 [Tessera 资源抓取脚本](userscripts/tessera-grabber.user.js) 从已加载的网页中收集图片、视频、音频、M3U8 与常见文件，在悬浮面板中预览、选择和批量保存；X 与 YouTube 另有页面操作入口。
+配套的 [Tessera 资源抓取脚本](userscripts/tessera-grabber.user.js) 从已加载的网页中收集图片、视频、音频、M3U8 与常见文件，在悬浮面板中预览、选择和批量保存；X 与 YouTube 另有页面操作入口。
 
-<p align="center"><img src="docs/screenshots/grabber.png" alt="Tessera 资源抓取脚本在本地演示相册中收集图片" width="100%"><br><sub>真实脚本界面，运行于本地合成相册；资源不来自第三方网站。</sub></p>
+<img src="docs/screenshots/grabber.png" alt="真实资源抓取脚本运行于本地合成相册，展示候选图片与批量保存入口" width="100%">
 
-| 方式 | 数据经过哪里 | 适用场景 |
+| 方式 | 数据路径 | 适用情况 |
 | --- | --- | --- |
-| **服务器下载** | 来源 → Tessera 服务器 → 加密存储 | 大文件、M3U8、X / YouTube；提交后无需保持原网页打开 |
-| **本地下载** | 来源 → 当前浏览器 → 上传 Tessera | 浏览器能读取、服务器被来源拒绝的图片与文件直链；并非保存到电脑的下载目录 |
-| **发给文件助手** | 页面结构快照 → Tessera 页面 → 你确认后发送给助手 | 分析图片候选与分页线索，逐页暂存后一起整理相册下载方案 |
+| **服务器下载** | 来源 → Tessera 服务器 → 加密存储 | 大文件、M3U8、X / YouTube，提交后无需保持来源网页打开 |
+| **本地下载** | 来源 → 浏览器 → 上传 Tessera | 浏览器能读取的图片与文件直链；“本地”指在浏览器读取，最终仍保存到网盘 |
+| **发给文件助手** | 图片候选与分页线索 → Tessera 页面 | 确认后交给助手分析、整理相册下载方案，不转交页面正文 |
 
-两种下载方式共用确认页：选择保存位置、浏览或新建文件夹、逐项改名、移除条目；服务器下载还可选择解析出的清晰度。进度原地更新，支持停止与重试，已发送项自动跳过；失败项可以改用本地下载。同名时保留已有文件，提示改名后重试。
+1. 桌面安装 **Tampermonkey / Violentmonkey** 并导入[脚本文件](userscripts/tessera-grabber.user.js)；iPhone / iPad 使用 **Userscripts + Safari**，授予相应网站访问权限。
+2. 在 Tessera 头像菜单「设置 → 访问密钥」创建读写密钥，建议限定到专用收集目录。
+3. 在脚本面板的「设置」中填写 Tessera 地址、`AccessKeyId:Secret` 和默认目录，按网站启用资源收集。
 
-**安装与连接**
-
-1. 桌面浏览器使用 **Tampermonkey / Violentmonkey**，新建脚本并粘贴[脚本文件](userscripts/tessera-grabber.user.js)的完整内容；iPhone / iPad 使用 **Userscripts + Safari**，把文件放入其脚本目录，并在 Safari 扩展设置中允许访问网站。
-2. 在 Tessera「访问密钥」中创建属于自己账号的**读写密钥**，建议限定到专用收集目录。
-3. 打开脚本面板的「设置」，填写 Tessera 地址与 `AccessKeyId:Secret`，选择默认保存目录。可按网站启用 / 隐藏悬浮按钮，支持列表与网格视图。
-
-脚本通过访问密钥调用 `/api/v1`，只浏览、写入授权目录。选择私密空间时会转交 Tessera 页面，由你登录、解锁并确认；密码不在来源网页或脚本中输入，私密文件不通过访问密钥上传。「发给文件助手」转交图片候选与分页链接，不含页面正文，需要在 Tessera 中确认发送。
+两种下载方式都有确认页，可选择目录、修改文件名并移除条目。保存到私密空间时，脚本会转交 Tessera 页面，由你登录、解锁后接收；不要在来源网页输入账号密码。
 
 <details>
-<summary><b>使用边界与常见问题</b></summary>
+<summary>使用边界</summary>
 
-- **本地下载限制**：HTTP(S) 文件直链，单文件最多 64 MiB，每批最多 50 项，逐项读取并上传；M3U8 / DASH 与平台视频使用服务器下载。传输时保持原网页打开，关闭面板可继续，刷新或关闭网页会中断。
-- **文件名与资源保留**：文件名可编辑，不能含路径、控制字符或保留名，最多 220 字节，批次内不能重名。探测到的资源在关闭面板或站内换页后保留，手动「清空」或刷新网页才清除。
-- **Cookie 边界**：服务器下载所需的来源 Cookie 只交给配置的 Tessera 服务器；本地下载只上传文件数据，不把来源 Cookie 发给上传接口，Tessera 密钥不用于来源请求。
-- **iOS 差异**：Userscripts 无脚本菜单与 `GM_cookie`，通过悬浮按钮设置，窄屏面板从底部展开；只能取得网页可见的 Cookie，无法读取 HttpOnly Cookie，部分登录资源可能受限。
-- **验证与跨域限制**：遇到人机验证时，可点「打开验证」在标签页完成后重试；服务器和浏览器的访问条件不同，本地读取也可能被跨域或站点策略阻止。验证页、登录页不会当作文件上传。少数网站禁止跨站窗口通信，会影响私密文件转交，此时可手动保存后上传。
+- 本地下载仅支持 HTTP(S) 直链，单文件最多 64 MiB、每批最多 50 项；M3U8 / DASH 和平台视频走服务器下载。传输期间保持来源网页打开。
+- 已探测资源在关闭面板或站内换页后保留，手动清空或刷新网页才移除。同名文件不会被脚本直接覆盖，需改名后重试。
+- 服务器下载所需的来源 Cookie 会交给你配置的 Tessera 服务器；本地上传不转发来源 Cookie，Tessera 密钥也不进入来源请求。
+- iOS Userscripts 无脚本菜单与 `GM_cookie`，通过悬浮按钮设置，无法读取 HttpOnly Cookie。跨域、来源验证与窗口通信策略仍可能阻止读取或私密转交。
 
 </details>
 
-## 备份与恢复
+## 客户端接入
 
-控制台「安全与维护 → 维护与备份」可以创建加密备份，文件保存在数据目录的 `backups/` 下（`*.tgdbak`）。备份包含元数据库（文件索引、账号、被包装的数据密钥等），不包含分片本身——分片保存在 Telegram 频道或本地分片目录中。请把备份文件复制到服务器以外的位置，并保存好备份时的加密口令；使用本地存储时，还需单独备份数据目录中的 `blobs/`。
+在头像菜单「设置 → 访问密钥」创建密钥；Secret 只显示一次。访问密钥按授权目录限制只读或读写，不能访问私密空间。每个用户的存储桶名形如 `user-2`。
 
-恢复前先停止服务：
+HTTP API 与网页共用站点地址。使用 S3 时，给它配置独立域名，指向同一个服务，并在控制台填写 S3 Endpoint。
 
 ```bash
-tgdrive restore /path/to/tgdrive-20261014-120000.tgdbak --data-dir /var/lib/tgdrive
+# HTTP API：列出 docs/ 下的文件
+curl -H 'Authorization: Bearer <AccessKeyId>:<Secret>' \
+  'https://drive.example.com/api/v1/list?prefix=docs/'
+
+# S3：按提示输入 AccessKeyId、Secret，区域填写 us-east-1
+aws configure --profile tessera
+aws configure set profile.tessera.s3.addressing_style path
+aws configure set profile.tessera.s3.signature_version s3v4
+aws --profile tessera --endpoint-url https://s3.example.com s3 ls s3://user-2/
 ```
 
-命令会提示输入备份时的口令，原数据库保留为 `meta.db.before-restore-*`。加密归档的审计日志可用 `tgdrive audit-export <归档文件> --output audit.jsonl` 导出。
+HTTP API 提供列表、搜索、上传、下载、移动、复制、删除、公开分享、秒传与离线下载。网页会话接口使用 Cookie 与 CSRF；脚本应使用访问密钥接口 `/api/v1`。
 
-## 本地开发
+S3 网关支持 SigV4、预签名 URL、列表、Range 读取、上传、复制、批量删除、分段上传与分段复制；可接入 rclone、AWS CLI、boto3。**不支持**版本控制、ACL、生命周期、对象锁或 POST 表单上传，不能替代全部 AWS S3 功能。
 
-需要 Python 3.12+ 与 Node.js 20+。
+[HTTP API](https://tessera.yangshoulai.xyz/docs/api-basics) · [文件接口](https://tessera.yangshoulai.xyz/docs/api-files) · [S3 配置与兼容性](https://tessera.yangshoulai.xyz/docs/s3)
 
-服务器生成图片、视频与音频封面需要 PATH 中有 FFmpeg。网页上传优先使用本地文件；预览复用已加载数据。后台自动任务只使用上传、下载任务和实际预览的短期密文缓存，数据不足时等待，不自动从 Telegram 补下载；只有用户明确点击「生成／重新生成缩略图」才允许按预算回源。管理员在「安全与维护」查看匿名队列状态。
+<a id="工作原理"></a>
+<a id="安全模型与限制"></a>
 
-生成权、超时接管、缓存预算、私密空间和取消规则见 [缩略图处理流程](docs/thumbnail-pipeline.md)。
+## 工作原理与使用边界
+
+```mermaid
+flowchart LR
+    clients["浏览器 · HTTP API · S3 客户端"] --> app["Tessera 单进程服务"]
+    app --- db[("SQLite：文件索引、账号、加密后的数据密钥")]
+    app -- "加密分片" --> tg["Telegram 私有频道"]
+    app -- "未配置 Telegram 时" --> local["本地分片目录"]
+```
+
+- **服务端加密。** 加密口令经 Argon2id 派生主密钥，文件内容使用独立数据密钥；默认按 16 MiB 分片、64 KiB 帧做 AES-256-GCM 加密。主密钥只在运行中的进程内存里保存，更换口令时重新包装数据密钥。
+- **不是端到端加密。** 服务器处理文件明文；文件名、路径、大小等元数据保存在 SQLite 中。内容加密保护 Telegram 侧和存储介质上的文件数据，不防御运行中的服务器被控制。管理界面不提供跨账号浏览用户文件或查看助手对话正文的入口。
+- **SQLite 是还原文件所需的索引。** 对应的文件分片、数据库与加密口令缺一不可。秒传、复制与保存分享可复用同一份加密内容，副本仍按原始大小计入账号配额。
+- **只运行一个服务进程。** 会话、私密授权、限流及连接池依赖进程内状态，不要启用多个 worker 或让多个实例共享数据目录。
+- **预览有明确范围。** 文本、Markdown、代码最多展示前 16 MiB；Office 文件与压缩包不提供在线内容预览，带打开密码的 PDF 需下载后查看。音视频兼容性取决于浏览器与编码。
+- **缩略图按预算生成。** 上传与预览优先复用已有数据；配置 FFmpeg 后，后台还会为较早上传且缺图的媒体按每日预算补图，也可手动生成。PDF、Office 和 SVG 不生成媒体缩略图。
+- **本机缓存用于加速。** 缓存加密保存在当前浏览器，仍需登录和有效授权，私密内容还需解锁；它不是离线备份，也不占账号存储配额。
+- **外部服务各有边界。** Telegram 影响传输速度、限流与可用性；模型服务接收其需要的上下文并可能计费。请自行保管服务凭据，并了解相关服务的数据政策与使用规则。
+
+<a id="备份与恢复"></a>
+
+## 备份、升级与恢复
+
+在「系统管理 → 安全与维护 → 维护与备份」创建加密备份，保存为数据目录 `backups/` 下的 `*.tgdbak`。备份包含元数据库、索引、账号、配置和加密后的数据密钥，**不包含文件分片**。
+
+把备份复制到服务器以外的位置，并保留对应的加密口令。使用本地存储时，还要备份 `blobs/`；即使后来启用了 Telegram，原有本地分片也仍需保留。
+
+**升级：** 先备份，再在原 Compose 项目目录执行，复用现有数据卷。
+
+```bash
+docker compose pull
+docker compose up -d --no-build
+```
+
+数据库会在启动时自动迁移，重启后需再次解锁。切换镜像变体时也使用原数据卷。
+
+**恢复：** 先停止服务，在能访问备份和数据目录的环境中运行：
+
+```bash
+tgdrive restore /path/to/backup.tgdbak --data-dir /path/to/data
+```
+
+Docker Compose 部署可使用同一服务的数据卷执行恢复；将下面的文件名替换为实际备份文件：
+
+```bash
+docker compose stop tgdrive
+docker compose run --rm --no-deps tgdrive \
+  restore /data/backups/backup.tgdbak --data-dir /data
+docker compose up -d --no-build
+```
+
+命令提示输入备份时的口令，原数据库保留为 `meta.db.before-restore-*`。如果使用本地分片，还需确保与备份对应的 `blobs/` 可用。审计归档可用 `tgdrive audit-export <归档文件> --output audit.jsonl` 导出。
+
+<a id="配置"></a>
+<a id="本地开发"></a>
+
+## 配置与本地开发
+
+控制台中的配置优先于启动参数；启动参数与对应环境变量用于提供默认值。
+
+| 参数 | 环境变量 | 用途 |
+| --- | --- | --- |
+| `--data-dir` | `TGDRIVE_DATA_DIR` | 数据目录，默认 `./data`，容器内为 `/data` |
+| `--host` / `--port` | `TGDRIVE_HOST` / `TGDRIVE_PORT` | 监听地址与端口，容器内为 `0.0.0.0:8000` |
+| `--public-url` | `TGDRIVE_PUBLIC_URL` | 对外访问地址，用于分享链接与文档示例 |
+| `--s3-endpoint` | `TGDRIVE_S3_ENDPOINT` | S3 客户端使用的完整 Endpoint |
+| `--trusted-proxies` | `TGDRIVE_TRUSTED_PROXIES` | 信任转发协议和客户端地址的代理 IP 或网段，逗号分隔 |
+| `--insecure-cookies` | `TGDRIVE_INSECURE_COOKIES=1` | 允许 HTTP 下使用会话 Cookie，仅限开发 |
+| `--resource-mode` | `TGDRIVE_RESOURCE_MODE` | 资源模式：`auto`、`low`、`custom` |
+
+更多参数见 `tgdrive --help` 与 [docker-compose.yml](docker-compose.yml)。可信代理只填写实际代理地址，不在不受控的网络中使用 `*`。
+
+<details>
+<summary><b>从源码运行</b>（Python 3.12+、Node.js 20+）</summary>
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+.venv/bin/pip install -e '.[dev]'
 (cd web && npm ci)
-
-# 构建前端并启动服务（单进程同时提供 API 和网页）
 (cd web && node build-apps.mjs)
-.venv/bin/tgdrive --data-dir /tmp/tgdrive-dev --port 8000 --static-dir web/dist --insecure-cookies
-
-# 全部检查：ruff、单元测试、TypeScript 类型检查、前端构建
-make check PYTHON=.venv/bin/python
+.venv/bin/tgdrive --data-dir /tmp/tessera-dev --port 8000 \
+  --static-dir web/dist --insecure-cookies
 ```
 
-前端没有开发服务器：修改后重新运行 `node build-apps.mjs` 并刷新页面即可，无需重启后端。未配置 Bot 时文件保存在数据目录中的本地分片目录。
+前端没有单独的开发服务器；修改后重新运行 `web/build-apps.mjs` 并刷新页面。后端与网页由同一进程提供。服务器生成媒体缩略图与封装视频需安装 FFmpeg；平台下载另需可选依赖和 JavaScript 运行时。
 
-发布新版本：同步更新 `pyproject.toml`、`web/package.json` 与 `web/package-lock.json` 的版本号，在 `CHANGELOG.md` 写明变化，再推送 `v<版本号>` 标签并创建 GitHub Release（CI 会校验标签与 `pyproject.toml` 一致）。
-
-更多约定见 [`AGENTS.md`](AGENTS.md)（代码约定）、[`DESIGN.md`](DESIGN.md)（视觉规范）、[`UX-CONTRACT.md`](UX-CONTRACT.md)（交互与路由）和 [`docs/architecture-v2.md`](docs/architecture-v2.md)（架构设计）。
-
-<details>
-<summary><b>项目结构</b></summary>
-
-```text
-src/tgdrive/            Python 后端：ASGI、对象服务、加密、S3、Telegram、离线下载与文件助手
-web/src/                React 18 + TypeScript 前端：用户端、管理控制台、文档站
-web/build-apps.mjs      前端打包脚本（产物位于 web/dist，不纳入版本库）
-userscripts/            资源抓取脚本（Tampermonkey / Violentmonkey / iOS Userscripts）
-tests/                  Python unittest 与浏览器脚本 Node.js 回归测试
-docs/                   架构与助手设计、下载说明、README 截图
-Dockerfile              多阶段镜像（基础 / FFmpeg / 平台）
-docker-compose*.yml     部署与本地开发配置
-.github/workflows/      推送 v* 标签时构建并发布镜像
-```
+项目现有检查入口为 `make check PYTHON=.venv/bin/python`，包含静态检查、后端测试、前端类型检查与构建。
 
 </details>
 
+## 使用文档
+
+每个实例的 `/docs/` 内置用户指南与接口参考；管理员文档仅对管理员会话下发。公开文档可访问 [tessera.yangshoulai.xyz/docs](https://tessera.yangshoulai.xyz/docs/)，无需登录文档站。该部署实例不开放注册。
+
+- [快速上手](https://tessera.yangshoulai.xyz/docs/quickstart) · [文件与预览](https://tessera.yangshoulai.xyz/docs/files) · [账号与设置](https://tessera.yangshoulai.xyz/docs/account)
+- [文件助手](https://tessera.yangshoulai.xyz/docs/assistant) · [下载与资源抓取](https://tessera.yangshoulai.xyz/docs/downloads) · [分享](https://tessera.yangshoulai.xyz/docs/sharing)
+- [HTTP API](https://tessera.yangshoulai.xyz/docs/api-basics) · [S3](https://tessera.yangshoulai.xyz/docs/s3)
+- 开发资料：[架构](docs/architecture-v2.md) · [文件助手设计](docs/assistant-design.md) · [本机缓存设计](docs/client-cache-design.md) · [缩略图流程](docs/thumbnail-pipeline.md)
+- 项目约定：[AGENTS.md](AGENTS.md) · [DESIGN.md](DESIGN.md) · [UX-CONTRACT.md](UX-CONTRACT.md)
+
+遇到问题可提交 [Issue](https://github.com/yangshoulai/tgdrive/issues)，附上版本、部署方式、复现步骤与脱敏日志。请勿提交真实文件、密码、访问密钥或来源 Cookie。
+
 ## 许可证
 
-本项目采用 [MIT License](LICENSE)。允许使用、复制、修改、再分发和商用，须保留版权与许可声明。第三方依赖遵循各自的许可证。
+本项目采用 [MIT License](LICENSE)。允许使用、修改、再分发和商用，须保留版权与许可声明；第三方依赖遵循各自的许可证。
