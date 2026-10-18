@@ -3322,7 +3322,7 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .folder-stats-figures > div { display: grid; gap: 2px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); min-width: 0; }
 .folder-stats-figures span { color: var(--ink-3); font-size: var(--text-xs); }
 .folder-stats-figures strong { color: var(--ink); font-size: var(--text-xl); font-weight: 600; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
-.folder-stats-figures small { overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.folder-stats-figures small { color: var(--ink-3); font-size: var(--text-xs); overflow-wrap: anywhere; }
 /* 目录统计里的本机缓存：一行浅色说明，不参与上方的空间统计。 */
 .folder-stats-local { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-sunken); color: var(--ink-2); font-size: var(--text-sm); }
 .folder-stats-local > svg { flex: none; margin-top: 2px; color: var(--ink-3); }

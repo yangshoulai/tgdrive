@@ -16,14 +16,16 @@ type LocalCache = { total: number; bytes: number; manual: number; complete: numb
 
 export function FolderStatsDialog({ prefix, title, onClose, onOpenFolder}: { prefix: string; title: string; onClose: () => void; onOpenFolder?: (prefix: string) => void }) {
   const cacheQueue = useCacheQueue();
-  // 这台设备上缓存了这个文件夹里的哪些文件（只统计普通文件；私密文件的缓存不在这里展开）。
+  // 这台设备上缓存了这个文件夹里的哪些文件。私密文件夹读私密层，只在这台设备开启了私密缓存且已解锁时显示。
   const [local, setLocal] = useState<LocalCache | null>(null);
+  const secret = api.isPrivatePath(prefix);
+  const allowed = Boolean(cacheQueue?.available && (!secret || cacheQueue.privateReady));
   useEffect(() => {
-    if (!cacheQueue?.available || api.isPrivatePath(prefix)) { setLocal(null); return; }
+    if (!allowed) { setLocal(null); return; }
     let alive = true;
-    void cachedItems({ prefix, limit: 1 }).then(value => { if (alive) setLocal(value); }).catch(() => { if (alive) setLocal(null); });
+    void cachedItems({ prefix, private: secret, limit: 1 }).then(value => { if (alive) setLocal(value); }).catch(() => { if (alive) setLocal(null); });
     return () => { alive = false; };
-  }, [prefix, cacheQueue?.available]);
+  }, [prefix, secret, allowed]);
   const [stats, setStats] = useState<api.FolderStats | null>(null);
   const [error, setError] = useState("");
   const [measure, setMeasure] = useState<"bytes" | "count">("bytes");
@@ -45,7 +47,7 @@ export function FolderStatsDialog({ prefix, title, onClose, onOpenFolder}: { pre
           <div className="folder-stats-figures">
             <div><span>文件</span><strong>{stats.files.toLocaleString("zh-CN")}</strong><small>本层 {stats.direct_files.toLocaleString("zh-CN")}</small></div>
             <div><span>文件夹</span><strong>{stats.folders.toLocaleString("zh-CN")}</strong><small>本层 {stats.direct_folders.toLocaleString("zh-CN")}</small></div>
-            <div><span>占用空间</span><strong>{formatBytes(stats.bytes)}</strong><small>{stats.latest_modified ? `最近更新于 ${formatDate(stats.latest_modified)}` : "包含全部子文件夹"}</small></div>
+            <div><span>占用空间</span><strong>{formatBytes(stats.bytes)}</strong><small>{stats.latest_modified ? `更新于 ${formatDate(stats.latest_modified)}` : "包含全部子文件夹"}</small></div>
           </div>
           {local && stats.files > 0 && <section className="folder-stats-local" aria-label="本机缓存">
             <Icon name="monitor" size={16} />

@@ -862,7 +862,7 @@ async function stats(): Promise<Stats> {
 }
 
 type Item = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean };
-type ItemQuery = { prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
+type ItemQuery = { private?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
 let itemCache: { ns: string; at: number; items: Item[] } | null = null;
 
 /** 普通层已缓存文件的完整索引：解密一次后在内存里保留 15 秒，翻页、搜索与筛选都不再解密。缩略图不列出。 */
@@ -882,10 +882,26 @@ async function allItems(): Promise<Item[]> {
   return items;
 }
 
+/** 私密层已缓存的文件：只在私密空间已解锁、这台设备允许私密缓存时可读；每次重新解密，不在内存里保留路径。 */
+async function privateItems(): Promise<Item[]> {
+  const context = await normalContext();
+  const secret = context && await privateContext({ tier: "p", etag: "", version: "", path: "", access: "", bucketId: null, thumb: false });
+  if (!context || !secret) return [];
+  const items: Item[] = [];
+  for (const entry of await listEntries(context.ns, "p")) {
+    if (entry.kind === "thumb") continue;
+    const info = await openInfo(secret.info, entry);
+    if (info && info.kind !== "thumb") items.push({ key: entry.key, path: info.path, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed,
+      manual: Boolean(entry.manual ?? info.manual), complete: fileCacheState(entry, info.size).complete });
+  }
+  context.signal.throwIfAborted();
+  return items;
+}
+
 async function matchItems(options: ItemQuery) {
   const query = (options.query ?? "").trim().toLowerCase();
-  // prefix：目录统计只看某个文件夹（含子文件夹）里的缓存。
-  return (await allItems()).filter(item => (!options.prefix || item.path.startsWith(options.prefix)) && (!query || item.path.toLowerCase().includes(query))
+  // prefix：目录统计只看某个文件夹（含子文件夹）里的缓存；private：私密空间的目录统计读私密层。
+  return (await (options.private ? privateItems() : allItems())).filter(item => (!options.prefix || item.path.startsWith(options.prefix)) && (!query || item.path.toLowerCase().includes(query))
     && (!options.kind || (options.kind === "other" ? !["image", "video", "audio"].includes(item.kind) : item.kind === options.kind))
     && (!options.status || (options.status === "complete") === item.complete));
 }
@@ -901,7 +917,7 @@ async function listItems(options: ItemQuery) {
 
 /** 按同样的条件移除（「移除筛选出的文件」）；只作用于当前账号的普通层。 */
 async function removeItems(options: ItemQuery) {
-  const keys = new Set((await matchItems(options)).map(item => item.key));
+  const keys = new Set((await matchItems({ ...options, private: false })).map(item => item.key));
   if (manual?.opened && keys.has(manual.opened.entry.key)) stopManual();
   await deleteEntries([...keys]);
   itemCache = null; manualCache = null;

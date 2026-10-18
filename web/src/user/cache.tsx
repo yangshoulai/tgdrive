@@ -12,6 +12,8 @@ const COMPLETED_VISIBLE_MS = 8000;
 type Queue = {
   /** 浏览器支持且用户与管理员都没有关闭本机缓存；否则不显示缓存按钮与菜单项。 */
   available: boolean;
+  /** 私密文件可以缓存（管理员允许、设备已信任且私密空间已解锁）。 */
+  privateReady: boolean;
   /** states：预览等单独关注的文件的实时状态；cached：这台设备上全部已缓存文件的索引（区分自动与手动），文件列表只看这一份。 */
   jobs: CacheJob[]; states: Map<string, FileCacheState>; cached: Map<string, CachedFileState>; expanded: boolean; setExpanded: (value: boolean) => void;
   watch: (owner: string, files: CacheFile[]) => () => void;
@@ -219,9 +221,9 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
     });
   }, []);
   const visibleJobs = useMemo(() => enabled ? jobs.filter(job => !api.isPrivatePath(job.file.key) || privateReady) : [], [enabled, jobs, privateReady]);
-  const value: Queue = useMemo(() => ({ available, jobs: visibleJobs, states, cached, expanded, setExpanded, watch, canCache, enqueue, enqueueMany, cancel, retry,
+  const value: Queue = useMemo(() => ({ available, privateReady, jobs: visibleJobs, states, cached, expanded, setExpanded, watch, canCache, enqueue, enqueueMany, cancel, retry,
     clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: files => setRemoving(Array.isArray(files) ? files : [files]), forget, report }),
-  [available, visibleJobs, states, cached, expanded, watch, canCache, enqueue, enqueueMany, cancel, retry, update, forget, report]);
+  [available, privateReady, visibleJobs, states, cached, expanded, watch, canCache, enqueue, enqueueMany, cancel, retry, update, forget, report]);
   const detailState = details && (states.get(cacheFileId(details)) ?? cached.get(cacheFileId(details)));
   const detailManual = Boolean(details && cached.get(cacheFileId(details))?.manual);
   const showDetails = enabled && details && (!api.isPrivatePath(details.key) || privateReady);
