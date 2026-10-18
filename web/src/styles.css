@@ -1481,6 +1481,10 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .preview-text-capsule > span + span { padding-left: 10px; border-left: 1px solid rgba(255, 255, 255, .14); }
 .preview-text-capsule a { color: #fff; text-decoration: underline; text-underline-offset: 2px; }
 /* PDF 阅读：pdf.js 把页面画在 canvas 上，白色纸张纵向排列在深色画布里；工具放在浮动头部，样式与文本工具相同。 */
+/* PDF 的白色页面会滚到浮动头部下面，渐变头部在白底上发白：改为深色磨砂实底（仍浮动、静止后隐藏），页面从头部下方开始。 */
+.preview-modal-pdf.is-immersive:not(.is-minimized) .modal-header { padding-bottom: 12px; border-bottom: 1px solid rgba(255, 255, 255, .07); background: rgba(14, 16, 25, .86);
+  backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); box-shadow: 0 10px 28px -14px rgba(0, 0, 0, .7); }
+@media (max-width: 640px) { .preview-modal-pdf.is-immersive:not(.is-minimized) .modal-header { padding-bottom: 10px; } }
 .preview-stage.is-reading .preview-pdf { position: absolute; inset: 0; display: flex; flex-direction: column; }
 .preview-pdf-scroller { position: relative; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none; }
 .preview-pdf.is-immersive .preview-pdf-scroller { padding-top: var(--preview-header-height, 0px); }
