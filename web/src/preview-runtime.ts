@@ -2,13 +2,15 @@
 type TextEngine = typeof import("./preview-text-engine");
 type MediaEngine = typeof import("./preview-media-engine");
 type ComposerEngine = typeof import("./composer-engine");
+type PdfEngine = typeof import("./preview-pdf-engine");
 type Asset = { js: string; css?: string };
 declare global {
   interface Window {
-    tesseraPreviewAssets: { text: Asset; media: Asset; composer: Asset };
+    tesseraPreviewAssets: { text: Asset; media: Asset; composer: Asset; pdf: Asset & { worker: string; base: string } };
     TesseraTextPreview?: TextEngine;
     TesseraMediaPreview?: MediaEngine;
     TesseraComposer?: ComposerEngine;
+    TesseraPdfPreview?: PdfEngine;
   }
 }
 
@@ -49,4 +51,11 @@ export async function loadComposerEngine(): Promise<ComposerEngine> {
   await load(window.tesseraPreviewAssets.composer);
   if (!window.TesseraComposer) throw new Error("输入框组件未能启动");
   return window.TesseraComposer;
+}
+/** PDF 预览（pdf.js）：打开 PDF 时才加载，Worker 与字体资源随后按需请求。 */
+export async function loadPdfEngine(): Promise<{ engine: PdfEngine; assets: { worker: string; base: string } }> {
+  const asset = window.tesseraPreviewAssets.pdf;
+  await load(asset);
+  if (!window.TesseraPdfPreview) throw new Error("PDF 预览组件未能启动");
+  return { engine: window.TesseraPdfPreview, assets: { worker: asset.worker, base: asset.base } };
 }

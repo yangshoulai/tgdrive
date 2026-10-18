@@ -1414,12 +1414,6 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 /* 图片：画布从头部下方开始，适应窗口时整张图不被头部遮住；背景模糊层仍铺满整个窗口。 */
 .preview-modal.is-immersive:not(.is-minimized) .image-canvas { margin-top: max(0px, calc(var(--preview-header-height, 56px) - 20px)); }
 .preview-modal.is-immersive:not(.is-minimized) .audio-body { padding-top: calc(var(--preview-header-height, 56px) + 4px); }
-/* PDF：浏览器自带的 PDF 工具栏在画面顶部，头部不浮动，改为与画布同色的实心栏，阅读器铺满窗口。 */
-.preview-modal-pdf.is-dark-surface:not(.is-minimized) .modal-header { border-bottom: 1px solid rgba(255, 255, 255, .07); background: #181b29; }
-.preview-modal-pdf.is-dark-surface:not(.is-minimized) .modal-header .file-tile { filter: saturate(.85) brightness(.95); }
-.preview-modal-pdf:not(.is-minimized) .preview-resource, .preview-modal-pdf:not(.is-minimized) .preview-frame { background: var(--media-canvas); }
-.preview-modal-pdf:not(.is-minimized) .preview-frame { display: block; }
-.preview-modal-pdf:not(.is-minimized) .preview-loading { color: rgba(255, 255, 255, .7); }
 /* 「加载较慢 · 重试」放在浮动头部下方，不与全屏、窗口选项、关闭按钮重叠。 */
 .preview-modal.is-immersive:not(.is-minimized) .preview-player-slow { top: calc(var(--preview-header-height, 56px) + 6px); right: 16px; }
 .preview-modal.is-chrome-idle:not(.is-minimized) .modal-header { opacity: 0; transform: translateY(-8px); }
@@ -1486,8 +1480,52 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .preview-text-capsule > span { overflow: hidden; text-overflow: ellipsis; }
 .preview-text-capsule > span + span { padding-left: 10px; border-left: 1px solid rgba(255, 255, 255, .14); }
 .preview-text-capsule a { color: #fff; text-decoration: underline; text-underline-offset: 2px; }
+/* PDF 阅读：pdf.js 把页面画在 canvas 上，白色纸张纵向排列在深色画布里；工具放在浮动头部，样式与文本工具相同。 */
+.preview-stage.is-reading .preview-pdf { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.preview-pdf-scroller { position: relative; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none; }
+.preview-pdf.is-immersive .preview-pdf-scroller { padding-top: var(--preview-header-height, 0px); }
+.preview-pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 16px; width: max-content; min-width: 100%; padding-inline: 24px; }
+.preview-pdf-page-sheet { position: relative; flex: none; overflow: hidden; border-radius: var(--radius-xs); background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 12px 32px -12px rgba(0, 0, 0, .55); }
+.preview-pdf-page-sheet canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.preview-pdf-page-sheet.is-idle::after, .preview-pdf-page-sheet.is-drawing::after { content: ""; position: absolute; top: 50%; left: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border: 2px solid rgba(16, 19, 31, .12); border-top-color: rgba(16, 19, 31, .45); border-radius: 50%; animation: spin .8s linear infinite; }
+.preview-pdf-page-error { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 6px; color: #6b6f80; font-size: var(--text-sm); }
+/* 文字层：透明文字叠在画面上，只用于选择、复制与浏览器查找。规则取自 pdf.js 的 pdf_viewer.css（.textLayer），
+ * pdf.js 给每个文字片段写入 --font-height、--scale-x 等变量，字号与位置都靠这里的 calc 换算。 */
+.preview-pdf-text { --user-unit: 1; --total-scale-factor: calc(var(--scale-factor) * var(--user-unit)); --scale-round-x: 1px; --scale-round-y: 1px;
+  --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size));
+  position: absolute; inset: 0; z-index: 1; overflow: clip; color-scheme: only light; line-height: 1; letter-spacing: normal; word-spacing: normal; text-align: initial; text-size-adjust: none; -webkit-text-size-adjust: none;
+  forced-color-adjust: none; transform-origin: 0 0; caret-color: CanvasText; }
+.preview-pdf-text :is(span, br) { position: absolute; color: transparent; white-space: pre; cursor: text; transform-origin: 0% 0%; user-select: text; -webkit-user-select: text; }
+.preview-pdf-text > :not(.markedContent), .preview-pdf-text .markedContent span:not(.markedContent) { --font-height: 0; --scale-x: 1; --rotate: 0deg; z-index: 1;
+  font-size: calc(var(--text-scale-factor) * var(--font-height)); transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
+.preview-pdf-text .markedContent { display: contents; }
+.preview-pdf-text span[role="img"] { cursor: default; user-select: none; -webkit-user-select: none; }
+.preview-pdf-text ::selection { background: rgba(64, 108, 255, .3); color: transparent; }
+.preview-pdf-text br::selection { background: transparent; }
+.preview-pdf-text .endOfContent { position: absolute; inset: 100% 0 0; z-index: 0; display: block; cursor: default; user-select: none; -webkit-user-select: none; }
+.preview-pdf-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 10px; color: rgba(255, 255, 255, .7); font-size: var(--text-sm); }
+.preview-pdf-spinner { width: 16px; height: 16px; border: 2px solid rgba(255, 255, 255, .2); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
+.preview-pdf-tools { display: flex; align-items: center; gap: 2px; margin-right: auto; color: rgba(255, 255, 255, .78); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.preview-pdf-tools .icon-btn { color: rgba(255, 255, 255, .78); }
+.preview-pdf-tools .icon-btn:hover:not(:disabled), .preview-pdf-tools .icon-btn.is-active { background: rgba(255, 255, 255, .14); color: #fff; }
+.preview-pdf-tools .icon-btn:disabled { opacity: .35; }
+.preview-pdf-page { display: flex; align-items: center; gap: 4px; margin: 0 2px; white-space: nowrap; }
+.preview-pdf-page input { box-sizing: content-box; height: 22px; padding: 0 6px; border: 1px solid rgba(255, 255, 255, .14); border-radius: var(--radius-sm); background: rgba(255, 255, 255, .08); color: #fff; font: inherit; text-align: center; }
+.preview-pdf-page input:focus { border-color: rgba(255, 255, 255, .4); outline: none; background: rgba(255, 255, 255, .14); }
+.preview-pdf-page span { color: rgba(255, 255, 255, .6); }
+.preview-pdf-divider { width: 1px; height: 16px; margin: 0 6px; background: rgba(255, 255, 255, .14); }
+.preview-pdf-zoom { min-width: 64px; height: 28px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.preview-pdf-zoom:hover { background: rgba(255, 255, 255, .14); color: #fff; }
+.preview-pdf-bar { display: flex; justify-content: center; padding: 6px; border-bottom: 1px solid rgba(255, 255, 255, .08); background: var(--media-canvas); }
+.preview-pdf:not(.is-immersive) { position: relative; display: flex; flex-direction: column; height: min(78vh, 900px); background: var(--media-canvas); }
+.preview-pdf:not(.is-immersive) .preview-outline-panel { top: 50px; }
+/* 窄窗口：头部放不下全部工具，只留目录与页码（滚动翻页、页面适合宽度）。 */
+@container preview-window (max-width: 580px) {
+  .preview-pdf-tools > :is(.preview-pdf-divider, .preview-pdf-zoom, .preview-pdf-step) { display: none; }
+}
+@media (max-width: 640px) { .preview-pdf-pages { padding-inline: 8px; gap: 10px; } }
 /* 目录抽屉：沿用播放列表的磨砂玻璃抽屉。 */
-.preview-stage.is-reading .preview-outline-panel { position: absolute; top: calc(var(--preview-header-height, 0px) + 6px); right: 12px; bottom: 12px; z-index: 3; display: flex; flex-direction: column;
+.preview-stage.is-reading .preview-outline-panel, .preview-pdf .preview-outline-panel { position: absolute; top: calc(var(--preview-header-height, 0px) + 6px); right: 12px; bottom: 12px; z-index: 3; display: flex; flex-direction: column;
   width: min(300px, calc(100% - 24px)); min-height: 0; overflow: hidden; border: 1px solid rgba(255, 255, 255, .1); border-radius: var(--radius-lg); background: rgba(16, 17, 26, .8); color: #fff;
   box-shadow: 0 24px 60px -12px rgba(0, 0, 0, .6), inset 0 1px 0 rgba(255, 255, 255, .06); backdrop-filter: blur(28px) saturate(1.5); -webkit-backdrop-filter: blur(28px) saturate(1.5); animation: drawer-in var(--duration-slow) var(--ease-out); }
 .preview-outline-item { display: block; width: 100%; min-height: 34px; padding: 6px 12px; border: 0; border-radius: var(--radius-sm); background: transparent; color: rgba(255, 255, 255, .86); font: inherit; font-size: var(--text-sm); line-height: 1.45; text-align: left; cursor: pointer; }

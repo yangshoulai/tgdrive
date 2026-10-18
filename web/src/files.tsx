@@ -7,6 +7,7 @@ import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip }
 import { ImageViewer } from "./preview-image";
 import { FileCacheButton, useCacheFiles } from "./user/cache";
 import { PreviewToolsContext, TextPreview } from "./preview-text";
+import { PdfPreview } from "./preview-pdf";
 import { Notice, ButtonLink, Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, type IconName } from "./ui";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "text" | "code" | "archive" | "other";
@@ -233,9 +234,8 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
   const [content, setContent] = useState<PreviewText | null>(null);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
-  const [mediaReady, setMediaReady] = useState(false);
   // 图片复用组件，切换到下一张时清除上一张的失败状态。
-  useEffect(() => { if (kind === "image") setMediaFailed(false); }, [url, kind]);
+  useEffect(() => { if (kind === "image") setMediaFailed(false); if (kind === "pdf") setError(""); }, [url, kind]);
   useEffect(() => {
     if (kind !== "text" && kind !== "code") return;
     setContent(null); setError("");
@@ -272,10 +272,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
   if (mediaFailed) return fallback;
   // 原图从存储取回并解密需要时间：查看器先显示封面图占位，原图加载完成后淡入替换。
   if (kind === "image") return <ImageViewer url={url} name={name} poster={poster} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
-  if (kind === "pdf") return <div className={`preview-resource${mediaReady ? " is-ready" : ""}`} aria-busy={!mediaReady}>
-    {!mediaReady && <div className="preview-media-loader"><PreviewLoading onRetry={onRetry} /></div>}
-    {kind === "pdf" && <iframe className="preview-frame" src={url} title={name} onLoad={() => setMediaReady(true)} onError={() => setMediaFailed(true)} />}
-  </div>;
+  if (kind === "pdf") return error ? fallback : <PdfPreview url={url} name={name} onError={setError} />;
   if (kind === "text" || kind === "code") {
     if (error) return fallback;
     if (content === null) return <PreviewLoading onRetry={onRetry} />;
@@ -291,7 +288,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   const media = (kind === "audio" || kind === "video") && isPlayable(file.key, file.content_type);
   const browsable = media || kind === "image";
   // 文本与代码也用沉浸式窗口（深色画布 + 浮动头部），但没有播放列表与左右切换。
-  const reading = kind === "text" || kind === "code";
+  const reading = kind === "text" || kind === "code" || kind === "pdf";
   const immersive = browsable || reading;
   const [textTools, setTextTools] = useState<HTMLElement | null>(null);
   const playlist = usePreviewPlaylist(file, kind, playlistFiles,
@@ -463,7 +460,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>
         <IconButton icon="next" label="下一张" size="sm" onClick={nav.onNext} />
-      </div> : undefined} className={`preview-modal preview-modal-${kind}${immersive ? " is-immersive" : ""}${immersive || kind === "pdf" ? " is-dark-surface" : ""}${reading ? " is-reading" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} style={kind === "video" ? { "--preview-video-ratio": videoRatio } as CSSProperties : undefined} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
+      </div> : undefined} className={`preview-modal preview-modal-${kind}${immersive ? " is-immersive" : ""}${immersive ? " is-dark-surface" : ""}${reading ? " is-reading" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} style={kind === "video" ? { "--preview-video-ratio": videoRatio } as CSSProperties : undefined} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={onClose}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>

@@ -51,7 +51,7 @@
 | Dialog | `Modal`、`ConfirmDialog` | sm / md / lg / xl | focus trap + Esc |
 | Row actions | `Menu` | file / folder / user / object | keyboard + browser |
 | CRUD | 页面内调用 `web/src/api.ts` | list / create / status / public | API tests |
-| Preview | `FilePreview`、`PreviewModal` | image / video / audio / pdf / text / fallback | CodeMirror、markdown-it、ArtPlayer；音乐为原生 Audio 自绘界面，图片为 `preview-image.tsx` 查看器，PDF 用浏览器内置阅读器，放在深色画布与实心深色头部中 |
+| Preview | `FilePreview`、`PreviewModal` | image / video / audio / pdf / text / fallback | CodeMirror、markdown-it、ArtPlayer；音乐为原生 Audio 自绘界面，图片为 `preview-image.tsx` 查看器，PDF 为 `preview-pdf.tsx` 自绘阅读器（pdf.js），与文本同为沉浸式阅读：工具（目录、翻页、页码、缩放）放进浮动头部，窄窗口只留目录与页码 |
 | Sharing | `ShareDialog`、`SharePage` | on / off | `tests/test_m8.py` |
 
 ## 共享行为

@@ -9,7 +9,7 @@ const previewAssets={};
 // 只给按需加载的引擎（文本与媒体预览、助手输入框）使用标准打包器，保留主应用和受保护管理员文档的原有边界。
 if(!process.argv[2] || process.argv[2]==='user') {
  const dist=path.join(root,'dist');fs.mkdirSync(dist,{recursive:true});
- for(const [kind,globalName,base] of [['text','TesseraTextPreview','preview-text'],['media','TesseraMediaPreview','preview-media'],['composer','TesseraComposer','composer']]) {
+ for(const [kind,globalName,base] of [['text','TesseraTextPreview','preview-text'],['media','TesseraMediaPreview','preview-media'],['composer','TesseraComposer','composer'],['pdf','TesseraPdfPreview','preview-pdf']]) {
   const result=await build({entryPoints:[path.join(root,`src/${base}-engine.ts`)],bundle:true,write:false,
    outfile:path.join(dist,`${base}.js`),format:'iife',globalName,minify:true,target:'es2022',legalComments:'inline'});
   const hash=crypto.createHash('sha256');for(const file of result.outputFiles) hash.update(file.contents);
@@ -20,6 +20,14 @@ if(!process.argv[2] || process.argv[2]==='user') {
    fs.writeFileSync(path.join(dist,name),file.contents);assets[extension]=`/${name}`;
   }
   previewAssets[kind]=assets;
+ }
+ // PDF：pdf.js 的 Worker 与字符映射、标准字体、解码器按版本放在 dist/pdfjs/<版本>/，引擎按需加载时才请求。
+ {
+  const source=path.join(root,'node_modules/pdfjs-dist');const version=JSON.parse(fs.readFileSync(path.join(source,'package.json'),'utf8')).version;
+  const target=path.join(dist,'pdfjs',version);
+  for(const folder of ['cmaps','standard_fonts','wasm','iccs']) if(fs.existsSync(path.join(source,folder))) fs.cpSync(path.join(source,folder),path.join(target,folder),{recursive:true});
+  fs.copyFileSync(path.join(source,'build/pdf.worker.min.mjs'),path.join(target,'pdf.worker.js'));
+  previewAssets.pdf={...previewAssets.pdf,worker:`/pdfjs/${version}/pdf.worker.js`,base:`/pdfjs/${version}/`};
  }
  // 浏览器本地缓存的 Service Worker（docs/client-cache-design.md）：地址固定为 /sw.js（作用域 /），服务端按 no-cache 返回。
  const worker=await build({entryPoints:[path.join(root,'src/sw/cache-worker.ts')],bundle:true,write:false,outfile:path.join(dist,'sw.js'),format:'iife',minify:true,target:'es2022'});
@@ -35,7 +43,7 @@ if(!process.argv[2] || process.argv[2]==='user') {
   }
   for(const dependency of Object.keys(manifest.dependencies||{})) collectLicense(dependency);
  }
- for(const name of ['artplayer','codemirror','@codemirror/legacy-modes','markdown-it','dompurify']) collectLicense(name);
+ for(const name of ['artplayer','codemirror','@codemirror/legacy-modes','markdown-it','dompurify','pdfjs-dist']) collectLicense(name);
  fs.writeFileSync(path.join(dist,'preview-licenses.txt'),licenses.join('\n\n'));
 }
 const configs={
