@@ -35,7 +35,7 @@ cd web && node build-apps.mjs                                  # 构建到 web/d
 .venv-net/bin/tgdrive --data-dir .local-data --port 8000 --static-dir web/dist --insecure-cookies   # 单进程单端口，同一个应用
 ```
 
-验证 UI 时请使用独立数据目录（如 `/tmp/tgdrive-verify-data`）和其他端口，不要动用户的 `.local-data`（会触发 schema 迁移）。`.claude/launch.json` 的 `verify` 配置在 8100 端口同时提供用户端和控制台。
+验证 UI 时请使用独立数据目录（如 `/tmp/tgdrive-verify-data`）和其他端口，不要动用户的 `.local-data`（会触发 schema 迁移）。`.claude/launch.json` 的 `verify` 配置在 8100 端口同时提供用户端和控制台。验证截图、浏览器日志等放在 `output/`（已被 `.gitignore` 忽略，不入库）；README 等文档要长期引用的截图放在 `docs/screenshots/`。
 
 ## 约定
 

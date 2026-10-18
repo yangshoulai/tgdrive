@@ -64,7 +64,7 @@ Node 默认堆上限仍为 128 MiB；只在明确的堆内存不足时提高到 
 - arm64 本地平台镜像未压缩大小 742632010 字节，约 708 MiB，包含 FFmpeg、Node 和解析器。其他架构或版本可能不同。
 - Chrome 已验证 Cookie 文件导入、YouTube 清晰度互斥选择、任务提交与真实进度、完成保存；390×844 候选弹窗无横向溢出，解析结果不显示 Cookie 明文。管理员大小上限保存、刷新后保留，360×640 资源页无横向溢出。手机真机及 Safari 未验证。
 - 实际 `.local-data` 环境已重新构建并在 8000 重启，健康检查与首页 200 通过；v14 元数据库备份已创建，原账号和文件保留。重启后需用原管理员账号登录并解锁；已有管理员资源配置继续优先。
-- 新截图保存在 `output/playwright/offline/platform-*.png`；详细日志和样本在 `/private/tmp/tessera-platform-proof`、`/private/tmp/tessera-platform-*.log`，验证数据在 `.local-data` 的独立 `platform-*` 子目录。
+- 新截图保存在 `output/playwright/offline/platform-*.png`（本地验证产物，未纳入版本库）；详细日志和样本在 `/private/tmp/tessera-platform-proof`、`/private/tmp/tessera-platform-*.log`，验证数据在 `.local-data` 的独立 `platform-*` 子目录。
 
 ## 本次文件清单
 

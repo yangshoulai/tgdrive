@@ -43,7 +43,7 @@ HTTP 只有在强 ETag、来源、总长度和实际 Range 响应一致时追加
 - 两种 Docker 镜像构建、Compose 配置验证通过。arm64 本地未压缩大小：默认约 165 MiB，FFmpeg 约 557 MiB；其他架构或版本可能不同。
 - 1 核、750 MiB、禁用交换空间、uid 10001、只读根文件系统的临时容器：自动识别 low／并发 1，19 项下载回归通过，真实 M3U8 封装与 MP4 完整解码通过。两次验证峰值分别约 325／334 MiB（340570112／350298112 字节），包含测试内存盘；这是受控样本，不能作为所有大文件、长视频或并行网页操作的峰值保证。
 - Chrome 实际粘贴 curl／Cookie → 解析 → 勾选 → 提交，显示真实进度和速度；资源配置保存并刷新保留。390×844 手机任务页、360×640 资源页没有横向溢出。生成的 MP4 时长约 6.037 秒，播放与跳转到第 4 秒成功。Safari 真机未验证。
-- 验证截图：`output/playwright/offline/downloads-desktop.png`、`downloads-mobile.png`、`resources-desktop.png`。临时工具与详细日志位于 `/private/tmp/tessera-offline-verify/`，测试容器运行后自动移除，验证镜像未推送。
+- 验证截图：`output/playwright/offline/downloads-desktop.png`、`downloads-mobile.png`、`resources-desktop.png`（本地验证产物，未纳入版本库）。临时工具与详细日志位于 `/private/tmp/tessera-offline-verify/`，测试容器运行后自动移除，验证镜像未推送。
 
 ## 文件清单
 

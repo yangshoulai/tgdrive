@@ -1,8 +1,0 @@
-- generic [active] [ref=f8e1]:
-  - text: ▦Tessera
-  - heading "验证邮箱，开启你的文件空间" [level=1] [ref=f8e2]
-  - paragraph [ref=f8e3]: 你正在注册 Tessera。请在注册页面输入下方验证码，完成邮箱验证。
-  - generic [ref=f8e4]: "883219"
-  - paragraph [ref=f8e5]: 验证码 10 分钟内有效，仅可使用一次。请勿向任何人透露，包括管理员。
-  - paragraph [ref=f8e6]: 如果不是你本人操作，请忽略此邮件。无需回复。
-  - text: 千片成璧，唯你可合。你的文件空间，由你掌握。
