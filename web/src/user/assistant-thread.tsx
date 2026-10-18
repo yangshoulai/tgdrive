@@ -525,8 +525,8 @@ function CacheBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
   const present = usable.filter(file => (queue?.cached.get(cacheFileId(file))?.bytes ?? 0) > 0 || queue?.jobs.some(job => cacheFileId(job.file) === cacheFileId(file)));
   const targets = caching ? usable : present;
   const blocked = !cacheSupported() ? "这个浏览器不能使用本机缓存（需要 https:// 访问与较新的浏览器，无痕模式不可用）"
-    : !queue?.available ? "这台设备的本机缓存已关闭，可在「用户设置 → 本机缓存」开启"
-    : !usable.length && event.private ? "私密文件需要先在「用户设置 → 本机缓存」信任这台设备，并保持私密空间解锁"
+    : !queue?.available ? "这台设备的本机缓存已关闭，可在「设置 → 本机缓存」开启"
+    : !usable.length && event.private ? "私密文件需要先在「设置 → 本机缓存」信任这台设备，并保持私密空间解锁"
     : !caching && !present.length && phase !== "done" ? "这些文件在这台设备上没有缓存" : "";
   const total = event.items.length;
   async function run() {
@@ -545,7 +545,7 @@ function CacheBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
       subtitle={`${formatBytes(event.size)} · 只影响这台设备`} />
     <ul className="ai-list">{event.items.slice(0, 5).map(item => <li key={item.path}><Icon name="file" size={13} /><span className="cell-truncate">{display(item.path)}</span></li>)}
       {total > 5 && <li className="ai-list-more">等 {total} 个文件</li>}</ul>
-    {caching && limit !== null && event.size > limit && phase === "idle" && <p className="ai-card-note"><Icon name="alert" size={13} />超过这台设备的缓存上限（{formatBytes(limit)}），较早打开的缓存会被移除。可在「用户设置 → 本机缓存」调大上限。</p>}
+    {caching && limit !== null && event.size > limit && phase === "idle" && <p className="ai-card-note"><Icon name="alert" size={13} />超过这台设备的缓存上限（{formatBytes(limit)}），较早打开的缓存会被移除。可在「设置 → 本机缓存」调大上限。</p>}
     {error && <p className="ai-card-note tone-danger" role="alert">{error}</p>}
     <footer className="ai-card-foot"><span>{note}</span>
       {phase === "done" ? <Icon name="check" size={16} />

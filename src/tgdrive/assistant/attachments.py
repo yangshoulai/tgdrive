@@ -180,7 +180,7 @@ class AttachmentStore:
         self._delete([row])
 
     def discard_pending(self, user_id: int) -> dict[str, int]:
-        """清除自己全部未发送的附件（用户设置「助手附件」）。"""
+        """清除自己全部未发送的附件（设置「助手附件」）。"""
         rows = self.metadata.db.execute("SELECT * FROM assistant_attachments WHERE user_id=? AND conversation_id IS NULL",
                                         (user_id,)).fetchall()
         size = sum(int(row["size"]) for row in rows)

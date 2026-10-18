@@ -321,7 +321,7 @@ class Passkeys:
         _, rp_id = self._require_site(origin)
         rows = self._rows(account.id, rp_id)
         if not rows:
-            raise ValueError("本站还没有绑定通行密钥，请使用登录密码解锁，并在用户设置中添加凭据")
+            raise ValueError("本站还没有绑定通行密钥，请使用登录密码解锁，并在设置中添加凭据")
         request_id, item = self._new("private", token, self._user_row(account.id), origin)
         options = generate_authentication_options(
             rp_id=rp_id, challenge=item.value, timeout=self.CHALLENGE_SECONDS * 1000,
@@ -353,7 +353,7 @@ class Passkeys:
             args.append(item.user_id)
         stored = self.metadata.db.execute(sql, args).fetchone()
         if stored is None:
-            raise ValueError("凭据不可用，请使用登录密码，并在用户设置中检查通行密钥")
+            raise ValueError("凭据不可用，请使用登录密码，并在设置中检查通行密钥")
         user_row = self._user_row(stored["user_id"])
         if user_row is None or user_row["status"] != "active":
             raise AuthenticationError("invalid credentials")

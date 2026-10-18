@@ -12,6 +12,9 @@ export type NavWorkspace = { label: string; icon: IconName };
 export type NavLink = { label: string; icon: IconName; href: string };
 
 const COLLAPSED_GROUPS = "tessera:nav-collapsed";
+/** 桌面侧栏收起为图标栏，记在这台设备上；手机抽屉不受影响。 */
+const SIDEBAR_RAIL = "tessera:sidebar-rail";
+const readRail = () => { try { return localStorage.getItem(SIDEBAR_RAIL) === "1"; } catch { return false; } };
 function readCollapsed(): string[] {
   try { const value = JSON.parse(localStorage.getItem(COLLAPSED_GROUPS) ?? "[]"); return Array.isArray(value) ? value.filter(item => typeof item === "string") : []; }
   catch { return []; }
@@ -34,6 +37,11 @@ export function AppShell<K extends string>({ groups, workspaces = [], active, on
 }) {
   const [drawer, setDrawer] = useState(false);
   const [collapsed, setCollapsed] = useState(readCollapsed);
+  const [rail, setRail] = useState(readRail);
+  const toggleRail = () => setRail(value => {
+    try { localStorage.setItem(SIDEBAR_RAIL, value ? "0" : "1"); } catch { /* 隐私模式下不保存 */ }
+    return !value;
+  });
   const groupOf = (key: K) => groups.find(group => group.items.some(item => item.key === key));
   const currentWorkspace = workspaces.find(workspace => workspace.label === groupOf(active)?.workspace) ?? workspaces[0];
   const saveCollapsed = (next: string[]) => {
@@ -54,12 +62,12 @@ export function AppShell<K extends string>({ groups, workspaces = [], active, on
   }, [drawer]);
   const visible = groups.filter(group => !group.workspace || !currentWorkspace || group.workspace === currentWorkspace.label);
   return (
-    <div className={`shell${drawer ? " drawer-open" : ""}`}>
+    <div className={`shell${drawer ? " drawer-open" : ""}${rail ? " is-rail" : ""}`}>
       <a className="skip-link" href="#main">跳到主要内容</a>
       <header className="mobile-bar">
         <button type="button" className="icon-btn icon-btn-ghost" aria-label="打开导航" aria-expanded={drawer} onClick={() => setDrawer(true)}><Icon name="menu" /></button>
         <Brand />
-        {/* 窄屏顶栏的头像直接打开账号菜单（用户设置、访问密钥、外观、退出），不必先展开侧栏。 */}
+        {/* 窄屏顶栏的头像直接打开账号菜单（设置、访问密钥、外观、退出），不必先展开侧栏。 */}
         <Menu label="账号操作" items={account.menu} size="md" className="mobile-account"><Avatar name={account.name} tone={account.tone} src={account.avatar} /></Menu>
       </header>
       <div className="drawer-scrim" onClick={() => setDrawer(false)} aria-hidden="true" />
@@ -67,6 +75,7 @@ export function AppShell<K extends string>({ groups, workspaces = [], active, on
       <aside className="sidebar" aria-label="主导航" onClick={event => { if ((event.target as Element).closest("a[href], [data-closes-nav]")) setDrawer(false); }}>
         <div className="sidebar-top">
           <Brand tagline />
+          <button type="button" className="icon-btn icon-btn-ghost icon-btn-sm sidebar-rail-toggle" aria-label={rail ? "展开侧栏" : "收起侧栏"} title={rail ? "展开侧栏" : "收起侧栏"} aria-pressed={rail} onClick={toggleRail}><Icon name="sidebar" size={16} /></button>
           <button type="button" className="icon-btn icon-btn-ghost icon-btn-sm sidebar-close" aria-label="关闭导航" onClick={() => setDrawer(false)}><Icon name="x" size={16} /></button>
         </div>
         {workspaces.length > 1 && currentWorkspace && <div className="workspace-switch"><Segmented label="工作区" showLabels value={currentWorkspace.label} options={workspaces.map(item => ({ value: item.label, label: item.label, icon: item.icon }))} onChange={label => {
@@ -75,14 +84,15 @@ export function AppShell<K extends string>({ groups, workspaces = [], active, on
         {sidebarAction && <div className="sidebar-action">{sidebarAction}</div>}
         <nav className="sidebar-nav">
           {visible.map((group, index) => {
-            const folded = Boolean(group.label && collapsed.includes(group.label));
+            // 图标栏里分组标题不显示，所有分组都展开，用细线分隔。
+            const folded = !rail && Boolean(group.label && collapsed.includes(group.label));
             const holdsActive = group.items.some(item => item.key === active);
             const id = `nav-group-${index}`;
             const items = group.items.map(item => {
               const content = <><Icon name={item.icon} size={17} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
               return item.href
-                ? <a key={item.key} className="nav-item" href={item.href} target="_blank" rel="noreferrer">{content}</a>
-                : <a key={item.key} className={`nav-item${active === item.key ? " is-active" : ""}`} href={hrefFor(item.key)} aria-current={active === item.key ? "page" : undefined}
+                ? <a key={item.key} className="nav-item" href={item.href} target="_blank" rel="noreferrer" title={rail ? item.label : undefined}>{content}</a>
+                : <a key={item.key} className={`nav-item${active === item.key ? " is-active" : ""}`} href={hrefFor(item.key)} aria-current={active === item.key ? "page" : undefined} title={rail ? item.label : undefined}
                   onClick={event => { if (isPlainClick(event)) { event.preventDefault(); onNavigate(item.key); } }}>{content}</a>;
             });
             if (!group.label) return <div className="nav-group" key={`group-${index}`}><div className="nav-group-list">{items}</div></div>;
@@ -102,13 +112,15 @@ export function AppShell<K extends string>({ groups, workspaces = [], active, on
         <div className="sidebar-bottom">
           {sidebarFooter}
           {links.length > 0 && <div className="sidebar-links">
-            {links.map(link => <a key={link.href} className="sidebar-link" href={link.href} target="_blank" rel="noreferrer"><Icon name={link.icon} size={15} /><span>{link.label}</span><Icon name="external" size={12} className="nav-external" /></a>)}
+            {links.map(link => <a key={link.href} className="sidebar-link" href={link.href} target="_blank" rel="noreferrer" title={rail ? link.label : undefined}><Icon name={link.icon} size={15} /><span>{link.label}</span><Icon name="external" size={12} className="nav-external" /></a>)}
           </div>}
-          <div className="account-row">
-            <Avatar name={account.name} tone={account.tone} src={account.avatar} />
-            <span className="account-copy"><strong>{account.name}</strong><small>{account.caption}</small></span>
-            <Menu label="账号操作" icon="more" items={account.menu} />
-          </div>
+          {rail
+            ? <div className="account-row"><Menu label={`${account.name} · 账号操作`} items={account.menu} align="start" above size="md" className="account-rail-avatar"><Avatar name={account.name} tone={account.tone} src={account.avatar} /></Menu></div>
+            : <div className="account-row">
+              <Avatar name={account.name} tone={account.tone} src={account.avatar} />
+              <span className="account-copy"><strong>{account.name}</strong><small>{account.caption}</small></span>
+              <Menu label="账号操作" icon="more" items={account.menu} above />
+            </div>}
         </div>
       </aside>
       <main className="main" id="main" tabIndex={-1}>
@@ -315,7 +327,7 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
           <input id="setup-passphrase2" className="input" type="password" autoComplete="new-password" value={form.passphrase2} onChange={set("passphrase2")} />
         </Field>
         <div className="form-row">
-          <Field label="管理员邮箱" htmlFor="setup-username" error={errors.username} hint="用于登录，之后可以在用户设置中修改。">
+          <Field label="管理员邮箱" htmlFor="setup-username" error={errors.username} hint="用于登录，之后可以在设置中修改。">
             <input id="setup-username" className="input" type="text" inputMode="email" placeholder="name@example.com" autoComplete="username"
               autoCapitalize="none" spellCheck={false} value={form.username} onChange={set("username")} />
           </Field>

@@ -23,7 +23,7 @@ export function ClientCachePolicy() {
   }
   const dirty = saved && JSON.stringify(form) !== JSON.stringify(saved);
   const number = (key: keyof api.ClientCachePolicy, value: string) => form && setForm({ ...form, [key]: Number(value) });
-  return <Panel title="浏览器缓存" description="用户看过的文件加密保存在各自的浏览器里，重复打开时不必再从服务器读取。占用多少空间由用户在「用户设置 → 本机缓存」中按设备设置。">
+  return <Panel title="浏览器缓存" description="用户看过的文件加密保存在各自的浏览器里，重复打开时不必再从服务器读取。占用多少空间由用户在「设置 → 本机缓存」中按设备设置。">
     {!form || !saved ? error ? <div className="form"><Notice tone="danger">{error}</Notice><Button onClick={load}>重试</Button></div> : <SkeletonRows rows={2} /> :
       <form className="form" onSubmit={submit}>
         <div className="switch-list"><Switch checked={form.enabled} onChange={enabled => setForm({ ...form, enabled })} label="允许浏览器缓存文件"

@@ -78,7 +78,7 @@ export function AssistantDock(props: DrawerProps) {
 
 export function AssistantLauncher({ onOpen, open }: { onOpen: () => void; open: boolean }) {
   return (
-    <button type="button" className={`assistant-launch${open ? " is-active" : ""}`} onClick={onOpen} data-closes-nav aria-expanded={open} aria-keyshortcuts="Meta+J Control+J">
+    <button type="button" className={`assistant-launch${open ? " is-active" : ""}`} onClick={onOpen} data-closes-nav aria-expanded={open} aria-label="文件助手" title="文件助手" aria-keyshortcuts="Meta+J Control+J">
       <AssistantMark size={18} /><span>文件助手</span><kbd>{navigator.platform.includes("Mac") ? "⌘J" : "Ctrl J"}</kbd>
     </button>
   );
@@ -671,7 +671,7 @@ async function executeClientTool(name: string, args: Record<string, unknown>,
 /** 本机缓存查询（§26）：只回答服务端发来的文件；缓存索引在这台设备的浏览器里，服务端看不到。 */
 async function cacheStatus(args: Record<string, unknown>, queue: ReturnType<typeof useCacheQueue>): Promise<Record<string, unknown>> {
   if (!cacheSupported()) return { available: false, reason: "这个浏览器不能使用本机缓存：需要通过 https:// 地址访问并使用较新的浏览器，无痕模式下不可用" };
-  if (!queue?.available) return { available: false, reason: "这台设备的本机缓存已关闭（可在「用户设置 → 本机缓存」开启），或管理员不允许使用" };
+  if (!queue?.available) return { available: false, reason: "这台设备的本机缓存已关闭（可在「设置 → 本机缓存」开启），或管理员不允许使用" };
   const stats = await cacheStats();
   const items = (Array.isArray(args.items) ? args.items : []) as (CacheFile & { path: string })[];
   const files = items.map(item => ({ key: item.path, etag: item.etag, size: item.size, content_type: item.content_type }));

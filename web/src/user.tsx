@@ -116,7 +116,7 @@ function readLocation(): { section: Section; prefix: string } {
   const view = params.get("view");
   // 文件助手全页：prefix 字段沿用为对话编号（?view=assistant&c=<对话>）。
   if (view === "assistant") return { section: "assistantPage", prefix: params.get("c") ?? "" };
-  // 用户设置分「账号」「访问密钥」「本机缓存」三个标签页，prefix 字段沿用为标签名；旧地址 ?view=keys 打开访问密钥标签。
+  // 设置分「账号」「访问密钥」「本机缓存」三个标签页，prefix 字段沿用为标签名；旧地址 ?view=keys 打开访问密钥标签。
   if (view === "account" || view === "keys") return { section: "account", prefix: view === "keys" ? "keys" : params.get("tab") === "keys" || params.get("tab") === "cache" ? params.get("tab")! : "" };
   return { section: view === "shared" || view === "trash" || view === "private" || view === "downloads" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
 }
@@ -133,7 +133,7 @@ function sectionUrl(section: Section, prefix = "") {
 }
 
 /** 侧栏容量：点开按「用户数据」（我的文件、回收站、私密空间）与「系统数据」（缩略图、助手附件）分组显示，两者都计入配额；
- * 另列「本机缓存」（这台设备浏览器里的副本，不计入配额，也不参与上方占比条），点「管理」进入用户设置。 */
+ * 另列「本机缓存」（这台设备浏览器里的副本，不计入配额，也不参与上方占比条），点「管理」进入设置。 */
 function StorageMeter({ usage, percent, onOpenCache }: { usage: Usage | null; percent: number; onOpenCache: () => void }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<api.StorageUsage | null>(null);
@@ -324,9 +324,10 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         <StorageMeter usage={usage} percent={percent} onOpenCache={() => navigate("account", "cache")} />
       </>}
       account={{ name: api.displayName(session), caption: isAdmin ? "管理员" : "个人空间", tone: isAdmin ? "admin" : "accent", avatar: api.avatarUrl(session.avatar_version), menu: [
-        // 用户设置（含访问密钥）从头像菜单进入，不占侧栏位置。
-        { label: "用户设置", icon: "settings", onSelect: () => navigate("account") },
+        // 设置从头像菜单进入，不占侧栏位置；三个标签各有入口。
+        { label: "账号", icon: "user", heading: "设置", onSelect: () => navigate("account") },
         { label: "访问密钥", icon: "key", onSelect: () => navigate("account", "keys") },
+        { label: "本机缓存", icon: "monitor", onSelect: () => navigate("account", "cache") },
         { label: "跟随系统", icon: "monitor", heading: "外观", divider: true, checked: theme === "system", onSelect: () => setThemePreference("system") },
         { label: "浅色", icon: "sun", checked: theme === "light", onSelect: () => setThemePreference("light") },
         { label: "深色", icon: "moon", checked: theme === "dark", onSelect: () => setThemePreference("dark") },

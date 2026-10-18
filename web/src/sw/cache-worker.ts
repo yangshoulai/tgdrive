@@ -564,7 +564,7 @@ function manualRoute(url: string) {
 async function manualOpened(url: string) {
   const { request, route } = manualRoute(url);
   const value = await openEntry(request, route);
-  if (!value) throw new Error(route.tier === "p" ? "请解锁私密空间，并在本机缓存设置中允许缓存私密文件" : "本机缓存未启用，请检查用户设置与管理员策略");
+  if (!value) throw new Error(route.tier === "p" ? "请解锁私密空间，并在本机缓存设置中允许缓存私密文件" : "本机缓存未启用，请检查设置与管理员策略");
   const keys = await entryKeys(value.context, value.base, route.version);
   value.context.signal.throwIfAborted();
   return { ...value, keys, request, route, key: `${value.context.ns}/${route.tier}/${keys.id}` };
@@ -613,7 +613,7 @@ async function startManual(owner: string, id: string, url: string) {
       if (!Number.isSafeInteger(size) || size < 0) throw new Error("服务器未提供有效的文件大小");
       const preferences = await currentSettings();
       const budget = tierBudget(preferences, route.tier), cap = budget;
-      if (size > budget) throw new Error("文件超过本机缓存容量，请先在「用户设置 → 本机缓存」中提高上限");
+      if (size > budget) throw new Error("文件超过本机缓存容量，请先在「设置 → 本机缓存」中提高上限");
       let entry = await getEntry(value.key);
       let info = entry ? await openInfo(value.context.info, entry) : null;
       if (entry && (!info || info.size !== size)) { await deleteEntries([value.key]); entry = undefined; }
@@ -862,7 +862,7 @@ async function stats(): Promise<Stats> {
 }
 
 type Item = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean };
-type ItemQuery = { query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
+type ItemQuery = { prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
 let itemCache: { ns: string; at: number; items: Item[] } | null = null;
 
 /** 普通层已缓存文件的完整索引：解密一次后在内存里保留 15 秒，翻页、搜索与筛选都不再解密。缩略图不列出。 */
@@ -884,7 +884,8 @@ async function allItems(): Promise<Item[]> {
 
 async function matchItems(options: ItemQuery) {
   const query = (options.query ?? "").trim().toLowerCase();
-  return (await allItems()).filter(item => (!query || item.path.toLowerCase().includes(query))
+  // prefix：目录统计只看某个文件夹（含子文件夹）里的缓存。
+  return (await allItems()).filter(item => (!options.prefix || item.path.startsWith(options.prefix)) && (!query || item.path.toLowerCase().includes(query))
     && (!options.kind || (options.kind === "other" ? !["image", "video", "audio"].includes(item.kind) : item.kind === options.kind))
     && (!options.status || (options.status === "complete") === item.complete));
 }
@@ -894,7 +895,8 @@ async function listItems(options: ItemQuery) {
   const order = options.sort ?? "recent";
   matched.sort(order === "size" ? (a, b) => b.bytes - a.bytes : order === "name" ? (a, b) => a.path.localeCompare(b.path, "zh-CN") : (a, b) => b.accessed - a.accessed);
   const offset = Math.max(0, options.offset ?? 0), limit = Math.max(1, Math.min(200, options.limit ?? 50));
-  return { total: matched.length, bytes: matched.reduce((sum, item) => sum + item.bytes, 0), items: matched.slice(offset, offset + limit) };
+  return { total: matched.length, bytes: matched.reduce((sum, item) => sum + item.bytes, 0), manual: matched.filter(item => item.manual).length,
+    complete: matched.filter(item => item.complete).length, items: matched.slice(offset, offset + limit) };
 }
 
 /** 按同样的条件移除（「移除筛选出的文件」）；只作用于当前账号的普通层。 */

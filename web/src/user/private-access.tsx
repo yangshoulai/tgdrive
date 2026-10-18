@@ -64,8 +64,8 @@ export function PrivateUnlockForm() {
       <input id={`${id}-password`} className="input" type="password" value={password} autoComplete="current-password" autoFocus={!quick} disabled={busy} onChange={event => { setPassword(event.target.value); setError(""); }} />
     </Field>
     <Button type="submit" variant={quick ? "secondary" : "primary"} icon="lock" loading={busy && !usingPasskey} disabled={busy || !password}>使用登录密码解锁</Button>
-    <p className="private-passkey-hint">解锁后可在当前登录会话内直接返回，闲置 {status.idle_seconds / 60} 分钟自动锁定。可在「用户设置 → 私密空间」中调整时间。</p>
-    {!quick && <p className="private-passkey-hint">{unavailable || "在侧栏的「用户设置」中添加通行密钥，可同时用于登录和私密解锁。"}</p>}
+    <p className="private-passkey-hint">解锁后可在当前登录会话内直接返回，闲置 {status.idle_seconds / 60} 分钟自动锁定。可在「设置 → 私密空间」中调整时间。</p>
+    {!quick && <p className="private-passkey-hint">{unavailable || "在侧栏的「设置」中添加通行密钥，可同时用于登录和私密解锁。"}</p>}
   </form>;
 }
 

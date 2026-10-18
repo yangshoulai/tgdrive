@@ -2,7 +2,9 @@
 import { useEffect, useState } from "react";
 import * as api from "../api";
 import { FileTile, baseName, getFileKind, parentPath } from "../files";
-import { Button, EmptyState, Modal, SkeletonRows, formatBytes, formatDate } from "../ui";
+import { Button, EmptyState, Icon, Modal, SkeletonRows, formatBytes, formatDate } from "../ui";
+import { cachedItems } from "../cache-client";
+import { useCacheQueue } from "./cache";
 
 const KIND_LABEL: Record<api.FolderStats["kinds"][number]["kind"], string> = {
   image: "图片", video: "视频", audio: "音频", document: "文档", text: "文本", archive: "压缩包", other: "其他",
@@ -10,7 +12,18 @@ const KIND_LABEL: Record<api.FolderStats["kinds"][number]["kind"], string> = {
 // 类型顺序固定，颜色跟随类型而不是排名：筛选或数量变化时同一类型始终同一颜色。
 const KIND_ORDER = ["image", "video", "audio", "document", "text", "archive", "other"] as const;
 
-export function FolderStatsDialog({ prefix, title, onClose, onOpenFolder }: { prefix: string; title: string; onClose: () => void; onOpenFolder?: (prefix: string) => void }) {
+type LocalCache = { total: number; bytes: number; manual: number; complete: number };
+
+export function FolderStatsDialog({ prefix, title, onClose, onOpenFolder}: { prefix: string; title: string; onClose: () => void; onOpenFolder?: (prefix: string) => void }) {
+  const cacheQueue = useCacheQueue();
+  // 这台设备上缓存了这个文件夹里的哪些文件（只统计普通文件；私密文件的缓存不在这里展开）。
+  const [local, setLocal] = useState<LocalCache | null>(null);
+  useEffect(() => {
+    if (!cacheQueue?.available || api.isPrivatePath(prefix)) { setLocal(null); return; }
+    let alive = true;
+    void cachedItems({ prefix, limit: 1 }).then(value => { if (alive) setLocal(value); }).catch(() => { if (alive) setLocal(null); });
+    return () => { alive = false; };
+  }, [prefix, cacheQueue?.available]);
   const [stats, setStats] = useState<api.FolderStats | null>(null);
   const [error, setError] = useState("");
   const [measure, setMeasure] = useState<"bytes" | "count">("bytes");
@@ -34,6 +47,12 @@ export function FolderStatsDialog({ prefix, title, onClose, onOpenFolder }: { pr
             <div><span>文件夹</span><strong>{stats.folders.toLocaleString("zh-CN")}</strong><small>本层 {stats.direct_folders.toLocaleString("zh-CN")}</small></div>
             <div><span>占用空间</span><strong>{formatBytes(stats.bytes)}</strong><small>{stats.latest_modified ? `最近更新于 ${formatDate(stats.latest_modified)}` : "包含全部子文件夹"}</small></div>
           </div>
+          {local && stats.files > 0 && <section className="folder-stats-local" aria-label="本机缓存">
+            <Icon name="monitor" size={16} />
+            <span>{local.total ? <><span>这台设备缓存了 <strong>{local.total.toLocaleString("zh-CN")}</strong> 个文件 · {formatBytes(local.bytes)}</span>
+              <small>{[`手动 ${local.manual.toLocaleString("zh-CN")} 个`, `自动 ${(local.total - local.manual).toLocaleString("zh-CN")} 个`, local.total - local.complete ? `${(local.total - local.complete).toLocaleString("zh-CN")} 个只缓存了一部分` : ""].filter(Boolean).join(" · ")}；不占用你的空间</small></>
+              : <><span>这台设备还没有缓存这个文件夹里的文件</span><small>勾选文件后选择「缓存到本机」，之后打开更快</small></>}</span>
+          </section>}
           {stats.files === 0 ? <p className="muted">这个文件夹里还没有文件。</p> : <>
             <section className="folder-stats-section">
               <header><h3>类型构成</h3>

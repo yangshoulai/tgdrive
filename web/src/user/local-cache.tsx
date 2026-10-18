@@ -9,7 +9,7 @@ const KIND_LABEL: Record<Kind, string> = { image: "图片", video: "视频", aud
 const KIND_ORDER: Kind[] = ["image", "video", "audio", "thumb", "other"];
 const sizeLabel = (mib: number) => mib >= 1024 ? `${mib / 1024} GB` : `${mib} MB`;
 
-/** 用户设置 →「本机缓存」：浏览器本地缓存的统计、设置与清理（docs/client-cache-design.md §5）。设置只属于这台设备的这个浏览器。 */
+/** 设置 →「本机缓存」：浏览器本地缓存的统计、设置与清理（docs/client-cache-design.md §5）。设置只属于这台设备的这个浏览器。 */
 export function LocalCacheSettings() {
   const [stats, setStats] = useState<CacheStats | null>(null);
   const [settings, setSettings] = useState<DeviceSettings | null>(null);

@@ -1053,7 +1053,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 | 事件 | 处理 |
 |---|---|
 | 选择／粘贴／拖入 | 流式上传，登记为未发送；单个 ≤ 64 MiB，每个用户最多 20 个未发送附件 |
-| 托盘移除、新建或切换对话、关闭抽屉、刷新或关闭页面 | `discard` 删除（页面卸载时用 keepalive 请求）；只允许删除未发送的附件。用户设置可「立即清除」全部未发送的附件（`discard-pending`） |
+| 托盘移除、新建或切换对话、关闭抽屉、刷新或关闭页面 | `discard` 删除（页面卸载时用 keepalive 请求）；只允许删除未发送的附件。设置可「立即清除」全部未发送的附件（`discard-pending`） |
 | 发送 | `send` 的 `attachments` 为附件 ID（≤10），`bind` 校验属于本人且未发送（或已属于本对话），绑定到对话与消息 |
 | 重试 | 重发的附件改绑到新消息；被截断消息上的其他附件删除 |
 | 删除对话 | 立即删除该对话全部附件，释放空间 |
@@ -1076,7 +1076,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 **统计**
 
 - `GET /api/user/v1/usage` 返回已用空间分项 `{total, quota_bytes, files, trash, private, assistant}`（前缀范围求和），点击侧栏「已用空间」在下方展开显示。
-- `GET /api/user/v1/assistant/attachments/stats` 返回附件总数、总大小与按对话分组；用户设置「助手附件」区块展示（助手不可用且没有附件时隐藏），可打开对应对话，不提供删除按钮；另列出尚未发送的附件。删除对话改为先确认，确认框写明会一并删除的附件数量与大小。
+- `GET /api/user/v1/assistant/attachments/stats` 返回附件总数、总大小与按对话分组；设置「助手附件」区块展示（助手不可用且没有附件时隐藏），可打开对应对话，不提供删除按钮；另列出尚未发送的附件。删除对话改为先确认，确认框写明会一并删除的附件数量与大小。
 
 **接口**（网页会话；写入需 CSRF）：`PUT /api/user/v1/assistant/attachments?name=`、`POST …/<id>/thumbnails`、`GET …/<id>/content`（Range、`?download=1`）、`GET …/<id>/thumbnail?variant=`、`POST …/<id>/discard`、`POST …/<id>/save`、`GET …/stats`。
 

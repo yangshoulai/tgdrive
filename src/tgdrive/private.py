@@ -216,7 +216,7 @@ class PrivateSpace:
                 pass
         idle = self._idle(idle)
         if new_password:
-            raise ValueError("私密空间使用登录密码，请在用户设置中修改密码")
+            raise ValueError("私密空间使用登录密码，请在设置中修改密码")
         if password is not None:
             await self.check_password(token, csrf, password)
             if grant is not None:

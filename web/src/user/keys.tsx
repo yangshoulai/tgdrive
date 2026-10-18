@@ -7,7 +7,7 @@ import { Badge, Button, ConfirmDialog, CopyField, EmptyState, Field, Icon, IconB
 
 /* ---------- 访问密钥 ---------- */
 
-/** embedded：放在用户设置的标签页里，不再显示页面标题，新建按钮移到密钥列表上。 */
+/** embedded：放在设置的标签页里，不再显示页面标题，新建按钮移到密钥列表上。 */
 export function KeysView({ bucketName, embedded = false }: { bucketName: string | null; embedded?: boolean }) {
   const pagination = useCursorPage(api.userClientsPage);
   const clients = pagination.page?.clients ?? null;

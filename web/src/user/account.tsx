@@ -14,7 +14,7 @@ export type SettingsTab = "account" | "keys" | "cache";
 const SETTINGS_TABS: { value: SettingsTab; label: string; icon: "user" | "key" | "monitor" }[] = [{ value: "account", label: "账号", icon: "user" },
   { value: "keys", label: "访问密钥", icon: "key" }, { value: "cache", label: "本机缓存", icon: "monitor" }];
 
-/** 用户设置：从头像菜单进入，分「账号」「访问密钥」「本机缓存」三个标签页（地址 ?view=account&tab=keys|cache，旧地址 ?view=keys 仍可用）。 */
+/** 设置：从头像菜单进入，分「账号」「访问密钥」「本机缓存」三个标签页（地址 ?view=account&tab=keys|cache，旧地址 ?view=keys 仍可用）。 */
 export function UserSettingsPage({ session, onSessionChange, assistant = false, onOpenConversation, tab = "account", onTabChange, bucketName = null, keysAvailable = true }: {
   session: api.Session; onSessionChange: (patch: Partial<api.Session>) => void;
   /** 文件助手可用时显示「助手附件」统计（没有附件且助手不可用时隐藏） */
@@ -22,12 +22,12 @@ export function UserSettingsPage({ session, onSessionChange, assistant = false, 
   tab?: SettingsTab; onTabChange?: (tab: SettingsTab) => void; bucketName?: string | null;
   /** 系统锁定或服务尚未解锁时不能管理访问密钥 */
   keysAvailable?: boolean }) {
-  useDocumentTitle(`${tab === "keys" ? "访问密钥" : tab === "cache" ? "本机缓存" : "用户设置"} · ${BRAND}`);
+  useDocumentTitle(`${tab === "keys" ? "访问密钥" : tab === "cache" ? "本机缓存" : "设置"} · ${BRAND}`);
   return <div className="account-page">
-    <PageHeader title="用户设置" description={tab === "keys" ? "让同步工具（如 rclone、AWS CLI）或你自己的脚本访问你的文件。密钥只能访问你自己的文件，随时可以停用。"
+    <PageHeader title="设置" description={tab === "keys" ? "让同步工具（如 rclone、AWS CLI）或你自己的脚本访问你的文件。密钥只能访问你自己的文件，随时可以停用。"
       : tab === "cache" ? "看过的图片、音乐、视频片段和缩略图加密保存在这台设备的浏览器里，再次打开时不必重新下载。"
       : "管理你的个人资料和登录方式，登录方式也用于解锁私密空间。"} />
-    {onTabChange && <Tabs label="用户设置" value={tab} onChange={onTabChange} options={SETTINGS_TABS} />}
+    {onTabChange && <Tabs label="设置" value={tab} onChange={onTabChange} options={SETTINGS_TABS} />}
     {tab === "cache" ? <LocalCacheSettings />
       : tab === "keys" ? keysAvailable ? <KeysView bucketName={bucketName} embedded />
       : <EmptyState icon="lock" title="暂时无法管理访问密钥" description="服务正在等待管理员完成启动，稍后再来查看和创建访问密钥。" />

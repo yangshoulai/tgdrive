@@ -245,7 +245,7 @@ export const setAttachmentThumbnail = (id: string, data: string | null, variant:
 export const discardAttachment = (id: string) => post<void>(attachmentPath(id, "discard"), {});
 /** 页面关闭时放弃未发送的附件：keepalive 请求在卸载后仍会送达。 */
 export const discardAttachmentsOnUnload = (ids: string[]) => ids.forEach(id => postKeepalive(attachmentPath(id, "discard"), {}));
-/** 清除自己全部未发送的附件（用户设置「助手附件」）。 */
+/** 清除自己全部未发送的附件（设置「助手附件」）。 */
 export const discardPendingAttachments = () => post<{ removed: number; size: number }>(`${USER}/attachments/discard-pending`, {});
 /** 另存为普通文件：path 为目标文件夹（以 / 结尾）；同名自动改名。 */
 export const saveAttachment = (id: string, path: string) => post<{ path: string; size: number }>(attachmentPath(id, "save"), { path });

@@ -126,7 +126,7 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
             <input id="user-nickname" className="input" autoComplete="off" maxLength={32} value={form.nickname} onChange={event => setForm({ ...form, nickname: event.target.value })} />
           </Field>
         </div>
-        <Field label="初始密码" htmlFor="user-password" error={errors.password} hint="用户登录后可以在「用户设置」中修改。">
+        <Field label="初始密码" htmlFor="user-password" error={errors.password} hint="用户登录后可以在「设置」中修改。">
           <input id="user-password" className="input" type="password" autoComplete="new-password" value={form.password} onChange={event => setForm({ ...form, password: event.target.value })} />
         </Field>
         <Field label="容量上限" htmlFor="user-quota" error={errors.quota} hint="留空表示不限制。">
