@@ -723,8 +723,9 @@ function MenuList({ items, label, anchor, onClose, restoreFocus, dark }: { items
       }
     };
     // 推迟到下一帧再监听，避免打开菜单的那次点击（或右键）立即把它关掉。
+    // 用捕获阶段的 pointerdown：拖动窗口头部会 preventDefault，浏览器不再派发 mousedown，菜单就会留在原处。
     const timer = window.setTimeout(() => {
-      document.addEventListener("mousedown", outside);
+      document.addEventListener("pointerdown", outside, true);
       document.addEventListener("contextmenu", outside);
     });
     document.addEventListener("keydown", key, true);
@@ -733,7 +734,7 @@ function MenuList({ items, label, anchor, onClose, restoreFocus, dark }: { items
     document.addEventListener("scroll", scrolled, true);
     return () => {
       window.clearTimeout(timer);
-      document.removeEventListener("mousedown", outside);
+      document.removeEventListener("pointerdown", outside, true);
       document.removeEventListener("contextmenu", outside);
       document.removeEventListener("keydown", key, true);
       window.removeEventListener("resize", close);
