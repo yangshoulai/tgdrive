@@ -3,17 +3,19 @@ import { BRAND, SITE } from "../brand";
 import * as api from "../api";
 import { ClientCachePolicy } from "./client-cache";
 import { Resources } from "./resources";
+import { RegistrationSettings } from "./registration";
 
 import { Button, Field, KeyValue, Notice, PageHeader, Panel, SetupGuide, SkeletonRows, Tabs, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 系统设置 ---------- */
 
-/** 系统设置分三个标签：访问地址、下载与资源、浏览器缓存；当前标签记在地址的 ?tab= 中，刷新后保留。 */
-type SettingsTab = "address" | "resources" | "cache";
-const SETTINGS_TABS: { value: SettingsTab; label: string; icon: "globe" | "download" | "monitor" }[] = [
+/** 系统设置的当前标签记在地址的 ?tab= 中，刷新后保留。 */
+type SettingsTab = "address" | "resources" | "cache" | "registration";
+const SETTINGS_TABS: { value: SettingsTab; label: string; icon: "globe" | "download" | "monitor" | "users" }[] = [
   { value: "address", label: "访问地址", icon: "globe" }, { value: "resources", label: "下载与资源", icon: "download" }, { value: "cache", label: "浏览器缓存", icon: "monitor" },
+  { value: "registration", label: "注册", icon: "users" },
 ];
-const readTab = (): SettingsTab => { const value = new URLSearchParams(window.location.search).get("tab"); return value === "resources" || value === "cache" ? value : "address"; };
+const readTab = (): SettingsTab => { const value = new URLSearchParams(window.location.search).get("tab"); return value === "resources" || value === "cache" || value === "registration" ? value : "address"; };
 
 export function Settings({ onSaved }: { onSaved: () => void }) {
   const [tab, setTab] = useState<SettingsTab>(readTab);
@@ -30,6 +32,7 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
     {tab === "address" && <AccessSettings onSaved={onSaved} />}
     {tab === "resources" && <Resources />}
     {tab === "cache" && <ClientCachePolicy />}
+    {tab === "registration" && <RegistrationSettings />}
   </>;
 }
 

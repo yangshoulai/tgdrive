@@ -37,6 +37,7 @@ from .keyapi import KeyApi, KeyAuthError
 from .metrics import TrafficMetrics
 from .objects import Scope
 from .private import PrivateAccessLogFilter, PrivateLocked, PrivateSpace
+from .registration import RegistrationService
 from .settings import SystemSettings
 from .share import ShareAccess
 from .static import StaticFiles
@@ -90,6 +91,7 @@ class TgDriveASGI(StaticFiles):
         self.private_space = PrivateSpace(user, self.settings)
         self.passkeys = self.private_space.passkeys
         self.client_cache = ClientCache(user, self.private_space)
+        self.registration = RegistrationService(user.accounts)
         user.private_space = self.private_space
         admin.private_space = self.private_space
         access_logger = logging.getLogger("uvicorn.access")
@@ -152,7 +154,9 @@ class TgDriveASGI(StaticFiles):
         host = headers.get("host", "localhost").split(":", 1)[0].lower()
         query = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
         started = False
-        private_response = path.startswith("/api/user/v1/private/") or path.startswith("/api/user/v1/passkeys")
+        private_response = (path.startswith("/api/user/v1/private/") or path.startswith("/api/user/v1/passkeys")
+                            or path.startswith("/api/user/v1/registration") or path == "/api/user/v1/register"
+                            or path.startswith("/api/admin/v1/registration"))
         request_id = secrets.token_hex(8)
         request_start = time.monotonic()
 
@@ -372,6 +376,9 @@ class TgDriveASGI(StaticFiles):
                     await self._send(tracked_send, 413, {"error": {"code": "body_too_large", "message": "JSON 请求体过大"}})
                     return
                 data.extend(chunk)
+            if method == "POST" and path in ("/api/user/v1/register", "/api/user/v1/registration/code"):
+                if headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    raise ValueError("注册请求必须使用 JSON 格式")
             payload = json.loads(data) if data else {}
             if not isinstance(payload, dict):
                 raise ValueError("JSON 请求体必须为对象")
@@ -415,6 +422,8 @@ class TgDriveASGI(StaticFiles):
                           "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/clients/{}/delete": "client.delete",
                           "/bots": "bot.create", "/bots/{}/status": "bot.status",
                           "/bots/{}/check": "bot.check", "/settings": "settings.update", "/resources": "resources.update", "/client-cache": "client_cache.update",
+                          "/registration": "registration.update", "/registration/test-email": "registration.test_email",
+                          "/registration/invites": "invite.create", "/registration/invites/{}/revoke": "invite.revoke",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
                           "/maintenance/thumbnails": "maintenance.thumbnails",
@@ -435,7 +444,7 @@ class TgDriveASGI(StaticFiles):
                           "/assistant/models/{}/test": "assistant.model.test",
                           "/assistant/users/{}/policy": "assistant.user_policy",
                           "/assistant/conversations/delete": "assistant.trace.delete", "/assistant/purge": "assistant.data.purge"},
-        "/api/user/v1": {"/login": "user.login", "/logout": "user.logout", "/password": "user.password",
+        "/api/user/v1": {"/login": "user.login", "/logout": "user.logout", "/password": "user.password", "/register": "user.register",
                          "/profile": "account.profile", "/email": "account.email", "/avatar": "account.avatar",
                          "/avatar/delete": "account.avatar_delete",
                          "/clients": "key.create", "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/public": "object.public",
@@ -469,6 +478,7 @@ class TgDriveASGI(StaticFiles):
                 continue
             route = path[len(prefix):]
             pattern = re.sub(r"^/(users|clients|bots|downloads)/\d+/", r"/\1/{}/", route)
+            pattern = re.sub(r"^/registration/invites/\d+/", "/registration/invites/{}/", pattern)
             pattern = re.sub(r"^/shares/[A-Za-z0-9_-]+/", "/shares/{}/", pattern)
             pattern = re.sub(r"^/assistant/(channels|models|users)/\d+/", r"/assistant/\1/{}/", pattern)
             pattern = re.sub(r"^/assistant/(scope-requests|actions|attachments)/[A-Za-z0-9_-]+/", r"/assistant/\1/{}/", pattern)
@@ -490,6 +500,8 @@ class TgDriveASGI(StaticFiles):
         payload, action = entry["payload"], entry["action"]
         if action == "user.login" and ok and (result or {}).get("username"):
             entry = {**entry, "actor": result["username"]}
+        if action == "user.register" and ok:
+            entry = {**entry, "actor": (result or {}).get("username"), "actor_type": "user"}
         if action == "user.login" and ok and (result or {}).get("role") == "admin":
             # 统一登录入口：管理员登录在审计里仍记为 admin.login。
             action, entry = "admin.login", {**entry, "actor_type": "admin"}
@@ -497,6 +509,17 @@ class TgDriveASGI(StaticFiles):
         target, detail = entry["target_id"], {}
         if action in ("user.create",):
             target, detail = payload.get("username"), {"quota_bytes": payload.get("quota_bytes")}
+        elif action == "user.register":
+            target = (result or {}).get("username") if ok else None
+            detail = {"method": payload.get("method") if payload.get("method") in ("email", "invite") else None}
+            if ok:
+                detail["quota_bytes"] = (result or {}).get("quota_bytes")
+        elif action == "registration.update":
+            detail = {key: payload[key] for key in ("enabled", "email_enabled", "invite_enabled", "default_quota_bytes") if key in payload}
+            if "smtp" in payload or "smtp_password" in payload or "clear_smtp_password" in payload:
+                detail["smtp_changed"] = True
+        elif action == "invite.create":
+            detail = {key: payload[key] for key in ("count", "quota_bytes", "expires_at") if key in payload}
         elif action in ("user.status", "client.status", "bot.status"):
             detail = {"status": payload.get("status")}
         elif action == "user.quota":
@@ -772,6 +795,26 @@ class TgDriveASGI(StaticFiles):
                 return 204, None, {"Set-Cookie": self._cookie("", expires=True)}
             if not self.admin.accounts.keystore.unlocked:
                 raise NotReadyError("系统尚未解锁")
+            if route == "/registration":
+                if method == "GET":
+                    return 200, self.registration.describe(), {}
+                if method == "POST":
+                    return 200, self.registration.configure(payload), {}
+            if route == "/registration/test-email" and method == "POST":
+                def authorize_mail():
+                    current = self.admin.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+                    self.admin.accounts.account_for_session(current)
+                    self.admin.accounts.keystore.require_kek()
+                return 200, await self.registration.test_email(payload.get("email", session.username), authorize_mail), {}
+            if route == "/registration/invites":
+                if method == "GET":
+                    return 200, self.registration.list_invitations(int(query.get("cursor", ["0"])[0]), query.get("status", ["all"])[0], int(query.get("limit", ["50"])[0])), {}
+                if method == "POST":
+                    return 201, self.registration.create_invitations(payload, session.user_id), {}
+            invite_route = re.fullmatch(r"/registration/invites/(\d+)/revoke", route)
+            if invite_route and method == "POST":
+                self.registration.revoke_invitation(int(invite_route[1]))
+                return 204, None, {}
             if route.startswith("/assistant/") and self.assistant is not None:
                 return await self._assistant_admin(method, route[len("/assistant"):], query, payload, session)
             if method == "GET" and route == "/users":
@@ -858,6 +901,18 @@ class TgDriveASGI(StaticFiles):
                                                        bool(payload.get("deep", False))), {}
         elif path.startswith("/api/user/v1/"):
             route = path[len("/api/user/v1"):]
+            if route == "/registration" and method == "GET":
+                return 200, self.registration.public_config(), {}
+            if route in ("/register", "/registration/code") and method == "POST":
+                # 公共注册接口仅接受 JSON；浏览器跨站表单无法携带 JSON，且不开放 CORS。
+                if origin is not None:
+                    from .settings import normalize_origin
+                    expected = self.settings.get("public_base_url")
+                    if expected and normalize_origin(origin, "请求来源") != expected:
+                        raise PermissionError("注册请求来源不匹配")
+                if route == "/registration/code":
+                    return 200, await self.registration.send_code(payload.get("email"), ip), {}
+                return 201, await self.registration.register(payload, ip), {}
             if route == "/passkeys/status" and method == "GET":
                 return 200, self.passkeys.capability(None, origin), {"Cache-Control": "no-store"}
             if route == "/passkeys/login/options" and method == "POST":
@@ -1610,7 +1665,7 @@ class TgDriveASGI(StaticFiles):
         elif isinstance(exc, WrongPassphrase): status, code, message = 400, "wrong_passphrase", "加密口令不正确"
         elif isinstance(exc, TooManyAttempts):
             status, code = 429, "too_many_attempts"
-            message = str(exc) if str(exc).startswith(("访问密码", "登录", "验证", "通行密钥")) else "登录失败次数过多，请 15 分钟后再试"
+            message = str(exc) if str(exc).startswith(("访问密码", "登录", "验证", "通行密钥", "注册")) else "登录失败次数过多，请 15 分钟后再试"
         elif isinstance(exc, (AuthenticationError, SessionExpired)): status, code, message = 401, "unauthorized", "登录已过期，请重新登录"
         elif isinstance(exc, AssistantDenied): status, code, message = 403, "assistant_unavailable", str(exc) or "文件助手不可用"
         elif isinstance(exc, (CsrfError, PermissionError)): status, code, message = 403, "forbidden", "没有权限执行这个操作"

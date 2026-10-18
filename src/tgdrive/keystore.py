@@ -138,6 +138,16 @@ class KeyStore:
                 import base64
                 plain = open_sealed(derive_subkey(old_kek, "client-cache"), base64.b64decode(cache_row["value"]), "client-cache-key")
                 cache_key = base64.b64encode(seal(derive_subkey(new_kek, "client-cache"), plain, "client-cache-key")).decode()
+            # 注册 SMTP 密码和邀请码与系统口令一起轮换，避免更改口令后无法发送邮件或复制邀请链接。
+            old_registration_key = derive_subkey(old_kek, "registration-secret")
+            new_registration_key = derive_subkey(new_kek, "registration-secret")
+            smtp_row = self.metadata.db.execute("SELECT value FROM settings WHERE key='registration.smtp_password'").fetchone()
+            smtp_password = None
+            if smtp_row is not None:
+                import base64
+                aad = "registration.smtp_password"
+                plain = open_sealed(old_registration_key, base64.b64decode(smtp_row["value"]), aad)
+                smtp_password = base64.b64encode(seal(new_registration_key, plain, aad)).decode()
             # 所有重新包裹和 keys 更新在同一个事务里。
             with self.metadata.transaction() as db:
                 db.executemany("UPDATE blobs SET wrapped_dek = ? WHERE uuid = ?", ((w, u) for u, w in wrapped))
@@ -150,6 +160,12 @@ class KeyStore:
                     db.execute("UPDATE settings SET value = ? WHERE key = 'assistant.trace_key'", (trace_key,))
                 if cache_key is not None:
                     db.execute("UPDATE settings SET value = ? WHERE key = 'client_cache.key'", (cache_key,))
+                if smtp_password is not None:
+                    db.execute("UPDATE settings SET value=? WHERE key='registration.smtp_password'", (smtp_password,))
+                for invite in db.execute("SELECT id,code_hash,code_enc FROM registration_invites"):
+                    aad = f"invite:{invite['code_hash']}"
+                    plain = open_sealed(old_registration_key, invite["code_enc"], aad)
+                    db.execute("UPDATE registration_invites SET code_enc=? WHERE id=?", (seal(new_registration_key, plain, aad), invite["id"]))
                 # 历史任务可能很多，逐条重加密，不把所有请求体再攒到内存里。
                 for task in db.execute("SELECT id,request_enc FROM offline_tasks"):
                     aad = f"offline:{task['id']}"

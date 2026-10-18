@@ -31,7 +31,7 @@ class Account:
     nickname: str | None = None
 
 
-# 登录名使用邮箱：只做格式检查（后续再加验证码），统一转成小写保存，数据库按不区分大小写唯一。
+# 登录名使用邮箱，统一转成小写保存；访客注册的验证码校验由 registration.py 负责。
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]{1,64}@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}")
 NICKNAME_LIMIT = 32
 AVATAR_LIMIT = 256 * 1024

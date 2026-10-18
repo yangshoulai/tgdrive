@@ -2034,6 +2034,20 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
 .key-panel .unlock-form { flex: 1 1 360px; }
 /* 设置表单：左侧标题与说明，右侧控件；行之间用细线分隔（参照 Linear / Vercel 设置页）。 */
 .settings-form { gap: 0; }
+.registration-code-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.registration-code-row > .input { flex: 1; min-width: 0; }
+.registration-code-row > .btn { flex-shrink: 0; }
+.registration-password .input { flex: 1; min-width: 0; }
+.registration-password .affix-toggle { flex-shrink: 0; white-space: nowrap; }
+.registration-switches { display: grid; gap: 20px; padding-bottom: 24px; }
+.registration-section { padding: 24px 0 8px; }
+.registration-section h3 { margin: 0 0 8px; font-size: var(--text-md); }
+.registration-section p { margin: 0; color: var(--ink-3); font-size: var(--text-sm); line-height: 1.7; }
+.invitations-table { --cols: minmax(220px, 1.4fr) minmax(90px, .6fr) minmax(160px, 1fr) 80px 148px; }
+.registration-invite-toolbar { padding: 16px 20px; margin: 0; }
+.registration-invite-toolbar > .input { width: auto; }
+.registration-invite-footer { padding: 12px 20px; }
+.settings-form > .registration-message { margin-top: 16px; }
 .settings-form > .field { grid-template-columns: minmax(0, 300px) minmax(0, 1fr); column-gap: 40px; row-gap: 4px; align-items: start; padding: 16px 0; border-bottom: 1px solid var(--line-soft); }
 .settings-form > .field:first-child { padding-top: 0; }
 .settings-form > .field:last-of-type { padding-bottom: 0; border-bottom: 0; }

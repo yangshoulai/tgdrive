@@ -8,7 +8,7 @@ Tessera（仓库名 tgdrive）：基于 Telegram Bot + 私有频道的加密分�
 
 ## 目录
 
-- `src/tgdrive/`：后端（src 布局，导入名仍为 `tgdrive`；改动后需 `pip install -e .` 重新安装）。`metadata.py`（SQLite 迁移，当前 schema v25）、`objects.py`（对象/公开链接）、`api.py`（网页会话服务层，按角色校验 Cookie 会话与 CSRF）、`private.py`（私密空间访问授权）、`passkeys.py`（账号登录与私密解锁共用的通行密钥挑战及验签）、`offline/`（受控来源请求、持久下载队列、资源预算与视频封装；平台解析子进程的网络经主进程转发）、`keyapi.py`（`/api/v1` 访问密钥 API）、`asgi.py`（HTTP 路由与流式响应）、`app.py`（应用工厂与 CLI）、`assistant/`（AI 文件助手：渠道与模型、模型目录 `catalog.py`、识图 `vision.py`、Agent 循环、工具、浏览器工具 `client_tools.py`、公共 HTTP 查询 `http_tools.py`、公共使用知识与客户端环境 `knowledge.py`、秘密保护 `guard.py`、留痕与调用日志、私密对话的内存留痕 `private_chat.py`）、`s3/`、`telegram/`。
+- `src/tgdrive/`：后端（src 布局，导入名仍为 `tgdrive`；改动后需 `pip install -e .` 重新安装）。`metadata.py`（SQLite 迁移，当前 schema v27）、`objects.py`（对象/公开链接）、`api.py`（网页会话服务层，按角色校验 Cookie 会话与 CSRF）、`private.py`（私密空间访问授权）、`passkeys.py`（账号登录与私密解锁共用的通行密钥挑战及验签）、`offline/`（受控来源请求、持久下载队列、资源预算与视频封装；平台解析子进程的网络经主进程转发）、`keyapi.py`（`/api/v1` 访问密钥 API）、`asgi.py`（HTTP 路由与流式响应）、`app.py`（应用工厂与 CLI）、`assistant/`（AI 文件助手：渠道与模型、模型目录 `catalog.py`、识图 `vision.py`、Agent 循环、工具、浏览器工具 `client_tools.py`、公共 HTTP 查询 `http_tools.py`、公共使用知识与客户端环境 `knowledge.py`、秘密保护 `guard.py`、留痕与调用日志、私密对话的内存留痕 `private_chat.py`）、`s3/`、`telegram/`。
 - `web/src/`：前端源码。
   - `ui.tsx`：设计系统基元（按钮、表单、弹窗、菜单、toast、格式化、配置页的 `SetupGuide` 配置指南）。新界面必须复用这里的组件。列表行操作遵循 `DESIGN.md`「列表行操作规范」：一个快捷操作 + ⋯ 菜单，删除、禁用／启用等只放菜单末尾并确认。存储通道的指南步骤（`admin/bots.tsx` 的 `STORAGE_STEPS`）是管理员文档「存储通道」页的精简版，两处同步修改。
   - `shell.tsx`：应用外壳、登录页、首次初始化页。
@@ -50,6 +50,7 @@ cd web && node build-apps.mjs                                  # 构建到 web/d
 - 认证边界：`/api/user/v1`、`/api/admin/v1` 只供网页使用（HttpOnly Cookie + `X-CSRF-Token`）；`/api/v1` 与 S3 只接受访问密钥（`Authorization: Bearer AK:SECRET` / Basic、SigV4），不读取 Cookie。两者授权都走 `ClientAuthStore`（存储桶 + 前缀 + ro/rw），所属用户被禁用时密钥失效。新增程序可调用的能力应加在 `/api/v1`，不要让脚本依赖网页接口。
 - 业务校验失败返回 `ValueError`（400），不要用 `AuthenticationError`（401 会让前端登出）。
 - 新的数据库字段通过在 `Metadata._migrate` 中追加版本块添加，并提升 `SCHEMA_VERSION`。
+- 访客注册（`registration.py`／`mailer.py`，schema v27）：默认关闭，配置入口 `/admin/settings?tab=registration`，公共网页接口 `/api/auth/v1/registration`、`/registration/code`、`/register`。邮箱验证码与邀请码可单独或同时开放，同时开放时任选其一；邀请码单次核销与账号创建必须同事务。SMTP 密码和邀请码用 `registration-secret` 子密钥加密，改系统口令时在 `keystore.rotate` 一起重加密；验证码仅在内存中保留 HMAC 摘要。邀请链接用 `/register#invite=…`，前端只读固定邀请码，禁止把邀请码、验证码、SMTP 密码写入审计。邮件发送强制 TLS；测试必须替身发送，不得连接真实 SMTP。
 - 对外地址（公开访问地址、S3 Endpoint）由 `tgdrive/settings.py` 的 `SystemSettings` 管理，存 `settings` 表，优先级：控制台设置 > 启动参数 > 前端推断。S3 路由主机名每个请求从它读取（带缓存）。前端统一通过 `api.userSiteOrigin()` / `api.s3Endpoint()` / `api.publicLinks()` 取地址，不要在组件里自行拼接 `window.location`。
 - Docker：镜像入口是 `docker-entrypoint.sh`（以 root 启动 → 数据目录属主不是 10001 时一次性 `chown -R` → `setpriv` 降权运行 `tgdrive`），不要在 Dockerfile 里写 `USER`，否则旧数据卷和宿主机挂载目录会因为权限问题启动失败（sqlite 报 unable to open database file）。`create_app` 会在数据目录不可写时给出明确的错误提示。
 - 单进程部署：普通会话、登录失败计数、Telegram 客户端池都在进程内存中，不要使用多个 uvicorn worker 或多实例共享数据目录。登录页勾选“30 天内保持登录”的会话例外：它们额外持久化在 `sessions` 表（只存令牌的 SHA-256，由 `accounts.MetadataSessionStore` 管理），服务重启后在系统解锁时恢复；退出、改密码（保留当前会话）、禁用账号、删除账号、管理员重置密码、锁定系统都必须同时清掉这张表里的对应记录（`SessionManager.revoke/clear/clear_user` 已统一处理，新增注销路径时不要绕过）。

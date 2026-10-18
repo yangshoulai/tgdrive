@@ -38,6 +38,12 @@ export type BotConfig = { id: number; name: string; channel_id: string; status: 
 export type UserMe = Profile & { id: number; username: string; role: Role; bucket_id: number | null; quota_bytes: number | null; used_bytes: number; unlocked: boolean; remember?: boolean; csrf_token: string; expires_at: number } & SiteConfig;
 export type SettingValue = { value: string | null; default: string | null; effective: string | null };
 export type SystemSettings = { public_base_url: SettingValue; s3_endpoint: SettingValue };
+export type RegistrationConfig = { enabled: boolean; available: boolean; email_enabled: boolean; invite_enabled: boolean; default_quota_bytes: number | null; code_ttl: number; resend_delay: number };
+export type SmtpConfig = { host: string; port: number; security: "ssl" | "starttls"; username: string; sender: string; sender_name: string };
+export type RegistrationSettings = Pick<RegistrationConfig, "enabled" | "email_enabled" | "invite_enabled" | "default_quota_bytes"> & { smtp: SmtpConfig & { has_password: boolean } };
+export type RegistrationUpdate = Omit<RegistrationSettings, "smtp"> & { smtp: SmtpConfig; smtp_password?: string; clear_smtp_password?: boolean };
+export type Invitation = { id: number; code: string; status: "active" | "used" | "expired" | "revoked"; quota_bytes: number | null; expires_at: number; created_at: number; used_at?: number | null };
+export type InvitationPage = { invites: Invitation[]; total: number; next_cursor: number | null };
 export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number };
 export type ResourceSettings = { config: ResourceConfig; source: "admin" | "startup"; pressure: string | null;
   components: { versions: Record<string, string | null>; ytdlp_age_days: number | null };
@@ -228,6 +234,18 @@ export async function finishPasskeyLogin(requestId: string, credential: unknown,
 }
 
 /* ---------- 会话 ---------- */
+
+export const registrationConfig = (signal?: AbortSignal) => request<RegistrationConfig>("/api/auth/v1/registration", { signal });
+export const sendRegistrationCode = (email: string) => post<{ sent: boolean; resend_after: number; expires_in: number }>("/api/auth/v1/registration/code", { email }, 45000);
+export const registerAccount = (body: { email: string; password: string; method: "email" | "invite"; email_code?: string; invite_code?: string }) => post<{ username: string; quota_bytes: number | null }>("/api/auth/v1/register", body);
+export const adminRegistration = () => request<RegistrationSettings>("/api/admin/v1/registration");
+export const updateRegistration = (body: RegistrationUpdate) => post<RegistrationSettings>("/api/admin/v1/registration", body);
+export const testRegistrationEmail = (email: string) => post<{ sent: boolean }>("/api/admin/v1/registration/test-email", { email }, 45000);
+export const adminInvitations = (cursor: string | null, status = "all", limit = 50) => request<InvitationPage>(`/api/admin/v1/registration/invites?cursor=${cursor ?? "0"}&status=${encodeURIComponent(status)}&limit=${limit}`);
+export const createInvitations = (body: { count: number; expires_at: number; quota_bytes: number | null }) => post<{ invites: Invitation[] }>("/api/admin/v1/registration/invites", body);
+export const revokeInvitation = (id: number) => post<void>(`/api/admin/v1/registration/invites/${id}/revoke`, {});
+/** 邀请凭据放在片段中，不进入 HTTP 请求、反向代理日志或 Referer。 */
+export const invitationUrl = (code: string) => `${userSiteOrigin()}/register#invite=${encodeURIComponent(code)}`;
 
 /** remember 为 true 时服务端签发 30 天的长期会话（服务重启后仍有效）；否则 12 小时。 */
 export async function login(username: string, password: string, remember = false): Promise<Session> {

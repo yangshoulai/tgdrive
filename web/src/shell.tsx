@@ -218,12 +218,14 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
   const usernameInput = useRef<HTMLInputElement>(null);
   const [passkeyCapability, setPasskeyCapability] = useState<api.PasskeyCapability | null>(null);
   const [usingPasskey, setUsingPasskey] = useState(false);
+  const [registrationOpen, setRegistrationOpen] = useState(false);
   const mounted = useRef(true), passkeyController = useRef<AbortController | null>(null);
   useEffect(() => { document.title = `登录 · ${BRAND}`; }, []);
   useEffect(() => {
     mounted.current = true;
     const load = new AbortController();
     void api.passkeyStatus(load.signal).then(value => { if (mounted.current) setPasskeyCapability(value); }).catch(() => undefined);
+    void api.registrationConfig(load.signal).then(value => { if (mounted.current) setRegistrationOpen(value.enabled); }).catch(() => undefined);
     return () => { mounted.current = false; load.abort(); passkeyController.current?.abort(); };
   }, []);
   function accept(session: api.Session) {
@@ -264,7 +266,7 @@ export function LoginPage({ onSuccess, notice }: { onSuccess: (session: api.Sess
   const passkeyReason = passkeyCapability ? passkeyUnavailable(passkeyCapability) : null;
   return (
     <AuthLayout admin={false} title="登录" description="登录你的文件空间。"
-      footer={<><a href="/docs">使用文档</a><span>没有账号？请联系管理员创建。</span></>}>
+      footer={<><a href="/docs">使用文档</a>{registrationOpen ? <span>还没有账号？<a href="/register">注册账号</a></span> : <span>没有账号？请联系管理员创建。</span>}</>}>
       {notice}
       <form className="form" onSubmit={submit} noValidate>
         <Field label="邮箱" htmlFor="login-username"

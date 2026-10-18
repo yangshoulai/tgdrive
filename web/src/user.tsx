@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { BRAND } from "./brand";
+import { RegisterPage } from "./register";
 import * as api from "./api";
 import { type CacheStats, cacheStats, cacheSupported, startLocalCache } from "./cache-client";
 import { DocsPage } from "./docs/docs";
@@ -34,6 +35,7 @@ import { onThemeChange, setThemePreference, themePreference, type ThemePreferenc
  */
 export function App() {
   const path = window.location.pathname;
+  if (path === "/register" || path === "/register/") return <RegisterPage />;
   if (path === "/docs" || path.startsWith("/docs/")) return <DocsEntry />;
   const share = path.match(/^\/s\/([A-Za-z0-9_-]+)/);
   if (share) return <SharePage token={share[1]} />;
