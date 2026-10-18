@@ -555,7 +555,8 @@ class AssistantTests(AssistantCase):
             self.model.replies = [Reply(tool_calls=[ToolCall(f"id_{n}", "get_context", "{}") for n in range(3)]), answer("已达到上限")]
             await self.send(user, conversation, "查上下文")
             tools = [m for m in await self.messages(user, conversation) if m["role"] == "tool"]
-            self.assertEqual([m["status"] for m in tools], ["ok", "error", "error"])
+            self.assertEqual([m["status"] for m in tools], ["ok", "limited", "limited"])
+            self.assertTrue(all("工具调用次数上限" in m["summary"] for m in tools[1:]))
             self.assertEqual(self.app.metadata.db.execute("SELECT tool_calls FROM assistant_runs").fetchone()[0], 1)
         self.run_async(run())
 

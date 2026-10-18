@@ -16,7 +16,7 @@ from ..metadata import Metadata
 LIMITS: dict[str, tuple[int, int, int, str]] = {
     "max_steps": (40, 1, 200, "每轮模型调用次数"),
     "max_tool_calls": (150, 1, 1000, "每轮工具调用总数"),
-    "parallel_calls": (8, 1, 32, "单次模型回复中的并行工具调用数"),
+    "parallel_calls": (8, 1, 32, "同时执行的工具调用数"),
     "repeat_threshold": (4, 2, 20, "相同工具与参数的重复调用次数"),
     "error_threshold": (8, 1, 50, "连续工具错误次数"),
     "run_seconds": (900, 30, 7200, "每轮最长运行时间（秒）"),

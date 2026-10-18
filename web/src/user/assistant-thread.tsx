@@ -241,13 +241,14 @@ export function copyMessage(text: string) {
 function Process({ steps, live }: { steps: Step[]; live: boolean }) {
   const [open, setOpen] = useState(false);
   const tools = steps.filter(step => step.kind === "tool");
+  const executed = tools.filter(step => step.kind === "tool" && step.message?.status !== "limited" && step.message?.status !== "cancelled");
   const failed = tools.filter(step => step.kind === "tool" && step.message?.status === "error").length;
   const thinkingMs = steps.reduce((sum, step) => sum + (step.kind === "thinking" ? step.ms ?? 0 : 0), 0);
   const thought = steps.some(step => step.kind === "thinking");
   const toolMs = tools.reduce((sum, step) => sum + (step.kind === "tool" ? step.message?.duration_ms ?? 0 : 0), 0);
   // 运行中始终展开；只有一个思考步骤时直接显示，不再套一层折叠。
   if (live || (steps.length === 1 && steps[0].kind === "thinking")) return <div className="ai-process">{steps.map(step => <StepView key={step.key} step={step} />)}</div>;
-  const parts = [thought ? (thinkingMs ? `思考 ${seconds(thinkingMs)}` : "思考") : "", tools.length ? `使用 ${tools.length} 个工具` : "",
+  const parts = [thought ? (thinkingMs ? `思考 ${seconds(thinkingMs)}` : "思考") : "", executed.length ? `使用 ${executed.length} 个工具` : "",
     toolMs >= 1000 ? `耗时 ${seconds(toolMs)}` : ""].filter(Boolean);
   return <div className={`ai-process is-collapsible${open ? " is-open" : ""}`}>
     <button type="button" className="ai-process-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
@@ -318,10 +319,11 @@ function ToolStep({ message, pending }: { message?: ai.ChatMessage; pending?: { 
   const [open, setOpen] = useState(false);
   const name = message?.name ?? pending?.name;
   const failed = message?.status === "error";
+  const skipped = message?.status === "limited" || message?.status === "cancelled";
   const arg = primaryArg(message?.arguments);
-  const state = pending ? "is-running" : failed ? "is-error" : "is-ok";
+  const state = pending ? "is-running" : failed ? "is-error" : skipped ? "is-skipped" : "is-ok";
   return <div className={`ai-step ai-tool ${state}${open ? " is-open" : ""}`}>
-    <span className="ai-step-dot" aria-hidden="true">{pending ? <ActivityDots /> : <Icon name={failed ? "alert" : toolIcon(name)} size={12} />}</span>
+    <span className="ai-step-dot" aria-hidden="true">{pending ? <ActivityDots /> : <Icon name={failed ? "alert" : skipped ? "stop" : toolIcon(name)} size={12} />}</span>
     <div className="ai-tool-body">
       <button type="button" className="ai-tool-head" aria-expanded={open} disabled={!message} onClick={() => setOpen(value => !value)}>
         <strong>{message?.label ?? pending?.label ?? name}</strong>

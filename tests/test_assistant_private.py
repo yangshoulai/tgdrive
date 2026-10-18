@@ -2,7 +2,9 @@
 import json
 
 from tests.test_assistant import AssistantCase, answer, call
+from tests.test_assistant_loop import folder_calls
 from tests.test_assistant_actions import ActionHelpers
+from tgdrive.assistant.providers import Reply
 
 PRIVATE = "/api/user/v1/private/assistant"
 TABLES = ("assistant_conversations", "assistant_messages", "assistant_runs", "assistant_actions", "assistant_collections")
@@ -45,6 +47,26 @@ class PrivateAssistantTests(ActionHelpers, AssistantCase):
 
     def counts(self):
         return {table: self.app.metadata.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
+
+    def test_private_large_tool_batch_finishes_in_memory(self):
+        async def run():
+            admin, _, model = await self.setup_assistant()
+            await self.enable_private(admin, model)
+            await self.req("POST", "/api/admin/v1/assistant/limits",
+                           {"parallel_calls": 8, "repeat_threshold": 10, "error_threshold": 5}, admin)
+            user = await self.unlock(await self.client.login("user", "alice@example.com", "alice password"))
+            conversation = await self.private_conversation(user)
+            before = self.counts()
+            calls = folder_calls(23)
+            self.model.replies = [Reply(tool_calls=calls), answer("全部处理完成。")]
+            _, result = await self.private_send(user, conversation, "处理私密空间中的相册")
+            self.assertEqual(self.service.runs[result["run_id"]].stop_reason, "completed")
+            tools = await self.private_tools(user, conversation)
+            self.assertEqual([m["status"] for m in tools], ["ok"] * 23)
+            self.assertEqual([m["call_id"] for m in tools], [c.id for c in calls])
+            self.assertEqual(self.counts(), before, "分批调度仍须遵守私密对话只存在内存中的约定")
+            self.assertIn("最多同时执行 8 个", self.model.calls[0]["messages"][-1]["content"])
+        self.run_async(run())
 
     def test_private_requires_admin_opt_in_model_and_notice(self):
         async def run():

@@ -37,7 +37,7 @@ from .channels import ChannelStore
 from .config import LIMITS, PRIVATE_NOTICE, AssistantConfig
 from .private_chat import MemoryTrace, RoutedTrace, is_private
 from .guard import SecretGuard
-from .providers import ProviderError, ToolDef
+from .providers import ProviderError, ToolCall, ToolDef
 from .tools import (
     TOOLS,
     ToolContext,
@@ -1771,6 +1771,46 @@ class AssistantService:
             body["images"] = images
         return body
 
+    @staticmethod
+    def _skipped_tool(call: ToolCall, reason: str, *, status: str = "limited") -> dict:
+        """未执行的调用也补齐结果，但不作为工具执行错误或重复调用计数。"""
+        try:
+            arguments = json.loads(call.arguments or "{}")
+        except ValueError:
+            arguments = {}
+        payload = {"error": reason}
+        return {"call_id": call.id, "name": call.name, "label": TOOLS[call.name].label if call.name in TOOLS else call.name,
+                "arguments": arguments if isinstance(arguments, dict) else {}, "status": status,
+                "summary": reason, "result": payload, "items": None, "duration_ms": 0, "truncated": False,
+                "event": None, "ends_turn": False, "model_content": prompts.wrap_result(call.name, status, payload, False)}
+
+    async def _record_tool(self, state: RunState, body: dict) -> None:
+        seq = self.trace.append(state.conversation_id, state.id, "tool", body, tool_name=body["name"])
+        await state.emit({"type": "message", "message": self._public_message(
+            {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "tool", "tool_name": body["name"], **body})})
+        if body["event"]:
+            await state.emit({"type": "tool_event", **body["event"]})
+
+    async def _tool_batch(self, state: RunState, calls: list[ToolCall], tools: dict, limits: dict,
+                          shared: dict, deadline: float) -> list[dict]:
+        """整轮时限内执行一批；取消时回收全部子任务，保留已经完成的结果。"""
+        tasks = [asyncio.create_task(self._execute(state, call, tools, limits, shared)) for call in calls]
+        try:
+            done, _ = await asyncio.wait(tasks, timeout=max(0, deadline - time.monotonic()),
+                                         return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                if task.cancelled():
+                    raise asyncio.CancelledError()
+                if error := task.exception():
+                    raise error
+            return [task.result() if task in done else self._skipped_tool(
+                call, "已达到本轮运行时间上限，本次调用已取消") for call, task in zip(calls, tasks)]
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _run(self, state: RunState) -> None:
         status, stop_reason = "completed", "completed"
         steps = tool_calls = 0
@@ -1836,6 +1876,7 @@ class AssistantService:
                     used=_fmt(usage["used_bytes"] if usage else 0),
                     quota="不限" if not usage or usage["quota_bytes"] is None else _fmt(usage["quota_bytes"]),
                     remaining_steps=max(0, limits["max_steps"] - steps), remaining_tools=max(0, limits["max_tool_calls"] - tool_calls),
+                    parallel_calls=limits["parallel_calls"],
                     pending="；".join(f"#{a['id']}（{KINDS.get(a['kind'], a['kind'])}，{a['count']} 项）" for a in pending) or "无")}
                 definitions = [] if forced_final else [spec.definition() for spec in tools.values()]
                 # 系统提示词、工具定义与动态上下文块也占窗口（§23）。
@@ -1883,34 +1924,55 @@ class AssistantService:
                 await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "assistant", **assistant}})
                 if not calls:
                     break
-                allowed = min(limits["parallel_calls"], max(0, limits["max_tool_calls"] - tool_calls))
-                accepted = calls[:allowed]
-                results = await asyncio.gather(*(self._execute(state, call, tools, limits, shared) for call in accepted))
-                for call in calls[allowed:]:
-                    results.append({"call_id": call.id, "name": call.name, "label": call.name, "arguments": {}, "status": "error",
-                                    "summary": "本轮工具调用过多", "result": {"error": "本轮工具调用过多"}, "items": None,
-                                    "duration_ms": 0, "truncated": False, "event": None, "ends_turn": False,
-                                    "model_content": prompts.wrap_result(call.name, "error", {"error": "本轮工具调用过多"}, False)})
                 ends = False
-                looping = False
-                for call, body in zip(calls, results):
-                    tool_calls += int(call in accepted)
-                    seq = self.trace.append(state.conversation_id, state.id, "tool", body, tool_name=body["name"])
-                    await state.emit({"type": "message", "message": self._public_message({"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "tool", "tool_name": body["name"], **body})})
-                    if body["event"]:
-                        await state.emit({"type": "tool_event", **body["event"]})
-                    ends = ends or bool(body.get("ends_turn"))
-                    errors = errors + 1 if body["status"] != "ok" else 0
-                    key = (call.name, json.dumps(body["arguments"], sort_keys=True, ensure_ascii=False))
-                    repeats[key] += 1
-                    if repeats[key] > limits["repeat_threshold"]:
-                        looping = True
+                looping = too_many_errors = False
+                offset = 0
+                skipped_status = "limited"
+                skipped_reason = ""
+                while offset < len(calls):
+                    self._validate(state)
+                    if tool_calls >= limits["max_tool_calls"]:
+                        skipped_reason = "已达到本轮工具调用次数上限，本次调用未执行"
+                        break
+                    if state.input_tokens + state.output_tokens >= limits["run_tokens"]:
+                        skipped_reason = "已达到本轮 token 预算，本次调用未执行"
+                        break
+                    if time.monotonic() >= deadline:
+                        skipped_reason = "已达到本轮运行时间上限，本次调用未执行"
+                        break
+                    size = min(limits["parallel_calls"], limits["max_tool_calls"] - tool_calls)
+                    batch = calls[offset:offset + size]
+                    tool_calls += len(batch)
+                    results = await self._tool_batch(state, batch, tools, limits, shared, deadline)
+                    offset += len(batch)
+                    for call, body in zip(batch, results):
+                        await self._record_tool(state, body)
+                        if body["status"] == "limited":
+                            continue
+                        ends = ends or bool(body.get("ends_turn"))
+                        errors = errors + 1 if body["status"] != "ok" else 0
+                        too_many_errors = too_many_errors or errors >= limits["error_threshold"]
+                        # 使用调用原文归一化，避免未解析参数等情况把不同调用合并成同一个空参数。
+                        try:
+                            arguments = json.dumps(json.loads(call.arguments or "{}"), sort_keys=True, ensure_ascii=False)
+                        except ValueError:
+                            arguments = call.arguments
+                        key = (call.name, arguments)
+                        repeats[key] += 1
+                        looping = looping or repeats[key] > limits["repeat_threshold"]
+                    if ends or looping or too_many_errors:
+                        skipped_status = "cancelled"
+                        skipped_reason = ("等待用户回复或确认，本次调用未执行" if ends else
+                                          "检测到重复工具调用，本次调用未执行" if looping else "工具连续出错，本次调用未执行")
+                        break
+                for call in calls[offset:]:
+                    await self._record_tool(state, self._skipped_tool(call, skipped_reason, status=skipped_status))
                 if ends:
                     stop_reason = "waiting_user"
                     break
                 if looping:
                     raise StopRun("loop", "助手重复调用了相同的工具，已停止。请换一种说法或缩小范围。")
-                if errors >= limits["error_threshold"]:
+                if too_many_errors:
                     raise StopRun("errors", "工具连续出错，已停止。请换一种说法或缩小范围。")
         except asyncio.CancelledError:
             status, stop_reason = "stopped", "stopped"

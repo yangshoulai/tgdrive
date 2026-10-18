@@ -101,14 +101,16 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
 
 
 def context_block(*, scope_root: str, view: str, location: str, used: str, quota: str, remaining_steps: int,
-                  remaining_tools: int, pending: str = "无", private_remaining: int | None = None) -> str:
+                  remaining_tools: int, parallel_calls: int, pending: str = "无", private_remaining: int | None = None) -> str:
+    scheduling = (f"工具调度：最多同时执行 {parallel_calls} 个，超出时分批排队；"
+                  "只并行调用互不依赖的工具，有依赖时等待前一步结果。\n")
     if private_remaining is not None:
         # 私密对话：位置相对私密空间根，另给出授权剩余时间，便于在快锁定时提醒用户（§24.7）。
         return (f"<context>\n当前位置：私密空间 {location}\n私密空间授权剩余：约 {max(0, private_remaining) // 60} 分钟（用户操作会续期）\n"
                 f"存储用量：已用 {used} / 配额 {quota}\n待确认操作：{pending}\n"
-                f"本轮剩余预算：模型调用 {remaining_steps} 次，工具调用 {remaining_tools} 次\n</context>")
+                f"本轮剩余预算：模型调用 {remaining_steps} 次，工具调用 {remaining_tools} 次\n{scheduling}</context>")
     return (f"<context>\n当前作用域：{scope_root}\n用户所在页面：{view}（位置 {location}）\n存储用量：已用 {used} / 配额 {quota}\n"
-            f"待确认操作：{pending}\n本轮剩余预算：模型调用 {remaining_steps} 次，工具调用 {remaining_tools} 次\n</context>")
+            f"待确认操作：{pending}\n本轮剩余预算：模型调用 {remaining_steps} 次，工具调用 {remaining_tools} 次\n{scheduling}</context>")
 
 
 def action_event(action_id: str, kind: str, count: int, decision: str, result: dict | None = None) -> str:

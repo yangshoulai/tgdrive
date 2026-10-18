@@ -183,7 +183,7 @@ export type ChatMessage = {
   text?: string; scope?: string; location?: string;
   tool_calls?: { id: string; name: string; arguments: string }[]; model_id?: number; input_tokens?: number; output_tokens?: number;
   reasoning?: string; reasoning_ms?: number | null;
-  call_id?: string; name?: string; label?: string; arguments?: Record<string, unknown>; status?: "ok" | "error"; summary?: string;
+  call_id?: string; name?: string; label?: string; arguments?: Record<string, unknown>; status?: "ok" | "error" | "limited" | "cancelled"; summary?: string;
   result?: unknown; items?: number | null; duration_ms?: number; truncated?: boolean; event?: ToolEvent | null;
   type?: string; retry?: boolean; action_id?: string; attachment?: SnapshotAttachment; mentions?: string[]; attachments?: MessageAttachment[];
 };

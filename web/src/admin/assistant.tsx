@@ -937,7 +937,7 @@ function ToolParamsDialog({ tool, values, onClose, onApply }: { tool: ai.AdminTo
 /* ---------- 限制与额度 ---------- */
 
 const LIMIT_GROUPS: { title: string; description: string; keys: string[] }[] = [
-  { title: "Agent 循环", description: "每一轮对话（一条用户消息触发的处理）的上限。触达后助手会总结已完成的部分并停止。", keys: ["max_steps", "max_tool_calls", "parallel_calls", "repeat_threshold", "error_threshold", "run_seconds", "tool_seconds", "tool_result_bytes", "run_tokens"] },
+  { title: "Agent 循环", description: "每一轮对话（一条用户消息触发的处理）的运行限制。工具调用超过同时执行数时会分批排队；触达总次数、时间或预算上限后，助手会总结已完成的部分并停止。", keys: ["max_steps", "max_tool_calls", "parallel_calls", "repeat_threshold", "error_threshold", "run_seconds", "tool_seconds", "tool_result_bytes", "run_tokens"] },
   { title: "并发与容量", description: "单进程部署：并发过高会占用内存与模型服务额度。", keys: ["user_concurrency", "global_concurrency", "user_messages_per_minute", "max_messages", "max_conversations", "action_items", "download_urls"] },
 ];
 
