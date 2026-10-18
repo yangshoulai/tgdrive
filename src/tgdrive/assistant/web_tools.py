@@ -110,7 +110,7 @@ async def analyze_page(ctx: ToolContext, args: dict) -> ToolOutput:
     if snapshot_id and ctx.private:
         raise ToolError("私密对话不接受抓取脚本的页面快照，请让用户在消息里给出网页链接")
     if url:
-        ctx.check_url(url.strip(), "user")
+        ctx.check_url(url.strip(), "page")
     if snapshot_id:
         snapshot = _record(ctx, snapshot_id, kind="snapshot")
         pages, start_url, source = snapshot["urls"], snapshot["urls"][0]["url"], snapshot["source"]
@@ -300,7 +300,7 @@ async def propose_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
         if not isinstance(urls, list) or not all(isinstance(url, str) for url in urls):
             raise ToolError("参数 urls 需要链接列表")
         for url in dict.fromkeys(urls):
-            ctx.check_url(url.strip(), "user")
+            ctx.check_url(url.strip(), "page")
             try:
                 clean = checked_url(url.strip())
             except ValueError as exc:

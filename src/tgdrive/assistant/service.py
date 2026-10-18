@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import SimpleNamespace
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from ..api import normalize_user_path
@@ -77,6 +77,19 @@ def display(key: str) -> str:
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'`）】」』，。；、]+", re.IGNORECASE)
+
+
+# 网页工具：它们的成功结果里出现的同站地址可以继续访问（§24.5.2「站内地址」）。
+WEB_RESULT_TOOLS = frozenset({"http_request", "analyze_page", "collect_gallery", "get_collection"})
+
+
+def _host(url: str) -> str:
+    """比对站内地址用的主机名：小写，去掉开头的 www.。"""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
 
 
 def _urls(text: object) -> set[str]:
@@ -300,33 +313,43 @@ class AssistantService:
             except Exception:
                 self.forget_private(access=binding.access)
 
-    def _url_pool(self, conversation_id: str) -> tuple[set[str], set[str], list[str]]:
-        """私密对话中出现过的地址：用户消息里的（user）、成功的工具结果里的（seen），以及用户消息原文。"""
-        user, seen, texts = set(), set(), []
+    def _url_pool(self, conversation_id: str) -> tuple[set[str], set[str], set[str], list[str]]:
+        """私密对话中出现过的地址：用户消息里的（user）、成功的工具结果里的（seen）、网页工具结果里的（web），以及用户消息原文。"""
+        user, seen, web, texts = set(), set(), set(), []
         for message in self.memory.messages(conversation_id, limit=5000):
             if message["role"] == "user":
                 user |= _urls(message.get("text"))
                 texts.append(str(message.get("text") or ""))
             elif message["role"] == "tool" and message.get("status") == "ok":
                 # 只认成功的工具结果：错误文案可能回显模型自己给出的地址。
-                seen |= _urls(message.get("model_content"))
-        return user, seen, texts
+                found = _urls(message.get("model_content"))
+                seen |= found
+                if message.get("tool_name") in WEB_RESULT_TOOLS:
+                    web |= found
+        return user, seen, web, texts
 
     def _url_allowed(self, conversation_id: str):
-        """§24.5.2：user = 用户消息里原样出现的地址；seen = 用户地址加上本对话工具结果里出现过的地址。"""
+        """§24.5.2：user = 用户消息里原样出现的地址；page = 用户地址加上网页工具结果里与用户地址同主机的地址（站内地址）；
+        seen = 用户地址加上本对话工具结果里出现过的地址。"""
         def allowed(url: str, level: str) -> bool:
             if not isinstance(url, str):
                 return False
             candidate = url.strip().split("#", 1)[0]
-            user, seen, texts = self._url_pool(conversation_id)
+            user, seen, web, texts = self._url_pool(conversation_id)
             if level == "text":
                 # 解析下载来源的文本（链接或 curl 命令）：原样出现在用户消息里，或每一行都是用户给出的链接。
                 text = url.strip()
                 lines = [line.strip() for line in text.splitlines() if line.strip()]
                 return bool(text) and (any(text in item for item in texts)
                                        or all(line.split("#", 1)[0] in user for line in lines))
+            stripped = candidate.rstrip(".,;:!?)]}")
+            if level == "page":
+                if candidate in user or stripped in user:
+                    return True
+                hosts = {_host(item) for item in user} - {""}
+                return (candidate in web or stripped in web) and _host(candidate) in hosts
             pool = user if level == "user" else user | seen
-            return candidate in pool or candidate.rstrip(".,;:!?)]}") in pool
+            return candidate in pool or stripped in pool
         return allowed
 
     def _full_access(self, user_id: int) -> bool:

@@ -855,7 +855,7 @@ function Welcome({ location, view, privateMode, onPick }: { location: string; vi
     <span className="assistant-welcome-icon"><AssistantMark size={36} /></span>
     <span className="assistant-eyebrow"><Icon name="lock" size={12} />私密对话</span>
     <h3>只在私密空间里工作。</h3>
-    <p className="muted">助手只能看到私密空间，对话不保存，锁定后立即清除。<br />联网只访问你在消息里给出的链接。</p>
+    <p className="muted">助手只能看到私密空间，对话不保存，锁定后立即清除。<br />联网只访问你给出的链接及其网站里的同站页面。</p>
     <div className="assistant-starters">{[
       { title: "看懂空间", description: "用量与文件分布", text: "统计私密空间的空间占用，按类型分组", icon: "pulse" as IconName },
       { title: "找到大文件", description: "发现空间占用大户", text: "私密空间里最大的 10 个文件是什么？", icon: "search" as IconName },

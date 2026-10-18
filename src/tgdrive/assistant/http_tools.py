@@ -46,8 +46,8 @@ async def http_request(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
         raise ToolError("当前无法发起 HTTP 请求")
     raw = _str(args, "url", limit=16384)
-    # 私密对话只访问用户在消息里原样给出的地址（§24.5.2）。
-    ctx.check_url(raw, "user")
+    # 私密对话只访问用户在消息里原样给出的地址，或网页结果里与之同站的地址（§24.5.2）。
+    ctx.check_url(raw, "page")
     try:
         url = checked_url(raw)
     except ValueError as exc:

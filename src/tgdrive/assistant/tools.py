@@ -120,9 +120,12 @@ class ToolContext:
             await stream.aclose()
 
     def check_url(self, url: str, level: str = "user") -> None:
-        """私密对话的地址规则：服务端请求只用用户消息里给出的地址，需要用户点击的只用对话中出现过的完整地址。"""
+        """私密对话的地址规则：服务端请求只用用户消息里给出的地址（page 级另可用网页工具结果里的同站地址），
+        需要用户点击的只用对话中出现过的完整地址。"""
         if self.url_allowed is not None and not self.url_allowed(url, level):
             raise ToolError("这个地址不是用户在消息里给出的，私密对话不能使用。请让用户在消息里给出完整链接。" if level == "user" else
+                            "这个地址既不是用户在消息里给出的，也不是从用户给出的网站页面里找到的同站地址，私密对话不能访问。"
+                            "请原样使用网页分析或 HTTP 请求结果里出现的同站链接（不能拼接或改写），或让用户在消息里给出链接。" if level == "page" else
                             "私密对话只能打开对话中出现过的完整地址，不能拼接或改写。请让用户在消息里给出链接。")
 
     # ---------- 路径 ----------
@@ -261,13 +264,13 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     **{name: ("allow", "只作用于私密空间；需设备已信任且已解锁") for name in ("ui_cache_status", "ui_cache_files", "ui_clear_cache")},
     "ui_copy": ("limited", "卡片显示完整文本，提示可能进入剪贴板历史"),
     "browser_open_url": ("limited", "只能打开对话中出现过的完整地址"),
-    "propose_downloads": ("limited", "只用用户在消息里给出的链接，保存到私密空间"),
+    "propose_downloads": ("limited", "只用用户给出的链接或其网站页面里找到的同站链接，保存到私密空间"),
     "parse_download_source": ("limited", "只用用户在消息里给出的链接"),
     "propose_download_control": ("allow", "只能操作私密下载任务"),
-    "analyze_page": ("limited", "起始地址必须是用户在消息里给出的链接，不接受抓取脚本快照"),
+    "analyze_page": ("limited", "地址必须是用户给出的链接或其网站页面里找到的同站链接，不接受抓取脚本快照"),
     "collect_gallery": ("limited", "只按隔离分析的规则翻页，不离开起始网站"),
     "get_collection": ("limited", "只读取本对话的结果集"),
-    "http_request": ("limited", "只访问用户在消息里给出的链接"),
+    "http_request": ("limited", "只访问用户给出的链接或其网站页面里找到的同站链接"),
     "propose_save_attachment": ("never", "私密对话暂不提供附件"),
 }
 

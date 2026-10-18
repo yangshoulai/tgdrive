@@ -205,6 +205,37 @@ class PrivateAssistantTests(ActionHelpers, AssistantCase):
             self.assertEqual(tools[2]["status"], "ok", tools[2]["result"])
         self.run_async(run())
 
+    def test_url_rules_allow_same_site_links_found_by_web_tools(self):
+        async def run():
+            admin, _, model = await self.setup_assistant()
+            await self.enable_private(admin, model)
+            user = await self.unlock(await self.client.login("user", "alice@example.com", "alice password"))
+            conversation = await self.private_conversation(user)
+            self.model.replies = [answer("好")]
+            await self.private_send(user, conversation, "爬取 https://www.photos.example.com/albums 里的所有相册")
+            memory = self.service.memory
+            # 相册列表页的分析结果：同站的相册地址可以继续访问，其他网站的不行。
+            memory.append(conversation, None, "tool", {"status": "ok", "model_content": json.dumps({"samples": [
+                "https://photos.example.com/album/1", "https://www.photos.example.com/album/2?page=3", "https://evil.example/album/3"]})},
+                tool_name="analyze_page")
+            # 私密文件里出现的同站地址、失败结果里回显的地址都不算。
+            memory.append(conversation, None, "tool", {"status": "ok", "model_content": "见 https://photos.example.com/album/9"}, tool_name="read_text_file")
+            memory.append(conversation, None, "tool", {"status": "error", "model_content": "https://photos.example.com/album/8"}, tool_name="http_request")
+            allowed = self.service._url_allowed(conversation)
+            self.assertTrue(allowed("https://www.photos.example.com/albums", "page"))
+            self.assertTrue(allowed("https://photos.example.com/album/1", "page"))
+            self.assertTrue(allowed("https://www.photos.example.com/album/2?page=3#top", "page"))
+            self.assertFalse(allowed("https://photos.example.com/album/2?page=3&d=secret", "page"), "不能改写查询串")
+            self.assertFalse(allowed("https://evil.example/album/3", "page"), "不能离开用户给出的网站")
+            self.assertFalse(allowed("https://photos.example.com/album/9", "page"), "私密文件里的地址不能由服务端请求")
+            self.assertFalse(allowed("https://photos.example.com/album/8", "page"))
+            self.assertFalse(allowed("https://photos.example.com/album/1", "user"), "user 级仍只认用户消息")
+            # 工具层：http_request 用 page 级，错误文案说明可以用同站链接。
+            self.model.replies = [call("http_request", url="https://evil.example/album/3"), answer("好")]
+            await self.private_send(user, conversation, "继续")
+            self.assertIn("同站", (await self.private_tools(user, conversation))[-1]["result"]["error"])
+        self.run_async(run())
+
     def test_private_actions_stay_inside_and_move_out_requires_verification(self):
         async def run():
             admin, _, model = await self.setup_assistant()
