@@ -11,6 +11,7 @@ import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thu
 import { Notice, ButtonLink, Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 
 import { UploadDialog, type UploadQueue } from "./uploads";
+import { UploadPicker, droppedUploadFiles, uploadFiles, type UploadFile } from "./upload-selection";
 import { PrivateTransferDialog } from "./private-access";
 import type { PreviewPlayback } from "../files";
 import { usePrivateToast } from "./private-session";
@@ -61,11 +62,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const surface = useRef<HTMLElement>(null);
   const dragKeys = useRef<string[]>([]);
   const [folderOpen, setFolderOpen] = useState(false);
-  const [pendingUpload, setPendingUpload] = useState<File[] | null>(null);
-  useEffect(() => { if (incoming?.length) { setPendingUpload(incoming); onIncomingTaken?.(); } }, [incoming, onIncomingTaken]);
+  const [pendingUpload, setPendingUpload] = useState<UploadFile[] | null>(null);
+  useEffect(() => { if (incoming?.length) { startUpload(incoming); onIncomingTaken?.(); } }, [incoming, onIncomingTaken]);
   const [dragging, setDragging] = useState(false);
+  const [readingUpload, setReadingUpload] = useState(false);
+  const uploadReadVersion = useRef(0);
+  useEffect(() => { uploadReadVersion.current++; setReadingUpload(false); return () => { uploadReadVersion.current++; }; }, [prefix]);
   const lastUploadRevision = useRef(uploadRevision);
-  const fileInput = useRef<HTMLInputElement>(null);
   const breadcrumbNav = useRef<HTMLElement>(null);
   const dragDepth = useRef(0);
   const name = prefix !== root ? baseName(prefix) : rootName;
@@ -285,8 +288,24 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     } catch (reason) { notify.error(api.errorMessage(reason, "删除失败，请稍后重试")); }
   }
   function startUpload(list: FileList | File[] | null) {
-    const picked = Array.from(list ?? []);
-    if (picked.length) setPendingUpload(picked);
+    if (!list) return;
+    uploadReadVersion.current++; setReadingUpload(false);
+    try {
+      const picked = uploadFiles(list);
+      if (picked.length) setPendingUpload(picked);
+      else notify.info("没有可上传的文件，空文件夹不会上传");
+    } catch (reason) { notify.error(api.errorMessage(reason, "无法读取所选文件，请重新选择")); }
+  }
+  async function dropUpload(transfer: DataTransfer) {
+    const version = ++uploadReadVersion.current;
+    setReadingUpload(true);
+    try {
+      const picked = await droppedUploadFiles(transfer);
+      if (version !== uploadReadVersion.current) return;
+      if (picked.length) setPendingUpload(picked);
+      else notify.info("没有可上传的文件，空文件夹不会上传");
+    } catch (reason) { if (version === uploadReadVersion.current) notify.error(api.errorMessage(reason, "无法读取文件夹，请重新选择")); }
+    finally { if (version === uploadReadVersion.current) setReadingUpload(false); }
   }
   /** 逐项移动；文件夹连同内容一起移动，公开链接随文件保留。 */
   async function moveEntries(targets: Entry[], dest: string, conflict: api.MoveConflict = "rename") {
@@ -522,12 +541,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       onDragEnter={event => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current++; setDragging(true); }}
       onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }}
-      onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); startUpload(event.dataTransfer.files); }}>
+      onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); if (!pendingUpload && event.dataTransfer.types.includes("Files")) void dropUpload(event.dataTransfer); }}>
       <PageHeader title={query ? `搜索“${query}”` : name}
         actions={<>
           <Button icon="folderPlus" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
-          <Button variant="primary" icon="upload" onClick={() => fileInput.current?.click()}>上传</Button>
-          <input ref={fileInput} type="file" multiple hidden onChange={event => { startUpload(event.target.files); event.target.value = ""; }} />
+          <UploadPicker onPick={startUpload} />
         </>}>
         {(prefix !== root || query) && <nav ref={breadcrumbNav} className="breadcrumbs file-breadcrumbs" aria-label="当前位置">
           <ol>
@@ -540,6 +558,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           </ol>
         </nav>}
       </PageHeader>
+
+      {readingUpload && <Notice icon={false} role="status"><span className="spinner" />正在读取待上传的文件夹…</Notice>}
 
       {selected.size > 0 ? (
         <div className="toolbar selection-bar" role="toolbar" aria-label="批量操作">
@@ -580,7 +600,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           : kind && !query ? <EmptyState icon="search" title={`${filter === "public" ? "这个文件夹里没有公开的" : "这个文件夹里没有"}${api.kindFilterLabel(kind)}`} description="类型筛选只看当前文件夹，不包含子文件夹；搜索时会在全部文件中按类型查找。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
           : query ? <EmptyState icon="search" title={`没有找到包含“${query}”的${kind ? api.kindFilterLabel(kind) : "文件"}`} description="换个关键词，或检查拼写。" action={<Button onClick={() => { setSearch(""); setQuery(""); }}>清除搜索</Button>} />
             : filter === "public" ? <EmptyState icon="globe" title="这个文件夹里没有公开内容" description="在文件或文件夹的菜单中选择“公开分享”，即可生成任何人可访问的链接。" />
-              : <EmptyState icon="upload" title={prefix ? "这个文件夹是空的" : "上传你的第一个文件"} description="把文件拖到这里，或点击上传按钮。" action={<Button icon="upload" onClick={() => fileInput.current?.click()}>选择文件</Button>} />
+              : <EmptyState icon="upload" title={prefix ? "这个文件夹是空的" : "上传你的第一个文件"} description="把文件或文件夹拖到这里，或点击上传按钮。" action={<UploadPicker onPick={startUpload} />} />
         ) : layout === "list" ? (
           <div className="data-table file-table" role="table" aria-label="文件">
             <div className="data-row data-head" role="row">
@@ -722,7 +742,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       </Modal>}
 
       {pendingUpload && <UploadDialog files={pendingUpload} destination={prefix} onClose={() => setPendingUpload(null)}
-        onStart={(list, isPublic, destination) => { setPendingUpload(null); uploads.enqueue(list.map(file => ({ file, path: `${destination}${file.name}`, isPublic }))); }} />}
+        onStart={(list, isPublic, destination) => {
+          setPendingUpload(null);
+          uploads.enqueue(list.map(({ file, path }) => ({ file, path: `${destination}${path}`, isPublic,
+            publicFolder: isPublic && path.includes("/") ? `${destination}${path.slice(0, path.indexOf("/") + 1)}` : undefined })));
+        }} />}
       {folderOpen && <NameDialog title="新建文件夹" label="文件夹名称" confirm="创建" location={prefix} onClose={() => setFolderOpen(false)}
         onSubmit={async (value, destination) => { await api.makeFolder(`${destination}${value}`); notify.success(`已创建文件夹“${value}”`); setFolderOpen(false); await refreshList(); }} />}
       {renaming && <NameDialog privateSpace={privateSpace} title={renaming.kind === "folder" ? "重命名文件夹" : "重命名文件"} label="新名称" confirm="重命名" initial={baseName(renaming.key)} onClose={() => setRenaming(null)}

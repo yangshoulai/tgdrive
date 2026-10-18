@@ -1687,11 +1687,38 @@ html[data-input="keyboard"] .preview-code-editor .cm-editor.cm-focused { box-sha
 .share-status.is-public .switch-input:checked + .switch-track { background: var(--public); }
 
 /* 上传 */
-.upload-pick-list { display: grid; max-height: 280px; margin: 0; padding: 0; overflow-y: auto; border: 1px solid var(--line-soft); border-radius: var(--radius-md); list-style: none; }
-.upload-pick-list li { display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--line-soft); }
-.upload-pick-list li:last-child { border-bottom: 0; }
-.upload-pick-list .muted { font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
-.upload-pick-name { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-picker-trigger.icon-btn { display: inline-flex; justify-content: center; gap: 6px; width: auto; height: 34px; padding: 0 12px; background: var(--primary); color: var(--on-primary); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; }
+.upload-picker-trigger.icon-btn:hover, .upload-picker-trigger.icon-btn.is-active { background: var(--primary-hover); color: var(--on-primary); }
+.upload-selection { display: grid; gap: 12px; min-width: 0; }
+.upload-selection .search-input { width: 100%; }
+.upload-type-filters { margin: 0; padding: 2px; }
+.upload-tree-surface { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.upload-selection-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface-sunken); font-size: var(--text-sm); }
+.upload-selection-bar > label { display: inline-flex; align-items: center; gap: 10px; min-height: 40px; cursor: pointer; }
+.upload-selection-bar > .muted { font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.upload-tree-scroll { max-height: min(360px, 42dvh); overflow-y: auto; overscroll-behavior: contain; }
+.upload-tree { margin: 0; padding: 4px 0; list-style: none; }
+.upload-tree-row { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 42px; padding: 0 12px 0 calc(8px + var(--upload-depth) * 16px); font-size: var(--text-sm); }
+.upload-tree-row:hover { background: var(--surface-hover); }
+.upload-tree-check { display: flex; flex: none; align-items: center; justify-content: center; width: 28px; min-height: 40px; cursor: pointer; }
+.upload-tree-name { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; min-height: 40px; padding: 0; border: 0; border-radius: var(--radius-xs); background: transparent; color: inherit; font: inherit; text-align: left; }
+button.upload-tree-name { cursor: pointer; }
+.upload-tree-name > :not(:last-child) { flex: none; }
+.upload-tree-name > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-tree-spacer { width: 14px; }
+.upload-tree-meta { flex: none; font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.upload-tree-row.is-folder .upload-tree-name { font-weight: 500; }
+.upload-tree-row.is-excluded .upload-tree-name { color: var(--ink-3); }
+.upload-selection-hint { margin: 0; font-size: var(--text-xs); line-height: 1.6; }
+.upload-selection-empty { display: grid; justify-items: center; gap: 8px; padding: 32px 16px; color: var(--ink-3); font-size: var(--text-sm); }
+@media (max-width: 860px) {
+  .files-view .page-header-actions > .upload-picker-trigger { flex: 1 1 0; }
+  .upload-picker-trigger.icon-btn { min-height: 40px; }
+  .upload-type-filters .filter-chip { min-height: 36px; }
+  .upload-tree-row { padding-right: 8px; padding-left: calc(4px + var(--upload-depth) * 12px); }
+  .upload-tree-check { width: 40px; }
+  .upload-dialog .search-input input { font-size: var(--text-lg); }
+}
 
 /* 上传与离线下载托盘叠放在右下角，各自保持独立的卡片。 */
 /* 上传与离线下载托盘在页面底部居中；文件助手抽屉打开时居中在抽屉左侧的剩余区域（--assistant-occupied 由抽屉写入），

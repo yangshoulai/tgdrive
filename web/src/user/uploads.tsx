@@ -1,20 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import * as api from "../api";
 
 import { fingerprintFile, fingerprintSupported } from "../fingerprint";
-import { FileTile, getFileKind } from "../files";
+import { FileTile, baseName, getFileKind } from "../files";
 import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
 
 import { Notice, Badge, Button, Icon, IconButton, Modal, Switch, copyText, formatBytes, toast } from "../ui";
 import { DestinationPicker } from "./folders";
 import { TrayBar, TrayRing, type TrayState } from "./tray";
+import { UploadSelection, type UploadFile } from "./upload-selection";
 
 /* ---------- 上传 ---------- */
 
-export function UploadDialog({ files, destination: initialDestination, onClose, onStart }: { files: File[]; destination: string; onClose: () => void; onStart: (files: File[], isPublic: boolean, destination: string) => void }) {
+export function UploadDialog({ files, destination: initialDestination, onClose, onStart }: { files: UploadFile[]; destination: string; onClose: () => void; onStart: (files: UploadFile[], isPublic: boolean, destination: string) => void }) {
   const privateSpace = api.isPrivatePath(initialDestination);
-  const [list, setList] = useState(files);
+  const [selected, setSelected] = useState(() => new Set(files.map(item => item.path)));
+  const list = useMemo(() => files.filter(item => selected.has(item.path)), [files, selected]);
   const [destination, setDestination] = useState(initialDestination);
   const [ready, setReady] = useState(true);
   const [existing, setExisting] = useState<Set<string>>(new Set());
@@ -22,16 +24,23 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
   const [error, setError] = useState("");
   const [checkVersion, setCheckVersion] = useState(0);
   const [isPublic, setIsPublic] = useState(() => !privateSpace && localStorage.getItem("tgdrive:upload-public") === "1");
-  const total = list.reduce((sum, file) => sum + file.size, 0);
-  const conflicts = list.filter(file => existing.has(file.name.normalize("NFC"))).length;
-  useEffect(() => { if (!list.length) onClose(); }, [list.length]);
+  const hasFolders = files.some(item => item.path.includes("/"));
+  const hasLooseFiles = files.some(item => !item.path.includes("/"));
+  const total = list.reduce((sum, item) => sum + item.file.size, 0);
+  const conflicts = list.filter(item => existing.has(item.path)).length;
   useEffect(() => {
     let active = true;
     setChecking(true); setExisting(new Set()); setError("");
     const check = async () => {
+      // 根目录的保留名称不能让路径自动路由把普通上传误送进私密接口。
+      if (!privateSpace && list.some(item => {
+        const path = `${destination}${item.path}`;
+        return path === ".tgdrive" || path.startsWith(".tgdrive/");
+      })) throw new Error("“.tgdrive”在此位置不可用，请更改目标位置或取消勾选该项");
       const found = new Set<string>();
       for (let index = 0; index < list.length; index += 200) {
-        const result = await api.checkFiles(list.slice(index, index + 200).map(file => `${destination}${file.name}`));
+        if (!active) return;
+        const result = await api.checkFiles(list.slice(index, index + 200).map(item => `${destination}${item.path}`));
         if (!active) return;
         result.paths.forEach(path => found.add(path.slice(destination.length)));
       }
@@ -40,33 +49,29 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
     void check().catch(reason => { if (active) setError(api.errorMessage(reason, "无法检查目标位置，请重试")); })
       .finally(() => { if (active) setChecking(false); });
     return () => { active = false; };
-  }, [destination, list, checkVersion]);
+  }, [destination, list, checkVersion, privateSpace]);
   return (
-    <Modal title={`上传 ${list.length} 个文件`} description={<>上传到 <strong>{api.privatePathLabel(destination)}</strong>，共 {formatBytes(total)}</>} icon="upload" onClose={onClose} size="md" className={privateSpace ? "private-dialog" : ""}
+    <Modal title="确认上传" description={<>已选 {list.length} / {files.length} 个文件，共 {formatBytes(total)}</>} icon="upload" onClose={onClose} size="lg" className={`upload-dialog${privateSpace ? " private-dialog" : ""}`}
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" icon="upload" disabled={!ready || checking || Boolean(error) || !list.length} onClick={() => { if (!privateSpace) localStorage.setItem("tgdrive:upload-public", isPublic ? "1" : "0"); onStart(list, isPublic, destination); }}>开始上传</Button></>}>
       <DestinationPicker value={destination} onChange={next => { setReady(false); setDestination(next); setChecking(true); }} onReady={setReady} />
-      <ul className="upload-pick-list">
-        {list.map((file, index) => (
-          <li key={`${file.name}-${index}`}>
-            <FileTile kind={getFileKind(file.type, file.name)} />
-            <span className="upload-pick-name">{file.name}{existing.has(file.name.normalize("NFC")) && <Badge tone="warning">将覆盖</Badge>}</span>
-            <span className="muted">{formatBytes(file.size)}</span>
-            <IconButton icon="x" size="sm" label={`移除 ${file.name}`} onClick={() => setList(current => current.filter((_, i) => i !== index))} />
-          </li>
-        ))}
-      </ul>
+      <UploadSelection files={files} selected={selected} onChange={setSelected} existing={existing} />
       {checking && <Notice icon={false} role="status"><span className="spinner" />正在检查目标位置的同名文件</Notice>}
       {error && <Notice tone="danger"><span>{error}</span><Button size="sm" onClick={() => setCheckVersion(current => current + 1)}>重试</Button></Notice>}
       {conflicts > 0 && <Notice tone="warning">{conflicts} 个文件与现有文件同名，上传后将替换原文件，已有的公开链接保持不变。</Notice>}
       {!privateSpace && <div className={`share-status${isPublic ? " is-public" : ""}`}>
-        <Switch checked={isPublic} onChange={setIsPublic} label="上传后公开访问"
-          description={isPublic ? "每个文件都会生成独立的公开链接，任何拥有链接的人都可以查看和下载。" : "文件仅自己可见，之后可以随时单独分享。"} />
+        <Switch checked={isPublic} onChange={setIsPublic} label={hasFolders ? hasLooseFiles ? "上传后公开所选项目" : "上传后公开文件夹" : "上传后公开访问"}
+          description={hasFolders ? isPublic
+            ? `${hasLooseFiles ? "文件夹生成目录分享链接，单独选择的文件分别生成文件链接。" : "全部所选文件上传成功后，为顶层文件夹生成分享链接，可浏览其中的文件与子文件夹。"}同名文件夹中的已有内容也会一并公开。`
+            : "上传后可以在文件或文件夹菜单中管理公开分享。"
+            : isPublic ? "每个文件都会生成独立的公开链接，任何拥有链接的人都可以查看和下载。" : "文件仅自己可见，之后可以随时单独分享。"} />
       </div>}
     </Modal>
   );
 }
 
-type UploadJob = { id: string; file: File; path: string; isPublic: boolean; percent: number; status: "queued" | "uploading" | "done" | "error" | "canceled"; error?: string; result?: api.FileItem; resumed?: boolean; phase?: "hashing"; instant?: boolean; completedAt?: number };
+type UploadJob = { id: string; file: File; path: string; isPublic: boolean; folderShare?: string; percent: number; status: "queued" | "uploading" | "done" | "error" | "canceled"; error?: string; result?: api.FileItem; resumed?: boolean; phase?: "hashing"; instant?: boolean; completedAt?: number };
+type FolderShare = { id: string; path: string; total: number; uploaded: number; status: "waiting" | "sharing" | "done" | "error" | "canceled"; result?: api.FileItem; error?: string; completedAt?: number };
+type FolderShareWork = { path: string; remaining: Set<string>; total: number; canceled: boolean; publishing: boolean };
 
 /** 超过这个大小的文件分段上传：每段失败自动重试，网络中断或刷新页面后重新选择同一文件即可续传。 */
 const MULTIPART_THRESHOLD = 64 * 1024 * 1024;
@@ -170,6 +175,8 @@ export type UploadQueue = ReturnType<typeof useUploadQueue>;
 
 export function useUploadQueue(onSettled: () => void) {
   const [jobs, setJobs] = useState<UploadJob[]>([]);
+  const [folderShares, setFolderShares] = useState<FolderShare[]>([]);
+  const folderGroups = useRef(new Map<string, FolderShareWork>());
   const queue = useRef<UploadJob[]>([]);
   const disposed = useRef(false);
   const aborters = useRef(new Map<string, () => void>());
@@ -177,9 +184,10 @@ export function useUploadQueue(onSettled: () => void) {
   const settled = useRef(onSettled);
   settled.current = onSettled;
   const update = (id: string, patch: Partial<UploadJob>) => { if (!disposed.current) setJobs(current => current.map(job => job.id === id ? { ...job, ...patch } : job)); };
+  const updateFolder = (id: string, patch: Partial<FolderShare>) => { if (!disposed.current) setFolderShares(current => current.map(folder => folder.id === id ? { ...folder, ...patch } : folder)); };
   useEffect(() => {
     disposed.current = false;
-    return () => { disposed.current = true; queue.current = []; aborters.current.forEach(abort => abort()); };
+    return () => { disposed.current = true; queue.current = []; folderGroups.current.clear(); aborters.current.forEach(abort => abort()); };
   }, []);
   useEffect(() => {
     const completed = jobs.filter(job => job.status === "done" && job.completedAt != null);
@@ -189,9 +197,38 @@ export function useUploadQueue(onSettled: () => void) {
       job.status !== "done" || job.completedAt == null || job.completedAt + COMPLETED_VISIBLE_MS > Date.now())), Math.max(0, expires - Date.now()));
     return () => window.clearTimeout(timer);
   }, [jobs]);
+  useEffect(() => {
+    const completed = folderShares.filter(folder => folder.status === "done" && folder.completedAt != null);
+    if (!completed.length) return;
+    const expires = Math.min(...completed.map(folder => folder.completedAt! + COMPLETED_VISIBLE_MS));
+    const timer = window.setTimeout(() => {
+      const expired = new Set(completed.filter(folder => folder.completedAt! + COMPLETED_VISIBLE_MS <= Date.now()).map(folder => folder.id));
+      expired.forEach(id => folderGroups.current.delete(id));
+      setFolderShares(current => current.filter(folder => !expired.has(folder.id)));
+    }, Math.max(0, expires - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [folderShares]);
 
   const workers = useRef(0);
   const tally = useRef({ done: 0, failed: 0, instant: 0 });
+
+  async function publishFolder(id: string) {
+    const folder = folderGroups.current.get(id);
+    if (disposed.current || !folder || folder.remaining.size || folder.canceled || folder.publishing) return;
+    folder.publishing = true;
+    updateFolder(id, { status: "sharing", error: undefined });
+    try {
+      const result = (await api.setPublic([folder.path], true)).objects[0];
+      if (!result?.public_token) throw new Error("未能取得文件夹分享链接，请重试");
+      updateFolder(id, { status: "done", result, completedAt: Date.now() });
+    } catch (reason) {
+      updateFolder(id, { status: "error", error: api.errorMessage(reason, "文件已上传，但公开失败，请重试") });
+      if (!disposed.current) toast.error("文件已上传，但文件夹公开失败，可在上传列表中重试公开");
+    } finally {
+      folder.publishing = false;
+      if (!disposed.current) settled.current();
+    }
+  }
 
   async function uploadOne(job: UploadJob) {
     update(job.id, { status: "uploading" });
@@ -231,6 +268,15 @@ export function useUploadQueue(onSettled: () => void) {
       const result = await promise;
       update(job.id, { status: "done", percent: 100, result, completedAt: Date.now() });
       tally.current.done++;
+      if (job.folderShare && !control.aborted) {
+        const folder = folderGroups.current.get(job.folderShare);
+        if (folder) {
+          folder.remaining.delete(job.id);
+          updateFolder(job.folderShare, { uploaded: folder.total - folder.remaining.size });
+          // 完成数独立于托盘里暂留的成功行，失败后重试也能等齐原来选择的全部文件。
+          if (!folder.remaining.size) void publishFolder(job.folderShare);
+        }
+      }
       const source = thumbnailSource(job.file.name, job.file.type, job.file.size);
       if (!disposed.current && !result.thumbnails?.length && source) {
         // 用本地文件生成缩略图（图片缩放、视频截帧、音频封面），不需要再下载；失败不影响上传结果。
@@ -271,8 +317,26 @@ export function useUploadQueue(onSettled: () => void) {
       void worker();
     }
   }
-  function enqueue(items: { file: File; path: string; isPublic: boolean }[]) {
-    const next = items.map(item => ({ ...item, id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, percent: 0, status: "queued" as const }));
+  function enqueue(items: { file: File; path: string; isPublic: boolean; publicFolder?: string }[]) {
+    const folders = new Map<string, string>();
+    const next = items.map(({ publicFolder, ...item }) => {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      if (api.isPrivatePath(item.path)) publicFolder = undefined;
+      let folderShare: string | undefined;
+      if (publicFolder) {
+        folderShare = folders.get(publicFolder);
+        if (!folderShare) {
+          folderShare = `folder-${id}`;
+          folders.set(publicFolder, folderShare);
+          folderGroups.current.set(folderShare, { path: publicFolder, remaining: new Set(), total: 0, canceled: false, publishing: false });
+        }
+        const folder = folderGroups.current.get(folderShare)!;
+        folder.remaining.add(id); folder.total++;
+      }
+      return { ...item, isPublic: !api.isPrivatePath(item.path) && !publicFolder && item.isPublic, folderShare, id, percent: 0, status: "queued" as const };
+    });
+    const shares = [...folders].map(([path, id]) => ({ id, path, total: folderGroups.current.get(id)!.total, uploaded: 0, status: "waiting" as const }));
+    setFolderShares(current => [...current, ...shares]);
     queue.current.push(...next);
     setJobs(current => [...current, ...next]);
     // 先按当前值开始；读到管理员的新配置后，若允许更多文件同时上传就补上。
@@ -283,7 +347,7 @@ export function useUploadQueue(onSettled: () => void) {
     const failed = jobs.find(job => job.id === id && job.status === "error");
     if (!failed || aborters.current.has(id) || queue.current.some(job => job.id === id)) return;
     // 保留原始 File 与目标路径，分段上传沿用原来的续传记录。
-    const next: UploadJob = { id, file: failed.file, path: failed.path, isPublic: failed.isPublic, percent: 0, status: "queued" };
+    const next: UploadJob = { id, file: failed.file, path: failed.path, isPublic: failed.isPublic, folderShare: failed.folderShare, percent: 0, status: "queued" };
     setJobs(current => current.map(job => job.id === id ? next : job));
     queue.current.push(next);
     run();
@@ -291,12 +355,15 @@ export function useUploadQueue(onSettled: () => void) {
   function cancel(id: string) {
     canceled.current.add(id);
     aborters.current.get(id)?.();
+    const folderId = jobs.find(job => job.id === id)?.folderShare;
+    if (folderId) cancelFolder(folderId);
     setJobs(current => current.map(job => job.id === id && job.status === "queued" ? { ...job, status: "canceled" } : job));
   }
   function cancelAll() {
     queue.current = [];
     canceled.current.clear();
     aborters.current.forEach(abort => abort());
+    folderGroups.current.forEach((_, id) => cancelFolder(id));
     setJobs(current => current.map(job => job.status === "queued" ? { ...job, status: "canceled" } : job));
   }
   function cancelPrivate() {
@@ -305,29 +372,43 @@ export function useUploadQueue(onSettled: () => void) {
     privateResumes.clear();
     setJobs(current => current.filter(job => !api.isPrivatePath(job.path)));
   }
-  function clear() { setJobs(current => current.filter(job => job.status === "queued" || job.status === "uploading")); }
-  return { jobs, enqueue, retry, cancel, cancelAll, cancelPrivate, clear };
+  function cancelFolder(id: string) {
+    const folder = folderGroups.current.get(id);
+    if (!folder || folder.publishing || !folder.remaining.size) return;
+    folder.canceled = true;
+    updateFolder(id, { status: "canceled" });
+  }
+  function clear() {
+    const retained = new Set(jobs.filter(job => job.status === "queued" || job.status === "uploading").map(job => job.folderShare));
+    folderGroups.current.forEach((folder, id) => { if (!retained.has(id) && !folder.publishing) folderGroups.current.delete(id); });
+    setFolderShares(current => current.filter(folder => retained.has(folder.id) || folder.status === "sharing"));
+    setJobs(current => current.filter(job => job.status === "queued" || job.status === "uploading"));
+  }
+  return { jobs, folderShares, enqueue, retry, retryFolder: (id: string) => void publishFolder(id), cancel, cancelAll, cancelPrivate, clear };
 }
 
 export function UploadTray({ queue }: { queue: UploadQueue }) {
   const [collapsed, setCollapsed] = useState(false);
-  const { jobs } = queue;
-  useEffect(() => { if (!jobs.length) setCollapsed(false); }, [jobs.length]);
-  if (!jobs.length) return null;
-  const active = jobs.filter(job => job.status === "queued" || job.status === "uploading").length;
+  const { jobs, folderShares } = queue;
+  useEffect(() => { if (!jobs.length && !folderShares.length) setCollapsed(false); }, [jobs.length, folderShares.length]);
+  if (!jobs.length && !folderShares.length) return null;
+  const uploading = jobs.filter(job => job.status === "queued" || job.status === "uploading").length;
+  const publishing = folderShares.filter(folder => folder.status === "sharing").length;
+  const shareFailures = folderShares.filter(folder => folder.status === "error").length;
+  const active = uploading + publishing;
   const failed = jobs.filter(job => job.status === "error").length;
   const canceledCount = jobs.filter(job => job.status === "canceled").length;
   const completed = jobs.filter(job => job.status === "done").length;
-  const allCanceled = canceledCount === jobs.length;
+  const allCanceled = jobs.length > 0 && canceledCount === jobs.length;
   // 总进度按字节计算，大文件不会被一堆小文件的“已完成”冲淡。
   const counted = jobs.filter(job => job.status !== "canceled");
   const totalBytes = counted.reduce((sum, job) => sum + job.file.size, 0);
   const sentBytes = counted.reduce((sum, job) => sum + job.file.size * (job.status === "done" ? 1 : job.status === "error" ? 0 : job.percent / 100), 0);
   const overall = totalBytes ? sentBytes / totalBytes * 100 : counted.length ? counted.filter(job => job.status === "done").length / counted.length * 100 : 0;
-  const state: TrayState = active ? "active" : failed ? "error" : allCanceled ? "idle" : "done";
-  const title = active ? `正在上传 ${active} 个文件` : failed ? `${failed} 个文件上传失败` : allCanceled ? "上传已取消" : "上传完成";
-  const subtitle = active ? `${formatBytes(sentBytes)} / ${formatBytes(totalBytes)} · ${Math.floor(overall)}%`
-    : failed ? `${completed} 个已完成，可逐个重试` : allCanceled ? `${canceledCount} 个文件` : `${completed} 个文件 · ${formatBytes(totalBytes)}${canceledCount ? ` · ${canceledCount} 个已取消` : ""}`;
+  const state: TrayState = active ? "active" : failed || shareFailures ? "error" : allCanceled ? "idle" : "done";
+  const title = uploading ? `正在上传 ${uploading} 个文件` : publishing ? "正在公开文件夹" : failed ? `${failed} 个文件上传失败` : shareFailures ? "文件夹公开失败" : allCanceled ? "上传已取消" : "上传完成";
+  const subtitle = uploading ? `${formatBytes(sentBytes)} / ${formatBytes(totalBytes)} · ${Math.floor(overall)}%`
+    : publishing ? "文件已上传，正在生成文件夹分享链接" : failed ? `${completed} 个已完成，可逐个重试` : shareFailures ? "重试公开即可，无需重新上传文件" : allCanceled ? `${canceledCount} 个文件` : jobs.length ? `${completed} 个文件 · ${formatBytes(totalBytes)}${canceledCount ? ` · ${canceledCount} 个已取消` : ""}` : `${folderShares.filter(folder => folder.status === "done").length} 个文件夹已公开`;
   return (
     <aside className={`upload-tray is-${state}${collapsed ? " is-collapsed" : ""}`} aria-label="上传进度" aria-live="polite">
       <header>
@@ -338,6 +419,18 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
       </header>
       {!collapsed && (
         <ul>
+          {folderShares.map(folder => <li key={folder.id} className={`tray-item is-${folder.status}`}>
+            <span className="tray-icon"><FileTile kind="folder" /></span>
+            <div className="tray-job">
+              <span className="tray-name" title={api.privatePathLabel(folder.path)}><span>{baseName(folder.path)}</span>{folder.status === "done" && <Icon name="globe" size={13} className="tray-public" />}</span>
+              <small className={folder.status === "error" ? "tone-danger" : "muted"}>{folder.status === "waiting" ? `${folder.uploaded} / ${folder.total} 个文件，全部完成后公开` : folder.status === "sharing" ? "正在生成文件夹分享链接…" : folder.status === "done" ? "文件夹已公开" : folder.status === "canceled" ? "上传未完成，已取消公开" : folder.error}</small>
+            </div>
+            <span className="tray-right">
+              {folder.status === "sharing" && <span className="spinner" aria-label="正在公开文件夹" />}
+              {folder.status === "error" && <Button size="sm" icon="refresh" aria-label={`重试公开文件夹 ${baseName(folder.path)}`} onClick={() => queue.retryFolder(folder.id)}>重试公开</Button>}
+              {folder.status === "done" && folder.result?.public_token && <IconButton icon="copy" size="sm" label={`复制文件夹 ${baseName(folder.path)} 的分享链接`} onClick={() => void copyText(api.publicLinks(folder.result!.public_token!, baseName(folder.path)).page, "文件夹分享链接已复制")} />}
+            </span>
+          </li>)}
           {jobs.map(job => {
             const running = job.status === "uploading" || job.status === "queued";
             const detail = job.status === "queued" ? `等待上传 · ${formatBytes(job.file.size)}`
@@ -347,7 +440,7 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
               <span className="tray-icon"><FileTile kind={getFileKind(job.file.type, job.file.name)} />
                 {(job.status === "done" || job.status === "error") && <span className="tray-badge"><Icon name={job.status === "done" ? "check" : "alert"} size={10} /></span>}</span>
               <div className="tray-job">
-                <span className="tray-name" title={job.file.name}><span>{job.file.name}</span>{job.isPublic && <Icon name="globe" size={13} className="tray-public" />}{job.resumed && running && <Badge tone="accent">续传</Badge>}</span>
+                <span className="tray-name" title={api.privatePathLabel(job.path)}><span>{job.file.name}</span>{job.isPublic && <Icon name="globe" size={13} className="tray-public" />}{job.resumed && running && <Badge tone="accent">续传</Badge>}</span>
                 <small className={job.status === "error" ? "tone-danger" : "muted"}>{detail}</small>
                 {running && <TrayBar percent={job.status === "queued" ? 0 : job.percent} paused={job.status === "queued"} label={`${job.file.name} 上传进度`} />}
               </div>
