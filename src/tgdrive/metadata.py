@@ -669,7 +669,7 @@ class Metadata:
             if version < 27:
                 # 邀请码单次使用；账号删除后仍保留 used_at，不能再次核销。
                 self._schema("""
-                    CREATE TABLE registration_invites(
+                    CREATE TABLE IF NOT EXISTS registration_invites(
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         code_hash TEXT NOT NULL UNIQUE,
                         code_enc BLOB NOT NULL,
