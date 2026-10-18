@@ -14,19 +14,19 @@ from ..metadata import Metadata
 
 # 名称: (默认值, 最小值, 硬上限, 说明)
 LIMITS: dict[str, tuple[int, int, int, str]] = {
-    "max_steps": (16, 1, 50, "每轮模型调用次数"),
-    "max_tool_calls": (40, 1, 200, "每轮工具调用总数"),
-    "parallel_calls": (8, 1, 16, "单次模型回复中的并行工具调用数"),
-    "repeat_threshold": (3, 2, 10, "相同工具与参数的重复调用次数"),
-    "error_threshold": (5, 1, 20, "连续工具错误次数"),
-    "run_seconds": (300, 30, 1800, "每轮最长运行时间（秒）"),
-    "tool_seconds": (30, 5, 120, "单个工具超时（秒）"),
-    "tool_result_bytes": (12288, 2048, 65536, "单个工具结果长度（字节）"),
-    "run_tokens": (120000, 4000, 1000000, "每轮 token 预算"),
+    "max_steps": (40, 1, 200, "每轮模型调用次数"),
+    "max_tool_calls": (150, 1, 1000, "每轮工具调用总数"),
+    "parallel_calls": (8, 1, 32, "单次模型回复中的并行工具调用数"),
+    "repeat_threshold": (4, 2, 20, "相同工具与参数的重复调用次数"),
+    "error_threshold": (8, 1, 50, "连续工具错误次数"),
+    "run_seconds": (900, 30, 7200, "每轮最长运行时间（秒）"),
+    "tool_seconds": (60, 5, 600, "单个工具超时（秒）"),
+    "tool_result_bytes": (16384, 2048, 131072, "单个工具结果长度（字节）"),
+    "run_tokens": (400000, 4000, 4000000, "每轮 token 预算"),
     "user_concurrency": (1, 1, 4, "每用户同时进行的对话"),
     "global_concurrency": (4, 1, 32, "全站同时进行的对话"),
     "user_messages_per_minute": (10, 1, 60, "每用户每分钟消息数"),
-    "max_messages": (400, 20, 2000, "单个对话最多消息数"),
+    "max_messages": (1000, 20, 5000, "单个对话最多消息数"),
     "max_conversations": (1000, 10, 10000, "每用户最多保留的对话数"),
     "action_items": (10000, 100, 20000, "单个待确认操作最多条目数"),
     "download_urls": (2000, 32, 5000, "单次下载提议最多链接数"),
@@ -34,7 +34,7 @@ LIMITS: dict[str, tuple[int, int, int, str]] = {
 }
 
 SETTINGS: dict[str, tuple[int, int, int]] = {
-    "user_daily_tokens": (200000, 0, 100_000_000),  # 0 表示不限
+    "user_daily_tokens": (1000000, 0, 100_000_000),  # 0 表示不限
     "retention_days": (365, 1, 3650),
     "call_log_days": (90, 1, 3650),
 }
