@@ -222,8 +222,10 @@ export type AssistantAction = {
   created_at: number; expires_at: number; decided_at: number | null; finished_at?: number | null;
 };
 export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; actions: AssistantAction[]; active_run: string | null;
+  /** 向前翻页的消息游标；null 表示已加载到最早的消息。 */
+  before_seq?: number | null;
   attachments?: { count: number; size: number };
-  /** 上下文占用：最近一次模型调用的输入加输出 token 与模型窗口（§23） */
+  /** 最近一次模型请求的上下文占用（包括因超长而停止的请求）与模型窗口（§23） */
   context?: { used: number; window: number } | null;
   /** 私密对话：对话中出现过的地址，回复里只有这些链接可以点击（§24.8） */
   links?: string[] };
@@ -241,7 +243,7 @@ export const acknowledgeNotice = (privateMode = false) => post<void>(`${root(pri
 export const conversations = (cursor?: string | null, archived = false, privateMode = false) => get<{ conversations: Conversation[]; next_cursor: string | null }>(`${root(privateMode)}/conversations${query({ cursor, archived: archived ? "1" : undefined })}`);
 export const createConversation = (location: string, modelId?: number | null, accessMode: AccessMode = "approval", privateMode = false) =>
   post<ConversationDetail>(`${root(privateMode)}/conversations`, { location, model_id: modelId ?? undefined, access_mode: accessMode });
-export const conversation = (id: string) => get<ConversationDetail>(`${by(id)}/conversations/${encodeURIComponent(id)}`);
+export const conversation = (id: string, beforeSeq?: number) => get<ConversationDetail>(`${by(id)}/conversations/${encodeURIComponent(id)}${query({ before_seq: beforeSeq })}`);
 export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${by(id)}/conversations/${encodeURIComponent(id)}/update`, input);
 export const deleteConversation = (id: string) => post<void>(`${by(id)}/conversations/${encodeURIComponent(id)}/delete`, {});
 const attachmentPath = (id: string, tail: string) => `${USER}/attachments/${encodeURIComponent(id)}/${tail}`;

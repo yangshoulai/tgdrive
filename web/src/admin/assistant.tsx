@@ -937,8 +937,8 @@ function ToolParamsDialog({ tool, values, onClose, onApply }: { tool: ai.AdminTo
 /* ---------- 限制与额度 ---------- */
 
 const LIMIT_GROUPS: { title: string; description: string; keys: string[] }[] = [
-  { title: "Agent 循环", description: "每一轮对话（一条用户消息触发的处理）的运行限制。工具调用超过同时执行数时会分批排队；触达总次数、时间或预算上限后，助手会总结已完成的部分并停止。", keys: ["max_steps", "max_tool_calls", "parallel_calls", "repeat_threshold", "error_threshold", "run_seconds", "tool_seconds", "tool_result_bytes", "run_tokens"] },
-  { title: "并发与容量", description: "单进程部署：并发过高会占用内存与模型服务额度。", keys: ["user_concurrency", "global_concurrency", "user_messages_per_minute", "max_messages", "max_conversations", "action_items", "download_urls"] },
+  { title: "Agent 循环", description: "每一轮对话（一条用户消息触发的处理）的运行限制。工具调用超过同时执行数时会分批排队；触达总次数、时间或预算上限后，助手会总结已完成的部分并停止。累计 token 预算合计本轮每次模型请求的输入与输出，设为 0 表示不限，与模型上下文容量独立。", keys: ["max_steps", "max_tool_calls", "parallel_calls", "repeat_threshold", "error_threshold", "run_seconds", "tool_seconds", "tool_result_bytes", "run_tokens"] },
+  { title: "并发与容量", description: "对话容量按所选模型的上下文窗口判断，接近上限时自动压缩历史。单进程部署：并发过高会占用内存与模型服务额度。", keys: ["user_concurrency", "global_concurrency", "user_messages_per_minute", "max_conversations", "action_items", "download_urls"] },
 ];
 
 function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | null; onSaved: (settings: ai.AssistantSettings) => void }) {
@@ -996,7 +996,7 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
     <form className="assistant-limits" onSubmit={submit} noValidate>
       <Panel title="访问模式" description="审批模式下，每次修改文件都由用户在卡片上确认。完全访问模式下，普通修改自动执行并保留 24 小时撤销。">
         <Switch label="允许用户切换到完全访问" checked={settings.full_access} onChange={value => void setFullAccess(value)}
-          description="彻底删除、公开分享、超过 1,000 项的操作，以及对话读取过文件内容或网页之后的修改，仍然需要用户确认。可在“用户”页按人单独允许或禁止。" />
+          description="彻底删除、公开分享、跨私密空间移动与 HTTP DELETE 仍然需要用户确认。可在“用户”页按人单独允许或禁止。" />
       </Panel>
       <Panel title="私密对话" description="用户在已解锁的私密空间里使用助手。对话只在服务器内存中，锁定、闲置或重启后清除，管理员看不到内容。">
         <Switch label="允许用户使用私密对话" checked={settings.private} onChange={value => void setPrivate(value)}

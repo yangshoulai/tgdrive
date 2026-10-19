@@ -99,7 +99,7 @@ def _match_rows(ctx: ToolContext, match: object, *, limit: int) -> list:
 
     def read():
         rows = []
-        for row in ctx.db.execute(f"SELECT * FROM objects WHERE {' AND '.join(where)} ORDER BY key LIMIT ?", (*params, SCAN_LIMIT + 1)):
+        for row in ctx.db.execute(f"SELECT * FROM objects WHERE {' AND '.join(where)} ORDER BY key LIMIT ?", (*params, max(SCAN_LIMIT, limit) + 1)):
             name = _name_of(row["key"])
             if glob and not fnmatch.fnmatch(name.lower(), glob.lower()):
                 continue
@@ -135,7 +135,7 @@ def _match_folders(ctx: ToolContext, match: dict, *, limit: int):
     def read():
         folders: set[str] = set()
         for (key,) in ctx.db.execute(f"SELECT key FROM objects WHERE bucket_id=? AND key>? AND key<? AND {ctx.hide()} "
-                                     "ORDER BY key LIMIT ?", (ctx.bucket_id, prefix, prefix + END, SCAN_LIMIT + 1)):
+                                     "ORDER BY key LIMIT ?", (ctx.bucket_id, prefix, prefix + END, max(SCAN_LIMIT, limit) + 1)):
             parts = key[len(prefix):].split("/")[:-1]
             if not recursive:
                 parts = parts[:1]

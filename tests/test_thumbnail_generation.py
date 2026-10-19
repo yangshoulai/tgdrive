@@ -13,11 +13,25 @@ from tgdrive.errors import NotFoundError, NotReadyError
 from tgdrive.keystore import KeyStore
 from tgdrive.metadata import Metadata
 from tgdrive.objects import ObjectService, PRIVATE_PREFIX, Scope
-from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailRetry, ThumbnailService, _RangeInput, _Job
+from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailRetry, ThumbnailService, _RangeInput, _Job, video_frame_usable
 from tgdrive.thumbnail_cache import ThumbnailCacheMiss
 
 
 JPEG = b"\xff\xd8\xff\xe0" + b"test-thumbnail" * 8
+
+
+class VideoFrameTests(unittest.TestCase):
+    def test_blank_and_mostly_black_or_white_frames_are_rejected(self):
+        for pixels in (b"", bytes(1024), b"\xff" * 1024, b"\x80" * 1024,
+                       bytes(800) + b"\x90" * 224, b"\xff" * 800 + b"\x30" * 224):
+            with self.subTest(sample=pixels[:8]):
+                self.assertFalse(video_frame_usable(pixels))
+
+    def test_details_in_dark_scenes_and_letterboxed_frames_are_allowed(self):
+        for pixels in (bytes([28, 64, 50, 110]) * 256,
+                       bytes(400) + bytes(range(40, 196)) * 4,
+                       bytes(range(64, 192)) * 8):
+            self.assertTrue(video_frame_usable(pixels))
 
 
 class Writer:
@@ -68,6 +82,27 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         entry.return_value.__aenter__ = AsyncMock(return_value=Mock())
         entry.return_value.__aexit__ = AsyncMock(return_value=False)
         return patch("tgdrive.thumbnails._RangeInput", entry), patch.object(self.worker, "_render", AsyncMock(return_value=result))
+
+    async def test_video_skips_rejected_frames_and_stops_at_usable_candidate(self):
+        samples = [( {"thumb": JPEG}, bytes(1024)), ({"thumb": JPEG}, b"\xff" * 1024),
+                   ({"thumb": JPEG}, bytes(range(64, 192)) * 8)]
+        with patch.object(self.worker, "_render_frame", AsyncMock(side_effect=samples)) as decoder:
+            images = await self.worker._render(Mock(), "video", Path(self.temp.name), lambda: None)
+        self.assertEqual(images, {"thumb": JPEG})
+        self.assertEqual([call.kwargs["position"] for call in decoder.await_args_list], [0, 1, 3])
+
+    async def test_video_stops_at_eof_instead_of_reusing_rejected_first_frame(self):
+        with patch.object(self.worker, "_render_frame", AsyncMock(side_effect=[({"thumb": JPEG}, bytes(1024)), (None, b"")])) as decoder:
+            self.assertIsNone(await self.worker._render(Mock(), "video", Path(self.temp.name), lambda: None))
+        self.assertEqual(decoder.await_count, 2)
+
+    async def test_force_without_usable_video_frame_keeps_existing_thumbnail_and_reports_failure(self):
+        info = await self.put("dark.mp4")
+        await self.objects.set_thumbnail(self.scope, info.key, JPEG)
+        channel, render = self.renderer(None)
+        with channel, render, self.assertRaisesRegex(ThumbnailError, "未替换现有缩略图"):
+            await self.worker.generate(info, force=True)
+        self.assertEqual(self.variants(info), ["thumb"])
 
     async def test_put_and_multipart_notify_after_commit_with_scope(self):
         notify = Mock()
@@ -230,7 +265,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_timeout_terminates_decoder_and_drains_its_pipes(self):
         ended = asyncio.Event()
-        process = SimpleNamespace(pid=0, returncode=None, stderr=asyncio.StreamReader())
+        process = SimpleNamespace(pid=0, returncode=None, stderr=asyncio.StreamReader(), stdout=asyncio.StreamReader())
 
         async def wait():
             await ended.wait()
@@ -239,6 +274,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         def kill():
             process.returncode = -9
             process.stderr.feed_eof()
+            process.stdout.feed_eof()
             ended.set()
 
         process.wait, process.kill = wait, Mock(side_effect=kill)
@@ -428,18 +464,17 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         # 旧版用 RLIMIT_AS 限制解码器，FFmpeg 7 在加载库或创建线程时就失败，结果所有文件都被误记为「无法生成」。
         directory = Path(self.temp.name) / "fake-ffmpeg"
         directory.mkdir()
-        for name, (message, code) in {"threads": ("pthread_create() failed: Resource temporarily unavailable", 1),
-                                       "killed": ("", -9), "broken": ("Invalid data found when processing input", 1)}.items():
-            script = directory / name
-            script.write_text("#!/bin/sh\n" + (f"echo '{message}' >&2\n" if message else "") +
-                              ("kill -9 $$\n" if code < 0 else f"exit {code}\n"))
-            script.chmod(0o755)
         source = SimpleNamespace(url="http://127.0.0.1:9/x", origin="http://127.0.0.1:9", failure=None)
-        for name, expected in (("threads", ThumbnailRetry), ("killed", ThumbnailRetry), ("broken", ThumbnailError)):
-            self.worker.resources.ffmpeg = str(directory / name)
-            with self.assertRaises(ThumbnailError) as caught:
+        # 用进程替身覆盖错误分类，Windows 与 POSIX 都能验证，不依赖 /bin/sh。
+        for message, code, expected in ((b"pthread_create() failed: Resource temporarily unavailable", 1, ThumbnailRetry),
+                                        (b"", -9, ThumbnailRetry), (b"Invalid data found when processing input", 1, ThumbnailError)):
+            stderr = asyncio.StreamReader()
+            stderr.feed_data(message)
+            stderr.feed_eof()
+            process = SimpleNamespace(pid=0, returncode=code, stderr=stderr, wait=AsyncMock(return_value=code))
+            with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)), self.assertRaises(ThumbnailError) as caught:
                 await self.worker._render(source, "image", directory, lambda: None)
-            self.assertIs(type(caught.exception), expected, name)
+            self.assertIs(type(caught.exception), expected, message)
         info = await self.put("photo.jpg")
         self.worker.cache.drop(info.blob_uuid)
         self.age(info)

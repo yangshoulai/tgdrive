@@ -21,6 +21,34 @@ class AssistantLoopTests(AssistantCase):
         user = await self.client.login("user", "alice@example.com", "alice password")
         return admin, user
 
+    def test_tool_concurrency_above_previous_cap_is_honored(self):
+        async def run():
+            _, user = await self.prepare({"parallel_calls": 64})
+            conversation = await self.start_conversation(user)
+            self.model.replies = [Reply(tool_calls=folder_calls(80)), answer("全部处理完成")]
+            execute = self.service._execute
+            active = peak = 0
+
+            async def tracked(*args):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                try:
+                    await asyncio.sleep(0.01)
+                    return await execute(*args)
+                finally:
+                    active -= 1
+
+            with mock.patch.object(self.service, "_execute", side_effect=tracked):
+                status, result = await self.send(user, conversation, "读取所有相册")
+            self.assertEqual(status, 201, result)
+            self.assertEqual(peak, 64)
+            self.assertEqual(self.service.runs[result["run_id"]].stop_reason, "completed")
+            tools = [m for m in await self.messages(user, conversation) if m["role"] == "tool"]
+            self.assertEqual(len(tools), 80)
+            self.assertTrue(all(m["status"] == "ok" for m in tools))
+        self.run_async(run())
+
     def test_large_reply_runs_all_calls_with_bounded_concurrency(self):
         async def run():
             _, user = await self.prepare({"parallel_calls": 8, "repeat_threshold": 10, "error_threshold": 5})
@@ -129,6 +157,28 @@ class AssistantLoopTests(AssistantCase):
             self.assertEqual([m["status"] for m in tools], ["ok", "limited", "limited"])
             self.assertIn("token 预算", tools[1]["summary"])
             self.assertEqual(self.model.calls[1]["tools"], [])
+        self.run_async(run())
+
+    def test_zero_token_budget_allows_tools_followup_and_title(self):
+        async def run():
+            _, user = await self.prepare({"parallel_calls": 1, "run_tokens": 0})
+            conversation = await self.start_conversation(user)
+            self.model.replies = [Reply(tool_calls=folder_calls(3)), answer("所有任务完成"), answer("对话标题")]
+            execute = self.service._execute
+
+            async def spend(state, *args):
+                result = await execute(state, *args)
+                state.input_tokens += 110_000_000
+                return result
+
+            with mock.patch.object(self.service, "_execute", side_effect=spend):
+                status, result = await self.send(user, conversation, "处理相册")
+            self.assertEqual(status, 201, result)
+            self.assertEqual(self.service.runs[result["run_id"]].stop_reason, "completed")
+            tools = [m for m in await self.messages(user, conversation) if m["role"] == "tool"]
+            self.assertEqual([m["status"] for m in tools], ["ok"] * 3)
+            _, detail = await self.req("GET", f"/api/user/v1/assistant/conversations/{conversation}", headers=user)
+            self.assertEqual(detail["conversation"]["title"], "对话标题")
         self.run_async(run())
 
     def test_run_timeout_cancels_pending_tools_and_keeps_completed_results(self):

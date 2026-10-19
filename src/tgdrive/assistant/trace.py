@@ -167,13 +167,23 @@ class TraceStore:
             db.execute("UPDATE assistant_conversations SET messages=MAX(0, messages-?), updated_at=? WHERE id=?", (removed, now, conversation_id))
         return removed
 
-    def messages(self, conversation_id: str, *, after: int = 0, limit: int = 500) -> list[dict[str, object]]:
+    def messages(self, conversation_id: str, *, after: int = 0, before: int = 0, limit: int = 500,
+                 latest: bool = False) -> list[dict[str, object]]:
         rows = self.metadata.db.execute(
-            "SELECT * FROM assistant_messages WHERE conversation_id=? AND seq>? ORDER BY seq LIMIT ?",
-            (conversation_id, after, limit)).fetchall()
+            "SELECT * FROM assistant_messages WHERE conversation_id=? AND seq>? "
+            + ("AND seq<? " if before else "") + f"ORDER BY seq {'DESC' if latest else 'ASC'} LIMIT ?",
+            (conversation_id, after, *((before,) if before else ()), limit)).fetchall()
+        if latest:
+            rows.reverse()
         return [{"seq": row["seq"], "run_id": row["run_id"], "role": row["role"], "tool_name": row["tool_name"],
                  "created_at": row["created_at"], **self._open(row["body"], f"assistant:{conversation_id}:{row['seq']}")}
                 for row in rows]
+
+    def latest_summary(self, conversation_id: str) -> dict | None:
+        row = self.metadata.db.execute(
+            "SELECT seq,body FROM assistant_messages WHERE conversation_id=? AND role='event' AND tool_name='summary' "
+            "ORDER BY seq DESC LIMIT 1", (conversation_id,)).fetchone()
+        return {"seq": row["seq"], "role": "event", **self._open(row["body"], f"assistant:{conversation_id}:{row['seq']}")} if row else None
 
     def latest_plan(self, conversation_id: str) -> dict | None:
         row = self.metadata.db.execute(

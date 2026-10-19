@@ -50,6 +50,41 @@ class PrivateAssistantTests(ActionHelpers, AssistantCase):
     def counts(self):
         return {table: self.app.metadata.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
 
+    def test_private_long_conversation_continues_pages_and_summarizes_in_memory(self):
+        async def run():
+            admin, _, model = await self.setup_assistant()
+            self.service.channels.update_model(model["id"], {"context_window": 128000})
+            await self.enable_private(admin, model)
+            self.service.config.write_raw("limits", {"max_messages": 20})
+            user = await self.unlock(await self.client.login("user", "alice@example.com", "alice password"))
+            conversation = await self.private_conversation(user)
+            before = self.counts()
+            trace = self.service.trace
+            trace.append(conversation, None, "user", {"text": "最初的私密要求"})
+            for _ in range(5200):
+                trace.append(conversation, None, "event", {"type": "progress", "text": "进度"})
+            self.model.replies = [answer("已继续处理"), answer("私密标题")]
+            status, result = await self.private_send(user, conversation, "私密最新要求")
+            self.assertEqual(status, 201, result)
+            self.assertEqual(self.service.runs[result["run_id"]].stop_reason, "completed")
+            prompt = json.dumps(next(c for c in self.model.calls if c["tools"])["messages"], ensure_ascii=False)
+            self.assertIn("最初的私密要求", prompt)
+            self.assertIn("私密最新要求", prompt)
+            _, detail = await self.req("GET", f"{PRIVATE}/conversations/{conversation}", headers=user)
+            self.assertEqual(detail["messages"][-1]["text"], "已继续处理")
+            self.assertLess(detail["context"]["used"] / detail["context"]["window"], 0.2)
+            cursor = detail["before_seq"]
+            _, earlier = await self.req("GET", f"{PRIVATE}/conversations/{conversation}?before_seq={cursor}", headers=user)
+            self.assertEqual(earlier["messages"][-1]["seq"], cursor - 1)
+            trace.append(conversation, None, "event", {"type": "summary", "upto": detail["messages"][-1]["seq"],
+                                                     "model_text": "私密任务摘要"}, tool_name="summary")
+            trace.append(conversation, None, "user", {"text": "摘要之后"})
+            history = json.dumps(self.service._history(conversation, model["context_window"]), ensure_ascii=False)
+            self.assertIn("私密任务摘要", history)
+            self.assertNotIn("最初的私密要求", history)
+            self.assertEqual(self.counts(), before, "长对话与分页不能把私密留痕写入数据库")
+        self.run_async(run())
+
     def test_private_large_tool_batch_finishes_in_memory(self):
         async def run():
             admin, _, model = await self.setup_assistant()

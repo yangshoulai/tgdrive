@@ -225,7 +225,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         savePreviewThumbnail(item, () => thumbnailsFromImage(image), true);
       },
       onVideoFrame: (video, item) => {
-        // 等到当前画面不是片头黑屏再截取；画面来自播放器已经解码的数据，不额外读取视频。
+        // 等到当前画面通过黑白占比与细节检查再截取；画面来自播放器已解码的数据，不额外读取视频。
         if (item.thumbnails?.length || previewThumbnailAttempts.current.has(`${item.key}:${item.etag}`) || !videoFrameUsable(video)) return;
         const source = video.currentSrc;
         savePreviewThumbnail(item, () => video.currentSrc === source ? thumbnailsFromVideo(video) : Promise.resolve(null));

@@ -115,6 +115,7 @@ class RunState:
     event_bytes: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    context: dict | None = None
     trim_events: Callable[[], None] | None = None
     seq: int = 0
     status: str = "queued"
@@ -502,7 +503,7 @@ class AssistantService:
             raise ValueError("管理员未允许你使用完全访问模式")
         return str(value)
 
-    def conversation(self, token: str, conversation_id: str, access: str | None = None) -> dict[str, object]:
+    def conversation(self, token: str, conversation_id: str, access: str | None = None, *, before: int = 0) -> dict[str, object]:
         _, account = self._session(token)
         self._check_private(token, conversation_id, access)
         row = self.trace.conversation(account.id, conversation_id)
@@ -510,7 +511,12 @@ class AssistantService:
         item["scope"] = display(item.pop("scope_root"))
         if item["access_mode"] == "full" and not self._full_access(account.id):
             item["access_mode"] = "approval"
-        messages = self.trace.messages(conversation_id, limit=2000)
+        if before < 0:
+            raise ValueError("消息游标无效")
+        messages = self.trace.messages(conversation_id, before=before, limit=2001, latest=True)
+        has_earlier = len(messages) > 2000
+        messages = messages[-2000:]
+        context_messages = self.trace.messages(conversation_id, limit=2000, latest=True) if before else messages
         actions = [self._action_view(action) for action in self.trace.actions(conversation_id)]
         active_run = self._active_run(conversation_id)
         seen_plans: set[str] = set()
@@ -519,18 +525,23 @@ class AssistantService:
             if event.get("type") == "plan" and event.get("id") and event["id"] not in seen_plans:
                 seen_plans.add(event["id"])
                 message["event"] = display_plan(event, actions, active=bool(active_run and message.get("run_id") == active_run))
-        return {"conversation": item, "messages": [self._public_message(m) for m in messages], "context": self._context_usage(row, messages),
+        return {"conversation": item, "messages": [self._public_message(m) for m in messages], "context": self._context_usage(row, context_messages),
+                "before_seq": messages[0]["seq"] if has_earlier else None,
                 "actions": actions, "active_run": active_run,
                 "attachments": self.attachments.conversation_usage(account.id, conversation_id)}
 
     def _context_usage(self, row, messages: list[dict]) -> dict | None:
-        """上下文占用（§23）：最近一次模型调用的输入加输出 token（下一次请求至少包含这些）与当前模型窗口。"""
-        last = next((m for m in reversed(messages) if m["role"] == "assistant" and (m.get("input_tokens") or m.get("prompt_estimate"))), None)
+        """最近一次模型请求的上下文占用；请求过长时也保存本次估算，避免仍显示上一轮的低占用。"""
+        last = next((m for m in reversed(messages) if isinstance(m.get("context"), dict)
+                     or m["role"] == "assistant" and (m.get("input_tokens") or m.get("prompt_estimate"))), None)
         if last is None:
             return None
-        actual = int(last.get("input_tokens") or 0)
-        estimate = last.get("prompt_estimate") if isinstance(last.get("prompt_estimate"), int) else 0
-        used = (actual if actual * 4 >= estimate else estimate) + int(last.get("output_tokens") or 0)
+        if isinstance(last.get("context"), dict):
+            used = last["context"]["used"]
+        else:
+            actual = int(last.get("input_tokens") or 0)
+            estimate = last.get("prompt_estimate") if isinstance(last.get("prompt_estimate"), int) else 0
+            used = (actual if actual * 4 >= estimate else estimate) + int(last.get("output_tokens") or 0)
         try:
             window = self.channels.model(row["model_id"] or last.get("model_id"))["context_window"]
         except (NotFoundError, TypeError, KeyError):
@@ -696,9 +707,7 @@ class AssistantService:
             raise ValueError("请输入消息")
         if len(text) > MAX_TEXT:
             raise ValueError(f"消息最多 {MAX_TEXT} 个字符")
-        limits = self._admit(account.id, row)
-        if row["messages"] >= limits["max_messages"]:
-            raise ValueError("这个对话已经很长了，请新建对话继续")
+        self._admit(account.id, row)
         model_id = self._choose_model(payload.get("model_id"), row["model_id"], private=private)
         view = payload.get("view") if isinstance(payload.get("view"), str) and len(payload.get("view")) <= 20 else "files"
         scope_root = row["scope_root"]
@@ -1298,6 +1307,16 @@ class AssistantService:
             await asyncio.sleep(0.2)
         self._channel_active[channel_id] = self._channel_active.get(channel_id, 0) + 1
 
+    def _stored_history(self, conversation_id: str, context_window: int | None) -> list[dict]:
+        """跳过已摘要的前缀，读取与模型窗口相称的最新记录，避免固定读取最早 5000 条。"""
+        summary = self.trace.latest_summary(conversation_id)
+        floor = int(summary.get("upto") or 0) if summary else 0
+        messages = self.trace.messages(conversation_id, after=floor, limit=max(5000, context_window or 32000), latest=True)
+        if summary and not any(m["seq"] == summary["seq"] for m in messages):
+            messages.append(summary)
+            messages.sort(key=lambda m: m["seq"])
+        return messages
+
     def _history(self, conversation_id: str, context_window: int | None, *, run_id: str | None = None,
                  can_see: bool = False, meta: dict | None = None) -> list[dict]:
         """把留痕还原成发给模型的消息。最近一次摘要之前的内容用摘要代替；缺少结果的工具调用补上「已取消」。
@@ -1305,7 +1324,7 @@ class AssistantService:
         更早轮次的图片换成文字占位，不重复发送。
         上下文（§23）：早于最近两轮用户消息的工具结果只发摘要行；工具消息带 _run（属于本轮）与 _slim（摘要行）供 _shrink 使用。
         meta 收集最近一条助手消息的实际用量（model_id、input_tokens、prompt_estimate），用于 _measure。"""
-        messages = self.trace.messages(conversation_id, limit=5000)
+        messages = self._stored_history(conversation_id, context_window)
         files = self.attachments.for_conversation(conversation_id)
         start, upto = 0, None
         summary = None
@@ -1441,6 +1460,8 @@ class AssistantService:
         history = self._history(state.conversation_id, model["context_window"], run_id=state.id, can_see=can_see, meta=meta)
         raw = self._estimate(history) + fixed
         used = self._measure(meta, model["id"], raw)
+        # 摘要请求本身也可能被上游拒绝，停止时应保留这次准备请求的占用。
+        state.context = {"used": used, "window": window}
         compacted = False
         if (force or (allow_compact and used > window * 0.7 and len(history) > 6)):
             compacted = await self._compact(state, model, endpoint)
@@ -1502,7 +1523,7 @@ class AssistantService:
 
     async def _compact(self, state: RunState, model: dict, endpoint) -> bool:
         """压缩较早的历史：保留最近两轮用户消息及其后的全部内容原文，之前的部分（连同旧摘要）交给模型概括。"""
-        messages = self.trace.messages(state.conversation_id, limit=5000)
+        messages = self._stored_history(state.conversation_id, model["context_window"])
         users = [m["seq"] for m in messages if m["role"] == "user"]
         previous = next((m for m in reversed(messages) if m["role"] == "event" and m.get("type") == "summary"), None)
         floor = previous.get("upto") or 0 if previous else 0
@@ -1883,8 +1904,8 @@ class AssistantService:
                         forced_final = "模型调用次数"
                     elif tool_calls >= limits["max_tool_calls"]:
                         forced_final = "工具调用次数"
-                    elif state.input_tokens + state.output_tokens >= limits["run_tokens"]:
-                        forced_final = "token 预算"
+                    elif limits["run_tokens"] and state.input_tokens + state.output_tokens >= limits["run_tokens"]:
+                        forced_final = "累计 token 预算"
                     elif time.monotonic() >= deadline:
                         forced_final = "运行时间"
                     if forced_final:
@@ -1928,6 +1949,8 @@ class AssistantService:
                 window = model["context_window"] or 32000
                 history, used, estimate, did = await self._context(state, model, endpoint, can_see, fixed, allow_compact=not compacted)
                 compacted = compacted or did
+                state.context = {"used": used, "window": window}
+                await state.emit({"type": "context", **state.context})
                 if used > window * 0.85:
                     raise ContextFull()
                 await self._attach_images(state, history)
@@ -1945,13 +1968,16 @@ class AssistantService:
                     history, used, estimate, did = await self._context(state, model, endpoint, can_see, fixed,
                                                                        allow_compact=True, force=True)
                     compacted = compacted or did
+                    state.context = {"used": used, "window": window}
+                    await state.emit({"type": "context", **state.context})
                     await self._attach_images(state, history)
                     history.append(context_block)
                     remaining = max(5.0, deadline + (60 if forced_final else 0) - time.monotonic())
                     reply = await asyncio.wait_for(self._model_call(state, model, endpoint, system, _clean(history), definitions,
                                                                     max_tokens=model["max_output"]), remaining)
                 actual = reply.input_tokens if reply.input_tokens * 4 >= estimate else estimate
-                await state.emit({"type": "context", "used": actual + reply.output_tokens, "window": window})
+                state.context = {"used": actual + reply.output_tokens, "window": window}
+                await state.emit({"type": "context", **state.context})
                 steps += 1
                 self._validate(state)
                 calls = reply.tool_calls if not forced_final else []
@@ -1996,8 +2022,8 @@ class AssistantService:
                     if tool_calls >= limits["max_tool_calls"]:
                         skipped_reason = "已达到本轮工具调用次数上限，本次调用未执行"
                         break
-                    if state.input_tokens + state.output_tokens >= limits["run_tokens"]:
-                        skipped_reason = "已达到本轮 token 预算，本次调用未执行"
+                    if limits["run_tokens"] and state.input_tokens + state.output_tokens >= limits["run_tokens"]:
+                        skipped_reason = "已达到本轮累计 token 预算，本次调用未执行"
                         break
                     if time.monotonic() >= deadline:
                         skipped_reason = "已达到本轮运行时间上限，本次调用未执行"
@@ -2072,7 +2098,7 @@ class AssistantService:
         except ProviderError as exc:
             if exc.code == "context_overflow":
                 status, stop_reason = "stopped", "context"
-                await self._context_full(state)
+                await self._context_full(state, upstream=True)
             else:
                 status, stop_reason = "failed", exc.code
                 # 用户只看到原因与下一步；上游的原始错误（已脱敏）留在调用日志里给管理员排查。
@@ -2108,11 +2134,15 @@ class AssistantService:
             await state.emit({"type": "run_finished", "status": status, "stop_reason": stop_reason,
                               "usage": {"today": self.trace.tokens_today(state.user_id)}})
 
-    async def _context_full(self, state: RunState) -> None:
+    async def _context_full(self, state: RunState, *, upstream: bool = False) -> None:
         """压缩与兜底之后仍放不下：结束本轮，不再请求渠道（§23）。"""
-        message = {"type": "limit", "text": "这个对话已经很长，助手记不下更多内容了。请新建对话继续。",
+        text = ("模型服务报告本次请求超过上下文上限，自动压缩后重试仍未成功。请检查模型的上下文配置，或选择上下文更大的模型；也可新建对话继续。"
+                if upstream else "本次请求已接近模型上下文上限，自动压缩后仍无法容纳。可以减少本轮内容、选择上下文更大的模型，或新建对话继续。")
+        message = {"type": "limit", "text": text, "context": state.context,
                    "model_text": "[系统事件] 上一轮因对话上下文已满而停止。请简要总结已完成的部分，并建议用户新建对话继续。"}
         try:
+            if state.context:
+                await state.emit({"type": "context", **state.context})
             seq = self.trace.append(state.conversation_id, state.id, "event", message)
             await state.emit({"type": "message", "message": {"seq": seq, "role": "event", **message}})
         except Exception:
@@ -2133,7 +2163,8 @@ class AssistantService:
         first = next((m["text"] for m in self.trace.messages(state.conversation_id, limit=50) if m["role"] == "user"), "")
         title = first.strip().splitlines()[0][:20] if first.strip() else "新对话"
         try:
-            if state.input_tokens + state.output_tokens >= self.config.limits()["run_tokens"]:
+            budget = self.config.limits()["run_tokens"]
+            if budget and state.input_tokens + state.output_tokens >= budget:
                 raise StopRun("limit", "这次回复的处理量已到上限，已经停止。可以缩小范围后继续。")
             model = self.channels.model(state.model_id)
             endpoint = self.channels.endpoint(model["channel_id"])

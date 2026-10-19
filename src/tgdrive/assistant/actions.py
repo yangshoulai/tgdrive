@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from ..errors import NotFoundError
 from ..objects import PRIVATE_PREFIX, ObjectService, Scope
+from .config import LIMITS
 
 BATCH = 500
 END = "\U0010ffff"
@@ -50,7 +51,7 @@ def share_options(payload: dict, confirm: dict | None) -> dict[str, object]:
     return result
 
 
-def directory_version(db, bucket_id: int, prefix: str, *, limit: int = 20000) -> tuple[str, int]:
+def directory_version(db, bucket_id: int, prefix: str, *, limit: int = LIMITS["action_items"][2]) -> tuple[str, int]:
     """相对路径与版本的摘要；限量扫描，避免目录整体操作绕过条目上限。"""
     digest, count = hashlib.sha256(), 0
     for row in db.execute("SELECT key, etag, modified_at FROM objects WHERE bucket_id=? AND key>=? AND key<? ORDER BY key LIMIT ?",

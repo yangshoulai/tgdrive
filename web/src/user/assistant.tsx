@@ -27,6 +27,14 @@ const boundWidth = (value: number, maximum = MAX_WIDTH) => Math.max(MIN_WIDTH, M
 const display = (key: string) => "/" + key;
 const DRAFT_LIMIT = 8000;
 
+/** 刷新最新一页时保留用户已经向前加载的记录，最新页中的消息以服务器为准。 */
+function refreshDetail(current: ai.ConversationDetail | null, fresh: ai.ConversationDetail): ai.ConversationDetail {
+  if (!current || current.conversation.id !== fresh.conversation.id) return fresh;
+  const first = fresh.messages[0]?.seq ?? 0;
+  const earlier = current.messages.filter(message => message.seq < first);
+  return earlier.length ? { ...fresh, messages: [...earlier, ...fresh.messages], before_seq: current.before_seq } : fresh;
+}
+
 export type AssistantLocation = { view: string; prefix: string };
 
 /** 读取助手是否可用；不可用时不显示入口。 */
@@ -139,6 +147,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [conversations, setConversations] = useState<ai.Conversation[] | null>(null);
   const [detail, setDetail] = useState<ai.ConversationDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [earlierBusy, setEarlierBusy] = useState(false);
+  const earlierRequest = useRef<string | null>(null);
   const [draft, setDraft] = useState("");
   const [modelId, setModelId] = useState<number | null>(null);
   // 用户为下一条消息选定的作用域目录（对象键，"" 为全部普通文件）；null 表示沿用对话作用域，HERE 表示跟随文件页的当前位置。
@@ -359,7 +369,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         }
         case "resync":
           setLive(value => value && { ...value, streaming: "", reasoning: "" });
-          setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => { if (version === selection.current) setDetail(fresh); }).catch(() => undefined); return current; });
+          setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => { if (version === selection.current) setDetail(value => refreshDetail(value, fresh)); }).catch(() => undefined); return current; });
           break;
         case "title": setDetail(current => current && { ...current, conversation: { ...current.conversation, title: String(event.title) } }); loadConversations(); break;
         case "context": setDetail(current => current && { ...current, context: { used: Number(event.used) || 0, window: Number(event.window) || 32000 } }); break;
@@ -367,7 +377,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           cancelBrowserCalls();
           setRunId(null); setLive(null); unsubscribe.current = null;
           onConfigChanged();
-          setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => setDetail(value => value?.conversation.id === fresh.conversation.id ? fresh : value)).catch(() => undefined); return current; });
+          setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value)).catch(() => undefined); return current; });
           break;
       }
     }, value => { if (version === selection.current) setReconnecting(value); });
@@ -388,6 +398,26 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       window.requestAnimationFrame(() => scrollToEnd(true));
     } catch (reason) { toast.error(api.errorMessage(reason, "对话加载失败，请稍后重试")); }
     finally { if (version === selection.current) setLoading(false); }
+  }
+
+  async function loadEarlier() {
+    if (!detail?.before_seq || earlierRequest.current) return;
+    const id = detail.conversation.id, version = selection.current;
+    earlierRequest.current = id; setEarlierBusy(true);
+    try {
+      const older = await ai.conversation(id, detail.before_seq);
+      if (version !== selection.current) return;
+      const node = scroller.current, height = node?.scrollHeight ?? 0, top = node?.scrollTop ?? 0;
+      atBottomRef.current = false; setAtBottom(false);
+      setDetail(current => {
+        if (current?.conversation.id !== id) return current;
+        const known = new Set(current.messages.map(message => message.seq));
+        const messages = [...older.messages.filter(message => !known.has(message.seq)), ...current.messages].sort((a, b) => a.seq - b.seq);
+        return { ...current, messages, before_seq: older.before_seq };
+      });
+      window.requestAnimationFrame(() => { if (node && version === selection.current) node.scrollTop = top + node.scrollHeight - height; });
+    } catch (reason) { if (version === selection.current) toast.error(api.errorMessage(reason, "更早的消息加载失败，请稍后重试")); }
+    finally { earlierRequest.current = null; setEarlierBusy(false); }
   }
 
   // 关闭抽屉即放弃输入框里尚未发送的附件（§22.5）：附件只属于发出的消息，不留下没有对话的附件。
@@ -443,7 +473,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       if (withFiles) attachments.clear();
       const fresh = await ai.conversation(current.conversation.id).catch(() => null);
       if (version !== selection.current) return;
-      if (fresh) setDetail(fresh);
+      if (fresh) setDetail(value => refreshDetail(value, fresh));
       follow(result.run_id);
       window.requestAnimationFrame(() => scrollToEnd(true));
     } catch (reason) { toast.error(api.errorMessage(reason, "发送失败，请稍后重试")); }
@@ -465,7 +495,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   async function retry(seq: number) {
     if (!detail || runId || sending) return;
     setSending(true);
-    const version = selection.current, id = detail.conversation.id;
+    const version = ++selection.current, id = detail.conversation.id;
     try {
       const result = await ai.retryMessage(id, { seq, model_id: modelId ?? undefined, location: locationKey, view: location.view, environment: assistantEnvironment() });
       if (version !== selection.current) return;
@@ -482,7 +512,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     try {
       const result = await ai.decideScope(actionId, approve);
       const fresh = await ai.conversation(detail!.conversation.id);
-      setDetail(fresh);
+      setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value);
       if (result.run_id) follow(result.run_id);
     } catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); }
   }
@@ -501,13 +531,13 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     try {
       await ai.updateConversation(detail.conversation.id, { access_mode: next });
       const fresh = await ai.conversation(detail.conversation.id);
-      setDetail(value => value?.conversation.id === fresh.conversation.id ? fresh : value);
+      setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value);
       window.requestAnimationFrame(() => scrollToEnd(true));
     } catch (reason) { toast.error(api.errorMessage(reason, "切换模型失败，请稍后重试")); }
   }
 
   const reloadDetail = useCallback(() => {
-    setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => setDetail(value => value?.conversation.id === fresh.conversation.id ? fresh : value)).catch(() => undefined); return current; });
+    setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value)).catch(() => undefined); return current; });
   }, []);
 
   // 键盘：Esc 运行中先停止，空闲时关闭。全页模式只停止运行，不关闭。
@@ -610,10 +640,11 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const usage = config.usage;
   const usageRatio = usage.limit ? usage.today / usage.limit : 0;
   const context = detail?.context ?? null;
-  const contextRatio = context ? context.used / Math.max(1, context.window) : 0;
+  const selectedModel = config.models.find(model => model.id === modelId);
+  const contextWindow = selectedModel ? selectedModel.context_window || 32000 : context?.window || 32000;
+  const contextRatio = context ? context.used / Math.max(1, contextWindow) : 0;
   const exhausted = Boolean(usage.limit && usage.today >= usage.limit);
 
-  const selectedModel = config.models.find(model => model.id === modelId);
   const canSee = selectedModel?.capabilities?.vision === true;
   // 私密空间不对助手开放，也不在那里添加附件（附件保存在普通文件区域）。
   const canAttach = config.notice_ack && !exhausted && location.view !== "private" && !privateMode;
@@ -650,6 +681,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     <div className="assistant-scroll-area"><div className="assistant-thread" ref={scroller} role="log" aria-live="polite" aria-relevant="additions"
       onScroll={event => { const node = event.currentTarget; const bottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; setAtBottom(bottom); if (bottom) setUnseen(false); }}>
       <div className="assistant-thread-inner">
+        {config.notice_ack && !loading && detail?.before_seq && <Button variant="ghost" loading={earlierBusy} onClick={() => void loadEarlier()}>加载更早消息</Button>}
         {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} privateMode={privateMode} onAccept={() => void acknowledge()} />
           : loading ? <SkeletonRows rows={4} />
           : !detail ? <Welcome location={effectiveScope} view={location.view} privateMode={privateMode} onPick={text => { setDraft(text); input.current?.focus(); }} />
@@ -699,10 +731,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       </div>
       <div className={`assistant-footnote${usageRatio >= 0.8 ? " tone-warning" : ""}`}>
         <span className="assistant-footnote-meters">
-          <span title={usage.limit ? `今天的使用额度已用 ${Math.min(100, Math.round(usageRatio * 100))}%，明天 0 点恢复` : "今天的使用不限额度"}>{usage.limit ? `今日额度 ${Math.min(100, Math.round(usageRatio * 100))}%` : "今日不限额"}</span>
+          <span title={usage.limit ? `今日所有模型请求累计 ${usage.today.toLocaleString("zh-CN")} / ${usage.limit.toLocaleString("zh-CN")} token，明天 0 点恢复；与模型上下文容量独立。` : "今日累计 token 不限额；每轮累计预算由管理员单独配置。"}>{usage.limit ? `今日额度 ${Math.min(100, Math.round(usageRatio * 100))}%` : "今日不限额"}</span>
           {context && <span className={contextRatio >= 0.8 ? "tone-warning" : undefined}
-            title="助手一次能记住的对话内容有限；接近上限时，较早的内容会自动压缩为摘要，新建对话效果更好。">
-            对话长度 {Math.min(100, Math.round(contextRatio * 100))}%{contextRatio >= 0.8 ? " · 建议新建对话" : ""}</span>}
+            title={`最近一次请求约 ${context.used.toLocaleString("zh-CN")} / ${contextWindow.toLocaleString("zh-CN")} token（所选模型）。包含提示词、工具和历史内容，接近上限时自动压缩历史；与每日额度、每轮累计预算独立。`}>
+            模型上下文 {Math.min(100, Math.round(contextRatio * 100))}%{contextRatio >= 0.8 ? " · 接近容量上限" : ""}</span>}
         </span>
         <span>{accessMode === "full" ? <><Icon name="zap" size={11} />普通修改自动执行，可在卡片上撤销</> : <><Icon name="shield" size={11} />修改文件前会请你确认</>}</span>
       </div>

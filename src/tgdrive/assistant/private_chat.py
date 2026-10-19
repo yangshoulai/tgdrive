@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 import secrets
 import threading
@@ -130,11 +131,23 @@ class MemoryTrace:
                 row["updated_at"] = now
         return removed
 
-    def messages(self, conversation_id: str, *, after: int = 0, limit: int = 500) -> list[dict[str, object]]:
+    def messages(self, conversation_id: str, *, after: int = 0, before: int = 0, limit: int = 500,
+                 latest: bool = False) -> list[dict[str, object]]:
         with self._lock:
-            rows = [m for m in self.messages_by.get(conversation_id, []) if m["seq"] > after][:limit]
+            messages = self.messages_by.get(conversation_id, [])
+            source = reversed(messages) if latest else iter(messages)
+            rows = list(itertools.islice((m for m in source if m["seq"] > after and (not before or m["seq"] < before)), limit))
+            if latest:
+                rows.reverse()
             return [{"seq": m["seq"], "run_id": m["run_id"], "role": m["role"], "tool_name": m["tool_name"],
                      "created_at": m["created_at"], **_copy(m["body"])} for m in rows]
+
+    def latest_summary(self, conversation_id: str) -> dict | None:
+        with self._lock:
+            for message in reversed(self.messages_by.get(conversation_id, [])):
+                if message["role"] == "event" and message["tool_name"] == "summary":
+                    return {"seq": message["seq"], "role": "event", **_copy(message["body"])}
+        return None
 
     def latest_plan(self, conversation_id: str) -> dict | None:
         with self._lock:
@@ -373,6 +386,9 @@ class RoutedTrace:
 
     def latest_plan(self, conversation_id):
         return self._by(conversation_id).latest_plan(conversation_id)
+
+    def latest_summary(self, conversation_id):
+        return self._by(conversation_id).latest_summary(conversation_id)
 
     def start_run(self, conversation_id, *args):
         return self._by(conversation_id).start_run(conversation_id, *args)

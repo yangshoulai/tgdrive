@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { getFileKind } from "./files";
+import { videoFramePixelsUsable } from "./video-frame";
 
 export type ThumbnailSource = "image" | "video" | "audio";
 export type ThumbnailSet = { thumb: string; grid?: string; poster?: string };
@@ -61,14 +62,24 @@ export function thumbnailsFromImage(image: HTMLImageElement): Promise<ThumbnailS
 
 /** 只截取播放器已经解码的当前画面，不创建媒体来源、不跳转、不额外读取视频。 */
 export function thumbnailsFromVideo(video: HTMLVideoElement): Promise<ThumbnailSet | null> {
-  return video.readyState >= 2 ? renderSet(video, video.videoWidth, video.videoHeight).catch(() => null) : Promise.resolve(null);
+  try {
+    if (!videoFrameUsable(video)) return Promise.resolve(null);
+    // 编码会异步等待：先固定当前画面，保证三个规格不会分别截到下一场景或黑屏。
+    const frame = document.createElement("canvas");
+    const scale = Math.min(1, POSTER.size / Math.max(video.videoWidth, video.videoHeight));
+    frame.width = Math.max(1, Math.round(video.videoWidth * scale));
+    frame.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const context = frame.getContext("2d");
+    if (!context) return Promise.resolve(null);
+    context.drawImage(video, 0, 0, frame.width, frame.height);
+    return renderSet(frame, frame.width, frame.height).catch(() => null);
+  } catch { return Promise.resolve(null); }
 }
 
-/** 预览中的当前画面是否适合做封面：跳过片头黑屏；播放 5 秒后仍然很暗就接受，避免一直等不到。
- * 跨域或解码受限导致读不了像素时视为可用，交给 renderSet 自己判断。 */
+/** 只检查已经解码的画面，不跳转或额外读取；播放时间不会绕过质量检查。 */
 export function videoFrameUsable(video: HTMLVideoElement): boolean {
-  if (video.readyState < 2 || !video.videoWidth) return false;
-  try { return brightness(video) > 18 || video.currentTime >= 5; } catch { return true; }
+  if (video.readyState < 2 || video.seeking || !video.videoWidth || !video.videoHeight) return false;
+  try { return videoFramePixelsUsable(frameLuma(video)); } catch { return false; }
 }
 
 async function fromBlob(blob: Blob): Promise<ThumbnailSet | null> {
@@ -101,24 +112,23 @@ function waitFor(target: HTMLMediaElement, event: string | string[], signal?: Ab
   });
 }
 
-/** 画面平均亮度（0–255），用于跳过片头的黑屏。 */
-function brightness(video: HTMLVideoElement) {
+/** 缩小后的灰度样本（0–255），同时判断黑白占比与画面细节。 */
+function frameLuma(video: HTMLVideoElement) {
   const canvas = document.createElement("canvas");
-  canvas.width = 24; canvas.height = 24;
+  canvas.width = 32; canvas.height = 32;
   const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) return 255;
-  context.drawImage(video, 0, 0, 24, 24);
-  const pixels = context.getImageData(0, 0, 24, 24).data;
-  let total = 0;
-  for (let index = 0; index < pixels.length; index += 4) total += pixels[index] * 0.3 + pixels[index + 1] * 0.59 + pixels[index + 2] * 0.11;
-  return total / (pixels.length / 4);
+  if (!context) return new Uint8Array();
+  context.drawImage(video, 0, 0, 32, 32);
+  const pixels = context.getImageData(0, 0, 32, 32).data;
+  const luma = new Uint8Array(pixels.length / 4);
+  for (let index = 0; index < luma.length; index++) luma[index] = Math.round(pixels[index * 4] * 0.299 + pixels[index * 4 + 1] * 0.587 + pixels[index * 4 + 2] * 0.114);
+  return luma;
 }
 
 async function fromVideo(src: string, signal?: AbortSignal, onFailure?: (message: string) => void): Promise<ThumbnailSet | null> {
   const video = document.createElement("video");
   video.muted = true; video.playsInline = true; video.preload = "metadata";
   const deadline = performance.now() + 45000;
-  let first: ThumbnailSet | null = null;
   try {
     // 浏览器用 Range 取得容器索引；MP4 的 moov 可能在文件末尾，不能假设首个存储分片足够。
     const metadata = waitFor(video, "loadedmetadata", signal, 45000, () => video.readyState >= 1);
@@ -133,24 +143,22 @@ async function fromVideo(src: string, signal?: AbortSignal, onFailure?: (message
       await frame;
       video.pause();
     }
-    first = await renderSet(video, video.videoWidth, video.videoHeight);
-    if (brightness(video) > 18) return first;
-    // 只在片头黑屏时看前 1、3 秒；不按总时长跳转，也不为了获取时长扫描 WebM 末尾。
-    for (const candidate of [1, 3]) {
+    if (videoFrameUsable(video)) return await thumbnailsFromVideo(video);
+    // 仅本地上传或显式生成时尝试多个位置；真实预览仍只截当前画面，不跳转播放位置。
+    for (const candidate of [1, 3, 10, 30]) {
       const time = Number.isFinite(video.duration) ? Math.min(candidate, Math.max(0, video.duration - 0.1)) : candidate;
       if (time <= video.currentTime + 0.01 || performance.now() >= deadline) continue;
-      const seek = waitFor(video, "seeked", signal, Math.min(3000, Math.max(1, deadline - performance.now())));
+      const seek = waitFor(video, "seeked", signal, Math.min(3000, Math.max(1, deadline - performance.now())), () => !video.seeking && video.readyState >= 2 && Math.abs(video.currentTime - time) < 0.1);
       video.currentTime = time;
       await seek;
-      if (video.readyState >= 2 && brightness(video) > 18) return await renderSet(video, video.videoWidth, video.videoHeight);
+      if (videoFrameUsable(video)) return await thumbnailsFromVideo(video);
     }
-    if (!first) onFailure?.("视频未能生成可用画面，可重试生成缩略图");
-    return first;
+    onFailure?.("未找到适合的封面画面：候选画面过黑、过白或接近纯色");
+    return null;
   } catch (reason) {
     if (signal?.aborted || reason instanceof DOMException && reason.name === "AbortError") throw reason;
-    // 已经取得的首帧优于缺失封面；后续跳转超时不丢弃它。
-    if (!first) onFailure?.(reason instanceof VideoThumbnailError ? reason.message : "浏览器未能截取视频画面，可重试生成缩略图");
-    return first;
+    onFailure?.(reason instanceof VideoThumbnailError ? reason.message : "浏览器未能截取视频画面，可重试生成缩略图");
+    return null;
   } finally {
     video.pause();
     video.removeAttribute("src"); video.load();

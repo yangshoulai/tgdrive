@@ -41,6 +41,9 @@ BACKFILL_KEY, BACKFILL_USAGE_KEY = "thumbnails.backfill", "thumbnails.backfill_u
 BACKFILL_RETRY = 6 * 3600
 MAX_PIXELS = 40_000_000
 VIDEO_PIXELS = 4096 * 2160
+# 与 web/src/video-frame.ts 保持一致；只分析 32×32 灰度样本，不在 Python 中解码完整图片。
+VIDEO_SAMPLE_SIZE = 32
+VIDEO_FRAME_TIMES = (0, 1, 3, 10, 30)
 # 不允许播放列表、concat、SVG 等会加载其他资源的格式。HTTP 请求还统一经过下面的本地代理。
 FORMATS = ("mov,matroska,webm,avi,ogg,mp3,flac,wav,aac,aiff,asf,flv,mpeg,mpegts,ape,wv,"
            "jpeg_pipe,png_pipe,webp_pipe,gif,bmp_pipe,tiff_pipe,ico,jxl_pipe,avif,heif")
@@ -73,6 +76,16 @@ class ThumbnailBudget(ThumbnailError):
 
 class ThumbnailRetry(ThumbnailBudget):
     """暂时无法继续（服务器资源不足、已读分片缓存被回收），稍后可以再试，不能记为「无法生成」。"""
+
+
+def video_frame_usable(pixels: bytes) -> bool:
+    if not pixels:
+        return False
+    count = len(pixels)
+    if sum(value <= 24 for value in pixels) >= count * 0.7 or sum(value >= 232 for value in pixels) >= count * 0.7:
+        return False
+    mean = sum(pixels) / count
+    return sum((value - mean) ** 2 for value in pixels) / count >= 12 ** 2
 
 
 def source_kind(info: ObjectInfo) -> str | None:
@@ -671,6 +684,8 @@ class ThumbnailService:
             if not force and self._has_thumbnail(info.blob_uuid):
                 return
             if images is None:
+                if force and kind == "video":
+                    raise ThumbnailError("候选画面过黑、过白或接近纯色，未替换现有缩略图")
                 await self.objects.set_thumbnail(scope, info.key, None, "none")
                 return
             saved = []
@@ -685,8 +700,28 @@ class ThumbnailService:
                 self.objects.finish_thumbnail_set(scope, info.key, saved)
 
     async def _render(self, source, kind, directory, authorize):
+        if kind != "video":
+            images, _ = await self._render_frame(source, kind, directory, authorize)
+            return images
+        for index, position in enumerate(VIDEO_FRAME_TIMES):
+            authorize()
+            candidate = directory / str(index)
+            candidate.mkdir()
+            images, pixels = await self._render_frame(source, kind, candidate, authorize, position=position)
+            if not images:  # 已到短视频结尾，无需继续跳到更远的位置。
+                break
+            if len(pixels) != VIDEO_SAMPLE_SIZE ** 2:
+                raise ThumbnailError("未能检查视频画面")
+            if video_frame_usable(pixels):
+                return images
+        # 不把片头黑屏、白屏或近乎纯色的画面固化为封面。
+        return None
+
+    async def _render_frame(self, source, kind, directory, authorize, *, position=0):
         selector = "V:0" if kind == "video" else "v:0"
-        filters = [f"[0:{selector}]split=3[t][g][p]"]
+        filters = [f"[0:{selector}]split=4[t][g][p][q]" if kind == "video" else f"[0:{selector}]split=3[t][g][p]"]
+        if kind == "video":
+            filters.append(f"[q]scale={VIDEO_SAMPLE_SIZE}:{VIDEO_SAMPLE_SIZE}:out_range=full,format=gray[quality]")
         for label, variant, size in (("t", "thumb", 160), ("g", "grid", 640), ("p", "poster", 960)):
             filters.append(f"[{label}]scale=w='max(2,min({size},iw))':h='max(2,min({size},ih))':"
                            f"force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuvj420p[{variant}]")
@@ -694,16 +729,23 @@ class ThumbnailService:
                    "-threads", "1", "-filter_complex_threads", "1", "-protocol_whitelist", "http,tcp",
                    "-format_whitelist", FORMATS, "-probesize", str(MIB), "-analyzeduration", "1000000",
                    "-max_pixels", str(VIDEO_PIXELS if kind == "video" else MAX_PIXELS)]
+        if position:
+            options += ["-ss", str(position)]
         options += ["-i", source.url, "-filter_complex", ";".join(filters)]
         for variant in ("thumb", "grid", "poster"):
             options += ["-map", f"[{variant}]", "-an", "-sn", "-dn", "-frames:v", "1", "-threads", "1",
                         "-c:v", "mjpeg", "-q:v", "8", "-f", "image2", "-update", "1", str(directory / f"{variant}.jpg")]
+        if kind == "video":
+            options += ["-map", "[quality]", "-an", "-sn", "-dn", "-frames:v", "1", "-threads", "1",
+                        "-c:v", "rawvideo", "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1"]
         # 强制 HTTP 经仅服务当前文件的本地代理，清掉宿主机代理配置，拒绝媒体中的外部引用。
         env = {key: value for key, value in os.environ.items()
                if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
         env.update(http_proxy=source.origin, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
         process = await asyncio.create_subprocess_exec(self.resources.ffmpeg, *options, env=env,
-            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE if kind == "video" else asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE)
         waiting = asyncio.create_task(process.wait())
 
         async def errors():
@@ -712,7 +754,14 @@ class ThumbnailService:
                 output.extend(piece[:max(0, 8192 - len(output))])
             return bytes(output)
 
+        async def samples():
+            output = bytearray()
+            while piece := await process.stdout.read(4096):
+                output.extend(piece[:max(0, VIDEO_SAMPLE_SIZE ** 2 - len(output))])
+            return bytes(output)
+
         stderr = asyncio.create_task(errors())
+        quality = asyncio.create_task(samples()) if kind == "video" else None
         # 按实际占用的物理内存（RSS）巡检，不用 RLIMIT_AS：FFmpeg 7 为每路输入、输出和滤镜各开线程，
         # 加上动态库映射，虚拟地址空间远大于实际用量，限制地址空间会让它在加载库或创建线程时直接失败。
         memory = min(512 * MIB, max(192 * MIB, (self.resources.detected["memory_bytes"] or 1536 * MIB) // 3))
@@ -731,7 +780,7 @@ class ThumbnailService:
                 raise source.failure
             if process.returncode:
                 if kind == "audio" and b"matches no streams" in output:
-                    return None
+                    return None, b""
                 if process.returncode < 0 or any(sign in output for sign in ENVIRONMENT_ERRORS):
                     # 被系统终止、线程或内存不足、缺少动态库都是运行环境的问题，不能据此把文件记为「无法生成」。
                     raise ThumbnailRetry("解码器运行环境受限，稍后再生成")
@@ -742,16 +791,18 @@ class ThumbnailService:
                 if path.is_file() and 0 < path.stat().st_size <= limit:
                     images[variant] = path.read_bytes()
             if "thumb" not in images:
+                if kind == "video" and position:
+                    return None, b""
                 raise ThumbnailError("未能提取画面或封面")
             # 缩小前尺寸未知时，FFmpeg 可能输出同样大小的图片；不重复保存同一张图。
             for variant in ("poster", "grid"):
                 if images.get(variant) == images.get("grid" if variant == "poster" else "thumb"):
                     images.pop(variant, None)
-            return images
+            return images, (await quality if quality else b"")
         finally:
             if process.returncode is None:
                 try:
                     process.kill()
                 except ProcessLookupError:
                     pass
-            await asyncio.gather(waiting, stderr, return_exceptions=True)
+            await asyncio.gather(waiting, stderr, *([quality] if quality else []), return_exceptions=True)

@@ -1424,7 +1424,7 @@ class TgDriveASGI(StaticFiles):
             return 201, service.create_conversation(token, csrf, payload, access), no_store
         match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})(?:/(update|delete|messages|retry|share-link))?", route)
         if match and match[2] is None and method == "GET":
-            return 200, service.conversation(token, match[1], access), no_store
+            return 200, service.conversation(token, match[1], access, before=int(query.get("before_seq", ["0"])[0])), no_store
         if match and match[2] == "update" and method == "POST":
             return 200, service.update_conversation(token, csrf, match[1], payload, access), no_store
         if match and match[2] == "delete" and method == "POST":
