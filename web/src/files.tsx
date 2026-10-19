@@ -5,10 +5,11 @@ import { readPreviewText, TEXT_PREVIEW_LIMIT, type PreviewText } from "./preview
 import { MediaPreview, MinimizedPlayback, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
 import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip } from "./preview-playlist";
 import { ImageViewer } from "./preview-image";
-import { FileCacheButton, useCacheFiles } from "./user/cache";
+import { FileCacheButton, cacheMenuItems, useCacheFiles } from "./user/cache";
 import { PreviewToolsContext, TextPreview } from "./preview-text";
 import { PdfPreview } from "./preview-pdf";
-import { Notice, ButtonLink, Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, type IconName } from "./ui";
+import { Notice, ButtonLink, Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, type IconName, type MenuItem } from "./ui";
+import { ShortcutsDialog } from "./shortcuts";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "text" | "code" | "archive" | "other";
 
@@ -291,6 +292,10 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   const reading = kind === "text" || kind === "code" || kind === "pdf";
   const immersive = browsable || reading;
   const [textTools, setTextTools] = useState<HTMLElement | null>(null);
+  const [compactActions, setCompactActions] = useState(false);
+  const [textMenuItems, setTextMenuItems] = useState<MenuItem[]>([]);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const readingTools = useMemo(() => reading && textTools ? { target: textTools, compact: compactActions, setMenuItems: setTextMenuItems } : null, [reading, textTools, compactActions]);
   const playlist = usePreviewPlaylist(file, kind, playlistFiles,
     item => getFileKind(item.content_type, item.key) === kind && (kind === "image" || isPlayable(item.key, item.content_type)) && parentPath(item.key) === parentPath(file.key));
   const active = browsable && playlist.current.key !== file.key ? playlist.current : file;
@@ -305,7 +310,8 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   };
   const source = sourceOf(active);
   const ownSource = /^\/api\/user\/v1\/(?:private\/)?content\?/.test(source.url);
-  useCacheFiles([active], ownSource);
+  const cacheQueue = useCacheFiles([active], ownSource);
+  const downloadHref = ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag, active.size) : source.downloadUrl;
   const [videoSize, setVideoSize] = useState<{ key: string; etag: string; ratio: number } | null>(null);
   const videoRatio = videoSize?.key === active.key && videoSize.etag === active.etag ? videoSize.ratio : 16 / 9;
   const [playlistExpanded, setPlaylistExpanded] = useState(false);
@@ -339,12 +345,24 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   }
   useEffect(() => { pendingPlay.current = false; }, [file.key]);
   function handleShortcut(event: KeyboardEvent<HTMLDivElement>) {
-    if (!browsable || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return;
     const key = event.key.toLowerCase(), navigation = key === "arrowleft" || key === "arrowright";
-    if (!navigation && (!media || !["k", " ", "j", "l", "arrowup", "arrowdown"].includes(key))) return;
     const target = event.target as HTMLElement;
     if (!event.currentTarget.contains(target) || event.currentTarget.closest("[inert]")) return;
     if (isShortcutControl(target)) return;
+    if (key === "?") { event.preventDefault(); event.stopPropagation(); event.currentTarget.classList.remove("is-chrome-idle"); if (!event.repeat) void showShortcuts(); return; }
+    if (event.shiftKey) return;
+    if (key === "d" || key === "s" && onShare || key === "o" && media && playlist.items.length > 1) {
+      event.preventDefault(); event.stopPropagation();
+      event.currentTarget.classList.remove("is-chrome-idle");
+      if (!event.repeat) {
+        if (key === "d") downloadFile(downloadHref);
+        else if (key === "s") void share();
+        else setPlaylistExpanded(value => !value);
+      }
+      return;
+    }
+    if (!browsable || !navigation && (!media || !["k", " ", "j", "l", "arrowup", "arrowdown"].includes(key))) return;
     // 空格继续激活当前按钮，不能同时切换播放状态。
     if (key === " " && target.closest("button, a, summary, [role='button']")) return;
     event.preventDefault(); event.stopPropagation();
@@ -367,11 +385,13 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   useLayoutEffect(() => {
     const node = stage.current, modal = node?.closest<HTMLElement>(".modal"), backdrop = modal?.parentElement;
     const header = modal?.querySelector<HTMLElement>(".modal-header");
-    if (!immersive || !node || !modal || !backdrop || !header) return;
+    if (!node || !modal || !backdrop || !header) return;
     // 按实际头部高度计算画布，避免窄屏换行挤出内容及百分比高度循环；导航都在播放器内部，不再有单独的工具栏。
     // 沉浸式预览的头部浮在画布上（不占高度），播放器用 --preview-header-height 给顶部内容留出位置。
     const resize = () => {
       if (modal.classList.contains("is-minimized")) return;
+      setCompactActions(modal.clientWidth <= 580);
+      if (!immersive) return;
       const outer = getComputedStyle(backdrop), frame = getComputedStyle(modal);
       let available = backdrop.clientHeight - parseFloat(outer.paddingTop) - parseFloat(outer.paddingBottom);
       if (frame.maxHeight.endsWith("px")) available = Math.min(available, parseFloat(frame.maxHeight));
@@ -400,6 +420,13 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     }
     onShare?.(active);
   }
+  async function showShortcuts() {
+    const screen = document.fullscreenElement;
+    if (screen && stage.current?.closest(".modal-backdrop")?.contains(screen)) {
+      try { await document.exitFullscreen(); } catch { toast.error("请先退出全屏，再查看快捷键。"); return; }
+    }
+    setShortcutsOpen(true);
+  }
   const resolveImage = useMemo(() => hasAssets ? (src: string) => {
     const key = resolveRelativeKey(parentPath(active.key), src);
     return key && assetRef.current ? assetRef.current(key) : null;
@@ -426,7 +453,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       modal.classList.remove("is-chrome-idle");
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
-        if (modal.classList.contains("is-minimized") || header?.matches(":hover, :focus-within") || modal.querySelector(".preview-playlist-panel")) return;
+        if (modal.hasAttribute("inert") || modal.classList.contains("is-minimized") || header?.matches(":hover, :focus-within") || header?.querySelector('[aria-expanded="true"]') || modal.querySelector(".preview-playlist-panel")) return;
         if (kind === "video" && !playingRef.current) return;
         if (reading && (modal.querySelector(".cm-panels, .preview-outline-panel") || !window.getSelection()?.isCollapsed && modal.contains(window.getSelection()?.anchorNode ?? null))) return;
         modal.classList.add("is-chrome-idle");
@@ -453,9 +480,19 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     node.addEventListener("pointerdown", outside);
     return () => node.removeEventListener("pointerdown", outside);
   }, [panelOpen]);
-  // 下载、分享放在头部，与窗口按钮一组；不再保留底部操作栏，内容区可以更高。
+  // 窄窗口仅保留阅读工具、更多与关闭，其他操作合并到同一个菜单。
   return (
-    <Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable movable resizable={kind === "audio" ? undefined : `preview-${kind === "code" ? "text" : kind}`} aspectRatio={kind === "video" ? videoRatio : undefined} windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
+    <><Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable movable compactActions={compactActions}
+      menuItems={[
+        { label: "键盘快捷键", icon: "keyboard", shortcut: "?", onSelect: () => void showShortcuts() },
+        ...(compactActions ? [
+        ...textMenuItems,
+        ...(onShare ? [{ label: active.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => void share() }] : []),
+        ...(ownSource ? cacheMenuItems(cacheQueue, active).filter(item => !item.danger) : []),
+        { label: "下载文件", icon: "download" as const, shortcut: "D", href: downloadHref, onSelect: () => {} },
+        ] : []),
+      ]}
+      resizable={kind === "audio" ? undefined : `preview-${kind === "code" ? "text" : kind}`} aspectRatio={kind === "video" ? videoRatio : undefined} windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
       : kind === "image" && nav && nav.count > 1 ? <div className="preview-mini-gallery">
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>
@@ -468,12 +505,14 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       </span>}
       actions={<>
         {reading && <span className="preview-header-tools" ref={setTextTools} />}
-        {onShare && <IconButton icon="link" label={active.public_token ? "管理分享" : "公开分享"} size="sm" onClick={() => void share()} />}
-        {ownSource && <FileCacheButton file={active} />}
-        <a className="icon-btn icon-btn-ghost icon-btn-sm" href={ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag, active.size) : source.downloadUrl} aria-label="下载文件" title="下载文件"><Icon name="download" size={16} /></a>
-        <span className="modal-actions-divider" aria-hidden="true" />
+        {!compactActions && <>
+          {onShare && <IconButton icon="link" label={active.public_token ? "管理分享" : "公开分享"} shortcut="S" size="sm" onClick={() => void share()} />}
+          {ownSource && <FileCacheButton file={active} />}
+          <a className="icon-btn icon-btn-ghost icon-btn-sm" href={downloadHref} aria-label="下载文件" aria-keyshortcuts="D" title="下载文件（D）"><Icon name="download" size={16} /></a>
+          <span className="modal-actions-divider" aria-hidden="true" />
+        </>}
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}`}><PreviewToolsContext.Provider value={reading ? textTools : null}><FilePreview kind={kind} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag, active.size) : source.downloadUrl} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}`}><PreviewToolsContext.Provider value={readingTools}><FilePreview kind={kind} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height) => setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height })}
         onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}
@@ -485,6 +524,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
           renderThumbnail={item => <FileVisual kind={getFileKind(item.content_type, item.key)} src={sourceOf(item).thumbnail} size="md" />} />}
       </div>
     </Modal>
+    {shortcutsOpen && <ShortcutsDialog area="preview" kind={kind} privateSpace={api.isPrivatePath(active.key)} onClose={() => setShortcutsOpen(false)} />}</>
   );
 }
 

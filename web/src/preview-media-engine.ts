@@ -103,13 +103,13 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       if (option) player.controls.update({ name, ...option });
       else if (container.querySelector(`.art-control-${name}`)) player.controls.remove(name);
     };
-    control("previous", multiple ? { position: "left", index: 11, html: GLYPHS.previous, tooltip: "上一个", click: () => navigation?.()?.onPrevious() } : null);
-    control("next", multiple ? { position: "left", index: 12, html: GLYPHS.next, tooltip: "下一个", click: () => navigation?.()?.onNext() } : null);
-    control("playlist", multiple && nav?.onPlaylist ? { position: "right", index: 25, html: GLYPHS.list, tooltip: `播放列表 ${nav.index + 1}/${nav.count}`,
+    control("previous", multiple ? { position: "left", index: 11, html: GLYPHS.previous, tooltip: "上一个（←）", click: () => navigation?.()?.onPrevious() } : null);
+    control("next", multiple ? { position: "left", index: 12, html: GLYPHS.next, tooltip: "下一个（→）", click: () => navigation?.()?.onNext() } : null);
+    control("playlist", multiple && nav?.onPlaylist ? { position: "right", index: 25, html: GLYPHS.list, tooltip: `播放列表 ${nav.index + 1}/${nav.count}（O）`,
       style: nav.playlistOpen ? { color: "var(--art-theme)" } : {}, click: () => navigation?.()?.onPlaylist?.() } : null);
     for (const name of ["previous", "next", "playlist"]) {
       const element = container.querySelector<HTMLElement>(`.art-control-${name}`);
-      if (element) { element.tabIndex = 0; element.setAttribute("role", "button"); element.setAttribute("aria-label", name === "previous" ? "上一个" : name === "next" ? "下一个" : "播放列表"); }
+      if (element) { element.tabIndex = 0; element.setAttribute("role", "button"); element.setAttribute("aria-label", name === "previous" ? "上一个" : name === "next" ? "下一个" : "播放列表"); element.setAttribute("aria-keyshortcuts", name === "previous" ? "ArrowLeft" : name === "next" ? "ArrowRight" : "O"); }
     }
     if (multiple && nav?.mode && nav.onMode) {
       const current = MODE_LABELS.find(([value]) => value === nav.mode) ?? MODE_LABELS[0];

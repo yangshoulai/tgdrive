@@ -2,14 +2,14 @@
  * 在沉浸式预览窗口里（PreviewToolsContext 提供头部插槽）：工具移到浮动头部，Markdown／纯文本放在居中的纸张上，
  * 代码与 Markdown 源码用通栏深色编辑器，行数与截断提示浮在底部；Markdown 预览提供标题目录抽屉。
  * 没有插槽时（分享页等内嵌场景）保持原来的工具栏布局。 */
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { loadTextEngine } from "./preview-runtime";
-import { Button, Icon, IconButton, Segmented, Switch, copyText, formatBytes } from "./ui";
+import { Button, Icon, IconButton, Segmented, Switch, copyText, formatBytes, isShortcutControl, type MenuItem } from "./ui";
 import { TEXT_PREVIEW_LIMIT, type PreviewText } from "./preview-data";
 
-/** 沉浸式预览头部里放文本工具的元素；为 null 时文本预览使用内嵌工具栏。 */
-export const PreviewToolsContext = createContext<HTMLElement | null>(null);
+/** 沉浸式预览的头部插槽与更多菜单；为 null 时使用内嵌工具栏。 */
+export const PreviewToolsContext = createContext<{ target: HTMLElement; compact: boolean; setMenuItems: (items: MenuItem[]) => void } | null>(null);
 
 type Heading = { index: number; level: number; text: string };
 
@@ -65,6 +65,8 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   const errorHandler = useRef(onError); errorHandler.current = onError;
   const tools = useContext(PreviewToolsContext);
   const immersive = tools !== null;
+  const compactTools = tools?.compact ?? false;
+  const setMenuItems = tools?.setMenuItems;
   const markdown = /\.(md|markdown|mdx)$/i.test(name);
   // 纸张：Markdown 预览与纯文本；深色通栏：代码文件与 Markdown 源码。
   const paper = immersive && (mode === "render" || !code && !markdown);
@@ -97,11 +99,28 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   }, [content.text, name, mode]);
   useEffect(() => { editor.current?.setWrapping(wrapping); }, [wrapping, ready]);
   useEffect(() => { if (mode !== "render") setOutline(false); }, [mode]);
+  useEffect(() => {
+    if (!immersive) return;
+    const handle = (event: KeyboardEvent) => {
+      const target = event.target as Element | null, dialog = host.current?.closest(".modal");
+      if (event.defaultPrevented || event.isComposing || !target || !dialog?.contains(target) || dialog.closest("[inert]") || dialog.classList.contains("is-minimized") || isShortcutControl(target)) return;
+      const key = event.key.toLowerCase(), mod = event.metaKey || event.ctrlKey;
+      if (mod && !event.altKey && !event.shiftKey && key === "f" && mode === "source" && ready) {
+        event.preventDefault(); if (!event.repeat) editor.current?.search(); return;
+      }
+      if (mod || event.altKey || event.shiftKey) return;
+      if (key === "t" && markdown) { event.preventDefault(); if (!event.repeat) setMode(value => value === "render" ? "source" : "render"); }
+      else if (key === "o" && mode === "render" && headings.length) { event.preventDefault(); if (!event.repeat) setOutline(value => !value); }
+      else if (key === "w" && mode === "source") { event.preventDefault(); if (!event.repeat) setWrapping(value => !value); }
+    };
+    document.addEventListener("keydown", handle);
+    return () => document.removeEventListener("keydown", handle);
+  }, [immersive, markdown, mode, ready, headings.length]);
   // 预览弹窗里按 Ctrl/⌘+A 只选中文件内容，而不是整个页面；输入框（如查找框）保留原生行为。
   useEffect(() => {
     if (!ready) return;
     const handleKey = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "a") return;
+      if (event.defaultPrevented || event.isComposing || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "a") return;
       const node = host.current, dialog = node?.closest(".modal"), target = event.target as HTMLElement;
       if (!node || !dialog?.contains(target) || dialog.hasAttribute("inert") || target.closest("input, textarea, select, [contenteditable='true']")) return;
       event.preventDefault();
@@ -146,20 +165,31 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     return () => { scroller.removeEventListener("scroll", schedule); cancelAnimationFrame(frame); };
   }, [ready, mode, headings]);
 
-  const copy = () => void copyText(content.text, content.truncated ? "已复制预览内容" : "内容已复制");
+  const copy = useCallback(() => void copyText(content.text, content.truncated ? "已复制预览内容" : "内容已复制"), [content.text, content.truncated]);
+  useEffect(() => {
+    if (!compactTools || !setMenuItems) return;
+    const items: MenuItem[] = [];
+    if (mode === "source") items.push(
+      { label: "查找", icon: "search", shortcut: "Mod+F", disabled: !ready, onSelect: () => editor.current?.search() },
+      { label: "自动换行", icon: "wrap", shortcut: "W", checked: wrapping, onSelect: () => setWrapping(value => !value) },
+    );
+    items.push({ label: content.truncated ? "复制已加载的预览内容" : "复制全部内容", icon: "copy", disabled: !ready && mode === "source", onSelect: copy });
+    setMenuItems(items);
+    return () => setMenuItems([]);
+  }, [compactTools, setMenuItems, mode, ready, wrapping, copy, content.truncated]);
   const jump = (heading: Heading) => {
     host.current?.querySelectorAll("h1, h2, h3")[heading.index]?.scrollIntoView({ block: "start", behavior: "smooth" });
     setActive(heading.index);
     if (window.matchMedia("(max-width: 640px)").matches) setOutline(false);
   };
   const toolbar = immersive ? <div className="preview-text-tools">
-    {markdown && <Segmented label="显示方式" value={mode} onChange={setMode} options={[{ value: "render", label: "预览" }, { value: "source", label: "源码" }]} />}
-    {markdown && mode === "render" && headings.length > 0 && <IconButton icon="list" label="目录" size="sm" className="playlist-toggle" active={outline} onClick={() => setOutline(value => !value)} />}
-    {mode === "source" && <>
-      <IconButton icon="search" label="查找（⌘F）" size="sm" disabled={!ready} onClick={() => editor.current?.search()} />
-      <IconButton icon="wrap" label={wrapping ? "关闭自动换行" : "自动换行"} size="sm" active={wrapping} onClick={() => setWrapping(value => !value)} />
+    {markdown && <Segmented label="显示方式" shortcut="T" value={mode} onChange={setMode} options={[{ value: "render", label: "预览" }, { value: "source", label: "源码" }]} />}
+    {markdown && mode === "render" && headings.length > 0 && <IconButton icon="list" label="目录" shortcut="O" size="sm" className="playlist-toggle" active={outline} onClick={() => setOutline(value => !value)} />}
+    {!compactTools && mode === "source" && <>
+      <IconButton icon="search" label="查找" shortcut="Mod+F" size="sm" disabled={!ready} onClick={() => editor.current?.search()} />
+      <IconButton icon="wrap" label={wrapping ? "关闭自动换行" : "自动换行"} shortcut="W" size="sm" active={wrapping} onClick={() => setWrapping(value => !value)} />
     </>}
-    <IconButton icon="copy" label={content.truncated ? "复制已加载的预览内容" : "复制全部内容"} size="sm" disabled={!ready && mode === "source"} onClick={copy} />
+    {!compactTools && <IconButton icon="copy" label={content.truncated ? "复制已加载的预览内容" : "复制全部内容"} size="sm" disabled={!ready && mode === "source"} onClick={copy} />}
   </div> : <div className="preview-toolbar">
     {markdown && <Segmented label="显示方式" value={mode} onChange={setMode} options={[{ value: "render", label: "预览" }, { value: "source", label: "源码" }]} />}
     {!markdown && <span className="preview-readonly"><Icon name="fileText" size={14} />只读预览</span>}
@@ -173,7 +203,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   const truncated = content.truncated && <span>仅显示前 {formatBytes(TEXT_PREVIEW_LIMIT)}{content.total ? `（共 ${formatBytes(content.total)}）` : ""}，<a href={downloadUrl}>下载完整文件</a></span>;
 
   return <div className={`preview-text${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${content.truncated ? " is-truncated" : ""}${immersive ? paper ? " is-paper" : " is-code" : ""}`}>
-    {immersive ? createPortal(toolbar, tools) : toolbar}
+    {tools ? createPortal(toolbar, tools.target) : toolbar}
     {!ready && <div className="preview-engine-loading" role="status"><span className="spinner" />正在准备预览…</div>}
     <div className={immersive ? "preview-sheet" : undefined}>
       <div ref={host} className={mode === "render" ? "preview-doc md" : "preview-code-editor"} onClick={event => {

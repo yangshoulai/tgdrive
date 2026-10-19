@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { errorMessage } from "./api";
 import { loadPdfEngine } from "./preview-runtime";
 import { PreviewToolsContext } from "./preview-text";
-import { Icon, IconButton } from "./ui";
+import { Icon, IconButton, isShortcutControl, shortcutAria, shortcutLabel } from "./ui";
 import type { PdfDocument, PdfOutline } from "./preview-pdf-engine";
 
 const ZOOMS = [0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
@@ -121,11 +121,13 @@ export function PdfPreview({ url, name, onError }: { url: string; name: string; 
     if (!node || !doc) return;
     const handle = (event: KeyboardEvent) => {
       const target = event.target instanceof Element ? event.target : document.body;
-      if (event.defaultPrevented || target.closest("input, textarea, select, [role=menu], [role=dialog]:not(.preview-modal)") || node.closest(".modal")?.classList.contains("is-minimized") || !node.closest(".modal")?.contains(target) && target !== document.body) return;
+      if (event.defaultPrevented || event.isComposing || event.altKey || isShortcutControl(target) || target.closest("[role=dialog]:not(.preview-modal)") || node.closest("[inert], .modal.is-minimized") || !node.closest(".modal")?.contains(target) && target !== document.body) return;
       if ((event.metaKey || event.ctrlKey) && (event.key === "=" || event.key === "+")) { event.preventDefault(); step(1); }
       else if ((event.metaKey || event.ctrlKey) && event.key === "-") { event.preventDefault(); step(-1); }
       else if ((event.metaKey || event.ctrlKey) && event.key === "0") { event.preventDefault(); changeZoom("fit"); }
-      else if (event.metaKey || event.ctrlKey || event.altKey) return;
+      else if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      else if (event.key.toLowerCase() === "o" && outline?.length) { event.preventDefault(); if (!event.repeat) setOutlineOpen(value => !value); }
+      else if (event.key.toLowerCase() === "g") { event.preventDefault(); if (!event.repeat) (tools?.target ?? node.closest(".preview-pdf"))?.querySelector<HTMLInputElement>(".preview-pdf-page input")?.focus(); }
       else if (event.key === "PageDown" || event.key === "ArrowRight") { event.preventDefault(); goTo(current + 1); }
       else if (event.key === "PageUp" || event.key === "ArrowLeft") { event.preventDefault(); goTo(current - 1); }
       else if (event.key === "Home") { event.preventDefault(); goTo(1); }
@@ -140,24 +142,24 @@ export function PdfPreview({ url, name, onError }: { url: string; name: string; 
   const activeItem = useMemo(() => { let found = -1; flat.forEach((item, index) => { if (item.page !== null && item.page <= current) found = index; }); return found; }, [flat, current]);
 
   const toolbar = doc && <div className="preview-pdf-tools" role="toolbar" aria-label="PDF 工具">
-    {outline && outline.length > 0 && <IconButton icon="list" size="sm" label={outlineOpen ? "收起目录" : "目录"} className="playlist-toggle" active={outlineOpen} onClick={() => setOutlineOpen(value => !value)} />}
-    <IconButton icon="chevronLeft" size="sm" label="上一页（PageUp）" className="preview-pdf-step" disabled={current <= 1} onClick={() => goTo(current - 1)} />
+    {outline && outline.length > 0 && <IconButton icon="list" size="sm" label={outlineOpen ? "收起目录" : "目录"} shortcut="O" className="playlist-toggle" active={outlineOpen} onClick={() => setOutlineOpen(value => !value)} />}
+    <IconButton icon="chevronLeft" size="sm" label="上一页" shortcut="PageUp" className="preview-pdf-step" disabled={current <= 1} onClick={() => goTo(current - 1)} />
     <form className="preview-pdf-page" onSubmit={event => { event.preventDefault(); const value = Number(pageInput); if (Number.isFinite(value)) goTo(Math.round(value)); else setPageInput(String(current)); }}>
-      <input aria-label="页码" inputMode="numeric" value={pageInput} onChange={event => setPageInput(event.target.value.replace(/\D/g, ""))} onBlur={() => setPageInput(String(current))}
+      <input aria-label="页码" aria-keyshortcuts="G" title="跳到页码（G）" inputMode="numeric" value={pageInput} onChange={event => setPageInput(event.target.value.replace(/\D/g, ""))} onBlur={() => setPageInput(String(current))}
         onFocus={event => event.currentTarget.select()} style={{ width: `${Math.max(2, String(base.length).length) + 1}ch` }} />
       <span>/ {base.length}</span>
     </form>
-    <IconButton icon="chevronRight" size="sm" label="下一页（PageDown）" className="preview-pdf-step" disabled={current >= base.length} onClick={() => goTo(current + 1)} />
+    <IconButton icon="chevronRight" size="sm" label="下一页" shortcut="PageDown" className="preview-pdf-step" disabled={current >= base.length} onClick={() => goTo(current + 1)} />
     <span className="preview-pdf-divider" aria-hidden="true" />
-    <IconButton icon="zoomOut" size="sm" label="缩小（⌘/Ctrl −）" className="preview-pdf-step" disabled={scale <= ZOOMS[0] + 0.001} onClick={() => step(-1)} />
-    <button type="button" className="preview-pdf-zoom" title={zoom === "fit" ? "当前适合宽度，点击切换为 100%" : "点击适合宽度（⌘/Ctrl 0）"} onClick={() => changeZoom(zoom === "fit" ? 1 : "fit")}>
+    <IconButton icon="zoomOut" size="sm" label="缩小" shortcut="Mod+-" className="preview-pdf-step" disabled={scale <= ZOOMS[0] + 0.001} onClick={() => step(-1)} />
+    <button type="button" className="preview-pdf-zoom" aria-keyshortcuts={shortcutAria("Mod+0")} title={`${zoom === "fit" ? "当前适合宽度，点击切换为 100%" : "点击适合宽度"}（${shortcutLabel("Mod+0")} 适合宽度）`} onClick={() => changeZoom(zoom === "fit" ? 1 : "fit")}>
       {zoom === "fit" ? "适合宽度" : `${Math.round(scale * 100)}%`}
     </button>
-    <IconButton icon="zoomIn" size="sm" label="放大（⌘/Ctrl +）" className="preview-pdf-step" disabled={scale >= ZOOMS[ZOOMS.length - 1] - 0.001} onClick={() => step(1)} />
+    <IconButton icon="zoomIn" size="sm" label="放大" shortcut="Mod++" className="preview-pdf-step" disabled={scale >= ZOOMS[ZOOMS.length - 1] - 0.001} onClick={() => step(1)} />
   </div>;
 
   return <div className={`preview-pdf${tools ? " is-immersive" : ""}`}>
-    {toolbar && (tools ? createPortal(toolbar, tools) : <div className="preview-pdf-bar">{toolbar}</div>)}
+    {toolbar && (tools ? createPortal(toolbar, tools.target) : <div className="preview-pdf-bar">{toolbar}</div>)}
     <div ref={scroller} className="preview-pdf-scroller" onScroll={onScroll} tabIndex={-1} aria-label={`${name}，共 ${base.length} 页`}>
       {!doc ? <div className="preview-pdf-loading" role="status"><span className="preview-pdf-spinner" aria-hidden="true" /><span>正在打开 PDF…</span></div>
         : <div className="preview-pdf-pages" style={{ paddingTop: GAP, paddingBottom: GAP }}>

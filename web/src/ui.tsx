@@ -165,6 +165,21 @@ export function Brand({ href = "/", suffix, tagline = false }: { href?: string; 
 
 /* ---------- 按钮 ---------- */
 
+export const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+export const shortcutAria = (shortcut: string) => shortcut.replace(/Mod/g, IS_MAC ? "Meta" : "Control").replace(/⌘/g, "Meta+").replace(/⇧/g, "Shift+").replace(/⌫/g, "Backspace").replace(/↵/g, "Enter").replace(/\bDel\b/g, "Delete");
+export function shortcutLabel(shortcut: string): string {
+  if (shortcut.endsWith("++")) return `${shortcutLabel(shortcut.slice(0, -2))}${IS_MAC ? "" : " + "}+`;
+  const labels: Record<string, string> = { Mod: IS_MAC ? "⌘" : "Ctrl", Meta: "⌘", Control: "Ctrl", Shift: IS_MAC ? "⇧" : "Shift", Alt: IS_MAC ? "⌥" : "Alt", ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→", Enter: "↵", Escape: "Esc", Backspace: IS_MAC ? "⌫" : "Backspace", Space: "空格" };
+  return shortcut.split("+").map(key => labels[key] ?? (/^[a-z]$/.test(key) ? key.toUpperCase() : key)).join(IS_MAC ? "" : " + ");
+}
+
+/** 下载沿用传入的授权与版本地址；在用户点击或按键触发时调用。 */
+export function downloadFile(href: string) {
+  const link = document.createElement("a");
+  link.href = href; link.download = ""; link.hidden = true;
+  document.body.append(link); link.click(); link.remove();
+}
+
 /** ghost-danger：安静的危险操作（如「取消密码」「清除全部」），不抢主按钮的位置。 */
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "ghost-danger";
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -173,10 +188,12 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   icon?: IconName;
   loading?: boolean;
   block?: boolean;
+  /** 只提供提示和无障碍标记，按键由所属区域处理。 */
+  shortcut?: string;
 };
-export function Button({ variant = "secondary", size = "md", icon, loading, block, className = "", children, disabled, type = "button", ...rest }: ButtonProps) {
+export function Button({ variant = "secondary", size = "md", icon, loading, block, shortcut, className = "", children, disabled, type = "button", ...rest }: ButtonProps) {
   return (
-    <button type={type} className={`btn btn-${variant} btn-${size}${block ? " btn-block" : ""} ${className}`} disabled={disabled || loading} aria-busy={loading || undefined} {...rest}>
+    <button type={type} className={`btn btn-${variant} btn-${size}${block ? " btn-block" : ""} ${className}`} disabled={disabled || loading} aria-busy={loading || undefined} aria-keyshortcuts={shortcut ? shortcutAria(shortcut) : undefined} title={shortcut ? `${typeof children === "string" ? children : "快捷键"}（${shortcutLabel(shortcut)}）` : undefined} {...rest}>
       {loading ? <span className="spinner" aria-hidden="true" /> : icon && <Icon name={icon} size={size === "sm" ? 15 : 17} />}
       {children && <span>{children}</span>}
     </button>
@@ -184,9 +201,9 @@ export function Button({ variant = "secondary", size = "md", icon, loading, bloc
 }
 
 /** 外观与 Button 一致的链接：下载、打开新页面等需要真实地址的操作用它，不要手写 btn 类名。 */
-export function ButtonLink({ variant = "secondary", size = "md", icon, className = "", children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement> & { variant?: ButtonVariant; size?: "sm" | "md" | "lg"; icon?: IconName }) {
+export function ButtonLink({ variant = "secondary", size = "md", icon, shortcut, className = "", children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement> & { variant?: ButtonVariant; size?: "sm" | "md" | "lg"; icon?: IconName; shortcut?: string }) {
   return (
-    <a className={`btn btn-${variant} btn-${size} ${className}`} {...rest}>
+    <a className={`btn btn-${variant} btn-${size} ${className}`} aria-keyshortcuts={shortcut ? shortcutAria(shortcut) : undefined} title={shortcut ? `${typeof children === "string" ? children : "快捷键"}（${shortcutLabel(shortcut)}）` : undefined} {...rest}>
       {icon && <Icon name={icon} size={size === "sm" ? 15 : 17} />}
       {children && <span>{children}</span>}
     </a>
@@ -195,7 +212,7 @@ export function ButtonLink({ variant = "secondary", size = "md", icon, className
 
 export function IconButton({ icon, label, onClick, variant = "ghost", size = "md", disabled, active, shortcut, spinning, className = "" }: { className?: string; icon: IconName; label: string; onClick?: () => void; variant?: "ghost" | "secondary"; size?: "sm" | "md"; disabled?: boolean; active?: boolean; shortcut?: string; spinning?: boolean }) {
   return (
-    <button type="button" className={`icon-btn icon-btn-${variant} icon-btn-${size}${active ? " is-active" : ""}${spinning ? " is-spinning" : ""} ${className}`} aria-busy={spinning || undefined} onClick={onClick} aria-label={label} aria-keyshortcuts={shortcut} title={shortcut ? `${label}（${shortcut.toUpperCase()}）` : label} disabled={disabled} aria-pressed={active}>
+    <button type="button" className={`icon-btn icon-btn-${variant} icon-btn-${size}${active ? " is-active" : ""}${spinning ? " is-spinning" : ""} ${className}`} aria-busy={spinning || undefined} onClick={onClick} aria-label={label} aria-keyshortcuts={shortcut ? shortcutAria(shortcut) : undefined} title={shortcut ? `${label}（${shortcutLabel(shortcut)}）` : label} disabled={disabled} aria-pressed={active}>
       <Icon name={icon} size={size === "sm" ? 16 : 18} />
     </button>
   );
@@ -279,11 +296,11 @@ export function Checkbox({ checked, indeterminate, onChange, label }: { checked:
   return <input ref={ref} type="checkbox" className="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} aria-label={label} onClick={event => event.stopPropagation()} />;
 }
 
-export function SearchInput({ value, onChange, onSubmit, onClear, placeholder, label }: { value: string; onChange: (value: string) => void; onSubmit?: () => void; onClear?: () => void; placeholder: string; label: string }) {
+export function SearchInput({ value, onChange, onSubmit, onClear, placeholder, label, shortcut }: { value: string; onChange: (value: string) => void; onSubmit?: () => void; onClear?: () => void; placeholder: string; label: string; shortcut?: string }) {
   return (
     <form className="search-input" role="search" noValidate onSubmit={event => { event.preventDefault(); onSubmit?.(); }}>
       <Icon name="search" size={16} />
-      <input value={value} onChange={event => onChange(event.target.value)} placeholder={placeholder} aria-label={label} enterKeyHint="search" />
+      <input value={value} onChange={event => onChange(event.target.value)} placeholder={placeholder} aria-label={label} aria-keyshortcuts={shortcut ? shortcutAria(shortcut) : undefined} title={shortcut ? `${label}（${shortcutLabel(shortcut)}）` : undefined} enterKeyHint="search" />
       {value && <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => { onChange(""); onClear?.(); }}><Icon name="x" size={14} /></button>}
     </form>
   );
@@ -341,11 +358,11 @@ export function Tabs<T extends string>({ value, options, onChange, label, classN
   );
 }
 
-export function Segmented<T extends string>({ value, options, onChange, label, disabled, showLabels = false }: { value: T; options: { value: T; label: string; icon?: IconName; count?: number }[]; onChange: (value: T) => void; label: string; disabled?: boolean; /** 有图标时同时显示文字（默认只显示图标） */ showLabels?: boolean }) {
+export function Segmented<T extends string>({ value, options, onChange, label, disabled, shortcut, showLabels = false }: { value: T; options: { value: T; label: string; icon?: IconName; count?: number }[]; onChange: (value: T) => void; label: string; disabled?: boolean; shortcut?: string; /** 有图标时同时显示文字（默认只显示图标） */ showLabels?: boolean }) {
   return (
-    <div className="segmented" role="radiogroup" aria-label={label}>
+    <div className="segmented" role="radiogroup" aria-label={label} aria-keyshortcuts={shortcut ? shortcutAria(shortcut) : undefined} title={shortcut ? `${label}（${shortcutLabel(shortcut)}）` : undefined}>
       {options.map((option, index) => (
-        <button key={option.value} type="button" role="radio" disabled={disabled} aria-checked={value === option.value} tabIndex={value === option.value || (!options.some(item => item.value === value) && index === 0) ? 0 : -1} className={value === option.value ? "is-active" : ""} onClick={() => onChange(option.value)} title={option.icon && !showLabels ? option.label : undefined}
+        <button key={option.value} type="button" role="radio" disabled={disabled} aria-checked={value === option.value} tabIndex={value === option.value || (!options.some(item => item.value === value) && index === 0) ? 0 : -1} className={value === option.value ? "is-active" : ""} onClick={() => onChange(option.value)} title={shortcut ? `${option.label}（${shortcutLabel(shortcut)} 切换）` : option.icon && !showLabels ? option.label : undefined}
           onKeyDown={event => {
             const offset = ["ArrowRight", "ArrowDown"].includes(event.key) ? 1 : ["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 0;
             if (!offset && event.key !== "Home" && event.key !== "End") return;
@@ -401,7 +418,7 @@ function fitAspect(size: { width: number; height: number }, ratio: number) {
   return { width: Math.round(width * scale), height: Math.round(height * scale) };
 }
 
-export function Modal({ title, description, onClose, children, footer, actions, size: modalSize = "md", icon, leading, tone, dismissible = true, closable = true, className = "", style, initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false, movable = false, resizable, aspectRatio }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; style?: CSSProperties; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean; /** 拖动头部移动窗口（正常与最小化分别记住位置，最大化与全屏时不生效） */ movable?: boolean;
+export function Modal({ title, description, onClose, children, footer, actions, menuItems = [], compactActions = false, size: modalSize = "md", icon, leading, tone, dismissible = true, closable = true, className = "", style, initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false, movable = false, resizable, aspectRatio }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; menuItems?: MenuItem[]; /** 窄预览窗口将窗口操作合并到更多菜单。 */ compactActions?: boolean; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; style?: CSSProperties; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean; /** 拖动头部移动窗口（正常与最小化分别记住位置，最大化与全屏时不生效） */ movable?: boolean;
   /** 桌面上拖动四边或四角调整窗口大小；值是记住尺寸用的名称（同名窗口共用），双击边角还原默认大小。手机、最大化、全屏与最小化时不生效。 */ resizable?: string;
   /** 调整大小时保持的宽高比（视频窗口），按住 Shift 自由调整；记住的尺寸按面积换算到当前比例，同名窗口的横竖内容不会互相留下黑边。 */ aspectRatio?: number }) {
   const id = useId();
@@ -565,26 +582,43 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     } catch { toast.error("请先退出全屏，再最小化预览。"); }
     finally { setSwitchingScreen(false); }
   }
+  async function toggleMaximize() {
+    if (switchingScreen) return;
+    setSwitchingScreen(true);
+    try {
+      if (document.fullscreenElement && backdrop.current?.contains(document.fullscreenElement)) await document.exitFullscreen();
+      setMaximized(value => !value);
+    } catch { toast.error("请先退出全屏，再调整预览窗口。"); }
+    finally { setSwitchingScreen(false); }
+  }
   const handleWindowKey: KeyboardEventHandler<HTMLDivElement> = event => {
     onKeyDownCapture?.(event);
-    if (!windowShortcuts || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
+    if (!windowShortcuts || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return;
     const target = event.target as HTMLElement, key = event.key.toLowerCase();
     if (!event.currentTarget.contains(target) || event.currentTarget.closest("[inert]") || isShortcutControl(target)) return;
-    if ((key !== "i" || !minimizable) && (key !== "f" || !expandable)) return;
+    if (event.shiftKey && key !== "f") return;
+    if ((key !== "i" || !minimizable) && (key !== "f" || !expandable) && (key !== "p" || !pinnable)) return;
     event.preventDefault(); event.stopPropagation();
     if (event.repeat || switchingScreen) return;
-    if (key === "i") { if (minimized) setMinimized(false); else void minimize(); }
+    event.currentTarget.classList.remove("is-chrome-idle");
+    if (key === "p") setPinned(value => !value);
+    else if (key === "i") { if (minimized) setMinimized(false); else void minimize(); }
     else {
       setMinimized(false);
-      if (supportsFullscreen) void toggleFullscreen(); else setMaximized(value => !value);
+      if (event.shiftKey || !supportsFullscreen) void toggleMaximize(); else void toggleFullscreen();
     }
+  };
+  const focusWindowHeader = (event: ReactPointerEvent<HTMLElement>) => {
+    const target = event.target as Element;
+    if (windowShortcuts && !isShortcutControl(target) && !target.closest("button, a, summary, [role='button']")) ref.current?.focus({ preventScroll: true });
+    if (movable) startMove(event);
   };
   useEffect(() => {
     if (!windowShortcuts || !minimizable || !minimized) return;
     // 小窗口释放页面焦点后，仍可恢复；其他弹窗与输入控件不受影响。
     const restore = (event: KeyboardEvent) => {
       if (modalStack.length || event.defaultPrevented || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.key.toLowerCase() !== "i") return;
-      if (!(event.target instanceof Element) || isShortcutControl(event.target)) return;
+      if (!(event.target instanceof Element) || isShortcutControl(event.target) || event.target.closest(".assistant-drawer, .assistant-page, .sidebar") || document.querySelector(".menu")) return;
       event.preventDefault(); event.stopPropagation(); setMinimized(false);
     };
     document.addEventListener("keydown", restore);
@@ -602,11 +636,11 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     (preferred ?? node).focus();
     document.body.classList.add("has-modal");
     const handleKey = (event: KeyboardEvent) => {
-      if (modalStack.at(-1) !== node || event.defaultPrevented) return;
+      if (modalStack.at(-1) !== node || event.defaultPrevented || event.isComposing) return;
       if ((event.target as HTMLElement).closest?.(".menu")) return;
       if (event.key === "Escape") {
         event.preventDefault(); event.stopPropagation();
-        if (pinnedRef.current) return;
+        if (event.repeat || pinnedRef.current) return;
         // 全屏中的 Esc 只还原视图，避免同时关掉正在播放的预览。
         if (document.fullscreenElement && backdrop.current?.contains(document.fullscreenElement)) void document.exitFullscreen().catch(() => {});
         else if (dismissibleRef.current) closeRef.current();
@@ -637,7 +671,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
       <div ref={ref} className={`modal modal-${modalSize} ${className}${expanded ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}${positionable ? " is-movable" : ""}${moving ? " is-moving" : ""}${sized ? " is-sized" : ""}${resizing ? " is-resizing" : ""}`}
         style={{ ...style, ...(positionable && (offset.x || offset.y) ? { translate: `${offset.x}px ${offset.y}px` } : {}), ...(resizing ? { "--modal-resize-cursor": RESIZE_CURSORS[resizing] } : {}),
           ...(shown ? { "--modal-width": `${shown.width}px`, "--modal-height": `${shown.height}px` } : {}) } as CSSProperties} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={handleWindowKey}>
-        <header className="modal-header" onPointerDown={movable ? startMove : undefined}>
+        <header className="modal-header" onPointerDown={focusWindowHeader}>
           {leading ?? (icon && <span className={`modal-icon tone-${tone ?? "accent"}`}><Icon name={icon} size={20} /></span>)}
           <div className="modal-heading">
             <h2 id={`${id}-title`} title={title}>{title}</h2>
@@ -645,19 +679,22 @@ export function Modal({ title, description, onClose, children, footer, actions, 
           </div>
           <div className="modal-window-actions">
             {!minimized && actions}
-            {/* 常用的只留全屏和关闭；固定、最小化、最大化收进“窗口选项”。固定后显示一个高亮的固定按钮，提醒 Esc 不会关闭。 */}
-            {pinned && !minimized && <IconButton icon="pin" label="取消固定预览" size="sm" active onClick={() => setPinned(false)} />}
+            {/* 宽窗口保留全屏和关闭；窄窗口将其余操作合并到更多菜单。固定状态在按钮或菜单中提示。 */}
+            {pinned && !minimized && !compactActions && <IconButton icon="pin" label="取消固定预览" shortcut={windowShortcuts ? "P" : undefined} size="sm" active onClick={() => setPinned(false)} />}
             {minimized && <IconButton icon="restore" label="恢复预览" shortcut={windowShortcuts ? "i" : undefined} size="sm" disabled={switchingScreen} onClick={() => setMinimized(false)} />}
-            {expandable && !minimized && !supportsFullscreen && <IconButton icon={maximized ? "restore" : "maximize"} label={maximized ? "还原预览" : "最大化预览"} onClick={() => setMaximized(value => !value)} size="sm" active={maximized} disabled={switchingScreen} />}
-            {expandable && !minimized && supportsFullscreen && <IconButton icon={fullscreen ? "exitFullscreen" : "fullscreen"} label={fullscreen ? "退出全屏" : "全屏预览"} shortcut={windowShortcuts ? "f" : undefined} onClick={() => void toggleFullscreen()} size="sm" active={fullscreen} disabled={switchingScreen} />}
+            {expandable && !minimized && !compactActions && !supportsFullscreen && <IconButton icon={maximized ? "restore" : "maximize"} label={maximized ? "还原预览" : "最大化预览"} shortcut={windowShortcuts ? "F" : undefined} onClick={() => void toggleMaximize()} size="sm" active={maximized} disabled={switchingScreen} />}
+            {expandable && !minimized && !compactActions && supportsFullscreen && <IconButton icon={fullscreen ? "exitFullscreen" : "fullscreen"} label={fullscreen ? "退出全屏" : "全屏预览"} shortcut={windowShortcuts ? "f" : undefined} onClick={() => void toggleFullscreen()} size="sm" active={fullscreen} disabled={switchingScreen} />}
             {!minimized && (() => {
-              const items: MenuItem[] = [];
+              const items: MenuItem[] = [...menuItems];
+              if (compactActions && expandable) items.push(supportsFullscreen
+                ? { label: fullscreen ? "退出全屏" : "全屏预览", icon: fullscreen ? "exitFullscreen" : "fullscreen", divider: items.length > 0, shortcut: windowShortcuts ? "F" : undefined, disabled: switchingScreen, onSelect: () => void toggleFullscreen() }
+                : { label: maximized ? "还原大小" : "最大化", icon: maximized ? "restore" : "maximize", divider: items.length > 0, shortcut: windowShortcuts ? "F" : undefined, disabled: switchingScreen, onSelect: () => void toggleMaximize() });
               if (minimizable) items.push({ label: "最小化", icon: "minimize", shortcut: windowShortcuts ? "I" : undefined, onSelect: () => void minimize() });
-              if (expandable && supportsFullscreen && !fullscreen) items.push({ label: maximized ? "还原大小" : "最大化", icon: maximized ? "restore" : "maximize", onSelect: () => setMaximized(value => !value) });
-              if (pinnable && !pinned) items.push({ label: "固定", icon: "pin", onSelect: () => setPinned(true) });
-              return items.length > 0 && <Menu label="窗口选项" items={items} />;
+              if (expandable && supportsFullscreen && !fullscreen) items.push({ label: maximized ? "还原大小" : "最大化", icon: maximized ? "restore" : "maximize", shortcut: windowShortcuts ? "Shift+F" : undefined, disabled: switchingScreen, onSelect: () => void toggleMaximize() });
+              if (pinnable && (!pinned || compactActions)) items.push({ label: pinned ? "取消固定预览" : "固定", icon: "pin", shortcut: windowShortcuts ? "P" : undefined, checked: compactActions ? pinned : undefined, onSelect: () => setPinned(value => !value) });
+              return items.length > 0 && <Menu label={compactActions ? "更多操作" : "窗口选项"} className={compactActions && pinned ? "is-active" : ""} items={items} />;
             })()}
-            {closable && <IconButton icon="x" label="关闭" onClick={onClose} size="sm" disabled={!dismissible} />}
+            {closable && <IconButton icon="x" label="关闭" shortcut={dismissible && !pinned && !minimized ? "Escape" : undefined} onClick={onClose} size="sm" disabled={!dismissible} />}
           </div>
         </header>
         {children && <div className="modal-body">{children}</div>}
@@ -747,13 +784,13 @@ function MenuList({ items, label, anchor, onClose, restoreFocus, dark }: { items
     <div ref={list} className={`menu${items.some(item => item.description !== undefined) ? " has-descriptions" : ""}${dark ? " is-dark" : ""}`} role="menu" aria-label={label} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }}
       onClick={event => event.stopPropagation()} onContextMenu={event => event.preventDefault()}>
       {items.map(item => {
-        const content = <><Icon name={item.icon} size={16} /><span className="menu-copy"><span>{item.label}</span>{item.description !== undefined && <small title={item.description}>{item.description}</small>}</span>{item.checked ? <span className="menu-check"><Icon name="check" size={15} /></span> : item.shortcut && <kbd className="menu-shortcut">{item.shortcut}</kbd>}</>;
+        const content = <><Icon name={item.icon} size={16} /><span className="menu-copy"><span>{item.label}</span>{item.description !== undefined && <small title={item.description}>{item.description}</small>}</span>{item.checked ? <span className="menu-check"><Icon name="check" size={15} /></span> : item.shortcut && <kbd className="menu-shortcut">{shortcutLabel(item.shortcut)}</kbd>}</>;
         // 带标题的分组：标题承担分隔线，选项用 menuitemradio 表示单选状态。
         const className = `menu-item${item.description !== undefined ? " has-description" : ""}${item.danger ? " is-danger" : ""}${item.divider && !item.heading ? " has-divider" : ""}`;
         const role = item.checked === undefined ? "menuitem" : "menuitemradio";
         const element = item.href
-          ? <a key={item.label} role={role} className={className} href={item.href} onClick={() => onClose()}>{content}</a>
-          : <button key={item.label} type="button" role={role} aria-checked={item.checked === undefined ? undefined : item.checked} className={className} disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>{content}</button>;
+          ? <a key={item.label} role={role} className={className} aria-keyshortcuts={item.shortcut ? shortcutAria(item.shortcut) : undefined} href={item.href} onClick={() => onClose()}>{content}</a>
+          : <button key={item.label} type="button" role={role} aria-keyshortcuts={item.shortcut ? shortcutAria(item.shortcut) : undefined} aria-checked={item.checked === undefined ? undefined : item.checked} className={className} disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>{content}</button>;
         return item.heading ? <Fragment key={item.label}><div className={`menu-heading${item.divider ? " has-divider" : ""}`} role="presentation">{item.heading}</div>{element}</Fragment> : element;
       })}
     </div>,
@@ -761,12 +798,12 @@ function MenuList({ items, label, anchor, onClose, restoreFocus, dark }: { items
   );
 }
 
-export function Menu({ items, label, icon = "more", size = "sm", children, className = "", align = "end", above = false }: { align?: "start" | "end"; above?: boolean; items: MenuItem[]; label: string; icon?: IconName; size?: "sm" | "md"; children?: ReactNode; className?: string }) {
+export function Menu({ items, label, icon = "more", size = "sm", children, className = "", shortcut, align = "end", above = false }: { shortcut?: string; align?: "start" | "end"; above?: boolean; items: MenuItem[]; label: string; icon?: IconName; size?: "sm" | "md"; children?: ReactNode; className?: string }) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   return (
     <>
-      <button ref={trigger} type="button" className={`icon-btn icon-btn-ghost icon-btn-${size}${open ? " is-active" : ""} ${className}`} aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open}
+      <button ref={trigger} type="button" className={`icon-btn icon-btn-ghost icon-btn-${size}${open ? " is-active" : ""} ${className}`} aria-label={label} aria-keyshortcuts={shortcut ? shortcutAria(shortcut) : undefined} title={shortcut ? `${label}（${shortcutLabel(shortcut)}）` : label} aria-haspopup="menu" aria-expanded={open}
         onMouseDown={event => { if (open) event.stopPropagation(); }}
         onClick={event => { event.stopPropagation(); setOpen(value => !value); }}>
         {children ?? <Icon name={icon} size={16} />}

@@ -5,7 +5,7 @@ import { errorMessage, type PreviewAsset } from "./api";
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
 import { MODE_ICONS, PLAYBACK_MODES, type PreviewNav } from "./preview-playlist";
-import { Button, Icon, Menu, type IconName } from "./ui";
+import { Button, Icon, Menu, shortcutAria, shortcutLabel, type IconName } from "./ui";
 import type { MediaProgress, MediaState } from "./preview-media-engine";
 export type { MediaProgress, MediaState } from "./preview-media-engine";
 
@@ -41,11 +41,11 @@ export function MinimizedPlayback({ progress, state, playing, lyric, onSeek, onT
         ? <MediaButton icon={MODE_ICONS[nav.mode]} label={`${PLAYBACK_MODES[modeIndex]?.label ?? "播放模式"}（点击切换为${nextMode.label}）`} active={nav.mode !== "sequence"} onClick={() => nav.onMode?.(nextMode.value)} />
         : <span />}
       <div className="preview-mini-transport">
-        <MediaButton icon="previous" label="上一个" disabled={!nav || nav.count < 2} onClick={nav?.onPrevious} />
-        <button type="button" className="preview-mini-play" aria-label={playing ? "暂停" : "播放"} title={playing ? "暂停（K）" : "播放（K）"} disabled={failed} onClick={onToggle}>
+        <MediaButton icon="previous" label="上一个" shortcut="ArrowLeft" disabled={!nav || nav.count < 2} onClick={nav?.onPrevious} />
+        <button type="button" className="preview-mini-play" aria-label={playing ? "暂停" : "播放"} aria-keyshortcuts="Space K" title={playing ? "暂停（空格 / K）" : "播放（空格 / K）"} disabled={failed} onClick={onToggle}>
           <Icon name={playing ? "pause" : "play"} size={18} />
         </button>
-        <MediaButton icon="next" label="下一个" disabled={!nav || nav.count < 2} onClick={nav?.onNext} />
+        <MediaButton icon="next" label="下一个" shortcut="ArrowRight" disabled={!nav || nav.count < 2} onClick={nav?.onNext} />
       </div>
       <span className="preview-mini-time">{time}<span> / {duration}</span></span>
     </div>
@@ -259,8 +259,8 @@ function Timeline({ progress, buffered, disabled, onSeek }: { progress: MediaPro
   </div>;
 }
 
-function MediaButton({ icon, label, onClick, disabled, active, className = "" }: { icon: IconName; label: string; onClick?: () => void; disabled?: boolean; active?: boolean; className?: string }) {
-  return <button type="button" className={`audio-button${active ? " is-active" : ""} ${className}`} aria-label={label} title={label} aria-pressed={active} disabled={disabled} onClick={onClick}><Icon name={icon} size={20} /></button>;
+function MediaButton({ icon, label, shortcut, onClick, disabled, active, className = "" }: { icon: IconName; label: string; shortcut?: string; onClick?: () => void; disabled?: boolean; active?: boolean; className?: string }) {
+  return <button type="button" className={`audio-button${active ? " is-active" : ""} ${className}`} aria-label={label} title={shortcut ? `${label}（${shortcutLabel(shortcut)}）` : label} aria-keyshortcuts={shortcut ? shortcutAria(shortcut) : undefined} aria-pressed={active} disabled={disabled} onClick={onClick}><Icon name={icon} size={20} /></button>;
 }
 
 /* ---------- 统一入口 ---------- */
@@ -502,11 +502,11 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
           {nav?.onMode && nav.mode && <MediaButton icon={MODE_ICONS[nav.mode]} label={`${PLAYBACK_MODES[modeIndex]?.label ?? "播放模式"}（点击切换为${nextMode.label}）`} active={nav.mode !== "sequence"} onClick={() => nav.onMode?.(nextMode.value)} />}
         </div>
         <div className="audio-buttons-main">
-          <MediaButton icon="previous" label="上一首" disabled={!nav || nav.count < 2} onClick={nav?.onPrevious} />
-          <button type="button" className="audio-play" aria-label={playing ? "暂停" : "播放"} title={playing ? "暂停（空格）" : "播放（空格）"} disabled={failed} onClick={toggle}>
+          <MediaButton icon="previous" label="上一首" shortcut="ArrowLeft" disabled={!nav || nav.count < 2} onClick={nav?.onPrevious} />
+          <button type="button" className="audio-play" aria-label={playing ? "暂停" : "播放"} aria-keyshortcuts="Space K" title={playing ? "暂停（空格 / K）" : "播放（空格 / K）"} disabled={failed} onClick={toggle}>
             <Icon name={playing ? "pause" : "play"} size={24} />
           </button>
-          <MediaButton icon="next" label="下一首" disabled={!nav || nav.count < 2} onClick={nav?.onNext} />
+          <MediaButton icon="next" label="下一首" shortcut="ArrowRight" disabled={!nav || nav.count < 2} onClick={nav?.onNext} />
         </div>
         <div className="audio-buttons-end">
           {assets.length > 0 && !failed && <Menu label={selected ? `歌词：${lyricLabel}（点击切换）` : "歌词已关闭（点击选择）"} align="end" above
@@ -522,7 +522,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
               onChange={event => audio?.setVolume(Number(event.target.value))}
               onKeyDown={event => { if (event.key.startsWith("Arrow")) event.stopPropagation(); }} />
           </div>
-          {nav?.onPlaylist && nav.count > 1 && <MediaButton icon="list" className="playlist-toggle" label={`播放列表（${nav.index + 1} / ${nav.count}）`} active={nav.playlistOpen} onClick={nav.onPlaylist} />}
+          {nav?.onPlaylist && nav.count > 1 && <MediaButton icon="list" className="playlist-toggle" label={`播放列表（${nav.index + 1} / ${nav.count}）`} shortcut="O" active={nav.playlistOpen} onClick={nav.onPlaylist} />}
         </div>
       </div>
     </div>

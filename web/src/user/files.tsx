@@ -8,7 +8,8 @@ import { FolderStatsDialog } from "./folder-stats";
 import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type EntryFilter, type FileSort } from "../files";
 import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator, videoFrameUsable } from "../thumbnails";
 
-import { Notice, ButtonLink, Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
+import { Notice, ButtonLink, Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
+import { ShortcutsDialog } from "../shortcuts";
 
 import { UploadDialog, type UploadQueue } from "./uploads";
 import { UploadPicker, droppedUploadFiles, uploadFiles, type UploadFile } from "./upload-selection";
@@ -25,7 +26,6 @@ type Entry = { kind: "folder"; key: string; size?: number } | { kind: "file"; ke
 
 /** 文件夹大小：未统计时留空，没有内容时写“空”，不显示生硬的“0 B”或“—”。 */
 const folderSize = (size?: number) => size == null ? "" : size === 0 ? "空" : formatBytes(size);
-const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 const DELETE_KEY = IS_MAC ? "⌘⌫" : "Del";
 /** 图标上已经印了格式标签（PDF、DOC…）的类型，网格卡片不再重复显示扩展名。 */
 const LABELLED_KINDS = new Set(["pdf", "document", "spreadsheet", "presentation"]);
@@ -366,7 +366,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   function fileMenu(file: api.FileItem): MenuItem[] {
     const entry: Entry = { kind: "file", key: file.key, file };
     const items: MenuItem[] = [
-      { label: "下载", icon: "download", onSelect: () => undefined, href: api.versionedContentUrl(api.contentUrl(file.key, true), file.etag, file.size) },
+      { label: "下载", icon: "download", shortcut: "D", onSelect: () => undefined, href: api.versionedContentUrl(api.contentUrl(file.key, true), file.etag, file.size) },
       ...cacheMenuItems(cacheQueue, file).filter(item => !item.danger),
       ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) }] : []),
     ];
@@ -381,7 +381,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     if (file.public_token) items.push({ label: "打开分享页", icon: "external", onSelect: () => window.open(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "_blank", "noreferrer") });
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
     items.push({ label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming(entry) });
-    items.push({ label: "移动到…", icon: "move", onSelect: () => setMoving([entry]) });
+    items.push({ label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving([entry]) });
     items.push({ label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([entry]) });
     if (query) items.push({ label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(parentPath(file.key)) });
     items.push(...cacheMenuItems(cacheQueue, file).filter(item => item.danger));
@@ -395,13 +395,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     const shared = publicFolders[key];
     return [
       { label: "打开", icon: "folder", shortcut: "↵", onSelect: () => onOpenFolder(key) },
-      { label: "下载（ZIP）", icon: "download", onSelect: () => undefined, href: api.archiveUrl([key]) },
+      { label: "下载（ZIP）", icon: "download", shortcut: "D", onSelect: () => undefined, href: api.archiveUrl([key]) },
       { label: "目录统计", icon: "chart", onSelect: () => setStatsFor({ prefix: key, title: baseName(key) }) },
       ...(!privateSpace ? [{ label: shared ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(folderItem(key)) }] : []),
       ...(shared ? [{ label: "打开分享页", icon: "external" as const, onSelect: () => window.open(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "_blank", "noreferrer") }] : []),
       ...(shared ? [{ label: "复制分享链接", icon: "copy" as const, onSelect: () => void copyText(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "分享链接已复制") }] : []),
       { label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming({ kind: "folder", key }) },
-      { label: "移动到…", icon: "move", onSelect: () => setMoving([{ kind: "folder", key }]) },
+      { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving([{ kind: "folder", key }]) },
       { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([{ kind: "folder", key }]) },
       { label: "删除", icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash([{ kind: "folder", key }]) },
     ];
@@ -457,43 +457,61 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     if (event.key === "Tab") { tabbed.current = true; return; }
     if (event.defaultPrevented || event.isComposing || document.body.classList.contains("has-modal") || context) return;
     const target = event.target as Element;
-    if (target instanceof Element && (isShortcutControl(target) || target.closest(".modal, .tray-stack, .sidebar"))) return;
+    if (target instanceof Element && (isShortcutControl(target) || target.closest(".modal, .tray-stack, .sidebar, .assistant-drawer, .assistant-page"))) return;
     const control = target instanceof Element ? target.closest("button, a, summary, [role='button']") : null;
     if ((event.key === " " || event.key === "Enter") && control && tabbed.current) return;
     const mod = event.metaKey || event.ctrlKey;
     const current = entries.find(entry => entry.key === cursor) ?? null;
     const arrows: Record<string, "up" | "down" | "left" | "right"> = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+    const plain = !mod && !event.altKey;
+    if (event.repeat && !arrows[event.key] && event.key !== "Home" && event.key !== "End") {
+      if ((plain && ["/", "?", "n", "u", "r", "v", "m", "d", "s", "f2", "delete", "backspace", " ", "enter"].includes(event.key.toLowerCase())) || (mod && !event.altKey && event.key.toLowerCase() === "a")) event.preventDefault();
+      return;
+    }
+    const actionKey = plain && !event.shiftKey ? event.key.toLowerCase() : "";
+    const targets = selected.size ? selectedEntries : current ? [current] : [];
     let handled = true;
-    if (event.key === "ArrowUp" && (IS_MAC ? event.metaKey : event.altKey) && !event.shiftKey) {
+    if (actionKey === "n") setFolderOpen(true);
+    else if (actionKey === "u") surface.current?.closest(".files-view")?.querySelector<HTMLButtonElement>(".upload-picker-trigger")?.click();
+    else if (actionKey === "r") { if (!loading && !pagination.refreshing) void refreshList(); }
+    else if (actionKey === "v") setLayout(value => value === "list" ? "grid" : "list");
+    else if (actionKey === "m" && targets.length) setMoving(targets);
+    else if (actionKey === "d" && targets.length) { if (targets.length > 200) downloadLimit(); else downloadFile(downloadUrl(targets)); }
+    else if (plain && (event.key === "ContextMenu" || event.key === "F10" && event.shiftKey) && (current || targets[0])) {
+      const entry = current ?? targets[0];
+      const node = [...(surface.current?.querySelectorAll<HTMLElement>("[data-key]") ?? [])].find(item => item.dataset.key === entry.key);
+      const rect = node?.getBoundingClientRect() ?? surface.current?.getBoundingClientRect();
+      if (rect) setContext({ key: entry.key, x: rect.left + 24, y: Math.min(rect.bottom, window.innerHeight - 8) });
+    } else if (event.key === "ArrowUp" && (IS_MAC ? event.metaKey && !event.altKey : event.altKey && !mod) && !event.shiftKey) {
       if (query || prefix === root) handled = false;
       else onOpenFolder(parentPath(prefix));
-    } else if ((event.key === "Home" || event.key === "End") && !mod && entries.length) {
+    } else if ((event.key === "Home" || event.key === "End") && plain && entries.length) {
       const next = (event.key === "Home" ? entries[0] : entries[entries.length - 1]).key;
       if (next && event.shiftKey) setSelected(value => new Set([...value, ...(cursor ? [cursor] : []), next]));
       setCursor(next);
-    } else if (event.key === "/" && !mod) {
+    } else if (event.key === "/" && plain && !event.shiftKey) {
       surface.current?.closest(".files-view")?.querySelector<HTMLInputElement>(".toolbar input[type=search], .toolbar input")?.focus();
-    } else if (event.key === "?" && !mod) {
+    } else if (event.key === "?" && plain) {
       setShortcutsOpen(true);
     } else if (arrows[event.key] && !mod && !event.altKey && (layout === "grid" || event.key === "ArrowUp" || event.key === "ArrowDown")) {
       const next = neighbour(cursor, arrows[event.key]);
       if (next && event.shiftKey) setSelected(value => new Set([...value, ...(cursor ? [cursor] : []), next]));
       setCursor(next);
-    } else if ((event.key === "a" || event.key === "A") && mod && !event.shiftKey) {
+    } else if ((event.key === "a" || event.key === "A") && mod && !event.shiftKey && !event.altKey) {
       setSelected(new Set(entries.map(entry => entry.key)));
-    } else if (event.key === "Escape" && (selected.size || cursor)) {
+    } else if (event.key === "Escape" && plain && (selected.size || cursor)) {
       if (selected.size) setSelected(new Set()); else setCursor(null);
-    } else if (event.key === " " && !mod) {
+    } else if (event.key === " " && plain && !event.shiftKey) {
       // 还没有焦点项时先落到第一项，避免空格激活残留焦点的按钮或滚动页面。
       if (current) toggleSelect(current.key, !selected.has(current.key));
       else setCursor(neighbour(null, "down"));
-    } else if (event.key === "Enter" && current && !mod) {
+    } else if (event.key === "Enter" && current && plain && !event.shiftKey) {
       openEntry(current);
     } else if ((event.key === "s" || event.key === "S") && !mod && !event.altKey && !event.shiftKey && current && !privateSpace) {
       setSharing(current.kind === "folder" ? folderItem(current.key) : current.file);
-    } else if (event.key === "F2" && current) {
+    } else if (event.key === "F2" && current && plain && !event.shiftKey) {
       setRenaming(current);
-    } else if ((event.key === "Delete" || (event.key === "Backspace" && (mod || !IS_MAC))) && (selected.size || current)) {
+    } else if (!event.altKey && !event.shiftKey && (event.key === "Delete" && !mod || event.key === "Backspace" && (mod || !IS_MAC)) && (selected.size || current)) {
       void moveToTrash(selected.size ? selectedEntries : [current!]);
     } else handled = false;
     if (handled) { event.preventDefault(); tabbed.current = false; document.documentElement.dataset.input = "keyboard"; }
@@ -511,9 +529,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   function contextItems(key: string): MenuItem[] {
     if (selected.size > 1 && selected.has(key)) {
       return [
-        { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", onSelect: selectedEntries.length > 200 ? downloadLimit : () => undefined,
+        { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", shortcut: "D", onSelect: selectedEntries.length > 200 ? downloadLimit : () => undefined,
           href: selectedEntries.length > 200 ? undefined : downloadUrl(selectedEntries) },
-        { label: "移动到…", icon: "move", onSelect: () => setMoving(selectedEntries) },
+        { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving(selectedEntries) },
         { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring(selectedEntries) },
         ...(selectionCache.cacheable.length ? [{ label: `缓存 ${selectionCache.cacheable.length} 个文件到本机`, icon: "monitor" as const, onSelect: () => cacheQueue?.enqueueMany(selectionCache.cacheable) }] : []),
         ...(selectionCache.cached.length ? [{ label: `清除 ${selectionCache.cached.length} 个文件的本机缓存`, icon: "trash" as const, danger: true, divider: true, onSelect: () => cacheQueue?.remove(selectionCache.cached) }] : []),
@@ -544,8 +562,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); if (!pendingUpload && event.dataTransfer.types.includes("Files")) void dropUpload(event.dataTransfer); }}>
       <PageHeader title={query ? `搜索“${query}”` : name}
         actions={<>
-          <Button icon="folderPlus" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
-          <UploadPicker onPick={startUpload} />
+          <Button icon="folderPlus" shortcut="N" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
+          <UploadPicker shortcut="U" onPick={startUpload} />
         </>}>
         {(prefix !== root || query) && <nav ref={breadcrumbNav} className="breadcrumbs file-breadcrumbs" aria-label="当前位置">
           <ol>
@@ -566,11 +584,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <span className="selection-count">已选择 {selected.size} 项</span>
           <div className="toolbar-actions">
             {selectedEntries.length > 200 ? <Button size="sm" icon="download" onClick={downloadLimit}>下载</Button>
-              : <ButtonLink variant="secondary" size="sm" icon="download" href={downloadUrl(selectedEntries)}>下载</ButtonLink>}
+              : <ButtonLink variant="secondary" size="sm" shortcut="D" icon="download" href={downloadUrl(selectedEntries)}>下载</ButtonLink>}
             {selectionCache.cacheable.length > 0 && <Button size="sm" icon="monitor" onClick={() => cacheQueue?.enqueueMany(selectionCache.cacheable)}>缓存到本机</Button>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
-            <Button size="sm" icon="move" onClick={() => setMoving(selectedEntries)}>移动</Button>
+            <Button size="sm" icon="move" shortcut="M" onClick={() => setMoving(selectedEntries)}>移动</Button>
             <Button size="sm" icon="lock" onClick={() => setTransferring(selectedEntries)}>{privateSpace ? "移出私密空间" : "移入私密空间"}</Button>
             <Button size="sm" variant="danger" icon="trash" onClick={() => void moveToTrash(selectedEntries)}>删除</Button>
             <IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} />
@@ -578,13 +596,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         </div>
       ) : (
         <div className="toolbar">
-          <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder={privateSpace ? "搜索私密空间，按回车" : "搜索全部文件，按回车"} label="搜索文件" />
+          <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder={privateSpace ? "搜索私密空间，按回车" : "搜索全部文件，按回车"} label="搜索文件" shortcut="/" />
           <div className="toolbar-actions">
             {!privateSpace && <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />}
             <FileSortSelect sort={sort} onSort={setSort} grid={layout === "grid"} />
             <IconButton icon="chart" label="目录统计" variant="secondary" className="toolbar-stats" onClick={() => setStatsFor({ prefix, title: name })} />
-            <IconButton icon="refresh" label="刷新" variant="secondary" spinning={pagination.refreshing} disabled={loading} onClick={() => void refreshList()} />
-            <Segmented label="视图" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
+            <IconButton icon="refresh" label="刷新" shortcut="R" variant="secondary" spinning={pagination.refreshing} disabled={loading} onClick={() => void refreshList()} />
+            <Segmented label="视图" shortcut="V" value={layout} onChange={setLayout} options={[{ value: "list", label: "列表视图", icon: "list" }, { value: "grid", label: "网格视图", icon: "gridView" }]} />
           </div>
         </div>
       )}
@@ -718,28 +736,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         <span className="list-footer-end">
           {pagination.loadingMore ? <span role="status">正在读取其余项目…</span>
             : pagination.truncated && <span role="status">仅显示前 {SEARCH_PAGES * 200} 个结果，请细化关键词</span>}
-          <button type="button" className="link-button shortcut-hint" onClick={() => setShortcutsOpen(true)} aria-keyshortcuts="?"><Icon name="keyboard" size={15} /><span>快捷键</span></button>
+          <button type="button" className="link-button shortcut-hint" onClick={() => setShortcutsOpen(true)} aria-keyshortcuts="?"><Icon name="keyboard" size={15} /><span>快捷键</span><kbd>?</kbd></button>
         </span>
       </footer>
 
       {context && <ContextMenu x={context.x} y={context.y} label={`${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
       {statsFor && <FolderStatsDialog prefix={statsFor.prefix} title={statsFor.prefix === root ? rootName : api.privatePathLabel(statsFor.prefix).replace(/\/$/, "")} onClose={() => setStatsFor(null)} onOpenFolder={onOpenFolder} />}
-      {shortcutsOpen && <Modal title="键盘快捷键" icon="keyboard" size="sm" onClose={() => setShortcutsOpen(false)} footer={<Button onClick={() => setShortcutsOpen(false)}>知道了</Button>}>
-        <KeyValue items={[
-          [<kbd>/</kbd>, "搜索文件"],
-          [<><kbd>↑</kbd> <kbd>↓</kbd>{layout === "grid" && <> <kbd>←</kbd> <kbd>→</kbd></>}</>, "移动焦点；按住 Shift 连续选择"],
-          [<><kbd>Home</kbd> <kbd>End</kbd></>, "跳到第一项／最后一项"],
-          [<kbd>↵</kbd>, "打开文件或文件夹"],
-          [<kbd>{IS_MAC ? "⌘ ↑" : "Alt ↑"}</kbd>, "返回上一级文件夹"],
-          [<kbd>空格</kbd>, "选中或取消选中"],
-          [<kbd>{IS_MAC ? "⌘" : "Ctrl"} A</kbd>, "全选当前结果"],
-          ...(!privateSpace ? [[<kbd>S</kbd>, "公开分享或管理分享"] as [ReactNode, ReactNode]] : []),
-          [<kbd>F2</kbd>, "重命名"],
-          [<kbd>{DELETE_KEY}</kbd>, "移到回收站"],
-          [<kbd>Esc</kbd>, "取消选择"],
-          [<kbd>?</kbd>, "显示本说明"],
-        ]} />
-      </Modal>}
+      {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
 
       {pendingUpload && <UploadDialog files={pendingUpload} destination={prefix} onClose={() => setPendingUpload(null)}
         onStart={(list, isPublic, destination) => {

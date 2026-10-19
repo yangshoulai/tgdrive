@@ -52,13 +52,13 @@ export async function droppedUploadFiles(transfer: DataTransfer): Promise<Upload
   return validateFiles(files);
 }
 
-export function UploadPicker({ onPick }: { onPick: (files: FileList | null) => void }) {
+export function UploadPicker({ onPick, shortcut }: { onPick: (files: FileList | null) => void; shortcut?: string }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
   const supportsFolders = "webkitdirectory" in document.createElement("input");
   useEffect(() => { if (folderInput.current) folderInput.current.webkitdirectory = true; }, []);
   return <>
-    <Menu label="上传" size="md" className="upload-picker-trigger" items={[
+    <Menu label="上传" size="md" shortcut={shortcut} className="upload-picker-trigger" items={[
       { label: "上传文件", description: "选择一个或多个文件", icon: "file", onSelect: () => fileInput.current?.click() },
       { label: "上传文件夹", description: supportsFolders ? "保留文件夹名称与层级" : "当前浏览器不支持选择文件夹", icon: "folder", disabled: !supportsFolders, onSelect: () => folderInput.current?.click() },
     ]}><Icon name="upload" size={17} /><span>上传</span><Icon name="chevronDown" size={13} /></Menu>

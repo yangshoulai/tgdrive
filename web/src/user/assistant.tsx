@@ -5,7 +5,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type DragEvent as ReactDragEvent } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, formatBytes, toast, type IconName, type MenuItem } from "../ui";
+import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, formatBytes, isShortcutControl, shortcutLabel, toast, type IconName, type MenuItem } from "../ui";
+import { ShortcutsDialog } from "../shortcuts";
 import type { PageImport } from "./page-import";
 import { Thread, useMarkState, type LiveRun } from "./assistant-thread";
 import { AttachmentTray, useAttachments } from "./assistant-attachments";
@@ -78,8 +79,8 @@ export function AssistantDock(props: DrawerProps) {
 
 export function AssistantLauncher({ onOpen, open }: { onOpen: () => void; open: boolean }) {
   return (
-    <button type="button" className={`assistant-launch${open ? " is-active" : ""}`} onClick={onOpen} data-closes-nav aria-expanded={open} aria-label="文件助手" title="文件助手" aria-keyshortcuts="Meta+J Control+J">
-      <AssistantMark size={18} /><span>文件助手</span><kbd>{navigator.platform.includes("Mac") ? "⌘J" : "Ctrl J"}</kbd>
+    <button type="button" className={`assistant-launch${open ? " is-active" : ""}`} onClick={onOpen} data-closes-nav aria-expanded={open} aria-label="文件助手" title={`文件助手（${shortcutLabel("Mod+J")}）`} aria-keyshortcuts="Meta+J Control+J">
+      <AssistantMark size={18} /><span>文件助手</span><kbd>{shortcutLabel("Mod+J")}</kbd>
     </button>
   );
 }
@@ -104,6 +105,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const page = mode === "page";
   const [width, setWidth] = useState(() => { const saved = Number(localStorage.getItem(WIDTH_KEY)); return saved >= MIN_WIDTH && saved <= MAX_WIDTH ? saved : 480; });
   const [history, setHistory] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [archived, setArchived] = useState(false);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
@@ -433,8 +435,28 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   // 键盘：Esc 运行中先停止，空闲时关闭。全页模式只停止运行，不关闭。
   function escape() { if (runId) void stop(); else if (!page) onClose(); }
+  function focusArea(event: ReactPointerEvent<HTMLElement>) {
+    const target = event.target as Element;
+    if (!event.currentTarget.contains(target) || isShortcutControl(target) || target.closest("button, a, summary, [role='button'], [role='separator']")) return;
+    // 点击消息或标题后让快捷键仍归助手处理，同时保留原生选中文字。
+    event.currentTarget.focus({ preventScroll: true });
+  }
   function onKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
-    if (!page || event.key !== "Escape" || event.defaultPrevented || event.nativeEvent.isComposing || !runId) return;
+    const target = event.target as Element;
+    if (open && !event.defaultPrevented && !event.nativeEvent.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey && !isShortcutControl(target)
+      && !document.querySelector(".modal-backdrop:not(.is-minimized), .menu") && (event.key === "?" || !event.shiftKey && ["/", "h"].includes(event.key.toLowerCase()))) {
+      event.preventDefault(); event.stopPropagation();
+      if (event.repeat) return;
+      if (event.key === "?") setShortcutsOpen(true);
+      else if (event.key === "/") { setHistory(false); window.setTimeout(() => input.current?.focus(), 0); }
+      else if (!privateMode) {
+        const side = page ? event.currentTarget.querySelector<HTMLElement>(".assistant-page-side") : null;
+        if (side && getComputedStyle(side).display !== "none") side.querySelector<HTMLElement>("input, button, [tabindex='0']")?.focus();
+        else { setHistory(value => !value); if (!history) loadConversations(); }
+      }
+      return;
+    }
+    if (!page || event.key !== "Escape" || event.defaultPrevented || event.repeat || event.nativeEvent.isComposing || !runId) return;
     if (document.querySelector(".modal-backdrop:not(.is-minimized), .menu")) return;
     event.preventDefault();
     escape();
@@ -448,7 +470,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   useEffect(() => {
     if (!open || page) return;
     const handler = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.repeat) return;
       const target = event.target as Element | null;
       if (target?.closest?.(".menu, .modal-backdrop:not(.is-minimized) .modal")) return;
       if (document.querySelector(".menu, .modal-backdrop:not(.is-minimized) .assistant-dialog") || mentionOpen.current) return;
@@ -462,10 +484,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   useEffect(() => {
     if (!open) return;
     const handler = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "o") {
-        if (document.querySelector(".modal-backdrop:not(.is-minimized)")) return;
+      if (!event.defaultPrevented && !event.isComposing && (event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "o") {
+        if (document.querySelector(".modal-backdrop:not(.is-minimized), .menu")) return;
         event.preventDefault();
-        newConversation();
+        if (!event.repeat) newConversation();
       }
     };
     document.addEventListener("keydown", handler);
@@ -515,15 +537,16 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     loadConversations(); if (deleted && deleted === currentId) newConversation(); else reloadDetail();
   }} />;
   const header = <header className="assistant-header">
-    {!privateMode && <IconButton className={page ? "assistant-mobile-history" : undefined} icon="list" label="对话历史" active={history} onClick={() => { setHistory(value => !value); if (!history) loadConversations(); }} />}
+    {!privateMode && <IconButton className={page ? "assistant-mobile-history" : undefined} icon="list" label="对话历史" shortcut="H" active={history} onClick={() => { setHistory(value => !value); if (!history) loadConversations(); }} />}
     <span className={`assistant-brand-mark${runId ? " is-working" : ""}`} aria-hidden="true"><AssistantMark size={24} state={headerMark} /></span>
     {privateMode ? <div className="assistant-title"><strong><span className="assistant-private-tag"><Icon name="lock" size={11} />私密</span>{detail?.conversation.title || "私密对话"}</strong>
       <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{selectedModel?.label ?? "未选择模型"} · 锁定后对话会被清除</small></div>
     : <div className="assistant-title"><strong>{detail?.conversation.title || "文件助手"}</strong>
       <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{detail ? conversationScope : "查找、整理，让文件井井有条"}</small></div>}
-    <IconButton icon="plus" label={privateMode ? "新的私密对话（⌘⇧O，当前对话会被清除）" : "新对话（⌘⇧O）"} onClick={newConversation} />
+    <IconButton icon="plus" label={privateMode ? "新的私密对话（当前对话会被清除）" : "新对话"} shortcut="Mod+Shift+O" onClick={newConversation} />
+    <IconButton icon="keyboard" label="键盘快捷键" shortcut="?" onClick={() => setShortcutsOpen(true)} />
     {!page && onOpenPage && !privateMode && <IconButton icon="maximize" label="在全页打开" onClick={() => onOpenPage(currentId)} />}
-    {!page && <IconButton icon="x" label="关闭" onClick={onClose} />}
+    {!page && <IconButton icon="x" label="关闭" shortcut="Mod+J" onClick={onClose} />}
   </header>;
   const body = <>
     <div className="assistant-scroll-area"><div className="assistant-thread" ref={scroller} role="log" aria-live="polite" aria-relevant="additions"
@@ -569,9 +592,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
             title={`添加附件（也可以粘贴或拖入），随对话保存${canSee ? "；图片会发给模型识别" : ""}`}><Icon name="paperclip" size={15} /></button>}
           <input ref={filePicker} type="file" multiple hidden onChange={event => { addFiles([...(event.target.files ?? [])]); event.target.value = ""; input.current?.focus(); }} />
           <span className="assistant-enter-hint">@ 引用 · Enter 发送 · Shift+Enter 换行</span>
-          {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
-            : <button type="button" className="assistant-send" aria-label="发送" disabled={(!draft.trim() && !attachments.items.length) || attachments.pending || sending || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)}
-              title={attachments.pending ? "附件处理中" : "发送（Enter）"} onClick={() => void send()}>
+          {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" aria-keyshortcuts="Escape" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
+            : <button type="button" className="assistant-send" aria-label="发送" aria-keyshortcuts="Enter Meta+Enter Control+Enter" disabled={(!draft.trim() && !attachments.items.length) || attachments.pending || sending || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)}
+              title={attachments.pending ? "附件处理中" : `发送（Enter 或 ${shortcutLabel("Mod+Enter")}）`} onClick={() => void send()}>
               {sending ? <span className="spinner" aria-hidden="true" /> : <Icon name="arrowUp" size={18} />}</button>}
         </div>
       </div>
@@ -602,18 +625,19 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   </>;
 
   if (page) return (
-    <section className="assistant-page" aria-label="文件助手" onKeyDown={onKeyDown} {...dropProps}>
+    <section className="assistant-page" aria-label="文件助手" tabIndex={-1} onPointerDown={focusArea} onKeyDown={onKeyDown} {...dropProps}>
       <aside className="assistant-page-side" aria-label="对话列表">
-        <div className="assistant-page-side-head"><strong>对话</strong><Button size="sm" icon="plus" onClick={newConversation}>新对话</Button></div>
+        <div className="assistant-page-side-head"><strong>对话</strong><Button size="sm" icon="plus" shortcut="Mod+Shift+O" onClick={newConversation}>新对话</Button></div>
         {historyList}
       </aside>
       <div className="assistant-page-main">{header}{history ? historyList : body}{dropOverlay}</div>
       {dialogs}
+      {shortcutsOpen && <ShortcutsDialog area="assistant" privateSpace={privateMode} onClose={() => setShortcutsOpen(false)} />}
     </section>
   );
   return (
     <aside ref={drawer} className={`assistant-drawer${open ? " is-open" : ""}${privateMode ? " is-private" : ""}`} style={{ "--assistant-width": `${width}px` } as CSSProperties}
-      aria-label={privateMode ? "文件助手（私密对话）" : "文件助手"} aria-hidden={!open} onKeyDown={onKeyDown} {...dropProps} {...(!open ? { inert: "" } as object : {})}>
+      aria-label={privateMode ? "文件助手（私密对话）" : "文件助手"} aria-hidden={!open} tabIndex={-1} onPointerDown={focusArea} onKeyDown={onKeyDown} {...dropProps} {...(!open ? { inert: "" } as object : {})}>
       <div className="assistant-resize" onPointerDown={startResize} role="separator" tabIndex={open ? 0 : -1} aria-label="调整助手宽度" aria-orientation="vertical"
         aria-valuemin={MIN_WIDTH} aria-valuemax={MAX_WIDTH} aria-valuenow={width}
         onKeyDown={event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault();
@@ -623,6 +647,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       {history ? historyList : body}
       {dropOverlay}
       {dialogs}
+      {shortcutsOpen && <ShortcutsDialog area="assistant" privateSpace={privateMode} onClose={() => setShortcutsOpen(false)} />}
     </aside>
   );
 }
@@ -980,10 +1005,10 @@ export function useAssistantShortcut(enabled: boolean, toggle: () => void) {
   useEffect(() => {
     if (!enabled) return;
     const handler = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "j") {
-        if (document.querySelector(".modal-backdrop:not(.is-minimized)")) return;
+      if (!event.defaultPrevented && !event.isComposing && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "j") {
+        if (document.querySelector(".modal-backdrop:not(.is-minimized), .menu")) return;
         event.preventDefault();
-        toggle();
+        if (!event.repeat) toggle();
       }
     };
     document.addEventListener("keydown", handler);

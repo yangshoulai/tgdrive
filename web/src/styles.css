@@ -1083,6 +1083,9 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .link-button.shortcut-hint { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-3); font-size: var(--text-xs); text-decoration: none; }
 .link-button.shortcut-hint:hover { color: var(--ink); }
 .key-value kbd + kbd { margin-left: 2px; }
+.shortcuts-dialog .segmented { display: flex; margin-bottom: 20px; }
+.shortcuts-dialog .segmented button { flex: 1; justify-content: center; }
+.shortcut-note { margin-top: 18px; line-height: 1.6; }
 .list-sentinel { height: 1px; }
 .list-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; padding: 8px 2px; color: var(--ink-3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: var(--text-sm); color: var(--ink-2); }
@@ -1428,10 +1431,10 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
   --code-string: #8fd19e; --code-keyword: #c9a3f2; --code-property: #7cc8e0; --code-number: #f0b07a; --code-variable: #ee9ac0; --code-fn: #9db8f5;
 }
 .preview-modal.is-reading { max-width: 1080px; container: preview-window / inline-size; }
-/* 窄窗口：头部折成两行，文件名独占一行，文本工具靠左、窗口按钮靠右；浮动头部高度由 --preview-header-height 同步给内容留白。 */
+/* 窄窗口：文件名独占一行，工具与窗口按钮保持同一行；次要操作由更多菜单提供。 */
 @container preview-window (max-width: 580px) {
   .preview-modal.is-reading.is-immersive:not(.is-minimized) .modal-header { flex-wrap: wrap; row-gap: 6px; }
-  .preview-modal.is-reading.is-immersive:not(.is-minimized) .modal-window-actions { width: 100%; justify-content: flex-end; }
+  .preview-modal.is-reading.is-immersive:not(.is-minimized) .modal-window-actions { width: 100%; min-width: 0; flex-wrap: nowrap; justify-content: flex-end; }
   .preview-modal.is-reading .preview-text-tools { margin-right: auto; }
 }
 .preview-modal.is-reading.is-chrome-idle:not(.is-minimized) .preview-stage { cursor: auto; }

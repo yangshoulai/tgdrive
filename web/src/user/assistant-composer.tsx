@@ -72,6 +72,8 @@ export const AssistantComposer = forwardRef<ComposerHandle, {
       onChange={event => onChange(event.target.value)}
       onPaste={event => { const files = [...event.clipboardData.files]; if (files.length && onPasteFiles?.(files)) event.preventDefault(); }}
       onKeyDown={event => {
+        if (event.nativeEvent.isComposing) return;
+        if (event.repeat && event.key === "Enter" && !event.shiftKey) { event.preventDefault(); return; }
         if (onKey(event.nativeEvent)) { event.preventDefault(); return; }
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); onSubmit(); }
       }} />}

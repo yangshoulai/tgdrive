@@ -259,7 +259,11 @@ export function createComposer(parent: HTMLElement, options: ComposerOptions) {
     EditorView.contentAttributes.of({ "aria-label": options.label, "aria-multiline": "true", spellcheck: "false", autocapitalize: "off", autocorrect: "off" }),
     EditorState.transactionFilter.of(tr => tr.docChanged && tr.newDoc.length > options.maxLength && tr.newDoc.length > tr.startState.doc.length ? [] : tr),
     Prec.highest(EditorView.domEventHandlers({
-      keydown: event => options.onKey(event),
+      keydown: event => {
+        if (event.isComposing) return false;
+        if (event.repeat && event.key === "Enter" && !event.shiftKey) { event.preventDefault(); return true; }
+        return options.onKey(event);
+      },
       paste: event => {
         const files = [...(event.clipboardData?.files ?? [])];
         if (!files.length || !options.onPasteFiles?.(files)) return false;
