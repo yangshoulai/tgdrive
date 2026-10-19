@@ -365,13 +365,16 @@ class AssistantActionTests(ActionHelpers, AssistantCase):
     def test_compaction_keeps_recent_turns(self):
         async def run():
             admin, _, model = await self.setup_assistant()
-            # 系统提示词与工具定义约 1.3 万 token 也计入窗口（§23），窗口取 2 万。
-            await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"context_window": 20000}, admin)
             user = await self.client.login("user", "alice@example.com", "alice password")
             conversation = await self.start_conversation(user)
             for index in range(3):
                 self.model.replies = [answer(f"第 {index} 轮回答 " + "很长的内容" * 240)]
                 await self.send(user, conversation, f"第 {index} 个问题 " + "背景" * 600)
+            # 先积累成功轮次，再按当前提示词实际大小缩小窗口；提示词或工具描述变化不应提前耗尽测试窗口。
+            last = next(message for message in reversed(self.service.trace.messages(conversation)) if message["role"] == "assistant")
+            estimate = last["prompt_estimate"] + self.service._estimate([
+                {"role": "assistant", "content": last["text"]}, {"role": "user", "content": "最新的问题"}])
+            await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"context_window": int(estimate / .75)}, admin)
             self.model.replies = [Reply(text="摘要：用户问了三个问题"), answer("第四轮")]
             await self.send(user, conversation, "最新的问题")
             summary = [m for m in await self.messages(user, conversation) if m.get("type") == "summary"]

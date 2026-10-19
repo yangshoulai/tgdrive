@@ -87,7 +87,7 @@ export function AssistantLauncher({ onOpen, open }: { onOpen: () => void; open: 
 }
 
 export type AssistantNavigate = (view: "files" | "trash" | "downloads" | "shared" | "private", prefix?: string) => void;
-const FULL_ACK_KEY = "tessera-assistant-full-ack";
+const FULL_ACK_KEY = "tessera-assistant-full-ack-v2";
 const EMPTY_LIVE: LiveRun = { reasoning: "", reasoningStartedAt: null, streaming: "", tools: [], phase: "thinking" };
 
 export function AssistantDrawer({ open, config, location, onClose, onConfigChanged, mode = "drawer", initialConversation, onOpenPage,
@@ -122,6 +122,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [httpApprovals, setHttpApprovals] = useState<HttpApproval[]>([]);
   const httpResolvers = useRef(new Map<string, { resolve: (decision: ai.HttpDecision | null) => void; expires: number }>());
+  const browserCalls = useRef(new Map<string, AbortController>());
+  const cancelBrowserCalls = useCallback(() => { for (const controller of browserCalls.current.values()) controller.abort(); }, []);
+  useEffect(() => { if (!open) cancelBrowserCalls(); return cancelBrowserCalls; }, [open, cancelBrowserCalls]);
   const decideHttp = useCallback((callId: string, decision: ai.HttpDecision) => {
     const waiter = httpResolvers.current.get(callId);
     if (!waiter) return;
@@ -285,6 +288,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     const handledKey = `${runId}:${callId}`;
     if (!callId || handledCalls.current.has(handledKey) || Number(event.expires_at ?? 0) * 1000 < Date.now()) return;
     handledCalls.current.add(handledKey);
+    const controller = event.name === "http_request_approval" ? null : new AbortController();
+    if (controller) browserCalls.current.set(handledKey, controller);
+    const timer = controller ? window.setTimeout(() => controller.abort(), Math.max(0, Number(event.expires_at) * 1000 - Date.now())) : undefined;
     let outcome: { result?: Record<string, unknown>; error?: string };
     try {
       if (event.name === "http_request_approval") {
@@ -297,9 +303,11 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         });
         if (decision === null) return; // 断线重放时结果可能紧接确认事件到达，不再回传旧决定。
         outcome = { result: { approved: decision === "approved", decision } };
-      } else outcome = { result: await executeClientTool(String(event.name), (event.args ?? {}) as Record<string, unknown>, clientContext.current) };
+      } else outcome = { result: await executeClientTool(String(event.name), (event.args ?? {}) as Record<string, unknown>, clientContext.current, controller?.signal) };
     }
     catch (reason) { outcome = { error: reason instanceof Error ? reason.message : "页面操作失败" }; }
+    finally { window.clearTimeout(timer); browserCalls.current.delete(handledKey); }
+    if (controller?.signal.aborted) return;
     await ai.sendClientResult(runId, callId, outcome).catch(() => {
       setHttpApprovals(items => items.map(item => item.callId === handledKey ? { ...item, status: "error" } : item));
     });
@@ -356,16 +364,18 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         case "title": setDetail(current => current && { ...current, conversation: { ...current.conversation, title: String(event.title) } }); loadConversations(); break;
         case "context": setDetail(current => current && { ...current, context: { used: Number(event.used) || 0, window: Number(event.window) || 32000 } }); break;
         case "run_finished": case "stream_failed":
+          cancelBrowserCalls();
           setRunId(null); setLive(null); unsubscribe.current = null;
           onConfigChanged();
           setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => setDetail(value => value?.conversation.id === fresh.conversation.id ? fresh : value)).catch(() => undefined); return current; });
           break;
       }
     }, value => { if (version === selection.current) setReconnecting(value); });
-  }, [onConfigChanged, loadConversations, scrollToEnd, runClientCall]);
+  }, [onConfigChanged, loadConversations, scrollToEnd, runClientCall, cancelBrowserCalls]);
 
   async function openConversation(id: string) {
     const version = ++selection.current;
+    cancelBrowserCalls();
     for (const callId of httpResolvers.current.keys()) decideHttp(callId, "cancelled");
     setHttpApprovals([]);
     unsubscribe.current?.(); unsubscribe.current = null;
@@ -385,6 +395,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   function newConversation() {
     selection.current += 1;
+    cancelBrowserCalls();
     for (const callId of httpResolvers.current.keys()) decideHttp(callId, "cancelled");
     setHttpApprovals([]);
     setLoading(false); setReconnecting(false);
@@ -441,6 +452,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   async function stop() {
     if (!runId) return;
+    cancelBrowserCalls();
     try { await ai.stopRun(runId); } catch (reason) { toast.error(api.errorMessage(reason, "停止失败，请稍后重试")); }
   }
 
@@ -704,9 +716,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     {fullPrompt && <Modal className="assistant-dialog" title="切换到完全访问？" icon="zap" onClose={() => setFullPrompt(false)}
       footer={<><Button onClick={() => setFullPrompt(false)}>取消</Button><Button variant="primary" onClick={() => { localStorage.setItem(FULL_ACK_KEY, "1"); setFullPrompt(false); void chooseMode("full", true); }}>切换</Button></>}>
       <ul className="assistant-mode-points">
-        <li><Icon name="zap" size={15} /><span><strong>普通修改自动执行</strong>改名、移动、整理、新建文件夹、移入回收站等不再逐项询问，结果直接显示在对话里。</span></li>
-        <li><Icon name="restore" size={15} /><span><strong>24 小时内可以撤销</strong>每个自动执行的操作都保留卡片，可以一键撤销。</span></li>
-        <li><Icon name="shield" size={15} /><span><strong>这些仍需你确认</strong>彻底删除、公开分享、超过 1,000 项的操作，以及对话中读取过文件内容或网页之后的修改。</span></li>
+        <li><Icon name="zap" size={15} /><span><strong>常规操作自动执行</strong>改名、移动、整理、移入回收站、下载任务与常规 HTTP 请求不再逐项询问，读取文件或网页后仍保持此模式。</span></li>
+        <li><Icon name="restore" size={15} /><span><strong>保留结果和撤销入口</strong>文件改名、移动、整理等可撤销操作保留 24 小时撤销入口；第三方 HTTP 请求的结果以接口为准。</span></li>
+        <li><Icon name="shield" size={15} /><span><strong>这些仍需你确认</strong>彻底删除、公开分享、跨私密空间移动和 HTTP DELETE；打开新标签、下载到本机和复制仍可能需要浏览器要求的点击。</span></li>
       </ul>
     </Modal>}
   </>;
@@ -743,9 +755,31 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
 /** 在用户当前页面执行浏览器工具（docs/assistant-design.md §19.7）。参数已经过服务端校验，这里只做页面操作。 */
 async function executeClientTool(name: string, args: Record<string, unknown>,
-  context: { location: AssistantLocation; onNavigate?: AssistantNavigate; page: boolean; privateMode: boolean; cacheQueue: ReturnType<typeof useCacheQueue> }): Promise<Record<string, unknown>> {
+  context: { location: AssistantLocation; onNavigate?: AssistantNavigate; page: boolean; privateMode: boolean; cacheQueue: ReturnType<typeof useCacheQueue> }, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const { location, onNavigate, page } = context;
   if (name === "ui_cache_status") return cacheStatus(args, context.cacheQueue);
+  if (["ui_cache_files", "ui_clear_cache", "ui_generate_thumbnails"].includes(name)) {
+    signal?.throwIfAborted();
+    const items = (Array.isArray(args.items) ? args.items : []) as { path: string; etag: string; size: number; content_type: string | null }[];
+    if (Boolean(args.private) !== context.privateMode || items.some(item => api.isPrivatePath(item.path) !== context.privateMode)) throw new Error("文件不属于当前对话的文件区域");
+    if (name === "ui_generate_thumbnails") {
+      let ok = 0, failed = 0, note = "";
+      for (const item of items) {
+        if (signal?.aborted) break;
+        try { await api.generateThumbnail({ key: item.path, etag: item.etag }); ok++; }
+        catch (reason) { failed++; note = api.errorMessage(reason, "缩略图提交失败"); }
+      }
+      if (ok) for (const delay of [5000, 30000, 120000]) window.setTimeout(() => window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [...new Set(items.map(item => item.path.slice(0, item.path.lastIndexOf("/") + 1)))] } })), delay);
+      return { ok, failed, note: note || "已提交服务器生成，生成结果以文件缩略图为准" };
+    }
+    const queue = context.cacheQueue;
+    if (!cacheSupported() || !queue?.available) throw new Error("这台设备不能使用本机缓存，请在设置中启用");
+    const files = items.map(item => ({ key: item.path, etag: item.etag, size: item.size, content_type: item.content_type }));
+    const usable = files.filter(queue.canCache);
+    if (name === "ui_cache_files") queue.enqueueMany(usable);
+    else await queue.forget(usable);
+    return { ok: usable.length, skipped: files.length - usable.length, note: name === "ui_cache_files" ? "已加入缓存队列，进度见本机缓存托盘" : "只清除此设备的副本，云端文件不受影响" };
+  }
   if (context.privateMode) return executePrivateTool(name, args, location, onNavigate);
   const bridge = filesBridge();
   if (name === "ui_get_view") {
@@ -969,7 +1003,7 @@ function Welcome({ location, view, privateMode, onPick }: { location: string; vi
     <span className="assistant-welcome-icon"><AssistantMark size={36} /></span>
     <span className="assistant-eyebrow"><Icon name="lock" size={12} />私密对话</span>
     <h3>只在私密空间里工作。</h3>
-    <p className="muted">助手只能看到私密空间，对话不保存，锁定后立即清除。<br />联网只访问你给出的链接及其网站里的同站页面。</p>
+    <p className="muted">助手只能看到私密空间，对话不保存，锁定后立即清除。<br />支持任务所需的公共网页、跨站链接和第三方接口。</p>
     <div className="assistant-starters">{[
       { title: "看懂空间", description: "用量与文件分布", text: "统计私密空间的空间占用，按类型分组", icon: "pulse" as IconName },
       { title: "找到大文件", description: "发现空间占用大户", text: "私密空间里最大的 10 个文件是什么？", icon: "search" as IconName },

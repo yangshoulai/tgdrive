@@ -7,7 +7,7 @@
 - ui_generate_thumbnails：缩略图只能在浏览器生成且大图计入用户空间，同样只生成卡片，由用户点击后在对话框里逐个生成。
 - 路径一律经 ctx.resolve 校验在作用域内且不在 .tgdrive/；页面回传的数据同样按不可信数据包装。
 - 私密对话（§24.5.4）：只由持有同一私密授权的抽屉执行，读取与跳转只作用于私密空间页面；
-  打开网页只能用对话中出现过的完整地址，复制卡片完整显示文本。
+  打开任务所需的公共网页，复制卡片完整显示文本。
 """
 
 from __future__ import annotations
@@ -227,7 +227,7 @@ THUMBNAIL_LIMIT = 300
 
 @tool("ui_generate_thumbnails", "生成缩略图", "browser", "read",
       "为图片、视频和音乐补生成缩略图（列表小图、网格图与预览封面）。生成需要读取原文件，并且网格图与封面会计入用户空间，"
-      "所以工具只在对话中显示「生成缩略图」卡片，由用户点击后提交给服务器后台生成，工具立即返回。path 可以是文件或目录；recursive 包含子目录；"
+      "审批模式显示「生成缩略图」卡片，完全访问下自动提交给服务器后台生成。path 可以是文件或目录；recursive 包含子目录；"
       "regenerate 时也重新生成已有但缺少网格图的旧版缩略图（例如用户觉得网格视图模糊）。单次最多 300 个文件。",
       {"path": PATH, "recursive": {"type": "boolean", "description": "目录是否包含子目录，默认否"},
        "regenerate": {"type": "boolean", "description": "是否重新生成缺少网格图的旧缩略图，默认否"}}, ("path",))
@@ -360,7 +360,7 @@ def _cache_card(ctx: ToolContext, args: dict, action: str) -> ToolOutput:
 
 @tool("ui_cache_files", "缓存到本机", "browser", "read",
       "把文件保存到这台设备的本机缓存，之后预览和下载直接读取本机数据（适合即将离线使用或反复打开的文件）。"
-      "会占用设备空间，所以只在对话中显示「缓存到本机」卡片，由用户点击后开始，工具立即返回。path 可以是文件或文件夹；"
+      "审批模式显示「缓存到本机」卡片；完全访问下自动加入缓存队列。设备必须已开启本机缓存。path 可以是文件或文件夹；"
       "recursive 包含子目录；单次最多 300 个文件。",
       {"paths": CACHE_PATHS, "recursive": {"type": "boolean", "description": "文件夹是否包含子目录，默认否"}}, ("paths",))
 async def ui_cache_files(ctx: ToolContext, args: dict) -> ToolOutput:
@@ -368,7 +368,7 @@ async def ui_cache_files(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("ui_clear_cache", "清除本机缓存", "browser", "read",
-      "删除这台设备上指定文件的本机缓存（云端文件不受影响）。只在对话中显示「清除」卡片，由用户点击后执行，工具立即返回。"
+      "删除这台设备上指定文件的本机缓存（云端文件不受影响）。审批模式显示「清除」卡片；完全访问下自动执行，不删除云端文件。"
       "参数同 ui_cache_files；单次最多 300 个文件。",
       {"paths": CACHE_PATHS, "recursive": {"type": "boolean", "description": "文件夹是否包含子目录，默认否"}}, ("paths",))
 async def ui_clear_cache(ctx: ToolContext, args: dict) -> ToolOutput:

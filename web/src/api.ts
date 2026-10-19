@@ -53,6 +53,8 @@ export type ResourceSettings = { config: ResourceConfig; source: "admin" | "star
 export type DownloadCandidate = { ticket: string; group: string; name: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform?: "x" | "youtube"; media_type?: "image" | "video" | "audio"; content_type?: string | null; size: number | null; variant: string | null; warnings: string[]; header_names: string[]; body_bytes: number };
 export type DownloadStatus = "queued" | "running" | "stopped" | "interrupted" | "completed" | "failed";
 export type DownloadTask = { id: number; key: string; private: boolean; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform: "x" | "youtube" | null; phase: "resolving" | "downloading" | "merging" | "saving" | null; status: DownloadStatus; size: number | null; received: number; stored_bytes: number; segments_done: number; segments_total: number; duration: number | null; processed_seconds: number; elapsed_seconds: number; error: string | null; created_at: number; updated_at: number; speed: number; eta_seconds: number | null;
+  /** 成品已移入回收站或之后被清除；key 仍为删除前的位置，不暴露内部存储地址。 */
+  trashed?: boolean;
   /** 来源地址：直链去掉查询串（has_query 表示有被省略的参数，完整地址经 downloadSource 读取）；私密空间锁定时为 null。 */
   source?: { url: string; has_query: boolean } | null;
   /** 已完成且文件仍在原位置时的文件信息与缩略图状态；文件已删除时为 null。 */

@@ -73,7 +73,7 @@ async def parse_download_source(ctx: ToolContext, args: dict) -> ToolOutput:
     text = _str(args, "text", limit=16384)
     if not text:
         raise ToolError("请提供链接")
-    # 私密对话：链接或命令必须原样来自用户消息（§24.5.2），模型不能补充请求头或参数。
+    # 普通和私密对话均可解析当前任务所需的链接或请求配置；连接由离线请求层校验。
     ctx.check_url(text, "text")
     try:
         parsed = await ctx.offline.parse(ctx.user_id, text)

@@ -19,7 +19,6 @@ class Plan:
         self.calls: dict[str, str] = {}
         self.running: set[str] = set()
         self.published = 0
-        self.recent: list[dict] = []
 
     def snapshot(self) -> dict | None:
         return copy.deepcopy(self.data)
@@ -39,6 +38,12 @@ class Plan:
         if item is None:
             raise ValueError("计划步骤不存在，请使用当前计划返回的步骤编号")
         return item
+
+    @staticmethod
+    def _reopen(item: dict) -> None:
+        # 历史快照保留原完成依据；重新执行不能沿用旧结果或被旧操作再次标成完成。
+        for key in ("evidence", "actions", "action_pending", "issue", "waiting_call", "detail"):
+            item.pop(key, None)
 
     def update(self, args: dict) -> dict:
         items = args.get("items")
@@ -74,14 +79,14 @@ class Plan:
                 raise ValueError("步骤 kind 只能是 tool 或 reasoning")
             if previous.get("kind") == "tool" and item["kind"] != "tool":
                 raise ValueError("执行步骤不能改为纯分析步骤来跳过结果核验")
+            if previous.get("status") == "completed" and item["status"] != "completed":
+                self._reopen(item)
             if "detail" in value:
                 if not isinstance(value["detail"], str):
                     raise ValueError("步骤 detail 需要文本")
                 item["detail"] = value["detail"].strip()[:300]
             active = any(self.calls.get(call_id) == step_id for call_id in self.running)
             unresolved = item.get("action_pending", False)
-            if previous.get("status") == "completed" and (item["status"] != "completed" or item["content"] != previous["content"]):
-                raise ValueError("已完成的步骤不能重新执行或改写；新增步骤以安排后续工作")
             if (active or unresolved) and item["status"] not in ("in_progress", "waiting_user"):
                 raise ValueError("步骤还有进行中的调用或待确认操作，不能提前结束")
             if item["status"] == "completed" and previous.get("status") != "completed":
@@ -101,7 +106,7 @@ class Plan:
             raise ValueError("计划标题和调整原因需要文本")
         structure = [(item["id"], item["content"]) for item in result]
         if original and structure != [(item["id"], item["content"]) for item in original["items"]] and not reason.strip():
-            raise ValueError("增删、改写或调整步骤顺序时请提供 reason，说明计划调整原因")
+            reason = "按当前任务调整计划"
         self.data = {"type": "plan", "id": (original or {}).get("id") or "plan_" + secrets.token_hex(8),
                      "run_id": (original or {}).get("run_id") or self.run_id, "title": title.strip()[:80] or "处理计划",
                      "version": (original or {}).get("version", 0), "automatic": False, "items": result}
@@ -112,45 +117,6 @@ class Plan:
         self._changed()
         return self.snapshot()
 
-    def prepare(self, calls: list, labels: dict[str, str]) -> bool:
-        """模型未规划时，按真实多工具调用补建基础计划，不改变工具的授权或执行次数。"""
-        work = [call for call in calls if call.name not in META_TOOLS]
-        if self.data is not None and not self.data.get("automatic") or not work:
-            return False
-        if self.data is None:
-            if len(work) + len(self.recent) < 2:
-                return False
-            self.data = {"type": "plan", "id": "plan_" + secrets.token_hex(8), "run_id": self.run_id,
-                         "version": 0, "title": "处理计划", "automatic": True, "items": []}
-            for body in self.recent:
-                item = self._auto_item(body["name"], labels)
-                self.calls[body["call_id"]] = item["id"]
-                self.observe(body)
-        for call in work:
-            item = self._auto_item(call.name, labels)
-            if not any(self.calls.get(c) == item["id"] for c in self.running) and not item.get("action_pending"):
-                item.pop("issue", None)
-                item.pop("actions", None)
-            self.calls[call.id] = item["id"]
-            # 同一步骤可能对应多次分页或批量调用；全部返回后才能更新完成状态。
-            self.running.add(call.id)
-            item["status"] = "in_progress"
-        self._changed()
-        return True
-
-    def _auto_item(self, name: str, labels: dict[str, str]) -> dict:
-        items = self.data["items"]
-        item = next((item for item in items if item.get("tool") == name), None)
-        if item is None:
-            item = {"id": f"step{len(items) + 1}", "content": labels.get(name, name), "kind": "tool",
-                    "status": "pending", "tool": name}
-            if len(items) < 12:
-                items.append(item)
-            else:
-                item = items[-1]
-                item["content"] = "其他处理步骤"
-        return item
-
     def begin(self, call_id: str, name: str, step_id: str | None) -> None:
         if self.data is None or name == "update_plan" or name in META_TOOLS and not step_id:
             return
@@ -159,16 +125,17 @@ class Plan:
         if not step_id:
             active = [item for item in self.data["items"] if item["status"] == "in_progress"]
             if len(active) != 1:
-                raise ValueError("请用 plan_step_id 指明这次调用所属的计划步骤")
+                return
             step_id = active[0]["id"]
-        item = self._item(step_id)
-        if item["status"] == "completed" and not self.data.get("automatic"):
-            raise ValueError("这一步已经完成，请执行尚未完成的步骤")
-        if item.get("action_pending"):
-            raise ValueError("这一步还在等待操作结果，请等待或处理其他步骤，避免重复提交")
+        item = next((item for item in self.data["items"] if item["id"] == step_id), None)
+        if item is None:
+            return  # 计划关联不能让本来可执行的业务工具失败。
+        if item["status"] == "completed":
+            self._reopen(item)
         if not self.data.get("automatic") and not any(self.calls.get(c) == step_id for c in self.running):
             item.pop("issue", None)
-            item.pop("actions", None)
+            if not item.get("action_pending"):
+                item.pop("actions", None)
         self.calls[call_id] = step_id
         self.running.add(call_id)
         item["kind"] = "tool"
@@ -188,10 +155,6 @@ class Plan:
         if body["name"] == "update_plan" or body["name"] in META_TOOLS and body["call_id"] not in self.calls:
             return
         if self.data is None:
-            self.recent = (self.recent + [{key: copy.deepcopy(body.get(key)) for key in
-                                          ("call_id", "name", "status", "summary", "event")}
-                                         | {"result": {key: value for key, value in (body.get("result") or {}).items()
-                                                       if key in ("stopped", "failed", "partial")}}])[-12:]
             return
         step_id = self.calls.get(body["call_id"])
         if not step_id:

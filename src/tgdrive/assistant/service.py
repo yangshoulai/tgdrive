@@ -15,7 +15,6 @@ import collections
 import hashlib
 import json
 import logging
-import re
 import secrets
 import threading
 import time
@@ -30,9 +29,10 @@ from ..api import normalize_user_path
 from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
 from ..objects import PRIVATE_PREFIX, Scope
+from ..offline.request import checked_url
 from . import client_tools, http_tools, knowledge, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
 from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
-from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, PRIVATE_CONFIRM_KINDS, ActionExecutor, Progress, share_options
+from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
 from .catalog import CatalogStore
 from .channels import ChannelStore
 from .config import LIMITS, PRIVATE_NOTICE, AssistantConfig
@@ -64,7 +64,7 @@ AUTO_WAIT = 25
 ACCESS_MODES = ("approval", "full")
 MAX_MENTIONS = 20
 # 聊天框附件：统一保存在普通文件区域的这个目录下（§22.5），每条消息最多 10 个。
-# 读取不可信外部内容的工具：结果进入上下文后，完全访问模式下的修改仍需确认（§19.5）。
+# 读取不可信内容的工具；内容只作为数据，不改变当前访问模式。
 TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "collect_gallery": "分析过网页",
                "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应", "view_image": "查看过图片内容"}
 
@@ -76,29 +76,6 @@ def session_hash(token: str) -> str:
 def display(key: str) -> str:
     """路径显示：私密空间内的路径相对私密空间根，不暴露系统区前缀。"""
     return "/" + (key[len(PRIVATE_PREFIX):] if key.startswith(PRIVATE_PREFIX) else key)
-
-
-URL_PATTERN = re.compile(r"https?://[^\s<>\"'`）】」』，。；、]+", re.IGNORECASE)
-
-
-# 网页工具：它们的成功结果里出现的同站地址可以继续访问（§24.5.2「站内地址」）。
-WEB_RESULT_TOOLS = frozenset({"http_request", "analyze_page", "collect_gallery", "get_collection"})
-
-
-def _host(url: str) -> str:
-    """比对站内地址用的主机名：小写，去掉开头的 www.。"""
-    try:
-        host = (urlsplit(url).hostname or "").lower()
-    except ValueError:
-        return ""
-    return host[4:] if host.startswith("www.") else host
-
-
-def _urls(text: object) -> set[str]:
-    """文本中出现的 http(s) 地址（去掉锚点与结尾标点），用于私密对话的地址规则（§24.5.2）。"""
-    if not isinstance(text, str):
-        return set()
-    return {match.rstrip(".,;:!?)]}").split("#", 1)[0] for match in URL_PATTERN.findall(text)}
 
 
 PROVIDER_FAILURES = {
@@ -147,7 +124,7 @@ class RunState:
     changed: asyncio.Condition = field(default_factory=asyncio.Condition)
     # 浏览器工具：等待页面回传结果的调用（call_id → Future）
     client_waiters: dict = field(default_factory=dict)
-    # 本轮读取过的不可信外部内容（之后的修改在完全访问下也需要确认）
+    # 本轮读取过的不可信外部内容；仅作为来源标记，不改变访问模式。
     tainted: str | None = None
     listeners: int = 0
     thinking: dict = field(default_factory=dict)
@@ -317,43 +294,21 @@ class AssistantService:
             except Exception:
                 self.forget_private(access=binding.access)
 
-    def _url_pool(self, conversation_id: str) -> tuple[set[str], set[str], set[str], list[str]]:
-        """私密对话中出现过的地址：用户消息里的（user）、成功的工具结果里的（seen）、网页工具结果里的（web），以及用户消息原文。"""
-        user, seen, web, texts = set(), set(), set(), []
-        for message in self.memory.messages(conversation_id, limit=5000):
-            if message["role"] == "user":
-                user |= _urls(message.get("text"))
-                texts.append(str(message.get("text") or ""))
-            elif message["role"] == "tool" and message.get("status") == "ok":
-                # 只认成功的工具结果：错误文案可能回显模型自己给出的地址。
-                found = _urls(message.get("model_content"))
-                seen |= found
-                if message.get("tool_name") in WEB_RESULT_TOOLS:
-                    web |= found
-        return user, seen, web, texts
-
     def _url_allowed(self, conversation_id: str):
-        """§24.5.2：user = 用户消息里原样出现的地址；page = 用户地址加上网页工具结果里与用户地址同主机的地址（站内地址）；
-        seen = 用户地址加上本对话工具结果里出现过的地址。"""
+        """私密对话使用公共 HTTP(S) 地址，不再按用户原文、来源主机或已见地址设白名单。
+
+        实际请求仍由 SafeHttpClient 检查公网地址、DNS 与每次跳转；这里不发网络请求。
+        """
         def allowed(url: str, level: str) -> bool:
-            if not isinstance(url, str):
+            if not isinstance(url, str) or not url.strip():
                 return False
-            candidate = url.strip().split("#", 1)[0]
-            user, seen, web, texts = self._url_pool(conversation_id)
             if level == "text":
-                # 解析下载来源的文本（链接或 curl 命令）：原样出现在用户消息里，或每一行都是用户给出的链接。
-                text = url.strip()
-                lines = [line.strip() for line in text.splitlines() if line.strip()]
-                return bool(text) and (any(text in item for item in texts)
-                                       or all(line.split("#", 1)[0] in user for line in lines))
-            stripped = candidate.rstrip(".,;:!?)]}")
-            if level == "page":
-                if candidate in user or stripped in user:
-                    return True
-                hosts = {_host(item) for item in user} - {""}
-                return (candidate in web or stripped in web) and _host(candidate) in hosts
-            pool = user if level == "user" else user | seen
-            return candidate in pool or stripped in pool
+                return True  # curl／多链接仍由离线来源解析器逐项校验。
+            try:
+                checked_url(url.strip())
+                return True
+            except ValueError:
+                return False
         return allowed
 
     def _full_access(self, user_id: int) -> bool:
@@ -566,9 +521,7 @@ class AssistantService:
                 message["event"] = display_plan(event, actions, active=bool(active_run and message.get("run_id") == active_run))
         return {"conversation": item, "messages": [self._public_message(m) for m in messages], "context": self._context_usage(row, messages),
                 "actions": actions, "active_run": active_run,
-                "attachments": self.attachments.conversation_usage(account.id, conversation_id),
-                # 私密对话的回复里只有「已出现地址」可以点击（§24.8），其余链接显示为文字。
-                **({"links": sorted(set().union(*self._url_pool(conversation_id)[:2]))[:500]} if is_private(conversation_id) else {})}
+                "attachments": self.attachments.conversation_usage(account.id, conversation_id)}
 
     def _context_usage(self, row, messages: list[dict]) -> dict | None:
         """上下文占用（§23）：最近一次模型调用的输入加输出 token（下一次请求至少包含这些）与当前模型窗口。"""
@@ -608,8 +561,8 @@ class AssistantService:
         if mode is not None:
             self.trace.append(conversation_id, None, "event", {
                 "type": "mode_changed", "text": "已切换到完全访问：普通修改会自动执行" if mode == "full" else "已切换到审批模式：每次修改都需要你确认",
-                "model_text": "[系统事件] 用户切换到完全访问模式。普通修改会在生成提议后自动执行；彻底删除、公开分享、超过 1000 项，"
-                              "以及本轮读取过文件内容或网页之后的修改，仍需要用户确认。" if mode == "full" else
+                "model_text": "[系统事件] 用户切换到完全访问模式。常规修改、下载任务、HTTP 请求、缓存和缩略图提交自动执行；"
+                              "读取文件、图片或网页不改变此模式。彻底删除、公开分享、跨私密空间移动和 HTTP DELETE 仍需确认。" if mode == "full" else
                               "[系统事件] 用户切换到审批模式，所有修改都需要用户在卡片上确认。"})
         item = self.trace.conversation_json(self.trace.conversation(account.id, conversation_id))
         item["scope"] = display(item.pop("scope_root"))
@@ -1696,21 +1649,14 @@ class AssistantService:
             async def propose(kind: str, payload: dict, count: int) -> dict:
                 if count > limits["action_items"]:
                     raise ToolError(f"匹配 {count} 项，超过单次上限 {limits['action_items']}，请缩小范围。")
-                # 完全访问：普通修改自动确认执行；不可恢复、公开分享、超过 1000 项、读取过外部内容之后仍需确认（§19.5）。
+                # 完全访问遵从用户选择；读取内容和批量数量不再使可撤销操作退回审批。
                 auto = False
                 current = self.trace.conversation(state.user_id, state.conversation_id, include_hidden=True)
                 if current["access_mode"] == "full" and self._full_access(state.user_id):
-                    taint = state.tainted or self._conversation_taint(state.conversation_id)
                     if kind in ("move_out", "move_in"):
                         reason = "移出或移入私密空间总是需要你确认"
                     elif kind in CONFIRM_KINDS:
                         reason = "彻底删除与公开分享总是需要你确认"
-                    elif state.private and kind in PRIVATE_CONFIRM_KINDS:
-                        reason = "私密对话中的下载操作总是需要你确认"
-                    elif count > 1000:
-                        reason = "条目超过 1,000 项，需要你确认"
-                    elif taint:
-                        reason = f"对话中{taint}，为防止内容里的诱导指令，这次修改需要你确认"
                     else:
                         reason, auto = None, True
                     payload = {**payload, "auto": True} if auto else {**payload, "confirm_reason": reason}
@@ -1722,7 +1668,7 @@ class AssistantService:
                     created["confirm_reason"] = payload["confirm_reason"]
                 if auto and self.trace.start_action(action_id):
                     task = self._launch_action(row, SimpleNamespace(id=state.user_id, bucket_id=state.bucket_id), state.token,
-                                               payload, None, "自动执行")
+                                               payload, None, "自动执行", state.access if state.private else None)
                     try:
                         outcome = await asyncio.wait_for(asyncio.shield(task), min(AUTO_WAIT, max(2, limits["tool_seconds"] - 3)))
                     except TimeoutError:
@@ -1755,6 +1701,11 @@ class AssistantService:
                 if "http_request" not in self._user_tools(state.user_id, private=state.private):
                     raise ToolError("HTTP 请求工具已停用，未发送请求")
 
+            def auto_approve() -> bool:
+                self._validate(state)
+                current = self.trace.conversation(state.user_id, state.conversation_id, include_hidden=True)
+                return current["access_mode"] == "full" and self._full_access(state.user_id)
+
             async def analyze(summary: dict, goal: str) -> dict:
                 model = self.channels.model(state.model_id)
                 endpoint = self.channels.endpoint(model["channel_id"])
@@ -1774,13 +1725,30 @@ class AssistantService:
                                   public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
                                   redact=self.guard.redact,
                                   plan=plan,
-                                  http_guard=self.http_guard, http_authorize=http_authorize,
+                                  http_guard=self.http_guard, http_authorize=http_authorize, auto_approve=auto_approve,
                                   attachments=shared.setdefault("attachments", self.attachments.for_conversation(state.conversation_id)),
                                   read_only=spec.level == "read",
                                   vision=self.channels.vision(self.channels.model(state.model_id)),
                                   tainted=lambda: state.tainted or self._conversation_taint(state.conversation_id), **private)
             timeout = max(limits["tool_seconds"], spec.timeout or 0)
             output = await asyncio.wait_for(spec.handler(context, arguments), timeout)
+            browser = output.event or {}
+            if browser.get("type") == "browser" and browser.get("action") in ("cache", "uncache", "thumbnails") and auto_approve():
+                # 缓存和缩略图提交不需要浏览器用户手势，按完全访问权限直接执行。
+                response = await client(call.name, {**browser, "private": state.private})
+                if not isinstance(response, dict) or response.get("error"):
+                    raise ToolError(str(response.get("error") if isinstance(response, dict) else "浏览器没有返回操作结果")[:200])
+                total = len(browser.get("items", []))
+                def count(name: str, maximum: int) -> int:
+                    value = response.get(name)
+                    return max(0, min(value, maximum)) if isinstance(value, int) and not isinstance(value, bool) else 0
+                ok = count("ok", total)
+                skipped = count("skipped", total - ok)
+                failed = total - ok - skipped
+                output.summary = f"{label}（已自动执行：成功 {ok}，跳过 {skipped}，失败 {failed}）"
+                output.result = {**output.result, "status": output.summary, "auto": True, "ok": ok,
+                                 "skipped": skipped, "failed": failed, "note": str(response.get("note") or "")[:300]}
+                output.event = None
             payload, truncated = self._fit(self.guard.redact_value(output.result), limits["tool_result_bytes"])
             summary, items, event = self.guard.redact(output.summary), output.items, self.guard.redact_value(output.event)
             ends_turn = output.ends_turn
@@ -1893,8 +1861,6 @@ class AssistantService:
             candidate = self.trace.latest_plan(state.conversation_id)
             if candidate:
                 candidate = display_plan(candidate, self.trace.actions(state.conversation_id), active=False)
-            if candidate and candidate.get("status") == "completed":
-                candidate = None
             state.plan = Plan(state.id, candidate)
             plan_checked = False
             forced_final: str | None = None
@@ -2020,9 +1986,6 @@ class AssistantService:
                         seq = self.trace.append(state.conversation_id, state.id, "event", message)
                         await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
                     break
-                if "update_plan" in tools and not any(call.name == "update_plan" for call in calls):
-                    if state.plan.prepare(calls, {name: spec.label for name, spec in tools.items()}):
-                        await self._publish_plan(state)
                 ends = False
                 looping = too_many_errors = False
                 offset = 0

@@ -18,7 +18,7 @@ from cryptography.exceptions import InvalidTag
 from ..api import normalize_user_path
 from ..crypto import derive_subkey, open_sealed, seal
 from ..errors import IntegrityError, NotFoundError, NotReadyError, QuotaExceededError
-from ..objects import PRIVATE_PREFIX, Scope
+from ..objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
 from ..work import WorkBusyError
 from .hls import load_playlist, remux
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
@@ -37,6 +37,19 @@ KNOWN_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".w
 # 解析结果的复用期限；YouTube 地址自带 expire 参数时以它为准。
 RESOLVED_TTL = {"x": 24 * 3600, "youtube": 3 * 3600}
 PUBLIC_FIELDS = ("id", "key", "source_host", "method", "kind", "platform", "phase", "status", "size", "received", "stored_bytes", "segments_done", "segments_total", "duration", "processed_seconds", "elapsed_seconds", "error", "created_at", "updated_at")
+# 任务仍跟踪成品的实际位置，以便回收站还原（含冲突改名）后重新关联；展示和重新下载使用原路径。
+TASK_TRASH_PREFIXES = ((ObjectService.TRASH_PREFIX, ""), (PRIVATE_TRASH_PREFIX, PRIVATE_PREFIX))
+TASK_PATH_SQL = "CASE " + " ".join(
+    f"WHEN substr(key,1,{len(prefix)})='{prefix}' THEN '{original}' || "
+    f"substr(key,{len(prefix) + 1}+instr(substr(key,{len(prefix) + 1}),'/'))"
+    for prefix, original in TASK_TRASH_PREFIXES) + " ELSE key END"
+
+
+def task_path(key: str) -> str:
+    for prefix, original in TASK_TRASH_PREFIXES:
+        if key.startswith(prefix):
+            return original + key[len(prefix):].partition("/")[2]
+    return key
 
 
 class Paused(NotReadyError):
@@ -93,7 +106,7 @@ class OfflineDownloads:
 
     def _private_view(self, row, private_scope: Scope | None) -> bool:
         """私密任务的文件名、来源和参数只在当前会话已解锁私密空间时可见。"""
-        if not row["key"].startswith(PRIVATE_PREFIX):
+        if not task_path(row["key"]).startswith(PRIVATE_PREFIX):
             return True
         if (private_scope is None or not private_scope.private_access or private_scope.bucket_id != row["bucket_id"]):
             return False
@@ -377,7 +390,9 @@ class OfflineDownloads:
 
     def public(self, row, *, reveal_private=False):
         result = {key: row[key] for key in PUBLIC_FIELDS}
-        result["private"] = row["key"].startswith(PRIVATE_PREFIX)
+        result["key"] = task_path(row["key"])
+        result["trashed"] = any(row["key"].startswith(prefix) for prefix, _ in TASK_TRASH_PREFIXES)
+        result["private"] = result["key"].startswith(PRIVATE_PREFIX)
         if result["private"] and not reveal_private:
             result["key"] = "私密空间下载"
         stats = self._stats.get(row["id"], {})
@@ -413,7 +428,7 @@ class OfflineDownloads:
             raise ValueError("搜索内容不能超过 200 个字符")
         if query:
             # 锁定时按可见的占位名称搜索，不能通过命中数探测私密文件名或目录。
-            visible_key = "key" if reveal_private else "CASE WHEN substr(key,1,?)=? THEN '私密空间下载' ELSE key END"
+            visible_key = TASK_PATH_SQL if reveal_private else f"CASE WHEN substr(({TASK_PATH_SQL}),1,?)=? THEN '私密空间下载' ELSE ({TASK_PATH_SQL}) END"
             where += f" AND instr(lower(({visible_key}) || ' ' || source_host),lower(?))>0"
             if not reveal_private:
                 args.extend((len(PRIVATE_PREFIX), PRIVATE_PREFIX))
@@ -432,7 +447,7 @@ class OfflineDownloads:
             task["source"] = self._source_link(row, key) if visible else None
             task["file"] = None
             tasks.append(task)
-        self._attach_files(user_id, [(task, row) for task, row in zip(tasks, rows) if task["status"] == "completed" and (reveal_private or not task["private"])])
+        self._attach_files(user_id, [(task, row) for task, row in zip(tasks, rows) if task["status"] == "completed" and not task["trashed"] and (reveal_private or not task["private"])])
         return {"tasks": tasks, "total": total,
                 "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None,
                 "capabilities": {"hls": effective["hls_enabled"] and effective["hls_available"],
@@ -528,7 +543,7 @@ class OfflineDownloads:
         try:
             async with lock:
                 row = self._row(task_id, user_id)
-                private_task = row["key"].startswith(PRIVATE_PREFIX)
+                private_task = task_path(row["key"]).startswith(PRIVATE_PREFIX)
                 reveal_private = False
                 if private_task and action in ("resume", "restart", "update"):
                     if (private_scope is None or not private_scope.private_access
@@ -563,7 +578,7 @@ class OfflineDownloads:
                     return None
                 if action in ("restart", "update"):
                     await self._discard(row)
-                    self._set(task_id, received=0, stored_bytes=0, segments_done=0, processed_seconds=0, elapsed_seconds=0)
+                    self._set(task_id, key=task_path(row["key"]), received=0, stored_bytes=0, segments_done=0, processed_seconds=0, elapsed_seconds=0)
                     source = self._source(self._row(task_id))
                     source["state"] = {}
                     if action == "update":

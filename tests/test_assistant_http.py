@@ -1,4 +1,5 @@
 """HTTP 能力与安全边界的定向回归；使用内存替身，不建数据库、不访问外网。"""
+import asyncio
 import base64
 import json
 import unittest
@@ -69,7 +70,7 @@ class HttpToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(options["request_body"]), {"name": "中文"})
         self.assertIn(("Authorization", "Bearer third-party-token"), request.headers)
         self.assertFalse(options["redirects"])
-        self.assertEqual(ctx.http_authorize.call_count, 2)
+        self.assertGreaterEqual(ctx.http_authorize.call_count, 2)
 
     async def test_rejection_and_non_boolean_approval_never_send(self):
         for decision in ({"approved": False}, {"approved": "true"}, {"error": "closed"}):
@@ -170,12 +171,12 @@ class HttpToolTests(unittest.IsolatedAsyncioTestCase):
             await http_request(ctx, {"url": "https://public.example/", "method": "POST"})
         self.assertEqual(len(ctx.offline.http.requests), 1)
 
-    async def test_tainted_query_requires_confirmation_and_permission_is_rechecked(self):
+    async def test_tainted_query_does_not_prompt_and_permission_is_rechecked(self):
         ctx = context(tainted=lambda: "读取过网页")
         ctx.http_authorize.side_effect = [None, ToolError("权限已撤销")]
         with self.assertRaisesRegex(ToolError, "权限已撤销"):
             await http_request(ctx, {"url": "https://public.example/api"})
-        ctx.client.assert_awaited_once()
+        ctx.client.assert_not_awaited()
         self.assertEqual(ctx.offline.http.requests, [])
 
     async def test_bounded_bodies_and_responses(self):
@@ -188,6 +189,75 @@ class HttpToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(output["body_complete"])
         binary = (await http_request(context(HttpFixture(b"\0" * 5000, "application/octet-stream")), {"url": "https://public.example/", "response_format": "binary"})).result
         self.assertEqual(binary["sample_bytes"], 512)
+
+    async def test_larger_default_payloads_and_text_continuation(self):
+        data = ("中文正文" * 40000).encode()
+        ctx = context(HttpFixture(data, "text/plain; charset=utf-8"))
+        output = (await http_request(ctx, {"url": "https://public.example/api"})).result
+        self.assertTrue(output["body_complete"])
+        self.assertEqual(output["text"].encode(), data)
+        await http_request(ctx, {"url": "https://public.example/api", "method": "POST", "body": "x" * 300000})
+        self.assertEqual(len(ctx.offline.http.requests[-1][1]["request_body"]), 300000)
+        pieces = []
+        offset = 0
+        while True:
+            output = (await http_request(ctx, {"url": "https://public.example/api", "response_format": "text", "offset": offset, "max_bytes": 120000})).result
+            pieces.append(output["text"].encode())
+            if output["next_offset"] is None:
+                break
+            self.assertGreater(output["next_offset"], offset)
+            offset = output["next_offset"]
+        self.assertEqual(b"".join(pieces), data)
+
+    async def test_full_access_auto_sends_standard_requests_in_both_chat_modes(self):
+        for base in ("", ".tgdrive/private/"):
+            ctx = context(base=base, auto_approve=lambda: True, tainted=lambda: "读取过文件与网页")
+            output = await http_request(ctx, {"url": "https://other.example/api", "method": "POST",
+                "query": {"page": 2}, "json": {"title": "用户请求的数据"}, "auth": {"type": "bearer", "token": "third-party"}})
+            ctx.client.assert_not_awaited()
+            self.assertTrue(output.result["auto"])
+            request, options = ctx.offline.http.requests[-1]
+            self.assertEqual(request.method, "POST")
+            self.assertIn("page=2", request.url)
+            self.assertFalse(options["redirects"], "自动执行也不能重放带认证或正文的请求")
+            await http_request(ctx, {"url": "https://other.example/api", "method": "DELETE"})
+            ctx.client.assert_awaited_once()
+
+    async def test_text_continuation_preserves_multibyte_characters(self):
+        original = "中文🙂继续" * 4
+        for charset in ("utf-8", "utf-16", "utf-32"):
+            ctx = context(HttpFixture(original.encode(charset), "text/plain; charset=" + charset))
+            offset, text = 0, ""
+            for _ in range(40):
+                output = (await http_request(ctx, {"url": "https://public.example/", "response_format": "text", "max_bytes": 7, "offset": offset})).result
+                text += output["text"]
+                if output["next_offset"] is None:
+                    break
+                self.assertGreater(output["next_offset"], offset)
+                offset = output["next_offset"]
+            self.assertEqual(text, original, charset)
+
+    async def test_full_access_revocation_blocks_automatic_send(self):
+        ctx = context(auto_approve=Mock(side_effect=[True, False]))
+        with self.assertRaisesRegex(ToolError, "完全访问权限已关闭"):
+            await http_request(ctx, {"url": "https://public.example/", "method": "POST", "json": {"ok": True}})
+        self.assertEqual(ctx.offline.http.requests, [])
+        ctx.client.assert_not_awaited()
+
+    async def test_cancelled_http_queue_releases_slots(self):
+        guard = HttpGuard()
+        async def queued():
+            async with guard.slot(1):
+                self.fail("已取消的等待不应进入网络阶段")
+        async with guard.slot(1), guard.slot(1):
+            task = asyncio.create_task(queued())
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(guard.active, {})
+        self.assertEqual(guard.waiting, {})
+        self.assertEqual(guard.slots, {})
 
     async def test_minute_quota_shared_between_conversations_and_redirects_count(self):
         guard = HttpGuard()
@@ -217,13 +287,12 @@ class HttpToolTests(unittest.IsolatedAsyncioTestCase):
                 await http_request(second, {"url": "https://public.example/"})
         self.assertEqual(second.offline.http.requests, [])
 
-    async def test_private_context_keeps_read_only_and_exact_urls(self):
+    async def test_private_context_supports_methods_query_auth_and_bodies(self):
         allowed = "https://public.example/"
         for args in ({"method": "POST"}, {"query": {"x": 1}}, {"headers": {"Authorization": "Bearer third-party"}}, {"body": "x"}):
-            ctx = context(base=".tgdrive/private/", url_allowed=lambda url, level: url == allowed)
-            with self.assertRaisesRegex(ToolError, "私密对话"):
-                await http_request(ctx, {"url": allowed, **args})
-            self.assertEqual(ctx.offline.http.requests, [])
+            ctx = context(base=".tgdrive/private/", url_allowed=lambda url, level: True)
+            await http_request(ctx, {"url": allowed, **args})
+            self.assertEqual(len(ctx.offline.http.requests), 1)
         ctx = context(base=".tgdrive/private/", url_allowed=lambda url, level: url == allowed)
         with self.assertRaisesRegex(ToolError, "地址"):
             await http_request(ctx, {"url": allowed + "other"})
@@ -231,13 +300,23 @@ class HttpToolTests(unittest.IsolatedAsyncioTestCase):
         await http_request(ctx, {"url": "https://public.example"})
         self.assertEqual(ctx.offline.http.requests[0][0].url, "https://public.example/")
 
-    def test_concurrency_and_public_address_boundaries(self):
+    async def test_concurrent_requests_queue_instead_of_failing(self):
         guard = HttpGuard()
-        with guard.slot(1), guard.slot(1):
-            with self.assertRaisesRegex(ToolError, "并发"):
-                with guard.slot(1):
-                    self.fail("不应占用第三路")
+        acquired = asyncio.Event()
+        async def third():
+            async with guard.slot(1):
+                acquired.set()
+        async with guard.slot(1), guard.slot(1):
+            waiting = asyncio.create_task(third())
+            await asyncio.sleep(0)
+            self.assertFalse(acquired.is_set())
+            self.assertEqual(guard.active[1], 2)
+        await asyncio.wait_for(waiting, 1)
+        self.assertTrue(acquired.is_set())
         self.assertEqual(guard.active, {})
+        self.assertEqual(guard.slots, {})
+
+    def test_public_address_boundaries_remain(self):
         for address in ("127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "::ffff:127.0.0.1"):
             self.assertFalse(public_ip(address))
 
@@ -266,7 +345,7 @@ class HttpWireTests(unittest.IsolatedAsyncioTestCase):
                 service._user_tools.return_value = {"http_request": spec}
                 service._tool_settings.return_value = {}
                 service._conversation_taint.return_value = None
-                service.trace.conversation.return_value = {"scope_root": ""}
+                service.trace.conversation.return_value = {"scope_root": "", "access_mode": "approval"}
                 service.objects.metadata.db.execute.return_value.fetchone.return_value = None
                 service.guard.redact.side_effect = lambda value: value
                 service.guard.redact_value.side_effect = lambda value: value

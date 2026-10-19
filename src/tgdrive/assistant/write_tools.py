@@ -294,7 +294,7 @@ def render_name(template: str, row, n: int, groups: tuple) -> str:
 
 
 @tool("propose_rename", "批量改名", "write", "write",
-      "生成批量改名的待确认操作（文件或文件夹），不会立即执行，也不能跨目录（移动请用 propose_move）。\n"
+      "生成批量改名操作（文件或文件夹）；审批模式等待确认，完全访问下自动执行。不能跨目录（移动请用 propose_move）。\n"
       "- 规则模式：match 指定范围（match.type=folder 时改文件夹名），template 指定新名称。可用变量：{name} 原名称、{stem} 不含扩展名、"
       "{ext} 含点的扩展名（文件夹为空）、{n} 序号（{n:03} 补零，按 sort 排序后从 start 开始）、{parent} 所在目录名、"
       "{mtime:%Y-%m-%d} 修改时间（文件夹取其中最新文件）、{1}{2} match.regex 的分组。\n"
@@ -388,7 +388,7 @@ def _source_rows(ctx: ToolContext, paths: object) -> tuple[list, list]:
 
 
 @tool("propose_move", "移动", "write", "write",
-      "生成把文件或文件夹移动到目标目录的待确认操作，不会立即执行。sources 与 match 二选一；不能把文件夹移入它自己的子目录。",
+      "生成把文件或文件夹移动到目标目录的操作；审批模式等待确认，完全访问下自动执行。sources 与 match 二选一；不能把文件夹移入它自己的子目录。",
       {"sources": {"type": "array", "items": {"type": "string"}, "description": "要移动的文件或文件夹路径（≤1000 个）"},
        "match": MATCH, "target": {"type": "string", "description": "目标目录，不存在时自动创建"}, "conflict": CONFLICT},
       ("target",))
@@ -423,7 +423,7 @@ async def propose_move(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("propose_organize", "整理文件", "write", "write",
-      "按规则把目录中的文件归类到子文件夹，生成待确认操作，不会立即执行。by：kind 按类型（图片、视频…）、ext 按扩展名、"
+      "按规则把目录中的文件归类到子文件夹；审批模式等待确认，完全访问下自动执行。by：kind 按类型（图片、视频…）、ext 按扩展名、"
       "year 按修改年份、month 按修改年月（YYYY-MM）、mapping 按扩展名映射到指定文件夹（mapping 形如 {\"jpg\":\"照片\",\"*\":\"其他\"}，"
       "没有 * 时未映射的文件保持不动）。target 为放置子文件夹的目录，默认就是 path。",
       {"path": PATH, "by": {"type": "string", "enum": ["kind", "ext", "year", "month", "mapping"]},
@@ -567,9 +567,6 @@ async def propose_purge_trash(ctx: ToolContext, args: dict) -> ToolOutput:
     ids, everything = args.get("ids"), args.get("all") is True
     if bool(ids) == everything:
         raise ToolError("请在 ids 与 all=true 中二选一")
-    if ctx.private and ctx.tainted is not None and ctx.tainted():
-        # 私密对话读取过外部内容后，不能提议彻底删除私密回收站（§24.5.1）。
-        raise ToolError("本轮已读取文件、图片或网页内容，为防止其中的诱导指令，私密对话不能在之后提议彻底删除。请让用户在新的一轮对话中直接提出。")
     limit = _item_limit(ctx)
     rows = await _thread(ctx, lambda: _trash_rows(ctx, ids or None, None, limit=limit))
     if len(rows) > limit:
@@ -724,15 +721,13 @@ def _cross_items(ctx: ToolContext, paths: object) -> tuple[list, list]:
 
 @tool("propose_move_out", "移出私密空间", "write", "write",
       "生成把私密空间中的文件或文件夹移到普通文件目录的待确认操作。移出后不再受私密空间保护，所以只在用户明确要求时使用；"
-      "本轮读取过文件内容、图片或网页之后不能调用。用户确认时需要重新验证身份，执行后不能撤销。"
+      "用户确认时需要重新验证身份，执行后不能撤销。"
       "paths 为私密空间中的路径（≤200 个），target 为普通文件区的目录（如 /文档/；/ 表示根目录），用户可以在卡片上改选。",
       {"paths": {"type": "array", "items": {"type": "string"}, "description": "私密空间中的文件或文件夹路径（≤200 个）"},
        "target": {"type": "string", "description": "普通文件区的目标目录"}}, ("paths", "target"))
 async def propose_move_out(ctx: ToolContext, args: dict) -> ToolOutput:
     if not ctx.private:
         raise ToolError("只能在私密对话中使用")
-    if ctx.tainted is not None and (reason := ctx.tainted()):
-        raise ToolError(f"对话中{reason}，为防止其中的诱导指令，不能提议移出私密空间。请让用户在新的一轮对话中直接提出。")
     target = _normal_folder(args.get("target"))
     items, skipped = _cross_items(ctx, args.get("paths"))
     size = sum(item["size"] for item in items)

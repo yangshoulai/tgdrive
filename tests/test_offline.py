@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 from tgdrive.app import create_app
 from tgdrive.errors import NotFoundError
-from tgdrive.objects import Scope
+from tgdrive.objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, Scope
 from tgdrive.offline.hls import parse_playlist
 from tgdrive.offline.http import DownloadError, SafeHttpClient, public_ip
 from tgdrive.offline.request import command_text, parse_requests
@@ -189,6 +189,79 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.offline.list(self.alice.id)["tasks"][0]["file"]["key"], "elsewhere/file.bin")
         await self.app.objects.delete_objects(scope, ["elsewhere/file.bin"])
         self.assertIsNone(self.offline.list(self.alice.id)["tasks"][0]["file"])
+
+    async def test_trashed_download_hides_internal_path_and_tracks_restore_conflicts(self):
+        task = await self.make()
+        self.offline.start()
+        await self.wait_for(lambda: self.offline._row(task["id"])["status"] == "completed")
+        scope = Scope(self.alice.bucket_id)
+        entries = await self.app.objects.trash(scope, ["downloads/"])
+        self.assertTrue(self.offline._row(task["id"])["key"].startswith(self.app.objects.TRASH_PREFIX))
+        page = self.offline.list(self.alice.id)
+        listed = page["tasks"][0]
+        self.assertEqual((listed["key"], listed["trashed"], listed["file"], listed["private"]),
+                         ("downloads/file.bin", True, None, False))
+        self.assertNotIn(".tgdrive/", json.dumps(page))
+        self.assertEqual(self.offline.list(self.alice.id, query="downloads/file.bin")["total"], 1)
+        self.assertEqual(self.offline.list(self.alice.id, query=entries[0]["id"])["total"], 0)
+        self.assertIsNone(self.offline.list(self.alice.id, ids=[task["id"]])["tasks"][0]["file"])
+        # 还原时原位置已有其他文件：任务必须跟随自己的成品改名，不能关联到新文件。
+        await self.app.objects.put_object(scope, "downloads/file.bin", b"replacement")
+        self.app.objects.restore(scope, [entries[0]["id"]])
+        listed = self.offline.list(self.alice.id)["tasks"][0]
+        self.assertEqual((listed["key"], listed["trashed"], listed["file"]["key"]),
+                         ("downloads/file (1).bin", False, "downloads/file (1).bin"))
+
+    async def test_private_trash_keeps_download_names_sources_and_restart_protected(self):
+        scope = Scope(self.alice.bucket_id, PRIVATE_PREFIX, private_access=True)
+        parsed = await self.offline.parse(self.alice.id, "https://example.com/secret-memo.bin")
+        task = self.offline.create(self.alice.id, [{"ticket": parsed["candidates"][0]["ticket"], "name": "secret-memo.bin"}],
+                                   PRIVATE_PREFIX + "notes/", private_scope=scope)[0]
+        self.offline.start()
+        await self.wait_for(lambda: self.offline._row(task["id"])["status"] == "completed")
+        await self.offline.stop()
+        entries = await self.app.objects.trash(scope, [PRIVATE_PREFIX + "notes/secret-memo.bin"])
+        self.assertTrue(self.offline._row(task["id"])["key"].startswith(PRIVATE_TRASH_PREFIX))
+        locked = self.offline.list(self.alice.id)["tasks"][0]
+        self.assertEqual((locked["key"], locked["private"], locked["trashed"], locked["source"], locked["file"]),
+                         ("私密空间下载", True, True, None, None))
+        self.assertEqual(self.offline.list(self.alice.id, query="secret-memo")["total"], 0)
+        self.assertEqual(self.offline.list(self.alice.id, query="私密空间下载")["total"], 1)
+        visible = self.offline.list(self.alice.id, query="secret-memo", private_scope=scope)
+        self.assertEqual((visible["total"], visible["tasks"][0]["key"]), (1, PRIVATE_PREFIX + "notes/secret-memo.bin"))
+        self.assertNotIn("private-trash", json.dumps(visible))
+        with self.assertRaises(ValueError):
+            self.offline.source(self.alice.id, task["id"])
+        with self.assertRaises(ValueError):
+            await self.offline.control(self.alice.id, task["id"], "restart")
+        await self.app.objects.purge_trash(scope, [entries[0]["id"]])
+        self.assertEqual(self.offline.list(self.alice.id, query="secret-memo")["total"], 0)
+        restarted = await self.offline.control(self.alice.id, task["id"], "restart", private_scope=scope)
+        self.assertEqual((restarted["key"], restarted["private"], restarted["trashed"]),
+                         (PRIVATE_PREFIX + "notes/secret-memo.bin", True, False))
+
+    async def test_redownload_of_deleted_file_returns_to_original_destination(self):
+        for action in ("restart", "update"):
+            with self.subTest(action=action):
+                task = await self.make()
+                self.offline.start()
+                await self.wait_for(lambda: self.offline._row(task["id"])["status"] == "completed")
+                await self.offline.stop()
+                scope = Scope(self.alice.bucket_id)
+                entries = await self.app.objects.trash(scope, ["downloads/file.bin"])
+                await self.app.objects.purge_trash(scope, [entries[0]["id"]])
+                options = {}
+                if action == "update":
+                    parsed = await self.offline.parse(self.alice.id, "https://example.com/new.bin")
+                    options["item"] = {"ticket": parsed["candidates"][0]["ticket"]}
+                restarted = await self.offline.control(self.alice.id, task["id"], action, **options)
+                self.assertEqual((restarted["key"], restarted["trashed"]), ("downloads/file.bin", False))
+                self.offline.start()
+                await self.wait_for(lambda: self.offline._row(task["id"])["status"] == "completed")
+                await self.offline.stop()
+                listed = self.offline.list(self.alice.id, ids=[task["id"]])["tasks"][0]
+                self.assertEqual(listed["file"]["key"], "downloads/file.bin")
+                await self.app.objects.delete_objects(scope, ["downloads/file.bin"])
 
     async def test_batch_actions_skip_unsupported_and_foreign_tasks(self):
         first, second = await self.make(), await self.make()

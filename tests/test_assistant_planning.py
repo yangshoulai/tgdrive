@@ -3,7 +3,6 @@
 import asyncio
 import json
 import unittest
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from tgdrive.assistant.config import LIMITS
@@ -39,10 +38,16 @@ class PlanTests(unittest.TestCase):
         final = plan.update({"items": [step("completed")]})
         self.assertEqual(final["id"], first["id"])
         self.assertEqual(final["status"], "completed")
-        with self.assertRaisesRegex(ValueError, "已经完成"):
-            plan.begin("c2", "search_files", "one")
-        with self.assertRaisesRegex(ValueError, "重新执行"):
-            plan.update({"items": [step()]})
+        plan.begin("c2", "search_files", "one")
+        self.assertEqual(plan.data["status"], "in_progress")
+        with self.assertRaisesRegex(ValueError, "进行中"):
+            plan.update({"items": [step("completed")]})
+        plan.observe(result("c2"))
+        plan.update({"items": [step("completed")]})
+        plan.update({"items": [step("pending", content="重新核对并分类")]})
+        self.assertEqual(plan.data["items"][0].get("evidence", []), [])
+        with self.assertRaisesRegex(ValueError, "成功"):
+            plan.update({"items": [step("completed", content="重新核对并分类")]})
 
     def test_confirmation_and_partial_action_results_are_not_completion(self):
         plan = Plan()
@@ -71,21 +76,51 @@ class PlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "纯分析"):
             plan.update({"items": [step("completed", kind="reasoning", detail="已分析")]})
 
-    def test_automatic_plan_waits_for_all_calls_and_preserves_failure(self):
+    def test_explicit_plan_waits_for_all_calls_and_preserves_failure(self):
         plan = Plan("run")
+        plan.update({"items": [step()]})
         calls = [call("search_files", ident=f"c{i}") for i in range(3)]
-        self.assertTrue(plan.prepare(calls, {"search_files": "查询文件"}))
         for entry in calls:
-            plan.begin(entry.id, entry.name, None)
+            plan.begin(entry.id, entry.name, "one")
         plan.observe(result("c0", status="error"))
         plan.observe(result("c1"))
         plan.observe(result("c2"))
         self.assertEqual(plan.data["status"], "failed")
         retry = call("search_files", ident="retry")
-        plan.prepare([retry], {})
-        plan.begin(retry.id, retry.name, None)
+        plan.begin(retry.id, retry.name, "one")
         plan.observe(result("retry"))
+        plan.update({"items": [step("completed")]})
         self.assertEqual(plan.data["status"], "completed")
+
+    def test_plan_can_be_edited_reordered_and_reopened_after_action_completion(self):
+        plan = Plan("run")
+        plan.update({"items": [step()]})
+        plan.begin("c1", "propose_move", "one")
+        plan.observe(result(event={"type": "action", "action_id": "a1"}))
+        plan.reconcile([{"id": "a1", "status": "done"}])
+        snapshot = plan.snapshot()
+        resumed = Plan("next", snapshot)
+        updated = resumed.update({"plan_id": snapshot["id"], "items": [
+            {"id": "two", "content": "检查新规则", "status": "pending"}, step(content="按新要求整理")]})
+        self.assertEqual(updated["id"], snapshot["id"])
+        self.assertEqual(updated["status"], "in_progress")
+        resumed.reconcile([{"id": "a1", "status": "done"}])
+        self.assertEqual(resumed.data["items"][1]["status"], "in_progress", "旧操作不能完成重开的步骤")
+        self.assertNotIn("actions", resumed.data["items"][1])
+        resumed.begin("c2", "search_files", "no-longer-exists")
+        self.assertNotIn("c2", resumed.calls, "过期的计划编号不阻止业务工具")
+
+    def test_pending_steps_cannot_be_removed_and_metadata_does_not_block_reads(self):
+        plan = Plan()
+        plan.update({"items": [step()]})
+        plan.begin("c1", "propose_move", "one")
+        plan.observe(result(event={"type": "action", "action_id": "a1"}))
+        with self.assertRaisesRegex(ValueError, "等待确认"):
+            plan.update({"items": [{"id": "two", "content": "替换", "status": "pending"}]})
+        plan.begin("c2", "search_files", "one")
+        plan.observe(result("c2"))
+        plan.reconcile([{"id": "a1", "status": "pending"}])
+        self.assertEqual(plan.data["status"], "waiting_user")
 
     def test_resume_and_restart_keep_completed_steps(self):
         plan = Plan("run")
@@ -205,12 +240,13 @@ class LoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.stop_reason, "plan_incomplete")
         self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "paused")
 
-    async def test_fallback_plan_keeps_tool_budget_and_cancellation_keeps_progress(self):
+    async def test_simple_multiple_tool_calls_do_not_create_plan(self):
         service, state = await self.run_fixture([
             Reply(tool_calls=[call("search_files", ident="c1"), call("search_files", {"q": "next"}, "c2")]), Reply(text="已查询")])
         self.assertEqual(service.search.await_count, 2)
-        self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "completed")
-        self.assertTrue(service.trace.latest_plan(state.conversation_id)["automatic"])
+        self.assertIsNone(service.trace.latest_plan(state.conversation_id))
+
+    async def test_cancellation_keeps_explicit_plan_progress(self):
         service, state = await self.run_fixture([Reply(tool_calls=[call("update_plan", {"items": [step()]})]), asyncio.CancelledError()])
         self.assertEqual(state.status, "stopped")
         self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "cancelled")

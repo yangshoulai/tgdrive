@@ -96,6 +96,8 @@ type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
 const ADMIN_KEYS: readonly string[] = ADMIN_MODULES.map(item => item.key);
 const isAdminSection = (section: Section): section is AdminModule => ADMIN_KEYS.includes(section);
+// 旧下载记录或书签可能包含回收站等内部地址；普通文件导航不展示系统目录。
+const visibleFilesPrefix = (prefix: string) => prefix === ".tgdrive" || prefix.startsWith(".tgdrive/") ? "" : prefix;
 
 function readLocation(): { section: Section; prefix: string } {
   const { pathname, search } = window.location;
@@ -109,7 +111,9 @@ function readLocation(): { section: Section; prefix: string } {
   if (view === "assistant") return { section: "assistantPage", prefix: params.get("c") ?? "" };
   // 设置分「账号」「访问密钥」「本机缓存」三个标签页，prefix 字段沿用为标签名；旧地址 ?view=keys 打开访问密钥标签。
   if (view === "account" || view === "keys") return { section: "account", prefix: view === "keys" ? "keys" : params.get("tab") === "keys" || params.get("tab") === "cache" ? params.get("tab")! : "" };
-  return { section: view === "shared" || view === "trash" || view === "private" || view === "downloads" ? view : "files", prefix: view === "private" ? api.PRIVATE_PREFIX + (params.get("path") ?? "") : params.get("path") ?? "" };
+  const section = view === "shared" || view === "trash" || view === "private" || view === "downloads" ? view : "files";
+  const prefix = params.get("path") ?? "";
+  return { section, prefix: section === "private" ? api.PRIVATE_PREFIX + prefix : section === "files" ? visibleFilesPrefix(prefix) : prefix };
 }
 
 function sectionUrl(section: Section, prefix = "") {
@@ -221,6 +225,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
     return () => window.removeEventListener("popstate", pop);
   }, []);
   const navigate = useCallback((section: Section, prefix = "") => {
+    if (section === "files") prefix = visibleFilesPrefix(prefix);
     window.history.pushState(null, "", sectionUrl(section, prefix));
     setLocation({ section, prefix: section === "private" ? (api.isPrivatePath(prefix) ? prefix : api.PRIVATE_PREFIX + prefix) : prefix });
     document.getElementById("main")?.scrollTo?.({ top: 0 });

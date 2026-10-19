@@ -2631,15 +2631,17 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .assistant-models-table .name-stack strong .badge { margin-left: 6px; }
 .assistant-tool-group + .assistant-tool-group { margin-top: 16px; }
 .assistant-tool-list { margin: 0; padding: 0; list-style: none; }
-.assistant-tool-list li { display: flex; align-items: center; gap: 16px; padding: 12px 18px; border-bottom: 1px solid var(--line-soft); }
+.assistant-tool-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 12px 18px; border-bottom: 1px solid var(--line-soft); }
 .assistant-tool-list li:last-child { border-bottom: 0; }
 .assistant-tool-list li.is-off .assistant-tool-copy { opacity: .6; }
-.assistant-tool-copy { display: grid; min-width: 0; flex: 1; gap: 3px; }
+.assistant-tool-copy { display: grid; min-width: 0; flex: 1 1 320px; gap: 3px; overflow-wrap: anywhere; }
 .assistant-tool-copy small { color: var(--ink-3); font-size: var(--text-xs); line-height: 1.5; }
 .assistant-tool-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .assistant-tool-head code { color: var(--ink-3); font-size: var(--text-xs); }
 .assistant-tool-warning { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-xs); }
-.assistant-tool-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.assistant-tool-actions { display: grid; grid-template-columns: 40px 56px 56px; flex: none; align-items: center; gap: 8px; margin-left: auto; }
+.assistant-tool-params { display: flex; align-items: center; justify-content: center; min-height: 40px; }
+.assistant-tool-enable { display: flex; align-items: center; justify-content: flex-end; white-space: nowrap; }
 .assistant-sticky-actions { position: sticky; bottom: 12px; z-index: 5; box-shadow: var(--shadow-md); }
 .assistant-limits { display: grid; gap: 16px; }
 .assistant-conversations-table { --cols: 110px minmax(120px, 1fr) minmax(100px, .8fr) 52px 52px 52px 70px 130px 96px; min-width: 900px; }
@@ -2921,7 +2923,7 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .assistant-tool-private { display: inline-flex; align-items: center; gap: 4px; }
 .assistant-tool-copy .assistant-tool-private.is-never, .assistant-tool-copy .assistant-tool-private.is-na { color: var(--ink-3); }
 .assistant-tool-copy .assistant-tool-private.is-limited, .assistant-tool-copy .assistant-tool-private.is-only { color: var(--warning); }
-.assistant-tool-private-toggle { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-3); }
+.assistant-tool-private-toggle { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; color: var(--ink-3); }
 
 /* 输入区：模式按钮 */
 .assistant-mode { display: inline-flex; width: auto; height: 30px; flex: none; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-family: var(--font); font-size: var(--text-xs); }

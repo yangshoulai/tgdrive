@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SetupGuide, SearchInput, Segmented,
+import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SetupGuide, SearchInput, Segmented,
   SkeletonRows, Switch, Tabs, Disclosure, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
 import { Stat } from "./overview";
 
@@ -24,7 +24,7 @@ const TABS = GROUPS.flatMap(group => group.sections);
 const groupOf = (tab: Tab) => GROUPS.find(group => group.sections.some(section => section.value === tab))!;
 const LEVELS: Record<ai.ToolLevel, { label: string; tone: Tone }> = {
   read: { label: "只读", tone: "neutral" }, meta: { label: "交互", tone: "neutral" }, scope: { label: "需确认", tone: "accent" },
-  write: { label: "需确认", tone: "warning" }, danger: { label: "不可恢复", tone: "danger" },
+  write: { label: "可修改", tone: "warning" }, danger: { label: "不可恢复", tone: "danger" },
 };
 const KIND_LABEL = { openai: "OpenAI 兼容", anthropic: "Anthropic" };
 const KIND_EXAMPLE = { openai: "https://api.deepseek.com/v1", anthropic: "https://api.anthropic.com" };
@@ -869,7 +869,7 @@ function ToolsTab() {
   if (!tools) return error ? <Panel><EmptyState icon="alert" title="工具加载失败" description={error} action={<Button onClick={load}>重试</Button>} /></Panel> : <Panel><SkeletonRows rows={6} /></Panel>;
   return (
     <>
-      <Notice className="banner">停用的工具不会发送给模型，模型不知道它存在。需要确认的写入操作始终需要用户在界面上逐项确认，不能关闭。改动在下一次模型调用时生效。
+      <Notice className="banner">停用的工具不会发送给模型，模型不知道它存在。操作按对话选择的审批或完全访问模式执行；彻底删除、公开分享、跨私密空间移动和 HTTP DELETE 始终确认。改动在下一次模型调用时生效。
         锁形开关只控制私密对话：关闭后这个工具只在普通对话中提供。</Notice>
       {groups.map(([group, items]) => (
         <Panel key={group} title={group} flush className="assistant-tool-group"
@@ -888,11 +888,11 @@ function ToolsTab() {
                   <small className={`assistant-tool-private is-${tool.private}`}><Icon name="lock" size={12} />{PRIVATE_LABELS[tool.private]}{tool.private_note ? `：${tool.private_note}` : ""}</small>
                 </span>
                 <span className="assistant-tool-actions">
-                  {tool.params.length > 0 && <Button size="sm" variant="ghost" onClick={() => setParamsFor(tool)}>参数…</Button>}
-                  {!tool.fixed && ["allow", "limited", "only"].includes(tool.private) && <span className="assistant-tool-private-toggle" title="在私密对话中提供"><Icon name="lock" size={13} />
-                    <Switch compact label={`在私密对话中提供 ${tool.label}`} disabled={!tool.on} checked={(draft[tool.name]?.private_enabled ?? tool.private_enabled) as boolean} onChange={value => togglePrivate(tool.name, value)} /></span>}
-                  {tool.fixed ? <span className="muted">固定启用</span>
-                    : <Switch compact label={`启用 ${tool.label}`} checked={(draft[tool.name]?.enabled ?? tool.enabled) as boolean} onChange={value => toggle(tool.name, value)} />}
+                  <span className="assistant-tool-params">{tool.params.length > 0 && <IconButton icon="settings" size="sm" label={`配置${tool.label}参数`} onClick={() => setParamsFor(tool)} />}</span>
+                  <span className="assistant-tool-private-toggle">{!tool.fixed && ["allow", "limited", "only"].includes(tool.private) && <><Icon name="lock" size={13} />
+                    <Switch compact label={`在私密对话中提供 ${tool.label}`} disabled={!tool.on} checked={(draft[tool.name]?.private_enabled ?? tool.private_enabled) as boolean} onChange={value => togglePrivate(tool.name, value)} /></>}</span>
+                  <span className="assistant-tool-enable">{tool.fixed ? <span className="muted">固定启用</span>
+                    : <Switch compact label={`启用 ${tool.label}`} checked={(draft[tool.name]?.enabled ?? tool.enabled) as boolean} onChange={value => toggle(tool.name, value)} />}</span>
                 </span>
               </li>
             ))}

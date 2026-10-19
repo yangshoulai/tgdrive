@@ -208,8 +208,8 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             self.assertEqual(image["format"], "binary")
             action_id, tool = await self.propose(user, conversation, call("propose_downloads", collection_id=image["download_collection_id"], target="/"))
             self.app.offline.http.open = opened
-            self.assertIn("HTTP", tool["result"]["status"])
-            self.assertEqual(self.service.trace.action(self.alice.id, action_id)["status"], "pending")
+            self.assertIn("自动执行", tool["result"]["status"])
+            self.assertEqual(self.service.trace.action(self.alice.id, action_id)["status"], "done")
             logs = [dict(row) for row in self.app.metadata.db.execute("SELECT * FROM assistant_calls WHERE kind='fetch'")]
             self.assertEqual(logs[-1]["host"], "api.example.com")
             self.assertNotIn("q=test", str(logs))
@@ -261,7 +261,7 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             self.assertIsNone(secret["result"]["sample_base64"])
             self.assertEqual(html["status"], "ok")
             self.assertEqual(html["result"]["text"], "<html>example</html>")
-            self.assertEqual(self.service._client_call.await_count, 2)
+            self.service._client_call.assert_not_awaited()
         self.run_async(run())
 
     # ---------- 文件夹改名 ----------
@@ -338,7 +338,7 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             self.assertEqual(detail["conversation"]["access_mode"], "approval")
         self.run_async(run())
 
-    def test_full_access_auto_executes_but_not_after_reading_content(self):
+    def test_full_access_keeps_auto_execution_after_reading_and_retains_danger_confirmation(self):
         async def run():
             admin, user, conversation = await self.ready(["Inbox/a.jpg", "Inbox/b.jpg", "Inbox/readme.txt"])
             await self.req("POST", "/api/admin/v1/assistant/settings", {"full_access": True}, admin)
@@ -359,12 +359,37 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             # 分享总是需要确认。
             action_id, tool = await self.propose(user, conversation, call("propose_share", paths=["/Inbox/readme.txt"]))
             self.assertIn("等待用户", tool["result"]["status"])
-            # 读取文件内容后，同一对话后续修改需要确认（防止内容里的诱导指令）。
+            # 阅读内容不改变用户选择的模式；可恢复的删除自动执行，彻底删除仍需确认。
             self.model.replies = [call("read_text_file", path="/Inbox/readme.txt"), call("propose_trash", paths=["/Inbox/pic_1.jpg"]), answer("好")]
             await self.send(user, conversation, "读一下再删")
             tool = (await self.tool_results(user, conversation))[-1]
+            self.assertIn("自动执行", tool["result"]["status"])
+            self.assertNotIn("Inbox/pic_1.jpg", self.keys())
+            await self.req("POST", f"/api/admin/v1/assistant/users/{self.alice.id}/policy", {"max_level": "danger"}, admin)
+            action_id, tool = await self.propose(user, conversation, call("propose_purge_trash", all=True))
             self.assertIn("等待用户", tool["result"]["status"])
-            self.assertIn("Inbox/pic_1.jpg", self.keys())
+            self.assertEqual(self.service.trace.action(self.alice.id, action_id)["status"], "pending")
+            self.assertIsNone(self.service.trace.latest_plan(conversation), "查询、单次改名和移入回收站不自动生成计划")
+        self.run_async(run())
+
+    def test_full_access_cache_and_thumbnail_commands_execute_through_browser(self):
+        async def run():
+            admin, user, conversation = await self.ready(["Photos/a.jpg"])
+            await self.req("POST", "/api/admin/v1/assistant/settings", {"full_access": True}, admin)
+            await self.req("POST", f"/api/user/v1/assistant/conversations/{conversation}/update", {"access_mode": "full"}, user)
+            self.service._client_call = AsyncMock(return_value={"ok": 1, "skipped": 0})
+            self.model.replies = [call("ui_cache_files", paths=["/Photos/a.jpg"]),
+                                  call("ui_clear_cache", paths=["/Photos/a.jpg"]),
+                                  call("ui_generate_thumbnails", path="/Photos/a.jpg"), answer("完成")]
+            await self.send(user, conversation, "缓存后清理本机副本，再补缩略图")
+            tools = await self.tool_results(user, conversation)
+            for tool in tools:
+                self.assertEqual(tool["status"], "ok", tool)
+                self.assertTrue(tool["result"]["auto"])
+                self.assertIsNone(tool["event"], "已经执行的操作不能再显示等待点击的卡片")
+            self.assertEqual([entry.args[2] for entry in self.service._client_call.await_args_list],
+                             ["ui_cache_files", "ui_clear_cache", "ui_generate_thumbnails"])
+            self.assertTrue(all(entry.args[3]["items"][0]["path"] == "Photos/a.jpg" for entry in self.service._client_call.await_args_list))
         self.run_async(run())
 
     # ---------- 浏览器工具 ----------

@@ -20,7 +20,9 @@ export const downloadPercent = (task: api.DownloadTask) => task.status === "comp
 export const downloadStatusLabel = (task: api.DownloadTask) => task.status === "running" && task.phase ? { resolving: "解析来源", downloading: "下载媒体", merging: "合并音视频", saving: "完成保存" }[task.phase] : LABEL[task.status];
 export const parentFolder = (key: string) => key.includes("/") ? key.slice(0, key.lastIndexOf("/")) + "/" : "";
 export const downloadTaskName = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? "私密空间下载" : task.key.split("/").at(-1) ?? task.key;
-export const downloadTaskFolder = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? api.PRIVATE_PREFIX : parentFolder(task.key);
+const hasVisibleDownloadPath = (task: api.DownloadTask) => !task.key.startsWith(".tgdrive/") || task.private && api.isPrivatePath(task.key);
+export const canOpenDownloadFolder = (task: api.DownloadTask) => !task.trashed && hasVisibleDownloadPath(task);
+export const downloadTaskFolder = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? api.PRIVATE_PREFIX : hasVisibleDownloadPath(task) ? parentFolder(task.key) : "";
 const elapsed = (value: number) => value < 1 ? "不到 1 秒" : value < 60 ? `${Math.round(value)} 秒` : value < 3600 ? `${Math.floor(value / 60)} 分 ${Math.round(value % 60)} 秒` : `${Math.floor(value / 3600)} 小时 ${Math.round(value % 3600 / 60)} 分`;
 /** 完整来源地址：列表只带不含查询串的地址，有省略参数时再向服务端读取。 */
 const fullSource = async (task: api.DownloadTask) => task.source && !task.source.has_query ? task.source.url : (await api.downloadSource(task.id, task.private)).url;
@@ -187,13 +189,14 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                 const name = downloadTaskName(task);
                 const folder = downloadTaskFolder(task);
                 const completed = task.status === "completed";
+                const canOpen = canOpenDownloadFolder(task);
                 const kind = task.kind === "hls" ? "video" : task.private && !api.isPrivatePath(task.key) ? "other" : getFileKind(null, task.key);
                 const location = api.privatePathLabel(folder);
                 const file = completed ? task.file : null;
                 const thumbnail = file ? api.fileThumbnail(file) : undefined;
                 // 每行一个快捷操作：进行中停止、停止或失败后继续、完成后打开所在目录；其余在「更多」菜单。
                 const quick = active(task) ? <IconButton icon="pause" size="sm" label="停止下载" onClick={() => setConfirm({ task, action: "stop" })} />
-                  : completed ? <IconButton icon="folder" size="sm" label={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)} />
+                  : completed ? <IconButton icon="folder" size="sm" label={canOpen ? `打开所在目录：${location}` : "文件已删除"} disabled={!canOpen} onClick={() => onOpenFolder(folder, task.private)} />
                     : <IconButton icon="play" size="sm" label="继续下载" onClick={() => task.method === "POST" ? setConfirm({ task, action: "resume" }) : void control(task, "resume")} />;
                 const checked = selected.has(task.id);
                 return <div className={`data-row download-item is-${task.status}${checked ? " is-selected" : ""}`} role="row" key={task.id}>
@@ -207,8 +210,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                   </div>
                   <div role="cell"><DownloadProgress task={task} name={name} /></div>
                   <div role="cell" className="muted">
-                    {completed ? <button type="button" className="download-location" title={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)}><Icon name="folder" size={12} /><span>{location}</span></button>
-                      : <span className="download-location" title={`保存到 ${location}`}><Icon name="folder" size={12} /><span>{location}</span></span>}
+                    {completed && canOpen ? <button type="button" className="download-location" title={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)}><Icon name="folder" size={12} /><span>{location}</span></button>
+                      : <span className="download-location" title={task.trashed ? `文件已删除，原位置：${location}` : `保存到 ${location}`}><Icon name={task.trashed ? "trash" : "folder"} size={12} /><span>{task.trashed ? "文件已删除" : location}</span></span>}
                   </div>
                   <div className="download-state" role="cell"><Badge tone={TONE[task.status]} dot={!completed} icon={completed ? "check" : undefined}>{downloadStatusLabel(task)}</Badge></div>
                   <div className="cell-actions" role="cell">{busy.has(task.id) ? <span className="spinner" aria-label="正在处理任务" /> : <>{quick}<Menu label={`${name}的更多操作`} items={[

@@ -32,8 +32,6 @@ MOVE_KINDS = ("rename", "move", "organize")
 DANGER_KINDS = ("purge",)
 # 完全访问模式下仍然必须由用户确认的类型：不可恢复，或会让数据对外可见；跨区移动的目标由用户在卡片上决定。
 CONFIRM_KINDS = ("purge", "share", "move_out", "move_in")
-# 私密对话中总是需要确认的类型（§24.5.1）：离线下载会访问外部地址并写入私密空间。
-PRIVATE_CONFIRM_KINDS = ("downloads", "download_control")
 
 
 def share_options(payload: dict, confirm: dict | None) -> dict[str, object]:

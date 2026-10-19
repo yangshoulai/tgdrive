@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import { Button, Icon, IconButton, formatBytes } from "../ui";
-import { downloadGlyph, downloadPercent, downloadStatusLabel, downloadTaskFolder, downloadTaskName, isActiveDownload, seconds } from "./downloads";
+import { canOpenDownloadFolder, downloadGlyph, downloadPercent, downloadStatusLabel, downloadTaskFolder, downloadTaskName, isActiveDownload, seconds } from "./downloads";
 import { TrayProgressRing, TrayRing, type TrayState } from "./tray";
 
 const COMPLETED_VISIBLE_MS = 8000;
@@ -131,7 +131,7 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
         <ul>
           {tasks.map(task => {
             const name = downloadTaskName(task);
-            const location = api.privatePathLabel(downloadTaskFolder(task));
+            const location = task.trashed ? "文件已删除" : api.privatePathLabel(downloadTaskFolder(task));
             const percent = downloadPercent(task);
             const running = isActiveDownload(task);
             const progress = task.size ? `${formatBytes(task.received)} / ${formatBytes(task.size)}` : task.received ? formatBytes(task.received) : null;
@@ -147,7 +147,7 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
               </div>
               <span className="tray-right">
                 {running && <TrayProgressRing percent={percent} paused={task.status !== "running"} label={`${name}：${downloadStatusLabel(task)}`} />}
-                {task.status === "completed" && <IconButton icon="folder" size="sm" label={`打开 ${name} 所在目录`} onClick={() => onOpenFolder(downloadTaskFolder(task), task.private)} />}
+                {task.status === "completed" && <IconButton icon="folder" size="sm" label={canOpenDownloadFolder(task) ? `打开 ${name} 所在目录` : "文件已删除"} disabled={!canOpenDownloadFolder(task)} onClick={() => onOpenFolder(downloadTaskFolder(task), task.private)} />}
                 {(task.status === "failed" || task.status === "stopped") && task.method !== "POST" && <Button size="sm" icon="refresh" loading={retrying.has(task.id)} aria-label={`继续下载 ${name}`} onClick={() => void retry(task)}>继续</Button>}
               </span>
             </li>;
