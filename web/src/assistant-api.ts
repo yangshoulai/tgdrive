@@ -171,11 +171,14 @@ export type BrowserEvent =
   | { type: "browser"; action: "thumbnails"; items: { path: string; size: number; etag: string; content_type: string | null }[]; regenerate: boolean }
   | { type: "browser"; action: "cache"; items: { path: string; size: number; etag: string; content_type: string | null }[]; size: number; private?: boolean }
   | { type: "browser"; action: "uncache"; items: { path: string; size: number; etag: string; content_type: string | null }[]; size: number; private?: boolean };
+export type HttpDecision = "approved" | "rejected" | "expired" | "cancelled";
+export type HttpRequestPreview = { url: string; method: string; headers: Record<string, string>; body: string | null; body_encoding: "text" | "base64"; body_bytes: number };
 export type ToolEvent =
   | { type: "plan"; items: { content: string; status: "pending" | "in_progress" | "completed" }[] }
   | { type: "question"; question: string; options: string[] }
   | { type: "scope_request"; action_id: string; from: string; to: string; reason: string }
   | { type: "action"; action_id: string; kind: string; count: number; auto?: boolean }
+  | { type: "http_request"; id: string; requested_at: number; request: HttpRequestPreview; decision: HttpDecision }
   | BrowserEvent;
 export type SnapshotAttachment = { type: "snapshot"; id: string; source: string; pages: number; images: number };
 export type ChatMessage = {

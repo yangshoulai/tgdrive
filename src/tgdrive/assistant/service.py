@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -205,6 +206,7 @@ class AssistantService:
         self.catalog = CatalogStore(self.metadata, self.config, log_call=self.trace.log_call)
         self.channels = ChannelStore(self.metadata, self.keystore, log_call=self.trace.log_call, catalog=self.catalog)
         self.guard = SecretGuard(self.channels, offline)
+        self.http_guard = http_tools.HttpGuard()
         self.on_audit: Callable[[str, int, dict], None] | None = None  # 由 HTTP 层注入：自动执行的操作写审计
         self.chat = providers.chat  # 测试可替换为脚本化的假模型
         self.executor = ActionExecutor(objects, offline)
@@ -974,17 +976,24 @@ class AssistantService:
         error = payload.get("error")
         future.set_result({"error": str(error)[:200]} if error else result if isinstance(result, dict) else {"error": "页面没有返回结果"})
 
-    async def _client_call(self, state: RunState, call_id: str, name: str, arguments: dict) -> dict:
+    async def _client_call(self, state: RunState, call_id: str, name: str, arguments: dict, *, review: dict | None = None) -> dict:
+        tool_call_id = call_id
+        # 确认必须绑定本次冻结请求，不能被模型重复使用的工具调用编号串到另一条请求。
+        if name == "http_request_approval":
+            call_id = "http_" + secrets.token_hex(16)
+            if review is not None:
+                review.update(id=call_id, requested_at=time.time())
         if state.listeners <= 0:
-            return {"error": "浏览器未连接：用户的对话框没有打开，无法操作页面"}
+            return {"error": "浏览器未连接：用户的对话框没有打开，无法操作页面", "decision": "cancelled"}
         future = asyncio.get_running_loop().create_future()
         state.client_waiters[call_id] = future
+        timeout = 120 if name == "http_request_approval" else CLIENT_TIMEOUT
         try:
-            await state.emit({"type": "client_call", "call_id": call_id, "name": name, "args": arguments,
-                              "expires_at": time.time() + CLIENT_TIMEOUT})
-            return await asyncio.wait_for(future, CLIENT_TIMEOUT)
+            await state.emit({"type": "client_call", "call_id": call_id, "tool_call_id": tool_call_id, "name": name, "args": arguments,
+                              "expires_at": time.time() + timeout, "requested_at": review.get("requested_at") if review is not None else time.time()})
+            return await asyncio.wait_for(future, timeout)
         except TimeoutError:
-            return {"error": "浏览器没有响应：对话框可能已关闭"}
+            return {"error": "浏览器没有响应：对话框可能已关闭", "decision": "expired"}
         finally:
             state.client_waiters.pop(call_id, None)
 
@@ -1645,6 +1654,7 @@ class AssistantService:
         label = TOOLS[call.name].label if call.name in TOOLS else call.name
         await state.emit({"type": "tool_started", "call_id": call.id, "name": call.name, "label": label})
         status, summary, items, event = "ok", "", None, None
+        http_review = None
         images: list[str] = []
         try:
             if spec is None:
@@ -1710,7 +1720,23 @@ class AssistantService:
                 state.tainted = state.tainted or reason
 
             async def client(name: str, arguments: dict) -> dict:
-                return await self._client_call(state, call.id, name, arguments)
+                nonlocal http_review
+                if name != "http_request_approval":
+                    return await self._client_call(state, call.id, name, arguments)
+                # 只保存已经脱敏的冻结预览；确认卡片与执行结果复用同一条加密工具消息。
+                http_review = {"type": "http_request", "request": arguments, "decision": "cancelled"}
+                result = await self._client_call(state, call.id, name, arguments, review=http_review)
+                decision = result.get("decision")
+                if result.get("approved") is True:
+                    http_review["decision"] = "approved"
+                else:
+                    http_review["decision"] = decision if decision in ("expired", "cancelled") else "rejected"
+                return result
+
+            def http_authorize() -> None:
+                self._validate(state)
+                if "http_request" not in self._user_tools(state.user_id, private=state.private):
+                    raise ToolError("HTTP 请求工具已停用，未发送请求")
 
             async def analyze(summary: dict, goal: str) -> dict:
                 model = self.channels.model(state.model_id)
@@ -1730,6 +1756,7 @@ class AssistantService:
                                   analyze=analyze, client=client, taint=taint,
                                   public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
                                   redact=self.guard.redact,
+                                  http_guard=self.http_guard, http_authorize=http_authorize,
                                   attachments=shared.setdefault("attachments", self.attachments.for_conversation(state.conversation_id)),
                                   read_only=spec.level == "read",
                                   vision=self.channels.vision(self.channels.model(state.model_id)),
@@ -1756,6 +1783,8 @@ class AssistantService:
             status, payload, truncated, ends_turn = "error", {"error": "工具执行失败"}, False, False
             summary = "工具执行失败"
         duration = int((time.time() - started) * 1000)
+        if http_review is not None:
+            event = self.guard.redact_value(http_review)
         self.trace.log_call(kind="tool", run_id=state.id, conversation_id=state.conversation_id, user_id=state.user_id,
                             tool_name=call.name, started_at=started, duration_ms=duration, status=status, items=items,
                             error_code="tool_error" if status != "ok" else None,

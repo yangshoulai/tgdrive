@@ -1,6 +1,6 @@
 /**
  * 文件助手的消息流（docs/assistant-design.md §19.3–19.4）：按轮组织，每轮依次是思考、过程时间线（工具调用与中间说明）、
- * 卡片（提问、作用域、待确认操作、浏览器动作）与最终回复。运行中的思考与工具调用来自事件流（live）。
+ * 卡片（提问、作用域、待确认操作、HTTP 请求、浏览器动作）与最终回复。运行中的思考与工具调用来自事件流（live）。
  * 卡片全部由服务端冻结的数据渲染，不使用模型生成的描述。
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -28,6 +28,8 @@ export type LiveRun = {
   reasoning: string; reasoningStartedAt: number | null; streaming: string;
   tools: { callId: string; name: string; label: string }[]; phase: "queued" | "thinking" | "tool" | "writing" | null; queue?: number;
 };
+export type HttpApproval = { callId: string; toolCallId: string; runId: string; expires: number; requestedAt: number; request: ai.HttpRequestPreview;
+  status: "pending" | "error" | ai.HttpDecision };
 
 /** 运行阶段到头像动效：调用工具时咬合扫描，输出回复时呼吸，其余（排队、思考）环绕。 */
 export function markState(live: LiveRun | null | undefined): AssistantMarkState {
@@ -127,12 +129,14 @@ function group(messages: ai.ChatMessage[]): Item[] {
 /** 私密对话的链接放行规则：只有对话中出现过的地址可以点击（§24.8）；普通对话不限制。 */
 const LinkContext = createContext<((href: string) => boolean) | undefined>(undefined);
 
-export function Thread({ detail, live, liveModel, modelLabel, running, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
-  detail: ai.ConversationDetail; live: LiveRun | null; liveModel?: string; modelLabel: (id: number | null | undefined) => string; running: boolean;
+export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprovals, onHttpDecision, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
+  detail: ai.ConversationDetail; live: LiveRun | null; liveModel?: string; modelLabel: (id: number | null | undefined) => string; runId: string | null;
+  httpApprovals: HttpApproval[]; onHttpDecision: (callId: string, decision: ai.HttpDecision) => void;
   /** 从这条用户消息重新回答（丢弃之后的记录）。 */
   onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: (seq: number) => void;
   onActionChanged: () => void; onFilesChanged?: () => void;
 }) {
+  const running = Boolean(runId);
   const items = useMemo(() => group(detail.messages), [detail.messages]);
   const lastQuestion = [...detail.messages].reverse().find(message => message.event?.type === "question");
   const answered = lastQuestion ? detail.messages.some(message => message.role === "user" && message.seq > lastQuestion.seq) : true;
@@ -148,10 +152,12 @@ export function Thread({ detail, live, liveModel, modelLabel, running, onAnswer,
       : <TurnView key={item.turn.key} turn={item.turn} live={item === lastTurn && running ? live : null}
           model={item.turn.modelId != null ? modelLabel(item.turn.modelId) : item === lastTurn && running ? liveModel ?? "" : ""}
           actions={detail.actions} messages={detail.messages} canAnswer={!running && !answered} questionSeq={lastQuestion?.seq}
+          httpApprovals={httpApprovals.filter(approval => approval.runId === (item.turn.runId ?? (item === lastTurn ? runId : null)))} onHttpDecision={onHttpDecision}
           onAnswer={onAnswer} onScope={onScope} onRetry={!running ? onRetry : undefined}
           onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />)}
     {running && live && (!lastTurn || lastTurn.kind !== "turn") && <TurnView turn={{ key: "live", steps: [], cards: [], notices: [], runId: null, input: 0, output: 0 }}
-      live={live} model="" actions={[]} messages={[]} canAnswer={false} onAnswer={onAnswer} onScope={onScope} onActionChanged={onActionChanged} />}
+      live={live} model="" actions={[]} messages={[]} canAnswer={false} httpApprovals={httpApprovals.filter(approval => approval.runId === runId)} onHttpDecision={onHttpDecision}
+      onAnswer={onAnswer} onScope={onScope} onActionChanged={onActionChanged} />}
   </LinkContext.Provider>;
 }
 
@@ -161,32 +167,46 @@ function SystemEvent({ message }: { message: ai.ChatMessage }) {
   return <div className="ai-divider" role="note"><span><Icon name={icon} size={12} />{message.text}</span></div>;
 }
 
-function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
+function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq, httpApprovals, onHttpDecision, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
   turn: Turn; live: LiveRun | null; model: string; actions: ai.AssistantAction[]; messages: ai.ChatMessage[]; canAnswer: boolean; questionSeq?: number;
   onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: (seq: number) => void;
   onActionChanged: () => void; onFilesChanged?: () => void;
+  httpApprovals: HttpApproval[]; onHttpDecision: (callId: string, decision: ai.HttpDecision) => void;
 }) {
   const steps = [...turn.steps];
   const retry = turn.user && onRetry ? () => onRetry(turn.user!.seq) : undefined;
   if (live) {
     if (live.reasoning) steps.push({ kind: "thinking", key: "live-thinking", text: live.reasoning, ms: null, live: true, startedAt: live.reasoningStartedAt });
-    for (const tool of live.tools) steps.push({ kind: "tool", key: `live-${tool.callId}`, pending: tool });
+    for (const tool of live.tools) if (!httpApprovals.some(approval => approval.toolCallId === tool.callId)) steps.push({ kind: "tool", key: `live-${tool.callId}`, pending: tool });
   }
   const streaming = live?.streaming ?? "";
   const mark = useMarkState(live);
   const allowLink = useContext(LinkContext);
-  const hasAssistant = steps.length > 0 || turn.cards.length > 0 || turn.answer || streaming || turn.notices.length > 0 || live;
+  const waiting = httpApprovals.some(approval => approval.status === "pending");
+  const cards: { key: string; at: number; message?: ai.ChatMessage; approval?: HttpApproval }[] = turn.cards.map(message => ({
+    key: message.event?.type === "http_request" ? `${message.run_id}:${message.event.id}` : `card-${message.seq}`,
+    at: message.event?.type === "http_request" ? message.event.requested_at : message.created_at ?? 0, message,
+  }));
+  for (const approval of httpApprovals) if (!cards.some(card => card.key === approval.callId)) cards.push({ key: approval.callId, at: approval.requestedAt, approval });
+  cards.sort((a, b) => a.at - b.at);
+  const hasAssistant = steps.length > 0 || turn.cards.length > 0 || httpApprovals.length > 0 || turn.answer || streaming || turn.notices.length > 0 || live;
   return <div className="ai-turn">
     {turn.user && <UserMessage message={turn.user} onRetry={retry} />}
     {hasAssistant && <div className={`ai-reply${live ? " is-live" : ""}`}>
-      <span className="ai-avatar" aria-hidden="true"><AssistantMark state={mark} /></span>
+      <span className="ai-avatar" aria-hidden="true"><AssistantMark state={waiting ? "idle" : mark} /></span>
       <div className="ai-reply-body">
         <div className="ai-reply-head"><strong>文件助手</strong>{model && <span className="ai-model" title={model}>{model}</span>}
-          {live && <LiveStatus live={live} />}</div>
+          {live && <LiveStatus live={live} waiting={waiting} />}</div>
         {steps.length > 0 && <Process steps={steps} live={Boolean(live)} />}
-        {turn.cards.map(card => <Card key={card.seq} message={card} actions={actions} running={Boolean(live)}
-          selectedAnswer={card.event?.type === "question" ? messages.find(message => message.role === "user" && message.seq > card.seq)?.text : undefined}
-          canAnswer={canAnswer && card.seq === questionSeq} onAnswer={onAnswer} onScope={onScope} onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />)}
+        {cards.map(card => {
+          const event = card.message?.event;
+          const http = card.approval ?? (event?.type === "http_request" ? { request: event.request, status: event.decision } : null);
+          if (http) return <HttpRequestCard key={card.key} request={http.request} decision={http.status} approval={card.approval} message={card.message} onDecide={onHttpDecision} />;
+          const message = card.message!;
+          return <Card key={card.key} message={message} actions={actions} running={Boolean(live)}
+            selectedAnswer={event?.type === "question" ? messages.find(item => item.role === "user" && item.seq > message.seq)?.text : undefined}
+            canAnswer={canAnswer && message.seq === questionSeq} onAnswer={onAnswer} onScope={onScope} onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />;
+        })}
         {(turn.answer || streaming) && <div className="ai-answer">
           <Markdown source={streaming || turn.answer?.text || ""} allowLink={allowLink} />{streaming && <i className="ai-caret" aria-hidden="true" />}
         </div>}
@@ -200,10 +220,10 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
   </div>;
 }
 
-function LiveStatus({ live }: { live: LiveRun }) {
-  const label = live.phase === "queued" ? `排队中${live.queue ? `，前面 ${live.queue} 个` : ""}`
+function LiveStatus({ live, waiting = false }: { live: LiveRun; waiting?: boolean }) {
+  const label = waiting ? "等待确认" : live.phase === "queued" ? `排队中${live.queue ? `，前面 ${live.queue} 个` : ""}`
     : live.tools.length ? `正在${live.tools.at(-1)!.label}` : live.streaming ? "正在回复" : live.reasoning ? "正在思考" : "正在准备";
-  return <span className="ai-live" role="status"><i aria-hidden="true" /><span className="ai-shimmer">{label}</span></span>;
+  return <span className="ai-live" role="status"><i aria-hidden="true" /><span className={waiting ? undefined : "ai-shimmer"}>{label}</span></span>;
 }
 
 /** 消息里的 @ 引用：与文件列表相同的类型图标 + 名称，完整路径在提示里。 */
@@ -373,6 +393,41 @@ function CardHead({ icon, tone = "accent", title, subtitle, badge }: { icon: Ico
     <span className="ai-card-title"><strong>{title}</strong>{subtitle && <small>{subtitle}</small>}</span>
     {badge}
   </header>;
+}
+
+/** 确认只回传决定；请求内容由服务端冻结，完成后以加密工具消息中的预览与结果替换实时卡片。 */
+function HttpRequestCard({ request, decision, approval, message, onDecide }: {
+  request: ai.HttpRequestPreview; decision: HttpApproval["status"]; approval?: HttpApproval; message?: ai.ChatMessage;
+  onDecide?: (callId: string, decision: ai.HttpDecision) => void;
+}) {
+  const now = useNow(decision === "pending");
+  const remaining = Math.max(0, Math.ceil(((approval?.expires ?? now) - now) / 1000));
+  const status = decision === "pending" && !remaining ? "expired" : decision;
+  const pending = status === "pending";
+  const label = pending ? "待确认" : status === "approved" ? message ? message.status === "ok" ? "已响应" : "执行失败" : "已同意"
+    : status === "rejected" ? "已拒绝" : status === "expired" ? "已过期" : status === "error" ? "回传失败" : "已取消";
+  const tone: Tone = pending ? "warning" : status === "approved" && message?.status === "ok" ? "success"
+    : status === "error" || status === "approved" && message?.status === "error" ? "danger" : "neutral";
+  return <section className={`ai-card ai-http is-${status}`} aria-label="HTTP 请求">
+    <CardHead icon="globe" tone={pending ? "warning" : "accent"} title="HTTP 请求" subtitle={`${request.method} · 正文 ${formatBytes(request.body_bytes)}`}
+      badge={<Badge tone={tone}>{label}</Badge>} />
+    <code className="ai-http-target">{request.url}</code>
+    {pending && <p className="ai-card-note"><Icon name="globe" size={13} />从服务器发送，可能修改第三方数据或产生费用，请核对请求。</p>}
+    <details className="ai-http-details"><summary>请求详情</summary><div className="ai-http-preview">
+      <h4>请求头</h4><pre>{Object.entries(request.headers).map(([key, value]) => `${key}: ${value}`).join("\n") || "无自定义请求头"}</pre>
+      {request.body !== null && <><h4>{request.body_encoding === "base64" ? "请求正文（Base64）" : "请求正文"}</h4><pre>{request.body || "空正文"}</pre></>}
+      <p>认证头及可识别的凭据已隐藏；本次确认仅适用于这一条请求。</p>
+    </div></details>
+    {message && <><p className="ai-http-summary">{message.summary}</p>
+      {status === "approved" && <details className="ai-http-details"><summary>响应结果</summary><ToolDetail message={{ ...message, arguments: undefined }} /></details>}
+    </>}
+    <footer className="ai-card-foot">
+      <span>{pending ? `剩余 ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}，超时取消` : status === "approved" ? message ? "已确认本次请求" : "已同意，等待请求结果"
+        : status === "error" ? "确认结果回传失败，请等待运行结果或停止本轮" : "未发送请求"}</span>
+      {pending && approval && onDecide && <><Button size="sm" onClick={() => onDecide(approval.callId, "rejected")}>拒绝</Button>
+        <Button size="sm" variant="primary" onClick={() => onDecide(approval.callId, "approved")}>发送请求</Button></>}
+    </footer>
+  </section>;
 }
 
 function PlanCard({ items }: { items: { content: string; status: string }[] }) {

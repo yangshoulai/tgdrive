@@ -315,7 +315,7 @@ class SafeHttpClient:
                 failure = exc
         raise _tls_error(failure, "无法建立来源连接，请检查链接或网络") from failure
 
-    async def _connect(self, request: DownloadRequest, url: str, method: str, body: str | None,
+    async def _connect(self, request: DownloadRequest, url: str, method: str, body: str | bytes | None,
                        headers: list[tuple[str, str]]) -> HttpResponse:
         parts = urlsplit(checked_url(url))
         host = parts.hostname.encode("idna").decode("ascii")
@@ -342,7 +342,7 @@ class SafeHttpClient:
             if not any(key.lower() == "user-agent" for key, _ in headers):
                 lines.append("User-Agent: Tessera/1.0")
             lines.extend(f"{key}: {value}" for key, value in headers)
-            payload = body.encode() if body is not None else b""
+            payload = body.encode() if isinstance(body, str) else body if body is not None else b""
             if body is not None:
                 lines.append(f"Content-Length: {len(payload)}")
             async with asyncio.timeout(15):
@@ -380,9 +380,11 @@ class SafeHttpClient:
 
     @asynccontextmanager
     async def open(self, request: DownloadRequest, *, url: str | None = None, method: str | None = None,
-                   extra_headers: dict[str, str] | None = None, identity: bool = False, redirects: bool = True, url_check=None):
+                   extra_headers: dict[str, str] | None = None, identity: bool = False, redirects: bool = True, url_check=None,
+                   request_body: bytes | None = None):
         current, verb = checked_url(url or request.url), method or request.method
-        body = request.body if verb == "POST" else None
+        # 通用 HTTP 工具显式传入冻结的字节；离线下载继续沿用原来的 POST 正文规则。
+        body = request_body if request_body is not None else request.body if verb == "POST" else None
         # 所有自定义头都按来源隔离，跨域 CDN 也不转发 Cookie 或自定义认证字段。
         custom = list(request.headers) if origin(current) == origin(request.credential_origin or request.url) else []
         additions = dict(extra_headers or {})
@@ -390,23 +392,25 @@ class SafeHttpClient:
             additions["Accept-Encoding"] = "identity"
         lowered = {key.lower() for key in additions}
         custom = [(key, value) for key, value in custom if key.lower() not in lowered] + list(additions.items())
-        response = None
+        response, history = None, []
         try:
             for _ in range(6):
                 if url_check:
                     url_check(current)
                 response = await self._connect(request, current, verb, body, custom)
                 if not redirects or response.status not in (301, 302, 303, 307, 308):
+                    response.history = history
                     yield response
                     return
                 if not request.follow_redirects:
                     raise DownloadError("来源要求重定向，请在 curl 命令中加入 -L 后重新解析")
-                if verb == "POST":
+                if verb == "POST" or request_body is not None:
                     raise DownloadError("POST 请求不会自动重发到重定向地址，请使用最终的文件链接重新提交")
                 location = response.headers.get("location")
                 if not location:
                     raise DownloadError("来源的重定向缺少目标地址")
                 next_url = checked_url(urljoin(current, location))
+                history.append({"url": current, "status": response.status})
                 if origin(next_url) != origin(current):
                     custom = [(key, value) for key, value in custom if key.lower() in lowered]
                 await self._close(response)

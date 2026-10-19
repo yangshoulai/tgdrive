@@ -8,7 +8,7 @@ import * as ai from "../assistant-api";
 import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, formatBytes, isShortcutControl, shortcutLabel, toast, type IconName, type MenuItem } from "../ui";
 import { ShortcutsDialog } from "../shortcuts";
 import type { PageImport } from "./page-import";
-import { Thread, useMarkState, type LiveRun } from "./assistant-thread";
+import { Thread, useMarkState, type HttpApproval, type LiveRun } from "./assistant-thread";
 import { AttachmentTray, useAttachments } from "./assistant-attachments";
 import { filesBridge, getPrivateSection, openPrivateSection, waitForFiles } from "./assistant-bridge";
 import { usePrivateAccess } from "./private-session";
@@ -106,6 +106,16 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [width, setWidth] = useState(() => { const saved = Number(localStorage.getItem(WIDTH_KEY)); return saved >= MIN_WIDTH && saved <= MAX_WIDTH ? saved : 480; });
   const [history, setHistory] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [httpApprovals, setHttpApprovals] = useState<HttpApproval[]>([]);
+  const httpResolvers = useRef(new Map<string, { resolve: (decision: ai.HttpDecision | null) => void; expires: number }>());
+  const decideHttp = useCallback((callId: string, decision: ai.HttpDecision) => {
+    const waiter = httpResolvers.current.get(callId);
+    if (!waiter) return;
+    const status = decision === "approved" && waiter.expires <= Date.now() ? "expired" : decision;
+    httpResolvers.current.delete(callId);
+    setHttpApprovals(items => items.map(item => item.callId === callId ? { ...item, status } : item));
+    waiter.resolve(status);
+  }, []);
   const [archived, setArchived] = useState(false);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
@@ -118,6 +128,16 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [scopeTarget, setScopeTarget] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<{ seq: number; later: number } | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
+  useEffect(() => {
+    const pending = httpApprovals.filter(item => item.status === "pending");
+    for (const item of pending) if (!open || item.runId !== runId) decideHttp(item.callId, "cancelled");
+    if (!pending.length) return;
+    const timer = window.setTimeout(() => {
+      for (const item of pending) if (item.expires <= Date.now()) decideHttp(item.callId, "expired");
+    }, Math.max(0, Math.min(...pending.map(item => item.expires)) - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [open, runId, httpApprovals, decideHttp]);
+  useEffect(() => () => { for (const waiter of httpResolvers.current.values()) waiter.resolve("cancelled"); httpResolvers.current.clear(); }, []);
   const [live, setLive] = useState<LiveRun | null>(null);
   const [pendingMode, setPendingMode] = useState<ai.AccessMode>("approval");
   const [fullPrompt, setFullPrompt] = useState(false);
@@ -156,7 +176,13 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       setModelId([detail?.conversation.model_id, config.default_model, config.models[0]?.id].find(id => config.models.some(model => model.id === id)) ?? null);
     }
   }, [config, detail?.conversation.model_id, modelId]);
-  useEffect(() => { if (open) window.setTimeout(() => input.current?.focus(), 60); }, [open, currentId]);
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setTimeout(() => {
+      if (!document.querySelector(".modal-backdrop:not(.is-minimized), .menu")) input.current?.focus();
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [open, currentId]);
   // 抽屉占用的右侧宽度（含 16px 边距）写到根元素上，上传／下载托盘与最小化预览据此居中在剩余区域，不被抽屉挡住。
   useEffect(() => {
     if (page || !open) return;
@@ -242,13 +268,28 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   clientContext.current = { location, onNavigate, page, privateMode, cacheQueue };
   const runClientCall = useCallback(async (runId: string, event: ai.RunEvent) => {
     const callId = String(event.call_id ?? "");
-    if (!callId || handledCalls.current.has(callId) || Number(event.expires_at ?? 0) * 1000 < Date.now()) return;
-    handledCalls.current.add(callId);
+    const handledKey = `${runId}:${callId}`;
+    if (!callId || handledCalls.current.has(handledKey) || Number(event.expires_at ?? 0) * 1000 < Date.now()) return;
+    handledCalls.current.add(handledKey);
     let outcome: { result?: Record<string, unknown>; error?: string };
-    try { outcome = { result: await executeClientTool(String(event.name), (event.args ?? {}) as Record<string, unknown>, clientContext.current) }; }
+    try {
+      if (event.name === "http_request_approval") {
+        const decision = await new Promise<ai.HttpDecision | null>(resolve => {
+          const expires = Number(event.expires_at) * 1000;
+          httpResolvers.current.set(handledKey, { resolve, expires });
+          setHttpApprovals(items => [...items, { callId: handledKey, toolCallId: String(event.tool_call_id ?? callId), runId, expires, requestedAt: Number(event.requested_at) || Date.now() / 1000,
+            request: event.args as ai.HttpRequestPreview, status: "pending" }]);
+          window.requestAnimationFrame(() => scrollToEnd());
+        });
+        if (decision === null) return; // 断线重放时结果可能紧接确认事件到达，不再回传旧决定。
+        outcome = { result: { approved: decision === "approved", decision } };
+      } else outcome = { result: await executeClientTool(String(event.name), (event.args ?? {}) as Record<string, unknown>, clientContext.current) };
+    }
     catch (reason) { outcome = { error: reason instanceof Error ? reason.message : "页面操作失败" }; }
-    await ai.sendClientResult(runId, callId, outcome).catch(() => undefined);
-  }, []);
+    await ai.sendClientResult(runId, callId, outcome).catch(() => {
+      setHttpApprovals(items => items.map(item => item.callId === handledKey ? { ...item, status: "error" } : item));
+    });
+  }, [scrollToEnd]);
 
   const follow = useCallback((id: string) => {
     unsubscribe.current?.();
@@ -276,6 +317,12 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           // 落库的消息到达后，去掉对应的实时内容（思考与文字随助手消息，工具随工具消息）。
           if (message.role === "assistant") setLive(value => value && { ...value, reasoning: "", reasoningStartedAt: null, streaming: "" });
           if (message.role === "tool") setLive(value => value && { ...value, tools: value.tools.filter(tool => tool.callId !== message.call_id) });
+          if (message.event?.type === "http_request") {
+            const reviewId = `${id}:${message.event.id}`;
+            httpResolvers.current.get(reviewId)?.resolve(null);
+            httpResolvers.current.delete(reviewId);
+            setHttpApprovals(items => items.filter(item => item.callId !== reviewId));
+          }
           setDetail(current => current && !current.messages.some(item => item.seq === message.seq)
             ? { ...current, messages: [...current.messages, message] } : current);
           const actionEvent = message.event;
@@ -305,6 +352,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   async function openConversation(id: string) {
     const version = ++selection.current;
+    for (const callId of httpResolvers.current.keys()) decideHttp(callId, "cancelled");
+    setHttpApprovals([]);
     unsubscribe.current?.(); unsubscribe.current = null;
     setRunId(null); setLive(null); setHistory(false); setReconnecting(false); setLoading(true); setScopeTarget(null); mention.reset();
     try {
@@ -322,6 +371,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   function newConversation() {
     selection.current += 1;
+    for (const callId of httpResolvers.current.keys()) decideHttp(callId, "cancelled");
+    setHttpApprovals([]);
     setLoading(false); setReconnecting(false);
     unsubscribe.current?.(); unsubscribe.current = null;
     setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeTarget(null); mention.reset(); setDraft(""); setPendingMode("approval"); attachments.clear(true);
@@ -555,7 +606,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} privateMode={privateMode} onAccept={() => void acknowledge()} />
           : loading ? <SkeletonRows rows={4} />
           : !detail ? <Welcome location={effectiveScope} view={location.view} privateMode={privateMode} onPick={text => { setDraft(text); input.current?.focus(); }} />
-          : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} running={Boolean(runId)} onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
+          : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} runId={runId} httpApprovals={httpApprovals} onHttpDecision={decideHttp}
+              onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
               onRetry={retryFrom} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
         {reconnecting && <p className="ai-notice" role="status"><Icon name="refresh" size={14} /><span>重新连接中…</span></p>}
       </div>

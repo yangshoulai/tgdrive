@@ -88,6 +88,9 @@ class ToolContext:
     url_allowed: Callable[[str, str], bool] | None = None
     # 本轮或对话中是否读取过外部内容（返回原因）：私密对话据此拒绝提议移出与彻底删除。
     tainted: Callable[[], str | None] | None = None
+    # HTTP：跨对话频率／并发限制，以及确认后发送前的权限复核。
+    http_guard: object | None = None
+    http_authorize: Callable[[], None] | None = None
 
     @property
     def db(self):
@@ -270,7 +273,7 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "analyze_page": ("limited", "地址必须是用户给出的链接或其网站页面里找到的同站链接，不接受抓取脚本快照"),
     "collect_gallery": ("limited", "只按隔离分析的规则翻页，不离开起始网站"),
     "get_collection": ("limited", "只读取本对话的结果集"),
-    "http_request": ("limited", "只访问用户给出的链接或其网站页面里找到的同站链接"),
+    "http_request": ("limited", "仅无认证、无正文的 GET／HEAD；只访问用户链接或同站已出现链接"),
     "propose_save_attachment": ("never", "私密对话暂不提供附件"),
 }
 
