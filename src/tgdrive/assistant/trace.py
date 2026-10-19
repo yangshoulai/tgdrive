@@ -175,6 +175,15 @@ class TraceStore:
                  "created_at": row["created_at"], **self._open(row["body"], f"assistant:{conversation_id}:{row['seq']}")}
                 for row in rows]
 
+    def latest_plan(self, conversation_id: str) -> dict | None:
+        row = self.metadata.db.execute(
+            "SELECT seq,body FROM assistant_messages WHERE conversation_id=? AND role='event' AND tool_name='update_plan' ORDER BY seq DESC LIMIT 1",
+            (conversation_id,)).fetchone()
+        if row is None:
+            return None
+        event = self._open(row["body"], f"assistant:{conversation_id}:{row['seq']}").get("event")
+        return event if isinstance(event, dict) and event.get("type") == "plan" and event.get("id") else None
+
     # ---------- 运行 ----------
 
     def start_run(self, conversation_id: str, model_id: int, prompt_version: str) -> str:

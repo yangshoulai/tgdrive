@@ -173,8 +173,12 @@ export type BrowserEvent =
   | { type: "browser"; action: "uncache"; items: { path: string; size: number; etag: string; content_type: string | null }[]; size: number; private?: boolean };
 export type HttpDecision = "approved" | "rejected" | "expired" | "cancelled";
 export type HttpRequestPreview = { url: string; method: string; headers: Record<string, string>; body: string | null; body_encoding: "text" | "base64"; body_bytes: number };
+export type PlanStatus = "pending" | "in_progress" | "waiting_user" | "completed" | "failed" | "paused" | "cancelled";
+export type PlanEvent = { type: "plan"; id?: string; run_id?: string; version?: number; title?: string; reason?: string;
+  status?: PlanStatus; automatic?: boolean;
+  items: { id?: string; content: string; status: PlanStatus; kind?: "tool" | "reasoning"; detail?: string }[] };
 export type ToolEvent =
-  | { type: "plan"; items: { content: string; status: "pending" | "in_progress" | "completed" }[] }
+  | PlanEvent
   | { type: "question"; question: string; options: string[] }
   | { type: "scope_request"; action_id: string; from: string; to: string; reason: string }
   | { type: "action"; action_id: string; kind: string; count: number; auto?: boolean }

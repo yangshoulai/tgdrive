@@ -27,6 +27,7 @@ from ..objects import PRIVATE_PREFIX, ObjectService, Scope
 from .attachments import PREFIX as ATTACHMENT_PREFIX, ROOT as ATTACHMENT_ROOT
 from .providers import ToolDef
 from .knowledge import HELP
+from .planning import Plan, STATUSES
 
 END = "\U0010ffff"
 KIND_LABELS = {"image": "图片", "video": "视频", "audio": "音频", "document": "文档", "text": "文本与代码", "archive": "压缩包"}
@@ -91,6 +92,7 @@ class ToolContext:
     # HTTP：跨对话频率／并发限制，以及确认后发送前的权限复核。
     http_guard: object | None = None
     http_authorize: Callable[[], None] | None = None
+    plan: Plan | None = None
 
     @property
     def db(self):
@@ -214,8 +216,12 @@ class ToolSpec:
     warning: str | None = None
     timeout: int | None = None  # 秒；网页抓取等长任务可超过通用的单个工具超时
 
-    def definition(self) -> ToolDef:
-        return ToolDef(self.name, self.description, self.parameters)
+    def definition(self, *, planning: bool = False) -> ToolDef:
+        parameters = self.parameters
+        if planning and self.name != "update_plan":
+            parameters = {**parameters, "properties": {**parameters.get("properties", {}), "plan_step_id": {
+                "type": "string", "description": "当前计划中的步骤编号；存在计划时标明本次调用所属步骤"}}}
+        return ToolDef(self.name, self.description, parameters)
 
     @property
     def private(self) -> str:
@@ -426,22 +432,23 @@ async def ask_user(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("update_plan", "更新计划", "context", "meta",
-      "多步骤任务时展示或更新待办清单。每次传入完整清单。",
-      {"items": {"type": "array", "description": "完整清单", "items": {"type": "object", "properties": {
-          "content": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}},
+      "复杂任务开始前制定通用计划，随真实进度更新。每次传入完整步骤；继续历史任务时传回 plan_id，保留步骤编号。"
+      "执行步骤完成需要成功工具结果，待确认操作不能标成完成。纯分析步骤使用 kind=reasoning 并在完成时提供 detail。",
+      {"title": {"type": "string", "description": "简短任务标题"},
+       "plan_id": {"type": "string", "description": "继续已有任务时使用上下文中的计划编号；新任务省略"},
+       "reason": {"type": "string", "description": "调整计划的简短原因"},
+       "items": {"type": "array", "description": "1–12 个完整步骤", "items": {"type": "object", "properties": {
+          "id": {"type": "string", "description": "稳定步骤编号，例如 step1"},
+          "content": {"type": "string"}, "status": {"type": "string", "enum": list(STATUSES)},
+          "kind": {"type": "string", "enum": ["tool", "reasoning"]},
+          "detail": {"type": "string", "description": "结论、失败原因或未完成的说明"}},
           "required": ["content", "status"]}}}, ("items",))
 async def update_plan(ctx: ToolContext, args: dict) -> ToolOutput:
-    items = args.get("items")
-    if not isinstance(items, list) or not 1 <= len(items) <= 12:
-        raise ToolError("参数 items 不正确：需要 1–12 项")
-    plan = []
-    for item in items:
-        if not isinstance(item, dict) or not isinstance(item.get("content"), str) \
-                or item.get("status") not in ("pending", "in_progress", "completed"):
-            raise ToolError("参数 items 不正确：每项需要 content 与 status")
-        plan.append({"content": item["content"].strip()[:80], "status": item["status"]})
-    done = sum(1 for item in plan if item["status"] == "completed")
-    return ToolOutput({"status": "ok"}, f"{done}/{len(plan)} 已完成", event={"type": "plan", "items": plan})
+    plan = ctx.plan or ctx.state.setdefault("plan", Plan())
+    event = plan.update(args)
+    done = sum(item["status"] == "completed" for item in event["items"])
+    return ToolOutput({"status": "ok", "plan_id": event["id"], "items": event["items"]},
+                      f"{done}/{len(event['items'])} 已完成", event=event)
 
 
 # ---------- 浏览与查询 ----------

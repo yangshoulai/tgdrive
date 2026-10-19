@@ -37,6 +37,7 @@ from .catalog import CatalogStore
 from .channels import ChannelStore
 from .config import LIMITS, PRIVATE_NOTICE, AssistantConfig
 from .private_chat import MemoryTrace, RoutedTrace, is_private
+from .planning import Plan, display_plan
 from .guard import SecretGuard
 from .providers import ProviderError, ToolCall, ToolDef
 from .tools import (
@@ -155,6 +156,7 @@ class RunState:
     images: dict = field(default_factory=dict)
     # 私密对话：发起这个 run 的私密授权（§24.2）。普通对话为 None。
     access: str | None = None
+    plan: Plan = field(default_factory=Plan)
 
     @property
     def private(self) -> bool:
@@ -554,9 +556,16 @@ class AssistantService:
         if item["access_mode"] == "full" and not self._full_access(account.id):
             item["access_mode"] = "approval"
         messages = self.trace.messages(conversation_id, limit=2000)
+        actions = [self._action_view(action) for action in self.trace.actions(conversation_id)]
+        active_run = self._active_run(conversation_id)
+        seen_plans: set[str] = set()
+        for message in reversed(messages):
+            event = message.get("event") or {}
+            if event.get("type") == "plan" and event.get("id") and event["id"] not in seen_plans:
+                seen_plans.add(event["id"])
+                message["event"] = display_plan(event, actions, active=bool(active_run and message.get("run_id") == active_run))
         return {"conversation": item, "messages": [self._public_message(m) for m in messages], "context": self._context_usage(row, messages),
-                "actions": [self._action_view(action) for action in self.trace.actions(conversation_id)],
-                "active_run": self._active_run(conversation_id),
+                "actions": actions, "active_run": active_run,
                 "attachments": self.attachments.conversation_usage(account.id, conversation_id),
                 # 私密对话的回复里只有「已出现地址」可以点击（§24.8），其余链接显示为文字。
                 **({"links": sorted(set().union(*self._url_pool(conversation_id)[:2]))[:500]} if is_private(conversation_id) else {})}
@@ -1655,6 +1664,7 @@ class AssistantService:
         await state.emit({"type": "tool_started", "call_id": call.id, "name": call.name, "label": label})
         status, summary, items, event = "ok", "", None, None
         http_review = None
+        plan = state.plan if isinstance(getattr(state, "plan", None), Plan) else None
         images: list[str] = []
         try:
             if spec is None:
@@ -1666,6 +1676,10 @@ class AssistantService:
             if not isinstance(parsed, dict):
                 raise ToolError("工具参数必须是对象")
             arguments = parsed
+            step_id = arguments.pop("plan_step_id", None)
+            if plan is not None:
+                plan.begin(call.id, call.name, step_id)
+                await self._publish_plan(state)
             if call.name == "http_request":
                 url = arguments.get("url")
                 decoded = unquote(url) if isinstance(url, str) else ""
@@ -1725,6 +1739,9 @@ class AssistantService:
                     return await self._client_call(state, call.id, name, arguments)
                 # 只保存已经脱敏的冻结预览；确认卡片与执行结果复用同一条加密工具消息。
                 http_review = {"type": "http_request", "request": arguments, "decision": "cancelled"}
+                if plan is not None:
+                    plan.wait(call.id, "请在 HTTP 请求卡片中确认")
+                    await self._publish_plan(state)
                 result = await self._client_call(state, call.id, name, arguments, review=http_review)
                 decision = result.get("decision")
                 if result.get("approved") is True:
@@ -1756,6 +1773,7 @@ class AssistantService:
                                   analyze=analyze, client=client, taint=taint,
                                   public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
                                   redact=self.guard.redact,
+                                  plan=plan,
                                   http_guard=self.http_guard, http_authorize=http_authorize,
                                   attachments=shared.setdefault("attachments", self.attachments.for_conversation(state.conversation_id)),
                                   read_only=spec.level == "read",
@@ -1798,6 +1816,13 @@ class AssistantService:
         if images and status == "ok":
             # 只保存图片引用（对象键），图片本身在当前这一轮发给模型时再读取。
             body["images"] = images
+        if plan is not None:
+            plan.observe(body)
+            if plan.has_actions:
+                plan.reconcile(self.trace.actions(state.conversation_id))
+            if call.name == "update_plan" and status == "ok":
+                body["event"] = self.guard.redact_value(plan.snapshot())
+            await self._publish_plan(state)
         return body
 
     @staticmethod
@@ -1819,6 +1844,17 @@ class AssistantService:
             {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "tool", "tool_name": body["name"], **body})})
         if body["event"]:
             await state.emit({"type": "tool_event", **body["event"]})
+
+    async def _publish_plan(self, state: RunState) -> None:
+        plan = state.plan
+        event = plan.snapshot()
+        if not event or event["version"] == plan.published:
+            return
+        event = self.guard.redact_value(event)
+        plan.published = event["version"]
+        body = {"type": "plan", "event": event}
+        seq = self.trace.append(state.conversation_id, state.id, "event", body, tool_name="update_plan")
+        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "event", **body}})
 
     async def _tool_batch(self, state: RunState, calls: list[ToolCall], tools: dict, limits: dict,
                           shared: dict, deadline: float) -> list[dict]:
@@ -1854,6 +1890,13 @@ class AssistantService:
             repeats: collections.Counter = collections.Counter()
             errors = 0
             shared: dict = {}
+            candidate = self.trace.latest_plan(state.conversation_id)
+            if candidate:
+                candidate = display_plan(candidate, self.trace.actions(state.conversation_id), active=False)
+            if candidate and candidate.get("status") == "completed":
+                candidate = None
+            state.plan = Plan(state.id, candidate)
+            plan_checked = False
             forced_final: str | None = None
             compacted = overflowed = False
             while True:
@@ -1862,6 +1905,9 @@ class AssistantService:
                 endpoint = self.channels.endpoint(model["channel_id"])
                 can_see = self.channels.vision(model)
                 tools = self._user_tools(state.user_id, private=state.private)
+                if state.plan.has_actions:
+                    state.plan.reconcile(self.trace.actions(state.conversation_id))
+                await self._publish_plan(state)
                 if not can_see:
                     tools.pop("view_image", None)
                 conversation = self.trace.conversation(state.user_id, state.conversation_id, include_hidden=True)
@@ -1893,7 +1939,8 @@ class AssistantService:
                                                public_config=knowledge.public_config(self.settings, state.environment), environment=state.environment,
                                                access_mode="full" if conversation["access_mode"] == "full"
                                                and self._full_access(state.user_id) else "approval",
-                                               private=state.private, can_move_private="propose_move_to_private" in tools)
+                                               private=state.private, can_move_private="propose_move_to_private" in tools,
+                                               can_plan="update_plan" in tools)
                 pending = self.trace.pending_actions(state.conversation_id)
                 remaining = None
                 if state.private and self.private_space is not None:
@@ -1906,8 +1953,9 @@ class AssistantService:
                     quota="不限" if not usage or usage["quota_bytes"] is None else _fmt(usage["quota_bytes"]),
                     remaining_steps=max(0, limits["max_steps"] - steps), remaining_tools=max(0, limits["max_tool_calls"] - tool_calls),
                     parallel_calls=limits["parallel_calls"],
+                    plan=self.guard.redact(state.plan.context()) if "update_plan" in tools else "无",
                     pending="；".join(f"#{a['id']}（{KINDS.get(a['kind'], a['kind'])}，{a['count']} 项）" for a in pending) or "无")}
-                definitions = [] if forced_final else [spec.definition() for spec in tools.values()]
+                definitions = [] if forced_final else [spec.definition(planning="update_plan" in tools) for spec in tools.values()]
                 # 系统提示词、工具定义与动态上下文块也占窗口（§23）。
                 fixed = (len(system) + len(json.dumps([vars(item) for item in definitions], ensure_ascii=False))) // 2 \
                     + self._estimate([context_block])
@@ -1941,9 +1989,12 @@ class AssistantService:
                 steps += 1
                 self._validate(state)
                 calls = reply.tool_calls if not forced_final else []
+                check_plan = not calls and not forced_final and state.plan.needs_check and not plan_checked
                 assistant = {"text": self.guard.redact(reply.text), "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
                              "model_id": model["id"], "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens,
                              "prompt_estimate": estimate}
+                if check_plan:
+                    assistant["text"] = ""
                 if reply.reasoning.strip():
                     started_at = state.thinking.get("start")
                     ended_at = state.thinking.get("end") or state.thinking.get("last")
@@ -1952,7 +2003,26 @@ class AssistantService:
                 seq = self.trace.append(state.conversation_id, state.id, "assistant", assistant)
                 await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "assistant", **assistant}})
                 if not calls:
+                    if check_plan:
+                        plan_checked = True
+                        message = {"type": "plan_check", "text": "正在核验计划中尚未完成的步骤",
+                                   "model_text": "[系统事件] 计划仍有待执行或执行中的步骤。请依据实际工具结果更新计划，"
+                                   "继续可完成的工作；若无法继续，明确标成等待、失败或暂停并说明原因，再给出最终回复。"}
+                        seq = self.trace.append(state.conversation_id, state.id, "event", message)
+                        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
+                        continue
+                    if state.plan.remaining:
+                        waiting = any(item["status"] == "waiting_user" or item.get("action_pending") for item in state.plan.data["items"])
+                        if not forced_final:
+                            stop_reason = "waiting_user" if waiting else "plan_incomplete"
+                        message = {"type": "plan_incomplete", "text": f"计划还有 {state.plan.remaining} 个步骤未完成，"
+                                   + ("请先处理需要确认的操作或回复。" if waiting else "当前进度已保留，可以继续处理。")}
+                        seq = self.trace.append(state.conversation_id, state.id, "event", message)
+                        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
                     break
+                if "update_plan" in tools and not any(call.name == "update_plan" for call in calls):
+                    if state.plan.prepare(calls, {name: spec.label for name, spec in tools.items()}):
+                        await self._publish_plan(state)
                 ends = False
                 looping = too_many_errors = False
                 offset = 0
@@ -1971,6 +2041,12 @@ class AssistantService:
                         break
                     size = min(limits["parallel_calls"], limits["max_tool_calls"] - tool_calls)
                     batch = calls[offset:offset + size]
+                    # 计划更新先落地，后续工具才能绑定新步骤；其余独立调用仍按原有并发预算执行。
+                    if batch[0].name == "update_plan":
+                        batch = batch[:1]
+                    else:
+                        first_plan = next((index for index, call in enumerate(batch) if call.name == "update_plan"), len(batch))
+                        batch = batch[:first_plan]
                     tool_calls += len(batch)
                     results = await self._tool_batch(state, batch, tools, limits, shared, deadline)
                     offset += len(batch)
@@ -1983,7 +2059,10 @@ class AssistantService:
                         too_many_errors = too_many_errors or errors >= limits["error_threshold"]
                         # 使用调用原文归一化，避免未解析参数等情况把不同调用合并成同一个空参数。
                         try:
-                            arguments = json.dumps(json.loads(call.arguments or "{}"), sort_keys=True, ensure_ascii=False)
+                            repeated_args = json.loads(call.arguments or "{}")
+                            if isinstance(repeated_args, dict):
+                                repeated_args.pop("plan_step_id", None)
+                            arguments = json.dumps(repeated_args, sort_keys=True, ensure_ascii=False)
                         except ValueError:
                             arguments = call.arguments
                         key = (call.name, arguments)
@@ -1995,7 +2074,9 @@ class AssistantService:
                                           "检测到重复工具调用，本次调用未执行" if looping else "工具连续出错，本次调用未执行")
                         break
                 for call in calls[offset:]:
-                    await self._record_tool(state, self._skipped_tool(call, skipped_reason, status=skipped_status))
+                    body = self._skipped_tool(call, skipped_reason, status=skipped_status)
+                    state.plan.observe(body)
+                    await self._record_tool(state, body)
                 if ends:
                     stop_reason = "waiting_user"
                     break
@@ -2038,6 +2119,13 @@ class AssistantService:
             status, stop_reason = "failed", "internal"
             await self._fail(state, "助手出了点问题，没有完成这次回复。请稍后重试。", retry=True)
         finally:
+            try:
+                if state.plan.has_actions:
+                    state.plan.reconcile(self.trace.actions(state.conversation_id))
+                state.plan.finish(status, stop_reason)
+                await self._publish_plan(state)
+            except Exception:
+                log.error("assistant plan bookkeeping failed id=%s", state.id)
             if acquired:
                 self._release()
             if (status == "completed" or stop_reason == "waiting_user") and not state.private:

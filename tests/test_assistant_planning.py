@@ -1,0 +1,247 @@
+"""计划状态与执行循环的定向回归；只使用内存留痕与工具替身。"""
+
+import asyncio
+import json
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
+from tgdrive.assistant.config import LIMITS
+from tgdrive.assistant.planning import Plan, display_plan
+from tgdrive.assistant.private_chat import MemoryTrace, RoutedTrace
+from tgdrive.assistant.providers import Reply, ToolCall
+from tgdrive.assistant.service import AssistantService, RunState
+from tgdrive.assistant.tools import TOOLS, ToolOutput, ToolSpec
+
+
+def step(status="in_progress", **extra):
+    return {"id": "one", "content": "核对文件", "status": status, **extra}
+
+
+def result(call_id="c1", status="ok", **extra):
+    return {"call_id": call_id, "name": "search_files", "status": status, "summary": "已查询", "result": {}, **extra}
+
+
+def call(name, args=None, ident="c1"):
+    return ToolCall(ident, name, json.dumps(args or {}, ensure_ascii=False))
+
+
+class PlanTests(unittest.TestCase):
+    def test_completion_requires_actual_result_and_stable_ids(self):
+        plan = Plan("run")
+        first = plan.update({"items": [step()]})
+        with self.assertRaisesRegex(ValueError, "成功"):
+            plan.update({"items": [step("completed")]})
+        plan.begin("c1", "search_files", "one")
+        with self.assertRaisesRegex(ValueError, "进行中"):
+            plan.update({"items": [step("completed")]})
+        plan.observe(result())
+        final = plan.update({"items": [step("completed")]})
+        self.assertEqual(final["id"], first["id"])
+        self.assertEqual(final["status"], "completed")
+        with self.assertRaisesRegex(ValueError, "已经完成"):
+            plan.begin("c2", "search_files", "one")
+        with self.assertRaisesRegex(ValueError, "重新执行"):
+            plan.update({"items": [step()]})
+
+    def test_confirmation_and_partial_action_results_are_not_completion(self):
+        plan = Plan()
+        plan.update({"items": [step()]})
+        plan.begin("c1", "propose_move", "one")
+        plan.observe(result(event={"type": "action", "action_id": "a1"}))
+        self.assertEqual(plan.data["status"], "waiting_user")
+        with self.assertRaisesRegex(ValueError, "待确认"):
+            plan.update({"items": [step("completed")]})
+        plan.reconcile([{"id": "a1", "status": "running"}])
+        self.assertEqual(plan.data["status"], "in_progress")
+        plan.reconcile([{"id": "a1", "status": "partial"}])
+        self.assertEqual(plan.data["status"], "failed")
+        plan.begin("c2", "propose_move", "one")
+        plan.observe(result("c2", event={"type": "action", "action_id": "a2"}))
+        plan.reconcile([{"id": "a1", "status": "partial"}, {"id": "a2", "status": "done"}])
+        self.assertEqual(plan.data["status"], "completed")
+
+    def test_reasoning_needs_summary_and_tool_use_prevents_bypass(self):
+        plan = Plan()
+        with self.assertRaisesRegex(ValueError, "detail"):
+            plan.update({"items": [step("completed", kind="reasoning")]})
+        plan.update({"items": [step(kind="reasoning")]})
+        plan.begin("c1", "search_files", "one")
+        plan.observe(result(status="error"))
+        with self.assertRaisesRegex(ValueError, "纯分析"):
+            plan.update({"items": [step("completed", kind="reasoning", detail="已分析")]})
+
+    def test_automatic_plan_waits_for_all_calls_and_preserves_failure(self):
+        plan = Plan("run")
+        calls = [call("search_files", ident=f"c{i}") for i in range(3)]
+        self.assertTrue(plan.prepare(calls, {"search_files": "查询文件"}))
+        for entry in calls:
+            plan.begin(entry.id, entry.name, None)
+        plan.observe(result("c0", status="error"))
+        plan.observe(result("c1"))
+        plan.observe(result("c2"))
+        self.assertEqual(plan.data["status"], "failed")
+        retry = call("search_files", ident="retry")
+        plan.prepare([retry], {})
+        plan.begin(retry.id, retry.name, None)
+        plan.observe(result("retry"))
+        self.assertEqual(plan.data["status"], "completed")
+
+    def test_resume_and_restart_keep_completed_steps(self):
+        plan = Plan("run")
+        plan.update({"items": [step("completed", kind="reasoning", detail="已确认范围"),
+                               {"id": "two", "content": "执行整理", "status": "in_progress"}]})
+        snapshot = display_plan(plan.snapshot(), [], active=False)
+        self.assertEqual([item["status"] for item in snapshot["items"]], ["completed", "paused"])
+        resumed = Plan("next-run", snapshot)
+        event = resumed.update({"plan_id": snapshot["id"], "items": [snapshot["items"][0],
+                                  {"id": "two", "content": "执行整理", "status": "in_progress"}]})
+        self.assertEqual(event["id"], snapshot["id"])
+        self.assertEqual(event["run_id"], "run")
+        resumed.finish("stopped", "stopped")
+        self.assertEqual([item["status"] for item in resumed.data["items"]], ["completed", "cancelled"])
+        with self.assertRaisesRegex(ValueError, "当前对话"):
+            Plan(candidate=snapshot).update({"plan_id": "other", "items": [step()]})
+
+    def test_memory_trace_routes_plan_and_drops_it_with_private_chat(self):
+        trace = MemoryTrace()
+        cid = trace.create_conversation(1, "", 1)
+        plan = Plan("run")
+        event = plan.update({"items": [step()]})
+        trace.append(cid, "run", "event", {"type": "plan", "event": event}, tool_name="update_plan")
+        routed = RoutedTrace(Mock(), trace)
+        self.assertEqual(routed.latest_plan(cid), event)
+        routed.latest_plan(cid)["items"].clear()
+        self.assertEqual(len(trace.latest_plan(cid)["items"]), 1)
+        trace.drop(cid)
+        self.assertIsNone(trace.latest_plan(cid))
+
+    def test_tool_metadata_does_not_mutate_business_schema(self):
+        spec = TOOLS["http_request"]
+        self.assertIn("plan_step_id", spec.definition(planning=True).parameters["properties"])
+        self.assertNotIn("plan_step_id", spec.parameters["properties"])
+        self.assertNotIn("plan_step_id", spec.definition().parameters["properties"])
+
+    def test_stopping_or_restarting_http_confirmation_is_resumable(self):
+        plan = Plan()
+        plan.update({"items": [step()]})
+        plan.begin("http", "http_request", "one")
+        plan.wait("http", "等待确认 HTTP 请求")
+        snapshot = plan.snapshot()
+        plan.finish("stopped", "stopped")
+        self.assertEqual(plan.data["status"], "cancelled")
+        self.assertEqual(display_plan(snapshot, [], active=False)["status"], "paused")
+
+    def test_partial_tool_results_cannot_be_completed_by_changing_status(self):
+        plan = Plan()
+        plan.update({"items": [step()]})
+        plan.begin("c1", "search_files", "one")
+        plan.observe(result(result={"stopped": "达到上限"}))
+        plan.update({"items": [step("paused")]})
+        with self.assertRaisesRegex(ValueError, "成功"):
+            plan.update({"items": [step("completed")]})
+        plan.update({"items": [step()]})
+        plan.begin("c2", "search_files", "one")
+        plan.observe(result("c2"))
+        self.assertEqual(plan.update({"items": [step("completed")]})["status"], "completed")
+
+
+class LoopTests(unittest.IsolatedAsyncioTestCase):
+    def fixture(self, replies):
+        service = object.__new__(AssistantService)
+        memory = MemoryTrace()
+        cid = memory.create_conversation(1, "", 1)
+        rid = memory.start_run(cid, 1, "test")
+        bookkeeping = Mock()
+        bookkeeping.tokens_today.return_value = 0
+        service.trace = RoutedTrace(bookkeeping, memory)
+        state = RunState(rid, cid, 1, 1, "test", 1, "files", "")
+        service._validate = Mock()
+        service._acquire, service._title, service._attach_images = AsyncMock(), AsyncMock(), AsyncMock()
+        service._release = Mock()
+        service._context = AsyncMock(return_value=([], 0, 0, False))
+        service._model_call = AsyncMock(side_effect=replies)
+        service.channels = Mock()
+        service.channels.model.return_value = {"id": 1, "channel_id": 1, "context_window": 1000000, "max_output": 1000}
+        service.channels.vision.return_value = False
+        service.config = Mock()
+        service.config.limits.return_value = {name: rule[0] for name, rule in LIMITS.items()}
+        service.objects, service.guard, service.attachments, service.settings = Mock(), Mock(), Mock(), Mock()
+        service.objects.metadata.db.execute.return_value.fetchone.return_value = None
+        service.guard.redact.side_effect = lambda value: value
+        service.guard.redact_value.side_effect = lambda value: value
+        service.attachments.for_conversation.return_value = {}
+        service.offline, service.http_guard = None, None
+        service._tool_settings = Mock(return_value={})
+        service._conversation_taint = Mock(return_value=None)
+        service._fit = lambda value, limit: (value, False)
+        service.search = AsyncMock(return_value=ToolOutput({"count": 1}, "找到 1 项"))
+        spec = ToolSpec("search_files", "搜索文件", "browse", "read", "查询", {"type": "object", "properties": {}}, service.search)
+        service._user_tools = Mock(return_value={"update_plan": TOOLS["update_plan"], "search_files": spec})
+        return service, state
+
+    async def run_fixture(self, replies):
+        service, state = self.fixture(replies)
+        with patch("tgdrive.assistant.service.knowledge.public_config", return_value={}):
+            await service._run(state)
+        return service, state
+
+    async def test_plan_precedes_parallel_work_and_uses_real_evidence(self):
+        service, state = await self.run_fixture([
+            Reply(tool_calls=[call("update_plan", {"items": [step()]}, "plan1"), call("search_files", {"plan_step_id": "one"})]),
+            Reply(tool_calls=[call("update_plan", {"items": [step("completed")]}, "plan2")]), Reply(text="已核对")])
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "completed")
+        self.assertEqual(service.search.await_args.args[1], {})
+        service.search.assert_awaited_once()
+
+    async def test_final_check_has_one_retry_then_preserves_unfinished_plan(self):
+        service, state = await self.run_fixture([Reply(tool_calls=[call("update_plan", {"items": [step()]})]),
+                                                 Reply(text="已经全部完成"), Reply(text="本轮暂停")])
+        messages = service.trace.messages(state.conversation_id)
+        self.assertEqual(service._model_call.await_count, 3)
+        self.assertEqual(sum(message.get("type") == "plan_check" for message in messages), 1)
+        self.assertNotIn("已经全部完成", [message.get("text") for message in messages])
+        self.assertEqual(state.stop_reason, "plan_incomplete")
+        self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "paused")
+
+    async def test_fallback_plan_keeps_tool_budget_and_cancellation_keeps_progress(self):
+        service, state = await self.run_fixture([
+            Reply(tool_calls=[call("search_files", ident="c1"), call("search_files", {"q": "next"}, "c2")]), Reply(text="已查询")])
+        self.assertEqual(service.search.await_count, 2)
+        self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "completed")
+        self.assertTrue(service.trace.latest_plan(state.conversation_id)["automatic"])
+        service, state = await self.run_fixture([Reply(tool_calls=[call("update_plan", {"items": [step()]})]), asyncio.CancelledError()])
+        self.assertEqual(state.status, "stopped")
+        self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "cancelled")
+
+    async def test_budget_limit_keeps_limit_reason_and_plan_progress(self):
+        service, state = self.fixture([Reply(tool_calls=[call("update_plan", {"items": [step()]})]), Reply(text="预算已用完")])
+        service.config.limits.return_value["max_steps"] = 1
+        with patch("tgdrive.assistant.service.knowledge.public_config", return_value={}):
+            await service._run(state)
+        self.assertEqual(state.stop_reason, "limit")
+        self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "paused")
+
+    async def test_next_run_resumes_same_plan_without_repeating_completed_step(self):
+        first = {"id": "scope", "content": "确认范围", "kind": "reasoning", "status": "completed", "detail": "已确认"}
+        pending = step("paused")
+        service, state = await self.run_fixture([Reply(tool_calls=[call("update_plan", {"items": [first, pending]})]), Reply(text="稍后继续")])
+        previous = service.trace.latest_plan(state.conversation_id)
+        rid = service.trace.start_run(state.conversation_id, 1, "test")
+        resumed = RunState(rid, state.conversation_id, 1, 1, "test", 1, "files", "")
+        service._model_call.side_effect = [
+            Reply(tool_calls=[call("update_plan", {"plan_id": previous["id"], "items": [first, step()]}, "resume"),
+                              call("search_files", {"plan_step_id": "one"})]),
+            Reply(tool_calls=[call("update_plan", {"items": [first, step("completed")]}, "finish")]), Reply(text="核对完成")]
+        with patch("tgdrive.assistant.service.knowledge.public_config", return_value={}):
+            await service._run(resumed)
+        latest = service.trace.latest_plan(state.conversation_id)
+        self.assertEqual((latest["id"], latest["status"]), (previous["id"], "completed"))
+        self.assertEqual(latest["items"][0]["status"], "completed")
+        service.search.assert_awaited_once()
+        self.assertIn(previous["id"], service._model_call.call_args_list[-3].args[4][-1]["content"])
+
+
+if __name__ == "__main__":
+    unittest.main()

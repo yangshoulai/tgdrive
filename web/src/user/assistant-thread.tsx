@@ -3,7 +3,7 @@
  * 卡片（提问、作用域、待确认操作、HTTP 请求、浏览器动作）与最终回复。运行中的思考与工具调用来自事件流（live）。
  * 卡片全部由服务端冻结的数据渲染，不使用模型生成的描述。
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { Markdown } from "../markdown";
@@ -81,6 +81,7 @@ const SYSTEM_EVENTS = ["scope_changed", "scope_rejected", "mode_changed", "model
 
 function group(messages: ai.ChatMessage[]): Item[] {
   const items: Item[] = [];
+  const plans = new Map<string, { turn: Turn; index: number }>();
   let turn: Turn | null = null;
   const ensure = (message: ai.ChatMessage): Turn => {
     if (!turn) { turn = { key: `t${message.seq}`, steps: [], cards: [], notices: [], runId: message.run_id, input: 0, output: 0, startedAt: message.created_at }; items.push({ kind: "turn", turn }); }
@@ -92,6 +93,19 @@ function group(messages: ai.ChatMessage[]): Item[] {
     if (message.role === "user") {
       turn = { key: `t${message.seq}`, user: message, steps: [], cards: [], notices: [], runId: message.run_id, input: 0, output: 0, startedAt: message.created_at };
       items.push({ kind: "turn", turn });
+      continue;
+    }
+    if (message.event?.type === "plan") {
+      const id = message.event.id ?? `legacy-${ensure(message).key}`;
+      const existing = plans.get(id);
+      if (existing) {
+        const previous = existing.turn.cards[existing.index].event as ai.PlanEvent;
+        if ((message.event.version ?? 0) >= (previous.version ?? 0)) existing.turn.cards[existing.index] = message;
+      } else {
+        const current = ensure(message);
+        plans.set(id, { turn: current, index: current.cards.length });
+        current.cards.push(message);
+      }
       continue;
     }
     if (message.role === "event" && (SYSTEM_EVENTS.includes(message.type ?? "") || !message.run_id && !["error", "stopped", "limit"].includes(message.type ?? ""))) {
@@ -116,7 +130,6 @@ function group(messages: ai.ChatMessage[]): Item[] {
     }
     if (message.role === "tool") {
       if (message.event) {
-        if (message.event.type === "plan") current.cards = current.cards.filter(card => card.event?.type !== "plan");
         current.cards.push(message);
       } else current.steps.push({ kind: "tool", key: `s${message.seq}`, message });
     }
@@ -128,6 +141,22 @@ function group(messages: ai.ChatMessage[]): Item[] {
 
 /** 私密对话的链接放行规则：只有对话中出现过的地址可以点击（§24.8）；普通对话不限制。 */
 const LinkContext = createContext<((href: string) => boolean) | undefined>(undefined);
+
+export function latestPlan(messages: ai.ChatMessage[]): ai.PlanEvent | null {
+  let latest: ai.PlanEvent | null = null;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const event = messages[index].event;
+    if (event?.type !== "plan") continue;
+    if (!latest) latest = event;
+    else if (latest.id && event.id === latest.id && (event.version ?? 0) > (latest.version ?? 0)) latest = event;
+  }
+  return latest;
+}
+
+function canResumePlan(plan: ai.PlanEvent, running: boolean): boolean {
+  return !running && Boolean(plan.id) && plan.status !== "completed"
+    && !plan.items.some(item => item.status === "waiting_user" || item.status === "in_progress");
+}
 
 export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprovals, onHttpDecision, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
   detail: ai.ConversationDetail; live: LiveRun | null; liveModel?: string; modelLabel: (id: number | null | undefined) => string; runId: string | null;
@@ -141,6 +170,8 @@ export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprova
   const lastQuestion = [...detail.messages].reverse().find(message => message.event?.type === "question");
   const answered = lastQuestion ? detail.messages.some(message => message.role === "user" && message.seq > lastQuestion.seq) : true;
   const lastTurn = [...items].reverse().find(item => item.kind === "turn");
+  const lastPlan = latestPlan(detail.messages);
+  const resumablePlan = lastPlan && canResumePlan(lastPlan, running) ? lastPlan.id : undefined;
   const links = detail.links;
   const allowLink = useMemo(() => {
     if (!links) return undefined;
@@ -152,6 +183,7 @@ export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprova
       : <TurnView key={item.turn.key} turn={item.turn} live={item === lastTurn && running ? live : null}
           model={item.turn.modelId != null ? modelLabel(item.turn.modelId) : item === lastTurn && running ? liveModel ?? "" : ""}
           actions={detail.actions} messages={detail.messages} canAnswer={!running && !answered} questionSeq={lastQuestion?.seq}
+          resumablePlan={resumablePlan}
           httpApprovals={httpApprovals.filter(approval => approval.runId === (item.turn.runId ?? (item === lastTurn ? runId : null)))} onHttpDecision={onHttpDecision}
           onAnswer={onAnswer} onScope={onScope} onRetry={!running ? onRetry : undefined}
           onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />)}
@@ -167,8 +199,9 @@ function SystemEvent({ message }: { message: ai.ChatMessage }) {
   return <div className="ai-divider" role="note"><span><Icon name={icon} size={12} />{message.text}</span></div>;
 }
 
-function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq, httpApprovals, onHttpDecision, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
+function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq, resumablePlan, httpApprovals, onHttpDecision, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
   turn: Turn; live: LiveRun | null; model: string; actions: ai.AssistantAction[]; messages: ai.ChatMessage[]; canAnswer: boolean; questionSeq?: number;
+  resumablePlan?: string;
   onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: (seq: number) => void;
   onActionChanged: () => void; onFilesChanged?: () => void;
   httpApprovals: HttpApproval[]; onHttpDecision: (callId: string, decision: ai.HttpDecision) => void;
@@ -183,7 +216,8 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
   const mark = useMarkState(live);
   const allowLink = useContext(LinkContext);
   const waiting = httpApprovals.some(approval => approval.status === "pending");
-  const cards: { key: string; at: number; message?: ai.ChatMessage; approval?: HttpApproval }[] = turn.cards.map(message => ({
+  const plans = turn.cards.filter(message => message.event?.type === "plan");
+  const cards: { key: string; at: number; message?: ai.ChatMessage; approval?: HttpApproval }[] = turn.cards.filter(message => message.event?.type !== "plan").map(message => ({
     key: message.event?.type === "http_request" ? `${message.run_id}:${message.event.id}` : `card-${message.seq}`,
     at: message.event?.type === "http_request" ? message.event.requested_at : message.created_at ?? 0, message,
   }));
@@ -197,6 +231,9 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
       <div className="ai-reply-body">
         <div className="ai-reply-head"><strong>文件助手</strong>{model && <span className="ai-model" title={model}>{model}</span>}
           {live && <LiveStatus live={live} waiting={waiting} />}</div>
+        {plans.map(message => message.event?.type === "plan" && <PlanCard key={message.event.id ?? turn.key} plan={message.event}
+          canContinue={Boolean(resumablePlan) && message.event.id === resumablePlan}
+          onContinue={() => onAnswer("继续当前计划，从尚未完成的步骤继续，先核对已有结果，避免重复执行。")} />)}
         {steps.length > 0 && <Process steps={steps} live={Boolean(live)} />}
         {cards.map(card => {
           const event = card.message?.event;
@@ -378,7 +415,7 @@ function Card({ message, actions, running, selectedAnswer, canAnswer, onAnswer, 
   onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onActionChanged: () => void; onFilesChanged?: () => void;
 }) {
   const event = message.event!;
-  if (event.type === "plan") return <PlanCard items={event.items} />;
+  if (event.type === "plan") return null;
   if (event.type === "question") return <QuestionCard question={event.question} options={event.options} selected={selectedAnswer} canAnswer={canAnswer} onAnswer={onAnswer} />;
   if (event.type === "scope_request") return <ScopeCard event={event} action={actions.find(item => item.id === event.action_id)} running={running} onScope={onScope} />;
   if (event.type === "action") return <ActionCard id={event.action_id} action={actions.find(item => item.id === event.action_id)} fallback={event}
@@ -430,14 +467,76 @@ function HttpRequestCard({ request, decision, approval, message, onDecide }: {
   </section>;
 }
 
-function PlanCard({ items }: { items: { content: string; status: string }[] }) {
-  const done = items.filter(item => item.status === "completed").length;
-  return <section className="ai-card ai-plan">
-    <CardHead icon="list" title="处理计划" subtitle={`${done} / ${items.length} 已完成`} />
-    <Progress value={items.length ? done / items.length * 100 : 0} label="计划进度" />
-    <ol>{items.map((item, index) => <li key={index} className={`is-${item.status}`}>
-      <span aria-hidden="true">{item.status === "completed" ? <Icon name="check" size={12} /> : item.status === "in_progress" ? <ActivityDots /> : index + 1}</span>{item.content}
+const PLAN_LABELS: Record<ai.PlanStatus, string> = { pending: "待执行", in_progress: "执行中", waiting_user: "等待确认", completed: "已完成",
+  failed: "失败", paused: "已暂停", cancelled: "已取消" };
+
+function planProgress(plan: ai.PlanEvent) {
+  const done = plan.items.filter(item => item.status === "completed").length;
+  const status = plan.status ?? (done === plan.items.length ? "completed" : "in_progress");
+  const current = plan.items.find(item => item.status === "in_progress" || item.status === "waiting_user");
+  const tone: Tone = status === "completed" ? "success" : status === "failed" ? "danger" : status === "waiting_user" ? "warning" : "neutral";
+  return { done, status, current, tone };
+}
+
+function PlanSteps({ plan }: { plan: ai.PlanEvent }) {
+  return <>
+    <ol>{plan.items.map((item, index) => <li key={item.id ?? index} className={`is-${item.status}`}>
+      <span className="ai-plan-dot" aria-hidden="true">{item.status === "completed" ? <Icon name="check" size={12} />
+        : item.status === "in_progress" ? <ActivityDots /> : item.status === "failed" ? <Icon name="alert" size={12} /> : index + 1}</span>
+      <div><span className="ai-plan-step"><span>{item.content}</span><small>{PLAN_LABELS[item.status]}</small></span>
+        {item.detail && <p className="ai-plan-detail">{item.detail}</p>}</div>
     </li>)}</ol>
+    {plan.reason && <p className="ai-plan-reason">调整原因：{plan.reason}</p>}
+  </>;
+}
+
+/** 位于消息滚动区之外，长任务中随时查看计划，不改变对话的阅读位置。 */
+export function PlanBar({ plan, running, onContinue }: { plan: ai.PlanEvent; running: boolean; onContinue: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const { done, status, current, tone } = planProgress(plan);
+  const panelId = useId();
+  const next = current ?? plan.items.find(item => item.status !== "completed");
+  const subtitle = next?.content ?? (status === "completed" ? "全部步骤已完成" : "查看完整计划");
+  return <section className="assistant-plan-bar ai-plan" aria-label="当前任务计划" onKeyDown={event => {
+    if (!expanded || event.key !== "Escape" || event.nativeEvent.isComposing || event.repeat) return;
+    event.preventDefault(); event.stopPropagation(); setExpanded(false); trigger.current?.focus({ preventScroll: true });
+  }}><div className="assistant-plan-inner">
+    <button ref={trigger} type="button" className="assistant-plan-trigger" aria-expanded={expanded} aria-controls={panelId}
+      onClick={() => setExpanded(value => !value)}>
+      <Icon name="list" size={16} />
+      <span className="assistant-plan-summary"><span className="assistant-plan-meta">
+        <strong>{plan.title ?? "任务计划"}</strong><span>{done} / {plan.items.length}</span><Badge tone={tone}>{PLAN_LABELS[status]}</Badge>
+      </span><small title={subtitle}>{subtitle}</small></span>
+      <Icon name="chevronDown" size={14} />
+    </button>
+    <div id={panelId} className="assistant-plan-panel" hidden={!expanded} role="region" aria-label="完整任务计划" tabIndex={0}
+      onPointerDown={event => {
+        if (!(event.target as Element).closest("button, a")) event.currentTarget.focus({ preventScroll: true });
+        event.stopPropagation();
+      }}>
+      <PlanSteps plan={plan} />
+      {canResumePlan(plan, running) && <div className="assistant-plan-actions"><span>已保留当前进度</span>
+        <Button size="sm" onClick={onContinue}>继续任务</Button></div>}
+    </div>
+  </div></section>;
+}
+
+function PlanCard({ plan, canContinue, onContinue }: { plan: ai.PlanEvent; canContinue: boolean; onContinue: () => void }) {
+  const { items } = plan;
+  const [collapsed, setCollapsed] = useState(plan.status === "completed");
+  const { done, status, current, tone } = planProgress(plan);
+  return <section className={`ai-card ai-plan is-${status}`} aria-label="任务计划">
+    <CardHead icon="list" title={plan.title ?? "处理计划"} subtitle={`${done} / ${items.length} 步骤已完成`}
+      badge={<Badge tone={tone}>{PLAN_LABELS[status]}</Badge>} />
+    <Progress value={items.length ? done / items.length * 100 : 0} label={`计划步骤完成数：${done} / ${items.length}`} />
+    <button type="button" className="ai-plan-toggle" aria-expanded={!collapsed} onClick={() => setCollapsed(value => !value)}>
+      <span>{current ? current.content : status === "completed" ? "全部步骤已完成" : "查看计划步骤"}</span>
+      <span>{collapsed ? "展开" : "收起"}<Icon name="chevronDown" size={13} /></span>
+    </button>
+    {!collapsed && <PlanSteps plan={plan} />}
+    {canContinue && <footer className="ai-card-foot"><span>已保留当前进度</span>
+      <Button size="sm" onClick={onContinue}>继续任务</Button></footer>}
   </section>;
 }
 

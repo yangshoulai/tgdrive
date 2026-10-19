@@ -8,7 +8,7 @@ import * as ai from "../assistant-api";
 import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, formatBytes, isShortcutControl, shortcutLabel, toast, type IconName, type MenuItem } from "../ui";
 import { ShortcutsDialog } from "../shortcuts";
 import type { PageImport } from "./page-import";
-import { Thread, useMarkState, type HttpApproval, type LiveRun } from "./assistant-thread";
+import { Thread, PlanBar, latestPlan, useMarkState, type HttpApproval, type LiveRun } from "./assistant-thread";
 import { AttachmentTray, useAttachments } from "./assistant-attachments";
 import { filesBridge, getPrivateSection, openPrivateSection, waitForFiles } from "./assistant-bridge";
 import { usePrivateAccess } from "./private-session";
@@ -22,7 +22,8 @@ import { cacheStats, cacheSupported, type CacheFile } from "../cache-client";
 /** 作用域选择「当前位置」：随文件页切换目录。 */
 const HERE = "\u0000here";
 const WIDTH_KEY = "tessera-assistant-width";
-const MIN_WIDTH = 360, MAX_WIDTH = 720;
+const MIN_WIDTH = 480, MAX_WIDTH = 720;
+const boundWidth = (value: number, maximum = MAX_WIDTH) => Math.max(MIN_WIDTH, Math.min(maximum, value));
 const display = (key: string) => "/" + key;
 const DRAFT_LIMIT = 8000;
 
@@ -103,7 +104,20 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   privateMode?: boolean;
 }) {
   const page = mode === "page";
-  const [width, setWidth] = useState(() => { const saved = Number(localStorage.getItem(WIDTH_KEY)); return saved >= MIN_WIDTH && saved <= MAX_WIDTH ? saved : 480; });
+  const [width, setWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(WIDTH_KEY));
+    return Number.isFinite(saved) && saved > 0 ? boundWidth(saved) : MIN_WIDTH;
+  });
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [resizing, setResizing] = useState(false);
+  const resize = useRef<{ pointerId: number; startX: number; startWidth: number; width: number } | null>(null);
+  const maxWidth = boundWidth(viewportWidth - 32);
+  const actualWidth = Math.min(width, maxWidth);
+  useEffect(() => {
+    const sync = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, []);
   const [history, setHistory] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [httpApprovals, setHttpApprovals] = useState<HttpApproval[]>([]);
@@ -187,9 +201,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   useEffect(() => {
     if (page || !open) return;
     const root = document.documentElement;
-    root.style.setProperty("--assistant-occupied", `${width + 32}px`);
+    root.style.setProperty("--assistant-occupied", `${viewportWidth > 760 ? actualWidth + 32 : 0}px`);
     return () => { root.style.removeProperty("--assistant-occupied"); };
-  }, [page, open, width]);
+  }, [page, open, actualWidth, viewportWidth]);
   useEffect(() => () => unsubscribe.current?.(), []);
   // 普通与私密抽屉可能同时挂着：只由打开的那个设置，关闭时移除。
   useEffect(() => {
@@ -332,7 +346,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
               setDetail(current => current && { ...current, actions: [...current.actions.filter(item => item.id !== action.id), action] });
             }).catch(() => undefined);
           }
-          window.requestAnimationFrame(() => scrollToEnd());
+          if (message.event?.type !== "plan") window.requestAnimationFrame(() => scrollToEnd());
           break;
         }
         case "resync":
@@ -526,6 +540,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       if (target?.closest?.(".menu, .modal-backdrop:not(.is-minimized) .modal")) return;
       if (document.querySelector(".menu, .modal-backdrop:not(.is-minimized) .assistant-dialog") || mentionOpen.current) return;
       event.preventDefault(); event.stopPropagation();
+      const planToggle = target?.closest?.(".assistant-plan-bar")?.querySelector<HTMLButtonElement>('.assistant-plan-trigger[aria-expanded="true"]');
+      if (planToggle) { planToggle.click(); planToggle.focus({ preventScroll: true }); return; }
       escapeRef.current();
     };
     window.addEventListener("keydown", handler, true);
@@ -546,14 +562,30 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   }, [open]);
 
   function startResize(event: ReactPointerEvent<HTMLDivElement>) {
-    event.preventDefault();
-    const startX = event.clientX, startWidth = width;
-    const move = (moveEvent: PointerEvent) => setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + startX - moveEvent.clientX)));
-    const up = () => {
-      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
-      setWidth(value => { localStorage.setItem(WIDTH_KEY, String(value)); return value; });
-    };
-    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+    if (event.button !== 0 || !event.isPrimary) return;
+    event.preventDefault(); event.stopPropagation();
+    event.currentTarget.focus({ preventScroll: true });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resize.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: actualWidth, width: actualWidth };
+    setResizing(true);
+  }
+  function moveResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const current = resize.current;
+    if (!current || event.pointerId !== current.pointerId) return;
+    current.width = boundWidth(current.startWidth + current.startX - event.clientX, boundWidth(window.innerWidth - 32));
+    setWidth(current.width);
+  }
+  function saveWidth(value: number) {
+    const next = boundWidth(value, boundWidth(window.innerWidth - 32));
+    setWidth(next); localStorage.setItem(WIDTH_KEY, String(next));
+  }
+  function finishResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const current = resize.current;
+    if (!current || event.pointerId !== current.pointerId) return;
+    resize.current = null;
+    setResizing(false);
+    saveWidth(current.width);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   }
 
   const conversationScope = detail?.conversation.scope ?? display(locationKey);
@@ -599,7 +631,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     {!page && onOpenPage && !privateMode && <IconButton icon="maximize" label="在全页打开" onClick={() => onOpenPage(currentId)} />}
     {!page && <IconButton icon="x" label="关闭" shortcut="Mod+J" onClick={onClose} />}
   </header>;
+  const plan = detail && !loading && config.notice_ack ? latestPlan(detail.messages) : null;
   const body = <>
+    {plan && <PlanBar key={`${currentId}:${plan.id ?? "legacy"}`} plan={plan} running={Boolean(runId)}
+      onContinue={() => void send("继续当前计划，从尚未完成的步骤继续，先核对已有结果，避免重复执行。")} />}
     <div className="assistant-scroll-area"><div className="assistant-thread" ref={scroller} role="log" aria-live="polite" aria-relevant="additions"
       onScroll={event => { const node = event.currentTarget; const bottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; setAtBottom(bottom); if (bottom) setUnseen(false); }}>
       <div className="assistant-thread-inner">
@@ -688,13 +723,15 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     </section>
   );
   return (
-    <aside ref={drawer} className={`assistant-drawer${open ? " is-open" : ""}${privateMode ? " is-private" : ""}`} style={{ "--assistant-width": `${width}px` } as CSSProperties}
+    <aside ref={drawer} className={`assistant-drawer${open ? " is-open" : ""}${privateMode ? " is-private" : ""}${resizing ? " is-resizing" : ""}`} style={{ "--assistant-width": `${actualWidth}px` } as CSSProperties}
       aria-label={privateMode ? "文件助手（私密对话）" : "文件助手"} aria-hidden={!open} tabIndex={-1} onPointerDown={focusArea} onKeyDown={onKeyDown} {...dropProps} {...(!open ? { inert: "" } as object : {})}>
-      <div className="assistant-resize" onPointerDown={startResize} role="separator" tabIndex={open ? 0 : -1} aria-label="调整助手宽度" aria-orientation="vertical"
-        aria-valuemin={MIN_WIDTH} aria-valuemax={MAX_WIDTH} aria-valuenow={width}
+      <div className="assistant-resize" onPointerDown={startResize} onPointerMove={moveResize}
+        onPointerUp={finishResize} onPointerCancel={finishResize} onLostPointerCapture={finishResize} onDoubleClick={() => saveWidth(MIN_WIDTH)}
+        role="separator" tabIndex={open ? 0 : -1} aria-label="调整助手宽度" aria-orientation="vertical"
+        title={`左右拖动调整宽度（${MIN_WIDTH}–${maxWidth} 像素），双击还原`}
+        aria-valuemin={MIN_WIDTH} aria-valuemax={maxWidth} aria-valuenow={actualWidth} aria-valuetext={`${actualWidth} 像素`}
         onKeyDown={event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault();
-          const next = event.key === "Home" ? MIN_WIDTH : event.key === "End" ? MAX_WIDTH : Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, width + (event.key === "ArrowLeft" ? 20 : -20)));
-          setWidth(next); localStorage.setItem(WIDTH_KEY, String(next)); }} />
+          saveWidth(event.key === "Home" ? MIN_WIDTH : event.key === "End" ? maxWidth : actualWidth + (event.key === "ArrowLeft" ? 20 : -20)); }} />
       {header}
       {history ? historyList : body}
       {dropOverlay}

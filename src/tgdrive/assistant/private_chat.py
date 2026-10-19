@@ -136,6 +136,13 @@ class MemoryTrace:
             return [{"seq": m["seq"], "run_id": m["run_id"], "role": m["role"], "tool_name": m["tool_name"],
                      "created_at": m["created_at"], **_copy(m["body"])} for m in rows]
 
+    def latest_plan(self, conversation_id: str) -> dict | None:
+        with self._lock:
+            for message in reversed(self.messages_by.get(conversation_id, [])):
+                if message["role"] == "event" and message["tool_name"] == "update_plan":
+                    return _copy(message["body"].get("event"))
+        return None
+
     def taint(self, conversation_id: str, names: list[str]) -> str | None:
         """最近一次摘要之后读取外部内容的工具名（与 AssistantService._conversation_taint 的 SQL 等价）。"""
         with self._lock:
@@ -363,6 +370,9 @@ class RoutedTrace:
 
     def messages(self, conversation_id, **options):
         return self._by(conversation_id).messages(conversation_id, **options)
+
+    def latest_plan(self, conversation_id):
+        return self._by(conversation_id).latest_plan(conversation_id)
 
     def start_run(self, conversation_id, *args):
         return self._by(conversation_id).start_run(conversation_id, *args)
