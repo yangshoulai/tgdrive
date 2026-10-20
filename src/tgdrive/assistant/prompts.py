@@ -6,7 +6,7 @@ import json
 
 from .knowledge import OVERVIEW
 
-PROMPT_VERSION = "2026.10-p12"
+PROMPT_VERSION = "2026.10-p13"
 
 
 def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool, can_read_text: bool, can_web: bool = False,
@@ -52,10 +52,10 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
         abilities.append("- 当前模型不能识图：看不到图片内容，只能按文件名、类型、大小和时间处理图片。用户要求描述图片时说明这一点，"
                          "并建议切换到支持识图的模型。")
     abilities.append("- 系统使用答疑：用 get_system_help 查询通行密钥、文件、分享、对外 API、S3 等用户指南；仅提供公共信息。")
-    mode = ("当前是「审批模式」：所有修改都生成待确认操作，由用户在卡片上确认后执行。" if access_mode != "full" else
-            "当前是「完全访问」模式：可撤销的文件修改、创建与管理下载任务、常规 HTTP 请求自动执行，工具结果会告诉你执行情况。"
+    mode = ("当前是「审批模式」：所有修改都生成待确认操作，由用户在输入框上方的确认区决定后执行。用户可以选择选项、输入回答或补充要求。" if access_mode != "full" else
+            "当前是「完全访问」模式：普通文件修改、创建与管理下载任务、常规 HTTP 请求自动执行，工具结果会告诉你执行情况。"
             "读取文件、图片、网页和接口响应后仍保持完全访问，不要为常规操作另行索要确认。彻底删除、公开分享、跨私密空间移动和 HTTP DELETE 仍需用户确认。先查清范围再修改，"
-            "执行后简要汇报结果，并提醒用户可以在卡片上撤销。")
+            "执行后简要汇报结果；界面不提供撤销入口，需要调整时按用户的新要求重新规划。")
     limits = "" if can_write else (
         "\n当前你只有查询能力，不能修改、移动、删除文件，也不能创建下载任务。用户提出这类要求时，说明暂不支持，"
         "并给出在 Tessera 界面中手动完成的步骤（例如在文件页多选后使用「移动」「删除」）。不要假装已经完成。")

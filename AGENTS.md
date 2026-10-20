@@ -25,6 +25,7 @@ Tessera（仓库名 tgdrive）：基于 Telegram Bot + 私有频道的加密分�
 - `Dockerfile` / `docker-compose.yml`：多阶段镜像，用户端在根路径，管理端在 `/admin/`。`.github/workflows/docker.yml` 仅在推送 `v*` 标签时构建并发布镜像，不要添加其他触发条件；它会校验标签与 `pyproject.toml` 版本一致，并发布 `<完整版本>`、`<主>.<次>`、`<主>`（v0 除外）与 `latest` 标签。
 - 版本与发布：1.0.0 起遵循语义化版本，版本号的唯一来源是 `pyproject.toml`（运行时由 `tgdrive/version.py` 读取，`tgdrive --version`、管理员接口 `/api/admin/v1/version` 与控制台概览显示；公开接口不暴露版本）。发布时同时更新 `pyproject.toml`、`web/package.json`（含 lock）、`CHANGELOG.md`，再推送 `v<版本>` 标签并创建 GitHub Release。数据库、`/api/v1`、S3 网关、秒传指纹的不兼容变更只能进入新的主版本，并在 CHANGELOG 写明升级步骤。
 - `DESIGN.md`：视觉规范；`UX-CONTRACT.md`：交互与路由契约。改动 UI 时同步更新。
+- 文件助手的提问、文件操作、范围请求与 HTTP 审批由 `web/src/user/assistant-review.tsx` 统一放在输入框上方，按队列逐项处理，决定后移除；消息流只保留紧凑结果，不提供撤销入口。补充要求先拒绝旧请求、停止原运行，再作为新消息重新规划，不能修改或同时批准冻结参数。普通／私密操作有效期共用 `config.ACTION_TTL`（24 小时），HTTP 审批为 `HTTP_APPROVAL_TIMEOUT`（30 分钟），人工等待不占工具及整轮执行预算；登录与私密授权按原规则失效。见 `docs/assistant-design.md` §28。
 
 ## 常用命令
 

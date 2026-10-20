@@ -415,15 +415,15 @@ async def request_scope(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("ask_user", "向用户提问", "context", "meta",
-      "需要用户在几个选项中做选择时使用（例如命名格式、归类方式）。界面会把选项渲染成按钮；调用后本轮结束，等待用户回复。",
+      "需要用户选择或补充要求时使用（例如命名格式、归类方式）。可提供选项，也可只问开放问题；用户始终可以输入文字。调用后本轮结束，等待用户回复。",
       {"question": {"type": "string", "description": "问题"},
-       "options": {"type": "array", "items": {"type": "string"}, "description": "2–6 个简短选项"}}, ("question", "options"))
+       "options": {"type": "array", "items": {"type": "string"}, "description": "可选，最多 6 个简短选项"}}, ("question",))
 async def ask_user(ctx: ToolContext, args: dict) -> ToolOutput:
     question = _str(args, "question", limit=300)
-    options = args.get("options")
-    if not question or not isinstance(options, list) or not 2 <= len(options) <= 6 \
+    options = args.get("options", [])
+    if not question or not isinstance(options, list) or len(options) > 6 \
             or not all(isinstance(item, str) and 0 < len(item.strip()) <= 60 for item in options):
-        raise ToolError("参数不正确：需要问题和 2–6 个不超过 60 字的选项")
+        raise ToolError("参数不正确：需要问题，选项最多 6 个且每个不超过 60 字")
     options = [item.strip() for item in options]
     return ToolOutput({"status": "已向用户提问，等待回复"}, question, ends_turn=True,
                       event={"type": "question", "question": question, "options": options})

@@ -35,7 +35,7 @@ from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
 from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
 from .catalog import CatalogStore
 from .channels import ChannelStore
-from .config import LIMITS, PRIVATE_NOTICE, AssistantConfig
+from .config import HTTP_APPROVAL_TIMEOUT, LIMITS, PRIVATE_NOTICE, AssistantConfig
 from .private_chat import MemoryTrace, RoutedTrace, is_private
 from .planning import Plan, display_plan
 from .guard import SecretGuard
@@ -125,6 +125,9 @@ class RunState:
     changed: asyncio.Condition = field(default_factory=asyncio.Condition)
     # 浏览器工具：等待页面回传结果的调用（call_id → Future）
     client_waiters: dict = field(default_factory=dict)
+    approval_waiters: int = 0
+    approval_started: float | None = None
+    approval_seconds: float = 0
     # 本轮读取过的不可信外部内容；仅作为来源标记，不改变访问模式。
     tainted: str | None = None
     listeners: int = 0
@@ -153,6 +156,13 @@ class RunState:
             self.trim_events()
         async with self.changed:
             self.changed.notify_all()
+
+
+def _run_clock(state) -> float:
+    """人工审批暂停执行预算；并行审批的重叠等待只扣除一次。"""
+    now = time.monotonic()
+    started = getattr(state, "approval_started", None)
+    return now - getattr(state, "approval_seconds", 0) - (now - started if started is not None else 0)
 
 
 class AssistantDenied(PermissionError):
@@ -958,7 +968,12 @@ class AssistantService:
             return {"error": "浏览器未连接：用户的对话框没有打开，无法操作页面", "decision": "cancelled"}
         future = asyncio.get_running_loop().create_future()
         state.client_waiters[call_id] = future
-        timeout = 120 if name == "http_request_approval" else CLIENT_TIMEOUT
+        approval = name == "http_request_approval"
+        timeout = HTTP_APPROVAL_TIMEOUT if approval else CLIENT_TIMEOUT
+        if approval:
+            if not getattr(state, "approval_waiters", 0):
+                state.approval_started = time.monotonic()
+            state.approval_waiters = getattr(state, "approval_waiters", 0) + 1
         try:
             await state.emit({"type": "client_call", "call_id": call_id, "tool_call_id": tool_call_id, "name": name, "args": arguments,
                               "expires_at": time.time() + timeout, "requested_at": review.get("requested_at") if review is not None else time.time()})
@@ -967,6 +982,11 @@ class AssistantService:
             return {"error": "浏览器没有响应：对话框可能已关闭", "decision": "expired"}
         finally:
             state.client_waiters.pop(call_id, None)
+            if approval:
+                state.approval_waiters -= 1
+                if not state.approval_waiters:
+                    state.approval_seconds = getattr(state, "approval_seconds", 0) + time.monotonic() - state.approval_started
+                    state.approval_started = None
 
     def _conversation_taint(self, conversation_id: str) -> str | None:
         """最近一次摘要之后，对话里是否有读取外部内容的工具结果（它们仍在模型上下文中）。"""
@@ -1638,6 +1658,7 @@ class AssistantService:
         await state.emit({"type": "tool_started", "call_id": call.id, "name": call.name, "label": label})
         status, summary, items, event = "ok", "", None, None
         http_review = None
+        tool_timer = None
         plan = state.plan if isinstance(getattr(state, "plan", None), Plan) else None
         images: list[str] = []
         try:
@@ -1709,7 +1730,15 @@ class AssistantService:
                 if plan is not None:
                     plan.wait(call.id, "请在 HTTP 请求卡片中确认")
                     await self._publish_plan(state)
-                result = await self._client_call(state, call.id, name, arguments, review=http_review)
+                # 人工确认不消耗工具执行时间；恢复后仍使用等待前剩余的预算。
+                remaining = max(0, tool_timer.when() - time.monotonic()) if tool_timer is not None else None
+                if tool_timer is not None:
+                    tool_timer.reschedule(None)
+                try:
+                    result = await self._client_call(state, call.id, name, arguments, review=http_review)
+                finally:
+                    if tool_timer is not None:
+                        tool_timer.reschedule(time.monotonic() + remaining)
                 decision = result.get("decision")
                 if result.get("approved") is True:
                     http_review["decision"] = "approved"
@@ -1752,7 +1781,8 @@ class AssistantService:
                                   vision=self.channels.vision(self.channels.model(state.model_id)),
                                   tainted=lambda: state.tainted or self._conversation_taint(state.conversation_id), **private)
             timeout = max(limits["tool_seconds"], spec.timeout or 0)
-            output = await asyncio.wait_for(spec.handler(context, arguments), timeout)
+            async with asyncio.timeout(timeout) as tool_timer:
+                output = await spec.handler(context, arguments)
             browser = output.event or {}
             if browser.get("type") == "browser" and browser.get("action") in ("cache", "uncache", "thumbnails") and auto_approve():
                 # 缓存和缩略图提交不需要浏览器用户手势，按完全访问权限直接执行。
@@ -1850,13 +1880,15 @@ class AssistantService:
         """整轮时限内执行一批；取消时回收全部子任务，保留已经完成的结果。"""
         tasks = [asyncio.create_task(self._execute(state, call, tools, limits, shared)) for call in calls]
         try:
-            done, _ = await asyncio.wait(tasks, timeout=max(0, deadline - time.monotonic()),
-                                         return_when=asyncio.FIRST_EXCEPTION)
-            for task in done:
-                if task.cancelled():
-                    raise asyncio.CancelledError()
-                if error := task.exception():
-                    raise error
+            done, pending = set(), set(tasks)
+            while pending and (remaining := deadline - _run_clock(state)) > 0:
+                finished, pending = await asyncio.wait(pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                done.update(finished)
+                for task in finished:
+                    if task.cancelled():
+                        raise asyncio.CancelledError()
+                    if error := task.exception():
+                        raise error
             return [task.result() if task in done else self._skipped_tool(
                 call, "已达到本轮运行时间上限，本次调用已取消") for call, task in zip(calls, tasks)]
         finally:
@@ -1875,7 +1907,7 @@ class AssistantService:
             state.status = "running"
             await state.emit({"type": "run_started", "run_id": state.id, "model_id": state.model_id})
             limits = self.config.limits()
-            deadline = time.monotonic() + limits["run_seconds"]
+            deadline = _run_clock(state) + limits["run_seconds"]
             repeats: collections.Counter = collections.Counter()
             errors = 0
             shared: dict = {}
@@ -1906,7 +1938,7 @@ class AssistantService:
                         forced_final = "工具调用次数"
                     elif limits["run_tokens"] and state.input_tokens + state.output_tokens >= limits["run_tokens"]:
                         forced_final = "累计 token 预算"
-                    elif time.monotonic() >= deadline:
+                    elif _run_clock(state) >= deadline:
                         forced_final = "运行时间"
                     if forced_final:
                         stop_reason = "limit"
@@ -1955,7 +1987,7 @@ class AssistantService:
                     raise ContextFull()
                 await self._attach_images(state, history)
                 history.append(context_block)
-                remaining = max(5.0, deadline + (60 if forced_final else 0) - time.monotonic())
+                remaining = max(5.0, deadline + (60 if forced_final else 0) - _run_clock(state))
                 await state.emit({"type": "thinking"})
                 try:
                     reply = await asyncio.wait_for(self._model_call(state, model, endpoint, system, _clean(history), definitions,
@@ -1972,7 +2004,7 @@ class AssistantService:
                     await state.emit({"type": "context", **state.context})
                     await self._attach_images(state, history)
                     history.append(context_block)
-                    remaining = max(5.0, deadline + (60 if forced_final else 0) - time.monotonic())
+                    remaining = max(5.0, deadline + (60 if forced_final else 0) - _run_clock(state))
                     reply = await asyncio.wait_for(self._model_call(state, model, endpoint, system, _clean(history), definitions,
                                                                     max_tokens=model["max_output"]), remaining)
                 actual = reply.input_tokens if reply.input_tokens * 4 >= estimate else estimate
@@ -2025,7 +2057,7 @@ class AssistantService:
                     if limits["run_tokens"] and state.input_tokens + state.output_tokens >= limits["run_tokens"]:
                         skipped_reason = "已达到本轮累计 token 预算，本次调用未执行"
                         break
-                    if time.monotonic() >= deadline:
+                    if _run_clock(state) >= deadline:
                         skipped_reason = "已达到本轮运行时间上限，本次调用未执行"
                         break
                     size = min(limits["parallel_calls"], limits["max_tool_calls"] - tool_calls)

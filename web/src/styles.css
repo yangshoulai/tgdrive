@@ -3262,6 +3262,35 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .assistant-limit-form textarea.input { min-height: 96px; padding: 10px 12px; resize: vertical; line-height: 1.6; }
 
 /* ---------- 文件助手输入区层次 ---------- */
+/* 确认请求与消息分开布局；数量增加只改变队列计数，不挤占更多对话高度。 */
+.assistant-review { margin-bottom: 10px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); }
+.assistant-review-head { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 7px 12px; border-bottom: 1px solid var(--line-soft); background: var(--surface-sunken); color: var(--ink-2); font-size: var(--text-xs); }
+.assistant-review-head > svg { color: var(--accent); flex: none; }
+.assistant-review-head > strong { font-weight: 600; }
+.assistant-review-head > span { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--ink-3); }
+.assistant-review-nav { display: flex; gap: 2px; }
+.assistant-review-nav .icon-btn { width: 26px; height: 26px; }
+.assistant-review-body { max-height: min(28dvh, 280px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.assistant-review-edit { flex: none; padding: 3px 0; border: 0; background: transparent; color: var(--ink-2); font-size: var(--text-xs); cursor: pointer; }
+.assistant-review-edit:hover { color: var(--accent); }
+.assistant-review-body > .ai-card { margin: 0; border: 0; border-radius: 0; box-shadow: none; animation: none; }
+.assistant-review-body .ai-card-foot { position: sticky; z-index: 1; bottom: 0; border-radius: 0; background: var(--surface); }
+.assistant-review-question { display: grid; gap: 12px; padding: 12px 14px; }
+.assistant-review-question h3 { margin: 0; color: var(--ink); font-size: var(--text-sm); font-weight: 600; line-height: 1.6; }
+.assistant-review-input { display: grid; gap: 6px; min-width: 0; color: var(--ink-2); font-size: var(--text-xs); }
+.assistant-review-input textarea { width: 100%; min-height: 64px; max-height: 160px; resize: vertical; font-size: var(--text-sm); line-height: 1.6; }
+.assistant-review-feedback { padding: 10px 14px; border-top: 1px solid var(--line-soft); font-size: var(--text-xs); }
+.assistant-review-feedback form { display: grid; gap: 10px; }
+.assistant-review-question footer, .assistant-review-feedback footer { position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 8px 0; background: var(--surface); }
+.assistant-review-question footer > span, .assistant-review-feedback footer > span { flex: 1; color: var(--ink-3); font-size: var(--text-micro); line-height: 1.6; }
+.ai-review-result { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 0; color: var(--ink-2); font-size: var(--text-xs); line-height: 1.6; }
+.ai-review-result > svg, .ai-review-result > .badge, .ai-review-result > .btn, .ai-review-result > button { flex: none; }
+.ai-review-result > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.ai-review-result strong { color: var(--ink); font-weight: 500; }
+.ai-review-result small { display: block; color: var(--ink-3); font-size: var(--text-micro); }
+.ai-action-record { display: grid; gap: 4px; border-bottom: 1px solid var(--line-soft); }
+@media (max-height: 640px) { .assistant-review-body { max-height: 24dvh; } }
+
 /* 消息区底部渐隐，与输入区拉开层次；输入框是浮起的卡片，上下文与控制行退为安静的文字按钮，发送按钮是唯一的强调。 */
 .assistant-scroll-area::after { position: absolute; right: 0; bottom: 0; left: 0; z-index: 1; height: 28px; background: linear-gradient(to bottom, transparent, var(--surface)); content: ""; pointer-events: none; }
 .assistant-composer { container: assistant-composer / inline-size; padding: 4px 16px 12px; }

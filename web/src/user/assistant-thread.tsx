@@ -1,6 +1,6 @@
 /**
  * 文件助手的消息流（docs/assistant-design.md §19.3–19.4）：按轮组织，每轮依次是思考、过程时间线（工具调用与中间说明）、
- * 卡片（提问、作用域、待确认操作、HTTP 请求、浏览器动作）与最终回复。运行中的思考与工具调用来自事件流（live）。
+ * 决定／执行摘要、浏览器动作与最终回复；待确认请求由输入区上方的统一确认区呈现。
  * 卡片全部由服务端冻结的数据渲染，不使用模型生成的描述。
  */
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
@@ -238,7 +238,7 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
         {cards.map(card => {
           const event = card.message?.event;
           const http = card.approval ?? (event?.type === "http_request" ? { request: event.request, status: event.decision } : null);
-          if (http) return <HttpRequestCard key={card.key} request={http.request} decision={http.status} approval={card.approval} message={card.message} onDecide={onHttpDecision} />;
+          if (http) return http.status === "pending" ? null : <HttpRequestCard key={card.key} request={http.request} decision={http.status} approval={card.approval} message={card.message} onDecide={onHttpDecision} />;
           const message = card.message!;
           return <Card key={card.key} message={message} actions={actions} running={Boolean(live)}
             selectedAnswer={event?.type === "question" ? messages.find(item => item.role === "user" && item.seq > message.seq)?.text : undefined}
@@ -416,7 +416,7 @@ function Card({ message, actions, running, selectedAnswer, canAnswer, onAnswer, 
 }) {
   const event = message.event!;
   if (event.type === "plan") return null;
-  if (event.type === "question") return <QuestionCard question={event.question} options={event.options} selected={selectedAnswer} canAnswer={canAnswer} onAnswer={onAnswer} />;
+  if (event.type === "question") return selectedAnswer ? <div className="ai-review-result"><Icon name="checkCircle" size={14} /><span>{event.question}</span><Badge>已回答</Badge></div> : null;
   if (event.type === "scope_request") return <ScopeCard event={event} action={actions.find(item => item.id === event.action_id)} running={running} onScope={onScope} />;
   if (event.type === "action") return <ActionCard id={event.action_id} action={actions.find(item => item.id === event.action_id)} fallback={event}
     onChanged={onActionChanged} onFilesChanged={onFilesChanged} />;
@@ -433,9 +433,10 @@ function CardHead({ icon, tone = "accent", title, subtitle, badge }: { icon: Ico
 }
 
 /** 确认只回传决定；请求内容由服务端冻结，完成后以加密工具消息中的预览与结果替换实时卡片。 */
-function HttpRequestCard({ request, decision, approval, message, onDecide }: {
+export function HttpRequestCard({ request, decision, approval, message, onDecide, review = false }: {
   request: ai.HttpRequestPreview; decision: HttpApproval["status"]; approval?: HttpApproval; message?: ai.ChatMessage;
   onDecide?: (callId: string, decision: ai.HttpDecision) => void;
+  review?: boolean;
 }) {
   const now = useNow(decision === "pending");
   const remaining = Math.max(0, Math.ceil(((approval?.expires ?? now) - now) / 1000));
@@ -445,6 +446,7 @@ function HttpRequestCard({ request, decision, approval, message, onDecide }: {
     : status === "rejected" ? "已拒绝" : status === "expired" ? "已过期" : status === "error" ? "回传失败" : "已取消";
   const tone: Tone = pending ? "warning" : status === "approved" && message?.status === "ok" ? "success"
     : status === "error" || status === "approved" && message?.status === "error" ? "danger" : "neutral";
+  if (!review) return <div className="ai-review-result"><Icon name="globe" size={14} /><span>{request.method} {request.url}</span><Badge tone={tone}>{label}</Badge></div>;
   return <section className={`ai-card ai-http is-${status}`} aria-label="HTTP 请求">
     <CardHead icon="globe" tone={pending ? "warning" : "accent"} title="HTTP 请求" subtitle={`${request.method} · 正文 ${formatBytes(request.body_bytes)}`}
       badge={<Badge tone={tone}>{label}</Badge>} />
@@ -540,20 +542,13 @@ function PlanCard({ plan, canContinue, onContinue }: { plan: ai.PlanEvent; canCo
   </section>;
 }
 
-function QuestionCard({ question, options, selected, canAnswer, onAnswer }: { question: string; options: string[]; selected?: string; canAnswer: boolean; onAnswer: (text: string) => void }) {
-  return <section className={`ai-card ai-question${selected ? " is-answered" : ""}`}>
-    <CardHead icon="info" title="需要你的选择" subtitle={question} badge={selected ? <Badge tone="success">已回答</Badge> : undefined} />
-    <div className="ai-choices">{options.map((option, index) => <button type="button" key={option} disabled={!canAnswer}
-      className={selected === option ? "is-selected" : ""} onClick={() => onAnswer(option)}>
-      <span className="ai-choice-key">{selected === option ? <Icon name="check" size={12} /> : String.fromCharCode(65 + index)}</span><span>{option}</span>
-    </button>)}</div>
-  </section>;
-}
-
-function ScopeCard({ event, action, running, onScope }: { event: Extract<ai.ToolEvent, { type: "scope_request" }>; action?: ai.AssistantAction; running: boolean;
+export function ScopeCard({ event, action, running, onScope, review = false }: { event: Extract<ai.ToolEvent, { type: "scope_request" }>; action?: ai.AssistantAction; running: boolean;
+  review?: boolean;
   onScope: (id: string, approve: boolean) => void }) {
   if (!action && running) return <section className="ai-card"><SkeletonRows rows={2} /></section>;
   const status = action?.status ?? "expired";
+  if (!review) return status === "pending" ? null : <div className="ai-review-result"><Icon name="folder" size={14} />
+    <span>访问范围：{action?.payload?.to ?? event.to}</span><Badge>{status === "confirmed" ? "已允许" : status === "rejected" ? "已拒绝" : "已过期"}</Badge></div>;
   return <section className={`ai-card ai-scope is-${status}`}>
     <CardHead icon="folder" tone="warning" title="助手请求访问更大的范围" subtitle={action?.payload?.reason ?? event.reason}
       badge={status !== "pending" ? <Badge tone={status === "confirmed" ? "success" : "neutral"}>{status === "confirmed" ? "已允许" : status === "rejected" ? "已拒绝" : "已过期"}</Badge> : undefined} />
@@ -766,13 +761,9 @@ function ItemRow({ kind, item }: { kind: string; item: ai.ActionItem }) {
     <span className="cell-truncate" title={display(item.path ?? "")}>{display(item.path ?? "")}</span></li>;
 }
 
-function formatClock(seconds: number) {
-  const date = new Date(seconds * 1000);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
+export function ActionCard({ id, action, fallback, onChanged, onFilesChanged, review = false }: {
   id: string; action?: ai.AssistantAction; fallback: { kind: string; count: number; auto?: boolean }; onChanged: () => void; onFilesChanged?: () => void;
+  review?: boolean;
 }) {
   const [value, setValue] = useState<ai.AssistantAction | undefined>(action);
   const [busy, setBusy] = useState<string | null>(null);
@@ -813,7 +804,7 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
     setBusy(label);
     try {
       const fresh = await task();
-      if (fresh.status === "running" || fresh.status === "undoing" || label === "undo") touched.current = true;
+      if (fresh.status === "running" || fresh.status === "undoing") touched.current = true;
       setValue(fresh);
       onChanged();
     } catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); onChanged(); }
@@ -841,9 +832,24 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
   const crossBlocked = cross && (!targetReady || (moveOut ? !verify && !password : !unlocked));
   const crossInput = () => ({ target: moveOut ? chosen : chosen.slice(api.PRIVATE_PREFIX.length) });
   const iconTone: Tone = danger || moveOut ? "danger" : share ? "public" : status === "done" ? "success" : "accent";
+  if (pending && !review) return null;
+  if (!pending) return <div className="ai-action-record">
+    <div className="ai-review-result"><Icon name={ACTION_ICONS[kind] ?? "check"} size={14} />
+      <span><strong>{payload.title ?? ai.ACTION_KINDS[kind] ?? kind}</strong> · {value.count.toLocaleString("zh-CN")} 项
+        {result && <small>成功 {result.ok}{result.skipped ? `，跳过 ${result.skipped}` : ""}{result.failed ? `，失败 ${result.failed}` : ""}</small>}</span>
+      <Badge tone={tone}>{auto && status === "done" ? "已自动执行" : label}</Badge>
+      {live && status === "running" ? <Button size="sm" loading={busy === "cancel"} onClick={() => void run("cancel", () => ai.cancelAction(id))}>取消</Button>
+        : <button className="ai-link" type="button" onClick={() => setDetails(true)}>明细</button>}
+    </div>
+    {live && progress && <Progress value={progress.total ? progress.done / progress.total * 100 : 0} label="执行进度" />}
+    {result?.links?.map(link => <div className="ai-review-result" key={link.path}><Icon name="link" size={13} /><span>{baseName(link.path)}</span>
+      {link.password && <Badge icon="lock">密码</Badge>}
+      <Button size="sm" onClick={() => copyMessage(api.publicLinks(link.token, baseName(link.path)).page)}>复制链接</Button></div>)}
+    {details && <ActionItemsDialog action={value} onClose={() => setDetails(false)} />}
+  </div>;
   return <section className={`ai-card ai-action is-${expired ? "expired" : status}${danger || moveOut ? " is-danger" : ""}`}>
     <CardHead icon={ACTION_ICONS[kind] ?? "check"} tone={iconTone} title={payload.title ?? ai.ACTION_KINDS[kind] ?? kind} subtitle={payload.summary}
-      badge={<Badge tone={danger && pending ? "danger" : tone} icon={auto && !pending ? "zap" : undefined}>{danger && pending ? "不可恢复" : auto && status === "done" ? "已自动执行" : label}</Badge>} />
+      badge={<Badge tone={danger ? "danger" : tone}>{danger ? "不可恢复" : label}</Badge>} />
     <div className="ai-chips">
       <span><Icon name="folder" size={12} />{display(payload.scope ?? "")}</span>
       <span>{value.count.toLocaleString("zh-CN")} 项</span>
@@ -853,8 +859,8 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
       {(payload.conflicts ?? 0) > 0 && <span className="tone-warning">{payload.conflicts} 项将跳过</span>}
     </div>
     {payload.confirm_reason && pending && <p className="ai-card-note"><Icon name="shield" size={13} />{payload.confirm_reason}</p>}
-    {samples.length > 0 && !result?.links && <ul className="ai-diff">{samples.slice(0, 6).map((item, index) => <ItemRow key={index} kind={kind} item={item} />)}</ul>}
-    {(value.count > 6 || (payload.conflicts ?? 0) > 0) && <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {value.count.toLocaleString("zh-CN")} 项</button>}
+    {samples.length > 0 && !result?.links && <ul className="ai-diff">{samples.slice(0, review ? 3 : 6).map((item, index) => <ItemRow key={index} kind={kind} item={item} />)}</ul>}
+    {(value.count > (review ? 3 : 6) || (payload.conflicts ?? 0) > 0) && <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {value.count.toLocaleString("zh-CN")} 项</button>}
     {share && pending && <div className="ai-share-form">
       <label><span>有效期</span><select className="input input-sm" value={days} onChange={event => setShareDays(Number(event.target.value))}>
         {SHARE_DAYS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
@@ -872,26 +878,9 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
         onPasskey={async signal => { passkeyAssertion.current = await privatePasskeyAssertion(signal); setPassword(""); setVerify("passkey"); }} />}
       <small>{moveOut ? "移出后文件不再受私密空间保护；同名时自动改名，不能撤销。" : "移入后公开链接会被取消；目标位置不会告诉助手。同名时自动改名，不能撤销。"}</small>
     </div>}
-    {result?.links && result.links.length > 0 && <ul className="ai-links">{result.links.map(link => {
-      const url = api.publicLinks(link.token, baseName(link.path)).page;
-      return <li key={link.path}><Icon name={link.folder ? "folder" : "file"} size={13} /><span className="cell-truncate" title={display(link.path)}>{baseName(link.path)}</span>
-        {link.password && <Badge icon="lock">密码</Badge>}
-        <button type="button" onClick={() => copyMessage(url)}><Icon name="copy" size={12} />复制链接</button></li>;
-    })}</ul>}
-    {live && progress && <div className="ai-action-progress">
-      <Progress value={progress.total ? progress.done / progress.total * 100 : 0} label="执行进度" />
-      <small>{progress.done.toLocaleString("zh-CN")} / {progress.total.toLocaleString("zh-CN")}</small>
-    </div>}
-    {result && !live && <p className="ai-result">
-      <span className="tone-success"><Icon name="checkCircle" size={13} />成功 {result.ok}</span>
-      {result.skipped > 0 && <span className="tone-warning">跳过 {result.skipped}</span>}
-      {result.failed > 0 && <span className="tone-danger">失败 {result.failed}</span>}
-      {Object.keys(result.reasons ?? {}).length > 0 && <small>{Object.entries(result.reasons).map(([reason, count]) => `${reason} ${count}`).join("；")}</small>}
-    </p>}
-    {kind === "downloads" && result?.failed ? <p className="ai-card-note">部分图片需要来源页的登录或防盗链，可以在来源页用抓取脚本的「本地下载」保存。</p> : null}
     {pending && danger && <label className="ai-ack"><Checkbox checked={acknowledged} onChange={setAcknowledged} label="我了解此操作不可恢复" /><span>我了解此操作不可恢复</span></label>}
-    {(pending || (live && status === "running") || (value.undoable && !live)) && <footer className="ai-card-foot">
-      <span>{pending ? `${formatClock(value.expires_at)} 前有效` : live ? "正在执行，可以随时取消" : "24 小时内可以撤销"}</span>
+    {pending && <footer className="ai-card-foot">
+      <span>{formatDateTime(value.expires_at)} 前有效</span>
       {pending && <>
         <Button size="sm" disabled={Boolean(busy)} loading={busy === "reject"} onClick={() => void run("reject", () => ai.rejectAction(id))}>拒绝</Button>
         <Button size="sm" variant={danger || moveOut ? "danger" : "primary"} disabled={Boolean(busy) || (danger && !acknowledged) || (share && password.length > 0 && password.length < 4) || crossBlocked}
@@ -913,8 +902,6 @@ function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
               share: share ? { expires_days: days, ...(password ? { password } : {}) } : undefined })); }}>
           {many && armed ? `确认执行 ${value.count.toLocaleString("zh-CN")} 项` : share ? "确认分享" : moveOut ? "验证并移出" : kind === "move_in" ? "确认移入" : "确认执行"}</Button>
       </>}
-      {live && status === "running" && <Button size="sm" loading={busy === "cancel"} onClick={() => void run("cancel", () => ai.cancelAction(id))}>取消</Button>}
-      {value.undoable && !live && <Button size="sm" icon="restore" loading={busy === "undo"} onClick={() => void run("undo", () => ai.undoAction(id))}>撤销</Button>}
     </footer>}
     {details && <ActionItemsDialog action={value} onClose={() => setDetails(false)} />}
   </section>;
@@ -962,14 +949,15 @@ function ActionItemsDialog({ action, onClose }: { action: ai.AssistantAction; on
   }, [action.id]);
   useEffect(() => load(0), [load]);
   const failures = action.result?.failures ?? [];
-  return <Modal title={`${action.payload?.title ?? "操作"}：全部条目`} description={action.payload?.summary} size="lg" onClose={onClose}
+  return <Modal className="assistant-dialog" title={`${action.payload?.title ?? "操作"}：全部条目`} description={action.payload?.summary} size="lg" onClose={onClose}
     footer={<Button onClick={onClose}>关闭</Button>}>
     {compacted && <InlineNotice>这个操作已超过 30 天，只保留了前 20 条样例。</InlineNotice>}
+    {action.kind === "downloads" && action.result?.failed ? <InlineNotice>部分图片需要来源页的登录或防盗链，可以在来源页用抓取脚本的「本地下载」保存。</InlineNotice> : null}
     {failures.length > 0 && <section className="ai-items-section"><h4>执行时跳过或失败</h4>
       <ul className="ai-diff is-plain">{failures.map((item, index) => <li key={index} className="ai-diff-row"><span className="cell-truncate">{item.path}</span><small>{item.reason}</small></li>)}</ul></section>}
     {skipped.length > 0 && <section className="ai-items-section"><h4>提议时已跳过（{skipped.length}）</h4>
       <ul className="ai-diff is-plain">{skipped.map((item, index) => <li key={index} className="ai-diff-row"><span className="cell-truncate">{item.path}</span><small>{item.reason}</small></li>)}</ul></section>}
-    <section className="ai-items-section"><h4>将要执行（{action.count.toLocaleString("zh-CN")}）</h4>
+    <section className="ai-items-section"><h4>操作条目（{action.count.toLocaleString("zh-CN")}）</h4>
       {items === null ? <SkeletonRows rows={4} /> : <ul className="ai-diff is-plain">{items.map((item, index) => <ItemRow key={index} kind={action.kind} item={item} />)}</ul>}
       {next !== null && <Button size="sm" onClick={() => load(next)}>加载更多</Button>}
     </section>

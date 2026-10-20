@@ -9,6 +9,7 @@ import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButt
 import { ShortcutsDialog } from "../shortcuts";
 import type { PageImport } from "./page-import";
 import { Thread, PlanBar, latestPlan, useMarkState, type HttpApproval, type LiveRun } from "./assistant-thread";
+import { ReviewQueue, type ReviewRequest } from "./assistant-review";
 import { AttachmentTray, useAttachments } from "./assistant-attachments";
 import { filesBridge, getPrivateSection, openPrivateSection, waitForFiles } from "./assistant-bridge";
 import { usePrivateAccess } from "./private-session";
@@ -170,6 +171,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [fullPrompt, setFullPrompt] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [sending, setSending] = useState(false);
+  const [revising, setRevising] = useState(false);
+  const [revisionPrompt, setRevisionPrompt] = useState<{ conversation: string; version: number; text: string } | null>(null);
   const [capabilities, setCapabilities] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const attachments = useAttachments();
@@ -287,6 +290,12 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   }, []);
   const atBottomRef = useRef(true);
   atBottomRef.current = atBottom;
+  // 决定后结果行和确认区会改变高度；只为原本跟随底部的阅读位置补齐滚动。
+  const reviewState = `${detail?.actions.map(action => `${action.id}:${action.status}`).join(",") ?? ""}|${httpApprovals.map(item => `${item.callId}:${item.status}`).join(",")}`;
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { if (atBottomRef.current) scrollToEnd(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [reviewState, scrollToEnd]);
 
   // 浏览器工具：在当前页面执行后回传结果。只执行仍在有效期内、尚未处理的调用（断线重放时不重复操作页面）。
   const handledCalls = useRef(new Set<string>());
@@ -438,7 +447,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     // 附件只随输入框里的消息发送（不随卡片上的快捷回答）；只有附件没有文字时补一句说明。
     const withFiles = text === draft && attachments.items.length > 0;
     const message = text.trim() || (withFiles ? "请查看这些附件" : "");
-    if (!message || runId || sending) return;
+    if (!message || runId || sending || revising) return;
     if (withFiles && attachments.pending) { toast.error("附件还在上传或生成预览图，请稍候"); return; }
     if (withFiles && attachments.failed) { toast.error("有附件上传失败，请重试或移除后再发送"); return; }
     if (pageImport && !pageImport.pages) { toast.error(pageImport.error || "页面快照还在接收，请稍候"); return; }
@@ -485,6 +494,45 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     cancelBrowserCalls();
     try { await ai.stopRun(runId); } catch (reason) { toast.error(api.errorMessage(reason, "停止失败，请稍后重试")); }
   }
+
+  async function reviseRequest(request: ReviewRequest, text: string) {
+    if (!detail || sending || revising || revisionPrompt) throw new Error("请等待当前请求处理完成");
+    const conversation = detail.conversation.id, version = selection.current;
+    const title = request.kind === "http" ? `${request.approval.request.method} ${request.approval.request.url}`
+      : request.kind === "question" ? request.question : request.action.payload?.title ?? "当前操作";
+    const prompt = `调整刚才的请求：\n${title}\n\n暂不执行原方案。\n${text}`;
+    // 决定或停止失败时，文字仍在输入框中，用户可以继续编辑和重试。
+    setDraft(prompt);
+    setRevising(true);
+    try {
+      let active = runId;
+      if (request.kind === "action") await ai.rejectAction(request.id);
+      else if (request.kind === "scope") {
+        const result = await ai.decideScope(request.id, false);
+        if (result.run_id) {
+          active = result.run_id;
+          if (version === selection.current) follow(result.run_id);
+        }
+      }
+      if (active) await ai.stopRun(active);
+      if (request.kind === "http") decideHttp(request.id, "rejected");
+      if (version !== selection.current) return;
+      setRevisionPrompt({ conversation, version, text: prompt });
+      reloadDetail();
+    } finally {
+      setRevising(false);
+    }
+  }
+
+  // 等待旧运行结束后再发送补充，避免仍在执行的工具或迟到的 SSE 覆盖新运行。
+  useEffect(() => {
+    if (!revisionPrompt) return;
+    if (!open || revisionPrompt.version !== selection.current || revisionPrompt.conversation !== currentId) { setRevisionPrompt(null); return; }
+    if (runId || sending || revising) return;
+    const text = revisionPrompt.text;
+    setRevisionPrompt(null);
+    void send(text);
+  }, [revisionPrompt, runId, sending, revising, currentId, open]);
 
   /** 从某条用户消息重新回答：之后还有其他轮次时先确认，因为它们会被丢弃。 */
   function retryFrom(seq: number) {
@@ -693,6 +741,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     </div>
     {unseen && <button type="button" className="assistant-unseen" onClick={() => scrollToEnd(true)}><Icon name="chevronDown" size={14} />有新消息</button>}</div>
     <div className="assistant-composer">
+      {detail && !loading && config.notice_ack && <ReviewQueue key={currentId} detail={detail} httpApprovals={httpApprovals} runId={runId}
+        onHttpDecision={decideHttp} onAnswer={send} onFeedback={reviseRequest} onScope={(id, approve) => void decideScope(id, approve)}
+        onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
       {pageImport && <SnapshotChip value={pageImport} onRemove={() => onPageImportDone?.()} />}
       {mention.menu}
       <div className={`assistant-compose-box${runId ? " is-running" : ""}`}>
@@ -708,7 +759,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         {/* 输入框即时渲染 Markdown、@ 引用胶囊、链接与列表；内容仍是 Markdown 纯文本。 */}
         <AssistantComposer ref={input} value={draft} onChange={setDraft} onSubmit={() => void send()} maxLength={DRAFT_LIMIT}
           placeholder={!config.notice_ack ? "请先阅读上方说明" : exhausted ? "今日额度已用完，明天 0 点后重置" : privateMode ? "在私密空间里想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown" : "想找什么，或想怎样整理？输入 @ 引用文件，支持 Markdown"}
-          disabled={!config.notice_ack || exhausted} mentions={mention.known.map(item => display(item.key))}
+          disabled={!config.notice_ack || exhausted || revising || Boolean(revisionPrompt)} mentions={mention.known.map(item => display(item.key))}
           onToken={mention.setToken} onKey={mention.onKey} onPasteFiles={files => addFiles(files, true)} />
         <div className="assistant-controls">
           <Menu label="选择模型" align="start" className="assistant-model" items={config.models.map(model => ({ label: model.label,
@@ -724,7 +775,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           <input ref={filePicker} type="file" multiple hidden onChange={event => { addFiles([...(event.target.files ?? [])]); event.target.value = ""; input.current?.focus(); }} />
           <span className="assistant-enter-hint">@ 引用 · Enter 发送 · Shift+Enter 换行</span>
           {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" aria-keyshortcuts="Escape" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
-            : <button type="button" className="assistant-send" aria-label="发送" aria-keyshortcuts="Enter Meta+Enter Control+Enter" disabled={(!draft.trim() && !attachments.items.length) || attachments.pending || sending || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)}
+            : <button type="button" className="assistant-send" aria-label="发送" aria-keyshortcuts="Enter Meta+Enter Control+Enter" disabled={(!draft.trim() && !attachments.items.length) || attachments.pending || sending || revising || Boolean(revisionPrompt) || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)}
               title={attachments.pending ? "附件处理中" : `发送（Enter 或 ${shortcutLabel("Mod+Enter")}）`} onClick={() => void send()}>
               {sending ? <span className="spinner" aria-hidden="true" /> : <Icon name="arrowUp" size={18} />}</button>}
         </div>
@@ -736,7 +787,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
             title={`最近一次请求约 ${context.used.toLocaleString("zh-CN")} / ${contextWindow.toLocaleString("zh-CN")} token（所选模型）。包含提示词、工具和历史内容，接近上限时自动压缩历史；与每日额度、每轮累计预算独立。`}>
             模型上下文 {Math.min(100, Math.round(contextRatio * 100))}%{contextRatio >= 0.8 ? " · 接近容量上限" : ""}</span>}
         </span>
-        <span>{accessMode === "full" ? <><Icon name="zap" size={11} />普通修改自动执行，可在卡片上撤销</> : <><Icon name="shield" size={11} />修改文件前会请你确认</>}</span>
+        <span>{accessMode === "full" ? <><Icon name="zap" size={11} />普通修改自动执行，结果记入对话</> : <><Icon name="shield" size={11} />修改文件前会请你确认</>}</span>
       </div>
     </div>
   </>;
@@ -749,7 +800,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       footer={<><Button onClick={() => setFullPrompt(false)}>取消</Button><Button variant="primary" onClick={() => { localStorage.setItem(FULL_ACK_KEY, "1"); setFullPrompt(false); void chooseMode("full", true); }}>切换</Button></>}>
       <ul className="assistant-mode-points">
         <li><Icon name="zap" size={15} /><span><strong>常规操作自动执行</strong>改名、移动、整理、移入回收站、下载任务与常规 HTTP 请求不再逐项询问，读取文件或网页后仍保持此模式。</span></li>
-        <li><Icon name="restore" size={15} /><span><strong>保留结果和撤销入口</strong>文件改名、移动、整理等可撤销操作保留 24 小时撤销入口；第三方 HTTP 请求的结果以接口为准。</span></li>
+        <li><Icon name="checkCircle" size={15} /><span><strong>保留执行结果</strong>操作结果记录在对话中，可查看明细；需要调整时请告诉助手，重新生成方案。第三方 HTTP 请求的结果以接口为准。</span></li>
         <li><Icon name="shield" size={15} /><span><strong>这些仍需你确认</strong>彻底删除、公开分享、跨私密空间移动和 HTTP DELETE；打开新标签、下载到本机和复制仍可能需要浏览器要求的点击。</span></li>
       </ul>
     </Modal>}
@@ -962,7 +1013,7 @@ function ScopeDialog({ initial, onClose, onChoose }: { initial: string; onClose:
 function ModeChip({ mode, allowed, onChoose }: { mode: ai.AccessMode; allowed: boolean; onChoose: (mode: ai.AccessMode) => void }) {
   const items: MenuItem[] = [
     { label: "审批模式", description: "每次修改都由你在卡片上确认", icon: "shield", heading: "修改文件时", checked: mode === "approval", onSelect: () => onChoose("approval") },
-    { label: "完全访问", description: allowed ? "普通修改自动执行，可撤销" : "管理员未开启", icon: "zap", checked: mode === "full", disabled: !allowed,
+    { label: "完全访问", description: allowed ? "普通修改自动执行，保留结果" : "管理员未开启", icon: "zap", checked: mode === "full", disabled: !allowed,
       onSelect: () => onChoose("full") },
   ];
   return <Menu label="访问模式" align="start" className={`assistant-mode${mode === "full" ? " is-full" : ""}`} items={items}>

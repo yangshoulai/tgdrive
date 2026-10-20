@@ -1026,30 +1026,23 @@ class ObjectService:
             return {}
         def read():
             previews: dict[str, list[dict[str, object]]] = {prefix: [] for prefix in prefixes}
-            for start in range(0, len(prefixes), 200):
-                batch = prefixes[start:start + 200]
-                values = ",".join("(?,?)" for _ in batch)
-                params = [value for prefix in batch for value in (prefix, prefix + self._PREFIX_END)]
-                # 每个前缀用桶 / 键索引取四项；不先读完整目录，也不逐项查询缩略图。
-                # 只在每个目录按键排序的前 PREVIEW_SAMPLE 个文件里找有缩略图的：大目录里的文件都没有缩略图时，
-                # 不能为了凑四张预览扫描整个目录（文件列表每页最多一千个目录都会执行一次）。
+            for prefix in prefixes:
+                # 先按桶 / 键索引限定候选，再关联缩略图。不能把采样放进多层关联 IN 子查询，
+                # 否则 SQLite 可能为桶内每个对象重复计算候选，即使 LIMIT 很小也会拖慢目录列表。
+                # 每个目录单独执行有界查询，最多检查 PREVIEW_SAMPLE 个文件，避免为凑四张封面扫描整个目录。
                 rows = self.metadata.db.execute(
-                    f"WITH folders(prefix,upper_key) AS (VALUES {values}) "
-                    "SELECT f.prefix,o.key,o.size,o.etag,o.content_type,o.modified_at,t.created_at AS thumbnail_created_at FROM folders f "
-                    "JOIN objects o ON o.bucket_id=? AND o.key IN ("
-                    "SELECT sample.key FROM objects sample WHERE sample.bucket_id=? AND sample.key IN ("
-                    "SELECT head.key FROM objects head WHERE head.bucket_id=? "
-                    "AND head.key>f.prefix AND head.key<f.upper_key AND substr(head.key,-1)!='/' "
-                    "AND (substr(head.key,1,9)!='.tgdrive/' OR ?=1) ORDER BY head.key LIMIT ?) AND ("
-                    "EXISTS(SELECT 1 FROM thumbnails t WHERE t.blob_uuid=sample.blob_uuid AND t.variant='thumb') "
-                    "OR EXISTS(SELECT 1 FROM thumbnail_legacy l WHERE l.blob_uuid=sample.blob_uuid)) "
-                    "ORDER BY sample.key LIMIT 4) "
-                    "LEFT JOIN thumbnails t ON t.blob_uuid=o.blob_uuid AND t.variant='thumb' "
-                    "ORDER BY f.prefix,o.key", (*params, scope.bucket_id, scope.bucket_id, scope.bucket_id,
-                                                  int(scope.private_access), self.PREVIEW_SAMPLE))
+                    "SELECT sample.key,sample.size,sample.etag,sample.content_type,sample.modified_at,"
+                    "t.created_at AS thumbnail_created_at FROM ("
+                    "SELECT key,blob_uuid,size,etag,content_type,modified_at FROM objects WHERE bucket_id=? "
+                    "AND key>? AND key<? AND substr(key,-1)!='/' "
+                    "AND (substr(key,1,9)!='.tgdrive/' OR ?=1) ORDER BY key LIMIT ?) sample "
+                    "LEFT JOIN thumbnails t ON t.blob_uuid=sample.blob_uuid AND t.variant='thumb' "
+                    "LEFT JOIN thumbnail_legacy l ON l.blob_uuid=sample.blob_uuid "
+                    "WHERE t.blob_uuid IS NOT NULL OR l.blob_uuid IS NOT NULL ORDER BY sample.key LIMIT 4",
+                    (scope.bucket_id, prefix, prefix + self._PREFIX_END, int(scope.private_access), self.PREVIEW_SAMPLE))
                 for row in rows:
                     item = {key: row[key] for key in ("key", "size", "etag", "content_type", "modified_at")}
-                    previews[row["prefix"]].append({**item, "thumbnails": ["thumb"], "has_thumbnail": True,
+                    previews[prefix].append({**item, "thumbnails": ["thumb"], "has_thumbnail": True,
                         "thumbnail_versions": {"thumb": self._thumbnail_revision(row["thumbnail_created_at"])}})
             return previews
         return self.metadata.cached_read(("folder-previews", scope.bucket_id, tuple(prefixes)), read)

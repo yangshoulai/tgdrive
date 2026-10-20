@@ -15,6 +15,7 @@ import threading
 import time
 
 from ..errors import NotFoundError
+from .config import ACTION_TTL
 
 # 私密对话的编号前缀：对话、运行、待确认操作、结果集。普通对话的编号是 c_／r_／a_／g_／s_。
 PRIVATE_IDS = ("pc_", "pr_", "pa_", "pg_")
@@ -196,7 +197,7 @@ class MemoryTrace:
     # ---------- 待确认操作 ----------
 
     def create_action(self, conversation_id: str, run_id: str, user_id: int, session_hash: str, kind: str, tool_name: str,
-                      payload: dict, *, count: int, ttl: float = 900, keep_pending: int = 5) -> str:
+                      payload: dict, *, count: int, ttl: float = ACTION_TTL, keep_pending: int = 5) -> str:
         action_id = "pa_" + secrets.token_urlsafe(12)
         now = time.time()
         with self._lock:

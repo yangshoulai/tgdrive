@@ -18,6 +18,7 @@ from ..crypto import derive_subkey, open_sealed, seal
 from ..errors import NotFoundError
 from ..keystore import KeyStore
 from ..metadata import Metadata
+from .config import ACTION_TTL
 from .providers import scrub
 
 CALL_FIELDS = ("kind", "run_id", "conversation_id", "user_id", "actor", "channel_id", "model_id", "tool_name", "action_id",
@@ -224,7 +225,7 @@ class TraceStore:
     # ---------- 待确认操作 ----------
 
     def create_action(self, conversation_id: str, run_id: str, user_id: int, session_hash: str, kind: str, tool_name: str,
-                      payload: dict, *, count: int, ttl: float = 900, keep_pending: int = 5) -> str:
+                      payload: dict, *, count: int, ttl: float = ACTION_TTL, keep_pending: int = 5) -> str:
         action_id = "a_" + secrets.token_urlsafe(12)
         now = time.time()
         with self.metadata.transaction() as db:

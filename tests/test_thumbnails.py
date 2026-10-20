@@ -431,5 +431,64 @@ class ThumbnailCacheTests(unittest.TestCase):
         self.assertNotEqual(versions["blob"]["thumb"], versions["blob"]["poster"])
 
 
+class FolderPreviewQueryTests(unittest.TestCase):
+    """仅用常量表执行只读查询，不建表、不迁移，也不读取真实数据库。"""
+
+    def test_sampling_is_bounded_before_thumbnail_lookup(self):
+        root = ".tgdrive/private/照片/"
+        folder = root + "相册/"
+        objects = [(9, folder + f"{index:03d}.jpg", f"blob-{index}", 8, f"etag-{index}", "image/jpeg", 1)
+                   for index in range(80)]
+        # 同桶其他目录、其他桶及目录标记都不能进入候选；第 65 个文件以后的缩略图不能补入采样。
+        objects += [(9, root + f"其他/{index:04d}.jpg", f"other-{index}", 8, "other", "image/jpeg", 1)
+                    for index in range(200)]
+        objects += [(10, folder + "000.jpg", "foreign", 8, "foreign", "image/jpeg", 1),
+                    (9, folder + "000/", None, 0, "directory", None, 1)]
+        thumbnails = [(f"blob-{index}", "thumb", 1000 + index) for index in (1, 3, 4, 5, 64, 65)]
+        legacy = [("blob-2",)]
+        definitions, values = [], []
+        for name, columns, rows in (
+                ("objects", "bucket_id,key,blob_uuid,size,etag,content_type,modified_at", objects),
+                ("thumbnails", "blob_uuid,variant,created_at", thumbnails),
+                ("thumbnail_legacy", "blob_uuid", legacy)):
+            placeholders = ",".join("(" + ",".join("?" for _ in row) + ")" for row in rows)
+            definitions.append(f"{name}({columns}) AS MATERIALIZED (VALUES {placeholders})")
+            values.extend(value for row in rows for value in row)
+        fixture = "WITH " + ",".join(definitions)
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        # 用虚拟机步数限制重复扫描，避免按耗时断言依赖机器速度；旧查询会耗尽这个预算。
+        steps = 0
+
+        def progress():
+            nonlocal steps
+            steps += 1000
+            return steps > 500_000
+
+        def execute(query, parameters):
+            statement = fixture + ("," + query[5:] if query.startswith("WITH ") else " " + query)
+            return connection.execute(statement, (*values, *parameters))
+
+        metadata = Mock()
+        metadata.cached_read.side_effect = lambda key, read: read()
+        metadata.db.execute.side_effect = execute
+        service = ObjectService(metadata, Mock())
+        connection.set_progress_handler(progress, 1000)
+        try:
+            previews = service.folder_previews(Scope(9, ".tgdrive/private/", private_access=True),
+                                               [folder, root + "其他/", root + "空/", folder])
+            self.assertEqual([item["key"] for item in previews[folder]],
+                             [folder + f"{index:03d}.jpg" for index in (1, 2, 3, 4)])
+            self.assertEqual(previews[folder][0]["thumbnail_versions"]["thumb"], "1001000000")
+            self.assertEqual({key: items for key, items in previews.items() if key != folder},
+                             {root + "其他/": [], root + "空/": []})
+            service.PREVIEW_SAMPLE = 1
+            self.assertEqual(service.folder_previews(Scope(9, ".tgdrive/private/", private_access=True), [folder]),
+                             {folder: []})
+        finally:
+            connection.close()
+
+
 if __name__ == "__main__":
     unittest.main()
