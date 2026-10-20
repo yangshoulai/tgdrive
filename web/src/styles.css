@@ -2681,6 +2681,7 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 /* 侧栏入口 */
 
 /* 抽屉 */
+.assistant-backdrop { display: none; }
 .assistant-drawer { position: fixed; top: 16px; right: 16px; bottom: 16px; z-index: 50; display: flex; width: var(--assistant-width, 480px); min-width: min(480px, calc(100vw - 32px)); max-width: min(720px, calc(100vw - 32px)); flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-lg); transform: translateX(calc(100% + 32px)); visibility: hidden; transition: transform var(--duration-base) var(--ease-out), visibility 0s var(--duration-base); }
 .assistant-drawer.is-open { transform: none; visibility: visible; transition: transform var(--duration-base) var(--ease-out); }
 .assistant-drawer.is-resizing { user-select: none; }
@@ -2744,8 +2745,8 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
   .assistant-channels { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 760px) {
-  .assistant-drawer { top: 0; right: 0; bottom: 0; width: 100vw; max-width: 100vw; height: 100dvh; border: 0; border-radius: 0; }
-  .assistant-drawer .assistant-header, .assistant-drawer .assistant-composer { border-radius: 0; }
+  .assistant-backdrop { position: fixed; inset: 0; z-index: 49; display: block; background: var(--scrim); backdrop-filter: blur(2px); touch-action: none; }
+  .assistant-drawer { top: calc(var(--assistant-viewport-top, 0px) + var(--floating-top)); right: auto; bottom: auto; left: calc(var(--assistant-viewport-left, 0px) + var(--floating-left)); width: calc(var(--assistant-viewport-width, 100%) - var(--floating-left) - var(--floating-right)); min-width: 0; max-width: none; height: calc(var(--assistant-viewport, 100dvh) - var(--floating-top) - var(--floating-bottom)); overflow: hidden; }
   :root.assistant-open { overflow: hidden; }
   .assistant-resize { display: none; }
   .assistant-master .badge { display: none; }
@@ -2861,7 +2862,7 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
   .assistant-mobile-history { display: inline-flex; }
   .assistant-page .assistant-header .assistant-brand-mark { display: none; }
   .assistant-thread, .assistant-page .assistant-thread { padding: 20px 16px; }
-  .assistant-drawer .assistant-composer { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+  .assistant-drawer .assistant-composer { padding-bottom: 12px; }
   .assistant-starters button { padding: 14px 12px; }
   .assistant-starters { gap: 8px; }
   .assistant-enter-hint { display: none; }
@@ -3425,9 +3426,10 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 
 /* ---------- 文件助手手机布局 ---------- */
 @media (max-width: 760px) {
-  .assistant-drawer { height: var(--assistant-viewport, 100dvh); bottom: auto; padding-top: env(safe-area-inset-top); }
+  .assistant-input, .assistant-editor .cm-editor, .assistant-editor .cm-content, .assistant-history-search input, .assistant-review input:not([type="checkbox"]), .assistant-review textarea { font-size: var(--text-lg); }
   .assistant-drawer .assistant-header { min-height: 52px; padding: 6px 8px; }
   .assistant-drawer .assistant-header .assistant-brand-mark { transform: scale(.85); }
+  .assistant-drawer .assistant-header .assistant-keyboard-help { display: none; }
   .assistant-capability-button span { display: none; }
   .assistant-starters { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .assistant-starters button { grid-template-columns: 20px minmax(0, 1fr) auto; column-gap: 12px; row-gap: 1px; align-items: center; padding: 10px 12px; }
@@ -3441,6 +3443,9 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
   .assistant-composer { padding: 4px 10px 10px; }
   .assistant-model { min-width: 0; max-width: 46vw; }
   .assistant-history li > button:last-child { opacity: 1; }
+}
+@media (max-width: 380px) {
+  .assistant-drawer .assistant-header .assistant-brand-mark { display: none; }
 }
 
 /* ---------- 配置指南（SetupGuide） ---------- */
