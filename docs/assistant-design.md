@@ -253,7 +253,7 @@ AssistantService（src/tgdrive/assistant/）
 | `propose_move` | P | 把一组文件或目录移动到目标目录（`ObjectService.move` 语义，禁止移入自身子目录） | `sources[]` 或 `match{}`, `target`, `conflict` |
 | `propose_organize` | P | 按规则归类：按类型／扩展名／修改年月／自定义映射分到子目录 | `path`, `by: kind\|ext\|year\|month\|mapping`, `target_template`, `recursive?` |
 | `propose_create_folders` | P | 新建一个或多个文件夹 | `paths[]` |
-| `propose_trash` | P | 移入回收站（可恢复） | `paths[]` 或 `match{}` |
+| `propose_trash` | P | 移入回收站（可恢复） | `paths[]` 或 `match{}`；`only_empty` 只删空目录（§35） |
 | `propose_restore` | P | 从回收站恢复 | `ids[]` 或 `match{original_prefix?}` |
 | `propose_purge_trash` | D | 彻底删除回收站中的指定条目或全部条目 | `ids[]?`, `all?` |
 | `propose_unshare` | P | 取消公开链接（只允许收回，不提供创建公开链接） | `paths[]` |
@@ -1432,3 +1432,11 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - 两个抽屉（普通与私密）各自经 `onStatus` 报告 `running`（有运行）与 `pending`（`pendingReviews` 的数量）；按钮反映点开后会出现的对话：私密空间页面已解锁时取私密对话并加锁形角标，否则取普通对话。关闭抽屉后后台仍在运行或等待确认时，按钮显示运行动效或数量徽标；未打开过的历史对话不预先读取，因此不会在加载前显示徽标。
 - 布局：层级 45，低于托盘与抽屉（50）和弹窗（60），沉浸式预览自然盖住按钮。存在按钮时 `.main` 底部留 72px；窄屏托盘宽度让出按钮所在的右侧，toast 上移，最小化的预览小窗出现时隐藏按钮。
 
+## 35. 删除空目录与移入回收站的内容提示
+
+起因：用户要求「删除空目录」，`find_empty_folders` 找到 23 个，模型却把 45 个文件夹（含有图片的）交给 `propose_trash`，只能靠用户在卡片上发现并拒绝。同时 `find_duplicates` 的 SQL 因 `objects`／`blobs` 都有 `size` 列而报列名歧义，自上线起每次都失败。
+
+- `propose_trash` 新增 `only_empty`（只能配合 `paths`）：冻结时每项必须是没有任何文件的文件夹（只含空子目录也算空），文件与非空文件夹进入 `skipped` 并写明「不是空目录（含 N 个文件）」；条目带 `only_empty`，执行时 `ActionExecutor` 在 `directory_version` 校验之外再用 `folder_files` 复核，已放进文件的跳过「已不是空目录」。
+- 不带 `only_empty` 时照常生成，但每个文件夹条目记录 `files`，`options` 记 `files`／`nonempty`，摘要写明「其中 X 个文件夹含 N 个文件」；工具结果给模型 `nonempty_folders`／`files_in_folders`。确认卡与决定节点在每行显示「空目录／含 N 个文件」，并用警示标签提示总数。
+- `find_empty_folders` 结果带 `next` 指引，提示词规则 6 要求删除只使用工具查到的路径，删空目录必须设置 `only_empty`，数量不符或含非空文件夹时说明差异而不是请用户确认。
+- 工具的意外异常日志记录异常类型与出错位置（文件:行），不记异常文本，避免私密路径进入日志。

@@ -533,7 +533,8 @@ class AssistantTests(AssistantCase):
                                                     ToolCall("3", "find_empty_folders", '{}'),
                                                     ToolCall("4", "folder_tree", '{"depth": 2}'),
                                                     ToolCall("5", "find_large_files", '{"limit": 1}'),
-                                                    ToolCall("6", "get_file_info", '{"path": "/a"}')]), answer("好")]
+                                                    ToolCall("6", "get_file_info", '{"path": "/a"}'),
+                                                    ToolCall("7", "find_duplicates", '{}')]), answer("好")]
             await self.send(user, conversation, "统计")
             tools = {m["call_id"]: m for m in await self.messages(user, conversation) if m["role"] == "tool"}
             self.assertTrue(all(t["status"] == "ok" for t in tools.values()), [t["result"] for t in tools.values()])
@@ -544,6 +545,7 @@ class AssistantTests(AssistantCase):
             self.assertEqual(tools["3"]["result"]["folders"], ["/empty/"])
             self.assertEqual(tools["5"]["result"]["files"][0]["path"], "/b/3.mp4")
             self.assertEqual((tools["6"]["result"]["kind"], tools["6"]["result"]["files"]), ("folder", 2))
+            self.assertEqual(tools["7"]["result"]["groups"], [{"copies": 2, "size": 100, "reclaimable": 100, "paths": ["/a/1.jpg", "/a/2.jpg"]}])
         self.run_async(run())
 
     def test_tool_budget_does_not_execute_extra_calls(self):

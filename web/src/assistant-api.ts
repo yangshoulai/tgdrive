@@ -209,7 +209,9 @@ export type ActionStatus = "pending" | "confirmed" | "rejected" | "expired" | "r
   | "interrupted" | "undoing" | "undone";
 /** 冻结的条目：移动类为 from/to（对象键），其余为 path / id / url 等。 */
 export type ActionItem = { from?: string; to?: string; path?: string; id?: string | number; name?: string; url?: string; host?: string;
-  size?: number; folder?: boolean; op?: string; status?: string; variant?: string | null; attachment?: string };
+  size?: number; folder?: boolean; op?: string; status?: string; variant?: string | null; attachment?: string;
+  /** 移入回收站的文件夹内的文件数（0 为空目录） */
+  files?: number };
 export type ShareLink = { path: string; token: string; folder: boolean; expires_at: number | null; password: boolean };
 export type ActionResult = { ok: number; skipped: number; failed: number; total: number; reasons: Record<string, number>;
   failures: { path: string; reason: string; status: "skipped" | "failed" }[]; links?: ShareLink[] };
@@ -219,7 +221,9 @@ export type AssistantAction = {
     from?: string; to?: string; reason?: string; kind?: string; title?: string; scope?: string; summary?: string; size?: number;
     conflicts?: number; danger?: boolean; samples?: ActionItem[]; skipped?: { path: string; reason: string }[];
     options?: { target?: string; hosts?: string[]; source?: string | null; op?: string; by?: string; folders?: string[];
-      expires_days?: number | null; require_password?: boolean };
+      expires_days?: number | null; require_password?: boolean;
+      /** 移入回收站：只删除空目录；所选文件夹中的文件总数与非空文件夹数 */
+      only_empty?: boolean; files?: number; nonempty?: number };
     auto?: boolean; confirm_reason?: string;
   } | null;
   result: ActionResult | null; undoable?: boolean; progress?: { done: number; total: number; ok: number; skipped: number; failed: number };

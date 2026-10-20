@@ -19,6 +19,7 @@ import re
 import secrets
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1895,8 +1896,11 @@ class AssistantService:
             summary = str(exc) or "操作不被允许"
         except asyncio.CancelledError:
             raise
-        except Exception:
-            log.error("assistant tool failed name=%s", call.name)
+        except Exception as exc:
+            # 只记异常类型与出错位置：异常文本可能带文件路径（含私密空间），不写入日志。
+            frame = traceback.extract_tb(exc.__traceback__)[-1:] or [None]
+            where = f"{frame[0].filename.rsplit('/', 1)[-1]}:{frame[0].lineno}" if frame[0] else "?"
+            log.error("assistant tool failed name=%s error=%s at=%s", call.name, type(exc).__name__, where)
             status, payload, truncated, ends_turn = "error", {"error": "工具执行失败"}, False, False
             summary = "工具执行失败"
         duration = int((time.time() - started) * 1000)

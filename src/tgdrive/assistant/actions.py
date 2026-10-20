@@ -63,6 +63,11 @@ def directory_version(db, bucket_id: int, prefix: str, *, limit: int = LIMITS["a
     return digest.hexdigest(), count
 
 
+def folder_files(db, bucket_id: int, folder: str) -> int:
+    """文件夹内（含各级子目录）的文件数；目录标记不算文件。"""
+    return int(db.execute("SELECT COUNT(*) FROM objects WHERE bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/'",
+                          (bucket_id, folder, folder + END)).fetchone()[0])
+
 @dataclass
 class Progress:
     total: int
@@ -248,6 +253,8 @@ class ActionExecutor:
         elif kind == "trash":
             key = item["path"]
             reason = self._check_source(bucket_id, scope_root, item, key)
+            if not reason and item.get("only_empty") and (not key.endswith("/") or folder_files(self.db, bucket_id, key)):
+                reason = "已不是空目录"
             if reason:
                 progress.skip(display(key), reason)
                 return

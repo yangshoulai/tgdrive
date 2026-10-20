@@ -724,10 +724,11 @@ async def find_duplicates(ctx: ToolContext, args: dict) -> ToolOutput:
 
     def read():
         rows = ctx.db.execute(
-            "SELECT COALESCE(b.fingerprint, o.blob_uuid) AS content, COUNT(*) AS copies, MAX(o.size) AS size "
+            # objects 与 blobs 都有 size 列，聚合结果必须另起别名，否则 ORDER BY 报列名歧义。
+            "SELECT COALESCE(b.fingerprint, o.blob_uuid) AS content, COUNT(*) AS copies, MAX(o.size) AS file_size "
             "FROM objects o JOIN blobs b ON b.uuid=o.blob_uuid WHERE o.bucket_id=? AND o.key>? AND o.key<? "
             f"AND substr(o.key,-1)!='/' AND {ctx.hide('o.key')} AND o.size>=? "
-            "GROUP BY content HAVING copies>1 ORDER BY size*(copies-1) DESC LIMIT 50",
+            "GROUP BY content HAVING copies>1 ORDER BY file_size*(copies-1) DESC LIMIT 50",
             (ctx.bucket_id, prefix, prefix + END, max(min_size, 1))).fetchall()
         groups = []
         for row in rows:
@@ -735,8 +736,8 @@ async def find_duplicates(ctx: ToolContext, args: dict) -> ToolOutput:
                 "SELECT o.key FROM objects o JOIN blobs b ON b.uuid=o.blob_uuid WHERE o.bucket_id=? AND o.key>? AND o.key<? "
                 f"AND substr(o.key,-1)!='/' AND {ctx.hide('o.key')} AND COALESCE(b.fingerprint, o.blob_uuid)=? "
                 "ORDER BY o.key LIMIT 10", (ctx.bucket_id, prefix, prefix + END, row["content"]))]
-            groups.append({"copies": int(row["copies"]), "size": int(row["size"]),
-                           "reclaimable": int(row["size"]) * (int(row["copies"]) - 1), "paths": paths})
+            groups.append({"copies": int(row["copies"]), "size": int(row["file_size"]),
+                           "reclaimable": int(row["file_size"]) * (int(row["copies"]) - 1), "paths": paths})
         return groups
 
     groups = await _thread(ctx, read)
@@ -744,7 +745,9 @@ async def find_duplicates(ctx: ToolContext, args: dict) -> ToolOutput:
     return ToolOutput({"groups": groups, "reclaimable_total": saved}, f"{len(groups)} 组 · 可节省 {_fmt(saved)}", items=len(groups))
 
 
-@tool("find_empty_folders", "查找空目录", "browse", "read", "列出没有任何文件的目录（最多 200 个）。", {"path": PATH})
+@tool("find_empty_folders", "查找空目录", "browse", "read",
+      "列出没有任何文件的目录（只含空子目录的也算，最多 200 个）。要删除它们时，把结果原样传给 propose_trash 的 paths，"
+      "并设置 only_empty=true，由服务端再次核对，不要自行拼接或补充路径。", {"path": PATH})
 async def find_empty_folders(ctx: ToolContext, args: dict) -> ToolOutput:
     prefix = ctx.resolve(args.get("path"), directory=True)
 
@@ -756,7 +759,12 @@ async def find_empty_folders(ctx: ToolContext, args: dict) -> ToolOutput:
             (ctx.bucket_id, prefix, prefix + END))]
 
     folders = await _thread(ctx, read)
-    return ToolOutput({"folders": folders}, f"{len(folders)} 个空目录", items=len(folders))
+    payload: dict = {"folders": folders, "count": len(folders)}
+    if len(folders) >= 200:
+        payload["truncated"] = True
+    if folders:
+        payload["next"] = "删除这些空目录：调用 propose_trash，paths 使用本结果的 folders，并设置 only_empty=true"
+    return ToolOutput(payload, f"{len(folders)} 个空目录", items=len(folders))
 
 
 @tool("list_recent", "最近的文件", "browse", "read", "最近若干天内新增或修改的文件，按时间倒序。",

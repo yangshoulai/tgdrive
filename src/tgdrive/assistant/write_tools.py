@@ -13,7 +13,7 @@ from datetime import datetime
 from ..api import normalize_user_path
 from ..filekinds import kind_clause, kind_of
 from ..objects import PRIVATE_PREFIX
-from .actions import KINDS, directory_version
+from .actions import KINDS, directory_version, folder_files
 from .attachments import PREFIX as ATTACHMENT_PREFIX
 from .tools import (
     END,
@@ -503,27 +503,63 @@ async def propose_create_folders(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("propose_trash", "移入回收站", "write", "write",
-      "生成把文件或文件夹移入回收站的待确认操作（可从回收站恢复，30 天后自动清除）。paths 与 match 二选一。",
-      {"paths": {"type": "array", "items": {"type": "string"}, "description": "文件或文件夹路径（≤1000 个）"}, "match": MATCH})
+      "生成把文件或文件夹移入回收站的待确认操作（可从回收站恢复，30 天后自动清除）。paths 与 match 二选一。"
+      "用户要求删除空目录时必须设置 only_empty=true：服务端会跳过任何含文件的文件夹和所有文件，执行前再核对一次。"
+      "结果中的 nonempty_folders 表示其中含文件的文件夹数，与用户意图不符时不要继续，应重新生成。",
+      {"paths": {"type": "array", "items": {"type": "string"}, "description": "文件或文件夹路径（≤1000 个）"}, "match": MATCH,
+       "only_empty": {"type": "boolean", "description": "只删除空目录（没有任何文件的文件夹），其余条目跳过"}})
 async def propose_trash(ctx: ToolContext, args: dict) -> ToolOutput:
     if bool(args.get("paths")) == bool(args.get("match")):
         raise ToolError("请在 paths 与 match 中二选一")
+    only_empty = args.get("only_empty") is True
+    if only_empty and not args.get("paths"):
+        raise ToolError("only_empty 需要配合 paths 使用：先调用 find_empty_folders，再把结果传入 paths")
     if args.get("paths"):
         rows, skipped = _source_rows(ctx, args["paths"])
     else:
         rows, skipped = await _rows(ctx, args["match"], _item_limit(ctx)), []
     # 同时选中文件夹和其中的文件时只保留文件夹。
     folders = sorted(row["key"] for row in rows if row["key"].endswith("/"))
-    items = []
+    items, seen, files_total, nonempty = [], set(), 0, 0
     for row in rows:
-        if any(row["key"] != folder and row["key"].startswith(folder) for folder in folders):
+        key = row["key"]
+        if key in seen or any(key != folder and key.startswith(folder) for folder in folders):
             continue
-        items.append({"path": row["key"], "folder": row["key"].endswith("/"), "etag": row["etag"],
-                      "modified_at": row["modified_at"], "directory_version": row.get("directory_version") if isinstance(row, dict) else None,
-                      "size": int(row["size"] or 0)})
+        seen.add(key)
+        folder = key.endswith("/")
+        files = await _thread(ctx, lambda: folder_files(ctx.db, ctx.bucket_id, key)) if folder else None
+        if only_empty and not folder:
+            skipped.append({"path": ctx.display(key), "reason": "不是文件夹"})
+            continue
+        if only_empty and files:
+            skipped.append({"path": ctx.display(key), "reason": f"不是空目录（含 {files} 个文件）"})
+            continue
+        if files:
+            files_total += files
+            nonempty += 1
+        item = {"path": key, "folder": folder, "etag": row["etag"], "modified_at": row["modified_at"],
+                "directory_version": row.get("directory_version") if isinstance(row, dict) else None,
+                "size": int(row["size"] or 0)}
+        if folder:
+            item["files"] = files
+        if only_empty:
+            item["only_empty"] = True
+        items.append(item)
     size = sum(item["size"] for item in items)
-    return await _propose(ctx, "trash", items, skipped=skipped, sample=lambda item: ctx.display(item["path"]),
-                          summary=f"把 {len(items)} 项（{_fmt(size)}）移入回收站")
+    if only_empty:
+        summary = f"把 {len(items)} 个空目录移入回收站"
+    elif nonempty:
+        summary = f"把 {len(items)} 项（{_fmt(size)}）移入回收站，其中 {nonempty} 个文件夹含 {files_total} 个文件"
+    else:
+        summary = f"把 {len(items)} 项（{_fmt(size)}）移入回收站"
+    output = await _propose(ctx, "trash", items, skipped=skipped, sample=lambda item: ctx.display(item["path"]), summary=summary,
+                            options={"only_empty": only_empty, "files": files_total, "nonempty": nonempty})
+    output.result["nonempty_folders"] = nonempty
+    output.result["files_in_folders"] = files_total
+    if skipped:
+        output.result["skipped"] = len(skipped)
+        output.result["skipped_samples"] = skipped[:10]
+    return output
 
 
 def _trash_rows(ctx: ToolContext, ids: object, prefix: str | None, *, limit: int) -> list:

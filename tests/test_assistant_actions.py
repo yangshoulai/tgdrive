@@ -430,6 +430,45 @@ class AssistantActionTests(ActionHelpers, AssistantCase):
             self.assertIn("Archive/Docs/later.txt", self.keys(), "撤销也不能移动后来加入的文件")
         self.run_async(run())
 
+    def test_trash_only_empty_skips_folders_with_files(self):
+        async def run():
+            await self.setup_assistant()
+            await self.put("Album/full/1.jpg", b"1")
+            await self.put("Album/nested/inner/2.jpg", b"2")
+            scope = Scope(self.alice.bucket_id)
+            for folder in ("Album/full/", "Album/nested/", "Album/empty/", "Album/hollow/", "Album/hollow/sub/", "Album/late/"):
+                await self.app.objects.put_directory_marker(scope, folder)
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            conversation = await self.start_conversation(user)
+            self.model.replies = [call("find_empty_folders", path="/Album/"), answer("好")]
+            await self.send(user, conversation, "找空目录")
+            found = (await self.tool_results(user, conversation))[-1]["result"]
+            self.assertEqual(found["folders"], ["/Album/empty/", "/Album/hollow/", "/Album/hollow/sub/", "/Album/late/"])
+            self.assertIn("only_empty", found["next"])
+            # 模型多传了非空目录：only_empty 会跳过它们，只留下真正的空目录。
+            paths = ["/Album/full/", "/Album/nested/", "/Album/full/1.jpg", *found["folders"]]
+            action_id, tool = await self.propose(user, conversation, call("propose_trash", paths=paths, only_empty=True))
+            self.assertEqual((tool["result"]["count"], tool["result"]["skipped"], tool["result"]["nonempty_folders"]), (3, 2, 0))
+            self.assertIn("不是空目录（含 1 个文件）", [entry["reason"] for entry in tool["result"]["skipped_samples"]])
+            # 生成后有文件放进了空目录：执行时跳过它。
+            await self.put("Album/late/new.jpg", b"new")
+            _, done = await self.confirm(user, action_id)
+            self.assertEqual((done["result"]["ok"], done["result"]["skipped"]), (2, 1))
+            keys = self.keys()
+            self.assertIn("Album/full/1.jpg", keys)
+            self.assertIn("Album/nested/inner/2.jpg", keys)
+            self.assertIn("Album/late/new.jpg", keys)
+            self.assertNotIn("Album/empty/", keys)
+            self.assertNotIn("Album/hollow/", keys)
+            # 不带 only_empty 时照常生成，但会告诉模型和界面其中有多少文件。
+            action_id, tool = await self.propose(user, conversation, call("propose_trash", paths=["/Album/full/", "/Album/nested/"]))
+            self.assertEqual((tool["result"]["nonempty_folders"], tool["result"]["files_in_folders"]), (2, 2))
+            _, action = await self.req("GET", f"/api/user/v1/assistant/actions/{action_id}", headers=user)
+            self.assertEqual(action["payload"]["options"], {"only_empty": False, "files": 2, "nonempty": 2})
+            self.assertEqual([item["files"] for item in action["payload"]["samples"]], [1, 1])
+            self.assertIn("2 个文件夹含 2 个文件", action["payload"]["summary"])
+        self.run_async(run())
+
     def test_download_control_obeys_frozen_scope(self):
         async def run():
             await self.setup_assistant()

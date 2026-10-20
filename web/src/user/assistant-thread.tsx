@@ -911,8 +911,17 @@ function ItemRow({ kind, item }: { kind: string; item: ai.ActionItem }) {
   if (CROSS_KINDS.includes(kind) && item.from) return <li className="ai-diff-row"><Icon name={item.folder ? "folder" : "file"} size={13} />
     <span className="cell-truncate" title={display(item.from)}>{display(item.from)}</span></li>;
   if (kind === "download_control") return <li className="ai-diff-row"><Icon name="download" size={13} /><span className="cell-truncate">#{item.id} {baseName(item.path ?? "")}</span></li>;
+  const files = kind === "trash" && typeof item.files === "number" ? item.files : null;
   return <li className="ai-diff-row"><Icon name={item.folder || item.path?.endsWith("/") ? "folder" : "file"} size={13} />
-    <span className="cell-truncate" title={display(item.path ?? "")}>{display(item.path ?? "")}</span></li>;
+    <span className="cell-truncate" title={display(item.path ?? "")}>{display(item.path ?? "")}</span>
+    {files !== null && <small className={files ? "tone-warning" : undefined}>{files ? `含 ${files.toLocaleString("zh-CN")} 个文件` : "空目录"}</small>}</li>;
+}
+
+/** 移入回收站时提示文件夹里还有多少文件，避免「删除空目录」误带上非空文件夹。 */
+function TrashChips({ options }: { options?: { only_empty?: boolean; files?: number; nonempty?: number } }) {
+  if (options?.only_empty) return <span><Icon name="shield" size={12} />仅空目录，执行前再核对</span>;
+  if (!options?.nonempty) return null;
+  return <span className="tone-warning"><Icon name="alert" size={12} />{options.nonempty.toLocaleString("zh-CN")} 个文件夹含 {(options.files ?? 0).toLocaleString("zh-CN")} 个文件</span>;
 }
 
 /** 操作的实时状态：执行中轮询进度；经历过执行（含自动执行）后在终态时刷新文件列表。 */
@@ -1001,6 +1010,7 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
       {kind === "downloads" && payload.options?.target != null && <span><Icon name="download" size={12} />保存到 {display(payload.options.target)}</span>}
       {cross && !pending && <span><Icon name={moveOut ? "unlock" : "lock"} size={12} />{moveOut ? "移到普通文件" : "移入私密空间"}</span>}
       {(payload.conflicts ?? 0) > 0 && <span className="tone-warning">{payload.conflicts} 项将跳过</span>}
+      {kind === "trash" && <TrashChips options={payload.options} />}
     </div>
     {payload.confirm_reason && pending && <p className="ai-card-note"><Icon name="shield" size={13} />{payload.confirm_reason}</p>}
     {samples.length > 0 && <ul className="ai-diff">{samples.slice(0, 3).map((item, index) => <ItemRow key={index} kind={kind} item={item} />)}</ul>}
