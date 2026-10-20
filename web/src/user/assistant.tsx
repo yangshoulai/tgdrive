@@ -300,8 +300,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   // 浏览器工具：在当前页面执行后回传结果。只执行仍在有效期内、尚未处理的调用（断线重放时不重复操作页面）。
   const handledCalls = useRef(new Set<string>());
   const cacheQueue = useCacheQueue();
-  const clientContext = useRef({ location, onNavigate, page, privateMode, cacheQueue });
-  clientContext.current = { location, onNavigate, page, privateMode, cacheQueue };
+  const clientContext = useRef({ location, onNavigate, page, privateMode, cacheQueue, open });
+  clientContext.current = { location, onNavigate, page, privateMode, cacheQueue, open };
   const runClientCall = useCallback(async (runId: string, event: ai.RunEvent) => {
     const callId = String(event.call_id ?? "");
     const handledKey = `${runId}:${callId}`;
@@ -312,6 +312,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     const timer = controller ? window.setTimeout(() => controller.abort(), Math.max(0, Number(event.expires_at) * 1000 - Date.now())) : undefined;
     let outcome: { result?: Record<string, unknown>; error?: string };
     try {
+      if (!clientContext.current.open) throw new Error("对话已关闭，未执行页面操作");
       if (event.name === "http_request_approval") {
         const decision = await new Promise<ai.HttpDecision | null>(resolve => {
           const expires = Number(event.expires_at) * 1000;
@@ -837,8 +838,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 }
 
 /** 在用户当前页面执行浏览器工具（docs/assistant-design.md §19.7）。参数已经过服务端校验，这里只做页面操作。 */
-async function executeClientTool(name: string, args: Record<string, unknown>,
-  context: { location: AssistantLocation; onNavigate?: AssistantNavigate; page: boolean; privateMode: boolean; cacheQueue: ReturnType<typeof useCacheQueue> }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+export async function executeClientTool(name: string, args: Record<string, unknown>,
+  context: { location: AssistantLocation; onNavigate?: AssistantNavigate; page: boolean; privateMode: boolean; cacheQueue: ReturnType<typeof useCacheQueue>; open: boolean }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  if (!context.open) throw new Error("对话已关闭，未执行页面操作");
+  signal?.throwIfAborted();
   const { location, onNavigate, page } = context;
   if (name === "ui_cache_status") return cacheStatus(args, context.cacheQueue);
   if (["ui_cache_files", "ui_clear_cache", "ui_generate_thumbnails"].includes(name)) {
@@ -936,11 +939,10 @@ async function executePrivateTool(name: string, args: Record<string, unknown>, l
   };
   if (name === "ui_navigate") {
     const view = String(args.view ?? "files");
-    if (view === "downloads") onNavigate("downloads");
-    else {
-      if (!inPrivate || view === "files") onNavigate("private", view === "files" ? String(args.path ?? api.PRIVATE_PREFIX) : api.PRIVATE_PREFIX);
-      openPrivateSection(view === "trash" ? "trash" : "files");
-    }
+    // 旧运行重连后也可能重放下载页导航，必须在页面侧再次拒绝，避免卸载私密抽屉形成跳转循环。
+    if (view !== "files" && view !== "trash") throw new Error("私密对话保持在私密空间中，请通过侧栏手动打开下载任务；助手可直接查询下载进度");
+    if (!inPrivate || view === "files") onNavigate("private", view === "files" ? String(args.path ?? api.PRIVATE_PREFIX) : api.PRIVATE_PREFIX);
+    openPrivateSection(view === "trash" ? "trash" : "files");
     return { ok: true };
   }
   if (name === "ui_select") {

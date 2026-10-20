@@ -5,6 +5,7 @@ import { canOpenDownloadFolder, downloadGlyph, downloadPercent, downloadStatusLa
 import { TrayProgressRing, TrayRing, type TrayState } from "./tray";
 
 const COMPLETED_VISIBLE_MS = 8000;
+const PREVIEW_LIMIT = 100;
 
 /**
  * 离线下载在服务器上运行，离开「下载任务」页后仍要能看到进度。
@@ -24,6 +25,7 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
   completedRef.current = onCompleted;
   const anyActive = [...tracked.values()].some(isActiveDownload);
   const [tick, setTick] = useState(0);
+  const [activeTotal, setActiveTotal] = useState(0);
   useEffect(() => {
     const lockPrivate = () => setTracked(new Map([...trackedRef.current].map(([id, task]) => [id, task.private ? { ...task, key: "私密空间下载" } : task])));
     window.addEventListener("tessera:private-locked", lockPrivate);
@@ -32,32 +34,31 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
   useEffect(() => {
     if (hidden) return;
     const controller = new AbortController();
-    // 读取全部进行中的任务（每页 100 个，最多 20 页），再按编号补读已跟踪但不再进行中的任务，取得它们的最终状态。
-    // 不能只读第一页：一次添加超过一页的任务时，托盘会漏掉其余任务，标题数量也会偏少。
+    // 队列可以有上万项；只展示最近任务和实际下载中的任务，总数直接使用服务端聚合。
+    // 补读上一轮任务的终态，以保留完成提示和目录刷新，不逐页扫描整个队列。
     const read = async () => {
       const seen = new Map<number, api.DownloadTask>();
-      let cursor: string | null = null;
-      for (let page = 0; page < 20; page++) {
-        const result: api.DownloadPage = await api.listDownloads(cursor, "active", controller.signal, "", { limit: 100 });
-        for (const task of result.tasks) seen.set(task.id, task);
-        if (!result.next_cursor) break;
-        cursor = String(result.next_cursor);
-      }
+      const recent = await api.listDownloads(null, "active", controller.signal, "", { limit: PREVIEW_LIMIT });
+      const running = await api.listDownloads(null, "running", controller.signal, "", { limit: PREVIEW_LIMIT });
+      for (const task of [...recent.tasks, ...running.tasks]) seen.set(task.id, task);
+      const previewIds = new Set(seen.keys());
       const rest = [...trackedRef.current.keys()].filter(id => !seen.has(id));
       for (let start = 0; start < rest.length; start += 100) {
         const result = await api.listDownloads(null, "", controller.signal, "", { ids: rest.slice(start, start + 100) });
         for (const task of result.tasks) seen.set(task.id, task);
       }
-      return [...seen.values()];
+      return { tasks: [...seen.values()], total: recent.total, previewIds };
     };
-    void read().then(tasks => {
+    void read().then(({ tasks, total, previewIds }) => {
       const next = new Map(trackedRef.current);
+      setActiveTotal(total);
       const finished = new Set<string>();
       // 已跟踪却读不到的任务已被删除（例如在任务页或另一个窗口），从托盘移除。
       const present = new Set(tasks.map(task => task.id));
       for (const id of [...next.keys()]) if (!present.has(id)) { next.delete(id); completedAt.current.delete(id); }
       for (const task of tasks) {
         const previous = next.get(task.id);
+        if (isActiveDownload(task) && !previewIds.has(task.id)) { next.delete(task.id); completedAt.current.delete(task.id); continue; }
         if (previous || isActiveDownload(task)) next.set(task.id, task);
         if (previous && isActiveDownload(previous) && task.status === "completed") {
           completedAt.current.set(task.id, Date.now());
@@ -65,6 +66,8 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
         }
         if (task.status !== "completed") completedAt.current.delete(task.id);
       }
+      const terminal = [...next.values()].filter(task => !isActiveDownload(task)).sort((a, b) => b.id - a.id);
+      for (const task of terminal.slice(PREVIEW_LIMIT)) { next.delete(task.id); completedAt.current.delete(task.id); }
       setTracked(next);
       // 新完成的文件出现在用量里；正在浏览保存目录的文件页按事件里的目录自行刷新（其他目录不受影响）。
       if (finished.size) {
@@ -81,7 +84,7 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
     document.addEventListener("visibilitychange", visible);
     return () => document.removeEventListener("visibilitychange", visible);
   }, []);
-  const tasks = [...tracked.values()].sort((a, b) => b.id - a.id);
+  const tasks = [...tracked.values()].sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || b.id - a.id);
   useEffect(() => {
     const completed = tasks.filter(task => task.status === "completed" && completedAt.current.has(task.id));
     if (!completed.length) return;
@@ -101,11 +104,11 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
   const active = tasks.filter(isActiveDownload);
   const failed = tasks.filter(task => task.status === "failed").length;
   const known = active.filter(task => downloadPercent(task) !== null);
-  const overall = known.length ? known.reduce((sum, task) => sum + (downloadPercent(task) ?? 0), 0) / known.length : null;
+  const overall = activeTotal <= active.length && known.length ? known.reduce((sum, task) => sum + (downloadPercent(task) ?? 0), 0) / known.length : null;
   const speed = active.reduce((sum, task) => sum + (task.status === "running" ? task.speed || 0 : 0), 0);
-  const eta = active.reduce<number | null>((longest, task) => task.eta_seconds === null ? longest : Math.max(longest ?? 0, task.eta_seconds), null);
+  const eta = activeTotal > active.length ? null : active.reduce<number | null>((longest, task) => task.eta_seconds === null ? longest : Math.max(longest ?? 0, task.eta_seconds), null);
   const state: TrayState = active.length ? "active" : failed ? "error" : "done";
-  const title = active.length ? `正在下载 ${active.length} 个文件` : failed ? `${failed} 个下载失败` : "离线下载完成";
+  const title = active.length ? `正在下载 ${Math.max(activeTotal, active.length).toLocaleString("zh-CN")} 个文件` : failed ? `${failed} 个下载失败` : "离线下载完成";
   const subtitle = active.length ? [speed ? `${formatBytes(speed)}/s` : "等待数据", eta !== null && speed ? `约剩 ${seconds(eta)}` : null, overall !== null ? `${Math.floor(overall)}%` : null].filter(Boolean).join(" · ")
     : failed ? "可以继续下载，或到任务页查看原因" : "文件已保存到云盘";
   const dismiss = () => setTracked(new Map([...trackedRef.current].filter(([, task]) => isActiveDownload(task))));
@@ -129,6 +132,7 @@ export function DownloadTray({ hidden, revision, onOpenTasks, onOpenFolder, onCo
       </header>
       {!collapsed && (
         <ul>
+          {activeTotal > active.length && <li><span className="muted">显示最近 {PREVIEW_LIMIT} 项及下载中任务；全部 {activeTotal.toLocaleString("zh-CN")} 项可在任务页查看</span></li>}
           {tasks.map(task => {
             const name = downloadTaskName(task);
             const location = task.trashed ? "文件已删除" : api.privatePathLabel(downloadTaskFolder(task));

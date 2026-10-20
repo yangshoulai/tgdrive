@@ -28,6 +28,8 @@ from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_c
 
 
 PART_SIZE = 16 * 1024 * 1024
+# 排队数量与实际并发分开限制，允许大批相册持久排队，不同时启动这些下载。
+MAX_PENDING_TASKS = 20_000
 ACTIVE = ("queued", "running", "interrupted")
 RETRY_DELAYS = (10, 30, 90)
 # mimetypes 对这几种常见类型给出的扩展名不符合习惯（如 .jpe），这里固定。
@@ -353,8 +355,8 @@ class OfflineDownloads:
         now, ids = time.time(), []
         with self.metadata.transaction() as db:
             pending = db.execute("SELECT COUNT(*) FROM offline_tasks WHERE user_id=? AND status!='completed'", (user_id,)).fetchone()[0]
-            if pending + len(decoded) > 500:
-                raise ValueError("未完成任务最多 500 个，请先清理任务")
+            if pending + len(decoded) > MAX_PENDING_TASKS:
+                raise ValueError(f"未完成任务最多 {MAX_PENDING_TASKS} 个，请等待下载完成或清理不再需要的任务")
             reserved = {row[0] for row in db.execute("SELECT key FROM offline_tasks WHERE bucket_id=? AND status!='completed'", (scope.bucket_id,))}
             for value, key in decoded:
                 if key in reserved or db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone():
@@ -408,7 +410,7 @@ class OfflineDownloads:
         reveal_private = bool(private_scope and private_scope.private_access)
         if reveal_private and private_scope.authorize is not None:
             private_scope.authorize()
-        if status not in ("", "active", "stopped", "completed", "failed") or cursor < 0:
+        if status not in ("", "active", "running", "stopped", "completed", "failed") or cursor < 0:
             raise ValueError("任务筛选或分页参数不正确")
         limit = max(1, min(limit, 100))
         where, args = "user_id=?", [user_id]

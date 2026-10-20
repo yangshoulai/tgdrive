@@ -19,7 +19,7 @@ from ..filekinds import kind_of
 from .tools import END, PATH, ToolContext, ToolError, ToolOutput, _str, tool
 
 VIEWS = {"files": "文件", "trash": "回收站", "downloads": "下载任务", "shared": "公开分享"}
-PRIVATE_VIEWS = {"files": "私密空间", "trash": "私密回收站", "downloads": "私密下载任务"}
+PRIVATE_VIEWS = {"files": "私密空间", "trash": "私密回收站"}
 
 
 async def _call(ctx: ToolContext, name: str, args: dict) -> dict:
@@ -83,13 +83,15 @@ async def ui_get_view(ctx: ToolContext, args: dict) -> ToolOutput:
 
 @tool("ui_navigate", "打开页面", "browser", "read",
       "在用户的 Tessera 中打开页面：view=files 时打开 path 指定的目录（默认作用域根），也可以打开 trash 回收站、downloads 下载任务、"
-      "shared 公开分享。用于把用户带到结果所在的位置。",
+      "shared 公开分享。只在用户明确要求打开页面时调用，提交下载后保持当前对话。私密对话只能打开私密目录或私密回收站，下载进度用 list_downloads 查询。",
       {"view": {"type": "string", "enum": list(VIEWS), "description": "页面，默认 files"}, "path": PATH}, timeout=50)
 async def ui_navigate(ctx: ToolContext, args: dict) -> ToolOutput:
     view = args.get("view") or "files"
     views = PRIVATE_VIEWS if ctx.private else VIEWS
+    if ctx.private and view == "downloads":
+        raise ToolError("请使用 list_downloads 或 get_download 查询私密下载进度，保持当前私密对话；用户可以手动打开侧栏的「下载任务」")
     if view not in views:
-        raise ToolError("参数 view 不正确" + ("：私密对话只能打开 files（私密空间）、trash（私密回收站）、downloads（私密下载任务）" if ctx.private else ""))
+        raise ToolError("参数 view 不正确" + ("：私密对话只能打开 files（私密空间）、trash（私密回收站）" if ctx.private else ""))
     path = ctx.resolve(args.get("path"), directory=True) if view == "files" else None
     if path is not None and path and ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
                                                     (ctx.bucket_id, path, path + END)).fetchone() is None:

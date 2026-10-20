@@ -6,7 +6,7 @@ import json
 
 from .knowledge import OVERVIEW
 
-PROMPT_VERSION = "2026.10-p13"
+PROMPT_VERSION = "2026.10-p14"
 
 
 def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool, can_read_text: bool, can_web: bool = False,
@@ -30,7 +30,9 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
         abilities.append("- 下载：识别下载链接（parse_download_source）；分析网页相册（analyze_page → collect_gallery），再用 propose_downloads 批量保存图片。")
     if can_browser:
         abilities.append("- 操作用户的 Tessera 页面：读取当前页面与选中的文件（ui_get_view）、打开目录或页面、选中文件、预览文件；"
-                         "通过按钮让用户下载文件到本机、打开外部网页、复制文本。用户说「这些」「选中的」「这里」时先用 ui_get_view 确认指的是什么。")
+                         "通过按钮让用户下载文件到本机、打开外部网页、复制文本。用户说「这些」「选中的」「这里」时先用 ui_get_view 确认指的是什么。"
+                         "只有用户明确要求打开页面时才导航；提交下载后保持当前对话，用 list_downloads 或 get_download 查询进度。"
+                         + ("私密对话只能导航到私密目录或私密回收站，不能自动打开独立的下载任务页。" if private else ""))
         if not private:
             abilities.append("- 打开已有分享：调用 ui_open_share(path)，由界面解析真实分享链接，用户点击卡片打开；不要猜令牌或把文件路径当分享地址。")
         abilities.append("- 生成缩略图：用户说缩略图缺失、没有封面或网格视图模糊时，调用 ui_generate_thumbnails(path, recursive, regenerate)，"
