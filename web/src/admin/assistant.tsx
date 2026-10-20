@@ -937,7 +937,7 @@ function ToolParamsDialog({ tool, values, onClose, onApply }: { tool: ai.AdminTo
 /* ---------- 限制与额度 ---------- */
 
 const LIMIT_GROUPS: { title: string; description: string; keys: string[] }[] = [
-  { title: "Agent 循环", description: "每一轮对话（一条用户消息触发的处理）的运行限制。工具调用超过同时执行数时会分批排队；触达总次数、时间或预算上限后，助手会总结已完成的部分并停止。累计 token 预算合计本轮每次模型请求的输入与输出，设为 0 表示不限，与模型上下文容量独立。", keys: ["max_steps", "max_tool_calls", "parallel_calls", "repeat_threshold", "error_threshold", "run_seconds", "tool_seconds", "tool_result_bytes", "run_tokens"] },
+  { title: "Agent 循环", description: "每一轮对话（一条用户消息触发的处理）的运行限制。工具调用超过同时执行数时会分批排队；触达总次数、时间或预算上限后，助手会总结已完成的部分并停止。累计 token 预算合计本轮每次模型请求的输入与输出，设为 0 表示不限，与模型上下文容量独立。长任务带有计划时，预算用完但计划仍有可执行步骤、本段有实际进展且没有等待确认，会按「自动续跑段数」在同一轮中开始新的一段，每段预算重新计算；用户可随时停止，每日额度照常生效。", keys: ["max_steps", "max_tool_calls", "parallel_calls", "repeat_threshold", "error_threshold", "run_seconds", "tool_seconds", "tool_result_bytes", "run_tokens", "auto_continue"] },
   { title: "并发与容量", description: "对话容量按所选模型的上下文窗口判断，接近上限时自动压缩历史。单进程部署：并发过高会占用内存与模型服务额度。", keys: ["user_concurrency", "global_concurrency", "user_messages_per_minute", "max_conversations", "action_items", "download_urls"] },
 ];
 
@@ -988,6 +988,10 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
     try { onSaved(await ai.updateAdminSettings({ private: value })); toast.success(value ? "已开放私密对话" : "已关闭私密对话，进行中的私密对话已清除"); }
     catch (reason) { toast.error(api.errorMessage(reason, "保存失败")); }
   }
+  async function setAuto(key: "full_auto_share" | "full_auto_purge", value: boolean) {
+    try { onSaved(await ai.updateAdminSettings({ [key]: value ? 1 : 0 })); toast.success(value ? "已设为完全访问下自动执行" : "已改为需要用户确认"); }
+    catch (reason) { toast.error(api.errorMessage(reason, "保存失败")); }
+  }
   async function setFullAccess(value: boolean) {
     try { onSaved(await ai.updateAdminSettings({ full_access: value })); toast.success(value ? "已允许用户使用完全访问模式" : "已关闭完全访问模式"); }
     catch (reason) { toast.error(api.errorMessage(reason, "保存失败")); }
@@ -996,7 +1000,13 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
     <form className="assistant-limits" onSubmit={submit} noValidate>
       <Panel title="访问模式" description="审批模式下，每次修改文件都由用户在卡片上确认。完全访问模式下，普通修改自动执行并保留 24 小时撤销。">
         <Switch label="允许用户切换到完全访问" checked={settings.full_access} onChange={value => void setFullAccess(value)}
-          description="彻底删除、公开分享、跨私密空间移动与 HTTP DELETE 仍然需要用户确认。可在“用户”页按人单独允许或禁止。" />
+          description="跨私密空间移动、需要访问密码的分享与 HTTP DELETE 始终需要用户确认。可在“用户”页按人单独允许或禁止。" />
+        <Switch label="完全访问下自动公开分享" checked={settings.full_auto_share === 1} disabled={!settings.full_access}
+          onChange={value => void setAuto("full_auto_share", value)}
+          description="按助手提议的有效期创建分享链接，不设密码；用户要求设置访问密码的分享仍需在卡片中确认。" />
+        <Switch label="完全访问下自动彻底删除" checked={settings.full_auto_purge === 1} disabled={!settings.full_access}
+          onChange={value => void setAuto("full_auto_purge", value)}
+          description="彻底删除回收站中的项目不可恢复。开启后助手按用户要求直接删除，适合信任模型判断范围的场景。" />
       </Panel>
       <Panel title="私密对话" description="用户在已解锁的私密空间里使用助手。对话只在服务器内存中，锁定、闲置或重启后清除，管理员看不到内容。">
         <Switch label="允许用户使用私密对话" checked={settings.private} onChange={value => void setPrivate(value)}

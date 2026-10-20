@@ -286,6 +286,24 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audit["action"], "download.batch")
         self.assertEqual(json.loads(audit["detail"]), {"action": "delete", "count": 4, "done": 3})
 
+    async def test_stop_all_stops_only_own_active_tasks_and_keeps_records(self):
+        queued, interrupted, done, foreign = await self.make(), await self.make(), await self.make(), await self.make()
+        with self.app.metadata.transaction() as db:
+            db.execute("UPDATE offline_tasks SET status='interrupted' WHERE id=?", (interrupted["id"],))
+            db.execute("UPDATE offline_tasks SET status='completed' WHERE id=?", (done["id"],))
+            db.execute("UPDATE offline_tasks SET user_id=? WHERE id=?", (self.admin.id, foreign["id"]))
+        client = Client(self.app)
+        headers = await client.login("user", "alice@example.com", "alice password")
+        status, _, data = await client.request("POST", "/api/user/v1/downloads/stop-all", b"{}", headers)
+        self.assertEqual((status, json.loads(data)), (200, {"stopped": 2}))
+        statuses = {row["id"]: row["status"] for row in self.app.metadata.db.execute("SELECT id, status FROM offline_tasks")}
+        self.assertEqual((statuses[queued["id"]], statuses[interrupted["id"]], statuses[done["id"]], statuses[foreign["id"]]),
+                         ("stopped", "stopped", "completed", "queued"), "只停止自己的进行中任务，记录保留，之后可以继续")
+        audit = self.app.metadata.db.execute("SELECT action,detail FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual((audit["action"], json.loads(audit["detail"])), ("download.stop_all", {"stopped": 2}))
+        await self.offline.control(self.alice.id, queued["id"], "resume")
+        self.assertEqual(self.offline._row(queued["id"])["status"], "queued")
+
     async def test_list_by_ids_for_tray_reads_beyond_first_page(self):
         tasks = [await self.make() for _ in range(3)]
         foreign = await self.make()

@@ -20,7 +20,7 @@ import { DownloadsView } from "./user/downloads";
 import { DownloadTray } from "./user/download-tray";
 import { PreviewHost } from "./user/preview-host";
 import { CacheTasksProvider, CacheTray } from "./user/cache";
-import { AssistantDock, AssistantDrawer, AssistantLauncher, useAssistantConfig, useAssistantShortcut } from "./user/assistant";
+import { AssistantDock, AssistantDrawer, useAssistantConfig, useAssistantShortcut } from "./user/assistant";
 import { takePageImportRequest, usePageImport } from "./user/page-import";
 import { PrivateSessionProvider } from "./user/private-session";
 import { EmailDialog, UserSettingsPage } from "./user/account";
@@ -307,7 +307,6 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   return (
     <AppShell active={section} onNavigate={key => navigate(key)} hrefFor={key => sectionUrl(key)} groups={groups}
       workspaces={isAdmin ? [{ label: "我的空间", icon: "folder" }, { label: "系统管理", icon: "shield" }] : []}
-      sidebarAction={assistantAvailable ? <AssistantLauncher open={assistantOpen || assistantPage} onOpen={toggleAssistant} /> : undefined}
       links={[{ label: "使用文档", icon: "book", href: "/docs" }]}
       sidebarFooter={<>
         {/* 系统正常时不占位置；只有锁定（或状态读取中）才提示，点击进入安全与维护。 */}
@@ -340,7 +339,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         <CacheTray />
       </div>
       {/* 私密空间页面已解锁时显示私密对话（§24.8），其他页面显示普通对话。 */}
-      {assistantAvailable && assistant.config && !assistantPage && <AssistantDock open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)}
+      {assistantAvailable && assistant.config && !assistantPage && <AssistantDock open={assistantOpen} onOpen={toggleAssistant} config={assistant.config} onClose={() => setAssistantOpen(false)}
         onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" || section === "private" ? location.prefix : "" }}
         onFilesChanged={filesChanged} pageImport={pageImport} onPageImportDone={clearPageImport} onNavigate={(view, prefix) => navigate(view, prefix ?? "")}
         onOpenPage={id => { setAssistantOpen(false); navigate("assistantPage", id ?? ""); }} />}

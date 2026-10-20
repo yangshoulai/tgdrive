@@ -384,6 +384,8 @@ export function Segmented<T extends string>({ value, options, onChange, label, d
 
 const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 const modalStack: HTMLElement[] = [];
+/** 最小化的小窗按最小化的先后排列：快捷键 I 只恢复最近最小化的一个，新小窗排在已有小窗上方。 */
+const minimizedStack: HTMLElement[] = [];
 const focusable = (node: HTMLElement) => Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(item => item.tabIndex >= 0 && item.getClientRects().length > 0);
 const WINDOW_POINTER = "(min-width: 861px) and (hover: hover) and (pointer: fine)";
 const RESIZE_CURSORS = { n: "ns-resize", e: "ew-resize", s: "ns-resize", w: "ew-resize", ne: "nesw-resize", se: "nwse-resize", sw: "nesw-resize", nw: "nwse-resize" } as const;
@@ -418,9 +420,10 @@ function fitAspect(size: { width: number; height: number }, ratio: number) {
   return { width: Math.round(width * scale), height: Math.round(height * scale) };
 }
 
-export function Modal({ title, description, onClose, children, footer, actions, menuItems = [], compactActions = false, size: modalSize = "md", icon, leading, tone, dismissible = true, closable = true, className = "", style, initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false, movable = false, resizable, aspectRatio }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; menuItems?: MenuItem[]; /** 窄预览窗口将窗口操作合并到更多菜单。 */ compactActions?: boolean; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; style?: CSSProperties; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean; /** 拖动头部移动窗口（正常与最小化分别记住位置，最大化与全屏时不生效） */ movable?: boolean;
+export function Modal({ title, description, onClose, children, footer, actions, menuItems = [], compactActions = false, size: modalSize = "md", icon, leading, tone, dismissible = true, closable = true, className = "", style, initialFocus = "auto", onKeyDownCapture, expandable = false, pinnable = false, minimizable = false, minimizedContent, windowKey, windowShortcuts = false, movable = false, resizable, aspectRatio, minimizeRequest }: { title: string; description?: ReactNode; onClose: () => void; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; menuItems?: MenuItem[]; /** 窄预览窗口将窗口操作合并到更多菜单。 */ compactActions?: boolean; size?: "sm" | "md" | "lg" | "xl"; icon?: IconName; leading?: ReactNode; tone?: Tone; dismissible?: boolean; /** false 时不显示右上角关闭按钮（必须完成的对话框） */ closable?: boolean; className?: string; style?: CSSProperties; initialFocus?: "auto" | "dialog"; onKeyDownCapture?: KeyboardEventHandler<HTMLDivElement>; expandable?: boolean; pinnable?: boolean; minimizable?: boolean; minimizedContent?: ReactNode; windowKey?: string; windowShortcuts?: boolean; /** 拖动头部移动窗口（正常与最小化分别记住位置，最大化与全屏时不生效） */ movable?: boolean;
   /** 桌面上拖动四边或四角调整窗口大小；值是记住尺寸用的名称（同名窗口共用），双击边角还原默认大小。手机、最大化、全屏与最小化时不生效。 */ resizable?: string;
-  /** 调整大小时保持的宽高比（视频窗口），按住 Shift 自由调整；记住的尺寸按面积换算到当前比例，同名窗口的横竖内容不会互相留下黑边。 */ aspectRatio?: number }) {
+  /** 调整大小时保持的宽高比（视频窗口），按住 Shift 自由调整；记住的尺寸按面积换算到当前比例，同名窗口的横竖内容不会互相留下黑边。 */ aspectRatio?: number;
+  /** 由外部要求最小化：数值变化（非 0）时最小化，例如打开另一类预览时把正在播放的窗口收成小窗。 */ minimizeRequest?: number }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
@@ -539,6 +542,22 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", end); window.addEventListener("pointercancel", end);
   }
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!minimized || !node) return;
+    minimizedStack.push(node);
+    // 同时最小化多个预览（例如边看视频边听音乐）：没有手动拖过的新小窗放到已有小窗上方，不互相遮挡。
+    if (movable && !offsets.mini.x && !offsets.mini.y) {
+      const rect = node.getBoundingClientRect();
+      const others = [...document.querySelectorAll<HTMLElement>(".modal.is-minimized")].filter(item => item !== node)
+        .map(item => item.getBoundingClientRect()).filter(other => other.left < rect.right && other.right > rect.left);
+      if (others.length) {
+        const dy = Math.min(...others.map(other => other.top)) - 12 - rect.bottom;
+        if (dy < 0) setOffsets(current => ({ ...current, mini: clampOffset(rect, current.mini, 0, dy) }));
+      }
+    }
+    return () => { const index = minimizedStack.indexOf(node); if (index >= 0) minimizedStack.splice(index, 1); };
+  }, [minimized]);
   useEffect(() => {
     if (!movable || (!offset.x && !offset.y)) return;
     // 窗口缩小后把已移动的窗口拉回可见区域。
@@ -573,6 +592,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     } catch { toast.error("无法进入全屏，可以使用最大化预览。"); }
     finally { setSwitchingScreen(false); }
   }
+  useEffect(() => { if (minimizeRequest && minimizable && !minimized) void minimize(); }, [minimizeRequest]);
   async function minimize() {
     if (switchingScreen) return;
     setSwitchingScreen(true);
@@ -617,7 +637,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     if (!windowShortcuts || !minimizable || !minimized) return;
     // 小窗口释放页面焦点后，仍可恢复；其他弹窗与输入控件不受影响。
     const restore = (event: KeyboardEvent) => {
-      if (modalStack.length || event.defaultPrevented || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.key.toLowerCase() !== "i") return;
+      if (modalStack.length || minimizedStack.at(-1) !== ref.current || event.defaultPrevented || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.key.toLowerCase() !== "i") return;
       if (!(event.target instanceof Element) || isShortcutControl(event.target) || event.target.closest(".assistant-drawer, .assistant-page, .sidebar") || document.querySelector(".menu")) return;
       event.preventDefault(); event.stopPropagation(); setMinimized(false);
     };

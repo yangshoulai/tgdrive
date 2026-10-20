@@ -6,6 +6,8 @@ import type { PreviewNav, PreviewStrip } from "./preview-playlist";
 import { Icon, isShortcutControl, type IconName } from "./ui";
 
 type Size = { width: number; height: number };
+/** 预览封面最长边为 min(960, 原图最长边)：达到这个长度说明原图至少这么大，占位时可以放大到原图将占据的尺寸。 */
+const POSTER_EDGE = 950;
 type View = { scale: number; x: number; y: number };
 const FIT: View = { scale: 1, x: 0, y: 0 };
 const MAX_ZOOM = 8;
@@ -21,7 +23,10 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
 }) {
   const root = useRef<HTMLDivElement>(null), canvas = useRef<HTMLDivElement>(null);
   const [loaded, setLoaded] = useState(false);
-  const [natural, setNatural] = useState<Size | null>(null);
+  // poster：尺寸来自预览封面而不是原图（原图加载前的占位）。
+  const [natural, setNatural] = useState<(Size & { poster?: boolean }) | null>(null);
+  // 原图淡入结束前保留封面在下面，避免切换瞬间露出背景或跳动。
+  const [posterDone, setPosterDone] = useState(false);
   const [box, setBox] = useState<Size>({ width: 0, height: 0 });
   const [rotation, setRotation] = useState(0);
   const [view, setView] = useState<View>(FIT);
@@ -32,7 +37,12 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ x: number; y: number; view: View; distance?: number; moved: boolean; startX: number; startY: number } | null>(null);
 
-  useEffect(() => { setLoaded(false); setNatural(null); setView(FIT); setRotation(0); }, [url]);
+  useEffect(() => { setLoaded(false); setNatural(null); setPosterDone(false); setView(FIT); setRotation(0); }, [url]);
+  useEffect(() => {
+    if (!loaded) return;
+    const timer = window.setTimeout(() => setPosterDone(true), 450);
+    return () => window.clearTimeout(timer);
+  }, [loaded]);
   useLayoutEffect(() => {
     const node = canvas.current;
     if (!node) return;
@@ -44,8 +54,10 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
 
   // 适应画布的基准尺寸：旋转 90° 时宽高互换；小图不放大。
   const turned = rotation % 180 !== 0;
+  // 小图不放大；封面占位且原图明显更大时按画布放大，原图到达后尺寸不变，不会从小图跳到大图。
+  const upscale = Boolean(natural?.poster && Math.max(natural.width, natural.height) >= POSTER_EDGE);
   const fit = natural && box.width && box.height
-    ? Math.min(1, (box.width - 32) / (turned ? natural.height : natural.width), (box.height - 32) / (turned ? natural.width : natural.height)) : 1;
+    ? Math.min(upscale ? Infinity : 1, (box.width - 32) / (turned ? natural.height : natural.width), (box.height - 32) / (turned ? natural.width : natural.height)) : 1;
   const display = natural ? { width: natural.width * fit, height: natural.height * fit } : null;
   const oneToOne = Math.max(1, 1 / fit);
   // 最多放大到适应窗口的 4 倍，或原图像素的 4 倍（大图），取较大者。
@@ -179,13 +191,13 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
   const transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale}) rotate(${rotation}deg)`;
   const sized = display ? { width: display.width, height: display.height } : undefined;
   const showStrip = Boolean(strip && strip.items.length > 1);
-  return <div ref={root} className={`image-viewer${idle && !dragging ? " is-idle" : ""}${loaded ? " is-loaded" : ""}${view.scale > 1 ? " is-zoomed" : ""}${dragging ? " is-dragging" : ""}`}
+  return <div ref={root} className={`image-viewer${idle && !dragging ? " is-idle" : ""}${loaded ? " is-loaded" : ""}${poster ? " has-poster" : ""}${view.scale > 1 ? " is-zoomed" : ""}${dragging ? " is-dragging" : ""}`}
     onPointerMove={wake}>
     <div className="image-backdrop" aria-hidden="true" style={poster ? { backgroundImage: `url("${poster}")` } as CSSProperties : undefined} />
     <div ref={canvas} className="image-canvas" onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}
       onDoubleClick={event => { if (view.scale > 1) setView(FIT); else zoomAt(Math.max(2.5, oneToOne), relative(event.clientX, event.clientY)); }}>
-      {!loaded && poster && <img className="image-poster" src={poster} alt="" aria-hidden="true" draggable={false} style={sized}
-        onLoad={event => { const image = event.currentTarget; if (!natural) setNatural({ width: image.naturalWidth, height: image.naturalHeight }); onImageSize?.(image.naturalWidth, image.naturalHeight, false); }} />}
+      {!posterDone && poster && <img className="image-poster" src={poster} alt="" aria-hidden="true" draggable={false} style={sized}
+        onLoad={event => { const image = event.currentTarget; if (!natural) setNatural({ width: image.naturalWidth, height: image.naturalHeight, poster: true }); onImageSize?.(image.naturalWidth, image.naturalHeight, false); }} />}
       <img key={url} className="image-full" src={url} alt={name} draggable={false} style={{ ...sized, transform }}
         onLoad={event => { const image = event.currentTarget; setNatural({ width: image.naturalWidth, height: image.naturalHeight }); setLoaded(true); onImageSize?.(image.naturalWidth, image.naturalHeight, true); onLoad?.(image); }}
         onError={onError} />

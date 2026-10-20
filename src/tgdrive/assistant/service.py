@@ -33,12 +33,12 @@ from ..objects import PRIVATE_PREFIX, Scope
 from ..offline.request import checked_url
 from . import client_tools, http_tools, knowledge, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
 from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
-from .actions import CONFIRM_KINDS, DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
+from .actions import DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
 from .catalog import CatalogStore
 from .channels import ChannelStore
 from .config import HTTP_APPROVAL_TIMEOUT, LIMITS, PRIVATE_NOTICE, AssistantConfig
 from .private_chat import MemoryTrace, RoutedTrace, is_private
-from .planning import Plan, display_plan
+from .planning import META_TOOLS, Plan, display_plan
 from .guard import SecretGuard
 from .providers import ProviderError, ToolCall, ToolDef
 from .tools import (
@@ -209,6 +209,8 @@ class AssistantService:
         self.executor = ActionExecutor(objects, offline)
         self.executions: dict[str, Progress] = {}
         self._execution_tasks: dict[str, asyncio.Task] = {}
+        # 与运行并行或在运行结束后继续的后台任务（生成标题）：保留引用，避免被回收。
+        self._background: set[asyncio.Task] = set()
         self.runs: dict[str, RunState] = {}
         self._minute: dict[int, collections.deque] = {}
         self._active = 0
@@ -1644,7 +1646,8 @@ class AssistantService:
         return True
 
     async def _model_call(self, state: RunState, model: dict, endpoint, system: str, messages: list[dict], tools: list[ToolDef], *,
-                          max_tokens: int | None, stream: bool = True):
+                          max_tokens: int | None, stream: bool = True, quiet: bool = False):
+        """quiet：与主回复并行的后台调用（生成标题），不改动思考计时，也不向界面发流事件。"""
         self._validate(state)
         await self._channel_slot(model["channel_id"])
         started = time.time()
@@ -1662,7 +1665,8 @@ class AssistantService:
             for attempt in range(2):
                 try:
                     self._validate(state)
-                    state.thinking = {}
+                    if not quiet:
+                        state.thinking = {}
                     reply = await self.chat(endpoint, model["model"], system, messages, tools, max_tokens=max_tokens,
                                             **({"on_text": on_text, "on_reasoning": on_reasoning} if stream else {}))
                     break
@@ -1673,7 +1677,8 @@ class AssistantService:
                                         http_status=exc.status, error_code=exc.code, error=f"模型请求失败（{exc.code}）")
                     if not exc.retryable or attempt:
                         raise
-                    await state.emit({"type": "stream_reset"})
+                    if not quiet:
+                        await state.emit({"type": "stream_reset"})
                     await asyncio.sleep(2)
                     started = time.time()
         except asyncio.CancelledError:
@@ -1768,8 +1773,12 @@ class AssistantService:
                 if current["access_mode"] == "full" and self._full_access(state.user_id):
                     if kind in ("move_out", "move_in"):
                         reason = "移出或移入私密空间总是需要你确认"
-                    elif kind in CONFIRM_KINDS:
-                        reason = "彻底删除与公开分享总是需要你确认"
+                    elif kind == "share" and (payload.get("options") or {}).get("require_password"):
+                        reason = "需要设置访问密码的分享要由你填写密码并确认"
+                    elif kind == "share" and not self.config.setting("full_auto_share"):
+                        reason = "公开分享需要你确认"
+                    elif kind == "purge" and not self.config.setting("full_auto_purge"):
+                        reason = "彻底删除不可恢复，需要你确认"
                     else:
                         reason, auto = None, True
                     payload = {**payload, "auto": True} if auto else {**payload, "confirm_reason": reason}
@@ -1799,7 +1808,7 @@ class AssistantService:
                 # 只保存已经脱敏的冻结预览；确认卡片与执行结果复用同一条加密工具消息。
                 http_review = {"type": "http_request", "request": arguments, "decision": "cancelled"}
                 if plan is not None:
-                    plan.wait(call.id, "请在 HTTP 请求卡片中确认")
+                    plan.wait(call.id, "等待你在确认区批准 HTTP 请求")
                     await self._publish_plan(state)
                 # 人工确认不消耗工具执行时间；恢复后仍使用等待前剩余的预算。
                 remaining = max(0, tool_timer.when() - time.monotonic()) if tool_timer is not None else None
@@ -1971,6 +1980,7 @@ class AssistantService:
     async def _run(self, state: RunState) -> None:
         status, stop_reason = "completed", "completed"
         steps = tool_calls = 0
+        spent_steps = spent_tools = 0  # 已结束各段的累计，写入运行记录
         acquired = False
         try:
             await self._acquire(state)
@@ -1990,6 +2000,8 @@ class AssistantService:
             review_checked = False
             forced_final: str | None = None
             compacted = overflowed = False
+            # 长任务分段（§32）：预算按段计算；计划仍有可执行步骤且本段有进展时，在同一轮中自动开始下一段。
+            segment, segment_tokens, segment_done, segment_ok = 1, 0, state.plan.completed, 0
             while True:
                 self._validate(state)
                 model = self.channels.model(state.model_id)
@@ -2008,11 +2020,33 @@ class AssistantService:
                         forced_final = "模型调用次数"
                     elif tool_calls >= limits["max_tool_calls"]:
                         forced_final = "工具调用次数"
-                    elif limits["run_tokens"] and state.input_tokens + state.output_tokens >= limits["run_tokens"]:
+                    elif limits["run_tokens"] and state.input_tokens + state.output_tokens - segment_tokens >= limits["run_tokens"]:
                         forced_final = "累计 token 预算"
                     elif _run_clock(state) >= deadline:
                         forced_final = "运行时间"
-                    if forced_final:
+                    # 有进展：多完成了计划步骤，或本段至少有 3 次成功的工具调用；没有进展时续跑只会重复消耗。
+                    progressed = state.plan.completed > segment_done or segment_ok >= 3
+                    if forced_final and segment <= limits.get("auto_continue", 0) and progressed and state.plan.actionable \
+                            and not self.trace.has_open_actions(state.conversation_id):
+                        segment += 1
+                        message = {"type": "continued", "text": f"已达到本段{forced_final}上限，计划还有 {state.plan.remaining} 步，自动继续（第 {segment} 段）",
+                                   "model_text": prompts.auto_continue(forced_final, segment, state.plan.remaining)}
+                        seq = self.trace.append(state.conversation_id, state.id, "event", message)
+                        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
+                        spent_steps, spent_tools = spent_steps + steps, spent_tools + tool_calls
+                        steps = tool_calls = segment_ok = 0
+                        segment_tokens = state.input_tokens + state.output_tokens
+                        segment_done = state.plan.completed
+                        deadline = _run_clock(state) + limits["run_seconds"]
+                        repeats.clear()
+                        compacted = plan_checked = review_checked = False
+                        forced_final = None
+                    if forced_final and state.plan.data and not state.plan.remaining:
+                        # 计划已经全部完成，只差最终回复：不提示上限，也不把这一轮记为预算中断。
+                        message = {"type": "finalize", "model_text": "[系统事件] 计划已全部完成，本段预算已用完，"
+                                   "不能再调用工具。请根据已有结果给出最终回复。"}
+                        self.trace.append(state.conversation_id, state.id, "event", message)
+                    elif forced_final:
                         stop_reason = "limit"
                         message = {"type": "limit", "text": f"已达到本轮{forced_final}上限",
                                    "model_text": prompts.limit_reached(forced_final)}
@@ -2031,7 +2065,9 @@ class AssistantService:
                                                access_mode="full" if conversation["access_mode"] == "full"
                                                and self._full_access(state.user_id) else "approval",
                                                private=state.private, can_move_private="propose_move_to_private" in tools,
-                                               can_plan="update_plan" in tools, can_inspect="inspect_page" in tools)
+                                               can_plan="update_plan" in tools, can_inspect="inspect_page" in tools,
+                                               auto_share=bool(self.config.setting("full_auto_share")),
+                                               auto_purge=bool(self.config.setting("full_auto_purge")))
                 pending = self.trace.pending_actions(state.conversation_id)
                 remaining = None
                 if state.private and self.private_space is not None:
@@ -2156,7 +2192,7 @@ class AssistantService:
                     if tool_calls >= limits["max_tool_calls"]:
                         skipped_reason = "已达到本轮工具调用次数上限，本次调用未执行"
                         break
-                    if limits["run_tokens"] and state.input_tokens + state.output_tokens >= limits["run_tokens"]:
+                    if limits["run_tokens"] and state.input_tokens + state.output_tokens - segment_tokens >= limits["run_tokens"]:
                         skipped_reason = "已达到本轮累计 token 预算，本次调用未执行"
                         break
                     if _run_clock(state) >= deadline:
@@ -2178,6 +2214,7 @@ class AssistantService:
                         if body["status"] == "limited":
                             continue
                         ends = ends or bool(body.get("ends_turn"))
+                        segment_ok += body["status"] == "ok" and call.name not in META_TOOLS
                         errors = errors + 1 if body["status"] != "ok" else 0
                         too_many_errors = too_many_errors or errors >= limits["error_threshold"]
                         # 使用调用原文归一化，避免未解析参数等情况把不同调用合并成同一个空参数。
@@ -2242,32 +2279,39 @@ class AssistantService:
             status, stop_reason = "failed", "internal"
             await self._fail(state, "助手出了点问题，没有完成这次回复。请稍后重试。", retry=True)
         finally:
+            # 收尾必须完整执行：停止请求可能在收尾期间到达，CancelledError 不能跳过运行记录与 run_finished，
+            # 否则界面会一直停在运行中，之后的停止也不再生效。
             self._finish_private_activity(state.token, state.access)
             try:
                 if state.plan.has_actions:
                     state.plan.reconcile(self.trace.actions(state.conversation_id))
                 state.plan.finish(status, stop_reason)
                 await self._publish_plan(state)
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 log.error("assistant plan bookkeeping failed id=%s", state.id)
             if acquired:
                 self._release()
-            if (status == "completed" or stop_reason == "waiting_user") and not state.private:
-                # 私密对话不生成标题（§24.3）。
-                try:
-                    await self._title(state)
-                except Exception:
-                    pass
             try:
-                self.trace.finish_run(state.id, status=status, stop_reason=stop_reason, steps=steps, tool_calls=tool_calls,
+                self.trace.finish_run(state.id, status=status, stop_reason=stop_reason, steps=spent_steps + steps, tool_calls=spent_tools + tool_calls,
                                       input_tokens=state.input_tokens, output_tokens=state.output_tokens)
                 self.trace.add_usage(state.user_id, state.model_id, 0, 0, runs=1)
             except Exception:
                 log.error("assistant run bookkeeping failed id=%s", state.id)
             state.status, state.stop_reason = status, stop_reason
             state.finished_at = time.time()
-            await state.emit({"type": "run_finished", "status": status, "stop_reason": stop_reason,
-                              "usage": {"today": self.trace.tokens_today(state.user_id)}})
+            try:
+                await asyncio.shield(state.emit({"type": "run_finished", "status": status, "stop_reason": stop_reason,
+                                                 "usage": {"today": self.trace.tokens_today(state.user_id)}}))
+            except asyncio.CancelledError:
+                pass
+            if (status == "completed" or stop_reason == "waiting_user") and not state.private:
+                # 标题在这一轮结束之后于后台生成（私密对话不生成标题，§24.3）：回复结束不用再等一次模型调用，
+                # 停止请求也不会打断收尾。界面在运行结束后补读标题。
+                task = asyncio.get_running_loop().create_task(self._title_safely(state))
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
 
     async def _context_full(self, state: RunState, *, upstream: bool = False) -> None:
         """压缩与兜底之后仍放不下：结束本轮，不再请求渠道（§23）。"""
@@ -2291,6 +2335,15 @@ class AssistantService:
         except Exception:
             pass
 
+    async def _title_safely(self, state: RunState) -> None:
+        """后台生成标题：失败只保留默认标题，不影响这一轮回复。"""
+        try:
+            await self._title(state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("assistant title failed run=%s", state.id)
+
     async def _title(self, state: RunState) -> None:
         row = self.trace.conversation(state.user_id, state.conversation_id, include_hidden=True)
         if row["title"] is not None:
@@ -2305,7 +2358,7 @@ class AssistantService:
             endpoint = self.channels.endpoint(model["channel_id"])
             reply = await asyncio.wait_for(self._model_call(state, model, endpoint, "你负责给对话起标题。",
                                                             [{"role": "user", "content": prompts.title_prompt(first)}], [],
-                                                            max_tokens=60, stream=False), 20)
+                                                            max_tokens=60, stream=False, quiet=True), 20)
             candidate = reply.text.strip().strip("“”\"'。.").splitlines()[0] if reply.text.strip() else ""
             if 0 < len(candidate) <= 30:
                 title = candidate

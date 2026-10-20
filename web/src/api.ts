@@ -585,6 +585,8 @@ export const controlDownload = (id: number, action: "stop" | "resume" | "restart
 const downloadRoute = (privateTask: boolean) => `/api/user/v1${privateTask && privateAccess ? "/private" : ""}/downloads`;
 /** 「更新下载参数」回填用的完整链接与请求参数（仅任务所有者；私密任务需已解锁）。 */
 export const downloadSource = (id: number, privateTask = false) => request<DownloadSource>(`${downloadRoute(privateTask)}/${id}/source`);
+/** 停止账号下全部进行中的下载任务（含私密任务，停止不需要解锁）；任务记录和断点保留。 */
+export const stopAllDownloads = () => post<{ stopped: number }>("/api/user/v1/downloads/stop-all", {});
 export const batchDownloads = (action: "stop" | "resume" | "delete", ids: number[], privateTasks = false) =>
   post<{ done: number; skipped: number }>(`${downloadRoute(privateTasks)}/batch`, { action, ids });
 export const updateAdminSettings = async (values: Partial<Record<keyof SystemSettings, string>>) => {

@@ -50,6 +50,8 @@ export type AssistantSettings = {
   notice: string; notice_default: string; bounds: Record<string, Bound>;
   /** 全局允许私密对话（默认关闭） */
   private: boolean;
+  /** 完全访问下自动执行公开分享（需要密码的除外）／彻底删除：1 开启，0 仍需确认 */
+  full_auto_share: number; full_auto_purge: number;
 };
 export type AssistantLimits = { values: Record<string, number>; bounds: Record<string, Bound & { label: string }> };
 export type UsagePoint = { day: string; model_id: number; input_tokens: number; output_tokens: number; runs: number };
@@ -176,7 +178,9 @@ export type HttpRequestPreview = { url: string; method: string; headers: Record<
 export type PlanStatus = "pending" | "in_progress" | "waiting_user" | "completed" | "failed" | "paused" | "cancelled";
 export type PlanEvent = { type: "plan"; id?: string; run_id?: string; version?: number; title?: string; reason?: string;
   status?: PlanStatus; automatic?: boolean;
-  items: { id?: string; content: string; status: PlanStatus; kind?: "tool" | "reasoning"; detail?: string }[] };
+  items: { id?: string; content: string; status: PlanStatus; kind?: "tool" | "reasoning"; detail?: string;
+    /** 没有关联的成功工具结果，由助手说明依据后标为完成。 */
+    unverified?: boolean }[] };
 export type ToolEvent =
   | PlanEvent
   | { type: "question"; question: string; options: string[] }

@@ -186,7 +186,7 @@ async def analyze_page(ctx: ToolContext, args: dict) -> ToolOutput:
     summary, clusters, links = web.summarize(pages)
     if not clusters:
         raise ToolError("页面没有可识别的图片（可能由 JavaScript 动态加载或需要登录）。建议用户在该页面打开 Tessera 抓取脚本，点击「发给文件助手」。")
-    max_pages = int(ctx.params.get("max_pages", 50)) if "max_pages" in ctx.params else 50
+    max_pages = int(ctx.params.get("max_pages", 100))
     try:
         raw = await ctx.analyze(summary, goal)
         rule = web.validate_rule(raw, clusters, links, start_url, max_pages=max_pages)
@@ -218,14 +218,14 @@ async def analyze_page(ctx: ToolContext, args: dict) -> ToolOutput:
        "ext": {"type": "array", "items": {"type": "string"}, "description": "只保留这些扩展名，如 [\"jpg\",\"png\"]"},
        "min_width": {"type": "integer", "description": "只保留 HTML 中声明宽度不小于该值的图片（未声明的保留）"}},
       ("collection_id",), depends=("analyze_page",), timeout=120,
-      params={"max_pages": (50, 1, 50, "最多翻页数"), "max_images": (5000, 100, 5000, "最多图片数"),
+      params={"max_pages": (100, 1, 500, "最多翻页数"), "max_images": (5000, 100, 20000, "最多图片数"),
               "delay_ms": (1000, 1000, 10000, "翻页间隔（毫秒）")})
 async def collect_gallery(ctx: ToolContext, args: dict) -> ToolOutput:
     record = _record(ctx, _str(args, "collection_id", limit=40), kind="collection")
     rule = record["rule"] or {}
     if rule.get("type") == "parsed" or "images" not in rule:
         raise ToolError("这个结果集不是网页相册，不需要收集")
-    max_pages = _int(args, "max_pages", int(ctx.params.get("max_pages", 50)), 1, int(ctx.params.get("max_pages", 50)))
+    max_pages = _int(args, "max_pages", int(ctx.params.get("max_pages", 100)), 1, int(ctx.params.get("max_pages", 100)))
     max_images = int(ctx.params.get("max_images", 5000))
     delay = max(1.0, int(ctx.params.get("delay_ms", 1000)) / 1000)
     exts = args.get("ext")

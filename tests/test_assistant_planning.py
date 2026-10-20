@@ -201,6 +201,42 @@ class PlanTests(unittest.TestCase):
                     plan.update({"items": [step("completed")]})
 
 
+class PlanBasisTests(unittest.TestCase):
+    def test_explicit_basis_completes_unlinked_step_and_marks_it(self):
+        plan = Plan()
+        plan.update({"items": [step()]})
+        with self.assertRaisesRegex(ValueError, "detail"):
+            plan.update({"items": [step("completed")]})
+        done = plan.update({"items": [step("completed", detail="上一步的搜索结果已列出全部 12 个文件")]})
+        self.assertEqual(done["status"], "completed")
+        self.assertTrue(done["items"][0]["unverified"])
+        # 重新打开后旧依据清除，再完成仍需新的依据或真实结果。
+        plan.update({"items": [step("pending")]})
+        self.assertNotIn("unverified", plan.data["items"][0])
+
+    def test_basis_cannot_close_running_or_unconfirmed_steps(self):
+        plan = Plan()
+        plan.update({"items": [step()]})
+        plan.begin("c1", "search_files", "one")
+        with self.assertRaisesRegex(ValueError, "进行中"):
+            plan.update({"items": [step("completed", detail="模型认为已完成")]})
+        plan.observe(result(event={"type": "action", "action_id": "a1"}))
+        with self.assertRaisesRegex(ValueError, "待确认"):
+            plan.update({"items": [step("completed", detail="模型认为已完成")]})
+
+    def test_model_view_omits_internal_records_and_allows_twenty_steps(self):
+        plan = Plan()
+        items = [{"id": f"s{index}", "content": f"步骤 {index}", "status": "pending"} for index in range(20)]
+        plan.update({"items": items})
+        plan.begin("c1", "search_files", "s0")
+        plan.observe(result())
+        view = json.loads(plan.context())
+        self.assertNotIn("evidence", view["items"][0])
+        self.assertTrue(plan.actionable)
+        with self.assertRaisesRegex(ValueError, "1–20"):
+            plan.update({"items": items + [{"content": "多余", "status": "pending"}]})
+
+
 class GalleryPlanTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def page(number, *, following=True):
@@ -278,6 +314,7 @@ class LoopTests(unittest.IsolatedAsyncioTestCase):
         state = RunState(rid, cid, 1, 1, "test", 1, "files", "")
         service._validate = Mock()
         service._acquire, service._title, service._attach_images = AsyncMock(), AsyncMock(), AsyncMock()
+        service._background = set()
         service._release = Mock()
         service._context = AsyncMock(return_value=([], 0, 0, False))
         service._model_call = AsyncMock(side_effect=replies)
@@ -364,6 +401,25 @@ class LoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service._model_call.await_count, 1)
         self.assertIn("操作已确认，正在执行", service.trace.messages(state.conversation_id)[-1]["text"])
 
+    async def test_run_finishes_before_slow_title_generation(self):
+        service, state = self.fixture([Reply(text="空间里没有文件")])
+        release = asyncio.Event()
+
+        async def slow_title(_state):
+            await release.wait()
+        service._title = AsyncMock(side_effect=slow_title)
+        events = []
+        state.emit = AsyncMock(side_effect=lambda event: events.append(event))
+        with patch("tgdrive.assistant.service.knowledge.public_config", return_value={}):
+            await asyncio.wait_for(service._run(state), 5)
+        # 回复写完即结束这一轮：不用等标题，停止请求也不会落在收尾的模型调用上。
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(events[-1]["type"], "run_finished")
+        self.assertEqual(len(service._background), 1)
+        release.set()
+        await asyncio.gather(*service._background)
+        service._title.assert_awaited_once()
+
     async def test_cancellation_keeps_explicit_plan_progress(self):
         service, state = await self.run_fixture([Reply(tool_calls=[call("update_plan", {"items": [step()]})]), asyncio.CancelledError()])
         self.assertEqual(state.status, "stopped")
@@ -376,6 +432,38 @@ class LoopTests(unittest.IsolatedAsyncioTestCase):
             await service._run(state)
         self.assertEqual(state.stop_reason, "limit")
         self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "paused")
+
+    def segmented(self, extra_replies, auto_continue=3):
+        two = [step(), {"id": "two", "content": "整理结果", "status": "pending", "kind": "reasoning"}]
+        replies = [Reply(tool_calls=[call("update_plan", {"items": two}, "p1")] + [call("search_files", {"plan_step_id": "one", "n": n}, f"s{n}")
+                                                                                   for n in range(3)])] + extra_replies
+        service, state = self.fixture(replies)
+        service.config.limits.return_value.update(max_steps=1, auto_continue=auto_continue)
+        return service, state
+
+    async def test_budget_with_progress_continues_in_new_segment(self):
+        done = [step("completed"), {"id": "two", "content": "整理结果", "status": "completed", "kind": "reasoning", "detail": "已汇总"}]
+        service, state = self.segmented([Reply(tool_calls=[call("update_plan", {"items": done}, "p2")]), Reply(text="全部完成")])
+        with patch("tgdrive.assistant.service.knowledge.public_config", return_value={}):
+            await service._run(state)
+        types = [message.get("type") for message in service.trace.messages(state.conversation_id)]
+        # 第二段完成了全部步骤，随后只做最终回复，不再续跑也不提示上限。
+        self.assertEqual(types.count("continued"), 1)
+        self.assertNotIn("limit", types)
+        self.assertEqual(state.stop_reason, "completed")
+        self.assertEqual(service.trace.latest_plan(state.conversation_id)["status"], "completed")
+
+    async def test_continuation_disabled_or_without_progress_stops_at_limit(self):
+        for auto, extra in ((0, [Reply(text="预算已用完")]),
+                            (3, [Reply(tool_calls=[call("update_plan", {"items": [step(), {"id": "two", "content": "整理结果", "status": "pending"}]}, "p2")]),
+                                 Reply(text="预算已用完")])):
+            with self.subTest(auto=auto):
+                service, state = self.segmented(extra, auto_continue=auto)
+                with patch("tgdrive.assistant.service.knowledge.public_config", return_value={}):
+                    await service._run(state)
+                types = [message.get("type") for message in service.trace.messages(state.conversation_id)]
+                self.assertEqual(types.count("continued"), 0 if auto == 0 else 1)
+                self.assertEqual(state.stop_reason, "limit")
 
     async def test_next_run_resumes_same_plan_without_repeating_completed_step(self):
         first = {"id": "scope", "content": "确认范围", "kind": "reasoning", "status": "completed", "detail": "已确认"}

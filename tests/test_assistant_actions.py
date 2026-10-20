@@ -439,18 +439,28 @@ class AssistantActionTests(ActionHelpers, AssistantCase):
             ticket = offline.direct_ticket(self.alice.id, "https://files.example.com/a.txt")
             offline.create(self.alice.id, [{"ticket": ticket, "name": "a.txt"}], "Elsewhere/")
             task = self.app.metadata.db.execute("SELECT id FROM offline_tasks").fetchone()[0]
-            self.model.replies = [call("propose_download_control", ids=[task], op="delete"), answer("好")]
-            await self.send(user, conversation, "删除那个任务")
-            self.assertEqual((await self.tool_results(user, conversation))[-1]["status"], "error")
+            with self.app.metadata.transaction() as db:
+                db.execute("UPDATE offline_tasks SET status='failed' WHERE id=?", (task,))
+            # 重新下载会写入文件：作用域外的任务不能生成操作，并说明原因。
+            self.model.replies = [call("propose_download_control", ids=[task], op="restart"), answer("好")]
+            await self.send(user, conversation, "重新下载那个任务")
+            tool = (await self.tool_results(user, conversation))[-1]
+            self.assertEqual(tool["status"], "error")
+            self.assertIn("不在当前作用域内", tool["result"]["error"])
             self.assertFalse(self.service.trace.pending_actions(conversation))
+            # 冻结后保存位置移出作用域，执行时跳过。
             with self.app.metadata.transaction() as db:
                 db.execute("UPDATE offline_tasks SET key='Downloads/a.txt' WHERE id=?", (task,))
-            action_id, _ = await self.propose(user, conversation, call("propose_download_control", ids=[task], op="delete"))
+            action_id, _ = await self.propose(user, conversation, call("propose_download_control", ids=[task], op="restart"))
             with self.app.metadata.transaction() as db:
                 db.execute("UPDATE offline_tasks SET key='Elsewhere/a.txt' WHERE id=?", (task,))
             _, done = await self.confirm(user, action_id)
             self.assertEqual((done["result"]["ok"], done["result"]["skipped"]), (0, 1))
-            self.assertIsNotNone(self.app.metadata.db.execute("SELECT id FROM offline_tasks WHERE id=?", (task,)).fetchone())
+            # 删除只删除任务记录，不受作用域限制。
+            action_id, _ = await self.propose(user, conversation, call("propose_download_control", ids=[task], op="delete"))
+            _, done = await self.confirm(user, action_id)
+            self.assertEqual(done["result"]["ok"], 1)
+            self.assertIsNone(self.app.metadata.db.execute("SELECT id FROM offline_tasks WHERE id=?", (task,)).fetchone())
         self.run_async(run())
 
     def test_action_stops_when_policy_changes_and_keeps_undo(self):

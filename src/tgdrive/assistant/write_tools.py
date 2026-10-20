@@ -12,6 +12,7 @@ from datetime import datetime
 
 from ..api import normalize_user_path
 from ..filekinds import kind_clause, kind_of
+from ..objects import PRIVATE_PREFIX
 from .actions import KINDS, directory_version
 from .attachments import PREFIX as ATTACHMENT_PREFIX
 from .tools import (
@@ -298,11 +299,11 @@ def render_name(template: str, row, n: int, groups: tuple) -> str:
       "- 规则模式：match 指定范围（match.type=folder 时改文件夹名），template 指定新名称。可用变量：{name} 原名称、{stem} 不含扩展名、"
       "{ext} 含点的扩展名（文件夹为空）、{n} 序号（{n:03} 补零，按 sort 排序后从 start 开始）、{parent} 所在目录名、"
       "{mtime:%Y-%m-%d} 修改时间（文件夹取其中最新文件）、{1}{2} match.regex 的分组。\n"
-      "- 映射模式：mapping 为 [{from, to}]，最多 200 项，from 为文件或文件夹路径，to 只能是新名称。\n"
+      "- 映射模式：mapping 为 [{from, to}]，最多 1000 项，from 为文件或文件夹路径，to 只能是新名称。\n"
       "同一次提议不能同时改名某个文件夹和它的下级。返回待确认操作的编号、条目数、冲突数和前 20 条样例。",
       {"match": RENAME_MATCH, "template": {"type": "string", "description": "新名称模板，如 {mtime:%Y%m%d}_{n:03}{ext}"},
        "mapping": {"type": "array", "items": {"type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}},
-                                              "required": ["from", "to"]}, "description": "逐个指定新名称（≤200 项）"},
+                                              "required": ["from", "to"]}, "description": "逐个指定新名称（≤1000 项）"},
        "sort": {"type": "string", "enum": ["name", "mtime"], "description": "{n} 的排序依据，默认 name"},
        "start": {"type": "integer", "description": "{n} 的起始值，默认 1"}, "conflict": CONFLICT})
 async def propose_rename(ctx: ToolContext, args: dict) -> ToolOutput:
@@ -312,8 +313,8 @@ async def propose_rename(ctx: ToolContext, args: dict) -> ToolOutput:
     if bool(mapping) == bool(template):
         raise ToolError("请在 template（规则模式）与 mapping（映射模式）中二选一")
     if mapping:
-        if not isinstance(mapping, list) or not 1 <= len(mapping) <= 200:
-            raise ToolError("参数 mapping 需要 1–200 项")
+        if not isinstance(mapping, list) or not 1 <= len(mapping) <= 1000:
+            raise ToolError("参数 mapping 需要 1–1000 项")
         plan = []
         for entry in mapping:
             if not isinstance(entry, dict) or not isinstance(entry.get("from"), str) or not isinstance(entry.get("to"), str):
@@ -439,8 +440,8 @@ async def propose_organize(ctx: ToolContext, args: dict) -> ToolOutput:
     base = ctx.resolve(_str(args, "target", limit=1024) or args.get("path"), directory=True)
     mapping = args.get("mapping") or {}
     if by == "mapping":
-        if not isinstance(mapping, dict) or not 1 <= len(mapping) <= 100:
-            raise ToolError("参数 mapping 需要 1–100 项")
+        if not isinstance(mapping, dict) or not 1 <= len(mapping) <= 1000:
+            raise ToolError("参数 mapping 需要 1–1000 项")
         mapping = {str(key).lower().lstrip("."): _check_name(str(value).strip().strip("/")) for key, value in mapping.items()}
     rows = await _rows(ctx, {"path": ctx.display(path), "recursive": bool(args.get("recursive")),
                              **({"kind": args["kind"]} if args.get("kind") else {})}, _item_limit(ctx))
@@ -480,12 +481,12 @@ async def propose_organize(ctx: ToolContext, args: dict) -> ToolOutput:
 
 # ---------- 新建、回收站、公开链接 ----------
 
-@tool("propose_create_folders", "新建文件夹", "write", "write", "生成新建一个或多个文件夹的待确认操作（≤200 个）。",
+@tool("propose_create_folders", "新建文件夹", "write", "write", "生成新建一个或多个文件夹的待确认操作（≤1000 个）。",
       {"paths": {"type": "array", "items": {"type": "string"}, "description": "文件夹路径"}}, ("paths",))
 async def propose_create_folders(ctx: ToolContext, args: dict) -> ToolOutput:
     paths = args.get("paths")
-    if not isinstance(paths, list) or not 1 <= len(paths) <= 200:
-        raise ToolError("参数 paths 需要 1–200 个路径")
+    if not isinstance(paths, list) or not 1 <= len(paths) <= 1000:
+        raise ToolError("参数 paths 需要 1–1000 个路径")
     items, skipped, seen = [], [], set()
     for value in paths:
         key = ctx.valid_key(ctx.resolve(value, directory=True))
@@ -632,13 +633,13 @@ async def propose_save_attachment(ctx: ToolContext, args: dict) -> ToolOutput:
       "生成公开分享文件或文件夹的待确认操作；已公开的项目会按新设置调整有效期与密码。确认卡片中用户可以修改有效期，"
       "并在卡片里自行输入访问密码（不要向用户索要密码，也不要把密码写进参数）。执行后链接只显示给用户，你不会拿到链接。"
       "公开分享总是需要用户确认。",
-      {"paths": {"type": "array", "items": {"type": "string"}, "description": "文件或文件夹路径（≤200 个）"},
+      {"paths": {"type": "array", "items": {"type": "string"}, "description": "文件或文件夹路径（≤1000 个）"},
        "expires_days": {"type": "integer", "description": "有效天数 1–365，0 或省略表示永久有效"},
        "require_password": {"type": "boolean", "description": "是否建议设置访问密码（由用户在卡片中填写）"}}, ("paths",))
 async def propose_share(ctx: ToolContext, args: dict) -> ToolOutput:
     paths = args.get("paths")
-    if not isinstance(paths, list) or not 1 <= len(paths) <= 200:
-        raise ToolError("参数 paths 需要 1–200 个路径")
+    if not isinstance(paths, list) or not 1 <= len(paths) <= 1000:
+        raise ToolError("参数 paths 需要 1–1000 个路径")
     days = _int(args, "expires_days", 0, 0, 365)
     require = args.get("require_password") is True
     rows, skipped = _source_rows(ctx, paths)
@@ -658,35 +659,78 @@ async def propose_share(ctx: ToolContext, args: dict) -> ToolOutput:
                           options={"expires_days": days or None, "require_password": require})
 
 
+DOWNLOAD_IDS = 1000
+DOWNLOAD_FILTERS = {"active": ("queued", "running", "interrupted"), "stopped": ("stopped",), "completed": ("completed",),
+                    "failed": ("failed",), "finished": ("completed", "failed", "stopped")}
+
+
 @tool("propose_download_control", "下载任务操作", "write", "write",
-      "生成停止、继续、重新下载或删除离线下载任务的待确认操作。删除任务不会删除已保存的文件。私密空间的任务不能操作。",
-      {"ids": {"type": "array", "items": {"type": "integer"}, "description": "任务 ID（来自 list_downloads，≤200 个）"},
-       "op": {"type": "string", "enum": ["stop", "resume", "restart", "delete"]}}, ("ids", "op"))
+      "生成停止、继续、重新下载或删除离线下载任务的操作（完全访问下自动执行）。删除任务只删除任务记录，不会删除已保存的文件。"
+      "用 ids 指定任务（≤1000 个），或用 status 选中某类全部任务，例如删除全部已完成和失败的任务用 status=finished 与 op=delete，"
+      "不需要先翻页收集编号。删除与停止不受对话作用域限制；继续和重新下载会写入文件，保存位置需要在作用域内。"
+      "普通对话只操作普通任务，私密对话只操作私密空间的任务。",
+      {"ids": {"type": "array", "items": {"type": "integer"}, "description": "任务 ID（来自 list_downloads，≤1000 个）"},
+       "status": {"type": "string", "enum": list(DOWNLOAD_FILTERS),
+                  "description": "按状态选中全部任务：active 进行中、stopped 已停止、completed 已完成、failed 失败、finished 已完成＋失败＋已停止"},
+       "op": {"type": "string", "enum": ["stop", "resume", "restart", "delete"]}}, ("op",))
 async def propose_download_control(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
         raise ToolError("离线下载未启用")
-    ids, op = args.get("ids"), args.get("op")
+    from ..offline.service import task_path
+    ids, op, status = args.get("ids"), args.get("op"), args.get("status")
     if op not in ("stop", "resume", "restart", "delete"):
         raise ToolError("参数 op 不正确")
-    if not isinstance(ids, list) or not 1 <= len(ids) <= 200 or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
-        raise ToolError("参数 ids 需要 1–200 个任务 ID")
-    rows = {row["id"]: row for row in ctx.db.execute(
-        f"SELECT id, key, status FROM offline_tasks WHERE user_id=? AND id IN ({','.join('?' * len(ids))})", (ctx.user_id, *ids))}
+    if (ids is None) == (status is None):
+        raise ToolError("请提供 ids 或 status 中的一个")
+    if status is not None:
+        if status not in DOWNLOAD_FILTERS:
+            raise ToolError("参数 status 不正确")
+        states = DOWNLOAD_FILTERS[status]
+        limit = ctx.limits.get("action_items", 10000)
+        rows = ctx.db.execute(f"SELECT id, key, status FROM offline_tasks WHERE user_id=? AND status IN ({','.join('?' * len(states))}) "
+                              "ORDER BY id DESC LIMIT ?", (ctx.user_id, *states, limit + 1)).fetchall()
+        if len(rows) > limit:
+            raise ToolError(f"匹配的任务超过单次上限 {limit} 个，请先处理一部分（例如分别处理 completed 与 failed）")
+        ids = [row["id"] for row in rows]
+        found = {row["id"]: row for row in rows}
+    else:
+        if not isinstance(ids, list) or not 1 <= len(ids) <= DOWNLOAD_IDS or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+            raise ToolError(f"参数 ids 需要 1–{DOWNLOAD_IDS} 个任务 ID")
+        found = {}
+        unique = list(dict.fromkeys(ids))
+        for start in range(0, len(unique), 500):
+            chunk = unique[start:start + 500]
+            found.update((row["id"], row) for row in ctx.db.execute(
+                f"SELECT id, key, status FROM offline_tasks WHERE user_id=? AND id IN ({','.join('?' * len(chunk))})", (ctx.user_id, *chunk)))
     items, skipped = [], []
     labels = {"stop": "停止", "resume": "继续", "restart": "重新下载", "delete": "删除"}
+    writes = op in ("resume", "restart")
     for task_id in dict.fromkeys(ids):
-        row = rows.get(task_id)
-        if row is None or (not ctx.private and row["key"].startswith(".tgdrive/")) or not row["key"].startswith(ctx.scope_root):
-            skipped.append({"path": f"任务 #{task_id}", "reason": "不存在"})
+        row = found.get(task_id)
+        if row is None:
+            skipped.append({"path": f"任务 #{task_id}", "reason": "任务不存在或已删除"})
+            continue
+        path = task_path(row["key"])
+        if ctx.private != path.startswith(PRIVATE_PREFIX):
+            # 普通与私密任务互不可见，不说明原因，避免泄露私密任务的存在。
+            skipped.append({"path": f"任务 #{task_id}", "reason": "任务不存在或已删除"})
+            continue
+        if (writes or ctx.private) and not path.startswith(ctx.scope_root):
+            skipped.append({"path": f"任务 #{task_id}", "reason": f"保存位置 {ctx.display(path)} 不在当前作用域内，继续或重新下载需要先扩大作用域"})
+            continue
+        if op == "stop" and row["status"] not in ("queued", "running", "interrupted"):
+            skipped.append({"path": f"任务 #{task_id}", "reason": "任务没有在进行"})
             continue
         items.append({"id": task_id, "op": op, "path": row["key"], "status": row["status"]})
+    if status is not None and not items and not skipped:
+        raise ToolError("没有符合条件的下载任务")
     return await _propose(ctx, "download_control", items, skipped=skipped, options={"op": op},
-                          sample=lambda item: f"#{item['id']} {ctx.display(item['path'])}", summary=f"{labels[op]} {len(items)} 个下载任务")
+                          sample=lambda item: f"#{item['id']} {ctx.display(task_path(item['path']))}", summary=f"{labels[op]} {len(items)} 个下载任务")
 
 
 # ---------- 跨区移动（docs/assistant-design.md §24.5.3） ----------
 
-MOVE_OUT_LIMIT = 200
+MOVE_OUT_LIMIT = 1000
 
 
 def _normal_folder(value: object) -> str:
@@ -722,8 +766,8 @@ def _cross_items(ctx: ToolContext, paths: object) -> tuple[list, list]:
 @tool("propose_move_out", "移出私密空间", "write", "write",
       "生成把私密空间中的文件或文件夹移到普通文件目录的待确认操作。移出后不再受私密空间保护，所以只在用户明确要求时使用；"
       "用户确认时需要重新验证身份，执行后不能撤销。"
-      "paths 为私密空间中的路径（≤200 个），target 为普通文件区的目录（如 /文档/；/ 表示根目录），用户可以在卡片上改选。",
-      {"paths": {"type": "array", "items": {"type": "string"}, "description": "私密空间中的文件或文件夹路径（≤200 个）"},
+      "paths 为私密空间中的路径（≤1000 个），target 为普通文件区的目录（如 /文档/；/ 表示根目录），用户可以在卡片上改选。",
+      {"paths": {"type": "array", "items": {"type": "string"}, "description": "私密空间中的文件或文件夹路径（≤1000 个）"},
        "target": {"type": "string", "description": "普通文件区的目标目录"}}, ("paths", "target"))
 async def propose_move_out(ctx: ToolContext, args: dict) -> ToolOutput:
     if not ctx.private:
@@ -737,9 +781,9 @@ async def propose_move_out(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("propose_move_to_private", "移入私密空间", "write", "write",
-      "生成把普通文件或文件夹移入私密空间的待确认操作（≤200 个）。私密空间中的目标位置由用户在卡片上选择，你不会知道私密空间的目录结构；"
+      "生成把普通文件或文件夹移入私密空间的待确认操作（≤1000 个）。私密空间中的目标位置由用户在卡片上选择，你不会知道私密空间的目录结构；"
       "确认时需要私密空间处于解锁状态。移入后公开链接会被取消。",
-      {"paths": {"type": "array", "items": {"type": "string"}, "description": "作用域内的文件或文件夹路径（≤200 个）"}}, ("paths",))
+      {"paths": {"type": "array", "items": {"type": "string"}, "description": "作用域内的文件或文件夹路径（≤1000 个）"}}, ("paths",))
 async def propose_move_to_private(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.private:
         raise ToolError("已经在私密空间中")

@@ -38,7 +38,7 @@ ACTIONS = {
     "passkey.delete": "移除通行密钥", "passkey.enable": "启用通行密钥登录",
     "private.passkey.unlock": "通行密钥解锁私密空间",
     "account.profile": "修改账号资料", "account.email": "更改登录邮箱", "account.avatar": "更换头像",
-    "account.avatar_delete": "移除头像", "download.clear": "清除下载记录", "download.batch": "批量操作下载任务", "share.save": "保存他人分享",
+    "account.avatar_delete": "移除头像", "download.clear": "清除下载记录", "download.batch": "批量操作下载任务", "download.stop_all": "停止全部下载任务", "share.save": "保存他人分享",
     "assistant.settings": "修改文件助手设置", "assistant.tools.update": "修改助手工具",
     "assistant.channel.create": "添加模型渠道", "assistant.channel.update": "修改模型渠道",
     "assistant.channel.delete": "删除模型渠道", "assistant.channel.sync": "检查渠道上游模型",

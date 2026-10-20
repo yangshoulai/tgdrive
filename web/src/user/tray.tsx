@@ -1,5 +1,5 @@
 /** 上传与离线下载托盘共用的展示件：头部总进度、行尾圆环与行内细进度条。 */
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { Icon, type IconName } from "../ui";
 
 export type TrayState = "active" | "done" | "error" | "idle";
@@ -31,4 +31,35 @@ export function TrayBar({ percent, label, paused = false }: { percent: number | 
     aria-valuemin={0} aria-valuemax={100} aria-valuenow={value === null ? undefined : Math.round(value)}>
     <span style={value === null ? undefined : { width: `${value}%` }} />
   </div>;
+}
+
+/** 托盘底栏：左侧状态摘要，右侧批量操作与跳转。 */
+export function TrayFoot({ summary, children }: { summary: ReactNode; children?: ReactNode }) {
+  return <footer className="tray-foot"><span className="tray-foot-summary">{summary}</span>{children}</footer>;
+}
+
+/** 「全部取消」：第一次点击变为确认态（4 秒内再点一次才执行），避免误触打断大量任务。 */
+export function TrayCancelAll({ count, noun, onConfirm }: { count: number; noun: string; onConfirm: () => Promise<void> | void }) {
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = window.setTimeout(() => setArmed(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+  return <button type="button" className={`tray-cancel-all${armed ? " is-armed" : ""}`} disabled={busy || !count} aria-live="polite"
+    onClick={async () => {
+      if (!armed) { setArmed(true); return; }
+      setBusy(true);
+      try { await onConfirm(); } finally { setBusy(false); setArmed(false); }
+    }}>
+    {busy ? <span className="spinner" aria-hidden="true" /> : <Icon name="x" size={12} />}
+    {armed ? `确认取消 ${count.toLocaleString("zh-CN")} 个${noun}` : "全部取消"}
+  </button>;
+}
+
+/** 头部下方的整体进度细条（进行中才显示）。 */
+export function TrayOverall({ percent }: { percent: number | null }) {
+  return <div className={`tray-overall${percent === null ? " is-indeterminate" : ""}`} aria-hidden="true">
+    <span style={percent === null ? undefined : { width: `${Math.max(0, Math.min(100, percent))}%` }} /></div>;
 }

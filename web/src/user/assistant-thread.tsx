@@ -1,6 +1,7 @@
 /**
- * 文件助手的消息流（docs/assistant-design.md §19.3–19.4）：按轮组织，每轮依次是思考、过程时间线（工具调用与中间说明）、
- * 决定／执行摘要、浏览器动作与最终回复；待确认请求由输入区上方的统一确认区呈现。
+ * 文件助手的消息流（docs/assistant-design.md §19.3–19.4、§31）：按轮组织，每轮依次是计划摘要、过程时间线（思考、工具调用、
+ * 中间说明与「决定」节点）、需要手势的浏览器动作与最终回复。待确认请求由输入区上方的确认坞处理，时间线里的决定节点
+ * 原位显示等待／结果并可定位到确认坞，不再另起结果卡片。
  * 卡片全部由服务端冻结的数据渲染，不使用模型生成的描述。
  */
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
@@ -73,16 +74,24 @@ function ActivityDots() {
 type Step =
   | { kind: "thinking"; key: string; text: string; ms: number | null; live?: boolean; startedAt?: number | null }
   | { kind: "tool"; key: string; message?: ai.ChatMessage; pending?: { name: string; label: string } }
-  | { kind: "note"; key: string; text: string };
+  | { kind: "note"; key: string; text: string }
+  /** 需要用户决定的请求（文件操作、范围、提问、HTTP）：在时间线里原位显示状态，处理在确认坞里完成。 */
+  | { kind: "decision"; key: string; message?: ai.ChatMessage; approval?: HttpApproval }
+  /** 执行层在过程中插入的节点（自动续跑下一段、核验计划等），按发生位置显示。 */
+  | { kind: "marker"; key: string; text: string; tone: "accent" | "neutral" };
 type Turn = { key: string; user?: ai.ChatMessage; steps: Step[]; cards: ai.ChatMessage[]; answer?: ai.ChatMessage; notices: ai.ChatMessage[];
   runId: string | null; modelId?: number; input: number; output: number; startedAt?: number; endedAt?: number };
 type Item = { kind: "turn"; turn: Turn } | { kind: "event"; message: ai.ChatMessage };
 const SYSTEM_EVENTS = ["scope_changed", "scope_rejected", "mode_changed", "model_switched", "action_result", "summary"];
+const DECISION_EVENTS = ["action", "scope_request", "question", "http_request"];
+const MARKER_EVENTS = ["continued", "plan_check", "review_check"];
 
 function group(messages: ai.ChatMessage[]): Item[] {
   const items: Item[] = [];
   const plans = new Map<string, { turn: Turn; index: number }>();
   let turn: Turn | null = null;
+  // 决定节点已经显示操作的实时状态；同一操作的结果分隔线只在找不到原节点（更早的消息未加载）时保留。
+  const linked = new Set(messages.flatMap(message => message.role === "tool" && message.event?.type === "action" ? [message.event.action_id] : []));
   const ensure = (message: ai.ChatMessage): Turn => {
     if (!turn) { turn = { key: `t${message.seq}`, steps: [], cards: [], notices: [], runId: message.run_id, input: 0, output: 0, startedAt: message.created_at }; items.push({ kind: "turn", turn }); }
     turn.runId = turn.runId ?? message.run_id;
@@ -108,6 +117,13 @@ function group(messages: ai.ChatMessage[]): Item[] {
       }
       continue;
     }
+    if (message.role === "event" && message.type === "action_result" && message.action_id && linked.has(message.action_id)) continue;
+    // 只给模型看的系统事件（没有界面文字）不显示。
+    if (message.role === "event" && !message.text && !message.event) continue;
+    if (message.role === "event" && message.run_id && MARKER_EVENTS.includes(message.type ?? "")) {
+      ensure(message).steps.push({ kind: "marker", key: `m${message.seq}`, text: message.text ?? "", tone: message.type === "continued" ? "accent" : "neutral" });
+      continue;
+    }
     if (message.role === "event" && (SYSTEM_EVENTS.includes(message.type ?? "") || !message.run_id && !["error", "stopped", "limit"].includes(message.type ?? ""))) {
       items.push({ kind: "event", message });
       continue;
@@ -129,9 +145,9 @@ function group(messages: ai.ChatMessage[]): Item[] {
       continue;
     }
     if (message.role === "tool") {
-      if (message.event) {
-        current.cards.push(message);
-      } else current.steps.push({ kind: "tool", key: `s${message.seq}`, message });
+      if (message.event && DECISION_EVENTS.includes(message.event.type)) current.steps.push({ kind: "decision", key: `d${message.seq}`, message });
+      else if (message.event) current.cards.push(message);
+      else current.steps.push({ kind: "tool", key: `s${message.seq}`, message });
     }
   }
   return items;
@@ -141,6 +157,14 @@ function group(messages: ai.ChatMessage[]): Item[] {
 
 /** 私密对话的链接放行规则：只有对话中出现过的地址可以点击（§24.8）；普通对话不限制。 */
 const LinkContext = createContext<((href: string) => boolean) | undefined>(undefined);
+
+/** 决定节点需要的对话状态与回调；放在上下文里，避免逐层传递到时间线。 */
+type DecisionState = {
+  actions: ai.AssistantAction[]; messages: ai.ChatMessage[]; running: boolean;
+  /** 在确认坞中定位到这项请求（编号与 pendingReviews 的 id 一致）。 */
+  onReview?: (id: string) => void; onActionChanged: () => void; onFilesChanged?: () => void;
+};
+const DecisionContext = createContext<DecisionState>({ actions: [], messages: [], running: false, onActionChanged: () => undefined });
 
 export function latestPlan(messages: ai.ChatMessage[]): ai.PlanEvent | null {
   let latest: ai.PlanEvent | null = null;
@@ -158,39 +182,33 @@ function canResumePlan(plan: ai.PlanEvent, running: boolean): boolean {
     && !plan.items.some(item => item.status === "waiting_user" || item.status === "in_progress");
 }
 
-export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprovals, onHttpDecision, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
+export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprovals, onRetry, onReview, onActionChanged, onFilesChanged }: {
   detail: ai.ConversationDetail; live: LiveRun | null; liveModel?: string; modelLabel: (id: number | null | undefined) => string; runId: string | null;
-  httpApprovals: HttpApproval[]; onHttpDecision: (callId: string, decision: ai.HttpDecision) => void;
+  httpApprovals: HttpApproval[];
   /** 从这条用户消息重新回答（丢弃之后的记录）。 */
-  onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: (seq: number) => void;
+  onRetry?: (seq: number) => void; onReview?: (id: string) => void;
   onActionChanged: () => void; onFilesChanged?: () => void;
 }) {
   const running = Boolean(runId);
   const items = useMemo(() => group(detail.messages), [detail.messages]);
-  const lastQuestion = [...detail.messages].reverse().find(message => message.event?.type === "question");
-  const answered = lastQuestion ? detail.messages.some(message => message.role === "user" && message.seq > lastQuestion.seq) : true;
   const lastTurn = [...items].reverse().find(item => item.kind === "turn");
-  const lastPlan = latestPlan(detail.messages);
-  const resumablePlan = lastPlan && canResumePlan(lastPlan, running) ? lastPlan.id : undefined;
   const links = detail.links;
   const allowLink = useMemo(() => {
     if (!links) return undefined;
     const allowed = new Set(links);
     return (href: string) => { const value = href.split("#", 1)[0]; return allowed.has(value) || allowed.has(value.replace(/\/$/, "")); };
   }, [links]);
-  return <LinkContext.Provider value={allowLink}>
+  const decisions = useMemo<DecisionState>(() => ({ actions: detail.actions, messages: detail.messages, running, onReview, onActionChanged, onFilesChanged }),
+    [detail.actions, detail.messages, running, onReview, onActionChanged, onFilesChanged]);
+  return <LinkContext.Provider value={allowLink}><DecisionContext.Provider value={decisions}>
     {items.map(item => item.kind === "event" ? <SystemEvent key={`e${item.message.seq}`} message={item.message} />
       : <TurnView key={item.turn.key} turn={item.turn} live={item === lastTurn && running ? live : null}
           model={item.turn.modelId != null ? modelLabel(item.turn.modelId) : item === lastTurn && running ? liveModel ?? "" : ""}
-          actions={detail.actions} messages={detail.messages} canAnswer={!running && !answered} questionSeq={lastQuestion?.seq}
-          resumablePlan={resumablePlan}
-          httpApprovals={httpApprovals.filter(approval => approval.runId === (item.turn.runId ?? (item === lastTurn ? runId : null)))} onHttpDecision={onHttpDecision}
-          onAnswer={onAnswer} onScope={onScope} onRetry={!running ? onRetry : undefined}
-          onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />)}
+          httpApprovals={httpApprovals.filter(approval => approval.runId === (item.turn.runId ?? (item === lastTurn ? runId : null)))}
+          onRetry={!running ? onRetry : undefined} />)}
     {running && live && (!lastTurn || lastTurn.kind !== "turn") && <TurnView turn={{ key: "live", steps: [], cards: [], notices: [], runId: null, input: 0, output: 0 }}
-      live={live} model="" actions={[]} messages={[]} canAnswer={false} httpApprovals={httpApprovals.filter(approval => approval.runId === runId)} onHttpDecision={onHttpDecision}
-      onAnswer={onAnswer} onScope={onScope} onActionChanged={onActionChanged} />}
-  </LinkContext.Provider>;
+      live={live} model="" httpApprovals={httpApprovals.filter(approval => approval.runId === runId)} />}
+  </DecisionContext.Provider></LinkContext.Provider>;
 }
 
 function SystemEvent({ message }: { message: ai.ChatMessage }) {
@@ -199,15 +217,16 @@ function SystemEvent({ message }: { message: ai.ChatMessage }) {
   return <div className="ai-divider" role="note"><span><Icon name={icon} size={12} />{message.text}</span></div>;
 }
 
-function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq, resumablePlan, httpApprovals, onHttpDecision, onAnswer, onScope, onRetry, onActionChanged, onFilesChanged }: {
-  turn: Turn; live: LiveRun | null; model: string; actions: ai.AssistantAction[]; messages: ai.ChatMessage[]; canAnswer: boolean; questionSeq?: number;
-  resumablePlan?: string;
-  onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onRetry?: (seq: number) => void;
-  onActionChanged: () => void; onFilesChanged?: () => void;
-  httpApprovals: HttpApproval[]; onHttpDecision: (callId: string, decision: ai.HttpDecision) => void;
+function TurnView({ turn, live, model, httpApprovals, onRetry }: {
+  turn: Turn; live: LiveRun | null; model: string; httpApprovals: HttpApproval[]; onRetry?: (seq: number) => void;
 }) {
+  const { actions } = useContext(DecisionContext);
   const steps = [...turn.steps];
   const retry = turn.user && onRetry ? () => onRetry(turn.user!.seq) : undefined;
+  // 已经写入消息的 HTTP 审批由消息渲染；其余（等待中或刚决定、结果未到）用实时审批状态补一个决定节点。
+  const recorded = new Set(steps.flatMap(step => step.kind === "decision" && step.message?.event?.type === "http_request"
+    ? [`${step.message.run_id}:${step.message.event.id}`] : []));
+  for (const approval of httpApprovals) if (!recorded.has(approval.callId)) steps.push({ kind: "decision", key: `h${approval.callId}`, approval });
   if (live) {
     if (live.reasoning) steps.push({ kind: "thinking", key: "live-thinking", text: live.reasoning, ms: null, live: true, startedAt: live.reasoningStartedAt });
     for (const tool of live.tools) if (!httpApprovals.some(approval => approval.toolCallId === tool.callId)) steps.push({ kind: "tool", key: `live-${tool.callId}`, pending: tool });
@@ -217,13 +236,14 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
   const allowLink = useContext(LinkContext);
   const waiting = httpApprovals.some(approval => approval.status === "pending");
   const plans = turn.cards.filter(message => message.event?.type === "plan");
-  const cards: { key: string; at: number; message?: ai.ChatMessage; approval?: HttpApproval }[] = turn.cards.filter(message => message.event?.type !== "plan").map(message => ({
-    key: message.event?.type === "http_request" ? `${message.run_id}:${message.event.id}` : `card-${message.seq}`,
-    at: message.event?.type === "http_request" ? message.event.requested_at : message.created_at ?? 0, message,
-  }));
-  for (const approval of httpApprovals) if (!cards.some(card => card.key === approval.callId)) cards.push({ key: approval.callId, at: approval.requestedAt, approval });
-  cards.sort((a, b) => a.at - b.at);
-  const hasAssistant = steps.length > 0 || turn.cards.length > 0 || httpApprovals.length > 0 || turn.answer || streaming || turn.notices.length > 0 || live;
+  const cards = turn.cards.filter(message => message.event?.type !== "plan");
+  // 公开分享的链接令牌只给界面；放在时间线之外，折叠过程时也能直接复制。
+  const shared = steps.flatMap(step => {
+    const event = step.kind === "decision" ? step.message?.event : null;
+    const action = event?.type === "action" ? actions.find(item => item.id === event.action_id) : undefined;
+    return action?.result?.links?.length ? [action] : [];
+  });
+  const hasAssistant = steps.length > 0 || turn.cards.length > 0 || turn.answer || streaming || turn.notices.length > 0 || live;
   return <div className="ai-turn">
     {turn.user && <UserMessage message={turn.user} onRetry={retry} />}
     {hasAssistant && <div className={`ai-reply${live ? " is-live" : ""}`}>
@@ -231,19 +251,10 @@ function TurnView({ turn, live, model, actions, messages, canAnswer, questionSeq
       <div className="ai-reply-body">
         <div className="ai-reply-head"><strong>文件助手</strong>{model && <span className="ai-model" title={model}>{model}</span>}
           {live && <LiveStatus live={live} waiting={waiting} />}</div>
-        {plans.map(message => message.event?.type === "plan" && <PlanCard key={message.event.id ?? turn.key} plan={message.event}
-          canContinue={Boolean(resumablePlan) && message.event.id === resumablePlan}
-          onContinue={() => onAnswer("继续当前计划，从尚未完成的步骤继续，先核对已有结果，避免重复执行。")} />)}
+        {plans.map(message => message.event?.type === "plan" && <PlanLine key={message.event.id ?? turn.key} plan={message.event} />)}
         {steps.length > 0 && <Process steps={steps} live={Boolean(live)} />}
-        {cards.map(card => {
-          const event = card.message?.event;
-          const http = card.approval ?? (event?.type === "http_request" ? { request: event.request, status: event.decision } : null);
-          if (http) return http.status === "pending" ? null : <HttpRequestCard key={card.key} request={http.request} decision={http.status} approval={card.approval} message={card.message} onDecide={onHttpDecision} />;
-          const message = card.message!;
-          return <Card key={card.key} message={message} actions={actions} running={Boolean(live)}
-            selectedAnswer={event?.type === "question" ? messages.find(item => item.role === "user" && item.seq > message.seq)?.text : undefined}
-            canAnswer={canAnswer && message.seq === questionSeq} onAnswer={onAnswer} onScope={onScope} onActionChanged={onActionChanged} onFilesChanged={onFilesChanged} />;
-        })}
+        {cards.map(message => message.event?.type === "browser" && <BrowserCard key={`card-${message.seq}`} event={message.event} />)}
+        {shared.map(action => <ShareLinks key={action.id} action={action} />)}
         {(turn.answer || streaming) && <div className="ai-answer">
           <Markdown source={streaming || turn.answer?.text || ""} allowLink={allowLink} />{streaming && <i className="ai-caret" aria-hidden="true" />}
         </div>}
@@ -295,22 +306,59 @@ export function copyMessage(text: string) {
 
 /* ---------- 过程时间线 ---------- */
 
+/** 决定节点当前的处理状态：等待用户、执行中或已有结果。 */
+function decisionState(step: Extract<Step, { kind: "decision" }>, state: DecisionState): "pending" | "busy" | "done" {
+  if (step.approval) return step.approval.status === "pending" && step.approval.expires > Date.now() ? "pending" : "done";
+  const event = step.message?.event;
+  if (event?.type === "question") {
+    const seq = step.message!.seq;
+    const latest = [...state.messages].reverse().find(message => message.event?.type === "question")?.seq === seq;
+    return latest && !state.running && !state.messages.some(message => message.role === "user" && message.seq > seq) ? "pending" : "done";
+  }
+  if (event?.type !== "action" && event?.type !== "scope_request") return "done";
+  const action = state.actions.find(item => item.id === event.action_id);
+  if (!action) return "done";
+  if (action.status === "pending") return action.expires_at * 1000 > Date.now() ? "pending" : "done";
+  return action.status === "running" || action.status === "undoing" || action.status === "confirmed" ? "busy" : "done";
+}
+
+const LIVE_TAIL = 6;
+
 function Process({ steps, live }: { steps: Step[]; live: boolean }) {
   const [open, setOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const state = useContext(DecisionContext);
   const tools = steps.filter(step => step.kind === "tool");
+  const decisions = steps.filter((step): step is Extract<Step, { kind: "decision" }> => step.kind === "decision");
+  const states = decisions.map(step => decisionState(step, state));
+  const waiting = states.filter(value => value === "pending").length;
+  const busy = states.includes("busy");
   const executed = tools.filter(step => step.kind === "tool" && step.message?.status !== "limited" && step.message?.status !== "cancelled");
   const failed = tools.filter(step => step.kind === "tool" && step.message?.status === "error").length;
   const thinkingMs = steps.reduce((sum, step) => sum + (step.kind === "thinking" ? step.ms ?? 0 : 0), 0);
   const thought = steps.some(step => step.kind === "thinking");
   const toolMs = tools.reduce((sum, step) => sum + (step.kind === "tool" ? step.message?.duration_ms ?? 0 : 0), 0);
-  // 运行中始终展开；只有一个思考步骤时直接显示，不再套一层折叠。
-  if (live || (steps.length === 1 && steps[0].kind === "thinking")) return <div className="ai-process">{steps.map(step => <StepView key={step.key} step={step} />)}</div>;
+  // 运行中、操作执行中始终展开（执行中的节点需要挂载才能轮询进度）；只有一个思考步骤时直接显示，不再套一层折叠。
+  // 长任务展开时只保留最近几步，更早的步骤收成一行；等待处理或执行中的决定节点始终显示。
+  if (live || busy || (steps.length === 1 && steps[0].kind === "thinking")) {
+    const keep = steps.map((step, index) => showAll || index >= steps.length - LIVE_TAIL
+      || step.kind === "decision" && decisionState(step, state) !== "done");
+    const hidden = keep.filter(value => !value).length;
+    const visible = hidden >= 3 ? steps.filter((_, index) => keep[index]) : steps;
+    return <div className="ai-process">
+      {hidden >= 3 && <button type="button" className="ai-process-more" onClick={() => setShowAll(true)}>
+        <Icon name="more" size={13} />前面还有 {hidden} 个步骤</button>}
+      {visible.map(step => <StepView key={step.key} step={step} />)}
+    </div>;
+  }
   const parts = [thought ? (thinkingMs ? `思考 ${seconds(thinkingMs)}` : "思考") : "", executed.length ? `使用 ${executed.length} 个工具` : "",
-    toolMs >= 1000 ? `耗时 ${seconds(toolMs)}` : ""].filter(Boolean);
+    decisions.length - waiting ? `${decisions.length - waiting} 项决定` : "", toolMs >= 1000 ? `耗时 ${seconds(toolMs)}` : ""].filter(Boolean);
   return <div className={`ai-process is-collapsible${open ? " is-open" : ""}`}>
     <button type="button" className="ai-process-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
-      <span className="ai-process-icons" aria-hidden="true">{thought && <Icon name="brain" size={13} />}{tools.length > 0 && <Icon name="wrench" size={13} />}</span>
+      <span className="ai-process-icons" aria-hidden="true">{thought && <Icon name="brain" size={13} />}{tools.length > 0 && <Icon name="wrench" size={13} />}
+        {decisions.length > 0 && <Icon name="shield" size={13} />}</span>
       <span>{parts.join(" · ") || `${steps.length} 个步骤`}</span>
+      {waiting > 0 && <span className="ai-process-waiting">{waiting} 项待确认</span>}
       {failed > 0 && <span className="ai-process-error">{failed} 项出错</span>}
       <Icon name="chevronDown" size={14} />
     </button>
@@ -320,6 +368,10 @@ function Process({ steps, live }: { steps: Step[]; live: boolean }) {
 
 function StepView({ step }: { step: Step }) {
   if (step.kind === "thinking") return <Thinking text={step.text} ms={step.ms} live={step.live} startedAt={step.startedAt ?? null} />;
+  if (step.kind === "decision") return <DecisionStep step={step} />;
+  if (step.kind === "marker") return <div className={`ai-step ai-marker tone-${step.tone}`}>
+    <span className="ai-step-dot" aria-hidden="true"><Icon name={step.tone === "accent" ? "refresh" : "checkCircle"} size={12} /></span>
+    <span className="ai-marker-text">{step.text}</span></div>;
   if (step.kind === "note") return <div className="ai-step ai-note"><span className="ai-step-dot" aria-hidden="true" /><div className="ai-note-text"><NoteMarkdown text={step.text} /></div></div>;
   return <ToolStep message={step.message} pending={step.pending} />;
 }
@@ -410,18 +462,121 @@ function ToolDetail({ message }: { message: ai.ChatMessage }) {
 
 /* ---------- 卡片 ---------- */
 
-function Card({ message, actions, running, selectedAnswer, canAnswer, onAnswer, onScope, onActionChanged, onFilesChanged }: {
-  message: ai.ChatMessage; actions: ai.AssistantAction[]; running: boolean; selectedAnswer?: string; canAnswer: boolean;
-  onAnswer: (text: string) => void; onScope: (id: string, approve: boolean) => void; onActionChanged: () => void; onFilesChanged?: () => void;
+/* ---------- 决定节点 ---------- */
+
+const DECISION_TONES: Record<string, Tone> = { pending: "warning", busy: "accent" };
+
+/** 时间线里的决定节点：一行显示请求与状态，等待中可定位到确认坞，展开后查看冻结的请求内容与结果。 */
+function DecisionRow({ icon, title, target, label, tone, state, reviewId, extra, children }: {
+  icon: IconName; title: string; target?: string; label: string; tone: Tone; state: "pending" | "busy" | "done"; reviewId?: string;
+  extra?: ReactNode; children?: ReactNode;
 }) {
+  const [open, setOpen] = useState(false);
+  const { onReview } = useContext(DecisionContext);
+  return <div className={`ai-step ai-decision is-${state} tone-${tone}${open ? " is-open" : ""}`}>
+    <span className="ai-step-dot" aria-hidden="true"><Icon name={icon} size={12} /></span>
+    <div className="ai-tool-body">
+      <div className="ai-decision-head">
+        <button type="button" className="ai-tool-head" aria-expanded={children ? open : undefined} disabled={!children} onClick={() => setOpen(value => !value)}>
+          <strong>{title}</strong>
+          {target && <span className="ai-decision-target" title={target}>{target}</span>}
+          {children && <Icon name="chevronDown" size={13} />}
+        </button>
+        <Badge tone={DECISION_TONES[state] ?? tone}>{label}</Badge>
+        {state === "pending" && reviewId && onReview && <button type="button" className="ai-decision-go" onClick={() => onReview(reviewId)}>
+          去处理<Icon name="chevronDown" size={12} /></button>}
+      </div>
+      {extra}
+      {open && children && <div className="ai-tool-detail ai-decision-detail">{children}</div>}
+    </div>
+  </div>;
+}
+
+function DecisionStep({ step }: { step: Extract<Step, { kind: "decision" }> }) {
+  const decisions = useContext(DecisionContext);
+  const state = decisionState(step, decisions);
+  if (step.approval) return <HttpDecision request={step.approval.request} status={step.approval.status} approval={step.approval} state={state} />;
+  const message = step.message!;
   const event = message.event!;
-  if (event.type === "plan") return null;
-  if (event.type === "question") return selectedAnswer ? <div className="ai-review-result"><Icon name="checkCircle" size={14} /><span>{event.question}</span><Badge>已回答</Badge></div> : null;
-  if (event.type === "scope_request") return <ScopeCard event={event} action={actions.find(item => item.id === event.action_id)} running={running} onScope={onScope} />;
-  if (event.type === "action") return <ActionCard id={event.action_id} action={actions.find(item => item.id === event.action_id)} fallback={event}
-    onChanged={onActionChanged} onFilesChanged={onFilesChanged} />;
-  if (event.type === "browser") return <BrowserCard event={event} />;
+  if (event.type === "http_request") return <HttpDecision request={event.request} status={event.decision} message={message} state={state} />;
+  if (event.type === "question") {
+    const answer = decisions.messages.find(item => item.role === "user" && item.seq > message.seq)?.text;
+    return <DecisionRow icon="info" title="向你提问" target={event.question} state={state} tone={answer ? "success" : "neutral"}
+      label={state === "pending" ? "等待回答" : answer ? "已回答" : "未回答"} reviewId={`question-${message.seq}`}>
+      <p className="ai-decision-text">{event.question}</p>
+      {event.options?.length ? <ul className="ai-decision-options">{event.options.map(option => <li key={option}>{option}</li>)}</ul> : null}
+      {answer && <div className="ai-decision-answer"><span>你的回答</span><p>{answer}</p></div>}
+    </DecisionRow>;
+  }
+  if (event.type === "scope_request") {
+    const action = decisions.actions.find(item => item.id === event.action_id);
+    const status = action?.status ?? "expired";
+    const [label, tone]: [string, Tone] = state === "pending" ? ["等待确认", "warning"] : status === "confirmed" ? ["已允许", "success"]
+      : status === "rejected" ? ["已拒绝", "neutral"] : ["已过期", "neutral"];
+    return <DecisionRow icon="folder" title="扩大访问范围" target={action?.payload?.to ?? event.to} label={label} tone={tone} state={state} reviewId={event.action_id}>
+      <div className="ai-scope-path"><code>{action?.payload?.from ?? event.from}</code><Icon name="chevronRight" size={14} /><code>{action?.payload?.to ?? event.to}</code></div>
+      {(action?.payload?.reason ?? event.reason) && <p className="ai-decision-text">{action?.payload?.reason ?? event.reason}</p>}
+    </DecisionRow>;
+  }
+  if (event.type === "action") return <ActionDecision id={event.action_id} fallback={event} state={state} />;
   return null;
+}
+
+function HttpDecision({ request, status, approval, message, state }: {
+  request: ai.HttpRequestPreview; status: HttpApproval["status"]; approval?: HttpApproval; message?: ai.ChatMessage; state: "pending" | "busy" | "done";
+}) {
+  const expired = status === "pending" && state !== "pending";
+  const label = state === "pending" ? "等待确认" : expired ? "已过期" : status === "approved" ? message ? message.status === "ok" ? "已响应" : "执行失败" : "已同意，发送中"
+    : status === "rejected" ? "已拒绝" : status === "expired" ? "已过期" : status === "error" ? "回传失败" : "已取消";
+  const tone: Tone = status === "approved" && message?.status === "ok" ? "success"
+    : status === "error" || status === "approved" && message?.status === "error" ? "danger" : "neutral";
+  return <DecisionRow icon="globe" title="HTTP 请求" target={`${request.method} ${request.url}`} label={label} tone={tone} state={state}
+    reviewId={approval?.callId}>
+    <HttpRequestDetail request={request} message={status === "approved" ? message : undefined} />
+  </DecisionRow>;
+}
+
+function ActionDecision({ id, fallback, state }: { id: string; fallback: { kind: string; count: number; auto?: boolean }; state: "pending" | "busy" | "done" }) {
+  const { actions, onActionChanged, onFilesChanged } = useContext(DecisionContext);
+  const [details, setDetails] = useState(false);
+  const { value, busy, run } = useActionState(id, actions.find(item => item.id === id), fallback, onActionChanged, onFilesChanged);
+  const kind = value?.kind || fallback.kind;
+  const payload = value?.payload ?? {};
+  const status = value?.status ?? "expired";
+  const expired = status === "pending" && state !== "pending";
+  const [statusLabel, tone] = STATUS_LABEL[expired ? "expired" : status] ?? [status, "neutral" as Tone];
+  const count = value?.count ?? fallback.count;
+  const result = value?.result;
+  const progress = value?.progress;
+  const label = state === "pending" ? "等待确认" : payload.auto && status === "done" ? "已自动执行" : statusLabel;
+  const samples = payload.samples ?? [];
+  return <DecisionRow icon={ACTION_ICONS[kind] ?? "check"} title={payload.title ?? ai.ACTION_KINDS[kind] ?? kind}
+    target={`${count.toLocaleString("zh-CN")} 项${payload.scope ? ` · ${display(payload.scope)}` : ""}`} label={label} tone={tone} state={state} reviewId={id}
+    extra={<>
+      {state === "busy" && <div className="ai-action-progress">
+        <Progress value={progress?.total ? progress.done / progress.total * 100 : 0} label="执行进度" />
+        <span>{progress ? `${progress.done.toLocaleString("zh-CN")} / ${progress.total.toLocaleString("zh-CN")}` : "准备中"}</span>
+        {status === "running" && <Button size="sm" loading={busy === "cancel"} onClick={() => void run("cancel", () => ai.cancelAction(id))}>取消</Button>}
+      </div>}
+      {result && state === "done" && <p className="ai-decision-result">成功 {result.ok.toLocaleString("zh-CN")}{result.skipped ? `，跳过 ${result.skipped}` : ""}
+        {result.failed ? <span className="tone-danger">，失败 {result.failed}</span> : null}</p>}
+    </>}>
+    {value ? <>
+      {payload.summary && <p className="ai-decision-text">{payload.summary}</p>}
+      {samples.length > 0 && <ul className="ai-diff">{samples.slice(0, 6).map((item, index) => <ItemRow key={index} kind={kind} item={item} />)}</ul>}
+      <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {count.toLocaleString("zh-CN")} 项{result?.failed ? "与失败原因" : ""}</button>
+      {details && <ActionItemsDialog action={value} onClose={() => setDetails(false)} />}
+    </> : <SkeletonRows rows={2} />}
+  </DecisionRow>;
+}
+
+/** 公开分享成功后的链接：令牌只出现在给界面的操作结果中，不经过模型。 */
+function ShareLinks({ action }: { action: ai.AssistantAction }) {
+  return <ul className="ai-links ai-share-links" aria-label="分享链接">{action.result!.links!.map(link => <li key={link.path}>
+    <Icon name="link" size={13} /><span className="cell-truncate" title={display(link.path)}>{baseName(link.path)}</span>
+    {link.password && <Badge icon="lock">密码</Badge>}
+    <Button size="sm" onClick={() => copyMessage(api.publicLinks(link.token, baseName(link.path)).page)}>复制链接</Button>
+  </li>)}</ul>;
 }
 
 function CardHead({ icon, tone = "accent", title, subtitle, badge }: { icon: IconName; tone?: Tone; title: string; subtitle?: string; badge?: ReactNode }) {
@@ -432,39 +587,34 @@ function CardHead({ icon, tone = "accent", title, subtitle, badge }: { icon: Ico
   </header>;
 }
 
-/** 确认只回传决定；请求内容由服务端冻结，完成后以加密工具消息中的预览与结果替换实时卡片。 */
-export function HttpRequestCard({ request, decision, approval, message, onDecide, review = false }: {
-  request: ai.HttpRequestPreview; decision: HttpApproval["status"]; approval?: HttpApproval; message?: ai.ChatMessage;
-  onDecide?: (callId: string, decision: ai.HttpDecision) => void;
-  review?: boolean;
-}) {
-  const now = useNow(decision === "pending");
-  const remaining = Math.max(0, Math.ceil(((approval?.expires ?? now) - now) / 1000));
-  const status = decision === "pending" && !remaining ? "expired" : decision;
-  const pending = status === "pending";
-  const label = pending ? "待确认" : status === "approved" ? message ? message.status === "ok" ? "已响应" : "执行失败" : "已同意"
-    : status === "rejected" ? "已拒绝" : status === "expired" ? "已过期" : status === "error" ? "回传失败" : "已取消";
-  const tone: Tone = pending ? "warning" : status === "approved" && message?.status === "ok" ? "success"
-    : status === "error" || status === "approved" && message?.status === "error" ? "danger" : "neutral";
-  if (!review) return <div className="ai-review-result"><Icon name="globe" size={14} /><span>{request.method} {request.url}</span><Badge tone={tone}>{label}</Badge></div>;
-  return <section className={`ai-card ai-http is-${status}`} aria-label="HTTP 请求">
-    <CardHead icon="globe" tone={pending ? "warning" : "accent"} title="HTTP 请求" subtitle={`${request.method} · 正文 ${formatBytes(request.body_bytes)}`}
-      badge={<Badge tone={tone}>{label}</Badge>} />
-    <code className="ai-http-target">{request.url}</code>
-    {pending && <p className="ai-card-note"><Icon name="globe" size={13} />从服务器发送，可能修改第三方数据或产生费用，请核对请求。</p>}
-    <details className="ai-http-details"><summary>请求详情</summary><div className="ai-http-preview">
+/** 请求冻结后的内容与响应：确认坞和时间线的决定节点共用。 */
+function HttpRequestDetail({ request, message }: { request: ai.HttpRequestPreview; message?: ai.ChatMessage }) {
+  return <>
+    <code className="ai-http-target">{request.method} {request.url}</code>
+    <details className="ai-http-details"><summary>请求详情 · 正文 {formatBytes(request.body_bytes)}</summary><div className="ai-http-preview">
       <h4>请求头</h4><pre>{Object.entries(request.headers).map(([key, value]) => `${key}: ${value}`).join("\n") || "无自定义请求头"}</pre>
       {request.body !== null && <><h4>{request.body_encoding === "base64" ? "请求正文（Base64）" : "请求正文"}</h4><pre>{request.body || "空正文"}</pre></>}
       <p>认证头及可识别的凭据已隐藏；本次确认仅适用于这一条请求。</p>
     </div></details>
     {message && <><p className="ai-http-summary">{message.summary}</p>
-      {status === "approved" && <details className="ai-http-details"><summary>响应结果</summary><ToolDetail message={{ ...message, arguments: undefined }} /></details>}
-    </>}
+      <details className="ai-http-details"><summary>响应结果</summary><ToolDetail message={{ ...message, arguments: undefined }} /></details></>}
+  </>;
+}
+
+/** 确认只回传决定；请求内容由服务端冻结，决定后由时间线的决定节点显示结果。 */
+export function HttpRequestCard({ request, approval, onDecide }: {
+  request: ai.HttpRequestPreview; approval: HttpApproval; onDecide: (callId: string, decision: ai.HttpDecision) => void;
+}) {
+  const now = useNow(approval.status === "pending");
+  const remaining = Math.max(0, Math.ceil((approval.expires - now) / 1000));
+  return <section className="ai-card ai-http is-pending" aria-label="HTTP 请求">
+    <CardHead icon="globe" tone="warning" title={`发送 ${request.method} 请求`} subtitle={request.url.replace(/^https?:\/\//, "").split(/[/?#]/, 1)[0]} />
+    <HttpRequestDetail request={request} />
+    <p className="ai-card-note"><Icon name="globe" size={13} />从服务器发送，可能修改第三方数据或产生费用，请核对请求。</p>
     <footer className="ai-card-foot">
-      <span>{pending ? `剩余 ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}，超时取消` : status === "approved" ? message ? "已确认本次请求" : "已同意，等待请求结果"
-        : status === "error" ? "确认结果回传失败，请等待运行结果或停止本轮" : "未发送请求"}</span>
-      {pending && approval && onDecide && <><Button size="sm" onClick={() => onDecide(approval.callId, "rejected")}>拒绝</Button>
-        <Button size="sm" variant="primary" onClick={() => onDecide(approval.callId, "approved")}>发送请求</Button></>}
+      <span>剩余 {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, "0")}，超时取消</span>
+      <Button size="sm" onClick={() => onDecide(approval.callId, "rejected")}>拒绝</Button>
+      <Button size="sm" variant="primary" disabled={!remaining} onClick={() => onDecide(approval.callId, "approved")}>发送请求</Button>
     </footer>
   </section>;
 }
@@ -485,70 +635,74 @@ function PlanSteps({ plan }: { plan: ai.PlanEvent }) {
     <ol>{plan.items.map((item, index) => <li key={item.id ?? index} className={`is-${item.status}`}>
       <span className="ai-plan-dot" aria-hidden="true">{item.status === "completed" ? <Icon name="check" size={12} />
         : item.status === "in_progress" ? <ActivityDots /> : item.status === "failed" ? <Icon name="alert" size={12} /> : index + 1}</span>
-      <div><span className="ai-plan-step"><span>{item.content}</span><small>{PLAN_LABELS[item.status]}</small></span>
+      <div><span className="ai-plan-step"><span>{item.content}</span><small>{PLAN_LABELS[item.status]}
+        {item.status === "completed" && item.unverified && <span className="ai-plan-unverified" title="没有关联的工具结果，完成依据见下方说明">未关联结果</span>}</small></span>
         {item.detail && <p className="ai-plan-detail">{item.detail}</p>}</div>
     </li>)}</ol>
     {plan.reason && <p className="ai-plan-reason">调整原因：{plan.reason}</p>}
   </>;
 }
 
-/** 位于消息滚动区之外，长任务中随时查看计划，不改变对话的阅读位置。 */
+function PlanMeter({ done, total }: { done: number; total: number }) {
+  return <span className="ai-plan-meter" role="progressbar" aria-label="计划进度" aria-valuemin={0} aria-valuemax={total} aria-valuenow={done}>
+    <i style={{ inlineSize: `${total ? done / total * 100 : 0}%` }} /></span>;
+}
+
+/** 位于消息滚动区之外，长任务中随时查看计划，不改变对话的阅读位置；也是「继续任务」的唯一入口。 */
 export function PlanBar({ plan, running, onContinue }: { plan: ai.PlanEvent; running: boolean; onContinue: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const { done, status, current, tone } = planProgress(plan);
   const panelId = useId();
   const next = current ?? plan.items.find(item => item.status !== "completed");
-  const subtitle = next?.content ?? (status === "completed" ? "全部步骤已完成" : "查看完整计划");
-  return <section className="assistant-plan-bar ai-plan" aria-label="当前任务计划" onKeyDown={event => {
+  const subtitle = status === "completed" ? "全部步骤已完成" : next ? `${current ? "当前" : "下一步"}：${next.content}` : "查看完整计划";
+  const resumable = canResumePlan(plan, running);
+  return <section className={`assistant-plan-bar ai-plan is-${status}`} aria-label="当前任务计划" onKeyDown={event => {
     if (!expanded || event.key !== "Escape" || event.nativeEvent.isComposing || event.repeat) return;
     event.preventDefault(); event.stopPropagation(); setExpanded(false); trigger.current?.focus({ preventScroll: true });
   }}><div className="assistant-plan-inner">
-    <button ref={trigger} type="button" className="assistant-plan-trigger" aria-expanded={expanded} aria-controls={panelId}
-      onClick={() => setExpanded(value => !value)}>
-      <Icon name="list" size={16} />
-      <span className="assistant-plan-summary"><span className="assistant-plan-meta">
-        <strong>{plan.title ?? "任务计划"}</strong><span>{done} / {plan.items.length}</span><Badge tone={tone}>{PLAN_LABELS[status]}</Badge>
-      </span><small title={subtitle}>{subtitle}</small></span>
-      <Icon name="chevronDown" size={14} />
-    </button>
+    <div className="assistant-plan-row">
+      <button ref={trigger} type="button" className="assistant-plan-trigger" aria-expanded={expanded} aria-controls={panelId}
+        onClick={() => setExpanded(value => !value)}>
+        <span className="assistant-plan-icon" aria-hidden="true">{status === "in_progress" && running ? <ActivityDots /> : <Icon name={status === "completed" ? "check" : "list"} size={14} />}</span>
+        <span className="assistant-plan-summary"><span className="assistant-plan-meta">
+          <strong>{plan.title ?? "任务计划"}</strong><Badge tone={tone}>{PLAN_LABELS[status]}</Badge>
+        </span><small title={subtitle}>{subtitle}</small></span>
+        <span className="assistant-plan-count">{done}/{plan.items.length}</span>
+        <Icon name="chevronDown" size={14} />
+      </button>
+      {resumable && <Button size="sm" icon="play" onClick={onContinue}>继续</Button>}
+    </div>
+    <PlanMeter done={done} total={plan.items.length} />
     <div id={panelId} className="assistant-plan-panel" hidden={!expanded} role="region" aria-label="完整任务计划" tabIndex={0}
       onPointerDown={event => {
         if (!(event.target as Element).closest("button, a")) event.currentTarget.focus({ preventScroll: true });
         event.stopPropagation();
       }}>
       <PlanSteps plan={plan} />
-      {canResumePlan(plan, running) && <div className="assistant-plan-actions"><span>已保留当前进度</span>
-        <Button size="sm" onClick={onContinue}>继续任务</Button></div>}
+      {resumable && <p className="assistant-plan-actions">已保留当前进度，继续时会先核对已有结果，避免重复执行。</p>}
     </div>
   </div></section>;
 }
 
-function PlanCard({ plan, canContinue, onContinue }: { plan: ai.PlanEvent; canContinue: boolean; onContinue: () => void }) {
-  const { items } = plan;
-  const [collapsed, setCollapsed] = useState(plan.status === "completed");
-  const { done, status, current, tone } = planProgress(plan);
-  return <section className={`ai-card ai-plan is-${status}`} aria-label="任务计划">
-    <CardHead icon="list" title={plan.title ?? "处理计划"} subtitle={`${done} / ${items.length} 步骤已完成`}
-      badge={<Badge tone={tone}>{PLAN_LABELS[status]}</Badge>} />
-    <Progress value={items.length ? done / items.length * 100 : 0} label={`计划步骤完成数：${done} / ${items.length}`} />
-    <button type="button" className="ai-plan-toggle" aria-expanded={!collapsed} onClick={() => setCollapsed(value => !value)}>
-      <span>{current ? current.content : status === "completed" ? "全部步骤已完成" : "查看计划步骤"}</span>
-      <span>{collapsed ? "展开" : "收起"}<Icon name="chevronDown" size={13} /></span>
+/** 消息里的计划只占一行（标题、进度与状态），展开查看这一轮的步骤；完整、最新的计划在顶部计划栏。 */
+function PlanLine({ plan }: { plan: ai.PlanEvent }) {
+  const [open, setOpen] = useState(false);
+  const { done, status, tone } = planProgress(plan);
+  return <section className={`ai-plan ai-plan-line is-${status}${open ? " is-open" : ""}`} aria-label="任务计划">
+    <button type="button" className="ai-plan-line-head" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+      <Icon name="list" size={14} /><strong>{plan.title ?? "处理计划"}</strong>
+      <PlanMeter done={done} total={plan.items.length} />
+      <span className="ai-plan-line-count">{done}/{plan.items.length}</span>
+      <Badge tone={tone}>{PLAN_LABELS[status]}</Badge><Icon name="chevronDown" size={13} />
     </button>
-    {!collapsed && <PlanSteps plan={plan} />}
-    {canContinue && <footer className="ai-card-foot"><span>已保留当前进度</span>
-      <Button size="sm" onClick={onContinue}>继续任务</Button></footer>}
+    {open && <div className="ai-plan-line-body"><PlanSteps plan={plan} /></div>}
   </section>;
 }
 
-export function ScopeCard({ event, action, running, onScope, review = false }: { event: Extract<ai.ToolEvent, { type: "scope_request" }>; action?: ai.AssistantAction; running: boolean;
-  review?: boolean;
+export function ScopeCard({ event, action, onScope }: { event: Extract<ai.ToolEvent, { type: "scope_request" }>; action?: ai.AssistantAction;
   onScope: (id: string, approve: boolean) => void }) {
-  if (!action && running) return <section className="ai-card"><SkeletonRows rows={2} /></section>;
   const status = action?.status ?? "expired";
-  if (!review) return status === "pending" ? null : <div className="ai-review-result"><Icon name="folder" size={14} />
-    <span>访问范围：{action?.payload?.to ?? event.to}</span><Badge>{status === "confirmed" ? "已允许" : status === "rejected" ? "已拒绝" : "已过期"}</Badge></div>;
   return <section className={`ai-card ai-scope is-${status}`}>
     <CardHead icon="folder" tone="warning" title="助手请求访问更大的范围" subtitle={action?.payload?.reason ?? event.reason}
       badge={status !== "pending" ? <Badge tone={status === "confirmed" ? "success" : "neutral"}>{status === "confirmed" ? "已允许" : status === "rejected" ? "已拒绝" : "已过期"}</Badge> : undefined} />
@@ -761,28 +915,13 @@ function ItemRow({ kind, item }: { kind: string; item: ai.ActionItem }) {
     <span className="cell-truncate" title={display(item.path ?? "")}>{display(item.path ?? "")}</span></li>;
 }
 
-export function ActionCard({ id, action, fallback, onChanged, onFilesChanged, review = false }: {
-  id: string; action?: ai.AssistantAction; fallback: { kind: string; count: number; auto?: boolean }; onChanged: () => void; onFilesChanged?: () => void;
-  review?: boolean;
-}) {
+/** 操作的实时状态：执行中轮询进度；经历过执行（含自动执行）后在终态时刷新文件列表。 */
+function useActionState(id: string, action: ai.AssistantAction | undefined, fallback: { auto?: boolean }, onChanged: () => void, onFilesChanged?: () => void) {
   const [value, setValue] = useState<ai.AssistantAction | undefined>(action);
   const [busy, setBusy] = useState<string | null>(null);
-  const [acknowledged, setAcknowledged] = useState(false);
-  const [armed, setArmed] = useState(false);
-  const [details, setDetails] = useState(false);
-  const [shareDays, setShareDays] = useState<number | null>(null);
-  const [password, setPassword] = useState("");
-  const [target, setTarget] = useState<string | null>(null);
-  const [targetReady, setTargetReady] = useState(false);
-  const [verify, setVerify] = useState("");
-  // 通行密钥断言只用于这一次确认：随确认请求提交，不在界面里保存。
-  const passkeyAssertion = useRef<{ request_id: string; credential: unknown } | null>(null);
   useEffect(() => { if (action) setValue(current => !current || action.status !== current.status || action.finished_at !== current.finished_at ? action : current); }, [action]);
   const status = value?.status ?? "pending";
   const live = status === "running" || status === "undoing";
-  const now = useNow(status === "pending") / 1000;
-  const expired = status === "pending" && value != null && value.expires_at <= now;
-  // 执行中轮询进度；无论终态来自轮询还是对话刷新，只要经历过执行就刷新文件列表。
   useEffect(() => {
     if (!live) return;
     let stopped = false;
@@ -795,10 +934,11 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged, re
     }, 1000);
     return () => { stopped = true; window.clearInterval(timer); };
   }, [live, id]);
-  const touched = useRef(Boolean(fallback.auto));
+  // 节点可能在折叠后重新挂载：只有挂载时仍在执行的自动操作才需要在结束后刷新文件。
+  const touched = useRef(Boolean(fallback.auto) && (!action || action.status === "running" || action.status === "confirmed"));
   useEffect(() => {
     if (live) touched.current = true;
-    else if (touched.current && status !== "pending") { touched.current = false; onFilesChanged?.(); }
+    else if (touched.current && status !== "pending" && status !== "confirmed") { touched.current = false; onFilesChanged?.(); }
   }, [live, status]);
   const run = useCallback(async (label: string, task: () => Promise<ai.AssistantAction>) => {
     setBusy(label);
@@ -808,21 +948,40 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged, re
       setValue(fresh);
       onChanged();
     } catch (reason) { toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试")); onChanged(); }
-    finally { setBusy(null); setArmed(false); }
+    finally { setBusy(null); }
   }, [onChanged]);
+  return { value, busy, run };
+}
+
+/** 确认坞里的文件操作确认；决定之后由时间线的决定节点显示执行进度与结果。 */
+export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: {
+  id: string; action?: ai.AssistantAction; fallback: { kind: string; count: number; auto?: boolean }; onChanged: () => void; onFilesChanged?: () => void;
+}) {
+  const { value, busy, run: execute } = useActionState(id, action, fallback, onChanged, onFilesChanged);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [armed, setArmed] = useState(false);
+  const [details, setDetails] = useState(false);
+  const [shareDays, setShareDays] = useState<number | null>(null);
+  const [password, setPassword] = useState("");
+  const [target, setTarget] = useState<string | null>(null);
+  const [targetReady, setTargetReady] = useState(false);
+  const [verify, setVerify] = useState("");
+  // 通行密钥断言只用于这一次确认：随确认请求提交，不在界面里保存。
+  const passkeyAssertion = useRef<{ request_id: string; credential: unknown } | null>(null);
+  const status = value?.status ?? "pending";
+  const now = useNow(status === "pending") / 1000;
+  const expired = status === "pending" && value != null && value.expires_at <= now;
+  const run = (label: string, task: () => Promise<ai.AssistantAction>) => execute(label, task).finally(() => setArmed(false));
 
   if (!value) return <section className="ai-card ai-action is-loading"><SkeletonRows rows={2} /></section>;
   const payload = value.payload ?? {};
   const kind = value.kind || fallback.kind;
   const danger = Boolean(payload.danger);
   const share = kind === "share";
-  const auto = Boolean(payload.auto);
   const many = value.count > 1000;
   const pending = status === "pending" && !expired;
   const [label, tone] = STATUS_LABEL[expired ? "expired" : status] ?? [status, "neutral" as Tone];
   const samples = payload.samples ?? [];
-  const progress = value.progress;
-  const result = value.result;
   const days = shareDays ?? payload.options?.expires_days ?? 0;
   const cross = CROSS_KINDS.includes(kind);
   const moveOut = kind === "move_out";
@@ -832,21 +991,6 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged, re
   const crossBlocked = cross && (!targetReady || (moveOut ? !verify && !password : !unlocked));
   const crossInput = () => ({ target: moveOut ? chosen : chosen.slice(api.PRIVATE_PREFIX.length) });
   const iconTone: Tone = danger || moveOut ? "danger" : share ? "public" : status === "done" ? "success" : "accent";
-  if (pending && !review) return null;
-  if (!pending) return <div className="ai-action-record">
-    <div className="ai-review-result"><Icon name={ACTION_ICONS[kind] ?? "check"} size={14} />
-      <span><strong>{payload.title ?? ai.ACTION_KINDS[kind] ?? kind}</strong> · {value.count.toLocaleString("zh-CN")} 项
-        {result && <small>成功 {result.ok}{result.skipped ? `，跳过 ${result.skipped}` : ""}{result.failed ? `，失败 ${result.failed}` : ""}</small>}</span>
-      <Badge tone={tone}>{auto && status === "done" ? "已自动执行" : label}</Badge>
-      {live && status === "running" ? <Button size="sm" loading={busy === "cancel"} onClick={() => void run("cancel", () => ai.cancelAction(id))}>取消</Button>
-        : <button className="ai-link" type="button" onClick={() => setDetails(true)}>明细</button>}
-    </div>
-    {live && progress && <Progress value={progress.total ? progress.done / progress.total * 100 : 0} label="执行进度" />}
-    {result?.links?.map(link => <div className="ai-review-result" key={link.path}><Icon name="link" size={13} /><span>{baseName(link.path)}</span>
-      {link.password && <Badge icon="lock">密码</Badge>}
-      <Button size="sm" onClick={() => copyMessage(api.publicLinks(link.token, baseName(link.path)).page)}>复制链接</Button></div>)}
-    {details && <ActionItemsDialog action={value} onClose={() => setDetails(false)} />}
-  </div>;
   return <section className={`ai-card ai-action is-${expired ? "expired" : status}${danger || moveOut ? " is-danger" : ""}`}>
     <CardHead icon={ACTION_ICONS[kind] ?? "check"} tone={iconTone} title={payload.title ?? ai.ACTION_KINDS[kind] ?? kind} subtitle={payload.summary}
       badge={<Badge tone={danger ? "danger" : tone}>{danger ? "不可恢复" : label}</Badge>} />
@@ -859,8 +1003,8 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged, re
       {(payload.conflicts ?? 0) > 0 && <span className="tone-warning">{payload.conflicts} 项将跳过</span>}
     </div>
     {payload.confirm_reason && pending && <p className="ai-card-note"><Icon name="shield" size={13} />{payload.confirm_reason}</p>}
-    {samples.length > 0 && !result?.links && <ul className="ai-diff">{samples.slice(0, review ? 3 : 6).map((item, index) => <ItemRow key={index} kind={kind} item={item} />)}</ul>}
-    {(value.count > (review ? 3 : 6) || (payload.conflicts ?? 0) > 0) && <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {value.count.toLocaleString("zh-CN")} 项</button>}
+    {samples.length > 0 && <ul className="ai-diff">{samples.slice(0, 3).map((item, index) => <ItemRow key={index} kind={kind} item={item} />)}</ul>}
+    {(value.count > 3 || (payload.conflicts ?? 0) > 0) && <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {value.count.toLocaleString("zh-CN")} 项</button>}
     {share && pending && <div className="ai-share-form">
       <label><span>有效期</span><select className="input input-sm" value={days} onChange={event => setShareDays(Number(event.target.value))}>
         {SHARE_DAYS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>

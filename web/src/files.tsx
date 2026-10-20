@@ -284,7 +284,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
 
 type PreviewSource = { url: string; downloadUrl: string; poster?: string; thumbnail?: string };
 export type PreviewPlayback = { playing: boolean; currentTime: number; state: MediaState };
-export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, onVideoFrame, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity }: PreviewSource & { file: api.FileItem; onClose: () => void; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; onVideoFrame?: (video: HTMLVideoElement, file: api.FileItem) => void; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
+export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, onVideoFrame, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest }: PreviewSource & { file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; onVideoFrame?: (video: HTMLVideoElement, file: api.FileItem) => void; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
   const kind = getFileKind(file.content_type, file.key);
   const media = (kind === "audio" || kind === "video") && isPlayable(file.key, file.content_type);
   const browsable = media || kind === "image";
@@ -482,7 +482,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   }, [panelOpen]);
   // 窄窗口仅保留阅读工具、更多与关闭，其他操作合并到同一个菜单。
   return (
-    <><Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable movable compactActions={compactActions}
+    <><Modal size="xl" initialFocus="dialog" onKeyDownCapture={handleShortcut} windowShortcuts expandable pinnable minimizable movable minimizeRequest={minimizeRequest} compactActions={compactActions}
       menuItems={[
         { label: "键盘快捷键", icon: "keyboard", shortcut: "?", onSelect: () => void showShortcuts() },
         ...(compactActions ? [

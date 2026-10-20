@@ -8,7 +8,7 @@ import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../
 
 import { Notice, Badge, Button, Icon, IconButton, Modal, Switch, copyText, formatBytes, toast } from "../ui";
 import { DestinationPicker } from "./folders";
-import { TrayBar, TrayRing, type TrayState } from "./tray";
+import { TrayBar, TrayCancelAll, TrayFoot, TrayOverall, TrayRing, type TrayState } from "./tray";
 import { UploadSelection, type UploadFile } from "./upload-selection";
 
 /* ---------- 上传 ---------- */
@@ -417,7 +417,8 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
         <IconButton icon="chevronDown" size="sm" label={collapsed ? "展开" : "收起"} onClick={() => setCollapsed(value => !value)} />
         {!active && <IconButton icon="x" size="sm" label="关闭上传列表" onClick={queue.clear} />}
       </header>
-      {!collapsed && (
+      {uploading > 0 && <TrayOverall percent={overall} />}
+      {!collapsed && <>
         <ul>
           {folderShares.map(folder => <li key={folder.id} className={`tray-item is-${folder.status}`}>
             <span className="tray-icon"><FileTile kind="folder" /></span>
@@ -446,14 +447,18 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
               </div>
               <span className="tray-right">
                 {job.status === "uploading" && job.phase !== "hashing" && job.percent < 100 && <span className="tray-percent">{Math.floor(job.percent)}%</span>}
-                {running && <IconButton icon="x" size="sm" label={`取消上传 ${job.file.name}`} onClick={() => queue.cancel(job.id)} />}
+                {running && <IconButton className="tray-cancel" icon="x" size="sm" label={`取消上传 ${job.file.name}`} onClick={() => queue.cancel(job.id)} />}
                 {job.status === "error" && <Button size="sm" icon="refresh" aria-label={`重试上传 ${job.file.name}`} onClick={() => queue.retry(job.id)}>重试</Button>}
                 {job.status === "done" && job.result?.public_token && <IconButton icon="copy" size="sm" label="复制分享链接" onClick={() => void copyText(api.publicLinks(job.result!.public_token!, job.file.name).page, "分享链接已复制")} />}
               </span>
             </li>;
           })}
         </ul>
-      )}
+        <TrayFoot summary={[uploading ? `${uploading} 个进行中` : "", completed ? `${completed} 个已完成` : "", failed ? `${failed} 个失败` : "",
+          canceledCount ? `${canceledCount} 个已取消` : ""].filter(Boolean).join(" · ") || title}>
+          {active > 0 && <TrayCancelAll count={uploading} noun="上传" onConfirm={queue.cancelAll} />}
+        </TrayFoot>
+      </>}
     </aside>
   );
 }

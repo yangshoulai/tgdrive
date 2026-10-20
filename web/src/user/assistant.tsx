@@ -9,7 +9,7 @@ import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButt
 import { ShortcutsDialog } from "../shortcuts";
 import type { PageImport } from "./page-import";
 import { Thread, PlanBar, latestPlan, useMarkState, type HttpApproval, type LiveRun } from "./assistant-thread";
-import { ReviewQueue, type ReviewRequest } from "./assistant-review";
+import { ReviewQueue, pendingReviews, type ReviewRequest } from "./assistant-review";
 import { AttachmentTray, useAttachments } from "./assistant-attachments";
 import { filesBridge, getPrivateSection, openPrivateSection, waitForFiles } from "./assistant-bridge";
 import { usePrivateAccess } from "./private-session";
@@ -56,7 +56,11 @@ type DrawerProps = Parameters<typeof AssistantDrawer>[0];
  * 其他页面显示普通对话。普通抽屉一直挂着（切回时对话还在）；私密抽屉离开私密空间或锁定即卸载，
  * 私密对话保留在服务器内存里，回到私密空间时重新打开。锁定时收起抽屉，不把普通对话顶上来。
  */
-export function AssistantDock(props: DrawerProps) {
+/** 抽屉关闭时也要让人看见的状态：运行中与等待处理的请求数。 */
+type DockStatus = { running: boolean; pending: number };
+const IDLE_STATUS: DockStatus = { running: false, pending: 0 };
+
+export function AssistantDock({ onOpen, ...props }: DrawerProps & { onOpen: () => void }) {
   const privateView = props.location.view === "private" && Boolean(props.config.private_available);
   const { grant } = usePrivateAccess();
   const access = privateView ? grant?.access ?? "" : "";
@@ -79,20 +83,29 @@ export function AssistantDock(props: DrawerProps) {
     // 在私密空间页面锁定（手动或闲置）：收起抽屉；离开私密空间页面则直接切回普通对话。
     if (privateView && open) onClose();
   }, [Boolean(config), access]);
+  const [normalStatus, setNormalStatus] = useState(IDLE_STATUS);
+  const [privateStatus, setPrivateStatus] = useState(IDLE_STATUS);
+  // 按钮反映点开后会出现的那个对话：私密空间页面且已解锁时是私密对话。
+  const status = config ? privateStatus : normalStatus;
   return <>
-    <AssistantDrawer {...props} open={props.open && !config && !loading} />
+    <AssistantDrawer {...props} open={props.open && !config && !loading} onStatus={setNormalStatus} />
     {config && <AssistantDrawer key={access} open={props.open} config={config} location={props.location} onClose={props.onClose}
-      onConfigChanged={() => { refresh(); props.onConfigChanged(); }}
+      onConfigChanged={() => { refresh(); props.onConfigChanged(); }} onStatus={setPrivateStatus}
       onFilesChanged={props.onFilesChanged} onNavigate={props.onNavigate} privateMode />}
+    {!props.open && <AssistantFab status={status} privateMode={Boolean(config)} onOpen={onOpen} />}
   </>;
 }
 
-export function AssistantLauncher({ onOpen, open }: { onOpen: () => void; open: boolean }) {
-  return (
-    <button type="button" className={`assistant-launch${open ? " is-active" : ""}`} onClick={onOpen} data-closes-nav aria-expanded={open} aria-label="文件助手" title={`文件助手（${shortcutLabel("Mod+J")}）`} aria-keyshortcuts="Meta+J Control+J">
-      <AssistantMark size={18} /><span>文件助手</span><kbd>{shortcutLabel("Mod+J")}</kbd>
-    </button>
-  );
+/** 右下角的助手入口（§34）：抽屉关闭时显示，带运行动效与待处理数量；抽屉打开、全页与弹窗时不显示。 */
+function AssistantFab({ status, privateMode, onOpen }: { status: DockStatus; privateMode: boolean; onOpen: () => void }) {
+  const name = privateMode ? "私密对话" : "文件助手";
+  const state = status.pending ? `，${status.pending} 项等待处理` : status.running ? "，正在处理" : "";
+  return <button type="button" className={`assistant-fab${status.running ? " is-working" : ""}${status.pending ? " has-pending" : ""}`}
+    onClick={onOpen} aria-label={`${name}${state}`} title={`${name}（${shortcutLabel("Mod+J")}）${state}`} aria-keyshortcuts="Meta+J Control+J">
+    <AssistantMark size={28} state={status.running && !status.pending ? "thinking" : "idle"} />
+    {privateMode && <span className="assistant-fab-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}
+    {status.pending > 0 && <span className="assistant-fab-badge" aria-hidden="true">{status.pending > 99 ? "99+" : status.pending}</span>}
+  </button>;
 }
 
 export type AssistantNavigate = (view: "files" | "trash" | "downloads" | "shared" | "private", prefix?: string) => void;
@@ -100,7 +113,7 @@ const FULL_ACK_KEY = "tessera-assistant-full-ack-v2";
 const EMPTY_LIVE: LiveRun = { reasoning: "", reasoningStartedAt: null, streaming: "", tools: [], phase: "thinking" };
 
 export function AssistantDrawer({ open, config, location, onClose, onConfigChanged, mode = "drawer", initialConversation, onOpenPage,
-  onConversationChange, onFilesChanged, pageImport, onPageImportDone, onNavigate, privateMode = false }: {
+  onConversationChange, onFilesChanged, pageImport, onPageImportDone, onNavigate, privateMode = false, onStatus }: {
   open: boolean; config: ai.AssistantConfig; location: AssistantLocation; onClose: () => void; onConfigChanged: () => void;
   /** drawer：右侧抽屉；page：全页（左侧对话列表常驻，消息流居中）。 */
   mode?: "drawer" | "page"; initialConversation?: string | null; onOpenPage?: (conversationId: string | null) => void;
@@ -111,6 +124,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   onNavigate?: AssistantNavigate;
   /** 私密对话（§24）：作用域固定为私密空间，对话只在服务器内存中，没有历史、附件与全页模式。 */
   privateMode?: boolean;
+  /** 向浮动入口报告运行与待处理状态（抽屉关闭时也要可见）。 */
+  onStatus?: (status: DockStatus) => void;
 }) {
   const page = mode === "page";
   const [width, setWidth] = useState(() => {
@@ -147,6 +162,9 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [historyBusy, setHistoryBusy] = useState(false);
   const [conversations, setConversations] = useState<ai.Conversation[] | null>(null);
   const [detail, setDetail] = useState<ai.ConversationDetail | null>(null);
+  /** 消息流里的决定节点请求在确认坞中定位到某一项；n 递增以便重复点击同一项。 */
+  const [reviewFocus, setReviewFocus] = useState<{ id: string; n: number } | null>(null);
+  const focusReview = useCallback((id: string) => setReviewFocus(previous => ({ id, n: (previous?.n ?? 0) + 1 })), []);
   const [loading, setLoading] = useState(false);
   const [earlierBusy, setEarlierBusy] = useState(false);
   const earlierRequest = useRef<string | null>(null);
@@ -156,6 +174,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const [scopeTarget, setScopeTarget] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<{ seq: number; later: number } | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
+  const pendingCount = detail ? pendingReviews(detail, httpApprovals, runId, Date.now()).length : 0;
+  useEffect(() => { onStatus?.({ running: Boolean(runId), pending: pendingCount }); }, [Boolean(runId), pendingCount, onStatus]);
   useEffect(() => {
     const pending = httpApprovals.filter(item => item.status === "pending");
     for (const item of pending) if (!open || item.runId !== runId) decideHttp(item.callId, "cancelled");
@@ -395,6 +415,16 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
               if (version !== selection.current) return;
               setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value);
               if (fresh.active_run && fresh.active_run !== id && followedRun.current !== fresh.active_run) follow(fresh.active_run);
+              // 标题在这一轮结束后于后台生成（不再让回复等它）：还没有标题时稍后补读一次。
+              if (!fresh.conversation.title && !fresh.active_run) for (const delay of [3000, 9000]) window.setTimeout(() => {
+                if (version !== selection.current) return;
+                void ai.conversation(fresh.conversation.id).then(latest => {
+                  if (version !== selection.current || !latest.conversation.title) return;
+                  setDetail(value => value?.conversation.id === latest.conversation.id && !value.conversation.title
+                    ? { ...value, conversation: { ...value.conversation, title: latest.conversation.title } } : value);
+                  loadConversations();
+                }).catch(() => undefined);
+              }, delay);
             }).catch(() => undefined);
             return current && { ...current, active_run: null };
           });
@@ -783,15 +813,14 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} privateMode={privateMode} onAccept={() => void acknowledge()} />
           : loading ? <SkeletonRows rows={4} />
           : !detail ? <Welcome location={effectiveScope} view={location.view} privateMode={privateMode} onPick={text => { setDraft(text); input.current?.focus(); }} />
-          : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} runId={runId} httpApprovals={httpApprovals} onHttpDecision={decideHttp}
-              onAnswer={text => void send(text)} onScope={(id, approve) => void decideScope(id, approve)}
-              onRetry={retryFrom} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
+          : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} runId={runId} httpApprovals={httpApprovals}
+              onRetry={retryFrom} onReview={focusReview} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
         {reconnecting && <p className="ai-notice" role="status"><Icon name="refresh" size={14} /><span>重新连接中…</span></p>}
       </div>
     </div>
     {unseen && <button type="button" className="assistant-unseen" onClick={() => scrollToEnd(true)}><Icon name="chevronDown" size={14} />有新消息</button>}</div>
     <div className="assistant-composer">
-      {detail && !loading && config.notice_ack && <ReviewQueue key={currentId} detail={detail} httpApprovals={httpApprovals} runId={runId}
+      {detail && !loading && config.notice_ack && <ReviewQueue key={currentId} detail={detail} httpApprovals={httpApprovals} runId={runId} focus={reviewFocus}
         onHttpDecision={decideHttp} onAnswer={send} onFeedback={reviseRequest} onScope={(id, approve) => void decideScope(id, approve)}
         onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
       {pageImport && <SnapshotChip value={pageImport} onRemove={() => onPageImportDone?.()} />}

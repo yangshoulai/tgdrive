@@ -404,8 +404,10 @@ class OfflineDownloads:
         result["eta_seconds"] = max(0, (row["size"] - result["received"]) / speed) if result["speed"] and row["size"] and row["kind"] == "http" else None
         return result
 
-    def list(self, user_id, *, cursor=0, status="", query="", limit=50, private_scope: Scope | None = None, ids=None):
-        """任务列表（键集分页）。ids 用于托盘跟踪：只返回这些编号中属于该用户的任务（最多 100 个），不分页。"""
+    def list(self, user_id, *, cursor=0, status="", query="", limit=50, private_scope: Scope | None = None, ids=None,
+             area: str | None = None):
+        """任务列表（键集分页）。ids 用于托盘跟踪：只返回这些编号中属于该用户的任务（最多 100 个），不分页。
+        area 为 normal／private 时在查询中只取普通或私密任务（文件助手按对话类型使用），分页与总数都按该范围计算。"""
         self.scope(user_id)
         reveal_private = bool(private_scope and private_scope.private_access)
         if reveal_private and private_scope.authorize is not None:
@@ -420,6 +422,11 @@ class OfflineDownloads:
             where += f" AND id IN ({','.join('?' * len(ids))})"
             args.extend(ids)
             cursor, limit = 0, len(ids)
+        if area is not None:
+            if area not in ("normal", "private"):
+                raise ValueError("任务范围不正确")
+            where += f" AND substr(({TASK_PATH_SQL}),1,?){'=' if area == 'private' else '<>'}?"
+            args.extend((len(PRIVATE_PREFIX), PRIVATE_PREFIX))
         if status == "active":
             where += " AND status IN ('queued','running','interrupted')"
         elif status:
@@ -456,6 +463,15 @@ class OfflineDownloads:
                     "x": effective["x_enabled"] and effective["x_available"],
                     "youtube": effective["youtube_enabled"] and effective["youtube_available"],
                     "concurrency": effective["concurrency"], "pressure": self.resources.pressure()}}
+
+    def counts(self, user_id, *, area: str) -> dict[str, int]:
+        """按状态统计普通或私密任务数（文件助手用来了解整体规模，不必翻页计数）。"""
+        if area not in ("normal", "private"):
+            raise ValueError("任务范围不正确")
+        rows = self.metadata.db.execute(
+            f"SELECT status, COUNT(*) AS n FROM offline_tasks WHERE user_id=? AND substr(({TASK_PATH_SQL}),1,?)"
+            f"{'=' if area == 'private' else '<>'}? GROUP BY status", (user_id, len(PRIVATE_PREFIX), PRIVATE_PREFIX)).fetchall()
+        return {row["status"]: row["n"] for row in rows}
 
     def _attach_files(self, user_id, pairs):
         """已完成任务对应的文件（仍在原位置时）与缩略图状态：每页两次查询，不逐项读取。"""
@@ -616,6 +632,21 @@ class OfflineDownloads:
             except NotFoundError:
                 pass
         return {"removed": removed}
+
+    async def stop_all(self, user_id):
+        """停止账号下全部进行中的任务（托盘「全部取消」）：排队与中断的任务在一个事务里改为已停止，
+        正在下载的逐个取消；任务记录与已下载的断点保留，之后仍可继续。停止不需要解锁私密空间。"""
+        self.scope(user_id)
+        now = time.time()
+        with self.metadata.transaction() as db:
+            # 先改排队任务，调度器不会在取消运行中任务的间隙再启动它们。
+            queued = db.execute("UPDATE offline_tasks SET status='stopped',phase=NULL,error=NULL,updated_at=? "
+                                "WHERE user_id=? AND status IN ('queued','interrupted')", (now, user_id)).rowcount
+        running = [task_id for task_id, task in list(self._running.items())
+                   if not task.done() and self._row(task_id)["user_id"] == user_id]
+        for task_id in running:
+            await self._cancel(task_id, "stopped", None)
+        return {"stopped": queued + len(running)}
 
     async def _discard(self, row):
         if row["upload_id"]:

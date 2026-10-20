@@ -7,6 +7,7 @@ import json
 import re
 import secrets
 
+MAX_ITEMS = 20
 STATUSES = ("pending", "in_progress", "waiting_user", "completed", "failed", "paused", "cancelled")
 META_TOOLS = frozenset(("update_plan", "get_context", "get_system_help"))
 
@@ -42,13 +43,13 @@ class Plan:
     @staticmethod
     def _reopen(item: dict) -> None:
         # 历史快照保留原完成依据；重新执行不能沿用旧结果或被旧操作再次标成完成。
-        for key in ("evidence", "actions", "action_pending", "issue", "waiting_call", "detail"):
+        for key in ("evidence", "actions", "action_pending", "issue", "waiting_call", "detail", "unverified"):
             item.pop(key, None)
 
     def update(self, args: dict) -> dict:
         items = args.get("items")
-        if not isinstance(items, list) or not 1 <= len(items) <= 12:
-            raise ValueError("计划需要 1–12 个步骤")
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_ITEMS:
+            raise ValueError(f"计划需要 1–{MAX_ITEMS} 个步骤")
         plan_id = args.get("plan_id")
         original = self.data
         if plan_id and (original is None or original["id"] != plan_id):
@@ -95,9 +96,16 @@ class Plan:
                     if not item.get("detail"):
                         raise ValueError("纯分析步骤完成时需要 detail 说明结论")
                 elif not evidence or evidence[-1]["status"] != "ok" or item.get("issue") or previous.get("status") == "failed":
-                    detail = previous.get("detail") or "尚无关联的完整成功结果"
-                    raise ValueError(f"步骤 {step_id}（{item['content']}）需要成功的工具结果才能完成：{detail}；"
-                                     "请用 plan_step_id 关联此步骤重试，或保留失败／暂停状态")
+                    # 没有关联的完整成功结果时，只有本次明确说明依据（例如未带 plan_step_id 的查询已经确认，
+                    # 或部分失败可以接受）才能完成；界面标注「未关联结果」，说明保留给用户核对。
+                    basis = value.get("detail")
+                    if not isinstance(basis, str) or len(basis.strip()) < 4:
+                        detail = previous.get("detail") or "尚无关联的完整成功结果"
+                        raise ValueError(f"步骤 {step_id}（{item['content']}）还没有关联的完整成功结果：{detail}。"
+                                         "如果其他工具结果已经确认完成，或部分失败可以接受，请在 detail 中写明依据后再标为完成；"
+                                         "否则用 plan_step_id 关联此步骤继续执行，或保留失败／暂停状态")
+                    item["unverified"] = True
+                    item.pop("issue", None)
             result.append(item)
         for step_id, item in old.items():
             if step_id not in seen and (item.get("action_pending") or any(self.calls.get(c) == step_id for c in self.running)):
@@ -216,7 +224,7 @@ class Plan:
             if states & {"running", "confirmed", "undoing"}:
                 item["status"], item["detail"] = "in_progress", "操作正在执行"
             elif "pending" in states:
-                item["status"], item["detail"] = "waiting_user", "请在操作卡片中确认"
+                item["status"], item["detail"] = "waiting_user", "等待你在输入框上方的确认区处理"
             elif states <= {"done"}:
                 if any(self.calls.get(c) == item["id"] for c in self.running):
                     item["status"] = "in_progress"
@@ -271,8 +279,28 @@ class Plan:
         value = self.data or self.candidate
         if not value:
             return "无"
-        public = {key: value[key] for key in ("id", "title", "status", "automatic", "items") if key in value}
+        public = {key: value[key] for key in ("id", "title", "status") if key in value}
+        public["items"] = brief(value["items"])
         return json.dumps(public, ensure_ascii=False).replace("</", "<\\/")
+
+    @property
+    def completed(self) -> int:
+        return sum(item["status"] == "completed" for item in self.data["items"]) if self.data else 0
+
+    @property
+    def actionable(self) -> bool:
+        """还有不需要用户介入就能继续的步骤：用于判断预算用完后能否自动续跑。"""
+        if not self.data or self.data.get("automatic"):
+            return False
+        items = self.data["items"]
+        if any(item["status"] == "waiting_user" or item.get("action_pending") for item in items):
+            return False
+        return any(item["status"] in ("pending", "in_progress", "paused") for item in items)
+
+
+def brief(items: list[dict]) -> list[dict]:
+    """给模型的步骤视图：省去完成依据等内部记录，只保留编号、内容、状态与说明。"""
+    return [{key: item[key] for key in ("id", "content", "status", "kind", "detail") if item.get(key)} for item in items]
 
 
 def display_plan(event: dict, actions: list[dict], *, active: bool) -> dict:

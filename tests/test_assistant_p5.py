@@ -171,6 +171,76 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             self.assertEqual((result["status"], result["event"]), ("error", None), "作用域外的目录不生成卡片")
         self.run_async(run())
 
+    def _seed_downloads(self, rows):
+        """复制一条真实任务作为模板，批量造出指定 (状态, 保存键) 的任务记录。"""
+        offline = self.service.offline
+        ticket = offline.direct_ticket(self.alice.id, "https://files.example.com/a.txt")
+        offline.create(self.alice.id, [{"ticket": ticket, "name": "a.txt"}], "Elsewhere/")
+        db = self.app.metadata.db
+        columns = [row[1] for row in db.execute("PRAGMA table_info(offline_tasks)")]
+        base = dict(db.execute("SELECT * FROM offline_tasks").fetchone())
+        with self.app.metadata.transaction() as tx:
+            tx.execute("DELETE FROM offline_tasks")
+            for status, key in rows:
+                row = {**base, "id": None, "status": status, "key": key}
+                tx.execute(f"INSERT INTO offline_tasks ({','.join(columns)}) VALUES ({','.join('?' * len(columns))})", [row[c] for c in columns])
+
+    def test_download_tasks_list_counts_and_bulk_delete_in_full_access(self):
+        async def run():
+            admin, user, conversation = await self.ready(location="Downloads/")
+            # 最新的 120 个是私密任务：普通对话的第一页不能因为它们变成空页。
+            self._seed_downloads([("completed" if n % 4 else "failed", f"Elsewhere/f{n}.txt") for n in range(300)]
+                                 + [("completed", ".tgdrive/trash/1-abc/Elsewhere/old.txt"), ("stopped", "Downloads/s.txt")]
+                                 + [("completed", f".tgdrive/private/p{n}.txt") for n in range(120)])
+            self.model.replies = [call("list_downloads"), answer("好")]
+            await self.send(user, conversation, "有多少下载任务")
+            result = (await self.tool_results(user, conversation))[-1]
+            self.assertEqual(len(result["result"]["tasks"]), 100)
+            self.assertEqual(result["result"]["total"], 302)
+            self.assertEqual(result["result"]["counts"], {"completed": 226, "failed": 75, "stopped": 1})
+            self.assertNotIn(".tgdrive/private", json.dumps(result["result"], ensure_ascii=False))
+            # 重新下载会写入文件：作用域外的任务跳过并说明原因；删除只改任务记录，不受作用域限制。
+            self.model.replies = [call("propose_download_control", status="finished", op="restart"), answer("好")]
+            await self.send(user, conversation, "重新下载")
+            restart = (await self.tool_results(user, conversation))[-1]
+            self.assertEqual(restart["result"]["count"], 1, "只有作用域内的已停止任务可以重新下载")
+            self.service.trace.expire_actions(conversation)
+            await self.req("POST", "/api/admin/v1/assistant/settings", {"full_access": True}, admin)
+            await self.req("POST", f"/api/user/v1/assistant/conversations/{conversation}/update", {"access_mode": "full"}, user)
+            self.model.replies = [call("propose_download_control", status="finished", op="delete"), answer("已清空")]
+            await self.send(user, conversation, "清空已完成和失败的下载任务")
+            tool = (await self.tool_results(user, conversation))[-1]
+            self.assertEqual(tool["result"]["count"], 302)
+            task = self.service._execution_tasks.get(tool["result"]["action_id"])
+            if task:
+                await task
+            self.assertEqual(self.service.trace.action(self.alice.id, tool["result"]["action_id"])["status"], "done")
+            left = [row["key"] for row in self.app.metadata.db.execute("SELECT key FROM offline_tasks")]
+            self.assertEqual(len(left), 120)
+            self.assertTrue(all(key.startswith(".tgdrive/private/") for key in left), "私密任务不受普通对话影响")
+        self.run_async(run())
+
+    def test_full_access_share_follows_admin_setting(self):
+        async def run():
+            admin, user, conversation = await self.ready(files=("Docs/a.md",))
+            await self.req("POST", "/api/admin/v1/assistant/settings", {"full_access": True}, admin)
+            await self.req("POST", f"/api/user/v1/assistant/conversations/{conversation}/update", {"access_mode": "full"}, user)
+            _, tool = await self.propose(user, conversation, call("propose_share", paths=["/Docs/a.md"]))
+            self.assertIn("公开分享需要你确认", tool["result"]["status"])
+            self.service.trace.expire_actions(conversation)
+            status, _ = await self.req("POST", "/api/admin/v1/assistant/settings", {"full_auto_share": 1}, admin)
+            self.assertEqual(status, 200)
+            _, tool = await self.propose(user, conversation, call("propose_share", paths=["/Docs/a.md"], require_password=True))
+            self.assertIn("访问密码", tool["result"]["status"], "要求密码的分享仍需确认")
+            self.service.trace.expire_actions(conversation)
+            action_id, tool = await self.propose(user, conversation, call("propose_share", paths=["/Docs/a.md"]))
+            self.assertIn("自动执行", tool["result"]["status"])
+            task = self.service._execution_tasks.get(action_id)
+            if task:
+                await task
+            self.assertIsNotNone(self.app.metadata.db.execute("SELECT public_token FROM objects WHERE key='Docs/a.md'").fetchone()[0])
+        self.run_async(run())
+
     def test_http_json_redaction_download_proposal_and_persistent_taint(self):
         async def run():
             admin, user, conversation = await self.ready()

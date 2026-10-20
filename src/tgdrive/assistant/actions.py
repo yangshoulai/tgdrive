@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from ..errors import NotFoundError
 from ..objects import PRIVATE_PREFIX, ObjectService, Scope
+from ..offline.service import task_path
 from .config import LIMITS
 
 BATCH = 500
@@ -322,7 +323,14 @@ class ActionExecutor:
             if row is None:
                 progress.skip(f"任务 #{item['id']}", "任务已不存在")
                 return
-            if row["key"] != item["path"] or not self._inside(scope_root, row["key"]):
+            # 删除和停止只改任务记录，不受普通对话的作用域限制；继续、重新下载会写入文件，保存位置须仍在作用域内。
+            # 私密任务与普通任务互不越界：私密对话的作用域就是私密空间。
+            path = task_path(row["key"])
+            private_scope = scope_root.startswith(PRIVATE_PREFIX)
+            if private_scope != path.startswith(PRIVATE_PREFIX):
+                progress.skip(f"任务 #{item['id']}", "任务已不存在")
+                return
+            if (item["op"] in ("resume", "restart") or private_scope) and (row["key"] != item["path"] or not self._inside(scope_root, path)):
                 progress.skip(f"任务 #{item['id']}", "任务保存位置已变化或不在作用域内")
                 return
             await self.offline.control(user_id, item["id"], item["op"],

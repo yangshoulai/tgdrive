@@ -445,7 +445,7 @@ class TgDriveASGI(StaticFiles):
                          "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
-                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/shares/{}/save": "share.save", "/cache/reset": "client_cache.reset",
+                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/downloads/stop-all": "download.stop_all", "/shares/{}/save": "share.save", "/cache/reset": "client_cache.reset",
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
@@ -548,6 +548,8 @@ class TgDriveASGI(StaticFiles):
             ids = payload.get("ids")
             detail = {"action": payload.get("action") if payload.get("action") in ("stop", "resume", "delete") else None,
                       "count": len(ids) if isinstance(ids, list) else 0, "done": (result or {}).get("done") if ok else None}
+        elif action == "download.stop_all":
+            detail = {"stopped": (result or {}).get("stopped") if ok else None}
         elif action == "download.clear":
             detail = {"status": payload.get("status") if payload.get("status") in ("completed", "failed") else None,
                       "removed": (result or {}).get("removed") if ok else None}
@@ -974,6 +976,8 @@ class TgDriveASGI(StaticFiles):
                     return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""), private_scope=private_scope, private_activity=private_activity)}, {"Cache-Control": "no-store"}
                 if route == "/downloads/clear" and method == "POST":
                     return 200, await self.offline.clear(account.id, payload.get("status")), {"Cache-Control": "no-store"}
+                if route == "/downloads/stop-all" and method == "POST" and not private:
+                    return 200, await self.offline.stop_all(account.id), {"Cache-Control": "no-store"}
                 if route == "/downloads/batch" and method == "POST":
                     return 200, await self.offline.batch(account.id, payload.get("action"), payload.get("ids"), private_scope=private_scope, private_activity=private_activity), {"Cache-Control": "no-store"}
                 source = re.fullmatch(r"/downloads/(\d+)/source", route)
