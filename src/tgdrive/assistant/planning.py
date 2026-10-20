@@ -95,7 +95,9 @@ class Plan:
                     if not item.get("detail"):
                         raise ValueError("纯分析步骤完成时需要 detail 说明结论")
                 elif not evidence or evidence[-1]["status"] != "ok" or item.get("issue") or previous.get("status") == "failed":
-                    raise ValueError("执行步骤需要成功的工具结果才能完成；失败后应先重试或保留失败状态")
+                    detail = previous.get("detail") or "尚无关联的完整成功结果"
+                    raise ValueError(f"步骤 {step_id}（{item['content']}）需要成功的工具结果才能完成：{detail}；"
+                                     "请用 plan_step_id 关联此步骤重试，或保留失败／暂停状态")
             result.append(item)
         for step_id, item in old.items():
             if step_id not in seen and (item.get("action_pending") or any(self.calls.get(c) == step_id for c in self.running)):
@@ -183,8 +185,11 @@ class Plan:
         elif body.get("truncated") or result.get("truncated") or result.get("body_complete") is False:
             item["status"], item["detail"] = "paused", "返回内容被截断，请检查剩余内容或缩小查询范围"
             item["issue"] = True
-        elif result.get("stopped") or result.get("failed") or result.get("partial"):
-            item["status"], item["detail"] = "failed", "工具仅完成部分内容，请检查结果并调整后续步骤"
+        # 相册遍历正常结束也会有 stopped 原因；只接受工具明确报告完整，旧结果仍按保守规则判断。
+        elif result.get("failed") or result.get("partial") or result.get("complete") is False \
+                or (result.get("stopped") and result.get("complete") is not True):
+            item["status"] = "failed"
+            item["detail"] = str(result.get("stopped") or "工具仅完成部分内容，请检查结果并调整后续步骤")[:300]
             item["issue"] = True
         else:
             still_running = any(self.calls.get(c) == step_id for c in self.running)
@@ -250,7 +255,9 @@ class Plan:
             return
         before = self.snapshot()
         for item in self.data["items"]:
-            if (item["status"] in ("pending", "in_progress") or item.get("waiting_call")) and not item.get("action_pending"):
+            if reason == "missing_review" and item["status"] == "waiting_user" and not item.get("action_pending"):
+                item["status"], item["detail"] = "failed", "没有生成可确认的请求，本步骤尚未执行"
+            elif (item["status"] in ("pending", "in_progress") or item.get("waiting_call")) and not item.get("action_pending"):
                 item["status"] = "cancelled" if reason == "stopped" else "paused"
                 item.pop("waiting_call", None)
                 item["detail"] = ("本轮已停止，可继续尚未完成的步骤" if reason == "stopped" else

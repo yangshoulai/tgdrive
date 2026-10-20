@@ -116,6 +116,7 @@ class TgDriveASGI(StaticFiles):
             assistant.on_audit = audit_auto
             # 私密对话（docs/assistant-design.md §24）：授权由私密空间管理，撤销时清除对话。
             assistant.private_space = self.private_space
+            self.private_space.assistant_busy = assistant.private_busy
             self.private_space.listeners.append(assistant.on_private_forget)
 
     async def __call__(self, scope, receive, send):

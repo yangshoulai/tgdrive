@@ -15,6 +15,7 @@ import collections
 import hashlib
 import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -65,7 +66,7 @@ ACCESS_MODES = ("approval", "full")
 MAX_MENTIONS = 20
 # 聊天框附件：统一保存在普通文件区域的这个目录下（§22.5），每条消息最多 10 个。
 # 读取不可信内容的工具；内容只作为数据，不改变当前访问模式。
-TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "collect_gallery": "分析过网页",
+TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "inspect_page": "分析过网页结构", "collect_gallery": "分析过网页",
                "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应", "view_image": "查看过图片内容"}
 
 
@@ -128,6 +129,8 @@ class RunState:
     approval_waiters: int = 0
     approval_started: float | None = None
     approval_seconds: float = 0
+    action_revision: int = 0
+    seen_action_revision: int = 0
     # 本轮读取过的不可信外部内容；仅作为来源标记，不改变访问模式。
     tainted: str | None = None
     listeners: int = 0
@@ -163,6 +166,10 @@ def _run_clock(state) -> float:
     now = time.monotonic()
     started = getattr(state, "approval_started", None)
     return now - getattr(state, "approval_seconds", 0) - (now - started if started is not None else 0)
+
+
+_REVIEW_PROMISE = re.compile(r"(?:^|[。！？\n])\s*(?:我(?:会|将|先)?|接下来(?:我会)?|现在(?:我会)?)?\s*(?:等待|等候)(?:你|您)(?:的)?(?:确认|审批|批准)"
+                             r"|(?:你|您)(?:确认|批准|审批)(?:后|之后)[^。！？\n]{0,20}我(?:会|将)[^。！？\n]{0,12}继续")
 
 
 class AssistantDenied(PermissionError):
@@ -247,6 +254,26 @@ class AssistantService:
         """PrivateSpace 撤销授权（锁定、退出、改密、禁用、过期清理）时调用。"""
         if any(binding.access == access for binding in self.private_chats.values()):
             self.forget_private(access=access)
+
+    def private_busy(self, token: str, access: str) -> bool:
+        """只保持同一会话、同一授权下的真实执行；人工等待不延长闲置时间。"""
+        conversations = {cid for cid, binding in list(self.private_chats.items())
+                         if binding.token == token and binding.access == access}
+        if not conversations:
+            return False
+        if any(run.conversation_id in conversations and run.token == token and run.access == access
+               and run.status in ("queued", "running") and run.finished_at is None and not run.approval_waiters
+               and run.task is not None and not run.task.done() for run in list(self.runs.values())):
+            return True
+        return any(not task.done() and self.memory.action_rows.get(aid, {}).get("conversation_id") in conversations
+                   for aid, task in list(self._execution_tasks.items()))
+
+    def _finish_private_activity(self, token: str, access: str | None) -> None:
+        if access is not None:
+            try:
+                self._grant(token, access)
+            except (AuthenticationError, NotFoundError, NotReadyError, PermissionError):
+                pass  # 已撤销的授权不能因任务结束而恢复。
 
     def _grant(self, token: str, access: str) -> None:
         """复核私密授权；失效时清除这个会话的私密对话并抛出 PrivateLocked。"""
@@ -1170,6 +1197,40 @@ class AssistantService:
         self._execution_tasks[action_id] = task
         return task
 
+    async def _continue_action(self, row, token: str, access: str | None) -> str | None:
+        """用户确认的真实结果落地后继续最新任务；同一事件循环内检查并创建，避免并行结果重复续跑。"""
+        cid, origin = row["conversation_id"], self.runs.get(row["run_id"])
+        if origin and origin.finished_at is None and origin.task is not None:
+            try:
+                await asyncio.shield(origin.task)
+            except asyncio.CancelledError:
+                return None
+        try:
+            latest = self.trace.latest_run(cid)
+            unseen = origin and origin.action_revision > origin.seen_action_revision
+            if latest is None or latest["id"] != row["run_id"] or latest["status"] != "completed" \
+                    or not (latest["stop_reason"] == "waiting_user" or unseen and latest["stop_reason"] in ("completed", "plan_incomplete")) \
+                    or self.trace.has_open_actions(cid) or self.trace.continuation_blocked(cid, row["run_id"]):
+                return None
+            _, account = self._session(token)
+            self._check_private(token, cid, access)
+            self._require_available(account.id, private=access is not None)
+            conversation = self.trace.conversation(account.id, cid)
+            self._admit(account.id, conversation)
+            model_id = self._choose_model(None, conversation["model_id"], private=access is not None)
+            run_id = self.trace.start_run(cid, model_id, prompts.PROMPT_VERSION)
+            state = self._start(run_id, cid, account, token, model_id, origin.view if origin else "private" if access else "files",
+                                origin.location if origin else conversation["scope_root"], access=access)
+            return state.id
+        except (ValueError, PermissionError, AuthenticationError, NotFoundError, NotReadyError) as exc:
+            # 不能静默承诺稍后继续；额度或权限不允许时留下可见原因。
+            try:
+                self._check_private(token, cid, access)
+                self.trace.append(cid, None, "event", {"type": "continuation_paused", "text": "操作结果已保留，助手未继续：" + str(exc)[:200]})
+            except (PermissionError, AuthenticationError, NotFoundError, NotReadyError):
+                pass
+            return None
+
     def _action_authorized(self, token: str, row, access: str | None = None) -> bool:
         try:
             _, account = self._session(token)
@@ -1209,6 +1270,11 @@ class AssistantService:
             if decision != "自动执行":
                 event["model_text"] = prompts.action_event(action_id, KINDS.get(row["kind"], row["kind"]), row["count"], decision, result)
             record(status, result, undo, event)
+            origin = self.runs.get(row["run_id"])
+            if decision == "已确认" and origin is not None:
+                origin.action_revision += 1
+                if origin.finished_at is None:
+                    await origin.emit({"type": "resync"})
         except Exception:
             log.error("assistant action bookkeeping failed id=%s", action_id)
         if decision == "自动执行" and self.on_audit is not None:
@@ -1216,10 +1282,13 @@ class AssistantService:
                 self.on_audit("assistant.action.auto", account.id, {"kind": row["kind"], "status": status, "count": row["count"]})
             except Exception:
                 log.error("assistant audit failed id=%s", action_id)
+        self._finish_private_activity(token, access)
         self._execution_tasks.pop(action_id, None)
         # 进度在内存里多保留一会儿，便于界面读取最终计数。
         await asyncio.sleep(0)
         self.executions.pop(action_id, None)
+        if decision == "已确认" and status != "cancelled":
+            await self._continue_action(row, token, access)
         return {"status": status, **result}
 
     def cancel_action(self, token: str, csrf: str, action_id: str, access: str | None = None) -> dict[str, object]:
@@ -1672,6 +1741,8 @@ class AssistantService:
                 raise ToolError("工具参数必须是对象")
             arguments = parsed
             step_id = arguments.pop("plan_step_id", None)
+            if call.name == "http_request":
+                arguments.pop("max_bytes", None)  # 兼容旧上下文；新工具定义和留痕不再携带此参数。
             if plan is not None:
                 plan.begin(call.id, call.name, step_id)
                 await self._publish_plan(state)
@@ -1916,6 +1987,7 @@ class AssistantService:
                 candidate = display_plan(candidate, self.trace.actions(state.conversation_id), active=False)
             state.plan = Plan(state.id, candidate)
             plan_checked = False
+            review_checked = False
             forced_final: str | None = None
             compacted = overflowed = False
             while True:
@@ -1959,7 +2031,7 @@ class AssistantService:
                                                access_mode="full" if conversation["access_mode"] == "full"
                                                and self._full_access(state.user_id) else "approval",
                                                private=state.private, can_move_private="propose_move_to_private" in tools,
-                                               can_plan="update_plan" in tools)
+                                               can_plan="update_plan" in tools, can_inspect="inspect_page" in tools)
                 pending = self.trace.pending_actions(state.conversation_id)
                 remaining = None
                 if state.private and self.private_space is not None:
@@ -1979,6 +2051,7 @@ class AssistantService:
                 fixed = (len(system) + len(json.dumps([vars(item) for item in definitions], ensure_ascii=False))) // 2 \
                     + self._estimate([context_block])
                 window = model["context_window"] or 32000
+                state.seen_action_revision = state.action_revision
                 history, used, estimate, did = await self._context(state, model, endpoint, can_see, fixed, allow_compact=not compacted)
                 compacted = compacted or did
                 state.context = {"used": used, "window": window}
@@ -1997,6 +2070,7 @@ class AssistantService:
                         raise
                     # 渠道报上下文超长：强制摘要并把本轮工具结果瘦身到窗口一半，重试一次（§23）。
                     overflowed = True
+                    state.seen_action_revision = state.action_revision
                     history, used, estimate, did = await self._context(state, model, endpoint, can_see, fixed,
                                                                        allow_compact=True, force=True)
                     compacted = compacted or did
@@ -2013,12 +2087,24 @@ class AssistantService:
                 steps += 1
                 self._validate(state)
                 calls = reply.tool_calls if not forced_final else []
-                check_plan = not calls and not forced_final and state.plan.needs_check and not plan_checked
+                waiting_claim = bool(_REVIEW_PROMISE.search(reply.text))
+                executing_actions = not calls and self.trace.has_open_actions(state.conversation_id) \
+                    and not self.trace.pending_actions(state.conversation_id)
+                missing_review = not calls and not forced_final and not self.trace.has_open_actions(state.conversation_id) \
+                    and (waiting_claim or bool(state.plan.data and any(
+                        item["status"] == "waiting_user" for item in state.plan.data["items"])))
+                repair_review = missing_review and not review_checked
+                check_plan = not calls and not forced_final and not missing_review and state.plan.needs_check and not plan_checked
                 assistant = {"text": self.guard.redact(reply.text), "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
                              "model_id": model["id"], "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens,
                              "prompt_estimate": estimate}
-                if check_plan:
+                if check_plan or repair_review:
                     assistant["text"] = ""
+                elif missing_review:
+                    assistant["text"] = "助手没有生成可确认的请求，尚需确认的这一步未执行。请补充要求后重试。"
+                    status, stop_reason = "failed", "missing_review"
+                elif executing_actions and waiting_claim:
+                    assistant["text"] = "操作已确认，正在执行，完成后会继续处理原任务。"
                 if reply.reasoning.strip():
                     started_at = state.thinking.get("start")
                     ended_at = state.thinking.get("end") or state.thinking.get("last")
@@ -2027,6 +2113,19 @@ class AssistantService:
                 seq = self.trace.append(state.conversation_id, state.id, "assistant", assistant)
                 await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "assistant", **assistant}})
                 if not calls:
+                    if not forced_final and state.action_revision > state.seen_action_revision:
+                        if stop_reason == "missing_review":
+                            status, stop_reason = "completed", "completed"
+                        continue  # 模型生成回复期间操作才完成，先消费真实结果，不能停在旧的等待回复上。
+                    if repair_review:
+                        review_checked = True
+                        message = {"type": "review_check", "text": "正在核对需要你确认的请求",
+                                   "model_text": "[系统事件] 当前没有真实的待确认请求。不能只在文字中要求用户审批或承诺审批后继续。"
+                                   "需要修改时调用对应 propose_* 工具，提问时调用 ask_user；完全访问下常规操作直接通过工具执行。"
+                                   "若工作已完成请汇报真实结果，无法执行则说明原因，不要虚构确认卡片。"}
+                        seq = self.trace.append(state.conversation_id, state.id, "event", message)
+                        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
+                        continue
                     if check_plan:
                         plan_checked = True
                         message = {"type": "plan_check", "text": "正在核验计划中尚未完成的步骤",
@@ -2035,8 +2134,11 @@ class AssistantService:
                         seq = self.trace.append(state.conversation_id, state.id, "event", message)
                         await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
                         continue
-                    if state.plan.remaining:
-                        waiting = any(item["status"] == "waiting_user" or item.get("action_pending") for item in state.plan.data["items"])
+                    waiting_actions = self.trace.has_open_actions(state.conversation_id)
+                    if waiting_actions and not forced_final:
+                        stop_reason = "waiting_user"
+                    if state.plan.remaining and not missing_review:
+                        waiting = waiting_actions or any(item["status"] == "waiting_user" or item.get("action_pending") for item in state.plan.data["items"])
                         if not forced_final:
                             stop_reason = "waiting_user" if waiting else "plan_incomplete"
                         message = {"type": "plan_incomplete", "text": f"计划还有 {state.plan.remaining} 个步骤未完成，"
@@ -2140,6 +2242,7 @@ class AssistantService:
             status, stop_reason = "failed", "internal"
             await self._fail(state, "助手出了点问题，没有完成这次回复。请稍后重试。", retry=True)
         finally:
+            self._finish_private_activity(state.token, state.access)
             try:
                 if state.plan.has_actions:
                     state.plan.reconcile(self.trace.actions(state.conversation_id))

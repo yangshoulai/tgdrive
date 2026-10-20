@@ -194,7 +194,7 @@ def _charset(content_type: str, head: bytes) -> str:
     return "utf-8"
 
 
-async def fetch_page(http, url: str, *, referer: str | None = None, same_origin: str | None = None) -> dict:
+async def fetch_page(http, url: str, *, referer: str | None = None, same_origin: str | None = None, structure: bool = False) -> dict:
     """经 SafeHttpClient 抓取一个 HTML 页面并解析为规范页。"""
     request = DownloadRequest(checked_url(url), headers=[("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"),
                                                         ("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8"),
@@ -218,7 +218,12 @@ async def fetch_page(http, url: str, *, referer: str | None = None, same_origin:
             pieces.append(piece)
         data = b"".join(pieces)
         final = response.url
-    return parse_html(data.decode(_charset(content_type, data), "replace"), final)
+    html = data.decode(_charset(content_type, data), "replace")
+    page = parse_html(html, final)
+    if structure:
+        from .structure import parse_structure
+        page["structure"] = parse_structure(html, final)
+    return page
 
 
 # ---------- 摘要 ----------

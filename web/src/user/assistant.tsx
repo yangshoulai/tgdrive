@@ -193,6 +193,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     return () => { viewport.removeEventListener("resize", sync); node.style.removeProperty("--assistant-viewport"); };
   }, [open]);
   const unsubscribe = useRef<(() => void) | null>(null);
+  const followedRun = useRef<string | null>(null);
   const selection = useRef(0);
   const currentId = detail?.conversation.id ?? null;
   const locationKey = location.view === "files" || privateMode && location.view === "private" ? location.prefix : privateMode ? api.PRIVATE_PREFIX : "";
@@ -335,11 +336,12 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
 
   const follow = useCallback((id: string) => {
     unsubscribe.current?.();
+    followedRun.current = id;
     const version = selection.current;
     setReconnecting(false);
     setRunId(id); setLive({ ...EMPTY_LIVE });
     unsubscribe.current = ai.subscribeRun(id, event => {
-      if (version !== selection.current) return;
+      if (version !== selection.current || followedRun.current !== id) return;
       switch (event.type) {
         case "queued": setLive(value => ({ ...(value ?? EMPTY_LIVE), phase: "queued", queue: Number(event.position) })); break;
         case "run_started": case "thinking": case "stream_reset":
@@ -385,9 +387,17 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         case "context": setDetail(current => current && { ...current, context: { used: Number(event.used) || 0, window: Number(event.window) || 32000 } }); break;
         case "run_finished": case "stream_failed":
           cancelBrowserCalls();
+          followedRun.current = null;
           setRunId(null); setLive(null); unsubscribe.current = null;
           onConfigChanged();
-          setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value)).catch(() => undefined); return current; });
+          setDetail(current => {
+            if (current) void ai.conversation(current.conversation.id).then(fresh => {
+              if (version !== selection.current) return;
+              setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value);
+              if (fresh.active_run && fresh.active_run !== id && followedRun.current !== fresh.active_run) follow(fresh.active_run);
+            }).catch(() => undefined);
+            return current && { ...current, active_run: null };
+          });
           break;
       }
     }, value => { if (version === selection.current) setReconnecting(value); });
@@ -399,6 +409,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     for (const callId of httpResolvers.current.keys()) decideHttp(callId, "cancelled");
     setHttpApprovals([]);
     unsubscribe.current?.(); unsubscribe.current = null;
+    followedRun.current = null;
     setRunId(null); setLive(null); setHistory(false); setReconnecting(false); setLoading(true); setScopeTarget(null); mention.reset();
     try {
       const value = await ai.conversation(id);
@@ -440,6 +451,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     setHttpApprovals([]);
     setLoading(false); setReconnecting(false);
     unsubscribe.current?.(); unsubscribe.current = null;
+    followedRun.current = null;
     setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeTarget(null); mention.reset(); setDraft(""); setPendingMode("approval"); attachments.clear(true);
     window.setTimeout(() => input.current?.focus(), 30);
   }
@@ -515,6 +527,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
           if (version === selection.current) follow(result.run_id);
         }
       }
+      // 操作结束可能刚好自动创建了后续运行；拒绝旧请求后再核对，补充要求不能与它同时执行。
+      if (request.kind === "action") active = (await ai.conversation(conversation)).active_run ?? active;
       if (active) await ai.stopRun(active);
       if (request.kind === "http") decideHttp(request.id, "rejected");
       if (version !== selection.current) return;
@@ -582,12 +596,47 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       const fresh = await ai.conversation(detail.conversation.id);
       setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value);
       window.requestAnimationFrame(() => scrollToEnd(true));
-    } catch (reason) { toast.error(api.errorMessage(reason, "切换模型失败，请稍后重试")); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "切换访问模式失败，请稍后重试")); }
   }
 
   const reloadDetail = useCallback(() => {
-    setDetail(current => { if (current) void ai.conversation(current.conversation.id).then(fresh => setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value)).catch(() => undefined); return current; });
-  }, []);
+    const version = selection.current;
+    setDetail(current => {
+      if (current) void ai.conversation(current.conversation.id).then(fresh => {
+        if (version !== selection.current) return;
+        setDetail(value => value?.conversation.id === fresh.conversation.id ? refreshDetail(value, fresh) : value);
+        if (fresh.active_run && followedRun.current !== fresh.active_run) follow(fresh.active_run);
+      }).catch(() => undefined);
+      return current;
+    });
+  }, [follow]);
+
+  // 操作独立于模型运行，确认后需要同步真实终态并接上服务端自动创建的后续运行。
+  // 同时重试缺失的操作详情，避免一次网络失败让确认请求一直不可见。
+  const syncingActions = Boolean(detail && (detail.actions.some(action => ["pending", "confirmed", "running", "undoing"].includes(action.status))
+    || detail.messages.some(message => {
+      const event = message.event;
+      return (event?.type === "action" || event?.type === "scope_request") && !detail.actions.some(action => action.id === event.action_id);
+    })));
+  useEffect(() => {
+    if (!open || !currentId || !syncingActions) return;
+    let disposed = false, pending = false;
+    const version = selection.current;
+    const sync = async () => {
+      if (disposed || pending || document.hidden) return;
+      pending = true;
+      try {
+        const fresh = await ai.conversation(currentId);
+        if (disposed || version !== selection.current) return;
+        setDetail(value => value?.conversation.id === currentId ? refreshDetail(value, fresh) : value);
+        if (fresh.active_run && followedRun.current !== fresh.active_run) follow(fresh.active_run);
+      } catch { /* 临时网络错误由下一轮同步重试，不丢弃已有请求。 */ }
+      finally { pending = false; }
+    };
+    const timer = window.setInterval(() => void sync(), 2000);
+    void sync();
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [open, currentId, syncingActions, follow]);
 
   // 键盘：Esc 运行中先停止，空闲时关闭。全页模式只停止运行，不关闭。
   function escape() { if (runId) void stop(); else if (!page) onClose(); }

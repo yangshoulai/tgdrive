@@ -54,6 +54,8 @@ class PrivateSpace:
         self.passkeys = Passkeys(user, settings, self)
         # 授权被撤销时的回调（文件助手据此清除私密对话，docs/assistant-design.md §24.2）。
         self.listeners: list = []
+        # 由助手报告真实执行状态，不接受浏览器自行声明后台任务仍在工作。
+        self.assistant_busy = None
 
     def _account(self, token, csrf=None, mutation=False):
         session = self.user._session(token, csrf=csrf, mutation=mutation)
@@ -111,7 +113,7 @@ class PrivateSpace:
             raise ValueError("登录凭据已变化，请重新解锁")
         now = time.monotonic()
         for key, grant in list(self.grants.items()):
-            if grant.expires_at <= now:
+            if grant.expires_at <= now and not (self.assistant_busy and self.assistant_busy(grant.session, key)):
                 self._forget(key)
         access = self.session_grants.get(token)
         previous = self.grants.get(access)
@@ -161,19 +163,22 @@ class PrivateSpace:
         grant = self.grants.get(access)
         if grant is None or grant.session != token or grant.user_id != account.id:
             raise PrivateLocked("请重新解锁私密空间")
-        if grant.expires_at <= time.monotonic():
-            self._forget(access)
-            raise PrivateLocked("私密空间已因闲置自动锁定")
         row = self._user_row(account.id)
         if row is None or row["password_hash"] != grant.password_hash:
             self._forget(access)
             raise PrivateLocked("登录密码已修改，请重新解锁私密空间")
+        now = time.monotonic()
+        if self.assistant_busy and self.assistant_busy(token, access):
+            grant.expires_at = now + grant.idle_seconds
+        elif grant.expires_at <= now:
+            self._forget(access)
+            raise PrivateLocked("私密空间已因闲置自动锁定")
         return grant
 
     def activity(self, token, csrf, access, *, active=False, playing=False):
         self._account(token, csrf, True)
         grant = self.require(token, access)
-        # 普通读取、列表轮询和校验请求不续期；只有交互或有进展的播放才续期。
+        # 普通读取不续期；助手执行中的续期由 require 按服务端真实状态判断。
         if active or playing:
             grant.expires_at = time.monotonic() + grant.idle_seconds
         return {"remaining_seconds": max(0, grant.expires_at - time.monotonic()), "idle_seconds": grant.idle_seconds}

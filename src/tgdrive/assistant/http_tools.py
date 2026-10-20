@@ -16,12 +16,12 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from ..offline.http import DownloadError, origin
 from ..offline.request import DownloadRequest, checked_url, filename, url_filename
+from .config import LIMITS
 from .guard import HIDDEN, redact_content
 from .tools import ToolContext, ToolError, ToolOutput, _int, _str, tool
 
 METHODS = ("GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE")
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
-DEFAULT_RESPONSE_BYTES = 2 * 1024 * 1024
 DEFAULT_REQUEST_BYTES = 4 * 1024 * 1024
 MAX_BODY_BYTES = 32 * 1024 * 1024
 _SENSITIVE = re.compile(r"(?i)^(?:authorization|proxy-authorization|cookie|set-cookie|password|passwd|secret|token|"
@@ -32,6 +32,53 @@ _REFERENCE = re.compile(r"\{\{http_secret_[0-9]+\}\}")
 _URL = re.compile(r"https?://[^\s<>\"']+")
 _FORBIDDEN_HEADERS = {"host", "connection", "content-length", "transfer-encoding", "te", "trailer", "upgrade", "expect", "keep-alive", "http2-settings"}
 _PUBLIC_HEADERS = {"accept", "accept-language", "user-agent", "content-type", "referer", "origin", "range", "if-range", "if-none-match", "if-modified-since", "accept-encoding"}
+
+
+def _text_page(raw: bytes, mime: str, offset: int, prefix: bytes, complete: bool) -> tuple[str, int, bool]:
+    encoding = Message()
+    encoding["content-type"] = mime
+    charset = encoding.get_content_charset() or "utf-8-sig"
+    try:
+        normalized = codecs.lookup(charset).name
+        if offset and normalized in ("utf-16", "utf-32"):
+            unit = "16" if normalized == "utf-16" else "32"
+            charset = f"utf-{unit}-" + ("le" if prefix.startswith((b"\xff\xfe", b"\xff\xfe\x00\x00")) else "be")
+        decoder = codecs.getincrementaldecoder(charset)(errors="replace")
+    except LookupError:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    text = decoder.decode(raw, final=complete)
+    consumed = len(raw) - (len(decoder.getstate()[0]) if not complete else 0)
+    text, hidden = _redact_text(text)
+    return text, consumed, hidden
+
+
+def _fit_response(payload: dict, raw: bytes, budget: int, prefix: bytes) -> dict:
+    """在 HTTP 层按展示预算分段，保证通用结果裁剪不会跳过尚未返回的源字节。"""
+    def size(value):
+        return len(json.dumps(value, ensure_ascii=False).encode())
+    if payload.get("format") == "json" and size(payload) > budget:
+        payload.pop("data", None)
+        payload["format"] = "text"
+    if payload.get("format") != "text":
+        return payload
+    complete, offset = payload["body_complete"], payload["offset"]
+    while True:
+        text, consumed, hidden = _text_page(raw, payload["content_type"], offset, prefix, complete)
+        if raw and not consumed:
+            raise ToolError("工具结果预算太小，无法返回完整字符，请提高统一工具结果预算")
+        payload.update(text=text, redacted=hidden, read_bytes=consumed, body_complete=complete,
+                       next_offset=offset + consumed if not complete else None,
+                       note=None if complete else "响应已按工具结果预算分段；无正文的 GET 可用 offset=next_offset 继续读取，其他请求请使用接口自身的分页，避免重复发送")
+        if size(payload) <= budget:
+            return payload
+        # 极长响应头不能挤占全部正文预算；仅裁减展示副本，不影响网络请求。
+        if len(raw) <= 4:
+            if payload["headers"]:
+                payload["headers"].pop(next(reversed(payload["headers"])))
+                payload["headers_truncated"] = True
+                continue
+            raise ToolError("响应元信息超过统一工具结果预算，请提高工具结果预算")
+        raw, complete = raw[:max(4, len(raw) // 2)], False
 
 
 class HttpGuard:
@@ -286,10 +333,8 @@ def _review(url, method, headers, data, *, binary=False):
        "follow_redirects": {"type": "boolean", "description": "默认 true；仅不需要确认的基础查询可自动跳转，需确认的请求不重发"},
        "response_format": {"type": "string", "enum": ["auto", "json", "text", "binary"]},
        "json_path": {"type": "array", "items": {"type": ["string", "integer"]}},
-       "max_bytes": {"type": "integer", "description": "响应读取字节数，默认 2 MiB，受管理员上限约束"},
-       "offset": {"type": "integer", "description": "文本响应的起始字节，默认 0；用 next_offset 分段继续读取，仅无正文的 GET 可用"}}, ("url",),
-      params={"max_response_bytes": (DEFAULT_RESPONSE_BYTES, 1024, MAX_BODY_BYTES, "最大响应字节数"),
-              "max_request_bytes": (DEFAULT_REQUEST_BYTES, 1024, MAX_BODY_BYTES, "最大请求体字节数"),
+       "offset": {"type": "integer", "description": "文本／JSON 响应的起始字节，默认 0；响应按统一工具结果预算分段，用 next_offset 继续读取，仅无正文的 GET 可用"}}, ("url",),
+      params={"max_request_bytes": (DEFAULT_REQUEST_BYTES, 1024, MAX_BODY_BYTES, "最大请求体字节数"),
               "requests_per_run": (100, 1, 1000, "每轮最多 HTTP 请求（含跳转）"),
               "requests_per_minute": (120, 1, 1000, "每用户每分钟 HTTP 请求（跨对话）"),
               "allow_advanced_requests": (1, 0, 1, "允许非安全方法、正文和认证（0 关闭／1 开启）")},
@@ -304,10 +349,9 @@ async def http_request(ctx: ToolContext, args: dict) -> ToolOutput:
     path = args.get("json_path", [])
     if not isinstance(path, list) or len(path) > 20 or any(isinstance(key, bool) or not isinstance(key, (str, int)) for key in path):
         raise ToolError("json_path 必须是最多 20 项的字段名或数组索引")
-    limit = _int(args, "max_bytes", int(ctx.params.get("max_response_bytes", DEFAULT_RESPONSE_BYTES)), 1,
-                 int(ctx.params.get("max_response_bytes", DEFAULT_RESPONSE_BYTES)))
+    limit = max(2048, int(ctx.limits.get("tool_result_bytes", LIMITS["tool_result_bytes"][0])))
     offset = _int(args, "offset", 0, 0, 2**62)
-    if offset and (method != "GET" or body is not None or format in ("json", "binary") or path):
+    if offset and (method != "GET" or body is not None or format == "binary" or path):
         raise ToolError("offset 只用于无正文的 GET 文本响应；读取 JSON 字段请使用 json_path 或改用 text 分段读取")
     # 确认尝试先消耗本轮额度；分钟额度在真正发送时扣除，不能靠等待确认跨窗口攒请求。
     guard = ctx.http_guard
@@ -333,7 +377,7 @@ async def http_request(ctx: ToolContext, args: dict) -> ToolOutput:
     advanced = method not in SAFE_METHODS or body is not None or credential
     if advanced and not ctx.params.get("allow_advanced_requests", 1):
         raise ToolError("管理员已关闭带正文、认证或非安全方法的 HTTP 请求")
-    auto = method != "DELETE" and ctx.auto_approve is not None and ctx.auto_approve()
+    auto = advanced and method != "DELETE" and ctx.auto_approve is not None and ctx.auto_approve()
     needs_confirmation = method == "DELETE" or advanced and not auto
     if needs_confirmation:
         if ctx.client is None:
@@ -430,27 +474,7 @@ async def http_request(ctx: ToolContext, args: dict) -> ToolOutput:
                                 raise
                             raise ToolError("接口未返回有效 JSON，可改用 text 查看有限文本") from exc
                     elif textual or is_json or format != "binary" and raw.lstrip()[:32].lower().startswith((b"<!doctype html", b"<html")):
-                        encoding = Message()
-                        encoding["content-type"] = mime
-                        charset = encoding.get_content_charset() or "utf-8-sig"
-                        try:
-                            normalized = codecs.lookup(charset).name
-                            if offset and normalized in ("utf-16", "utf-32"):
-                                unit = "16" if normalized == "utf-16" else "32"
-                                charset = f"utf-{unit}-" + ("le" if prefix.startswith((b"\xff\xfe", b"\xff\xfe\x00\x00")) else "be")
-                            decoder = codecs.getincrementaldecoder(charset)(errors="replace")
-                        except LookupError:
-                            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                        text = decoder.decode(raw, final=complete)
-                        if not complete:
-                            pending = decoder.getstate()[0]
-                            consumed = len(raw) - len(pending)
-                            if not consumed:
-                                raise ToolError("max_bytes 太小，无法读取一个完整字符，请增大单次读取字节数")
-                            payload["next_offset"] = offset + consumed
-                        text, hidden = _redact_text(text)
-                        payload.update(format="text", text=text, redacted=hidden,
-                                       note=None if complete else "响应超过本次读取大小，可用 offset=next_offset 继续读取，或调高 max_bytes／管理员上限")
+                        payload["format"] = "text"
                     else:
                         sample = raw[:512]
                         text = sample.decode("utf-8", errors="replace")
@@ -463,6 +487,7 @@ async def http_request(ctx: ToolContext, args: dict) -> ToolOutput:
                         collection = ctx.trace.create_collection(ctx.conversation_id, ctx.user_id, "collection", source=None,
                             rule={"type": "http"}, urls=[{"url": url, "name": payload["name"]}], count=1)
                         payload["download_collection_id"] = collection
+                    payload = _fit_response(payload, raw, limit, prefix)
                     outcome = "ok"
                     return ToolOutput(payload, f"HTTP {status} · {host} · {payload.get('format', 'headers')}")
     except DownloadError as exc:

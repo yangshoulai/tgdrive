@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from tgdrive.assistant.guard import HIDDEN
 from tgdrive.assistant.http_tools import HttpGuard, http_request
-from tgdrive.assistant.tools import ToolContext, ToolError
+from tgdrive.assistant.tools import TOOLS, ToolContext, ToolError
 from tgdrive.assistant.service import AssistantService
 from tgdrive.offline.http import DownloadError, HttpResponse, SafeHttpClient, public_ip
 from tgdrive.offline.request import DownloadRequest
@@ -182,11 +182,14 @@ class HttpToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_bounded_bodies_and_responses(self):
         ctx = context(HttpFixture(b"x" * 5000, "text/plain"))
         ctx.params.update(max_request_bytes=10, max_response_bytes=1024)
+        ctx.limits["tool_result_bytes"] = 2048
         with self.assertRaisesRegex(ToolError, "请求体超过"):
             await http_request(ctx, {"url": "https://public.example/", "body": "x" * 11})
         output = (await http_request(ctx, {"url": "https://public.example/"})).result
-        self.assertEqual(len(output["text"]), 1024)
+        self.assertLessEqual(len(json.dumps(output, ensure_ascii=False).encode()), 2048)
         self.assertFalse(output["body_complete"])
+        self.assertNotIn("max_bytes", TOOLS["http_request"].parameters["properties"])
+        self.assertNotIn("max_response_bytes", TOOLS["http_request"].params)
         binary = (await http_request(context(HttpFixture(b"\0" * 5000, "application/octet-stream")), {"url": "https://public.example/", "response_format": "binary"})).result
         self.assertEqual(binary["sample_bytes"], 512)
 
@@ -200,6 +203,7 @@ class HttpToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.offline.http.requests[-1][1]["request_body"]), 300000)
         pieces = []
         offset = 0
+        ctx.limits["tool_result_bytes"] = 120000
         while True:
             output = (await http_request(ctx, {"url": "https://public.example/api", "response_format": "text", "offset": offset, "max_bytes": 120000})).result
             pieces.append(output["text"].encode())
@@ -224,18 +228,36 @@ class HttpToolTests(unittest.IsolatedAsyncioTestCase):
             ctx.client.assert_awaited_once()
 
     async def test_text_continuation_preserves_multibyte_characters(self):
-        original = "中文🙂继续" * 4
+        original = "中文🙂继续" * 300
         for charset in ("utf-8", "utf-16", "utf-32"):
             ctx = context(HttpFixture(original.encode(charset), "text/plain; charset=" + charset))
+            ctx.limits["tool_result_bytes"] = 2048
             offset, text = 0, ""
             for _ in range(40):
                 output = (await http_request(ctx, {"url": "https://public.example/", "response_format": "text", "max_bytes": 7, "offset": offset})).result
                 text += output["text"]
+                self.assertLessEqual(len(json.dumps(output, ensure_ascii=False).encode()), 2048)
                 if output["next_offset"] is None:
                     break
                 self.assertGreater(output["next_offset"], offset)
                 offset = output["next_offset"]
             self.assertEqual(text, original, charset)
+
+    async def test_response_budget_keeps_escaped_text_and_ignores_old_read_limits(self):
+        original = "\x00\n\\\"" * 2000
+        ctx = context(HttpFixture(original.encode(), "text/plain"))
+        ctx.params["max_response_bytes"] = 10
+        ctx.limits["tool_result_bytes"] = 2048
+        offset, pieces = 0, []
+        while True:
+            payload = (await http_request(ctx, {"url": "https://public.example/", "offset": offset, "max_bytes": 1})).result
+            self.assertLessEqual(len(json.dumps(payload, ensure_ascii=False).encode()), 2048)
+            pieces.append(payload["text"])
+            if payload["next_offset"] is None:
+                break
+            self.assertGreater(payload["next_offset"], offset)
+            offset = payload["next_offset"]
+        self.assertEqual("".join(pieces), original)
 
     async def test_full_access_revocation_blocks_automatic_send(self):
         ctx = context(auto_approve=Mock(side_effect=[True, False]))

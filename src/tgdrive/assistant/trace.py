@@ -18,7 +18,7 @@ from ..crypto import derive_subkey, open_sealed, seal
 from ..errors import NotFoundError
 from ..keystore import KeyStore
 from ..metadata import Metadata
-from .config import ACTION_TTL
+from .config import ACTION_TTL, MAX_PENDING_ACTIONS
 from .providers import scrub
 
 CALL_FIELDS = ("kind", "run_id", "conversation_id", "user_id", "actor", "channel_id", "model_id", "tool_name", "action_id",
@@ -204,6 +204,11 @@ class TraceStore:
                        (run_id, conversation_id, model_id, prompt_version, "running", time.time()))
         return run_id
 
+    def latest_run(self, conversation_id: str) -> dict | None:
+        row = self.metadata.db.execute("SELECT * FROM assistant_runs WHERE conversation_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+                                       (conversation_id,)).fetchone()
+        return dict(row) if row is not None else None
+
     def finish_run(self, run_id: str, *, status: str, stop_reason: str | None, steps: int, tool_calls: int,
                    input_tokens: int, output_tokens: int) -> None:
         with self.metadata.transaction() as db:
@@ -225,14 +230,14 @@ class TraceStore:
     # ---------- 待确认操作 ----------
 
     def create_action(self, conversation_id: str, run_id: str, user_id: int, session_hash: str, kind: str, tool_name: str,
-                      payload: dict, *, count: int, ttl: float = ACTION_TTL, keep_pending: int = 5) -> str:
+                      payload: dict, *, count: int, ttl: float = ACTION_TTL, keep_pending: int = MAX_PENDING_ACTIONS) -> str:
         action_id = "a_" + secrets.token_urlsafe(12)
         now = time.time()
         with self.metadata.transaction() as db:
             pending = db.execute("SELECT id FROM assistant_actions WHERE conversation_id=? AND status='pending' "
-                                 "ORDER BY created_at DESC LIMIT -1 OFFSET ?", (conversation_id, keep_pending - 1)).fetchall()
-            for row in pending:
-                db.execute("UPDATE assistant_actions SET status='expired', decided_at=? WHERE id=?", (now, row["id"]))
+                                 "AND expires_at>? LIMIT ?", (conversation_id, now, keep_pending)).fetchall()
+            if len(pending) >= keep_pending:
+                raise ValueError(f"待确认操作最多 {keep_pending} 个，请先处理已有请求；原有请求已保留")
             db.execute("INSERT INTO assistant_actions(id,conversation_id,run_id,user_id,session_hash,kind,tool_name,status,count,"
                        "payload,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                        (action_id, conversation_id, run_id, user_id, session_hash, kind, tool_name, "pending", count,
@@ -342,6 +347,16 @@ class TraceStore:
         rows = self.metadata.db.execute("SELECT id, kind, count FROM assistant_actions WHERE conversation_id=? AND status='pending' "
                                         "AND expires_at>? ORDER BY created_at", (conversation_id, time.time())).fetchall()
         return [dict(row) for row in rows]
+
+    def has_open_actions(self, conversation_id: str) -> bool:
+        return self.metadata.db.execute("SELECT 1 FROM assistant_actions WHERE conversation_id=? AND "
+                                        "(status IN ('confirmed','running','undoing') OR (status='pending' AND expires_at>?)) LIMIT 1",
+                                        (conversation_id, time.time())).fetchone() is not None
+
+    def continuation_blocked(self, conversation_id: str, run_id: str) -> bool:
+        return self.metadata.db.execute("SELECT 1 FROM assistant_actions WHERE conversation_id=? AND run_id=? AND "
+                                        "(status IN ('rejected','cancelled','expired','interrupted') OR (status='pending' AND expires_at<=?)) LIMIT 1",
+                                        (conversation_id, run_id, time.time())).fetchone() is not None
 
     def expire_actions(self, conversation_id: str | None = None, *, user_id: int | None = None, tool_names: list[str] | None = None) -> int:
         where, args = ["status='pending'"], [time.time()]

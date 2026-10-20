@@ -16,6 +16,8 @@ ACTION_TTL = 24 * 60 * 60
 HTTP_APPROVAL_TIMEOUT = 30 * 60
 
 # 名称: (默认值, 最小值, 硬上限, 说明)
+MAX_PENDING_ACTIONS = 128
+
 LIMITS: dict[str, tuple[int, int, int, str]] = {
     "max_steps": (40, 1, 2000, "每轮模型调用次数"),
     "max_tool_calls": (150, 1, 20_000, "每轮工具调用总数"),

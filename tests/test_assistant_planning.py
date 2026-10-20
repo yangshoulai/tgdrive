@@ -10,7 +10,9 @@ from tgdrive.assistant.planning import Plan, display_plan
 from tgdrive.assistant.private_chat import MemoryTrace, RoutedTrace
 from tgdrive.assistant.providers import Reply, ToolCall
 from tgdrive.assistant.service import AssistantService, RunState
-from tgdrive.assistant.tools import TOOLS, ToolOutput, ToolSpec
+from tgdrive.assistant.tools import TOOLS, ToolContext, ToolOutput, ToolSpec
+from tgdrive.assistant.web_tools import collect_gallery
+from tgdrive.offline.http import DownloadError
 
 
 def step(status="in_progress", **extra):
@@ -167,6 +169,13 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan.data["status"], "cancelled")
         self.assertEqual(display_plan(snapshot, [], active=False)["status"], "paused")
 
+    def test_missing_confirmation_request_does_not_leave_plan_waiting(self):
+        plan = Plan()
+        plan.update({"items": [step("waiting_user")]})
+        plan.finish("failed", "missing_review")
+        self.assertEqual(plan.snapshot()["status"], "failed")
+        self.assertIn("没有生成可确认", plan.snapshot()["items"][0]["detail"])
+
     def test_partial_tool_results_cannot_be_completed_by_changing_status(self):
         plan = Plan()
         plan.update({"items": [step()]})
@@ -179,6 +188,82 @@ class PlanTests(unittest.TestCase):
         plan.begin("c2", "search_files", "one")
         plan.observe(result("c2"))
         self.assertEqual(plan.update({"items": [step("completed")]})["status"], "completed")
+
+    def test_completion_flag_does_not_hide_failures_or_truncation(self):
+        for payload in ({"complete": True, "failed": 1}, {"complete": True, "partial": True},
+                        {"complete": True, "truncated": True}, {"complete": True, "body_complete": False}):
+            with self.subTest(payload=payload):
+                plan = Plan()
+                plan.update({"items": [step()]})
+                plan.begin("c1", "collect_gallery", "one")
+                plan.observe(result(name="collect_gallery", result=payload))
+                with self.assertRaisesRegex(ValueError, "成功"):
+                    plan.update({"items": [step("completed")]})
+
+
+class GalleryPlanTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def page(number, *, following=True):
+        return {"url": f"https://photos.example/album?page={number}",
+                "images": [{"path": "img.photo", "urls": {"src": "https://photos.example/a.jpg"}}],
+                "links": [{"href": f"https://photos.example/album?page={number + 1}", "rel": "next",
+                           "text": "下一页", "path": "a"}] if following else []}
+
+    async def collect(self, pages, *, max_pages=50, params=None, snapshot=False):
+        trace = MemoryTrace()
+        cid = trace.create_conversation(1, "", 1)
+        rule = {"start_url": pages[0]["url"], "images": {"path": "img.photo", "attr": "src", "transform": []},
+                "pagination": {"type": "next_link", "rel_next": True, "text": "下一页", "path": "a"}}
+        if snapshot:
+            sid = trace.create_collection(cid, 1, "snapshot", source="https://photos.example", rule=None,
+                                          urls=pages, count=len(pages))
+            rule.update(snapshot_id=sid, pagination={"type": "snapshot"})
+        ident = trace.create_collection(cid, 1, "collection", source="https://photos.example", rule=rule, urls=[], count=0)
+        ctx = ToolContext(1, 1, "", None, None, "private", "", params or {}, {}, conversation_id=cid,
+                          trace=trace, base=".tgdrive/private/")
+        with patch("tgdrive.assistant.web_tools._fetch_page", AsyncMock(side_effect=pages)) as fetch, \
+                patch("tgdrive.assistant.web_tools.asyncio.sleep", AsyncMock()):
+            output = await collect_gallery(ctx, {"collection_id": ident, "max_pages": max_pages})
+        if snapshot:
+            fetch.assert_not_awaited()
+        self.assertEqual(len(trace.collection(1, ident)["urls"]), output.result["count"])
+        plan = Plan("run")
+        plan.update({"items": [step()]})
+        plan.begin("c1", "collect_gallery", "one")
+        plan.observe(result(name="collect_gallery", result=output.result))
+        return output, plan
+
+    async def test_natural_gallery_end_allows_plan_completion(self):
+        for pages, snapshot in (([self.page(1), self.page(2)], False),
+                                ([self.page(1, following=False)], False),
+                                ([self.page(1), self.page(2)], True)):
+            with self.subTest(snapshot=snapshot, pages=len(pages)):
+                output, plan = await self.collect(pages, snapshot=snapshot)
+                self.assertIs(output.result.get("complete"), True)
+                self.assertEqual(output.result["count"], 1)
+                self.assertEqual(plan.update({"items": [step("completed")]})["status"], "completed")
+
+    async def test_limits_and_failed_pages_keep_plan_incomplete(self):
+        for pages, options, reason in (([self.page(1)], {"max_pages": 1}, "页数上限"),
+                                       ([self.page(1)], {"params": {"max_images": 1}}, "图片数上限"),
+                                       ([self.page(1), DownloadError("页面返回 HTTP 404")], {}, "HTTP 404"),
+                                       ([self.page(1), self.page(2)], {"snapshot": True, "max_pages": 1}, "页数上限")):
+            with self.subTest(reason=reason):
+                output, plan = await self.collect(pages, **options)
+                self.assertIs(output.result.get("complete"), False)
+                self.assertIn(reason, output.result["stopped"])
+                self.assertIn(reason, plan.snapshot()["items"][0]["detail"])
+                with self.assertRaisesRegex(ValueError, "one.*成功"):
+                    plan.update({"items": [step("completed")]})
+
+    async def test_runtime_limit_keeps_plan_incomplete(self):
+        with patch("tgdrive.assistant.web_tools.time") as clock:
+            clock.monotonic.side_effect = [0, 106]
+            output, plan = await self.collect([self.page(1)])
+        self.assertIs(output.result.get("complete"), False)
+        self.assertIn("时间", output.result["stopped"])
+        with self.assertRaisesRegex(ValueError, "成功"):
+            plan.update({"items": [step("completed")]})
 
 
 class LoopTests(unittest.IsolatedAsyncioTestCase):
@@ -245,6 +330,39 @@ class LoopTests(unittest.IsolatedAsyncioTestCase):
             Reply(tool_calls=[call("search_files", ident="c1"), call("search_files", {"q": "next"}, "c2")]), Reply(text="已查询")])
         self.assertEqual(service.search.await_count, 2)
         self.assertIsNone(service.trace.latest_plan(state.conversation_id))
+
+    async def test_waiting_claim_without_request_gets_one_repair_then_clear_failure(self):
+        service, state = await self.run_fixture([Reply(text="等待你的确认，我会继续处理。"), Reply(text="等待你的确认。")])
+        messages = service.trace.messages(state.conversation_id)
+        self.assertEqual(service._model_call.await_count, 2)
+        self.assertEqual(sum(message.get("type") == "review_check" for message in messages), 1)
+        self.assertEqual(state.stop_reason, "missing_review")
+        self.assertEqual(state.status, "failed")
+        self.assertIn("没有生成可确认", messages[-1]["text"])
+
+    async def test_action_finishing_during_model_response_gets_consumed(self):
+        service, state = self.fixture([])
+        replies = iter(["旧的处理中回复", "已根据实际操作结果继续处理"])
+        async def model(*args, **kwargs):
+            if state.action_revision == 0:
+                state.action_revision = 1
+            return Reply(text=next(replies))
+        service._model_call.side_effect = model
+        with patch("tgdrive.assistant.service.knowledge.public_config", return_value={}):
+            await service._run(state)
+        self.assertEqual(service._model_call.await_count, 2)
+        self.assertEqual(state.seen_action_revision, 1)
+        self.assertEqual(state.status, "completed")
+
+    async def test_already_confirmed_running_action_is_not_a_missing_review(self):
+        service, state = self.fixture([Reply(text="等待你的确认，我会继续处理。")])
+        aid = service.trace.create_action(state.conversation_id, state.id, 1, "session", "move", "propose_move", {}, count=1)
+        service.trace.start_action(aid)
+        with patch("tgdrive.assistant.service.knowledge.public_config", return_value={}):
+            await service._run(state)
+        self.assertEqual(state.stop_reason, "waiting_user")
+        self.assertEqual(service._model_call.await_count, 1)
+        self.assertIn("操作已确认，正在执行", service.trace.messages(state.conversation_id)[-1]["text"])
 
     async def test_cancellation_keeps_explicit_plan_progress(self):
         service, state = await self.run_fixture([Reply(tool_calls=[call("update_plan", {"items": [step()]})]), asyncio.CancelledError()])

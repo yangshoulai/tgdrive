@@ -15,7 +15,7 @@ import threading
 import time
 
 from ..errors import NotFoundError
-from .config import ACTION_TTL
+from .config import ACTION_TTL, MAX_PENDING_ACTIONS
 
 # 私密对话的编号前缀：对话、运行、待确认操作、结果集。普通对话的编号是 c_／r_／a_／g_／s_。
 PRIVATE_IDS = ("pc_", "pr_", "pa_", "pg_")
@@ -176,6 +176,10 @@ class MemoryTrace:
                                  "started_at": time.time()}
         return run_id
 
+    def latest_run(self, conversation_id: str) -> dict | None:
+        with self._lock:
+            return next((dict(run) for run in reversed(self.runs.values()) if run["conversation_id"] == conversation_id), None)
+
     def finish_run(self, run_id: str, *, status: str, stop_reason: str | None, steps: int, tool_calls: int,
                    input_tokens: int, output_tokens: int) -> None:
         with self._lock:
@@ -197,14 +201,14 @@ class MemoryTrace:
     # ---------- 待确认操作 ----------
 
     def create_action(self, conversation_id: str, run_id: str, user_id: int, session_hash: str, kind: str, tool_name: str,
-                      payload: dict, *, count: int, ttl: float = ACTION_TTL, keep_pending: int = 5) -> str:
+                      payload: dict, *, count: int, ttl: float = ACTION_TTL, keep_pending: int = MAX_PENDING_ACTIONS) -> str:
         action_id = "pa_" + secrets.token_urlsafe(12)
         now = time.time()
         with self._lock:
-            pending = sorted((a for a in self.action_rows.values() if a["conversation_id"] == conversation_id and a["status"] == "pending"),
-                             key=lambda a: a["created_at"], reverse=True)
-            for action in pending[keep_pending - 1:]:
-                action.update(status="expired", decided_at=now)
+            pending = sum(a["conversation_id"] == conversation_id and a["status"] == "pending" and a["expires_at"] > now
+                          for a in self.action_rows.values())
+            if pending >= keep_pending:
+                raise ValueError(f"待确认操作最多 {keep_pending} 个，请先处理已有请求；原有请求已保留")
             self.action_rows[action_id] = {
                 "id": action_id, "conversation_id": conversation_id, "run_id": run_id, "user_id": user_id, "session_hash": session_hash,
                 "kind": kind, "tool_name": tool_name, "status": "pending", "count": count, "payload": _copy(payload),
@@ -304,6 +308,19 @@ class MemoryTrace:
                            and a["status"] == "pending" and a["expires_at"] > now), key=lambda a: a["created_at"])
             return [{"id": a["id"], "kind": a["kind"], "count": a["count"]} for a in rows]
 
+    def has_open_actions(self, conversation_id: str) -> bool:
+        now = time.time()
+        with self._lock:
+            return any(a["conversation_id"] == conversation_id and (a["status"] in ("confirmed", "running", "undoing")
+                       or a["status"] == "pending" and a["expires_at"] > now) for a in self.action_rows.values())
+
+    def continuation_blocked(self, conversation_id: str, run_id: str) -> bool:
+        now = time.time()
+        with self._lock:
+            return any(a["conversation_id"] == conversation_id and a["run_id"] == run_id and (
+                       a["status"] in ("rejected", "cancelled", "expired", "interrupted")
+                       or a["status"] == "pending" and a["expires_at"] <= now) for a in self.action_rows.values())
+
     def expire_actions(self, conversation_id: str | None = None, *, user_id: int | None = None, tool_names: list[str] | None = None) -> int:
         now, count = time.time(), 0
         with self._lock:
@@ -394,6 +411,9 @@ class RoutedTrace:
     def start_run(self, conversation_id, *args):
         return self._by(conversation_id).start_run(conversation_id, *args)
 
+    def latest_run(self, conversation_id):
+        return self._by(conversation_id).latest_run(conversation_id)
+
     def finish_run(self, run_id, **options):
         return self._by(run_id).finish_run(run_id, **options)
 
@@ -435,6 +455,12 @@ class RoutedTrace:
 
     def pending_actions(self, conversation_id):
         return self._by(conversation_id).pending_actions(conversation_id)
+
+    def has_open_actions(self, conversation_id):
+        return self._by(conversation_id).has_open_actions(conversation_id)
+
+    def continuation_blocked(self, conversation_id, run_id):
+        return self._by(conversation_id).continuation_blocked(conversation_id, run_id)
 
     def expire_session_actions(self, session_hash):
         self.memory.expire_session_actions(session_hash)

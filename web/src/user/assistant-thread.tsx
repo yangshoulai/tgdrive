@@ -358,7 +358,7 @@ const TOOL_ICONS: [RegExp, IconName][] = [
   [/^propose_save_attachment/, "paperclip"], [/^ui_generate_thumbnails/, "image"],
   [/^(list_folder|folder_tree|find_empty)/, "folder"], [/^(search_files|find_large|find_duplicates)/, "search"],
   [/^(storage_stats|trash_stats)/, "pulse"], [/^(list_trash)/, "trash"], [/^read_text_file/, "fileText"], [/^get_file_info/, "file"],
-  [/^(list_public|propose_share|propose_unshare)/, "link"], [/download/, "download"], [/^(analyze_page|collect_gallery|parse_download)/, "globe"],
+  [/^(list_public|propose_share|propose_unshare)/, "link"], [/download/, "download"], [/^(inspect_page|analyze_page|collect_gallery|parse_download)/, "globe"],
   [/^(ui_|browser_)/, "cursor"], [/^propose_/, "edit"], [/^(get_context|request_scope)/, "info"], [/^list_recent/, "list"],
 ];
 const toolIcon = (name = ""): IconName => TOOL_ICONS.find(([pattern]) => pattern.test(name))?.[1] ?? "wrench";

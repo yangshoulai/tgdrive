@@ -235,7 +235,7 @@ async def _propose(ctx: ToolContext, kind: str, items: list[dict], *, skipped: l
         if outcome.get("status") == "running":
             result["status"] = "已在完全访问模式下自动开始执行，条目较多仍在进行，完成后对话中会出现结果"
         else:
-            result["status"] = "已在完全访问模式下自动执行完毕（用户可在卡片上撤销）"
+            result["status"] = "已在完全访问模式下自动执行完毕，请按实际结果继续处理"
             result["result"] = {key: outcome.get(key) for key in ("ok", "skipped", "failed", "reasons")}
         return ToolOutput(result, f"{summary}（已自动执行）", items=len(items), event={**event, "auto": True})
     result["expires_at"] = datetime.fromtimestamp(created["expires_at"]).isoformat(timespec="seconds")

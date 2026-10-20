@@ -275,6 +275,7 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "parse_download_source": ("allow", "支持任务所需的公共链接或请求配置"),
     "propose_download_control": ("allow", "只能操作私密下载任务"),
     "analyze_page": ("limited", "支持跨站网页，不接受抓取脚本快照"),
+    "inspect_page": ("allow", "分析当前任务所需的公共网页结构，不执行页面脚本"),
     "collect_gallery": ("limited", "只按隔离分析的规则翻页，不离开起始网站"),
     "get_collection": ("limited", "只读取本对话的结果集"),
     "http_request": ("allow", "与普通对话相同，支持公共接口、认证、查询参数与正文"),

@@ -38,15 +38,18 @@ def _record(ctx: ToolContext, collection_id: str, *, kind: str | None = None) ->
     return record
 
 
-async def _fetch_page(ctx: ToolContext, url: str, *, referer: str | None = None, same_origin: str | None = None) -> dict:
+async def _fetch_page(ctx: ToolContext, url: str, *, referer: str | None = None, same_origin: str | None = None, structure: bool = False) -> dict:
     """同一轮复用结构页，避免分析后收集时重复请求；最多四页、合计 2 MB、五分钟。"""
     cache = ctx.state.setdefault("web_pages", {})
-    cached = cache.get(url)
+    cache_key = (url, "structure") if structure else url
+    cached = cache.get(cache_key)
     if cached and time.monotonic() - cached[0] < 300:
         return cached[1]
     started = time.time()
     try:
         options = {"same_origin": same_origin} if same_origin is not None else {}
+        if structure:
+            options["structure"] = True
         page = await web.fetch_page(ctx.offline.http, url, referer=referer, **options)
     except (DownloadError, ValueError):
         ctx.trace.log_call(kind="fetch", user_id=ctx.user_id, conversation_id=ctx.conversation_id, host=urlsplit(url).hostname,
@@ -56,10 +59,10 @@ async def _fetch_page(ctx: ToolContext, url: str, *, referer: str | None = None,
                        started_at=started, duration_ms=int((time.time() - started) * 1000), status="ok", items=len(page["images"]))
     size = len(json.dumps(page, ensure_ascii=False).encode())
     if size <= 2 * 1024 * 1024:
-        cache.pop(url, None)
+        cache.pop(cache_key, None)
         while cache and (len(cache) >= 4 or sum(entry[2] for entry in cache.values()) + size > 2 * 1024 * 1024):
             cache.pop(next(iter(cache)))
-        cache[url] = (time.monotonic(), page, size)
+        cache[cache_key] = (time.monotonic(), page, size)
     return page
 
 
@@ -92,7 +95,60 @@ async def parse_download_source(ctx: ToolContext, args: dict) -> ToolOutput:
                       f"{len(candidates)} 个可下载文件", items=len(candidates))
 
 
-@tool("analyze_page", "分析网页", "web", "read",
+@tool("inspect_page", "分析网页结构", "web", "read",
+      "分析通用网页的 HTML 结构：语义布局、标题层级、表格、链接和分页候选；页面没有图片也可使用。"
+      "section 默认 overview 返回概览，其余分区用 offset/next_offset 翻页；tables 指定 table_index 后读取该表格的行。"
+      "不执行 JavaScript，不读取浏览器登录状态，也不提供实际 CSS 坐标。需要图片下载规则时使用 analyze_page。",
+      {"url": {"type": "string", "description": "完整公共 HTTP(S) 网页地址"},
+       "section": {"type": "string", "enum": ["overview", "layout", "headings", "links", "tables", "pagination"]},
+       "table_index": {"type": "integer", "description": "tables 分区的表格编号，从 0 开始；省略时列出表格概览"},
+       "offset": {"type": "integer", "description": "分区或表格行的起始位置，默认 0"},
+       "limit": {"type": "integer", "description": "本次返回项数，1–100，默认 50"}}, ("url",))
+async def inspect_page(ctx: ToolContext, args: dict) -> ToolOutput:
+    if ctx.offline is None:
+        raise ToolError("离线下载未启用，无法访问网页")
+    url = _str(args, "url", limit=web.URL_BYTES)
+    ctx.check_url(url, "page")
+    section = args.get("section", "overview")
+    if section not in ("overview", "layout", "headings", "links", "tables", "pagination"):
+        raise ToolError("网页结构分区不正确")
+    offset, limit = _int(args, "offset", 0, 0, 10**6), _int(args, "limit", 50, 1, 100)
+    try:
+        page = await _fetch_page(ctx, checked_url(url), structure=True)
+    except (DownloadError, ValueError) as exc:
+        raise ToolError(f"无法获取页面：{exc}") from exc
+    if ctx.taint:
+        ctx.taint("分析了网页结构")
+    structure = page["structure"]
+    links = page.get("links", [])
+    pagination = [link for link in links if set(link.get("rel", "").split()) & {"next", "prev"}
+                  or web.NEXT_TEXT.fullmatch(link.get("text", "")) or link.get("text", "").strip().isdigit()
+                  or link.get("text", "").strip().lower() in ("上一页", "上页", "首页", "末页", "previous", "prev")]
+    tables = [{key: value for key, value in table.items() if key != "rows"} for table in structure["tables"]]
+    payload = {"url": page["url"], "title": page["title"], "source": "static_html", "scripts_executed": False,
+               "section": section, "truncated": structure["truncated"] or len(links) >= 5000,
+               "note": "HTML 结构不能代表渲染后的视觉布局或 JavaScript 动态内容；分页链接为候选，需按实际页面核对。"}
+    if section == "overview":
+        payload.update(counts={"layout": len(structure["layout"]), "headings": len(structure["headings"]),
+                               "tables": len(tables), "links": len(links), "pagination": len(pagination)},
+                       layout=structure["layout"][:10], headings=structure["headings"][:20], tables=tables[:10],
+                       pagination=pagination[:10], links=links[:10],
+                       next="使用 section=layout/headings/links/tables/pagination 查看完整分区；表格行使用 table_index")
+    else:
+        values = {"layout": structure["layout"], "headings": structure["headings"], "links": links,
+                  "tables": tables, "pagination": pagination}[section]
+        if args.get("table_index") is not None:
+            index = _int(args, "table_index", 0, 0, 49)
+            if section != "tables" or index >= len(tables):
+                raise ToolError("表格编号不正确，请先查看 tables 分区")
+            values = structure["tables"][index]["rows"]
+            payload["table"] = tables[index]
+        payload.update(items=values[offset:offset + limit], total=len(values), offset=offset,
+                       next_offset=offset + limit if offset + limit < len(values) else None)
+    return ToolOutput(payload, f"{page['title'][:30] or _origin(page['url'])} · {section}", items=len(payload.get("items", [])))
+
+
+@tool("analyze_page", "分析相册", "web", "read",
       "分析网页相册：抓取页面（或使用抓取脚本发来的快照 snapshot_id），由隔离的结构分析找出主体图片与分页方式，"
       "返回规则摘要、第一页样例和 collection_id。不会返回网页原文。之后用 collect_gallery(collection_id) 收集全部页面的图片。",
       {"url": {"type": "string", "description": "网页地址（http/https）"},
@@ -156,7 +212,8 @@ async def analyze_page(ctx: ToolContext, args: dict) -> ToolOutput:
 
 @tool("collect_gallery", "抓取相册", "web", "read",
       "按 analyze_page 得到的规则翻页收集图片地址（只访问与起始页同源的分页，请求间隔不少于 1 秒；快照模式不发请求），"
-      "去重后保存到结果集，返回总数、页数与样例。之后用 propose_downloads(collection_id) 生成下载提议。",
+      "去重后保存到结果集，返回总数、页数与样例；complete 表示是否正常遍历结束，stopped 说明结束原因。"
+      "之后用 propose_downloads(collection_id) 生成下载提议。",
       {"collection_id": {"type": "string"}, "max_pages": {"type": "integer", "description": "最多翻页数，默认与上限为管理员设置"},
        "ext": {"type": "array", "items": {"type": "string"}, "description": "只保留这些扩展名，如 [\"jpg\",\"png\"]"},
        "min_width": {"type": "integer", "description": "只保留 HTML 中声明宽度不小于该值的图片（未声明的保留）"}},
@@ -180,6 +237,7 @@ async def collect_gallery(ctx: ToolContext, args: dict) -> ToolOutput:
     urls: list[dict] = []
     seen: set[str] = set()
     pages_done, stopped = 0, None
+    complete = True
 
     def keep(page: dict) -> None:
         selected = {**page, "images": [image for image in page.get("images", []) if not min_width or not image.get("w") or image["w"] >= min_width]}
@@ -197,8 +255,10 @@ async def collect_gallery(ctx: ToolContext, args: dict) -> ToolOutput:
             keep(page)
             pages_done += 1
             if len(urls) >= max_images:
-                stopped = "达到图片数上限"
+                stopped, complete = "达到图片数上限", False
                 break
+        if not stopped and pages_done < len(snapshot["urls"]):
+            stopped, complete = "达到页数上限", False
     else:
         start = rule["start_url"]
         start_origin = _origin(start)
@@ -212,7 +272,7 @@ async def collect_gallery(ctx: ToolContext, args: dict) -> ToolOutput:
             if url in visited or _origin(url) != start_origin:
                 continue
             if time.monotonic() > deadline:
-                stopped = "运行时间到达上限"
+                stopped, complete = "运行时间到达上限", False
                 break
             if pages_done:
                 await asyncio.sleep(delay)
@@ -222,13 +282,13 @@ async def collect_gallery(ctx: ToolContext, args: dict) -> ToolOutput:
             except (DownloadError, ValueError) as exc:
                 if pages_done == 0:
                     raise ToolError(f"无法获取页面：{exc}") from exc
-                stopped = f"第 {pages_done + 1} 页获取失败（{exc}）"
+                stopped, complete = f"第 {pages_done + 1} 页获取失败（{exc}）", False
                 break
             pages_done += 1
             before = len(urls)
             keep(page)
             if len(urls) >= max_images:
-                stopped = "达到图片数上限"
+                stopped, complete = "达到图片数上限", False
                 break
             if pages_done > 1 and len(urls) == before:
                 stopped = "这一页没有新图片，判断为最后一页"
@@ -237,11 +297,11 @@ async def collect_gallery(ctx: ToolContext, args: dict) -> ToolOutput:
             if following and not pattern:
                 queue.append(following)
         if not stopped and queue and pages_done >= max_pages:
-            stopped = "达到页数上限"
+            stopped, complete = "达到页数上限", False
     urls = urls[:max_images]
     ctx.trace.update_collection(record["id"], urls=urls)
     return ToolOutput({"collection_id": record["id"], "pages": pages_done, "count": len(urls),
-                       "samples": [item["url"] for item in urls[:SAMPLE]], "stopped": stopped},
+                       "samples": [item["url"] for item in urls[:SAMPLE]], "stopped": stopped, "complete": complete},
                       f"{pages_done} 页 · {len(urls)} 张图片" + (f"（{stopped}）" if stopped else ""), items=len(urls))
 
 

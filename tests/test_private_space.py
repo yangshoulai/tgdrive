@@ -70,6 +70,25 @@ class PrivateSpaceTests(unittest.IsolatedAsyncioTestCase):
                 self.space.require(self.session.token, access)
         self.sessions.require(self.session.token)
 
+    async def test_assistant_work_extends_idle_but_cannot_restore_locked_grant(self):
+        with patch("tgdrive.private.time.monotonic", return_value=100):
+            access = self.issue()
+        self.space.assistant_busy = Mock(return_value=True)
+        with patch("tgdrive.private.time.monotonic", return_value=200):
+            result = self.space.activity(self.session.token, self.session.csrf_token, access)
+            self.assertEqual(result["remaining_seconds"], 60)
+        self.space.assistant_busy.return_value = False
+        with patch("tgdrive.private.time.monotonic", return_value=261):
+            with self.assertRaises(PrivateLocked):
+                self.space.require(self.session.token, access)
+        self.space.assistant_busy.return_value = True
+        with self.assertRaises(PrivateLocked):
+            self.space.require(self.session.token, access)
+        access = self.issue()
+        self.space.lock(self.session.token, self.session.csrf_token, access)
+        with self.assertRaises(PrivateLocked):
+            self.space.require(self.session.token, access)
+
     async def test_grants_are_bound_to_login_and_lock_is_independent(self):
         access = self.issue()
         other = self.sessions.create(7, "测试用户", "user")
