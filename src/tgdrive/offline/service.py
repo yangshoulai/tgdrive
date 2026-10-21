@@ -405,7 +405,7 @@ class OfflineDownloads:
         return result
 
     def list(self, user_id, *, cursor=0, status="", query="", limit=50, private_scope: Scope | None = None, ids=None,
-             area: str | None = None):
+             area: str | None = None, max_limit: int = 100):
         """任务列表（键集分页）。ids 用于托盘跟踪：只返回这些编号中属于该用户的任务（最多 100 个），不分页。
         area 为 normal／private 时在查询中只取普通或私密任务（文件助手按对话类型使用），分页与总数都按该范围计算。"""
         self.scope(user_id)
@@ -414,7 +414,8 @@ class OfflineDownloads:
             private_scope.authorize()
         if status not in ("", "active", "running", "stopped", "completed", "failed") or cursor < 0:
             raise ValueError("任务筛选或分页参数不正确")
-        limit = max(1, min(limit, 100))
+        # 网页每页最多 100 个；文件助手按管理员设置的上限传入 max_limit。
+        limit = max(1, min(limit, max(1, min(max_limit, 2000))))
         where, args = "user_id=?", [user_id]
         if ids is not None:
             if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or not all(type(value) is int for value in ids):

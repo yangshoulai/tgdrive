@@ -26,6 +26,8 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
   const preferences = { enabled: true, maxMiB: 1024, video: true, private: true, privateMaxMiB: 256 };
   const policy = { enabled: true, private_enabled: true, private_ttl_days: 7 };
   const requests = [];
+  // 浏览器对媒体元素发出的 no-cors 请求只保留它自己带的 Range；脚本改写的 Range 会被丢掉，服务端返回整个文件。
+  const pageRanges = new Map();
   const clone = value => value === undefined ? undefined : structuredClone(value);
   const memory = {
     ...store,
@@ -88,7 +90,9 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
       if (custom) return custom;
       const headers = { "Content-Type": file.type || "image/png", "Content-Length": String(file.data.length), ETag: `"${file.etag}"` };
       if (request.method === "HEAD" || !file.data.length) return new Response(null, { headers });
-      const range = store.parseRange(request.headers.get("range"));
+      const sent = request.headers.get("range");
+      const dropped = request.mode === "no-cors" && sent !== (pageRanges.get(request.url) ?? null);
+      const range = dropped ? null : store.parseRange(sent);
       const span = store.resolveRange(range ?? null, file.data.length);
       if (!span) return new Response(null, { status: 416 });
       return new Response(file.data.subarray(span.start, span.end + 1), {
@@ -119,7 +123,8 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
     },
     async request(name, options = {}) {
       let response;
-      const request = new Request(h.url(name, options), { headers: options.range ? { Range: options.range } : {}, signal: options.signal });
+      const request = new Request(h.url(name, options), { headers: options.range ? { Range: options.range } : {}, signal: options.signal, ...(options.media ? { mode: "no-cors" } : {}) });
+      if (options.media) pageRanges.set(request.url, options.range ?? null);
       listeners.get("fetch")({ request, respondWith: value => { response = value; } });
       return response ? await response : fetchMock(request);
     },
@@ -531,4 +536,39 @@ test("文件列表只取一次缓存索引：区分自动与手动，旧条目�
   const withPrivate = await h.ask("tessera-cache:index", { private: true });
   assert.ok(withPrivate.some(item => item.id === ids(SECRET) && item.complete && item.manual));
   assert.ok(!normal.some(item => item.id === ids(SECRET)), "未解锁时不包含私密层");
+});
+
+test("媒体元素的 no-cors 请求：回源仍按块取 Range，已缓存的数据不会被当作文件变化清掉", async t => {
+  const h = harness(t, { "song.wav": bytes(6 * store.BLOCK + 99) });
+  const data = h.files.get("song.wav").data;
+  const first = await h.read("song.wav", { media: true, range: "bytes=0-" });
+  assert.deepEqual(first.data, data);
+  const [entry] = h.entries.values();
+  assert.equal(entry.blocks.length, 7, "第一次完整读取写满所有块");
+  // 模拟浏览器换位置继续读：清掉后半段，再从中间读取，worker 必须自己带 Range 回源。
+  entry.blocks = [0, 1, 2]; entry.bytes = 3 * store.BLOCK;
+  for (const index of [3, 4, 5, 6]) h.blocks.delete(`${entry.key}/${index}`);
+  const start = 3 * store.BLOCK + 10;
+  const second = await h.read("song.wav", { media: true, range: `bytes=${start}-` });
+  assert.equal(second.response.status, 206);
+  assert.deepEqual(second.data, data.subarray(start));
+  const after = h.entries.get(entry.key);
+  assert.ok(after, "条目不能被删除");
+  assert.deepEqual(after.blocks, [0, 1, 2, 3, 4, 5, 6]);
+  const ranged = h.origins().filter(request => request.method === "GET").map(request => request.headers.get("range"));
+  assert.ok(ranged.includes(`bytes=${3 * store.BLOCK}-${data.length - 1}`), ranged.join(","));
+});
+
+test("回源没有按 Range 返回（200）但版本相同，不能删除已缓存的数据", async t => {
+  const h = harness(t, { "clip.bin": bytes(4 * store.BLOCK) });
+  await h.read("clip.bin", { range: "bytes=0-" });
+  const [entry] = h.entries.values();
+  entry.blocks = [0, 1]; entry.bytes = 2 * store.BLOCK;
+  for (const index of [2, 3]) h.blocks.delete(`${entry.key}/${index}`);
+  h.state.originHook = request => request.headers.get("range")
+    ? new Response(h.files.get("clip.bin").data, { status: 200, headers: { "Content-Type": "application/octet-stream", ETag: `"${h.files.get("clip.bin").etag}"` } }) : null;
+  await h.read("clip.bin", { range: `bytes=${2 * store.BLOCK}-` }).catch(() => undefined);
+  const after = h.entries.get(entry.key);
+  assert.ok(after, "条目不能被删除");
+  assert.deepEqual(after.blocks.slice(0, 2), [0, 1]);
 });

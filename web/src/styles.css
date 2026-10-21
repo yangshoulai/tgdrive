@@ -1126,6 +1126,8 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .preview-meta-public { display: inline-flex; align-items: center; gap: 3px; color: var(--public-ink); }
 .preview-meta-public svg { flex: none; }
 .modal-actions-divider { width: 1px; height: 16px; margin: 0 4px; background: var(--line); }
+/* 文件已完整缓存在本机：ArtPlayer 的「已加载」只跟随浏览器缓冲位置，改为显示全满（宽度由播放器内联写入，只能覆盖）。 */
+.preview-stage.is-cached .art-progress-loaded { width: 100% !important; }
 .preview-stage { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 320px; overflow: hidden; background: var(--surface-sunken); }
 .preview-modal-text .preview-stage, .preview-modal-code .preview-stage { min-height: 0; background: var(--surface); }
 .preview-modal-audio .preview-stage { min-height: 0; background: var(--surface); }
@@ -2130,7 +2132,8 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .settings-form > .field > :not(.field-label, .field-hint, .field-error) { grid-column: 1; grid-row: 2; }
   .settings-form > .field > .field-hint, .settings-form > .field > .field-error { grid-row: 3; }
   /* 文件页：标题在上，按钮在下靠右并保留文字；触屏隐藏快捷键提示。 */
-  .files-view .page-header { flex-direction: column; align-items: stretch; }
+  /* 不能换行：多行的纵向 flex 每行按最宽内容计宽，长目录名的面包屑会把整页撑出屏幕。 */
+  .files-view .page-header { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
   .files-view .page-header-main { flex: initial; }
   .files-view .page-header-actions { justify-content: flex-end; }
   .shortcut-hint { display: none; }
@@ -2465,7 +2468,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
   .mobile-file-sort select { height: 40px; }
   /* 文件页顶部分两行：面包屑与目录名占满整行（长目录名不再挤在窄栏里折成多行），按钮在下一行靠右并保留文字；
      工具栏第二行不换行，排序框占满剩余宽度，目录统计改用列表底部的链接。 */
-  .files-view .page-header { flex-direction: column; align-items: stretch; gap: 12px; }
+  .files-view .page-header { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 12px; }
   .files-view .page-header-main { flex: initial; }
   .files-view .page-header-main > .breadcrumbs { margin-bottom: 6px; }
   .files-view .page-header-actions { justify-content: stretch; flex-wrap: nowrap; }
@@ -3426,6 +3429,10 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 /* ---------- 文件助手手机布局 ---------- */
 @media (max-width: 760px) {
   .assistant-drawer { height: var(--assistant-viewport, 100dvh); bottom: auto; padding-top: env(safe-area-inset-top); }
+  /* 手机上全屏：从右下角的浮动按钮放大展开、关闭时缩回按钮，不用桌面抽屉的侧滑。 */
+  .assistant-drawer { opacity: 0; transform: scale(.9); transform-origin: calc(100% - var(--floating-right) - 24px) calc(100% - var(--floating-bottom) - 24px);
+    transition: transform var(--duration-base) var(--ease-out), opacity var(--duration-base) var(--ease-out), visibility 0s var(--duration-base); }
+  .assistant-drawer.is-open { opacity: 1; transform: none; transition: transform var(--duration-base) var(--ease-out), opacity var(--duration-fast) var(--ease-out); }
   .assistant-drawer .assistant-header { min-height: 52px; padding: 6px 8px; }
   .assistant-drawer .assistant-header .assistant-brand-mark { transform: scale(.85); }
   .assistant-capability-button span { display: none; }
@@ -3638,4 +3645,4 @@ body:has(.assistant-fab) .main { padding-bottom: 72px; }
   body:has(.modal-backdrop.is-minimized) .assistant-fab { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .assistant-fab, .assistant-fab:hover { transition: none; transform: none; animation: none; } }
-
+@media (max-width: 760px) and (prefers-reduced-motion: reduce) { .assistant-drawer, .assistant-drawer.is-open { transform: none; transition: none; } }

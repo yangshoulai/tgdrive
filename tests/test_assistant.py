@@ -548,6 +548,31 @@ class AssistantTests(AssistantCase):
             self.assertEqual(tools["7"]["result"]["groups"], [{"copies": 2, "size": 100, "reclaimable": 100, "paths": ["/a/1.jpg", "/a/2.jpg"]}])
         self.run_async(run())
 
+    def test_duplicate_groups_page_with_admin_limits(self):
+        async def run():
+            admin, _, _ = await self.setup_assistant()
+            for group in range(5):
+                for copy in range(4):
+                    await self.put(f"dup/g{group}/c{copy}.bin", bytes([group]) * (100 + group))
+            status, _ = await self.req("POST", "/api/admin/v1/assistant/tools", {"find_duplicates": {"max_results": 10, "max_paths": 3}}, admin)
+            self.assertEqual(status, 200)
+            status, error = await self.req("POST", "/api/admin/v1/assistant/tools", {"find_duplicates": {"max_paths": 1}}, admin)
+            self.assertEqual(status, 400, error)
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            conversation = await self.start_conversation(user)
+            self.model.replies = [Reply(tool_calls=[ToolCall("1", "find_duplicates", '{"limit": 2}'),
+                                                    ToolCall("2", "find_duplicates", '{"limit": 50, "offset": 4}')]), answer("好")]
+            await self.send(user, conversation, "查重")
+            tools = {m["call_id"]: m["result"] for m in await self.messages(user, conversation) if m["role"] == "tool"}
+            first, last = tools["1"], tools["2"]
+            self.assertEqual((first["total_groups"], len(first["groups"]), first["next_offset"]), (5, 2, 2))
+            self.assertEqual(first["groups"][0]["size"], 104, "按可节省空间排序")
+            self.assertEqual((len(first["groups"][0]["paths"]), first["groups"][0]["paths_truncated"]), (3, True))
+            self.assertEqual(first["reclaimable_total"], sum((100 + g) * 3 for g in range(5)))
+            self.assertEqual((len(last["groups"]), last["next_offset"]), (1, None))
+            self.assertEqual(last["groups"][0]["size"], 100)
+        self.run_async(run())
+
     def test_tool_budget_does_not_execute_extra_calls(self):
         async def run():
             admin, _, _ = await self.setup_assistant()

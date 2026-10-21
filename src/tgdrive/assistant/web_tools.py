@@ -103,7 +103,8 @@ async def parse_download_source(ctx: ToolContext, args: dict) -> ToolOutput:
        "section": {"type": "string", "enum": ["overview", "layout", "headings", "links", "tables", "pagination"]},
        "table_index": {"type": "integer", "description": "tables 分区的表格编号，从 0 开始；省略时列出表格概览"},
        "offset": {"type": "integer", "description": "分区或表格行的起始位置，默认 0"},
-       "limit": {"type": "integer", "description": "本次返回项数，1–100，默认 50"}}, ("url",))
+       "limit": {"type": "integer", "description": "本次返回项数，默认 50，上限由管理员设置"}}, ("url",),
+      params={"max_results": (200, 10, 2000, "单次最多返回项数")})
 async def inspect_page(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
         raise ToolError("离线下载未启用，无法访问网页")
@@ -112,7 +113,8 @@ async def inspect_page(ctx: ToolContext, args: dict) -> ToolOutput:
     section = args.get("section", "overview")
     if section not in ("overview", "layout", "headings", "links", "tables", "pagination"):
         raise ToolError("网页结构分区不正确")
-    offset, limit = _int(args, "offset", 0, 0, 10**6), _int(args, "limit", 50, 1, 100)
+    high = int(ctx.params.get("max_results", 200))
+    offset, limit = _int(args, "offset", 0, 0, 10**6), _int(args, "limit", min(50, high), 1, high)
     try:
         page = await _fetch_page(ctx, checked_url(url), structure=True)
     except (DownloadError, ValueError) as exc:
@@ -305,19 +307,20 @@ async def collect_gallery(ctx: ToolContext, args: dict) -> ToolOutput:
                       f"{pages_done} 页 · {len(urls)} 张图片" + (f"（{stopped}）" if stopped else ""), items=len(urls))
 
 
-@tool("get_collection", "查看结果集", "web", "read", "查看结果集的统计和分页样例。",
+@tool("get_collection", "查看结果集", "web", "read", "查看结果集的统计和分页样例；每页项数由管理员设置，next_offset 不为空时继续读取。",
       {"collection_id": {"type": "string"}, "offset": {"type": "integer", "description": "从第几项开始，默认 0"}},
-      ("collection_id",), depends=("analyze_page",))
+      ("collection_id",), depends=("analyze_page",), params={"max_results": (200, 10, 2000, "单次最多返回项数")})
 async def get_collection(ctx: ToolContext, args: dict) -> ToolOutput:
     record = _record(ctx, _str(args, "collection_id", limit=40))
     offset = _int(args, "offset", 0, 0, 10**6)
+    size = int(ctx.params.get("max_results", 200))
     items = record["urls"] if record["kind"] == "collection" else []
-    page = items[offset:offset + 50]
+    page = items[offset:offset + size]
     view = [{"index": offset + index, "name": item.get("name"), "size": item.get("size"), "variant": item.get("variant")}
             if "ticket" in item else item.get("url") for index, item in enumerate(page)]
     return ToolOutput({"collection_id": record["id"], "kind": "parsed" if (record["rule"] or {}).get("type") == "parsed" else "gallery",
                        "source": record["source"], "count": len(items), "items": view,
-                       "next_offset": offset + 50 if offset + 50 < len(items) else None},
+                       "next_offset": offset + size if offset + size < len(items) else None},
                       f"{len(items)} 项", items=len(page))
 
 

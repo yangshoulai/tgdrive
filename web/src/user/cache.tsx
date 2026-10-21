@@ -48,6 +48,7 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
   const [states, setStates] = useState(new Map<string, FileCacheState>());
   const statesRef = useRef(states); statesRef.current = states;
   const [cached, setCached] = useState(new Map<string, CachedFileState>());
+  const cachedRef = useRef(cached); cachedRef.current = cached;
   const [expanded, setExpanded] = useState(true), [wake, setWake] = useState(0);
   const [details, setDetails] = useState<CacheFile | null>(null), [removing, setRemoving] = useState<CacheFile[] | null>(null);
   const active = useRef<{ id: string; controller: AbortController } | null>(null);
@@ -146,7 +147,10 @@ export function CacheTasksProvider({ enabled, privateAllowed, children }: { enab
       for (const file of accepted) {
         const found = next.find(job => cacheFileId(job.file) === cacheFileId(file));
         if (found && isRunning(found)) continue;
-        next = [...next.filter(job => job !== found), { id: crypto.randomUUID(), file, status: "queued", bytes: statesRef.current.get(cacheFileId(file))?.bytes ?? found?.bytes ?? 0, size: file.size, error: "", waiting: false }];
+        // 起始进度取已知的最大值：单文件状态只覆盖预览中的文件，列表文件要看缓存索引，不能先显示 0% 像是重新开始。
+        const id = cacheFileId(file);
+        const bytes = Math.max(statesRef.current.get(id)?.bytes ?? 0, cachedRef.current.get(id)?.bytes ?? 0, found?.bytes ?? 0);
+        next = [...next.filter(job => job !== found), { id: crypto.randomUUID(), file, status: "queued", bytes, size: file.size, error: "", waiting: false }];
       }
       return next;
     });
@@ -255,12 +259,15 @@ function buttonState(queue: Queue, file: CacheFile, indexOnly = false) {
   const indexed = queue.cached.get(cacheFileId(file));
   const state = (indexOnly ? undefined : queue.states.get(cacheFileId(file))) ?? indexed, job = queue.jobs.find(job => cacheFileId(job.file) === cacheFileId(file));
   const running = job && isRunning(job);
-  const complete = !running && Boolean(state?.complete);
-  const bytes = running ? job.bytes : state?.bytes ?? 0;
-  const present = Boolean(indexed || state?.complete || bytes);
+  // 任务刚完成时索引可能还没刷新：以任务结果为准，不能闪回旧的百分比。
+  const finished = !running && job?.status === "done";
+  const complete = finished || !running && Boolean(state?.complete);
+  const bytes = running ? job.bytes : finished ? job.size : state?.bytes ?? 0;
+  // 只建了条目、还没写入任何数据（例如刚打开就关闭预览）不算已缓存。
+  const present = Boolean(state?.complete || bytes);
   const percent = percentOf(bytes, running ? job.size : file.size, complete);
   const label = running ? job.status === "queued" ? "排队中" : "正在缓存" : complete ? "已缓存" : job?.status === "error" ? "重试缓存" : bytes ? "继续缓存" : "缓存到本机";
-  return { running, complete, present, bytes, percent, label, error: job?.status === "error", manual: Boolean(indexed?.manual) };
+  return { running, complete, present, bytes, percent, label, error: job?.status === "error", manual: finished || Boolean(indexed?.manual) };
 }
 
 export function FileCacheButton({ file }: { file: CacheFile }) {

@@ -192,10 +192,14 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             self._seed_downloads([("completed" if n % 4 else "failed", f"Elsewhere/f{n}.txt") for n in range(300)]
                                  + [("completed", ".tgdrive/trash/1-abc/Elsewhere/old.txt"), ("stopped", "Downloads/s.txt")]
                                  + [("completed", f".tgdrive/private/p{n}.txt") for n in range(120)])
-            self.model.replies = [call("list_downloads"), answer("好")]
+            # 单次上限由管理员在工具配置中设置（默认 200）；调到 100 后按 100 分页，模型要求更多也按上限处理。
+            status, _ = await self.req("POST", "/api/admin/v1/assistant/tools", {"list_downloads": {"max_results": 100}}, admin)
+            self.assertEqual(status, 200)
+            self.model.replies = [call("list_downloads", limit=1000), answer("好")]
             await self.send(user, conversation, "有多少下载任务")
             result = (await self.tool_results(user, conversation))[-1]
             self.assertEqual(len(result["result"]["tasks"]), 100)
+            self.assertIsNotNone(result["result"]["next_cursor"])
             self.assertEqual(result["result"]["total"], 302)
             self.assertEqual(result["result"]["counts"], {"completed": 226, "failed": 75, "stopped": 1})
             self.assertNotIn(".tgdrive/private", json.dumps(result["result"], ensure_ascii=False))

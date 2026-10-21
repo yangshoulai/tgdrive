@@ -1,6 +1,6 @@
 /** 播放界面与歌词、字幕附件；缓冲状态始终保留播放器。
  * 视频使用 ArtPlayer（按需加载）；音乐使用原生 <audio> 与自绘界面：模糊封面背景、唱片、频谱、同步歌词和一体化控制条。 */
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { errorMessage, type PreviewAsset } from "./api";
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
@@ -230,12 +230,17 @@ function Spectrum({ analyser, playing, loading = false, bars = 48 }: { analyser:
   return <canvas ref={canvas} className={`audio-spectrum${playing || loading ? "" : " is-idle"}`} aria-hidden="true" />;
 }
 
+/** 当前预览的文件已完整缓存在本机（由文件预览窗口提供）。浏览器只缓冲播放位置前面一段，
+ *  完整缓存时「已加载」应显示为满，而不是只到浏览器的缓冲位置。 */
+export const PreviewCachedContext = createContext(false);
+
 /** 进度条：已播放、已缓冲两层，悬停显示目标时间；拖动时不被播放进度覆盖。 */
 function Timeline({ progress, buffered, disabled, onSeek }: { progress: MediaProgress; buffered: number; disabled: boolean; onSeek: (time: number) => void }) {
   const [scrub, setScrub] = useState<number | null>(null), [hover, setHover] = useState<{ x: number; time: number } | null>(null);
+  const cached = useContext(PreviewCachedContext);
   const duration = progress.duration;
   const time = scrub ?? progress.currentTime;
-  const percent = duration ? time / duration * 100 : 0, loaded = duration ? Math.min(100, buffered / duration * 100) : 0;
+  const percent = duration ? time / duration * 100 : 0, loaded = cached && duration ? 100 : duration ? Math.min(100, buffered / duration * 100) : 0;
   return <div className="audio-timeline">
     <span className="audio-time">{playbackTime(time)}</span>
     <div className="audio-track" onPointerMove={event => {

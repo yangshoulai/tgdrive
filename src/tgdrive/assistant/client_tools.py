@@ -224,15 +224,17 @@ async def ui_copy(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 THUMBNAIL_KINDS = {"image", "video", "audio"}
-THUMBNAIL_LIMIT = 300
+# 展开目录时最多读取的文件行；单次处理数由各工具的 max_files 决定，剩余数量在结果里告诉模型。
+SCAN_FILES = 20000
 
 
 @tool("ui_generate_thumbnails", "生成缩略图", "browser", "read",
       "为图片、视频和音乐补生成缩略图（列表小图、网格图与预览封面）。生成需要读取原文件，并且网格图与封面会计入用户空间，"
       "审批模式显示「生成缩略图」卡片，完全访问下自动提交给服务器后台生成。path 可以是文件或目录；recursive 包含子目录；"
-      "regenerate 时也重新生成已有但缺少网格图的旧版缩略图（例如用户觉得网格视图模糊）。单次最多 300 个文件。",
+      "regenerate 时也重新生成已有但缺少网格图的旧版缩略图（例如用户觉得网格视图模糊）。单次文件数上限由管理员设置，超出时结果会说明剩余数量。",
       {"path": PATH, "recursive": {"type": "boolean", "description": "目录是否包含子目录，默认否"},
-       "regenerate": {"type": "boolean", "description": "是否重新生成缺少网格图的旧缩略图，默认否"}}, ("path",))
+       "regenerate": {"type": "boolean", "description": "是否重新生成缺少网格图的旧缩略图，默认否"}}, ("path",),
+      params={"max_files": (500, 10, 2000, "单次最多处理文件数")})
 async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
     key = ctx.resolve(_str(args, "path", limit=1024))
     recursive, regenerate = args.get("recursive") is True, args.get("regenerate") is True
@@ -243,8 +245,8 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
     else:
         folder = key.rstrip("/") + "/" if key else ctx.scope_root
         rows = ctx.db.execute("SELECT key, size, etag, content_type, blob_uuid FROM objects WHERE bucket_id=? AND key>=? AND key<? "
-                              f"AND substr(key,-1)!='/' AND {ctx.hide()} ORDER BY key LIMIT 5000",
-                              (ctx.bucket_id, folder, folder + END)).fetchall()
+                              f"AND substr(key,-1)!='/' AND {ctx.hide()} ORDER BY key LIMIT ?",
+                              (ctx.bucket_id, folder, folder + END, SCAN_FILES)).fetchall()
         if not rows and ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
                                        (ctx.bucket_id, folder, folder + END)).fetchone() is None:
             raise ToolError(f"{ctx.display(folder)} 不存在")
@@ -256,7 +258,7 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
     todo = [row for row in media if not variants.get(row["blob_uuid"])
             or regenerate and "grid" not in variants[row["blob_uuid"]]]
     items = [{"path": row["key"], "size": int(row["size"] or 0), "etag": row["etag"], "content_type": row["content_type"]}
-             for row in todo[:THUMBNAIL_LIMIT]]
+             for row in todo[:int(ctx.params.get("max_files", 500))]]
     payload = {"media_files": len(media), "need": len(todo), "in_card": len(items)}
     if not items:
         return ToolOutput({**payload, "status": "没有需要生成缩略图的文件"}, "没有需要生成的缩略图")
@@ -269,17 +271,17 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
 
 # ---------- 本机缓存（§26）：缓存只在用户浏览器里，服务端只负责校验路径并列出文件 ----------
 
-CACHE_LIMIT = 300
 CACHE_STATES = {"none", "partial", "auto", "manual", "caching"}
-CACHE_PATHS = {"type": "array", "items": {"type": "string"}, "description": "文件或文件夹路径（≤200 个）"}
+CACHE_PATHS = {"type": "array", "items": {"type": "string"}, "description": "文件或文件夹路径（数量不超过单次文件数上限，至少可传 200 个）"}
 
 
 def _cache_rows(ctx: ToolContext, paths: object, *, recursive: bool, limit: int, required: bool = True) -> tuple[list, int]:
     """把文件与目录展开成作用域内的文件行（去重、跳过系统区），返回 (前 limit 行, 总数)。"""
     if paths is None and not required:
         return [], 0
-    if not isinstance(paths, list) or not 1 <= len(paths) <= 200:
-        raise ToolError("参数 paths 需要 1–200 个路径")
+    cap = max(200, limit)
+    if not isinstance(paths, list) or not 1 <= len(paths) <= cap:
+        raise ToolError(f"参数 paths 需要 1–{cap} 个路径")
     rows: dict[str, object] = {}
     for value in dict.fromkeys(paths):
         key = ctx.resolve(value)
@@ -290,8 +292,8 @@ def _cache_rows(ctx: ToolContext, paths: object, *, recursive: bool, limit: int,
             continue
         folder = key.rstrip("/") + "/" if key else ctx.scope_root
         found = ctx.db.execute("SELECT key, size, etag, content_type FROM objects WHERE bucket_id=? AND key>=? AND key<? "
-                               f"AND substr(key,-1)!='/' AND {ctx.hide()} ORDER BY key LIMIT 5000",
-                               (ctx.bucket_id, folder, folder + END)).fetchall()
+                               f"AND substr(key,-1)!='/' AND {ctx.hide()} ORDER BY key LIMIT ?",
+                               (ctx.bucket_id, folder, folder + END, SCAN_FILES)).fetchall()
         if not recursive:
             found = [row for row in found if "/" not in row["key"][len(folder):]]
         if not found and ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
@@ -347,7 +349,7 @@ async def ui_cache_status(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 def _cache_card(ctx: ToolContext, args: dict, action: str) -> ToolOutput:
-    rows, total = _cache_rows(ctx, args.get("paths"), recursive=args.get("recursive") is True, limit=CACHE_LIMIT)
+    rows, total = _cache_rows(ctx, args.get("paths"), recursive=args.get("recursive") is True, limit=int(ctx.params.get("max_files", 500)))
     if not rows:
         return ToolOutput({"status": "没有可处理的文件"}, "没有文件")
     items = [_cache_item(row) for row in rows]
@@ -363,15 +365,17 @@ def _cache_card(ctx: ToolContext, args: dict, action: str) -> ToolOutput:
 @tool("ui_cache_files", "缓存到本机", "browser", "read",
       "把文件保存到这台设备的本机缓存，之后预览和下载直接读取本机数据（适合即将离线使用或反复打开的文件）。"
       "审批模式显示「缓存到本机」卡片；完全访问下自动加入缓存队列。设备必须已开启本机缓存。path 可以是文件或文件夹；"
-      "recursive 包含子目录；单次最多 300 个文件。",
-      {"paths": CACHE_PATHS, "recursive": {"type": "boolean", "description": "文件夹是否包含子目录，默认否"}}, ("paths",))
+      "recursive 包含子目录；单次文件数上限由管理员设置。",
+      {"paths": CACHE_PATHS, "recursive": {"type": "boolean", "description": "文件夹是否包含子目录，默认否"}}, ("paths",),
+      params={"max_files": (500, 10, 2000, "单次最多处理文件数")})
 async def ui_cache_files(ctx: ToolContext, args: dict) -> ToolOutput:
     return _cache_card(ctx, args, "cache")
 
 
 @tool("ui_clear_cache", "清除本机缓存", "browser", "read",
       "删除这台设备上指定文件的本机缓存（云端文件不受影响）。审批模式显示「清除」卡片；完全访问下自动执行，不删除云端文件。"
-      "参数同 ui_cache_files；单次最多 300 个文件。",
-      {"paths": CACHE_PATHS, "recursive": {"type": "boolean", "description": "文件夹是否包含子目录，默认否"}}, ("paths",))
+      "参数同 ui_cache_files；单次文件数上限由管理员设置。",
+      {"paths": CACHE_PATHS, "recursive": {"type": "boolean", "description": "文件夹是否包含子目录，默认否"}}, ("paths",),
+      params={"max_files": (500, 10, 2000, "单次最多处理文件数")})
 async def ui_clear_cache(ctx: ToolContext, args: dict) -> ToolOutput:
     return _cache_card(ctx, args, "uncache")

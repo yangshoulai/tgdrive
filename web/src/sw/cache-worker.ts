@@ -241,6 +241,10 @@ const etagOf = (response: Response) => (response.headers.get("etag") ?? "").repl
 const UNCACHED_DESTINATIONS = new Set(["document", "iframe", "frame", "embed", "object", "script", "style", "font", "worker", "sharedworker", "manifest", "report"]);
 const PREVIEW_FRAME_DESTINATIONS = new Set(["document", "iframe", "frame", "embed", "object"]);
 const direct = (request: Request) => fetch(request, { cache: "no-store" });
+/** 带自定义 Range 回源。媒体元素的请求是 no-cors 模式，直接 fetch(request, { headers }) 时浏览器会丢掉脚本设置的 Range、
+ *  返回整个文件；所以按原地址另建同源请求，只沿用原请求的普通请求头。 */
+const sourceFetch = (request: Request, headers: Headers, signal: AbortSignal, method = "GET") =>
+  fetch(new Request(request.url, { method, headers, credentials: "same-origin", mode: "same-origin", cache: "no-store", redirect: "follow", signal }));
 
 async function openEntry(request: Request, route: Route): Promise<{ context: TierContext; base: Bytes } | null> {
   const preferences = await currentSettings();
@@ -300,11 +304,11 @@ async function handle(request: Request, route: Route): Promise<Response> {
   try {
     const headers = new Headers(request.headers);
     if (range) headers.set("Range", `bytes=${start}-${end ?? ""}`);
-    const upstream = await fetch(request, { cache: "no-store", signal: controller.signal, headers });
+    const upstream = await sourceFetch(request, headers, controller.signal);
     if (upstream.status === 401) { dropKeys(); return direct(request); }
     // 空文本的 Range 返回 416；额外用 HEAD 验证版本后，也能登记真正的空文件。
     const emptyRange = route.preview && route.size === 0 && upstream.status === 416 && upstream.headers.get("content-range") === "bytes */0";
-    const metadata = emptyRange ? await fetch(request, { method: "HEAD", cache: "no-store", signal: controller.signal }) : upstream;
+    const metadata = emptyRange ? await sourceFetch(request, new Headers(request.headers), controller.signal, "HEAD") : upstream;
     const rawSize = metadata.headers.get("content-length")?.trim();
     const total = emptyRange && metadata.ok ? 0 : upstream.status === 206 ? Number(/\/(\d+)$/.exec(upstream.headers.get("content-range") ?? "")?.[1])
       : upstream.status === 200 ? route.size ?? (rawSize && /^\d+$/.test(rawSize) ? Number(rawSize) : NaN) : NaN;
@@ -431,12 +435,12 @@ async function* produce(opened: Opened, span: { start: number; end: number }, si
         active.controller = controller;
         const headers = new Headers(opened.request.headers);
         headers.set("Range", `bytes=${fetchStart}-${fetchEnd}`);
-        response = await fetch(opened.request, { cache: "no-store", signal: controller.signal, headers });
+        response = await sourceFetch(opened.request, headers, controller.signal);
         if (response.status === 401) dropKeys();
         if (response.status !== 206 || etagOf(response) !== info.version) {
           controller.abort();
-          // 服务端的文件已变化：这个条目不能再续写。
-          if (response.ok) await deleteEntries([opened.entry.key]);
+          // 只有版本真的变化才说明服务端文件已变，条目不能再续写；没按 Range 返回（200）不能当作文件变化清掉已缓存的数据。
+          if (response.ok && etagOf(response) !== info.version) await deleteEntries([opened.entry.key]);
           throw new Error(`回源失败（${response.status}）`);
         }
       }

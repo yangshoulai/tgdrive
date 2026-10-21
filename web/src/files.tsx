@@ -2,9 +2,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import * as api from "./api";
 import { readPreviewText, TEXT_PREVIEW_LIMIT, type PreviewText } from "./preview-data";
-import { MediaPreview, MinimizedPlayback, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
+import { MediaPreview, MinimizedPlayback, PreviewCachedContext, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
 import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip } from "./preview-playlist";
 import { ImageViewer } from "./preview-image";
+import { cacheFileId } from "./cache-client";
 import { FileCacheButton, cacheMenuItems, useCacheFiles } from "./user/cache";
 import { PreviewToolsContext, TextPreview } from "./preview-text";
 import { PdfPreview } from "./preview-pdf";
@@ -311,6 +312,8 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   const source = sourceOf(active);
   const ownSource = /^\/api\/user\/v1\/(?:private\/)?content\?/.test(source.url);
   const cacheQueue = useCacheFiles([active], ownSource);
+  const activeCacheId = cacheFileId(active);
+  const fullyCached = Boolean(ownSource && (cacheQueue?.states.get(activeCacheId)?.complete || cacheQueue?.cached.get(activeCacheId)?.complete));
   const downloadHref = ownSource ? api.versionedContentUrl(source.downloadUrl, active.etag, active.size) : source.downloadUrl;
   const [videoSize, setVideoSize] = useState<{ key: string; etag: string; ratio: number } | null>(null);
   const videoRatio = videoSize?.key === active.key && videoSize.etag === active.etag ? videoSize.ratio : 16 / 9;
@@ -512,13 +515,13 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
           <span className="modal-actions-divider" aria-hidden="true" />
         </>}
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}`}><PreviewToolsContext.Provider value={readingTools}><FilePreview kind={kind} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview kind={kind} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height) => setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height })}
         onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}
         onLyricLine={line => setLyric(current => current.key === active.key && current.line === line ? current : { key: active.key, line })}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}
-        loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} nav={nav} strip={strip} /></PreviewToolsContext.Provider>
+        loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} nav={nav} strip={strip} /></PreviewCachedContext.Provider></PreviewToolsContext.Provider>
         {panelOpen && <PlaylistPanel playlist={playlist} onSelect={select} typeLabel={kindLabel(kind)} playing={playing}
           onCollapse={() => setPlaylistExpanded(false)}
           renderThumbnail={item => <FileVisual kind={getFileKind(item.content_type, item.key)} src={sourceOf(item).thumbnail} size="md" />} />}

@@ -304,6 +304,15 @@ def _int(args: dict, name: str, default: int, low: int, high: int) -> int:
     return max(low, min(high, int(value)))
 
 
+def _limit(ctx: ToolContext, args: dict, fallback: int, *, default: int | None = None, param: str = "max_results") -> int:
+    """单次返回条数：上限由管理员在工具配置中设置（ctx.params[param]）；模型省略 limit 时取 default，未给 default 时直接取上限。"""
+    high = max(1, int(ctx.params.get(param, fallback)))
+    return _int(args, "limit", min(default, high) if default else high, 1, high)
+
+
+LIMIT_ARG = {"type": "integer", "description": "本次最多返回条数；省略时取管理员设置的上限，超过上限按上限处理"}
+
+
 def _str(args: dict, name: str, *, limit: int = 256) -> str:
     value = args.get(name)
     if value is None:
@@ -457,10 +466,11 @@ async def update_plan(ctx: ToolContext, args: dict) -> ToolOutput:
 @tool("list_folder", "列出目录", "browse", "read",
       "列出目录下的子目录和文件（名称、大小、类型、修改时间）。按名称排序时支持分页。",
       {"path": PATH, "kind": KIND, "sort": {"type": "string", "enum": ["name", "size", "modified"], "description": "文件排序，默认 name"},
-       "cursor": CURSOR, "limit": {"type": "integer", "description": "1–200，默认 100"}})
+       "cursor": CURSOR, "limit": LIMIT_ARG},
+      params={"max_results": (300, 10, 5000, "单次最多列出文件数（子目录同此上限）")})
 async def list_folder(ctx: ToolContext, args: dict) -> ToolOutput:
     prefix = ctx.resolve(args.get("path"), directory=True)
-    limit = _int(args, "limit", 100, 1, 200)
+    limit = _limit(ctx, args, 300)
     sort = args.get("sort") or "name"
     if sort not in ("name", "size", "modified"):
         raise ToolError("参数 sort 不正确")
@@ -470,7 +480,7 @@ async def list_folder(ctx: ToolContext, args: dict) -> ToolOutput:
     def read():
         folders = []
         if not cursor:
-            page = ctx.objects.list_objects(ctx.scope(), prefix, "/", None, 200)
+            page = ctx.objects.list_objects(ctx.scope(), prefix, "/", None, int(ctx.params.get("max_results", 300)))
             names = [p for p in page.common_prefixes if ctx.private or not p.startswith(".tgdrive/")]
             sizes = ctx.objects.folder_sizes(ctx.scope(), names) if names else {}
             folders = [{"path": ctx.display(p), "size": sizes.get(p, 0)} for p in names]
@@ -503,11 +513,13 @@ async def list_folder(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("folder_tree", "目录树", "browse", "read",
-      "返回目录树（只含目录），附每个目录的文件数和总大小。最多 200 个目录。",
-      {"path": PATH, "depth": {"type": "integer", "description": "1–4，默认 2"}})
+      "返回目录树（只含目录），附每个目录的文件数和总大小。目录数与最大深度由管理员设置，超出时 truncated 为 true。",
+      {"path": PATH, "depth": {"type": "integer", "description": "展开层数，默认 2，最大为管理员设置的深度"}},
+      params={"max_folders": (300, 10, 5000, "最多返回目录数"), "max_depth": (4, 1, 10, "最大展开层数")})
 async def folder_tree(ctx: ToolContext, args: dict) -> ToolOutput:
     root = ctx.resolve(args.get("path"), directory=True)
-    depth = _int(args, "depth", 2, 1, 4)
+    max_depth, max_folders = int(ctx.params.get("max_depth", 4)), int(ctx.params.get("max_folders", 300))
+    depth = _int(args, "depth", min(2, max_depth), 1, max_depth)
 
     def read():
         nodes, queue, truncated = [], [(root, 0)], False
@@ -515,11 +527,11 @@ async def folder_tree(ctx: ToolContext, args: dict) -> ToolOutput:
             prefix, level = queue.pop(0)
             if level >= depth:
                 continue
-            page = ctx.objects.list_objects(ctx.scope(), prefix, "/", None, 200)
+            page = ctx.objects.list_objects(ctx.scope(), prefix, "/", None, max_folders)
             for child in page.common_prefixes:
                 if child.startswith(".tgdrive/") and not ctx.private:
                     continue
-                if len(nodes) >= 200:
+                if len(nodes) >= max_folders:
                     truncated = True
                     break
                 stats = ctx.db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE bucket_id=? AND key>? AND key<? "
@@ -578,7 +590,7 @@ def _regex(pattern: str) -> re.Pattern:
 
 @tool("search_files", "搜索文件", "browse", "read",
       "在当前作用域（或指定目录）内递归搜索文件，所有条件取交集。query 为名称包含的文字；glob 与 regex 匹配文件名（不含目录）。"
-      "结果最多 200 条，有更多时返回 cursor；一次最多扫描 5000 个候选，扫描未完成时也会返回 cursor。不会返回 .tgdrive/ 下的内容。",
+      "单次返回条数与扫描候选数由管理员设置，有更多结果或扫描未完成时返回 cursor。不会返回 .tgdrive/ 下的内容。",
       {"path": PATH, "query": {"type": "string", "description": "名称包含的文字（不区分大小写）"},
        "glob": {"type": "string", "description": "文件名通配符，如 *.jpg、IMG_*"},
        "regex": {"type": "string", "description": "文件名正则，不区分大小写"},
@@ -586,10 +598,12 @@ def _regex(pattern: str) -> re.Pattern:
        "size_min": {"type": "integer", "description": "最小字节数"}, "size_max": {"type": "integer", "description": "最大字节数"},
        "modified_after": {"type": "string", "description": "YYYY-MM-DD 或 ISO 时间"},
        "modified_before": {"type": "string", "description": "YYYY-MM-DD 或 ISO 时间"},
-       "cursor": CURSOR, "limit": {"type": "integer", "description": "1–200，默认 100"}})
+       "cursor": CURSOR, "limit": LIMIT_ARG},
+      params={"max_results": (300, 10, 5000, "单次最多返回结果数"), "scan_limit": (20000, 1000, 200000, "单次最多扫描的候选文件数")})
 async def search_files(ctx: ToolContext, args: dict) -> ToolOutput:
     prefix = ctx.resolve(args.get("path"), directory=True)
-    limit = _int(args, "limit", 100, 1, 200)
+    limit = _limit(ctx, args, 300)
+    scan_limit = int(ctx.params.get("scan_limit", 20000))
     query = _str(args, "query")
     glob = _str(args, "glob", limit=100)
     pattern = _regex(_str(args, "regex", limit=100)) if args.get("regex") else None
@@ -621,9 +635,9 @@ async def search_files(ctx: ToolContext, args: dict) -> ToolOutput:
 
     def read():
         matched, scanned, last = [], 0, None
-        for row in ctx.db.execute(f"SELECT * FROM objects WHERE {' AND '.join(where)} ORDER BY key LIMIT 5001", params):
+        for row in ctx.db.execute(f"SELECT * FROM objects WHERE {' AND '.join(where)} ORDER BY key LIMIT ?", (*params, scan_limit + 1)):
             scanned += 1
-            if scanned > 5000:
+            if scanned > scan_limit:
                 return matched, last, True
             last = row["key"]
             name = row["key"].rsplit("/", 1)[-1]
@@ -645,9 +659,9 @@ async def search_files(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("storage_stats", "统计用量", "browse", "read",
-      "汇总统计文件数量与大小：按类型（kind）、扩展名（ext）、一级子目录（folder）、修改年份（year）或月份（month）分组，最多返回 30 组。",
+      "汇总统计文件数量与大小：按类型（kind）、扩展名（ext）、一级子目录（folder）、修改年份（year）或月份（month）分组，分组数上限由管理员设置。",
       {"path": PATH, "group_by": {"type": "string", "enum": ["kind", "ext", "folder", "year", "month"], "description": "分组方式"}},
-      ("group_by",))
+      ("group_by",), params={"max_groups": (100, 5, 1000, "最多返回分组数")})
 async def storage_stats(ctx: ToolContext, args: dict) -> ToolOutput:
     prefix = ctx.resolve(args.get("path"), directory=True)
     group = args.get("group_by")
@@ -655,6 +669,7 @@ async def storage_stats(ctx: ToolContext, args: dict) -> ToolOutput:
         raise ToolError("参数 group_by 不正确")
     base = f"bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND {ctx.hide()}"
     params = [ctx.bucket_id, prefix, prefix + END]
+    max_groups = int(ctx.params.get("max_groups", 100))
 
     def read():
         total = ctx.db.execute(f"SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE {base}", params).fetchone()
@@ -685,13 +700,13 @@ async def storage_stats(ctx: ToolContext, args: dict) -> ToolOutput:
                     else "strftime('%Y-%m', modified_at, 'unixepoch', 'localtime')"
             order = "grp DESC" if group in ("year", "month") else "size DESC"
             rows = ctx.db.execute(f"SELECT {expression} AS grp, COUNT(*) AS files, COALESCE(SUM(size),0) AS size FROM objects "
-                                  f"WHERE {base} GROUP BY grp ORDER BY {order} LIMIT 31", params).fetchall()
-            for row in rows[:30]:
+                                  f"WHERE {base} GROUP BY grp ORDER BY {order} LIMIT ?", (*params, max_groups + 1)).fetchall()
+            for row in rows[:max_groups]:
                 name = row["grp"]
                 if group == "folder" and name != "(当前目录)":
                     name = ctx.display(prefix + name)
                 groups.append({"group": name, "files": int(row["files"]), "size": int(row["size"])})
-            if len(rows) > 30:
+            if len(rows) > max_groups:
                 groups.append({"group": "（更多分组已省略）", "files": None, "size": None})
         return {"path": ctx.display(prefix), "total_files": int(total[0]), "total_size": int(total[1]), "groups": groups}
 
@@ -700,10 +715,11 @@ async def storage_stats(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("find_large_files", "查找大文件", "browse", "read", "返回最大的 N 个文件。",
-      {"path": PATH, "kind": KIND, "limit": {"type": "integer", "description": "1–100，默认 20"}})
+      {"path": PATH, "kind": KIND, "limit": {"type": "integer", "description": "返回个数，默认 20，上限由管理员设置"}},
+      params={"max_results": (200, 10, 5000, "最多返回文件数")})
 async def find_large_files(ctx: ToolContext, args: dict) -> ToolOutput:
     prefix = ctx.resolve(args.get("path"), directory=True)
-    limit = _int(args, "limit", 20, 1, 100)
+    limit = _limit(ctx, args, 200, default=20)
     condition, kind_args = _kind(args)
 
     def read():
@@ -716,64 +732,80 @@ async def find_large_files(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("find_duplicates", "查找重复文件", "browse", "read",
-      "按内容找出完全相同的文件组（同一份数据或相同内容指纹），按可节省空间排序，最多 50 组、每组列出 10 个路径。",
-      {"path": PATH, "min_size": {"type": "integer", "description": "只看不小于该字节数的文件，默认 1"}})
+      "按内容找出完全相同的文件组（同一份数据或相同内容指纹），按可节省空间排序。每组列出全部副本路径（超过上限时 paths_truncated 为 true），"
+      "组数与每组路径数的上限由管理员设置；total_groups 是全部重复组数，next_offset 不为空时用 offset 继续读取下一批。",
+      {"path": PATH, "min_size": {"type": "integer", "description": "只看不小于该字节数的文件，默认 1"},
+       "offset": {"type": "integer", "description": "从第几组开始，默认 0"}, "limit": LIMIT_ARG},
+      params={"max_results": (200, 10, 5000, "单次最多返回重复组数"), "max_paths": (50, 2, 1000, "每组最多列出的路径数")})
 async def find_duplicates(ctx: ToolContext, args: dict) -> ToolOutput:
     prefix = ctx.resolve(args.get("path"), directory=True)
     min_size = _int(args, "min_size", 1, 0, 2**62)
+    offset = _int(args, "offset", 0, 0, 10**7)
+    limit = _limit(ctx, args, 200)
+    max_paths = int(ctx.params.get("max_paths", 50))
+    scope = (f"FROM objects o JOIN blobs b ON b.uuid=o.blob_uuid WHERE o.bucket_id=? AND o.key>? AND o.key<? "
+             f"AND substr(o.key,-1)!='/' AND {ctx.hide('o.key')} AND o.size>=?")
+    params = (ctx.bucket_id, prefix, prefix + END, max(min_size, 1))
 
     def read():
-        rows = ctx.db.execute(
-            # objects 与 blobs 都有 size 列，聚合结果必须另起别名，否则 ORDER BY 报列名歧义。
-            "SELECT COALESCE(b.fingerprint, o.blob_uuid) AS content, COUNT(*) AS copies, MAX(o.size) AS file_size "
-            "FROM objects o JOIN blobs b ON b.uuid=o.blob_uuid WHERE o.bucket_id=? AND o.key>? AND o.key<? "
-            f"AND substr(o.key,-1)!='/' AND {ctx.hide('o.key')} AND o.size>=? "
-            "GROUP BY content HAVING copies>1 ORDER BY file_size*(copies-1) DESC LIMIT 50",
-            (ctx.bucket_id, prefix, prefix + END, max(min_size, 1))).fetchall()
+        # objects 与 blobs 都有 size 列，聚合结果必须另起别名，否则 ORDER BY 报列名歧义。
+        grouped = (f"SELECT COALESCE(b.fingerprint, o.blob_uuid) AS content, COUNT(*) AS copies, MAX(o.size) AS file_size "
+                   f"{scope} GROUP BY content HAVING copies>1")
+        total, reclaimable = ctx.db.execute(f"SELECT COUNT(*), COALESCE(SUM(file_size*(copies-1)),0) FROM ({grouped})", params).fetchone()
+        rows = ctx.db.execute(f"{grouped} ORDER BY file_size*(copies-1) DESC, content LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
         groups = []
         for row in rows:
             paths = [ctx.display(r["key"]) for r in ctx.db.execute(
-                "SELECT o.key FROM objects o JOIN blobs b ON b.uuid=o.blob_uuid WHERE o.bucket_id=? AND o.key>? AND o.key<? "
-                f"AND substr(o.key,-1)!='/' AND {ctx.hide('o.key')} AND COALESCE(b.fingerprint, o.blob_uuid)=? "
-                "ORDER BY o.key LIMIT 10", (ctx.bucket_id, prefix, prefix + END, row["content"]))]
-            groups.append({"copies": int(row["copies"]), "size": int(row["file_size"]),
-                           "reclaimable": int(row["file_size"]) * (int(row["copies"]) - 1), "paths": paths})
-        return groups
+                f"SELECT o.key {scope} AND COALESCE(b.fingerprint, o.blob_uuid)=? ORDER BY o.key LIMIT ?",
+                (*params, row["content"], max_paths + 1))]
+            group = {"copies": int(row["copies"]), "size": int(row["file_size"]),
+                     "reclaimable": int(row["file_size"]) * (int(row["copies"]) - 1), "paths": paths[:max_paths]}
+            if len(paths) > max_paths:
+                group["paths_truncated"] = True
+            groups.append(group)
+        return int(total), int(reclaimable), groups
 
-    groups = await _thread(ctx, read)
-    saved = sum(group["reclaimable"] for group in groups)
-    return ToolOutput({"groups": groups, "reclaimable_total": saved}, f"{len(groups)} 组 · 可节省 {_fmt(saved)}", items=len(groups))
+    total, reclaimable, groups = await _thread(ctx, read)
+    next_offset = offset + len(groups) if offset + len(groups) < total else None
+    page_saved = sum(group["reclaimable"] for group in groups)
+    return ToolOutput({"groups": groups, "total_groups": total, "reclaimable_total": reclaimable, "page_reclaimable": page_saved,
+                       "offset": offset, "next_offset": next_offset},
+                      f"{total} 组 · 可节省 {_fmt(reclaimable)}" + (f"（本次 {offset + 1}–{offset + len(groups)} 组）" if next_offset or offset else ""),
+                      items=len(groups))
 
 
 @tool("find_empty_folders", "查找空目录", "browse", "read",
-      "列出没有任何文件的目录（只含空子目录的也算，最多 200 个）。要删除它们时，把结果原样传给 propose_trash 的 paths，"
-      "并设置 only_empty=true，由服务端再次核对，不要自行拼接或补充路径。", {"path": PATH})
+      "列出没有任何文件的目录（只含空子目录的也算），数量上限由管理员设置，超出时 truncated 为 true。要删除它们时，把结果原样传给 propose_trash 的 paths，"
+      "并设置 only_empty=true，由服务端再次核对，不要自行拼接或补充路径。", {"path": PATH},
+      params={"max_results": (1000, 10, 10000, "最多列出空目录数")})
 async def find_empty_folders(ctx: ToolContext, args: dict) -> ToolOutput:
     prefix = ctx.resolve(args.get("path"), directory=True)
+    limit = int(ctx.params.get("max_results", 1000))
 
     def read():
         return [ctx.display(row["key"]) for row in ctx.db.execute(
             "SELECT o.key FROM objects o WHERE o.bucket_id=? AND o.key>? AND o.key<? AND substr(o.key,-1)='/' "
             f"AND {ctx.hide('o.key')} AND NOT EXISTS (SELECT 1 FROM objects c WHERE c.bucket_id=o.bucket_id "
-            "AND c.key>o.key AND c.key<o.key||char(1114111) AND substr(c.key,-1)!='/') ORDER BY o.key LIMIT 200",
-            (ctx.bucket_id, prefix, prefix + END))]
+            "AND c.key>o.key AND c.key<o.key||char(1114111) AND substr(c.key,-1)!='/') ORDER BY o.key LIMIT ?",
+            (ctx.bucket_id, prefix, prefix + END, limit + 1))]
 
     folders = await _thread(ctx, read)
-    payload: dict = {"folders": folders, "count": len(folders)}
-    if len(folders) >= 200:
+    payload: dict = {"folders": folders[:limit], "count": min(len(folders), limit)}
+    if len(folders) > limit:
         payload["truncated"] = True
     if folders:
         payload["next"] = "删除这些空目录：调用 propose_trash，paths 使用本结果的 folders，并设置 only_empty=true"
-    return ToolOutput(payload, f"{len(folders)} 个空目录", items=len(folders))
+    return ToolOutput(payload, f"{payload['count']}{'+' if len(folders) > limit else ''} 个空目录", items=payload["count"])
 
 
 @tool("list_recent", "最近的文件", "browse", "read", "最近若干天内新增或修改的文件，按时间倒序。",
       {"path": PATH, "days": {"type": "integer", "description": "1–365，默认 7"}, "kind": KIND,
-       "limit": {"type": "integer", "description": "1–200，默认 50"}})
+       "limit": {"type": "integer", "description": "返回个数，默认 50，上限由管理员设置"}},
+      params={"max_results": (200, 10, 5000, "最多返回文件数")})
 async def list_recent(ctx: ToolContext, args: dict) -> ToolOutput:
     prefix = ctx.resolve(args.get("path"), directory=True)
     days = _int(args, "days", 7, 1, 365)
-    limit = _int(args, "limit", 50, 1, 200)
+    limit = _limit(ctx, args, 200, default=50)
     condition, kind_args = _kind(args)
 
     def read():
@@ -794,9 +826,9 @@ def _trash_where(ctx: ToolContext) -> tuple[str, list]:
 
 @tool("list_trash", "查看回收站", "browse", "read",
       "列出回收站中原路径位于当前作用域内的条目：原路径、是否文件夹、大小、删除时间与自动清除时间。",
-      {"cursor": CURSOR, "limit": {"type": "integer", "description": "1–100，默认 50"}})
+      {"cursor": CURSOR, "limit": LIMIT_ARG}, params={"max_results": (200, 10, 5000, "单次最多列出条目数")})
 async def list_trash(ctx: ToolContext, args: dict) -> ToolOutput:
-    limit = _int(args, "limit", 50, 1, 100)
+    limit = _limit(ctx, args, 200)
     where, params = _trash_where(ctx)
     cursor = _str(args, "cursor", limit=200)
     if cursor:
@@ -837,9 +869,9 @@ async def trash_stats(ctx: ToolContext, args: dict) -> ToolOutput:
 
 @tool("list_public_links", "已公开的内容", "browse", "read",
       "列出作用域内已开启公开链接的文件和文件夹（不返回链接令牌和密码）。",
-      {"cursor": CURSOR, "limit": {"type": "integer", "description": "1–200，默认 100"}})
+      {"cursor": CURSOR, "limit": LIMIT_ARG}, params={"max_results": (200, 10, 5000, "单次最多列出条目数")})
 async def list_public_links(ctx: ToolContext, args: dict) -> ToolOutput:
-    limit = _int(args, "limit", 100, 1, 200)
+    limit = _limit(ctx, args, 200)
     cursor = ctx.base + _str(args, "cursor", limit=2048).lstrip("/") if args.get("cursor") else ""
     if cursor and not cursor.startswith(ctx.scope_root):
         raise ToolError("参数 cursor 不正确")
@@ -867,12 +899,12 @@ def _download(ctx: ToolContext, row: dict) -> dict:
 
 
 @tool("list_downloads", "下载任务", "browse", "read",
-      "列出离线下载任务（状态、进度、保存路径、错误），每页最多 100 个，按编号倒序；counts 给出各状态的总数。"
+      "列出离线下载任务（状态、进度、保存路径、错误），每页条数上限由管理员设置，按编号倒序；counts 给出各状态的总数。"
       "只为统计时看 counts 即可，不必逐页翻完；批量停止、删除某类任务时用 propose_download_control 的 status，不需要先收集编号。"
       "普通对话只列普通任务，私密对话只列私密空间的任务。",
       {"status": {"type": "string", "enum": ["active", "stopped", "completed", "failed"], "description": "按状态筛选，省略为全部"},
        "cursor": {"type": "integer", "description": "上一页返回的 cursor"},
-       "limit": {"type": "integer", "description": "1–100，默认 100"}})
+       "limit": LIMIT_ARG}, params={"max_results": (200, 10, 2000, "单次最多列出任务数")})
 async def list_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
         raise ToolError("离线下载未启用")
@@ -882,7 +914,8 @@ async def list_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
     cursor = _int(args, "cursor", 0, 0, 2**62)
     # 普通对话只看普通任务，私密对话只看私密任务（§24.5.1）；在查询中筛选，分页和总数才准确。
     area = "private" if ctx.private else "normal"
-    page = ctx.offline.list(ctx.user_id, cursor=cursor, status=status, limit=_int(args, "limit", 100, 1, 100), area=area)
+    limit = _limit(ctx, args, 200)
+    page = ctx.offline.list(ctx.user_id, cursor=cursor, status=status, limit=limit, max_limit=limit, area=area)
     tasks = [_download(ctx, task) for task in page["tasks"]]
     counts = ctx.offline.counts(ctx.user_id, area=area)
     return ToolOutput({"tasks": tasks, "total": page["total"], "counts": counts, "next_cursor": page["next_cursor"]},
