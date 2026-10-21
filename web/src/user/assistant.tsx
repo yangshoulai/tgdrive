@@ -2,7 +2,8 @@
  * 文件助手抽屉（docs/assistant-design.md §12.2）。挂在 MainShell：切换页面、打开预览时对话不中断。
  * 运行在服务端进行，这里通过 SSE 订阅事件；断线后按 seq 续读。写入类操作的确认卡片由服务端数据渲染。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type DragEvent as ReactDragEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type DragEvent as ReactDragEvent } from "react";
+import { createPortal } from "react-dom";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, formatBytes, isShortcutControl, shortcutLabel, toast, type IconName, type MenuItem } from "../ui";
@@ -16,6 +17,7 @@ import { usePrivateAccess } from "./private-session";
 import { assistantEnvironment } from "./assistant-environment";
 import { commonFolder, useMentions } from "./assistant-mentions";
 import { AssistantComposer, type ComposerHandle } from "./assistant-composer";
+import { lockAssistantPage, watchAssistantViewport } from "./assistant-layout";
 import { FolderPicker } from "./folders";
 import { useCacheQueue } from "./cache";
 import { cacheStats, cacheSupported, type CacheFile } from "../cache-client";
@@ -133,6 +135,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     return Number.isFinite(saved) && saved > 0 ? boundWidth(saved) : MIN_WIDTH;
   });
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const mobile = viewportWidth <= 760;
   const [resizing, setResizing] = useState(false);
   const resize = useRef<{ pointerId: number; startX: number; startWidth: number; width: number } | null>(null);
   const maxWidth = boundWidth(viewportWidth - 32);
@@ -203,15 +206,14 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<ComposerHandle>(null);
   const drawer = useRef<HTMLElement>(null);
-  // 手机上 iOS 弹出键盘时 100dvh 不会变小，按可视区域高度收缩抽屉，输入框不被键盘挡住。
-  useEffect(() => {
-    const viewport = window.visualViewport, node = drawer.current;
-    if (!open || !viewport || !node) return;
-    const sync = () => node.style.setProperty("--assistant-viewport", `${Math.round(viewport.height)}px`);
-    sync();
-    viewport.addEventListener("resize", sync);
-    return () => { viewport.removeEventListener("resize", sync); node.style.removeProperty("--assistant-viewport"); };
-  }, [open]);
+  // 键盘会同时改变可视区域的尺寸与偏移；手机抽屉固定在这个区域，底层文件页不参与触摸和滚动。
+  useLayoutEffect(() => {
+    const node = drawer.current;
+    if (!open || page || !mobile || !node) return;
+    const unlock = lockAssistantPage();
+    const unwatch = watchAssistantViewport(node);
+    return () => { unwatch(); unlock(); };
+  }, [open, page, mobile]);
   const unsubscribe = useRef<(() => void) | null>(null);
   const followedRun = useRef<string | null>(null);
   const selection = useRef(0);
@@ -230,10 +232,15 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   useEffect(() => {
     if (!open) return;
     const timer = window.setTimeout(() => {
-      if (!document.querySelector(".modal-backdrop:not(.is-minimized), .menu")) input.current?.focus();
+      if (document.querySelector(".modal-backdrop:not(.is-minimized), .menu")) return;
+      // 触屏打开或切换对话时先阅读消息，只有主动点击输入框才唤起软键盘。
+      if (mobile || window.matchMedia("(pointer: coarse)").matches) {
+        if (!drawer.current?.contains(document.activeElement)) drawer.current?.focus({ preventScroll: true });
+      }
+      else input.current?.focus();
     }, 60);
     return () => window.clearTimeout(timer);
-  }, [open, currentId]);
+  }, [open, currentId, mobile]);
   // 抽屉占用的右侧宽度（含 16px 边距）写到根元素上，上传／下载托盘与最小化预览据此居中在剩余区域，不被抽屉挡住。
   useEffect(() => {
     if (page || !open) return;
@@ -287,7 +294,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     } catch (reason) { toast.error(api.errorMessage(reason, "加载失败，请稍后重试")); }
     finally { setHistoryBusy(false); }
   }
-  // 桌面允许继续操作文件；窄屏抽屉占满视口时约束焦点，关闭后回到入口。
+  // 桌面允许继续操作文件；窄屏以浮层打开时约束焦点，关闭后回到入口。
   useEffect(() => {
     if (!open || page) return;
     const previous = document.activeElement as HTMLElement | null;
@@ -483,7 +490,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     unsubscribe.current?.(); unsubscribe.current = null;
     followedRun.current = null;
     setDetail(null); setRunId(null); setLive(null); setHistory(false); setScopeTarget(null); mention.reset(); setDraft(""); setPendingMode("approval"); attachments.clear(true);
-    window.setTimeout(() => input.current?.focus(), 30);
+    if (!mobile && !window.matchMedia("(pointer: coarse)").matches) window.setTimeout(() => input.current?.focus(), 30);
   }
 
   async function send(text = draft) {
@@ -798,7 +805,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     : <div className="assistant-title"><strong>{detail?.conversation.title || "文件助手"}</strong>
       <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{detail ? conversationScope : "查找、整理，让文件井井有条"}</small></div>}
     <IconButton icon="plus" label={privateMode ? "新的私密对话（当前对话会被清除）" : "新对话"} shortcut="Mod+Shift+O" onClick={newConversation} />
-    <IconButton icon="keyboard" label="键盘快捷键" shortcut="?" onClick={() => setShortcutsOpen(true)} />
+    <IconButton className="assistant-keyboard-help" icon="keyboard" label="键盘快捷键" shortcut="?" onClick={() => setShortcutsOpen(true)} />
     {!page && onOpenPage && !privateMode && <IconButton icon="maximize" label="在全页打开" onClick={() => onOpenPage(currentId)} />}
     {!page && <IconButton icon="x" label="关闭" shortcut="Mod+J" onClick={onClose} />}
   </header>;
@@ -896,9 +903,13 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       {shortcutsOpen && <ShortcutsDialog area="assistant" privateSpace={privateMode} onClose={() => setShortcutsOpen(false)} />}
     </section>
   );
-  return (
+  return createPortal(<>
+    {open && <div className="assistant-backdrop" aria-hidden="true" />}
     <aside ref={drawer} className={`assistant-drawer${open ? " is-open" : ""}${privateMode ? " is-private" : ""}${resizing ? " is-resizing" : ""}`} style={{ "--assistant-width": `${actualWidth}px` } as CSSProperties}
-      aria-label={privateMode ? "文件助手（私密对话）" : "文件助手"} aria-hidden={!open} tabIndex={-1} onPointerDown={focusArea} onKeyDown={onKeyDown} {...dropProps} {...(!open ? { inert: "" } as object : {})}>
+      role={mobile ? "dialog" : "complementary"} aria-modal={open && mobile ? true : undefined}
+      aria-label={privateMode ? "文件助手（私密对话）" : "文件助手"} aria-hidden={!open} tabIndex={-1}
+      onPointerDown={event => { event.stopPropagation(); focusArea(event); }} onClick={event => event.stopPropagation()}
+      onKeyDown={onKeyDown} {...dropProps} {...(!open ? { inert: "" } as object : {})}>
       <div className="assistant-resize" onPointerDown={startResize} onPointerMove={moveResize}
         onPointerUp={finishResize} onPointerCancel={finishResize} onLostPointerCapture={finishResize} onDoubleClick={() => saveWidth(MIN_WIDTH)}
         role="separator" tabIndex={open ? 0 : -1} aria-label="调整助手宽度" aria-orientation="vertical"
@@ -912,7 +923,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       {dialogs}
       {shortcutsOpen && <ShortcutsDialog area="assistant" privateSpace={privateMode} onClose={() => setShortcutsOpen(false)} />}
     </aside>
-  );
+  </>, document.body);
 }
 
 /** 在用户当前页面执行浏览器工具（docs/assistant-design.md §19.7）。参数已经过服务端校验，这里只做页面操作。 */
