@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from ..errors import NotFoundError
 from ..objects import PRIVATE_PREFIX, ObjectService, Scope
+from ..offline.request import filename
 from ..offline.service import task_path
 from .config import LIMITS
 
@@ -404,20 +405,27 @@ class ActionExecutor:
                 try:
                     ticket = item.get("ticket") or self.offline.direct_ticket(user_id, item["url"], referer=item.get("referer"),
                                                                               name=item["name"])
-                    prepared.append({"ticket": ticket, "name": item["name"]})
-                    labels.append(item["name"])
+                    prepared.append({"ticket": ticket, "name": item["name"], "folder": item.get("folder") or ""})
+                    labels.append(f"{item['folder']}/{item['name']}" if item.get("folder") else item["name"])
                 except ValueError as exc:
                     progress.fail(item.get("name") or item.get("url", ""), str(exc))
                     progress.done += 1
-            if prepared:
+            # 按相册分目录（§38）：子目录名在提议时已清理成单段名称，这里再清理一次并复核仍在作用域内。
+            groups: dict[str, list[tuple[dict, str]]] = {}
+            for entry, label in zip(prepared, labels):
+                groups.setdefault(entry.pop("folder", "") or "", []).append((entry, label))
+            for folder, members in groups.items():
+                destination = target + filename(folder, fallback="相册") + "/" if folder else target
                 try:
-                    # 私密对话的离线下载是私密任务：保存目录在私密空间内，创建与写入都复核私密授权。
-                    self.offline.create(user_id, prepared, target, private_scope=private_scope)
-                    progress.ok += len(prepared)
+                    if folder and not self._inside(scope_root, destination):
+                        raise PermissionError("保存目录不在作用域内")
+                    # 私密区域的离线下载是私密任务：保存目录在私密空间内，创建与写入都复核私密授权。
+                    self.offline.create(user_id, [entry for entry, _ in members], destination, private_scope=private_scope)
+                    progress.ok += len(members)
                 except (ValueError, PermissionError, NotFoundError) as exc:
-                    for label in labels:
+                    for _, label in members:
                         progress.fail(label, str(exc) or "创建任务失败")
-                progress.done += len(prepared)
+                progress.done += len(members)
             if on_progress:
                 on_progress()
             await asyncio.sleep(0)

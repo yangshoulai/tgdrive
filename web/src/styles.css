@@ -3129,6 +3129,9 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .ai-plan-step small { flex: none; color: var(--ink-3); font-size: var(--text-micro); font-weight: 400; }
 .ai-plan-unverified { margin-left: 6px; padding: 0 5px; border-radius: var(--radius-xs); background: var(--warning-soft); color: var(--warning); }
 .ai-plan-detail, .ai-plan-reason { margin: 4px 0 0; color: var(--ink-3); font-size: var(--text-xs); font-weight: 400; overflow-wrap: anywhere; }
+.ai-plan-notes { margin-top: 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: var(--text-xs); }
+.ai-plan-notes strong { display: block; margin-bottom: 2px; color: var(--ink-2); font-weight: 500; }
+.ai-plan-notes p { margin: 0; color: var(--ink-3); line-height: 1.6; white-space: pre-line; overflow-wrap: anywhere; }
 .assistant-plan-bar { flex: none; min-width: 0; padding: 0 20px; border-bottom: 1px solid var(--line-soft); background: var(--surface); }
 .assistant-plan-inner { min-width: 0; width: 100%; max-width: 760px; margin-inline: auto; }
 .assistant-plan-row { display: flex; min-width: 0; align-items: center; gap: 8px; }

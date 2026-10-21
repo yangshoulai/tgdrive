@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import shutil
 import sqlite3
 import threading
 import time
@@ -730,6 +731,33 @@ class Metadata:
                 else:
                     self.db.rollback()
                 raise
+
+    COMPACT_MIN_FREE = 64 * 1024 * 1024
+
+    def compact(self, *, seconds: float = 5) -> dict[str, object]:
+        """释放删除数据后留下的空闲页，让数据库文件真正变小。
+        旧库没有开启 auto_vacuum：空闲页超过 64 MiB 且占文件四分之一时整体 VACUUM 一次并改为增量模式
+        （期间其他写入会等待，所以只做一次，且要求磁盘剩余空间不少于数据库大小）；之后每轮做有时限的增量回收。"""
+        db = self.db
+        page = db.execute("PRAGMA page_size").fetchone()[0]
+        total = db.execute("PRAGMA page_count").fetchone()[0] * page
+        free = db.execute("PRAGMA freelist_count").fetchone()[0] * page
+        if db.execute("PRAGMA auto_vacuum").fetchone()[0] == 2:
+            deadline, before = time.monotonic() + seconds, free
+            while free and time.monotonic() < deadline:
+                db.execute("PRAGMA incremental_vacuum(2048)").fetchall()
+                free = db.execute("PRAGMA freelist_count").fetchone()[0] * page
+            return {"mode": "incremental", "freed": before - free, "free": free, "size": total - (before - free)}
+        if free < self.COMPACT_MIN_FREE or free * 4 < total:
+            return {"mode": "none", "free": free, "size": total}
+        if self.path != ":memory:" and shutil.disk_usage(Path(self.path).resolve().parent).free < total:
+            return {"mode": "none", "free": free, "size": total, "skipped": "磁盘剩余空间不足，暂不压缩数据库"}
+        db.execute("PRAGMA auto_vacuum = INCREMENTAL")
+        db.execute("VACUUM")
+        if self.path != ":memory:":
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        size = db.execute("PRAGMA page_count").fetchone()[0] * page
+        return {"mode": "vacuum", "freed": total - size, "free": 0, "size": size}
 
     async def run_in_thread(self, function, /, *args, **kwargs):
         """在线程池和独立连接中执行重查询或批量事务。

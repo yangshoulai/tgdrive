@@ -317,6 +317,7 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "get_system_help": ("allow", None),
     "ask_user": ("allow", None),
     "update_plan": ("allow", None),
+    "recall_result": ("allow", "只读取本对话已有的结果"),
     "request_scope": ("na", "作用域只针对普通文件；私密空间解锁后整体可用"),
     **{name: ("allow", "只在私密空间内") for name in ("list_folder", "folder_tree", "get_file_info", "search_files", "storage_stats",
                                                      "find_large_files", "find_empty_folders", "list_recent")},
@@ -353,6 +354,7 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "analyze_page": ("limited", "支持跨站网页，不接受抓取脚本快照"),
     "inspect_page": ("allow", "分析当前任务所需的公共网页结构，不执行页面脚本"),
     "collect_gallery": ("limited", "只按隔离分析的规则翻页，不离开起始网站"),
+    "collect_links": ("limited", "只按筛选条件翻页，不离开起始网站"),
     "get_collection": ("limited", "只读取本对话的结果集"),
     "http_request": ("allow", "与普通对话相同，支持公共接口、认证、查询参数与正文"),
     "propose_save_attachment": ("never", "附件只能另存为普通文件"),
@@ -520,8 +522,11 @@ async def ask_user(ctx: ToolContext, args: dict) -> ToolOutput:
       "仅用于长任务、多个独立阶段的复杂任务，或用户明确要求计划时；简单查询、单次改名／移动直接执行，不要建计划。"
       "计划可随时增删、改写、重排或重新打开已完成步骤。每次传入完整步骤；调整历史任务时传回 plan_id，保留步骤编号。"
       "执行步骤调用工具时传 plan_step_id，成功结果会自动作为完成依据；没有关联结果时，完成需要在 detail 写明依据。"
-      "待确认操作不能标成完成。纯分析步骤使用 kind=reasoning 并在完成时提供 detail。",
+      "待确认操作不能标成完成。纯分析步骤使用 kind=reasoning 并在完成时提供 detail。"
+      "notes 是进度记录（≤2000 字）：长任务每完成一批就写下已完成范围、下一步的起点和需要记住的结果集编号、游标；"
+      "它每一步都会出现在上下文里，较早的工具结果被省略后仍可依据它继续。只更新 notes 时可以省略 items。",
       {"title": {"type": "string", "description": "简短任务标题"},
+       "notes": {"type": "string", "description": "进度记录：已完成范围、下一步起点、结果集编号与游标；会替换上一份记录"},
        "plan_id": {"type": "string", "description": "继续已有任务时使用上下文中的计划编号；新任务省略"},
        "reason": {"type": "string", "description": "调整计划的简短原因"},
        "items": {"type": "array", "description": "1–20 个完整步骤", "items": {"type": "object", "properties": {
@@ -529,13 +534,49 @@ async def ask_user(ctx: ToolContext, args: dict) -> ToolOutput:
           "content": {"type": "string"}, "status": {"type": "string", "enum": list(STATUSES)},
           "kind": {"type": "string", "enum": ["tool", "reasoning"]},
           "detail": {"type": "string", "description": "结论、失败原因或未完成的说明"}},
-          "required": ["content", "status"]}}}, ("items",))
+          "required": ["content", "status"]}}})
 async def update_plan(ctx: ToolContext, args: dict) -> ToolOutput:
     plan = ctx.plan or ctx.state.setdefault("plan", Plan())
     event = plan.update(args)
     done = sum(item["status"] == "completed" for item in event["items"])
-    return ToolOutput({"status": "ok", "plan_id": event["id"], "items": brief(event["items"])},
+    return ToolOutput({"status": "ok", "plan_id": event["id"], "items": brief(event["items"]),
+                       **({"notes": event["notes"]} if event.get("notes") else {})},
                       f"{done}/{len(event['items'])} 已完成", event=event)
+
+
+# 读取不可信内容的工具；内容只作为数据，不改变当前访问模式。
+TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "inspect_page": "分析过网页结构", "collect_gallery": "分析过网页",
+               "collect_links": "分析过网页", "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应",
+               "view_image": "查看过图片内容"}
+
+
+@tool("recall_result", "找回工具结果", "context", "meta",
+      "重新读取本对话中较早的一次工具结果原文：上下文里写着「原始结果已省略，可用 recall_result(ref=N)」的结果都能找回。"
+      "不重新访问网页或文件、不重复执行操作；结果较长时按 next_offset 分段读取。需要旧结果时用它，不要用相同参数重新调用原工具。",
+      {"ref": {"type": "integer", "description": "摘要行里给出的 ref"},
+       "offset": {"type": "integer", "description": "从第几个字符开始，默认 0"}}, ("ref",),
+      params={"max_chars": (30000, 2000, 500000, "单次最多返回字符数")}, fixed=True)
+async def recall_result(ctx: ToolContext, args: dict) -> ToolOutput:
+    if ctx.trace is None or not ctx.conversation_id:
+        raise ToolError("当前无法读取历史结果")
+    ref = _int(args, "ref", 0, 1, 2**62)
+    offset = _int(args, "offset", 0, 0, 10**9)
+    message = ctx.trace.message(ctx.conversation_id, ref)
+    if not message or message.get("role") != "tool" or not isinstance(message.get("model_content"), str):
+        raise ToolError(f"ref={ref} 不是本对话中的工具结果")
+    name = message.get("name") or message.get("tool_name") or "工具"
+    if name in TAINT_TOOLS and ctx.taint is not None:
+        ctx.taint(TAINT_TOOLS[name])
+    content = message["model_content"]
+    # 取出原结果的数据部分（去掉外层包装，避免嵌套）。
+    start, end = content.find("<untrusted_data>\n"), content.rfind("\n</untrusted_data>")
+    data = content[start + len("<untrusted_data>\n"):end] if 0 <= start < end else content
+    size = int(ctx.params.get("max_chars", 30000))
+    chunk = data[offset:offset + size]
+    following = offset + size if offset + size < len(data) else None
+    return ToolOutput({"ref": ref, "tool": name, "status": message.get("status"), "arguments": message.get("arguments"),
+                       "content": chunk, "offset": offset, "total": len(data), "next_offset": following},
+                      f"{name} 的结果（第 {offset}–{offset + len(chunk)} 字符，共 {len(data)}）", items=1)
 
 
 # ---------- 浏览与查询 ----------

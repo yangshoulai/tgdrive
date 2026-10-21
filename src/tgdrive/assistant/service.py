@@ -43,6 +43,7 @@ from .guard import SecretGuard
 from .providers import ProviderError, ToolCall, ToolDef
 from .tools import (
     PRIVATE_LABEL,
+    TAINT_TOOLS,
     TOOLS,
     ToolContext,
     ToolError,
@@ -70,9 +71,6 @@ AUTO_WAIT = 25
 ACCESS_MODES = ("approval", "full")
 MAX_MENTIONS = 20
 # 聊天框附件：统一保存在普通文件区域的这个目录下（§22.5），每条消息最多 10 个。
-# 读取不可信内容的工具；内容只作为数据，不改变当前访问模式。
-TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "inspect_page": "分析过网页结构", "collect_gallery": "分析过网页",
-               "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应", "view_image": "查看过图片内容"}
 
 
 def session_hash(token: str) -> str:
@@ -168,6 +166,8 @@ def _run_clock(state) -> float:
 
 _REVIEW_PROMISE = re.compile(r"(?:^|[。！？\n])\s*(?:我(?:会|将|先)?|接下来(?:我会)?|现在(?:我会)?)?\s*(?:等待|等候)(?:你|您)(?:的)?(?:确认|审批|批准)"
                              r"|(?:你|您)(?:确认|批准|审批)(?:后|之后)[^。！？\n]{0,20}我(?:会|将)[^。！？\n]{0,12}继续")
+# 结束语里承诺「稍后／自动继续」：本轮结束后不会有人继续，这样的回复不能当作最终回复。
+_CONTINUE_PROMISE = re.compile(r"(?:我|助手)(?:会|将|再)?(?:自动|稍后|随后|马上|接着|继续)+(?:继续)?(?:处理|执行|下载|完成|进行|抓取|保存|整理)")
 
 
 class AssistantDenied(PermissionError):
@@ -1954,12 +1954,13 @@ class AssistantService:
                 "summary": reason, "result": payload, "items": None, "duration_ms": 0, "truncated": False,
                 "event": None, "ends_turn": False, "model_content": prompts.wrap_result(call.name, status, payload, False)}
 
-    async def _record_tool(self, state: RunState, body: dict) -> None:
+    async def _record_tool(self, state: RunState, body: dict) -> int:
         seq = self.trace.append(state.conversation_id, state.id, "tool", body, tool_name=body["name"])
         await state.emit({"type": "message", "message": self._public_message(
             {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "tool", "tool_name": body["name"], **body})})
         if body["event"]:
             await state.emit({"type": "tool_event", **body["event"]})
+        return seq
 
     async def _publish_plan(self, state: RunState) -> None:
         plan = state.plan
@@ -2007,6 +2008,10 @@ class AssistantService:
             limits = self.config.limits()
             deadline = _run_clock(state) + limits["run_seconds"]
             repeats: collections.Counter = collections.Counter()
+            # 重复检测（§38）：同一调用得到同样的结果才算没有进展；第一次超限只提醒，同一段再超限才停止。
+            repeat_refs: dict = {}
+            loop_warned = False
+            trim_warned = False
             errors = 0
             shared: dict = {}
             candidate = self.trace.latest_plan(state.conversation_id)
@@ -2015,6 +2020,7 @@ class AssistantService:
             state.plan = Plan(state.id, candidate)
             plan_checked = False
             review_checked = False
+            continue_checked = False
             forced_final: str | None = None
             compacted = overflowed = False
             # 长任务分段（§32）：预算按段计算；计划仍有可执行步骤且本段有进展时，在同一轮中自动开始下一段。
@@ -2056,7 +2062,9 @@ class AssistantService:
                         segment_done = state.plan.completed
                         deadline = _run_clock(state) + limits["run_seconds"]
                         repeats.clear()
-                        compacted = plan_checked = review_checked = False
+                        repeat_refs.clear()
+                        loop_warned = trim_warned = False
+                        compacted = plan_checked = review_checked = continue_checked = False
                         forced_final = None
                     if forced_final and state.plan.data and not state.plan.remaining:
                         # 计划已经全部完成，只差最终回复：不提示上限，也不把这一轮记为预算中断。
@@ -2120,6 +2128,12 @@ class AssistantService:
                 await state.emit({"type": "context", **state.context})
                 if used > window * 0.85:
                     raise ContextFull()
+                if used > window * 0.7 and not trim_warned and "update_plan" in tools:
+                    # 裁剪前提醒（§38）：较早的工具结果即将只剩摘要行，先把进度与编号写进计划的 notes。
+                    trim_warned = True
+                    context_block = {**context_block, "content": context_block["content"] + "\n\n[系统提示] 上下文已用约 "
+                                     f"{round(used / window * 100)}%，较早的工具结果很快会被省略为摘要行（可用 recall_result 找回）。"
+                                     "请先用 update_plan 的 notes 记下已完成的范围、下一步起点、结果集编号和游标，再继续。"}
                 await self._attach_images(state, history)
                 history.append(context_block)
                 remaining = max(5.0, deadline + (60 if forced_final else 0) - _run_clock(state))
@@ -2157,10 +2171,13 @@ class AssistantService:
                         item["status"] == "waiting_user" for item in state.plan.data["items"])))
                 repair_review = missing_review and not review_checked
                 check_plan = not calls and not forced_final and not missing_review and state.plan.needs_check and not plan_checked
+                # 没有待确认的操作却说「我会继续处理」就要结束：让模型现在就继续，或者给出真实的最终结果（一轮一次）。
+                check_continue = not calls and not forced_final and not missing_review and not check_plan and not continue_checked \
+                    and not self.trace.has_open_actions(state.conversation_id) and bool(_CONTINUE_PROMISE.search(reply.text))
                 assistant = {"text": self.guard.redact(reply.text), "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
                              "model_id": model["id"], "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens,
                              "prompt_estimate": estimate}
-                if check_plan or repair_review:
+                if check_plan or repair_review or check_continue:
                     assistant["text"] = ""
                 elif missing_review:
                     assistant["text"] = "助手没有生成可确认的请求，尚需确认的这一步未执行。请补充要求后重试。"
@@ -2185,6 +2202,15 @@ class AssistantService:
                                    "model_text": "[系统事件] 当前没有真实的待确认请求。不能只在文字中要求用户审批或承诺审批后继续。"
                                    "需要修改时调用对应 propose_* 工具，提问时调用 ask_user；完全访问下常规操作直接通过工具执行。"
                                    "若工作已完成请汇报真实结果，无法执行则说明原因，不要虚构确认卡片。"}
+                        seq = self.trace.append(state.conversation_id, state.id, "event", message)
+                        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
+                        continue
+                    if check_continue:
+                        continue_checked = True
+                        message = {"type": "continue_check", "text": "继续处理尚未完成的部分",
+                                   "model_text": "[系统事件] 你在回复里表示会继续处理，但没有调用工具，本轮即将结束，之后不会自动继续。"
+                                   "还有可以完成的工作就现在调用工具继续；已经完成就汇报真实结果；需要用户决定时调用 ask_user 或对应的 propose_* 工具。"
+                                   "不要再承诺稍后继续。"}
                         seq = self.trace.append(state.conversation_id, state.id, "event", message)
                         await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
                         continue
@@ -2236,7 +2262,7 @@ class AssistantService:
                     results = await self._tool_batch(state, batch, tools, limits, shared, deadline)
                     offset += len(batch)
                     for call, body in zip(batch, results):
-                        await self._record_tool(state, body)
+                        ref = await self._record_tool(state, body)
                         if body["status"] == "limited":
                             continue
                         ends = ends or bool(body.get("ends_turn"))
@@ -2251,9 +2277,12 @@ class AssistantService:
                             arguments = json.dumps(repeated_args, sort_keys=True, ensure_ascii=False)
                         except ValueError:
                             arguments = call.arguments
-                        key = (call.name, arguments)
+                        outcome = hashlib.sha256(str(body.get("model_content", "")).encode()).hexdigest()[:16]
+                        key = (call.name, arguments, outcome)
                         repeats[key] += 1
-                        looping = looping or repeats[key] > limits["repeat_threshold"]
+                        repeat_refs.setdefault(key, ref)
+                        if repeats[key] > limits["repeat_threshold"]:
+                            looping, loop_key = True, key
                     if ends or looping or too_many_errors:
                         skipped_status = "cancelled"
                         skipped_reason = ("等待用户回复或确认，本次调用未执行" if ends else
@@ -2267,6 +2296,17 @@ class AssistantService:
                     # 需要解锁私密空间时单独标记，界面据此弹出解锁并在解锁后继续（§37.3）。
                     stop_reason = "private_locked" if state.private_needed else "waiting_user"
                     break
+                if looping and not loop_warned:
+                    loop_warned = True
+                    name = loop_key[0]
+                    repeats[loop_key] = 0
+                    message = {"type": "repeat_check", "text": "发现重复调用，已提醒助手换个做法",
+                               "model_text": f"[系统事件] 你已经多次用相同参数调用 {name}，每次结果都相同（第一次的结果 ref={repeat_refs[loop_key]}）。"
+                               "不要再重复这次调用：需要之前的结果用 recall_result(ref) 读取；把进度、结果集编号和游标记在 update_plan 的 notes 里；"
+                               "需要推进时换参数（如 offset、cursor、下一项）或换方法；确实无法推进就说明原因后结束。"}
+                    seq = self.trace.append(state.conversation_id, state.id, "event", message)
+                    await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
+                    continue
                 if looping:
                     raise StopRun("loop", "助手重复调用了相同的工具，已停止。请换一种说法或缩小范围。")
                 if too_many_errors:
@@ -2551,10 +2591,30 @@ class AssistantService:
         return {key: result[key] for key in ("total", "added", "updated", "models")}
 
 
+# 摘要行保留的结果字段（§38）：继续工作所需的编号、游标与进度，裁剪后不必重新调用工具。
+_KEPT_FIELDS = ("collection_id", "action_id", "snapshot_id", "plan_id", "next_offset", "next_cursor", "cursor",
+                "count", "total", "pages", "complete", "stopped", "progress", "url", "path")
+
+
+def _kept(result: object) -> str:
+    if not isinstance(result, dict):
+        return ""
+    parts = []
+    for key in _KEPT_FIELDS:
+        value = result.get(key)
+        if value is None or value == "" or isinstance(value, (list, dict)) and key != "progress":
+            continue
+        text = json.dumps(value, ensure_ascii=False) if isinstance(value, dict) else str(value)
+        parts.append(f"{key}={text[:160]}")
+    return "；保留：" + "，".join(parts) if parts else ""
+
+
 def _slim_result(message: dict) -> str:
-    """工具结果的摘要行（§23）：只含工具名、状态与留痕里的一行摘要。"""
+    """工具结果的摘要行（§23、§38）：工具名、状态、一行摘要与关键字段；原文可用 recall_result(ref) 找回。"""
     status = "成功" if message.get("status") == "ok" else "出错"
-    return f"[已省略原始结果] {message.get('name') or message.get('tool_name') or '工具'} {status}：{message.get('summary') or '无摘要'}"
+    ref = f"，可用 recall_result(ref={message['seq']}) 重新读取" if message.get("seq") else ""
+    return (f"[原始结果已省略{ref}] {message.get('name') or message.get('tool_name') or '工具'} {status}："
+            f"{message.get('summary') or '无摘要'}{_kept(message.get('result'))}")
 
 
 def _clean(history: list[dict]) -> list[dict]:

@@ -191,6 +191,8 @@ export type HttpDecision = "approved" | "rejected" | "expired" | "cancelled";
 export type HttpRequestPreview = { url: string; method: string; headers: Record<string, string>; body: string | null; body_encoding: "text" | "base64"; body_bytes: number };
 export type PlanStatus = "pending" | "in_progress" | "waiting_user" | "completed" | "failed" | "paused" | "cancelled";
 export type PlanEvent = { type: "plan"; id?: string; run_id?: string; version?: number; title?: string; reason?: string;
+  /** 助手的进度记录：已完成范围、下一步起点与需要记住的编号（§38）。 */
+  notes?: string;
   status?: PlanStatus; automatic?: boolean;
   items: { id?: string; content: string; status: PlanStatus; kind?: "tool" | "reasoning"; detail?: string;
     /** 没有关联的成功工具结果，由助手说明依据后标为完成。 */

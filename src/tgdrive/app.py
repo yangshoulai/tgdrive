@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from pathlib import Path
 
 from .accounts import AccountService
@@ -82,11 +83,14 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     maintenance = MaintenanceService(metadata, engine, store, keystore, backup_dir=root / "backups",
                                      audit_retention_days=audit_retention_days)
     maintenance.trash_purger = objects.purge_expired_trash  # 回收站条目保留 30 天后自动永久删除
-    maintenance.thumbnail_adopter = objects.adopt_legacy_thumbnails  # 旧版明文缩略图解锁后加密转存
 
     async def migrate_thumbnails() -> dict[str, int]:
-        # 每轮最多转存 60 张：每张是一条 Telegram 消息，避免挤占正常上传的发送频率。
-        return {"moved": await objects.migrate_thumbnails(60),
+        # 旧版内联在数据库里的缩略图逐张转存为对象：每张是一条 Telegram 消息，实际速度由 Bot 发送间隔决定；
+        # 每轮最多占用 240 秒，不与正常上传长时间争抢发送频率。
+        started = time.monotonic()
+        adopted = await objects.adopt_legacy_thumbnails(500, seconds=60)
+        moved = await objects.migrate_thumbnails(5000, seconds=max(0.0, 240 - (time.monotonic() - started)))
+        return {"adopted": adopted, "moved": moved, "inline": objects.inline_thumbnails()["count"],
                 "swept": await objects.metadata.run_in_thread(objects.sweep_thumbnail_objects, 500)}
     maintenance.thumbnail_migrator = migrate_thumbnails
     context = AppContext(metadata, keystore, engine, accounts, objects, clients, s3, maintenance,

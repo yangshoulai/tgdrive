@@ -82,18 +82,26 @@ type Step =
   /** 执行层在过程中插入的节点（自动续跑下一段、核验计划等），按发生位置显示。 */
   | { kind: "marker"; key: string; text: string; tone: "accent" | "neutral" };
 type Turn = { key: string; user?: ai.ChatMessage; steps: Step[]; cards: ai.ChatMessage[]; answer?: ai.ChatMessage; notices: ai.ChatMessage[];
-  runId: string | null; modelId?: number; input: number; output: number; startedAt?: number; endedAt?: number };
+  runId: string | null; modelId?: number; input: number; output: number; startedAt?: number; endedAt?: number;
+  /** answer 出现时时间线的长度：之后还有步骤（确认后续跑的下一次运行等）时，它不是最终回复，要放回这个位置。 */
+  answerAt?: number };
 type Item = { kind: "turn"; turn: Turn } | { kind: "event"; message: ai.ChatMessage };
 const SYSTEM_EVENTS = ["scope_changed", "scope_rejected", "mode_changed", "model_switched", "action_result", "summary"];
 const DECISION_EVENTS = ["action", "scope_request", "question", "http_request"];
-const MARKER_EVENTS = ["continued", "plan_check", "review_check"];
+const MARKER_EVENTS = ["continued", "plan_check", "review_check", "continue_check", "repeat_check"];
 
-function group(messages: ai.ChatMessage[]): Item[] {
+export function group(messages: ai.ChatMessage[]): Item[] {
   const items: Item[] = [];
   const plans = new Map<string, { turn: Turn; index: number }>();
   let turn: Turn | null = null;
   // 决定节点已经显示操作的实时状态；同一操作的结果分隔线只在找不到原节点（更早的消息未加载）时保留。
   const linked = new Set(messages.flatMap(message => message.role === "tool" && message.event?.type === "action" ? [message.event.action_id] : []));
+  // 被后续步骤或新回复取代的回复按发生顺序放回时间线，不能留在末尾当作最终回复。
+  const settle = (target: Turn) => {
+    if (!target.answer?.text) return;
+    target.steps.splice(target.answerAt ?? target.steps.length, 0, { kind: "note", key: `n${target.answer.seq}`, text: target.answer.text });
+    target.answer = undefined; target.answerAt = undefined;
+  };
   const ensure = (message: ai.ChatMessage): Turn => {
     if (!turn) { turn = { key: `t${message.seq}`, steps: [], cards: [], notices: [], runId: message.run_id, input: 0, output: 0, startedAt: message.created_at }; items.push({ kind: "turn", turn }); }
     turn.runId = turn.runId ?? message.run_id;
@@ -123,7 +131,7 @@ function group(messages: ai.ChatMessage[]): Item[] {
     // 只给模型看的系统事件（没有界面文字）不显示。
     if (message.role === "event" && !message.text && !message.event) continue;
     if (message.role === "event" && message.run_id && MARKER_EVENTS.includes(message.type ?? "")) {
-      ensure(message).steps.push({ kind: "marker", key: `m${message.seq}`, text: message.text ?? "", tone: message.type === "continued" ? "accent" : "neutral" });
+      ensure(message).steps.push({ kind: "marker", key: `m${message.seq}`, text: message.text ?? "", tone: message.type === "continued" || message.type === "continue_check" ? "accent" : "neutral" });
       continue;
     }
     if (message.role === "event" && (SYSTEM_EVENTS.includes(message.type ?? "") || !message.run_id && !["error", "stopped", "limit"].includes(message.type ?? ""))) {
@@ -141,8 +149,9 @@ function group(messages: ai.ChatMessage[]): Item[] {
       if (message.tool_calls?.length) {
         if (text) current.steps.push({ kind: "note", key: `n${message.seq}`, text });
       } else if (text) {
-        if (current.answer?.text) current.steps.push({ kind: "note", key: `n${current.answer.seq}`, text: current.answer.text });
+        settle(current);
         current.answer = message;
+        current.answerAt = current.steps.length;
       }
       continue;
     }
@@ -152,6 +161,7 @@ function group(messages: ai.ChatMessage[]): Item[] {
       else current.steps.push({ kind: "tool", key: `s${message.seq}`, message });
     }
   }
+  for (const item of items) if (item.kind === "turn" && item.turn.answer && (item.turn.answerAt ?? 0) < item.turn.steps.length) settle(item.turn);
   return items;
 }
 
@@ -197,7 +207,7 @@ export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprova
     [detail.actions, detail.messages, running, onReview, onActionChanged, onFilesChanged]);
   return <DecisionContext.Provider value={decisions}>
     {items.map(item => item.kind === "event" ? <SystemEvent key={`e${item.message.seq}`} message={item.message} />
-      : <TurnView key={item.turn.key} turn={item.turn} live={item === lastTurn && running ? live : null}
+      : <TurnView key={item.turn.key} turn={item.turn} live={item === lastTurn && running ? live : null} runId={runId}
           model={item.turn.modelId != null ? modelLabel(item.turn.modelId) : item === lastTurn && running ? liveModel ?? "" : ""}
           httpApprovals={httpApprovals.filter(approval => approval.runId === (item.turn.runId ?? (item === lastTurn ? runId : null)))}
           onRetry={!running ? onRetry : undefined} />)}
@@ -212,11 +222,17 @@ function SystemEvent({ message }: { message: ai.ChatMessage }) {
   return <div className="ai-divider" role="note"><span><Icon name={icon} size={12} />{message.text}</span></div>;
 }
 
-function TurnView({ turn, live, model, httpApprovals, onRetry }: {
-  turn: Turn; live: LiveRun | null; model: string; httpApprovals: HttpApproval[]; onRetry?: (seq: number) => void;
+function TurnView({ turn, live, runId = null, model, httpApprovals, onRetry }: {
+  turn: Turn; live: LiveRun | null; runId?: string | null; model: string; httpApprovals: HttpApproval[]; onRetry?: (seq: number) => void;
 }) {
   const { actions } = useContext(DecisionContext);
   const steps = [...turn.steps];
+  // 同一轮里又开始运行（确认后续跑等）：上一次的回复不再是最终回复，回到它在时间线中的位置。
+  let answer = turn.answer;
+  if (live && answer?.text && answer.run_id !== runId) {
+    steps.splice(turn.answerAt ?? steps.length, 0, { kind: "note", key: `n${answer.seq}`, text: answer.text });
+    answer = undefined;
+  }
   const retry = turn.user && onRetry ? () => onRetry(turn.user!.seq) : undefined;
   // 已经写入消息的 HTTP 审批由消息渲染；其余（等待中或刚决定、结果未到）用实时审批状态补一个决定节点。
   const recorded = new Set(steps.flatMap(step => step.kind === "decision" && step.message?.event?.type === "http_request"
@@ -226,7 +242,10 @@ function TurnView({ turn, live, model, httpApprovals, onRetry }: {
     if (live.reasoning) steps.push({ kind: "thinking", key: "live-thinking", text: live.reasoning, ms: null, live: true, startedAt: live.reasoningStartedAt });
     for (const tool of live.tools) if (!httpApprovals.some(approval => approval.toolCallId === tool.callId)) steps.push({ kind: "tool", key: `live-${tool.callId}`, pending: tool });
   }
-  const streaming = live?.streaming ?? "";
+  // 已经有工具步骤时，正在输出的文字多半是两次工具调用之间的说明：在时间线末尾显示，结束后若是最终回复再移到下方。
+  const inline = Boolean(live?.streaming) && steps.some(step => step.kind !== "thinking");
+  if (inline) steps.push({ kind: "note", key: "live-note", text: live!.streaming });
+  const streaming = inline ? "" : live?.streaming ?? "";
   const mark = useMarkState(live);
   const waiting = httpApprovals.some(approval => approval.status === "pending");
   const plans = turn.cards.filter(message => message.event?.type === "plan");
@@ -237,7 +256,7 @@ function TurnView({ turn, live, model, httpApprovals, onRetry }: {
     const action = event?.type === "action" ? actions.find(item => item.id === event.action_id) : undefined;
     return action?.result?.links?.length ? [action] : [];
   });
-  const hasAssistant = steps.length > 0 || turn.cards.length > 0 || turn.answer || streaming || turn.notices.length > 0 || live;
+  const hasAssistant = steps.length > 0 || turn.cards.length > 0 || answer || streaming || turn.notices.length > 0 || live;
   return <div className="ai-turn">
     {turn.user && <UserMessage message={turn.user} onRetry={retry} />}
     {hasAssistant && <div className={`ai-reply${live ? " is-live" : ""}`}>
@@ -249,13 +268,13 @@ function TurnView({ turn, live, model, httpApprovals, onRetry }: {
         {steps.length > 0 && <Process steps={steps} live={Boolean(live)} />}
         {cards.map(message => message.event?.type === "browser" && <BrowserCard key={`card-${message.seq}`} event={message.event} />)}
         {shared.map(action => <ShareLinks key={action.id} action={action} />)}
-        {(turn.answer || streaming) && <div className="ai-answer">
-          <Markdown source={streaming || turn.answer?.text || ""} />{streaming && <i className="ai-caret" aria-hidden="true" />}
+        {(answer || streaming) && <div className="ai-answer">
+          <Markdown source={streaming || answer?.text || ""} />{streaming && <i className="ai-caret" aria-hidden="true" />}
         </div>}
         {turn.notices.map(notice => <Notice key={notice.seq} message={notice} onRetry={notice.retry ? retry : undefined} />)}
-        {!live && (turn.answer || turn.output > 0) && <div className="ai-reply-foot">
+        {!live && (answer || turn.output > 0) && <div className="ai-reply-foot">
           {turn.endedAt && <span>{formatDateTime(turn.endedAt)}</span>}
-          {turn.answer?.text && <button type="button" onClick={() => copyMessage(turn.answer?.text ?? "")}><Icon name="copy" size={12} />复制</button>}
+          {answer?.text && <button type="button" onClick={() => copyMessage(answer?.text ?? "")}><Icon name="copy" size={12} />复制</button>}
         </div>}
       </div>
     </div>}
@@ -404,8 +423,8 @@ const TOOL_ICONS: [RegExp, IconName][] = [
   [/^propose_save_attachment/, "paperclip"], [/^ui_generate_thumbnails/, "image"],
   [/^(list_folder|folder_tree|find_empty)/, "folder"], [/^(search_files|find_large|find_duplicates)/, "search"],
   [/^(storage_stats|trash_stats)/, "pulse"], [/^(list_trash)/, "trash"], [/^read_text_file/, "fileText"], [/^get_file_info/, "file"],
-  [/^(list_public|propose_share|propose_unshare)/, "link"], [/download/, "download"], [/^(inspect_page|analyze_page|collect_gallery|parse_download)/, "globe"],
-  [/^(ui_|browser_)/, "cursor"], [/^propose_/, "edit"], [/^(get_context|request_scope)/, "info"], [/^list_recent/, "list"],
+  [/^(list_public|propose_share|propose_unshare)/, "link"], [/download/, "download"], [/^(inspect_page|analyze_page|collect_gallery|collect_links|parse_download)/, "globe"],
+  [/^(ui_|browser_)/, "cursor"], [/^propose_/, "edit"], [/^(get_context|request_scope|recall_result)/, "info"], [/^list_recent/, "list"],
 ];
 const toolIcon = (name = ""): IconName => TOOL_ICONS.find(([pattern]) => pattern.test(name))?.[1] ?? "wrench";
 
@@ -634,6 +653,7 @@ function PlanSteps({ plan }: { plan: ai.PlanEvent }) {
         {item.detail && <p className="ai-plan-detail">{item.detail}</p>}</div>
     </li>)}</ol>
     {plan.reason && <p className="ai-plan-reason">调整原因：{plan.reason}</p>}
+    {plan.notes && <div className="ai-plan-notes"><strong>进度记录</strong><p>{plan.notes}</p></div>}
   </>;
 }
 

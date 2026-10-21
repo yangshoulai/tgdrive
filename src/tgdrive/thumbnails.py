@@ -492,6 +492,8 @@ class ThumbnailService:
             "LEFT JOIN users u ON u.id=b.owner_user_id WHERE o.blob_uuid IS NOT NULL AND o.size>0 "
             "AND (substr(o.key,1,9)!='.tgdrive/' OR substr(o.key,1,?)=?) "
             "AND (b.owner_user_id IS NULL OR u.status='active') AND o.modified_at<? "
+            # 缩略图计入所在存储桶的配额：空间已满的桶保存不了，先不回源。
+            "AND (b.quota_bytes IS NULL OR b.quota_bytes-b.used_bytes>=1048576) "
             "AND (o.bucket_id,o.key)>(?,?) AND NOT EXISTS (SELECT 1 FROM thumbnails t WHERE t.blob_uuid=o.blob_uuid) "
             f"AND {clauses} ORDER BY o.bucket_id,o.key LIMIT 32",
             (len(PRIVATE_PREFIX), PRIVATE_PREFIX, time.time() - BACKFILL_AGE, *self._backfill_cursor, *args)).fetchall()
@@ -551,7 +553,8 @@ class ThumbnailService:
                 "pressure": pressure, "jobs": jobs, "recent": list(reversed(self._history.values())),
                 "cache": self.cache.status(), "remote_bytes": self._remote_bytes,
                 "client_timeout_seconds": CLIENT_TIMEOUT, "task_timeout_seconds": TIMEOUT,
-                "automatic_remote_reads": False, "capacity": 128, "backfill": self.backfill_status()}
+                "automatic_remote_reads": False, "capacity": 128, "backfill": self.backfill_status(),
+                "inline": self.objects.inline_thumbnails()}
 
     async def _run(self):
         while True:
@@ -695,6 +698,9 @@ class ThumbnailService:
                     await self.objects.set_thumbnail(scope, info.key, data, variant)
                     saved.append(variant)
                 except QuotaExceededError:
+                    if not saved:
+                        # 没有保存任何规格：不记「无法生成」，空间腾出后还能自动补图。
+                        raise ThumbnailRetry("存储空间已满，无法保存缩略图") from None
                     break
             if force:
                 self.objects.finish_thumbnail_set(scope, info.key, saved)

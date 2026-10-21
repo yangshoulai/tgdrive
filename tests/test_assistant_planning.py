@@ -374,6 +374,23 @@ class LoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, "failed")
         self.assertIn("没有生成可确认", messages[-1]["text"])
 
+    async def test_promise_to_continue_gets_one_nudge_then_real_work(self):
+        service, state = await self.run_fixture([Reply(text="已分析相册，我会自动继续处理剩下的页面。"),
+                                                 Reply(tool_calls=[call("search_files", {})]), Reply(text="12 页都已处理完成。")])
+        messages = service.trace.messages(state.conversation_id)
+        self.assertEqual(service._model_call.await_count, 3)
+        self.assertEqual([m.get("type") for m in messages if m["role"] == "event"], ["continue_check"])
+        service.search.assert_awaited_once()
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(messages[-1]["text"], "12 页都已处理完成。")
+        # 只提醒一次：再次承诺时按普通回复结束，不会循环。
+        service, state = await self.run_fixture([Reply(text="我会继续处理。"), Reply(text="我会继续处理。")])
+        self.assertEqual(service._model_call.await_count, 2)
+        self.assertEqual(state.status, "completed")
+        # 普通的结束语不触发。
+        service, state = await self.run_fixture([Reply(text="已完成。如果需要，我可以继续整理其他目录。")])
+        self.assertEqual(service._model_call.await_count, 1)
+
     async def test_action_finishing_during_model_response_gets_consumed(self):
         service, state = self.fixture([])
         replies = iter(["旧的处理中回复", "已根据实际操作结果继续处理"])

@@ -165,7 +165,7 @@ class ObjectService:
             db.execute("UPDATE blobs SET refcount = ? WHERE uuid = ?", (count, blob_uuid))
             if bucket_id is not None and not db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND blob_uuid=? LIMIT 1",
                                                         (bucket_id, blob_uuid)).fetchone():
-                self._drop_thumbnail_objects(db, blob_uuid, now, bucket_id)
+                self._hand_over_thumbnails(db, blob_uuid, bucket_id, now)
             return
         self._drop_thumbnail_objects(db, blob_uuid, now)
         refs = [r[0] for r in db.execute("SELECT blob_ref FROM chunks WHERE blob_uuid = ?", (blob_uuid,))]
@@ -392,14 +392,14 @@ class ObjectService:
             db.execute("UPDATE objects SET public_downloads=public_downloads+1 WHERE bucket_id=? AND key=?", (bucket_id, key))
 
     # ---------- 缩略图（按 Blob 保存：移动、复制、秒传自动共享，覆盖内容后自然失效） ----------
-    # thumb：列表小图（约 160px，旧版为 320px），用该 Blob 的 DEK 派生密钥加密后存在 thumbnails 表，不计入配额；
-    # grid：网格图（约 640px）与 poster：预览封面（约 960px）存为系统区对象 .tgdrive/thumbnails/<blob>/<规格>，
-    # 计入生成它的存储桶的配额，表中只记录所在存储桶与键。该桶不再引用源文件时随之删除，其他用户浏览时重新生成。
+    # thumb：列表小图（约 160px）、grid：网格图（约 640px）与 poster：预览封面（约 960px）都存为系统区对象
+    # .tgdrive/thumbnails/<blob>/<规格>，计入所在存储桶的配额，表中只记录存储桶与键。该桶不再引用源文件时，
+    # 转交给另一个仍引用它的存储桶；没有其他引用时删除。旧版内联在 data 列里的图片（加密）由维护任务分批转存。
 
     THUMBNAIL_META = "tgdrive-thumbnail"  # 旧版存放位置，仅用于从 user_meta 中剔除
     THUMBNAIL_PREFIX = ".tgdrive/thumbnails/"
     THUMBNAIL_LIMITS = {"thumb": 96 * 1024, "grid": 160 * 1024, "poster": 320 * 1024}
-    STORED_THUMBNAILS = frozenset({"grid", "poster"})
+    STORED_THUMBNAILS = frozenset({"thumb", "grid", "poster"})
     # 请求的规格不存在时依次退回：网格图与封面互为替代，最后用列表小图。
     THUMBNAIL_FALLBACK = {"thumb": ("thumb",), "grid": ("grid", "poster", "thumb"), "poster": ("poster", "grid", "thumb")}
 
@@ -433,6 +433,29 @@ class ObjectService:
             self._drop_object_row(db, row["bucket_id"], row["object_key"], now)
             db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=?", (blob_uuid, row["variant"]))
 
+    def _hand_over_thumbnails(self, db, blob_uuid: str, bucket_id: int, now: float) -> None:
+        """某个存储桶不再引用源文件：把存在这个桶里的缩略图对象改归另一个仍引用它的桶（不重新上传），
+        没有其他引用的桶（例如只剩系统区副本）时删除。"""
+        heir = db.execute("SELECT bucket_id FROM objects WHERE blob_uuid=? AND bucket_id!=? AND substr(key,1,length(?))!=? "
+                          "ORDER BY bucket_id LIMIT 1", (blob_uuid, bucket_id, self.THUMBNAIL_PREFIX, self.THUMBNAIL_PREFIX)).fetchone()
+        if heir is None:
+            self._drop_thumbnail_objects(db, blob_uuid, now, bucket_id)
+            return
+        target = heir["bucket_id"]
+        rows = db.execute("SELECT variant, object_key FROM thumbnails WHERE blob_uuid=? AND bucket_id=? AND object_key IS NOT NULL",
+                          (blob_uuid, bucket_id)).fetchall()
+        for row in rows:
+            key = row["object_key"]
+            item = db.execute("SELECT size FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone()
+            if item is None:
+                db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=?", (blob_uuid, row["variant"]))
+                continue
+            self._drop_object_row(db, target, key, now)  # 目标桶里同名的残留对象
+            db.execute("UPDATE objects SET bucket_id=? WHERE bucket_id=? AND key=?", (target, bucket_id, key))
+            db.execute("UPDATE buckets SET used_bytes = MAX(0, used_bytes - ?) WHERE id=?", (item["size"], bucket_id))
+            db.execute("UPDATE buckets SET used_bytes = used_bytes + ? WHERE id=?", (item["size"], target))
+            db.execute("UPDATE thumbnails SET bucket_id=? WHERE blob_uuid=? AND variant=?", (target, blob_uuid, row["variant"]))
+
     def _drop_object_row(self, db, bucket_id: int, key: str, now: float) -> None:
         old = db.execute("SELECT blob_uuid, size FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone()
         if old is None:
@@ -457,16 +480,7 @@ class ObjectService:
             raise ValueError("不支持的缩略图规格")
         if not data or len(data) > limit:
             raise ValueError("缩略图过大")
-        mime = self._thumbnail_mime(data)
-        if variant in self.STORED_THUMBNAILS:
-            await self._store_thumbnail(info.bucket_id, blob_uuid, variant, mime, data, scope)
-            return
-        sealed = self.engine.seal_thumbnail(blob_uuid, variant, data)
-        with self.metadata.transaction() as db:
-            db.execute("INSERT OR REPLACE INTO thumbnails(blob_uuid,variant,mime,data,created_at) VALUES(?,?,?,?,?)",
-                       (blob_uuid, variant, mime, sealed, now))
-            db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant='none'", (blob_uuid,))
-            db.execute("DELETE FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,))
+        await self._store_thumbnail(info.bucket_id, blob_uuid, variant, self._thumbnail_mime(data), data, scope)
 
     async def _store_thumbnail(self, bucket_id: int, blob_uuid: str, variant: str, mime: str, data: bytes,
                                scope: Scope | None = None) -> None:
@@ -492,6 +506,8 @@ class ObjectService:
             db.execute("INSERT OR REPLACE INTO thumbnails(blob_uuid,variant,mime,data,created_at,bucket_id,object_key) "
                        "VALUES(?,?,?,x'',?,?,?)", (blob_uuid, variant, mime, now, bucket_id, key))
             db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant='none'", (blob_uuid,))
+            if variant == "thumb":
+                db.execute("DELETE FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,))
 
     def finish_thumbnail_set(self, scope: Scope, key: str, variants: list[str]) -> None:
         """重新生成成功后移除未生成的旧规格；失败期间始终保留原来的缩略图。"""
@@ -508,15 +524,21 @@ class ObjectService:
                 db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=?", (blob, row["variant"]))
 
     async def read_thumbnail(self, info: ObjectInfo, variant: str = "thumb") -> tuple[bytes, str, str]:
-        """返回 (图片, MIME, ETag)。所需规格缺失时按 THUMBNAIL_FALLBACK 退回；旧版明文缩略图在首次读取时加密转存。"""
+        """返回 (图片, MIME, ETag)。所需规格缺失时按 THUMBNAIL_FALLBACK 退回。
+        旧版内联在表里的图片与更早的明文缩略图在转存完成前照常读取，转存由维护任务完成。"""
         if variant not in self.THUMBNAIL_LIMITS or not info.blob_uuid:
             raise NotFoundError("thumbnail not found")
         db = self.metadata.db
         for candidate in self.THUMBNAIL_FALLBACK[variant]:
             sql = "SELECT mime, data, created_at, bucket_id, object_key FROM thumbnails WHERE blob_uuid=? AND variant=?"
             row = db.execute(sql, (info.blob_uuid, candidate)).fetchone()
-            if row is None and candidate == "thumb" and self._adopt_legacy_thumbnail(info.blob_uuid):
-                row = db.execute(sql, (info.blob_uuid, "thumb")).fetchone()
+            if row is None and candidate == "thumb":
+                legacy = db.execute("SELECT data FROM thumbnail_legacy WHERE blob_uuid=?", (info.blob_uuid,)).fetchone()
+                if legacy is not None:
+                    try:
+                        return legacy["data"], self._thumbnail_mime(legacy["data"]), f"{info.etag}-thumb-legacy"
+                    except ValueError:
+                        pass
             if row is None:
                 continue
             etag = f"{info.etag}-{candidate}-{self._thumbnail_revision(row['created_at'])}"
@@ -559,26 +581,78 @@ class ObjectService:
                 continue  # 相同内容的另一份副本可能已有缩略图。
         raise NotFoundError("thumbnail not found")
 
-    async def migrate_thumbnails(self, limit: int = 100) -> int:
-        """维护任务：把旧版存在数据库里的封面图（poster）分批转存为系统区对象，释放服务器磁盘。
-        对象写入引用该 Blob 的第一个存储桶；没有任何对象引用时直接删除记录。每批数量受 Telegram 发送频率限制。"""
-        rows = self.metadata.db.execute("SELECT blob_uuid, variant, mime, data FROM thumbnails WHERE variant IN ('grid','poster') "
-                                        "AND object_key IS NULL AND length(data) > 0 LIMIT ?", (limit,)).fetchall()
-        moved = 0
-        for row in rows:
-            blob_uuid, variant = row["blob_uuid"], row["variant"]
-            owner = self.metadata.db.execute("SELECT bucket_id FROM objects WHERE blob_uuid=? ORDER BY bucket_id LIMIT 1",
-                                             (blob_uuid,)).fetchone()
-            try:
-                if owner is None:
-                    raise QuotaExceededError("没有引用该文件的存储桶")
-                data = self.engine.open_thumbnail(blob_uuid, variant, row["data"])
-                await self._store_thumbnail(owner["bucket_id"], blob_uuid, variant, row["mime"], data)
-                moved += 1
-            except QuotaExceededError:
-                # 没有归属或配额已满：不再保留这张大图，界面退回列表小图，之后浏览时重新生成。
-                with self.metadata.transaction() as db:
-                    db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=? AND object_key IS NULL", (blob_uuid, variant))
+    MIGRATE_CURSOR = "thumbnails.migrate_cursor"
+
+    def _setting(self, key: str, default=None):
+        row = self.metadata.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        try:
+            return json.loads(row["value"]) if row is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    def _save_setting(self, key: str, value) -> None:
+        with self.metadata.transaction() as db:
+            db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                       (key, json.dumps(value)))
+
+    def inline_thumbnails(self) -> dict[str, int]:
+        """还内联在表里、等待转存为对象的缩略图（含旧版明文）的数量与字节数。"""
+        row = self.metadata.db.execute("SELECT COUNT(*), COALESCE(SUM(length(data)),0) FROM thumbnails "
+                                       "WHERE object_key IS NULL AND length(data) > 0").fetchone()
+        legacy = self.metadata.db.execute("SELECT COUNT(*), COALESCE(SUM(length(data)),0) FROM thumbnail_legacy").fetchone()
+        state = self._setting(self.MIGRATE_CURSOR, {}) or {}
+        return {"count": int(row[0]) + int(legacy[0]), "bytes": int(row[1]) + int(legacy[1]),
+                "skipped_quota": int(state.get("skipped", 0) or 0)}
+
+    async def migrate_thumbnails(self, limit: int = 100, *, seconds: float | None = None) -> int:
+        """维护任务：把旧版内联在数据库里的缩略图逐张转存为系统区对象，释放服务器磁盘。
+        对象写入引用该 Blob 的第一个存储桶；没有任何对象引用时直接删除记录。每张是一条 Telegram 消息，
+        所以按数量与时间片限制。配额已满时：大图删除（之后浏览重新生成），列表小图保留在表里，
+        用游标跳过、下一遍再试，避免回源补图。"""
+        deadline = time.monotonic() + seconds if seconds is not None else None
+        state = self._setting(self.MIGRATE_CURSOR, {}) or {}
+        after = (str(state.get("blob", "")), str(state.get("variant", "")))
+        skipped, current = int(state.get("skipped", 0) or 0), int(state.get("current", 0) or 0)
+        moved, wrapped = 0, False
+        try:
+            while moved < limit and (deadline is None or time.monotonic() < deadline):
+                row = self.metadata.db.execute(
+                    "SELECT blob_uuid, variant, mime, data FROM thumbnails WHERE object_key IS NULL AND length(data) > 0 "
+                    "AND variant IN ('thumb','grid','poster') AND (blob_uuid > ? OR (blob_uuid = ? AND variant > ?)) "
+                    "ORDER BY blob_uuid, variant LIMIT 1", (after[0], after[0], after[1])).fetchone()
+                if row is None:
+                    # 走完一遍：记下这一遍因配额跳过的小图数，从头再试；每次调用最多绕回一次，不在同一批行上空转。
+                    skipped, current = current, 0
+                    if wrapped or after == ("", ""):
+                        after = ("", "")
+                        break
+                    after, wrapped = ("", ""), True
+                    continue
+                blob_uuid, variant = row["blob_uuid"], row["variant"]
+                after = (blob_uuid, variant)
+                owner = self.metadata.db.execute(
+                    "SELECT bucket_id FROM objects WHERE blob_uuid=? AND substr(key,1,length(?))!=? ORDER BY bucket_id LIMIT 1",
+                    (blob_uuid, self.THUMBNAIL_PREFIX, self.THUMBNAIL_PREFIX)).fetchone()
+                try:
+                    if owner is None:
+                        raise LookupError
+                    data = self.engine.open_thumbnail(blob_uuid, variant, row["data"])
+                    await self._store_thumbnail(owner["bucket_id"], blob_uuid, variant, row["mime"], data)
+                    moved += 1
+                except LookupError:
+                    with self.metadata.transaction() as db:
+                        db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=? AND object_key IS NULL", (blob_uuid, variant))
+                except QuotaExceededError:
+                    if variant == "thumb":
+                        current += 1
+                    else:
+                        # 大图不再保留，界面退回列表小图，之后浏览时重新生成。
+                        with self.metadata.transaction() as db:
+                            db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=? AND object_key IS NULL",
+                                       (blob_uuid, variant))
+        finally:
+            self._save_setting(self.MIGRATE_CURSOR, {"blob": after[0], "variant": after[1],
+                                                     "skipped": max(skipped, current), "current": current})
         return moved
 
     def sweep_thumbnail_objects(self, limit: int = 500, *, older_than: float = 3600) -> int:
@@ -614,26 +688,33 @@ class ObjectService:
             variants.setdefault(row["variant"], self._thumbnail_revision(row["created_at"]))
         return result
 
-    def _adopt_legacy_thumbnail(self, blob_uuid: str) -> bool:
-        row = self.metadata.db.execute("SELECT data FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,)).fetchone()
-        if row is None:
-            return False
-        try:
-            mime = self._thumbnail_mime(row["data"])
-            sealed = self.engine.seal_thumbnail(blob_uuid, "thumb", row["data"])
-        except ValueError:
-            mime = sealed = None
-        with self.metadata.transaction() as db:
-            if sealed is not None:
-                db.execute("INSERT OR IGNORE INTO thumbnails(blob_uuid,variant,mime,data,created_at) VALUES(?,'thumb',?,?,?)",
-                           (blob_uuid, mime, sealed, time.time()))
-            db.execute("DELETE FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,))
-        return sealed is not None
-
-    def adopt_legacy_thumbnails(self, limit: int = 500) -> int:
-        """维护任务：把旧版明文缩略图加密转存并删除明文，需要系统已解锁。"""
-        rows = self.metadata.db.execute("SELECT blob_uuid FROM thumbnail_legacy LIMIT ?", (limit,)).fetchall()
-        return sum(1 for row in rows if self._adopt_legacy_thumbnail(row["blob_uuid"]))
+    async def adopt_legacy_thumbnails(self, limit: int = 100, *, seconds: float | None = None) -> int:
+        """维护任务：把旧版明文缩略图直接转存为列表小图对象并删除明文，需要系统已解锁。"""
+        deadline = time.monotonic() + seconds if seconds is not None else None
+        rows = self.metadata.db.execute("SELECT blob_uuid, data FROM thumbnail_legacy LIMIT ?", (limit,)).fetchall()
+        adopted = 0
+        for row in rows:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            blob_uuid = row["blob_uuid"]
+            owner = self.metadata.db.execute(
+                "SELECT bucket_id FROM objects WHERE blob_uuid=? AND substr(key,1,length(?))!=? ORDER BY bucket_id LIMIT 1",
+                (blob_uuid, self.THUMBNAIL_PREFIX, self.THUMBNAIL_PREFIX)).fetchone()
+            try:
+                mime = self._thumbnail_mime(row["data"])
+            except ValueError:
+                owner = None
+            if owner is None or self.metadata.db.execute(
+                    "SELECT 1 FROM thumbnails WHERE blob_uuid=? AND variant='thumb'", (blob_uuid,)).fetchone():
+                with self.metadata.transaction() as db:
+                    db.execute("DELETE FROM thumbnail_legacy WHERE blob_uuid=?", (blob_uuid,))
+                continue
+            try:
+                await self._store_thumbnail(owner["bucket_id"], blob_uuid, "thumb", mime, row["data"])
+                adopted += 1
+            except QuotaExceededError:
+                continue  # 保留明文副本，配额腾出后再转
+        return adopted
 
     # ---------- 回收站：条目以 .tgdrive/trash/<id>/<原路径> 保存，仍计入容量 ----------
 

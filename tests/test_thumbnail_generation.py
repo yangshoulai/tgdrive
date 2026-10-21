@@ -184,13 +184,21 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(info.blob_uuid, self.worker._pending)
         self.assertEqual(self.worker._history[info.blob_uuid]["state"], "failed")
 
-    async def test_quota_keeps_small_thumbnail_and_no_cover_is_not_repeated(self):
+    async def test_full_quota_is_retried_later_and_no_cover_is_not_repeated(self):
         info = await self.put()
         self.metadata.db.execute("UPDATE buckets SET quota_bytes=used_bytes WHERE id=?", (info.bucket_id,))
         channel, render = self.renderer({"thumb": JPEG, "grid": JPEG, "poster": JPEG})
         with channel, render:
+            with self.assertRaisesRegex(ThumbnailRetry, "空间已满"):
+                await self.worker.generate(info)
+        self.assertEqual(self.variants(info), [], "缩略图计入配额；空间已满时不记「无法生成」")
+        self.metadata.db.execute("UPDATE objects SET modified_at=0 WHERE bucket_id=?", (info.bucket_id,))
+        self.assertEqual(self.worker._backfill_page(), [], "空间已满的存储桶不参与自动补图")
+        self.metadata.db.execute("UPDATE buckets SET quota_bytes=NULL WHERE id=?", (info.bucket_id,))
+        self.assertEqual([item.key for item in self.worker._backfill_page()], [info.key])
+        with channel, render:
             await self.worker.generate(info)
-        self.assertEqual(self.variants(info), ["thumb"])
+        self.assertEqual(sorted(self.variants(info)), ["grid", "poster", "thumb"])
         audio = await self.put("song.mp3", Scope(self.objects.create_bucket("audio-tests")))
         channel, render = self.renderer(None)
         with channel, render as decoder:

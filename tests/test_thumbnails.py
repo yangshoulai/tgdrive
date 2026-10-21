@@ -83,25 +83,25 @@ class ThumbnailTests(unittest.TestCase):
         return [row[0] for row in self.app.metadata.db.execute(
             "SELECT key FROM objects WHERE bucket_id=? AND key LIKE '.tgdrive/thumbnails/%' ORDER BY key", (self.alice.bucket_id,))]
 
-    def test_grid_and_poster_are_system_objects_counted_in_quota(self):
+    def test_all_variants_are_system_objects_counted_in_quota(self):
         info = self.put("photo.jpg", b"original")
         self.assertEqual(self.set_thumb("photo.jpg", WEBP), 204)
-        self.assertEqual(self.used(), 8, "列表小图存在数据库里，不计入配额")
+        self.assertEqual(self.used(), 8 + len(WEBP), "列表小图同样是系统区对象，计入配额")
         self.assertEqual(self.set_thumb("photo.jpg", JPEG, "grid"), 204)
         self.assertEqual(self.set_thumb("photo.jpg", JPEG + b"!", "poster"), 204)
-        self.assertEqual(self.stored_keys(), [f".tgdrive/thumbnails/{info.blob_uuid}/grid", f".tgdrive/thumbnails/{info.blob_uuid}/poster"])
+        self.assertEqual(self.stored_keys(), [f".tgdrive/thumbnails/{info.blob_uuid}/{variant}" for variant in ("grid", "poster", "thumb")])
         rows = dict(self.app.metadata.db.execute("SELECT variant, length(data) FROM thumbnails WHERE blob_uuid=?", (info.blob_uuid,)).fetchall())
-        self.assertEqual((rows["grid"], rows["poster"]), (0, 0), "大图不再存进数据库")
-        self.assertEqual(self.used(), 8 + len(JPEG) * 2 + 1)
+        self.assertEqual(rows, {"thumb": 0, "grid": 0, "poster": 0}, "缩略图不再存进数据库")
+        self.assertEqual(self.used(), 8 + len(WEBP) + len(JPEG) * 2 + 1)
         usage = self.call("GET", "/api/user/v1/usage")[1]
-        self.assertEqual((usage["thumbnails"], usage["files"]), (len(JPEG) * 2 + 1, 8))
+        self.assertEqual((usage["thumbnails"], usage["files"]), (len(WEBP) + len(JPEG) * 2 + 1, 8))
         self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=photo.jpg&variant=grid")[1], JPEG)
         self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=photo.jpg&variant=poster")[1], JPEG + b"!")
         self.assertEqual(sorted(self.listed("photo.jpg")["thumbnails"]), ["grid", "poster", "thumb"])
         self.assertEqual([item["key"] for item in self.call("GET", "/api/user/v1/list")[1]["objects"]], ["photo.jpg"], "系统区不出现在列表")
         # 重新生成覆盖旧对象，不重复计入配额。
         self.assertEqual(self.set_thumb("photo.jpg", JPEG, "poster"), 204)
-        self.assertEqual(self.used(), 8 + len(JPEG) * 2)
+        self.assertEqual(self.used(), 8 + len(WEBP) + len(JPEG) * 2)
         # 覆盖内容后旧 Blob 的大图随之删除。
         self.put("photo.jpg", b"changed!")
         self.assertEqual((self.stored_keys(), self.used()), ([], 8))
@@ -114,7 +114,7 @@ class ThumbnailTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=clip.mp4&variant=grid")[1], JPEG, "网格图退回封面")
         self.call("POST", "/api/user/v1/copy", {"from": "clip.mp4", "to": "copy.mp4"})
         asyncio.run(self.app.objects.delete_objects(self.scope, ["clip.mp4"]))
-        self.assertEqual(len(self.stored_keys()), 1, "同一存储桶还有副本引用时保留")
+        self.assertEqual(len(self.stored_keys()), 2, "同一存储桶还有副本引用时保留")
         asyncio.run(self.app.objects.delete_objects(self.scope, ["copy.mp4"]))
         self.assertEqual((self.stored_keys(), self.used()), ([], 0))
         self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0], 0)
@@ -162,6 +162,89 @@ class ThumbnailTests(unittest.TestCase):
         self.assertEqual(self.app.objects.sweep_thumbnail_objects(), 0, "刚写入的对象不清理")
         self.assertEqual(self.app.objects.sweep_thumbnail_objects(older_than=-1), 1)
         self.assertEqual(self.stored_keys(), [f".tgdrive/thumbnails/{info.blob_uuid}/poster"])
+
+    def inline(self, info, variant="thumb", data=WEBP, mime="image/webp"):
+        sealed = self.app.engine.seal_thumbnail(info.blob_uuid, variant, data)
+        with self.app.metadata.transaction() as db:
+            db.execute("INSERT INTO thumbnails(blob_uuid,variant,mime,data,created_at) VALUES(?,?,?,?,?)",
+                       (info.blob_uuid, variant, mime, sealed, 1.0))
+
+    def test_maintenance_moves_database_list_thumbnails(self):
+        infos = [self.put(f"p{index}.jpg", b"photo-%d" % index) for index in range(3)]
+        for info in infos:
+            self.inline(info)
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=p0.jpg")[1], WEBP, "旧版内联小图在转存前仍可读取")
+        self.assertEqual(self.app.objects.inline_thumbnails()["count"], 3)
+        self.assertEqual(asyncio.run(self.app.objects.migrate_thumbnails(2)), 2, "按数量分批")
+        result = asyncio.run(self.app.maintenance.thumbnail_migrator())
+        self.assertEqual((result["moved"], result["inline"]), (1, 0))
+        for info in infos:
+            row = self.app.metadata.db.execute("SELECT length(data), object_key FROM thumbnails WHERE blob_uuid=?", (info.blob_uuid,)).fetchone()
+            self.assertEqual(tuple(row), (0, f".tgdrive/thumbnails/{info.blob_uuid}/thumb"))
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=p2.jpg")[1], WEBP)
+        self.assertEqual(self.used(), sum(len(b"photo-%d" % index) for index in range(3)) + 3 * len(WEBP))
+
+    def test_list_thumbnails_stay_inline_when_quota_is_full(self):
+        first, second = self.put("a.jpg", b"a"), self.put("b.jpg", b"b")
+        self.inline(first)
+        self.inline(second, "poster", JPEG, "image/jpeg")
+        with self.app.metadata.transaction() as db:
+            db.execute("UPDATE buckets SET quota_bytes=used_bytes WHERE id=?", (self.alice.bucket_id,))
+        self.assertEqual(asyncio.run(self.app.objects.migrate_thumbnails(10)), 0)
+        rows = dict(self.app.metadata.db.execute("SELECT variant, length(data) > 0 FROM thumbnails").fetchall())
+        self.assertEqual(rows, {"thumb": 1}, "小图保留在数据库，大图删除后重新生成")
+        self.assertEqual(self.app.objects.inline_thumbnails()["skipped_quota"], 1)
+        self.assertEqual(asyncio.run(self.app.objects.migrate_thumbnails(10)), 0, "空间仍满时不会空转")
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=a.jpg")[1], WEBP)
+        with self.app.metadata.transaction() as db:
+            db.execute("UPDATE buckets SET quota_bytes=50000000 WHERE id=?", (self.alice.bucket_id,))
+        self.assertEqual(asyncio.run(self.app.objects.migrate_thumbnails(10)), 1, "腾出空间后从头再试")
+        self.assertEqual(self.app.objects.inline_thumbnails(), {"count": 0, "bytes": 0, "skipped_quota": 0})
+
+    def test_thumbnails_are_handed_over_to_remaining_bucket(self):
+        info = self.put("shared.jpg", b"same content")
+        self.assertEqual(self.set_thumb("shared.jpg", WEBP), 204)
+        bob = self.app.accounts.create_user("bob@example.com", "bob password", quota_bytes=50_000_000)
+        with self.app.metadata.transaction() as db:  # 模拟保存分享：另一个桶引用同一个 Blob
+            db.execute("INSERT INTO objects(bucket_id,key,size,etag,content_type,user_meta,modified_at,blob_uuid) "
+                       "SELECT ?,key,size,etag,content_type,user_meta,modified_at,blob_uuid FROM objects WHERE bucket_id=? AND key=?",
+                       (bob.bucket_id, self.alice.bucket_id, "shared.jpg"))
+            db.execute("UPDATE blobs SET refcount=refcount+1 WHERE uuid=?", (info.blob_uuid,))
+            db.execute("UPDATE buckets SET used_bytes=used_bytes+? WHERE id=?", (info.size, bob.bucket_id))
+        blobs = self.app.metadata.db.execute("SELECT COUNT(*) FROM blobs").fetchone()[0]
+        asyncio.run(self.app.objects.delete_objects(self.scope, ["shared.jpg"]))
+        self.assertEqual((self.stored_keys(), self.used()), ([], 0), "原桶不再承担缩略图")
+        bob_used = self.app.metadata.db.execute("SELECT used_bytes FROM buckets WHERE id=?", (bob.bucket_id,)).fetchone()[0]
+        self.assertEqual(bob_used, info.size + len(WEBP))
+        row = self.app.metadata.db.execute("SELECT bucket_id FROM thumbnails WHERE blob_uuid=? AND variant='thumb'", (info.blob_uuid,)).fetchone()
+        self.assertEqual(row[0], bob.bucket_id)
+        self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM blobs").fetchone()[0], blobs, "改归属，不重新上传")
+        data, _, _ = asyncio.run(self.app.objects.get_thumbnail(Scope(bob.bucket_id), "shared.jpg"))
+        self.assertEqual(data, WEBP, "转交后无需重新生成")
+        asyncio.run(self.app.objects.delete_objects(Scope(bob.bucket_id), ["shared.jpg"]))
+        self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0], 0)
+        self.assertEqual(self.app.metadata.db.execute("SELECT used_bytes FROM buckets WHERE id=?", (bob.bucket_id,)).fetchone()[0], 0)
+
+    def test_compact_switches_to_incremental_vacuum(self):
+        metadata = self.app.metadata
+        metadata.COMPACT_MIN_FREE = 1
+        with metadata.transaction() as db:
+            db.execute("CREATE TABLE filler(data BLOB)")
+            db.executemany("INSERT INTO filler VALUES(?)", [(b"x" * 4096,) for _ in range(512)])
+        with metadata.transaction() as db:
+            db.execute("DROP TABLE filler")
+        result = metadata.compact()
+        self.assertEqual(result["mode"], "vacuum")
+        self.assertGreater(result["freed"], 1024 * 1024)
+        self.assertEqual(metadata.db.execute("PRAGMA auto_vacuum").fetchone()[0], 2)
+        with metadata.transaction() as db:
+            db.execute("CREATE TABLE filler(data BLOB)")
+            db.executemany("INSERT INTO filler VALUES(?)", [(b"x" * 4096,) for _ in range(256)])
+        with metadata.transaction() as db:
+            db.execute("DROP TABLE filler")
+        result = metadata.compact()
+        self.assertEqual((result["mode"], result["free"]), ("incremental", 0))
+        self.assertGreater(result["freed"], 512 * 1024)
 
     def test_migration_rebuilds_thumbnail_table(self):
         columns = [row[1] for row in self.app.metadata.db.execute("PRAGMA table_info(thumbnails)")]
@@ -265,10 +348,11 @@ class ThumbnailTests(unittest.TestCase):
         self.app.accounts.keystore.unlock(PASSPHRASE)
         self.user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         self.assertTrue(self.listed("old.jpg")["has_thumbnail"])
-        self.assertEqual(self.app.objects.adopt_legacy_thumbnails(), 1)
+        self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=old.jpg")[1], WEBP, "转存前直接读取明文副本")
+        self.assertEqual(asyncio.run(self.app.objects.adopt_legacy_thumbnails()), 1)
         self.assertEqual(self.app.metadata.db.execute("SELECT COUNT(*) FROM thumbnail_legacy").fetchone()[0], 0)
-        sealed = bytes(self.app.metadata.db.execute("SELECT data FROM thumbnails WHERE blob_uuid=?", (info.blob_uuid,)).fetchone()[0])
-        self.assertNotIn(WEBP, sealed)
+        row = self.app.metadata.db.execute("SELECT length(data), object_key FROM thumbnails WHERE blob_uuid=?", (info.blob_uuid,)).fetchone()
+        self.assertEqual(tuple(row), (0, f".tgdrive/thumbnails/{info.blob_uuid}/thumb"), "明文直接转为加密存储的对象")
         self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=old.jpg")[1], WEBP)
 
     def test_public_shares_follow_share_boundaries(self):

@@ -41,7 +41,7 @@ class ContextTests(AssistantCase):
             self.model.replies = [answer("第三轮")]
             await self.send(user, conversation, "第三个问题")
             content = self.tool_contents([r for r in self.model.calls if r["tools"]][-1])[0]
-            self.assertTrue(content.startswith("[已省略原始结果] read_text_file 成功"), content)
+            self.assertTrue(content.startswith("[原始结果已省略") and "] read_text_file 成功" in content, content)
             self.assertNotIn("short text", content)
             for record in self.model.calls:
                 for message in record["messages"]:
@@ -60,7 +60,7 @@ class ContextTests(AssistantCase):
             self.assertEqual(status, 201, data)
             final = self.tool_contents([record for record in self.model.calls if record["tools"]][-1])  # 最后一次是生成标题
             self.assertEqual(len(final), 3)
-            self.assertTrue(final[0].startswith("[已省略原始结果]"), "最早的结果换成摘要行")
+            self.assertTrue(final[0].startswith("[原始结果已省略"), "最早的结果换成摘要行")
             self.assertIn("word word", final[-1], "最近一批保持原文")
             self.assertEqual(self.service.runs[data["run_id"]].stop_reason, "completed")
         self.run_async(scenario())

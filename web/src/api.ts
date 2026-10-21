@@ -623,7 +623,8 @@ export type ThumbnailJob = { id: string; kind: "image" | "video" | "audio"; stat
 /** 自动补图：daily_bytes 为 null 表示不限制，0 表示关闭。 */
 export type ThumbnailBackfill = { daily_bytes: number | null; used_bytes: number; age_seconds: number; pending: number };
 export type ThumbnailQueueStatus = { available: boolean; unlocked: boolean; pressure: string | null; jobs: ThumbnailJob[]; recent: ThumbnailJob[];
-  cache: { bytes: number; limit_bytes: number; ttl_seconds: number }; remote_bytes: number; client_timeout_seconds: number; task_timeout_seconds: number; capacity: number; backfill: ThumbnailBackfill };
+  cache: { bytes: number; limit_bytes: number; ttl_seconds: number }; remote_bytes: number; client_timeout_seconds: number; task_timeout_seconds: number; capacity: number; backfill: ThumbnailBackfill;
+  inline: { count: number; bytes: number; skipped_quota: number } };
 export const thumbnailQueue = () => request<ThumbnailQueueStatus>("/api/admin/v1/maintenance/thumbnails");
 /** daily_mib：每日自动补图读取上限（MiB），0 关闭，-1 不限制。 */
 export const setThumbnailBackfill = (dailyMib: number) => post<ThumbnailBackfill>("/api/admin/v1/maintenance/thumbnails", { daily_mib: dailyMib });

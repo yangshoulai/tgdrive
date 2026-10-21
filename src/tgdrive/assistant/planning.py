@@ -8,8 +8,10 @@ import re
 import secrets
 
 MAX_ITEMS = 20
+# 进度记录（§38）：长任务需要记住的进度与编号，随计划保存，每一步都放进上下文，不受工具结果裁剪影响。
+MAX_NOTES = 2000
 STATUSES = ("pending", "in_progress", "waiting_user", "completed", "failed", "paused", "cancelled")
-META_TOOLS = frozenset(("update_plan", "get_context", "get_system_help"))
+META_TOOLS = frozenset(("update_plan", "get_context", "get_system_help", "recall_result"))
 
 
 class Plan:
@@ -48,8 +50,9 @@ class Plan:
 
     def update(self, args: dict) -> dict:
         items = args.get("items")
-        if not isinstance(items, list) or not 1 <= len(items) <= MAX_ITEMS:
-            raise ValueError(f"计划需要 1–{MAX_ITEMS} 个步骤")
+        notes = args.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            raise ValueError("notes 需要文本")
         plan_id = args.get("plan_id")
         original = self.data
         if plan_id and (original is None or original["id"] != plan_id):
@@ -58,6 +61,11 @@ class Plan:
             original = copy.deepcopy(self.candidate)
         if original and plan_id and original["id"] != plan_id:
             raise ValueError("本轮只能更新当前计划")
+        if items is None and notes is not None and original:
+            # 只更新进度记录：沿用现有步骤，不改变状态。
+            items = [{key: item[key] for key in ("id", "content", "status", "kind") if key in item} for item in original["items"]]
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_ITEMS:
+            raise ValueError(f"计划需要 1–{MAX_ITEMS} 个步骤")
         old = {item["id"]: item for item in (original or {}).get("items", [])}
         result, seen = [], set()
         for index, value in enumerate(items):
@@ -124,6 +132,13 @@ class Plan:
             self.data["reason"] = reason.strip()[:300]
         elif (original or {}).get("reason"):
             self.data["reason"] = original["reason"]
+        if notes is not None:
+            if len(notes.strip()) > MAX_NOTES:
+                raise ValueError(f"notes 最多 {MAX_NOTES} 个字符，请只记录进度与需要记住的编号")
+            if notes.strip():
+                self.data["notes"] = notes.strip()
+        elif (original or {}).get("notes"):
+            self.data["notes"] = original["notes"]
         self._changed()
         return self.snapshot()
 
@@ -281,6 +296,8 @@ class Plan:
             return "无"
         public = {key: value[key] for key in ("id", "title", "status") if key in value}
         public["items"] = brief(value["items"])
+        if value.get("notes"):
+            public["notes"] = value["notes"]
         return json.dumps(public, ensure_ascii=False).replace("</", "<\\/")
 
     @property

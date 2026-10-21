@@ -147,7 +147,8 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
     {error ? <EmptyState icon="alert" title="队列读取失败" description={error} /> : !status ? <SkeletonRows rows={2} /> : <>
       <KeyValue items={[["队列", `${status.jobs.length} / ${status.capacity}`], ["当前处理", `${status.jobs.filter(job => job.state === "running").length} 项`],
         ["缓存", `${formatBytes(status.cache.bytes)} / ${formatBytes(status.cache.limit_bytes)}`], ["从存储读取（本次运行）", formatBytes(status.remote_bytes)],
-        ["今日自动补图", status.backfill.daily_bytes === 0 ? "已关闭" : `${formatBytes(status.backfill.used_bytes)} / ${status.backfill.daily_bytes === null ? "不限制" : formatBytes(status.backfill.daily_bytes)}`]]} />
+        ["今日自动补图", status.backfill.daily_bytes === 0 ? "已关闭" : `${formatBytes(status.backfill.used_bytes)} / ${status.backfill.daily_bytes === null ? "不限制" : formatBytes(status.backfill.daily_bytes)}`],
+        ...(status.inline.count ? [["数据库中待转存", `${status.inline.count} 张（${formatBytes(status.inline.bytes)}）${status.inline.skipped_quota ? `，${status.inline.skipped_quota} 张因空间已满暂缓` : ""}`] as [string, string]] : [])]} />
       <div className="thumbnail-backfill">
         <Field label="自动补图每日读取上限" hint={`上传或修改超过 ${Math.round(status.backfill.age_seconds / 60)} 分钟仍没有缩略图的图片、视频、音频，由后台从存储读取生成（单个文件图片 60、视频 64、音频 32 MiB 以内），保证最终都有缩略图。关闭后只能等实际预览或手动生成。`}>
           <select className="input" value={presets.includes(dailyMib) ? String(dailyMib) : "custom"} disabled={saving} onChange={event => void changeBackfill(event.target.value)}>

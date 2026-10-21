@@ -400,8 +400,7 @@ class MaintenanceService:
         self.snapshots = EncryptedSnapshotStore(metadata, keystore)
         self.backups = BackupService(self.snapshots, backup_dir or Path(metadata.path).parent / "backups")
         self.trash_purger = None  # 由应用工厂注入：async (now) -> int
-        self.thumbnail_adopter = None  # 由应用工厂注入：同步 (limit) -> int，把旧版明文缩略图加密转存
-        self.thumbnail_migrator = None  # 由应用工厂注入：async () -> dict，旧版封面转存为系统区对象并清理未登记的对象
+        self.thumbnail_migrator = None  # 由应用工厂注入：async () -> dict，旧版内联缩略图转存为系统区对象并清理未登记的对象
         self.assistant_cleaner = None  # 由应用工厂注入：async (now) -> dict，按保留期清理助手留痕与调用日志
         self.assistant_catalog = None  # 由应用工厂注入：async (now) -> dict，每天同步一次模型目录
 
@@ -446,8 +445,8 @@ class MaintenanceScheduler:
                 days=self.service.audit_retention_days, now=now)))
         if self.service.trash_purger is not None:
             steps.append(("trash", lambda: self._purge(now)))
-        if self.service.thumbnail_adopter is not None:
-            steps.append(("thumbnails", lambda: self._adopt_thumbnails()))
+        if self.service.thumbnail_migrator is not None:
+            steps.append(("thumbnails", lambda: self.service.thumbnail_migrator()))
         if self.service.assistant_cleaner is not None:
             steps.append(("assistant", lambda: self.service.assistant_cleaner(now)))
         if self.service.assistant_catalog is not None:
@@ -456,6 +455,7 @@ class MaintenanceScheduler:
             steps.append(("scrub", lambda: self._scrub()))
         if self._due("backup", self.backup_every, now):
             steps.append(("backup", lambda: asyncio.to_thread(self.service.backups.create)))
+        steps.append(("compact", lambda: self.service.metadata.run_in_thread(self.service.metadata.compact)))
         for name, step in steps:
             try:
                 result = await step()
@@ -471,12 +471,6 @@ class MaintenanceScheduler:
 
     async def _gc(self) -> dict[str, object]:
         return asdict(await self.service.gc.run_once(limit=500))
-
-    async def _adopt_thumbnails(self) -> dict[str, object]:
-        result: dict[str, object] = {"adopted": await self.service.metadata.run_in_thread(self.service.thumbnail_adopter, 500)}
-        if self.service.thumbnail_migrator is not None:
-            result.update(await self.service.thumbnail_migrator())
-        return result
 
     async def _purge(self, now: float) -> dict[str, object]:
         return {"purged": await self.service.trash_purger(now)}

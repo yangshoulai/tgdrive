@@ -119,7 +119,12 @@ class AssistantLoopTests(AssistantCase):
                     conversation = await self.start_conversation(user)
                     self.model.replies = [Reply(tool_calls=initial + folder_calls(3))]
                     _, result = await self.send(user, conversation, "处理相册")
-                    self.assertEqual(self.service.runs[result["run_id"]].stop_reason, reason)
+                    # 第一次发现重复只提醒（§38），模型随后正常回复；同一段再次重复才以 loop 停止（见 test_assistant_longtask）。
+                    expected = "completed" if reason == "loop" else reason
+                    self.assertEqual(self.service.runs[result["run_id"]].stop_reason, expected)
+                    if reason == "loop":
+                        events = [m for m in await self.messages(user, conversation) if m["role"] == "event"]
+                        self.assertIn("repeat_check", [m.get("type") for m in events])
                     tools = [m for m in await self.messages(user, conversation) if m["role"] == "tool"]
                     self.assertEqual(len(tools), count + 3)
                     self.assertEqual([m["status"] for m in tools[count:]], ["cancelled"] * 3)

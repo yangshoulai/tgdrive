@@ -33,7 +33,7 @@ from .thumbnail_cache import ThumbnailCacheMiss
 from .work import Limiter, RateLimiter, TransferSlots, WorkBusyError
 
 # 小对象读取通道：并发数、单个对象上限与排队等待时间。
-SMALL_READ_CONCURRENCY = 4
+SMALL_READ_CONCURRENCY = 8
 SMALL_READ_LIMIT = 1024 * 1024
 SMALL_READ_WAIT = 60
 
