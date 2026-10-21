@@ -1,16 +1,23 @@
-"""私密空间安全边界回归；仅使用替身，不创建数据库、不执行 SQL。"""
+"""私密空间安全边界、设置接口与数据库迁移回归。"""
 
 import asyncio
+import json
 import unittest
 import logging
-from contextlib import nullcontext
+import sqlite3
+import tempfile
+from contextlib import closing, nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from tests.test_public_links import Client
 from tgdrive.api import UserApi, normalize_user_path
 from tgdrive.accounts import AccountService
+from tgdrive.app import create_app
 from tgdrive.asgi import TgDriveASGI
 from tgdrive.authn import CsrfError, SessionExpired, SessionManager, TooManyAttempts, hash_password
+from tgdrive.metadata import Metadata
 from tgdrive.objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
 from tgdrive.private import PrivateAccessLogFilter, PrivateFiles, PrivateLocked, PrivateSpace
 
@@ -282,26 +289,131 @@ class PrivateSpaceTests(unittest.IsolatedAsyncioTestCase):
         self.sessions.require(self.session.token)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class PrivateSettingsTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False, run_scheduler=False)
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
+        self.client = Client(self.app)
+
+    def tearDown(self):
+        self.app.metadata.close()
+        self.temp.cleanup()
+
+    async def test_locked_account_saves_every_idle_option_without_unlocking(self):
+        auth = await self.client.login("user", "alice@example.com", "alice password")
+        for idle in PrivateSpace.IDLE_OPTIONS:
+            with self.subTest(idle=idle):
+                status, _, data = await self.client.request("POST", "/api/user/v1/private/settings",
+                    json.dumps({"idle_seconds": idle}).encode(), auth)
+                self.assertEqual(status, 200, data)
+                self.assertEqual(json.loads(data), {"access": None, "idle_seconds": idle})
+                status, _, data = await self.client.request("GET", "/api/user/v1/private/status", headers=auth)
+                saved = json.loads(data)
+                self.assertEqual(status, 200, data)
+                self.assertEqual(saved["idle_seconds"], idle)
+                self.assertFalse(saved["unlocked"])
+                self.assertIsNone(saved["access"])
+                row = self.app.metadata.db.execute("SELECT idle_seconds FROM private_spaces WHERE user_id=?",
+                                                   (self.alice.id,)).fetchone()
+                self.assertEqual(row[0], idle)
+
+    async def test_unlocked_account_renews_current_grant_and_revokes_other_sessions(self):
+        auth = await self.client.login("user", "alice@example.com", "alice password")
+        other = await self.client.login("user", "alice@example.com", "alice password")
+        previous = []
+        for headers in (auth, other):
+            status, _, data = await self.client.request("POST", "/api/user/v1/private/unlock",
+                json.dumps({"password": "alice password"}).encode(), headers)
+            self.assertEqual(status, 200, data)
+            previous.append(json.loads(data)["access"])
+        status, _, data = await self.client.request("POST", "/api/user/v1/private/settings",
+            b'{"idle_seconds":7200}', {**auth, "x-private-access": previous[0]})
+        self.assertEqual(status, 200, data)
+        saved = json.loads(data)
+        self.assertEqual(saved["idle_seconds"], 7200)
+        self.assertEqual(saved["remaining_seconds"], 7200)
+        self.assertTrue(saved["access"])
+        self.assertNotIn(saved["access"], previous)
+        for access in previous:
+            self.assertNotIn(access, self.app.private_space.grants)
+        status, _, data = await self.client.request("GET", "/api/user/v1/private/status", headers=auth)
+        self.assertEqual(status, 200, data)
+        self.assertTrue(json.loads(data)["unlocked"])
+        self.assertEqual(json.loads(data)["access"], saved["access"])
+        status, _, data = await self.client.request("GET", "/api/user/v1/private/status", headers=other)
+        self.assertEqual(status, 200, data)
+        self.assertFalse(json.loads(data)["unlocked"])
+
+    async def test_settings_require_csrf_and_reject_invalid_times_without_changing_accounts(self):
+        auth = await self.client.login("user", "alice@example.com", "alice password")
+        self.app.private_space.ensure_config(self.alice.id, 900)
+        admin_id = self.app.metadata.db.execute("SELECT id FROM users WHERE role='admin'").fetchone()[0]
+        self.app.private_space.ensure_config(admin_id, 1800)
+        status, _, _ = await self.client.request("POST", "/api/user/v1/private/settings",
+            b'{"idle_seconds":7200}', {"cookie": auth["cookie"]})
+        self.assertEqual(status, 403)
+        for idle in (60, 120, 10800, True, None):
+            with self.subTest(idle=idle):
+                status, _, data = await self.client.request("POST", "/api/user/v1/private/settings",
+                    json.dumps({"idle_seconds": idle}).encode(), auth)
+                self.assertEqual(status, 400, data)
+        status, _, data = await self.client.request("POST", "/api/user/v1/private/settings",
+            json.dumps({"idle_seconds": 7200, "user_id": admin_id}).encode(), auth)
+        self.assertEqual(status, 200, data)
+        rows = dict(self.app.metadata.db.execute("SELECT user_id,idle_seconds FROM private_spaces"))
+        self.assertEqual(rows, {admin_id: 1800, self.alice.id: 7200})
 
 
 class IdleMigrationTests(unittest.TestCase):
+    def legacy_database(self, path, version, settings):
+        with closing(Metadata(path)) as metadata, metadata.transaction() as db:
+            db.execute("INSERT INTO users(id,username,password_hash,role,status,created_at) "
+                       "VALUES(1,'a@example.com','x','user','active',0),(2,'b@example.com','x','user','active',0)")
+            db.execute("DROP TABLE private_spaces")
+            db.execute("CREATE TABLE private_spaces("
+                       "user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,"
+                       "idle_seconds INTEGER NOT NULL DEFAULT 300 CHECK(idle_seconds IN (60,300,900,1800)),"
+                       "created_at REAL NOT NULL)")
+            db.executemany("INSERT INTO private_spaces(user_id,idle_seconds,created_at) VALUES(?,?,?)", settings)
+            db.execute(f"PRAGMA user_version={version}")
+
     def test_one_minute_setting_becomes_five_minutes(self):
-        import tempfile
-        from pathlib import Path
-        from tgdrive.metadata import Metadata
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "meta.db")
-            metadata = Metadata(path)
-            with metadata.transaction() as db:
-                db.execute("INSERT INTO users(id,username,password_hash,role,status,created_at) VALUES(1,'a@example.com','x','user','active',0)")
-                db.execute("INSERT INTO users(id,username,password_hash,role,status,created_at) VALUES(2,'b@example.com','x','user','active',0)")
-                db.execute("INSERT INTO private_spaces(user_id,idle_seconds,created_at) VALUES(1,60,0),(2,900,0)")
-                db.execute("PRAGMA user_version=28")
-            metadata.close()
-            migrated = Metadata(path)
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], Metadata.SCHEMA_VERSION)
-            self.assertEqual([tuple(row) for row in migrated.db.execute("SELECT user_id, idle_seconds FROM private_spaces ORDER BY user_id")], [(1, 300), (2, 900)])
-            migrated.close()
+            self.legacy_database(path, 28, [(1, 60, 0), (2, 900, 0)])
+            with closing(Metadata(path)) as migrated:
+                self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], Metadata.SCHEMA_VERSION)
+                self.assertEqual([tuple(row) for row in migrated.db.execute("SELECT user_id, idle_seconds FROM private_spaces ORDER BY user_id")], [(1, 300), (2, 900)])
+
+    def test_v30_upgrade_preserves_settings_and_expands_constraints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "meta.db"
+            self.legacy_database(path, 30, [(1, 1800, 123), (2, 900, 456)])
+            with closing(Metadata(path)) as migrated:
+                self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], Metadata.SCHEMA_VERSION)
+                rows = [tuple(row) for row in migrated.db.execute("SELECT * FROM private_spaces ORDER BY user_id")]
+                self.assertEqual(rows, [(1, 1800, 123), (2, 900, 456)])
+                for idle in PrivateSpace.IDLE_OPTIONS:
+                    with self.subTest(idle=idle), migrated.transaction() as db:
+                        db.execute("UPDATE private_spaces SET idle_seconds=? WHERE user_id=1", (idle,))
+                for idle in (60, 120, 10800):
+                    with self.subTest(invalid_idle=idle), self.assertRaises(sqlite3.IntegrityError), migrated.transaction() as db:
+                        db.execute("UPDATE private_spaces SET idle_seconds=? WHERE user_id=1", (idle,))
+                with self.assertRaises(sqlite3.IntegrityError), migrated.transaction() as db:
+                    db.execute("INSERT INTO private_spaces(user_id,created_at) VALUES(999,0)")
+                with migrated.transaction() as db:
+                    db.execute("DELETE FROM users WHERE id=1")
+                    db.execute("DELETE FROM private_spaces WHERE user_id=2")
+                    db.execute("INSERT INTO private_spaces(user_id,created_at) VALUES(2,789)")
+                self.assertEqual([tuple(row) for row in migrated.db.execute("SELECT * FROM private_spaces")], [(2, 1800, 789)])
+                self.assertEqual(migrated.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+            with closing(Metadata(path)) as reopened:
+                self.assertEqual([tuple(row) for row in reopened.db.execute("SELECT * FROM private_spaces")], [(2, 1800, 789)])
+            self.assertEqual(len(list(path.parent.glob("meta.db.v30.*.bak"))), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
 

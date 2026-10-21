@@ -44,7 +44,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 30
+    SCHEMA_VERSION = 31
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -705,6 +705,20 @@ class Metadata:
                     CREATE INDEX IF NOT EXISTS offline_by_key ON offline_tasks(bucket_id, key)
                 """)
                 db.execute("PRAGMA user_version = 30")
+            if version < 31:
+                # v29 扩展了可选闲置时间，但旧表的 CHECK 仍只允许 30 分钟以内；重建表并保留已有设置。
+                self._schema("""
+                    CREATE TABLE private_spaces_v31(
+                        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        idle_seconds INTEGER NOT NULL DEFAULT 1800 CHECK(idle_seconds IN (300,900,1800,3600,5400,7200)),
+                        created_at REAL NOT NULL
+                    );
+                    INSERT INTO private_spaces_v31(user_id,idle_seconds,created_at)
+                        SELECT user_id,idle_seconds,created_at FROM private_spaces;
+                    DROP TABLE private_spaces;
+                    ALTER TABLE private_spaces_v31 RENAME TO private_spaces
+                """)
+                db.execute("PRAGMA user_version = 31")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""
