@@ -1353,9 +1353,11 @@ class ObjectService:
         if old == new:
             return MoveResult(0, 0)
         with self.metadata.transaction() as db:
-            rows = [r for r in db.execute("SELECT * FROM objects WHERE bucket_id=? AND key>=? ORDER BY key",
-                                          (scope.bucket_id, old))
-                    if (r["key"].startswith(old) if folder else r["key"] == old)]
+            # 查询必须带上界：文件精确匹配，文件夹限定在前缀范围内。只写 key>=? 会扫描并读出桶里其后的全部对象，
+            # 批量移入回收站时每一项都扫一遍整个桶。
+            rows = db.execute("SELECT * FROM objects WHERE bucket_id=? AND key>=? AND key<? ORDER BY key",
+                              (scope.bucket_id, old, old + self._PREFIX_END)).fetchall() if folder else \
+                db.execute("SELECT * FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, old)).fetchall()
             if not rows:
                 raise NotFoundError(old)
             moving = {r["key"] for r in rows}
@@ -1394,8 +1396,10 @@ class ObjectService:
                                "public_password=NULL,public_downloads=0 WHERE bucket_id=? AND key=?", (scope.bucket_id, target))
             # 下载任务的目标也是文件系统路径；移动目录时同步未完成任务和已移动成品的位置。
             actual_moves = dict(moves)
-            tasks = db.execute("SELECT id,key,status,upload_id FROM offline_tasks WHERE bucket_id=? AND key>=?",
-                               (scope.bucket_id, old)).fetchall()
+            tasks = db.execute("SELECT id,key,status,upload_id FROM offline_tasks WHERE bucket_id=? AND key>=? AND key<?",
+                               (scope.bucket_id, old, old + self._PREFIX_END)).fetchall() if folder else \
+                db.execute("SELECT id,key,status,upload_id FROM offline_tasks WHERE bucket_id=? AND key=?",
+                           (scope.bucket_id, old)).fetchall()
             for task in tasks:
                 task_key = task["key"]
                 if folder:

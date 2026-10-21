@@ -44,7 +44,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 29
+    SCHEMA_VERSION = 30
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -696,6 +696,15 @@ class Metadata:
                 # 私密空间闲置锁定改为 5–120 分钟，不再提供 1 分钟：旧的 1 分钟设置改为最短的 5 分钟。
                 db.execute("UPDATE private_spaces SET idle_seconds=300 WHERE idle_seconds<300")
                 db.execute("PRAGMA user_version = 29")
+            if version < 30:
+                # 删除与移动的索引：释放 Blob 时按 blob_uuid 查引用（含删除 blobs 行时的外键检查）、
+                # 移动时查同一路径的下载任务。缺少它们时每删一个文件都要扫描整个桶或整张表。
+                self._schema("""
+                    CREATE INDEX IF NOT EXISTS objects_by_blob ON objects(blob_uuid);
+                    CREATE INDEX IF NOT EXISTS uploads_by_blob ON uploads(blob_uuid);
+                    CREATE INDEX IF NOT EXISTS offline_by_key ON offline_tasks(bucket_id, key)
+                """)
+                db.execute("PRAGMA user_version = 30")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""
