@@ -174,11 +174,29 @@ class ObjectService:
         db.execute("DELETE FROM uploads WHERE blob_uuid = ?", (blob_uuid,))
         db.execute("DELETE FROM blobs WHERE uuid = ?", (blob_uuid,))
 
+    def _duplicate_blob(self, db, bucket_id: int, blob_uuid: str, size: int) -> str | None:
+        """同一存储桶里已有内容指纹相同的完整 Blob 时返回它（写入后合并）：网页、离线下载、S3 与 API 上传都适用，
+        重复内容只保留一份数据和一套缩略图。查找范围与秒传相同（含私密空间，不含回收站与系统区）。"""
+        row = db.execute("SELECT fingerprint FROM blobs WHERE uuid=?", (blob_uuid,)).fetchone()
+        if row is None or not row["fingerprint"]:
+            return None
+        match = db.execute(
+            "SELECT o.blob_uuid FROM objects o JOIN blobs b ON b.uuid = o.blob_uuid "
+            "WHERE o.bucket_id = ? AND b.fingerprint = ? AND b.size = ? AND b.status = 'complete' AND b.uuid != ? "
+            "AND (substr(o.key,1,9)!='.tgdrive/' OR substr(o.key,1,?)=?) ORDER BY o.modified_at DESC LIMIT 1",
+            (bucket_id, row["fingerprint"], size, blob_uuid, len(PRIVATE_PREFIX), PRIVATE_PREFIX)).fetchone()
+        return match["blob_uuid"] if match else None
+
     def _commit_blob(self, bucket_id: int, key: str, blob_uuid: str, size: int, etag: str,
-                     content_type: str | None, user_meta: dict[str, str] | None, *, scope: Scope | None = None) -> ObjectInfo:
+                     content_type: str | None, user_meta: dict[str, str] | None, *, scope: Scope | None = None,
+                     dedupe: bool = False) -> ObjectInfo:
+        """dedupe=True 用于刚写入的新 Blob：已有相同内容时改为引用那份，调用方随后删除新 Blob（返回对象的 blob_uuid 不同）。
+        对象自己的 ETag 保持不变，S3 分段上传返回的 ETag 不受影响。"""
         now = time.time()
         meta_json = json.dumps(user_meta or {}, ensure_ascii=False, separators=(",", ":"))
         with self.metadata.transaction() as db:
+            if dedupe:
+                blob_uuid = self._duplicate_blob(db, bucket_id, blob_uuid, size) or blob_uuid
             bucket = db.execute("SELECT quota_bytes, used_bytes FROM buckets WHERE id = ?", (bucket_id,)).fetchone()
             if bucket is None:
                 raise NotFoundError(f"bucket {bucket_id} not found")
@@ -246,13 +264,19 @@ class ObjectService:
 
     async def put_object(self, scope: Scope, key: str, body: AsyncIterator[bytes] | Iterable[bytes] | bytes,
                          size: int | None = None, content_type: str | None = None,
-                         user_meta: dict[str, str] | None = None, *, expect_md5: str | None = None) -> ObjectInfo:
+                         user_meta: dict[str, str] | None = None, *, expect_md5: str | None = None, small: bool = False) -> ObjectInfo:
         self._check_scope(scope, key, write=True)
-        body = self._guard_quota(body, self._quota_room(scope.bucket_id, key), size)
+        room = self._quota_room(scope.bucket_id, key)
+        if small:
+            # 系统小对象已整块在内存里，大小已知：直接比较剩余配额（提交时事务内仍会复核）。
+            if room is not None and len(body) > room:  # type: ignore[arg-type]
+                raise QuotaExceededError("存储桶配额不足")
+        else:
+            body = self._guard_quota(body, room, size)
         blob_uuid = self.engine.begin_blob()
         self._cache_upload(blob_uuid, key, content_type)
         try:
-            result = await self.engine.put_part(blob_uuid, 1, body, bucket_id=scope.bucket_id)
+            result = await self.engine.put_part(blob_uuid, 1, body, bucket_id=scope.bucket_id, small=small)
             if size is not None and result.size != size:
                 raise ValueError("object size does not match request")
             if expect_md5 is not None and result.md5.lower() != expect_md5.lower():
@@ -261,8 +285,8 @@ class ObjectService:
             if result.size:
                 self.metadata.set_fingerprint(blob_uuid, combine(result.size, result.leaves))
             self._check_scope(scope, key, write=True)
-            return self._commit_blob(scope.bucket_id, key, blob_uuid, result.size, result.md5,
-                                     content_type, user_meta, scope=scope)
+            info = self._commit_blob(scope.bucket_id, key, blob_uuid, result.size, result.md5,
+                                     content_type, user_meta, scope=scope, dedupe=not small)
         except Exception:
             # 已写入后端的分片由 orphan cleanup/GC 处理；元数据中的临时 blob 可立即入队。
             try:
@@ -270,6 +294,9 @@ class ObjectService:
             except Exception:
                 pass
             raise
+        if info.blob_uuid != blob_uuid:
+            await self.engine.delete(blob_uuid)  # 内容与已有文件相同：只保留原来那份数据与缩略图
+        return info
 
     MIN_PART_SIZE = 5 * 1024 * 1024  # S3 规定：除最后一段外每段至少 5 MiB
 
@@ -486,7 +513,7 @@ class ObjectService:
                                scope: Scope | None = None) -> None:
         """大缩略图写成系统区对象（经 put_object 加密、计入配额），提交前复核源文件仍引用该 Blob。"""
         key = f"{self.THUMBNAIL_PREFIX}{blob_uuid}/{variant}"
-        await self.put_object(Scope(bucket_id), key, data, len(data), mime)
+        await self.put_object(Scope(bucket_id), key, data, len(data), mime, small=True)
         now = time.time()
         with self.metadata.transaction() as db:
             if scope is not None and scope.authorize is not None:
@@ -904,13 +931,13 @@ class ObjectService:
                 page = ListPage([self._object(row) for row in rows[:size]], [], rows[size - 1]["key"] if len(rows) > size else None)
             else:
                 page = self.list_objects(scope, prefix, "/", cursor, max(1, min(limit, 500)))
-            return (page, self.folder_sizes(scope, page.common_prefixes),
+            return (page, self.folder_summary(scope, page.common_prefixes),
                     self.thumbnail_variants([item.blob_uuid for item in page.objects]), self.folder_previews(scope, page.common_prefixes))
         page, sizes, thumbnails, previews = await self.metadata.run_in_thread(read_page)
         files = [{"name": item.key[len(prefix):], "path": item.key[len(root.key):], "size": item.size, "content_type": item.content_type,
                   "etag": item.etag, "modified_at": item.modified_at, "thumbnails": thumbnails.get(item.blob_uuid or "", [])}
                  for item in page.objects if item.key != prefix and not item.key.endswith("/")]
-        folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):], "size": sizes[value],
+        folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):], "size": sizes[value][0], "modified_at": sizes[value][1],
                     "previews": [{"name": item["key"].rsplit("/", 1)[-1], "path": item["key"][len(root.key):],
                                   **{key: data for key, data in item.items() if key != "key"}} for item in previews[value]]}
                    for value in page.common_prefixes]
@@ -1128,8 +1155,9 @@ class ObjectService:
             return previews
         return self.metadata.cached_read(("folder-previews", scope.bucket_id, tuple(prefixes)), read)
 
-    def folder_sizes(self, scope: Scope, prefixes: list[str]) -> dict[str, int]:
-        """只汇总当前页目录下的原始文件大小；由桶和路径范围限制查询，不读取文件内容。"""
+    def folder_summary(self, scope: Scope, prefixes: list[str]) -> dict[str, tuple[int, float | None]]:
+        """当前页各目录的汇总：(子孙文件的原始大小合计, 目录内最近修改时间)。修改时间含子目录与目录标记，空目录取标记的时间；
+        由桶和路径范围限制查询，不读取文件内容。"""
         prefixes = list(dict.fromkeys(prefixes))
         for prefix in prefixes:
             self._check_scope(scope, prefix)
@@ -1138,7 +1166,7 @@ class ObjectService:
         if not prefixes:
             return {}
         def read():
-            sizes: dict[str, int] = {}
+            summary: dict[str, tuple[int, float | None]] = {}
             # 限制 SQL 参数数量；范围连接使用已有的桶 / 键索引，隐式目录和空目录也能统计。
             for start in range(0, len(prefixes), 200):
                 batch = prefixes[start:start + 200]
@@ -1146,12 +1174,19 @@ class ObjectService:
                 params = [value for prefix in batch for value in (prefix, prefix + self._PREFIX_END)]
                 rows = self.metadata.db.execute(
                     f"WITH folders(prefix,upper_key) AS (VALUES {values}) "
-                    "SELECT f.prefix,COALESCE(SUM(o.size),0) AS size FROM folders f "
-                    "LEFT JOIN objects o ON o.bucket_id=? AND o.key>f.prefix AND o.key<f.upper_key "
-                    "AND substr(o.key,-1)!='/' GROUP BY f.prefix", (*params, scope.bucket_id))
-                sizes.update((row["prefix"], int(row["size"])) for row in rows)
-            return sizes
-        return self.metadata.cached_read(("folder-sizes", scope.bucket_id, tuple(prefixes)), read)
+                    "SELECT f.prefix,COALESCE(SUM(CASE WHEN substr(o.key,-1)!='/' THEN o.size END),0) AS size,"
+                    "MAX(o.modified_at) AS modified FROM folders f "
+                    "LEFT JOIN objects o ON o.bucket_id=? AND o.key>=f.prefix AND o.key<f.upper_key GROUP BY f.prefix",
+                    (*params, scope.bucket_id))
+                summary.update((row["prefix"], (int(row["size"]), row["modified"])) for row in rows)
+            return summary
+        return self.metadata.cached_read(("folder-summary", scope.bucket_id, tuple(prefixes)), read)
+
+    def folder_sizes(self, scope: Scope, prefixes: list[str]) -> dict[str, int]:
+        return {prefix: size for prefix, (size, _) in self.folder_summary(scope, prefixes).items()}
+
+    def folder_modified(self, scope: Scope, prefixes: list[str]) -> dict[str, float | None]:
+        return {prefix: modified for prefix, (_, modified) in self.folder_summary(scope, prefixes).items()}
 
     async def delete_prefix(self, scope: Scope, prefix: str, *, batch: int = 1000) -> int:
         """删除前缀下的全部对象（含目录标记），按批提交，避免长时间占用写锁。返回删除数量。"""
@@ -1472,9 +1507,13 @@ class ObjectService:
         combined = hashlib.md5(b"".join(bytes.fromhex(records[p[0]]["md5"]) for p in parts)).hexdigest() + f"-{len(parts)}"
         self._check_scope(scope, upload["key"], write=True)
         info = self._commit_blob(scope.bucket_id, upload["key"], upload["blob_uuid"], blob_size, combined,
-                                 upload["content_type"], json.loads(upload["user_meta"] or "{}"), scope=scope)
+                                 upload["content_type"], json.loads(upload["user_meta"] or "{}"), scope=scope, dedupe=True)
         with self.metadata.transaction() as db:
-            db.execute("UPDATE uploads SET completed_at=?, result_etag=? WHERE upload_id=?", (time.time(), combined, upload_id))
+            # 合并到已有 Blob 时，上传记录（幂等重试用）改指向它，才能删除刚写入的这份。
+            db.execute("UPDATE uploads SET completed_at=?, result_etag=?, blob_uuid=? WHERE upload_id=?",
+                       (time.time(), combined, info.blob_uuid, upload_id))
+        if info.blob_uuid != upload["blob_uuid"]:
+            await self.engine.delete(upload["blob_uuid"])
         return info
 
     async def abort_multipart(self, scope: Scope, upload_id: str) -> None:

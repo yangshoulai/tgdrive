@@ -955,7 +955,6 @@ class TgDriveASGI(StaticFiles):
                 session = user._session(token, csrf=csrf, mutation=method != "GET")
                 account = user.accounts.account_for_session(session)
                 private_scope = user._scope(token, csrf=csrf, mutation=method != "GET") if private else None
-                private_activity = (lambda: self.private_space.activity(token, csrf, access, active=True)) if private else None
                 if route == "/downloads/parse" and method == "POST":
                     return 200, await self.offline.parse(account.id, payload.get("input"), download_type=payload.get("download_type", "auto"), cookies=payload.get("cookies", "")), {"Cache-Control": "no-store"}
                 if route == "/downloads" and method == "GET":
@@ -965,19 +964,19 @@ class TgDriveASGI(StaticFiles):
                         raise ValueError("ids 应为逗号分隔的任务编号") from exc
                     return 200, self.offline.list(account.id, cursor=int(query.get("cursor", ["0"])[0] or "0"), status=query.get("status", [""])[0], query=query.get("q", [""])[0], limit=int(query.get("limit", ["50"])[0]), private_scope=private_scope, ids=ids), {"Cache-Control": "no-store"}
                 if route == "/downloads" and method == "POST":
-                    return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""), private_scope=private_scope, private_activity=private_activity)}, {"Cache-Control": "no-store"}
+                    return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""), private_scope=private_scope)}, {"Cache-Control": "no-store"}
                 if route == "/downloads/clear" and method == "POST":
                     return 200, await self.offline.clear(account.id, payload.get("status")), {"Cache-Control": "no-store"}
                 if route == "/downloads/stop-all" and method == "POST" and not private:
                     return 200, await self.offline.stop_all(account.id), {"Cache-Control": "no-store"}
                 if route == "/downloads/batch" and method == "POST":
-                    return 200, await self.offline.batch(account.id, payload.get("action"), payload.get("ids"), private_scope=private_scope, private_activity=private_activity), {"Cache-Control": "no-store"}
+                    return 200, await self.offline.batch(account.id, payload.get("action"), payload.get("ids"), private_scope=private_scope), {"Cache-Control": "no-store"}
                 source = re.fullmatch(r"/downloads/(\d+)/source", route)
                 if source and method == "GET":
                     return 200, self.offline.source(account.id, int(source[1]), private_scope=private_scope), {"Cache-Control": "no-store"}
                 download = re.fullmatch(r"/downloads/(\d+)/(stop|resume|restart|delete|update)", route)
                 if download and method == "POST":
-                    result = await self.offline.control(account.id, int(download[1]), download[2], item=payload.get("item"), private_scope=private_scope, private_activity=private_activity)
+                    result = await self.offline.control(account.id, int(download[1]), download[2], item=payload.get("item"), private_scope=private_scope)
                     return (204, None, {}) if result is None else (200, result, {"Cache-Control": "no-store"})
             if route == "/private/cache/session" and method == "POST":
                 return 200, self.client_cache.private_session(token, access, payload.get("device")), {}
@@ -1414,7 +1413,7 @@ class TgDriveASGI(StaticFiles):
                                                    archived=query.get("archived", ["0"])[0] in ("1", "true")), no_store
         if route == "/conversations" and method == "POST":
             return 201, service.create_conversation(token, csrf, payload), no_store
-        match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})(?:/(update|delete|messages|retry|share-link))?", route)
+        match = re.fullmatch(r"/conversations/([A-Za-z0-9_-]{4,40})(?:/(update|delete|messages|retry|share-link|export))?", route)
         if match and match[2] is None and method == "GET":
             return 200, service.conversation(token, match[1], before=int(query.get("before_seq", ["0"])[0])), no_store
         if match and match[2] == "update" and method == "POST":
@@ -1426,6 +1425,19 @@ class TgDriveASGI(StaticFiles):
             return 201, await service.send(token, csrf, match[1], payload), no_store
         if match and match[2] == "retry" and method == "POST":
             return 201, await service.retry(token, csrf, match[1], payload), no_store
+        if match and match[2] == "export" and method == "GET":
+            # 下载对话的明文留痕；涉及私密的对话由服务层要求已解锁（423）。审计只记格式与消息数。
+            fmt = query.get("format", ["markdown"])[0]
+            name, content_type, content, count = service.export_conversation(token, match[1], fmt, query.get("tz", [""])[0][:64])
+            session = self.admin.accounts.sessions.peek(token)
+            try:
+                self.audit.record("assistant.conversation.export", actor_type=session.role if session else "user",
+                                  actor=session.username if session else None, ok=True, target=match[1],
+                                  detail={"format": fmt, "messages": count}, ip=ip)
+            except Exception:
+                pass
+            return 200, content, {"Content-Type": content_type, "Cache-Control": "no-store",
+                                  "Content-Disposition": f"attachment; filename=\"conversation.{'md' if fmt == 'markdown' else 'json'}\"; filename*=UTF-8''{quote(name, safe='')}"}
         if match and match[2] == "share-link" and method == "GET":
             return 200, service.share_link(token, match[1], query.get("path", [""])[0]), no_store
         match = re.fullmatch(r"/runs/([A-Za-z0-9_-]{4,40})/(stop|client-results)", route)
@@ -1600,7 +1612,9 @@ class TgDriveASGI(StaticFiles):
 
     async def _send(self, send, status, result, extra=None):
         headers = dict(extra or {})
-        data = b"" if result is None or status in (204, 304) else json.dumps(result, ensure_ascii=False).encode()
+        # bytes 结果原样发送（如对话导出），由调用方在 extra 里给出 Content-Type。
+        data = b"" if result is None or status in (204, 304) else result if isinstance(result, bytes) \
+            else json.dumps(result, ensure_ascii=False).encode()
         if data:
             headers.setdefault("Content-Type", "application/json; charset=utf-8")
         if status != 304:

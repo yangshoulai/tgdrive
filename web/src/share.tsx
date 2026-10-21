@@ -237,6 +237,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
     const folders = entryFilter === "file" ? [] : source.folders.filter(folder => folder.name.toLowerCase().includes(query))
       .sort((a, b) => {
         const name = FOLDER_COLLATOR.compare(a.name, b.name);
+        if (sort.key === "modified") return direction * ((a.modified_at ?? 0) - (b.modified_at ?? 0)) || name;
         if (sort.key !== "size") return (sort.key === "name" ? direction : 1) * name;
         if (a.size == null) return b.size == null ? name : 1;
         if (b.size == null) return -1;
@@ -354,7 +355,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                     </span></span>
                     <span role="cell" className="cell-type muted">文件夹</span>
                     <span role="cell" className="cell-size muted" title="包含所有子文件夹中的文件">{item.size == null ? "—" : formatBytes(item.size)}</span>
-                    <span role="cell" className="cell-date muted">—</span>
+                    <span role="cell" className="cell-date muted" title={item.modified_at ? `目录内最近修改：${formatDateTime(item.modified_at)}` : undefined}>{formatDate(item.modified_at)}</span>
                     <span role="cell" className="cell-actions" />
                   </div>
                 ))}

@@ -43,7 +43,7 @@ class MaintenanceTests(unittest.TestCase):
 
     def test_scrub_progresses_through_all_blobs_and_wraps(self):
         for index in range(7):
-            self.put(f"f{index}")
+            self.put(f"f{index}", f"x{index}".encode())  # 内容不同：相同内容写入后会合并成一个 Blob
         checked = []
         for _ in range(4):
             report = asyncio.run(self.m.scrub.run_once(limit=3))

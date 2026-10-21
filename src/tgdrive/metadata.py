@@ -44,7 +44,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 28
+    SCHEMA_VERSION = 29
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -692,6 +692,10 @@ class Metadata:
                 if "private_at" not in columns:
                     db.execute("ALTER TABLE assistant_conversations ADD COLUMN private_at REAL")
                 db.execute("PRAGMA user_version = 28")
+            if version < 29:
+                # 私密空间闲置锁定改为 5–120 分钟，不再提供 1 分钟：旧的 1 分钟设置改为最短的 5 分钟。
+                db.execute("UPDATE private_spaces SET idle_seconds=300 WHERE idle_seconds<300")
+                db.execute("PRAGMA user_version = 29")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

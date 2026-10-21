@@ -70,7 +70,9 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def put(self, key="image.jpg", scope=None):
-        return await self.objects.put_object(scope or self.scope, key, bytes(range(128)))
+        # 每次写入的内容都不同（第一次正好是 0..127）：相同内容会在写入后合并到已有 Blob，覆盖测试需要新 Blob。
+        self._puts = getattr(self, "_puts", -1) + 1
+        return await self.objects.put_object(scope or self.scope, key, bytes(range(127)) + bytes([(127 + self._puts) % 256]))
 
     def variants(self, info):
         return [row[0] for row in self.metadata.db.execute(

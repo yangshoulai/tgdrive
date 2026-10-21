@@ -32,7 +32,7 @@ from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
 from ..objects import PRIVATE_PREFIX, Scope
 from ..offline.request import checked_url
-from . import client_tools, http_tools, knowledge, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
+from . import client_tools, export, http_tools, knowledge, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
 from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
 from .actions import DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
 from .catalog import CatalogStore
@@ -56,7 +56,7 @@ from .tools import (
     tool_params,
     validate_tool_settings,
 )
-from .trace import TraceStore
+from .trace import TraceStore, today as trace_today
 
 log = logging.getLogger(__name__)
 
@@ -574,6 +574,37 @@ class AssistantService:
         except (NotFoundError, TypeError, KeyError):
             window = None
         return {"used": used, "window": window or 32000}
+
+    def export_conversation(self, token: str, conversation_id: str, fmt: str = "markdown",
+                            zone: str = "") -> tuple[str, str, bytes, int]:
+        """导出对话的明文留痕（Markdown 或 JSON）。只能导出自己的对话，涉及私密的对话要求当前会话已解锁。
+        返回 (文件名, Content-Type, 内容, 消息数)。"""
+        if fmt not in export.FORMATS:
+            raise ValueError("导出格式只能是 markdown 或 json")
+        _, account = self._session(token)
+        self.trace.conversation(account.id, conversation_id)
+        self._check_private(token, conversation_id)
+        row = self.trace.conversation(account.id, conversation_id)
+        item = self.trace.conversation_json(row)
+        item["scope"] = display(item.pop("scope_root"))
+        try:
+            item["model"] = self.channels.model(row["model_id"])["label"] if row["model_id"] else None
+        except (NotFoundError, KeyError, TypeError):
+            item["model"] = None
+        try:
+            tz = ZoneInfo(zone) if zone else export.UTC
+        except (ValueError, KeyError, OSError):
+            tz = export.UTC
+        messages: list[dict] = []
+        while batch := self.trace.messages(conversation_id, after=messages[-1]["seq"] if messages else 0, limit=500):
+            messages.extend(self._public_message(message) for message in batch)
+        now = time.time()
+        if fmt == "json":
+            actions = [self._action_view(action) for action in self.trace.actions(conversation_id)]
+            content = export.render_json(item, messages, actions, tz, now)
+        else:
+            content = export.render_markdown(item, messages, tz, now)
+        return export.filename(item["title"], conversation_id, fmt), export.FORMATS[fmt][1], content, len(messages)
 
     @staticmethod
     def _public_message(message: dict) -> dict:
@@ -2461,6 +2492,8 @@ class AssistantService:
                           "tokens": int(tokens), "failure_rate": (1 - today_stats["success_rate"]) if today_stats["success_rate"] is not None else None,
                           "pending_actions": int(actions[0]), "executed_actions": int(actions[1])},
                 "usage": self.trace.usage_by_day(days=30),
+                # 曲线补齐无用量的日期时以服务器日期为准，不受浏览器时区影响。
+                "usage_since": trace_today(time.time() - 29 * 86400),
                 "models": {m["id"]: m["label"] for m in self.channels.models()},
                 "health": [{"id": c["id"], "name": c["name"], "enabled": c["enabled"], **health.get(c["id"], {})} for c in channels],
                 "storage": self.trace.storage()}

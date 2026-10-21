@@ -41,7 +41,7 @@ class PrivateGrant:
 
 
 class PrivateSpace:
-    IDLE_OPTIONS = (60, 300, 900, 1800)
+    IDLE_OPTIONS = (300, 900, 1800, 3600, 5400, 7200)
     DEFAULT_IDLE = 1800
     MAX_GRANTS = 5000
 
@@ -103,7 +103,7 @@ class PrivateSpace:
     @classmethod
     def _idle(cls, value):
         if isinstance(value, bool) or value not in cls.IDLE_OPTIONS:
-            raise ValueError("闲置时间只能选择 1、5、15 或 30 分钟")
+            raise ValueError("闲置时间只能选择 5、15、30、60、90 或 120 分钟")
         return int(value)
 
     def _issue(self, token, user_id, idle, *, password_hash=None):

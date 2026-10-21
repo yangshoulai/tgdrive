@@ -203,6 +203,31 @@ class PlatformTasks(unittest.IsolatedAsyncioTestCase):
         finally:
             service.RETRY_DELAYS = original
 
+    async def test_busy_storage_retries_instead_of_failing(self):
+        from tgdrive.offline import service
+        from tgdrive.work import WorkBusyError
+        http, failures = self.http, [1]
+        class Busy(MemoryHttp):
+            @asynccontextmanager
+            async def open(inner, request, **kwargs):
+                if failures[0]:
+                    failures[0] -= 1
+                    raise WorkBusyError("传输繁忙，请稍后重试")
+                async with http.open(request, **kwargs) as response:
+                    yield response
+        original = service.RETRY_DELAYS
+        service.RETRY_DELAYS = (0.05, 0.05, 0.05)
+        try:
+            task = await self.make()
+            self.offline.http = Busy()
+            self.offline.start()
+            row = await self.wait(task["id"], ("interrupted",))
+            self.assertIn("传输繁忙", row["error"])
+            row = await self.wait(task["id"])
+            self.assertEqual((row["status"], row["error"]), ("completed", None), "存储名额暂时占满时自动重试，不判为失败")
+        finally:
+            service.RETRY_DELAYS = original
+
     async def test_clear_finished_tasks_keeps_files_and_active_tasks(self):
         done, failed, queued = [await self.make() for _ in range(3)]
         self.offline.start()

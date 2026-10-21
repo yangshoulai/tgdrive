@@ -521,6 +521,7 @@ class UserApi:
             return {"objects": self._objects_json(page.objects),
                     "common_prefixes": page.common_prefixes, "next_cursor": page.next_cursor,
                     "folder_sizes": self.objects.folder_sizes(scope, page.common_prefixes),
+                    "folder_modified": self.objects.folder_modified(scope, page.common_prefixes),
                     # 网格视图的文件夹封面：每个文件夹最多四张已有的列表小图，只读元数据。
                     "folder_previews": self.objects.folder_previews(scope, page.common_prefixes),
                     "public_folders": self._public_folders(account.bucket_id, page.common_prefixes)}
@@ -538,6 +539,7 @@ class UserApi:
         return {"objects": [item for item in items if not item["key"].endswith("/")],
                 "common_prefixes": list(folders), "public_folders": folders,
                 "folder_sizes": self.objects.folder_sizes(Scope(bucket_id), list(folders)),
+                "folder_modified": self.objects.folder_modified(Scope(bucket_id), list(folders)),
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
     def _kind_directory_page(self, scope: Scope, prefix: str, cursor: str | None, limit: int,
@@ -559,7 +561,7 @@ class UserApi:
             (scope.bucket_id, effective, effective + self.objects._PREFIX_END, cursor or "", int(scope.private_access),
              len(effective) + 1, int(public_only), *args, limit + 1)).fetchall()
         return {"objects": self._objects_json([self.objects._object(row) for row in rows[:limit]]),
-                "common_prefixes": [], "folder_sizes": {}, "public_folders": {},
+                "common_prefixes": [], "folder_sizes": {}, "folder_modified": {}, "public_folders": {},
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
     STATS_LARGEST = 5
@@ -893,6 +895,7 @@ class UserApi:
         items = self._objects_json([self.objects._object(row) for row in rows[:limit]])
         return {"objects": items, "total": total,
                 "folder_sizes": self.objects.folder_sizes(scope, [item["key"] for item in items if item["key"].endswith("/")]),
+                "folder_modified": self.objects.folder_modified(scope, [item["key"] for item in items if item["key"].endswith("/")]),
                 "folder_previews": self.objects.folder_previews(scope, [item["key"] for item in items if item["key"].endswith("/")]),
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 

@@ -593,7 +593,7 @@ request_scope：请求把本对话的作用域切换到另一个目录。只有�
 │ 可用模型  5 个（2 个渠道）│ │ 待确认操作 6   已执行 41          │
 │ 启用工具  29 / 35         │ └─────────────────────────────────┘
 └──────────────────────────┘
-┌ 近 30 天 Token 用量（按模型堆叠柱状图）──────────────────────────┐
+┌ 近 30 天 Token 用量（每日合计曲线，补齐无用量日期）──────────────┐
 ┌ 渠道健康：名称 · 成功率 · P95 延迟 · 最近错误 ─────────────────────┐
 ┌ 数据占用：对话 / 消息 / 调用日志行数与估算大小  [清除所有助手数据] ┐
 ```
@@ -946,7 +946,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 
 - OpenAI 兼容流式响应的 `delta.reasoning_content`／`delta.reasoning`（DeepSeek、Qwen、OpenRouter、vLLM 等）与 Anthropic `thinking_delta` 作为 `reasoning_delta` 事件推送，结束后随该条助手消息加密保存（最多 20,000 字符）。
 - 思考内容只展示给用户，不发回模型（DeepSeek 要求不回传；Anthropic 不主动开启扩展思考，因此没有签名块需要回传）。
-- 界面：生成中显示「正在思考 · 已用 N 秒」，文字有流光动画，正文在固定高度、上下渐隐的窗口里滚动；结束后折叠成「已思考 N 秒」，点开阅读全文。所有长文本强制换行，对话区禁止横向滚动。
+- 界面：时间线节点为大脑图标与「思考」加用时，运行中标题有流光动画；正文默认收起，点开阅读，运行中展开时流式追加并跟随到底部，结束后保持展开。所有长文本强制换行，对话区禁止横向滚动。
 
 ### 19.4 对话层次
 
@@ -1470,7 +1470,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 ### 37.2 授权
 
 - 统一接口 `/api/user/v1/assistant/*`，删除 `/api/user/v1/private/assistant/*`。私密授权由服务端按登录会话查找（`PrivateSpace.session_grants`，同一登录会话共享一个授权），请求与事件流不携带授权；复核本身不续期。
-- 涉及私密的对话：详情、消息、发送、重试、改名、归档、事件流、浏览器回传、操作详情与确认都要求同一登录会话有效的私密授权（`PrivateSpace.require`），否则 423 `private_locked`，前端提示解锁，不登出。删除对话不需要解锁。
+- 涉及私密的对话：详情、消息、发送、重试、改名、归档、事件流、浏览器回传、操作详情与确认都要求同一登录会话有效的私密授权（`PrivateSpace.require`），否则 423 `private_locked`，前端提示解锁，不登出。删除对话不需要解锁。下载对话（§39）同样要求解锁。
 - 历史列表：涉及私密且请求没有有效授权的对话返回 `locked: true`、`title: null`，界面显示锁形图标与「私密对话 · 解锁后查看」，只显示时间。
 - 运行记录本轮访问私密空间时使用的授权（发送涉及私密时，或工具首次进入私密区域时取得）。涉及私密的运行每一步复核授权；授权失效立即停止（`stop_reason=private_locked`）。
 - 锁定、闲置过期、退出、改密、系统锁定：`PrivateSpace.listeners` 通知服务，取消持有该授权的运行与正在执行的私密操作；对话保留在历史中，重新解锁后可以继续。待确认的操作不作废（仍按 §28 的有效期），锁定期间确认返回 423，解锁后才能确认。
@@ -1506,3 +1506,10 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - **多个相册**：`collect_gallery` 新增 `albums`（链接结果集）或 `album_urls`（≤500），用 `analyze_page` 得到的同一条规则逐个相册收集。相册内只走学到的翻页规则（`next_link` 直接复用，`url_pattern` 能按起始地址替换时复用），不跟随「下一个相册」之类的通用链接。进度保存在结果集 rule 的 `batch` 中，每次调用最多 105 秒，返回 `progress` 与 `complete`；中途超时的相册下次从头再走（按地址去重），单次调用连一个相册都没走完时按部分收集记录，避免卡住。图片记录所属相册名（第一页标题清理成单段名称，重名加序号）；第一页没有符合规则图片的相册记为失败（结构可能不同）。`max_images` 默认 20000。
 - **分批与分目录下载**：`propose_downloads` 新增 `offset`/`limit`（与 `indices` 二选一，结果给出下一批的 `next_offset`）与 `by_album`（条目带 `folder`，保存到「目标/相册名/」）。执行时按子目录分组创建任务，子目录名再清理一次并复核仍在作用域内。
 - 提示词：规则 7 写明多层网页的流程（inspect_page → collect_links → analyze_page → collect_gallery(albums) 直到 complete → propose_downloads 分批、by_album）；规则 10 说明摘要行与 recall_result、notes 的用法。
+
+## 39. 下载对话
+
+- 历史列表每个对话的菜单提供「下载为 Markdown」与「下载为 JSON」，接口 `GET /api/user/v1/assistant/conversations/<id>/export?format=markdown|json&tz=<IANA 时区>`（普通会话 Cookie，GET 不需要 CSRF），响应 `Content-Disposition: attachment`、`Cache-Control: no-store`。
+- 只能下载自己的对话（他人返回 404）；涉及私密的对话要求同一登录会话已解锁，否则 423 `private_locked`，抽屉弹出解锁，解锁后自动重新下载；锁定的私密对话在菜单里也提供下载入口。
+- 内容是明文留痕，范围与对话详情一致：去掉只给模型看的包装文本（`model_content`、`model_text`）、图片字节与内部字段（`assistant/export.py` 的 `_HIDDEN`）。Markdown 按时间顺序列出用户消息（引用、附件名、网页快照）、助手回复（思考以引用块呈现）、工具调用（参数与结果，单个结果最多 20,000 字符）与系统事件；JSON 带格式标识 `tessera.assistant.conversation`、版本、对话元数据、全部消息与操作记录。时间按前端传入的时区，无效时用 UTC。
+- 审计 `assistant.conversation.export`，只记对话编号、格式与消息数，不记标题或内容。

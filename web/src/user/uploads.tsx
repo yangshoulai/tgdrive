@@ -69,7 +69,7 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
   );
 }
 
-type UploadJob = { id: string; file: File; path: string; isPublic: boolean; folderShare?: string; percent: number; status: "queued" | "uploading" | "done" | "error" | "canceled"; error?: string; result?: api.FileItem; resumed?: boolean; phase?: "hashing"; instant?: boolean; completedAt?: number };
+type UploadJob = { id: string; file: File; path: string; isPublic: boolean; folderShare?: string; percent: number; status: "queued" | "uploading" | "done" | "error" | "canceled"; error?: string; result?: api.FileItem; resumed?: boolean; phase?: "hashing" | "waiting"; instant?: boolean; completedAt?: number };
 type FolderShare = { id: string; path: string; total: number; uploaded: number; status: "waiting" | "sharing" | "done" | "error" | "canceled"; result?: api.FileItem; error?: string; completedAt?: number };
 type FolderShareWork = { path: string; remaining: Set<string>; total: number; canceled: boolean; publishing: boolean };
 
@@ -88,7 +88,8 @@ async function refreshUploadLimits() {
   } catch { /* 沿用当前值 */ }
 }
 /** 小于这个大小的文件不做秒传探测：哈希加一次请求的开销比直接上传还大。 */
-const INSTANT_MIN_SIZE = 1024 * 1024;
+// 秒传探测的最小文件：照片多在 1 MiB 以下，也要能复用已有内容与缩略图；更小的文件多一次请求不划算，由服务端写入后合并兜底。
+const INSTANT_MIN_SIZE = 64 * 1024;
 /** 成功反馈留出查看大小、复制分享链接的时间，再逐项收起。 */
 const COMPLETED_VISIBLE_MS = 8000;
 const resumeKey = (path: string, file: File) => `tgdrive:resume:${path}:${file.size}:${file.lastModified}`;
@@ -211,6 +212,8 @@ export function useUploadQueue(onSettled: () => void) {
 
   const workers = useRef(0);
   const tally = useRef({ done: 0, failed: 0, instant: 0 });
+  /** 同一批里内容相同的文件：第一个正常上传，其余等它结束后再探测秒传，避免并行上传出两份数据和两套缩略图。 */
+  const sameContent = useRef(new Map<string, Promise<void>>());
 
   async function publishFolder(id: string) {
     const folder = folderGroups.current.get(id);
@@ -237,6 +240,7 @@ export function useUploadQueue(onSettled: () => void) {
     aborters.current.set(job.id, () => { control.aborted = true; control.abort?.(); });
     const cancelled = () => new api.ApiError("已取消上传", 0, "upload_aborted");
     let promise: Promise<api.FileItem>;
+    const same = { release: () => {} };
     try {
       // 先算内容指纹并向服务端探测：存储桶里已有相同内容就直接引用，不传输任何数据。
       let instant: api.FileItem | null = null;
@@ -245,8 +249,25 @@ export function useUploadQueue(onSettled: () => void) {
         try {
           const fingerprint = await fingerprintFile(job.file, fraction => update(job.id, { percent: fraction * 100 }), control);
           if (control.aborted) throw cancelled();
-          const probe = await api.instantUpload(job.path, job.file.size, fingerprint, job.file.type, job.isPublic || undefined);
-          if (probe.hit) instant = probe;
+          const probe = () => api.instantUpload(job.path, job.file.size, fingerprint, job.file.type, job.isPublic || undefined);
+          let result = await probe();
+          const identity = `${job.file.size}:${fingerprint}`;
+          while (!result.hit && sameContent.current.has(identity)) {
+            // 同批相同内容的文件正在上传：等它结束（成功或失败）后再探测，命中就直接秒传。
+            update(job.id, { phase: "waiting" });
+            const gate = sameContent.current.get(identity)!;
+            await new Promise<void>(resolve => { control.abort = resolve; void gate.then(resolve); });
+            control.abort = undefined;
+            if (control.aborted) throw cancelled();
+            result = await probe();
+          }
+          if (result.hit) instant = result;
+          else {
+            let open = () => {};
+            const gate = new Promise<void>(resolve => { open = resolve; });
+            sameContent.current.set(identity, gate);
+            same.release = () => { if (sameContent.current.get(identity) === gate) sameContent.current.delete(identity); open(); };
+          }
         } catch (reason) {
           // 指纹或探测失败不影响上传，退回普通方式；只有用户取消才中止。
           if (control.aborted) throw cancelled();
@@ -294,7 +315,7 @@ export function useUploadQueue(onSettled: () => void) {
       update(job.id, { status: aborted ? "canceled" : "error",
         error: multipart && !aborted ? `${api.errorMessage(reason, "上传失败，请稍后重试")}。进度已保存，点击重试即可继续。` : api.errorMessage(reason, "上传失败，请稍后重试") });
       if (!aborted) tally.current.failed++;
-    } finally { aborters.current.delete(job.id); canceled.current.delete(job.id); }
+    } finally { aborters.current.delete(job.id); canceled.current.delete(job.id); same.release(); }
     if (!disposed.current) settled.current();
   }
 
@@ -435,7 +456,7 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
           {jobs.map(job => {
             const running = job.status === "uploading" || job.status === "queued";
             const detail = job.status === "queued" ? `等待上传 · ${formatBytes(job.file.size)}`
-              : job.status === "uploading" ? job.phase === "hashing" ? `检查是否可秒传 · ${Math.round(job.percent)}%` : job.percent >= 100 ? "正在保存…" : `${formatBytes(job.file.size * job.percent / 100)} / ${formatBytes(job.file.size)}`
+              : job.status === "uploading" ? job.phase === "hashing" ? `检查是否可秒传 · ${Math.round(job.percent)}%` : job.phase === "waiting" ? "等待相同文件上传完成后秒传" : job.percent >= 100 ? "正在保存…" : `${formatBytes(job.file.size * job.percent / 100)} / ${formatBytes(job.file.size)}`
               : job.status === "done" ? `${formatBytes(job.file.size)}${job.instant ? " · 秒传" : job.resumed ? " · 续传完成" : ""}` : job.status === "canceled" ? "已取消" : job.error;
             return <li key={job.id} className={`tray-item is-${job.status}`}>
               <span className="tray-icon"><FileTile kind={getFileKind(job.file.type, job.file.name)} />
@@ -446,7 +467,7 @@ export function UploadTray({ queue }: { queue: UploadQueue }) {
                 {running && <TrayBar percent={job.status === "queued" ? 0 : job.percent} paused={job.status === "queued"} label={`${job.file.name} 上传进度`} />}
               </div>
               <span className="tray-right">
-                {job.status === "uploading" && job.phase !== "hashing" && job.percent < 100 && <span className="tray-percent">{Math.floor(job.percent)}%</span>}
+                {job.status === "uploading" && !job.phase && job.percent < 100 && <span className="tray-percent">{Math.floor(job.percent)}%</span>}
                 {running && <IconButton className="tray-cancel" icon="x" size="sm" label={`取消上传 ${job.file.name}`} onClick={() => queue.cancel(job.id)} />}
                 {job.status === "error" && <Button size="sm" icon="refresh" aria-label={`重试上传 ${job.file.name}`} onClick={() => queue.retry(job.id)}>重试</Button>}
                 {job.status === "done" && job.result?.public_token && <IconButton icon="copy" size="sm" label="复制分享链接" onClick={() => void copyText(api.publicLinks(job.result!.public_token!, job.file.name).page, "分享链接已复制")} />}

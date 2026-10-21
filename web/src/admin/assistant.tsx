@@ -2,7 +2,7 @@
  * 系统管理 · 文件助手（docs/assistant-design.md §12.1）：概览、渠道与模型、工具、限制与额度、对话记录、调用日志。
  * 对话记录只展示元数据：服务端管理接口不返回任何对话正文。
  */
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
@@ -115,7 +115,7 @@ function OverviewTab({ revision, settings, onNavigate, onChanged }: { revision: 
     { done: Boolean(settings?.default_model), label: "设为默认模型", tab: "channels" as Tab },
     { done: data.enabled, label: "打开右上角的总开关", tab: "overview" as Tab },
   ];
-  const days = dailyUsage(data.usage);
+  const days = dailyUsage(data.usage_since, data.usage);
   return (
     <>
       {!data.enabled && <Panel title="开始使用" description="完成以下步骤后，用户就能在文件页打开文件助手。">
@@ -137,7 +137,7 @@ function OverviewTab({ revision, settings, onNavigate, onChanged }: { revision: 
       <div className="overview-columns">
         <div className="overview-column">
           <Panel title="近 30 天 Token 用量" description="输入与输出合计，按天汇总。">
-            {days.length ? <UsageBars days={days} /> : <p className="muted">暂无用量数据</p>}
+            {data.usage.length ? <UsageCurve days={days} /> : <p className="muted">暂无用量数据</p>}
           </Panel>
         </div>
         <div className="overview-column">
@@ -181,25 +181,107 @@ function formatSize(bytes: number) {
   return bytes >= 1024 ** 2 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function dailyUsage(points: ai.UsagePoint[]) {
-  const map = new Map<string, number>();
-  for (const point of points) map.set(point.day, (map.get(point.day) ?? 0) + (point.input_tokens ?? 0) + (point.output_tokens ?? 0));
-  return [...map.entries()].map(([day, total]) => ({ day, total }));
+/** 概览的用量按天与模型分组：先按天合计，再补齐 30 天。 */
+function dailyUsage(since: string, points: ai.UsagePoint[]) {
+  const map = new Map<string, { day: string; input_tokens: number; output_tokens: number }>();
+  for (const point of points) {
+    const row = map.get(point.day) ?? { day: point.day, input_tokens: 0, output_tokens: 0 };
+    row.input_tokens += point.input_tokens ?? 0; row.output_tokens += point.output_tokens ?? 0;
+    map.set(point.day, row);
+  }
+  return fillDays(since, 30, [...map.values()]);
 }
 
-function UsageBars({ days }: { days: { day: string; total: number }[] }) {
-  const [selected, setSelected] = useState<string | null>(null);
-  const max = Math.max(1, ...days.map(day => day.total));
-  const current = days.find(day => day.day === selected) ?? days.at(-1)!;
-  return <div className="traffic-chart" aria-label="近 30 天 Token 用量">
-    <div className="traffic-plot"><div className="traffic-axis"><span>{tokens(max)}</span><span>{tokens(Math.round(max / 2))}</span><span>0</span></div><div className="traffic-bars">
-      {days.map(day => <button type="button" key={day.day} className={`traffic-bar${current.day === day.day ? " is-active" : ""}`}
-        aria-label={`${day.day}：${tokens(day.total)} token`} onMouseEnter={() => setSelected(day.day)} onFocus={() => setSelected(day.day)} onClick={() => setSelected(day.day)}>
-        <i className="traffic-in" style={{ height: `${day.total / max * 100}%` }} />
-      </button>)}
-    </div></div>
-    <div className="traffic-times"><span>{days[0].day.slice(5)}</span><span>{days.at(-1)!.day.slice(5)}</span></div>
-    <p className="traffic-readout">{current.day}：{tokens(current.total)} token</p>
+type UsageDay = { day: string; input: number; output: number; total: number };
+
+/** 补齐区间内没有用量的日期（记为 0），曲线和日期刻度才连续；日期按字符串计算，不受时区影响。 */
+function fillDays(since: string, count: number, rows: { day: string; input_tokens: number | null; output_tokens: number | null }[]): UsageDay[] {
+  const known = new Map(rows.map(row => [row.day, row]));
+  const start = Date.UTC(Number(since.slice(0, 4)), Number(since.slice(5, 7)) - 1, Number(since.slice(8, 10)));
+  return Array.from({ length: count }, (_, index) => {
+    const day = new Date(start + index * 86400000).toISOString().slice(0, 10);
+    const row = known.get(day);
+    const input = row?.input_tokens ?? 0, output = row?.output_tokens ?? 0;
+    return { day, input, output, total: input + output };
+  });
+}
+
+/** 单调三次插值（Fritsch–Carlson）：曲线平滑且不会冲到 0 以下或越过相邻点的高度。 */
+function smoothPath(points: [number, number][]) {
+  if (points.length < 2) return points.length ? `M${points[0][0]},${points[0][1]}` : "";
+  const n = points.length, slopes: number[] = [], tangents: number[] = [];
+  for (let i = 0; i < n - 1; i++) slopes.push((points[i + 1][1] - points[i][1]) / (points[i + 1][0] - points[i][0]));
+  tangents.push(slopes[0]);
+  for (let i = 1; i < n - 1; i++) tangents.push(slopes[i - 1] * slopes[i] <= 0 ? 0 : (slopes[i - 1] + slopes[i]) / 2);
+  tangents.push(slopes[n - 2]);
+  for (let i = 0; i < n - 1; i++) {
+    if (slopes[i] === 0) { tangents[i] = tangents[i + 1] = 0; continue; }
+    const a = tangents[i] / slopes[i], b = tangents[i + 1] / slopes[i], h = a * a + b * b;
+    if (h > 9) { const t = 3 / Math.sqrt(h); tangents[i] = t * a * slopes[i]; tangents[i + 1] = t * b * slopes[i]; }
+  }
+  let path = `M${points[0][0]},${points[0][1]}`;
+  for (let i = 0; i < n - 1; i++) {
+    const [x0, y0] = points[i], [x1, y1] = points[i + 1], dx = (x1 - x0) / 3;
+    path += ` C${x0 + dx},${y0 + tangents[i] * dx} ${x1 - dx},${y1 - tangents[i + 1] * dx} ${x1},${y1}`;
+  }
+  return path;
+}
+
+/** 坐标轴上限取 1／2／5×10ⁿ 的整齐值，刻度数字好读。 */
+function niceMax(value: number) {
+  if (value <= 0) return 1;
+  const power = 10 ** Math.floor(Math.log10(value)), unit = value / power;
+  return (unit <= 1 ? 1 : unit <= 2 ? 2 : unit <= 5 ? 5 : 10) * power;
+}
+
+const CHART_W = 1000, CHART_H = 200;
+
+/** 每日 Token 曲线：悬停、点击或方向键查看某一天的输入与输出。 */
+function UsageCurve({ days }: { days: UsageDay[] }) {
+  const [selected, setSelected] = useState<number | null>(null);
+  const plot = useRef<HTMLDivElement>(null);
+  const max = niceMax(Math.max(...days.map(day => day.total)));
+  const x = (index: number) => days.length === 1 ? CHART_W / 2 : index / (days.length - 1) * CHART_W;
+  const y = (value: number) => CHART_H - value / max * CHART_H;
+  const points = days.map((day, index) => [x(index), y(day.total)] as [number, number]);
+  const line = smoothPath(points);
+  const area = `${line} L${x(days.length - 1)},${CHART_H} L${x(0)},${CHART_H} Z`;
+  const index = selected ?? days.length - 1;
+  const current = days[index];
+  // 日期刻度：固定间隔（最多约 7 个）并总是包含最后一天；最后一段太短时去掉它前面那个，避免文字挤在一起。
+  const last = days.length - 1, step = Math.max(1, Math.ceil(last / 6));
+  const ticks = Array.from({ length: Math.floor(last / step) + 1 }, (_, i) => i * step);
+  if (ticks.at(-1) !== last) { if (last - ticks.at(-1)! < step * 0.6 && ticks.length > 1) ticks.pop(); ticks.push(last); }
+  const pick = (clientX: number) => {
+    const box = plot.current?.getBoundingClientRect();
+    if (!box || !box.width) return;
+    setSelected(Math.max(0, Math.min(days.length - 1, Math.round((clientX - box.left) / box.width * (days.length - 1)))));
+  };
+  const left = `${x(index) / CHART_W * 100}%`, top = `${y(current.total) / CHART_H * 100}%`;
+  return <div className="usage-curve" aria-label={`近 ${days.length} 天 Token 用量曲线`}>
+    <div className="usage-curve-body">
+      <div className="usage-curve-axis" aria-hidden="true"><span>{tokens(max)}</span><span>{tokens(max / 2)}</span><span>0</span></div>
+      <div className="usage-curve-plot" ref={plot} tabIndex={0} role="slider" aria-label="选择日期" aria-valuemin={0} aria-valuemax={days.length - 1} aria-valuenow={index}
+        aria-valuetext={`${current.day}：${tokens(current.total)} token`}
+        onPointerMove={event => pick(event.clientX)} onPointerDown={event => pick(event.clientX)} onPointerLeave={() => setSelected(null)}
+        onKeyDown={event => {
+          const step = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
+          if (event.key === "Home" || event.key === "End") { event.preventDefault(); setSelected(event.key === "Home" ? 0 : days.length - 1); }
+          else if (step) { event.preventDefault(); setSelected(Math.max(0, Math.min(days.length - 1, index + step))); }
+        }}>
+        <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} preserveAspectRatio="none" aria-hidden="true">
+          {[0, 0.5, 1].map(ratio => <line key={ratio} className="usage-curve-grid" x1={0} x2={CHART_W} y1={CHART_H * ratio} y2={CHART_H * ratio} vectorEffect="non-scaling-stroke" />)}
+          <path className="usage-curve-area" d={area} />
+          <path className="usage-curve-line" d={line} vectorEffect="non-scaling-stroke" />
+          <line className="usage-curve-guide" x1={x(index)} x2={x(index)} y1={0} y2={CHART_H} vectorEffect="non-scaling-stroke" />
+        </svg>
+        <span className="usage-curve-dot" style={{ left, top }} aria-hidden="true" />
+      </div>
+    </div>
+    <div className="usage-curve-ticks" aria-hidden="true">
+      {ticks.map(tick => <span key={tick} style={{ left: `${x(tick) / CHART_W * 100}%` }}>{days[tick].day.slice(5)}</span>)}
+    </div>
+    <p className="traffic-readout">{current.day}：{tokens(current.total)} token（输入 {tokens(current.input)} · 输出 {tokens(current.output)}）</p>
   </div>;
 }
 
@@ -222,7 +304,6 @@ function UsageTab() {
     void ai.adminUsage(Number(days)).then(setReport).catch(reason => setError(api.errorMessage(reason, "用量加载失败")));
   }, [days]);
   useEffect(load, [load]);
-  const sum = (row: { input_tokens: number | null; output_tokens: number | null }) => (row.input_tokens ?? 0) + (row.output_tokens ?? 0);
   return <>
     <div className="toolbar">
       <div className="toolbar-actions">
@@ -241,7 +322,7 @@ function UsageTab() {
           <Stat label="估算费用" value={report.totals.cost == null ? "—" : `$${report.totals.cost.toFixed(report.totals.cost >= 10 ? 0 : 2)}`} detail="按模型目录价格估算，仅供参考" />
         </div>
         <Panel title="每日 Token 用量" description="输入与输出合计。">
-          {report.by_day.length ? <UsageBars days={report.by_day.map(row => ({ day: row.day, total: sum(row) }))} /> : <p className="muted">暂无用量数据</p>}
+          {report.by_day.length ? <UsageCurve days={fillDays(report.since, report.days, report.by_day)} /> : <p className="muted">暂无用量数据</p>}
         </Panel>
         <div className="assistant-usage-grid">
           <Panel title="按用户" description="用量最多的 50 个账号。">

@@ -22,7 +22,7 @@ import { useFilesBridge } from "./assistant-bridge";
 
 /* ---------- 文件 ---------- */
 
-type Entry = { kind: "folder"; key: string; size?: number } | { kind: "file"; key: string; file: api.FileItem };
+type Entry = { kind: "folder"; key: string; size?: number; modified?: number | null } | { kind: "file"; key: string; file: api.FileItem };
 
 /** 文件夹大小：未统计时留空，没有内容时写“空”，不显示生硬的“0 B”或“—”。 */
 const folderSize = (size?: number) => size == null ? "" : size === 0 ? "空" : formatBytes(size);
@@ -117,6 +117,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const folders = pagination.page?.common_prefixes ?? [];
   const publicFolders = pagination.page?.public_folders ?? {};
   const folderSizes = pagination.page?.folder_sizes ?? {};
+  const folderModified = pagination.page?.folder_modified ?? {};
   const folderPreviews = pagination.page?.folder_previews ?? {};
   const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
   const setThumbnails = (key: string, thumbnails: string[]) =>
@@ -197,10 +198,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     const folderEntries = [...folders].filter(key => filter === "all" || publicFolders[key])
       .sort((a, b) => sort.key === "size"
         ? direction * ((folderSizes[a] ?? 0) - (folderSizes[b] ?? 0)) || COLLATOR.compare(a, b)
+        : sort.key === "modified" ? direction * ((folderModified[a] ?? 0) - (folderModified[b] ?? 0)) || COLLATOR.compare(a, b)
         : (sort.key === "name" ? direction : 1) * COLLATOR.compare(a, b))
-      .map(key => ({ kind: "folder" as const, key, size: folderSizes[key] }));
+      .map(key => ({ kind: "folder" as const, key, size: folderSizes[key], modified: folderModified[key] ?? null }));
     return [...(entryFilter === "file" ? [] : folderEntries), ...(entryFilter === "folder" ? [] : fileEntries)];
-  }, [files, folders, publicFolders, folderSizes, filter, sort, entryFilter]);
+  }, [files, folders, publicFolders, folderSizes, folderModified, filter, sort, entryFilter]);
   useEffect(() => {
     if (loading || pagination.loadingMore || loadError) return;
     const keys = new Set(entries.map(entry => entry.key));
@@ -633,11 +635,11 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
               <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}${cursorClass(entry.key)}${dropClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} {...dropProps(entry.key)} onClick={() => onOpenFolder(entry.key)}>
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
                 <span role="cell" className="cell-name"><FileTile kind="folder" /><span className="name-stack"><button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
-                  <span className="file-mobile-meta"><span>{["文件夹", folderSize(entry.size)].filter(Boolean).join(" · ")}</span>{publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span></span>
+                  <span className="file-mobile-meta"><span>{["文件夹", folderSize(entry.size), entry.modified ? formatDate(entry.modified) : ""].filter(Boolean).join(" · ")}</span>{publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span></span>
                   {publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span>
                 <span role="cell" className="cell-type muted">文件夹</span>
                 <span role="cell" className="cell-size muted" title="包含所有子文件夹中的文件">{folderSize(entry.size)}</span>
-                <span role="cell" className="cell-date muted" />
+                <span role="cell" className="cell-date muted" title={entry.modified ? `目录内最近修改：${formatDateTime(entry.modified)}` : undefined}>{formatDate(entry.modified)}</span>
                 <span role="cell" className="cell-actions" onClick={event => event.stopPropagation()}>
                   {!privateSpace && <span className="row-quick"><IconButton icon="link" size="sm" label={`分享 ${baseName(entry.key)}`} onClick={() => setSharing(folderItem(entry.key))} /></span>}
                   <Menu label={`${baseName(entry.key)} 的更多操作`} items={folderMenu(entry.key)} />

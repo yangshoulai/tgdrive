@@ -111,6 +111,36 @@ class InstantUploadTests(unittest.IsolatedAsyncioTestCase):
         hit = self.service.instant_put(self.scope, "b.bin", len(data), reference(data))
         self.assertEqual(hit.public_token, token)
 
+    async def test_writing_identical_content_merges_into_existing_blob(self):
+        data = os.urandom(BLOCK * 3 + 5)
+        first = await self.service.put_object(self.scope, "a.jpg", data, len(data))
+        second = await self.service.put_object(self.scope, "copy/a.jpg", data, len(data))
+        self.assertEqual(second.blob_uuid, first.blob_uuid, "写入后发现相同内容：改为引用已有数据")
+        self.assertEqual(self.blob_count(), 1, "新写入的那份已删除")
+        self.assertEqual(self.metadata.db.execute("SELECT refcount FROM blobs").fetchone()[0], 2)
+        used = self.metadata.db.execute("SELECT used_bytes FROM buckets WHERE id=?", (self.scope.bucket_id,)).fetchone()[0]
+        self.assertEqual(used, 2 * len(data), "配额与秒传一样按文件计算")
+        await self.service.delete_objects(self.scope, ["a.jpg"])
+        stream = (await self.service.get_object(self.scope, "copy/a.jpg"))[1]
+        self.assertEqual(b"".join([piece async for piece in stream]), data)
+        # 其他存储桶、系统小对象不合并。
+        other = await self.service.put_object(self.other, "a.jpg", data, len(data))
+        self.assertNotEqual(other.blob_uuid, first.blob_uuid)
+        small = await self.service.put_object(self.scope, ".tgdrive/thumbnails/x/thumb", data, len(data), small=True)
+        self.assertNotEqual(small.blob_uuid, first.blob_uuid)
+
+    async def test_multipart_merge_keeps_its_own_etag_and_completion_record(self):
+        data = os.urandom(BLOCK * 2 + 9)
+        first = await self.service.put_object(self.scope, "a.bin", data, len(data))
+        upload = await self.service.create_multipart(self.scope, "b.bin")
+        part = await self.service.upload_part(self.scope, upload, 1, data)
+        info = await self.service.complete_multipart(self.scope, upload, [(1, part.etag)])
+        self.assertEqual(info.blob_uuid, first.blob_uuid)
+        self.assertTrue(info.etag.endswith("-1"), "S3 分段上传的 ETag 不变")
+        self.assertEqual(self.blob_count(), 1)
+        again = await self.service.complete_multipart(self.scope, upload, [(1, part.etag)])
+        self.assertEqual(again.key, "b.bin", "重复完成请求仍按幂等返回")
+
     async def test_quota_is_still_enforced(self):
         data = os.urandom(BLOCK * 2)
         await self.service.put_object(self.scope, "a.bin", data, len(data))

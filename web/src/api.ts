@@ -26,6 +26,8 @@ export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subti
 export type PreviewListPage = { objects: FileItem[]; next_cursor: string | null };
 /** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
 export type ListPage = { objects: FileItem[]; common_prefixes: string[]; next_cursor: string | null; public_folders?: Record<string, FileItem>; folder_sizes?: Record<string, number>;
+  /** 目录内最近修改时间（含子目录），空目录取目录本身的时间 */
+  folder_modified?: Record<string, number | null>;
   /** 网格视图的文件夹封面：每个文件夹最多四张已有缩略图的文件 */
   folder_previews?: Record<string, FileItem[]> };
 export type Account = Profile & { id: number; username: string; role: Role; status: "active" | "disabled"; bucket_id: number | null; created_at: number; last_login_at: number | null; quota_bytes: number | null; used_bytes: number };
@@ -73,7 +75,7 @@ export type PublicObject = PublicFile | PublicFolder | { token: string; password
 export type PublicFolderFile = { name: string; path: string; size: number; content_type: string | null; etag: string; modified_at: number; thumbnails?: string[] };
 export type PublicFolderPage = {
   name: string; path: string; next_cursor: string | null;
-  folders: { name: string; path: string; size?: number; previews?: PublicFolderFile[] }[];
+  folders: { name: string; path: string; size?: number; modified_at?: number | null; previews?: PublicFolderFile[] }[];
   files: PublicFolderFile[];
 };
 export type CreatedClient = { id: number; access_key_id: string; secret: string };
@@ -159,7 +161,17 @@ export function errorMessage(reason: unknown, fallback: string) {
 /** 会删除、覆盖或移动文件的接口：成功后通知本机缓存尽快对账（docs/client-cache-design.md §4）。 */
 const FILE_MUTATIONS = /^\/api\/user\/v1(?:\/private)?\/(?:delete|move|copy|transfer|trash\/purge|trash\/restore|uploads\/[A-Za-z0-9_-]+\/complete|files(?:\/instant)?|assistant\/actions\/[A-Za-z0-9_-]+\/(?:confirm|undo))(?:\?|$)/;
 
-async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 30000): Promise<T> {
+/** 下载响应转成 File：文件名取 Content-Disposition 的 filename*（UTF-8），没有时用 filename。 */
+async function responseFile(response: Response) {
+  const header = response.headers.get("Content-Disposition") ?? "";
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header)?.[1];
+  let name = /filename="([^"]*)"/i.exec(header)?.[1] ?? "download";
+  if (encoded) { try { name = decodeURIComponent(encoded); } catch { /* 保留 filename */ } }
+  const blob = await response.blob();
+  return new File([blob], name, { type: blob.type });
+}
+
+async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 30000, as: "json" | "blob" = "json"): Promise<T> {
   const headers = new Headers(init.headers);
   if (path.startsWith("/api/user/v1/private/") && !headers.has("X-Private-Access")) headers.set("X-Private-Access", privateAccess);
   if (init.body && !headers.has("Content-Type") && !(init.body instanceof Blob)) headers.set("Content-Type", "application/json");
@@ -182,7 +194,7 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 3000
     }
     if (init.method && init.method !== "GET" && FILE_MUTATIONS.test(path)) window.dispatchEvent(new CustomEvent("tessera:files-mutated"));
     if (response.status === 204) return undefined as T;
-    return await response.json() as T;
+    return await (as === "blob" ? responseFile(response) : response.json()) as T;
   } catch (reason) {
     if (timedOut) throw new ApiError("请求超时，请稍后重试", 0, "request_timeout");
     if (init.signal?.aborted) throw new ApiError("请求已取消", 0, "request_aborted");
@@ -198,6 +210,8 @@ const post = <T>(path: string, body?: unknown, timeoutMs?: number) => request<T>
 /** 供独立的接口模块（如 assistant-api.ts）复用同一套错误处理、CSRF 与超时。 */
 export const apiGet = <T>(path: string, signal?: AbortSignal) => request<T>(path, { signal });
 export const apiPost = post;
+/** 下载类 GET：错误仍按 JSON 解析（含 423 private_locked），成功时返回原始内容。 */
+export const apiBlob = (path: string, timeoutMs = 120000) => request<File>(path, {}, timeoutMs, "blob");
 
 export type PrivateGrant = { access: string; idle_seconds: number; remaining_seconds?: number };
 export type PasskeyCapability = { available: boolean; origin: string | null; rp_id: string | null; reason: string | null; registered: number };

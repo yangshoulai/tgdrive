@@ -5,11 +5,14 @@ import { Notice, Button, Field, Icon, Modal, Segmented, toast } from "../ui";
 import { FolderPicker } from "./folders";
 import { usePrivateAccess, usePrivateSession } from "./private-session";
 
+/** 与服务端 PrivateSpace.IDLE_OPTIONS 一致。 */
+const PRIVATE_IDLE_MINUTES = [5, 15, 30, 60, 90, 120];
+
 export function PrivateIdleSelect({ value, onChange }: { value: number; onChange: (value: number) => void }) {
   const id = useId();
   return <Field label="无操作后自动锁定" htmlFor={id} hint="私密操作会重新计时；播放音视频时保持解锁，切换页面不会立即锁定。">
     <select id={id} className="input" value={value} onChange={event => onChange(Number(event.target.value))}>
-      <option value={60}>1 分钟</option><option value={300}>5 分钟</option><option value={900}>15 分钟</option><option value={1800}>30 分钟</option>
+      {PRIVATE_IDLE_MINUTES.map(minutes => <option key={minutes} value={minutes * 60}>{minutes} 分钟</option>)}
     </select>
   </Field>;
 }

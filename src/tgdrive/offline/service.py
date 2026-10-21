@@ -58,10 +58,6 @@ class Paused(NotReadyError):
     pass
 
 
-class PrivateTaskLocked(Paused):
-    pass
-
-
 class OfflineDownloads:
     def __init__(self, accounts, objects, resources, *, http=None):
         self.accounts, self.objects, self.resources = accounts, objects, resources
@@ -79,8 +75,6 @@ class OfflineDownloads:
         self._next_byte = 0.0
         self._pressure_at, self._pressure = 0.0, None
         self._checked: dict[int, float] = {}
-        # 私密授权只存在于当前进程内存；服务重启后由用户解锁并手动恢复任务。
-        self._private_authorizers: dict[int, Callable[[], None]] = {}
         self._limit_at, self._limit = 0.0, 0
         # 自动重试状态只在进程内保存；重启后“等待恢复”的任务本来就会继续。
         self._retries: dict[int, int] = {}
@@ -153,16 +147,6 @@ class OfflineDownloads:
         if now - self._checked.get(user_id, 0) > 0.5:
             self.scope(user_id)
             self._checked[user_id] = now
-        if task_id is not None:
-            row = self._row(task_id)
-            if row["key"].startswith(PRIVATE_PREFIX):
-                authorize = self._private_authorizers.get(task_id)
-                if authorize is None:
-                    raise PrivateTaskLocked("私密空间已锁定，请解锁后继续下载")
-                try:
-                    authorize()
-                except PermissionError as exc:
-                    raise PrivateTaskLocked(str(exc) or "私密空间已锁定，请解锁后继续下载") from exc
         if now - self._pressure_at > 1:
             self._pressure_at, self._pressure = now, self.resources.pressure()
         if self._pressure:
@@ -318,7 +302,7 @@ class OfflineDownloads:
             raise ValueError("解析结果已过期或加密口令已变更，请重新解析") from exc
 
     def create(self, user_id: int, items: list, destination: str, *, private_scope: Scope | None = None,
-               private_activity=None, key_scope: Scope | None = None) -> list[dict]:
+               key_scope: Scope | None = None) -> list[dict]:
         regular_scope = self.scope(user_id)
         if key_scope is not None:
             # 访问密钥创建的任务只能写入密钥的授权前缀；运行时仍按账号身份校验。
@@ -371,24 +355,8 @@ class OfflineDownloads:
                 self._save_source(task_id, {"request": request.json(), "state": {}, "content_type": value["content_type"], "platform_source": value.get("platform_source"), "hls_audio": value.get("hls_audio")})
                 reserved.add(key)
                 ids.append(task_id)
-        if private_destination:
-            authorize = self._private_authorizer(private_scope, private_activity)
-            for task_id in ids:
-                self._private_authorizers[task_id] = authorize
         self._wake.set()
         return [self.public(self._row(task_id), reveal_private=private_destination) for task_id in ids]
-
-    @staticmethod
-    def _private_authorizer(scope: Scope, activity=None):
-        def authorize():
-            try:
-                if scope.authorize is not None:
-                    scope.authorize()
-                if activity is not None:
-                    activity()
-            except PermissionError as exc:
-                raise PrivateTaskLocked(str(exc) or "私密空间已锁定，请解锁后继续下载") from exc
-        return authorize
 
     def public(self, row, *, reveal_private=False):
         result = {key: row[key] for key in PUBLIC_FIELDS}
@@ -515,7 +483,7 @@ class OfflineDownloads:
             result["cookies"] = "\n".join(lines)
         return result
 
-    async def batch(self, user_id, action, ids, *, private_scope: Scope | None = None, private_activity=None) -> dict:
+    async def batch(self, user_id, action, ids, *, private_scope: Scope | None = None) -> dict:
         """多选操作：逐项走 control 的同一套校验；单项失败（如私密空间未解锁、POST 任务需单独确认）计入 skipped。"""
         if action not in ("stop", "resume", "delete"):
             raise ValueError("批量操作只支持停止、继续和删除")
@@ -533,7 +501,7 @@ class OfflineDownloads:
                 if action == "stop" and row["status"] not in ACTIVE:
                     skipped += 1
                     continue
-                await self.control(user_id, task_id, action, private_scope=private_scope, private_activity=private_activity)
+                await self.control(user_id, task_id, action, private_scope=private_scope)
                 done += 1
             except NotFoundError:
                 skipped += 1
@@ -552,8 +520,9 @@ class OfflineDownloads:
                                         (user_id, *ids)).fetchall()
         return [self.public(row) for row in rows if not row["key"].startswith(".tgdrive/") and permits(row["key"])]
 
-    async def control(self, user_id, task_id, action, *, item=None, private_scope: Scope | None = None,
-                      private_activity=None):
+    async def control(self, user_id, task_id, action, *, item=None, private_scope: Scope | None = None):
+        """停止、继续、重新下载与删除私密任务都不需要解锁：下载在服务端用系统密钥写入私密空间，与网页访问授权无关。
+        只有「更新下载参数」会读取并改写原来的来源参数，需要当前会话已解锁；返回结果仍按解锁状态决定是否显示名称。"""
         if action not in ("stop", "resume", "restart", "delete", "update"):
             raise ValueError("下载任务操作不正确")
         self.scope(user_id)
@@ -563,15 +532,9 @@ class OfflineDownloads:
             async with lock:
                 row = self._row(task_id, user_id)
                 private_task = task_path(row["key"]).startswith(PRIVATE_PREFIX)
-                reveal_private = False
-                if private_task and action in ("resume", "restart", "update"):
-                    if (private_scope is None or not private_scope.private_access
-                            or private_scope.bucket_id != row["bucket_id"] or private_scope.prefix != PRIVATE_PREFIX):
-                        raise ValueError("请先解锁私密空间后继续下载")
-                    authorize = self._private_authorizer(private_scope, private_activity)
-                    authorize()
-                    self._private_authorizers[task_id] = authorize
-                    reveal_private = True
+                reveal_private = self._private_view(row, private_scope) if private_task else False
+                if private_task and action == "update" and not reveal_private:
+                    raise ValueError("请先解锁私密空间，再更新下载参数")
                 if action == "resume" and row["status"] in ("running", "queued"):
                     return self.public(row, reveal_private=reveal_private)
                 if action == "stop" and row["status"] == "completed":
@@ -593,7 +556,6 @@ class OfflineDownloads:
                     await self._discard(row)
                     with self.metadata.transaction() as db:
                         db.execute("DELETE FROM offline_tasks WHERE id=? AND user_id=?", (task_id, user_id))
-                    self._private_authorizers.pop(task_id, None)
                     return None
                 if action in ("restart", "update"):
                     await self._discard(row)
@@ -608,8 +570,6 @@ class OfflineDownloads:
                         self._set(task_id, kind=value["kind"], method=value["request"]["method"], source_host=urlsplit(value["platform_source"]["url"] if value.get("platform") else value["request"]["url"]).hostname, size=value["size"])
                     self._save_source(task_id, source)
                 self._set(task_id, status="stopped" if action == "stop" else "queued", phase=None, error=None)
-                if action == "stop" and private_task:
-                    self._private_authorizers.pop(task_id, None)
                 self._wake.set()
                 return self.public(self._row(task_id), reveal_private=reveal_private)
         finally:
@@ -722,9 +682,6 @@ class OfflineDownloads:
                     row = self._row(task_id)
                     try:
                         self.check(row["user_id"], task_id)
-                    except PrivateTaskLocked as exc:
-                        self._private_authorizers.pop(task_id, None)
-                        await self._cancel(task_id, "interrupted", str(exc))
                     except Paused as exc:
                         status = "stopped" if "账号" in str(exc) or row["method"] == "POST" else "interrupted"
                         await self._cancel(task_id, status, str(exc))
@@ -737,8 +694,6 @@ class OfflineDownloads:
                         if len(self._running) >= config["concurrency"]:
                             break
                         if row["id"] in self._running or row["id"] in self._controls or self._retry_at.get(row["id"], 0) > now:
-                            continue
-                        if self._row(row["id"])["key"].startswith(PRIVATE_PREFIX) and row["id"] not in self._private_authorizers:
                             continue
                         if (row["kind"] == "hls" or row["platform"] == "youtube") and hls_running:
                             continue
@@ -794,13 +749,11 @@ class OfflineDownloads:
             fallback = ("stopped", "POST 任务已中断，请手动重新发送") if row["method"] == "POST" else ("interrupted", "任务已中断")
             status, error = self._intents.get(task_id, fallback)
             self._set(task_id, status=status, error=error)
-        except PrivateTaskLocked as exc:
-            self._private_authorizers.pop(task_id, None)
-            self._set(task_id, status="interrupted", error=str(exc))
         except Paused as exc:
             row = self._row(task_id)
             self._set(task_id, status="stopped" if "账号" in str(exc) or row["method"] == "POST" else "interrupted", error=str(exc))
-        except TransientError as exc:
+        except (TransientError, WorkBusyError) as exc:
+            # 存储写入名额暂时被占满（批量下载、上传与缩略图同时写入）和网络抖动一样自动重试，不直接判为失败。
             row = self._row(task_id)
             attempt = self._retries.get(task_id, 0) + 1
             if row["method"] == "POST" or attempt > len(RETRY_DELAYS):
@@ -810,8 +763,8 @@ class OfflineDownloads:
                 delay = RETRY_DELAYS[attempt - 1]
                 self._retries[task_id], self._retry_at[task_id] = attempt, time.monotonic() + delay
                 self._set(task_id, status="interrupted", error=f"{exc}；{delay} 秒后自动重试（第 {attempt}/{len(RETRY_DELAYS)} 次）")
-        except (DownloadError, QuotaExceededError, WorkBusyError) as exc:
-            self._set(task_id, status="failed", error=str(exc) if isinstance(exc, DownloadError) else "空间配额不足或传输繁忙，请调整后重试")
+        except (DownloadError, QuotaExceededError) as exc:
+            self._set(task_id, status="failed", error=str(exc) if isinstance(exc, DownloadError) else "存储空间不足，请清理文件或联系管理员扩容后重试")
         except Exception:
             # 外部异常可能含 URL、签名或响应内容，不能直接返回或写日志。
             self._set(task_id, status="failed", error="下载或保存失败，请检查来源参数、存储通道与可用空间后重试")
@@ -836,12 +789,10 @@ class OfflineDownloads:
 
     def _task_scope(self, row):
         if row["key"].startswith(PRIVATE_PREFIX):
-            authorize = self._private_authorizers.get(row["id"])
-            if authorize is None:
-                raise PrivateTaskLocked("私密空间已锁定，请解锁后继续下载")
+            # 私密空间只是网页访问锁：后台下载与缩略图一样用系统密钥写入，不依赖网页解锁；
+            # 每次提交前仍复核账号可用（禁用、删除账号或锁定系统时停止）。
             self.scope(row["user_id"])
-            authorize()
-            return Scope(row["bucket_id"], PRIVATE_PREFIX, private_access=True, authorize=authorize)
+            return Scope(row["bucket_id"], PRIVATE_PREFIX, private_access=True, authorize=lambda: self.scope(row["user_id"]))
         return self.scope(row["user_id"])
 
     def _reserve_target(self, row, scope, upload_id=None):

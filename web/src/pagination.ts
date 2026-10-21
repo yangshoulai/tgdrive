@@ -92,7 +92,7 @@ export function useRenderLimit<T>(items: T[], reset: unknown, step = 400) {
 
 export const mergeFilePages = (a: ListPage, b: ListPage): ListPage => ({
   ...b, objects: [...a.objects, ...b.objects], common_prefixes: [...new Set([...a.common_prefixes, ...b.common_prefixes])],
-  public_folders: { ...a.public_folders, ...b.public_folders }, folder_sizes: { ...a.folder_sizes, ...b.folder_sizes },
+  public_folders: { ...a.public_folders, ...b.public_folders }, folder_sizes: { ...a.folder_sizes, ...b.folder_sizes }, folder_modified: { ...a.folder_modified, ...b.folder_modified },
   folder_previews: { ...a.folder_previews, ...b.folder_previews },
 });
 /** 刷新后复用内容未变的文件对象：行、缩略图与补生成队列不会因为对象换新而重新渲染或重启。 */
@@ -113,29 +113,31 @@ export const reconcileFilePage = (previous: ListPage, next: ListPage): ListPage 
 export const mergePublicFolderPages = (a: PublicFolderPage, b: PublicFolderPage): PublicFolderPage => ({
   ...b, files: [...a.files, ...b.files], folders: [...a.folders, ...b.folders],
 });
-export const mergeObjectPages = <T extends { objects: unknown[]; folder_sizes?: Record<string, number>; folder_previews?: Record<string, unknown[]> }>(a: T, b: T): T => ({
+export const mergeObjectPages = <T extends { objects: unknown[]; folder_sizes?: Record<string, number>; folder_modified?: Record<string, number | null>; folder_previews?: Record<string, unknown[]> }>(a: T, b: T): T => ({
   ...b, objects: [...a.objects, ...b.objects],
-  folder_sizes: { ...a.folder_sizes, ...b.folder_sizes }, folder_previews: { ...a.folder_previews, ...b.folder_previews },
+  folder_sizes: { ...a.folder_sizes, ...b.folder_sizes }, folder_modified: { ...a.folder_modified, ...b.folder_modified }, folder_previews: { ...a.folder_previews, ...b.folder_previews },
 });
 export const mergeTrashPages = <T extends { items: unknown[] }>(a: T, b: T): T => ({ ...b, items: [...a.items, ...b.items] });
 export const mergeFolderPages = <T extends { folders: string[] }>(a: T, b: T): T => ({ ...b, folders: [...new Set([...a.folders, ...b.folders])] });
 
 export const FILE_PAGE_SIZES = [50, 100, 200];
 const FILE_PAGE_SIZE_KEY = "tessera-file-page-size";
-export function useFilePageSize() {
+/** 每页数量偏好按列表分别保存在本机；sizes 第一项之外的值无效时退回 fallback。 */
+export function usePageSize(key = FILE_PAGE_SIZE_KEY, sizes = FILE_PAGE_SIZES, fallback = 100) {
   const [pageSize, setPageSize] = useState(() => {
     try {
-      const saved = Number(localStorage.getItem(FILE_PAGE_SIZE_KEY));
-      return FILE_PAGE_SIZES.includes(saved) ? saved : 100;
-    } catch { return 100; }
+      const saved = Number(localStorage.getItem(key));
+      return sizes.includes(saved) ? saved : fallback;
+    } catch { return fallback; }
   });
   const changePageSize = useCallback((size: number) => {
-    if (!FILE_PAGE_SIZES.includes(size)) return;
+    if (!sizes.includes(size)) return;
     setPageSize(size);
-    try { localStorage.setItem(FILE_PAGE_SIZE_KEY, String(size)); } catch { /* 存储不可用时仍可切换。 */ }
-  }, []);
-  return { pageSize, changePageSize };
+    try { localStorage.setItem(key, String(size)); } catch { /* 存储不可用时仍可切换。 */ }
+  }, [key, sizes]);
+  return { pageSize, changePageSize, sizes };
 }
+export const useFilePageSize = () => usePageSize();
 
 /** 只保留当前页与游标历史；旧请求不能覆盖切换目录或筛选后的结果。 */
 export function useCursorPage<T extends { next_cursor: string | number | null }>(fetchPage: (cursor: string | null) => Promise<T>) {

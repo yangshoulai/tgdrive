@@ -18,7 +18,6 @@ class QueueCapacityTests(unittest.TestCase):
         service._save_source = Mock()
         service._row = lambda task_id: {"id": task_id}
         service.public = lambda row, **kwargs: row
-        service._private_authorizers = {}
         service._wake = asyncio.Event()
         database = Mock()
         count = [pending]
@@ -53,9 +52,7 @@ class QueueCapacityTests(unittest.TestCase):
         scope = Scope(8, PRIVATE_PREFIX, private_access=True, authorize=authorize)
         result = service.create(1, self.items(32), PRIVATE_PREFIX + "相册/", private_scope=scope)
         self.assertEqual(len(result), 32)
-        self.assertEqual(len(service._private_authorizers), 32)
-        service._private_authorizers[result[0]["id"]]()
-        self.assertGreaterEqual(authorize.call_count, 2)
+        authorize.assert_called()
 
     def test_capacity_accepts_last_batch_and_rejects_whole_overflow(self):
         service = self.prepare(MAX_PENDING_TASKS - 32)

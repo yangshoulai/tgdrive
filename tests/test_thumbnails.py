@@ -139,11 +139,15 @@ class ThumbnailTests(unittest.TestCase):
 
     def test_stored_thumbnails_do_not_wait_for_transfer_slots(self):
         self.put("photo.jpg")
+        self.put("other.jpg")
         self.assertEqual(self.set_thumb("photo.jpg", JPEG, "grid"), 204)
         transfers = self.app.objects.engine.transfers
         transfers.wait_seconds, transfers._active = 0.05, transfers.total
         status, data, _ = self.call("GET", "/api/user/v1/thumbnail?path=photo.jpg&variant=grid")
         self.assertEqual((status, data), (200, JPEG), "下载占满名额时网格图仍可读取")
+        # 保存缩略图同样不占文件传输名额：名额被离线下载占满时也能立即写入，不会反过来挤掉下载。
+        self.assertEqual(self.set_thumb("other.jpg", WEBP), 204)
+        self.assertEqual(self.set_thumb("other.jpg", JPEG, "poster"), 204)
 
     def test_maintenance_moves_database_posters_and_sweeps_orphans(self):
         info = self.put("old.jpg")
@@ -272,8 +276,20 @@ class ThumbnailTests(unittest.TestCase):
         self.assertEqual(self.set_thumb("song.mp3", None, "none"), 204)
         self.assertEqual(self.listed("song.mp3")["thumbnails"], ["thumb"], "marker never hides an existing thumbnail")
 
+    def test_identical_upload_reuses_existing_thumbnails(self):
+        first = self.put("a.jpg", b"same photo")
+        self.assertEqual(self.set_thumb("a.jpg", WEBP), 204)
+        objects = len(self.stored_keys())
+        second = self.put("album/b.jpg", b"same photo")
+        self.assertEqual(second.blob_uuid, first.blob_uuid)
+        self.assertEqual(self.listed_in("album/", "album/b.jpg")["thumbnails"], ["thumb"], "相同内容直接共用已有缩略图")
+        self.assertEqual(len(self.stored_keys()), objects, "没有生成第二套缩略图")
+
+    def listed_in(self, prefix, key):
+        return next(item for item in self.call("GET", f"/api/user/v1/list?prefix={prefix}")[1]["objects"] if item["key"] == key)
+
     def test_thumbnail_status_returns_only_listed_files(self):
-        first, second = self.put("a.jpg"), self.put("b.jpg")
+        first, second = self.put("a.jpg"), self.put("b.jpg", b"other")
         self.assertEqual(self.set_thumb("a.jpg", WEBP), 204)
         status, body, headers = self.call("POST", "/api/user/v1/thumbnail/status", {"paths": ["a.jpg", "b.jpg", "gone.jpg"]})
         self.assertEqual(status, 200, body)
@@ -357,7 +373,7 @@ class ThumbnailTests(unittest.TestCase):
 
     def test_public_shares_follow_share_boundaries(self):
         self.put("album/a.jpg")
-        self.put("secret.jpg")
+        self.put("secret.jpg", b"secret")
         self.set_thumb("album/a.jpg", WEBP)
         self.set_thumb("album/a.jpg", JPEG, "poster")
         self.set_thumb("secret.jpg", WEBP)

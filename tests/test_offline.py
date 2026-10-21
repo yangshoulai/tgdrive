@@ -232,13 +232,37 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-trash", json.dumps(visible))
         with self.assertRaises(ValueError):
             self.offline.source(self.alice.id, task["id"])
-        with self.assertRaises(ValueError):
-            await self.offline.control(self.alice.id, task["id"], "restart")
         await self.app.objects.purge_trash(scope, [entries[0]["id"]])
         self.assertEqual(self.offline.list(self.alice.id, query="secret-memo")["total"], 0)
         restarted = await self.offline.control(self.alice.id, task["id"], "restart", private_scope=scope)
         self.assertEqual((restarted["key"], restarted["private"], restarted["trashed"]),
                          (PRIVATE_PREFIX + "notes/secret-memo.bin", True, False))
+
+    async def test_private_tasks_do_not_depend_on_private_unlock(self):
+        authorized = [True]
+        def authorize():
+            if not authorized[0]:
+                raise PermissionError("私密空间已锁定")
+        scope = Scope(self.alice.bucket_id, PRIVATE_PREFIX, private_access=True, authorize=authorize)
+        tasks = []
+        for name in ("a.bin", "b.bin", "c.bin"):
+            parsed = await self.offline.parse(self.alice.id, f"https://example.com/{name}")
+            tasks += self.offline.create(self.alice.id, [{"ticket": parsed["candidates"][0]["ticket"], "name": name}], PRIVATE_PREFIX, private_scope=scope)
+        # 创建后立即锁定，并模拟服务重启留下的「等待恢复」：任务照常下载，不需要解锁。
+        authorized[0] = False
+        self.offline._set(tasks[0]["id"], status="interrupted", error="服务已重启，等待恢复")
+        await self.offline.control(self.alice.id, tasks[2]["id"], "stop")
+        self.offline.start()
+        await self.wait_for(lambda: all(self.offline._row(task["id"])["status"] == "completed" for task in tasks[:2]))
+        self.assertIsNotNone(self.app.metadata.db.execute("SELECT 1 FROM objects WHERE key=?", (PRIVATE_PREFIX + "a.bin",)).fetchone())
+        self.assertEqual(self.offline._row(tasks[2]["id"])["status"], "stopped", "手动停止的任务不自动开始")
+        # 锁定时也能继续、删除；返回结果不显示私密名称。更新下载参数需要解锁。
+        resumed = await self.offline.control(self.alice.id, tasks[2]["id"], "resume")
+        self.assertEqual((resumed["status"], resumed["key"]), ("queued", "私密空间下载"))
+        await self.wait_for(lambda: self.offline._row(tasks[2]["id"])["status"] == "completed")
+        with self.assertRaisesRegex(ValueError, "解锁"):
+            await self.offline.control(self.alice.id, tasks[2]["id"], "update", item={"ticket": "x"})
+        self.assertIsNone(await self.offline.control(self.alice.id, tasks[2]["id"], "delete"))
 
     async def test_redownload_of_deleted_file_returns_to_original_destination(self):
         for action in ("restart", "update"):

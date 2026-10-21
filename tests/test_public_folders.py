@@ -215,6 +215,14 @@ class PublicFolderTests(unittest.TestCase):
             await self.put(alice, "dir-other/ignore.txt", b"outside")
             _, page = await self.api("GET", "/api/user/v1/list?prefix=dir/", alice)
             self.assertEqual(page["folder_sizes"], {"dir/sub/": 10})
+            # 目录的修改时间取目录内（含子目录）最近一次修改，访客的文件夹列表同样给出。
+            newest = self.app.metadata.db.execute("SELECT modified_at FROM objects WHERE key='dir/sub/new.txt'").fetchone()[0]
+            self.assertEqual(page["folder_modified"], {"dir/sub/": newest})
+            _, root = await self.api("GET", "/api/user/v1/list", alice)
+            self.assertEqual(root["folder_modified"]["dir/"], newest)
+            _, shared = await self.api("GET", f"/api/public/v1/folders/{token}/list")
+            deep = self.app.metadata.db.execute("SELECT modified_at FROM objects WHERE key='dir/sub/deep/c.txt'").fetchone()[0]
+            self.assertEqual([(item["name"], item["modified_at"]) for item in shared["folders"]], [("deep", deep)])
             status, _ = await self.api("POST", "/api/user/v1/public", alice, {"paths": ["nothing/"], "public": True})
             self.assertEqual(status, 404)
             bob = await self.client.login("user", "bob@example.com", "bob password")

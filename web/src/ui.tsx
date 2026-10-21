@@ -173,10 +173,10 @@ export function shortcutLabel(shortcut: string): string {
   return shortcut.split("+").map(key => labels[key] ?? (/^[a-z]$/.test(key) ? key.toUpperCase() : key)).join(IS_MAC ? "" : " + ");
 }
 
-/** 下载沿用传入的授权与版本地址；在用户点击或按键触发时调用。 */
-export function downloadFile(href: string) {
+/** 下载沿用传入的授权与版本地址；在用户点击或按键触发时调用。name 用于 blob: 地址（否则浏览器用随机名）。 */
+export function downloadFile(href: string, name = "") {
   const link = document.createElement("a");
-  link.href = href; link.download = ""; link.hidden = true;
+  link.href = href; link.download = name; link.hidden = true;
   document.body.append(link); link.click(); link.remove();
 }
 
@@ -1084,18 +1084,22 @@ export function useDocumentTitle(title: string | null) {
   useEffect(() => { if (title !== null) document.title = title; }, [title]);
 }
 
-export function Pagination({ number, hasPrevious, hasNext, loading, previous, next, pageSize, changePageSize }: {
+export function Pagination({ number, hasPrevious, hasNext, loading, previous, next, pageSize, changePageSize, sizes = FILE_PAGE_SIZES, total }: {
   number: number; hasPrevious: boolean; hasNext: boolean; loading: boolean; previous: () => void; next: () => void;
-  pageSize?: number; changePageSize?: (size: number) => void;
+  pageSize?: number; changePageSize?: (size: number) => void; sizes?: number[];
+  /** 总条数：给出时显示「第 n / 共 N 页」，并在内容多于最小每页数量时保留数量选择。 */
+  total?: number;
 }) {
-  // 只有一页时不显示分页（包括每页数量）：数量选择只在内容多于一页时才有意义。
-  if (number === 1 && !hasPrevious && !hasNext) return null;
+  const pages = total != null && pageSize ? Math.max(1, Math.ceil(total / pageSize), number) : null;
+  // 只有一页时不显示分页；数量选择在内容多于最小每页数量时保留，调大后仍能调回去。
+  const sizeful = Boolean(changePageSize && total != null && total > Math.min(...sizes));
+  if (number === 1 && !hasPrevious && !hasNext && !sizeful) return null;
   return <nav className="pagination" aria-label="分页">
-    {changePageSize && <label className="pagination-size"><span>每页</span><select className="input" aria-label="每页文件数量" value={pageSize} onChange={event => changePageSize(Number(event.target.value))}>
-      {FILE_PAGE_SIZES.map(size => <option key={size} value={size}>{size} 项</option>)}
+    {changePageSize && <label className="pagination-size"><span>每页</span><select className="input" aria-label="每页数量" value={pageSize} onChange={event => changePageSize(Number(event.target.value))}>
+      {sizes.map(size => <option key={size} value={size}>{size} 项</option>)}
     </select></label>}
     <Button size="sm" disabled={loading || !hasPrevious} onClick={previous}>上一页</Button>
-    <span aria-live="polite" aria-atomic="true">第 {number} 页</span>
+    <span aria-live="polite" aria-atomic="true">{pages ? `第 ${number} / ${pages} 页` : `第 ${number} 页`}</span>
     <Button size="sm" disabled={loading || !hasNext} onClick={next}>下一页</Button>
     {loading && <span className="spinner" role="status" aria-label="正在加载" />}
   </nav>;

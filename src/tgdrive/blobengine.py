@@ -109,7 +109,13 @@ class BlobEngine:
         return open_sealed(self._thumbnail_key(blob_uuid), sealed, f"thumbnail:{variant}")
 
     async def put_part(self, blob_uuid: str, part_no: int, body: AsyncIterator[bytes] | Iterable[bytes] | bytes,
-                       *, bucket_id: int | None = None) -> PartResult:
+                       *, bucket_id: int | None = None, small: bool = False) -> PartResult:
+        if small:
+            # 缩略图等系统小对象（≤1 MiB，已在内存中）：只受上传名额与限速约束，不占文件传输名额，
+            # 否则每张图片的三种缩略图会挤掉同一存储桶的离线下载与上传，让它们等待超时。
+            if not isinstance(body, bytes) or len(body) > SMALL_READ_LIMIT:
+                raise ValueError("small writes must be bytes up to 1 MiB")
+            return await self._put_part(blob_uuid, part_no, body)
         # 在读取请求体前取得名额，让 ASGI 的背压限制尚未获准的上传。
         async with self.transfers.slot(bucket_id):
             return await self._put_part(blob_uuid, part_no, body)

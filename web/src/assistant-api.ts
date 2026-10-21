@@ -1,5 +1,5 @@
 /** 文件助手的接口：用户端 /api/user/v1/assistant 与管理端 /api/admin/v1/assistant（docs/assistant-design.md §13）。 */
-import { ApiError, apiGet, apiPost, postKeepalive } from "./api";
+import { ApiError, apiBlob, apiGet, apiPost, postKeepalive } from "./api";
 
 const USER = "/api/user/v1/assistant";
 /** 统一对话（§37）：涉及私密空间的对话、操作在私密空间锁定时返回 423 private_locked。
@@ -71,7 +71,7 @@ export type AssistantOverview = {
   enabled: boolean; default_model: AiModel | null; usable_models: number; channels: number;
   tools: { enabled: number; total: number };
   today: { conversations: number; requests: number; tokens: number; failure_rate: number | null; pending_actions: number; executed_actions: number };
-  usage: UsagePoint[]; models: Record<string, string>;
+  usage: UsagePoint[]; usage_since: string; models: Record<string, string>;
   health: (ChannelHealth & { id: number; name: string; enabled: boolean })[];
   storage: Record<string, number>;
 };
@@ -262,6 +262,13 @@ export const createConversation = (location: string, modelId?: number | null, ac
   post<ConversationDetail>(`${USER}/conversations`, { location, model_id: modelId ?? undefined, access_mode: accessMode });
 export const conversation = (id: string, beforeSeq?: number) => get<ConversationDetail>(`${USER}/conversations/${encodeURIComponent(id)}${query({ before_seq: beforeSeq })}`);
 export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
+export type ExportFormat = "markdown" | "json";
+/** 下载对话的明文留痕（Markdown 或 JSON）；涉及私密的对话未解锁时返回 423，经 guard 通知抽屉弹出解锁。 */
+export async function exportConversation(id: string, format: ExportFormat) {
+  let zone = "";
+  try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone ?? ""; } catch { /* 取不到时区时按 UTC 导出。 */ }
+  return guard(apiBlob(`${USER}/conversations/${encodeURIComponent(id)}/export?format=${format}&tz=${encodeURIComponent(zone)}`));
+}
 export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
 const attachmentPath = (id: string, tail: string) => `${USER}/attachments/${encodeURIComponent(id)}/${tail}`;
 export const attachmentContentUrl = (id: string, download = false) => attachmentPath(id, `content${download ? "?download=1" : ""}`);

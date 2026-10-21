@@ -393,28 +393,34 @@ function NoteMarkdown({ text }: { text: string }) {
   return <Markdown source={text} />;
 }
 
+/** 思考节点：时间线上是大脑图标与「思考」，正文默认收起，点开后阅读；运行中展开时随输出流式追加，
+ * 停在底部时自动跟随，向上翻阅时不打断。 */
+let liveThinkingOpen: string | null = null;  // 运行中展开阅读的思考，结束后换成已保存的节点时保持展开
+
 function Thinking({ text, ms, live, startedAt }: { text: string; ms: number | null; live?: boolean; startedAt: number | null }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => {
+    const kept = !live && liveThinkingOpen !== null && text.startsWith(liveThinkingOpen.slice(0, 64));
+    if (kept) liveThinkingOpen = null;
+    return kept;
+  });
   const now = useNow(Boolean(live));
   const box = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (live && box.current) box.current.scrollTop = box.current.scrollHeight; }, [text, live]);
-  if (live) {
-    const elapsed = startedAt ? Math.max(0, Math.round((now - startedAt) / 1000)) : 0;
-    return <div className="ai-step ai-thinking is-live">
-      <span className="ai-step-dot" aria-hidden="true"><Icon name="brain" size={12} /></span>
-      <div className="ai-thinking-body">
-        <div className="ai-thinking-head"><span className="ai-shimmer">正在思考</span><span className="ai-thinking-time">{elapsed} 秒</span></div>
-        <div className="ai-thinking-stream" ref={box} aria-live="off">{text}</div>
-      </div>
-    </div>;
-  }
-  return <div className={`ai-step ai-thinking${open ? " is-open" : ""}`}>
+  const follow = useRef(true);
+  useEffect(() => {
+    if (open && live && follow.current && box.current) box.current.scrollTop = box.current.scrollHeight;
+  }, [text, live, open]);
+  useEffect(() => { if (live) liveThinkingOpen = open ? text : null; }, [live, open, text]);
+  const elapsed = live ? (startedAt ? Math.max(0, now - startedAt) : 0) : ms;
+  return <div className={`ai-step ai-thinking${open ? " is-open" : ""}${live ? " is-live" : ""}`}>
     <span className="ai-step-dot" aria-hidden="true"><Icon name="brain" size={12} /></span>
     <div className="ai-thinking-body">
-      <button type="button" className="ai-thinking-head" aria-expanded={open} onClick={() => setOpen(value => !value)}>
-        <span>{ms ? `已思考 ${seconds(ms)}` : "思考过程"}</span><Icon name="chevronDown" size={13} />
+      <button type="button" className="ai-thinking-head" aria-expanded={open} onClick={() => { follow.current = true; setOpen(value => !value); }}>
+        <span className={live ? "ai-shimmer" : undefined}>思考</span>
+        {elapsed ? <span className="ai-thinking-time">{live ? `${Math.round(elapsed / 1000)} 秒` : seconds(elapsed)}</span> : null}
+        <Icon name="chevronDown" size={13} />
       </button>
-      {open ? <div className="ai-thinking-text">{text}</div> : <p className="ai-thinking-preview">{text.replace(/\s+/g, " ").slice(0, 160)}</p>}
+      {open && <div className="ai-thinking-text" ref={box} aria-live="off"
+        onScroll={event => { const node = event.currentTarget; follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24; }}>{text}</div>}
     </div>
   </div>;
 }
@@ -576,7 +582,7 @@ function ActionDecision({ id, fallback, state }: { id: string; fallback: { kind:
     </>}>
     {value ? <>
       {payload.summary && <p className="ai-decision-text">{payload.summary}</p>}
-      {samples.length > 0 && <ul className="ai-diff">{samples.slice(0, 6).map((item, index) => <ItemRow key={index} kind={kind} item={item} />)}</ul>}
+      {samples.length > 0 && <ItemList kind={kind} items={samples.slice(0, 6)} />}
       <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {count.toLocaleString("zh-CN")} 项{result?.failed ? "与失败原因" : ""}</button>
       {details && <ActionItemsDialog action={value} onClose={() => setDetails(false)} />}
     </> : <SkeletonRows rows={2} />}
@@ -910,24 +916,60 @@ const MOVE_KINDS = ["rename", "move", "organize"];
 const CROSS_KINDS = ["move_out", "move_in"];
 const SHARE_DAYS = [{ value: 0, label: "永久有效" }, { value: 1, label: "1 天" }, { value: 7, label: "7 天" }, { value: 30, label: "30 天" }, { value: 90, label: "90 天" }];
 
-function ItemRow({ kind, item }: { kind: string; item: ai.ActionItem }) {
+/** 条目里的文件路径：文件名在前、完整换行，所在目录另起一行；同一批条目共用目录时目录只在列表头显示一次。
+ * 卡片里文件名最多两行，全部条目对话框里完整显示；悬停提示始终是完整路径。 */
+function PathText({ path, base, className }: { path: string; base?: string; className?: string }) {
+  const dir = parentOf(path);
+  return <span className={`ai-path${className ? ` ${className}` : ""}`} title={display(path)}>
+    <span className="ai-path-name">{baseName(path)}{path.endsWith("/") ? "/" : ""}</span>
+    {dir && dir !== base && <span className="ai-path-dir">{display(dir)}</span>}
+  </span>;
+}
+
+const itemPath = (kind: string, item: ai.ActionItem) =>
+  MOVE_KINDS.includes(kind) || CROSS_KINDS.includes(kind) ? item.from : ["downloads", "save_attachment", "download_control"].includes(kind) ? undefined : item.path;
+
+/** 条目共同所在的目录（至少两项且全部相同时）。 */
+function commonDir(kind: string, items: ai.ActionItem[]) {
+  const dirs = items.map(item => itemPath(kind, item)).map(path => path ? parentOf(path) : null);
+  return dirs.length > 1 && dirs[0] && dirs.every(dir => dir === dirs[0]) ? dirs[0] : undefined;
+}
+
+function ItemList({ kind, items, full }: { kind: string; items: ai.ActionItem[]; full?: boolean }) {
+  const base = commonDir(kind, items);
+  return <ul className={`ai-diff${full ? " is-plain" : " is-clamped"}`}>
+    {base && <li className="ai-diff-dir"><Icon name="folder" size={13} /><span>{display(base)}</span></li>}
+    {items.map((item, index) => <ItemRow key={index} kind={kind} item={item} base={base} />)}
+  </ul>;
+}
+
+function ItemRow({ kind, item, base }: { kind: string; item: ai.ActionItem; base?: string }) {
   if (MOVE_KINDS.includes(kind) && item.from && item.to) {
     const rename = kind === "rename" || parentOf(item.from) === parentOf(item.to);
     return <li className="ai-diff-row"><Icon name={item.folder ? "folder" : "file"} size={13} />
-      {rename ? <><del className="cell-truncate" title={baseName(item.from)}>{baseName(item.from)}</del><Icon name="chevronRight" size={12} /><ins className="cell-truncate" title={baseName(item.to)}>{baseName(item.to)}</ins></>
-        : <><span className="cell-truncate" title={display(item.from)}>{baseName(item.from)}</span><Icon name="chevronRight" size={12} /><ins className="cell-truncate" title={display(parentOf(item.to))}>{display(parentOf(item.to))}</ins></>}
+      {rename ? <span className="ai-path" title={`${display(item.from)} → ${display(item.to)}`}>
+        <span className="ai-path-name"><del>{baseName(item.from)}</del></span>
+        <span className="ai-path-name"><Icon name="chevronRight" size={12} /><ins>{baseName(item.to)}</ins></span>
+        {parentOf(item.from) !== base && parentOf(item.from) && <span className="ai-path-dir">{display(parentOf(item.from))}</span>}
+      </span>
+        : <span className="ai-path" title={`${display(item.from)} → ${display(item.to)}`}>
+          <PathText path={item.from} base={base} />
+          <span className="ai-path-to"><Icon name="chevronRight" size={12} /><ins>{display(parentOf(item.to)) || "/"}</ins></span>
+        </span>}
     </li>;
   }
-  if (kind === "downloads") return <li className="ai-diff-row"><Icon name="download" size={13} /><span className="cell-truncate" title={item.name}>{item.name}</span>{item.host && <small>{item.host}</small>}</li>;
+  if (kind === "downloads") return <li className="ai-diff-row"><Icon name="download" size={13} />
+    <span className="ai-path" title={item.name}><span className="ai-path-name">{item.name}</span>{item.host && <span className="ai-path-dir">{item.host}</span>}</span></li>;
   if (kind === "save_attachment") return <li className="ai-diff-row"><Icon name="paperclip" size={13} />
-    <span className="cell-truncate" title={item.name}>{(item.name ?? "").replace(/^附件:/, "")}</span><Icon name="chevronRight" size={12} />
-    <ins className="cell-truncate" title={display(item.path ?? "")}>{display(parentOf(item.path ?? ""))}</ins></li>;
+    <span className="ai-path" title={display(item.path ?? "")}><span className="ai-path-name">{(item.name ?? "").replace(/^附件:/, "")}</span>
+      <span className="ai-path-to"><Icon name="chevronRight" size={12} /><ins>{display(parentOf(item.path ?? ""))}</ins></span></span></li>;
   if (CROSS_KINDS.includes(kind) && item.from) return <li className="ai-diff-row"><Icon name={item.folder ? "folder" : "file"} size={13} />
-    <span className="cell-truncate" title={display(item.from)}>{display(item.from)}</span></li>;
-  if (kind === "download_control") return <li className="ai-diff-row"><Icon name="download" size={13} /><span className="cell-truncate">#{item.id} {baseName(item.path ?? "")}</span></li>;
+    <PathText path={item.from} base={base} /></li>;
+  if (kind === "download_control") return <li className="ai-diff-row"><Icon name="download" size={13} />
+    <span className="ai-path" title={display(item.path ?? "")}><span className="ai-path-name">#{item.id} {baseName(item.path ?? "")}</span></span></li>;
   const files = kind === "trash" && typeof item.files === "number" ? item.files : null;
   return <li className="ai-diff-row"><Icon name={item.folder || item.path?.endsWith("/") ? "folder" : "file"} size={13} />
-    <span className="cell-truncate" title={display(item.path ?? "")}>{display(item.path ?? "")}</span>
+    <PathText path={item.path ?? ""} base={base} />
     {files !== null && <small className={files ? "tone-warning" : undefined}>{files ? `含 ${files.toLocaleString("zh-CN")} 个文件` : "空目录"}</small>}</li>;
 }
 
@@ -1027,7 +1069,7 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
       {kind === "trash" && <TrashChips options={payload.options} />}
     </div>
     {payload.confirm_reason && pending && <p className="ai-card-note"><Icon name="shield" size={13} />{payload.confirm_reason}</p>}
-    {samples.length > 0 && <ul className="ai-diff">{samples.slice(0, 3).map((item, index) => <ItemRow key={index} kind={kind} item={item} />)}</ul>}
+    {samples.length > 0 && <ItemList kind={kind} items={samples.slice(0, 3)} />}
     {(value.count > 3 || (payload.conflicts ?? 0) > 0) && <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {value.count.toLocaleString("zh-CN")} 项</button>}
     {share && pending && <div className="ai-share-form">
       <label><span>有效期</span><select className="input input-sm" value={days} onChange={event => setShareDays(Number(event.target.value))}>
@@ -1123,11 +1165,11 @@ function ActionItemsDialog({ action, onClose }: { action: ai.AssistantAction; on
     {compacted && <InlineNotice>这个操作已超过 30 天，只保留了前 20 条样例。</InlineNotice>}
     {action.kind === "downloads" && action.result?.failed ? <InlineNotice>部分图片需要来源页的登录或防盗链，可以在来源页用抓取脚本的「本地下载」保存。</InlineNotice> : null}
     {failures.length > 0 && <section className="ai-items-section"><h4>执行时跳过或失败</h4>
-      <ul className="ai-diff is-plain">{failures.map((item, index) => <li key={index} className="ai-diff-row"><span className="cell-truncate">{item.path}</span><small>{item.reason}</small></li>)}</ul></section>}
+      <ul className="ai-diff is-plain">{failures.map((item, index) => <li key={index} className="ai-diff-row"><Icon name={item.path.endsWith("/") ? "folder" : "file"} size={13} /><PathText path={item.path} /><small>{item.reason}</small></li>)}</ul></section>}
     {skipped.length > 0 && <section className="ai-items-section"><h4>提议时已跳过（{skipped.length}）</h4>
-      <ul className="ai-diff is-plain">{skipped.map((item, index) => <li key={index} className="ai-diff-row"><span className="cell-truncate">{item.path}</span><small>{item.reason}</small></li>)}</ul></section>}
+      <ul className="ai-diff is-plain">{skipped.map((item, index) => <li key={index} className="ai-diff-row"><Icon name={item.path.endsWith("/") ? "folder" : "file"} size={13} /><PathText path={item.path} /><small>{item.reason}</small></li>)}</ul></section>}
     <section className="ai-items-section"><h4>操作条目（{action.count.toLocaleString("zh-CN")}）</h4>
-      {items === null ? <SkeletonRows rows={4} /> : <ul className="ai-diff is-plain">{items.map((item, index) => <ItemRow key={index} kind={action.kind} item={item} />)}</ul>}
+      {items === null ? <SkeletonRows rows={4} /> : <ItemList kind={action.kind} items={items} full />}
       {next !== null && <Button size="sm" onClick={() => load(next)}>加载更多</Button>}
     </section>
   </Modal>;

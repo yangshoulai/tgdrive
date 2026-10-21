@@ -6,7 +6,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { createPortal } from "react-dom";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, formatBytes, isShortcutControl, shortcutLabel, toast, type IconName, type MenuItem } from "../ui";
+import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, downloadFile, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, formatBytes, isShortcutControl, shortcutLabel, toast, type IconName, type MenuItem } from "../ui";
 import { ShortcutsDialog } from "../shortcuts";
 import type { PageImport } from "./page-import";
 import { Thread, PlanBar, latestPlan, useMarkState, type HttpApproval, type LiveRun } from "./assistant-thread";
@@ -814,7 +814,19 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   };
   const dropOverlay = dragging && <div className="assistant-drop" aria-hidden="true"><span><Icon name="paperclip" size={22} />松开以添加为附件</span></div>;
   const modelLabel = (id: number | null | undefined) => config.models.find(model => model.id === id)?.label ?? "文件助手";
-  const historyList = <ConversationList archived={archived} onArchiveView={setArchived} more={historyCursor !== null} loadingMore={historyBusy} onMore={() => void moreConversations()} items={conversations} current={currentId} onOpen={id => void openConversation(id)} onChanged={(deleted) => {
+  // 下载对话的明文留痕；涉及私密的对话锁定时先解锁，解锁后自动继续下载。
+  async function exportConversation(item: ai.Conversation, format: ai.ExportFormat) {
+    try {
+      const file = await ai.exportConversation(item.id, format);
+      const url = URL.createObjectURL(file);
+      downloadFile(url, file.name);
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (reason) {
+      if (ai.isPrivateLocked(reason)) setUnlockPrompt({ reason: "locked", title: "下载私密对话需要先解锁", after: () => void exportConversation(item, format) });
+      else toast.error(api.errorMessage(reason, "对话下载失败，请稍后重试"));
+    }
+  }
+  const historyList = <ConversationList onExport={(item, format) => void exportConversation(item, format)} archived={archived} onArchiveView={setArchived} more={historyCursor !== null} loadingMore={historyBusy} onMore={() => void moreConversations()} items={conversations} current={currentId} onOpen={id => void openConversation(id)} onChanged={(deleted) => {
     loadConversations(); if (deleted && deleted === currentId) newConversation(); else reloadDetail();
   }} />;
   const header = <header className="assistant-header">
@@ -1237,8 +1249,9 @@ function UnlockDialog({ prompt, config, unlocked, acknowledged, onConfigChanged,
 
 /* ---------- 对话历史 ---------- */
 
-function ConversationList({ items, current, onOpen, onChanged, archived, onArchiveView, more, loadingMore, onMore }: {
+function ConversationList({ items, current, onOpen, onChanged, onExport, archived, onArchiveView, more, loadingMore, onMore }: {
   items: ai.Conversation[] | null; current: string | null; onOpen: (id: string) => void; onChanged: (deleted?: string) => void;
+  onExport: (item: ai.Conversation, format: ai.ExportFormat) => void;
   archived: boolean; onArchiveView: (value: boolean) => void; more: boolean; loadingMore: boolean; onMore: () => void;
 }) {
   const [renaming, setRenaming] = useState<ai.Conversation | null>(null);
@@ -1268,12 +1281,14 @@ function ConversationList({ items, current, onOpen, onChanged, archived, onArchi
             <small>{!item.locked && <span className="assistant-history-scope" title={item.scope}>{item.private ? "私密空间" : item.scope === "/" ? "全部文件" : item.scope.replace(/^\/|\/$/g, "")}</span>}<span>{relativeTime(item.updated_at)}</span>{!item.locked && <span>{item.messages} 条消息</span>}</small></span>
         </button>
         <Menu label={`${titleOf(item)} 的操作`} items={[
-          // 锁定的私密对话只能删除：改名与归档需要先解锁。
+          // 锁定的私密对话只能下载（先解锁）与删除：改名与归档需要先解锁。
+          { label: "下载为 Markdown", icon: "download" as IconName, onSelect: () => onExport(item, "markdown") },
+          { label: "下载为 JSON", icon: "download" as IconName, onSelect: () => onExport(item, "json") },
           ...(item.locked ? [] : [
-            { label: "重命名", icon: "edit" as IconName, onSelect: () => { setRenaming(item); setTitle(item.title ?? ""); } },
+            { label: "重命名", icon: "edit" as IconName, divider: true, onSelect: () => { setRenaming(item); setTitle(item.title ?? ""); } },
             { label: archived ? "移回最近对话" : "归档", icon: "archive" as IconName, onSelect: () => void ai.updateConversation(item.id, { archived: !archived }).then(() => { toast.success(archived ? "已移回最近对话" : "已归档"); onChanged(); }).catch(reason => toast.error(api.errorMessage(reason, "操作没有完成，请稍后重试"))) },
           ]),
-          { label: "删除", icon: "trash", danger: true, divider: !item.locked, onSelect: () => setDeleting(item) },
+          { label: "删除", icon: "trash", danger: true, divider: true, onSelect: () => setDeleting(item) },
         ]} />
       </li>)}</ul>
     </section>)}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BRAND } from "../brand";
 import * as api from "../api";
-import { useCursorPage } from "../pagination";
+import { useCursorPage, usePageSize } from "../pagination";
 import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
 import { FileTile, FileVisual, getFileKind } from "../files";
 import { DestinationPicker } from "./folders";
@@ -10,6 +10,9 @@ import { usePrivateAccess } from "./private-session";
 
 const LABEL: Record<api.DownloadStatus, string> = { queued: "排队中", running: "下载中", interrupted: "等待恢复", stopped: "已停止", completed: "已完成", failed: "失败" };
 const TONE: Record<api.DownloadStatus, Tone> = { queued: "neutral", running: "accent", interrupted: "warning", stopped: "neutral", completed: "success", failed: "danger" };
+/** 网页每页最多 100 个任务（服务端 OfflineDownloads.list 的上限）。 */
+const DOWNLOAD_PAGE_SIZES = [20, 50, 100];
+const DOWNLOAD_PAGE_SIZE_KEY = "tessera-download-page-size";
 export const isActiveDownload = (task: api.DownloadTask) => ["queued", "running", "interrupted"].includes(task.status);
 const active = isActiveDownload;
 export const downloadGlyph = (task: api.DownloadTask) => /\.(m4a|mp3|aac|flac|ogg|opus|wav)$/i.test(task.key) ? "audio" as const
@@ -66,7 +69,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   const [bulkBusy, setBulkBusy] = useState(false);
   const cursor = useRef<string | null>(null), epoch = useRef(0);
   const previous = useRef(new Map<number, api.DownloadStatus>());
-  const fetchPage = useCallback((next: string | null) => { cursor.current = next; epoch.current++; return api.listDownloads(next, filter, undefined, query); }, [filter, query]);
+  const { pageSize, changePageSize, sizes } = usePageSize(DOWNLOAD_PAGE_SIZE_KEY, DOWNLOAD_PAGE_SIZES, 50);
+  const fetchPage = useCallback((next: string | null) => { cursor.current = next; epoch.current++; return api.listDownloads(next, filter, undefined, query, { limit: pageSize }); }, [filter, query, pageSize]);
   const pagination = useCursorPage(fetchPage);
   useEffect(() => {
     const lockPrivate = () => {
@@ -87,12 +91,12 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       if (polling || document.visibilityState === "hidden") return;
       polling = true;
       const revision = epoch.current;
-      void api.listDownloads(cursor.current, filter, controller.signal, query).then(page => {
+      void api.listDownloads(cursor.current, filter, controller.signal, query, { limit: pageSize }).then(page => {
         if (alive && revision === epoch.current) pagination.setPage(page);
       }).catch(() => undefined).finally(() => { polling = false; });
     }, hasActive ? 3000 : 15000);
     return () => { alive = false; window.clearInterval(timer); controller.abort(); };
-  }, [filter, query, pagination.setPage, hasActive]);
+  }, [filter, query, pageSize, pagination.setPage, hasActive]);
   const page = pagination.page;
   // 切换筛选或搜索后清空选择；翻页与轮询时只保留仍在当前页的任务。
   useEffect(() => setSelected(new Set()), [filter, query]);
@@ -112,7 +116,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       const { done, skipped } = await api.batchDownloads(action, chosen.map(task => task.id), chosen.some(task => task.private));
       setBulk(null); setSelected(new Set());
       const verb = action === "stop" ? "停止" : action === "delete" ? "删除" : "加入下载队列";
-      const note = skipped ? `，${skipped} 个已跳过${action === "resume" ? "（POST 任务需逐个确认，私密任务需先解锁）" : ""}` : "";
+      const note = skipped ? `，${skipped} 个已跳过${action === "resume" ? "（POST 任务需逐个确认）" : ""}` : "";
       if (done) toast.success(`已${verb} ${done} 个任务${note}`); else toast.info(`没有可${action === "resume" ? "继续" : verb}的任务${note}`);
       await pagination.reload();
     } catch (reason) { toast.error(api.errorMessage(reason, "批量操作失败，请稍后重试")); }
@@ -210,8 +214,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                   </div>
                   <div role="cell"><DownloadProgress task={task} name={name} /></div>
                   <div role="cell" className="muted">
-                    {completed && canOpen ? <button type="button" className="download-location" title={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)}><Icon name="folder" size={12} /><span>{location}</span></button>
-                      : <span className="download-location" title={task.trashed ? `文件已删除，原位置：${location}` : `保存到 ${location}`}><Icon name={task.trashed ? "trash" : "folder"} size={12} /><span>{task.trashed ? "文件已删除" : location}</span></span>}
+                    {completed && canOpen ? <button type="button" className="download-location" title={`打开所在目录：${location}`} onClick={() => onOpenFolder(folder, task.private)}><Icon name="folder" size={12} /><LocationText folder={folder} /></button>
+                      : <span className="download-location" title={task.trashed ? `文件已删除，原位置：${location}` : `保存到 ${location}`}><Icon name={task.trashed ? "trash" : "folder"} size={12} />{task.trashed ? <span className="download-location-text"><span>文件已删除</span></span> : <LocationText folder={folder} />}</span>}
                   </div>
                   <div className="download-state" role="cell"><Badge tone={TONE[task.status]} dot={!completed} icon={completed ? "check" : undefined}>{downloadStatusLabel(task)}</Badge></div>
                   <div className="cell-actions" role="cell">{busy.has(task.id) ? <span className="spinner" aria-label="正在处理任务" /> : <>{quick}<Menu label={`${name}的更多操作`} items={[
@@ -228,7 +232,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
               })}
             </div>}
     </div>
-    {(pagination.hasPrevious || pagination.hasNext) && <footer className="list-footer download-footer"><Pagination {...pagination} /></footer>}
+    {page && (pagination.hasPrevious || pagination.hasNext || page.total > DOWNLOAD_PAGE_SIZES[0]) && <footer className="list-footer download-footer">
+      <Pagination {...pagination} total={page.total} pageSize={pageSize} changePageSize={changePageSize} sizes={sizes} /></footer>}
     <details className="download-help"><summary><Icon name="info" size={15} /><span>下载说明</span><Icon name="chevronDown" size={14} /></summary>
       <p>支持文件直链{page?.capabilities.hls ? "、M3U8 点播" : ""}{page?.capabilities.x ? "、X 帖子" : ""}{page?.capabilities.youtube ? "、YouTube 视频和 Shorts" : ""}。平台功能由管理员启用。网络中断会自动重试；文件直链满足条件时可续传，平台和 M3U8 任务手动停止后从头下载。删除任务保留已保存的文件。</p>
     </details>
@@ -248,6 +253,15 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       danger={confirm.action === "delete" || confirm.action === "restart"} confirmLabel={confirm.action === "delete" ? "删除任务" : confirm.action === "restart" ? "重新下载" : confirm.action === "resume" ? "重新发送" : "停止下载"}
       onClose={() => setConfirm(null)} onConfirm={() => control(confirm.task, confirm.action)} />}
   </>;
+}
+
+/** 保存位置：最后一级目录名在前（长路径也能一眼看出是哪个目录），上级路径另起一行；完整路径在悬停提示里。 */
+function LocationText({ folder }: { folder: string }) {
+  const trimmed = folder.replace(/\/$/, "");
+  const root = api.PRIVATE_PREFIX.replace(/\/$/, "");
+  if (!trimmed || trimmed === root) return <span className="download-location-text"><span>{api.privatePathLabel(folder)}</span></span>;
+  const parent = trimmed.slice(0, trimmed.lastIndexOf("/") + 1);
+  return <span className="download-location-text"><span>{trimmed.slice(trimmed.lastIndexOf("/") + 1)}</span><small>{api.privatePathLabel(parent)}</small></span>;
 }
 
 /** 进度列：进行中显示进度条与「已下载／总大小 · 速度 · 剩余时间」，完成后显示大小与用时，失败显示原因（点击展开全文）。 */

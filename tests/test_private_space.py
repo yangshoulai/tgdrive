@@ -171,10 +171,12 @@ class PrivateSpaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("changed-password", self.metadata.db.execute.call_args.args[1])
 
     async def test_locked_settings_validate_idle_without_unlocking_files(self):
-        for idle in (0, 120, True, None):
+        for idle in (0, 60, 120, 10800, True, None):
             with self.assertRaises(ValueError):
                 await self.space.configure(self.session.token, self.session.csrf_token, "", idle=idle)
         self.metadata.db.execute.assert_not_called()
+        two_hours = await self.space.configure(self.session.token, self.session.csrf_token, "", idle=7200)
+        self.assertEqual(two_hours["idle_seconds"], 7200)
         saved = await self.space.configure(self.session.token, self.session.csrf_token, "", idle=900)
         self.assertIsNone(saved["access"])
         self.assertEqual(saved["idle_seconds"], 900)
@@ -282,3 +284,24 @@ class PrivateSpaceTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IdleMigrationTests(unittest.TestCase):
+    def test_one_minute_setting_becomes_five_minutes(self):
+        import tempfile
+        from pathlib import Path
+        from tgdrive.metadata import Metadata
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "meta.db")
+            metadata = Metadata(path)
+            with metadata.transaction() as db:
+                db.execute("INSERT INTO users(id,username,password_hash,role,status,created_at) VALUES(1,'a@example.com','x','user','active',0)")
+                db.execute("INSERT INTO users(id,username,password_hash,role,status,created_at) VALUES(2,'b@example.com','x','user','active',0)")
+                db.execute("INSERT INTO private_spaces(user_id,idle_seconds,created_at) VALUES(1,60,0),(2,900,0)")
+                db.execute("PRAGMA user_version=28")
+            metadata.close()
+            migrated = Metadata(path)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], Metadata.SCHEMA_VERSION)
+            self.assertEqual([tuple(row) for row in migrated.db.execute("SELECT user_id, idle_seconds FROM private_spaces ORDER BY user_id")], [(1, 300), (2, 900)])
+            migrated.close()
+
