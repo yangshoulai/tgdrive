@@ -1,4 +1,4 @@
-"""计划状态与执行循环的定向回归；只使用内存留痕与工具替身。"""
+"""计划状态与执行循环的定向回归；使用临时数据目录里的留痕与工具替身。"""
 
 import asyncio
 import json
@@ -7,12 +7,12 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from tgdrive.assistant.config import LIMITS
 from tgdrive.assistant.planning import Plan, display_plan
-from tgdrive.assistant.private_chat import MemoryTrace, RoutedTrace
 from tgdrive.assistant.providers import Reply, ToolCall
 from tgdrive.assistant.service import AssistantService, RunState
 from tgdrive.assistant.tools import TOOLS, ToolContext, ToolOutput, ToolSpec
 from tgdrive.assistant.web_tools import collect_gallery
 from tgdrive.offline.http import DownloadError
+from tests.trace_fixture import real_trace
 
 
 def step(status="in_progress", **extra):
@@ -140,18 +140,16 @@ class PlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "当前对话"):
             Plan(candidate=snapshot).update({"plan_id": "other", "items": [step()]})
 
-    def test_memory_trace_routes_plan_and_drops_it_with_private_chat(self):
-        trace = MemoryTrace()
-        cid = trace.create_conversation(1, "", 1)
-        plan = Plan("run")
+    def test_private_conversation_keeps_plan_in_trace(self):
+        trace, _ = real_trace(self)
+        cid = trace.create_conversation(1, "", 1, keep=1, private=True)
+        rid = trace.start_run(cid, 1, "test")
+        plan = Plan(rid)
         event = plan.update({"items": [step()]})
-        trace.append(cid, "run", "event", {"type": "plan", "event": event}, tool_name="update_plan")
-        routed = RoutedTrace(Mock(), trace)
-        self.assertEqual(routed.latest_plan(cid), event)
-        routed.latest_plan(cid)["items"].clear()
+        trace.append(cid, rid, "event", {"type": "plan", "event": event}, tool_name="update_plan")
+        self.assertEqual(trace.latest_plan(cid), event)
+        trace.latest_plan(cid)["items"].clear()
         self.assertEqual(len(trace.latest_plan(cid)["items"]), 1)
-        trace.drop(cid)
-        self.assertIsNone(trace.latest_plan(cid))
 
     def test_tool_metadata_does_not_mutate_business_schema(self):
         spec = TOOLS["http_request"]
@@ -246,8 +244,8 @@ class GalleryPlanTests(unittest.IsolatedAsyncioTestCase):
                            "text": "下一页", "path": "a"}] if following else []}
 
     async def collect(self, pages, *, max_pages=50, params=None, snapshot=False):
-        trace = MemoryTrace()
-        cid = trace.create_conversation(1, "", 1)
+        trace, _ = real_trace(self)
+        cid = trace.create_conversation(1, "", 1, keep=1, private=True)
         rule = {"start_url": pages[0]["url"], "images": {"path": "img.photo", "attr": "src", "transform": []},
                 "pagination": {"type": "next_link", "rel_next": True, "text": "下一页", "path": "a"}}
         if snapshot:
@@ -305,12 +303,10 @@ class GalleryPlanTests(unittest.IsolatedAsyncioTestCase):
 class LoopTests(unittest.IsolatedAsyncioTestCase):
     def fixture(self, replies):
         service = object.__new__(AssistantService)
-        memory = MemoryTrace()
-        cid = memory.create_conversation(1, "", 1)
+        memory, _ = real_trace(self)
+        cid = memory.create_conversation(1, "", 1, keep=1)
         rid = memory.start_run(cid, 1, "test")
-        bookkeeping = Mock()
-        bookkeeping.tokens_today.return_value = 0
-        service.trace = RoutedTrace(bookkeeping, memory)
+        service.trace = memory
         state = RunState(rid, cid, 1, 1, "test", 1, "files", "")
         service._validate = Mock()
         service._acquire, service._title, service._attach_images = AsyncMock(), AsyncMock(), AsyncMock()
@@ -331,6 +327,7 @@ class LoopTests(unittest.IsolatedAsyncioTestCase):
         service.offline, service.http_guard = None, None
         service._tool_settings = Mock(return_value={})
         service._conversation_taint = Mock(return_value=None)
+        service._availability, service.private_space = Mock(return_value=(False, "未开放")), None
         service._fit = lambda value, limit: (value, False)
         service.search = AsyncMock(return_value=ToolOutput({"count": 1}, "找到 1 项"))
         spec = ToolSpec("search_files", "搜索文件", "browse", "read", "查询", {"type": "object", "properties": {}}, service.search)

@@ -831,8 +831,8 @@ function CatalogEntryDialog({ entry, onClose, onSaved }: { entry: ai.CatalogEntr
 
 /* ---------- 工具 ---------- */
 
-/** 工具在私密对话中的可用性（§24.5.1），说明来自服务端。 */
-const PRIVATE_LABELS: Record<ai.PrivateMode, string> = { allow: "私密对话可用", limited: "私密对话有限制", only: "仅私密对话", never: "私密对话不提供", na: "私密对话不适用" };
+/** 工具能否作用于私密空间（§24.5.1、§37.3），说明来自服务端。 */
+const PRIVATE_LABELS: Record<ai.PrivateMode, string> = { allow: "私密空间可用", limited: "私密空间有限制", only: "仅私密空间", never: "私密空间不提供", na: "私密空间不适用" };
 
 function ToolsTab() {
   const [tools, setTools] = useState<ai.AdminTool[] | null>(null);
@@ -870,7 +870,7 @@ function ToolsTab() {
   return (
     <>
       <Notice className="banner">停用的工具不会发送给模型，模型不知道它存在。操作按对话选择的审批或完全访问模式执行；彻底删除、公开分享、跨私密空间移动和 HTTP DELETE 始终确认。改动在下一次模型调用时生效。
-        锁形开关只控制私密对话：关闭后这个工具只在普通对话中提供。</Notice>
+        锁形开关只控制私密空间：关闭后这个工具不能用于私密文件，普通文件不受影响。</Notice>
       {groups.map(([group, items]) => (
         <Panel key={group} title={group} flush className="assistant-tool-group"
           actions={items.some(tool => !tool.fixed) && <Button size="sm" variant="ghost" onClick={() => {
@@ -890,7 +890,7 @@ function ToolsTab() {
                 <span className="assistant-tool-actions">
                   <span className="assistant-tool-params">{tool.params.length > 0 && <IconButton icon="settings" size="sm" label={`配置${tool.label}参数`} onClick={() => setParamsFor(tool)} />}</span>
                   <span className="assistant-tool-private-toggle">{!tool.fixed && ["allow", "limited", "only"].includes(tool.private) && <><Icon name="lock" size={13} />
-                    <Switch compact label={`在私密对话中提供 ${tool.label}`} disabled={!tool.on} checked={(draft[tool.name]?.private_enabled ?? tool.private_enabled) as boolean} onChange={value => togglePrivate(tool.name, value)} /></>}</span>
+                    <Switch compact label={`对私密空间提供 ${tool.label}`} disabled={!tool.on} checked={(draft[tool.name]?.private_enabled ?? tool.private_enabled) as boolean} onChange={value => togglePrivate(tool.name, value)} /></>}</span>
                   <span className="assistant-tool-enable">{tool.fixed ? <span className="muted">固定启用</span>
                     : <Switch compact label={`启用 ${tool.label}`} checked={(draft[tool.name]?.enabled ?? tool.enabled) as boolean} onChange={value => toggle(tool.name, value)} />}</span>
                 </span>
@@ -985,7 +985,7 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
     </Field>
   );
   async function setPrivate(value: boolean) {
-    try { onSaved(await ai.updateAdminSettings({ private: value })); toast.success(value ? "已开放私密对话" : "已关闭私密对话，进行中的私密对话已清除"); }
+    try { onSaved(await ai.updateAdminSettings({ private: value })); toast.success(value ? "已开放私密对话" : "已关闭私密对话，进行中的私密任务已停止"); }
     catch (reason) { toast.error(api.errorMessage(reason, "保存失败")); }
   }
   async function setAuto(key: "full_auto_share" | "full_auto_purge", value: boolean) {
@@ -1008,9 +1008,9 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
           onChange={value => void setAuto("full_auto_purge", value)}
           description="彻底删除回收站中的项目不可恢复。开启后助手按用户要求直接删除，适合信任模型判断范围的场景。" />
       </Panel>
-      <Panel title="私密对话" description="用户在已解锁的私密空间里使用助手。对话只在服务器内存中，锁定、闲置或重启后清除，管理员看不到内容。">
+      <Panel title="私密对话" description="用户解锁私密空间后，助手可以处理私密文件。涉及私密的对话保存在历史中，锁定后需解锁才能查看；管理员看不到内容。">
         <Switch label="允许用户使用私密对话" checked={settings.private} onChange={value => void setPrivate(value)}
-          description="还需要至少一个在模型配置中「允许用于私密对话」的模型；可在“用户”页按人单独允许或禁止。关闭时立即清除所有进行中的私密对话。" />
+          description="还需要至少一个在模型配置中「允许用于私密对话」的模型；可在“用户”页按人单独允许或禁止。关闭时立即停止所有进行中的私密任务。" />
       </Panel>
       <Panel title="额度与保留期" description="每个用户的默认额度可在“用户”页按人覆盖。">
         <div className="form settings-form assistant-limit-form">
@@ -1290,7 +1290,7 @@ export function AssistantPolicyDialog({ user, onClose }: { user: api.Account; on
           <select className="input" value={form.full_access} onChange={event => setForm({ ...form, full_access: event.target.value })}>
             <option value="inherit">跟随“限制与额度”中的全局设置</option>
             <option value="on">允许</option><option value="off">不允许</option></select></Field>
-        <Field label="私密对话" hint="允许后，用户可以在已解锁的私密空间里使用助手；禁止时立即清除该用户进行中的私密对话。">
+        <Field label="私密对话" hint="允许后，用户解锁私密空间即可让助手处理私密文件；禁止时立即停止该用户进行中的私密任务。">
           <select className="input" value={form.private} onChange={event => setForm({ ...form, private: event.target.value })}>
             <option value="inherit">跟随“限制与额度”中的全局设置</option>
             <option value="on">允许</option><option value="off">不允许</option></select></Field>

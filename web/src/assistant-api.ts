@@ -1,5 +1,17 @@
 /** 文件助手的接口：用户端 /api/user/v1/assistant 与管理端 /api/admin/v1/assistant（docs/assistant-design.md §13）。 */
-import { apiGet as get, apiPost as post, getPrivateAccess, postKeepalive } from "./api";
+import { ApiError, apiGet, apiPost, postKeepalive } from "./api";
+
+const USER = "/api/user/v1/assistant";
+/** 统一对话（§37）：涉及私密空间的对话、操作在私密空间锁定时返回 423 private_locked。
+ * 私密授权由服务端按登录会话判断，这里只通知抽屉弹出解锁（不退出登录）。 */
+export const UNLOCK_EVENT = "tessera:assistant-unlock";
+export const isPrivateLocked = (reason: unknown) => reason instanceof ApiError && reason.code === "private_locked";
+const guard = <T>(promise: Promise<T>) => promise.catch((reason: unknown) => {
+  if (isPrivateLocked(reason)) window.dispatchEvent(new CustomEvent(UNLOCK_EVENT));
+  throw reason;
+});
+const get = <T>(path: string, signal?: AbortSignal) => path.startsWith(USER) ? guard(apiGet<T>(path, signal)) : apiGet<T>(path, signal);
+const post = <T>(path: string, body?: unknown, timeoutMs?: number) => path.startsWith(USER) ? guard(apiPost<T>(path, body, timeoutMs)) : apiPost<T>(path, body, timeoutMs);
 
 export type ToolSupport = "unknown" | "yes" | "no";
 export type Capabilities = { tools?: boolean | null; reasoning?: boolean | null; vision?: boolean | null; structured?: boolean | null };
@@ -153,18 +165,20 @@ export const purgeAssistantData = () => post<void>(`${ADMIN}/purge`, { confirm: 
 /* ---------- 用户端 ---------- */
 
 export type UserTool = { name: string; label: string; group: string; group_label: string; level: ToolLevel; description: string; available: boolean; reason: string | null; warning: string | null;
-  /** 私密对话中「有限制」的工具的说明 */
+  /** 用于私密空间时的限制或不可用说明（§37.3） */
   note?: string };
 export type AssistantConfig = {
   available: boolean; reason: string | null; models: AiModel[]; default_model: number | null; tools: UserTool[];
   max_level: "read" | "write" | "danger"; usage: { today: number; limit: number | null }; notice: string; notice_ack: boolean; retention_days: number;
   full_access: boolean;
-  /** 这份配置是否属于私密对话；private_available：当前账号能否使用私密对话（不需要已解锁）。 */
-  private?: boolean; private_available?: boolean;
+  /** 私密空间（§37）：账号能否让助手处理私密文件、私密说明与是否已确认、当前登录会话是否已解锁。 */
+  private_available: boolean; private_notice: string; private_notice_ack: boolean; private_unlocked: boolean;
 };
 export type AccessMode = "approval" | "full";
 export type Conversation = { id: string; title: string | null; scope: string; model_id: number | null; archived: boolean; messages: number;
-  access_mode: AccessMode; created_at: number; updated_at: number; active_run?: string | null };
+  access_mode: AccessMode; created_at: number; updated_at: number; active_run?: string | null;
+  /** 涉及私密空间（§37）；locked：私密空间未解锁，标题已隐藏。 */
+  private?: boolean; locked?: boolean };
 export type BrowserEvent =
   | { type: "browser"; action: "download"; items: { path: string; folder: boolean }[]; size: number }
   | { type: "browser"; action: "open"; url: string; host: string; title: string | null }
@@ -234,26 +248,19 @@ export type ConversationDetail = { conversation: Conversation; messages: ChatMes
   before_seq?: number | null;
   attachments?: { count: number; size: number };
   /** 最近一次模型请求的上下文占用（包括因超长而停止的请求）与模型窗口（§23） */
-  context?: { used: number; window: number } | null;
-  /** 私密对话：对话中出现过的地址，回复里只有这些链接可以点击（§24.8） */
-  links?: string[] };
+  context?: { used: number; window: number } | null };
 export type RunEvent = { seq: number; type: string; [key: string]: unknown };
 
-const USER = "/api/user/v1/assistant";
-/** 私密对话（§24）：同一套接口挂在私密空间下，请求自动带上当前的私密授权（X-Private-Access）。
- * 私密对话、运行与操作的编号以 pc_／pr_／pa_ 开头，按编号选择路径；不带编号的接口显式传 privateMode。 */
-const PRIVATE_USER = "/api/user/v1/private/assistant";
-export const isPrivateId = (id: string | null | undefined) => /^p[crag]_/.test(id ?? "");
-const root = (privateMode: boolean) => privateMode ? PRIVATE_USER : USER;
-const by = (id: string) => root(isPrivateId(id));
-export const assistantConfig = (signal?: AbortSignal, privateMode = false) => get<AssistantConfig>(`${root(privateMode)}/config`, signal);
-export const acknowledgeNotice = (privateMode = false) => post<void>(`${root(privateMode)}/notice/ack`, {});
-export const conversations = (cursor?: string | null, archived = false, privateMode = false) => get<{ conversations: Conversation[]; next_cursor: string | null }>(`${root(privateMode)}/conversations${query({ cursor, archived: archived ? "1" : undefined })}`);
-export const createConversation = (location: string, modelId?: number | null, accessMode: AccessMode = "approval", privateMode = false) =>
-  post<ConversationDetail>(`${root(privateMode)}/conversations`, { location, model_id: modelId ?? undefined, access_mode: accessMode });
-export const conversation = (id: string, beforeSeq?: number) => get<ConversationDetail>(`${by(id)}/conversations/${encodeURIComponent(id)}${query({ before_seq: beforeSeq })}`);
-export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${by(id)}/conversations/${encodeURIComponent(id)}/update`, input);
-export const deleteConversation = (id: string) => post<void>(`${by(id)}/conversations/${encodeURIComponent(id)}/delete`, {});
+export const assistantConfig = (signal?: AbortSignal) => get<AssistantConfig>(`${USER}/config`, signal);
+/** 确认使用说明；private 为私密空间的单独说明（同时确认普通说明）。 */
+export const acknowledgeNotice = (privateNotice = false) => post<void>(`${USER}/notice/ack`, privateNotice ? { private: true } : {});
+export const conversations = (cursor?: string | null, archived = false) => get<{ conversations: Conversation[]; next_cursor: string | null }>(`${USER}/conversations${query({ cursor, archived: archived ? "1" : undefined })}`);
+/** location 在私密空间页面时是带私密前缀的对象键：新对话一开始就涉及私密（需已解锁）。 */
+export const createConversation = (location: string, modelId?: number | null, accessMode: AccessMode = "approval") =>
+  post<ConversationDetail>(`${USER}/conversations`, { location, model_id: modelId ?? undefined, access_mode: accessMode });
+export const conversation = (id: string, beforeSeq?: number) => get<ConversationDetail>(`${USER}/conversations/${encodeURIComponent(id)}${query({ before_seq: beforeSeq })}`);
+export const updateConversation = (id: string, input: { title?: string; archived?: boolean; access_mode?: AccessMode }) => post<Conversation>(`${USER}/conversations/${encodeURIComponent(id)}/update`, input);
+export const deleteConversation = (id: string) => post<void>(`${USER}/conversations/${encodeURIComponent(id)}/delete`, {});
 const attachmentPath = (id: string, tail: string) => `${USER}/attachments/${encodeURIComponent(id)}/${tail}`;
 export const attachmentContentUrl = (id: string, download = false) => attachmentPath(id, `content${download ? "?download=1" : ""}`);
 export const attachmentThumbnailUrl = (id: string, variant: "thumb" | "grid" | "poster" = "thumb") => attachmentPath(id, `thumbnail?variant=${variant}`);
@@ -271,27 +278,27 @@ export type AttachmentStats = { count: number; size: number; pending: { count: n
 export const attachmentStats = () => get<AttachmentStats>(`${USER}/attachments/stats`);
 export type ClientEnvironment = { browser: string; browser_version: string; os: string; language: string; timezone: string; origin: string };
 export const sendMessage = (id: string, input: { text: string; model_id?: number; location: string; view: string; scope?: "conversation" | "location" | "root" | "path"; scope_path?: string; mentions?: string[]; attachments?: string[]; snapshot_id?: string; environment?: ClientEnvironment }) =>
-  post<{ run_id: string; message_seq: number }>(`${by(id)}/conversations/${encodeURIComponent(id)}/messages`, input);
+  post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/messages`, input);
 /** 从自己的某条消息重新回答：服务端丢弃这条消息及之后的记录，以同样的内容（引用、附件）开始新运行。 */
 export const retryMessage = (id: string, input: { seq: number; model_id?: number; location: string; view: string; environment?: ClientEnvironment }) =>
-  post<{ run_id: string; message_seq: number }>(`${by(id)}/conversations/${encodeURIComponent(id)}/retry`, input);
-export const stopRun = (runId: string) => post<void>(`${by(runId)}/runs/${encodeURIComponent(runId)}/stop`, {});
+  post<{ run_id: string; message_seq: number }>(`${USER}/conversations/${encodeURIComponent(id)}/retry`, input);
+export const stopRun = (runId: string) => post<void>(`${USER}/runs/${encodeURIComponent(runId)}/stop`, {});
 export const shareLink = (conversationId: string, path: string) =>
   get<{ token: string; public_base_url: string | null }>(`${USER}/conversations/${encodeURIComponent(conversationId)}/share-link${query({ path })}`);
 /** 回传浏览器工具的执行结果（只有发起这个运行的登录会话可以回传）。 */
 export const sendClientResult = (runId: string, callId: string, outcome: { result?: Record<string, unknown>; error?: string }) =>
-  post<void>(`${by(runId)}/runs/${encodeURIComponent(runId)}/client-results`, { call_id: callId, ...outcome });
-export const action = (id: string) => get<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}`);
+  post<void>(`${USER}/runs/${encodeURIComponent(runId)}/client-results`, { call_id: callId, ...outcome });
+export const action = (id: string) => get<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}`);
 export const actionItems = (id: string, offset = 0) =>
   get<{ items: ActionItem[]; skipped: { path: string; reason: string }[]; total: number; next_offset: number | null; compacted: boolean }>(
-    `${by(id)}/actions/${encodeURIComponent(id)}/items${query({ offset: offset || undefined })}`);
+    `${USER}/actions/${encodeURIComponent(id)}/items${query({ offset: offset || undefined })}`);
 /** 跨区移动（§24.5.3）：target 为卡片上选择的目标目录（相对路径）；移出私密空间还要带登录密码或通行密钥断言。 */
 export type ConfirmInput = { acknowledge?: boolean; count?: number; share?: { expires_days?: number; password?: string };
   target?: string; password?: string; passkey?: { request_id: string; credential: unknown } };
-export const confirmAction = (id: string, input: ConfirmInput = {}) => post<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}/confirm`, input);
-export const rejectAction = (id: string) => post<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}/reject`, {});
-export const cancelAction = (id: string) => post<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}/cancel`, {});
-export const undoAction = (id: string) => post<AssistantAction>(`${by(id)}/actions/${encodeURIComponent(id)}/undo`, {});
+export const confirmAction = (id: string, input: ConfirmInput = {}) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/confirm`, input);
+export const rejectAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/reject`, {});
+export const cancelAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/cancel`, {});
+export const undoAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/undo`, {});
 /** 抓取脚本转交的已渲染页面快照（规范页列表），上传后随消息提交 snapshot_id。 */
 export type SnapshotPage = { url: string; title?: string; images: { path: string; urls: Record<string, string>; w?: number | null; h?: number | null }[];
   links?: { path: string; href: string; text: string; rel?: string }[] };
@@ -307,9 +314,7 @@ export function subscribeRun(runId: string, onEvent: (event: RunEvent) => void, 
   let after = 0, closed = false, source: EventSource | null = null, timer = 0, retries = 0;
   const open = () => {
     if (closed) return;
-    // EventSource 不能带请求头：私密运行把授权放在查询参数里（每次重连都取最新的授权）。
-    const access = isPrivateId(runId) ? `&access=${encodeURIComponent(getPrivateAccess())}` : "";
-    source = new EventSource(`${by(runId)}/runs/${encodeURIComponent(runId)}/events?after=${after}${access}`);
+    source = new EventSource(`${USER}/runs/${encodeURIComponent(runId)}/events?after=${after}`);
     source.onmessage = message => {
       retries = 0;
       onReconnecting?.(false);

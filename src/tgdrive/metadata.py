@@ -43,7 +43,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 27
+    SCHEMA_VERSION = 28
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -683,6 +683,14 @@ class Metadata:
                     )
                 """)
                 db.execute("PRAGMA user_version = 27")
+            if version < 28:
+                # 统一对话（文件助手设计 §37）：涉及私密空间的对话持久化，标记后锁定时需解锁才能查看。
+                columns = {row[1] for row in db.execute("PRAGMA table_info(assistant_conversations)")}
+                if "private" not in columns:
+                    db.execute("ALTER TABLE assistant_conversations ADD COLUMN private INTEGER NOT NULL DEFAULT 0")
+                if "private_at" not in columns:
+                    db.execute("ALTER TABLE assistant_conversations ADD COLUMN private_at REAL")
+                db.execute("PRAGMA user_version = 28")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

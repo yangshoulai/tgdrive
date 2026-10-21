@@ -36,7 +36,7 @@ class StructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["scripts_executed"])
         self.assertNotIn("must-not", json.dumps(payload))
         ctx.taint.assert_called_once()
-        self.assertIn("inspect_page", effective_tools({}, "read", private=True))
+        self.assertIn("inspect_page", effective_tools({}, "read"))
         self.assertEqual(len(http.requests), 1)
 
     async def test_sections_and_table_rows_page_without_refetching(self):

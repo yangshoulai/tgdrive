@@ -9,6 +9,7 @@ import * as api from "../api";
 import * as ai from "../assistant-api";
 import { Markdown } from "../markdown";
 import { MessageAttachments } from "./assistant-attachments";
+import { mentionLabel } from "./assistant-mentions";
 import { usePreview } from "./preview-host";
 import { FileGlyph, getFileKind, parentPath } from "../files";
 import { FolderPicker } from "./folders";
@@ -19,7 +20,8 @@ import { cacheFileId, cacheStats, cacheSupported } from "../cache-client";
 import { Notice as InlineNotice, ButtonLink, AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
 /** 对象键的显示路径：私密空间的条目显示为相对私密空间根的路径。 */
-const display = (key: string) => "/" + (api.isPrivatePath(key) ? key.slice(api.PRIVATE_PREFIX.length) : key);
+/** 对象键 → 显示路径：私密空间写作 私密:/路径（与助手使用的写法一致，§37.3）。 */
+const display = mentionLabel;
 const baseName = (key: string) => key.replace(/\/$/, "").split("/").pop() || key;
 const parentOf = (key: string) => { const trimmed = key.replace(/\/$/, ""); return trimmed.includes("/") ? trimmed.slice(0, trimmed.lastIndexOf("/") + 1) : ""; };
 const seconds = (ms: number) => ms < 1000 ? "不到 1 秒" : `${Math.round(ms / 1000)} 秒`;
@@ -156,7 +158,6 @@ function group(messages: ai.ChatMessage[]): Item[] {
 /* ---------- 消息流 ---------- */
 
 /** 私密对话的链接放行规则：只有对话中出现过的地址可以点击（§24.8）；普通对话不限制。 */
-const LinkContext = createContext<((href: string) => boolean) | undefined>(undefined);
 
 /** 决定节点需要的对话状态与回调；放在上下文里，避免逐层传递到时间线。 */
 type DecisionState = {
@@ -192,15 +193,9 @@ export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprova
   const running = Boolean(runId);
   const items = useMemo(() => group(detail.messages), [detail.messages]);
   const lastTurn = [...items].reverse().find(item => item.kind === "turn");
-  const links = detail.links;
-  const allowLink = useMemo(() => {
-    if (!links) return undefined;
-    const allowed = new Set(links);
-    return (href: string) => { const value = href.split("#", 1)[0]; return allowed.has(value) || allowed.has(value.replace(/\/$/, "")); };
-  }, [links]);
   const decisions = useMemo<DecisionState>(() => ({ actions: detail.actions, messages: detail.messages, running, onReview, onActionChanged, onFilesChanged }),
     [detail.actions, detail.messages, running, onReview, onActionChanged, onFilesChanged]);
-  return <LinkContext.Provider value={allowLink}><DecisionContext.Provider value={decisions}>
+  return <DecisionContext.Provider value={decisions}>
     {items.map(item => item.kind === "event" ? <SystemEvent key={`e${item.message.seq}`} message={item.message} />
       : <TurnView key={item.turn.key} turn={item.turn} live={item === lastTurn && running ? live : null}
           model={item.turn.modelId != null ? modelLabel(item.turn.modelId) : item === lastTurn && running ? liveModel ?? "" : ""}
@@ -208,12 +203,12 @@ export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprova
           onRetry={!running ? onRetry : undefined} />)}
     {running && live && (!lastTurn || lastTurn.kind !== "turn") && <TurnView turn={{ key: "live", steps: [], cards: [], notices: [], runId: null, input: 0, output: 0 }}
       live={live} model="" httpApprovals={httpApprovals.filter(approval => approval.runId === runId)} />}
-  </DecisionContext.Provider></LinkContext.Provider>;
+  </DecisionContext.Provider>;
 }
 
 function SystemEvent({ message }: { message: ai.ChatMessage }) {
   const icon: IconName = message.type === "mode_changed" ? "zap" : message.type === "model_switched" ? "server"
-    : message.type?.startsWith("scope") ? "folder" : message.type === "action_result" ? "checkCircle" : "info";
+    : message.type?.startsWith("scope") ? "folder" : message.type === "action_result" ? "checkCircle" : message.type === "private" ? "lock" : "info";
   return <div className="ai-divider" role="note"><span><Icon name={icon} size={12} />{message.text}</span></div>;
 }
 
@@ -233,7 +228,6 @@ function TurnView({ turn, live, model, httpApprovals, onRetry }: {
   }
   const streaming = live?.streaming ?? "";
   const mark = useMarkState(live);
-  const allowLink = useContext(LinkContext);
   const waiting = httpApprovals.some(approval => approval.status === "pending");
   const plans = turn.cards.filter(message => message.event?.type === "plan");
   const cards = turn.cards.filter(message => message.event?.type !== "plan");
@@ -256,7 +250,7 @@ function TurnView({ turn, live, model, httpApprovals, onRetry }: {
         {cards.map(message => message.event?.type === "browser" && <BrowserCard key={`card-${message.seq}`} event={message.event} />)}
         {shared.map(action => <ShareLinks key={action.id} action={action} />)}
         {(turn.answer || streaming) && <div className="ai-answer">
-          <Markdown source={streaming || turn.answer?.text || ""} allowLink={allowLink} />{streaming && <i className="ai-caret" aria-hidden="true" />}
+          <Markdown source={streaming || turn.answer?.text || ""} />{streaming && <i className="ai-caret" aria-hidden="true" />}
         </div>}
         {turn.notices.map(notice => <Notice key={notice.seq} message={notice} onRetry={notice.retry ? retry : undefined} />)}
         {!live && (turn.answer || turn.output > 0) && <div className="ai-reply-foot">
@@ -377,7 +371,7 @@ function StepView({ step }: { step: Step }) {
 }
 
 function NoteMarkdown({ text }: { text: string }) {
-  return <Markdown source={text} allowLink={useContext(LinkContext)} />;
+  return <Markdown source={text} />;
 }
 
 function Thinking({ text, ms, live, startedAt }: { text: string; ms: number | null; live?: boolean; startedAt: number | null }) {
@@ -994,8 +988,8 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
   const days = shareDays ?? payload.options?.expires_days ?? 0;
   const cross = CROSS_KINDS.includes(kind);
   const moveOut = kind === "move_out";
-  // 移出的目标是普通目录（对象键）；移入的目标是私密空间里的目录（对象键带私密前缀，提交时去掉）。
-  const chosen = target ?? (moveOut ? payload.options?.target ?? "" : api.PRIVATE_PREFIX);
+  // 移出的目标是普通目录（对象键）；移入的目标是私密空间里的目录（对象键带私密前缀，提交时去掉），助手可以给出默认值（相对私密空间根）。
+  const chosen = target ?? (moveOut ? payload.options?.target ?? "" : api.PRIVATE_PREFIX + (payload.options?.target ?? ""));
   const unlocked = Boolean(api.getPrivateAccess());
   const crossBlocked = cross && (!targetReady || (moveOut ? !verify && !password : !unlocked));
   const crossInput = () => ({ target: moveOut ? chosen : chosen.slice(api.PRIVATE_PREFIX.length) });
@@ -1027,7 +1021,8 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
       <div className="ai-cross-label"><Icon name={moveOut ? "folder" : "lock"} size={13} />
         <span>{moveOut ? "移到「我的文件」中的" : "移入「私密空间」中的"} <strong>{display(chosen)}</strong></span></div>
       {moveOut || unlocked ? <div className="ai-cross-picker"><FolderPicker value={chosen} onChange={setTarget} onReady={setTargetReady} /></div>
-        : <p className="ai-card-note"><Icon name="lock" size={13} />请先在私密空间页面解锁，再选择位置并确认移入。</p>}
+        : <p className="ai-card-note"><Icon name="lock" size={13} />解锁私密空间后选择位置并确认移入。
+          <button type="button" className="ai-link" onClick={() => window.dispatchEvent(new CustomEvent(ai.UNLOCK_EVENT))}>解锁私密空间</button></p>}
       {moveOut && <MoveOutVerify password={password} onPassword={value => { setPassword(value); setVerify(""); }} verified={Boolean(verify)}
         onPasskey={async signal => { passkeyAssertion.current = await privatePasskeyAssertion(signal); setPassword(""); setVerify("passkey"); }} />}
       <small>{moveOut ? "移出后文件不再受私密空间保护；同名时自动改名，不能撤销。" : "移入后公开链接会被取消；目标位置不会告诉助手。同名时自动改名，不能撤销。"}</small>

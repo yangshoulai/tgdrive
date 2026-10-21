@@ -1,5 +1,5 @@
 /** 输入框里的 @ 引用：输入 @ 列出当前目录，继续输入在全部普通文件中搜索；选中后插入 @/路径，发送时随消息提交。
- * 私密对话（root 为私密前缀）只列出和搜索私密空间，候选路径相对私密空间根（服务端按同样的约定校验）。 */
+ * 私密空间（§37）：在私密空间页面列出当前私密目录，或输入「@私密:」在私密空间中搜索（需已解锁）；插入 @私密:/路径。 */
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import { FileTile, baseName, getFileKind, parentPath } from "../files";
@@ -10,7 +10,12 @@ type Candidate = Mention & { name: string; parent: string };
 
 const LIMIT = 20;
 
-const candidate = (key: string, folder: boolean): Candidate => ({ key, folder, name: baseName(key), parent: "/" + parentPath(key) });
+/** 对象键 → 显示路径：普通文件为 /路径，私密空间为 私密:/路径（与服务端、模型看到的写法一致）。 */
+export const mentionLabel = (key: string) => api.isPrivatePath(key) ? PRIVATE_LABEL + "/" + key.slice(api.PRIVATE_PREFIX.length) : "/" + key;
+export const PRIVATE_LABEL = "私密:";
+const PRIVATE_QUERY = /^私密[:：]\/?/;
+
+const candidate = (key: string, folder: boolean): Candidate => ({ key, folder, name: baseName(key), parent: mentionLabel(parentPath(key)) });
 
 /** 一组引用的公共上级目录（对象键，"" 表示根目录）：文件取所在目录，文件夹取自身。 */
 export function commonFolder(keys: string[]): string {
@@ -26,11 +31,12 @@ export function commonFolder(keys: string[]): string {
   return parts.length ? parts.join("/") + "/" : "";
 }
 
-export function useMentions({ draft, location, enabled, onPick, root = "" }: {
+export function useMentions({ draft, location, enabled, onPick, privateUnlocked = false }: {
+  /** location：当前目录的对象键（私密空间页面带私密前缀）。 */
   draft: string; location: string; enabled: boolean;
-  /** 文件区域的根：普通对话为 ""，私密对话为私密前缀。location 是带根的对象键。 */
-  root?: string;
-  /** 选中候选后由输入框把 @ 片段替换为 @/路径。 */
+  /** 私密空间已解锁：可以列出和搜索私密文件。 */
+  privateUnlocked?: boolean;
+  /** 选中候选后由输入框把 @ 片段替换为 @显示路径。 */
   onPick: (from: number, path: string) => void;
 }) {
   const [mentions, setMentions] = useState<Mention[]>([]);
@@ -41,7 +47,7 @@ export function useMentions({ draft, location, enabled, onPick, root = "" }: {
   // Esc 关闭候选后，同一个 @ 片段不再弹出，直到光标离开或片段变化。
   const dismissed = useRef<number | null>(null);
   // 文本里已删掉的引用不再提交。
-  const present = mentions.filter(item => draft.includes(`@/${item.key}`));
+  const present = mentions.filter(item => draft.includes(`@${mentionLabel(item.key)}`));
 
   function setToken(next: { query: string; from: number } | null) {
     if (!enabled || !next) { dismissed.current = null; setTokenState(null); return; }
@@ -56,32 +62,36 @@ export function useMentions({ draft, location, enabled, onPick, root = "" }: {
     const timer = window.setTimeout(async () => {
       setLoading(true);
       try {
-        const query = token.query.trim().toLowerCase();
-        // 只保留根下的条目并去掉根：普通对话排除系统区域，私密对话只留私密空间（不含私密回收站）。
+        // 区域：私密空间页面或「@私密:」前缀进入私密空间（需已解锁），其他情况是普通文件（排除系统区域）。
+        const asked = PRIVATE_QUERY.test(token.query);
+        if (asked && !privateUnlocked) { setItems([]); return; }
+        const root = privateUnlocked && (asked || api.isPrivatePath(location)) ? api.PRIVATE_PREFIX : "";
+        const text = token.query.replace(PRIVATE_QUERY, "").trim();
+        const query = text.toLowerCase();
         const inside = (key: string) => root ? key.startsWith(root) : !key.startsWith(".tgdrive/");
-        const relative = (key: string) => key.slice(root.length);
-        const here = await api.listFiles(location, null, false, 60, "", controller.signal);
-        const folders = here.common_prefixes.filter(inside).map(key => candidate(relative(key), true));
-        const files = here.objects.filter(item => !item.key.endsWith("/") && inside(item.key)).map(item => candidate(relative(item.key), false));
+        const folder = inside(location) ? location : root;
+        const here = await api.listFiles(folder, null, false, 60, "", controller.signal);
+        const folders = here.common_prefixes.filter(inside).map(key => candidate(key, true));
+        const files = here.objects.filter(item => !item.key.endsWith("/") && inside(item.key)).map(item => candidate(item.key, false));
         let found = [...folders, ...files].filter(item => !query || item.name.toLowerCase().includes(query));
         if (query) {
-          const search = await api.searchFiles(token.query.trim(), "", false, LIMIT, root, "", controller.signal);
+          const search = await api.searchFiles(text, "", false, LIMIT, root, "", controller.signal);
           const seen = new Set(found.map(item => item.key));
-          found = [...found, ...search.objects.filter(item => !item.key.endsWith("/") && inside(item.key) && !seen.has(relative(item.key)))
-            .map(item => candidate(relative(item.key), false))];
+          found = [...found, ...search.objects.filter(item => !item.key.endsWith("/") && inside(item.key) && !seen.has(item.key))
+            .map(item => candidate(item.key, false))];
         }
         if (!controller.signal.aborted) { setItems(found.slice(0, LIMIT)); setActive(0); }
       } catch { if (!controller.signal.aborted) setItems([]); }
       finally { if (!controller.signal.aborted) setLoading(false); }
     }, token.query ? 160 : 0);
     return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [token?.query, location, root]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token?.query, location, privateUnlocked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function choose(item: Candidate) {
     if (!token) return;
     setMentions(current => current.some(value => value.key === item.key) ? current : [...current, { key: item.key, folder: item.folder }]);
     setTokenState(null);
-    onPick(token.from, `/${item.key}`);
+    onPick(token.from, mentionLabel(item.key));
   }
 
   /** 候选列表打开时接管方向键、回车、Tab 与 Esc；返回 true 表示已处理（并已阻止默认行为）。 */
@@ -99,14 +109,15 @@ export function useMentions({ draft, location, enabled, onPick, root = "" }: {
   }
 
   const menu = token ? <div className="assistant-mention-menu" role="listbox" aria-label="引用文件或文件夹">
-    <div className="assistant-mention-head"><Icon name="at" size={13} /><span>{token.query ? `搜索“${token.query}”` : `当前位置 /${location.slice(root.length)}`}</span><kbd>↑↓</kbd><kbd>Enter</kbd></div>
+    <div className="assistant-mention-head"><Icon name="at" size={13} /><span>{token.query ? `搜索“${token.query}”` : `当前位置 ${mentionLabel(location)}`}</span><kbd>↑↓</kbd><kbd>Enter</kbd></div>
     {items.length ? items.map((item, index) => <button key={item.key} type="button" role="option" aria-selected={index === active}
       className={`assistant-mention-item${index === active ? " is-active" : ""}`}
       onMouseDown={event => event.preventDefault()} onMouseEnter={() => setActive(index)} onClick={() => choose(item)}>
       <FileTile kind={item.folder ? "folder" : getFileKind(null, item.key)} />
       <span className="assistant-mention-name">{item.name}{item.folder ? "/" : ""}</span>
       <span className="assistant-mention-path">{item.parent}</span>
-    </button>) : <p className="assistant-mention-empty">{loading ? "正在查找…" : token.query ? "没有匹配的文件" : "这里还没有文件"}</p>}
+    </button>) : <p className="assistant-mention-empty">{loading ? "正在查找…" : PRIVATE_QUERY.test(token.query) && !privateUnlocked ? "解锁私密空间后才能引用私密文件"
+      : token.query ? "没有匹配的文件" : "这里还没有文件"}</p>}
   </div> : null;
 
   return { mentions: present, known: mentions, open: token !== null, menu, setToken, onKey, reset: () => { setMentions([]); setTokenState(null); dismissed.current = null; } };

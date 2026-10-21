@@ -63,12 +63,12 @@ class TraceStore:
 
     # ---------- 对话 ----------
 
-    def create_conversation(self, user_id: int, scope_root: str, model_id: int | None, *, keep: int) -> str:
+    def create_conversation(self, user_id: int, scope_root: str, model_id: int | None, *, keep: int, private: bool = False) -> str:
         conversation_id = "c_" + secrets.token_urlsafe(12)
         now = time.time()
         with self.metadata.transaction() as db:
-            db.execute("INSERT INTO assistant_conversations(id,user_id,scope_root,model_id,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                       (conversation_id, user_id, scope_root, model_id, now, now))
+            db.execute("INSERT INTO assistant_conversations(id,user_id,scope_root,model_id,private,private_at,created_at,updated_at) "
+                       "VALUES(?,?,?,?,?,?,?,?)", (conversation_id, user_id, scope_root, model_id, int(private), now if private else None, now, now))
             # 单用户容量保护：超出上限时删除最旧的对话（按最后活动）。
             stale = db.execute("SELECT id FROM assistant_conversations WHERE user_id=? ORDER BY updated_at DESC, id DESC LIMIT -1 OFFSET ?",
                                (user_id, keep)).fetchall()
@@ -87,7 +87,19 @@ class TraceStore:
         return {"id": row["id"], "title": self._open(row["title"], f"assistant:{row['id']}:title"),
                 "scope_root": row["scope_root"], "model_id": row["model_id"], "archived": bool(row["archived"]),
                 "access_mode": row["access_mode"] if row["access_mode"] in ("approval", "full") else "approval",
-                "messages": row["messages"], "created_at": row["created_at"], "updated_at": row["updated_at"]}
+                "messages": row["messages"], "private": bool(row["private"]),
+                "created_at": row["created_at"], "updated_at": row["updated_at"]}
+
+    def mark_private(self, conversation_id: str) -> bool:
+        """把对话标记为涉及私密空间（§37.1）；已标记时不变。返回这次是否新标记。"""
+        with self.metadata.transaction() as db:
+            changed = db.execute("UPDATE assistant_conversations SET private=1, private_at=? WHERE id=? AND private=0",
+                                 (time.time(), conversation_id)).rowcount
+        return bool(changed)
+
+    def is_private(self, conversation_id: str) -> bool:
+        row = self.metadata.db.execute("SELECT private FROM assistant_conversations WHERE id=?", (conversation_id,)).fetchone()
+        return bool(row and row["private"])
 
     def list_conversations(self, user_id: int, *, cursor: str = "", limit: int = 50, archived: bool = False) -> dict[str, object]:
         limit = max(1, min(limit, 100))
@@ -477,6 +489,12 @@ class TraceStore:
     # ---------- 调用日志 ----------
 
     def log_call(self, **fields) -> None:
+        # 涉及私密的对话：调用日志不关联对话、运行、操作与工具名，只记 private 标记；工具执行不写日志（§24.9、§37.1）。
+        conversation = fields.get("conversation_id")
+        if fields.get("private") or (isinstance(conversation, str) and self.is_private(conversation)):
+            if fields.get("kind") == "tool":
+                return None
+            fields = {**fields, "conversation_id": None, "run_id": None, "action_id": None, "tool_name": None, "private": True}
         values = {name: fields.get(name) for name in CALL_FIELDS}
         values["started_at"] = values["started_at"] or time.time()
         values["private"] = int(bool(values["private"]))
@@ -597,18 +615,18 @@ class TraceStore:
             args += [float(at), float(at), last]
         rows = self.metadata.db.execute(
             "SELECT c.id, c.user_id, u.username, c.model_id, m.model AS model_name, m.display_name AS model_label, c.messages, "
-            "c.input_tokens, c.output_tokens, c.hidden_at, c.archived, c.created_at, c.updated_at, "
+            "c.input_tokens, c.output_tokens, c.hidden_at, c.archived, c.private, c.created_at, c.updated_at, "
             "(SELECT COUNT(*) FROM assistant_runs r WHERE r.conversation_id=c.id) AS runs, "
             "(SELECT COUNT(*) FROM assistant_actions a WHERE a.conversation_id=c.id) AS actions "
             "FROM assistant_conversations c LEFT JOIN users u ON u.id=c.user_id LEFT JOIN ai_models m ON m.id=c.model_id "
             f"WHERE {' AND '.join(where)} ORDER BY c.updated_at DESC, c.id DESC LIMIT ?", (*args, limit + 1)).fetchall()
-        items = [{**dict(row), "hidden": row["hidden_at"] is not None} for row in rows[:limit]]
+        items = [{**dict(row), "hidden": row["hidden_at"] is not None, "private": bool(row["private"])} for row in rows[:limit]]
         next_cursor = f"{rows[limit - 1]['updated_at']!r}|{rows[limit - 1]['id']}" if len(rows) > limit else None
         return {"conversations": items, "next_cursor": next_cursor}
 
     def admin_conversation(self, conversation_id: str) -> dict[str, object]:
         row = self.metadata.db.execute(
-            "SELECT c.id, c.user_id, u.username, c.model_id, c.messages, c.input_tokens, c.output_tokens, c.hidden_at, "
+            "SELECT c.id, c.user_id, u.username, c.model_id, c.messages, c.input_tokens, c.output_tokens, c.hidden_at, c.private, "
             "c.created_at, c.updated_at FROM assistant_conversations c LEFT JOIN users u ON u.id=c.user_id WHERE c.id=?",
             (conversation_id,)).fetchone()
         if row is None:
@@ -616,13 +634,16 @@ class TraceStore:
         runs = [dict(r) for r in self.metadata.db.execute(
             "SELECT id, model_id, status, stop_reason, steps, tool_calls, input_tokens, output_tokens, started_at, ended_at "
             "FROM assistant_runs WHERE conversation_id=? ORDER BY started_at", (conversation_id,))]
-        tools = [dict(r) for r in self.metadata.db.execute(
+        # 涉及私密的对话不向管理员列出工具名（与私密调用日志一致，§24.9）。
+        tools = [] if row["private"] else [dict(r) for r in self.metadata.db.execute(
             "SELECT tool_name, COUNT(*) AS count FROM assistant_messages WHERE conversation_id=? AND role='tool' "
             "GROUP BY tool_name ORDER BY count DESC", (conversation_id,))]
         actions = [dict(r) for r in self.metadata.db.execute(
             "SELECT id, kind, tool_name, status, count, created_at, decided_at, finished_at FROM assistant_actions "
             "WHERE conversation_id=? ORDER BY created_at", (conversation_id,))]
-        return {**dict(row), "hidden": row["hidden_at"] is not None, "runs": runs, "tools": tools, "actions": actions}
+        if row["private"]:
+            actions = [{**action, "tool_name": None} for action in actions]
+        return {**dict(row), "hidden": row["hidden_at"] is not None, "private": bool(row["private"]), "runs": runs, "tools": tools, "actions": actions}
 
     def admin_delete(self, *, user_id: int | None = None, before: float | None = None) -> int:
         if user_id is None and before is None:

@@ -8,16 +8,16 @@ from tgdrive.assistant.tools import ToolError
 
 
 class NavigationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_private_download_navigation_never_reaches_browser(self):
+    async def test_private_area_has_no_download_view(self):
         context = SimpleNamespace(private=True, client=AsyncMock())
-        with self.assertRaisesRegex(ToolError, "list_downloads"):
+        with self.assertRaisesRegex(ToolError, "私密回收站"):
             await ui_navigate(context, {"view": "downloads"})
         context.client.assert_not_awaited()
 
     async def test_private_trash_navigation_stays_available(self):
         context = SimpleNamespace(private=True, client=AsyncMock(return_value={"ok": True}))
         result = await ui_navigate(context, {"view": "trash"})
-        context.client.assert_awaited_once_with("ui_navigate", {"view": "trash", "path": None})
+        context.client.assert_awaited_once_with("ui_navigate", {"view": "trash", "path": None, "private": True})
         self.assertEqual(result.result["view"], "trash")
 
     async def test_regular_download_navigation_stays_available(self):

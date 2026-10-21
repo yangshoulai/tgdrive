@@ -166,7 +166,7 @@ async def analyze_page(ctx: ToolContext, args: dict) -> ToolOutput:
     if bool(url) == bool(snapshot_id):
         raise ToolError("请在 url 与 snapshot_id 中二选一")
     if snapshot_id and ctx.private:
-        raise ToolError("私密对话不接受抓取脚本的页面快照，请让用户在消息里给出网页链接")
+        raise ToolError("处理私密空间时不接受抓取脚本的页面快照，请让用户在消息里给出网页链接")
     if url:
         ctx.check_url(url.strip(), "page")
     if snapshot_id:

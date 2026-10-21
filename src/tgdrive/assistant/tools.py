@@ -5,8 +5,8 @@
 - 路径对模型一律显示为以 / 开头的完整路径（如 /Downloads/a.txt）；以 / 开头按完整路径解析，否则相对作用域根。
   解析后必须落在作用域根之内，且不能进入 .tgdrive/（回收站、私密空间）。
 - 所有查询走 SQL 范围扫描并限制条数，不在 Python 中取全量。
-- 私密对话（§24）：ToolContext.base 为私密空间前缀，模型看到的 / 是私密空间根；SQL 里排除系统区的条件改用 ctx.hide()，
-  作用域带 private_access 与逐次复核授权的 authorize。每个工具在私密对话中的可用性登记在 PRIVATE（§24.5.1）。
+- 私密空间（§37.3）：模型用「私密:/路径」指私密文件；call_area 判断一次调用的区域，私密区域的 ToolContext.base 为私密空间前缀，
+  SQL 里排除系统区的条件改用 ctx.hide()，作用域带 private_access 与逐次复核授权的 authorize。每个工具能否作用于私密空间登记在 PRIVATE（§24.5.1）。
 """
 
 from __future__ import annotations
@@ -82,12 +82,16 @@ class ToolContext:
     read_only: bool = False
     # 当前模型能否识图，以及识图的参数（原图上限）
     vision: bool = False
-    # 私密对话（§24）：base 为私密空间前缀，模型看到的 / 即私密空间根；authorize 每次读写前复核私密授权。
+    # 私密区域（§37.3）：这次调用作用于私密空间时 base 为私密空间前缀，路径参数已去掉「私密:」前缀，/ 即私密空间根；
+    # authorize 每次读写前复核私密授权。require_private 供运行时才知道区域的工具（读取当前页面）进入私密区域。
     base: str = ""
     authorize: Callable[[], None] | None = None
+    require_private: Callable[[], Callable[[], None]] | None = None
+    # 私密空间状态（给 get_context）：{"available": 是否可用于助手, "unlocked": 当前登录会话是否已解锁}
+    private_state: Callable[[], dict] | None = None
     # 可选地址校验；普通和私密对话均可访问任务所需的公共 HTTP(S) 地址。
     url_allowed: Callable[[str, str], bool] | None = None
-    # 本轮或对话中是否读取过外部内容（返回原因）：私密对话据此拒绝提议移出与彻底删除。
+    # 本轮或对话中是否读取过外部内容（返回原因），用于来源标记。
     tainted: Callable[[], str | None] | None = None
     # HTTP：跨对话频率／并发限制，以及确认后发送前的权限复核。
     http_guard: object | None = None
@@ -105,7 +109,7 @@ class ToolContext:
         return bool(self.base)
 
     def hide(self, column: str = "key") -> str:
-        """排除系统区（回收站、私密空间、附件等）的 SQL 条件。私密对话的范围本身就在私密前缀内，不再排除。"""
+        """排除系统区（回收站、私密空间、附件等）的 SQL 条件。私密区域的范围本身就在私密前缀内，不再排除。"""
         return "1" if self.base else f"substr({column},1,9)!='.tgdrive/'"
 
     def scope(self) -> Scope:
@@ -116,7 +120,7 @@ class ToolContext:
         return Scope(self.bucket_id, "") if self.read_only and key in self.attachments.values() else self.scope()
 
     async def read(self, key: str, start: int = 0, end: int | None = None):
-        """读取对象内容；私密对话每个数据块之前都复核授权（锁定后立即停止）。"""
+        """读取对象内容；私密区域每个数据块之前都复核授权（锁定后立即停止）。"""
         _, stream = await self.objects.get_object(self.scope_for(key), key, start, end)
         try:
             async for chunk in stream:
@@ -137,15 +141,13 @@ class ToolContext:
         if key.startswith(ATTACHMENT_ROOT):
             name = next((name for name, value in self.attachments.items() if value == key), None)
             return ATTACHMENT_PREFIX + (name or "（已删除的附件）")
-        if self.base and key.startswith(self.base):
-            return "/" + key[len(self.base):]
-        return "/" + key
+        return display_key(key)
 
     def valid_key(self, key: str) -> str:
-        """校验写入目标的对象键（私密对话按私密空间内的相对路径校验）。"""
+        """校验写入目标的对象键（私密区域按私密空间内的相对路径校验）。"""
         relative = key[len(self.base):] if self.base and key.startswith(self.base) else key
         if self.base and not key.startswith(self.base):
-            raise ToolError("私密对话只能在私密空间内操作")
+            raise ToolError("这次调用作用于私密空间，路径必须在私密空间内（以「私密:/」开头）")
         try:
             return self.base + normalize_user_path(relative, directory=relative.endswith("/"))
         except (PermissionError, ValueError) as exc:
@@ -213,6 +215,9 @@ class ToolSpec:
     depends: tuple[str, ...] = ()
     warning: str | None = None
     timeout: int | None = None  # 秒；网页抓取等长任务可超过通用的单个工具超时
+    # 区域（§37.3）：None 按参数判断；"private"／"normal" 固定区域；area_skip 中的参数不参与判断（跨区工具的另一端）。
+    area: str | None = None
+    area_skip: tuple[str, ...] = ()
 
     def definition(self, *, planning: bool = False) -> ToolDef:
         parameters = self.parameters
@@ -223,7 +228,7 @@ class ToolSpec:
 
     @property
     def private(self) -> str:
-        """在私密对话中的可用性：allow 可用、limited 受限、only 只用于私密对话、never 不提供、na 不适用（§24.5.1）。"""
+        """能否作用于私密空间：allow 可用、limited 受限、only 只用于私密路径、never 不提供、na 不适用（§24.5.1、§37.3）。"""
         return PRIVATE.get(self.name, ("never", "未登记私密空间规则"))[0]
 
     @property
@@ -234,23 +239,94 @@ class ToolSpec:
 GROUPS = {"context": "上下文", "browse": "浏览与查询", "write": "提议写入", "web": "网页与下载", "browser": "浏览器"}
 TOOLS: dict[str, ToolSpec] = {}
 
-# 私密对话中的工具规则（docs/assistant-design.md §24.5.1）。原则是尽量与普通对话一致，只在数据会离开私密空间、
+PRIVATE_LABEL = "私密:"
+AREA = {"type": "string", "enum": ["normal", "private"],
+        "description": "作用的区域：private 为私密空间（需要用户已解锁），默认 normal（普通文件）"}
+# 可能带路径的参数：只按这些参数判断调用区域，正文、提问等文字里出现「私密:」不会改变区域。
+PATH_KEYS = ("path", "paths", "sources", "target", "cursor", "original_prefix")
+
+
+def display_key(key: str) -> str:
+    """对象键 → 给模型与界面看的路径：私密空间写作「私密:/…」，普通文件写作「/…」。"""
+    if key.startswith(PRIVATE_PREFIX):
+        return PRIVATE_LABEL + "/" + key[len(PRIVATE_PREFIX):]
+    return "/" + key
+
+
+def key_of(value: str) -> str:
+    """「私密:/…」或「/…」→ 对象键（不做作用域校验，供已校验过的显示路径还原）。"""
+    if value.startswith(PRIVATE_LABEL):
+        return PRIVATE_PREFIX + value[len(PRIVATE_LABEL):].lstrip("/")
+    return value.lstrip("/")
+
+
+def call_area(spec: "ToolSpec", args: dict) -> tuple[bool, dict]:
+    """判断一次调用作用于普通文件还是私密空间（§37.3），返回 (是否私密, 去掉「私密:」前缀后的参数)。
+
+    含「私密:」路径或 area=private 即为私密区域；私密区域里不能再出现普通路径（同一次调用不跨区，跨区用移出／移入工具）。"""
+    skip = set(spec.area_skip)
+    marked: list[bool] = []
+
+    def scan(value, strip: bool):
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith(PRIVATE_LABEL):
+                marked.append(True)
+                return ("/" + text[len(PRIVATE_LABEL):].lstrip("/")) if strip else value
+            if text.startswith("/"):
+                marked.append(False)
+            return value
+        if isinstance(value, list):
+            return [scan(item, strip) for item in value]
+        if isinstance(value, dict):
+            return {key: scan(item, strip) if key in ("path", "from") else item for key, item in value.items()}
+        return value
+
+    result = dict(args)
+    for key in PATH_KEYS:
+        if key in result and key not in skip:
+            result[key] = scan(result[key], True)
+    for key in ("match", "mapping"):
+        if key in result and key not in skip:
+            value = result[key]
+            if isinstance(value, dict) and key == "mapping":
+                # 整理的映射：{源路径: 目标文件夹}
+                result[key] = {scan(name, True): scan(item, True) for name, item in value.items()}
+            else:
+                result[key] = scan(value, True)
+    private = spec.area == "private" or args.get("area") == "private" or True in marked
+    if spec.area == "normal":
+        if True in marked:
+            raise ToolError(f"{spec.label}只处理普通文件，路径不能是私密空间")
+        return False, args
+    if spec.private == "only" and private and True not in marked and False in marked:
+        raise ToolError(f"{spec.label}只处理私密空间中的路径（以「私密:/」开头）")
+    if private and False in marked:
+        raise ToolError("同一次调用不能同时处理私密空间和普通文件；需要跨区时请用 propose_move_out 或 propose_move_to_private")
+    if private and spec.private not in ("allow", "limited", "only"):
+        raise ToolError(f"{spec.label}不能用于私密空间" + (f"：{spec.private_note}" if spec.private_note else ""))
+    if spec.private == "only" and not private:
+        raise ToolError(f"{spec.label}只处理私密空间中的路径（以「私密:/」开头）")
+    return private, result if private else args
+
+
+# 工具作用于私密空间时的规则（docs/assistant-design.md §24.5.1、§37.3）。原则是尽量与普通对话一致，只在数据会离开私密空间、
 # 地址可能由模型决定、或功能在私密空间里没有意义时改变行为。新增工具必须在这里登记，未登记的视为不提供。
 PRIVATE: dict[str, tuple[str, str | None]] = {
-    "get_context": ("allow", "作用域显示为私密空间"),
+    "get_context": ("allow", "同时报告私密空间是否已解锁"),
     "get_system_help": ("allow", None),
     "ask_user": ("allow", None),
     "update_plan": ("allow", None),
-    "request_scope": ("na", "私密对话的作用域固定为私密空间"),
+    "request_scope": ("na", "作用域只针对普通文件；私密空间解锁后整体可用"),
     **{name: ("allow", "只在私密空间内") for name in ("list_folder", "folder_tree", "get_file_info", "search_files", "storage_stats",
                                                      "find_large_files", "find_empty_folders", "list_recent")},
     "find_duplicates": ("allow", "只在私密空间内比较，不与普通文件比对"),
     "read_text_file": ("allow", "每个数据块都复核私密授权"),
     "view_image": ("allow", "每个数据块都复核私密授权"),
-    "list_trash": ("allow", "读取私密回收站"),
-    "trash_stats": ("allow", "读取私密回收站"),
-    "list_downloads": ("allow", "只列出私密下载任务"),
-    "get_download": ("allow", "只读取私密下载任务"),
+    "list_trash": ("allow", "area=private 时读取私密回收站"),
+    "trash_stats": ("allow", "area=private 时读取私密回收站"),
+    "list_downloads": ("allow", "area=private 时只列出私密下载任务"),
+    "get_download": ("allow", "area=private 时只读取私密下载任务"),
     "list_public_links": ("na", "私密文件不能公开"),
     "propose_unshare": ("na", "私密文件不能公开"),
     "ui_open_share": ("na", "私密文件不能公开"),
@@ -261,7 +337,7 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "propose_restore": ("allow", "从私密回收站恢复"),
     "propose_purge_trash": ("limited", "不可恢复，完全访问下也需要确认"),
     "propose_move_out": ("only", "移出私密空间：始终确认并重新验证身份"),
-    "propose_move_to_private": ("na", "已经在私密空间中"),
+    "propose_move_to_private": ("na", "来源是普通文件，目标在私密空间"),
     "ui_get_view": ("allow", "只读取私密空间页面"),
     "ui_navigate": ("allow", "只打开私密空间内的位置"),
     "ui_select": ("allow", "只作用于私密空间页面"),
@@ -273,13 +349,13 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "browser_open_url": ("allow", "打开任务所需的公共网页"),
     "propose_downloads": ("allow", "支持跨站资源，保存到私密空间"),
     "parse_download_source": ("allow", "支持任务所需的公共链接或请求配置"),
-    "propose_download_control": ("allow", "只能操作私密下载任务"),
+    "propose_download_control": ("allow", "area=private 时只操作私密下载任务"),
     "analyze_page": ("limited", "支持跨站网页，不接受抓取脚本快照"),
     "inspect_page": ("allow", "分析当前任务所需的公共网页结构，不执行页面脚本"),
     "collect_gallery": ("limited", "只按隔离分析的规则翻页，不离开起始网站"),
     "get_collection": ("limited", "只读取本对话的结果集"),
     "http_request": ("allow", "与普通对话相同，支持公共接口、认证、查询参数与正文"),
-    "propose_save_attachment": ("never", "私密对话暂不提供附件"),
+    "propose_save_attachment": ("never", "附件只能另存为普通文件"),
 }
 
 
@@ -372,10 +448,11 @@ CURSOR = {"type": "string", "description": "上一页返回的 cursor"}
 # ---------- 上下文 ----------
 
 @tool("get_context", "读取上下文", "context", "read",
-      "返回当前作用域、用户所在页面、当前时间与时区、存储用量、公共访问地址与客户端环境。", fixed=True)
+      "返回当前作用域、用户所在页面、私密空间是否可用与已解锁、当前时间与时区、存储用量、公共访问地址与客户端环境。", fixed=True)
 async def get_context(ctx: ToolContext, args: dict) -> ToolOutput:
     now = datetime.now(ZoneInfo(ctx.environment["timezone"])) if ctx.environment.get("timezone") else datetime.now().astimezone()
     return ToolOutput({"scope": ctx.display(ctx.scope_root), "view": ctx.view, "location": ctx.display(ctx.location),
+                       "private_space": ctx.private_state() if ctx.private_state else None,
                        "now": now.isoformat(timespec="seconds"), "timezone": str(now.tzinfo),
                        "used_bytes": ctx.quota.get("used_bytes"), "quota_bytes": ctx.quota.get("quota_bytes"),
                        "public_config": ctx.public_config, "environment": {"agent_runtime": "server", "client_reported": ctx.environment}},
@@ -819,14 +896,14 @@ async def list_recent(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 def _trash_where(ctx: ToolContext) -> tuple[str, list]:
-    # 回收站是整个账号的，但助手只看原路径在作用域内的条目；普通对话排除私密空间的条目，私密对话只看私密回收站。
+    # 回收站是整个账号的，但助手只看原路径在作用域内的条目；普通区域排除私密空间的条目，私密区域（area=private）只看私密回收站。
     return (f"bucket_id=? AND {ctx.hide('original_path')} AND original_path>=? AND original_path<?",
             [ctx.bucket_id, ctx.scope_root, ctx.scope_root + END])
 
 
 @tool("list_trash", "查看回收站", "browse", "read",
       "列出回收站中原路径位于当前作用域内的条目：原路径、是否文件夹、大小、删除时间与自动清除时间。",
-      {"cursor": CURSOR, "limit": LIMIT_ARG}, params={"max_results": (200, 10, 5000, "单次最多列出条目数")})
+      {"cursor": CURSOR, "limit": LIMIT_ARG, "area": AREA}, params={"max_results": (200, 10, 5000, "单次最多列出条目数")})
 async def list_trash(ctx: ToolContext, args: dict) -> ToolOutput:
     limit = _limit(ctx, args, 200)
     where, params = _trash_where(ctx)
@@ -854,7 +931,8 @@ async def list_trash(ctx: ToolContext, args: dict) -> ToolOutput:
                       items=len(items))
 
 
-@tool("trash_stats", "回收站统计", "browse", "read", "回收站中原路径位于当前作用域内的条目数、总大小与最早的自动清除时间。")
+@tool("trash_stats", "回收站统计", "browse", "read", "回收站中原路径位于当前作用域内的条目数、总大小与最早的自动清除时间。",
+      {"area": AREA})
 async def trash_stats(ctx: ToolContext, args: dict) -> ToolOutput:
     where, params = _trash_where(ctx)
 
@@ -901,10 +979,10 @@ def _download(ctx: ToolContext, row: dict) -> dict:
 @tool("list_downloads", "下载任务", "browse", "read",
       "列出离线下载任务（状态、进度、保存路径、错误），每页条数上限由管理员设置，按编号倒序；counts 给出各状态的总数。"
       "只为统计时看 counts 即可，不必逐页翻完；批量停止、删除某类任务时用 propose_download_control 的 status，不需要先收集编号。"
-      "普通对话只列普通任务，私密对话只列私密空间的任务。",
+      "默认只列普通任务；area=private 时只列私密空间的任务。",
       {"status": {"type": "string", "enum": ["active", "stopped", "completed", "failed"], "description": "按状态筛选，省略为全部"},
        "cursor": {"type": "integer", "description": "上一页返回的 cursor"},
-       "limit": LIMIT_ARG}, params={"max_results": (200, 10, 2000, "单次最多列出任务数")})
+       "limit": LIMIT_ARG, "area": AREA}, params={"max_results": (200, 10, 2000, "单次最多列出任务数")})
 async def list_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
         raise ToolError("离线下载未启用")
@@ -912,7 +990,7 @@ async def list_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
     if status not in ("", "active", "stopped", "completed", "failed"):
         raise ToolError("参数 status 不正确")
     cursor = _int(args, "cursor", 0, 0, 2**62)
-    # 普通对话只看普通任务，私密对话只看私密任务（§24.5.1）；在查询中筛选，分页和总数才准确。
+    # 普通区域只看普通任务，私密区域只看私密任务（§37.3）；在查询中筛选，分页和总数才准确。
     area = "private" if ctx.private else "normal"
     limit = _limit(ctx, args, 200)
     page = ctx.offline.list(ctx.user_id, cursor=cursor, status=status, limit=limit, max_limit=limit, area=area)
@@ -923,7 +1001,7 @@ async def list_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("get_download", "下载任务详情", "browse", "read", "单个离线下载任务的详情。",
-      {"id": {"type": "integer", "description": "任务 ID"}}, ("id",))
+      {"id": {"type": "integer", "description": "任务 ID"}, "area": AREA}, ("id",))
 async def get_download(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
         raise ToolError("离线下载未启用")
@@ -1026,7 +1104,7 @@ async def view_image(ctx: ToolContext, args: dict) -> ToolOutput:
 # ---------- 配置 ----------
 
 def private_enabled(settings: dict[str, dict], spec: ToolSpec) -> bool:
-    """私密对话中是否启用：工具本身启用、规则允许、管理员没有单独在私密对话中停用（null 跟随普通开关）。"""
+    """能否作用于私密空间：工具本身启用、规则允许、管理员没有单独对私密空间停用（null 跟随普通开关）。"""
     if spec.private not in ("allow", "limited", "only"):
         return False
     entry = settings.get(spec.name, {})
@@ -1034,16 +1112,13 @@ def private_enabled(settings: dict[str, dict], spec: ToolSpec) -> bool:
     return on and entry.get("private_enabled") is not False
 
 
-def effective_tools(settings: dict[str, dict], level: str, *, private: bool = False) -> dict[str, ToolSpec]:
-    """全局启用 ∩ 用户最高操作级别允许 ∩ 依赖满足；私密对话再按 PRIVATE 规则与 private_enabled 过滤（§24.6）。"""
+def effective_tools(settings: dict[str, dict], level: str) -> dict[str, ToolSpec]:
+    """全局启用 ∩ 用户最高操作级别允许 ∩ 依赖满足。能否作用于私密空间在每次调用时按 PRIVATE 规则与 private_enabled 判断（§37.3）。"""
     allowed = {"read": {"read", "meta", "scope"}, "write": {"read", "meta", "scope", "write"},
                "danger": {"read", "meta", "scope", "write", "danger"}}[level]
     enabled = {}
     for name, spec in TOOLS.items():
-        if private:
-            on = private_enabled(settings, spec)
-        else:
-            on = spec.private != "only" and (spec.fixed or bool(settings.get(name, {}).get("enabled", spec.default_enabled)))
+        on = spec.fixed or bool(settings.get(name, {}).get("enabled", spec.default_enabled))
         if on and spec.level in allowed:
             enabled[name] = spec
     return {name: spec for name, spec in enabled.items() if all(dep in enabled for dep in spec.depends)}
@@ -1090,13 +1165,13 @@ def validate_tool_settings(payload: object, current: dict[str, dict]) -> dict[st
                     raise ValueError(f"{spec.label}是固定工具，不能停用")
                 entry["enabled"] = item
             elif key == "private_enabled":
-                # 只在私密对话中停用（true 等同于跟随普通开关，不单独保存）。
+                # 只对私密空间停用（true 等同于跟随普通开关，不单独保存）。
                 if not isinstance(item, bool):
                     raise ValueError("private_enabled 必须是布尔值")
                 if spec.private not in ("allow", "limited", "only"):
-                    raise ValueError(f"{spec.label}在私密对话中不可用，不能单独启用")
+                    raise ValueError(f"{spec.label}不能用于私密空间，不能单独启用")
                 if spec.fixed and not item:
-                    raise ValueError(f"{spec.label}是固定工具，不能在私密对话中停用")
+                    raise ValueError(f"{spec.label}是固定工具，不能对私密空间单独停用")
                 if item:
                     entry.pop("private_enabled", None)
                 else:

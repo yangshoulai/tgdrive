@@ -338,7 +338,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         <UploadTray queue={uploads} />
         <CacheTray />
       </div>
-      {/* 私密空间页面已解锁时显示私密对话（§24.8），其他页面显示普通对话。 */}
+      {/* 统一对话（§37）：只有一个助手，涉及私密空间的对话在锁定时需要解锁。 */}
       {assistantAvailable && assistant.config && !assistantPage && <AssistantDock open={assistantOpen} onOpen={toggleAssistant} config={assistant.config} onClose={() => setAssistantOpen(false)}
         onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" || section === "private" ? location.prefix : "" }}
         onFilesChanged={filesChanged} pageImport={pageImport} onPageImportDone={clearPageImport} onNavigate={(view, prefix) => navigate(view, prefix ?? "")}

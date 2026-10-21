@@ -363,7 +363,7 @@ class HttpWireTests(unittest.IsolatedAsyncioTestCase):
                                  ({"approved": False, "decision": "cancelled"}, "cancelled")):
             with self.subTest(decision=decision):
                 service = Mock()
-                spec = SimpleNamespace(handler=http_request, level="meta", timeout=180)
+                spec = SimpleNamespace(handler=http_request, level="meta", timeout=180, area=None, area_skip=(), private="allow", private_note="")
                 service._user_tools.return_value = {"http_request": spec}
                 service._tool_settings.return_value = {}
                 service._conversation_taint.return_value = None

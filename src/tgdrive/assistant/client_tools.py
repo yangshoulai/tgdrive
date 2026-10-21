@@ -6,8 +6,8 @@
   所以只在对话里生成一张动作卡片，用户点击后执行；工具立即返回。
 - ui_generate_thumbnails：缩略图只能在浏览器生成且大图计入用户空间，同样只生成卡片，由用户点击后在对话框里逐个生成。
 - 路径一律经 ctx.resolve 校验在作用域内且不在 .tgdrive/；页面回传的数据同样按不可信数据包装。
-- 私密对话（§24.5.4）：只由持有同一私密授权的抽屉执行，读取与跳转只作用于私密空间页面；
-  打开任务所需的公共网页，复制卡片完整显示文本。
+- 私密空间（§37.3）：带「私密:/」路径或 area=private 的调用只作用于私密空间页面，需要当前登录会话已解锁；
+  页面上的私密路径以「私密:/」回给模型。
 """
 
 from __future__ import annotations
@@ -16,7 +16,8 @@ import time
 from urllib.parse import urlsplit
 
 from ..filekinds import kind_of
-from .tools import END, PATH, ToolContext, ToolError, ToolOutput, _str, tool
+from ..objects import PRIVATE_PREFIX
+from .tools import AREA, END, PATH, ToolContext, ToolError, ToolOutput, _str, tool
 
 VIEWS = {"files": "文件", "trash": "回收站", "downloads": "下载任务", "shared": "公开分享"}
 PRIVATE_VIEWS = {"files": "私密空间", "trash": "私密回收站"}
@@ -33,15 +34,14 @@ async def _call(ctx: ToolContext, name: str, args: dict) -> dict:
     return result
 
 
-def _inside(ctx: ToolContext, value: object) -> str | None:
-    """页面回传的路径：只保留作用域内的普通文件路径。"""
+def _inside(ctx: ToolContext, value: object, *, private: bool = False) -> str | None:
+    """页面回传的路径：普通页面只保留作用域内的普通文件路径；私密页面回传相对私密空间根的路径（也接受完整对象键）。"""
     if not isinstance(value, str):
         return None
     key = value.lstrip("/")
-    if ctx.private:
-        # 私密页面回传的是相对私密空间根的路径（也接受完整对象键）。
-        key = key if key.startswith(ctx.base) else ctx.base + key
-        return ctx.display(key) if key.startswith(ctx.scope_root) and ".." not in key.split("/") else None
+    if private:
+        key = key if key.startswith(PRIVATE_PREFIX) else PRIVATE_PREFIX + key
+        return ctx.display(key) if ".." not in key.split("/") else None
     if key.startswith(".tgdrive/") or not key.startswith(ctx.scope_root):
         return None
     return "/" + key
@@ -49,32 +49,31 @@ def _inside(ctx: ToolContext, value: object) -> str | None:
 
 @tool("ui_get_view", "读取当前页面", "browser", "read",
       "读取用户当前在 Tessera 里看到的页面：页面类型、所在目录、用户已选中的文件，以及当前页可见的条目（最多 200 个）。"
-      "用户说「这些」「选中的」「这里」时先调用它。私密空间页面不会返回内容。", timeout=50)
+      "用户说「这些」「选中的」「这里」时先调用它。用户在私密空间页面时返回「私密:/」路径，需要私密空间已解锁。", timeout=50)
 async def ui_get_view(ctx: ToolContext, args: dict) -> ToolOutput:
     result = await _call(ctx, "ui_get_view", {})
     view = str(result.get("view") or "")[:20]
-    if ctx.private and view != "private":
-        # 私密对话只读取私密空间页面；用户在其他页面时不返回那里的条目。
-        return ToolOutput({"view": view, "note": "用户当前不在私密空间页面，无法读取那里的内容"}, "不在私密空间页面")
-    if not ctx.private and view == "private":
-        return ToolOutput({"view": "private", "note": "用户正在私密空间，普通对话无法查看其中的内容；请用户在私密空间里打开助手（私密对话）"},
-                          "私密空间（不开放）")
-    if ctx.private:
+    private = view == "private"
+    if private:
+        # 页面在私密空间：与带「私密:」路径的调用相同，要求已解锁、模型允许处理私密内容，并把对话标记为涉及私密（§37.3）。
+        if ctx.require_private is None:
+            raise ToolError("私密空间不可用")
+        ctx.require_private()
         view = str(result.get("section") or "files")[:20]
-    selected = [path for path in (_inside(ctx, item) for item in (result.get("selected") or [])[:1000]) if path]
+    selected = [path for path in (_inside(ctx, item, private=private) for item in (result.get("selected") or [])[:1000]) if path]
     visible = []
     for item in (result.get("visible") or [])[:200]:
         if isinstance(item, dict):
-            path = _inside(ctx, item.get("path"))
+            path = _inside(ctx, item.get("path"), private=private)
             if path:
                 visible.append({"path": path, "kind": "folder" if path.endswith("/") else "file",
                                 **({"size": item["size"]} if isinstance(item.get("size"), int) else {})})
-    path = _inside(ctx, result.get("path")) if view == "files" else None
+    path = _inside(ctx, result.get("path"), private=private) if view == "files" else None
     hidden = len(result.get("selected") or []) - len(selected)
-    views = PRIVATE_VIEWS if ctx.private else VIEWS
+    views = PRIVATE_VIEWS if private else VIEWS
     payload = {"view": view, "view_label": views.get(view, view), "path": path, "selected": selected, "visible": visible,
                "visible_total": result.get("total") if isinstance(result.get("total"), int) else len(visible),
-               "preview": _inside(ctx, result.get("preview"))}
+               "preview": _inside(ctx, result.get("preview"), private=private)}
     if hidden > 0:
         payload["note"] = f"{hidden} 个选中项不在当前作用域内，已省略"
     label = views.get(view, view or "未知页面")
@@ -82,21 +81,19 @@ async def ui_get_view(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("ui_navigate", "打开页面", "browser", "read",
-      "在用户的 Tessera 中打开页面：view=files 时打开 path 指定的目录（默认作用域根），也可以打开 trash 回收站、downloads 下载任务、"
-      "shared 公开分享。只在用户明确要求打开页面时调用，提交下载后保持当前对话。私密对话只能打开私密目录或私密回收站，下载进度用 list_downloads 查询。",
-      {"view": {"type": "string", "enum": list(VIEWS), "description": "页面，默认 files"}, "path": PATH}, timeout=50)
+      "在用户的 Tessera 中打开页面：view=files 时打开 path 指定的目录（默认作用域根；「私密:/…」为私密空间目录），也可以打开 trash 回收站、"
+      "downloads 下载任务、shared 公开分享；area=private 配合 trash 打开私密回收站。只在用户明确要求打开页面时调用，提交下载后保持当前对话。",
+      {"view": {"type": "string", "enum": list(VIEWS), "description": "页面，默认 files"}, "path": PATH, "area": AREA}, timeout=50)
 async def ui_navigate(ctx: ToolContext, args: dict) -> ToolOutput:
     view = args.get("view") or "files"
     views = PRIVATE_VIEWS if ctx.private else VIEWS
-    if ctx.private and view == "downloads":
-        raise ToolError("请使用 list_downloads 或 get_download 查询私密下载进度，保持当前私密对话；用户可以手动打开侧栏的「下载任务」")
     if view not in views:
-        raise ToolError("参数 view 不正确" + ("：私密对话只能打开 files（私密空间）、trash（私密回收站）" if ctx.private else ""))
+        raise ToolError("参数 view 不正确" + ("：私密空间只有 files（私密目录）与 trash（私密回收站）" if ctx.private else ""))
     path = ctx.resolve(args.get("path"), directory=True) if view == "files" else None
     if path is not None and path and ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
                                                     (ctx.bucket_id, path, path + END)).fetchone() is None:
         raise ToolError(f"目录 {ctx.display(path)} 不存在")
-    await _call(ctx, "ui_navigate", {"view": view, "path": path})
+    await _call(ctx, "ui_navigate", {"view": view, "path": path, **({"private": True} if ctx.private else {})})
     return ToolOutput({"status": "已打开", "view": view, "path": ctx.display(path) if path is not None else None},
                       f"打开{views[view]}" + (f" {ctx.display(path)}" if path and path != ctx.base else ""))
 

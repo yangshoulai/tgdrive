@@ -2932,6 +2932,7 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .assistant-scope.is-private .assistant-scope-trigger { display: inline-flex; height: 30px; align-items: center; gap: 6px; padding: 0 6px; color: var(--warning); }
 .assistant-scope.is-private .assistant-scope-label { color: var(--warning); }
 .assistant-welcome.is-private .assistant-eyebrow { display: inline-flex; align-items: center; gap: 4px; color: var(--warning); }
+.assistant-unlock-notice p { margin: 0; color: var(--ink-2); font-size: var(--text-sm); line-height: 1.7; white-space: pre-line; }
 .md-link-blocked { color: var(--ink-2); text-decoration: underline dotted var(--line-strong); text-underline-offset: 3px; cursor: help; word-break: break-all; }
 .ai-cross-form { display: grid; gap: 8px; padding: 10px; border-radius: var(--radius-md); background: var(--surface-sunken); }
 .ai-cross-label { display: flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: var(--text-xs); }
@@ -3418,6 +3419,9 @@ button.download-location:focus-visible { outline: 2px solid var(--accent); outli
 .assistant-history-icon { position: relative; display: grid; width: 28px; height: 28px; flex: none; place-items: center; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-3); }
 .assistant-history li.is-active .assistant-history-icon { background: var(--surface); color: var(--accent); }
 .assistant-history-icon .assistant-pulse { position: absolute; top: -2px; right: -2px; width: 7px; height: 7px; box-shadow: 0 0 0 2px var(--surface); }
+/* 涉及私密空间的对话（§37）：锁形图标；锁定时标题隐藏，以次要文字显示。 */
+.assistant-history-icon.is-private { background: var(--warning-soft); color: var(--warning); }
+.assistant-history-locked { color: var(--ink-3); font-weight: 400; }
 .assistant-history-item strong { font-weight: 500; }
 .assistant-history-item small { display: flex; min-width: 0; gap: 0; }
 .assistant-history-item small > span { flex: none; }

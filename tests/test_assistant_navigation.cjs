@@ -1,4 +1,4 @@
-// 验证页面侧也拦截旧私密事件和隐藏抽屉；不创建 DOM、数据库或真实下载任务。
+// 验证页面侧也拦截锁定时的私密导航和隐藏抽屉；不创建 DOM、数据库或真实下载任务。
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
@@ -9,14 +9,16 @@ const bundle = buildSync({ stdin: { contents: 'export { executeClientTool } from
 const loaded = { exports: {} };
 new Function("module", "exports", bundle.outputFiles[0].text)(loaded, loaded.exports);
 const { executeClientTool } = loaded.exports;
-const context = (privateMode, onNavigate) => ({ open: true, privateMode, page: false, cacheQueue: null,
-  location: { view: privateMode ? "private" : "files", prefix: "" }, onNavigate });
+const context = (privateUnlocked, onNavigate) => ({ open: true, privateUnlocked, page: false, cacheQueue: null,
+  location: { view: "files", prefix: "" }, onNavigate });
 
-test("旧运行反复重放私密下载页导航也不改变页面", async () => {
+test("私密空间只有私密目录与回收站；锁定时不导航", async () => {
   const calls = [], state = context(true, (...args) => calls.push(args));
   for (let replay = 0; replay < 3; replay++) {
-    await assert.rejects(executeClientTool("ui_navigate", { view: "downloads" }, state), /私密对话保持/);
+    await assert.rejects(executeClientTool("ui_navigate", { view: "downloads", private: true }, state), /私密空间只有/);
   }
+  await assert.rejects(executeClientTool("ui_navigate", { view: "files", private: true }, context(false, (...args) => calls.push(args))), /已锁定/);
+  await assert.rejects(executeClientTool("ui_select", { folder: ".tgdrive/private/a/", paths: [] }, context(false, (...args) => calls.push(args))), /已锁定/);
   assert.deepEqual(calls, []);
 });
 

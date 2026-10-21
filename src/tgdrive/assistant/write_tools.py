@@ -16,7 +16,9 @@ from ..objects import PRIVATE_PREFIX
 from .actions import KINDS, directory_version, folder_files
 from .attachments import PREFIX as ATTACHMENT_PREFIX
 from .tools import (
+    AREA,
     END,
+    PRIVATE_LABEL,
     KIND,
     KIND_LABELS,
     PATH,
@@ -580,7 +582,7 @@ def _trash_rows(ctx: ToolContext, ids: object, prefix: str | None, *, limit: int
 @tool("propose_restore", "从回收站恢复", "write", "write",
       "生成从回收站恢复条目的待确认操作；恢复到原位置，原位置已有同名项目时自动改名保留两者。ids（来自 list_trash）"
       "与 original_prefix（按原路径所在目录）二选一。只能恢复原路径在当前作用域内的条目。",
-      {"ids": {"type": "array", "items": {"type": "string"}}, "original_prefix": {"type": "string", "description": "原路径所在目录"}})
+      {"ids": {"type": "array", "items": {"type": "string"}}, "original_prefix": {"type": "string", "description": "原路径所在目录"}, "area": AREA})
 async def propose_restore(ctx: ToolContext, args: dict) -> ToolOutput:
     ids, prefix_arg = args.get("ids"), _str(args, "original_prefix", limit=1024)
     if bool(ids) == bool(prefix_arg):
@@ -599,7 +601,7 @@ async def propose_restore(ctx: ToolContext, args: dict) -> ToolOutput:
 @tool("propose_purge_trash", "清空回收站", "write", "danger",
       "生成彻底删除回收站条目的待确认操作，不可恢复。ids（来自 list_trash）或 all=true（原路径在当前作用域内的全部条目）。"
       "提议前必须先告诉用户数量和不可恢复的后果。",
-      {"ids": {"type": "array", "items": {"type": "string"}}, "all": {"type": "boolean"}})
+      {"ids": {"type": "array", "items": {"type": "string"}}, "all": {"type": "boolean"}, "area": AREA})
 async def propose_purge_trash(ctx: ToolContext, args: dict) -> ToolOutput:
     ids, everything = args.get("ids"), args.get("all") is True
     if bool(ids) == everything:
@@ -703,11 +705,11 @@ DOWNLOAD_FILTERS = {"active": ("queued", "running", "interrupted"), "stopped": (
       "生成停止、继续、重新下载或删除离线下载任务的操作（完全访问下自动执行）。删除任务只删除任务记录，不会删除已保存的文件。"
       "用 ids 指定任务（上限为单个操作条目数），或用 status 选中某类全部任务，例如删除全部已完成和失败的任务用 status=finished 与 op=delete，"
       "不需要先翻页收集编号。删除与停止不受对话作用域限制；继续和重新下载会写入文件，保存位置需要在作用域内。"
-      "普通对话只操作普通任务，私密对话只操作私密空间的任务。",
+      "默认只操作普通任务；area=private 时只操作私密空间的任务。",
       {"ids": {"type": "array", "items": {"type": "integer"}, "description": "任务 ID（来自 list_downloads）"},
        "status": {"type": "string", "enum": list(DOWNLOAD_FILTERS),
                   "description": "按状态选中全部任务：active 进行中、stopped 已停止、completed 已完成、failed 失败、finished 已完成＋失败＋已停止"},
-       "op": {"type": "string", "enum": ["stop", "resume", "restart", "delete"]}}, ("op",))
+       "op": {"type": "string", "enum": ["stop", "resume", "restart", "delete"]}, "area": AREA}, ("op",))
 async def propose_download_control(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
         raise ToolError("离线下载未启用")
@@ -800,12 +802,12 @@ def _cross_items(ctx: ToolContext, paths: object) -> tuple[list, list]:
 @tool("propose_move_out", "移出私密空间", "write", "write",
       "生成把私密空间中的文件或文件夹移到普通文件目录的待确认操作。移出后不再受私密空间保护，所以只在用户明确要求时使用；"
       "用户确认时需要重新验证身份，执行后不能撤销。"
-      "paths 为私密空间中的路径（上限为单个操作条目数），target 为普通文件区的目录（如 /文档/；/ 表示根目录），用户可以在卡片上改选。",
+      "paths 为私密空间中的路径（「私密:/…」，上限为单个操作条目数），target 为普通文件区的目录（如 /文档/；/ 表示根目录），用户可以在卡片上改选。",
       {"paths": {"type": "array", "items": {"type": "string"}, "description": "私密空间中的文件或文件夹路径（上限为单个操作条目数）"},
-       "target": {"type": "string", "description": "普通文件区的目标目录"}}, ("paths", "target"))
+       "target": {"type": "string", "description": "普通文件区的目标目录"}}, ("paths", "target"), area="private", area_skip=("target",))
 async def propose_move_out(ctx: ToolContext, args: dict) -> ToolOutput:
     if not ctx.private:
-        raise ToolError("只能在私密对话中使用")
+        raise ToolError("paths 需要是私密空间中的路径（以「私密:/」开头）")
     target = _normal_folder(args.get("target"))
     items, skipped = _cross_items(ctx, args.get("paths"))
     size = sum(item["size"] for item in items)
@@ -815,13 +817,25 @@ async def propose_move_out(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("propose_move_to_private", "移入私密空间", "write", "write",
-      "生成把普通文件或文件夹移入私密空间的待确认操作（上限为单个操作条目数）。私密空间中的目标位置由用户在卡片上选择，你不会知道私密空间的目录结构；"
-      "确认时需要私密空间处于解锁状态。移入后公开链接会被取消。",
-      {"paths": {"type": "array", "items": {"type": "string"}, "description": "作用域内的文件或文件夹路径（上限为单个操作条目数）"}}, ("paths",))
+      "生成把普通文件或文件夹移入私密空间的待确认操作（上限为单个操作条目数）。target 可选，为私密空间中的目录（「私密:/…」）；"
+      "省略时由用户在卡片上选择。确认时需要私密空间处于解锁状态。移入后公开链接会被取消。",
+      {"paths": {"type": "array", "items": {"type": "string"}, "description": "作用域内的文件或文件夹路径（上限为单个操作条目数）"},
+       "target": {"type": "string", "description": "可选，私密空间中的目标目录，如 私密:/相册/"}}, ("paths",), area="normal", area_skip=("target",))
 async def propose_move_to_private(ctx: ToolContext, args: dict) -> ToolOutput:
-    if ctx.private:
-        raise ToolError("已经在私密空间中")
+    options = {}
+    target = _str(args, "target", limit=1024)
+    if target:
+        # 目标只作为卡片上的默认选择；用户确认时仍可改选，执行时按当时的授权复核。
+        if not target.startswith(PRIVATE_LABEL):
+            raise ToolError("target 需要是私密空间中的目录（以「私密:/」开头）")
+        relative = target[len(PRIVATE_LABEL):].strip().strip("/")
+        try:
+            # 与卡片提交的格式一致：相对私密空间根的目录，根目录为空字符串。
+            options["target"] = normalize_user_path(relative, directory=True) if relative else ""
+        except (PermissionError, ValueError) as exc:
+            raise ToolError(f"目标目录 {target} 不合法") from exc
     items, skipped = _cross_items(ctx, args.get("paths"))
     size = sum(item["size"] for item in items)
-    return await _propose(ctx, "move_in", items, skipped=skipped, sample=lambda item: ctx.display(item["from"]),
-                          summary=f"把 {len(items)} 项（{_fmt(size)}）移入私密空间，目标位置由你在卡片上选择")
+    where = ctx.display(PRIVATE_PREFIX + options["target"]) if options else "由你在卡片上选择的位置"
+    return await _propose(ctx, "move_in", items, skipped=skipped, sample=lambda item: ctx.display(item["from"]), options=options,
+                          summary=f"把 {len(items)} 项（{_fmt(size)}）移入私密空间：{where}")
