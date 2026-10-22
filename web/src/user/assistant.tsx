@@ -53,32 +53,8 @@ export function useAssistantConfig(enabled: boolean) {
   return { config, refresh };
 }
 
-type DrawerProps = Parameters<typeof AssistantDrawer>[0];
-
 /** 抽屉关闭时也要让人看见的状态：运行中、等待处理的请求数，以及当前对话是否涉及私密空间。 */
-type DockStatus = { running: boolean; pending: number; private: boolean };
-const IDLE_STATUS: DockStatus = { running: false, pending: 0, private: false };
-
-/** 抽屉的宿主（§37）：只有一个助手，私密对话与普通对话都在历史中；抽屉一直挂着，切换页面时对话不中断。 */
-export function AssistantDock({ onOpen, ...props }: DrawerProps & { onOpen: () => void }) {
-  const [status, setStatus] = useState(IDLE_STATUS);
-  return <>
-    <AssistantDrawer {...props} onStatus={setStatus} />
-    {!props.open && <AssistantFab status={status} onOpen={onOpen} />}
-  </>;
-}
-
-/** 右下角的助手入口（§34）：抽屉关闭时显示，带运行动效与待处理数量；当前对话涉及私密时带锁形角标。 */
-function AssistantFab({ status, onOpen }: { status: DockStatus; onOpen: () => void }) {
-  const name = status.private ? "文件助手（私密对话）" : "文件助手";
-  const state = status.pending ? `，${status.pending} 项等待处理` : status.running ? "，正在处理" : "";
-  return <button type="button" className={`assistant-fab${status.running ? " is-working" : ""}${status.pending ? " has-pending" : ""}`}
-    onClick={onOpen} aria-label={`${name}${state}`} title={`${name}（${shortcutLabel("Mod+J")}）${state}`} aria-keyshortcuts="Meta+J Control+J">
-    <AssistantMark size={28} state={status.running && !status.pending ? "thinking" : "idle"} />
-    {status.private && <span className="assistant-fab-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}
-    {status.pending > 0 && <span className="assistant-fab-badge" aria-hidden="true">{status.pending > 99 ? "99+" : status.pending}</span>}
-  </button>;
-}
+export type AssistantDockStatus = { running: boolean; pending: number; private: boolean };
 
 export type AssistantNavigate = (view: "files" | "trash" | "downloads" | "shared" | "private", prefix?: string) => void;
 const FULL_ACK_KEY = "tessera-assistant-full-ack-v2";
@@ -94,8 +70,8 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   pageImport?: PageImport | null; onPageImportDone?: () => void;
   /** 浏览器工具 ui_navigate 等：在 Tessera 中打开页面。全页模式不提供（会离开对话页）。 */
   onNavigate?: AssistantNavigate;
-  /** 向浮动入口报告运行与待处理状态（抽屉关闭时也要可见）。 */
-  onStatus?: (status: DockStatus) => void;
+  /** 向系统托盘报告运行与待处理状态（抽屉关闭时也要可见）。 */
+  onStatus?: (status: AssistantDockStatus) => void;
 }) {
   const page = mode === "page";
   const [width, setWidth] = useState(() => {
@@ -694,8 +670,6 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     return () => { disposed = true; window.clearInterval(timer); };
   }, [open, currentId, syncingActions, follow]);
 
-  // 键盘：Esc 运行中先停止，空闲时关闭。全页模式只停止运行，不关闭。
-  function escape() { if (runId) void stop(); else if (!page) onClose(); }
   function focusArea(event: ReactPointerEvent<HTMLElement>) {
     const target = event.target as Element;
     if (!event.currentTarget.contains(target) || isShortcutControl(target) || target.closest("button, a, summary, [role='button'], [role='separator']")) return;
@@ -717,13 +691,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       }
       return;
     }
-    if (!page || event.key !== "Escape" || event.defaultPrevented || event.repeat || event.nativeEvent.isComposing || !runId) return;
-    if (document.querySelector(".modal-backdrop:not(.is-minimized), .menu")) return;
-    event.preventDefault();
-    escape();
   }
-  const escapeRef = useRef(escape);
-  escapeRef.current = escape;
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  // Esc 只隐藏抽屉，不停止运行；全页对话不绑定停止快捷键。
   // 抽屉打开时 Esc 优先交给抽屉：在 window 捕获阶段处理，先于文件页（清除选择）、预览窗口与其他弹窗的 Esc。
   // 只在这些情况下让行：焦点在某个弹窗或菜单里（由它自己关闭）、抽屉自己打开的对话框还在、@ 候选列表打开（先关闭候选）、输入法组字中。
   const mentionOpen = useRef(false);
@@ -738,7 +709,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       event.preventDefault(); event.stopPropagation();
       const planToggle = target?.closest?.(".assistant-plan-bar")?.querySelector<HTMLButtonElement>('.assistant-plan-trigger[aria-expanded="true"]');
       if (planToggle) { planToggle.click(); planToggle.focus({ preventScroll: true }); return; }
-      escapeRef.current();
+      closeRef.current();
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
@@ -890,7 +861,7 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
             title={`添加附件（也可以粘贴或拖入），随对话保存${canSee ? "；图片会发给模型识别" : ""}`}><Icon name="paperclip" size={15} /></button>}
           <input ref={filePicker} type="file" multiple hidden onChange={event => { addFiles([...(event.target.files ?? [])]); event.target.value = ""; input.current?.focus(); }} />
           <span className="assistant-enter-hint">@ 引用 · Enter 发送 · Shift+Enter 换行</span>
-          {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" aria-keyshortcuts="Escape" title="停止（Esc）" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
+          {runId ? <button type="button" className="assistant-send is-stop" aria-label="停止" title="停止当前任务" onClick={() => void stop()}><Icon name="stop" size={16} /></button>
             : <button type="button" className="assistant-send" aria-label="发送" aria-keyshortcuts="Enter Meta+Enter Control+Enter" disabled={(!draft.trim() && !attachments.items.length) || attachments.pending || sending || revising || Boolean(revisionPrompt) || !config.notice_ack || exhausted || Boolean(pageImport && !pageImport.pages)}
               title={attachments.pending ? "附件处理中" : `发送（Enter 或 ${shortcutLabel("Mod+Enter")}）`} onClick={() => void send()}>
               {sending ? <span className="spinner" aria-hidden="true" /> : <Icon name="arrowUp" size={18} />}</button>}

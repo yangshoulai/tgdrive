@@ -6,9 +6,10 @@ import { fingerprintFile, fingerprintSupported } from "../fingerprint";
 import { FileTile, baseName, getFileKind } from "../files";
 import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
 
-import { Notice, Badge, Button, Icon, IconButton, Modal, Switch, copyText, formatBytes, toast } from "../ui";
+import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Switch, copyText, formatBytes, toast } from "../ui";
 import { DestinationPicker } from "./folders";
-import { TrayBar, TrayCancelAll, TrayFoot, TrayOverall, TrayRing, type TrayState } from "./tray";
+import { TrayBar } from "./tray";
+import { TaskListControls, TaskListFooter, useTaskList, type TaskFilter } from "./task-list";
 import { UploadSelection, type UploadFile } from "./upload-selection";
 
 /* ---------- 上传 ---------- */
@@ -90,8 +91,6 @@ async function refreshUploadLimits() {
 /** 小于这个大小的文件不做秒传探测：哈希加一次请求的开销比直接上传还大。 */
 // 秒传探测的最小文件：照片多在 1 MiB 以下，也要能复用已有内容与缩略图；更小的文件多一次请求不划算，由服务端写入后合并兜底。
 const INSTANT_MIN_SIZE = 64 * 1024;
-/** 成功反馈留出查看大小、复制分享链接的时间，再逐项收起。 */
-const COMPLETED_VISIBLE_MS = 8000;
 const resumeKey = (path: string, file: File) => `tgdrive:resume:${path}:${file.size}:${file.lastModified}`;
 const privateResumes = new Map<string, string>();
 const readResume = (key: string) => key.includes(`:${api.PRIVATE_PREFIX}`) ? privateResumes.get(key) ?? null : localStorage.getItem(key);
@@ -190,25 +189,6 @@ export function useUploadQueue(onSettled: () => void) {
     disposed.current = false;
     return () => { disposed.current = true; queue.current = []; folderGroups.current.clear(); aborters.current.forEach(abort => abort()); };
   }, []);
-  useEffect(() => {
-    const completed = jobs.filter(job => job.status === "done" && job.completedAt != null);
-    if (!completed.length) return;
-    const expires = Math.min(...completed.map(job => job.completedAt! + COMPLETED_VISIBLE_MS));
-    const timer = window.setTimeout(() => setJobs(current => current.filter(job =>
-      job.status !== "done" || job.completedAt == null || job.completedAt + COMPLETED_VISIBLE_MS > Date.now())), Math.max(0, expires - Date.now()));
-    return () => window.clearTimeout(timer);
-  }, [jobs]);
-  useEffect(() => {
-    const completed = folderShares.filter(folder => folder.status === "done" && folder.completedAt != null);
-    if (!completed.length) return;
-    const expires = Math.min(...completed.map(folder => folder.completedAt! + COMPLETED_VISIBLE_MS));
-    const timer = window.setTimeout(() => {
-      const expired = new Set(completed.filter(folder => folder.completedAt! + COMPLETED_VISIBLE_MS <= Date.now()).map(folder => folder.id));
-      expired.forEach(id => folderGroups.current.delete(id));
-      setFolderShares(current => current.filter(folder => !expired.has(folder.id)));
-    }, Math.max(0, expires - Date.now()));
-    return () => window.clearTimeout(timer);
-  }, [folderShares]);
 
   const workers = useRef(0);
   const tally = useRef({ done: 0, failed: 0, instant: 0 });
@@ -365,7 +345,7 @@ export function useUploadQueue(onSettled: () => void) {
     void refreshUploadLimits().then(run);
   }
   function retry(id: string) {
-    const failed = jobs.find(job => job.id === id && job.status === "error");
+    const failed = jobs.find(job => job.id === id && (job.status === "error" || job.status === "canceled"));
     if (!failed || aborters.current.has(id) || queue.current.some(job => job.id === id)) return;
     // 保留原始 File 与目标路径，分段上传沿用原来的续传记录。
     const next: UploadJob = { id, file: failed.file, path: failed.path, isPublic: failed.isPublic, folderShare: failed.folderShare, percent: 0, status: "queued" };
@@ -405,81 +385,73 @@ export function useUploadQueue(onSettled: () => void) {
     setFolderShares(current => current.filter(folder => retained.has(folder.id) || folder.status === "sharing"));
     setJobs(current => current.filter(job => job.status === "queued" || job.status === "uploading"));
   }
-  return { jobs, folderShares, enqueue, retry, retryFolder: (id: string) => void publishFolder(id), cancel, cancelAll, cancelPrivate, clear };
+  function remove(ids: string[]) {
+    const removing = new Set(ids);
+    jobs.filter(job => removing.has(job.id) && (job.status === "queued" || job.status === "uploading")).forEach(job => cancel(job.id));
+    queue.current = queue.current.filter(job => !removing.has(job.id));
+    setJobs(current => current.filter(job => !removing.has(job.id)));
+  }
+  return { jobs, folderShares, enqueue, retry, retryFolder: (id: string) => void publishFolder(id), cancel, cancelAll, cancelPrivate, clear, remove };
 }
 
-export function UploadTray({ queue }: { queue: UploadQueue }) {
-  const [collapsed, setCollapsed] = useState(false);
+const uploadGroup = (job: UploadJob): TaskFilter => job.status === "done" ? "done" : job.status === "error" ? "error" : job.status === "canceled" ? "paused" : "active";
+const uploadDescription = (job: UploadJob) => `${job.file.name} ${api.privatePathLabel(job.path)}`;
+
+/** 队列由应用外壳持有，关闭窗口只隐藏管理界面，不取消上传或清除记录。 */
+export function UploadTasks({ queue, onClose }: { queue: UploadQueue; onClose: () => void }) {
   const { jobs, folderShares } = queue;
-  useEffect(() => { if (!jobs.length && !folderShares.length) setCollapsed(false); }, [jobs.length, folderShares.length]);
-  if (!jobs.length && !folderShares.length) return null;
-  const uploading = jobs.filter(job => job.status === "queued" || job.status === "uploading").length;
-  const publishing = folderShares.filter(folder => folder.status === "sharing").length;
-  const shareFailures = folderShares.filter(folder => folder.status === "error").length;
-  const active = uploading + publishing;
+  const list = useTaskList(jobs, uploadDescription, uploadGroup);
+  const [confirm, setConfirm] = useState<{ action: "cancel" | "delete" | "clear"; ids: string[] } | null>(null);
+  const active = jobs.filter(job => uploadGroup(job) === "active").length;
+  const done = jobs.filter(job => job.status === "done").length;
   const failed = jobs.filter(job => job.status === "error").length;
-  const canceledCount = jobs.filter(job => job.status === "canceled").length;
-  const completed = jobs.filter(job => job.status === "done").length;
-  const allCanceled = jobs.length > 0 && canceledCount === jobs.length;
-  // 总进度按字节计算，大文件不会被一堆小文件的“已完成”冲淡。
-  const counted = jobs.filter(job => job.status !== "canceled");
-  const totalBytes = counted.reduce((sum, job) => sum + job.file.size, 0);
-  const sentBytes = counted.reduce((sum, job) => sum + job.file.size * (job.status === "done" ? 1 : job.status === "error" ? 0 : job.percent / 100), 0);
-  const overall = totalBytes ? sentBytes / totalBytes * 100 : counted.length ? counted.filter(job => job.status === "done").length / counted.length * 100 : 0;
-  const state: TrayState = active ? "active" : failed || shareFailures ? "error" : allCanceled ? "idle" : "done";
-  const title = uploading ? `正在上传 ${uploading} 个文件` : publishing ? "正在公开文件夹" : failed ? `${failed} 个文件上传失败` : shareFailures ? "文件夹公开失败" : allCanceled ? "上传已取消" : "上传完成";
-  const subtitle = uploading ? `${formatBytes(sentBytes)} / ${formatBytes(totalBytes)} · ${Math.floor(overall)}%`
-    : publishing ? "文件已上传，正在生成文件夹分享链接" : failed ? `${completed} 个已完成，可逐个重试` : shareFailures ? "重试公开即可，无需重新上传文件" : allCanceled ? `${canceledCount} 个文件` : jobs.length ? `${completed} 个文件 · ${formatBytes(totalBytes)}${canceledCount ? ` · ${canceledCount} 个已取消` : ""}` : `${folderShares.filter(folder => folder.status === "done").length} 个文件夹已公开`;
-  return (
-    <aside className={`upload-tray is-${state}${collapsed ? " is-collapsed" : ""}`} aria-label="上传进度" aria-live="polite">
-      <header>
-        <TrayRing state={state} percent={overall} icon="upload" />
-        <div className="tray-heading"><strong>{title}</strong><small>{subtitle}</small></div>
-        <IconButton icon="chevronDown" size="sm" label={collapsed ? "展开" : "收起"} onClick={() => setCollapsed(value => !value)} />
-        {!active && <IconButton icon="x" size="sm" label="关闭上传列表" onClick={queue.clear} />}
-      </header>
-      {uploading > 0 && <TrayOverall percent={overall} />}
-      {!collapsed && <>
-        <ul>
-          {folderShares.map(folder => <li key={folder.id} className={`tray-item is-${folder.status}`}>
-            <span className="tray-icon"><FileTile kind="folder" /></span>
-            <div className="tray-job">
-              <span className="tray-name" title={api.privatePathLabel(folder.path)}><span>{baseName(folder.path)}</span>{folder.status === "done" && <Icon name="globe" size={13} className="tray-public" />}</span>
-              <small className={folder.status === "error" ? "tone-danger" : "muted"}>{folder.status === "waiting" ? `${folder.uploaded} / ${folder.total} 个文件，全部完成后公开` : folder.status === "sharing" ? "正在生成文件夹分享链接…" : folder.status === "done" ? "文件夹已公开" : folder.status === "canceled" ? "上传未完成，已取消公开" : folder.error}</small>
-            </div>
-            <span className="tray-right">
-              {folder.status === "sharing" && <span className="spinner" aria-label="正在公开文件夹" />}
-              {folder.status === "error" && <Button size="sm" icon="refresh" aria-label={`重试公开文件夹 ${baseName(folder.path)}`} onClick={() => queue.retryFolder(folder.id)}>重试公开</Button>}
-              {folder.status === "done" && folder.result?.public_token && <IconButton icon="copy" size="sm" label={`复制文件夹 ${baseName(folder.path)} 的分享链接`} onClick={() => void copyText(api.publicLinks(folder.result!.public_token!, baseName(folder.path)).page, "文件夹分享链接已复制")} />}
-            </span>
-          </li>)}
-          {jobs.map(job => {
-            const running = job.status === "uploading" || job.status === "queued";
-            const detail = job.status === "queued" ? `等待上传 · ${formatBytes(job.file.size)}`
-              : job.status === "uploading" ? job.phase === "hashing" ? `检查是否可秒传 · ${Math.round(job.percent)}%` : job.phase === "waiting" ? "等待相同文件上传完成后秒传" : job.percent >= 100 ? "正在保存…" : `${formatBytes(job.file.size * job.percent / 100)} / ${formatBytes(job.file.size)}`
-              : job.status === "done" ? `${formatBytes(job.file.size)}${job.instant ? " · 秒传" : job.resumed ? " · 续传完成" : ""}` : job.status === "canceled" ? "已取消" : job.error;
-            return <li key={job.id} className={`tray-item is-${job.status}`}>
-              <span className="tray-icon"><FileTile kind={getFileKind(job.file.type, job.file.name)} />
-                {(job.status === "done" || job.status === "error") && <span className="tray-badge"><Icon name={job.status === "done" ? "check" : "alert"} size={10} /></span>}</span>
-              <div className="tray-job">
-                <span className="tray-name" title={api.privatePathLabel(job.path)}><span>{job.file.name}</span>{job.isPublic && <Icon name="globe" size={13} className="tray-public" />}{job.resumed && running && <Badge tone="accent">续传</Badge>}</span>
-                <small className={job.status === "error" ? "tone-danger" : "muted"}>{detail}</small>
-                {running && <TrayBar percent={job.status === "queued" ? 0 : job.percent} paused={job.status === "queued"} label={`${job.file.name} 上传进度`} />}
-              </div>
-              <span className="tray-right">
-                {job.status === "uploading" && !job.phase && job.percent < 100 && <span className="tray-percent">{Math.floor(job.percent)}%</span>}
-                {running && <IconButton className="tray-cancel" icon="x" size="sm" label={`取消上传 ${job.file.name}`} onClick={() => queue.cancel(job.id)} />}
-                {job.status === "error" && <Button size="sm" icon="refresh" aria-label={`重试上传 ${job.file.name}`} onClick={() => queue.retry(job.id)}>重试</Button>}
-                {job.status === "done" && job.result?.public_token && <IconButton icon="copy" size="sm" label="复制分享链接" onClick={() => void copyText(api.publicLinks(job.result!.public_token!, job.file.name).page, "分享链接已复制")} />}
-              </span>
-            </li>;
-          })}
-        </ul>
-        <TrayFoot summary={[uploading ? `${uploading} 个进行中` : "", completed ? `${completed} 个已完成` : "", failed ? `${failed} 个失败` : "",
-          canceledCount ? `${canceledCount} 个已取消` : ""].filter(Boolean).join(" · ") || title}>
-          {active > 0 && <TrayCancelAll count={uploading} noun="上传" onConfirm={queue.cancelAll} />}
-        </TrayFoot>
-      </>}
-    </aside>
-  );
+  const runningChosen = list.chosen.filter(job => uploadGroup(job) === "active");
+  const retryChosen = list.chosen.filter(job => job.status === "error" || job.status === "canceled");
+  const sent = jobs.reduce((sum, job) => sum + job.file.size * (job.status === "done" ? 1 : job.phase ? 0 : job.percent / 100), 0);
+  const total = jobs.reduce((sum, job) => sum + job.file.size, 0);
+  return <Modal title="上传任务" icon="upload" size="xl" className={`task-window${jobs.some(job => api.isPrivatePath(job.path)) ? " private-dialog" : ""}`} onClose={onClose}
+    description="上传在当前网页中继续；关闭窗口后可从系统托盘重新打开。" initialFocus="dialog"
+    footer={<><span className="task-window-footnote">{formatBytes(sent)} / {formatBytes(total)}</span><Button onClick={onClose}>隐藏窗口</Button></>}>
+    <div className="task-summary" aria-live="polite"><span><i className={active ? "is-working" : ""} />{active} 个进行中</span><span>{done} 个已完成</span>{failed > 0 && <span className="tone-danger">{failed} 个失败</span>}</div>
+    <TaskListControls list={list} noun="上传" pausedLabel="已取消" menu={<Menu label="清理上传记录" items={[
+      { label: "清理已结束记录", icon: "trash", danger: true, disabled: !jobs.some(job => uploadGroup(job) !== "active") && !folderShares.some(folder => ["done", "error", "canceled"].includes(folder.status)), onSelect: () => setConfirm({ action: "clear", ids: [] }) },
+    ]} />} actions={<>
+      {runningChosen.length > 0 && <Button size="sm" icon="x" onClick={() => setConfirm({ action: "cancel", ids: runningChosen.map(job => job.id) })}>取消上传</Button>}
+      {retryChosen.length > 0 && <Button size="sm" icon="refresh" onClick={() => { retryChosen.forEach(job => queue.retry(job.id)); list.clearSelection(); }}>重新上传</Button>}
+      {list.chosen.length > 0 && <Button size="sm" variant="danger" icon="trash" onClick={() => setConfirm({ action: "delete", ids: list.chosen.map(job => job.id) })}>删除记录</Button>}
+    </>} />
+    {!list.visible.length ? <EmptyState compact icon="upload" title={jobs.length ? "没有符合条件的上传" : "还没有上传任务"} description={jobs.length ? "试试其他名称或任务状态。" : "在文件页选择文件或文件夹上传，进度会显示在这里。"} />
+      : <ul className="task-list" aria-label="上传任务列表">{list.visible.map(job => {
+        const running = uploadGroup(job) === "active";
+        const detail = job.status === "queued" ? "排队中"
+          : job.status === "uploading" ? job.phase === "hashing" ? `检查是否可秒传 · ${Math.round(job.percent)}%` : job.phase === "waiting" ? "等待相同文件上传完成后秒传" : job.percent >= 100 ? "正在保存…" : `${formatBytes(job.file.size * job.percent / 100)} / ${formatBytes(job.file.size)}`
+            : job.status === "done" ? `${formatBytes(job.file.size)}${job.instant ? " · 秒传完成" : job.resumed ? " · 续传完成" : " · 已完成"}` : job.status === "canceled" ? "已取消，可重新上传" : job.error;
+        return <li key={job.id} className={`task-row is-${job.status}${list.selected.has(job.id) ? " is-selected" : ""}`}>
+          <Checkbox checked={list.selected.has(job.id)} label={`选择 ${job.file.name}`} onChange={checked => list.toggle(job.id, checked)} />
+          <FileTile kind={getFileKind(job.file.type, job.file.name)} />
+          <div className="task-row-content"><strong title={job.file.name}>{job.file.name}{job.isPublic && <Icon name="globe" size={13} />}{job.resumed && running && <Badge tone="accent">续传</Badge>}</strong>
+            <small className="task-row-path" title={api.privatePathLabel(job.path)}>{api.privatePathLabel(job.path)}</small>
+            <small className={job.status === "error" ? "tone-danger" : "muted"}>{detail}</small>
+            {running && <TrayBar percent={job.status === "queued" ? 0 : job.percent} paused={job.status === "queued"} label={`${job.file.name} 上传进度`} />}
+          </div>
+          <div className="task-row-actions">
+            {running ? <IconButton icon="x" size="sm" label={`取消上传 ${job.file.name}`} onClick={() => setConfirm({ action: "cancel", ids: [job.id] })} />
+              : job.status !== "done" ? <IconButton icon="refresh" size="sm" label={`重新上传 ${job.file.name}`} onClick={() => queue.retry(job.id)} />
+                : job.result?.public_token ? <IconButton icon="copy" size="sm" label={`复制 ${job.file.name} 的分享链接`} onClick={() => void copyText(api.publicLinks(job.result!.public_token!, job.file.name).page, "分享链接已复制")} /> : <Icon name="checkCircle" size={18} />}
+            <Menu label={`${job.file.name} 的更多操作`} items={[{ label: "删除上传记录", icon: "trash", danger: true, onSelect: () => setConfirm({ action: "delete", ids: [job.id] }) }]} />
+          </div>
+        </li>;
+      })}</ul>}
+    <TaskListFooter list={list} />
+    {folderShares.length > 0 && <details className="task-folder-shares"><summary>文件夹分享 · {folderShares.length}</summary><ul className="task-list">{folderShares.map(folder => <li key={folder.id} className="task-row">
+      <FileTile kind="folder" /><div className="task-row-content"><strong>{baseName(folder.path)}</strong><small className={folder.status === "error" ? "tone-danger" : "muted"}>{folder.status === "waiting" ? `${folder.uploaded} / ${folder.total} 个文件，全部完成后公开` : folder.status === "sharing" ? "正在生成分享链接…" : folder.status === "done" ? "文件夹已公开" : folder.status === "canceled" ? "上传未完成，已取消公开" : folder.error}</small></div>
+      {folder.status === "sharing" && <span className="spinner" aria-label="正在公开文件夹" />}
+      {folder.status === "error" && <Button size="sm" icon="refresh" onClick={() => queue.retryFolder(folder.id)}>重试公开</Button>}
+      {folder.result?.public_token && <IconButton icon="copy" label={`复制 ${baseName(folder.path)} 的分享链接`} onClick={() => void copyText(api.publicLinks(folder.result!.public_token!, baseName(folder.path)).page, "分享链接已复制")} />}
+    </li>)}</ul></details>}
+    {confirm && <ConfirmDialog title={confirm.action === "clear" ? "清理已结束的上传记录？" : `${confirm.action === "cancel" ? "取消" : "删除"} ${confirm.ids.length} 个上传任务？`}
+      description={confirm.action === "cancel" ? "所选上传会取消，未提交的分段将被清理。已上传成功的文件会保留。" : confirm.action === "clear" ? "移除已完成、失败和取消的记录，正在上传的任务和已保存的文件会保留。" : "移除所选记录；正在上传的任务会先取消，已保存的文件会保留。"}
+      confirmLabel={confirm.action === "cancel" ? "取消上传" : confirm.action === "clear" ? "清理记录" : "删除记录"} onClose={() => setConfirm(null)}
+      onConfirm={() => { if (confirm.action === "cancel") confirm.ids.forEach(queue.cancel); else if (confirm.action === "delete") queue.remove(confirm.ids); else queue.clear(); setConfirm(null); list.clearSelection(); }} />}
+  </Modal>;
 }

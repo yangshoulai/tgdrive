@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { BRAND, SITE } from "../brand";
 import * as api from "../api";
+import { CurveChart } from "../curve-chart";
 
-import { Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, formatDateTime, useDocumentTitle, type IconName } from "../ui";
+import { Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, useDocumentTitle, type IconName } from "../ui";
 
 import type { AdminModule } from "../admin";
 
@@ -83,24 +84,15 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
 }
 
 function TrafficChart({ metrics }: { metrics?: api.TrafficMetrics }) {
-  const [selected, setSelected] = useState<number | null>(null);
   const points = metrics?.recent.slice(-12) ?? [];
-  const max = Math.max(1, ...points.flatMap(point => [point.in_bytes, point.out_bytes]));
-  const current = points.find(point => point.at === selected) ?? points.at(-1);
   const time = (at: number) => new Date(at * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
   return <div className="traffic-chart" aria-label="近一小时上传下载流量图表">
     <div className="traffic-legend"><span><i className="traffic-dot traffic-in" />上传 {formatBytes(points.reduce((sum, point) => sum + point.in_bytes, 0))}</span><span><i className="traffic-dot traffic-out" />下载 {formatBytes(points.reduce((sum, point) => sum + point.out_bytes, 0))}</span></div>
-    {points.length ? <>
-      <div className="traffic-plot"><div className="traffic-axis"><span>{formatBytes(max)}</span><span>{formatBytes(max / 2)}</span><span>0 B</span></div><div className="traffic-bars">
-        {points.map(point => <button type="button" className={`traffic-bar${current?.at === point.at ? " is-active" : ""}`} key={point.at}
-          title={`${formatDateTime(point.at)}：上传 ${formatBytes(point.in_bytes)}，下载 ${formatBytes(point.out_bytes)}`}
-          aria-label={`${time(point.at)}，上传 ${formatBytes(point.in_bytes)}，下载 ${formatBytes(point.out_bytes)}`} onMouseEnter={() => setSelected(point.at)} onFocus={() => setSelected(point.at)} onClick={() => setSelected(point.at)}>
-          <i className="traffic-in" style={{ height: `${point.in_bytes / max * 100}%` }} /><i className="traffic-out" style={{ height: `${point.out_bytes / max * 100}%` }} />
-        </button>)}
-      </div></div>
-      <div className="traffic-times"><span>{time(points[0].at)}</span><span>{time(points[Math.floor((points.length - 1) / 2)].at)}</span><span>{time(points.at(-1)!.at)}</span></div>
-      <p className="traffic-readout">{current && <>{time(current.at)}：上传 {formatBytes(current.in_bytes)}，下载 {formatBytes(current.out_bytes)}</>}</p>
-    </> : <p className="muted">暂无流量数据</p>}
+    {points.length ? <CurveChart label="近一小时上传下载流量曲线" selectionLabel="选择流量时段" formatValue={formatBytes}
+      colors={["var(--accent)", "var(--chart-out)"]}
+      points={points.map(point => ({ id: point.at, tick: time(point.at), values: [point.in_bytes, point.out_bytes],
+        description: `${time(point.at)}：上传 ${formatBytes(point.in_bytes)}，下载 ${formatBytes(point.out_bytes)}` }))} />
+      : <p className="muted">暂无流量数据</p>}
   </div>;
 }
 

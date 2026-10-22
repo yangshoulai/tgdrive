@@ -51,15 +51,15 @@ function openSource(task: api.DownloadTask) {
 }
 export const seconds = (value: number) => value >= 3600 ? `${Math.ceil(value / 3600)} 小时` : value >= 60 ? `${Math.ceil(value / 60)} 分钟` : `${Math.ceil(value)} 秒`;
 
-export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChanged: () => void; onOpenFolder: (prefix: string, privateSpace?: boolean) => void; onCreated?: () => void }) {
-  useDocumentTitle(`下载任务 · ${BRAND}`);
+export function DownloadsView({ onChanged, onOpenFolder, onCreated, embedded = false }: { onChanged: () => void; onOpenFolder: (prefix: string, privateSpace?: boolean) => void; onCreated?: () => void; embedded?: boolean }) {
+  useDocumentTitle(embedded ? null : `下载任务 · ${BRAND}`);
   const [filter, setFilter] = useState("");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   useEffect(() => { const timer = window.setTimeout(() => setQuery(search.trim()), 300); return () => window.clearTimeout(timer); }, [search]);
   const [newTask, setNewTask] = useState(false);
   // 资源抓取脚本选择私密空间等需要网页确认的目标时，把解析结果放在地址片段里打开本页。
-  const [imported, setImported] = useState<api.DownloadImport | null>(api.takeDownloadImport);
+  const [imported, setImported] = useState<api.DownloadImport | null>(() => embedded ? null : api.takeDownloadImport());
   const [edit, setEdit] = useState<api.DownloadTask | null>(null);
   const [confirm, setConfirm] = useState<{ task: api.DownloadTask; action: "stop" | "resume" | "restart" | "delete" } | null>(null);
   const [busy, setBusy] = useState(new Set<number>());
@@ -114,6 +114,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     setBulkBusy(true);
     try {
       const { done, skipped } = await api.batchDownloads(action, chosen.map(task => task.id), chosen.some(task => task.private));
+      window.dispatchEvent(new Event("tessera:downloads-changed"));
       setBulk(null); setSelected(new Set());
       const verb = action === "stop" ? "停止" : action === "delete" ? "删除" : "加入下载队列";
       const note = skipped ? `，${skipped} 个已跳过${action === "resume" ? "（POST 任务需逐个确认）" : ""}` : "";
@@ -134,6 +135,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     setBusy(current => new Set(current).add(task.id));
     try {
       await api.controlDownload(task.id, action, undefined, task.private);
+      window.dispatchEvent(new Event("tessera:downloads-changed"));
       setConfirm(current => current?.task.id === task.id && current.action === action ? null : current);
       toast.success(action === "stop" ? "任务已停止" : action === "delete" ? "任务已删除" : "任务已加入下载队列");
       await pagination.reload();
@@ -143,15 +145,16 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   async function clear(status: "completed" | "failed") {
     try {
       const { removed } = await api.clearDownloads(status);
+      window.dispatchEvent(new Event("tessera:downloads-changed"));
       setClearing(null);
       toast.success(removed ? `已清除 ${removed} 个任务` : "没有需要清除的任务");
       await pagination.reload();
     } catch (reason) { toast.error(api.errorMessage(reason, "清除失败，请稍后重试")); }
   }
-  const completed = () => { setNewTask(false); setEdit(null); void pagination.reload(); onChanged(); onCreated?.(); };
+  const completed = () => { setNewTask(false); setEdit(null); void pagination.reload(); onChanged(); onCreated?.(); window.dispatchEvent(new Event("tessera:downloads-changed")); };
+  const actions = <><Button icon="refresh" onClick={() => void pagination.reload()} disabled={pagination.loading}>刷新</Button><Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button></>;
   return <>
-    <PageHeader title="下载任务" description="交给服务器下载，关闭页面后继续保存到你的文件空间。"
-      actions={<><Button icon="refresh" onClick={() => void pagination.reload()} disabled={pagination.loading}>刷新</Button><Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button></>} />
+    {embedded ? <div className="task-download-actions">{actions}</div> : <PageHeader title="下载任务" description="交给服务器下载，关闭页面后继续保存到你的文件空间。" actions={actions} />}
     <div className="toolbar download-search"><SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索文件名、保存路径或来源域名" label="搜索下载任务" /></div>
     <div className="download-controls">
       {chosen.length > 0 && <div className="toolbar selection-bar download-selection" role="toolbar" aria-label="批量操作">

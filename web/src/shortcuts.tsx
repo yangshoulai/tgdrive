@@ -36,7 +36,7 @@ export function ShortcutsDialog({ area, kind, privateSpace = false, onClose }: {
     [mod("J"), "打开／关闭文件助手"], [mod("Shift+O"), "新对话；私密对话会清除当前内容"],
     ["H", "切换／聚焦对话历史（普通对话）"], ["/", "聚焦消息输入框"],
     ["Enter", "发送消息；列表、代码块内继续编辑"], [mod("Enter"), "直接发送消息"], [shortcutLabel("Shift+Enter"), "输入换行"],
-    ["@", "引用文件或文件夹"], ["Esc", "先收起候选或菜单，再停止生成；空闲时关闭抽屉"], ["?", "打开快捷键说明"],
+    ["@", "引用文件或文件夹"], ["Esc", "先收起候选、菜单或展开的计划，再隐藏抽屉；任务继续执行"], ["?", "打开快捷键说明"],
   ];
   return <Modal title="键盘快捷键" icon="keyboard" size="md" className={`shortcuts-dialog${area === "assistant" ? " assistant-dialog" : ""}`} onClose={onClose}
     footer={<Button onClick={onClose}>知道了</Button>}>

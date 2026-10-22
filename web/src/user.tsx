@@ -12,15 +12,15 @@ import { Notice, Button, ButtonLink, Icon, Progress, formatBytes, toast, usageTo
 
 import { FilesView } from "./user/files";
 import { PrivateSpaceView } from "./user/private";
-import { UploadTray, useUploadQueue } from "./user/uploads";
+import { useUploadQueue } from "./user/uploads";
 
 import { SharedView } from "./user/shared";
 import { TrashView } from "./user/trash";
 import { DownloadsView } from "./user/downloads";
-import { DownloadTray } from "./user/download-tray";
 import { PreviewHost } from "./user/preview-host";
-import { CacheTasksProvider, CacheTray } from "./user/cache";
-import { AssistantDock, AssistantDrawer, useAssistantConfig, useAssistantShortcut } from "./user/assistant";
+import { CacheTasksProvider } from "./user/cache";
+import { AssistantDrawer, useAssistantConfig, useAssistantShortcut, type AssistantDockStatus } from "./user/assistant";
+import { TaskCenter, type TaskWindow } from "./user/task-center";
 import { takePageImportRequest, usePageImport } from "./user/page-import";
 import { PrivateSessionProvider } from "./user/private-session";
 import { EmailDialog, UserSettingsPage } from "./user/account";
@@ -243,8 +243,11 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const assistant = useAssistantConfig(assistantReady);
   const assistantAvailable = Boolean(assistant.config?.available);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [taskWindow, setTaskWindow] = useState<TaskWindow | null>(null);
+  const [assistantStatus, setAssistantStatus] = useState<AssistantDockStatus>({ running: false, pending: 0, private: false });
   const assistantPage = location.section === "assistantPage";
-  const toggleAssistant = useCallback(() => { if (!assistantPage) setAssistantOpen(value => !value); }, [assistantPage]);
+  const toggleAssistant = useCallback(() => { if (!assistantPage) { setTaskWindow(null); setAssistantOpen(value => !value); } }, [assistantPage]);
+  const openCacheTasks = useCallback(() => { setAssistantOpen(false); setTaskWindow("cache"); }, []);
   useAssistantShortcut(assistantAvailable, toggleAssistant);
   useEffect(() => { if (!assistantAvailable) setAssistantOpen(false); }, [assistantAvailable]);
   useEffect(() => { if (assistantPage) setAssistantOpen(false); }, [assistantPage]);
@@ -255,12 +258,14 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const filesChanged = useCallback(() => { setUploadRevision(value => value + 1); setDownloadRevision(value => value + 1); refreshUsage(); }, [refreshUsage]);
   const unlocked = () => { refreshStatus(); refreshUsage(); };
   const section = location.section;
-  // 文件空间可用时才保留预览和下载托盘；系统锁定、服务未解锁时一并关闭。
+  // 文件空间可用时才保留预览和系统托盘；系统锁定、服务未解锁时一并关闭。
   const workspaceReady = !locked && !(!isAdmin && session.unlocked === false) && !(isAdmin && status === null);
+  useEffect(() => { if (!workspaceReady) setTaskWindow(null); }, [workspaceReady]);
   let content: ReactNode;
   if (section === "assistantPage") {
     content = !assistantAvailable || !assistant.config ? (assistant.config ? <AccessDenied /> : <FullPageLoading label="正在读取文件助手" />)
       : <AssistantDrawer mode="page" open config={assistant.config} onClose={() => navigate("files")} onConfigChanged={assistant.refresh}
+          onStatus={setAssistantStatus}
           location={{ view: "assistant", prefix: "" }} initialConversation={location.prefix || null} onFilesChanged={filesChanged}
           pageImport={pageImport} onPageImportDone={clearPageImport}
           onConversationChange={id => { if ((id ?? "") !== (new URLSearchParams(window.location.search).get("c") ?? "")) window.history.replaceState(null, "", sectionUrl("assistantPage", id ?? "")); }} />;
@@ -298,9 +303,8 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       { key: "private", label: "私密空间", icon: "lock" },
       { key: "trash", label: "回收站", icon: "trash" },
     ] },
-    { label: "分享与传输", workspace: personalWorkspace, items: [
+    { label: "分享", workspace: personalWorkspace, items: [
       { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
-      { key: "downloads", label: "下载任务", icon: "download" },
     ] },
     ...(isAdmin ? adminGroups() : []),
   ];
@@ -329,17 +333,14 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },
       ] }}>
       <PrivateSessionProvider enabled={workspaceReady}>
-      <CacheTasksProvider enabled={workspaceReady} privateAllowed={section === "private"}>
+      <CacheTasksProvider enabled={workspaceReady} privateAllowed={section === "private"} onOpenTasks={openCacheTasks}>
       <PreviewHost enabled={workspaceReady} privateAllowed={section === "private"}>
         {content}
-      <div className="tray-stack">
-        {workspaceReady && <DownloadTray hidden={section === "downloads"} revision={downloadRevision} onOpenTasks={() => navigate("downloads")}
-          onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCompleted={refreshUsage} />}
-        <UploadTray queue={uploads} />
-        <CacheTray />
-      </div>
+      <TaskCenter enabled={workspaceReady} uploads={uploads} activeWindow={taskWindow} onWindowChange={setTaskWindow} downloadRevision={downloadRevision} onChanged={refreshUsage}
+        onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCacheSettings={() => navigate("account", "cache")}
+        assistantAvailable={assistantAvailable} assistantOpen={assistantOpen} assistantStatus={assistantStatus} onOpenAssistant={toggleAssistant} />
       {/* 统一对话（§37）：只有一个助手，涉及私密空间的对话在锁定时需要解锁。 */}
-      {assistantAvailable && assistant.config && !assistantPage && <AssistantDock open={assistantOpen} onOpen={toggleAssistant} config={assistant.config} onClose={() => setAssistantOpen(false)}
+      {assistantAvailable && assistant.config && !assistantPage && <AssistantDrawer open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)} onStatus={setAssistantStatus}
         onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" || section === "private" ? location.prefix : "" }}
         onFilesChanged={filesChanged} pageImport={pageImport} onPageImportDone={clearPageImport} onNavigate={(view, prefix) => navigate(view, prefix ?? "")}
         onOpenPage={id => { setAssistantOpen(false); navigate("assistantPage", id ?? ""); }} />}

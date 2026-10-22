@@ -1,5 +1,5 @@
 /** 图片查看器：深色画布与模糊背景，滚轮／双指／双击缩放，拖动平移，旋转，悬浮工具栏，左右切换与底部缩略图条。
- * 先显示封面图占位，原图解密完成后淡入替换；切换图片时有轻微的淡入缩放。 */
+ * 先显示封面图占位，原图解密完成后替换；新图就绪前保留上一张已解码图片的虚化背景。 */
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import type { FileItem } from "./api";
 import type { PreviewNav, PreviewStrip } from "./preview-playlist";
@@ -17,16 +17,34 @@ function ToolButton({ icon, label, onClick, disabled }: { icon: IconName; label:
   return <button type="button" className="image-tool" aria-label={label} title={label} disabled={disabled} onClick={onClick}><Icon name={icon} size={18} /></button>;
 }
 
+/** 复用已经读取的像素生成小背景，避免 CSS 背景再次读取原图；快照只在当前查看器中保留。 */
+function backdropOf(image: HTMLImageElement): string | null {
+  try {
+    const canvas = document.createElement("canvas"), scale = Math.min(1, 64 / Math.max(image.naturalWidth, image.naturalHeight));
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale)); canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", .7);
+  } catch { return null; } // 跨域图片无法读取像素时保留已有背景，不为装饰重新请求文件。
+}
+
 export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, nav, strip }: {
   url: string; name: string; poster?: string; onLoad?: (image: HTMLImageElement) => void; onError: () => void;
   onImageSize?: (width: number, height: number, original: boolean) => void; nav?: PreviewNav; strip?: PreviewStrip;
 }) {
   const root = useRef<HTMLDivElement>(null), canvas = useRef<HTMLDivElement>(null);
-  const [loaded, setLoaded] = useState(false);
-  // poster：尺寸来自预览封面而不是原图（原图加载前的占位）。
-  const [natural, setNatural] = useState<(Size & { poster?: boolean }) | null>(null);
+  const original = useRef<HTMLImageElement>(null), cover = useRef<HTMLImageElement>(null);
+  const delivered = useRef(new WeakSet<HTMLImageElement>());
+  // 就绪状态绑定资源地址，避免旧 load 事件或切换后的 effect 把缓存图片重新置为未加载。
+  const [ready, setReady] = useState<{ url: string; image: HTMLImageElement; size: Size; warm: boolean } | null>(null);
+  const [coverReady, setCoverReady] = useState<{ url: string; image: HTMLImageElement; size: Size } | null>(null);
+  const loaded = ready?.url === url && ready.image === original.current, warm = loaded && ready.warm;
+  const natural: (Size & { poster?: boolean }) | null = loaded ? ready.size : coverReady?.url === url && coverReady.image === cover.current ? { ...coverReady.size, poster: true } : null;
+  const [backdrops, setBackdrops] = useState<string[]>([]);
   // 原图淡入结束前保留封面在下面，避免切换瞬间露出背景或跳动。
-  const [posterDone, setPosterDone] = useState(false);
+  const [faded, setFaded] = useState<string | null>(null);
+  const posterDone = loaded && (warm || faded === url);
   const [box, setBox] = useState<Size>({ width: 0, height: 0 });
   const [rotation, setRotation] = useState(0);
   const [view, setView] = useState<View>(FIT);
@@ -37,12 +55,36 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ x: number; y: number; view: View; distance?: number; moved: boolean; startX: number; startY: number } | null>(null);
 
-  useEffect(() => { setLoaded(false); setNatural(null); setPosterDone(false); setView(FIT); setRotation(0); }, [url]);
+  function rememberBackdrop(image: HTMLImageElement) {
+    const snapshot = backdropOf(image);
+    if (snapshot) setBackdrops(current => current.at(-1) === snapshot ? current : [...current.slice(-1), snapshot]);
+  }
+  function imageLoaded(image: HTMLImageElement, fromMemory = false) {
+    if (image !== original.current || !image.naturalWidth || delivered.current.has(image)) return;
+    delivered.current.add(image);
+    setReady({ url, image, size: { width: image.naturalWidth, height: image.naturalHeight }, warm: fromMemory });
+    rememberBackdrop(image);
+    onImageSize?.(image.naturalWidth, image.naturalHeight, true); onLoad?.(image);
+  }
+  function coverLoaded(image: HTMLImageElement) {
+    if (image !== cover.current || !image.naturalWidth || delivered.current.has(image) || (original.current && delivered.current.has(original.current))) return;
+    delivered.current.add(image);
+    setCoverReady({ url, image, size: { width: image.naturalWidth, height: image.naturalHeight } });
+    rememberBackdrop(image);
+    onImageSize?.(image.naturalWidth, image.naturalHeight, false);
+  }
+  useLayoutEffect(() => { setView(FIT); setRotation(0); }, [url]);
+  useLayoutEffect(() => {
+    const image = original.current, poster = cover.current;
+    // 已在浏览器内存中解码的图片，在首帧绘制前直接就绪，不再先隐藏再淡入。
+    if (image?.complete && image.naturalWidth) imageLoaded(image, true);
+    else if (poster?.complete && poster.naturalWidth) coverLoaded(poster);
+  }, [url, poster]);
   useEffect(() => {
     if (!loaded) return;
-    const timer = window.setTimeout(() => setPosterDone(true), 450);
+    const timer = window.setTimeout(() => setFaded(url), 450);
     return () => window.clearTimeout(timer);
-  }, [loaded]);
+  }, [loaded, url]);
   useLayoutEffect(() => {
     const node = canvas.current;
     if (!node) return;
@@ -191,16 +233,16 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
   const transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale}) rotate(${rotation}deg)`;
   const sized = display ? { width: display.width, height: display.height } : undefined;
   const showStrip = Boolean(strip && strip.items.length > 1);
-  return <div ref={root} className={`image-viewer${idle && !dragging ? " is-idle" : ""}${loaded ? " is-loaded" : ""}${poster ? " has-poster" : ""}${view.scale > 1 ? " is-zoomed" : ""}${dragging ? " is-dragging" : ""}`}
+  return <div ref={root} className={`image-viewer${idle && !dragging ? " is-idle" : ""}${loaded ? " is-loaded" : ""}${warm ? " is-warm" : ""}${poster ? " has-poster" : ""}${view.scale > 1 ? " is-zoomed" : ""}${dragging ? " is-dragging" : ""}`}
     onPointerMove={wake}>
-    <div className="image-backdrop" aria-hidden="true" style={poster ? { backgroundImage: `url("${poster}")` } as CSSProperties : undefined} />
+    <div className="image-backdrop" aria-hidden="true">{backdrops.map(snapshot => <div key={snapshot} className="image-backdrop-layer" style={{ backgroundImage: `url("${snapshot}")` } as CSSProperties} />)}</div>
     <div ref={canvas} className="image-canvas" onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}
       onDoubleClick={event => { if (view.scale > 1) setView(FIT); else zoomAt(Math.max(2.5, oneToOne), relative(event.clientX, event.clientY)); }}>
-      {!posterDone && poster && <img className="image-poster" src={poster} alt="" aria-hidden="true" draggable={false} style={sized}
-        onLoad={event => { const image = event.currentTarget; if (!natural) setNatural({ width: image.naturalWidth, height: image.naturalHeight, poster: true }); onImageSize?.(image.naturalWidth, image.naturalHeight, false); }} />}
-      <img key={url} className="image-full" src={url} alt={name} draggable={false} style={{ ...sized, transform }}
-        onLoad={event => { const image = event.currentTarget; setNatural({ width: image.naturalWidth, height: image.naturalHeight }); setLoaded(true); onImageSize?.(image.naturalWidth, image.naturalHeight, true); onLoad?.(image); }}
-        onError={onError} />
+      {!posterDone && poster && <img ref={cover} key={`${url}:${poster}`} className="image-poster" src={poster} alt="" aria-hidden="true" draggable={false} style={sized}
+        onLoad={event => coverLoaded(event.currentTarget)} />}
+      <img ref={original} key={url} className="image-full" src={url} alt={name} draggable={false} style={{ ...sized, transform }}
+        onLoad={event => imageLoaded(event.currentTarget)}
+        onError={event => { if (event.currentTarget === original.current) onError(); }} />
       {!loaded && <span className="image-loading" role="status"><span className="spinner" />{poster ? "正在加载原图…" : "正在加载…"}</span>}
     </div>
     {nav && nav.count > 1 && <>

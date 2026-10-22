@@ -3,12 +3,13 @@ import { useDirectory, useRenderLimit, mergeFilePages, reconcileFilePage } from 
 import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
+import type { CacheFile } from "../cache-client";
 
 import { FolderStatsDialog } from "./folder-stats";
 import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type EntryFilter, type FileSort } from "../files";
 import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator, videoFrameUsable } from "../thumbnails";
 
-import { Notice, ButtonLink, Badge, Button, Checkbox, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
+import { Notice, ButtonLink, Badge, Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 import { ShortcutsDialog } from "../shortcuts";
 
 import { UploadDialog, type UploadQueue } from "./uploads";
@@ -59,6 +60,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [context, setContext] = useState<{ x: number; y: number; key: string } | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [statsFor, setStatsFor] = useState<{ prefix: string; title: string } | null>(null);
+  const [folderCache, setFolderCache] = useState<{ prefixes: string[]; files: CacheFile[] } | null>(null);
   const surface = useRef<HTMLElement>(null);
   const dragKeys = useRef<string[]>([]);
   const [folderOpen, setFolderOpen] = useState(false);
@@ -398,6 +400,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     return [
       { label: "打开", icon: "folder", shortcut: "↵", onSelect: () => onOpenFolder(key) },
       { label: "下载（ZIP）", icon: "download", shortcut: "D", onSelect: () => undefined, href: api.archiveUrl([key]) },
+      ...(canCacheFolders ? [{ label: "缓存到本机", icon: "monitor" as const, onSelect: () => setFolderCache({ prefixes: [key], files: [] }) }] : []),
       { label: "目录统计", icon: "chart", onSelect: () => setStatsFor({ prefix: key, title: baseName(key) }) },
       ...(!privateSpace ? [{ label: shared ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(folderItem(key)) }] : []),
       ...(shared ? [{ label: "打开分享页", icon: "external" as const, onSelect: () => window.open(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "_blank", "noreferrer") }] : []),
@@ -418,6 +421,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   // 列表只显示手动缓存的状态（索引由 CacheTasksProvider 统一读取），不逐个文件查询本机缓存。
   const cacheQueue = useCacheQueue();
   const selectionCache = cacheSelection(cacheQueue, selectedFiles.map(entry => entry.file));
+  const canCacheFolders = Boolean(cacheQueue?.available && (!privateSpace || cacheQueue.privateReady));
+  const selectedCacheFolders = canCacheFolders ? selectedEntries.filter(entry => entry.kind === "folder").map(entry => entry.key) : [];
+  const canCacheSelection = Boolean(selectionCache.cacheable.length || selectedCacheFolders.length);
+  function cacheSelected() {
+    if (selectedCacheFolders.length) setFolderCache({ prefixes: selectedCacheFolders, files: selectionCache.cacheable });
+    else cacheQueue?.enqueueMany(selectionCache.cacheable);
+  }
   // 焦点项可能还没挂载（End、跨批移动）：先放宽渲染范围，等它出现在 DOM 后只滚动一次，之后滚动加载不再拉回焦点。
   const pendingScroll = useRef<string | null>(null);
   useEffect(() => {
@@ -459,7 +469,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     if (event.key === "Tab") { tabbed.current = true; return; }
     if (event.defaultPrevented || event.isComposing || document.body.classList.contains("has-modal") || context) return;
     const target = event.target as Element;
-    if (target instanceof Element && (isShortcutControl(target) || target.closest(".modal, .tray-stack, .sidebar, .assistant-drawer, .assistant-page"))) return;
+    if (target instanceof Element && (isShortcutControl(target) || target.closest(".modal, .system-tray, .tray-stack, .sidebar, .assistant-drawer, .assistant-page"))) return;
     const control = target instanceof Element ? target.closest("button, a, summary, [role='button']") : null;
     if ((event.key === " " || event.key === "Enter") && control && tabbed.current) return;
     const mod = event.metaKey || event.ctrlKey;
@@ -535,7 +545,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           href: selectedEntries.length > 200 ? undefined : downloadUrl(selectedEntries) },
         { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving(selectedEntries) },
         { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring(selectedEntries) },
-        ...(selectionCache.cacheable.length ? [{ label: `缓存 ${selectionCache.cacheable.length} 个文件到本机`, icon: "monitor" as const, onSelect: () => cacheQueue?.enqueueMany(selectionCache.cacheable) }] : []),
+        ...(canCacheSelection ? [{ label: selectedCacheFolders.length ? "缓存所选项目到本机" : `缓存 ${selectionCache.cacheable.length} 个文件到本机`, icon: "monitor" as const, onSelect: cacheSelected }] : []),
         ...(selectionCache.cached.length ? [{ label: `清除 ${selectionCache.cached.length} 个文件的本机缓存`, icon: "trash" as const, danger: true, divider: true, onSelect: () => cacheQueue?.remove(selectionCache.cached) }] : []),
         { label: `删除 ${selected.size} 项`, icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash(selectedEntries) },
       ];
@@ -587,7 +597,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <div className="toolbar-actions">
             {selectedEntries.length > 200 ? <Button size="sm" icon="download" onClick={downloadLimit}>下载</Button>
               : <ButtonLink variant="secondary" size="sm" shortcut="D" icon="download" href={downloadUrl(selectedEntries)}>下载</ButtonLink>}
-            {selectionCache.cacheable.length > 0 && <Button size="sm" icon="monitor" onClick={() => cacheQueue?.enqueueMany(selectionCache.cacheable)}>缓存到本机</Button>}
+            {canCacheSelection && <Button size="sm" icon="monitor" onClick={cacheSelected}>缓存到本机</Button>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
             <Button size="sm" icon="move" shortcut="M" onClick={() => setMoving(selectedEntries)}>移动</Button>
@@ -745,6 +755,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       {context && <ContextMenu x={context.x} y={context.y} label={`${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
       {statsFor && <FolderStatsDialog prefix={statsFor.prefix} title={statsFor.prefix === root ? rootName : api.privatePathLabel(statsFor.prefix).replace(/\/$/, "")} onClose={() => setStatsFor(null)} onOpenFolder={onOpenFolder} />}
       {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
+      {folderCache && <ConfirmDialog title="缓存文件夹到本机？" danger={false} className={privateSpace ? "private-dialog" : ""} confirmLabel="开始缓存" onClose={() => setFolderCache(null)}
+        description={<>{folderCache.prefixes.length === 1 ? `将缓存“${baseName(folderCache.prefixes[0])}”中的所有文件，以及全部子目录中的文件。` : `将缓存所选 ${folderCache.prefixes.length} 个文件夹中的所有文件，以及全部子目录中的文件。`}
+          {folderCache.files.length > 0 && `另外 ${folderCache.files.length} 个所选文件也会一起缓存。`}缓存保存在当前浏览器中，会占用本机存储空间；空间不足时旧缓存可能被清理。可在系统托盘的「本机缓存」中查看进度、暂停或继续文件任务。</>}
+        onConfirm={() => {
+          if (!cacheQueue?.available || (privateSpace && !cacheQueue.privateReady)) { notify.error("本机缓存不可用，请检查缓存设置和私密空间的解锁状态"); return; }
+          cacheQueue.enqueueMany(folderCache.files); cacheQueue.enqueueFolders(folderCache.prefixes); setFolderCache(null);
+        }} />}
 
       {pendingUpload && <UploadDialog files={pendingUpload} destination={prefix} onClose={() => setPendingUpload(null)}
         onStart={(list, isPublic, destination) => {
