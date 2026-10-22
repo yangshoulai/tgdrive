@@ -42,11 +42,11 @@ function pause(signal: AbortSignal) {
   });
 }
 
-/** 队列属于已登录的应用外壳。切换目录继续，离开私密区域立即移除私密任务及文件名。 */
-export function CacheTasksProvider({ enabled, privateAllowed, onOpenTasks, children }: { enabled: boolean; privateAllowed: boolean; onOpenTasks: () => void; children: ReactNode }) {
+/** 队列属于已登录的应用外壳。切换页面继续，私密授权失效时立即移除私密任务及文件名。 */
+export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled: boolean; onOpenTasks: () => void; children: ReactNode }) {
   const access = usePrivateAccess();
   const [privateCacheEnabled, setPrivateCacheEnabled] = useState(false);
-  const privateReady = enabled && privateAllowed && privateCacheEnabled && Boolean(access.grant);
+  const privateReady = enabled && privateCacheEnabled && Boolean(access.grant);
   const [jobs, setJobs] = useState<CacheJob[]>([]), jobsRef = useRef(jobs);
   const [folders, setFolders] = useState<FolderCacheJob[]>([]), foldersRef = useRef(folders);
   const folderControllers = useRef(new Map<string, AbortController>());

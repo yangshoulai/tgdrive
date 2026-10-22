@@ -333,7 +333,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },
       ] }}>
       <PrivateSessionProvider enabled={workspaceReady}>
-      <CacheTasksProvider enabled={workspaceReady} privateAllowed={section === "private"} onOpenTasks={openCacheTasks}>
+      <CacheTasksProvider enabled={workspaceReady} onOpenTasks={openCacheTasks}>
       <PreviewHost enabled={workspaceReady} privateAllowed={section === "private"}>
         {content}
       <TaskCenter enabled={workspaceReady} uploads={uploads} activeWindow={taskWindow} onWindowChange={setTaskWindow} downloadRevision={downloadRevision} onChanged={refreshUsage}
