@@ -28,10 +28,11 @@ class GcFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_summary_returns_only_fixed_reason_labels_and_counts(self):
         metadata = SimpleNamespace(db=Mock())
         metadata.db.execute.return_value.fetchall.return_value = [
-            {"reason": "delete_forbidden", "count": 600, "last_error": "do-not-expose-this-token"},
-            {"reason": "message_missing", "count": 20, "blob_ref": "private-file-reference"}]
+            {"reason": "delete_forbidden", "count": 600, "dead": 600, "last_error": "do-not-expose-this-token"},
+            {"reason": "message_missing", "count": 20, "dead": 10, "blob_ref": "private-file-reference"}]
         summary = GarbageCollector(metadata, SimpleNamespace()).failure_summary()
         self.assertEqual(sum(item["count"] for item in summary), 620)
+        self.assertEqual([item["dead"] for item in summary], [600, 10])
         self.assertIn("48 小时", summary[0]["hint"])
         serialized = json.dumps(summary)
         self.assertNotIn("do-not-expose-this-token", serialized)
@@ -40,3 +41,5 @@ class GcFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sql.count("?"), len(params))
         self.assertIn("GROUP BY reason", sql)
         self.assertIn("WHERE attempts>0", sql)
+        self.assertIn("SUM(CASE WHEN attempts>=?", sql)
+        self.assertEqual(params[-1], GarbageCollector.MAX_ATTEMPTS)

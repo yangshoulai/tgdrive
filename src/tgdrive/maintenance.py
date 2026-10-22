@@ -112,10 +112,12 @@ class GarbageCollector:
             params.extend(f"%{pattern}%" for pattern in patterns)
             params.append(reason)
             labels[reason] = (label, hint)
+        params.append(self.MAX_ATTEMPTS)
         rows = self.metadata.db.execute(
-            "SELECT CASE " + " ".join(cases) + " ELSE 'other' END AS reason,COUNT(*) AS count "
+            "SELECT CASE " + " ".join(cases) + " ELSE 'other' END AS reason,COUNT(*) AS count,"
+            "SUM(CASE WHEN attempts>=? THEN 1 ELSE 0 END) AS dead "
             "FROM gc_queue WHERE attempts>0 GROUP BY reason ORDER BY count DESC,reason", params).fetchall()
-        return [{"reason": row["reason"], "count": int(row["count"]),
+        return [{"reason": row["reason"], "count": int(row["count"]), "dead": int(row["dead"]),
                  "label": labels[row["reason"]][0], "hint": labels[row["reason"]][1]} for row in rows]
 
     async def run_once(self, *, limit: int = 100) -> GcReport:
