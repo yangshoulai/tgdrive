@@ -3046,16 +3046,14 @@ button.download-location:hover .download-location-text > span { color: var(--acc
 .ai-tool.is-ok .ai-step-dot { color: var(--accent); }
 .ai-tool.is-error .ai-step-dot { border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); background: var(--danger-soft); color: var(--danger); }
 .ai-thinking .ai-step-dot { color: var(--accent); }
-.ai-note .ai-step-dot::after { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); content: ""; }
-.ai-note-text { min-width: 0; padding-top: 1px; color: var(--ink-2); font-size: var(--text-sm); }
-.ai-note-text .md { font-size: var(--text-sm); line-height: 1.7; }
-.ai-note-text .md > :last-child { margin-bottom: 0; }
-
 .ai-thinking-body, .ai-tool-body { display: grid; min-width: 0; gap: 6px; }
-.ai-thinking-head { display: flex; width: fit-content; max-width: 100%; align-items: center; gap: 6px; min-height: 22px; padding: 0; border: 0; background: none; color: var(--ink-2); font: inherit; font-size: var(--text-xs); cursor: pointer; }
-.ai-thinking.is-open .ai-thinking-head > svg { transform: rotate(180deg); }
+.ai-thinking-head > strong { margin-right: auto; }
+.ai-thinking.is-open .ai-thinking-head > svg, .ai-note.is-open .ai-thinking-head > svg { transform: rotate(180deg); }
 .ai-thinking-time { color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.ai-thinking-text { max-height: 320px; overscroll-behavior: contain; padding: 10px 12px; overflow-y: auto; border-left: 2px solid var(--line); color: var(--ink-2); font-size: var(--text-xs); line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-thinking-text { max-height: 320px; overscroll-behavior: contain; overflow-y: auto; color: var(--ink-2); font-size: var(--text-xs); line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-thinking-text[hidden] { display: none; }
+.ai-thinking-text .md { font-size: inherit; line-height: inherit; white-space: normal; }
+.ai-thinking-text .md > :last-child { margin-bottom: 0; }
 
 .ai-tool-head { display: flex; width: 100%; min-width: 0; min-height: 22px; align-items: center; gap: 8px; padding: 0; border: 0; background: none; color: var(--ink-2); font: inherit; font-size: var(--text-xs); text-align: left; cursor: pointer; }
 .ai-tool-head:disabled { cursor: default; }
@@ -3311,6 +3309,7 @@ button.download-location:hover .download-location-text > span { color: var(--acc
 @media (prefers-reduced-motion: reduce) {
   .ai-turn, .ai-card, .assistant-mention-menu, .assistant-compose-box.is-running::before { animation: none; }
   .ai-shimmer { animation: none; background: none; color: var(--ink-2); }
+  .ai-thinking-head > svg { transition: none; }
   .assistant-mark *, .ai-activity > i, .ai-caret, .ai-live > i { animation: none !important; }
 }
 

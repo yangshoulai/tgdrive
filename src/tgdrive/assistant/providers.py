@@ -1,4 +1,4 @@
-"""模型服务适配：OpenAI 兼容（/chat/completions）与 Anthropic（/v1/messages），均为流式请求。
+"""模型服务适配：OpenAI Chat Completions／Responses 与 Anthropic，均为流式请求。
 
 渠道地址只能由管理员配置（可以是本机 Ollama），所以这里不走离线下载的 SafeHttpClient；
 错误信息一律脱敏后才离开本模块：不含 API Key、请求头、URL 查询串与长令牌。
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import http.client
 import json
 import re
@@ -69,6 +70,10 @@ class Reply:
     upstream_id: str | None = None
     ttfb_ms: int | None = None
     status: int | None = None
+    # 仅供同一模型续接，不进入可见消息或导出；不包含可见的思考正文。
+    continuation: list[dict] = field(default_factory=list)
+    continuation_key: str | None = None
+    phase: str | None = None
 
 
 @dataclass
@@ -78,6 +83,24 @@ class Endpoint:
     api_key: str | None
     headers: dict[str, str]
     timeout: int
+    protocol: str = "chat_completions"
+
+
+def prepare_messages(endpoint: Endpoint, model_id: int, messages: list[dict]) -> tuple[list[dict], str | None]:
+    """内部续接状态仅交给原来的模型、地址与凭据；其他请求只得到普通对话历史。"""
+    binding = None
+    if endpoint.kind == "openai" and endpoint.protocol == "responses":
+        binding = hashlib.sha256(json.dumps([model_id, endpoint.base_url, endpoint.api_key, endpoint.headers],
+                                            sort_keys=True).encode()).hexdigest()
+    prepared = []
+    for message in messages:
+        value = {key: item for key, item in message.items() if key not in ("_responses", "_responses_items", "_responses_phase")}
+        opaque = message.get("_responses")
+        if binding and isinstance(opaque, dict) and opaque.get("binding") == binding:
+            value["_responses_items"] = opaque.get("items") or []
+            value["_responses_phase"] = opaque.get("phase")
+        prepared.append(value)
+    return prepared, binding
 
 
 # ---------- HTTP ----------
@@ -414,6 +437,11 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
         if on_text is not None:
             await on_text(text)
 
+    if endpoint.kind == "openai" and endpoint.protocol == "responses":
+        from .responses import chat_responses
+        return await chat_responses(endpoint, model, system, messages, tools, max_tokens=max_tokens,
+                                    reply=reply, started=started, emit=emit, think=think)
+
     if endpoint.kind == "openai":
         body: dict = {"model": model, "messages": _openai_messages(system, messages), "stream": True,
                       "stream_options": {"include_usage": True}}
@@ -461,7 +489,7 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
                         continue
                     delta = choice.get("delta") or {}
                     for name in ("reasoning_content", "reasoning"):
-                        if isinstance(delta.get(name), str):
+                        if isinstance(delta.get(name), str) and delta[name]:
                             await think(delta[name])
                             break
                     if isinstance(delta.get("content"), str):

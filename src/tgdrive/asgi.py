@@ -581,7 +581,7 @@ class TgDriveASGI(StaticFiles):
                                 if isinstance(value, dict) and "enabled" in value}}
         elif action in ("assistant.channel.create", "assistant.channel.update"):
             # 不记录 API Key 与请求头的值，只记录是否修改。
-            detail = {key: payload.get(key) for key in ("name", "kind", "enabled", "concurrency", "timeout") if key in payload}
+            detail = {key: payload.get(key) for key in ("name", "kind", "protocol", "enabled", "concurrency", "timeout") if key in payload}
             if "api_key" in payload:
                 detail["api_key"] = "changed"
             if "headers" in payload:

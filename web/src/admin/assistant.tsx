@@ -28,6 +28,7 @@ const LEVELS: Record<ai.ToolLevel, { label: string; tone: Tone }> = {
   write: { label: "可修改", tone: "warning" }, danger: { label: "不可恢复", tone: "danger" },
 };
 const KIND_LABEL = { openai: "OpenAI 兼容", anthropic: "Anthropic" };
+const channelLabel = (channel: ai.AiChannel) => channel.kind === "openai" && channel.protocol === "responses" ? "OpenAI Responses" : KIND_LABEL[channel.kind];
 const KIND_EXAMPLE = { openai: "https://api.deepseek.com/v1", anthropic: "https://api.anthropic.com" };
 
 export const tokens = (value: number | null | undefined) => value == null ? "—" : value >= 1e6 ? `${(value / 1e6).toFixed(1)}M` : value >= 1e4 ? `${(value / 1e3).toFixed(1)}K` : value.toLocaleString("zh-CN");
@@ -341,7 +342,7 @@ function ChannelsTab({ settings, onChanged }: { settings: ai.AssistantSettings |
               {channels.map(item => <li key={item.id}>
                 <button type="button" role="option" aria-selected={item.id === selected} className={item.id === selected ? "is-active" : ""} onClick={() => setSelected(item.id)}>
                   <i className={`assistant-dot${!item.enabled ? "" : item.health?.unhealthy ? " is-danger" : " is-success"}`} aria-hidden="true" />
-                  <span className="name-stack"><strong>{item.name}</strong><small>{KIND_LABEL[item.kind]} · {item.enabled_models}/{item.models} 个模型启用</small></span>
+                  <span className="name-stack"><strong>{item.name}</strong><small>{channelLabel(item)} · {item.enabled_models}/{item.models} 个模型启用</small></span>
                   {!item.enabled ? <Badge>已停用</Badge> : item.health?.unhealthy ? <Badge tone="danger">异常</Badge> : null}
                 </button>
               </li>)}
@@ -405,7 +406,7 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onPick, onChan
   const shown = (models ?? []).filter(model => (filter === "all" || model.enabled === (filter === "enabled"))
     && (!search.trim() || `${model.model} ${model.display_name ?? ""}`.toLowerCase().includes(search.trim().toLowerCase())));
   return (
-    <Panel flush className="assistant-channel-detail" title={<span className="assistant-channel-title"><span className="assistant-channel-symbol"><Icon name="server" size={20} /></span><span>{channel.name}<small>{KIND_LABEL[channel.kind]}</small></span><Badge tone={channel.enabled ? "success" : "neutral"} dot>{channel.enabled ? "已启用" : "已停用"}</Badge></span>}
+    <Panel flush className="assistant-channel-detail" title={<span className="assistant-channel-title"><span className="assistant-channel-symbol"><Icon name="server" size={20} /></span><span>{channel.name}<small>{channelLabel(channel)}</small></span><Badge tone={channel.enabled ? "success" : "neutral"} dot>{channel.enabled ? "已启用" : "已停用"}</Badge></span>}
       actions={<>
         <Button size="sm" variant="primary" icon="plus" onClick={onPick}>选择模型</Button>
         <Button size="sm" icon="edit" onClick={onEdit}>编辑</Button>
@@ -484,6 +485,7 @@ function parseHeaders(text: string): Record<string, string> | string {
 function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | null; onClose: () => void; onSaved: (channel: ai.AiChannel, created: boolean) => void }) {
   const [clearHeaders, setClearHeaders] = useState(false);
   const [form, setForm] = useState({ name: channel?.name ?? "", kind: channel?.kind ?? "openai" as ai.AiChannel["kind"], base_url: channel?.base_url ?? "",
+    protocol: channel?.protocol ?? "chat_completions" as ai.ChannelProtocol,
     api_key: "", headers: "", concurrency: String(channel?.concurrency ?? 4), timeout: String(channel?.timeout ?? 120), enabled: channel?.enabled ?? true });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -495,6 +497,7 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
     if (typeof headers === "string") { setError(headers); return; }
     const input: ai.ChannelInput = { name: form.name.trim(), base_url: form.base_url.trim(), enabled: form.enabled,
       concurrency: Number(form.concurrency), timeout: Number(form.timeout) };
+    if (form.kind === "openai") input.protocol = form.protocol;
     if (!channel) input.kind = form.kind;
     if (form.api_key.trim()) input.api_key = form.api_key.trim();
     if (clearHeaders || form.headers.trim() || !channel) input.headers = clearHeaders ? {} : headers;
@@ -520,6 +523,13 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
             </select>
           </Field>
         </div>
+        {form.kind === "openai" && <Field label="接口方式" hint={form.protocol === "responses"
+          ? "用于支持 Responses 的官方接口或中转，主动请求并流式展示思考摘要；请选择支持思考摘要的模型。"
+          : "兼容提供 Chat Completions 的服务；思考正文取决于渠道实际返回的字段。"}>
+          <select className="input" value={form.protocol} onChange={event => setForm({ ...form, protocol: event.target.value as ai.ChannelProtocol })}>
+            <option value="chat_completions">Chat Completions</option><option value="responses">Responses（思考摘要）</option>
+          </select>
+        </Field>}
         <Field label="Base URL" hint={`例如 ${KIND_EXAMPLE[form.kind]}${form.kind === "openai" ? "；本地 Ollama 为 http://127.0.0.1:11434/v1" : ""}`}>
           <input className="input mono" value={form.base_url} placeholder={KIND_EXAMPLE[form.kind]} autoCapitalize="none" spellCheck={false} onChange={event => setForm({ ...form, base_url: event.target.value })} />
         </Field>

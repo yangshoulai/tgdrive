@@ -4,11 +4,15 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const root = path.join(__dirname, "..");
 const { buildSync } = require(path.join(root, "web/node_modules/esbuild"));
-const bundle = buildSync({ stdin: { contents: 'export { group } from "./web/src/user/assistant-thread";', resolveDir: root },
+const bundle = buildSync({ stdin: { contents: `export { group } from "./web/src/user/assistant-thread";
+  import { Thread } from "./web/src/user/assistant-thread";
+  import { createElement } from "react";
+  import { renderToStaticMarkup } from "react-dom/server";
+  export const renderThread = props => renderToStaticMarkup(createElement(Thread, props));`, resolveDir: root },
   bundle: true, write: false, format: "cjs", platform: "node", jsx: "automatic", nodePaths: [path.join(root, "web/node_modules")] });
 const loaded = { exports: {} };
-new Function("module", "exports", bundle.outputFiles[0].text)(loaded, loaded.exports);
-const { group } = loaded.exports;
+new Function("module", "exports", "require", bundle.outputFiles[0].text)(loaded, loaded.exports, require);
+const { group, renderThread } = loaded.exports;
 
 let seq = 0;
 const user = text => ({ seq: ++seq, role: "user", run_id: "r1", text });
@@ -39,4 +43,38 @@ test("续跑有新回复时，旧回复按顺序留在时间线中", () => {
     say("r1", "请确认下载"), say("r2", "", call("list_downloads")), tool("r2", "list_downloads"), say("r2", "12 个任务都已完成")]);
   assert.deepEqual(shape(item.turn), ["tool:propose_downloads", "note:请确认下载", "tool:list_downloads"]);
   assert.equal(item.turn.answer.text, "12 个任务都已完成");
+});
+
+const view = (messages, live = null) => renderThread({ detail: { conversation: { id: "chat-1" }, messages, actions: [] },
+  live, runId: live ? "r1" : null, httpApprovals: [], modelLabel: () => "", onActionChanged: () => undefined });
+const running = { reasoning: "", reasoningStartedAt: null, streaming: "", tools: [], phase: "tool" };
+
+test("进度说明显示一行摘要并可展开，普通进度不冒充思考", () => {
+  seq = 0;
+  const html = view([user("分析相册"), say("r1", "已确认列表共有四页", call("collect_links")), tool("r1", "collect_links")],
+    { ...running, phase: "writing", streaming: "正在核对相册与已有文件" });
+  assert.equal((html.match(/class="ai-step ai-note/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-expanded="false"/g) ?? []).length, 3);
+  assert.match(html, /进度说明/);
+  assert.match(html, /已确认列表共有四页/);
+  assert.match(html, /正在核对相册与已有文件/);
+  assert.doesNotMatch(html, /思考中|ai-step ai-thinking/);
+});
+
+test("等待模型只显示等待状态，真实 reasoning 才生成思考节点", () => {
+  seq = 0;
+  const messages = [user("分析相册")];
+  const waiting = view(messages, { ...running, phase: "thinking" });
+  assert.match(waiting, /等待模型响应/);
+  assert.doesNotMatch(waiting, /ai-step ai-thinking|思考中/);
+  const streaming = view(messages, { ...running, phase: "thinking", reasoning: "逐页检查分页与链接结构" });
+  assert.match(streaming, /思考中/);
+  assert.doesNotMatch(streaming, /逐页检查分页与链接结构/);
+});
+
+test("完成后的最终回复保持正常展示，过程说明仍在时间线", () => {
+  seq = 0;
+  const html = view([user("分析相册"), say("r1", "中途核对已有目录", call("list_folder")), tool("r1", "list_folder"), say("r1", "已经整理完成")]);
+  assert.match(html, /class="ai-answer"[\s\S]*已经整理完成/);
+  assert.doesNotMatch(html, /中途核对已有目录/);
 });

@@ -609,7 +609,7 @@ class AssistantService:
     @staticmethod
     def _public_message(message: dict) -> dict:
         """发给浏览器的消息：去掉只给模型看的包装文本。"""
-        return {key: value for key, value in message.items() if key not in ("model_content", "images")}
+        return {key: value for key, value in message.items() if key not in ("model_content", "images", "_responses")}
 
     def update_conversation(self, token: str, csrf: str, conversation_id: str, payload: dict) -> dict[str, object]:
         _, account = self._session(token, csrf=csrf, mutation=True)
@@ -1488,6 +1488,8 @@ class AssistantService:
             elif role == "assistant":
                 calls = message.get("tool_calls") or []
                 result.append({"role": "assistant", "content": message.get("text") or "", "tool_calls": calls})
+                if isinstance(message.get("_responses"), dict):
+                    result[-1]["_responses"] = message["_responses"]
                 pending = {call["id"]: call["name"] for call in calls}
                 if meta is not None and message.get("input_tokens"):
                     meta.update(model_id=message.get("model_id"), input_tokens=int(message["input_tokens"]),
@@ -1518,6 +1520,10 @@ class AssistantService:
             pictures = len(message.get("images") or message.get("image_refs") or [])
             text = {key: value for key, value in message.items() if key not in ("images", "image_refs") and not key.startswith("_")}
             total += len(json.dumps(text, ensure_ascii=False)) // 2 + pictures * vision.IMAGE_TOKENS
+            opaque = message.get("_responses")
+            if isinstance(opaque, dict):
+                # 加密项也占请求资源，避免长任务积累未计入预算的续接数据。
+                total += sum(len(item.get("encrypted_content") or "") for item in opaque.get("items") or [] if isinstance(item, dict)) // 4
         return total
 
     @staticmethod
@@ -1653,6 +1659,9 @@ class AssistantService:
         await self._channel_slot(model["channel_id"])
         started = time.time()
         try:
+            prepared, binding = providers.prepare_messages(endpoint, model["id"], messages)
+            # 标题与压缩原先只预留正文 token；Responses 还要容纳内部推理，主回复仍遵守配置的输出上限。
+            budget = max(4096, max_tokens) if not stream and binding and max_tokens else max_tokens
             async def on_text(text: str) -> None:
                 if state.thinking.get("start") is not None and state.thinking.get("end") is None:
                     state.thinking["end"] = time.monotonic()
@@ -1668,8 +1677,9 @@ class AssistantService:
                     self._validate(state)
                     if not quiet:
                         state.thinking = {}
-                    reply = await self.chat(endpoint, model["model"], system, messages, tools, max_tokens=max_tokens,
+                    reply = await self.chat(endpoint, model["model"], system, prepared, tools, max_tokens=budget,
                                             **({"on_text": on_text, "on_reasoning": on_reasoning} if stream else {}))
+                    reply.continuation_key = binding
                     break
                 except ProviderError as exc:
                     self.trace.log_call(kind="model", run_id=state.id, conversation_id=state.conversation_id, user_id=state.user_id,
@@ -2220,8 +2230,10 @@ class AssistantService:
                     ended_at = state.thinking.get("end") or state.thinking.get("last")
                     assistant["reasoning"] = self.guard.redact(reply.reasoning.strip())
                     assistant["reasoning_ms"] = int((ended_at - started_at) * 1000) if started_at and ended_at else None
+                if reply.continuation or reply.phase:
+                    assistant["_responses"] = {"binding": reply.continuation_key, "items": reply.continuation, "phase": reply.phase}
                 seq = self.trace.append(state.conversation_id, state.id, "assistant", assistant)
-                await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "assistant", **assistant}})
+                await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "created_at": time.time(), "role": "assistant", **self._public_message(assistant)}})
                 if not calls:
                     if not forced_final and state.action_revision > state.seen_action_revision:
                         if stop_reason == "missing_review":

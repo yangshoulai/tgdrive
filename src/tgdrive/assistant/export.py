@@ -12,7 +12,7 @@ from datetime import datetime, timezone, tzinfo
 
 FORMATS = {"markdown": ("md", "text/markdown; charset=utf-8"), "json": ("json", "application/json; charset=utf-8")}
 # 只给模型看的包装文本、图片与内部记账字段不进入导出。
-_HIDDEN = {"model_content", "model_text", "images", "image_refs", "_run", "_slim", "prompt_estimate"}
+_HIDDEN = {"model_content", "model_text", "images", "image_refs", "_run", "_slim", "prompt_estimate", "_responses"}
 # Markdown 里每个工具结果最多保留的字符数；完整内容见 JSON 导出。
 RESULT_LIMIT = 20_000
 ROLE_TITLES = {"user": "用户", "assistant": "助手"}

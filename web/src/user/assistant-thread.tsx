@@ -76,7 +76,7 @@ function ActivityDots() {
 type Step =
   | { kind: "thinking"; key: string; text: string; ms: number | null; live?: boolean; startedAt?: number | null }
   | { kind: "tool"; key: string; message?: ai.ChatMessage; pending?: { name: string; label: string } }
-  | { kind: "note"; key: string; text: string }
+  | { kind: "note"; key: string; text: string; live?: boolean }
   /** 需要用户决定的请求（文件操作、范围、提问、HTTP）：在时间线里原位显示状态，处理在确认坞里完成。 */
   | { kind: "decision"; key: string; message?: ai.ChatMessage; approval?: HttpApproval }
   /** 执行层在过程中插入的节点（自动续跑下一段、核验计划等），按发生位置显示。 */
@@ -207,11 +207,11 @@ export function Thread({ detail, live, liveModel, modelLabel, runId, httpApprova
     [detail.actions, detail.messages, running, onReview, onActionChanged, onFilesChanged]);
   return <DecisionContext.Provider value={decisions}>
     {items.map(item => item.kind === "event" ? <SystemEvent key={`e${item.message.seq}`} message={item.message} />
-      : <TurnView key={item.turn.key} turn={item.turn} live={item === lastTurn && running ? live : null} runId={runId}
+      : <TurnView key={`${detail.conversation.id}:${item.turn.key}`} turn={item.turn} live={item === lastTurn && running ? live : null} runId={runId}
           model={item.turn.modelId != null ? modelLabel(item.turn.modelId) : item === lastTurn && running ? liveModel ?? "" : ""}
           httpApprovals={httpApprovals.filter(approval => approval.runId === (item.turn.runId ?? (item === lastTurn ? runId : null)))}
           onRetry={!running ? onRetry : undefined} />)}
-    {running && live && (!lastTurn || lastTurn.kind !== "turn") && <TurnView turn={{ key: "live", steps: [], cards: [], notices: [], runId: null, input: 0, output: 0 }}
+    {running && live && (!lastTurn || lastTurn.kind !== "turn") && <TurnView key={`${detail.conversation.id}:live`} turn={{ key: "live", steps: [], cards: [], notices: [], runId: null, input: 0, output: 0 }}
       live={live} model="" httpApprovals={httpApprovals.filter(approval => approval.runId === runId)} />}
   </DecisionContext.Provider>;
 }
@@ -239,12 +239,13 @@ function TurnView({ turn, live, runId = null, model, httpApprovals, onRetry }: {
     ? [`${step.message.run_id}:${step.message.event.id}`] : []));
   for (const approval of httpApprovals) if (!recorded.has(approval.callId)) steps.push({ kind: "decision", key: `h${approval.callId}`, approval });
   if (live) {
-    if (live.reasoning) steps.push({ kind: "thinking", key: "live-thinking", text: live.reasoning, ms: null, live: true, startedAt: live.reasoningStartedAt });
+    if (live.reasoning) steps.push({ kind: "thinking", key: "live-thinking", text: live.reasoning,
+      ms: null, live: live.phase === "thinking", startedAt: live.reasoningStartedAt });
     for (const tool of live.tools) if (!httpApprovals.some(approval => approval.toolCallId === tool.callId)) steps.push({ kind: "tool", key: `live-${tool.callId}`, pending: tool });
   }
   // 已经有工具步骤时，正在输出的文字多半是两次工具调用之间的说明：在时间线末尾显示，结束后若是最终回复再移到下方。
   const inline = Boolean(live?.streaming) && steps.some(step => step.kind !== "thinking");
-  if (inline) steps.push({ kind: "note", key: "live-note", text: live!.streaming });
+  if (inline) steps.push({ kind: "note", key: "live-note", text: live!.streaming, live: true });
   const streaming = inline ? "" : live?.streaming ?? "";
   const mark = useMarkState(live);
   const waiting = httpApprovals.some(approval => approval.status === "pending");
@@ -283,7 +284,7 @@ function TurnView({ turn, live, runId = null, model, httpApprovals, onRetry }: {
 
 function LiveStatus({ live, waiting = false }: { live: LiveRun; waiting?: boolean }) {
   const label = waiting ? "等待确认" : live.phase === "queued" ? `排队中${live.queue ? `，前面 ${live.queue} 个` : ""}`
-    : live.tools.length ? `正在${live.tools.at(-1)!.label}` : live.streaming ? "正在回复" : live.reasoning ? "正在思考" : "正在准备";
+    : live.tools.length ? `正在${live.tools.at(-1)!.label}` : live.streaming ? "正在回复" : live.reasoning ? "正在思考" : live.phase === "thinking" ? "等待模型响应" : "正在准备";
   return <span className="ai-live" role="status"><i aria-hidden="true" /><span className={waiting ? undefined : "ai-shimmer"}>{label}</span></span>;
 }
 
@@ -337,9 +338,38 @@ function decisionState(step: Extract<Step, { kind: "decision" }>, state: Decisio
 
 const LIVE_TAIL = 6;
 
+type ThoughtStep = Extract<Step, { kind: "thinking" | "note" }>;
+type ThinkingDisclosure = { text: string; open: boolean; follow: boolean; top: number };
+
+/** 展开选择属于本轮过程，流式节点保存或被外层折叠卸载后仍保留；不跨对话共享。 */
+function useThinkingDisclosures(steps: Step[]) {
+  const saved = useRef(new Map<string, ThinkingDisclosure>());
+  const thoughts = steps.filter((step): step is ThoughtStep => step.kind === "thinking" || step.kind === "note");
+  const fresh = (text: string): ThinkingDisclosure => ({ text, open: false, follow: true, top: 0 });
+  for (const kind of ["thinking", "note"] as const) {
+    const liveKey = `live-${kind}`;
+    let previous = saved.current.get(liveKey);
+    for (const step of thoughts) {
+      if (step.kind !== kind || step.key === liveKey || saved.current.has(step.key)) continue;
+      // 消息落库会更换 seq，按当前流的正文前缀交接阅读状态；两种正文各自交接，空占位不参与匹配。
+      const continued = previous?.text.trim() && step.text.trimStart().startsWith(previous.text.trim().slice(0, 64));
+      saved.current.set(step.key, continued ? previous! : fresh(step.text));
+      if (continued) { saved.current.delete(liveKey); previous = undefined; }
+    }
+    const live = thoughts.find(step => step.key === liveKey);
+    if (live) {
+      const value = saved.current.get(liveKey) ?? fresh(live.text);
+      value.text = live.text;
+      saved.current.set(liveKey, value);
+    } else saved.current.delete(liveKey);
+  }
+  return saved.current;
+}
+
 function Process({ steps, live }: { steps: Step[]; live: boolean }) {
   const [open, setOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const disclosures = useThinkingDisclosures(steps);
   const state = useContext(DecisionContext);
   const tools = steps.filter(step => step.kind === "tool");
   const decisions = steps.filter((step): step is Extract<Step, { kind: "decision" }> => step.kind === "decision");
@@ -351,9 +381,10 @@ function Process({ steps, live }: { steps: Step[]; live: boolean }) {
   const thinkingMs = steps.reduce((sum, step) => sum + (step.kind === "thinking" ? step.ms ?? 0 : 0), 0);
   const thought = steps.some(step => step.kind === "thinking");
   const toolMs = tools.reduce((sum, step) => sum + (step.kind === "tool" ? step.message?.duration_ms ?? 0 : 0), 0);
-  // 运行中、操作执行中始终展开（执行中的节点需要挂载才能轮询进度）；只有一个思考步骤时直接显示，不再套一层折叠。
+  // 运行中、操作执行中始终展开（执行中的节点需要挂载才能轮询进度）；只有一个思考或说明步骤时不再套一层折叠。
   // 长任务展开时只保留最近几步，更早的步骤收成一行；等待处理或执行中的决定节点始终显示。
-  if (live || busy || (steps.length === 1 && steps[0].kind === "thinking")) {
+  const renderStep = (step: Step) => <StepView key={step.key} step={step} disclosure={disclosures.get(step.key)} onThinkingOpen={() => setOpen(true)} />;
+  if (live || busy || (steps.length === 1 && (steps[0].kind === "thinking" || steps[0].kind === "note"))) {
     const keep = steps.map((step, index) => showAll || index >= steps.length - LIVE_TAIL
       || step.kind === "decision" && decisionState(step, state) !== "done");
     const hidden = keep.filter(value => !value).length;
@@ -361,7 +392,7 @@ function Process({ steps, live }: { steps: Step[]; live: boolean }) {
     return <div className="ai-process">
       {hidden >= 3 && <button type="button" className="ai-process-more" onClick={() => setShowAll(true)}>
         <Icon name="more" size={13} />前面还有 {hidden} 个步骤</button>}
-      {visible.map(step => <StepView key={step.key} step={step} />)}
+      {visible.map(renderStep)}
     </div>;
   }
   const parts = [thought ? (thinkingMs ? `思考 ${seconds(thinkingMs)}` : "思考") : "", executed.length ? `使用 ${executed.length} 个工具` : "",
@@ -375,52 +406,53 @@ function Process({ steps, live }: { steps: Step[]; live: boolean }) {
       {failed > 0 && <span className="ai-process-error">{failed} 项出错</span>}
       <Icon name="chevronDown" size={14} />
     </button>
-    {open && <div className="ai-process-steps">{steps.map(step => <StepView key={step.key} step={step} />)}</div>}
+    {open && <div className="ai-process-steps">{steps.map(renderStep)}</div>}
   </div>;
 }
 
-function StepView({ step }: { step: Step }) {
-  if (step.kind === "thinking") return <Thinking text={step.text} ms={step.ms} live={step.live} startedAt={step.startedAt ?? null} />;
+function StepView({ step, disclosure, onThinkingOpen }: { step: Step; disclosure?: ThinkingDisclosure; onThinkingOpen: () => void }) {
+  if (step.kind === "thinking" || step.kind === "note") return <ProcessText text={step.text} disclosure={disclosure!}
+    ms={step.kind === "thinking" ? step.ms : null} live={step.live} startedAt={step.kind === "thinking" ? step.startedAt ?? null : null}
+    markdown={step.kind === "note"} onOpen={onThinkingOpen} />;
   if (step.kind === "decision") return <DecisionStep step={step} />;
   if (step.kind === "marker") return <div className={`ai-step ai-marker tone-${step.tone}`}>
     <span className="ai-step-dot" aria-hidden="true"><Icon name={step.tone === "accent" ? "refresh" : "checkCircle"} size={12} /></span>
     <span className="ai-marker-text">{step.text}</span></div>;
-  if (step.kind === "note") return <div className="ai-step ai-note"><span className="ai-step-dot" aria-hidden="true" /><div className="ai-note-text"><NoteMarkdown text={step.text} /></div></div>;
   return <ToolStep message={step.message} pending={step.pending} />;
 }
 
-function NoteMarkdown({ text }: { text: string }) {
-  return <Markdown source={text} />;
-}
-
-/** 思考节点：时间线上是大脑图标与「思考」，正文默认收起，点开后阅读；运行中展开时随输出流式追加，
+/** 思考与进度说明复用折叠交互，用图标和标题区分来源；进度另有一行摘要，展开时随输出流式追加，
  * 停在底部时自动跟随，向上翻阅时不打断。 */
-let liveThinkingOpen: string | null = null;  // 运行中展开阅读的思考，结束后换成已保存的节点时保持展开
-
-function Thinking({ text, ms, live, startedAt }: { text: string; ms: number | null; live?: boolean; startedAt: number | null }) {
-  const [open, setOpen] = useState(() => {
-    const kept = !live && liveThinkingOpen !== null && text.startsWith(liveThinkingOpen.slice(0, 64));
-    if (kept) liveThinkingOpen = null;
-    return kept;
-  });
-  const now = useNow(Boolean(live));
+function ProcessText({ text, ms, live, startedAt, markdown, disclosure, onOpen }: {
+  text: string; ms: number | null; live?: boolean; startedAt: number | null; markdown: boolean; disclosure: ThinkingDisclosure; onOpen: () => void;
+}) {
+  const [choice, setChoice] = useState(() => ({ disclosure, open: disclosure.open }));
+  const open = choice.disclosure === disclosure ? choice.open : disclosure.open;
+  const contentId = useId();
+  const now = useNow(Boolean(live && startedAt));
   const box = useRef<HTMLDivElement>(null);
-  const follow = useRef(true);
   useEffect(() => {
-    if (open && live && follow.current && box.current) box.current.scrollTop = box.current.scrollHeight;
-  }, [text, live, open]);
-  useEffect(() => { if (live) liveThinkingOpen = open ? text : null; }, [live, open, text]);
+    if (open && box.current) box.current.scrollTop = disclosure.follow ? box.current.scrollHeight : disclosure.top;
+  }, [disclosure, open]);
+  useEffect(() => {
+    if (open && live && disclosure.follow && box.current) box.current.scrollTop = box.current.scrollHeight;
+  }, [text, live, open, disclosure]);
   const elapsed = live ? (startedAt ? Math.max(0, now - startedAt) : 0) : ms;
-  return <div className={`ai-step ai-thinking${open ? " is-open" : ""}${live ? " is-live" : ""}`}>
-    <span className="ai-step-dot" aria-hidden="true"><Icon name="brain" size={12} /></span>
+  const summary = markdown ? text.replace(/\s+/g, " ").trim() : "";
+  return <div className={`ai-step ${markdown ? "ai-note" : "ai-thinking"}${open ? " is-open" : ""}${live ? " is-live" : ""}`}>
+    <span className="ai-step-dot" aria-hidden="true"><Icon name={markdown ? "chat" : "brain"} size={12} /></span>
     <div className="ai-thinking-body">
-      <button type="button" className="ai-thinking-head" aria-expanded={open} onClick={() => { follow.current = true; setOpen(value => !value); }}>
-        <span className={live ? "ai-shimmer" : undefined}>思考</span>
-        {elapsed ? <span className="ai-thinking-time">{live ? `${Math.round(elapsed / 1000)} 秒` : seconds(elapsed)}</span> : null}
-        <Icon name="chevronDown" size={13} />
+      <button type="button" className="ai-tool-head ai-thinking-head" aria-expanded={open} aria-controls={text ? contentId : undefined} disabled={!text}
+        onClick={() => { disclosure.follow = true; disclosure.open = !open; setChoice({ disclosure, open: !open }); if (!open) onOpen(); }}>
+        <strong><span className={live ? "ai-shimmer" : undefined}>{markdown ? "进度说明" : live ? "思考中" : "思考"}</span></strong>
+        {markdown && !open && <span className="ai-tool-result">{summary.slice(0, 120)}{summary.length > 120 ? "…" : ""}</span>}
+        {elapsed ? <span className="ai-thinking-time">{seconds(elapsed)}</span> : null}
+        {text && <Icon name="chevronDown" size={13} />}
       </button>
-      {open && <div className="ai-thinking-text" ref={box} aria-live="off"
-        onScroll={event => { const node = event.currentTarget; follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24; }}>{text}</div>}
+      <div id={contentId} className="ai-tool-detail ai-thinking-text" hidden={!open} ref={box} aria-live="off"
+        onScroll={event => { const node = event.currentTarget; disclosure.top = node.scrollTop;
+          disclosure.follow = node.scrollHeight - node.scrollTop - node.clientHeight < 24; }}>
+        {open && (markdown ? <Markdown source={text} /> : text)}</div>
     </div>
   </div>;
 }

@@ -40,13 +40,15 @@ export type CatalogStatus = {
 export type CatalogInput = { provider?: string; model?: string; name?: string | null; context_window?: number | null; max_output?: number | null;
   input_price?: number | null; output_price?: number | null; cache_price?: number | null; capabilities?: Capabilities };
 export type ChannelHealth = { requests: number; success_rate: number | null; p95_ms: number | null; last_error: string | null; unhealthy: boolean };
+export type ChannelProtocol = "chat_completions" | "responses";
 export type AiChannel = {
   id: number; name: string; kind: "openai" | "anthropic"; base_url: string; api_key: string | null; header_names: string[];
+  protocol?: ChannelProtocol;
   enabled: boolean; concurrency: number; timeout: number; synced_at: number | null; sync_note: string | null; last_error: string | null;
   models: number; enabled_models: number; created_at: number; updated_at: number; health?: ChannelHealth | null;
   sync?: { total: number; added: number; removed: number; note: string }; sync_error?: string;
 };
-export type ChannelInput = { name?: string; kind?: AiChannel["kind"]; base_url?: string; api_key?: string | null; headers?: Record<string, string>; enabled?: boolean; concurrency?: number; timeout?: number };
+export type ChannelInput = { name?: string; kind?: AiChannel["kind"]; protocol?: ChannelProtocol; base_url?: string; api_key?: string | null; headers?: Record<string, string>; enabled?: boolean; concurrency?: number; timeout?: number };
 export type ToolLevel = "read" | "write" | "danger" | "scope" | "meta";
 export type ToolParam = { name: string; label: string; default: number; min: number; max: number; value: number };
 export type AdminTool = {

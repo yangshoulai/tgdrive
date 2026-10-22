@@ -16,6 +16,7 @@ from . import providers
 from .providers import Endpoint, ProviderError, ToolDef
 
 KINDS = ("openai", "anthropic")
+PROTOCOLS = ("chat_completions", "responses")
 _FORBIDDEN_HEADERS = {"host", "content-length", "content-type", "connection", "transfer-encoding", "accept",
                       "authorization", "x-api-key", "anthropic-version", "keep-alive", "upgrade", "te", "trailer"}
 MASK = "••••••••"
@@ -79,11 +80,15 @@ class ChannelStore:
 
     @staticmethod
     def _fields(payload: dict, *, creating: bool) -> dict[str, object]:
-        allowed = {"name", "kind", "base_url", "api_key", "headers", "enabled", "concurrency", "timeout"}
+        allowed = {"name", "kind", "base_url", "api_key", "headers", "enabled", "concurrency", "timeout", "protocol"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
         values: dict[str, object] = {}
+        if "protocol" in payload:
+            if payload["protocol"] not in PROTOCOLS:
+                raise ValueError("OpenAI 接口方式只能是 Chat Completions 或 Responses")
+            values["protocol"] = payload["protocol"]
         if creating or "name" in payload:
             name = payload.get("name")
             if not isinstance(name, str) or not 1 <= len(name.strip()) <= 40:
@@ -109,13 +114,30 @@ class ChannelStore:
 
     # ---------- 渠道 ----------
 
+    def _protocol(self, channel_id: int) -> str:
+        row = self.metadata.db.execute("SELECT value FROM settings WHERE key=?", (f"assistant.channel.{channel_id}.protocol",)).fetchone()
+        try:
+            value = json.loads(row["value"]) if row else None
+        except ValueError:
+            value = None
+        return value if value in PROTOCOLS else "chat_completions"
+
+    @staticmethod
+    def _save_protocol(db, channel_id: int, protocol: str) -> None:
+        key = f"assistant.channel.{channel_id}.protocol"
+        if protocol == "chat_completions":
+            db.execute("DELETE FROM settings WHERE key=?", (key,))
+        else:
+            db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                       (key, json.dumps(protocol)))
+
     def _channel_json(self, row) -> dict[str, object]:
         secret = self._open(row["id"], "secret", row["secret"])
         headers = self._open(row["id"], "headers", row["headers"])
         names = sorted(json.loads(headers)) if headers else []
         counts = self.metadata.db.execute(
             "SELECT COUNT(*) AS total, COALESCE(SUM(enabled),0) AS enabled FROM ai_models WHERE channel_id=?", (row["id"],)).fetchone()
-        return {"id": row["id"], "name": row["name"], "kind": row["kind"], "base_url": row["base_url"],
+        return {"id": row["id"], "name": row["name"], "kind": row["kind"], "base_url": row["base_url"], "protocol": self._protocol(row["id"]),
                 "api_key": _mask(secret.decode() if secret else None), "header_names": names,
                 "enabled": bool(row["enabled"]), "concurrency": row["concurrency"], "timeout": row["timeout"],
                 "synced_at": row["synced_at"], "sync_note": row["sync_note"], "last_error": row["last_error"],
@@ -136,6 +158,9 @@ class ChannelStore:
 
     def create(self, payload: dict) -> dict[str, object]:
         values = self._fields(payload, creating=True)
+        protocol = values.pop("protocol", "chat_completions")
+        if values["kind"] != "openai" and protocol != "chat_completions":
+            raise ValueError("Responses 仅适用于 OpenAI 渠道")
         api_key = payload.get("api_key")
         if api_key is not None and (not isinstance(api_key, str) or len(api_key) > 4096 or any(ord(c) < 33 for c in api_key)):
             raise ValueError("API Key 格式不正确")
@@ -147,6 +172,7 @@ class ChannelStore:
                 (values["name"], values["kind"], values["base_url"], values.get("enabled", 1), values.get("concurrency", 4),
                  values.get("timeout", 120), now, now))
             channel_id = int(cursor.lastrowid)
+            self._save_protocol(db, channel_id, protocol)
             db.execute("UPDATE ai_channels SET secret=?, headers=? WHERE id=?",
                        (self._seal(channel_id, "secret", api_key.encode()) if api_key else None,
                         self._seal(channel_id, "headers", json.dumps(headers).encode()) if headers else None, channel_id))
@@ -157,6 +183,9 @@ class ChannelStore:
         values = self._fields(payload, creating=False)
         if "kind" in values and values["kind"] != row["kind"]:
             raise ValueError("渠道类型创建后不能修改，请新建渠道")
+        protocol = values.pop("protocol", None)
+        if row["kind"] != "openai" and protocol not in (None, "chat_completions"):
+            raise ValueError("Responses 仅适用于 OpenAI 渠道")
         sets, args = [f"{name}=?" for name in values], list(values.values())
         if "api_key" in payload:
             # 留空表示不修改；只有显式传入 null 或新值才变更。
@@ -179,19 +208,22 @@ class ChannelStore:
         args.append(time.time())
         with self.metadata.transaction() as db:
             db.execute(f"UPDATE ai_channels SET {','.join(sets)} WHERE id=?", (*args, channel_id))
+            if protocol is not None:
+                self._save_protocol(db, channel_id, protocol)
         return self.get(channel_id)
 
     def delete(self, channel_id: int) -> None:
         self._row(channel_id)
         with self.metadata.transaction() as db:
             db.execute("DELETE FROM ai_channels WHERE id=?", (channel_id,))
+            db.execute("DELETE FROM settings WHERE key=?", (f"assistant.channel.{channel_id}.protocol",))
 
     def endpoint(self, channel_id: int) -> Endpoint:
         row = self._row(channel_id)
         secret = self._open(channel_id, "secret", row["secret"])
         headers = self._open(channel_id, "headers", row["headers"])
         return Endpoint(row["kind"], row["base_url"], secret.decode() if secret else None,
-                        json.loads(headers) if headers else {}, int(row["timeout"]))
+                        json.loads(headers) if headers else {}, int(row["timeout"]), self._protocol(channel_id))
 
     def concurrency(self, channel_id: int) -> int:
         row = self.metadata.db.execute("SELECT concurrency FROM ai_channels WHERE id=?", (channel_id,)).fetchone()
@@ -446,7 +478,7 @@ class ChannelStore:
         started = time.time()
         try:
             reply = await providers.chat(endpoint, model["model"], "你是连通性测试助手。", [{"role": "user", "content": prompt}],
-                                         [tool], max_tokens=256)
+                                         [tool], max_tokens=4096 if endpoint.protocol == "responses" else 256)
         except ProviderError as exc:
             note = str(exc)
             self.log_call(kind="test", channel_id=model["channel_id"], model_id=model_id, actor=actor, started_at=started,
@@ -457,11 +489,14 @@ class ChannelStore:
             return {"ok": False, "tools": model["tools"], "note": note, "duration_ms": int((time.time() - started) * 1000)}
         duration = int((time.time() - started) * 1000)
         supports = any(call.name == tool.name for call in reply.tool_calls)
-        note = f"连通正常，{'支持' if supports else '未发起'}工具调用，耗时 {duration / 1000:.1f} 秒"
+        # Responses 的预算也包含推理，达到上限只能记为未确认，不能把可用模型改成不支持工具。
+        uncertain = reply.finish == "length" and not supports
+        detected = model["tools"] if uncertain else "yes" if supports else "no"
+        note = "连通正常，输出达到测试上限，尚未确认工具调用能力" if uncertain else f"连通正常，{'支持' if supports else '未发起'}工具调用，耗时 {duration / 1000:.1f} 秒"
         with self.metadata.transaction() as db:
             db.execute("UPDATE ai_models SET tested_at=?, test_note=?, tools=? WHERE id=?",
-                       (time.time(), note, "yes" if supports else "no", model_id))
+                       (time.time(), note, detected, model_id))
         self.log_call(kind="test", channel_id=model["channel_id"], model_id=model_id, actor=actor, started_at=started,
                       status="ok", http_status=reply.status, duration_ms=duration, ttfb_ms=reply.ttfb_ms, input_tokens=reply.input_tokens,
                       output_tokens=reply.output_tokens, cached_tokens=reply.cached_tokens, upstream_id=reply.upstream_id, items=len(reply.tool_calls))
-        return {"ok": True, "tools": "yes" if supports else "no", "note": note, "duration_ms": duration}
+        return {"ok": True, "tools": detected, "note": note, "duration_ms": duration}
