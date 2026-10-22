@@ -324,7 +324,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
   const [candidates, setCandidates] = useState<api.DownloadCandidate[] | null>(initial?.candidates ?? null);
   const [selected, setSelected] = useState(() => new Set<number>(initial?.candidates.map((_, index) => index) ?? []));
   const [destination, setDestination] = useState(initial?.destination ?? "");
-  // 来自脚本的私密目标：未解锁时先在本页解锁，再确认保存位置。
+  // 来自脚本的私密目标：未解锁时先在本页解锁；手动切换位置时同步意图，避免又被改回私密空间。
   const access = usePrivateAccess();
   const [wantPrivate, setWantPrivate] = useState(Boolean(initial?.private));
   const needsUnlock = wantPrivate && !access.grant;
@@ -400,7 +400,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
               <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setWantPrivate(false); setDestination(""); }}>改存普通目录</Button></div>
             <PrivateUnlockForm />
           </div>
-          : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示不含查询参数的来源地址。</p></>}
+          : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { setWantPrivate(api.isPrivatePath(path)); setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示不含查询参数的来源地址。</p></>}
       </>}
       {error && <Notice tone="danger">{error}</Notice>}
     </div>

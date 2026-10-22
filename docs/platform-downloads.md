@@ -17,7 +17,7 @@ docker build --target platform -t tgdrive:platform .
 
 本地开发安装 `pip install -e '.[platform]'`，另需 FFmpeg、Node.js 22+ 或 Deno 2.3+。启动开关为 `--offline-x`、`--offline-youtube`，上限为 `--offline-max-mib`、`--youtube-max-height`，环境变量见 README 和管理员文档。管理员已有配置优先，不自动替管理员改开关。
 
-标签发布工作流仍只由 `v*` 触发，新增同版本 `-platform` 和 `latest-platform` 标签；这些标签在对应版本实际发布后才可拉取。本轮只构建本地验证镜像，没有发布或替换部署。
+发布工作流仅在发布关联 `v*` 标签的 GitHub Release 时触发，生成同版本 `-platform` 和 `latest-platform` 镜像标签；这些标签在对应版本的镜像构建并推送成功后才可拉取。本轮只构建本地验证镜像，没有发布或替换部署。
 
 ## 执行与数据边界
 
