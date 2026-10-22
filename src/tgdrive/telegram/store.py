@@ -12,7 +12,7 @@ from ..blobstore import BlobStore
 from ..errors import BlobNotFound, IntegrityError
 from .client import (
     TelegramAuthError,
-    TelegramNotFoundError,
+    TelegramError,
     TelegramRateLimitError,
     TelegramTransientError,
 )
@@ -142,5 +142,10 @@ class TelegramBlobStore(BlobStore):
             raise BlobNotFound(ref_value) from exc
         try:
             await bot.client.delete_message(ref.chat, ref.message)
-        except TelegramNotFoundError:
-            return
+        except TelegramError as exc:
+            # 远端已删除、本地尚未来得及出队便重启时，重试会收到 400 而不是 404。
+            # 只把明确的「消息不存在」视为幂等成功；频道、凭据或 API 地址错误仍须保留失败记录。
+            message = str(exc).strip().casefold().removeprefix("bad request: ").strip()
+            if exc.error_code == 400 and message == "message to delete not found":
+                return
+            raise

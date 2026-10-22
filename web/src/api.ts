@@ -631,7 +631,8 @@ export const resetAdminUserPassword = (id: number, password: string) => post<voi
 export const deleteAdminUser = (id: number, confirm: string) => post<{ username: string; deleted_objects: number }>(`/api/admin/v1/users/${id}/delete`, { confirm });
 export const changePassphrase = (oldPassphrase: string, newPassphrase: string) => post<{ key_version: number; rewrapped_files: number }>("/api/admin/v1/passphrase", { old_passphrase: oldPassphrase, new_passphrase: newPassphrase }, 15 * 60000);
 export type MaintenanceTask = { at: number; error?: string; [key: string]: unknown };
-export type MaintenanceStatus = { gc_pending: number; gc_dead: number; cleanup?: MaintenanceTask; gc?: MaintenanceTask; scrub?: MaintenanceTask; backup?: MaintenanceTask; trash?: MaintenanceTask };
+export type GcFailure = { reason: string; count: number; label: string; hint: string };
+export type MaintenanceStatus = { gc_pending: number; gc_dead: number; gc_failures?: GcFailure[]; cleanup?: MaintenanceTask; gc?: MaintenanceTask; scrub?: MaintenanceTask; backup?: MaintenanceTask; trash?: MaintenanceTask };
 export const maintenanceStatus = () => request<MaintenanceStatus>("/api/admin/v1/maintenance/status");
 export type ThumbnailJob = { id: string; kind: "image" | "video" | "audio"; state: string; detail: string; at?: number; wait_seconds?: number; manual?: boolean; backfill?: boolean };
 /** 自动补图：daily_bytes 为 null 表示不限制，0 表示关闭。 */

@@ -2100,6 +2100,10 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
 .key-value code.mono { overflow-wrap: anywhere; }
 .task-outcome { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: var(--text-sm); }
 .task-outcome .muted { font-size: var(--text-xs); }
+.gc-failures { margin-top: 8px; font-size: var(--text-sm); }
+.gc-failure-list { display: grid; gap: 10px; padding-top: 8px; }
+.gc-failure { display: grid; gap: 4px; }
+.gc-failure > small { color: var(--ink-2); line-height: 1.6; }
 
 /* ---------- 响应式 ---------- */
 

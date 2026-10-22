@@ -33,6 +33,40 @@ class VideoFrameTests(unittest.TestCase):
                        bytes(range(64, 192)) * 8):
             self.assertTrue(video_frame_usable(pixels))
 
+    def test_colored_intros_with_logos_and_smooth_gradients_are_rejected(self):
+        def frame(pixel):
+            return bytes(pixel(x, y) for y in range(32) for x in range(32))
+        samples = [frame(lambda x, y: 230 if x >= 26 and 4 <= y < 10 else value)
+                   for value in (32, 64, 96, 128, 160, 200)]
+        samples += [frame(lambda x, y: 200 if x >= 27 and 4 <= y < 10 else 30 + x + y),
+                    frame(lambda x, y: 40 + x * 4 + y),
+                    frame(lambda x, y: 0 if y < 6 or y >= 26 else 60),
+                    frame(lambda x, y: 200 if 12 <= x < 20 and 12 <= y < 20 else 64)]
+        for pixels in samples:
+            with self.subTest(sample=pixels[:8]):
+                self.assertFalse(video_frame_usable(pixels))
+
+    def test_detailed_single_tone_scenes_and_detail_inside_letterboxing_are_allowed(self):
+        for letterbox in (False, True):
+            pixels = bytes(0 if letterbox and (y < 6 or y >= 26) else 40 + (x * 17 + y * 13) % 100
+                           for y in range(32) for x in range(32))
+            self.assertTrue(video_frame_usable(pixels))
+
+
+class VideoFrameSelectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_colored_intro_can_continue_past_thirty_seconds(self):
+        # 选帧本身不需要数据库或源文件，只验证不合格片头之后继续找正文。
+        worker = ThumbnailService.__new__(ThumbnailService)
+        intro = bytes(200 if x >= 27 and 4 <= y < 10 else 30 + x + y
+                      for y in range(32) for x in range(32))
+        body = bytes([28, 64, 50, 110]) * 256
+        samples = [({"thumb": JPEG}, intro)] * 5 + [({"thumb": JPEG}, body)]
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(worker, "_render_frame", AsyncMock(side_effect=samples)) as decoder:
+                images = await worker._render(SimpleNamespace(), "video", Path(directory), lambda: None)
+        self.assertEqual(images, {"thumb": JPEG})
+        self.assertEqual([call.kwargs["position"] for call in decoder.await_args_list], [0, 1, 3, 10, 30, 60])
+
 
 class Writer:
     def __init__(self):

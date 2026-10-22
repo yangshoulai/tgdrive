@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { getFileKind } from "./files";
-import { videoFramePixelsUsable } from "./video-frame";
+import { VIDEO_FRAME_TIMES, VIDEO_SAMPLE_SIZE, videoFramePixelsUsable } from "./video-frame";
 
 export type ThumbnailSource = "image" | "video" | "audio";
 export type ThumbnailSet = { thumb: string; grid?: string; poster?: string };
@@ -112,14 +112,14 @@ function waitFor(target: HTMLMediaElement, event: string | string[], signal?: Ab
   });
 }
 
-/** 缩小后的灰度样本（0–255），同时判断黑白占比与画面细节。 */
+/** 缩小后的灰度样本（0–255），检查黑白占比、相近亮度集中程度与细节分布。 */
 function frameLuma(video: HTMLVideoElement) {
   const canvas = document.createElement("canvas");
-  canvas.width = 32; canvas.height = 32;
+  canvas.width = VIDEO_SAMPLE_SIZE; canvas.height = VIDEO_SAMPLE_SIZE;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) return new Uint8Array();
-  context.drawImage(video, 0, 0, 32, 32);
-  const pixels = context.getImageData(0, 0, 32, 32).data;
+  context.drawImage(video, 0, 0, VIDEO_SAMPLE_SIZE, VIDEO_SAMPLE_SIZE);
+  const pixels = context.getImageData(0, 0, VIDEO_SAMPLE_SIZE, VIDEO_SAMPLE_SIZE).data;
   const luma = new Uint8Array(pixels.length / 4);
   for (let index = 0; index < luma.length; index++) luma[index] = Math.round(pixels[index * 4] * 0.299 + pixels[index * 4 + 1] * 0.587 + pixels[index * 4 + 2] * 0.114);
   return luma;
@@ -145,7 +145,7 @@ async function fromVideo(src: string, signal?: AbortSignal, onFailure?: (message
     }
     if (videoFrameUsable(video)) return await thumbnailsFromVideo(video);
     // 仅本地上传或显式生成时尝试多个位置；真实预览仍只截当前画面，不跳转播放位置。
-    for (const candidate of [1, 3, 10, 30]) {
+    for (const candidate of VIDEO_FRAME_TIMES.slice(1)) {
       const time = Number.isFinite(video.duration) ? Math.min(candidate, Math.max(0, video.duration - 0.1)) : candidate;
       if (time <= video.currentTime + 0.01 || performance.now() >= deadline) continue;
       const seek = waitFor(video, "seeked", signal, Math.min(3000, Math.max(1, deadline - performance.now())), () => !video.seeking && video.readyState >= 2 && Math.abs(video.currentTime - time) < 0.1);

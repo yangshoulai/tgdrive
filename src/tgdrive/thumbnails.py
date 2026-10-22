@@ -43,7 +43,7 @@ MAX_PIXELS = 40_000_000
 VIDEO_PIXELS = 4096 * 2160
 # 与 web/src/video-frame.ts 保持一致；只分析 32×32 灰度样本，不在 Python 中解码完整图片。
 VIDEO_SAMPLE_SIZE = 32
-VIDEO_FRAME_TIMES = (0, 1, 3, 10, 30)
+VIDEO_FRAME_TIMES = (0, 1, 3, 10, 30, 60, 120)
 # 不允许播放列表、concat、SVG 等会加载其他资源的格式。HTTP 请求还统一经过下面的本地代理。
 FORMATS = ("mov,matroska,webm,avi,ogg,mp3,flac,wav,aac,aiff,asf,flv,mpeg,mpegts,ape,wv,"
            "jpeg_pipe,png_pipe,webp_pipe,gif,bmp_pipe,tiff_pipe,ico,jxl_pipe,avif,heif")
@@ -79,13 +79,36 @@ class ThumbnailRetry(ThumbnailBudget):
 
 
 def video_frame_usable(pixels: bytes) -> bool:
-    if not pixels:
+    if len(pixels) != VIDEO_SAMPLE_SIZE ** 2:
         return False
     count = len(pixels)
     if sum(value <= 24 for value in pixels) >= count * 0.7 or sum(value >= 232 for value in pixels) >= count * 0.7:
         return False
     mean = sum(pixels) / count
-    return sum((value - mean) ** 2 for value in pixels) / count >= 12 ** 2
+    if sum(value * value for value in pixels) / count - mean * mean < 12 ** 2:
+        return False
+    # 大面积单色叠加小标志也会有很高的全局方差；85% 像素集中在相近的 25 级亮度仍视为空白。
+    histogram = [0] * 256
+    for value in pixels:
+        histogram[value] += 1
+    band = sum(histogram[:25])
+    if band >= count * 0.85:
+        return False
+    for value in range(25, 256):
+        band += histogram[value] - histogram[value - 25]
+        if band >= count * 0.85:
+            return False
+    # 至少 8% 像素有明显邻域变化，覆盖 4 个分区并包含中部，避免平滑渐变、黑边和角落标志充数。
+    tiles = [0] * 16
+    tile_size = VIDEO_SAMPLE_SIZE // 4
+    for index, value in enumerate(pixels):
+        x, y = index % VIDEO_SAMPLE_SIZE, index // VIDEO_SAMPLE_SIZE
+        horizontal = x > 0 and abs(value - pixels[index - 1]) >= 12
+        vertical = y > 0 and abs(value - pixels[index - VIDEO_SAMPLE_SIZE]) >= 12
+        if horizontal or vertical:
+            tiles[(y // tile_size) * 4 + x // tile_size] += 1
+    return (sum(tiles) >= count * 0.08 and sum(value >= 4 for value in tiles) >= 4
+            and any(tiles[index] >= 4 for index in (5, 6, 9, 10)))
 
 
 def source_kind(info: ObjectInfo) -> str | None:

@@ -21,7 +21,7 @@ export function Maintenance({ status, onStatus, onLocked }: { status: api.System
       <PageHeader title="安全与维护" />
       <Tabs label="维护区域" value={section} onChange={setSection} options={[{ value: "maintenance", label: "维护与备份" }, { value: "security", label: "安全设置" }]} />
       <div className="stack maintenance-section" hidden={section !== "maintenance"}>
-        <TasksPanel unlocked={Boolean(unlocked)} />
+        <TasksPanel unlocked={Boolean(unlocked)} active={section === "maintenance"} />
         <ThumbnailTasksPanel active={section === "maintenance"} />
         <BackupsPanel unlocked={Boolean(unlocked)} />
       </div>
@@ -175,36 +175,58 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
 }
 
 /** 自动任务每 10 分钟运行一次（完整性校验与备份每天一次）；这里显示最近结果并允许立即运行。 */
-function TasksPanel({ unlocked }: { unlocked: boolean }) {
+function TasksPanel({ unlocked, active }: { unlocked: boolean; active: boolean }) {
   const [status, setStatus] = useState<api.MaintenanceStatus | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [deep, setDeep] = useState(false);
-  const load = useCallback(() => { void api.maintenanceStatus().then(setStatus).catch(() => undefined); }, []);
-  useEffect(load, [load]);
+  const failures = status?.gc_failures ?? [];
+  const load = useCallback(async () => { try { setStatus(await api.maintenanceStatus()); } catch { /* 下轮再刷新，不覆盖已有结果。 */ } }, []);
+  useEffect(() => {
+    if (!active || !unlocked) return;
+    void load();
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void load(); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [active, unlocked, load]);
   async function run(name: string, action: () => Promise<string>) {
     setRunning(name);
     try { toast.success(await action()); }
     catch (reason) { toast.error(api.errorMessage(reason, "执行失败，请稍后重试")); }
-    finally { setRunning(null); load(); }
+    finally { setRunning(null); void load(); }
   }
-  const outcome = (task?: api.MaintenanceTask, describe?: (task: api.MaintenanceTask) => string) => !task ? <small className="muted">从未运行</small>
+  async function collect(retry = false) {
+    setRunning(retry ? "retry" : "gc");
+    try {
+      if (retry) {
+        const result = await api.retryDeadGc();
+        toast.info(`已重新排队 ${result.requeued} 项，正在尝试清除`);
+        await load();
+      }
+      const result = await api.runAdminGc(500);
+      const message = `处理 ${result.processed} 项，删除 ${result.deleted} 项${result.failed ? `，${result.failed} 项失败，请查看失败原因` : ""}`;
+      if (result.failed) toast.error(message); else toast.success(message);
+    } catch (reason) { toast.error(api.errorMessage(reason, "清除失败，请稍后重试")); }
+    finally { setRunning(null); void load(); }
+  }
+  const outcome = (task?: api.MaintenanceTask, describe?: (task: api.MaintenanceTask) => string, warning = false) => !task ? <small className="muted">从未运行</small>
     : task.error ? <span className="task-outcome tone-danger"><Icon name="alert" size={14} />{task.error}<span className="muted">{since(task.at)}</span></span>
-      : <span className="task-outcome tone-success"><Icon name="check" size={14} />{describe?.(task) ?? "完成"}<span className="muted">{since(task.at)}</span></span>;
+      : <span className={`task-outcome ${warning ? "tone-warning" : "tone-success"}`}><Icon name={warning ? "alert" : "check"} size={14} />{describe?.(task) ?? "完成"}<span className="muted">{since(task.at)}</span></span>;
   const n = (value: unknown) => Number(value ?? 0);
   return (
     <Panel title="维护任务" description="服务运行时会自动执行：清理类任务每 10 分钟一次，文件校验与备份每天一次。系统锁定时暂停。" flush>
       <ul className="task-list">
         <li>
           <span className="attention-icon tone-accent"><Icon name="trash" size={17} /></span>
-          <span className="attention-copy">
-            <strong>清除已删除的文件</strong><small>把已经删除的文件从存储位置真正清除，释放空间。待清除 {status?.gc_pending ?? "—"} 项。</small>
-            {outcome(status?.gc, task => `处理 ${n(task.processed)} 项，删除 ${n(task.deleted)} 项${n(task.failed) ? `，${n(task.failed)} 项失败` : ""}`)}
-            {status && status.gc_dead > 0 && <span className="task-outcome tone-warning"><Icon name="alert" size={14} />{status.gc_dead} 项多次删除失败后已暂停重试（例如对应的存储通道已不可用）。
-              <Button size="sm" variant="ghost" disabled={!unlocked} onClick={() => void run("retry", async () => `已重新排队 ${(await api.retryDeadGc()).requeued} 项`)}>重新尝试</Button></span>}
-          </span>
-          <Button size="sm" loading={running === "gc"} disabled={!unlocked || running !== null} onClick={() => void run("gc", async () => {
-            const result = await api.runAdminGc(500); return `处理 ${result.processed} 项，删除 ${result.deleted} 项`;
-          })}>立即运行</Button>
+          <div className="attention-copy">
+            <strong>清除已删除的文件</strong><small>把已经删除的文件从存储位置真正清除，释放空间。待清除 {status ? status.gc_pending + status.gc_dead : "—"} 项{status && status.gc_dead > 0 ? `（其中 ${status.gc_dead} 项已暂停重试）` : ""}。</small>
+            {outcome(status?.gc, task => `最近一轮：处理 ${n(task.processed)} 项，删除 ${n(task.deleted)} 项${n(task.failed) ? `，${n(task.failed)} 项失败` : ""}`,
+              n(status?.gc?.failed) > 0 || n(status?.gc_dead) > 0)}
+            {status && status.gc_dead > 0 && <span className="task-outcome tone-warning"><Icon name="alert" size={14} />{status.gc_dead} 项连续删除失败，已暂停自动重试；请先查看原因。
+              <Button size="sm" variant="ghost" loading={running === "retry"} disabled={!unlocked || running !== null} onClick={() => void collect(true)}>重新尝试</Button></span>}
+            {failures.length > 0 && <details className="gc-failures"><summary>查看失败原因</summary><div className="gc-failure-list">
+              {failures.map(failure => <div className="gc-failure" key={failure.reason}><strong>{failure.count} 项：{failure.label}</strong><small>{failure.hint}</small></div>)}
+            </div></details>}
+          </div>
+          <Button size="sm" loading={running === "gc" || running === "retry"} disabled={!unlocked || running !== null} onClick={() => void collect()}>立即运行</Button>
         </li>
         <li>
           <span className="attention-icon tone-accent"><Icon name="upload" size={17} /></span>

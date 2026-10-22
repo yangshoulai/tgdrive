@@ -75,6 +75,26 @@ def _set_state(metadata: Metadata, key: str, value) -> None:
 class GarbageCollector:
     # 失败超过这个次数的条目不再重试，避免永久失败的条目堵住队列头部。
     MAX_ATTEMPTS = 8
+    # 只返回固定分类与处理建议，不把分片引用、文件标识或错误中的凭据交给界面。
+    FAILURE_REASONS = (
+        ("message_missing", "远端消息已不存在", "可重新尝试；已不存在的消息将按已清理处理。",
+         ("message to delete not found",)),
+        ("delete_forbidden", "Telegram 拒绝删除消息",
+         "可能超过 Bot API 的 48 小时删除时限，或缺少频道删除权限；请先核实，反复重试无法解除这些限制。",
+         ("message can't be deleted", "message cannot be deleted", "message_delete_forbidden")),
+        ("storage_unavailable", "原存储通道或分片引用不可用",
+         "请检查并恢复原 Bot 与频道配置；配置不可用时仍会保留清理记录。",
+         ("unknown bot:", "需要解锁并保留对应 bot 配置", "invalid telegram blob reference",
+          '"v":1,"bot":', '"v": 1, "bot":')),
+        ("channel_unavailable", "无法访问原频道", "请确认原频道仍存在，且原 Bot 仍在频道中。",
+         ("chat not found", "bot was kicked", "bot is not a member", "channel_private")),
+        ("permission", "Bot 凭据或权限不可用", "请检查 Bot token 和原频道管理员权限后重试。",
+         ("unauthorized", "forbidden", "not enough rights", "chat_admin_required")),
+        ("rate_limit", "Telegram 暂时限流", "请等待限流解除后重试，避免连续重复提交。",
+         ("too many requests", "retry after", "限流")),
+        ("network", "连接存储服务失败", "请检查服务器网络与代理，恢复连接后重试。",
+         ("timed out", "timeout", "connection", "network", "name or service not known", "temporary failure")),
+    )
 
     def __init__(self, metadata: Metadata, store: BlobStore) -> None:
         self.metadata, self.store = metadata, store
@@ -82,6 +102,21 @@ class GarbageCollector:
     def dead_count(self) -> int:
         return int(self.metadata.db.execute("SELECT COUNT(*) FROM gc_queue WHERE attempts >= ?",
                                             (self.MAX_ATTEMPTS,)).fetchone()[0])
+
+    def failure_summary(self) -> list[dict[str, object]]:
+        # 在 SQL 中聚合为有限个分类，避免把大量分片引用或逐项错误读入内存。
+        cases, params = [], []
+        labels = {"other": ("其他存储删除错误", "失败记录已保留，请检查原存储配置；重试后仍失败时继续排查。")}
+        for reason, label, hint, patterns in self.FAILURE_REASONS:
+            cases.append("WHEN " + " OR ".join("LOWER(COALESCE(last_error,'')) LIKE ?" for _ in patterns) + " THEN ?")
+            params.extend(f"%{pattern}%" for pattern in patterns)
+            params.append(reason)
+            labels[reason] = (label, hint)
+        rows = self.metadata.db.execute(
+            "SELECT CASE " + " ".join(cases) + " ELSE 'other' END AS reason,COUNT(*) AS count "
+            "FROM gc_queue WHERE attempts>0 GROUP BY reason ORDER BY count DESC,reason", params).fetchall()
+        return [{"reason": row["reason"], "count": int(row["count"]),
+                 "label": labels[row["reason"]][0], "hint": labels[row["reason"]][1]} for row in rows]
 
     async def run_once(self, *, limit: int = 100) -> GcReport:
         if limit <= 0:
@@ -409,6 +444,7 @@ class MaintenanceService:
         state["gc_pending"] = int(self.metadata.db.execute("SELECT COUNT(*) FROM gc_queue WHERE attempts < ?",
                                                            (GarbageCollector.MAX_ATTEMPTS,)).fetchone()[0])
         state["gc_dead"] = self.gc.dead_count()
+        state["gc_failures"] = self.gc.failure_summary()
         return state
 
     def record(self, task: str, result: dict[str, object]) -> None:

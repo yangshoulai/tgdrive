@@ -4,7 +4,7 @@ import re
 import unittest
 from collections.abc import Mapping
 
-from tgdrive.telegram.client import HttpResponse, TelegramClient, TelegramRateLimitError
+from tgdrive.telegram.client import HttpResponse, TelegramClient, TelegramError, TelegramRateLimitError
 from tgdrive.telegram.pool import BotPool, PoolBot
 from tgdrive.telegram.store import TelegramBlobStore
 
@@ -92,6 +92,42 @@ class M2Tests(unittest.IsolatedAsyncioTestCase):
         pool = BotPool([PoolBot("a", clients[0], 1), PoolBot("b", clients[1], 2)], min_interval=0)
         selected = await asyncio.gather(pool.acquire_for_upload(), pool.acquire_for_upload())
         self.assertEqual({bot.id for bot in selected}, {"a", "b"})
+
+    async def test_delete_recovers_when_previous_response_was_lost(self):
+        class LostResponse(FakeTransport):
+            async def request(self, method, url, headers, body):
+                if url.endswith("/deleteMessage"):
+                    if self.messages:
+                        await super().request(method, url, headers, body)
+                        raise OSError("删除已到达远端，但响应丢失")
+                    return self._json({"ok": False, "error_code": 400,
+                                       "description": "Bad Request: message to delete not found"})
+                return await super().request(method, url, headers, body)
+        transport = LostResponse()
+        client = TelegramClient("123:fake", api_base="https://fake", transport=transport)
+        store = TelegramBlobStore(BotPool([PoolBot("b1", client, -1001)], min_interval=0))
+        ref = await store.put("ignored", b"data")
+        with self.assertRaises(OSError):
+            await store.delete(ref)
+        await store.delete(ref)
+        self.assertFalse(transport.messages)
+
+    async def test_delete_preserves_permission_channel_and_endpoint_failures(self):
+        for code, description in [(400, "Bad Request: message can't be deleted"),
+                                  (400, "Bad Request: chat not found"), (401, "Unauthorized"),
+                                  (403, "Forbidden: bot was kicked from the channel"), (404, "Not Found"),
+                                  (500, "message to delete not found")]:
+            with self.subTest(code=code, description=description):
+                class FailingDelete(FakeTransport):
+                    async def request(self, method, url, headers, body):
+                        if url.endswith("/deleteMessage"):
+                            return self._json({"ok": False, "error_code": code, "description": description})
+                        return await super().request(method, url, headers, body)
+                client = TelegramClient("123:fake", api_base="https://fake", transport=FailingDelete())
+                store = TelegramBlobStore(BotPool([PoolBot("b1", client, -1001)], min_interval=0))
+                ref = await store.put("ignored", b"data")
+                with self.assertRaises(TelegramError):
+                    await store.delete(ref)
 
 
 if __name__ == "__main__":
