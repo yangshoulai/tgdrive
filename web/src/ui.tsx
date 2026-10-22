@@ -153,30 +153,6 @@ export function AssistantMark({ size = 20, state = "idle", monochrome = false }:
   );
 }
 
-/** 系统托盘标识：蓝色收纳盒与琥珀色文件卡片，渐变和高光均使用品牌令牌。 */
-export function SystemTrayMark({ size = 32 }: { size?: number }) {
-  const id = useId();
-  return <svg className="system-tray-mark" viewBox="0 0 32 32" width={size} height={size} aria-hidden="true">
-    <defs>
-      <linearGradient id={`${id}-body`} x1="7" y1="16" x2="26" y2="31" gradientUnits="userSpaceOnUse">
-        <stop className="tray-mark-top" /><stop offset="1" className="tray-mark-bottom" />
-      </linearGradient>
-      <linearGradient id={`${id}-card`} x1="8" y1="3" x2="17" y2="19" gradientUnits="userSpaceOnUse">
-        <stop className="tray-mark-card-light" /><stop offset="1" className="tray-mark-card-color" />
-      </linearGradient>
-    </defs>
-    <path className="tray-mark-back" d="M7 11.5h18a2 2 0 0 1 1.9 1.3L29 19H3l2.1-6.2A2 2 0 0 1 7 11.5Z" />
-    <rect x="7" y="3.5" width="11.5" height="16" rx="3" transform="rotate(-12 12.75 11.5)" fill={`url(#${id}-card)`} />
-    <g transform="rotate(8 19 13)">
-      <rect className="tray-mark-paper" x="13" y="5" width="12" height="16" rx="3" />
-      <path className="tray-mark-paper-line" d="M16.5 9.5h5M16.5 13h3.5" />
-    </g>
-    <path d="M3 17h7.5a1 1 0 0 1 .8.4l1.4 1.9a1 1 0 0 0 .8.4h5a1 1 0 0 0 .8-.4l1.4-1.9a1 1 0 0 1 .8-.4H29v8.5a3.5 3.5 0 0 1-3.5 3.5h-19A3.5 3.5 0 0 1 3 25.5Z" fill={`url(#${id}-body)`} />
-    <path className="tray-mark-highlight" d="M4 17.7h6.2l1.6 2.1a2 2 0 0 0 1.6.8h5.2a2 2 0 0 0 1.6-.8l1.6-2.1H28" />
-    <rect className="tray-mark-handle" x="12.5" y="24" width="7" height="1.5" rx=".75" />
-  </svg>;
-}
-
 export function Brand({ href = "/", suffix, tagline = false }: { href?: string; suffix?: string; /** 在名称下方显示品牌标语 */ tagline?: boolean }) {
   return (
     <a className={`brand${tagline ? " has-tagline" : ""}`} href={href} aria-label={`${BRAND} 首页`}>
