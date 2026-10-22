@@ -68,19 +68,20 @@ async def _fetch_page(ctx: ToolContext, url: str, *, referer: str | None = None,
 
 
 @tool("parse_download_source", "识别下载链接", "web", "read",
-      "识别用户给出的下载链接（文件直链、M3U8、X 帖子、YouTube 视频，或 curl/wget 命令，多个链接每行一个，最多 32 个），"
+      "识别用户给出的下载链接（文件直链、M3U8、X 帖子、YouTube 视频，或 curl/wget 命令，多个链接每行一个，数量上限由管理员配置，0 为不限），"
       "返回可下载的文件、大小与清晰度选项，以及结果集编号 collection_id；之后用 propose_downloads(collection_id, indices) 生成下载提议。",
-      {"text": {"type": "string", "description": "链接或命令文本"}}, ("text",))
+      {"text": {"type": "string", "description": "链接或命令文本，最多 256 KiB"}}, ("text",),
+      params={"max_urls": (32, 0, 1000, "单次最多识别链接数（0 为不限）")})
 async def parse_download_source(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
         raise ToolError("离线下载未启用")
-    text = _str(args, "text", limit=16384)
+    text = _str(args, "text", limit=262144)
     if not text:
         raise ToolError("请提供链接")
     # 普通和私密对话均可解析当前任务所需的链接或请求配置；连接由离线请求层校验。
     ctx.check_url(text, "text")
     try:
-        parsed = await ctx.offline.parse(ctx.user_id, text)
+        parsed = await ctx.offline.parse(ctx.user_id, text, max_urls=int(ctx.params.get("max_urls", 32)), multiple_platforms=True)
     except (ValueError, DownloadError) as exc:
         raise ToolError(f"无法识别：{exc}") from exc
     candidates = parsed["candidates"]

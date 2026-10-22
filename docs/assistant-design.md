@@ -93,6 +93,7 @@ AssistantService（src/tgdrive/assistant/）
 {
   "search_files": {"enabled": true},
   "propose_purge_trash": {"enabled": false},
+  "parse_download_source": {"enabled": true, "max_urls": 32},
   "collect_gallery": {"enabled": true, "max_pages": 50, "max_images": 5000, "delay_ms": 1000},
   "read_text_file": {"enabled": true, "max_bytes": 32768, "max_files_per_run": 20}
 }
@@ -107,6 +108,7 @@ AssistantService（src/tgdrive/assistant/）
 - **确认不可关闭**：P、D 级工具「需要用户确认」是固定行为，配置里不提供关闭确认的选项。
 - **生效的工具集** = 全局启用 ∩ 用户最高操作级别允许的级别 ∩ 当前模型支持（不支持工具调用的模型不可选）。用户在对话框「能力」面板里看到的就是这个集合，被关闭的工具标注原因。
 - **参数上限**：工具参数（如爬取页数）在服务端有不可超越的硬上限，与 §5 一致。
+- **下载链接识别**：`parse_download_source.max_urls` 默认 32，可配置为 0–1000 的整数；0 表示不限制链接数量，正数同时限制输入链接数与解析候选数，超出时明确报错、不截断。控制台沿用工具参数弹窗，保存后下一次工具调用生效。助手按此上限调用解析服务，可批量识别直链、命令与多个平台来源；输入仍受 256 KiB、工具超时和解析并发限制。网页下载与访问密钥接口继续默认单次最多 32 个链接／候选、一个 X 帖子或 YouTube 视频，创建任务仍每批最多 32 项。
 - 修改工具配置写审计 `assistant.tools.update`（记录变更的工具名与开关，不记录其他内容）。
 
 ## 4. 安全模型

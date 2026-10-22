@@ -165,15 +165,16 @@ class OfflineDownloads:
         if start > now:
             await asyncio.sleep(start - now)
 
-    async def parse(self, user_id: int, text: str, *, download_type="auto", cookies="") -> dict:
+    async def parse(self, user_id: int, text: str, *, download_type="auto", cookies="", max_urls: int = 32, multiple_platforms: bool = False) -> dict:
+        """网页与密钥接口沿用默认限制；助手可指定识别上限（0 为不限）并批量解析平台链接。"""
         if download_type not in ("auto", "http", "hls", "x", "youtube"):
             raise ValueError("下载类型不正确")
         if not isinstance(cookies, str) or len(cookies.encode()) > 32768:
             raise ValueError("Cookie 文本不能超过 32 KiB")
         self.scope(user_id)
-        requests = parse_requests(text)
+        requests = parse_requests(text, max_urls=max_urls)
         sites = [site_link(request.url) if download_type in ("auto", "x", "youtube") else None for request in requests]
-        if sum(site is not None for site in sites) > 1:
+        if not multiple_platforms and sum(site is not None for site in sites) > 1:
             raise ValueError("每次解析一个 X 帖子或 YouTube 视频，媒体可在解析后逐项选择")
         async def inspect(request, site):
             async with self._parse_slots:
@@ -186,8 +187,8 @@ class OfflineDownloads:
                 return await self._parse_request(user_id, request, download_type)
         groups = await asyncio.gather(*(inspect(request, site) for request, site in zip(requests, sites)))
         candidates = [{**candidate, "group": f"{index}:{candidate.get('group', '0')}"} for index, group in enumerate(groups) for candidate in group]
-        if len(candidates) > 32:
-            raise ValueError("解析结果超过 32 个文件，请分批提交")
+        if max_urls and len(candidates) > max_urls:
+            raise ValueError(f"解析结果超过 {max_urls} 个文件，请分批提交")
         self.scope(user_id)
         return {"candidates": candidates}
 

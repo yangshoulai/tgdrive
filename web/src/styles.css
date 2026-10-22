@@ -915,17 +915,18 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .cell-name, .cell-user { display: flex; align-items: center; gap: 10px; }
 .cell-size, .cell-date { font-variant-numeric: tabular-nums; }
 .cell-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
-/* 预览头部的缓存按钮：已缓存显示勾，部分缓存显示进度环与百分比。 */
+/* 预览头部的缓存按钮：完整缓存显示硬盘图标，手动绿色、自动灰色；部分缓存显示进度。 */
 .file-cache-button { display: inline-flex; flex: none; gap: 4px; width: auto; min-width: 28px; padding-inline: 6px; font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
 .file-cache-button.is-active { color: var(--accent); }
-.file-cache-button.is-complete { color: var(--success); }
+.file-cache-button.is-complete, .file-cache-button.is-complete > svg { color: var(--success); }
+.file-cache-button.is-complete.is-auto, .file-cache-button.is-complete.is-auto > svg { color: var(--ink-3); }
 .file-cache-ring { width: 18px; height: 18px; fill: none; stroke-width: 2; transform: rotate(-90deg); }
-/* 列表与网格的缓存状态：只为手动缓存与进行中的任务显示，跟在文件名后，与「公开」徽标同一高度。 */
+/* 列表与网格的缓存状态：跟在文件名后，完整缓存只显示图标，进度与失败保留文字。 */
 .file-cache-status { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 20px; padding: 0 6px; border: 0; border-radius: var(--radius-xs); background: var(--surface-sunken); color: var(--ink-3); font: inherit; font-size: var(--text-micro); font-weight: 500; font-variant-numeric: tabular-nums; cursor: pointer; }
 .file-cache-status:hover { color: var(--ink); }
 .file-cache-status:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-.file-cache-status.is-complete { background: var(--success-soft); color: var(--success); }
-/* 自动缓存：浏览器顺带保存、空间不够时先被移除，用描边的浅色标记，与手动缓存的实心标记区分。 */
+.file-cache-status.is-complete { justify-content: center; width: 24px; height: 24px; padding: 0; background: var(--success-soft); color: var(--success); }
+/* 自动缓存：保持灰色描边，手动缓存用绿色；二者共用同一个硬盘图标。 */
 .file-cache-status.is-auto { background: transparent; box-shadow: inset 0 0 0 1px var(--line); color: var(--ink-3); }
 .file-cache-status.is-auto:hover { color: var(--ink); }
 .file-cache-status.is-active { color: var(--accent); }

@@ -265,7 +265,9 @@ def command_text(request: DownloadRequest) -> str:
     return " \\\n  ".join(words)
 
 
-def parse_requests(text: str) -> list[DownloadRequest]:
+def parse_requests(text: str, *, max_urls: int = 32) -> list[DownloadRequest]:
+    if isinstance(max_urls, bool) or not isinstance(max_urls, int) or max_urls < 0:
+        raise ValueError("链接数量上限必须为非负整数")
     if not isinstance(text, str) or not text.strip() or len(text.encode()) > 262144:
         raise ValueError("请输入链接或命令，内容最多 256 KB")
     text = text.strip().replace("\r\n", "\n")
@@ -274,6 +276,8 @@ def parse_requests(text: str) -> list[DownloadRequest]:
         requests = [DownloadRequest(checked_url(line)) for line in lines]
     else:
         requests = [request for words in shell_words(text) for request in _command(words)]
-    if not 1 <= len(requests) <= 32:
-        raise ValueError("一次最多解析 32 个文件链接")
+    if not requests:
+        raise ValueError("请提供文件链接")
+    if max_urls and len(requests) > max_urls:
+        raise ValueError(f"一次最多解析 {max_urls} 个文件链接")
     return requests

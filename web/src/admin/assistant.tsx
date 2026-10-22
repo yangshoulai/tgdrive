@@ -934,8 +934,8 @@ function ToolParamsDialog({ tool, values, onClose, onApply }: { tool: ai.AdminTo
     event.preventDefault();
     const result: Record<string, number> = {};
     for (const param of tool.params) {
-      const value = Number(form[param.name]);
-      if (!Number.isInteger(value) || value < param.min || value > param.max) { setError(`${param.label}必须在 ${param.min}–${param.max} 之间`); return; }
+      const raw = form[param.name].trim(), value = Number(raw);
+      if (!raw || !Number.isInteger(value) || value < param.min || value > param.max) { setError(`${param.label}必须在 ${param.min}–${param.max} 之间`); return; }
       result[param.name] = value;
     }
     onApply(result);

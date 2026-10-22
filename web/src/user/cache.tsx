@@ -342,14 +342,14 @@ export function FileCacheButton({ file }: { file: CacheFile }) {
   const state = buttonState(queue, file);
   const automatic = state.complete && !state.manual;
   const label = state.complete ? `${automatic ? "已在本机（自动缓存）" : "已缓存到本机"}：${nameOf(file)}` : `${state.label} ${nameOf(file)}${state.bytes ? ` · ${state.percent}%` : ""}`;
-  return <button type="button" className={`icon-btn icon-btn-ghost icon-btn-sm file-cache-button${state.complete ? " is-complete" : ""}${state.running ? " is-active" : ""}`} title={label} aria-label={label}
+  return <button type="button" className={`icon-btn icon-btn-ghost icon-btn-sm file-cache-button${state.complete ? " is-complete" : ""}${automatic ? " is-auto" : ""}${state.running ? " is-active" : ""}`} title={label} aria-label={label}
     onClick={event => { event.stopPropagation(); if (state.running) queue.showTasks(); else if (state.complete) queue.inspect(file); else queue.enqueue(file); }}>
     {state.bytes && !state.complete ? <><svg className="file-cache-ring" viewBox="0 0 20 20" aria-hidden="true" style={{ "--tray-progress": state.percent } as CSSProperties}><circle className="tray-ring-track" cx="10" cy="10" r="8" /><circle className="tray-ring-value" cx="10" cy="10" r="8" pathLength="100" /></svg><span>{state.percent}%</span></>
-      : <Icon name={state.complete ? "check" : state.error ? "refresh" : state.running ? "pulse" : "monitor"} size={16} />}
+      : <Icon name={state.complete ? "hardDrive" : state.error ? "refresh" : state.running ? "pulse" : "monitor"} size={16} />}
   </button>;
 }
 
-/** 文件列表与网格卡片上的缓存状态：手动缓存（实心、「本机」）与自动缓存（浅色、「自动」）分开标记，另显示进行中与失败的任务。没有缓存时什么也不渲染。 */
+/** 文件列表与网格卡片上的缓存状态：完成时统一用硬盘图标，以绿色／灰色区分手动与自动缓存；另显示进度与失败。没有缓存时什么也不渲染。 */
 export function FileCacheStatus({ file, className = "" }: { file: CacheFile; className?: string }) {
   const queue = useContext(CacheContext);
   if (!queue?.available) return null;
@@ -358,13 +358,13 @@ export function FileCacheStatus({ file, className = "" }: { file: CacheFile; cla
   const name = nameOf(file), origin = state.manual ? "is-manual" : "is-auto";
   const [label, text, tone] = state.running ? [`${state.label} ${name} · ${state.percent}%`, `${state.percent}%`, "is-active"]
     : state.error ? [`缓存失败，点击重试：${name}`, "重试", "is-error"]
-    : state.complete ? state.manual ? [`已手动缓存到本机：${name}`, "本机", `is-complete ${origin}`] : [`已自动缓存到本机：${name}`, "自动", `is-complete ${origin}`]
+    : state.complete ? [`已${state.manual ? "手动" : "自动"}缓存到本机：${name}`, "", `is-complete ${origin}`]
     : [`${state.manual ? "已手动缓存" : "已自动缓存"} ${state.percent}%，点击继续：${name}`, `${state.percent}%`, `is-partial ${origin}`];
   return <button type="button" className={`file-cache-status ${tone} ${className}`} title={label} aria-label={label}
     onClick={event => { event.stopPropagation(); if (state.running) queue.showTasks(); else if (state.complete) queue.inspect(file); else queue.enqueue(file); }}>
-    {state.complete ? <Icon name={state.manual ? "check" : "monitor"} size={12} /> : state.error ? <Icon name="refresh" size={12} />
+    {state.complete ? <Icon name="hardDrive" size={16} /> : state.error ? <Icon name="refresh" size={12} />
       : <svg className="file-cache-ring" viewBox="0 0 20 20" aria-hidden="true" style={{ "--tray-progress": state.percent } as CSSProperties}><circle className="tray-ring-track" cx="10" cy="10" r="8" /><circle className="tray-ring-value" cx="10" cy="10" r="8" pathLength="100" /></svg>}
-    <span>{text}</span>
+    {text && <span>{text}</span>}
   </button>;
 }
 

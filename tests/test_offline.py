@@ -4,20 +4,37 @@ import asyncio
 import json
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 from contextlib import asynccontextmanager
 
 from tgdrive.app import create_app
+from tgdrive.assistant.tools import ToolContext, ToolError, describe_tools, tool_params, validate_tool_settings
+from tgdrive.assistant.web_tools import parse_download_source
 from tgdrive.errors import NotFoundError
 from tgdrive.objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, Scope
 from tgdrive.offline.hls import parse_playlist
 from tgdrive.offline.http import DownloadError, SafeHttpClient, public_ip
 from tgdrive.offline.request import command_text, parse_requests
 from tgdrive.offline.resources import ResourceSettings
+from tgdrive.offline.service import OfflineDownloads
 from tests.test_public_links import Client
 
 
 class RequestTests(unittest.TestCase):
+    def test_configurable_link_limit_keeps_default_and_supports_zero(self):
+        links = [f"https://example.com/{index}.bin" for index in range(1001)]
+        self.assertEqual(len(parse_requests("\n".join(links[:32]))), 32)
+        with self.assertRaisesRegex(ValueError, "最多解析 32"):
+            parse_requests("\n".join(links[:33]))
+        self.assertEqual(len(parse_requests("\n".join(links[:1000]), max_urls=1000)), 1000)
+        with self.assertRaisesRegex(ValueError, "最多解析 1000"):
+            parse_requests("\n".join(links), max_urls=1000)
+        self.assertEqual(len(parse_requests("\n".join(links), max_urls=0)), 1001)
+        self.assertEqual(len(parse_requests("\n".join(f"curl '{url}'" for url in links[:33]), max_urls=33)), 33)
+        for value in (-1, True, 1.5):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_requests(links[0], max_urls=value)
+
     def test_browser_curl_and_wget(self):
         request = parse_requests("curl 'https://example.com/f?x=1&y=2' " + "\\\n" + " -H 'Cookie: auth=private' -H 'Range: bytes=1-9' --compressed -L")[0]
         self.assertEqual(request.url, "https://example.com/f?x=1&y=2")
@@ -61,6 +78,59 @@ class RequestTests(unittest.TestCase):
         for text in ("#EXTM3U\n#EXTINF:2,\n1.ts", "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key\"\n#EXTINF:2,\n1.ts\n#EXT-X-ENDLIST", "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\n1.ts", "#EXTM3U\n#EXT-X-GAP\n#EXTINF:2,\n1.ts\n#EXT-X-ENDLIST"):
             with self.assertRaises(ValueError):
                 parse_playlist(text.encode(), base)
+
+
+class ParseLimitTests(unittest.IsolatedAsyncioTestCase):
+    """只使用解析与留痕替身，不创建数据库或连接来源站。"""
+
+    def service(self):
+        offline = OfflineDownloads.__new__(OfflineDownloads)
+        offline.scope = Mock()
+        offline._parse_slots = asyncio.Semaphore(2)
+        candidate = lambda user_id, request, *args: [{"name": request.url.rsplit("/", 1)[-1], "ticket": "fixture"}]
+        offline._parse_request = AsyncMock(side_effect=candidate)
+        offline._parse_platform = AsyncMock(side_effect=candidate)
+        return offline
+
+    def test_tool_configuration_bounds_and_defaults(self):
+        self.assertEqual(tool_params({}, "parse_download_source"), {"max_urls": 32})
+        for limit in (0, 1000):
+            settings = validate_tool_settings({"parse_download_source": {"max_urls": limit}}, {})
+            spec = next(tool for tool in describe_tools(settings) if tool["name"] == "parse_download_source")
+            param = spec["params"][0]
+            self.assertEqual((param["default"], param["min"], param["max"], param["value"]), (32, 0, 1000, limit))
+        for value in (-1, 1001, True, 1.5, "100"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_tool_settings({"parse_download_source": {"max_urls": value}}, {})
+
+    async def test_tool_limit_reaches_parser_and_keeps_large_results(self):
+        for limit, count in ((1000, 1000), (0, 1001)):
+            with self.subTest(limit=limit):
+                offline, trace = self.service(), Mock()
+                trace.create_collection.return_value = "fixture-collection"
+                ctx = ToolContext(1, 1, "", None, offline, "files", "", {"max_urls": limit}, {},
+                                  conversation_id="fixture", trace=trace)
+                text = "\n".join(f"https://example.com/{index}.bin" for index in range(count))
+                self.assertGreater(len(text), 16384)
+                result = await parse_download_source(ctx, {"text": text})
+                self.assertEqual((result.items, len(result.result["candidates"])), (count, count))
+                self.assertEqual(len({item["group"] for item in result.result["candidates"]}), count)
+                self.assertEqual(trace.create_collection.call_args.kwargs["count"], count)
+        ctx.params = {"max_urls": 1}
+        with self.assertRaisesRegex(ToolError, "最多解析 1"):
+            await parse_download_source(ctx, {"text": "https://example.com/a\nhttps://example.com/b"})
+
+    async def test_candidate_limits_and_platform_defaults_remain_enforced(self):
+        offline = self.service()
+        offline._parse_request.side_effect = lambda *args: [{"name": "a"}, {"name": "b"}]
+        text = "https://example.com/a\nhttps://example.com/b"
+        with self.assertRaisesRegex(ValueError, "解析结果超过 3"):
+            await offline.parse(1, text, max_urls=3)
+        self.assertEqual(len((await offline.parse(1, text, max_urls=0))["candidates"]), 4)
+        platforms = "https://x.com/u/status/123\nhttps://x.com/u/status/456"
+        with self.assertRaisesRegex(ValueError, "每次解析一个"):
+            await offline.parse(1, platforms)
+        self.assertEqual(len((await offline.parse(1, platforms, max_urls=1000, multiple_platforms=True))["candidates"]), 2)
 
 
 class MemoryResponse:
