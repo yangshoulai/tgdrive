@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from ..offline.http import DownloadError
 from ..offline.request import checked_url, filename, url_filename
 from . import web
+from .config import batch_limit
 from .tools import ToolContext, ToolError, ToolOutput, _int, _str, tool
 from .write_tools import _propose, render_name
 
@@ -583,14 +584,16 @@ async def get_collection(ctx: ToolContext, args: dict) -> ToolOutput:
       "的解析结果，可用 indices 选择其中几项，或用 offset/limit 选一段）、urls（直链列表）。target 为保存目录。name_template 可选，变量 {name} {stem} {ext} {n}"
       "（如 {n:03}{ext}）；默认使用链接里的文件名。多个相册的结果集可设 by_album=true，按相册保存到「target/相册名/」。"
       "超过单次上限时按 offset/limit 分批提议，结果里的 next_offset 是下一批的起点。已有文件直链可直接传 urls，无需逐条重新解析；"
-      "后台会自动分批入队，模型只需遵守本工具的提议上限，无需按底层接口批次拆分。续接时核对已成功提交的部分，避免重复提议。",
+      "当前提议上限见参数定义，在上限内优先一次提交已确认的条目；后台会自动分批入队并控制实际并发，无需按底层接口批次拆分。"
+      "续接时核对已成功提交的部分，避免重复提议。",
       {"collection_id": {"type": "string"}, "indices": {"type": "array", "items": {"type": "integer"}, "description": "只选结果集中的这些序号"},
        "offset": {"type": "integer", "description": "从结果集的第几项开始（与 indices 二选一）"},
        "limit": {"type": "integer", "description": "这一批最多几项，默认为单次上限"},
        "by_album": {"type": "boolean", "description": "按相册分子目录保存（结果集由 collect_gallery 的多个相册得到时）"},
        "urls": {"type": "array", "items": {"type": "string"}, "description": "文件直链（http/https）"},
        "target": {"type": "string", "description": "保存目录"},
-       "name_template": {"type": "string"}}, ("target",))
+       "name_template": {"type": "string"}}, ("target",),
+      input_limits={name: ("download_urls", "action_items") for name in ("urls", "indices", "limit")})
 async def propose_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
         raise ToolError("离线下载未启用")
@@ -598,7 +601,7 @@ async def propose_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
     collection_id, urls = _str(args, "collection_id", limit=40), args.get("urls")
     if bool(collection_id) == bool(urls):
         raise ToolError("请在 collection_id 与 urls 中二选一")
-    limit = int(ctx.limits.get("download_urls", 2000))
+    limit = batch_limit(ctx.limits, "download_urls", "action_items")
     template = _str(args, "name_template", limit=120)
     items: list[dict] = []
     source = None

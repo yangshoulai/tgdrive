@@ -1,11 +1,14 @@
 """大批量任务入队边界：数据库与来源均使用替身，不执行 SQL 或访问网络。"""
 import asyncio
+import copy
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from tgdrive.assistant.actions import ActionExecutor, DOWNLOAD_BATCH, Progress
+from tgdrive.assistant.tools import TOOLS, ToolContext, ToolError
+from tgdrive.assistant.web_tools import propose_downloads
 from tgdrive.objects import PRIVATE_PREFIX, ObjectService, Scope
 from tgdrive.offline.service import MAX_CREATE_ITEMS, MAX_PENDING_TASKS, OfflineDownloads
 
@@ -118,6 +121,54 @@ class QueueCapacityTests(unittest.TestCase):
         statement, parameters = database.execute.call_args_list[1].args
         self.assertIn("user_id=? AND status=?", statement)
         self.assertEqual(parameters, (1, "running", 101))
+
+
+class AssistantProposalTests(unittest.IsolatedAsyncioTestCase):
+    def fixture(self, limits=None):
+        return ToolContext(1, 8, "", None, SimpleNamespace(), "files", "", {}, {},
+                           limits=limits or {}, conversation_id="fixture",
+                           propose=AsyncMock(return_value={"action_id": "fixture", "expires_at": 4102444800}))
+
+    def test_tool_schema_uses_effective_limits_without_changing_registry(self):
+        spec = TOOLS["propose_downloads"]
+        original = copy.deepcopy(spec.parameters)
+        for limits, expected in (({}, 2000), ({"download_urls": 32}, 32),
+                                 ({"download_urls": 5000, "action_items": 100}, 100),
+                                 ({"download_urls": 1000, "action_items": 10000}, 1000)):
+            with self.subTest(limits=limits):
+                properties = spec.definition(limits=limits, planning=True).parameters["properties"]
+                for name in ("urls", "indices", "limit"):
+                    self.assertEqual(properties[name]["maxItems" if name != "limit" else "maximum"], expected)
+                    self.assertIn(f"当前生效上限 {expected} 项", properties[name]["description"])
+                self.assertIn("plan_step_id", properties)
+        self.assertEqual(spec.parameters, original)
+        self.assertNotIn("plan_step_id", spec.definition().parameters["properties"])
+
+    async def test_confirmed_urls_are_kept_in_one_proposal(self):
+        for count in (13, 77, 2000):
+            with self.subTest(count=count):
+                ctx = self.fixture()
+                urls = [f"https://example.test/{index}.bin" for index in range(count)]
+                output = await propose_downloads(ctx, {"urls": urls, "target": "/"})
+                ctx.propose.assert_awaited_once()
+                payload = ctx.propose.await_args.args[1]
+                self.assertEqual([item["url"] for item in payload["items"]], urls)
+                self.assertEqual(output.items, count)
+
+    async def test_pagination_and_validation_share_effective_limit(self):
+        ctx = self.fixture({"download_urls": 2000, "action_items": 100})
+        entries = [{"url": f"https://example.test/{index}.bin"} for index in range(125)]
+        ctx.trace = Mock()
+        ctx.trace.collection.return_value = {"id": "collection", "conversation_id": ctx.conversation_id,
+                                             "source": "https://example.test", "rule": {}, "urls": entries}
+        first = await propose_downloads(ctx, {"collection_id": "collection", "target": "/", "offset": 0})
+        last = await propose_downloads(ctx, {"collection_id": "collection", "target": "/", "offset": first.result["next_offset"]})
+        self.assertEqual((first.items, first.result["next_offset"], last.items), (100, 100, 25))
+        self.assertNotIn("next_offset", last.result)
+        ctx.propose.reset_mock()
+        with self.assertRaisesRegex(ToolError, "超过单次上限 100"):
+            await propose_downloads(ctx, {"urls": [entry["url"] for entry in entries], "target": "/"})
+        ctx.propose.assert_not_awaited()
 
 
 class AssistantQueueBatchTests(unittest.IsolatedAsyncioTestCase):

@@ -99,7 +99,7 @@ class ContextTests(AssistantCase):
             self.assertEqual(detail["context"]["window"], 200000)
             self.assertGreater(detail["context"]["used"], 0)
             # 第二次仍超长：结束本轮并提示新建对话，不当作渠道故障。
-            self.model.replies = [overflow, overflow]
+            self.model.replies = [overflow, Reply(text="滚动摘要：继续最新请求"), overflow]
             status, data = await self.send(user, conversation, "再问一次")
             self.assertEqual(self.service.runs[data["run_id"]].stop_reason, "context")
             last = [m for m in await self.messages(user, conversation) if m["role"] == "event"][-1]

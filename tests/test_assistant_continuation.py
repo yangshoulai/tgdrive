@@ -48,7 +48,11 @@ def memory_trace():
     trace.append.side_effect = append
     trace.messages.side_effect = messages
     trace.latest_plan.side_effect = latest_plan
-    trace.latest_summary.return_value = None
+    trace.latest_summary.side_effect = lambda cid: next((m for m in reversed(messages(cid))
+                                                        if m["role"] == "event" and m.get("type") == "summary"), None)
+    trace.message.side_effect = lambda cid, seq: next((m for m in messages(cid, after=seq - 1, limit=1) if m["seq"] == seq), None)
+    trace.first_user_message.side_effect = lambda cid, rid: next((m for m in messages(cid)
+                                                                 if m["role"] == "user" and m["run_id"] == rid), None)
     trace.conversation.return_value = {"scope_root": "", "access_mode": "full"}
     trace.create_action.side_effect = create_action
     trace.start_action.side_effect = start_action
@@ -95,6 +99,17 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m["role"] for m in history], ["user", "assistant", "tool", "system"])
         trace.append(cid, rid, "event", {"type": "action_result", "model_text": "操作结果中的数据"})
         self.assertEqual(service._history(cid, 1000000)[-1]["role"], "user", "不把业务数据提升为系统指令")
+
+    async def test_model_receives_current_download_limit(self):
+        service, state = self.fixture([Reply(text="已核对")])
+        service.config.limits.return_value.update(download_urls=900, action_items=300)
+        service._user_tools.return_value["propose_downloads"] = TOOLS["propose_downloads"]
+        await self.run_service(service, state)
+        definitions = {definition.name: definition for definition in service._model_call.await_args.args[5]}
+        parameters = definitions["propose_downloads"].parameters["properties"]
+        self.assertEqual(parameters["urls"]["maxItems"], 300)
+        self.assertEqual(parameters["limit"]["maximum"], 300)
+        self.assertIn("plan_step_id", parameters)
 
     async def test_prior_run_controls_do_not_override_new_user_request(self):
         service, state = self.fixture([])

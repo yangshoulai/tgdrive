@@ -25,6 +25,7 @@ from ..errors import NotFoundError
 from ..filekinds import KIND_GROUPS, kind_clause
 from ..objects import PRIVATE_PREFIX, ObjectService, Scope
 from .attachments import PREFIX as ATTACHMENT_PREFIX, ROOT as ATTACHMENT_ROOT
+from .config import batch_limit
 from .providers import ToolDef
 from .knowledge import HELP
 from .planning import Plan, STATUSES, brief
@@ -218,12 +219,21 @@ class ToolSpec:
     # 区域（§37.3）：None 按参数判断；"private"／"normal" 固定区域；area_skip 中的参数不参与判断（跨区工具的另一端）。
     area: str | None = None
     area_skip: tuple[str, ...] = ()
+    # 参数名 → 共同限制它的配置项；每轮请求生成实际边界，不修改注册表中的静态定义。
+    input_limits: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
-    def definition(self, *, planning: bool = False) -> ToolDef:
-        parameters = self.parameters
+    def definition(self, *, planning: bool = False, limits: dict[str, int] | None = None) -> ToolDef:
+        properties = dict(self.parameters.get("properties", {}))
+        for name, keys in self.input_limits.items():
+            value = batch_limit(limits or {}, *keys)
+            parameter = properties[name]
+            bound = "maxItems" if parameter["type"] == "array" else "maximum"
+            properties[name] = {**parameter, bound: value,
+                                "description": f"{parameter.get('description', '')}（当前生效上限 {value} 项）"}
         if planning and self.name != "update_plan":
-            parameters = {**parameters, "properties": {**parameters.get("properties", {}), "plan_step_id": {
-                "type": "string", "description": "当前计划中的步骤编号；存在计划时标明本次调用所属步骤"}}}
+            properties["plan_step_id"] = {
+                "type": "string", "description": "当前计划中的步骤编号；存在计划时标明本次调用所属步骤"}
+        parameters = {**self.parameters, "properties": properties}
         return ToolDef(self.name, self.description, parameters)
 
     @property

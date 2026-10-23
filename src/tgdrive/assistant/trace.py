@@ -167,6 +167,13 @@ class TraceStore:
         found = self.messages(conversation_id, after=seq - 1, limit=1)
         return found[0] if found and found[0]["seq"] == seq else None
 
+    def first_user_message(self, conversation_id: str, run_id: str) -> dict | None:
+        """从本对话恢复计划的原始请求，只读取一条用户消息，兼容没有原话引用的旧摘要。"""
+        row = self.metadata.db.execute(
+            "SELECT seq FROM assistant_messages WHERE conversation_id=? AND run_id=? AND role='user' ORDER BY seq LIMIT 1",
+            (conversation_id, run_id)).fetchone()
+        return self.message(conversation_id, row["seq"]) if row else None
+
     def truncate(self, conversation_id: str, seq: int) -> int:
         """删除 seq 及之后的消息（重试）；这些运行留下的待确认操作一并失效。返回删除的条数。"""
         now = time.time()

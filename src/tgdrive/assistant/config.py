@@ -38,6 +38,12 @@ LIMITS: dict[str, tuple[int, int, int, str]] = {
     "message_images": (6, 1, 10, "每条消息随附给识图模型的图片数"),
 }
 
+
+def batch_limit(limits: dict[str, int], *names: str) -> int:
+    """工具定义和执行共用配置交集，避免模型看到的上限与实际校验不一致。"""
+    return min(int(limits.get(name, LIMITS[name][0])) for name in names)
+
+
 SETTINGS: dict[str, tuple[int, int, int]] = {
     "user_daily_tokens": (10_000_000, 0, 10_000_000_000),  # 0 表示不限
     "retention_days": (365, 1, 3650),
