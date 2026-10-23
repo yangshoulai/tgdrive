@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from ..offline.http import DownloadError
 from ..offline.request import checked_url, filename, url_filename
 from . import web
-from .config import batch_limit
+from .config import LIMITS, batch_limit
 from .tools import ToolContext, ToolError, ToolOutput, _int, _str, tool
 from .write_tools import _propose, render_name
 
@@ -559,8 +559,11 @@ async def _collect_albums(ctx: ToolContext, record: dict, rule: dict, albums: ob
                       + (f"，{len(batch['failed'])} 个失败" if batch["failed"] else ""), items=added)
 
 
-@tool("get_collection", "查看结果集", "web", "read", "查看结果集的统计和分页样例；每页项数由管理员设置，next_offset 不为空时继续读取。",
-      {"collection_id": {"type": "string"}, "offset": {"type": "integer", "description": "从第几项开始，默认 0"}},
+@tool("get_collection", "查看结果集", "web", "read",
+      "分页读取结果集。count 是总项数，returned 是本次项数，每项 index 是从 0 起的稳定序号；offset 默认 0。"
+      "每页大小由管理员设置并受工具结果预算约束；只从 next_offset 继续，null 表示本页之后没有下一页。"
+      "已读页面不必反复读取；按稳定序号和条目内容核对任务进度，不能把显示序号与 offset 混用。",
+      {"collection_id": {"type": "string"}, "offset": {"type": "integer", "description": "从 0 起的条目序号；续读使用返回的 next_offset"}},
       ("collection_id",), depends=("analyze_page",), params={"max_results": (200, 10, 2000, "单次最多返回项数")})
 async def get_collection(ctx: ToolContext, args: dict) -> ToolOutput:
     record = _record(ctx, _str(args, "collection_id", limit=40))
@@ -569,14 +572,29 @@ async def get_collection(ctx: ToolContext, args: dict) -> ToolOutput:
     items = record["urls"] if record["kind"] == "collection" else []
     page = items[offset:offset + size]
     kind = {"parsed": "parsed", "links": "links"}.get((record["rule"] or {}).get("type"), "gallery")
-    view = [{"index": offset + index, "name": item.get("name"), "size": item.get("size"), "variant": item.get("variant")}
-            if "ticket" in item else {"url": item.get("url"), "text": item.get("text")} if kind == "links"
-            else {"url": item.get("url"), "album": item["album"]} if item.get("album") else item.get("url")
-            for index, item in enumerate(page)]
-    return ToolOutput({"collection_id": record["id"], "kind": kind,
-                       "source": record["source"], "count": len(items), "items": view,
-                       "next_offset": offset + size if offset + size < len(items) else None},
-                      f"{len(items)} 项", items=len(page))
+    view = []
+    for index, item in enumerate(page, offset):
+        if "ticket" in item:
+            entry = {"name": item.get("name"), "size": item.get("size"), "variant": item.get("variant")}
+        elif kind == "links":
+            entry = {"url": item.get("url"), "text": item.get("text")}
+        else:
+            entry = {"url": item.get("url"), **({"album": item["album"]} if item.get("album") else {})}
+        view.append({"index": index, **entry})
+    budget = int(ctx.limits.get("tool_result_bytes", LIMITS["tool_result_bytes"][0]))
+    # 先按实际返回项数决定游标，避免通用裁剪删掉条目后让下一页跳过尚未读到的内容。
+    while True:
+        returned = len(view)
+        payload = {"collection_id": record["id"], "kind": kind, "source": record["source"], "count": len(items),
+                   "offset": offset, "returned": returned, "items": view,
+                   "next_offset": offset + returned if offset + returned < len(items) else None}
+        if len(json.dumps(payload, ensure_ascii=False).encode()) <= budget:
+            break
+        if returned <= 1:
+            raise ToolError("单个结果集条目超过工具结果预算，请提高统一工具结果预算")
+        view = view[:returned // 2]
+    summary = f"共 {len(items)} 项 · " + (f"本次第 {offset + 1}–{offset + returned} 项" if returned else "本次无条目")
+    return ToolOutput(payload, summary, items=returned)
 
 
 @tool("propose_downloads", "离线下载", "write", "write",

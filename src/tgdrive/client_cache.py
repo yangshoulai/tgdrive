@@ -1,9 +1,10 @@
-"""浏览器本地缓存（docs/client-cache-design.md）：只下发密钥与核对引用，文件内容由浏览器的 Service Worker 加密保存。
+"""浏览器本地缓存（docs/client-cache-design.md）：文件内容由浏览器的 Service Worker 加密保存。
 
 - 缓存主密钥 C 是随机 32 字节，用 KEK 子密钥 ``client-cache`` 包裹后存在 settings 表（``client_cache.key``），
   改加密口令时由 ``keystore.rotate`` 重新包裹，浏览器里已有的缓存不受影响。
 - 普通层：会话有效时下发层级密钥 K_tier，条目密钥由浏览器从 K_tier 派生；别处删除的文件靠 ``check`` 对账清理。
 - 私密层：私密授权有效时才下发层级密钥；每个条目的编号与密钥都由服务端逐个计算，只有私密区仍引用该版本时才给出。
+- 手动缓存：解锁时创建任务，后续按登录会话和任务范围读取，不受私密空间锁定影响。
 - 所有密钥都绑定 用户 ‖ 设备 ‖ 纪元 ‖ 密码哈希：改密码、重置纪元都会让旧缓存无法解开。
 """
 
@@ -16,9 +17,12 @@ import json
 import os
 import re
 import threading
+from dataclasses import dataclass
 
+from .api import UserApi
 from .crypto import derive_subkey, open_sealed, seal
-from .objects import PRIVATE_PREFIX
+from .objects import PRIVATE_PREFIX, Scope
+from .private import PrivateFiles
 
 SETTING_KEY = "client_cache.key"
 POLICY_KEY = "client_cache.policy"
@@ -26,6 +30,17 @@ WRAP_PURPOSE = "client-cache"
 WRAP_AAD = "client-cache-key"
 DEVICE = re.compile(r"[A-Za-z0-9_-]{22,64}")
 BATCH = 500
+
+
+@dataclass
+class CacheTask:
+    user_id: int
+    bucket_id: int
+    device: str
+    identity: tuple
+    paths: tuple[str, ...]
+
+
 # 管理员只决定是否允许缓存、是否允许私密缓存及其保留期（安全策略）；占用多少空间由用户在各自设备上设置，
 # 浏览器配额是硬上限。旧版本保存过的容量字段（max_mib、entry_mib、private_max_mib）读取时忽略。
 DEFAULT_POLICY = {
@@ -66,6 +81,7 @@ class ClientCache:
         self.keystore = user.accounts.keystore
         self._lock = threading.Lock()
         self._cached: tuple[bytes, bytes] | None = None
+        self._tasks: dict[tuple[str, str], CacheTask] = {}
 
     # ---------- 主密钥与策略 ----------
 
@@ -189,3 +205,88 @@ class ClientCache:
                 raise ValueError("etag 不合法")
             result.append(value)
         return list(dict.fromkeys(result))
+
+    # ---------- 手动缓存任务：复用登录会话，不另发授权凭据或设置到期时间 ----------
+
+    def start_task(self, token: str, csrf: str, access: str, device: str, task_id: str, paths: object) -> dict:
+        self.user._session(token, csrf=csrf, mutation=True)
+        user_id, bucket_id = self._private_account(token, access)
+        if not self.policy()["enabled"]:
+            raise PermissionError("管理员已关闭本机缓存")
+        if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", task_id):
+            raise ValueError("缓存任务编号不合法")
+        if not isinstance(paths, list) or not paths:
+            raise ValueError("请选择需要缓存的文件或文件夹")
+        normalized = tuple(dict.fromkeys(PrivateFiles.path(path) for path in paths))
+        identity = self._identity(user_id, device)
+        with self._lock:
+            # 任务随网页结束移除；异常关闭遗漏的记录在下次创建时按登录会话清理。
+            self._tasks = {key: task for key, task in self._tasks.items()
+                           if self.user.accounts.sessions.peek(key[0]) is not None}
+            self._tasks[token, task_id] = CacheTask(user_id, bucket_id, device, identity, normalized)
+        return {"namespace": self._namespace(user_id), "bucket_id": bucket_id,
+                "key": _b64(self._derive("tier", "p", *identity))}
+
+    def _task(self, token: str, task_id: str) -> CacheTask:
+        account = self.user.accounts.account_for_session(self.user._session(token))
+        with self._lock:
+            task = self._tasks.get((token, task_id))
+        if task is None or task.user_id != account.id or task.bucket_id != account.bucket_id:
+            raise PermissionError("缓存任务不存在或已结束")
+        policy = self.policy()
+        if not policy["enabled"] or not policy["private_enabled"]:
+            raise PermissionError("管理员已关闭私密文件缓存")
+        if task.identity != self._identity(account.id, task.device):
+            raise PermissionError("缓存密钥已变化，请重新加入缓存")
+        return task
+
+    def task_files(self, token: str, task_id: str):
+        self._task(token, task_id)
+        return CacheTaskFiles(self, token, task_id)
+
+    def task_key(self, token: str, task_id: str, path: str, etag: str) -> dict:
+        files = self.task_files(token, task_id)
+        task = self._task(token, task_id)
+        info = self.user.objects.head_object(files._scope(token), files._path(path))
+        if info.etag != etag or info.key.endswith("/"):
+            raise ValueError("文件已变化，请刷新列表后重新缓存")
+        return {"key": _b64(self._derive("entry", "p", *task.identity, etag))}
+
+    def finish_task(self, token: str, task_id: str) -> dict:
+        self.user._session(token)
+        with self._lock:
+            self._tasks.pop((token, task_id), None)
+        return {"ok": True}
+
+
+class CacheTaskFiles(UserApi):
+    """仅供 Worker 补齐指定范围的缓存；不可用于私密预览或任何写入操作。"""
+
+    def __init__(self, cache: ClientCache, token: str, task_id: str):
+        super().__init__(cache.user.accounts, cache.user.objects, cache.user.clients)
+        self.cache, self.token, self.task_id = cache, token, task_id
+
+    def _path(self, path, *, directory=False):
+        key = PrivateFiles.path(path, directory=directory)
+        task = self.cache._task(self.token, self.task_id)
+        if not any(key == root or root.endswith("/") and key.startswith(root) for root in task.paths):
+            raise PermissionError("文件超出已选定的缓存范围")
+        return key
+
+    def _scope(self, token, *, csrf=None, mutation=False):
+        if mutation or token != self.token:
+            raise PermissionError("缓存任务仅允许读取已选定的文件")
+        task = self.cache._task(token, self.task_id)
+        return Scope(task.bucket_id, PRIVATE_PREFIX, perms="ro", private_access=True,
+                     authorize=lambda: self.cache._task(token, self.task_id))
+
+    async def content(self, token, path, start=0, end=None):
+        info, stream = await super().content(token, path, start, end)
+        async def guarded():
+            try:
+                async for chunk in stream:
+                    self.cache._task(token, self.task_id)
+                    yield chunk
+            finally:
+                await stream.aclose()
+        return info, guarded()

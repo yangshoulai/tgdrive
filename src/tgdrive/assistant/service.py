@@ -69,6 +69,7 @@ CLIENT_TIMEOUT = 45
 CLIENT_RESULT_BYTES = 64 * 1024
 AUTO_WAIT = 25
 COMPACT_TIMEOUT = 60
+PROGRESS_ITEMS = 20_000  # 本轮重复读取检测最多保留的条目指纹，不保存网页或文件正文。
 ACCESS_MODES = ("approval", "full")
 MAX_MENTIONS = 20
 # 聊天框附件：统一保存在普通文件区域的这个目录下（§22.5），每条消息最多 10 个。
@@ -2138,6 +2139,8 @@ class AssistantService:
             repeats: collections.Counter = collections.Counter()
             # 重复检测（§38）：同一调用得到同样的结果才算没有进展；第一次超限只提醒，同一段再超限才停止。
             repeat_refs: dict = {}
+            progress_results: set[bytes] = set()
+            collection_reads: collections.OrderedDict[tuple[str, int], bytes] = collections.OrderedDict()
             loop_warned = False
             trim_warned = False
             errors = 0
@@ -2398,12 +2401,13 @@ class AssistantService:
                     tool_calls += len(batch)
                     results = await self._tool_batch(state, batch, tools, limits, shared, deadline)
                     offset += len(batch)
+                    page_keys = set()
+                    new_pages = set()
                     for call, body in zip(batch, results):
                         ref = await self._record_tool(state, body)
                         if body["status"] == "limited":
                             continue
                         ends = ends or bool(body.get("ends_turn"))
-                        segment_ok += body["status"] == "ok" and call.name not in META_TOOLS
                         errors = errors + 1 if body["status"] != "ok" else 0
                         too_many_errors = too_many_errors or errors >= limits["error_threshold"]
                         # 使用调用原文归一化，避免未解析参数等情况把不同调用合并成同一个空参数。
@@ -2416,10 +2420,32 @@ class AssistantService:
                             arguments = call.arguments
                         outcome = hashlib.sha256(str(body.get("model_content", "")).encode()).hexdigest()[:16]
                         key = (call.name, arguments, outcome)
+                        signature = hashlib.sha256(f"{call.name}\0{arguments}\0{outcome}".encode()).digest()
+                        progressed = signature not in progress_results
+                        progress_results.add(signature)
                         repeats[key] += 1
                         repeat_refs.setdefault(key, ref)
-                        if repeats[key] > limits["repeat_threshold"]:
+                        page_progress = None
+                        if call.name == "get_collection" and body["status"] == "ok" and not body.get("truncated"):
+                            page_progress = _collection_progress(body.get("result"), collection_reads)
+                            if page_progress is not None:
+                                progressed = page_progress
+                                page_key = (call.name, body["result"]["collection_id"], "seen_items")
+                                page_keys.add(page_key)
+                                repeat_refs.setdefault(page_key, ref)
+                                repeats[page_key] = 0 if progressed else repeats[page_key] + 1
+                                if progressed:
+                                    new_pages.add(page_key)
+                        if page_progress is None and repeats[key] > limits["repeat_threshold"]:
                             looping, loop_key = True, key
+                        # 成功返回旧结果不等于任务推进；本轮的已见记录跨分段保留，不能靠重读取得续跑预算。
+                        segment_ok += body["status"] == "ok" and progressed and call.name not in META_TOOLS
+                    # 同一批并行请求可能同时读到重叠页和新页，按整批结果判断，避免中途误报。
+                    for page_key in page_keys:
+                        if page_key in new_pages:
+                            repeats[page_key] = 0
+                        if repeats[page_key] > limits["repeat_threshold"]:
+                            looping, loop_key = True, page_key
                     if ends or looping or too_many_errors:
                         skipped_status = "cancelled"
                         skipped_reason = ("等待用户回复或确认，本次调用未执行" if ends else
@@ -2437,10 +2463,14 @@ class AssistantService:
                     loop_warned = True
                     name = loop_key[0]
                     repeats[loop_key] = 0
+                    cause = ("反复读取同一结果集中已经返回过的条目，调整偏移量也没有获得新内容" if loop_key[2] == "seen_items"
+                             else f"多次用相同参数调用 {name}，每次结果都相同")
                     message = {"type": "repeat_check", "text": "发现重复调用，已提醒助手换个做法",
-                               "model_text": f"[系统事件] 你已经多次用相同参数调用 {name}，每次结果都相同（第一次的结果 ref={repeat_refs[loop_key]}）。"
+                               "model_text": f"[系统事件] 你已经{cause}（第一次的结果 ref={repeat_refs[loop_key]}）。"
                                "不要再重复这次调用：需要之前的结果用 recall_result(ref) 读取；把进度、结果集编号和游标记在 update_plan 的 notes 里；"
-                               "需要推进时换参数（如 offset、cursor、下一项）或换方法；确实无法推进就说明原因后结束。"}
+                               "继续处理尚未完成的条目，或从 next_offset、cursor 指向的未读位置推进；不要仅修改参数来重读已知内容。"
+                               "结果集 count 是总数，returned 才是本次项数，index 从 0 起；next_offset=null 表示本页之后没有下一页。"
+                               "确实无法推进就说明原因后结束。"}
                     seq = self.trace.append(state.conversation_id, state.id, "event", message)
                     await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
                     continue
@@ -2731,8 +2761,28 @@ class AssistantService:
 
 
 # 摘要行保留的结果字段（§38）：继续工作所需的编号、游标与进度，裁剪后不必重新调用工具。
-_KEPT_FIELDS = ("collection_id", "action_id", "snapshot_id", "plan_id", "next_offset", "next_cursor", "cursor",
-                "count", "total", "pages", "complete", "stopped", "progress", "url", "path")
+_KEPT_FIELDS = ("collection_id", "action_id", "snapshot_id", "plan_id", "kind", "offset", "returned", "next_offset",
+                "next_cursor", "cursor", "count", "total", "pages", "complete", "stopped", "progress", "url", "path")
+
+
+def _collection_progress(result: object, seen: collections.OrderedDict[tuple[str, int], bytes]) -> bool | None:
+    """稳定序号与内容都相同的条目属于重读；不同偏移的重叠页不能冒充新的进展。"""
+    if not isinstance(result, dict) or not isinstance(result.get("collection_id"), str):
+        return None
+    items = result.get("items")
+    if not isinstance(items, list) or any(not isinstance(item, dict) or not isinstance(item.get("index"), int)
+                                         or isinstance(item["index"], bool) for item in items):
+        return None
+    progressed = False
+    for item in items:
+        key = (result["collection_id"], item["index"])
+        value = hashlib.sha256(json.dumps(item, sort_keys=True, ensure_ascii=False).encode()).digest()
+        progressed = progressed or seen.get(key) != value
+        seen[key] = value
+        seen.move_to_end(key)
+        if len(seen) > PROGRESS_ITEMS:
+            seen.popitem(last=False)
+    return progressed
 
 
 def _compact_line(message: dict) -> str:
@@ -2767,10 +2817,13 @@ def _kept(result: object) -> str:
         return ""
     parts = []
     for key in _KEPT_FIELDS:
-        value = result.get(key)
-        if value is None or value == "" or isinstance(value, (list, dict)) and key != "progress":
+        if key not in result:
             continue
-        text = json.dumps(value, ensure_ascii=False) if isinstance(value, dict) else str(value)
+        value = result.get(key)
+        if (value is None and key not in ("next_offset", "next_cursor") or value == ""
+                or isinstance(value, (list, dict)) and key != "progress"):
+            continue
+        text = json.dumps(value, ensure_ascii=False) if value is None or isinstance(value, dict) else str(value)
         parts.append(f"{key}={text[:160]}")
     return "；保留：" + "，".join(parts) if parts else ""
 

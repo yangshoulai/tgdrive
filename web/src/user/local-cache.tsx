@@ -92,7 +92,7 @@ export function LocalCacheSettings() {
     </Section>
 
 
-    {settings && policy?.private_enabled && <Section icon="shield" title="私密文件" description="私密空间锁定后，这些副本无法打开；文件被移出私密空间后也不再使用。">
+    {settings && policy?.private_enabled && <Section icon="shield" title="私密文件" description="私密空间锁定后，已加入的缓存任务继续，副本仍需解锁才能打开；文件被移出私密空间后也不再使用。">
       <div className="account-setting-summary"><div>
         <strong>{settings.private ? "这台设备会缓存私密文件" : "不缓存私密文件"}</strong>
         <p>只在你信任的个人设备上开启。超过 {policy.private_ttl_days} 天没有打开的私密文件会被自动清除。</p>

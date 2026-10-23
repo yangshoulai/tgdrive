@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { beginFileCache, cachedFiles, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type FileCacheState } from "../cache-client";
+import { startCacheGroup, beginFileCache, cachedFiles, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, listCacheGroup, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type FileCacheState } from "../cache-client";
 import { Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, formatBytes, toast, type MenuItem } from "../ui";
 import { usePrivateAccess } from "./private-session";
 import { TrayBar } from "./tray";
@@ -8,8 +8,8 @@ import { TaskListControls, TaskListFooter, useTaskList, type TaskFilter } from "
 import { cacheFolderFiles } from "./cache-folders";
 
 export type CacheReport = { state: "none" | "partial" | "auto" | "manual" | "caching"; percent?: number; blocked?: string };
-type CacheJob = { id: string; file: CacheFile; status: "queued" | "active" | "paused" | "done" | "error" | "canceled"; bytes: number; size: number; error: string; waiting: boolean; completedAt?: number };
-type FolderCacheJob = { id: string; prefixes: string[]; status: "active" | "error"; files: number; error: string; toastId?: number };
+type CacheJob = { id: string; file: CacheFile; group?: string; status: "queued" | "active" | "paused" | "done" | "error" | "canceled"; bytes: number; size: number; error: string; waiting: boolean; completedAt?: number };
+type FolderCacheJob = { id: string; prefixes: string[]; group?: string; status: "active" | "error"; files: number; error: string; toastId?: number };
 type Queue = {
   /** 浏览器支持且用户与管理员都没有关闭本机缓存；否则不显示缓存按钮与菜单项。 */
   available: boolean;
@@ -42,7 +42,7 @@ function pause(signal: AbortSignal) {
   });
 }
 
-/** 队列属于已登录的应用外壳。切换页面继续，私密授权失效时立即移除私密任务及文件名。 */
+/** 队列属于已登录的应用外壳；已加入的缓存任务不受私密空间锁定影响。 */
 export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled: boolean; onOpenTasks: () => void; children: ReactNode }) {
   const access = usePrivateAccess();
   const [privateCacheEnabled, setPrivateCacheEnabled] = useState(false);
@@ -50,6 +50,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
   const [jobs, setJobs] = useState<CacheJob[]>([]), jobsRef = useRef(jobs);
   const [folders, setFolders] = useState<FolderCacheJob[]>([]), foldersRef = useRef(folders);
   const folderControllers = useRef(new Map<string, AbortController>());
+  const groups = useRef(new Map<string, { ready: Promise<void>; paths: string[] }>());
   const [states, setStates] = useState(new Map<string, FileCacheState>());
   const statesRef = useRef(states); statesRef.current = states;
   const [cached, setCached] = useState(new Map<string, CachedFileState>());
@@ -58,8 +59,14 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
   const [details, setDetails] = useState<CacheFile | null>(null), [removing, setRemoving] = useState<CacheFile[] | null>(null);
   const active = useRef<{ id: string; controller: AbortController } | null>(null);
   const [available, setAvailable] = useState(false);
-  const watching = useRef(new Map<string, CacheFile[]>()), ready = useRef({ enabled, privateReady, available });
-  ready.current = { enabled, privateReady, available };
+  const watching = useRef(new Map<string, CacheFile[]>()), ready = useRef({ enabled, privateReady, available, privateCacheEnabled });
+  ready.current = { enabled, privateReady, available, privateCacheEnabled };
+  const prepareGroup = useCallback((paths: string[], id: string) => {
+    const task = startCacheGroup(id, paths);
+    task.catch(() => undefined);
+    groups.current.set(id, { ready: task, paths });
+    return id;
+  }, []);
   const refreshRef = useRef<() => void>(() => undefined);
   useEffect(() => {
     if (!enabled || !cacheSupported()) { setAvailable(false); setPrivateCacheEnabled(false); return; }
@@ -102,13 +109,27 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
     setDetails(value => value && (!privateOnly || api.isPrivatePath(value.key)) ? null : value);
     setRemoving(value => value && (!privateOnly || value.some(file => api.isPrivatePath(file.key))) ? null : value);
   }, [update, cancelFolder]);
-  useLayoutEffect(() => { if (!enabled) reset(false); else if (!privateReady) reset(true); }, [enabled, privateReady, reset]);
+  const hidePrivate = useCallback(() => {
+    setStates(value => new Map([...value].filter(([key]) => !key.startsWith("p:"))));
+    setCached(value => new Map([...value].filter(([key]) => !key.startsWith("p:"))));
+    setDetails(value => value && api.isPrivatePath(value.key) ? null : value);
+    setRemoving(value => value?.some(file => api.isPrivatePath(file.key)) ? null : value);
+  }, []);
+  useLayoutEffect(() => {
+    if (!enabled || !available) reset(false);
+    else if (!privateCacheEnabled) reset(true);
+    else if (!privateReady) hidePrivate();
+  }, [enabled, available, privateCacheEnabled, privateReady, reset, hidePrivate]);
+  useEffect(() => {
+    const used = new Set([...jobs.filter(job => job.status !== "done").map(job => job.group), ...folders.map(folder => folder.group)]);
+    for (const id of groups.current.keys()) if (!used.has(id)) { releaseCacheGroup(id); groups.current.delete(id); }
+  }, [jobs, folders]);
   useEffect(() => {
     const stop = () => reset(false);
-    const locked = () => reset(true);
+    const locked = hidePrivate;
     window.addEventListener("pagehide", stop); window.addEventListener("tessera:logout", stop); window.addEventListener("tessera:private-locked", locked);
-    return () => { window.removeEventListener("pagehide", stop); window.removeEventListener("tessera:logout", stop); window.removeEventListener("tessera:private-locked", locked); active.current?.controller.abort(); cancelFileCache(active.current?.id); folderControllers.current.forEach(controller => controller.abort()); foldersRef.current.forEach(folder => { if (folder.toastId != null) toast.dismiss(folder.toastId); }); };
-  }, [reset]);
+    return () => { window.removeEventListener("pagehide", stop); window.removeEventListener("tessera:logout", stop); window.removeEventListener("tessera:private-locked", locked); active.current?.controller.abort(); cancelFileCache(active.current?.id); folderControllers.current.forEach(controller => controller.abort()); foldersRef.current.forEach(folder => { if (folder.toastId != null) toast.dismiss(folder.toastId); }); groups.current.forEach((_, id) => releaseCacheGroup(id)); groups.current.clear(); };
+  }, [reset, hidePrivate]);
 
   // 文件列表只取一次「缓存索引」，不逐个文件查询；单独关注的文件（预览中的文件）另外批量查询完整状态。
   useEffect(() => {
@@ -161,10 +182,13 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
     watching.current.set(owner, files); refreshRef.current();
     return () => { watching.current.delete(owner); refreshRef.current(); };
   }, []);
-  const canCache = useCallback((file: CacheFile) => ready.current.enabled && cacheSupported() && (!api.isPrivatePath(file.key) || ready.current.privateReady), []);
-  const enqueueMany = useCallback((files: CacheFile[]) => {
-    const accepted = files.filter(canCache);
+  const canCache = useCallback((file: CacheFile) => ready.current.enabled && ready.current.available && cacheSupported() && (!api.isPrivatePath(file.key) || ready.current.privateReady), []);
+  const enqueueMany = useCallback((files: CacheFile[], queuedGroup?: string) => {
+    const accepted = files.filter(file => queuedGroup && api.isPrivatePath(file.key)
+      ? ready.current.enabled && ready.current.available && ready.current.privateCacheEnabled && groups.current.has(queuedGroup) : canCache(file));
     if (!accepted.length) return 0;
+    const privateFiles = accepted.filter(file => api.isPrivatePath(file.key));
+    let group = queuedGroup;
     let added = 0;
     update(value => {
       const known = new Map(value.map(job => [cacheFileId(job.file), job]));
@@ -174,29 +198,36 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
         if ((found && isRunning(found)) || queued.has(id)) continue;
         // 起始进度取已知的最大值：单文件状态只覆盖预览中的文件，列表文件要看缓存索引，不能先显示 0% 像是重新开始。
         const bytes = Math.max(statesRef.current.get(id)?.bytes ?? 0, cachedRef.current.get(id)?.bytes ?? 0, found?.bytes ?? 0);
-        queued.set(id, { id: crypto.randomUUID(), file, status: "queued", bytes, size: file.size, error: "", waiting: false });
+        const jobId = crypto.randomUUID();
+        if (!group && api.isPrivatePath(file.key)) group = jobId;
+        queued.set(id, { id: jobId, file, group: api.isPrivatePath(file.key) ? group : undefined, status: "queued", bytes, size: file.size, error: "", waiting: false });
       }
       added = queued.size;
       return added ? [...value.filter(job => !queued.has(cacheFileId(job.file))), ...queued.values()] : value;
     });
+    if (!queuedGroup && group && jobsRef.current.some(job => job.group === group)) prepareGroup(privateFiles.map(file => file.key), group);
     return added;
-  }, [update, canCache]);
+  }, [update, canCache, prepareGroup]);
   const enqueue = useCallback((file: CacheFile) => enqueueMany([file]), [enqueueMany]);
-  const startFolder = useCallback((prefixes: string[], id: string = crypto.randomUUID()) => {
-    const roots = [...new Set(prefixes)].filter(prefix => prefix && prefix.endsWith("/") && (!prefix.startsWith(".tgdrive/") || api.isPrivatePath(prefix)) && (!api.isPrivatePath(prefix) || ready.current.privateReady));
+  const startFolder = useCallback((prefixes: string[], id: string = crypto.randomUUID(), queuedGroup?: string) => {
+    const roots = [...new Set(prefixes)].filter(prefix => prefix && prefix.endsWith("/") && (!prefix.startsWith(".tgdrive/") || api.isPrivatePath(prefix)) && (!api.isPrivatePath(prefix) || ready.current.privateReady || queuedGroup && groups.current.has(queuedGroup)));
     if (!ready.current.available || !roots.length) return;
+    const privateRoots = roots.filter(api.isPrivatePath);
+    const group = privateRoots.length ? queuedGroup ?? prepareGroup(privateRoots, crypto.randomUUID()) : undefined;
     const toastId = foldersRef.current.find(folder => folder.id === id)?.toastId;
     if (toastId != null) toast.dismiss(toastId);
     const controller = new AbortController();
     folderControllers.current.get(id)?.abort(); folderControllers.current.set(id, controller);
-    updateFolders(value => [...value.filter(folder => folder.id !== id), { id, prefixes: roots, status: "active", files: 0, error: "" }]);
+    updateFolders(value => [...value.filter(folder => folder.id !== id), { id, prefixes: roots, group, status: "active", files: 0, error: "" }]);
     void (async () => {
       let added = 0, found = 0;
       const seen = new Set<string>();
       try {
-        for await (const files of cacheFolderFiles(roots, controller.signal)) {
+        if (group) await groups.current.get(group)!.ready;
+        const load = (prefix: string, cursor: string | null, signal: AbortSignal) => api.isPrivatePath(prefix) && group
+          ? listCacheGroup(group, prefix, cursor, signal) : api.listFiles(prefix, cursor, false, 200, "", signal);
+        for await (const files of cacheFolderFiles(roots, controller.signal, load)) {
           if (!ready.current.available) throw new Error("本机缓存已关闭，请开启后重试");
-          if (roots.some(api.isPrivatePath) && !ready.current.privateReady) { controller.abort(); break; }
           found += files.length;
           added += enqueueMany(files.filter(file => {
             const identity = cacheFileId(file);
@@ -204,7 +235,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
             seen.add(identity);
             const state = cachedRef.current.get(identity);
             return !(state?.complete && state.manual && state.size === file.size);
-          }));
+          }), group);
           updateFolders(value => value.map(folder => folder.id === id ? { ...folder, files: added } : folder));
         }
         if (controller.signal.aborted) return;
@@ -220,19 +251,26 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
         if (folderControllers.current.get(id) === controller) folderControllers.current.delete(id);
       }
     })();
-  }, [enqueueMany, updateFolders]);
+  }, [enqueueMany, updateFolders, prepareGroup]);
   const retryFolder = useCallback((id: string) => {
     const folder = foldersRef.current.find(folder => folder.id === id);
-    if (folder?.status === "error") startFolder(folder.prefixes, id);
+    if (folder?.status === "error") startFolder(folder.prefixes, id, ready.current.privateReady ? undefined : folder.group);
   }, [startFolder]);
   const retry = useCallback((id: string) => {
     const job = jobsRef.current.find(job => job.id === id);
-    if (job && !isRunning(job) && canCache(job.file)) update(value => value.map(item => item.id === id ? { ...item, status: "queued", error: "", waiting: false } : item));
-  }, [canCache, update]);
+    if (!job || isRunning(job) || job.status === "done") return;
+    const group = job.group && groups.current.get(job.group);
+    if (!canCache(job.file) && !(ready.current.available && ready.current.privateCacheEnabled && group)) return;
+    if (group && ready.current.privateReady && !jobsRef.current.some(item => item.group === job.group && isRunning(item))
+      && !foldersRef.current.some(folder => folder.group === job.group && folder.status === "active")) {
+      prepareGroup(group.paths, job.group!);
+    }
+    update(value => value.map(item => item.id === id ? { ...item, status: "queued", error: "", waiting: false } : item));
+  }, [canCache, update, prepareGroup]);
 
   useEffect(() => {
-    if (!enabled || active.current) return;
-    const job = jobs.find(job => job.status === "queued" && (!api.isPrivatePath(job.file.key) || privateReady));
+    if (!enabled || !available || active.current) return;
+    const job = jobs.find(job => job.status === "queued" && (!api.isPrivatePath(job.file.key) || privateCacheEnabled && job.group));
     if (!job) return;
     const controller = new AbortController(), running = { id: job.id, controller };
     active.current = running;
@@ -242,14 +280,20 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
     const progress = (state: FileCacheState) => {
       if (controller.signal.aborted) return;
       patch({ bytes: state.bytes, size: state.size });
-      setStates(value => new Map(value).set(cacheFileId(job.file), state));
+      if (!api.isPrivatePath(job.file.key) || ready.current.privateReady) setStates(value => new Map(value).set(cacheFileId(job.file), state));
     };
     void (async () => {
       try {
+        if (job.group) {
+          const group = groups.current.get(job.group);
+          if (!group) throw new Error("缓存任务已结束，请重新加入缓存");
+          await group.ready;
+          controller.signal.throwIfAborted();
+        }
         let result;
         do {
           patch({ status: "active", waiting: false });
-          result = await beginFileCache(job.file, job.id, controller.signal);
+          result = await beginFileCache(job.file, job.id, controller.signal, job.group);
           if (result.busy) { patch({ status: "queued", waiting: true }); await pause(controller.signal); }
         } while (result.busy);
         progress(result);
@@ -264,7 +308,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
         setWake(value => value + 1); refreshRef.current();
       }
     })();
-  }, [jobs, enabled, privateReady, wake, update]);
+  }, [jobs, enabled, available, privateCacheEnabled, wake, update]);
 
   const forget = useCallback(async (files: CacheFile[]) => {
     const ids = new Set(files.map(cacheFileId));
@@ -288,8 +332,8 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
       return { state: state.manual ? "manual" : "auto" };
     });
   }, []);
-  const visibleJobs = useMemo(() => enabled ? jobs.filter(job => !api.isPrivatePath(job.file.key) || privateReady) : [], [enabled, jobs, privateReady]);
-  const visibleFolders = useMemo(() => enabled ? folders.filter(folder => privateReady || !folder.prefixes.some(api.isPrivatePath)) : [], [enabled, folders, privateReady]);
+  const visibleJobs = useMemo(() => enabled ? jobs : [], [enabled, jobs]);
+  const visibleFolders = useMemo(() => enabled ? folders : [], [enabled, folders]);
   const value: Queue = useMemo(() => ({ available, privateReady, jobs: visibleJobs, folders: visibleFolders, enqueueFolders: startFolder, cancelFolder, retryFolder, states, cached, showTasks: onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pause: pauseJob, retry, removeJobs,
     clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: files => setRemoving(Array.isArray(files) ? files : [files]), forget, report }),
   [available, privateReady, visibleJobs, visibleFolders, startFolder, cancelFolder, retryFolder, states, cached, onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pauseJob, retry, removeJobs, update, forget, report]);
@@ -391,7 +435,8 @@ const cacheDescription = (job: CacheJob) => `${nameOf(job.file)} ${api.privatePa
 export function CacheTasks({ onClose, onSettings }: { onClose: () => void; onSettings: () => void }) {
   const queue = useContext(CacheContext)!;
   const { jobs } = queue;
-  const list = useTaskList(jobs, cacheDescription, cacheGroup);
+  const describe = useCallback((job: CacheJob) => api.isPrivatePath(job.file.key) && !queue.privateReady ? "私密文件" : cacheDescription(job), [queue.privateReady]);
+  const list = useTaskList(jobs, describe, cacheGroup);
   const [removing, setRemoving] = useState<string[] | null>(null);
   const adding = queue.folders.filter(folder => folder.status === "active").length;
   const active = jobs.filter(isRunning).length + adding;
@@ -400,14 +445,14 @@ export function CacheTasks({ onClose, onSettings }: { onClose: () => void; onSet
   const runningChosen = list.chosen.filter(isRunning);
   const resumable = list.chosen.filter(job => ["paused", "canceled", "error"].includes(job.status));
   return <Modal title="本机缓存任务" icon="monitor" size="xl" className={`task-window${jobs.some(job => api.isPrivatePath(job.file.key)) || queue.folders.some(folder => folder.prefixes.some(api.isPrivatePath)) ? " private-dialog" : ""}`} onClose={onClose} initialFocus="dialog"
-    description="暂停后保留已缓存的部分，继续时只补齐缺失内容。关闭窗口后缓存继续。"
+    description="暂停后保留已缓存的部分，继续时只补齐缺失内容。关闭窗口或锁定私密空间后，已加入的缓存任务继续。"
     footer={<><Button variant="ghost" icon="settings" onClick={onSettings}>缓存设置</Button><span className="task-window-footnote">仅保存到当前浏览器</span><Button onClick={onClose}>隐藏窗口</Button></>}>
     <div className="task-summary" aria-live="polite"><span><i className={active ? "is-working" : ""} />{active} 个进行中</span><span>{done} 个已完成</span>{failed > 0 && <span className="tone-danger">{failed} 个失败</span>}</div>
     {!queue.available && <Notice>本机缓存尚未开启或当前浏览器不支持，请到缓存设置中查看。</Notice>}
     {queue.folders.map(folder => <Notice key={folder.id} icon="folder" tone={folder.status === "error" ? "danger" : "info"} role={folder.status === "error" ? "alert" : "status"}>
       <strong>{folder.status === "error" ? "文件夹未全部加入缓存" : "正在添加文件夹缓存"}</strong>
-      <p>{folder.prefixes.map(prefix => api.privatePathLabel(prefix)).join("、")} · 已加入 {folder.files} 个文件</p>
-      {folder.error && <p>{folder.error}；已加入的文件任务会保留，重试会跳过已缓存或正在缓存的文件。</p>}
+      <p>{folder.prefixes.map(prefix => api.isPrivatePath(prefix) && !queue.privateReady ? "私密文件夹" : api.privatePathLabel(prefix)).join("、")} · 已加入 {folder.files} 个文件</p>
+      {folder.error && <p>{!queue.privateReady && folder.prefixes.some(api.isPrivatePath) ? "请解锁后查看具体原因" : folder.error}；已加入的文件任务会保留，重试会跳过已缓存或正在缓存的文件。</p>}
       {folder.status === "error" && <Button size="sm" icon="refresh" disabled={!queue.available} onClick={() => queue.retryFolder(folder.id)}>重试添加</Button>}
       <Button size="sm" variant="ghost" onClick={() => queue.cancelFolder(folder.id)}>{folder.status === "error" ? "移除提示" : "停止添加"}</Button>
     </Notice>)}
@@ -417,27 +462,28 @@ export function CacheTasks({ onClose, onSettings }: { onClose: () => void; onSet
       {runningChosen.length > 0 && <Button size="sm" icon="pause" onClick={() => { runningChosen.forEach(job => queue.pause(job.id)); list.clearSelection(); }}>暂停</Button>}
       {resumable.length > 0 && <Button size="sm" icon="play" disabled={!queue.available} onClick={() => { resumable.forEach(job => queue.retry(job.id)); list.clearSelection(); }}>继续缓存</Button>}
       {list.chosen.length > 0 && <Menu label="所选缓存的更多操作" items={[
-        { label: "清除所选文件的缓存", icon: "trash", danger: true, onSelect: () => queue.remove(list.chosen.map(job => job.file)) },
+        { label: "清除所选文件的缓存", icon: "trash", danger: true, disabled: !queue.privateReady && list.chosen.some(job => api.isPrivatePath(job.file.key)), onSelect: () => queue.remove(list.chosen.map(job => job.file)) },
         { label: "删除所选任务记录", icon: "x", danger: true, divider: true, onSelect: () => setRemoving(list.chosen.map(job => job.id)) },
       ]} />}
     </>} />
     {!list.visible.length ? queue.folders.length ? null : <EmptyState compact icon="monitor" title={jobs.length ? "没有符合条件的缓存任务" : "还没有缓存任务"} description={jobs.length ? "试试其他名称或任务状态。" : "在文件或文件夹菜单中选择「缓存到本机」，可批量保存完整文件。"} />
       : <ul className="task-list" aria-label="缓存任务列表">{list.visible.map(job => {
         const running = isRunning(job), percent = percentOf(job.bytes, job.size, job.status === "done");
-        const detail = job.status === "error" ? job.error : job.status === "queued" ? job.waiting ? "其他页面正在缓存，等待完成…" : "排队中" : job.status === "paused" || job.status === "canceled" ? "已暂停，已缓存的部分会保留" : job.status === "done" ? "完整文件已缓存" : "正在缓存";
-        const name = nameOf(job.file);
+        const hidden = api.isPrivatePath(job.file.key) && !queue.privateReady;
+        const detail = job.status === "error" ? hidden ? "缓存失败，请解锁后查看详情" : job.error : job.status === "queued" ? job.waiting ? "其他页面正在缓存，等待完成…" : "排队中" : job.status === "paused" || job.status === "canceled" ? "已暂停，已缓存的部分会保留" : job.status === "done" ? "完整文件已缓存" : "正在缓存";
+        const name = hidden ? "私密文件" : nameOf(job.file), path = hidden ? "私密空间已锁定" : api.privatePathLabel(job.file.key);
         return <li key={job.id} className={`task-row is-${job.status}${list.selected.has(job.id) ? " is-selected" : ""}`}>
           <Checkbox checked={list.selected.has(job.id)} label={`选择 ${name}`} onChange={checked => list.toggle(job.id, checked)} />
           <span className="task-row-icon"><Icon name={api.isPrivatePath(job.file.key) ? "lock" : "monitor"} size={22} /></span>
-          <div className="task-row-content"><strong title={name}>{name}</strong><small className="task-row-path" title={api.privatePathLabel(job.file.key)}>{api.privatePathLabel(job.file.key)}</small>
+          <div className="task-row-content"><strong title={name}>{name}</strong><small className="task-row-path" title={path}>{path}</small>
             <small className={job.status === "error" ? "tone-danger" : "muted"}>{detail} · {formatBytes(job.bytes)} / {formatBytes(job.size)}</small>
             {job.status !== "done" && <TrayBar percent={percent} label={`${name} 缓存进度`} paused={job.status !== "active"} />}
           </div><span className="task-row-percent">{percent}%</span><div className="task-row-actions">
             {running ? <IconButton icon="pause" size="sm" label={`暂停缓存 ${name}`} onClick={() => queue.pause(job.id)} />
               : job.status !== "done" ? <IconButton icon="play" size="sm" label={`继续缓存 ${name}`} disabled={!queue.available} onClick={() => queue.retry(job.id)} />
-                : <IconButton icon="info" size="sm" label={`查看 ${name} 的缓存`} onClick={() => queue.inspect(job.file)} />}
+                : <IconButton icon="info" size="sm" label={`查看 ${name} 的缓存`} disabled={hidden} onClick={() => queue.inspect(job.file)} />}
             <Menu label={`${name} 的更多操作`} items={[
-              { label: "清除文件的本机缓存", icon: "trash", danger: true, onSelect: () => queue.remove(job.file) },
+              { label: "清除文件的本机缓存", icon: "trash", danger: true, disabled: hidden, onSelect: () => queue.remove(job.file) },
               { label: "删除任务记录", icon: "x", danger: true, divider: true, onSelect: () => setRemoving([job.id]) },
             ]} />
           </div></li>;

@@ -6,7 +6,7 @@ import json
 
 from .knowledge import OVERVIEW
 
-PROMPT_VERSION = "2026.10-p23"
+PROMPT_VERSION = "2026.10-p24"
 
 
 def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool, can_read_text: bool, can_web: bool = False,

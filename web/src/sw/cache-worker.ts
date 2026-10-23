@@ -23,7 +23,9 @@ type TierContext = {
 type Route = { tier: Tier; etag: string; version: string; path: string; access: string; bucketId: number | null; thumb: boolean; size?: number; preview?: boolean };
 type Opened = { tier: TierContext; entry: EntryRecord; info: EntryInfo; key: CryptoKey; request: Request; cap: number };
 type Source = { start: number; response: Response; controller: AbortController };
-type Manual = { id: string; owner: string; route: Route; request: Request; controller: AbortController; opened?: Opened; running: boolean };
+type Background = { id: string; controller: AbortController; ready: Promise<void>; started: boolean; context: TierContext | null };
+const backgrounds = new Map<string, Background>();
+type Manual = { id: string; owner: string; route: Route; request: Request; controller: AbortController; opened?: Opened; running: boolean; background?: Background };
 let manual: Manual | null = null;
 
 /* ---------- 路由 ---------- */
@@ -71,7 +73,8 @@ async function currentSettings() {
 }
 
 function dropKeys(tier?: Tier) {
-  if (manual && (!tier || manual.route.tier === tier)) stopManual();
+  if (manual && (!tier || manual.route.tier === tier && !manual.background)) stopManual();
+  if (!tier) for (const key of backgrounds.keys()) void finishBackground(key);
   for (const selected of tier ? [tier] : ["n", "p"] as const) {
     revocation[selected].abort();
     revocation[selected] = new AbortController();
@@ -86,10 +89,10 @@ function dropKeys(tier?: Tier) {
   if (!tier || tier === "n") normal = null;
 }
 
-async function post(path: string, body: unknown, access = "") {
+async function post(path: string, body: unknown, access = "", headers: Record<string, string> = {}) {
   const response = await fetch(path, {
     method: "POST", credentials: "same-origin", cache: "no-store",
-    headers: { "Content-Type": "application/json", ...(access ? { "X-Private-Access": access } : {}) }, body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...(access ? { "X-Private-Access": access } : {}), ...headers }, body: JSON.stringify(body),
   });
   if (response.status === 401) dropKeys();
   return response;
@@ -558,6 +561,69 @@ function renewManual(job: Manual) {
   manualTimer = setTimeout(() => { if (manual === job) stopManual(); }, 120_000) as unknown as number;
 }
 
+async function startPrivateTask(owner: string, id: string, paths: string[], csrf: string, access: string) {
+  if (!owner || !id || id.length > 100 || !Array.isArray(paths)) throw new Error("缓存任务来源无效");
+  const key = `${owner}:${id}`, existing = backgrounds.get(key);
+  const previous = existing ? releaseBackground(owner, id) : Promise.resolve();
+  const background: Background = { id, controller: new AbortController(), ready: Promise.resolve(), started: false, context: null };
+  background.ready = (async () => {
+    await previous;
+    background.controller.signal.throwIfAborted();
+    const preferences = await currentSettings();
+    const normal = await normalContext();
+    if (!preferences.enabled || !preferences.private || !policy?.private_enabled || !normal || normal.signal.aborted)
+      throw new Error("请在本机缓存设置中允许缓存私密文件");
+    const device = await deviceId();
+    background.controller.signal.throwIfAborted();
+    const response = await post("/api/user/v1/cache/tasks", { id, device, paths }, access, { "X-CSRF-Token": csrf });
+    if (!response.ok) throw new Error(`无法创建缓存任务（${response.status}），请解锁后重试`);
+    const body = await response.json() as { namespace: string; bucket_id: number; key: string };
+    background.started = true;
+    background.controller.signal.throwIfAborted();
+    background.context = await tierContext("p", body.namespace, body.key, body.bucket_id, background.controller.signal);
+    if (!background.context) throw new Error("缓存任务已停止");
+  })().catch(async error => {
+    background.controller.abort();
+    if (backgrounds.get(key) === background) {
+      backgrounds.delete(key);
+      if (background.started) await post("/api/user/v1/cache/tasks/release", {}, "", { "X-Tessera-Cache-Task": background.id }).catch(() => undefined);
+    }
+    throw error;
+  });
+  backgrounds.set(key, background);
+  return background.ready;
+}
+
+async function getBackground(owner: string, id: string) {
+  const background = backgrounds.get(`${owner}:${id}`);
+  if (!background) throw new Error("缓存任务已结束，请重新加入缓存");
+  await background.ready;
+  background.controller.signal.throwIfAborted();
+  return background;
+}
+
+function releaseBackground(owner: string, id: string) { return finishBackground(`${owner}:${id}`); }
+
+async function finishBackground(key: string) {
+  const background = backgrounds.get(key);
+  if (!background) return;
+  backgrounds.delete(key); background.controller.abort();
+  if (manual?.background === background) stopManual();
+  await background.ready.catch(() => undefined);
+  if (background.started) await post("/api/user/v1/cache/tasks/release", {}, "", { "X-Tessera-Cache-Task": background.id }).catch(() => undefined);
+}
+
+async function listBackground(owner: string, id: string, prefix: string, cursor?: string | null) {
+  const background = await getBackground(owner, id);
+  const query = new URLSearchParams({ prefix, ...(cursor ? { cursor } : {}) });
+  const response = await fetch(`/api/user/v1/cache/tasks/list?${query}`, { credentials: "same-origin", cache: "no-store",
+    headers: { "X-Tessera-Cache-Task": background.id }, signal: background.controller.signal });
+  if (!response.ok) throw new Error(`无法读取缓存目录（${response.status}），请解锁后重试`);
+  const result: unknown = await response.json();
+  background.controller.signal.throwIfAborted();
+  return result;
+}
+
 function manualRoute(url: string) {
   const request = new Request(new URL(url, sw.location.origin), { credentials: "same-origin" });
   const route = routeOf(request);
@@ -565,9 +631,19 @@ function manualRoute(url: string) {
   return { request, route };
 }
 
-async function manualOpened(url: string) {
+async function manualOpened(url: string, background?: Background) {
   const { request, route } = manualRoute(url);
-  const value = await openEntry(request, route);
+  let value;
+  if (background && route.tier === "p") {
+    const preferences = await currentSettings();
+    const context = background.context;
+    if (!preferences.enabled || !preferences.private || !context) throw new Error("私密文件缓存已关闭");
+    const response = await post("/api/user/v1/cache/tasks/keys", { path: route.path, etag: route.etag }, "", { "X-Tessera-Cache-Task": background.id });
+    if (!response.ok) throw new Error(`缓存任务或文件版本已变化（${response.status}），请解锁后重试`);
+    const body = await response.json() as { key: string };
+    context.signal.throwIfAborted();
+    value = { context, base: fromB64u(body.key) };
+  } else value = await openEntry(request, route);
   if (!value) throw new Error(route.tier === "p" ? "请解锁私密空间，并在本机缓存设置中允许缓存私密文件" : "本机缓存未启用，请检查设置与管理员策略");
   const keys = await entryKeys(value.context, value.base, route.version);
   value.context.signal.throwIfAborted();
@@ -586,7 +662,7 @@ async function fileStates(urls: string[]) {
 }
 
 async function verifyManual(job: Manual) {
-  const response = await fetch(job.request, { method: "HEAD", cache: "no-store", signal: job.controller.signal });
+  const response = await manualFetch(job, { method: "HEAD" });
   if (response.status === 401) dropKeys();
   if (!response.ok) throw new Error(`无法读取文件（${response.status}），请刷新列表后重试`);
   if (etagOf(response) !== `"${job.route.etag}"`) {
@@ -596,16 +672,30 @@ async function verifyManual(job: Manual) {
   return response;
 }
 
-async function startManual(owner: string, id: string, url: string) {
+function manualFetch(job: Manual, options: RequestInit = {}) {
+  const headers = new Headers(options.headers);
+  let request = job.request;
+  if (job.background) {
+    const url = new URL(request.url);
+    url.pathname = "/api/user/v1/cache/tasks/content"; url.searchParams.delete("access");
+    request = new Request(url, { credentials: "same-origin" });
+    headers.set("X-Tessera-Cache-Task", job.background.id);
+  }
+  return fetch(request, { ...options, headers, cache: "no-store", signal: job.controller.signal });
+}
+
+async function startManual(owner: string, id: string, url: string, group?: string) {
   if (!owner || !id || id.length > 100) throw new Error("缓存任务来源无效");
   if (manual) return { busy: true };
   const { request, route } = manualRoute(url);
-  const job: Manual = { owner, id, request, route, controller: new AbortController(), running: false };
+  const background = group && route.tier === "p" ? await getBackground(owner, group) : undefined;
+  if (manual) return { busy: true };
+  const job: Manual = { owner, id, request, route, controller: new AbortController(), running: false, background };
   manual = job; renewManual(job);
   try {
     // 点击时重取账号策略；长期播放的普通预览仍按原有的上下文周期复用。
     normal = null;
-    const value = await manualOpened(url);
+    const value = await manualOpened(url, background);
     job.controller.signal.throwIfAborted();
     const abort = () => job.controller.abort();
     value.context.signal.addEventListener("abort", abort, { once: true });
@@ -654,7 +744,7 @@ async function stepManual(owner: string, id: string, progress: (value: unknown) 
   job.running = true; renewManual(job);
   const abort = () => job.controller.abort();
   try {
-    const value = await manualOpened(job.request.url);
+    const value = await manualOpened(job.request.url, job.background);
     if (value.key !== job.opened.entry.key) throw new Error("缓存密钥已变化，请重试");
     value.context.signal.addEventListener("abort", abort, { once: true });
     job.controller.signal.throwIfAborted();
@@ -669,7 +759,7 @@ async function stepManual(owner: string, id: string, progress: (value: unknown) 
     if (index !== undefined) {
       const end = Math.min(opened.info.size - 1, (Math.min(index + 7, missingRun(entry.blocks, index, count - 1)) + 1) * BLOCK - 1);
       const headers = new Headers({ Range: `bytes=${index * BLOCK}-${end}` });
-      const response = await fetch(job.request, { headers, cache: "no-store", signal: job.controller.signal });
+      const response = await manualFetch(job, { headers });
       if (response.status === 401) dropKeys();
       if (response.status !== 206 || etagOf(response) !== opened.info.version || response.headers.get("content-range") !== `bytes ${index * BLOCK}-${end}/${opened.info.size}`) {
         await response.body?.cancel();
@@ -942,7 +1032,8 @@ async function clear(scope: string, key?: string) {
 }
 
 sw.addEventListener("message", event => {
-  const data = event.data as { type?: string; access?: string; scope?: string; key?: string; id?: string; url?: string; urls?: string[] } | null;
+  const data = event.data as { type?: string; access?: string; scope?: string; key?: string; id?: string; url?: string; urls?: string[];
+    group?: string; paths?: string[]; csrf?: string; prefix?: string; cursor?: string | null } | null;
   const port = event.ports[0];
   const owner = event.source && "id" in event.source ? event.source.id : "";
   const reply = (work: Promise<unknown>) => event.waitUntil(work.then(value => port?.postMessage({ ok: true, value }), error => port?.postMessage({ ok: false, error: String(error).replace(/^Error: /, "") })));
@@ -953,7 +1044,10 @@ sw.addEventListener("message", event => {
       askedAt = 0;
       break;
     case "tessera-cache:logout": pageAccess = ""; dropKeys(); break;
-    case "tessera-cache:settings": settings = null; stopManual(); dropKeys("p"); reply(Promise.resolve(null)); break;
+    case "tessera-cache:settings":
+      settings = null; stopManual(); dropKeys("p");
+      for (const key of backgrounds.keys()) void finishBackground(key);
+      reply(Promise.resolve(null)); break;
     case "tessera-cache:nudge": if (Date.now() - lastReconcile > 5000) scheduleReconcile(3000); break;
     case "tessera-cache:stats": reply(stats()); break;
     case "tessera-cache:items": reply(listItems((data as { filter?: ItemQuery }).filter ?? {})); break;
@@ -962,7 +1056,10 @@ sw.addEventListener("message", event => {
     case "tessera-cache:reset": dropKeys(); reply(clear("all")); break;
     case "tessera-cache:files": reply(fileStates(data.urls ?? [])); break;
     case "tessera-cache:index": reply(cacheIndex((data as { private?: boolean }).private === true)); break;
-    case "tessera-cache:start": reply(startManual(owner, data.id ?? "", data.url ?? "")); break;
+    case "tessera-cache:queue-group": reply(startPrivateTask(owner, data.id ?? "", data.paths ?? [], data.csrf ?? "", data.access ?? "")); break;
+    case "tessera-cache:list-group": reply(listBackground(owner, data.id ?? "", data.prefix ?? "", data.cursor)); break;
+    case "tessera-cache:release-group": reply(releaseBackground(owner, data.id ?? "")); break;
+    case "tessera-cache:start": reply(startManual(owner, data.id ?? "", data.url ?? "", data.group)); break;
     case "tessera-cache:step": reply(stepManual(owner, data.id ?? "", value => port?.postMessage({ progress: value }))); break;
     case "tessera-cache:cancel":
       if (manual?.owner === owner && (!data.id || manual.id === data.id)) stopManual();

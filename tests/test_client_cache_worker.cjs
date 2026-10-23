@@ -22,9 +22,10 @@ const bytes = size => { const data = Buffer.alloc(size); for (let index = 0; ind
 function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECRET]: bytes(65536) }) {
   const entries = new Map(), blocks = new Map(), listeners = new Map(), timers = new Set();
   const files = new Map(Object.entries(fixtures).map(([name, data], index) => [name, { data, etag: `version-${index}`, valid: true }]));
-  const state = { clock: 0, authenticated: true, unlocked: true, key: new Uint8Array(32).fill(1), privateKey: new Uint8Array(32).fill(2), keysHook: null, originHook: null };
+  const state = { clock: 0, authenticated: true, unlocked: true, key: new Uint8Array(32).fill(1), privateKey: new Uint8Array(32).fill(2), keysHook: null, originHook: null, taskHook: null };
   const preferences = { enabled: true, maxMiB: 1024, video: true, private: true, privateMaxMiB: 256 };
   const policy = { enabled: true, private_enabled: true, private_ttl_days: 7 };
+  const tasks = new Map();
   const requests = [];
   // 浏览器对媒体元素发出的 no-cors 请求只保留它自己带的 Range；脚本改写的 Range 会被丢掉，服务端返回整个文件。
   const pageRanges = new Map();
@@ -70,6 +71,27 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
     const url = new URL(request.url), route = url.pathname;
     requests.push(request);
     if (!state.authenticated) return json({}, 401);
+    if (route === "/api/user/v1/cache/tasks") {
+      if (!state.unlocked || request.headers.get("x-csrf-token") !== "csrf" || !policy.enabled || !policy.private_enabled) return json({}, 403);
+      const body = await request.json();
+      tasks.set(body.id, { paths: body.paths, identity: store.b64u(state.privateKey) });
+      await state.taskHook?.();
+      return json({ namespace: "user-namespace", bucket_id: 7, key: store.b64u(state.privateKey) }, 201);
+    }
+    if (route.startsWith("/api/user/v1/cache/tasks/")) {
+      const task = tasks.get(request.headers.get("x-tessera-cache-task"));
+      if (route.endsWith("/release")) { tasks.delete(request.headers.get("x-tessera-cache-task")); return json({ ok: true }); }
+      if (!task || task.identity !== store.b64u(state.privateKey) || !policy.enabled || !policy.private_enabled) return json({}, 403);
+      const body = request.method === "POST" ? await request.json() : {};
+      const selected = body.path || url.searchParams.get("path") || url.searchParams.get("prefix");
+      if (!task.paths.some(path => selected === path || path.endsWith("/") && selected?.startsWith(path))) return json({}, 403);
+      if (route.endsWith("/keys")) {
+        const file = files.get(body.path);
+        return file?.valid && file.etag === body.etag ? json({ key: store.b64u(await store.hmac(state.privateKey, body.etag)) }) : json({}, 400);
+      }
+      if (route.endsWith("/list")) return json({ objects: [...files].filter(([path]) => path.startsWith(selected))
+        .map(([key, file]) => ({ key, etag: file.etag, size: file.data.length, content_type: "application/octet-stream" })), common_prefixes: [], next_cursor: null });
+    }
     if (route === "/api/user/v1/cache/session") return json({ namespace: "user-namespace", bucket_id: 7, key: store.b64u(state.key), policy });
     if (route === "/api/user/v1/cache/check") return json({ valid: [...files.values()].filter(file => file.valid).map(file => file.etag) });
     if (route === "/api/user/v1/private/cache/session") return state.unlocked ? json({ namespace: "user-namespace", key: store.b64u(state.privateKey) }) : json({}, 423);
@@ -105,7 +127,7 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
   }
   const context = vm.createContext({
     testStore: new Proxy(memory, { get: (target, key) => typeof target[key] === "function" ? (...args) => memory[key](...args) : target[key] }),
-    fetch: fetchMock, crypto, Request, Response, Headers, ReadableStream, AbortController, DOMException, URL,
+    fetch: fetchMock, crypto, Request, Response, Headers, ReadableStream, AbortController, DOMException, URL, URLSearchParams,
     navigator: { userAgent: "Chrome" },
     Date: class extends Date { static now() { return Date.now() + state.clock; } },
     setTimeout(callback, delay) { const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay); timers.add(timer); if (delay > 1000) timer.unref(); return timer; },
@@ -393,7 +415,7 @@ test("补全期间文件覆盖会停止任务并清除旧版本", async t => {
   assert.equal(h.entries.size, 0);
 });
 
-test("私密手动缓存逐批验权，锁定后停止，重新解锁可以续传", async t => {
+test("未加入缓存任务的旧版私密请求逐批验权，锁定后停止，重新解锁可以续传", async t => {
   const h = harness(t, { [SECRET]: bytes(9 * store.BLOCK) }), url = h.url(SECRET);
   await h.ask("tessera-cache:start", { id: "secret", url });
   await h.ask("tessera-cache:step", { id: "secret" });
@@ -409,6 +431,102 @@ test("私密手动缓存逐批验权，锁定后停止，重新解锁可以续�
   assert.equal((await h.ask("tessera-cache:step", { id: "secret-2" })).complete, true);
   assert.equal(h.origins().filter(request => request.method === "GET").length, before + 1);
   assert.ok(h.keyRequests().length >= 4);
+});
+
+test("已加入的私密文件夹任务锁定后继续缓存，排队文件可以开始，预览仍要求解锁", async t => {
+  const root = ".tgdrive/private/selected/", first = root + "first.bin", second = root + "second.bin";
+  const h = harness(t, { [first]: bytes(9 * store.BLOCK), [second]: bytes(100) });
+  assert.equal(await h.ask("tessera-cache:queue-group", { id: "group", paths: [root], csrf: "csrf", access: "grant" }), undefined,
+    "页面不接收缓存密钥，沿用已有任务编号");
+  await h.ask("tessera-cache:start", { id: "first", group: "group", url: h.url(first) });
+  await h.ask("tessera-cache:step", { id: "first" });
+  h.state.unlocked = false;
+  await h.message("tessera-cache:access", { access: "" });
+  const page = await h.ask("tessera-cache:list-group", { id: "group", prefix: root });
+  assert.equal(page.objects.length, 2);
+  assert.equal((await h.ask("tessera-cache:step", { id: "first" })).complete, true);
+  await h.ask("tessera-cache:start", { id: "second", group: "group", url: h.url(second) });
+  assert.equal((await h.ask("tessera-cache:step", { id: "second" })).complete, true);
+  assert.equal((await h.read(first)).response.status, 423, "缓存完成也不能在锁定时交付明文");
+  h.state.unlocked = true;
+  await h.message("tessera-cache:access", { access: "fresh" });
+  const before = h.origins().filter(request => request.method === "GET").length;
+  assert.deepEqual((await h.read(first, { access: "fresh" })).data, h.files.get(first).data);
+  assert.equal(h.origins().filter(request => request.method === "GET").length, before, "解锁后复用后台写好的密文");
+});
+
+test("缓存范围与标签页绑定，其他页面不能使用或结束任务", async t => {
+  const h = harness(t, { [SECRET]: bytes(100), ".tgdrive/private/other.bin": bytes(100) });
+  await h.ask("tessera-cache:queue-group", { id: "group", paths: [SECRET], csrf: "csrf", access: "grant" });
+  h.state.unlocked = false;
+  await h.message("tessera-cache:access", { access: "" });
+  await assert.rejects(h.ask("tessera-cache:start", { id: "foreign", group: "group", url: h.url(SECRET) }, "page-B"), /任务已结束/);
+  await h.ask("tessera-cache:release-group", { id: "group" }, "page-B");
+  await assert.rejects(h.ask("tessera-cache:start", { id: "outside", group: "group", url: h.url(".tgdrive/private/other.bin") }), /任务|版本/);
+  await h.ask("tessera-cache:start", { id: "allowed", group: "group", url: h.url(SECRET) });
+  assert.equal((await h.ask("tessera-cache:step", { id: "allowed" })).complete, true);
+  await assert.rejects(h.ask("tessera-cache:queue-group", { id: "late", paths: [SECRET], csrf: "csrf", access: "grant" }), /解锁/);
+});
+
+test("锁定后长时间排队的任务无需续期，轮到时直接缓存", async t => {
+  const h = harness(t, { [SECRET]: bytes(100) });
+  await h.ask("tessera-cache:queue-group", { id: "group", paths: [SECRET], csrf: "csrf", access: "grant" });
+  h.state.unlocked = false;
+  await h.message("tessera-cache:access", { access: "" });
+  h.state.clock += 2 * 60 * 60_000;
+  await h.ask("tessera-cache:start", { id: "secret", group: "group", url: h.url(SECRET) });
+  assert.equal((await h.ask("tessera-cache:step", { id: "secret" })).complete, true);
+  assert.equal((await h.read(SECRET)).response.status, 423);
+});
+
+test("创建任务的迟到响应可跨越私密锁定，但不能跨越退出或移除任务", async t => {
+  for (const mode of ["lock", "logout", "remove"]) {
+    const h = harness(t, { [SECRET]: bytes(100) });
+    const started = deferred(), pending = deferred();
+    h.state.taskHook = async () => { started.resolve(); await pending.promise; };
+    const creation = h.ask("tessera-cache:queue-group", { id: "group", paths: [SECRET], csrf: "csrf", access: "grant" });
+    const result = creation.then(() => "ok", () => "aborted");
+    await started.promise;
+    h.state.unlocked = false;
+    let removed;
+    if (mode === "lock") await h.message("tessera-cache:access", { access: "" });
+    if (mode === "logout") await h.message("tessera-cache:logout");
+    if (mode === "remove") removed = h.ask("tessera-cache:release-group", { id: "group" });
+    pending.resolve(); await removed;
+    assert.equal(await result, mode === "lock" ? "ok" : "aborted");
+    if (mode === "lock") {
+      await h.ask("tessera-cache:start", { id: "secret", group: "group", url: h.url(SECRET) });
+      assert.equal((await h.ask("tessera-cache:step", { id: "secret" })).complete, true);
+    } else await assert.rejects(h.ask("tessera-cache:start", { id: "secret", group: "group", url: h.url(SECRET) }), /任务已结束/);
+  }
+});
+
+test("重试沿用任务编号时，旧请求的清理不能删除新任务", async t => {
+  const h = harness(t, { [SECRET]: bytes(100) });
+  const started = deferred(), pending = deferred();
+  h.state.taskHook = async () => { started.resolve(); await pending.promise; };
+  const first = h.ask("tessera-cache:queue-group", { id: "group", paths: [SECRET], csrf: "csrf", access: "grant" }).catch(() => undefined);
+  await started.promise;
+  const retry = h.ask("tessera-cache:queue-group", { id: "group", paths: [SECRET], csrf: "csrf", access: "grant" });
+  pending.resolve(); await first; await retry;
+  assert.equal(h.requests.filter(request => request.url.endsWith("/tasks/release")).length, 1);
+  await h.ask("tessera-cache:start", { id: "secret", group: "group", url: h.url(SECRET) });
+  assert.equal((await h.ask("tessera-cache:step", { id: "secret" })).complete, true);
+});
+
+test("退出、关闭私密缓存策略与缓存密钥变化仍会终止缓存任务", async t => {
+  for (const mode of ["logout", "policy", "epoch", "settings"]) {
+    const h = harness(t, { [SECRET]: bytes(9 * store.BLOCK) });
+    await h.ask("tessera-cache:queue-group", { id: "group", paths: [SECRET], csrf: "csrf", access: "grant" });
+    await h.ask("tessera-cache:start", { id: "secret", group: "group", url: h.url(SECRET) });
+    await h.ask("tessera-cache:step", { id: "secret" });
+    if (mode === "logout") { h.state.authenticated = false; await h.message("tessera-cache:logout"); }
+    if (mode === "policy") h.policy.private_enabled = false;
+    if (mode === "epoch") h.state.privateKey = new Uint8Array(32).fill(8);
+    if (mode === "settings") { h.preferences.private = false; await h.message("tessera-cache:settings"); }
+    await assert.rejects(h.ask("tessera-cache:step", { id: "secret" }), /任务已停止|任务或文件版本|关闭/);
+    assert.equal([...h.entries.values()][0].bytes, 8 * store.BLOCK);
+  }
 });
 
 test("手动缓存为完整大小预留空间，并淘汰其他旧条目", async t => {

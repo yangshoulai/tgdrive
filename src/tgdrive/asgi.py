@@ -156,6 +156,7 @@ class TgDriveASGI(StaticFiles):
         query = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
         started = False
         private_response = (path.startswith("/api/user/v1/private/") or path.startswith("/api/user/v1/passkeys")
+                            or path.startswith("/api/user/v1/cache/tasks")
                             or path.startswith("/api/user/v1/registration") or path == "/api/user/v1/register"
                             or path.startswith("/api/admin/v1/registration"))
         request_id = secrets.token_hex(8)
@@ -241,6 +242,17 @@ class TgDriveASGI(StaticFiles):
                 raise PermissionError("系统管理不提供用户文件访问，请在我的空间管理自己的文件")
             if path.startswith("/api/v1/"):
                 await self._key_api(tracked_send, method, path[len("/api/v1"):], query, headers, body_stream)
+                return
+            if path in ("/api/user/v1/cache/tasks/content", "/api/user/v1/cache/tasks/list") and method in ("GET", "HEAD"):
+                cache_user = self.client_cache.task_files(token, headers.get("x-tessera-cache-task", ""))
+                if path.endswith("/content"):
+                    await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, user=cache_user, private=True))
+                else:
+                    prefix = query.get("prefix", [""])[0]
+                    if not prefix.endswith("/"):
+                        raise ValueError("缓存目录必须以 / 结尾")
+                    result = await cache_user.list(token, prefix=prefix, cursor=query.get("cursor", [None])[0], limit=200)
+                    await self._send(tracked_send, 200, result)
                 return
             file_user = self.user
             private = path.startswith("/api/user/v1/private/")
@@ -380,7 +392,7 @@ class TgDriveASGI(StaticFiles):
                 status, result, extra = await self._route(method, path, query, payload, token, csrf,
                     ip=(scope.get("client") or [None])[0], user=file_user, private=private, access=access,
                     origin=headers.get("origin") or (f"{scope.get('scheme', 'http')}://{headers.get('host', '')}" if method == "GET" else None),
-                    passkey_browser=cookies.get("tg_passkey", ""))
+                    passkey_browser=cookies.get("tg_passkey", ""), cache_task=headers.get("x-tessera-cache-task", ""))
             except Exception as exc:
                 if audit:
                     self._write_audit(audit, ok=False, error=exc)
@@ -734,7 +746,7 @@ class TgDriveASGI(StaticFiles):
             raise NotFoundError("接口不存在")
         await self._send(send, 200, result)
 
-    async def _route(self, method, path, query, payload, token, csrf, ip=None, *, user=None, private=False, access="", origin=None, passkey_browser=""):
+    async def _route(self, method, path, query, payload, token, csrf, ip=None, *, user=None, private=False, access="", origin=None, passkey_browser="", cache_task=""):
         user = user or self.user
         if path.startswith("/api/admin/v1/"):
             route = path[len("/api/admin/v1"):]
@@ -934,14 +946,22 @@ class TgDriveASGI(StaticFiles):
             if route == "/usage" and method == "GET" and not private:
                 return 200, user.usage(token), {"Cache-Control": "no-store"}
             if route.startswith("/cache/") and method == "POST" and not private:
-                # 浏览器本地缓存：只下发密钥与核对引用，响应一律不进入 HTTP 缓存。读取类接口不要求 CSRF，
-                # 以便 Service Worker 在页面不在前台时也能取得密钥；重置纪元是修改操作，要求 CSRF。
+                # 缓存响应一律不进入 HTTP 缓存。任务读取复用登录会话；
+                # 创建私密任务要求当前已解锁，创建任务与重置纪元要求 CSRF。
                 if route == "/cache/session":
                     return 200, self.client_cache.session(token, payload.get("device")), {"Cache-Control": "no-store"}
                 if route == "/cache/check":
                     return 200, self.client_cache.check(token, payload.get("etags")), {"Cache-Control": "no-store"}
                 if route == "/cache/reset":
                     return 200, self.client_cache.reset(token, csrf), {"Cache-Control": "no-store"}
+                if route == "/cache/tasks":
+                    return 201, self.client_cache.start_task(token, csrf, access,
+                                                           payload.get("device"), payload.get("id"), payload.get("paths")), {"Cache-Control": "no-store"}
+                if route == "/cache/tasks/keys":
+                    return 200, self.client_cache.task_key(token, cache_task,
+                                                         payload.get("path"), payload.get("etag")), {"Cache-Control": "no-store"}
+                if route == "/cache/tasks/release":
+                    return 200, self.client_cache.finish_task(token, cache_task), {"Cache-Control": "no-store"}
             if route == "/upload-config" and method == "GET" and not private:
                 # 网页上传的并发由管理员在「下载与资源」配置；只返回这几个数值，不暴露其他资源配置。
                 user._scope(token)

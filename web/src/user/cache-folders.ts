@@ -1,7 +1,8 @@
 import * as api from "../api";
 
 /** 逐页读取文件夹树，不受当前列表的搜索、类型或公开筛选影响。 */
-export async function* cacheFolderFiles(prefixes: string[], signal: AbortSignal) {
+export async function* cacheFolderFiles(prefixes: string[], signal: AbortSignal,
+  load = (prefix: string, cursor: string | null, signal: AbortSignal) => api.listFiles(prefix, cursor, false, 200, "", signal)) {
   const roots = [...new Set(prefixes)].filter(prefix => prefix && prefix.endsWith("/"));
   const pending = roots.filter(prefix => !roots.some(other => other !== prefix && prefix.startsWith(other)));
   const visited = new Set(pending);
@@ -11,7 +12,7 @@ export async function* cacheFolderFiles(prefixes: string[], signal: AbortSignal)
     let cursor: string | null = null;
     do {
       signal.throwIfAborted();
-      const page = await api.listFiles(prefix, cursor, false, 200, "", signal);
+      const page = await load(prefix, cursor, signal);
       signal.throwIfAborted();
       const next = page.next_cursor;
       if (next && cursors.has(next)) throw new Error("文件夹列表未能继续读取，请重试");

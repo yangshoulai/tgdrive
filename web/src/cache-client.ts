@@ -111,7 +111,12 @@ export type CachedFileState = FileCacheState & { manual: boolean };
 /** 已缓存文件的索引（键与 cacheFileId 相同，不含缩略图），文件列表据此区分自动缓存与手动缓存。私密层只在私密空间已解锁时包含。 */
 export const cacheIndex = (withPrivate: boolean) =>
   ask<(CachedFileState & { id: string })[]>("tessera-cache:index", { private: withPrivate }, 30000);
-export const beginFileCache = (file: CacheFile, id: string, signal: AbortSignal) => ask<({ busy: true } | ({ busy: false } & FileCacheState))>("tessera-cache:start", { url: fileUrl(file), id }, 30000, undefined, signal);
+/** 直接建立用户选定的私密缓存任务，沿用登录会话，缓存密钥只留在 Worker。 */
+export const startCacheGroup = (id: string, paths: string[]) => ask<void>("tessera-cache:queue-group", { id, paths, csrf: api.getCsrf(), access: api.getPrivateAccess() }, 30000);
+export const listCacheGroup = (id: string, prefix: string, cursor: string | null, signal: AbortSignal) =>
+  ask<api.ListPage>("tessera-cache:list-group", { id, prefix, cursor }, 30000, undefined, signal);
+export function releaseCacheGroup(id: string) { notify("tessera-cache:release-group", { id }); }
+export const beginFileCache = (file: CacheFile, id: string, signal: AbortSignal, group?: string) => ask<({ busy: true } | ({ busy: false } & FileCacheState))>("tessera-cache:start", { url: fileUrl(file), id, group }, 30000, undefined, signal);
 export const stepFileCache = (id: string, signal: AbortSignal, progress: (state: FileCacheState) => void) => ask<FileCacheState>("tessera-cache:step", { id }, 120000, progress, signal);
 export function cancelFileCache(id?: string) {
   // pagehide 中也能同步发出，不等待异步查找 Worker。

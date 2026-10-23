@@ -84,6 +84,8 @@ let csrfToken = "";
 let thumbnailBucketId: number | null = null;
 let thumbnailSessionEpoch = 0;
 export function setCsrf(value: string) { csrfToken = value; }
+/** Worker 创建受限缓存任务时复用当前网页会话的 CSRF 校验。 */
+export const getCsrf = () => csrfToken;
 /** 页面卸载时仍要送达的小请求（fetch keepalive，带 CSRF）；不等待结果。 */
 export function postKeepalive(url: string, body: unknown) {
   try {

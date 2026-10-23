@@ -111,6 +111,67 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parameters["limit"]["maximum"], 300)
         self.assertIn("plan_step_id", parameters)
 
+    async def test_changing_collection_offsets_without_new_items_warns_then_stops(self):
+        offsets = [0, 70, 71, 72, 73, 74, 75, 65]
+        service, state = self.fixture([Reply(tool_calls=[call("get_collection", {"collection_id": "g_test", "offset": offset}, f"c{i}")])
+                                       for i, offset in enumerate(offsets)])
+        service._user_tools.return_value["get_collection"] = TOOLS["get_collection"]
+        service.trace.collection.return_value = {"id": "g_test", "conversation_id": state.conversation_id, "kind": "collection",
+                                                 "source": "https://example.test", "rule": {"type": "links"},
+                                                 "urls": [{"url": f"https://example.test/{i}"} for i in range(76)]}
+        service.config.limits.return_value["repeat_threshold"] = 2
+        await self.run_service(service, state)
+        messages = service.trace.messages(state.conversation_id)
+        checks = [m for m in messages if m.get("type") == "repeat_check"]
+        self.assertEqual(len(checks), 1)
+        self.assertIn("调整偏移量也没有获得新内容", checks[0]["model_text"])
+        self.assertEqual(state.stop_reason, "loop")
+        self.assertEqual(service._model_call.await_count, 7)
+
+    async def test_new_collection_pages_are_not_a_loop(self):
+        service, state = self.fixture([Reply(tool_calls=[call("get_collection", {"collection_id": "g_test", "offset": offset}, f"c{offset}")])
+                                       for offset in (0, 200, 400, 600)] + [Reply(text="清单已读取完成")])
+        service._user_tools.return_value["get_collection"] = TOOLS["get_collection"]
+        service.trace.collection.return_value = {"id": "g_test", "conversation_id": state.conversation_id, "kind": "collection",
+                                                 "source": "https://example.test", "rule": {"type": "links"},
+                                                 "urls": [{"url": f"https://example.test/{i}"} for i in range(650)]}
+        service.config.limits.return_value["repeat_threshold"] = 2
+        await self.run_service(service, state)
+        self.assertFalse(any(m.get("type") == "repeat_check" for m in service.trace.messages(state.conversation_id)))
+        self.assertEqual(state.stop_reason, "completed")
+
+    async def test_parallel_read_with_new_items_does_not_keep_a_stale_loop_flag(self):
+        args = lambda offset: {"collection_id": "g_test", "offset": offset}
+        for offsets in ((73, 74, 75, 0), (0, 73, 74, 75)):
+            with self.subTest(offsets=offsets):
+                service, state = self.fixture([
+                    *[Reply(tool_calls=[call("get_collection", args(offset), f"c{offset}")]) for offset in (70, 71, 72)],
+                    Reply(tool_calls=[call("get_collection", args(offset), f"c{offset}") for offset in offsets]),
+                    Reply(text="清单已核对")])
+                service._user_tools.return_value["get_collection"] = TOOLS["get_collection"]
+                service.trace.collection.return_value = {"id": "g_test", "conversation_id": state.conversation_id, "kind": "collection",
+                                                         "source": "https://example.test", "rule": {"type": "links"},
+                                                         "urls": [{"url": f"https://example.test/{i}"} for i in range(76)]}
+                service.config.limits.return_value["repeat_threshold"] = 2
+                await self.run_service(service, state)
+                self.assertFalse(any(m.get("type") == "repeat_check" for m in service.trace.messages(state.conversation_id)))
+                self.assertEqual(state.stop_reason, "completed")
+
+    async def test_old_results_do_not_earn_more_automatic_segments(self):
+        service, state = self.fixture([
+            Reply(tool_calls=[call("update_plan", {"items": [step()]}, "p1"), call("search_files", {"part": 1}, "c1")]),
+            Reply(tool_calls=[call("search_files", {"part": 2}, "c2")]),
+            Reply(tool_calls=[call("search_files", {"part": 3}, "c3")]),
+            Reply(tool_calls=[call("search_files", {"part": 1}, "c4")]),
+            Reply(tool_calls=[call("search_files", {"part": 2}, "c5")]),
+            Reply(tool_calls=[call("search_files", {"part": 3}, "c6")]),
+            Reply(text="保留当前进度，说明阻碍")])
+        service.config.limits.return_value.update(max_steps=3, repeat_threshold=200)
+        await self.run_service(service, state)
+        continued = [m for m in service.trace.messages(state.conversation_id) if m.get("type") == "continued"]
+        self.assertEqual(len(continued), 1, "第二段全部重读旧结果，不能继续取得第三段预算")
+        self.assertEqual(state.stop_reason, "limit")
+
     async def test_prior_run_controls_do_not_override_new_user_request(self):
         service, state = self.fixture([])
         trace, cid = service.trace, state.conversation_id

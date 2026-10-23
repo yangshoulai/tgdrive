@@ -1,5 +1,6 @@
 """长任务（docs/assistant-design.md §38）：进度记录、裁剪后找回结果、按结果判断重复、多层网页收集与分批下载。
 只使用临时留痕与网页替身，不访问外网。"""
+import collections
 import json
 import unittest
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from tests.trace_fixture import real_trace
 from tgdrive.assistant.actions import ActionExecutor, Progress
 from tgdrive.assistant.planning import Plan
 from tgdrive.assistant.providers import Reply
-from tgdrive.assistant.service import _slim_result
+from tgdrive.assistant.service import _collection_progress, _slim_result
 from tgdrive.assistant.tools import ToolContext, ToolError, ToolOutput, recall_result
 from tgdrive.assistant.web_tools import collect_gallery, collect_links, get_collection, propose_downloads
 
@@ -179,6 +180,75 @@ class LongTaskTools(unittest.IsolatedAsyncioTestCase):
         await executor._downloads(1, "", {"options": {"target": "模特/"}, "items": items}, progress, None)
         self.assertEqual(sorted(created), [("模特/", 1), ("模特/相册 A/", 3), ("模特/相册 B/", 2)])
         self.assertEqual(progress.ok, 6)
+
+
+class CollectionPageTests(unittest.IsolatedAsyncioTestCase):
+    """结果集与留痕使用内存替身，不建立数据库或访问来源网页。"""
+
+    def context(self, items, kind="links", *, budget=4 * 1024 * 1024):
+        trace = Mock()
+        trace.collection.return_value = {"id": "g_test", "conversation_id": "chat", "kind": "collection",
+                                         "source": SITE, "rule": {"type": kind}, "urls": items}
+        return ToolContext(1, 1, "", None, None, "files", "", {}, {}, trace=trace,
+                           conversation_id="chat", limits={"tool_result_bytes": budget})
+
+    async def test_page_reports_total_range_and_stable_indices_for_all_kinds(self):
+        for kind in ("links", "gallery", "parsed"):
+            with self.subTest(kind=kind):
+                items = [{"url": f"{SITE}/{i}", "text": f"条目 {i}"} for i in range(76)]
+                if kind == "parsed":
+                    items = [{"ticket": f"ticket{i}", "name": f"{i}.jpg"} for i in range(76)]
+                output = await get_collection(self.context(items, kind), {"collection_id": "g_test", "offset": 70})
+                self.assertEqual((output.result["count"], output.result["offset"], output.result["returned"]), (76, 70, 6))
+                self.assertEqual([item["index"] for item in output.result["items"]], list(range(70, 76)))
+                self.assertIsNone(output.result["next_offset"])
+                self.assertEqual(output.summary, "共 76 项 · 本次第 71–76 项")
+
+    async def test_result_budget_pages_without_skipping_items(self):
+        ctx = self.context([{"url": f"{SITE}/{i}/" + "长路径" * 75} for i in range(20)], budget=2048)
+        offset, found = 0, []
+        while offset is not None:
+            output = await get_collection(ctx, {"collection_id": "g_test", "offset": offset})
+            self.assertLessEqual(len(json.dumps(output.result, ensure_ascii=False).encode()), 2048)
+            self.assertEqual(output.result["returned"], len(output.result["items"]))
+            found.extend(item["index"] for item in output.result["items"])
+            following = output.result["next_offset"]
+            if following is not None:
+                self.assertEqual(following, offset + output.result["returned"])
+                self.assertGreater(following, offset)
+            offset = following
+        self.assertEqual(found, list(range(20)))
+
+    async def test_empty_page_and_oversized_item_do_not_invent_a_cursor(self):
+        output = await get_collection(self.context([]), {"collection_id": "g_test", "offset": 70})
+        self.assertEqual(output.result["returned"], 0)
+        self.assertIsNone(output.result["next_offset"])
+        self.assertEqual(output.summary, "共 0 项 · 本次无条目")
+        with self.assertRaisesRegex(ToolError, "工具结果预算"):
+            await get_collection(self.context([{"url": "x" * 3000}], budget=2048), {"collection_id": "g_test"})
+
+    async def test_slim_result_keeps_page_range_and_end_markers(self):
+        output = await get_collection(self.context([{"url": f"{SITE}/1"}]), {"collection_id": "g_test"})
+        text = _slim_result({"seq": 1, "name": "get_collection", "status": "ok", "result": output.result})
+        for kept in ("collection_id=g_test", "offset=0", "returned=1", "count=1", "next_offset=null"):
+            self.assertIn(kept, text)
+
+    async def test_overlap_is_not_progress_but_changed_content_and_other_collections_are(self):
+        seen = collections.OrderedDict()
+        page = lambda start, end: {"collection_id": "g_test", "items": [{"index": i, "url": f"{SITE}/{i}"} for i in range(start, end)]}
+        self.assertTrue(_collection_progress(page(0, 76), seen))
+        for offset in (70, 71, 75, 65, 0):
+            self.assertFalse(_collection_progress(page(offset, 76), seen))
+        self.assertTrue(_collection_progress(page(75, 77), seen), "结果集追加条目属于新进展")
+        changed = page(75, 76)
+        changed["items"][0]["url"] = f"{SITE}/updated"
+        self.assertTrue(_collection_progress(changed, seen))
+        self.assertTrue(_collection_progress({**changed, "collection_id": "g_other"}, seen))
+        self.assertIsNone(_collection_progress({"collection_id": "g_old", "items": ["旧格式"]}, seen))
+        with patch("tgdrive.assistant.service.PROGRESS_ITEMS", 2):
+            seen.clear()
+            _collection_progress(page(0, 5), seen)
+            self.assertEqual(list(seen), [("g_test", 3), ("g_test", 4)])
 
 
 class LongTaskLoop(planning.LoopTests):
