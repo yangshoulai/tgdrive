@@ -8,7 +8,7 @@ const MODES: Record<api.ResourceConfig["mode"], string> = { auto: "自动", low:
 const TIERS: Record<api.ResourceSettings["effective"]["mode"], string> = { low: "低资源", standard: "标准", custom: "自定义" };
 const MODE_HINTS: Record<api.ResourceConfig["mode"], string> = {
   auto: "按检测到的 CPU 和内存在「标准」与「低资源」之间选择，适合大多数部署。",
-  low: "单核或 1 GB 以下内存的机器：离线下载 1 个任务，读取与写入并发都会收紧。",
+  low: "离线下载 1 个任务；内存达到 512 MiB 时最多读取 4 路、每账号 2 路，写入 4 个分片、网页每个文件 4 段。更小或无法检测内存时继续降低。",
   custom: "自己决定同时下载的任务数；容器预算不足时实际并发仍会降低。",
 };
 const rate = (kib: number) => kib ? `${kib.toLocaleString("zh-CN")} KiB/s` : "不限速";
@@ -98,8 +98,8 @@ export function Resources() {
         ["视频组件", `FFmpeg ${component(effective.hls_available)} · X ${component(effective.x_available)} · YouTube ${effective.youtube_available ? "可用" : "组件不完整"}`],
       ]} />
       {effective.reduced && <Notice tone="warning">资源预算不足，离线下载并发已降低。</Notice>}
-      {effective.upload_reduced && <Notice tone="warning">上传并发已按{effective.mode === "low" ? "低资源档（写入最多 2 个分片、网页每个文件最多 2 段）" : "检测到的内存"}降低。</Notice>}
-      {effective.transfer_reduced && <Notice tone="warning">文件读取并发已按{effective.mode === "low" ? "低资源档（最多 2 路、每个账号 1 路）" : "检测到的内存"}降低。</Notice>}
+      {effective.upload_reduced && <Notice tone="warning">上传并发已按{effective.mode === "low" ? "低资源档与内存预算" : "检测到的内存"}降低为写入 {effective.upload_concurrency} 个分片、网页每个文件 {effective.web_part_concurrency} 段。</Notice>}
+      {effective.transfer_reduced && <Notice tone="warning">文件读取并发已按{effective.mode === "low" ? "低资源档与内存预算" : "检测到的内存"}降低为服务器 {effective.transfer_concurrency} 路、每个账号 {effective.bucket_concurrency} 路。</Notice>}
       {settings.pressure && <Notice tone="warning">{settings.pressure}</Notice>}
       {settings.components.ytdlp_age_days !== null && settings.components.ytdlp_age_days > 60 && <Notice tone="warning">yt-dlp 已发布 {settings.components.ytdlp_age_days} 天。YouTube 经常调整接口，解析失败时请拉取最新的平台镜像。</Notice>}
       <Disclosure title="检测信息与组件版本" description="服务器资源、视频处理方式与各组件版本。">

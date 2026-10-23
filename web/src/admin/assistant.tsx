@@ -6,8 +6,8 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
-import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SetupGuide, SearchInput, Segmented,
-  SkeletonRows, Switch, Tabs, Disclosure, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
+import { Notice, Badge, Button, ByteSizeInput, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SetupGuide, SearchInput, Segmented,
+  SkeletonRows, Switch, Tabs, Disclosure, formatBytes, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
 import { Stat } from "./overview";
 import { CurveChart } from "../curve-chart";
 
@@ -927,6 +927,13 @@ function ToolsTab() {
   );
 }
 
+// 接口中以 _bytes 结尾的配置使用字节存储，界面统一转换容量单位。
+const byteSetting = (name: string) => name.endsWith("_bytes");
+const sizeLabel = (label: string) => label.replace(/字节数/g, "大小").replace(/（字节）/g, "");
+const settingLabel = (name: string, label: string) => byteSetting(name) ? sizeLabel(label) : label;
+const settingNumber = (name: string, value: number) => byteSetting(name) ? formatBytes(value).replace(/\.0(?= )/, "") : value.toLocaleString("zh-CN");
+const settingRange = (name: string, bound: { min: number; max: number }) => `${settingNumber(name, bound.min)}–${settingNumber(name, bound.max)}`;
+
 function ToolParamsDialog({ tool, values, onClose, onApply }: { tool: ai.AdminTool; values: Record<string, unknown>; onClose: () => void; onApply: (values: Record<string, number>) => void }) {
   const [form, setForm] = useState(() => Object.fromEntries(tool.params.map(param => [param.name, String(values[param.name] ?? param.value)])));
   const [error, setError] = useState("");
@@ -935,7 +942,7 @@ function ToolParamsDialog({ tool, values, onClose, onApply }: { tool: ai.AdminTo
     const result: Record<string, number> = {};
     for (const param of tool.params) {
       const raw = form[param.name].trim(), value = Number(raw);
-      if (!raw || !Number.isInteger(value) || value < param.min || value > param.max) { setError(`${param.label}必须在 ${param.min}–${param.max} 之间`); return; }
+      if (!raw || !Number.isInteger(value) || value < param.min || value > param.max) { setError(`${settingLabel(param.name, param.label)}必须在 ${settingRange(param.name, param)} 之间`); return; }
       result[param.name] = value;
     }
     onApply(result);
@@ -944,8 +951,9 @@ function ToolParamsDialog({ tool, values, onClose, onApply }: { tool: ai.AdminTo
     <Modal title={`${tool.label} · 参数`} size="sm" onClose={onClose}
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="tool-params-form">应用</Button></>}>
       <form id="tool-params-form" className="form" onSubmit={submit} noValidate>
-        {tool.params.map(param => <Field key={param.name} label={param.label} hint={`默认 ${param.default}，范围 ${param.min}–${param.max}（硬上限）`}>
-          <input className="input" type="number" min={param.min} max={param.max} value={form[param.name]} onChange={event => setForm({ ...form, [param.name]: event.target.value })} />
+        {tool.params.map(param => <Field key={param.name} label={settingLabel(param.name, param.label)} hint={`默认 ${settingNumber(param.name, param.default)}，范围 ${settingRange(param.name, param)}（硬上限）`}>
+          {byteSetting(param.name) ? <ByteSizeInput label={settingLabel(param.name, param.label)} min={param.min} max={param.max} value={form[param.name]} onChange={value => setForm({ ...form, [param.name]: value })} />
+            : <input className="input" type="number" min={param.min} max={param.max} value={form[param.name]} onChange={event => setForm({ ...form, [param.name]: event.target.value })} />}
         </Field>)}
         {error && <Notice tone="danger">{error}</Notice>}
         <p className="muted">应用后点击页面底部的“保存工具配置”才会生效。</p>
@@ -983,7 +991,7 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
     event.preventDefault();
     for (const [key, value] of Object.entries(form)) {
       const bound = limits!.bounds[key], parsed = Number(value);
-      if (!value.trim() || !Number.isInteger(parsed) || parsed < bound.min || parsed > bound.max) { setError(`${bound.label}必须在 ${bound.min}–${bound.max} 之间`); return; }
+      if (!value.trim() || !Number.isInteger(parsed) || parsed < bound.min || parsed > bound.max) { setError(`${settingLabel(key, bound.label)}必须在 ${settingRange(key, bound)} 之间`); return; }
     }
     for (const key of ["user_daily_tokens", "retention_days", "call_log_days"]) {
       const bound = settings!.bounds[key], parsed = Number(general[key]);
@@ -1000,8 +1008,9 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
     finally { setBusy(false); }
   }
   const numberField = (key: string, label: string, bound: ai.Bound, value: string, onChange: (value: string) => void) => (
-    <Field key={key} label={label} hint={`默认 ${bound.default.toLocaleString("zh-CN")}，范围 ${bound.min.toLocaleString("zh-CN")}–${bound.max.toLocaleString("zh-CN")}`}>
-      <input className="input" type="number" min={bound.min} max={bound.max} value={value} onChange={event => onChange(event.target.value)} />
+    <Field key={key} label={settingLabel(key, label)} hint={`默认 ${settingNumber(key, bound.default)}，范围 ${settingRange(key, bound)}`}>
+      {byteSetting(key) ? <ByteSizeInput label={settingLabel(key, label)} min={bound.min} max={bound.max} value={value} onChange={onChange} />
+        : <input className="input" type="number" min={bound.min} max={bound.max} value={value} onChange={event => onChange(event.target.value)} />}
     </Field>
   );
   async function setPrivate(value: boolean) {

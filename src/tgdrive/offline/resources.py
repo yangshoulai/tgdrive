@@ -175,20 +175,22 @@ class ResourceSettings:
         desired = config["concurrency"] if mode == "custom" else (1 if mode == "low" else 2)
         ceiling = 1 if low else min(4, max(1, int(memory / (256 * MIB)) - 2))
         platform_limit = min(config["platform_max_mib"], 512) if low or mode == "low" else config["platform_max_mib"]
-        # 文件读取并发：低资源模式最多 2 路、每个账号 1 路；另按检测到的内存留出余量（每路约 24 MB，最多占四分之一）。
+        # 小型个人部署允许适度并行；不足 512 MiB 或内存未知时保留原先的保守限制。
+        low_parallel = 4 if memory and memory >= 512 * MIB else 2
+        # 文件读取每路约 24 MB，最多占检测内存的四分之一；管理员设得更低时不主动抬高。
         transfer = config["transfer_concurrency"]
         if mode == "low":
-            transfer = min(transfer, 2)
+            transfer = min(transfer, low_parallel)
         if memory:
             transfer = min(transfer, max(2, memory // 4 // TRANSFER_MEMORY))
-        bucket = min(config["bucket_concurrency"], transfer, 1 if mode == "low" else 16)
-        # 上传名额同样按低资源模式与内存收紧；网页分段并发在低资源下最多 2，避免服务端同时缓冲太多 16 MB 分段。
+        bucket = min(config["bucket_concurrency"], transfer, low_parallel // 2 if mode == "low" else 16)
+        # 写入分片每路约 32 MB；低资源下网页分段同步受此预算限制，避免小容器额外缓冲太多请求。
         upload = config["upload_concurrency"]
+        upload_budget = max(1, memory // 4 // UPLOAD_MEMORY) if memory else 16
         if mode == "low":
-            upload = min(upload, 2)
-        if memory:
-            upload = min(upload, max(1, memory // 4 // UPLOAD_MEMORY))
-        web_parts = min(config["web_part_concurrency"], 2) if mode == "low" else config["web_part_concurrency"]
+            upload = min(upload, low_parallel)
+        upload = min(upload, upload_budget)
+        web_parts = min(config["web_part_concurrency"], low_parallel, upload_budget) if mode == "low" else config["web_part_concurrency"]
         return {**config, "mode": mode, "concurrency": min(desired, ceiling), "ffmpeg_concurrency": 1,
                 "transfer_concurrency": transfer, "bucket_concurrency": bucket,
                 "upload_concurrency": upload, "web_part_concurrency": web_parts,

@@ -615,8 +615,8 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 resources.update(bad)
         low = resources.update({"mode": "low"})["effective"]
-        self.assertEqual((low["transfer_concurrency"], low["bucket_concurrency"], low["transfer_reduced"]), (2, 1, True))
-        self.assertEqual((transfers.total, transfers.per_bucket), (2, 1))
+        self.assertEqual((low["transfer_concurrency"], low["bucket_concurrency"], low["transfer_reduced"]), (4, 2, True))
+        self.assertEqual((transfers.total, transfers.per_bucket), (4, 2))
         # 自定义模式不按低资源档收紧，只按检测到的内存留余量（自动模式在 1 GB 以下会选低资源档）。
         resources.update({"mode": "custom"})
         resources.detected.update(memory_bytes=512 * 1024 ** 2)

@@ -413,7 +413,7 @@ function Process({ steps, live }: { steps: Step[]; live: boolean }) {
 function StepView({ step, disclosure, onThinkingOpen }: { step: Step; disclosure?: ThinkingDisclosure; onThinkingOpen: () => void }) {
   if (step.kind === "thinking" || step.kind === "note") return <ProcessText text={step.text} disclosure={disclosure!}
     ms={step.kind === "thinking" ? step.ms : null} live={step.live} startedAt={step.kind === "thinking" ? step.startedAt ?? null : null}
-    markdown={step.kind === "note"} onOpen={onThinkingOpen} />;
+    note={step.kind === "note"} onOpen={onThinkingOpen} />;
   if (step.kind === "decision") return <DecisionStep step={step} />;
   if (step.kind === "marker") return <div className={`ai-step ai-marker tone-${step.tone}`}>
     <span className="ai-step-dot" aria-hidden="true"><Icon name={step.tone === "accent" ? "refresh" : "checkCircle"} size={12} /></span>
@@ -423,8 +423,8 @@ function StepView({ step, disclosure, onThinkingOpen }: { step: Step; disclosure
 
 /** 思考与进度说明复用折叠交互，用图标和标题区分来源；进度另有一行摘要，展开时随输出流式追加，
  * 停在底部时自动跟随，向上翻阅时不打断。 */
-function ProcessText({ text, ms, live, startedAt, markdown, disclosure, onOpen }: {
-  text: string; ms: number | null; live?: boolean; startedAt: number | null; markdown: boolean; disclosure: ThinkingDisclosure; onOpen: () => void;
+function ProcessText({ text, ms, live, startedAt, note, disclosure, onOpen }: {
+  text: string; ms: number | null; live?: boolean; startedAt: number | null; note: boolean; disclosure: ThinkingDisclosure; onOpen: () => void;
 }) {
   const [choice, setChoice] = useState(() => ({ disclosure, open: disclosure.open }));
   const open = choice.disclosure === disclosure ? choice.open : disclosure.open;
@@ -438,21 +438,21 @@ function ProcessText({ text, ms, live, startedAt, markdown, disclosure, onOpen }
     if (open && live && disclosure.follow && box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [text, live, open, disclosure]);
   const elapsed = live ? (startedAt ? Math.max(0, now - startedAt) : 0) : ms;
-  const summary = markdown ? text.replace(/\s+/g, " ").trim() : "";
-  return <div className={`ai-step ${markdown ? "ai-note" : "ai-thinking"}${open ? " is-open" : ""}${live ? " is-live" : ""}`}>
-    <span className="ai-step-dot" aria-hidden="true"><Icon name={markdown ? "chat" : "brain"} size={12} /></span>
+  const summary = note ? text.replace(/\s+/g, " ").trim() : "";
+  return <div className={`ai-step ${note ? "ai-note" : "ai-thinking"}${open ? " is-open" : ""}${live ? " is-live" : ""}`}>
+    <span className="ai-step-dot" aria-hidden="true"><Icon name={note ? "chat" : "brain"} size={12} /></span>
     <div className="ai-thinking-body">
       <button type="button" className="ai-tool-head ai-thinking-head" aria-expanded={open} aria-controls={text ? contentId : undefined} disabled={!text}
         onClick={() => { disclosure.follow = true; disclosure.open = !open; setChoice({ disclosure, open: !open }); if (!open) onOpen(); }}>
-        <strong><span className={live ? "ai-shimmer" : undefined}>{markdown ? "进度说明" : live ? "思考中" : "思考"}</span></strong>
-        {markdown && !open && <span className="ai-tool-result">{summary.slice(0, 120)}{summary.length > 120 ? "…" : ""}</span>}
+        <strong><span className={live ? "ai-shimmer" : undefined}>{note ? "进度说明" : live ? "思考中" : "思考"}</span></strong>
+        {note && !open && <span className="ai-tool-result">{summary.slice(0, 120)}{summary.length > 120 ? "…" : ""}</span>}
         {elapsed ? <span className="ai-thinking-time">{seconds(elapsed)}</span> : null}
         {text && <Icon name="chevronDown" size={13} />}
       </button>
       <div id={contentId} className="ai-tool-detail ai-thinking-text" hidden={!open} ref={box} aria-live="off"
         onScroll={event => { const node = event.currentTarget; disclosure.top = node.scrollTop;
           disclosure.follow = node.scrollHeight - node.scrollTop - node.clientHeight < 24; }}>
-        {open && (markdown ? <Markdown source={text} /> : text)}</div>
+        {open && <Markdown source={text} />}</div>
     </div>
   </div>;
 }

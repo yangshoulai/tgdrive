@@ -237,7 +237,7 @@ export function Badge({ tone = "neutral", icon, children, dot }: { tone?: Tone; 
 export function Field({ label, hint, error, children, htmlFor }: { label: string; hint?: ReactNode; error?: string; children: ReactNode; htmlFor?: string }) {
   const id = useId();
   const content = Children.toArray(children);
-  const control = content.find(child => isValidElement(child) && typeof child.type === "string" && ["input", "select", "textarea"].includes(child.type));
+  const control = content.find(child => isValidElement(child) && (child.type === ByteSizeInput || typeof child.type === "string" && ["input", "select", "textarea"].includes(child.type)));
   const input = isValidElement<{ id?: string; "aria-describedby"?: string; "aria-invalid"?: boolean }>(control) ? control : null;
   const inputId = htmlFor ?? input?.props.id ?? (input ? `${id}-input` : undefined);
   const descriptionId = `${id}-description`;
@@ -251,6 +251,43 @@ export function Field({ label, hint, error, children, htmlFor }: { label: string
       {error ? <p id={descriptionId} className="field-error" role="alert">{error}</p> : hint && <p id={descriptionId} className="field-hint">{hint}</p>}
     </div>
   );
+}
+
+const BYTE_UNITS = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 } as const;
+type ByteUnit = keyof typeof BYTE_UNITS;
+function byteDisplay(value: string): { amount: string; unit: ByteUnit } {
+  const bytes = Number(value), unit = bytes >= BYTE_UNITS.GB ? "GB" : bytes >= BYTE_UNITS.MB ? "MB" : "KB";
+  return { amount: value.trim() && Number.isFinite(bytes) ? String(bytes / BYTE_UNITS[unit]) : "", unit };
+}
+
+/** 容量输入使用易读单位，向表单回传整数字节；切换单位只改变显示，不修改容量。 */
+export function ByteSizeInput({ label, value, onChange, min, max, id, "aria-describedby": describedBy, "aria-invalid": invalid }: {
+  label: string; value: string; onChange: (value: string) => void; min: number; max: number; id?: string;
+  "aria-describedby"?: string; "aria-invalid"?: boolean;
+}) {
+  const [display, setDisplay] = useState(() => byteDisplay(value)), reported = useRef(value);
+  useEffect(() => {
+    // 保留用户正在输入的小数格式；只有重置或外部回填才重新选择显示单位。
+    if (value !== reported.current) { reported.current = value; setDisplay(byteDisplay(value)); }
+  }, [value]);
+  function changeAmount(amount: string) {
+    setDisplay(current => ({ ...current, amount }));
+    const bytes = amount.trim() ? Number(amount) * BYTE_UNITS[display.unit] : NaN;
+    const next = Number.isFinite(bytes) ? String(Math.round(bytes)) : "";
+    reported.current = next;
+    onChange(next);
+  }
+  function changeUnit(unit: ByteUnit) {
+    const amount = Number(display.amount);
+    setDisplay({ amount: display.amount.trim() && Number.isFinite(amount) ? String(amount * BYTE_UNITS[display.unit] / BYTE_UNITS[unit]) : display.amount, unit });
+  }
+  return <div className="input-affix byte-size-input">
+    <input id={id} className="input" type="number" inputMode="decimal" step="any" min={min / BYTE_UNITS[display.unit]} max={max / BYTE_UNITS[display.unit]}
+      value={display.amount} onChange={event => changeAmount(event.target.value)} aria-describedby={describedBy} aria-invalid={invalid} />
+    <select className="input" aria-label={`${label}单位`} value={display.unit} onChange={event => changeUnit(event.target.value as ByteUnit)}>
+      {Object.keys(BYTE_UNITS).map(unit => <option key={unit} value={unit}>{unit}</option>)}
+    </select>
+  </div>;
 }
 
 export function PasswordField({ label, value, onChange, name, autoComplete = "current-password", hint, error, disabled, autoFocus }: {
