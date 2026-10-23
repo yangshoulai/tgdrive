@@ -28,7 +28,8 @@ from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_c
 
 
 PART_SIZE = 16 * 1024 * 1024
-# 排队数量与实际并发分开限制，允许大批相册持久排队，不同时启动这些下载。
+# 单次提交、队列容量与实际下载并发分别限制。
+MAX_CREATE_ITEMS = 1000
 MAX_PENDING_TASKS = 20_000
 ACTIVE = ("queued", "running", "interrupted")
 RETRY_DELAYS = (10, 30, 90)
@@ -165,8 +166,8 @@ class OfflineDownloads:
         if start > now:
             await asyncio.sleep(start - now)
 
-    async def parse(self, user_id: int, text: str, *, download_type="auto", cookies="", max_urls: int = 32, multiple_platforms: bool = False) -> dict:
-        """网页与密钥接口沿用默认限制；助手可指定识别上限（0 为不限）并批量解析平台链接。"""
+    async def parse(self, user_id: int, text: str, *, download_type="auto", cookies="", max_urls: int = MAX_CREATE_ITEMS, multiple_platforms: bool = False) -> dict:
+        """网页与密钥接口每次最多解析一个提交批次；助手另按工具配置指定上限（0 为不限）。"""
         if download_type not in ("auto", "http", "hls", "x", "youtube"):
             raise ValueError("下载类型不正确")
         if not isinstance(cookies, str) or len(cookies.encode()) > 32768:
@@ -176,16 +177,31 @@ class OfflineDownloads:
         sites = [site_link(request.url) if download_type in ("auto", "x", "youtube") else None for request in requests]
         if not multiple_platforms and sum(site is not None for site in sites) > 1:
             raise ValueError("每次解析一个 X 帖子或 YouTube 视频，媒体可在解析后逐项选择")
+        candidate_count = 0
         async def inspect(request, site):
+            nonlocal candidate_count
             async with self._parse_slots:
                 if download_type in ("x", "youtube") and (not site or site[0] != download_type):
                     raise ValueError("链接与选择的平台不匹配")
                 if site:
-                    return await self._parse_platform(user_id, request, site, cookies)
-                if cookies:
-                    raise ValueError("额外的 Cookie 导入只用于平台链接；文件直链请在 curl 命令中携带 Cookie")
-                return await self._parse_request(user_id, request, download_type)
-        groups = await asyncio.gather(*(inspect(request, site) for request, site in zip(requests, sites)))
+                    group = await self._parse_platform(user_id, request, site, cookies)
+                else:
+                    if cookies:
+                        raise ValueError("额外的 Cookie 导入只用于平台链接；文件直链请在 curl 命令中携带 Cookie")
+                    group = await self._parse_request(user_id, request, download_type, max_urls)
+                candidate_count += len(group)
+                if max_urls and candidate_count > max_urls:
+                    raise ValueError(f"解析结果超过 {max_urls} 个文件，请分批提交")
+                return group
+        tasks = [asyncio.create_task(inspect(request, site)) for request, site in zip(requests, sites)]
+        try:
+            groups = await asyncio.gather(*tasks)
+        except BaseException:
+            # gather 首次失败不会自动取消其余请求；大批解析必须等待清理完毕再退出。
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         candidates = [{**candidate, "group": f"{index}:{candidate.get('group', '0')}"} for index, group in enumerate(groups) for candidate in group]
         if max_urls and len(candidates) > max_urls:
             raise ValueError(f"解析结果超过 {max_urls} 个文件，请分批提交")
@@ -223,7 +239,7 @@ class OfflineDownloads:
             raise DownloadError("可用媒体需要的临时缓存超过当前资源上限，请选择其他格式或调整资源设置")
         return candidates
 
-    async def _parse_request(self, user_id, request, download_type):
+    async def _parse_request(self, user_id, request, download_type, max_candidates=MAX_CREATE_ITEMS):
         candidates = []
         name, size, content_type = request.name or url_filename(request.url), None, None
         # POST 的解析完全不访问来源，不预先发送，也不进行探测性重放。
@@ -270,8 +286,8 @@ class OfflineDownloads:
             stem = name.rsplit(".", 1)[0] if "." in name else name
             name = filename(stem + ".mp4")
         for choice, label, audio in choices:
-            if len(candidates) >= 32:
-                raise ValueError("解析结果超过 32 个文件，请分批提交")
+            if max_candidates and len(candidates) >= max_candidates:
+                raise ValueError(f"解析结果超过 {max_candidates} 个文件，请分批提交")
             ticket = {"user_id": user_id, "expires": time.time() + 1200, "request": choice.json(), "kind": "hls" if hls else "http", "size": None if hls else size, "content_type": "video/mp4" if hls else content_type, "hls_audio": audio}
             import base64
             encoded = base64.urlsafe_b64encode(seal(self._key("offline-ticket"), json.dumps(ticket, ensure_ascii=False).encode(), "offline-ticket")).decode()
@@ -310,8 +326,8 @@ class OfflineDownloads:
             if key_scope.bucket_id != regular_scope.bucket_id:
                 raise PermissionError("离线下载只能保存到密钥所属用户的存储桶")
             regular_scope = replace(regular_scope, prefix=key_scope.prefix, perms=key_scope.perms)
-        if not isinstance(items, list) or not 1 <= len(items) <= 32:
-            raise ValueError("一次请选择 1–32 个文件")
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_CREATE_ITEMS:
+            raise ValueError(f"一次请选择 1–{MAX_CREATE_ITEMS} 个文件")
         if not isinstance(destination, str):
             raise ValueError("目标目录不正确")
         private_destination = destination.startswith(PRIVATE_PREFIX)

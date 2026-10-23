@@ -201,7 +201,7 @@ function FilesGuide() {
 function DownloadsGuide() {
   return <>
     <p>在侧栏打开「下载任务」，把文件交给服务器下载。关闭网页后任务继续运行，完成的文件出现在你选择的目录中。</p>
-    <p>每个账号最多保留 20,000 个未完成任务，普通与私密任务合计，包含排队、下载中、等待恢复、停止和失败；已完成任务不占名额。大批相册可以分批排队，实际同时下载的数量仍由管理员的资源配置决定。</p>
+    <p>每个账号最多保留 20,000 个未完成任务，普通与私密任务合计，包含排队、下载中、等待恢复、停止和失败；已完成任务不占名额。网页与访问密钥接口每次最多解析和创建 1,000 项，实际同时下载的数量仍由管理员的资源配置决定。创建前会校验整批内容与队列容量，其中任一项无效则本次不会创建任务；脚本导入同样最多 1,000 项，超出时提示分批发送，不会截取部分内容。</p>
     <p>右下角系统托盘显示真实的活动下载总数，点击「下载任务」打开常规大弹窗，可搜索、筛选、分页并批量停止、继续或删除任务。关闭窗口后服务器继续下载；大队列按页加载。</p>
     <H2>添加下载</H2>
     <Steps><Step title="粘贴并解析">输入 HTTP 或 HTTPS 文件直链、X 单条帖子、YouTube 视频或 Shorts，多个链接每行一个；也可以粘贴 bash 格式 curl／wget 命令。平台功能需要管理员启用。</Step><Step title="勾选文件">检查文件名、来源和参数说明。X 按图片和视频勾选，YouTube／M3U8 同一视频选择一个清晰度。</Step><Step title="选择保存位置">选择「我的文件」或已解锁的「私密空间」目录并开始下载。同名文件自动改名，保留原文件。</Step></Steps>
@@ -706,7 +706,7 @@ if not result["hit"]:
       <p>与网页「下载任务」相同，分两步：先解析，再从结果中选择文件创建任务。任务属于密钥的所属用户，只能保存到该用户自己的存储桶、且在密钥的读写授权前缀内，不能保存到私密空间；进度在网页「下载任务」中查看。管理员创建的、不属于任何用户的密钥返回 403。规则与支持范围见 <DocLink to="downloads">离线下载</DocLink>。</p>
       <Endpoint method="POST" path="/downloads/parse" auth="key" summary="解析文件直链、curl／wget 命令（bash 格式）、X 帖子或 YouTube 视频，返回可下载的候选文件。需要读写权限。">
         <Params title="请求体" rows={[
-          ["input", "string", true, "链接（多个每行一个）或命令文本，最多 256 KB"],
+          ["input", "string", true, "链接（多个每行一个）或命令文本，最多 256 KB、1,000 个链接，解析候选同样最多 1,000 项；X／YouTube 平台来源每次仍限一条"],
           ["download_type", "string", false, <><C>auto</C>（默认）、<C>http</C>、<C>hls</C>、<C>x</C> 或 <C>youtube</C></>],
           ["cookies", "string", false, "仅平台链接使用的 Cookie 请求头文本或 Netscape cookies.txt，最多 32 KiB；文件直链请把 Cookie 写在 curl 命令中"],
         ]} />
@@ -720,7 +720,7 @@ if not result["hit"]:
       </Endpoint>
       <Endpoint method="POST" path="/downloads" auth="key" summary="用解析得到的 ticket 创建下载任务，返回 201 和任务列表。同名文件自动改名。需要读写权限。">
         <Params title="请求体" rows={[
-          ["items", "object[]", true, <>1–32 项，每项为 <C>{"{ \"ticket\": \"…\", \"name\": \"文件名\" }"}</C>，文件名不能包含路径</>],
+          ["items", "object[]", true, <>1–1,000 项，每项为 <C>{"{ \"ticket\": \"…\", \"name\": \"文件名\" }"}</C>，文件名不能包含路径。整批校验后创建，任一项无效或队列容量不足时本次不创建任务</>],
           ["destination", "string", false, "保存目录；省略时使用密钥最上层的读写授权前缀（网页创建的密钥即根目录）"],
         ]} />
         <Code lang="bash" code={`

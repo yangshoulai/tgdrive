@@ -21,10 +21,12 @@ from dataclasses import dataclass, field
 from ..errors import NotFoundError
 from ..objects import PRIVATE_PREFIX, ObjectService, Scope
 from ..offline.request import filename
-from ..offline.service import task_path
+from ..offline.service import MAX_CREATE_ITEMS, task_path
 from .config import LIMITS
 
 BATCH = 500
+# 下载提议内部按小批写入并让出事件循环，兼顾入队吞吐、进度与取消响应；不作为模型的提议上限。
+DOWNLOAD_BATCH = min(128, MAX_CREATE_ITEMS)
 END = "\U0010ffff"
 KINDS = {
     "rename": "批量改名", "move": "移动", "organize": "整理文件", "mkdir": "新建文件夹", "trash": "移入回收站",
@@ -395,11 +397,11 @@ class ActionExecutor:
         if not self._inside(scope_root, target) and target != scope_root:
             raise PermissionError("保存目录不在作用域内")
         items = payload.get("items", [])
-        for start in range(0, len(items), 32):
+        for start in range(0, len(items), DOWNLOAD_BATCH):
             if progress.cancel or (authorized is not None and not authorized()):
                 progress.cancel = True
                 break
-            batch = items[start:start + 32]
+            batch = items[start:start + DOWNLOAD_BATCH]
             prepared, labels = [], []
             for item in batch:
                 try:

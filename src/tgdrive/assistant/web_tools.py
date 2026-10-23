@@ -317,6 +317,7 @@ async def analyze_page(ctx: ToolContext, args: dict) -> ToolOutput:
       "去重后保存到结果集，返回总数、页数与样例；complete 表示是否正常遍历结束，stopped 说明结束原因。"
       "多个结构相同的相册：先用 analyze_page 分析其中一个，再传 albums（collect_links 的结果集编号）或 album_urls（地址列表），"
       "用同一条规则逐个收集，图片记录所属相册；一次调用处理不完时返回 progress，用同一个 collection_id 再次调用即可继续。"
+      "目标链接来自列表页时，可先用 inspect_page 确认链接结构，再用 collect_links 收集目标相册链接；结构相同的相册不必逐个重复分析。"
       "之后用 propose_downloads(collection_id) 生成下载提议。",
       {"collection_id": {"type": "string", "description": "analyze_page 返回的结果集编号"},
        "albums": {"type": "string", "description": "多个相册：collect_links 返回的链接结果集编号"},
@@ -581,7 +582,8 @@ async def get_collection(ctx: ToolContext, args: dict) -> ToolOutput:
       "生成创建离线下载任务的待确认操作。来源三选一：collection_id（analyze_page/collect_gallery 的相册结果，或 parse_download_source "
       "的解析结果，可用 indices 选择其中几项，或用 offset/limit 选一段）、urls（直链列表）。target 为保存目录。name_template 可选，变量 {name} {stem} {ext} {n}"
       "（如 {n:03}{ext}）；默认使用链接里的文件名。多个相册的结果集可设 by_album=true，按相册保存到「target/相册名/」。"
-      "超过单次上限时按 offset/limit 分批提议，结果里的 next_offset 是下一批的起点。",
+      "超过单次上限时按 offset/limit 分批提议，结果里的 next_offset 是下一批的起点。已有文件直链可直接传 urls，无需逐条重新解析；"
+      "后台会自动分批入队，模型只需遵守本工具的提议上限，无需按底层接口批次拆分。续接时核对已成功提交的部分，避免重复提议。",
       {"collection_id": {"type": "string"}, "indices": {"type": "array", "items": {"type": "integer"}, "description": "只选结果集中的这些序号"},
        "offset": {"type": "integer", "description": "从结果集的第几项开始（与 indices 二选一）"},
        "limit": {"type": "integer", "description": "这一批最多几项，默认为单次上限"},

@@ -572,7 +572,8 @@ export const parseDownloads = (input: string, signal?: AbortSignal, download_typ
  * 资源抓取脚本转交的解析结果：地址 #import=<base64url(JSON)>。片段不会发给服务器；票据加密、绑定账号且 20 分钟过期。
  * 读取后立即从地址栏和历史记录中移除。
  */
-export type DownloadImport = { candidates: DownloadCandidate[]; private: boolean; destination: string };
+export const MAX_DOWNLOAD_ITEMS = 1000;
+export type DownloadImport = { candidates: DownloadCandidate[]; private: boolean; destination: string; error?: string };
 export function takeDownloadImport(): DownloadImport | null {
   const match = /^#import=([A-Za-z0-9_-]+)$/.exec(window.location.hash);
   if (!match) return null;
@@ -586,7 +587,8 @@ export function takeDownloadImport(): DownloadImport | null {
     if (!candidates.length) return null;
     // 私密目标只接受私密前缀下的相对目录；普通目标不能指向私密空间或回收站。
     const destination = typeof value.destination === "string" ? value.destination.replace(/^\/+/, "") : "";
-    return { candidates: candidates.slice(0, 100), private: value.private === true,
+    const error = candidates.length > MAX_DOWNLOAD_ITEMS ? `一次最多导入 ${MAX_DOWNLOAD_ITEMS} 个文件，请回到来源页面分批发送。` : undefined;
+    return { candidates: error ? [] : candidates, error, private: value.private === true,
       destination: value.private === true ? PRIVATE_PREFIX : destination.startsWith(".tgdrive/") ? "" : destination };
   } catch { return null; }
 }

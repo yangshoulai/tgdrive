@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 from tgdrive.app import create_app
 from tgdrive.assistant.tools import ToolContext, ToolError, describe_tools, tool_params, validate_tool_settings
@@ -14,7 +15,7 @@ from tgdrive.errors import NotFoundError
 from tgdrive.objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, Scope
 from tgdrive.offline.hls import parse_playlist
 from tgdrive.offline.http import DownloadError, SafeHttpClient, public_ip
-from tgdrive.offline.request import command_text, parse_requests
+from tgdrive.offline.request import DownloadRequest, command_text, parse_requests
 from tgdrive.offline.resources import ResourceSettings
 from tgdrive.offline.service import OfflineDownloads
 from tests.test_public_links import Client
@@ -102,6 +103,58 @@ class ParseLimitTests(unittest.IsolatedAsyncioTestCase):
         for value in (-1, 1001, True, 1.5, "100"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_tool_settings({"parse_download_source": {"max_urls": value}}, {})
+
+    async def test_web_and_key_parser_default_accepts_1000_links(self):
+        offline = self.service()
+        links = [f"https://example.com/{n}.bin" for n in range(1001)]
+        result = await offline.parse(1, "\n".join(links[:1000]))
+        self.assertEqual(len(result["candidates"]), 1000)
+        rejected = self.service()
+        with self.assertRaisesRegex(ValueError, "最多解析 1000"):
+            await rejected.parse(1, "\n".join(links))
+        rejected._parse_request.assert_not_awaited()
+
+    async def test_one_source_can_return_more_than_32_candidates(self):
+        offline = self.service()
+        offline.http = Mock()
+        offline._key = Mock(return_value=b"k" * 32)
+        offline.resources = Mock()
+        offline.resources.effective.return_value = {"hls_enabled": True, "hls_available": True}
+        playlist = SimpleNamespace(variants=[(f"https://example.com/{n}.m3u8", str(n)) for n in range(40)], audio={})
+        with patch("tgdrive.offline.service.load_playlist", AsyncMock(return_value=playlist)):
+            request = DownloadRequest("https://example.com/index.m3u8", method="POST")
+            result = await OfflineDownloads._parse_request(offline, 1, request, "hls")
+            self.assertEqual(len(await OfflineDownloads._parse_request(offline, 1, request, "hls", 0)), 40)
+            with self.assertRaisesRegex(ValueError, "解析结果超过 10"):
+                await OfflineDownloads._parse_request(offline, 1, request, "hls", 10)
+        self.assertEqual(len(result), 40, "候选数量由外层统一校验，不能再固定截在32项")
+
+    async def test_parsing_error_cancels_other_source_requests(self):
+        offline = self.service()
+        started = asyncio.Event()
+        active = 0
+        cancelled = []
+
+        async def inspect(user_id, request, *args):
+            nonlocal active
+            active += 1
+            try:
+                if request.url.endswith("0.bin"):
+                    await started.wait()
+                    raise ValueError("来源解析失败")
+                started.set()
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(request.url)
+                raise
+            finally:
+                active -= 1
+
+        offline._parse_request.side_effect = inspect
+        with self.assertRaisesRegex(ValueError, "来源解析失败"):
+            await asyncio.wait_for(offline.parse(1, "\n".join(f"https://example.com/{n}.bin" for n in range(3))), 1)
+        self.assertTrue(cancelled)
+        self.assertEqual(active, 0, "返回错误前必须回收仍在运行的解析请求")
 
     async def test_tool_limit_reaches_parser_and_keeps_large_results(self):
         for limit, count in ((1000, 1000), (0, 1001)):

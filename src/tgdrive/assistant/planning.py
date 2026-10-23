@@ -244,7 +244,11 @@ class Plan:
                 if any(self.calls.get(c) == item["id"] for c in self.running):
                     item["status"] = "in_progress"
                 elif not item.get("issue"):
-                    item["status"] = "completed"
+                    # 显式计划的一次操作可能只是整个范围中的一批；完成范围由模型核对后显式更新。
+                    if self.data.get("automatic"):
+                        item["status"] = "completed"
+                    elif item["status"] == "waiting_user":
+                        item["status"] = "in_progress"
                     if any(action and action.get("kind") == "downloads" for action in linked):
                         item["detail"] = "已创建下载任务，文件下载结果以下载任务状态为准"
                     else:
@@ -263,7 +267,9 @@ class Plan:
     @property
     def needs_check(self) -> bool:
         return bool(self.data and not self.data.get("automatic")
-                    and any(item["status"] in ("pending", "in_progress") and not item.get("action_pending") for item in self.data["items"]))
+                    and any((item["status"] in ("pending", "in_progress")
+                             or item["status"] == "paused" and not item.get("issue"))
+                            and not item.get("action_pending") for item in self.data["items"]))
 
     @property
     def remaining(self) -> int:

@@ -331,7 +331,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
   useEffect(() => { if (wantPrivate && access.grant && !api.isPrivatePath(destination)) setDestination(api.PRIVATE_PREFIX); }, [wantPrivate, access.grant, destination]);
   const [ready, setReady] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(initial?.error ?? "");
   const abort = useRef<AbortController | null>(null);
   useEffect(() => () => abort.current?.abort(), []);
   async function parse() {

@@ -66,6 +66,8 @@ class PlanTests(unittest.TestCase):
         plan.begin("c2", "propose_move", "one")
         plan.observe(result("c2", event={"type": "action", "action_id": "a2"}))
         plan.reconcile([{"id": "a1", "status": "partial"}, {"id": "a2", "status": "done"}])
+        self.assertEqual(plan.data["status"], "in_progress", "操作完成后还需核对计划的全部范围")
+        plan.update({"items": [step("completed")]})
         self.assertEqual(plan.data["status"], "completed")
 
     def test_reasoning_needs_summary_and_tool_use_prevents_bypass(self):
@@ -100,6 +102,7 @@ class PlanTests(unittest.TestCase):
         plan.begin("c1", "propose_move", "one")
         plan.observe(result(event={"type": "action", "action_id": "a1"}))
         plan.reconcile([{"id": "a1", "status": "done"}])
+        plan.update({"items": [step("completed")]})
         snapshot = plan.snapshot()
         resumed = Plan("next", snapshot)
         updated = resumed.update({"plan_id": snapshot["id"], "items": [
@@ -482,7 +485,8 @@ class LoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_next_run_resumes_same_plan_without_repeating_completed_step(self):
         first = {"id": "scope", "content": "确认范围", "kind": "reasoning", "status": "completed", "detail": "已确认"}
         pending = step("paused")
-        service, state = await self.run_fixture([Reply(tool_calls=[call("update_plan", {"items": [first, pending]})]), Reply(text="稍后继续")])
+        service, state = await self.run_fixture([Reply(tool_calls=[call("update_plan", {"items": [first, pending]})]),
+                                                 Reply(text="稍后继续"), Reply(text="本轮暂停")])
         previous = service.trace.latest_plan(state.conversation_id)
         rid = service.trace.start_run(state.conversation_id, 1, "test")
         resumed = RunState(rid, state.conversation_id, 1, 1, "test", 1, "files", "")

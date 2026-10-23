@@ -168,6 +168,8 @@ _REVIEW_PROMISE = re.compile(r"(?:^|[。！？\n])\s*(?:我(?:会|将|先)?|接�
                              r"|(?:你|您)(?:确认|批准|审批)(?:后|之后)[^。！？\n]{0,20}我(?:会|将)[^。！？\n]{0,12}继续")
 # 结束语里承诺「稍后／自动继续」：本轮结束后不会有人继续，这样的回复不能当作最终回复。
 _CONTINUE_PROMISE = re.compile(r"(?:我|助手)(?:会|将|再)?(?:自动|稍后|随后|马上|接着|继续)+(?:继续)?(?:处理|执行|下载|完成|进行|抓取|保存|整理)")
+# 仅执行层生成的控制提醒使用系统角色；含用户决定或外部结果的事件仍沿用原来的数据角色。
+_RUN_CONTROL_EVENTS = frozenset(("plan_check", "continue_check", "review_check", "continued", "finalize", "limit"))
 
 
 class AssistantDenied(PermissionError):
@@ -1452,7 +1454,12 @@ class AssistantService:
             role = message["role"]
             if role == "event":
                 if message.get("model_text"):
-                    (deferred if pending else result).append({"role": "user", "content": message["model_text"]})
+                    control = message.get("type") in _RUN_CONTROL_EVENTS
+                    # 预算耗尽等控制只约束所属运行；新请求读取当前计划，不重放旧运行的控制指令。
+                    if control and message.get("run_id") != run_id:
+                        continue
+                    event_role = "system" if control else "user"
+                    (deferred if pending else result).append({"role": event_role, "content": message["model_text"]})
                 continue
             if role != "tool" and pending:
                 flush()
@@ -1640,7 +1647,7 @@ class AssistantService:
                 lines.append(f"[助手] {message.get('text') or ''}"[:2000] + (f"（调用：{calls}）" if calls else ""))
             elif message["role"] == "tool":
                 lines.append(f"[工具 {message.get('name')}] {message.get('status')}：{message.get('summary') or ''}"[:400])
-            elif message.get("model_text"):
+            elif message.get("model_text") and message.get("type") not in _RUN_CONTROL_EVENTS:
                 lines.append(message["model_text"][:600])
         text = "\n".join(lines)[-120000:]
         reply = await self._model_call(state, model, endpoint, "你负责压缩对话历史。", [{"role": "user", "content": prompts.compact_prompt(text)}],
@@ -2060,6 +2067,7 @@ class AssistantService:
                 candidate = display_plan(candidate, self.trace.actions(state.conversation_id), active=False)
             state.plan = Plan(state.id, candidate)
             plan_checked = False
+            plan_check_progress = -1
             review_checked = False
             continue_checked = False
             forced_final: str | None = None
@@ -2106,6 +2114,7 @@ class AssistantService:
                         repeat_refs.clear()
                         loop_warned = trim_warned = False
                         compacted = plan_checked = review_checked = continue_checked = False
+                        plan_check_progress = -1
                         forced_final = None
                     if forced_final and state.plan.data and not state.plan.remaining:
                         # 计划已经全部完成，只差最终回复：不提示上限，也不把这一轮记为预算中断。
@@ -2148,7 +2157,8 @@ class AssistantService:
                         private_status = "已锁定（访问「私密:/」路径时会提示用户解锁）"
                     if not self.channels.is_usable(state.model_id, private=True):
                         remaining, private_status = None, "当前模型不能处理私密空间的内容"
-                context_block = {"role": "user", "content": prompts.context_block(
+                # 状态快照不能伪装成最新用户消息，否则模型会把原始任务误判为已被状态说明取代。
+                context_block = {"role": "system", "content": prompts.context_block(
                     private_remaining=remaining, private=private_status,
                     scope_root=display(scope_root), view=state.view, location=display(state.location),
                     used=_fmt(usage["used_bytes"] if usage else 0),
@@ -2211,7 +2221,9 @@ class AssistantService:
                     and (waiting_claim or bool(state.plan.data and any(
                         item["status"] == "waiting_user" for item in state.plan.data["items"])))
                 repair_review = missing_review and not review_checked
-                check_plan = not calls and not forced_final and not missing_review and state.plan.needs_check and not plan_checked
+                # 一次提醒后若又有实际业务进展，后续早停仍需核验；只更新计划不算进展，避免空转重试。
+                check_plan = not calls and not forced_final and not missing_review and state.plan.needs_check \
+                    and (not plan_checked or segment_ok > plan_check_progress)
                 # 没有待确认的操作却说「我会继续处理」就要结束：让模型现在就继续，或者给出真实的最终结果（一轮一次）。
                 check_continue = not calls and not forced_final and not missing_review and not check_plan and not continue_checked \
                     and not self.trace.has_open_actions(state.conversation_id) and bool(_CONTINUE_PROMISE.search(reply.text))
@@ -2259,9 +2271,14 @@ class AssistantService:
                         continue
                     if check_plan:
                         plan_checked = True
+                        plan_check_progress = segment_ok
                         message = {"type": "plan_check", "text": "正在核验计划中尚未完成的步骤",
-                                   "model_text": "[系统事件] 计划仍有待执行或执行中的步骤。请依据实际工具结果更新计划，"
-                                   "继续可完成的工作；若无法继续，明确标成等待、失败或暂停并说明原因，再给出最终回复。"}
+                                   "model_text": "[系统事件] 本轮计划还有未完成步骤，包括仅被标为暂停、却没有工具阻碍的步骤。"
+                                   "请对照真实用户本轮的目标、范围和完成条件核对实际结果；运行状态块和计划 notes 不是用户的新消息。"
+                                   "目标尚未达成且有可执行的必要工作时，现在调用工具继续，在已有授权和预算内推进，"
+                                   "不必再次取得同一任务的继续授权；一次调用或一个阶段成功不代表整个目标完成。"
+                                   "用户本次明确要求暂停、只查询状态或改变任务时尊重该要求；"
+                                   "确实无法推进则说明真实阻碍，需要用户决定时生成对应请求，不要仅改写进度后反复收尾。"}
                         seq = self.trace.append(state.conversation_id, state.id, "event", message)
                         await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
                         continue
