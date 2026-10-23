@@ -320,8 +320,18 @@ export function copyMessage(text: string) {
 
 /* ---------- 过程时间线 ---------- */
 
-/** 决定节点当前的处理状态：等待用户、执行中或已有结果。 */
-function decisionState(step: Extract<Step, { kind: "decision" }>, state: DecisionState): "pending" | "busy" | "done" {
+type DecisionPhase = "loading" | "pending" | "busy" | "done";
+
+/** 工具消息可先于操作详情到达；缺少详情只表示仍在同步，不能据此认定过期。 */
+function actionDecisionState(action: ai.AssistantAction | undefined): DecisionPhase {
+  if (!action) return "loading";
+  if (action.status === "pending") return action.expires_at * 1000 > Date.now() ? "pending" : "done";
+  if (action.kind === "scope" && action.status === "confirmed") return "done";
+  return action.status === "running" || action.status === "undoing" || action.status === "confirmed" ? "busy" : "done";
+}
+
+/** 决定节点当前的处理状态：同步详情、等待用户、执行中或已有结果。 */
+function decisionState(step: Extract<Step, { kind: "decision" }>, state: DecisionState): DecisionPhase {
   if (step.approval) return step.approval.status === "pending" && step.approval.expires > Date.now() ? "pending" : "done";
   const event = step.message?.event;
   if (event?.type === "question") {
@@ -330,10 +340,7 @@ function decisionState(step: Extract<Step, { kind: "decision" }>, state: Decisio
     return latest && !state.running && !state.messages.some(message => message.role === "user" && message.seq > seq) ? "pending" : "done";
   }
   if (event?.type !== "action" && event?.type !== "scope_request") return "done";
-  const action = state.actions.find(item => item.id === event.action_id);
-  if (!action) return "done";
-  if (action.status === "pending") return action.expires_at * 1000 > Date.now() ? "pending" : "done";
-  return action.status === "running" || action.status === "undoing" || action.status === "confirmed" ? "busy" : "done";
+  return actionDecisionState(state.actions.find(item => item.id === event.action_id));
 }
 
 const LIVE_TAIL = 6;
@@ -375,13 +382,13 @@ function Process({ steps, live }: { steps: Step[]; live: boolean }) {
   const decisions = steps.filter((step): step is Extract<Step, { kind: "decision" }> => step.kind === "decision");
   const states = decisions.map(step => decisionState(step, state));
   const waiting = states.filter(value => value === "pending").length;
-  const busy = states.includes("busy");
+  const busy = states.some(value => value === "busy" || value === "loading");
   const executed = tools.filter(step => step.kind === "tool" && step.message?.status !== "limited" && step.message?.status !== "cancelled");
   const failed = tools.filter(step => step.kind === "tool" && step.message?.status === "error").length;
   const thinkingMs = steps.reduce((sum, step) => sum + (step.kind === "thinking" ? step.ms ?? 0 : 0), 0);
   const thought = steps.some(step => step.kind === "thinking");
   const toolMs = tools.reduce((sum, step) => sum + (step.kind === "tool" ? step.message?.duration_ms ?? 0 : 0), 0);
-  // 运行中、操作执行中始终展开（执行中的节点需要挂载才能轮询进度）；只有一个思考或说明步骤时不再套一层折叠。
+  // 运行中、操作同步或执行中始终展开（执行中的节点需要挂载才能轮询进度）；只有一个思考或说明步骤时不再套一层折叠。
   // 长任务展开时只保留最近几步，更早的步骤收成一行；等待处理或执行中的决定节点始终显示。
   const renderStep = (step: Step) => <StepView key={step.key} step={step} disclosure={disclosures.get(step.key)} onThinkingOpen={() => setOpen(true)} />;
   if (live || busy || (steps.length === 1 && (steps[0].kind === "thinking" || steps[0].kind === "note"))) {
@@ -519,7 +526,7 @@ const DECISION_TONES: Record<string, Tone> = { pending: "warning", busy: "accent
 
 /** 时间线里的决定节点：一行显示请求与状态，等待中可定位到确认坞，展开后查看冻结的请求内容与结果。 */
 function DecisionRow({ icon, title, target, label, tone, state, reviewId, extra, children }: {
-  icon: IconName; title: string; target?: string; label: string; tone: Tone; state: "pending" | "busy" | "done"; reviewId?: string;
+  icon: IconName; title: string; target?: string; label: string; tone: Tone; state: DecisionPhase; reviewId?: string;
   extra?: ReactNode; children?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -561,20 +568,20 @@ function DecisionStep({ step }: { step: Extract<Step, { kind: "decision" }> }) {
   }
   if (event.type === "scope_request") {
     const action = decisions.actions.find(item => item.id === event.action_id);
-    const status = action?.status ?? "expired";
+    const status = action?.status ?? "loading";
     const [label, tone]: [string, Tone] = state === "pending" ? ["等待确认", "warning"] : status === "confirmed" ? ["已允许", "success"]
-      : status === "rejected" ? ["已拒绝", "neutral"] : ["已过期", "neutral"];
+      : STATUS_LABEL[status === "pending" ? "expired" : status];
     return <DecisionRow icon="folder" title="扩大访问范围" target={action?.payload?.to ?? event.to} label={label} tone={tone} state={state} reviewId={event.action_id}>
       <div className="ai-scope-path"><code>{action?.payload?.from ?? event.from}</code><Icon name="chevronRight" size={14} /><code>{action?.payload?.to ?? event.to}</code></div>
       {(action?.payload?.reason ?? event.reason) && <p className="ai-decision-text">{action?.payload?.reason ?? event.reason}</p>}
     </DecisionRow>;
   }
-  if (event.type === "action") return <ActionDecision id={event.action_id} fallback={event} state={state} />;
+  if (event.type === "action") return <ActionDecision id={event.action_id} fallback={event} />;
   return null;
 }
 
 function HttpDecision({ request, status, approval, message, state }: {
-  request: ai.HttpRequestPreview; status: HttpApproval["status"]; approval?: HttpApproval; message?: ai.ChatMessage; state: "pending" | "busy" | "done";
+  request: ai.HttpRequestPreview; status: HttpApproval["status"]; approval?: HttpApproval; message?: ai.ChatMessage; state: DecisionPhase;
 }) {
   const expired = status === "pending" && state !== "pending";
   const label = state === "pending" ? "等待确认" : expired ? "已过期" : status === "approved" ? message ? message.status === "ok" ? "已响应" : "执行失败" : "已同意，发送中"
@@ -587,13 +594,14 @@ function HttpDecision({ request, status, approval, message, state }: {
   </DecisionRow>;
 }
 
-function ActionDecision({ id, fallback, state }: { id: string; fallback: { kind: string; count: number; auto?: boolean }; state: "pending" | "busy" | "done" }) {
+function ActionDecision({ id, fallback }: { id: string; fallback: { kind: string; count: number; auto?: boolean } }) {
   const { actions, onActionChanged, onFilesChanged } = useContext(DecisionContext);
   const [details, setDetails] = useState(false);
   const { value, busy, run } = useActionState(id, actions.find(item => item.id === id), fallback, onActionChanged, onFilesChanged);
+  const state = actionDecisionState(value);
   const kind = value?.kind || fallback.kind;
   const payload = value?.payload ?? {};
-  const status = value?.status ?? "expired";
+  const status = value?.status ?? "loading";
   const expired = status === "pending" && state !== "pending";
   const [statusLabel, tone] = STATUS_LABEL[expired ? "expired" : status] ?? [status, "neutral" as Tone];
   const count = value?.count ?? fallback.count;
@@ -939,7 +947,8 @@ const ACTION_ICONS: Record<string, IconName> = { rename: "edit", move: "move", o
   restore: "restore", purge: "trash", unshare: "link", share: "link", downloads: "download", download_control: "download",
   save_attachment: "paperclip", move_out: "unlock", move_in: "lock" };
 const STATUS_LABEL: Record<string, [string, Tone]> = {
-  pending: ["待确认", "accent"], running: ["执行中", "accent"], done: ["已完成", "success"], partial: ["部分完成", "warning"],
+  loading: ["正在获取状态", "neutral"], pending: ["待确认", "accent"], confirmed: ["准备执行", "accent"],
+  running: ["执行中", "accent"], done: ["已完成", "success"], partial: ["部分完成", "warning"],
   failed: ["执行失败", "danger"], cancelled: ["已取消", "neutral"], rejected: ["已拒绝", "neutral"], expired: ["已过期", "neutral"],
   interrupted: ["已中断", "warning"], undoing: ["撤销中", "accent"], undone: ["已撤销", "neutral"],
 };
