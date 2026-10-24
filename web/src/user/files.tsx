@@ -8,7 +8,7 @@ import type { CacheFile } from "../cache-client";
 import { FolderStatsDialog } from "./folder-stats";
 import { ThumbnailPicker } from "./thumbnail-picker";
 import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type EntryFilter, type FileSort } from "../files";
-import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator, videoFrameUsable } from "../thumbnails";
+import { generateLoadedThumbnails, saveCurrentVideoThumbnail, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator, videoFrameUsable } from "../thumbnails";
 
 import { Notice, ButtonLink, Badge, Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 import { ShortcutsDialog } from "../shortcuts";
@@ -221,6 +221,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       playlistFiles: entries.flatMap(entry => entry.kind === "file" ? [entry.file] : []),
       poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file), onPlaybackActivity: onPlayback,
       onShare: privateSpace ? undefined : item => { preview.update(item); setSharing(item); },
+      onSaveVideoThumbnail: async (video, item) => {
+        await saveCurrentVideoThumbnail(item, video);
+        // 预览可在页面离开后继续播放；这里只更新全局预览并通知文件页刷新，不写入页面状态。
+        const state = await api.thumbnailStatus([item.key]).then(value => value.files[item.key], () => undefined);
+        if (state?.etag === item.etag) preview.update({ ...item, ...state });
+        window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [parentPath(item.key)] } }));
+      },
       onImageLoad: (image, item) => {
         // 预览过的图片顺便补上缩略图和封面图（例如通过 S3 上传、没有缩略图的图片），不必再下载一次原图。
         // 只在能补上缺少的规格时生成（阈值与 thumbnails.ts 的 renderSet 一致）：没有小图；原图超过 240px 却没有网格图或封面；

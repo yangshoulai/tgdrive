@@ -1088,7 +1088,7 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/thumbnail/claim":
                 return 200, user.thumbnail_claim(token, csrf, payload["path"], str(payload["etag"]), bool(payload.get("force"))), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/thumbnail/release":
-                user.thumbnail_release(token, csrf, payload["path"], str(payload["etag"]), str(payload["ticket"]))
+                user.thumbnail_release(token, csrf, payload["path"], str(payload["etag"]), str(payload["ticket"]), payload.get("variants"))
                 return 204, None, {}
             if method == "POST" and route == "/thumbnail/generate":
                 return 202, user.thumbnail_generate(token, csrf, payload["path"], str(payload["etag"])), {}

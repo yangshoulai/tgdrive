@@ -61,9 +61,9 @@ export function thumbnailsFromImage(image: HTMLImageElement): Promise<ThumbnailS
 }
 
 /** 只截取播放器已经解码的当前画面，不创建媒体来源、不跳转、不额外读取视频。 */
-export function thumbnailsFromVideo(video: HTMLVideoElement): Promise<ThumbnailSet | null> {
+export function thumbnailsFromVideo(video: HTMLVideoElement, checkQuality = true): Promise<ThumbnailSet | null> {
   try {
-    if (!videoFrameUsable(video)) return Promise.resolve(null);
+    if (video.readyState < 2 || video.seeking || !video.videoWidth || !video.videoHeight || (checkQuality && !videoFrameUsable(video))) return Promise.resolve(null);
     // 编码会异步等待：先固定当前画面，保证三个规格不会分别截到下一场景或黑屏。
     const frame = document.createElement("canvas");
     const scale = Math.min(1, POSTER.size / Math.max(video.videoWidth, video.videoHeight));
@@ -339,6 +339,22 @@ export async function saveThumbnails(path: string, result: ThumbnailResult, clai
     if (data && await api.setThumbnail(path, data, variant, claim).then(() => true, () => false)) saved.push(variant);
   }
   return saved;
+}
+
+/** 用户选择当前播放画面：先同步固定这一帧，再申请写入，不用自动画面过滤或重新读取视频。 */
+export async function saveCurrentVideoThumbnail(file: Pick<api.FileItem, "key" | "etag">, video: HTMLVideoElement): Promise<void> {
+  const result = await thumbnailsFromVideo(video, false);
+  if (!result) throw new Error("当前画面尚未就绪，请等待画面加载后重试");
+  const lease = await api.claimThumbnail(file, true);
+  if (!lease.token) throw new Error("这个文件正在生成缩略图，请稍后重试");
+  let released = false;
+  try {
+    const saved = await saveThumbnails(file.key, result, { etag: file.etag, ticket: lease.token });
+    await api.releaseThumbnail(file, lease.token, saved ?? undefined);
+    released = true;
+  } finally {
+    if (!released) await api.releaseThumbnail(file, lease.token).catch(() => undefined);
+  }
 }
 
 /** 浏览器取得有期限的生成权后才处理本地／已加载数据；失败主动交还，页面关闭则由服务端超时接管。 */

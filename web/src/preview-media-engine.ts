@@ -14,6 +14,7 @@ const GLYPHS = {
   previous: glyph("M5 5v14m13-14L8 12l10 7V5Z"),
   next: glyph("M19 5v14M6 5l10 7-10 7V5Z"),
   list: glyph("M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"),
+  thumbnail: glyph("M4 4h16v16H4zM4 16l5-5 4 4 3-3 4 4M8 8h.01"),
 };
 type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onVideoSize?: (width: number, height: number) => void; onVideoFrame?: (video: HTMLVideoElement) => void };
 function mediaProgress(media: HTMLMediaElement): MediaProgress {
@@ -59,6 +60,14 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   };
   document.addEventListener("keydown", exitWebScreen, true);
   let ready = false, destroyed = false, subtitleUrl: string | null = null, version = 0;
+  let saveThumbnail: ((video: HTMLVideoElement) => Promise<void>) | null = null, thumbnailBusy = false, sourceVersion = 0;
+  const thumbnailState = () => {
+    const control = container.querySelector<HTMLElement>(".art-control-thumbnail");
+    if (!control) return;
+    control.setAttribute("aria-disabled", String(thumbnailBusy || player.video.readyState < 2 || player.video.seeking));
+    control.setAttribute("aria-busy", String(thumbnailBusy));
+    control.setAttribute("aria-label", thumbnailBusy ? "正在保存缩略图" : "将当前画面设为缩略图");
+  };
   const setRatio = (width: number, height: number) => {
     if (!destroyed && width > 0 && height > 0) {
       container.style.setProperty("--preview-video-ratio", String(width / height));
@@ -76,7 +85,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   setCover(poster);
   let switching = Promise.resolve();
   const updateProgress = () => events?.onProgress?.(mediaProgress(player.video));
-  const markReady = () => { setRatio(player.video.videoWidth, player.video.videoHeight); ready = true; notify("ready"); if (player.video.readyState >= 2) events?.onVideoFrame?.(player.video); };
+  const markReady = () => { setRatio(player.video.videoWidth, player.video.videoHeight); ready = true; notify("ready"); thumbnailState(); if (player.video.readyState >= 2) events?.onVideoFrame?.(player.video); };
   // iOS Safari 在用户点播放前不预加载画面，只会触发 loadedmetadata：读到时长即视为就绪，避免误报“加载较慢”。
   player.on("video:loadedmetadata", () => { markReady(); updateProgress(); });
   player.on("video:resize", () => setRatio(player.video.videoWidth, player.video.videoHeight));
@@ -88,6 +97,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   player.on("video:durationchange", updateProgress);
   player.on("video:timeupdate", () => { updateProgress(); if (player.video.readyState >= 2) events?.onVideoFrame?.(player.video); });
   player.on("video:seeked", () => { updateProgress(); if (player.video.readyState >= 2) markReady(); });
+  player.on("video:seeking", thumbnailState);
   player.on("video:ended", () => { markReady(); events?.onPlaying(false); events?.onEnded(); });
   player.on("video:error", () => notify("failed"));
   // ArtPlayer 默认只监听浏览器窗口；弹窗拖动改变容器尺寸时也要更新比例与控件布局。
@@ -121,6 +131,46 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   };
   return {
     refreshNavigation,
+    /** 当前已解码画面由上层保存；按钮也出现在播放器全屏控制条中。 */
+    setThumbnailAction: (save: ((video: HTMLVideoElement) => Promise<void>) | null) => {
+      saveThumbnail = save;
+      if (destroyed) return;
+      if (!save) { if (container.querySelector(".art-control-thumbnail")) player.controls.remove("thumbnail"); return; }
+      const click = async () => {
+        if (thumbnailBusy || !saveThumbnail || player.video.readyState < 2 || player.video.seeking) return;
+        const current = sourceVersion;
+        thumbnailBusy = true;
+        const control = container.querySelector<HTMLElement>(".art-control-thumbnail");
+        if (control) control.innerHTML = '<span class="spinner" aria-hidden="true"></span>';
+        thumbnailState();
+        try {
+          await saveThumbnail(player.video);
+          if (!destroyed && current === sourceVersion) player.notice.show = "已将当前画面设为缩略图";
+        } catch (reason) {
+          if (!destroyed && current === sourceVersion) player.notice.show = reason instanceof Error ? reason.message : "缩略图保存失败，请重试";
+        } finally {
+          thumbnailBusy = false;
+          if (!destroyed) {
+            const currentControl = container.querySelector<HTMLElement>(".art-control-thumbnail");
+            if (currentControl) currentControl.innerHTML = GLYPHS.thumbnail;
+            thumbnailState();
+          }
+        }
+      };
+      player.controls.update({ name: "thumbnail", position: "right", index: 24, html: GLYPHS.thumbnail,
+        tooltip: "将当前画面设为缩略图", click: () => { void click(); } });
+      const control = container.querySelector<HTMLElement>(".art-control-thumbnail");
+      if (control) {
+        control.tabIndex = 0; control.setAttribute("role", "button");
+        control.onkeydown = event => {
+          if (event.key === " " || event.key === "Enter") {
+            event.preventDefault(); event.stopPropagation();
+            if (!event.repeat) void click();
+          }
+        };
+      }
+      thumbnailState();
+    },
     play: () => player.play(),
     pause: () => player.pause(),
     isPlaying: () => !player.video.paused,
@@ -128,11 +178,13 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     seekBy: (seconds: number) => { seekBy(player.video, seconds); updateProgress(); },
     adjustVolume: (delta: number) => { player.volume = Math.max(0, Math.min(1, player.video.volume + delta)); },
     setSource: (nextUrl: string, _name: string, nextCover?: string) => {
+      sourceVersion++;
       player.pause(); ready = false; notify("loading");
       container.style.removeProperty("--preview-video-ratio");
       player.poster = nextCover ?? ""; player.url = nextUrl;
       // 换源后立即重置原生媒体和控件，不能等新文件的 timeupdate 来清掉旧时间与缓冲条。
       player.video.load(); player.currentTime = 0;
+      thumbnailState();
       player.emit("setBar", "played", 0); player.emit("setBar", "loaded", 0);
       const time = container.querySelector(".art-control-time");
       if (time) time.textContent = "00:00 / 00:00";

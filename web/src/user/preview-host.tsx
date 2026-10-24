@@ -57,8 +57,13 @@ export function PreviewHost({ children, privateAllowed, enabled }: { children: R
       next.set(slot, { id: ++counter.current, owner, request, minimize: 0 });
       return next;
     }),
-    update: file => setSlots(current => mapSlots(current, value => value.request.file.key === file.key
-      ? { ...value, request: { ...value.request, file: { ...value.request.file, ...file } } } : value)),
+    update: file => setSlots(current => mapSlots(current, value => {
+      if (value.request.file.key !== file.key && !value.request.playlistFiles?.some(item => item.key === file.key)) return value;
+      return { ...value, request: { ...value.request,
+        file: value.request.file.key === file.key ? { ...value.request.file, ...file } : value.request.file,
+        playlistFiles: value.request.playlistFiles?.map(item => item.key === file.key ? { ...item, ...file } : item),
+      } };
+    })),
     // 打开预览的页面刷新了文件信息（补上缩略图、覆盖后的新版本）：同步给预览的当前文件与列表，成员与顺序不变。
     sync: (owner, files) => setSlots(current => mapSlots(current, value => {
       if (value.owner !== owner) return value;

@@ -14,7 +14,7 @@ type VideoPlayer = ReturnType<Engine["createVideoPlayer"]>;
 type Lyric = { time: number; text: string };
 export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[]>;
 export type PlaybackControls = { play: () => Promise<void>; pause: () => void; isPlaying: () => boolean; seek: (time: number) => void; seekBy: (seconds: number) => void; adjustVolume: (delta: number) => void };
-export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onLyricLine?: (line: string | null) => void };
+export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onSaveThumbnail?: (video: HTMLVideoElement) => Promise<void>; onLyricLine?: (line: string | null) => void };
 type Player = PlaybackControls & { setSource: (url: string, name: string, cover?: string) => void; destroy: () => void };
 
 function playbackTime(time: number): string {
@@ -270,15 +270,15 @@ function MediaButton({ icon, label, shortcut, onClick, disabled, active, classNa
 
 /* ---------- 统一入口 ---------- */
 
-export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onLyricLine }: {
+export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }: {
   kind: "video" | "audio"; url: string; name: string; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav;
 } & PlaybackProps) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
   const loader = useRef(loadAssets), resolveAsset = useRef(assetUrl);
   loader.current = loadAssets; resolveAsset.current = assetUrl;
-  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onLyricLine }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
-  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onLyricLine }; source.current = { url, name, cover };
+  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
+  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }; source.current = { url, name, cover };
   const navRef = useRef(nav);
   navRef.current = nav;
   const [state, setState] = useState<MediaState>("loading"), [error, setError] = useState("");
@@ -352,6 +352,12 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
     const instance = player.current;
     if (playerReady && instance && "refreshNavigation" in instance) (instance as VideoPlayer).refreshNavigation();
   }, [playerReady, navKey]);
+  const canSaveThumbnail = Boolean(onSaveThumbnail);
+  useEffect(() => {
+    const instance = player.current as VideoPlayer | null;
+    if (kind === "video" && playerReady && instance) instance.setThumbnailAction(canSaveThumbnail
+      ? async video => { await callbacks.current.onSaveThumbnail?.(video); } : null);
+  }, [kind, playerReady, canSaveThumbnail]);
   useEffect(() => {
     if (state !== "loading" && state !== "buffering") { setSlow(false); return; }
     const timer = window.setTimeout(() => setSlow(true), 8000);

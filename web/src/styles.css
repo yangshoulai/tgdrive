@@ -1242,6 +1242,9 @@ body:has(.modal-backdrop.is-minimized .preview-modal-video) .tray-stack { bottom
 .preview-video-host .art-bottom { padding-inline: 16px; }
 .preview-video-host .art-controls { min-height: 44px; font-family: var(--font); }
 .preview-video-host .art-control:focus-visible { outline: 2px solid var(--media-ink); outline-offset: -2px; border-radius: var(--radius-xs); }
+.preview-video-host .art-control-thumbnail[aria-disabled="true"] { opacity: .45; cursor: default; }
+.preview-video-host .art-control-thumbnail svg { fill: none; }
+.preview-video-host .art-control-thumbnail .spinner { width: 18px; height: 18px; color: var(--media-ink); }
 .preview-video-host .art-subtitle { font-family: var(--font); }
 @container video-preview (max-width: 480px) {
   .preview-video-host .art-control-pip, .preview-video-host .art-control-fullscreenWeb { display: none !important; }

@@ -9,20 +9,23 @@ MAX_COUNT = 9
 
 
 def frame_positions(duration: float | None, count: int = DEFAULT_COUNT) -> list[float]:
-    """先密集检查前几秒，片头较长时逐步向后；短视频补入按时长分布的位置。"""
-    positions = {1, 2, 3, 5, 8, 12, 20, 30, 45, 60, 90, 120, 180, 300, 600}
-    if count > DEFAULT_COUNT:
-        step = min(1, duration / (count * 2)) if duration is not None and math.isfinite(duration) and duration > 0 else 1
-        positions.update(index * step for index in range(1, count * 2 + 1))
+    """优先覆盖全片的不同段落，主采样点之后再补取附近位置，避免候选集中在片头。"""
     if duration is not None and math.isfinite(duration) and duration > 0:
         end = max(0, duration - min(.05, duration / 10))
-        positions.update(duration * part for part in (.1, .2, .35, .5, .65, .8, .9, .98))
-        positions = {value for value in positions if .03 <= value <= end}
-    # 避免相邻的固定位置与时长比例位置只差几毫秒，重复启动解码器。
+        anchors = [.5] if count == 1 else [.1 + .8 * index / (count - 1) for index in range(count)]
+        offset = min(.04, .8 / max(1, count - 1) / 3)
+        positions = [min(end, duration * (anchor + shift)) for shift in (0, offset, -offset) for anchor in anchors]
+        separation = min(.05, duration / (count * 16))
+    else:
+        # 无时长信息时逐步拉开间隔，解码到结尾后停止；不再一秒一张凑满数量。
+        positions = [5, 15, 30, 60, 120, 300, 600, 900, 1200, 1800, 2700, 3600, 5400, 7200]
+        separation = .05
+    # 保留主采样点优先级，不能按时间重新排序，否则又会优先凑满前段画面。
     result = []
-    for position in sorted(positions):
-        if not result or position - result[-1] >= .05:
-            result.append(round(position, 3))
+    for position in positions:
+        position = round(position, 3)
+        if position > 0 and all(abs(position - old) >= separation for old in result):
+            result.append(position)
     return result
 
 

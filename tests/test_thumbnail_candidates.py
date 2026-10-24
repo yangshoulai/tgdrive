@@ -13,10 +13,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from tgdrive.asgi import TgDriveASGI
+from tgdrive.api import UserApi
 from tgdrive.crypto import open_sealed, seal
 from tgdrive.objects import ObjectInfo, ObjectService, PRIVATE_PREFIX, Scope
 from tgdrive.errors import QuotaExceededError
-from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailService, _Job
+from tgdrive.thumbnails import MIB, ThumbnailError, ThumbnailService, _Job
 from tgdrive.video_candidates import frame_positions, frame_usable, same_frame
 
 
@@ -54,10 +55,48 @@ class CandidateFrameTests(unittest.TestCase):
         self.assertFalse(same_frame(detailed(), detailed(1)))
         positions = frame_positions(.8)
         self.assertGreaterEqual(len(positions), 5)
-        self.assertEqual(positions, sorted(set(positions)))
+        self.assertEqual(positions[:3], sorted(positions[:3]))
+        self.assertEqual(len(positions), len(set(positions)))
         self.assertTrue(all(0 < value < .8 for value in positions))
-        self.assertEqual(frame_positions(1200)[:5], [1, 2, 3, 5, 8])
-        self.assertIn(960, frame_positions(1200))
+        self.assertEqual(frame_positions(1200)[:3], [120, 600, 1080])
+
+    def test_long_movie_candidates_cover_different_sections_before_nearby_fallbacks(self):
+        positions = frame_positions(7200, 9)
+        self.assertEqual(positions[:9], list(range(720, 6481, 720)))
+        self.assertTrue(all(abs(right - left) >= 720 for left, right in zip(positions[:8], positions[1:9])))
+        self.assertEqual(frame_positions(7200, 1)[0], 3600)
+        self.assertEqual(frame_positions(None, 9)[:4], [5, 15, 30, 60])
+
+
+class PlayerThumbnailSaveTests(unittest.TestCase):
+    def setUp(self):
+        self.api = UserApi.__new__(UserApi)
+        self.scope = Scope(7, authorize=lambda: None)
+        self.info = ObjectInfo(7, "movie.mp4", 1000000, "video-v1", "video/mp4", {}, 100, "blob-video")
+        self.api._scope = Mock(return_value=self.scope)
+        self.api.objects = SimpleNamespace(STORED_THUMBNAILS=ObjectService.STORED_THUMBNAILS,
+            head_object=Mock(return_value=self.info), finish_thumbnail_set=Mock(), thumbnail_service=Mock())
+
+    def test_selected_frame_finishes_its_set_and_releases_the_generation_claim(self):
+        self.api.thumbnail_release("session", "csrf", self.info.key, self.info.etag, "ticket", ["thumb"])
+        self.api._scope.assert_called_once_with("session", csrf="csrf", mutation=True)
+        self.api.objects.thumbnail_service.check_claim.assert_called_once_with(self.info, "ticket")
+        self.api.objects.finish_thumbnail_set.assert_called_once_with(self.scope, self.info.key, ["thumb"])
+        self.api.objects.thumbnail_service.release.assert_called_once_with(self.scope, self.info.key, self.info.etag, "ticket")
+
+    def test_old_version_or_invalid_claim_cannot_finish_a_set(self):
+        with self.assertRaisesRegex(ValueError, "变化"):
+            self.api.thumbnail_release("session", "csrf", self.info.key, "old-version", "ticket", ["thumb"])
+        self.api.objects.thumbnail_service.check_claim.side_effect = ValueError("生成权已失效")
+        with self.assertRaisesRegex(ValueError, "失效"):
+            self.api.thumbnail_release("session", "csrf", self.info.key, self.info.etag, "ticket", ["thumb"])
+        self.api.objects.finish_thumbnail_set.assert_not_called()
+
+    def test_invalid_variants_cannot_remove_existing_thumbnails(self):
+        for variants in ([], ["none"], ["grid"], ["thumb", "bad"], "thumb", ["thumb", {}]):
+            with self.subTest(variants=variants), self.assertRaises(ValueError):
+                self.api.thumbnail_release("session", "csrf", self.info.key, self.info.etag, "ticket", variants)
+        self.api.objects.finish_thumbnail_set.assert_not_called()
 
 
 class CandidateServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -91,12 +130,13 @@ class CandidateServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @asynccontextmanager
     async def source(self, *_args, **_kwargs):
+        self.assertIsNone(_args[3], "用户手动选图不应套用自动生成的读取预算")
         yield SimpleNamespace(duration=8, remote_bytes=0)
 
     async def prepare(self, samples):
         value = self.request()
         job = self.worker._pending[self.info.blob_uuid]
-        with patch("tgdrive.thumbnails._RangeInput", self.source), patch.object(self.worker, "_render_frame", AsyncMock(side_effect=samples)):
+        with patch("tgdrive.thumbnails._RangeInput", self.source), patch.object(self.worker, "_render_frame", AsyncMock(side_effect=[({"thumb": JPEG}, bytes(4096)), *samples])):
             await self.worker._generate_candidates(job)
         return value["id"]
 
@@ -145,19 +185,79 @@ class CandidateServiceTests(unittest.IsolatedAsyncioTestCase):
         self.objects.finish_thumbnail_set.assert_called_once()
         self.assertNotIn(identity, self.worker._choices)
 
-    async def test_budget_can_keep_available_candidates_without_replacing_old_thumbnail(self):
-        identity = await self.prepare([({"thumb": JPEG}, detailed()), ThumbnailBudget("达到读取预算")])
+    async def test_long_movie_opening_probe_does_not_replace_a_distributed_candidate(self):
+        self.worker._setting.return_value = {"count": 9}
+        @asynccontextmanager
+        async def source(*args, **kwargs):
+            yield SimpleNamespace(duration=7200, remote_bytes=0)
+        # 即使开头本身画质合格，也只用于获取时长，九张候选仍覆盖不同段落。
+        renderer = AsyncMock(side_effect=[({"thumb": JPEG}, detailed(seed)) for seed in range(10)])
+        value = self.request()
+        with patch("tgdrive.thumbnails._RangeInput", source), patch.object(self.worker, "_render_frame", renderer):
+            await self.worker._generate_candidates(self.worker._pending[self.info.blob_uuid])
+        expected = list(range(720, 6481, 720))
+        self.assertEqual([frame.position for frame in self.worker._choices[value["id"]].frames], expected)
+        self.assertEqual([call.kwargs["position"] for call in renderer.await_args_list], [0, *expected])
+
+    async def test_decoder_failure_keeps_available_candidates_and_reports_its_real_reason(self):
+        identity = await self.prepare([({"thumb": JPEG}, detailed()), ThumbnailError("视频后续画面无法解码")])
         self.assertEqual(self.worker._choices[identity].state, "ready")
         self.assertEqual(len(self.worker._choices[identity].frames), 1)
+        self.assertIn("无法解码", self.worker._choices[identity].detail)
+        self.assertNotIn("上限", self.worker._choices[identity].detail)
         self.objects.set_thumbnail.assert_not_awaited()
         self.worker.cancel_candidates(self.scope, self.info.key, self.info.etag, "session", identity)
         self.assertNotIn(identity, self.worker._choices)
         self.assertNotIn(self.info.blob_uuid, self.worker._leases)
 
+    async def test_manual_generation_and_save_do_not_use_automatic_deadlines(self):
+        async def render(*args, **kwargs):
+            await asyncio.sleep(.01)
+            return {"thumb": JPEG}, detailed(int(kwargs["position"]))
+        with patch("tgdrive.thumbnails.TIMEOUT", .001), patch("tgdrive.thumbnails._RangeInput", self.source), \
+                patch.object(self.worker, "_render_frame", render):
+            value = self.request()
+            await self.worker._generate_candidates(self.worker._pending[self.info.blob_uuid])
+            self.assertEqual(len(self.worker._choices[value["id"]].frames), 3)
+            async def save(scope, *args):
+                await asyncio.sleep(.01)
+                self.worker._choices[value["id"]].until = 0
+                self.worker._expire_clients()
+                scope.authorize()
+            self.objects.set_thumbnail.side_effect = save
+            await self.worker.select_candidate(self.scope, self.info.key, self.info.etag, "session", value["id"], 0)
+        self.objects.finish_thumbnail_set.assert_called_once()
+
+    def test_waiting_or_running_candidates_do_not_expire_during_processing(self):
+        value = self.request()
+        choice = self.worker._choices[value["id"]]
+        choice.until = 0
+        for state in ("queued", "running"):
+            choice.state = state
+            self.assertEqual(self.worker.candidates_status(self.scope, self.info.key, self.info.etag, "session", value["id"])["state"], state)
+
+    async def test_cancel_still_stops_an_active_candidate_decoder(self):
+        started, stopped = asyncio.Event(), asyncio.Event()
+        async def render(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+        value = self.request()
+        self.worker._repair = Mock()
+        with patch("tgdrive.thumbnails._RangeInput", self.source), patch.object(self.worker, "_render_frame", render):
+            self.worker.start()
+            await asyncio.wait_for(started.wait(), 1)
+            self.worker.cancel_candidates(self.scope, self.info.key, self.info.etag, "session", value["id"])
+            await asyncio.wait_for(stopped.wait(), 1)
+        self.assertNotIn(value["id"], self.worker._choices)
+        self.objects.set_thumbnail.assert_not_awaited()
+
     async def test_worker_uses_candidate_path_and_reserves_generation_lease(self):
         value = self.request()
         self.worker._repair = Mock()
-        with patch("tgdrive.thumbnails._RangeInput", self.source), patch.object(self.worker, "_render_frame", AsyncMock(side_effect=[({"thumb": JPEG}, detailed(seed)) for seed in range(3)])):
+        with patch("tgdrive.thumbnails._RangeInput", self.source), patch.object(self.worker, "_render_frame", AsyncMock(side_effect=[({"thumb": JPEG}, bytes(4096)), *[({"thumb": JPEG}, detailed(seed)) for seed in range(3)]])):
             self.worker.start()
             async def ready():
                 while self.worker._choices[value["id"]].state != "ready" or self.info.blob_uuid in self.worker._pending:

@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from tgdrive.thumbnails import ThumbnailBudget, _RangeInput
+from tgdrive.thumbnails import MIB, ThumbnailBudget, _RangeInput
 
 
 class _Writer:
@@ -25,6 +25,18 @@ class _Writer:
         pass
 
 
+class _CountingWriter(_Writer):
+    def __init__(self):
+        super().__init__()
+        self.body_size = 0
+
+    def write(self, data):
+        if data.startswith(b"HTTP/1.1"):
+            super().write(data)
+        else:
+            self.body_size += len(data)
+
+
 class CandidateReadBudgetTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.data = bytes(range(256)) * 64
@@ -38,42 +50,62 @@ class CandidateReadBudgetTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         yield self.data[start:end]
 
-    def source(self, *, unique_reads=True, authorize=lambda: None):
-        source = _RangeInput(SimpleNamespace(stream=self.stream), self.info, authorize, 8192, unique_reads=unique_reads)
+    def source(self, *, budget=None, authorize=lambda: None):
+        source = _RangeInput(SimpleNamespace(stream=self.stream), self.info, authorize, budget)
         source.origin, source.url = "http://127.0.0.1:12345", "http://127.0.0.1:12345" + source.path
         return source
 
-    async def read(self, source, start, end):
-        reader, writer = asyncio.StreamReader(), _Writer()
+    async def read(self, source, start, end, writer=None):
+        reader, writer = asyncio.StreamReader(), writer or _Writer()
         reader.feed_data(f"GET {source.path} HTTP/1.1\r\nHost: 127.0.0.1:12345\r\nRange: bytes={start}-{end - 1}\r\n\r\n".encode())
         await source._serve(reader, writer)
         return bytes(writer.data).split(b"\r\n\r\n", 1)[1]
 
-    async def test_repeated_probe_and_frame_ranges_only_count_once(self):
+    async def test_manual_repeated_probes_do_not_have_a_read_limit(self):
         source = self.source()
         for _ in range(20):
             self.assertEqual(await self.read(source, 0, 4096), self.data[:4096])
             self.assertEqual(await self.read(source, 4096, 8192), self.data[4096:8192])
         self.assertIsNone(source.failure)
-        self.assertEqual(source.remaining, 0)
+        self.assertIsNone(source.remaining)
         self.assertEqual(source.remote_bytes, len(self.data))
         self.assertEqual(self.remote_reads, {"video"})
 
-    async def test_overlapping_and_parallel_ranges_share_the_limit(self):
+    async def test_manual_overlapping_and_parallel_ranges_keep_working(self):
         source = self.source()
         results = await asyncio.gather(self.read(source, 0, 6144), self.read(source, 2048, 8192))
         self.assertEqual(results, [self.data[:6144], self.data[2048:8192]])
         self.assertEqual(await self.read(source, 1024, 7168), self.data[1024:7168])
         self.assertIsNone(source.failure)
-        self.assertEqual(source.remaining, 0)
-        self.assertEqual(source._ranges, [(0, 8192)])
+        self.assertIsNone(source.remaining)
 
-    async def test_new_video_content_still_stops_at_the_real_limit(self):
-        source = self.source()
+    async def test_automatic_new_content_still_stops_at_its_read_limit(self):
+        source = self.source(budget=8192)
         await self.read(source, 0, 8192)
         self.assertEqual(await self.read(source, 8192, 12288), b"")
         self.assertIsInstance(source.failure, ThumbnailBudget)
-        self.assertIn("不同的视频内容", str(source.failure))
+        self.assertIn("读取量超过预算", str(source.failure))
+
+    async def test_manual_can_stream_more_than_sixty_four_mib_without_buffering_a_video(self):
+        source, writer = self.source(), _CountingWriter()
+        source.info = SimpleNamespace(size=72 * MIB, blob_uuid="large-video", bucket_id=7)
+        piece = bytes(MIB)
+        async def stream(blob, start, end, *, read_budget=None, **kwargs):
+            read_budget(str(start), end - start)
+            yield piece[:end - start]
+        source.engine.stream = stream
+        await self.read(source, 0, source.info.size, writer)
+        self.assertIsNone(source.failure)
+        self.assertEqual(writer.body_size, 72 * MIB)
+        self.assertEqual(source.remote_bytes, 72 * MIB)
+
+    async def test_manual_can_reload_a_fragment_after_cache_eviction(self):
+        source = self.source()
+        self.assertEqual(await self.read(source, 0, 4096), self.data[:4096])
+        self.remote_reads.clear()
+        self.assertEqual(await self.read(source, 0, 4096), self.data[:4096])
+        self.assertIsNone(source.failure)
+        self.assertEqual(source.remote_bytes, len(self.data) * 2)
 
     async def test_cache_reuse_does_not_skip_authorization(self):
         authorize = Mock()
@@ -84,7 +116,7 @@ class CandidateReadBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(source.failure, PermissionError)
 
     async def test_automatic_generation_keeps_its_existing_total_read_limit(self):
-        source = self.source(unique_reads=False)
+        source = self.source(budget=8192)
         await self.read(source, 0, 4096)
         await self.read(source, 0, 4096)
         self.assertEqual(await self.read(source, 0, 4096), b"")

@@ -833,9 +833,19 @@ class UserApi:
         scope = self._scope(token, csrf=csrf, mutation=True)
         return self.objects.thumbnail_service.claim(scope, self._path(path), etag, force=force)
 
-    def thumbnail_release(self, token, csrf, path, etag, ticket):
+    def thumbnail_release(self, token, csrf, path, etag, ticket, variants=None):
         scope = self._scope(token, csrf=csrf, mutation=True)
-        self.objects.thumbnail_service.release(scope, self._path(path), etag, ticket)
+        key = self._path(path)
+        if variants is not None:
+            if (not isinstance(variants, list) or not variants or "thumb" not in variants
+                    or any(not isinstance(value, str) or value not in self.objects.STORED_THUMBNAILS for value in variants)):
+                raise ValueError("缩略图规格不正确")
+            info = self.objects.head_object(scope, key)
+            if info.etag != etag:
+                raise ValueError("文件内容已变化，结果已丢弃")
+            self.objects.thumbnail_service.check_claim(info, ticket)
+            self.objects.finish_thumbnail_set(scope, key, variants)
+        self.objects.thumbnail_service.release(scope, key, etag, ticket)
 
     def thumbnail_generate(self, token, csrf, path, etag):
         scope = self._scope(token, csrf=csrf, mutation=True)

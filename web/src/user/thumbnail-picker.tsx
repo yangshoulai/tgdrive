@@ -92,7 +92,7 @@ export function ThumbnailPicker({ file, onClose, onSaved }: { file: api.FileItem
   const failed = Boolean(error) || job?.state === "failed";
   const working = !failed && (!job || job.state === "queued" || job.state === "running");
   return <Modal title="选择视频缩略图" icon="image" size="lg" className={`thumbnail-picker${api.isPrivatePath(file.key) ? " private-dialog" : ""}`}
-    description="优先从视频前段寻找画面，跳过明显的灰屏、片头文字和重复截图。" initialFocus="dialog" onClose={onClose} dismissible={!saving} closable={!saving}
+    description="从视频不同段落选取画面，跳过明显的灰屏、片头文字和重复截图。" initialFocus="dialog" onClose={onClose} dismissible={!saving} closable={!saving}
     footer={<><span className="thumbnail-picker-choice" aria-live="polite">{selected === null ? "请选择一张画面" : `已选 ${timestamp(job?.frames.find(frame => frame.index === selected)?.seconds ?? 0)}`}</span><Button disabled={saving} onClick={onClose}>取消</Button><Button variant="primary" icon="check" loading={saving} disabled={working || failed || restarting || selected === null || !images[selected] || imageErrors.has(selected)} onClick={() => void confirm()}>使用这张</Button></>}>
     <div className="thumbnail-picker-file"><Icon name="video" size={18} /><strong title={baseName(file.key)}>{baseName(file.key)}</strong></div>
     {failed ? <EmptyState compact icon="alert" title="暂时无法使用候选画面" description={error || job?.detail} action={<Button icon="refresh" loading={restarting} onClick={() => void retry()}>重新生成</Button>} /> : <>

@@ -1,4 +1,4 @@
-"""缩略图协作队列：自动任务只用已接收密文，手动任务才允许有预算地回源。"""
+"""缩略图协作队列：自动任务复用已接收密文；手动视频选图按需读取。"""
 
 from __future__ import annotations
 
@@ -56,7 +56,6 @@ REPAIR_KEY = "thumbnails.repair"
 CHOICE_KEY = "thumbnails.candidates"
 CHOICE_TTL = 600
 CHOICE_CAPACITY = 16
-CHOICE_BYTES = 32 * MIB
 
 
 def _resident(pid):
@@ -129,11 +128,10 @@ def source_kind(info: ObjectInfo) -> str | None:
 class _RangeInput:
     """只提供一个 Blob 的短期本地 HTTP/代理入口，支持解码器跳到尾部索引再回读画面。"""
 
-    def __init__(self, engine, info, authorize, budget, *, cache_only=False, unique_reads=False):
+    def __init__(self, engine, info, authorize, budget, *, cache_only=False):
         self.engine, self.info, self.authorize = engine, info, authorize
         self.remaining, self.failure = budget, None
-        self.budget, self.unique_reads, self._ranges = budget, unique_reads, []
-        self.remote_remaining, self.remote_bytes = budget + MIB, 0
+        self.remote_remaining, self.remote_bytes = None if budget is None else budget + MIB, 0
         self._fetched = set()
         self.cache_only = cache_only
         self.path = "/" + secrets.token_urlsafe(32)
@@ -143,36 +141,17 @@ class _RangeInput:
         self.duration = None
 
     def _charge(self, ref, size):
+        # 用户手动选图不受自动生成额度约束；缓存已回收时允许重新取回所需分片。
+        if self.remote_remaining is None:
+            self.remote_bytes += size
+            return
         if ref in self._fetched:
             raise ThumbnailRetry("已读分片缓存被回收，停止生成以避免重复下载")
         if size > self.remote_remaining:
-            if self.unique_reads:
-                raise ThumbnailBudget(f"本次选图已从存储读取 {self.remote_bytes / MIB:.1f} MiB，"
-                                      "继续读取新分片将超过单次上限；原缩略图已保留")
             raise ThumbnailBudget("手动缩略图读取量超过预算")
         self.remote_remaining -= size
         self.remote_bytes += size
         self._fetched.add(ref)
-
-    def _reserve(self, start, end):
-        """候选图复用同一份输入，只对尚未读取的范围计量；自动生成保留原限制。"""
-        size = end - start
-        if self.unique_reads:
-            size -= sum(max(0, min(end, right) - max(start, left)) for left, right in self._ranges)
-        if size > self.remaining:
-            if self.unique_reads:
-                raise ThumbnailBudget(f"本次选图已读取 {(self.budget - self.remaining) / MIB:.1f} MiB 不同的视频内容，"
-                                      f"继续读取将超过 {self.budget / MIB:g} MiB 上限；原缩略图已保留")
-            raise ThumbnailBudget("缩略图读取量超过预算")
-        self.remaining -= size
-        if self.unique_reads:
-            merged = []
-            for left, right in sorted([*self._ranges, (start, end)]):
-                if merged and left <= merged[-1][1]:
-                    merged[-1] = (merged[-1][0], max(merged[-1][1], right))
-                else:
-                    merged.append((left, right))
-            self._ranges = merged
 
     async def __aenter__(self):
         self.server = await asyncio.start_server(self._serve, "127.0.0.1", 0, limit=8192)
@@ -236,9 +215,12 @@ class _RangeInput:
                     return
                 while start < end:
                     self.authorize()
-                    # 每次最多读 1 MiB；多次取帧重复请求头部、索引和同一关键帧时不重复扣候选图额度。
+                    # 分窗口流式交付，不为手动选图把完整视频放入内存。
                     stop = min(end, start + MIB)
-                    self._reserve(start, stop)
+                    if self.remaining is not None:
+                        if stop - start > self.remaining:
+                            raise ThumbnailBudget("缩略图读取量超过预算")
+                        self.remaining -= stop - start
                     async with aclosing(self.engine.stream(self.info.blob_uuid, start, stop,
                                                           window=MIB, bucket_id=self.info.bucket_id,
                                                           cache_only=self.cache_only,
@@ -547,7 +529,7 @@ class ThumbnailService:
 
     def _expire_choices(self):
         for choice in list(self._choices.values()):
-            if choice.until <= time.monotonic() and choice.state != "saving":
+            if choice.until <= time.monotonic() and choice.state in ("ready", "failed"):
                 self._discard_choice(choice)
 
     def request_candidates(self, scope, key, etag, owner):
@@ -623,8 +605,9 @@ class ThumbnailService:
         if choice.state != "ready" or type(index) is not int or not 0 <= index < len(choice.frames):
             raise ValueError("请等待候选画面生成完成后选择")
         self.check_claim(choice.info, choice.id)
-        choice.state, choice.until = "saving", time.monotonic() + TIMEOUT
-        self._leases[choice.info.blob_uuid].until = choice.until
+        choice.state = "saving"
+        # 保存期间按实际会话和源版本校验，结束时由 finally 释放，不套用候选等待期限。
+        self._leases[choice.info.blob_uuid].until = float("inf")
         def authorize():
             self._choice(scope, key, etag, owner, request_id)
             self.check_claim(choice.info, choice.id)
@@ -632,19 +615,18 @@ class ThumbnailService:
         guarded = replace(scope, authorize=authorize)
         saved = []
         try:
-            async with asyncio.timeout(TIMEOUT):
-                for variant, sealed in choice.frames[index].images.items():
-                    authorize()
-                    data = self.objects.engine.open_thumbnail(choice.info.blob_uuid, f"choice:{choice.id}:{index}:{variant}", sealed)
-                    try:
-                        await self.objects.set_thumbnail(guarded, key, data, variant)
-                        saved.append(variant)
-                    except QuotaExceededError:
-                        if not saved:
-                            raise ValueError("存储空间已满，无法保存所选画面") from None
-                        break
+            for variant, sealed in choice.frames[index].images.items():
                 authorize()
-                self.objects.finish_thumbnail_set(guarded, key, saved)
+                data = self.objects.engine.open_thumbnail(choice.info.blob_uuid, f"choice:{choice.id}:{index}:{variant}", sealed)
+                try:
+                    await self.objects.set_thumbnail(guarded, key, data, variant)
+                    saved.append(variant)
+                except QuotaExceededError:
+                    if not saved:
+                        raise ValueError("存储空间已满，无法保存所选画面") from None
+                    break
+            authorize()
+            self.objects.finish_thumbnail_set(guarded, key, saved)
         finally:
             self._discard_choice(choice)
 
@@ -653,48 +635,47 @@ class ThumbnailService:
         if choice is None:
             raise ThumbnailError("候选画面请求已取消")
         scope = self._scope(job.info, None)
-        choice.state, choice.detail = "running", "正在从视频前段寻找清晰且不同的画面"
+        choice.state, choice.detail = "running", "正在从视频不同段落寻找清晰且不同的画面"
         self.cache.prepare(job.info.blob_uuid, job.info.key, job.info.content_type)
         samples = []
-        partial = False
+        stopped = ""
         try:
-            async with asyncio.timeout(TIMEOUT):
-                async with _RangeInput(self.objects.engine, job.info, scope.authorize, READ_LIMITS["video"], unique_reads=True) as source:
-                    try:
-                        with tempfile.TemporaryDirectory(prefix="tessera-candidates-") as directory:
-                            positions, attempt = [0], 0
-                            while positions and len(choice.frames) < choice.count:
-                                position = positions.pop(0)
-                                target = Path(directory) / str(attempt)
-                                attempt += 1
-                                target.mkdir()
-                                images, pixels = await self._render_frame(source, "video", target, scope.authorize, position=position,
-                                                                        sample_size=video_candidates.SAMPLE_SIZE)
-                                if position == 0:
-                                    positions = video_candidates.frame_positions(source.duration, choice.count)
-                                if not images:
-                                    break
-                                if not video_candidates.frame_usable(pixels) or any(video_candidates.same_frame(pixels, old) for old in samples):
-                                    continue
-                                index = len(choice.frames)
-                                sealed = {variant: self.objects.engine.seal_thumbnail(job.info.blob_uuid, f"choice:{choice.id}:{index}:{variant}", data)
-                                          for variant, data in images.items()}
-                                used = sum(len(data) for item in self._choices.values() for frame in item.frames for data in frame.images.values())
-                                if used + sum(map(len, sealed.values())) > CHOICE_BYTES:
-                                    raise ThumbnailBudget("候选画面缓存已满")
-                                choice.frames.append(_Candidate(position, sealed))
-                                samples.append(pixels)
-                    finally:
-                        self._remote_bytes += source.remote_bytes if isinstance(source.remote_bytes, int) else 0
-        except (TimeoutError, ThumbnailError):
+            async with _RangeInput(self.objects.engine, job.info, scope.authorize, None) as source:
+                try:
+                    with tempfile.TemporaryDirectory(prefix="tessera-candidates-") as directory:
+                        positions, attempt = [0], 0
+                        while positions and len(choice.frames) < choice.count:
+                            position = positions.pop(0)
+                            target = Path(directory) / str(attempt)
+                            attempt += 1
+                            target.mkdir()
+                            images, pixels = await self._render_frame(source, "video", target, scope.authorize, position=position,
+                                                                    sample_size=video_candidates.SAMPLE_SIZE)
+                            if position == 0:
+                                positions = video_candidates.frame_positions(source.duration, choice.count)
+                                # 开头只用于复用容器时长信息，不占用户的候选名额。
+                                continue
+                            if not images:
+                                break
+                            if not video_candidates.frame_usable(pixels) or any(video_candidates.same_frame(pixels, old) for old in samples):
+                                continue
+                            index = len(choice.frames)
+                            sealed = {variant: self.objects.engine.seal_thumbnail(job.info.blob_uuid, f"choice:{choice.id}:{index}:{variant}", data)
+                                      for variant, data in images.items()}
+                            choice.frames.append(_Candidate(position, sealed))
+                            samples.append(pixels)
+                            choice.detail = f"已找到 {len(choice.frames)} / {choice.count} 张画面，继续截取"
+                finally:
+                    self._remote_bytes += source.remote_bytes if isinstance(source.remote_bytes, int) else 0
+        except ThumbnailError as exc:
             if not choice.frames:
                 raise
-            partial = True
+            stopped = str(exc)
         scope.authorize()
         if not choice.frames:
             raise ThumbnailError("未找到合适的画面，原缩略图已保留")
         choice.state, choice.until = "ready", time.monotonic() + CHOICE_TTL
-        choice.detail = "请选择一张作为缩略图" if len(choice.frames) == choice.count else f"已找到 {len(choice.frames)} 张不同的合适画面" + ("，本次已达到处理或读取上限" if partial else "")
+        choice.detail = "请选择一张作为缩略图" if len(choice.frames) == choice.count else f"已找到 {len(choice.frames)} 张不同的合适画面" + (f"；{stopped}" if stopped else "，视频其余采样位置没有更多合适画面")
         self._leases[job.info.blob_uuid] = _Lease(job.info, choice.id, choice.until)
 
     # ---------- 自动补图 ----------
@@ -868,6 +849,7 @@ class ThumbnailService:
                                 choice = self._choices.get(job.choice)
                                 if choice is not None:
                                     choice.state, choice.detail = "failed", "视频读取暂时不可用，请重试；原缩略图已保留"
+                                    choice.until = time.monotonic() + CHOICE_TTL
                                 self._record(job, "failed", "候选画面的读取暂时不可用")
                                 continue
                             job.misses += 1
@@ -888,6 +870,7 @@ class ThumbnailService:
                             choice = self._choices.get(job.choice)
                             if choice is not None:
                                 choice.state = "failed"
+                                choice.until = time.monotonic() + CHOICE_TTL
                                 choice.detail = "截取画面超时，请重试；原缩略图已保留" if isinstance(exc, TimeoutError) else str(exc) if isinstance(exc, ThumbnailError) else "暂时无法截取画面，请重试；原缩略图已保留"
                             if job.backfill and not isinstance(exc, (NotFoundError, PermissionError)):
                                 # 超时、资源不足等暂时性失败：几小时后再试；连续 3 次仍失败就记为「无法生成」，不再消耗补图额度。
