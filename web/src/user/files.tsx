@@ -48,7 +48,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [entryFilter, setEntryFilter] = useState<EntryFilter>("all");
   const [kind, setKind] = useState<api.KindFilter>("");
   const [layout, setLayout] = useState<"list" | "grid">(() => (localStorage.getItem("tgdrive:layout") as "list" | "grid") || "list");
-  const [sort, setSort] = useState<FileSort>({ key: "name", desc: false });
+  const [sort, setSort] = useState<FileSort>({ key: "modified", desc: true });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const preview = usePreview();
   const [sharing, setSharing] = useState<api.FileItem | null>(null);

@@ -21,6 +21,7 @@ export function ThumbnailPicker({ file, onClose, onSaved }: { file: api.FileItem
   const [attempt, setAttempt] = useState(0);
   const close = useRef(onClose); close.current = onClose;
   const released = useRef(false), live = useRef(true);
+  const submitting = useRef(false);
   useEffect(() => {
     if (!api.isPrivatePath(file.key)) return;
     const locked = () => close.current();
@@ -30,10 +31,10 @@ export function ThumbnailPicker({ file, onClose, onSaved }: { file: api.FileItem
   useEffect(() => {
     let disposed = false, timer = 0, requestId = "";
     const controller = new AbortController(), urls = new Map<number, string>(), pending = new Set<number>();
-    live.current = true; released.current = false;
+    live.current = true; released.current = false; submitting.current = false;
     setJob(null); setError(""); setImages({}); setImageErrors(new Set()); setSelected(null);
     const update = (value: api.ThumbnailCandidates) => {
-      if (disposed) return;
+      if (disposed || submitting.current) return;
       setJob(value);
       for (const frame of value.frames) {
         if (urls.has(frame.index) || pending.has(frame.index)) continue;
@@ -47,11 +48,12 @@ export function ThumbnailPicker({ file, onClose, onSaved }: { file: api.FileItem
       }
     };
     const poll = async () => {
+      if (disposed || submitting.current) return;
       try {
         const value = await api.thumbnailCandidates(file, requestId, controller.signal);
         update(value);
-        if (!disposed && (value.state === "queued" || value.state === "running")) timer = window.setTimeout(poll, 1000);
-      } catch (reason) { if (!disposed) setError(api.errorMessage(reason, "无法读取候选画面，请重试")); }
+        if (!disposed && !submitting.current && (value.state === "queued" || value.state === "running")) timer = window.setTimeout(poll, 1000);
+      } catch (reason) { if (!disposed && !submitting.current) setError(api.errorMessage(reason, "无法读取候选画面，请重试")); }
     };
     void api.createThumbnailCandidates(file).then(value => {
       requestId = value.id;
@@ -80,7 +82,9 @@ export function ThumbnailPicker({ file, onClose, onSaved }: { file: api.FileItem
     finally { if (live.current) setRestarting(false); }
   }
   async function confirm() {
-    if (!job || selected === null || saving || job.state !== "ready" || !images[selected] || imageErrors.has(selected)) return;
+    if (!job || selected === null || submitting.current || (job.state !== "running" && job.state !== "ready") || !images[selected] || imageErrors.has(selected)) return;
+    // 本轮提交后冻结旧轮询；保存失败时通过重新生成开启新一轮。
+    submitting.current = true;
     setSaving(true); setError("");
     try {
       await api.selectThumbnailCandidate(file, job.id, selected);
@@ -91,18 +95,19 @@ export function ThumbnailPicker({ file, onClose, onSaved }: { file: api.FileItem
   }
   const failed = Boolean(error) || job?.state === "failed";
   const working = !failed && (!job || job.state === "queued" || job.state === "running");
+  const selectable = job?.state === "running" || job?.state === "ready";
   return <Modal title="选择视频缩略图" icon="image" size="lg" className={`thumbnail-picker${api.isPrivatePath(file.key) ? " private-dialog" : ""}`}
-    description="从视频不同段落选取画面，跳过明显的灰屏、片头文字和重复截图。" initialFocus="dialog" onClose={onClose} dismissible={!saving} closable={!saving}
-    footer={<><span className="thumbnail-picker-choice" aria-live="polite">{selected === null ? "请选择一张画面" : `已选 ${timestamp(job?.frames.find(frame => frame.index === selected)?.seconds ?? 0)}`}</span><Button disabled={saving} onClick={onClose}>取消</Button><Button variant="primary" icon="check" loading={saving} disabled={working || failed || restarting || selected === null || !images[selected] || imageErrors.has(selected)} onClick={() => void confirm()}>使用这张</Button></>}>
+    description="从视频不同段落逐张选取画面，看到满意的即可保存，无需等待全部生成。" initialFocus="dialog" onClose={onClose} dismissible={!saving} closable={!saving}
+    footer={<><span className="thumbnail-picker-choice" aria-live="polite">{selected === null ? "请选择一张画面" : `已选 ${timestamp(job?.frames.find(frame => frame.index === selected)?.seconds ?? 0)}`}</span><Button disabled={saving} onClick={onClose}>取消</Button><Button variant="primary" icon="check" loading={saving} disabled={saving || !selectable || failed || restarting || selected === null || !images[selected] || imageErrors.has(selected)} onClick={() => void confirm()}>使用这张</Button></>}>
     <div className="thumbnail-picker-file"><Icon name="video" size={18} /><strong title={baseName(file.key)}>{baseName(file.key)}</strong></div>
     {failed ? <EmptyState compact icon="alert" title="暂时无法使用候选画面" description={error || job?.detail} action={<Button icon="refresh" loading={restarting} onClick={() => void retry()}>重新生成</Button>} /> : <>
-      <div className="thumbnail-picker-status" role="status">{working ? <span className="spinner" /> : <Icon name="checkCircle" size={16} />}<span>{job?.state === "ready" ? "请选择一张作为缩略图" : job?.detail || "正在提交截图请求"}</span><small>{job?.frames.length ?? 0} / {job?.count ?? 3} 张</small></div>
+      <div className="thumbnail-picker-status" role="status">{working || saving ? <span className="spinner" /> : <Icon name="checkCircle" size={16} />}<span>{saving ? "正在保存所选画面，并停止剩余截图" : job?.state === "ready" ? "请选择一张作为缩略图" : job?.detail || "正在提交截图请求"}</span><small>{job?.frames.length ?? 0} / {job?.count ?? 3} 张</small></div>
       {job?.state === "ready" && job.frames.length < job.count && <Notice>{job.detail}，可直接选择。</Notice>}
-      <div className="thumbnail-candidates" role="radiogroup" aria-label="视频候选画面" aria-busy={working}>
+      <div className="thumbnail-candidates" role="radiogroup" aria-label="视频候选画面" aria-busy={saving}>
         {Array.from({ length: working ? job?.count ?? 3 : job?.frames.length ?? 0 }, (_, index) => {
           const frame = job?.frames[index], url = frame && images[frame.index], broken = frame && imageErrors.has(frame.index);
           return <label key={index} className={`thumbnail-candidate${selected === frame?.index ? " is-selected" : ""}${!url || broken ? " is-loading" : ""}`}>
-            <input type="radio" name="thumbnail-frame" aria-label={frame ? `选择 ${timestamp(frame.seconds)} 的画面` : `候选画面 ${index + 1} 正在准备`} checked={Boolean(frame && selected === frame.index)} disabled={!frame || !url || broken || saving || restarting || job?.state !== "ready"} onChange={() => frame && setSelected(frame.index)} />
+            <input type="radio" name="thumbnail-frame" aria-label={frame ? `选择 ${timestamp(frame.seconds)} 的画面` : `候选画面 ${index + 1} 正在准备`} checked={Boolean(frame && selected === frame.index)} disabled={!frame || !url || broken || saving || restarting || !selectable} onChange={() => frame && setSelected(frame.index)} />
             <span className="thumbnail-candidate-image">{url && !broken ? <img src={url} alt={`视频在 ${timestamp(frame!.seconds)} 的画面`} onError={() => setImageErrors(previous => new Set(previous).add(frame!.index))} /> : <span>{broken ? <Icon name="alert" size={22} /> : <span className="spinner" />}<span>{broken ? "画面加载失败" : "正在截取画面"}</span></span>}</span>
             <span className="thumbnail-candidate-caption"><span>{frame ? timestamp(frame.seconds) : `候选 ${index + 1}`}</span><span>{selected === frame?.index ? <><Icon name="checkCircle" size={15} />已选择</> : ""}</span></span>
           </label>;

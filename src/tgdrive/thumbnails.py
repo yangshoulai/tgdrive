@@ -602,12 +602,19 @@ class ThumbnailService:
 
     async def select_candidate(self, scope, key, etag, owner, request_id, index):
         choice = self._choice(scope, key, etag, owner, request_id)
-        if choice.state != "ready" or type(index) is not int or not 0 <= index < len(choice.frames):
-            raise ValueError("请等待候选画面生成完成后选择")
-        self.check_claim(choice.info, choice.id)
+        if choice.state not in ("running", "ready") or type(index) is not int or not 0 <= index < len(choice.frames):
+            raise ValueError("请选择已经生成的候选画面")
+        if choice.state == "ready":
+            self.check_claim(choice.info, choice.id)
+        frame = choice.frames[index]
         choice.state = "saving"
         # 保存期间按实际会话和源版本校验，结束时由 finally 释放，不套用候选等待期限。
-        self._leases[choice.info.blob_uuid].until = float("inf")
+        blob = choice.info.blob_uuid
+        self._leases[blob] = _Lease(choice.info, choice.id, float("inf"))
+        job = self._pending.get(blob)
+        generating = self._task if job is not None and job.choice == choice.id and self._active is job else None
+        if job is not None and job.choice == choice.id:
+            self._pending.pop(blob, None)
         def authorize():
             self._choice(scope, key, etag, owner, request_id)
             self.check_claim(choice.info, choice.id)
@@ -615,7 +622,11 @@ class ThumbnailService:
         guarded = replace(scope, authorize=authorize)
         saved = []
         try:
-            for variant, sealed in choice.frames[index].images.items():
+            # 先停止并收尾后台截帧，再写入选中的快照，避免剩余任务改回候选状态或继续读取视频。
+            if generating is not None and not generating.done():
+                generating.cancel()
+                await asyncio.gather(generating, return_exceptions=True)
+            for variant, sealed in frame.images.items():
                 authorize()
                 data = self.objects.engine.open_thumbnail(choice.info.blob_uuid, f"choice:{choice.id}:{index}:{variant}", sealed)
                 try:
@@ -644,13 +655,15 @@ class ThumbnailService:
                 try:
                     with tempfile.TemporaryDirectory(prefix="tessera-candidates-") as directory:
                         positions, attempt = [0], 0
-                        while positions and len(choice.frames) < choice.count:
+                        while positions and len(choice.frames) < choice.count and choice.state == "running":
                             position = positions.pop(0)
                             target = Path(directory) / str(attempt)
                             attempt += 1
                             target.mkdir()
                             images, pixels = await self._render_frame(source, "video", target, scope.authorize, position=position,
                                                                     sample_size=video_candidates.SAMPLE_SIZE)
+                            if choice.state != "running":
+                                return
                             if position == 0:
                                 positions = video_candidates.frame_positions(source.duration, choice.count)
                                 # 开头只用于复用容器时长信息，不占用户的候选名额。
@@ -672,6 +685,8 @@ class ThumbnailService:
                 raise
             stopped = str(exc)
         scope.authorize()
+        if choice.state != "running":
+            return
         if not choice.frames:
             raise ThumbnailError("未找到合适的画面，原缩略图已保留")
         choice.state, choice.until = "ready", time.monotonic() + CHOICE_TTL
@@ -847,7 +862,7 @@ class ThumbnailService:
                             if job.choice:
                                 self._pending.pop(blob, None)
                                 choice = self._choices.get(job.choice)
-                                if choice is not None:
+                                if choice is not None and choice.state != "saving":
                                     choice.state, choice.detail = "failed", "视频读取暂时不可用，请重试；原缩略图已保留"
                                     choice.until = time.monotonic() + CHOICE_TTL
                                 self._record(job, "failed", "候选画面的读取暂时不可用")
@@ -868,7 +883,7 @@ class ThumbnailService:
                         except Exception as exc:
                             self._pending.pop(blob, None)
                             choice = self._choices.get(job.choice)
-                            if choice is not None:
+                            if choice is not None and choice.state != "saving":
                                 choice.state = "failed"
                                 choice.until = time.monotonic() + CHOICE_TTL
                                 choice.detail = "截取画面超时，请重试；原缩略图已保留" if isinstance(exc, TimeoutError) else str(exc) if isinstance(exc, ThumbnailError) else "暂时无法截取画面，请重试；原缩略图已保留"

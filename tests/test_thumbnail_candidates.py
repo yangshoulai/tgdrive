@@ -254,6 +254,64 @@ class CandidateServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(value["id"], self.worker._choices)
         self.objects.set_thumbnail.assert_not_awaited()
 
+    async def test_first_available_candidate_can_save_and_stop_remaining_generation(self):
+        next_frame, stopped, saving, finish_save = (asyncio.Event() for _ in range(4))
+        async def render(*args, **kwargs):
+            position = kwargs["position"]
+            if position == 0:
+                return {"thumb": JPEG}, bytes(4096)
+            if position < 1:
+                return {"thumb": JPEG + b"selected", "grid": JPEG + b"selected-grid"}, detailed()
+            next_frame.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # 模拟取消时解码器仍交付最后一帧，不能追加或把 saving 改回 ready。
+                return {"thumb": JPEG + b"late"}, detailed(1)
+            finally:
+                stopped.set()
+        async def save(scope, *args):
+            self.assertTrue(stopped.is_set(), "先停止截帧，再保存选中结果")
+            scope.authorize()
+            saving.set()
+            await finish_save.wait()
+        self.objects.set_thumbnail.side_effect = save
+        value = self.request()
+        self.worker._repair = Mock()
+        with patch("tgdrive.thumbnails._RangeInput", self.source), patch.object(self.worker, "_render_frame", render):
+            self.worker.start()
+            await asyncio.wait_for(next_frame.wait(), 1)
+            choice = self.worker._choices[value["id"]]
+            self.assertEqual(choice.state, "running")
+            self.assertEqual(len(choice.frames), 1)
+            self.assertEqual(self.worker.candidate_image(self.scope, self.info.key, self.info.etag, "session", value["id"], 0), JPEG + b"selected-grid")
+            selecting = asyncio.create_task(self.worker.select_candidate(self.scope, self.info.key, self.info.etag, "session", value["id"], 0))
+            try:
+                await asyncio.wait_for(saving.wait(), 1)
+                self.assertEqual(choice.state, "saving")
+                self.assertNotIn(self.info.blob_uuid, self.worker._pending)
+                self.assertEqual(len(choice.frames), 1)
+                with self.assertRaises(ValueError):
+                    await self.worker.select_candidate(self.scope, self.info.key, self.info.etag, "session", value["id"], 0)
+            finally:
+                finish_save.set()
+                await asyncio.wait_for(selecting, 1)
+        self.assertEqual([call.args[2] for call in self.objects.set_thumbnail.await_args_list], [JPEG + b"selected", JPEG + b"selected-grid"])
+        self.objects.finish_thumbnail_set.assert_called_once()
+        self.assertNotIn(value["id"], self.worker._choices)
+        self.assertNotIn(self.info.blob_uuid, self.worker._leases)
+
+    async def test_early_selection_rejects_unavailable_frames_without_stopping_generation(self):
+        value = self.request()
+        choice = self.worker._choices[value["id"]]
+        choice.state = "running"
+        for index in (0, 1, -1, True, "0"):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                await self.worker.select_candidate(self.scope, self.info.key, self.info.etag, "session", value["id"], index)
+        self.assertEqual(choice.state, "running")
+        self.assertIn(self.info.blob_uuid, self.worker._pending)
+        self.objects.set_thumbnail.assert_not_awaited()
+
     async def test_worker_uses_candidate_path_and_reserves_generation_lease(self):
         value = self.request()
         self.worker._repair = Mock()
