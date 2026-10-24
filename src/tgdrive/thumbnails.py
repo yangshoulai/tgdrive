@@ -129,9 +129,10 @@ def source_kind(info: ObjectInfo) -> str | None:
 class _RangeInput:
     """只提供一个 Blob 的短期本地 HTTP/代理入口，支持解码器跳到尾部索引再回读画面。"""
 
-    def __init__(self, engine, info, authorize, budget, *, cache_only=False):
+    def __init__(self, engine, info, authorize, budget, *, cache_only=False, unique_reads=False):
         self.engine, self.info, self.authorize = engine, info, authorize
         self.remaining, self.failure = budget, None
+        self.budget, self.unique_reads, self._ranges = budget, unique_reads, []
         self.remote_remaining, self.remote_bytes = budget + MIB, 0
         self._fetched = set()
         self.cache_only = cache_only
@@ -145,10 +146,33 @@ class _RangeInput:
         if ref in self._fetched:
             raise ThumbnailRetry("已读分片缓存被回收，停止生成以避免重复下载")
         if size > self.remote_remaining:
+            if self.unique_reads:
+                raise ThumbnailBudget(f"本次选图已从存储读取 {self.remote_bytes / MIB:.1f} MiB，"
+                                      "继续读取新分片将超过单次上限；原缩略图已保留")
             raise ThumbnailBudget("手动缩略图读取量超过预算")
         self.remote_remaining -= size
         self.remote_bytes += size
         self._fetched.add(ref)
+
+    def _reserve(self, start, end):
+        """候选图复用同一份输入，只对尚未读取的范围计量；自动生成保留原限制。"""
+        size = end - start
+        if self.unique_reads:
+            size -= sum(max(0, min(end, right) - max(start, left)) for left, right in self._ranges)
+        if size > self.remaining:
+            if self.unique_reads:
+                raise ThumbnailBudget(f"本次选图已读取 {(self.budget - self.remaining) / MIB:.1f} MiB 不同的视频内容，"
+                                      f"继续读取将超过 {self.budget / MIB:g} MiB 上限；原缩略图已保留")
+            raise ThumbnailBudget("缩略图读取量超过预算")
+        self.remaining -= size
+        if self.unique_reads:
+            merged = []
+            for left, right in sorted([*self._ranges, (start, end)]):
+                if merged and left <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+                else:
+                    merged.append((left, right))
+            self._ranges = merged
 
     async def __aenter__(self):
         self.server = await asyncio.start_server(self._serve, "127.0.0.1", 0, limit=8192)
@@ -212,11 +236,9 @@ class _RangeInput:
                     return
                 while start < end:
                     self.authorize()
-                    # 每次最多读 1 MiB，避免解码器一次开放式 Range 触发大窗口预读，绕过累计读取预算。
+                    # 每次最多读 1 MiB；多次取帧重复请求头部、索引和同一关键帧时不重复扣候选图额度。
                     stop = min(end, start + MIB)
-                    if stop - start > self.remaining:
-                        raise ThumbnailBudget("缩略图读取量超过预算")
-                    self.remaining -= stop - start
+                    self._reserve(start, stop)
                     async with aclosing(self.engine.stream(self.info.blob_uuid, start, stop,
                                                           window=MIB, bucket_id=self.info.bucket_id,
                                                           cache_only=self.cache_only,
@@ -637,7 +659,7 @@ class ThumbnailService:
         partial = False
         try:
             async with asyncio.timeout(TIMEOUT):
-                async with _RangeInput(self.objects.engine, job.info, scope.authorize, READ_LIMITS["video"]) as source:
+                async with _RangeInput(self.objects.engine, job.info, scope.authorize, READ_LIMITS["video"], unique_reads=True) as source:
                     try:
                         with tempfile.TemporaryDirectory(prefix="tessera-candidates-") as directory:
                             positions, attempt = [0], 0

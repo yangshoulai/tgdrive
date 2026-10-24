@@ -2,6 +2,7 @@
 
 import asyncio
 import shutil
+import struct
 import tempfile
 import time
 import unittest
@@ -15,7 +16,7 @@ from tgdrive.asgi import TgDriveASGI
 from tgdrive.crypto import open_sealed, seal
 from tgdrive.objects import ObjectInfo, ObjectService, PRIVATE_PREFIX, Scope
 from tgdrive.errors import QuotaExceededError
-from tgdrive.thumbnails import ThumbnailBudget, ThumbnailError, ThumbnailService, _Job
+from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailService, _Job
 from tgdrive.video_candidates import frame_positions, frame_usable, same_frame
 
 
@@ -24,6 +25,17 @@ JPEG = b"\xff\xd8\xff\xe0test-image"
 
 def detailed(seed=0):
     return bytes(32 + (x * 17 + y * 13 + seed * 37) % 180 for y in range(64) for x in range(64))
+
+
+def ffmpeg_executable():
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        try:
+            import imageio_ffmpeg  # 本地验证可选，服务不依赖这个包。
+            executable = imageio_ffmpeg.get_ffmpeg_exe()
+        except (ImportError, RuntimeError):
+            return None
+    return executable
 
 
 class CandidateFrameTests(unittest.TestCase):
@@ -190,13 +202,9 @@ class CandidateServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[1], {"candidate_count": 5})
 
     async def test_real_decoder_skips_gray_intro_and_produces_three_or_nine_frames(self):
-        executable = shutil.which("ffmpeg")
+        executable = ffmpeg_executable()
         if not executable:
-            try:
-                import imageio_ffmpeg  # 本地验证可选，服务不依赖这个包。
-                executable = imageio_ffmpeg.get_ffmpeg_exe()
-            except (ImportError, RuntimeError):
-                self.skipTest("没有可用 FFmpeg")
+            self.skipTest("没有可用 FFmpeg")
         self.worker.resources.ffmpeg = executable
         data, fetched = b"", set()
         async def stream(blob, start, end, *, read_budget=None, **kwargs):
@@ -232,6 +240,66 @@ class CandidateServiceTests(unittest.IsolatedAsyncioTestCase):
             self.request()
             with self.assertRaisesRegex(ThumbnailError, "原缩略图已保留"):
                 await self.worker._generate_candidates(self.worker._pending[self.info.blob_uuid])
+            self.objects.set_thumbnail.assert_not_awaited()
+
+    async def test_large_mp4_tail_index_and_repeated_probes_keep_all_candidates(self):
+        executable = ffmpeg_executable()
+        if not executable:
+            self.skipTest("没有可用 FFmpeg")
+        self.worker.resources.ffmpeg = executable
+        with tempfile.TemporaryDirectory() as directory:
+            original, target = Path(directory) / "clip.mp4", Path(directory) / "large.mp4"
+            graph = ("color=c=gray:s=640x360:r=12:d=10,drawgrid=w=70:h=40:t=4:c=white[a];"
+                     "nullsrc=s=640x360:r=12:d=20,geq=lum='mod(X*2+Y+N*10,220)+16':cb=128:cr=128[b];"
+                     "[a][b]concat=n=2:v=1:a=0[out]")
+            process = await asyncio.create_subprocess_exec(executable, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-filter_complex", graph, "-map", "[out]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", str(original),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            _, error = await asyncio.wait_for(process.communicate(), 20)
+            self.assertEqual(process.returncode, 0, error.decode(errors="replace"))
+            # 在媒体数据与尾部索引之间插入稀疏 free atom，保留合法的媒体偏移，不分配整份大文件内存。
+            with original.open("rb") as source:
+                while header := source.read(8):
+                    size, kind = struct.unpack(">I4s", header)
+                    self.assertGreaterEqual(size, 8)
+                    if kind == b"moov":
+                        moov = source.tell() - 8
+                        break
+                    source.seek(size - 8, 1)
+                else:
+                    self.fail("测试 MP4 缺少尾部索引")
+                source.seek(0)
+                with target.open("wb") as output:
+                    output.write(source.read(moov))
+                    output.write(struct.pack(">I4s", 128 * MIB, b"free"))
+                    output.seek(128 * MIB - 8, 1)
+                    shutil.copyfileobj(source, output)
+            length, fetched = target.stat().st_size, set()
+            self.assertGreater(length, 64 * MIB)
+            self.info = self.objects.head_object.return_value = replace(self.info, size=length)
+            async def stream(blob, start, end, *, read_budget=None, **kwargs):
+                with target.open("rb") as source:
+                    source.seek(start)
+                    for part in range(start // (16 * MIB), (end - 1) // (16 * MIB) + 1):
+                        if read_budget and part not in fetched:
+                            read_budget(str(part), min(16 * MIB, length - part * 16 * MIB))
+                            fetched.add(part)
+                    while start < end:
+                        piece = source.read(min(64 * 1024, end - start))
+                        self.assertTrue(piece)
+                        start += len(piece)
+                        await asyncio.sleep(0)
+                        yield piece
+            self.objects.engine.stream = stream
+            for count in (3, 9):
+                fetched.clear()
+                self.worker._setting.return_value = {"count": count}
+                value = self.request()
+                await self.worker._generate_candidates(self.worker._pending[self.info.blob_uuid])
+                frames = self.worker.candidates_status(self.scope, self.info.key, self.info.etag, "session", value["id"])["frames"]
+                self.assertEqual(len(frames), count)
+                self.assertTrue(all(frame["seconds"] >= 10 for frame in frames))
+                self.worker.cancel_candidates(self.scope, self.info.key, self.info.etag, "session", value["id"])
             self.objects.set_thumbnail.assert_not_awaited()
 
 
