@@ -393,7 +393,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     // 沉浸式预览的头部浮在画布上（不占高度），播放器用 --preview-header-height 给顶部内容留出位置。
     const resize = () => {
       if (modal.classList.contains("is-minimized")) return;
-      setCompactActions(modal.clientWidth <= 580);
+      setCompactActions(header.clientWidth <= 580 || window.matchMedia("(hover: none) and (pointer: coarse)").matches);
       if (!immersive) return;
       const outer = getComputedStyle(backdrop), frame = getComputedStyle(modal);
       let available = backdrop.clientHeight - parseFloat(outer.paddingTop) - parseFloat(outer.paddingBottom);

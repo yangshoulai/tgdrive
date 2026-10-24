@@ -424,6 +424,34 @@ const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select
 const modalStack: HTMLElement[] = [];
 /** 最小化的小窗按最小化的先后排列：快捷键 I 只恢复最近最小化的一个，新小窗排在已有小窗上方。 */
 const minimizedStack: HTMLElement[] = [];
+let scrollLocks = 0;
+let restoreScroll: (() => void) | null = null;
+
+/** 固定背景并记住原位置；触屏不能只依赖 overflow，嵌套弹框共用同一把滚动锁。 */
+export function lockPageScroll() {
+  if (scrollLocks++ === 0) {
+    const body = document.body, x = window.scrollX, y = window.scrollY;
+    const properties = ["position", "top", "left", "width", "paddingRight"] as const;
+    const previous = properties.map(name => [name, body.style[name]] as const);
+    const gutter = window.innerWidth - document.documentElement.clientWidth;
+    const padding = parseFloat(getComputedStyle(body).paddingRight) || 0;
+    body.style.position = "fixed"; body.style.top = `${-y}px`; body.style.left = `${-x}px`; body.style.width = "100%";
+    if (gutter > 0) body.style.paddingRight = `${padding + gutter}px`;
+    body.classList.add("has-modal");
+    restoreScroll = () => {
+      for (const [name, value] of previous) body.style[name] = value;
+      body.classList.remove("has-modal");
+      window.scrollTo({ left: x, top: y, behavior: "instant" });
+    };
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--scrollLocks === 0) { restoreScroll?.(); restoreScroll = null; }
+  };
+}
+
 const focusable = (node: HTMLElement) => Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(item => item.tabIndex >= 0 && item.getClientRects().length > 0);
 const WINDOW_POINTER = "(min-width: 861px) and (hover: hover) and (pointer: fine)";
 const RESIZE_CURSORS = { n: "ns-resize", e: "ew-resize", s: "ns-resize", w: "ew-resize", ne: "nesw-resize", se: "nwse-resize", sw: "nesw-resize", nw: "nwse-resize" } as const;
@@ -485,6 +513,21 @@ export function Modal({ title, description, onClose, children, footer, actions, 
   const [windowPointer, setWindowPointer] = useState(() => window.matchMedia(WINDOW_POINTER).matches);
   const [resizing, setResizing] = useState<ResizeDirection | null>(null);
   const resizeCleanup = useRef<(() => void) | null>(null);
+  useLayoutEffect(() => {
+    const node = backdrop.current;
+    if (!node || minimized) return;
+    const viewport = window.visualViewport;
+    const sync = () => {
+      node.style.setProperty("--modal-viewport-height", `${viewport?.height ?? window.innerHeight}px`);
+      node.style.setProperty("--modal-viewport-top", `${viewport?.offsetTop ?? 0}px`);
+    };
+    sync(); window.addEventListener("resize", sync);
+    viewport?.addEventListener("resize", sync); viewport?.addEventListener("scroll", sync);
+    return () => {
+      window.removeEventListener("resize", sync);
+      viewport?.removeEventListener("resize", sync); viewport?.removeEventListener("scroll", sync);
+    };
+  }, [minimized]);
   useEffect(() => {
     const media = window.matchMedia(WINDOW_POINTER);
     const sync = () => { resizeCleanup.current?.(); setResizing(null); setWindowPointer(media.matches); };
@@ -682,17 +725,17 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     document.addEventListener("keydown", restore);
     return () => document.removeEventListener("keydown", restore);
   }, [windowShortcuts, minimizable, minimized]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (minimized) return;
     const previous = previousFocus.current;
     const node = ref.current;
     if (!node) return;
     modalStack.at(-1)?.setAttribute("inert", "");
     modalStack.push(node);
+    const unlockScroll = lockPageScroll();
     // 表单沿用输入控件优先；预览聚焦对话框，避免播放控件打开时就被选中。
     const preferred = initialFocus === "auto" ? focusable(node).find(item => item.matches("[autofocus], .modal-body input, .modal-body select, .modal-body textarea")) : undefined;
-    (preferred ?? node).focus();
-    document.body.classList.add("has-modal");
+    (preferred ?? node).focus({ preventScroll: true });
     const handleKey = (event: KeyboardEvent) => {
       if (modalStack.at(-1) !== node || event.defaultPrevented || event.isComposing) return;
       if ((event.target as HTMLElement).closest?.(".menu")) return;
@@ -716,9 +759,9 @@ export function Modal({ title, description, onClose, children, footer, actions, 
       document.removeEventListener("keydown", handleKey);
       const wasTop = modalStack.at(-1) === node;
       modalStack.splice(modalStack.indexOf(node), 1);
-      if (!modalStack.length) document.body.classList.remove("has-modal");
-      else modalStack.at(-1)?.removeAttribute("inert");
-      if (wasTop && previous?.isConnected) previous.focus();
+      modalStack.at(-1)?.removeAttribute("inert");
+      unlockScroll();
+      if (wasTop && previous?.isConnected) previous.focus({ preventScroll: true });
     };
   }, [minimized, initialFocus]);
   return createPortal(

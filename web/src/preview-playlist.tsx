@@ -100,10 +100,19 @@ export function PlaylistPanel({ playlist, onSelect, onCollapse, renderThumbnail,
   useEffect(() => {
     const node = list.current;
     if (!node) return;
-    const reveal = () => { if (node.clientHeight) node.querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest" }); };
-    const observer = new ResizeObserver(reveal);
-    observer.observe(node); reveal();
-    return () => observer.disconnect();
+    const reveal = () => {
+      const current = node.querySelector<HTMLElement>('[aria-current="true"]');
+      if (!node.clientHeight || !current) return;
+      // 只按列表内的位置滚动，避免窗口动画、旋转与 scrollIntoView 连带移动背景。
+      const top = current.offsetTop, bottom = top + current.offsetHeight;
+      if (top < node.scrollTop) node.scrollTop = top;
+      else if (bottom > node.scrollTop + node.clientHeight) node.scrollTop = bottom - node.clientHeight;
+    };
+    let frame = 0;
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(reveal); };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(node); schedule();
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [playlist.current.key, playlist.items.length]);
   const label = image ? "图片列表" : "播放列表";
   return <aside id="preview-playlist-panel" className={`preview-playlist-panel${playing ? " is-playing" : ""}`} aria-label={label}

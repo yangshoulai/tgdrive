@@ -32,13 +32,13 @@ export function startLocalCache() {
   listening = true;
   navigator.serviceWorker.addEventListener("message", event => {
     // Service Worker 重启后没有私密授权时会来问；只回答同一页面当前持有的授权。
-    if (event.data?.type === "tessera-cache:context?") event.ports[0]?.postMessage({ access: api.getPrivateAccess() });
+    if (event.data?.type === "tessera-cache:context?") event.ports[0]?.postMessage({ access: api.getPrivateAccess(), expires: api.getPrivateAccessExpires() });
     if (event.data?.type === "tessera-cache:changed") changed();
   });
-  window.addEventListener("tessera:private-access", event => notify("tessera-cache:access", { access: (event as CustomEvent<string>).detail }));
+  window.addEventListener("tessera:private-access", event => notify("tessera-cache:access", { access: (event as CustomEvent<string>).detail, expires: api.getPrivateAccessExpires() }));
   window.addEventListener("tessera:logout", () => notify("tessera-cache:logout"));
   window.addEventListener("tessera:files-mutated", () => notify("tessera-cache:nudge"));
-  notify("tessera-cache:access", { access: api.getPrivateAccess() });
+  notify("tessera-cache:access", { access: api.getPrivateAccess(), expires: api.getPrivateAccessExpires() });
 }
 
 async function worker(timeout = 3000): Promise<ServiceWorker | null> {

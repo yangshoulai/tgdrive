@@ -5,7 +5,7 @@ import { SITE } from "../brand";
 import { DOC_PAGES, type DocPage } from "./docs-content";
 import { ADMIN_DOC_PAGES } from "./docs-admin-content";
 import { ConfigContext, Lead, NAV_EVENT, navigateDocs, useDocsConfig, type DocsConfig } from "./docs-ui";
-import { Brand, Icon } from "../ui";
+import { Brand, Icon, lockPageScroll } from "../ui";
 
 const ALL_DOC_PAGES = [...DOC_PAGES, ...ADMIN_DOC_PAGES];
 
@@ -150,9 +150,9 @@ function DocsSearch({ pages, onClose }: { pages: DocPage[]; onClose: () => void 
   useEffect(() => {
     // 打开时聚焦输入框，关闭后把焦点还给触发搜索的元素。
     const previous = document.activeElement as HTMLElement | null;
-    input.current?.focus();
-    document.body.classList.add("has-modal");
-    return () => { document.body.classList.remove("has-modal"); previous?.focus?.(); };
+    const unlockScroll = lockPageScroll();
+    input.current?.focus({ preventScroll: true });
+    return () => { unlockScroll(); previous?.focus?.({ preventScroll: true }); };
   }, []);
   function trapFocus(event: ReactKeyboardEvent) {
     if (event.key !== "Tab" || !dialog.current) return;

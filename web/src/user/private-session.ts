@@ -45,7 +45,7 @@ export function PrivateSessionProvider({ children, enabled }: { children: ReactN
     const current = state.current;
     current.revision++; current.grant = value; current.until = requestedAt + (value.remaining_seconds ?? value.idle_seconds) * 1000;
     current.human = current.reported = Date.now(); current.playing = false; current.playbackOwner = null;
-    api.setPrivateAccess(value.access); setGrant(value); setIdleSeconds(value.idle_seconds); setRestoring(false); setError("");
+    api.setPrivateAccess(value.access, current.until); setGrant(value); setIdleSeconds(value.idle_seconds); setRestoring(false); setError("");
   }, []);
   const drop = useCallback(() => {
     const current = state.current;
@@ -117,6 +117,7 @@ export function PrivateSessionProvider({ children, enabled }: { children: ReactN
         const result = await api.privateActivity(human > current.reported, isPlaying());
         if (disposed || current.grant?.access !== access || revision !== current.revision) return;
         current.reported = human; current.until = requestedAt + result.remaining_seconds * 1000;
+        api.setPrivateAccess(access, current.until);
       } catch (reason) {
         if (!disposed && current.grant?.access === access && revision === current.revision && reason instanceof api.ApiError && (reason.code === "private_locked" || reason.status === 401)) drop();
       } finally { pending = false; }

@@ -96,15 +96,18 @@ export function postKeepalive(url: string, body: unknown) {
 
 export const PRIVATE_PREFIX = ".tgdrive/private/";
 let privateAccess = "";
+let privateAccessExpires = 0;
 export const isPrivatePath = (path: string) => path.startsWith(PRIVATE_PREFIX);
 export const privatePathLabel = (path: string) => isPrivatePath(path) ? `私密空间${path.length > PRIVATE_PREFIX.length ? ` / ${path.slice(PRIVATE_PREFIX.length).replace(/\/$/, "")}` : ""}` : path ? `我的文件 / ${path.replace(/\/$/, "")}` : "我的文件";
-/** 授权变化同时广播给本机缓存（cache-client.ts）：锁定后 Service Worker 立即丢弃私密密钥。 */
-export const setPrivateAccess = (access: string) => {
-  const changed = access !== privateAccess;
-  privateAccess = access;
+/** 同步服务端已确认的授权截止时间；锁定时本机缓存立即丢弃私密密钥。 */
+export const setPrivateAccess = (access: string, expires = 0) => {
+  const until = access ? expires : 0;
+  const changed = access !== privateAccess || until !== privateAccessExpires;
+  privateAccess = access; privateAccessExpires = until;
   if (changed && typeof window !== "undefined") window.dispatchEvent(new CustomEvent("tessera:private-access", { detail: access }));
 };
 export const getPrivateAccess = () => privateAccess;
+export const getPrivateAccessExpires = () => privateAccessExpires;
 const fileApi = (route: string, path = "") => `/api/user/v1${isPrivatePath(path) ? "/private" : ""}${route}`;
 const mediaAccess = (url: string, path: string) => isPrivatePath(path) ? `${url}&access=${encodeURIComponent(privateAccess)}` : url;
 

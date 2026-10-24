@@ -22,7 +22,7 @@ const bytes = size => { const data = Buffer.alloc(size); for (let index = 0; ind
 function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECRET]: bytes(65536) }) {
   const entries = new Map(), blocks = new Map(), listeners = new Map(), timers = new Set();
   const files = new Map(Object.entries(fixtures).map(([name, data], index) => [name, { data, etag: `version-${index}`, valid: true }]));
-  const state = { clock: 0, authenticated: true, unlocked: true, key: new Uint8Array(32).fill(1), privateKey: new Uint8Array(32).fill(2), keysHook: null, originHook: null, taskHook: null };
+  const state = { clock: 0, authenticated: true, unlocked: true, key: new Uint8Array(32).fill(1), privateKey: new Uint8Array(32).fill(2), keysHook: null, originHook: null, taskHook: null, clients: [] };
   const preferences = { enabled: true, maxMiB: 1024, video: true, private: true, privateMaxMiB: 256 };
   const policy = { enabled: true, private_enabled: true, private_ttl_days: 7 };
   const tasks = new Map();
@@ -127,12 +127,12 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
   }
   const context = vm.createContext({
     testStore: new Proxy(memory, { get: (target, key) => typeof target[key] === "function" ? (...args) => memory[key](...args) : target[key] }),
-    fetch: fetchMock, crypto, Request, Response, Headers, ReadableStream, AbortController, DOMException, URL, URLSearchParams,
+    fetch: fetchMock, crypto, Request, Response, Headers, ReadableStream, AbortController, DOMException, URL, URLSearchParams, MessageChannel,
     navigator: { userAgent: "Chrome" },
     Date: class extends Date { static now() { return Date.now() + state.clock; } },
     setTimeout(callback, delay) { const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay); timers.add(timer); if (delay > 1000) timer.unref(); return timer; },
     clearTimeout(timer) { clearTimeout(timer); timers.delete(timer); },
-    self: { location: { origin: ORIGIN }, addEventListener: (type, callback) => listeners.set(type, callback), clients: { matchAll: async () => [] } },
+    self: { location: { origin: ORIGIN }, addEventListener: (type, callback) => listeners.set(type, callback), clients: { matchAll: async () => state.clients } },
   });
   vm.runInContext(worker, context);
   const h = {
@@ -173,7 +173,7 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
   return h;
 }
 
-test("私密文件逐次验权，删除版本后清理本地条目", async t => {
+test("未同步授权期限时逐次验权，删除版本后清理本地条目", async t => {
   const h = harness(t);
   assert.deepEqual((await h.read(SECRET)).data, h.files.get(SECRET).data);
   assert.equal((await h.read(SECRET)).response.headers.get("X-Tessera-Cache"), "hit");
@@ -183,7 +183,7 @@ test("私密文件逐次验权，删除版本后清理本地条目", async t => 
   assert.equal([...h.entries.values()].filter(entry => entry.tier === "p").length, 0);
 });
 
-test("服务端锁定后，即使页面尚未通知也不能读取私密缓存", async t => {
+test("未同步授权期限时，服务端锁定仍阻止私密缓存读取", async t => {
   const h = harness(t);
   await h.read(SECRET);
   h.state.unlocked = false;
@@ -197,7 +197,7 @@ test("服务端锁定后，即使页面尚未通知也不能读取私密缓存",
   assert.deepEqual(resumed.data, h.files.get(SECRET).data);
 });
 
-test("同一私密上下文的并发读取合并验权，不复用已结束批次", async t => {
+test("未同步授权期限时只合并并发验权，不复用已结束批次", async t => {
   const h = harness(t);
   const first = await Promise.all([h.read(SECRET), h.read(SECRET)]);
   assert.ok(first.every(item => item.response.status === 200));
@@ -206,8 +206,76 @@ test("同一私密上下文的并发读取合并验权，不复用已结束批�
   assert.equal(h.keyRequests().length, 2);
 });
 
+test("有效私密授权期间，多次跳转视频进度和授权续期只获取一次版本密钥", async t => {
+  const h = harness(t, { [SECRET]: bytes(3 * store.BLOCK + 137) });
+  h.files.get(SECRET).type = "video/mp4";
+  await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 300_000 });
+  await h.read(SECRET, { media: true });
+  const origins = h.origins().length;
+  for (const start of [store.BLOCK + 17, 0, 2 * store.BLOCK + 33]) {
+    h.state.clock += 60_000;
+    await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + h.state.clock + 300_000 });
+    const { response, data } = await h.read(SECRET, { media: true, range: `bytes=${start}-${start + 99}` });
+    assert.equal(response.headers.get("X-Tessera-Cache"), "hit");
+    assert.deepEqual(data, h.files.get(SECRET).data.subarray(start, start + 100));
+  }
+  assert.equal(h.keyRequests().length, 1);
+  assert.equal(h.requests.filter(request => new URL(request.url).pathname === "/api/user/v1/private/cache/session").length, 1);
+  assert.equal(h.origins().length, origins);
+});
+
+test("Worker 重启后向页面恢复有效授权，后续读取复用密钥", async t => {
+  const h = harness(t);
+  h.state.clients = [{ postMessage(_message, ports) { ports[0].postMessage({ access: "grant", expires: Date.now() + 300_000 }); ports[0].close(); } }];
+  await h.read(SECRET);
+  assert.equal((await h.read(SECRET)).response.headers.get("X-Tessera-Cache"), "hit");
+  assert.equal(h.keyRequests().length, 1);
+});
+
+test("已复用的私密密钥在锁定、退出、重置、授权替换或到期后失效", async t => {
+  for (const revoke of ["lock", "logout", "reset", "replace", "expire"]) await t.test(revoke, async t => {
+    const h = harness(t);
+    await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 300_000 });
+    await h.read(SECRET);
+    await h.read(SECRET);
+    assert.equal(h.keyRequests().length, 1);
+    h.state.unlocked = false;
+    if (revoke === "lock") await h.message("tessera-cache:access", { access: "" });
+    else if (revoke === "logout") { h.state.authenticated = false; await h.message("tessera-cache:logout"); }
+    else if (revoke === "reset") await h.ask("tessera-cache:reset");
+    else if (revoke === "replace") await h.message("tessera-cache:access", { access: "new-grant", expires: Date.now() + 300_000 });
+    else h.state.clock += 300_001;
+    const { response } = await h.read(SECRET);
+    assert.equal(response.status, revoke === "logout" ? 401 : 423);
+    assert.equal(response.headers.get("X-Tessera-Cache"), null);
+  });
+});
+
+test("文件变更通知使私密版本重新验权，已删除文件不能命中旧密钥", async t => {
+  const h = harness(t);
+  await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 300_000 });
+  await h.read(SECRET);
+  h.files.get(SECRET).valid = false;
+  await h.message("tessera-cache:nudge");
+  assert.equal((await h.read(SECRET)).response.status, 404);
+  assert.equal(h.keyRequests().length, 2);
+  assert.equal(h.entries.size, 0);
+});
+
+test("获取私密密钥失败不留在复用缓存中，恢复后可重新获取", async t => {
+  const h = harness(t);
+  await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 300_000 });
+  h.state.keysHook = async () => { throw new TypeError("network unavailable"); };
+  await h.read(SECRET);
+  h.state.keysHook = null;
+  await h.read(SECRET);
+  assert.equal((await h.read(SECRET)).response.headers.get("X-Tessera-Cache"), "hit");
+  assert.equal(h.keyRequests().length, 2);
+});
+
 test("锁定期间返回的旧私密密钥不能重新恢复缓存上下文", { timeout: 3000 }, async t => {
   const h = harness(t), entered = deferred(), release = deferred();
+  await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 300_000 });
   h.state.keysHook = async (_request, _body, keys) => { entered.resolve(); await release.promise; return new Response(JSON.stringify({ keys })); };
   const reading = h.read(SECRET);
   await entered.promise;
@@ -220,6 +288,7 @@ test("锁定期间返回的旧私密密钥不能重新恢复缓存上下文", { 
 
 test("私密缓存尚未交付时收到锁定通知，立即取消旧读取", { timeout: 3000 }, async t => {
   const h = harness(t), entered = deferred(), release = deferred();
+  await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 300_000 });
   await h.read(SECRET);
   const getEntry = h.memory.getEntry;
   h.memory.getEntry = async key => { const entry = await getEntry(key); entered.resolve(); await release.promise; return entry; };

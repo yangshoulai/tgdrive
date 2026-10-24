@@ -18,7 +18,7 @@ type Policy = { enabled: boolean; private_enabled: boolean; private_ttl_days: nu
 type EntryKeys = { id: string; key: CryptoKey };
 type TierContext = {
   tier: Tier; ns: string; key: Bytes; info: CryptoKey; bucketId: number | null; access: string; signal: AbortSignal;
-  materials: Map<string, Promise<Bytes>>; derived: Map<string, Promise<EntryKeys>>;
+  materials: Map<string, Promise<Bytes | null>>; derived: Map<string, Promise<EntryKeys>>;
 };
 type Route = { tier: Tier; etag: string; version: string; path: string; access: string; bucketId: number | null; thumb: boolean; size?: number; preview?: boolean };
 type Opened = { tier: TierContext; entry: EntryRecord; info: EntryInfo; key: CryptoKey; request: Request; cap: number };
@@ -59,6 +59,8 @@ type Cached = { promise: Promise<TierContext | null>; expires: number; access?: 
 let normal: Cached | null = null;
 let privateTier: Cached | null = null;
 let pageAccess = "";
+let pageAccessExpires = 0;
+let accessTimer: number | undefined;
 let askedAt = 0;
 const revocation = { n: new AbortController(), p: new AbortController() };
 type PrivateBatch = { waiters: Map<string, (value: Bytes | null) => void>; timer: number };
@@ -70,6 +72,23 @@ const tierBudget = (preferences: DeviceSettings, tier: Tier) => (tier === "n" ? 
 async function currentSettings() {
   if (!settings || Date.now() - settings.at > 5000) settings = { value: await readSettings(navigator.userAgent), at: Date.now() };
   return settings.value;
+}
+
+/** 沿用私密空间已有的状态检查与闲置期限，拖动进度时不再重复请求同一密钥。 */
+function rememberAccess(access: string, expires = 0) {
+  pageAccess = access;
+  pageAccessExpires = access && Number.isFinite(expires) ? expires : 0;
+  clearTimeout(accessTimer);
+  accessTimer = undefined;
+  if (pageAccessExpires) accessTimer = setTimeout(() => {
+    rememberAccess(""); dropKeys("p");
+  }, Math.max(0, pageAccessExpires - Date.now())) as unknown as number;
+}
+
+const reusablePrivate = (context: TierContext) => context.access === pageAccess && Date.now() < pageAccessExpires;
+
+function clearPrivateMaterials() {
+  return privateTier?.promise.then(context => { context?.materials.clear(); context?.derived.clear(); });
 }
 
 function dropKeys(tier?: Tier) {
@@ -85,7 +104,7 @@ function dropKeys(tier?: Tier) {
     pendingPrivate.delete(context);
     for (const resolve of batch.waiters.values()) resolve(null);
   }
-  if (!tier || tier === "p") privateTier = null;
+  if (!tier || tier === "p") { void clearPrivateMaterials(); privateTier = null; }
   if (!tier || tier === "n") normal = null;
 }
 
@@ -135,13 +154,15 @@ function normalContext(): Promise<TierContext | null> {
 }
 
 async function privateContext(route: Route): Promise<TierContext | null> {
+  if (pageAccessExpires && Date.now() >= pageAccessExpires) { rememberAccess(""); dropKeys("p"); }
   const signal = revocation.p.signal;
   const [device, preferences, base] = await Promise.all([deviceId(), currentSettings(), normalContext()]);
   if (!preferences.private || !policy?.private_enabled || !base || base.signal.aborted || signal.aborted) return null;
+  if (!pageAccessExpires) await askAccess(signal);
   const access = route.access || pageAccess || await askAccess(signal);
   if (!access || signal.aborted) return null;
-  // 私密层只保留 60 秒：撤销授权后很快就拿不到密钥；每个条目的密钥另有服务端逐次校验。
-  if (privateTier && privateTier.access === access && Date.now() < privateTier.expires) return privateTier.promise;
+  // 页面持续同步有效授权时复用上下文；旧页面没有截止时间时仍沿用逐次验权。
+  if (privateTier && privateTier.access === access && (Date.now() < privateTier.expires || access === pageAccess && Date.now() < pageAccessExpires)) return privateTier.promise;
   const pending: Promise<TierContext | null> = (async () => {
     const response = await post("/api/user/v1/private/cache/session", { device }, access);
     if (!response.ok) return null;
@@ -152,17 +173,17 @@ async function privateContext(route: Route): Promise<TierContext | null> {
   return pending;
 }
 
-/** 普通层在本地从层级密钥派生；私密层逐个向服务端申请，同一时刻的请求合并成一批。 */
+/** 私密条目首次读取向服务端申请；同一有效授权期间复用，未同步授权期限时仍逐次校验。 */
 function material(context: TierContext, etag: string): Promise<Bytes | null> {
   if (context.signal.aborted) return Promise.resolve(null);
-  // 私密密钥只合并当前并发批次，不能复用上一次读取的授权结果。
-  if (context.tier === "p") return requestPrivate(context, etag);
+  if (context.tier === "p" && !reusablePrivate(context)) return requestPrivate(context, etag);
   let value = context.materials.get(etag);
   if (!value) {
     if (context.materials.size > 4000) context.materials.clear();
-    value = hkdf(context.key, "entry|" + etag);
+    value = context.tier === "p" ? requestPrivate(context, etag) : hkdf(context.key, "entry|" + etag);
     context.materials.set(etag, value);
-    value.catch(() => context.materials.delete(etag));
+    const forget = () => { if (context.materials.get(etag) === value) context.materials.delete(etag); };
+    value.then(result => { if (!result) forget(); }, forget);
   }
   return value;
 }
@@ -209,7 +230,7 @@ async function flushPrivate(context: TierContext, batch: PrivateBatch) {
 
 function entryKeys(context: TierContext, base: Bytes, version: string) {
   const derive = async () => ({ id: b64u(await hmac(base, "id|" + version)).slice(0, 32), key: await aesKey(await hkdf(base, "key|" + version)) });
-  if (context.tier === "p") return derive();
+  if (context.tier === "p" && !reusablePrivate(context)) return derive();
   let value = context.derived.get(version);
   if (!value) {
     if (context.derived.size > 4000) context.derived.clear();
@@ -225,14 +246,14 @@ async function askAccess(signal: AbortSignal): Promise<string> {
   if (Date.now() - askedAt < 3000) return "";
   askedAt = Date.now();
   for (const client of await sw.clients.matchAll({ type: "window" })) {
-    const access = await new Promise<string>(resolve => {
+    const grant = await new Promise<{ access: string; expires?: number }>(resolve => {
       const channel = new MessageChannel();
-      const timer = setTimeout(() => resolve(""), 500);
-      channel.port1.onmessage = event => { clearTimeout(timer); resolve(typeof event.data?.access === "string" ? event.data.access : ""); };
+      const timer = setTimeout(() => { channel.port1.close(); resolve({ access: "" }); }, 500);
+      channel.port1.onmessage = event => { clearTimeout(timer); channel.port1.close(); resolve({ access: typeof event.data?.access === "string" ? event.data.access : "", expires: event.data?.expires }); };
       client.postMessage({ type: "tessera-cache:context?" }, [channel.port2]);
     });
     if (signal.aborted) return "";
-    if (access) { pageAccess = access; return access; }
+    if (grant.access && (!grant.expires || grant.expires > Date.now())) { rememberAccess(grant.access, grant.expires); return grant.access; }
   }
   return "";
 }
@@ -921,15 +942,21 @@ async function reconcile() {
     await deleteEntries(privateEntries.map(entry => entry.key));
     return;
   }
-  const secret = privateTier && Date.now() < privateTier.expires ? await privateTier.promise : null;
+  const secret = privateTier && (Date.now() < privateTier.expires || privateTier.access === pageAccess && Date.now() < pageAccessExpires) ? await privateTier.promise : null;
   if (!secret || secret.signal.aborted) return;
   const privateEtags = await etagsOf(secret, await listEntries(context.ns, "p"));
   const list = [...privateEtags.keys()];
   for (let index = 0; index < list.length; index += 500) {
     const batch = list.slice(index, index + 500);
     const response = await post("/api/user/v1/private/cache/keys", { device: await deviceId(), etags: batch }, secret.access);
-    if (!response.ok) return;
-    const keys = (await response.json() as { keys: Record<string, unknown> }).keys;
+    if (!response.ok) { dropKeys("p"); return; }
+    const keys = (await response.json() as { keys: Record<string, { key: string } | null> }).keys;
+    for (const etag of batch) {
+      const cached = await secret.materials.get(etag);
+      // 其他设备重置缓存后，旧纪元的密钥不能继续复用。
+      if (cached && keys[etag] && b64u(cached) !== keys[etag]!.key) { dropKeys("p"); return; }
+      if (!keys[etag]) { secret.materials.delete(etag); secret.derived.clear(); }
+    }
     await deleteEntries(batch.filter(etag => !keys[etag]).flatMap(etag => privateEtags.get(etag) ?? []));
   }
 }
@@ -1032,23 +1059,25 @@ async function clear(scope: string, key?: string) {
 }
 
 sw.addEventListener("message", event => {
-  const data = event.data as { type?: string; access?: string; scope?: string; key?: string; id?: string; url?: string; urls?: string[];
+  const data = event.data as { type?: string; access?: string; expires?: number; scope?: string; key?: string; id?: string; url?: string; urls?: string[];
     group?: string; paths?: string[]; csrf?: string; prefix?: string; cursor?: string | null } | null;
   const port = event.ports[0];
   const owner = event.source && "id" in event.source ? event.source.id : "";
   const reply = (work: Promise<unknown>) => event.waitUntil(work.then(value => port?.postMessage({ ok: true, value }), error => port?.postMessage({ ok: false, error: String(error).replace(/^Error: /, "") })));
   switch (data?.type) {
     case "tessera-cache:access":
-      if (!data.access || pageAccess !== data.access) dropKeys("p");
-      pageAccess = typeof data.access === "string" ? data.access : "";
+      if (!data.access || pageAccess !== data.access || !data.expires || data.expires <= Date.now()) dropKeys("p");
+      rememberAccess(typeof data.access === "string" ? data.access : "", data.expires);
       askedAt = 0;
       break;
-    case "tessera-cache:logout": pageAccess = ""; dropKeys(); break;
+    case "tessera-cache:logout": rememberAccess(""); dropKeys(); break;
     case "tessera-cache:settings":
       settings = null; stopManual(); dropKeys("p");
       for (const key of backgrounds.keys()) void finishBackground(key);
       reply(Promise.resolve(null)); break;
-    case "tessera-cache:nudge": if (Date.now() - lastReconcile > 5000) scheduleReconcile(3000); break;
+    case "tessera-cache:nudge":
+      event.waitUntil(Promise.resolve(clearPrivateMaterials()));
+      if (Date.now() - lastReconcile > 5000) scheduleReconcile(3000); break;
     case "tessera-cache:stats": reply(stats()); break;
     case "tessera-cache:items": reply(listItems((data as { filter?: ItemQuery }).filter ?? {})); break;
     case "tessera-cache:remove-items": reply(removeItems((data as { filter?: ItemQuery }).filter ?? {})); break;
