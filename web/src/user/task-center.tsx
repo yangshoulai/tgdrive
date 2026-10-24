@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { Icon, Modal, shortcutLabel, type IconName } from "../ui";
+import { Button, Icon, Modal, shortcutLabel, type IconName } from "../ui";
 import { type AssistantDockStatus } from "./assistant";
 import { CacheTasks, useCacheQueue } from "./cache";
 import { useDownloadActivity } from "./download-tray";
@@ -113,7 +113,8 @@ export function TaskCenter({ enabled, uploads, activeWindow, onWindowChange, dow
     </div>, document.body)}
     {activeWindow === "upload" && <UploadTasks queue={uploads} onClose={close} />}
     {activeWindow === "download" && <Modal title="下载任务" icon="download" size="xl" className="task-window task-download-window" onClose={close} initialFocus="dialog"
-      description="下载由服务器执行。关闭窗口后任务继续，已保存的文件不受任务删除影响。">
+      description="由服务器下载，关闭网页后任务继续。"
+      footer={<><span className="task-window-footnote"><Icon name="server" size={14} /><span>删除任务保留已保存的文件</span></span><Button onClick={close}>隐藏窗口</Button></>}>
       <DownloadsView embedded onChanged={onChanged} onOpenFolder={(prefix, privateSpace) => { close(); onOpenFolder(prefix, privateSpace); }} />
     </Modal>}
     {activeWindow === "cache" && <CacheTasks onClose={close} onSettings={() => { close(); onCacheSettings(); }} />}

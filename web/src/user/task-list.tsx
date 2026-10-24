@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Checkbox, Pagination, SearchInput, Segmented } from "../ui";
+import { Checkbox, IconButton, Pagination, SearchInput, Segmented } from "../ui";
 
 export type TaskFilter = "" | "active" | "paused" | "done" | "error";
 const PAGE_SIZE = 50;
@@ -35,16 +35,27 @@ export function useTaskList<T extends { id: string }>(items: T[], describe: (ite
 }
 
 type ListState = ReturnType<typeof useTaskList>;
+
+export function TaskSummary({ active, done, failed, scope, loading = false }: { active: number; done: number; failed: number; scope?: string; loading?: boolean }) {
+  return <div className="task-summary" aria-label={scope ? `${scope}概览` : "任务概览"}>
+    {scope && <span className="task-summary-scope">{scope}</span>}
+    <span className={active ? "is-active" : ""}><strong>{loading ? "—" : active}</strong><span>进行中</span></span>
+    <span><strong>{loading ? "—" : done}</strong><span>已完成</span></span>
+    <span className={failed ? "is-failed" : ""}><strong>{loading ? "—" : failed}</strong><span>失败</span></span>
+  </div>;
+}
+
 export function TaskListControls({ list, actions, menu, noun, pausedLabel = "已暂停" }: { list: ListState; actions: ReactNode; menu?: ReactNode; noun: string; pausedLabel?: string }) {
   return <div className="task-list-controls">
     <SearchInput value={list.search} onChange={list.setSearch} placeholder={`搜索${noun}名称或路径`} label={`搜索${noun}`} />
     <div className="task-list-filters"><Segmented label={`${noun}状态`} showLabels value={list.filter} onChange={list.setFilter} options={[
       { value: "", label: "全部" }, { value: "active", label: "进行中" }, { value: "paused", label: pausedLabel }, { value: "done", label: "已完成" }, { value: "error", label: "失败" },
     ]} />{menu}</div>
-    <div className="task-list-selection" role="toolbar" aria-label={`${noun}批量操作`}>
+    <div className={`task-list-selection${list.chosen.length ? " is-selecting" : ""}`} role="toolbar" aria-label={`${noun}批量操作`}>
       <Checkbox checked={list.allSelected} indeterminate={list.chosen.length > 0 && !list.allSelected} label={`选择本页全部${noun}`} onChange={list.selectPage} />
       <span>{list.chosen.length ? `已选 ${list.chosen.length} 项` : `${list.filtered.length} 个任务`}</span>
-      <div className="task-list-actions">{actions}</div>
+      {list.chosen.length > 0 && <IconButton icon="x" size="sm" label="取消选择" onClick={list.clearSelection} />}
+      {list.chosen.length > 0 && <div className="task-list-actions">{actions}</div>}
     </div>
   </div>;
 }

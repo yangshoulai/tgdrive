@@ -7,6 +7,7 @@ import { FileTile, FileVisual, getFileKind } from "../files";
 import { DestinationPicker } from "./folders";
 import { PrivateUnlockForm } from "./private-access";
 import { usePrivateAccess } from "./private-session";
+import { TaskSummary } from "./task-list";
 
 const LABEL: Record<api.DownloadStatus, string> = { queued: "排队中", running: "下载中", interrupted: "等待恢复", stopped: "已停止", completed: "已完成", failed: "失败" };
 const TONE: Record<api.DownloadStatus, Tone> = { queued: "neutral", running: "accent", interrupted: "warning", stopped: "neutral", completed: "success", failed: "danger" };
@@ -153,9 +154,12 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated, embedded = f
   }
   const completed = () => { setNewTask(false); setEdit(null); void pagination.reload(); onChanged(); onCreated?.(); window.dispatchEvent(new Event("tessera:downloads-changed")); };
   const actions = <><Button icon="refresh" onClick={() => void pagination.reload()} disabled={pagination.loading}>刷新</Button><Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button></>;
+  const searchField = <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索名称、路径或来源" label="搜索下载任务" />;
   return <>
-    {embedded ? <div className="task-download-actions">{actions}</div> : <PageHeader title="下载任务" description="交给服务器下载，关闭页面后继续保存到你的文件空间。" actions={actions} />}
-    <div className="toolbar download-search"><SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索文件名、保存路径或来源域名" label="搜索下载任务" /></div>
+    {embedded ? <>
+      <TaskSummary scope="本页" active={page?.tasks.filter(active).length ?? 0} done={page?.tasks.filter(task => task.status === "completed").length ?? 0} failed={page?.tasks.filter(task => task.status === "failed").length ?? 0} loading={!page} />
+      <div className="task-download-tools">{searchField}<IconButton icon="refresh" label="刷新任务" disabled={pagination.loading} onClick={() => void pagination.reload()} /><Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button></div>
+    </> : <><PageHeader title="下载任务" description="交给服务器下载，关闭页面后继续保存到你的文件空间。" actions={actions} /><div className="toolbar download-search">{searchField}</div></>}
     <div className="download-controls">
       {chosen.length > 0 && <div className="toolbar selection-bar download-selection" role="toolbar" aria-label="批量操作">
         <span className="selection-count"><span className="download-selection-prefix">已选择 </span>{chosen.length} 项</span>
@@ -170,8 +174,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated, embedded = f
         { value: "", label: "全部" }, { value: "active", label: "进行中" }, { value: "stopped", label: "已停止" }, { value: "completed", label: "已完成" }, { value: "failed", label: "失败" },
       ]} /><span className="download-toolbar-meta">
         {/* 进行中与失败的数量来自当前页（新任务排在最前），方便一眼看出需要处理的任务。 */}
-        {page && !filter && page.tasks.some(active) && <span className="download-summary is-active">进行中 {page.tasks.filter(active).length}</span>}
-        {page && !filter && page.tasks.some(task => task.status === "failed") && <span className="download-summary is-failed">失败 {page.tasks.filter(task => task.status === "failed").length}</span>}
+        {!embedded && page && !filter && page.tasks.some(active) && <span className="download-summary is-active">进行中 {page.tasks.filter(active).length}</span>}
+        {!embedded && page && !filter && page.tasks.some(task => task.status === "failed") && <span className="download-summary is-failed">失败 {page.tasks.filter(task => task.status === "failed").length}</span>}
         <span className="muted">{page ? `${page.total} 个任务` : "正在读取任务"}</span>
         <Menu label="清理任务" icon="trash" items={[
           { label: "清除已完成的任务", icon: "checkCircle", onSelect: () => setClearing("completed") },
@@ -186,7 +190,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated, embedded = f
             : <div className="data-table download-list" role="table" aria-label="下载任务">
               <div className="data-row data-head" role="row">
                 <span className="cell-check" role="columnheader"><Checkbox checked={allSelected} indeterminate={chosen.length > 0 && !allSelected} label="选择本页全部任务" onChange={checked => setSelected(checked ? new Set(page.tasks.map(task => task.id)) : new Set())} /></span>
-                <span role="columnheader">文件</span>
+                <span role="columnheader">{embedded ? `${page.total} 个任务` : "文件"}</span>
                 <span role="columnheader">进度</span>
                 <span role="columnheader">保存到</span>
                 <span role="columnheader">状态</span>
@@ -237,9 +241,9 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated, embedded = f
     </div>
     {page && (pagination.hasPrevious || pagination.hasNext || page.total > DOWNLOAD_PAGE_SIZES[0]) && <footer className="list-footer download-footer">
       <Pagination {...pagination} total={page.total} pageSize={pageSize} changePageSize={changePageSize} sizes={sizes} /></footer>}
-    <details className="download-help"><summary><Icon name="info" size={15} /><span>下载说明</span><Icon name="chevronDown" size={14} /></summary>
+    {!embedded && <details className="download-help"><summary><Icon name="info" size={15} /><span>下载说明</span><Icon name="chevronDown" size={14} /></summary>
       <p>支持文件直链{page?.capabilities.hls ? "、M3U8 点播" : ""}{page?.capabilities.x ? "、X 帖子" : ""}{page?.capabilities.youtube ? "、YouTube 视频和 Shorts" : ""}。平台功能由管理员启用。网络中断会自动重试；文件直链满足条件时可续传，平台和 M3U8 任务手动停止后从头下载。删除任务保留已保存的文件。</p>
-    </details>
+    </details>}
     {(newTask || edit) && <DownloadDialog task={edit} onClose={() => { setNewTask(false); setEdit(null); }} onComplete={completed} />}
     {imported && !newTask && !edit && <DownloadDialog task={null} initial={imported} onClose={() => setImported(null)} onComplete={() => { setImported(null); completed(); }} />}
     {clearing && <ConfirmDialog title={clearing === "completed" ? "清除已完成的任务" : "清除失败的任务"}

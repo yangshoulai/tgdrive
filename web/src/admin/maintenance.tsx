@@ -132,6 +132,13 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
   }, [active, load]);
   const labels: Record<string, string> = { queued: "待处理", running: "处理中", waiting_client: "等待浏览器", waiting_data: "等待数据", done: "已完成", failed: "失败", cancelled: "已取消" };
   const [saving, setSaving] = useState(false);
+  const [savingCandidates, setSavingCandidates] = useState(false);
+  async function changeCandidates(count: number) {
+    setSavingCandidates(true);
+    try { const value = await api.setThumbnailCandidateCount(count); setStatus(current => current && { ...current, ...value }); toast.success("视频候选截图数量已保存"); }
+    catch (reason) { toast.error(api.errorMessage(reason, "保存失败，请稍后重试")); }
+    finally { setSavingCandidates(false); }
+  }
   async function changeBackfill(value: string) {
     setSaving(true);
     try { const backfill = await api.setThumbnailBackfill(Number(value)); setStatus(current => current && { ...current, backfill }); toast.success("自动补图设置已保存"); }
@@ -150,6 +157,11 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
         ["今日自动补图", status.backfill.daily_bytes === 0 ? "已关闭" : `${formatBytes(status.backfill.used_bytes)} / ${status.backfill.daily_bytes === null ? "不限制" : formatBytes(status.backfill.daily_bytes)}`],
         ...(status.inline.count ? [["数据库中待转存", `${status.inline.count} 张（${formatBytes(status.inline.bytes)}）${status.inline.skipped_quota ? `，${status.inline.skipped_quota} 张因空间已满暂缓` : ""}`] as [string, string]] : [])]} />
       <div className="thumbnail-backfill">
+        <Field label="手动生成视频候选截图" hint="用户在文件菜单中生成或重新生成视频缩略图时，先准备候选画面供选择。默认 3 张，最多 9 张；画面相同、视频过短或达到处理上限时，实际数量可能较少。">
+          <select className="input" aria-label="视频候选截图数量" value={status.candidate_count ?? 3} disabled={savingCandidates} onChange={event => void changeCandidates(Number(event.target.value))}>
+            {Array.from({ length: 9 }, (_, index) => index + 1).map(count => <option key={count} value={count}>{count} 张</option>)}
+          </select>
+        </Field>
         <Field label="自动补图每日读取上限" hint={`上传或修改超过 ${Math.round(status.backfill.age_seconds / 60)} 分钟仍没有缩略图的图片、视频、音频，由后台从存储读取生成（单个文件图片 60、视频 64、音频 32 MiB 以内），保证最终都有缩略图。关闭后只能等实际预览或手动生成。`}>
           <select className="input" value={presets.includes(dailyMib) ? String(dailyMib) : "custom"} disabled={saving} onChange={event => void changeBackfill(event.target.value)}>
             {!presets.includes(dailyMib) && <option value="custom" disabled>{formatBytes(dailyMib * 1048576)}</option>}

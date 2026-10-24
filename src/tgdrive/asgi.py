@@ -269,7 +269,8 @@ class TgDriveASGI(StaticFiles):
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
-                           "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/content", "/preview-assets", "/preview-list",
+                           "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate",
+                           "/thumbnail/candidates", "/thumbnail/candidates/status", "/thumbnail/candidates/cancel", "/thumbnail/candidates/select", "/thumbnail/candidate", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
                            "/downloads", "/downloads/clear", "/downloads/batch"}
                 if route not in controls:
@@ -299,6 +300,11 @@ class TgDriveASGI(StaticFiles):
                                                              bucket_id=bucket_id, etag=query.get("etag", [""])[0])
                 # 私密空间的缩略图同样按版本地址长期缓存：只有授权通过才会返回，删除或覆盖后地址随内容版本变化。
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
+                return
+            if path == "/api/user/v1/thumbnail/candidate" and method == "GET":
+                data = file_user.thumbnail_candidate_image(token, query.get("path", [""])[0], query.get("etag", [""])[0],
+                                                           query.get("id", [""])[0], int(query.get("index", ["-1"])[0]))
+                await self._send_raw(tracked_send, 200, {"Content-Type": "image/jpeg", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}, data)
                 return
             if path == "/api/user/v1/avatar" and method == "GET":
                 data, mime, etag = self.user.avatar(token)
@@ -534,7 +540,7 @@ class TgDriveASGI(StaticFiles):
         elif action == "bot.check" and ok:
             detail = {"status": (result or {}).get("status")}
         elif action == "maintenance.thumbnails":
-            detail = {"daily_mib": payload.get("daily_mib")}
+            detail = {key: payload[key] for key in ("daily_mib", "candidate_count") if key in payload}
         elif action == "resources.update":
             detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency", "upload_concurrency", "upload_kib", "bot_interval_ms", "web_part_concurrency", "web_file_concurrency") if key in payload}
             if "proxy" in payload:
@@ -858,6 +864,8 @@ class TgDriveASGI(StaticFiles):
             if method == "GET" and route == "/maintenance/thumbnails":
                 return 200, self.thumbnails.status(), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/maintenance/thumbnails":
+                if "candidate_count" in payload:
+                    return 200, self.thumbnails.configure_candidates(payload["candidate_count"]), {"Cache-Control": "no-store"}
                 return 200, self.thumbnails.configure_backfill(payload.get("daily_mib")), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/maintenance/cleanup":
                 return 200, await self.admin.run_cleanup(token, csrf), {}
@@ -1084,6 +1092,16 @@ class TgDriveASGI(StaticFiles):
                 return 204, None, {}
             if method == "POST" and route == "/thumbnail/generate":
                 return 202, user.thumbnail_generate(token, csrf, payload["path"], str(payload["etag"])), {}
+            if method == "POST" and route == "/thumbnail/candidates":
+                return 202, user.thumbnail_candidates(token, csrf, payload["path"], str(payload["etag"])), {"Cache-Control": "no-store"}
+            if method == "POST" and route == "/thumbnail/candidates/status":
+                return 200, user.thumbnail_candidates(token, csrf, payload["path"], str(payload["etag"]), str(payload["id"])), {"Cache-Control": "no-store"}
+            if method == "POST" and route == "/thumbnail/candidates/cancel":
+                user.thumbnail_candidates(token, csrf, payload["path"], str(payload["etag"]), str(payload["id"]), cancel=True)
+                return 204, None, {}
+            if method == "POST" and route == "/thumbnail/candidates/select":
+                await user.thumbnail_select(token, csrf, payload["path"], str(payload["etag"]), str(payload["id"]), payload["index"])
+                return 204, None, {}
             if method == "POST" and route == "/files/instant":
                 public = payload.get("public")
                 return 200, user.instant_put(token, csrf, payload["path"], payload["size"], payload["fingerprint"],

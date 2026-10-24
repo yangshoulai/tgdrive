@@ -14,13 +14,14 @@ import tempfile
 import time
 from collections import OrderedDict
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .errors import NotFoundError, NotReadyError, QuotaExceededError
 from .filekinds import kind_clause, kind_of
 from .objects import PRIVATE_PREFIX, ObjectInfo, Scope
 from .thumbnail_cache import ThumbnailCache, ThumbnailCacheMiss
+from . import video_candidates
 
 
 log = logging.getLogger("tgdrive.thumbnails")
@@ -52,6 +53,10 @@ ENVIRONMENT_ERRORS = (b"pthread_create", b"Cannot allocate memory", b"Resource t
                       b"error while loading shared libraries", b"failed to map segment")
 # 一次性清理：修复前运行环境问题会被误记为「无法生成」，升级后清掉这些记录让补图重新处理。
 REPAIR_KEY = "thumbnails.repair"
+CHOICE_KEY = "thumbnails.candidates"
+CHOICE_TTL = 600
+CHOICE_CAPACITY = 16
+CHOICE_BYTES = 32 * MIB
 
 
 def _resident(pid):
@@ -134,6 +139,7 @@ class _RangeInput:
         self.server = None
         self.tasks = set()
         self.slots = asyncio.Semaphore(2)
+        self.duration = None
 
     def _charge(self, ref, size):
         if ref in self._fetched:
@@ -247,6 +253,7 @@ class _Job:
     revision: int = 0
     misses: int = 0
     backfill: bool = False
+    choice: str | None = None
 
 
 @dataclass
@@ -254,6 +261,24 @@ class _Lease:
     info: ObjectInfo
     token: str
     until: float
+
+
+@dataclass
+class _Candidate:
+    position: float
+    images: dict[str, bytes]
+
+
+@dataclass
+class _Choice:
+    id: str
+    owner: str
+    info: ObjectInfo
+    count: int
+    until: float
+    state: str = "queued"
+    detail: str = "等待后台截取候选画面"
+    frames: list[_Candidate] = field(default_factory=list)
 
 
 class ThumbnailService:
@@ -270,6 +295,7 @@ class ThumbnailService:
         self._runner = self._loop = self._active = self._task = None
         self._wake = asyncio.Event()
         self._pending, self._leases, self._history = OrderedDict(), {}, OrderedDict()
+        self._choices: dict[str, _Choice] = {}
         self._remote_bytes = 0
         # 补图扫描的键集游标、下一次扫描时间与暂时失败后推迟重试的 Blob（进程内，重启后重新尝试）。
         self._backfill_cursor, self._backfill_at, self._backfill_skip, self._backfill_failures = (0, ""), 0.0, {}, {}
@@ -301,6 +327,7 @@ class ThumbnailService:
             self._runner = None
         self._pending.clear()
         self._leases.clear()
+        self._choices.clear()
         self.cache.close()
 
     @staticmethod
@@ -336,6 +363,8 @@ class ThumbnailService:
             return False
         previous = self._pending.get(blob)
         if previous is not None:
+            if job.choice:
+                previous.info, previous.choice = job.info, job.choice
             if job.remote and not job.backfill:
                 previous.force, previous.remote, previous.backfill, previous.ready_at = True, True, False, 0
                 if self._active is not previous:
@@ -354,6 +383,7 @@ class ThumbnailService:
         return True
 
     def _expire_clients(self):
+        self._expire_choices()
         now = time.monotonic()
         for blob, lease in list(self._leases.items()):
             if lease.until <= now:
@@ -370,6 +400,16 @@ class ThumbnailService:
             self._wake.set()
 
     def _changed(self, bucket):
+        for choice in list(self._choices.values()):
+            if choice.info.bucket_id == bucket:
+                try:
+                    scope = self._scope(choice.info, None)
+                    if self.objects.head_object(scope, choice.info.key).etag != choice.info.etag:
+                        self._discard_choice(choice)
+                except (NotFoundError, PermissionError):
+                    self._discard_choice(choice)
+                except NotReadyError:
+                    pass
         for blob, job in list(self._pending.items()):
             if job.info.bucket_id != bucket:
                 continue
@@ -456,6 +496,184 @@ class ThumbnailService:
             raise ValueError("服务器未安装 FFmpeg，无法执行手动生成")
         self._enqueue(_Job(info, force=True, remote=True, detail="用户请求生成"))
         return {"accepted": True}
+
+    # ---------- 用户手动选择视频画面 ----------
+
+    def candidate_count(self):
+        config = self._setting(CHOICE_KEY)
+        count = config.get("count", video_candidates.DEFAULT_COUNT) if isinstance(config, dict) else None
+        return count if type(count) is int and 1 <= count <= video_candidates.MAX_COUNT else video_candidates.DEFAULT_COUNT
+
+    def configure_candidates(self, count):
+        if type(count) is not int or not 1 <= count <= video_candidates.MAX_COUNT:
+            raise ValueError("视频候选截图数量必须是 1 到 9 之间的整数")
+        self._save_setting(CHOICE_KEY, {"count": count})
+        return {"candidate_count": count}
+
+    def _discard_choice(self, choice):
+        self._choices.pop(choice.id, None)
+        blob = choice.info.blob_uuid
+        lease = self._leases.get(blob)
+        if lease is not None and lease.token == choice.id:
+            self._leases.pop(blob, None)
+        job = self._pending.get(blob)
+        if job is not None and job.choice == choice.id:
+            self._pending.pop(blob, None)
+            if self._active is job and self._task is not None:
+                self._task.cancel()
+        self._wake.set()
+
+    def _expire_choices(self):
+        for choice in list(self._choices.values()):
+            if choice.until <= time.monotonic() and choice.state != "saving":
+                self._discard_choice(choice)
+
+    def request_candidates(self, scope, key, etag, owner):
+        owner = hashlib.sha256(owner.encode()).hexdigest()
+        self._expire_clients()
+        self.objects._check_scope(scope, key, write=True)
+        info = self.objects.head_object(scope, key)
+        if info.etag != etag:
+            raise ValueError("文件内容已变化，请刷新后重试")
+        if not self._eligible(info) or source_kind(info) != "video":
+            raise ValueError("只有视频文件支持选择候选画面")
+        if not self.resources.ffmpeg:
+            raise ValueError("服务器未安装 FFmpeg，无法截取候选画面")
+        for choice in list(self._choices.values()):
+            if choice.owner == owner and choice.info == info:
+                if choice.state == "saving":
+                    raise ValueError("正在保存所选画面，请稍后刷新列表")
+                if choice.state == "failed":
+                    self._discard_choice(choice)
+                    break
+                return self._choice_json(choice)
+        blob = info.blob_uuid
+        if blob in self._leases or self._active is not None and self._active.info.blob_uuid == blob:
+            raise ValueError("这个视频正在生成缩略图，请稍后重试")
+        previous = self._pending.get(blob)
+        if previous is not None and previous.choice:
+            raise ValueError("这个视频正在准备候选画面，请稍后重试")
+        if len(self._choices) >= CHOICE_CAPACITY:
+            raise ValueError("候选画面任务较多，请关闭其他选择窗口后重试")
+        choice = _Choice(secrets.token_urlsafe(24), owner, info, self.candidate_count(), time.monotonic() + CHOICE_TTL)
+        self._enqueue(_Job(info, force=True, remote=True, detail="用户请求候选画面", choice=choice.id))
+        self._choices[choice.id] = choice
+        return self._choice_json(choice)
+
+    @staticmethod
+    def _choice_json(choice):
+        return {"id": choice.id, "state": choice.state, "detail": choice.detail, "count": choice.count,
+                "expires_in": max(0, int(choice.until - time.monotonic())),
+                "frames": [{"index": index, "seconds": frame.position} for index, frame in enumerate(choice.frames)]}
+
+    def _choice(self, scope, key, etag, owner, request_id):
+        owner = hashlib.sha256(owner.encode()).hexdigest()
+        self._expire_choices()
+        choice = self._choices.get(request_id)
+        if choice is None or choice.owner != owner or (choice.info.bucket_id, choice.info.key, choice.info.etag) != (scope.bucket_id, key, etag):
+            raise ValueError("候选画面已失效，请重新生成")
+        self.objects._check_scope(scope, key, write=True)
+        current = self.objects.head_object(scope, key)
+        if (current.etag, current.blob_uuid) != (etag, choice.info.blob_uuid):
+            self._discard_choice(choice)
+            raise ValueError("文件已删除或覆盖，请刷新后重试")
+        return choice
+
+    def candidates_status(self, scope, key, etag, owner, request_id):
+        return self._choice_json(self._choice(scope, key, etag, owner, request_id))
+
+    def candidate_image(self, scope, key, etag, owner, request_id, index):
+        choice = self._choice(scope, key, etag, owner, request_id)
+        if type(index) is not int or not 0 <= index < len(choice.frames):
+            raise ValueError("候选画面不存在")
+        images = choice.frames[index].images
+        variant = "grid" if "grid" in images else "poster" if "poster" in images else "thumb"
+        return self.objects.engine.open_thumbnail(choice.info.blob_uuid, f"choice:{choice.id}:{index}:{variant}", images[variant])
+
+    def cancel_candidates(self, scope, key, etag, owner, request_id):
+        choice = self._choice(scope, key, etag, owner, request_id)
+        if choice.state == "saving":
+            raise ValueError("正在保存所选画面，请稍候")
+        self._discard_choice(choice)
+
+    async def select_candidate(self, scope, key, etag, owner, request_id, index):
+        choice = self._choice(scope, key, etag, owner, request_id)
+        if choice.state != "ready" or type(index) is not int or not 0 <= index < len(choice.frames):
+            raise ValueError("请等待候选画面生成完成后选择")
+        self.check_claim(choice.info, choice.id)
+        choice.state, choice.until = "saving", time.monotonic() + TIMEOUT
+        self._leases[choice.info.blob_uuid].until = choice.until
+        def authorize():
+            self._choice(scope, key, etag, owner, request_id)
+            self.check_claim(choice.info, choice.id)
+            self._scope(choice.info, None).authorize()
+        guarded = replace(scope, authorize=authorize)
+        saved = []
+        try:
+            async with asyncio.timeout(TIMEOUT):
+                for variant, sealed in choice.frames[index].images.items():
+                    authorize()
+                    data = self.objects.engine.open_thumbnail(choice.info.blob_uuid, f"choice:{choice.id}:{index}:{variant}", sealed)
+                    try:
+                        await self.objects.set_thumbnail(guarded, key, data, variant)
+                        saved.append(variant)
+                    except QuotaExceededError:
+                        if not saved:
+                            raise ValueError("存储空间已满，无法保存所选画面") from None
+                        break
+                authorize()
+                self.objects.finish_thumbnail_set(guarded, key, saved)
+        finally:
+            self._discard_choice(choice)
+
+    async def _generate_candidates(self, job):
+        choice = self._choices.get(job.choice)
+        if choice is None:
+            raise ThumbnailError("候选画面请求已取消")
+        scope = self._scope(job.info, None)
+        choice.state, choice.detail = "running", "正在从视频前段寻找清晰且不同的画面"
+        self.cache.prepare(job.info.blob_uuid, job.info.key, job.info.content_type)
+        samples = []
+        partial = False
+        try:
+            async with asyncio.timeout(TIMEOUT):
+                async with _RangeInput(self.objects.engine, job.info, scope.authorize, READ_LIMITS["video"]) as source:
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="tessera-candidates-") as directory:
+                            positions, attempt = [0], 0
+                            while positions and len(choice.frames) < choice.count:
+                                position = positions.pop(0)
+                                target = Path(directory) / str(attempt)
+                                attempt += 1
+                                target.mkdir()
+                                images, pixels = await self._render_frame(source, "video", target, scope.authorize, position=position,
+                                                                        sample_size=video_candidates.SAMPLE_SIZE)
+                                if position == 0:
+                                    positions = video_candidates.frame_positions(source.duration, choice.count)
+                                if not images:
+                                    break
+                                if not video_candidates.frame_usable(pixels) or any(video_candidates.same_frame(pixels, old) for old in samples):
+                                    continue
+                                index = len(choice.frames)
+                                sealed = {variant: self.objects.engine.seal_thumbnail(job.info.blob_uuid, f"choice:{choice.id}:{index}:{variant}", data)
+                                          for variant, data in images.items()}
+                                used = sum(len(data) for item in self._choices.values() for frame in item.frames for data in frame.images.values())
+                                if used + sum(map(len, sealed.values())) > CHOICE_BYTES:
+                                    raise ThumbnailBudget("候选画面缓存已满")
+                                choice.frames.append(_Candidate(position, sealed))
+                                samples.append(pixels)
+                    finally:
+                        self._remote_bytes += source.remote_bytes if isinstance(source.remote_bytes, int) else 0
+        except (TimeoutError, ThumbnailError):
+            if not choice.frames:
+                raise
+            partial = True
+        scope.authorize()
+        if not choice.frames:
+            raise ThumbnailError("未找到合适的画面，原缩略图已保留")
+        choice.state, choice.until = "ready", time.monotonic() + CHOICE_TTL
+        choice.detail = "请选择一张作为缩略图" if len(choice.frames) == choice.count else f"已找到 {len(choice.frames)} 张不同的合适画面" + ("，本次已达到处理或读取上限" if partial else "")
+        self._leases[job.info.blob_uuid] = _Lease(job.info, choice.id, choice.until)
 
     # ---------- 自动补图 ----------
 
@@ -577,6 +795,7 @@ class ThumbnailService:
                 "cache": self.cache.status(), "remote_bytes": self._remote_bytes,
                 "client_timeout_seconds": CLIENT_TIMEOUT, "task_timeout_seconds": TIMEOUT,
                 "automatic_remote_reads": False, "capacity": 128, "backfill": self.backfill_status(),
+                "candidate_count": self.candidate_count(),
                 "inline": self.objects.inline_thumbnails()}
 
     async def _run(self):
@@ -614,14 +833,21 @@ class ThumbnailService:
                         self._active = job
                         started_remote = job.remote
                         before = self._remote_bytes
-                        self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote, budget=budget,
-                                                                       give_up=job.backfill))
+                        self._task = asyncio.create_task(self._generate_candidates(job) if job.choice else
+                            self.generate(job.info, force=job.force, allow_remote=job.remote, budget=budget, give_up=job.backfill))
                         try:
                             await self._task
                             self._pending.pop(blob, None)
-                            self._record(job, "done", "自动补图完成" if job.backfill else "缩略图处理完成")
+                            self._record(job, "done", "候选画面已准备，等待用户选择" if job.choice else "自动补图完成" if job.backfill else "缩略图处理完成")
                             self.cache.drop(blob)
                         except ThumbnailCacheMiss:
+                            if job.choice:
+                                self._pending.pop(blob, None)
+                                choice = self._choices.get(job.choice)
+                                if choice is not None:
+                                    choice.state, choice.detail = "failed", "视频读取暂时不可用，请重试；原缩略图已保留"
+                                self._record(job, "failed", "候选画面的读取暂时不可用")
+                                continue
                             job.misses += 1
                             job.state, job.detail = "waiting_data", "已接收的数据还不够，等待继续播放或下载；不会自动回源"
                             if job.remote and not started_remote:
@@ -637,6 +863,10 @@ class ThumbnailService:
                                 raise
                         except Exception as exc:
                             self._pending.pop(blob, None)
+                            choice = self._choices.get(job.choice)
+                            if choice is not None:
+                                choice.state = "failed"
+                                choice.detail = "截取画面超时，请重试；原缩略图已保留" if isinstance(exc, TimeoutError) else str(exc) if isinstance(exc, ThumbnailError) else "暂时无法截取画面，请重试；原缩略图已保留"
                             if job.backfill and not isinstance(exc, (NotFoundError, PermissionError)):
                                 # 超时、资源不足等暂时性失败：几小时后再试；连续 3 次仍失败就记为「无法生成」，不再消耗补图额度。
                                 # 解码器确定无法处理的已在 generate 中记录；运行环境受限（ThumbnailRetry）只推迟，不计次数。
@@ -746,15 +976,15 @@ class ThumbnailService:
         # 不把片头黑屏、白屏或近乎纯色的画面固化为封面。
         return None
 
-    async def _render_frame(self, source, kind, directory, authorize, *, position=0):
+    async def _render_frame(self, source, kind, directory, authorize, *, position=0, sample_size=VIDEO_SAMPLE_SIZE):
         selector = "V:0" if kind == "video" else "v:0"
         filters = [f"[0:{selector}]split=4[t][g][p][q]" if kind == "video" else f"[0:{selector}]split=3[t][g][p]"]
         if kind == "video":
-            filters.append(f"[q]scale={VIDEO_SAMPLE_SIZE}:{VIDEO_SAMPLE_SIZE}:out_range=full,format=gray[quality]")
+            filters.append(f"[q]scale={sample_size}:{sample_size}:out_range=full,format=gray[quality]")
         for label, variant, size in (("t", "thumb", 160), ("g", "grid", 640), ("p", "poster", 960)):
             filters.append(f"[{label}]scale=w='max(2,min({size},iw))':h='max(2,min({size},ih))':"
                            f"force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuvj420p[{variant}]")
-        options = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-max_alloc", str(192 * MIB),
+        options = ["-hide_banner", "-loglevel", "info" if sample_size != VIDEO_SAMPLE_SIZE else "error", "-nostdin", "-y", "-max_alloc", str(192 * MIB),
                    "-threads", "1", "-filter_complex_threads", "1", "-protocol_whitelist", "http,tcp",
                    "-format_whitelist", FORMATS, "-probesize", str(MIB), "-analyzeduration", "1000000",
                    "-max_pixels", str(VIDEO_PIXELS if kind == "video" else MAX_PIXELS)]
@@ -786,7 +1016,7 @@ class ThumbnailService:
         async def samples():
             output = bytearray()
             while piece := await process.stdout.read(4096):
-                output.extend(piece[:max(0, VIDEO_SAMPLE_SIZE ** 2 - len(output))])
+                output.extend(piece[:max(0, sample_size ** 2 - len(output))])
             return bytes(output)
 
         stderr = asyncio.create_task(errors())
@@ -805,6 +1035,11 @@ class ThumbnailService:
                     raise ThumbnailError("解码所需内存超过上限")
                 await asyncio.wait({waiting}, timeout=0.25)
             output = await stderr
+            if sample_size != VIDEO_SAMPLE_SIZE:
+                duration = re.search(rb"Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)", output)
+                if duration:
+                    hours, minutes, seconds = map(float, duration.groups())
+                    source.duration = hours * 3600 + minutes * 60 + seconds
             if source.failure:
                 raise source.failure
             if process.returncode:

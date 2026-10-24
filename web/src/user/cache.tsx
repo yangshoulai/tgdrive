@@ -4,7 +4,7 @@ import { startCacheGroup, beginFileCache, cachedFiles, cacheFileId, cacheIndex, 
 import { Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, formatBytes, toast, type MenuItem } from "../ui";
 import { usePrivateAccess } from "./private-session";
 import { TrayBar } from "./tray";
-import { TaskListControls, TaskListFooter, useTaskList, type TaskFilter } from "./task-list";
+import { TaskListControls, TaskListFooter, TaskSummary, useTaskList, type TaskFilter } from "./task-list";
 import { cacheFolderFiles } from "./cache-folders";
 
 export type CacheReport = { state: "none" | "partial" | "auto" | "manual" | "caching"; percent?: number; blocked?: string };
@@ -445,17 +445,23 @@ export function CacheTasks({ onClose, onSettings }: { onClose: () => void; onSet
   const runningChosen = list.chosen.filter(isRunning);
   const resumable = list.chosen.filter(job => ["paused", "canceled", "error"].includes(job.status));
   return <Modal title="本机缓存任务" icon="monitor" size="xl" className={`task-window${jobs.some(job => api.isPrivatePath(job.file.key)) || queue.folders.some(folder => folder.prefixes.some(api.isPrivatePath)) ? " private-dialog" : ""}`} onClose={onClose} initialFocus="dialog"
-    description="暂停后保留已缓存的部分，继续时只补齐缺失内容。关闭窗口或锁定私密空间后，已加入的缓存任务继续。"
+    description="隐藏窗口或锁定私密空间后，已加入的缓存任务继续。"
     footer={<><Button variant="ghost" icon="settings" onClick={onSettings}>缓存设置</Button><span className="task-window-footnote">仅保存到当前浏览器</span><Button onClick={onClose}>隐藏窗口</Button></>}>
-    <div className="task-summary" aria-live="polite"><span><i className={active ? "is-working" : ""} />{active} 个进行中</span><span>{done} 个已完成</span>{failed > 0 && <span className="tone-danger">{failed} 个失败</span>}</div>
+    <TaskSummary active={active} done={done} failed={failed} />
     {!queue.available && <Notice>本机缓存尚未开启或当前浏览器不支持，请到缓存设置中查看。</Notice>}
-    {queue.folders.map(folder => <Notice key={folder.id} icon="folder" tone={folder.status === "error" ? "danger" : "info"} role={folder.status === "error" ? "alert" : "status"}>
-      <strong>{folder.status === "error" ? "文件夹未全部加入缓存" : "正在添加文件夹缓存"}</strong>
-      <p>{folder.prefixes.map(prefix => api.isPrivatePath(prefix) && !queue.privateReady ? "私密文件夹" : api.privatePathLabel(prefix)).join("、")} · 已加入 {folder.files} 个文件</p>
-      {folder.error && <p>{!queue.privateReady && folder.prefixes.some(api.isPrivatePath) ? "请解锁后查看具体原因" : folder.error}；已加入的文件任务会保留，重试会跳过已缓存或正在缓存的文件。</p>}
-      {folder.status === "error" && <Button size="sm" icon="refresh" disabled={!queue.available} onClick={() => queue.retryFolder(folder.id)}>重试添加</Button>}
-      <Button size="sm" variant="ghost" onClick={() => queue.cancelFolder(folder.id)}>{folder.status === "error" ? "移除提示" : "停止添加"}</Button>
-    </Notice>)}
+    {queue.folders.length > 0 && <div className="task-folder-notices">{queue.folders.map(folder => {
+      const path = folder.prefixes.map(prefix => api.isPrivatePath(prefix) && !queue.privateReady ? "私密文件夹" : api.privatePathLabel(prefix)).join("、");
+      return <Notice key={folder.id} className="task-folder-notice" icon="folder" tone={folder.status === "error" ? "danger" : "info"} role={folder.status === "error" ? "alert" : "status"}>
+        <div className="task-folder-notice-main"><strong>{folder.status === "error" ? "文件夹未全部加入缓存" : "正在添加文件夹缓存"}</strong>
+          <p className="task-folder-notice-path" title={path}>已加入 {folder.files} 个文件 · {path}</p>
+          {folder.error && <p>{!queue.privateReady && folder.prefixes.some(api.isPrivatePath) ? "请解锁后查看具体原因" : folder.error}；已加入的文件任务会保留，重试会跳过已缓存或正在缓存的文件。</p>}
+        </div>
+        <div className="task-folder-notice-actions">
+          {folder.status === "error" && <IconButton icon="refresh" label={`重试添加缓存：${path}`} disabled={!queue.available} onClick={() => queue.retryFolder(folder.id)} />}
+          <IconButton icon="x" label={`${folder.status === "error" ? "移除提示" : "停止添加"}：${path}`} onClick={() => queue.cancelFolder(folder.id)} />
+        </div>
+      </Notice>;
+    })}</div>}
     <TaskListControls list={list} noun="缓存" menu={<Menu label="清理缓存任务记录" items={[
       { label: "清理已结束记录", icon: "trash", danger: true, disabled: !jobs.some(job => !isRunning(job)), onSelect: () => setRemoving(jobs.filter(job => !isRunning(job)).map(job => job.id)) },
     ]} />} actions={<>
@@ -471,14 +477,18 @@ export function CacheTasks({ onClose, onSettings }: { onClose: () => void; onSet
         const running = isRunning(job), percent = percentOf(job.bytes, job.size, job.status === "done");
         const hidden = api.isPrivatePath(job.file.key) && !queue.privateReady;
         const detail = job.status === "error" ? hidden ? "缓存失败，请解锁后查看详情" : job.error : job.status === "queued" ? job.waiting ? "其他页面正在缓存，等待完成…" : "排队中" : job.status === "paused" || job.status === "canceled" ? "已暂停，已缓存的部分会保留" : job.status === "done" ? "完整文件已缓存" : "正在缓存";
-        const name = hidden ? "私密文件" : nameOf(job.file), path = hidden ? "私密空间已锁定" : api.privatePathLabel(job.file.key);
+        const folder = job.file.key.slice(0, job.file.key.lastIndexOf("/") + 1);
+        const name = hidden ? "私密文件" : nameOf(job.file), path = hidden ? "私密空间已锁定" : api.privatePathLabel(folder);
+        const status = job.status === "error" ? "缓存失败" : job.status === "queued" ? "排队中" : job.status === "paused" || job.status === "canceled" ? "已暂停" : job.status === "done" ? "已完成" : "缓存中";
         return <li key={job.id} className={`task-row is-${job.status}${list.selected.has(job.id) ? " is-selected" : ""}`}>
           <Checkbox checked={list.selected.has(job.id)} label={`选择 ${name}`} onChange={checked => list.toggle(job.id, checked)} />
           <span className="task-row-icon"><Icon name={api.isPrivatePath(job.file.key) ? "lock" : "monitor"} size={22} /></span>
-          <div className="task-row-content"><strong title={name}>{name}</strong><small className="task-row-path" title={path}>{path}</small>
-            <small className={job.status === "error" ? "tone-danger" : "muted"}>{detail} · {formatBytes(job.bytes)} / {formatBytes(job.size)}</small>
+          <div className="task-row-content"><strong title={name}><span>{name}</span></strong><small className="task-row-path" title={path}><Icon name={api.isPrivatePath(job.file.key) ? "lock" : "folder"} size={12} /><span>{path}</span></small></div>
+          <div className="task-row-transfer">
+            <div className="task-row-status"><span>{status}</span>{job.status !== "done" && <span>{percent}%</span>}</div>
             {job.status !== "done" && <TrayBar percent={percent} label={`${name} 缓存进度`} paused={job.status !== "active"} />}
-          </div><span className="task-row-percent">{percent}%</span><div className="task-row-actions">
+            <small title={detail}>{job.status === "error" ? detail : `${formatBytes(job.bytes)} / ${formatBytes(job.size)}${job.waiting ? " · 等待其他页面完成" : job.status === "paused" || job.status === "canceled" ? " · 已缓存部分保留" : ""}`}</small>
+          </div><div className="task-row-actions">
             {running ? <IconButton icon="pause" size="sm" label={`暂停缓存 ${name}`} onClick={() => queue.pause(job.id)} />
               : job.status !== "done" ? <IconButton icon="play" size="sm" label={`继续缓存 ${name}`} disabled={!queue.available} onClick={() => queue.retry(job.id)} />
                 : <IconButton icon="info" size="sm" label={`查看 ${name} 的缓存`} disabled={hidden} onClick={() => queue.inspect(job.file)} />}

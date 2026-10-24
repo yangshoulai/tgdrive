@@ -9,7 +9,7 @@ import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../
 import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, Switch, copyText, formatBytes, toast } from "../ui";
 import { DestinationPicker } from "./folders";
 import { TrayBar } from "./tray";
-import { TaskListControls, TaskListFooter, useTaskList, type TaskFilter } from "./task-list";
+import { TaskListControls, TaskListFooter, TaskSummary, useTaskList, type TaskFilter } from "./task-list";
 import { UploadSelection, type UploadFile } from "./upload-selection";
 
 /* ---------- 上传 ---------- */
@@ -410,9 +410,9 @@ export function UploadTasks({ queue, onClose }: { queue: UploadQueue; onClose: (
   const sent = jobs.reduce((sum, job) => sum + job.file.size * (job.status === "done" ? 1 : job.phase ? 0 : job.percent / 100), 0);
   const total = jobs.reduce((sum, job) => sum + job.file.size, 0);
   return <Modal title="上传任务" icon="upload" size="xl" className={`task-window${jobs.some(job => api.isPrivatePath(job.path)) ? " private-dialog" : ""}`} onClose={onClose}
-    description="上传在当前网页中继续；关闭窗口后可从系统托盘重新打开。" initialFocus="dialog"
-    footer={<><span className="task-window-footnote">{formatBytes(sent)} / {formatBytes(total)}</span><Button onClick={onClose}>隐藏窗口</Button></>}>
-    <div className="task-summary" aria-live="polite"><span><i className={active ? "is-working" : ""} />{active} 个进行中</span><span>{done} 个已完成</span>{failed > 0 && <span className="tone-danger">{failed} 个失败</span>}</div>
+    description="隐藏窗口后继续上传，请保持网页打开。" initialFocus="dialog"
+    footer={<><span className="task-window-footnote"><Icon name="upload" size={14} /><span>已传输 {formatBytes(sent)} / {formatBytes(total)}</span></span><Button onClick={onClose}>隐藏窗口</Button></>}>
+    <TaskSummary active={active} done={done} failed={failed} />
     <TaskListControls list={list} noun="上传" pausedLabel="已取消" menu={<Menu label="清理上传记录" items={[
       { label: "清理已结束记录", icon: "trash", danger: true, disabled: !jobs.some(job => uploadGroup(job) !== "active") && !folderShares.some(folder => ["done", "error", "canceled"].includes(folder.status)), onSelect: () => setConfirm({ action: "clear", ids: [] }) },
     ]} />} actions={<>
@@ -423,16 +423,21 @@ export function UploadTasks({ queue, onClose }: { queue: UploadQueue; onClose: (
     {!list.visible.length ? <EmptyState compact icon="upload" title={jobs.length ? "没有符合条件的上传" : "还没有上传任务"} description={jobs.length ? "试试其他名称或任务状态。" : "在文件页选择文件或文件夹上传，进度会显示在这里。"} />
       : <ul className="task-list" aria-label="上传任务列表">{list.visible.map(job => {
         const running = uploadGroup(job) === "active";
-        const detail = job.status === "queued" ? "排队中"
-          : job.status === "uploading" ? job.phase === "hashing" ? `检查是否可秒传 · ${Math.round(job.percent)}%` : job.phase === "waiting" ? "等待相同文件上传完成后秒传" : job.percent >= 100 ? "正在保存…" : `${formatBytes(job.file.size * job.percent / 100)} / ${formatBytes(job.file.size)}`
+        const detail = job.status === "queued" ? `${formatBytes(job.file.size)} · 等待开始`
+          : job.status === "uploading" ? job.phase === "hashing" ? `${formatBytes(job.file.size)} · 检查是否可秒传` : job.phase === "waiting" ? "等待相同文件上传完成后秒传" : job.percent >= 100 ? "正在保存…" : `${formatBytes(job.file.size * job.percent / 100)} / ${formatBytes(job.file.size)}`
             : job.status === "done" ? `${formatBytes(job.file.size)}${job.instant ? " · 秒传完成" : job.resumed ? " · 续传完成" : " · 已完成"}` : job.status === "canceled" ? "已取消，可重新上传" : job.error;
+        const status = job.status === "queued" ? "排队中" : job.status === "uploading" ? job.phase === "hashing" ? "检查秒传" : job.phase === "waiting" ? "等待秒传" : job.percent >= 100 ? "正在保存" : "上传中" : job.status === "done" ? "已完成" : job.status === "canceled" ? "已取消" : "上传失败";
+        const folder = job.path.slice(0, job.path.lastIndexOf("/") + 1);
         return <li key={job.id} className={`task-row is-${job.status}${list.selected.has(job.id) ? " is-selected" : ""}`}>
           <Checkbox checked={list.selected.has(job.id)} label={`选择 ${job.file.name}`} onChange={checked => list.toggle(job.id, checked)} />
           <FileTile kind={getFileKind(job.file.type, job.file.name)} />
-          <div className="task-row-content"><strong title={job.file.name}>{job.file.name}{job.isPublic && <Icon name="globe" size={13} />}{job.resumed && running && <Badge tone="accent">续传</Badge>}</strong>
-            <small className="task-row-path" title={api.privatePathLabel(job.path)}>{api.privatePathLabel(job.path)}</small>
-            <small className={job.status === "error" ? "tone-danger" : "muted"}>{detail}</small>
+          <div className="task-row-content"><strong title={job.file.name}><span>{job.file.name}</span>{job.isPublic && <Icon name="globe" size={13} />}{job.resumed && running && <Badge tone="accent">续传</Badge>}</strong>
+            <small className="task-row-path" title={api.privatePathLabel(folder)}><Icon name={api.isPrivatePath(job.path) ? "lock" : "folder"} size={12} /><span>{api.privatePathLabel(folder)}</span></small>
+          </div>
+          <div className="task-row-transfer">
+            <div className="task-row-status"><span>{status}</span>{job.status === "uploading" && job.phase !== "waiting" && <span>{Math.round(job.percent)}%</span>}</div>
             {running && <TrayBar percent={job.status === "queued" ? 0 : job.percent} paused={job.status === "queued"} label={`${job.file.name} 上传进度`} />}
+            <small title={detail}>{detail}</small>
           </div>
           <div className="task-row-actions">
             {running ? <IconButton icon="x" size="sm" label={`取消上传 ${job.file.name}`} onClick={() => setConfirm({ action: "cancel", ids: [job.id] })} />
@@ -444,7 +449,7 @@ export function UploadTasks({ queue, onClose }: { queue: UploadQueue; onClose: (
       })}</ul>}
     <TaskListFooter list={list} />
     {folderShares.length > 0 && <details className="task-folder-shares"><summary>文件夹分享 · {folderShares.length}</summary><ul className="task-list">{folderShares.map(folder => <li key={folder.id} className="task-row">
-      <FileTile kind="folder" /><div className="task-row-content"><strong>{baseName(folder.path)}</strong><small className={folder.status === "error" ? "tone-danger" : "muted"}>{folder.status === "waiting" ? `${folder.uploaded} / ${folder.total} 个文件，全部完成后公开` : folder.status === "sharing" ? "正在生成分享链接…" : folder.status === "done" ? "文件夹已公开" : folder.status === "canceled" ? "上传未完成，已取消公开" : folder.error}</small></div>
+      <FileTile kind="folder" /><div className="task-row-content"><strong title={baseName(folder.path)}><span>{baseName(folder.path)}</span></strong><small className={folder.status === "error" ? "tone-danger" : "muted"}>{folder.status === "waiting" ? `${folder.uploaded} / ${folder.total} 个文件，全部完成后公开` : folder.status === "sharing" ? "正在生成分享链接…" : folder.status === "done" ? "文件夹已公开" : folder.status === "canceled" ? "上传未完成，已取消公开" : folder.error}</small></div>
       {folder.status === "sharing" && <span className="spinner" aria-label="正在公开文件夹" />}
       {folder.status === "error" && <Button size="sm" icon="refresh" onClick={() => queue.retryFolder(folder.id)}>重试公开</Button>}
       {folder.result?.public_token && <IconButton icon="copy" label={`复制 ${baseName(folder.path)} 的分享链接`} onClick={() => void copyText(api.publicLinks(folder.result!.public_token!, baseName(folder.path)).page, "分享链接已复制")} />}

@@ -6,6 +6,7 @@ import * as api from "../api";
 import type { CacheFile } from "../cache-client";
 
 import { FolderStatsDialog } from "./folder-stats";
+import { ThumbnailPicker } from "./thumbnail-picker";
 import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type EntryFilter, type FileSort } from "../files";
 import { generateLoadedThumbnails, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, useThumbnailGenerator, videoFrameUsable } from "../thumbnails";
 
@@ -51,6 +52,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const preview = usePreview();
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
+  const [thumbnailPicking, setThumbnailPicking] = useState<api.FileItem | null>(null);
   const [renaming, setRenaming] = useState<Entry | null>(null);
   const [transferring, setTransferring] = useState<Entry[] | null>(null);
   const [moving, setMoving] = useState<Entry[] | null>(null);
@@ -380,7 +382,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       const pending = state?.phase === "queued";
       if (failed) items.push({ label: "查看缩略图失败原因", icon: "info", heading: "缩略图", onSelect: () => notify.info(state.message) });
       items.push({ label: pending ? state.message : failed ? "重试生成缩略图" : file.thumbnails?.length ? "重新生成缩略图" : "生成缩略图", icon: "refresh", heading: failed ? undefined : "缩略图", disabled: pending,
-        onSelect: () => void thumbnailGenerator.generate(file) });
+        onSelect: () => { if (thumbnailSource(file.key, file.content_type, file.size) === "video") setThumbnailPicking(file); else void thumbnailGenerator.generate(file); } });
     }
     if (file.public_token) items.push({ label: "打开分享页", icon: "external", onSelect: () => window.open(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "_blank", "noreferrer") });
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
@@ -754,6 +756,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
 
       {context && <ContextMenu x={context.x} y={context.y} label={`${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
       {statsFor && <FolderStatsDialog prefix={statsFor.prefix} title={statsFor.prefix === root ? rootName : api.privatePathLabel(statsFor.prefix).replace(/\/$/, "")} onClose={() => setStatsFor(null)} onOpenFolder={onOpenFolder} />}
+      {thumbnailPicking && <ThumbnailPicker file={thumbnailPicking} onClose={() => setThumbnailPicking(null)} onSaved={() => { setThumbnailPicking(null); notify.success("视频缩略图已更新"); scheduleRefresh(); onChanged(); }} />}
       {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
       {folderCache && <ConfirmDialog title="缓存文件夹到本机？" danger={false} className={privateSpace ? "private-dialog" : ""} confirmLabel="开始缓存" onClose={() => setFolderCache(null)}
         description={<>{folderCache.prefixes.length === 1 ? `将缓存“${baseName(folderCache.prefixes[0])}”中的所有文件，以及全部子目录中的文件。` : `将缓存所选 ${folderCache.prefixes.length} 个文件夹中的所有文件，以及全部子目录中的文件。`}
