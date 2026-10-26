@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
+const { createHash } = require("node:crypto");
 const { test } = require("node:test");
 
 const source = fs.readFileSync(path.join(__dirname, "../userscripts/tessera-grabber.user.js"), "utf8");
@@ -12,6 +13,7 @@ const instrumented = source.replace(/\s+gm\.load\(\)\.then\([\s\S]*\}\);\s*\}\)\
   globalThis.toastMessages = [];
   toast = message => globalThis.toastMessages.push(message);
   globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBatch, parseEntries, clearEntries, clearBatch, close,
+    cloudOf, cloudSources, cloudSelected, resolveCloud, cloudMd5, cloudRequest, cloudDownload, captureCloudAuthorization, authorizeCloudBaidu, curlFor,
     getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES,
     pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages, collect, addItem, checkNavigation, setActive: value => { active = value; },
     ready: gm.load(), gm, HAS_MENU, dormantFab, copy: text => gm.copy(text), openTab: url => gm.openTab(url),
@@ -31,7 +33,8 @@ async function until(predicate) {
 }
 
 /** manager: "sync" 模拟 Tampermonkey／Violentmonkey（GM_*），"async" 模拟 iOS Userscripts（只有异步 GM.*，无 GM_cookie 与菜单命令）。 */
-function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true, dom, manager = "sync" } = {}) {
+function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true, dom, manager = "sync",
+  url = "https://gallery.example/album", storage = {}, query, pageState = {}, documentCookie = "visible=page", gmCookies } = {}) {
   const values = { settings: { server: "https://tessera.example", key: "TEST:secret", cookies } };
   const requests = [], fetches = [], listeners = [], opened = [], copied = [];
   const window = { addEventListener(type, listener) { if (type === "message") listeners.push(listener); }, removeEventListener() {},
@@ -39,6 +42,9 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
     fetches.push({ url, options });
     return fetch ? fetch(url, options) : imageResponse();
   } };
+  const storageApi = { getItem: key => storage[key] == null ? null : typeof storage[key] === "string" ? storage[key] : JSON.stringify(storage[key]),
+    setItem: (key, value) => { storage[key] = value; }, key: index => Object.keys(storage)[index], get length() { return Object.keys(storage).length; } };
+  Object.assign(window, { localStorage: storageApi }, pageState);
   const xmlHttpRequest = details => {
     const record = { details, aborted: false };
     requests.push(record);
@@ -57,9 +63,9 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
     return { abort() { record.aborted = true; details.onabort?.(); } };
   };
   const context = vm.createContext({
-    window, unsafeWindow: window, document: { cookie: "visible=page", querySelectorAll: selector => dom ? dom(selector) : [] },
-    location: new URL("https://gallery.example/album"), navigator: { userAgent: "BrowserTest/1" },
-    URL, Blob, Response, ReadableStream, AbortController, btoa, DOMException, TextEncoder, Uint8Array, Uint32Array, crypto: webcrypto,
+    window, unsafeWindow: window, document: { cookie: documentCookie, querySelector: selector => query?.(selector) || null, querySelectorAll: selector => dom ? dom(selector) : [] },
+    location: new URL(url), localStorage: storageApi, navigator: { userAgent: "BrowserTest/1" },
+    URL, URLSearchParams, Blob, Response, ReadableStream, AbortController, btoa, atob, DOMException, TextEncoder, Uint8Array, Uint32Array, crypto: webcrypto,
     setTimeout: (fn, delay) => fn.name === "poll" ? 0 : setTimeout(fn, delay), clearTimeout, clearInterval,
     ...(manager === "sync" ? {
       GM_getValue: (key, fallback) => values[key] ?? fallback,
@@ -67,7 +73,7 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
       GM_registerMenuCommand() {},
       GM_openInTab: url => opened.push(url),
       GM_setClipboard: text => copied.push(text),
-      GM_cookie: cookieApi ? { list: (_, callback) => callback([{ name: "cf_clearance", value: "test-cookie", httpOnly: true }], null) } : undefined,
+      GM_cookie: cookieApi ? { list: (_, callback) => callback(gmCookies || [{ name: "cf_clearance", value: "test-cookie", httpOnly: true }], null) } : undefined,
       GM_xmlhttpRequest: xmlHttpRequest,
     } : {
       GM: {
@@ -791,4 +797,428 @@ test("size probing runs at most three requests and skips playlists", async () =>
   assert.ok(!pending.some(details => details.url.includes("m3u8")));
   assert.equal(pending.filter(details => details.url.endsWith("/0.mp4")).length, 1, "each address is probed once");
   assert.equal(h.api.describe({ url: "https://media.example/0.mp4", type: "video" }), "视频 · 10 B · media.example");
+});
+
+// Cloud fixtures model the provider page's actual Vue/React selection boundaries. No provider is contacted.
+const reactSelection = props => ({ __reactFiber$fixture: { type: "div", return: { type() {}, pendingProps: props } } });
+const jsonReply = (details, value, extra = {}) => details.onload({ status: 200, responseText: JSON.stringify(value), ...extra });
+const md5 = value => createHash("md5").update(value).digest("hex");
+function cloudFixture(provider) {
+  const name = `来自 ${provider} 的'原文件'.bin`;
+  const vue = selectedList => ({ __vue__: { selectedList } });
+  const tokenStorage = { credentials_client: { token_type: "Bearer", access_token: "SOURCE_TOKEN", user_id: "user", expires_at: "2099-01-01" },
+    captcha_client: { token: "SOURCE_CAPTCHA", captcha_token: "SOURCE_CAPTCHA", expires_at: "2099-01-01" }, deviceid: "0123456789abcdef0123456789abcdef" };
+  const fixtures = {
+    baidu: { url: "https://pan.baidu.com/disk/main", query: selector => selector === ".wp-s-core-pan" ? vue([
+      { fs_id: 101, server_filename: name, size: 42, isdir: 0 }, { fs_id: 102, server_filename: "folder", isdir: 1 },
+    ]) : null },
+    aliyun: { url: "https://www.alipan.com/drive/file/all", storage: { token: { token_type: "Bearer", access_token: "ALI_TOKEN" } },
+      query: selector => selector.startsWith('[class^="node-list-table-view--"]') ? reactSelection({ selectedKeys: "a1", dataSource: [
+        { fileId: "a1", driveId: "drive1", name, size: 42, type: "file" }, { fileId: "a2", name: "other", type: "file" },
+      ] }) : null },
+    mcloud: { url: "https://yun.139.com/w/#/main", documentCookie: "authorization=Bearer%20MOBILE_TOKEN", query: selector => selector === ".main_file_list"
+      ? { __vue__: { selectList: [{ item: { contentID: "m1", contentName: name, contentSize: 42 } }] } } : null },
+    tcloud: { url: "https://cloud.189.cn/web/main", query: selector => selector === ".c-file-list" ? vue([{ fileId: "t1", fileName: name, size: 42, isFolder: false }]) : null },
+    xunlei: { url: "https://pan.xunlei.com/", storage: tokenStorage, dom: selector => selector.includes("SourceListItem")
+      ? [{ __vue__: { selected: ["x1"], info: { id: "x1", name, size: 42, kind: "drive#file" } } }] : [] },
+    guangya: { url: "https://www.guangyapan.com/", storage: tokenStorage, query: selector => selector.startsWith(".swangpan-file-list")
+      ? reactSelection({ dataSource: [{ fileId: "g1", fileName: name, fileSize: 42, resType: 1 }], selectedItems: ["g1"] }) : null },
+    quark: { url: "https://pan.quark.cn/list/all", documentCookie: "__pugs=SOURCE_COOKIE", gmCookies: [{ name: "__pugs", value: "SOURCE_COOKIE" }], query: selector => selector === ".file-list"
+      ? reactSelection({ list: [{ fid: "q1", file_name: name, size: 42, file: true }, { fid: "folder", file: false }], selectedRowKeys: ["q1", "folder"] }) : null },
+    uc: { url: "https://drive.uc.cn/list/all", query: selector => selector === ".file-list"
+      ? reactSelection({ list: [{ fid: "u1", file_name: name, size: 42, file: true }], selectedRowKeys: ["u1"] }) : null },
+    "123pan": { url: "https://www.123pan.com/", storage: { authorToken: "PAN123_TOKEN", LoginUuid: "login-uuid" },
+      query: selector => selector.startsWith(".ant-table-wrapper") ? reactSelection({ dataSource: [
+        { FileId: 123, FileName: name, Size: 42, Type: 0, Etag: "file-etag", S3KeyFlag: "s3-key" },
+        { FileId: 124, FileName: "unselected", Size: 42, Type: 0 },
+      ], rowSelection: { selectedRowKeys: [123] } }) : null },
+  };
+  return { ...fixtures[provider], name };
+}
+
+function cloudReply(provider, details) {
+  const url = new URL(details.url);
+  const data = details.data ? JSON.parse(details.data) : null;
+  if (provider === "baidu") {
+    assert.deepEqual(JSON.parse(url.searchParams.get("fsids")), [101]);
+    assert.equal(url.searchParams.get("access_token"), "BAIDU_TOKEN");
+    return jsonReply(details, { errno: 0, list: [{ fs_id: 101, dlink: "https://d.pcs.baidu.com/download/file" }] });
+  }
+  if (provider === "aliyun") {
+    assert.deepEqual(data, { drive_id: "drive1", file_id: "a1" });
+    assert.equal(details.headers.Authorization, "Bearer ALI_TOKEN");
+    return jsonReply(details, { url: "https://files.example/ali.bin" });
+  }
+  if (provider === "mcloud") {
+    assert.deepEqual(data, { fileId: "m1" });
+    assert.equal(details.headers.Authorization, "Bearer MOBILE_TOKEN");
+    const [time, nonce, sign] = details.headers["Mcloud-Sign"].split(",");
+    assert.equal(nonce.length, 16, "the upstream undefined-prefix nonce bug is fixed");
+    const sorted = encodeURIComponent(JSON.stringify(data).replace(/\s*/g, "")).split("").sort().join("");
+    assert.equal(sign, md5(md5(btoa(sorted)) + md5(`${time}:${nonce}`)).toUpperCase());
+    return jsonReply(details, { success: true, data: { url: "https://files.example/mobile.bin" } });
+  }
+  if (provider === "tcloud") {
+    if (url.pathname.endsWith("ssoH5.action")) return details.onload({ status: 200, finalUrl: "https://cloud.189.cn/web/main?accessToken=TELECOM_TOKEN" });
+    assert.equal(url.searchParams.get("fileId"), "t1");
+    assert.equal(details.headers.Signature, md5(`AccessToken=TELECOM_TOKEN&Timestamp=${details.headers.Timestamp}&fileId=t1`));
+    return jsonReply(details, { res_code: 0, fileDownloadUrl: "https://files.example/telecom.bin" });
+  }
+  if (provider === "xunlei") {
+    assert.equal(details.headers.Authorization, "Bearer SOURCE_TOKEN");
+    assert.equal(details.headers["X-Captcha-Token"], "SOURCE_CAPTCHA");
+    return jsonReply(details, { web_content_link: "https://files.example/xunlei.bin" });
+  }
+  if (provider === "guangya") {
+    assert.deepEqual(data, { fileId: "g1" });
+    assert.equal(details.headers["X-Captcha-Token"], "SOURCE_CAPTCHA");
+    return jsonReply(details, { code: 0, data: { signedURL: "https://files.example/guangya.bin" } });
+  }
+  if (provider === "quark" || provider === "uc") {
+    if (url.hostname === "drive-social-api.quark.cn") return jsonReply(details, { code: 0, data: { token: "SOCIAL_TOKEN" } });
+    assert.deepEqual(data.fids, [provider === "quark" ? "q1" : "u1"]);
+    if (provider === "quark") assert.equal(data.token, "SOCIAL_TOKEN");
+    return jsonReply(details, { code: 0, data: [{ fid: data.fids[0], download_url: `https://dl.${provider === "quark" ? "quark.cn" : "uc.cn"}/file.bin` }] });
+  }
+  assert.equal(provider, "123pan");
+  assert.equal(data.fileId, 123);
+  assert.equal(data.s3keyFlag, "s3-key");
+  assert.equal(details.headers.Authorization, "Bearer PAN123_TOKEN");
+  assert.equal(details.headers.LoginUuid, "login-uuid");
+  return jsonReply(details, { code: 0, data: { dispatchList: [{ prefix: "https://files.example" }], downloadPath: "/123.bin" } });
+}
+
+for (const manager of ["sync", "async"]) for (const provider of ["baidu", "aliyun", "mcloud", "tcloud", "xunlei", "guangya", "quark", "uc", "123pan"]) {
+  test(`cloud ${provider}: selected file to parse ticket and task, with isolated credentials (${manager})`, async () => {
+    const fixture = cloudFixture(provider);
+    const h = harness({ ...fixture, manager, gm: details => {
+      if (new URL(details.url).hostname !== "tessera.example") {
+        assert.ok(!JSON.stringify(details).includes("TEST:secret"), "the Tessera credential never reaches a provider");
+        assert.ok(!Object.keys(details.headers).some(key => key.toLowerCase() === "user-agent"), "GM keeps the browser User-Agent");
+        return cloudReply(provider, details);
+      }
+      if (details.url.endsWith("/parse")) {
+        const body = JSON.parse(details.data);
+        assert.equal(body.download_type, "http");
+        assert.ok(!body.input.includes("tessera-"), "submit the resolved download URL, not the synthetic selection identity");
+        assert.ok(body.input.includes("-o '来自 "), "pass the cloud filename even when the CDN has no filename");
+        if (provider === "baidu") assert.ok(body.input.includes("User-Agent: pan.baidu.com"));
+        if (provider === "quark") assert.ok(body.input.includes("Cookie: __pugs=SOURCE_COOKIE"));
+        if (provider === "aliyun") assert.ok(!body.input.includes("ALI_TOKEN"), "API OAuth token is not a download header");
+        return jsonReply(details, { candidates: [{ ticket: "sealed-ticket", name: "cdn.bin", kind: "http", size: 42 }] });
+      }
+      const body = JSON.parse(details.data);
+      assert.deepEqual(body, { items: [{ ticket: "sealed-ticket", name: fixture.name }], destination: "photos/" });
+      return jsonReply(details, { tasks: [{ id: 21, status: "queued", key: "photos/file.bin" }] });
+    } });
+    await h.ready;
+    h.api.gm.set("cloud-baidu-token", { token: "BAIDU_TOKEN", expires: Date.now() + 3600000 });
+    const sources = h.api.cloudSources(h.api.cloudOf());
+    assert.equal(sources.length, 1, "ignore folders and unselected files");
+    assert.equal(sources[0].name, fixture.name);
+    const current = h.batch(sources.map(item => ({ ...item, sourceName: item.name, type: "file", state: "parsing", tasks: [], error: "" })));
+    current.mode = "server";
+    await h.api.parseEntries(current, current.entries.slice());
+    assert.equal(current.entries[0].state, "waiting", current.entries[0].error);
+    assert.equal(current.entries[0].name, fixture.name);
+    assert.equal(current.entries[0].cloud.provider, provider);
+    await h.api.runBatch();
+    assert.equal(current.entries[0].state, "submitted");
+    assert.equal(h.fetches.length, 0, "the browser never downloads file bytes in server mode");
+    assert.ok(h.values.sent.includes(sources[0].url));
+  });
+}
+
+test("cloud provider detection uses exact HTTPS hosts and recognizes nested share routes", () => {
+  const h = harness();
+  for (const url of ["https://pan.baidu.com.evil.example/disk/main", "http://pan.quark.cn/list/all", "https://api.alipan.com/", "https://123pan.com.evil.example/", "https://user:secret@pan.baidu.com/disk/main"]) assert.equal(h.api.cloudOf(url), null);
+  assert.equal(h.api.cloudOf("https://cloud.189.cn/web/share?code=a").share, true);
+  assert.equal(h.api.cloudOf("https://www.123865.com/s/abc").provider, "123pan");
+});
+
+test("cloud MD5 signatures match independent UTF-8 and multi-block vectors", () => {
+  const h = harness();
+  for (const input of ["", "abc", "中文签名😀", "a".repeat(55), "b".repeat(56), "c".repeat(64), "d".repeat(1000)]) assert.equal(h.api.cloudMd5(input), md5(input));
+});
+
+test("cloud curl preserves signed URLs and shell-quotes names without duplicating headers", async () => {
+  const h = harness();
+  const curl = await h.api.curlFor("https://dl.quark.cn/file?sign=a&b=2", true, { "User-Agent": "QuarkPC/1", Cookie: "__pugs=one'two" }, "原'文件.bin");
+  assert.equal((curl.match(/User-Agent:/g) || []).length, 1);
+  assert.ok(curl.includes("'User-Agent: QuarkPC/1'"));
+  assert.ok(curl.includes("__pugs=one'\\''two"));
+  assert.ok(curl.includes("-o '原'\\''文件.bin'"));
+  assert.ok(!(await h.api.curlFor("https://dl.quark.cn/file", false, { Cookie: "secret" })).includes("Cookie:"));
+  await assert.rejects(() => h.api.curlFor("https://files.example/a", true, { Referer: "x\r\nAuthorization: secret" }), /请求头无效/);
+});
+
+test("cloud selection snapshots are immutable and enforce the batch limit before requests", () => {
+  const fixture = cloudFixture("aliyun");
+  const item = Object.freeze({ fileId: "a1", driveId: "drive1", name: "a.bin", size: 42, type: "file" });
+  let files = [item];
+  const h = harness({ ...fixture, query: () => reactSelection({ dataSource: files, selectedKeys: files.map(file => file.fileId) }) });
+  const sources = h.api.cloudSources(h.api.cloudOf());
+  sources[0].cloud.file.name = "changed";
+  assert.equal(item.name, "a.bin");
+  files = Array.from({ length: 51 }, (_, index) => ({ ...item, fileId: String(index) }));
+  assert.throws(() => h.api.cloudSources(h.api.cloudOf()), /最多发送 50/);
+  assert.equal(h.requests.length, 0);
+});
+
+test("cloud share modes missing an upstream resolver explain the save-to-own-drive workflow", () => {
+  const h = harness();
+  for (const url of ["https://www.alipan.com/s/share", "https://pan.xunlei.com/s/share", "https://yun.139.com/link/share"]) assert.throws(() => h.api.cloudSources(h.api.cloudOf(url)), /保存到自己的网盘/);
+  assert.equal(h.requests.length, 0);
+});
+
+test("cloud request rejects a different provider, arbitrary API hosts and foreign cookie download targets", async () => {
+  const h = harness(cloudFixture("aliyun"));
+  const context = h.api.cloudSources(h.api.cloudOf())[0].cloud;
+  await assert.rejects(() => h.api.cloudRequest(context, "https://evil.example/api"), /接口地址无效/);
+  await assert.rejects(() => h.api.cloudRequest(context, "https://api.alipan.com/v2/file/get_download_url", { headers: { "user-agent": "different" } }), /改写浏览器身份/);
+  assert.throws(() => h.api.cloudDownload(context, "https://evil.example/file", { Cookie: "source-secret" }), /未转交登录 Cookie/);
+  assert.throws(() => h.api.cloudDownload({ provider: "quark" }, "https://dl.uc.cn/file", { cookie: "source-secret" }), /未转交登录 Cookie/);
+  h.context.location = new URL("https://pan.quark.cn/list/all");
+  await assert.rejects(() => h.api.resolveCloud(context), /返回原网盘页面/);
+  assert.equal(h.requests.length, 0);
+});
+
+for (const manager of ["sync", "async"]) test(`cloud Baidu authorization requires matching state, expiry and the provider origin (${manager})`, async () => {
+  let cleaned = "";
+  const h = harness({ manager, url: "https://pan.baidu.com/disk/main", pageState: { history: { replaceState: (_, __, url) => { cleaned = url; } } } });
+  await h.ready;
+  h.api.authorizeCloudBaidu();
+  await tick();
+  const authorize = new URL(h.opened[0]);
+  assert.equal(authorize.hostname, "openapi.baidu.com");
+  const state = authorize.searchParams.get("state");
+  assert.equal(state.length, 32);
+  const callback = `https://openapi.baidu.com/oauth/2.0/login_success#access_token=OAUTH_TOKEN&expires_in=3600&state=${state}`;
+  h.context.location = new URL(callback.replace(state, "wrong"));
+  assert.equal(h.api.captureCloudAuthorization(), false);
+  h.context.location = new URL(callback.replace("openapi.baidu.com", "evil.example"));
+  assert.equal(h.api.captureCloudAuthorization(), false);
+  h.context.location = new URL(callback);
+  assert.equal(h.api.captureCloudAuthorization(), true);
+  await tick();
+  assert.equal(h.values["cloud-baidu-token"].token, "OAUTH_TOKEN");
+  assert.equal(cleaned, "/oauth/2.0/login_success", "remove the token fragment after capture");
+  assert.equal(h.api.captureCloudAuthorization(), false, "state is single use");
+  h.api.gm.set("cloud-baidu-auth", { state, expires: Date.now() - 1 });
+  assert.equal(h.api.captureCloudAuthorization(), false, "expired authorization cannot overwrite a token");
+});
+
+test("cloud Quark share rotates __pugs and carries the share file token to the provider only", async () => {
+  const h = harness({ url: "https://pan.quark.cn/s/share123", cookieApi: false, documentCookie: "__pugs=old; login=private", query: () => reactSelection({
+    list: [{ fid: "q-share", file_name: "share.bin", file: true, share_fid_token: "FILE_SHARE_TOKEN" }], selectedRowKeys: ["q-share"], stoken: "SHARE_TOKEN",
+  }), gm: details => {
+    if (details.url.includes("drive-social-api")) return jsonReply(details, { code: 0, data: { token: "SOCIAL" } });
+    assert.deepEqual(JSON.parse(details.data), { fids: ["q-share"], speedup_session: "", token: "SOCIAL", pwd_id: "share123", stoken: "SHARE_TOKEN", fids_token: ["FILE_SHARE_TOKEN"] });
+    return jsonReply(details, { code: 0, data: [{ fid: "q-share", download_url: "https://dl.quark.cn/share.bin" }] }, { responseHeaders: "Set-Cookie: __pugs=new-cookie; Path=/; Secure\r\n" });
+  } });
+  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const result = await h.api.resolveCloud(source.cloud);
+  assert.equal(result.headers.Cookie, "__pugs=new-cookie");
+  assert.ok(!JSON.stringify(result).includes("SHARE_TOKEN"));
+});
+
+test("cloud disabled cookie forwarding fails Quark before requesting a download", async () => {
+  const h = harness({ ...cloudFixture("quark"), cookies: false });
+  await assert.rejects(() => h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud), /启用携带 Cookie/);
+  assert.equal(h.requests.length, 0);
+});
+
+test("cloud HTML challenge stays a parse failure and never creates a task", async () => {
+  const h = harness({ ...cloudFixture("aliyun"), gm: details => details.onload({ status: 403, responseHeaders: "server: cloudflare\r\ncf-mitigated: challenge", responseText: "Just a moment" }) });
+  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]); current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  assert.equal(current.entries[0].state, "parse-error");
+  assert.equal(current.entries[0].challenge, true);
+  assert.match(current.entries[0].error, /人机验证/);
+  assert.ok(h.requests.every(request => new URL(request.details.url).hostname !== "tessera.example"));
+  assert.equal(h.values.sent, undefined);
+});
+
+test("cloud retry acquires a new signed URL and ticket while preserving the edited filename", async () => {
+  let signed = 0;
+  const h = harness({ ...cloudFixture("aliyun"), gm: details => {
+    if (details.url.includes("api.alipan.com")) return jsonReply(details, { url: `https://files.example/file?sign=${++signed}` });
+    if (details.url.endsWith("/parse")) return jsonReply(details, { candidates: [{ ticket: `ticket-${signed}`, name: "cdn.bin", kind: "http" }] });
+    return jsonReply(details, { tasks: [{ id: signed, status: "queued" }] });
+  } });
+  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]); current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  await h.api.runBatch();
+  const old = current.entries[0];
+  old.tasks[0].status = "failed";
+  old.name = "修改后的文件.bin"; old.nameEdited = true;
+  await h.api.retryEntries([old]);
+  await until(() => current.entries[0].state === "submitted");
+  assert.equal(signed, 2);
+  const creates = h.requests.filter(request => new URL(request.details.url).pathname === "/api/v1/downloads");
+  assert.deepEqual(JSON.parse(creates[1].details.data).items, [{ ticket: "ticket-2", name: "修改后的文件.bin" }]);
+});
+
+test("cloud 123 wrapped dispatch links are decoded and quota errors remain actionable", async () => {
+  let quota = false;
+  const h = harness({ ...cloudFixture("123pan"), gm: details => jsonReply(details, quota ? { code: 5113 } : { code: 0, data: {
+    dispatchList: [{ prefix: "https://files.example" }], downloadPath: "/wrapper?params=" + encodeURIComponent(btoa("https://files.example/actual?sign=1")),
+  } }) });
+  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  assert.equal((await h.api.resolveCloud(source.cloud)).url, "https://files.example/actual?sign=1");
+  quota = true;
+  await assert.rejects(() => h.api.resolveCloud(source.cloud), /下载流量不足/);
+});
+
+test("cloud Baidu share uses page verification and signed form fields without requiring OAuth consent", async () => {
+  const h = harness({ url: "https://pan.baidu.com/s/1share?pwd=1234", query: selector => selector === ".wp-s-core-pan"
+    ? { __vue__: { selectedList: [{ fs_id: 9, server_filename: "shared.bin", isdir: 0 }] } } : null,
+    pageState: { locals: { dump: () => ({ share_uk: { value: "uk" }, shareid: { value: "share-id" }, bdstoken: { value: "BDSTOKEN" } }) }, jsToken: "JS_TOKEN", currentSekey: "SHARE_KEY" },
+    gm: details => {
+      if (details.url.includes("tplconfig")) return jsonReply(details, { data: { sign: "sign", timestamp: 123 } });
+      const url = new URL(details.url);
+      assert.equal(url.searchParams.get("sign"), "sign");
+      assert.equal(url.searchParams.get("jsToken"), "JS_TOKEN");
+      const form = new URLSearchParams(details.data);
+      assert.equal(form.get("uk"), "uk");
+      assert.equal(form.get("fid_list"), "[9]");
+      assert.deepEqual(JSON.parse(form.get("extra")), { sekey: "SHARE_KEY" });
+      return jsonReply(details, { errno: 0, list: [{ fs_id: 9, dlink: "https://d.pcs.baidu.com/shared.bin" }] });
+    },
+  });
+  const result = await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud);
+  assert.equal(result.url, "https://d.pcs.baidu.com/shared.bin");
+  assert.ok(!result.url.includes("pwd="));
+  assert.equal(h.opened.length, 0);
+});
+
+test("cloud Tianyi share signature includes the share identity in the prescribed order", async () => {
+  const h = harness({ url: "https://cloud.189.cn/web/share?code=abc", query: selector => selector === ".info-detail"
+    ? { __vue__: { fileDetail: { fileId: "t1", fileName: "shared.bin", isFolder: false, shareId: "s1" } } } : null,
+    gm: details => {
+      if (details.url.includes("ssoH5.action")) return details.onload({ status: 200, finalUrl: "https://cloud.189.cn/web/main?accessToken=TOKEN" });
+      assert.equal(new URL(details.url).searchParams.get("shareId"), "s1");
+      assert.equal(details.headers.Signature, md5(`AccessToken=TOKEN&Timestamp=${details.headers.Timestamp}&dt=1&fileId=t1&shareId=s1`));
+      return jsonReply(details, { res_code: 0, fileDownloadUrl: "https://files.example/share.bin" });
+    },
+  });
+  assert.equal((await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud)).url, "https://files.example/share.bin");
+});
+
+test("cloud Guangya share sends the user-entered code to the provider and keeps its access token off the download request", async () => {
+  const fixture = cloudFixture("guangya");
+  const h = harness({ ...fixture, url: "https://www.guangyapan.com/s/share-id?code=1234", gm: details => {
+    const body = JSON.parse(details.data);
+    if (details.url.includes("get_share_access_token")) {
+      assert.deepEqual(body, { shareId: "share-id", code: "1234" });
+      return jsonReply(details, { data: { accessToken: "SHARE_ACCESS" } });
+    }
+    assert.deepEqual(body, { fileId: "g1", accessToken: "SHARE_ACCESS" });
+    return jsonReply(details, { data: { downloadUrl: "https://files.example/share.bin" } });
+  } });
+  const result = await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud);
+  assert.ok(!JSON.stringify(result).includes("SHARE_ACCESS"));
+});
+
+test("cloud UC share preserves file and share tokens but exports only its download headers", async () => {
+  const h = harness({ manager: "async", url: "https://drive.uc.cn/s/share-id", query: () => reactSelection({
+    list: [{ fid: "u-share", file_name: "shared.bin", file: true, share_fid_token: "FILE_TOKEN" }], selectedRowKeys: ["u-share"], stoken: "STOKEN",
+  }), gm: details => {
+    assert.deepEqual(JSON.parse(details.data), { fids: ["u-share"], pwd_id: "share-id", stoken: "STOKEN", fids_token: ["FILE_TOKEN"] });
+    return jsonReply(details, { code: 0, data: [{ fid: "u-share", download_url: "https://dl.uc.cn/shared.bin" }] });
+  } });
+  await h.ready;
+  const result = await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud);
+  assert.ok(result.headers["User-Agent"].includes("uc-cloud-drive"));
+  assert.ok(!JSON.stringify(result).includes("STOKEN"));
+});
+
+test("cloud 123 single-file share selection uses the share API without requiring a login token", async () => {
+  const h = harness({ url: "https://www.123pan.com/s/share-key", query: () => reactSelection({ file: { FileId: 12, FileName: "shared.bin", Size: 42, Type: 0, Etag: "etag", S3KeyFlag: "s3" } }),
+    gm: details => {
+      assert.equal(new URL(details.url).pathname, "/api/v2/share/download/info");
+      assert.deepEqual(JSON.parse(details.data), { ShareKey: "share-key", FileID: 12, S3keyFlag: "s3", Size: 42, Etag: "etag" });
+      assert.equal(details.headers.Authorization, undefined);
+      return jsonReply(details, { data: { dispatchList: [{ prefix: "https://files.example" }], downloadPath: "/shared.bin" } });
+    },
+  });
+  assert.equal((await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud)).url, "https://files.example/shared.bin");
+});
+
+test("cloud Xunlei renews expired tokens once and signs the provider captcha request", async () => {
+  const fixture = cloudFixture("xunlei");
+  fixture.storage.credentials_client.expires_at = "2000-01-01";
+  fixture.storage.credentials_client.refresh_token = "REFRESH_SECRET";
+  fixture.storage.captcha_client.expires_at = "2000-01-01";
+  const calls = [];
+  const h = harness({ ...fixture, gm: details => {
+    const url = new URL(details.url); calls.push(url.pathname);
+    if (url.pathname === "/v1/auth/token") {
+      assert.equal(JSON.parse(details.data).refresh_token, "REFRESH_SECRET");
+      return jsonReply(details, { access_token: "NEW_ACCESS", token_type: "Bearer", expires_in: 3600 });
+    }
+    if (url.pathname === "/v1/shield/captcha/init") {
+      const body = JSON.parse(details.data);
+      assert.match(body.meta.captcha_sign, /^1\.[a-f0-9]{32}$/);
+      assert.equal(body.device_id, "0123456789abcdef0123456789abcdef");
+      return jsonReply(details, { captcha_token: "NEW_CAPTCHA", expires_in: 3600 });
+    }
+    assert.equal(details.headers.Authorization, "Bearer NEW_ACCESS");
+    assert.equal(details.headers["X-Captcha-Token"], "NEW_CAPTCHA");
+    return jsonReply(details, { web_content_link: "https://files.example/file.bin" });
+  } });
+  const result = await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud);
+  assert.equal(calls.join(","), "/v1/auth/token,/v1/shield/captcha/init,/drive/v1/files/x1");
+  assert.ok(!JSON.stringify(result).includes("REFRESH_SECRET"));
+});
+
+test("cloud private-space handoff carries renamed tickets, with no key-API private task creation", async () => {
+  const h = harness({ ...cloudFixture("aliyun"), manager: "async", gm: details => details.url.includes("api.alipan.com")
+    ? jsonReply(details, { url: "https://files.example/private.bin" }) : jsonReply(details, { candidates: [{ ticket: "private-ticket", name: "cdn.bin", kind: "http" }] }) });
+  await h.ready;
+  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]);
+  current.mode = "server"; current.destination.private = true;
+  await h.api.parseEntries(current, current.entries.slice());
+  current.entries[0].name = "私密文件.bin";
+  await h.api.runBatch();
+  const imported = JSON.parse(Buffer.from(new URL(h.opened[0]).hash.slice("#import=".length), "base64url"));
+  assert.equal(imported.private, true);
+  assert.equal(imported.candidates[0].name, "私密文件.bin");
+  assert.equal(imported.candidates[0].ticket, "private-ticket");
+  assert.ok(!JSON.stringify(imported).includes("ALI_TOKEN"));
+  assert.ok(!h.requests.some(request => new URL(request.details.url).pathname === "/api/v1/downloads"));
+});
+
+test("cloud retry after an expired SSO session obtains fresh credentials before parsing", async () => {
+  let tokens = 0;
+  const h = harness({ ...cloudFixture("tcloud"), gm: details => {
+    if (details.url.includes("ssoH5.action")) return details.onload({ status: 200, finalUrl: `https://cloud.189.cn/web/main?accessToken=TOKEN${++tokens}` });
+    if (details.url.includes("getFileDownloadUrl.action")) return jsonReply(details, tokens === 1
+      ? { errorcode: "InvalidSessionKey" } : { res_code: 0, fileDownloadUrl: "https://files.example/fresh.bin" });
+    return jsonReply(details, { candidates: [{ ticket: "fresh-ticket", name: "fresh.bin", kind: "http" }] });
+  } });
+  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]); current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  assert.equal(current.entries[0].state, "parse-error");
+  await h.api.parseEntries(current, current.entries.slice());
+  assert.equal(tokens, 2);
+  assert.equal(current.entries[0].candidate.ticket, "fresh-ticket");
+});
+
+test("cloud late resolution cannot recreate a removed row or submit its URL to Tessera", async () => {
+  let reply;
+  const h = harness({ ...cloudFixture("aliyun"), gm: details => { reply = details; } });
+  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]); current.mode = "server";
+  const pending = h.api.parseEntries(current, current.entries.slice());
+  await until(() => Boolean(reply));
+  current.entries = [];
+  jsonReply(reply, { url: "https://files.example/late.bin" });
+  await pending;
+  assert.equal(current.entries.length, 0);
+  assert.equal(h.requests.length, 1);
 });

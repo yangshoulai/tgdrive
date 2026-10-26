@@ -1,3 +1,12 @@
+License scope
+
+The MIT license below applies to Tessera's independent server, web application,
+and other original repository files, except where a file states otherwise.
+userscripts/tessera-grabber.user.js includes adapted LinkSwift code and is
+distributed as a combined work under AGPL-3.0-or-later; see userscripts/LICENSE
+and userscripts/NOTICE.md. third_party/linkswift/upstream.user.js retains its
+upstream AGPL-3.0-or-later license; see third_party/linkswift/LICENSE.
+
 MIT License
 
 Copyright (c) 2026 yangshoulai

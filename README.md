@@ -12,7 +12,7 @@
 
 [![Version](https://img.shields.io/github/v/tag/yangshoulai/tgdrive?sort=semver&label=version&color=0b0c13)](https://github.com/yangshoulai/tgdrive/releases)
 [![Docker](https://img.shields.io/github/actions/workflow/status/yangshoulai/tgdrive/docker.yml?label=docker&logo=docker&logoColor=white)](https://github.com/yangshoulai/tgdrive/actions/workflows/docker.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-0b0c13)](LICENSE)
+[![License: MIT + AGPL](https://img.shields.io/badge/license-MIT%20%2B%20AGPL--3.0-0b0c13)](#许可证)
 
 [功能特点](#功能特点) · [界面预览](#界面预览) · [快速开始](#快速开始) · [文件助手](#文件助手) · [网页资源抓取](#网页资源抓取) · [使用文档](#使用文档)
 
@@ -225,6 +225,8 @@ docker build --target platform -t tessera:platform .
 
 配套的 [Tessera 资源抓取脚本](userscripts/tessera-grabber.user.js) 从已加载的网页中收集图片、视频、音频、M3U8 与常见文件，在悬浮面板中预览、选择和批量保存；X 与 YouTube 另有页面操作入口。
 
+脚本还内置了基于 LinkSwift 的九个网盘取链适配器：百度、阿里、中国移动、天翼、迅雷、光鸭、夸克、UC 与 123 云盘。在网盘中勾选文件，打开 Tessera 面板，点「发送已选网盘文件」，即可确认保存位置、修改文件名并提交服务器下载，无需另装 LinkSwift。一次最多 50 个文件；文件夹请打开后选择里面的文件。百度自盘首次使用需点「授权百度取链」，在百度页面确认后返回重试。阿里、移动与迅雷分享文件请先转存自己的网盘；其他分享页需先完成提取码验证。适配范围、验证边界与上游更新方法见 [内置取链说明](third_party/linkswift/README.md)。
+
 <img src="docs/screenshots/grabber.png" alt="真实资源抓取脚本运行于本地合成相册，展示候选图片与批量保存入口" width="100%">
 
 | 方式 | 数据路径 | 适用情况 |
@@ -245,6 +247,7 @@ docker build --target platform -t tessera:platform .
 - 本地下载仅支持 HTTP(S) 直链，单文件最多 64 MiB、每批最多 50 项；M3U8 / DASH 和平台视频走服务器下载。传输期间保持来源网页打开。
 - 已探测资源在关闭面板或站内换页后保留，手动清空或刷新网页才移除。同名文件不会被脚本直接覆盖，需改名后重试。
 - 服务器下载所需的来源 Cookie 会交给你配置的 Tessera 服务器；本地上传不转发来源 Cookie，Tessera 密钥也不进入来源请求。
+- 网盘取链仍受账号权限、流量额度、页面结构、服务器出口 IP 与临时链接有效期限制。失败后点重试会重新取链并创建新任务，保留修改后的保存名；不更新旧任务，也不保证继续旧任务的断点。网盘文件仅进入服务器下载流程。
 - iOS Userscripts 无脚本菜单与 `GM_cookie`，通过悬浮按钮设置，无法读取 HttpOnly Cookie。跨域、来源验证与窗口通信策略仍可能阻止读取或私密转交。
 
 </details>
@@ -383,4 +386,4 @@ python3.12 -m venv .venv
 
 ## 许可证
 
-本项目采用 [MIT License](LICENSE)。允许使用、修改、再分发和商用，须保留版权与许可声明；第三方依赖遵循各自的许可证。
+Tessera 后端与独立网页应用采用 [MIT License](LICENSE)。包含 LinkSwift 取链适配的资源抓取脚本从 0.16.0 起整体采用 [AGPL-3.0-or-later](userscripts/LICENSE)，保留原作者及 Tessera 原始代码的许可声明，见 [脚本版权说明](userscripts/NOTICE.md)。其他第三方依赖遵循各自的许可证。

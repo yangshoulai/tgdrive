@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.15.0
-// @description  在 X、YouTube 和其他网页上复制资源地址与 curl 命令，发送到 Tessera 离线下载，或在浏览器下载后上传
+// @version      0.16.0
+// @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
-// @license      MIT
+// @license      AGPL-3.0-or-later
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
 // @match        *://*/*
 // @run-at       document-start
@@ -27,6 +27,707 @@
 // @inject-into  content
 // @connect      *
 // ==/UserScript==
+
+/*
+ * Copyright (c) 2026 yangshoulai. Original Tessera code retains its MIT notice
+ * in userscripts/NOTICE.md; this combined script is distributed under AGPL-3.0-or-later.
+ * Cloud-drive adapters are adapted from LinkSwift by 油小猴 and hmjz100,
+ * Copyright (c) 2022 hmjz100, AGPL-3.0-or-later.
+ * Upstream: https://github.com/hmjz100/LinkSwift
+ * Pinned commit: 8283da03e6c78576ebca8b1604161bcd54ade82e (1.1.4).
+ * Modified 2026-10-26: extract selection and link resolution; use Tessera UI/GM APIs.
+ * License and complete source: https://github.com/yangshoulai/tgdrive/tree/main/userscripts
+ * Upstream snapshot and update instructions: third_party/linkswift/README.md.
+ * This program comes WITHOUT ANY WARRANTY. See userscripts/LICENSE for the full license.
+ */
+
+/*
+ * Complete licenses for standalone distribution of this userscript.
+ *
+ * MIT License
+ *
+ * Copyright (c) 2026 yangshoulai
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ *                     GNU AFFERO GENERAL PUBLIC LICENSE
+ *                        Version 3, 19 November 2007
+ *
+ *  Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+ *  Everyone is permitted to copy and distribute verbatim copies
+ *  of this license document, but changing it is not allowed.
+ *
+ *                             Preamble
+ *
+ *   The GNU Affero General Public License is a free, copyleft license for
+ * software and other kinds of works, specifically designed to ensure
+ * cooperation with the community in the case of network server software.
+ *
+ *   The licenses for most software and other practical works are designed
+ * to take away your freedom to share and change the works.  By contrast,
+ * our General Public Licenses are intended to guarantee your freedom to
+ * share and change all versions of a program--to make sure it remains free
+ * software for all its users.
+ *
+ *   When we speak of free software, we are referring to freedom, not
+ * price.  Our General Public Licenses are designed to make sure that you
+ * have the freedom to distribute copies of free software (and charge for
+ * them if you wish), that you receive source code or can get it if you
+ * want it, that you can change the software or use pieces of it in new
+ * free programs, and that you know you can do these things.
+ *
+ *   Developers that use our General Public Licenses protect your rights
+ * with two steps: (1) assert copyright on the software, and (2) offer
+ * you this License which gives you legal permission to copy, distribute
+ * and/or modify the software.
+ *
+ *   A secondary benefit of defending all users' freedom is that
+ * improvements made in alternate versions of the program, if they
+ * receive widespread use, become available for other developers to
+ * incorporate.  Many developers of free software are heartened and
+ * encouraged by the resulting cooperation.  However, in the case of
+ * software used on network servers, this result may fail to come about.
+ * The GNU General Public License permits making a modified version and
+ * letting the public access it on a server without ever releasing its
+ * source code to the public.
+ *
+ *   The GNU Affero General Public License is designed specifically to
+ * ensure that, in such cases, the modified source code becomes available
+ * to the community.  It requires the operator of a network server to
+ * provide the source code of the modified version running there to the
+ * users of that server.  Therefore, public use of a modified version, on
+ * a publicly accessible server, gives the public access to the source
+ * code of the modified version.
+ *
+ *   An older license, called the Affero General Public License and
+ * published by Affero, was designed to accomplish similar goals.  This is
+ * a different license, not a version of the Affero GPL, but Affero has
+ * released a new version of the Affero GPL which permits relicensing under
+ * this license.
+ *
+ *   The precise terms and conditions for copying, distribution and
+ * modification follow.
+ *
+ *                        TERMS AND CONDITIONS
+ *
+ *   0. Definitions.
+ *
+ *   "This License" refers to version 3 of the GNU Affero General Public License.
+ *
+ *   "Copyright" also means copyright-like laws that apply to other kinds of
+ * works, such as semiconductor masks.
+ *
+ *   "The Program" refers to any copyrightable work licensed under this
+ * License.  Each licensee is addressed as "you".  "Licensees" and
+ * "recipients" may be individuals or organizations.
+ *
+ *   To "modify" a work means to copy from or adapt all or part of the work
+ * in a fashion requiring copyright permission, other than the making of an
+ * exact copy.  The resulting work is called a "modified version" of the
+ * earlier work or a work "based on" the earlier work.
+ *
+ *   A "covered work" means either the unmodified Program or a work based
+ * on the Program.
+ *
+ *   To "propagate" a work means to do anything with it that, without
+ * permission, would make you directly or secondarily liable for
+ * infringement under applicable copyright law, except executing it on a
+ * computer or modifying a private copy.  Propagation includes copying,
+ * distribution (with or without modification), making available to the
+ * public, and in some countries other activities as well.
+ *
+ *   To "convey" a work means any kind of propagation that enables other
+ * parties to make or receive copies.  Mere interaction with a user through
+ * a computer network, with no transfer of a copy, is not conveying.
+ *
+ *   An interactive user interface displays "Appropriate Legal Notices"
+ * to the extent that it includes a convenient and prominently visible
+ * feature that (1) displays an appropriate copyright notice, and (2)
+ * tells the user that there is no warranty for the work (except to the
+ * extent that warranties are provided), that licensees may convey the
+ * work under this License, and how to view a copy of this License.  If
+ * the interface presents a list of user commands or options, such as a
+ * menu, a prominent item in the list meets this criterion.
+ *
+ *   1. Source Code.
+ *
+ *   The "source code" for a work means the preferred form of the work
+ * for making modifications to it.  "Object code" means any non-source
+ * form of a work.
+ *
+ *   A "Standard Interface" means an interface that either is an official
+ * standard defined by a recognized standards body, or, in the case of
+ * interfaces specified for a particular programming language, one that
+ * is widely used among developers working in that language.
+ *
+ *   The "System Libraries" of an executable work include anything, other
+ * than the work as a whole, that (a) is included in the normal form of
+ * packaging a Major Component, but which is not part of that Major
+ * Component, and (b) serves only to enable use of the work with that
+ * Major Component, or to implement a Standard Interface for which an
+ * implementation is available to the public in source code form.  A
+ * "Major Component", in this context, means a major essential component
+ * (kernel, window system, and so on) of the specific operating system
+ * (if any) on which the executable work runs, or a compiler used to
+ * produce the work, or an object code interpreter used to run it.
+ *
+ *   The "Corresponding Source" for a work in object code form means all
+ * the source code needed to generate, install, and (for an executable
+ * work) run the object code and to modify the work, including scripts to
+ * control those activities.  However, it does not include the work's
+ * System Libraries, or general-purpose tools or generally available free
+ * programs which are used unmodified in performing those activities but
+ * which are not part of the work.  For example, Corresponding Source
+ * includes interface definition files associated with source files for
+ * the work, and the source code for shared libraries and dynamically
+ * linked subprograms that the work is specifically designed to require,
+ * such as by intimate data communication or control flow between those
+ * subprograms and other parts of the work.
+ *
+ *   The Corresponding Source need not include anything that users
+ * can regenerate automatically from other parts of the Corresponding
+ * Source.
+ *
+ *   The Corresponding Source for a work in source code form is that
+ * same work.
+ *
+ *   2. Basic Permissions.
+ *
+ *   All rights granted under this License are granted for the term of
+ * copyright on the Program, and are irrevocable provided the stated
+ * conditions are met.  This License explicitly affirms your unlimited
+ * permission to run the unmodified Program.  The output from running a
+ * covered work is covered by this License only if the output, given its
+ * content, constitutes a covered work.  This License acknowledges your
+ * rights of fair use or other equivalent, as provided by copyright law.
+ *
+ *   You may make, run and propagate covered works that you do not
+ * convey, without conditions so long as your license otherwise remains
+ * in force.  You may convey covered works to others for the sole purpose
+ * of having them make modifications exclusively for you, or provide you
+ * with facilities for running those works, provided that you comply with
+ * the terms of this License in conveying all material for which you do
+ * not control copyright.  Those thus making or running the covered works
+ * for you must do so exclusively on your behalf, under your direction
+ * and control, on terms that prohibit them from making any copies of
+ * your copyrighted material outside their relationship with you.
+ *
+ *   Conveying under any other circumstances is permitted solely under
+ * the conditions stated below.  Sublicensing is not allowed; section 10
+ * makes it unnecessary.
+ *
+ *   3. Protecting Users' Legal Rights From Anti-Circumvention Law.
+ *
+ *   No covered work shall be deemed part of an effective technological
+ * measure under any applicable law fulfilling obligations under article
+ * 11 of the WIPO copyright treaty adopted on 20 December 1996, or
+ * similar laws prohibiting or restricting circumvention of such
+ * measures.
+ *
+ *   When you convey a covered work, you waive any legal power to forbid
+ * circumvention of technological measures to the extent such circumvention
+ * is effected by exercising rights under this License with respect to
+ * the covered work, and you disclaim any intention to limit operation or
+ * modification of the work as a means of enforcing, against the work's
+ * users, your or third parties' legal rights to forbid circumvention of
+ * technological measures.
+ *
+ *   4. Conveying Verbatim Copies.
+ *
+ *   You may convey verbatim copies of the Program's source code as you
+ * receive it, in any medium, provided that you conspicuously and
+ * appropriately publish on each copy an appropriate copyright notice;
+ * keep intact all notices stating that this License and any
+ * non-permissive terms added in accord with section 7 apply to the code;
+ * keep intact all notices of the absence of any warranty; and give all
+ * recipients a copy of this License along with the Program.
+ *
+ *   You may charge any price or no price for each copy that you convey,
+ * and you may offer support or warranty protection for a fee.
+ *
+ *   5. Conveying Modified Source Versions.
+ *
+ *   You may convey a work based on the Program, or the modifications to
+ * produce it from the Program, in the form of source code under the
+ * terms of section 4, provided that you also meet all of these conditions:
+ *
+ *     a) The work must carry prominent notices stating that you modified
+ *     it, and giving a relevant date.
+ *
+ *     b) The work must carry prominent notices stating that it is
+ *     released under this License and any conditions added under section
+ *     7.  This requirement modifies the requirement in section 4 to
+ *     "keep intact all notices".
+ *
+ *     c) You must license the entire work, as a whole, under this
+ *     License to anyone who comes into possession of a copy.  This
+ *     License will therefore apply, along with any applicable section 7
+ *     additional terms, to the whole of the work, and all its parts,
+ *     regardless of how they are packaged.  This License gives no
+ *     permission to license the work in any other way, but it does not
+ *     invalidate such permission if you have separately received it.
+ *
+ *     d) If the work has interactive user interfaces, each must display
+ *     Appropriate Legal Notices; however, if the Program has interactive
+ *     interfaces that do not display Appropriate Legal Notices, your
+ *     work need not make them do so.
+ *
+ *   A compilation of a covered work with other separate and independent
+ * works, which are not by their nature extensions of the covered work,
+ * and which are not combined with it such as to form a larger program,
+ * in or on a volume of a storage or distribution medium, is called an
+ * "aggregate" if the compilation and its resulting copyright are not
+ * used to limit the access or legal rights of the compilation's users
+ * beyond what the individual works permit.  Inclusion of a covered work
+ * in an aggregate does not cause this License to apply to the other
+ * parts of the aggregate.
+ *
+ *   6. Conveying Non-Source Forms.
+ *
+ *   You may convey a covered work in object code form under the terms
+ * of sections 4 and 5, provided that you also convey the
+ * machine-readable Corresponding Source under the terms of this License,
+ * in one of these ways:
+ *
+ *     a) Convey the object code in, or embodied in, a physical product
+ *     (including a physical distribution medium), accompanied by the
+ *     Corresponding Source fixed on a durable physical medium
+ *     customarily used for software interchange.
+ *
+ *     b) Convey the object code in, or embodied in, a physical product
+ *     (including a physical distribution medium), accompanied by a
+ *     written offer, valid for at least three years and valid for as
+ *     long as you offer spare parts or customer support for that product
+ *     model, to give anyone who possesses the object code either (1) a
+ *     copy of the Corresponding Source for all the software in the
+ *     product that is covered by this License, on a durable physical
+ *     medium customarily used for software interchange, for a price no
+ *     more than your reasonable cost of physically performing this
+ *     conveying of source, or (2) access to copy the
+ *     Corresponding Source from a network server at no charge.
+ *
+ *     c) Convey individual copies of the object code with a copy of the
+ *     written offer to provide the Corresponding Source.  This
+ *     alternative is allowed only occasionally and noncommercially, and
+ *     only if you received the object code with such an offer, in accord
+ *     with subsection 6b.
+ *
+ *     d) Convey the object code by offering access from a designated
+ *     place (gratis or for a charge), and offer equivalent access to the
+ *     Corresponding Source in the same way through the same place at no
+ *     further charge.  You need not require recipients to copy the
+ *     Corresponding Source along with the object code.  If the place to
+ *     copy the object code is a network server, the Corresponding Source
+ *     may be on a different server (operated by you or a third party)
+ *     that supports equivalent copying facilities, provided you maintain
+ *     clear directions next to the object code saying where to find the
+ *     Corresponding Source.  Regardless of what server hosts the
+ *     Corresponding Source, you remain obligated to ensure that it is
+ *     available for as long as needed to satisfy these requirements.
+ *
+ *     e) Convey the object code using peer-to-peer transmission, provided
+ *     you inform other peers where the object code and Corresponding
+ *     Source of the work are being offered to the general public at no
+ *     charge under subsection 6d.
+ *
+ *   A separable portion of the object code, whose source code is excluded
+ * from the Corresponding Source as a System Library, need not be
+ * included in conveying the object code work.
+ *
+ *   A "User Product" is either (1) a "consumer product", which means any
+ * tangible personal property which is normally used for personal, family,
+ * or household purposes, or (2) anything designed or sold for incorporation
+ * into a dwelling.  In determining whether a product is a consumer product,
+ * doubtful cases shall be resolved in favor of coverage.  For a particular
+ * product received by a particular user, "normally used" refers to a
+ * typical or common use of that class of product, regardless of the status
+ * of the particular user or of the way in which the particular user
+ * actually uses, or expects or is expected to use, the product.  A product
+ * is a consumer product regardless of whether the product has substantial
+ * commercial, industrial or non-consumer uses, unless such uses represent
+ * the only significant mode of use of the product.
+ *
+ *   "Installation Information" for a User Product means any methods,
+ * procedures, authorization keys, or other information required to install
+ * and execute modified versions of a covered work in that User Product from
+ * a modified version of its Corresponding Source.  The information must
+ * suffice to ensure that the continued functioning of the modified object
+ * code is in no case prevented or interfered with solely because
+ * modification has been made.
+ *
+ *   If you convey an object code work under this section in, or with, or
+ * specifically for use in, a User Product, and the conveying occurs as
+ * part of a transaction in which the right of possession and use of the
+ * User Product is transferred to the recipient in perpetuity or for a
+ * fixed term (regardless of how the transaction is characterized), the
+ * Corresponding Source conveyed under this section must be accompanied
+ * by the Installation Information.  But this requirement does not apply
+ * if neither you nor any third party retains the ability to install
+ * modified object code on the User Product (for example, the work has
+ * been installed in ROM).
+ *
+ *   The requirement to provide Installation Information does not include a
+ * requirement to continue to provide support service, warranty, or updates
+ * for a work that has been modified or installed by the recipient, or for
+ * the User Product in which it has been modified or installed.  Access to a
+ * network may be denied when the modification itself materially and
+ * adversely affects the operation of the network or violates the rules and
+ * protocols for communication across the network.
+ *
+ *   Corresponding Source conveyed, and Installation Information provided,
+ * in accord with this section must be in a format that is publicly
+ * documented (and with an implementation available to the public in
+ * source code form), and must require no special password or key for
+ * unpacking, reading or copying.
+ *
+ *   7. Additional Terms.
+ *
+ *   "Additional permissions" are terms that supplement the terms of this
+ * License by making exceptions from one or more of its conditions.
+ * Additional permissions that are applicable to the entire Program shall
+ * be treated as though they were included in this License, to the extent
+ * that they are valid under applicable law.  If additional permissions
+ * apply only to part of the Program, that part may be used separately
+ * under those permissions, but the entire Program remains governed by
+ * this License without regard to the additional permissions.
+ *
+ *   When you convey a copy of a covered work, you may at your option
+ * remove any additional permissions from that copy, or from any part of
+ * it.  (Additional permissions may be written to require their own
+ * removal in certain cases when you modify the work.)  You may place
+ * additional permissions on material, added by you to a covered work,
+ * for which you have or can give appropriate copyright permission.
+ *
+ *   Notwithstanding any other provision of this License, for material you
+ * add to a covered work, you may (if authorized by the copyright holders of
+ * that material) supplement the terms of this License with terms:
+ *
+ *     a) Disclaiming warranty or limiting liability differently from the
+ *     terms of sections 15 and 16 of this License; or
+ *
+ *     b) Requiring preservation of specified reasonable legal notices or
+ *     author attributions in that material or in the Appropriate Legal
+ *     Notices displayed by works containing it; or
+ *
+ *     c) Prohibiting misrepresentation of the origin of that material, or
+ *     requiring that modified versions of such material be marked in
+ *     reasonable ways as different from the original version; or
+ *
+ *     d) Limiting the use for publicity purposes of names of licensors or
+ *     authors of the material; or
+ *
+ *     e) Declining to grant rights under trademark law for use of some
+ *     trade names, trademarks, or service marks; or
+ *
+ *     f) Requiring indemnification of licensors and authors of that
+ *     material by anyone who conveys the material (or modified versions of
+ *     it) with contractual assumptions of liability to the recipient, for
+ *     any liability that these contractual assumptions directly impose on
+ *     those licensors and authors.
+ *
+ *   All other non-permissive additional terms are considered "further
+ * restrictions" within the meaning of section 10.  If the Program as you
+ * received it, or any part of it, contains a notice stating that it is
+ * governed by this License along with a term that is a further
+ * restriction, you may remove that term.  If a license document contains
+ * a further restriction but permits relicensing or conveying under this
+ * License, you may add to a covered work material governed by the terms
+ * of that license document, provided that the further restriction does
+ * not survive such relicensing or conveying.
+ *
+ *   If you add terms to a covered work in accord with this section, you
+ * must place, in the relevant source files, a statement of the
+ * additional terms that apply to those files, or a notice indicating
+ * where to find the applicable terms.
+ *
+ *   Additional terms, permissive or non-permissive, may be stated in the
+ * form of a separately written license, or stated as exceptions;
+ * the above requirements apply either way.
+ *
+ *   8. Termination.
+ *
+ *   You may not propagate or modify a covered work except as expressly
+ * provided under this License.  Any attempt otherwise to propagate or
+ * modify it is void, and will automatically terminate your rights under
+ * this License (including any patent licenses granted under the third
+ * paragraph of section 11).
+ *
+ *   However, if you cease all violation of this License, then your
+ * license from a particular copyright holder is reinstated (a)
+ * provisionally, unless and until the copyright holder explicitly and
+ * finally terminates your license, and (b) permanently, if the copyright
+ * holder fails to notify you of the violation by some reasonable means
+ * prior to 60 days after the cessation.
+ *
+ *   Moreover, your license from a particular copyright holder is
+ * reinstated permanently if the copyright holder notifies you of the
+ * violation by some reasonable means, this is the first time you have
+ * received notice of violation of this License (for any work) from that
+ * copyright holder, and you cure the violation prior to 30 days after
+ * your receipt of the notice.
+ *
+ *   Termination of your rights under this section does not terminate the
+ * licenses of parties who have received copies or rights from you under
+ * this License.  If your rights have been terminated and not permanently
+ * reinstated, you do not qualify to receive new licenses for the same
+ * material under section 10.
+ *
+ *   9. Acceptance Not Required for Having Copies.
+ *
+ *   You are not required to accept this License in order to receive or
+ * run a copy of the Program.  Ancillary propagation of a covered work
+ * occurring solely as a consequence of using peer-to-peer transmission
+ * to receive a copy likewise does not require acceptance.  However,
+ * nothing other than this License grants you permission to propagate or
+ * modify any covered work.  These actions infringe copyright if you do
+ * not accept this License.  Therefore, by modifying or propagating a
+ * covered work, you indicate your acceptance of this License to do so.
+ *
+ *   10. Automatic Licensing of Downstream Recipients.
+ *
+ *   Each time you convey a covered work, the recipient automatically
+ * receives a license from the original licensors, to run, modify and
+ * propagate that work, subject to this License.  You are not responsible
+ * for enforcing compliance by third parties with this License.
+ *
+ *   An "entity transaction" is a transaction transferring control of an
+ * organization, or substantially all assets of one, or subdividing an
+ * organization, or merging organizations.  If propagation of a covered
+ * work results from an entity transaction, each party to that
+ * transaction who receives a copy of the work also receives whatever
+ * licenses to the work the party's predecessor in interest had or could
+ * give under the previous paragraph, plus a right to possession of the
+ * Corresponding Source of the work from the predecessor in interest, if
+ * the predecessor has it or can get it with reasonable efforts.
+ *
+ *   You may not impose any further restrictions on the exercise of the
+ * rights granted or affirmed under this License.  For example, you may
+ * not impose a license fee, royalty, or other charge for exercise of
+ * rights granted under this License, and you may not initiate litigation
+ * (including a cross-claim or counterclaim in a lawsuit) alleging that
+ * any patent claim is infringed by making, using, selling, offering for
+ * sale, or importing the Program or any portion of it.
+ *
+ *   11. Patents.
+ *
+ *   A "contributor" is a copyright holder who authorizes use under this
+ * License of the Program or a work on which the Program is based.  The
+ * work thus licensed is called the contributor's "contributor version".
+ *
+ *   A contributor's "essential patent claims" are all patent claims
+ * owned or controlled by the contributor, whether already acquired or
+ * hereafter acquired, that would be infringed by some manner, permitted
+ * by this License, of making, using, or selling its contributor version,
+ * but do not include claims that would be infringed only as a
+ * consequence of further modification of the contributor version.  For
+ * purposes of this definition, "control" includes the right to grant
+ * patent sublicenses in a manner consistent with the requirements of
+ * this License.
+ *
+ *   Each contributor grants you a non-exclusive, worldwide, royalty-free
+ * patent license under the contributor's essential patent claims, to
+ * make, use, sell, offer for sale, import and otherwise run, modify and
+ * propagate the contents of its contributor version.
+ *
+ *   In the following three paragraphs, a "patent license" is any express
+ * agreement or commitment, however denominated, not to enforce a patent
+ * (such as an express permission to practice a patent or covenant not to
+ * sue for patent infringement).  To "grant" such a patent license to a
+ * party means to make such an agreement or commitment not to enforce a
+ * patent against the party.
+ *
+ *   If you convey a covered work, knowingly relying on a patent license,
+ * and the Corresponding Source of the work is not available for anyone
+ * to copy, free of charge and under the terms of this License, through a
+ * publicly available network server or other readily accessible means,
+ * then you must either (1) cause the Corresponding Source to be so
+ * available, or (2) arrange to deprive yourself of the benefit of the
+ * patent license for this particular work, or (3) arrange, in a manner
+ * consistent with the requirements of this License, to extend the patent
+ * license to downstream recipients.  "Knowingly relying" means you have
+ * actual knowledge that, but for the patent license, your conveying the
+ * covered work in a country, or your recipient's use of the covered work
+ * in a country, would infringe one or more identifiable patents in that
+ * country that you have reason to believe are valid.
+ *
+ *   If, pursuant to or in connection with a single transaction or
+ * arrangement, you convey, or propagate by procuring conveyance of, a
+ * covered work, and grant a patent license to some of the parties
+ * receiving the covered work authorizing them to use, propagate, modify
+ * or convey a specific copy of the covered work, then the patent license
+ * you grant is automatically extended to all recipients of the covered
+ * work and works based on it.
+ *
+ *   A patent license is "discriminatory" if it does not include within
+ * the scope of its coverage, prohibits the exercise of, or is
+ * conditioned on the non-exercise of one or more of the rights that are
+ * specifically granted under this License.  You may not convey a covered
+ * work if you are a party to an arrangement with a third party that is
+ * in the business of distributing software, under which you make payment
+ * to the third party based on the extent of your activity of conveying
+ * the work, and under which the third party grants, to any of the
+ * parties who would receive the covered work from you, a discriminatory
+ * patent license (a) in connection with copies of the covered work
+ * conveyed by you (or copies made from those copies), or (b) primarily
+ * for and in connection with specific products or compilations that
+ * contain the covered work, unless you entered into that arrangement,
+ * or that patent license was granted, prior to 28 March 2007.
+ *
+ *   Nothing in this License shall be construed as excluding or limiting
+ * any implied license or other defenses to infringement that may
+ * otherwise be available to you under applicable patent law.
+ *
+ *   12. No Surrender of Others' Freedom.
+ *
+ *   If conditions are imposed on you (whether by court order, agreement or
+ * otherwise) that contradict the conditions of this License, they do not
+ * excuse you from the conditions of this License.  If you cannot convey a
+ * covered work so as to satisfy simultaneously your obligations under this
+ * License and any other pertinent obligations, then as a consequence you may
+ * not convey it at all.  For example, if you agree to terms that obligate you
+ * to collect a royalty for further conveying from those to whom you convey
+ * the Program, the only way you could satisfy both those terms and this
+ * License would be to refrain entirely from conveying the Program.
+ *
+ *   13. Remote Network Interaction; Use with the GNU General Public License.
+ *
+ *   Notwithstanding any other provision of this License, if you modify the
+ * Program, your modified version must prominently offer all users
+ * interacting with it remotely through a computer network (if your version
+ * supports such interaction) an opportunity to receive the Corresponding
+ * Source of your version by providing access to the Corresponding Source
+ * from a network server at no charge, through some standard or customary
+ * means of facilitating copying of software.  This Corresponding Source
+ * shall include the Corresponding Source for any work covered by version 3
+ * of the GNU General Public License that is incorporated pursuant to the
+ * following paragraph.
+ *
+ *   Notwithstanding any other provision of this License, you have
+ * permission to link or combine any covered work with a work licensed
+ * under version 3 of the GNU General Public License into a single
+ * combined work, and to convey the resulting work.  The terms of this
+ * License will continue to apply to the part which is the covered work,
+ * but the work with which it is combined will remain governed by version
+ * 3 of the GNU General Public License.
+ *
+ *   14. Revised Versions of this License.
+ *
+ *   The Free Software Foundation may publish revised and/or new versions of
+ * the GNU Affero General Public License from time to time.  Such new versions
+ * will be similar in spirit to the present version, but may differ in detail to
+ * address new problems or concerns.
+ *
+ *   Each version is given a distinguishing version number.  If the
+ * Program specifies that a certain numbered version of the GNU Affero General
+ * Public License "or any later version" applies to it, you have the
+ * option of following the terms and conditions either of that numbered
+ * version or of any later version published by the Free Software
+ * Foundation.  If the Program does not specify a version number of the
+ * GNU Affero General Public License, you may choose any version ever published
+ * by the Free Software Foundation.
+ *
+ *   If the Program specifies that a proxy can decide which future
+ * versions of the GNU Affero General Public License can be used, that proxy's
+ * public statement of acceptance of a version permanently authorizes you
+ * to choose that version for the Program.
+ *
+ *   Later license versions may give you additional or different
+ * permissions.  However, no additional obligations are imposed on any
+ * author or copyright holder as a result of your choosing to follow a
+ * later version.
+ *
+ *   15. Disclaimer of Warranty.
+ *
+ *   THERE IS NO WARRANTY FOR THE PROGRAM, TO THE EXTENT PERMITTED BY
+ * APPLICABLE LAW.  EXCEPT WHEN OTHERWISE STATED IN WRITING THE COPYRIGHT
+ * HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY
+ * OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO,
+ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE.  THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM
+ * IS WITH YOU.  SHOULD THE PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF
+ * ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+ *
+ *   16. Limitation of Liability.
+ *
+ *   IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING
+ * WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MODIFIES AND/OR CONVEYS
+ * THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY
+ * GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE
+ * USE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF
+ * DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD
+ * PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER PROGRAMS),
+ * EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGES.
+ *
+ *   17. Interpretation of Sections 15 and 16.
+ *
+ *   If the disclaimer of warranty and limitation of liability provided
+ * above cannot be given local legal effect according to their terms,
+ * reviewing courts shall apply local law that most closely approximates
+ * an absolute waiver of all civil liability in connection with the
+ * Program, unless a warranty or assumption of liability accompanies a
+ * copy of the Program in return for a fee.
+ *
+ *                      END OF TERMS AND CONDITIONS
+ *
+ *             How to Apply These Terms to Your New Programs
+ *
+ *   If you develop a new program, and you want it to be of the greatest
+ * possible use to the public, the best way to achieve this is to make it
+ * free software which everyone can redistribute and change under these terms.
+ *
+ *   To do so, attach the following notices to the program.  It is safest
+ * to attach them to the start of each source file to most effectively
+ * state the exclusion of warranty; and each file should have at least
+ * the "copyright" line and a pointer to where the full notice is found.
+ *
+ *     <one line to give the program's name and a brief idea of what it does.>
+ *     Copyright (C) <year>  <name of author>
+ *
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published
+ *     by the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
+ *
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
+ *
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Also add information on how to contact you by electronic and paper mail.
+ *
+ *   If your software can interact with users remotely through a computer
+ * network, you should also make sure that it provides a way for users to
+ * get its source.  For example, if your program is a web application, its
+ * interface could display a "Source" link that leads users to an archive
+ * of the code.  There are many ways you could offer source, and different
+ * solutions will be better for different programs; see section 13 for the
+ * specific requirements.
+ *
+ *   You should also get your employer (if you work as a programmer) or school,
+ * if any, to sign a "copyright disclaimer" for the program, if necessary.
+ * For more information on this, and how to apply and follow the GNU AGPL, see
+ * <https://www.gnu.org/licenses/>.
+ */
 
 /*
  * 三处入口：右下角悬浮按钮（所有网页）、X 帖子操作栏、YouTube 播放页操作栏。
@@ -55,7 +756,7 @@
   const GMA = typeof GM !== "undefined" ? GM : null;
   const SYNC_STORE = typeof GM_getValue === "function" && typeof GM_setValue === "function";
   const HAS_MENU = typeof GM_registerMenuCommand === "function";
-  const STORE_KEYS = ["settings", "sent", "fabPosition", "assistant-pages"];
+  const STORE_KEYS = ["settings", "sent", "fabPosition", "assistant-pages", "cloud-baidu-token", "cloud-baidu-auth"];
   const cache = new Map();
   const gm = {
     get(key, fallback) {
@@ -299,6 +1000,489 @@
     return null;
   }
 
+  // ---------- 内置网盘适配（LinkSwift 1.1.4 / 8283da03；来源映射见 third_party/linkswift） ----------
+
+  const CLOUD_PROVIDERS = [
+    ["baidu", "百度网盘", /^(?:pan|yun)\.baidu\.com$/],
+    ["aliyun", "阿里云盘", /^(?:www\.)?(?:aliyundrive|alipan)\.com$/],
+    ["mcloud", "中国移动云盘", /^(?:yun|caiyun)\.139\.com$/],
+    ["tcloud", "天翼云盘", /^cloud\.189\.cn$/],
+    ["xunlei", "迅雷云盘", /^pan\.xunlei\.com$/],
+    ["guangya", "光鸭云盘", /^www\.guangyapan\.com$/],
+    ["quark", "夸克网盘", /^pan\.quark\.cn$/],
+    ["uc", "UC 网盘", /^drive\.uc\.cn$/],
+    ["123pan", "123 云盘", /^(?:(?:www|login|yun|user|share)\.)?(?:123(?:pan|684|865|952|912)\.com|123pan\.cn)$/],
+  ];
+  const CLOUD_API_HOSTS = {
+    baidu: ["pan.baidu.com", "yun.baidu.com", "openapi.baidu.com"],
+    aliyun: ["api.alipan.com", "api.aliyundrive.com"], mcloud: ["personal-kd-njs.yun.139.com"],
+    tcloud: ["api.cloud.189.cn"], xunlei: ["api-pan.xunlei.com", "xluser-ssl.xunlei.com"],
+    guangya: ["api.guangyapan.com"], quark: ["drive-pc.quark.cn", "drive-social-api.quark.cn"],
+    uc: ["pc-api.uc.cn"], "123pan": ["api.123pan.cn"],
+  };
+  // These client headers belong to the server download request. GM requests keep the browser's User-Agent.
+  const CLOUD_DOWNLOAD_UA = {
+    baidu: "pan.baidu.com",
+    quark: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 QuarkPC/6.9.7.761 QuarkCloudDrivePC/6.9.7.761 quark-cloud-drive/2.5.40",
+    uc: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) uc-cloud-drive/1.8.8 Chrome/100.0.4896.160 Electron/18.3.5.16-b62cf9c50d Safari/537.36 Channel/ucpan_other_ch",
+  };
+  const BAIDU_AUTHORIZE = "https://openapi.baidu.com/oauth/2.0/authorize?response_type=token&scope=basic,netdisk&client_id=omiOnr2tYnN9vSyDErcVFWpPU2mZA7YO&redirect_uri=oob&confirm_login=0";
+
+  function cloudOf(href = location.href) {
+    try {
+      const url = new URL(href);
+      if (url.protocol !== "https:" || url.username || url.password) return null;
+      const found = CLOUD_PROVIDERS.find(([, , hosts]) => hosts.test(url.hostname));
+      if (!found) return null;
+      return { provider: found[0], label: found[1], url: url.href, share: /^\/(?:web\/)?(?:s|share|link|t)(?:\/|$)|shareweb/.test(url.pathname) };
+    } catch { return null; }
+  }
+
+  const cloudNode = selector => (page.document || document).querySelector?.(selector);
+  const cloudNodes = selector => [...((page.document || document).querySelectorAll?.(selector) || [])];
+  function cloudStorage(key) {
+    try {
+      const value = (page.localStorage || localStorage).getItem(key);
+      try { return JSON.parse(value); } catch { return value; }
+    } catch { return null; }
+  }
+  function cloudSetStorage(key, value) {
+    try { (page.localStorage || localStorage).setItem(key, JSON.stringify(value)); } catch { /* 本页凭据仍可用 */ }
+  }
+  function cloudCookie(name) {
+    const value = document.cookie.split(";").map(part => part.trim()).find(part => part.startsWith(name + "="))?.slice(name.length + 1) || "";
+    try { return decodeURIComponent(value); } catch { return value; }
+  }
+
+  /** LinkSwift base.findReact: walk component owners, checking the actual selection props along the way. */
+  function cloudReactProps(node, accepts) {
+    if (!node) return null;
+    const keys = Object.keys(node);
+    const direct = node[keys.find(key => key.startsWith("__reactProps$"))];
+    if (direct && accepts(direct)) return direct;
+    let fiber = node[keys.find(key => /^(?:__reactFiber\$|__reactInternalInstance\$)/.test(key))];
+    const visited = new Set();
+    for (let depth = 0; fiber && depth < 40 && !visited.has(fiber); depth++) {
+      visited.add(fiber);
+      for (const props of [fiber.stateNode?.props, fiber.memoizedProps, fiber.pendingProps, fiber._instance?.props]) {
+        if (props && accepts(props)) return props;
+      }
+      fiber = fiber.return || fiber._currentElement?._owner;
+    }
+    return null;
+  }
+
+  /** Each adapter reads the same page state as upstream, without importing its UI or mutating selected files. */
+  function cloudSelected(context) {
+    switch (context.provider) {
+      case "baidu": {
+        const core = cloudNode(".wp-s-core-pan")?.__vue__?.selectedList;
+        if (core?.length) return core;
+        const list = cloudNode(".file-list")?.__vue__?.allFileList?.filter(item => item.selected);
+        if (list?.length) return list;
+        try { return page.require?.("system-core:context/context.js")?.instanceForSystem?.list?.getSelected?.() || []; }
+        catch { return []; }
+      }
+      case "aliyun": {
+        const props = cloudReactProps(cloudNode('[class^="node-list-table-view--"]'), value => Array.isArray(value.dataSource) && value.selectedKeys != null);
+        const ids = Array.isArray(props?.selectedKeys) ? props.selectedKeys : String(props?.selectedKeys || "").split(",");
+        return (props?.dataSource || []).filter(item => ids.some(id => String(id) === String(item.fileId)));
+      }
+      case "mcloud": {
+        const list = cloudNode(".main_file_list")?.__vue__?.selectList;
+        if (list) return list.map(value => value.item);
+        const home = cloudNode(".home-page")?.__vue__;
+        return (home?._computedWatchers?.fileList?.value || []).filter((_, index) => home.selectedFile?.includes(index));
+      }
+      case "tcloud": return cloudNode(".c-file-list")?.__vue__?.selectedList || [cloudNode(".info-detail")?.__vue__?.fileDetail].filter(Boolean);
+      case "xunlei": return cloudNodes('[class*="SourceListItem__item--"]').map(node => node.__vue__)
+        .filter(vue => vue?.selected?.includes?.(vue.info?.id)).map(vue => vue.info);
+      case "guangya": {
+        const props = cloudReactProps(cloudNode('.swangpan-file-list__root[data-ui="file-list"]'), value => Array.isArray(value.dataSource) && Array.isArray(value.selectedItems));
+        return (props?.dataSource || []).filter(item => props.selectedItems.some(id => String(id) === String(item.fileId)));
+      }
+      case "quark": case "uc": {
+        const props = cloudReactProps(cloudNode(".file-list"), value => Array.isArray(value.list) && Array.isArray(value.selectedRowKeys));
+        return (props?.list || []).filter(item => props.selectedRowKeys.some(id => String(id) === String(item.fid)))
+          .map(item => ({ ...item, stoken: props.stoken || "" }));
+      }
+      case "123pan": {
+        const props = cloudReactProps(cloudNode('.ant-table-wrapper, .tiled-list, .file-list, .single-file-sharing-container-content, .custom-table-wrapper, [class^="mfy_h-table-module__shell__"]'),
+          value => Array.isArray(value.dataSource || value.loadedFileList || value.files) || value.file?.S3KeyFlag != null);
+        const ids = props?.rowSelection?.selectedRowKeys || [];
+        const files = (props?.dataSource || props?.loadedFileList || props?.files || []).filter(item => item.checked === true || ids.some(id => String(id) === String(item.FileId)));
+        if (props?.file?.S3KeyFlag != null && !files.some(item => item.FileId === props.file.FileId)) files.push(props.file);
+        return files;
+      }
+      default: return [];
+    }
+  }
+
+  /** Snapshot only file fields, never React/Vue instances or account credentials. Folders are deliberately not expanded. */
+  function cloudSources(context) {
+    if (context.share && ["aliyun", "mcloud", "xunlei"].includes(context.provider)) throw new Error("请先将分享文件保存到自己的网盘，再打开文件夹并勾选文件");
+    const layouts = {
+      baidu: ["fs_id", "server_filename", "size", "fs_id server_filename filename size isdir"],
+      aliyun: ["fileId", "name", "size", "fileId driveId name size type"],
+      mcloud: ["contentID", "contentName", "contentSize", "contentID contentName contentSize contentSuffix path dirEtag caName"],
+      tcloud: ["fileId", "fileName", "size", "fileId fileName size isFolder shareId"],
+      xunlei: ["id", "name", "size", "id name size kind"],
+      guangya: ["fileId", "fileName", "fileSize", "fileId fileName fileSize resType"],
+      quark: ["fid", "file_name", "size", "fid file_name size file stoken share_fid_token"],
+      uc: ["fid", "file_name", "size", "fid file_name size file stoken share_fid_token"],
+      "123pan": ["FileId", "FileName", "Size", "FileId FileName Size Type Etag S3KeyFlag"],
+    };
+    const [idKey, nameKey, sizeKey, fields] = layouts[context.provider];
+    const selectedFiles = cloudSelected(context);
+    const files = selectedFiles.filter(item => item && item[idKey] != null && !item.isdir && !item.isFolder && !item.dirEtag && !item.caName
+      && item.type !== "folder" && item.kind !== "drive#folder" && item.resType != 2 && item.file !== false && (item.Type == null || item.Type === 0)
+      && (!["quark", "uc"].includes(context.provider) || item.file === true)
+      && (context.provider !== "aliyun" || item.type === "file") && (context.provider !== "xunlei" || item.kind === "drive#file"));
+    if (!files.length) throw new Error(context.provider === "aliyun" && cloudNode('[class^="node-list-grid-view--"]')
+      ? "请切换到网盘的列表视图，再勾选文件" : "请先在网盘中勾选文件；文件夹请打开后选择里面的文件");
+    if (files.length > BATCH_LIMIT) throw new Error(`一次最多发送 ${BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
+    const session = new Map();
+    const unique = new Map();
+    for (const item of files) {
+      const file = Object.fromEntries(fields.split(" ").filter(key => item[key] != null).map(key => [key, item[key]]));
+      const source = new URL(context.url);
+      source.search = "";
+      if (!context.share) source.pathname = "/";
+      source.hash = `tessera-${context.provider}-${encodeURIComponent(String(item[idKey]))}`;
+      unique.set(source.href, { url: source.href, name: String(item[nameKey] || item.filename || ""), size: Number(item[sizeKey]) || null,
+        cloud: { ...context, file, session } });
+    }
+    const result = [...unique.values()].filter(item => !isSent(item.url));
+    if (!result.length) throw new Error("所选文件已发送，请到 Tessera 查看下载任务");
+    return result;
+  }
+
+  function cloudFailure(context, code) {
+    const safeCode = /^[\w.-]{1,48}$/.test(String(code)) ? `（代码 ${code}）` : "";
+    return new Error(`${context.label}未返回有效下载地址${safeCode}，请确认已登录、文件可下载，再刷新网盘页面重试`);
+  }
+  function cloudOnce(context, key, factory) {
+    if (!context.session.has(key)) context.session.set(key, Promise.resolve().then(factory).catch(error => { context.session.delete(key); throw error; }));
+    return context.session.get(key);
+  }
+  /** All source requests are separate from api(): no Tessera access key, no custom User-Agent. */
+  async function cloudRequest(context, input, { body, headers = {}, raw = false, withResponse = false } = {}) {
+    const url = new URL(input);
+    if (url.protocol !== "https:" || url.username || url.password || !CLOUD_API_HOSTS[context.provider]?.includes(url.hostname)) throw new Error("网盘接口地址无效");
+    const requestHeaders = { Accept: raw ? "text/html,*/*" : "application/json, text/plain, */*", Referer: context.url.split("#")[0], ...headers };
+    if (Object.keys(requestHeaders).some(name => /^(?:user-agent|proxy-authorization)$/i.test(name))) throw new Error("网盘请求不能改写浏览器身份");
+    const form = body instanceof URLSearchParams;
+    if (body != null) requestHeaders["Content-Type"] = form ? "application/x-www-form-urlencoded" : "application/json;charset=UTF-8";
+    const response = await gmRequest({ method: body == null ? "GET" : "POST", url: url.href, headers: requestHeaders, withCredentials: true,
+      data: body == null ? undefined : form ? body.toString() : JSON.stringify(body), responseType: "text", timeout: 30000,
+      errorMessage: "无法连接网盘接口，请检查网络和脚本的网站访问权限", timeoutMessage: "网盘取链超时，请稍后重试",
+      sizeMessage: "网盘接口返回的数据过大，请刷新网盘页面后重试" }, undefined, 2 * 1024 * 1024);
+    if (isChallenge(response.status, response.responseHeaders, response.responseText || "")) throw challengeError();
+    if (response.status < 200 || response.status >= 300) throw cloudFailure(context, `HTTP-${response.status}`);
+    if (raw) return response;
+    let data;
+    try { data = JSON.parse(response.responseText); } catch { throw new Error("网盘返回了登录、验证页面或无效数据，请在网盘网页中完成验证后重试"); }
+    return withResponse ? { data, headers: response.responseHeaders || "" } : data;
+  }
+  function cloudDownload(context, input, headers = {}) {
+    let url;
+    try { url = new URL(input); } catch { throw cloudFailure(context); }
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw cloudFailure(context);
+    const carriesCookie = Object.entries(headers).some(([key, value]) => key.toLowerCase() === "cookie" && value);
+    const cookieHosts = { baidu: /(?:^|\.)(?:baidu\.com|baidupcs\.(?:com|cn|net))$/, quark: /(?:^|\.)quark\.cn$/, uc: /(?:^|\.)uc\.cn$/ };
+    if (carriesCookie && !cookieHosts[context.provider]?.test(url.hostname)) throw new Error("网盘返回的下载域名无法验证，未转交登录 Cookie");
+    return { url: url.href, headers };
+  }
+
+  /** Small local MD5 for provider request signatures (RFC 1321); no runtime CDN dependency. */
+  function cloudMd5(input) {
+    const bytes = new TextEncoder().encode(String(input));
+    const padded = new Uint8Array(Math.ceil((bytes.length + 9) / 64) * 64);
+    padded.set(bytes); padded[bytes.length] = 0x80;
+    const view = new DataView(padded.buffer);
+    view.setUint32(padded.length - 8, bytes.length * 8, true);
+    view.setUint32(padded.length - 4, Math.floor(bytes.length / 0x20000000), true);
+    const shifts = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+    let state = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+    for (let offset = 0; offset < padded.length; offset += 64) {
+      let [a, b, c, d] = state;
+      for (let i = 0; i < 64; i++) {
+        const round = i >>> 4;
+        const f = round === 0 ? b & c | ~b & d : round === 1 ? d & b | ~d & c : round === 2 ? b ^ c ^ d : c ^ (b | ~d);
+        const g = round === 0 ? i : round === 1 ? (5 * i + 1) % 16 : round === 2 ? (3 * i + 5) % 16 : 7 * i % 16;
+        const sum = (a + f + Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) + view.getUint32(offset + g * 4, true)) | 0;
+        const shift = shifts[round * 4 + i % 4];
+        [a, b, c, d] = [d, b + (sum << shift | sum >>> (32 - shift)) | 0, b, c];
+      }
+      state = state.map((value, index) => value + [a, b, c, d][index] | 0);
+    }
+    return state.map(value => [0, 8, 16, 24].map(shift => (value >>> shift & 255).toString(16).padStart(2, "0")).join("")).join("");
+  }
+
+  function authorizeCloudBaidu() {
+    const state = [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join("");
+    gm.set("cloud-baidu-auth", { state, expires: Date.now() + 10 * 60 * 1000 });
+    const url = new URL(BAIDU_AUTHORIZE); url.searchParams.set("state", state);
+    gm.openTab(url.href);
+  }
+  function captureCloudAuthorization() {
+    if (location.origin !== "https://openapi.baidu.com" || location.pathname !== "/oauth/2.0/login_success") return false;
+    const params = new URLSearchParams(location.hash.slice(1));
+    const pending = gm.get("cloud-baidu-auth");
+    const token = params.get("access_token");
+    if (!pending || pending.expires < Date.now() || params.get("state") !== pending.state || !token || token.length > 4096 || /[\s\x00-\x1f]/.test(token)) return false;
+    const seconds = Math.min(Math.max(Number(params.get("expires_in")) || 3600, 1), 365 * 86400);
+    gm.set("cloud-baidu-token", { token, expires: Date.now() + seconds * 1000 });
+    gm.set("cloud-baidu-auth", null);
+    try { (page.history || history).replaceState(null, "", location.pathname + location.search); } catch { /* 来源页面仍可关闭 */ }
+    return true;
+  }
+
+  // $baidu.getFilesUrl / getShareData / getShareFilesUrl. OAuth consent stays in the provider's own tab.
+  async function cloudBaidu(context) {
+    let response;
+    const cached = gm.get("cloud-baidu-token");
+    const token = cached?.expires > Date.now() + 60000 ? cached.token : "";
+    if (!context.share) {
+      if (!token) throw new Error("请返回面板点击「授权百度取链」，在百度页面确认后回来重试");
+      const url = new URL("https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1");
+      url.searchParams.set("fsids", JSON.stringify([context.file.fs_id])); url.searchParams.set("access_token", token);
+      response = await cloudRequest(context, url);
+    } else {
+      const shared = await cloudOnce(context, "baidu-share", async () => {
+        const locals = page.locals?.dump?.() || {};
+        const value = key => locals[key]?.value ?? locals[key];
+        const data = { uk: value("share_uk"), id: value("shareid"), bdstoken: value("bdstoken"),
+          jsToken: page.jsToken || "", sekey: page.currentSekey || page.cache?.list?.config?.params?.sekey || "" };
+        if (!data.uk || !data.id) throw new Error("请先打开分享文件列表并完成提取码验证，再获取文件");
+        const url = new URL("https://pan.baidu.com/share/tplconfig?fields=sign,timestamp&channel=chunlei&web=1&app_id=250528&clienttype=0&view_mode=1");
+        url.searchParams.set("surl", new URL(context.url).pathname.split("/").pop());
+        url.searchParams.set("bdstoken", data.bdstoken || "");
+        const sign = await cloudRequest(context, url);
+        if (!sign.data?.sign || !sign.data?.timestamp) throw cloudFailure(context, sign.errno);
+        return { ...data, ...sign.data };
+      });
+      const url = new URL("https://pan.baidu.com/api/sharedownload?channel=chunlei&clienttype=0&web=1&app_id=250528");
+      for (const key of ["sign", "timestamp", "bdstoken", "jsToken"]) if (shared[key]) url.searchParams.set(key, shared[key]);
+      if (cloudCookie("BAIDUID")) url.searchParams.set("logid", btoa(cloudCookie("BAIDUID")));
+      const body = new URLSearchParams({ encrypt: "0", product: "share", uk: shared.uk, primaryid: shared.id, fid_list: JSON.stringify([context.file.fs_id]) });
+      if (shared.sekey) body.set("extra", JSON.stringify({ sekey: shared.sekey }));
+      response = await cloudRequest(context, url, { body });
+    }
+    if (response.errno === 9019 || response.errno === 110 || response.errno === 111) gm.set("cloud-baidu-token", null);
+    const file = Array.isArray(response.list) && response.list.find(item => String(item.fs_id) === String(context.file.fs_id));
+    if (response.errno !== 0 || !file?.dlink) throw cloudFailure(context, response.errno);
+    const result = cloudDownload(context, file.dlink, { "User-Agent": CLOUD_DOWNLOAD_UA.baidu });
+    if (token) {
+      const url = new URL(result.url);
+      if (!/(?:^|\.)(?:baidu\.com|baidupcs\.(?:com|cn|net))$/.test(url.hostname)) throw cloudFailure(context);
+      url.searchParams.set("access_token", token); result.url = url.href;
+    }
+    return result;
+  }
+
+  // $aliyun.getFilesUrl. Keep results associated with their own file; upstream's batch assignment is not reused.
+  async function cloudAliyun(context) {
+    const token = cloudStorage("token");
+    if (!token?.access_token || !token?.token_type) throw new Error("请先登录阿里云盘，再刷新页面重试");
+    const domain = new URL(context.url).hostname.endsWith("alipan.com") ? "api.alipan.com" : "api.aliyundrive.com";
+    const response = await cloudRequest(context, `https://${domain}/v2/file/get_download_url`, {
+      body: { drive_id: context.file.driveId, file_id: context.file.fileId },
+      headers: { Authorization: `${token.token_type} ${token.access_token}`, "X-Canary": "client=windows,app=adrive,version=v6.0.0" },
+    });
+    if (!response.url || response.code) throw cloudFailure(context, response.code);
+    return cloudDownload(context, response.url, { Referer: new URL(context.url).origin + "/" });
+  }
+
+  // $mcloud.getSign / getFileUrl. Initialize the nonce before appending characters (upstream leaves it undefined).
+  async function cloudMobile(context) {
+    const authorization = cloudCookie("authorization");
+    if (!authorization) throw new Error("请先登录中国移动云盘，再刷新页面重试");
+    const body = { fileId: context.file.contentID };
+    const time = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 19).replace("T", " ");
+    const chars = "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678";
+    const nonce = [...crypto.getRandomValues(new Uint8Array(16))].map(value => chars[value % chars.length]).join("");
+    const sorted = encodeURIComponent(JSON.stringify(body).replace(/\s*/g, "")).split("").sort().join("");
+    const sign = cloudMd5(cloudMd5(btoa(sorted)) + cloudMd5(time + ":" + nonce)).toUpperCase();
+    const response = await cloudRequest(context, "https://personal-kd-njs.yun.139.com/hcy/file/getDownloadUrl", { body, headers: {
+      Authorization: authorization, Caller: "web", "CMS-DEVICE": "default", "Mcloud-Channel": "1000101", "Mcloud-Client": "10701",
+      "Mcloud-Sign": `${time},${nonce},${sign}`, "Mcloud-Version": "7.14.2", "X-DeviceInfo": "||9|7.17.0|edge||||windows 10||zh-CN|||",
+      "X-Huawei-ChannelSrc": "10000034", "X-Inner-Ntwk": "2", "X-M4C-Caller": "PC", "X-M4C-Src": "10002", "X-SvcType": "1",
+      "X-Yun-Api-Version": "v1", "X-Yun-App-Channel": "10000034", "X-Yun-Channel-Source": "10000034",
+      "X-Yun-Client-Info": "||9|7.17.0|edge||||windows 10||zh-CN|||||", "X-Yun-Module-Type": "100", "X-Yun-Svc-Type": "1", "X-Yun-Url-Type": "3",
+    } });
+    if (!response.success || !response.data?.url) throw cloudFailure(context, response.code);
+    return cloudDownload(context, response.data.url);
+  }
+
+  // $tcloud.getToken / getFileUrl. The SSO token is kept in this batch, not persisted by the script.
+  async function cloudTelecom(context) {
+    const token = await cloudOnce(context, "tcloud-token", async () => {
+      const response = await cloudRequest(context, "https://api.cloud.189.cn/open/oauth2/ssoH5.action", { raw: true });
+      const value = new URL(response.finalUrl || "https://api.cloud.189.cn").searchParams.get("accessToken");
+      if (!value) throw new Error("请先登录天翼云盘，再刷新页面重试");
+      return value;
+    });
+    const time = Date.now();
+    const url = new URL("https://api.cloud.189.cn/open/file/getFileDownloadUrl.action");
+    url.searchParams.set("fileId", context.file.fileId);
+    let sign = `AccessToken=${token}&Timestamp=${time}`;
+    if (context.file.shareId) { url.searchParams.set("dt", "1"); url.searchParams.set("shareId", context.file.shareId); sign += "&dt=1"; }
+    sign += `&fileId=${context.file.fileId}`;
+    if (context.file.shareId) sign += `&shareId=${context.file.shareId}`;
+    const response = await cloudRequest(context, url, { headers: { "Sign-Type": "1", Accesstoken: token, Timestamp: String(time), Signature: cloudMd5(sign) } });
+    if (response.res_code != 0 || !response.fileDownloadUrl) throw cloudFailure(context, response.res_code || response.errorcode);
+    return cloudDownload(context, response.fileDownloadUrl);
+  }
+
+  function cloudCredentials() {
+    let credentials = null, captcha = null, credentialsKey = "", clientId = "";
+    try {
+      const storage = page.localStorage || localStorage;
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        if (key.startsWith("credentials_") && cloudStorage(key)?.access_token) {
+          credentials = cloudStorage(key); credentialsKey = key; clientId = key.slice("credentials_".length); break;
+        }
+      }
+      captcha = cloudStorage(`captcha_${clientId}`);
+    } catch { /* 缺少凭据时由调用方提示登录 */ }
+    const rawDeviceId = cloudStorage("deviceid");
+    return { credentials, captcha, credentialsKey, clientId, rawDeviceId, deviceId: String(rawDeviceId || "").match(/\w{32}/)?.[0] || "" };
+  }
+
+  // $xunlei.getToken / _getCaptchaSign / getFileUrl. Refresh only against the provider's own endpoints.
+  async function cloudXunleiToken(context, force = false) {
+    const token = cloudCredentials();
+    let { credentials, captcha } = token;
+    if (!token.clientId || !token.deviceId || !credentials?.access_token) throw new Error("请先登录迅雷云盘，再刷新页面重试");
+    const expired = value => value && Date.parse(value) <= Date.now() + 60000;
+    if (force || expired(credentials.expires_at)) {
+      if (!credentials.refresh_token) throw new Error("迅雷登录已过期，请在网盘网页重新登录");
+      const response = await cloudRequest(context, "https://xluser-ssl.xunlei.com/v1/auth/token", {
+        body: { client_id: token.clientId, grant_type: "refresh_token", refresh_token: credentials.refresh_token },
+        headers: { "x-action": "401", "x-client-id": token.clientId, "x-device-id": token.rawDeviceId, "x-device-sign": token.deviceId, "x-protocol-version": "301", "x-sdk-version": "3.4.20" },
+      });
+      if (!response.access_token) throw cloudFailure(context, response.error_code);
+      credentials = { ...credentials, ...response, expires_at: new Date(Date.now() + (response.expires_in || 43200) * 1000).toISOString() };
+      cloudSetStorage(token.credentialsKey, credentials);
+    }
+    if (force || !captcha?.token || expired(captcha.expires_at)) {
+      const timestamp = String(Date.now());
+      const host = new URL(context.url).hostname;
+      let sign = `${token.clientId}1.92.62${host}${token.deviceId}${timestamp}`;
+      for (const salt of ["o6b11ImBwJA1KSNMTALjL0xMkMjTP", "oVHCQaox9N6+R91GY63sbxci9K9ymFl", "XReS2zbwYB/+vUnYDwZ", "O56ssQHYiK5enUTKaV", "sGKNxaX7aUzpjJ2n+/2f1I0", "1oyQWde2s4zvz", "ziq13Yyc6HUXr3477c20PJfwBjg7ux", "xKMXTJmlEqamEpkWfp6WeP1qZezdCA", "rUA", "XVIzRTbY7MGdUXn0+qLjw", "aGrpbD3EUDGo0wmvaKPDGxVRaNVN6", "ieQk/"]) sign = cloudMd5(sign + salt);
+      const response = await cloudRequest(context, "https://xluser-ssl.xunlei.com/v1/shield/captcha/init", { body: {
+        client_id: token.clientId, action: "get:/drive/v1/about", device_id: token.deviceId,
+        meta: { username: "", phone_number: "", email: "", package_name: host, client_version: "1.92.62", captcha_sign: `1.${sign}`, timestamp, user_id: credentials.user_id || "" },
+      } });
+      if (!response.captcha_token) throw cloudFailure(context, response.error_code);
+      captcha = { token: response.captcha_token, expires_at: new Date(Date.now() + (response.expires_in || 300) * 1000).toISOString() };
+      cloudSetStorage(`captcha_${token.clientId}`, captcha);
+    }
+    return { Authorization: `${credentials.token_type || "Bearer"} ${credentials.access_token}`, "X-Captcha-Token": captcha.token, "X-Device-Id": token.deviceId };
+  }
+  async function cloudXunlei(context) {
+    let headers = await cloudOnce(context, "xunlei-token", () => cloudXunleiToken(context));
+    const url = "https://api-pan.xunlei.com/drive/v1/files/" + encodeURIComponent(context.file.id);
+    let response = await cloudRequest(context, url, { headers });
+    if (response.error_code == 9) {
+      headers = await cloudOnce(context, "xunlei-refresh", () => cloudXunleiToken(context, true));
+      response = await cloudRequest(context, url, { headers });
+    }
+    if (!response.web_content_link) throw cloudFailure(context, response.error_code);
+    return cloudDownload(context, response.web_content_link);
+  }
+
+  // $guangya.getToken / getShareToken / getFileUrl.
+  async function cloudGuangya(context) {
+    const token = cloudCredentials();
+    if (!token.credentials?.access_token || !token.deviceId) throw new Error("请先登录光鸭云盘，再刷新页面重试");
+    const headers = { Authorization: `${token.credentials.token_type || "Bearer"} ${token.credentials.access_token}`,
+      "X-Captcha-Token": token.captcha?.captcha_token || token.captcha?.token || "", "X-Device-Id": token.deviceId };
+    const body = { fileId: context.file.fileId };
+    if (context.share) body.accessToken = await cloudOnce(context, "guangya-share", async () => {
+      const pageUrl = new URL(context.url);
+      const response = await cloudRequest(context, "https://api.guangyapan.com/nd.bizuserres.s/v1/get_share_access_token", {
+        body: { shareId: pageUrl.pathname.match(/\/(?:s|share)\/([^/?#]+)/)?.[1], code: pageUrl.searchParams.get("code") || cloudNode('input.ant-input[type="text"]')?.value || "" }, headers,
+      });
+      if (!response.data?.accessToken) throw cloudFailure(context, response.code);
+      return response.data.accessToken;
+    });
+    const response = await cloudRequest(context, `https://api.guangyapan.com/nd.bizuserres.s/v1/${context.share ? "get_share_download_url" : "get_res_download_url"}`, { body, headers });
+    if (!response.data?.signedURL && !response.data?.downloadUrl) throw cloudFailure(context, response.code);
+    return cloudDownload(context, response.data.signedURL || response.data.downloadUrl);
+  }
+
+  // $quark / $uc.getLink, including share tokens and Quark's download cookie.
+  async function cloudQuarkUc(context) {
+    const quark = context.provider === "quark";
+    const cookie = context.session.get("quark-cookie") || await cookieHeader(context.url);
+    if (quark && !settings().cookies) throw new Error("夸克下载需要来源 Cookie，请先在脚本设置中启用携带 Cookie");
+    let socialToken = "";
+    if (quark) {
+      try {
+        socialToken = await cloudOnce(context, "quark-social", async () => {
+          const time = Math.floor(Date.now() / 1000);
+          const response = await cloudRequest(context, "https://drive-social-api.quark.cn/1/clouddrive/chat/conv/file/acquire_dl_token?pr=ucpro&fr=pc&sys=win32&ve=6.9.7.761&fr=win&la=zh-CN&ch=pckk%40product_guanwan", {
+            body: { conversation_id: "300000" + time, conversation_type: 3, msg_id: time + "000" }, headers: cookie ? { Cookie: cookie } : {},
+          });
+          if (response.code !== 0 || !response.data?.token) throw cloudFailure(context, response.code);
+          return response.data.token;
+        });
+      } catch (error) { if (!context.share) throw error; }
+    }
+    const body = { fids: [context.file.fid] };
+    if (quark) { body.speedup_session = ""; body.token = socialToken; }
+    if (context.share) {
+      const pwdId = page.factStat?.ut?.baseParams?.pwd_id || page.factStat?.wa?.customStatParams?.pwd_id
+        || new URL(context.url).pathname.match(/^\/(?:s|share)\/([^/?#]+)/)?.[1];
+      if (!pwdId || !context.file.stoken || !context.file.share_fid_token) throw new Error("请在分享网页完成提取码验证，打开文件列表后重试");
+      Object.assign(body, { pwd_id: pwdId, stoken: context.file.stoken, fids_token: [context.file.share_fid_token] });
+    }
+    const url = quark ? "https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc&sys=win32&ve=6.9.7.761"
+      : "https://pc-api.uc.cn/1/clouddrive/file/download?pr=UCBrowser&fr=pc&sys=win32&ve=1.8.8";
+    const result = await cloudRequest(context, url, { body, headers: cookie ? { Cookie: cookie } : {}, withResponse: true });
+    const response = result.data;
+    const pugs = result.headers.match(/^set-cookie:\s*__pugs=([^;\r\n]+)/im)?.[1];
+    const downloadCookie = quark && context.share
+      ? pugs ? `__pugs=${pugs}` : cookie.split(";").map(part => part.trim()).find(part => part.startsWith("__pugs=")) || cookie
+      : cookie;
+    if (quark && pugs) context.session.set("quark-cookie", downloadCookie);
+    const file = Array.isArray(response.data) && response.data.find(item => String(item.fid) === String(context.file.fid));
+    if (response.code !== 0 || !file?.download_url) throw cloudFailure(context, response.code);
+    const headers = { "User-Agent": CLOUD_DOWNLOAD_UA[context.provider] };
+    if (quark) headers.Cookie = downloadCookie;
+    else headers["Sec-Ch-Ua"] = '"Not=A?Brand";v="99", "Chromium";v="100", "Google Chrome";v="100"';
+    return cloudDownload(context, file.download_url, headers);
+  }
+
+  // $123pan.getFileUrl: v2 endpoints, dispatchList + downloadPath, and the params wrapper.
+  async function cloud123(context) {
+    const token = cloudStorage("authorToken");
+    const file = context.file;
+    const headers = { Platform: "web", Platform_os: "123pan/v323(Windows10.0.26200)", "App-Version": "323", LoginUuid: cloudStorage("LoginUuid") || "", Devicename: "", "Mac-Addr": "" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    else if (!context.share) throw new Error("请先登录 123 云盘，再刷新页面重试");
+    const body = context.share
+      ? { ShareKey: new URL(context.url).pathname.split("/").filter(Boolean)[1], FileID: file.FileId, S3keyFlag: file.S3KeyFlag, Size: file.Size, Etag: file.Etag }
+      : { driveId: 0, etag: file.Etag, fileId: file.FileId, s3keyFlag: file.S3KeyFlag, type: file.Type, fileName: file.FileName, size: file.Size };
+    const response = await cloudRequest(context, `https://api.123pan.cn/api/v2/${context.share ? "share/download/info" : "file/download_info"}`, { body, headers });
+    if (response.code == 5113) throw new Error("123 云盘提示本月可用下载流量不足，请在网盘中查看流量额度");
+    if (!response.data?.dispatchList?.[0]?.prefix || !response.data?.downloadPath) throw cloudFailure(context, response.code);
+    let url = response.data.dispatchList[0].prefix + response.data.downloadPath;
+    const wrapped = new URL(url).searchParams.get("params");
+    if (wrapped) { try { url = atob(wrapped.replace(/-/g, "+").replace(/_/g, "/")); } catch { throw cloudFailure(context); } }
+    return cloudDownload(context, url);
+  }
+
+  async function resolveCloud(context) {
+    if (cloudOf()?.provider !== context.provider || new URL(context.url).origin !== location.origin) throw new Error("请返回原网盘页面，再重新获取文件");
+    const resolvers = { baidu: cloudBaidu, aliyun: cloudAliyun, mcloud: cloudMobile, tcloud: cloudTelecom,
+      xunlei: cloudXunlei, guangya: cloudGuangya, quark: cloudQuarkUc, uc: cloudQuarkUc, "123pan": cloud123 };
+    return resolvers[context.provider](context);
+  }
+
   // ---------- Cookie 与 curl ----------
 
   function cookieHeader(url) {
@@ -326,10 +1510,16 @@
   const quote = value => "'" + String(value).replace(/'/g, "'\\''") + "'";
   const referer = () => location.href.split("#")[0];
 
-  async function curlFor(url, withCookies = settings().cookies) {
-    const lines = [`curl ${quote(url)} -L`, `-H ${quote("User-Agent: " + navigator.userAgent)}`, `-H ${quote("Referer: " + referer())}`];
+  async function curlFor(url, withCookies = settings().cookies, extraHeaders = {}, name = "") {
+    const headers = new Map([["user-agent", ["User-Agent", navigator.userAgent]], ["referer", ["Referer", referer()]]]);
     const cookie = withCookies ? await cookieHeader(url) : "";
-    if (cookie) lines.push(`-H ${quote("Cookie: " + cookie)}`);
+    if (cookie) headers.set("cookie", ["Cookie", cookie]);
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      if (!/^[\w-]+$/.test(key) || /[\r\n\x00]/.test(String(value))) throw new Error("来源请求头无效");
+      if (key.toLowerCase() !== "cookie" || withCookies) headers.set(key.toLowerCase(), [key, String(value)]);
+    }
+    const lines = [`curl ${quote(url)} -L`, ...[...headers.values()].map(([key, value]) => `-H ${quote(key + ": " + value)}`)];
+    if (name) lines.push(`-o ${quote(name)}`);
     return lines.join(" \\\n  ");
   }
 
@@ -362,7 +1552,7 @@
         if (!maxBytes) return false;
         const length = Number((response.responseHeaders || "").match(/^content-length:\s*(\d+)/im)?.[1]) || response.total || 0;
         if (length <= maxBytes && (response.loaded || 0) <= maxBytes) return false;
-        finish(new Error("资源超过浏览器上传的 64 MiB 上限，请使用服务器下载或先保存到本地"));
+        finish(new Error(details.sizeMessage || "资源超过浏览器上传的 64 MiB 上限，请使用服务器下载或先保存到本地"));
         request?.abort();
         return true;
       };
@@ -410,7 +1600,7 @@
     "image/avif": ".avif", "image/heic": ".heic", "image/heif": ".heif", "image/bmp": ".bmp", "image/svg+xml": ".svg",
     "image/tiff": ".tiff", "image/x-icon": ".ico", "image/jxl": ".jxl", "image/jp2": ".jp2",
     "video/mp4": ".mp4", "video/webm": ".webm", "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "application/pdf": ".pdf" };
-  const browserEligible = item => item.type !== "stream" && !/\.(?:m3u8|mpd)(?:[?#]|$)/i.test(item.url);
+  const browserEligible = item => !item.cloud && item.type !== "stream" && !/\.(?:m3u8|mpd)(?:[?#]|$)/i.test(item.url);
   const sourceHeader = (headers, name) => (headers || "").match(new RegExp(`^${name}:\\s*(.*)$`, "im"))?.[1].trim() || "";
   const sourceError = (status, pageStatus, extension = false) => new Error(status === 401 || status === 403
     ? `${pageStatus ? `网页请求 HTTP ${pageStatus}，` : ""}来源拒绝${extension ? "扩展" : "网页"}请求（HTTP ${status}）。直接打开图片与脚本读取的权限可能不同；请先打开原图确认，仍失败时手动保存后上传`
@@ -1318,6 +2508,7 @@
     frame("Tessera", [
       h("div", { className: "banner-host" }),
       currentContext ? platformCard(currentContext) : null,
+      cloudOf() ? cloudCard(cloudOf()) : null,
       h("div", { className: "section list-host" }),
     ], { footer: [], subtitle: "资源抓取" });
     panel.dataset.view = "main";
@@ -1369,6 +2560,19 @@
       h("p", { className: "hint" }, youtube
         ? "YouTube 的媒体地址带签名且分段，无法直接下载；发送后由服务器解析并选择清晰度。"
         : "视频由服务器解析；图片可以在下方直接复制原图地址。"));
+  }
+
+  function cloudCard(context) {
+    return h("div", { className: "hero" },
+      h("div", { className: "hero-head" }, h("span", { className: "hero-mark" }, svg("folder", 18)),
+        h("div", { className: "hero-text" }, h("strong", {}, context.label), h("div", { className: "sub" }, "获取网盘中已勾选的文件"))),
+      h("div", { className: "actions" },
+        h("button", { type: "button", className: "btn primary block", onclick: () => {
+          try { startBatch(cloudSources(cloudOf() || context), "server"); } catch (error) { toast(error.message); }
+        } }, svg("send"), "发送已选网盘文件"),
+        context.provider === "baidu" && !context.share ? h("button", { type: "button", className: "btn", onclick: authorizeCloudBaidu }, "授权百度取链") : null),
+      h("p", { className: "hint" }, "先在网盘中勾选文件，再确认保存位置和文件名。文件夹请打开后选择里面的文件。"),
+      context.provider === "baidu" && !context.share ? h("p", { className: "hint" }, "首次使用需在百度页面确认取链授权，完成后回到这里重试。") : null);
   }
 
   // X、YouTube 会持续加载资源：新资源到达时最多每秒刷新一次列表。
@@ -2045,7 +3249,7 @@
     return fallback === "stream" ? "video" : fallback;
   }
 
-  /** sources：资源地址，或 { url, platform }（X 帖子、YouTube 视频只能服务器下载）。 */
+  /** sources：资源地址、{ url, platform }，或网盘选择快照 { url, name, size, cloud }。 */
   function startBatch(sources, mode) {
     if (!settings().server || !settings().key) {
       toast("请先填写 Tessera 地址和访问密钥");
@@ -2059,8 +3263,8 @@
     const byUrl = new Map(wanted.map(source => [source.url, source]));
     const ordered = [...listed.filter(item => byUrl.has(item.url)).map(item => byUrl.get(item.url)), ...wanted.filter(source => !known.has(source.url))];
     batch = { started: false, mode, destination: savedDestination(),
-      entries: ordered.slice(0, BATCH_LIMIT).map(({ url, platform }) => ({ url, platform: platform || null,
-        type: known.get(url)?.type || (platform ? "video" : "file"), name: mode === "local" ? defaultSaveName(url) : "",
+      entries: ordered.slice(0, BATCH_LIMIT).map(({ url, platform, cloud, name, size }) => ({ url, platform: platform || null, cloud,
+        type: known.get(url)?.type || (platform ? "video" : "file"), name: name || (mode === "local" ? defaultSaveName(url) : ""), sourceName: name || "", size,
         state: mode === "server" ? "parsing" : "waiting", error: "", tasks: [] })) };
     openBatch();
     if (mode === "server") void parseEntries(batch, batch.entries.slice());
@@ -2075,16 +3279,27 @@
 
   async function parseEntry(entry, current) {
     entry.state = "parsing"; entry.error = "";
+    entry.resolvingCloud = Boolean(entry.cloud);
     updateBatch();
     try {
+      let cloudRequestInfo;
+      if (entry.cloud) {
+        cloudRequestInfo = await resolveCloud(entry.cloud);
+        if (batch !== current || !current.entries.includes(entry)) return;
+        entry.resolvingCloud = false;
+        updateBatch();
+      }
       // 平台链接单独传 Cookie；文件直链把 Cookie 写进 curl 命令，与网页「下载任务」的规则一致。
-      const payload = entry.platform
+      const payload = cloudRequestInfo
+        ? { input: await curlFor(cloudRequestInfo.url, settings().cookies, cloudRequestInfo.headers, entry.sourceName || entry.name), download_type: "http" }
+        : entry.platform
         ? { input: entry.url, cookies: settings().cookies ? await cookieHeader(entry.url) : "" }
         : { input: await curlFor(entry.url) };
+      if (batch !== current || !current.entries.includes(entry)) return;
       const parsed = await api("POST", "/api/v1/downloads/parse", payload);
       const candidates = parsed.candidates || [];
       if (!candidates.length) throw new Error("没有可下载的文件");
-      if (batch !== current) return;
+      if (batch !== current || !current.entries.includes(entry)) return;
       // 每个分组（X 帖子的每张图、每个视频）一行；同组的不同清晰度默认第一个，可在行内切换。
       const groups = new Map();
       for (const candidate of candidates) {
@@ -2095,13 +3310,15 @@
       const index = current.entries.indexOf(entry);
       if (index < 0) return;
       const room = BATCH_LIMIT - current.entries.length + 1;
-      const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform,
-        type: candidateType(variants[0], entry.type), variants, candidate: variants[0], name: variants[0].name, nameEdited: false,
+      const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform, cloud: entry.cloud, sourceName: entry.sourceName,
+        type: candidateType(variants[0], entry.type), variants, candidate: variants[0], name: entry.nameEdited ? entry.name : entry.sourceName || variants[0].name, nameEdited: Boolean(entry.nameEdited),
         state: current.started ? "error" : "waiting", error: "", tasks: [] }));
       current.entries.splice(index, 1, ...rows);
     } catch (error) {
       entry.state = "parse-error";
       entry.error = error.message;
+      entry.challenge = Boolean(error.challenge);
+      entry.cloud?.session.clear();
     }
     updateBatch();
   }
@@ -2298,8 +3515,10 @@
     const problem = batchNameProblems(batch).values().next().value;
     if (problem) return toast(problem);
     const current = batch;
-    const unparsed = entries.filter(entry => !nameable(current, entry));
+    const unparsed = entries.filter(entry => entry.cloud || !nameable(current, entry));
+    for (const entry of unparsed) if (entry.cloud) { entry.cloud.session.clear(); entry.candidate = null; markSent([entry.url], false); }
     for (const entry of entries) {
+      if (unparsed.includes(entry)) continue;
       if (!nameable(current, entry)) continue;
       entry.state = "waiting"; entry.error = ""; entry.tasks = []; entry.challenge = false; entry.delivered = false;
     }
@@ -2428,7 +3647,7 @@
   /** 一个条目的状态文字、语气与进度（0–1，null 为不确定进度，undefined 为不显示）。 */
   function entryStatus(entry) {
     if (entry.state === "waiting") return { text: batch.started ? "等待中" : "" };
-    if (entry.state === "parsing") return { text: "服务器解析中…", tone: "run", progress: null };
+    if (entry.state === "parsing") return { text: entry.resolvingCloud ? "正在获取网盘直链…" : "服务器解析中…", tone: "run", progress: null };
     if (entry.state === "parse-error") return { text: entry.error || "解析失败", tone: "err" };
     if (entry.state === "creating") return { text: "提交任务…", tone: "run", progress: null };
     if (entry.state === "error") return { text: entry.error || "保存失败", tone: "err" };
@@ -2469,7 +3688,7 @@
   let nameFieldSequence = 0;
   function batchRow(entry) {
     if (!entry.row) {
-      const thumbnail = entry.type === "image" && !entry.platform;
+      const thumbnail = entry.type === "image" && !entry.platform && !entry.cloud;
       const tile = h("span", { className: "tile" }, thumbnail
         ? h("img", { src: entry.url, alt: "", loading: "lazy", referrerpolicy: "no-referrer", onerror: event => event.currentTarget.replaceWith(svg("image", 18)) })
         : svg(TYPE_ICON[entry.type] || "file", 18));
@@ -2531,7 +3750,7 @@
     if (entry.row.actionKey !== actionKey) {
       action.replaceChildren(...[
         retry && entry.challenge ? h("button", { type: "button", className: "btn small", title: "在新标签页打开资源，完成人机验证后回来重试",
-          onclick: () => gm.openTab(entry.url) }, svg("shield", 14), "打开验证") : null,
+          onclick: () => gm.openTab(entry.cloud?.url || entry.url) }, svg("shield", 14), "打开验证") : null,
         retry ? h("button", { type: "button", className: "icon-btn", title: batch.started ? "重试" : "重新解析", "aria-label": "重试", "data-retry": "",
           onclick: () => batch.started ? retryEntries([entry]) : void parseEntries(batch, [entry]) }, svg("retry")) : null,
         removable ? iconButton("close", batch.started ? "从列表清除" : "移除", () => batch.started ? clearEntries([entry]) : removeEntry(entry), "row-clear") : null,
@@ -2741,6 +3960,8 @@
         h("div", { className: "field" }, h("span", { className: "label" }, "显示范围"),
           h("div", { className: "segmented", role: "radiogroup", "aria-label": "显示范围" }, Object.values(modeButtons)),
           sites, scopeHint)),
+      h("p", { className: "hint" }, "Tessera 资源抓取 · AGPL-3.0-or-later · 无担保",
+        h("button", { type: "button", className: "text-btn", onclick: () => gm.openTab("https://github.com/yangshoulai/tgdrive/tree/main/userscripts") }, "源码与许可证")),
     ], { back: back || close, footer: [test, h("span", { className: "spacer" }), save] });
   }
 
@@ -2813,7 +4034,7 @@
     refreshFab();
     if (!panel || panel.dataset.view !== "main" || (currentContext && currentContext.scope)) return;
     const next = platformOf(location.href);
-    if ((next && next.url) !== (currentContext && currentContext.url)) open(next);
+    if (cloudOf() || (next && next.url) !== (currentContext && currentContext.url)) open(next);
     else renderList();
   }
   function watchNavigation() {
@@ -2873,7 +4094,9 @@
   gm.menu("设置", () => openSettings());
   // Tessera 站点和被排除的网站上不嗅探、不加按钮；需要时可从脚本管理器菜单（或无菜单时的淡化按钮）打开面板或设置。
   gm.load().then(() => {
+    const authorized = captureCloudAuthorization();
     applySiteState();
+    if (authorized) whenReady(() => { mount(); toast("百度取链授权已保存，请返回网盘页面重试"); });
     if (!SYNC_STORE) document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") return;
       const before = siteEnabled();

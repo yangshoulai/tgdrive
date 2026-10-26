@@ -1,0 +1,2 @@
+# Preserve the exact upstream bytes used by the provenance SHA-256.
+third_party/linkswift/upstream.user.js -text

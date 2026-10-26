@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/hmjz100/LinkSwift",
+  "commit": "8283da03e6c78576ebca8b1604161bcd54ade82e",
+  "version": "1.1.4",
+  "channel": "dev",
+  "upstream_file": "（改）网盘直链下载助手.user.js",
+  "snapshot": "upstream.user.js",
+  "sha256": "7939fea9072a4a43e028916f3aa96c40602aecf127ad713a1aada2c36d6bde3c",
+  "license": "AGPL-3.0-or-later",
+  "adapted_on": "2026-10-26",
+  "adapters": {
+    "baidu": ["$baidu.getSelectedList", "$baidu.getFilesUrl", "$baidu.getShareData", "$baidu.getShareFilesUrl"],
+    "aliyun": ["$aliyun.getSelectedList", "$aliyun.getFilesUrl"],
+    "mcloud": ["$mcloud.getSelectedList", "$mcloud.getSign", "$mcloud.getFileUrl"],
+    "tcloud": ["$tcloud.getSelectedList", "$tcloud.getToken", "$tcloud.getFileUrl"],
+    "xunlei": ["$xunlei.getSelectedList", "$xunlei.getToken", "$xunlei._getCaptchaSign", "$xunlei.getFileUrl"],
+    "guangya": ["$guangya.getSelectedList", "$guangya.getToken", "$guangya.getShareToken", "$guangya.getFileUrl"],
+    "quark": ["$quark.getSelectedList", "$quark.getSocialToken", "$quark.getLink"],
+    "uc": ["$uc.getSelectedList", "$uc.getLink"],
+    "123pan": ["$123pan.getSelectedList", "$123pan.getFileUrl"]
+  },
+  "shared": ["config", "base.findReact"],
+  "runtime": "userscripts/tessera-grabber.user.js"
+}
