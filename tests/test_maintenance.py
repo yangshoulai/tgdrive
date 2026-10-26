@@ -14,7 +14,7 @@ from pathlib import Path
 
 from tests.test_public_links import Client
 from tgdrive.app import create_app
-from tgdrive.maintenance import EncryptedSnapshotStore, GarbageCollector, restore_backup
+from tgdrive.maintenance import BackupService, EncryptedSnapshotStore, GarbageCollector, restore_backup
 from tgdrive.objects import Scope
 
 
@@ -188,6 +188,71 @@ class MaintenanceTests(unittest.TestCase):
             second = self.m.backups.create()
         self.assertNotEqual(first["name"], second["name"])
         self.assertEqual(len(self.m.backups.list()), 2)
+
+    def test_backup_settings_persist_and_apply_after_successful_backup(self):
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        self.assertEqual(self.request("GET", "/api/admin/v1/backups/settings", headers=admin), (200, {"keep": 14}))
+        first, second = self.m.backups.create(), self.m.backups.create()
+        self.assertEqual(self.request("POST", "/api/admin/v1/backups/settings", {"keep": 1}, admin), (200, {"keep": 1}))
+        self.assertEqual(len(self.m.backups.list()), 2)
+        reloaded = BackupService(self.m.snapshots, self.m.backups.directory)
+        self.assertEqual(reloaded.settings(), {"keep": 1})
+        with mock.patch.object(self.m.snapshots, "create", side_effect=OSError("模拟备份失败")):
+            with self.assertRaises(OSError):
+                self.m.backups.create()
+        self.assertEqual(len(self.m.backups.list()), 2)
+        status, latest = self.request("POST", "/api/admin/v1/backups", headers=admin)
+        self.assertEqual(status, 201)
+        self.assertEqual([item["name"] for item in self.m.backups.list()], [latest["name"]])
+        for item in (first, second):
+            self.assertFalse((self.m.backups.directory / item["name"]).exists())
+        for value in (0, 1001, True, 1.5, "2", None):
+            with self.subTest(keep=value):
+                self.assertEqual(self.request("POST", "/api/admin/v1/backups/settings", {"keep": value}, admin)[0], 400)
+                self.assertEqual(self.m.backups.keep, 1)
+        self.assertEqual(self.request("POST", "/api/admin/v1/backups/settings", {"keep": 1000}, admin), (200, {"keep": 1000}))
+
+    def test_backup_delete_checks_permissions_and_stays_in_backup_directory(self):
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
+        backup, other = self.m.backups.create(), self.m.backups.create()
+        self.assertEqual(self.request("GET", "/api/admin/v1/backups/settings", headers=user)[0], 403)
+        for route, payload in (("/backups/settings", {"keep": 1}), ("/backups/delete", {"name": backup["name"]})):
+            path = "/api/admin/v1" + route
+            self.assertEqual(self.request("POST", path, payload, user)[0], 403)
+            self.assertEqual(self.request("POST", path, payload, {"cookie": admin["cookie"]})[0], 403)
+            self.assertEqual(self.request("POST", path, payload)[0], 401)
+        self.assertEqual(self.m.backups.keep, 14)
+        self.assertEqual(len(self.m.backups.list()), 2)
+        for name in ("../meta.db", str(self.root / "data" / "meta.db"), "tgdrive-20000101-000000.tgdbak"):
+            self.assertEqual(self.request("POST", "/api/admin/v1/backups/delete", {"name": name}, admin)[0], 404)
+        linked = self.m.backups.directory / "tgdrive-20000101-000001.tgdbak"
+        linked.symlink_to(self.root / "data" / "meta.db")
+        self.assertEqual(self.request("POST", "/api/admin/v1/backups/delete", {"name": linked.name}, admin)[0], 404)
+        self.assertEqual(len(self.m.backups.list()), 2)
+        self.assertEqual(self.request("POST", "/api/admin/v1/backups/delete", {"name": backup["name"]}, admin),
+                         (200, {"name": backup["name"]}))
+        self.assertEqual(self.request("GET", f"/api/admin/v1/backups/{backup['name']}", headers=admin)[0], 404)
+        self.assertEqual([item["name"] for item in self.m.backups.list()], [other["name"]])
+        self.assertTrue((self.root / "data" / "meta.db").is_file())
+        event = self.request("GET", "/api/admin/v1/audit?action=backup.delete", headers=admin)[1]["events"][0]
+        self.assertEqual((event["target"], event["actor"], event["ok"]), (backup["name"], "admin@example.com", True))
+
+    def test_deleting_backup_does_not_interrupt_open_download(self):
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        backup = self.m.backups.create()
+        expected = self.m.backups.path(backup["name"]).read_bytes()
+        sent = []
+        async def send(message):
+            sent.append(message)
+            if message["type"] == "http.response.start":
+                status, _, _ = await self.client.request("POST", "/api/admin/v1/backups/delete",
+                    json.dumps({"name": backup["name"]}).encode(), admin)
+                self.assertEqual(status, 200)
+        asyncio.run(self.app._backup_download(send, admin["cookie"].split("=", 1)[1], backup["name"]))
+        self.assertEqual(sent[0]["status"], 200)
+        self.assertEqual(b"".join(message.get("body", b"") for message in sent[1:]), expected)
+        self.assertEqual(self.m.backups.list(), [])
 
     def test_cleanup_is_batched_and_audit_archive_is_recoverable(self):
         for _ in range(3):

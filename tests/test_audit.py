@@ -105,6 +105,46 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(len(set(ids)), 8)
         self.assertIsNone(second["next_cursor"])
 
+    def test_admin_can_delete_one_event_and_clear_all_pages(self):
+        from tgdrive.audit import AuditLog
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        audit = AuditLog(self.app.metadata)
+        for index in range(40):
+            audit.record("user.status", actor_type="admin", actor="admin@example.com", ok=index % 2 == 0)
+        original = self.events(admin)
+        event_id = original[0]["id"]
+        status, body = self.request("POST", f"/api/admin/v1/audit/{event_id}/delete", headers=admin)
+        self.assertEqual((status, body), (200, {"deleted": 1}))
+        self.assertNotIn(event_id, [event["id"] for event in self.events(admin)])
+        deleted = self.events(admin)[0]
+        self.assertGreater(deleted["id"], event_id)
+        self.assertEqual((deleted["action"], deleted["target"], deleted["detail"], deleted["actor"]),
+                         ("audit.delete", str(event_id), {"deleted": 1}, "admin@example.com"))
+        self.assertEqual(self.request("POST", f"/api/admin/v1/audit/{event_id}/delete", headers=admin)[0], 404)
+        self.assertEqual(self.request("POST", "/api/admin/v1/audit/clear", headers=admin)[0], 400)
+        self.assertTrue(set(event["id"] for event in original[1:]) <= set(event["id"] for event in self.events(admin)))
+        total = len(self.events(admin))
+        last_id = self.events(admin)[0]["id"]
+        status, body = self.request("POST", "/api/admin/v1/audit/clear", {"confirm": "清空"}, admin)
+        self.assertEqual((status, body), (200, {"deleted": total}))
+        remaining = self.events(admin)
+        self.assertEqual(len(remaining), 1)
+        self.assertGreater(remaining[0]["id"], last_id)
+        self.assertEqual((remaining[0]["action"], remaining[0]["actor"], remaining[0]["detail"]),
+                         ("audit.clear", "admin@example.com", {"deleted": total}))
+
+    def test_audit_mutations_require_admin_and_csrf(self):
+        admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
+        user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
+        event_id = self.events(admin)[-1]["id"]
+        for route, payload in ((f"/audit/{event_id}/delete", None), ("/audit/clear", {"confirm": "清空"})):
+            with self.subTest(route=route):
+                path = "/api/admin/v1" + route
+                self.assertEqual(self.request("POST", path, payload, user)[0], 403)
+                self.assertEqual(self.request("POST", path, payload, {"cookie": admin["cookie"]})[0], 403)
+                self.assertEqual(self.request("POST", path, payload)[0], 401)
+                self.assertIsNotNone(self.app.metadata.db.execute("SELECT id FROM audit_log WHERE id=?", (event_id,)).fetchone())
+
     def test_key_creation_is_atomic(self):
         clients = self.app.s3.auth
         self.app.keystore.lock()

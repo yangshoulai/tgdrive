@@ -628,6 +628,8 @@ export const adminAudit = (options: { cursor?: number | null; failedOnly?: boole
   if (options.failedOnly) params.set("failed", "1");
   return request<{ events: AuditEvent[]; next_cursor: number | null }>(`/api/admin/v1/audit?${params}`);
 };
+export const deleteAuditEvent = (id: number) => post<{ deleted: number }>(`/api/admin/v1/audit/${id}/delete`);
+export const clearAudit = (confirm: string) => post<{ deleted: number }>("/api/admin/v1/audit/clear", { confirm });
 export const adminStatus = () => request<SystemStatus>("/api/admin/v1/status");
 export const adminVersion = (signal?: AbortSignal) => request<{ version: string }>("/api/admin/v1/version", { signal });
 export const adminSetup = (passphrase: string, username: string, password: string, nickname = "") => post<{ user_id: number; username: string }>("/api/admin/v1/setup", { passphrase, username, password, nickname });
@@ -661,7 +663,11 @@ export const setThumbnailCandidateCount = (count: number) => post<{ candidate_co
 export const runCleanup = () => post<{ aborted_uploads: number; stale_blobs: number; expired_upload_records: number }>("/api/admin/v1/maintenance/cleanup");
 export const retryDeadGc = () => post<{ requeued: number }>("/api/admin/v1/maintenance/gc/retry");
 export type Backup = { name: string; size: number; created_at: number };
+export type BackupSettings = { keep: number };
 export const listBackups = () => request<Backup[]>("/api/admin/v1/backups");
+export const backupSettings = () => request<BackupSettings>("/api/admin/v1/backups/settings");
+export const configureBackups = (keep: number) => post<BackupSettings>("/api/admin/v1/backups/settings", { keep }, 15 * 60000);
+export const deleteBackup = (name: string) => post<{ name: string }>("/api/admin/v1/backups/delete", { name }, 15 * 60000);
 export const createBackup = () => post<Backup>("/api/admin/v1/backups", undefined, 15 * 60000);
 export const backupUrl = (name: string) => `/api/admin/v1/backups/${encodeURIComponent(name)}`;
 export const setAdminUserQuota = (id: number, quotaBytes: number | null) => post<void>(`/api/admin/v1/users/${id}/quota`, { quota_bytes: quotaBytes });

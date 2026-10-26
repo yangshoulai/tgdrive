@@ -362,10 +362,24 @@ class EncryptedSnapshotStore:
 
 class BackupService:
     NAME = re.compile(r"tgdrive-\d{8}-\d{6}(?:-\d+)?\.tgdbak")
+    KEEP_KEY = "backup.keep"
 
     def __init__(self, snapshots: EncryptedSnapshotStore, directory: str | Path, *, keep: int = 14) -> None:
-        self.snapshots, self.directory, self.keep = snapshots, Path(directory), keep
+        self.snapshots, self.directory = snapshots, Path(directory)
+        saved = _get_state(snapshots.metadata, self.KEEP_KEY, keep)
+        self.keep = saved if type(saved) is int and 1 <= saved <= 1000 else keep
         self._lock = threading.Lock()
+
+    def settings(self) -> dict[str, int]:
+        return {"keep": self.keep}
+
+    def configure(self, keep: int) -> dict[str, int]:
+        if type(keep) is not int or not 1 <= keep <= 1000:
+            raise ValueError("备份最大数量必须是 1–1000 的整数")
+        with self._lock:
+            _set_state(self.snapshots.metadata, self.KEEP_KEY, keep)
+            self.keep = keep
+            return self.settings()
 
     def create(self) -> dict[str, object]:
         # 手动与定时备份串行发布和保留，避免同时清理对方刚生成的文件。
@@ -382,14 +396,27 @@ class BackupService:
     def list(self) -> list[dict[str, object]]:
         if not self.directory.is_dir():
             return []
-        items = [path for path in self.directory.iterdir() if self.NAME.fullmatch(path.name)]
-        return [{"name": path.name, "size": path.stat().st_size, "created_at": path.stat().st_mtime}
-                for path in sorted(items, key=lambda item: item.name, reverse=True)]
+        items = []
+        # 列表不等待耗时的快照创建；并发删除或轮换时跳过已经移除的文件。
+        for path in sorted(self.directory.iterdir(), key=lambda item: item.name, reverse=True):
+            if not self.NAME.fullmatch(path.name) or path.is_symlink() or not path.is_file():
+                continue
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                continue
+            items.append({"name": path.name, "size": info.st_size, "created_at": info.st_mtime})
+        return items
 
     def path(self, name: str) -> Path:
-        if not self.NAME.fullmatch(name) or not (self.directory / name).is_file():
+        if not self.NAME.fullmatch(name) or (self.directory / name).is_symlink() or not (self.directory / name).is_file():
             raise FileNotFoundError(name)
         return self.directory / name
+
+    def delete(self, name: str) -> dict[str, str]:
+        with self._lock:
+            self.path(name).unlink()
+        return {"name": name}
 
 
 def restore_backup(backup: str | Path, passphrase: str, data_dir: str | Path) -> Path:

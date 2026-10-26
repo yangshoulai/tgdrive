@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import secrets
 import time
@@ -324,7 +325,7 @@ class TgDriveASGI(StaticFiles):
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
                 await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, user=file_user, private=private))
                 return
-            if path.startswith("/api/admin/v1/backups/") and method == "GET":
+            if path.startswith("/api/admin/v1/backups/") and path != "/api/admin/v1/backups/settings" and method == "GET":
                 await self._backup_download(tracked_send, token, path.rsplit("/", 1)[-1])
                 return
             attachment = re.fullmatch(r"/api/user/v1/assistant/attachments(?:/([0-9a-f]{32})/(content|thumbnail))?", path)
@@ -436,6 +437,8 @@ class TgDriveASGI(StaticFiles):
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
                           "/maintenance/thumbnails": "maintenance.thumbnails",
+                          "/audit/{}/delete": "audit.delete", "/audit/clear": "audit.clear",
+                          "/backups/settings": "backup.settings", "/backups/delete": "backup.delete",
                           "/backups": "backup.create", "/password": "admin.password", "/passphrase": "system.passphrase",
                           "/users/{}/password": "user.password_reset", "/users/{}/delete": "user.delete",
                           "/assistant/settings": "assistant.settings", "/assistant/limits": "assistant.settings",
@@ -482,7 +485,7 @@ class TgDriveASGI(StaticFiles):
             if not path.startswith(prefix + "/"):
                 continue
             route = path[len(prefix):]
-            pattern = re.sub(r"^/(users|clients|bots|downloads)/\d+/", r"/\1/{}/", route)
+            pattern = re.sub(r"^/(users|clients|bots|downloads|audit)/\d+/", r"/\1/{}/", route)
             pattern = re.sub(r"^/registration/invites/\d+/", "/registration/invites/{}/", pattern)
             pattern = re.sub(r"^/shares/[A-Za-z0-9_-]+/", "/shares/{}/", pattern)
             pattern = re.sub(r"^/assistant/(channels|models|users)/\d+/", r"/assistant/\1/{}/", pattern)
@@ -541,6 +544,12 @@ class TgDriveASGI(StaticFiles):
             detail = {"status": (result or {}).get("status")}
         elif action == "maintenance.thumbnails":
             detail = {key: payload[key] for key in ("daily_mib", "candidate_count") if key in payload}
+        elif action in ("audit.delete", "audit.clear") and ok:
+            detail = {"deleted": (result or {}).get("deleted")}
+        elif action == "backup.settings" and ok:
+            detail = {"keep": (result or {}).get("keep")}
+        elif action == "backup.delete" and ok:
+            target = (result or {}).get("name")
         elif action == "resources.update":
             detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency", "upload_concurrency", "upload_kib", "bot_interval_ms", "web_part_concurrency", "web_file_concurrency") if key in payload}
             if "proxy" in payload:
@@ -643,11 +652,16 @@ class TgDriveASGI(StaticFiles):
     async def _backup_download(self, send, token, name):
         self.admin.accounts.sessions.require(token, role="admin")
         path = self.admin.backup_path(token, name)
-        size = path.stat().st_size
-        await send({"type": "http.response.start", "status": 200, "headers": self._headers({
-            "Content-Type": "application/octet-stream", "Content-Length": str(size), "Cache-Control": "no-store",
-            "Content-Disposition": f"attachment; filename={name}", "X-Content-Type-Options": "nosniff"})})
-        with path.open("rb") as handle:
+        try:
+            handle = path.open("rb")
+        except FileNotFoundError as exc:
+            raise NotFoundError("备份不存在") from exc
+        # 先打开文件再发送响应头，删除或轮换备份不会中断已经开始的下载。
+        with handle:
+            size = os.fstat(handle.fileno()).st_size
+            await send({"type": "http.response.start", "status": 200, "headers": self._headers({
+                "Content-Type": "application/octet-stream", "Content-Length": str(size), "Cache-Control": "no-store",
+                "Content-Disposition": f"attachment; filename={name}", "X-Content-Type-Options": "nosniff"})})
             while chunk := await asyncio.to_thread(handle.read, 1 << 20):
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
         await send({"type": "http.response.body", "body": b""})
@@ -774,6 +788,12 @@ class TgDriveASGI(StaticFiles):
                 return 200, await self.admin.accounts.metadata.run_in_thread(self.audit.list, before=int(before) if before else None, limit=int(query.get("limit", ["50"])[0]),
                                             action=query.get("action", [""])[0] or None,
                                             failed_only=query.get("failed", ["0"])[0] in ("1", "true")), {}
+            if method == "POST" and re.fullmatch(r"/audit/\d+/delete", route):
+                return 200, await self.admin.accounts.metadata.run_in_thread(self.audit.delete, int(route.split("/")[2])), {}
+            if method == "POST" and route == "/audit/clear":
+                if payload.get("confirm") != "清空":
+                    raise ValueError("请输入“清空”确认")
+                return 200, await self.admin.accounts.metadata.run_in_thread(self.audit.clear), {}
             if method == "GET" and route == "/settings":
                 return 200, self.settings.describe(), {}
             if method == "GET" and route == "/version":
@@ -872,7 +892,16 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/maintenance/gc/retry":
                 return 200, self.admin.retry_gc(token, csrf), {}
             if method == "GET" and route == "/backups":
-                return 200, self.admin.list_backups(token), {}
+                return 200, await self.admin.list_backups(token), {}
+            if method == "GET" and route == "/backups/settings":
+                return 200, self.admin.backup_settings(token), {}
+            if method == "POST" and route == "/backups/settings":
+                return 200, await self.admin.configure_backups(token, csrf, payload.get("keep")), {}
+            if method == "POST" and route == "/backups/delete":
+                name = payload.get("name")
+                if not isinstance(name, str):
+                    raise ValueError("请选择要删除的备份")
+                return 200, await self.admin.delete_backup(token, csrf, name), {}
             if method == "POST" and route == "/backups":
                 return 201, await self.admin.create_backup(token, csrf), {}
             if route.startswith("/users/") and method == "POST" and route.endswith("/quota"):

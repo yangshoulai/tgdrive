@@ -2272,7 +2272,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
 .field > .segmented { justify-self: start; }
 .check-cell { display: grid; justify-items: start; gap: 2px; }
 .check-cell small { max-width: 100%; overflow: hidden; font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
-.audit-table { --cols: 128px minmax(110px, 1fr) minmax(96px, .8fr) minmax(140px, 2fr) 64px; }
+.audit-table { --cols: 128px minmax(110px, 1fr) minmax(96px, .8fr) minmax(140px, 2fr) 64px 44px; }
 /* 每列都要能收在自己的宽度里：动作名允许换行，对象与详情单行省略（完整内容在 title），不能溢出到相邻列。 */
 .audit-table .data-row > * { min-width: 0; }
 .audit-action { overflow-wrap: anywhere; }
@@ -2281,7 +2281,7 @@ kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
 .audit-target { overflow: hidden; font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
 .panel-more { display: flex; justify-content: center; padding: 12px; border-top: 1px solid var(--line-soft); }
 .panel-more:empty { display: none; }
-@media (max-width: 860px) { .audit-table { --cols: 128px 140px 112px minmax(200px, 1fr) 64px; } }
+@media (max-width: 860px) { .audit-table { --cols: 128px 140px 112px minmax(200px, 1fr) 64px 44px; } }
 .share-gate { display: grid; justify-items: center; gap: 6px; max-width: 420px; width: 100%; margin: 0 auto; padding: 36px 28px; text-align: center; }
 .share-gate h1 { font-size: var(--text-lg); font-weight: 600; }
 .share-gate > p { margin-bottom: 14px; color: var(--ink-2); }

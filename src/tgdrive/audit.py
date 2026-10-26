@@ -13,6 +13,7 @@ import secrets
 from pathlib import Path
 
 from .crypto import derive_subkey, seal
+from .errors import NotFoundError
 
 from .metadata import Metadata
 
@@ -28,6 +29,7 @@ ACTIONS = {
     "invite.create": "创建邀请码", "invite.revoke": "撤销邀请码",
     "maintenance.gc": "运行垃圾回收", "maintenance.scrub": "运行完整性校验", "maintenance.cleanup": "清理未完成的上传",
     "maintenance.gc_retry": "重试回收失败的分片", "maintenance.thumbnails": "调整缩略图自动补图", "backup.create": "创建备份", "backup.download": "下载备份",
+    "backup.settings": "修改备份设置", "backup.delete": "删除备份", "audit.delete": "删除审计日志", "audit.clear": "清空审计日志",
     "admin.password": "修改管理员密码", "system.passphrase": "更换加密口令", "user.password_reset": "重置用户密码",
     "user.delete": "删除用户", "trash.purge": "清空回收站",
     "resources.update": "修改下载与资源配置", "client_cache.update": "修改浏览器缓存策略", "client_cache.reset": "重置浏览器缓存密钥",
@@ -124,6 +126,7 @@ class AuditLog:
             finally:
                 os.close(directory_fd)
             with self.metadata.transaction() as db:
+                self._preserve_sequence(db)
                 db.executemany("DELETE FROM audit_log WHERE id=? AND ts<?", ((row["id"], cutoff) for row in rows))
         finally:
             staging.unlink(missing_ok=True)
@@ -133,9 +136,33 @@ class AuditLog:
                detail: dict[str, object] | None = None, ip: str | None = None) -> None:
         target, detail = self._redact(action, target, detail)
         with self.metadata.transaction() as db:
-            db.execute("INSERT INTO audit_log(ts,actor_type,actor,action,target,ip,ok,detail) VALUES(?,?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO audit_log(id,ts,actor_type,actor,action,target,ip,ok,detail) "
+                       "VALUES(max(coalesce((SELECT max(id) FROM audit_log),0),"
+                       "coalesce(CAST((SELECT value FROM settings WHERE key='audit.sequence') AS INTEGER),0))+1,"
+                       "?,?,?,?,?,?,?,?)",
                        (time.time(), actor_type, actor, action, target, ip, int(ok),
                         json.dumps(detail, ensure_ascii=False, separators=(",", ":")) if detail else None))
+
+    @staticmethod
+    def _preserve_sequence(db) -> None:
+        # INTEGER PRIMARY KEY 会复用删除后的编号；保留水位，避免旧确认弹窗命中新日志。
+        last_id = db.execute("SELECT coalesce(max(id),0) FROM audit_log").fetchone()[0]
+        db.execute("INSERT INTO settings(key,value) VALUES('audit.sequence',?) ON CONFLICT(key) DO UPDATE "
+                   "SET value=max(CAST(settings.value AS INTEGER),CAST(excluded.value AS INTEGER))", (str(last_id),))
+
+    def delete(self, event_id: int) -> dict[str, int]:
+        with self.metadata.transaction() as db:
+            self._preserve_sequence(db)
+            deleted = db.execute("DELETE FROM audit_log WHERE id=?", (event_id,)).rowcount
+            if not deleted:
+                raise NotFoundError("审计日志不存在")
+        return {"deleted": deleted}
+
+    def clear(self) -> dict[str, int]:
+        with self.metadata.transaction() as db:
+            self._preserve_sequence(db)
+            deleted = db.execute("DELETE FROM audit_log").rowcount
+        return {"deleted": deleted}
 
     def list(self, *, before: int | None = None, limit: int = 50, action: str | None = None,
              failed_only: bool = False) -> dict[str, object]:

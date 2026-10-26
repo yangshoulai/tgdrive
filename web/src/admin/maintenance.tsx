@@ -4,7 +4,7 @@ import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 
-import { Notice, ButtonLink, Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, PageHeader, Pagination, Panel, Segmented, SkeletonRows, Tabs, Switch, formatBytes, formatDateTime, toast, useDocumentTitle } from "../ui";
+import { Notice, ButtonLink, Badge, Button, ConfirmDialog, EmptyState, Field, Icon, KeyValue, Menu, Modal, PageHeader, Pagination, Panel, Segmented, SkeletonRows, Tabs, Switch, formatBytes, formatDateTime, toast, useDocumentTitle } from "../ui";
 
 import { UnlockForm } from "./lock";
 
@@ -75,6 +75,7 @@ function auditDetail(event: api.AuditEvent) {
   if (typeof detail.bad === "number" && detail.bad) parts.push(`异常 ${detail.bad} 项`);
   if ("quota_bytes" in detail) parts.push(detail.quota_bytes ? `配额 ${formatBytes(Number(detail.quota_bytes))}` : "不限配额");
   if (typeof detail.name === "string") parts.push(detail.name);
+  if (typeof detail.keep === "number") parts.push(`最多保留 ${detail.keep} 份备份`);
   if (typeof detail.model === "string") parts.push(detail.model);
   if (Array.isArray(detail.models)) parts.push(`${detail.models.length} 个模型`);
   if (detail.api_key === "changed") parts.push("更换 API Key");
@@ -86,17 +87,21 @@ function auditDetail(event: api.AuditEvent) {
 
 function AuditPanel() {
   const [failedOnly, setFailedOnly] = useState(false);
+  const [deleting, setDeleting] = useState<api.AuditEvent | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
   const fetchPage = useCallback((cursor: string | null) => api.adminAudit({ failedOnly, cursor: cursor === null ? null : Number(cursor) }), [failedOnly]);
   const pagination = useCursorPage(fetchPage);
   const events = pagination.page?.events ?? null;
   return (
     <Panel title="活动记录" description="记录账号、安全操作和结果，不记录文件名、路径、来源链接或凭据。" flush
-      actions={<Segmented label="筛选" value={failedOnly ? "failed" : "all"} onChange={value => setFailedOnly(value === "failed")} options={[{ value: "all", label: "全部" }, { value: "failed", label: "仅失败" }]} />}>
+      actions={<><Segmented label="筛选" value={failedOnly ? "failed" : "all"} onChange={value => setFailedOnly(value === "failed")} options={[{ value: "all", label: "全部" }, { value: "failed", label: "仅失败" }]} />
+        <Menu label="审计日志操作" items={[{ label: "清空全部日志", icon: "trash", danger: true, onSelect: () => { setConfirmText(""); setClearing(true); } }]} /></>}>
       {pagination.error ? <EmptyState icon="alert" title="审计日志加载失败" description={pagination.error} action={<Button onClick={() => void pagination.reload()}>重试</Button>} /> : events === null ? <SkeletonRows rows={4} /> : events.length === 0 ? <EmptyState icon="shield" title={failedOnly ? "没有失败的操作" : "还没有记录"} /> : (
         <>
           <div className="table-scroll"><div className="data-table audit-table" role="table" aria-label="审计日志">
             <div className="data-row data-head" role="row">
-              <span role="columnheader">时间</span><span role="columnheader">操作者</span><span role="columnheader">操作</span><span role="columnheader">对象与详情</span><span role="columnheader">结果</span>
+              <span role="columnheader">时间</span><span role="columnheader">操作者</span><span role="columnheader">操作</span><span role="columnheader">对象与详情</span><span role="columnheader">结果</span><span role="columnheader"><span className="sr-only">操作</span></span>
             </div>
             {events.map(event => { const detail = auditDetail(event); return (
               <div key={event.id} role="row" className="data-row">
@@ -105,12 +110,29 @@ function AuditPanel() {
                 <span role="cell" className="audit-action" title={event.action}>{event.label}</span>
                 <span role="cell" className="name-stack audit-detail">{event.target && <span className="mono audit-target" title={event.target}>{event.target}</span>}{detail && <small title={detail}>{detail}</small>}</span>
                 <span role="cell">{event.ok ? <Badge tone="success" dot>成功</Badge> : <Badge tone="danger" dot>失败</Badge>}</span>
+                <span role="cell" className="cell-actions"><Menu label={`日志 ${event.id} 的操作`} items={[
+                  { label: "删除日志", icon: "trash", danger: true, onSelect: () => setDeleting(event) },
+                ]} /></span>
               </div>
             ); })}
           </div></div>
           <div className="panel-more"><Pagination {...pagination} /></div>
         </>
       )}
+      {deleting && <ConfirmDialog title="删除这条审计日志？" description={`${formatDateTime(deleting.ts)} · ${deleting.label}。此记录将被永久删除，无法撤销；本次删除操作会写入新的审计记录。`}
+        confirmLabel="删除日志" onClose={() => setDeleting(null)} onConfirm={async () => {
+          try { await api.deleteAuditEvent(deleting.id); toast.success("审计日志已删除"); setDeleting(null); void pagination.reload(); }
+          catch (reason) { toast.error(api.errorMessage(reason, "删除失败，请稍后重试")); }
+        }} />}
+      {clearing && <ConfirmDialog title="清空全部审计日志？" description="将永久删除所有在线审计日志，包括其他分页和筛选条件下的记录，无法撤销。已有归档和备份保留，清空后会留下本次清空操作的审计记录。"
+        confirmLabel="清空全部日志" onClose={() => setClearing(false)} onConfirm={async () => {
+          if (confirmText !== "清空") { toast.error("请输入“清空”确认"); return; }
+          try {
+            const result = await api.clearAudit(confirmText); toast.success(`已清空 ${result.deleted} 条审计日志`); setClearing(false); setFailedOnly(false); void pagination.reload();
+          } catch (reason) { toast.error(api.errorMessage(reason, "清空失败，请稍后重试")); }
+        }}>
+        <Field label="输入“清空”确认"><input className="input" value={confirmText} onChange={event => setConfirmText(event.target.value)} autoComplete="off" autoFocus /></Field>
+      </ConfirmDialog>}
     </Panel>
   );
 }
@@ -291,9 +313,18 @@ function TasksPanel({ unlocked, active }: { unlocked: boolean; active: boolean }
 
 function BackupsPanel({ unlocked }: { unlocked: boolean }) {
   const [backups, setBackups] = useState<api.Backup[] | null>(null);
+  const [settings, setSettings] = useState<api.BackupSettings | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [keep, setKeep] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState<api.Backup | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const load = useCallback(() => { setError(""); void api.listBackups().then(setBackups).catch(reason => setError(api.errorMessage(reason, "备份列表加载失败，请稍后重试"))); }, []);
+  const load = useCallback(() => {
+    setError("");
+    void Promise.all([api.listBackups(), api.backupSettings()]).then(([items, config]) => { setBackups(items); setSettings(config); })
+      .catch(reason => setError(api.errorMessage(reason, "备份列表加载失败，请稍后重试")));
+  }, []);
   useEffect(load, [load]);
   async function create() {
     setBusy(true);
@@ -301,9 +332,19 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
     catch (reason) { toast.error(api.errorMessage(reason, "备份失败，请稍后重试")); }
     finally { setBusy(false); }
   }
+  async function saveSettings(event: FormEvent) {
+    event.preventDefault();
+    const value = Number(keep);
+    if (!Number.isInteger(value) || value < 1 || value > 1000) { toast.error("备份最大数量必须是 1–1000 的整数"); return; }
+    setSaving(true);
+    try { setSettings(await api.configureBackups(value)); toast.success("备份设置已保存，下次成功备份后按新上限保留"); setEditing(false); }
+    catch (reason) { toast.error(api.errorMessage(reason, "保存失败，请稍后重试")); }
+    finally { setSaving(false); }
+  }
   return (
-    <Panel title="数据备份" description="数据库记录了每个文件保存在哪里、如何打开。它丢失后，已保存的文件将无法读取。系统每天自动备份一次，保留最近 14 份。"
-      actions={<Button size="sm" icon="plus" loading={busy} disabled={!unlocked} onClick={() => void create()}>立即备份</Button>} flush>
+    <Panel title="数据备份" description={`数据库记录了每个文件保存在哪里、如何打开。它丢失后，已保存的文件将无法读取。系统每天自动备份一次${settings ? `，最多保留最近 ${settings.keep} 份` : ""}。`}
+      actions={<><Button size="sm" disabled={!settings || busy} onClick={() => { if (settings) { setKeep(String(settings.keep)); setEditing(true); } }}>备份设置</Button>
+        <Button size="sm" icon="plus" loading={busy} disabled={!unlocked} onClick={() => void create()}>立即备份</Button></>} flush>
       {error ? <EmptyState icon="alert" title="备份列表加载失败" description={error} action={<Button onClick={load}>重试</Button>} /> : backups === null ? <SkeletonRows rows={2} /> : backups.length === 0 ? <EmptyState icon="shield" title="还没有备份" description="解锁后系统会自动创建第一份备份。" /> : (
         <div className="table-scroll"><div className="data-table backups-table" role="table" aria-label="备份">
           <div className="data-row data-head" role="row"><span role="columnheader">备份文件</span><span role="columnheader">大小</span><span role="columnheader">创建时间</span><span role="columnheader"><span className="sr-only">操作</span></span></div>
@@ -312,7 +353,8 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
               <span role="cell" className="mono">{backup.name}</span>
               <span role="cell" className="muted">{formatBytes(backup.size)}</span>
               <span role="cell" className="muted">{formatDateTime(backup.created_at)}</span>
-              <span role="cell" className="cell-actions"><ButtonLink variant="ghost" size="sm" icon="download" href={api.backupUrl(backup.name)} download>下载</ButtonLink></span>
+              <span role="cell" className="cell-actions"><ButtonLink variant="ghost" size="sm" icon="download" href={api.backupUrl(backup.name)} aria-label={`下载备份 ${backup.name}`} title="下载备份" download />
+                <Menu label={`备份 ${backup.name} 的操作`} items={[{ label: "删除备份", icon: "trash", danger: true, disabled: busy, onSelect: () => setDeleting(backup) }]} /></span>
             </div>
           ))}
         </div></div>
@@ -322,6 +364,19 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
         <div className="code-block"><pre><code>tgdrive restore tgdrive-20261007-030000.tgdbak --data-dir /var/lib/tgdrive</code></pre></div>
         <p className="muted">恢复需要输入<strong>创建该备份时</strong>的加密口令。原数据库会被保留为 meta.db.before-restore-*，不会被覆盖。</p>
       </div>
+      {editing && <Modal title="备份设置" description="每次成功创建备份后，按上限保留最新备份并自动删除超量旧备份。" size="sm" onClose={() => setEditing(false)} dismissible={!saving}
+        footer={<><Button disabled={saving} onClick={() => setEditing(false)}>取消</Button><Button variant="primary" loading={saving} type="submit" form="backup-settings-form">保存</Button></>}>
+        <form id="backup-settings-form" className="form" noValidate onSubmit={event => void saveSettings(event)}>
+          <Field label="备份最大数量" hint="可设为 1–1000 份。修改不会立即删除现有备份；下次手动或自动备份成功后生效。">
+            <input className="input" type="number" min={1} max={1000} step={1} value={keep} onChange={event => setKeep(event.target.value)} disabled={saving} autoFocus />
+          </Field>
+        </form>
+      </Modal>}
+      {deleting && <ConfirmDialog title="删除这份备份？" description={`备份 ${deleting.name} 将被永久删除，无法撤销。当前数据库和已保存的文件不受影响。删除前请确认已有其他可用备份。`}
+        confirmLabel="删除备份" onClose={() => setDeleting(null)} onConfirm={async () => {
+          try { await api.deleteBackup(deleting.name); toast.success("备份已删除"); setDeleting(null); load(); }
+          catch (reason) { toast.error(api.errorMessage(reason, "删除失败，请稍后重试")); }
+        }} />}
     </Panel>
   );
 }

@@ -354,9 +354,26 @@ class AdminApi:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         return {"requeued": self._maintenance().gc.retry_dead()}
 
-    def list_backups(self, token: str) -> list[dict[str, object]]:
+    async def list_backups(self, token: str) -> list[dict[str, object]]:
         self.accounts.sessions.require(token, role="admin")
-        return self._maintenance().backups.list()
+        import asyncio
+        return await asyncio.to_thread(self._maintenance().backups.list)
+
+    def backup_settings(self, token: str) -> dict[str, int]:
+        self.accounts.sessions.require(token, role="admin")
+        return self._maintenance().backups.settings()
+
+    async def configure_backups(self, token: str, csrf: str, keep: int) -> dict[str, int]:
+        self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        return await self.accounts.metadata.run_in_thread(self._maintenance().backups.configure, keep)
+
+    async def delete_backup(self, token: str, csrf: str, name: str) -> dict[str, str]:
+        self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        import asyncio
+        try:
+            return await asyncio.to_thread(self._maintenance().backups.delete, name)
+        except FileNotFoundError as exc:
+            raise NotFoundError("备份不存在") from exc
 
     async def create_backup(self, token: str, csrf: str) -> dict[str, object]:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
