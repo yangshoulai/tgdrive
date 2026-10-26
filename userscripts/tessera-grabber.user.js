@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.16.0
+// @version      0.16.1
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -17,6 +17,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
 // @grant        GM_openInTab
+// @grant        GM_addElement
 // @grant        unsafeWindow
 // @grant        GM.getValue
 // @grant        GM.setValue
@@ -24,6 +25,7 @@
 // @grant        GM.openInTab
 // @grant        GM.setClipboard
 // @grant        GM.xmlHttpRequest
+// @grant        GM.addElement
 // @inject-into  content
 // @connect      *
 // ==/UserScript==
@@ -35,7 +37,8 @@
  * Copyright (c) 2022 hmjz100, AGPL-3.0-or-later.
  * Upstream: https://github.com/hmjz100/LinkSwift
  * Pinned commit: 8283da03e6c78576ebca8b1604161bcd54ade82e (1.1.4).
- * Modified 2026-10-26: extract selection and link resolution; use Tessera UI/GM APIs.
+ * Modified 2026-10-26: extract selection and link resolution; use Tessera UI/GM APIs;
+ * bridge read-only selection across isolated worlds and clarify share-page navigation.
  * License and complete source: https://github.com/yangshoulai/tgdrive/tree/main/userscripts
  * Upstream snapshot and update instructions: third_party/linkswift/README.md.
  * This program comes WITHOUT ANY WARRANTY. See userscripts/LICENSE for the full license.
@@ -799,6 +802,17 @@
       }
       throw new Error("当前脚本管理器不支持跨域请求，请使用 Tampermonkey、Violentmonkey 或 Userscripts");
     },
+    /** Only the built-in, read-only cloud selection reader is injected; no GM APIs or settings enter the page. */
+    async pageScript(textContent) {
+      if (typeof GM_addElement === "function") return await GM_addElement("script", { textContent });
+      if (GMA?.addElement) return await GMA.addElement("script", { textContent });
+      const node = document.createElement("script");
+      try {
+        node.textContent = textContent;
+        (document.head || document.documentElement).appendChild(node);
+        return node;
+      } catch (error) { node.remove(); throw error; }
+    },
     menu(label, fn) { return HAS_MENU ? GM_registerMenuCommand(label, fn) : null; },
     unmenu(id) { if (id != null && typeof GM_unregisterMenuCommand === "function") GM_unregisterMenuCommand(id); },
   };
@@ -1039,7 +1053,6 @@
   }
 
   const cloudNode = selector => (page.document || document).querySelector?.(selector);
-  const cloudNodes = selector => [...((page.document || document).querySelectorAll?.(selector) || [])];
   function cloudStorage(key) {
     try {
       const value = (page.localStorage || localStorage).getItem(key);
@@ -1054,103 +1067,168 @@
     try { return decodeURIComponent(value); } catch { return value; }
   }
 
-  /** LinkSwift base.findReact: walk component owners, checking the actual selection props along the way. */
-  function cloudReactProps(node, accepts) {
-    if (!node) return null;
-    const keys = Object.keys(node);
-    const direct = node[keys.find(key => key.startsWith("__reactProps$"))];
-    if (direct && accepts(direct)) return direct;
-    let fiber = node[keys.find(key => /^(?:__reactFiber\$|__reactInternalInstance\$)/.test(key))];
-    const visited = new Set();
-    for (let depth = 0; fiber && depth < 40 && !visited.has(fiber); depth++) {
-      visited.add(fiber);
-      for (const props of [fiber.stateNode?.props, fiber.memoizedProps, fiber.pendingProps, fiber._instance?.props]) {
-        if (props && accepts(props)) return props;
+  const CLOUD_LAYOUTS = {
+    baidu: ["fs_id", "server_filename", "size", "fs_id server_filename filename size isdir"],
+    aliyun: ["fileId", "name", "size", "fileId driveId name size type"],
+    mcloud: ["contentID", "contentName", "contentSize", "contentID contentName contentSize contentSuffix path dirEtag caName"],
+    tcloud: ["fileId", "fileName", "size", "fileId fileName size isFolder shareId"],
+    xunlei: ["id", "name", "size", "id name size kind"],
+    guangya: ["fileId", "fileName", "fileSize", "fileId fileName fileSize resType"],
+    quark: ["fid", "file_name", "size", "fid file_name size file stoken share_fid_token"],
+    uc: ["fid", "file_name", "size", "fid file_name size file stoken share_fid_token"],
+    "123pan": ["FileId", "FileName", "Size", "FileId FileName Size Type Etag S3KeyFlag"],
+  };
+
+  /** Self-contained so it can also run in the page realm. Only whitelisted primitive file fields leave it. */
+  function cloudReadSelection(view, provider, fields, share) {
+    const doc = view.document || document;
+    const nodes = selector => {
+      const all = [...(doc.querySelectorAll?.(selector) || [])];
+      return all.length ? all : [doc.querySelector?.(selector)].filter(Boolean);
+    };
+    const node = selector => nodes(selector)[0];
+    let available = false;
+    const list = value => { if (Array.isArray(value)) { available = true; return value; } return []; };
+    const keysOf = value => typeof value === "string" ? value.split(",") : Array.isArray(value) ? value
+      : value && typeof value.values === "function" ? [...value.values()] : [];
+    function reactValues(element) {
+      const values = [], visited = new Set();
+      const keys = Object.keys(element);
+      const direct = element[keys.find(key => key.startsWith("__reactProps$"))];
+      if (direct) values.push(direct);
+      let fiber = element[keys.find(key => /^(?:__reactFiber\$|__reactInternalInstance\$)/.test(key))];
+      for (let depth = 0; fiber && depth < 40 && !visited.has(fiber); depth++) {
+        visited.add(fiber);
+        // Class components may keep the selection in state and the file list in props.
+        const instance = fiber.stateNode || fiber._instance;
+        if (instance?.props && instance?.state) values.push({ ...instance.props, ...instance.state });
+        for (const value of [instance?.props, instance?.state, fiber.memoizedProps, fiber.pendingProps]) if (value) values.push(value);
+        fiber = fiber.return || fiber._currentElement?._owner;
       }
-      fiber = fiber.return || fiber._currentElement?._owner;
+      return values;
     }
-    return null;
+    function reactList(selectors, listNames, idKey, selectionNames) {
+      let empty = [];
+      for (const selector of selectors) for (const element of nodes(selector).slice(0, 8)) {
+        const values = reactValues(element);
+        for (const props of values) {
+          const files = listNames.map(key => props[key]).find(Array.isArray);
+          if (provider === "123pan" && props.file?.S3KeyFlag != null) { available = true; return [props.file]; }
+          if (!files) continue;
+          const selection = value => selectionNames.map(key => value[key]).find(value => value != null) ?? value.rowSelection?.selectedRowKeys;
+          const selected = selection(props) ?? values.map(selection).find(value => value != null);
+          if (selected == null && !(provider === "123pan" && files.some(item => item.checked != null))) continue;
+          available = true;
+          const ids = new Set(keysOf(selected).map(String));
+          const token = values.map(value => value.stoken).find(value => typeof value === "string" && value) || "";
+          const result = files.filter(item => provider === "123pan" && item.checked === true || ids.has(String(item[idKey])))
+            .map(item => provider === "quark" || provider === "uc" ? { ...item, stoken: item.stoken || token } : item);
+          if (result.length) return result;
+          empty = result;
+        }
+      }
+      return empty;
+    }
+    let selected = [];
+    switch (provider) {
+      case "baidu": {
+        selected = list(node(".wp-s-core-pan")?.__vue__?.selectedList);
+        if (!available) selected = list(node(".file-list")?.__vue__?.allFileList).filter(item => item.selected);
+        if (!available) { try { selected = list(view.require?.("system-core:context/context.js")?.instanceForSystem?.list?.getSelected?.()); } catch { /* Try the page bridge. */ } }
+        break;
+      }
+      case "aliyun": selected = reactList(['[class^="node-list-table-view--"], [class*="node-list-table-view--"], [class*="node-list-grid-view--"]'], ["dataSource"], "fileId", ["selectedKeys"]); break;
+      case "mcloud": {
+        const own = node(".main_file_list")?.__vue__?.selectList;
+        if (own) selected = list(own).map(value => value.item);
+        else {
+          const home = node(".home-page")?.__vue__;
+          selected = list(home?._computedWatchers?.fileList?.value).filter((_, index) => home.selectedFile?.includes(index));
+        }
+        break;
+      }
+      case "tcloud": {
+        selected = list(node(".c-file-list")?.__vue__?.selectedList);
+        if (!available && node(".info-detail")?.__vue__?.fileDetail) selected = list([node(".info-detail").__vue__.fileDetail]);
+        break;
+      }
+      case "xunlei": {
+        const rows = nodes('[class*="SourceListItem__item--"]').map(element => element.__vue__).filter(Boolean);
+        if (rows.length) selected = list(rows.filter(vue => vue.selected?.includes?.(vue.info?.id)).map(vue => vue.info));
+        break;
+      }
+      case "guangya": selected = reactList(['.swangpan-file-list__root[data-ui="file-list"]'], ["dataSource"], "fileId", ["selectedItems"]); break;
+      case "quark": case "uc": selected = reactList([".file-list", ".ant-table-wrapper"], ["list", "dataSource"], "fid", ["selectedRowKeys"]); break;
+      case "123pan": selected = reactList(['.ant-table-wrapper, .tiled-list, .file-list, .single-file-sharing-container-content, .custom-table-wrapper, [class^="mfy_h-table-module__shell__"]'], ["dataSource", "loadedFileList", "files"], "FileId", []); break;
+    }
+    const primitive = value => typeof value === "string" && value.length <= 8192 || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value);
+    const pick = (item, names) => Object.fromEntries(names.filter(key => primitive(item?.[key])).map(key => [key, item[key]]));
+    const result = { available, overflow: selected.length > 51, files: selected.slice(0, 51).map(item => pick(item, fields.split(" "))) };
+    if (share && provider === "baidu") {
+      const locals = view.locals?.dump?.() || {};
+      const value = key => locals[key]?.value ?? locals[key];
+      result.shareData = pick({ uk: value("share_uk"), id: value("shareid"), bdstoken: value("bdstoken"),
+        jsToken: view.jsToken || "", sekey: view.currentSekey || view.cache?.list?.config?.params?.sekey || "" }, ["uk", "id", "bdstoken", "jsToken", "sekey"]);
+    }
+    return result;
   }
 
-  /** Each adapter reads the same page state as upstream, without importing its UI or mutating selected files. */
-  function cloudSelected(context) {
-    switch (context.provider) {
-      case "baidu": {
-        const core = cloudNode(".wp-s-core-pan")?.__vue__?.selectedList;
-        if (core?.length) return core;
-        const list = cloudNode(".file-list")?.__vue__?.allFileList?.filter(item => item.selected);
-        if (list?.length) return list;
-        try { return page.require?.("system-core:context/context.js")?.instanceForSystem?.list?.getSelected?.() || []; }
-        catch { return []; }
-      }
-      case "aliyun": {
-        const props = cloudReactProps(cloudNode('[class^="node-list-table-view--"]'), value => Array.isArray(value.dataSource) && value.selectedKeys != null);
-        const ids = Array.isArray(props?.selectedKeys) ? props.selectedKeys : String(props?.selectedKeys || "").split(",");
-        return (props?.dataSource || []).filter(item => ids.some(id => String(id) === String(item.fileId)));
-      }
-      case "mcloud": {
-        const list = cloudNode(".main_file_list")?.__vue__?.selectList;
-        if (list) return list.map(value => value.item);
-        const home = cloudNode(".home-page")?.__vue__;
-        return (home?._computedWatchers?.fileList?.value || []).filter((_, index) => home.selectedFile?.includes(index));
-      }
-      case "tcloud": return cloudNode(".c-file-list")?.__vue__?.selectedList || [cloudNode(".info-detail")?.__vue__?.fileDetail].filter(Boolean);
-      case "xunlei": return cloudNodes('[class*="SourceListItem__item--"]').map(node => node.__vue__)
-        .filter(vue => vue?.selected?.includes?.(vue.info?.id)).map(vue => vue.info);
-      case "guangya": {
-        const props = cloudReactProps(cloudNode('.swangpan-file-list__root[data-ui="file-list"]'), value => Array.isArray(value.dataSource) && Array.isArray(value.selectedItems));
-        return (props?.dataSource || []).filter(item => props.selectedItems.some(id => String(id) === String(item.fileId)));
-      }
-      case "quark": case "uc": {
-        const props = cloudReactProps(cloudNode(".file-list"), value => Array.isArray(value.list) && Array.isArray(value.selectedRowKeys));
-        return (props?.list || []).filter(item => props.selectedRowKeys.some(id => String(id) === String(item.fid)))
-          .map(item => ({ ...item, stoken: props.stoken || "" }));
-      }
-      case "123pan": {
-        const props = cloudReactProps(cloudNode('.ant-table-wrapper, .tiled-list, .file-list, .single-file-sharing-container-content, .custom-table-wrapper, [class^="mfy_h-table-module__shell__"]'),
-          value => Array.isArray(value.dataSource || value.loadedFileList || value.files) || value.file?.S3KeyFlag != null);
-        const ids = props?.rowSelection?.selectedRowKeys || [];
-        const files = (props?.dataSource || props?.loadedFileList || props?.files || []).filter(item => item.checked === true || ids.some(id => String(id) === String(item.FileId)));
-        if (props?.file?.S3KeyFlag != null && !files.some(item => item.FileId === props.file.FileId)) files.push(props.file);
-        return files;
-      }
-      default: return [];
-    }
+  async function cloudSelected(context) {
+    const fields = CLOUD_LAYOUTS[context.provider]?.[3];
+    if (!fields || cloudOf()?.provider !== context.provider || new URL(context.url).origin !== location.origin) throw new Error("请返回原网盘页面，再重新获取文件");
+    let snapshot;
+    try { snapshot = cloudReadSelection(page, context.provider, fields, context.share); } catch { /* Isolated wrappers may deny page state. */ }
+    if (snapshot?.available && (!context.share || context.provider !== "baidu" || snapshot.shareData?.id)) return snapshot;
+    // @inject-into content hides React/Vue expandos. A one-shot page script reads just file metadata;
+    // its DOM attribute is shared across realms. No persistent listener, GM capability or Tessera key is exposed.
+    let script;
+    try {
+      const code = `(() => { const node = document.currentScript; try { node.setAttribute("data-tessera-selection", JSON.stringify((${cloudReadSelection.toString()})(window, ${JSON.stringify(context.provider)}, ${JSON.stringify(fields)}, ${JSON.stringify(context.share)}))); } catch { node.setAttribute("data-tessera-selection", "{}"); } })();`;
+      script = await gm.pageScript(code);
+      const text = script?.getAttribute("data-tessera-selection");
+      if (!text || text.length > 256 * 1024) throw new Error();
+      snapshot = JSON.parse(text);
+      if (typeof snapshot.available !== "boolean" || !Array.isArray(snapshot.files) || snapshot.files.length > 51) throw new Error();
+    } catch { throw new Error("脚本无法读取网盘页面的勾选状态，请更新脚本并刷新页面；若仍失败，请检查脚本管理器的页面脚本权限"); }
+    finally { script?.remove(); }
+    if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
+    if (!snapshot.available) throw new Error("暂未识别到网盘文件列表，请等待列表加载后重试；若仍失败，请反馈当前页面地址和视图");
+    return snapshot;
+  }
+
+  function cloudShareGuide(context) {
+    if (!context.share || !["aliyun", "mcloud", "xunlei"].includes(context.provider)) return null;
+    const path = { aliyun: "/drive/file/all", mcloud: "/w/#/main", xunlei: "/" }[context.provider];
+    return { url: new URL(path, context.url).href,
+      hint: "此网盘的分享页暂不支持直接取链。请先将文件保存到自己的网盘，再打开「我的网盘」勾选文件；转存成功后留在分享页仍无法发送。" };
   }
 
   /** Snapshot only file fields, never React/Vue instances or account credentials. Folders are deliberately not expanded. */
-  function cloudSources(context) {
-    if (context.share && ["aliyun", "mcloud", "xunlei"].includes(context.provider)) throw new Error("请先将分享文件保存到自己的网盘，再打开文件夹并勾选文件");
-    const layouts = {
-      baidu: ["fs_id", "server_filename", "size", "fs_id server_filename filename size isdir"],
-      aliyun: ["fileId", "name", "size", "fileId driveId name size type"],
-      mcloud: ["contentID", "contentName", "contentSize", "contentID contentName contentSize contentSuffix path dirEtag caName"],
-      tcloud: ["fileId", "fileName", "size", "fileId fileName size isFolder shareId"],
-      xunlei: ["id", "name", "size", "id name size kind"],
-      guangya: ["fileId", "fileName", "fileSize", "fileId fileName fileSize resType"],
-      quark: ["fid", "file_name", "size", "fid file_name size file stoken share_fid_token"],
-      uc: ["fid", "file_name", "size", "fid file_name size file stoken share_fid_token"],
-      "123pan": ["FileId", "FileName", "Size", "FileId FileName Size Type Etag S3KeyFlag"],
-    };
-    const [idKey, nameKey, sizeKey, fields] = layouts[context.provider];
-    const selectedFiles = cloudSelected(context);
+  async function cloudSources(context) {
+    if (cloudShareGuide(context)) throw new Error("请先将分享文件保存到自己的网盘，再打开「我的网盘」勾选文件；转存后请离开当前分享页");
+    const [idKey, nameKey, sizeKey, fields] = CLOUD_LAYOUTS[context.provider];
+    const snapshot = await cloudSelected(context);
+    if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
+    if (snapshot.overflow) throw new Error(`一次最多发送 ${BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
+    const selectedFiles = snapshot.files;
     const files = selectedFiles.filter(item => item && item[idKey] != null && !item.isdir && !item.isFolder && !item.dirEtag && !item.caName
       && item.type !== "folder" && item.kind !== "drive#folder" && item.resType != 2 && item.file !== false && (item.Type == null || item.Type === 0)
       && (!["quark", "uc"].includes(context.provider) || item.file === true)
       && (context.provider !== "aliyun" || item.type === "file") && (context.provider !== "xunlei" || item.kind === "drive#file"));
-    if (!files.length) throw new Error(context.provider === "aliyun" && cloudNode('[class^="node-list-grid-view--"]')
-      ? "请切换到网盘的列表视图，再勾选文件" : "请先在网盘中勾选文件；文件夹请打开后选择里面的文件");
+    if (!files.length) throw new Error("请先在网盘中勾选文件；文件夹请打开后选择里面的文件");
     if (files.length > BATCH_LIMIT) throw new Error(`一次最多发送 ${BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
     const session = new Map();
     const unique = new Map();
     for (const item of files) {
-      const file = Object.fromEntries(fields.split(" ").filter(key => item[key] != null).map(key => [key, item[key]]));
+      const file = Object.fromEntries(fields.split(" ").filter(key => ["string", "number", "boolean"].includes(typeof item[key]) && String(item[key]).length <= 8192).map(key => [key, item[key]]));
       const source = new URL(context.url);
       source.search = "";
       if (!context.share) source.pathname = "/";
       source.hash = `tessera-${context.provider}-${encodeURIComponent(String(item[idKey]))}`;
-      unique.set(source.href, { url: source.href, name: String(item[nameKey] || item.filename || ""), size: Number(item[sizeKey]) || null,
-        cloud: { ...context, file, session } });
+      const shareData = context.provider === "baidu" && snapshot.shareData ? Object.fromEntries(["uk", "id", "bdstoken", "jsToken", "sekey"]
+        .filter(key => ["string", "number"].includes(typeof snapshot.shareData[key]) && String(snapshot.shareData[key]).length <= 8192).map(key => [key, snapshot.shareData[key]])) : undefined;
+      unique.set(source.href, { url: source.href, name: String(file[nameKey] || file.filename || ""), size: Number(file[sizeKey]) || null,
+        cloud: { ...context, file, shareData, session } });
     }
     const result = [...unique.values()].filter(item => !isSent(item.url));
     if (!result.length) throw new Error("所选文件已发送，请到 Tessera 查看下载任务");
@@ -1250,10 +1328,7 @@
       response = await cloudRequest(context, url);
     } else {
       const shared = await cloudOnce(context, "baidu-share", async () => {
-        const locals = page.locals?.dump?.() || {};
-        const value = key => locals[key]?.value ?? locals[key];
-        const data = { uk: value("share_uk"), id: value("shareid"), bdstoken: value("bdstoken"),
-          jsToken: page.jsToken || "", sekey: page.currentSekey || page.cache?.list?.config?.params?.sekey || "" };
+        const data = context.shareData || {};
         if (!data.uk || !data.id) throw new Error("请先打开分享文件列表并完成提取码验证，再获取文件");
         const url = new URL("https://pan.baidu.com/share/tplconfig?fields=sign,timestamp&channel=chunlei&web=1&app_id=250528&clienttype=0&view_mode=1");
         url.searchParams.set("surl", new URL(context.url).pathname.split("/").pop());
@@ -2563,15 +2638,23 @@
   }
 
   function cloudCard(context) {
+    const guide = cloudShareGuide(context);
     return h("div", { className: "hero" },
       h("div", { className: "hero-head" }, h("span", { className: "hero-mark" }, svg("folder", 18)),
-        h("div", { className: "hero-text" }, h("strong", {}, context.label), h("div", { className: "sub" }, "获取网盘中已勾选的文件"))),
+        h("div", { className: "hero-text" }, h("strong", {}, context.label), h("div", { className: "sub" }, guide ? "分享文件需先转存" : "获取网盘中已勾选的文件"))),
       h("div", { className: "actions" },
-        h("button", { type: "button", className: "btn primary block", onclick: () => {
-          try { startBatch(cloudSources(cloudOf() || context), "server"); } catch (error) { toast(error.message); }
-        } }, svg("send"), "发送已选网盘文件"),
+        guide ? h("button", { type: "button", className: "btn primary block", onclick: () => gm.openTab(guide.url) }, svg("external"), "打开我的网盘")
+          : h("button", { type: "button", className: "btn primary block", onclick: async event => {
+            const button = event.currentTarget, opened = panel;
+            button.disabled = true;
+            try {
+              const sources = await cloudSources(cloudOf() || context);
+              if (panel === opened) startBatch(sources, "server");
+            } catch (error) { toast(error.message); }
+            finally { button.disabled = false; }
+          } }, svg("send"), "发送已选网盘文件"),
         context.provider === "baidu" && !context.share ? h("button", { type: "button", className: "btn", onclick: authorizeCloudBaidu }, "授权百度取链") : null),
-      h("p", { className: "hint" }, "先在网盘中勾选文件，再确认保存位置和文件名。文件夹请打开后选择里面的文件。"),
+      h("p", { className: "hint" }, guide?.hint || "先在网盘中勾选文件，再确认保存位置和文件名。文件夹请打开后选择里面的文件。"),
       context.provider === "baidu" && !context.share ? h("p", { className: "hint" }, "首次使用需在百度页面确认取链授权，完成后回到这里重试。") : null);
   }
 

@@ -13,7 +13,7 @@ const instrumented = source.replace(/\s+gm\.load\(\)\.then\([\s\S]*\}\);\s*\}\)\
   globalThis.toastMessages = [];
   toast = message => globalThis.toastMessages.push(message);
   globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBatch, parseEntries, clearEntries, clearBatch, close,
-    cloudOf, cloudSources, cloudSelected, resolveCloud, cloudMd5, cloudRequest, cloudDownload, captureCloudAuthorization, authorizeCloudBaidu, curlFor,
+    cloudOf, cloudSources, cloudSelected, cloudShareGuide, cloudCard, resolveCloud, cloudMd5, cloudRequest, cloudDownload, captureCloudAuthorization, authorizeCloudBaidu, curlFor,
     getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES,
     pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages, collect, addItem, checkNavigation, setActive: value => { active = value; },
     ready: gm.load(), gm, HAS_MENU, dormantFab, copy: text => gm.copy(text), openTab: url => gm.openTab(url),
@@ -33,7 +33,7 @@ async function until(predicate) {
 }
 
 /** manager: "sync" 模拟 Tampermonkey／Violentmonkey（GM_*），"async" 模拟 iOS Userscripts（只有异步 GM.*，无 GM_cookie 与菜单命令）。 */
-function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true, dom, manager = "sync",
+function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true, dom, manager = "sync", isolated = false, bridge = "dom",
   url = "https://gallery.example/album", storage = {}, query, pageState = {}, documentCookie = "visible=page", gmCookies } = {}) {
   const values = { settings: { server: "https://tessera.example", key: "TEST:secret", cookies } };
   const requests = [], fetches = [], listeners = [], opened = [], copied = [];
@@ -44,7 +44,27 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
   } };
   const storageApi = { getItem: key => storage[key] == null ? null : typeof storage[key] === "string" ? storage[key] : JSON.stringify(storage[key]),
     setItem: (key, value) => { storage[key] = value; }, key: index => Object.keys(storage)[index], get length() { return Object.keys(storage).length; } };
-  Object.assign(window, { localStorage: storageApi }, pageState);
+  Object.assign(window, { localStorage: storageApi }, isolated ? {} : pageState);
+  const injected = [], scriptNodes = [];
+  const pageDocument = { cookie: documentCookie, querySelector: selector => query?.(selector) || null, querySelectorAll: selector => dom ? dom(selector) : [] };
+  const pageContext = vm.createContext({ window: { document: pageDocument, ...pageState }, document: pageDocument });
+  const makeScript = () => {
+    const attributes = new Map();
+    const node = { textContent: "", setAttribute: (key, value) => attributes.set(key, String(value)), getAttribute: key => attributes.get(key),
+      remove() { node.removed = true; attributes.clear(); } };
+    if (bridge === "trusted-types") Object.defineProperty(node, "textContent", { set() { throw new TypeError("TrustedScript required"); } });
+    scriptNodes.push(node);
+    return node;
+  };
+  const inject = (node, privileged = false) => {
+    injected.push(node.textContent);
+    if (bridge === "blocked" || bridge === "privileged" && !privileged) return node;
+    pageDocument.currentScript = node;
+    try { vm.runInContext(node.textContent, pageContext); } finally { pageDocument.currentScript = null; }
+    return node;
+  };
+  const document = isolated ? { cookie: documentCookie, querySelector: () => ({}), querySelectorAll: () => [],
+    createElement: tag => { assert.equal(tag, "script"); return makeScript(); }, head: { appendChild: node => inject(node) } } : pageDocument;
   const xmlHttpRequest = details => {
     const record = { details, aborted: false };
     requests.push(record);
@@ -63,7 +83,7 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
     return { abort() { record.aborted = true; details.onabort?.(); } };
   };
   const context = vm.createContext({
-    window, unsafeWindow: window, document: { cookie: documentCookie, querySelector: selector => query?.(selector) || null, querySelectorAll: selector => dom ? dom(selector) : [] },
+    window, unsafeWindow: window, document,
     location: new URL(url), localStorage: storageApi, navigator: { userAgent: "BrowserTest/1" },
     URL, URLSearchParams, Blob, Response, ReadableStream, AbortController, btoa, atob, DOMException, TextEncoder, Uint8Array, Uint32Array, crypto: webcrypto,
     setTimeout: (fn, delay) => fn.name === "poll" ? 0 : setTimeout(fn, delay), clearTimeout, clearInterval,
@@ -72,6 +92,7 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
       GM_setValue: (key, value) => { values[key] = value; },
       GM_registerMenuCommand() {},
       GM_openInTab: url => opened.push(url),
+      GM_addElement: bridge === "privileged" ? (tag, attrs) => { assert.equal(tag, "script"); return inject(Object.assign(makeScript(), attrs), true); } : undefined,
       GM_setClipboard: text => copied.push(text),
       GM_cookie: cookieApi ? { list: (_, callback) => callback(gmCookies || [{ name: "cf_clearance", value: "test-cookie", httpOnly: true }], null) } : undefined,
       GM_xmlhttpRequest: xmlHttpRequest,
@@ -95,7 +116,7 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
     api.setBatch(result);
     return result;
   };
-  return { api, context, values, requests, fetches, opened, copied, ready: api.ready, messages: context.toastMessages, entry, batch };
+  return { api, context, pageContext, injected, scriptNodes, values, requests, fetches, opened, copied, ready: api.ready, messages: context.toastMessages, entry, batch };
 }
 
 test("browser image upload preserves bytes and isolates credentials", async () => {
@@ -888,10 +909,10 @@ function cloudReply(provider, details) {
   return jsonReply(details, { code: 0, data: { dispatchList: [{ prefix: "https://files.example" }], downloadPath: "/123.bin" } });
 }
 
-for (const manager of ["sync", "async"]) for (const provider of ["baidu", "aliyun", "mcloud", "tcloud", "xunlei", "guangya", "quark", "uc", "123pan"]) {
-  test(`cloud ${provider}: selected file to parse ticket and task, with isolated credentials (${manager})`, async () => {
+for (const manager of ["sync", "async"]) for (const isolated of [false, true]) for (const provider of ["baidu", "aliyun", "mcloud", "tcloud", "xunlei", "guangya", "quark", "uc", "123pan"]) {
+  test(`cloud ${provider}: selected file to parse ticket and task, with isolated credentials (${manager}, ${isolated ? "content realm" : "page access"})`, async () => {
     const fixture = cloudFixture(provider);
-    const h = harness({ ...fixture, manager, gm: details => {
+    const h = harness({ ...fixture, manager, isolated, bridge: isolated && manager === "sync" ? "privileged" : "dom", gm: details => {
       if (new URL(details.url).hostname !== "tessera.example") {
         assert.ok(!JSON.stringify(details).includes("TEST:secret"), "the Tessera credential never reaches a provider");
         assert.ok(!Object.keys(details.headers).some(key => key.toLowerCase() === "user-agent"), "GM keeps the browser User-Agent");
@@ -913,7 +934,7 @@ for (const manager of ["sync", "async"]) for (const provider of ["baidu", "aliyu
     } });
     await h.ready;
     h.api.gm.set("cloud-baidu-token", { token: "BAIDU_TOKEN", expires: Date.now() + 3600000 });
-    const sources = h.api.cloudSources(h.api.cloudOf());
+    const sources = await h.api.cloudSources(h.api.cloudOf());
     assert.equal(sources.length, 1, "ignore folders and unselected files");
     assert.equal(sources[0].name, fixture.name);
     const current = h.batch(sources.map(item => ({ ...item, sourceName: item.name, type: "file", state: "parsing", tasks: [], error: "" })));
@@ -926,6 +947,10 @@ for (const manager of ["sync", "async"]) for (const provider of ["baidu", "aliyu
     assert.equal(current.entries[0].state, "submitted");
     assert.equal(h.fetches.length, 0, "the browser never downloads file bytes in server mode");
     assert.ok(h.values.sent.includes(sources[0].url));
+    assert.equal(h.injected.length, isolated ? 1 : 0);
+    assert.ok(h.scriptNodes.every(node => node.removed), "remove the page reader and its metadata after each click");
+    assert.ok(h.injected.every(code => !/TEST:secret|SOURCE_TOKEN|ALI_TOKEN/.test(code)), "never pass credentials into page code");
+    assert.equal(vm.runInContext("typeof GM", h.pageContext), "undefined", "the page realm has no privileged API");
   });
 }
 
@@ -952,28 +977,93 @@ test("cloud curl preserves signed URLs and shell-quotes names without duplicatin
   await assert.rejects(() => h.api.curlFor("https://files.example/a", true, { Referer: "x\r\nAuthorization: secret" }), /请求头无效/);
 });
 
-test("cloud selection snapshots are immutable and enforce the batch limit before requests", () => {
+test("cloud selection snapshots are immutable and enforce the batch limit before requests", async () => {
   const fixture = cloudFixture("aliyun");
   const item = Object.freeze({ fileId: "a1", driveId: "drive1", name: "a.bin", size: 42, type: "file" });
   let files = [item];
   const h = harness({ ...fixture, query: () => reactSelection({ dataSource: files, selectedKeys: files.map(file => file.fileId) }) });
-  const sources = h.api.cloudSources(h.api.cloudOf());
+  const sources = await h.api.cloudSources(h.api.cloudOf());
   sources[0].cloud.file.name = "changed";
   assert.equal(item.name, "a.bin");
   files = Array.from({ length: 51 }, (_, index) => ({ ...item, fileId: String(index) }));
-  assert.throws(() => h.api.cloudSources(h.api.cloudOf()), /最多发送 50/);
+  await assert.rejects(() => h.api.cloudSources(h.api.cloudOf()), /最多发送 50/);
   assert.equal(h.requests.length, 0);
 });
 
-test("cloud share modes missing an upstream resolver explain the save-to-own-drive workflow", () => {
+test("cloud share modes missing an upstream resolver explain the save-to-own-drive workflow", async () => {
   const h = harness();
-  for (const url of ["https://www.alipan.com/s/share", "https://pan.xunlei.com/s/share", "https://yun.139.com/link/share"]) assert.throws(() => h.api.cloudSources(h.api.cloudOf(url)), /保存到自己的网盘/);
+  for (const url of ["https://www.alipan.com/s/share", "https://pan.xunlei.com/s/share", "https://yun.139.com/link/share"]) await assert.rejects(() => h.api.cloudSources(h.api.cloudOf(url)), /保存到自己的网盘/);
+  const guide = h.api.cloudShareGuide(h.api.cloudOf("https://www.alipan.com/s/share/folder/file"));
+  assert.equal(guide.url, "https://www.alipan.com/drive/file/all");
+  assert.match(guide.hint, /转存成功后留在分享页仍无法发送/);
+  assert.equal(h.api.cloudShareGuide(h.api.cloudOf("https://pan.quark.cn/s/share")), null);
+  assert.equal(h.api.cloudShareGuide(h.api.cloudOf("https://www.alipan.com/drive/file/all")), null);
+  assert.equal(h.requests.length, 0);
+});
+
+for (const manager of ["sync", "async"]) test(`cloud Quark share reads class state, ignores stale empty lists and refreshes each click (${manager})`, async () => {
+  const files = [{ fid: "selected", file_name: "已选文件.bin", file: true, share_fid_token: "FILE_TOKEN", access_token: "ACCOUNT_SECRET" },
+    { fid: "other", file_name: "没有勾选.bin", file: true, checked: true }];
+  const state = { selectedRowKeys: ["selected"] };
+  const current = { __reactFiber$fixture: { return: { stateNode: { props: { list: files, stoken: "STOKEN" }, state } } } };
+  const h = harness({ manager, isolated: true, url: "https://pan.quark.cn/s/share-id", dom: selector => selector === ".file-list"
+    ? [reactSelection({ list: [], selectedRowKeys: [] }), current] : [] });
+  await h.ready;
+  const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
+  assert.equal(source.name, "已选文件.bin");
+  assert.equal(source.cloud.file.stoken, "STOKEN");
+  assert.equal(source.cloud.file.share_fid_token, "FILE_TOKEN");
+  assert.ok(!JSON.stringify(source).includes("ACCOUNT_SECRET"));
+  assert.ok(h.injected.every(code => !code.includes("STOKEN") && !code.includes("已选文件")));
+  state.selectedRowKeys = [];
+  await assert.rejects(() => h.api.cloudSources(h.api.cloudOf()), /请先在网盘中勾选文件/);
+  assert.equal(h.injected.length, 2, "do not cache selection between clicks");
+  assert.ok(h.scriptNodes.every(node => node.removed));
+  assert.equal(h.requests.length, 0);
+});
+
+test("cloud Aliyun grid reads selection from class state with Set keys", async () => {
+  const h = harness({ manager: "async", isolated: true, url: "https://www.alipan.com/drive/file/all", query: selector => selector.includes("node-list-grid-view")
+    ? { __reactFiber$fixture: { stateNode: { props: { dataSource: [{ fileId: "a1", driveId: "drive", name: "网格.bin", type: "file" }] }, state: { selectedKeys: new Set(["a1"]) } } } } : null });
+  await h.ready;
+  const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
+  assert.equal(source.name, "网格.bin");
+  assert.equal(source.cloud.file.fileId, "a1");
+});
+
+for (const bridge of ["blocked", "trusted-types"]) test(`cloud blocked page reader reports access failure without asking for selection (${bridge})`, async () => {
+  const h = harness({ ...cloudFixture("quark"), isolated: true, bridge });
+  await assert.rejects(() => h.api.cloudSources(h.api.cloudOf()), error => {
+    assert.match(error.message, /无法读取.*勾选状态/);
+    assert.ok(!error.message.includes("请先在网盘中勾选文件"));
+    return true;
+  });
+  assert.equal(h.requests.length, 0);
+  assert.ok(h.scriptNodes.every(node => node.removed));
+});
+
+test("cloud unknown page layout is distinct from an empty selection", async () => {
+  const h = harness({ url: "https://pan.quark.cn/s/share-id", isolated: true });
+  await assert.rejects(() => h.api.cloudSources(h.api.cloudOf()), /暂未识别到网盘文件列表/);
+  assert.equal(h.requests.length, 0);
+});
+
+test("cloud late page-reader response cannot use selection after navigation", async () => {
+  let reply;
+  const h = harness({ ...cloudFixture("quark"), isolated: true });
+  h.api.gm.pageScript = () => new Promise(resolve => { reply = resolve; });
+  const pending = h.api.cloudSources(h.api.cloudOf());
+  h.context.location = new URL("https://pan.quark.cn/s/new-share");
+  let removed = false;
+  reply({ getAttribute: () => JSON.stringify({ available: true, files: [{ fid: "old-file", file_name: "old.bin", file: true }] }), remove() { removed = true; } });
+  await assert.rejects(() => pending, /页面已切换/);
+  assert.equal(removed, true);
   assert.equal(h.requests.length, 0);
 });
 
 test("cloud request rejects a different provider, arbitrary API hosts and foreign cookie download targets", async () => {
   const h = harness(cloudFixture("aliyun"));
-  const context = h.api.cloudSources(h.api.cloudOf())[0].cloud;
+  const context = (await h.api.cloudSources(h.api.cloudOf()))[0].cloud;
   await assert.rejects(() => h.api.cloudRequest(context, "https://evil.example/api"), /接口地址无效/);
   await assert.rejects(() => h.api.cloudRequest(context, "https://api.alipan.com/v2/file/get_download_url", { headers: { "user-agent": "different" } }), /改写浏览器身份/);
   assert.throws(() => h.api.cloudDownload(context, "https://evil.example/file", { Cookie: "source-secret" }), /未转交登录 Cookie/);
@@ -1008,15 +1098,16 @@ for (const manager of ["sync", "async"]) test(`cloud Baidu authorization require
   assert.equal(h.api.captureCloudAuthorization(), false, "expired authorization cannot overwrite a token");
 });
 
-test("cloud Quark share rotates __pugs and carries the share file token to the provider only", async () => {
-  const h = harness({ url: "https://pan.quark.cn/s/share123", cookieApi: false, documentCookie: "__pugs=old; login=private", query: () => reactSelection({
+for (const manager of ["sync", "async"]) test(`cloud Quark share reads isolated selection and rotates __pugs (${manager})`, async () => {
+  const h = harness({ isolated: true, manager, url: "https://pan.quark.cn/s/share123", cookieApi: false, documentCookie: "__pugs=old; login=private", query: () => reactSelection({
     list: [{ fid: "q-share", file_name: "share.bin", file: true, share_fid_token: "FILE_SHARE_TOKEN" }], selectedRowKeys: ["q-share"], stoken: "SHARE_TOKEN",
   }), gm: details => {
     if (details.url.includes("drive-social-api")) return jsonReply(details, { code: 0, data: { token: "SOCIAL" } });
     assert.deepEqual(JSON.parse(details.data), { fids: ["q-share"], speedup_session: "", token: "SOCIAL", pwd_id: "share123", stoken: "SHARE_TOKEN", fids_token: ["FILE_SHARE_TOKEN"] });
     return jsonReply(details, { code: 0, data: [{ fid: "q-share", download_url: "https://dl.quark.cn/share.bin" }] }, { responseHeaders: "Set-Cookie: __pugs=new-cookie; Path=/; Secure\r\n" });
   } });
-  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  await h.ready;
+  const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
   const result = await h.api.resolveCloud(source.cloud);
   assert.equal(result.headers.Cookie, "__pugs=new-cookie");
   assert.ok(!JSON.stringify(result).includes("SHARE_TOKEN"));
@@ -1024,13 +1115,14 @@ test("cloud Quark share rotates __pugs and carries the share file token to the p
 
 test("cloud disabled cookie forwarding fails Quark before requesting a download", async () => {
   const h = harness({ ...cloudFixture("quark"), cookies: false });
-  await assert.rejects(() => h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud), /启用携带 Cookie/);
+  const context = (await h.api.cloudSources(h.api.cloudOf()))[0].cloud;
+  await assert.rejects(() => h.api.resolveCloud(context), /启用携带 Cookie/);
   assert.equal(h.requests.length, 0);
 });
 
 test("cloud HTML challenge stays a parse failure and never creates a task", async () => {
   const h = harness({ ...cloudFixture("aliyun"), gm: details => details.onload({ status: 403, responseHeaders: "server: cloudflare\r\ncf-mitigated: challenge", responseText: "Just a moment" }) });
-  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
   const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]); current.mode = "server";
   await h.api.parseEntries(current, current.entries.slice());
   assert.equal(current.entries[0].state, "parse-error");
@@ -1047,7 +1139,7 @@ test("cloud retry acquires a new signed URL and ticket while preserving the edit
     if (details.url.endsWith("/parse")) return jsonReply(details, { candidates: [{ ticket: `ticket-${signed}`, name: "cdn.bin", kind: "http" }] });
     return jsonReply(details, { tasks: [{ id: signed, status: "queued" }] });
   } });
-  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
   const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]); current.mode = "server";
   await h.api.parseEntries(current, current.entries.slice());
   await h.api.runBatch();
@@ -1066,14 +1158,14 @@ test("cloud 123 wrapped dispatch links are decoded and quota errors remain actio
   const h = harness({ ...cloudFixture("123pan"), gm: details => jsonReply(details, quota ? { code: 5113 } : { code: 0, data: {
     dispatchList: [{ prefix: "https://files.example" }], downloadPath: "/wrapper?params=" + encodeURIComponent(btoa("https://files.example/actual?sign=1")),
   } }) });
-  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
   assert.equal((await h.api.resolveCloud(source.cloud)).url, "https://files.example/actual?sign=1");
   quota = true;
   await assert.rejects(() => h.api.resolveCloud(source.cloud), /下载流量不足/);
 });
 
-test("cloud Baidu share uses page verification and signed form fields without requiring OAuth consent", async () => {
-  const h = harness({ url: "https://pan.baidu.com/s/1share?pwd=1234", query: selector => selector === ".wp-s-core-pan"
+test("cloud Baidu share reads isolated page verification without exposing GM APIs", async () => {
+  const h = harness({ isolated: true, url: "https://pan.baidu.com/s/1share?pwd=1234", query: selector => selector === ".wp-s-core-pan"
     ? { __vue__: { selectedList: [{ fs_id: 9, server_filename: "shared.bin", isdir: 0 }] } } : null,
     pageState: { locals: { dump: () => ({ share_uk: { value: "uk" }, shareid: { value: "share-id" }, bdstoken: { value: "BDSTOKEN" } }) }, jsToken: "JS_TOKEN", currentSekey: "SHARE_KEY" },
     gm: details => {
@@ -1088,7 +1180,7 @@ test("cloud Baidu share uses page verification and signed form fields without re
       return jsonReply(details, { errno: 0, list: [{ fs_id: 9, dlink: "https://d.pcs.baidu.com/shared.bin" }] });
     },
   });
-  const result = await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud);
+  const result = await h.api.resolveCloud((await h.api.cloudSources(h.api.cloudOf()))[0].cloud);
   assert.equal(result.url, "https://d.pcs.baidu.com/shared.bin");
   assert.ok(!result.url.includes("pwd="));
   assert.equal(h.opened.length, 0);
@@ -1104,7 +1196,7 @@ test("cloud Tianyi share signature includes the share identity in the prescribed
       return jsonReply(details, { res_code: 0, fileDownloadUrl: "https://files.example/share.bin" });
     },
   });
-  assert.equal((await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud)).url, "https://files.example/share.bin");
+  assert.equal((await h.api.resolveCloud((await h.api.cloudSources(h.api.cloudOf()))[0].cloud)).url, "https://files.example/share.bin");
 });
 
 test("cloud Guangya share sends the user-entered code to the provider and keeps its access token off the download request", async () => {
@@ -1118,19 +1210,19 @@ test("cloud Guangya share sends the user-entered code to the provider and keeps 
     assert.deepEqual(body, { fileId: "g1", accessToken: "SHARE_ACCESS" });
     return jsonReply(details, { data: { downloadUrl: "https://files.example/share.bin" } });
   } });
-  const result = await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud);
+  const result = await h.api.resolveCloud((await h.api.cloudSources(h.api.cloudOf()))[0].cloud);
   assert.ok(!JSON.stringify(result).includes("SHARE_ACCESS"));
 });
 
 test("cloud UC share preserves file and share tokens but exports only its download headers", async () => {
-  const h = harness({ manager: "async", url: "https://drive.uc.cn/s/share-id", query: () => reactSelection({
+  const h = harness({ manager: "async", isolated: true, url: "https://drive.uc.cn/s/share-id", query: () => reactSelection({
     list: [{ fid: "u-share", file_name: "shared.bin", file: true, share_fid_token: "FILE_TOKEN" }], selectedRowKeys: ["u-share"], stoken: "STOKEN",
   }), gm: details => {
     assert.deepEqual(JSON.parse(details.data), { fids: ["u-share"], pwd_id: "share-id", stoken: "STOKEN", fids_token: ["FILE_TOKEN"] });
     return jsonReply(details, { code: 0, data: [{ fid: "u-share", download_url: "https://dl.uc.cn/shared.bin" }] });
   } });
   await h.ready;
-  const result = await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud);
+  const result = await h.api.resolveCloud((await h.api.cloudSources(h.api.cloudOf()))[0].cloud);
   assert.ok(result.headers["User-Agent"].includes("uc-cloud-drive"));
   assert.ok(!JSON.stringify(result).includes("STOKEN"));
 });
@@ -1144,7 +1236,7 @@ test("cloud 123 single-file share selection uses the share API without requiring
       return jsonReply(details, { data: { dispatchList: [{ prefix: "https://files.example" }], downloadPath: "/shared.bin" } });
     },
   });
-  assert.equal((await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud)).url, "https://files.example/shared.bin");
+  assert.equal((await h.api.resolveCloud((await h.api.cloudSources(h.api.cloudOf()))[0].cloud)).url, "https://files.example/shared.bin");
 });
 
 test("cloud Xunlei renews expired tokens once and signs the provider captcha request", async () => {
@@ -1169,7 +1261,7 @@ test("cloud Xunlei renews expired tokens once and signs the provider captcha req
     assert.equal(details.headers["X-Captcha-Token"], "NEW_CAPTCHA");
     return jsonReply(details, { web_content_link: "https://files.example/file.bin" });
   } });
-  const result = await h.api.resolveCloud(h.api.cloudSources(h.api.cloudOf())[0].cloud);
+  const result = await h.api.resolveCloud((await h.api.cloudSources(h.api.cloudOf()))[0].cloud);
   assert.equal(calls.join(","), "/v1/auth/token,/v1/shield/captcha/init,/drive/v1/files/x1");
   assert.ok(!JSON.stringify(result).includes("REFRESH_SECRET"));
 });
@@ -1178,7 +1270,7 @@ test("cloud private-space handoff carries renamed tickets, with no key-API priva
   const h = harness({ ...cloudFixture("aliyun"), manager: "async", gm: details => details.url.includes("api.alipan.com")
     ? jsonReply(details, { url: "https://files.example/private.bin" }) : jsonReply(details, { candidates: [{ ticket: "private-ticket", name: "cdn.bin", kind: "http" }] }) });
   await h.ready;
-  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
   const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]);
   current.mode = "server"; current.destination.private = true;
   await h.api.parseEntries(current, current.entries.slice());
@@ -1200,7 +1292,7 @@ test("cloud retry after an expired SSO session obtains fresh credentials before 
       ? { errorcode: "InvalidSessionKey" } : { res_code: 0, fileDownloadUrl: "https://files.example/fresh.bin" });
     return jsonReply(details, { candidates: [{ ticket: "fresh-ticket", name: "fresh.bin", kind: "http" }] });
   } });
-  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
   const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]); current.mode = "server";
   await h.api.parseEntries(current, current.entries.slice());
   assert.equal(current.entries[0].state, "parse-error");
@@ -1212,7 +1304,7 @@ test("cloud retry after an expired SSO session obtains fresh credentials before 
 test("cloud late resolution cannot recreate a removed row or submit its URL to Tessera", async () => {
   let reply;
   const h = harness({ ...cloudFixture("aliyun"), gm: details => { reply = details; } });
-  const source = h.api.cloudSources(h.api.cloudOf())[0];
+  const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
   const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]); current.mode = "server";
   const pending = h.api.parseEntries(current, current.entries.slice());
   await until(() => Boolean(reply));
