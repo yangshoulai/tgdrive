@@ -1,4 +1,4 @@
-"""受控获取 HLS 点播；FFmpeg 只读取重写后的本地列表和媒体。"""
+"""受控获取 HLS 点播；通过管道或任务内回环连接向 FFmpeg 提供媒体。"""
 
 from __future__ import annotations
 
@@ -6,10 +6,8 @@ import asyncio
 import math
 import os
 import re
-import shutil
-import tempfile
+import secrets
 from dataclasses import dataclass, field
-from pathlib import Path
 from urllib.parse import urljoin
 
 from .http import DownloadError, ExpiredMedia, SafeHttpClient, status_error
@@ -282,13 +280,193 @@ async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist
         await stderr
 
 
-async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
-                executable: str, *, check, progress, throttle, cache_root: Path | None = None,
-                task_id=0, limit=None, reserve=0, audio=None, media_type="video", url_check=None, phase=None):
-    """普通 TS 保持管道传输；复杂列表缓存受控分片，并生成不含外部 URI 的本地 HLS。
+class _RelayClosed(Exception):
+    """本机接收端提前关闭；与可重试的来源连接故障区分。"""
 
-    不将原始列表交给 FFmpeg，避免其绕过 SafeHttpClient 请求分片、密钥或初始化文件。
-    """
+
+class _HlsRelay:
+    """仅向本次 FFmpeg 暴露已登记资源；源站请求仍经 SafeHttpClient，媒体逐块转发、不落盘。"""
+
+    def __init__(self, client, *, check, progress, throttle, url_check, phase):
+        self.client, self.check, self.progress = client, check, progress
+        self.throttle, self.url_check, self.phase = throttle, url_check, phase
+        self.prefix = "/" + secrets.token_urlsafe(24) + "/"
+        self.routes, self.playlists, self.keys, self.pending = {}, {}, {}, {}
+        self.completed, self.handlers = 0, set()
+        self.error = self.process = None
+
+    async def __aenter__(self):
+        self.server = await asyncio.start_server(self.serve, "127.0.0.1", 0, limit=8192)
+        self.origin = f"http://127.0.0.1:{self.server.sockets[0].getsockname()[1]}"
+        return self
+
+    async def __aexit__(self, *_):
+        self.server.close()
+        handlers = list(self.handlers)
+        for task in handlers:
+            task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
+        await self.server.wait_closed()
+
+    def asset(self, source, asset, extension):
+        path = f"{self.prefix}media-{len(self.routes)}.{extension}"
+        self.routes[path] = source, asset, extension
+        return path
+
+    def playlist(self, source, parsed, name, audio_track=False):
+        if parsed.variants or not parsed.items:
+            raise DownloadError("M3U8 子列表必须是具体的点播媒体列表")
+        lines = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-PLAYLIST-TYPE:VOD",
+                 f"#EXT-X-TARGETDURATION:{math.ceil(max(item.duration for item in parsed.items))}",
+                 f"#EXT-X-MEDIA-SEQUENCE:{parsed.sequence}"]
+        active_key, active_init, keys = None, None, {}
+
+        def key_line(key):
+            if key is None:
+                return "#EXT-X-KEY:METHOD=NONE"
+            if key.url not in keys:
+                keys[key.url] = self.asset(source, Asset(key.url), "key")
+            line = f'#EXT-X-KEY:METHOD=AES-128,URI="{keys[key.url]}"'
+            return line + (f",IV={key.iv}" if key.iv else "")
+
+        for item in parsed.items:
+            if item.discontinuity:
+                lines.append("#EXT-X-DISCONTINUITY")
+            if item.init and item.init != active_init:
+                if item.init.key != active_key:
+                    lines.append(key_line(item.init.key))
+                    active_key = item.init.key
+                local = self.asset(source, item.init, "mp4")
+                lines.append(f'#EXT-X-MAP:URI="{local}"')
+                active_init = item.init
+            if item.asset.key != active_key:
+                lines.append(key_line(item.asset.key))
+                active_key = item.asset.key
+            local = self.asset(source, item.asset, "m4s" if item.init else "ts")
+            lines.extend((f"#EXTINF:{item.duration:.6f},", local))
+            self.pending[local] = 0 if audio_track else item.duration
+        lines.append("#EXT-X-ENDLIST")
+        path = self.prefix + name
+        self.playlists[path] = ("\n".join(lines) + "\n").encode()
+        return self.origin + path
+
+    async def head(self, writer, status=200, size=None):
+        headers = f"HTTP/1.1 {status} Reply\r\nConnection: close\r\nAccept-Ranges: none\r\n"
+        if size is not None:
+            headers += f"Content-Length: {size}\r\n"
+        await self.write(writer, (headers + "\r\n").encode("ascii"))
+
+    async def write(self, writer, data):
+        try:
+            writer.write(data)
+            async with asyncio.timeout(120):
+                await writer.drain()
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            # 在受控 HTTP 上下文内也要保留区别，避免把 FFmpeg 的探测断连归类为来源故障。
+            raise _RelayClosed() from exc
+        except TimeoutError as exc:
+            raise DownloadError("视频封装中断或超时，可以重新下载") from exc
+
+    async def send_asset(self, path, writer):
+        if path in self.keys:
+            await self.head(writer, size=16)
+            await self.write(writer, self.keys[path])
+            return
+        source, asset, extension = self.routes[path]
+        headers = playback_headers(source) if self.url_check else {}
+        if asset.byte_range:
+            offset, length = asset.byte_range
+            headers["Range"] = f"bytes={offset}-{offset + length - 1}"
+        async with self.client.open(source, url=asset.url, method="GET", identity=True,
+                                    extra_headers=headers, url_check=self.url_check) as response:
+            if self.url_check and response.status in (401, 403, 404, 410):
+                raise ExpiredMedia(f"平台视频分片不可访问（HTTP {response.status}），需要重新解析")
+            if asset.byte_range:
+                if response.status in (408, 425, 429, 500, 502, 503, 504):
+                    raise status_error(response.status, f"读取视频资源失败（HTTP {response.status}）")
+                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
+                if response.status != 206 or not match or (int(match[1]), int(match[2])) != (offset, offset + length - 1) or int(match[3]) < offset + length:
+                    raise DownloadError("M3U8 来源未返回所请求的字节范围")
+                expected = length
+            else:
+                if response.status != 200:
+                    raise status_error(response.status, f"读取视频资源失败（HTTP {response.status}）")
+                expected = response.size
+            if extension != "key":
+                await self.head(writer, size=expected)
+            size, key = 0, b""
+            async for piece in response.stream():
+                self.check()
+                size += len(piece)
+                if extension == "key" and size > 16:
+                    raise DownloadError("M3U8 AES-128 密钥必须为 16 字节")
+                if expected is not None and size > expected:
+                    raise DownloadError("M3U8 视频资源长度不正确")
+                await self.throttle(len(piece))
+                self.progress(bytes_in=len(piece))
+                if extension == "key":
+                    key += piece
+                else:
+                    # 背压贯穿源站、FFmpeg 与加密上传；不会缓存整个分片或整个视频。
+                    await self.write(writer, piece)
+            if not size or expected is not None and size != expected:
+                raise DownloadError("M3U8 视频资源不完整")
+            if extension == "key":
+                if size != 16:
+                    raise DownloadError("M3U8 AES-128 密钥必须为 16 字节")
+                self.keys[path] = key
+                await self.head(writer, size=16)
+                await self.write(writer, key)
+        if path in self.pending:
+            duration = self.pending.pop(path)
+            self.completed += 1
+            self.progress(segment=self.completed, seconds=duration)
+            if not self.pending and self.phase:
+                self.phase("merging")
+
+    async def serve(self, reader, writer):
+        task = asyncio.current_task()
+        self.handlers.add(task)
+        try:
+            try:
+                async with asyncio.timeout(10):
+                    header = await reader.readuntil(b"\r\n\r\n")
+                method, path, _ = header.split(b"\r\n", 1)[0].decode("ascii").split(" ")
+            except (ValueError, UnicodeError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+                await self.head(writer, 400, 0)
+                return
+            if method != "GET" or path not in self.playlists and path not in self.routes:
+                await self.head(writer, 404, 0)
+                return
+            self.check()
+            if path in self.playlists:
+                await self.head(writer, size=len(self.playlists[path]))
+                await self.write(writer, self.playlists[path])
+            else:
+                await self.send_asset(path, writer)
+        except (_RelayClosed, BrokenPipeError, ConnectionResetError):
+            # FFmpeg 探测后可能提前关闭连接；再次读取仍走同一个受控资源。
+            pass
+        except Exception as exc:
+            if self.error is None:
+                self.error = exc
+            # HLS 解复用器会跳过失败分片，必须中止进程，避免把缺失片段的成品标为成功。
+            if self.process is not None and self.process.returncode is None:
+                self.process.kill()
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+            finally:
+                self.handlers.discard(task)
+
+
+async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
+                executable: str, *, check, progress, throttle, audio=None,
+                media_type="video", url_check=None, phase=None):
+    """连续 TS 走管道；复杂 HLS 只向 FFmpeg 提供重写后的回环地址，按需读取、不缓存输入。"""
     special = audio is not None or media_type == "audio" or any(
         item.init or item.asset.key or item.asset.byte_range or item.discontinuity for item in playlist.items)
     if not special:
@@ -300,117 +478,26 @@ async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Play
         finally:
             await stream.aclose()
         return
-    if cache_root is None:
-        raise DownloadError("此 M3U8 格式需要配置受控临时目录")
-    cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if cache_root.is_symlink():
-        raise DownloadError("离线临时目录不能是符号链接")
-    with tempfile.TemporaryDirectory(prefix=f"task-{task_id}-", dir=cache_root) as directory:
-        root = Path(directory)
-        files, keys, received, completed = {}, {}, 0, 0
-
-        async def save(source, asset, extension):
-            nonlocal received
-            identity = (source.url, asset)
-            if identity in files:
-                return files[identity]
-            name = f"media-{len(files)}.{extension}"
-            headers = playback_headers(source) if url_check else {}
-            if asset.byte_range:
-                offset, length = asset.byte_range
-                headers["Range"] = f"bytes={offset}-{offset + length - 1}"
-            check()
-            async with client.open(source, url=asset.url, method="GET", identity=True,
-                                   extra_headers=headers, url_check=url_check) as response:
-                if url_check and response.status in (401, 403, 404, 410):
-                    raise ExpiredMedia(f"平台视频分片不可访问（HTTP {response.status}），需要重新解析")
-                if response.status in (408, 425, 429, 500, 502, 503, 504):
-                    raise status_error(response.status, f"读取视频资源失败（HTTP {response.status}）")
-                if asset.byte_range:
-                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
-                    if response.status != 206 or not match or (int(match[1]), int(match[2])) != (offset, offset + length - 1) or int(match[3]) < offset + length:
-                        raise DownloadError("M3U8 来源未返回所请求的字节范围")
-                elif response.status != 200:
-                    raise status_error(response.status, f"读取视频资源失败（HTTP {response.status}）")
-                maximum = 16 if extension == "key" else limit
-                size = 0
-                with (root / name).open("wb") as output:
-                    os.chmod(root / name, 0o600)
-                    async for piece in response.stream():
-                        check()
-                        size += len(piece)
-                        received += len(piece)
-                        if maximum is not None and size > maximum or limit is not None and received > limit:
-                            raise DownloadError("视频资源超过临时缓存大小上限，请调整资源设置或选择更低清晰度")
-                        if asset.byte_range and size > length:
-                            raise DownloadError("M3U8 字节范围响应长度不正确")
-                        # 输入缓存与加密成品同时占盘，按已接收输入预留成品空间。
-                        if shutil.disk_usage(root).free < reserve + received + len(piece) + 32 * 1024 * 1024:
-                            raise DownloadError("视频临时磁盘空间不足，请释放空间后重试")
-                        await throttle(len(piece))
-                        await asyncio.to_thread(output.write, piece)
-                        progress(bytes_in=len(piece))
-                if not size or asset.byte_range and size != length:
-                    raise DownloadError("M3U8 视频资源不完整")
-                if extension == "key" and size != 16:
-                    raise DownloadError("M3U8 AES-128 密钥必须为 16 字节")
-            files[identity] = name
-            return name
-
-        async def key_line(source, key):
-            if key is None:
-                return "#EXT-X-KEY:METHOD=NONE"
-            if (source.url, key.url) not in keys:
-                keys[(source.url, key.url)] = await save(source, Asset(key.url), "key")
-            line = f'#EXT-X-KEY:METHOD=AES-128,URI="{keys[(source.url, key.url)]}"'
-            return line + (f",IV={key.iv}" if key.iv else "")
-
-        async def local_playlist(source, parsed, name, audio_track=False):
-            nonlocal completed
-            if parsed.variants or not parsed.items:
-                raise DownloadError("M3U8 子列表必须是具体的点播媒体列表")
-            lines = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-PLAYLIST-TYPE:VOD",
-                     f"#EXT-X-TARGETDURATION:{math.ceil(max(item.duration for item in parsed.items))}",
-                     f"#EXT-X-MEDIA-SEQUENCE:{parsed.sequence}"]
-            active_key, active_init = None, None
-            for item in parsed.items:
-                if item.discontinuity:
-                    lines.append("#EXT-X-DISCONTINUITY")
-                if item.init and item.init != active_init:
-                    if item.init.key != active_key:
-                        lines.append(await key_line(source, item.init.key))
-                        active_key = item.init.key
-                    local = await save(source, item.init, "mp4")
-                    lines.append(f'#EXT-X-MAP:URI="{local}"')
-                    active_init = item.init
-                if item.asset.key != active_key:
-                    lines.append(await key_line(source, item.asset.key))
-                    active_key = item.asset.key
-                local = await save(source, item.asset, "m4s" if item.init else "ts")
-                lines.extend((f"#EXTINF:{item.duration:.6f},", local))
-                completed += 1
-                # 独立音轨与视频时间重叠，播放时长只按主轨累加。
-                progress(segment=completed, seconds=0 if audio_track else item.duration)
-            lines.append("#EXT-X-ENDLIST")
-            (root / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
-            os.chmod(root / name, 0o600)
-            return root / name
-
-        primary = await local_playlist(request, playlist, "video.m3u8")
-        secondary = await local_playlist(*audio, "audio.m3u8", True) if audio else None
-        if phase:
-            phase("merging")
+    async with _HlsRelay(client, check=check, progress=progress, throttle=throttle,
+                         url_check=url_check, phase=phase) as relay:
+        primary = relay.playlist(request, playlist, "video.m3u8")
+        secondary = relay.playlist(*audio, "audio.m3u8", True) if audio else None
         inputs = []
         for path in ([primary, secondary] if secondary else [primary]):
-            inputs.extend(("-protocol_whitelist", "file,crypto", "-allowed_extensions", "ALL",
-                           "-f", "hls", "-i", str(path)))
+            # 只有外层 HLS 能连接回环服务；分片解复用器仅接受支持的媒体格式，不自行打开网络或文件。
+            inputs.extend(("-protocol_whitelist", "http,tcp,crypto", "-allowed_extensions", "ALL",
+                           "-seg_format_options", "format_whitelist=mpegts,mov,aac:protocol_whitelist=pipe",
+                           "-http_persistent", "0", "-http_multiple", "0", "-http_seekable", "0",
+                           "-rw_timeout", "120000000", "-f", "hls", "-i", path))
         mapping = ["-map", "0:a:0", "-vn"] if media_type == "audio" else ["-map", "0:v:0", "-map", "1:a:0" if secondary else "0:a:0?"]
         process = await asyncio.create_subprocess_exec(executable,
             "-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-max_alloc", "33554432",
             *inputs, *mapping, "-c", "copy", "-tag:v", "avc1", "-bsf:a", "aac_adtstoasc", "-threads", "1", "-max_muxing_queue_size", "64",
             "-avoid_negative_ts", "make_zero", "-movflags", "empty_moov+delay_moov+frag_keyframe+default_base_moof",
             "-frag_duration", "2000000", "-f", "mp4", "pipe:1",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=131072)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=131072,
+            env={key: value for key, value in os.environ.items() if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")})
+        relay.process = process
         async def discard_errors():
             while await process.stderr.read(65536):
                 pass
@@ -419,15 +506,22 @@ async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Play
         try:
             while True:
                 check()
+                if relay.error is not None:
+                    raise relay.error
                 async with asyncio.timeout(120):
                     piece = await process.stdout.read(65536)
                 if not piece:
                     break
                 size += len(piece)
-                if limit is not None and size > limit + 16 * 1024 * 1024:
-                    raise DownloadError("视频封装结果超过大小上限")
                 yield piece
-            if await process.wait() != 0 or not size:
+            code = await process.wait()
+            if code == 0:
+                # FFmpeg 收到 Content-Length 指定的字节后就能结束，来源连接的清理可能还在进行。
+                async with asyncio.timeout(120):
+                    await asyncio.gather(*list(relay.handlers))
+            if relay.error is not None:
+                raise relay.error
+            if code != 0 or not size or relay.pending:
                 raise DownloadError("M3U8 封装失败，请检查分片完整性与 H.264／AAC 编码")
             if phase:
                 phase("saving")
@@ -436,5 +530,8 @@ async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Play
         finally:
             if process.returncode is None:
                 process.kill()
+            # 取消时 stdout 可能已因背压暂停；先排空被终止进程的管道，避免 wait 等待管道关闭而挂起。
+            while await process.stdout.read(65536):
+                pass
             await process.wait()
             await stderr

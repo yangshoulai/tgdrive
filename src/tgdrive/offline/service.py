@@ -1013,8 +1013,7 @@ class OfflineDownloads:
             self._set(row["id"], segments_total=len(playlist.segments), size=None)
             upload_id = await self._begin(row, scope, entry["content_type"])
             stream = remux(self.http, request, playlist, self.resources.ffmpeg,
-                cache_root=self.cache_root, task_id=row["id"], limit=config["platform_max_mib"] * MIB,
-                reserve=config["reserve_mib"] * MIB, media_type=entry["media_type"], url_check=url_check,
+                media_type=entry["media_type"], url_check=url_check,
                 check=lambda: self.check(row["user_id"], row["id"]), progress=lambda **values: self._progress(row["id"], **values),
                 throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase))
             try:
@@ -1061,8 +1060,7 @@ class OfflineDownloads:
         self._set(row["id"], phase="downloading", segments_total=len(playlist.segments) + (len(audio[1].segments) if audio else 0), duration=playlist.duration)
         upload_id = await self._begin(row, scope, "video/mp4")
         stream = remux(self.http, request, playlist, self.resources.ffmpeg,
-            cache_root=self.cache_root, task_id=row["id"], reserve=self.resources.effective()["reserve_mib"] * MIB,
-            limit=self.objects._quota_room(scope.bucket_id, row["key"]), audio=audio,
+            audio=audio,
             check=lambda: self.check(row["user_id"], row["id"]), progress=lambda **values: self._progress(row["id"], **values), throttle=self.throttle,
             phase=lambda phase: self._set(row["id"], phase=phase))
         try:
