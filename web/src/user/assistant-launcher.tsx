@@ -5,8 +5,8 @@ import { type AssistantDockStatus } from "./assistant";
 
 const badgeText = (count: number) => count > 99 ? "99+" : count.toLocaleString("zh-CN");
 
-/** 右下角只保留文件助手入口：悬停时展开名称与快捷键，处理中显示流光描边，待确认事项以角标提示。
- * 上传、离线下载与本机缓存的进度在侧栏「任务中心」的页面里查看。 */
+/** 右下角只保留文件助手入口：圆形图标按钮。处理中外圈渐变光环持续旋转、标识进入思考动画；悬停时上浮放大并轻微转动标识；
+ * 待确认事项以暖色描边与数量角标提示。名称与快捷键放在悬停提示里。上传、离线下载与本机缓存在侧栏「任务中心」。 */
 export function AssistantLauncher({ available, open, status, onToggle }: { available: boolean; open: boolean; status: AssistantDockStatus; onToggle: () => void }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const wasOpen = useRef(open);
@@ -21,12 +21,9 @@ export function AssistantLauncher({ available, open, status, onToggle }: { avail
   const name = status.private ? "文件助手（私密对话）" : "文件助手";
   return createPortal(<button ref={trigger} type="button" hidden={open}
     className={`assistant-launcher${working ? " is-working" : ""}${status.pending ? " has-pending" : ""}`}
-    aria-label={`${name}${state}`} aria-keyshortcuts="Meta+J Control+J" onClick={onToggle}>
+    aria-label={`${name}${state}`} title={`${name}（${shortcutLabel("Mod+J")}）${state}`} aria-keyshortcuts="Meta+J Control+J" onClick={onToggle}>
+    <span className="assistant-launcher-ring" aria-hidden="true" />
     <span className="assistant-launcher-orb" aria-hidden="true"><AssistantMark size={26} state={working ? "thinking" : "idle"} /></span>
-    <span className="assistant-launcher-copy" aria-hidden="true">
-      <strong>{status.pending ? "等待确认" : working ? "正在处理" : "文件助手"}</strong>
-      <kbd>{shortcutLabel("Mod+J")}</kbd>
-    </span>
     {status.private && <span className="assistant-launcher-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}
     {status.pending > 0 && <span className="assistant-launcher-badge" aria-hidden="true">{badgeText(status.pending)}</span>}
   </button>, document.body);

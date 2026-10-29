@@ -19,6 +19,8 @@ export type EntryRecord = {
   kind?: Kind;
   /** 用户手动缓存过（与加密 info 里的 manual 一致）：文件列表只为这些条目显示状态，不必逐个解密。1.11.0 留下的条目没有这个字段，首次建立索引时补上。 */
   manual?: boolean;
+  /** 数据块存放位置："dir" 为用户选择的本地文件夹（不占浏览器配额），缺省为 IndexedDB。 */
+  store?: "dir";
   info: ArrayBuffer | null;
 };
 export type EntryInfo = { etag: string; version: string; size: number; type: string; disposition: string; path: string; kind: Kind; manual?: boolean };
@@ -93,7 +95,15 @@ export const getMeta = <T>(key: string) => run(["meta"], "readonly", tx => done(
 export const setMeta = (key: string, value: unknown) => run(["meta"], "readwrite", tx => { tx.objectStore("meta").put(value, key); });
 export const getEntry = (key: string) => run(["entries"], "readonly", tx => done(tx.objectStore("entries").get(key)) as Promise<EntryRecord | undefined>);
 export const putEntry = (entry: EntryRecord) => run(["entries"], "readwrite", tx => { tx.objectStore("entries").put(entry); });
-export const getBlock = (key: string, index: number) => run(["blocks"], "readonly", tx => done(tx.objectStore("blocks").get(`${key}/${index}`)) as Promise<ArrayBuffer | undefined>);
+/** 读取一个数据块；目录中的块在文件夹不可用或文件缺失时返回 undefined，由调用方回源。 */
+export async function getBlock(key: string, index: number, store?: "dir"): Promise<ArrayBuffer | undefined> {
+  if (store === "dir") {
+    const folder = await entryFolder(key, false);
+    if (!folder) return undefined;
+    try { return await (await (await folder.getFileHandle(`${index}`)).getFile()).arrayBuffer(); } catch { return undefined; }
+  }
+  return run(["blocks"], "readonly", tx => done(tx.objectStore("blocks").get(`${key}/${index}`)) as Promise<ArrayBuffer | undefined>);
+}
 
 export function listEntries(ns?: string, tier?: Tier): Promise<EntryRecord[]> {
   return run(["entries"], "readonly", tx => {
@@ -102,15 +112,20 @@ export function listEntries(ns?: string, tier?: Tier): Promise<EntryRecord[]> {
   });
 }
 
-/** 删除条目及其全部数据块；块键以「条目键/」开头，按前缀范围删除。 */
-export function deleteEntries(keys: string[]): Promise<void> {
-  if (!keys.length) return Promise.resolve();
-  return run(["entries", "blocks"], "readwrite", tx => {
+/** 删除条目及其全部数据块；块键以「条目键/」开头，按前缀范围删除。目录中的块在提交后尽力删除，
+ * 文件夹暂时不可用时留下的文件由 sweepDirectory 在下次可用时清理。 */
+export async function deleteEntries(keys: string[]): Promise<void> {
+  if (!keys.length) return;
+  const folders: string[] = [];
+  await run(["entries", "blocks"], "readwrite", async tx => {
     for (const key of keys) {
+      const entry = await done(tx.objectStore("entries").get(key)) as EntryRecord | undefined;
+      if (entry?.store === "dir") folders.push(key);
       tx.objectStore("entries").delete(key);
       tx.objectStore("blocks").delete(IDBKeyRange.bound(`${key}/`, `${key}/\uffff`));
     }
   });
+  for (const key of folders) await removeEntryFolder(key).catch(() => undefined);
 }
 
 /** 条目不存在时才创建，已存在则返回现有记录（同一文件的并发首次请求不能互相覆盖块列表）。 */
@@ -157,8 +172,29 @@ export function setManualFlags(flags: [string, boolean][]): Promise<void> {
   });
 }
 
-/** 写入一个数据块并在同一事务里更新条目的块列表与字节数；条目已被删除时放弃写入，返回 null。 */
-export function putBlock(key: string, index: number, sealed: ArrayBuffer, plainLength: number): Promise<EntryRecord | null> {
+/** 写入一个数据块并在同一事务里更新条目的块列表与字节数；条目已被删除时放弃写入，返回 null。
+ * 目录条目先把块写成文件（关闭时整体替换，不会留下半个块），再登记到条目；条目已删除时撤回文件。 */
+export async function putBlock(key: string, index: number, sealed: ArrayBuffer, plainLength: number, store?: "dir"): Promise<EntryRecord | null> {
+  if (store === "dir") {
+    const folder = await entryFolder(key, true);
+    if (!folder) throw new DOMException("本机缓存目录不可用，请在缓存设置中重新授权", "NotAllowedError");
+    const writable = await (await folder.getFileHandle(`${index}`, { create: true })).createWritable();
+    try { await writable.write(sealed); await writable.close(); }
+    catch (error) { await writable.abort().catch(() => undefined); throw error; }
+    const updated = await run(["entries"], "readwrite", async tx => {
+      const entries = tx.objectStore("entries");
+      const entry = await done(entries.get(key)) as EntryRecord | undefined;
+      if (!entry) return null;
+      if (!entry.blocks.includes(index)) {
+        entry.blocks = [...entry.blocks, index].sort((a, b) => a - b);
+        entry.bytes += plainLength;
+      }
+      entries.put(entry);
+      return entry;
+    });
+    if (!updated) await removeEntryFolder(key).catch(() => undefined);
+    return updated;
+  }
   return run(["entries", "blocks"], "readwrite", async tx => {
     const entries = tx.objectStore("entries");
     const entry = await done(entries.get(key)) as EntryRecord | undefined;
@@ -185,6 +221,82 @@ export async function evict(entries: EntryRecord[], target: number, keep?: (entr
   }
   await deleteEntries(victims);
   return victims;
+}
+
+/* ---------- 本地缓存目录（File System Access API，桌面 Chrome／Edge） ---------- */
+
+/** 用户选择的文件夹：句柄存在 meta 表，页面与 Service Worker 共用。数据块写在其中的 tessera-cache 子文件夹，
+ * 按「命名空间/层/条目编号/块序号」分层；文件名只有不可逆的编号，内容是加密后的块，离开 Tessera 无法打开。 */
+export type CacheDirectory = { handle: FileSystemDirectoryHandle; name: string; since: number };
+export type DirectoryPermission = "granted" | "prompt" | "denied";
+export const DIRECTORY_FOLDER = "tessera-cache";
+type PermissionHandle = FileSystemDirectoryHandle & { queryPermission?: (options: { mode: "readwrite" }) => Promise<PermissionState> };
+let rootMemo: { at: number; root: FileSystemDirectoryHandle | null } | null = null;
+
+export const directorySupported = () => typeof globalThis.FileSystemDirectoryHandle !== "undefined";
+export const readDirectory = () => getMeta<CacheDirectory>("directory").catch(() => undefined);
+export async function directoryPermission(directory?: CacheDirectory): Promise<DirectoryPermission> {
+  try { return (await (directory?.handle as PermissionHandle | undefined)?.queryPermission?.({ mode: "readwrite" })) as DirectoryPermission ?? "denied"; }
+  catch { return "denied"; }
+}
+/** 选择或停用目录后让各上下文重新检查（Worker 内最多沿用 5 秒）。 */
+export const forgetDirectory = () => { rootMemo = null; };
+
+/** 已授权的缓存根目录；未配置或未授权时为 null（不在后台弹出授权，授权只能由页面在用户点击后完成）。 */
+export async function directoryRoot(): Promise<FileSystemDirectoryHandle | null> {
+  if (rootMemo && Date.now() - rootMemo.at < 5000) return rootMemo.root;
+  const directory = await readDirectory();
+  let root: FileSystemDirectoryHandle | null = null;
+  if (directory && await directoryPermission(directory) === "granted") {
+    try { root = await directory.handle.getDirectoryHandle(DIRECTORY_FOLDER, { create: true }); } catch { root = null; }
+  }
+  rootMemo = { at: Date.now(), root };
+  return root;
+}
+
+/** 新条目的数据块放在哪里："dir" 目录、"idb" 浏览器存储；配置了目录但暂未授权时为 null（不写入，等用户重新授权）。 */
+export async function preferredStore(): Promise<"dir" | "idb" | null> {
+  if (!(await readDirectory())) return "idb";
+  return await directoryRoot() ? "dir" : null;
+}
+
+const segment = (value: string) => value.replace(/[^A-Za-z0-9_-]/g, character => `~${character.charCodeAt(0).toString(16)}`) || "_";
+
+async function entryFolder(key: string, create: boolean): Promise<FileSystemDirectoryHandle | null> {
+  let folder = await directoryRoot();
+  if (!folder) return null;
+  try {
+    for (const part of key.split("/")) folder = await folder.getDirectoryHandle(segment(part), { create });
+    return folder;
+  } catch { return null; }
+}
+
+async function removeEntryFolder(key: string) {
+  const parts = key.split("/");
+  const parent = await entryFolder(parts.slice(0, -1).join("/"), false);
+  await parent?.removeEntry(segment(parts.at(-1)!), { recursive: true }).catch(() => undefined);
+}
+
+type IterableDirectory = FileSystemDirectoryHandle & { entries(): AsyncIterable<[string, FileSystemHandle]> };
+
+/** 清理目录中没有对应条目的文件夹（目录暂不可用时删除的条目、浏览器数据被清除后留下的文件）；返回删除的条目文件夹数。 */
+export async function sweepDirectory(): Promise<number> {
+  const root = await directoryRoot();
+  if (!root) return 0;
+  const known = new Set((await listEntries()).filter(entry => entry.store === "dir").map(entry => entry.key.split("/").map(segment).join("/")));
+  let removed = 0;
+  for await (const [ns, nsHandle] of (root as IterableDirectory).entries()) {
+    if (nsHandle.kind !== "directory") continue;
+    for await (const [tier, tierHandle] of (nsHandle as IterableDirectory).entries()) {
+      if (tierHandle.kind !== "directory") continue;
+      for await (const [id] of (tierHandle as IterableDirectory).entries()) {
+        if (known.has(`${ns}/${tier}/${id}`)) continue;
+        await (tierHandle as FileSystemDirectoryHandle).removeEntry(id, { recursive: true }).catch(() => undefined);
+        removed++;
+      }
+    }
+  }
+  return removed;
 }
 
 /* ---------- 设备设置 ---------- */

@@ -298,6 +298,9 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 .account-setting-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .account-setting-summary > div { min-width: 0; }
 .account-setting-summary strong { font-size: var(--text-md); font-weight: 500; }
+.cache-location-name { display: inline-flex; min-width: 0; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.cache-location-name > svg { flex: none; color: var(--accent-ink); }
+.cache-location-name > .muted { font-weight: 400; }
 .account-setting-summary p { margin-top: 5px; color: var(--ink-3); font-size: var(--text-sm); line-height: 1.7; }
 .account-action-dialog .input { height: 40px; }
 .account-editor-note { margin: 0; color: var(--ink-3); font-size: var(--text-sm); line-height: 1.7; overflow-wrap: anywhere; }
@@ -3682,51 +3685,49 @@ button.task-location:hover .task-location-text > span { color: var(--accent); }
   .preview-modal:not(.is-immersive):not(.is-minimized) .modal-heading { flex: 1; min-width: 0; }
   .preview-modal:not(.is-immersive):not(.is-minimized) .modal-window-actions { flex: none; width: auto; gap: 0; }
 }
-/* ---------- 文件助手入口：右下角只保留助手，悬停展开名称；处理中流光描边，待确认显示角标 ---------- */
+/* ---------- 文件助手入口：右下角圆形图标；处理中外圈光环旋转，悬停上浮放大，待确认显示暖色角标 ---------- */
 .assistant-launcher { --launcher-size: 52px; position: fixed; right: max(24px, calc(env(safe-area-inset-right) + 16px)); bottom: max(24px, calc(env(safe-area-inset-bottom) + 16px)); z-index: 45;
-  display: flex; align-items: center; gap: 0; height: var(--launcher-size); min-width: var(--launcher-size); max-width: var(--launcher-size); padding: 0; overflow: visible;
-  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--line)); border-radius: 999px; background: var(--surface); color: var(--accent-ink);
+  display: grid; width: var(--launcher-size); height: var(--launcher-size); padding: 0; place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--line)); border-radius: 50%; background: var(--surface); color: var(--accent-ink);
   box-shadow: 0 1px 2px rgba(19, 26, 51, .06), 0 8px 24px -6px color-mix(in srgb, var(--accent) 28%, rgba(19, 26, 51, .18)), inset 0 1px 0 var(--tray-highlight);
   animation: launcher-in var(--duration-slow) var(--ease-out) both;
-  transition: max-width var(--duration-base) var(--ease-out), transform var(--duration-base) var(--ease-out), box-shadow var(--duration-base), border-color var(--duration-fast); }
+  transition: transform var(--duration-base) var(--ease-out), box-shadow var(--duration-base), border-color var(--duration-fast); }
 .assistant-launcher[hidden] { display: none; }
-.assistant-launcher::before { content: ""; position: absolute; inset: -1px; z-index: -1; border-radius: inherit; background: conic-gradient(from var(--launcher-angle, 0deg), transparent 0 55%, color-mix(in srgb, var(--accent) 70%, transparent) 75%, transparent 95%); opacity: 0; transition: opacity var(--duration-base); }
-.assistant-launcher-orb { position: relative; display: grid; flex: none; width: calc(var(--launcher-size) - 2px); height: calc(var(--launcher-size) - 2px); place-items: center; border-radius: 50%;
-  background: radial-gradient(circle at 30% 25%, color-mix(in srgb, var(--accent) 16%, var(--surface)) 0, var(--surface) 70%); transition: transform var(--duration-base) var(--ease-out); }
-.assistant-launcher-copy { display: flex; align-items: center; gap: 8px; min-width: 0; padding-right: 16px; overflow: hidden; white-space: nowrap; opacity: 0; transform: translateX(-6px); transition: opacity var(--duration-fast), transform var(--duration-base) var(--ease-out); }
-.assistant-launcher-copy strong { color: var(--ink); font-size: var(--text-sm); font-weight: 600; }
-.assistant-launcher-copy kbd { padding: 1px 6px; border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-sunken); color: var(--ink-3); font-family: var(--font); font-size: var(--text-micro); }
-.assistant-launcher-badge { position: absolute; top: -5px; right: -5px; display: grid; min-width: 20px; height: 20px; padding: 0 5px; place-items: center; border: 2px solid var(--surface); border-radius: 999px; background: var(--warning); color: var(--on-accent); font-size: var(--text-micro); font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; animation: launcher-pop var(--duration-base) var(--ease-out); }
-.assistant-launcher-lock { position: absolute; left: 34px; bottom: -2px; display: grid; width: 18px; height: 18px; place-items: center; border: 2px solid var(--surface); border-radius: 50%; background: var(--ink); color: var(--surface); }
-.assistant-launcher:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring), var(--shadow-lg); }
-.assistant-launcher:focus-visible, .assistant-launcher.has-pending { max-width: 220px; }
-.assistant-launcher:focus-visible .assistant-launcher-copy, .assistant-launcher.has-pending .assistant-launcher-copy { opacity: 1; transform: none; }
-.assistant-launcher:active { transform: scale(.96); }
-.assistant-launcher.is-working::before { opacity: 1; animation: launcher-spin 2.4s linear infinite; }
-.assistant-launcher.is-working { border-color: transparent; }
+.assistant-launcher-orb { position: relative; z-index: 1; display: grid; width: calc(var(--launcher-size) - 8px); height: calc(var(--launcher-size) - 8px); place-items: center; border-radius: 50%;
+  background: radial-gradient(circle at 30% 25%, color-mix(in srgb, var(--accent) 16%, var(--surface)) 0, var(--surface) 72%); transition: transform var(--duration-slow) var(--ease-out); }
+/* 外圈光环：静止时透明；处理中是一段旋转的渐变弧线，待确认时为静止的暖色圆环。 */
+.assistant-launcher-ring { position: absolute; inset: -4px; border-radius: 50%; opacity: 0; pointer-events: none;
+  background: conic-gradient(from 0deg, transparent 0 40%, color-mix(in srgb, var(--accent) 25%, transparent) 60%, var(--accent) 88%, transparent 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px)); mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+  transition: opacity var(--duration-base); }
+.assistant-launcher.is-working { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.assistant-launcher.is-working .assistant-launcher-ring { opacity: 1; animation: launcher-spin 1.2s linear infinite; }
+.assistant-launcher.is-working .assistant-launcher-orb { animation: launcher-breathe 2.4s ease-in-out infinite; }
 .assistant-launcher.has-pending { border-color: color-mix(in srgb, var(--warning) 55%, var(--line)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 14%, transparent), var(--shadow-lg); }
-.assistant-launcher.has-pending .assistant-launcher-copy strong { color: var(--warning); }
+.assistant-launcher.has-pending .assistant-launcher-ring { opacity: 1; background: color-mix(in srgb, var(--warning) 55%, transparent); animation: none; }
+.assistant-launcher-badge { position: absolute; top: -5px; right: -5px; z-index: 2; display: grid; min-width: 20px; height: 20px; padding: 0 5px; place-items: center; border: 2px solid var(--surface); border-radius: 999px; background: var(--warning); color: var(--on-accent); font-size: var(--text-micro); font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; animation: launcher-pop var(--duration-base) var(--ease-out); }
+.assistant-launcher-lock { position: absolute; left: -2px; bottom: -2px; z-index: 2; display: grid; width: 18px; height: 18px; place-items: center; border: 2px solid var(--surface); border-radius: 50%; background: var(--ink); color: var(--surface); }
+.assistant-launcher:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring), var(--shadow-lg); }
+.assistant-launcher:active { transform: scale(.94); }
 @media (hover: hover) and (pointer: fine) {
-  .assistant-launcher:hover { max-width: 220px; transform: translateY(-2px); border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
-    box-shadow: 0 2px 4px rgba(19, 26, 51, .06), 0 14px 32px -8px color-mix(in srgb, var(--accent) 38%, rgba(19, 26, 51, .22)), inset 0 1px 0 var(--tray-highlight); }
-  .assistant-launcher:hover .assistant-launcher-copy { opacity: 1; transform: none; }
-  .assistant-launcher:hover .assistant-launcher-orb { transform: rotate(-8deg) scale(1.04); }
+  .assistant-launcher:hover { transform: translateY(-3px) scale(1.06); border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+    box-shadow: 0 2px 4px rgba(19, 26, 51, .06), 0 16px 34px -8px color-mix(in srgb, var(--accent) 45%, rgba(19, 26, 51, .24)), 0 0 0 6px color-mix(in srgb, var(--accent) 8%, transparent), inset 0 1px 0 var(--tray-highlight); }
+  .assistant-launcher:hover .assistant-launcher-orb { transform: rotate(-12deg) scale(1.05); }
+  .assistant-launcher:hover:active { transform: translateY(-1px) scale(.97); }
 }
-@property --launcher-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
-@keyframes launcher-spin { to { --launcher-angle: 360deg; } }
+@keyframes launcher-spin { to { transform: rotate(360deg); } }
+@keyframes launcher-breathe { 50% { transform: scale(.94); } }
 @keyframes launcher-in { from { opacity: 0; transform: translateY(12px) scale(.9); } }
 @keyframes launcher-pop { from { transform: scale(.4); } }
 body.has-modal .assistant-launcher { visibility: hidden; pointer-events: none; }
 body:has(.assistant-launcher:not([hidden])) .main { padding-bottom: 88px; }
 @media (max-width: 760px) {
   .assistant-launcher { --launcher-size: 48px; right: var(--floating-right); bottom: var(--floating-bottom); }
-  .assistant-launcher-copy { display: none; }
-  .assistant-launcher:focus-visible, .assistant-launcher.has-pending { max-width: var(--launcher-size); }
   body:has(.assistant-launcher:not([hidden])) .toaster { bottom: calc(var(--floating-bottom) + 60px); }
   body:has(.assistant-launcher:not([hidden])) .modal-backdrop.is-minimized { left: calc((100vw + var(--floating-left) - var(--floating-right) - 60px) / 2); width: min(380px, calc(100vw - var(--floating-left) - var(--floating-right) - 60px)); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .assistant-launcher, .assistant-launcher *, .assistant-launcher::before { animation: none !important; transition: none; }
+  .assistant-launcher, .assistant-launcher * { animation: none !important; transition: none; }
   .assistant-launcher:hover, .assistant-launcher:active, .assistant-launcher:hover .assistant-launcher-orb { transform: none; }
 }
 
@@ -3747,6 +3748,17 @@ button.task-stat:focus-visible { outline: 2px solid var(--focus-ring); outline-o
 .task-stat-icon.is-accent { background: var(--accent-soft); color: var(--accent-ink); }
 .task-stat-icon.is-success { background: var(--success-soft); color: var(--success); }
 .task-stat-icon.is-danger { background: var(--danger-soft); color: var(--danger); }
+.task-stat-icon.is-warning { background: var(--warning-soft); color: var(--warning); }
+.task-stat.is-warning.is-selected { border-color: color-mix(in srgb, var(--warning) 45%, var(--line)); background: color-mix(in srgb, var(--warning-soft) 60%, var(--surface)); }
+/* 私密空间的缓存：锁形角标、暖色「私密」标签与左侧暖色细条，和普通文件一眼区分。 */
+.cached-tile { position: relative; display: inline-flex; flex: none; }
+.cached-tile-lock { position: absolute; right: -4px; bottom: -3px; display: grid; width: 16px; height: 16px; place-items: center; border: 2px solid var(--surface); border-radius: 50%; background: var(--warning); color: var(--on-accent); }
+.cached-private-tag { display: inline-flex; flex: none; align-items: center; gap: 3px; padding: 0 6px; border-radius: var(--radius-xs); background: var(--warning-soft); color: var(--warning); font-size: var(--text-micro); font-weight: 500; line-height: 18px; }
+.task-table .task-item.is-private { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warning) 70%, transparent); background: color-mix(in srgb, var(--warning-soft) 28%, transparent); }
+.task-table .task-item.is-private:hover { background: color-mix(in srgb, var(--warning-soft) 45%, var(--surface-hover)); }
+.task-item.is-private .task-location > svg { color: var(--warning); }
+.cached-private-notice .notice-body { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; width: 100%; }
+.task-page > .cached-private-notice, .task-page .cached-private-notice { margin-bottom: 12px; }
 .task-stat-icon.is-live { animation: task-live 1.8s ease-in-out infinite; }
 @keyframes task-live { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 12%, transparent); } }
 .task-stat-copy { display: grid; min-width: 0; gap: 2px; }

@@ -3,7 +3,7 @@
  * 并给「本机缓存」设置页提供统计、设置与清理。页面本身不持有缓存密钥。
  */
 import * as api from "./api";
-import { type DeviceSettings, type FileCacheState, type Kind, readSettings, setMeta } from "./cache-store";
+import { type CacheDirectory, type DeviceSettings, type DirectoryPermission, type FileCacheState, type Kind, directoryPermission, forgetDirectory, readDirectory, readSettings, setMeta } from "./cache-store";
 export type CacheFile = Pick<api.FileItem, "key" | "etag" | "size" | "content_type">;
 export type { FileCacheState } from "./cache-store";
 export const cacheFileId = (file: CacheFile) => `${api.isPrivatePath(file.key) ? "p" : "n"}:${file.etag}`;
@@ -15,8 +15,8 @@ export type CacheStats = {
   namespace: string | null; policy: CachePolicy | null; settings: DeviceSettings;
   normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>> }; private: { bytes: number; count: number }; others: { bytes: number; count: number };
 };
-export type CachedItem = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean };
-export type CachedItemFilter = { private?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; origin?: "" | "manual" | "auto"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
+export type CachedItem = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean; private: boolean };
+export type CachedItemFilter = { private?: boolean; all?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; origin?: "" | "manual" | "auto"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
 
 /** Worker 判定重试也无法解决的失败（空间不足、文件已变化、设置不允许等）；其余失败可以自动重试续传。 */
 export const isFatalCacheError = (reason: unknown) => reason instanceof Error && (reason as Error & { fatal?: boolean }).fatal === true;
@@ -137,3 +137,71 @@ export async function storageEstimate(): Promise<{ usage: number; quota: number;
 }
 
 export const isStandalone = () => window.matchMedia?.("(display-mode: standalone)").matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+
+/* ---------- 本地缓存目录（桌面 Chrome／Edge 的 File System Access API） ---------- */
+
+type PickerWindow = Window & { showDirectoryPicker?: (options?: { id?: string; mode?: "read" | "readwrite"; startIn?: string }) => Promise<FileSystemDirectoryHandle> };
+type GrantableHandle = FileSystemDirectoryHandle & { requestPermission?: (options: { mode: "readwrite" }) => Promise<PermissionState> };
+export type CacheDirectoryInfo = { name: string; since: number; permission: DirectoryPermission };
+
+/** 能否把缓存放到本地文件夹：只看浏览器是否提供目录选择（桌面 Chrome、Edge 等 Chromium 浏览器），不按名称判断。 */
+export const directoryAvailable = () => cacheSupported() && typeof (window as PickerWindow).showDirectoryPicker === "function";
+
+/** 当前浏览器的简短名称，只用于提示文案。 */
+export function browserName() {
+  const agent = navigator.userAgent;
+  const mobile = /Android|iPhone|iPad|iPod|Mobile/.test(agent);
+  const name = /Edg\//.test(agent) ? "Edge" : /Firefox|FxiOS/.test(agent) ? "Firefox" : /OPR\//.test(agent) ? "Opera"
+    : /Chrome|CriOS/.test(agent) ? "Chrome" : /Safari/.test(agent) ? "Safari" : "当前浏览器";
+  return { name, mobile };
+}
+
+export async function cacheDirectoryInfo(): Promise<CacheDirectoryInfo | null> {
+  const directory = await readDirectory();
+  return directory ? { name: directory.name, since: directory.since, permission: await directoryPermission(directory) } : null;
+}
+
+/** 让用户选择文件夹（必须在点击事件中调用）。更换为另一个文件夹时先停用旧目录并删除其中的缓存。 */
+export async function chooseCacheDirectory(): Promise<CacheDirectoryInfo | null> {
+  const picker = (window as PickerWindow).showDirectoryPicker;
+  if (!picker) throw new Error("这个浏览器不支持选择本地文件夹");
+  let handle: FileSystemDirectoryHandle;
+  try { handle = await picker.call(window, { id: "tessera-cache", mode: "readwrite", startIn: "documents" }); }
+  catch (error) { if (error instanceof DOMException && error.name === "AbortError") return null; throw error; }
+  if (await (handle as GrantableHandle).requestPermission?.({ mode: "readwrite" }) === "denied") throw new Error("没有获得这个文件夹的读写权限");
+  const previous = await readDirectory();
+  if (previous && !(await previous.handle.isSameEntry(handle).catch(() => false))) await ask("tessera-cache:directory-off", {}, 120000);
+  const directory: CacheDirectory = { handle, name: handle.name, since: previous && await previous.handle.isSameEntry(handle).catch(() => false) ? previous.since : Date.now() };
+  await setMeta("directory", directory);
+  forgetDirectory();
+  await ask("tessera-cache:directory", {}, 120000).catch(() => undefined);
+  void navigator.storage?.persist?.().catch(() => false);
+  changed();
+  return { name: directory.name, since: directory.since, permission: "granted" };
+}
+
+/** 重新授权（必须在点击事件中调用）。Chrome 122 起可选「每次访问都允许」，之后不再需要重复授权。 */
+export async function regrantCacheDirectory(): Promise<DirectoryPermission> {
+  const directory = await readDirectory();
+  if (!directory) return "denied";
+  const result = (await (directory.handle as GrantableHandle).requestPermission?.({ mode: "readwrite" }) ?? "denied") as DirectoryPermission;
+  forgetDirectory();
+  if (result === "granted") await ask("tessera-cache:directory", {}, 120000).catch(() => undefined);
+  changed();
+  return result;
+}
+
+/** 改回浏览器存储：删除保存在目录中的缓存（目录仍有授权时一并删除文件夹里的 tessera-cache 子文件夹）。 */
+export async function stopCacheDirectory() {
+  const removed = await ask<number>("tessera-cache:directory-off", {}, 120000);
+  forgetDirectory();
+  changed();
+  return removed;
+}
+
+/** 缓存容量的参照配额：数据块写在已授权的本地文件夹时不受浏览器配额限制（返回 null）。 */
+export async function cacheQuota(): Promise<number | null> {
+  const directory = await cacheDirectoryInfo().catch(() => null);
+  if (directory?.permission === "granted") return null;
+  return (await storageEstimate())?.quota || null;
+}

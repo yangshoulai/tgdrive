@@ -6,7 +6,7 @@
  */
 import {
   BLOCK, type Bytes, type DeviceSettings, type EntryInfo, type EntryRecord, type Kind, type Tier,
-  aesKey, b64u, blockAad, deleteEntries, deviceId, effectiveMiB, ensureEntry, evict, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
+  aesKey, b64u, blockAad, deleteEntries, deviceId, directoryRoot, effectiveMiB, ensureEntry, evict, forgetDirectory, preferredStore, readDirectory, setMeta, sweepDirectory, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
   kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, setManualFlags, touchEntry, updateEntryInfo,
 } from "../cache-store";
 
@@ -75,11 +75,12 @@ const sizeText = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).
 
 const tierBudget = (preferences: DeviceSettings, tier: Tier) => (tier === "n" ? preferences.maxMiB : preferences.privateMaxMiB) * MiB;
 
-/** 设备设置，容量按浏览器配额截断：设置值大于配额时以配额为准（配额每 5 秒随设置一起重读）。 */
+/** 设备设置，容量按浏览器配额截断：设置值大于配额时以配额为准（配额每 5 秒随设置一起重读）；使用本地缓存目录时不截断。 */
 async function currentSettings() {
   if (!settings || Date.now() - settings.at > 5000) {
-    const [value, estimate] = await Promise.all([readSettings(navigator.userAgent), navigator.storage?.estimate?.().catch(() => undefined)]);
-    const quota = estimate?.quota;
+    const [value, estimate, folder] = await Promise.all([readSettings(navigator.userAgent), navigator.storage?.estimate?.().catch(() => undefined), directoryRoot()]);
+    // 数据块写在用户选择的文件夹时不占浏览器配额，容量只按用户设置。
+    const quota = folder ? undefined : estimate?.quota;
     settings = { value: { ...value, maxMiB: effectiveMiB(value.maxMiB, quota), privateMaxMiB: effectiveMiB(value.privateMaxMiB, quota) }, at: Date.now() };
   }
   return settings.value;
@@ -300,6 +301,8 @@ async function handle(request: Request, route: Route): Promise<Response> {
   const key = `${context.ns}/${context.tier}/${keys.id}`;
   const now = Date.now();
   let entry = await getEntry(key);
+  // 数据在本地缓存目录、但目录暂未授权：直接回源，保留条目等用户重新授权后继续使用。
+  if (entry?.store === "dir" && !(await directoryRoot())) return direct(request);
   let info = entry ? await openInfo(context.info, entry) : null;
   // 旧版可能把缺失的 Content-Length 写成 0；大小不符时清掉条目，让本次读取正常回源。
   if (entry && (!info || route.size !== undefined && info.size !== route.size)) {
@@ -359,8 +362,11 @@ async function handle(request: Request, route: Route): Promise<Response> {
     const type = metadata.headers.get("content-type") ?? "application/octet-stream";
     const kind: Kind = route.thumb ? "thumb" : kindOf(type, request.destination);
     if (kind === "other" && !route.preview || kind === "video" && !preferences.video) return bypass();
+    // 配置了本地缓存目录但暂未授权时不自动缓存，避免把数据悄悄写回受配额限制的浏览器存储。
+    const store = await preferredStore();
+    if (!store) return bypass();
     const record: EntryRecord = { key, ns: context.ns, tier: context.tier, id: keys.id, blocks: [], bytes: 0, accessed: now, created: now,
-      ...(context.tier === "n" ? { kind } : {}), manual: false, info: null };
+      ...(context.tier === "n" ? { kind } : {}), manual: false, ...(store === "dir" ? { store } : {}), info: null };
     info = { etag: route.etag, version: validator, size: total, type, disposition: metadata.headers.get("content-disposition") ?? "inline", path: route.path, kind };
     record.info = await sealInfo(context.info, record, info);
     context.signal.throwIfAborted();
@@ -439,7 +445,7 @@ async function* produce(opened: Opened, span: { start: number; end: number }, si
       if (opened.entry.blocks.includes(index)) {
         let plain: Bytes | undefined;
         try {
-          const sealed = await getBlock(opened.entry.key, index);
+          const sealed = await getBlock(opened.entry.key, index, opened.entry.store);
           if (!sealed) throw new Error("缓存数据块缺失");
           plain = await open(opened.key, sealed, blockAad(opened.entry, index));
           if (plain.length !== Math.min(BLOCK, info.size - index * BLOCK)) throw new Error("缓存数据块大小不符");
@@ -557,7 +563,7 @@ class BlockWriter {
       const sealed = await seal(this.opened.key, data, blockAad(entry, index));
       this.opened.tier.signal.throwIfAborted();
       this.strict?.signal.throwIfAborted();
-      const updated = await putBlock(entry.key, index, sealed, data.length);
+      const updated = await putBlock(entry.key, index, sealed, data.length, entry.store);
       if (!updated) {
         if (this.strict) throw new Error("缓存已被清理，请重试");
         this.stopped = true; return;
@@ -569,7 +575,10 @@ class BlockWriter {
       if (this.opened.info.kind !== "thumb") await cacheChanged(fileCacheState(updated, this.opened.info.size).complete).catch(() => undefined);
     } catch (error) {
       if (this.strict) {
-        if (error instanceof DOMException && error.name === "QuotaExceededError") throw new CacheFatal("浏览器存储空间不足，请清理本机缓存后重试");
+        if (error instanceof DOMException && error.name === "QuotaExceededError")
+          throw new CacheFatal(entry.store === "dir" ? "缓存目录所在磁盘空间不足，请清理磁盘或本机缓存后重试" : "浏览器存储空间不足，请清理本机缓存后重试");
+        if (entry.store === "dir" && error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "NotFoundError"))
+          throw new CacheFatal("本机缓存目录不可用（未授权或已被移动），请在「本机缓存」设置中重新授权或重新选择目录");
         throw error;
       }
       // 多半是浏览器配额不足：先淘汰一部分，这次读取不再写入。
@@ -748,11 +757,16 @@ async function startManual(owner: string, id: string, url: string, group?: strin
       let entry = await getEntry(value.key);
       let info = entry ? await openInfo(value.context.info, entry) : null;
       if (entry && (!info || info.size !== size)) { await deleteEntries([value.key]); entry = undefined; }
+      const store = await preferredStore();
+      if (!store) throw new CacheFatal("本机缓存目录需要重新授权：请到「本机缓存」设置点击「重新授权」后重试");
+      if (entry?.store === "dir" && store !== "dir") throw new CacheFatal("这个文件缓存在本地缓存目录中，目录暂不可用，请重新授权后重试");
+      // 已选择本地缓存目录：浏览器存储里未完成的旧条目改到目录重新缓存，不再占用浏览器配额；已完整的保留原处。
+      if (entry && !entry.store && store === "dir" && !fileCacheState(entry, size).complete) { await deleteEntries([value.key]); entry = undefined; }
       const now = Date.now(), type = response.headers.get("content-type") ?? "application/octet-stream", kind = kindOf(type, "");
       info = { etag: route.etag, version: etagOf(response), path: route.path, type, size, kind,
         disposition: response.headers.get("content-disposition") ?? "inline", manual: true };
       const record: EntryRecord = { key: value.key, ns: value.context.ns, tier: route.tier, id: value.keys.id, blocks: [], bytes: 0,
-        created: now, accessed: now, ...(route.tier === "n" ? { kind } : {}), manual: true, info: null };
+        created: now, accessed: now, ...(route.tier === "n" ? { kind } : {}), manual: true, ...(store === "dir" ? { store } : {}), info: null };
       record.info = await sealInfo(value.context.info, record, info);
       job.controller.signal.throwIfAborted();
       entry = await ensureEntry(record);
@@ -762,7 +776,7 @@ async function startManual(owner: string, id: string, url: string, group?: strin
       job.controller.signal.throwIfAborted();
       job.opened = { tier: value.context, entry, info, key: value.keys.key, request, cap };
       await enforce();
-      await reserveQuota(entry.key, size - entry.bytes + Math.ceil(size / BLOCK) * 28);
+      if (entry.store !== "dir") await reserveQuota(entry.key, size - entry.bytes + Math.ceil(size / BLOCK) * 28);
       job.controller.signal.throwIfAborted();
       const state = fileCacheState(entry, size);
       await cacheChanged(state.complete).catch(() => undefined);
@@ -958,6 +972,18 @@ async function etagsOf(context: TierContext, entries: EntryRecord[]) {
 }
 
 /** 别处删除、覆盖或移出某个区域的文件：服务端不再引用这个版本时删除本地数据（解不开的条目同样删除）。 */
+/** 停用本地缓存目录：删除数据在目录中的条目；目录仍有授权时一并删除其中的 tessera-cache 子文件夹，再移除配置。 */
+async function stopDirectory() {
+  const directory = await readDirectory();
+  const entries = (await listEntries()).filter(entry => entry.store === "dir");
+  await deleteEntries(entries.map(entry => entry.key));
+  if (directory && await directoryRoot()) await directory.handle.removeEntry("tessera-cache", { recursive: true }).catch(() => undefined);
+  await setMeta("directory", undefined);
+  forgetDirectory(); settings = null; manualCache = null; itemCache = null;
+  await cacheChanged(true).catch(() => undefined);
+  return entries.length;
+}
+
 async function reconcile() {
   const context = await normalContext();
   if (!context) return;
@@ -1018,8 +1044,8 @@ async function stats(): Promise<Stats> {
   return result;
 }
 
-type Item = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean };
-type ItemQuery = { private?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; origin?: "" | "manual" | "auto"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
+type Item = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean; private: boolean };
+type ItemQuery = { private?: boolean; all?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; origin?: "" | "manual" | "auto"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
 let itemCache: { ns: string; at: number; items: Item[] } | null = null;
 
 /** 普通层已缓存文件的完整索引：解密一次后在内存里保留 15 秒，翻页、搜索与筛选都不再解密。缩略图不列出。 */
@@ -1032,7 +1058,7 @@ async function allItems(): Promise<Item[]> {
     if (entry.kind === "thumb") continue;
     const info = await openInfo(context.info, entry);
     if (info) items.push({ key: entry.key, path: info.path, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed,
-      manual: Boolean(entry.manual ?? info.manual), complete: fileCacheState(entry, info.size).complete });
+      manual: Boolean(entry.manual ?? info.manual), complete: fileCacheState(entry, info.size).complete, private: false });
   }
   context.signal.throwIfAborted();
   itemCache = { ns: context.ns, at: Date.now(), items };
@@ -1049,7 +1075,7 @@ async function privateItems(): Promise<Item[]> {
     if (entry.kind === "thumb") continue;
     const info = await openInfo(secret.info, entry);
     if (info && info.kind !== "thumb") items.push({ key: entry.key, path: info.path, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed,
-      manual: Boolean(entry.manual ?? info.manual), complete: fileCacheState(entry, info.size).complete });
+      manual: Boolean(entry.manual ?? info.manual), complete: fileCacheState(entry, info.size).complete, private: true });
   }
   context.signal.throwIfAborted();
   return items;
@@ -1058,7 +1084,9 @@ async function privateItems(): Promise<Item[]> {
 async function matchItems(options: ItemQuery) {
   const query = (options.query ?? "").trim().toLowerCase();
   // prefix：目录统计只看某个文件夹（含子文件夹）里的缓存；private：私密空间的目录统计读私密层。
-  return (await (options.private ? privateItems() : allItems())).filter(item => (!options.prefix || item.path.startsWith(options.prefix)) && (!query || item.path.toLowerCase().includes(query))
+  // all：普通层与（已解锁时的）私密层合在一起，「已缓存的文件」的「全部」标签使用；私密层锁定时只有普通层。
+  const source = options.all ? [...await allItems(), ...await privateItems().catch(() => [] as Item[])] : await (options.private ? privateItems() : allItems());
+  return source.filter(item => (!options.prefix || item.path.startsWith(options.prefix)) && (!query || item.path.toLowerCase().includes(query))
     && (!options.kind || (options.kind === "other" ? !["image", "video", "audio"].includes(item.kind) : item.kind === options.kind))
     && (!options.status || (options.status === "complete") === item.complete) && (!options.origin || (options.origin === "manual") === item.manual));
 }
@@ -1112,6 +1140,11 @@ sw.addEventListener("message", event => {
       settings = null; stopManual(); dropKeys("p");
       for (const key of backgrounds.keys()) void finishBackground(key);
       reply(Promise.resolve(null)); break;
+    case "tessera-cache:directory":
+      // 页面选择、重新授权或停用了本地缓存目录：重新读取配置，清理目录里没有对应条目的残留文件。
+      forgetDirectory(); settings = null; stopManual(); manualCache = null; itemCache = null;
+      reply(sweepDirectory().catch(() => 0)); break;
+    case "tessera-cache:directory-off": stopManual(); reply(stopDirectory()); break;
     case "tessera-cache:nudge":
       event.waitUntil(Promise.resolve(clearPrivateMaterials()));
       if (Date.now() - lastReconcile > 5000) scheduleReconcile(3000); break;

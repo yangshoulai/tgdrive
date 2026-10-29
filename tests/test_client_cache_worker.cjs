@@ -34,6 +34,13 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
     ...store,
     deviceId: async () => "device-aaaaaaaaaaaaaaaaaaaa",
     readSettings: async () => ({ ...preferences }),
+    // 本地缓存目录：state.store 为 "idb"（默认）、"dir"（已授权的目录）或 null（配置了目录但未授权）。
+    directoryRoot: async () => state.store === "dir" ? {} : null,
+    preferredStore: async () => state.store === undefined ? "idb" : state.store,
+    readDirectory: async () => state.store === undefined || state.store === "idb" ? undefined : { name: "Cache" },
+    forgetDirectory: () => undefined,
+    sweepDirectory: async () => 0,
+    setMeta: async () => undefined,
     getEntry: async key => clone(entries.get(key)),
     ensureEntry: async entry => { if (!entries.has(entry.key)) entries.set(entry.key, clone(entry)); return clone(entries.get(entry.key)); },
     getBlock: async (key, index) => clone(blocks.get(`${key}/${index}`)),
@@ -470,6 +477,24 @@ test("设置的容量超过浏览器配额时按配额生效", async t => {
   h.state.quota = 2 * store.BLOCK;
   await assert.rejects(h.ask("tessera-cache:start", { id: "a", url: h.url("a.bin") }), /超过本机缓存上限 2 MB/);
   assert.equal(h.entries.size, 0);
+});
+
+test("本地缓存目录：新条目写入目录且容量不受浏览器配额限制", async t => {
+  const h = harness(t, { "a.bin": bytes(3 * store.BLOCK) });
+  h.state.store = "dir";
+  h.state.quota = 2 * store.BLOCK;
+  await cacheFully(h, "a", "a.bin");
+  const [entry] = [...h.entries.values()];
+  assert.equal(entry.store, "dir");
+  assert.equal(entry.blocks.length, 3);
+});
+
+test("本地缓存目录未授权时不自动缓存，手动缓存提示重新授权", async t => {
+  const h = harness(t);
+  h.state.store = null;
+  assert.deepEqual((await h.read("file.bin")).data, h.files.get("file.bin").data);
+  assert.equal(h.entries.size, 0);
+  await assert.rejects(h.ask("tessera-cache:start", { id: "m", url: h.url("file.bin") }), /重新授权/);
 });
 
 test("配额写入失败会报错并保留已提交块，不误报完成", async t => {

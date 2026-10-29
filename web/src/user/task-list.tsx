@@ -44,7 +44,7 @@ export function useTaskList<T extends { id: string }>(items: T[], describe: (ite
 
 export type TaskListState = ReturnType<typeof useTaskList>;
 
-export type TaskStat = { key: string; label: string; value: ReactNode; detail?: ReactNode; icon: IconName; tone?: "accent" | "success" | "danger" | "neutral"; live?: boolean; selected?: boolean; onSelect?: () => void };
+export type TaskStat = { key: string; label: string; value: ReactNode; detail?: ReactNode; icon: IconName; tone?: "accent" | "success" | "danger" | "warning" | "neutral"; live?: boolean; selected?: boolean; onSelect?: () => void };
 
 /** 页面顶部的概览卡片；可点击的卡片切换到对应的状态筛选。live 表示有任务正在进行（图标呼吸提示）。 */
 export function TaskStats({ items, progress, label }: { items: TaskStat[]; progress?: { percent: number | null; label: string } | null; label: string }) {

@@ -1,11 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { isFatalCacheError, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, storageEstimate, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
+import { isFatalCacheError, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
 import { BRAND } from "../brand";
 import { effectiveMiB } from "../cache-store";
 import { FileTile, getFileKind } from "../files";
 import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, Tabs, copyText, formatBytes, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 import { usePrivateAccess } from "./private-session";
+import { PrivateUnlockForm } from "./private-access";
 import { LocationText, TaskControls, TaskListFooter, TaskStats, remainingText, useTaskList, useTransferRates, type TaskFilter, type TaskStat } from "./task-list";
 import { cacheFolderFiles } from "./cache-folders";
 
@@ -18,6 +19,8 @@ type Queue = {
   available: boolean;
   /** 私密文件可以缓存（管理员允许、设备已信任且私密空间已解锁）。 */
   privateReady: boolean;
+  /** 管理员允许且这台设备已信任（不论是否解锁）：锁定时据此提示解锁后查看私密缓存。 */
+  privateEnabled: boolean;
   /** states：预览等单独关注的文件的实时状态；cached：这台设备上全部已缓存文件的索引（区分自动与手动），文件列表只看这一份。 */
   jobs: CacheJob[]; states: Map<string, FileCacheState>; cached: Map<string, CachedFileState>; showTasks: () => void;
   folders: FolderCacheJob[]; enqueueFolders: (prefixes: string[]) => void; cancelFolder: (id: string) => void; retryFolder: (id: string) => void;
@@ -86,6 +89,17 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
     window.addEventListener("tessera:cache-changed", read);
     return () => { alive = false; window.removeEventListener("tessera:cache-changed", read); };
   }, [enabled]);
+  // 本地缓存目录的授权在浏览器重启后可能需要重新确认：每次登录提示一次，点击提示中的按钮即可授权（需要用户点击）。
+  useEffect(() => {
+    if (!enabled || !available) return;
+    let alive = true;
+    void cacheDirectoryInfo().then(folder => {
+      if (!alive || !folder || folder.permission === "granted" || sessionStorage.getItem("tessera:cache-regrant")) return;
+      sessionStorage.setItem("tessera:cache-regrant", "1");
+      toast.info(`本机缓存文件夹「${folder.name}」需要重新授权`, { label: "重新授权", onClick: () => void regrantCacheDirectory().catch(() => undefined) });
+    }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [enabled, available]);
   const update = useCallback((apply: (value: CacheJob[]) => CacheJob[]) => { jobsRef.current = apply(jobsRef.current); setJobs(jobsRef.current); }, []);
   const updateFolders = useCallback((apply: (value: FolderCacheJob[]) => FolderCacheJob[]) => { foldersRef.current = apply(foldersRef.current); setFolders(foldersRef.current); }, []);
   const cancelFolder = useCallback((id: string) => {
@@ -358,9 +372,9 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
   const activeCount = enabled ? jobs.filter(isRunning).length + folders.filter(folder => folder.status === "active").length : 0;
   useEffect(() => { onActiveChange?.(activeCount); }, [activeCount, onActiveChange]);
   const visibleFolders = useMemo(() => enabled ? folders : [], [enabled, folders]);
-  const value: Queue = useMemo(() => ({ available, privateReady, jobs: visibleJobs, folders: visibleFolders, enqueueFolders: startFolder, cancelFolder, retryFolder, states, cached, showTasks: onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pause: pauseJob, retry, removeJobs,
+  const value: Queue = useMemo(() => ({ available, privateReady, privateEnabled: enabled && privateCacheEnabled, jobs: visibleJobs, folders: visibleFolders, enqueueFolders: startFolder, cancelFolder, retryFolder, states, cached, showTasks: onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pause: pauseJob, retry, removeJobs,
     clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: files => setRemoving(Array.isArray(files) ? files : [files]), forget, report }),
-  [available, privateReady, visibleJobs, visibleFolders, startFolder, cancelFolder, retryFolder, states, cached, onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pauseJob, retry, removeJobs, update, forget, report]);
+  [available, privateReady, privateCacheEnabled, enabled, visibleJobs, visibleFolders, startFolder, cancelFolder, retryFolder, states, cached, onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pauseJob, retry, removeJobs, update, forget, report]);
   const detailState = details && (states.get(cacheFileId(details)) ?? cached.get(cacheFileId(details)));
   const detailManual = Boolean(details && cached.get(cacheFileId(details))?.manual);
   const showDetails = enabled && details && (!api.isPrivatePath(details.key) || privateReady);
@@ -467,10 +481,13 @@ export function CachePage({ tab, onTabChange, onSettings, onOpenFolder }: { tab:
   const [stats, setStats] = useState<CacheStats | null>(null);
   // 浏览器配额：上限按「设置值与配额的较小者」显示，和 Worker 实际生效的容量一致。
   const [quota, setQuota] = useState<number | null>(null);
+  const [directory, setDirectory] = useState<CacheDirectoryInfo | null>(null);
   useEffect(() => {
     if (!cacheSupported()) return;
     let alive = true;
-    const read = () => void Promise.all([cacheStats(), storageEstimate()]).then(([value, estimate]) => { if (alive) { setStats(value); setQuota(estimate?.quota || null); } }).catch(() => undefined);
+    const read = () => void Promise.all([cacheStats(), cacheQuota(), cacheDirectoryInfo().catch(() => null)]).then(([value, limit, folder]) => {
+      if (alive) { setStats(value); setQuota(limit); setDirectory(folder); }
+    }).catch(() => undefined);
     read();
     window.addEventListener("tessera:cache-changed", read);
     const timer = window.setInterval(read, 15000);
@@ -486,9 +503,11 @@ export function CachePage({ tab, onTabChange, onSettings, onOpenFolder }: { tab:
       { value: "tasks", label: "缓存任务", icon: "list", count: queue.jobs.filter(isRunning).length || undefined },
       { value: "files", label: "已缓存的文件", icon: "hardDrive" },
     ]} />
+    {directory && directory.permission !== "granted" && <Notice tone="warning" icon="folder">缓存文件夹「{directory.name}」需要重新授权，授权前不会缓存新文件。
+      <button type="button" className="link-button" onClick={() => void regrantCacheDirectory().then(result => { if (result !== "granted") toast.error("没有获得文件夹的读写权限"); })}>重新授权</button></Notice>}
     {!queue.available && <Notice>本机缓存已关闭，或管理员未开放。可以在<button type="button" className="link-button" onClick={onSettings}>缓存设置</button>中开启。</Notice>}
     {tab === "tasks" ? <CacheTaskList queue={queue} stats={stats} quota={quota} onSettings={onSettings} onOpenFolder={onOpenFolder} />
-      : <CachedFileList privateReady={queue.privateReady} stats={stats} quota={quota} onOpenFolder={onOpenFolder} onSettings={onSettings} />}
+      : <CachedFileList privateReady={queue.privateReady} privateEnabled={queue.privateEnabled} stats={stats} quota={quota} onOpenFolder={onOpenFolder} onSettings={onSettings} />}
   </div>;
 }
 
@@ -514,7 +533,14 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
   const runningChosen = list.chosen.filter(isRunning);
   const resumable = list.chosen.filter(job => ["paused", "canceled", "error"].includes(job.status));
   const toggle = (filter: TaskFilter) => list.setFilter(list.filter === filter ? "" : filter);
+  const [unlocking, setUnlocking] = useState(false);
+  const closeUnlock = useCallback(() => setUnlocking(false), []);
+  const hiddenPrivate = queue.privateReady ? 0 : jobs.filter(job => api.isPrivatePath(job.file.key)).length;
   return <>
+    {hiddenPrivate > 0 && <Notice className="cached-private-notice" icon="lock" tone="warning">
+      <span>私密空间已锁定：{hiddenPrivate} 个私密缓存任务仍在继续，名称和位置已隐藏。</span>
+      <Button size="sm" variant="primary" icon="unlock" onClick={() => setUnlocking(true)}>解锁查看</Button></Notice>}
+    {unlocking && <CacheUnlockDialog onClose={closeUnlock} />}
     <TaskStats label="缓存任务概览" progress={running.length ? { percent: total ? (total - left) / total * 100 : null, label: "进行中任务的总进度" } : null} items={[
       { key: "active", label: "进行中", icon: "monitor", tone: "accent", live: running.length + adding > 0, value: (running.length + adding).toLocaleString("zh-CN"),
         detail: running.length ? speed > 0 ? `${formatBytes(speed)}/s · ${remainingText(left / speed)}` : `剩余 ${formatBytes(left)}` : adding ? "正在读取文件夹" : "逐个缓存，避免占满网络",
@@ -564,11 +590,12 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
             const quick = running ? <IconButton icon="pause" size="sm" label={`暂停缓存 ${name}`} onClick={() => queue.pause(job.id)} />
               : job.status !== "done" ? <IconButton icon="play" size="sm" label={`继续缓存 ${name}`} disabled={!queue.available} onClick={() => queue.retry(job.id)} />
                 : <IconButton icon="info" size="sm" label={`查看 ${name} 的缓存`} disabled={hidden} onClick={() => queue.inspect(job.file)} />;
-            return <div key={job.id} className={`data-row task-item is-${job.status}${checked ? " is-selected" : ""}`} role="row">
+            return <div key={job.id} className={`data-row task-item is-${job.status}${secret ? " is-private" : ""}${checked ? " is-selected" : ""}`} role="row">
               <span className="cell-check" role="cell"><Checkbox checked={checked} label={`选择 ${name}`} onChange={value => list.toggle(job.id, value)} /></span>
               <div className="cell-name" role="cell">
-                {hidden ? <span className="task-lock-tile"><Icon name="lock" size={18} /></span> : <FileTile kind={getFileKind(job.file.content_type, job.file.key)} />}
-                <div className="name-stack"><strong className="task-name" title={name}>{name}</strong><small className="task-subline">{formatBytes(job.size)}{secret ? " · 私密" : ""}</small></div>
+                {hidden ? <span className="task-lock-tile"><Icon name="lock" size={18} /></span>
+                  : <span className="cached-tile"><FileTile kind={getFileKind(job.file.content_type, job.file.key)} />{secret && <span className="cached-tile-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}</span>}
+                <div className="name-stack"><strong className="task-name" title={name}>{name}{secret && !hidden && <span className="cached-private-tag"><Icon name="lock" size={10} />私密</span>}</strong><small className="task-subline">{formatBytes(job.size)}</small></div>
               </div>
               <div role="cell"><CacheProgress job={job} rate={rates.get(job.id) ?? 0} hidden={hidden} /></div>
               <div role="cell" className="muted">{hidden ? <span className="task-location"><Icon name="lock" size={12} /><span className="task-location-text"><span>私密空间已锁定</span></span></span>
@@ -613,10 +640,20 @@ function CacheProgress({ job, rate, hidden }: { job: CacheJob; rate: number; hid
 
 const CACHED_PAGE = 50;
 type CachedOrigin = "" | "manual" | "auto";
+type CachedTier = "all" | "normal" | "private";
 
-/** 已缓存的文件：搜索、类型与来源筛选、排序，逐项或批量清除；私密层只在解锁且允许私密缓存时可看。 */
-function CachedFileList({ privateReady, stats, quota, onOpenFolder, onSettings }: { privateReady: boolean; stats: CacheStats | null; quota: number | null; onOpenFolder: (prefix: string, privateSpace?: boolean) => void; onSettings: () => void }) {
-  const [tier, setTier] = useState<"normal" | "private">("normal");
+/** 私密空间的解锁弹窗：复用私密空间的解锁表单，解锁成功后自动关闭，列表随授权变化重新读取。 */
+function CacheUnlockDialog({ onClose }: { onClose: () => void }) {
+  const access = usePrivateAccess();
+  useEffect(() => { if (access.grant) onClose(); }, [access.grant, onClose]);
+  return <Modal title="解锁私密空间" description="解锁后即可查看和管理这台设备上缓存的私密文件。" icon="lock" size="sm" className="private-dialog" onClose={onClose}>
+    <PrivateUnlockForm />
+  </Modal>;
+}
+
+/** 已缓存的文件：普通文件与私密空间分开统计，「全部」把两者合在一起并用锁形标记区分；私密空间锁定时提示解锁后再读取。 */
+function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFolder, onSettings }: { privateReady: boolean; privateEnabled: boolean; stats: CacheStats | null; quota: number | null; onOpenFolder: (prefix: string, privateSpace?: boolean) => void; onSettings: () => void }) {
+  const [tier, setTier] = useState<CachedTier>("all");
   const [search, setSearch] = useState(""), [query, setQuery] = useState("");
   const [kind, setKind] = useState<"" | "image" | "video" | "audio" | "other">("");
   const [origin, setOrigin] = useState<CachedOrigin>("");
@@ -626,43 +663,59 @@ function CachedFileList({ privateReady, stats, quota, onOpenFolder, onSettings }
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(new Set<string>());
   const [removing, setRemoving] = useState<CachedItem[] | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
   const [revision, setRevision] = useState(0);
-  const secret = tier === "private";
+  const closeUnlock = useCallback(() => setUnlocking(false), []);
+  // 私密层：这台设备允许缓存私密文件（或仍留有私密副本）时才出现；锁定时只能看到数量与大小。
+  const privateCount = stats?.private.count ?? 0, privateBytes = stats?.private.bytes ?? 0;
+  const showPrivate = privateEnabled || privateCount > 0;
+  const privateLocked = showPrivate && !privateReady;
+  const waitingUnlock = tier === "private" && privateLocked;
   useEffect(() => { const timer = window.setTimeout(() => setQuery(search.trim()), 250); return () => window.clearTimeout(timer); }, [search]);
-  useEffect(() => { setOffset(0); setSelected(new Set()); }, [tier, query, kind, origin, sort]);
-  useEffect(() => { if (!privateReady && secret) setTier("normal"); }, [privateReady, secret]);
+  useEffect(() => { setOffset(0); setSelected(new Set()); }, [tier, query, kind, origin, sort, privateReady]);
+  useEffect(() => { if (!showPrivate && tier === "private") setTier("all"); }, [showPrivate, tier]);
   useEffect(() => {
     const changed = () => setRevision(value => value + 1);
     window.addEventListener("tessera:cache-changed", changed);
     return () => window.removeEventListener("tessera:cache-changed", changed);
   }, []);
   useEffect(() => {
+    if (waitingUnlock) { setPage(null); return; }
     let alive = true;
     setError("");
-    void cachedItems({ private: secret, query, kind, origin, sort, offset, limit: CACHED_PAGE })
+    const scope = tier === "all" ? { all: true } : { private: tier === "private" };
+    void cachedItems({ ...scope, query, kind, origin, sort, offset, limit: CACHED_PAGE })
       .then(value => { if (alive) { setPage(value); setSelected(current => new Set([...current].filter(key => value.items.some(item => item.key === key)))); } })
       .catch(reason => { if (alive) setError(api.errorMessage(reason, "读取本机缓存失败，请刷新页面后重试")); });
     return () => { alive = false; };
-  }, [secret, query, kind, origin, sort, offset, revision]);
+  }, [tier, query, kind, origin, sort, offset, revision, privateReady, waitingUnlock]);
   const items = page?.items ?? [];
   const chosen = items.filter(item => selected.has(item.key));
   const allSelected = items.length > 0 && chosen.length === items.length;
   const filtered = Boolean(query || kind || origin);
+  const limitOf = (mib: number | undefined) => mib ? ` / 上限 ${formatBytes(effectiveMiB(mib, quota) * 1048576)}` : "";
+  const toggleTier = (value: CachedTier) => setTier(tier === value ? "all" : value);
+  const unlockAction = <Button size="sm" variant="primary" icon="unlock" onClick={() => setUnlocking(true)}>解锁查看</Button>;
   return <>
     <TaskStats label="已缓存文件概览" items={[
-      { key: "files", label: filtered ? "符合条件" : secret ? "私密文件" : "普通文件", icon: secret ? "lock" : "folder", value: page ? page.total.toLocaleString("zh-CN") : "—",
-        detail: page ? `${formatBytes(page.bytes)}${stats ? ` / 上限 ${formatBytes(effectiveMiB(secret ? stats.settings.privateMaxMiB : stats.settings.maxMiB, quota) * 1048576)}` : ""}` : "正在读取" },
+      { key: "normal", label: "普通文件", icon: "folder", value: stats ? stats.normal.count.toLocaleString("zh-CN") : "—",
+        detail: stats ? `${formatBytes(stats.normal.bytes)}${limitOf(stats.settings.maxMiB)}` : "正在读取", selected: tier === "normal", onSelect: () => toggleTier("normal") },
+      ...(showPrivate ? [{ key: "private", label: "私密空间", icon: "lock" as const, tone: "warning" as const, value: stats ? privateCount.toLocaleString("zh-CN") : "—",
+        detail: privateLocked ? `${formatBytes(privateBytes)} · 已锁定，解锁后查看` : `${formatBytes(privateBytes)}${limitOf(stats?.settings.privateMaxMiB)}`,
+        selected: tier === "private", onSelect: () => toggleTier("private") }] : []),
       { key: "manual", label: "手动缓存", icon: "pin", tone: "success", value: page && !filtered ? page.manual.toLocaleString("zh-CN") : "—", detail: "优先保留，不会被自动移除",
         selected: origin === "manual", onSelect: () => setOrigin(origin === "manual" ? "" : "manual") },
-      { key: "auto", label: "自动缓存", icon: "refresh", value: page && !filtered ? (page.total - page.manual).toLocaleString("zh-CN") : "—", detail: "空间不足时最先移除",
-        selected: origin === "auto", onSelect: () => setOrigin(origin === "auto" ? "" : "auto") },
       usageStat(stats, quota, onSettings),
     ]} />
+    {privateLocked && tier === "all" && privateCount > 0 && <Notice className="cached-private-notice" icon="lock" tone="warning">
+      <span>私密空间已锁定：这台设备还缓存了 {privateCount.toLocaleString("zh-CN")} 个私密文件（{formatBytes(privateBytes)}），解锁后一并显示。</span>{unlockAction}</Notice>}
     <div className="toolbar task-search cached-search">
-      {privateReady && <Segmented label="缓存层" showLabels value={tier} onChange={setTier} options={[{ value: "normal", label: "普通文件", icon: "folder" }, { value: "private", label: "私密文件", icon: "lock" }]} />}
+      {showPrivate && <Segmented label="缓存范围" showLabels value={tier} onChange={setTier} options={[
+        { value: "all", label: "全部" }, { value: "normal", label: "普通文件", icon: "folder" }, { value: "private", label: "私密空间", icon: "lock" },
+      ]} />}
       <SearchInput value={search} onChange={setSearch} placeholder="搜索文件名或路径" label="搜索已缓存的文件" />
     </div>
-    <div className="task-controls">
+    {!waitingUnlock && <div className="task-controls">
       {chosen.length > 0 && <div className="toolbar selection-bar task-selection" role="toolbar" aria-label="已缓存文件批量操作">
         <Checkbox checked={allSelected} indeterminate={!allSelected} label="选择本页全部文件" onChange={checked => setSelected(checked ? new Set(items.map(item => item.key)) : new Set())} />
         <span className="selection-count"><span className="task-selection-prefix">已选择 </span>{chosen.length} 项 · {formatBytes(chosen.reduce((sum, item) => sum + item.bytes, 0))}</span>
@@ -670,10 +723,15 @@ function CachedFileList({ privateReady, stats, quota, onOpenFolder, onSettings }
       </div>}
       <div className={`task-toolbar${chosen.length ? " is-selecting" : ""}`} aria-hidden={chosen.length > 0}>
         <Segmented label="文件类型" showLabels value={kind} onChange={setKind} options={[
-          { value: "", label: "全部" }, { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" }, { value: "other", label: "其他" },
+          { value: "", label: "全部类型" }, { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" }, { value: "other", label: "其他" },
         ]} />
         <span className="task-toolbar-meta">
           <span className="muted">{page ? `${page.total.toLocaleString("zh-CN")} 个文件 · ${formatBytes(page.bytes)}` : "正在读取"}</span>
+          <Menu label={`来源：${origin === "manual" ? "手动缓存" : origin === "auto" ? "自动缓存" : "全部"}`} icon="pin" items={[
+            { label: "全部来源", icon: "list", checked: origin === "", onSelect: () => setOrigin("") },
+            { label: "手动缓存", icon: "pin", checked: origin === "manual", onSelect: () => setOrigin("manual") },
+            { label: "自动缓存", icon: "refresh", checked: origin === "auto", onSelect: () => setOrigin("auto") },
+          ]} />
           <Menu label={`排序：${sort === "recent" ? "最近使用" : sort === "size" ? "占用空间" : "名称"}`} icon="sequence" items={[
             { label: "最近使用", icon: "clock", checked: sort === "recent", onSelect: () => setSort("recent") },
             { label: "占用空间", icon: "hardDrive", checked: sort === "size", onSelect: () => setSort("size") },
@@ -681,13 +739,16 @@ function CachedFileList({ privateReady, stats, quota, onOpenFolder, onSettings }
           ]} />
         </span>
       </div>
-    </div>
+    </div>}
     <div className="file-surface task-surface">
-      {error ? <EmptyState icon="alert" title="读取失败" description={error} action={<Button onClick={() => setRevision(value => value + 1)}>重试</Button>} />
+      {waitingUnlock ? <EmptyState icon="lock" title="私密空间已锁定"
+        description={privateCount ? `这台设备缓存了 ${privateCount.toLocaleString("zh-CN")} 个私密文件（${formatBytes(privateBytes)}）。解锁私密空间后才能查看名称与位置、清除缓存。` : "解锁私密空间后查看这台设备上缓存的私密文件。"}
+        action={unlockAction} />
+        : error ? <EmptyState icon="alert" title="读取失败" description={error} action={<Button onClick={() => setRevision(value => value + 1)}>重试</Button>} />
         : !page ? <SkeletonRows rows={5} />
-          : !items.length ? <EmptyState icon="hardDrive" title={filtered ? "没有符合条件的文件" : "这台设备上还没有缓存"}
-            description={filtered ? "试试其他名称、类型或来源。" : "预览过的文件会自动缓存；在文件菜单中选择「缓存到本机」可以完整保存并优先保留。"}
-            action={filtered ? <Button onClick={() => { setSearch(""); setQuery(""); setKind(""); setOrigin(""); }}>清除筛选</Button> : undefined} />
+          : !items.length ? <EmptyState icon={tier === "private" ? "lock" : "hardDrive"} title={filtered ? "没有符合条件的文件" : tier === "private" ? "这台设备上还没有缓存私密文件" : "这台设备上还没有缓存"}
+            description={filtered ? "试试其他名称、类型或来源。" : tier === "private" && !privateEnabled ? "在本机缓存设置中「信任这台设备」后，私密文件也可以缓存。" : "预览过的文件会自动缓存；在文件菜单中选择「缓存到本机」可以完整保存并优先保留。"}
+            action={filtered ? <Button onClick={() => { setSearch(""); setQuery(""); setKind(""); setOrigin(""); }}>清除筛选</Button> : tier === "private" && !privateEnabled ? <Button onClick={onSettings}>缓存设置</Button> : undefined} />
             : <div className="data-table task-table cached-table" role="table" aria-label="已缓存的文件">
               <div className="data-row data-head" role="row">
                 <span className="cell-check" role="columnheader"><Checkbox checked={allSelected} indeterminate={chosen.length > 0 && !allSelected} label="选择本页全部文件" onChange={checked => setSelected(checked ? new Set(items.map(item => item.key)) : new Set())} /></span>
@@ -695,11 +756,13 @@ function CachedFileList({ privateReady, stats, quota, onOpenFolder, onSettings }
                 <span className="cell-actions" role="columnheader"><span className="sr-only">操作</span></span>
               </div>
               {items.map(item => {
-                const name = item.path.split("/").at(-1) || item.path, folder = folderOf(item.path), checked = selected.has(item.key);
-                return <div key={item.key} className={`data-row task-item${checked ? " is-selected" : ""}`} role="row">
+                const name = item.path.split("/").at(-1) || item.path, folder = folderOf(item.path), checked = selected.has(item.key), secret = item.private;
+                return <div key={item.key} className={`data-row task-item${secret ? " is-private" : ""}${checked ? " is-selected" : ""}`} role="row">
                   <span className="cell-check" role="cell"><Checkbox checked={checked} label={`选择 ${name}`} onChange={value => setSelected(current => { const next = new Set(current); if (value) next.add(item.key); else next.delete(item.key); return next; })} /></span>
-                  <div className="cell-name" role="cell"><FileTile kind={item.kind === "thumb" ? "image" : getFileKind(null, item.path)} />
-                    <div className="name-stack"><strong className="task-name" title={name}>{name}</strong><small className="task-subline">最近使用 {formatDateTime(item.accessed / 1000)}</small></div></div>
+                  <div className="cell-name" role="cell">
+                    <span className="cached-tile"><FileTile kind={item.kind === "thumb" ? "image" : getFileKind(null, item.path)} />{secret && <span className="cached-tile-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}</span>
+                    <div className="name-stack"><strong className="task-name" title={name}>{name}{secret && <span className="cached-private-tag"><Icon name="lock" size={10} />私密</span>}</strong>
+                      <small className="task-subline">最近使用 {formatDateTime(item.accessed / 1000)}</small></div></div>
                   <div role="cell"><div className="task-progress is-done">
                     {item.complete ? <span className="task-figure">{formatBytes(item.bytes)}</span>
                       : <div className="task-progress-bar"><Progress value={percentOf(item.bytes, item.size)} tone="neutral" label={`${name} 已缓存比例`} /><span className="task-percent">{percentOf(item.bytes, item.size)}%</span></div>}
@@ -712,9 +775,11 @@ function CachedFileList({ privateReady, stats, quota, onOpenFolder, onSettings }
               })}
             </div>}
     </div>
-    {page && page.total > CACHED_PAGE && <footer className="list-footer task-footer"><Pagination number={Math.floor(offset / CACHED_PAGE) + 1} total={page.total} pageSize={CACHED_PAGE} loading={false}
+    {page && !waitingUnlock && page.total > CACHED_PAGE && <footer className="list-footer task-footer"><Pagination number={Math.floor(offset / CACHED_PAGE) + 1} total={page.total} pageSize={CACHED_PAGE} loading={false}
       hasPrevious={offset > 0} hasNext={offset + CACHED_PAGE < page.total} previous={() => setOffset(Math.max(0, offset - CACHED_PAGE))} next={() => setOffset(offset + CACHED_PAGE)} /></footer>}
+    {unlocking && <CacheUnlockDialog onClose={closeUnlock} />}
     {removing && <ConfirmDialog title={removing.length === 1 ? "清除本机缓存？" : `清除 ${removing.length} 个文件的本机缓存？`} confirmLabel="清除缓存"
+      className={removing.some(item => item.private) ? "private-dialog" : ""}
       description={`${removing.length === 1 ? `“${removing[0].path.split("/").at(-1)}”` : "所选文件"}在这台设备上的副本会被删除，释放 ${formatBytes(removing.reduce((sum, item) => sum + item.bytes, 0))}。云端文件不受影响。`}
       onClose={() => setRemoving(null)} onConfirm={async () => {
         try { for (const item of removing) await clearCache("entry", item.key); toast.success("已清除本机缓存"); }

@@ -944,7 +944,7 @@ export const toast = {
   dismiss: dismissToast,
   success: (message: string, action?: ToastAction) => pushToast("success", message, action),
   error: (message: string) => pushToast("error", message),
-  info: (message: string) => pushToast("info", message),
+  info: (message: string, action?: ToastAction) => pushToast("info", message, action),
 };
 
 export function Toaster() {

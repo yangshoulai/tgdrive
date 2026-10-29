@@ -1,28 +1,29 @@
 import { type ReactNode, useCallback, useEffect, useId, useState } from "react";
 
 import * as api from "../api";
-import { type CacheStats, cacheStats, cacheSupported, clearCache, isStandalone, loadSettings, resetAllDevices, saveSettings, storageEstimate } from "../cache-client";
+import { type CacheDirectoryInfo, type CacheStats, browserName, cacheDirectoryInfo, cacheStats, cacheSupported, chooseCacheDirectory, clearCache, directoryAvailable, isStandalone, loadSettings, regrantCacheDirectory, resetAllDevices, saveSettings, stopCacheDirectory, storageEstimate } from "../cache-client";
 import { type DeviceSettings, type Kind, effectiveMiB, sizeChoices, webkitOnly } from "../cache-store";
-import { Notice, Badge, Button, ConfirmDialog, Disclosure, EmptyState, Field, Icon, Switch, formatBytes, toast } from "../ui";
+import { Notice, Badge, Button, ConfirmDialog, Disclosure, EmptyState, Field, Icon, Switch, formatBytes, formatDateTime, toast, type IconName } from "../ui";
 
 const KIND_LABEL: Record<Kind, string> = { image: "图片", video: "视频", audio: "音频", thumb: "缩略图", other: "其他" };
 const KIND_ORDER: Kind[] = ["image", "video", "audio", "thumb", "other"];
-const sizeLabel = (mib: number) => mib >= 1024 ? `${mib / 1024} GB` : `${mib} MB`;
+const sizeLabel = (mib: number) => mib >= 1024 ? `${Number((mib / 1024).toFixed(1))} GB` : `${Math.round(mib)} MB`;
 
 /** 设置 →「本机缓存」：浏览器本地缓存的统计、设置与清理（docs/client-cache-design.md §5）。设置只属于这台设备的这个浏览器。 */
 export function LocalCacheSettings() {
   const [stats, setStats] = useState<CacheStats | null>(null);
   const [settings, setSettings] = useState<DeviceSettings | null>(null);
   const [estimate, setEstimate] = useState<Awaited<ReturnType<typeof storageEstimate>>>(null);
+  const [directory, setDirectory] = useState<CacheDirectoryInfo | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState<"private" | "reset" | "all" | null>(null);
+  const [confirm, setConfirm] = useState<"private" | "reset" | "all" | "browser" | null>(null);
   const supported = cacheSupported();
 
   const refresh = useCallback(async () => {
     try {
-      const [value, current, storage] = await Promise.all([cacheStats(), loadSettings(), storageEstimate()]);
-      setStats(value); setSettings(current); setEstimate(storage); setError("");
+      const [value, current, storage, folder] = await Promise.all([cacheStats(), loadSettings(), storageEstimate(), cacheDirectoryInfo().catch(() => null)]);
+      setStats(value); setSettings(current); setEstimate(storage); setDirectory(folder); setError("");
     } catch (reason) {
       setSettings(await loadSettings().catch(() => null));
       setError(api.errorMessage(reason, "本机缓存状态读取失败，请刷新页面后重试"));
@@ -56,6 +57,25 @@ export function LocalCacheSettings() {
     finally { setBusy(false); }
   }
 
+  // 数据块写在已授权的本地文件夹时不受浏览器配额限制，容量只按用户设置。
+  const quota = directory?.permission === "granted" ? undefined : estimate?.quota;
+  async function pickDirectory() {
+    setBusy(true);
+    try {
+      const folder = await chooseCacheDirectory();
+      if (folder) { toast.success(`新的缓存将保存到「${folder.name}」`); await refresh(); }
+    } catch (reason) { toast.error(api.errorMessage(reason, "没有选择文件夹，请重试")); }
+    finally { setBusy(false); }
+  }
+  async function regrant() {
+    setBusy(true);
+    try {
+      const result = await regrantCacheDirectory();
+      if (result === "granted") toast.success("已重新授权，本机缓存继续使用这个文件夹"); else toast.error("没有获得文件夹的读写权限");
+      await refresh();
+    } catch (reason) { toast.error(api.errorMessage(reason, "授权失败，请重试")); }
+    finally { setBusy(false); }
+  }
   const policy = stats?.policy ?? null;
   const adminOff = policy !== null && !policy.enabled;
   const normalLimit = settings?.maxMiB ?? 0, privateLimit = settings?.privateMaxMiB ?? 0;
@@ -71,8 +91,8 @@ export function LocalCacheSettings() {
         : settings && <Switch checked={settings.enabled} disabled={busy} onChange={value => void update({ enabled: value }, value ? "已开启本机缓存" : "已关闭本机缓存并清除数据")}
           label="在这台设备上缓存文件" description="自动保存预览过的内容，包括图片、音视频、Markdown、文本、代码、PDF 和缩略图；任意文件都可以通过「缓存到本机」完整保存。文件列表用「本机」标记手动缓存、「自动」标记自动缓存。" />}
       {stats && <div className="local-cache-figures folder-stats-figures">
-        <div><span>普通文件</span><strong>{formatBytes(stats.normal.bytes)}</strong><small>上限 {sizeLabel(effectiveMiB(normalLimit, estimate?.quota))} · {stats.normal.count.toLocaleString("zh-CN")} 项</small></div>
-        <div><span>私密文件</span><strong>{formatBytes(stats.private.bytes)}</strong><small>{privateOn ? `上限 ${sizeLabel(effectiveMiB(privateLimit, estimate?.quota))} · ${stats.private.count} 项` : "未开启"}</small></div>
+        <div><span>普通文件</span><strong>{formatBytes(stats.normal.bytes)}</strong><small>上限 {sizeLabel(effectiveMiB(normalLimit, quota))} · {stats.normal.count.toLocaleString("zh-CN")} 项</small></div>
+        <div><span>私密文件</span><strong>{formatBytes(stats.private.bytes)}</strong><small>{privateOn ? `上限 ${sizeLabel(effectiveMiB(privateLimit, quota))} · ${stats.private.count} 项` : "未开启"}</small></div>
         <div><span>浏览器占用</span><strong>{estimate ? formatBytes(estimate.usage) : "—"}</strong><small>{estimate ? `${estimate.persisted ? "已持久保存" : "空间不足时可能被浏览器清除"}` : "浏览器未提供"}</small></div>
       </div>}
       {kinds.length > 0 && <div className="local-cache-kinds">
@@ -82,7 +102,7 @@ export function LocalCacheSettings() {
         <ul className="local-cache-legend">{kinds.map(item => <li key={item.kind}><i className={`folder-stats-swatch kind-${item.kind}`} aria-hidden="true" />{KIND_LABEL[item.kind]} {formatBytes(item.bytes)}</li>)}</ul>
       </div>}
       {settings && !adminOff && settings.enabled && <div className="local-cache-options">
-      <CacheSizeSelect label="最多占用" value={settings.maxMiB} disabled={busy || !settings.enabled} quota={estimate?.quota}
+      <CacheSizeSelect label="最多占用" value={settings.maxMiB} disabled={busy || !settings.enabled} quota={quota}
         hint="超出后先移除最久没有打开的自动缓存，手动缓存的文件会保留；自动缓存的单个文件最多占一半。" onChange={value => void update({ maxMiB: value }, "已保存")} />
       <Switch checked={settings.video} disabled={busy || !settings.enabled} onChange={value => void update({ video: value }, "已保存")} label="自动缓存视频片段"
         description={webkitOnly(navigator.userAgent) ? "Safari 对缓存视频的支持还不稳定，如果开启后播放异常，请关闭此项。" : "按看过的片段保存，拖回已看过的位置时不必重新下载。"} />
@@ -91,6 +111,9 @@ export function LocalCacheSettings() {
         Safari 会清除 7 天内没有访问过的网站数据。把 Tessera 添加到主屏幕后打开，缓存可以保留得更久。</Notice>}
     </Section>
 
+
+    {settings && !adminOff && settings.enabled && <CacheLocation directory={directory} quota={estimate?.quota} busy={busy}
+      onPick={() => void pickDirectory()} onRegrant={() => void regrant()} onBrowser={() => setConfirm("browser")} />}
 
     {settings && policy?.private_enabled && <Section icon="shield" title="私密文件" description="私密空间锁定后，已加入的缓存任务继续，副本仍需解锁才能打开；文件被移出私密空间后也不再使用。">
       <div className="account-setting-summary"><div>
@@ -102,7 +125,7 @@ export function LocalCacheSettings() {
           ? <Button size="sm" disabled={busy} onClick={() => void update({ private: false }, "已关闭并清除私密缓存")}>关闭并清除</Button>
           : <Button size="sm" icon="shield" disabled={busy || !settings.enabled} onClick={() => setConfirm("private")}>信任这台设备</Button>}
       </div>
-      {settings.private && <CacheSizeSelect label="私密文件最多占用" value={settings.privateMaxMiB} disabled={busy} quota={estimate?.quota}
+      {settings.private && <CacheSizeSelect label="私密文件最多占用" value={settings.privateMaxMiB} disabled={busy} quota={quota}
         onChange={value => void update({ privateMaxMiB: value }, "已保存")} />}
     </Section>}
 
@@ -123,6 +146,12 @@ export function LocalCacheSettings() {
     {confirm === "private" && <ConfirmDialog danger={false} title="信任这台设备？" confirmLabel="开启"
       description="打开过的私密文件会加密保存在这个浏览器里。私密空间锁定后无法解开，但请不要在公用或他人的设备上开启。"
       onClose={() => setConfirm(null)} onConfirm={async () => { await update({ private: true }, "已开启私密文件缓存"); setConfirm(null); }} />}
+    {confirm === "browser" && directory && <ConfirmDialog title="改回浏览器存储？" confirmLabel="改回浏览器存储"
+      description={`保存在「${directory.name}」中的本机缓存会被删除（文件夹仍有授权时一并删除其中的 tessera-cache 子文件夹），之后新的缓存保存在浏览器内部，受浏览器空间限制。云端文件不受影响。`}
+      onClose={() => setConfirm(null)} onConfirm={async () => {
+        try { const removed = await stopCacheDirectory(); toast.success(removed ? `已改回浏览器存储，删除了 ${removed} 个缓存文件` : "已改回浏览器存储"); setConfirm(null); await refresh(); }
+        catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
+      }} />}
     {confirm === "all" && <ConfirmDialog title="全部清理？" confirmLabel="全部清理"
       description="将清除这台设备上的全部本机缓存，包括普通文件、私密文件、缩略图和其他账号留下的缓存。之后打开文件需要重新下载，云端文件不受影响。"
       onClose={() => setConfirm(null)} onConfirm={async () => { await wipe("all", "已清理这台设备上的全部缓存"); setConfirm(null); }} />}
@@ -135,12 +164,43 @@ export function LocalCacheSettings() {
   </>;
 }
 
-function Section({ icon, title, description, children }: { icon: "monitor" | "settings" | "shield" | "trash"; title: string; description: string; children: ReactNode }) {
+function Section({ icon, title, description, children }: { icon: IconName; title: string; description: string; children: ReactNode }) {
   const id = useId();
   return <section className="account-section" aria-labelledby={`${id}-title`}>
     <header className="account-section-heading"><Icon name={icon} size={20} /><div><h2 id={`${id}-title`}>{title}</h2><p>{description}</p></div></header>
     <div className="account-section-content local-cache-section">{children}</div>
   </section>;
+}
+
+/** 缓存位置：支持目录选择的浏览器（桌面 Chrome／Edge）可以把数据块放到用户选择的本地文件夹，不受浏览器配额限制；
+ * 不选也可以继续使用浏览器存储。其他浏览器只说明限制，并建议在电脑上用 Chrome 或 Edge 打开。 */
+function CacheLocation({ directory, quota, busy, onPick, onRegrant, onBrowser }: { directory: CacheDirectoryInfo | null; quota?: number; busy: boolean; onPick: () => void; onRegrant: () => void; onBrowser: () => void }) {
+  const browser = browserName();
+  const limit = quota ? `约 ${formatBytes(quota)}` : "由浏览器决定";
+  if (!directoryAvailable()) return <Section icon="hardDrive" title="缓存位置" description="本机缓存保存在浏览器内部。">
+    <Notice icon="info">{browser.name}{browser.mobile ? "（移动端）" : ""}的本机缓存受浏览器限制：最多可用{limit}，空间紧张时浏览器还可能自动清除。
+      在电脑上使用 Chrome 或 Edge 打开 Tessera，可以把缓存放到你选择的本地文件夹，容量只受硬盘大小限制。</Notice>
+  </Section>;
+  if (!directory) return <Section icon="hardDrive" title="缓存位置" description="可以把缓存放到电脑上的一个文件夹，不再受浏览器空间限制。">
+    <div className="account-setting-summary"><div>
+      <strong>保存在浏览器中</strong>
+      <p>当前最多可用{limit}，空间紧张时浏览器可能自动清除。选择一个本地文件夹后，新的缓存加密保存到其中的 tessera-cache 子文件夹，容量只受硬盘和下方上限限制。也可以不选择，继续使用浏览器存储。</p>
+    </div><Badge tone="neutral">浏览器存储</Badge></div>
+    <div className="account-private-actions"><Button size="sm" icon="folder" disabled={busy} onClick={onPick}>选择本地文件夹</Button></div>
+  </Section>;
+  const granted = directory.permission === "granted";
+  return <Section icon="hardDrive" title="缓存位置" description="缓存保存在你选择的本地文件夹中，不受浏览器空间限制。">
+    <div className="account-setting-summary"><div>
+      <strong className="cache-location-name"><Icon name="folder" size={15} />{directory.name}<span className="muted"> / tessera-cache</span></strong>
+      <p>{granted ? `自 ${formatDateTime(directory.since / 1000)} 起使用。文件已加密，只能在 Tessera 中打开；请不要手动修改其中的文件。之前保存在浏览器中的缓存仍可使用，空间不够时会被逐步移除；更换文件夹会删除原文件夹中的缓存。`
+        : "浏览器需要你重新允许访问这个文件夹。授权前不会自动缓存新文件，已缓存在文件夹里的内容暂时无法使用。在 Chrome 中选择「每次访问时都允许」后不必重复授权。"}</p>
+    </div><Badge tone={granted ? "success" : "warning"}>{granted ? "已授权" : "需要授权"}</Badge></div>
+    <div className="account-private-actions">
+      {!granted && <Button size="sm" variant="primary" icon="unlock" disabled={busy} onClick={onRegrant}>重新授权</Button>}
+      <Button size="sm" icon="folder" disabled={busy} onClick={onPick}>更换文件夹</Button>
+      <Button size="sm" disabled={busy} onClick={onBrowser}>改回浏览器存储</Button>
+    </div>
+  </Section>;
 }
 
 /** 容量由用户按设备决定，但不能超过浏览器配额：下拉框只列出配额以内的选项；
