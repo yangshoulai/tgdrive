@@ -1,3 +1,7 @@
+# INSTALL_FFMPEG=0（默认）为轻量镜像，1 为带 FFmpeg 的变体；其他取值找不到对应阶段，构建直接失败。
+# 用在 FROM 中的构建参数必须在第一个 FROM 之前声明。
+ARG INSTALL_FFMPEG=0
+
 # 前端构建阶段：只把可复现的源码和锁文件带入镜像。
 FROM node:22-alpine AS web-build
 
@@ -10,15 +14,23 @@ RUN node build-apps.mjs
 # 平台镜像按需携带 JavaScript 运行时，轻量镜像不包含该层。
 FROM node:22-bookworm-slim AS platform-js
 
+# FFmpeg 使用静态编译的单个可执行文件（FFmpeg 7.1，约 100 MB），代替 Debian 的 ffmpeg 包及其数百个共享库（约 420 MB）。
+# 按摘要固定版本；升级时同时更新摘要与 licenses/ffmpeg 中的说明。只复制 ffmpeg，服务不使用 ffprobe。
+FROM mwader/static-ffmpeg:7.1.1@sha256:11a44711684c0b9f754c047dcd64235b8b52deab251bd0e0a86f22faa160749c AS ffmpeg-static
+FROM python:3.12-slim AS ffmpeg-0
+RUN mkdir -p /out/bin /out/licenses
+FROM python:3.12-slim AS ffmpeg-1
+COPY --from=ffmpeg-static /ffmpeg /out/bin/ffmpeg
+COPY --from=ffmpeg-static /versions.json /out/licenses/ffmpeg/versions.json
+COPY licenses/ffmpeg/NOTICE.md /out/licenses/ffmpeg/NOTICE.md
+FROM ffmpeg-${INSTALL_FFMPEG} AS ffmpeg-selected
+
 # 运行阶段：API 服务同时托管用户端根路径和 /admin/ 管理端。
 FROM python:3.12-slim AS runtime
 
 # 默认保留轻量镜像；带 FFmpeg 的变体支持视频封装与图片／音视频缩略图后台生成。
-ARG INSTALL_FFMPEG=0
-RUN if [ "$INSTALL_FFMPEG" = "1" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends ffmpeg \
-      && rm -rf /var/lib/apt/lists/*; \
-    elif [ "$INSTALL_FFMPEG" != "0" ]; then exit 1; fi
+COPY --from=ffmpeg-selected /out/bin/ /usr/local/bin/
+COPY --from=ffmpeg-selected /out/licenses/ /app/licenses/
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -35,9 +47,10 @@ RUN pip install --no-cache-dir .
 
 COPY --from=web-build /src/web/dist /app/static/
 
+# /app 只需可读：不再 chown -R，避免在新层里把整个程序目录再复制一份。
 RUN useradd --system --uid 10001 --create-home --home-dir /home/tgdrive tgdrive \
     && mkdir -p /data \
-    && chown -R tgdrive:tgdrive /app /data
+    && chown tgdrive:tgdrive /data
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
@@ -52,7 +65,10 @@ CMD ["--data-dir", "/data", "--host", "0.0.0.0", "--static-dir", "/app/static"]
 
 FROM runtime AS platform
 COPY --from=platform-js /usr/local/bin/node /usr/local/bin/node
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libstdc++6 \
+COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-static /versions.json /app/licenses/ffmpeg/versions.json
+COPY licenses/ffmpeg/NOTICE.md /app/licenses/ffmpeg/NOTICE.md
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir '.[platform]' \
     && mkdir -p /app/licenses/platform \

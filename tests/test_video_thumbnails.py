@@ -72,13 +72,19 @@ class VideoDecoderTests(unittest.IsolatedAsyncioTestCase):
             "mostly-white": "color=c=white:s=320x180:r=8:d=2,drawbox=x=100:y=60:w=120:h=60:color=black:t=fill",
             "gray": "color=c=gray:s=320x180:r=8:d=2",
         }
-        self.engine.store.get = AsyncMock(side_effect=AssertionError("自动截帧不能额外回源"))
+        original = self.engine.store.get
+        guard = AsyncMock(side_effect=AssertionError("自动截帧不能额外回源"))
         for name, intro in samples.items():
             with self.subTest(intro=name):
                 info = await self.clip(name, intro)
                 old = b"\xff\xd8\xff\xe0old-thumbnail"
                 await self.objects.set_thumbnail(self.scope, info.key, old)
-                await self.worker.generate(info, force=True)
+                # 只在截帧期间禁止回源；缩略图存为系统区对象，读回结果本身需要读取存储。
+                self.engine.store.get = guard
+                try:
+                    await self.worker.generate(info, force=True)
+                finally:
+                    self.engine.store.get = original
                 image, mime, _ = await self.objects.get_thumbnail(self.scope, info.key)
                 self.assertNotEqual(image, old)
                 self.assertEqual(mime, "image/jpeg")
@@ -86,7 +92,7 @@ class VideoDecoderTests(unittest.IsolatedAsyncioTestCase):
                                            "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1", data=image)
                 self.assertEqual(len(pixels), 1024)
                 self.assertTrue(video_frame_usable(pixels), name)
-        self.engine.store.get.assert_not_awaited()
+        guard.assert_not_awaited()
 
     async def test_short_blank_video_keeps_old_thumbnail_and_reports_no_suitable_frame(self):
         info = await self.clip("blank", "color=c=white:s=320x180:r=8:d=0.5", body=False)

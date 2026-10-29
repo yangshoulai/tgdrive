@@ -160,6 +160,8 @@ docker compose up -d --no-build
 | FFmpeg | `1-ffmpeg`、`latest-ffmpeg` | `1.16.1-ffmpeg` | 基础能力 + 服务器生成媒体缩略图、M3U8 封装 |
 | 平台 | `1-platform`、`latest-platform` | `1.16.1-platform` | FFmpeg 变体 + X / YouTube 下载所需的 yt-dlp、gallery-dl 与 Node.js |
 
+FFmpeg 与平台变体使用静态编译的 FFmpeg 7.1（单个可执行文件，GPL，说明见镜像内 `/app/licenses/ffmpeg`），镜像比使用系统 ffmpeg 包时小约 300 MB。
+
 另提供次版本标签（如 `1.16` 及对应后缀）。`1` 跟随主版本内的更新，完整版本标签用于固定部署；当前版本见[发布记录](https://github.com/yangshoulai/tgdrive/releases)。同一主版本内保持数据库、HTTP API 与 S3 的兼容，具体变化及升级说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 安装组件后，仍需在「系统设置 → 下载与资源」启用对应下载来源。文件助手的总开关与模型在控制台「文件助手」中配置，不因镜像变体而自动启用。
