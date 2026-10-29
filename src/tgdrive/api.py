@@ -846,9 +846,9 @@ class UserApi:
         return {"files": {item["key"]: {name: item[name] for name in ("etag", "size", "modified_at", "has_thumbnail", "thumbnails", "thumbnail_versions")}
                           for item in self._objects_json(items)}}
 
-    def thumbnail_claim(self, token, csrf, path, etag, force=False):
+    def thumbnail_claim(self, token, csrf, path, etag, force=False, custom=False):
         scope = self._scope(token, csrf=csrf, mutation=True)
-        return self.objects.thumbnail_service.claim(scope, self._path(path), etag, force=force)
+        return self.objects.thumbnail_service.claim(scope, self._path(path), etag, force=force, custom=custom)
 
     def thumbnail_release(self, token, csrf, path, etag, ticket, variants=None):
         scope = self._scope(token, csrf=csrf, mutation=True)
@@ -868,24 +868,10 @@ class UserApi:
         scope = self._scope(token, csrf=csrf, mutation=True)
         return self.objects.thumbnail_service.request(scope, self._path(path), etag)
 
-    def thumbnail_candidates(self, token, csrf, path, etag, request_id=None, *, cancel=False):
-        scope = self._scope(token, csrf=csrf, mutation=cancel or request_id is None)
-        service, key = self.objects.thumbnail_service, self._path(path)
-        if request_id is None:
-            return service.request_candidates(scope, key, etag, token)
-        if cancel:
-            service.cancel_candidates(scope, key, etag, token, request_id)
-            return None
-        return service.candidates_status(scope, key, etag, token, request_id)
-
-    def thumbnail_candidate_image(self, token, path, etag, request_id, index):
-        return self.objects.thumbnail_service.candidate_image(self._scope(token), self._path(path), etag, token, request_id, index)
-
-    async def thumbnail_select(self, token, csrf, path, etag, request_id, index):
-        scope, key = self._scope(token, csrf=csrf, mutation=True), self._path(path)
-        # 保存三种规格可能跨越多个网络请求，每次提交都复核登录会话、账号和私密解锁状态。
-        guarded = replace(scope, authorize=lambda: self._scope(token))
-        await self.objects.thumbnail_service.select_candidate(guarded, key, etag, token, request_id, index)
+    async def thumbnail_fetch(self, token, csrf, url):
+        """自定义缩略图的图片地址：校验网页会话后由服务器读取，图片交回网页处理。"""
+        self._scope(token, csrf=csrf, mutation=True)
+        return await self.objects.thumbnail_service.fetch_image(url)
 
     async def thumbnail(self, token: str, path: str, variant: str = "thumb", *, bucket_id: int | None = None,
                         etag: str = "") -> tuple[bytes, str, str]:

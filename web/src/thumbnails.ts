@@ -1,7 +1,6 @@
 /** 浏览器缩略图生成：图片缩放、视频截帧、音频内嵌封面；网页上传优先复用本地文件，后台服务另行补生成。
  * 三种规格：thumb（最长边 160px，列表、目录四宫格）、grid（640px，网格卡片）与 poster（960px，预览封面与占位）；
  * 后两种只在原图明显更大时生成，存为系统区对象并计入用户空间。旧文件没有 grid 时网格退回 poster 或旧版 320px 的 thumb。 */
-import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { getFileKind } from "./files";
 import { VIDEO_FRAME_TIMES, VIDEO_SAMPLE_SIZE, videoFramePixelsUsable } from "./video-frame";
@@ -341,20 +340,35 @@ export async function saveThumbnails(path: string, result: ThumbnailResult, clai
   return saved;
 }
 
+/** 用户指定的缩略图适用于任何文件：取得自定义票据（会取消这个文件排队中的自动生成），保存全部规格后移除旧的多余规格。 */
+async function saveCustomThumbnails(file: Pick<api.FileItem, "key" | "etag">, result: ThumbnailSet): Promise<string[]> {
+  const lease = await api.claimThumbnail(file, true, true);
+  if (!lease.token) throw new Error("暂时无法更新缩略图，请稍后重试");
+  let released = false;
+  try {
+    const saved = await saveThumbnails(file.key, result, { etag: file.etag, ticket: lease.token }) ?? ["thumb"];
+    await api.releaseThumbnail(file, lease.token, saved);
+    released = true;
+    return saved;
+  } finally {
+    if (!released) await api.releaseThumbnail(file, lease.token).catch(() => undefined);
+  }
+}
+
 /** 用户选择当前播放画面：先同步固定这一帧，再申请写入，不用自动画面过滤或重新读取视频。 */
 export async function saveCurrentVideoThumbnail(file: Pick<api.FileItem, "key" | "etag">, video: HTMLVideoElement): Promise<void> {
   const result = await thumbnailsFromVideo(video, false);
   if (!result) throw new Error("当前画面尚未就绪，请等待画面加载后重试");
-  const lease = await api.claimThumbnail(file, true);
-  if (!lease.token) throw new Error("这个文件正在生成缩略图，请稍后重试");
-  let released = false;
-  try {
-    const saved = await saveThumbnails(file.key, result, { etag: file.etag, ticket: lease.token });
-    await api.releaseThumbnail(file, lease.token, saved ?? undefined);
-    released = true;
-  } finally {
-    if (!released) await api.releaseThumbnail(file, lease.token).catch(() => undefined);
-  }
+  await saveCustomThumbnails(file, result);
+}
+
+/** 用户上传或从网址取得的图片：在浏览器里解码并缩放成三种规格，不把原图存进文件空间。 */
+export async function saveImageThumbnail(file: Pick<api.FileItem, "key" | "etag">, image: Blob): Promise<string[]> {
+  let result: ThumbnailSet | null;
+  try { result = await fromBlob(image); }
+  catch { throw new Error("无法读取这张图片，请换用 JPEG、PNG、WebP 或 GIF 格式"); }
+  if (!result) throw new Error("图片处理失败，请换一张图片再试");
+  return await saveCustomThumbnails(file, result);
 }
 
 /** 浏览器取得有期限的生成权后才处理本地／已加载数据；失败主动交还，页面关闭则由服务端超时接管。 */
@@ -377,48 +391,4 @@ export async function generateLoadedThumbnails(file: Pick<api.FileItem, "key" | 
     controller.abort(); window.clearTimeout(timer); signal?.removeEventListener("abort", abort);
     await api.releaseThumbnail(file, lease.token).catch(() => undefined);
   }
-}
-
-/* ---------- 用户主动提交后台生成 ---------- */
-
-type ThumbnailWork = { etag: string; phase: "queued" | "failed"; message: string };
-
-/** 只提交用户点击的任务；不在浏览器读取原文件，也不向普通用户轮询后台队列。 */
-export function useThumbnailGenerator(files: api.FileItem[], onQueued: () => void) {
-  const [states, setStates] = useState<Record<string, ThumbnailWork>>({});
-  const current = useRef(files), queued = useRef(onQueued), mounted = useRef(true);
-  const requests = useRef(new Set<string>());
-  const refreshTimers = useRef<number[]>([]);
-  current.current = files; queued.current = onQueued;
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; refreshTimers.current.forEach(window.clearTimeout); }; }, []);
-  useEffect(() => {
-    const identities = new Map(files.map(file => [file.key, file.etag]));
-    setStates(previous => {
-      const entries = Object.entries(previous).filter(([key, state]) => identities.get(key) === state.etag);
-      return entries.length === Object.keys(previous).length ? previous : Object.fromEntries(entries);
-    });
-  }, [files]);
-  return {
-    state: (file: api.FileItem) => states[file.key]?.etag === file.etag ? states[file.key] : undefined,
-    generate: async (file: api.FileItem) => {
-      const identity = `${file.key}:${file.etag}`;
-      if (requests.current.has(identity)) return;
-      requests.current.add(identity);
-      setStates(previous => ({ ...previous, [file.key]: { etag: file.etag, phase: "queued", message: "正在提交生成请求" } }));
-      try {
-        await api.generateThumbnail(file);
-        if (mounted.current && current.current.some(item => item.key === file.key && item.etag === file.etag)) {
-          setStates(previous => { const next = { ...previous }; delete next[file.key]; return next; });
-          queued.current();
-          // 用户提交后的有界元数据刷新，不查询任务队列，也不读取原文件。
-          refreshTimers.current.forEach(window.clearTimeout);
-          refreshTimers.current = [3000, 15000, 60000, 150000].map(delay => window.setTimeout(() => {
-            if (mounted.current) window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [file.key.slice(0, file.key.lastIndexOf("/") + 1)] } }));
-          }, delay));
-        }
-      } catch (reason) {
-        if (mounted.current) setStates(previous => ({ ...previous, [file.key]: { etag: file.etag, phase: "failed", message: api.errorMessage(reason, "提交失败，请重试") } }));
-      } finally { requests.current.delete(identity); }
-    },
-  };
 }

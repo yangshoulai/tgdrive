@@ -5,7 +5,8 @@ import * as api from "./api";
 import { loginWithPasskey, passkeyUnavailable } from "./passkeys";
 import { Notice, Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
 
-export type NavItem<K extends string> = { key: K; label: string; icon: IconName; count?: number; href?: string };
+/** live：有任务正在进行，数量角标显示呼吸提示（任务中心）。 */
+export type NavItem<K extends string> = { key: K; label: string; icon: IconName; count?: number; live?: boolean; href?: string };
 /** 侧栏分组：有标题的分组可以点击展开／收起（状态保存在本机）；workspace 指明所属工作区（管理员的「我的空间／系统管理」）。 */
 export type NavGroup<K extends string> = { label?: string; workspace?: string; items: NavItem<K>[] };
 export type NavWorkspace = { label: string; icon: IconName };
@@ -89,7 +90,7 @@ export function AppShell<K extends string>({ groups, workspaces = [], active, on
             const holdsActive = group.items.some(item => item.key === active);
             const id = `nav-group-${index}`;
             const items = group.items.map(item => {
-              const content = <><Icon name={item.icon} size={17} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
+              const content = <><Icon name={item.icon} size={17} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className={`nav-count${item.live ? " is-live" : ""}`}>{item.count > 99 ? "99+" : item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
               return item.href
                 ? <a key={item.key} className="nav-item" href={item.href} target="_blank" rel="noreferrer" title={rail ? item.label : undefined}>{content}</a>
                 : <a key={item.key} className={`nav-item${active === item.key ? " is-active" : ""}`} href={hrefFor(item.key)} aria-current={active === item.key ? "page" : undefined} title={rail ? item.label : undefined}

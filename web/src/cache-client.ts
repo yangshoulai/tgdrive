@@ -16,7 +16,10 @@ export type CacheStats = {
   normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>> }; private: { bytes: number; count: number }; others: { bytes: number; count: number };
 };
 export type CachedItem = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean };
-export type CachedItemFilter = { private?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
+export type CachedItemFilter = { private?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; origin?: "" | "manual" | "auto"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
+
+/** Worker 判定重试也无法解决的失败（空间不足、文件已变化、设置不允许等）；其余失败可以自动重试续传。 */
+export const isFatalCacheError = (reason: unknown) => reason instanceof Error && (reason as Error & { fatal?: boolean }).fatal === true;
 
 export const cacheSupported = () => typeof window !== "undefined" && window.isSecureContext && "serviceWorker" in navigator
   && typeof indexedDB !== "undefined" && Boolean(globalThis.crypto?.subtle);
@@ -66,7 +69,8 @@ async function ask<T>(type: string, extra: Record<string, unknown> = {}, timeout
     let timer = setTimeout(expired, timeout);
     channel.port1.onmessage = event => {
       if (event.data?.progress) { clearTimeout(timer); timer = setTimeout(expired, timeout); progress?.(event.data.progress); return; }
-      if (event.data?.ok) finish(undefined, event.data.value as T); else finish(new Error(event.data?.error || "本机缓存操作失败"));
+      if (event.data?.ok) finish(undefined, event.data.value as T);
+      else finish(Object.assign(new Error(event.data?.error || "本机缓存操作失败"), { fatal: event.data?.fatal === true }));
     };
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener("abort", abort, { once: true });

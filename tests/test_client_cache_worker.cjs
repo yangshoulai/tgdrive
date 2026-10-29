@@ -50,7 +50,7 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
     evict: async (items, target, keep) => {
       let total = items.reduce((sum, entry) => sum + entry.bytes, 0);
       const victims = [];
-      for (const entry of [...items].sort((a, b) => a.accessed - b.accessed)) {
+      for (const entry of [...items].sort((a, b) => Number(Boolean(a.manual)) - Number(Boolean(b.manual)) || a.accessed - b.accessed)) {
         if (total <= target) break;
         if (keep?.(entry)) continue;
         victims.push(entry.key); total -= entry.bytes;
@@ -128,7 +128,7 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
   const context = vm.createContext({
     testStore: new Proxy(memory, { get: (target, key) => typeof target[key] === "function" ? (...args) => memory[key](...args) : target[key] }),
     fetch: fetchMock, crypto, Request, Response, Headers, ReadableStream, AbortController, DOMException, URL, URLSearchParams, MessageChannel,
-    navigator: { userAgent: "Chrome" },
+    navigator: { userAgent: "Chrome", storage: { estimate: async () => state.quota ? { quota: state.quota, usage: 0 } : {} } },
     Date: class extends Date { static now() { return Date.now() + state.clock; } },
     setTimeout(callback, delay) { const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay); timers.add(timer); if (delay > 1000) timer.unref(); return timer; },
     clearTimeout(timer) { clearTimeout(timer); timers.delete(timer); },
@@ -433,8 +433,42 @@ for (const tier of ["normal", "private"]) test(`手动缓存预检拒绝超过�
   const h = harness(t, { "file.bin": bytes(3 * store.BLOCK + 137), [SECRET]: bytes(2 * store.BLOCK) });
   if (tier === "normal") h.preferences.maxMiB = 1; else h.preferences.privateMaxMiB = 1;
   const name = tier === "normal" ? "file.bin" : SECRET;
-  await assert.rejects(h.ask("tessera-cache:start", { id: "oversize", url: h.url(name) }), /超过本机缓存容量/);
+  await assert.rejects(h.ask("tessera-cache:start", { id: "oversize", url: h.url(name) }), /超过本机缓存上限/);
   assert.equal(h.origins().filter(request => request.method === "GET").length, 0);
+  assert.equal(h.entries.size, 0);
+});
+
+async function cacheFully(h, id, name) {
+  await h.ask("tessera-cache:start", { id, url: h.url(name) });
+  while (!(await h.ask("tessera-cache:step", { id })).complete) { /* 逐段补全 */ }
+}
+
+test("手动缓存优先：空间不够时先移除最久未用的自动缓存，保留其他手动缓存", async t => {
+  const h = harness(t, { "a.bin": bytes(3 * store.BLOCK), "b.bin": bytes(3 * store.BLOCK), "c.bin": bytes(3 * store.BLOCK) });
+  h.preferences.maxMiB = 7;
+  await cacheFully(h, "a", "a.bin");
+  await h.read("b.bin");
+  assert.equal([...h.entries.values()].filter(entry => !entry.manual).length, 1);
+  await cacheFully(h, "c", "c.bin");
+  const left = [...h.entries.values()];
+  assert.equal(left.length, 2);
+  assert.ok(left.every(entry => entry.manual));
+});
+
+test("手动缓存已占满上限时直接提示用户处理，不删除其他手动缓存", async t => {
+  const h = harness(t, { "a.bin": bytes(3 * store.BLOCK), "b.bin": bytes(3 * store.BLOCK), "c.bin": bytes(3 * store.BLOCK) });
+  h.preferences.maxMiB = 7;
+  await cacheFully(h, "a", "a.bin");
+  await cacheFully(h, "b", "b.bin");
+  await assert.rejects(h.ask("tessera-cache:start", { id: "c", url: h.url("c.bin") }), /已手动缓存/);
+  assert.equal([...h.entries.values()].filter(entry => entry.manual && entry.blocks.length === 3).length, 2);
+});
+
+test("设置的容量超过浏览器配额时按配额生效", async t => {
+  const h = harness(t, { "a.bin": bytes(3 * store.BLOCK) });
+  h.preferences.maxMiB = 512000;
+  h.state.quota = 2 * store.BLOCK;
+  await assert.rejects(h.ask("tessera-cache:start", { id: "a", url: h.url("a.bin") }), /超过本机缓存上限 2 MB/);
   assert.equal(h.entries.size, 0);
 });
 

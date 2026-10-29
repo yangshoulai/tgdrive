@@ -6,7 +6,7 @@
  */
 import {
   BLOCK, type Bytes, type DeviceSettings, type EntryInfo, type EntryRecord, type Kind, type Tier,
-  aesKey, b64u, blockAad, deleteEntries, deviceId, ensureEntry, evict, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
+  aesKey, b64u, blockAad, deleteEntries, deviceId, effectiveMiB, ensureEntry, evict, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
   kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, setManualFlags, touchEntry, updateEntryInfo,
 } from "../cache-store";
 
@@ -67,10 +67,21 @@ type PrivateBatch = { waiters: Map<string, (value: Bytes | null) => void>; timer
 const pendingPrivate = new Map<TierContext, PrivateBatch>();
 
 /** 设备设置中这一层的容量（字节）。 */
+/** 重试也无法解决的失败（空间不足、文件已变化、设置不允许等）：页面据此停止自动重试，直接提示用户处理。 */
+class CacheFatal extends Error {}
+/** 4xx（除限流外）说明文件或授权已变化，重试无益；5xx、429 与网络中断按暂时故障自动重试。 */
+const statusError = (status: number, message: string) => status >= 400 && status < 500 && status !== 408 && status !== 429 ? new CacheFatal(message) : new Error(message);
+const sizeText = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / MiB))} MB`;
+
 const tierBudget = (preferences: DeviceSettings, tier: Tier) => (tier === "n" ? preferences.maxMiB : preferences.privateMaxMiB) * MiB;
 
+/** 设备设置，容量按浏览器配额截断：设置值大于配额时以配额为准（配额每 5 秒随设置一起重读）。 */
 async function currentSettings() {
-  if (!settings || Date.now() - settings.at > 5000) settings = { value: await readSettings(navigator.userAgent), at: Date.now() };
+  if (!settings || Date.now() - settings.at > 5000) {
+    const [value, estimate] = await Promise.all([readSettings(navigator.userAgent), navigator.storage?.estimate?.().catch(() => undefined)]);
+    const quota = estimate?.quota;
+    settings = { value: { ...value, maxMiB: effectiveMiB(value.maxMiB, quota), privateMaxMiB: effectiveMiB(value.privateMaxMiB, quota) }, at: Date.now() };
+  }
   return settings.value;
 }
 
@@ -539,7 +550,7 @@ class BlockWriter {
     const { entry } = this.opened;
     if (entry.blocks.includes(index)) return;
     if (entry.bytes + data.length > this.opened.cap) {
-      if (this.strict) throw new Error("文件超过本机缓存的单文件上限");
+      if (this.strict) throw new CacheFatal("文件超过本机缓存的单文件上限");
       this.stopped = true; return;
     }
     try {
@@ -558,7 +569,7 @@ class BlockWriter {
       if (this.opened.info.kind !== "thumb") await cacheChanged(fileCacheState(updated, this.opened.info.size).complete).catch(() => undefined);
     } catch (error) {
       if (this.strict) {
-        if (error instanceof DOMException && error.name === "QuotaExceededError") throw new Error("浏览器存储空间不足，请清理本机缓存后重试");
+        if (error instanceof DOMException && error.name === "QuotaExceededError") throw new CacheFatal("浏览器存储空间不足，请清理本机缓存后重试");
         throw error;
       }
       // 多半是浏览器配额不足：先淘汰一部分，这次读取不再写入。
@@ -583,7 +594,7 @@ function renewManual(job: Manual) {
 }
 
 async function startPrivateTask(owner: string, id: string, paths: string[], csrf: string, access: string) {
-  if (!owner || !id || id.length > 100 || !Array.isArray(paths)) throw new Error("缓存任务来源无效");
+  if (!owner || !id || id.length > 100 || !Array.isArray(paths)) throw new CacheFatal("缓存任务来源无效");
   const key = `${owner}:${id}`, existing = backgrounds.get(key);
   const previous = existing ? releaseBackground(owner, id) : Promise.resolve();
   const background: Background = { id, controller: new AbortController(), ready: Promise.resolve(), started: false, context: null };
@@ -593,7 +604,7 @@ async function startPrivateTask(owner: string, id: string, paths: string[], csrf
     const preferences = await currentSettings();
     const normal = await normalContext();
     if (!preferences.enabled || !preferences.private || !policy?.private_enabled || !normal || normal.signal.aborted)
-      throw new Error("请在本机缓存设置中允许缓存私密文件");
+      throw new CacheFatal("请在本机缓存设置中允许缓存私密文件");
     const device = await deviceId();
     background.controller.signal.throwIfAborted();
     const response = await post("/api/user/v1/cache/tasks", { id, device, paths }, access, { "X-CSRF-Token": csrf });
@@ -648,7 +659,7 @@ async function listBackground(owner: string, id: string, prefix: string, cursor?
 function manualRoute(url: string) {
   const request = new Request(new URL(url, sw.location.origin), { credentials: "same-origin" });
   const route = routeOf(request);
-  if (!route || route.thumb || new URL(request.url).searchParams.get("download") === "1") throw new Error("只能缓存自己的普通或私密文件");
+  if (!route || route.thumb || new URL(request.url).searchParams.get("download") === "1") throw new CacheFatal("只能缓存自己的普通或私密文件");
   return { request, route };
 }
 
@@ -658,14 +669,14 @@ async function manualOpened(url: string, background?: Background) {
   if (background && route.tier === "p") {
     const preferences = await currentSettings();
     const context = background.context;
-    if (!preferences.enabled || !preferences.private || !context) throw new Error("私密文件缓存已关闭");
+    if (!preferences.enabled || !preferences.private || !context) throw new CacheFatal("私密文件缓存已关闭");
     const response = await post("/api/user/v1/cache/tasks/keys", { path: route.path, etag: route.etag }, "", { "X-Tessera-Cache-Task": background.id });
     if (!response.ok) throw new Error(`缓存任务或文件版本已变化（${response.status}），请解锁后重试`);
     const body = await response.json() as { key: string };
     context.signal.throwIfAborted();
     value = { context, base: fromB64u(body.key) };
   } else value = await openEntry(request, route);
-  if (!value) throw new Error(route.tier === "p" ? "请解锁私密空间，并在本机缓存设置中允许缓存私密文件" : "本机缓存未启用，请检查设置与管理员策略");
+  if (!value) throw new CacheFatal(route.tier === "p" ? "请解锁私密空间，并在本机缓存设置中允许缓存私密文件" : "本机缓存未启用，请检查设置与管理员策略");
   const keys = await entryKeys(value.context, value.base, route.version);
   value.context.signal.throwIfAborted();
   return { ...value, keys, request, route, key: `${value.context.ns}/${route.tier}/${keys.id}` };
@@ -685,10 +696,10 @@ async function fileStates(urls: string[]) {
 async function verifyManual(job: Manual) {
   const response = await manualFetch(job, { method: "HEAD" });
   if (response.status === 401) dropKeys();
-  if (!response.ok) throw new Error(`无法读取文件（${response.status}），请刷新列表后重试`);
+  if (!response.ok) throw statusError(response.status, `无法读取文件（${response.status}），请刷新列表后重试`);
   if (etagOf(response) !== `"${job.route.etag}"`) {
     if (job.opened) await deleteEntries([job.opened.entry.key]);
-    throw new Error("文件已变化，请刷新列表后重新缓存");
+    throw new CacheFatal("文件已变化，请刷新列表后重新缓存");
   }
   return response;
 }
@@ -706,7 +717,7 @@ function manualFetch(job: Manual, options: RequestInit = {}) {
 }
 
 async function startManual(owner: string, id: string, url: string, group?: string) {
-  if (!owner || !id || id.length > 100) throw new Error("缓存任务来源无效");
+  if (!owner || !id || id.length > 100) throw new CacheFatal("缓存任务来源无效");
   if (manual) return { busy: true };
   const { request, route } = manualRoute(url);
   const background = group && route.tier === "p" ? await getBackground(owner, group) : undefined;
@@ -725,10 +736,15 @@ async function startManual(owner: string, id: string, url: string, group?: strin
       // 文本经过代理压缩后，HEAD 可能不含原始长度；同 ETag 的列表大小优先，未知长度不能转成 0。
       const rawSize = response.headers.get("content-length")?.trim();
       const size = route.size ?? (rawSize && /^\d+$/.test(rawSize) ? Number(rawSize) : NaN);
-      if (!Number.isSafeInteger(size) || size < 0) throw new Error("服务器未提供有效的文件大小");
+      if (!Number.isSafeInteger(size) || size < 0) throw new CacheFatal("服务器未提供有效的文件大小");
       const preferences = await currentSettings();
       const budget = tierBudget(preferences, route.tier), cap = budget;
-      if (size > budget) throw new Error("文件超过本机缓存容量，请先在「设置 → 本机缓存」中提高上限");
+      if (size > budget) throw new CacheFatal(`文件（${sizeText(size)}）超过本机缓存上限 ${sizeText(budget)}，请先在「设置 → 本机缓存」中提高上限`);
+      // 手动缓存优先于自动缓存：自动缓存的文件随时可以让出空间（enforce 按最久未使用先移除），
+      // 已手动缓存的文件不会被挤掉；它们加上这个文件仍超出上限时，交给用户自己清理。
+      const pinned = (await listEntries(value.context.ns, route.tier)).filter(item => item.manual && item.key !== value.key).reduce((sum, item) => sum + item.bytes, 0);
+      if (pinned + size > budget)
+        throw new CacheFatal(`本机缓存空间不足：已手动缓存 ${sizeText(pinned)}，加上这个文件（${sizeText(size)}）会超过上限 ${sizeText(budget)}。请在「本机缓存」中清除部分手动缓存或提高上限后重试`);
       let entry = await getEntry(value.key);
       let info = entry ? await openInfo(value.context.info, entry) : null;
       if (entry && (!info || info.size !== size)) { await deleteEntries([value.key]); entry = undefined; }
@@ -746,9 +762,7 @@ async function startManual(owner: string, id: string, url: string, group?: strin
       job.controller.signal.throwIfAborted();
       job.opened = { tier: value.context, entry, info, key: value.keys.key, request, cap };
       await enforce();
-      const estimate = await navigator.storage?.estimate?.().catch(() => undefined);
-      if (estimate?.quota && estimate.usage !== undefined && estimate.quota - estimate.usage < size - entry.bytes + Math.ceil(size / BLOCK) * 28)
-        throw new Error("浏览器存储空间不足，请清理本机缓存后重试");
+      await reserveQuota(entry.key, size - entry.bytes + Math.ceil(size / BLOCK) * 28);
       job.controller.signal.throwIfAborted();
       const state = fileCacheState(entry, size);
       await cacheChanged(state.complete).catch(() => undefined);
@@ -756,6 +770,28 @@ async function startManual(owner: string, id: string, url: string, group?: strin
       return { busy: false, ...state };
     } finally { value.context.signal.removeEventListener("abort", abort); }
   } catch (error) { if (manual === job) stopManual(); throw error; }
+}
+
+/** 浏览器配额（整个站点共用）不够时，先移除这台设备上最久未使用的自动缓存（含其他账号与私密层），手动缓存不动；仍不够就请用户处理。 */
+async function reserveQuota(keep: string, need: number) {
+  const estimate = await navigator.storage?.estimate?.().catch(() => undefined);
+  if (!estimate?.quota || estimate.usage === undefined) return;
+  const shortfall = need - (estimate.quota - estimate.usage);
+  if (shortfall <= 0) return;
+  const victims: string[] = [];
+  let freed = 0;
+  for (const item of (await listEntries()).filter(item => !item.manual && item.key !== keep && item.key !== manual?.opened?.entry.key).sort((a, b) => a.accessed - b.accessed)) {
+    if (freed >= shortfall) break;
+    victims.push(item.key); freed += item.bytes;
+  }
+  if (victims.length) {
+    await deleteEntries(victims);
+    victims.forEach(key => infoMemo.delete(key));
+    manualCache = null; itemCache = null;
+    await cacheChanged(true).catch(() => undefined);
+  }
+  if (freed < shortfall)
+    throw new CacheFatal(`浏览器可用空间不足，还差约 ${sizeText(shortfall - freed)}。自动缓存已全部让出，请在「本机缓存」中清除部分手动缓存后重试`);
 }
 
 async function stepManual(owner: string, id: string, progress: (value: unknown) => void) {
@@ -784,8 +820,8 @@ async function stepManual(owner: string, id: string, progress: (value: unknown) 
       if (response.status === 401) dropKeys();
       if (response.status !== 206 || etagOf(response) !== opened.info.version || response.headers.get("content-range") !== `bytes ${index * BLOCK}-${end}/${opened.info.size}`) {
         await response.body?.cancel();
-        if (response.ok) { await deleteEntries([entry.key]); throw new Error("文件已变化，请刷新列表后重新缓存"); }
-        throw new Error(`读取文件失败（${response.status}），请稍后重试`);
+        if (response.ok) { await deleteEntries([entry.key]); throw new CacheFatal("文件已变化，请刷新列表后重新缓存"); }
+        throw statusError(response.status, `读取文件失败（${response.status}），请稍后重试`);
       }
       if (!response.body) throw new Error("服务器未返回文件内容");
       const reader = response.body.getReader();
@@ -983,7 +1019,7 @@ async function stats(): Promise<Stats> {
 }
 
 type Item = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean };
-type ItemQuery = { private?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
+type ItemQuery = { private?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; origin?: "" | "manual" | "auto"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
 let itemCache: { ns: string; at: number; items: Item[] } | null = null;
 
 /** 普通层已缓存文件的完整索引：解密一次后在内存里保留 15 秒，翻页、搜索与筛选都不再解密。缩略图不列出。 */
@@ -996,7 +1032,7 @@ async function allItems(): Promise<Item[]> {
     if (entry.kind === "thumb") continue;
     const info = await openInfo(context.info, entry);
     if (info) items.push({ key: entry.key, path: info.path, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed,
-      manual: Boolean(info.manual), complete: fileCacheState(entry, info.size).complete });
+      manual: Boolean(entry.manual ?? info.manual), complete: fileCacheState(entry, info.size).complete });
   }
   context.signal.throwIfAborted();
   itemCache = { ns: context.ns, at: Date.now(), items };
@@ -1024,7 +1060,7 @@ async function matchItems(options: ItemQuery) {
   // prefix：目录统计只看某个文件夹（含子文件夹）里的缓存；private：私密空间的目录统计读私密层。
   return (await (options.private ? privateItems() : allItems())).filter(item => (!options.prefix || item.path.startsWith(options.prefix)) && (!query || item.path.toLowerCase().includes(query))
     && (!options.kind || (options.kind === "other" ? !["image", "video", "audio"].includes(item.kind) : item.kind === options.kind))
-    && (!options.status || (options.status === "complete") === item.complete));
+    && (!options.status || (options.status === "complete") === item.complete) && (!options.origin || (options.origin === "manual") === item.manual));
 }
 
 async function listItems(options: ItemQuery) {
@@ -1048,7 +1084,8 @@ async function removeItems(options: ItemQuery) {
 async function clear(scope: string, key?: string) {
   const entries = await listEntries();
   const namespace = (await normalContext())?.ns ?? lastNamespace;
-  const victims = scope === "entry" ? entries.filter(entry => entry.key === key && entry.tier === "n")
+  // 单个条目：「本机缓存 → 已缓存的文件」中逐项清除，普通与私密层都只删除当前账号的副本。
+  const victims = scope === "entry" ? entries.filter(entry => entry.key === key && (!namespace || entry.ns === namespace))
     : scope === "all" ? entries
     : scope === "others" ? entries.filter(entry => entry.ns !== namespace)
     : entries.filter(entry => entry.tier === (scope === "private" ? "p" : "n") && (!namespace || entry.ns === namespace));
@@ -1063,7 +1100,7 @@ sw.addEventListener("message", event => {
     group?: string; paths?: string[]; csrf?: string; prefix?: string; cursor?: string | null } | null;
   const port = event.ports[0];
   const owner = event.source && "id" in event.source ? event.source.id : "";
-  const reply = (work: Promise<unknown>) => event.waitUntil(work.then(value => port?.postMessage({ ok: true, value }), error => port?.postMessage({ ok: false, error: String(error).replace(/^Error: /, "") })));
+  const reply = (work: Promise<unknown>) => event.waitUntil(work.then(value => port?.postMessage({ ok: true, value }), error => port?.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error), fatal: error instanceof CacheFatal })));
   switch (data?.type) {
     case "tessera-cache:access":
       if (!data.access || pageAccess !== data.access || !data.expires || data.expires <= Date.now()) dropKeys("p");

@@ -55,18 +55,24 @@ for(const app of process.argv[2] ? [process.argv[2]] : ['user']) {
  const config=configs[app];
  if(!config) throw Error('未知应用');
  const modules={};
- function visit(file) {
-  const id=path.relative(root,file);
-  if(modules[id]) return id;
-  let code=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX},fileName:file}).outputText;
-  modules[id]='';
-  code=code.replace(/require\("([^"\n]+)"\)/g,(all,dep)=>{
-   if(!dep.startsWith('.')) return all;
-   let target=path.resolve(path.dirname(file),dep);
-   if(!path.extname(target)) target=['.tsx','.ts'].map(ext=>target+ext).find(fs.existsSync);
-   return `require(${JSON.stringify(visit(target))})`;
-  });
-  modules[id]=code; return id;
+ // 用队列而不是递归遍历依赖：导入链很深时，递归叠加 TypeScript 自身的输出栈会超出调用栈上限。
+ function visit(start) {
+  const queue=[start];
+  while(queue.length) {
+   const file=queue.pop();
+   const id=path.relative(root,file);
+   if(id in modules) continue;
+   let code=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX},fileName:file}).outputText;
+   code=code.replace(/require\("([^"\n]+)"\)/g,(all,dep)=>{
+    if(!dep.startsWith('.')) return all;
+    let target=path.resolve(path.dirname(file),dep);
+    if(!path.extname(target)) target=['.tsx','.ts'].map(ext=>target+ext).find(fs.existsSync);
+    queue.push(target);
+    return `require(${JSON.stringify(path.relative(root,target))})`;
+   });
+   modules[id]=code;
+  }
+  return path.relative(root,start);
  }
  const entry=visit(path.join(root,'src',config.entry+'.tsx'));
  const mountId='root';

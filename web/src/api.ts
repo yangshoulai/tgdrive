@@ -392,7 +392,8 @@ export const thumbnailUrl = (path: string, etag: string, version: string, varian
 export type ThumbnailClaim = { etag?: string; ticket?: string };
 export const setThumbnail = (path: string, data: string, variant: ThumbnailVariant = "thumb", claim: ThumbnailClaim = {}) => post<void>(fileApi("/thumbnail", path), { path, data, variant, ...claim });
 export const markNoThumbnail = (path: string, claim: ThumbnailClaim = {}) => post<void>(fileApi("/thumbnail", path), { path, variant: "none", ...claim });
-export const claimThumbnail = (file: Pick<FileItem, "key" | "etag">, force = false) => post<{ token: string | null; expires_in?: number }>(fileApi("/thumbnail/claim", file.key), { path: file.key, etag: file.etag, force });
+/** custom：用户指定的缩略图（上传图片、图片地址、播放器当前画面），适用于任何文件并优先于自动生成。 */
+export const claimThumbnail = (file: Pick<FileItem, "key" | "etag">, force = false, custom = false) => post<{ token: string | null; expires_in?: number }>(fileApi("/thumbnail/claim", file.key), { path: file.key, etag: file.etag, force, ...(custom ? { custom } : {}) });
 export const releaseThumbnail = (file: Pick<FileItem, "key" | "etag">, ticket: string, variants?: string[]) => post<void>(fileApi("/thumbnail/release", file.key), { path: file.key, etag: file.etag, ticket, ...(variants ? { variants } : {}) });
 export type ThumbnailState = Pick<FileItem, "etag" | "size" | "modified_at" | "has_thumbnail" | "thumbnails" | "thumbnail_versions">;
 /** 只查询所列文件的 ETag 与缩略图状态（最多 200 个）；不存在或无权访问的路径不在结果中。 */
@@ -401,12 +402,9 @@ export const thumbnailStatus = (paths: string[], signal?: AbortSignal) => reques
 /** 网页上传并发：由管理员在「下载与资源」配置。 */
 export const uploadConfig = () => request<{ part_concurrency: number; file_concurrency: number }>("/api/user/v1/upload-config");
 export const generateThumbnail = (file: Pick<FileItem, "key" | "etag">) => post<{ accepted: boolean }>(fileApi("/thumbnail/generate", file.key), { path: file.key, etag: file.etag });
-export type ThumbnailCandidates = { id: string; state: "queued" | "running" | "ready" | "failed" | "saving"; detail: string; count: number; expires_in: number; frames: { index: number; seconds: number }[] };
-export const createThumbnailCandidates = (file: Pick<FileItem, "key" | "etag">) => post<ThumbnailCandidates>(fileApi("/thumbnail/candidates", file.key), { path: file.key, etag: file.etag });
-export const thumbnailCandidates = (file: Pick<FileItem, "key" | "etag">, id: string, signal?: AbortSignal) => request<ThumbnailCandidates>(fileApi("/thumbnail/candidates/status", file.key), { method: "POST", body: JSON.stringify({ path: file.key, etag: file.etag, id }), signal });
-export const thumbnailCandidateImage = (file: Pick<FileItem, "key" | "etag">, id: string, index: number, signal?: AbortSignal) => request<File>(`${fileApi("/thumbnail/candidate", file.key)}?path=${encodeURIComponent(file.key)}&etag=${encodeURIComponent(file.etag)}&id=${encodeURIComponent(id)}&index=${index}`, { signal, cache: "no-store" }, 30000, "blob");
-export const cancelThumbnailCandidates = (file: Pick<FileItem, "key" | "etag">, id: string) => request<void>(fileApi("/thumbnail/candidates/cancel", file.key), { method: "POST", body: JSON.stringify({ path: file.key, etag: file.etag, id }), keepalive: true });
-export const selectThumbnailCandidate = (file: Pick<FileItem, "key" | "etag">, id: string, index: number) => post<void>(fileApi("/thumbnail/candidates/select", file.key), { path: file.key, etag: file.etag, id, index }, 60000);
+/** 自定义缩略图：读取用户填写的图片地址（由服务器经受控出站客户端读取，只返回受支持的图片）。 */
+export const fetchThumbnailImage = (file: Pick<FileItem, "key">, url: string, signal?: AbortSignal) =>
+  request<Blob>(fileApi("/thumbnail/fetch", file.key), { method: "POST", body: JSON.stringify({ url }), signal, cache: "no-store" }, 45000, "blob");
 type ThumbnailFile = Pick<FileItem, "key" | "etag" | "thumbnails" | "has_thumbnail" | "thumbnail_versions">;
 function thumbnailSpec(file: ThumbnailFile, variant: ThumbnailVariant) {
   const resolved = THUMBNAIL_FALLBACK[variant].find(item => item === "thumb" || file.thumbnails?.includes(item)) ?? "thumb";
@@ -654,12 +652,10 @@ export type ThumbnailJob = { id: string; kind: "image" | "video" | "audio"; stat
 export type ThumbnailBackfill = { daily_bytes: number | null; used_bytes: number; age_seconds: number; pending: number };
 export type ThumbnailQueueStatus = { available: boolean; unlocked: boolean; pressure: string | null; jobs: ThumbnailJob[]; recent: ThumbnailJob[];
   cache: { bytes: number; limit_bytes: number; ttl_seconds: number }; remote_bytes: number; client_timeout_seconds: number; task_timeout_seconds: number; capacity: number; backfill: ThumbnailBackfill;
-  candidate_count: number;
   inline: { count: number; bytes: number; skipped_quota: number } };
 export const thumbnailQueue = () => request<ThumbnailQueueStatus>("/api/admin/v1/maintenance/thumbnails");
 /** daily_mib：每日自动补图读取上限（MiB），0 关闭，-1 不限制。 */
 export const setThumbnailBackfill = (dailyMib: number) => post<ThumbnailBackfill>("/api/admin/v1/maintenance/thumbnails", { daily_mib: dailyMib });
-export const setThumbnailCandidateCount = (count: number) => post<{ candidate_count: number }>("/api/admin/v1/maintenance/thumbnails", { candidate_count: count });
 export const runCleanup = () => post<{ aborted_uploads: number; stale_blobs: number; expired_upload_records: number }>("/api/admin/v1/maintenance/cleanup");
 export const retryDeadGc = () => post<{ requeued: number }>("/api/admin/v1/maintenance/gc/retry");
 export type Backup = { name: string; size: number; created_at: number };

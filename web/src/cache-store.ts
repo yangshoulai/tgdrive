@@ -30,7 +30,14 @@ export function fileCacheState(entry: EntryRecord | undefined, size: number): Fi
   return { bytes: entry?.bytes ?? 0, size, complete: Boolean(entry && entry.bytes === size && entry.blocks.length === count && entry.blocks.every((value, index) => value === index)) };
 }
 export type DeviceSettings = { enabled: boolean; maxMiB: number; video: boolean; private: boolean; privateMaxMiB: number };
-export const SIZE_CHOICES = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+export const SIZE_CHOICES = [256, 512, 1024, 2048, 5120, 10240, 20480, 51200, 102400, 204800, 512000];
+/** 实际生效的容量（MiB）：用户设置不能突破浏览器给这个网站的配额（quota 为字节，未知时只按设置）。 */
+export const effectiveMiB = (value: number, quota?: number | null) => quota ? Math.max(1, Math.min(value, Math.floor(quota / 1048576))) : value;
+/** 设置页可选的容量：只列出不超过浏览器配额的选项；配额比最小选项还小时保留最小一项。 */
+export const sizeChoices = (quota?: number | null) => {
+  const fit = quota ? SIZE_CHOICES.filter(choice => choice * 1048576 <= quota) : SIZE_CHOICES;
+  return fit.length ? fit : SIZE_CHOICES.slice(0, 1);
+};
 
 /* ---------- IndexedDB ---------- */
 
@@ -166,11 +173,12 @@ export function putBlock(key: string, index: number, sealed: ArrayBuffer, plainL
   });
 }
 
-/** 按最后访问时间淘汰，直到不超过 target 字节；返回删除的条目键。 */
+/** 淘汰到不超过 target 字节；返回删除的条目键。自动缓存先按最后访问时间移除，
+ * 只有全部自动缓存都移除后仍超出（例如用户调低了上限）才动手动缓存——手动缓存的优先级更高。 */
 export async function evict(entries: EntryRecord[], target: number, keep?: (entry: EntryRecord) => boolean): Promise<string[]> {
   let total = entries.reduce((sum, entry) => sum + entry.bytes, 0);
   const victims: string[] = [];
-  for (const entry of [...entries].sort((a, b) => a.accessed - b.accessed)) {
+  for (const entry of [...entries].sort((a, b) => Number(Boolean(a.manual)) - Number(Boolean(b.manual)) || a.accessed - b.accessed)) {
     if (total <= target) break;
     if (keep?.(entry)) continue;
     victims.push(entry.key); total -= entry.bytes;
@@ -185,7 +193,7 @@ export async function evict(entries: EntryRecord[], target: number, keep?: (entr
 export const webkitOnly = (agent: string) => /AppleWebKit/.test(agent) && !/Chrome|Chromium|Edg|Android|CriOS|FxiOS|Firefox/.test(agent);
 
 export function defaultSettings(agent: string): DeviceSettings {
-  return { enabled: true, maxMiB: 1024, video: !webkitOnly(agent), private: false, privateMaxMiB: 256 };
+  return { enabled: true, maxMiB: 10240, video: !webkitOnly(agent), private: false, privateMaxMiB: 2048 };
 }
 
 export async function readSettings(agent: string): Promise<DeviceSettings> {

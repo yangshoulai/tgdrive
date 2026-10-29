@@ -12,15 +12,16 @@ import { Notice, Button, ButtonLink, Icon, Progress, formatBytes, toast, usageTo
 
 import { FilesView } from "./user/files";
 import { PrivateSpaceView } from "./user/private";
-import { useUploadQueue } from "./user/uploads";
+import { UploadsPage, useUploadQueue } from "./user/uploads";
 
 import { SharedView } from "./user/shared";
 import { TrashView } from "./user/trash";
 import { DownloadsView } from "./user/downloads";
 import { PreviewHost } from "./user/preview-host";
-import { CacheTasksProvider } from "./user/cache";
+import { CachePage, CacheTasksProvider, type CacheTab } from "./user/cache";
 import { AssistantDrawer, useAssistantConfig, useAssistantShortcut, type AssistantDockStatus } from "./user/assistant";
-import { TaskCenter, type TaskWindow } from "./user/task-center";
+import { AssistantLauncher } from "./user/assistant-launcher";
+import { useDownloadActivity } from "./user/download-activity";
 import { takePageImportRequest, usePageImport } from "./user/page-import";
 import { PrivateSessionProvider } from "./user/private-session";
 import { EmailDialog, UserSettingsPage } from "./user/account";
@@ -90,7 +91,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
     onSessionChange={patch => setSession(current => current && { ...current, ...patch })} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "private" | "downloads" | "account" | "assistantPage";
+type UserSection = "files" | "shared" | "trash" | "private" | "uploads" | "downloads" | "cache" | "account" | "assistantPage";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -111,7 +112,9 @@ function readLocation(): { section: Section; prefix: string } {
   if (view === "assistant") return { section: "assistantPage", prefix: params.get("c") ?? "" };
   // 设置分「账号」「访问密钥」「本机缓存」三个标签页，prefix 字段沿用为标签名；旧地址 ?view=keys 打开访问密钥标签。
   if (view === "account" || view === "keys") return { section: "account", prefix: view === "keys" ? "keys" : params.get("tab") === "keys" || params.get("tab") === "cache" ? params.get("tab")! : "" };
-  const section = view === "shared" || view === "trash" || view === "private" || view === "downloads" ? view : "files";
+  // 任务中心：本机缓存页的 prefix 字段沿用为标签名（?view=cache&tab=files）。
+  if (view === "cache") return { section: "cache", prefix: params.get("tab") === "files" ? "files" : "" };
+  const section = view === "shared" || view === "trash" || view === "private" || view === "uploads" || view === "downloads" ? view : "files";
   const prefix = params.get("path") ?? "";
   return { section, prefix: section === "private" ? api.PRIVATE_PREFIX + prefix : section === "files" ? visibleFilesPrefix(prefix) : prefix };
 }
@@ -123,6 +126,7 @@ function sectionUrl(section: Section, prefix = "") {
   if ((section === "files" || section === "private") && prefix) params.set("path", section === "private" ? prefix.replace(api.PRIVATE_PREFIX, "") : prefix);
   if (section === "assistantPage" && prefix) params.set("c", prefix);
   if (section === "account" && (prefix === "keys" || prefix === "cache")) params.set("tab", prefix);
+  if (section === "cache" && prefix === "files") params.set("tab", prefix);
   const query = params.toString();
   return query ? `/?${query}` : "/";
 }
@@ -243,11 +247,10 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const assistant = useAssistantConfig(assistantReady);
   const assistantAvailable = Boolean(assistant.config?.available);
   const [assistantOpen, setAssistantOpen] = useState(false);
-  const [taskWindow, setTaskWindow] = useState<TaskWindow | null>(null);
   const [assistantStatus, setAssistantStatus] = useState<AssistantDockStatus>({ running: false, pending: 0, private: false });
   const assistantPage = location.section === "assistantPage";
-  const toggleAssistant = useCallback(() => { if (!assistantPage) { setTaskWindow(null); setAssistantOpen(value => !value); } }, [assistantPage]);
-  const openCacheTasks = useCallback(() => { setAssistantOpen(false); setTaskWindow("cache"); }, []);
+  const toggleAssistant = useCallback(() => { if (!assistantPage) setAssistantOpen(value => !value); }, [assistantPage]);
+  const openCacheTasks = useCallback(() => { setAssistantOpen(false); navigate("cache"); }, [navigate]);
   useAssistantShortcut(assistantAvailable, toggleAssistant);
   useEffect(() => { if (!assistantAvailable) setAssistantOpen(false); }, [assistantAvailable]);
   useEffect(() => { if (assistantPage) setAssistantOpen(false); }, [assistantPage]);
@@ -260,7 +263,10 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const section = location.section;
   // 文件空间可用时才保留预览和系统托盘；系统锁定、服务未解锁时一并关闭。
   const workspaceReady = !locked && !(!isAdmin && session.unlocked === false) && !(isAdmin && status === null);
-  useEffect(() => { if (!workspaceReady) setTaskWindow(null); }, [workspaceReady]);
+  // 任务中心的侧栏数量：上传队列在本页，离线下载取服务端聚合，本机缓存由缓存队列回报。
+  const downloadsActive = useDownloadActivity(workspaceReady, downloadRevision, refreshUsage);
+  const [cacheActive, setCacheActive] = useState(0);
+  const uploadsActive = uploads.jobs.filter(job => job.status === "queued" || job.status === "uploading").length;
   let content: ReactNode;
   if (section === "assistantPage") {
     content = !assistantAvailable || !assistant.config ? (assistant.config ? <AccessDenied /> : <FullPageLoading label="正在读取文件助手" />)
@@ -291,6 +297,9 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       {section === "files" && <FilesView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={prefix => navigate("files", prefix)} onChanged={refreshUsage} />}
       {section === "private" && <PrivateSpaceView session={session} prefix={location.prefix} uploads={uploads} uploadRevision={uploadRevision} onOpenFolder={path => navigate("private", path)} onChanged={refreshUsage} />}
       {section === "shared" && <SharedView session={session} onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
+      {section === "uploads" && <UploadsPage queue={uploads} onOpenFolder={prefix => navigate(api.isPrivatePath(prefix) ? "private" : "files", prefix)} />}
+      {section === "cache" && <CachePage tab={location.prefix === "files" ? "files" : "tasks"} onTabChange={(tab: CacheTab) => navigate("cache", tab === "files" ? "files" : "")}
+        onSettings={() => navigate("account", "cache")} onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} />}
       {section === "downloads" && <DownloadsView onChanged={refreshUsage} onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCreated={() => setDownloadRevision(value => value + 1)} />}
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
     </>;
@@ -305,6 +314,11 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
     ] },
     { label: "分享", workspace: personalWorkspace, items: [
       { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
+    ] },
+    { label: "任务中心", workspace: personalWorkspace, items: [
+      { key: "uploads", label: "上传任务", icon: "upload", count: uploadsActive, live: uploadsActive > 0 },
+      { key: "downloads", label: "离线下载", icon: "download", count: downloadsActive, live: downloadsActive > 0 },
+      { key: "cache", label: "本机缓存", icon: "monitor", count: cacheActive, live: cacheActive > 0 },
     ] },
     ...(isAdmin ? adminGroups() : []),
   ];
@@ -333,12 +347,10 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },
       ] }}>
       <PrivateSessionProvider enabled={workspaceReady}>
-      <CacheTasksProvider enabled={workspaceReady} onOpenTasks={openCacheTasks}>
+      <CacheTasksProvider enabled={workspaceReady} onOpenTasks={openCacheTasks} onActiveChange={setCacheActive}>
       <PreviewHost enabled={workspaceReady} privateAllowed={section === "private"}>
         {content}
-      <TaskCenter enabled={workspaceReady} uploads={uploads} activeWindow={taskWindow} onWindowChange={setTaskWindow} downloadRevision={downloadRevision} onChanged={refreshUsage}
-        onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCacheSettings={() => navigate("account", "cache")}
-        assistantAvailable={assistantAvailable} assistantOpen={assistantOpen} assistantStatus={assistantStatus} onOpenAssistant={toggleAssistant} />
+      <AssistantLauncher available={workspaceReady && assistantAvailable && Boolean(assistant.config) && !assistantPage} open={assistantOpen} status={assistantStatus} onToggle={toggleAssistant} />
       {/* 统一对话（§37）：只有一个助手，涉及私密空间的对话在锁定时需要解锁。 */}
       {assistantAvailable && assistant.config && !assistantPage && <AssistantDrawer open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)} onStatus={setAssistantStatus}
         onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" || section === "private" ? location.prefix : "" }}

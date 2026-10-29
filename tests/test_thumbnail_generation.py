@@ -13,7 +13,7 @@ from tgdrive.errors import NotFoundError, NotReadyError
 from tgdrive.keystore import KeyStore
 from tgdrive.metadata import Metadata
 from tgdrive.objects import ObjectService, PRIVATE_PREFIX, Scope
-from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailRetry, ThumbnailService, _RangeInput, _Job, video_frame_usable
+from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailRetry, ThumbnailService, _RangeInput, _Job, image_mime, video_frame_usable
 from tgdrive.thumbnail_cache import ThumbnailCacheMiss
 
 
@@ -376,6 +376,49 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         lease = self.worker.claim(self.scope, info.key, info.etag)
         self.worker.release(self.scope, info.key, info.etag, lease["token"])
         self.assertEqual(self.worker._pending[info.blob_uuid].state, "queued")
+
+    async def test_custom_thumbnail_works_for_any_file_and_preempts_automatic_jobs(self):
+        document = await self.put("report.pdf")
+        # PDF 不会自动生成，但用户可以指定缩略图；保存仍复核票据，完成后清除多余的旧规格。
+        lease = self.worker.claim(self.scope, document.key, document.etag, custom=True)
+        self.assertTrue(lease["token"])
+        self.assertNotIn(document.blob_uuid, self.worker._pending)
+        self.worker.check_claim(document, lease["token"])
+        await self.objects.set_thumbnail(self.scope, document.key, JPEG, "thumb")
+        self.objects.finish_thumbnail_set(self.scope, document.key, ["thumb"])
+        self.worker.release(self.scope, document.key, document.etag, lease["token"])
+        self.assertEqual(self.variants(document), ["thumb"])
+        image = await self.put()
+        job = _Job(image, state="running")
+        self.worker._enqueue(job)
+        self.worker._active, self.worker._task = job, asyncio.create_task(asyncio.sleep(60))
+        browser = self.worker.claim(self.scope, image.key, image.etag)
+        self.assertIsNone(browser["token"])
+        custom = self.worker.claim(self.scope, image.key, image.etag, custom=True)
+        await asyncio.gather(self.worker._task, return_exceptions=True)
+        self.assertTrue(self.worker._task.cancelled())
+        self.assertNotIn(image.blob_uuid, self.worker._pending)
+        self.worker.check_claim(image, custom["token"])
+        with self.assertRaises(ValueError):
+            self.worker.claim(self.scope, image.key, "stale", custom=True)
+
+    async def test_custom_thumbnail_rejects_system_files(self):
+        info = await self.objects.put_object(self.scope, ".tgdrive/assistant/x/a.txt", b"abc")
+        with self.assertRaises(ValueError):
+            self.worker.claim(Scope(self.scope.bucket_id, private_access=True), info.key, info.etag, custom=True)
+
+    def test_remote_image_type_is_detected_from_content(self):
+        self.assertEqual(image_mime(JPEG), "image/jpeg")
+        self.assertEqual(image_mime(b"GIF89a" + b"\0" * 8), "image/gif")
+        self.assertEqual(image_mime(b"RIFF\0\0\0\0WEBPVP8 "), "image/webp")
+        self.assertEqual(image_mime(b"\0\0\0\x1cftypavif" + b"\0" * 8), "image/avif")
+        self.assertIsNone(image_mime(b"<html><body>not an image</body></html>"))
+        self.assertIsNone(image_mime(b"<svg xmlns='http://www.w3.org/2000/svg'/>"))
+
+    async def test_remote_image_rejects_non_http_addresses(self):
+        for url in ("", "file:///etc/passwd", "ftp://example.com/a.jpg", "javascript:alert(1)"):
+            with self.assertRaises(ValueError):
+                await self.worker.fetch_image(url)
 
     async def test_deletion_and_overwrite_cancel_pending_and_running_jobs(self):
         self.worker._loop = asyncio.get_running_loop()

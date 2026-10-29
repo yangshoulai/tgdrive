@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useId, useState } from "react";
 
 import * as api from "../api";
 import { type CacheStats, cacheStats, cacheSupported, clearCache, isStandalone, loadSettings, resetAllDevices, saveSettings, storageEstimate } from "../cache-client";
-import { type DeviceSettings, type Kind, SIZE_CHOICES, webkitOnly } from "../cache-store";
+import { type DeviceSettings, type Kind, effectiveMiB, sizeChoices, webkitOnly } from "../cache-store";
 import { Notice, Badge, Button, ConfirmDialog, Disclosure, EmptyState, Field, Icon, Switch, formatBytes, toast } from "../ui";
 
 const KIND_LABEL: Record<Kind, string> = { image: "图片", video: "视频", audio: "音频", thumb: "缩略图", other: "其他" };
@@ -71,8 +71,8 @@ export function LocalCacheSettings() {
         : settings && <Switch checked={settings.enabled} disabled={busy} onChange={value => void update({ enabled: value }, value ? "已开启本机缓存" : "已关闭本机缓存并清除数据")}
           label="在这台设备上缓存文件" description="自动保存预览过的内容，包括图片、音视频、Markdown、文本、代码、PDF 和缩略图；任意文件都可以通过「缓存到本机」完整保存。文件列表用「本机」标记手动缓存、「自动」标记自动缓存。" />}
       {stats && <div className="local-cache-figures folder-stats-figures">
-        <div><span>普通文件</span><strong>{formatBytes(stats.normal.bytes)}</strong><small>上限 {sizeLabel(normalLimit)} · {stats.normal.count.toLocaleString("zh-CN")} 项</small></div>
-        <div><span>私密文件</span><strong>{formatBytes(stats.private.bytes)}</strong><small>{privateOn ? `上限 ${sizeLabel(privateLimit)} · ${stats.private.count} 项` : "未开启"}</small></div>
+        <div><span>普通文件</span><strong>{formatBytes(stats.normal.bytes)}</strong><small>上限 {sizeLabel(effectiveMiB(normalLimit, estimate?.quota))} · {stats.normal.count.toLocaleString("zh-CN")} 项</small></div>
+        <div><span>私密文件</span><strong>{formatBytes(stats.private.bytes)}</strong><small>{privateOn ? `上限 ${sizeLabel(effectiveMiB(privateLimit, estimate?.quota))} · ${stats.private.count} 项` : "未开启"}</small></div>
         <div><span>浏览器占用</span><strong>{estimate ? formatBytes(estimate.usage) : "—"}</strong><small>{estimate ? `${estimate.persisted ? "已持久保存" : "空间不足时可能被浏览器清除"}` : "浏览器未提供"}</small></div>
       </div>}
       {kinds.length > 0 && <div className="local-cache-kinds">
@@ -83,7 +83,7 @@ export function LocalCacheSettings() {
       </div>}
       {settings && !adminOff && settings.enabled && <div className="local-cache-options">
       <CacheSizeSelect label="最多占用" value={settings.maxMiB} disabled={busy || !settings.enabled} quota={estimate?.quota}
-        hint="超出后自动移除最久没有打开的文件；自动缓存的单个文件最多占一半。" onChange={value => void update({ maxMiB: value }, "已保存")} />
+        hint="超出后先移除最久没有打开的自动缓存，手动缓存的文件会保留；自动缓存的单个文件最多占一半。" onChange={value => void update({ maxMiB: value }, "已保存")} />
       <Switch checked={settings.video} disabled={busy || !settings.enabled} onChange={value => void update({ video: value }, "已保存")} label="自动缓存视频片段"
         description={webkitOnly(navigator.userAgent) ? "Safari 对缓存视频的支持还不稳定，如果开启后播放异常，请关闭此项。" : "按看过的片段保存，拖回已看过的位置时不必重新下载。"} />
       </div>}
@@ -143,14 +143,17 @@ function Section({ icon, title, description, children }: { icon: "monitor" | "se
   </section>;
 }
 
-/** 容量由用户按设备决定；浏览器配额是硬上限，超过配额的选项仍可选，但会在说明里提示。 */
+/** 容量由用户按设备决定，但不能超过浏览器配额：下拉框只列出配额以内的选项；
+ * 已保存的值超出配额（换了设备环境、硬盘变满）时仍显示并标注，实际按配额生效。 */
 function CacheSizeSelect({ label, value, hint, quota, disabled, onChange }: { label: string; value: number; hint?: string; quota?: number; disabled?: boolean; onChange: (value: number) => void }) {
   const id = useId();
-  const choices = SIZE_CHOICES.includes(value) ? SIZE_CHOICES : [...SIZE_CHOICES, value].sort((a, b) => a - b);
+  const fit = sizeChoices(quota);
   const over = Boolean(quota && value * 1048576 > quota);
-  return <Field label={label} htmlFor={id} hint={[hint, quota ? `这个浏览器最多可用约 ${formatBytes(quota)}${over ? "，实际以浏览器为准" : ""}。` : ""].filter(Boolean).join("")}>
+  const choices = fit.includes(value) ? fit : [...fit, value].sort((a, b) => a - b);
+  const note = quota ? over ? `当前设置超出这个浏览器的可用空间（约 ${formatBytes(quota)}），实际按 ${sizeLabel(effectiveMiB(value, quota))} 生效，建议改小。` : `这个浏览器最多可用约 ${formatBytes(quota)}。` : "";
+  return <Field label={label} htmlFor={id} hint={[hint, note].filter(Boolean).join("")}>
     <select id={id} className="input local-cache-select" value={value} disabled={disabled} onChange={event => onChange(Number(event.target.value))}>
-      {choices.map(choice => <option key={choice} value={choice}>{sizeLabel(choice)}</option>)}
+      {choices.map(choice => <option key={choice} value={choice}>{sizeLabel(choice)}{quota && choice * 1048576 > quota ? "（超出浏览器可用空间）" : ""}</option>)}
     </select>
   </Field>;
 }

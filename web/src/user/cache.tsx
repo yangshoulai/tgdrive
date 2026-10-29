@@ -1,14 +1,17 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { startCacheGroup, beginFileCache, cachedFiles, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, listCacheGroup, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type FileCacheState } from "../cache-client";
-import { Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, formatBytes, toast, type MenuItem } from "../ui";
+import { isFatalCacheError, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, storageEstimate, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
+import { BRAND } from "../brand";
+import { effectiveMiB } from "../cache-store";
+import { FileTile, getFileKind } from "../files";
+import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, Tabs, copyText, formatBytes, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 import { usePrivateAccess } from "./private-session";
-import { TrayBar } from "./tray";
-import { TaskListControls, TaskListFooter, TaskSummary, useTaskList, type TaskFilter } from "./task-list";
+import { LocationText, TaskControls, TaskListFooter, TaskStats, remainingText, useTaskList, useTransferRates, type TaskFilter, type TaskStat } from "./task-list";
 import { cacheFolderFiles } from "./cache-folders";
 
 export type CacheReport = { state: "none" | "partial" | "auto" | "manual" | "caching"; percent?: number; blocked?: string };
-type CacheJob = { id: string; file: CacheFile; group?: string; status: "queued" | "active" | "paused" | "done" | "error" | "canceled"; bytes: number; size: number; error: string; waiting: boolean; completedAt?: number };
+/** retrying：暂时失败后正在等待第几次自动重试（已缓存的块保留，从缺失处继续）。 */
+type CacheJob = { id: string; file: CacheFile; group?: string; status: "queued" | "active" | "paused" | "done" | "error" | "canceled"; bytes: number; size: number; error: string; waiting: boolean; retrying?: number; addedAt: number; completedAt?: number };
 type FolderCacheJob = { id: string; prefixes: string[]; group?: string; status: "active" | "error"; files: number; error: string; toastId?: number };
 type Queue = {
   /** 浏览器支持且用户与管理员都没有关闭本机缓存；否则不显示缓存按钮与菜单项。 */
@@ -33,17 +36,20 @@ const nameOf = (file: CacheFile) => file.key.split("/").at(-1) || file.key;
 const isRunning = (job: CacheJob) => job.status === "queued" || job.status === "active";
 const percentOf = (bytes: number, size: number, complete = false) => complete ? 100 : size ? Math.min(99, Math.floor(bytes / size * 100)) : 0;
 
-function pause(signal: AbortSignal) {
+/** 网络抖动、Worker 被浏览器回收、其他页面占用等暂时失败按此间隔自动续传；连续失败（期间没有新进度）超过次数才算失败。 */
+const RETRY_DELAYS = [1000, 3000, 8000, 15000, 30000, 60000];
+
+function pause(signal: AbortSignal, delay = 1500) {
   return new Promise<void>((resolve, reject) => {
     const finish = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); resolve(); };
     const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(new DOMException("缓存已取消", "AbortError")); };
-    const timer = setTimeout(finish, 1500);
+    const timer = setTimeout(finish, delay);
     if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
   });
 }
 
 /** 队列属于已登录的应用外壳；已加入的缓存任务不受私密空间锁定影响。 */
-export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled: boolean; onOpenTasks: () => void; children: ReactNode }) {
+export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, children }: { enabled: boolean; onOpenTasks: () => void; onActiveChange?: (count: number) => void; children: ReactNode }) {
   const access = usePrivateAccess();
   const [privateCacheEnabled, setPrivateCacheEnabled] = useState(false);
   const privateReady = enabled && privateCacheEnabled && Boolean(access.grant);
@@ -90,7 +96,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
   }, [updateFolders]);
   const stop = useCallback((id: string, status: "paused" | "canceled") => {
     if (active.current?.id === id) { active.current.controller.abort(); cancelFileCache(id); }
-    update(value => value.map(job => job.id === id && isRunning(job) ? { ...job, status, waiting: false } : job));
+    update(value => value.map(job => job.id === id && isRunning(job) ? { ...job, status, waiting: false, retrying: undefined } : job));
   }, [update]);
   const cancel = useCallback((id: string) => stop(id, "canceled"), [stop]);
   const pauseJob = useCallback((id: string) => stop(id, "paused"), [stop]);
@@ -200,7 +206,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
         const bytes = Math.max(statesRef.current.get(id)?.bytes ?? 0, cachedRef.current.get(id)?.bytes ?? 0, found?.bytes ?? 0);
         const jobId = crypto.randomUUID();
         if (!group && api.isPrivatePath(file.key)) group = jobId;
-        queued.set(id, { id: jobId, file, group: api.isPrivatePath(file.key) ? group : undefined, status: "queued", bytes, size: file.size, error: "", waiting: false });
+        queued.set(id, { id: jobId, file, group: api.isPrivatePath(file.key) ? group : undefined, status: "queued", bytes, size: file.size, error: "", waiting: false, addedAt: Date.now() });
       }
       added = queued.size;
       return added ? [...value.filter(job => !queued.has(cacheFileId(job.file))), ...queued.values()] : value;
@@ -265,7 +271,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
       && !foldersRef.current.some(folder => folder.group === job.group && folder.status === "active")) {
       prepareGroup(group.paths, job.group!);
     }
-    update(value => value.map(item => item.id === id ? { ...item, status: "queued", error: "", waiting: false } : item));
+    update(value => value.map(item => item.id === id ? { ...item, status: "queued", error: "", waiting: false, retrying: undefined } : item));
   }, [canCache, update, prepareGroup]);
 
   useEffect(() => {
@@ -290,18 +296,34 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
           await group.ready;
           controller.signal.throwIfAborted();
         }
-        let result;
-        do {
-          patch({ status: "active", waiting: false });
-          result = await beginFileCache(job.file, job.id, controller.signal, job.group);
-          if (result.busy) { patch({ status: "queued", waiting: true }); await pause(controller.signal); }
-        } while (result.busy);
-        progress(result);
-        let state: FileCacheState = result;
-        while (!state.complete) { state = await stepFileCache(job.id, controller.signal, progress); progress(state); }
-        patch({ status: "done", completedAt: Date.now() });
+        let failures = 0, reached = -1;
+        while (true) {
+          try {
+            let result;
+            do {
+              patch({ status: "active", waiting: false });
+              result = await beginFileCache(job.file, job.id, controller.signal, job.group);
+              if (result.busy) { patch({ status: "queued", waiting: true }); await pause(controller.signal); }
+            } while (result.busy);
+            progress(result);
+            let state: FileCacheState = result;
+            while (!state.complete) {
+              state = await stepFileCache(job.id, controller.signal, progress); progress(state);
+              if (state.bytes > reached) { reached = state.bytes; failures = 0; patch({ retrying: undefined }); }
+            }
+            break;
+          } catch (reason) {
+            // 已写入的块都保留：暂时失败时稍等片刻重新开始，只补缺失的部分；空间不足等无法自动解决的失败直接报告。
+            if (controller.signal.aborted || isFatalCacheError(reason) || failures >= RETRY_DELAYS.length) throw reason;
+            failures++;
+            patch({ status: "active", waiting: true, retrying: failures, error: api.errorMessage(reason, "连接中断") });
+            cancelFileCache(job.id);
+            await pause(controller.signal, RETRY_DELAYS[failures - 1]);
+          }
+        }
+        patch({ status: "done", completedAt: Date.now(), retrying: undefined, error: "" });
       } catch (reason) {
-        if (!controller.signal.aborted) patch({ status: "error", error: api.errorMessage(reason, "缓存失败，请稍后重试") });
+        if (!controller.signal.aborted) patch({ status: "error", retrying: undefined, error: api.errorMessage(reason, "缓存失败，请稍后重试") });
       } finally {
         cancelFileCache(job.id);
         if (active.current === running) active.current = null;
@@ -333,6 +355,8 @@ export function CacheTasksProvider({ enabled, onOpenTasks, children }: { enabled
     });
   }, []);
   const visibleJobs = useMemo(() => enabled ? jobs : [], [enabled, jobs]);
+  const activeCount = enabled ? jobs.filter(isRunning).length + folders.filter(folder => folder.status === "active").length : 0;
+  useEffect(() => { onActiveChange?.(activeCount); }, [activeCount, onActiveChange]);
   const visibleFolders = useMemo(() => enabled ? folders : [], [enabled, folders]);
   const value: Queue = useMemo(() => ({ available, privateReady, jobs: visibleJobs, folders: visibleFolders, enqueueFolders: startFolder, cancelFolder, retryFolder, states, cached, showTasks: onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pause: pauseJob, retry, removeJobs,
     clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: files => setRemoving(Array.isArray(files) ? files : [files]), forget, report }),
@@ -431,24 +455,75 @@ export function cacheSelection(queue: Queue | null, files: CacheFile[]) {
 
 const cacheGroup = (job: CacheJob): TaskFilter => job.status === "done" ? "done" : job.status === "error" ? "error" : job.status === "paused" || job.status === "canceled" ? "paused" : "active";
 const cacheDescription = (job: CacheJob) => `${nameOf(job.file)} ${api.privatePathLabel(job.file.key)}`;
+const folderOf = (key: string) => key.slice(0, key.lastIndexOf("/") + 1);
+const CACHE_LABEL: Record<CacheJob["status"], string> = { queued: "排队中", active: "缓存中", paused: "已暂停", canceled: "已暂停", done: "已完成", error: "失败" };
+const CACHE_TONE: Record<CacheJob["status"], "neutral" | "accent" | "success" | "danger" | "warning"> = { queued: "neutral", active: "accent", paused: "neutral", canceled: "neutral", done: "success", error: "danger" };
+export type CacheTab = "tasks" | "files";
 
-export function CacheTasks({ onClose, onSettings }: { onClose: () => void; onSettings: () => void }) {
-  const queue = useContext(CacheContext)!;
+/** 任务中心 · 本机缓存：「缓存任务」管理手动缓存的进度，「已缓存的文件」浏览、清理这台设备上的副本。 */
+export function CachePage({ tab, onTabChange, onSettings, onOpenFolder }: { tab: CacheTab; onTabChange: (tab: CacheTab) => void; onSettings: () => void; onOpenFolder: (prefix: string, privateSpace?: boolean) => void }) {
+  useDocumentTitle(`本机缓存 · ${BRAND}`);
+  const queue = useContext(CacheContext);
+  const [stats, setStats] = useState<CacheStats | null>(null);
+  // 浏览器配额：上限按「设置值与配额的较小者」显示，和 Worker 实际生效的容量一致。
+  const [quota, setQuota] = useState<number | null>(null);
+  useEffect(() => {
+    if (!cacheSupported()) return;
+    let alive = true;
+    const read = () => void Promise.all([cacheStats(), storageEstimate()]).then(([value, estimate]) => { if (alive) { setStats(value); setQuota(estimate?.quota || null); } }).catch(() => undefined);
+    read();
+    window.addEventListener("tessera:cache-changed", read);
+    const timer = window.setInterval(read, 15000);
+    return () => { alive = false; window.removeEventListener("tessera:cache-changed", read); window.clearInterval(timer); };
+  }, []);
+  const header = <PageHeader title="本机缓存" description="把文件加密保存在这台设备的浏览器里，再次打开或离线查看时不必重新下载。手动缓存优先保留，空间不够时先移除自动缓存。"
+    actions={<Button icon="settings" onClick={onSettings}>缓存设置</Button>} />;
+  if (!cacheSupported() || !queue) return <div className="task-page cache-page">{header}
+    <EmptyState icon="monitor" title="这个浏览器不能使用本机缓存" description="需要通过 https:// 地址访问，并使用较新的 Chrome、Edge、Firefox 或 Safari；隐私（无痕）模式下无法使用。" /></div>;
+  return <div className="task-page cache-page">
+    {header}
+    <Tabs label="本机缓存" value={tab} onChange={onTabChange} options={[
+      { value: "tasks", label: "缓存任务", icon: "list", count: queue.jobs.filter(isRunning).length || undefined },
+      { value: "files", label: "已缓存的文件", icon: "hardDrive" },
+    ]} />
+    {!queue.available && <Notice>本机缓存已关闭，或管理员未开放。可以在<button type="button" className="link-button" onClick={onSettings}>缓存设置</button>中开启。</Notice>}
+    {tab === "tasks" ? <CacheTaskList queue={queue} stats={stats} quota={quota} onSettings={onSettings} onOpenFolder={onOpenFolder} />
+      : <CachedFileList privateReady={queue.privateReady} stats={stats} quota={quota} onOpenFolder={onOpenFolder} onSettings={onSettings} />}
+  </div>;
+}
+
+/** 本机占用的概览卡片：普通层（与私密层）已用／上限。 */
+function usageStat(stats: CacheStats | null, quota: number | null, onSettings: () => void): TaskStat {
+  const used = stats ? stats.normal.bytes + stats.private.bytes : 0;
+  const configured = stats ? (stats.settings.maxMiB + (stats.settings.private ? stats.settings.privateMaxMiB : 0)) * 1048576 : 0;
+  const limit = quota ? Math.min(configured, quota) : configured;
+  return { key: "usage", label: "本机占用", icon: "hardDrive", tone: limit && used / limit > 0.9 ? "danger" : "neutral", value: stats ? formatBytes(used) : "—",
+    detail: stats ? `上限 ${formatBytes(limit)} · 点击调整` : "正在读取", onSelect: onSettings };
+}
+
+function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queue: Queue; stats: CacheStats | null; quota: number | null; onSettings: () => void; onOpenFolder: (prefix: string, privateSpace?: boolean) => void }) {
   const { jobs } = queue;
   const describe = useCallback((job: CacheJob) => api.isPrivatePath(job.file.key) && !queue.privateReady ? "私密文件" : cacheDescription(job), [queue.privateReady]);
   const list = useTaskList(jobs, describe, cacheGroup);
   const [removing, setRemoving] = useState<string[] | null>(null);
+  const running = jobs.filter(isRunning);
+  const rates = useTransferRates(running.filter(job => job.status === "active" && !job.waiting).map(job => [job.id, job.bytes]));
+  const speed = running.reduce((sum, job) => sum + (rates.get(job.id) ?? 0), 0);
+  const left = running.reduce((sum, job) => sum + Math.max(0, job.size - job.bytes), 0), total = running.reduce((sum, job) => sum + job.size, 0);
   const adding = queue.folders.filter(folder => folder.status === "active").length;
-  const active = jobs.filter(isRunning).length + adding;
-  const done = jobs.filter(job => job.status === "done").length;
-  const failed = jobs.filter(job => job.status === "error").length + queue.folders.filter(folder => folder.status === "error").length;
   const runningChosen = list.chosen.filter(isRunning);
   const resumable = list.chosen.filter(job => ["paused", "canceled", "error"].includes(job.status));
-  return <Modal title="本机缓存任务" icon="monitor" size="xl" className={`task-window${jobs.some(job => api.isPrivatePath(job.file.key)) || queue.folders.some(folder => folder.prefixes.some(api.isPrivatePath)) ? " private-dialog" : ""}`} onClose={onClose} initialFocus="dialog"
-    description="隐藏窗口或锁定私密空间后，已加入的缓存任务继续。"
-    footer={<><Button variant="ghost" icon="settings" onClick={onSettings}>缓存设置</Button><span className="task-window-footnote">仅保存到当前浏览器</span><Button onClick={onClose}>隐藏窗口</Button></>}>
-    <TaskSummary active={active} done={done} failed={failed} />
-    {!queue.available && <Notice>本机缓存尚未开启或当前浏览器不支持，请到缓存设置中查看。</Notice>}
+  const toggle = (filter: TaskFilter) => list.setFilter(list.filter === filter ? "" : filter);
+  return <>
+    <TaskStats label="缓存任务概览" progress={running.length ? { percent: total ? (total - left) / total * 100 : null, label: "进行中任务的总进度" } : null} items={[
+      { key: "active", label: "进行中", icon: "monitor", tone: "accent", live: running.length + adding > 0, value: (running.length + adding).toLocaleString("zh-CN"),
+        detail: running.length ? speed > 0 ? `${formatBytes(speed)}/s · ${remainingText(left / speed)}` : `剩余 ${formatBytes(left)}` : adding ? "正在读取文件夹" : "逐个缓存，避免占满网络",
+        selected: list.filter === "active", onSelect: () => toggle("active") },
+      { key: "done", label: "已完成", icon: "checkCircle", tone: "success", value: list.counts.done.toLocaleString("zh-CN"), detail: "本次登录期间", selected: list.filter === "done", onSelect: () => toggle("done") },
+      { key: "error", label: "失败", icon: "alert", tone: list.counts.error ? "danger" : "neutral", value: list.counts.error.toLocaleString("zh-CN"),
+        detail: list.counts.error ? "空间不足等需手动处理" : "中断会自动重试", selected: list.filter === "error", onSelect: () => toggle("error") },
+      usageStat(stats, quota, onSettings),
+    ]} />
     {queue.folders.length > 0 && <div className="task-folder-notices">{queue.folders.map(folder => {
       const path = folder.prefixes.map(prefix => api.isPrivatePath(prefix) && !queue.privateReady ? "私密文件夹" : api.privatePathLabel(prefix)).join("、");
       return <Notice key={folder.id} className="task-folder-notice" icon="folder" tone={folder.status === "error" ? "danger" : "info"} role={folder.status === "error" ? "alert" : "status"}>
@@ -462,44 +537,189 @@ export function CacheTasks({ onClose, onSettings }: { onClose: () => void; onSet
         </div>
       </Notice>;
     })}</div>}
-    <TaskListControls list={list} noun="缓存" menu={<Menu label="清理缓存任务记录" items={[
-      { label: "清理已结束记录", icon: "trash", danger: true, disabled: !jobs.some(job => !isRunning(job)), onSelect: () => setRemoving(jobs.filter(job => !isRunning(job)).map(job => job.id)) },
+    <TaskControls list={list} noun="缓存" menu={<Menu label="清理缓存任务记录" icon="trash" items={[
+      { label: "清理已结束的记录", icon: "trash", danger: true, disabled: !jobs.some(job => !isRunning(job)), onSelect: () => setRemoving(jobs.filter(job => !isRunning(job)).map(job => job.id)) },
     ]} />} actions={<>
       {runningChosen.length > 0 && <Button size="sm" icon="pause" onClick={() => { runningChosen.forEach(job => queue.pause(job.id)); list.clearSelection(); }}>暂停</Button>}
-      {resumable.length > 0 && <Button size="sm" icon="play" disabled={!queue.available} onClick={() => { resumable.forEach(job => queue.retry(job.id)); list.clearSelection(); }}>继续缓存</Button>}
-      {list.chosen.length > 0 && <Menu label="所选缓存的更多操作" items={[
-        { label: "清除所选文件的缓存", icon: "trash", danger: true, disabled: !queue.privateReady && list.chosen.some(job => api.isPrivatePath(job.file.key)), onSelect: () => queue.remove(list.chosen.map(job => job.file)) },
+      {resumable.length > 0 && <Button size="sm" icon="play" disabled={!queue.available} onClick={() => { resumable.forEach(job => queue.retry(job.id)); list.clearSelection(); }}>继续</Button>}
+      <Menu label="所选缓存的更多操作" items={[
+        { label: "清除所选文件的本机缓存", icon: "trash", danger: true, disabled: !queue.privateReady && list.chosen.some(job => api.isPrivatePath(job.file.key)), onSelect: () => queue.remove(list.chosen.map(job => job.file)) },
         { label: "删除所选任务记录", icon: "x", danger: true, divider: true, onSelect: () => setRemoving(list.chosen.map(job => job.id)) },
-      ]} />}
+      ]} />
     </>} />
-    {!list.visible.length ? queue.folders.length ? null : <EmptyState compact icon="monitor" title={jobs.length ? "没有符合条件的缓存任务" : "还没有缓存任务"} description={jobs.length ? "试试其他名称或任务状态。" : "在文件或文件夹菜单中选择「缓存到本机」，可批量保存完整文件。"} />
-      : <ul className="task-list" aria-label="缓存任务列表">{list.visible.map(job => {
-        const running = isRunning(job), percent = percentOf(job.bytes, job.size, job.status === "done");
-        const hidden = api.isPrivatePath(job.file.key) && !queue.privateReady;
-        const detail = job.status === "error" ? hidden ? "缓存失败，请解锁后查看详情" : job.error : job.status === "queued" ? job.waiting ? "其他页面正在缓存，等待完成…" : "排队中" : job.status === "paused" || job.status === "canceled" ? "已暂停，已缓存的部分会保留" : job.status === "done" ? "完整文件已缓存" : "正在缓存";
-        const folder = job.file.key.slice(0, job.file.key.lastIndexOf("/") + 1);
-        const name = hidden ? "私密文件" : nameOf(job.file), path = hidden ? "私密空间已锁定" : api.privatePathLabel(folder);
-        const status = job.status === "error" ? "缓存失败" : job.status === "queued" ? "排队中" : job.status === "paused" || job.status === "canceled" ? "已暂停" : job.status === "done" ? "已完成" : "缓存中";
-        return <li key={job.id} className={`task-row is-${job.status}${list.selected.has(job.id) ? " is-selected" : ""}`}>
-          <Checkbox checked={list.selected.has(job.id)} label={`选择 ${name}`} onChange={checked => list.toggle(job.id, checked)} />
-          <span className="task-row-icon"><Icon name={api.isPrivatePath(job.file.key) ? "lock" : "monitor"} size={22} /></span>
-          <div className="task-row-content"><strong title={name}><span>{name}</span></strong><small className="task-row-path" title={path}><Icon name={api.isPrivatePath(job.file.key) ? "lock" : "folder"} size={12} /><span>{path}</span></small></div>
-          <div className="task-row-transfer">
-            <div className="task-row-status"><span>{status}</span>{job.status !== "done" && <span>{percent}%</span>}</div>
-            {job.status !== "done" && <TrayBar percent={percent} label={`${name} 缓存进度`} paused={job.status !== "active"} />}
-            <small title={detail}>{job.status === "error" ? detail : `${formatBytes(job.bytes)} / ${formatBytes(job.size)}${job.waiting ? " · 等待其他页面完成" : job.status === "paused" || job.status === "canceled" ? " · 已缓存部分保留" : ""}`}</small>
-          </div><div className="task-row-actions">
-            {running ? <IconButton icon="pause" size="sm" label={`暂停缓存 ${name}`} onClick={() => queue.pause(job.id)} />
+    <div className="file-surface task-surface">
+      {!list.visible.length ? queue.folders.length ? null : <EmptyState icon="monitor" title={jobs.length ? "没有符合条件的缓存任务" : "还没有缓存任务"}
+        description={jobs.length ? "试试其他名称或任务状态。" : "在文件或文件夹菜单中选择「缓存到本机」，完整文件会保存到这台设备，离线也能打开。"}
+        action={jobs.length ? <Button onClick={list.clearFilters}>清除筛选</Button> : undefined} />
+        : <div className="data-table task-table cache-table" role="table" aria-label="缓存任务">
+          <div className="data-row data-head" role="row">
+            <span className="cell-check" role="columnheader"><Checkbox checked={list.allSelected} indeterminate={list.chosen.length > 0 && !list.allSelected} label="选择本页全部缓存任务" onChange={list.selectPage} /></span>
+            <span role="columnheader">文件</span><span role="columnheader">进度</span><span role="columnheader">位置</span><span role="columnheader">状态</span>
+            <span className="cell-actions" role="columnheader"><span className="sr-only">操作</span></span>
+          </div>
+          {list.visible.map(job => {
+            const running = isRunning(job), hidden = api.isPrivatePath(job.file.key) && !queue.privateReady;
+            const name = hidden ? "私密文件" : nameOf(job.file), folder = folderOf(job.file.key), secret = api.isPrivatePath(job.file.key);
+            const checked = list.selected.has(job.id);
+            const quick = running ? <IconButton icon="pause" size="sm" label={`暂停缓存 ${name}`} onClick={() => queue.pause(job.id)} />
               : job.status !== "done" ? <IconButton icon="play" size="sm" label={`继续缓存 ${name}`} disabled={!queue.available} onClick={() => queue.retry(job.id)} />
-                : <IconButton icon="info" size="sm" label={`查看 ${name} 的缓存`} disabled={hidden} onClick={() => queue.inspect(job.file)} />}
-            <Menu label={`${name} 的更多操作`} items={[
-              { label: "清除文件的本机缓存", icon: "trash", danger: true, disabled: hidden, onSelect: () => queue.remove(job.file) },
-              { label: "删除任务记录", icon: "x", danger: true, divider: true, onSelect: () => setRemoving([job.id]) },
-            ]} />
-          </div></li>;
-      })}</ul>}
+                : <IconButton icon="info" size="sm" label={`查看 ${name} 的缓存`} disabled={hidden} onClick={() => queue.inspect(job.file)} />;
+            return <div key={job.id} className={`data-row task-item is-${job.status}${checked ? " is-selected" : ""}`} role="row">
+              <span className="cell-check" role="cell"><Checkbox checked={checked} label={`选择 ${name}`} onChange={value => list.toggle(job.id, value)} /></span>
+              <div className="cell-name" role="cell">
+                {hidden ? <span className="task-lock-tile"><Icon name="lock" size={18} /></span> : <FileTile kind={getFileKind(job.file.content_type, job.file.key)} />}
+                <div className="name-stack"><strong className="task-name" title={name}>{name}</strong><small className="task-subline">{formatBytes(job.size)}{secret ? " · 私密" : ""}</small></div>
+              </div>
+              <div role="cell"><CacheProgress job={job} rate={rates.get(job.id) ?? 0} hidden={hidden} /></div>
+              <div role="cell" className="muted">{hidden ? <span className="task-location"><Icon name="lock" size={12} /><span className="task-location-text"><span>私密空间已锁定</span></span></span>
+                : <button type="button" className="task-location" title={`打开所在文件夹：${api.privatePathLabel(folder)}`} onClick={() => onOpenFolder(folder, secret)}>
+                  <Icon name={secret ? "lock" : "folder"} size={12} /><LocationText folder={folder} /></button>}</div>
+              <div className="task-state" role="cell"><Badge tone={job.retrying ? "warning" : CACHE_TONE[job.status]} dot={job.status !== "done"} icon={job.status === "done" ? "check" : undefined}>
+                {job.retrying ? "自动重试" : job.status === "queued" && job.waiting ? "等待中" : CACHE_LABEL[job.status]}</Badge></div>
+              <div className="cell-actions" role="cell">{quick}<Menu label={`${name} 的更多操作`} items={[
+                ...(!hidden ? [{ label: "打开所在文件夹", icon: "folder" as const, onSelect: () => onOpenFolder(folder, secret) }] : []),
+                ...(job.status === "error" && !hidden ? [{ label: "复制失败原因", icon: "alert" as const, onSelect: () => void copyText(job.error, "失败原因已复制") }] : []),
+                { label: "清除文件的本机缓存", icon: "trash", danger: true, divider: true, disabled: hidden, onSelect: () => queue.remove(job.file) },
+                { label: "删除任务记录", icon: "x", danger: true, onSelect: () => setRemoving([job.id]) },
+              ]} /></div>
+            </div>;
+          })}
+        </div>}
+    </div>
     <TaskListFooter list={list} />
     {removing && <ConfirmDialog title={`删除 ${removing.length} 个缓存任务记录？`} confirmLabel="删除记录" description="所选任务会停止并从列表移除，已经缓存的内容和云端文件会保留。如需释放本机空间，请选择「清除文件的本机缓存」。"
       onClose={() => setRemoving(null)} onConfirm={() => { queue.removeJobs(removing); setRemoving(null); list.clearSelection(); }} />}
-  </Modal>;
+  </>;
+}
+
+function CacheProgress({ job, rate, hidden }: { job: CacheJob; rate: number; hidden: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  if (job.status === "done") return <div className="task-progress is-done"><span className="task-figure">{formatBytes(job.size)}</span><small>完整文件已保存到这台设备</small></div>;
+  if (job.status === "error") {
+    const message = hidden ? "缓存失败，请解锁后查看详情" : job.error || "缓存失败";
+    return <button type="button" className={`task-failure${expanded ? " is-expanded" : ""}`} title={expanded ? "收起" : message} aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      <Icon name="alert" size={13} /><span>{message}</span></button>;
+  }
+  const percent = percentOf(job.bytes, job.size);
+  const detail = job.retrying ? `连接中断，正在第 ${job.retrying} 次自动重试，已缓存的部分会保留`
+    : job.status === "queued" ? job.waiting ? "其他页面正在缓存，完成后自动开始" : `${formatBytes(job.bytes)} / ${formatBytes(job.size)} · 等待开始`
+      : job.status === "paused" || job.status === "canceled" ? `${formatBytes(job.bytes)} / ${formatBytes(job.size)} · 已暂停，已缓存的部分会保留`
+        : [`${formatBytes(job.bytes)} / ${formatBytes(job.size)}`, rate > 0 && `${formatBytes(rate)}/s`, rate > 0 && remainingText(Math.max(0, job.size - job.bytes) / rate)].filter(Boolean).join(" · ");
+  return <div className={`task-progress is-${job.retrying ? "interrupted" : job.status}`}>
+    <div className="task-progress-bar"><Progress value={percent} tone={job.status === "active" && !job.retrying ? "accent" : "neutral"} label={`缓存进度`} /><span className="task-percent">{percent}%</span></div>
+    <small title={detail}>{detail}</small>
+  </div>;
+}
+
+const CACHED_PAGE = 50;
+type CachedOrigin = "" | "manual" | "auto";
+
+/** 已缓存的文件：搜索、类型与来源筛选、排序，逐项或批量清除；私密层只在解锁且允许私密缓存时可看。 */
+function CachedFileList({ privateReady, stats, quota, onOpenFolder, onSettings }: { privateReady: boolean; stats: CacheStats | null; quota: number | null; onOpenFolder: (prefix: string, privateSpace?: boolean) => void; onSettings: () => void }) {
+  const [tier, setTier] = useState<"normal" | "private">("normal");
+  const [search, setSearch] = useState(""), [query, setQuery] = useState("");
+  const [kind, setKind] = useState<"" | "image" | "video" | "audio" | "other">("");
+  const [origin, setOrigin] = useState<CachedOrigin>("");
+  const [sort, setSort] = useState<"recent" | "size" | "name">("recent");
+  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState<Awaited<ReturnType<typeof cachedItems>> | null>(null);
+  const [error, setError] = useState("");
+  const [selected, setSelected] = useState(new Set<string>());
+  const [removing, setRemoving] = useState<CachedItem[] | null>(null);
+  const [revision, setRevision] = useState(0);
+  const secret = tier === "private";
+  useEffect(() => { const timer = window.setTimeout(() => setQuery(search.trim()), 250); return () => window.clearTimeout(timer); }, [search]);
+  useEffect(() => { setOffset(0); setSelected(new Set()); }, [tier, query, kind, origin, sort]);
+  useEffect(() => { if (!privateReady && secret) setTier("normal"); }, [privateReady, secret]);
+  useEffect(() => {
+    const changed = () => setRevision(value => value + 1);
+    window.addEventListener("tessera:cache-changed", changed);
+    return () => window.removeEventListener("tessera:cache-changed", changed);
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    setError("");
+    void cachedItems({ private: secret, query, kind, origin, sort, offset, limit: CACHED_PAGE })
+      .then(value => { if (alive) { setPage(value); setSelected(current => new Set([...current].filter(key => value.items.some(item => item.key === key)))); } })
+      .catch(reason => { if (alive) setError(api.errorMessage(reason, "读取本机缓存失败，请刷新页面后重试")); });
+    return () => { alive = false; };
+  }, [secret, query, kind, origin, sort, offset, revision]);
+  const items = page?.items ?? [];
+  const chosen = items.filter(item => selected.has(item.key));
+  const allSelected = items.length > 0 && chosen.length === items.length;
+  const filtered = Boolean(query || kind || origin);
+  return <>
+    <TaskStats label="已缓存文件概览" items={[
+      { key: "files", label: filtered ? "符合条件" : secret ? "私密文件" : "普通文件", icon: secret ? "lock" : "folder", value: page ? page.total.toLocaleString("zh-CN") : "—",
+        detail: page ? `${formatBytes(page.bytes)}${stats ? ` / 上限 ${formatBytes(effectiveMiB(secret ? stats.settings.privateMaxMiB : stats.settings.maxMiB, quota) * 1048576)}` : ""}` : "正在读取" },
+      { key: "manual", label: "手动缓存", icon: "pin", tone: "success", value: page && !filtered ? page.manual.toLocaleString("zh-CN") : "—", detail: "优先保留，不会被自动移除",
+        selected: origin === "manual", onSelect: () => setOrigin(origin === "manual" ? "" : "manual") },
+      { key: "auto", label: "自动缓存", icon: "refresh", value: page && !filtered ? (page.total - page.manual).toLocaleString("zh-CN") : "—", detail: "空间不足时最先移除",
+        selected: origin === "auto", onSelect: () => setOrigin(origin === "auto" ? "" : "auto") },
+      usageStat(stats, quota, onSettings),
+    ]} />
+    <div className="toolbar task-search cached-search">
+      {privateReady && <Segmented label="缓存层" showLabels value={tier} onChange={setTier} options={[{ value: "normal", label: "普通文件", icon: "folder" }, { value: "private", label: "私密文件", icon: "lock" }]} />}
+      <SearchInput value={search} onChange={setSearch} placeholder="搜索文件名或路径" label="搜索已缓存的文件" />
+    </div>
+    <div className="task-controls">
+      {chosen.length > 0 && <div className="toolbar selection-bar task-selection" role="toolbar" aria-label="已缓存文件批量操作">
+        <Checkbox checked={allSelected} indeterminate={!allSelected} label="选择本页全部文件" onChange={checked => setSelected(checked ? new Set(items.map(item => item.key)) : new Set())} />
+        <span className="selection-count"><span className="task-selection-prefix">已选择 </span>{chosen.length} 项 · {formatBytes(chosen.reduce((sum, item) => sum + item.bytes, 0))}</span>
+        <div className="toolbar-actions"><Button size="sm" variant="danger" icon="trash" onClick={() => setRemoving(chosen)}>清除缓存</Button><IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} /></div>
+      </div>}
+      <div className={`task-toolbar${chosen.length ? " is-selecting" : ""}`} aria-hidden={chosen.length > 0}>
+        <Segmented label="文件类型" showLabels value={kind} onChange={setKind} options={[
+          { value: "", label: "全部" }, { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" }, { value: "other", label: "其他" },
+        ]} />
+        <span className="task-toolbar-meta">
+          <span className="muted">{page ? `${page.total.toLocaleString("zh-CN")} 个文件 · ${formatBytes(page.bytes)}` : "正在读取"}</span>
+          <Menu label={`排序：${sort === "recent" ? "最近使用" : sort === "size" ? "占用空间" : "名称"}`} icon="sequence" items={[
+            { label: "最近使用", icon: "clock", checked: sort === "recent", onSelect: () => setSort("recent") },
+            { label: "占用空间", icon: "hardDrive", checked: sort === "size", onSelect: () => setSort("size") },
+            { label: "名称", icon: "fileText", checked: sort === "name", onSelect: () => setSort("name") },
+          ]} />
+        </span>
+      </div>
+    </div>
+    <div className="file-surface task-surface">
+      {error ? <EmptyState icon="alert" title="读取失败" description={error} action={<Button onClick={() => setRevision(value => value + 1)}>重试</Button>} />
+        : !page ? <SkeletonRows rows={5} />
+          : !items.length ? <EmptyState icon="hardDrive" title={filtered ? "没有符合条件的文件" : "这台设备上还没有缓存"}
+            description={filtered ? "试试其他名称、类型或来源。" : "预览过的文件会自动缓存；在文件菜单中选择「缓存到本机」可以完整保存并优先保留。"}
+            action={filtered ? <Button onClick={() => { setSearch(""); setQuery(""); setKind(""); setOrigin(""); }}>清除筛选</Button> : undefined} />
+            : <div className="data-table task-table cached-table" role="table" aria-label="已缓存的文件">
+              <div className="data-row data-head" role="row">
+                <span className="cell-check" role="columnheader"><Checkbox checked={allSelected} indeterminate={chosen.length > 0 && !allSelected} label="选择本页全部文件" onChange={checked => setSelected(checked ? new Set(items.map(item => item.key)) : new Set())} /></span>
+                <span role="columnheader">文件</span><span role="columnheader">已缓存</span><span role="columnheader">位置</span><span role="columnheader">来源</span>
+                <span className="cell-actions" role="columnheader"><span className="sr-only">操作</span></span>
+              </div>
+              {items.map(item => {
+                const name = item.path.split("/").at(-1) || item.path, folder = folderOf(item.path), checked = selected.has(item.key);
+                return <div key={item.key} className={`data-row task-item${checked ? " is-selected" : ""}`} role="row">
+                  <span className="cell-check" role="cell"><Checkbox checked={checked} label={`选择 ${name}`} onChange={value => setSelected(current => { const next = new Set(current); if (value) next.add(item.key); else next.delete(item.key); return next; })} /></span>
+                  <div className="cell-name" role="cell"><FileTile kind={item.kind === "thumb" ? "image" : getFileKind(null, item.path)} />
+                    <div className="name-stack"><strong className="task-name" title={name}>{name}</strong><small className="task-subline">最近使用 {formatDateTime(item.accessed / 1000)}</small></div></div>
+                  <div role="cell"><div className="task-progress is-done">
+                    {item.complete ? <span className="task-figure">{formatBytes(item.bytes)}</span>
+                      : <div className="task-progress-bar"><Progress value={percentOf(item.bytes, item.size)} tone="neutral" label={`${name} 已缓存比例`} /><span className="task-percent">{percentOf(item.bytes, item.size)}%</span></div>}
+                    <small>{item.complete ? "完整文件" : `${formatBytes(item.bytes)} / ${formatBytes(item.size)}（看过的片段）`}</small></div></div>
+                  <div role="cell" className="muted"><button type="button" className="task-location" title={`打开所在文件夹：${api.privatePathLabel(folder)}`} onClick={() => onOpenFolder(folder, secret)}>
+                    <Icon name={secret ? "lock" : "folder"} size={12} /><LocationText folder={folder} /></button></div>
+                  <div className="task-state" role="cell"><Badge tone={item.manual ? "success" : "neutral"} icon={item.manual ? "pin" : undefined}>{item.manual ? "手动" : "自动"}</Badge></div>
+                  <div className="cell-actions" role="cell"><IconButton icon="trash" size="sm" label={`清除 ${name} 的本机缓存`} onClick={() => setRemoving([item])} /></div>
+                </div>;
+              })}
+            </div>}
+    </div>
+    {page && page.total > CACHED_PAGE && <footer className="list-footer task-footer"><Pagination number={Math.floor(offset / CACHED_PAGE) + 1} total={page.total} pageSize={CACHED_PAGE} loading={false}
+      hasPrevious={offset > 0} hasNext={offset + CACHED_PAGE < page.total} previous={() => setOffset(Math.max(0, offset - CACHED_PAGE))} next={() => setOffset(offset + CACHED_PAGE)} /></footer>}
+    {removing && <ConfirmDialog title={removing.length === 1 ? "清除本机缓存？" : `清除 ${removing.length} 个文件的本机缓存？`} confirmLabel="清除缓存"
+      description={`${removing.length === 1 ? `“${removing[0].path.split("/").at(-1)}”` : "所选文件"}在这台设备上的副本会被删除，释放 ${formatBytes(removing.reduce((sum, item) => sum + item.bytes, 0))}。云端文件不受影响。`}
+      onClose={() => setRemoving(null)} onConfirm={async () => {
+        try { for (const item of removing) await clearCache("entry", item.key); toast.success("已清除本机缓存"); }
+        catch (reason) { toast.error(api.errorMessage(reason, "清除失败，请稍后重试")); }
+        finally { setRemoving(null); setSelected(new Set()); setRevision(value => value + 1); }
+      }} />}
+  </>;
 }
