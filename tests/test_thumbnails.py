@@ -310,7 +310,6 @@ class ThumbnailTests(unittest.TestCase):
         admin = asyncio.run(self.client.login("admin", "admin@example.com", "admin password"))
         status, queue, headers = self.call("GET", "/api/admin/v1/maintenance/thumbnails", headers=admin)
         self.assertEqual(status, 200)
-        self.assertFalse(queue["automatic_remote_reads"])
         self.assertNotIn("secret-subdirectory", json.dumps(queue))
         self.assertNotIn("photo.jpg", json.dumps(queue))
         self.assertEqual(headers["cache-control"], "no-store")

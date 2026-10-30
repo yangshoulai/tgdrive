@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.16.1
+// @version      0.17.0
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -1034,7 +1034,20 @@
     guangya: ["api.guangyapan.com"], quark: ["drive-pc.quark.cn", "drive-social-api.quark.cn"],
     uc: ["pc-api.uc.cn"], "123pan": ["api.123pan.cn"],
   };
-  // These client headers belong to the server download request. GM requests keep the browser's User-Agent.
+  // Same client identities as LinkSwift. API headers go on the GM request that fetches the link;
+  // download headers go into the curl handed to the Tessera server.
+  const CLOUD_API_HEADERS = {
+    baidu: { "User-Agent": "pan.baidu.com" },
+    quark: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 QuarkPC/6.9.7.761 QuarkCloudDrivePC/6.9.7.761 quark-cloud-drive/2.5.40" },
+    uc: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) uc-cloud-drive/1.8.8 Chrome/100.0.4896.160 Electron/18.3.5.16-b62cf9c50d Safari/537.36 Channel/ucpan_other_ch",
+      "Sec-Ch-Ua": '"Not=A?Brand";v="99", "Chromium";v="100", "Google Chrome";v="100"' },
+    "123pan": { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) 123pan/3.2.3 Chrome/108.0.5359.215 Electron/22.3.27 Safari/537.36 WebView/1.0",
+      "Sec-Ch-Ua": '"Not?A_Brand";v="8", "Chromium";v="108"' },
+  };
+  // LinkSwift's pacing: files per batch, whether one request carries the whole batch, and a pause between batches.
+  const CLOUD_PACE = { baidu: { size: 50, many: true }, aliyun: { size: 3 }, quark: { size: 15, many: true }, uc: { size: 15, many: true } };
+  const CLOUD_PAUSE = 1000;
+  const CLOUD_BATCH_LIMIT = 1000;  // 与 Tessera 单次创建任务上限（MAX_CREATE_ITEMS）一致
   const CLOUD_DOWNLOAD_UA = {
     baidu: "pan.baidu.com",
     quark: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 QuarkPC/6.9.7.761 QuarkCloudDrivePC/6.9.7.761 quark-cloud-drive/2.5.40",
@@ -1068,7 +1081,7 @@
   }
 
   const CLOUD_LAYOUTS = {
-    baidu: ["fs_id", "server_filename", "size", "fs_id server_filename filename size isdir"],
+    baidu: ["fs_id", "server_filename", "size", "fs_id server_filename filename size isdir path"],
     aliyun: ["fileId", "name", "size", "fileId driveId name size type"],
     mcloud: ["contentID", "contentName", "contentSize", "contentID contentName contentSize contentSuffix path dirEtag caName"],
     tcloud: ["fileId", "fileName", "size", "fileId fileName size isFolder shareId"],
@@ -1163,7 +1176,8 @@
     }
     const primitive = value => typeof value === "string" && value.length <= 8192 || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value);
     const pick = (item, names) => Object.fromEntries(names.filter(key => primitive(item?.[key])).map(key => [key, item[key]]));
-    const result = { available, overflow: selected.length > 51, files: selected.slice(0, 51).map(item => pick(item, fields.split(" "))) };
+    // 1001 = CLOUD_BATCH_LIMIT + 1 (this function also runs in the page realm, so it cannot read script constants).
+    const result = { available, overflow: selected.length > 1001, files: selected.slice(0, 1001).map(item => pick(item, fields.split(" "))) };
     if (share && provider === "baidu") {
       const locals = view.locals?.dump?.() || {};
       const value = key => locals[key]?.value ?? locals[key];
@@ -1186,9 +1200,9 @@
       const code = `(() => { const node = document.currentScript; try { node.setAttribute("data-tessera-selection", JSON.stringify((${cloudReadSelection.toString()})(window, ${JSON.stringify(context.provider)}, ${JSON.stringify(fields)}, ${JSON.stringify(context.share)}))); } catch { node.setAttribute("data-tessera-selection", "{}"); } })();`;
       script = await gm.pageScript(code);
       const text = script?.getAttribute("data-tessera-selection");
-      if (!text || text.length > 256 * 1024) throw new Error();
+      if (!text || text.length > 8 * 1024 * 1024) throw new Error();
       snapshot = JSON.parse(text);
-      if (typeof snapshot.available !== "boolean" || !Array.isArray(snapshot.files) || snapshot.files.length > 51) throw new Error();
+      if (typeof snapshot.available !== "boolean" || !Array.isArray(snapshot.files) || snapshot.files.length > CLOUD_BATCH_LIMIT + 1) throw new Error();
     } catch { throw new Error("脚本无法读取网盘页面的勾选状态，请更新脚本并刷新页面；若仍失败，请检查脚本管理器的页面脚本权限"); }
     finally { script?.remove(); }
     if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
@@ -1203,20 +1217,26 @@
       hint: "此网盘的分享页暂不支持直接取链。请先将文件保存到自己的网盘，再打开「我的网盘」勾选文件；转存成功后留在分享页仍无法发送。" };
   }
 
-  /** Snapshot only file fields, never React/Vue instances or account credentials. Folders are deliberately not expanded. */
+  /** Snapshot only file fields, never React/Vue instances or account credentials. Folders are expanded only for Baidu's own drive, as in LinkSwift. */
   async function cloudSources(context) {
     if (cloudShareGuide(context)) throw new Error("请先将分享文件保存到自己的网盘，再打开「我的网盘」勾选文件；转存后请离开当前分享页");
     const [idKey, nameKey, sizeKey, fields] = CLOUD_LAYOUTS[context.provider];
     const snapshot = await cloudSelected(context);
     if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
-    if (snapshot.overflow) throw new Error(`一次最多发送 ${BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
-    const selectedFiles = snapshot.files;
+    if (snapshot.overflow) throw new Error(`一次最多发送 ${CLOUD_BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
+    let selectedFiles = snapshot.files;
+    // LinkSwift expands folders selected in Baidu's own drive (other drives ask you to open the folder first).
+    const baiduDirs = context.provider === "baidu" && !context.share ? selectedFiles.filter(item => item?.isdir) : [];
+    if (baiduDirs.length) {
+      selectedFiles = [...selectedFiles.filter(item => !item?.isdir), ...await cloudBaiduFolders(context, baiduDirs, CLOUD_BATCH_LIMIT)];
+      if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
+    }
     const files = selectedFiles.filter(item => item && item[idKey] != null && !item.isdir && !item.isFolder && !item.dirEtag && !item.caName
       && item.type !== "folder" && item.kind !== "drive#folder" && item.resType != 2 && item.file !== false && (item.Type == null || item.Type === 0)
       && (!["quark", "uc"].includes(context.provider) || item.file === true)
       && (context.provider !== "aliyun" || item.type === "file") && (context.provider !== "xunlei" || item.kind === "drive#file"));
     if (!files.length) throw new Error("请先在网盘中勾选文件；文件夹请打开后选择里面的文件");
-    if (files.length > BATCH_LIMIT) throw new Error(`一次最多发送 ${BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
+    if (files.length > CLOUD_BATCH_LIMIT) throw new Error(`一次最多发送 ${CLOUD_BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
     const session = new Map();
     const unique = new Map();
     for (const item of files) {
@@ -1235,10 +1255,16 @@
     return result;
   }
 
-  function cloudFailure(context, code) {
-    const safeCode = /^[\w.-]{1,48}$/.test(String(code)) ? `（代码 ${code}）` : "";
-    return new Error(`${context.label}未返回有效下载地址${safeCode}，请确认已登录、文件可下载，再刷新网盘页面重试`);
+  /** The provider's own explanation (like LinkSwift's 服务器说), trimmed to one short line without control characters. */
+  function cloudSays(message) {
+    const text = typeof message === "string" ? message.replace(/[\x00-\x1f\x7f]+/g, " ").trim().slice(0, 160) : "";
+    return text ? `，服务器说：${text}` : "";
   }
+  function cloudFailure(context, code, message) {
+    const safeCode = /^[\w.-]{1,48}$/.test(String(code)) ? `（代码 ${code}）` : "";
+    return new Error(`${context.label}未返回有效下载地址${safeCode}${cloudSays(message)}。请确认已登录、文件可下载，再刷新网盘页面重试`);
+  }
+  const cloudSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   function cloudOnce(context, key, factory) {
     if (!context.session.has(key)) context.session.set(key, Promise.resolve().then(factory).catch(error => { context.session.delete(key); throw error; }));
     return context.session.get(key);
@@ -1247,8 +1273,10 @@
   async function cloudRequest(context, input, { body, headers = {}, raw = false, withResponse = false } = {}) {
     const url = new URL(input);
     if (url.protocol !== "https:" || url.username || url.password || !CLOUD_API_HOSTS[context.provider]?.includes(url.hostname)) throw new Error("网盘接口地址无效");
-    const requestHeaders = { Accept: raw ? "text/html,*/*" : "application/json, text/plain, */*", Referer: context.url.split("#")[0], ...headers };
-    if (Object.keys(requestHeaders).some(name => /^(?:user-agent|proxy-authorization)$/i.test(name))) throw new Error("网盘请求不能改写浏览器身份");
+    // Like LinkSwift's standHeaders: Origin and Referer name the drive's site; client identity comes from CLOUD_API_HEADERS.
+    const origin = new URL(context.url).origin;
+    const requestHeaders = { Accept: raw ? "text/html,*/*" : "application/json, text/plain, */*", Origin: origin, Referer: origin + "/", ...headers };
+    if (Object.keys(requestHeaders).some(name => /^(?:proxy-authorization|host)$/i.test(name))) throw new Error("网盘请求头无效");
     const form = body instanceof URLSearchParams;
     if (body != null) requestHeaders["Content-Type"] = form ? "application/x-www-form-urlencoded" : "application/json;charset=UTF-8";
     const response = await gmRequest({ method: body == null ? "GET" : "POST", url: url.href, headers: requestHeaders, withCredentials: true,
@@ -1256,10 +1284,18 @@
       errorMessage: "无法连接网盘接口，请检查网络和脚本的网站访问权限", timeoutMessage: "网盘取链超时，请稍后重试",
       sizeMessage: "网盘接口返回的数据过大，请刷新网盘页面后重试" }, undefined, 2 * 1024 * 1024);
     if (isChallenge(response.status, response.responseHeaders, response.responseText || "")) throw challengeError();
-    if (response.status < 200 || response.status >= 300) throw cloudFailure(context, `HTTP-${response.status}`);
-    if (raw) return response;
+    if (raw) {
+      if (response.status < 200 || response.status >= 300) throw cloudFailure(context, `HTTP-${response.status}`);
+      return response;
+    }
+    // Error statuses usually still carry the provider's JSON code and message (e.g. Quark answers 400 with code 23018);
+    // hand it to the adapter instead of reporting a bare HTTP status.
     let data;
-    try { data = JSON.parse(response.responseText); } catch { throw new Error("网盘返回了登录、验证页面或无效数据，请在网盘网页中完成验证后重试"); }
+    try { data = JSON.parse(response.responseText); } catch {
+      if (response.status < 200 || response.status >= 300) throw cloudFailure(context, `HTTP-${response.status}`);
+      throw new Error("网盘返回了登录、验证页面或无效数据，请在网盘网页中完成验证后重试");
+    }
+    if (data === null || typeof data !== "object") throw cloudFailure(context, `HTTP-${response.status}`);
     return withResponse ? { data, headers: response.responseHeaders || "" } : data;
   }
   function cloudDownload(context, input, headers = {}) {
@@ -1317,43 +1353,87 @@
   }
 
   // $baidu.getFilesUrl / getShareData / getShareFilesUrl. OAuth consent stays in the provider's own tab.
-  async function cloudBaidu(context) {
-    let response;
-    const cached = gm.get("cloud-baidu-token");
-    const token = cached?.expires > Date.now() + 60000 ? cached.token : "";
-    if (!context.share) {
-      if (!token) throw new Error("请返回面板点击「授权百度取链」，在百度页面确认后回来重试");
-      const url = new URL("https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1");
-      url.searchParams.set("fsids", JSON.stringify([context.file.fs_id])); url.searchParams.set("access_token", token);
-      response = await cloudRequest(context, url);
-    } else {
-      const shared = await cloudOnce(context, "baidu-share", async () => {
-        const data = context.shareData || {};
-        if (!data.uk || !data.id) throw new Error("请先打开分享文件列表并完成提取码验证，再获取文件");
-        const url = new URL("https://pan.baidu.com/share/tplconfig?fields=sign,timestamp&channel=chunlei&web=1&app_id=250528&clienttype=0&view_mode=1");
-        url.searchParams.set("surl", new URL(context.url).pathname.split("/").pop());
-        url.searchParams.set("bdstoken", data.bdstoken || "");
-        const sign = await cloudRequest(context, url);
-        if (!sign.data?.sign || !sign.data?.timestamp) throw cloudFailure(context, sign.errno);
-        return { ...data, ...sign.data };
-      });
-      const url = new URL("https://pan.baidu.com/api/sharedownload?channel=chunlei&clienttype=0&web=1&app_id=250528");
-      for (const key of ["sign", "timestamp", "bdstoken", "jsToken"]) if (shared[key]) url.searchParams.set(key, shared[key]);
-      if (cloudCookie("BAIDUID")) url.searchParams.set("logid", btoa(cloudCookie("BAIDUID")));
-      const body = new URLSearchParams({ encrypt: "0", product: "share", uk: shared.uk, primaryid: shared.id, fid_list: JSON.stringify([context.file.fs_id]) });
-      if (shared.sekey) body.set("extra", JSON.stringify({ sekey: shared.sekey }));
-      response = await cloudRequest(context, url, { body });
+  const baiduToken = () => { const cached = gm.get("cloud-baidu-token"); return cached?.expires > Date.now() + 60000 ? cached.token : ""; };
+  function baiduError(context, response) {
+    if ([9019, 110, 111].includes(response.errno)) {
+      gm.set("cloud-baidu-token", null);
+      return new Error("百度取链授权已过期，请返回面板点击「授权百度取链」后重试");
     }
-    if (response.errno === 9019 || response.errno === 110 || response.errno === 111) gm.set("cloud-baidu-token", null);
-    const file = Array.isArray(response.list) && response.list.find(item => String(item.fs_id) === String(context.file.fs_id));
-    if (response.errno !== 0 || !file?.dlink) throw cloudFailure(context, response.errno);
-    const result = cloudDownload(context, file.dlink, { "User-Agent": CLOUD_DOWNLOAD_UA.baidu });
+    if (response.errno === 112) return new Error("百度网盘页面已过期，请刷新网盘页面后重试");
+    return cloudFailure(context, response.errno, response.errmsg || response.show_msg);
+  }
+  function baiduResult(context, dlink, token) {
+    const result = cloudDownload(context, dlink, { "User-Agent": CLOUD_DOWNLOAD_UA.baidu });
     if (token) {
       const url = new URL(result.url);
       if (!/(?:^|\.)(?:baidu\.com|baidupcs\.(?:com|cn|net))$/.test(url.hostname)) throw cloudFailure(context);
       url.searchParams.set("access_token", token); result.url = url.href;
     }
     return result;
+  }
+  /** My drive: up to 50 fsids per filemetas request, sent as pan.baidu.com like LinkSwift. */
+  async function cloudBaiduMany(contexts) {
+    const context = contexts[0], token = baiduToken();
+    if (!token) throw new Error("请返回面板点击「授权百度取链」，在百度页面确认后回来重试");
+    const url = new URL("https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1");
+    url.searchParams.set("fsids", JSON.stringify(contexts.map(item => item.file.fs_id))); url.searchParams.set("access_token", token);
+    const response = await cloudRequest(context, url, { headers: CLOUD_API_HEADERS.baidu });
+    if (response.errno !== 0 || !Array.isArray(response.list)) throw baiduError(context, response);
+    return contexts.map(item => {
+      const file = response.list.find(entry => String(entry.fs_id) === String(item.file.fs_id));
+      try { return file?.dlink ? baiduResult(item, file.dlink, token) : cloudFailure(item); } catch (error) { return error; }
+    });
+  }
+  async function cloudBaidu(context) {
+    if (!context.share) {
+      const [result] = await cloudBaiduMany([context]);
+      if (result instanceof Error) throw result;
+      return result;
+    }
+    const shared = await cloudOnce(context, "baidu-share", async () => {
+      const data = context.shareData || {};
+      if (!data.uk || !data.id) throw new Error("请先打开分享文件列表并完成提取码验证，再获取文件");
+      const url = new URL("https://pan.baidu.com/share/tplconfig?fields=sign,timestamp&channel=chunlei&web=1&app_id=250528&clienttype=0&view_mode=1");
+      url.searchParams.set("surl", new URL(context.url).pathname.split("/").pop());
+      url.searchParams.set("bdstoken", data.bdstoken || "");
+      const sign = await cloudRequest(context, url);
+      if (!sign.data?.sign || !sign.data?.timestamp) throw baiduError(context, sign);
+      return { ...data, ...sign.data };
+    });
+    const url = new URL("https://pan.baidu.com/api/sharedownload?channel=chunlei&clienttype=0&web=1&app_id=250528");
+    for (const key of ["sign", "timestamp", "bdstoken", "jsToken"]) if (shared[key]) url.searchParams.set(key, shared[key]);
+    if (cloudCookie("BAIDUID")) url.searchParams.set("logid", btoa(cloudCookie("BAIDUID")));
+    const body = new URLSearchParams({ encrypt: "0", product: "share", uk: shared.uk, primaryid: shared.id, fid_list: JSON.stringify([context.file.fs_id]) });
+    if (shared.sekey) body.set("extra", JSON.stringify({ sekey: shared.sekey }));
+    const response = await cloudRequest(context, url, { body });
+    if (response.errno === 0 && typeof response.list === "string") throw new Error("此文件大小超过分享页可获取的限制，请保存到自己的网盘后在网盘中发送");
+    const file = Array.isArray(response.list) && response.list.find(item => String(item.fs_id) === String(context.file.fs_id));
+    if (response.errno !== 0 || !file?.dlink) throw baiduError(context, response);
+    return baiduResult(context, file.dlink, baiduToken());
+  }
+
+  /** $baidu.getFilesList: expand selected folders in my drive (recursively, resting 3 s after every 50 listings). */
+  async function cloudBaiduFolders(context, dirs, limit) {
+    const token = baiduToken();
+    if (!token) throw new Error("发送文件夹需要先授权：请返回面板点击「授权百度取链」，在百度页面确认后回来重试");
+    const files = [];
+    let listed = 0;
+    const walk = async folders => {
+      for (const dir of folders) {
+        if (files.length > limit) return;
+        if (typeof dir.path !== "string" || !dir.path.startsWith("/")) throw new Error("无法读取所选文件夹的位置，请打开文件夹后选择里面的文件");
+        const url = new URL("https://pan.baidu.com/rest/2.0/xpan/file?method=list&showempty=1");
+        url.searchParams.set("dir", dir.path); url.searchParams.set("access_token", token);
+        const response = await cloudRequest(context, url, { headers: CLOUD_API_HEADERS.baidu });
+        if (response.errno !== 0 && response.errmsg !== "succ") throw baiduError(context, response);
+        const list = Array.isArray(response.list) ? response.list : [];
+        files.push(...list.filter(item => !item.isdir).map(item => ({ fs_id: item.fs_id, server_filename: item.server_filename, size: item.size, isdir: 0 })));
+        if (++listed % 50 === 0) await cloudSleep(3000);
+        await walk(list.filter(item => item.isdir).map(item => ({ path: item.path })));
+      }
+    };
+    await walk(dirs);
+    return files;
   }
 
   // $aliyun.getFilesUrl. Keep results associated with their own file; upstream's batch assignment is not reused.
@@ -1365,7 +1445,8 @@
       body: { drive_id: context.file.driveId, file_id: context.file.fileId },
       headers: { Authorization: `${token.token_type} ${token.access_token}`, "X-Canary": "client=windows,app=adrive,version=v6.0.0" },
     });
-    if (!response.url || response.code) throw cloudFailure(context, response.code);
+    if (response.code === "AccessTokenInvalid") throw new Error("阿里云盘访问令牌已过期，请刷新网盘页面后重试");
+    if (!response.url || response.code) throw cloudFailure(context, response.code, response.message);
     return cloudDownload(context, response.url, { Referer: new URL(context.url).origin + "/" });
   }
 
@@ -1386,7 +1467,7 @@
       "X-Yun-Api-Version": "v1", "X-Yun-App-Channel": "10000034", "X-Yun-Channel-Source": "10000034",
       "X-Yun-Client-Info": "||9|7.17.0|edge||||windows 10||zh-CN|||||", "X-Yun-Module-Type": "100", "X-Yun-Svc-Type": "1", "X-Yun-Url-Type": "3",
     } });
-    if (!response.success || !response.data?.url) throw cloudFailure(context, response.code);
+    if (!response.success || !response.data?.url) throw cloudFailure(context, response.code, response.message);
     return cloudDownload(context, response.data.url);
   }
 
@@ -1406,7 +1487,9 @@
     sign += `&fileId=${context.file.fileId}`;
     if (context.file.shareId) sign += `&shareId=${context.file.shareId}`;
     const response = await cloudRequest(context, url, { headers: { "Sign-Type": "1", Accesstoken: token, Timestamp: String(time), Signature: cloudMd5(sign) } });
-    if (response.res_code != 0 || !response.fileDownloadUrl) throw cloudFailure(context, response.res_code || response.errorcode);
+    if (response.errorcode === "InvalidSessionKey") { context.session.delete("tcloud-token"); throw new Error("请先登录天翼云盘，再刷新页面重试"); }
+    if (response.res_code === "ShareNotFoundFlatDir") throw new Error("请先转存文件，再到「我的网盘」中勾选发送");
+    if (response.res_code != 0 || !response.fileDownloadUrl) throw cloudFailure(context, response.res_code || response.errorcode, response.res_message || response.errorMsg);
     return cloudDownload(context, response.fileDownloadUrl);
   }
 
@@ -1465,7 +1548,8 @@
       headers = await cloudOnce(context, "xunlei-refresh", () => cloudXunleiToken(context, true));
       response = await cloudRequest(context, url, { headers });
     }
-    if (!response.web_content_link) throw cloudFailure(context, response.error_code);
+    if (response.error_code == 9) throw new Error("迅雷云盘的验证令牌已过期，请刷新网盘页面后重试");
+    if (!response.web_content_link) throw cloudFailure(context, response.error_code, response.error_description);
     return cloudDownload(context, response.web_content_link);
   }
 
@@ -1481,17 +1565,34 @@
       const response = await cloudRequest(context, "https://api.guangyapan.com/nd.bizuserres.s/v1/get_share_access_token", {
         body: { shareId: pageUrl.pathname.match(/\/(?:s|share)\/([^/?#]+)/)?.[1], code: pageUrl.searchParams.get("code") || cloudNode('input.ant-input[type="text"]')?.value || "" }, headers,
       });
-      if (!response.data?.accessToken) throw cloudFailure(context, response.code);
+      if (!response.data?.accessToken) throw cloudFailure(context, response.code, response.msg);
       return response.data.accessToken;
     });
     const response = await cloudRequest(context, `https://api.guangyapan.com/nd.bizuserres.s/v1/${context.share ? "get_share_download_url" : "get_res_download_url"}`, { body, headers });
-    if (!response.data?.signedURL && !response.data?.downloadUrl) throw cloudFailure(context, response.code);
+    if (!response.data?.signedURL && !response.data?.downloadUrl) {
+      if (response.code == 9) throw new Error("光鸭云盘页面验证已过期，请刷新网盘页面后重试");
+      if (response.code == 103) throw new Error("光鸭云盘服务响应超时，请稍后重试");
+      if (response.code == 207) throw new Error("分享者未开启免登录下载，请登录光鸭云盘后重试");
+      throw cloudFailure(context, response.code, response.msg);
+    }
     return cloudDownload(context, response.data.signedURL || response.data.downloadUrl);
   }
 
-  // $quark / $uc.getLink, including share tokens and Quark's download cookie.
-  async function cloudQuarkUc(context) {
+  // $quark / $uc.getLink, including share tokens and Quark's download cookie. Up to 15 fids per request, sent as the PC client.
+  function quarkError(contexts, response) {
+    const context = contexts[0];
+    if (response.code == 31001) return new Error(`请先登录${context.label}，再刷新页面重试`);
+    if (response.code == 23018) {
+      const fid = String(response.message || "").match(/\[([a-f0-9]{32})\]/)?.[1];
+      const name = contexts.find(item => String(item.file.fid) === fid)?.file.file_name;
+      return new Error(`超出${context.label}游客可获取的文件大小，请登录后重试${name ? `（文件：${String(name).slice(0, 80)}）` : ""}`);
+    }
+    return cloudFailure(context, response.code, response.message);
+  }
+  async function cloudQuarkUcMany(contexts) {
+    const context = contexts[0];
     const quark = context.provider === "quark";
+    const identity = CLOUD_API_HEADERS[context.provider];
     const cookie = context.session.get("quark-cookie") || await cookieHeader(context.url);
     if (quark && !settings().cookies) throw new Error("夸克下载需要来源 Cookie，请先在脚本设置中启用携带 Cookie");
     let socialToken = "";
@@ -1500,62 +1601,111 @@
         socialToken = await cloudOnce(context, "quark-social", async () => {
           const time = Math.floor(Date.now() / 1000);
           const response = await cloudRequest(context, "https://drive-social-api.quark.cn/1/clouddrive/chat/conv/file/acquire_dl_token?pr=ucpro&fr=pc&sys=win32&ve=6.9.7.761&fr=win&la=zh-CN&ch=pckk%40product_guanwan", {
-            body: { conversation_id: "300000" + time, conversation_type: 3, msg_id: time + "000" }, headers: cookie ? { Cookie: cookie } : {},
+            body: { conversation_id: "300000" + time, conversation_type: 3, msg_id: time + "000" }, headers: { ...identity, ...(cookie ? { Cookie: cookie } : {}) },
           });
-          if (response.code !== 0 || !response.data?.token) throw cloudFailure(context, response.code);
+          if (response.code !== 0 || !response.data?.token) throw quarkError(contexts, response);
           return response.data.token;
         });
       } catch (error) { if (!context.share) throw error; }
     }
-    const body = { fids: [context.file.fid] };
+    const body = { fids: contexts.map(item => item.file.fid) };
     if (quark) { body.speedup_session = ""; body.token = socialToken; }
     if (context.share) {
       const pwdId = page.factStat?.ut?.baseParams?.pwd_id || page.factStat?.wa?.customStatParams?.pwd_id
         || new URL(context.url).pathname.match(/^\/(?:s|share)\/([^/?#]+)/)?.[1];
-      if (!pwdId || !context.file.stoken || !context.file.share_fid_token) throw new Error("请在分享网页完成提取码验证，打开文件列表后重试");
-      Object.assign(body, { pwd_id: pwdId, stoken: context.file.stoken, fids_token: [context.file.share_fid_token] });
+      if (!pwdId || contexts.some(item => !item.file.stoken || !item.file.share_fid_token)) throw new Error("请在分享网页完成提取码验证，打开文件列表后重试");
+      Object.assign(body, { pwd_id: pwdId, stoken: context.file.stoken, fids_token: contexts.map(item => item.file.share_fid_token) });
     }
     const url = quark ? "https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc&sys=win32&ve=6.9.7.761"
       : "https://pc-api.uc.cn/1/clouddrive/file/download?pr=UCBrowser&fr=pc&sys=win32&ve=1.8.8";
-    const result = await cloudRequest(context, url, { body, headers: cookie ? { Cookie: cookie } : {}, withResponse: true });
+    const result = await cloudRequest(context, url, { body, headers: { ...identity, ...(cookie ? { Cookie: cookie } : {}) }, withResponse: true });
     const response = result.data;
     const pugs = result.headers.match(/^set-cookie:\s*__pugs=([^;\r\n]+)/im)?.[1];
     const downloadCookie = quark && context.share
       ? pugs ? `__pugs=${pugs}` : cookie.split(";").map(part => part.trim()).find(part => part.startsWith("__pugs=")) || cookie
       : cookie;
     if (quark && pugs) context.session.set("quark-cookie", downloadCookie);
-    const file = Array.isArray(response.data) && response.data.find(item => String(item.fid) === String(context.file.fid));
-    if (response.code !== 0 || !file?.download_url) throw cloudFailure(context, response.code);
+    if (response.code !== 0 || !Array.isArray(response.data)) throw quarkError(contexts, response);
     const headers = { "User-Agent": CLOUD_DOWNLOAD_UA[context.provider] };
     if (quark) headers.Cookie = downloadCookie;
-    else headers["Sec-Ch-Ua"] = '"Not=A?Brand";v="99", "Chromium";v="100", "Google Chrome";v="100"';
-    return cloudDownload(context, file.download_url, headers);
+    else headers["Sec-Ch-Ua"] = identity["Sec-Ch-Ua"];
+    return contexts.map(item => {
+      const file = response.data.find(entry => String(entry.fid) === String(item.file.fid));
+      try { return file?.download_url ? cloudDownload(item, file.download_url, headers) : cloudFailure(item, response.code); } catch (error) { return error; }
+    });
+  }
+  async function cloudQuarkUc(context) {
+    const [result] = await cloudQuarkUcMany([context]);
+    if (result instanceof Error) throw result;
+    return result;
   }
 
   // $123pan.getFileUrl: v2 endpoints, dispatchList + downloadPath, and the params wrapper.
   async function cloud123(context) {
     const token = cloudStorage("authorToken");
     const file = context.file;
-    const headers = { Platform: "web", Platform_os: "123pan/v323(Windows10.0.26200)", "App-Version": "323", LoginUuid: cloudStorage("LoginUuid") || "", Devicename: "", "Mac-Addr": "" };
+    const headers = { ...CLOUD_API_HEADERS["123pan"], Platform: "web", Platform_os: "123pan/v323(Windows10.0.26200)", "App-Version": "323", LoginUuid: cloudStorage("LoginUuid") || "", Devicename: "", "Mac-Addr": "" };
     if (token) headers.Authorization = `Bearer ${token}`;
     else if (!context.share) throw new Error("请先登录 123 云盘，再刷新页面重试");
     const body = context.share
       ? { ShareKey: new URL(context.url).pathname.split("/").filter(Boolean)[1], FileID: file.FileId, S3keyFlag: file.S3KeyFlag, Size: file.Size, Etag: file.Etag }
       : { driveId: 0, etag: file.Etag, fileId: file.FileId, s3keyFlag: file.S3KeyFlag, type: file.Type, fileName: file.FileName, size: file.Size };
     const response = await cloudRequest(context, `https://api.123pan.cn/api/v2/${context.share ? "share/download/info" : "file/download_info"}`, { body, headers });
+    if (response.code == 5112) throw new Error("请先登录 123 云盘，再刷新页面重试");
     if (response.code == 5113) throw new Error("123 云盘提示本月可用下载流量不足，请在网盘中查看流量额度");
-    if (!response.data?.dispatchList?.[0]?.prefix || !response.data?.downloadPath) throw cloudFailure(context, response.code);
+    if (!response.data?.dispatchList?.[0]?.prefix || !response.data?.downloadPath) throw cloudFailure(context, response.code, response.message);
     let url = response.data.dispatchList[0].prefix + response.data.downloadPath;
     const wrapped = new URL(url).searchParams.get("params");
     if (wrapped) { try { url = atob(wrapped.replace(/-/g, "+").replace(/_/g, "/")); } catch { throw cloudFailure(context); } }
     return cloudDownload(context, url);
   }
 
+  const cloudSamePage = context => cloudOf()?.provider === context.provider && new URL(context.url).origin === location.origin;
   async function resolveCloud(context) {
-    if (cloudOf()?.provider !== context.provider || new URL(context.url).origin !== location.origin) throw new Error("请返回原网盘页面，再重新获取文件");
+    if (!cloudSamePage(context)) throw new Error("请返回原网盘页面，再重新获取文件");
     const resolvers = { baidu: cloudBaidu, aliyun: cloudAliyun, mcloud: cloudMobile, tcloud: cloudTelecom,
       xunlei: cloudXunlei, guangya: cloudGuangya, quark: cloudQuarkUc, uc: cloudQuarkUc, "123pan": cloud123 };
     return resolvers[context.provider](context);
+  }
+  /** Multi-file requests, where the provider's API takes several files at once (LinkSwift's batch getLink). */
+  function cloudManyResolver(context) {
+    if (context.provider === "quark" || context.provider === "uc") return cloudQuarkUcMany;
+    if (context.provider === "baidu" && !context.share) return cloudBaiduMany;
+    return null;
+  }
+
+  /**
+   * Fetch links for many selected files the way LinkSwift does: fixed-size batches (one request per batch where the API
+   * accepts several files, otherwise that many requests in parallel; Baidu share pages one at a time), resting CLOUD_PAUSE
+   * between batches. Returns one promise per context, in order. If a multi-file request fails, its files are retried one by
+   * one so a single problem file (or a size limit) does not fail the whole batch.
+   */
+  function cloudResolveAll(contexts) {
+    const settled = contexts.map(() => { let resolve, reject; const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; }); promise.catch(() => {}); return { promise, resolve, reject }; });
+    if (!contexts.length) return [];
+    const first = contexts[0];
+    const pace = first.provider === "baidu" && first.share ? { size: 1 } : CLOUD_PACE[first.provider] || { size: 15 };
+    const many = pace.many ? cloudManyResolver(first) : null;
+    const single = async index => {
+      try { settled[index].resolve(await resolveCloud(contexts[index])); } catch (error) { settled[index].reject(error); }
+    };
+    void (async () => {
+      for (let start = 0; start < contexts.length; start += pace.size) {
+        const indexes = contexts.slice(start, start + pace.size).map((_, offset) => start + offset);
+        if (!cloudSamePage(first)) { for (const index of indexes) settled[index].reject(new Error("请返回原网盘页面，再重新获取文件")); continue; }
+        if (many) {
+          try {
+            const results = await many(indexes.map(index => contexts[index]));
+            indexes.forEach((index, offset) => results[offset] instanceof Error ? settled[index].reject(results[offset]) : settled[index].resolve(results[offset]));
+          } catch (error) {
+            if (indexes.length === 1) settled[indexes[0]].reject(error);
+            else for (const index of indexes) await single(index);
+          }
+        } else await Promise.all(indexes.map(single));
+        if (start + pace.size < contexts.length) await cloudSleep(CLOUD_PAUSE);
+      }
+    })();
+    return settled.map(item => item.promise);
   }
 
   // ---------- Cookie 与 curl ----------
@@ -3073,6 +3223,8 @@
     let binary = "";
     for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
     const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    // 浏览器地址最长约 2 MB；网盘一次最多可选 1000 个文件，过大时请分批转交。
+    if (encoded.length > 1_800_000) throw new Error("转交到私密空间的文件太多，请减少勾选数量后分批发送");
     gm.openTab(`${settings().server.replace(/\/+$/, "")}/?view=downloads#import=${encoded}`);
   }
 
@@ -3345,8 +3497,10 @@
     const known = new Map(listed.map(item => [item.url, item]));
     const byUrl = new Map(wanted.map(source => [source.url, source]));
     const ordered = [...listed.filter(item => byUrl.has(item.url)).map(item => byUrl.get(item.url)), ...wanted.filter(source => !known.has(source.url))];
-    batch = { started: false, mode, destination: savedDestination(),
-      entries: ordered.slice(0, BATCH_LIMIT).map(({ url, platform, cloud, name, size }) => ({ url, platform: platform || null, cloud,
+    // 网盘选择一次最多 CLOUD_BATCH_LIMIT 个文件（与 LinkSwift 一样不在 50 处截断）；网页资源仍为 BATCH_LIMIT。
+    const limit = wanted.some(source => source.cloud) ? CLOUD_BATCH_LIMIT : BATCH_LIMIT;
+    batch = { started: false, mode, destination: savedDestination(), limit,
+      entries: ordered.slice(0, limit).map(({ url, platform, cloud, name, size }) => ({ url, platform: platform || null, cloud,
         type: known.get(url)?.type || (platform ? "video" : "file"), name: name || (mode === "local" ? defaultSaveName(url) : ""), sourceName: name || "", size,
         state: mode === "server" ? "parsing" : "waiting", error: "", tasks: [] })) };
     openBatch();
@@ -3355,6 +3509,13 @@
 
   /** 服务器解析：两路并行（服务端同时最多解析 2 个）。 */
   async function parseEntries(current, entries) {
+    // Cloud links are fetched up front in LinkSwift-sized batches (grouped per selection); each row then awaits its own link.
+    const groups = new Map();
+    for (const entry of entries) if (entry.cloud && !entry.cloudLink) {
+      if (!groups.has(entry.cloud.session)) groups.set(entry.cloud.session, []);
+      groups.get(entry.cloud.session).push(entry);
+    }
+    for (const group of groups.values()) cloudResolveAll(group.map(entry => entry.cloud)).forEach((promise, index) => { group[index].cloudLink = promise; });
     const queue = entries.slice();
     const worker = async () => { while (queue.length && batch === current) await parseEntry(queue.shift(), current); };
     await Promise.all([worker(), worker()]);
@@ -3367,7 +3528,9 @@
     try {
       let cloudRequestInfo;
       if (entry.cloud) {
-        cloudRequestInfo = await resolveCloud(entry.cloud);
+        const pending = entry.cloudLink;
+        entry.cloudLink = null;
+        cloudRequestInfo = await (pending || resolveCloud(entry.cloud));
         if (batch !== current || !current.entries.includes(entry)) return;
         entry.resolvingCloud = false;
         updateBatch();
@@ -3392,7 +3555,7 @@
       }
       const index = current.entries.indexOf(entry);
       if (index < 0) return;
-      const room = BATCH_LIMIT - current.entries.length + 1;
+      const room = (current.limit || BATCH_LIMIT) - current.entries.length + 1;
       const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform, cloud: entry.cloud, sourceName: entry.sourceName,
         type: candidateType(variants[0], entry.type), variants, candidate: variants[0], name: entry.nameEdited ? entry.name : entry.sourceName || variants[0].name, nameEdited: Boolean(entry.nameEdited),
         state: current.started ? "error" : "waiting", error: "", tasks: [] }));
@@ -3401,7 +3564,6 @@
       entry.state = "parse-error";
       entry.error = error.message;
       entry.challenge = Boolean(error.challenge);
-      entry.cloud?.session.clear();
     }
     updateBatch();
   }
@@ -3474,7 +3636,8 @@
     const privateSpace = current.destination.private;
     // 私密空间 + 服务器下载：解析结果连同修改后的文件名一次性转交 Tessera 页面确认。
     if (current.mode === "server" && privateSpace) {
-      handoff(queue.map(entry => ({ ...entry.candidate, name: entry.name.trim().normalize("NFC") })));
+      try { handoff(queue.map(entry => ({ ...entry.candidate, name: entry.name.trim().normalize("NFC") }))); }
+      catch (error) { current.running = false; current.started = false; updateBatch(); return toast(error.message); }
       for (const entry of queue) { entry.state = "handoff"; entry.delivered = true; }
       current.running = false;
       toast(`已在 Tessera 中打开 ${queue.length} 项，请在那里解锁并确认`);
@@ -3865,7 +4028,7 @@
           ? "开始后会打开 Tessera 标签页接收文件，在那里解锁私密空间并确认上传；请保持两个页面打开。"
           : "解析结果会转交 Tessera 标签页，在那里解锁私密空间并确认后开始下载；解析结果 20 分钟内有效。";
         target.replaceChildren(
-          destinationRow(() => batch.destination, value => { batch.destination = value; renderBatch(); }),
+          destinationRow(() => batch.destination, value => { batch.destination = value; rememberDestination(value); renderBatch(); }),
           h("div", { className: "section" },
             h("div", { className: "section-head" }, h("h2", {}, "保存的文件", h("span", { className: "count" }))),
             list),

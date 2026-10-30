@@ -270,12 +270,12 @@ class TgDriveASGI(StaticFiles):
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
-                           "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate",
+                           "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
                            "/thumbnail/fetch", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
-                           "/downloads", "/downloads/clear", "/downloads/batch"}
+                           "/downloads", "/downloads/clear", "/downloads/batch", "/downloads/destination"}
                 if route not in controls:
-                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?|/downloads/\d+/(?:stop|resume|restart|delete|update|source)", route):
+                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?|/downloads/\d+/(?:stop|resume|restart|delete|update|source|cover)", route):
                         raise NotFoundError("资源不存在")
                     file_user = self.private_space.files(token, access)
                     path = "/api/user/v1" + route
@@ -426,12 +426,11 @@ class TgDriveASGI(StaticFiles):
                           "/clients/{}/status": "client.status", "/clients/{}/grants": "client.grant",
                           "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/clients/{}/delete": "client.delete",
                           "/bots": "bot.create", "/bots/{}/status": "bot.status",
-                          "/bots/{}/check": "bot.check", "/settings": "settings.update", "/resources": "resources.update", "/client-cache": "client_cache.update",
+                          "/bots/{}/check": "bot.check", "/settings": "settings.update", "/resources": "resources.update",
                           "/registration": "registration.update", "/registration/test-email": "registration.test_email",
                           "/registration/invites": "invite.create", "/registration/invites/{}/revoke": "invite.revoke",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
-                          "/maintenance/thumbnails": "maintenance.thumbnails",
                           "/audit/{}/delete": "audit.delete", "/audit/clear": "audit.clear",
                           "/backups/settings": "backup.settings", "/backups/delete": "backup.delete",
                           "/backups": "backup.create", "/password": "admin.password", "/passphrase": "system.passphrase",
@@ -537,8 +536,6 @@ class TgDriveASGI(StaticFiles):
             target, detail = payload.get("name"), {"channel_id": payload.get("channel_id")}
         elif action == "bot.check" and ok:
             detail = {"status": (result or {}).get("status")}
-        elif action == "maintenance.thumbnails":
-            detail = {key: payload[key] for key in ("daily_mib",) if key in payload}
         elif action in ("audit.delete", "audit.clear") and ok:
             detail = {"deleted": (result or {}).get("deleted")}
         elif action == "backup.settings" and ok:
@@ -550,8 +547,6 @@ class TgDriveASGI(StaticFiles):
             if "proxy" in payload:
                 # 代理地址可能包含认证信息，审计只记录是否启用。
                 detail["proxy_enabled"] = bool(payload.get("proxy"))
-        elif action == "client_cache.update":
-            detail = {key: payload.get(key) for key in ("enabled", "private_enabled", "private_ttl_days") if key in payload}
         elif action == "download.create":
             detail = {"count": len(payload.get("items", [])) if isinstance(payload.get("items"), list) else 0}
         elif action == "share.save":
@@ -796,11 +791,6 @@ class TgDriveASGI(StaticFiles):
                 return 200, {"version": __version__}, {}
             if method == "POST" and route == "/settings":
                 return 200, self.settings.update(payload), {}
-            if route == "/client-cache":
-                if method == "GET":
-                    return 200, self.client_cache.policy(), {}
-                if method == "POST":
-                    return 200, self.client_cache.configure(payload), {}
             if route == "/resources" and self.resources is not None:
                 if method == "GET":
                     return 200, self.resources.describe(), {}
@@ -878,8 +868,6 @@ class TgDriveASGI(StaticFiles):
                 return 200, self.admin.maintenance_status(token), {}
             if method == "GET" and route == "/maintenance/thumbnails":
                 return 200, self.thumbnails.status(), {"Cache-Control": "no-store"}
-            if method == "POST" and route == "/maintenance/thumbnails":
-                return 200, self.thumbnails.configure_backfill(payload.get("daily_mib")), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/maintenance/cleanup":
                 return 200, await self.admin.run_cleanup(token, csrf), {}
             if method == "POST" and route == "/maintenance/gc/retry":
@@ -1015,6 +1003,11 @@ class TgDriveASGI(StaticFiles):
                     return 200, self.offline.list(account.id, cursor=int(query.get("cursor", ["0"])[0] or "0"), status=query.get("status", [""])[0], query=query.get("q", [""])[0], limit=int(query.get("limit", ["50"])[0]), private_scope=private_scope, ids=ids), {"Cache-Control": "no-store"}
                 if route == "/downloads" and method == "POST":
                     return 201, {"tasks": self.offline.create(account.id, payload.get("items"), payload.get("destination", ""), private_scope=private_scope)}, {"Cache-Control": "no-store"}
+                if route == "/downloads/destination" and method == "GET":
+                    return 200, self.offline.last_destination(account.id, private_scope=private_scope), {"Cache-Control": "no-store"}
+                cover = re.fullmatch(r"/downloads/(\d+)/cover", route)
+                if cover and method == "POST":
+                    return 200, await self.offline.set_cover(account.id, int(cover[1]), payload.get("images"), private_scope=private_scope), {"Cache-Control": "no-store"}
                 if route == "/downloads/clear" and method == "POST":
                     return 200, await self.offline.clear(account.id, payload.get("status")), {"Cache-Control": "no-store"}
                 if route == "/downloads/stop-all" and method == "POST" and not private:
@@ -1109,12 +1102,16 @@ class TgDriveASGI(StaticFiles):
                 return 200, user.thumbnail_status(token, payload.get("paths")), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/thumbnail/claim":
                 return 200, user.thumbnail_claim(token, csrf, payload["path"], str(payload["etag"]), bool(payload.get("force")),
-                                                 bool(payload.get("custom"))), {"Cache-Control": "no-store"}
+                                                 bool(payload.get("custom")), payload.get("ticket")), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/thumbnail/release":
                 user.thumbnail_release(token, csrf, payload["path"], str(payload["etag"]), str(payload["ticket"]), payload.get("variants"))
                 return 204, None, {}
             if method == "POST" and route == "/thumbnail/generate":
                 return 202, user.thumbnail_generate(token, csrf, payload["path"], str(payload["etag"])), {}
+            if method == "POST" and route == "/thumbnail/progress":
+                return 200, user.thumbnail_progress(token, payload["path"], str(payload["etag"])), {"Cache-Control": "no-store"}
+            if method == "POST" and route == "/thumbnail/cancel":
+                return 200, user.thumbnail_cancel(token, csrf, payload["path"], str(payload["etag"])), {}
             if method == "POST" and route == "/thumbnail/fetch":
                 data, mime = await user.thumbnail_fetch(token, csrf, payload.get("url"))
                 return 200, data, {"Content-Type": mime, "Cache-Control": "no-store"}

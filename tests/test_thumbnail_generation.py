@@ -13,7 +13,7 @@ from tgdrive.errors import NotFoundError, NotReadyError
 from tgdrive.keystore import KeyStore
 from tgdrive.metadata import Metadata
 from tgdrive.objects import ObjectService, PRIVATE_PREFIX, Scope
-from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailError, ThumbnailRetry, ThumbnailService, _RangeInput, _Job, image_mime, video_frame_usable
+from tgdrive.thumbnails import MIB, ThumbnailError, ThumbnailRetry, ThumbnailService, _RangeInput, _Job, image_mime, video_frame_usable
 from tgdrive.thumbnail_cache import ThumbnailCacheMiss
 
 
@@ -348,7 +348,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
     async def test_overwritten_source_cannot_receive_stale_result(self):
         info = await self.put()
 
-        async def overwrite(*_):
+        async def overwrite(*_, **__):
             await self.put()
             return {"thumb": JPEG}
 
@@ -364,7 +364,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         authorize = Mock()
         private = Scope(self.scope.bucket_id, PRIVATE_PREFIX, private_access=True, authorize=authorize)
         info = await self.put(PRIVATE_PREFIX + "secret.jpg", private)
-        async def lock(*_):
+        async def lock(*_, **__):
             authorize.side_effect = PermissionError("private locked")
             return {"thumb": JPEG}
 
@@ -389,22 +389,18 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_range_crosses_encrypted_chunks_and_rejects_external_targets(self):
         info = await self.put()
-        source = _RangeInput(self.engine, info, lambda: None, 128, cache_only=True)
+        source = _RangeInput(self.engine, info, lambda: None, cache_only=True)
         response = await self.request(source, source.path)
         self.assertEqual(response.split(b"\r\n\r\n", 1)[1], bytes(range(28, 70)))
         self.assertIn(b"Content-Range: bytes 28-69/128", response)
         response = await self.request(source, "http://192.168.1.1/secret")
         self.assertTrue(response.startswith(b"HTTP/1.1 403"))
-        self.assertEqual(source.remaining, 128 - 42)
+        self.assertEqual(source.remote_bytes, 0, "缓存读取不计入从存储读取的量")
 
-    async def test_read_budget_and_revoked_access_stop_plaintext_delivery(self):
+    async def test_revoked_access_stops_plaintext_delivery(self):
         info = await self.put()
-        source = _RangeInput(self.engine, info, lambda: None, 16)
-        response = await self.request(source, source.path)
-        self.assertIsInstance(source.failure, ThumbnailBudget)
-        self.assertEqual(response.split(b"\r\n\r\n", 1)[1], b"")
         authorize = Mock(side_effect=[None, None, PermissionError("revoked")])
-        source = _RangeInput(self.engine, info, authorize, 128)
+        source = _RangeInput(self.engine, info, authorize)
         response = await self.request(source, source.path)
         self.assertIsInstance(source.failure, PermissionError)
         self.assertEqual(response.split(b"\r\n\r\n", 1)[1], b"")
@@ -435,7 +431,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
     async def test_received_upload_cache_generates_without_store_get(self):
         info = await self.put()
         self.engine.store.get = AsyncMock(side_effect=AssertionError("自动任务不能回源"))
-        source = _RangeInput(self.engine, info, lambda: None, 128, cache_only=True)
+        source = _RangeInput(self.engine, info, lambda: None, cache_only=True)
         response = await self.request(source, source.path)
         self.assertEqual(response.split(b"\r\n\r\n", 1)[1], bytes(range(28, 70)))
         self.assertIsNone(source.failure)
@@ -445,19 +441,19 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         info = await self.put()
         self.worker.cache.drop(info.blob_uuid)
         self.engine.store.get = AsyncMock(side_effect=AssertionError("不能回源"))
-        source = _RangeInput(self.engine, info, lambda: None, 128, cache_only=True)
+        source = _RangeInput(self.engine, info, lambda: None, cache_only=True)
         response = await self.request(source, source.path)
         self.assertIsInstance(source.failure, ThumbnailCacheMiss)
         self.assertEqual(response.split(b"\r\n\r\n", 1)[1], b"")
         self.engine.store.get.assert_not_awaited()
 
-    async def test_manual_read_downloads_each_cipher_chunk_only_once(self):
+    async def test_remote_read_downloads_each_cipher_chunk_only_once(self):
         info = await self.put()
         self.worker.cache.drop(info.blob_uuid)
         self.worker.cache.prepare(info.blob_uuid, info.key)
         original = self.engine.store.get
         self.engine.store.get = AsyncMock(side_effect=original)
-        source = _RangeInput(self.engine, info, lambda: None, 1024)
+        source = _RangeInput(self.engine, info, lambda: None)
         for _ in range(2):
             response = await self.request(source, source.path)
             self.assertIsNone(source.failure)
@@ -589,7 +585,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         entry.return_value.__aexit__ = AsyncMock(return_value=False)
         return patch("tgdrive.thumbnails._RangeInput", entry), patch.object(self.worker, "_render", AsyncMock(return_value=result))
 
-    async def test_backfill_generates_old_files_without_cache_and_counts_daily_reads(self):
+    async def test_backfill_generates_old_files_without_cache(self):
         old, fresh = await self.put("old.jpg"), await self.put("fresh.jpg")
         private = Scope(self.scope.bucket_id, PRIVATE_PREFIX, private_access=True, authorize=lambda: None)
         secret = await self.put(PRIVATE_PREFIX + "secret.mp3", private)
@@ -603,36 +599,10 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(4):
                 while not (self.variants(old) and self.variants(secret)):
                     await asyncio.sleep(0.01)
-            self.assertTrue(all(call.kwargs.get("cache_only") is False for call in source.call_args_list), "补图允许按预算读取存储")
+            self.assertTrue(all(call.kwargs.get("cache_only") is False for call in source.call_args_list), "补图直接读取存储，不设额度")
         self.assertEqual(self.variants(fresh), [], "刚写入的文件先留给上传端与缓存处理")
-        self.assertEqual(self.worker.backfill_status()["used_bytes"], 6 * MIB)
 
-    async def test_backfill_respects_daily_limit_and_switch(self):
-        info = await self.put()
-        self.worker.cache.drop(info.blob_uuid)
-        self.age(info)
-        self.worker.configure_backfill(0)
-        channel, render = self.remote_renderer({"thumb": JPEG})
-        with channel, render as decoder:
-            self.worker.start()
-            self.worker._backfill_at = 0
-            await asyncio.sleep(0.2)
-            decoder.assert_not_awaited()
-            self.worker.configure_backfill(1)
-            self.worker._charge_backfill(MIB)
-            self.worker._backfill_at = 0
-            await asyncio.sleep(0.2)
-            decoder.assert_not_awaited()
-            self.worker.configure_backfill(-1)
-            async with asyncio.timeout(3):
-                while not self.variants(info):
-                    await asyncio.sleep(0.01)
-        self.assertIsNone(self.worker.backfill_status()["daily_bytes"])
-        for bad in (True, "4096", -2, 2 ** 40):
-            with self.assertRaises(ValueError):
-                self.worker.configure_backfill(bad)
-
-    async def test_backfill_marks_undecodable_file_once(self):
+    async def test_backfill_defers_decoder_errors_without_a_permanent_marker(self):
         info = await self.put("broken.mp4")
         self.worker.cache.drop(info.blob_uuid)
         self.age(info)
@@ -642,12 +612,12 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
             self.worker.start()
             self.worker._backfill_at = 0
             async with asyncio.timeout(3):
-                while not self.variants(info):
+                while info.blob_uuid not in self.worker._backfill_skip:
                     await asyncio.sleep(0.01)
             self.worker._backfill_at = 0
             await asyncio.sleep(0.2)
-            self.assertEqual(decoder.await_count, 1, "记为无法生成后不再自动重试")
-        self.assertEqual(self.variants(info), ["none"])
+            self.assertEqual(decoder.await_count, 1, "暂时错误延后重试，避免立即重复解码")
+        self.assertEqual(self.variants(info), [])
 
     async def test_decoder_environment_failure_is_retried_not_marked_undecodable(self):
         # 旧版用 RLIMIT_AS 限制解码器，FFmpeg 7 在加载库或创建线程时就失败，结果所有文件都被误记为「无法生成」。

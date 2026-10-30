@@ -5,9 +5,11 @@ import { useCursorPage, usePageSize } from "../pagination";
 import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
 import { FileTile, FileVisual, getFileKind } from "../files";
 import { DestinationPicker } from "./folders";
-import { PrivateUnlockForm } from "./private-access";
+import { PrivateUnlockForm } from "./private-unlock";
 import { usePrivateAccess } from "./private-session";
 import { LocationText, TaskStats, remainingText } from "./task-list";
+import { CoverPickerDialog } from "./thumbnail-editor";
+import { imageThumbnailSet } from "../thumbnails";
 
 const LABEL: Record<api.DownloadStatus, string> = { queued: "排队中", running: "下载中", interrupted: "等待恢复", stopped: "已停止", completed: "已完成", failed: "失败" };
 const TONE: Record<api.DownloadStatus, Tone> = { queued: "neutral", running: "accent", interrupted: "warning", stopped: "neutral", completed: "success", failed: "danger" };
@@ -365,6 +367,23 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
   const [wantPrivate, setWantPrivate] = useState(Boolean(initial?.private));
   const needsUnlock = wantPrivate && !access.grant;
   useEffect(() => { if (wantPrivate && access.grant && !api.isPrivatePath(destination)) setDestination(api.PRIVATE_PREFIX); }, [wantPrivate, access.grant, destination]);
+  // 默认使用上次的保存位置（服务端按账号记录，脚本提交的任务也会更新）；私密位置在解锁后才取得具体目录。
+  // 用户在本窗口改过位置后不再覆盖。
+  const chosen = useRef(false);
+  useEffect(() => {
+    if (task) return;
+    let alive = true;
+    void api.lastDownloadDestination().then(last => {
+      if (!alive || chosen.current) return;
+      if (initial) { if (initial.private && last.private) setDestination(last.private); return; }
+      if (last.area === "private") { setWantPrivate(true); setDestination(last.private ?? ""); }
+      else setDestination(last.normal);
+    }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [task, initial, access.grant]);
+  // 每个文件可以附带一张缩略图（本地图片或图片地址），任务创建后提交，下载完成时设为文件的缩略图。
+  const [covers, setCovers] = useState<Map<number, Blob>>(new Map());
+  const [coverFor, setCoverFor] = useState<number | null>(null);
   const [ready, setReady] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(initial?.error ?? "");
@@ -375,7 +394,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
     abort.current = new AbortController();
     try {
       const result = await api.parseDownloads(input, abort.current.signal, downloadType, cookies);
-      setCandidates(result.candidates);
+      setCandidates(result.candidates); setCovers(new Map());
       const seen = new Set<string>();
       setSelected(new Set(result.candidates.flatMap((candidate, index) => {
         if (task) return index === 0 ? [index] : [];
@@ -389,9 +408,30 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
     if (!candidates || !selected.size || !ready || needsUnlock) return;
     setBusy(true); setError("");
     try {
-      if (task) await api.controlDownload(task.id, "update", { ticket: candidates[[...selected][0]].ticket }, task.private);
-      else await api.createDownloads([...selected].map(index => ({ ticket: candidates[index].ticket, name: candidates[index].name })), destination);
-      toast.success(task ? "参数已更新，任务已重新加入队列" : `${selected.size} 个任务已加入下载队列`);
+      if (task) {
+        await api.controlDownload(task.id, "update", { ticket: candidates[[...selected][0]].ticket }, task.private);
+        toast.success("参数已更新，任务已重新加入队列");
+        onComplete();
+        return;
+      }
+      const chosenIndexes = [...selected];
+      // 先在浏览器里缩放缩略图：图片有问题时还没创建任务，可以直接更换。
+      const images = new Map<number, Record<string, string>>();
+      for (const index of chosenIndexes) {
+        const cover = covers.get(index);
+        if (!cover) continue;
+        try { images.set(index, await imageThumbnailSet(cover)); }
+        catch (reason) { throw new Error(`${candidates[index].name} 的缩略图：${api.errorMessage(reason, "图片处理失败")}`); }
+      }
+      const { tasks } = await api.createDownloads(chosenIndexes.map(index => ({ ticket: candidates[index].ticket, name: candidates[index].name })), destination);
+      let failed = 0;
+      for (const [position, index] of chosenIndexes.entries()) {
+        const value = images.get(index), created = tasks[position];
+        if (!value || !created) continue;
+        try { await api.setDownloadCover(created.id, value, api.isPrivatePath(destination)); } catch { failed++; }
+      }
+      if (failed) toast.error(`任务已创建，但 ${failed} 个缩略图未能提交；下载完成后可在文件菜单「更新缩略图」中设置`);
+      else toast.success(`${selected.size} 个任务已加入下载队列`);
       onComplete();
     } catch (reason) {
       const expired = initial && reason instanceof api.ApiError && reason.status === 400 && /过期|expired/i.test(reason.message);
@@ -427,18 +467,38 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
               {candidate.kind === "hls" && <p className="muted">保存为 MP4；停止后从头重新下载。</p>}
               {candidate.platform && <p className="muted">已解析的媒体地址会直接用于下载，失效时自动重新解析；{candidate.platform === "youtube" ? "同一视频选择一个清晰度，" : ""}停止后从头下载。</p>}
               {candidate.warnings.map((warning, i) => <p className="tone-warning" key={i}>{warning}</p>)}
+              {!task && <CoverSlot image={covers.get(index) ?? null} name={candidate.name} disabled={busy}
+                onEdit={() => setCoverFor(index)} onRemove={() => setCovers(current => { const next = new Map(current); next.delete(index); return next; })} />}
             </div>
           </div>)}
         </div>
         {task ? <p className="muted">保存位置：{task.private && !api.isPrivatePath(task.key) ? "私密空间" : api.privatePathLabel(task.key)}</p>
           : needsUnlock ? <div className="download-import-unlock">
-            <div className="download-import-unlock-head"><Icon name="lock" size={18} /><div><strong>保存到私密空间需要先解锁</strong><p className="muted">解锁只在当前 {BRAND} 页面完成，脚本和原网页拿不到你的密码。</p></div>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setWantPrivate(false); setDestination(""); }}>改存普通目录</Button></div>
+            <div className="download-import-unlock-head"><Icon name="lock" size={18} /><div><strong>保存到私密空间需要先解锁</strong><p className="muted">{initial ? `解锁只在当前 ${BRAND} 页面完成，脚本和原网页拿不到你的密码。` : "上次保存到了私密空间，解锁后继续使用那个位置。"}</p></div>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => { chosen.current = true; setWantPrivate(false); setDestination(""); }}>改存普通目录</Button></div>
             <PrivateUnlockForm />
           </div>
-          : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { setWantPrivate(api.isPrivatePath(path)); setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示不含查询参数的来源地址。</p></>}
+          : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { chosen.current = true; setWantPrivate(api.isPrivatePath(path)); setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示不含查询参数的来源地址。</p></>}
       </>}
       {error && <Notice tone="danger">{error}</Notice>}
     </div>
+    {coverFor !== null && candidates?.[coverFor] && <CoverPickerDialog name={candidates[coverFor].name} onClose={() => setCoverFor(null)}
+      onPick={image => { setCovers(current => new Map(current).set(coverFor, image)); setCoverFor(null); }} />}
   </Modal>;
+}
+
+/** 解析结果里每个文件的缩略图：默认自动生成，可换成自己的图片。 */
+function CoverSlot({ image, name, disabled, onEdit, onRemove }: { image: Blob | null; name: string; disabled: boolean; onEdit: () => void; onRemove: () => void }) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!image) { setUrl(null); return; }
+    const value = URL.createObjectURL(image); setUrl(value);
+    return () => URL.revokeObjectURL(value);
+  }, [image]);
+  return <div className="download-cover">
+    {url ? <img src={url} alt={`${name} 的缩略图`} /> : <span className="download-cover-empty" aria-hidden="true"><Icon name="image" size={16} /></span>}
+    <span className="download-cover-copy">{image ? "下载完成后使用这张图片作为缩略图" : "缩略图：下载完成后自动生成"}</span>
+    <Button size="sm" variant="ghost" icon={image ? "edit" : "image"} disabled={disabled} onClick={onEdit}>{image ? "更换" : "设置缩略图"}</Button>
+    {image && <Button size="sm" variant="ghost" disabled={disabled} onClick={onRemove}>移除</Button>}
+  </div>;
 }

@@ -15,16 +15,18 @@ import { UploadPicker, UploadSelection, uploadFiles, type UploadFile } from "./u
 /* ---------- 上传 ---------- */
 
 export function UploadDialog({ files, destination: initialDestination, onClose, onStart }: { files: UploadFile[]; destination: string; onClose: () => void; onStart: (files: UploadFile[], isPublic: boolean, destination: string) => void }) {
-  const privateSpace = api.isPrivatePath(initialDestination);
   const [selected, setSelected] = useState(() => new Set(files.map(item => item.path)));
   const list = useMemo(() => files.filter(item => selected.has(item.path)), [files, selected]);
   const [destination, setDestination] = useState(initialDestination);
+  // 目标可以在弹窗里换到私密空间（未解锁时先解锁）；私密样式与公开开关跟随当前选择的位置。
+  const privateSpace = api.isPrivatePath(destination);
   const [ready, setReady] = useState(true);
   const [existing, setExisting] = useState<Set<string>>(new Set());
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState("");
   const [checkVersion, setCheckVersion] = useState(0);
-  const [isPublic, setIsPublic] = useState(() => !privateSpace && localStorage.getItem("tgdrive:upload-public") === "1");
+  const [publicChoice, setIsPublic] = useState(() => localStorage.getItem("tgdrive:upload-public") === "1");
+  const isPublic = publicChoice && !privateSpace;
   const hasFolders = files.some(item => item.path.includes("/"));
   const hasLooseFiles = files.some(item => !item.path.includes("/"));
   const total = list.reduce((sum, item) => sum + item.file.size, 0);
@@ -53,8 +55,8 @@ export function UploadDialog({ files, destination: initialDestination, onClose, 
   }, [destination, list, checkVersion, privateSpace]);
   return (
     <Modal title="确认上传" description={<>已选 {list.length} / {files.length} 个文件，共 {formatBytes(total)}</>} icon="upload" onClose={onClose} size="lg" className={`upload-dialog${privateSpace ? " private-dialog" : ""}`}
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" icon="upload" disabled={!ready || checking || Boolean(error) || !list.length} onClick={() => { if (!privateSpace) localStorage.setItem("tgdrive:upload-public", isPublic ? "1" : "0"); onStart(list, isPublic, destination); }}>开始上传</Button></>}>
-      <DestinationPicker value={destination} onChange={next => { setReady(false); setDestination(next); setChecking(true); }} onReady={setReady} />
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" icon="upload" disabled={!ready || checking || Boolean(error) || !list.length} onClick={() => { if (!privateSpace) localStorage.setItem("tgdrive:upload-public", publicChoice ? "1" : "0"); onStart(list, isPublic, destination); }}>开始上传</Button></>}>
+      <DestinationPicker value={destination} allowPrivate onChange={next => { setReady(false); setDestination(next); setChecking(true); }} onReady={setReady} />
       <UploadSelection files={files} selected={selected} onChange={setSelected} existing={existing} />
       {checking && <Notice icon={false} role="status"><span className="spinner" />正在检查目标位置的同名文件</Notice>}
       {error && <Notice tone="danger"><span>{error}</span><Button size="sm" onClick={() => setCheckVersion(current => current + 1)}>重试</Button></Notice>}

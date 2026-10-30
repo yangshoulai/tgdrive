@@ -804,16 +804,21 @@ function BrowserCard({ event }: { event: ai.BrowserEvent }) {
   </section>;
 }
 
-/** 生成缩略图：用户点击后逐个提交给服务器后台生成（优先复用服务器已收到的数据，必要时按预算读取存储），
+/** 生成缩略图：用户点击后逐个提交给服务器后台生成（优先复用服务器已收到的数据，必要时读取存储），
  * 不经浏览器下载原文件，避免为补图产生出站流量。队列满时等待后继续提交；服务器没有 FFmpeg 时才在当前页面生成。
  * 卡片卸载（切换对话、关闭页面）时停止提交；已提交的任务继续在后台完成。 */
 function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action: "thumbnails" }> }) {
-  type Run = { phase: "idle" | "running" | "done" | "stopped"; done: number; none: number; failed: number; current: string; local: boolean };
+  type Run = { phase: "idle" | "running" | "stopping" | "done" | "stopped"; done: number; none: number; failed: number; current: string; local: boolean };
   const [state, setState] = useState<Run>({ phase: "idle", done: 0, none: 0, failed: 0, current: "", local: false });
   const controller = useRef<AbortController | null>(null);
+  const attempted = useRef<Array<{ key: string; etag: string }>>([]);
+  const inFlight = useRef<Promise<unknown> | null>(null);
+  const stopping = useRef(false);
+  const [stopError, setStopError] = useState("");
   useEffect(() => () => controller.current?.abort(), []);
   const pause = (signal: AbortSignal) => new Promise<void>(resolve => { const timer = window.setTimeout(resolve, 5000); signal.addEventListener("abort", () => { window.clearTimeout(timer); resolve(); }, { once: true }); });
   async function start() {
+    attempted.current = []; stopping.current = false; setStopError("");
     const signal = (controller.current = new AbortController()).signal;
     const counts = { done: 0, none: 0, failed: 0 }, folders = new Set<string>();
     let local = false;
@@ -823,10 +828,12 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
       setState(value => ({ ...value, current: item.path }));
       const source = thumbnailSource(item.path, item.content_type, item.size);
       if (!source) { counts.none++; setState(value => ({ ...value, ...counts })); continue; }
+      const file = { key: item.path, etag: item.etag };
+      attempted.current.push(file);
       try {
         if (!local) {
           for (;;) {
-            try { await api.generateThumbnail({ key: item.path, etag: item.etag }); counts.done++; folders.add(parentPath(item.path)); break; }
+            try { await (inFlight.current = api.generateThumbnail(file)); counts.done++; folders.add(parentPath(item.path)); break; }
             catch (reason) {
               const message = api.errorMessage(reason, "");
               if (message.includes("队列已满") && !signal.aborted) { await pause(signal); if (signal.aborted) break; continue; }
@@ -838,7 +845,9 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
         }
         if (local && !signal.aborted) {
           // 服务器无法生成时的退路：在当前页面读取文件生成（会产生下载流量）。
-          const saved = await generateLoadedThumbnails({ key: item.path, etag: item.etag }, claimSignal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source), event.regenerate || item.retry === true, signal);
+          const work = generateLoadedThumbnails(file, claimSignal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source), event.regenerate || item.retry === true, signal);
+          inFlight.current = work;
+          const saved = await work;
           if (!saved) counts.failed++; else if (saved.includes("none")) counts.none++; else counts.done++;
           if (saved) folders.add(parentPath(item.path));
         }
@@ -850,7 +859,18 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
     }
     // 后台生成需要一点时间：稍后通知文件页刷新所在目录，只读元数据，不读取原文件。
     if (folders.size) for (const delay of local ? [0] : [5000, 30000, 120000]) window.setTimeout(() => window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [...folders] } })), delay);
-    setState(value => ({ ...value, ...counts, phase: signal.aborted ? "stopped" : "done", current: "" }));
+    setState(value => ({ ...value, ...counts, phase: stopping.current ? value.phase : signal.aborted ? "stopped" : "done", current: "" }));
+  }
+  async function stop() {
+    stopping.current = true; controller.current?.abort(); setStopError("");
+    setState(value => ({ ...value, phase: "stopping" }));
+    // 等在途提交确认后再取消，避免“先取消、后入队”的竞争；关闭卡片只停止提交，不调用此操作。
+    await inFlight.current?.catch(() => undefined);
+    let failed = 0;
+    for (const file of attempted.current) await api.cancelThumbnail(file).catch(() => { failed++; });
+    setStopError(failed ? `${failed} 个文件未能确认停止，请重试` : "");
+    setState(value => ({ ...value, phase: "stopped", current: "" }));
+    stopping.current = false;
   }
   const total = event.items.length, processed = state.done + state.none + state.failed;
   const summary = [state.local ? `已生成 ${state.done} 个` : `已提交 ${state.done} 个`, state.none ? `${state.none} 个不支持` : "", state.failed ? `${state.failed} 个失败` : ""].filter(Boolean).join("，");
@@ -862,9 +882,12 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
         <Progress value={total ? processed / total * 100 : 100} label={`${processed} / ${total}`} />
         <p className="cell-truncate">{state.phase === "running" ? `正在提交 ${display(state.current)}` : summary}</p>
       </div>}
+    {stopError && <p className="ai-card-note tone-danger" role="alert">{stopError}</p>}
     <footer className="ai-card-foot"><span>{state.phase === "idle" ? "网格图与封面计入你的已用空间；服务器优先复用已收到的数据"
+      : state.phase === "stopping" ? "正在停止已提交的生成任务"
       : state.phase === "running" ? `${processed} / ${total}` : state.phase === "stopped" ? `已停止 · ${summary}` : state.local ? "已完成" : "已全部提交，完成后自动刷新"}</span>
-      {state.phase === "running" ? <Button size="sm" onClick={() => controller.current?.abort()}>停止</Button>
+      {(state.phase === "running" || state.phase === "stopping" || state.phase === "done" && !state.local || Boolean(stopError)) && <Button size="sm" loading={state.phase === "stopping"} onClick={() => void stop()}>停止生成</Button>}
+      {state.phase === "running" || state.phase === "stopping" ? null
         : <Button size="sm" variant={state.phase === "idle" ? "primary" : "secondary"} icon={state.phase === "idle" ? "image" : "refresh"} onClick={() => void start()}>{state.phase === "idle" ? "生成" : "重新提交"}</Button>}
     </footer>
   </section>;

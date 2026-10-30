@@ -50,6 +50,14 @@ class VideoDecoderTests(unittest.IsolatedAsyncioTestCase):
         self.metadata.close()
         self.temp.cleanup()
 
+    async def test_render_image_resizes_cover_without_network_or_object(self):
+        # 离线任务的图片地址封面：原图在本地临时文件中缩放成三种规格，不经回环代理。
+        png = await self.ffmpeg("-f", "lavfi", "-i", "testsrc=size=1600x900", "-frames:v", "1", "-f", "image2", "-c:v", "png", "pipe:1")
+        images = await self.worker.render_image(png)
+        self.assertEqual(set(images), {"thumb", "grid", "poster"})
+        self.assertTrue(all(data.startswith(b"\xff\xd8\xff") for data in images.values()))
+        self.assertIsNone(await self.worker.render_image(b"not an image"))
+
     async def ffmpeg(self, *options, data=None):
         process = await asyncio.create_subprocess_exec(FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *options,
             stdin=asyncio.subprocess.PIPE if data is not None else asyncio.subprocess.DEVNULL,

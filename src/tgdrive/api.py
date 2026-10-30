@@ -846,9 +846,9 @@ class UserApi:
         return {"files": {item["key"]: {name: item[name] for name in ("etag", "size", "modified_at", "has_thumbnail", "thumbnails", "thumbnail_versions", "thumbnail_status")}
                           for item in self._objects_json(items)}}
 
-    def thumbnail_claim(self, token, csrf, path, etag, force=False, custom=False):
+    def thumbnail_claim(self, token, csrf, path, etag, force=False, custom=False, ticket=None):
         scope = self._scope(token, csrf=csrf, mutation=True)
-        return self.objects.thumbnail_service.claim(scope, self._path(path), etag, force=force, custom=custom)
+        return self.objects.thumbnail_service.claim(scope, self._path(path), etag, force=force, custom=custom, ticket=ticket)
 
     def thumbnail_release(self, token, csrf, path, etag, ticket, variants=None):
         scope = self._scope(token, csrf=csrf, mutation=True)
@@ -867,6 +867,13 @@ class UserApi:
     def thumbnail_generate(self, token, csrf, path, etag):
         scope = self._scope(token, csrf=csrf, mutation=True)
         return self.objects.thumbnail_service.request(scope, self._path(path), etag)
+
+    def thumbnail_progress(self, token, path, etag):
+        return self.objects.thumbnail_service.progress(self._scope(token), self._path(path), etag)
+
+    def thumbnail_cancel(self, token, csrf, path, etag):
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        return self.objects.thumbnail_service.cancel(scope, self._path(path), etag)
 
     async def thumbnail_fetch(self, token, csrf, url):
         """自定义缩略图的图片地址：校验网页会话后由服务器读取，图片交回网页处理。"""

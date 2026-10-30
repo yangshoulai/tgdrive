@@ -21,7 +21,6 @@ FILE = ROOT + "file.bin"
 class CacheTaskTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.state = {"unlocked": True, "active": True, "epoch": 0, "password": "password-hash"}
-        self.policy = {"enabled": True, "private_enabled": True}
         self.sessions = {"session": SimpleNamespace(user_id=1), "other-session": SimpleNamespace(user_id=1),
                          "other-account": SimpleNamespace(user_id=2)}
 
@@ -56,7 +55,6 @@ class CacheTaskTests(unittest.IsolatedAsyncioTestCase):
         self.space = SimpleNamespace(require=Mock(side_effect=private))
         self.cache = ClientCache(self.user, self.space)
         self.cache._master = lambda: b"m" * 32
-        self.cache.policy = lambda: dict(self.policy)
         self.objects.head_object = lambda scope, path: SimpleNamespace(key=path, etag="version")
 
     def create(self, paths=None):
@@ -115,13 +113,8 @@ class CacheTaskTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AuthenticationError):
             self.cache._task("session", task_id)
 
-    async def test_policy_password_and_cache_epoch_are_checked_each_time(self):
+    async def test_password_and_cache_epoch_are_checked_each_time(self):
         task_id = self.create()
-        for name in ("enabled", "private_enabled"):
-            self.policy[name] = False
-            with self.subTest(policy=name), self.assertRaises(PermissionError):
-                self.cache._task("session", task_id)
-            self.policy[name] = True
         self.state["epoch"] += 1
         with self.assertRaises(PermissionError):
             self.cache._task("session", task_id)

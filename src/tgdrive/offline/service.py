@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import mimetypes
 import re
 import time
@@ -28,6 +29,12 @@ from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_c
 
 
 PART_SIZE = 16 * 1024 * 1024
+log = logging.getLogger(__name__)
+# 任务附带的缩略图（封面）：网页在创建任务后上传已缩放好的三种规格，暂存为系统区加密对象（计入配额，不写进数据库），
+# 文件下载完成后转为这个文件的缩略图并删除暂存；图片地址形式的封面记在加密的来源参数里，完成时由服务器读取并缩放。
+COVER_PREFIX = ".tgdrive/offline-covers/"
+# 每个账号记住最近一次的保存位置（普通与私密分别记录），新建任务时默认使用；私密位置只在解锁后返回。
+DESTINATION_KEY = "offline.destination.{}"
 # 单次提交、队列容量与实际下载并发分别限制。
 MAX_CREATE_ITEMS = 1000
 MAX_PENDING_TASKS = 20_000
@@ -73,6 +80,7 @@ class OfflineDownloads:
         self._wake = asyncio.Event()
         self._parse_slots = asyncio.Semaphore(2)
         self._closing = False
+        self._covers: set[asyncio.Task] = set()
         self._next_byte = 0.0
         self._pressure_at, self._pressure = 0.0, None
         self._checked: dict[int, float] = {}
@@ -352,14 +360,14 @@ class OfflineDownloads:
                 raise ValueError("文件名称不能包含路径")
             key = prefix + name
             self.objects._check_scope(scope, key, write=True)
-            decoded.append((value, key))
+            decoded.append((value, key, self._cover_spec(item.get("cover"))))
         now, ids = time.time(), []
         with self.metadata.transaction() as db:
             pending = db.execute("SELECT COUNT(*) FROM offline_tasks WHERE user_id=? AND status!='completed'", (user_id,)).fetchone()[0]
             if pending + len(decoded) > MAX_PENDING_TASKS:
                 raise ValueError(f"未完成任务最多 {MAX_PENDING_TASKS} 个，请等待下载完成或清理不再需要的任务")
             reserved = {row[0] for row in db.execute("SELECT key FROM offline_tasks WHERE bucket_id=? AND status!='completed'", (scope.bucket_id,))}
-            for value, key in decoded:
+            for value, key, cover in decoded:
                 if key in reserved or db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone():
                     key = self.objects._free_name(db, scope.bucket_id, key, reserved)
                 self.objects._check_scope(scope, key, write=True)
@@ -369,11 +377,134 @@ class OfflineDownloads:
                 cursor = db.execute("INSERT INTO offline_tasks(user_id,bucket_id,key,source_host,method,kind,platform,request_enc,status,size,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
                     (user_id, scope.bucket_id, key, source_host, request.method, value["kind"], platform, b"", value["size"], now, now))
                 task_id = cursor.lastrowid
-                self._save_source(task_id, {"request": request.json(), "state": {}, "content_type": value["content_type"], "platform_source": value.get("platform_source"), "hls_audio": value.get("hls_audio")})
+                self._save_source(task_id, {"request": request.json(), "state": {}, "content_type": value["content_type"], "platform_source": value.get("platform_source"), "hls_audio": value.get("hls_audio"),
+                                            **({"cover": cover} if cover else {})})
                 reserved.add(key)
                 ids.append(task_id)
+            self._remember_destination(db, user_id, prefix)
         self._wake.set()
         return [self.public(self._row(task_id), reveal_private=private_destination) for task_id in ids]
+
+    @staticmethod
+    def _cover_spec(cover):
+        """创建时只接受图片地址形式的封面（文件助手、访问密钥 API）；网页上传的图片在创建后经 set_cover 提交。"""
+        if cover is None or cover == "":
+            return None
+        url = cover.get("url") if isinstance(cover, dict) else cover
+        if not isinstance(url, str) or not re.match(r"https?://", url.strip(), re.IGNORECASE) or len(url) > 4096:
+            raise ValueError("缩略图必须是 http:// 或 https:// 开头的图片地址")
+        return {"url": url.strip()}
+
+    def _remember_destination(self, db, user_id, prefix):
+        key = DESTINATION_KEY.format(user_id)
+        row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        try:
+            value = json.loads(row[0]) if row else {}
+        except ValueError:
+            value = {}
+        area = "private" if prefix.startswith(PRIVATE_PREFIX) else "normal"
+        value.update(area=area, **{area: prefix})
+        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, json.dumps(value, ensure_ascii=False)))
+
+    def last_destination(self, user_id, *, private_scope: Scope | None = None) -> dict:
+        """最近一次创建离线任务时选择的位置。私密路径只在当前会话已解锁时返回，未解锁只告诉网页上次选的是私密空间。"""
+        self.scope(user_id)
+        row = self.metadata.db.execute("SELECT value FROM settings WHERE key=?", (DESTINATION_KEY.format(user_id),)).fetchone()
+        try:
+            value = json.loads(row[0]) if row else {}
+        except ValueError:
+            value = {}
+        reveal = bool(private_scope and private_scope.private_access)
+        if reveal and private_scope.authorize is not None:
+            private_scope.authorize()
+        return {"area": "private" if value.get("area") == "private" else "normal", "normal": value.get("normal") or "",
+                "private": (value.get("private") or PRIVATE_PREFIX) if reveal else None}
+
+    async def set_cover(self, user_id, task_id, images, *, private_scope: Scope | None = None) -> dict:
+        """网页在创建任务后提交封面（浏览器缩放好的 thumb／grid／poster）。任务已完成时直接设为文件的缩略图，
+        否则暂存到系统区，下载完成后再使用。私密任务需当前会话已解锁，与查看任务名称的要求一致。"""
+        self.scope(user_id)
+        row = self._row(task_id, user_id)
+        if not self._private_view(row, private_scope):
+            raise ValueError("请先解锁私密空间，再设置缩略图")
+        images = self._cover_images(images)
+        if row["status"] == "completed":
+            await self._apply_images(row, images)
+            return {"applied": True}
+        scope, prefix = Scope(row["bucket_id"]), f"{COVER_PREFIX}{task_id}/"
+        await self.objects.delete_prefix(scope, prefix)
+        for variant, data in images.items():
+            await self.objects.put_object(scope, prefix + variant, data, len(data), self.objects._thumbnail_mime(data), small=True)
+        # 暂存期间下载可能已经完成：完成时没看到暂存的封面，这里补上。
+        row = self._row(task_id, user_id)
+        if row["status"] == "completed":
+            await self._apply_cover(task_id)
+            return {"applied": True}
+        return {"applied": False}
+
+    def _cover_images(self, images):
+        import base64
+        from ..thumbnails import image_mime
+        if not isinstance(images, dict) or "thumb" not in images or not set(images) <= set(ObjectService.STORED_THUMBNAILS):
+            raise ValueError("缩略图至少需要列表小图（thumb）")
+        decoded = {}
+        for variant, value in images.items():
+            try:
+                data = base64.b64decode(value, validate=True) if isinstance(value, str) else b""
+            except ValueError:
+                data = b""
+            if not data or len(data) > ObjectService.THUMBNAIL_LIMITS[variant] or image_mime(data) not in ("image/jpeg", "image/webp", "image/png"):
+                raise ValueError("缩略图图片格式或大小不正确")
+            decoded[variant] = data
+        return decoded
+
+    async def _apply_images(self, row, images):
+        service = self.objects.thumbnail_service
+        if service is None:
+            raise ValueError("缩略图服务不可用")
+        try:
+            await service.apply_custom(self._task_scope(row), row["key"], images)
+        except NotFoundError:
+            raise ValueError("下载的文件已移动或删除，请在文件菜单中设置缩略图") from None
+
+    def _schedule_cover(self, task_id):
+        task = asyncio.create_task(self._apply_cover(task_id))
+        self._covers.add(task)
+        task.add_done_callback(self._covers.discard)
+
+    async def _apply_cover(self, task_id):
+        """下载完成后使用任务附带的封面：先用网页上传的暂存图片，没有时读取图片地址并在服务器缩放。
+        封面只是附加信息，失败不影响任务结果（自动生成的缩略图照常保留）。每个封面只使用一次。"""
+        try:
+            row = self._row(task_id)
+        except NotFoundError:
+            return
+        prefix, bucket = f"{COVER_PREFIX}{task_id}/", Scope(row["bucket_id"])
+        try:
+            images = {}
+            keys = [item["key"] for item in self.metadata.db.execute(
+                "SELECT key FROM objects WHERE bucket_id=? AND key>=? AND key<?", (row["bucket_id"], prefix, prefix + ObjectService._PREFIX_END))]
+            for key in keys:
+                _, stream = await self.objects.get_object(bucket, key)
+                images[key[len(prefix):]] = b"".join([piece async for piece in stream])
+            source = self._source(row)
+            url = (source.get("cover") or {}).get("url")
+            if "thumb" not in images and url and self.objects.thumbnail_service is not None:
+                data, _ = await self.objects.thumbnail_service.fetch_image(url)
+                images = await self.objects.thumbnail_service.render_image(data) or {}
+            if "thumb" in images and self._row(task_id)["status"] == "completed":
+                await self._apply_images(self._row(task_id), images)
+        except Exception as exc:  # 封面失败只记录类型，不记录地址或文件名
+            log.info("离线任务封面未能使用：task=%s error=%s", task_id, type(exc).__name__)
+        finally:
+            try:
+                await self.objects.delete_prefix(bucket, prefix)
+                current = self._row(task_id)
+                source = self._source(current)
+                if source.pop("cover", None) is not None:
+                    self._save_source(task_id, source)
+            except Exception:
+                pass
 
     def public(self, row, *, reveal_private=False):
         result = {key: row[key] for key in PUBLIC_FIELDS}
@@ -571,6 +702,7 @@ class OfflineDownloads:
                 self.scope(user_id)
                 if action == "delete":
                     await self._discard(row)
+                    await self.objects.delete_prefix(Scope(row["bucket_id"]), f"{COVER_PREFIX}{task_id}/")
                     with self.metadata.transaction() as db:
                         db.execute("DELETE FROM offline_tasks WHERE id=? AND user_id=?", (task_id, user_id))
                     return None
@@ -895,6 +1027,7 @@ class OfflineDownloads:
                 self._reserve_target(row, scope, upload_id)
             info = await self.objects.complete_multipart(scope, upload_id, [(part.part_no, part.etag) for part in parts])
             self._set(row["id"], status="completed", phase=None, key=info.key, stored_bytes=info.size, size=info.size if row["kind"] == "http" else None, error=None)
+        self._schedule_cover(row["id"])
 
     async def _http(self, row, scope, source):
         request = DownloadRequest.from_json(source["request"])

@@ -397,6 +397,10 @@ export const markNoThumbnail = (path: string, claim: ThumbnailClaim = {}) => pos
 /** custom：用户指定的缩略图（上传图片、图片地址、播放器当前画面），适用于任何文件并优先于自动生成。 */
 export const claimThumbnail = (file: Pick<FileItem, "key" | "etag">, force = false, custom = false) => post<{ token: string | null; expires_in?: number }>(fileApi("/thumbnail/claim", file.key), { path: file.key, etag: file.etag, force, ...(custom ? { custom } : {}) });
 export const releaseThumbnail = (file: Pick<FileItem, "key" | "etag">, ticket: string, variants?: string[]) => post<void>(fileApi("/thumbnail/release", file.key), { path: file.key, etag: file.etag, ticket, ...(variants ? { variants } : {}) });
+export const renewThumbnail = (file: Pick<FileItem, "key" | "etag">, ticket: string) => post<{ token: string; expires_in: number }>(fileApi("/thumbnail/claim", file.key), { path: file.key, etag: file.etag, ticket });
+export type ThumbnailProgress = { state: "idle" | "queued" | "running" | "waiting_client" | "waiting_data" | "done" | "failed" | "cancelled"; detail: string };
+export const thumbnailProgress = (file: Pick<FileItem, "key" | "etag">, signal?: AbortSignal) => request<ThumbnailProgress>(fileApi("/thumbnail/progress", file.key), { method: "POST", body: JSON.stringify({ path: file.key, etag: file.etag }), signal });
+export const cancelThumbnail = (file: Pick<FileItem, "key" | "etag">) => post<{ cancelled: boolean }>(fileApi("/thumbnail/cancel", file.key), { path: file.key, etag: file.etag });
 export type ThumbnailState = Pick<FileItem, "etag" | "size" | "modified_at" | "has_thumbnail" | "thumbnails" | "thumbnail_versions" | "thumbnail_status">;
 /** 只查询所列文件的 ETag 与缩略图状态（最多 200 个）；不存在或无权访问的路径不在结果中。 */
 export const thumbnailStatus = (paths: string[], signal?: AbortSignal) => request<{ files: Record<string, ThumbnailState> }>(fileApi("/thumbnail/status", paths[0]),
@@ -562,10 +566,6 @@ export const publicPath = (token: string, name: string, download = false, access
 export const adminSettings = (signal?: AbortSignal) => request<SystemSettings>("/api/admin/v1/settings", { signal });
 export const adminResources = () => request<ResourceSettings>("/api/admin/v1/resources");
 export const updateAdminResources = (values: ResourceConfig) => post<ResourceSettings>("/api/admin/v1/resources", values);
-/** 浏览器本地缓存策略（docs/client-cache-design.md §5）。 */
-export type ClientCachePolicy = { enabled: boolean; private_enabled: boolean; private_ttl_days: number };
-export const adminClientCache = () => request<ClientCachePolicy>("/api/admin/v1/client-cache");
-export const updateAdminClientCache = (values: Partial<ClientCachePolicy>) => post<ClientCachePolicy>("/api/admin/v1/client-cache", values);
 /** ids：只读取这些任务（最多 100 个，托盘跟踪用）；limit 为每页数量（最多 100）。 */
 export async function listDownloads(cursor: string | null, status: string, signal?: AbortSignal, query = "", options: { ids?: number[]; limit?: number } = {}) {
   const params = new URLSearchParams({ limit: String(options.limit ?? 50), cursor: cursor ?? "", status });
@@ -604,6 +604,12 @@ export function takeDownloadImport(): DownloadImport | null {
   } catch { return null; }
 }
 export const createDownloads = (items: { ticket: string; name: string }[], destination: string) => post<{ tasks: DownloadTask[] }>(`/api/user/v1${isPrivatePath(destination) ? "/private" : ""}/downloads`, { items, destination });
+/** 最近一次新建离线任务的保存位置（服务端按账号记录）；私密路径只在当前会话已解锁时返回。 */
+export type DownloadDestination = { area: "normal" | "private"; normal: string; private: string | null };
+export const lastDownloadDestination = () => request<DownloadDestination>(`/api/user/v1${privateAccess ? "/private" : ""}/downloads/destination`);
+/** 为刚创建的任务提交缩略图：浏览器缩放好的各规格（base64，不含 data: 前缀）。任务完成后设为文件的缩略图。 */
+export const setDownloadCover = (id: number, images: Record<string, string>, privateTask = false) =>
+  post<{ applied: boolean }>(`${downloadRoute(privateTask)}/${id}/cover`, { images });
 export const clearDownloads = (status: "completed" | "failed") => post<{ removed: number }>("/api/user/v1/downloads/clear", { status });
 export const controlDownload = (id: number, action: "stop" | "resume" | "restart" | "delete" | "update", item?: { ticket: string }, privateTask = false) => {
   const usePrivate = privateTask && Boolean(privateAccess);
@@ -649,15 +655,12 @@ export type MaintenanceTask = { at: number; error?: string; [key: string]: unkno
 export type GcFailure = { reason: string; count: number; dead?: number; label: string; hint: string };
 export type MaintenanceStatus = { gc_pending: number; gc_dead: number; gc_failures?: GcFailure[]; cleanup?: MaintenanceTask; gc?: MaintenanceTask; scrub?: MaintenanceTask; backup?: MaintenanceTask; trash?: MaintenanceTask };
 export const maintenanceStatus = () => request<MaintenanceStatus>("/api/admin/v1/maintenance/status");
-export type ThumbnailJob = { id: string; kind: "image" | "video" | "audio"; state: string; detail: string; at?: number; wait_seconds?: number; manual?: boolean; backfill?: boolean };
-/** 自动补图：daily_bytes 为 null 表示不限制，0 表示关闭。 */
-export type ThumbnailBackfill = { daily_bytes: number | null; used_bytes: number; age_seconds: number; pending: number };
+export type ThumbnailJob = { id: string; kind: "image" | "video" | "audio"; state: string; detail: string; at?: number; wait_seconds?: number; backfill?: boolean };
+export type ThumbnailBackfill = { age_seconds: number; pending: number };
 export type ThumbnailQueueStatus = { available: boolean; unlocked: boolean; pressure: string | null; jobs: ThumbnailJob[]; recent: ThumbnailJob[];
   cache: { bytes: number; limit_bytes: number; ttl_seconds: number }; remote_bytes: number; client_timeout_seconds: number; task_timeout_seconds: number; capacity: number; backfill: ThumbnailBackfill;
   inline: { count: number; bytes: number; skipped_quota: number } };
 export const thumbnailQueue = () => request<ThumbnailQueueStatus>("/api/admin/v1/maintenance/thumbnails");
-/** daily_mib：每日自动补图读取上限（MiB），0 关闭，-1 不限制。 */
-export const setThumbnailBackfill = (dailyMib: number) => post<ThumbnailBackfill>("/api/admin/v1/maintenance/thumbnails", { daily_mib: dailyMib });
 export const runCleanup = () => post<{ aborted_uploads: number; stale_blobs: number; expired_upload_records: number }>("/api/admin/v1/maintenance/cleanup");
 export const retryDeadGc = () => post<{ requeued: number }>("/api/admin/v1/maintenance/gc/retry");
 export type Backup = { name: string; size: number; created_at: number };

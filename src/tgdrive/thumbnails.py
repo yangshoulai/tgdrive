@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime
 import json
 import logging
 import os
@@ -16,6 +15,7 @@ from collections import OrderedDict
 from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from .errors import NotFoundError, NotReadyError, QuotaExceededError
 from .filekinds import kind_clause, kind_of
@@ -25,22 +25,17 @@ from .thumbnail_cache import ThumbnailCache, ThumbnailCacheMiss
 
 log = logging.getLogger("tgdrive.thumbnails")
 MIB = 1024 * 1024
-IMAGE_LIMIT = 60 * MIB
-READ_LIMITS = {"image": IMAGE_LIMIT, "video": 64 * MIB, "audio": 32 * MIB}
-TIMEOUT = 45
+# 只用来回收卡死的解码器（损坏文件、存储长时间无响应），不是读取量或文件大小的限制；用户请求和后台任务一致。
+TIMEOUT = 600
 CLIENT_TIMEOUT = 90
 # 网页预览图片／视频时浏览器手里已有解码好的画面，先等它生成；超时后后台再用同一批已接收的密文接管。
 PREVIEW_GRACE = 30
 # 缓存不足时只在收到新数据后重试，并逐次拉长间隔；多次仍不足就放弃，避免边播放边反复启动解码器。
 MISS_LIMIT = 6
-# 自动补图：上传或修改超过 BACKFILL_AGE 秒仍没有缩略图的文件（缓存已过期、复制或秒传、服务器重启等），
-# 由后台按单文件预算从存储读取生成，保证最终都有缩略图。只产生存储到服务器的入站流量，每天总量受管理员设置限制。
+# 自动补图：上传或修改超过 BACKFILL_AGE 秒仍没有缩略图的图片、视频、音频（缓存已过期、复制或秒传、服务器重启等），
+# 由后台在队列空闲时从存储读取生成，单并发、只产生存储到服务器的入站流量，不设额度。
 BACKFILL_AGE = 600
-BACKFILL_DEFAULT_MIB = 4096
-BACKFILL_KEY, BACKFILL_USAGE_KEY = "thumbnails.backfill", "thumbnails.backfill_usage"
 BACKFILL_RETRY = 6 * 3600
-MAX_PIXELS = 40_000_000
-VIDEO_PIXELS = 4096 * 2160
 # 与 web/src/video-frame.ts 保持一致；只分析 32×32 灰度样本，不在 Python 中解码完整图片。
 VIDEO_SAMPLE_SIZE = 32
 VIDEO_FRAME_TIMES = (0, 1, 3, 10, 30, 60, 120)
@@ -64,7 +59,7 @@ DECODER_ERRORS = (
 # 一次性清理：修复前运行环境问题会被误记为「无法生成」，升级后清掉这些记录让补图重新处理。
 REPAIR_KEY = "thumbnails.repair"
 # 自定义缩略图可以填写图片地址，由服务器经受控出站客户端读取后交给网页处理。
-FETCH_LIMIT = 20 * MIB
+FETCH_LIMIT = 50 * MIB
 FETCH_TIMEOUT = 30
 
 
@@ -84,11 +79,7 @@ class ThumbnailError(Exception):
     pass
 
 
-class ThumbnailBudget(ThumbnailError):
-    pass
-
-
-class ThumbnailRetry(ThumbnailBudget):
+class ThumbnailRetry(ThumbnailError):
     """暂时无法继续（服务器资源不足、已读分片缓存被回收），稍后可以再试，不能记为「无法生成」。"""
 
 
@@ -129,10 +120,9 @@ def source_kind(info: ObjectInfo) -> str | None:
     kind = kind_of(info.key, info.content_type)
     if not info.blob_uuid or not info.size or info.key.endswith("/"):
         return None
-    if kind == "image":
-        if info.size > IMAGE_LIMIT or info.key.lower().endswith(".svg") or "svg" in (info.content_type or "").lower():
-            return None
-    return kind if kind in READ_LIMITS else None
+    if kind == "image" and (info.key.lower().endswith(".svg") or "svg" in (info.content_type or "").lower()):
+        return None
+    return kind if kind in ("image", "video", "audio") else None
 
 
 def image_mime(data: bytes) -> str | None:
@@ -155,47 +145,19 @@ def image_mime(data: bytes) -> str | None:
 class _RangeInput:
     """只提供一个 Blob 的短期本地 HTTP/代理入口，支持解码器跳到尾部索引再回读画面。"""
 
-    def __init__(self, engine, info, authorize, budget, *, cache_only=False):
+    def __init__(self, engine, info, authorize, *, cache_only=False):
         self.engine, self.info, self.authorize = engine, info, authorize
-        self.remaining, self.failure = budget, None
-        self.remote_remaining, self.remote_bytes = None if budget is None else budget + MIB, 0
-        self._ranges = []
-        self._fetched = set()
+        self.failure = None
+        # 只统计从存储读取的量（管理员页显示），不限制。
+        self.remote_bytes = 0
         self.cache_only = cache_only
         self.path = "/" + secrets.token_urlsafe(32)
         self.server = None
         self.tasks = set()
         self.slots = asyncio.Semaphore(2)
 
-    def _charge_range(self, start, end):
-        if self.remaining is None:
-            return
-        # 多次选帧会反复探测文件头、尾部索引与同一关键帧，已覆盖的范围不能再次占用预算。
-        extra = end - start - sum(max(0, min(end, right) - max(start, left)) for left, right in self._ranges)
-        if extra > self.remaining:
-            raise ThumbnailBudget("缩略图读取量超过预算")
-        merged = []
-        for left, right in self._ranges:
-            if right < start or left > end:
-                merged.append((left, right))
-            else:
-                start, end = min(start, left), max(end, right)
-        merged.append((start, end))
-        self._ranges = sorted(merged)
-        self.remaining -= extra
-
     def _charge(self, ref, size):
-        # 用户手动选图不受自动生成额度约束；缓存已回收时允许重新取回所需分片。
-        if self.remote_remaining is None:
-            self.remote_bytes += size
-            return
-        if ref in self._fetched:
-            raise ThumbnailRetry("已读分片缓存被回收，停止生成以避免重复下载")
-        if size > self.remote_remaining:
-            raise ThumbnailBudget("缩略图回源读取量超过预算")
-        self.remote_remaining -= size
         self.remote_bytes += size
-        self._fetched.add(ref)
 
     async def __aenter__(self):
         self.server = await asyncio.start_server(self._serve, "127.0.0.1", 0, limit=8192)
@@ -259,9 +221,8 @@ class _RangeInput:
                     return
                 while start < end:
                     self.authorize()
-                    # 分窗口流式交付，不为手动选图把完整视频放入内存。
+                    # 分窗口流式交付，不把完整文件放入内存。
                     stop = min(end, start + MIB)
-                    self._charge_range(start, stop)
                     async with aclosing(self.engine.stream(self.info.blob_uuid, start, stop,
                                                           window=MIB, bucket_id=self.info.bucket_id,
                                                           cache_only=self.cache_only,
@@ -308,7 +269,7 @@ class _Lease:
 
 
 class ThumbnailService:
-    """单并发协作队列。任务只来自写入、实际读取与用户手动请求；自动任务禁止回源，不扫描整库补图。"""
+    """单并发协作队列。即时任务复用已收数据，空闲补图按管理员日额度回源，用户请求不设单文件门槛。"""
 
     def __init__(self, accounts, objects, resources):
         self.accounts, self.objects, self.resources = accounts, objects, resources
@@ -325,7 +286,7 @@ class ThumbnailService:
         self._http = None
         self._remote_bytes = 0
         # 补图扫描的键集游标、下一次扫描时间与暂时失败后推迟重试的 Blob（进程内，重启后重新尝试）。
-        self._backfill_cursor, self._backfill_at, self._backfill_skip, self._backfill_failures = (0, ""), 0.0, {}, {}
+        self._backfill_cursor, self._backfill_at, self._backfill_skip = (0, ""), 0.0, {}
 
     def _dispatch(self, action, *args):
         loop = self._loop
@@ -389,13 +350,16 @@ class ThumbnailService:
             return False
         previous = self._pending.get(blob)
         if previous is not None:
-            if job.remote and not job.backfill:
+            if job.remote and not job.backfill and (not previous.remote or previous.backfill):
+                previous.info = job.info
+                self._leases.pop(blob, None)
                 previous.force, previous.remote, previous.backfill, previous.ready_at = True, True, False, 0
-                if self._active is not previous:
-                    previous.state, previous.detail = "queued", "用户请求重新生成"
+                previous.state, previous.detail = "queued", "用户请求重新生成"
+                if self._active is previous and self._task is not None:
+                    self._task.cancel()  # 从后台策略切换为用户主动任务，复用已有缓存重新开始。
             return True
         if len(self._pending) >= 128:
-            # 缺图扫描可以重建自动任务；优先让出等待数据的名额给新上传与明确的手动请求。
+            # 缺图扫描可以重建自动任务；优先让出等待数据的名额给新上传与用户请求。
             victim = next((key for key, item in self._pending.items() if (item.state == "waiting_data" or item.backfill) and key not in self._leases and item is not self._active), None)
             if victim is None:
                 if job.remote and not job.backfill:
@@ -447,21 +411,29 @@ class ThumbnailService:
                 pass  # 系统锁定时保留任务，恢复解锁后再处理。
         self._wake.set()
 
-    def _cancel(self, job):
+    def _cancel(self, job, detail="文件已删除、移动、覆盖或账号不可用"):
         blob = job.info.blob_uuid
         self._pending.pop(blob, None)
         self._leases.pop(blob, None)
         if self._active is job and self._task is not None:
             self._task.cancel()
-        self._record(job, "cancelled", "文件已删除、移动、覆盖或账号不可用")
+        self._record(job, "cancelled", detail)
         self.cache.drop(blob)
 
-    def claim(self, scope, key, etag, *, force=False, custom=False):
+    def claim(self, scope, key, etag, *, force=False, custom=False, ticket=None):
         self._expire_clients()
         info = self.objects.head_object(scope, key)
         self.objects._check_scope(scope, key, write=True)
         if info.etag != etag:
             raise ValueError("文件内容已变化，请刷新后重试")
+        if ticket is not None:
+            self.check_claim(info, ticket)
+            lease = self._leases[info.blob_uuid]
+            lease.until = time.monotonic() + CLIENT_TIMEOUT
+            job = self._pending.get(info.blob_uuid)
+            if job is not None:
+                job.ready_at = lease.until
+            return {"token": lease.token, "expires_in": CLIENT_TIMEOUT}
         if custom:
             return self._custom_claim(info)
         if not self._eligible(info) or (not force and self._has_thumbnail(info.blob_uuid)):
@@ -478,19 +450,23 @@ class ThumbnailService:
         job.state, job.detail, job.ready_at = "waiting_client", "浏览器正在复用本地或预览数据", lease.until
         return {"token": lease.token, "expires_in": CLIENT_TIMEOUT}
 
-    def _custom_claim(self, info):
-        """用户指定的缩略图（上传图片、图片地址或播放器当前画面）适用于任何文件，优先于自动生成：
-        取消这个 Blob 排队或进行中的自动任务并收回旧票据，不登记新任务；保存仍走带票据的普通写入。"""
+    def _take_over(self, info):
+        """用户指定的缩略图优先于自动生成：取消这个 Blob 排队或进行中的自动任务。"""
         if info.key.endswith("/") or not info.blob_uuid:
             raise ValueError("只有文件可以设置缩略图")
         if info.key.startswith(".tgdrive/") and not info.key.startswith(PRIVATE_PREFIX):
             raise ValueError("系统文件不能设置缩略图")
-        blob = info.blob_uuid
-        job = self._pending.pop(blob, None)
+        job = self._pending.pop(info.blob_uuid, None)
         if job is not None:
             if self._active is job and self._task is not None:
                 self._task.cancel()
             self._record(job, "cancelled", "用户设置了自定义缩略图")
+
+    def _custom_claim(self, info):
+        """用户指定的缩略图（上传图片、图片地址或播放器当前画面）适用于任何文件，优先于自动生成：
+        取消这个 Blob 排队或进行中的自动任务并收回旧票据，不登记新任务；保存仍走带票据的普通写入。"""
+        self._take_over(info)
+        blob = info.blob_uuid
         lease = _Lease(info, secrets.token_urlsafe(24), time.monotonic() + CLIENT_TIMEOUT)
         self._leases[blob] = lease
         return {"token": lease.token, "expires_in": CLIENT_TIMEOUT}
@@ -515,12 +491,12 @@ class ThumbnailService:
                         if response.status != 200:
                             raise ValueError(f"图片地址无法访问（HTTP {response.status}）")
                         if response.size is not None and response.size > FETCH_LIMIT:
-                            raise ValueError("图片超过 20 MB，请换一张较小的图片")
+                            raise ValueError("图片超过 50 MB，请换一张较小的图片")
                         pieces, size = [], 0
                         async for piece in response.stream():
                             size += len(piece)
                             if size > FETCH_LIMIT:
-                                raise ValueError("图片超过 20 MB，请换一张较小的图片")
+                                raise ValueError("图片超过 50 MB，请换一张较小的图片")
                             pieces.append(piece)
             except TimeoutError:
                 raise ValueError("读取图片超时，请检查地址或稍后重试") from None
@@ -529,6 +505,32 @@ class ThumbnailService:
         if mime is None:
             raise ValueError("地址返回的不是受支持的图片（JPEG、PNG、WebP、GIF、BMP 或 AVIF）")
         return data, mime
+
+    async def apply_custom(self, scope, key, images):
+        """服务端直接保存用户指定的缩略图（离线下载任务附带的封面）：与网页自定义缩略图同样取消自动任务、
+        保存后清除没有更新的旧规格。images 是已缩放好的 {规格: 图片字节}。"""
+        info = self.objects.head_object(scope, key)
+        self._take_over(info)
+        self._leases.pop(info.blob_uuid, None)
+        saved = []
+        for variant in ("thumb", "grid", "poster"):
+            if variant in images:
+                await self.objects.set_thumbnail(scope, key, images[variant], variant)
+                saved.append(variant)
+        self.objects.finish_thumbnail_set(scope, key, saved)
+        return saved
+
+    async def render_image(self, data):
+        """把一张图片缩放成三种缩略图规格（离线任务的图片地址封面使用）；服务器没有 FFmpeg 时返回 None。"""
+        if not self.resources.ffmpeg or image_mime(data) is None:
+            return None
+        with tempfile.TemporaryDirectory(prefix="tessera-cover-") as directory:
+            path = Path(directory) / "source"
+            path.write_bytes(data)
+            source = SimpleNamespace(url=str(path), origin="", failure=None)
+            async with asyncio.timeout(TIMEOUT):
+                images, _ = await self._render_frame(source, "image", Path(directory), lambda: None, protocols="file")
+            return images
 
     def check_claim(self, info, token):
         lease = self._leases.get(info.blob_uuid)
@@ -560,9 +562,34 @@ class ThumbnailService:
         if not self._eligible(info):
             raise ValueError("此文件不支持生成缩略图")
         if not self.resources.ffmpeg:
-            raise ValueError("服务器未安装 FFmpeg，无法执行手动生成")
+            raise ValueError("服务器未安装 FFmpeg，无法在服务器生成")
+        self._history.pop(info.blob_uuid, None)
         self._enqueue(_Job(info, force=True, remote=True, detail="用户请求生成"))
         return {"accepted": True}
+
+    def progress(self, scope, key, etag):
+        """网页「更新缩略图 → 自动生成」查询这个文件的生成进度：排队、处理中，或最近一次的结果与原因。"""
+        self.objects._check_scope(scope, key)
+        info = self.objects.head_object(scope, key)
+        if info.etag != etag:
+            raise ValueError("文件内容已变化，请刷新后重试")
+        job = self._pending.get(info.blob_uuid)
+        if job is not None and job.info.bucket_id == info.bucket_id:
+            return {"state": "running" if self._active is job else "queued", "detail": job.detail}
+        record = self._history.get(info.blob_uuid)
+        return {"state": record["state"], "detail": record["detail"]} if record else {"state": "idle", "detail": ""}
+
+    def cancel(self, scope, key, etag):
+        self.objects._check_scope(scope, key, write=True)
+        info = self.objects.head_object(scope, key)
+        if info.etag != etag:
+            raise ValueError("文件内容已变化，请刷新后重试")
+        job = self._pending.get(info.blob_uuid)
+        if job is None or job.info.bucket_id != info.bucket_id:
+            return {"cancelled": False}
+        self.objects._check_scope(scope, job.info.key, write=True)
+        self._cancel(job, "用户已停止生成")
+        return {"cancelled": True}
 
     # ---------- 自动补图 ----------
 
@@ -578,41 +605,8 @@ class ThumbnailService:
             db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                        (key, json.dumps(value, separators=(",", ":"))))
 
-    def backfill_limit(self):
-        """每日自动补图的读取上限（字节）；0 表示关闭，None 表示不限制。"""
-        value = self._setting(BACKFILL_KEY).get("daily_mib", BACKFILL_DEFAULT_MIB)
-        if not isinstance(value, int) or isinstance(value, bool):
-            value = BACKFILL_DEFAULT_MIB
-        return None if value < 0 else value * MIB
-
-    def configure_backfill(self, daily_mib):
-        if isinstance(daily_mib, bool) or not isinstance(daily_mib, int) or daily_mib < -1 or daily_mib > 1024 * 1024:
-            raise ValueError("每日读取上限必须是 0 到 1048576 MiB 之间的整数，-1 表示不限制")
-        self._save_setting(BACKFILL_KEY, {"daily_mib": daily_mib})
-        self._backfill_at = 0
-        self._wake.set()
-        return self.backfill_status()
-
-    @staticmethod
-    def _today():
-        return datetime.date.today().isoformat()
-
-    def _backfill_used(self):
-        usage = self._setting(BACKFILL_USAGE_KEY)
-        return int(usage.get("bytes", 0)) if usage.get("day") == self._today() else 0
-
-    def _charge_backfill(self, size):
-        if size > 0:
-            self._save_setting(BACKFILL_USAGE_KEY, {"day": self._today(), "bytes": self._backfill_used() + size})
-
-    def _backfill_room(self):
-        limit = self.backfill_limit()
-        return None if limit is None else max(0, limit - self._backfill_used())
-
     def backfill_status(self):
-        limit = self.backfill_limit()
-        return {"daily_bytes": limit, "used_bytes": self._backfill_used(), "age_seconds": BACKFILL_AGE,
-                "pending": sum(1 for job in self._pending.values() if job.backfill)}
+        return {"age_seconds": BACKFILL_AGE, "pending": sum(1 for job in self._pending.values() if job.backfill)}
 
     def _backfill_page(self):
         """按键集分页找出较早写入、仍没有任何缩略图记录（含「无法生成」）的媒体文件；只读元数据。"""
@@ -630,12 +624,8 @@ class ThumbnailService:
         return [self.objects._object(row) for row in rows]
 
     async def _plan_backfill(self):
-        """队列里没有更便宜的任务时补充最多 4 个补图任务；预算用完或扫描到末尾后暂停一段时间。"""
+        """队列里没有更便宜的任务时补充最多 4 个补图任务；扫描到末尾后暂停一段时间。"""
         if time.monotonic() < self._backfill_at or sum(1 for job in self._pending.values() if job.backfill) >= 4:
-            return False
-        room = self._backfill_room()
-        if room is not None and room < 2 * MIB:
-            self._backfill_at = time.monotonic() + 600
             return False
         page = await self.metadata.run_in_thread(self._backfill_page)
         if not page:
@@ -654,7 +644,7 @@ class ThumbnailService:
             blob = info.blob_uuid
             if not self._eligible(info) or blob in self._pending or blob in self._leases or blob in self._backfill_skip:
                 continue
-            added = self._enqueue(_Job(info, remote=True, backfill=True, detail="自动补图：按预算读取存储")) or added
+            added = self._enqueue(_Job(info, remote=True, backfill=True, detail="自动补图：从存储读取")) or added
         return added
 
     def _repair(self):
@@ -676,14 +666,14 @@ class ThumbnailService:
     def status(self):
         self._expire_clients()
         jobs = [{"id": hashlib.sha256(blob.encode()).hexdigest()[:12], "kind": source_kind(job.info),
-                 "state": job.state, "detail": job.detail, "manual": job.remote and not job.backfill, "backfill": job.backfill,
+                 "state": job.state, "detail": job.detail, "backfill": job.backfill,
                  "wait_seconds": max(0, int(job.ready_at - time.monotonic()))} for blob, job in self._pending.items()]
         pressure = self.resources.pressure()
         return {"available": bool(self.resources.ffmpeg), "unlocked": self.keystore.unlocked,
                 "pressure": pressure, "jobs": jobs, "recent": list(reversed(self._history.values())),
                 "cache": self.cache.status(), "remote_bytes": self._remote_bytes,
                 "client_timeout_seconds": CLIENT_TIMEOUT, "task_timeout_seconds": TIMEOUT,
-                "automatic_remote_reads": False, "capacity": 128, "backfill": self.backfill_status(),
+                "capacity": 128, "backfill": self.backfill_status(),
                 "inline": self.objects.inline_thumbnails()}
 
     async def _run(self):
@@ -694,7 +684,7 @@ class ThumbnailService:
                     self._expire_clients()
                     now = time.monotonic()
                     ready = (item for item in self._pending.values() if item.state == "queued" and item.ready_at <= now and item.info.blob_uuid not in self._leases)
-                    # 明确的手动请求优先，其次是只用缓存的自动任务，最后才是需要读取存储的补图；同级先图片和音频。
+                    # 用户请求优先，其次是只用缓存的自动任务，最后才是需要读取存储的补图；同级先图片和音频。
                     job = min(ready, key=lambda item: (2 if item.backfill else 0 if item.remote else 1,
                                                        {"image": 0, "audio": 1, "video": 2}[source_kind(item.info)]), default=None)
                     if job is not None:
@@ -707,21 +697,11 @@ class ThumbnailService:
                             # 没有任何已接收的数据：不占队列名额，等文件被实际读取时 observe 再登记。
                             self._pending.pop(blob, None)
                             continue
-                        budget = None
-                        if job.backfill:
-                            room = self._backfill_room()
-                            budget = READ_LIMITS[source_kind(job.info)] if room is None else min(READ_LIMITS[source_kind(job.info)], room - MIB)
-                            if budget < MIB:
-                                # 今日补图额度用完：保留任务，明天或调高上限后继续。
-                                job.ready_at, job.detail = now + 600, "今日自动补图读取量已用完"
-                                self._backfill_at = now + 600
-                                continue
-                        job.state, job.detail = "running", "使用已接收缓存" if not job.remote else "优先使用缓存，必要时按预算回源"
+                        job.state, job.detail = "running", "使用已接收缓存" if not job.remote else "优先使用缓存，必要时读取存储"
                         job.revision = self.cache.revision(blob)
                         self._active = job
                         started_remote = job.remote
-                        before = self._remote_bytes
-                        self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote, budget=budget, give_up=job.backfill))
+                        self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote))
                         try:
                             failure_detail = await self._task
                             self._pending.pop(blob, None)
@@ -747,16 +727,8 @@ class ThumbnailService:
                         except Exception as exc:
                             self._pending.pop(blob, None)
                             if job.backfill and not isinstance(exc, (NotFoundError, PermissionError)):
-                                # 超时、资源不足等暂时性失败：几小时后再试；连续 3 次仍失败就记为「无法生成」，不再消耗补图额度。
-                                # 解码器确定无法处理的已在 generate 中记录；运行环境受限（ThumbnailRetry）只推迟，不计次数。
-                                failures = self._backfill_failures.get(blob, 0) + (not isinstance(exc, ThumbnailRetry))
-                                self._backfill_failures[blob] = failures
+                                # 资源、额度、网络和解码错误都可能恢复，不得据此永久跳过文件。
                                 self._backfill_skip[blob] = time.monotonic() + BACKFILL_RETRY
-                                if failures >= 3:
-                                    try:
-                                        await self.objects.set_thumbnail(self._scope(job.info, None), job.info.key, None, "none")
-                                    except Exception:
-                                        pass
                             if not isinstance(exc, (ThumbnailError, TimeoutError, NotFoundError, PermissionError)):
                                 log.warning("缩略图任务失败：id=%s reason=unexpected_error error=%s",
                                             hashlib.sha256(blob.encode()).hexdigest()[:12], type(exc).__name__)
@@ -773,10 +745,8 @@ class ThumbnailService:
                             self._record(job, "failed", detail)
                         finally:
                             self._active = self._task = None
-                            if job.backfill:
-                                self._charge_backfill(self._remote_bytes - before)
                         continue
-                    if self._backfill_room() != 0 and await self._plan_backfill():
+                    if await self._plan_backfill():
                         continue
                 await asyncio.wait_for(self._wake.wait(), 1)
             except TimeoutError:
@@ -803,11 +773,9 @@ class ThumbnailService:
         self.objects._check_scope(scope, info.key, write=True)
         return scope
 
-    async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False,
-                       budget=None, give_up=False) -> str | None:
-        """生成并保存缩略图。give_up 用于自动补图：解码器确定无法处理或单文件预算不够时记为「无法生成」，
-        以后不再自动重试（可通过文件助手的生成卡片重新请求）。
-        返回固定失败说明表示已记录 none，成功或跳过返回 None。"""
+    async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False) -> str | None:
+        """生成并保存缩略图。用户请求、自动补图与已收数据任务走同一流程：不限制文件大小或读取量，
+        allow_remote 只决定缓存不足时能否从存储读取。只有确实没有可用图片才记录 none；运行异常交给队列延后重试。"""
         kind = source_kind(info)
         if not self._eligible(info) or not self.resources.ffmpeg:
             return
@@ -816,25 +784,17 @@ class ThumbnailService:
         if not force and self._has_thumbnail(info.blob_uuid):
             return
         async with asyncio.timeout(TIMEOUT):
-            failure_detail = None
-            async with _RangeInput(self.objects.engine, info, scope.authorize, budget or READ_LIMITS[kind], cache_only=not allow_remote) as source:
+            async with _RangeInput(self.objects.engine, info, scope.authorize, cache_only=not allow_remote) as source:
                 try:
                     with tempfile.TemporaryDirectory(prefix="tessera-thumbnail-") as directory:
-                        try:
-                            images = await self._render(source, kind, Path(directory), scope.authorize)
-                        except ThumbnailError as exc:
-                            # 资源压力属于暂时失败；读取预算不够（只在没有缩小预算时）或解码失败才是确定的结果。
-                            if not give_up or isinstance(exc, ThumbnailRetry) or isinstance(exc, ThumbnailBudget) and budget and budget < READ_LIMITS[kind]:
-                                raise
-                            failure_detail = str(exc)
-                            images = None
+                        images = await self._render(source, kind, Path(directory), scope.authorize)
                 finally:
                     self._remote_bytes += source.remote_bytes if isinstance(source.remote_bytes, int) else 0
             scope.authorize()
             if not force and self._has_thumbnail(info.blob_uuid):
                 return
             if images is None:
-                failure_detail = failure_detail or ("候选画面均为空白或细节不足" if kind == "video"
+                failure_detail = ("候选画面均为空白或细节不足" if kind == "video"
                                                     else "音频没有可用的内嵌封面" if kind == "audio" else "未能提取图片画面")
                 if force and kind == "video":
                     raise ThumbnailError(failure_detail + "，未替换现有缩略图")
@@ -872,7 +832,7 @@ class ThumbnailService:
         # 不把片头黑屏、白屏或近乎纯色的画面固化为封面。
         return None
 
-    async def _render_frame(self, source, kind, directory, authorize, *, position=0):
+    async def _render_frame(self, source, kind, directory, authorize, *, position=0, protocols="http,tcp"):
         selector = "V:0" if kind == "video" else "v:0"
         filters = [f"[0:{selector}]split=4[t][g][p][q]" if kind == "video" else f"[0:{selector}]split=3[t][g][p]"]
         if kind == "video":
@@ -880,10 +840,9 @@ class ThumbnailService:
         for label, variant, size in (("t", "thumb", 160), ("g", "grid", 640), ("p", "poster", 960)):
             filters.append(f"[{label}]scale=w='max(2,min({size},iw))':h='max(2,min({size},ih))':"
                            f"force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuvj420p[{variant}]")
-        options = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-max_alloc", str(192 * MIB),
-                   "-threads", "1", "-filter_complex_threads", "1", "-protocol_whitelist", "http,tcp",
-                   "-format_whitelist", FORMATS, "-probesize", str(MIB), "-analyzeduration", "1000000",
-                   "-max_pixels", str(VIDEO_PIXELS if kind == "video" else MAX_PIXELS)]
+        options = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                   "-threads", "1", "-filter_complex_threads", "1", "-protocol_whitelist", protocols,
+                   "-format_whitelist", FORMATS]
         if position:
             options += ["-ss", str(position)]
         options += ["-i", source.url, "-filter_complex", ";".join(filters)]
@@ -893,7 +852,7 @@ class ThumbnailService:
         if kind == "video":
             options += ["-map", "[quality]", "-an", "-sn", "-dn", "-frames:v", "1", "-threads", "1",
                         "-c:v", "rawvideo", "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1"]
-        # 强制 HTTP 经仅服务当前文件的本地代理，清掉宿主机代理配置，拒绝媒体中的外部引用。
+        # 原文件流式经过当前 Blob 的回环代理，拒绝媒体中的外部引用。
         env = {key: value for key, value in os.environ.items()
                if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
         env.update(http_proxy=source.origin, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
@@ -919,7 +878,8 @@ class ThumbnailService:
         quality = asyncio.create_task(samples()) if kind == "video" else None
         # 按实际占用的物理内存（RSS）巡检，不用 RLIMIT_AS：FFmpeg 7 为每路输入、输出和滤镜各开线程，
         # 加上动态库映射，虚拟地址空间远大于实际用量，限制地址空间会让它在加载库或创建线程时直接失败。
-        memory = min(512 * MIB, max(192 * MIB, (self.resources.detected["memory_bytes"] or 1536 * MIB) // 3))
+        # 这是保护服务器的资源上限（超出只推迟重试），不是按文件大小拒绝：至少 512 MiB，大内存服务器放宽到一半。
+        memory = max(512 * MIB, (self.resources.detected["memory_bytes"] or 0) // 2)
         try:
             while not waiting.done():
                 authorize()

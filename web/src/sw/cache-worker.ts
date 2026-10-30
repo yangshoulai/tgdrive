@@ -13,8 +13,7 @@ import {
 const sw = self as unknown as ServiceWorkerGlobalScope;
 const MiB = 1 << 20;
 
-/** 管理员策略只有开关与私密保留期；容量全部来自设备设置（tierBudget）。 */
-type Policy = { enabled: boolean; private_enabled: boolean; private_ttl_days: number };
+/* 是否缓存、是否缓存私密文件与容量都只来自这台设备的设置（tierBudget），服务端没有管理员策略。 */
 type EntryKeys = { id: string; key: CryptoKey };
 type TierContext = {
   tier: Tier; ns: string; key: Bytes; info: CryptoKey; bucketId: number | null; access: string; signal: AbortSignal;
@@ -54,7 +53,6 @@ function routeOf(request: Request): Route | null {
 /* ---------- 设置、策略与密钥 ---------- */
 
 let settings: { value: DeviceSettings; at: number } | null = null;
-let policy: Policy | null = null;
 type Cached = { promise: Promise<TierContext | null>; expires: number; access?: string };
 let normal: Cached | null = null;
 let privateTier: Cached | null = null;
@@ -149,15 +147,10 @@ function normalContext(): Promise<TierContext | null> {
   const pending: Promise<TierContext | null> = (async () => {
     const response = await post("/api/user/v1/cache/session", { device: await deviceId() });
     if (!response.ok) return null;
-    const body = await response.json() as { namespace: string; bucket_id: number; policy: Policy; key?: string };
+    const body = await response.json() as { namespace: string; bucket_id: number; key?: string };
     if (signal.aborted) return null;
-    policy = body.policy;
     lastNamespace = body.namespace;
-    if (!body.key) {
-      // 管理员关闭了普通文件的本机缓存：这台设备上该账号的普通层数据不再允许保留。
-      await deleteEntries((await listEntries(body.namespace, "n")).map(entry => entry.key));
-      return null;
-    }
+    if (!body.key) return null;
     scheduleReconcile(5000);
     return tierContext("n", body.namespace, body.key, body.bucket_id, signal);
   })().catch(() => null);
@@ -169,7 +162,7 @@ async function privateContext(route: Route): Promise<TierContext | null> {
   if (pageAccessExpires && Date.now() >= pageAccessExpires) { rememberAccess(""); dropKeys("p"); }
   const signal = revocation.p.signal;
   const [device, preferences, base] = await Promise.all([deviceId(), currentSettings(), normalContext()]);
-  if (!preferences.private || !policy?.private_enabled || !base || base.signal.aborted || signal.aborted) return null;
+  if (!preferences.private || !base || base.signal.aborted || signal.aborted) return null;
   if (!pageAccessExpires) await askAccess(signal);
   const access = route.access || pageAccess || await askAccess(signal);
   if (!access || signal.aborted) return null;
@@ -612,7 +605,7 @@ async function startPrivateTask(owner: string, id: string, paths: string[], csrf
     background.controller.signal.throwIfAborted();
     const preferences = await currentSettings();
     const normal = await normalContext();
-    if (!preferences.enabled || !preferences.private || !policy?.private_enabled || !normal || normal.signal.aborted)
+    if (!preferences.enabled || !preferences.private || !normal || normal.signal.aborted)
       throw new CacheFatal("请在本机缓存设置中允许缓存私密文件");
     const device = await deviceId();
     background.controller.signal.throwIfAborted();
@@ -996,11 +989,10 @@ async function reconcile() {
     const valid = new Set((await response.json() as { valid: string[] }).valid);
     await deleteEntries(batch.filter(etag => !valid.has(etag)).flatMap(etag => byEtag.get(etag) ?? []));
   }
-  // 私密层：先按保留期清理（不需要密钥），再在私密授权有效时核对引用。
-  const ttl = (policy?.private_ttl_days ?? 7) * 86_400_000;
+  // 私密层：这台设备关闭私密缓存后清除全部副本；仍开启时在私密授权有效期间核对引用（文件已删除或移出就清除）。
+  // 副本只以密文保存、需要解锁才能打开，不再按未访问天数自动清除。
   const privateEntries = await listEntries(context.ns, "p");
-  await deleteEntries(privateEntries.filter(entry => Date.now() - entry.accessed > ttl).map(entry => entry.key));
-  if (!policy?.private_enabled || !(await currentSettings()).private) {
+  if (!(await currentSettings()).private) {
     await deleteEntries(privateEntries.map(entry => entry.key));
     return;
   }
@@ -1026,7 +1018,7 @@ async function reconcile() {
 /* ---------- 页面消息 ---------- */
 
 type Stats = {
-  namespace: string | null; policy: Policy | null; settings: DeviceSettings;
+  namespace: string | null; settings: DeviceSettings;
   normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>> }; private: { bytes: number; count: number }; others: { bytes: number; count: number };
 };
 
@@ -1034,7 +1026,7 @@ type Stats = {
 async function stats(): Promise<Stats> {
   const context = await normalContext();
   const namespace = context?.ns ?? (lastNamespace || null);
-  const result: Stats = { namespace, policy, settings: await currentSettings(), normal: { bytes: 0, count: 0, kinds: {} },
+  const result: Stats = { namespace, settings: await currentSettings(), normal: { bytes: 0, count: 0, kinds: {} },
     private: { bytes: 0, count: 0 }, others: { bytes: 0, count: 0 } };
   for (const entry of await listEntries()) {
     const bucket = entry.ns !== namespace ? result.others : entry.tier === "p" ? result.private : result.normal;

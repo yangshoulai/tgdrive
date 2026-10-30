@@ -831,7 +831,7 @@ function cloudFixture(provider) {
     captcha_client: { token: "SOURCE_CAPTCHA", captcha_token: "SOURCE_CAPTCHA", expires_at: "2099-01-01" }, deviceid: "0123456789abcdef0123456789abcdef" };
   const fixtures = {
     baidu: { url: "https://pan.baidu.com/disk/main", query: selector => selector === ".wp-s-core-pan" ? vue([
-      { fs_id: 101, server_filename: name, size: 42, isdir: 0 }, { fs_id: 102, server_filename: "folder", isdir: 1 },
+      { fs_id: 101, server_filename: name, size: 42, isdir: 0 }, { fs_id: 102, server_filename: "folder", isdir: 1, path: "/empty" },
     ]) : null },
     aliyun: { url: "https://www.alipan.com/drive/file/all", storage: { token: { token_type: "Bearer", access_token: "ALI_TOKEN" } },
       query: selector => selector.startsWith('[class^="node-list-table-view--"]') ? reactSelection({ selectedKeys: "a1", dataSource: [
@@ -861,6 +861,8 @@ function cloudReply(provider, details) {
   const url = new URL(details.url);
   const data = details.data ? JSON.parse(details.data) : null;
   if (provider === "baidu") {
+    // 选中的文件夹按 LinkSwift 展开；夹具中的文件夹是空的。
+    if (url.searchParams.get("method") === "list") return jsonReply(details, { errno: 0, list: [] });
     assert.deepEqual(JSON.parse(url.searchParams.get("fsids")), [101]);
     assert.equal(url.searchParams.get("access_token"), "BAIDU_TOKEN");
     return jsonReply(details, { errno: 0, list: [{ fs_id: 101, dlink: "https://d.pcs.baidu.com/download/file" }] });
@@ -915,7 +917,13 @@ for (const manager of ["sync", "async"]) for (const isolated of [false, true]) f
     const h = harness({ ...fixture, manager, isolated, bridge: isolated && manager === "sync" ? "privileged" : "dom", gm: details => {
       if (new URL(details.url).hostname !== "tessera.example") {
         assert.ok(!JSON.stringify(details).includes("TEST:secret"), "the Tessera credential never reaches a provider");
-        assert.ok(!Object.keys(details.headers).some(key => key.toLowerCase() === "user-agent"), "GM keeps the browser User-Agent");
+        // 与 LinkSwift 一致：百度自盘、夸克、UC、123 以客户端身份取链，其余网盘保持浏览器身份。
+        const identity = { baidu: "pan.baidu.com", quark: "QuarkPC/", uc: "uc-cloud-drive/", "123pan": "123pan/" }[provider];
+        const agent = details.headers["User-Agent"];
+        if (identity) assert.ok(agent?.includes(identity), `${provider} uses the LinkSwift client User-Agent`);
+        else assert.equal(agent, undefined, `${provider} keeps the browser User-Agent`);
+        assert.equal(details.headers.Origin, new URL(fixture.url).origin);
+        assert.equal(details.headers.Referer, new URL(fixture.url).origin + "/");
         return cloudReply(provider, details);
       }
       if (details.url.endsWith("/parse")) {
@@ -985,9 +993,85 @@ test("cloud selection snapshots are immutable and enforce the batch limit before
   const sources = await h.api.cloudSources(h.api.cloudOf());
   sources[0].cloud.file.name = "changed";
   assert.equal(item.name, "a.bin");
-  files = Array.from({ length: 51 }, (_, index) => ({ ...item, fileId: String(index) }));
-  await assert.rejects(() => h.api.cloudSources(h.api.cloudOf()), /最多发送 50/);
+  files = Array.from({ length: 1000 }, (_, index) => ({ ...item, fileId: String(index) }));
+  assert.equal((await h.api.cloudSources(h.api.cloudOf())).length, 1000, "LinkSwift does not stop at 50 files");
+  files = Array.from({ length: 1001 }, (_, index) => ({ ...item, fileId: String(index) }));
+  await assert.rejects(() => h.api.cloudSources(h.api.cloudOf()), /最多发送 1000/);
   assert.equal(h.requests.length, 0);
+});
+
+function quarkHarness(files, reply) {
+  return harness({ url: "https://pan.quark.cn/list/all", documentCookie: "__pugs=C", gmCookies: [{ name: "__pugs", value: "C" }],
+    query: selector => selector === ".file-list" ? reactSelection({ list: files, selectedRowKeys: files.map(file => file.fid) }) : null,
+    gm: details => {
+      const url = new URL(details.url);
+      if (url.hostname === "drive-social-api.quark.cn") return jsonReply(details, { code: 0, data: { token: "T" } });
+      if (url.hostname === "drive-pc.quark.cn") return reply(details, JSON.parse(details.data));
+      if (details.url.endsWith("/parse")) return jsonReply(details, { candidates: [{ ticket: "t", name: "x.bin", kind: "http", size: 1 }] });
+      throw new Error(`unexpected request ${details.url}`);
+    } });
+}
+async function parseCloudSelection(h) {
+  await h.ready;
+  const sources = await h.api.cloudSources(h.api.cloudOf());
+  const current = h.batch(sources.map(item => ({ ...item, sourceName: item.name, type: "file", state: "parsing", tasks: [], error: "" })));
+  current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  return current;
+}
+
+test("cloud quark fetches links 15 files per request as the PC client, pausing between batches like LinkSwift", async () => {
+  const files = Array.from({ length: 20 }, (_, index) => ({ fid: `q${index}`, file_name: `f${index}.bin`, size: 1, file: true }));
+  const calls = [];
+  const h = quarkHarness(files, (details, body) => {
+    calls.push({ fids: body.fids, at: Date.now(), agent: details.headers["User-Agent"] });
+    return jsonReply(details, { code: 0, data: body.fids.map(fid => ({ fid, download_url: `https://dl.quark.cn/${fid}` })) });
+  });
+  const current = await parseCloudSelection(h);
+  assert.deepEqual(calls.map(call => call.fids.length), [15, 5]);
+  assert.ok(calls[1].at - calls[0].at >= 900, "rest about a second between batches");
+  assert.ok(calls.every(call => call.agent.includes("QuarkPC/")));
+  assert.ok(current.entries.every(entry => entry.state === "waiting"), current.entries.map(entry => entry.error).join());
+});
+
+test("cloud provider errors keep the provider's code and message, and a failed batch retries file by file", async () => {
+  const big = "b".repeat(32), small = "a".repeat(32);
+  const files = [{ fid: small, file_name: "small.bin", size: 1, file: true }, { fid: big, file_name: "movie.mkv", size: 9e9, file: true }];
+  const calls = [];
+  const h = quarkHarness(files, (details, body) => {
+    calls.push(body.fids);
+    if (body.fids.includes(big)) return details.onload({ status: 400, responseText: JSON.stringify({ status: 400, code: 23018, message: `file [${big}] size limit` }) });
+    return jsonReply(details, { code: 0, data: [{ fid: small, download_url: "https://dl.quark.cn/small" }] });
+  });
+  const current = await parseCloudSelection(h);
+  assert.deepEqual(calls, [[small, big], [small], [big]]);
+  const [ok, failed] = current.entries;
+  assert.equal(ok.state, "waiting");
+  assert.equal(failed.state, "parse-error");
+  assert.match(failed.error, /超出夸克网盘游客可获取的文件大小.*movie\.mkv/);
+  const generic = quarkHarness([files[0]], details => details.onload({ status: 400, responseText: JSON.stringify({ code: 41008, message: "签名\n已过期" }) }));
+  const [entry] = (await parseCloudSelection(generic)).entries;
+  assert.match(entry.error, /（代码 41008），服务器说：签名 已过期/);
+});
+
+test("cloud baidu expands selected folders in my drive with the pan.baidu.com identity", async () => {
+  const listed = [];
+  const h = harness({ url: "https://pan.baidu.com/disk/main", query: selector => selector === ".wp-s-core-pan" ? { __vue__: { selectedList: [
+    { fs_id: 1, server_filename: "top.bin", size: 1, isdir: 0 }, { fs_id: 2, server_filename: "album", isdir: 1, path: "/album" }] } } : null,
+  gm: details => {
+    const url = new URL(details.url);
+    assert.equal(details.headers["User-Agent"], "pan.baidu.com");
+    listed.push(url.searchParams.get("dir"));
+    if (url.searchParams.get("dir") === "/album") return jsonReply(details, { errno: 0, list: [
+      { fs_id: 3, server_filename: "a.jpg", size: 2, isdir: 0 }, { fs_id: 4, server_filename: "sub", isdir: 1, path: "/album/sub" }] });
+    return jsonReply(details, { errno: 0, list: [{ fs_id: 5, server_filename: "b.jpg", size: 3, isdir: 0 }] });
+  } });
+  await h.ready;
+  await assert.rejects(() => h.api.cloudSources(h.api.cloudOf()), /授权百度取链/);
+  h.api.gm.set("cloud-baidu-token", { token: "BAIDU_TOKEN", expires: Date.now() + 3600000 });
+  const sources = await h.api.cloudSources(h.api.cloudOf());
+  assert.deepEqual(Array.from(sources, item => item.name), ["top.bin", "a.jpg", "b.jpg"]);
+  assert.deepEqual(listed, ["/album", "/album/sub"]);
 });
 
 test("cloud share modes missing an upstream resolver explain the save-to-own-drive workflow", async () => {
@@ -1065,7 +1149,7 @@ test("cloud request rejects a different provider, arbitrary API hosts and foreig
   const h = harness(cloudFixture("aliyun"));
   const context = (await h.api.cloudSources(h.api.cloudOf()))[0].cloud;
   await assert.rejects(() => h.api.cloudRequest(context, "https://evil.example/api"), /接口地址无效/);
-  await assert.rejects(() => h.api.cloudRequest(context, "https://api.alipan.com/v2/file/get_download_url", { headers: { "user-agent": "different" } }), /改写浏览器身份/);
+  await assert.rejects(() => h.api.cloudRequest(context, "https://api.alipan.com/v2/file/get_download_url", { headers: { Host: "evil.example" } }), /请求头无效/);
   assert.throws(() => h.api.cloudDownload(context, "https://evil.example/file", { Cookie: "source-secret" }), /未转交登录 Cookie/);
   assert.throws(() => h.api.cloudDownload({ provider: "quark" }, "https://dl.uc.cn/file", { cookie: "source-secret" }), /未转交登录 Cookie/);
   h.context.location = new URL("https://pan.quark.cn/list/all");

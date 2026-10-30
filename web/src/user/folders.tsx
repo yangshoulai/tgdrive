@@ -3,6 +3,8 @@ import * as api from "../api";
 import { FileTile, baseName } from "../files";
 import { useDirectory, mergeFolderPages } from "../pagination";
 import { Button, Field, Icon, SkeletonRows } from "../ui";
+import { usePrivateAccess } from "./private-session";
+import { PrivateUnlockDialog } from "./private-unlock";
 
 /** 上传、新建与移动共用的位置浏览器；自动列完当前目录的全部子目录。 */
 export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate = false, creatable = true }: {
@@ -19,13 +21,9 @@ export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate =
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [privateAvailable, setPrivateAvailable] = useState(Boolean(api.getPrivateAccess()));
   const returnToCreate = useRef(false);
   useEffect(() => {
-    const locked = () => {
-      setPrivateAvailable(false);
-      if (api.isPrivatePath(value)) onChange("");
-    };
+    const locked = () => { if (api.isPrivatePath(value)) onChange(""); };
     window.addEventListener("tessera:private-locked", locked);
     return () => window.removeEventListener("tessera:private-locked", locked);
   }, [value, onChange]);
@@ -51,14 +49,7 @@ export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate =
     finally { setBusy(false); }
   }
   return <div className="move-browser">
-    {allowPrivate && <div className="move-scope-toggle" role="group" aria-label="目标空间">
-      <button type="button" className={!root ? "is-active" : ""} aria-pressed={!root} onClick={() => open("")}><Icon name="home" size={15} />我的文件</button>
-      <button type="button" className={root ? "is-active" : ""} aria-pressed={Boolean(root)} disabled={!privateAvailable && !api.getPrivateAccess()} title={!privateAvailable && !api.getPrivateAccess() ? "请先解锁私密空间" : undefined} onClick={() => {
-        const available = Boolean(api.getPrivateAccess()); setPrivateAvailable(available);
-        if (available) open(api.PRIVATE_PREFIX);
-      }}><Icon name="lock" size={15} />私密空间</button>
-      {!privateAvailable && !api.getPrivateAccess() && <span className="muted">需先解锁后选择</span>}
-    </div>}
+    {allowPrivate && <PrivateScopeToggle privateRoot={Boolean(root)} onOpen={open} />}
     <div className="move-head">
       <nav className="breadcrumbs" aria-label="目标位置">
         <button type="button" disabled={busy} onClick={() => open(root)} aria-current={value === root ? "page" : undefined}><Icon name={root ? "lock" : "home"} size={15} />{rootName}</button>
@@ -87,6 +78,22 @@ export function FolderPicker({ value, onChange, blocked, onReady, allowPrivate =
     </div>
     {pagination.loadingMore && <p className="muted" role="status">正在读取其余文件夹…</p>}
     <p className="muted folder-destination">已选位置：{api.privatePathLabel(value)}</p>
+  </div>;
+}
+
+/** 「我的文件／私密空间」切换。私密空间未解锁时点击先弹出解锁窗口，解锁后直接进入私密空间根目录。
+ *  只在应用外壳（PrivateSessionProvider）内使用，分享页等外部页面不传 allowPrivate。 */
+function PrivateScopeToggle({ privateRoot, onOpen }: { privateRoot: boolean; onOpen: (path: string) => void }) {
+  const access = usePrivateAccess();
+  const [unlocking, setUnlocking] = useState(false);
+  if (!access.available) return null;
+  return <div className="move-scope-toggle" role="group" aria-label="目标空间">
+    <button type="button" className={!privateRoot ? "is-active" : ""} aria-pressed={!privateRoot} onClick={() => onOpen("")}><Icon name="home" size={15} />我的文件</button>
+    <button type="button" className={privateRoot ? "is-active" : ""} aria-pressed={privateRoot} onClick={() => { if (access.grant) onOpen(api.PRIVATE_PREFIX); else setUnlocking(true); }}>
+      <Icon name={access.grant ? "unlock" : "lock"} size={15} />私密空间</button>
+    {!access.grant && <span className="muted">点击后解锁</span>}
+    {unlocking && <PrivateUnlockDialog description="解锁后即可选择私密空间中的位置。" onClose={() => setUnlocking(false)}
+      onUnlocked={() => { setUnlocking(false); onOpen(api.PRIVATE_PREFIX); }} />}
   </div>;
 }
 

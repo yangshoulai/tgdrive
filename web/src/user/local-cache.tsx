@@ -76,20 +76,17 @@ export function LocalCacheSettings() {
     } catch (reason) { toast.error(api.errorMessage(reason, "授权失败，请重试")); }
     finally { setBusy(false); }
   }
-  const policy = stats?.policy ?? null;
-  const adminOff = policy !== null && !policy.enabled;
   const normalLimit = settings?.maxMiB ?? 0, privateLimit = settings?.privateMaxMiB ?? 0;
   const kinds = KIND_ORDER.map(kind => ({ kind, bytes: stats?.normal.kinds[kind] ?? 0 })).filter(item => item.bytes > 0);
-  const privateOn = Boolean(settings?.private && policy?.private_enabled);
+  const privateOn = Boolean(settings?.private);
   const total = (stats?.normal.count ?? 0) + (stats?.private.count ?? 0) + (stats?.others.count ?? 0);
   const totalBytes = (stats?.normal.bytes ?? 0) + (stats?.private.bytes ?? 0) + (stats?.others.bytes ?? 0);
 
   return <>
     <Section icon="monitor" title="本机缓存" description="看过的文件加密保存在这个浏览器里，再次打开更快，只有登录你的账号才能打开。">
       {error && <Notice tone="danger">{error}</Notice>}
-      {adminOff ? <Notice>管理员已关闭浏览器本地缓存，这台设备上的普通文件缓存已清除。</Notice>
-        : settings && <Switch checked={settings.enabled} disabled={busy} onChange={value => void update({ enabled: value }, value ? "已开启本机缓存" : "已关闭本机缓存并清除数据")}
-          label="在这台设备上缓存文件" description="自动保存预览过的内容，包括图片、音视频、Markdown、文本、代码、PDF 和缩略图；任意文件都可以通过「缓存到本机」完整保存。文件列表用「本机」标记手动缓存、「自动」标记自动缓存。" />}
+      {settings && <Switch checked={settings.enabled} disabled={busy} onChange={value => void update({ enabled: value }, value ? "已开启本机缓存" : "已关闭本机缓存并清除数据")}
+          label="在这台设备上缓存文件" description="自动保存预览过的内容，包括图片、音视频、文档和缩略图；任意文件都可以通过「缓存到本机」完整保存。文件列表中绿色硬盘图标表示手动缓存、灰色表示自动缓存。" />}
       {stats && <div className="local-cache-figures folder-stats-figures">
         <div><span>普通文件</span><strong>{formatBytes(stats.normal.bytes)}</strong><small>上限 {sizeLabel(effectiveMiB(normalLimit, quota))} · {stats.normal.count.toLocaleString("zh-CN")} 项</small></div>
         <div><span>私密文件</span><strong>{formatBytes(stats.private.bytes)}</strong><small>{privateOn ? `上限 ${sizeLabel(effectiveMiB(privateLimit, quota))} · ${stats.private.count} 项` : "未开启"}</small></div>
@@ -101,7 +98,7 @@ export function LocalCacheSettings() {
         </div>
         <ul className="local-cache-legend">{kinds.map(item => <li key={item.kind}><i className={`folder-stats-swatch kind-${item.kind}`} aria-hidden="true" />{KIND_LABEL[item.kind]} {formatBytes(item.bytes)}</li>)}</ul>
       </div>}
-      {settings && !adminOff && settings.enabled && <div className="local-cache-options">
+      {settings && settings.enabled && <div className="local-cache-options">
       <CacheSizeSelect label="最多占用" value={settings.maxMiB} disabled={busy || !settings.enabled} quota={quota}
         hint="超出后先移除最久没有打开的自动缓存，手动缓存的文件会保留；自动缓存的单个文件最多占一半。" onChange={value => void update({ maxMiB: value }, "已保存")} />
       <Switch checked={settings.video} disabled={busy || !settings.enabled} onChange={value => void update({ video: value }, "已保存")} label="自动缓存视频片段"
@@ -112,13 +109,13 @@ export function LocalCacheSettings() {
     </Section>
 
 
-    {settings && !adminOff && settings.enabled && <CacheLocation directory={directory} quota={estimate?.quota} busy={busy}
+    {settings && settings.enabled && <CacheLocation directory={directory} quota={estimate?.quota} busy={busy}
       onPick={() => void pickDirectory()} onRegrant={() => void regrant()} onBrowser={() => setConfirm("browser")} />}
 
-    {settings && policy?.private_enabled && <Section icon="shield" title="私密文件" description="私密空间锁定后，已加入的缓存任务继续，副本仍需解锁才能打开；文件被移出私密空间后也不再使用。">
+    {settings && <Section icon="shield" title="私密文件" description="私密空间锁定后，已加入的缓存任务继续，副本仍需解锁才能打开；文件被移出私密空间后也不再使用。">
       <div className="account-setting-summary"><div>
         <strong>{settings.private ? "这台设备会缓存私密文件" : "不缓存私密文件"}</strong>
-        <p>只在你信任的个人设备上开启。超过 {policy.private_ttl_days} 天没有打开的私密文件会被自动清除。</p>
+        <p>只在你信任的个人设备上开启。副本以密文保存，私密空间锁定后无法打开；关闭后立即清除这台设备上的私密副本。</p>
       </div><Badge tone={settings.private ? "success" : "neutral"}>{settings.private ? "已开启" : "未开启"}</Badge></div>
       <div className="account-private-actions">
         {settings.private

@@ -13,11 +13,10 @@ export type ThumbnailResult = ThumbnailSet | "none" | null;
 const THUMB = { size: 160, budget: 24 * 1024 };
 const GRID = { size: 640, budget: 120 * 1024 };
 const POSTER = { size: 960, budget: 220 * 1024 };
-const IMAGE_LIMIT = 60 * 1024 * 1024;
 
 export function thumbnailSource(name: string, type: string | null | undefined, size: number): ThumbnailSource | null {
   const kind = getFileKind(type, name);
-  if (kind === "image") return /\.svg$/i.test(name) || (type || "").includes("svg") || size > IMAGE_LIMIT ? null : "image";
+  if (kind === "image") return /\.svg$/i.test(name) || (type || "").includes("svg") ? null : "image";
   return kind === "video" || kind === "audio" ? kind : null;
 }
 
@@ -86,6 +85,15 @@ async function fromBlob(blob: Blob): Promise<ThumbnailSet | null> {
   try { return await renderSet(bitmap, bitmap.width, bitmap.height); } finally { bitmap.close(); }
 }
 
+/** 把一张图片缩放成三种缩略图规格，返回去掉 data: 前缀的 base64（离线任务附带的缩略图在任务创建后提交）。 */
+export async function imageThumbnailSet(image: Blob): Promise<Record<string, string>> {
+  let result: ThumbnailSet | null;
+  try { result = await fromBlob(image); }
+  catch { throw new Error("无法读取这张图片，请换用 JPEG、PNG、WebP 或 GIF 格式"); }
+  if (!result) throw new Error("图片处理失败，请换一张图片再试");
+  return Object.fromEntries(Object.entries(result).filter(([, value]) => value).map(([variant, value]) => [variant, String(value).slice(String(value).indexOf(",") + 1)]));
+}
+
 /* ---------- 视频截帧 ---------- */
 
 class VideoThumbnailError extends Error {}
@@ -95,18 +103,18 @@ function videoFailure(target: HTMLMediaElement) {
     : "视频读取失败，请稍后重试";
 }
 
-function waitFor(target: HTMLMediaElement, event: string | string[], signal?: AbortSignal, timeout = 20000, ready?: () => boolean) {
+function waitFor(target: HTMLMediaElement, event: string | string[], signal?: AbortSignal, timeout: number | null = 20000, ready?: () => boolean) {
   return new Promise<void>((resolve, reject) => {
     if (signal?.aborted) { reject(new DOMException("aborted", "AbortError")); return; }
     if (target.error) { reject(new VideoThumbnailError(videoFailure(target))); return; }
     if (ready?.()) { resolve(); return; }
     const events = typeof event === "string" ? [event] : event;
     const done = (error?: unknown) => {
-      window.clearTimeout(timer); events.forEach(name => target.removeEventListener(name, ok)); target.removeEventListener("error", failed); signal?.removeEventListener("abort", aborted);
+      if (timer !== null) window.clearTimeout(timer); events.forEach(name => target.removeEventListener(name, ok)); target.removeEventListener("error", failed); signal?.removeEventListener("abort", aborted);
       if (error) reject(error); else resolve();
     };
     const ok = () => { if (!ready || ready()) done(); }, failed = () => done(new VideoThumbnailError(videoFailure(target))), aborted = () => done(new DOMException("aborted", "AbortError"));
-    const timer = window.setTimeout(() => done(new VideoThumbnailError("视频读取或解码超时，可重试生成缩略图")), timeout);
+    const timer = timeout === null ? null : window.setTimeout(() => done(new VideoThumbnailError("视频读取或解码超时，可重试生成缩略图")), timeout);
     events.forEach(name => target.addEventListener(name, ok)); target.addEventListener("error", failed, { once: true }); signal?.addEventListener("abort", aborted, { once: true });
   });
 }
@@ -127,10 +135,11 @@ function frameLuma(video: HTMLVideoElement) {
 async function fromVideo(src: string, signal?: AbortSignal, onFailure?: (message: string) => void): Promise<ThumbnailSet | null> {
   const video = document.createElement("video");
   video.muted = true; video.playsInline = true; video.preload = "metadata";
-  const deadline = performance.now() + 45000;
+  // 只防止浏览器解码卡住时一直占用生成权；不按文件大小区分，失败后交给服务器处理。
+  const deadline = performance.now() + 120000;
   try {
     // 浏览器用 Range 取得容器索引；MP4 的 moov 可能在文件末尾，不能假设首个存储分片足够。
-    const metadata = waitFor(video, "loadedmetadata", signal, 45000, () => video.readyState >= 1);
+    const metadata = waitFor(video, "loadedmetadata", signal, Math.max(1, deadline - performance.now()), () => video.readyState >= 1);
     video.src = src;
     await metadata;
     if (video.readyState < 2) {
@@ -147,7 +156,7 @@ async function fromVideo(src: string, signal?: AbortSignal, onFailure?: (message
     for (const candidate of VIDEO_FRAME_TIMES.slice(1)) {
       const time = Number.isFinite(video.duration) ? Math.min(candidate, Math.max(0, video.duration - 0.1)) : candidate;
       if (time <= video.currentTime + 0.01 || performance.now() >= deadline) continue;
-      const seek = waitFor(video, "seeked", signal, Math.min(3000, Math.max(1, deadline - performance.now())), () => !video.seeking && video.readyState >= 2 && Math.abs(video.currentTime - time) < 0.1);
+      const seek = waitFor(video, "seeked", signal, Math.min(10000, Math.max(1, deadline - performance.now())), () => !video.seeking && video.readyState >= 2 && Math.abs(video.currentTime - time) < 0.1);
       video.currentTime = time;
       await seek;
       if (videoFrameUsable(video)) return await thumbnailsFromVideo(video);
@@ -176,16 +185,31 @@ function urlReader(url: string, size: number, signal?: AbortSignal): ByteReader 
   return {
     size,
     read: async (offset, length) => {
-      const end = Math.min(size, offset + length) - 1;
-      const response = await fetch(url, { headers: { Range: `bytes=${offset}-${end}` }, credentials: "include", signal });
-      if (response.status !== 206 && !(response.ok && offset === 0)) throw new Error(`HTTP ${response.status}`);
-      const data = new Uint8Array(await response.arrayBuffer());
-      return response.status === 206 ? data : data.subarray(offset, end + 1);
+      if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+      const end = Math.min(size, offset + length);
+      if (end <= offset) return new Uint8Array();
+      const response = await fetch(url, { headers: { Range: `bytes=${offset}-${end - 1}` }, credentials: "include", signal });
+      if (response.status !== 206 && response.status !== 200) throw new Error(`HTTP ${response.status}`);
+      if (response.status === 206 && !response.headers.get("Content-Range")?.startsWith(`bytes ${offset}-`)) throw new Error("文件范围响应无效");
+      if (!response.body) throw new Error("文件响应为空");
+      const reader = response.body.getReader(), data = new Uint8Array(end - offset);
+      // 来源忽略 Range 时也只流式跳过前缀、读取所需范围，随后立即取消，不把整首音频装入内存。
+      let skip = response.status === 200 ? offset : 0, filled = 0;
+      try {
+        while (filled < data.length) {
+          const { value, done } = await reader.read();
+          if (done) throw new Error("文件数据不完整");
+          const ignored = Math.min(skip, value.length);
+          skip -= ignored;
+          const piece = value.subarray(ignored, ignored + data.length - filled);
+          data.set(piece, filled); filled += piece.length;
+        }
+        return data;
+      } finally { await reader.cancel().catch(() => undefined); }
     },
   };
 }
 
-const MAX_COVER_TAG = 16 * 1024 * 1024;
 const ascii = (bytes: Uint8Array, start: number, length: number) => String.fromCharCode(...bytes.subarray(start, start + length));
 const uint32 = (bytes: Uint8Array, at: number) => ((bytes[at] << 24) | (bytes[at + 1] << 16) | (bytes[at + 2] << 8) | bytes[at + 3]) >>> 0;
 const synchsafe = (bytes: Uint8Array, at: number) => (bytes[at] << 21) | (bytes[at + 1] << 14) | (bytes[at + 2] << 7) | bytes[at + 3];
@@ -239,71 +263,114 @@ function parseId3(tag: Uint8Array): Blob | null {
   return fallback;
 }
 
-async function flacCover(reader: ByteReader): Promise<Blob | null> {
-  let offset = 4;
-  for (let index = 0; index < 64 && offset + 4 <= reader.size; index++) {
+/** 按帧头跳过无关 ID3 内容，只读取实际图片；旧版整体反同步标签保留兼容解码。 */
+async function id3Cover(reader: ByteReader, head: Uint8Array): Promise<Blob | null> {
+  const version = head[3], flags = head[5], end = 10 + synchsafe(head, 6);
+  if (version < 2 || version > 4 || end > reader.size || version === 2 && flags & 0x40) throw new Error("不支持的音频标签");
+  if (flags & 0x80 && version < 4) return parseId3(await reader.read(0, end));
+  let offset = 10, fallback: Blob | null = null;
+  if (flags & 0x40) {
+    const extended = await reader.read(offset, 4);
+    offset += version === 4 ? synchsafe(extended, 0) : uint32(extended, 0) + 4;
+  }
+  const headerSize = version === 2 ? 6 : 10;
+  while (offset + headerSize <= end) {
+    const header = await reader.read(offset, headerSize), id = ascii(header, 0, version === 2 ? 3 : 4);
+    if (!/^[A-Z0-9]{3,4}$/.test(id)) break;
+    const size = version === 2 ? (header[3] << 16) | (header[4] << 8) | header[5]
+      : version === 4 ? synchsafe(header, 4) : uint32(header, 4);
+    offset += headerSize;
+    if (offset + size > end) throw new Error("音频标签不完整");
+    if (id === "APIC" || id === "PIC") {
+      if (version === 3 && header[9] & 0xc0 || version === 4 && header[9] & 0x0c) throw new Error("不支持的封面编码");
+      let body = await reader.read(offset, size);
+      if (version === 3 && header[9] & 0x20 || version === 4 && header[9] & 0x40) body = body.subarray(1);
+      if (version === 4 && header[9] & 0x01) body = body.subarray(4);
+      if (version === 4 && (flags & 0x80 || header[9] & 0x02)) {
+        const decoded = new Uint8Array(body.length);
+        let length = 0;
+        for (let index = 0; index < body.length; index++) { decoded[length++] = body[index]; if (body[index] === 0xff && body[index + 1] === 0) index++; }
+        body = decoded.subarray(0, length);
+      }
+      let cursor = id === "PIC" ? 4 : textEnd(body, 1, 0);
+      const type = body[cursor];
+      cursor = textEnd(body, cursor + 1, body[0]);
+      const image = picture(body.subarray(cursor));
+      if (!image) throw new Error("浏览器不支持这张内嵌封面");
+      if (type === 3) return image;
+      fallback ??= image;
+    }
+    offset += size;
+  }
+  return fallback;
+}
+
+async function flacCover(reader: ByteReader, start = 0): Promise<Blob | null> {
+  let offset = start + 4, fallback: Blob | null = null;
+  while (offset + 4 <= reader.size) {
     const header = await reader.read(offset, 4);
     const last = header[0] & 0x80, type = header[0] & 0x7f, length = (header[1] << 16) | (header[2] << 8) | header[3];
-    if (type === 6 && length <= MAX_COVER_TAG) {
+    if (offset + 4 + length > reader.size) throw new Error("音频元数据不完整");
+    if (type === 6) {
       const block = await reader.read(offset + 4, length);
       let cursor = 4;
       cursor += 4 + uint32(block, cursor);  // MIME
       cursor += 4 + uint32(block, cursor);  // 描述
       cursor += 16;                          // 宽、高、色深、调色板
       const size = uint32(block, cursor);
-      return picture(block.subarray(cursor + 4, cursor + 4 + size));
+      if (cursor + 4 + size > block.length) throw new Error("内嵌封面不完整");
+      const image = picture(block.subarray(cursor + 4, cursor + 4 + size));
+      if (!image) throw new Error("浏览器不支持这张内嵌封面");
+      if (uint32(block, 0) === 3) return image;
+      fallback ??= image;
     }
-    if (last) break;
+    if (last) return fallback;
     offset += 4 + length;
   }
-  return null;
+  throw new Error("音频元数据不完整");
 }
 
-function findBox(bytes: Uint8Array, start: number, end: number, type: string): [number, number] | null {
+/** 按 box 头跳过音轨与无关元数据，不读取整个 moov，也不限制 box 数或元数据大小。 */
+async function findBox(reader: ByteReader, start: number, end: number, type: string): Promise<[number, number] | null> {
   let offset = start;
   while (offset + 8 <= end) {
-    let size = uint32(bytes, offset), header = 8;
-    if (size === 1) { size = uint32(bytes, offset + 8) * 2 ** 32 + uint32(bytes, offset + 12); header = 16; }
+    const bytes = await reader.read(offset, Math.min(16, end - offset));
+    let size = uint32(bytes, 0), header = 8;
+    if (size === 1) { size = uint32(bytes, 8) * 2 ** 32 + uint32(bytes, 12); header = 16; }
     if (size === 0) size = end - offset;
-    if (size < header) return null;
-    if (ascii(bytes, offset + 4, 4) === type) return [offset + header, Math.min(end, offset + size)];
+    if (!Number.isSafeInteger(size) || size < header || offset + size > end) throw new Error("音频索引无效");
+    if (ascii(bytes, 4, 4) === type) return [offset + header, offset + size];
     offset += size;
   }
   return null;
 }
 
 async function mp4Cover(reader: ByteReader): Promise<Blob | null> {
-  let offset = 0;
-  for (let index = 0; index < 64 && offset + 8 <= reader.size; index++) {
-    const header = await reader.read(offset, 16);
-    let size = uint32(header, 0);
-    if (size === 1) size = uint32(header, 8) * 2 ** 32 + uint32(header, 12);
-    if (size === 0) size = reader.size - offset;
-    if (size < 8) return null;
-    if (ascii(header, 4, 4) === "moov") {
-      if (size > 4 * MAX_COVER_TAG) return null;
-      const moov = await reader.read(offset, size);
-      let box: [number, number] | null = [8, moov.length];
-      for (const type of ["udta", "meta", "ilst", "covr", "data"]) {
-        box = box && findBox(moov, box[0], box[1], type);
-        if (box && type === "meta") box = [box[0] + 4, box[1]];  // meta 是 full box，跳过版本与标志
-      }
-      return box ? picture(moov.subarray(box[0] + 8, box[1])) : null;
-    }
-    offset += size;
-  }
-  return null;
+  const moov = await findBox(reader, 0, reader.size, "moov");
+  if (!moov) throw new Error("音频缺少索引");
+  const udta = await findBox(reader, ...moov, "udta");
+  let box = (udta && await findBox(reader, ...udta, "meta")) || await findBox(reader, ...moov, "meta");
+  if (!box) return null;
+  box = [box[0] + 4, box[1]];  // meta 是 full box，跳过版本与标志
+  for (const type of ["ilst", "covr", "data"]) box = box && await findBox(reader, ...box, type);
+  if (!box) return null;
+  const image = picture(await reader.read(box[0] + 8, box[1] - box[0] - 8));
+  if (!image) throw new Error("浏览器不支持这张内嵌封面");
+  return image;
 }
 
-async function audioCover(reader: ByteReader): Promise<Blob | null> {
-  const head = await reader.read(0, Math.min(reader.size, 64 * 1024));
+async function audioCover(reader: ByteReader): Promise<Blob | "none" | null> {
+  const head = await reader.read(0, Math.min(reader.size, 10));
   if (ascii(head, 0, 3) === "ID3") {
-    const total = 10 + synchsafe(head, 6) + (head[5] & 0x10 ? 10 : 0);
-    if (total > MAX_COVER_TAG) return null;
-    return parseId3(total <= head.length ? head.subarray(0, total) : await reader.read(0, total));
+    const cover = await id3Cover(reader, head);
+    if (cover) return cover;
+    const next = 10 + synchsafe(head, 6) + (head[3] === 4 && head[5] & 0x10 ? 10 : 0);
+    if (ascii(await reader.read(next, 4), 0, 4) === "fLaC") return await flacCover(reader, next) ?? "none";
+    return "none";
   }
-  if (ascii(head, 0, 4) === "fLaC") return flacCover(reader);
-  if (ascii(head, 4, 4) === "ftyp") return mp4Cover(reader);
+  if (ascii(head, 0, 4) === "fLaC") return await flacCover(reader) ?? "none";
+  if (ascii(head, 4, 4) === "ftyp") return await mp4Cover(reader) ?? "none";
+  // 未识别的封装交给服务器处理，不能据此永久标记没有封面。
   return null;
 }
 
@@ -319,7 +386,7 @@ export async function createThumbnails(input: Input, source: ThumbnailSource): P
       try { return await fromVideo(url, input.signal, input.onFailure); } finally { if ("file" in input) URL.revokeObjectURL(url); }
     }
     const cover = await audioCover("file" in input ? blobReader(input.file) : urlReader(input.url, input.size, input.signal));
-    return cover ? await fromBlob(cover) ?? "none" : "none";
+    return cover === "none" ? "none" : cover ? await fromBlob(cover) : null;
   } catch (reason) {
     if (reason instanceof DOMException && reason.name === "AbortError") throw reason;
     return null;
@@ -340,17 +407,32 @@ export async function saveThumbnails(path: string, result: ThumbnailResult, clai
   return saved;
 }
 
+/** 长处理与慢速保存期间续期；页面关闭后不再续期，由服务器回收票据。 */
+function keepClaim(file: Pick<api.FileItem, "key" | "etag">, ticket: string, expires: number, failed?: () => void) {
+  let stopped = false, error: unknown, timer = 0;
+  const renew = async () => {
+    try { await api.renewThumbnail(file, ticket); }
+    catch (reason) { if (!stopped) { error = reason; failed?.(); } return; }
+    if (!stopped) timer = window.setTimeout(() => void renew(), expires * 1000 / 3);
+  };
+  timer = window.setTimeout(() => void renew(), expires * 1000 / 3);
+  return { stop: () => { stopped = true; window.clearTimeout(timer); }, check: () => { if (error) throw error; } };
+}
+
 /** 用户指定的缩略图适用于任何文件：取得自定义票据（会取消这个文件排队中的自动生成），保存全部规格后移除旧的多余规格。 */
 async function saveCustomThumbnails(file: Pick<api.FileItem, "key" | "etag">, result: ThumbnailSet): Promise<string[]> {
   const lease = await api.claimThumbnail(file, true, true);
   if (!lease.token) throw new Error("暂时无法更新缩略图，请稍后重试");
+  const heartbeat = keepClaim(file, lease.token, lease.expires_in ?? 90);
   let released = false;
   try {
     const saved = await saveThumbnails(file.key, result, { etag: file.etag, ticket: lease.token }) ?? ["thumb"];
+    heartbeat.check();
     await api.releaseThumbnail(file, lease.token, saved);
     released = true;
     return saved;
   } finally {
+    heartbeat.stop();
     if (!released) await api.releaseThumbnail(file, lease.token).catch(() => undefined);
   }
 }
@@ -371,24 +453,31 @@ export async function saveImageThumbnail(file: Pick<api.FileItem, "key" | "etag"
   return await saveCustomThumbnails(file, result);
 }
 
-/** 浏览器取得有期限的生成权后才处理本地／已加载数据；失败主动交还，页面关闭则由服务端超时接管。 */
+/** 浏览器取得生成权后处理本地／已加载数据，处理期间持续续期（不设总时限）；失败主动交还，页面关闭则由服务端超时接管。 */
 export async function generateLoadedThumbnails(file: Pick<api.FileItem, "key" | "etag">, produce: (signal: AbortSignal) => Promise<ThumbnailResult>, force = false, signal?: AbortSignal): Promise<string[] | null> {
   if (signal?.aborted) return null;
   const lease = await api.claimThumbnail(file, force);
   if (!lease.token) return null;
   const controller = new AbortController();
+  const heartbeat = keepClaim(file, lease.token, lease.expires_in ?? 90, () => controller.abort());
   const abort = () => controller.abort();
   signal?.addEventListener("abort", abort, { once: true });
-  let timer = 0;
+  let stopWaiting: (() => void) | undefined;
   try {
     if (signal?.aborted) return null;
-    const result = await Promise.race([produce(controller.signal), new Promise<never>((_, reject) => {
-      timer = window.setTimeout(() => { controller.abort(); reject(new Error("缩略图生成超时")); }, 60000);
-    })]);
+    const stopped = new Promise<never>((_, reject) => {
+      stopWaiting = () => reject(new DOMException("aborted", "AbortError"));
+      controller.signal.addEventListener("abort", stopWaiting, { once: true });
+    });
+    const result = await Promise.race([produce(controller.signal), stopped]);
+    heartbeat.check();
     if (controller.signal.aborted) return null;
-    return await saveThumbnails(file.key, result, { etag: file.etag, ticket: lease.token });
+    const saved = await saveThumbnails(file.key, result, { etag: file.etag, ticket: lease.token });
+    heartbeat.check();
+    return saved;
   } finally {
-    controller.abort(); window.clearTimeout(timer); signal?.removeEventListener("abort", abort);
+    heartbeat.stop(); if (stopWaiting) controller.signal.removeEventListener("abort", stopWaiting);
+    controller.abort(); signal?.removeEventListener("abort", abort);
     await api.releaseThumbnail(file, lease.token).catch(() => undefined);
   }
 }

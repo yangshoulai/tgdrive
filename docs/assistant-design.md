@@ -260,7 +260,7 @@ AssistantService（src/tgdrive/assistant/）
 | `propose_restore` | P | 从回收站恢复 | `ids[]` 或 `match{original_prefix?}` |
 | `propose_purge_trash` | D | 彻底删除回收站中的指定条目或全部条目 | `ids[]?`, `all?` |
 | `propose_unshare` | P | 取消公开链接（只允许收回，不提供创建公开链接） | `paths[]` |
-| `propose_downloads` | P | 创建离线下载任务；链接可来自用户输入或 `collect_gallery` 的结果集 | `urls[]?` 或 `collection_id?`, `target`, `name_template?` |
+| `propose_downloads` | P | 创建离线下载任务；链接可来自用户输入或 `collect_gallery` 的结果集 | `urls[]?` 或 `collection_id?`, `target`, `name_template?`, `thumbnail?`（全部条目的封面图片地址）, `thumbnails[]?`（按条目对应，可为 null） |
 | `propose_download_control` | P | 停止／继续／重试／删除离线任务，清除已完成记录 | `ids[]`, `op` |
 
 提议工具的共同返回：`{action_id, kind, count, conflicts, samples[≤20], expires_at}`。条目超过 10,000 时返回错误要求缩小范围。
@@ -1523,6 +1523,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - **收集链接**：新工具 `collect_links(url, path|href_glob|text_contains, follow, max_pages)`，按 rel=next、「下一页」文字或下一个页码翻页（同源），去重后存为 `rule.type="links"` 的结果集；`get_collection` 显示链接文字，`propose_downloads` 拒绝链接结果集。
 - **多个相册**：`collect_gallery` 新增 `albums`（链接结果集）或 `album_urls`（≤500），用 `analyze_page` 得到的同一条规则逐个相册收集。相册内只走学到的翻页规则（`next_link` 直接复用，`url_pattern` 能按起始地址替换时复用），不跟随「下一个相册」之类的通用链接。进度保存在结果集 rule 的 `batch` 中，每次调用最多 105 秒，返回 `progress` 与 `complete`；中途超时的相册下次从头再走（按地址去重），单次调用连一个相册都没走完时按部分收集记录，避免卡住。图片记录所属相册名（第一页标题清理成单段名称，重名加序号）；第一页没有符合规则图片的相册记为失败（结构可能不同）。`max_images` 默认 20000。
 - **分批与分目录下载**：`propose_downloads` 新增 `offset`/`limit`（与 `indices` 二选一，结果给出下一批的 `next_offset`）与 `by_album`（条目带 `folder`，保存到「目标/相册名/」）。执行时按子目录分组创建任务，子目录名再清理一次并复核仍在作用域内。工具说明明确已有直链可直接提交，后台自动分批入队；模型遵守工具的提议上限，无需关心内部批次大小。
+- **下载封面**：`propose_downloads` 可附带 `thumbnail`（作用于本批全部条目）或与条目一一对应的 `thumbnails`。地址经 `check_url` 与 `checked_url` 校验后记在条目的 `cover`，确认卡片样例标注「指定缩略图」；执行器把它作为 `cover: {url}` 交给 `OfflineDownloads.create`，下载完成后由服务器读取并缩放为文件缩略图（需 FFmpeg，失败保留自动生成）。
 - **动态工具上限**：`ToolSpec.input_limits` 声明参数受哪些配置共同限制，每次模型请求按本轮生效配置生成 `maxItems`／`maximum` 与数值说明，不修改注册表。`propose_downloads` 的 `urls`、`indices` 与 `limit` 使用 `download_urls` 和 `action_items` 的较小值（默认 2000）；执行校验与结果集分页共用这一计算，避免工具宣称可接收的数量与实际操作上限不同。默认下 77 项或 2000 项可作为一个提议，后台负责分批入队。
 - 提示词：全局规则 7 根据用户目标、页面结构和已启用工具选择处理方式，不规定相册流程；规则 10 统一说明任务持续推进、批量能力、摘要行与 recall_result、notes。同一目标与授权范围内，已确认条目在当前工具上限内优先一次提交，不从历史调用的条目数推断限制；确需分页、依赖或错误恢复时再分批。相册列表分析与批量收集的具体用法保留在 `collect_gallery` 工具说明中，下载提交与批次细节保留在 `propose_downloads` 工具说明中。提示词版本为 `2026.10-p23`。
 

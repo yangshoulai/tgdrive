@@ -407,7 +407,8 @@ class ActionExecutor:
                 try:
                     ticket = item.get("ticket") or self.offline.direct_ticket(user_id, item["url"], referer=item.get("referer"),
                                                                               name=item["name"])
-                    prepared.append({"ticket": ticket, "name": item["name"], "folder": item.get("folder") or ""})
+                    prepared.append({"ticket": ticket, "name": item["name"], "folder": item.get("folder") or "",
+                                     **({"cover": {"url": item["cover"]}} if item.get("cover") else {})})
                     labels.append(f"{item['folder']}/{item['name']}" if item.get("folder") else item["name"])
                 except ValueError as exc:
                     progress.fail(item.get("name") or item.get("url", ""), str(exc))

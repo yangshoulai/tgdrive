@@ -16,7 +16,7 @@ import { filesBridge, getPrivateSection, openPrivateSection, waitForFiles } from
 import { usePrivateAccess } from "./private-session";
 import { assistantEnvironment } from "./assistant-environment";
 import { commonFolder, mentionLabel, useMentions } from "./assistant-mentions";
-import { PrivateUnlockForm } from "./private-access";
+import { PrivateUnlockForm } from "./private-unlock";
 import { AssistantComposer, type ComposerHandle } from "./assistant-composer";
 import { lockAssistantPage, watchAssistantViewport } from "./assistant-layout";
 import { FolderPicker } from "./folders";
@@ -1023,7 +1023,7 @@ async function cacheStatus(args: Record<string, unknown>, queue: ReturnType<type
   const blocked = reports.find(report => report.blocked)?.blocked;
   return { available: true,
     device: { normal_bytes: stats.normal.bytes, normal_limit_bytes: stats.settings.maxMiB * 1048576, private_bytes: stats.private.bytes,
-      private_enabled: Boolean(stats.settings.private && stats.policy?.private_enabled) },
+      private_enabled: stats.settings.private },
     items: files.map((file, index) => ({ path: file.key, state: reports[index].state, ...(reports[index].percent !== undefined ? { percent: reports[index].percent } : {}) })),
     ...(blocked ? { private_note: blocked } : {}) };
 }

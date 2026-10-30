@@ -33,8 +33,10 @@ class QueueCapacityTests(unittest.TestCase):
                 result.fetchone.return_value = (count[0],)
             elif statement.startswith("SELECT key"):
                 return []
-            elif statement.startswith("SELECT 1"):
+            elif statement.startswith("SELECT 1") or statement.startswith("SELECT value FROM settings"):
                 result.fetchone.return_value = None
+            elif statement.startswith("INSERT OR REPLACE INTO settings"):
+                pass  # 记住本次保存位置，不占任务名额
             elif statement.startswith("INSERT"):
                 count[0] += 1
                 result.lastrowid = count[0]

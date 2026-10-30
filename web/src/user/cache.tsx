@@ -6,7 +6,7 @@ import { effectiveMiB } from "../cache-store";
 import { FileTile, getFileKind } from "../files";
 import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, Tabs, copyText, formatBytes, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 import { usePrivateAccess } from "./private-session";
-import { PrivateUnlockForm } from "./private-access";
+import { PrivateUnlockForm } from "./private-unlock";
 import { LocationText, TaskControls, TaskListFooter, TaskStats, remainingText, useTaskList, useTransferRates, type TaskFilter, type TaskStat } from "./task-list";
 import { cacheFolderFiles } from "./cache-folders";
 
@@ -17,15 +17,15 @@ type FolderCacheJob = { id: string; prefixes: string[]; group?: string; status: 
 type Queue = {
   /** 浏览器支持且用户与管理员都没有关闭本机缓存；否则不显示缓存按钮与菜单项。 */
   available: boolean;
-  /** 私密文件可以缓存（管理员允许、设备已信任且私密空间已解锁）。 */
+  /** 私密文件可以缓存（这台设备开启了私密缓存且私密空间已解锁）。 */
   privateReady: boolean;
-  /** 管理员允许且这台设备已信任（不论是否解锁）：锁定时据此提示解锁后查看私密缓存。 */
+  /** 这台设备开启了私密缓存（不论是否解锁）：锁定时据此提示解锁后查看私密缓存。 */
   privateEnabled: boolean;
   /** states：预览等单独关注的文件的实时状态；cached：这台设备上全部已缓存文件的索引（区分自动与手动），文件列表只看这一份。 */
   jobs: CacheJob[]; states: Map<string, FileCacheState>; cached: Map<string, CachedFileState>; showTasks: () => void;
   folders: FolderCacheJob[]; enqueueFolders: (prefixes: string[]) => void; cancelFolder: (id: string) => void; retryFolder: (id: string) => void;
   watch: (owner: string, files: CacheFile[]) => () => void;
-  /** 私密文件只在管理员允许、设备已信任且私密空间已解锁时可以缓存。 */
+  /** 私密文件只在这台设备开启了私密缓存且私密空间已解锁时可以缓存。 */
   canCache: (file: CacheFile) => boolean; enqueue: (file: CacheFile) => void; enqueueMany: (files: CacheFile[]) => number;
   cancel: (id: string) => void; pause: (id: string) => void; retry: (id: string) => void; clear: () => void; removeJobs: (ids: string[]) => void;
   inspect: (file: CacheFile) => void; remove: (files: CacheFile | CacheFile[]) => void;
@@ -82,8 +82,8 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
     let alive = true;
     const read = () => void cacheStats().then(value => {
       if (!alive) return;
-      setAvailable(value.settings.enabled && value.policy?.enabled !== false);
-      setPrivateCacheEnabled(value.settings.private && value.policy?.private_enabled === true);
+      setAvailable(value.settings.enabled);
+      setPrivateCacheEnabled(value.settings.private);
     }).catch(() => undefined);
     read();
     window.addEventListener("tessera:cache-changed", read);

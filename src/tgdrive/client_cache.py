@@ -13,7 +13,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import os
 import re
 import threading
@@ -25,7 +24,6 @@ from .objects import PRIVATE_PREFIX, Scope
 from .private import PrivateFiles
 
 SETTING_KEY = "client_cache.key"
-POLICY_KEY = "client_cache.policy"
 WRAP_PURPOSE = "client-cache"
 WRAP_AAD = "client-cache-key"
 DEVICE = re.compile(r"[A-Za-z0-9_-]{22,64}")
@@ -41,37 +39,13 @@ class CacheTask:
     paths: tuple[str, ...]
 
 
-# 管理员只决定是否允许缓存、是否允许私密缓存及其保留期（安全策略）；占用多少空间由用户在各自设备上设置，
-# 浏览器配额是硬上限。旧版本保存过的容量字段（max_mib、entry_mib、private_max_mib）读取时忽略。
-DEFAULT_POLICY = {
-    "enabled": True,            # 是否允许浏览器缓存普通文件
-    "private_enabled": False,   # 是否允许用户在信任的设备上缓存私密文件
-    "private_ttl_days": 7,      # 私密条目多少天未访问即清除
-}
-LIMITS = {"private_ttl_days": (1, 90)}
+# 本机缓存是每台设备上用户自己的选择：是否缓存、是否缓存私密文件、占用多少空间都在「设置 → 本机缓存」中设置，
+# 服务端不再有管理员策略。接口仍返回固定的 policy 字段，兼容已经安装的旧版 Service Worker。
+POLICY = {"enabled": True, "private_enabled": True}
 
 
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
-
-
-def normalize_policy(values: dict | None, base: dict | None = None) -> dict:
-    policy = dict(base or DEFAULT_POLICY)
-    for key, value in (values or {}).items():
-        if key not in DEFAULT_POLICY:
-            raise ValueError(f"未知设置：{key}")
-        if key in ("enabled", "private_enabled"):
-            if not isinstance(value, bool):
-                raise ValueError("开关必须是布尔值")
-            policy[key] = value
-            continue
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError("数值必须是整数")
-        low, high = LIMITS[key]
-        if not low <= value <= high:
-            raise ValueError(f"{key} 必须在 {low}–{high} 之间")
-        policy[key] = value
-    return policy
 
 
 class ClientCache:
@@ -101,20 +75,9 @@ class ClientCache:
             self._cached = (kek, key)
             return key
 
-    def policy(self) -> dict:
-        row = self.metadata.db.execute("SELECT value FROM settings WHERE key=?", (POLICY_KEY,)).fetchone()
-        try:
-            stored = json.loads(row["value"]) if row else None
-            return normalize_policy({key: value for key, value in stored.items() if key in DEFAULT_POLICY} if isinstance(stored, dict) else None)
-        except (ValueError, TypeError):
-            return dict(DEFAULT_POLICY)
-
-    def configure(self, values: dict) -> dict:
-        policy = normalize_policy(values, self.policy())
-        with self.metadata.transaction() as db:
-            db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                       (POLICY_KEY, json.dumps(policy, separators=(",", ":"))))
-        return policy
+    @staticmethod
+    def policy() -> dict:
+        return dict(POLICY)
 
     # ---------- 派生 ----------
 
@@ -141,11 +104,8 @@ class ClientCache:
     def session(self, token: str, device: str) -> dict:
         scope = self.user._scope(token)
         account = self.user.accounts.account_for_session(self.user._session(token))
-        policy = self.policy()
-        result = {"namespace": self._namespace(account.id), "bucket_id": scope.bucket_id, "policy": policy}
-        if policy["enabled"]:
-            result["key"] = _b64(self._derive("tier", "n", *self._identity(account.id, device)))
-        return result
+        return {"namespace": self._namespace(account.id), "bucket_id": scope.bucket_id, "policy": self.policy(),
+                "key": _b64(self._derive("tier", "n", *self._identity(account.id, device)))}
 
     def check(self, token: str, etags: object) -> dict:
         """返回普通区（不含回收站、私密空间与系统区）仍在引用的版本；其余缓存由浏览器删除。"""
@@ -168,8 +128,6 @@ class ClientCache:
     # ---------- 私密层 ----------
 
     def _private_account(self, token: str, access: str) -> tuple[int, int]:
-        if not self.policy()["private_enabled"]:
-            raise PermissionError("管理员未开启私密文件的本机缓存")
         grant = self.private_space.require(token, access)
         account = self.user.accounts.account_for_session(self.user._session(token))
         if grant.user_id != account.id:
@@ -211,8 +169,6 @@ class ClientCache:
     def start_task(self, token: str, csrf: str, access: str, device: str, task_id: str, paths: object) -> dict:
         self.user._session(token, csrf=csrf, mutation=True)
         user_id, bucket_id = self._private_account(token, access)
-        if not self.policy()["enabled"]:
-            raise PermissionError("管理员已关闭本机缓存")
         if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", task_id):
             raise ValueError("缓存任务编号不合法")
         if not isinstance(paths, list) or not paths:
@@ -233,9 +189,6 @@ class ClientCache:
             task = self._tasks.get((token, task_id))
         if task is None or task.user_id != account.id or task.bucket_id != account.bucket_id:
             raise PermissionError("缓存任务不存在或已结束")
-        policy = self.policy()
-        if not policy["enabled"] or not policy["private_enabled"]:
-            raise PermissionError("管理员已关闭私密文件缓存")
         if task.identity != self._identity(account.id, task.device):
             raise PermissionError("缓存密钥已变化，请重新加入缓存")
         return task

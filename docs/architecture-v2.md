@@ -1013,8 +1013,8 @@ make_check_blob(kek) / verify_check_blob(kek, blob)
 | `POST /uploads/{id}/complete`、`DELETE /uploads/{id}` | 完成/取消 | M6 |
 | `GET / HEAD /content?path=&download=0\|1` | 下载或预览（Range、ETag） | M6 |
 | `GET /thumbnail?path=` | 缩略图 | M8 |
-| `POST /thumbnail/candidates`、`/thumbnail/candidates/status` | 手动视频候选截图的创建和进度（`path, etag`；进度另带 `id`） | 已实现 |
-| `GET /thumbnail/candidate`、`POST /thumbnail/candidates/select`、`/thumbnail/candidates/cancel` | 受保护的候选 JPEG、确认保存及取消；确认前不改变旧图 | 已实现 |
+| `POST /thumbnail/generate`、`/thumbnail/cancel` | 主动生成或停止缩略图（`path, etag`）；服务端流式处理 | 已实现 |
+| `POST /thumbnail/claim`、`/thumbnail/release` | 浏览器生成授权与交还；claim 携带原 `ticket` 可在长处理与保存期间续期 | 已实现 |
 | `GET /trash`、`POST /trash/restore`、`DELETE /trash` | 回收站 | M8 |
 | `GET /shares`、`POST /shares`、`DELETE /shares/{token}` | 分享链接（公开访问路径为 `/s/{token}`） | M8 |
 | `GET /access-keys`、`POST /access-keys`、`DELETE /access-keys/{id}` | 用户自助创建仅限自己存储桶的 S3 访问密钥 | M8 |
@@ -1231,7 +1231,7 @@ make_check_blob(kek) / verify_check_blob(kek, blob)
 
 **预览安全：** 白名单类型才用 `inline`，其余一律 `attachment`；预览响应带 `nosniff` 和 `Content-Security-Policy: sandbox`；所有由文件内容生成的 HTML（Markdown、Office）先经 DOMPurify 清洗；pdf.js 不执行脚本；超过大小上限的文件只提供下载。
 
-**缩略图（已实现，与原设想不同）：** 小图在 meta.db 按 Blob 加密保存，大图作为系统区对象计入配额。网页上传优先本地生成，浏览器处理前经 /thumbnail/claim 取得同 Blob 的生成权（90 秒）；保存带 ETag 与票据，/thumbnail/release 主动交还，失败或过期后服务端接管，过期结果不能写入。上传、下载任务与真实预览已传输的密文由 thumbnail_cache.py 短期缓存（匿名临时文件，总计 128 MiB／每 Blob 65 MiB／15 分钟），不保存明文或额外密钥。自动队列只使用缓存，缺失进入 waiting_data，收到新数据才继续，禁止为补图自动回源 TG。图片预览复用原图、视频截播放器当前已解码画面，不额外 seek／播放；原生音频的缓冲字节无法从浏览器取出，后台复用已经交付的数据提取封面。只有用户明确触发手动生成才允许后台回源（图片／音频及批量工具沿用 POST /thumbnail/generate，视频文件菜单使用 POST /thumbnail/candidates）；普通单图生成接口按完整密文分片计预算，图片 60、视频 64、音频 32 MiB，另预留 1 MiB 帧开销，取回分片缓存复用。后台单并发、队列上限 128，普通单图生成处理保存共 45 秒；视频文件菜单的手动候选及所选画面保存不设固定读取量或总处理时限，缓存回收后允许按需重读。私密内部任务不依赖网页解锁，仍校验系统 KEK、账号与源 Blob；网页读取继续校验私密授权。ObjectService.on_change 在删除、覆盖、移动及移入回收站时取消旧任务和票据，读写过程也复核版本。GET /api/admin/v1/maintenance/thumbnails 只供管理员，在「安全与维护」展示匿名编号、类型、状态、缓存与手动读取量，不返回文件名、路径、账号或私密内容。即时任务只来自写入提交、实际读取与手动请求，没有任何已接收数据的任务直接出队；写入 10 分钟后仍缺图的文件由自动补图按每日读取额度从存储读取生成，保证最终都有缩略图。私密缩略图地址不带解锁令牌，按会话授权校验，与普通缩略图一样按版本长期缓存。网页预览图片／视频时浏览器先处理 30 秒，超时后后台用同一批缓存接管；缓存不足时只在收到新数据后重试，间隔 4→60 秒递增，6 次仍不足即放弃（可手动生成）。文件助手的生成卡片改为逐个提交 /thumbnail/generate，不经浏览器下载原文件（服务器没有 FFmpeg 时才退回浏览器生成）。以下为原始设想，仅作记录。
+**缩略图（已实现，与原设想不同）：** 三种规格均作为加密系统区对象保存，按 Blob 复用并计入配额。网页上传优先本地生成，浏览器处理前经 /thumbnail/claim 取得同 Blob 的生成权（90 秒）；保存带 ETag 与票据，/thumbnail/release 主动交还，失败或过期后服务端接管，过期结果不能写入。上传、下载任务与真实预览已传输的密文由 thumbnail_cache.py 短期缓存（匿名临时文件，总计 128 MiB／每 Blob 65 MiB／15 分钟），不保存明文或额外密钥。写入提交与实际读取登记的任务只使用缓存，缺失进入 waiting_data，收到新数据才继续。图片预览复用原图、视频截播放器当前已解码画面，不额外 seek／播放；原生音频的缓冲字节无法从浏览器取出，后台复用已经交付的数据提取封面。用户请求（文件菜单「自动生成」、助手卡片）走 POST /thumbnail/generate 并以 /thumbnail/progress 查询进度；用户请求与自动补图可回源。生成不区分手动与自动，没有累计读取量、文件大小、像素数门槛或每日额度，只终止卡住 10 分钟或常驻内存超过服务器一半的解码，缓存回收后允许按需重取。后台单并发、队列上限 128，用户请求的任务可停止；浏览器生成和保存期间续期 90 秒票据。私密内部任务不依赖网页解锁，仍校验系统 KEK、账号与源 Blob；网页读取继续校验私密授权。ObjectService.on_change 在删除、覆盖、移动及移入回收站时取消旧任务和票据，读写过程也复核版本。GET /api/admin/v1/maintenance/thumbnails 只供管理员，在「安全与维护」展示匿名编号、类型、状态、缓存与本进程回源读取量，不返回文件名、路径、账号或私密内容。即时任务只来自写入提交、实际读取与用户请求，没有任何已接收数据的即时任务直接出队；写入 10 分钟后仍缺图的文件由自动补图在队列空闲时从存储读取生成，尝试补齐缩略图。私密缩略图地址不带解锁令牌，按会话授权校验，与普通缩略图一样按版本长期缓存。网页预览图片／视频时浏览器先处理 30 秒，超时后后台用同一批缓存接管；缓存不足时只在收到新数据后重试，间隔 4→60 秒递增，6 次仍不足即放弃（之后由自动补图处理，也可在文件菜单立即生成）。文件助手的生成卡片改为逐个提交 /thumbnail/generate，不经浏览器下载原文件（服务器没有 FFmpeg 时才退回浏览器生成）。以下为原始设想，仅作记录。
 
 **缩略图（M8）：** 图片和视频首帧在浏览器端生成，通过用户 API 存入 `thumbs.db`（可再生的缓存，不占用 Telegram 消息，不进入快照）。S3 客户端上传的文件没有缩略图，用户端首次浏览时对小图（如小于 5 MiB）懒生成。
 

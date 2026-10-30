@@ -50,10 +50,6 @@ class ClientCacheTests(unittest.TestCase):
         self.assertIn(status, (200, 201), data)
         return {**self.user, "x-private-access": data["access"]}
 
-    def enable_private(self):
-        status, data, _ = self.call("POST", "/api/admin/v1/client-cache", {"private_enabled": True}, self.admin)
-        self.assertEqual((status, data["private_enabled"]), (200, True))
-
     def test_tier_key_is_stable_and_bound_to_device_password_and_epoch(self):
         first = self.session()
         self.assertEqual(first, self.session(), "同一设备重复获取得到同一把密钥")
@@ -78,14 +74,10 @@ class ClientCacheTests(unittest.TestCase):
         self.app.client_cache._cached = None
         self.assertEqual(self.session()["key"], key)
 
-    def test_disabled_policy_returns_no_key_and_session_required(self):
+    def test_session_requires_login_and_valid_device(self):
         self.assertEqual(self.call("POST", "/api/user/v1/cache/session", {"device": DEVICE}, {})[0], 401)
         self.assertEqual(self.call("POST", "/api/user/v1/cache/session", {"device": "short"})[0], 400)
-        self.assertEqual(self.call("POST", "/api/admin/v1/client-cache", {"enabled": False})[0], 403, "普通用户不能修改策略")
-        self.assertEqual(self.call("POST", "/api/admin/v1/client-cache", {"max_mib": 1}, self.admin)[0], 400, "容量由用户在设备上设置")
-        self.assertEqual(self.call("POST", "/api/admin/v1/client-cache", {"private_ttl_days": 0}, self.admin)[0], 400)
-        self.assertEqual(self.call("POST", "/api/admin/v1/client-cache", {"enabled": False}, self.admin)[0], 200)
-        self.assertNotIn("key", self.session())
+        self.assertIn("key", self.session())
 
     def test_check_only_keeps_versions_referenced_in_normal_area(self):
         kept = self.put("photos/a.jpg", b"a")
@@ -98,13 +90,11 @@ class ClientCacheTests(unittest.TestCase):
         self.assertEqual(self.call("POST", "/api/user/v1/cache/check", {"etags": etags})[1], {"valid": [kept.etag]})
         self.assertEqual(self.call("POST", "/api/user/v1/cache/check", {"etags": ["x"] * 501})[0], 400)
 
-    def test_private_tier_requires_policy_and_grant_and_filters_by_area(self):
+    def test_private_tier_requires_grant_and_filters_by_area(self):
         visible = self.put(PRIVATE_PREFIX + "a.jpg", b"secret-a")
         normal = self.put("plain.jpg", b"plain")
         private = self.unlock()
         payload = {"device": DEVICE, "etags": [visible.etag, normal.etag]}
-        self.assertEqual(self.call("POST", "/api/user/v1/private/cache/session", {"device": DEVICE}, private)[0], 403, "默认关闭")
-        self.enable_private()
         self.assertEqual(self.call("POST", "/api/user/v1/private/cache/session", {"device": DEVICE})[0], 423, "需要私密授权")
         status, session, headers = self.call("POST", "/api/user/v1/private/cache/session", {"device": DEVICE}, private)
         self.assertEqual((status, headers["cache-control"]), (200, "no-store"))
@@ -127,11 +117,10 @@ class ClientCacheTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/api/user/v1/content?path=evil.js")[0], 200)
 
 
-    def test_stored_capacity_fields_from_older_versions_are_ignored(self):
-        # 旧版保存的容量字段不能让整个策略回落到默认值（否则管理员开启的私密缓存会被悄悄关掉）。
+    def test_cache_policy_is_no_longer_configured_by_admins(self):
+        # 本机缓存完全由用户在各自设备上设置：旧版保存的管理员策略不再生效，配置接口也已移除。
         with self.app.metadata.transaction() as db:
             db.execute("INSERT INTO settings(key,value) VALUES('client_cache.policy',?)",
-                       (json.dumps({"enabled": True, "max_mib": 4096, "entry_mib": 2048, "private_enabled": True, "private_max_mib": 1024, "private_ttl_days": 3}),))
-        policy = self.call("GET", "/api/admin/v1/client-cache", headers=self.admin)[1]
-        self.assertEqual(policy, {"enabled": True, "private_enabled": True, "private_ttl_days": 3})
-        self.assertEqual(self.session()["policy"], policy)
+                       (json.dumps({"enabled": False, "private_enabled": False, "private_ttl_days": 3}),))
+        self.assertEqual(self.session()["policy"], {"enabled": True, "private_enabled": True})
+        self.assertEqual(self.call("GET", "/api/admin/v1/client-cache", headers=self.admin)[0], 404)

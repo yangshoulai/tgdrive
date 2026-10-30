@@ -153,32 +153,14 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
     return () => window.clearInterval(timer);
   }, [active, load]);
   const labels: Record<string, string> = { queued: "待处理", running: "处理中", waiting_client: "等待浏览器", waiting_data: "等待数据", done: "已完成", failed: "失败", cancelled: "已取消" };
-  const [saving, setSaving] = useState(false);
-  async function changeBackfill(value: string) {
-    setSaving(true);
-    try { const backfill = await api.setThumbnailBackfill(Number(value)); setStatus(current => current && { ...current, backfill }); toast.success("自动补图设置已保存"); }
-    catch (reason) { toast.error(api.errorMessage(reason, "保存失败，请稍后重试")); }
-    finally { setSaving(false); }
-  }
-  const backfill = status?.backfill;
-  const dailyMib = backfill ? backfill.daily_bytes === null ? -1 : Math.round(backfill.daily_bytes / 1048576) : 4096;
-  const presets = [0, 1024, 4096, 16384, 65536, -1];
   const kinds = { image: "图片", video: "视频", audio: "音频" };
-  return <Panel title="缩略图队列" description="优先使用上传和预览时已收到的数据；仍缺缩略图的文件由自动补图按预算从存储读取（只产生入站流量）。此处仅显示任务编号与处理情况。"
+  return <Panel title="缩略图队列" description="优先使用上传和预览时已收到的数据；上传或修改 10 分钟后仍缺缩略图的图片、视频、音频由后台逐个从存储读取补齐（只产生入站流量）。此处仅显示任务编号与处理情况。"
     actions={<Button size="sm" icon="refresh" onClick={load}>刷新</Button>}>
     {error ? <EmptyState icon="alert" title="队列读取失败" description={error} /> : !status ? <SkeletonRows rows={2} /> : <>
       <KeyValue items={[["队列", `${status.jobs.length} / ${status.capacity}`], ["当前处理", `${status.jobs.filter(job => job.state === "running").length} 项`],
         ["缓存", `${formatBytes(status.cache.bytes)} / ${formatBytes(status.cache.limit_bytes)}`], ["从存储读取（本次运行）", formatBytes(status.remote_bytes)],
-        ["今日自动补图", status.backfill.daily_bytes === 0 ? "已关闭" : `${formatBytes(status.backfill.used_bytes)} / ${status.backfill.daily_bytes === null ? "不限制" : formatBytes(status.backfill.daily_bytes)}`],
+        ["待补图", `${status.backfill.pending} 项`],
         ...(status.inline.count ? [["数据库中待转存", `${status.inline.count} 张（${formatBytes(status.inline.bytes)}）${status.inline.skipped_quota ? `，${status.inline.skipped_quota} 张因空间已满暂缓` : ""}`] as [string, string]] : [])]} />
-      <div className="thumbnail-backfill">
-        <Field label="自动补图每日读取上限" hint={`上传或修改超过 ${Math.round(status.backfill.age_seconds / 60)} 分钟仍没有缩略图的图片、视频、音频，由后台从存储读取生成（单个文件图片 60、视频 64、音频 32 MiB 以内），保证最终都有缩略图。关闭后只能等实际预览时生成，或由用户在文件菜单更新缩略图。`}>
-          <select className="input" value={presets.includes(dailyMib) ? String(dailyMib) : "custom"} disabled={saving} onChange={event => void changeBackfill(event.target.value)}>
-            {!presets.includes(dailyMib) && <option value="custom" disabled>{formatBytes(dailyMib * 1048576)}</option>}
-            {presets.map(value => <option key={value} value={value}>{value === 0 ? "关闭" : value === -1 ? "不限制" : formatBytes(value * 1048576)}</option>)}
-          </select>
-        </Field>
-      </div>
       {!status.available && <Notice tone="warning">服务器未安装 FFmpeg，后台生成不可用；网页仍可用本地文件或已加载的画面生成。</Notice>}
       {!status.unlocked && <Notice>系统已锁定，后台任务暂停。</Notice>}
       {status.pressure && <Notice tone="warning">{status.pressure}</Notice>}
@@ -191,7 +173,7 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
       {status.recent.length > 0 && <details><summary>最近处理记录（{status.recent.length}）</summary><ul className="task-list">
         {status.recent.slice(0, 20).map(job => <li key={job.id}><span className="mono">{job.id}</span><span className="attention-copy"><strong>{kinds[job.kind]} · {labels[job.state] ?? job.state}</strong><small>{job.detail}</small></span><small className="muted">{job.at ? formatDateTime(job.at) : ""}</small></li>)}
       </ul></details>}
-      <p className="muted">浏览器生成权 {status.client_timeout_seconds} 秒，后台单次处理 {status.task_timeout_seconds} 秒。缓存最长保留 {Math.round(status.cache.ttl_seconds / 60)} 分钟，进程重启后等待新的上传或预览数据。</p>
+      <p className="muted">浏览器停止响应 {status.client_timeout_seconds} 秒后由服务器接管；解码器卡住超过 {Math.round(status.task_timeout_seconds / 60)} 分钟会被结束并稍后重试。已收数据最长缓存 {Math.round(status.cache.ttl_seconds / 60)} 分钟。</p>
     </>}
   </Panel>;
 }

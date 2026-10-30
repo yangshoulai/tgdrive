@@ -176,7 +176,7 @@ function StorageMeter({ usage, percent, onOpenCache }: { usage: Usage | null; pe
             <li><Icon name="folder" size={12} /><span>普通文件</span><strong>{formatBytes(local.normal.bytes)}</strong></li>
             {(local.private.count > 0 || local.settings.private) && <li><Icon name="lock" size={12} /><span>私密文件</span><strong>{formatBytes(local.private.bytes)}</strong></li>}
           </ul>
-          <p className="storage-local-note">{local.settings.enabled && local.policy?.enabled !== false ? "不占用空间" : "已关闭"} · <button type="button" className="link-button" onClick={onOpenCache}>管理</button></p>
+          <p className="storage-local-note">{local.settings.enabled ? "不占用空间" : "已关闭"} · <button type="button" className="link-button" onClick={onOpenCache}>管理</button></p>
         </section>}
       </>}
     </div>}
@@ -217,6 +217,13 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   }, []);
   const uploads = useUploadQueue(() => { setUploadRevision(revision => revision + 1); refreshUsage(); });
   useEffect(() => () => window.clearTimeout(refreshTimer.current), []);
+  // 私密上传可以从任何页面发起（上传弹窗可选择私密空间）：私密空间锁定时统一取消，离开私密页面不再取消。
+  const uploadsRef = useRef(uploads); uploadsRef.current = uploads;
+  useEffect(() => {
+    const locked = () => uploadsRef.current.cancelPrivate();
+    window.addEventListener("tessera:private-locked", locked);
+    return () => window.removeEventListener("tessera:private-locked", locked);
+  }, []);
   // 只有管理员需要系统状态（是否已解锁、流量统计）；普通用户在系统锁定时根本无法登录。
   const refreshStatus = useCallback(() => {
     if (isAdmin) void api.adminStatus().then(setStatus).catch(reason => toast.error(api.errorMessage(reason, "系统状态加载失败，请稍后重试")));

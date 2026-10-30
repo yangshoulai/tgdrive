@@ -10,9 +10,8 @@ export const cacheFileId = (file: CacheFile) => `${api.isPrivatePath(file.key) ?
 const fileUrl = (file: CacheFile) => api.versionedContentUrl(api.contentUrl(file.key), file.etag, file.size);
 const changed = () => window.dispatchEvent(new Event("tessera:cache-changed"));
 
-export type CachePolicy = { enabled: boolean; private_enabled: boolean; private_ttl_days: number };
 export type CacheStats = {
-  namespace: string | null; policy: CachePolicy | null; settings: DeviceSettings;
+  namespace: string | null; settings: DeviceSettings;
   normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>> }; private: { bytes: number; count: number }; others: { bytes: number; count: number };
 };
 export type CachedItem = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean; private: boolean };
