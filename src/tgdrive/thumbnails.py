@@ -159,12 +159,30 @@ class _RangeInput:
         self.engine, self.info, self.authorize = engine, info, authorize
         self.remaining, self.failure = budget, None
         self.remote_remaining, self.remote_bytes = None if budget is None else budget + MIB, 0
+        self._ranges = []
         self._fetched = set()
         self.cache_only = cache_only
         self.path = "/" + secrets.token_urlsafe(32)
         self.server = None
         self.tasks = set()
         self.slots = asyncio.Semaphore(2)
+
+    def _charge_range(self, start, end):
+        if self.remaining is None:
+            return
+        # 多次选帧会反复探测文件头、尾部索引与同一关键帧，已覆盖的范围不能再次占用预算。
+        extra = end - start - sum(max(0, min(end, right) - max(start, left)) for left, right in self._ranges)
+        if extra > self.remaining:
+            raise ThumbnailBudget("缩略图读取量超过预算")
+        merged = []
+        for left, right in self._ranges:
+            if right < start or left > end:
+                merged.append((left, right))
+            else:
+                start, end = min(start, left), max(end, right)
+        merged.append((start, end))
+        self._ranges = sorted(merged)
+        self.remaining -= extra
 
     def _charge(self, ref, size):
         # 用户手动选图不受自动生成额度约束；缓存已回收时允许重新取回所需分片。
@@ -174,7 +192,7 @@ class _RangeInput:
         if ref in self._fetched:
             raise ThumbnailRetry("已读分片缓存被回收，停止生成以避免重复下载")
         if size > self.remote_remaining:
-            raise ThumbnailBudget("手动缩略图读取量超过预算")
+            raise ThumbnailBudget("缩略图回源读取量超过预算")
         self.remote_remaining -= size
         self.remote_bytes += size
         self._fetched.add(ref)
@@ -243,10 +261,7 @@ class _RangeInput:
                     self.authorize()
                     # 分窗口流式交付，不为手动选图把完整视频放入内存。
                     stop = min(end, start + MIB)
-                    if self.remaining is not None:
-                        if stop - start > self.remaining:
-                            raise ThumbnailBudget("缩略图读取量超过预算")
-                        self.remaining -= stop - start
+                    self._charge_range(start, stop)
                     async with aclosing(self.engine.stream(self.info.blob_uuid, start, stop,
                                                           window=MIB, bucket_id=self.info.bucket_id,
                                                           cache_only=self.cache_only,

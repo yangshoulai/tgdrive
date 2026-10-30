@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from tgdrive.thumbnails import MIB, ThumbnailBudget, _RangeInput
+from tgdrive.thumbnails import MIB, ThumbnailBudget, ThumbnailRetry, _RangeInput
 
 
 class _Writer:
@@ -71,6 +71,15 @@ class CandidateReadBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source.remote_bytes, len(self.data))
         self.assertEqual(self.remote_reads, {"video"})
 
+    async def test_budgeted_frame_probes_charge_the_same_range_once(self):
+        source = self.source(budget=8192)
+        for _ in range(20):
+            self.assertEqual(await self.read(source, 0, 4096), self.data[:4096])
+            self.assertEqual(await self.read(source, 4096, 8192), self.data[4096:8192])
+        self.assertIsNone(source.failure)
+        self.assertEqual(source.remaining, 0)
+        self.assertEqual(source.remote_bytes, len(self.data))
+
     async def test_manual_overlapping_and_parallel_ranges_keep_working(self):
         source = self.source()
         results = await asyncio.gather(self.read(source, 0, 6144), self.read(source, 2048, 8192))
@@ -78,6 +87,17 @@ class CandidateReadBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.read(source, 1024, 7168), self.data[1024:7168])
         self.assertIsNone(source.failure)
         self.assertIsNone(source.remaining)
+
+    async def test_budgeted_overlapping_and_parallel_ranges_only_charge_new_bytes(self):
+        source = self.source(budget=8192)
+        results = await asyncio.gather(self.read(source, 0, 6144), self.read(source, 2048, 8192))
+        self.assertEqual(results, [self.data[:6144], self.data[2048:8192]])
+        self.assertEqual(await self.read(source, 1024, 7168), self.data[1024:7168])
+        self.assertIsNone(source.failure)
+        self.assertEqual(source.remaining, 0)
+        self.assertEqual(source._ranges, [(0, 8192)])
+        self.assertEqual(await self.read(source, 8192, 8193), b"")
+        self.assertIsInstance(source.failure, ThumbnailBudget)
 
     async def test_automatic_new_content_still_stops_at_its_read_limit(self):
         source = self.source(budget=8192)
@@ -115,13 +135,51 @@ class CandidateReadBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.read(source, 0, 4096), b"")
         self.assertIsInstance(source.failure, PermissionError)
 
-    async def test_automatic_generation_keeps_its_existing_total_read_limit(self):
+    async def test_generation_limits_new_content_instead_of_repeated_bytes(self):
         source = self.source(budget=8192)
-        await self.read(source, 0, 4096)
-        await self.read(source, 0, 4096)
-        self.assertEqual(await self.read(source, 0, 4096), b"")
+        for _ in range(3):
+            self.assertEqual(await self.read(source, 0, 4096), self.data[:4096])
+        self.assertEqual(source.remaining, 4096)
+        self.assertEqual(await self.read(source, 4096, 8192), self.data[4096:8192])
+        self.assertEqual(await self.read(source, 8192, 12288), b"")
         self.assertIsInstance(source.failure, ThumbnailBudget)
         self.assertEqual(source.remaining, 0)
+
+    async def test_range_merging_preserves_gaps_and_coalesces_a_bridge(self):
+        source = self.source(budget=8192)
+        for start, end in ((0, 2048), (6144, 8192), (2048, 6144)):
+            self.assertEqual(await self.read(source, start, end), self.data[start:end])
+        self.assertEqual(source._ranges, [(0, 8192)])
+        self.assertEqual(source.remaining, 0)
+        self.assertIsNone(source.failure)
+
+    async def test_budgeted_cached_reread_still_checks_authorization(self):
+        authorize = Mock()
+        source = self.source(budget=8192, authorize=authorize)
+        await self.read(source, 0, 4096)
+        authorize.side_effect = PermissionError("访问已撤销")
+        self.assertEqual(await self.read(source, 0, 4096), b"")
+        self.assertIsInstance(source.failure, PermissionError)
+
+    async def test_budgeted_reread_stops_if_the_cached_fragment_was_evicted(self):
+        source = self.source(budget=8192)
+        self.assertEqual(await self.read(source, 0, 4096), self.data[:4096])
+        self.remote_reads.clear()
+        self.assertEqual(await self.read(source, 0, 4096), b"")
+        self.assertIsInstance(source.failure, ThumbnailRetry)
+        self.assertEqual(source.remote_bytes, len(self.data))
+
+    async def test_actual_fragment_downloads_keep_their_separate_budget(self):
+        source = self.source(budget=8192)
+        async def stream(blob, start, end, *, read_budget=None, **kwargs):
+            read_budget(str(start), MIB)
+            yield self.data[start:end]
+        source.engine.stream = stream
+        self.assertEqual(await self.read(source, 0, 4096), self.data[:4096])
+        self.assertEqual(await self.read(source, 4096, 8192), b"")
+        self.assertIsInstance(source.failure, ThumbnailBudget)
+        self.assertIn("回源读取量超过预算", str(source.failure))
+        self.assertEqual(source.remote_bytes, MIB)
 
 
 if __name__ == "__main__":
