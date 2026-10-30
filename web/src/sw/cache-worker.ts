@@ -24,8 +24,11 @@ type Opened = { tier: TierContext; entry: EntryRecord; info: EntryInfo; key: Cry
 type Source = { start: number; response: Response; controller: AbortController };
 type Background = { id: string; controller: AbortController; ready: Promise<void>; started: boolean; context: TierContext | null };
 const backgrounds = new Map<string, Background>();
-type Manual = { id: string; owner: string; route: Route; request: Request; controller: AbortController; opened?: Opened; running: boolean; background?: Background };
-let manual: Manual | null = null;
+type Manual = { key: string; id: string; owner: string; route: Route; request: Request; controller: AbortController; opened?: Opened; running: boolean;
+  background?: Background; timer?: number };
+/** 手动缓存任务（键为 页面:任务编号）。最多同时缓存 MAX_MANUAL_FILES 个文件，所有文件的回源请求共用 manualSlot 的并发上限。 */
+const manuals = new Map<string, Manual>();
+const MAX_MANUAL_FILES = 3;
 
 /* ---------- 路由 ---------- */
 
@@ -102,7 +105,7 @@ function clearPrivateMaterials() {
 }
 
 function dropKeys(tier?: Tier) {
-  if (manual && (!tier || manual.route.tier === tier && !manual.background)) stopManual();
+  stopManualWhere(job => !tier || job.route.tier === tier && !job.background);
   if (!tier) for (const key of backgrounds.keys()) void finishBackground(key);
   for (const selected of tier ? [tier] : ["n", "p"] as const) {
     revocation[selected].abort();
@@ -581,18 +584,64 @@ class BlockWriter {
   }
 }
 
-/* ---------- 手动补全：页面调度，Worker 每次只处理至多 8 MiB ---------- */
+/* ---------- 手动补全：页面调度，Worker 每一步并行补齐若干个 16 MiB 段 ---------- */
 
-let manualTimer: number | undefined;
-function stopManual() {
-  manual?.controller.abort(); manual = null;
-  clearTimeout(manualTimer); manualTimer = undefined;
+/** 停止一个手动任务；不传参数时停止全部。 */
+function stopManual(job?: Manual) {
+  for (const item of job ? [job] : [...manuals.values()]) {
+    item.controller.abort(); clearTimeout(item.timer);
+    if (manuals.get(item.key) === item) manuals.delete(item.key);
+  }
 }
+function stopManualWhere(test: (job: Manual) => boolean) {
+  for (const job of [...manuals.values()]) if (test(job)) stopManual(job);
+}
+const manualKeys = () => new Set([...manuals.values()].flatMap(job => job.opened ? [job.opened.entry.key] : []));
 
 function renewManual(job: Manual) {
-  clearTimeout(manualTimer);
+  clearTimeout(job.timer);
   // 页面关闭、消息超时或 Worker 重启都不留下持久任务；已提交的块仍可再次续传。
-  manualTimer = setTimeout(() => { if (manual === job) stopManual(); }, 120_000) as unknown as number;
+  job.timer = setTimeout(() => stopManual(job), 120_000) as unknown as number;
+}
+
+/* 多线程缓存：大文件按 16 MiB（服务器存储分片的大小，一段只对应一个分片）切段并行下载，几个文件也可以同时缓存。
+ * 所有回源请求共用一个并发上限：服务器给每个账号的读取路数减一（服务器为播放和预览保留一路），最多 3 路，
+ * 也给浏览器对同一站点的连接数（HTTP/1.1 约 6 个）留出余量。请求带 X-Tessera-Background，服务器让播放优先。 */
+const SEGMENT_BLOCKS = 16;
+let manualActive = 0;
+const manualWaiters: (() => void)[] = [];
+let readConcurrency: { value: number; at: number } | null = null;
+async function manualParallel() {
+  if (!readConcurrency || Date.now() - readConcurrency.at > 60_000) {
+    let value = readConcurrency?.value ?? 2;
+    try {
+      const response = await fetch("/api/user/v1/upload-config", { credentials: "same-origin", cache: "no-store" });
+      if (response.ok) {
+        const reads = Number((await response.json() as { read_concurrency?: unknown }).read_concurrency);
+        if (Number.isInteger(reads) && reads > 0) value = reads;
+      }
+    } catch { /* 沿用上次的值 */ }
+    readConcurrency = { value, at: Date.now() };
+  }
+  return Math.max(1, Math.min(3, readConcurrency.value - 1));
+}
+async function manualSlot(signal: AbortSignal) {
+  const limit = await manualParallel();
+  while (manualActive >= limit) {
+    signal.throwIfAborted();
+    await new Promise<void>(resolve => {
+      manualWaiters.push(resolve);
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  }
+  signal.throwIfAborted();
+  manualActive++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true; manualActive--;
+    manualWaiters.shift()?.();
+  };
 }
 
 async function startPrivateTask(owner: string, id: string, paths: string[], csrf: string, access: string) {
@@ -642,7 +691,7 @@ async function finishBackground(key: string) {
   const background = backgrounds.get(key);
   if (!background) return;
   backgrounds.delete(key); background.controller.abort();
-  if (manual?.background === background) stopManual();
+  stopManualWhere(job => job.background === background);
   await background.ready.catch(() => undefined);
   if (background.started) await post("/api/user/v1/cache/tasks/release", {}, "", { "X-Tessera-Cache-Task": background.id }).catch(() => undefined);
 }
@@ -691,7 +740,7 @@ async function fileStates(urls: string[]) {
     const entry = await getEntry(value.key);
     const info = entry && await openInfo(value.context.info, entry);
     value.context.signal.throwIfAborted();
-    return { ...fileCacheState(info ? entry : undefined, info?.size ?? 0), busy: manual?.opened?.entry.key === value.key };
+    return { ...fileCacheState(info ? entry : undefined, info?.size ?? 0), busy: manualKeys().has(value.key) };
   }));
 }
 
@@ -720,12 +769,15 @@ function manualFetch(job: Manual, options: RequestInit = {}) {
 
 async function startManual(owner: string, id: string, url: string, group?: string) {
   if (!owner || !id || id.length > 100) throw new CacheFatal("缓存任务来源无效");
-  if (manual) return { busy: true };
+  const key = `${owner}:${id}`;
+  const busy = (route: Route) => manuals.has(key) || manuals.size >= MAX_MANUAL_FILES
+    || [...manuals.values()].some(job => job.route.etag === route.etag && job.route.tier === route.tier);
   const { request, route } = manualRoute(url);
+  if (busy(route)) return { busy: true };
   const background = group && route.tier === "p" ? await getBackground(owner, group) : undefined;
-  if (manual) return { busy: true };
-  const job: Manual = { owner, id, request, route, controller: new AbortController(), running: false, background };
-  manual = job; renewManual(job);
+  if (busy(route)) return { busy: true };
+  const job: Manual = { key, owner, id, request, route, controller: new AbortController(), running: false, background };
+  manuals.set(key, job); renewManual(job);
   try {
     // 点击时重取账号策略；长期播放的普通预览仍按原有的上下文周期复用。
     normal = null;
@@ -773,10 +825,10 @@ async function startManual(owner: string, id: string, url: string, group?: strin
       job.controller.signal.throwIfAborted();
       const state = fileCacheState(entry, size);
       await cacheChanged(state.complete).catch(() => undefined);
-      if (state.complete) stopManual();
+      if (state.complete) stopManual(job);
       return { busy: false, ...state };
     } finally { value.context.signal.removeEventListener("abort", abort); }
-  } catch (error) { if (manual === job) stopManual(); throw error; }
+  } catch (error) { stopManual(job); throw error; }
 }
 
 /** 浏览器配额（整个站点共用）不够时，先移除这台设备上最久未使用的自动缓存（含其他账号与私密层），手动缓存不动；仍不够就请用户处理。 */
@@ -787,7 +839,8 @@ async function reserveQuota(keep: string, need: number) {
   if (shortfall <= 0) return;
   const victims: string[] = [];
   let freed = 0;
-  for (const item of (await listEntries()).filter(item => !item.manual && item.key !== keep && item.key !== manual?.opened?.entry.key).sort((a, b) => a.accessed - b.accessed)) {
+  const busy = manualKeys();
+  for (const item of (await listEntries()).filter(item => !item.manual && item.key !== keep && !busy.has(item.key)).sort((a, b) => a.accessed - b.accessed)) {
     if (freed >= shortfall) break;
     victims.push(item.key); freed += item.bytes;
   }
@@ -802,8 +855,8 @@ async function reserveQuota(keep: string, need: number) {
 }
 
 async function stepManual(owner: string, id: string, progress: (value: unknown) => void) {
-  const job = manual;
-  if (!job || job.owner !== owner || job.id !== id || !job.opened) throw new Error("缓存任务已停止，请重试以继续缓存");
+  const job = manuals.get(`${owner}:${id}`);
+  if (!job || !job.opened) throw new Error("缓存任务已停止，请重试以继续缓存");
   if (job.running) throw new Error("缓存任务正在写入");
   job.running = true; renewManual(job);
   const abort = () => job.controller.abort();
@@ -815,52 +868,72 @@ async function stepManual(owner: string, id: string, progress: (value: unknown) 
     const entry = await getEntry(value.key);
     if (!entry) throw new Error("缓存已被清理，请重试");
     const opened = job.opened = { ...job.opened, tier: value.context, key: value.keys.key, entry };
+    // 这一步并行补齐的段：每个 16 MiB 段取第一段连续缺失的块；段内其他空洞留给下一步。
     const count = Math.ceil(opened.info.size / BLOCK);
     const present = new Set(entry.blocks);
-    let missing = 0;
-    while (present.has(missing)) missing++;
-    const index = missing < count ? missing : undefined;
-    if (index !== undefined) {
-      const end = Math.min(opened.info.size - 1, (Math.min(index + 7, missingRun(entry.blocks, index, count - 1)) + 1) * BLOCK - 1);
-      const headers = new Headers({ Range: `bytes=${index * BLOCK}-${end}` });
-      const response = await manualFetch(job, { headers });
-      if (response.status === 401) dropKeys();
-      if (response.status !== 206 || etagOf(response) !== opened.info.version || response.headers.get("content-range") !== `bytes ${index * BLOCK}-${end}/${opened.info.size}`) {
-        await response.body?.cancel();
-        if (response.ok) { await deleteEntries([entry.key]); throw new CacheFatal("文件已变化，请刷新列表后重新缓存"); }
-        throw statusError(response.status, `读取文件失败（${response.status}），请稍后重试`);
-      }
-      if (!response.body) throw new Error("服务器未返回文件内容");
-      const reader = response.body.getReader();
-      const writer = new BlockWriter(opened, index, { signal: job.controller.signal, stored: () => {
-        if (manual !== job || job.controller.signal.aborted) return;
-        renewManual(job); progress(fileCacheState(opened.entry, opened.info.size));
-      } });
-      let received = 0;
-      try {
-        while (true) {
-          job.controller.signal.throwIfAborted();
-          const { value, done } = await reader.read();
-          if (done) break;
-          received += value.length;
-          if (received > end - index * BLOCK + 1) throw new Error("服务器返回的数据大小不符");
-          await writer.push(value);
-        }
-      } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
-      if (received !== end - index * BLOCK + 1) throw new Error("服务器提前结束了响应，请重试以继续缓存");
+    const parallel = await manualParallel();
+    const segments: [number, number][] = [];
+    for (let lo = 0; lo < count && segments.length < parallel * 2; lo += SEGMENT_BLOCKS) {
+      const hi = Math.min(count - 1, lo + SEGMENT_BLOCKS - 1);
+      let first = lo;
+      while (first <= hi && present.has(first)) first++;
+      if (first > hi) continue;
+      let last = first;
+      while (last < hi && !present.has(last + 1)) last++;
+      segments.push([first, last]);
     }
+    const failures: unknown[] = [];
+    await Promise.all(segments.map(segment => fetchSegment(job, opened, segment, progress).catch(error => {
+      failures.push(error);
+      // 文件已变化、空间不足等无法自动恢复的错误：停止其余段；临时故障让其余段继续，已写入的块都保留。
+      if (error instanceof CacheFatal) job.controller.abort();
+    })));
+    if (failures.length) throw failures.find(error => error instanceof CacheFatal) ?? failures.find(error => !(error instanceof DOMException && error.name === "AbortError")) ?? failures[0];
     job.controller.signal.throwIfAborted();
     const state = fileCacheState(await getEntry(entry.key), opened.info.size);
-    if (state.complete) { await verifyManual(job); if (manual === job) stopManual(); }
+    if (state.complete) { await verifyManual(job); stopManual(job); }
     manualCache = null;
     return state;
-  } catch (error) { if (manual === job) stopManual(); throw error; }
+  } catch (error) { stopManual(job); throw error; }
   finally { job.opened?.tier.signal.removeEventListener("abort", abort); job.running = false; }
+}
+
+async function fetchSegment(job: Manual, opened: Opened, [first, last]: [number, number], progress: (value: unknown) => void) {
+  const release = await manualSlot(job.controller.signal);
+  try {
+    const end = Math.min(opened.info.size - 1, (last + 1) * BLOCK - 1);
+    const headers = new Headers({ Range: `bytes=${first * BLOCK}-${end}`, "X-Tessera-Background": "cache" });
+    const response = await manualFetch(job, { headers });
+    if (response.status === 401) dropKeys();
+    if (response.status !== 206 || etagOf(response) !== opened.info.version || response.headers.get("content-range") !== `bytes ${first * BLOCK}-${end}/${opened.info.size}`) {
+      await response.body?.cancel();
+      if (response.ok) { await deleteEntries([opened.entry.key]); throw new CacheFatal("文件已变化，请刷新列表后重新缓存"); }
+      throw statusError(response.status, `读取文件失败（${response.status}），请稍后重试`);
+    }
+    if (!response.body) throw new Error("服务器未返回文件内容");
+    const reader = response.body.getReader();
+    const writer = new BlockWriter(opened, first, { signal: job.controller.signal, stored: () => {
+      if (manuals.get(job.key) !== job || job.controller.signal.aborted) return;
+      renewManual(job); progress(fileCacheState(opened.entry, opened.info.size));
+    } });
+    let received = 0;
+    try {
+      while (true) {
+        job.controller.signal.throwIfAborted();
+        const { value, done } = await reader.read();
+        if (done) break;
+        received += value.length;
+        if (received > end - first * BLOCK + 1) throw new Error("服务器返回的数据大小不符");
+        await writer.push(value);
+      }
+    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+    if (received !== end - first * BLOCK + 1) throw new Error("服务器提前结束了响应，请重试以继续缓存");
+  } finally { release(); }
 }
 
 async function removeFile(url: string) {
   const value = await manualOpened(url);
-  if (manual?.route.etag === value.route.etag && manual.route.tier === value.route.tier) stopManual();
+  stopManualWhere(job => job.route.etag === value.route.etag && job.route.tier === value.route.tier);
   await deleteEntries([value.key]);
   infoMemo.delete(value.key);
   await cacheChanged(true).catch(() => undefined);
@@ -930,10 +1003,10 @@ async function enforce(factor = 1) {
   const normalBudget = tierBudget(preferences, "n"), privateBudget = tierBudget(preferences, "p");
   // 为手动任务预留剩余空间，普通预览的延迟淘汰也不能删除正在补全的条目。
   for (const tier of ["n", "p"] as const) {
-    const opened = manual?.opened;
-    const reserved = opened?.tier.tier === tier ? opened : undefined;
-    const remaining = reserved ? Math.max(0, reserved.info.size - reserved.entry.bytes) : 0;
-    await evict(await listEntries(lastNamespace, tier), Math.max(0, (tier === "n" ? normalBudget : privateBudget) * factor - remaining), entry => entry.key === reserved?.entry.key);
+    const reserved = [...manuals.values()].flatMap(job => job.opened?.tier.tier === tier ? [job.opened] : []);
+    const remaining = reserved.reduce((sum, opened) => sum + Math.max(0, opened.info.size - opened.entry.bytes), 0);
+    const keep = new Set(reserved.map(opened => opened.entry.key));
+    await evict(await listEntries(lastNamespace, tier), Math.max(0, (tier === "n" ? normalBudget : privateBudget) * factor - remaining), entry => keep.has(entry.key));
   }
   // 其他账号留在这台设备上的数据同样计入：超过普通层上限时先淘汰它们中最久未用的。
   const others = (await listEntries()).filter(entry => entry.ns !== lastNamespace);
@@ -1095,7 +1168,7 @@ async function listItems(options: ItemQuery) {
 /** 按同样的条件移除（「移除筛选出的文件」）；只作用于当前账号的普通层。 */
 async function removeItems(options: ItemQuery) {
   const keys = new Set((await matchItems({ ...options, private: false })).map(item => item.key));
-  if (manual?.opened && keys.has(manual.opened.entry.key)) stopManual();
+  stopManualWhere(job => Boolean(job.opened && keys.has(job.opened.entry.key)));
   await deleteEntries([...keys]);
   itemCache = null; manualCache = null;
   return keys.size;
@@ -1109,8 +1182,8 @@ async function clear(scope: string, key?: string) {
     : scope === "all" ? entries
     : scope === "others" ? entries.filter(entry => entry.ns !== namespace)
     : entries.filter(entry => entry.tier === (scope === "private" ? "p" : "n") && (!namespace || entry.ns === namespace));
-  if (manual && (scope === "all" || scope === "normal" && manual.route.tier === "n" || scope === "private" && manual.route.tier === "p"
-    || victims.some(entry => entry.key === manual?.opened?.entry.key))) stopManual();
+  stopManualWhere(job => scope === "all" || scope === "normal" && job.route.tier === "n" || scope === "private" && job.route.tier === "p"
+    || victims.some(entry => entry.key === job.opened?.entry.key));
   await deleteEntries(victims.map(entry => entry.key));
   itemCache = null; manualCache = null;
 }
@@ -1153,7 +1226,7 @@ sw.addEventListener("message", event => {
     case "tessera-cache:start": reply(startManual(owner, data.id ?? "", data.url ?? "", data.group)); break;
     case "tessera-cache:step": reply(stepManual(owner, data.id ?? "", value => port?.postMessage({ progress: value }))); break;
     case "tessera-cache:cancel":
-      if (manual?.owner === owner && (!data.id || manual.id === data.id)) stopManual();
+      stopManualWhere(job => job.owner === owner && (!data.id || job.id === data.id));
       reply(Promise.resolve(null)); break;
     case "tessera-cache:remove-file": reply(removeFile(data.url ?? "")); break;
   }

@@ -635,8 +635,8 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         admin = await client.login("admin", "admin@example.com", "admin password")
         status, _, data = await client.request("POST", "/api/admin/v1/resources", b'{"mode":"low"}', admin)
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(data)["effective"]["concurrency"], 1)
-        self.assertEqual(self.app.engine.transfers.per_bucket, 1)
+        effective = json.loads(data)["effective"]
+        self.assertEqual(self.app.engine.transfers.per_bucket, effective["bucket_concurrency"], "保存后读取名额立即生效")
         # 私密下载位置需要已解锁的私密授权；未授权是业务校验错误（400），不能让前端当成会话过期。
         with self.assertRaises(ValueError):
             parsed = await self.offline.parse(self.alice.id, "https://example.com/f")
@@ -645,7 +645,7 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
     async def test_budget_persistence_and_disabled_queue(self):
         self.app.resources.detected.update(cpu_cores=1, memory_bytes=750 * 1024 * 1024)
         saved = self.app.resources.update({"mode": "custom", "concurrency": 4})
-        self.assertEqual(saved["effective"]["concurrency"], 1)
+        self.assertEqual(saved["effective"]["concurrency"], 2, "低配机器（1 核、750 MB）离线下载最多同时 2 个")
         self.assertTrue(saved["effective"]["reduced"])
         restored = ResourceSettings(self.app.metadata, self.app.resources.data_dir, {"mode": "standard"})
         self.assertEqual(restored.config()["mode"], "custom")
@@ -667,13 +667,15 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
                     {"bucket_concurrency": True}):
             with self.assertRaises(ValueError):
                 resources.update(bad)
+        resources.update({"transfer_concurrency": 12, "bucket_concurrency": 12})
         low = resources.update({"mode": "low"})["effective"]
-        self.assertEqual((low["transfer_concurrency"], low["bucket_concurrency"], low["transfer_reduced"]), (4, 2, True))
-        self.assertEqual((transfers.total, transfers.per_bucket), (4, 2))
+        # 低资源档最多 8 路读取，每个账号可以用满（不再减半）。
+        self.assertEqual((low["transfer_concurrency"], low["bucket_concurrency"], low["transfer_reduced"]), (8, 8, True))
+        self.assertEqual((transfers.total, transfers.per_bucket), (8, 8))
         # 自定义模式不按低资源档收紧，只按检测到的内存留余量（自动模式在 1 GB 以下会选低资源档）。
         resources.update({"mode": "custom"})
         resources.detected.update(memory_bytes=512 * 1024 ** 2)
-        self.assertEqual(resources.effective()["transfer_concurrency"], 5, "按内存留出余量")
+        self.assertEqual(resources.effective()["transfer_concurrency"], 7, "每路约 24 MB，最多占内存的三分之一")
         # 旧版保存的配置没有这两项时，用启动参数补齐。
         with self.app.metadata.transaction() as db:
             db.execute("UPDATE settings SET value=? WHERE key=?", ('{"mode":"standard"}', ResourceSettings.KEY))

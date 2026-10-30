@@ -984,8 +984,10 @@ class TgDriveASGI(StaticFiles):
                 # 网页上传的并发由管理员在「下载与资源」配置；只返回这几个数值，不暴露其他资源配置。
                 user._scope(token)
                 effective = self.resources.effective() if self.resources is not None else {}
+                # read_concurrency：每个账号同时读取的路数，本机缓存据此决定并行下载的段数。
                 return 200, {"part_concurrency": effective.get("web_part_concurrency", 4),
-                             "file_concurrency": effective.get("web_file_concurrency", 2)}, {"Cache-Control": "no-store"}
+                             "file_concurrency": effective.get("web_file_concurrency", 2),
+                             "read_concurrency": effective.get("bucket_concurrency", 2)}, {"Cache-Control": "no-store"}
             if route.startswith("/assistant/") and self.assistant is not None:
                 return await self._assistant_user(method, route[len("/assistant"):], query, payload, token, csrf,
                                                   origin=origin, ip=ip)
@@ -1243,7 +1245,9 @@ class TgDriveASGI(StaticFiles):
         user = user or self.user
         path = query.get("path", [""])[0]
         info, _ = await user.content(token, path)
-        opener = lambda start, end: user.content(token, path, start, end)
+        # 本机缓存的 Service Worker 用这个请求头标记后台整文件读取（只影响读取名额的先后，不影响权限）。
+        background = headers.get("x-tessera-background") == "cache"
+        opener = lambda start, end: user.content(token, path, start, end, background=background)
         if "bucket_id" in query and int(query["bucket_id"][0]) != info.bucket_id:
             raise PermissionError("文件缓存不属于当前账号")
         # 缓存必须同时绑定存储桶与内容版本，不能在切换账号后复用同路径的内容。

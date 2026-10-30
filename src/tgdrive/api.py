@@ -950,11 +950,12 @@ class UserApi:
             # 旧密码错误不是会话失效，不能返回 401 触发前端退出登录。
             raise ValueError("当前密码不正确") from exc
 
-    async def content(self, token: str, path: str, start: int = 0, end: int | None = None):
+    async def content(self, token: str, path: str, start: int = 0, end: int | None = None, *, background: bool = False):
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         # 网页读取：图片、视频的缩略图优先由预览页用已加载的画面生成，后台稍后才接管。
-        return await self.objects.get_object(replace(self._scope(token), thumbnail_client=True), self._path(path), start, end)
+        # background：本机缓存的整文件读取，读取名额让播放和预览优先。
+        return await self.objects.get_object(replace(self._scope(token), thumbnail_client=True, background=background), self._path(path), start, end)
 
     ARCHIVE_LIMIT = 200
 

@@ -8,7 +8,7 @@ const MODES: Record<api.ResourceConfig["mode"], string> = { auto: "自动", low:
 const TIERS: Record<api.ResourceSettings["effective"]["mode"], string> = { low: "低资源", standard: "标准", custom: "自定义" };
 const MODE_HINTS: Record<api.ResourceConfig["mode"], string> = {
   auto: "按检测到的 CPU 和内存在「标准」与「低资源」之间选择，适合大多数部署。",
-  low: "离线下载 1 个任务；内存达到 512 MiB 时最多读取 4 路、每账号 2 路，写入 4 个分片、网页每个文件 4 段。更小或无法检测内存时继续降低。",
+  low: "内存达到 512 MiB 时：离线下载 2 个任务，读取最多 8 路（每个账号可以全部使用），写入与网页分段最多 8 路，并按内存的三分之一收紧。更小或无法检测内存时最多 3 路、离线下载 1 个任务。",
   custom: "自己决定同时下载的任务数；容器预算不足时实际并发仍会降低。",
 };
 const rate = (kib: number) => kib ? `${kib.toLocaleString("zh-CN")} KiB/s` : "不限速";
@@ -62,7 +62,7 @@ export function Resources() {
               <input className="input" type="number" min={1} max={16} step={1} required value={form.transfer_concurrency}
                 onChange={event => { const value = Number(event.target.value); setForm({ ...form, transfer_concurrency: value, bucket_concurrency: Math.min(form.bucket_concurrency, Math.max(1, value)) }); }} />
             </Field>
-            <Field label="每个账号同时读取数" hint="单个账号最多占用的读取数，不超过服务器总数。">
+            <Field label="每个账号同时读取数" hint="单个账号最多占用的读取数，不超过服务器总数。本机缓存最多用其中「总数减一」路，留一路给播放与预览。">
               <input className="input" type="number" min={1} max={form.transfer_concurrency || 1} step={1} required value={form.bucket_concurrency} onChange={number("bucket_concurrency")} />
             </Field>
           </div>

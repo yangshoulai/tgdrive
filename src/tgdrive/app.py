@@ -33,7 +33,7 @@ from .work import PasswordWork
 def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None = None,
                s3_host: str | None = None, secure_cookies: bool = True,
                public_base_url: str | None = None, s3_endpoint: str | None = None,
-               run_scheduler: bool = True, transfer_concurrency: int = 4, bucket_concurrency: int = 2,
+               run_scheduler: bool = True, transfer_concurrency: int = 8, bucket_concurrency: int = 6,
                audit_retention_days: int = 0, resource_mode: str = "auto",
                offline_concurrency: int = 1, offline_bandwidth_kib: int = 0,
                offline_reserve_mib: int = 512, offline_hls: bool = False,
@@ -187,8 +187,8 @@ def main() -> None:
                         help="信任 X-Forwarded-For/Proto 的代理 IP 或网段，逗号分隔；留空使用 Uvicorn 默认值")
     parser.add_argument("--insecure-cookies", action="store_true",
                         default=os.environ.get("TGDRIVE_INSECURE_COOKIES", "0") == "1")
-    parser.add_argument("--transfer-concurrency", type=int, default=int(os.environ.get("TGDRIVE_TRANSFER_CONCURRENCY", "4")))
-    parser.add_argument("--bucket-concurrency", type=int, default=int(os.environ.get("TGDRIVE_BUCKET_CONCURRENCY", "2")))
+    parser.add_argument("--transfer-concurrency", type=int, default=int(os.environ.get("TGDRIVE_TRANSFER_CONCURRENCY", "8")))
+    parser.add_argument("--bucket-concurrency", type=int, default=int(os.environ.get("TGDRIVE_BUCKET_CONCURRENCY", "6")))
     parser.add_argument("--audit-retention-days", type=int, default=int(os.environ.get("TGDRIVE_AUDIT_RETENTION_DAYS", "0")),
                         help="审计日志归档期限；0 为永久保留，正数表示归档指定天数以前的记录")
     parser.add_argument("--resource-mode", choices=("auto", "low", "standard", "custom"), default=os.environ.get("TGDRIVE_RESOURCE_MODE", "auto"), help="资源预设；管理员配置优先，容器预算始终限制实际并发。standard 是旧值，按 auto 处理")

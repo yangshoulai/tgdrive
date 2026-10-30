@@ -296,8 +296,8 @@ class PrivateFiles(UserApi):
         return Scope(account.bucket_id, PRIVATE_PREFIX, private_access=True,
                      authorize=lambda: self.space.require(token, self.access))
 
-    async def content(self, token, path, start=0, end=None):
-        info, stream = await super().content(token, path, start, end)
+    async def content(self, token, path, start=0, end=None, *, background=False):
+        info, stream = await super().content(token, path, start, end, background=background)
         async def guarded():
             try:
                 async for chunk in stream:

@@ -36,7 +36,7 @@ class PasswordWork:
 
 
 class TransferSlots:
-    def __init__(self, total: int = 4, per_bucket: int = 2, wait_seconds: float = 30) -> None:
+    def __init__(self, total: int = 8, per_bucket: int = 6, wait_seconds: float = 30) -> None:
         if total < 1 or per_bucket < 1 or wait_seconds <= 0:
             raise ValueError("传输并发和等待时间必须为正数")
         self.total, self.per_bucket, self.wait_seconds = total, per_bucket, wait_seconds
@@ -50,14 +50,21 @@ class TransferSlots:
             raise ValueError("传输并发必须为正数")
         self.total, self.per_bucket = total, per_bucket
 
+    def _full(self, bucket_id, background: bool) -> bool:
+        # 后台读取（本机缓存）给前台留一个名额：边缓存边播放、预览时，播放请求不必排在缓存后面。
+        reserve = 1 if background else 0
+        return (self._active >= max(1, self.total - reserve)
+                or self._buckets.get(bucket_id, 0) >= max(1, self.per_bucket - reserve))
+
     @asynccontextmanager
-    async def slot(self, bucket_id: int | None):
+    async def slot(self, bucket_id: int | None, *, background: bool = False):
         acquired = False
         try:
             try:
-                async with asyncio.timeout(self.wait_seconds):
+                # 后台读取可以多等一会儿：名额让给前台时不应很快失败。
+                async with asyncio.timeout(self.wait_seconds * (4 if background else 1)):
                     async with self._condition:
-                        while self._active >= self.total or self._buckets.get(bucket_id, 0) >= self.per_bucket:
+                        while self._full(bucket_id, background):
                             try:
                                 async with asyncio.timeout(0.5):
                                     await self._condition.wait()

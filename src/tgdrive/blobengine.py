@@ -53,7 +53,7 @@ class BlobEngine:
     def __init__(self, metadata: Metadata, store: BlobStore, kek: bytes | None = None,
                  *, keystore: KeyStore | None = None,
                  chunk_size: int = 16 * 1024 * 1024, frame_size: int = 64 * 1024,
-                 transfer_concurrency: int = 4, bucket_concurrency: int = 2) -> None:
+                 transfer_concurrency: int = 8, bucket_concurrency: int = 6) -> None:
         if chunk_size <= 0 or frame_size <= 0:
             raise ValueError("chunk_size and frame_size must be positive")
         self.metadata, self.store, self.kek = metadata, store, kek
@@ -213,14 +213,16 @@ class BlobEngine:
 
     async def stream(self, blob_uuid: str, start: int = 0, end: int | None = None,
                      *, window: int = 1024 * 1024, bucket_id: int | None = None,
-                     cache_only: bool = False, read_budget=None) -> AsyncIterator[bytes]:
-        async with self.transfers.slot(bucket_id):
-            async with aclosing(self._stream(blob_uuid, start, end, window=window, cache_only=cache_only, read_budget=read_budget)) as source:
+                     cache_only: bool = False, read_budget=None, background: bool = False) -> AsyncIterator[bytes]:
+        async with self.transfers.slot(bucket_id, background=background):
+            async with aclosing(self._stream(blob_uuid, start, end, window=window, cache_only=cache_only, read_budget=read_budget,
+                                             background=background)) as source:
                 async for piece in source:
                     yield piece
 
     async def _stream(self, blob_uuid: str, start: int = 0, end: int | None = None,
-                      *, window: int = 1024 * 1024, cache_only: bool = False, read_budget=None) -> AsyncIterator[bytes]:
+                      *, window: int = 1024 * 1024, cache_only: bool = False, read_budget=None,
+                      background: bool = False) -> AsyncIterator[bytes]:
         record = self.metadata.get_blob(blob_uuid)
         if record.status != "complete" or record.size is None:
             raise InvalidStateError("blob is not complete")
@@ -252,7 +254,9 @@ class BlobEngine:
                 while position < hi_exclusive:
                     # 短 Range 和本地读取仍按原窗口一次取齐。
                     if ramp is None:
-                        ramp = min(window, 256 * 1024) if chunk_window > window and stop - start > chunk_window else chunk_window
+                        # 后台整段读取（本机缓存）不会被中途放弃，直接用后端窗口。
+                        ramp = (min(window, 256 * 1024) if chunk_window > window and stop - start > chunk_window and not background
+                                else chunk_window)
                     width = min(ramp, chunk_window)
                     ramp = min(ramp * 4, 1 << 40)
                     local_end = min(hi_exclusive, position + max(width, record.frame_size))

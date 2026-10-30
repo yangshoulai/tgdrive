@@ -128,6 +128,45 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
         async with slots.slot(1):
             pass
 
+    async def test_background_reads_leave_a_slot_for_playback(self):
+        # 本机缓存（后台读取）最多占「名额 - 1」路，播放和预览总能拿到剩下的一路；只有一路时不限制后台。
+        slots = TransferSlots(total=3, per_bucket=3, wait_seconds=0.03)
+        async with slots.slot(1, background=True), slots.slot(1, background=True):
+            with self.assertRaises(WorkBusyError):
+                async with slots.slot(1, background=True):
+                    self.fail("后台读取占用了为播放保留的名额")
+            async with slots.slot(1):
+                pass
+        single = TransferSlots(total=1, per_bucket=1, wait_seconds=0.03)
+        async with single.slot(1, background=True):
+            pass
+
+    async def test_background_reads_skip_the_small_window_ramp(self):
+        class WindowStore(SlowStore):
+            def read_window(self, ref):
+                return 64 * 1024
+        root = Path(self.temp.name)
+        store = WindowStore(root / "window-blobs", 0)
+        engine = BlobEngine(self.metadata, store, self.engine.kek, chunk_size=128 * 1024, frame_size=4096)
+        data = os.urandom(300 * 1024)
+        blob = engine.begin_blob()
+        await engine.put_part(blob, 1, data)
+        engine.finalize(blob, [1])
+        sizes = []
+        original = store.get
+        async def recording(ref, start=None, end=None):
+            sizes.append((end or 0) - (start or 0))
+            return await original(ref, start, end)
+        store.get = recording
+        # 前台（播放）从小窗口起步、逐步放大；后台整段读取（本机缓存）直接用后端窗口。
+        self.assertEqual(b"".join([piece async for piece in engine.stream(blob, window=1024)]), data)
+        foreground = sizes[:]
+        sizes.clear()
+        self.assertEqual(b"".join([piece async for piece in engine.stream(blob, window=1024, background=True)]), data)
+        self.assertLess(foreground[0], 8 * 1024)
+        self.assertGreaterEqual(sizes[0], 64 * 1024)
+        self.assertLess(len(sizes), len(foreground))
+
     async def test_closing_stream_cancels_pending_reads(self):
         stream = self.engine.stream(self.blob, window=64)
         await anext(stream)

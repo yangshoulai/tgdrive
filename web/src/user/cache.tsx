@@ -41,6 +41,8 @@ const percentOf = (bytes: number, size: number, complete = false) => complete ? 
 
 /** 网络抖动、Worker 被浏览器回收、其他页面占用等暂时失败按此间隔自动续传；连续失败（期间没有新进度）超过次数才算失败。 */
 const RETRY_DELAYS = [1000, 3000, 8000, 15000, 30000, 60000];
+/** 同时缓存的文件数，与 Worker 的 MAX_MANUAL_FILES 一致；所有文件的回源请求另有共同的并发上限。 */
+const CACHE_FILE_CONCURRENCY = 3;
 
 function pause(signal: AbortSignal, delay = 1500) {
   return new Promise<void>((resolve, reject) => {
@@ -66,7 +68,8 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
   const cachedRef = useRef(cached); cachedRef.current = cached;
   const [wake, setWake] = useState(0);
   const [details, setDetails] = useState<CacheFile | null>(null), [removing, setRemoving] = useState<CacheFile[] | null>(null);
-  const active = useRef<{ id: string; controller: AbortController } | null>(null);
+  // 同时缓存的文件（与 Worker 的 MAX_MANUAL_FILES 一致）；每个大文件在 Worker 内再按段并行下载。
+  const active = useRef(new Map<string, AbortController>());
   const [available, setAvailable] = useState(false);
   const watching = useRef(new Map<string, CacheFile[]>()), ready = useRef({ enabled, privateReady, available, privateCacheEnabled });
   ready.current = { enabled, privateReady, available, privateCacheEnabled };
@@ -109,7 +112,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
     updateFolders(value => value.filter(folder => folder.id !== id));
   }, [updateFolders]);
   const stop = useCallback((id: string, status: "paused" | "canceled") => {
-    if (active.current?.id === id) { active.current.controller.abort(); cancelFileCache(id); }
+    if (active.current.has(id)) { active.current.get(id)!.abort(); cancelFileCache(id); }
     update(value => value.map(job => job.id === id && isRunning(job) ? { ...job, status, waiting: false, retrying: undefined } : job));
   }, [update]);
   const cancel = useCallback((id: string) => stop(id, "canceled"), [stop]);
@@ -122,7 +125,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
   const reset = useCallback((privateOnly: boolean) => {
     foldersRef.current.filter(folder => !privateOnly || folder.prefixes.some(api.isPrivatePath)).forEach(folder => cancelFolder(folder.id));
     const selected = jobsRef.current.filter(job => !privateOnly || api.isPrivatePath(job.file.key));
-    selected.forEach(job => { if (active.current?.id === job.id) { active.current.controller.abort(); cancelFileCache(job.id); } });
+    selected.forEach(job => { if (active.current.has(job.id)) { active.current.get(job.id)!.abort(); cancelFileCache(job.id); } });
     update(value => privateOnly ? value.filter(job => !api.isPrivatePath(job.file.key)) : []);
     setStates(value => new Map([...value].filter(([key]) => privateOnly && !key.startsWith("p:"))));
     setCached(value => new Map([...value].filter(([key]) => privateOnly && !key.startsWith("p:"))));
@@ -148,7 +151,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
     const stop = () => reset(false);
     const locked = hidePrivate;
     window.addEventListener("pagehide", stop); window.addEventListener("tessera:logout", stop); window.addEventListener("tessera:private-locked", locked);
-    return () => { window.removeEventListener("pagehide", stop); window.removeEventListener("tessera:logout", stop); window.removeEventListener("tessera:private-locked", locked); active.current?.controller.abort(); cancelFileCache(active.current?.id); folderControllers.current.forEach(controller => controller.abort()); foldersRef.current.forEach(folder => { if (folder.toastId != null) toast.dismiss(folder.toastId); }); groups.current.forEach((_, id) => releaseCacheGroup(id)); groups.current.clear(); };
+    return () => { window.removeEventListener("pagehide", stop); window.removeEventListener("tessera:logout", stop); window.removeEventListener("tessera:private-locked", locked); active.current.forEach((controller, id) => { controller.abort(); cancelFileCache(id); }); folderControllers.current.forEach(controller => controller.abort()); foldersRef.current.forEach(folder => { if (folder.toastId != null) toast.dismiss(folder.toastId); }); groups.current.forEach((_, id) => releaseCacheGroup(id)); groups.current.clear(); };
   }, [reset, hidePrivate]);
 
   // 文件列表只取一次「缓存索引」，不逐个文件查询；单独关注的文件（预览中的文件）另外批量查询完整状态。
@@ -289,11 +292,13 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
   }, [canCache, update, prepareGroup]);
 
   useEffect(() => {
-    if (!enabled || !available || active.current) return;
-    const job = jobs.find(job => job.status === "queued" && (!api.isPrivatePath(job.file.key) || privateCacheEnabled && job.group));
+    if (!enabled || !available || active.current.size >= CACHE_FILE_CONCURRENCY) return;
+    const job = jobs.find(job => job.status === "queued" && !active.current.has(job.id) && (!api.isPrivatePath(job.file.key) || privateCacheEnabled && job.group));
     if (!job) return;
-    const controller = new AbortController(), running = { id: job.id, controller };
-    active.current = running;
+    const controller = new AbortController();
+    active.current.set(job.id, controller);
+    // 还有空位时让下一次渲染继续启动排队的任务。
+    if (active.current.size < CACHE_FILE_CONCURRENCY) setWake(value => value + 1);
     const patch = (value: Partial<CacheJob>) => {
       if (!controller.signal.aborted) update(jobs => jobs.map(item => item.id === job.id ? { ...item, ...value } : item));
     };
@@ -340,7 +345,7 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
         if (!controller.signal.aborted) patch({ status: "error", retrying: undefined, error: api.errorMessage(reason, "缓存失败，请稍后重试") });
       } finally {
         cancelFileCache(job.id);
-        if (active.current === running) active.current = null;
+        if (active.current.get(job.id) === controller) active.current.delete(job.id);
         setWake(value => value + 1); refreshRef.current();
       }
     })();
@@ -543,7 +548,7 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
     {unlocking && <CacheUnlockDialog onClose={closeUnlock} />}
     <TaskStats label="缓存任务概览" progress={running.length ? { percent: total ? (total - left) / total * 100 : null, label: "进行中任务的总进度" } : null} items={[
       { key: "active", label: "进行中", icon: "monitor", tone: "accent", live: running.length + adding > 0, value: (running.length + adding).toLocaleString("zh-CN"),
-        detail: running.length ? speed > 0 ? `${formatBytes(speed)}/s · ${remainingText(left / speed)}` : `剩余 ${formatBytes(left)}` : adding ? "正在读取文件夹" : "逐个缓存，避免占满网络",
+        detail: running.length ? speed > 0 ? `${formatBytes(speed)}/s · ${remainingText(left / speed)}` : `剩余 ${formatBytes(left)}` : adding ? "正在读取文件夹" : "多线程分段缓存，播放与预览优先",
         selected: list.filter === "active", onSelect: () => toggle("active") },
       { key: "done", label: "已完成", icon: "checkCircle", tone: "success", value: list.counts.done.toLocaleString("zh-CN"), detail: "本次登录期间", selected: list.filter === "done", onSelect: () => toggle("done") },
       { key: "error", label: "失败", icon: "alert", tone: list.counts.error ? "danger" : "neutral", value: list.counts.error.toLocaleString("zh-CN"),

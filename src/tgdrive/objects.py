@@ -34,6 +34,8 @@ class Scope:
     private_access: bool = False
     authorize: Callable[[], None] | None = None
     thumbnail_client: bool = False
+    # 后台读取（本机缓存整文件）：让出一个读取名额给播放和预览，不用小窗口起步。
+    background: bool = False
 
 
 @dataclass(frozen=True)
@@ -361,7 +363,7 @@ class ObjectService:
         if self.thumbnail_service is not None and self.thumbnail_service.wants_data(info):
             self._cache_upload(info.blob_uuid, key, info.content_type)
             self.thumbnail_service.observe(info, client=scope.thumbnail_client)
-        return info, self.engine.stream(info.blob_uuid, start, end, bucket_id=scope.bucket_id)
+        return info, self.engine.stream(info.blob_uuid, start, end, bucket_id=scope.bucket_id, background=scope.background)
 
     def head_object(self, scope: Scope, key: str) -> ObjectInfo:
         return self._object(self._lookup(scope, key))

@@ -11,7 +11,10 @@ const bundled = buildSync({ entryPoints: [path.join(__dirname, "../web/src/cache
 const module_ = { exports: {} };
 new Function("module", "exports", bundled.outputFiles[0].text)(module_, module_.exports);
 const store = module_.exports;
-const source = fs.readFileSync(process.env.TESSERA_CACHE_WORKER_SOURCE || path.join(__dirname, "../web/src/sw/cache-worker.ts"), "utf8");
+// 测试把手动缓存的段缩小为 4 个块，并默认每个账号 2 路读取（并行 1 段、每步 2 段 = 8 个块），便于构造部分缓存的场景。
+const original = fs.readFileSync(process.env.TESSERA_CACHE_WORKER_SOURCE || path.join(__dirname, "../web/src/sw/cache-worker.ts"), "utf8");
+const source = original.replace("const SEGMENT_BLOCKS = 16;", "const SEGMENT_BLOCKS = 4;");
+if (source === original && !process.env.TESSERA_CACHE_WORKER_SOURCE) throw new Error("cache worker segment size changed; update the test hook");
 const worker = transformSync(source.replace(/import\s*\{([^}]+)\}\s*from "\.\.\/cache-store";/, (_, names) =>
   `const {${names.split(",").filter(name => !name.trim().startsWith("type ")).join(",")}} = testStore;`), { loader: "ts", target: "es2022" }).code;
 const ORIGIN = "https://cache.test";
@@ -99,6 +102,8 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
       if (route.endsWith("/list")) return json({ objects: [...files].filter(([path]) => path.startsWith(selected))
         .map(([key, file]) => ({ key, etag: file.etag, size: file.data.length, content_type: "application/octet-stream" })), common_prefixes: [], next_cursor: null });
     }
+    // 本机缓存按每个账号的读取路数决定并行段数（服务器保留一路给播放）。
+    if (route === "/api/user/v1/upload-config") return json({ part_concurrency: 4, file_concurrency: 2, read_concurrency: state.reads ?? 2 });
     if (route === "/api/user/v1/cache/session") return json({ namespace: "user-namespace", bucket_id: 7, key: store.b64u(state.key), policy });
     if (route === "/api/user/v1/cache/check") return json({ valid: [...files.values()].filter(file => file.valid).map(file => file.etag) });
     if (route === "/api/user/v1/private/cache/session") return state.unlocked ? json({ namespace: "user-namespace", key: store.b64u(state.privateKey) }) : json({}, 423);
@@ -532,6 +537,39 @@ test("多个页面共享缓存名额，其他页面不能操作当前任务", as
   assert.equal((await h.ask("tessera-cache:step", { id: "a" })).complete, true);
   assert.equal((await h.ask("tessera-cache:start", { id: "b", url }, "page-B")).complete, true);
   assert.equal(h.origins().filter(request => request.method === "GET").length, 1);
+});
+
+test("手动缓存按段并行回源，标记为后台读取，并发不超过读取路数减一", async t => {
+  const h = harness(t, { "movie.mp4": bytes(30 * store.BLOCK + 5) });
+  h.state.reads = 4;  // 每个账号 4 路：服务器为播放保留一路，缓存最多 3 路
+  let active = 0, peak = 0;
+  h.state.originHook = async request => {
+    if (request.method !== "GET" || !request.headers.get("range")) return null;
+    active++; peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    active--;
+    return null;
+  };
+  await h.ask("tessera-cache:start", { id: "movie", url: h.url("movie.mp4") });
+  const step = await h.ask("tessera-cache:step", { id: "movie" });
+  const gets = h.origins().filter(request => request.method === "GET" && request.headers.get("range"));
+  assert.equal(peak, 3, "最多 3 段同时回源");
+  assert.equal(gets.length, 6, "每一步补齐并行数两倍的段");
+  assert.ok(gets.every(request => request.headers.get("x-tessera-background") === "cache"));
+  assert.deepEqual(gets.map(request => request.headers.get("range")).sort(),
+    [0, 4, 8, 12, 16, 20].map(block => `bytes=${block * store.BLOCK}-${(block + 4) * store.BLOCK - 1}`).sort(), "按段对齐");
+  assert.equal(step.bytes, 24 * store.BLOCK);
+  const end = await h.ask("tessera-cache:step", { id: "movie" });
+  assert.equal(end.complete, true);
+  assert.deepEqual((await h.read("movie.mp4")).data, h.files.get("movie.mp4").data);
+});
+
+test("同时缓存最多三个文件，第四个等待空位", async t => {
+  const h = harness(t, { "a.bin": bytes(5), "b.bin": bytes(6), "c.bin": bytes(7), "d.bin": bytes(8) });
+  for (const name of ["a", "b", "c"]) assert.equal((await h.ask("tessera-cache:start", { id: name, url: h.url(`${name}.bin`) })).busy, false);
+  assert.equal((await h.ask("tessera-cache:start", { id: "d", url: h.url("d.bin") })).busy, true);
+  await h.ask("tessera-cache:step", { id: "a" });
+  assert.equal((await h.ask("tessera-cache:start", { id: "d", url: h.url("d.bin") })).busy, false);
 });
 
 test("补全期间文件覆盖会停止任务并清除旧版本", async t => {

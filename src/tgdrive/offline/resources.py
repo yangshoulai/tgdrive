@@ -19,13 +19,15 @@ MIB = 1024 * 1024
 DEFAULTS = {"mode": "auto", "concurrency": 1, "bandwidth_kib": 0,
             "reserve_mib": 512, "hls_enabled": False, "x_enabled": False, "youtube_enabled": False,
             "youtube_max_height": 2160, "platform_max_mib": 512, "proxy": "",
-            "transfer_concurrency": 4, "bucket_concurrency": 2,
+            "transfer_concurrency": 8, "bucket_concurrency": 6,
             "upload_concurrency": 4, "upload_kib": 0, "bot_interval_ms": 1000,
             "web_part_concurrency": 4, "web_file_concurrency": 2}
 # 写入存储（Telegram 发送）的每个在途分片约占明文与密文两份内存。
 UPLOAD_MEMORY = 32 * MIB
-# 文件读取并发（下载、预览、播放、S3 读取共用）：每路约占 (预读窗口数 + 1) × 8 MB 内存。
+# 文件读取并发（下载、预览、播放、本机缓存、S3 读取共用）：每路约占 (预读窗口数 + 1) × 8 MB 内存。
 TRANSFER_MEMORY = 24 * MIB
+# 1.38 之前的读取并发默认值；仍保存着这组值的配置在升级后改用新默认值（见 ResourceSettings.config）。
+LEGACY_READ_DEFAULTS = (4, 2)
 MASK = "******"
 
 
@@ -111,6 +113,7 @@ def detect_resources() -> dict:
 
 class ResourceSettings:
     KEY = "offline.resources"
+    READ_UPGRADE_KEY = "offline.resources.read_defaults"
 
     def __init__(self, metadata, data_dir: Path, defaults: dict | None = None):
         self.metadata, self.data_dir = metadata, data_dir
@@ -164,7 +167,15 @@ class ResourceSettings:
         if self._config is None:
             row = self.metadata.db.execute("SELECT value FROM settings WHERE key=?", (self.KEY,)).fetchone()
             # 旧版保存的配置没有后来新增的项，用启动参数补齐，而不是模块默认值。
-            self._config = self.validate({**self.defaults, **json.loads(row[0])}) if row else dict(self.defaults)
+            stored = json.loads(row[0]) if row else None
+            if stored is not None and not self.metadata.db.execute("SELECT 1 FROM settings WHERE key=?", (self.READ_UPGRADE_KEY,)).fetchone():
+                # 一次性升级：仍是旧默认值（每账号 2 路）的配置改用新默认值；管理员改过的值保持不变。
+                if (stored.get("transfer_concurrency", 4), stored.get("bucket_concurrency", 2)) == LEGACY_READ_DEFAULTS:
+                    stored.update(transfer_concurrency=self.defaults["transfer_concurrency"], bucket_concurrency=self.defaults["bucket_concurrency"])
+                with self.metadata.transaction() as db:
+                    db.execute("UPDATE settings SET value=? WHERE key=?", (json.dumps(self.validate({**self.defaults, **stored}), separators=(",", ":")), self.KEY))
+                    db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (self.READ_UPGRADE_KEY, "1"))
+            self._config = self.validate({**self.defaults, **stored}) if stored is not None else dict(self.defaults)
         return dict(self._config)
 
     def effective(self):
@@ -172,21 +183,23 @@ class ResourceSettings:
         cpu, memory = self.detected["cpu_cores"], self.detected["memory_bytes"]
         low = cpu < 2 or memory is None or memory < 1024 * MIB
         mode = ("low" if low else "standard") if config["mode"] == "auto" else config["mode"]
-        desired = config["concurrency"] if mode == "custom" else (1 if mode == "low" else 2)
-        ceiling = 1 if low else min(4, max(1, int(memory / (256 * MIB)) - 2))
+        # 个人部署通常只有一两个人在用：低资源档按内存放宽并行，只在内存很小或未知时保守处理。
+        roomy = bool(memory and memory >= 512 * MIB)
+        desired = config["concurrency"] if mode == "custom" else (2 if roomy else 1) if mode == "low" else 2
+        ceiling = (2 if roomy else 1) if low else min(4, max(1, int(memory / (256 * MIB)) - 2))
         platform_limit = min(config["platform_max_mib"], 512) if low or mode == "low" else config["platform_max_mib"]
-        # 小型个人部署允许适度并行；不足 512 MiB 或内存未知时保留原先的保守限制。
-        low_parallel = 4 if memory and memory >= 512 * MIB else 2
-        # 文件读取每路约 24 MB，最多占检测内存的四分之一；管理员设得更低时不主动抬高。
+        low_parallel = 8 if roomy else 3
+        # 文件读取每路约 24 MB，最多占检测内存的三分之一；每个账号可以用满全部读取名额（低资源档不再减半）。
+        # 管理员设得更低时不主动抬高。
         transfer = config["transfer_concurrency"]
         if mode == "low":
             transfer = min(transfer, low_parallel)
         if memory:
-            transfer = min(transfer, max(2, memory // 4 // TRANSFER_MEMORY))
-        bucket = min(config["bucket_concurrency"], transfer, low_parallel // 2 if mode == "low" else 16)
-        # 写入分片每路约 32 MB；低资源下网页分段同步受此预算限制，避免小容器额外缓冲太多请求。
+            transfer = min(transfer, max(2, memory // 3 // TRANSFER_MEMORY))
+        bucket = min(config["bucket_concurrency"], transfer)
+        # 写入分片每路约 32 MB，最多占检测内存的三分之一；低资源下网页分段同步受此预算限制。
         upload = config["upload_concurrency"]
-        upload_budget = max(1, memory // 4 // UPLOAD_MEMORY) if memory else 16
+        upload_budget = max(1, memory // 3 // UPLOAD_MEMORY) if memory else 16
         if mode == "low":
             upload = min(upload, low_parallel)
         upload = min(upload, upload_budget)

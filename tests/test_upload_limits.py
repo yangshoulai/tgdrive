@@ -30,24 +30,26 @@ class ResourceBudgetTests(unittest.TestCase):
 
     def test_low_defaults_allow_parallel_transfers_in_personal_deployment(self):
         effective = self.effective()
-        self.assertEqual((effective["mode"], effective["concurrency"], effective["ffmpeg_concurrency"]), ("low", 1, 1))
-        self.assertEqual(self.parallel(effective), (4, 2, 4, 4))
+        # 个人部署：低资源档也允许每个账号用满读取名额（不再减半），离线下载可同时 2 个。
+        self.assertEqual((effective["mode"], effective["concurrency"], effective["ffmpeg_concurrency"]), ("low", 2, 1))
+        self.assertEqual(self.parallel(effective), (8, 6, 4, 4))
         self.assertFalse(effective["transfer_reduced"] or effective["upload_reduced"])
         self.assertEqual((effective["web_file_concurrency"], effective["bot_interval_ms"], effective["platform_max_mib"]), (2, 1000, 512))
 
     def test_explicit_low_mode_still_caps_higher_admin_limits(self):
         effective = self.effective(memory=8192 * MIB, cpu=4, mode="low", transfer_concurrency=16,
                                    bucket_concurrency=16, upload_concurrency=16, web_part_concurrency=8)
-        self.assertEqual(self.parallel(effective), (4, 2, 4, 4))
+        self.assertEqual(self.parallel(effective), (8, 8, 8, 8))
         self.assertTrue(effective["transfer_reduced"] and effective["upload_reduced"])
 
     def test_small_or_unknown_memory_keeps_conservative_limits(self):
-        for memory, expected in ((None, (2, 1, 2, 2)), (128, (2, 1, 1, 1)), (256, (2, 1, 2, 2)),
-                                 (511, (2, 1, 2, 2)), (512, (4, 2, 4, 4))):
+        # 读取每路约 24 MB、写入每路约 32 MB，最多各占内存的三分之一；不足 512 MiB 或未知时读写最多 3 路。
+        for memory, expected in ((None, (3, 3, 3, 3)), (128, (2, 2, 1, 1)), (256, (3, 3, 2, 2)),
+                                 (511, (3, 3, 3, 3)), (512, (7, 6, 4, 4))):
             with self.subTest(memory=memory):
                 effective = self.effective(memory=memory * MIB if memory else None)
                 self.assertEqual(self.parallel(effective), expected)
-                self.assertEqual(effective["concurrency"], 1)
+                self.assertEqual(effective["concurrency"], 2 if memory and memory >= 512 else 1)
 
     def test_lower_admin_limits_are_preserved(self):
         effective = self.effective(transfer_concurrency=2, bucket_concurrency=1, upload_concurrency=1, web_part_concurrency=1)
@@ -60,7 +62,7 @@ class ResourceBudgetTests(unittest.TestCase):
         self.assertEqual((standard["mode"], standard["concurrency"]), ("standard", 2))
         self.assertEqual(self.parallel(standard), (8, 3, 6, 6))
         custom = self.effective(memory=512 * MIB, cpu=4, mode="custom", **config)
-        self.assertEqual(self.parallel(custom), (5, 3, 4, 6))
+        self.assertEqual(self.parallel(custom), (7, 3, 5, 6))
 
 
 class LimiterTests(unittest.IsolatedAsyncioTestCase):
@@ -109,6 +111,24 @@ class SettingsTests(unittest.TestCase):
         self.app.metadata.close()
         self.temp.cleanup()
 
+    def test_legacy_read_defaults_upgrade_once(self):
+        # 1.38 之前默认每账号 2 路读取：仍是旧默认值的配置升级为新默认值，管理员改过的值和之后再设的值不受影响。
+        metadata, data_dir = self.app.metadata, self.app.resources.data_dir
+        def stored(value):
+            with metadata.transaction() as db:
+                db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (ResourceSettings.KEY, json.dumps(value)))
+                db.execute("DELETE FROM settings WHERE key=?", (ResourceSettings.READ_UPGRADE_KEY,))
+        stored({"mode": "auto", "transfer_concurrency": 4, "bucket_concurrency": 2})
+        upgraded = ResourceSettings(metadata, data_dir).config()
+        self.assertEqual((upgraded["transfer_concurrency"], upgraded["bucket_concurrency"]), (8, 6))
+        stored({"mode": "auto", "transfer_concurrency": 4, "bucket_concurrency": 3})
+        kept = ResourceSettings(metadata, data_dir).config()
+        self.assertEqual((kept["transfer_concurrency"], kept["bucket_concurrency"]), (4, 3))
+        resources = ResourceSettings(metadata, data_dir)
+        resources.update({"transfer_concurrency": 4, "bucket_concurrency": 2})
+        again = ResourceSettings(metadata, data_dir).config()
+        self.assertEqual((again["transfer_concurrency"], again["bucket_concurrency"]), (4, 2), "升级只做一次")
+
     def test_admin_settings_apply_immediately_and_web_reads_them(self):
         resources, engine = self.app.resources, self.app.objects.engine
         store = engine.store
@@ -122,14 +142,15 @@ class SettingsTests(unittest.TestCase):
         store._telegram = None
         user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         status, _, data = asyncio.run(self.client.request("GET", "/api/user/v1/upload-config", b"", user))
-        self.assertEqual((status, json.loads(data)), (200, {"part_concurrency": 6, "file_concurrency": 3}))
+        self.assertEqual((status, json.loads(data)), (200, {"part_concurrency": 6, "file_concurrency": 3, "read_concurrency": 6}))
         self.assertEqual(asyncio.run(self.client.request("GET", "/api/user/v1/upload-config", b"", {}))[0], 401)
         low = resources.update({"mode": "low"})["effective"]
-        self.assertEqual((low["upload_concurrency"], low["web_part_concurrency"], low["upload_reduced"]), (4, 4, True))
+        # 低资源档在内存充足时最多 8 路，管理员设的 6 路不再被收紧。
+        self.assertEqual((low["upload_concurrency"], low["web_part_concurrency"], low["upload_reduced"]), (6, 6, False))
         # 自定义模式不按低资源档收紧，只按检测到的内存留余量（自动模式在 1 GB 以下会选低资源档）。
         resources.update({"mode": "custom"})
         resources.detected.update(memory_bytes=512 * 1024 ** 2)
-        self.assertEqual(resources.effective()["upload_concurrency"], 4, "每个分片约 32 MB，最多占内存的四分之一")
+        self.assertEqual(resources.effective()["upload_concurrency"], 5, "每个分片约 32 MB，最多占内存的三分之一")
         for bad in ({"upload_concurrency": 0}, {"upload_kib": -1}, {"bot_interval_ms": 10001}, {"web_part_concurrency": 9},
                     {"web_file_concurrency": 5}, {"upload_kib": 1.5}):
             with self.assertRaises(ValueError):
