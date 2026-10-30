@@ -50,6 +50,17 @@ FORMATS = ("mov,matroska,webm,avi,ogg,mp3,flac,wav,aac,aiff,asf,flv,mpeg,mpegts,
 # 解码器输出里出现这些内容说明是运行环境（线程、内存、动态库）的问题，而不是文件本身无法解码。
 ENVIRONMENT_ERRORS = (b"pthread_create", b"Cannot allocate memory", b"Resource temporarily unavailable",
                       b"error while loading shared libraries", b"failed to map segment")
+# 仅匹配已知错误并输出固定说明，原始 stderr 可能包含媒体信息或本地路径，不能写入日志或队列。
+DECODER_ERRORS = (
+    ("pixel_limit", (b"exceeds specified max pixel count",), "媒体画面像素数超过解码上限"),
+    ("unsupported_codec", (b"unknown decoder", b"decoder not found", b"no decoder found", b"unsupported codec"),
+     "当前解码器不支持此媒体编码"),
+    ("missing_stream", (b"matches no streams", b"does not contain any stream"), "媒体没有可用的画面或封面"),
+    ("invalid_data", (b"invalid data found when processing input", b"moov atom not found", b"could not find codec parameters"),
+     "未能解析媒体数据或索引"),
+    ("filter_error", (b"error reinitializing filters", b"error initializing complex filters", b"error while filtering",
+                      b"failed to configure output pad"), "解码器未能完成画面转换"),
+)
 # 一次性清理：修复前运行环境问题会被误记为「无法生成」，升级后清掉这些记录让补图重新处理。
 REPAIR_KEY = "thumbnails.repair"
 # 自定义缩略图可以填写图片地址，由服务器经受控出站客户端读取后交给网页处理。
@@ -697,9 +708,12 @@ class ThumbnailService:
                         before = self._remote_bytes
                         self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote, budget=budget, give_up=job.backfill))
                         try:
-                            await self._task
+                            failure_detail = await self._task
                             self._pending.pop(blob, None)
-                            self._record(job, "done", "自动补图完成" if job.backfill else "缩略图处理完成")
+                            if isinstance(failure_detail, str):
+                                self._record(job, "failed", failure_detail)
+                            else:
+                                self._record(job, "done", "自动补图完成" if job.backfill else "缩略图处理完成")
                             self.cache.drop(blob)
                         except ThumbnailCacheMiss:
                             job.misses += 1
@@ -728,8 +742,20 @@ class ThumbnailService:
                                         await self.objects.set_thumbnail(self._scope(job.info, None), job.info.key, None, "none")
                                     except Exception:
                                         pass
-                            self._record(job, "failed", "处理超时" if isinstance(exc, TimeoutError)
-                                         else str(exc) if isinstance(exc, ThumbnailRetry) else "当前数据或解码器无法生成，可手动重试")
+                            if not isinstance(exc, (ThumbnailError, TimeoutError, NotFoundError, PermissionError)):
+                                log.warning("缩略图任务失败：id=%s reason=unexpected_error error=%s",
+                                            hashlib.sha256(blob.encode()).hexdigest()[:12], type(exc).__name__)
+                            if isinstance(exc, TimeoutError):
+                                detail = "处理超时"
+                            elif isinstance(exc, ThumbnailError):
+                                detail = str(exc)
+                            elif isinstance(exc, NotFoundError):
+                                detail = "源文件已删除、移动或覆盖"
+                            elif isinstance(exc, PermissionError):
+                                detail = "访问权限不足，无法生成"
+                            else:
+                                detail = "生成未完成，请结合服务日志排查"
+                            self._record(job, "failed", detail)
                         finally:
                             self._active = self._task = None
                             if job.backfill:
@@ -763,9 +789,10 @@ class ThumbnailService:
         return scope
 
     async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False,
-                       budget=None, give_up=False):
+                       budget=None, give_up=False) -> str | None:
         """生成并保存缩略图。give_up 用于自动补图：解码器确定无法处理或单文件预算不够时记为「无法生成」，
-        以后不再自动重试（文件菜单仍可手动重新生成）。"""
+        以后不再自动重试（可通过文件助手的生成卡片重新请求）。
+        返回固定失败说明表示已记录 none，成功或跳过返回 None。"""
         kind = source_kind(info)
         if not self._eligible(info) or not self.resources.ffmpeg:
             return
@@ -774,6 +801,7 @@ class ThumbnailService:
         if not force and self._has_thumbnail(info.blob_uuid):
             return
         async with asyncio.timeout(TIMEOUT):
+            failure_detail = None
             async with _RangeInput(self.objects.engine, info, scope.authorize, budget or READ_LIMITS[kind], cache_only=not allow_remote) as source:
                 try:
                     with tempfile.TemporaryDirectory(prefix="tessera-thumbnail-") as directory:
@@ -783,6 +811,7 @@ class ThumbnailService:
                             # 资源压力属于暂时失败；读取预算不够（只在没有缩小预算时）或解码失败才是确定的结果。
                             if not give_up or isinstance(exc, ThumbnailRetry) or isinstance(exc, ThumbnailBudget) and budget and budget < READ_LIMITS[kind]:
                                 raise
+                            failure_detail = str(exc)
                             images = None
                 finally:
                     self._remote_bytes += source.remote_bytes if isinstance(source.remote_bytes, int) else 0
@@ -790,10 +819,12 @@ class ThumbnailService:
             if not force and self._has_thumbnail(info.blob_uuid):
                 return
             if images is None:
+                failure_detail = failure_detail or ("候选画面均为空白或细节不足" if kind == "video"
+                                                    else "音频没有可用的内嵌封面" if kind == "audio" else "未能提取图片画面")
                 if force and kind == "video":
-                    raise ThumbnailError("没有找到合适的画面，未替换现有缩略图")
+                    raise ThumbnailError(failure_detail + "，未替换现有缩略图")
                 await self.objects.set_thumbnail(scope, info.key, None, "none")
-                return
+                return failure_detail
             saved = []
             for variant, data in images.items():
                 scope.authorize()
@@ -882,7 +913,7 @@ class ThumbnailService:
                 if self.resources.pressure():
                     raise ThumbnailRetry("服务器资源不足，稍后再生成")
                 if _resident(process.pid) > memory:
-                    raise ThumbnailError("解码所需内存超过上限")
+                    raise ThumbnailRetry("解码所需内存超过上限，稍后再生成")
                 await asyncio.wait({waiting}, timeout=0.25)
             output = await stderr
             if source.failure:
@@ -890,10 +921,23 @@ class ThumbnailService:
             if process.returncode:
                 if kind == "audio" and b"matches no streams" in output:
                     return None, b""
-                if process.returncode < 0 or any(sign in output for sign in ENVIRONMENT_ERRORS):
+                reason, detail = "decoder_error", "当前解码器未能生成缩略图"
+                lowered = output.lower()
+                environment = process.returncode < 0 or any(sign.lower() in lowered for sign in ENVIRONMENT_ERRORS)
+                if environment:
+                    reason, detail = "environment", "解码器运行环境受限，稍后再生成"
+                else:
+                    for code, signs, message in DECODER_ERRORS:
+                        if any(sign in lowered for sign in signs):
+                            reason, detail = code, message
+                            break
+                blob = getattr(getattr(source, "info", None), "blob_uuid", None)
+                anonymous_id = hashlib.sha256(blob.encode()).hexdigest()[:12] if isinstance(blob, str) else "unknown"
+                log.warning("缩略图解码失败：id=%s reason=%s returncode=%s", anonymous_id, reason, process.returncode)
+                if environment:
                     # 被系统终止、线程或内存不足、缺少动态库都是运行环境的问题，不能据此把文件记为「无法生成」。
-                    raise ThumbnailRetry("解码器运行环境受限，稍后再生成")
-                raise ThumbnailError("当前解码器未能生成缩略图")
+                    raise ThumbnailRetry(detail)
+                raise ThumbnailError(detail)
             images = {}
             for variant, limit in self.objects.THUMBNAIL_LIMITS.items():
                 path = directory / f"{variant}.jpg"

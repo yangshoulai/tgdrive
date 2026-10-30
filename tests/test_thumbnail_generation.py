@@ -68,6 +68,108 @@ class VideoFrameSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.kwargs["position"] for call in decoder.await_args_list], [0, 1, 3, 10, 30, 60])
 
 
+class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
+    """只替身解码进程和对象存储，不创建或修改数据库。"""
+
+    def worker(self):
+        worker = ThumbnailService.__new__(ThumbnailService)
+        worker.resources = SimpleNamespace(ffmpeg="ffmpeg", detected={"memory_bytes": 1024**3}, pressure=lambda: None)
+        worker.objects = SimpleNamespace(THUMBNAIL_LIMITS={"thumb": 96 * 1024}, engine=Mock())
+        return worker
+
+    def source(self):
+        return SimpleNamespace(url="http://127.0.0.1:9/input", origin="http://127.0.0.1:9", failure=None,
+                               info=SimpleNamespace(blob_uuid="private-source-blob"), remote_bytes=0)
+
+    async def test_resident_memory_limit_is_retryable(self):
+        exited = asyncio.Event()
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        process = SimpleNamespace(pid=123, returncode=None, stderr=reader)
+
+        async def wait():
+            await exited.wait()
+            return process.returncode
+
+        def kill():
+            process.returncode = -9
+            exited.set()
+
+        process.wait, process.kill = wait, kill
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)), \
+                    patch("tgdrive.thumbnails._resident", return_value=1024**3), self.assertRaises(ThumbnailRetry):
+                await self.worker()._render_frame(self.source(), "image", Path(directory), lambda: None)
+        self.assertTrue(exited.is_set(), "超过内存上限时必须收回解码进程")
+
+    async def test_decoder_errors_are_classified_without_logging_media_details(self):
+        private = b" /private/media-secret.mp4 https://example.invalid/?token=secret"
+        cases = (
+            (b"Invalid data found when processing input", "invalid_data", "未能解析媒体数据或索引", ThumbnailError),
+            (b"Unknown decoder", "unsupported_codec", "不支持此媒体编码", ThumbnailError),
+            (b"Stream specifier matches no streams", "missing_stream", "没有可用的画面或封面", ThumbnailError),
+            (b"Picture size exceeds specified max pixel count", "pixel_limit", "像素数超过解码上限", ThumbnailError),
+            (b"Failed to configure output pad", "filter_error", "画面转换", ThumbnailError),
+            (b"Unrecognized decoder failure", "decoder_error", "未能生成缩略图", ThumbnailError),
+            (b"CANNOT ALLOCATE MEMORY", "environment", "运行环境受限", ThumbnailRetry),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for message, code, detail, error_type in cases:
+                with self.subTest(reason=code):
+                    reader = asyncio.StreamReader()
+                    reader.feed_data(message + private)
+                    reader.feed_eof()
+                    process = SimpleNamespace(pid=0, returncode=1, stderr=reader, wait=AsyncMock(return_value=1))
+                    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)), \
+                            self.assertLogs("tgdrive.thumbnails", level="WARNING") as captured, \
+                            self.assertRaises(ThumbnailError) as caught:
+                        await self.worker()._render_frame(self.source(), "image", Path(directory), lambda: None)
+                    self.assertIs(type(caught.exception), error_type)
+                    self.assertIn(detail, str(caught.exception))
+                    logs = "\n".join(captured.output)
+                    self.assertIn("reason=" + code, logs)
+                    self.assertIn("returncode=1", logs)
+                    for secret in ("media-secret", "example.invalid", "token=secret", "private-source-blob"):
+                        self.assertNotIn(secret, logs)
+                        self.assertNotIn(secret, str(caught.exception))
+
+    async def test_no_usable_video_frame_preserves_existing_thumbnail(self):
+        worker = self.worker()
+        worker.cache = SimpleNamespace(prepare=Mock())
+        worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
+        worker._has_thumbnail = Mock(return_value=False)
+        worker._render = AsyncMock(return_value=None)
+        worker._remote_bytes = 0
+        worker.objects.set_thumbnail = AsyncMock()
+        worker.objects.finish_thumbnail_set = Mock()
+        info = SimpleNamespace(key="clip.mp4", content_type="video/mp4", blob_uuid="blob", bucket_id=1, size=128)
+        entry = Mock()
+        entry.return_value.__aenter__ = AsyncMock(return_value=self.source())
+        entry.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch("tgdrive.thumbnails._RangeInput", entry), \
+                self.assertRaisesRegex(ThumbnailError, "候选画面均为空白或细节不足.*未替换现有缩略图"):
+            await worker.generate(info, force=True)
+        worker.objects.set_thumbnail.assert_not_awaited()
+        worker.objects.finish_thumbnail_set.assert_not_called()
+
+    async def test_automatic_no_frame_returns_a_failure_detail(self):
+        worker = self.worker()
+        worker.cache = SimpleNamespace(prepare=Mock())
+        worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
+        worker._has_thumbnail = Mock(return_value=False)
+        worker._render = AsyncMock(return_value=None)
+        worker._remote_bytes = 0
+        worker.objects.set_thumbnail = AsyncMock()
+        entry = Mock()
+        entry.return_value.__aenter__ = AsyncMock(return_value=self.source())
+        entry.return_value.__aexit__ = AsyncMock(return_value=False)
+        info = SimpleNamespace(key="clip.mp4", content_type="video/mp4", blob_uuid="blob", bucket_id=1, size=128)
+        with patch("tgdrive.thumbnails._RangeInput", entry):
+            detail = await worker.generate(info)
+        self.assertEqual(detail, "候选画面均为空白或细节不足")
+        self.assertEqual(worker.objects.set_thumbnail.await_args.args[2:], (None, "none"))
+
+
 class Writer:
     def __init__(self):
         self.data = bytearray()
