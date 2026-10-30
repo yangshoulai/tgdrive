@@ -124,14 +124,17 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const folderModified = pagination.page?.folder_modified ?? {};
   const folderPreviews = pagination.page?.folder_previews ?? {};
   const setFiles = (update: (files: api.FileItem[]) => api.FileItem[]) => pagination.setPage(current => current && { ...current, objects: update(current.objects) });
-  const setThumbnails = (key: string, thumbnails: string[]) =>
-    setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, thumbnail_versions: undefined, has_thumbnail: thumbnails.includes("thumb") } : item));
+  const setThumbnails = (key: string, result: string[]) => {
+    const thumbnails = result.filter(variant => variant !== "none");
+    const thumbnail_status: api.FileItem["thumbnail_status"] = thumbnails.length ? "ready" : result.includes("none") ? "unavailable" : "missing";
+    setFiles(current => current.map(item => item.key === key ? { ...item, thumbnails, thumbnail_status, thumbnail_versions: undefined, has_thumbnail: thumbnails.includes("thumb") } : item));
+  };
   // 预览打开时，把页面上最新的文件信息（补上的缩略图、覆盖后的新版本）同步给预览的当前文件与底部列表。
   useEffect(() => { preview.sync(files); }, [files, preview.sync]);
   // 等待缩略图：当前列表里有缺缩略图的图片、视频、音频时，只查询这些文件的缩略图状态（不重读整个目录），
   // 间隔 10 秒起逐次加倍到 5 分钟，页面隐藏时跳过，最长等 1 小时；文件被删除或覆盖时改为整页后台刷新。
   const waitingThumbnails = useMemo(() => files
-    .filter(item => !item.thumbnails?.length && thumbnailSource(item.key, item.content_type, item.size))
+    .filter(item => !item.thumbnails?.length && item.thumbnail_status !== "unavailable" && thumbnailSource(item.key, item.content_type, item.size))
     .sort((a, b) => b.modified_at - a.modified_at).slice(0, 200), [files]);
   const waitingKey = waitingThumbnails.map(item => `${item.key}\n${item.etag}`).join("\n");
   useEffect(() => {
@@ -144,9 +147,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           const { files: states } = await api.thumbnailStatus(waiting.map(item => item.key), controller.signal);
           if (stopped) return;
           if (waiting.some(item => !states[item.key] || states[item.key].etag !== item.etag)) scheduleRefresh();
-          const ready = new Map(Object.entries(states).filter(([, state]) => state.thumbnails?.length));
-          if (ready.size) setFiles(current => current.map(item => {
-            const state = ready.get(item.key);
+          const settled = new Map(Object.entries(states).filter(([, state]) => state.thumbnails?.length || state.thumbnail_status === "unavailable"));
+          if (settled.size) setFiles(current => current.map(item => {
+            const state = settled.get(item.key);
             return state && state.etag === item.etag ? { ...item, ...state } : item;
           }));
         } catch { if (stopped) return; }
@@ -238,7 +241,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       },
       onVideoFrame: (video, item) => {
         // 等到当前画面通过黑白占比与细节检查再截取；画面来自播放器已解码的数据，不额外读取视频。
-        if (item.thumbnails?.length || previewThumbnailAttempts.current.has(`${item.key}:${item.etag}`) || !videoFrameUsable(video)) return;
+        if (item.thumbnails?.length || item.thumbnail_status === "unavailable" || previewThumbnailAttempts.current.has(`${item.key}:${item.etag}`) || !videoFrameUsable(video)) return;
         const source = video.currentSrc;
         savePreviewThumbnail(item, () => video.currentSrc === source ? thumbnailsFromVideo(video) : Promise.resolve(null));
       },
@@ -760,7 +763,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         onSaved={variants => { const target = thumbnailEditing; setThumbnailEditing(null);
           // 替换后先用临时版本号让地址变化，避免浏览器沿用旧图；随后的后台刷新会带回服务端的正式版本。
           const stamp = String(Date.now());
-          setFiles(current => current.map(item => item.key === target.key ? { ...item, thumbnails: variants, has_thumbnail: true, thumbnail_versions: Object.fromEntries(variants.map(variant => [variant, stamp])) } : item)); notify.success("缩略图已更新"); scheduleRefresh(); onChanged(); }} />}
+          setFiles(current => current.map(item => item.key === target.key ? { ...item, thumbnails: variants, thumbnail_status: "ready", has_thumbnail: true, thumbnail_versions: Object.fromEntries(variants.map(variant => [variant, stamp])) } : item)); notify.success("缩略图已更新"); scheduleRefresh(); onChanged(); }} />}
       {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
       {folderCache && <ConfirmDialog title="缓存文件夹到本机？" danger={false} className={privateSpace ? "private-dialog" : ""} confirmLabel="开始缓存" onClose={() => setFolderCache(null)}
         description={<>{folderCache.prefixes.length === 1 ? `将缓存“${baseName(folderCache.prefixes[0])}”中的所有文件，以及全部子目录中的文件。` : `将缓存所选 ${folderCache.prefixes.length} 个文件夹中的所有文件，以及全部子目录中的文件。`}

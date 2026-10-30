@@ -4,7 +4,7 @@
   由对话框执行并回传结果；对话框没有打开时返回「浏览器未连接」。
 - 需要用户手势的动作（ui_download、browser_open_url、ui_copy）：浏览器不允许脚本自动下载、弹出新窗口或写剪贴板，
   所以只在对话里生成一张动作卡片，用户点击后执行；工具立即返回。
-- ui_generate_thumbnails：缩略图只能在浏览器生成且大图计入用户空间，同样只生成卡片，由用户点击后在对话框里逐个生成。
+- ui_generate_thumbnails：缺图（含曾经失败）的文件可重新提交后台生成；审批模式显示卡片，完全访问下自动提交。
 - 路径一律经 ctx.resolve 校验在作用域内且不在 .tgdrive/；页面回传的数据同样按不可信数据包装。
 - 私密空间（§37.3）：带「私密:/」路径或 area=private 的调用只作用于私密空间页面，需要当前登录会话已解锁；
   页面上的私密路径以「私密:/」回给模型。
@@ -228,7 +228,8 @@ SCAN_FILES = 20000
 @tool("ui_generate_thumbnails", "生成缩略图", "browser", "read",
       "为图片、视频和音乐补生成缩略图（列表小图、网格图与预览封面）。生成需要读取原文件，并且网格图与封面会计入用户空间，"
       "审批模式显示「生成缩略图」卡片，完全访问下自动提交给服务器后台生成。path 可以是文件或目录；recursive 包含子目录；"
-      "regenerate 时也重新生成已有但缺少网格图的旧版缩略图（例如用户觉得网格视图模糊）。单次文件数上限由管理员设置，超出时结果会说明剩余数量。",
+      "曾尝试但未生成的文件也会重试，不能把 none 失败记录当作已有缩略图。regenerate 时也重新生成已有但缺少网格图的旧版缩略图。"
+      "单次文件数上限由管理员设置，超出时结果会说明剩余数量。",
       {"path": PATH, "recursive": {"type": "boolean", "description": "目录是否包含子目录，默认否"},
        "regenerate": {"type": "boolean", "description": "是否重新生成缺少网格图的旧缩略图，默认否"}}, ("path",),
       params={"max_files": (500, 10, 2000, "单次最多处理文件数")})
@@ -251,12 +252,15 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
             rows = [row for row in rows if "/" not in row["key"][len(folder):]]
     media = [row for row in rows if row["blob_uuid"] and kind_of(row["key"], row["content_type"]) in THUMBNAIL_KINDS]
     variants = ctx.objects.thumbnail_variants([row["blob_uuid"] for row in media])
-    # 没有任何记录的需要生成；regenerate 时缺少网格图的（旧版 320px 小图、曾经失败的）也重新生成。
-    todo = [row for row in media if not variants.get(row["blob_uuid"])
+    # 用户明确补图时，none 也属于缺图；只有真实的小图才算已有缩略图。
+    todo = [row for row in media if "thumb" not in variants.get(row["blob_uuid"], ())
             or regenerate and "grid" not in variants[row["blob_uuid"]]]
-    items = [{"path": row["key"], "size": int(row["size"] or 0), "etag": row["etag"], "content_type": row["content_type"]}
+    items = [{"path": row["key"], "size": int(row["size"] or 0), "etag": row["etag"], "content_type": row["content_type"],
+              "retry": "none" in variants.get(row["blob_uuid"], ())}
              for row in todo[:int(ctx.params.get("max_files", 500))]]
-    payload = {"media_files": len(media), "need": len(todo), "in_card": len(items)}
+    payload = {"media_files": len(media), "need": len(todo), "in_card": len(items),
+               "already_have": sum("thumb" in variants.get(row["blob_uuid"], ()) for row in media),
+               "previously_failed": sum("none" in variants.get(row["blob_uuid"], ()) and "thumb" not in variants[row["blob_uuid"]] for row in media)}
     if not items:
         return ToolOutput({**payload, "status": "没有需要生成缩略图的文件"}, "没有需要生成的缩略图")
     if len(todo) > len(items):

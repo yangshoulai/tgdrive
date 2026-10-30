@@ -17,8 +17,10 @@ export type FileItem = {
   public_has_password?: boolean;
   public_downloads?: number;
   has_thumbnail?: boolean;
-  /** 缩略图状态："thumb"、"grid"、"poster"，或 "none"（已尝试但无法生成）。 */
+  /** 已有的实际图片规格："thumb"、"grid"、"poster"，没有图片时为空。 */
   thumbnails?: string[];
+  /** missing：尚无结果；ready：有实际图片；unavailable：曾尝试但未生成，可显式重试。 */
+  thumbnail_status?: "missing" | "ready" | "unavailable";
   /** 各规格保存时的独立版本，用于浏览器缓存失效。 */
   thumbnail_versions?: Partial<Record<ThumbnailVariant, string>>;
 };
@@ -61,7 +63,7 @@ export type DownloadTask = { id: number; key: string; private: boolean; source_h
   source?: { url: string; has_query: boolean } | null;
   /** 已完成且文件仍在原位置时的文件信息与缩略图状态；文件已删除时为 null。 */
   file?: DownloadFile | null };
-export type DownloadFile = Pick<FileItem, "key" | "size" | "etag" | "content_type" | "thumbnails" | "thumbnail_versions">;
+export type DownloadFile = Pick<FileItem, "key" | "size" | "etag" | "content_type" | "thumbnails" | "thumbnail_versions" | "thumbnail_status">;
 export type DownloadSource = { input: string; download_type: "http" | "hls" | "x" | "youtube"; cookies: string; url: string };
 export type DownloadPage = { tasks: DownloadTask[]; total: number; next_cursor: number | null; capabilities: { hls: boolean; x: boolean; youtube: boolean; concurrency: number; pressure: string | null } };
 export type TrafficPoint = { at: number; in_bytes: number; out_bytes: number };
@@ -395,7 +397,7 @@ export const markNoThumbnail = (path: string, claim: ThumbnailClaim = {}) => pos
 /** custom：用户指定的缩略图（上传图片、图片地址、播放器当前画面），适用于任何文件并优先于自动生成。 */
 export const claimThumbnail = (file: Pick<FileItem, "key" | "etag">, force = false, custom = false) => post<{ token: string | null; expires_in?: number }>(fileApi("/thumbnail/claim", file.key), { path: file.key, etag: file.etag, force, ...(custom ? { custom } : {}) });
 export const releaseThumbnail = (file: Pick<FileItem, "key" | "etag">, ticket: string, variants?: string[]) => post<void>(fileApi("/thumbnail/release", file.key), { path: file.key, etag: file.etag, ticket, ...(variants ? { variants } : {}) });
-export type ThumbnailState = Pick<FileItem, "etag" | "size" | "modified_at" | "has_thumbnail" | "thumbnails" | "thumbnail_versions">;
+export type ThumbnailState = Pick<FileItem, "etag" | "size" | "modified_at" | "has_thumbnail" | "thumbnails" | "thumbnail_versions" | "thumbnail_status">;
 /** 只查询所列文件的 ETag 与缩略图状态（最多 200 个）；不存在或无权访问的路径不在结果中。 */
 export const thumbnailStatus = (paths: string[], signal?: AbortSignal) => request<{ files: Record<string, ThumbnailState> }>(fileApi("/thumbnail/status", paths[0]),
   { method: "POST", body: JSON.stringify({ paths }), signal });

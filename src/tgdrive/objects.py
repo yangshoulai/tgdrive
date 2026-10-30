@@ -697,8 +697,17 @@ class ObjectService:
         return len(rows)
 
     def thumbnail_variants(self, blob_uuids: list[str]) -> dict[str, list[str]]:
-        """一页对象的缩略图状态，一次查询：{blob_uuid: ["thumb", "poster"] 或 ["none"]}。"""
+        """内部缩略图记录，含 none 失败标记；网页输出需经 thumbnail_fields 分离图片与状态。"""
         return {uuid: list(versions) for uuid, versions in self.thumbnail_versions(blob_uuids).items()}
+
+    @classmethod
+    def thumbnail_fields(cls, variants: Iterable[str] = (), versions: dict[str, str] | None = None) -> dict[str, object]:
+        """none 只表示曾尝试但未生成，不能出现在网页的图片规格或图片版本中。"""
+        variants = tuple(variants)
+        images = [variant for variant in variants if variant in cls.STORED_THUMBNAILS]
+        return {"has_thumbnail": "thumb" in images, "thumbnails": images,
+                "thumbnail_versions": {name: revision for name, revision in (versions or {}).items() if name in images},
+                "thumbnail_status": "ready" if images else "unavailable" if "none" in variants else "missing"}
 
     def thumbnail_versions(self, blob_uuids: list[str]) -> dict[str, dict[str, str]]:
         """批量读取各规格的独立版本，列表与目录封面复用同一资源地址。"""
@@ -935,7 +944,8 @@ class ObjectService:
                     self.thumbnail_variants([item.blob_uuid for item in page.objects]), self.folder_previews(scope, page.common_prefixes))
         page, sizes, thumbnails, previews = await self.metadata.run_in_thread(read_page)
         files = [{"name": item.key[len(prefix):], "path": item.key[len(root.key):], "size": item.size, "content_type": item.content_type,
-                  "etag": item.etag, "modified_at": item.modified_at, "thumbnails": thumbnails.get(item.blob_uuid or "", [])}
+                  "etag": item.etag, "modified_at": item.modified_at,
+                  **self.thumbnail_fields(thumbnails.get(item.blob_uuid or "", []))}
                  for item in page.objects if item.key != prefix and not item.key.endswith("/")]
         folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):], "size": sizes[value][0], "modified_at": sizes[value][1],
                     "previews": [{"name": item["key"].rsplit("/", 1)[-1], "path": item["key"][len(root.key):],

@@ -989,7 +989,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 | `ui_download` | 把文件或文件夹下载到用户电脑 | 生成卡片，用户点击按钮后下载（浏览器要求用户手势）；多项打包为 ZIP |
 | `browser_open_url` | 在新标签页打开外部网页 | 生成卡片，用户点击后打开；只允许 http(s) |
 | `ui_copy` | 把文本复制到剪贴板 | 生成卡片，用户点击复制 |
-| `ui_generate_thumbnails` | 为图片、视频、音乐补生成缩略图 | 缩略图只在浏览器生成（服务端不解码用户文件），而且网格图与封面计入用户空间：服务端只挑出需要生成的文件（单个文件或目录，可含子目录，单次 ≤300 个；`regenerate` 时也重做缺少网格图的旧版缩略图），生成卡片；用户点击后由对话框逐个生成并保存，卡片显示进度，结束后通知文件页刷新。不经过 `client_call`，没有 45 秒的限制 |
+| `ui_generate_thumbnails` | 为图片、视频、音乐补生成缩略图 | 单个文件或目录，可包含子目录，单次数量由管理员配置。没有真实 `thumb` 的文件（含仅有 `none` 失败记录）默认进入补图；`regenerate` 还纳入已有小图但缺少网格图的文件。结果分别提供 `need`、`already_have`、`previously_failed`。审批模式由卡片提交，完全访问下自动提交服务器生成；仅服务器无 FFmpeg 时卡片退回浏览器，条目 `retry` 允许覆盖旧失败标记。已入队不等于已生成；完成后刷新目录元数据，图片计入用户空间 |
 | `ui_cache_status` | 查询文件在这台设备上的本机缓存状态与本机缓存占用 | 实时工具，见 §26 |
 | `ui_cache_files`／`ui_clear_cache` | 把文件缓存到这台设备／清除这台设备上的缓存 | 生成卡片，用户点击后执行，见 §26 |
 

@@ -843,7 +843,7 @@ class UserApi:
         rows = self.objects.metadata.db.execute(
             f"SELECT * FROM objects WHERE bucket_id=? AND key IN ({','.join('?' * len(keys))})", (scope.bucket_id, *keys)).fetchall()
         items = [self.objects._object(row) for row in rows]
-        return {"files": {item["key"]: {name: item[name] for name in ("etag", "size", "modified_at", "has_thumbnail", "thumbnails", "thumbnail_versions")}
+        return {"files": {item["key"]: {name: item[name] for name in ("etag", "size", "modified_at", "has_thumbnail", "thumbnails", "thumbnail_versions", "thumbnail_status")}
                           for item in self._objects_json(items)}}
 
     def thumbnail_claim(self, token, csrf, path, etag, force=False, custom=False):
@@ -1092,10 +1092,13 @@ class UserApi:
                                   versions.get(item.blob_uuid or "", {})) for item in items]
 
     @staticmethod
-    def _object_json(item, thumbnails: list[str] | tuple[str, ...] = (), thumbnail_versions: dict[str, str] | None = None) -> dict[str, object]:
+    def _object_json(item, thumbnails: list[str] | tuple[str, ...] = (), thumbnail_versions: dict[str, str] | None = None,
+                     *, legacy_thumbnails: bool = False) -> dict[str, object]:
         meta = {key: value for key, value in item.user_meta.items() if key != ObjectService.THUMBNAIL_META}
+        # /api/v1 保留既有程序接口契约；网页接口把内部失败标记与实际图片分开。
+        state = ({"has_thumbnail": "thumb" in thumbnails, "thumbnails": list(thumbnails), "thumbnail_versions": thumbnail_versions or {}}
+                 if legacy_thumbnails else ObjectService.thumbnail_fields(thumbnails, thumbnail_versions))
         return {"key": item.key, "size": item.size, "etag": item.etag, "content_type": item.content_type,
-                "user_meta": meta, "modified_at": item.modified_at,
-                "has_thumbnail": "thumb" in thumbnails, "thumbnails": list(thumbnails), "thumbnail_versions": thumbnail_versions or {},
+                "user_meta": meta, "modified_at": item.modified_at, **state,
                 "public_token": item.public_token, "public_at": item.public_at, "public_expires_at": item.public_expires_at,
                 "public_has_password": item.public_has_password, "public_downloads": item.public_downloads}

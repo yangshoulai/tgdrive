@@ -279,7 +279,7 @@ export function useUploadQueue(onSettled: () => void) {
         }
       }
       const source = thumbnailSource(job.file.name, job.file.type, job.file.size);
-      if (!disposed.current && !result.thumbnails?.length && source) {
+      if (!disposed.current && !result.thumbnails?.length && result.thumbnail_status !== "unavailable" && source) {
         // 用本地文件生成缩略图（图片缩放、视频截帧、音频封面），不需要再下载；失败不影响上传结果。
         void generateLoadedThumbnails(result, signal => createThumbnails({ file: job.file, signal }, source))
           .then(() => { if (!disposed.current) settled.current(); }).catch(() => undefined);

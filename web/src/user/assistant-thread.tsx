@@ -838,7 +838,7 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
         }
         if (local && !signal.aborted) {
           // 服务器无法生成时的退路：在当前页面读取文件生成（会产生下载流量）。
-          const saved = await generateLoadedThumbnails({ key: item.path, etag: item.etag }, claimSignal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source), event.regenerate, signal);
+          const saved = await generateLoadedThumbnails({ key: item.path, etag: item.etag }, claimSignal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source), event.regenerate || item.retry === true, signal);
           if (!saved) counts.failed++; else if (saved.includes("none")) counts.none++; else counts.done++;
           if (saved) folders.add(parentPath(item.path));
         }

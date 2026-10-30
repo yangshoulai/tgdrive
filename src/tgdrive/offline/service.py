@@ -477,7 +477,7 @@ class OfflineDownloads:
                 continue
             states = versions.get(item["blob_uuid"] or "", {})
             task["file"] = {"key": item["key"], "size": item["size"], "etag": item["etag"], "content_type": item["content_type"],
-                            "thumbnails": list(states), "thumbnail_versions": states}
+                            **self.objects.thumbnail_fields(states, states)}
 
     def source(self, user_id: int, task_id: int, *, private_scope: Scope | None = None) -> dict:
         """「更新下载参数」回填：还原成可再次解析的链接或 curl 命令（含用户提交过的请求头与请求体，只返回给任务所有者）。"""

@@ -1199,7 +1199,8 @@ class TgDriveASGI(StaticFiles):
                              "expires_at": info.public_expires_at, "sharer": sharer}, {}
             thumbnails = user.objects.thumbnail_variants([info.blob_uuid]).get(info.blob_uuid or "", [])
             return 200, {"token": info.public_token, "kind": "file", "name": info.key.rsplit("/", 1)[-1], "size": info.size,
-                         "content_type": info.content_type, "etag": info.etag, "password_required": False, "thumbnails": thumbnails,
+                         "content_type": info.content_type, "etag": info.etag, "password_required": False,
+                         **user.objects.thumbnail_fields(thumbnails),
                          "modified_at": info.modified_at, "public_at": info.public_at,
                          "expires_at": info.public_expires_at, "sharer": sharer}, {}
         elif re.fullmatch(r"/api/public/v1/folders/[A-Za-z0-9_-]+/(list|preview-assets)", path) and method == "GET":

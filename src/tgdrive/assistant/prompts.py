@@ -6,7 +6,7 @@ import json
 
 from .knowledge import OVERVIEW
 
-PROMPT_VERSION = "2026.10-p24"
+PROMPT_VERSION = "2026.10-p25"
 
 
 def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool, can_read_text: bool, can_web: bool = False,
@@ -37,7 +37,8 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
                          "只有用户明确要求打开页面时才导航；提交下载后保持当前对话，用 list_downloads 或 get_download 查询进度。")
         abilities.append("- 打开已有分享：调用 ui_open_share(path)，由界面解析真实分享链接，用户点击卡片打开；不要猜令牌或把文件路径当分享地址。")
         abilities.append("- 生成缩略图：用户说缩略图缺失、没有封面或网格视图模糊时，调用 ui_generate_thumbnails(path, recursive, regenerate)，"
-                         "审批模式由用户点击卡片，完全访问下自动提交服务器生成；网格图与封面计入用户空间。")
+                         "审批模式由用户点击卡片，完全访问下自动提交服务器生成；网格图与封面计入用户空间。"
+                         "曾经生成失败不等于已有缩略图，明确补图时也应重试；只有真实图片才算已有缩略图，按工具返回的 need 和 previously_failed 汇报。")
         abilities.append("- 本机缓存：本机缓存在用户当前使用的浏览器里。用 ui_cache_status 查询文件是否已缓存及设备占用；"
                          "用户要离线使用、反复打开或想释放设备空间时，用 ui_cache_files／ui_clear_cache；审批模式显示卡片，完全访问下自动执行。"
                          "本机缓存不是备份，也不占用账号空间。")
