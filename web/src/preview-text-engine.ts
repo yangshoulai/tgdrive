@@ -3,6 +3,7 @@ import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, drawSelection, highlightSpecialChars, keymap, lineNumbers } from "@codemirror/view";
 import { HighlightStyle, StreamLanguage, syntaxHighlighting, type StreamParser } from "@codemirror/language";
 import { highlightSelectionMatches, openSearchPanel, search, searchKeymap } from "@codemirror/search";
+import { defaultKeymap, history, historyKeymap, indentLess, insertTab } from "@codemirror/commands";
 import { tags } from "@lezer/highlight";
 import { c, cpp, java, csharp, kotlin, scala, dart } from "@codemirror/legacy-modes/mode/clike";
 import { javascript, typescript, json } from "@codemirror/legacy-modes/mode/javascript";
@@ -26,8 +27,18 @@ import DOMPurify from "dompurify";
 import { highlight, languageOf } from "./highlight";
 
 const modes: Record<string, StreamParser<unknown>> = { c, cpp, java, csharp, kotlin, scala, dart, js: javascript, javascript, typescript, json, python, shell, go, rust, css, html, xml, yaml, toml, ruby, swift, lua, ini: properties, diff, docker: dockerFile, sql: standardSQL };
-export function createTextView(container: HTMLElement, source: string, name: string) {
-  const wrapping = new Compartment();
+/** 文本视图：默认只读；setEditable(true) 进入编辑（撤销重做、标准编辑键、⌘S 保存）。 */
+export function createTextView(container: HTMLElement, source: string, name: string, options: { onChange?: () => void; onSave?: () => void } = {}) {
+  const wrapping = new Compartment(), editing = new Compartment();
+  // 编辑保存要逐字节保留换行：只用 CRLF 的文件按 CRLF 拆行与拼接；其他文件按 LF，残留的 CR 作为普通字符保留，不被规整掉。
+  const separator = source.includes("\r\n") && !/(^|[^\r])\n/.test(source) ? "\r\n" : "\n";
+  const readOnly = [EditorState.readOnly.of(true), EditorView.editable.of(false), EditorView.contentAttributes.of({ tabindex: "0", "aria-label": "文件内容，只读" })];
+  const writable = [
+    EditorView.contentAttributes.of({ "aria-label": "编辑文件内容" }),
+    keymap.of([{ key: "Mod-s", preventDefault: true, run: () => { options.onSave?.(); return true; } },
+      // Tab 缩进；Esc 之后的 Tab 仍可移出编辑器（CodeMirror 的 Tab 焦点陷阱约定）。
+      { key: "Tab", run: insertTab, shift: indentLess }, ...historyKeymap, ...defaultKeymap]),
+  ];
   const extension = name.toLowerCase().split(".").at(-1)!;
   const language = ({ ts: "typescript", tsx: "typescript", cpp: "cpp", cc: "cpp", cxx: "cpp", hpp: "cpp", scala: "scala", dart: "dart", html: "html", htm: "html", lua: "lua" } as Record<string, string>)[extension] ?? languageOf(name);
   // 已有轻量语法规则作为补充，保留 PHP、Makefile 等文件的高亮。
@@ -44,8 +55,8 @@ export function createTextView(container: HTMLElement, source: string, name: str
   const view = new EditorView({ parent: container, state: EditorState.create({ doc: source, extensions: [
     // 只保留阅读所需能力，避免默认编辑器的光标、当前行高亮和折叠留白。
     lineNumbers(), highlightSpecialChars(), drawSelection(), highlightSelectionMatches(),
-    search({ top: true }), keymap.of(searchKeymap), EditorState.readOnly.of(true), EditorView.editable.of(false),
-    EditorView.contentAttributes.of({ tabindex: "0", "aria-label": "文件内容，只读" }),
+    search({ top: true }), keymap.of(searchKeymap), history(), EditorState.lineSeparator.of(separator), editing.of(readOnly),
+    EditorView.updateListener.of(update => { if (update.docChanged) options.onChange?.(); }),
     EditorState.phrases.of({ "Find": "查找", "next": "下一处", "previous": "上一处", "all": "全部", "match case": "区分大小写", "regexp": "正则表达式", "by word": "完整单词", "close": "关闭", "No matches": "没有匹配项" }),
     wrapping.of(EditorView.lineWrapping), ...(mode ? [StreamLanguage.define(mode)] : []),
     syntaxHighlighting(HighlightStyle.define([
@@ -75,6 +86,9 @@ export function createTextView(container: HTMLElement, source: string, name: str
     // 编辑器只渲染可见行，必须用编辑器自己的选区全选，复制时才包含屏幕外的内容。
     selectAll: () => { view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } }); view.focus(); },
     setWrapping: (enabled: boolean) => view.dispatch({ effects: wrapping.reconfigure(enabled ? EditorView.lineWrapping : []) }),
+    setEditable: (enabled: boolean) => { view.dispatch({ effects: editing.reconfigure(enabled ? writable : readOnly) }); if (enabled) view.focus(); },
+    /** 按原换行拼接的全文（sliceDoc 使用 lineSeparator）。 */
+    text: () => view.state.sliceDoc(),
   };
 }
 

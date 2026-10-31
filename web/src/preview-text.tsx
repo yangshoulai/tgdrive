@@ -5,8 +5,13 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { loadTextEngine } from "./preview-runtime";
-import { Button, Icon, IconButton, Segmented, Switch, copyText, formatBytes, isShortcutControl, type MenuItem } from "./ui";
+import * as api from "./api";
+import { Button, ConfirmDialog, Icon, IconButton, Segmented, Switch, copyText, formatBytes, isShortcutControl, toast, type MenuItem } from "./ui";
 import { TEXT_PREVIEW_LIMIT, type PreviewText } from "./preview-data";
+import { ENCODING_LABEL } from "./text-encoding";
+
+/** 文本编辑：save 按原编码覆盖原文件（force 为真时不校验版本），reload 读取最新版本；onDirty 报告是否有未保存的修改。 */
+export type TextEdit = { save: (text: string, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void };
 
 /** 沉浸式预览的头部插槽与更多菜单；为 null 时使用内嵌工具栏。 */
 export const PreviewToolsContext = createContext<{ target: HTMLElement; compact: boolean; setMenuItems: (items: MenuItem[]) => void } | null>(null);
@@ -50,8 +55,8 @@ function loadRemoteImages(root: HTMLElement) {
   }
 }
 
-export function TextPreview({ content, name, code = false, downloadUrl, resolveImage, onError }: {
-  content: PreviewText; name: string; code?: boolean; downloadUrl: string; resolveImage?: (src: string) => string | null; onError: (reason: unknown) => void;
+export function TextPreview({ content, name, code = false, downloadUrl, resolveImage, onError, edit }: {
+  content: PreviewText; name: string; code?: boolean; downloadUrl: string; resolveImage?: (src: string) => string | null; onError: (reason: unknown) => void; edit?: TextEdit;
 }) {
   const [mode, setMode] = useState<"render" | "source">(/\.(md|markdown|mdx)$/i.test(name) ? "render" : "source");
   const [wrapping, setWrapping] = useState(true);
@@ -61,6 +66,13 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   const [active, setActive] = useState(-1);
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<ReturnType<Awaited<ReturnType<typeof loadTextEngine>>["createTextView"]> | null>(null);
+  // 编辑：draft 是当前文字（切到 Markdown 预览时编辑器会销毁，靠它保留），saved 是最近一次保存的内容。
+  const [editing, setEditing] = useState(false), [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
+  const [conflict, setConflict] = useState(false), [discarding, setDiscarding] = useState(false), [forcing, setForcing] = useState(false);
+  const [editorRevision, setEditorRevision] = useState(0);
+  const draft = useRef(content.text), saved = useRef(content.text), editingRef = useRef(false);
+  editingRef.current = editing;
+  const editBlocked = !edit ? null : content.truncated ? `文件超过 ${formatBytes(TEXT_PREVIEW_LIMIT)}，只能预览` : !content.exact ? "文件里有无法识别编码的字节，不能安全编辑" : null;
   const resolver = useRef(resolveImage); resolver.current = resolveImage;
   const errorHandler = useRef(onError); errorHandler.current = onError;
   const tools = useContext(PreviewToolsContext);
@@ -89,14 +101,57 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     void loadTextEngine().then(engine => {
       if (cancelled || !host.current) return;
       if (mode === "render") {
-        host.current.innerHTML = engine.renderMarkdown(content.text, resolver.current);
+        host.current.innerHTML = engine.renderMarkdown(draft.current, resolver.current);
         holdRemoteImages(host.current);
         setHeadings([...host.current.querySelectorAll("h1, h2, h3")].map((node, index) => ({ index, level: Number(node.tagName[1]), text: node.textContent?.trim() || "（无标题）" })));
-      } else editor.current = engine.createTextView(host.current, content.text, name);
+      } else {
+        editor.current = engine.createTextView(host.current, draft.current, name, {
+          onChange: () => { if (editingRef.current) setDirty(true); }, onSave: () => void saveRef.current(false),
+        });
+        if (editingRef.current) editor.current.setEditable(true);
+      }
       setReady(true);
     }).catch(reason => { if (!cancelled) errorHandler.current(reason); });
-    return () => { cancelled = true; editor.current?.destroy(); editor.current = null; if (host.current) host.current.replaceChildren(); };
-  }, [content.text, name, mode]);
+    return () => {
+      cancelled = true;
+      // 编辑中切换显示方式时保留草稿；退出编辑（放弃修改）时 editing 已为假，不能把旧草稿写回。
+      if (editor.current && editingRef.current) draft.current = editor.current.text();
+      editor.current?.destroy(); editor.current = null; if (host.current) host.current.replaceChildren();
+    };
+  }, [content.text, name, mode, editorRevision]);
+  useEffect(() => { edit?.onDirty(dirty); }, [dirty]);
+  useEffect(() => () => edit?.onDirty(false), []);
+  async function save(force: boolean) {
+    if (!edit || saving) return;
+    const text = editor.current?.text() ?? draft.current;
+    setSaving(true);
+    try {
+      await edit.save(text, force);
+      saved.current = draft.current = text;
+      setDirty(false); setConflict(false);
+      toast.success("已保存");
+    } catch (reason) {
+      if (reason instanceof api.ApiError && reason.code === "version_conflict") setConflict(true);
+      else toast.error(reason instanceof api.ApiError ? reason.message : reason instanceof Error ? reason.message : "保存失败，请稍后重试");
+    } finally { setSaving(false); }
+  }
+  const saveRef = useRef(save); saveRef.current = save;
+  function startEditing() {
+    if (!edit || editBlocked) return;
+    if (mode === "render") setMode("source");
+    setEditing(true);
+    editor.current?.setEditable(true);
+  }
+  /** 退出编辑：放弃未保存的修改，回到最近一次保存的内容。 */
+  function stopEditing() {
+    draft.current = saved.current;
+    setEditing(false); setDirty(false); setConflict(false); setDiscarding(false);
+    setEditorRevision(current => current + 1);
+  }
+  async function reloadLatest() {
+    if (!edit) return;
+    try { await edit.reload(); setDirty(false); } catch (reason) { toast.error(api.errorMessage(reason, "无法读取最新版本，请稍后重试")); }
+  }
   useEffect(() => { editor.current?.setWrapping(wrapping); }, [wrapping, ready]);
   useEffect(() => { if (mode !== "render") setOutline(false); }, [mode]);
   useEffect(() => {
@@ -109,13 +164,14 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
         event.preventDefault(); if (!event.repeat) editor.current?.search(); return;
       }
       if (mod || event.altKey || event.shiftKey) return;
-      if (key === "t" && markdown) { event.preventDefault(); if (!event.repeat) setMode(value => value === "render" ? "source" : "render"); }
+      if (key === "e" && edit && !editBlocked && !editingRef.current) { event.preventDefault(); if (!event.repeat) startEditing(); }
+      else if (key === "t" && markdown) { event.preventDefault(); if (!event.repeat) setMode(value => value === "render" ? "source" : "render"); }
       else if (key === "o" && mode === "render" && headings.length) { event.preventDefault(); if (!event.repeat) setOutline(value => !value); }
       else if (key === "w" && mode === "source") { event.preventDefault(); if (!event.repeat) setWrapping(value => !value); }
     };
     document.addEventListener("keydown", handle);
     return () => document.removeEventListener("keydown", handle);
-  }, [immersive, markdown, mode, ready, headings.length]);
+  }, [immersive, markdown, mode, ready, headings.length, edit, editBlocked]);
   // 预览弹窗里按 Ctrl/⌘+A 只选中文件内容，而不是整个页面；输入框（如查找框）保留原生行为。
   useEffect(() => {
     if (!ready) return;
@@ -165,7 +221,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     return () => { scroller.removeEventListener("scroll", schedule); cancelAnimationFrame(frame); };
   }, [ready, mode, headings]);
 
-  const copy = useCallback(() => void copyText(content.text, content.truncated ? "已复制预览内容" : "内容已复制"), [content.text, content.truncated]);
+  const copy = useCallback(() => void copyText(editor.current?.text() ?? draft.current, content.truncated ? "已复制预览内容" : "内容已复制"), [content.truncated]);
   useEffect(() => {
     if (!compactTools || !setMenuItems) return;
     const items: MenuItem[] = [];
@@ -174,9 +230,10 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
       { label: "自动换行", icon: "wrap", shortcut: "W", checked: wrapping, onSelect: () => setWrapping(value => !value) },
     );
     items.push({ label: content.truncated ? "复制已加载的预览内容" : "复制全部内容", icon: "copy", disabled: !ready && mode === "source", onSelect: copy });
+    if (edit && !editing) items.push({ label: editBlocked ?? "编辑", icon: "edit", shortcut: "E", disabled: Boolean(editBlocked), onSelect: startEditing });
     setMenuItems(items);
     return () => setMenuItems([]);
-  }, [compactTools, setMenuItems, mode, ready, wrapping, copy, content.truncated]);
+  }, [compactTools, setMenuItems, mode, ready, wrapping, copy, content.truncated, edit, editing, editBlocked]);
   const jump = (heading: Heading) => {
     host.current?.querySelectorAll("h1, h2, h3")[heading.index]?.scrollIntoView({ block: "start", behavior: "smooth" });
     setActive(heading.index);
@@ -190,6 +247,11 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
       <IconButton icon="wrap" label={wrapping ? "关闭自动换行" : "自动换行"} shortcut="W" size="sm" active={wrapping} onClick={() => setWrapping(value => !value)} />
     </>}
     {!compactTools && <IconButton icon="copy" label={content.truncated ? "复制已加载的预览内容" : "复制全部内容"} size="sm" disabled={!ready && mode === "source"} onClick={copy} />}
+    {edit && !editing && !compactTools && <IconButton icon="edit" label={editBlocked ?? "编辑"} shortcut="E" size="sm" disabled={Boolean(editBlocked)} onClick={startEditing} />}
+    {editing && <span className="preview-edit-actions">
+      <Button size="sm" variant="ghost" disabled={saving} onClick={() => dirty ? setDiscarding(true) : stopEditing()}>退出编辑</Button>
+      <Button size="sm" variant="primary" icon="check" shortcut="Mod+S" loading={saving} disabled={!dirty} onClick={() => void save(false)}>保存</Button>
+    </span>}
   </div> : <div className="preview-toolbar">
     {markdown && <Segmented label="显示方式" value={mode} onChange={setMode} options={[{ value: "render", label: "预览" }, { value: "source", label: "源码" }]} />}
     {!markdown && <span className="preview-readonly"><Icon name="fileText" size={14} />只读预览</span>}
@@ -199,12 +261,22 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
       <Switch checked={wrapping} onChange={setWrapping} label="自动换行" />
     </div>}
   </div>;
-  const status = mode === "source" && ready ? (content.text.length ? `${lineCount.toLocaleString()} 行` : "文件内容为空") : null;
+  const status = editing ? `编辑中 · ${ENCODING_LABEL[content.encoding]}${content.encoding === "utf-8" && content.bom ? "（带 BOM）" : ""}${dirty ? " · 有未保存的修改" : ""}`
+    : mode === "source" && ready ? (content.text.length ? `${lineCount.toLocaleString()} 行` : "文件内容为空") : null;
   const truncated = content.truncated && <span>仅显示前 {formatBytes(TEXT_PREVIEW_LIMIT)}{content.total ? `（共 ${formatBytes(content.total)}）` : ""}，<a href={downloadUrl}>下载完整文件</a></span>;
 
-  return <div className={`preview-text${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${content.truncated ? " is-truncated" : ""}${immersive ? paper ? " is-paper" : " is-code" : ""}`}>
+  return <div className={`preview-text${editing ? " is-editing" : ""}${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${content.truncated ? " is-truncated" : ""}${immersive ? paper ? " is-paper" : " is-code" : ""}`}>
     {tools ? createPortal(toolbar, tools.target) : toolbar}
     {!ready && <div className="preview-engine-loading" role="status"><span className="spinner" />正在准备预览…</div>}
+    {conflict && <div className="preview-edit-conflict" role="alert">
+      <Icon name="alert" size={16} /><span>文件已在别处修改，保存没有覆盖它。</span>
+      <Button size="sm" variant="ghost" onClick={() => void reloadLatest()}>放弃我的修改并重新加载</Button>
+      <Button size="sm" variant="danger" onClick={() => setForcing(true)}>仍然覆盖</Button>
+    </div>}
+    {discarding && <ConfirmDialog title="放弃未保存的修改？" description="退出编辑后，这次的修改会丢失，文件保持上次保存的内容。" confirmLabel="放弃修改"
+      onConfirm={stopEditing} onClose={() => setDiscarding(false)} />}
+    {forcing && <ConfirmDialog title="覆盖别处的修改？" description="文件在你打开之后被修改过。仍然保存会用你当前的内容覆盖它，别处的修改将丢失。" confirmLabel="覆盖保存"
+      onConfirm={async () => { setForcing(false); await save(true); }} onClose={() => setForcing(false)} />}
     <div className={immersive ? "preview-sheet" : undefined}>
       <div ref={host} className={mode === "render" ? "preview-doc md" : "preview-code-editor"} onClick={event => {
         const remote = (event.target as Element).closest("button.md-remote-image");

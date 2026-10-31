@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from typing import Callable
 
 from .blobengine import BlobEngine
-from .errors import InvalidStateError, NotFoundError, QuotaExceededError, ShareExpiredError
+from .errors import InvalidStateError, NotFoundError, QuotaExceededError, ShareExpiredError, VersionConflict
 from .filekinds import kind_clause
 from .fingerprint import combine, is_fingerprint
 from .metadata import Metadata
@@ -191,7 +191,7 @@ class ObjectService:
 
     def _commit_blob(self, bucket_id: int, key: str, blob_uuid: str, size: int, etag: str,
                      content_type: str | None, user_meta: dict[str, str] | None, *, scope: Scope | None = None,
-                     dedupe: bool = False) -> ObjectInfo:
+                     dedupe: bool = False, if_match: str | None = None) -> ObjectInfo:
         """dedupe=True 用于刚写入的新 Blob：已有相同内容时改为引用那份，调用方随后删除新 Blob（返回对象的 blob_uuid 不同）。
         对象自己的 ETag 保持不变，S3 分段上传返回的 ETag 不受影响。"""
         now = time.time()
@@ -203,6 +203,9 @@ class ObjectService:
             if bucket is None:
                 raise NotFoundError(f"bucket {bucket_id} not found")
             old = db.execute("SELECT * FROM objects WHERE bucket_id = ? AND key = ?", (bucket_id, key)).fetchone()
+            # 条件写入：在提交事务内复核版本，与覆盖在同一事务完成，避免两次保存交错时互相覆盖。
+            if if_match is not None and (old is None or old["etag"] != if_match):
+                raise VersionConflict("文件已在别处修改")
             old_size = int(old["size"]) if old else 0
             new_used = int(bucket["used_bytes"]) - old_size + size
             if bucket["quota_bytes"] is not None and new_used > bucket["quota_bytes"]:
@@ -266,8 +269,15 @@ class ObjectService:
 
     async def put_object(self, scope: Scope, key: str, body: AsyncIterator[bytes] | Iterable[bytes] | bytes,
                          size: int | None = None, content_type: str | None = None,
-                         user_meta: dict[str, str] | None = None, *, expect_md5: str | None = None, small: bool = False) -> ObjectInfo:
+                         user_meta: dict[str, str] | None = None, *, expect_md5: str | None = None, small: bool = False,
+                         if_match: str | None = None) -> ObjectInfo:
+        """if_match：只在对象当前 ETag 等于它时覆盖（网页文本编辑保存用），否则抛 VersionConflict，不写入。"""
         self._check_scope(scope, key, write=True)
+        if if_match is not None:
+            # 先查一次，版本已变时不必上传；提交事务内还会再复核。
+            current = self.metadata.db.execute("SELECT etag FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone()
+            if current is None or current["etag"] != if_match:
+                raise VersionConflict("文件已在别处修改")
         room = self._quota_room(scope.bucket_id, key)
         if small:
             # 系统小对象已整块在内存里，大小已知：直接比较剩余配额（提交时事务内仍会复核）。
@@ -288,7 +298,7 @@ class ObjectService:
                 self.metadata.set_fingerprint(blob_uuid, combine(result.size, result.leaves))
             self._check_scope(scope, key, write=True)
             info = self._commit_blob(scope.bucket_id, key, blob_uuid, result.size, result.md5,
-                                     content_type, user_meta, scope=scope, dedupe=not small)
+                                     content_type, user_meta, scope=scope, dedupe=not small, if_match=if_match)
         except Exception:
             # 已写入后端的分片由 orphan cleanup/GC 处理；元数据中的临时 blob 可立即入队。
             try:

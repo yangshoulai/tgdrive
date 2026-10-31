@@ -653,6 +653,10 @@ class UserApi:
             return {"folders": folders[:limit], "next_cursor": folders[limit - 1] if len(folders) > limit else None}
         return await self.objects.metadata.run_in_thread(read)
 
+    def file_info(self, token: str, path: str) -> dict[str, object]:
+        """单个文件的当前元数据（含 ETag 与缩略图状态）；文本编辑遇到版本冲突时用它取得最新版本。"""
+        return self._objects_json([self.objects.head_object(self._scope(token), self._path(path))])[0]
+
     def check_files(self, token: str, csrf: str, paths: list[str]):
         scope = self._scope(token, csrf=csrf, mutation=True)
         if not isinstance(paths, list) or len(paths) > 200 or any(not isinstance(path, str) for path in paths):
@@ -707,13 +711,14 @@ class UserApi:
 
     async def put(self, token: str, csrf: str, path: str, body: bytes | AsyncIterator[bytes],
                   content_type: str | None = None, size: int | None = None,
-                  public: bool | None = None) -> dict[str, object]:
-        """上传对象；public 为 None 时保持原有公开状态，True/False 显式开启或关闭链接。"""
+                  public: bool | None = None, if_match: str | None = None) -> dict[str, object]:
+        """上传对象；public 为 None 时保持原有公开状态，True/False 显式开启或关闭链接。
+        if_match 是打开时的 ETag（文本编辑保存）：对象已被改动时抛 VersionConflict（409），不覆盖。"""
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
         key = self._path(path)
         item = await self.objects.put_object(replace(self._scope(token), thumbnail_client=True), key, body,
-                                             len(body) if isinstance(body, bytes) else size, content_type)
+                                             len(body) if isinstance(body, bytes) else size, content_type, if_match=if_match)
         if public is not None:
             item = self.objects.set_public(self._scope(token), key, public)
         return self._object_json(item)

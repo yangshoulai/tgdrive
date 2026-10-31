@@ -86,6 +86,12 @@ export function PreviewHost({ children, privateAllowed, enabled }: { children: R
       return { ...value, owner: "", request };
     })),
   }), []);
+  // 预览里保存了文本（或冲突后重新读取了最新版本）：窗口里的文件换成新版本，地址随 ETag 更新。
+  useEffect(() => {
+    const updated = (event: Event) => host.update((event as CustomEvent<api.FileItem>).detail);
+    window.addEventListener(api.FILE_UPDATED_EVENT, updated);
+    return () => window.removeEventListener(api.FILE_UPDATED_EVENT, updated);
+  }, [host]);
   const hasPrivate = [...slots.values()].some(value => api.isPrivatePath(value.request.file.key));
   useEffect(() => {
     if (!enabled) setSlots(current => current.size ? new Map() : current);

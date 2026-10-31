@@ -357,6 +357,16 @@ export type FolderStats = { prefix: string; files: number; folders: number; byte
 export const folderStats = (prefix: string, signal?: AbortSignal) => request<FolderStats>(`${fileApi("/stats", prefix)}?prefix=${encodeURIComponent(prefix)}`, { signal });
 export const listFolders = (prefix: string, cursor: string | null = null, signal?: AbortSignal) => request<{ folders: string[]; next_cursor: string | null }>(
   `${fileApi("/folders", prefix)}?limit=50&prefix=${encodeURIComponent(prefix)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+/** 文本编辑保存：覆盖原文件。默认带打开时的 ETag 作 If-Match，文件已在别处修改时返回 409 version_conflict；force 时不带条件直接覆盖。 */
+export const saveTextFile = (file: FileItem, data: Uint8Array, force = false) => request<FileItem>(`${fileApi("/files", file.key)}?path=${encodeURIComponent(file.key)}`, {
+  method: "PUT", body: new Blob([data as BlobPart], { type: file.content_type || "text/plain" }),
+  headers: { "Content-Type": file.content_type || "text/plain", ...(force ? {} : { "If-Match": `"${file.etag}"` }) },
+}, 120000);
+/** 单个文件的当前元数据（最新 ETag、大小与修改时间）。 */
+export const fileInfo = (path: string) => request<FileItem>(`${fileApi("/files/info", path)}?path=${encodeURIComponent(path)}`);
+export const FILE_UPDATED_EVENT = "tessera:file-updated";
+/** 文件在预览里被保存或刷新到新版本后广播：预览宿主更新窗口里的文件，文件页刷新所在目录。 */
+export const announceFileUpdated = (file: FileItem) => window.dispatchEvent(new CustomEvent<FileItem>(FILE_UPDATED_EVENT, { detail: file }));
 export const checkFiles = (paths: string[]) => post<{ paths: string[] }>(fileApi("/files/check", paths[0]), { paths });
 export const makeFolder = (path: string) => post<FileItem>(fileApi("/folders", path), { path });
 /** recursive 为 true 时，以 / 结尾的文件夹路径会在服务端连同其中所有内容一起删除。 */

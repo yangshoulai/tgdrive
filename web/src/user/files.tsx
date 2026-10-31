@@ -114,6 +114,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     window.addEventListener("tessera:files-added", completed);
     return () => { window.removeEventListener("tessera:downloads-completed", completed); window.removeEventListener("tessera:files-added", completed); };
   }, [prefix, query, scheduleRefresh]);
+  // 预览里保存了文本：所在目录正是当前目录（或正在搜索）时刷新，列表里的大小与修改时间随之更新。
+  useEffect(() => {
+    const updated = (event: Event) => {
+      const key = (event as CustomEvent<api.FileItem>).detail.key;
+      if (query || key.slice(0, key.lastIndexOf("/") + 1) === prefix) scheduleRefresh();
+    };
+    window.addEventListener(api.FILE_UPDATED_EVENT, updated);
+    return () => window.removeEventListener(api.FILE_UPDATED_EVENT, updated);
+  }, [prefix, query, scheduleRefresh]);
   useEffect(() => () => window.clearTimeout(backgroundRefresh.current.timer), []);
   const loading = pagination.loading;
   const loadError = pagination.error;

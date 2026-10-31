@@ -37,5 +37,9 @@ class ShareExpiredError(NotFoundError):
     """公开链接已超过有效期。"""
 
 
+class VersionConflict(TgDriveError):
+    """条件写入（If-Match）时对象已不是调用方打开的版本：已被覆盖、移动或删除。"""
+
+
 class QuotaExceededError(TgDriveError):
     """对象提交后会超过存储桶配额。"""

@@ -1552,6 +1552,23 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .preview-text-tools .icon-btn { color: var(--on-dark-72); }
 .preview-text-tools .icon-btn:hover:not(:disabled), .preview-text-tools .icon-btn.is-active { background: var(--on-dark-16); color: var(--on-dark); }
 @media (max-width: 640px) { .preview-text-tools .segmented { margin-right: 2px; } }
+/* 文本编辑：深色头部里的「退出编辑／保存」，保存是浅色实心按钮；编辑状态与编码显示在底部胶囊。 */
+.preview-edit-actions { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.preview-text-tools .btn-ghost { color: var(--on-dark-72); }
+.preview-text-tools .btn-ghost:hover:not(:disabled) { background: var(--on-dark-16); color: var(--on-dark); }
+.preview-text-tools .btn-primary { background: var(--on-dark-90); color: var(--dark-surface); }
+.preview-text-tools .btn-primary:hover:not(:disabled) { background: var(--on-dark); }
+.preview-text-tools .btn-primary:disabled { background: var(--on-dark-16); color: var(--on-dark-56); }
+/* 编辑时光标已说明焦点位置，不再显示键盘导航用的焦点框。 */
+html[data-input="keyboard"] .preview-text.is-editing .cm-editor.cm-focused { box-shadow: none; }
+.preview-text.is-editing .cm-cursor { border-left-color: var(--code-ink); }
+.preview-text.is-editing .cm-activeLine { background: transparent; }
+.preview-edit-conflict { position: absolute; top: calc(var(--preview-header-height, 56px) + 12px); left: 50%; z-index: 3; display: flex; max-width: calc(100% - 32px); flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 8px 8px 12px; border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); border-radius: var(--radius-md); background: var(--shade-80); color: var(--on-dark);
+  font-size: var(--text-sm); box-shadow: var(--shadow-md); transform: translateX(-50%); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+.preview-edit-conflict > svg { flex: none; color: var(--on-dark-danger); }
+.preview-edit-conflict .btn-ghost { color: var(--on-dark-72); }
+.preview-edit-conflict .btn-ghost:hover:not(:disabled) { background: var(--on-dark-16); color: var(--on-dark); }
 /* 底部状态胶囊：行数与截断提示浮在内容上，不占阅读空间。 */
 .preview-text-capsule { position: absolute; bottom: 14px; left: 50%; z-index: 2; display: flex; max-width: calc(100% - 32px); align-items: center; gap: 8px; padding: 8px 16px; border: 1px solid var(--on-dark-8); border-radius: var(--radius-pill);
   background: var(--shade-80); color: var(--on-dark-72); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; transform: translateX(-50%);

@@ -32,6 +32,7 @@ from .errors import (
     NotReadyError,
     QuotaExceededError,
     ShareExpiredError,
+    VersionConflict,
     WrongPassphrase,
 )
 from .keyapi import KeyApi, KeyAuthError
@@ -269,7 +270,7 @@ class TgDriveASGI(StaticFiles):
                 route = path[len("/api/user/v1/private"):]
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
-                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/instant", "/move", "/archive",
+                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/move", "/archive",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
                            "/thumbnail/fetch", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
@@ -284,9 +285,11 @@ class TgDriveASGI(StaticFiles):
             if path == "/api/user/v1/files" and method == "PUT":
                 size = int(headers["content-length"]) if "content-length" in headers else None
                 public = query.get("public", [None])[0]
+                # If-Match：文本编辑保存时带上打开时的 ETag，文件已在别处改动则返回 409，不覆盖。
+                if_match = headers.get("if-match", "").strip().removeprefix("W/").strip('"') or None
                 result = await file_user.put(token, csrf, query.get("path", [""])[0], body_stream(),
                                               headers.get("content-type"), size,
-                                              None if public is None else public in ("1", "true"))
+                                              None if public is None else public in ("1", "true"), if_match=if_match)
                 await self._send(tracked_send, 200, result)
                 return
             part_route = re.fullmatch(r"/api/user/v1/uploads/([A-Za-z0-9_-]+)/parts/(\d+)", path)
@@ -1143,6 +1146,8 @@ class TgDriveASGI(StaticFiles):
                                                  public_only=query.get("public", ["0"])[0] == "1", kind=query.get("kind", [""])[0]), {}
             if method == "GET" and route == "/stats":
                 return 200, await user.stats(token, query.get("prefix", [""])[0]), {"Cache-Control": "no-store"}
+            if method == "GET" and route == "/files/info":
+                return 200, user.file_info(token, query.get("path", [""])[0]), {"Cache-Control": "no-store"}
             if method == "GET" and route == "/folders":
                 return 200, await user.folders(token, prefix=query.get("prefix", [""])[0],
                     cursor=query.get("cursor", [""])[0], limit=int(query.get("limit", ["50"])[0])), {}
@@ -1733,6 +1738,7 @@ class TgDriveASGI(StaticFiles):
             status, code, message = 416, "range_not_satisfiable", "请求的字节范围不可满足"
             extra["Content-Range"] = f"bytes */{exc.size}"
         elif isinstance(exc, IntegrityError): status, code, message = 500, "integrity_error", "文件完整性校验失败"
+        elif isinstance(exc, VersionConflict): status, code, message = 409, "version_conflict", "文件已在别处修改，请重新加载后再保存"
         elif isinstance(exc, QuotaExceededError): status, code, message = 413, "quota_exceeded", "空间不足，请先清理不需要的文件或联系管理员扩容"
         elif isinstance(exc, ValueError):
             status, code, message = 400, "bad_request", str(exc) or "请求参数不合法"
