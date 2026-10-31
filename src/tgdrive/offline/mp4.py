@@ -51,6 +51,43 @@ def _boxes(data: bytes, start: int = 0, end: int | None = None):
         position += size
 
 
+FRAGMENT_PROBE = 64 * 1024     # 判断是否分片 MP4 时读取的开头长度
+
+
+def is_fragmented(head: bytes) -> bool:
+    """文件开头（至少包含 ftyp 与 moov）是否为分片 MP4：moov 里有 mvex，或在 mdat 之前出现了 moof。
+
+    只看顶层盒子头，不完整的盒子按「不是」处理：普通 MP4 的 moov 可能很大而读不全，分片 MP4 的 moov 很小。
+    """
+    if head[4:8] != b"ftyp":
+        return False
+    position = 0
+    while position + 8 <= len(head):
+        size, kind = struct.unpack(">I4s", head[position:position + 8])
+        header = 8
+        if size == 1:
+            if position + 16 > len(head):
+                return False
+            size, header = struct.unpack(">Q", head[position + 8:position + 16])[0], 16
+        if size < header:
+            return False
+        if kind in (b"moof", b"sidx", b"styp"):
+            return True
+        if kind == b"mdat":
+            return False
+        if kind == b"moov":
+            if position + size > len(head):
+                return False
+            try:
+                return any(child == b"mvex" for child, *_ in _boxes(head, position + header, position + size))
+            except DownloadError:
+                return False
+        if size == 0:
+            return False
+        position += size
+    return False
+
+
 def _box(kind: bytes, payload: bytes) -> bytes:
     if 8 + len(payload) < 1 << 32:
         return struct.pack(">I4s", 8 + len(payload), kind) + payload

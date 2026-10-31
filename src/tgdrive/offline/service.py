@@ -23,7 +23,7 @@ from ..objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
 from ..work import WorkBusyError
 from .hls import load_playlist, remux
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
-from .mp4 import Defragmenter
+from .mp4 import FRAGMENT_PROBE, Defragmenter, is_fragmented
 from .request import DownloadRequest, checked_url, command_text, filename, parse_requests, url_filename
 from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_cache, media_request, merge_tracks, prepare, site_link, track_stream
 
@@ -61,6 +61,22 @@ def task_path(key: str) -> str:
             return original + key[len(prefix):].partition("/")[2]
     return key
 
+
+
+async def _peek(stream, size: int):
+    """读出流的开头至少 size 字节（不足则到结束），返回 (开头, 包含开头的完整流)。"""
+    iterator, head = stream.__aiter__(), bytearray()
+    while len(head) < size:
+        try:
+            head += await iterator.__anext__()
+        except StopAsyncIteration:
+            break
+    async def whole():
+        if head:
+            yield bytes(head)
+        async for piece in iterator:
+            yield piece
+    return bytes(head), whole()
 
 class Paused(NotReadyError):
     pass
@@ -1080,11 +1096,32 @@ class OfflineDownloads:
             self._set(row["id"], size=size)
             source["state"] = state
             self._save_source(row["id"], source)
+            stream = response.stream()
+            head, stream = await _peek(stream, FRAGMENT_PROBE) if not offset else (b"", stream)
+            fragmented = is_fragmented(head)
             if not upload_id:
-                upload_id = await self._begin(row, scope, response.headers.get("content-type", source.get("content_type")), size=size)
-            stored = await self._stage(row, scope, upload_id, response.stream(), offset=offset)
-            if size is not None and stored != size:
-                raise DownloadError("下载文件的实际长度与来源声明不一致，请重新下载")
+                content_type = response.headers.get("content-type", source.get("content_type"))
+                if fragmented and not (content_type or "").startswith(("video/", "audio/")):
+                    content_type = "video/mp4"
+                upload_id = await self._begin(row, scope, content_type, size=size)
+            if fragmented:
+                # 分片 MP4（直播切片、部分网站与抓取脚本拿到的视频）：浏览器要逐个片段扫描才能开始播放和拖动，
+                # 保存时转成普通 MP4（moov 在前）。转换结果长度与来源不同，不能续传，停止后从头下载。
+                received = 0
+                async def counted():
+                    nonlocal received
+                    async for piece in stream:
+                        await self.throttle(len(piece))
+                        self._progress(row["id"], bytes_in=len(piece))
+                        received += len(piece)
+                        yield piece
+                await self._stage_video(row, scope, upload_id, counted())
+                if size is not None and received != size:
+                    raise DownloadError("下载文件的实际长度与来源声明不一致，请重新下载")
+            else:
+                stored = await self._stage(row, scope, upload_id, stream, offset=offset)
+                if size is not None and stored != size:
+                    raise DownloadError("下载文件的实际长度与来源声明不一致，请重新下载")
             state["eof"] = True
             self._save_source(row["id"], source)
         await self._finish(row, scope, upload_id)

@@ -1492,6 +1492,8 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .preview-modal.is-immersive:not(.is-minimized) .audio-body { padding-top: calc(var(--preview-header-height, 56px) + 4px); }
 /* 「加载较慢 · 重试」放在浮动头部下方，不与全屏、窗口选项、关闭按钮重叠。 */
 .preview-modal.is-immersive:not(.is-minimized) .preview-player-slow { top: calc(var(--preview-header-height, 56px) + 6px); right: 16px; }
+/* 视频的「加载较慢 · 重试」放在画面中央的加载圈正下方，和加载状态在一起，而不是挤在头部角落。 */
+.preview-player-video .preview-player-slow, .preview-modal.is-immersive:not(.is-minimized) .preview-player-video .preview-player-slow { top: calc(50% + 44px); right: auto; left: 50%; transform: translateX(-50%); }
 .preview-modal.is-chrome-idle:not(.is-minimized) .modal-header { opacity: 0; transform: translateY(-8px); }
 .preview-modal.is-chrome-idle:not(.is-minimized) .modal-header > * { pointer-events: none; }
 .preview-modal.is-chrome-idle:not(.is-minimized) .preview-stage { cursor: none; }

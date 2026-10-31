@@ -6,7 +6,7 @@ import { encodeText } from "./text-encoding";
 import { MediaPreview, MinimizedPlayback, PreviewCachedContext, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
 import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip } from "./preview-playlist";
 import { ImageViewer } from "./preview-image";
-import { cacheFileId } from "./cache-client";
+import { cacheFileId, startPreviewPrefetch } from "./cache-client";
 import { FileCacheButton, cacheMenuItems, useCacheFiles } from "./user/cache";
 import { PreviewToolsContext, TextPreview } from "./preview-text";
 import { PdfPreview } from "./preview-pdf";
@@ -359,6 +359,20 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   const [progress, setProgress] = useState<MediaProgress>({ currentTime: 0, duration: 0 });
   const [mediaState, setMediaState] = useState<MediaState>("loading");
   const [lyric, setLyric] = useState<{ key: string; line: string | null }>({ key: active.key, line: null });
+  // 预览音视频期间在后台多段并行预读（自动缓存），关闭预览或换文件时停止；拖动进度后从新位置往后预读。
+  const prefetch = useRef<ReturnType<typeof startPreviewPrefetch> | null>(null), prefetchTime = useRef(0);
+  useEffect(() => {
+    if (!media || !ownSource) return;
+    const job = startPreviewPrefetch(active);
+    prefetch.current = job; prefetchTime.current = 0;
+    return () => { job.stop(); if (prefetch.current === job) prefetch.current = null; };
+  }, [media, ownSource, active.key, active.etag]);
+  const trackPrefetch = (value: MediaProgress) => {
+    // 播放进度跳动超过 15 秒视为拖动：按时长比例换算成字节位置。
+    if (value.duration > 0 && Math.abs(value.currentTime - prefetchTime.current) > 15)
+      prefetch.current?.seek(value.currentTime / value.duration * active.size);
+    prefetchTime.current = value.currentTime;
+  };
   const activityCallback = useRef(onPlaybackActivity);
   activityCallback.current = onPlaybackActivity;
   useEffect(() => { activityCallback.current?.({ playing: media && playing, currentTime: progress.currentTime, state: mediaState }); }, [media, playing, progress.currentTime, mediaState]);
@@ -554,7 +568,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} onSaveThumbnail={onSaveVideoThumbnail ? video => onSaveVideoThumbnail(video, active) : undefined} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height) => setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height })}
-        onProgress={value => setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value)} onState={setMediaState}
+        onProgress={value => { trackPrefetch(value); setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value); }} onState={setMediaState}
         onLyricLine={line => setLyric(current => current.key === active.key && current.line === line ? current : { key: active.key, line })}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}
         loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => api.previewAssets(active.key, signal) : undefined} nav={nav} strip={strip} /></PreviewCachedContext.Provider></PreviewToolsContext.Provider>

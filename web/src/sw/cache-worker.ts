@@ -931,6 +931,105 @@ async function fetchSegment(job: Manual, opened: Opened, [first, last]: [number,
   } finally { release(); }
 }
 
+/* ---------- 预览预读：预览打开期间，从播放位置往后多段并行补齐自动缓存；关闭预览即停止 ----------
+ * 播放器自己的请求仍按原路读取（未缓存的块直接回源），预读只是让后面的数据提前进缓存：
+ * 分片 MP4 这类需要跳着读很多位置才能开始播放的文件，跳到的位置多半已经在缓存里。
+ * 与手动缓存共用 manualSlot 的并发上限并带后台标记，服务器始终给播放留一路读取。
+ * 页面关闭预览时发 prefetch-stop；页面每 30 秒续期一次，超过 60 秒没有续期（页面崩溃、标签页关闭）也会停止。 */
+/** woken：有段完成或播放位置变化；主循环在重新安排的间隙里也不会错过这些通知。 */
+type Prefetch = { key: string; owner: string; id: string; url: string; from: number; controller: AbortController; timer?: number; wake?: () => void; woken?: boolean };
+const prefetches = new Map<string, Prefetch>();
+const PREFETCH_IDLE = 60_000, MAX_PREFETCH_FILES = 2;
+
+const wakePrefetch = (job: Prefetch) => { job.woken = true; job.wake?.(); };
+function stopPrefetch(job?: Prefetch) {
+  for (const item of job ? [job] : [...prefetches.values()]) {
+    item.controller.abort(); clearTimeout(item.timer); wakePrefetch(item);
+    if (prefetches.get(item.key) === item) prefetches.delete(item.key);
+  }
+}
+function renewPrefetch(job: Prefetch) {
+  clearTimeout(job.timer);
+  job.timer = setTimeout(() => stopPrefetch(job), PREFETCH_IDLE) as unknown as number;
+}
+
+/** 开始或更新一个预览的预读：同一预览再次调用只更新播放位置（拖动进度条后从新位置往后预读）。 */
+function startPrefetch(owner: string, id: string, url: string, from: number) {
+  if (!owner || !id || id.length > 100 || !url) return;
+  const key = `${owner}:${id}`, existing = prefetches.get(key);
+  const position = Number.isFinite(from) && from > 0 ? Math.floor(from) : 0;
+  if (existing && existing.url === url) { existing.from = position; renewPrefetch(existing); wakePrefetch(existing); return; }
+  if (existing) stopPrefetch(existing);
+  // 同时预览的文件很少；超过上限时停掉最早的那个。
+  if (prefetches.size >= MAX_PREFETCH_FILES) stopPrefetch(prefetches.values().next().value);
+  const job: Prefetch = { key, owner, id, url, from: position, controller: new AbortController() };
+  prefetches.set(key, job); renewPrefetch(job);
+  void runPrefetch(job).catch(() => undefined).finally(() => { if (prefetches.get(key) === job) stopPrefetch(job); });
+}
+
+const pause = (ms: number, signal: AbortSignal) => new Promise<void>(resolve => {
+  const timer = setTimeout(resolve, ms);
+  signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+});
+
+async function runPrefetch(job: Prefetch) {
+  const signal = job.controller.signal;
+  const value = await manualOpened(job.url);
+  const preferences = await currentSettings();
+  // 条目由播放器的第一次读取建立（handle 里登记类型、大小与版本）；等它出现再开始，最多等 20 秒。
+  let entry: EntryRecord | undefined, info: EntryInfo | null = null;
+  for (let attempt = 0; attempt < 40 && !signal.aborted; attempt++) {
+    entry = await getEntry(value.key);
+    info = entry ? await openInfo(value.context.info, entry) : null;
+    if (entry && info) break;
+    await pause(500, signal);
+  }
+  if (!entry || !info || signal.aborted || !info.size) return;
+  if (info.kind === "video" && !preferences.video && !info.manual) return;
+  if (entry.store === "dir" && !(await directoryRoot())) return;
+  const budget = tierBudget(preferences, value.route.tier);
+  const cap = info.manual ? budget : Math.max(BLOCK, Math.floor(budget / 2));
+  const opened: Opened = { tier: value.context, entry, info, key: value.keys.key, request: value.request, cap };
+  const worker: Manual = { key: `prefetch:${job.key}`, id: job.id, owner: job.owner, route: value.route, request: value.request, controller: job.controller, running: false };
+  const abort = () => job.controller.abort();
+  value.context.signal.addEventListener("abort", abort, { once: true });
+  const count = Math.ceil(info.size / BLOCK), inflight = new Set<number>();
+  let running = 0, failures = 0;
+  try {
+    while (!signal.aborted) {
+      const current = await getEntry(value.key);
+      if (!current) return;
+      opened.entry = current;
+      if (fileCacheState(current, info.size).complete || current.bytes >= cap) return;
+      const parallel = await manualParallel();
+      const present = new Set(current.blocks);
+      // 从播放位置所在的块往后找缺失的块，到末尾后再从头补；每段不跨 16 MiB 的存储分片边界。
+      const start = Math.min(count - 1, Math.floor(job.from / BLOCK));
+      for (let step = 0; step < count && running < parallel; step++) {
+        const first = (start + step) % count;
+        if (present.has(first) || inflight.has(first)) continue;
+        const groupEnd = Math.min(count - 1, (Math.floor(first / SEGMENT_BLOCKS) + 1) * SEGMENT_BLOCKS - 1);
+        let last = first;
+        while (last < groupEnd && !present.has(last + 1) && !inflight.has(last + 1)) last++;
+        for (let block = first; block <= last; block++) inflight.add(block);
+        running++;
+        void fetchSegment(worker, opened, [first, last], () => undefined)
+          .then(() => { failures = 0; }, error => {
+            // 空间到上限、文件已变化等无法恢复的错误直接停止；临时故障最多连续重试几次。
+            if (error instanceof CacheFatal || ++failures >= 4) job.controller.abort();
+          })
+          .finally(() => { for (let block = first; block <= last; block++) inflight.delete(block); running--; wakePrefetch(job); });
+      }
+      if (!running) return;
+      // 等任一段完成或播放位置变化，再重新安排。
+      if (!job.woken) await new Promise<void>(resolve => { job.wake = resolve; });
+      job.wake = undefined; job.woken = false;
+    }
+  } finally {
+    value.context.signal.removeEventListener("abort", abort);
+  }
+}
+
 async function removeFile(url: string) {
   const value = await manualOpened(url);
   stopManualWhere(job => job.route.etag === value.route.etag && job.route.tier === value.route.tier);
@@ -1200,16 +1299,16 @@ sw.addEventListener("message", event => {
       rememberAccess(typeof data.access === "string" ? data.access : "", data.expires);
       askedAt = 0;
       break;
-    case "tessera-cache:logout": rememberAccess(""); dropKeys(); break;
+    case "tessera-cache:logout": rememberAccess(""); dropKeys(); stopPrefetch(); break;
     case "tessera-cache:settings":
-      settings = null; stopManual(); dropKeys("p");
+      settings = null; stopManual(); stopPrefetch(); dropKeys("p");
       for (const key of backgrounds.keys()) void finishBackground(key);
       reply(Promise.resolve(null)); break;
     case "tessera-cache:directory":
       // 页面选择、重新授权或停用了本地缓存目录：重新读取配置，清理目录里没有对应条目的残留文件。
-      forgetDirectory(); settings = null; stopManual(); manualCache = null; itemCache = null;
+      forgetDirectory(); settings = null; stopManual(); stopPrefetch(); manualCache = null; itemCache = null;
       reply(sweepDirectory().catch(() => 0)); break;
-    case "tessera-cache:directory-off": stopManual(); reply(stopDirectory()); break;
+    case "tessera-cache:directory-off": stopManual(); stopPrefetch(); reply(stopDirectory()); break;
     case "tessera-cache:nudge":
       event.waitUntil(Promise.resolve(clearPrivateMaterials()));
       if (Date.now() - lastReconcile > 5000) scheduleReconcile(3000); break;
@@ -1229,6 +1328,8 @@ sw.addEventListener("message", event => {
       stopManualWhere(job => job.owner === owner && (!data.id || job.id === data.id));
       reply(Promise.resolve(null)); break;
     case "tessera-cache:remove-file": reply(removeFile(data.url ?? "")); break;
+    case "tessera-cache:prefetch": startPrefetch(owner, data.id ?? "", data.url ?? "", Number((data as { from?: unknown }).from ?? 0)); break;
+    case "tessera-cache:prefetch-stop": for (const job of [...prefetches.values()]) if (job.owner === owner && (!data.id || job.id === data.id)) stopPrefetch(job); break;
   }
 });
 

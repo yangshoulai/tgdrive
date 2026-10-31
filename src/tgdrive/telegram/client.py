@@ -8,6 +8,8 @@ HTTP 客户端。生产部署可以通过包装 transport 接入连接池；测�
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import http.client
 import json
 import mimetypes
@@ -59,6 +61,19 @@ class Transport(Protocol):
     async def request(self, method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> HttpResponse: ...
 
 
+# Telegram 网络请求专用线程池：每个下载窗口（最大 8 MB）在线程里同步读取，可能持续数秒。
+# 默认线程池只有「CPU 核数 + 4」个线程，并与解密、缓存写入共用；小机器上几个长下载就能占满，
+# 播放器跳到别处（如读取文件末尾的索引）的请求会排在后面，表现为缓存了很多却迟迟不能播放。
+# 这些线程几乎只在等网络，并发量另由传输名额与上传名额限制，单独开一个足够大的池子。
+NETWORK_THREADS = 64
+_network_pool = concurrent.futures.ThreadPoolExecutor(max_workers=NETWORK_THREADS, thread_name_prefix="telegram-net")
+
+
+async def in_network_thread(function, *args):
+    """在网络线程池里运行阻塞的 HTTP 请求（取消时线程继续运行到下一个检查点，与 asyncio.to_thread 相同）。"""
+    return await asyncio.get_running_loop().run_in_executor(_network_pool, functools.partial(function, *args))
+
+
 class UrllibTransport:
     async def request(self, method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> HttpResponse:
         def request_sync() -> HttpResponse:
@@ -70,7 +85,7 @@ class UrllibTransport:
                 return HttpResponse(exc.code, dict(exc.headers.items()), exc.read())
             except (urllib.error.URLError, TimeoutError) as exc:
                 raise TelegramTransientError(str(exc)) from exc
-        return await asyncio.to_thread(request_sync)
+        return await in_network_thread(request_sync)
 
 
 @dataclass(frozen=True)
@@ -175,7 +190,7 @@ class PooledTransport:
         # 避免被中断的预览请求继续占用 Telegram 带宽和线程池。
         cancel = threading.Event()
         try:
-            return await asyncio.to_thread(self._request_sync, method, url, headers, body, cancel)
+            return await in_network_thread(self._request_sync, method, url, headers, body, cancel)
         except asyncio.CancelledError:
             cancel.set()
             raise

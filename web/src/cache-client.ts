@@ -77,6 +77,24 @@ async function ask<T>(type: string, extra: Record<string, unknown> = {}, timeout
   });
 }
 
+/**
+ * 预览预读：预览音视频期间让 Worker 从播放位置往后多段并行补齐自动缓存（规则同自动缓存：关闭自动缓存视频时不预读，
+ * 单个文件最多占这一层容量的一半）。seek 在拖动进度后更新位置，stop 在关闭预览时调用；页面每 30 秒续期，
+ * 页面意外关闭时 Worker 在 60 秒内自行停止。
+ */
+export function startPreviewPrefetch(file: CacheFile) {
+  if (!cacheSupported()) return { seek: (_: number) => undefined, stop: () => undefined };
+  const id = `preview-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`, url = fileUrl(file);
+  let from = 0;
+  const send = () => notify("tessera-cache:prefetch", { id, url, from });
+  send();
+  const timer = window.setInterval(send, 30_000);
+  return {
+    seek: (byte: number) => { from = Math.max(0, Math.floor(byte)); send(); },
+    stop: () => { window.clearInterval(timer); notify("tessera-cache:prefetch-stop", { id }); },
+  };
+}
+
 /** 只读统计（不解密条目），侧栏与设置页都可以频繁调用。 */
 export const cacheStats = () => ask<CacheStats>("tessera-cache:stats");
 /** 已缓存文件的分页列表；搜索、筛选与排序在 Worker 内完成，每页最多 200 项。 */

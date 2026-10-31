@@ -178,6 +178,8 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
       return result.value;
     },
     async dispatchFetch(event) { listeners.get("fetch")(event); },
+    /** 页面发来的单向消息（不等回复），带发送页面的标识。 */
+    notify(type, extra = {}, owner = "page-A") { listeners.get("message")({ data: { type, ...extra }, source: { id: owner }, ports: [], waitUntil: () => undefined }); },
     origins: () => requests.filter(request => new URL(request.url).pathname.endsWith("/content")),
     keyRequests: () => requests.filter(request => new URL(request.url).pathname.endsWith("/cache/keys")),
   };
@@ -855,4 +857,49 @@ test("回源没有按 Range 返回（200）但版本相同，不能删除已缓�
   const after = h.entries.get(entry.key);
   assert.ok(after, "条目不能被删除");
   assert.deepEqual(after.blocks.slice(0, 2), [0, 1]);
+});
+
+const until = async (check, timeout = 3000) => {
+  for (const started = Date.now(); Date.now() - started < timeout; await new Promise(resolve => setTimeout(resolve, 10))) if (await check()) return true;
+  return false;
+};
+const background = h => h.origins().filter(request => request.headers.get("x-tessera-background") === "cache");
+
+test("预览预读：播放器建立条目后，后台带后台标记并行补齐整个文件，完成后停止", async t => {
+  const h = harness(t, { "clip.bin": bytes(9 * store.BLOCK + 137) });
+  h.state.reads = 4;
+  await h.read("clip.bin", { range: `bytes=0-${store.BLOCK - 1}` });
+  h.notify("tessera-cache:prefetch", { id: "preview-1", url: h.url("clip.bin"), from: 0 });
+  const entry = () => [...h.entries.values()][0];
+  assert.ok(await until(() => entry()?.blocks.length === 10), "预读补齐了全部块");
+  const ranges = background(h).map(request => request.headers.get("range"));
+  assert.ok(ranges.length >= 2 && !ranges.includes(`bytes=0-${store.BLOCK - 1}`), "已缓存的首块不重复读取，其余按段并行读取");
+  const { data } = await h.read("clip.bin");
+  assert.deepEqual(data, h.files.get("clip.bin").data);
+});
+
+test("预览预读从播放位置往后开始，拖动后改从新位置补", async t => {
+  const h = harness(t, { "clip.bin": bytes(12 * store.BLOCK) });
+  h.state.reads = 2;  // 只有一路后台读取，顺序可预期
+  await h.read("clip.bin", { range: `bytes=0-${store.BLOCK - 1}` });
+  h.notify("tessera-cache:prefetch", { id: "preview-1", url: h.url("clip.bin"), from: 8 * store.BLOCK + 10 });
+  assert.ok(await until(() => background(h).length > 0));
+  assert.match(background(h)[0].headers.get("range"), new RegExp(`^bytes=${8 * store.BLOCK}-`), "从播放位置所在的块开始");
+});
+
+test("关闭预览立即停止预读：进行中的后台请求被中止，不再发出新请求", { timeout: 5000 }, async t => {
+  const h = harness(t, { "clip.bin": bytes(9 * store.BLOCK) });
+  h.state.reads = 4;
+  await h.read("clip.bin", { range: `bytes=0-${store.BLOCK - 1}` });
+  const stalled = [];
+  h.state.originHook = request => request.headers.get("x-tessera-background") === "cache"
+    ? new Promise((_, reject) => { stalled.push(request); request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }); })
+    : null;
+  h.notify("tessera-cache:prefetch", { id: "preview-1", url: h.url("clip.bin"), from: 0 });
+  assert.ok(await until(() => stalled.length > 0));
+  h.notify("tessera-cache:prefetch-stop", { id: "preview-1" });
+  assert.ok(await until(() => stalled.every(request => request.signal.aborted)), "关闭预览后中止了进行中的预读");
+  const count = background(h).length;
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(background(h).length, count, "停止后不再发出新的预读请求");
 });
