@@ -365,7 +365,8 @@ export const saveTextFile = (file: FileItem, data: Uint8Array, force = false) =>
 /** 单个文件的当前元数据（最新 ETag、大小与修改时间）。 */
 export const fileInfo = (path: string) => request<FileItem>(`${fileApi("/files/info", path)}?path=${encodeURIComponent(path)}`);
 /** 侧栏收藏的文件夹（完整键，私密文件夹以 .tgdrive/private/ 开头）；missing 表示文件夹已不存在。 */
-export type Favorite = { path: string; icon: string | null; private: boolean; missing: boolean };
+/** locked：私密收藏且当前会话未解锁（仍显示，点击后先解锁）。 */
+export type Favorite = { path: string; icon: string | null; private: boolean; locked?: boolean; missing: boolean };
 export const favorites = () => request<{ items: Favorite[]; limit: number }>("/api/user/v1/favorites");
 /** 整体保存收藏的顺序与图标（icon 为 null 表示默认文件夹图标）。 */
 export const saveFavorites = (items: { path: string; icon: string | null }[]) => request<{ items: Favorite[]; limit: number }>("/api/user/v1/favorites", { method: "PUT", body: JSON.stringify({ items }) });

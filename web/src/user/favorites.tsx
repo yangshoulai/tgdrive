@@ -1,6 +1,6 @@
 /**
  * 侧栏「收藏」：固定常用文件夹（类似 Finder 的个人收藏）。列表按账号保存在服务端（GET/PUT /api/user/v1/favorites），
- * 多台设备同步；私密文件夹只在当前会话已解锁时返回，锁定时保存的顺序由服务端把它们放回原位。
+ * 多台设备同步；私密文件夹锁定时也显示（locked），点击后进入私密空间并弹出解锁框，解锁后打开该文件夹。
  * 入口：文件夹菜单「固定到侧栏」，或把文件夹从文件列表拖到收藏区域；收藏之间拖动排序，右键可上移、下移、移除。
  * 文件夹移动或改名后服务端同步改写（图标随之保留），移入回收站后移除；已不存在的显示为灰色。
  * 每个收藏可以选一个图标（右键「更改图标…」，FAVORITE_ICONS），不选时普通文件夹用文件夹图标、私密文件夹用锁形图标。
@@ -14,16 +14,29 @@ export type Favorite = api.Favorite;
 /** 文件列表拖动时携带的键（与 user/files.tsx 的 INTERNAL_DRAG 一致）。 */
 export const FILE_DRAG = "application/x-tgdrive-keys";
 const FAVORITE_DRAG = "application/x-tessera-favorite";
+/** 点击锁定的私密收藏时请求私密空间页弹出解锁框（user/private.tsx 监听）。 */
+export const UNLOCK_REQUEST_EVENT = "tessera:private-unlock-request";
 
 let items: Favorite[] = [];
 let loaded = false;
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach(listener => listener());
-let loading: Promise<void> | null = null;
+let loading: Promise<void> | null = null, again = false;
+/** 本页刚锁定：服务端可能还没处理完锁定请求，读回的结果仍是已解锁；在下一次解锁之前，私密收藏一律按锁定显示。 */
+let lockedHere = false;
+const applyLock = (list: Favorite[]) => lockedHere ? list.map(item => item.private ? { ...item, locked: true } : item) : list;
 
-export function refreshFavorites() {
-  loading ??= api.favorites().then(value => { items = value.items; loaded = true; emit(); }).catch(() => undefined).finally(() => { loading = null; });
+export function refreshFavorites(): Promise<void> {
+  // 读取进行中又有新的请求（例如刚锁定或移动了文件夹）：本次结束后再读一次，不能复用可能已过时的结果。
+  if (loading) { again = true; return loading; }
+  loading = api.favorites().then(value => { items = applyLock(value.items); loaded = true; emit(); }).catch(() => undefined)
+    .finally(() => { loading = null; if (again) { again = false; void refreshFavorites(); } });
   return loading;
+}
+function privateLockChanged(locked: boolean) {
+  lockedHere = locked;
+  items = items.map(item => item.private ? { ...item, locked } : item); emit();
+  void refreshFavorites();
 }
 
 /** 侧栏收藏可选的图标；null 为默认（文件夹，私密文件夹为锁形）。名称是 ui.tsx 的图标名，服务端只校验格式。 */
@@ -125,9 +138,10 @@ export function FavoritesNav({ section, prefix, rail, onOpen, hrefFor }: {
   useEffect(() => { void refreshFavorites(); }, [section, prefix]);
   useEffect(() => {
     const refresh = () => void refreshFavorites();
-    window.addEventListener("tessera:private-locked", refresh); window.addEventListener("tessera:private-unlocked", refresh);
+    const locked = () => privateLockChanged(true), unlocked = () => privateLockChanged(false);
+    window.addEventListener("tessera:private-locked", locked); window.addEventListener("tessera:private-unlocked", unlocked);
     window.addEventListener("focus", refresh);
-    return () => { window.removeEventListener("tessera:private-locked", refresh); window.removeEventListener("tessera:private-unlocked", refresh); window.removeEventListener("focus", refresh); };
+    return () => { window.removeEventListener("tessera:private-locked", locked); window.removeEventListener("tessera:private-unlocked", unlocked); window.removeEventListener("focus", refresh); };
   }, []);
   const accepts = (event: DragEvent) => event.dataTransfer.types.includes(FAVORITE_DRAG) || event.dataTransfer.types.includes(FILE_DRAG);
   // 放在第几项之前：按指针位于项目上半部还是下半部决定。
@@ -171,6 +185,8 @@ export function FavoritesNav({ section, prefix, rail, onOpen, hrefFor }: {
       return;
     }
     onOpen(item.path);
+    // 私密空间页已经打开且锁定时不会再自动弹出解锁框：请求它弹出（刚进入时会自动弹出，重复请求无害）。
+    if (item.locked) window.dispatchEvent(new CustomEvent(UNLOCK_REQUEST_EVENT));
   };
   const menu = (path: string): MenuItem[] => {
     const index = list.findIndex(item => item.path === path), paths = list.map(item => item.path);
@@ -191,7 +207,7 @@ export function FavoritesNav({ section, prefix, rail, onOpen, hrefFor }: {
       const name = folderName(item.path), active = current === item.path;
       return <a key={item.path} href={hrefFor(item.path)} draggable
         className={`nav-item nav-favorite${active ? " is-active" : ""}${item.missing ? " is-missing" : ""}${dragging === item.path ? " is-dragging" : ""}${drop === index ? " drop-before" : ""}${drop === index + 1 && index === list.length - 1 ? " drop-after" : ""}`}
-        aria-current={active ? "page" : undefined} title={item.missing ? `${name}（已不存在）` : rail ? name : api.privatePathLabel(item.path)}
+        aria-current={active ? "page" : undefined} title={item.missing ? `${name}（已不存在）` : item.locked ? `${api.privatePathLabel(item.path)}（已锁定，点击后解锁）` : rail ? name : api.privatePathLabel(item.path)}
         onClick={event => open(event, item)} onContextMenu={event => { event.preventDefault(); setContext({ path: item.path, x: event.clientX, y: event.clientY }); }}
         onDragStart={event => { event.dataTransfer.setData(FAVORITE_DRAG, item.path); event.dataTransfer.effectAllowed = "move"; setDragging(item.path); }}
         onDragEnd={() => { setDragging(null); setDrop(null); }}

@@ -83,7 +83,7 @@ class FavoriteTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(status, (400, 403), body)
             self.assertEqual(await self.paths(), [])
 
-    async def test_private_favorites_hidden_while_locked_and_kept(self):
+    async def test_private_favorites_shown_locked_while_locked(self):
         private = PRIVATE_PREFIX + "账本/"
         # 未解锁不能新增私密收藏。
         status, _ = await self.call("PUT", {"paths": [private]})
@@ -96,11 +96,17 @@ class FavoriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(item["path"], item["private"]) for item in body["items"]], [("音乐/", False), (private, True), ("照片/2024/", False)])
         status, _, data = await self.client.request("POST", "/api/user/v1/private/lock", b"{}", {**self.auth, "x-private-access": access})
         self.assertEqual(status, 204, data)
-        # 锁定后看不到私密收藏；此时调整普通收藏的顺序，私密收藏按原位置保留。
-        self.assertEqual(await self.paths(), ["音乐/", "照片/2024/"])
-        await self.call("PUT", {"paths": ["照片/2024/", "音乐/"]})
-        status, _, data = await self.client.request("POST", "/api/user/v1/private/unlock", json.dumps({"password": "alice password"}).encode(), self.auth)
+        # 锁定后私密收藏仍然显示（locked=True，点击时先解锁），可以排序，但不能新增私密收藏。
+        status, body = await self.call("GET")
+        self.assertEqual([(item["path"], item["locked"]) for item in body["items"]], [("音乐/", False), (private, True), ("照片/2024/", False)])
+        status, body = await self.call("PUT", {"paths": ["照片/2024/", private, "音乐/"]})
+        self.assertEqual(status, 200, body)
         self.assertEqual(await self.paths(), ["照片/2024/", private, "音乐/"])
+        status, _ = await self.call("PUT", {"paths": ["照片/2024/", private, PRIVATE_PREFIX + "日记/"]})
+        self.assertEqual(status, 423)
+        status, _, data = await self.client.request("POST", "/api/user/v1/private/unlock", json.dumps({"password": "alice password"}).encode(), self.auth)
+        status, body = await self.call("GET")
+        self.assertFalse(any(item["locked"] for item in body["items"]))
 
 
 if __name__ == "__main__":

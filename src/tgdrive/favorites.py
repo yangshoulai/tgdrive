@@ -3,7 +3,7 @@
 每项是文件夹的完整键（以 / 结尾）加可选的图标名：普通文件夹如 ``照片/2024/``，私密空间的文件夹以 ``.tgdrive/private/`` 开头。
 图标只是界面里的名称（如 ``audio``、``film``），服务端只校验格式，前端不认识的名称按默认文件夹图标显示。
 旧版本只存路径字符串，读取时兼容。
-私密收藏只在当前登录会话已解锁时返回；锁定时保存的列表不包含它们，服务端按原位置把它们放回去，不会丢失。
+私密收藏锁定时也返回（带 locked 标记，界面点击后先解锁）；锁定时不能新增私密收藏。
 文件夹被移动或改名时由 ``ObjectService.move`` 在同一事务里调用 :func:`moved` 改写；移入回收站或系统区时移除。
 """
 
@@ -76,7 +76,7 @@ def store(db, bucket_id: int, entries: list[Entry]) -> None:
 
 
 def merge_hidden(current: list[Entry], given: list[Entry], hidden: set[str]) -> list[Entry]:
-    """锁定时客户端看不到私密收藏：把它们按原来的位置插回客户端提交的新顺序里（同一路径只保留第一项）。"""
+    """去重并把客户端看不到的项目（hidden）按原来的位置插回新顺序里；目前私密收藏锁定时也可见，调用方传空集合。"""
     result: list[Entry] = []
     seen: set[str] = set()
     for entry in given:

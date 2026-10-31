@@ -40,6 +40,8 @@ MAX_CREATE_ITEMS = 1000
 MAX_PENDING_TASKS = 20_000
 ACTIVE = ("queued", "running", "interrupted")
 RETRY_DELAYS = (10, 30, 90)
+# 解析时探测来源文件信息（HEAD／GET 响应头）：单次上限、尝试次数、重试间隔与总时长（留在 30 秒的解析请求超时之内）。
+PROBE_TIMEOUT, PROBE_ATTEMPTS, PROBE_RETRY_DELAY, PROBE_BUDGET = 10, 2, 1, 24
 # mimetypes 对这几种常见类型给出的扩展名不符合习惯（如 .jpe），这里固定。
 KNOWN_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
                     "video/mp4": ".mp4", "audio/mp4": ".m4a", "audio/mpeg": ".mp3", "application/pdf": ".pdf",
@@ -279,28 +281,43 @@ class OfflineDownloads:
         name, size, content_type = request.name or url_filename(request.url), None, None
         # POST 的解析完全不访问来源，不预先发送，也不进行探测性重放。
         if request.method == "GET":
-            try:
-                async with asyncio.timeout(6):
-                    for method in ("HEAD", "GET"):
-                        # 兼容拒绝 HEAD 或省略元数据的来源；GET 只读响应头，立即关闭连接。
-                        async with self.http.open(request, method=method, identity=True) as response:
-                            if response.status != 200:
-                                if method == "HEAD" and response.status in (400, 403, 405, 501):
-                                    continue
-                                raise DownloadError(f"来源未提供文件信息（HTTP {response.status}），请检查链接和认证参数")
-                            size = response.size
-                            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower() or None
-                            message = Message()
-                            message["Content-Disposition"] = response.headers.get("content-disposition", "")
-                            suggested = message.get_filename()
-                            if suggested and not request.name:
-                                name = filename(unquote(suggested))
-                            if method == "GET" or size is not None and content_type:
-                                break
-            except DownloadError as exc:
-                request.warnings.append(f"暂未取得文件信息：{exc}")
-            except TimeoutError:
-                request.warnings.append("获取文件信息超时，开始下载时会再次校验来源")
+            async def probe():
+                found_size, found_type, found_name = None, None, None
+                for method in ("HEAD", "GET"):
+                    # 兼容拒绝 HEAD 或省略元数据的来源；GET 只读响应头，立即关闭连接。
+                    async with self.http.open(request, method=method, identity=True) as response:
+                        if response.status != 200:
+                            if method == "HEAD" and response.status in (400, 403, 405, 501):
+                                continue
+                            raise status_error(response.status, f"来源未提供文件信息（HTTP {response.status}），请检查链接和认证参数")
+                        found_size = response.size
+                        found_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower() or None
+                        message = Message()
+                        message["Content-Disposition"] = response.headers.get("content-disposition", "")
+                        found_name = message.get_filename()
+                        if method == "GET" or found_size is not None and found_type:
+                            break
+                return found_size, found_type, found_name
+            # 网盘直链等来源首次响应常常较慢：每次最多等 PROBE_TIMEOUT 秒，超时、网络抖动或限流／临时故障时稍后重试，
+            # 总时长不超过 PROBE_BUDGET（脚本与网页的解析请求最多等 30 秒）。内容、权限、证书错误不重试。
+            deadline = time.monotonic() + PROBE_BUDGET
+            for attempt in range(1, PROBE_ATTEMPTS + 1):
+                remaining = deadline - time.monotonic()
+                try:
+                    async with asyncio.timeout(min(PROBE_TIMEOUT, remaining)):
+                        size, content_type, suggested = await probe()
+                    if suggested and not request.name:
+                        name = filename(unquote(suggested))
+                    break
+                except (TimeoutError, TransientError) as exc:
+                    if attempt < PROBE_ATTEMPTS and deadline - time.monotonic() > PROBE_RETRY_DELAY + 2:
+                        await asyncio.sleep(PROBE_RETRY_DELAY)
+                        continue
+                    request.warnings.append("获取文件信息超时，开始下载时会再次校验来源" if isinstance(exc, TimeoutError)
+                                            else f"暂未取得文件信息：{exc}")
+                except DownloadError as exc:
+                    request.warnings.append(f"暂未取得文件信息：{exc}")
+                    break
         if not request.name and "." not in name and content_type and content_type != "application/octet-stream":
             # 地址里没有扩展名（如 /it/u=123&fm=3028）时按来源的 Content-Type 补上，便于识别和打开文件。
             extension = KNOWN_EXTENSIONS.get(content_type) or mimetypes.guess_extension(content_type, strict=False)

@@ -7,6 +7,7 @@ import { TrashView } from "./trash";
 import { PRIVATE_SECTION_EVENT, setPrivateSection } from "./assistant-bridge";
 import type { UploadQueue } from "./uploads";
 import { PrivateUnlockDialog } from "./private-unlock";
+import { UNLOCK_REQUEST_EVENT } from "./favorites";
 import { usePrivateAccess, usePrivateSession } from "./private-session";
 import { takeTransferRequest, useTransferReceiver, type TransferState } from "./transfer";
 
@@ -36,6 +37,12 @@ export function PrivateSpaceView({ session, prefix, onOpenFolder, onChanged, upl
   const [unlocking, setUnlocking] = useState(true);
   // 解锁成功时解锁框随锁定页一起卸载，来不及回调，这里收起：之后手动锁定不再自动弹出。
   useEffect(() => { if (grant) setUnlocking(false); }, [grant]);
+  // 侧栏点击锁定的私密收藏：已在本页时重新弹出解锁框，解锁后显示该文件夹。
+  useEffect(() => {
+    const request = () => setUnlocking(true);
+    window.addEventListener(UNLOCK_REQUEST_EVENT, request);
+    return () => window.removeEventListener(UNLOCK_REQUEST_EVENT, request);
+  }, []);
   const [transferRequest] = useState(takeTransferRequest);
   const [transfer, discardTransfer] = useTransferReceiver(transferRequest);
   const incoming = transfer && transfer.ended && !transfer.error && transfer.files.length ? transfer.files : null;
