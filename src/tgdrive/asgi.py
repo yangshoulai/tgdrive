@@ -966,6 +966,11 @@ class TgDriveASGI(StaticFiles):
                 return 200, await user.save_share(token, csrf, shared[1], payload.get("destination", ""), payload.get("paths")), {}
             if route == "/usage" and method == "GET" and not private:
                 return 200, user.usage(token), {"Cache-Control": "no-store"}
+            if route == "/favorites" and not private:
+                if method == "GET":
+                    return 200, user.favorites(token), {"Cache-Control": "no-store"}
+                if method == "PUT":
+                    return 200, user.set_favorites(token, csrf, payload.get("paths")), {"Cache-Control": "no-store"}
             if route.startswith("/cache/") and method == "POST" and not private:
                 # 缓存响应一律不进入 HTTP 缓存。任务读取复用登录会话；
                 # 创建私密任务要求当前已解锁，创建任务与重置纪元要求 CSRF。

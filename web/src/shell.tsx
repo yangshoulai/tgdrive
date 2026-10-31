@@ -1,5 +1,5 @@
 /** 用户端与管理端共用的应用外壳、登录页和首次设置页。 */
-import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
 import { BRAND, SITE, STORY, TAGLINE } from "./brand";
 import * as api from "./api";
 import { loginWithPasskey, passkeyUnavailable } from "./passkeys";
@@ -26,8 +26,12 @@ function readCollapsed(): string[] {
   catch { return []; }
 }
 
-export function AppShell<K extends string>({ groups, workspaces = [], active, onNavigate, hrefFor, sidebarAction, sidebarFooter, links = [], account, children }: {
+export function AppShell<K extends string>({ groups, slot, workspaces = [], active, activeHighlight = true, onNavigate, hrefFor, sidebarAction, sidebarFooter, links = [], account, children }: {
   groups: NavGroup<K>[];
+  /** 插在某个分组之后的自定义分组（侧栏收藏）：与普通分组一样可折叠，内容由调用方渲染。 */
+  slot?: { label: string; after: string; render: (rail: boolean) => ReactNode };
+  /** false 时不高亮任何导航项（当前位置由 slot 里的项目高亮，例如打开了收藏的文件夹）。 */
+  activeHighlight?: boolean;
   workspaces?: NavWorkspace[];
   active: K;
   onNavigate: (key: K) => void;
@@ -112,21 +116,26 @@ export function AppShell<K extends string>({ groups, workspaces = [], active, on
               const content = <><Icon name={item.icon} size={17} /><span className="nav-label">{item.label}</span>{item.count !== undefined && item.count > 0 && <span className={`nav-count${item.live ? " is-live" : ""}`}>{item.count > 99 ? "99+" : item.count}</span>}{item.href && <Icon name="external" size={14} className="nav-external" />}</>;
               return item.href
                 ? <a key={item.key} className="nav-item" href={item.href} target="_blank" rel="noreferrer" title={rail ? item.label : undefined}>{content}</a>
-                : <a key={item.key} className={`nav-item${active === item.key ? " is-active" : ""}`} href={hrefFor(item.key)} aria-current={active === item.key ? "page" : undefined} title={rail ? item.label : undefined}
+                : <a key={item.key} className={`nav-item${activeHighlight && active === item.key ? " is-active" : ""}`} href={hrefFor(item.key)} aria-current={activeHighlight && active === item.key ? "page" : undefined} title={rail ? item.label : undefined}
                   onClick={event => { if (isPlainClick(event)) { event.preventDefault(); onNavigate(item.key); } }}>{content}</a>;
             });
             if (!group.label) return <div className="nav-group" key={`group-${index}`}><div className="nav-group-list">{items}</div></div>;
-            return (
-              <div className={`nav-group is-collapsible${folded ? " is-collapsed" : ""}`} key={group.label}>
-                <button type="button" className="nav-group-toggle" aria-expanded={!folded} aria-controls={id}
-                  onClick={() => saveCollapsed(folded ? collapsed.filter(item => item !== group.label) : [...collapsed, group.label!])}>
-                  <span>{group.label}</span>
-                  {folded && holdsActive && <span className="nav-group-dot" aria-hidden="true" />}
+            const block = (label: string, key: string, content: ReactNode, dot: boolean) => {
+              const closed = !rail && collapsed.includes(label);
+              return <div className={`nav-group is-collapsible${closed ? " is-collapsed" : ""}`} key={key}>
+                <button type="button" className="nav-group-toggle" aria-expanded={!closed} aria-controls={`${key}-items`}
+                  onClick={() => saveCollapsed(closed ? collapsed.filter(item => item !== label) : [...collapsed, label])}>
+                  <span>{label}</span>
+                  {closed && dot && <span className="nav-group-dot" aria-hidden="true" />}
                   <Icon name="chevronDown" size={12} />
                 </button>
-                <div className="nav-group-items" id={id}><div className="nav-group-list">{items}</div></div>
-              </div>
-            );
+                <div className="nav-group-items" id={`${key}-items`}><div className="nav-group-list">{content}</div></div>
+              </div>;
+            };
+            return <Fragment key={group.label}>
+              {block(group.label, id, items, folded && holdsActive)}
+              {slot && slot.after === group.label && block(slot.label, `nav-slot-${index}`, slot.render(rail), !activeHighlight)}
+            </Fragment>;
           })}
         </nav>
         <div className="sidebar-bottom">

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { isFatalCacheError, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
+import { isFatalCacheError, loadPrivateCacheQueue, savePrivateCacheQueue, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
 import { BRAND } from "../brand";
 import { effectiveMiB } from "../cache-store";
 import { FileTile, getFileKind } from "../files";
@@ -53,8 +53,39 @@ function pause(signal: AbortSignal, delay = 1500) {
   });
 }
 
-/** 队列属于已登录的应用外壳；已加入的缓存任务不受私密空间锁定影响。 */
-export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, children }: { enabled: boolean; onOpenTasks: () => void; onActiveChange?: (count: number) => void; children: ReactNode }) {
+/** 刷新页面后恢复的任务记录，按账号分开：普通文件存在 localStorage；私密文件交给 Worker 用私密层密钥加密保存，
+ * 只有解锁后才能读写（不以明文写入浏览器存储）。进行中与排队的任务恢复后自动从已缓存处续传；退出登录或关闭本机缓存时删除。 */
+const SAVED_VERSION = 1, SAVED_LIMIT = 1000;
+type SavedQueue = { version: number; jobs: CacheJob[]; folders: string[][] };
+function parseQueue(text: string | null, privateTier: boolean): SavedQueue | null {
+  try {
+    const value = JSON.parse(text ?? "null") as Partial<SavedQueue> | null;
+    if (!value || value.version !== SAVED_VERSION || !Array.isArray(value.jobs)) return null;
+    const statuses = new Set(["queued", "active", "paused", "done", "error", "canceled"]);
+    const jobs = value.jobs.filter(job => job && typeof job.id === "string" && job.file && typeof job.file.key === "string" && typeof job.file.etag === "string"
+      && typeof job.file.size === "number" && api.isPrivatePath(job.file.key) === privateTier && statuses.has(job.status))
+      .map(job => ({ ...job, group: undefined, status: job.status === "active" ? "queued" as const : job.status, waiting: false, retrying: undefined }));
+    const folders = Array.isArray(value.folders) ? value.folders.filter(prefixes => Array.isArray(prefixes) && prefixes.length > 0
+      && prefixes.every(prefix => typeof prefix === "string" && api.isPrivatePath(prefix) === privateTier)) : [];
+    return { version: SAVED_VERSION, jobs, folders };
+  } catch { return null; }
+}
+/** 序列化一层的队列；没有任何记录时返回空字符串（表示删除）。 */
+function serializeQueue(jobs: CacheJob[], folders: FolderCacheJob[], privateTier: boolean) {
+  const tier = jobs.filter(job => api.isPrivatePath(job.file.key) === privateTier).map(({ group: _group, retrying: _retrying, ...job }) => ({ ...job, waiting: false }));
+  // 进行中与排队的任务全部保留，历史记录只留最近的部分。
+  const running = tier.filter(isRunning), history = tier.filter(job => !isRunning(job)).slice(-SAVED_LIMIT);
+  const prefixes = folders.filter(folder => folder.status === "active").map(folder => folder.prefixes.filter(prefix => api.isPrivatePath(prefix) === privateTier)).filter(list => list.length);
+  return running.length || history.length || prefixes.length ? JSON.stringify({ version: SAVED_VERSION, jobs: [...history, ...running], folders: prefixes }) : "";
+}
+function writeLocal(key: string, text: string) {
+  try { if (text) localStorage.setItem(key, text); else localStorage.removeItem(key); } catch { /* 存储已满或被禁用时只是不能在刷新后恢复 */ }
+}
+const readLocal = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
+
+/** 队列属于已登录的应用外壳；已加入的缓存任务不受私密空间锁定影响。owner 区分账号，用于刷新后恢复任务。 */
+export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange, children }: { enabled: boolean; owner?: string; onOpenTasks: () => void; onActiveChange?: (count: number) => void; children: ReactNode }) {
+  const storageKey = owner ? `tessera:cache-jobs:${owner}` : "";
   const access = usePrivateAccess();
   const [privateCacheEnabled, setPrivateCacheEnabled] = useState(false);
   const privateReady = enabled && privateCacheEnabled && Boolean(access.grant);
@@ -87,11 +118,12 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
       if (!alive) return;
       setAvailable(value.settings.enabled);
       setPrivateCacheEnabled(value.settings.private);
+      if (!value.settings.enabled && storageKey) writeLocal(storageKey, "");
     }).catch(() => undefined);
     read();
     window.addEventListener("tessera:cache-changed", read);
     return () => { alive = false; window.removeEventListener("tessera:cache-changed", read); };
-  }, [enabled]);
+  }, [enabled, storageKey]);
   // 本地缓存目录的授权在浏览器重启后可能需要重新确认：每次登录提示一次，点击提示中的按钮即可授权（需要用户点击）。
   useEffect(() => {
     if (!enabled || !available) return;
@@ -147,12 +179,63 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
     const used = new Set([...jobs.filter(job => job.status !== "done").map(job => job.group), ...folders.map(folder => folder.group)]);
     for (const id of groups.current.keys()) if (!used.has(id)) { releaseCacheGroup(id); groups.current.delete(id); }
   }, [jobs, folders]);
+  // 刷新后恢复：开启缓存且可用后读取一次保存的队列（私密队列在解锁后读取）；离开页面时先保存再停止，停止后的空队列不写回。
+  const restored = useRef(false), leaving = useRef(false), restoreFolders = useRef<string[][]>([]);
+  const privateLoaded = useRef<"no" | "loading" | "yes">("no"), privateSaved = useRef<string | null>(null);
+  const [restoreTick, setRestoreTick] = useState(0);
+  const mergeRestored = useCallback((saved: SavedQueue, group?: string) => {
+    update(value => {
+      const known = new Set(value.map(job => cacheFileId(job.file)));
+      return [...saved.jobs.filter(job => !known.has(cacheFileId(job.file))).map(job => group && job.status !== "done" ? { ...job, group } : job), ...value];
+    });
+    restoreFolders.current = [...restoreFolders.current, ...saved.folders];
+    setRestoreTick(value => value + 1);
+  }, [update]);
   useEffect(() => {
-    const stop = () => reset(false);
+    if (!enabled || !available || !storageKey || restored.current) return;
+    restored.current = true;
+    const saved = parseQueue(readLocal(storageKey), false);
+    if (saved) mergeRestored(saved);
+  }, [enabled, available, storageKey, restoreTick, mergeRestored]);
+  useEffect(() => {
+    if (!enabled || !available || !privateReady || privateLoaded.current !== "no") return;
+    privateLoaded.current = "loading";
+    void loadPrivateCacheQueue().catch(() => null).then(text => {
+      privateSaved.current = text ?? "";
+      privateLoaded.current = "yes";
+      const saved = parseQueue(text, true);
+      if (!saved || !ready.current.privateReady) return;
+      // 私密任务需要重新登记任务组（服务端按当前解锁授权核对路径）后才能继续。
+      const group = crypto.randomUUID(), known = new Set(jobsRef.current.map(job => cacheFileId(job.file)));
+      const paths = saved.jobs.filter(job => job.status !== "done" && !known.has(cacheFileId(job.file))).map(job => job.file.key);
+      if (paths.length) prepareGroup(paths, group);
+      mergeRestored(saved, paths.length ? group : undefined);
+    });
+  }, [enabled, available, privateReady, restoreTick, mergeRestored, prepareGroup]);
+  const persist = useCallback(() => {
+    if (leaving.current) return;
+    if (restored.current && storageKey) writeLocal(storageKey, serializeQueue(jobsRef.current, foldersRef.current, false));
+    if (privateLoaded.current === "yes" && ready.current.privateReady) {
+      const text = serializeQueue(jobsRef.current, foldersRef.current, true);
+      if (text !== privateSaved.current) { privateSaved.current = text; void savePrivateCacheQueue(text).catch(() => { privateSaved.current = null; }); }
+    }
+  }, [storageKey]);
+  useEffect(() => {
+    const timer = window.setTimeout(persist, 1000);
+    return () => window.clearTimeout(timer);
+  }, [jobs, folders, privateReady, persist]);
+  useEffect(() => {
+    const stop = () => { persist(); leaving.current = true; reset(false); };
+    const logout = () => {
+      if (privateLoaded.current === "yes" && ready.current.privateReady) void savePrivateCacheQueue("").catch(() => undefined);
+      leaving.current = true; if (storageKey) writeLocal(storageKey, ""); reset(false);
+    };
+    // 从往返缓存（bfcache）回到页面时重新读取保存的队列。
+    const shown = (event: PageTransitionEvent) => { if (event.persisted) { leaving.current = false; restored.current = false; privateLoaded.current = "no"; setRestoreTick(value => value + 1); } };
     const locked = hidePrivate;
-    window.addEventListener("pagehide", stop); window.addEventListener("tessera:logout", stop); window.addEventListener("tessera:private-locked", locked);
-    return () => { window.removeEventListener("pagehide", stop); window.removeEventListener("tessera:logout", stop); window.removeEventListener("tessera:private-locked", locked); active.current.forEach((controller, id) => { controller.abort(); cancelFileCache(id); }); folderControllers.current.forEach(controller => controller.abort()); foldersRef.current.forEach(folder => { if (folder.toastId != null) toast.dismiss(folder.toastId); }); groups.current.forEach((_, id) => releaseCacheGroup(id)); groups.current.clear(); };
-  }, [reset, hidePrivate]);
+    window.addEventListener("pagehide", stop); window.addEventListener("pageshow", shown); window.addEventListener("tessera:logout", logout); window.addEventListener("tessera:private-locked", locked);
+    return () => { window.removeEventListener("pagehide", stop); window.removeEventListener("pageshow", shown); window.removeEventListener("tessera:logout", logout); window.removeEventListener("tessera:private-locked", locked); active.current.forEach((controller, id) => { controller.abort(); cancelFileCache(id); }); folderControllers.current.forEach(controller => controller.abort()); foldersRef.current.forEach(folder => { if (folder.toastId != null) toast.dismiss(folder.toastId); }); groups.current.forEach((_, id) => releaseCacheGroup(id)); groups.current.clear(); };
+  }, [reset, hidePrivate, storageKey, persist]);
 
   // 文件列表只取一次「缓存索引」，不逐个文件查询；单独关注的文件（预览中的文件）另外批量查询完整状态。
   useEffect(() => {
@@ -275,6 +358,11 @@ export function CacheTasksProvider({ enabled, onOpenTasks, onActiveChange, child
       }
     })();
   }, [enqueueMany, updateFolders, prepareGroup]);
+  useEffect(() => {
+    const prefixes = restoreFolders.current;
+    restoreFolders.current = [];
+    prefixes.forEach(roots => startFolder(roots));
+  }, [restoreTick, startFolder]);
   const retryFolder = useCallback((id: string) => {
     const folder = foldersRef.current.find(folder => folder.id === id);
     if (folder?.status === "error") startFolder(folder.prefixes, id, ready.current.privateReady ? undefined : folder.group);
@@ -667,6 +755,21 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
   const [unlocking, setUnlocking] = useState(false);
   const [revision, setRevision] = useState(0);
   const closeUnlock = useCallback(() => setUnlocking(false), []);
+  // 未完成的文件（暂停、失败或只缓存了看过的片段）可以直接继续缓存：按记录的内容版本重新加入缓存任务，只补缺失的部分。
+  const queue = useContext(CacheContext);
+  const fileOf = (item: CachedItem): CacheFile => ({ key: item.path, etag: item.etag, size: item.size, content_type: item.type || null });
+  const resumable = (item: CachedItem) => !item.complete && Boolean(item.etag) && Boolean(queue?.canCache(fileOf(item)));
+  const cachingJob = (item: CachedItem) => queue?.jobs.find(job => isRunning(job) && cacheFileId(job.file) === cacheFileId(fileOf(item)));
+  const resume = (targets: CachedItem[]) => {
+    if (!queue) return;
+    const files = targets.filter(item => resumable(item) && !cachingJob(item)).map(fileOf);
+    if (!files.length) { toast.info("所选文件已完整缓存或正在缓存"); return; }
+    const added = queue.enqueueMany(files);
+    if (added) toast.success(added === 1 ? "已继续缓存，只补齐缺失的部分" : `已继续缓存 ${added} 个文件`, { label: "查看任务", onClick: queue.showTasks });
+    else toast.info("所选文件已在缓存任务中");
+    setSelected(new Set());
+  };
+  const resumableChosen = (items: CachedItem[]) => items.filter(item => resumable(item) && !cachingJob(item));
   // 私密层：这台设备允许缓存私密文件（或仍留有私密副本）时才出现；锁定时只能看到数量与大小。
   const privateCount = stats?.private.count ?? 0, privateBytes = stats?.private.bytes ?? 0;
   const showPrivate = privateEnabled || privateCount > 0;
@@ -720,7 +823,7 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
       {chosen.length > 0 && <div className="toolbar selection-bar task-selection" role="toolbar" aria-label="已缓存文件批量操作">
         <Checkbox checked={allSelected} indeterminate={!allSelected} label="选择本页全部文件" onChange={checked => setSelected(checked ? new Set(items.map(item => item.key)) : new Set())} />
         <span className="selection-count"><span className="task-selection-prefix">已选择 </span>{chosen.length} 项 · {formatBytes(chosen.reduce((sum, item) => sum + item.bytes, 0))}</span>
-        <div className="toolbar-actions"><Button size="sm" variant="danger" icon="trash" onClick={() => setRemoving(chosen)}>清除缓存</Button><IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} /></div>
+        <div className="toolbar-actions">{resumableChosen(chosen).length > 0 && <Button size="sm" icon="monitor" onClick={() => resume(chosen)}>继续缓存{chosen.length > 1 ? `（${resumableChosen(chosen).length}）` : ""}</Button>}<Button size="sm" variant="danger" icon="trash" onClick={() => setRemoving(chosen)}>清除缓存</Button><IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} /></div>
       </div>}
       <div className={`task-toolbar${chosen.length ? " is-selecting" : ""}`} aria-hidden={chosen.length > 0}>
         <Segmented label="文件类型" showLabels value={kind} onChange={setKind} options={[
@@ -767,11 +870,15 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
                   <div role="cell"><div className="task-progress is-done">
                     {item.complete ? <span className="task-figure">{formatBytes(item.bytes)}</span>
                       : <div className="task-progress-bar"><Progress value={percentOf(item.bytes, item.size)} tone="neutral" label={`${name} 已缓存比例`} /><span className="task-percent">{percentOf(item.bytes, item.size)}%</span></div>}
-                    <small>{item.complete ? "完整文件" : `${formatBytes(item.bytes)} / ${formatBytes(item.size)}（看过的片段）`}</small></div></div>
+                    <small>{item.complete ? "完整文件" : cachingJob(item) ? `${formatBytes(item.bytes)} / ${formatBytes(item.size)} · 正在缓存` : `${formatBytes(item.bytes)} / ${formatBytes(item.size)}（${item.manual ? "未完成" : "看过的片段"}）`}</small></div></div>
                   <div role="cell" className="muted"><button type="button" className="task-location" title={`打开所在文件夹：${api.privatePathLabel(folder)}`} onClick={() => onOpenFolder(folder, secret)}>
                     <Icon name={secret ? "lock" : "folder"} size={12} /><LocationText folder={folder} /></button></div>
                   <div className="task-state" role="cell"><Badge tone={item.manual ? "success" : "neutral"} icon={item.manual ? "pin" : undefined}>{item.manual ? "手动" : "自动"}</Badge></div>
-                  <div className="cell-actions" role="cell"><IconButton icon="trash" size="sm" label={`清除 ${name} 的本机缓存`} onClick={() => setRemoving([item])} /></div>
+                  <div className="cell-actions" role="cell">
+                    {resumable(item) && (cachingJob(item)
+                      ? <IconButton icon="pulse" size="sm" label={`正在缓存 ${name}，查看缓存任务`} onClick={() => queue?.showTasks()} />
+                      : <IconButton icon="monitor" size="sm" label={`继续缓存 ${name}`} onClick={() => resume([item])} />)}
+                    <IconButton icon="trash" size="sm" label={`清除 ${name} 的本机缓存`} onClick={() => setRemoving([item])} /></div>
                 </div>;
               })}
             </div>}

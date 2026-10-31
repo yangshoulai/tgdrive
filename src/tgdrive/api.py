@@ -13,6 +13,7 @@ from dataclasses import replace
 from .accounts import AccountService
 from .authn import AuthenticationError, Session, hash_password
 from .errors import NotFoundError, NotReadyError
+from . import favorites
 from .filekinds import kind_case, kind_clause
 from .maintenance import MaintenanceService
 from .metrics import TrafficMetrics
@@ -656,6 +657,59 @@ class UserApi:
     def file_info(self, token: str, path: str) -> dict[str, object]:
         """单个文件的当前元数据（含 ETag 与缩略图状态）；文本编辑遇到版本冲突时用它取得最新版本。"""
         return self._objects_json([self.objects.head_object(self._scope(token), self._path(path))])[0]
+
+    # ---------- 侧栏收藏 ----------
+
+    def _private_unlocked(self, token: str) -> bool:
+        """当前登录会话的私密空间是否已解锁（只复核，不续期）。"""
+        space = getattr(self, "private_space", None)
+        access = space.session_grants.get(token) if space is not None else None
+        if not access:
+            return False
+        try:
+            space.require(token, access)
+        except Exception:  # noqa: BLE001 - 任何失效都视为未解锁
+            return False
+        return True
+
+    def _favorite_path(self, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("收藏的文件夹不正确")
+        if favorites.is_private(value):
+            relative = value[len(favorites.PRIVATE_PREFIX):]
+            return favorites.PRIVATE_PREFIX + self._path(relative, directory=True)
+        return self._path(value, directory=True)
+
+    def favorites(self, token: str) -> dict[str, object]:
+        """侧栏收藏：私密文件夹只在已解锁时返回；missing 表示文件夹已不存在（显示为灰色，可移除）。"""
+        scope = self._scope(token)
+        unlocked = self._private_unlocked(token)
+        db = self.objects.metadata.db
+        items = []
+        for path in favorites.load(db, scope.bucket_id):
+            private = favorites.is_private(path)
+            if private and not unlocked:
+                continue
+            exists = db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
+                                (scope.bucket_id, path, path + ObjectService._PREFIX_END)).fetchone() is not None
+            items.append({"path": path, "private": private, "missing": not exists})
+        return {"items": items, "limit": favorites.LIMIT}
+
+    def set_favorites(self, token: str, csrf: str, paths: object) -> dict[str, object]:
+        """保存收藏的顺序与内容。锁定时提交的列表看不到私密收藏，按原位置保留它们；未解锁不能新增私密收藏。"""
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        if not isinstance(paths, list) or len(paths) > favorites.LIMIT:
+            raise ValueError(f"最多收藏 {favorites.LIMIT} 个文件夹")
+        given = [self._favorite_path(path) for path in paths]
+        unlocked = self._private_unlocked(token)
+        with self.objects.metadata.transaction() as db:
+            current = favorites.load(db, scope.bucket_id)
+            hidden = set() if unlocked else {path for path in current if favorites.is_private(path)}
+            if not unlocked and any(favorites.is_private(path) and path not in current for path in given):
+                from .private import PrivateLocked  # private 依赖 api，延迟导入避免循环
+                raise PrivateLocked("请先解锁私密空间")
+            favorites.store(db, scope.bucket_id, favorites.merge_hidden(current, given, hidden))
+        return self.favorites(token)
 
     def check_files(self, token: str, csrf: str, paths: list[str]):
         scope = self._scope(token, csrf=csrf, mutation=True)

@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from typing import Callable
 
 from .blobengine import BlobEngine
+from . import favorites
 from .errors import InvalidStateError, NotFoundError, QuotaExceededError, ShareExpiredError, VersionConflict
 from .filekinds import kind_clause
 from .fingerprint import combine, is_fingerprint
@@ -1445,6 +1446,9 @@ class ObjectService:
                 db.execute("UPDATE offline_tasks SET key=?,updated_at=? WHERE id=?", (target, now, task["id"]))
                 if task["upload_id"]:
                     db.execute("UPDATE uploads SET key=? WHERE upload_id=?", (target, task["upload_id"]))
+            if folder and moves:
+                # 侧栏收藏随文件夹一起移动；移入回收站时移除（favorites.moved）。
+                favorites.moved(db, scope.bucket_id, old, new)
             if scope.authorize is not None:
                 scope.authorize()
             result = MoveResult(len(moves), skipped)

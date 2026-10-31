@@ -14,7 +14,7 @@ export type CacheStats = {
   namespace: string | null; settings: DeviceSettings;
   normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>> }; private: { bytes: number; count: number }; others: { bytes: number; count: number };
 };
-export type CachedItem = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean; private: boolean };
+export type CachedItem = { key: string; path: string; etag: string; type: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean; private: boolean };
 export type CachedItemFilter = { private?: boolean; all?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; origin?: "" | "manual" | "auto"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
 
 /** Worker 判定重试也无法解决的失败（空间不足、文件已变化、设置不允许等）；其余失败可以自动重试续传。 */
@@ -137,6 +137,9 @@ export const startCacheGroup = (id: string, paths: string[]) => ask<void>("tesse
 export const listCacheGroup = (id: string, prefix: string, cursor: string | null, signal: AbortSignal) =>
   ask<api.ListPage>("tessera-cache:list-group", { id, prefix, cursor }, 30000, undefined, signal);
 export function releaseCacheGroup(id: string) { notify("tessera-cache:release-group", { id }); }
+/** 私密缓存任务记录：由 Worker 用私密层密钥加密保存，只有解锁后才能读写；空字符串表示删除。 */
+export const savePrivateCacheQueue = (text: string) => ask<boolean>("tessera-cache:private-queue-save", { text, access: api.getPrivateAccess() }, 15000);
+export const loadPrivateCacheQueue = () => ask<string | null>("tessera-cache:private-queue-load", { access: api.getPrivateAccess() }, 15000);
 export const beginFileCache = (file: CacheFile, id: string, signal: AbortSignal, group?: string) => ask<({ busy: true } | ({ busy: false } & FileCacheState))>("tessera-cache:start", { url: fileUrl(file), id, group }, 30000, undefined, signal);
 export const stepFileCache = (id: string, signal: AbortSignal, progress: (state: FileCacheState) => void) => ask<FileCacheState>("tessera-cache:step", { id }, 120000, progress, signal);
 export function cancelFileCache(id?: string) {

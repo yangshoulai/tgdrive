@@ -6,7 +6,7 @@
  */
 import {
   BLOCK, type Bytes, type DeviceSettings, type EntryInfo, type EntryRecord, type Kind, type Tier,
-  aesKey, b64u, blockAad, deleteEntries, deviceId, directoryRoot, effectiveMiB, ensureEntry, evict, forgetDirectory, preferredStore, readDirectory, setMeta, sweepDirectory, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
+  aesKey, b64u, blockAad, deleteEntries, deviceId, directoryRoot, effectiveMiB, ensureEntry, evict, forgetDirectory, getMeta, preferredStore, readDirectory, setMeta, sweepDirectory, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
   kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, setManualFlags, touchEntry, updateEntryInfo,
 } from "../cache-store";
 
@@ -1208,7 +1208,8 @@ async function stats(): Promise<Stats> {
   return result;
 }
 
-type Item = { key: string; path: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean; private: boolean };
+/** etag／type：「已缓存的文件」里继续缓存未完成的文件时，按同一内容版本重新加入缓存任务。 */
+type Item = { key: string; path: string; etag: string; type: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean; private: boolean };
 type ItemQuery = { private?: boolean; all?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; origin?: "" | "manual" | "auto"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
 let itemCache: { ns: string; at: number; items: Item[] } | null = null;
 
@@ -1221,7 +1222,7 @@ async function allItems(): Promise<Item[]> {
   for (const entry of await listEntries(context.ns, "n")) {
     if (entry.kind === "thumb") continue;
     const info = await openInfo(context.info, entry);
-    if (info) items.push({ key: entry.key, path: info.path, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed,
+    if (info) items.push({ key: entry.key, path: info.path, etag: info.etag, type: info.type, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed,
       manual: Boolean(entry.manual ?? info.manual), complete: fileCacheState(entry, info.size).complete, private: false });
   }
   context.signal.throwIfAborted();
@@ -1238,7 +1239,7 @@ async function privateItems(): Promise<Item[]> {
   for (const entry of await listEntries(context.ns, "p")) {
     if (entry.kind === "thumb") continue;
     const info = await openInfo(secret.info, entry);
-    if (info && info.kind !== "thumb") items.push({ key: entry.key, path: info.path, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed,
+    if (info && info.kind !== "thumb") items.push({ key: entry.key, path: info.path, etag: info.etag, type: info.type, kind: info.kind, bytes: entry.bytes, size: info.size, accessed: entry.accessed,
       manual: Boolean(entry.manual ?? info.manual), complete: fileCacheState(entry, info.size).complete, private: true });
   }
   context.signal.throwIfAborted();
@@ -1284,7 +1285,35 @@ async function clear(scope: string, key?: string) {
   stopManualWhere(job => scope === "all" || scope === "normal" && job.route.tier === "n" || scope === "private" && job.route.tier === "p"
     || victims.some(entry => entry.key === job.opened?.entry.key));
   await deleteEntries(victims.map(entry => entry.key));
+  // 清除私密层或全部缓存时，私密任务记录一起删除（只能定位当前账号的记录，其他账号的记录本来就无法解开）。
+  if (namespace && (scope === "private" || scope === "all")) await setMeta(queueMeta(namespace), null).catch(() => undefined);
   itemCache = null; manualCache = null;
+}
+
+/* ---------- 私密缓存任务队列（刷新后恢复） ---------- */
+
+/** 页面的私密缓存任务记录（路径、ETag、进度）用私密层密钥派生的队列密钥加密后存在 meta 里：只有解锁后才能读写，
+ * 改密码、重置缓存纪元后旧记录无法解开并被丢弃。普通文件的任务记录由页面直接存在 localStorage。 */
+const queueMeta = (ns: string) => `private-queue/${ns}`;
+const queueRoute = (access: string): Route => ({ tier: "p", etag: "", version: "", path: "", access, bucketId: null, thumb: false });
+const queueKey = async (context: TierContext) => aesKey(await hkdf(context.key, "tessera-cache-queue"));
+
+async function savePrivateQueue(access: string, text: string) {
+  const context = await privateContext(queueRoute(access));
+  if (!context || context.signal.aborted) return false;
+  if (!text) { await setMeta(queueMeta(context.ns), null); return true; }
+  if (text.length > 4 * MiB) throw new CacheFatal("私密缓存任务记录过大");
+  await setMeta(queueMeta(context.ns), await seal(await queueKey(context), new TextEncoder().encode(text), `${context.ns}|queue`));
+  return true;
+}
+
+async function loadPrivateQueue(access: string): Promise<string | null> {
+  const context = await privateContext(queueRoute(access));
+  if (!context || context.signal.aborted) return null;
+  const sealed = await getMeta<ArrayBuffer | null>(queueMeta(context.ns)).catch(() => null);
+  if (!sealed) return null;
+  try { return new TextDecoder().decode(await open(await queueKey(context), sealed, `${context.ns}|queue`)); }
+  catch { await setMeta(queueMeta(context.ns), null).catch(() => undefined); return null; }
 }
 
 sw.addEventListener("message", event => {
@@ -1329,6 +1358,8 @@ sw.addEventListener("message", event => {
       reply(Promise.resolve(null)); break;
     case "tessera-cache:remove-file": reply(removeFile(data.url ?? "")); break;
     case "tessera-cache:prefetch": startPrefetch(owner, data.id ?? "", data.url ?? "", Number((data as { from?: unknown }).from ?? 0)); break;
+    case "tessera-cache:private-queue-save": reply(savePrivateQueue(data.access ?? "", typeof (data as { text?: unknown }).text === "string" ? (data as { text: string }).text : "")); break;
+    case "tessera-cache:private-queue-load": reply(loadPrivateQueue(data.access ?? "")); break;
     case "tessera-cache:prefetch-stop": for (const job of [...prefetches.values()]) if (job.owner === owner && (!data.id || job.id === data.id)) stopPrefetch(job); break;
   }
 });

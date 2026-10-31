@@ -43,9 +43,12 @@ export function PrivateSessionProvider({ children, enabled }: { children: ReactN
   const pendingLock = useRef<string | null>(null);
   const adopt = useCallback((value: api.PrivateGrant, requestedAt = Date.now()) => {
     const current = state.current;
+    const wasLocked = !current.grant;
     current.revision++; current.grant = value; current.until = requestedAt + (value.remaining_seconds ?? value.idle_seconds) * 1000;
     current.human = current.reported = Date.now(); current.playing = false; current.playbackOwner = null;
     api.setPrivateAccess(value.access, current.until); setGrant(value); setIdleSeconds(value.idle_seconds); setRestoring(false); setError("");
+    // 侧栏收藏等位于 Provider 之外的界面据此重新读取私密内容。
+    if (wasLocked) window.dispatchEvent(new CustomEvent("tessera:private-unlocked"));
   }, []);
   const drop = useCallback(() => {
     const current = state.current;

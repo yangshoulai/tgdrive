@@ -16,6 +16,12 @@ import { ShortcutsDialog } from "./shortcuts";
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "text" | "code" | "archive" | "other";
 
 export type EntryFilter = "all" | "folder" | "file";
+/** 本机缓存筛选：cached 为完整文件已在这台设备（手动或自动缓存），uncached 为没有完整副本（含只缓存了一部分）。 */
+export type CacheFilter = "" | "cached" | "uncached";
+const CACHE_FILTERS: { value: Exclude<CacheFilter, "">; label: string; title: string }[] = [
+  { value: "cached", label: "已缓存", title: "完整文件已缓存到这台设备（手动或自动）" },
+  { value: "uncached", label: "未缓存", title: "这台设备上没有完整副本，含只缓存了一部分的文件" },
+];
 export type FileSort = { key: "name" | "type" | "size" | "modified"; desc: boolean };
 const ENTRY_FILTERS: { value: EntryFilter; label: string }[] = [
   { value: "all", label: "全部" }, { value: "folder", label: "文件夹" }, { value: "file", label: "文件" },
@@ -23,13 +29,15 @@ const ENTRY_FILTERS: { value: EntryFilter; label: string }[] = [
 
 /** 一行筛选：先选项目（全部／文件夹／文件），分隔线后是文件类型（可多选，取并集）；选类型即切到「文件」，
  * 取消全部类型保持「文件」，选文件夹或全部会清除类型。 */
-export function FileFilters({ entry, kind, onEntryChange, onKindChange }: {
+export function FileFilters({ entry, kind, onEntryChange, onKindChange, cache, onCacheChange }: {
   entry: EntryFilter; kind: api.KindFilter; onEntryChange: (value: EntryFilter) => void; onKindChange: (value: api.KindFilter) => void;
+  /** 本机缓存可用时传入：再加一组「已缓存／未缓存」（单选，再点一次取消）；选中即切到「文件」。 */
+  cache?: CacheFilter; onCacheChange?: (value: CacheFilter) => void;
 }) {
   const chosen = api.kindValues(kind);
   return <div className="file-filters">
     <FilterChips label="项目" value={entry} options={ENTRY_FILTERS} onChange={value => {
-      onEntryChange(value); if (value !== "file") onKindChange("");
+      onEntryChange(value); if (value !== "file") { onKindChange(""); onCacheChange?.(""); }
     }} />
     <span className="file-filters-divider" aria-hidden="true" />
     <div className="filter-chips" role="group" aria-label="文件类型（可多选）">
@@ -41,6 +49,17 @@ export function FileFilters({ entry, kind, onEntryChange, onKindChange }: {
       })}
       {chosen.length > 1 && <button type="button" className="filter-chip-clear" onClick={() => onKindChange("")}>清除</button>}
     </div>
+    {onCacheChange && <>
+      <span className="file-filters-divider" aria-hidden="true" />
+      <div className="filter-chips" role="group" aria-label="本机缓存">
+        {CACHE_FILTERS.map(option => {
+          const active = cache === option.value;
+          return <button key={option.value} type="button" aria-pressed={active} title={option.title} className={`filter-chip is-multi${active ? " is-active" : ""}`}
+            onClick={() => { onCacheChange(active ? "" : option.value); if (!active) onEntryChange("file"); }}>
+            {active && <Icon name="check" size={12} />}{option.label}</button>;
+        })}
+      </div>
+    </>}
   </div>;
 }
 

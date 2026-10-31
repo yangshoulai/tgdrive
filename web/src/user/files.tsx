@@ -3,11 +3,11 @@ import { useDirectory, useRenderLimit, mergeFilePages, reconcileFilePage } from 
 import { DestinationPicker, FolderPicker } from "./folders";
 import { BRAND } from "../brand";
 import * as api from "../api";
-import type { CacheFile } from "../cache-client";
+import { cacheFileId, type CacheFile } from "../cache-client";
 
 import { FolderStatsDialog } from "./folder-stats";
 import { ThumbnailEditor } from "./thumbnail-editor";
-import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type EntryFilter, type FileSort } from "../files";
+import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type CacheFilter, type EntryFilter, type FileSort } from "../files";
 import { generateLoadedThumbnails, saveCurrentVideoThumbnail, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, videoFrameUsable } from "../thumbnails";
 
 import { Notice, ButtonLink, Badge, Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
@@ -20,6 +20,7 @@ import type { PreviewPlayback } from "../files";
 import { usePrivateToast } from "./private-session";
 import { usePreview } from "./preview-host";
 import { FileCacheStatus, cacheMenuItems, cacheSelection, useCacheQueue } from "./cache";
+import { favoriteMenuItem, useFavorites } from "./favorites";
 import { useFilesBridge } from "./assistant-bridge";
 
 /* ---------- 文件 ---------- */
@@ -40,12 +41,17 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   incoming?: File[] | null; onIncomingTaken?: () => void }) {
   const privateSpace = api.isPrivatePath(prefix);
   const notify = usePrivateToast(privateSpace);
+  useFavorites(); // 文件夹菜单的「固定到侧栏／从侧栏移除」随收藏变化
   const root = privateSpace ? api.PRIVATE_PREFIX : "";
   const rootName = privateSpace ? "私密空间" : "我的文件";
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "public">("all");
   const [entryFilter, setEntryFilter] = useState<EntryFilter>("all");
+  const [cacheFilter, setCacheFilter] = useState<CacheFilter>("");
+  // 本机缓存筛选读的是 CacheTasksProvider 统一维护的缓存索引，不逐个文件查询。
+  const cacheQueue = useCacheQueue();
+  const cacheFilterReady = Boolean(cacheQueue?.available && (!privateSpace || cacheQueue.privateReady));
   const [kind, setKind] = useState<api.KindFilter>("");
   const [layout, setLayout] = useState<"list" | "grid">(() => (localStorage.getItem("tgdrive:layout") as "list" | "grid") || "list");
   const [sort, setSort] = useState<FileSort>({ key: "modified", desc: true });
@@ -181,7 +187,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     }).catch(() => undefined);
   }
   const setPublicFolders = (update: (items: Record<string, api.FileItem>) => Record<string, api.FileItem>) => pagination.setPage(current => current && { ...current, public_folders: update(current.public_folders ?? {}) });
-  useEffect(() => { setSelected(new Set()); }, [fetchPage, entryFilter]);
+  useEffect(() => { setSelected(new Set()); }, [fetchPage, entryFilter, cacheFilter]);
   useEffect(() => { setSearch(""); setQuery(""); }, [prefix]);
   useEffect(() => { localStorage.setItem("tgdrive:layout", layout); }, [layout]);
   useEffect(() => {
@@ -200,8 +206,10 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const entries = useMemo<Entry[]>(() => {
     const direction = sort.desc ? -1 : 1;
     // 名称与类型先算好再排序：大目录有数千项，比较函数里重复解析会拖慢每次提交。
+    const cachedIndex = cacheFilter && cacheFilterReady ? cacheQueue!.cached : null;
     const fileEntries = files
       .filter(file => filter === "all" || file.public_token)
+      .filter(file => !cachedIndex || (cachedIndex.get(cacheFileId(file))?.complete === true) === (cacheFilter === "cached"))
       .map(file => ({ file, name: baseName(file.key), type: sort.key === "type" ? kindLabel(getFileKind(file.content_type, file.key)) : "" }))
       .sort((a, b) => {
         const name = COLLATOR.compare(a.name, b.name);
@@ -217,7 +225,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         : (sort.key === "name" ? direction : 1) * COLLATOR.compare(a, b))
       .map(key => ({ kind: "folder" as const, key, size: folderSizes[key], modified: folderModified[key] ?? null }));
     return [...(entryFilter === "file" ? [] : folderEntries), ...(entryFilter === "folder" ? [] : fileEntries)];
-  }, [files, folders, publicFolders, folderSizes, folderModified, filter, sort, entryFilter]);
+  }, [files, folders, publicFolders, folderSizes, folderModified, filter, sort, entryFilter, cacheFilter, cacheFilterReady, cacheQueue?.cached]);
   useEffect(() => {
     if (loading || pagination.loadingMore || loadError) return;
     const keys = new Set(entries.map(entry => entry.key));
@@ -358,7 +366,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         const keys = selected.has(entry.key) ? selectedEntries.map(item => item.key) : [entry.key];
         dragKeys.current = keys;
         event.dataTransfer.setData(INTERNAL_DRAG, JSON.stringify(keys));
-        event.dataTransfer.effectAllowed = "move";
+        // move：拖进文件夹移动；link：拖到侧栏收藏固定文件夹。
+        event.dataTransfer.effectAllowed = "linkMove";
       },
       onDragEnd: () => { dragKeys.current = []; setDropTarget(null); },
     };
@@ -416,6 +425,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       { label: "下载（ZIP）", icon: "download", shortcut: "D", onSelect: () => undefined, href: api.archiveUrl([key]) },
       ...(canCacheFolders ? [{ label: "缓存到本机", icon: "monitor" as const, onSelect: () => setFolderCache({ prefixes: [key], files: [] }) }] : []),
       { label: "目录统计", icon: "chart", onSelect: () => setStatsFor({ prefix: key, title: baseName(key) }) },
+      favoriteMenuItem(key),
       ...(!privateSpace ? [{ label: shared ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(folderItem(key)) }] : []),
       ...(shared ? [{ label: "打开分享页", icon: "external" as const, onSelect: () => window.open(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "_blank", "noreferrer") }] : []),
       ...(shared ? [{ label: "复制分享链接", icon: "copy" as const, onSelect: () => void copyText(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "分享链接已复制") }] : []),
@@ -433,7 +443,6 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   useEffect(() => { setCursor(current => current && entries.some(entry => entry.key === current) ? current : null); }, [entries]);
   const rendered = useRenderLimit(entries, fetchPage);
   // 列表只显示手动缓存的状态（索引由 CacheTasksProvider 统一读取），不逐个文件查询本机缓存。
-  const cacheQueue = useCacheQueue();
   const selectionCache = cacheSelection(cacheQueue, selectedFiles.map(entry => entry.file));
   const canCacheFolders = Boolean(cacheQueue?.available && (!privateSpace || cacheQueue.privateReady));
   const selectedCacheFolders = canCacheFolders ? selectedEntries.filter(entry => entry.kind === "folder").map(entry => entry.key) : [];
@@ -633,13 +642,16 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         </div>
       )}
 
-      <FileFilters entry={entryFilter} kind={kind} onEntryChange={setEntryFilter} onKindChange={setKind} />
+      <FileFilters entry={entryFilter} kind={kind} onEntryChange={setEntryFilter} onKindChange={setKind}
+        cache={cacheFilterReady ? cacheFilter : ""} onCacheChange={cacheFilterReady ? setCacheFilter : undefined} />
 
       <section ref={surface} className={`file-surface${layout === "grid" && !loading && !loadError && entries.length > 0 ? " is-grid" : ""}${dragging ? " is-dragging" : ""}`} aria-label="文件列表">
         {loading ? <SkeletonRows rows={6} /> : loadError ? (
           <EmptyState icon="alert" title="文件列表加载失败" description={loadError} action={<Button icon="refresh" onClick={() => void load()}>重试</Button>} />
         ) : entries.length === 0 ? (
-          entryFilter === "folder" ? <EmptyState icon="folder" title="没有符合条件的文件夹" description={query ? "搜索目前按文件名查找文件；清除搜索可浏览当前目录的文件夹。" : "当前目录没有符合筛选条件的文件夹。"} action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
+          cacheFilter && cacheFilterReady && !query ? <EmptyState icon={cacheFilter === "cached" ? "hardDrive" : "check"} title={cacheFilter === "cached" ? `这个文件夹里没有已缓存的${kind ? api.kindFilterLabel(kind) : "文件"}` : `这个文件夹里的${kind ? api.kindFilterLabel(kind) : "文件"}都已缓存`}
+            description="缓存筛选只看当前文件夹，不包含子文件夹；部分缓存的文件算作未缓存。" action={<Button onClick={() => setCacheFilter("")}>显示全部文件</Button>} />
+          : entryFilter === "folder" ? <EmptyState icon="folder" title="没有符合条件的文件夹" description={query ? "搜索目前按文件名查找文件；清除搜索可浏览当前目录的文件夹。" : "当前目录没有符合筛选条件的文件夹。"} action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
           : entryFilter === "file" && !kind && !query ? <EmptyState icon="file" title="这个目录没有符合条件的文件" description="文件筛选只看当前目录，不包含子文件夹中的内容。" action={<Button onClick={() => setEntryFilter("all")}>显示全部项目</Button>} />
           : kind && !query ? <EmptyState icon="search" title={`${filter === "public" ? "这个文件夹里没有公开的" : "这个文件夹里没有"}${api.kindFilterLabel(kind)}`} description="类型筛选只看当前文件夹，不包含子文件夹；搜索时会在全部文件中按类型查找。" action={<Button onClick={() => setKind("")}>显示全部类型</Button>} />
           : query ? <EmptyState icon="search" title={`没有找到包含“${query}”的${kind ? api.kindFilterLabel(kind) : "文件"}`} description="换个关键词，或检查拼写。" action={<Button onClick={() => { setSearch(""); setQuery(""); }}>清除搜索</Button>} />

@@ -19,6 +19,7 @@ import { TrashView } from "./user/trash";
 import { DownloadsView } from "./user/downloads";
 import { PreviewHost } from "./user/preview-host";
 import { CachePage, CacheTasksProvider, type CacheTab } from "./user/cache";
+import { FavoritesNav, useFavorites } from "./user/favorites";
 import { AssistantDrawer, useAssistantConfig, useAssistantShortcut, type AssistantDockStatus } from "./user/assistant";
 import { AssistantLauncher } from "./user/assistant-launcher";
 import { useDownloadActivity } from "./user/download-activity";
@@ -316,6 +317,9 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
     </>;
   }
+  // 打开的正是某个收藏的文件夹时，由侧栏收藏高亮，「我的文件」「私密空间」不再同时高亮。
+  const favoriteList = useFavorites();
+  const favoriteOpen = (section === "files" || section === "private") && favoriteList.some(item => item.path === location.prefix);
   // 个人空间与系统管理都按用途分组；管理员在两个工作区之间切换，侧栏只显示当前工作区的分组。
   const personalWorkspace = isAdmin ? "我的空间" : undefined;
   const groups: NavGroup<Section>[] = [
@@ -336,6 +340,9 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   ];
   return (
     <AppShell active={section} onNavigate={key => navigate(key)} hrefFor={key => sectionUrl(key)} groups={groups}
+      activeHighlight={!favoriteOpen}
+      slot={{ label: "收藏", after: "文件", render: rail => <FavoritesNav section={section} prefix={location.prefix} rail={rail}
+        onOpen={path => navigate(api.isPrivatePath(path) ? "private" : "files", path)} hrefFor={path => sectionUrl(api.isPrivatePath(path) ? "private" : "files", path)} /> }}
       workspaces={isAdmin ? [{ label: "我的空间", icon: "folder" }, { label: "系统管理", icon: "shield" }] : []}
       links={[{ label: "使用文档", icon: "book", href: "/docs" }]}
       sidebarFooter={<>
@@ -359,7 +366,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         { label: "退出登录", icon: "logout", onSelect: () => void logout(), divider: true },
       ] }}>
       <PrivateSessionProvider enabled={workspaceReady}>
-      <CacheTasksProvider enabled={workspaceReady} onOpenTasks={openCacheTasks} onActiveChange={setCacheActive}>
+      <CacheTasksProvider enabled={workspaceReady} owner={session.bucket_id != null ? String(session.bucket_id) : undefined} onOpenTasks={openCacheTasks} onActiveChange={setCacheActive}>
       <PreviewHost enabled={workspaceReady} privateAllowed={section === "private"}>
         {content}
       <AssistantLauncher available={workspaceReady && assistantAvailable && Boolean(assistant.config) && !assistantPage} open={assistantOpen} status={assistantStatus} onToggle={toggleAssistant} />
