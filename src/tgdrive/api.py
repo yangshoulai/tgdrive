@@ -681,31 +681,43 @@ class UserApi:
         return self._path(value, directory=True)
 
     def favorites(self, token: str) -> dict[str, object]:
-        """侧栏收藏：私密文件夹只在已解锁时返回；missing 表示文件夹已不存在（显示为灰色，可移除）。"""
+        """侧栏收藏：私密文件夹只在已解锁时返回；missing 表示文件夹已不存在（显示为灰色，可移除）；icon 为空表示默认文件夹图标。"""
         scope = self._scope(token)
         unlocked = self._private_unlocked(token)
         db = self.objects.metadata.db
         items = []
-        for path in favorites.load(db, scope.bucket_id):
+        for entry in favorites.load(db, scope.bucket_id):
+            path = entry["path"]
             private = favorites.is_private(path)
             if private and not unlocked:
                 continue
             exists = db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
                                 (scope.bucket_id, path, path + ObjectService._PREFIX_END)).fetchone() is not None
-            items.append({"path": path, "private": private, "missing": not exists})
+            items.append({"path": path, "icon": entry["icon"], "private": private, "missing": not exists})
         return {"items": items, "limit": favorites.LIMIT}
 
-    def set_favorites(self, token: str, csrf: str, paths: object) -> dict[str, object]:
-        """保存收藏的顺序与内容。锁定时提交的列表看不到私密收藏，按原位置保留它们；未解锁不能新增私密收藏。"""
+    def set_favorites(self, token: str, csrf: str, items: object = None, paths: object = None) -> dict[str, object]:
+        """保存收藏的顺序、内容与图标（items: [{path, icon}]；旧客户端只传 paths 时沿用已有图标）。
+        锁定时提交的列表看不到私密收藏，按原位置保留它们；未解锁不能新增私密收藏。"""
         scope = self._scope(token, csrf=csrf, mutation=True)
-        if not isinstance(paths, list) or len(paths) > favorites.LIMIT:
+        raw = items if items is not None else paths
+        if not isinstance(raw, list) or len(raw) > favorites.LIMIT:
             raise ValueError(f"最多收藏 {favorites.LIMIT} 个文件夹")
-        given = [self._favorite_path(path) for path in paths]
         unlocked = self._private_unlocked(token)
         with self.objects.metadata.transaction() as db:
             current = favorites.load(db, scope.bucket_id)
-            hidden = set() if unlocked else {path for path in current if favorites.is_private(path)}
-            if not unlocked and any(favorites.is_private(path) and path not in current for path in given):
+            icons = {entry["path"]: entry["icon"] for entry in current}
+            given = []
+            for value in raw:
+                if isinstance(value, dict):
+                    path = self._favorite_path(value.get("path"))
+                    given.append({"path": path, "icon": favorites.icon_name(value.get("icon"))})
+                else:
+                    path = self._favorite_path(value)
+                    given.append({"path": path, "icon": icons.get(path)})
+            known = {entry["path"] for entry in current}
+            hidden = set() if unlocked else {path for path in known if favorites.is_private(path)}
+            if not unlocked and any(favorites.is_private(entry["path"]) and entry["path"] not in known for entry in given):
                 from .private import PrivateLocked  # private 依赖 api，延迟导入避免循环
                 raise PrivateLocked("请先解锁私密空间")
             favorites.store(db, scope.bucket_id, favorites.merge_hidden(current, given, hidden))

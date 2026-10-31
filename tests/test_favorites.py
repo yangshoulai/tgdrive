@@ -56,6 +56,27 @@ class FavoriteTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self.call("GET")
         self.assertEqual([item["missing"] for item in body["items"]], [True, False])
 
+    async def test_icons_saved_kept_and_follow_moves(self):
+        status, body = await self.call("PUT", {"items": [{"path": "音乐/", "icon": "audio"}, {"path": "照片/2024/", "icon": "camera"}, {"path": "工作/报告/"}]})
+        self.assertEqual(status, 200, body)
+        self.assertEqual([(item["path"], item["icon"]) for item in body["items"]], [("音乐/", "audio"), ("照片/2024/", "camera"), ("工作/报告/", None)])
+        # 只传路径（排序）时沿用已有图标；"folder" 视为默认图标。
+        await self.call("PUT", {"paths": ["工作/报告/", "照片/2024/", "音乐/"]})
+        status, body = await self.call("GET")
+        self.assertEqual([item["icon"] for item in body["items"]], [None, "camera", "audio"])
+        await self.call("PUT", {"items": [{"path": "工作/报告/", "icon": "folder"}, {"path": "照片/2024/", "icon": "camera"}, {"path": "音乐/", "icon": "audio"}]})
+        self.app.objects.move(self.scope, "照片/", "相册/")
+        status, body = await self.call("GET")
+        self.assertEqual([(item["path"], item["icon"]) for item in body["items"]], [("工作/报告/", None), ("相册/2024/", "camera"), ("音乐/", "audio")])
+        status, body = await self.call("PUT", {"items": [{"path": "音乐/", "icon": "<svg>"}]})
+        self.assertEqual(status, 400, body)
+
+    async def test_reads_legacy_path_list(self):
+        with self.app.metadata.transaction() as db:
+            db.execute("INSERT INTO settings(key,value) VALUES(?,?)", (f"favorites.{self.alice.bucket_id}", json.dumps(["音乐/", "照片/2024/"])))
+        status, body = await self.call("GET")
+        self.assertEqual([(item["path"], item["icon"]) for item in body["items"]], [("音乐/", None), ("照片/2024/", None)])
+
     async def test_rejects_system_paths_and_too_many(self):
         for paths in (["../x/"], [".tgdrive/trash/x/"], [PRIVATE_PREFIX], "照片/", [f"f{n}/" for n in range(51)]):
             status, body = await self.call("PUT", {"paths": paths})

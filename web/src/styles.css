@@ -798,7 +798,20 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .nav-favorite.drop-before::after, .nav-favorite.drop-after::after { position: absolute; right: 4px; left: 4px; height: 2px; border-radius: var(--radius-pill); background: var(--accent); content: ""; }
 .nav-favorite.drop-before::after { top: -2px; }
 .nav-favorite.drop-after::after { bottom: -2px; }
+.nav-favorite-lock { flex: none; color: var(--ink-3); }
+.is-rail .nav-favorite-lock { display: none; }
+/* 收藏图标选择：五列网格，图标在上、名称在下；当前图标用强调色边框。 */
+.favorite-icon-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.favorite-icon-option { display: grid; justify-items: center; gap: 4px; padding: 8px 4px; border: 1px solid transparent; border-radius: var(--radius-md); background: transparent; color: var(--ink-2); font-size: var(--text-xs); cursor: pointer; transition: background-color var(--duration-fast), color var(--duration-fast), border-color var(--duration-fast); }
+.favorite-icon-option:hover { background: var(--surface-hover); color: var(--ink); }
+.favorite-icon-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.favorite-icon-option.is-selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
 .nav-favorites-empty { margin: 0; padding: 4px 8px 8px; color: var(--ink-3); font-size: var(--text-xs); line-height: 1.5; }
+.nav-favorites-empty.is-armed, .nav-favorites-drop { border: 1px dashed var(--line-strong); border-radius: var(--radius-md); color: var(--ink-2); }
+.nav-favorites-empty.is-armed { padding: 8px; }
+/* 拖动时出现在收藏末尾的放置区：指针移入时改为强调色。 */
+.nav-favorites-drop { display: flex; align-items: center; justify-content: center; height: 36px; margin-top: 4px; font-size: var(--text-xs); }
+.nav-favorites-drop.is-over, .nav-favorites.is-dropping .nav-favorites-empty { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
 .nav-external { color: var(--ink-3); }
 .sidebar-bottom { display: grid; gap: 8px; padding: 8px 12px 12px; border-top: 1px solid var(--line); }
 .sidebar-links { display: grid; }
