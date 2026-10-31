@@ -1,10 +1,10 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import * as api from "../api";
 import { passkeyUnavailable, unlockWithPrivatePasskey } from "../passkeys";
-import { Button, Field, Modal } from "../ui";
+import { Button, Field, Modal, Notice } from "../ui";
 import { usePrivateAccess } from "./private-session";
 
-/** 私密空间解锁表单：账号通行密钥或登录密码。独立成文件，位置选择器等底层组件也能使用而不形成循环导入。 */
+/** 私密空间解锁表单：账号通行密钥或登录密码。只在 PrivateUnlockDialog 内使用；独立成文件，位置选择器等底层组件也能使用而不形成循环导入。 */
 export function PrivateUnlockForm() {
   const access = usePrivateAccess();
   const id = useId(), mounted = useRef(true), controller = useRef<AbortController | null>(null);
@@ -60,12 +60,19 @@ export function PrivateUnlockForm() {
   </form>;
 }
 
-/** 在其他弹窗里临时解锁私密空间（如选择保存位置时）；解锁成功后回调并关闭。 */
-export function PrivateUnlockDialog({ description, onClose, onUnlocked }: { description: string; onClose: () => void; onUnlocked: () => void }) {
+/**
+ * 私密空间唯一的解锁入口：进入私密空间、移入移出、保存到私密目录、本机缓存、文件助手等需要解锁时都弹出它，
+ * 不在页面或其他弹窗里内嵌解锁表单。解锁成功后回调 onUnlocked（调用方自行关闭或继续原操作）。
+ */
+export function PrivateUnlockDialog({ title = "解锁私密空间", description, onClose, onUnlocked, className = "" }: {
+  title?: string; description: string; onClose: () => void; onUnlocked?: () => void; className?: string;
+}) {
   const access = usePrivateAccess();
   const done = useRef(onUnlocked); done.current = onUnlocked;
-  useEffect(() => { if (access.grant) done.current(); }, [access.grant]);
-  return <Modal title="解锁私密空间" description={description} icon="lock" size="sm" className="private-dialog" onClose={onClose}>
-    <PrivateUnlockForm />
+  useEffect(() => { if (access.grant) done.current?.(); }, [access.grant]);
+  return <Modal title={title} description={description} icon="lock" size="sm" className={`private-dialog${className ? ` ${className}` : ""}`} onClose={onClose}>
+    {access.restoring ? <div className="private-loading" role="status"><span className="spinner" />正在检查私密空间</div>
+      : access.error ? <div className="form"><Notice tone="danger">{access.error}</Notice><Button onClick={access.restore}>重试</Button></div>
+      : <PrivateUnlockForm />}
   </Modal>;
 }

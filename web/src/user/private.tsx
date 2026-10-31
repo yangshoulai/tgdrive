@@ -6,7 +6,7 @@ import { FilesView } from "./files";
 import { TrashView } from "./trash";
 import { PRIVATE_SECTION_EVENT, setPrivateSection } from "./assistant-bridge";
 import type { UploadQueue } from "./uploads";
-import { PrivateUnlockForm } from "./private-unlock";
+import { PrivateUnlockDialog } from "./private-unlock";
 import { usePrivateAccess, usePrivateSession } from "./private-session";
 import { takeTransferRequest, useTransferReceiver, type TransferState } from "./transfer";
 
@@ -33,6 +33,9 @@ export function PrivateSpaceView({ session, prefix, onOpenFolder, onChanged, upl
   useDocumentTitle(`私密空间 · ${BRAND}`);
   const access = usePrivateAccess(), grant = access.grant;
   const [trash, setTrash] = useState(false);
+  const [unlocking, setUnlocking] = useState(true);
+  // 解锁成功时解锁框随锁定页一起卸载，来不及回调，这里收起：之后手动锁定不再自动弹出。
+  useEffect(() => { if (grant) setUnlocking(false); }, [grant]);
   const [transferRequest] = useState(takeTransferRequest);
   const [transfer, discardTransfer] = useTransferReceiver(transferRequest);
   const incoming = transfer && transfer.ended && !transfer.error && transfer.files.length ? transfer.files : null;
@@ -49,12 +52,17 @@ export function PrivateSpaceView({ session, prefix, onOpenFolder, onChanged, upl
   if (!grant) return <>
     <PageHeader title="私密空间" description="使用账号登录密码或通行密钥解锁，无操作后自动锁定。" />
     {transfer && <TransferNotice transfer={transfer} unlocked={false} onDiscard={discardTransfer} />}
-    <section className="private-gate" aria-label="解锁私密空间">
+    <section className="private-gate" aria-label="私密空间已锁定">
       <span className="locked-icon"><Icon name="lock" size={26} /></span>
-      <h2>{access.restoring ? "正在检查解锁状态" : "解锁后查看私密文件"}</h2>
-      {access.restoring ? <div className="private-loading" role="status"><span className="spinner" />正在检查私密空间</div> : access.error ? <div className="form"><Notice tone="danger">{access.error}</Notice><Button onClick={access.restore}>重试</Button></div>
-        : <PrivateUnlockForm />}
+      <h2>{access.restoring ? "正在检查解锁状态" : "私密空间已锁定"}</h2>
+      {access.restoring ? <div className="private-loading" role="status"><span className="spinner" />正在检查私密空间</div> : <>
+        <p className="muted">解锁后查看和管理私密文件。</p>
+        <Button variant="primary" icon="unlock" onClick={() => setUnlocking(true)}>解锁</Button>
+      </>}
     </section>
+    {/* 进入页面时直接弹出解锁框；关闭后可用上面的按钮重新打开，手动锁定后不自动弹出。 */}
+    {unlocking && !access.restoring && <PrivateUnlockDialog description="解锁后查看和管理私密文件。"
+      onClose={() => setUnlocking(false)} onUnlocked={() => setUnlocking(false)} />}
   </>;
   return <div className="private-space">
     <div className="private-toolbar">

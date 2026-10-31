@@ -16,7 +16,7 @@ import { filesBridge, getPrivateSection, openPrivateSection, waitForFiles } from
 import { usePrivateAccess } from "./private-session";
 import { assistantEnvironment } from "./assistant-environment";
 import { commonFolder, mentionLabel, useMentions } from "./assistant-mentions";
-import { PrivateUnlockForm } from "./private-unlock";
+import { PrivateUnlockDialog } from "./private-unlock";
 import { AssistantComposer, type ComposerHandle } from "./assistant-composer";
 import { lockAssistantPage, watchAssistantViewport } from "./assistant-layout";
 import { FolderPicker } from "./folders";
@@ -1210,11 +1210,13 @@ function UnlockDialog({ prompt, config, unlocked, acknowledged, onConfigChanged,
     finally { setBusy(false); }
   }
   if (ready) return null;
+  // 锁定时使用统一的私密空间解锁弹窗；已解锁但还没确认私密说明时才显示下面的说明框。
+  if (!unlocked) return <PrivateUnlockDialog className="assistant-dialog assistant-unlock-dialog" title={prompt.title}
+    description="私密空间已锁定。解锁后继续；锁定后需要重新解锁。" onClose={onClose} />;
   return <Modal className="assistant-dialog assistant-unlock-dialog" size="sm" icon="lock" title={prompt.title}
-    description={!unlocked ? "私密空间已锁定。解锁后继续；锁定后需要重新解锁。" : "第一次让助手处理私密文件前，请阅读以下说明。"}
-    onClose={onClose} footer={unlocked ? <><Button onClick={onClose}>取消</Button><Button variant="primary" loading={busy} onClick={() => void accept()}>我知道了，继续</Button></> : undefined}>
-    {!unlocked ? <PrivateUnlockForm />
-      : <div className="assistant-unlock-notice"><p>{config.private_notice}</p></div>}
+    description="第一次让助手处理私密文件前，请阅读以下说明。"
+    onClose={onClose} footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" loading={busy} onClick={() => void accept()}>我知道了，继续</Button></>}>
+    <div className="assistant-unlock-notice"><p>{config.private_notice}</p></div>
   </Modal>;
 }
 

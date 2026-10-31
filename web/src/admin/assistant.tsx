@@ -7,19 +7,19 @@ import { SITE } from "../brand";
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { Notice, Badge, Button, ByteSizeInput, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Panel, PasswordField, SetupGuide, SearchInput, Segmented,
-  SkeletonRows, Switch, Tabs, Disclosure, formatBytes, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
+  SkeletonRows, Switch, Tabs, Disclosure, formatBytes, formatDateTime, toast, confirmLeave, useDocumentTitle, useUnsavedChanges, type IconName, type Tone } from "../ui";
 import { Stat } from "./overview";
 import { CurveChart } from "../curve-chart";
 
 type Tab = "overview" | "channels" | "catalog" | "tools" | "limits" | "usage" | "conversations" | "calls";
 /** 控制台五个标签，相关的页面并在一起，用分段切换；每个分段仍有自己的地址（/admin/assistant/<分段>），旧链接不受影响。 */
 type Group = "overview" | "models" | "access" | "usage" | "conversations";
-const GROUPS: { value: Group; label: string; sections: { value: Tab; label: string }[] }[] = [
-  { value: "overview", label: "概览", sections: [{ value: "overview", label: "概览" }] },
-  { value: "models", label: "渠道与模型", sections: [{ value: "channels", label: "模型渠道" }, { value: "catalog", label: "模型目录" }] },
-  { value: "access", label: "权限与工具", sections: [{ value: "limits", label: "权限与额度" }, { value: "tools", label: "工具" }] },
-  { value: "usage", label: "用量与日志", sections: [{ value: "usage", label: "用量统计" }, { value: "calls", label: "调用日志" }] },
-  { value: "conversations", label: "对话记录", sections: [{ value: "conversations", label: "对话记录" }] },
+const GROUPS: { value: Group; label: string; icon: IconName; sections: { value: Tab; label: string }[] }[] = [
+  { value: "overview", label: "概览", icon: "pulse", sections: [{ value: "overview", label: "概览" }] },
+  { value: "models", label: "渠道与模型", icon: "server", sections: [{ value: "channels", label: "模型渠道" }, { value: "catalog", label: "模型目录" }] },
+  { value: "access", label: "权限与工具", icon: "shield", sections: [{ value: "limits", label: "权限与额度" }, { value: "tools", label: "工具" }] },
+  { value: "usage", label: "用量与日志", icon: "chart", sections: [{ value: "usage", label: "用量统计" }, { value: "calls", label: "调用日志" }] },
+  { value: "conversations", label: "对话记录", icon: "chat", sections: [{ value: "conversations", label: "对话记录" }] },
 ];
 const TABS = GROUPS.flatMap(group => group.sections);
 const groupOf = (tab: Tab) => GROUPS.find(group => group.sections.some(section => section.value === tab))!;
@@ -61,7 +61,8 @@ export function AssistantAdmin() {
     window.addEventListener("popstate", pop);
     return () => window.removeEventListener("popstate", pop);
   }, []);
-  function choose(next: Tab) {
+  async function choose(next: Tab) {
+    if (next === tab || !await confirmLeave()) return;
     setTab(next);
     window.history.pushState(null, "", next === "overview" ? "/admin/assistant" : `/admin/assistant/${next}`);
   }
@@ -131,10 +132,10 @@ function OverviewTab({ revision, settings, onNavigate, onChanged }: { revision: 
       </Panel>}
       <div className="stat-strip assistant-stats">
         <Stat label="默认模型" value={data.default_model?.label ?? "未设置"} detail={`可用模型 ${data.usable_models} 个（${data.channels} 个渠道）`} />
-        <Stat label="今日对话" value={String(data.today.conversations)} detail={`模型请求 ${data.today.requests} 次`} />
+        <Stat label="今日对话" value={data.today.conversations} detail={`模型请求 ${data.today.requests} 次`} />
         <Stat label="今日 Token" value={tokens(data.today.tokens)} detail={`失败率 ${percent(data.today.failure_rate)}`} />
         <Stat label="启用工具" value={`${data.tools.enabled} / ${data.tools.total}`} detail="管理员可逐个停用" />
-        <Stat label="待确认操作" value={String(data.today.pending_actions)} detail={`今日已执行 ${data.today.executed_actions}`} />
+        <Stat label="待确认操作" value={data.today.pending_actions} detail={`今日已执行 ${data.today.executed_actions}`} />
       </div>
       <div className="overview-columns">
         <div className="overview-column">
@@ -247,8 +248,8 @@ function UsageTab() {
       : report === null ? <SkeletonRows rows={6} /> : <div className="assistant-admin-stack">
         <div className="stat-strip assistant-stats">
           <Stat label="Token" value={tokens(report.totals.input_tokens + report.totals.output_tokens)} detail={`输入 ${tokens(report.totals.input_tokens)} · 输出 ${tokens(report.totals.output_tokens)}`} />
-          <Stat label="运行次数" value={report.totals.runs.toLocaleString("zh-CN")} detail={`自 ${report.since}`} />
-          <Stat label="使用人数" value={report.totals.users.toLocaleString("zh-CN")} detail="有用量的账号" />
+          <Stat label="运行次数" value={report.totals.runs} detail={`自 ${report.since}`} />
+          <Stat label="使用人数" value={report.totals.users} detail="有用量的账号" />
           <Stat label="估算费用" value={report.totals.cost == null ? "—" : `$${report.totals.cost.toFixed(report.totals.cost >= 10 ? 0 : 2)}`} detail="按模型目录价格估算，仅供参考" />
         </div>
         <Panel title="每日 Token 用量" description="输入与输出合计。">
@@ -875,6 +876,7 @@ function ToolsTab() {
     return [...result.entries()];
   }, [effective]);
   const dirty = Object.keys(draft).length > 0;
+  useUnsavedChanges(dirty);
   function toggle(name: string, value: boolean) { setDraft(current => ({ ...current, [name]: { ...current[name], enabled: value } })); }
   function togglePrivate(name: string, value: boolean) { setDraft(current => ({ ...current, [name]: { ...current[name], private_enabled: value } })); }
   async function save() {
@@ -983,10 +985,11 @@ function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSettings | nul
     if (!settings) return;
     void ai.adminLimits().then(value => { setLimits(value); reset(value, settings); }).catch(reason => setError(api.errorMessage(reason, "加载失败")));
   }, [settings === null]);
+  const dirty = Boolean(limits && settings) && (Object.entries(form).some(([key, value]) => value !== String(limits!.values[key]))
+    || general.user_daily_tokens !== String(settings!.user_daily_tokens) || general.retention_days !== String(settings!.retention_days)
+    || general.call_log_days !== String(settings!.call_log_days) || general.notice !== settings!.notice);
+  useUnsavedChanges(dirty);
   if (!limits || !settings) return error ? <Panel><EmptyState icon="alert" title="加载失败" description={error} /></Panel> : <Panel><SkeletonRows rows={6} /></Panel>;
-  const dirty = Object.entries(form).some(([key, value]) => value !== String(limits.values[key]))
-    || general.user_daily_tokens !== String(settings.user_daily_tokens) || general.retention_days !== String(settings.retention_days)
-    || general.call_log_days !== String(settings.call_log_days) || general.notice !== settings.notice;
   async function submit(event: FormEvent) {
     event.preventDefault();
     for (const [key, value] of Object.entries(form)) {
@@ -1241,7 +1244,7 @@ function CallsTab() {
         <Button icon="refresh" onClick={load}>刷新</Button>
       </div>
       {stats && <div className="stat-strip assistant-stats assistant-call-stats">
-        <Stat label="请求" value={stats.total.toLocaleString("zh-CN")} detail={`成功 ${stats.ok.toLocaleString("zh-CN")}`} />
+        <Stat label="请求" value={stats.total} detail={`成功 ${stats.ok.toLocaleString("zh-CN")}`} />
         <Stat label="成功率" value={percent(stats.success_rate)} detail="所选范围" />
         <Stat label="P50 延迟" value={ms(stats.p50_ms)} detail="中位数" />
         <Stat label="P95 延迟" value={ms(stats.p95_ms)} detail="慢请求" />

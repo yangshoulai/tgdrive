@@ -496,7 +496,7 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
         {failure || (showLyrics
           ? <div className="audio-lyrics" ref={lyricHost} aria-label="同步歌词，点击跳转">
             {lyrics.map((line, index) => <button type="button" key={index} data-line={index} className={`audio-lyric${active === index ? " is-active" : ""}${index < active ? " is-past" : ""}`}
-              aria-current={active === index ? "true" : undefined} onClick={() => audio?.seek(line.time)}>{line.text || "♪"}</button>)}
+              aria-current={active === index ? "true" : undefined} onClick={() => audio?.seek(line.time)}>{line.text || <Icon name="audio" size={14} className="audio-lyric-rest" />}</button>)}
           </div>
           : lyricsLoading
             ? <div className="audio-lyrics-skeleton" role="status" aria-label="正在加载歌词"><i /><i /><i /><i /><i /></div>

@@ -19,7 +19,7 @@ export function Maintenance({ status, onStatus, onLocked }: { status: api.System
   return (
     <>
       <PageHeader title="安全与维护" />
-      <Tabs label="维护区域" value={section} onChange={setSection} options={[{ value: "maintenance", label: "维护与备份" }, { value: "security", label: "安全设置" }]} />
+      <Tabs label="维护区域" value={section} onChange={setSection} options={[{ value: "maintenance", label: "维护与备份", icon: "wrench" }, { value: "security", label: "安全设置", icon: "shield" }]} />
       <div className="stack maintenance-section" hidden={section !== "maintenance"}>
         <TasksPanel unlocked={Boolean(unlocked)} active={section === "maintenance"} />
         <ThumbnailTasksPanel active={section === "maintenance"} />
@@ -56,6 +56,13 @@ const STATUS_LABEL: Record<string, string> = {
   expired: "已过期", running: "执行中", done: "已完成", partial: "部分完成", failed: "失败", cancelled: "已取消",
   interrupted: "已中断", undoing: "撤销中", undone: "已撤销",
 };
+/** 审计只保存错误代码（不保存可能含敏感内容的原文），这里换成管理员读得懂的原因。 */
+const ERROR_LABEL: Record<string, string> = {
+  bad_request: "参数不合法或校验未通过", unauthorized: "未登录或登录已过期", forbidden: "没有权限", not_found: "目标不存在",
+  wrong_passphrase: "加密口令不正确", too_many_attempts: "尝试次数过多", quota_exceeded: "空间不足", transfer_busy: "传输繁忙",
+  locked: "系统未解锁", private_locked: "私密空间未解锁", password_required: "需要访问密码", share_expired: "分享已过期",
+  assistant_unavailable: "文件助手不可用", integrity_error: "完整性校验失败", range_not_satisfiable: "字节范围无效", internal_error: "服务内部错误",
+};
 const count = (value: unknown, label: string) => typeof value === "number" ? `${label} ${value.toLocaleString("zh-CN")} 项` : null;
 
 function auditDetail(event: api.AuditEvent) {
@@ -81,7 +88,7 @@ function auditDetail(event: api.AuditEvent) {
   if (detail.api_key === "changed") parts.push("更换 API Key");
   if (typeof detail.full_access === "boolean") parts.push(detail.full_access ? "允许完全访问" : "关闭完全访问");
   if (typeof detail.public_base_url === "string" || typeof detail.s3_endpoint === "string") parts.push(Object.entries(detail).map(([key, value]) => `${key === "s3_endpoint" ? "S3" : "公开地址"}：${value || "默认"}`).join("，"));
-  if (typeof detail.error === "string") parts.push(`错误：${detail.error}`);
+  if (typeof detail.error === "string") parts.push(`失败原因：${ERROR_LABEL[detail.error] ?? detail.error}`);
   return parts.filter(Boolean).join("，");
 }
 

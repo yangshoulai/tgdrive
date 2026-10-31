@@ -68,8 +68,8 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   const compactTools = tools?.compact ?? false;
   const setMenuItems = tools?.setMenuItems;
   const markdown = /\.(md|markdown|mdx)$/i.test(name);
-  // 纸张：Markdown 预览与纯文本；深色通栏：代码文件与 Markdown 源码。
-  const paper = immersive && (mode === "render" || !code && !markdown);
+  // 纸张只给 Markdown 预览；纯文本、日志、代码与 Markdown 源码统一用深色通栏编辑器。
+  const paper = immersive && markdown && mode === "render";
   const lineCount = useMemo(() => {
     // 大文本只统计换行，避免 split 为每一行额外分配字符串。
     let count = 1;

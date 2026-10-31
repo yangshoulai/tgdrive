@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import * as api from "../api";
-import { Button, Disclosure, Field, KeyValue, Notice, Panel, SkeletonRows, Switch, formatBytes, toast } from "../ui";
+import { Button, Disclosure, Field, KeyValue, Notice, Panel, SkeletonRows, Switch, formatBytes, toast, useUnsavedChanges } from "../ui";
 
 /** 可选的资源模式。「标准」已并入「自动」：硬件足够时自动就是标准档。 */
 const MODES: Record<api.ResourceConfig["mode"], string> = { auto: "自动", low: "低资源", custom: "自定义" };
@@ -31,8 +31,9 @@ export function Resources() {
     } catch (reason) { setError(api.errorMessage(reason, "资源配置保存失败")); }
     finally { setBusy(false); }
   }
+  const dirty = Boolean(settings && form) && JSON.stringify(form) !== JSON.stringify(settings!.config);
+  useUnsavedChanges(dirty);
   if (!settings || !form) return <Panel title="下载与资源">{error ? <div className="form"><Notice tone="danger">{error}</Notice><Button onClick={load}>重试</Button></div> : <SkeletonRows rows={3} />}</Panel>;
-  const dirty = JSON.stringify(form) !== JSON.stringify(settings.config);
   const set = <K extends keyof api.ResourceConfig>(key: K, value: api.ResourceConfig[K]) => setForm({ ...form, [key]: value });
   const number = (key: keyof api.ResourceConfig) => (event: { target: { value: string } }) => set(key, Number(event.target.value) as never);
   const effective = settings.effective;

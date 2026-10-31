@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type Reac
 import { BRAND, SITE, STORY, TAGLINE } from "./brand";
 import * as api from "./api";
 import { loginWithPasskey, passkeyUnavailable } from "./passkeys";
-import { Notice, Avatar, Brand, Button, Checkbox, Field, Icon, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
+import { Notice, Avatar, Brand, Button, Checkbox, Field, Icon, LeaveGuard, Menu, Segmented, Toaster, type IconName, type MenuItem } from "./ui";
 
 /** live：有任务正在进行，数量角标显示呼吸提示（任务中心）。 */
 export type NavItem<K extends string> = { key: K; label: string; icon: IconName; count?: number; live?: boolean; href?: string };
@@ -15,7 +15,12 @@ export type NavLink = { label: string; icon: IconName; href: string };
 const COLLAPSED_GROUPS = "tessera:nav-collapsed";
 /** 桌面侧栏收起为图标栏，记在这台设备上；手机抽屉不受影响。 */
 const SIDEBAR_RAIL = "tessera:sidebar-rail";
-const readRail = () => { try { return localStorage.getItem(SIDEBAR_RAIL) === "1"; } catch { return false; } };
+/** 没有手动选择时按窗口宽度决定：1200px 以下的桌面窗口自动收起，给内容区留出空间。 */
+const RAIL_AUTO = "(max-width: 1199px)";
+const readRail = (): boolean | null => {
+  try { const value = localStorage.getItem(SIDEBAR_RAIL); return value === "1" ? true : value === "0" ? false : null; } catch { return null; }
+};
+const autoRail = () => typeof matchMedia === "function" && matchMedia(RAIL_AUTO).matches;
 function readCollapsed(): string[] {
   try { const value = JSON.parse(localStorage.getItem(COLLAPSED_GROUPS) ?? "[]"); return Array.isArray(value) ? value.filter(item => typeof item === "string") : []; }
   catch { return []; }
@@ -38,11 +43,25 @@ export function AppShell<K extends string>({ groups, workspaces = [], active, on
 }) {
   const [drawer, setDrawer] = useState(false);
   const [collapsed, setCollapsed] = useState(readCollapsed);
-  const [rail, setRail] = useState(readRail);
-  const toggleRail = () => setRail(value => {
-    try { localStorage.setItem(SIDEBAR_RAIL, value ? "0" : "1"); } catch { /* 隐私模式下不保存 */ }
-    return !value;
-  });
+  const [saved, setSaved] = useState(readRail);
+  const [narrow, setNarrow] = useState(autoRail);
+  useEffect(() => {
+    if (typeof matchMedia !== "function") return;
+    const query = matchMedia(RAIL_AUTO);
+    const update = () => {
+      setNarrow(query.matches);
+      // 跨过断点时回到自动：在窄窗口里展开过的侧栏，放大后不再固定为展开，反之亦然。
+      setSaved(null);
+      try { localStorage.removeItem(SIDEBAR_RAIL); } catch { /* 隐私模式下不保存 */ }
+    };
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  const rail = saved ?? narrow;
+  const toggleRail = () => {
+    try { localStorage.setItem(SIDEBAR_RAIL, rail ? "0" : "1"); } catch { /* 隐私模式下不保存 */ }
+    setSaved(!rail);
+  };
   const groupOf = (key: K) => groups.find(group => group.items.some(item => item.key === key));
   const currentWorkspace = workspaces.find(workspace => workspace.label === groupOf(active)?.workspace) ?? workspaces[0];
   const saveCollapsed = (next: string[]) => {
@@ -128,6 +147,7 @@ export function AppShell<K extends string>({ groups, workspaces = [], active, on
         <div className="main-inner">{children}</div>
       </main>
       <Toaster />
+      <LeaveGuard />
     </div>
   );
 }

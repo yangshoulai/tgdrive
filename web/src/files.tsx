@@ -346,7 +346,8 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     if (item.key === active.key) { if (controls.current) { controls.current.seek(0); play(); } else pendingPlay.current = true; return; }
     pendingPlay.current = true; playlist.select(item);
   }
-  useEffect(() => { pendingPlay.current = false; }, [file.key]);
+  // 打开（或换成另一个）音视频文件后直接播放：播放器还没就绪时先记下，就绪后由 onControls 开始；浏览器拦截时 play() 会提示点击播放。
+  useEffect(() => { pendingPlay.current = false; if (media) play(); }, [file.key]);
   function handleShortcut(event: KeyboardEvent<HTMLDivElement>) {
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return;
     const key = event.key.toLowerCase(), navigation = key === "arrowleft" || key === "arrowright";

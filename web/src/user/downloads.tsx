@@ -5,7 +5,7 @@ import { useCursorPage, usePageSize } from "../pagination";
 import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
 import { FileTile, FileVisual, getFileKind } from "../files";
 import { DestinationPicker } from "./folders";
-import { PrivateUnlockForm } from "./private-unlock";
+import { PrivateUnlockDialog } from "./private-unlock";
 import { usePrivateAccess } from "./private-session";
 import { LocationText, TaskStats, remainingText } from "./task-list";
 import { CoverPickerDialog } from "./thumbnail-editor";
@@ -366,6 +366,9 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
   const access = usePrivateAccess();
   const [wantPrivate, setWantPrivate] = useState(Boolean(initial?.private));
   const needsUnlock = wantPrivate && !access.grant;
+  // 脚本转交到私密空间的任务直接弹出统一的解锁框；记住的私密位置只提示，由用户点「解锁」。
+  const [unlocking, setUnlocking] = useState(Boolean(initial?.private));
+  useEffect(() => { if (access.grant) setUnlocking(false); }, [access.grant]);
   useEffect(() => { if (wantPrivate && access.grant && !api.isPrivatePath(destination)) setDestination(api.PRIVATE_PREFIX); }, [wantPrivate, access.grant, destination]);
   // 默认使用上次的保存位置（服务端按账号记录，脚本提交的任务也会更新）；私密位置在解锁后才取得具体目录。
   // 用户在本窗口改过位置后不再覆盖。
@@ -475,13 +478,15 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
         {task ? <p className="muted">保存位置：{task.private && !api.isPrivatePath(task.key) ? "私密空间" : api.privatePathLabel(task.key)}</p>
           : needsUnlock ? <div className="download-import-unlock">
             <div className="download-import-unlock-head"><Icon name="lock" size={18} /><div><strong>保存到私密空间需要先解锁</strong><p className="muted">{initial ? `解锁只在当前 ${BRAND} 页面完成，脚本和原网页拿不到你的密码。` : "上次保存到了私密空间，解锁后继续使用那个位置。"}</p></div>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => { chosen.current = true; setWantPrivate(false); setDestination(""); }}>改存普通目录</Button></div>
-            <PrivateUnlockForm />
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => { chosen.current = true; setWantPrivate(false); setDestination(""); }}>改存普通目录</Button>
+              <Button size="sm" variant="primary" icon="unlock" disabled={busy} onClick={() => setUnlocking(true)}>解锁</Button></div>
           </div>
           : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { chosen.current = true; setWantPrivate(api.isPrivatePath(path)); setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示不含查询参数的来源地址。</p></>}
       </>}
       {error && <Notice tone="danger">{error}</Notice>}
     </div>
+    {unlocking && needsUnlock && <PrivateUnlockDialog description={initial ? `解锁只在当前 ${BRAND} 页面完成，脚本和原网页拿不到你的密码。` : "解锁后保存到私密空间。"}
+      onClose={() => setUnlocking(false)} onUnlocked={() => setUnlocking(false)} />}
     {coverFor !== null && candidates?.[coverFor] && <CoverPickerDialog name={candidates[coverFor].name} onClose={() => setCoverFor(null)}
       onPick={image => { setCovers(current => new Map(current).set(coverFor, image)); setCoverFor(null); }} />}
   </Modal>;

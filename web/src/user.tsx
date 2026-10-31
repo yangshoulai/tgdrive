@@ -8,7 +8,7 @@ import { DocsPage } from "./docs/docs";
 import { SharePage } from "./share";
 import { ADMIN_MODULES, AdminConsole, LockedGate, type AdminModule } from "./admin";
 import { AppShell, FullPageLoading, LoginPage, SetupPage, isPlainClick, useSessionGuard, type NavGroup } from "./shell";
-import { Notice, Button, ButtonLink, Icon, Progress, formatBytes, toast, usageTone, useDocumentTitle, type IconName } from "./ui";
+import { Notice, Button, ButtonLink, Icon, Progress, confirmLeave, formatBytes, hasUnsavedChanges, toast, usageTone, useDocumentTitle, type IconName } from "./ui";
 
 import { FilesView } from "./user/files";
 import { PrivateSpaceView } from "./user/private";
@@ -236,11 +236,16 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
     return () => window.removeEventListener("popstate", pop);
   }, []);
   const navigate = useCallback((section: Section, prefix = "") => {
+    // 设置页有未保存的修改时先确认；没有时同步切换，调用方不需要等待。
+    if (hasUnsavedChanges()) { void confirmLeave().then(leave => { if (leave) go(section, prefix); }); return; }
+    go(section, prefix);
+  }, []);
+  const go = (section: Section, prefix: string) => {
     if (section === "files") prefix = visibleFilesPrefix(prefix);
     window.history.pushState(null, "", sectionUrl(section, prefix));
     setLocation({ section, prefix: section === "private" ? (api.isPrivatePath(prefix) ? prefix : api.PRIVATE_PREFIX + prefix) : prefix });
     document.getElementById("main")?.scrollTo?.({ top: 0 });
-  }, []);
+  };
   async function logout() {
     uploads.cancelAll();
     await api.logout().catch(() => undefined);

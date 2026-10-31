@@ -72,7 +72,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                       <span role="cell" className="cell-name">
                         <FileVisual kind={folder ? "folder" : getFileKind(file.content_type, file.key)} src={folder ? undefined : api.fileThumbnail(file)} />
                         <span className="name-stack">
-                          <button type="button" className="name-button" onClick={event => { event.stopPropagation(); open(); }}>{baseName(file.key)}</button>
+                          <button type="button" className="name-button" title={file.key} onClick={event => { event.stopPropagation(); open(); }}>{baseName(file.key)}</button>
                           {/* 位置是次要信息：小号三级色，带文件夹图标的面包屑，和文件名明显区分。 */}
                           <small className="item-location" title={`位于 /${parentPath(file.key)}`}><Icon name="folder" size={12} />
                             <span>{["我的文件", ...parentPath(file.key).split("/").filter(Boolean)].join(" › ")}</span>

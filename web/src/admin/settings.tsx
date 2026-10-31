@@ -4,7 +4,7 @@ import * as api from "../api";
 import { Resources } from "./resources";
 import { RegistrationSettings } from "./registration";
 
-import { Button, Field, KeyValue, Notice, PageHeader, Panel, SetupGuide, SkeletonRows, Tabs, toast, useDocumentTitle } from "../ui";
+import { Button, Field, KeyValue, Notice, PageHeader, Panel, SetupGuide, SkeletonRows, Tabs, confirmLeave, toast, useDocumentTitle, useUnsavedChanges } from "../ui";
 
 /* ---------- 系统设置 ---------- */
 
@@ -19,7 +19,8 @@ const readTab = (): SettingsTab => { const value = new URLSearchParams(window.lo
 export function Settings({ onSaved }: { onSaved: () => void }) {
   const [tab, setTab] = useState<SettingsTab>(readTab);
   useDocumentTitle(`系统设置 · ${SITE.admin}`);
-  const choose = (value: SettingsTab) => {
+  const choose = async (value: SettingsTab) => {
+    if (value === tab || !await confirmLeave()) return;
     setTab(value);
     const url = new URL(window.location.href);
     if (value === "address") url.searchParams.delete("tab"); else url.searchParams.set("tab", value);
@@ -57,11 +58,12 @@ function AccessSettings({ onSaved }: { onSaved: () => void }) {
     } catch (reason) { setError(api.errorMessage(reason, "保存失败，请稍后重试")); }
     finally { setBusy(false); }
   }
+  const dirty = settings !== null && (form.public_base_url !== (settings.public_base_url.value ?? "") || form.s3_endpoint !== (settings.s3_endpoint.value ?? ""));
+  useUnsavedChanges(dirty);
   if (!settings && !error) return <Panel><SkeletonRows rows={3} /></Panel>;
   const trimmed = (value: string) => value.trim().replace(/\/+$/, "");
   const site = trimmed(form.public_base_url) || settings?.public_base_url.default || api.detectedSiteOrigin();
   const s3 = trimmed(form.s3_endpoint) || settings?.s3_endpoint.default || null;
-  const dirty = settings !== null && (form.public_base_url !== (settings.public_base_url.value ?? "") || form.s3_endpoint !== (settings.s3_endpoint.value ?? ""));
   return (
     <>
       <SetupGuide id="system-settings" title="访问地址配置指南" description="让分享链接、使用文档和同步工具指向正确的域名。" docHref="/docs/deploy"

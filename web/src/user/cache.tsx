@@ -6,7 +6,7 @@ import { effectiveMiB } from "../cache-store";
 import { FileTile, getFileKind } from "../files";
 import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, Tabs, copyText, formatBytes, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 import { usePrivateAccess } from "./private-session";
-import { PrivateUnlockForm } from "./private-unlock";
+import { PrivateUnlockDialog } from "./private-unlock";
 import { LocationText, TaskControls, TaskListFooter, TaskStats, remainingText, useTaskList, useTransferRates, type TaskFilter, type TaskStat } from "./task-list";
 import { cacheFolderFiles } from "./cache-folders";
 
@@ -432,7 +432,7 @@ export function FileCacheButton({ file }: { file: CacheFile }) {
   return <button type="button" className={`icon-btn icon-btn-ghost icon-btn-sm file-cache-button${state.complete ? " is-complete" : ""}${automatic ? " is-auto" : ""}${state.running ? " is-active" : ""}`} title={label} aria-label={label}
     onClick={event => { event.stopPropagation(); if (state.running) queue.showTasks(); else if (state.complete) queue.inspect(file); else queue.enqueue(file); }}>
     {state.bytes && !state.complete ? <><svg className="file-cache-ring" viewBox="0 0 20 20" aria-hidden="true" style={{ "--tray-progress": state.percent } as CSSProperties}><circle className="tray-ring-track" cx="10" cy="10" r="8" /><circle className="tray-ring-value" cx="10" cy="10" r="8" pathLength="100" /></svg><span>{state.percent}%</span></>
-      : <Icon name={state.complete ? "hardDrive" : state.error ? "refresh" : state.running ? "pulse" : "monitor"} size={16} />}
+      : <Icon name={state.complete ? "hardDrive" : state.error ? "refresh" : state.running ? "pulse" : "monitor"} size={16} filled={state.complete && state.manual} />}
   </button>;
 }
 
@@ -449,7 +449,7 @@ export function FileCacheStatus({ file, className = "" }: { file: CacheFile; cla
     : [`${state.manual ? "已手动缓存" : "已自动缓存"} ${state.percent}%，点击继续：${name}`, `${state.percent}%`, `is-partial ${origin}`];
   return <button type="button" className={`file-cache-status ${tone} ${className}`} title={label} aria-label={label}
     onClick={event => { event.stopPropagation(); if (state.running) queue.showTasks(); else if (state.complete) queue.inspect(file); else queue.enqueue(file); }}>
-    {state.complete ? <Icon name="hardDrive" size={16} /> : state.error ? <Icon name="refresh" size={12} />
+    {state.complete ? <Icon name="hardDrive" size={16} filled={state.manual} /> : state.error ? <Icon name="refresh" size={12} />
       : <svg className="file-cache-ring" viewBox="0 0 20 20" aria-hidden="true" style={{ "--tray-progress": state.percent } as CSSProperties}><circle className="tray-ring-track" cx="10" cy="10" r="8" /><circle className="tray-ring-value" cx="10" cy="10" r="8" pathLength="100" /></svg>}
     {text && <span>{text}</span>}
   </button>;
@@ -647,13 +647,9 @@ const CACHED_PAGE = 50;
 type CachedOrigin = "" | "manual" | "auto";
 type CachedTier = "all" | "normal" | "private";
 
-/** 私密空间的解锁弹窗：复用私密空间的解锁表单，解锁成功后自动关闭，列表随授权变化重新读取。 */
+/** 私密缓存的解锁：使用统一的解锁弹窗，解锁成功后自动关闭，列表随授权变化重新读取。 */
 function CacheUnlockDialog({ onClose }: { onClose: () => void }) {
-  const access = usePrivateAccess();
-  useEffect(() => { if (access.grant) onClose(); }, [access.grant, onClose]);
-  return <Modal title="解锁私密空间" description="解锁后即可查看和管理这台设备上缓存的私密文件。" icon="lock" size="sm" className="private-dialog" onClose={onClose}>
-    <PrivateUnlockForm />
-  </Modal>;
+  return <PrivateUnlockDialog description="解锁后即可查看和管理这台设备上缓存的私密文件。" onClose={onClose} onUnlocked={onClose} />;
 }
 
 /** 已缓存的文件：普通文件与私密空间分开统计，「全部」把两者合在一起并用锁形标记区分；私密空间锁定时提示解锁后再读取。 */

@@ -1,5 +1,5 @@
 /** 任务中心三个页面（上传、离线下载、本机缓存）共用的结构：概览卡片、筛选工具栏、批量操作栏与分页。 */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
 import { Checkbox, Icon, IconButton, Pagination, SearchInput, Segmented, type IconName } from "../ui";
 
@@ -49,7 +49,7 @@ export type TaskStat = { key: string; label: string; value: ReactNode; detail?: 
 /** 页面顶部的概览卡片；可点击的卡片切换到对应的状态筛选。live 表示有任务正在进行（图标呼吸提示）。 */
 export function TaskStats({ items, progress, label }: { items: TaskStat[]; progress?: { percent: number | null; label: string } | null; label: string }) {
   return <section className="task-stats" aria-label={label}>
-    <div className="task-stats-grid">{items.map(item => {
+    <div className={`task-stats-grid${items.length >= 4 ? " is-wide" : ""}`} style={{ "--stat-count": items.length } as CSSProperties}>{items.map(item => {
       const body = <>
         <span className={`task-stat-icon is-${item.tone ?? "neutral"}${item.live ? " is-live" : ""}`} aria-hidden="true"><Icon name={item.icon} size={18} /></span>
         <span className="task-stat-copy"><span className="task-stat-label">{item.label}</span><strong className="task-stat-value">{item.value}</strong>

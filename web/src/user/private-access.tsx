@@ -3,7 +3,7 @@ import * as api from "../api";
 import { Notice, Button, Field, Modal, Segmented, toast } from "../ui";
 import { FolderPicker } from "./folders";
 import { usePrivateAccess, usePrivateSession } from "./private-session";
-import { PrivateUnlockForm } from "./private-unlock";
+import { PrivateUnlockDialog } from "./private-unlock";
 
 /** 与服务端 PrivateSpace.IDLE_OPTIONS 一致。 */
 const PRIVATE_IDLE_MINUTES = [5, 15, 30, 60, 90, 120];
@@ -34,14 +34,17 @@ export function PrivateTransferDialog({ paths, into, onClose, onDone }: { paths:
     } catch (reason) { setError(api.errorMessage(reason, "移动失败，请稍后重试")); }
     finally { setBusy(false); }
   }
+  // 未解锁时先只显示统一的解锁弹窗，解锁后原地换成移动对话框；关闭解锁框即取消本次移动。
+  if (!grant) return <PrivateUnlockDialog className="private-transfer" title={into ? "移入私密空间" : "移出到我的文件"}
+    description={into ? "解锁后选择私密空间中的目标位置。" : "解锁后把这些私密项目移出到我的文件。"} onClose={onClose} />;
   return <Modal className="private-transfer" title={into ? "移入私密空间" : "移出到我的文件"} icon="lock" onClose={onClose} dismissible={!busy}
     description={into ? "移入后取消这些项目的公开分享，文件夹中的内容一起移动。" : "移出后可以从我的文件访问，公开分享仍保持关闭。"}
     footer={<><Button disabled={busy} onClick={onClose}>取消</Button>{grant && <Button variant="primary" loading={busy} disabled={!ready} onClick={() => void move()}>移动 {paths.length} 个项目</Button>}</>}>
-    {access.restoring ? <div className="private-loading" role="status"><span className="spinner" />正在检查私密空间</div> : grant ? <>
+    <>
       <FolderPicker value={destination} onChange={path => { setReady(false); setDestination(path); }} onReady={setReady} />
       <div className="move-conflict"><span>遇到同名文件时</span><Segmented label="同名冲突处理" value={conflict} onChange={setConflict} options={[{ value: "rename", label: "保留两者" }, { value: "skip", label: "跳过" }, { value: "overwrite", label: "覆盖" }]} /></div>
       {conflict === "overwrite" && <Notice tone="warning">目标位置的同名文件会被替换且无法恢复。</Notice>}
       {error && <Notice tone="danger">{error}</Notice>}
-    </> : access.error ? <div className="form"><Notice tone="danger">{access.error}</Notice><Button onClick={access.restore}>重试</Button></div> : <PrivateUnlockForm />}
+    </>
   </Modal>;
 }

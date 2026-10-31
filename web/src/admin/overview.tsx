@@ -3,7 +3,7 @@ import { BRAND, SITE } from "../brand";
 import * as api from "../api";
 import { CurveChart } from "../curve-chart";
 
-import { Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, useDocumentTitle, type IconName } from "../ui";
+import { Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, formatCount, formatNumber, useDocumentTitle, type IconName } from "../ui";
 
 import type { AdminModule } from "../admin";
 
@@ -40,12 +40,12 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
     <>
       <PageHeader title="概览" description={version ? `${BRAND} ${version}` : undefined} />
       <div className="stat-strip">
-        <Stat label="用户" value={String(data.users.total)} detail={`${data.users.active} 个启用`} />
-        <Stat label="文件" value={data.objects.total.toLocaleString("zh-CN")} detail="全部用户" />
+        <Stat label="用户" value={data.users.total} detail={`${data.users.active} 个启用`} />
+        <Stat label="文件" value={data.objects.total} detail="全部用户" />
         <Stat label="已用空间" value={formatBytes(used)} detail="加密前的原始大小" />
-        <Stat label="公开链接" value={data.objects.public_total.toLocaleString("zh-CN")} detail="任何人可访问" tone={data.objects.public_total ? "public" : undefined} />
+        <Stat label="公开链接" value={data.objects.public_total} detail="任何人可访问" />
         {data.bots.length
-          ? <Stat label="存储通道" value={String(activeBots.length)} detail={activeBots.length === data.bots.length ? "全部启用" : `共 ${data.bots.length} 个，${data.bots.length - activeBots.length} 个停用`} />
+          ? <Stat label="存储通道" value={activeBots.length} detail={activeBots.length === data.bots.length ? "全部启用" : `共 ${data.bots.length} 个，${data.bots.length - activeBots.length} 个停用`} />
           : <Stat label="存储通道" value="未配置" detail="文件暂存在本地磁盘" />}
       </div>
       <div className="overview-columns">
@@ -67,7 +67,7 @@ export function Overview({ onNavigate, status }: { onNavigate: (module: AdminMod
             <div className="usage-chart" aria-label="用户空间使用图表">
               {data.users.top_users.map(user => {
                 const max = Math.max(1, ...data.users.top_users.map(item => item.used_bytes));
-                return <div className="usage-chart-row" key={user.id}><span title={user.username}>{api.displayName(user)}</span><div className="usage-chart-track"><i style={{ width: `${Math.max(2, user.used_bytes / max * 100)}%` }} /></div><strong>{formatBytes(user.used_bytes)}</strong></div>;
+                return <div className="usage-chart-row" key={user.id}><span title={user.username}>{api.displayName(user)}</span><div className="usage-chart-track"><i style={{ width: user.used_bytes ? `${Math.max(2, user.used_bytes / max * 100)}%` : 0 }} /></div><strong>{formatBytes(user.used_bytes)}</strong></div>;
               })}
               {data.users.user_total === 0 && <EmptyState compact icon="users" title="还没有普通用户" description="创建用户后，这里会按空间使用量排列。" action={<Button size="sm" onClick={() => onNavigate("users")}>管理用户</Button>} />}
             </div>
@@ -96,7 +96,10 @@ function TrafficChart({ metrics }: { metrics?: api.TrafficMetrics }) {
   </div>;
 }
 
-export function Stat({ label, value, detail, tone }: { label: string; value: string; detail: string; tone?: "public" }) {
-  return <div className={`stat${tone ? ` stat-${tone}` : ""}`}><span className="stat-label">{label}</span><strong className="stat-value">{value}</strong><span className="stat-detail">{detail}</span></div>;
+/** value 是数字时按「万／亿」缩写，悬停显示精确值。 */
+export function Stat({ label, value, detail }: { label: string; value: string | number; detail: string }) {
+  const text = typeof value === "number" ? formatCount(value) : value;
+  const exact = typeof value === "number" && text !== formatNumber(value) ? formatNumber(value) : undefined;
+  return <div className="stat"><span className="stat-label">{label}</span><strong className="stat-value" title={exact}>{text}</strong><span className="stat-detail">{detail}</span></div>;
 }
 

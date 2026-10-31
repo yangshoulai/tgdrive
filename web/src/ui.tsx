@@ -100,10 +100,18 @@ const ICONS = {
 } as const;
 export type IconName = keyof typeof ICONS;
 
-export function Icon({ name, size = 18, className }: { name: IconName; size?: number; className?: string }) {
+/** 实心版本：外形描边 + 用奇偶规则挖空细节的填充，镂空处透出背景，不依赖底色。目前只有缓存状态用到（手动实心、自动空心）。 */
+const FILLED: Partial<Record<IconName, { shape: string; holes: string }>> = {
+  hardDrive: { shape: "M6 5h12l3 10v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-4z", holes: "M3 14.4h18v1.2H3zM6.2 17.5a.8.8 0 1 0 1.6 0a.8.8 0 1 0-1.6 0zM9.2 17.5a.8.8 0 1 0 1.6 0a.8.8 0 1 0-1.6 0z" },
+};
+
+export function Icon({ name, size = 18, className, filled = false }: { name: IconName; size?: number; className?: string; filled?: boolean }) {
+  const solid = filled ? FILLED[name] : undefined;
   return (
     <svg className={className} aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      {name === "more" ? [5, 12, 19].map(cy => <circle key={cy} cx="12" cy={cy} r="1.65" fill="currentColor" stroke="none" />) : <path d={ICONS[name]} />}
+      {name === "more" ? [5, 12, 19].map(cy => <circle key={cy} cx="12" cy={cy} r="1.65" fill="currentColor" stroke="none" />)
+        : solid ? <><path d={solid.shape} /><path d={solid.shape + solid.holes} fill="currentColor" fillRule="evenodd" stroke="none" /></>
+        : <path d={ICONS[name]} />}
     </svg>
   );
 }
@@ -823,6 +831,44 @@ export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onC
   );
 }
 
+/* ---------- 未保存的修改 ---------- */
+
+const unsavedForms = new Set<symbol>();
+let leaveRequest: ((resolve: (leave: boolean) => void) => void) | null = null;
+
+/** 表单有未保存的修改时登记：关闭或刷新页面由浏览器提示，应用内切换页面与标签页经 confirmLeave 确认。 */
+export function useUnsavedChanges(dirty: boolean) {
+  useEffect(() => {
+    if (!dirty) return;
+    const token = Symbol("unsaved");
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    unsavedForms.add(token);
+    window.addEventListener("beforeunload", warn);
+    return () => { unsavedForms.delete(token); window.removeEventListener("beforeunload", warn); };
+  }, [dirty]);
+}
+
+export const hasUnsavedChanges = () => unsavedForms.size > 0;
+
+/** 应用内导航前调用：没有未保存的修改时立即放行，否则弹窗确认是否放弃修改。 */
+export function confirmLeave(): Promise<boolean> {
+  if (!unsavedForms.size || !leaveRequest) return Promise.resolve(true);
+  return new Promise(resolve => leaveRequest!(resolve));
+}
+
+/** confirmLeave 的弹窗挂载点，放在应用外壳里。 */
+export function LeaveGuard() {
+  const [pending, setPending] = useState<((leave: boolean) => void) | null>(null);
+  useEffect(() => {
+    leaveRequest = resolve => setPending(() => resolve);
+    return () => { leaveRequest = null; };
+  }, []);
+  if (!pending) return null;
+  const finish = (leave: boolean) => { setPending(null); pending(leave); };
+  return <ConfirmDialog title="放弃未保存的修改？" description="当前页面的修改还没有保存，离开后这些修改会丢失。" confirmLabel="放弃修改"
+    onConfirm={() => finish(true)} onClose={() => finish(false)} />;
+}
+
 export type MenuItem = { label: string; description?: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean; shortcut?: string; disabled?: boolean };
 
 /** 浮层挂载点：全屏时只有全屏元素内的内容可见，所以菜单挂到全屏元素里，否则挂到 body。 */
@@ -1142,6 +1188,15 @@ export function formatBytes(value: number | null | undefined) {
   const amount = value / 1024 ** index;
   return `${index === 0 ? Math.round(amount) : amount >= 100 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
 }
+
+/** 指标卡片里的大数字：十万起缩写为「万」「亿」（五位数仍写全，避免 10,018 显示成「1 万」），精确值用 formatNumber 放进提示。 */
+export function formatCount(value: number) {
+  if (Math.abs(value) >= 1e8) return `${trimFixed(value / 1e8)} 亿`;
+  if (Math.abs(value) >= 1e5) return `${trimFixed(value / 1e4)} 万`;
+  return formatNumber(value);
+}
+export const formatNumber = (value: number) => value.toLocaleString("zh-CN");
+const trimFixed = (value: number) => (Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(1)).replace(/\.0$/, "");
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
 const timeFormatter = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" });

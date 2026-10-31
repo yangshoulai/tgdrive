@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import * as api from "../api";
 import { useCursorPage } from "../pagination";
-import { Badge, Button, ConfirmDialog, EmptyState, Field, Menu, Modal, Notice, Pagination, Panel, SkeletonRows, Switch, copyText, formatBytes, formatDateTime, toast } from "../ui";
+import { Badge, Button, ConfirmDialog, EmptyState, Field, Menu, Modal, Notice, Pagination, Panel, SkeletonRows, Switch, copyText, formatBytes, formatDateTime, toast, useUnsavedChanges } from "../ui";
 
 const GIB = 1024 ** 3;
 const quotaInput = (value: number | null) => value === null ? "" : String(value / GIB);
@@ -33,6 +33,7 @@ export function RegistrationSettings() {
     return () => { alive = false; };
   }, []);
   const dirty = Boolean(form && saved && JSON.stringify(form) !== JSON.stringify(settingsForm(saved)));
+  useUnsavedChanges(dirty);
   function change(patch: Partial<SettingsForm>) { setForm(current => current && { ...current, ...patch }); setError(""); setTestResult(""); }
   function smtpChange(patch: Partial<api.SmtpConfig>) { if (form) change({ smtp: { ...form.smtp, ...patch } }); }
   async function submit(event: FormEvent) {
