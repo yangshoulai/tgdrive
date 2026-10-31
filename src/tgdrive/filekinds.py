@@ -12,6 +12,8 @@ def _ext(*names: str) -> list[str]:
 _RULES: list[tuple[str, list[str], list[str]]] = [
     ("image", ["image/%"], _ext("png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg", "ico", "heic")),
     ("stream", ["video/mp2t%"], _ext("mts", "m2ts")),
+    # 明确的音频扩展名优先于 video/* MIME（来源常把 FLAC、MP3 标成 video/*），与前端 audioName 一致。
+    ("audio", [], _ext("mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac")),
     ("video", ["video/%"], _ext("mp4", "webm", "mov", "mkv", "avi", "m4v", "ogv")),
     ("audio", ["audio/%"], _ext("mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac")),
     ("pdf", ["application/pdf%"], _ext("pdf")),

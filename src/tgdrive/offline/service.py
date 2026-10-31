@@ -63,6 +63,17 @@ def task_path(key: str) -> str:
 
 
 
+def _stored_type(key: str, content_type: str | None) -> str | None:
+    """保存时的 MIME：来源没给或只给 octet-stream 时按文件名推断；文件名是明确的音频而来源标成 video/*
+    （不少网站把 FLAC、MP3 标成 video/x-flac 等）时改用音频类型，以免网页把音乐当成视频播放。"""
+    guessed = mimetypes.guess_type(key)[0]
+    if not content_type or content_type == "application/octet-stream":
+        return guessed or content_type
+    if guessed and guessed.startswith("audio/") and content_type.startswith("video/"):
+        return guessed
+    return content_type
+
+
 async def _peek(stream, size: int):
     """读出流的开头至少 size 字节（不足则到结束），返回 (开头, 包含开头的完整流)。"""
     iterator, head = stream.__aiter__(), bytearray()
@@ -977,7 +988,7 @@ class OfflineDownloads:
         room = self.objects._quota_room(scope.bucket_id, key)
         if size is not None and room is not None and size > room:
             raise QuotaExceededError("下载文件超过剩余配额")
-        upload_id = await self.objects.create_multipart(scope, key, content_type)
+        upload_id = await self.objects.create_multipart(scope, key, _stored_type(key, content_type))
         self._set(row["id"], upload_id=upload_id, stored_bytes=0)
         return upload_id
 

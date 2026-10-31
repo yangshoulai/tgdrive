@@ -12,6 +12,7 @@ from pathlib import Path
 from tgdrive.app import create_app
 from tgdrive.objects import Scope
 from tgdrive.offline.mp4 import is_fragmented
+from tgdrive.offline.service import _stored_type
 
 FFMPEG = shutil.which("ffmpeg")
 
@@ -43,6 +44,14 @@ class BytesHttp:
     @asynccontextmanager
     async def open(self, request, **kwargs):
         yield BytesResponse(request, self.data)
+
+
+class StoredTypeTests(unittest.TestCase):
+    def test_audio_names_are_not_saved_as_video(self):
+        self.assertTrue(_stored_type("music/以父之名.flac", "video/x-flac").startswith("audio/"))
+        self.assertTrue(_stored_type("a.mp3", "application/octet-stream").startswith("audio/"))
+        self.assertEqual(_stored_type("a.mp4", "video/mp4"), "video/mp4")
+        self.assertEqual(_stored_type("a.flac", "audio/flac"), "audio/flac")
 
 
 @unittest.skipUnless(FFMPEG, "需要 FFmpeg 生成分片 MP4 样本")

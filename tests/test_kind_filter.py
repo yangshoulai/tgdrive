@@ -43,13 +43,13 @@ class KindFilterTests(unittest.TestCase):
     def test_list_and_search_filter_by_kind(self):
         for key, content_type in [("a.MP4", None), ("b.jpg", None), ("c.txt", None), ("d.py", None), ("e.mp3", None),
                                   ("f.pdf", None), ("g.xlsx", None), ("h.zip", None), ("clip.ts", "video/mp2t"),
-                                  ("photo.txt", "image/png"), ("noext", "video/webm"), ("Dockerfile", None),
+                                  ("photo.txt", "image/png"), ("noext", "video/webm"), ("song.flac", "video/x-flac"), ("Dockerfile", None),
                                   ("sub/deep.mp4", None), (".env.local", None)]:
             self.put(key, content_type)
         self.put("pub.mp4")
         self.app.objects.set_public(self.scope, "pub.mp4", True)
         expected = {
-            "video": ["a.MP4", "noext", "pub.mp4"], "image": ["b.jpg", "photo.txt"], "audio": ["e.mp3"],
+            "video": ["a.MP4", "noext", "pub.mp4"], "image": ["b.jpg", "photo.txt"], "audio": ["e.mp3", "song.flac"],
             "document": ["f.pdf", "g.xlsx"], "text": [".env.local", "Dockerfile", "c.txt", "d.py"], "archive": ["h.zip"],
         }
         for kind, keys in expected.items():
@@ -60,7 +60,7 @@ class KindFilterTests(unittest.TestCase):
         self.assertEqual(self.keys("/api/user/v1/search?q=mp4&kind=video"), ["a.MP4", "pub.mp4", "sub/deep.mp4"])
         # 多选取并集，顺序无关；任一项未知整体拒绝。
         self.assertEqual(self.keys("/api/user/v1/list?prefix=&kind=video,image"), sorted(expected["video"] + expected["image"]))
-        self.assertEqual(self.keys("/api/user/v1/list?prefix=&kind=archive%2Caudio"), ["e.mp3", "h.zip"])
+        self.assertEqual(self.keys("/api/user/v1/list?prefix=&kind=archive%2Caudio"), ["e.mp3", "h.zip", "song.flac"])
         for bogus in ("bogus", "video,bogus", ","):
             status, _, _ = asyncio.run(self.client.request("GET", f"/api/user/v1/list?prefix=&kind={bogus}", headers=self.session))
             self.assertEqual(status, 400, bogus)

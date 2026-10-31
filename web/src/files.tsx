@@ -75,8 +75,10 @@ export function getFileKind(type: string | null | undefined, name: string): File
   if (lower.endsWith("/")) return "folder";
   if (mime.startsWith("image/") || /\.(png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$/.test(lower)) return "image";
   if (mime === "video/mp2t" || /\.(mts|m2ts)$/.test(lower)) return "other";
-  if (mime.startsWith("video/") || /\.(mp4|webm|mov|mkv|avi|m4v|ogv)$/.test(lower)) return "video";
-  if (mime.startsWith("audio/") || /\.(mp3|wav|ogg|oga|opus|flac|m4a|aac)$/.test(lower)) return "audio";
+  // 明确的音频扩展名优先于 video/* MIME：来源网站或下载工具常把 FLAC、MP3 标成 video/*，不能因此用视频播放器。
+  const audioName = /\.(mp3|wav|ogg|oga|opus|flac|m4a|aac)$/.test(lower);
+  if (!audioName && (mime.startsWith("video/") || /\.(mp4|webm|mov|mkv|avi|m4v|ogv)$/.test(lower))) return "video";
+  if (audioName || mime.startsWith("audio/")) return "audio";
   if (mime === "application/pdf" || lower.endsWith(".pdf")) return "pdf";
   if (/\.(docx?|dotx?|odt|rtf|pages|wps)$/.test(lower) || /wordprocessingml|msword|opendocument\.text/.test(mime)) return "document";
   if (/\.(xlsx?|xlsm|xltx?|ods|numbers|et)$/.test(lower) || /spreadsheetml|ms-excel|opendocument\.spreadsheet/.test(mime)) return "spreadsheet";
