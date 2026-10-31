@@ -1,5 +1,5 @@
 /** Tessera 设计系统基元：所有页面只通过这里的组件表达按钮、表单、浮层和反馈。 */
-import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type CSSProperties, type KeyboardEventHandler, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Children, Fragment, cloneElement, createContext, isValidElement, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type CSSProperties, type KeyboardEventHandler, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { BRAND, TAGLINE } from "./brand";
 import { FILE_PAGE_SIZES } from "./pagination";
@@ -430,6 +430,12 @@ export function Segmented<T extends string>({ value, options, onChange, label, d
 
 const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 const modalStack: HTMLElement[] = [];
+// 弹窗里再打开的弹窗（例如确认下载里的解锁）。React 先挂载子组件，同一次渲染里一起打开时子弹窗会先进入 body 与 modalStack，
+// 被外层盖住并设为 inert；所以按嵌套层级排序：层级更深的始终在上层（z-index 与 modalStack 顺序一致）。
+const ModalDepth = createContext(0);
+function syncModalInert() {
+  modalStack.forEach((item, index) => { if (index < modalStack.length - 1) item.setAttribute("inert", ""); else item.removeAttribute("inert"); });
+}
 /** 最小化的小窗按最小化的先后排列：快捷键 I 只恢复最近最小化的一个，新小窗排在已有小窗上方。 */
 const minimizedStack: HTMLElement[] = [];
 let scrollLocks = 0;
@@ -512,6 +518,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
   dismissibleRef.current = dismissible;
   pinnedRef.current = pinned;
   const [offsets, setOffsets] = useState<Record<"normal" | "mini", { x: number; y: number }>>({ normal: { x: 0, y: 0 }, mini: { x: 0, y: 0 } });
+  const depth = useContext(ModalDepth);
   const [moving, setMoving] = useState(false);
   const expanded = !minimized && (maximized || fullscreen);
   const sizeKey = resizable ? `tessera:window-size:${resizable}` : "";
@@ -738,12 +745,13 @@ export function Modal({ title, description, onClose, children, footer, actions, 
     const previous = previousFocus.current;
     const node = ref.current;
     if (!node) return;
-    modalStack.at(-1)?.setAttribute("inert", "");
-    modalStack.push(node);
+    const above = modalStack.findIndex(item => Number(item.dataset.modalDepth ?? 0) > depth);
+    modalStack.splice(above < 0 ? modalStack.length : above, 0, node);
+    syncModalInert();
     const unlockScroll = lockPageScroll();
     // 表单沿用输入控件优先；预览聚焦对话框，避免播放控件打开时就被选中。
     const preferred = initialFocus === "auto" ? focusable(node).find(item => item.matches("[autofocus], .modal-body input, .modal-body select, .modal-body textarea")) : undefined;
-    (preferred ?? node).focus({ preventScroll: true });
+    if (modalStack.at(-1) === node) (preferred ?? node).focus({ preventScroll: true });
     const handleKey = (event: KeyboardEvent) => {
       if (modalStack.at(-1) !== node || event.defaultPrevented || event.isComposing) return;
       if ((event.target as HTMLElement).closest?.(".menu")) return;
@@ -767,17 +775,17 @@ export function Modal({ title, description, onClose, children, footer, actions, 
       document.removeEventListener("keydown", handleKey);
       const wasTop = modalStack.at(-1) === node;
       modalStack.splice(modalStack.indexOf(node), 1);
-      modalStack.at(-1)?.removeAttribute("inert");
+      syncModalInert();
       unlockScroll();
       if (wasTop && previous?.isConnected) previous.focus({ preventScroll: true });
     };
   }, [minimized, initialFocus]);
-  return createPortal(
-    <div ref={backdrop} className={`modal-backdrop${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}${minimized ? " is-minimized" : ""}`} role="presentation"
+  return createPortal(<ModalDepth.Provider value={depth + 1}>
+    <div ref={backdrop} style={depth ? { "--modal-depth": depth } as CSSProperties : undefined} className={`modal-backdrop${!minimized && (maximized || fullscreen) ? " is-expanded" : ""}${fullscreen ? " is-fullscreen" : ""}${minimized ? " is-minimized" : ""}`} role="presentation"
       onPointerDown={event => { const edge = edgeOf(event); if (edge) startResize(event, edge); }}
       onPointerMove={event => { if (!resizing) event.currentTarget.style.cursor = (() => { const edge = edgeOf(event); return edge ? RESIZE_CURSORS[edge] : ""; })(); }}
       onMouseDown={event => { if (event.target === event.currentTarget && !edgeOf(event) && dismissible && !pinned && !minimized && modalStack.at(-1) === ref.current) onClose(); }}>
-      <div ref={ref} className={`modal modal-${modalSize} ${className}${expanded ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}${positionable ? " is-movable" : ""}${moving ? " is-moving" : ""}${sized ? " is-sized" : ""}${resizing ? " is-resizing" : ""}`}
+      <div ref={ref} data-modal-depth={depth || undefined} className={`modal modal-${modalSize} ${className}${expanded ? " is-expanded" : ""}${minimized ? " is-minimized" : ""}${positionable ? " is-movable" : ""}${moving ? " is-moving" : ""}${sized ? " is-sized" : ""}${resizing ? " is-resizing" : ""}`}
         style={{ ...style, ...(positionable && (offset.x || offset.y) ? { translate: `${offset.x}px ${offset.y}px` } : {}), ...(resizing ? { "--modal-resize-cursor": RESIZE_CURSORS[resizing] } : {}),
           ...(shown ? { "--modal-width": `${shown.width}px`, "--modal-height": `${shown.height}px` } : {}) } as CSSProperties} role={minimized ? "region" : "dialog"} aria-modal={minimized ? undefined : true} aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDownCapture={handleWindowKey}>
         <header className="modal-header" onPointerDown={focusWindowHeader}>
@@ -811,7 +819,7 @@ export function Modal({ title, description, onClose, children, footer, actions, 
         {minimized && minimizedContent && <div className="modal-minimized-controls">{minimizedContent}</div>}
         {resizable && windowPointer && !expanded && !minimized && (Object.keys(RESIZE_CURSORS) as ResizeDirection[]).map(direction => <span key={direction} className={`modal-resize modal-resize-${direction}`} aria-hidden="true" title="拖动调整窗口大小，双击还原" onPointerDown={event => startResize(event, direction)} onDoubleClick={resetSize} />)}
       </div>
-    </div>, document.body,
+    </div></ModalDepth.Provider>, document.body,
   );
 }
 

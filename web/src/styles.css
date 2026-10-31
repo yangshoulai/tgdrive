@@ -558,7 +558,7 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 /* ---------- 浮层 ---------- */
 
 /* 单列轨道限制为可用宽度：单行省略的长文件名等内容不能把弹窗撑出屏幕。 */
-.modal-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; padding: 24px; background: var(--scrim); backdrop-filter: blur(2px); animation: fade var(--duration-fast) ease-out; }
+.modal-backdrop { position: fixed; inset: 0; z-index: calc(60 + var(--modal-depth, 0)); display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; padding: 24px; background: var(--scrim); backdrop-filter: blur(2px); animation: fade var(--duration-fast) ease-out; }
 .modal-backdrop:not(.is-minimized) { top: var(--modal-viewport-top, 0px); bottom: auto; height: var(--modal-viewport-height, 100dvh); overscroll-behavior: none; }
 .modal { display: flex; width: 100%; min-width: 0; max-height: calc(var(--modal-viewport-height, 100dvh) - 48px); flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-lg); animation: rise var(--duration-base) var(--ease-out); }
 .modal-sm { max-width: 420px; }
