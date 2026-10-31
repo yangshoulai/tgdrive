@@ -218,7 +218,7 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing } & PlaybackProps;
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing } & PlaybackProps;
 /** 文本编辑：只给本人有写权限的文件。key 是文件路径（保存后地址随版本变化，编辑器不重建）；load 递增时重新读取（换文件、外部改动、冲突后重新加载）。 */
 type TextEditing = { key: string; load: number; save: (data: Uint8Array, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void };
 export function FilePreview(props: PreviewProps) {
@@ -235,7 +235,7 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, text }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, size, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, text }: PreviewProps & { onRetry: () => void }) {
   const [content, setContent] = useState<PreviewText | null>(null);
   // 每次读到新内容递增，文本预览按它重建；自己保存不重新读取，编辑器保持原状。
   const [revision, setRevision] = useState(0);
@@ -275,7 +275,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, poster, onI
   );
 
   if (unplayable) return fallback;
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} />;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} />;
   if (mediaFailed) return fallback;
   // 原图从存储取回并解密需要时间：查看器先显示封面图占位，原图加载完成后淡入替换。
   if (kind === "image") return <ImageViewer url={url} name={name} poster={poster} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
@@ -565,7 +565,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
           <span className="modal-actions-divider" aria-hidden="true" />
         </>}
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} onSaveThumbnail={onSaveVideoThumbnail ? video => onSaveVideoThumbnail(video, active) : undefined} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} onSaveThumbnail={onSaveVideoThumbnail ? video => onSaveVideoThumbnail(video, active) : undefined} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height) => setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height })}
         onProgress={value => { trackPrefetch(value); setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value); }} onState={setMediaState}

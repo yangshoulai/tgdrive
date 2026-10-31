@@ -1341,7 +1341,7 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 :is(.preview-player-audio, .preview-mini-player).is-playing .preview-equalizer i:nth-child(4) { animation-duration: 1.05s; animation-delay: -.65s; }
 @keyframes audio-bars { 0% { transform: scaleY(.25); } 50% { transform: scaleY(1); } 100% { transform: scaleY(.45); } }
 
-/* 音乐：模糊封面做背景，左侧封面与唱片，右侧标题、歌词或频谱，底部一体化控制条。 */
+/* 音乐：模糊封面做背景，左侧唱片机（封面在唱片中心），右侧标题与歌词，底部一体化控制条。 */
 .preview-player-audio { position: relative; isolation: isolate; display: flex; flex-direction: column; overflow: hidden; overflow: clip; height: min(540px, var(--preview-player-height, calc(100dvh - 220px))); container: audio-player / inline-size; background: var(--dark-surface); color: var(--on-dark); }
 .preview-player-audio::after { position: absolute; inset: 0; z-index: -1; background: linear-gradient(to bottom, var(--shade-8), var(--shade-48)); content: ""; }
 .audio-backdrop { position: absolute; inset: -20%; z-index: -2; background: radial-gradient(40% 50% at 22% 30%, color-mix(in srgb, var(--accent) 60%, transparent), transparent 70%), radial-gradient(45% 55% at 78% 72%, color-mix(in srgb, var(--admin) 50%, transparent), transparent 70%), var(--dark-surface); filter: blur(40px); animation: backdrop-drift 30s ease-in-out infinite alternate; animation-play-state: paused; }
@@ -1349,18 +1349,23 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .preview-player-audio.is-active .audio-backdrop { animation-play-state: running; }
 @keyframes backdrop-drift { from { transform: scale(1.04) translate(-2%, -1%) rotate(0deg); } to { transform: scale(1.18) translate(2%, 2%) rotate(8deg); } }
 .audio-body { flex: 1; min-height: 0; overflow: hidden; overflow: clip; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: center; gap: 36px; padding: 36px 44px 8px; }
-.audio-art { position: relative; justify-self: center; width: clamp(120px, calc(var(--preview-player-height, 540px) - 260px), 250px); aspect-ratio: 1; margin-right: 22%; }
-.audio-disc { position: absolute; inset: 3%; border-radius: 50%; transition: transform .8s var(--ease-out); }
-.preview-player-audio.is-active .audio-disc { transform: translateX(36%); }
-.audio-disc-spin { position: relative; display: grid; width: 100%; height: 100%; place-items: center; border-radius: 50%; background: repeating-radial-gradient(circle, var(--dark-surface-raised) 0 1px, var(--dark-surface-deep) 1.6px 3.2px); box-shadow: 0 12px 34px var(--shade-48), inset 0 0 0 1px var(--on-dark-4); animation: disc-spin 9s linear infinite; animation-play-state: paused; }
-.audio-disc-spin::before { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 20deg, transparent 0 8%, var(--on-dark-8) 14%, transparent 22% 58%, var(--on-dark-8) 64%, transparent 72%); content: ""; }
-.audio-disc-spin::after { position: absolute; width: 5%; aspect-ratio: 1; border-radius: 50%; background: var(--dark-surface-deep); box-shadow: 0 0 0 1px var(--on-dark-16); content: ""; }
-.audio-disc-spin img { width: 36%; height: 36%; border-radius: 50%; object-fit: cover; box-shadow: 0 0 0 3px var(--dark-surface-deep); }
-.preview-player-audio.is-playing .audio-disc-spin { animation-play-state: running; }
-@keyframes disc-spin { to { transform: rotate(360deg); } }
-.audio-sleeve { position: relative; z-index: 1; display: grid; width: 100%; height: 100%; place-items: center; overflow: hidden; border-radius: var(--radius-xl); background: linear-gradient(135deg, var(--on-dark-16), var(--on-dark-4)); color: var(--media-ink-2); box-shadow: 0 30px 60px -14px var(--shade-64), 0 0 0 1px var(--on-dark-8); transform: scale(.92); transition: transform .7s var(--ease-out); }
-.preview-player-audio.is-active .audio-sleeve { transform: scale(1); }
-.audio-sleeve img { width: 100%; height: 100%; object-fit: cover; }
+.audio-art { position: relative; justify-self: center; width: clamp(160px, calc(var(--preview-player-height, 540px) - 220px), 300px); aspect-ratio: 1; }
+/* 唱片（网易云音乐式）：唱片占 86% 居中偏下，封面占唱片 66%，外圈是黑色刻纹；唱针支点在唱片上方偏右，播放时落到外圈，暂停时向右抬开。
+ * 唱片由 Turntable 用 JS 转动（起转、停转有缓动），表面高光是不随唱片转动的独立层。 */
+.audio-turntable { position: relative; width: 100%; height: 100%; }
+.audio-record { position: absolute; top: 14%; left: 7%; width: 86%; aspect-ratio: 1; border-radius: 50%; box-shadow: 0 0 0 6px var(--on-dark-8), 0 28px 56px -16px var(--shade-64); }
+.audio-record-disc { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 50%; background: repeating-radial-gradient(circle, var(--dark-surface-raised) 0 1px, var(--dark-surface-deep) 1.5px 3px); will-change: transform; }
+.audio-record-disc::before { position: absolute; inset: 15.5%; border-radius: 50%; background: var(--dark-surface-deep); content: ""; }
+.audio-record-label { position: relative; display: grid; width: 66%; aspect-ratio: 1; place-items: center; overflow: hidden; border-radius: 50%; background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 60%, var(--on-dark)), var(--accent)); }
+.audio-record-label img { width: 100%; height: 100%; object-fit: cover; }
+.audio-record-sheen { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 30deg, transparent 0 6%, var(--on-dark-12) 12%, transparent 20% 56%, var(--on-dark-8) 62%, transparent 70%); pointer-events: none;
+  -webkit-mask: radial-gradient(circle, transparent 0 66%, var(--black) 67%); mask: radial-gradient(circle, transparent 0 66%, var(--black) 67%); }
+.audio-tonearm { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 4px 6px var(--shade-48)); transform: rotate(-32deg); transform-origin: 57% 4%; transition: transform .8s var(--ease-out); }
+.preview-player-audio.is-active .audio-tonearm { transform: rotate(0deg); }
+.audio-tonearm-base { fill: var(--on-dark-90); stroke: var(--on-dark-24); stroke-width: 1; }
+.audio-tonearm-pivot { fill: var(--dark-surface-raised); }
+.audio-tonearm-arm { fill: none; stroke: var(--on-dark-90); stroke-width: 1.8; stroke-linecap: round; }
+.audio-tonearm-head { fill: var(--on-dark-90); }
 .audio-side { display: flex; flex-direction: column; justify-content: center; gap: 16px; min-width: 0; height: 100%; min-height: 0; }
 .audio-body.has-lyrics .audio-side { justify-content: flex-start; padding-top: 4px; }
 .audio-heading { display: grid; justify-items: start; gap: 8px; }
@@ -1384,9 +1389,6 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .audio-lyric { display: block; width: 100%; padding: 8px 0; border: 0; background: transparent; color: var(--on-dark-40); font: inherit; font-size: var(--text-lg); font-weight: 600; line-height: 1.5; text-align: left; white-space: pre-line; cursor: pointer; transform-origin: left center; transition: color .4s, transform .4s var(--ease-out); }
 .audio-lyric:hover { color: var(--on-dark-72); }
 .audio-lyric.is-active { color: var(--on-dark); transform: scale(1.06); }
-.audio-visual { display: grid; gap: 16px; }
-.audio-spectrum { display: block; width: 100%; height: 92px; transition: opacity var(--duration-slow) var(--ease-out); }
-.audio-spectrum.is-idle { opacity: 0; transition-delay: .6s; }
 /* 歌词加载：几行长短不一的柔光占位条，与真实歌词同样左对齐；300 ms 后才出现，没有歌词的歌曲不会闪一下。 */
 .audio-lyrics-skeleton { display: grid; justify-items: start; gap: 16px; padding: 8px 0; animation: lyrics-skeleton-in var(--duration-slow) .3s both; }
 .audio-lyrics-skeleton i { width: 64%; height: 14px; border-radius: var(--radius-pill); background: linear-gradient(90deg, var(--on-dark-8) 0 30%, var(--on-dark-16) 50%, var(--on-dark-8) 70% 100%) 0 0 / 300% 100%; animation: lyrics-shimmer 1.6s ease-in-out infinite; }
@@ -1397,6 +1399,9 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .audio-lyrics-skeleton i:nth-child(5) { width: 54%; animation-delay: .4s; opacity: .4; }
 @keyframes lyrics-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
 @keyframes lyrics-skeleton-in { from { opacity: 0; transform: translateY(4px); } }
+.audio-info { display: grid; justify-items: start; gap: 12px; }
+.audio-facts { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.audio-facts li { height: 24px; padding: 0 8px; border: 1px solid var(--on-dark-12); border-radius: var(--radius-pill); color: var(--media-ink-2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; line-height: 22px; }
 .audio-hint { margin: 0; color: var(--media-ink-3); font-size: var(--text-xs); line-height: 1.6; }
 .audio-controls { flex: none; padding: 4px 32px 20px; }
 .audio-timeline { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center; gap: 12px; color: var(--media-ink-3); font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
@@ -1448,7 +1453,7 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .preview-player-audio .preview-player-slow button { background: var(--media-glass-strong); color: var(--on-dark); }
 @container audio-player (max-width: 600px) {
   .audio-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); align-items: start; gap: 16px; padding: 24px 20px 8px; }
-  .audio-art { width: clamp(84px, min(34cqw, calc(var(--preview-player-height, 540px) * .26)), 176px); margin: 0 auto; translate: -11% 0; }
+  .audio-art { width: clamp(108px, min(42cqw, calc(var(--preview-player-height, 540px) * .32)), 200px); margin: 0 auto; }
   .audio-side { align-self: stretch; height: auto; align-items: center; justify-content: flex-start; gap: 8px; text-align: center; }
   /* 歌手与状态并排一行，给歌词多留一行空间。 */
   .audio-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 8px; }
@@ -1457,13 +1462,25 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
   .audio-lyrics-skeleton { justify-items: center; align-self: stretch; }
   .audio-lyrics { align-self: stretch; }
   .audio-lyric { text-align: center; transform-origin: center; font-size: var(--text-md); }
+  .audio-info { justify-items: center; }
+  .audio-facts { justify-content: center; }
   .audio-controls { padding: 2px 16px 16px; }
   .audio-buttons-main { gap: 8px; }
   .audio-volume input { display: none; }
 }
 /* 手机宽度：音量交给系统按键，控制条右侧只留歌词与播放列表，不与「下一首」挤在一起。 */
 @container audio-player (max-width: 420px) { .audio-volume { display: none; } }
-@media (max-height: 600px) { .audio-art { display: none; } .audio-body { grid-template-columns: minmax(0, 1fr); } }
+/* 矮窗口：唱片缩小放在标题左侧，不再隐藏。 */
+@media (max-height: 600px) {
+  .audio-body { grid-template-columns: auto minmax(0, 1fr); grid-template-rows: none; align-items: center; gap: 24px; }
+  .audio-art { width: clamp(96px, calc(var(--preview-player-height, 400px) * .4), 168px); margin: 0; }
+  .audio-side { align-self: center; align-items: flex-start; text-align: left; }
+  .audio-heading { justify-content: flex-start; }
+  .audio-lyric { text-align: left; transform-origin: left center; }
+  .audio-lyrics-skeleton { justify-items: start; }
+  .audio-info { justify-items: start; }
+  .audio-facts { justify-content: flex-start; }
+}
 
 
 /* ---------- 沉浸式预览：音乐、视频、图片的头部浮在深色画布上 ----------
@@ -1755,8 +1772,8 @@ html[data-input="keyboard"] .preview-text.is-editing .cm-editor.cm-focused { box
   :is(.preview-player-audio, .preview-mini-player).is-playing .preview-equalizer i { animation: none; transform: scaleY(.65); }
   .audio-lyrics-skeleton i { animation: none; }
   .audio-status-spinner { animation-duration: 2.4s; }
-  .audio-backdrop, .audio-disc-spin, .image-backdrop-layer, .image-viewer.is-loaded .image-full { animation: none; }
-  .audio-disc, .audio-sleeve, .audio-lyric, .image-full { transition: none; }
+  .audio-backdrop, .image-backdrop-layer, .image-viewer.is-loaded .image-full { animation: none; }
+  .audio-tonearm, .audio-lyric, .image-full { transition: none; }
   .preview-modal.is-minimized, .preview-mini-lyric, .preview-mini-player.is-waiting .preview-mini-play { animation: none; }
 }
 .preview-engine-loading { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 240px; padding: 24px; color: var(--ink-2); }

@@ -1,11 +1,11 @@
 /** 播放界面与歌词、字幕附件；缓冲状态始终保留播放器。
- * 视频使用 ArtPlayer（按需加载）；音乐使用原生 <audio> 与自绘界面：模糊封面背景、唱片、频谱、同步歌词和一体化控制条。 */
+ * 视频使用 ArtPlayer（按需加载）；音乐使用原生 <audio> 与自绘界面：模糊封面背景、唱片、同步歌词（没有时显示音频信息）和一体化控制条。 */
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { errorMessage, type PreviewAsset } from "./api";
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
 import { MODE_ICONS, PLAYBACK_MODES, type PreviewNav } from "./preview-playlist";
-import { Button, Icon, Menu, shortcutAria, shortcutLabel, type IconName } from "./ui";
+import { Button, Icon, Menu, formatBytes, shortcutAria, shortcutLabel, type IconName } from "./ui";
 import type { MediaProgress, MediaState } from "./preview-media-engine";
 export type { MediaProgress, MediaState } from "./preview-media-engine";
 
@@ -87,17 +87,13 @@ function assetLabel(asset: PreviewAsset): string {
 
 const VOLUME_KEY = "tessera-volume";
 type AudioEvents = { notify: (state: MediaState) => void; onPlaying: (playing: boolean) => void; onProgress: (progress: MediaProgress, buffered: number) => void; onEnded: () => void; onVolume: (volume: number, muted: boolean) => void };
-type AudioPlayer = Player & { element: HTMLAudioElement; analyser: () => AnalyserNode | null; setVolume: (volume: number) => void; toggleMute: () => void };
-
-/** iOS 把经 Web Audio 输出的媒体在锁屏后挂起，所以触屏的苹果设备不接频谱，只用装饰动画。 */
-const spectrumAllowed = () => !/iPhone|iPad|iPod/.test(navigator.userAgent) && !(navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent));
+type AudioPlayer = Player & { element: HTMLAudioElement; setVolume: (volume: number) => void; toggleMute: () => void };
 
 function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
   const audio = new Audio();
   audio.preload = "metadata";
   try { const saved = Number(localStorage.getItem(VOLUME_KEY)); if (saved >= 0 && saved <= 1 && localStorage.getItem(VOLUME_KEY) !== null) audio.volume = saved; } catch { /* 无法读取偏好时使用默认音量 */ }
   let ready = false, destroyed = false;
-  let context: AudioContext | null = null, analyser: AnalyserNode | null = null;
   const progress = (): MediaProgress => {
     const duration = Number.isFinite(audio.duration) ? Math.max(0, audio.duration) : 0;
     const currentTime = Number.isFinite(audio.currentTime) ? Math.max(0, audio.currentTime) : 0;
@@ -106,23 +102,10 @@ function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
   const buffered = () => { const ranges = audio.buffered; return ranges.length ? ranges.end(ranges.length - 1) : 0; };
   const update = () => { if (!destroyed) events.onProgress(progress(), buffered()); };
   const markReady = () => { ready = true; events.notify("ready"); };
-  /** 频谱只能在用户手势中创建：浏览器不允许在非手势下启动 AudioContext，挂起的上下文会让音乐静音。 */
-  const ensureAnalyser = () => {
-    if (analyser || context || !spectrumAllowed() || !(navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive) return;
-    try {
-      const Context = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!Context) return;
-      context = new Context();
-      const source = context.createMediaElementSource(audio);
-      analyser = context.createAnalyser();
-      analyser.fftSize = 512; analyser.smoothingTimeConstant = .86;
-      source.connect(analyser); analyser.connect(context.destination);
-    } catch { analyser = null; }
-  };
   const listeners: [string, () => void][] = [
     ["loadedmetadata", () => { markReady(); update(); }], ["canplay", markReady], ["playing", markReady],
     ["waiting", () => events.notify(ready ? "buffering" : "loading")],
-    ["play", () => { void context?.resume().catch(() => undefined); events.onPlaying(true); }],
+    ["play", () => events.onPlaying(true)],
     ["pause", () => { events.onPlaying(false); if (ready) events.notify("ready"); }],
     ["timeupdate", update], ["durationchange", update], ["progress", update],
     ["seeked", () => { update(); if (audio.readyState >= 2) markReady(); }],
@@ -138,8 +121,7 @@ function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
   events.onVolume(audio.volume, audio.muted);
   return {
     element: audio,
-    analyser: () => analyser,
-    play: () => { ensureAnalyser(); void context?.resume().catch(() => undefined); return audio.play(); },
+    play: () => audio.play(),
     pause: () => audio.pause(),
     isPlaying: () => !audio.paused,
     seek: time => { audio.currentTime = time; update(); },
@@ -156,78 +138,48 @@ function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
       destroyed = true; audio.pause();
       for (const [name, handler] of listeners) audio.removeEventListener(name, handler);
       audio.removeAttribute("src"); audio.load();
-      void context?.close().catch(() => undefined);
     },
   };
 }
 
 const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-/** 频谱：有 Web Audio 时画真实频率，否则播放时用平滑的伪随机律动；加载或缓冲时是一道缓缓流过的波；暂停后柱子落下并淡出，不留一排小点。
- * 相邻柱子取不相邻的频段（固定的打乱顺序）并各有增益，外形中间高两侧低，跳动有参差而不整齐划一；上升、回落都放慢。 */
-function Spectrum({ analyser, playing, loading = false, bars = 48 }: { analyser: () => AnalyserNode | null; playing: boolean; loading?: boolean; bars?: number }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
+/** 唱片（网易云音乐式）：大唱片居中，封面占唱片约三分之二、外圈一圈黑色刻纹，唱针支点在唱片上方，播放时匀速转动，开始播放渐渐转起、暂停后慢慢停下；
+ * 没有封面时标签是主题色。唱臂在点了播放后落到唱片上，暂停时抬起移开。唱片表面的高光不随唱片转动，转动才看得出来。减少动态效果时不转。 */
+function Turntable({ cover, spinning }: { cover?: string; spinning: boolean }) {
+  const disc = useRef<HTMLDivElement>(null);
+  const motion = useRef({ angle: 0, speed: 0 });
   useEffect(() => {
-    const node = canvas.current, context = node?.getContext("2d");
-    if (!node || !context) return;
-    // 固定种子的伪随机数：每次打开的律动形状一致，但柱子之间互不相同。
-    let seed = 7;
-    const random = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
-    const levels = new Float32Array(bars), gains = Float32Array.from({ length: bars }, () => .7 + random() * .45);
-    const phases = Float32Array.from({ length: bars * 2 }, () => random() * 6.28), speeds = Float32Array.from({ length: bars * 2 }, (_, index) => (index % 2 ? .45 : .9) + random() * .7);
-    const order = Array.from({ length: bars }, (_, index) => index);
-    for (let index = bars - 1; index > 0; index--) { const swap = Math.floor(random() * (index + 1)); [order[index], order[swap]] = [order[swap], order[index]]; }
-    const envelope = Float32Array.from({ length: bars }, (_, index) => .35 + .65 * Math.pow(Math.sin(Math.PI * (index + .5) / bars), .7));
-    let frame = 0, data: Uint8Array<ArrayBuffer> | null = null, start = performance.now();
-    const still = reducedMotion();
-    const draw = (now: number) => {
-      const ratio = window.devicePixelRatio || 1, width = node.clientWidth, height = node.clientHeight;
-      if (node.width !== Math.round(width * ratio) || node.height !== Math.round(height * ratio)) { node.width = Math.round(width * ratio); node.height = Math.round(height * ratio); }
-      context.setTransform(ratio, 0, 0, ratio, 0, 0);
-      context.clearRect(0, 0, width, height);
-      const source = playing && !still ? analyser() : null;
-      if (source) { data ??= new Uint8Array(new ArrayBuffer(source.frequencyBinCount)); source.getByteFrequencyData(data); }
-      const t = (now - start) / 1000;
-      // 整体响度：频段很窄的乐曲（纯音、独奏）也让每根柱子按自己的增益和慢速起伏一起律动。
-      let loudness = 0;
-      if (source && data) { for (let bin = 1; bin < data.length * .5; bin++) loudness += data[bin]; loudness /= data.length * .5 * 255; }
-      let moving = false;
-      const gap = Math.max(2, width / bars * .35), barWidth = Math.max(2, (width - gap * (bars - 1)) / bars);
-      for (let index = 0; index < bars; index++) {
-        let target = .06;
-        if (playing && !still) {
-          if (source && data) {
-            // 频段按对数分布在可听的前 70% 频率上，高频能量弱，按频段位置适当提升。
-            const band = order[index] / bars, span = data.length * .7;
-            const from = Math.floor(Math.pow(band, 1.6) * span) + 1, to = Math.max(from + 1, Math.floor(Math.pow(band + 1 / bars, 1.6) * span) + 1);
-            let sum = 0;
-            for (let bin = from; bin < to && bin < data.length; bin++) sum += data[bin];
-            const value = sum / Math.max(1, Math.min(to, data.length) - from) / 255;
-            const sway = .55 + .45 * (Math.sin(t * speeds[index * 2] + phases[index * 2]) + 1) / 2;
-            const floor = Math.min(1, loudness * 2.4) * sway * gains[index] * envelope[index] * .8;
-            target = Math.max(.06, floor, Math.min(1, Math.pow(value, 1.35) * (1 + band * 1.1) * gains[index] * envelope[index] * 1.25));
-          } else {
-            const wave = (Math.sin(t * speeds[index * 2] + phases[index * 2]) + 1) / 2, drift = (Math.sin(t * speeds[index * 2 + 1] + phases[index * 2 + 1]) + 1) / 2;
-            target = .1 + .72 * Math.pow(wave * .65 + drift * .35, 1.6) * gains[index] * envelope[index];
-          }
-        } else if (still && playing) target = .3 * envelope[index] * gains[index] + .06;
-        else if (loading && !still) target = .08 + .34 * Math.pow((Math.sin(index * .32 - t * 3.4) + 1) / 2, 2) * envelope[index];
-        else if (loading) target = .16 * envelope[index] + .06;
-        levels[index] += (target - levels[index]) * (target > levels[index] ? .16 : .06);
-        if (Math.abs(target - levels[index]) > .002) moving = true;
-        const barHeight = Math.max(3, levels[index] * height);
-        const x = index * (barWidth + gap), y = (height - barHeight) / 2;
-        context.fillStyle = `rgba(255, 255, 255, ${.28 + levels[index] * .62})`;
-        context.beginPath();
-        context.roundRect(x, y, barWidth, barHeight, barWidth / 2);
-        context.fill();
-      }
-      if (((playing || loading) && !still) || moving) frame = requestAnimationFrame(draw);
+    const node = disc.current;
+    if (!node || reducedMotion()) return;
+    // 与网易云音乐相近：约 20 秒一圈（每秒 18°），慢转才看得清封面；起转约 1 秒、停转约 1.5 秒。
+    const target = spinning ? 18 : 0, state = motion.current;
+    let frame = 0, last = performance.now();
+    const step = (now: number) => {
+      const elapsed = Math.min(.1, (now - last) / 1000); last = now;
+      state.speed += (target - state.speed) * Math.min(1, elapsed * (spinning ? 3 : 2));
+      if (!spinning && state.speed < .1) state.speed = 0;
+      state.angle = (state.angle + state.speed * elapsed) % 360;
+      node.style.transform = `rotate(${state.angle}deg)`;
+      if (spinning || state.speed > 0) frame = requestAnimationFrame(step);
     };
-    frame = requestAnimationFrame(draw);
+    frame = requestAnimationFrame(step);
     return () => cancelAnimationFrame(frame);
-  }, [analyser, playing, loading, bars]);
-  return <canvas ref={canvas} className={`audio-spectrum${playing || loading ? "" : " is-idle"}`} aria-hidden="true" />;
+  }, [spinning]);
+  return <div className="audio-turntable" aria-hidden="true">
+    <div className="audio-record">
+      <div ref={disc} className="audio-record-disc">
+        <div className="audio-record-label">{cover && <img src={cover} alt="" />}</div>
+      </div>
+      <div className="audio-record-sheen" />
+    </div>
+    <svg className="audio-tonearm" viewBox="0 0 100 100">
+      <path className="audio-tonearm-arm" d="M57 4 L67 21 L69.5 28" />
+      <rect className="audio-tonearm-head" x="66.5" y="26" width="6" height="9" rx="1.2" transform="rotate(-20 69.5 30.5)" />
+      <circle className="audio-tonearm-base" cx="57" cy="4" r="4.6" />
+      <circle className="audio-tonearm-pivot" cx="57" cy="4" r="1.8" />
+    </svg>
+  </div>;
 }
 
 /** 当前预览的文件已完整缓存在本机（由文件预览窗口提供）。浏览器只缓冲播放位置前面一段，
@@ -270,8 +222,8 @@ function MediaButton({ icon, label, shortcut, onClick, disabled, active, classNa
 
 /* ---------- 统一入口 ---------- */
 
-export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }: {
-  kind: "video" | "audio"; url: string; name: string; cover?: string; onRetry: () => void;
+export function MediaPreview({ kind, url, name, size, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }: {
+  kind: "video" | "audio"; url: string; name: string; size?: number; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav;
 } & PlaybackProps) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
@@ -472,16 +424,22 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
   const lyricHint = lyricsLoading ? ""
     : assetError || discoveryError ? assetError || discoveryError
     : assets.length && !selected ? "歌词已关闭"
+    : loadAssets && !assets.length ? "没有找到同名歌词（.lrc）"
     : "";
+  // 没有歌词时右侧显示音频信息：格式（无损格式标注）、时长、大小与按大小估算的平均码率（含封面等元数据，所以写「约」）。
+  const extension = /\.([a-z\d]{2,5})$/i.exec(name)?.[1].toUpperCase() ?? "";
+  const facts = [
+    extension && `${extension}${/^(FLAC|WAV|APE|AIFF?|ALAC|WV|DSF|DFF)$/.test(extension) ? " 无损" : ""}`,
+    progress.duration > 0 && playbackTime(progress.duration),
+    size ? formatBytes(size) : "",
+    size && progress.duration > 0 ? `约 ${Math.round(size * 8 / progress.duration / 1000)} kbps` : "",
+  ].filter((fact): fact is string => Boolean(fact));
   const showLyrics = lyrics.length > 0 && lyricSource.current === url;
   return <div className={`preview-player preview-player-audio${cover ? " has-cover" : ""}${waiting && !failed ? " is-waiting" : ""}${playing && !waiting && !failed ? " is-playing" : ""}${playing ? " is-active" : ""}`}
     style={cover ? { "--preview-cover": `url("${cover}")` } as CSSProperties : undefined}>
     <div className="audio-backdrop" aria-hidden="true" />
     <div className={`audio-body${showLyrics ? " has-lyrics" : ""}`}>
-      <div className="audio-art">
-        <div className="audio-disc" aria-hidden="true"><div className="audio-disc-spin">{cover && <img src={cover} alt="" />}</div></div>
-        <div className="audio-sleeve">{cover ? <img src={cover} alt="专辑封面" /> : <Icon name="audio" size={56} />}</div>
-      </div>
+      <div className="audio-art"><Turntable cover={cover} spinning={playing && !waiting && !failed} /></div>
       <div className="audio-side">
         <div className="audio-heading">
           <h3 title={name}>{title}</h3>
@@ -500,8 +458,8 @@ export function MediaPreview({ kind, url, name, cover, onRetry, loadAssets, asse
           </div>
           : lyricsLoading
             ? <div className="audio-lyrics-skeleton" role="status" aria-label="正在加载歌词"><i /><i /><i /><i /><i /></div>
-            : <div className="audio-visual">
-              <Spectrum analyser={() => audio?.analyser() ?? null} playing={playing && !waiting} loading={waiting && !failed} />
+            : <div className="audio-info">
+              {facts.length > 0 && <ul className="audio-facts" aria-label="音频信息">{facts.map(fact => <li key={fact}>{fact}</li>)}</ul>}
               {lyricHint && <p className="audio-hint">{lyricHint}</p>}
             </div>)}
       </div>
