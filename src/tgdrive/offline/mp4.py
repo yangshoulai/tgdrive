@@ -425,3 +425,32 @@ class Defragmenter:
             if wide or base + self.length < 1 << 32:
                 return self.ftyp + self._moov(base, wide) + mdat
         raise AssertionError("unreachable")
+
+
+def video_size(moov: bytes) -> tuple[int, int] | None:
+    """从 moov（可以带前面的 ftyp 等顶层盒子）里取第一条视频轨的显示尺寸：tkhd 末尾的 16.16 定点宽高。"""
+    def children(data: bytes, start: int, end: int):
+        position = start
+        while position + 8 <= end:
+            size, kind = struct.unpack(">I4s", data[position:position + 8])
+            header = 8
+            if size == 1 and position + 16 <= end:
+                size, header = struct.unpack(">Q", data[position + 8:position + 16])[0], 16
+            elif size == 0:
+                size = end - position
+            if size < header or position + size > end:
+                return
+            yield kind, position + header, position + size
+            position += size
+    for kind, start, end in children(moov, 0, len(moov)):
+        if kind != b"moov":
+            continue
+        for track, track_start, track_end in children(moov, start, end):
+            if track != b"trak":
+                continue
+            for box, box_start, box_end in children(moov, track_start, track_end):
+                if box == b"tkhd" and box_end - box_start >= 84:
+                    width, height = struct.unpack(">II", moov[box_end - 8:box_end])
+                    if width >> 16 and height >> 16:
+                        return width >> 16, height >> 16
+    return None

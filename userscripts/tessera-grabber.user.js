@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.17.0
+// @version      0.17.1
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -1247,12 +1247,11 @@
       source.hash = `tessera-${context.provider}-${encodeURIComponent(String(item[idKey]))}`;
       const shareData = context.provider === "baidu" && snapshot.shareData ? Object.fromEntries(["uk", "id", "bdstoken", "jsToken", "sekey"]
         .filter(key => ["string", "number"].includes(typeof snapshot.shareData[key]) && String(snapshot.shareData[key]).length <= 8192).map(key => [key, snapshot.shareData[key]])) : undefined;
+      // 在网盘里勾选是明确的选择：之前发送过的也一起进入确认页（标「已发送过」，可移除），不再静默跳过或拦下。
       unique.set(source.href, { url: source.href, name: String(file[nameKey] || file.filename || ""), size: Number(file[sizeKey]) || null,
-        cloud: { ...context, file, shareData, session } });
+        cloud: { ...context, file, shareData, session }, resent: isSent(source.href) });
     }
-    const result = [...unique.values()].filter(item => !isSent(item.url));
-    if (!result.length) throw new Error("所选文件已发送，请到 Tessera 查看下载任务");
-    return result;
+    return [...unique.values()];
   }
 
   /** The provider's own explanation (like LinkSwift's 服务器说), trimmed to one short line without control characters. */
@@ -3500,10 +3499,12 @@
     // 网盘选择一次最多 CLOUD_BATCH_LIMIT 个文件（与 LinkSwift 一样不在 50 处截断）；网页资源仍为 BATCH_LIMIT。
     const limit = wanted.some(source => source.cloud) ? CLOUD_BATCH_LIMIT : BATCH_LIMIT;
     batch = { started: false, mode, destination: savedDestination(), limit,
-      entries: ordered.slice(0, limit).map(({ url, platform, cloud, name, size }) => ({ url, platform: platform || null, cloud,
+      entries: ordered.slice(0, limit).map(({ url, platform, cloud, name, size, resent }) => ({ url, platform: platform || null, cloud, resent: Boolean(resent),
         type: known.get(url)?.type || (platform ? "video" : "file"), name: name || (mode === "local" ? defaultSaveName(url) : ""), sourceName: name || "", size,
         state: mode === "server" ? "parsing" : "waiting", error: "", tasks: [] })) };
     openBatch();
+    const resent = batch.entries.filter(entry => entry.resent).length;
+    if (resent) toast(resent === batch.entries.length ? "所选文件之前已发送过，确认后会再次下载" : `其中 ${resent} 个文件之前已发送过，不需要的可以移除`);
     if (mode === "server") void parseEntries(batch, batch.entries.slice());
   }
 
@@ -3556,7 +3557,7 @@
       const index = current.entries.indexOf(entry);
       if (index < 0) return;
       const room = (current.limit || BATCH_LIMIT) - current.entries.length + 1;
-      const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform, cloud: entry.cloud, sourceName: entry.sourceName,
+      const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform, cloud: entry.cloud, sourceName: entry.sourceName, resent: entry.resent,
         type: candidateType(variants[0], entry.type), variants, candidate: variants[0], name: entry.nameEdited ? entry.name : entry.sourceName || variants[0].name, nameEdited: Boolean(entry.nameEdited),
         state: current.started ? "error" : "waiting", error: "", tasks: [] }));
       current.entries.splice(index, 1, ...rows);
@@ -3951,7 +3952,8 @@
       let domain = "";
       try { domain = new URL(entry.url).hostname.replace(/^www\./, ""); } catch { /* 忽略无效地址 */ }
       const size = h("span", { className: "size" });
-      const sub = h("div", { className: "sub", title: entry.url }, h("span", {}, `${TYPE_LABEL[entry.type] || "文件"}${domain ? ` · ${domain}` : ""}`));
+      const sub = h("div", { className: "sub", title: entry.url }, entry.resent ? h("span", { className: "sent-tag", title: "之前已发送过，确认后会再次下载" }, "已发送过") : null,
+        h("span", {}, `${TYPE_LABEL[entry.type] || "文件"}${domain ? ` · ${domain}` : ""}`));
       // 服务器解析出同一分组的多个清晰度：下拉切换，未改过文件名时跟随候选的默认名。
       if (entry.variants?.length > 1) {
         const select = h("select", { className: "variant", "aria-label": "清晰度",

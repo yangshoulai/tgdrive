@@ -16,6 +16,8 @@ export type FileItem = {
   public_expires_at?: number | null;
   public_has_password?: boolean;
   public_downloads?: number;
+  /** 图片／视频的显示尺寸（上传、离线下载转封装或首次预览时记录）；播放器据此一开始就按视频比例打开，预览头部显示分辨率。 */
+  dimensions?: MediaSize | null;
   has_thumbnail?: boolean;
   /** 已有的实际图片规格："thumb"、"grid"、"poster"，没有图片时为空。 */
   thumbnails?: string[];
@@ -71,7 +73,7 @@ export type TrafficMetrics = { total_in_bytes: number; total_out_bytes: number; 
 export type SystemStatus = { initialized: boolean; unlocked: boolean; user_count: number; traffic?: TrafficMetrics };
 /** 公开分享页展示的分享者：只有设置了昵称才返回，不含邮箱。 */
 export type PublicSharer = { nickname: string; avatar_version: number | null };
-export type PublicFile = { kind: "file"; token: string; password_required: false; sharer?: PublicSharer | null; name: string; size: number; content_type: string | null; etag: string; modified_at: number; public_at: number | null; expires_at: number | null; thumbnails?: string[] };
+export type PublicFile = { kind: "file"; token: string; password_required: false; sharer?: PublicSharer | null; name: string; size: number; content_type: string | null; etag: string; modified_at: number; public_at: number | null; expires_at: number | null; thumbnails?: string[]; dimensions?: MediaSize };
 export type PublicFolder = { kind: "folder"; token: string; password_required: false; sharer?: PublicSharer | null; name: string; modified_at: number; public_at: number | null; expires_at: number | null };
 export type PublicObject = PublicFile | PublicFolder | { token: string; password_required: true };
 export type PublicFolderFile = { name: string; path: string; size: number; content_type: string | null; etag: string; modified_at: number; thumbnails?: string[] };
@@ -370,6 +372,12 @@ export type Favorite = { path: string; icon: string | null; private: boolean; lo
 export const favorites = () => request<{ items: Favorite[]; limit: number }>("/api/user/v1/favorites");
 /** 整体保存收藏的顺序与图标（icon 为 null 表示默认文件夹图标）。 */
 export const saveFavorites = (items: { path: string; icon: string | null }[]) => request<{ items: Favorite[]; limit: number }>("/api/user/v1/favorites", { method: "PUT", body: JSON.stringify({ items }) });
+export type MediaSize = { width: number; height: number };
+/** 分辨率文字，如「4032 × 3024」。 */
+export const formatDimensions = (size: MediaSize) => `${size.width} × ${size.height}`;
+/** 记录图片／视频的显示尺寸（只写入仍是这个版本的文件）。 */
+export const setMediaSize = (file: Pick<FileItem, "key" | "etag">, size: MediaSize) =>
+  post<{ saved: boolean }>(fileApi("/media/size", file.key), { path: file.key, etag: file.etag, width: size.width, height: size.height });
 export const FILE_UPDATED_EVENT = "tessera:file-updated";
 /** 文件在预览里被保存或刷新到新版本后广播：预览宿主更新窗口里的文件，文件页刷新所在目录。 */
 export const announceFileUpdated = (file: FileItem) => window.dispatchEvent(new CustomEvent<FileItem>(FILE_UPDATED_EVENT, { detail: file }));

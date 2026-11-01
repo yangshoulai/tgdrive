@@ -1,12 +1,12 @@
 /** 播放界面与歌词、字幕附件；缓冲状态始终保留播放器。
  * 视频使用 ArtPlayer（按需加载）；音乐使用原生 <audio> 与自绘界面：模糊封面背景、唱片、同步歌词（没有时显示音频信息）和一体化控制条。 */
-import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { errorMessage, type PreviewAsset } from "./api";
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
 import { MODE_ICONS, PLAYBACK_MODES, type PreviewNav } from "./preview-playlist";
 import { Button, Icon, Menu, formatBytes, shortcutAria, shortcutLabel, type IconName } from "./ui";
-import type { MediaProgress, MediaState } from "./preview-media-engine";
+import type { MediaProgress, MediaState, VideoSizeSource } from "./preview-media-engine";
 export type { MediaProgress, MediaState } from "./preview-media-engine";
 
 type Engine = Awaited<ReturnType<typeof loadMediaEngine>>;
@@ -14,7 +14,7 @@ type VideoPlayer = ReturnType<Engine["createVideoPlayer"]>;
 type Lyric = { time: number; text: string };
 export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[]>;
 export type PlaybackControls = { play: () => Promise<void>; pause: () => void; isPlaying: () => boolean; seek: (time: number) => void; seekBy: (seconds: number) => void; adjustVolume: (delta: number) => void };
-export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onSaveThumbnail?: (video: HTMLVideoElement) => Promise<void>; onLyricLine?: (line: string | null) => void };
+export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number, source: VideoSizeSource) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onSaveThumbnail?: (video: HTMLVideoElement) => Promise<void>; onLyricLine?: (line: string | null) => void };
 type Player = PlaybackControls & { setSource: (url: string, name: string, cover?: string) => void; destroy: () => void };
 
 function playbackTime(time: number): string {
@@ -51,8 +51,7 @@ export function MinimizedPlayback({ progress, state, playing, lyric, onSeek, onT
     </div>
     <input className="preview-mini-progress" type="range" aria-label="播放进度" aria-valuetext={`已播放 ${time}，共 ${duration}`} min={0} max={progress.duration || 1} step={0.1}
       value={progress.duration ? progress.currentTime : 0} disabled={!progress.duration || failed} onChange={event => onSeek(Number(event.target.value))}
-      onKeyDown={event => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); onSeek(Math.max(0, Math.min(progress.duration, progress.currentTime + (event.key === "ArrowLeft" ? -5 : 5)))); } }}
-      style={{ "--playback-progress": `${percent}%` } as CSSProperties} />
+      data-media-progress="" style={{ "--playback-progress": `${percent}%` } as CSSProperties} />
   </div>;
 }
 
@@ -144,6 +143,13 @@ function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
 
 const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+/** 没有封面时的色调：按文件名固定选一种图表色（--series-1…6），同一首歌每次一样，不同歌曲各不相同。 */
+export function coverTint(name: string) {
+  let hash = 0;
+  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return `var(--series-${hash % 6 + 1})`;
+}
+
 /** 唱片（网易云音乐式）：大唱片居中，封面占唱片约三分之二、外圈一圈黑色刻纹，唱针支点在唱片上方，播放时匀速转动，开始播放渐渐转起、暂停后慢慢停下；
  * 没有封面时标签是主题色。唱臂在点了播放后落到唱片上，暂停时抬起移开。唱片表面的高光不随唱片转动，转动才看得出来。减少动态效果时不转。 */
 function Turntable({ cover, spinning }: { cover?: string; spinning: boolean }) {
@@ -166,17 +172,29 @@ function Turntable({ cover, spinning }: { cover?: string; spinning: boolean }) {
     frame = requestAnimationFrame(step);
     return () => cancelAnimationFrame(frame);
   }, [spinning]);
+  const metal = `tonearm-${useId().replace(/:/g, "")}`;
+  // 唱盘（金属转盘）→ 唱片（随播放转动：刻纹、标签）→ 固定不动的光照层（左上受光、右下阴影、刻纹高光）与金属轴心 → 唱臂。
   return <div className="audio-turntable" aria-hidden="true">
+    <div className="audio-platter" />
     <div className="audio-record">
       <div ref={disc} className="audio-record-disc">
-        <div className="audio-record-label">{cover && <img src={cover} alt="" />}</div>
+        <div className={`audio-record-label${cover ? "" : " is-blank"}`}>{cover ? <img src={cover} alt="" /> : <Icon name="audio" size={18} className="audio-record-mark" />}</div>
       </div>
       <div className="audio-record-sheen" />
+      <div className="audio-record-light" />
+      <div className="audio-record-spindle" />
     </div>
     <svg className="audio-tonearm" viewBox="0 0 100 100">
-      <path className="audio-tonearm-arm" d="M57 4 L67 21 L69.5 28" />
-      <rect className="audio-tonearm-head" x="66.5" y="26" width="6" height="9" rx="1.2" transform="rotate(-20 69.5 30.5)" />
-      <circle className="audio-tonearm-base" cx="57" cy="4" r="4.6" />
+      <defs>
+        <linearGradient id={metal} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" style={{ stopColor: "var(--on-dark)" }} /><stop offset=".55" style={{ stopColor: "var(--on-dark-72)" }} /><stop offset="1" style={{ stopColor: "var(--on-dark-40)" }} />
+        </linearGradient>
+      </defs>
+      <rect className="audio-tonearm-weight" x="53.2" y="-5.5" width="5.2" height="6.4" rx="1.4" transform="rotate(-30 55.8 -2.3)" />
+      <path className="audio-tonearm-arm" d="M57 4 L67 21 L69.5 28" style={{ stroke: `url(#${metal})` }} />
+      <rect className="audio-tonearm-head" x="66.5" y="26" width="6" height="9" rx="1.2" transform="rotate(-20 69.5 30.5)" style={{ fill: `url(#${metal})` }} />
+      <circle className="audio-tonearm-ring" cx="57" cy="4" r="6.2" />
+      <circle className="audio-tonearm-base" cx="57" cy="4" r="4.6" style={{ fill: `url(#${metal})` }} />
       <circle className="audio-tonearm-pivot" cx="57" cy="4" r="1.8" />
     </svg>
   </div>;
@@ -205,11 +223,7 @@ function Timeline({ progress, buffered, disabled, onSeek }: { progress: MediaPro
         onChange={event => setScrub(Number(event.target.value))}
         onPointerUp={event => { if (scrub !== null) onSeek(Number((event.target as HTMLInputElement).value)); setScrub(null); }}
         onKeyUp={event => { if (scrub !== null) { onSeek(scrub); setScrub(null); } else if (event.key === "Home" || event.key === "End") onSeek(Number(event.currentTarget.value)); }}
-        onKeyDown={event => {
-          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-          event.preventDefault(); event.stopPropagation();
-          onSeek(Math.max(0, Math.min(duration, progress.currentTime + (event.key === "ArrowLeft" ? -5 : 5))));
-        }} />
+        data-media-progress="" />
       {hover && <span className="audio-track-tip" style={{ left: hover.x }} aria-hidden="true">{playbackTime(hover.time)}</span>}
     </div>
     <span className="audio-time">{duration ? playbackTime(duration) : "--:--"}</span>
@@ -222,15 +236,15 @@ function MediaButton({ icon, label, shortcut, onClick, disabled, active, classNa
 
 /* ---------- 统一入口 ---------- */
 
-export function MediaPreview({ kind, url, name, size, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }: {
-  kind: "video" | "audio"; url: string; name: string; size?: number; cover?: string; onRetry: () => void;
+export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }: {
+  kind: "video" | "audio"; url: string; name: string; size?: number; videoSize?: { width: number; height: number }; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav;
 } & PlaybackProps) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
   const loader = useRef(loadAssets), resolveAsset = useRef(assetUrl);
   loader.current = loadAssets; resolveAsset.current = assetUrl;
-  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }), source = useRef({ url, name, cover }), loadedUrl = useRef("");
-  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }; source.current = { url, name, cover };
+  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }), source = useRef({ url, name, cover, videoSize }), loadedUrl = useRef("");
+  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }; source.current = { url, name, cover, videoSize };
   const navRef = useRef(nav);
   navRef.current = nav;
   const [state, setState] = useState<MediaState>("loading"), [error, setError] = useState("");
@@ -274,10 +288,10 @@ export function MediaPreview({ kind, url, name, size, cover, onRetry, loadAssets
         if (cancelled || !host.current) return;
         const events = { onEnded: () => callbacks.current.onEnded?.(), onPlaying: playingChanged,
           onProgress: (value: MediaProgress) => { if (!cancelled) callbacks.current.onProgress?.(value); },
-          onVideoSize: (width: number, height: number) => callbacks.current.onVideoSize?.(width, height),
+          onVideoSize: (width: number, height: number, from: VideoSizeSource) => callbacks.current.onVideoSize?.(width, height, from),
           onVideoFrame: (video: HTMLVideoElement) => callbacks.current.onVideoFrame?.(video) };
         const initial = source.current;
-        const video = engine.createVideoPlayer(host.current, initial.url, notify, initial.cover, events, () => navRef.current);
+        const video = engine.createVideoPlayer(host.current, initial.url, notify, initial.cover, events, () => navRef.current, initial.videoSize);
         player.current = video;
         loadedUrl.current = initial.url;
         setPlayerReady(true);
@@ -293,7 +307,7 @@ export function MediaPreview({ kind, url, name, size, cover, onRetry, loadAssets
     setError(""); setSlow(false); timeRef.current = 0; setProgress({ currentTime: 0, duration: 0 }); setBuffered(0);
     lyricSource.current = ""; callbacks.current.onLyricLine?.(null);
     loadedUrl.current = url;
-    player.current.setSource(url, name, cover);
+    (player.current as VideoPlayer).setSource(url, name, cover, kind === "video" ? videoSize : undefined);
     callbacks.current.onControls?.(player.current);
     // 封面元信息变化不重置已在播放的媒体。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -436,7 +450,7 @@ export function MediaPreview({ kind, url, name, size, cover, onRetry, loadAssets
   ].filter((fact): fact is string => Boolean(fact));
   const showLyrics = lyrics.length > 0 && lyricSource.current === url;
   return <div className={`preview-player preview-player-audio${cover ? " has-cover" : ""}${waiting && !failed ? " is-waiting" : ""}${playing && !waiting && !failed ? " is-playing" : ""}${playing ? " is-active" : ""}`}
-    style={cover ? { "--preview-cover": `url("${cover}")` } as CSSProperties : undefined}>
+    style={{ "--preview-tint": coverTint(name), ...(cover ? { "--preview-cover": `url("${cover}")` } : {}) } as CSSProperties}>
     <div className="audio-backdrop" aria-hidden="true" />
     <div className={`audio-body${showLyrics ? " has-lyrics" : ""}`}>
       <div className="audio-art"><Turntable cover={cover} spinning={playing && !waiting && !failed} /></div>

@@ -98,7 +98,7 @@ export function SharePage({ token }: { token: string }) {
               <div className="share-title">
                 <h1>{file.name}</h1>
                 <p>
-                  <span>{formatBytes(file.size)}</span><span>{kindLabel(kind)}</span><span>更新于 {formatDateTime(file.modified_at)}</span>
+                  <span>{formatBytes(file.size)}</span><span>{kindLabel(kind)}</span>{file.dimensions && (kind === "image" || kind === "video") && <span title="分辨率">{api.formatDimensions(file.dimensions)}</span>}<span>更新于 {formatDateTime(file.modified_at)}</span>
                   {file.expires_at && <span>链接有效期至 {formatDateTime(file.expires_at)}</span>}
                 </p>
                 <SharerLine token={token} sharer={file.sharer} access={access} />

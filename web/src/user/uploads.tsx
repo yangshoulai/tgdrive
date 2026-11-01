@@ -4,7 +4,7 @@ import * as api from "../api";
 
 import { fingerprintFile, fingerprintSupported } from "../fingerprint";
 import { FileTile, FileVisual, baseName, getFileKind } from "../files";
-import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
+import { createThumbnails, generateLoadedThumbnails, readImageSize, readVideoSize, thumbnailSource } from "../thumbnails";
 
 import { BRAND } from "../brand";
 import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, PageHeader, Progress, Switch, copyText, formatBytes, toast, useDocumentTitle } from "../ui";
@@ -281,6 +281,9 @@ export function useUploadQueue(onSettled: () => void) {
         }
       }
       const source = thumbnailSource(job.file.name, job.file.type, job.file.size);
+      // 图片／视频的显示尺寸从本地文件读取并记录：视频播放时一开始就按比例打开，预览头部显示分辨率（同内容已记录时跳过）。
+      if ((source === "video" || source === "image") && !result.dimensions)
+        void (source === "video" ? readVideoSize(job.file) : readImageSize(job.file)).then(size => { if (size) void api.setMediaSize(result, size).catch(() => undefined); });
       if (!disposed.current && !result.thumbnails?.length && result.thumbnail_status !== "unavailable" && source) {
         // 用本地文件生成缩略图（图片缩放、视频截帧、音频封面），不需要再下载；失败不影响上传结果。
         void generateLoadedThumbnails(result, signal => createThumbnails({ file: job.file, signal }, source))

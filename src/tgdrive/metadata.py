@@ -44,7 +44,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 31
+    SCHEMA_VERSION = 32
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -719,6 +719,14 @@ class Metadata:
                     ALTER TABLE private_spaces_v31 RENAME TO private_spaces
                 """)
                 db.execute("PRAGMA user_version = 31")
+            if version < 32:
+                # 图片／视频的显示尺寸按内容（Blob）记录：上传时由浏览器读取、离线下载转封装时从 moov 取得、首次预览或播放时补记。
+                # 播放器据此一开始就按视频比例打开窗口（不再先按 16:9、再按缩略图、最后按视频比例变换几次大小），预览头部显示分辨率。
+                columns = {row[1] for row in db.execute("PRAGMA table_info(blobs)")}
+                for column in ("media_width", "media_height"):
+                    if column not in columns:
+                        db.execute(f"ALTER TABLE blobs ADD COLUMN {column} INTEGER")
+                db.execute("PRAGMA user_version = 32")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

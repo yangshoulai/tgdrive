@@ -1020,6 +1020,21 @@ async function parseCloudSelection(h) {
   return current;
 }
 
+test("cloud files sent before are still offered again and marked, instead of blocking the selection", async () => {
+  const files = [{ fid: "a1", file_name: "08.mp4", size: 1, file: true }, { fid: "b2", file_name: "27.mp4", size: 1, file: true }];
+  const h = quarkHarness(files, details => jsonReply(details, { code: 0, data: [] }));
+  await h.ready;
+  const first = await h.api.cloudSources(h.api.cloudOf());
+  assert.deepEqual(Array.from(first, item => item.resent), [false, false]);
+  h.api.gm.set("sent", [first[1].url]);
+  const again = await h.api.cloudSources(h.api.cloudOf());
+  assert.deepEqual(Array.from(again, item => [item.name, item.resent]), [["08.mp4", false], ["27.mp4", true]]);
+  h.api.gm.set("sent", first.map(item => item.url));
+  const all = await h.api.cloudSources(h.api.cloudOf());
+  assert.equal(all.length, 2, "both files are offered even though every one was sent before");
+  assert.ok(all.every(item => item.resent));
+});
+
 test("cloud quark fetches links 15 files per request as the PC client, pausing between batches like LinkSwift", async () => {
   const files = Array.from({ length: 20 }, (_, index) => ({ fid: `q${index}`, file_name: `f${index}.bin`, size: 1, file: true }));
   const calls = [];

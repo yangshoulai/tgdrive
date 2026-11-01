@@ -393,6 +393,29 @@ export async function createThumbnails(input: Input, source: ThumbnailSource): P
   }
 }
 
+/** 读取本地视频文件的显示尺寸（只读元信息，不解码画面）；浏览器无法识别时返回 null。 */
+export async function readVideoSize(file: Blob, timeout = 15000): Promise<api.MediaSize | null> {
+  const video = document.createElement("video"), url = URL.createObjectURL(file);
+  video.muted = true; video.preload = "metadata";
+  try {
+    const metadata = waitFor(video, "loadedmetadata", undefined, timeout, () => video.readyState >= 1);
+    video.src = url;
+    await metadata;
+    return video.videoWidth > 0 && video.videoHeight > 0 ? { width: video.videoWidth, height: video.videoHeight } : null;
+  } catch { return null; }
+  finally { video.removeAttribute("src"); video.load(); URL.revokeObjectURL(url); }
+}
+
+/** 读取本地图片文件的显示尺寸（按 EXIF 方向换算）；无法解码时返回 null。 */
+export async function readImageSize(file: Blob): Promise<api.MediaSize | null> {
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const size = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return size.width > 0 && size.height > 0 ? size : null;
+  } catch { return null; }
+}
+
 /** 保存生成结果；返回保存后的缩略图状态，供界面立即更新。 */
 export async function saveThumbnails(path: string, result: ThumbnailResult, claim: api.ThumbnailClaim = {}): Promise<string[] | null> {
   if (!result) return null;

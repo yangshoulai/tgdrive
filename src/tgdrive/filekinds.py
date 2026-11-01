@@ -104,3 +104,21 @@ def kind_of(key: str, content_type: str | None) -> str | None:
         if any(_like(mime, pattern) for pattern in mimes) or any(_like(name, pattern) for pattern in keys):
             return next((group for group, members in KIND_GROUPS.items() if rule in members), None)
     return None
+
+
+# 音频扩展名对应的标准 MIME。Safari／iOS（包括 iOS 上的 Chrome）按响应的 Content-Type 判断 <audio> 能否播放，
+# 不像桌面 Chrome 那样嗅探内容：存成 video/x-flac、application/octet-stream 或 audio/x-flac 等别名的音乐会直接播放失败。
+AUDIO_TYPES = {"flac": "audio/flac", "mp3": "audio/mpeg", "m4a": "audio/mp4", "aac": "audio/aac", "wav": "audio/wav",
+               "ogg": "audio/ogg", "oga": "audio/ogg", "opus": "audio/ogg"}
+
+
+def served_type(key: str, content_type: str | None) -> str:
+    """响应与保存用的 MIME：明确的音频扩展名在来源没给、给了通用二进制、video/* 或非标准音频别名时改用标准音频类型；
+    其余原样返回（与 web/src/cache-store.ts 的 servedType 一致）。"""
+    current = (content_type or "application/octet-stream").split(";", 1)[0].strip().lower()
+    extension = key.rsplit(".", 1)[-1].lower() if "." in key.rsplit("/", 1)[-1] else ""
+    standard = AUDIO_TYPES.get(extension)
+    if standard and current != standard and (current == "application/octet-stream" or current.startswith("video/")
+                                             or current.startswith("audio/") and current not in AUDIO_TYPES.values()):
+        return standard
+    return current

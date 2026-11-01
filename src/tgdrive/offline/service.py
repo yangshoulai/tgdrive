@@ -22,8 +22,9 @@ from ..errors import IntegrityError, NotFoundError, NotReadyError, QuotaExceeded
 from ..objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
 from ..work import WorkBusyError
 from .hls import load_playlist, remux
+from ..filekinds import served_type
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
-from .mp4 import FRAGMENT_PROBE, Defragmenter, is_fragmented
+from .mp4 import FRAGMENT_PROBE, Defragmenter, is_fragmented, video_size
 from .request import DownloadRequest, checked_url, command_text, filename, parse_requests, url_filename
 from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_cache, media_request, merge_tracks, prepare, site_link, track_stream
 
@@ -66,8 +67,11 @@ def task_path(key: str) -> str:
 
 
 def _stored_type(key: str, content_type: str | None) -> str | None:
-    """保存时的 MIME：来源没给或只给 octet-stream 时按文件名推断；文件名是明确的音频而来源标成 video/*
-    （不少网站把 FLAC、MP3 标成 video/x-flac 等）时改用音频类型，以免网页把音乐当成视频播放。"""
+    """保存时的 MIME：来源没给或只给 octet-stream 时按文件名推断；文件名是明确的音频而来源标成 video/* 或非标准别名
+    （不少网站把 FLAC、MP3 标成 video/x-flac 等）时改用标准音频类型（filekinds.served_type），以免网页当成视频、iOS 无法播放。"""
+    if served := served_type(key, content_type):
+        if served != (content_type or "application/octet-stream").split(";", 1)[0].strip().lower():
+            return served
     guessed = mimetypes.guess_type(key)[0]
     if not content_type or content_type == "application/octet-stream":
         return guessed or content_type
@@ -108,6 +112,8 @@ class OfflineDownloads:
         self._control_refs: dict[int, int] = {}
         self._wake = asyncio.Event()
         self._parse_slots = asyncio.Semaphore(2)
+        # 转封装得到的视频显示尺寸（按 upload_id），提交完成后记到 Blob 上；重启后丢失也无妨，首次播放会补记。
+        self._video_sizes: dict[str, tuple[int, int]] = {}
         self._closing = False
         self._covers: set[asyncio.Task] = set()
         self._next_byte = 0.0
@@ -1054,7 +1060,10 @@ class OfflineDownloads:
             stored = await self._stage(row, scope, upload_id, source, offset=PART_SIZE, count_input=False) - PART_SIZE
         finally:
             await source.aclose()
-        first = converter.header() + b"".join(head)
+        header = converter.header()
+        if size := video_size(header):
+            self._video_sizes[upload_id] = size
+        first = header + b"".join(head)
         del head
         await self.objects.upload_part(scope, upload_id, 1, first, len(first))
         self._set(row["id"], stored_bytes=stored + len(first))
@@ -1071,6 +1080,11 @@ class OfflineDownloads:
                 self._reserve_target(row, scope, upload_id)
             info = await self.objects.complete_multipart(scope, upload_id, [(part.part_no, part.etag) for part in parts])
             self._set(row["id"], status="completed", phase=None, key=info.key, stored_bytes=info.size, size=info.size if row["kind"] == "http" else None, error=None)
+        if size := self._video_sizes.pop(upload_id, None):
+            try:
+                self.objects.set_media_size(scope, info.key, info.etag, *size)
+            except Exception:  # noqa: BLE001 - 尺寸只用于播放器初始大小，记录失败时首次播放会补记
+                pass
         self._schedule_cover(row["id"])
 
     async def _http(self, row, scope, source):

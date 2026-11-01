@@ -411,3 +411,15 @@ export function kindOf(type: string, destination: string): Kind {
   if (mime.startsWith("audio/") || destination === "audio") return "audio";
   return "other";
 }
+
+/** 与服务端 filekinds.served_type 一致：明确的音频扩展名在类型缺失、通用二进制、video/* 或非标准音频别名时改用标准音频类型。
+ *  iOS 的 Safari／Chrome 按 Content-Type 判断 <audio> 能否播放；旧版本缓存的条目可能记着 video/x-flac。 */
+const AUDIO_TYPES: Record<string, string> = { flac: "audio/flac", mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac", wav: "audio/wav", ogg: "audio/ogg", oga: "audio/ogg", opus: "audio/ogg" };
+const STANDARD_AUDIO = new Set(Object.values(AUDIO_TYPES));
+export function servedType(path: string, type: string | null | undefined): string {
+  const current = (type || "application/octet-stream").split(";")[0].trim().toLowerCase();
+  const name = path.split("/").at(-1) ?? "", dot = name.lastIndexOf(".");
+  const standard = dot > 0 ? AUDIO_TYPES[name.slice(dot + 1).toLowerCase()] : undefined;
+  if (standard && current !== standard && (current === "application/octet-stream" || current.startsWith("video/") || current.startsWith("audio/") && !STANDARD_AUDIO.has(current))) return standard;
+  return current;
+}

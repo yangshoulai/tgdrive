@@ -721,6 +721,14 @@ class UserApi:
             favorites.store(db, scope.bucket_id, favorites.merge_hidden(current, given, set()))
         return self.favorites(token)
 
+    def set_media_size(self, token: str, csrf: str, payload: dict) -> dict[str, bool]:
+        """上传、预览或播放时读到图片／视频的尺寸后补记（只写入仍是同一版本的文件）。"""
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        path, etag = payload.get("path"), payload.get("etag")
+        if not isinstance(path, str) or not isinstance(etag, str):
+            raise ValueError("缺少文件路径或版本")
+        return {"saved": self.objects.set_media_size(scope, self._path(path), etag, payload.get("width"), payload.get("height"))}
+
     def check_files(self, token: str, csrf: str, paths: list[str]):
         scope = self._scope(token, csrf=csrf, mutation=True)
         if not isinstance(paths, list) or len(paths) > 200 or any(not isinstance(path, str) for path in paths):
@@ -1165,8 +1173,14 @@ class UserApi:
     def _objects_json(self, items) -> list[dict[str, object]]:
         """序列化一页对象，并用一次查询附上缩略图状态。"""
         versions = self.objects.thumbnail_versions([item.blob_uuid for item in items])
-        return [self._object_json(item, tuple(versions.get(item.blob_uuid or "", {})),
-                                  versions.get(item.blob_uuid or "", {})) for item in items]
+        sizes = self.objects.media_sizes([item.blob_uuid for item in items]) if hasattr(self.objects, "media_sizes") else {}
+        result = []
+        for item in items:
+            value = self._object_json(item, tuple(versions.get(item.blob_uuid or "", {})), versions.get(item.blob_uuid or "", {}))
+            if size := sizes.get(item.blob_uuid or ""):
+                value["dimensions"] = {"width": size[0], "height": size[1]}
+            result.append(value)
+        return result
 
     @staticmethod
     def _object_json(item, thumbnails: list[str] | tuple[str, ...] = (), thumbnail_versions: dict[str, str] | None = None,

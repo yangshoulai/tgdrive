@@ -7,7 +7,7 @@
 import {
   BLOCK, type Bytes, type DeviceSettings, type EntryInfo, type EntryRecord, type Kind, type Tier,
   aesKey, b64u, blockAad, deleteEntries, deviceId, directoryRoot, effectiveMiB, ensureEntry, evict, forgetDirectory, getMeta, preferredStore, readDirectory, setMeta, sweepDirectory, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
-  kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, setManualFlags, touchEntry, updateEntryInfo,
+  kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, servedType, setManualFlags, touchEntry, updateEntryInfo,
 } from "../cache-store";
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
@@ -316,7 +316,7 @@ async function handle(request: Request, route: Route): Promise<Response> {
     if (now - entry.accessed > 60_000) void touchEntry(key, now).catch(() => undefined);
     if (download) info = { ...info, disposition: `attachment; filename*=UTF-8''${encodeURIComponent(route.path.split("/").at(-1) || "file")}` };
     if (!info.size) return new Response(null, { status: range ? 416 : 200, headers: {
-      "Content-Type": info.type, "Content-Length": "0", "Content-Disposition": info.disposition,
+      "Content-Type": servedType(info.path, info.type), "Content-Length": "0", "Content-Disposition": info.disposition,
       "Cache-Control": "no-store", "X-Tessera-Cache": "hit", ETag: info.version,
       ...(range ? { "Content-Range": "bytes */0" } : {}),
     } });
@@ -396,7 +396,7 @@ function build(opened: Opened, range: { start: number; end: number | null } | nu
   }
   const hit = opened.entry.blocks.length > 0;
   const headers = new Headers({
-    "Content-Type": info.type, "Content-Length": String(span.end - span.start + 1), "Accept-Ranges": "bytes",
+    "Content-Type": servedType(info.path, info.type), "Content-Length": String(span.end - span.start + 1), "Accept-Ranges": "bytes",
     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox",
     "Content-Disposition": info.disposition, "X-Tessera-Cache": initial ? "miss" : hit ? "hit" : "miss",
   });

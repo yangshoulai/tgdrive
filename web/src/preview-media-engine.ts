@@ -16,7 +16,9 @@ const GLYPHS = {
   list: glyph("M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"),
   thumbnail: glyph("M4 4h16v16H4zM4 16l5-5 4 4 3-3 4 4M8 8h.01"),
 };
-type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onVideoSize?: (width: number, height: number) => void; onVideoFrame?: (video: HTMLVideoElement) => void };
+/** 尺寸来源：stored 为已记录的尺寸，cover 为封面图比例（没有记录时的临时值），video 为视频元信息。 */
+export type VideoSizeSource = "stored" | "cover" | "video";
+type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onVideoSize?: (width: number, height: number, source: VideoSizeSource) => void; onVideoFrame?: (video: HTMLVideoElement) => void };
 function mediaProgress(media: HTMLMediaElement): MediaProgress {
   const duration = Number.isFinite(media.duration) ? Math.max(0, media.duration) : 0;
   const currentTime = Number.isFinite(media.currentTime) ? Math.max(0, media.currentTime) : 0;
@@ -26,7 +28,7 @@ function seekBy(media: HTMLMediaElement, seconds: number) {
   const { currentTime, duration } = mediaProgress(media);
   if (duration) media.currentTime = Math.max(0, Math.min(duration, currentTime + seconds));
 }
-export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents, navigation?: () => Navigation | undefined) {
+export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents, navigation?: () => Navigation | undefined, known?: { width: number; height: number }) {
   // 网页全屏仍留在预览的对话框内，保留焦点锁和无障碍语义。
   Artplayer.FULLSCREEN_WEB_IN_BODY = false;
   // 不自动重连：播放失败直接交给预览界面显示原因与重试，避免画面上反复出现“重新连接”。
@@ -68,27 +70,28 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     control.setAttribute("aria-busy", String(thumbnailBusy));
     control.setAttribute("aria-label", thumbnailBusy ? "正在保存缩略图" : "将当前画面设为缩略图");
   };
-  const setRatio = (width: number, height: number) => {
+  const setRatio = (width: number, height: number, source: "stored" | "cover" | "video") => {
     if (!destroyed && width > 0 && height > 0) {
       container.style.setProperty("--preview-video-ratio", String(width / height));
-      events?.onVideoSize?.(width, height);
+      events?.onVideoSize?.(width, height, source);
     }
   };
-  // 封面与视频都使用原始比例；元信息就绪后以实际视频尺寸为准，兼容旧封面。
+  // 已记录视频尺寸时直接按它打开，不再用封面比例过渡；没有记录时先用封面比例，元信息就绪后以实际视频尺寸为准。
   let cover: HTMLImageElement | null = null;
-  const setCover = (src?: string) => {
+  const setCover = (src?: string, size?: { width: number; height: number }) => {
     if (cover) { cover.onload = null; cover.src = ""; }
-    cover = src ? new Image() : null;
+    if (size) setRatio(size.width, size.height, "stored");
+    cover = src && !size ? new Image() : null;
     const image = cover;
-    if (image) { image.onload = () => { if (!player.video.videoWidth) setRatio(image.naturalWidth, image.naturalHeight); }; image.src = src!; }
+    if (image) { image.onload = () => { if (!player.video.videoWidth) setRatio(image.naturalWidth, image.naturalHeight, "cover"); }; image.src = src!; }
   };
-  setCover(poster);
+  setCover(poster, known);
   let switching = Promise.resolve();
   const updateProgress = () => events?.onProgress?.(mediaProgress(player.video));
-  const markReady = () => { setRatio(player.video.videoWidth, player.video.videoHeight); ready = true; notify("ready"); thumbnailState(); if (player.video.readyState >= 2) events?.onVideoFrame?.(player.video); };
+  const markReady = () => { setRatio(player.video.videoWidth, player.video.videoHeight, "video"); ready = true; notify("ready"); thumbnailState(); if (player.video.readyState >= 2) events?.onVideoFrame?.(player.video); };
   // iOS Safari 在用户点播放前不预加载画面，只会触发 loadedmetadata：读到时长即视为就绪，避免误报“加载较慢”。
   player.on("video:loadedmetadata", () => { markReady(); updateProgress(); });
-  player.on("video:resize", () => setRatio(player.video.videoWidth, player.video.videoHeight));
+  player.on("video:resize", () => setRatio(player.video.videoWidth, player.video.videoHeight, "video"));
   player.on("video:loadeddata", markReady);
   player.on("video:canplay", markReady);
   player.on("video:playing", markReady);
@@ -177,7 +180,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     seek: (time: number) => { player.video.currentTime = time; updateProgress(); },
     seekBy: (seconds: number) => { seekBy(player.video, seconds); updateProgress(); },
     adjustVolume: (delta: number) => { player.volume = Math.max(0, Math.min(1, player.video.volume + delta)); },
-    setSource: (nextUrl: string, _name: string, nextCover?: string) => {
+    setSource: (nextUrl: string, _name: string, nextCover?: string, nextSize?: { width: number; height: number }) => {
       sourceVersion++;
       player.pause(); ready = false; notify("loading");
       container.style.removeProperty("--preview-video-ratio");
@@ -189,7 +192,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       const time = container.querySelector(".art-control-time");
       if (time) time.textContent = "00:00 / 00:00";
       events?.onPlaying(false); events?.onProgress?.({ currentTime: 0, duration: 0 });
-      setCover(nextCover);
+      setCover(nextCover, nextSize);
     },
     /** 字幕选择放在播放器的设置菜单里；没有字幕时不显示这一项。 */
     setSubtitleMenu: (options: { value: string; label: string }[], selected: string, onSelect: (value: string) => void) => {

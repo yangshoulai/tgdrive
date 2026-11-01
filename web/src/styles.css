@@ -641,6 +641,12 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .menu.is-dark .menu-item:hover, .menu.is-dark .menu-item:focus-visible { background: var(--on-dark-8); }
 .menu.is-dark .menu-item .menu-shortcut { background: var(--on-dark-8); color: var(--on-dark-56); }
 .menu.is-dark .menu-item.has-divider::before, .menu.is-dark .menu-heading.has-divider::before { border-top-color: var(--on-dark-8); }
+/* 播放器里的菜单：和播放器一样以模糊的封面（没有封面时为色调）铺底；伪元素向外延伸再按菜单圆角裁回，模糊边缘不会发灰。 */
+.menu.has-media-surface { isolation: isolate; }
+.menu.has-media-surface::before { position: absolute; inset: -40px; z-index: -1; border-radius: var(--radius-md); pointer-events: none; content: "";
+  background: radial-gradient(60% 70% at 25% 20%, color-mix(in srgb, var(--preview-tint, var(--accent)) 45%, transparent), transparent 75%), var(--dark-surface);
+  filter: blur(28px); clip-path: inset(40px round var(--radius-md)); }
+.menu.has-media-surface.has-cover::before { background: var(--preview-cover) center / cover no-repeat, var(--dark-surface); filter: blur(32px) saturate(1.6) brightness(.42); }
 .menu-item.has-divider::before { position: absolute; top: -5px; right: -4px; left: -4px; border-top: 1px solid var(--line-soft); content: ""; }
 
 .toaster { position: fixed; bottom: 24px; left: 50%; z-index: 90; display: grid; width: min(420px, calc(100vw - 32px)); gap: 8px; pointer-events: none; transform: translateX(-50%); }
@@ -1366,7 +1372,7 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 /* 音乐：模糊封面做背景，左侧唱片机（封面在唱片中心），右侧标题与歌词，底部一体化控制条。 */
 .preview-player-audio { position: relative; isolation: isolate; display: flex; flex-direction: column; overflow: hidden; overflow: clip; height: min(540px, var(--preview-player-height, calc(100dvh - 220px))); container: audio-player / inline-size; background: var(--dark-surface); color: var(--on-dark); }
 .preview-player-audio::after { position: absolute; inset: 0; z-index: -1; background: linear-gradient(to bottom, var(--shade-8), var(--shade-48)); content: ""; }
-.audio-backdrop { position: absolute; inset: -20%; z-index: -2; background: radial-gradient(40% 50% at 22% 30%, color-mix(in srgb, var(--accent) 60%, transparent), transparent 70%), radial-gradient(45% 55% at 78% 72%, color-mix(in srgb, var(--admin) 50%, transparent), transparent 70%), var(--dark-surface); filter: blur(40px); animation: backdrop-drift 30s ease-in-out infinite alternate; animation-play-state: paused; }
+.audio-backdrop { position: absolute; inset: -20%; z-index: -2; background: radial-gradient(40% 50% at 22% 30%, color-mix(in srgb, var(--preview-tint, var(--accent)) 50%, transparent), transparent 70%), radial-gradient(45% 55% at 78% 72%, color-mix(in srgb, var(--preview-tint, var(--accent)) 26%, transparent), transparent 70%), var(--dark-surface); filter: blur(40px); animation: backdrop-drift 30s ease-in-out infinite alternate; animation-play-state: paused; }
 .preview-player-audio.has-cover .audio-backdrop { background: var(--preview-cover) center / cover no-repeat; filter: blur(64px) saturate(1.6) brightness(.52); }
 .preview-player-audio.is-active .audio-backdrop { animation-play-state: running; }
 @keyframes backdrop-drift { from { transform: scale(1.04) translate(-2%, -1%) rotate(0deg); } to { transform: scale(1.18) translate(2%, 2%) rotate(8deg); } }
@@ -1375,19 +1381,33 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 /* 唱片（网易云音乐式）：唱片占 86% 居中偏下，封面占唱片 66%，外圈是黑色刻纹；唱针支点在唱片上方偏右，播放时落到外圈，暂停时向右抬开。
  * 唱片由 Turntable 用 JS 转动（起转、停转有缓动），表面高光是不随唱片转动的独立层。 */
 .audio-turntable { position: relative; width: 100%; height: 100%; }
-.audio-record { position: absolute; top: 14%; left: 7%; width: 86%; aspect-ratio: 1; border-radius: 50%; box-shadow: 0 0 0 6px var(--on-dark-8), 0 28px 56px -16px var(--shade-64); }
-.audio-record-disc { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 50%; background: repeating-radial-gradient(circle, var(--dark-surface-raised) 0 1px, var(--dark-surface-deep) 1.5px 3px); will-change: transform; }
-.audio-record-disc::before { position: absolute; inset: 15.5%; border-radius: 50%; background: var(--dark-surface-deep); content: ""; }
-.audio-record-label { position: relative; display: grid; width: 66%; aspect-ratio: 1; place-items: center; overflow: hidden; border-radius: 50%; background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 60%, var(--on-dark)), var(--accent)); }
+/* 金属转盘：比唱片大一圈，拉丝金属（锥形渐变）加上沿受光、下沿暗边和落在背景上的投影，让唱片像放在唱机上。 */
+.audio-platter { position: absolute; top: 11%; left: 4%; width: 92%; aspect-ratio: 1; border-radius: 50%;
+  background: conic-gradient(from 20deg, var(--on-dark-8), var(--on-dark-16) 8%, var(--on-dark-4) 18%, var(--on-dark-12) 32%, var(--on-dark-4) 47%, var(--on-dark-16) 58%, var(--on-dark-4) 70%, var(--on-dark-12) 84%, var(--on-dark-8)), var(--dark-surface-raised);
+  box-shadow: 0 30px 50px -14px var(--shade-80), 0 0 0 1px var(--on-dark-8), inset 0 1px 1px var(--on-dark-24), inset 0 -3px 6px var(--shade-48); }
+.audio-record { position: absolute; top: 14%; left: 7%; width: 86%; aspect-ratio: 1; border-radius: 50%; box-shadow: 0 6px 14px var(--shade-64), 0 1px 3px var(--shade-48); }
+.audio-record-disc { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 50%; background: repeating-radial-gradient(circle, var(--dark-surface-raised) 0 1px, var(--dark-surface-deep) 1.5px 3px);
+  box-shadow: inset 0 0 0 1px var(--on-dark-16), inset 0 0 0 3px var(--dark-surface-deep); will-change: transform; }
+.audio-record-disc::before { position: absolute; inset: 15.5%; border-radius: 50%; background: var(--dark-surface-deep); box-shadow: 0 0 0 1px var(--on-dark-8); content: ""; }
+/* 标签：有封面时是封面，没有时是按文件名选的柔和色调（--preview-tint）加细同心纹与音符印记，边缘略微内凹。 */
+.audio-record-label { position: relative; display: grid; width: 66%; aspect-ratio: 1; place-items: center; overflow: hidden; border-radius: 50%; box-shadow: 0 0 0 2px var(--shade-48); }
+.audio-record-label.is-blank { background: repeating-radial-gradient(circle, transparent 0 7px, var(--shade-8) 7.5px 8px), radial-gradient(circle at 35% 28%, color-mix(in srgb, var(--preview-tint, var(--series-other)) 45%, var(--on-dark)), color-mix(in srgb, var(--preview-tint, var(--series-other)) 70%, var(--dark-surface-deep)) 62%, color-mix(in srgb, var(--preview-tint, var(--series-other)) 40%, var(--dark-surface-deep))); color: var(--on-dark-72); }
+.audio-record-label::after { position: absolute; inset: 0; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--on-dark-16), inset 0 -4px 10px var(--shade-48), inset 0 3px 8px var(--on-dark-8); content: ""; }
+.audio-record-mark { position: absolute; top: 20%; left: calc(50% - 9px); opacity: .7; }
 .audio-record-label img { width: 100%; height: 100%; object-fit: cover; }
-.audio-record-sheen { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 30deg, transparent 0 6%, var(--on-dark-12) 12%, transparent 20% 56%, var(--on-dark-8) 62%, transparent 70%); pointer-events: none;
+.audio-record-sheen { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 30deg, transparent 0 6%, var(--on-dark-16) 12%, transparent 20% 56%, var(--on-dark-12) 62%, transparent 70%); pointer-events: none;
   -webkit-mask: radial-gradient(circle, transparent 0 66%, var(--black) 67%); mask: radial-gradient(circle, transparent 0 66%, var(--black) 67%); }
+/* 不随唱片转动的光照：左上受光、右下背光，转动时高光与阴影留在原处，唱片看起来是有厚度的圆盘。 */
+.audio-record-light { position: absolute; inset: 0; border-radius: 50%; background: radial-gradient(120% 120% at 26% 16%, var(--on-dark-12), transparent 40%), radial-gradient(90% 90% at 78% 88%, var(--shade-32), transparent 60%); pointer-events: none; }
+.audio-record-spindle { position: absolute; top: calc(50% - 3%); left: calc(50% - 3%); width: 6%; aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle at 35% 30%, var(--on-dark), var(--on-dark-56) 45%, var(--shade-64)); box-shadow: 0 1px 3px var(--shade-80), 0 0 0 2px var(--shade-32); }
 .audio-tonearm { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 4px 6px var(--shade-48)); transform: rotate(-32deg); transform-origin: 57% 4%; transition: transform .8s var(--ease-out); }
 .preview-player-audio.is-active .audio-tonearm { transform: rotate(0deg); }
-.audio-tonearm-base { fill: var(--on-dark-90); stroke: var(--on-dark-24); stroke-width: 1; }
+.audio-tonearm-base { stroke: var(--on-dark-24); stroke-width: .8; }
+.audio-tonearm-ring { fill: var(--dark-surface-raised); stroke: var(--on-dark-16); stroke-width: .8; }
+.audio-tonearm-weight { fill: var(--dark-surface-raised); stroke: var(--on-dark-40); stroke-width: .8; }
 .audio-tonearm-pivot { fill: var(--dark-surface-raised); }
-.audio-tonearm-arm { fill: none; stroke: var(--on-dark-90); stroke-width: 1.8; stroke-linecap: round; }
-.audio-tonearm-head { fill: var(--on-dark-90); }
+.audio-tonearm-arm { fill: none; stroke-width: 1.8; stroke-linecap: round; }
+.audio-tonearm-head { stroke: var(--shade-32); stroke-width: .4; }
 .audio-side { display: flex; flex-direction: column; justify-content: center; gap: 16px; min-width: 0; height: 100%; min-height: 0; }
 .audio-body.has-lyrics .audio-side { justify-content: flex-start; padding-top: 4px; }
 .audio-heading { display: grid; justify-items: start; gap: 8px; }
@@ -1441,7 +1461,11 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .audio-track input::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: var(--on-dark); box-shadow: 0 2px 8px var(--shade-48); transform: scale(0); transition: transform var(--duration-fast); }
 .audio-track:hover input:not(:disabled)::-webkit-slider-thumb, .audio-track input:focus-visible::-webkit-slider-thumb { transform: scale(1); }
 .audio-track:hover input:not(:disabled)::-moz-range-thumb, .audio-track input:focus-visible::-moz-range-thumb { transform: scale(1); }
-.audio-track input:focus-visible { outline: none; }
+/* 进度条不画焦点框（深色画布的通用焦点规则 .preview-stage.is-media :focus-visible 更具体，需要同等优先级覆盖）：
+ * 点过进度条再按方向键快进时不出现整条白框；键盘焦点改由放大的滑块加一圈柔和光晕表示。 */
+.audio-track input:focus-visible, .preview-stage.is-media .audio-track input:focus-visible { outline: none; }
+.audio-track input:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--on-dark-24), 0 2px 8px var(--shade-48); }
+.audio-track input:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px var(--on-dark-24), 0 2px 8px var(--shade-48); }
 .audio-track-tip { position: absolute; bottom: 22px; padding: 2px 8px; border-radius: var(--radius-xs); background: var(--shade-64); color: var(--on-dark); font-size: var(--text-micro); pointer-events: none; white-space: nowrap; transform: translateX(-50%); }
 .audio-buttons { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 12px; margin-top: 4px; }
 .audio-buttons-main { display: flex; align-items: center; gap: 16px; }
@@ -1466,6 +1490,10 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .audio-volume input::-webkit-slider-thumb { width: 12px; height: 12px; margin-top: -4px; border: 0; border-radius: 50%; background: var(--on-dark); appearance: none; -webkit-appearance: none; }
 .audio-volume input::-moz-range-track { height: 4px; border-radius: var(--radius-pill); background: linear-gradient(to right, var(--on-dark) var(--volume), var(--on-dark-16) var(--volume)); }
 .audio-volume input::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: var(--on-dark); }
+/* 音量滑块同样不画焦点框，键盘焦点用滑块光晕表示。 */
+.preview-stage.is-media .audio-volume input:focus-visible { outline: none; }
+.audio-volume input:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--on-dark-24); }
+.audio-volume input:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px var(--on-dark-24); }
 @media (hover: none) { .audio-volume input { width: 72px; margin: 0 8px 0 2px; opacity: 1; } }
 .preview-player-audio .preview-player-failure { flex: 1; min-height: 0; padding: 12px 0; align-items: flex-start; text-align: left; color: var(--on-dark); }
 .preview-player-audio .preview-player-failure > span:not(.preview-failure-icon) { color: var(--media-ink-2); }
@@ -1684,6 +1712,13 @@ html[data-input="keyboard"] .preview-text.is-editing .cm-editor.cm-focused { box
   width: min(340px, calc(100% - 24px)); min-height: 0; overflow: hidden; border: 1px solid var(--on-dark-8); border-radius: var(--radius-lg); background: var(--shade-80); color: var(--on-dark);
   box-shadow: 0 24px 60px -12px var(--shade-64), inset 0 1px 0 var(--on-dark-4); backdrop-filter: blur(28px) saturate(1.5); -webkit-backdrop-filter: blur(28px) saturate(1.5); animation: drawer-in var(--duration-slow) var(--ease-out); }
 @keyframes drawer-in { from { opacity: 0; transform: translateX(24px) scale(.98); } }
+/* 播放器的播放列表与最小化小窗：和音乐播放器一样，用当前文件的封面模糊后铺底（没有封面时用按文件名选的色调）。
+ * 伪元素在各自的层叠上下文里位于背景之上、内容之下。 */
+.preview-modal.has-media-surface .preview-playlist-panel, .preview-modal.has-media-surface.is-minimized { isolation: isolate; }
+.preview-modal.has-media-surface .preview-playlist-panel::before, .preview-modal.has-media-surface.is-minimized::before {
+  position: absolute; inset: -48px; z-index: -1; background: radial-gradient(50% 60% at 25% 20%, color-mix(in srgb, var(--preview-tint, var(--accent)) 45%, transparent), transparent 72%), radial-gradient(55% 60% at 80% 85%, color-mix(in srgb, var(--preview-tint, var(--accent)) 22%, transparent), transparent 72%), var(--dark-surface);
+  filter: blur(36px); pointer-events: none; content: ""; }
+.preview-modal.has-cover .preview-playlist-panel::before, .preview-modal.has-cover.is-minimized::before { background: var(--preview-cover) center / cover no-repeat, var(--dark-surface); filter: blur(48px) saturate(1.6) brightness(.42); }
 .preview-playlist-panel > header { display: flex; flex: none; align-items: center; gap: 8px; padding: 16px 8px 8px 16px; }
 .preview-playlist-title { display: flex; flex: 1; align-items: baseline; gap: 8px; min-width: 0; }
 .preview-playlist-title strong { font-size: var(--text-md); font-weight: 600; }

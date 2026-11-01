@@ -722,6 +722,30 @@ class ObjectService:
                 "thumbnail_versions": {name: revision for name, revision in (versions or {}).items() if name in images},
                 "thumbnail_status": "ready" if images else "unavailable" if "none" in variants else "missing"}
 
+    MEDIA_SIZE_LIMIT = 32768
+
+    def media_sizes(self, blob_uuids: list[str]) -> dict[str, tuple[int, int]]:
+        """批量读取图片／视频的显示尺寸（宽、高）；没有记录的不返回。"""
+        unique = list(dict.fromkeys(uuid for uuid in blob_uuids if uuid))
+        if not unique:
+            return {}
+        marks = ",".join("?" for _ in unique)
+        return {row["uuid"]: (row["media_width"], row["media_height"]) for row in self.metadata.db.execute(
+            f"SELECT uuid, media_width, media_height FROM blobs WHERE uuid IN ({marks}) AND media_width IS NOT NULL", unique)}
+
+    def set_media_size(self, scope: Scope, key: str, etag: str, width: object, height: object) -> bool:
+        """记录图片／视频的显示尺寸（浏览器读到的 naturalWidth／videoWidth 等，已按旋转方向换算）。
+        只在对象仍是这个版本时写入；同一内容的所有副本共用这条记录。返回是否写入。"""
+        if not all(isinstance(value, int) and not isinstance(value, bool) and 0 < value <= self.MEDIA_SIZE_LIMIT for value in (width, height)):
+            raise ValueError("图片或视频尺寸不正确")
+        self._check_scope(scope, key)
+        with self.metadata.transaction() as db:
+            row = db.execute("SELECT etag, blob_uuid FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone()
+            if row is None or row["etag"] != etag or not row["blob_uuid"]:
+                return False
+            db.execute("UPDATE blobs SET media_width=?, media_height=? WHERE uuid=?", (width, height, row["blob_uuid"]))
+        return True
+
     def thumbnail_versions(self, blob_uuids: list[str]) -> dict[str, dict[str, str]]:
         """批量读取各规格的独立版本，列表与目录封面复用同一资源地址。"""
         unique = list(dict.fromkeys(uuid for uuid in blob_uuids if uuid))

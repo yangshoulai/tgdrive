@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperti
 import * as api from "./api";
 import { readPreviewText, TEXT_PREVIEW_LIMIT, type PreviewText } from "./preview-data";
 import { encodeText } from "./text-encoding";
-import { MediaPreview, MinimizedPlayback, PreviewCachedContext, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
+import { MediaPreview, MinimizedPlayback, PreviewCachedContext, coverTint, type AssetLoader, type MediaProgress, type MediaState, type PlaybackControls, type PlaybackProps } from "./preview-media";
 import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip } from "./preview-playlist";
 import { ImageViewer } from "./preview-image";
 import { cacheFileId, startPreviewPrefetch } from "./cache-client";
@@ -239,7 +239,7 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing } & PlaybackProps;
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; /** 已记录的视频显示尺寸。 */ videoSize?: api.MediaSize; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing } & PlaybackProps;
 /** 文本编辑：只给本人有写权限的文件。key 是文件路径（保存后地址随版本变化，编辑器不重建）；load 递增时重新读取（换文件、外部改动、冲突后重新加载）。 */
 type TextEditing = { key: string; load: number; save: (data: Uint8Array, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void };
 export function FilePreview(props: PreviewProps) {
@@ -256,7 +256,7 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, size, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, text }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, size, videoSize, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, text }: PreviewProps & { onRetry: () => void }) {
   const [content, setContent] = useState<PreviewText | null>(null);
   // 每次读到新内容递增，文本预览按它重建；自己保存不重新读取，编辑器保持原状。
   const [revision, setRevision] = useState(0);
@@ -296,7 +296,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, poste
   );
 
   if (unplayable) return fallback;
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} />;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} videoSize={videoSize} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} />;
   if (mediaFailed) return fallback;
   // 原图从存储取回并解密需要时间：查看器先显示封面图占位，原图加载完成后淡入替换。
   if (kind === "image") return <ImageViewer url={url} name={name} poster={poster} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
@@ -312,6 +312,8 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, poste
 }
 
 type PreviewSource = { url: string; downloadUrl: string; poster?: string; thumbnail?: string };
+/** 本页读到或补记过的图片／视频尺寸（按内容版本）：列表数据刷新前再次打开也直接按实际比例打开、显示分辨率。 */
+const recordedSizes = new Map<string, api.MediaSize>();
 export type PreviewPlayback = { playing: boolean; currentTime: number; state: MediaState };
 export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest }: PreviewSource & { file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; onVideoFrame?: (video: HTMLVideoElement, file: api.FileItem) => void; onSaveVideoThumbnail?: (video: HTMLVideoElement, file: api.FileItem) => Promise<void>; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
   const kind = getFileKind(file.content_type, file.key);
@@ -338,6 +340,8 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     return { url, downloadUrl, poster: latest.poster ?? poster, thumbnail: latest.thumbnail ?? thumbnail };
   };
   const source = sourceOf(active);
+  // 播放列表、最小化小窗与快捷键说明沿用音乐播放器的背景：当前文件的封面模糊后铺底，没有封面时用按文件名选的色调。
+  const mediaSurface: Record<string, string> = media ? { "--preview-tint": coverTint(baseName(active.key)), ...(source.poster ? { "--preview-cover": `url("${source.poster}")` } : {}) } : {};
   const ownSource = /^\/api\/user\/v1\/(?:private\/)?content\?/.test(source.url);
   const cacheQueue = useCacheFiles([active], ownSource);
   const activeCacheId = cacheFileId(active);
@@ -372,7 +376,11 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   } : undefined, [editable, active, textLoad]);
   const closePreview = () => { if (!textDirty) onClose(); else void confirmLeave().then(leave => { if (leave) onClose(); }); };
   const [videoSize, setVideoSize] = useState<{ key: string; etag: string; ratio: number } | null>(null);
-  const videoRatio = videoSize?.key === active.key && videoSize.etag === active.etag ? videoSize.ratio : 16 / 9;
+  // 已记录尺寸（列表接口的 dimensions，或本页刚读到的）时一开始就按视频比例打开；没有时先按 16:9，读到元信息后改为实际比例。
+  // 同一份尺寸也在预览头部显示为分辨率（图片、视频）。
+  const [, setSizeRevision] = useState(0);
+  const knownSize = active.dimensions ?? recordedSizes.get(active.etag);
+  const videoRatio = videoSize?.key === active.key && videoSize.etag === active.etag ? videoSize.ratio : knownSize ? knownSize.width / knownSize.height : 16 / 9;
   const [playlistExpanded, setPlaylistExpanded] = useState(false);
   const controls = useRef<PlaybackControls | null>(null), pendingPlay = useRef(false), currentKey = useRef(active.key);
   currentKey.current = active.key;
@@ -388,6 +396,15 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     prefetch.current = job; prefetchTime.current = 0;
     return () => { job.stop(); if (prefetch.current === job) prefetch.current = null; };
   }, [media, ownSource, active.key, active.etag]);
+  // 读到图片原图或视频的实际尺寸时在头部显示分辨率，并记录下来（只记本人的文件），下次直接按这个比例打开、显示分辨率。
+  function recordSize(width: number, height: number) {
+    if (kind !== "video" && kind !== "image" || width <= 0 || height <= 0) return;
+    const known = active.dimensions ?? recordedSizes.get(active.etag);
+    if (known && known.width === width && known.height === height) return;
+    recordedSizes.set(active.etag, { width, height });
+    setSizeRevision(value => value + 1);
+    if (ownSource) void api.setMediaSize(active, { width, height }).catch(() => undefined);
+  }
   const trackPrefetch = (value: MediaProgress) => {
     // 播放进度跳动超过 15 秒视为拖动：按时长比例换算成字节位置。
     if (value.duration > 0 && Math.abs(value.currentTime - prefetchTime.current) > 15)
@@ -418,11 +435,43 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   }
   // 打开（或换成另一个）音视频文件后直接播放：播放器还没就绪时先记下，就绪后由 onControls 开始；浏览器拦截时 play() 会提示点击播放。
   useEffect(() => { pendingPlay.current = false; if (media) play(); }, [file.key]);
+  // 音视频的 ← →：短按（松开时）切换上一首／下一首，长按（按键开始自动重复后）每 150 ms 后退／前进 5 秒，松开时不再切换。
+  // 进度条获得焦点时也按这个规则，不再由滑块自己处理方向键。
+  const arrowHold = useRef<{ key: string; seeking: boolean; last: number } | null>(null);
+  const releaseArrow = useRef<(key: string) => void>(() => undefined);
+  releaseArrow.current = key => {
+    const hold = arrowHold.current;
+    if (!hold || hold.key !== key) return;
+    arrowHold.current = null;
+    if (hold.seeking || playlist.items.length < 2) return;
+    const next = key === "arrowleft" ? playlist.previous() : playlist.next();
+    if (next) select(next);
+  };
+  useEffect(() => {
+    const up = (event: globalThis.KeyboardEvent) => releaseArrow.current(event.key.toLowerCase());
+    const reset = () => { arrowHold.current = null; };
+    window.addEventListener("keyup", up); window.addEventListener("blur", reset);
+    return () => { window.removeEventListener("keyup", up); window.removeEventListener("blur", reset); };
+  }, []);
+  function pressArrow(event: KeyboardEvent<HTMLDivElement>, key: string) {
+    event.preventDefault(); event.stopPropagation();
+    const hold = arrowHold.current;
+    if (!event.repeat || !hold || hold.key !== key) {
+      if (!event.repeat) arrowHold.current = { key, seeking: false, last: 0 };
+      return;
+    }
+    hold.seeking = true;
+    const now = performance.now();
+    if (now - hold.last < 150) return;
+    hold.last = now;
+    controls.current?.seekBy(key === "arrowleft" ? -5 : 5);
+  }
   function handleShortcut(event: KeyboardEvent<HTMLDivElement>) {
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return;
     const key = event.key.toLowerCase(), navigation = key === "arrowleft" || key === "arrowright";
     const target = event.target as HTMLElement;
     if (!event.currentTarget.contains(target) || event.currentTarget.closest("[inert]")) return;
+    if (navigation && media && !event.shiftKey && target.closest("[data-media-progress]")) { pressArrow(event, key); return; }
     if (isShortcutControl(target)) return;
     if (key === "?") { event.preventDefault(); event.stopPropagation(); event.currentTarget.classList.remove("is-chrome-idle"); if (!event.repeat) void showShortcuts(); return; }
     if (event.shiftKey) return;
@@ -440,7 +489,8 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     // 空格继续激活当前按钮，不能同时切换播放状态。
     if (key === " " && target.closest("button, a, summary, [role='button']")) return;
     event.preventDefault(); event.stopPropagation();
-    if (navigation) {
+    if (navigation && media) pressArrow(event, key);
+    else if (navigation) {
       if (event.repeat || playlist.items.length < 2) return;
       const next = key === "arrowleft" ? playlist.previous() : playlist.next();
       if (next) select(next);
@@ -571,9 +621,10 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>
         <IconButton icon="next" label="下一张" size="sm" onClick={nav.onNext} />
-      </div> : undefined} className={`preview-modal preview-modal-${kind}${immersive ? " is-immersive" : ""}${immersive ? " is-dark-surface" : ""}${reading ? " is-reading" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}`} style={kind === "video" ? { "--preview-video-ratio": videoRatio } as CSSProperties : undefined} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={closePreview}
+      </div> : undefined} className={`preview-modal preview-modal-${kind}${immersive ? " is-immersive" : ""}${immersive ? " is-dark-surface" : ""}${reading ? " is-reading" : ""}${api.isPrivatePath(active.key) ? " is-private" : ""}${panelOpen ? " has-playlist-open" : ""}${media ? " has-media-surface" : ""}${media && source.poster ? " has-cover" : ""}`} style={{ ...(kind === "video" ? { "--preview-video-ratio": videoRatio } : {}), ...mediaSurface } as CSSProperties} leading={<FileVisual kind={kind} src={source.thumbnail} size="lg" />} title={baseName(active.key)} onClose={closePreview}
       description={<span className="preview-meta">
         <span title={active.content_type ?? undefined}>{typeLabel}</span><span>{formatBytes(active.size)}</span>
+        {(kind === "image" || kind === "video") && knownSize && <span className="preview-meta-dimensions" title="分辨率">{api.formatDimensions(knownSize)}</span>}
         <span className="preview-meta-date" title={`修改于 ${formatDateTime(active.modified_at)}`}>{formatDate(active.modified_at)}</span>
         {active.public_token && <span className="preview-meta-public" title="已公开分享"><Icon name="globe" size={12} />公开</span>}
       </span>}
@@ -586,9 +637,9 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
           <span className="modal-actions-divider" aria-hidden="true" />
         </>}
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onVideoFrame={video => onVideoFrame?.(video, active)} onSaveThumbnail={onSaveVideoThumbnail ? video => onSaveVideoThumbnail(video, active) : undefined} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} videoSize={knownSize ?? undefined} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onSaveThumbnail={onSaveVideoThumbnail ? video => onSaveVideoThumbnail(video, active) : undefined} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
-        onVideoSize={(width, height) => setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height })}
+        onVideoSize={(width, height, from) => { if (from === "video") recordSize(width, height); setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height }); }}
         onProgress={value => { trackPrefetch(value); setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value); }} onState={setMediaState}
         onLyricLine={line => setLyric(current => current.key === active.key && current.line === line ? current : { key: active.key, line })}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}

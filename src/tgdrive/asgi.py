@@ -26,6 +26,7 @@ from .authn import (
     verify_password,
 )
 from .context import AppContext
+from .filekinds import served_type
 from .errors import (
     IntegrityError,
     NotFoundError,
@@ -270,7 +271,7 @@ class TgDriveASGI(StaticFiles):
                 route = path[len("/api/user/v1/private"):]
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
-                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/move", "/archive",
+                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/move", "/archive",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
                            "/thumbnail/fetch", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
@@ -1151,6 +1152,8 @@ class TgDriveASGI(StaticFiles):
                                                  public_only=query.get("public", ["0"])[0] == "1", kind=query.get("kind", [""])[0]), {}
             if method == "GET" and route == "/stats":
                 return 200, await user.stats(token, query.get("prefix", [""])[0]), {"Cache-Control": "no-store"}
+            if method == "POST" and route == "/media/size":
+                return 200, user.set_media_size(token, csrf, payload), {}
             if method == "GET" and route == "/files/info":
                 return 200, user.file_info(token, query.get("path", [""])[0]), {"Cache-Control": "no-store"}
             if method == "GET" and route == "/folders":
@@ -1207,9 +1210,11 @@ class TgDriveASGI(StaticFiles):
                              "password_required": False, "modified_at": info.modified_at, "public_at": info.public_at,
                              "expires_at": info.public_expires_at, "sharer": sharer}, {}
             thumbnails = user.objects.thumbnail_variants([info.blob_uuid]).get(info.blob_uuid or "", [])
+            dimensions = user.objects.media_sizes([info.blob_uuid]).get(info.blob_uuid or "")
             return 200, {"token": info.public_token, "kind": "file", "name": info.key.rsplit("/", 1)[-1], "size": info.size,
                          "content_type": info.content_type, "etag": info.etag, "password_required": False,
                          **user.objects.thumbnail_fields(thumbnails),
+                         **({"dimensions": {"width": dimensions[0], "height": dimensions[1]}} if dimensions else {}),
                          "modified_at": info.modified_at, "public_at": info.public_at,
                          "expires_at": info.public_expires_at, "sharer": sharer}, {}
         elif re.fullmatch(r"/api/public/v1/folders/[A-Za-z0-9_-]+/(list|preview-assets)", path) and method == "GET":
@@ -1411,11 +1416,11 @@ class TgDriveASGI(StaticFiles):
         if headers.get("if-range") and headers["if-range"] != etag:
             requested = None
         start, end, partial = byte_range(requested, info.size)
-        content_type = (info.content_type or "application/octet-stream").split(";", 1)[0].lower()
+        content_type = served_type(info.key, info.content_type)
         inline = content_type in {
             "image/jpeg", "image/png", "image/gif", "image/webp", "image/avif", "image/bmp", "image/x-icon",
             "video/mp4", "video/webm", "video/quicktime", "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav",
-            "audio/flac", "application/pdf", "text/plain",
+            "audio/flac", "audio/aac", "application/pdf", "text/plain",
         } and query.get("download", ["0"])[0] != "1"
         disposition = "inline" if inline else "attachment"
         filename = quote(info.key.rsplit("/", 1)[-1], safe="")
