@@ -629,7 +629,7 @@ export async function listDownloads(cursor: string | null, status: string, signa
 }
 export const parseDownloads = (input: string, signal?: AbortSignal, download_type: "auto" | "http" | "hls" | "x" | "youtube" = "auto", cookies = "") => request<{ candidates: DownloadCandidate[] }>("/api/user/v1/downloads/parse", { method: "POST", body: JSON.stringify({ input, download_type, cookies }), signal }, 180000);
 /**
- * 资源抓取脚本转交的解析结果：地址 #import=<base64url(JSON)>。片段不会发给服务器；票据加密、绑定账号且 20 分钟过期。
+ * 资源抓取脚本转交的解析结果：地址 #import=<base64url(JSON)>。片段不会发给服务器；票据加密、绑定账号且 30 分钟过期。
  * 读取后立即从地址栏和历史记录中移除。
  */
 export const MAX_DOWNLOAD_ITEMS = 1000;

@@ -1017,7 +1017,7 @@ test("cloud selection snapshots are immutable and enforce the batch limit before
   assert.equal(item.name, "a.bin");
   files = Array.from({ length: 1000 }, (_, index) => ({ ...item, fileId: String(index) }));
   assert.equal((await h.api.cloudSources(h.api.cloudOf())).length, 1000, "LinkSwift does not stop at 50 files");
-  // 勾选数量不设上限，之后按 1000 个一批自动发送。
+  // 勾选数量不设上限，之后按 500 个一批自动发送。
   files = Array.from({ length: 12000 }, (_, index) => ({ ...item, fileId: String(index) }));
   assert.equal((await h.api.cloudSources(h.api.cloudOf())).length, 12000);
   assert.equal(h.requests.length, 0);
@@ -1485,7 +1485,7 @@ test("cloud late resolution cannot recreate a removed row or submit its URL to T
   assert.equal(h.requests.length, 1);
 });
 
-test("cloud selections over 1000 files are sent in automatic rounds of 1000", async () => {
+test("large cloud selections are sent in automatic rounds of 500", async () => {
   let created = 0;
   const parsedAt = [];
   const h = harness({ gm: details => {
@@ -1504,24 +1504,24 @@ test("cloud selections over 1000 files are sent in automatic rounds of 1000", as
   } });
   await h.ready;
   const make = index => ({ url: `https://cdn.example/file-${index}`, type: "file", platform: null, name: "", sourceName: "", state: "parsing", error: "", tasks: [], folder: "" });
-  const all = Array.from({ length: 2050 }, (_, index) => make(index));
-  const current = { mode: "server", started: false, destination: { path: "photos/", private: false }, limit: 1000,
-    entries: all.slice(0, 1000), deferred: all.slice(1000), round: 1, rounds: 3, archivedOk: 0 };
+  const all = Array.from({ length: 1050 }, (_, index) => make(index));
+  const current = { mode: "server", started: false, destination: { path: "photos/", private: false }, limit: 500,
+    entries: all.slice(0, 500), deferred: all.slice(500), round: 1, rounds: 3, archivedOk: 0 };
   h.api.setBatch(current);
   await h.api.parseEntries(current, current.entries.slice());
   // 确认页只解析第一批；后面的批次在开始后、上一批创建完任务才取直链。
-  assert.equal(parsedAt.length, 1000);
-  assert.equal(h.api.batchSummary().total, 2050);
+  assert.equal(parsedAt.length, 500);
+  assert.equal(h.api.batchSummary().total, 1050);
   await h.api.runBatch();
-  await until(() => created === 2050 && h.api.getBatch().round === 3 && !h.api.getBatch().running);
+  await until(() => created === 1050 && h.api.getBatch().round === 3 && !h.api.getBatch().running);
   for (let i = 0; i < 400 && !h.api.batchDone(); i++) await tick();
   assert.equal(h.api.getBatch().deferred.length, 0);
-  // 第二批的解析都在第一批 1000 个任务创建之后。
-  assert.ok(parsedAt.slice(1000, 2000).every(count => count >= 1000));
-  assert.ok(parsedAt.slice(2000).every(count => count >= 2000));
+  // 第二批的解析都在第一批 500 个任务创建之后。
+  assert.ok(parsedAt.slice(500, 1000).every(count => count >= 500));
+  assert.ok(parsedAt.slice(1000).every(count => count >= 1000));
   // 已完成的行收起为计数，列表只保留最后一批。
   assert.equal(h.api.getBatch().entries.length, 50);
-  assert.deepEqual({ ...h.api.batchSummary(), finished: true }, { total: 2050, ok: 2050, failed: 0, finished: true });
+  assert.deepEqual({ ...h.api.batchSummary(), finished: true }, { total: 1050, ok: 1050, failed: 0, finished: true });
 });
 
 test("private cloud rounds wait for the user, and remaining rounds can be dropped", async () => {
@@ -1535,15 +1535,15 @@ test("private cloud rounds wait for the user, and remaining rounds can be droppe
   } });
   await h.ready;
   const make = index => ({ url: `https://cdn.example/file-${index}`, type: "file", platform: null, name: "", sourceName: "", state: "parsing", error: "", tasks: [], folder: "" });
-  const all = Array.from({ length: 2500 }, (_, index) => make(index));
-  const current = { mode: "server", started: false, destination: { path: "", private: true }, limit: 1000,
-    entries: all.slice(0, 1000), deferred: all.slice(1000), round: 1, rounds: 3, archivedOk: 0 };
+  const all = Array.from({ length: 1250 }, (_, index) => make(index));
+  const current = { mode: "server", started: false, destination: { path: "", private: true }, limit: 500,
+    entries: all.slice(0, 500), deferred: all.slice(500), round: 1, rounds: 3, archivedOk: 0 };
   h.api.setBatch(current);
   await h.api.parseEntries(current, current.entries.slice());
   await h.api.runBatch();
   assert.equal(h.opened.length, 1);
   for (let i = 0; i < 50; i++) await tick();
-  assert.equal(current.deferred.length, 1500, "私密空间不自动发送下一批");
+  assert.equal(current.deferred.length, 750, "私密空间不自动发送下一批");
   assert.equal(h.api.batchDone(), false);
   await h.api.nextRound(current);
   assert.equal(h.opened.length, 2);

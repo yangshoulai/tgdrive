@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.19.0
+// @version      0.19.1
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -1047,7 +1047,8 @@
   // LinkSwift's pacing: files per batch, whether one request carries the whole batch, and a pause between batches.
   const CLOUD_PACE = { baidu: { size: 50, many: true }, aliyun: { size: 3 }, quark: { size: 15, many: true }, uc: { size: 15, many: true } };
   const CLOUD_PAUSE = 1000;
-  const CLOUD_BATCH_LIMIT = 1000;  // 每批文件数，与 Tessera 单次创建任务上限（MAX_CREATE_ITEMS）一致
+  // 每批文件数：一批取完直链、解析完才创建任务，批太大时前面的直链与解析票据（服务器 30 分钟内有效）可能已经过期，所以每批 500 个。
+  const CLOUD_BATCH_LIMIT = 500;
   const CLOUD_DOWNLOAD_UA = {
     baidu: "pan.baidu.com",
     quark: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 QuarkPC/6.9.7.761 QuarkCloudDrivePC/6.9.7.761 quark-cloud-drive/2.5.40",
@@ -3514,7 +3515,7 @@
         parts.push(h("div", { className: "private-note" },
           h("strong", {}, "保存到私密空间"),
           h("span", {}, "访问密钥不能直接写入私密空间，发送时会打开一个 Tessera 标签页：服务器下载转交解析结果，浏览器上传转交下载好的文件。在那里用登录密码或通行密钥解锁、确认后保存。"),
-          h("span", {}, "密码只在 Tessera 自己的页面里输入，当前网页和脚本都拿不到。服务器解析结果 20 分钟内有效。")));
+          h("span", {}, "密码只在 Tessera 自己的页面里输入，当前网页和脚本都拿不到。服务器解析结果 30 分钟内有效。")));
         footer.replaceChildren(h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: closeLayer }, "取消"),
           h("button", { type: "button", className: "btn primary", onclick: () => { closeLayer(); onPick({ path: "", private: true }); } }, svg("lock"), "选择私密空间"));
         body.replaceChildren(...parts);
@@ -3559,7 +3560,7 @@
 
   /**
    * 把解析结果转交给 Tessera 页面确认（私密空间）：结果放在地址的 # 片段里，不会发给服务器或进入访问日志；
-   * 票据由服务器加密、绑定账号并在 20 分钟后过期，页面读取后立即从地址栏移除。
+   * 票据由服务器加密、绑定账号并在 30 分钟后过期，页面读取后立即从地址栏移除。
    */
   function handoff(candidates) {
     const json = JSON.stringify({ private: true, candidates: candidates.map(item => ({ ...item })) });
@@ -4417,7 +4418,7 @@
       if (!batch.started) {
         const privateNote = local
           ? "开始后会打开 Tessera 标签页接收文件，在那里解锁私密空间并确认上传；请保持两个页面打开。"
-          : "解析结果会转交 Tessera 标签页，在那里解锁私密空间并确认后开始下载；解析结果 20 分钟内有效。";
+          : "解析结果会转交 Tessera 标签页，在那里解锁私密空间并确认后开始下载；解析结果 30 分钟内有效。";
         target.replaceChildren(
           destinationRow(() => batch.destination, value => { batch.destination = value; rememberDestination(value); renderBatch(); }),
           h("div", { className: "section" },

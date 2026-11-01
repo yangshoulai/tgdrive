@@ -94,7 +94,7 @@ async def parse_download_source(ctx: ToolContext, args: dict) -> ToolOutput:
              "platform": item.get("platform"), "source_host": item.get("source_host"), "group": item.get("group"),
              "warnings": item.get("warnings") or []} for index, item in enumerate(candidates)]
     return ToolOutput({"collection_id": collection_id, "candidates": view,
-                       "note": "同一 group 的多个候选是同一媒体的不同清晰度，通常只选一个。解析结果 20 分钟内有效。"},
+                       "note": "同一 group 的多个候选是同一媒体的不同清晰度，通常只选一个。解析结果 30 分钟内有效。"},
                       f"{len(candidates)} 个可下载文件", items=len(candidates))
 
 

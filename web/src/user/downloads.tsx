@@ -438,7 +438,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
       onComplete();
     } catch (reason) {
       const expired = initial && reason instanceof api.ApiError && reason.status === 400 && /过期|expired/i.test(reason.message);
-      setError(expired ? "解析结果已过期（20 分钟），请回到原网页重新发送。" : api.errorMessage(reason, "创建任务失败，请稍后重试"));
+      setError(expired ? "解析结果已过期（30 分钟），请回到原网页重新发送。" : api.errorMessage(reason, "创建任务失败，请稍后重试"));
     }
     finally { setBusy(false); }
   }

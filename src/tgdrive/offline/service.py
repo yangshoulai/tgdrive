@@ -47,6 +47,8 @@ KNOWN_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".w
                     "video/mp4": ".mp4", "audio/mp4": ".m4a", "audio/mpeg": ".mp3", "application/pdf": ".pdf",
                     "application/zip": ".zip", "text/plain": ".txt"}
 # 解析结果的复用期限；YouTube 地址自带 expire 参数时以它为准。
+# 解析票据（parse 返回的 ticket）的有效期：解析后要在这段时间内创建任务，抓取脚本按批先解析再创建。
+TICKET_TTL = 30 * 60
 RESOLVED_TTL = {"x": 24 * 3600, "youtube": 3 * 3600}
 PUBLIC_FIELDS = ("id", "key", "source_host", "method", "kind", "platform", "phase", "status", "size", "received", "stored_bytes", "segments_done", "segments_total", "duration", "processed_seconds", "elapsed_seconds", "error", "created_at", "updated_at")
 # 任务仍跟踪成品的实际位置，以便回收站还原（含冲突改名）后重新关联；展示和重新下载使用原路径。
@@ -278,7 +280,7 @@ class OfflineDownloads:
         for entry in entries:
             if entry.get("too_large"):
                 continue
-            ticket = {"user_id": user_id, "expires": time.time() + 1200, "request": request.json(),
+            ticket = {"user_id": user_id, "expires": time.time() + TICKET_TTL, "request": request.json(),
                       "kind": "http", "size": entry["size"], "content_type": entry["content_type"],
                       "platform": platform, "platform_source": {**source, "selection": entry["selection"],
                           "entry": entry, "resolved_at": time.time()}}
@@ -360,7 +362,7 @@ class OfflineDownloads:
         for choice, label, audio in choices:
             if max_candidates and len(candidates) >= max_candidates:
                 raise ValueError(f"解析结果超过 {max_candidates} 个文件，请分批提交")
-            ticket = {"user_id": user_id, "expires": time.time() + 1200, "request": choice.json(), "kind": "hls" if hls else "http", "size": None if hls else size, "content_type": "video/mp4" if hls else content_type, "hls_audio": audio}
+            ticket = {"user_id": user_id, "expires": time.time() + TICKET_TTL, "request": choice.json(), "kind": "hls" if hls else "http", "size": None if hls else size, "content_type": "video/mp4" if hls else content_type, "hls_audio": audio}
             import base64
             encoded = base64.urlsafe_b64encode(seal(self._key("offline-ticket"), json.dumps(ticket, ensure_ascii=False).encode(), "offline-ticket")).decode()
             candidates.append({"ticket": encoded, "name": name, "source_host": urlsplit(choice.url).hostname, "method": choice.method,
@@ -375,7 +377,7 @@ class OfflineDownloads:
         if referer:
             headers.append(("Referer", checked_url(referer)))
         request = DownloadRequest(checked_url(url), headers=headers, name=filename(name) if name else None)
-        return self._encode_ticket({"user_id": user_id, "expires": time.time() + 1200, "request": request.json(), "kind": "http",
+        return self._encode_ticket({"user_id": user_id, "expires": time.time() + TICKET_TTL, "request": request.json(), "kind": "http",
                                     "size": None, "content_type": None})
 
     def _ticket(self, user_id, token):
