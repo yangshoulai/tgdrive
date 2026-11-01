@@ -507,9 +507,12 @@ function resizeEdge(rect: DOMRect, x: number, y: number, band = 8): ResizeDirect
 }
 
 /** 把记住的窗口尺寸换算到新的宽高比：保持面积，再整体缩小到视口之内。 */
+/** 记住的窗口尺寸按面积换算到当前宽高比；缩小时用和样式相同的边距（背景层四周各 24px，`.modal` 最高为可视高度减 48px），
+ *  否则窗口高度会被样式截短而宽度不变，竖屏视频两侧留出黑边。 */
 function fitAspect(size: { width: number; height: number }, ratio: number) {
   const width = Math.sqrt(size.width * size.height * ratio), height = width / ratio;
-  const scale = Math.min(1, (window.innerWidth - 16) / width, (window.innerHeight - 16) / height);
+  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+  const scale = Math.min(1, (window.innerWidth - 48) / width, (viewportHeight - 48) / height);
   return { width: Math.round(width * scale), height: Math.round(height * scale) };
 }
 
