@@ -256,7 +256,7 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, size, videoSize, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, text }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, size, videoSize, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation, onRotate, onBufferSpeed, text }: PreviewProps & { onRetry: () => void }) {
   const [content, setContent] = useState<PreviewText | null>(null);
   // 每次读到新内容递增，文本预览按它重建；自己保存不重新读取，编辑器保持原状。
   const [revision, setRevision] = useState(0);
@@ -296,7 +296,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
   );
 
   if (unplayable) return fallback;
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} videoSize={videoSize} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} />;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} videoSize={videoSize} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} rotation={rotation} onRotate={onRotate} onBufferSpeed={onBufferSpeed} />;
   if (mediaFailed) return fallback;
   // 原图从存储取回并解密需要时间：查看器先显示封面图占位，原图加载完成后淡入替换。
   if (kind === "image") return <ImageViewer url={url} name={name} poster={poster} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
@@ -314,8 +314,31 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
 type PreviewSource = { url: string; downloadUrl: string; poster?: string; thumbnail?: string };
 /** 本页读到或补记过的图片／视频尺寸（按内容版本）：列表数据刷新前再次打开也直接按实际比例打开、显示分辨率。 */
 const recordedSizes = new Map<string, api.MediaSize>();
+/** 视频画面旋转按内容版本记在本机（localStorage，最多 300 个）；私密文件只在本页内存里记住，不写入浏览器存储。 */
+const ROTATION_KEY = "tessera:video-rotation", ROTATION_LIMIT = 300;
+const sessionRotations = new Map<string, number>();
+function storedRotations(): Record<string, number> {
+  try {
+    const value = JSON.parse(localStorage.getItem(ROTATION_KEY) ?? "{}") as unknown;
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, number> : {};
+  } catch { return {}; }
+}
+function videoRotation(file: api.FileItem): number {
+  if (api.isPrivatePath(file.key)) return sessionRotations.get(file.etag) ?? 0;
+  const value = storedRotations()[file.etag];
+  return value === 90 || value === 180 || value === 270 ? value : 0;
+}
+function rememberRotation(file: api.FileItem, degrees: number) {
+  if (api.isPrivatePath(file.key)) { if (degrees) sessionRotations.set(file.etag, degrees); else sessionRotations.delete(file.etag); return; }
+  const entries = Object.entries(storedRotations()).filter(([etag]) => etag !== file.etag);
+  if (degrees) entries.push([file.etag, degrees]);
+  try {
+    if (entries.length) localStorage.setItem(ROTATION_KEY, JSON.stringify(Object.fromEntries(entries.slice(-ROTATION_LIMIT))));
+    else localStorage.removeItem(ROTATION_KEY);
+  } catch { /* 存储不可用时只在本次预览里生效 */ }
+}
 export type PreviewPlayback = { playing: boolean; currentTime: number; state: MediaState };
-export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest }: PreviewSource & { file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; onVideoFrame?: (video: HTMLVideoElement, file: api.FileItem) => void; onSaveVideoThumbnail?: (video: HTMLVideoElement, file: api.FileItem) => Promise<void>; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
+export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest }: PreviewSource & { file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; onVideoFrame?: (video: HTMLVideoElement, file: api.FileItem) => void; onSaveVideoThumbnail?: (video: HTMLVideoElement, file: api.FileItem, rotation: number) => Promise<void>; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
   const kind = getFileKind(file.content_type, file.key);
   const media = (kind === "audio" || kind === "video") && isPlayable(file.key, file.content_type);
   const browsable = media || kind === "image";
@@ -380,13 +403,22 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   // 同一份尺寸也在预览头部显示为分辨率（图片、视频）。
   const [, setSizeRevision] = useState(0);
   const knownSize = active.dimensions ?? recordedSizes.get(active.etag);
-  const videoRatio = videoSize?.key === active.key && videoSize.etag === active.etag ? videoSize.ratio : knownSize ? knownSize.width / knownSize.height : 16 / 9;
+  const sourceRatio = videoSize?.key === active.key && videoSize.etag === active.etag ? videoSize.ratio : knownSize ? knownSize.width / knownSize.height : 16 / 9;
+  // 画面转过四分之一圈时窗口按转过来的比例显示。
+  const [rotationRevision, setRotationRevision] = useState(0);
+  const rotation = useMemo(() => kind === "video" ? videoRotation(active) : 0, [kind, active.key, active.etag, rotationRevision]);
+  const videoRatio = rotation % 180 ? 1 / sourceRatio : sourceRatio;
+  function rotateVideo(degrees: number) {
+    rememberRotation(active, ((degrees % 360) + 360) % 360);
+    setRotationRevision(value => value + 1);
+  }
   const [playlistExpanded, setPlaylistExpanded] = useState(false);
   const controls = useRef<PlaybackControls | null>(null), pendingPlay = useRef(false), currentKey = useRef(active.key);
   currentKey.current = active.key;
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState<MediaProgress>({ currentTime: 0, duration: 0 });
   const [mediaState, setMediaState] = useState<MediaState>("loading");
+  const [bufferSpeed, setBufferSpeed] = useState<number | null>(null);
   const [lyric, setLyric] = useState<{ key: string; line: string | null }>({ key: active.key, line: null });
   // 预览音视频期间在后台多段并行预读（自动缓存），关闭预览或换文件时停止；拖动进度后从新位置往后预读。
   const prefetch = useRef<ReturnType<typeof startPreviewPrefetch> | null>(null), prefetchTime = useRef(0);
@@ -483,6 +515,11 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         else if (key === "s") void share();
         else setPlaylistExpanded(value => !value);
       }
+      return;
+    }
+    if (key === "r" && kind === "video" && media) {
+      event.preventDefault(); event.stopPropagation();
+      if (!event.repeat) rotateVideo(rotation + 90);
       return;
     }
     if (!browsable || !navigation && (!media || !["k", " ", "j", "l", "arrowup", "arrowdown"].includes(key))) return;
@@ -616,7 +653,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         { label: "下载文件", icon: "download" as const, shortcut: "D", href: downloadHref, onSelect: () => {} },
         ] : []),
       ]}
-      resizable={kind === "audio" ? undefined : `preview-${kind === "code" ? "text" : kind}`} aspectRatio={kind === "video" ? videoRatio : undefined} windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
+      resizable={kind === "audio" ? undefined : `preview-${kind === "code" ? "text" : kind}`} aspectRatio={kind === "video" ? videoRatio : undefined} windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} speed={bufferSpeed} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
       : kind === "image" && nav && nav.count > 1 ? <div className="preview-mini-gallery">
         <IconButton icon="previous" label="上一张" size="sm" onClick={nav.onPrevious} />
         <span>{nav.index + 1} / {nav.count}</span>
@@ -637,7 +674,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
           <span className="modal-actions-divider" aria-hidden="true" />
         </>}
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} videoSize={knownSize ?? undefined} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onSaveThumbnail={onSaveVideoThumbnail ? video => onSaveVideoThumbnail(video, active) : undefined} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} videoSize={knownSize ?? undefined} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onBufferSpeed={setBufferSpeed} onSaveThumbnail={onSaveVideoThumbnail ? (video, degrees) => onSaveVideoThumbnail(video, active, degrees) : undefined} rotation={rotation} onRotate={rotateVideo} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height, from) => { if (from === "video") recordSize(width, height); setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height }); }}
         onProgress={value => { trackPrefetch(value); setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value); }} onState={setMediaState}

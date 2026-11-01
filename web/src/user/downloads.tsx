@@ -426,7 +426,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
         try { images.set(index, await imageThumbnailSet(cover)); }
         catch (reason) { throw new Error(`${candidates[index].name} 的缩略图：${api.errorMessage(reason, "图片处理失败")}`); }
       }
-      const { tasks } = await api.createDownloads(chosenIndexes.map(index => ({ ticket: candidates[index].ticket, name: candidates[index].name })), destination);
+      const { tasks } = await api.createDownloads(chosenIndexes.map(index => ({ ticket: candidates[index].ticket, name: candidates[index].name, ...(candidates[index].folder ? { folder: candidates[index].folder } : {}) })), destination);
       let failed = 0;
       for (const [position, index] of chosenIndexes.entries()) {
         const value = images.get(index), created = tasks[position];
@@ -464,6 +464,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
             <Checkbox checked={selected.has(index)} label={`下载 ${candidate.name}${candidate.variant ? ` ${candidate.variant}` : ""}`} onChange={checked => setSelected(current => { const next = task ? new Set<number>() : new Set(current); if (checked) { if (candidate.variant) for (const item of next) if (candidates[item].group === candidate.group) next.delete(item); next.add(index); } else next.delete(index); return next; })} />
             <div className="download-candidate-copy">
               {task ? <strong>{candidate.name}</strong> : <Field label={`文件 ${index + 1} 的名称`}><input className="input" value={candidate.name} onChange={event => setCandidates(current => current?.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) ?? null)} /></Field>}
+              {candidate.folder && <p className="muted">保存到子目录 {candidate.folder}</p>}
               <p>{candidate.source_host} · {candidate.variant ?? candidate.content_type ?? (candidate.media_type === "image" ? "图片" : candidate.media_type === "video" ? "视频" : candidate.media_type === "audio" ? "音频" : candidate.method)} · {candidate.size !== null ? formatBytes(candidate.size) : "大小未知"}</p>
               {(candidate.header_names.length > 0 || candidate.body_bytes > 0) && <details><summary>请求参数（凭据已隐藏）</summary><p>{candidate.header_names.length ? `请求头：${candidate.header_names.join("、")}` : "无额外请求头"}{candidate.body_bytes > 0 ? `；文本请求体 ${formatBytes(candidate.body_bytes)}` : ""}。下载时使用你提交的原值。</p></details>}
               {candidate.method === "POST" && <p className="tone-warning">点击开始才发送 POST 请求；中断后需要手动重新发送。</p>}

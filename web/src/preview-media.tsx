@@ -1,6 +1,6 @@
 /** 播放界面与歌词、字幕附件；缓冲状态始终保留播放器。
  * 视频使用 ArtPlayer（按需加载）；音乐使用原生 <audio> 与自绘界面：模糊封面背景、唱片、同步歌词（没有时显示音频信息）和一体化控制条。 */
-import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { errorMessage, type PreviewAsset } from "./api";
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
@@ -14,27 +14,69 @@ type VideoPlayer = ReturnType<Engine["createVideoPlayer"]>;
 type Lyric = { time: number; text: string };
 export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[]>;
 export type PlaybackControls = { play: () => Promise<void>; pause: () => void; isPlaying: () => boolean; seek: (time: number) => void; seekBy: (seconds: number) => void; adjustVolume: (delta: number) => void };
-export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number, source: VideoSizeSource) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onSaveThumbnail?: (video: HTMLVideoElement) => Promise<void>; onLyricLine?: (line: string | null) => void };
+export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number, source: VideoSizeSource) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onSaveThumbnail?: (video: HTMLVideoElement, rotation: number) => Promise<void>; onLyricLine?: (line: string | null) => void;
+  /** 视频画面旋转（顺时针角度），由上层按文件记住；播放器设置菜单与快捷键 R 经 onRotate 修改。 */
+  rotation?: number; onRotate?: (degrees: number) => void;
+  /** 缓冲速度（字节／秒，估算值）；不在加载或缓冲、或无法估算时为 null。最小化小窗据此显示。 */
+  onBufferSpeed?: (speed: number | null) => void };
 type Player = PlaybackControls & { setSource: (url: string, name: string, cover?: string) => void; destroy: () => void };
 
 function playbackTime(time: number): string {
   const seconds = Math.floor(time), hours = Math.floor(seconds / 3600);
   return [...(hours ? [String(hours)] : []), String(Math.floor(seconds / 60) % 60).padStart(2, "0"), String(seconds % 60).padStart(2, "0")].join(":");
 }
+/** 当前位置所在缓冲段的末尾，以及它后面下一段的起点（用于识别两段合并）。 */
+function bufferedAhead(media: HTMLMediaElement): { end: number; next: number } {
+  const time = media.currentTime, ranges = media.buffered;
+  for (let index = 0; index < ranges.length; index++) {
+    if (ranges.start(index) <= time + 0.25 && time <= ranges.end(index))
+      return { end: ranges.end(index), next: index + 1 < ranges.length ? ranges.start(index + 1) : Infinity };
+  }
+  for (let index = 0; index < ranges.length; index++) if (ranges.start(index) > time) return { end: time, next: ranges.start(index) };
+  return { end: time, next: Infinity };
+}
+/** 缓冲速度：浏览器不提供媒体请求的实时字节数，用当前缓冲段末尾的增长 × 文件平均码率（大小 ÷ 时长）估算，取最近 3 秒。
+ *  跳转或与后面已缓冲的段合并时重新计时，避免跳变；读到时长前无法估算。
+ *  不在服务端统计发送字节：系统缓冲区与反向代理会先吞下几 MB，服务端看到的是到代理的速度，不是浏览器实际收到的速度。 */
+export function useBufferSpeed(media: () => HTMLMediaElement | null, active: boolean, size?: number, resetKey?: string): number | null {
+  const [speed, setSpeed] = useState<number | null>(null);
+  useEffect(() => {
+    setSpeed(null);
+    if (!active || !size) return;
+    let samples: { time: number; end: number; next: number }[] = [];
+    const tick = () => {
+      const element = media();
+      if (!element || !Number.isFinite(element.duration) || element.duration <= 0) return;
+      const now = performance.now(), { end, next } = bufferedAhead(element), last = samples.at(-1);
+      if (last && (end < last.end || end >= last.next)) samples = [];
+      samples.push({ time: now, end, next });
+      samples = samples.filter(sample => now - sample.time <= 3000);
+      const first = samples[0];
+      if (now - first.time < 900) return;
+      setSpeed(Math.max(0, (end - first.end) / ((now - first.time) / 1000) * size / element.duration));
+    };
+    tick();
+    const timer = window.setInterval(tick, 500);
+    return () => window.clearInterval(timer);
+  }, [active, size, media, resetKey]);
+  return active ? speed : null;
+}
+export const formatSpeed = (speed: number) => `${formatBytes(speed)}/s`;
 /** 最小化后的迷你播放器：一行歌词／状态、切歌与播放、模式和时间，底边是可拖动的细进度条。 */
-export function MinimizedPlayback({ progress, state, playing, lyric, onSeek, onToggle, nav }: {
-  progress: MediaProgress; state: MediaState; playing: boolean; lyric?: string | null; onSeek: (time: number) => void; onToggle: () => void; nav?: PreviewNav;
+export function MinimizedPlayback({ progress, state, playing, lyric, speed, onSeek, onToggle, nav }: {
+  progress: MediaProgress; state: MediaState; playing: boolean; lyric?: string | null; speed?: number | null; onSeek: (time: number) => void; onToggle: () => void; nav?: PreviewNav;
 }) {
   const time = playbackTime(progress.currentTime), duration = progress.duration ? playbackTime(progress.duration) : "--:--";
   const percent = progress.duration ? progress.currentTime / progress.duration * 100 : 0;
   const failed = state === "failed", waiting = state === "loading" || state === "buffering";
-  const status = failed ? "播放失败" : state === "loading" ? "正在加载" : state === "buffering" ? "正在缓冲" : playing ? "正在播放" : "已暂停";
+  const status = (failed ? "播放失败" : state === "loading" ? "正在加载" : state === "buffering" ? "正在缓冲" : playing ? "正在播放" : "已暂停")
+    + (waiting && speed != null ? ` · ${formatSpeed(speed)}` : "");
   const modeIndex = Math.max(0, PLAYBACK_MODES.findIndex(mode => mode.value === nav?.mode));
   const nextMode = PLAYBACK_MODES[(modeIndex + 1) % PLAYBACK_MODES.length];
   return <div className={`preview-mini-player${playing && state === "ready" ? " is-playing" : ""}${waiting ? " is-waiting" : ""}${failed ? " is-failed" : ""}`}>
     <div className="preview-mini-line">
       <span className="preview-equalizer" aria-hidden="true"><i /><i /><i /><i /></span>
-      {lyric ? <span key={lyric} className="preview-mini-lyric" title={lyric} aria-label={`当前歌词：${lyric}`}>{lyric}</span> : <span className="preview-mini-status" role="status">{status}</span>}
+      {lyric && !(waiting && speed != null) ? <span key={lyric} className="preview-mini-lyric" title={lyric} aria-label={`当前歌词：${lyric}`}>{lyric}</span> : <span className="preview-mini-status" role="status">{status}</span>}
     </div>
     <div className="preview-mini-controls">
       {nav?.onMode && nav.mode
@@ -236,15 +278,18 @@ function MediaButton({ icon, label, shortcut, onClick, disabled, active, classNa
 
 /* ---------- 统一入口 ---------- */
 
-export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }: {
+export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation: givenRotation = 0, onRotate, onBufferSpeed }: {
   kind: "video" | "audio"; url: string; name: string; size?: number; videoSize?: { width: number; height: number }; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav;
 } & PlaybackProps) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
+  // 上层不记旋转（如分享页）时由播放器自己保存，只在本次预览中生效。
+  const [localRotation, setLocalRotation] = useState(0);
+  const rotation = onRotate ? givenRotation : localRotation;
   const loader = useRef(loadAssets), resolveAsset = useRef(assetUrl);
   loader.current = loadAssets; resolveAsset.current = assetUrl;
-  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }), source = useRef({ url, name, cover, videoSize }), loadedUrl = useRef("");
-  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine }; source.current = { url, name, cover, videoSize };
+  const callbacks = useRef({ onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, onRotate }), source = useRef({ url, name, cover, videoSize, rotation }), loadedUrl = useRef("");
+  callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, onRotate }; source.current = { url, name, cover, videoSize, rotation };
   const navRef = useRef(nav);
   navRef.current = nav;
   const [state, setState] = useState<MediaState>("loading"), [error, setError] = useState("");
@@ -289,9 +334,10 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
         const events = { onEnded: () => callbacks.current.onEnded?.(), onPlaying: playingChanged,
           onProgress: (value: MediaProgress) => { if (!cancelled) callbacks.current.onProgress?.(value); },
           onVideoSize: (width: number, height: number, from: VideoSizeSource) => callbacks.current.onVideoSize?.(width, height, from),
-          onVideoFrame: (video: HTMLVideoElement) => callbacks.current.onVideoFrame?.(video) };
+          onVideoFrame: (video: HTMLVideoElement) => callbacks.current.onVideoFrame?.(video),
+          onRotate: (degrees: number) => (callbacks.current.onRotate ?? setLocalRotation)(degrees) };
         const initial = source.current;
-        const video = engine.createVideoPlayer(host.current, initial.url, notify, initial.cover, events, () => navRef.current, initial.videoSize);
+        const video = engine.createVideoPlayer(host.current, initial.url, notify, initial.cover, events, () => navRef.current, initial.videoSize, initial.rotation);
         player.current = video;
         loadedUrl.current = initial.url;
         setPlayerReady(true);
@@ -322,8 +368,12 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   useEffect(() => {
     const instance = player.current as VideoPlayer | null;
     if (kind === "video" && playerReady && instance) instance.setThumbnailAction(canSaveThumbnail
-      ? async video => { await callbacks.current.onSaveThumbnail?.(video); } : null);
+      ? async (video, degrees) => { await callbacks.current.onSaveThumbnail?.(video, degrees); } : null);
   }, [kind, playerReady, canSaveThumbnail]);
+  useEffect(() => {
+    const instance = player.current as VideoPlayer | null;
+    if (kind === "video" && playerReady && instance) instance.setRotation(rotation);
+  }, [kind, playerReady, rotation]);
   useEffect(() => {
     if (state !== "loading" && state !== "buffering") { setSlow(false); return; }
     const timer = window.setTimeout(() => setSlow(true), 8000);
@@ -386,6 +436,15 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   }, [lyrics.length]);
   const waiting = state === "loading" || state === "buffering";
   const failed = state === "failed";
+  const mediaElement = useCallback(() => {
+    const instance = player.current;
+    return instance ? "element" in instance ? (instance as AudioPlayer).element : (instance as VideoPlayer).media() : null;
+  }, []);
+  const speed = useBufferSpeed(mediaElement, waiting && !failed && playerReady, size, url);
+  const speedCallback = useRef(onBufferSpeed);
+  speedCallback.current = onBufferSpeed;
+  useEffect(() => { speedCallback.current?.(speed); }, [speed]);
+  useEffect(() => () => speedCallback.current?.(null), []);
   // 同时间戳的双语歌词只取第一行；空白间奏保留行高，不让小窗口随每句歌词跳动。
   const currentLine = kind === "audio" && !failed && selected && !assetBusy && !findingAssets && lyricSource.current === url && lyrics.length
     ? lyrics[active]?.text.split(/\r?\n/).find(line => line.trim())?.trim() ?? "" : null;
@@ -409,8 +468,11 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
     <span>{error || "浏览器无法读取文件或解码这种格式。可以重试，或下载后用本地播放器打开。"}</span>
     <Button size="sm" variant="secondary" icon="refresh" onClick={onRetry}>重试</Button>
   </div>;
-  const slowNotice = !failed && slow && <div className="preview-player-slow" role="status">
-    <span>加载较慢</span><button type="button" onClick={onRetry}>重试</button>
+  // 视频的提示在加载动画下方：缓冲时显示估算速度，超过 8 秒再加「加载较慢 · 重试」；音乐的速度显示在状态胶囊里。
+  const videoSpeed = kind === "video" && waiting && speed != null;
+  const slowNotice = !failed && (slow || videoSpeed) && <div className="preview-player-slow" role="status">
+    {videoSpeed && <span className="preview-player-speed" title="按缓冲进度与文件平均码率估算的下载速度">{formatSpeed(speed)}</span>}
+    {slow && <><span>加载较慢</span><button type="button" onClick={onRetry}>重试</button></>}
   </div>;
 
   if (kind === "video") {
@@ -432,7 +494,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   const nextMode = PLAYBACK_MODES[(modeIndex + 1) % PLAYBACK_MODES.length];
   const volumeIcon: IconName = volume.muted || volume.level === 0 ? "volumeMute" : volume.level < .5 ? "volumeLow" : "volume";
   const lyricsLoading = (findingAssets || assetBusy) && !failed;
-  const status = failed ? { tone: "failed", text: "播放失败" } : waiting ? { tone: "waiting", text: state === "buffering" ? "正在缓冲" : "正在加载" }
+  const status = failed ? { tone: "failed", text: "播放失败" } : waiting ? { tone: "waiting", text: (state === "buffering" ? "正在缓冲" : "正在加载") + (speed != null ? ` · ${formatSpeed(speed)}` : "") }
     : playing ? { tone: "playing", text: "正在播放" } : { tone: "paused", text: "已暂停" };
   const lyricLabel = selected ? options.find(option => option.value === selected)?.label ?? "歌词" : "";
   const lyricHint = lyricsLoading ? ""

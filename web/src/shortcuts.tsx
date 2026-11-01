@@ -30,6 +30,7 @@ export function ShortcutsDialog({ area, kind, privateSpace = false, onClose }: {
     ...(!kind || kind === "image" ? [["← →", "上一个／下一个同类文件"]] as Row[] : []),
     ...(!kind || kind === "audio" || kind === "video" ? [["← →", "短按：上一首／下一首；长按：后退／快进"]] as Row[] : []),
     ...(!kind || kind === "image" ? [["+ / − / 0 / R", "图片放大／缩小／适应窗口／旋转"]] as Row[] : []),
+    ...(!kind || kind === "video" ? [["R", "视频画面顺时针旋转 90°"]] as Row[] : []),
     ...(!kind || kind === "audio" || kind === "video" ? [["空格 / K", "播放／暂停"], ["J / L", "后退／前进 10 秒"], ["↑ / ↓", "增加／减少音量"], ["O", "打开／收起播放列表"]] as Row[] : []),
     ["Esc", "退出全屏或关闭预览；固定窗口保留"], ["?", "打开快捷键说明"],
   ];

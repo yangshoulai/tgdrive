@@ -408,7 +408,11 @@ class OfflineDownloads:
             name = normalize_user_path(item["name"])
             if "/" in name:
                 raise ValueError("文件名称不能包含路径")
-            key = prefix + name
+            # 可选的子目录（相对保存位置）：网盘文件夹里的文件按原目录结构保存。
+            folder = item.get("folder") or ""
+            if not isinstance(folder, str):
+                raise ValueError("子目录不正确")
+            key = prefix + (normalize_user_path(folder, directory=True) if folder else "") + name
             self.objects._check_scope(scope, key, write=True)
             decoded.append((value, key, self._cover_spec(item.get("cover"))))
         now, ids = time.time(), []

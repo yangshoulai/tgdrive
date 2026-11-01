@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.17.1
+// @version      0.18.0
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -1217,7 +1217,12 @@
       hint: "此网盘的分享页暂不支持直接取链。请先将文件保存到自己的网盘，再打开「我的网盘」勾选文件；转存成功后留在分享页仍无法发送。" };
   }
 
-  /** Snapshot only file fields, never React/Vue instances or account credentials. Folders are expanded only for Baidu's own drive, as in LinkSwift. */
+  /**
+   * Snapshot only file fields, never React/Vue instances or account credentials.
+   * Selected folders are listed through the drive's own list API (cloudListFolder) and shown as a tree (openCloudTree):
+   * everything is checked by default, and each chosen file keeps its path relative to the selection so the server
+   * rebuilds the same folders. LinkSwift itself only expands Baidu's own drive, and flattens it.
+   */
   async function cloudSources(context) {
     if (cloudShareGuide(context)) throw new Error("请先将分享文件保存到自己的网盘，再打开「我的网盘」勾选文件；转存后请离开当前分享页");
     const [idKey, nameKey, sizeKey, fields] = CLOUD_LAYOUTS[context.provider];
@@ -1225,19 +1230,23 @@
     if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
     if (snapshot.overflow) throw new Error(`一次最多发送 ${CLOUD_BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
     let selectedFiles = snapshot.files;
-    // LinkSwift expands folders selected in Baidu's own drive (other drives ask you to open the folder first).
-    const baiduDirs = context.provider === "baidu" && !context.share ? selectedFiles.filter(item => item?.isdir) : [];
-    if (baiduDirs.length) {
-      selectedFiles = [...selectedFiles.filter(item => !item?.isdir), ...await cloudBaiduFolders(context, baiduDirs, CLOUD_BATCH_LIMIT)];
-      if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
-    }
-    const files = selectedFiles.filter(item => item && item[idKey] != null && !item.isdir && !item.isFolder && !item.dirEtag && !item.caName
+    const isFile = item => item && item[idKey] != null && !item.isdir && !item.isFolder && !item.dirEtag && !item.caName
       && item.type !== "folder" && item.kind !== "drive#folder" && item.resType != 2 && item.file !== false && (item.Type == null || item.Type === 0)
       && (!["quark", "uc"].includes(context.provider) || item.file === true)
-      && (context.provider !== "aliyun" || item.type === "file") && (context.provider !== "xunlei" || item.kind === "drive#file"));
-    if (!files.length) throw new Error("请先在网盘中勾选文件；文件夹请打开后选择里面的文件");
-    if (files.length > CLOUD_BATCH_LIMIT) throw new Error(`一次最多发送 ${CLOUD_BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
+      && (context.provider !== "aliyun" || item.type === "file") && (context.provider !== "xunlei" || item.kind === "drive#file");
+    const folders = selectedFiles.filter(item => item && cloudIsFolder(context.provider, item));
+    // 同一次选择共用的会话（取链令牌等）：列出文件夹时取得的令牌，取链时继续使用。
     const session = new Map();
+    if (folders.length) {
+      if (!cloudFolderLister(context)) throw new Error(`${context.label}${context.share ? "的分享页" : ""}暂不支持直接选择文件夹，请打开文件夹后勾选里面的文件`);
+      const picked = await cloudTreePicker({ ...context, session }, folders, selectedFiles.filter(isFile), snapshot.shareData);
+      if (!picked) throw Object.assign(new Error("已取消"), { silent: true });
+      if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
+      selectedFiles = picked;
+    }
+    const files = selectedFiles.filter(isFile);
+    if (!files.length) throw new Error(folders.length ? "没有选择要发送的文件" : "请先在网盘中勾选文件或文件夹");
+    if (files.length > CLOUD_BATCH_LIMIT) throw new Error(`一次最多发送 ${CLOUD_BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
     const unique = new Map();
     for (const item of files) {
       const file = Object.fromEntries(fields.split(" ").filter(key => ["string", "number", "boolean"].includes(typeof item[key]) && String(item[key]).length <= 8192).map(key => [key, item[key]]));
@@ -1249,7 +1258,7 @@
         .filter(key => ["string", "number"].includes(typeof snapshot.shareData[key]) && String(snapshot.shareData[key]).length <= 8192).map(key => [key, snapshot.shareData[key]])) : undefined;
       // 在网盘里勾选是明确的选择：之前发送过的也一起进入确认页（标「已发送过」，可移除），不再静默跳过或拦下。
       unique.set(source.href, { url: source.href, name: String(file[nameKey] || file.filename || ""), size: Number(file[sizeKey]) || null,
-        cloud: { ...context, file, shareData, session }, resent: isSent(source.href) });
+        cloud: { ...context, file, shareData, session }, resent: isSent(source.href), folder: typeof item.__folder === "string" ? item.__folder : "" });
     }
     return [...unique.values()];
   }
@@ -1411,28 +1420,331 @@
     return baiduResult(context, file.dlink, baiduToken());
   }
 
-  /** $baidu.getFilesList: expand selected folders in my drive (recursively, resting 3 s after every 50 listings). */
-  async function cloudBaiduFolders(context, dirs, limit) {
-    const token = baiduToken();
-    if (!token) throw new Error("发送文件夹需要先授权：请返回面板点击「授权百度取链」，在百度页面确认后回来重试");
-    const files = [];
+  // ---------- 网盘文件夹：列出内容，按树形结构挑选 ----------
+  // 每个网盘用自己的列表接口（与取链同一套凭据与客户端身份），一层一层地读；读到的条目只保留 CLOUD_LAYOUTS 里的字段。
+  const CLOUD_TREE_FILES = 5000;   // 最多列出的文件数（超过时提示只显示前面部分）
+  const CLOUD_TREE_FOLDERS = 2000; // 最多展开的文件夹数
+  function cloudIsFolder(provider, item) {
+    switch (provider) {
+      case "baidu": return Boolean(Number(item.isdir));
+      case "quark": case "uc": return item.file === false;
+      case "aliyun": return item.type === "folder";
+      case "123pan": return item.Type === 1;
+      case "tcloud": return item.isFolder === true;
+      case "xunlei": return item.kind === "drive#folder";
+      case "mcloud": return Boolean(item.dirEtag || item.caName);
+      case "guangya": return item.resType == 2;
+      default: return false;
+    }
+  }
+  /** 能列出文件夹内容的网盘：百度（自己的网盘与分享）、夸克／UC（自己的网盘与分享）、阿里、123、天翼与迅雷自己的网盘。 */
+  function cloudFolderLister(context) {
+    const own = { baidu: cloudListBaidu, quark: cloudListQuarkUc, uc: cloudListQuarkUc, aliyun: cloudListAliyun, "123pan": cloudList123, tcloud: cloudListTelecom, xunlei: cloudListXunlei };
+    const shared = { baidu: cloudListBaidu, quark: cloudListQuarkUc, uc: cloudListQuarkUc };
+    return (context.share ? shared : own)[context.provider] || null;
+  }
+  const cloudKeep = (provider, item) => Object.fromEntries(CLOUD_LAYOUTS[provider][3].split(" ")
+    .filter(key => ["string", "number", "boolean"].includes(typeof item?.[key]) && String(item[key]).length <= 8192).map(key => [key, item[key]]));
+
+  /** 百度：自己的网盘用开放平台 list（需授权，与取链相同），分享页用 share/list（带提取码验证后的 sekey）。 */
+  async function cloudListBaidu(context, folder, page, share) {
+    if (typeof folder.path !== "string" || !folder.path.startsWith("/")) throw new Error("无法读取所选文件夹的位置，请打开文件夹后勾选里面的文件");
+    let url;
+    if (context.share) {
+      if (!share?.uk || !share?.id) throw new Error("请在分享网页完成提取码验证，打开文件列表后重试");
+      url = new URL("https://pan.baidu.com/share/list?web=1&app_id=250528&channel=chunlei&clienttype=0&showempty=0&order=name&desc=0&num=100");
+      url.searchParams.set("uk", share.uk); url.searchParams.set("shareid", share.id);
+      url.searchParams.set("dir", folder.path); url.searchParams.set("page", String(page));
+      if (share.sekey) url.searchParams.set("sekey", share.sekey);
+    } else {
+      const token = baiduToken();
+      if (!token) throw new Error("读取文件夹需要先授权：请返回面板点击「授权百度取链」，在百度页面确认后回来重试");
+      url = new URL("https://pan.baidu.com/rest/2.0/xpan/file?method=list&showempty=1&order=name&limit=1000");
+      url.searchParams.set("dir", folder.path); url.searchParams.set("access_token", token);
+      url.searchParams.set("start", String((page - 1) * 1000));
+    }
+    const response = await cloudRequest(context, url, { headers: context.share ? {} : CLOUD_API_HEADERS.baidu });
+    if (response.errno !== 0 && response.errmsg !== "succ") throw baiduError(context, response);
+    const list = Array.isArray(response.list) ? response.list : [];
+    return { items: list.map(item => ({ fs_id: item.fs_id, server_filename: item.server_filename, size: item.size, isdir: Number(item.isdir) ? 1 : 0, path: item.path })),
+      more: list.length >= (context.share ? 100 : 1000) };
+  }
+  /** 夸克／UC：自己的网盘 file/sort，分享页 sharepage/detail（条目自带 share_fid_token，沿用页面的 stoken）。 */
+  async function cloudListQuarkUc(context, folder, page) {
+    const quark = context.provider === "quark", identity = CLOUD_API_HEADERS[context.provider];
+    const cookie = await cookieHeader(context.url);
+    const base = quark ? "https://drive-pc.quark.cn/1/clouddrive" : "https://pc-api.uc.cn/1/clouddrive";
+    const url = new URL(base + (context.share ? "/share/sharepage/detail" : "/file/sort"));
+    for (const [key, value] of Object.entries({ pr: quark ? "ucpro" : "UCBrowser", fr: "pc", pdir_fid: folder.fid, _page: page, _size: 100, _fetch_total: 1, _sort: "file_type:asc,file_name:asc" }))
+      url.searchParams.set(key, String(value));
+    if (context.share) {
+      const pwdId = page_pwdId(context);
+      if (!pwdId || !folder.stoken) throw new Error("请在分享网页完成提取码验证，打开文件列表后重试");
+      url.searchParams.set("pwd_id", pwdId); url.searchParams.set("stoken", folder.stoken);
+      url.searchParams.set("force", "0"); url.searchParams.set("_fetch_share", "0");
+    }
+    const response = await cloudRequest(context, url, { headers: { ...identity, ...(cookie ? { Cookie: cookie } : {}) } });
+    if (response.code !== 0 || !Array.isArray(response.data?.list)) throw quarkError([{ ...context, file: folder }], response);
+    const total = Number(response.metadata?._total) || 0;
+    return { items: response.data.list.map(item => ({ ...item, ...(context.share ? { stoken: folder.stoken } : {}) })), more: page * 100 < total };
+  }
+  function page_pwdId(context) {
+    return page.factStat?.ut?.baseParams?.pwd_id || page.factStat?.wa?.customStatParams?.pwd_id
+      || new URL(context.url).pathname.match(/^\/(?:s|share)\/([^/?#]+)/)?.[1] || "";
+  }
+  /** 阿里云盘：adrive/v3/file/list，按 next_marker 翻页。 */
+  async function cloudListAliyun(context, folder, page, _share, state) {
+    const token = cloudStorage("token");
+    if (!token?.access_token || !token?.token_type) throw new Error("请先登录阿里云盘，再刷新页面重试");
+    const domain = new URL(context.url).hostname.endsWith("alipan.com") ? "api.alipan.com" : "api.aliyundrive.com";
+    const response = await cloudRequest(context, `https://${domain}/adrive/v3/file/list`, {
+      body: { drive_id: folder.driveId, parent_file_id: folder.fileId, limit: 200, marker: page > 1 ? state.marker || "" : "", order_by: "name", order_direction: "ASC", all: false, fields: "*" },
+      headers: { Authorization: `${token.token_type} ${token.access_token}`, "X-Canary": "client=windows,app=adrive,version=v6.0.0" },
+    });
+    if (response.code === "AccessTokenInvalid") throw new Error("阿里云盘访问令牌已过期，请刷新网盘页面后重试");
+    if (!Array.isArray(response.items)) throw cloudFailure(context, response.code, response.message);
+    state.marker = response.next_marker || "";
+    return { items: response.items.map(item => ({ fileId: item.file_id, driveId: item.drive_id, name: item.name, size: item.size, type: item.type })), more: Boolean(state.marker) };
+  }
+  /** 123 云盘：file/list/new，按页读取。 */
+  async function cloudList123(context, folder, page) {
+    const token = cloudStorage("authorToken");
+    if (!token) throw new Error("请先登录 123 云盘，再刷新页面重试");
+    const url = new URL("https://api.123pan.cn/api/file/list/new?driveId=0&limit=100&next=0&orderBy=file_name&orderDirection=asc&trashed=false&SearchData=&OnlyLookAbnormalFile=0&event=homeListFile&operateType=4&inDirectSpace=false");
+    url.searchParams.set("parentFileId", String(folder.FileId)); url.searchParams.set("Page", String(page));
+    const response = await cloudRequest(context, url, { headers: { ...CLOUD_API_HEADERS["123pan"], Authorization: `Bearer ${token}`, Platform: "web",
+      "App-Version": "323", LoginUuid: cloudStorage("LoginUuid") || "" } });
+    if (response.code == 5112) throw new Error("请先登录 123 云盘，再刷新页面重试");
+    if (response.code !== 0 || !Array.isArray(response.data?.InfoList)) throw cloudFailure(context, response.code, response.message);
+    return { items: response.data.InfoList, more: response.data.Next != null && String(response.data.Next) !== "-1" };
+  }
+  /** 天翼云盘：open/file/listFiles.action，签名规则与取链相同（参数按名称排序后取 MD5）。 */
+  async function cloudListTelecom(context, folder, page) {
+    const token = await cloudOnce(context, "tcloud-token", async () => {
+      const response = await cloudRequest(context, "https://api.cloud.189.cn/open/oauth2/ssoH5.action", { raw: true });
+      const value = new URL(response.finalUrl || "https://api.cloud.189.cn").searchParams.get("accessToken");
+      if (!value) throw new Error("请先登录天翼云盘，再刷新页面重试");
+      return value;
+    });
+    const time = Date.now();
+    const params = { folderId: String(folder.fileId), pageNum: String(page), pageSize: "100", mediaType: "0", iconOption: "0", orderBy: "filename", descending: "false" };
+    const sign = Object.entries({ AccessToken: token, Timestamp: String(time), ...params }).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, value]) => `${key}=${value}`).join("&");
+    const url = new URL("https://api.cloud.189.cn/open/file/listFiles.action");
+    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+    const response = await cloudRequest(context, url, { headers: { "Sign-Type": "1", Accesstoken: token, Timestamp: String(time), Signature: cloudMd5(sign) } });
+    if (response.errorcode === "InvalidSessionKey") { context.session.delete("tcloud-token"); throw new Error("请先登录天翼云盘，再刷新页面重试"); }
+    const list = response.fileListAO;
+    if (response.res_code != 0 || !list) throw cloudFailure(context, response.res_code || response.errorcode, response.res_message || response.errorMsg);
+    const items = [...(list.folderList || []).map(item => ({ fileId: String(item.id), fileName: item.name, size: 0, isFolder: true })),
+      ...(list.fileList || []).map(item => ({ fileId: String(item.id), fileName: item.name, size: item.size, isFolder: false }))];
+    return { items, more: page * 100 < (Number(list.count) || 0) };
+  }
+  /** 迅雷云盘：drive/v1/files，按 next_page_token 翻页（凭据与取链相同）。 */
+  async function cloudListXunlei(context, folder, page, _share, state) {
+    let headers = await cloudOnce(context, "xunlei-token", () => cloudXunleiToken(context));
+    const url = new URL("https://api-pan.xunlei.com/drive/v1/files?limit=100&with_audit=true");
+    url.searchParams.set("parent_id", String(folder.id));
+    url.searchParams.set("filters", JSON.stringify({ phase: { eq: "PHASE_TYPE_COMPLETE" }, trashed: { eq: false } }));
+    if (page > 1 && state.token) url.searchParams.set("page_token", state.token);
+    let response = await cloudRequest(context, url, { headers });
+    if (response.error_code == 9) {
+      headers = await cloudOnce(context, "xunlei-refresh", () => cloudXunleiToken(context, true));
+      response = await cloudRequest(context, url, { headers });
+    }
+    if (!Array.isArray(response.files)) throw cloudFailure(context, response.error_code, response.error_description);
+    state.token = response.next_page_token || "";
+    return { items: response.files, more: Boolean(state.token) };
+  }
+
+  // 测试替换为不经界面的挑选（见 tests/test_grabber.cjs）。
+  let cloudTreePicker = (...args) => openCloudTree(...args);
+  /** 网盘里的名称作为 Tessera 的文件夹名：去掉斜杠与控制字符，避开 . / .. 与系统目录。 */
+  function cloudFolderSegment(name) {
+    let value = String(name || "").replace(/[\x00-\x1f\x7f]/g, "").replace(/[\\/]/g, "_").trim();
+    if (!value || value === "." || value === "..") value = "未命名文件夹";
+    if (value.startsWith(".tgdrive")) value = "_" + value.slice(1);
+    return value.slice(0, 120);
+  }
+
+  /**
+   * 逐层列出所选文件夹（含子目录），建成树：文件夹 { dir, name, children, parent, total, checked, size, checkedSize, open }，
+   * 文件 { name, size, item, parent, checked }，默认全部选中。最多 CLOUD_TREE_FILES 个文件、CLOUD_TREE_FOLDERS 个文件夹。
+   */
+  async function cloudListTree(context, folders, looseFiles, shareData, onProgress = () => {}, cancelled = () => false) {
+    const [, nameKey, sizeKey] = CLOUD_LAYOUTS[context.provider];
+    const lister = cloudFolderLister(context);
+    const tree = { truncated: false, files: 0, folders: 0 };
+    // 根节点与所选的顶层文件夹默认展开，更深的子目录点开再看。
+    const makeDir = (name, parent) => ({ dir: true, name: cloudFolderSegment(name), children: [], parent, total: 0, checked: 0, size: 0, checkedSize: 0, open: !parent || !parent.parent });
+    const root = tree.root = makeDir("", null);
+    const addFile = (dir, item) => {
+      const size = Number(item[sizeKey]) || 0;
+      dir.children.push({ name: String(item[nameKey] || ""), size, item: cloudKeep(context.provider, item), parent: dir, checked: true });
+      for (let node = dir; node; node = node.parent) { node.total++; node.checked++; node.size += size; node.checkedSize += size; }
+      tree.files++;
+    };
+    for (const item of looseFiles) addFile(root, item);
+    const queue = folders.map(item => { const dir = makeDir(item[nameKey], root); root.children.push(dir); return { item: cloudKeep(context.provider, item), node: dir }; });
     let listed = 0;
-    const walk = async folders => {
-      for (const dir of folders) {
-        if (files.length > limit) return;
-        if (typeof dir.path !== "string" || !dir.path.startsWith("/")) throw new Error("无法读取所选文件夹的位置，请打开文件夹后选择里面的文件");
-        const url = new URL("https://pan.baidu.com/rest/2.0/xpan/file?method=list&showempty=1");
-        url.searchParams.set("dir", dir.path); url.searchParams.set("access_token", token);
-        const response = await cloudRequest(context, url, { headers: CLOUD_API_HEADERS.baidu });
-        if (response.errno !== 0 && response.errmsg !== "succ") throw baiduError(context, response);
-        const list = Array.isArray(response.list) ? response.list : [];
-        files.push(...list.filter(item => !item.isdir).map(item => ({ fs_id: item.fs_id, server_filename: item.server_filename, size: item.size, isdir: 0 })));
+    while (queue.length && !cancelled()) {
+      const { item, node } = queue.shift();
+      tree.folders++;
+      const state = {};
+      for (let pageNumber = 1; !cancelled(); pageNumber++) {
+        // 百度分享页的列表需要页面上的 uk、shareid 与提取码验证后的 sekey（cloudSelected 已在快照里取得）。
+        const result = await lister(context, item, pageNumber, shareData, state);
+        if (cancelled()) return tree;
+        for (const child of result.items) {
+          if (cloudIsFolder(context.provider, child)) {
+            if (tree.folders + queue.length >= CLOUD_TREE_FOLDERS) { tree.truncated = true; continue; }
+            const dir = makeDir(child[nameKey], node);
+            node.children.push(dir);
+            queue.push({ item: cloudKeep(context.provider, child), node: dir });
+          } else if (tree.files >= CLOUD_TREE_FILES) tree.truncated = true;
+          else addFile(node, child);
+        }
+        onProgress(tree);
+        // 与 LinkSwift 相同的节奏：每 50 次列表请求停 3 秒，避免被网盘限流。
         if (++listed % 50 === 0) await cloudSleep(3000);
-        await walk(list.filter(item => item.isdir).map(item => ({ path: item.path })));
+        if (!result.more || tree.files >= CLOUD_TREE_FILES) break;
+      }
+      if (tree.files >= CLOUD_TREE_FILES && tree.truncated) break;
+    }
+    return tree;
+  }
+  /** 选中的文件条目，带 __folder：相对保存位置的子目录（以 / 结尾，所选文件夹本身的名称在最前）。 */
+  function cloudPickedFiles(root) {
+    const picked = [];
+    const walk = (node, path) => {
+      for (const child of node.children) {
+        if (child.dir) { if (child.checked) walk(child, path + child.name + "/"); }
+        else if (child.checked) picked.push({ ...child.item, __folder: path });
       }
     };
-    await walk(dirs);
-    return files;
+    walk(root, "");
+    return picked;
+  }
+
+  /**
+   * 读取所选文件夹（含子目录）并在面板内以树形结构挑选文件：默认全部选中，可全选／取消、按文件夹勾选。
+   * 返回选中的文件条目（带 __folder），取消时返回 null。
+   */
+  function openCloudTree(context, folders, looseFiles, shareData) {
+    return new Promise(resolve => {
+      if (!panel) return resolve(null);
+      panel.layer?.close();
+      let cancelled = false, settled = false, root = null, truncated = false, fileCount = 0, folderCount = 0;
+      const finish = value => { if (settled) return; settled = true; cancelled = true; closeLayer(); resolve(value); };
+      const body = h("div", { className: "body tree-body" });
+      const footer = h("footer", {});
+      const layer = h("div", { className: "layer", role: "dialog", "aria-label": "选择要发送的文件" },
+        h("header", {}, iconButton("back", "返回", () => finish(null), "back"), h("span", { className: "title" }, "选择要发送的文件")), body, footer);
+      const host = panel;
+      const closeLayer = () => {
+        layer.remove();
+        host.classList.remove("has-layer");
+        if (panel && panel.layer === controller) panel.layer = null;
+      };
+      const controller = { close: () => finish(null) };
+      panel.layer = controller;
+      host.classList.add("has-layer");
+      panel.append(layer);
+
+      const loading = emptyState("loader", "", true);
+      const progress = loading.lastChild;
+      progress.setAttribute("role", "status");
+      const showLoading = () => {
+        progress.textContent = `正在读取文件夹内容… 已找到 ${fileCount} 个文件、${folderCount} 个文件夹`;
+        body.replaceChildren(loading);
+        footer.replaceChildren(h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: () => finish(null) }, "取消"));
+      };
+      showLoading();
+
+      const progressed = tree => { fileCount = tree.files; folderCount = tree.folders; progress.textContent = `正在读取文件夹内容… 已找到 ${fileCount} 个文件、${folderCount} 个文件夹`; };
+      void cloudListTree(context, folders, looseFiles, shareData, progressed, () => cancelled).then(tree => {
+        if (cancelled) return;
+        ({ root, truncated } = tree); progressed(tree);
+        render();
+      }, error => {
+        if (cancelled) return;
+        body.replaceChildren(h("div", { className: "error" }, error.message));
+        footer.replaceChildren(h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: () => finish(null) }, "关闭"));
+      });
+
+      // ---------- 渲染：行节点按需创建，勾选时只更新受影响的复选框与统计 ----------
+      const summary = h("span", { className: "tree-summary" });
+      const allBox = h("input", { type: "checkbox", "aria-label": "全选" });
+      const confirm = h("button", { type: "button", className: "btn primary" });
+      const setBox = node => {
+        if (!node.box) return;
+        const all = node.dir ? node.total > 0 && node.checked === node.total : node.checked;
+        const some = node.dir && node.checked > 0 && !all;
+        node.box.checked = all; node.box.indeterminate = some;
+        node.mark.className = `check${all ? " on" : some ? " on partial" : ""}`;
+      };
+      const refreshSummary = () => {
+        summary.textContent = `已选 ${root.checked} / ${root.total} 个文件${root.checkedSize ? ` · ${formatSize(root.checkedSize)}` : ""}`;
+        allBox.checked = root.total > 0 && root.checked === root.total;
+        allBox.indeterminate = root.checked > 0 && root.checked < root.total;
+        allMark.className = `check${allBox.checked ? " on" : allBox.indeterminate ? " on partial" : ""}`;
+        const over = root.checked > CLOUD_BATCH_LIMIT;
+        confirm.disabled = !root.checked || over;
+        confirm.textContent = over ? `一次最多 ${CLOUD_BATCH_LIMIT} 个文件` : `确定（${root.checked}）`;
+      };
+      const setChecked = (node, value) => {
+        const apply = item => {
+          if (item.dir) { item.children.forEach(apply); setBox(item); return; }
+          if (item.checked === value) return;
+          item.checked = value;
+          for (let dir = item.parent; dir; dir = dir.parent) { dir.checked += value ? 1 : -1; dir.checkedSize += value ? item.size : -item.size; }
+          setBox(item);
+        };
+        apply(node);
+        for (let dir = node.parent; dir; dir = dir.parent) setBox(dir);
+        refreshSummary();
+      };
+      const allMark = h("span", { className: "check" }, svg("check", 12, 3));
+      const rowFor = (node, depth) => {
+        node.box = h("input", { type: "checkbox", "aria-label": `${node.dir ? "文件夹" : "文件"} ${node.name}`, onchange: () => setChecked(node, node.box.checked) });
+        node.mark = h("span", { className: "check" }, svg("check", 12, 3));
+        const pick = h("label", { className: "pick tree-pick" }, node.box, node.mark);
+        const row = h("div", { className: `tree-row${node.dir ? " is-dir" : ""}`, style: `--depth:${depth}` });
+        if (node.dir) {
+          const children = h("div", { className: "tree-children", role: "group" });
+          const toggle = h("button", { type: "button", className: "tree-toggle", "aria-expanded": String(node.open), "aria-label": `${node.open ? "收起" : "展开"} ${node.name}` }, svg("chevron", 14));
+          const expand = open => {
+            node.open = open;
+            toggle.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-label", `${open ? "收起" : "展开"} ${node.name}`);
+            children.hidden = !open;
+            if (open && !children.firstChild) children.append(...node.children.map(child => rowFor(child, depth + 1)));
+          };
+          toggle.onclick = () => expand(!node.open);
+          row.append(toggle, pick, svg("folder", 16), h("span", { className: "tree-name", title: node.name, ondblclick: () => expand(!node.open) }, node.name),
+            h("span", { className: "tree-meta" }, `${node.total} 个文件${node.size ? ` · ${formatSize(node.size)}` : ""}`));
+          setBox(node);
+          const wrap = h("div", { className: "tree-node" }, row, children);
+          expand(node.open);
+          return wrap;
+        }
+        row.append(h("span", { className: "tree-toggle-space" }), pick, svg("file", 16), h("span", { className: "tree-name", title: node.name }, node.name),
+          h("span", { className: "tree-meta" }, node.size ? formatSize(node.size) : ""));
+        setBox(node);
+        return row;
+      };
+      function render() {
+        allBox.onchange = () => setChecked(root, allBox.checked);
+        const head = h("div", { className: "tree-head" }, h("label", { className: "pick tree-pick" }, allBox, allMark), h("span", { className: "tree-all" }, "全选"), h("span", { className: "spacer" }), summary);
+        const parts = [head];
+        if (truncated) parts.push(h("p", { className: "warn" }, `文件夹内容过多，只列出了前 ${fileCount} 个文件${folderCount >= CLOUD_TREE_FOLDERS ? `、${CLOUD_TREE_FOLDERS} 个文件夹` : ""}；其余请打开子文件夹后分批发送。`));
+        if (!root.total) parts.push(h("p", { className: "hint" }, "所选文件夹里没有文件。"));
+        parts.push(h("div", { className: "tree", role: "tree" }, root.children.map(child => rowFor(child, 0))));
+        parts.push(h("p", { className: "hint" }, "保存时会在所选位置下按原来的文件夹结构建立子目录。"));
+        body.replaceChildren(...parts);
+        confirm.onclick = () => finish(cloudPickedFiles(root));
+        footer.replaceChildren(h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: () => finish(null) }, "取消"), confirm);
+        refreshSummary();
+      }
+    });
   }
 
   // $aliyun.getFilesUrl. Keep results associated with their own file; upstream's batch assignment is not reused.
@@ -2107,6 +2419,29 @@
     .item.is-selected { background: var(--accent-soft); }
     .item.is-selected:hover { background: var(--accent-soft); }
     .item.is-sent:not(.is-selected) .name { color: var(--muted); }
+    .folder-tag { display: inline-flex; align-items: center; gap: 3px; max-width: 100%; margin-right: 6px; color: var(--muted); vertical-align: -1px; }
+    .folder-tag svg { flex: none; }
+    /* 网盘文件夹树 */
+    .tree-body { gap: 12px; }
+    .tree-head { display: flex; align-items: center; gap: 8px; position: sticky; top: -18px; z-index: 1; margin: -4px 0 0; padding: 4px 0 8px; background: var(--bg); border-bottom: 1px solid var(--line); }
+    .tree-head .spacer { flex: 1; }
+    .tree-all { font-weight: 500; }
+    .tree-summary { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .tree { display: grid; }
+    .tree-row { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 6px 0 calc(var(--depth, 0) * 18px + 2px); border-radius: 6px; }
+    .tree-row:hover { background: var(--hover); }
+    .tree-row > svg { flex: none; color: var(--muted); }
+    .tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tree-row.is-dir .tree-name { font-weight: 500; cursor: default; }
+    .tree-meta { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .tree-toggle, .tree-toggle-space { flex: none; width: 20px; height: 20px; }
+    .tree-toggle { display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); cursor: pointer; }
+    .tree-toggle svg { transition: transform .12s; }
+    .tree-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+    .tree-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .tree-pick { position: relative; display: inline-flex; }
+    .check.partial svg { display: none; }
+    .check.partial::after { content: ""; width: 8px; height: 2px; border-radius: 1px; background: #fff; }
     .sent-tag { display: inline-block; margin-right: 6px; padding: 0 5px; border-radius: 4px; background: var(--soft); color: var(--success);
       font-size: 11px; font-weight: 500; line-height: 16px; vertical-align: 1px; }
     .check.on { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -2799,11 +3134,13 @@
             try {
               const sources = await cloudSources(cloudOf() || context);
               if (panel === opened) startBatch(sources, "server");
-            } catch (error) { toast(error.message); }
+            } catch (error) { if (!error.silent) toast(error.message); }
             finally { button.disabled = false; }
           } }, svg("send"), "发送已选网盘文件"),
         context.provider === "baidu" && !context.share ? h("button", { type: "button", className: "btn", onclick: authorizeCloudBaidu }, "授权百度取链") : null),
-      h("p", { className: "hint" }, guide?.hint || "先在网盘中勾选文件，再确认保存位置和文件名。文件夹请打开后选择里面的文件。"),
+      h("p", { className: "hint" }, guide?.hint || (cloudFolderLister(context)
+        ? "先在网盘中勾选文件或文件夹，再确认保存位置和文件名。勾选文件夹时会列出其中的文件供挑选，并按原目录结构保存。"
+        : "先在网盘中勾选文件，再确认保存位置和文件名。文件夹请打开后选择里面的文件。")),
       context.provider === "baidu" && !context.share ? h("p", { className: "hint" }, "首次使用需在百度页面确认取链授权，完成后回到这里重试。") : null);
   }
 
@@ -3499,7 +3836,7 @@
     // 网盘选择一次最多 CLOUD_BATCH_LIMIT 个文件（与 LinkSwift 一样不在 50 处截断）；网页资源仍为 BATCH_LIMIT。
     const limit = wanted.some(source => source.cloud) ? CLOUD_BATCH_LIMIT : BATCH_LIMIT;
     batch = { started: false, mode, destination: savedDestination(), limit,
-      entries: ordered.slice(0, limit).map(({ url, platform, cloud, name, size, resent }) => ({ url, platform: platform || null, cloud, resent: Boolean(resent),
+      entries: ordered.slice(0, limit).map(({ url, platform, cloud, name, size, resent, folder }) => ({ url, platform: platform || null, cloud, resent: Boolean(resent), folder: folder || "",
         type: known.get(url)?.type || (platform ? "video" : "file"), name: name || (mode === "local" ? defaultSaveName(url) : ""), sourceName: name || "", size,
         state: mode === "server" ? "parsing" : "waiting", error: "", tasks: [] })) };
     openBatch();
@@ -3557,7 +3894,7 @@
       const index = current.entries.indexOf(entry);
       if (index < 0) return;
       const room = (current.limit || BATCH_LIMIT) - current.entries.length + 1;
-      const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform, cloud: entry.cloud, sourceName: entry.sourceName, resent: entry.resent,
+      const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform, cloud: entry.cloud, sourceName: entry.sourceName, resent: entry.resent, folder: entry.folder || "",
         type: candidateType(variants[0], entry.type), variants, candidate: variants[0], name: entry.nameEdited ? entry.name : entry.sourceName || variants[0].name, nameEdited: Boolean(entry.nameEdited),
         state: current.started ? "error" : "waiting", error: "", tasks: [] }));
       current.entries.splice(index, 1, ...rows);
@@ -3578,7 +3915,8 @@
       if (!nameable(current, entry) || current.started && !entryFailed(entry)) continue;
       const problem = saveNameProblem(entry.name);
       if (problem) { problems.set(entry, problem); continue; }
-      const name = entry.name.trim().normalize("NFC");
+      // 网盘文件夹里的文件保存到各自的子目录：同名只在同一目录里才算重复。
+      const name = (entry.folder || "") + entry.name.trim().normalize("NFC");
       if (seen.has(name)) {
         problems.set(entry, "本批次保存文件名重复，请修改");
         problems.set(seen.get(name), "本批次保存文件名重复，请修改");
@@ -3637,7 +3975,7 @@
     const privateSpace = current.destination.private;
     // 私密空间 + 服务器下载：解析结果连同修改后的文件名一次性转交 Tessera 页面确认。
     if (current.mode === "server" && privateSpace) {
-      try { handoff(queue.map(entry => ({ ...entry.candidate, name: entry.name.trim().normalize("NFC") }))); }
+      try { handoff(queue.map(entry => ({ ...entry.candidate, name: entry.name.trim().normalize("NFC"), ...(entry.folder ? { folder: entry.folder } : {}) }))); }
       catch (error) { current.running = false; current.started = false; updateBatch(); return toast(error.message); }
       for (const entry of queue) { entry.state = "handoff"; entry.delivered = true; }
       current.running = false;
@@ -3741,7 +4079,7 @@
     updateBatch();
     try {
       const result = await api("POST", "/api/v1/downloads", {
-        items: [{ ticket: entry.candidate.ticket, name: entry.name.trim().normalize("NFC") }],
+        items: [{ ticket: entry.candidate.ticket, name: entry.name.trim().normalize("NFC"), ...(entry.folder ? { folder: entry.folder } : {}) }],
         destination: current.destination.path,
       }, { config: current.config });
       entry.tasks = result.tasks || [];
@@ -3953,6 +4291,7 @@
       try { domain = new URL(entry.url).hostname.replace(/^www\./, ""); } catch { /* 忽略无效地址 */ }
       const size = h("span", { className: "size" });
       const sub = h("div", { className: "sub", title: entry.url }, entry.resent ? h("span", { className: "sent-tag", title: "之前已发送过，确认后会再次下载" }, "已发送过") : null,
+        entry.folder ? h("span", { className: "folder-tag", title: `保存到子目录 ${entry.folder}` }, svg("folder", 12), entry.folder.replace(/\/$/, "")) : null,
         h("span", {}, `${TYPE_LABEL[entry.type] || "文件"}${domain ? ` · ${domain}` : ""}`));
       // 服务器解析出同一分组的多个清晰度：下拉切换，未改过文件名时跟随候选的默认名。
       if (entry.variants?.length > 1) {

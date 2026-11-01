@@ -59,17 +59,22 @@ export function thumbnailsFromImage(image: HTMLImageElement): Promise<ThumbnailS
 }
 
 /** 只截取播放器已经解码的当前画面，不创建媒体来源、不跳转、不额外读取视频。 */
-export function thumbnailsFromVideo(video: HTMLVideoElement, checkQuality = true): Promise<ThumbnailSet | null> {
+/** rotation：播放器里画面的顺时针旋转角度，手动「将当前画面设为缩略图」时按看到的方向保存。 */
+export function thumbnailsFromVideo(video: HTMLVideoElement, checkQuality = true, rotation = 0): Promise<ThumbnailSet | null> {
   try {
     if (video.readyState < 2 || video.seeking || !video.videoWidth || !video.videoHeight || (checkQuality && !videoFrameUsable(video))) return Promise.resolve(null);
     // 编码会异步等待：先固定当前画面，保证三个规格不会分别截到下一场景或黑屏。
     const frame = document.createElement("canvas");
     const scale = Math.min(1, POSTER.size / Math.max(video.videoWidth, video.videoHeight));
-    frame.width = Math.max(1, Math.round(video.videoWidth * scale));
-    frame.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const width = Math.max(1, Math.round(video.videoWidth * scale)), height = Math.max(1, Math.round(video.videoHeight * scale));
+    const quarter = rotation % 180 !== 0;
+    frame.width = quarter ? height : width;
+    frame.height = quarter ? width : height;
     const context = frame.getContext("2d");
     if (!context) return Promise.resolve(null);
-    context.drawImage(video, 0, 0, frame.width, frame.height);
+    context.translate(frame.width / 2, frame.height / 2);
+    context.rotate(rotation * Math.PI / 180);
+    context.drawImage(video, -width / 2, -height / 2, width, height);
     return renderSet(frame, frame.width, frame.height).catch(() => null);
   } catch { return Promise.resolve(null); }
 }
@@ -461,8 +466,8 @@ async function saveCustomThumbnails(file: Pick<api.FileItem, "key" | "etag">, re
 }
 
 /** 用户选择当前播放画面：先同步固定这一帧，再申请写入，不用自动画面过滤或重新读取视频。 */
-export async function saveCurrentVideoThumbnail(file: Pick<api.FileItem, "key" | "etag">, video: HTMLVideoElement): Promise<void> {
-  const result = await thumbnailsFromVideo(video, false);
+export async function saveCurrentVideoThumbnail(file: Pick<api.FileItem, "key" | "etag">, video: HTMLVideoElement, rotation = 0): Promise<void> {
+  const result = await thumbnailsFromVideo(video, false, rotation);
   if (!result) throw new Error("当前画面尚未就绪，请等待画面加载后重试");
   await saveCustomThumbnails(file, result);
 }

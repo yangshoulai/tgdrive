@@ -56,7 +56,9 @@ export type ResourceSettings = { config: ResourceConfig; source: "admin" | "star
   /** 生效档位：自动模式按检测到的 CPU 与内存选择 low 或 standard。 */
   effective: Omit<ResourceConfig, "mode"> & { mode: "low" | "standard" | "custom"; ffmpeg_concurrency: number; streaming: boolean; cache_mib: number; hls_available: boolean; x_available: boolean; youtube_available: boolean; reduced: boolean; transfer_reduced: boolean; upload_reduced: boolean };
   detected: { cpu_cores: number; memory_bytes: number | null; container_limits: boolean; disk_total_bytes: number | null; disk_free_bytes: number | null } };
-export type DownloadCandidate = { ticket: string; group: string; name: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform?: "x" | "youtube"; media_type?: "image" | "video" | "audio"; content_type?: string | null; size: number | null; variant: string | null; warnings: string[]; header_names: string[]; body_bytes: number };
+export type DownloadCandidate = { ticket: string; group: string; name: string; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform?: "x" | "youtube"; media_type?: "image" | "video" | "audio"; content_type?: string | null; size: number | null; variant: string | null; warnings: string[]; header_names: string[]; body_bytes: number;
+  /** 抓取脚本转交网盘文件夹里的文件时带上的子目录（相对保存位置，以 / 结尾），按原结构保存。 */
+  folder?: string };
 export type DownloadStatus = "queued" | "running" | "stopped" | "interrupted" | "completed" | "failed";
 export type DownloadTask = { id: number; key: string; private: boolean; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform: "x" | "youtube" | null; phase: "resolving" | "downloading" | "merging" | "saving" | null; status: DownloadStatus; size: number | null; received: number; stored_bytes: number; segments_done: number; segments_total: number; duration: number | null; processed_seconds: number; elapsed_seconds: number; error: string | null; created_at: number; updated_at: number; speed: number; eta_seconds: number | null;
   /** 成品已移入回收站或之后被清除；key 仍为删除前的位置，不暴露内部存储地址。 */
@@ -378,6 +380,29 @@ export const formatDimensions = (size: MediaSize) => `${size.width} × ${size.he
 /** 记录图片／视频的显示尺寸（只写入仍是这个版本的文件）。 */
 export const setMediaSize = (file: Pick<FileItem, "key" | "etag">, size: MediaSize) =>
   post<{ saved: boolean }>(fileApi("/media/size", file.key), { path: file.key, etag: file.etag, width: size.width, height: size.height });
+/** 在线解压（服务器流式解压，不占本机磁盘）：支持 ZIP 与 TAR（含 .tar.gz／.tar.bz2／.tar.xz）及单个 .gz／.bz2／.xz。 */
+export const ARCHIVE_NAME = /\.(zip|tar|tgz|tbz2?|txz|tar\.(?:gz|bz2|xz)|gz|bz2|xz)$/i;
+export type ArchiveInfo = {
+  format: string; size: number; room: number | null; listable: boolean; encrypted: boolean; encryption?: "aes" | "zipcrypto" | null;
+  files: number | null; total_bytes: number | null; entries: { name: string; size: number; dir: boolean }[];
+  unsafe?: number; unsupported?: number; single_root?: string | null; single_name?: string | null;
+  password_ok?: boolean; conflicts?: number; conflict_bytes?: number;
+};
+export type ArchiveConflict = "rename" | "skip" | "overwrite";
+export type ArchiveJob = {
+  id: string; private: boolean; archive: string; destination: string; format: string; conflict: ArchiveConflict; keep_archive: boolean;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  total_files: number | null; total_bytes: number | null; archive_size: number; read_bytes: number;
+  done_files: number; done_bytes: number; skipped: number; renamed: number; failed: number; failures: { name: string; error: string }[];
+  current: string; error: string; archive_removed: boolean; created_at: number; finished_at: number | null;
+};
+export const inspectArchive = (path: string, options: { destination?: string; password?: string } = {}) =>
+  post<ArchiveInfo>(fileApi("/archive/inspect", path), { path, ...options }, 60000);
+export const extractArchive = (path: string, options: { destination: string; password?: string; conflict: ArchiveConflict; keep_archive: boolean }) =>
+  post<ArchiveJob>(fileApi("/archive/extract", path), { path, ...options }, 60000);
+export const archiveJobs = (ids: string[], privateJobs = false) =>
+  request<{ jobs: ArchiveJob[] }>(`/api/user/v1${privateJobs ? "/private" : ""}/archive/jobs?ids=${ids.map(encodeURIComponent).join(",")}`);
+export const cancelArchiveJob = (id: string, privateJob = false) => post<ArchiveJob>(`/api/user/v1${privateJob ? "/private" : ""}/archive/jobs/${encodeURIComponent(id)}/cancel`);
 export const FILE_UPDATED_EVENT = "tessera:file-updated";
 /** 文件在预览里被保存或刷新到新版本后广播：预览宿主更新窗口里的文件，文件页刷新所在目录。 */
 export const announceFileUpdated = (file: FileItem) => window.dispatchEvent(new CustomEvent<FileItem>(FILE_UPDATED_EVENT, { detail: file }));
@@ -618,7 +643,8 @@ export function takeDownloadImport(): DownloadImport | null {
     const value = JSON.parse(new TextDecoder().decode(bytes)) as { candidates?: Partial<DownloadCandidate>[]; private?: unknown; destination?: unknown };
     // 脚本可能只带部分展示字段，缺省值与普通解析结果一致。
     const candidates: DownloadCandidate[] = Array.isArray(value.candidates) ? value.candidates.filter(item => item && typeof item.ticket === "string" && typeof item.name === "string")
-      .map(item => ({ group: "", source_host: "", method: "GET", kind: "http", size: null, variant: null, warnings: [], header_names: [], body_bytes: 0, ...item } as DownloadCandidate)) : [];
+      .map(item => ({ group: "", source_host: "", method: "GET", kind: "http", size: null, variant: null, warnings: [], header_names: [], body_bytes: 0, ...item,
+        folder: typeof item.folder === "string" && item.folder && !item.folder.startsWith("/") && !item.folder.startsWith(".tgdrive") ? item.folder : undefined } as DownloadCandidate)) : [];
     if (!candidates.length) return null;
     // 私密目标只接受私密前缀下的相对目录；普通目标不能指向私密空间或回收站。
     const destination = typeof value.destination === "string" ? value.destination.replace(/^\/+/, "") : "";
@@ -627,7 +653,7 @@ export function takeDownloadImport(): DownloadImport | null {
       destination: value.private === true ? PRIVATE_PREFIX : destination.startsWith(".tgdrive/") ? "" : destination };
   } catch { return null; }
 }
-export const createDownloads = (items: { ticket: string; name: string }[], destination: string) => post<{ tasks: DownloadTask[] }>(`/api/user/v1${isPrivatePath(destination) ? "/private" : ""}/downloads`, { items, destination });
+export const createDownloads = (items: { ticket: string; name: string; folder?: string }[], destination: string) => post<{ tasks: DownloadTask[] }>(`/api/user/v1${isPrivatePath(destination) ? "/private" : ""}/downloads`, { items, destination });
 /** 最近一次新建离线任务的保存位置（服务端按账号记录）；私密路径只在当前会话已解锁时返回。 */
 export type DownloadDestination = { area: "normal" | "private"; normal: string; private: string | null };
 export const lastDownloadDestination = () => request<DownloadDestination>(`/api/user/v1${privateAccess ? "/private" : ""}/downloads/destination`);

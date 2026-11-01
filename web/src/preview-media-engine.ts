@@ -8,6 +8,9 @@ type Mode = "sequence" | "random" | "loop" | "single";
 /** 与 preview-playlist.tsx 的 PreviewNav 一致；这里只声明用到的字段，避免引擎包依赖界面模块。 */
 type Navigation = { index: number; count: number; onPrevious: () => void; onNext: () => void; mode?: Mode; onMode?: (mode: Mode) => void; playlistOpen?: boolean; onPlaylist?: () => void };
 const MODE_LABELS: [Mode, string][] = [["sequence", "顺序播放"], ["random", "随机播放"], ["loop", "列表循环"], ["single", "单曲循环"]];
+/** 画面旋转（顺时针角度）：横屏文件里录成竖屏的内容可转正；只改显示，不改文件。 */
+const ROTATION_LABELS: [number, string][] = [[0, "不旋转"], [90, "顺时针 90°"], [180, "旋转 180°"], [270, "逆时针 90°"]];
+export const normalizeRotation = (degrees: number) => ((Math.round(degrees / 90) * 90) % 360 + 360) % 360;
 /** 与 ui.tsx 的图标同一套线条，保持控制条风格一致。 */
 const glyph = (path: string) => `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"/></svg>`;
 const GLYPHS = {
@@ -15,10 +18,11 @@ const GLYPHS = {
   next: glyph("M19 5v14M6 5l10 7-10 7V5Z"),
   list: glyph("M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"),
   thumbnail: glyph("M4 4h16v16H4zM4 16l5-5 4 4 3-3 4 4M8 8h.01"),
+  rotate: glyph("M3 12a9 9 0 1 0 3-6.7L3 8m0-5v5h5"),
 };
 /** 尺寸来源：stored 为已记录的尺寸，cover 为封面图比例（没有记录时的临时值），video 为视频元信息。 */
 export type VideoSizeSource = "stored" | "cover" | "video";
-type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onVideoSize?: (width: number, height: number, source: VideoSizeSource) => void; onVideoFrame?: (video: HTMLVideoElement) => void };
+type PlaybackEvents = { onEnded: () => void; onPlaying: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onVideoSize?: (width: number, height: number, source: VideoSizeSource) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onRotate?: (degrees: number) => void };
 function mediaProgress(media: HTMLMediaElement): MediaProgress {
   const duration = Number.isFinite(media.duration) ? Math.max(0, media.duration) : 0;
   const currentTime = Number.isFinite(media.currentTime) ? Math.max(0, media.currentTime) : 0;
@@ -28,7 +32,7 @@ function seekBy(media: HTMLMediaElement, seconds: number) {
   const { currentTime, duration } = mediaProgress(media);
   if (duration) media.currentTime = Math.max(0, Math.min(duration, currentTime + seconds));
 }
-export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents, navigation?: () => Navigation | undefined, known?: { width: number; height: number }) {
+export function createVideoPlayer(container: HTMLDivElement, url: string, notify: Notify, poster?: string, events?: PlaybackEvents, navigation?: () => Navigation | undefined, known?: { width: number; height: number }, initialRotation = 0) {
   // 网页全屏仍留在预览的对话框内，保留焦点锁和无障碍语义。
   Artplayer.FULLSCREEN_WEB_IN_BODY = false;
   // 不自动重连：播放失败直接交给预览界面显示原因与重试，避免画面上反复出现“重新连接”。
@@ -62,7 +66,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   };
   document.addEventListener("keydown", exitWebScreen, true);
   let ready = false, destroyed = false, subtitleUrl: string | null = null, version = 0;
-  let saveThumbnail: ((video: HTMLVideoElement) => Promise<void>) | null = null, thumbnailBusy = false, sourceVersion = 0;
+  let saveThumbnail: ((video: HTMLVideoElement, rotation: number) => Promise<void>) | null = null, thumbnailBusy = false, sourceVersion = 0;
   const thumbnailState = () => {
     const control = container.querySelector<HTMLElement>(".art-control-thumbnail");
     if (!control) return;
@@ -70,12 +74,39 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     control.setAttribute("aria-busy", String(thumbnailBusy));
     control.setAttribute("aria-label", thumbnailBusy ? "正在保存缩略图" : "将当前画面设为缩略图");
   };
+  // 旋转 90°／270° 时窗口按转过来的比例显示；回报给上层的仍是视频本身的尺寸（用于记录分辨率）。
+  let rotation = normalizeRotation(initialRotation), lastSize: { width: number; height: number } | null = null;
+  const applyRatio = () => {
+    if (destroyed || !lastSize) return;
+    const ratio = lastSize.width / lastSize.height;
+    container.style.setProperty("--preview-video-ratio", String(rotation % 180 ? 1 / ratio : ratio));
+  };
   const setRatio = (width: number, height: number, source: "stored" | "cover" | "video") => {
     if (!destroyed && width > 0 && height > 0) {
-      container.style.setProperty("--preview-video-ratio", String(width / height));
+      lastSize = { width, height }; applyRatio();
       events?.onVideoSize?.(width, height, source);
     }
   };
+  // 旋转作用在 <video> 上：四分之一圈时把它的宽高换成播放器的高宽再转，画面仍按 contain 完整显示，控制条与字幕不转。
+  const frame = player.template.$player;
+  const measure = () => {
+    frame.style.setProperty("--art-frame-width", `${frame.clientWidth}px`);
+    frame.style.setProperty("--art-frame-height", `${frame.clientHeight}px`);
+  };
+  const rotationItem = () => {
+    const current = ROTATION_LABELS.find(([value]) => value === rotation) ?? ROTATION_LABELS[0];
+    return { name: "rotation", html: "画面旋转", icon: GLYPHS.rotate, tooltip: current[1], width: 180,
+      selector: ROTATION_LABELS.map(([value, label]) => ({ html: label, value, default: value === rotation })),
+      onSelect: (option: { value?: number; html: string }) => { if (typeof option.value === "number") events?.onRotate?.(option.value); return option.html; } };
+  };
+  const applyRotation = () => {
+    frame.classList.toggle("is-rotated", rotation !== 0);
+    frame.classList.toggle("is-rotated-quarter", rotation % 180 !== 0);
+    frame.style.setProperty("--art-video-rotation", `${rotation}deg`);
+    measure(); applyRatio();
+    if (player.setting.find("rotation")) player.setting.update(rotationItem()); else player.setting.add(rotationItem());
+  };
+  applyRotation();
   // 已记录视频尺寸时直接按它打开，不再用封面比例过渡；没有记录时先用封面比例，元信息就绪后以实际视频尺寸为准。
   let cover: HTMLImageElement | null = null;
   const setCover = (src?: string, size?: { width: number; height: number }) => {
@@ -104,8 +135,10 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   player.on("video:ended", () => { markReady(); events?.onPlaying(false); events?.onEnded(); });
   player.on("video:error", () => notify("failed"));
   // ArtPlayer 默认只监听浏览器窗口；弹窗拖动改变容器尺寸时也要更新比例与控件布局。
-  const observer = new ResizeObserver(() => player.emit("resize"));
+  const observer = new ResizeObserver(() => { measure(); player.emit("resize"); });
   observer.observe(container);
+  // 原生全屏时放大的是播放器本身，容器尺寸不变，所以也要观察播放器。
+  observer.observe(frame);
   updateProgress();
   /** 上一个／下一个紧跟播放键，播放列表在设置前，播放模式放进设置菜单；只有一个文件时都不显示。 */
   const refreshNavigation = () => {
@@ -135,7 +168,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   return {
     refreshNavigation,
     /** 当前已解码画面由上层保存；按钮也出现在播放器全屏控制条中。 */
-    setThumbnailAction: (save: ((video: HTMLVideoElement) => Promise<void>) | null) => {
+    setThumbnailAction: (save: ((video: HTMLVideoElement, rotation: number) => Promise<void>) | null) => {
       saveThumbnail = save;
       if (destroyed) return;
       if (!save) { if (container.querySelector(".art-control-thumbnail")) player.controls.remove("thumbnail"); return; }
@@ -147,7 +180,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
         if (control) control.innerHTML = '<span class="spinner" aria-hidden="true"></span>';
         thumbnailState();
         try {
-          await saveThumbnail(player.video);
+          await saveThumbnail(player.video, rotation);
           if (!destroyed && current === sourceVersion) player.notice.show = "已将当前画面设为缩略图";
         } catch (reason) {
           if (!destroyed && current === sourceVersion) player.notice.show = reason instanceof Error ? reason.message : "缩略图保存失败，请重试";
@@ -174,16 +207,24 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       }
       thumbnailState();
     },
+    /** 原生媒体元素：预览界面据此估算缓冲速度。 */
+    media: () => player.video,
     play: () => player.play(),
     pause: () => player.pause(),
     isPlaying: () => !player.video.paused,
     seek: (time: number) => { player.video.currentTime = time; updateProgress(); },
     seekBy: (seconds: number) => { seekBy(player.video, seconds); updateProgress(); },
+    /** 由上层按文件记住的角度设置；换文件时上层会再次调用，引擎自己不重置。 */
+    setRotation: (degrees: number) => {
+      const next = normalizeRotation(degrees);
+      if (destroyed || next === rotation) return;
+      rotation = next; applyRotation(); player.emit("resize");
+    },
     adjustVolume: (delta: number) => { player.volume = Math.max(0, Math.min(1, player.video.volume + delta)); },
     setSource: (nextUrl: string, _name: string, nextCover?: string, nextSize?: { width: number; height: number }) => {
       sourceVersion++;
       player.pause(); ready = false; notify("loading");
-      container.style.removeProperty("--preview-video-ratio");
+      container.style.removeProperty("--preview-video-ratio"); lastSize = null;
       player.poster = nextCover ?? ""; player.url = nextUrl;
       // 换源后立即重置原生媒体和控件，不能等新文件的 timeupdate 来清掉旧时间与缓冲条。
       player.video.load(); player.currentTime = 0;

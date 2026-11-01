@@ -7,6 +7,7 @@ import { cacheFileId, type CacheFile } from "../cache-client";
 
 import { FolderStatsDialog } from "./folder-stats";
 import { ThumbnailEditor } from "./thumbnail-editor";
+import { ExtractDialog, isArchive } from "./extract";
 import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type CacheFilter, type EntryFilter, type FileSort } from "../files";
 import { generateLoadedThumbnails, saveCurrentVideoThumbnail, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, videoFrameUsable } from "../thumbnails";
 
@@ -59,6 +60,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const preview = usePreview();
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
   const [thumbnailEditing, setThumbnailEditing] = useState<api.FileItem | null>(null);
+  const [extracting, setExtracting] = useState<api.FileItem | null>(null);
   const [renaming, setRenaming] = useState<Entry | null>(null);
   const [transferring, setTransferring] = useState<Entry[] | null>(null);
   const [moving, setMoving] = useState<Entry[] | null>(null);
@@ -240,8 +242,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       playlistFiles: entries.flatMap(entry => entry.kind === "file" ? [entry.file] : []),
       poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file), onPlaybackActivity: onPlayback,
       onShare: privateSpace ? undefined : item => { preview.update(item); setSharing(item); },
-      onSaveVideoThumbnail: async (video, item) => {
-        await saveCurrentVideoThumbnail(item, video);
+      onSaveVideoThumbnail: async (video, item, rotation) => {
+        await saveCurrentVideoThumbnail(item, video, rotation);
         // 预览可在页面离开后继续播放；这里只更新全局预览并通知文件页刷新，不写入页面状态。
         const state = await api.thumbnailStatus([item.key]).then(value => value.files[item.key], () => undefined);
         if (state?.etag === item.etag) preview.update({ ...item, ...state });
@@ -409,6 +411,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
     items.push({ label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming(entry) });
     items.push({ label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving([entry]) });
+    if (isArchive(file)) items.push({ label: "解压…", icon: "archive", onSelect: () => setExtracting(file) });
     items.push({ label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([entry]) });
     if (query) items.push({ label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(parentPath(file.key)) });
     items.push(...cacheMenuItems(cacheQueue, file).filter(item => item.danger));
@@ -780,6 +783,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
 
       {context && <ContextMenu x={context.x} y={context.y} label={`${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
       {statsFor && <FolderStatsDialog prefix={statsFor.prefix} title={statsFor.prefix === root ? rootName : api.privatePathLabel(statsFor.prefix).replace(/\/$/, "")} onClose={() => setStatsFor(null)} onOpenFolder={onOpenFolder} />}
+      {extracting && <ExtractDialog file={extracting} onClose={() => setExtracting(null)} onOpenFolder={onOpenFolder} />}
       {thumbnailEditing && <ThumbnailEditor file={thumbnailEditing} onClose={() => setThumbnailEditing(null)}
         onSaved={variants => { const target = thumbnailEditing; setThumbnailEditing(null);
           // 替换后先用临时版本号让地址变化，避免浏览器沿用旧图；随后的后台刷新会带回服务端的正式版本。

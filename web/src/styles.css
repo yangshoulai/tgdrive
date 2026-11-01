@@ -1143,6 +1143,17 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .destination-summary .field-label { color: var(--ink-3); font-size: var(--text-xs); }
 .destination-summary strong { overflow: hidden; color: var(--ink); font-size: var(--text-sm); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .destination-browser { padding-top: 16px; }
+/* 在线解压 */
+.extract-form, .extract-progress { display: grid; gap: 16px; }
+.extract-form .muted, .extract-progress .muted { margin: 0; font-size: var(--text-sm); }
+.extract-destination { margin-top: -8px !important; overflow-wrap: anywhere; }
+.extract-picker { max-height: 280px; overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.extract-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.extract-failures summary { cursor: pointer; font-size: var(--text-sm); color: var(--ink-2); }
+.extract-failures ul { display: grid; gap: 4px; max-height: 200px; margin: 8px 0 0; padding: 0; overflow: auto; list-style: none; font-size: var(--text-sm); }
+.extract-failures li { display: grid; gap: 0; }
+.extract-failures li strong { font-weight: 500; overflow-wrap: anywhere; }
+.extract-failures li span { color: var(--danger); }
 .settings-disclosure { min-width: 0; border-top: 1px solid var(--line-soft); }
 .settings-disclosure > summary { display: flex; align-items: center; gap: 12px; min-height: 48px; cursor: pointer; list-style: none; font-weight: 500; }
 .settings-disclosure > summary::-webkit-details-marker { display: none; }
@@ -1314,12 +1325,15 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .preview-modal-video:not(.is-minimized) .preview-player-surface { flex: 1; min-height: 0; }
 .preview-modal-video:not(.is-minimized) .preview-video-host { width: 100%; height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; }
 .preview-video-host .art-video { object-fit: contain; }
+/* 画面旋转：只转 <video>，四分之一圈时宽高互换后居中再转，控制条、字幕与封面不转。 */
+.preview-video-host .art-video-player.is-rotated .art-video { transform: rotate(var(--art-video-rotation, 0deg)); }
+.preview-video-host .art-video-player.is-rotated-quarter .art-video { inset: auto; left: 50%; top: 50%; width: var(--art-frame-height, 100%); height: var(--art-frame-width, 100%); transform: translate(-50%, -50%) rotate(var(--art-video-rotation, 0deg)); }
 .preview-video-host .art-poster { background-size: contain; }
 .preview-video-host .art-bottom { padding-inline: 16px; }
 .preview-video-host .art-controls { min-height: 44px; font-family: var(--font); }
 .preview-video-host .art-control:focus-visible { outline: 2px solid var(--media-ink); outline-offset: -2px; border-radius: var(--radius-xs); }
 .preview-video-host .art-control-thumbnail[aria-disabled="true"] { opacity: .45; cursor: default; }
-.preview-video-host .art-control-thumbnail svg { fill: none; }
+.preview-video-host .art-control-thumbnail svg, .preview-video-host .art-setting-item-left-icon svg[fill="none"] { fill: none; }
 .preview-video-host .art-control-thumbnail .spinner { width: 18px; height: 18px; color: var(--media-ink); }
 .preview-video-host .art-subtitle { font-family: var(--font); }
 @container video-preview (max-width: 480px) {
@@ -1352,6 +1366,9 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .preview-player-audio .preview-player-failure > span:not(.preview-failure-icon) { color: var(--ink-3); }
 .preview-player-audio .preview-failure-icon { background: var(--danger-soft); color: var(--danger); }
 .preview-player-slow { position: absolute; top: 12px; right: 12px; z-index: 35; display: inline-flex; align-items: center; gap: 8px; padding: 4px 4px 4px 8px; border-radius: var(--radius-pill); font-size: var(--text-xs); }
+.preview-player-slow:not(:has(button)) { padding-right: 8px; }
+.preview-player-speed { font-variant-numeric: tabular-nums; }
+.preview-player-slow .preview-player-speed + span::before { content: "·"; margin-right: 8px; opacity: .6; }
 .preview-player-slow button { height: 22px; padding: 0 8px; border: 0; border-radius: var(--radius-pill); font-size: var(--text-xs); font-weight: 500; }
 .preview-player-video .preview-player-slow { background: var(--media-overlay); color: var(--media-ink); }
 .preview-player-video .preview-player-slow button { background: var(--on-dark-16); color: inherit; }

@@ -33,7 +33,7 @@ ACTIONS = {
     "admin.password": "修改管理员密码", "system.passphrase": "更换加密口令", "user.password_reset": "重置用户密码",
     "user.delete": "删除用户", "trash.purge": "清空回收站",
     "resources.update": "修改下载与资源配置", "client_cache.update": "修改浏览器缓存策略", "client_cache.reset": "重置浏览器缓存密钥",
-    "download.create": "创建离线下载",
+    "download.create": "创建离线下载", "archive.extract": "在线解压",
     "download.stop": "停止离线下载", "download.resume": "继续离线下载",
     "download.restart": "重新下载", "download.delete": "删除下载任务", "download.update": "更新下载参数",
     "passkey.create": "添加通行密钥", "passkey.rename": "重命名通行密钥",
@@ -70,11 +70,12 @@ class AuditLog:
         allowed = {
             "object.public": {"public", "count", "bucket_id", "expires_at", "password", "error"},
             "share.save": {"saved", "bytes", "error"},
+            "archive.extract": {"conflict", "keep", "format", "error"},
             "assistant.attachment.save": {"bytes", "error"},
             "client.grant": {"bucket_id", "perms", "error"},
             "key.create": {"error"},
         }
-        if action in ("object.public", "share.save", "assistant.attachment.save"):
+        if action in ("object.public", "share.save", "assistant.attachment.save", "archive.extract"):
             target = None
         if action in allowed:
             detail = {key: value for key, value in (detail or {}).items() if key in allowed[action]}

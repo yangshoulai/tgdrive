@@ -12,11 +12,18 @@ const source = fs.readFileSync(path.join(__dirname, "../userscripts/tessera-grab
 const instrumented = source.replace(/\s+gm\.load\(\)\.then\([\s\S]*\}\);\s*\}\)\(\);\s*$/, `
   globalThis.toastMessages = [];
   toast = message => globalThis.toastMessages.push(message);
+  // 树形挑选没有界面：按真实列表建树，默认全部选中；测试可用 pickTree 改选。
+  cloudTreePicker = async (context, folders, loose, shareData) => {
+    const tree = await cloudListTree(context, folders, loose, shareData);
+    globalThis.lastTree = tree;
+    return globalThis.pickTree ? globalThis.pickTree(tree, cloudPickedFiles) : cloudPickedFiles(tree.root);
+  };
   globalThis.grabber = { browserDownload, api, cookieHeader, runBatch, retryEntries, stopBatch, parseEntries, clearEntries, clearBatch, close,
     cloudOf, cloudSources, cloudSelected, cloudShareGuide, cloudCard, resolveCloud, cloudMd5, cloudRequest, cloudDownload, captureCloudAuthorization, authorizeCloudBaidu, curlFor,
     getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES,
     pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages, collect, addItem, checkNavigation, setActive: value => { active = value; },
     ready: gm.load(), gm, HAS_MENU, dormantFab, copy: text => gm.copy(text), openTab: url => gm.openTab(url),
+    lastTree: () => globalThis.lastTree, setPickTree: fn => { globalThis.pickTree = fn; }, createEntry, batchNameProblems,
     requestSize, wantSize, describe, noteMeta, timingSize, probeState: () => ({ probing, queued: probeQueue.length }) };
 })();`);
 assert.notEqual(instrumented, source, "userscript test hook must replace only final bootstrap");
@@ -542,6 +549,20 @@ test("server mode parses first: one row per group with variants and editable nam
   assert.equal(h.fetches.length, 0);
 });
 
+test("server mode sends the cloud folder of each row as the item's folder", async () => {
+  const h = harness({ gm: details => details.onload({ status: 200, responseText: JSON.stringify(
+    details.url.endsWith("/parse") ? { candidates: [{ ticket: "t-a", group: "", name: "a.bin", size: 1, warnings: [] }] } : { tasks: [{ id: 8, status: "queued", key: "photos/x" }] }) }) });
+  const current = h.batch([{ url: "https://cdn.example/a.bin", type: "file", state: "parsing", error: "", tasks: [], platform: null, folder: "相册/2024/" }]);
+  current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  assert.equal(current.entries[0].folder, "相册/2024/");
+  await h.api.runBatch();
+  const creates = h.requests.filter(request => new URL(request.details.url).pathname === "/api/v1/downloads");
+  assert.deepEqual(creates.map(request => JSON.parse(request.details.data)), [
+    { items: [{ ticket: "t-a", name: "a.bin", folder: "相册/2024/" }], destination: "photos/" },
+  ]);
+});
+
 test("server mode to private space hands renamed candidates to the Tessera page", async () => {
   const h = harness({ gm: details => details.onload({ status: 200, responseText: JSON.stringify(parseResponse) }) });
   const current = h.batch([{ url: "https://cdn.example/clip.m3u8", type: "stream", state: "parsing", error: "", tasks: [], platform: null }]);
@@ -831,7 +852,7 @@ function cloudFixture(provider) {
     captcha_client: { token: "SOURCE_CAPTCHA", captcha_token: "SOURCE_CAPTCHA", expires_at: "2099-01-01" }, deviceid: "0123456789abcdef0123456789abcdef" };
   const fixtures = {
     baidu: { url: "https://pan.baidu.com/disk/main", query: selector => selector === ".wp-s-core-pan" ? vue([
-      { fs_id: 101, server_filename: name, size: 42, isdir: 0 }, { fs_id: 102, server_filename: "folder", isdir: 1, path: "/empty" },
+      { fs_id: 101, server_filename: name, size: 42, isdir: 0 },
     ]) : null },
     aliyun: { url: "https://www.alipan.com/drive/file/all", storage: { token: { token_type: "Bearer", access_token: "ALI_TOKEN" } },
       query: selector => selector.startsWith('[class^="node-list-table-view--"]') ? reactSelection({ selectedKeys: "a1", dataSource: [
@@ -845,7 +866,7 @@ function cloudFixture(provider) {
     guangya: { url: "https://www.guangyapan.com/", storage: tokenStorage, query: selector => selector.startsWith(".swangpan-file-list")
       ? reactSelection({ dataSource: [{ fileId: "g1", fileName: name, fileSize: 42, resType: 1 }], selectedItems: ["g1"] }) : null },
     quark: { url: "https://pan.quark.cn/list/all", documentCookie: "__pugs=SOURCE_COOKIE", gmCookies: [{ name: "__pugs", value: "SOURCE_COOKIE" }], query: selector => selector === ".file-list"
-      ? reactSelection({ list: [{ fid: "q1", file_name: name, size: 42, file: true }, { fid: "folder", file: false }], selectedRowKeys: ["q1", "folder"] }) : null },
+      ? reactSelection({ list: [{ fid: "q1", file_name: name, size: 42, file: true }, { fid: "other", file_name: "other", file: true }], selectedRowKeys: ["q1"] }) : null },
     uc: { url: "https://drive.uc.cn/list/all", query: selector => selector === ".file-list"
       ? reactSelection({ list: [{ fid: "u1", file_name: name, size: 42, file: true }], selectedRowKeys: ["u1"] }) : null },
     "123pan": { url: "https://www.123pan.com/", storage: { authorToken: "PAN123_TOKEN", LoginUuid: "login-uuid" },
@@ -1084,9 +1105,57 @@ test("cloud baidu expands selected folders in my drive with the pan.baidu.com id
   await h.ready;
   await assert.rejects(() => h.api.cloudSources(h.api.cloudOf()), /授权百度取链/);
   h.api.gm.set("cloud-baidu-token", { token: "BAIDU_TOKEN", expires: Date.now() + 3600000 });
+  listed.length = 0;
   const sources = await h.api.cloudSources(h.api.cloudOf());
   assert.deepEqual(Array.from(sources, item => item.name), ["top.bin", "a.jpg", "b.jpg"]);
+  // 文件夹里的文件保留目录结构：所选文件夹本身的名称在最前。
+  assert.deepEqual(Array.from(sources, item => item.folder), ["", "album/", "album/sub/"]);
   assert.deepEqual(listed, ["/album", "/album/sub"]);
+  const tree = h.api.lastTree();
+  assert.equal(tree.root.total, 3);
+  assert.equal(tree.root.children[1].name, "album");
+  assert.equal(tree.root.children[1].total, 2);
+});
+
+test("cloud folder tree: unchecking files and folders, select limits and unsupported drives", async () => {
+  const h = harness({ url: "https://pan.quark.cn/list/all", gmCookies: [{ name: "__pugs", value: "SOURCE_COOKIE" }], query: selector => selector === ".file-list"
+    ? reactSelection({ list: [{ fid: "d1", file_name: "照片/2024", file: false }, { fid: "f0", file_name: "a.bin", size: 1, file: true }], selectedRowKeys: ["d1", "f0"] }) : null,
+    gm: details => {
+      const url = new URL(details.url);
+      assert.equal(url.hostname, "drive-pc.quark.cn");
+      assert.equal(url.pathname, "/1/clouddrive/file/sort");
+      assert.ok(!details.headers.Authorization);
+      const dir = url.searchParams.get("pdir_fid");
+      if (dir === "d1") return jsonReply(details, { code: 0, data: { list: [{ fid: "f1", file_name: "a.bin", size: 2, file: true }, { fid: "d2", file_name: "..", file: false }] }, metadata: { _total: 2 } });
+      return jsonReply(details, { code: 0, data: { list: [{ fid: "f2", file_name: "b.bin", size: 3, file: true }, { fid: "f3", file_name: "c.bin", size: 4, file: true }] }, metadata: { _total: 2 } });
+    } });
+  await h.ready;
+  // 去掉一个子文件夹里的文件：子目录名经过清理（斜杠、. 与 ..）。
+  h.api.setPickTree((tree, pick) => {
+    const [folder] = tree.root.children.filter(node => node.dir);
+    assert.equal(folder.name, "照片_2024");
+    const sub = folder.children.find(node => node.dir);
+    assert.equal(sub.name, "未命名文件夹");
+    sub.children[0].checked = false;
+    return pick(tree.root);
+  });
+  const sources = await h.api.cloudSources(h.api.cloudOf());
+  assert.deepEqual(Array.from(sources, item => [item.name, item.folder]), [["a.bin", ""], ["a.bin", "照片_2024/"], ["c.bin", "照片_2024/未命名文件夹/"]]);
+  // 同名文件在不同子目录不算重复；创建任务时带上子目录。
+  const current = h.batch(sources.map(source => ({ ...source, sourceName: source.name, candidate: { ticket: "t-" + source.folder + source.name }, state: "waiting", tasks: [] })));
+  current.mode = "server";
+  assert.equal(h.api.batchNameProblems(current).size, 0);
+  current.entries[1].folder = "";
+  assert.equal(h.api.batchNameProblems(current).size, 2);
+  current.entries[1].folder = "照片_2024/";
+  // 取消挑选：不报错，也不会开始。
+  h.api.setPickTree(() => null);
+  await assert.rejects(() => h.api.cloudSources(h.api.cloudOf()), error => error.silent === true);
+  h.api.setPickTree(null);
+  const mobile = harness({ url: "https://yun.139.com/w/#/main", query: selector => selector === ".main_file_list"
+    ? { __vue__: { selectList: [{ item: { contentID: "m1", contentName: "dir", dirEtag: "1" } }] } } : null });
+  await mobile.ready;
+  await assert.rejects(() => mobile.api.cloudSources(mobile.api.cloudOf()), /暂不支持直接选择文件夹/);
 });
 
 test("cloud share modes missing an upstream resolver explain the save-to-own-drive workflow", async () => {

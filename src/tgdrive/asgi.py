@@ -38,8 +38,9 @@ from .errors import (
 )
 from .keyapi import KeyApi, KeyAuthError
 from .metrics import TrafficMetrics
-from .objects import Scope
+from .objects import PRIVATE_PREFIX, Scope
 from .private import PrivateAccessLogFilter, PrivateLocked, PrivateSpace
+from .extract import ArchiveService
 from .registration import RegistrationService
 from .settings import SystemSettings
 from .share import ShareAccess
@@ -92,6 +93,8 @@ class TgDriveASGI(StaticFiles):
         # 对外地址也是通行密钥的固定来源，不能由任意请求头决定。
         self.settings = settings or SystemSettings(admin.accounts.metadata, {"public_base_url": public_base_url})
         self.private_space = PrivateSpace(user, self.settings)
+        # 在线解压：任务只在进程内存里，流式读写存储，不落本地磁盘。
+        self.archives = ArchiveService(user.objects)
         self.passkeys = self.private_space.passkeys
         self.client_cache = ClientCache(user, self.private_space)
         self.registration = RegistrationService(user.accounts)
@@ -139,6 +142,7 @@ class TgDriveASGI(StaticFiles):
                         await self.offline.stop()
                     if self.thumbnails is not None:
                         await self.thumbnails.stop()
+                    await self.archives.stop()
                     if self.scheduler is not None:
                         await self.scheduler.stop()
                     await send({"type": "lifespan.shutdown.complete"})
@@ -272,12 +276,13 @@ class TgDriveASGI(StaticFiles):
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/move", "/archive",
+                           "/archive/inspect", "/archive/extract", "/archive/jobs",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
                            "/thumbnail/fetch", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
                            "/downloads", "/downloads/clear", "/downloads/batch", "/downloads/destination"}
                 if route not in controls:
-                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?|/downloads/\d+/(?:stop|resume|restart|delete|update|source|cover)", route):
+                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?|/downloads/\d+/(?:stop|resume|restart|delete|update|source|cover)|/archive/jobs/[0-9a-f]{16}/cancel", route):
                         raise NotFoundError("资源不存在")
                     file_user = self.private_space.files(token, access)
                     path = "/api/user/v1" + route
@@ -461,7 +466,7 @@ class TgDriveASGI(StaticFiles):
                          "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
-                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/downloads/stop-all": "download.stop_all", "/shares/{}/save": "share.save", "/cache/reset": "client_cache.reset",
+                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/downloads/stop-all": "download.stop_all", "/shares/{}/save": "share.save", "/archive/extract": "archive.extract", "/cache/reset": "client_cache.reset",
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
@@ -553,6 +558,10 @@ class TgDriveASGI(StaticFiles):
                 detail["proxy_enabled"] = bool(payload.get("proxy"))
         elif action == "download.create":
             detail = {"count": len(payload.get("items", [])) if isinstance(payload.get("items"), list) else 0}
+        elif action == "archive.extract":
+            # 不记录压缩包与保存位置的路径，更不记录密码。
+            detail = {"conflict": payload.get("conflict") if payload.get("conflict") in ("skip", "overwrite", "rename") else None,
+                      "keep": payload.get("keep_archive") is not False, "format": (result or {}).get("format") if ok else None}
         elif action == "share.save":
             detail = {"saved": (result or {}).get("saved"), "bytes": (result or {}).get("bytes")} if ok else {}
         elif action == "assistant.attachment.save":
@@ -1152,6 +1161,8 @@ class TgDriveASGI(StaticFiles):
                                                  public_only=query.get("public", ["0"])[0] == "1", kind=query.get("kind", [""])[0]), {}
             if method == "GET" and route == "/stats":
                 return 200, await user.stats(token, query.get("prefix", [""])[0]), {"Cache-Control": "no-store"}
+            if route.startswith("/archive/"):
+                return await self._archive_route(user, method, route, query, payload, token, csrf, private)
             if method == "POST" and route == "/media/size":
                 return 200, user.set_media_size(token, csrf, payload), {}
             if method == "GET" and route == "/files/info":
@@ -1276,6 +1287,39 @@ class TgDriveASGI(StaticFiles):
                 and query.get("bucket_id", [""])[0] and info.etag and query.get("v", [""])[0] == info.etag):
             cache_control = "private, max-age=604800, immutable"
         await self._stream_object(send, method, info, opener, query, headers, cache_control)
+
+    async def _archive_route(self, user, method, route, query, payload, token, csrf, private):
+        """在线解压（extract.py）：预览压缩包、开始解压、查看与取消任务。私密空间走 /private 前缀，按当前解锁授权读写。"""
+        scope = user._scope(token, csrf=csrf, mutation=method != "GET")
+        account = user.accounts.account_for_session(user._session(token))
+        no_store = {"Cache-Control": "no-store"}
+
+        def destination(value):
+            if not isinstance(value, str):
+                raise ValueError("保存位置不正确")
+            if private:
+                return user._path(value or PRIVATE_PREFIX, directory=True)
+            return user._path(value, directory=True) if value else ""
+
+        def password():
+            value = payload.get("password")
+            if value is not None and (not isinstance(value, str) or len(value) > 1024):
+                raise ValueError("密码不正确")
+            return value or None
+
+        if route == "/archive/inspect" and method == "POST":
+            target = payload.get("destination")
+            return 200, await self.archives.inspect(scope, user._path(payload.get("path", "")), None if target is None else destination(target), password()), no_store
+        if route == "/archive/extract" and method == "POST":
+            return 201, await self.archives.start(account.id, scope, user._path(payload.get("path", "")), destination(payload.get("destination", "")),
+                                                  password(), payload.get("conflict", "rename"), payload.get("keep_archive", True)), no_store
+        if route == "/archive/jobs" and method == "GET":
+            ids = [value for value in query["ids"][0].split(",") if value] if "ids" in query else None
+            return 200, {"jobs": self.archives.list(account.id, private, ids)}, no_store
+        cancel = re.fullmatch(r"/archive/jobs/([0-9a-f]{16})/cancel", route)
+        if cancel and method == "POST":
+            return 200, self.archives.cancel(account.id, private, cancel[1]), no_store
+        raise NotFoundError("资源不存在")
 
     async def _public_content(self, send, method, path, query, headers):
         # 文件分享：/p/<token> 与 /p/<token>/<文件名> 等价，文件名只用于让链接更易读。
