@@ -185,8 +185,11 @@ class ResourceSettings:
         mode = ("low" if low else "standard") if config["mode"] == "auto" else config["mode"]
         # 个人部署通常只有一两个人在用：低资源档按内存放宽并行，只在内存很小或未知时保守处理。
         roomy = bool(memory and memory >= 512 * MIB)
-        desired = config["concurrency"] if mode == "custom" else (2 if roomy else 1) if mode == "low" else 2
-        ceiling = (2 if roomy else 1) if low else min(4, max(1, int(memory / (256 * MIB)) - 2))
+        # 低资源机器的离线下载上限按内存分档：≥640 MiB 4 个、512–640 MiB 3 个、更小 2 个，检测不到内存时 1 个；
+        # 「自动」档默认取其中较稳妥的值（最多 3 个），管理员选「自定义」可以用满上限。
+        low_ceiling = (4 if memory >= 640 * MIB else 3 if roomy else 2) if memory else 1
+        desired = config["concurrency"] if mode == "custom" else min(3, low_ceiling) if mode == "low" else 2
+        ceiling = low_ceiling if low else min(4, max(1, int(memory / (256 * MIB)) - 2))
         platform_limit = min(config["platform_max_mib"], 512) if low or mode == "low" else config["platform_max_mib"]
         low_parallel = 8 if roomy else 3
         # 文件读取每路约 24 MB，最多占检测内存的三分之一；每个账号可以用满全部读取名额（低资源档不再减半）。

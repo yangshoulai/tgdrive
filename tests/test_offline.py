@@ -645,7 +645,11 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
     async def test_budget_persistence_and_disabled_queue(self):
         self.app.resources.detected.update(cpu_cores=1, memory_bytes=750 * 1024 * 1024)
         saved = self.app.resources.update({"mode": "custom", "concurrency": 4})
-        self.assertEqual(saved["effective"]["concurrency"], 2, "低配机器（1 核、750 MB）离线下载最多同时 2 个")
+        self.assertEqual(saved["effective"]["concurrency"], 4, "低配机器（1 核、750 MB）离线下载最多同时 4 个")
+        self.assertFalse(saved["effective"]["reduced"])
+        self.app.resources.detected.update(memory_bytes=400 * 1024 * 1024)
+        saved = self.app.resources.update({"mode": "custom", "concurrency": 4})
+        self.assertEqual(saved["effective"]["concurrency"], 2, "内存不足 512 MB 时最多同时 2 个")
         self.assertTrue(saved["effective"]["reduced"])
         restored = ResourceSettings(self.app.metadata, self.app.resources.data_dir, {"mode": "standard"})
         self.assertEqual(restored.config()["mode"], "custom")

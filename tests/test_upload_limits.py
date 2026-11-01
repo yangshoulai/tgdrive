@@ -30,8 +30,9 @@ class ResourceBudgetTests(unittest.TestCase):
 
     def test_low_defaults_allow_parallel_transfers_in_personal_deployment(self):
         effective = self.effective()
-        # 个人部署：低资源档也允许每个账号用满读取名额（不再减半），离线下载可同时 2 个。
-        self.assertEqual((effective["mode"], effective["concurrency"], effective["ffmpeg_concurrency"]), ("low", 2, 1))
+        # 个人部署：低资源档也允许每个账号用满读取名额（不再减半），离线下载默认同时 3 个（自定义可到 4 个）。
+        self.assertEqual((effective["mode"], effective["concurrency"], effective["ffmpeg_concurrency"]), ("low", 3, 1))
+        self.assertEqual(self.effective(mode="custom", concurrency=4)["concurrency"], 4)
         self.assertEqual(self.parallel(effective), (8, 6, 4, 4))
         self.assertFalse(effective["transfer_reduced"] or effective["upload_reduced"])
         self.assertEqual((effective["web_file_concurrency"], effective["bot_interval_ms"], effective["platform_max_mib"]), (2, 1000, 512))
@@ -49,7 +50,8 @@ class ResourceBudgetTests(unittest.TestCase):
             with self.subTest(memory=memory):
                 effective = self.effective(memory=memory * MIB if memory else None)
                 self.assertEqual(self.parallel(effective), expected)
-                self.assertEqual(effective["concurrency"], 2 if memory and memory >= 512 else 1)
+                self.assertEqual(effective["concurrency"], 3 if memory and memory >= 512 else 2 if memory else 1)
+                self.assertEqual(self.effective(memory=memory * MIB if memory else None, mode="custom", concurrency=4)["concurrency"], 3 if memory == 512 else 2 if memory else 1)
 
     def test_lower_admin_limits_are_preserved(self):
         effective = self.effective(transfer_concurrency=2, bucket_concurrency=1, upload_concurrency=1, web_part_concurrency=1)
