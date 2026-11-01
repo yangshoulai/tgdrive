@@ -1326,8 +1326,9 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .preview-modal-video:not(.is-minimized) .preview-video-host { width: 100%; height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; }
 .preview-video-host .art-video { object-fit: contain; }
 /* 画面旋转：只转 <video>，四分之一圈时宽高互换后居中再转，控制条、字幕与封面不转。 */
-.preview-video-host .art-video-player.is-rotated .art-video { transform: rotate(var(--art-video-rotation, 0deg)); }
-.preview-video-host .art-video-player.is-rotated-quarter .art-video { inset: auto; left: 50%; top: 50%; width: var(--art-frame-height, 100%); height: var(--art-frame-width, 100%); transform: translate(-50%, -50%) rotate(var(--art-video-rotation, 0deg)); }
+/* 尺寸用 !important：播放器的「画面比例」等功能会在 <video> 上写内联宽高与外边距，不能让它们改变旋转后的尺寸。 */
+.preview-video-host .art-video-player.is-rotated .art-video { inset: 0 !important; width: 100% !important; height: 100% !important; margin: 0 !important; padding: 0 !important; transform: rotate(var(--art-video-rotation, 0deg)); }
+.preview-video-host .art-video-player.is-rotated-quarter .art-video { inset: auto !important; left: 50% !important; top: 50% !important; width: var(--art-frame-height, 100%) !important; height: var(--art-frame-width, 100%) !important; transform: translate(-50%, -50%) rotate(var(--art-video-rotation, 0deg)); }
 .preview-video-host .art-poster { background-size: contain; }
 .preview-video-host .art-bottom { padding-inline: 16px; }
 .preview-video-host .art-controls { min-height: 44px; font-family: var(--font); }
@@ -1796,12 +1797,14 @@ html[data-input="keyboard"] .preview-text.is-editing .cm-editor.cm-focused { box
 .image-backdrop { position: absolute; inset: -12%; z-index: -1; filter: blur(52px) saturate(1.4) brightness(.42); opacity: .8; transform: scale(1.1); }
 .image-backdrop-layer { position: absolute; inset: 0; background-position: center; background-size: cover; }
 .image-backdrop-layer:last-child { animation: image-fade var(--duration-base) ease-out; }
-.image-canvas { position: relative; display: grid; flex: 1; min-height: 0; place-items: center; overflow: hidden; overflow: clip; touch-action: none; cursor: zoom-in; }
+.image-canvas { position: relative; display: grid; flex: 1; min-height: 0; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; overflow: hidden; overflow: clip; touch-action: none; cursor: zoom-in; }
 .image-viewer.is-zoomed .image-canvas { cursor: grab; }
 .image-viewer.is-zoomed.is-dragging .image-canvas { cursor: grabbing; }
 .image-canvas > img { grid-area: 1 / 1; max-width: calc(100% - 32px); max-height: calc(100% - 32px); border-radius: var(--radius-2xs); box-shadow: 0 24px 64px var(--shade-48); -webkit-user-drag: none; }
 .image-viewer.is-zoomed .image-canvas > .image-full { max-width: none; max-height: none; }
+/* 封面在算出显示尺寸前不出现：否则会先按自身大小画一帧、再缩放到适配位置。 */
 .image-poster { filter: blur(1.5px); }
+.image-poster:not(.is-sized) { visibility: hidden; }
 .image-full { opacity: 0; transition: transform var(--duration-slow) var(--ease-out), opacity var(--duration-slow) ease; will-change: transform; }
 .image-viewer.is-loaded .image-full { opacity: 1; animation: image-in .45s var(--ease-out); }
 /* 有封面占位时原图与封面尺寸、位置一致，只做淡入，不再缩放入场；封面在淡入结束后才移除。 */

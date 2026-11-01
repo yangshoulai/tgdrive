@@ -33,6 +33,11 @@ class OfflineFolderTests(unittest.IsolatedAsyncioTestCase):
         # 记住的保存位置仍是所选目录，不是子目录。
         self.assertEqual(self.offline.last_destination(self.alice.id)["normal"], "下载/")
 
+    async def test_same_name_as_pending_task_is_renamed(self):
+        first = self.offline.create(self.alice.id, [{"ticket": await self.ticket(), "name": "a.bin"}], "下载/")
+        second = self.offline.create(self.alice.id, [{"ticket": await self.ticket(), "name": "a.bin"}, {"ticket": await self.ticket(), "name": "a.bin"}], "下载/")
+        self.assertEqual([task["key"] for task in first + second], ["下载/a.bin", "下载/a (1).bin", "下载/a (2).bin"])
+
     async def test_folder_cannot_escape_or_enter_system_area(self):
         for folder in ("../x/", "/abs/", "a/../b/", ".tgdrive/private/", "a//b/", 3):
             with self.assertRaises((ValueError, PermissionError), msg=folder):

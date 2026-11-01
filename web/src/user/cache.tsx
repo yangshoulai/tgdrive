@@ -29,6 +29,8 @@ type Queue = {
   canCache: (file: CacheFile) => boolean; enqueue: (file: CacheFile) => void; enqueueMany: (files: CacheFile[]) => number;
   cancel: (id: string) => void; pause: (id: string) => void; retry: (id: string) => void; clear: () => void; removeJobs: (ids: string[]) => void;
   inspect: (file: CacheFile) => void; remove: (files: CacheFile | CacheFile[]) => void;
+  /** 清除文件夹（含子文件夹）在这台设备上的缓存，可连同另外选中的文件一起；先统计再确认。 */
+  removeFolders: (prefixes: string[], files?: CacheFile[]) => void;
   /** 不弹确认直接清除（文件助手卡片：点击卡片本身就是确认）。 */
   forget: (files: CacheFile[]) => Promise<void>;
   /** 文件助手查询用：重新读取一次缓存索引，返回每个文件的状态。 */
@@ -99,6 +101,7 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
   const cachedRef = useRef(cached); cachedRef.current = cached;
   const [wake, setWake] = useState(0);
   const [details, setDetails] = useState<CacheFile | null>(null), [removing, setRemoving] = useState<CacheFile[] | null>(null);
+  const [folderRemoving, setFolderRemoving] = useState<{ prefixes: string[]; files: CacheFile[]; count: number; bytes: number } | null>(null);
   // 同时缓存的文件（与 Worker 的 MAX_MANUAL_FILES 一致）；每个大文件在 Worker 内再按段并行下载。
   const active = useRef(new Map<string, AbortController>());
   const [available, setAvailable] = useState(false);
@@ -449,6 +452,45 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
       setCached(value => { const next = new Map(value); ids.forEach(id => next.delete(id)); return next; });
     }
   }, [cancel, update]);
+  // 文件夹里已缓存的文件来自 Worker 的缓存索引（按完整路径前缀筛选，私密文件夹读私密层），不向服务器列目录；
+  // 再加上这些文件夹里还在排队或缓存中的任务，清除时一并停止。
+  const folderFiles = useCallback(async (prefixes: string[]) => {
+    const files = new Map<string, CacheFile>();
+    for (const prefix of prefixes) {
+      for (let offset = 0; ; offset += 200) {
+        const page = await cachedItems({ prefix, private: api.isPrivatePath(prefix), sort: "name", offset, limit: 200 });
+        for (const item of page.items) { const file = { key: item.path, etag: item.etag, size: item.size, content_type: item.type }; files.set(cacheFileId(file), file); }
+        if (offset + 200 >= page.total) break;
+      }
+    }
+    for (const job of jobsRef.current) if (isRunning(job) && prefixes.some(prefix => job.file.key.startsWith(prefix))) files.set(cacheFileId(job.file), job.file);
+    return [...files.values()];
+  }, []);
+  const removeFolders = useCallback((prefixes: string[], extra: CacheFile[] = []) => {
+    if (prefixes.some(api.isPrivatePath) && !ready.current.privateReady) { toast.error("请先解锁私密空间，并确认这台设备开启了私密文件缓存"); return; }
+    void (async () => {
+      try {
+        const inside = await folderFiles(prefixes);
+        const all = new Map([...inside, ...extra].map(file => [cacheFileId(file), file]));
+        if (!all.size) { toast.info(prefixes.length === 1 && !extra.length ? "这个文件夹在这台设备上没有缓存" : "所选项目在这台设备上没有缓存"); return; }
+        const sizes = await cacheIndex(ready.current.privateReady).then(list => new Map(list.map(item => [item.id, item.bytes])), () => new Map<string, number>());
+        const bytes = [...all.keys()].reduce((sum, id) => sum + (sizes.get(id) ?? 0), 0);
+        setFolderRemoving({ prefixes, files: extra, count: all.size, bytes });
+      } catch (reason) { toast.error(api.errorMessage(reason, "无法读取本机缓存")); }
+    })();
+  }, [folderFiles]);
+  async function confirmFolderRemoving() {
+    const target = folderRemoving;
+    if (!target) return;
+    try {
+      // 只停止完全落在这些文件夹里的文件夹缓存任务，不影响覆盖更大范围的任务。
+      foldersRef.current.filter(folder => folder.prefixes.every(item => target.prefixes.some(prefix => item.startsWith(prefix)))).forEach(folder => cancelFolder(folder.id));
+      const files = new Map([...await folderFiles(target.prefixes), ...target.files].map(file => [cacheFileId(file), file]));
+      await forget([...files.values()]);
+      toast.success(`已清除 ${files.size} 个文件的本机缓存`);
+    } catch (reason) { toast.error(api.errorMessage(reason, "清除本机缓存失败")); }
+    finally { setFolderRemoving(null); }
+  }
   const report = useCallback(async (files: CacheFile[]): Promise<CacheReport[]> => {
     const index = new Map((await cacheIndex(ready.current.privateReady)).map(({ id, ...state }) => [id, state]));
     return files.map(file => {
@@ -466,8 +508,8 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
   useEffect(() => { onActiveChange?.(activeCount); }, [activeCount, onActiveChange]);
   const visibleFolders = useMemo(() => enabled ? folders : [], [enabled, folders]);
   const value: Queue = useMemo(() => ({ available, privateReady, privateEnabled: enabled && privateCacheEnabled, jobs: visibleJobs, folders: visibleFolders, enqueueFolders: startFolder, cancelFolder, retryFolder, states, cached, showTasks: onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pause: pauseJob, retry, removeJobs,
-    clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: files => setRemoving(Array.isArray(files) ? files : [files]), forget, report }),
-  [available, privateReady, privateCacheEnabled, enabled, visibleJobs, visibleFolders, startFolder, cancelFolder, retryFolder, states, cached, onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pauseJob, retry, removeJobs, update, forget, report]);
+    clear: () => update(value => value.filter(isRunning)), inspect: setDetails, remove: files => setRemoving(Array.isArray(files) ? files : [files]), removeFolders, forget, report }),
+  [available, privateReady, privateCacheEnabled, enabled, visibleJobs, visibleFolders, startFolder, cancelFolder, retryFolder, states, cached, onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pauseJob, retry, removeJobs, update, removeFolders, forget, report]);
   const detailState = details && (states.get(cacheFileId(details)) ?? cached.get(cacheFileId(details)));
   const detailManual = Boolean(details && cached.get(cacheFileId(details))?.manual);
   const showDetails = enabled && details && (!api.isPrivatePath(details.key) || privateReady);
@@ -482,6 +524,9 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
     {showRemoving && <ConfirmDialog title="清除本机缓存" className={removing.some(file => api.isPrivatePath(file.key)) ? "private-dialog" : ""} confirmLabel="清除缓存" onClose={() => setRemoving(null)}
       description={removing.length === 1 ? `清除“${nameOf(removing[0])}”在这台设备上的缓存？云端文件不受影响。` : `清除这 ${removing.length} 个文件在这台设备上的缓存？云端文件不受影响。`}
       onConfirm={async () => { try { await forget(removing); } finally { setRemoving(null); } }} />}
+    {enabled && folderRemoving && <ConfirmDialog title="清除本机缓存" className={folderRemoving.prefixes.some(api.isPrivatePath) ? "private-dialog" : ""} confirmLabel="清除缓存" onClose={() => setFolderRemoving(null)}
+      description={`${folderRemoving.prefixes.length === 1 && !folderRemoving.files.length ? `“${folderRemoving.prefixes[0].replace(/\/$/, "").split("/").at(-1)}”及其子文件夹中` : "所选项目中"} ${folderRemoving.count} 个文件${folderRemoving.bytes ? `（约 ${formatBytes(folderRemoving.bytes)}）` : ""}在这台设备上的缓存将被清除，正在进行的缓存任务一并停止。云端文件不受影响。`}
+      onConfirm={confirmFolderRemoving} />}
   </CacheContext.Provider>;
 }
 

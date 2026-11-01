@@ -100,6 +100,8 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       onSelect: (option: { value?: number; html: string }) => { if (typeof option.value === "number") events?.onRotate?.(option.value); return option.html; } };
   };
   const applyRotation = () => {
+    // 「画面比例」会在 <video> 上写内联宽高，与旋转叠加会压扁画面、四周留黑边：旋转时恢复默认比例。
+    if (rotation && player.aspectRatio !== "default") player.aspectRatio = "default";
     frame.classList.toggle("is-rotated", rotation !== 0);
     frame.classList.toggle("is-rotated-quarter", rotation % 180 !== 0);
     frame.style.setProperty("--art-video-rotation", `${rotation}deg`);
@@ -107,6 +109,8 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     if (player.setting.find("rotation")) player.setting.update(rotationItem()); else player.setting.add(rotationItem());
   };
   applyRotation();
+  // 旋转时又选了画面比例：按所选比例显示，取消旋转。
+  player.on("aspectRatio", value => { if (value !== "default" && rotation) events?.onRotate?.(0); });
   // 已记录视频尺寸时直接按它打开，不再用封面比例过渡；没有记录时先用封面比例，元信息就绪后以实际视频尺寸为准。
   let cover: HTMLImageElement | null = null;
   const setCover = (src?: string, size?: { width: number; height: number }) => {

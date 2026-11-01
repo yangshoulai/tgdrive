@@ -10,7 +10,7 @@ from tgdrive.assistant.actions import ActionExecutor, DOWNLOAD_BATCH, Progress
 from tgdrive.assistant.tools import TOOLS, ToolContext, ToolError
 from tgdrive.assistant.web_tools import propose_downloads
 from tgdrive.objects import PRIVATE_PREFIX, ObjectService, Scope
-from tgdrive.offline.service import MAX_CREATE_ITEMS, MAX_PENDING_TASKS, OfflineDownloads
+from tgdrive.offline.service import MAX_CREATE_ITEMS, OfflineDownloads
 
 
 class QueueCapacityTests(unittest.TestCase):
@@ -61,16 +61,12 @@ class QueueCapacityTests(unittest.TestCase):
         self.assertEqual(len(result), 32)
         authorize.assert_called()
 
-    def test_capacity_accepts_last_batch_and_rejects_whole_overflow(self):
-        service = self.prepare(MAX_PENDING_TASKS - MAX_CREATE_ITEMS)
+    def test_queue_has_no_total_limit_and_does_not_scan_pending_tasks(self):
+        # 排队任务总数不设上限：已有一百万个未完成任务时照常创建，也不统计或读出全部任务。
+        service = self.prepare(1_000_000)
         self.assertEqual(len(service.create(1, self.items(MAX_CREATE_ITEMS), "文件/")), MAX_CREATE_ITEMS)
-        with self.assertRaisesRegex(ValueError, str(MAX_PENDING_TASKS)):
-            service.create(1, self.items(1), "文件/")
-        self.assertEqual(service._save_source.call_count, MAX_CREATE_ITEMS)
-        full = self.prepare(MAX_PENDING_TASKS - 1)
-        with self.assertRaisesRegex(ValueError, str(MAX_PENDING_TASKS)):
-            full.create(1, self.items(2), "相册/")
-        full._save_source.assert_not_called()
+        statements = [call.args[0] for call in service.metadata.transaction().__enter__().execute.call_args_list]
+        self.assertFalse(any(statement.startswith(("SELECT COUNT(*)", "SELECT key")) for statement in statements))
 
     def test_single_submission_accepts_1000_and_rejects_invalid_counts_before_writing(self):
         service = self.prepare(0)

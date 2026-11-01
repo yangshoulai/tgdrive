@@ -29,8 +29,9 @@ function backdropOf(image: HTMLImageElement): string | null {
   } catch { return null; } // 跨域图片无法读取像素时保留已有背景，不为装饰重新请求文件。
 }
 
-export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, nav, strip }: {
-  url: string; name: string; poster?: string; onLoad?: (image: HTMLImageElement) => void; onError: () => void;
+export function ImageViewer({ url, name, poster, size, onLoad, onError, onImageSize, nav, strip }: {
+  url: string; name: string; poster?: string; /** 已记录的原图分辨率：加载前就按它定好显示尺寸，封面与原图都在最终位置出现，不再跳动。 */ size?: Size;
+  onLoad?: (image: HTMLImageElement) => void; onError: () => void;
   onImageSize?: (width: number, height: number, original: boolean) => void; nav?: PreviewNav; strip?: PreviewStrip;
 }) {
   const root = useRef<HTMLDivElement>(null), canvas = useRef<HTMLDivElement>(null);
@@ -40,7 +41,10 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
   const [ready, setReady] = useState<{ url: string; image: HTMLImageElement; size: Size; warm: boolean } | null>(null);
   const [coverReady, setCoverReady] = useState<{ url: string; image: HTMLImageElement; size: Size } | null>(null);
   const loaded = ready?.url === url && ready.image === original.current, warm = loaded && ready.warm;
-  const natural: (Size & { poster?: boolean }) | null = loaded ? ready.size : coverReady?.url === url && coverReady.image === cover.current ? { ...coverReady.size, poster: true } : null;
+  // 显示尺寸依次取：原图实际尺寸、已记录的分辨率、封面尺寸（封面只是占位，按比例推测原图大小）。
+  const known = size && size.width > 0 && size.height > 0 ? size : null;
+  const natural: (Size & { poster?: boolean }) | null = loaded ? ready.size : known ? known
+    : coverReady?.url === url && coverReady.image === cover.current ? { ...coverReady.size, poster: true } : null;
   const [backdrops, setBackdrops] = useState<string[]>([]);
   // 原图淡入结束前保留封面在下面，避免切换瞬间露出背景或跳动。
   const [faded, setFaded] = useState<string | null>(null);
@@ -238,7 +242,7 @@ export function ImageViewer({ url, name, poster, onLoad, onError, onImageSize, n
     <div className="image-backdrop" aria-hidden="true">{backdrops.map(snapshot => <div key={snapshot} className="image-backdrop-layer" style={{ backgroundImage: `url("${snapshot}")` } as CSSProperties} />)}</div>
     <div ref={canvas} className="image-canvas" onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}
       onDoubleClick={event => { if (view.scale > 1) setView(FIT); else zoomAt(Math.max(2.5, oneToOne), relative(event.clientX, event.clientY)); }}>
-      {!posterDone && poster && <img ref={cover} key={`${url}:${poster}`} className="image-poster" src={poster} alt="" aria-hidden="true" draggable={false} style={sized}
+      {!posterDone && poster && <img ref={cover} key={`${url}:${poster}`} className={`image-poster${sized ? " is-sized" : ""}`} src={poster} alt="" aria-hidden="true" draggable={false} style={sized}
         onLoad={event => coverLoaded(event.currentTarget)} />}
       <img ref={original} key={url} className="image-full" src={url} alt={name} draggable={false} style={{ ...sized, transform }}
         onLoad={event => imageLoaded(event.currentTarget)}

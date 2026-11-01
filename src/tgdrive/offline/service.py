@@ -36,9 +36,8 @@ log = logging.getLogger(__name__)
 COVER_PREFIX = ".tgdrive/offline-covers/"
 # 每个账号记住最近一次的保存位置（普通与私密分别记录），新建任务时默认使用；私密位置只在解锁后返回。
 DESTINATION_KEY = "offline.destination.{}"
-# 单次提交、队列容量与实际下载并发分别限制。
+# 单次提交的条目数有上限（整批校验与事务）；排队任务总数不设上限，实际下载并发由资源配置决定。
 MAX_CREATE_ITEMS = 1000
-MAX_PENDING_TASKS = 20_000
 ACTIVE = ("queued", "running", "interrupted")
 RETRY_DELAYS = (10, 30, 90)
 # 解析时探测来源文件信息（HEAD／GET 响应头）：单次上限、尝试次数、重试间隔与总时长（留在 30 秒的解析请求超时之内）。
@@ -64,6 +63,21 @@ def task_path(key: str) -> str:
             return original + key[len(prefix):].partition("/")[2]
     return key
 
+
+
+class _PendingKeys:
+    """同一存储桶里未完成任务占用的保存路径（加上本次新登记的）。任务数不设上限，所以按需逐个查询（offline_by_key 索引），
+    不把全部任务的路径读进内存——抓取脚本每个文件单独创建，读全表会让大批量提交越来越慢。"""
+
+    def __init__(self, db, bucket_id: int):
+        self.db, self.bucket_id, self.added = db, bucket_id, set()
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.added or self.db.execute(
+            "SELECT 1 FROM offline_tasks WHERE bucket_id=? AND key=? AND status!='completed' LIMIT 1", (self.bucket_id, key)).fetchone() is not None
+
+    def add(self, key: str) -> None:
+        self.added.add(key)
 
 
 def _stored_type(key: str, content_type: str | None) -> str | None:
@@ -417,10 +431,7 @@ class OfflineDownloads:
             decoded.append((value, key, self._cover_spec(item.get("cover"))))
         now, ids = time.time(), []
         with self.metadata.transaction() as db:
-            pending = db.execute("SELECT COUNT(*) FROM offline_tasks WHERE user_id=? AND status!='completed'", (user_id,)).fetchone()[0]
-            if pending + len(decoded) > MAX_PENDING_TASKS:
-                raise ValueError(f"未完成任务最多 {MAX_PENDING_TASKS} 个，请等待下载完成或清理不再需要的任务")
-            reserved = {row[0] for row in db.execute("SELECT key FROM offline_tasks WHERE bucket_id=? AND status!='completed'", (scope.bucket_id,))}
+            reserved = _PendingKeys(db, scope.bucket_id)
             for value, key, cover in decoded:
                 if key in reserved or db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone():
                     key = self.objects._free_name(db, scope.bucket_id, key, reserved)

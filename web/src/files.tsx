@@ -239,7 +239,7 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; /** 已记录的视频显示尺寸。 */ videoSize?: api.MediaSize; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing } & PlaybackProps;
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; /** 已记录的图片／视频显示尺寸：视频按它设播放器比例，图片按它在加载前就把封面与原图放到最终位置。 */ videoSize?: api.MediaSize; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing } & PlaybackProps;
 /** 文本编辑：只给本人有写权限的文件。key 是文件路径（保存后地址随版本变化，编辑器不重建）；load 递增时重新读取（换文件、外部改动、冲突后重新加载）。 */
 type TextEditing = { key: string; load: number; save: (data: Uint8Array, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void };
 export function FilePreview(props: PreviewProps) {
@@ -299,7 +299,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
   if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} videoSize={videoSize} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} rotation={rotation} onRotate={onRotate} onBufferSpeed={onBufferSpeed} />;
   if (mediaFailed) return fallback;
   // 原图从存储取回并解密需要时间：查看器先显示封面图占位，原图加载完成后淡入替换。
-  if (kind === "image") return <ImageViewer url={url} name={name} poster={poster} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
+  if (kind === "image") return <ImageViewer url={url} name={name} poster={poster} size={videoSize} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
   if (kind === "pdf") return error ? fallback : <PdfPreview url={url} name={name} onError={setError} />;
   if (kind === "text" || kind === "code") {
     if (error) return fallback;

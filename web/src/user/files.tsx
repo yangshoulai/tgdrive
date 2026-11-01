@@ -435,6 +435,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       { label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming({ kind: "folder", key }) },
       { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving([{ kind: "folder", key }]) },
       { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([{ kind: "folder", key }]) },
+      ...(canCacheFolders ? [{ label: "清除本机缓存", icon: "trash" as const, danger: true, divider: true, onSelect: () => cacheQueue?.removeFolders([key]) }] : []),
       { label: "删除", icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash([{ kind: "folder", key }]) },
     ];
   }
@@ -450,6 +451,12 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const canCacheFolders = Boolean(cacheQueue?.available && (!privateSpace || cacheQueue.privateReady));
   const selectedCacheFolders = canCacheFolders ? selectedEntries.filter(entry => entry.kind === "folder").map(entry => entry.key) : [];
   const canCacheSelection = Boolean(selectionCache.cacheable.length || selectedCacheFolders.length);
+  // 清除所选项目的本机缓存：有文件夹时连同文件夹（含子文件夹）里已缓存的文件一起统计后确认。
+  const canClearSelection = Boolean(selectionCache.cached.length || selectedCacheFolders.length);
+  function clearSelectedCache() {
+    if (selectedCacheFolders.length) cacheQueue?.removeFolders(selectedCacheFolders, selectionCache.cached);
+    else cacheQueue?.remove(selectionCache.cached);
+  }
   function cacheSelected() {
     if (selectedCacheFolders.length) setFolderCache({ prefixes: selectedCacheFolders, files: selectionCache.cacheable });
     else cacheQueue?.enqueueMany(selectionCache.cacheable);
@@ -572,7 +579,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving(selectedEntries) },
         { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring(selectedEntries) },
         ...(canCacheSelection ? [{ label: selectedCacheFolders.length ? "缓存所选项目到本机" : `缓存 ${selectionCache.cacheable.length} 个文件到本机`, icon: "monitor" as const, onSelect: cacheSelected }] : []),
-        ...(selectionCache.cached.length ? [{ label: `清除 ${selectionCache.cached.length} 个文件的本机缓存`, icon: "trash" as const, danger: true, divider: true, onSelect: () => cacheQueue?.remove(selectionCache.cached) }] : []),
+        ...(canClearSelection ? [{ label: selectedCacheFolders.length ? "清除所选项目的本机缓存" : `清除 ${selectionCache.cached.length} 个文件的本机缓存`, icon: "trash" as const, danger: true, divider: true, onSelect: clearSelectedCache }] : []),
         { label: `删除 ${selected.size} 项`, icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash(selectedEntries) },
       ];
     }
@@ -624,6 +631,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             {selectedEntries.length > 200 ? <Button size="sm" icon="download" onClick={downloadLimit}>下载</Button>
               : <ButtonLink variant="secondary" size="sm" shortcut="D" icon="download" href={downloadUrl(selectedEntries)}>下载</ButtonLink>}
             {canCacheSelection && <Button size="sm" icon="monitor" onClick={cacheSelected}>缓存到本机</Button>}
+            {canClearSelection && <Button size="sm" icon="trash" onClick={clearSelectedCache}>清除本机缓存</Button>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
             <Button size="sm" icon="move" shortcut="M" onClick={() => setMoving(selectedEntries)}>移动</Button>

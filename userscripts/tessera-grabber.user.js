@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.18.0
+// @version      0.19.0
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -1047,7 +1047,7 @@
   // LinkSwift's pacing: files per batch, whether one request carries the whole batch, and a pause between batches.
   const CLOUD_PACE = { baidu: { size: 50, many: true }, aliyun: { size: 3 }, quark: { size: 15, many: true }, uc: { size: 15, many: true } };
   const CLOUD_PAUSE = 1000;
-  const CLOUD_BATCH_LIMIT = 1000;  // 与 Tessera 单次创建任务上限（MAX_CREATE_ITEMS）一致
+  const CLOUD_BATCH_LIMIT = 1000;  // 每批文件数，与 Tessera 单次创建任务上限（MAX_CREATE_ITEMS）一致
   const CLOUD_DOWNLOAD_UA = {
     baidu: "pan.baidu.com",
     quark: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 QuarkPC/6.9.7.761 QuarkCloudDrivePC/6.9.7.761 quark-cloud-drive/2.5.40",
@@ -1176,8 +1176,8 @@
     }
     const primitive = value => typeof value === "string" && value.length <= 8192 || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value);
     const pick = (item, names) => Object.fromEntries(names.filter(key => primitive(item?.[key])).map(key => [key, item[key]]));
-    // 1001 = CLOUD_BATCH_LIMIT + 1 (this function also runs in the page realm, so it cannot read script constants).
-    const result = { available, overflow: selected.length > 1001, files: selected.slice(0, 1001).map(item => pick(item, fields.split(" "))) };
+    // 勾选数量不设上限：发送时按 CLOUD_BATCH_LIMIT 自动分批。
+    const result = { available, files: selected.map(item => pick(item, fields.split(" "))) };
     if (share && provider === "baidu") {
       const locals = view.locals?.dump?.() || {};
       const value = key => locals[key]?.value ?? locals[key];
@@ -1200,9 +1200,9 @@
       const code = `(() => { const node = document.currentScript; try { node.setAttribute("data-tessera-selection", JSON.stringify((${cloudReadSelection.toString()})(window, ${JSON.stringify(context.provider)}, ${JSON.stringify(fields)}, ${JSON.stringify(context.share)}))); } catch { node.setAttribute("data-tessera-selection", "{}"); } })();`;
       script = await gm.pageScript(code);
       const text = script?.getAttribute("data-tessera-selection");
-      if (!text || text.length > 8 * 1024 * 1024) throw new Error();
+      if (!text || text.length > 256 * 1024 * 1024) throw new Error();
       snapshot = JSON.parse(text);
-      if (typeof snapshot.available !== "boolean" || !Array.isArray(snapshot.files) || snapshot.files.length > CLOUD_BATCH_LIMIT + 1) throw new Error();
+      if (typeof snapshot.available !== "boolean" || !Array.isArray(snapshot.files)) throw new Error();
     } catch { throw new Error("脚本无法读取网盘页面的勾选状态，请更新脚本并刷新页面；若仍失败，请检查脚本管理器的页面脚本权限"); }
     finally { script?.remove(); }
     if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
@@ -1228,7 +1228,6 @@
     const [idKey, nameKey, sizeKey, fields] = CLOUD_LAYOUTS[context.provider];
     const snapshot = await cloudSelected(context);
     if (context.url !== location.href) throw new Error("网盘页面已切换，请重新勾选文件再试");
-    if (snapshot.overflow) throw new Error(`一次最多发送 ${CLOUD_BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
     let selectedFiles = snapshot.files;
     const isFile = item => item && item[idKey] != null && !item.isdir && !item.isFolder && !item.dirEtag && !item.caName
       && item.type !== "folder" && item.kind !== "drive#folder" && item.resType != 2 && item.file !== false && (item.Type == null || item.Type === 0)
@@ -1246,7 +1245,6 @@
     }
     const files = selectedFiles.filter(isFile);
     if (!files.length) throw new Error(folders.length ? "没有选择要发送的文件" : "请先在网盘中勾选文件或文件夹");
-    if (files.length > CLOUD_BATCH_LIMIT) throw new Error(`一次最多发送 ${CLOUD_BATCH_LIMIT} 个文件，请减少网盘中的勾选数量`);
     const unique = new Map();
     for (const item of files) {
       const file = Object.fromEntries(fields.split(" ").filter(key => ["string", "number", "boolean"].includes(typeof item[key]) && String(item[key]).length <= 8192).map(key => [key, item[key]]));
@@ -1422,8 +1420,7 @@
 
   // ---------- 网盘文件夹：列出内容，按树形结构挑选 ----------
   // 每个网盘用自己的列表接口（与取链同一套凭据与客户端身份），一层一层地读；读到的条目只保留 CLOUD_LAYOUTS 里的字段。
-  const CLOUD_TREE_FILES = 5000;   // 最多列出的文件数（超过时提示只显示前面部分）
-  const CLOUD_TREE_FOLDERS = 2000; // 最多展开的文件夹数
+  const CLOUD_TREE_PAGE = 200;     // 树里每次渲染的行数，文件夹内容很多时点「再显示」继续，避免一次创建几万个节点
   function cloudIsFolder(provider, item) {
     switch (provider) {
       case "baidu": return Boolean(Number(item.isdir));
@@ -1568,12 +1565,12 @@
 
   /**
    * 逐层列出所选文件夹（含子目录），建成树：文件夹 { dir, name, children, parent, total, checked, size, checkedSize, open }，
-   * 文件 { name, size, item, parent, checked }，默认全部选中。最多 CLOUD_TREE_FILES 个文件、CLOUD_TREE_FOLDERS 个文件夹。
+   * 文件 { name, size, item, parent, checked }，默认全部选中。数量不设上限。
    */
   async function cloudListTree(context, folders, looseFiles, shareData, onProgress = () => {}, cancelled = () => false) {
     const [, nameKey, sizeKey] = CLOUD_LAYOUTS[context.provider];
     const lister = cloudFolderLister(context);
-    const tree = { truncated: false, files: 0, folders: 0 };
+    const tree = { files: 0, folders: 0 };
     // 根节点与所选的顶层文件夹默认展开，更深的子目录点开再看。
     const makeDir = (name, parent) => ({ dir: true, name: cloudFolderSegment(name), children: [], parent, total: 0, checked: 0, size: 0, checkedSize: 0, open: !parent || !parent.parent });
     const root = tree.root = makeDir("", null);
@@ -1596,19 +1593,16 @@
         if (cancelled()) return tree;
         for (const child of result.items) {
           if (cloudIsFolder(context.provider, child)) {
-            if (tree.folders + queue.length >= CLOUD_TREE_FOLDERS) { tree.truncated = true; continue; }
             const dir = makeDir(child[nameKey], node);
             node.children.push(dir);
             queue.push({ item: cloudKeep(context.provider, child), node: dir });
-          } else if (tree.files >= CLOUD_TREE_FILES) tree.truncated = true;
-          else addFile(node, child);
+          } else addFile(node, child);
         }
         onProgress(tree);
         // 与 LinkSwift 相同的节奏：每 50 次列表请求停 3 秒，避免被网盘限流。
         if (++listed % 50 === 0) await cloudSleep(3000);
-        if (!result.more || tree.files >= CLOUD_TREE_FILES) break;
+        if (!result.more) break;
       }
-      if (tree.files >= CLOUD_TREE_FILES && tree.truncated) break;
     }
     return tree;
   }
@@ -1633,7 +1627,7 @@
     return new Promise(resolve => {
       if (!panel) return resolve(null);
       panel.layer?.close();
-      let cancelled = false, settled = false, root = null, truncated = false, fileCount = 0, folderCount = 0;
+      let cancelled = false, settled = false, root = null, fileCount = 0, folderCount = 0;
       const finish = value => { if (settled) return; settled = true; cancelled = true; closeLayer(); resolve(value); };
       const body = h("div", { className: "body tree-body" });
       const footer = h("footer", {});
@@ -1663,7 +1657,7 @@
       const progressed = tree => { fileCount = tree.files; folderCount = tree.folders; progress.textContent = `正在读取文件夹内容… 已找到 ${fileCount} 个文件、${folderCount} 个文件夹`; };
       void cloudListTree(context, folders, looseFiles, shareData, progressed, () => cancelled).then(tree => {
         if (cancelled) return;
-        ({ root, truncated } = tree); progressed(tree);
+        root = tree.root; progressed(tree);
         render();
       }, error => {
         if (cancelled) return;
@@ -1687,9 +1681,9 @@
         allBox.checked = root.total > 0 && root.checked === root.total;
         allBox.indeterminate = root.checked > 0 && root.checked < root.total;
         allMark.className = `check${allBox.checked ? " on" : allBox.indeterminate ? " on partial" : ""}`;
-        const over = root.checked > CLOUD_BATCH_LIMIT;
-        confirm.disabled = !root.checked || over;
-        confirm.textContent = over ? `一次最多 ${CLOUD_BATCH_LIMIT} 个文件` : `确定（${root.checked}）`;
+        const rounds = Math.ceil(root.checked / CLOUD_BATCH_LIMIT);
+        confirm.disabled = !root.checked;
+        confirm.textContent = rounds > 1 ? `确定（${root.checked}，分 ${rounds} 批）` : `确定（${root.checked}）`;
       };
       const setChecked = (node, value) => {
         const apply = item => {
@@ -1704,6 +1698,16 @@
         refreshSummary();
       };
       const allMark = h("span", { className: "check" }, svg("check", 12, 3));
+      // 分页渲染：先放前 CLOUD_TREE_PAGE 行，末尾的「再显示」按钮接着放下一段。
+      const appendRows = (container, nodes, depth, start = 0) => {
+        const end = Math.min(nodes.length, start + CLOUD_TREE_PAGE);
+        container.append(...nodes.slice(start, end).map(child => rowFor(child, depth)));
+        if (end < nodes.length) {
+          const more = h("button", { type: "button", className: "tree-more", style: `--depth:${depth}`,
+            onclick: () => { more.remove(); appendRows(container, nodes, depth, end); } }, `再显示 ${Math.min(CLOUD_TREE_PAGE, nodes.length - end)} 项（还有 ${nodes.length - end} 项）`);
+          container.append(more);
+        }
+      };
       const rowFor = (node, depth) => {
         node.box = h("input", { type: "checkbox", "aria-label": `${node.dir ? "文件夹" : "文件"} ${node.name}`, onchange: () => setChecked(node, node.box.checked) });
         node.mark = h("span", { className: "check" }, svg("check", 12, 3));
@@ -1716,7 +1720,7 @@
             node.open = open;
             toggle.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-label", `${open ? "收起" : "展开"} ${node.name}`);
             children.hidden = !open;
-            if (open && !children.firstChild) children.append(...node.children.map(child => rowFor(child, depth + 1)));
+            if (open && !children.firstChild) appendRows(children, node.children, depth + 1);
           };
           toggle.onclick = () => expand(!node.open);
           row.append(toggle, pick, svg("folder", 16), h("span", { className: "tree-name", title: node.name, ondblclick: () => expand(!node.open) }, node.name),
@@ -1735,9 +1739,10 @@
         allBox.onchange = () => setChecked(root, allBox.checked);
         const head = h("div", { className: "tree-head" }, h("label", { className: "pick tree-pick" }, allBox, allMark), h("span", { className: "tree-all" }, "全选"), h("span", { className: "spacer" }), summary);
         const parts = [head];
-        if (truncated) parts.push(h("p", { className: "warn" }, `文件夹内容过多，只列出了前 ${fileCount} 个文件${folderCount >= CLOUD_TREE_FOLDERS ? `、${CLOUD_TREE_FOLDERS} 个文件夹` : ""}；其余请打开子文件夹后分批发送。`));
         if (!root.total) parts.push(h("p", { className: "hint" }, "所选文件夹里没有文件。"));
-        parts.push(h("div", { className: "tree", role: "tree" }, root.children.map(child => rowFor(child, 0))));
+        const treeNode = h("div", { className: "tree", role: "tree" });
+        appendRows(treeNode, root.children, 0);
+        parts.push(treeNode);
         parts.push(h("p", { className: "hint" }, "保存时会在所选位置下按原来的文件夹结构建立子目录。"));
         body.replaceChildren(...parts);
         confirm.onclick = () => finish(cloudPickedFiles(root));
@@ -2435,6 +2440,8 @@
     .tree-row.is-dir .tree-name { font-weight: 500; cursor: default; }
     .tree-meta { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
     .tree-toggle, .tree-toggle-space { flex: none; width: 20px; height: 20px; }
+    .tree-more { display: block; margin: 4px 0 4px calc(var(--depth, 0) * 18px + 54px); padding: 4px 10px; border: 0; border-radius: 6px; background: var(--soft); color: var(--accent); font-size: 12px; cursor: pointer; }
+    .tree-more:hover { background: var(--hover); }
     .tree-toggle { display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); cursor: pointer; }
     .tree-toggle svg { transition: transform .12s; }
     .tree-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
@@ -2495,8 +2502,9 @@
     .batch-item .sub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; white-space: normal; }
     .batch-item .warn { font-size: 12px; }
     .batch-host > .dest { min-height: 0; }
-    .batch-note { display: flex; align-items: flex-start; gap: 8px; }
-    .batch-note > svg { margin-top: 2px; }
+    .batch-note, .rounds-note { display: flex; align-items: flex-start; gap: 8px; }
+    .batch-note > svg, .rounds-note > svg { flex: none; margin-top: 2px; }
+    .rounds-note { margin: 0 0 8px; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--fg); }
     @media (max-width: 560px) {
       header { padding-left: 16px; padding-right: 12px; }
       .body { padding: 16px; }
@@ -3833,15 +3841,19 @@
     const known = new Map(listed.map(item => [item.url, item]));
     const byUrl = new Map(wanted.map(source => [source.url, source]));
     const ordered = [...listed.filter(item => byUrl.has(item.url)).map(item => byUrl.get(item.url)), ...wanted.filter(source => !known.has(source.url))];
-    // 网盘选择一次最多 CLOUD_BATCH_LIMIT 个文件（与 LinkSwift 一样不在 50 处截断）；网页资源仍为 BATCH_LIMIT。
-    const limit = wanted.some(source => source.cloud) ? CLOUD_BATCH_LIMIT : BATCH_LIMIT;
-    batch = { started: false, mode, destination: savedDestination(), limit,
-      entries: ordered.slice(0, limit).map(({ url, platform, cloud, name, size, resent, folder }) => ({ url, platform: platform || null, cloud, resent: Boolean(resent), folder: folder || "",
-        type: known.get(url)?.type || (platform ? "video" : "file"), name: name || (mode === "local" ? defaultSaveName(url) : ""), sourceName: name || "", size,
-        state: mode === "server" ? "parsing" : "waiting", error: "", tasks: [] })) };
+    // 网盘选择不设数量上限（与 LinkSwift 一样不在 50 处截断），按 CLOUD_BATCH_LIMIT 自动分批：
+    // 确认页只列出第一批，开始后每批创建完任务再取下一批的直链（直链与解析票据都会过期，不能一次取完）。网页资源仍为 BATCH_LIMIT。
+    const cloud = wanted.some(source => source.cloud);
+    const all = (cloud ? ordered : ordered.slice(0, BATCH_LIMIT)).map(({ url, platform, cloud, name, size, resent, folder }) => ({ url, platform: platform || null, cloud, resent: Boolean(resent), folder: folder || "",
+      type: known.get(url)?.type || (platform ? "video" : "file"), name: name || (mode === "local" ? defaultSaveName(url) : ""), sourceName: name || "", size,
+      state: mode === "server" ? "parsing" : "waiting", error: "", tasks: [] }));
+    const first = cloud ? all.slice(0, CLOUD_BATCH_LIMIT) : all;
+    batch = { started: false, mode, destination: savedDestination(), limit: cloud ? CLOUD_BATCH_LIMIT : BATCH_LIMIT,
+      entries: first, deferred: all.slice(first.length), round: 1, rounds: Math.max(1, Math.ceil(all.length / (cloud ? CLOUD_BATCH_LIMIT : all.length || 1))), archivedOk: 0 };
     openBatch();
-    const resent = batch.entries.filter(entry => entry.resent).length;
-    if (resent) toast(resent === batch.entries.length ? "所选文件之前已发送过，确认后会再次下载" : `其中 ${resent} 个文件之前已发送过，不需要的可以移除`);
+    const resent = all.filter(entry => entry.resent).length;
+    if (resent) toast(resent === all.length ? "所选文件之前已发送过，确认后会再次下载" : `其中 ${resent} 个文件之前已发送过，不需要的可以移除`);
+    else if (batch.deferred.length) toast(`共 ${all.length} 个文件，将分 ${batch.rounds} 批自动发送`);
     if (mode === "server") void parseEntries(batch, batch.entries.slice());
   }
 
@@ -3896,7 +3908,7 @@
       const room = (current.limit || BATCH_LIMIT) - current.entries.length + 1;
       const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform, cloud: entry.cloud, sourceName: entry.sourceName, resent: entry.resent, folder: entry.folder || "",
         type: candidateType(variants[0], entry.type), variants, candidate: variants[0], name: entry.nameEdited ? entry.name : entry.sourceName || variants[0].name, nameEdited: Boolean(entry.nameEdited),
-        state: current.started ? "error" : "waiting", error: "", tasks: [] }));
+        autoRound: entry.autoRound, state: current.started && !entry.autoRound ? "error" : "waiting", error: "", tasks: [] }));
       current.entries.splice(index, 1, ...rows);
     } catch (error) {
       entry.state = "parse-error";
@@ -3954,13 +3966,15 @@
     || entry.state === "submitted" && entry.tasks.some(task => !TERMINAL.includes(task.status));
   const entryOk = entry => entry.state === "completed" || entry.state === "handoff" || entry.state === "submitted" && entry.tasks.length > 0 && entry.tasks.every(task => task.status === "completed");
   const entryFailed = entry => ["error", "stopped", "parse-error"].includes(entry.state) || entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped");
-  const batchDone = () => !batch || batch.started && !batch.entries.some(entryActive);
+  const pendingRounds = (current = batch) => current?.deferred?.length || 0;
+  const batchDone = () => !batch || batch.started && !batch.entries.some(entryActive) && !pendingRounds();
 
-  async function runBatch() {
+  async function runBatch(auto = false) {
     if (batch.running) return;
     const current = batch;
     if (current.mode === "local") for (const entry of current.entries) entry.name ??= defaultSaveName(entry.url);
-    const problem = batchNameProblems(current).values().next().value;
+    // 自动续发的批次沿用原文件名，不因前面批次里改坏的失败行而停下（服务器会为同名文件自动改名）。
+    const problem = auto ? null : batchNameProblems(current).values().next().value;
     if (problem) return toast(problem);
     const queue = current.entries.filter(entry => entry.state === "waiting");
     if (!queue.length) return toast("没有可保存的文件");
@@ -4014,6 +4028,37 @@
     current.running = false;
     if (current.transfer) { current.transfer.end(); current.transfer = null; }
     if (batch === current) updateBatch();
+    // 这一批的任务都创建好了：自动取下一批（私密空间每批要在 Tessera 页面确认，等用户点「发送下一批」）。
+    if (batch === current && pendingRounds(current) && !current.controller.signal.aborted && !current.destination.private) void nextRound(current);
+  }
+
+  /** 下一批：已下载完成的行收起为计数，取下一批文件获取直链、服务器解析，然后直接创建任务（沿用确认过的保存位置）。 */
+  async function nextRound(current) {
+    if (current.running || !pendingRounds(current) || batch !== current) return;
+    const done = current.entries.filter(entryOk);
+    current.archivedOk += done.length;
+    current.entries = current.entries.filter(entry => !done.includes(entry));
+    const chunk = current.deferred.splice(0, CLOUD_BATCH_LIMIT);
+    for (const entry of chunk) entry.autoRound = true;
+    current.round += 1;
+    current.entries.push(...chunk);
+    current.running = true;
+    updateBatch();
+    await parseEntries(current, chunk);
+    current.running = false;
+    if (batch !== current) return;
+    if (current.entries.some(entry => entry.autoRound && entry.state === "waiting")) return runBatch(true);
+    updateBatch();
+    if (!current.destination.private) return nextRound(current);
+  }
+
+  /** 放弃还没开始的批次（已创建的任务不受影响）。 */
+  function dropRounds() {
+    if (!batch || !pendingRounds()) return;
+    const count = batch.deferred.length;
+    batch.deferred = [];
+    toast(`已放弃剩余 ${count} 个文件`);
+    updateBatch();
   }
 
   async function uploadEntry(entry, current) {
@@ -4145,7 +4190,11 @@
     const ids = batch.entries.flatMap(entry => entry.tasks.filter(task => !TERMINAL.includes(task.status)).map(task => task.id));
     if (ids.length) {
       try {
-        const { tasks } = await api("GET", `/api/v1/downloads?ids=${ids.join(",")}`, undefined, { config: batch.config || settings() });
+        // 分批后可能同时跟踪上千个任务：每次请求最多 200 个编号，避免地址过长。
+        const tasks = [];
+        for (let index = 0; index < ids.length; index += 200)
+          tasks.push(...(await api("GET", `/api/v1/downloads?ids=${ids.slice(index, index + 200).join(",")}`, undefined, { config: batch.config || settings() })).tasks);
+        if (!batch) return;
         const fresh = new Map(tasks.map(task => [task.id, task]));
         for (const entry of batch.entries) entry.tasks = entry.tasks.map(task => fresh.get(task.id) || task);
         // 下载失败或被停止的资源不算已发送，下次全选时重新包含。
@@ -4163,8 +4212,9 @@
   }
 
   function batchSummary() {
-    const total = batch.entries.length;
-    const ok = batch.entries.filter(entryOk).length;
+    // 自动分批时：已收起的完成行与未开始的批次也计入总数。
+    const total = batch.entries.length + (batch.archivedOk || 0) + pendingRounds();
+    const ok = batch.entries.filter(entryOk).length + (batch.archivedOk || 0);
     const failed = batch.entries.filter(entryFailed).length;
     return { total, ok, failed, finished: batchDone() };
   }
@@ -4372,6 +4422,8 @@
           destinationRow(() => batch.destination, value => { batch.destination = value; rememberDestination(value); renderBatch(); }),
           h("div", { className: "section" },
             h("div", { className: "section-head" }, h("h2", {}, "保存的文件", h("span", { className: "count" }))),
+            pendingRounds() ? h("p", { className: "hint rounds-note" }, svg("rows", 14),
+              h("span", {}, `共 ${batch.entries.length + pendingRounds()} 个文件，分 ${batch.rounds} 批自动发送：下面是第 1 批（可改名、移除），之后每批在上一批创建好任务后自动获取直链并提交，沿用同一保存位置，按网盘原文件名保存。${batch.destination.private ? "保存到私密空间时每批都要在 Tessera 页面确认。" : ""}`)) : null,
             list),
           h("p", { className: "hint batch-note" }, svg(local ? "globe" : "download"), h("span", {}, batch.destination.private ? privateNote : local
             ? "由当前浏览器读取文件后上传，适合服务器被拒绝（防盗链、登录、人机验证）的资源。单文件最多 64 MiB；请保持网页打开，关闭面板后传输会继续。"
@@ -4393,10 +4445,10 @@
     syncChildren(target.querySelector(".batch-list"), batch.entries.map(batchRow));
     if (!batch.started) {
       const count = target.querySelector(".count");
-      count.textContent = String(batch.entries.length);
+      count.textContent = pendingRounds() ? `${batch.entries.length} / 共 ${batch.entries.length + pendingRounds()}` : String(batch.entries.length);
       const parsing = batch.entries.filter(entry => entry.state === "parsing").length;
       const failedParse = batch.entries.filter(entry => entry.state === "parse-error").length;
-      footer.querySelector(".selection").textContent = parsing ? `正在解析 ${parsing} 项` : failedParse ? `${failedParse} 项解析失败，开始时跳过` : `${batch.entries.length} 个文件`;
+      footer.querySelector(".selection").textContent = parsing ? `正在解析 ${parsing} 项` : failedParse ? `${failedParse} 项解析失败，开始时跳过` : pendingRounds() ? `第 1 批 ${batch.entries.length} 个 · 共 ${batch.rounds} 批` : `${batch.entries.length} 个文件`;
       syncBatchNames();
       return;
     }
@@ -4408,7 +4460,8 @@
     const icon = overview.querySelector(".status-icon");
     if (icon.dataset.icon !== head.icon) { icon.dataset.icon = head.icon; icon.replaceChildren(svg(head.icon, 18, head.icon === "check" ? 2.6 : 2)); }
     overview.querySelector("strong").textContent = head.title;
-    overview.querySelector(".sub").textContent = handedOff ? "私密空间 · 在 Tessera 页面确认" : `保存到「${destinationLabel(batch.destination)}」`;
+    const roundText = batch.rounds > 1 ? `第 ${batch.round} / ${batch.rounds} 批 · ` : "";
+    overview.querySelector(".sub").textContent = roundText + (handedOff ? "私密空间 · 在 Tessera 页面确认" : `保存到「${destinationLabel(batch.destination)}」`);
     // 统计胶囊：数量变化时才重建。
     const stats = overview.querySelector(".stats");
     const statKey = `${ok}:${failed}:${head.running}`;
@@ -4426,7 +4479,7 @@
     const failedEntries = batch.entries.filter(entry => entryFailed(entry) && !entryActive(entry));
     const switchable = !local && finished ? failedEntries.filter(entry => !entry.platform && browserEligible(entry)) : [];
     const clearable = batch.entries.some(entry => entryOk(entry));
-    const mode = `${finished ? "done" : "run"}:${failedEntries.length > 0}:${switchable.length > 0}:${Boolean(batch.running)}:${clearable}`;
+    const mode = `${finished ? "done" : "run"}:${failedEntries.length > 0}:${switchable.length > 0}:${Boolean(batch.running)}:${clearable}:${pendingRounds()}`;
     if (footer.dataset.mode === mode) { syncBatchNames(); return; }
     footer.dataset.mode = mode;
     const server = (batch.config || settings()).server.replace(/\/+$/, "");
@@ -4439,6 +4492,9 @@
       failedEntries.length ? h("button", { type: "button", className: "btn", "data-retry-failed": "", disabled: batch.running,
         onclick: () => retryEntries(batch.entries.filter(entry => entryFailed(entry) && !entryActive(entry))) }, "重试失败项") : null,
       local && !finished ? h("button", { type: "button", className: "btn", onclick: stopBatch }, "停止") : null,
+      pendingRounds() ? h("button", { type: "button", className: "btn ghost", title: "不再发送还没开始的批次，已创建的任务照常下载", onclick: dropRounds }, `放弃剩余 ${pendingRounds()} 个`) : null,
+      pendingRounds() && handedOff && !batch.running ? h("button", { type: "button", className: "btn primary", title: "获取下一批直链并转交 Tessera 页面确认",
+        onclick: () => void nextRound(batch) }, svg("send"), `发送下一批（第 ${batch.round + 1} / ${batch.rounds} 批）`) : null,
       clearable && (failedEntries.length || !finished) ? h("button", { type: "button", className: "btn ghost", title: "从列表移除已完成的项，保留失败项",
         onclick: () => clearEntries(batch.entries.filter(entryOk)) }, "清除已完成") : null,
       finished
