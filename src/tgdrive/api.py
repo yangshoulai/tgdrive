@@ -1111,6 +1111,34 @@ class UserApi:
         result = self.objects.move(self._scope(token), old, new, conflict)
         return {"moved": result.moved, "skipped": result.skipped}
 
+    @staticmethod
+    def move_pairs(items, path) -> list[tuple[str, str]]:
+        """批量移动的条目：[{from, to}]，按 path 规范化；条目数由 ObjectService.move_many 限制。"""
+        if not isinstance(items, list) or not all(
+                isinstance(item, dict) and isinstance(item.get("from"), str) and isinstance(item.get("to"), str) for item in items):
+            raise ValueError("items 必须为 {from, to} 数组")
+        return [(path(item["from"], directory=item["from"].endswith("/")), path(item["to"], directory=item["to"].endswith("/")))
+                for item in items]
+
+    @staticmethod
+    def move_results(moves: list[tuple[str, str]], results) -> dict[str, object]:
+        items: list[dict[str, object]] = []
+        for (old, _), result in zip(moves, results):
+            if isinstance(result, Exception):
+                items.append({"from": old, "error": str(result) or "移动失败"})
+            else:
+                items.append({"from": old, "moved": result.moved, "skipped": result.skipped})
+        return {"moved": sum(item.get("moved", 0) for item in items), "skipped": sum(item.get("skipped", 0) for item in items),
+                "results": items}
+
+    async def move_many(self, token: str, csrf: str, items, conflict: str = "skip") -> dict[str, object]:
+        """一次请求移动多项（同一事务、只提交一次）；每项单独报告结果，失败项不影响其余。"""
+        self._session(token, csrf=csrf, mutation=True)
+        scope = self._scope(token)
+        moves = self.move_pairs(items, self._path)
+        results = await self.objects.metadata.run_in_thread(self.objects.move_many, scope, moves, conflict)
+        return self.move_results(moves, results)
+
     async def copy(self, token: str, csrf: str, source: str, target: str) -> dict[str, object]:
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)

@@ -16,8 +16,9 @@ class ThumbnailPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.scope = Scope(7)
         self.worker = ThumbnailService.__new__(ThumbnailService)
         self.worker.objects = SimpleNamespace(head_object=Mock(return_value=self.info), _check_scope=Mock(),
-            engine=Mock(), set_thumbnail=AsyncMock(), finish_thumbnail_set=Mock())
-        self.worker.resources = SimpleNamespace(ffmpeg="ffmpeg", pressure=lambda: None)
+            engine=Mock(), set_thumbnail=AsyncMock(), finish_thumbnail_set=Mock(), media_sizes=Mock(return_value={}))
+        self.worker.resources = SimpleNamespace(ffmpeg="ffmpeg", detected={"memory_bytes": 2 * 1024**3}, pressure=lambda: None,
+                                                available_memory=lambda: None)
         self.worker.keystore = SimpleNamespace(unlocked=True)
         self.worker.cache = Mock()
         self.worker._pending, self.worker._leases, self.worker._history = OrderedDict(), {}, OrderedDict()
@@ -25,6 +26,7 @@ class ThumbnailPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.worker._active = self.worker._task = None
         self.worker._remote_bytes = 0
         self.worker._backfill_skip = {}
+        self.worker._unsuitable, self.worker._probed, self.worker._read_rate = OrderedDict(), OrderedDict(), None
         self.worker._has_thumbnail = Mock(return_value=False)
         self.worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
         self.worker._plan_backfill = AsyncMock(return_value=False)
@@ -42,7 +44,7 @@ class ThumbnailPolicyTests(unittest.IsolatedAsyncioTestCase):
         with self.source():
             await self.worker.generate(self.info, force=True, allow_remote=True)
         self.assertEqual(self.input.call_args.args[:3], (self.worker.objects.engine, self.info, self.worker._scope.return_value.authorize))
-        self.assertEqual(self.input.call_args.kwargs, {"cache_only": False})
+        self.assertEqual(self.input.call_args.kwargs, {"cache_only": False})  # 音频与文件大小无关，读取量不设上限
         self.worker.objects.set_thumbnail.assert_awaited_once()
 
     async def test_automatic_timeout_does_not_mark_file_as_unavailable(self):

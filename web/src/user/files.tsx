@@ -341,19 +341,26 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     } catch (reason) { if (version === uploadReadVersion.current) notify.error(api.errorMessage(reason, "无法读取文件夹，请重新选择")); }
     finally { if (version === uploadReadVersion.current) setReadingUpload(false); }
   }
-  /** 逐项移动；文件夹连同内容一起移动，公开链接随文件保留。 */
+  /** 批量移动（每批最多 MOVE_BATCH_LIMIT 项，一次请求）；文件夹连同内容一起移动，公开链接随文件保留。 */
   async function moveEntries(targets: Entry[], dest: string, conflict: api.MoveConflict = "rename") {
     const items = targets.filter(target => canMoveInto(target, dest));
     if (!items.length) { notify.info("所选项目已经在这个文件夹中"); return; }
     const destName = dest === root ? rootName : baseName(dest);
     let movedItems = 0, skippedFiles = 0;
     const failures: string[] = [];
-    for (const target of items) {
+    for (let start = 0; start < items.length; start += api.MOVE_BATCH_LIMIT) {
+      const batch = items.slice(start, start + api.MOVE_BATCH_LIMIT);
       try {
-        const result = await api.moveFile(target.key, `${dest}${baseName(target.key)}${target.kind === "folder" ? "/" : ""}`, conflict);
-        if (result.moved > 0) movedItems++;
-        skippedFiles += result.skipped;
-      } catch (reason) { failures.push(`${baseName(target.key)}：${api.errorMessage(reason, "移动失败，请稍后重试")}`); }
+        const result = await api.moveFiles(batch.map(target => ({ from: target.key, to: `${dest}${baseName(target.key)}${target.kind === "folder" ? "/" : ""}` })), conflict);
+        for (const item of result.results) {
+          if (item.error) failures.push(`${baseName(item.from)}：${item.error}`);
+          else if ((item.moved ?? 0) > 0) movedItems++;
+          skippedFiles += item.skipped ?? 0;
+        }
+      } catch (reason) {
+        const message = api.errorMessage(reason, "移动失败，请稍后重试");
+        failures.push(...batch.map(target => `${baseName(target.key)}：${message}`));
+      }
     }
     if (movedItems) notify.success(`已将 ${movedItems} 项移动到“${destName}”${skippedFiles ? `，${skippedFiles} 个同名文件已跳过` : ""}`);
     else if (skippedFiles) notify.error(`“${destName}”中已有同名文件，未移动任何项目`);

@@ -418,6 +418,12 @@ export const shareStatus = (token: string) => request<{ own: boolean }>(`/api/us
 export const saveShare = (token: string, destination: string, access: string | null, paths?: string[]) =>
   post<{ saved: number; bytes: number; items: string[] }>(`/api/user/v1/shares/${encodeURIComponent(token)}/save`, { destination, access, ...(paths ? { paths } : {}) });
 export const moveFile = (from: string, to: string, conflict: MoveConflict = "skip") => post<{ moved: number; skipped: number }>(fileApi("/move", from), { from, to, conflict });
+export type MoveItemResult = { from: string; moved?: number; skipped?: number; error?: string };
+/** 服务端一次最多移动的项数（ObjectService.MOVE_BATCH_LIMIT）。 */
+export const MOVE_BATCH_LIMIT = 1000;
+/** 批量移动：同一事务内依次执行，每项单独返回结果；所有条目须同在普通区域或同在私密空间。 */
+export const moveFiles = (items: { from: string; to: string }[], conflict: MoveConflict = "skip") =>
+  post<{ moved: number; skipped: number; results: MoveItemResult[] }>(fileApi("/move", items[0]?.from ?? ""), { items, conflict });
 export const copyFile = (from: string, to: string) => post<FileItem>(fileApi("/copy", from), { from, to });
 export type ShareOptions = { expires_at?: number | null; password?: string | null };
 export const setPublic = (paths: string[], isPublic: boolean, options: ShareOptions = {}) => post<{ objects: FileItem[] }>("/api/user/v1/public", { paths, public: isPublic, ...options });
@@ -709,7 +715,9 @@ export type ThumbnailJob = { id: string; kind: "image" | "video" | "audio"; stat
 export type ThumbnailBackfill = { age_seconds: number; pending: number };
 export type ThumbnailQueueStatus = { available: boolean; unlocked: boolean; pressure: string | null; jobs: ThumbnailJob[]; recent: ThumbnailJob[];
   cache: { bytes: number; limit_bytes: number; ttl_seconds: number }; remote_bytes: number; client_timeout_seconds: number; task_timeout_seconds: number; capacity: number; backfill: ThumbnailBackfill;
-  inline: { count: number; bytes: number; skipped_quota: number } };
+  inline: { count: number; bytes: number; skipped_quota: number };
+  /** 生成前资源评估：解码器内存上限、此刻可用内存（非 Linux 为 null）、最近的存储读取速度（字节／秒）与本次运行判定不适合的文件数。 */
+  limits?: { memory_cap: number; memory_available: number | null; read_rate: number | null; unsuitable: number } };
 export const thumbnailQueue = () => request<ThumbnailQueueStatus>("/api/admin/v1/maintenance/thumbnails");
 export const runCleanup = () => post<{ aborted_uploads: number; stale_blobs: number; expired_upload_records: number }>("/api/admin/v1/maintenance/cleanup");
 export const retryDeadGc = () => post<{ requeued: number }>("/api/admin/v1/maintenance/gc/retry");

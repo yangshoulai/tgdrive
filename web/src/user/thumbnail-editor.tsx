@@ -85,6 +85,9 @@ export function ImageUrlForm({ picker, disabled }: { picker: ImagePicker; disabl
 /** 更新缩略图：图片、视频、音频可以重新自动生成（上传或下载时没生成成功也能在这里补上）；
  * 任何文件都可以用一张本地图片或网络图片作为缩略图。图片在浏览器里缩放成三种规格后保存，原图不进入文件空间；
  * 网络图片由服务器代为读取，只接受常见图片格式。 */
+/** 图片超过服务器短期缓存（64 MiB）时生成要从存储读完整个文件，并按服务器内存评估；提示用户可能不会生成。 */
+const LARGE_IMAGE = 64 * 1024 * 1024;
+
 export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem; onClose: () => void; onSaved: (variants: string[]) => void }) {
   const media = thumbnailSource(file.key, file.content_type, file.size);
   const [source, setSource] = useState<Source>(media ? "auto" : "local");
@@ -114,7 +117,8 @@ export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem
     catch (reason) { setError(api.errorMessage(reason, "保存失败，请稍后重试")); setSaving(false); }
   }
 
-  /** 自动生成：交给服务器重新生成（与上传后的自动生成相同的流程，不限制文件大小）；服务器没有 FFmpeg 时改在这个页面读取文件生成。 */
+  /** 自动生成：交给服务器重新生成（与上传后的自动生成相同的流程）。服务器先按自己的内存与读取速度评估，不适合时直接说明原因，
+   *  不改在页面里读取原文件；只有服务器没有 FFmpeg 时才改在这个页面读取文件生成。 */
   async function generate() {
     if (!media || generation.current) return;
     const controller = new AbortController();
@@ -201,10 +205,15 @@ export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem
         <span><strong>{generating?.state === "running" ? generating.detail : generating?.state === "failed" ? "没有生成成功" : media ? "从文件内容重新生成" : "这类文件不能自动生成"}</strong>
           <small>{generating?.state === "failed" ? generating.detail
             : generating?.state === "running" ? "由服务器读取文件生成，文件较大时需要一些时间；关闭窗口不影响生成，完成后列表自动更新。"
+            : media === "image" && file.size >= LARGE_IMAGE ? "文件较大：服务器会先按自己的内存与读取速度评估，条件不适合时不会生成，可以改用本地图片或图片地址。"
             : media === "video" ? "在视频的多个位置寻找有内容的画面，跳过黑屏、白屏和纯色片头。"
             : media === "audio" ? "使用音频文件里内嵌的专辑封面；没有封面时请上传一张图片。"
             : media === "image" ? "按原图重新缩放出列表、网格与预览三种尺寸。"
-            : "只有图片、视频和音频可以从文件内容生成；其他文件请上传本地图片或填写图片地址。"}</small></span>
+            : "只有图片、视频和音频可以从文件内容生成；其他文件请上传本地图片或填写图片地址。"}</small>
+          {generating?.state === "failed" && <span className="thumbnail-auto-actions">
+            <Button size="sm" icon="upload" onClick={() => { setSource("local"); setGenerating(null); }}>改用本地图片</Button>
+            <Button size="sm" variant="ghost" icon="link" onClick={() => { setSource("url"); setGenerating(null); }}>填写图片地址</Button>
+          </span>}</span>
       </div> : source === "local" ? <LocalImageButton picker={picker} disabled={saving} dragging={dragging} onDragging={setDragging} />
         : <ImageUrlForm picker={picker} disabled={saving} />}
       {error && <Notice tone="danger">{error}</Notice>}

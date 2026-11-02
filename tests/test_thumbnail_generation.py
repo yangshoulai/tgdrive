@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -13,7 +14,7 @@ from tgdrive.errors import NotFoundError, NotReadyError
 from tgdrive.keystore import KeyStore
 from tgdrive.metadata import Metadata
 from tgdrive.objects import ObjectService, PRIVATE_PREFIX, Scope
-from tgdrive.thumbnails import MIB, ThumbnailError, ThumbnailRetry, ThumbnailService, _RangeInput, _Job, image_mime, video_frame_usable
+from tgdrive.thumbnails import MIB, ThumbnailError, ThumbnailRetry, ThumbnailService, ThumbnailUnsuitable, _RangeInput, _Job, image_mime, video_frame_usable
 from tgdrive.thumbnail_cache import ThumbnailCacheMiss
 
 
@@ -73,15 +74,16 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
 
     def worker(self):
         worker = ThumbnailService.__new__(ThumbnailService)
-        worker.resources = SimpleNamespace(ffmpeg="ffmpeg", detected={"memory_bytes": 1024**3}, pressure=lambda: None)
-        worker.objects = SimpleNamespace(THUMBNAIL_LIMITS={"thumb": 96 * 1024}, engine=Mock())
+        worker.resources = SimpleNamespace(ffmpeg="ffmpeg", detected={"memory_bytes": 1024**3}, pressure=lambda: None, available_memory=lambda: None)
+        worker.objects = SimpleNamespace(THUMBNAIL_LIMITS={"thumb": 96 * 1024}, engine=Mock(), media_sizes=lambda blobs: {})
+        worker._unsuitable, worker._probed, worker._read_rate = OrderedDict(), OrderedDict(), None
         return worker
 
     def source(self):
         return SimpleNamespace(url="http://127.0.0.1:9/input", origin="http://127.0.0.1:9", failure=None,
                                info=SimpleNamespace(blob_uuid="private-source-blob"), remote_bytes=0)
 
-    async def test_resident_memory_limit_is_retryable(self):
+    async def test_resident_memory_over_server_cap_is_unsuitable(self):
         exited = asyncio.Event()
         reader = asyncio.StreamReader()
         reader.feed_eof()
@@ -98,7 +100,7 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
         process.wait, process.kill = wait, kill
         with tempfile.TemporaryDirectory() as directory:
             with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)), \
-                    patch("tgdrive.thumbnails._resident", return_value=1024**3), self.assertRaises(ThumbnailRetry):
+                    patch("tgdrive.thumbnails._resident", return_value=1024**3), self.assertRaises(ThumbnailUnsuitable):
                 await self.worker()._render_frame(self.source(), "image", Path(directory), lambda: None)
         self.assertTrue(exited.is_set(), "超过内存上限时必须收回解码进程")
 
@@ -197,7 +199,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
                                  chunk_size=32, frame_size=8)
         self.objects = ObjectService(self.metadata, self.engine)
         self.scope = Scope(self.objects.create_bucket("thumbnail-tests"))
-        resources = SimpleNamespace(ffmpeg="ffmpeg", detected={"memory_bytes": 1024**3}, pressure=lambda: None)
+        resources = SimpleNamespace(ffmpeg="ffmpeg", detected={"memory_bytes": 1024**3}, pressure=lambda: None, available_memory=lambda: None)
         self.worker = ThumbnailService(SimpleNamespace(keystore=self.keys), self.objects, resources)
 
     async def asyncTearDown(self):

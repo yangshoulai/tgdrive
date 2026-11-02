@@ -23,7 +23,7 @@ const instrumented = source.replace(/\s+gm\.load\(\)\.then\([\s\S]*\}\);\s*\}\)\
     getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES,
     pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages, collect, addItem, checkNavigation, setActive: value => { active = value; },
     ready: gm.load(), gm, HAS_MENU, dormantFab, copy: text => gm.copy(text), openTab: url => gm.openTab(url),
-    nextRound, dropRounds, batchSummary, batchDone: () => batchDone(),
+    nextRound, dropRounds, batchSummary, batchDone: () => batchDone(), cloudBatchLimit, saveSettings, settings,
     lastTree: () => globalThis.lastTree, setPickTree: fn => { globalThis.pickTree = fn; }, createEntry, batchNameProblems,
     requestSize, wantSize, describe, noteMeta, timingSize, probeState: () => ({ probing, queued: probeQueue.length }) };
 })();`);
@@ -1017,7 +1017,7 @@ test("cloud selection snapshots are immutable and enforce the batch limit before
   assert.equal(item.name, "a.bin");
   files = Array.from({ length: 1000 }, (_, index) => ({ ...item, fileId: String(index) }));
   assert.equal((await h.api.cloudSources(h.api.cloudOf())).length, 1000, "LinkSwift does not stop at 50 files");
-  // 勾选数量不设上限，之后按 500 个一批自动发送。
+  // 勾选数量不设上限，之后按设置的每批文件数（默认 100，最多 500）自动发送。
   files = Array.from({ length: 12000 }, (_, index) => ({ ...item, fileId: String(index) }));
   assert.equal((await h.api.cloudSources(h.api.cloudOf())).length, 12000);
   assert.equal(h.requests.length, 0);
@@ -1522,6 +1522,52 @@ test("large cloud selections are sent in automatic rounds of 500", async () => {
   // 已完成的行收起为计数，列表只保留最后一批。
   assert.equal(h.api.getBatch().entries.length, 50);
   assert.deepEqual({ ...h.api.batchSummary(), finished: true }, { total: 1050, ok: 1050, failed: 0, finished: true });
+});
+
+test("cloud batch size is a setting: default 100, at most 500", async () => {
+  for (const manager of ["sync", "async"]) {
+    const h = harness({ manager });
+    await h.ready;
+    assert.equal(h.api.cloudBatchLimit(), 100, "旧设置没有这一项时默认每批 100 个");
+    h.api.saveSettings({ cloudBatch: 250 });
+    assert.equal(h.api.cloudBatchLimit(), 250);
+    assert.equal(h.api.settings().server, "https://tessera.example", "保存批大小不覆盖其他设置");
+    h.api.saveSettings({ cloudBatch: 5000 });
+    assert.equal(h.api.cloudBatchLimit(), 500, "超过上限按 500");
+    for (const value of [0, -3, 1.5, "abc", null]) {
+      h.api.saveSettings({ cloudBatch: value });
+      assert.equal(h.api.cloudBatchLimit(), 100, `非法值 ${value} 按默认值`);
+    }
+  }
+});
+
+test("later rounds keep the batch size the send started with", async () => {
+  let created = 0;
+  const h = harness({ gm: details => {
+    const url = new URL(details.url);
+    if (url.pathname === "/api/v1/downloads/parse") {
+      const name = JSON.parse(details.data).input.match(/file-(\d+)/)[1] + ".bin";
+      return details.onload({ status: 200, responseText: JSON.stringify({ candidates: [{ ticket: "t" + name, group: "", name, size: 1, warnings: [] }] }) });
+    }
+    if (url.pathname === "/api/v1/downloads" && details.method === "POST") {
+      created++;
+      return details.onload({ status: 200, responseText: JSON.stringify({ tasks: [{ id: created, status: "completed", key: "x" }] }) });
+    }
+    return details.onload({ status: 200, responseText: JSON.stringify({ tasks: [] }) });
+  } });
+  await h.ready;
+  const make = index => ({ url: `https://cdn.example/file-${index}`, type: "file", platform: null, name: "", sourceName: "", state: "parsing", error: "", tasks: [], folder: "" });
+  const all = Array.from({ length: 250 }, (_, index) => make(index));
+  const current = { mode: "server", started: false, destination: { path: "photos/", private: false }, limit: 100,
+    entries: all.slice(0, 100), deferred: all.slice(100), round: 1, rounds: 3, archivedOk: 0 };
+  h.api.setBatch(current);
+  // 发送途中改设置不影响这一轮的分批。
+  h.api.saveSettings({ cloudBatch: 500 });
+  await h.api.parseEntries(current, current.entries.slice());
+  await h.api.runBatch();
+  await until(() => created === 250 && h.api.getBatch().round === 3 && !h.api.getBatch().running);
+  assert.equal(h.api.getBatch().entries.length, 50);
+  assert.deepEqual({ ...h.api.batchSummary(), finished: true }, { total: 250, ok: 250, failed: 0, finished: true });
 });
 
 test("private cloud rounds wait for the user, and remaining rounds can be dropped", async () => {

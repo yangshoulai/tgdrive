@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import secrets
 import hashlib
+import shutil
 import tempfile
 import time
 from collections import OrderedDict
@@ -21,11 +23,12 @@ from .errors import NotFoundError, NotReadyError, QuotaExceededError
 from .filekinds import kind_clause, kind_of
 from .objects import PRIVATE_PREFIX, ObjectInfo, Scope
 from .thumbnail_cache import ThumbnailCache, ThumbnailCacheMiss
+from .work import WorkBusyError
 
 
 log = logging.getLogger("tgdrive.thumbnails")
 MIB = 1024 * 1024
-# 只用来回收卡死的解码器（损坏文件、存储长时间无响应），不是读取量或文件大小的限制；用户请求和后台任务一致。
+# 回收卡死的解码器（损坏文件、存储长时间无响应）；资源评估也按它判断读完整张图片是否来得及。用户请求和后台任务一致。
 TIMEOUT = 600
 CLIENT_TIMEOUT = 90
 # 网页预览图片／视频时浏览器手里已有解码好的画面，先等它生成；超时后后台再用同一批已接收的密文接管。
@@ -58,6 +61,22 @@ DECODER_ERRORS = (
 )
 # 一次性清理：修复前运行环境问题会被误记为「无法生成」，升级后清掉这些记录让补图重新处理。
 REPAIR_KEY = "thumbnails.repair"
+# 资源评估：生成前按这台服务器此刻的内存、临时目录与读取速度判断是否适合，不设固定的文件大小门槛。
+# 估算系数来自实测（同一滤镜图、单线程，误差约 5%）：图片约「像素 × 解码后每像素字节数 + 文件大小 × 2」（管道解封装器
+# 把整个文件攒成一个数据包；JPEG 4:2:0 为 1.5、4:4:4 为 3，PNG 按位深与颜色类型），视频由分辨率与参考帧决定、
+# 与文件大小无关（4K 实测 125–325 MiB，按 16 帧 × 1.5 字节／像素估算）。
+DECODE_BASE = 40 * MIB
+IMAGE_BYTES_PER_PIXEL = 4  # 文件头里读不出解码格式时按 RGBA 估算
+VIDEO_BYTES_PER_PIXEL = 24
+# FFmpeg 的 av_image_check_size：(宽 + 128) × (高 + 128) 必须小于 INT_MAX / 8，超过的画面根本无法解码。
+PIXEL_LIMIT = (2**31 - 1) // 8
+# 生成时给服务其他部分留出的内存与临时目录空间。
+MEMORY_RESERVE = 128 * MIB
+TEMP_RESERVE = 64 * MIB
+# 没有记录尺寸的图片只读文件开头解析宽高（不解码画面）。
+HEADER_BYTES = 512 * 1024
+# 本进程记住的「这台服务器不适合生成」的 Blob 数量上限；重启后按已记录的尺寸重新评估，代价很小。
+UNSUITABLE_LIMIT = 4096
 # 自定义缩略图可以填写图片地址，由服务器经受控出站客户端读取后交给网页处理。
 FETCH_LIMIT = 50 * MIB
 FETCH_TIMEOUT = 30
@@ -81,6 +100,134 @@ class ThumbnailError(Exception):
 
 class ThumbnailRetry(ThumbnailError):
     """暂时无法继续（服务器资源不足、已读分片缓存被回收），稍后可以再试，不能记为「无法生成」。"""
+
+
+class ThumbnailUnsuitable(ThumbnailError):
+    """按这台服务器的资源条件不适合生成（所需内存超过上限、画面超过解码器上限）：自动流程不再尝试。
+    不记为「无法生成」，浏览器预览时仍可用已加载的画面生成，用户也可以上传图片作为缩略图。"""
+
+
+def _size_text(value: int) -> str:
+    return f"{value / 1024 ** 3:.1f} GB" if value >= 1024 ** 3 else f"{max(1, round(value / MIB))} MB"
+
+
+def decode_estimate(kind: str, size: int, dims: tuple[int, int] | None, bpp: float | None = None) -> int:
+    """估算生成缩略图时解码器的内存峰值。bpp 是图片解码后每像素的字节数（未知按 4）；
+    尺寸未知时只计入能确定的部分，由运行中的内存巡检兜底。"""
+    pixels = dims[0] * dims[1] if dims else 0
+    if kind == "image":
+        return DECODE_BASE + 2 * size + int(pixels * (IMAGE_BYTES_PER_PIXEL if bpp is None else bpp))
+    if kind == "video":
+        return DECODE_BASE + pixels * VIDEO_BYTES_PER_PIXEL
+    return DECODE_BASE
+
+
+def _boxes(data: bytes, start: int, end: int):
+    """ISO BMFF（AVIF／HEIF）盒子：(类型, 内容起点, 终点)；被截断的盒子只给出已读到的部分。"""
+    while start + 8 <= end:
+        size, kind, header = int.from_bytes(data[start:start + 4], "big"), data[start + 4:start + 8], 8
+        if size == 1:
+            size, header = int.from_bytes(data[start + 8:start + 16], "big"), 16
+        elif size == 0:
+            size = end - start
+        if size < header:
+            return
+        yield kind, start + header, min(start + size, end)
+        start += size
+
+
+def image_size(data: bytes) -> tuple[int, int] | None:
+    header = image_header(data)
+    return header[:2] if header else None
+
+
+def image_header(data: bytes) -> tuple[int, int, float | None] | None:
+    """只解析文件开头的图片头部，取得宽、高与解码后每像素的字节数（读不出时为 None），不解码画面；
+    格式不认识或头部不完整时返回 None。"""
+    bpp = None
+    try:
+        if data.startswith(b"\x89PNG\r\n\x1a\n") and data[12:16] == b"IHDR":
+            size = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+            # 颜色类型 → 通道数；调色板解码为 8 位索引。
+            channels = {0: 1, 2: 3, 3: None, 4: 2, 6: 4}.get(data[25])
+            bpp = 1 if data[25] == 3 else channels * max(8, data[24]) / 8 if channels else None
+        elif data[:6] in (b"GIF87a", b"GIF89a"):
+            size = int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")
+        elif data[:2] == b"BM" and len(data) >= 26:
+            if int.from_bytes(data[14:18], "little") == 12:
+                size = int.from_bytes(data[18:20], "little"), int.from_bytes(data[20:22], "little")
+            else:
+                size = (abs(int.from_bytes(data[18:22], "little", signed=True)),
+                        abs(int.from_bytes(data[22:26], "little", signed=True)))
+                if len(data) >= 30:
+                    bpp = max(1, int.from_bytes(data[28:30], "little") // 8)
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            chunk = data[12:16]
+            if chunk == b"VP8X":
+                size = 1 + int.from_bytes(data[24:27], "little"), 1 + int.from_bytes(data[27:30], "little")
+            elif chunk == b"VP8 " and data[23:26] == b"\x9d\x01\x2a":
+                size = int.from_bytes(data[26:28], "little") & 0x3FFF, int.from_bytes(data[28:30], "little") & 0x3FFF
+            elif chunk == b"VP8L" and data[20] == 0x2F:
+                bits = int.from_bytes(data[21:25], "little")
+                size = (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+            else:
+                return None
+        elif data.startswith(b"\xff\xd8"):
+            index, size = 2, None
+            while size is None:
+                if index + 9 > len(data) or data[index] != 0xFF:
+                    return None
+                marker = data[index + 1]
+                if marker == 0xFF:
+                    index += 1
+                elif marker == 0x01 or 0xD0 <= marker <= 0xD8:
+                    index += 2
+                elif marker == 0xDA:
+                    return None
+                elif 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    size = int.from_bytes(data[index + 7:index + 9], "big"), int.from_bytes(data[index + 5:index + 7], "big")
+                    # 各分量的采样因子决定解码后的平面大小：4:2:0 为 1.5 字节／像素，4:4:4 为 3。
+                    count = data[index + 9]
+                    factors = [(data[index + 11 + 3 * n] >> 4, data[index + 11 + 3 * n] & 15) for n in range(count)]
+                    widest, tallest = max(h for h, _ in factors), max(v for _, v in factors)
+                    if widest and tallest:
+                        bpp = sum(h * v for h, v in factors) / (widest * tallest) * max(1, data[index + 4] // 8)
+                else:
+                    index += 2 + int.from_bytes(data[index + 2:index + 4], "big")
+        elif data[:4] in (b"II*\x00", b"MM\x00*"):
+            order = "little" if data[:2] == b"II" else "big"
+            offset = int.from_bytes(data[4:8], order)
+            values = {}
+            for entry in range(int.from_bytes(data[offset:offset + 2], order)):
+                start = offset + 2 + entry * 12
+                if start + 12 > len(data):
+                    break
+                tag, kind = int.from_bytes(data[start:start + 2], order), int.from_bytes(data[start + 2:start + 4], order)
+                values[tag] = int.from_bytes(data[start + 8:start + (10 if kind == 3 else 12)], order)
+            size = values.get(256, 0), values.get(257, 0)
+        elif data[4:8] == b"ftyp":
+            # AVIF／HEIF：meta → iprp → ipco 中的 ispe；网格图片取最大的一项（整张画面）。
+            size = (0, 0)
+            for kind, start, end in _boxes(data, 0, len(data)):
+                if kind != b"meta":
+                    continue
+                for child, child_start, child_end in _boxes(data, start + 4, end):
+                    if child != b"iprp":
+                        continue
+                    for group, group_start, group_end in _boxes(data, child_start, child_end):
+                        if group != b"ipco":
+                            continue
+                        for prop, prop_start, prop_end in _boxes(data, group_start, group_end):
+                            if prop == b"ispe" and prop_end - prop_start >= 12:
+                                found = (int.from_bytes(data[prop_start + 4:prop_start + 8], "big"),
+                                         int.from_bytes(data[prop_start + 8:prop_start + 12], "big"))
+                                if found[0] * found[1] > size[0] * size[1]:
+                                    size = found
+        else:
+            return None
+    except (IndexError, ValueError, ZeroDivisionError):
+        return None
+    return (*size, bpp) if size and size[0] > 0 and size[1] > 0 else None
 
 
 def video_frame_usable(pixels: bytes) -> bool:
@@ -223,9 +370,10 @@ class _RangeInput:
                     self.authorize()
                     # 分窗口流式交付，不把完整文件放入内存。
                     stop = min(end, start + MIB)
+                    # 缩略图是后台工作：读取名额给前台下载、预览与播放留一个。
                     async with aclosing(self.engine.stream(self.info.blob_uuid, start, stop,
                                                           window=MIB, bucket_id=self.info.bucket_id,
-                                                          cache_only=self.cache_only,
+                                                          cache_only=self.cache_only, background=True,
                                                           read_budget=None if self.cache_only else self._charge)) as source:
                         async for piece in source:
                             self.authorize()
@@ -287,6 +435,9 @@ class ThumbnailService:
         self._remote_bytes = 0
         # 补图扫描的键集游标、下一次扫描时间与暂时失败后推迟重试的 Blob（进程内，重启后重新尝试）。
         self._backfill_cursor, self._backfill_at, self._backfill_skip = (0, ""), 0.0, {}
+        # 资源评估：不适合这台服务器的 Blob 与原因、从文件头读到的图片尺寸（进程内，有上限）、最近的存储读取速度。
+        self._unsuitable, self._probed = OrderedDict(), OrderedDict()
+        self._read_rate = None
 
     def _dispatch(self, action, *args):
         loop = self._loop
@@ -325,7 +476,7 @@ class ThumbnailService:
         return self.metadata.db.execute("SELECT 1 FROM thumbnails WHERE blob_uuid=? LIMIT 1", (blob,)).fetchone() is not None
 
     def enqueue(self, info: ObjectInfo, scope: Scope | None = None):
-        if self._eligible(info):
+        if self._eligible(info) and info.blob_uuid not in self._unsuitable:
             delay = CLIENT_TIMEOUT if scope and scope.thumbnail_client else 1
             self._dispatch(self._enqueue, _Job(info, time.monotonic() + delay,
                 state="waiting_client" if delay == CLIENT_TIMEOUT else "queued",
@@ -563,6 +714,12 @@ class ThumbnailService:
             raise ValueError("此文件不支持生成缩略图")
         if not self.resources.ffmpeg:
             raise ValueError("服务器未安装 FFmpeg，无法在服务器生成")
+        # 已知尺寸时当场评估，不适合就直接说明原因，不进入队列；尺寸未知的图片在任务里读文件头后再评估。
+        try:
+            self._plan(info, source_kind(info), *self._known(info), remote=True)
+        except ThumbnailError as exc:
+            raise ValueError(str(exc)) from None
+        self._unsuitable.pop(info.blob_uuid, None)
         self._history.pop(info.blob_uuid, None)
         self._enqueue(_Job(info, force=True, remote=True, detail="用户请求生成"))
         return {"accepted": True}
@@ -642,7 +799,8 @@ class ThumbnailService:
             # 游标只越过已经看过的文件；名额满时这一页剩下的文件下次接着处理，不能等到下一轮。
             self._backfill_cursor = (info.bucket_id, info.key)
             blob = info.blob_uuid
-            if not self._eligible(info) or blob in self._pending or blob in self._leases or blob in self._backfill_skip:
+            if (not self._eligible(info) or blob in self._pending or blob in self._leases or blob in self._backfill_skip
+                    or blob in self._unsuitable):
                 continue
             added = self._enqueue(_Job(info, remote=True, backfill=True, detail="自动补图：从存储读取")) or added
         return added
@@ -674,6 +832,8 @@ class ThumbnailService:
                 "cache": self.cache.status(), "remote_bytes": self._remote_bytes,
                 "client_timeout_seconds": CLIENT_TIMEOUT, "task_timeout_seconds": TIMEOUT,
                 "capacity": 128, "backfill": self.backfill_status(),
+                "limits": {"memory_cap": self._memory_cap(), "memory_available": self.resources.available_memory(),
+                           "read_rate": round(self._read_rate) if self._read_rate else None, "unsuitable": len(self._unsuitable)},
                 "inline": self.objects.inline_thumbnails()}
 
     async def _run(self):
@@ -708,6 +868,7 @@ class ThumbnailService:
                             if isinstance(failure_detail, str):
                                 self._record(job, "failed", failure_detail)
                             else:
+                                self._unsuitable.pop(blob, None)
                                 self._record(job, "done", "自动补图完成" if job.backfill else "缩略图处理完成")
                             self.cache.drop(blob)
                         except ThumbnailCacheMiss:
@@ -726,7 +887,10 @@ class ThumbnailService:
                                 raise
                         except Exception as exc:
                             self._pending.pop(blob, None)
-                            if job.backfill and not isinstance(exc, (NotFoundError, PermissionError)):
+                            if isinstance(exc, ThumbnailUnsuitable):
+                                # 这台服务器的资源条件不适合：本进程内自动流程不再尝试，用户请求时重新评估。
+                                self._remember(self._unsuitable, blob, str(exc))
+                            elif job.backfill and not isinstance(exc, (NotFoundError, PermissionError)):
                                 # 资源、额度、网络和解码错误都可能恢复，不得据此永久跳过文件。
                                 self._backfill_skip[blob] = time.monotonic() + BACKFILL_RETRY
                             if not isinstance(exc, (ThumbnailError, TimeoutError, NotFoundError, PermissionError)):
@@ -774,8 +938,9 @@ class ThumbnailService:
         return scope
 
     async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False) -> str | None:
-        """生成并保存缩略图。用户请求、自动补图与已收数据任务走同一流程：不限制文件大小或读取量，
-        allow_remote 只决定缓存不足时能否从存储读取。只有确实没有可用图片才记录 none；运行异常交给队列延后重试。"""
+        """生成并保存缩略图。用户请求、自动补图与已收数据任务走同一流程：开始前按服务器此刻的内存、临时空间与读取速度
+        评估（_plan），不适合或暂时不行就不启动解码器；allow_remote 只决定缓存不足时能否从存储读取。
+        只有确实没有可用图片才记录 none；资源不适合不记 none（浏览器预览仍可生成），运行异常交给队列延后重试。"""
         kind = source_kind(info)
         if not self._eligible(info) or not self.resources.ffmpeg:
             return
@@ -783,13 +948,24 @@ class ThumbnailService:
         self.cache.prepare(info.blob_uuid, info.key, info.content_type)
         if not force and self._has_thumbnail(info.blob_uuid):
             return
+        if not force and info.blob_uuid in self._unsuitable:
+            raise ThumbnailUnsuitable(self._unsuitable[info.blob_uuid])
+        if kind == "image" and not allow_remote and info.size > self.cache.per_blob:
+            # 解码图片要读完整个文件，短期缓存装不下时只用缓存必然失败；交给自动补图或用户请求评估后再读取存储。
+            raise ThumbnailRetry("图片超过服务器的短期缓存，稍后由自动补图评估后从存储读取")
         async with asyncio.timeout(TIMEOUT):
+            self._plan(info, kind, *await self._dimensions(info, kind, allow_remote), remote=allow_remote)
+            started = time.monotonic()
             async with _RangeInput(self.objects.engine, info, scope.authorize, cache_only=not allow_remote) as source:
                 try:
                     with tempfile.TemporaryDirectory(prefix="tessera-thumbnail-") as directory:
                         images = await self._render(source, kind, Path(directory), scope.authorize)
+                except WorkBusyError:
+                    raise ThumbnailRetry("文件读取名额繁忙，稍后再生成") from None
                 finally:
-                    self._remote_bytes += source.remote_bytes if isinstance(source.remote_bytes, int) else 0
+                    remote = source.remote_bytes if isinstance(source.remote_bytes, int) else 0
+                    self._remote_bytes += remote
+                    self._observe_rate(remote, time.monotonic() - started)
             scope.authorize()
             if not force and self._has_thumbnail(info.blob_uuid):
                 return
@@ -813,6 +989,95 @@ class ThumbnailService:
                     break
             if force:
                 self.objects.finish_thumbnail_set(scope, info.key, saved)
+
+    @staticmethod
+    def _remember(store, key, value):
+        store[key] = value
+        store.move_to_end(key)
+        while len(store) > UNSUITABLE_LIMIT:
+            store.popitem(last=False)
+
+    def _memory_cap(self):
+        """缩略图解码器最多可用的内存：至少 512 MiB，大内存服务器放宽到一半。超过它的文件在这台服务器上不生成。"""
+        return max(512 * MIB, (self.resources.detected["memory_bytes"] or 0) // 2)
+
+    def _reserve(self):
+        """生成期间给服务其他部分留出的内存；小内存服务器按总量的八分之一。"""
+        return min(MEMORY_RESERVE, (self.resources.detected["memory_bytes"] or 0) // 8) or MEMORY_RESERVE
+
+    def _observe_rate(self, size, seconds):
+        """记录从存储读取原文件的实际速度（含解码耗时），评估大图片能否在单次处理时限内读完。"""
+        if size >= 8 * MIB and seconds >= 1:
+            rate = size / seconds
+            self._read_rate = rate if self._read_rate is None else (self._read_rate + rate) / 2
+
+    def _known(self, info):
+        """评估用的（尺寸, 每像素字节数）。图片以文件头为准（解码按未旋转的原始尺寸），没有读过时退回已记录的显示尺寸，
+        每像素字节数记为 0：只按能确定的部分（文件大小、像素上限）评估，其余等任务读取文件头后再判断。"""
+        probed = self._probed.get(info.blob_uuid)
+        if probed:
+            return probed[:2], probed[2]
+        recorded = self.objects.media_sizes([info.blob_uuid]).get(info.blob_uuid)
+        return recorded, 0 if recorded and source_kind(info) == "image" else None
+
+    def _plan(self, info, kind, size, bpp=None, *, remote):
+        """按这台服务器此刻的条件评估能否生成，返回估算的内存峰值，不设固定的文件大小门槛。
+        超过解码器像素上限或本机内存上限抛 ThumbnailUnsuitable（自动流程不再尝试）；
+        可用内存、临时目录空间不足或按最近读取速度读不完抛 ThumbnailRetry（稍后再试）。"""
+        if size and (size[0] + 128) * (size[1] + 128) >= PIXEL_LIMIT:
+            raise ThumbnailUnsuitable(f"画面 {size[0]}×{size[1]} 超过解码器的像素上限，不生成缩略图；可以改用本地图片或图片地址")
+        need, cap = decode_estimate(kind, info.size, size, bpp), self._memory_cap()
+        if need > cap:
+            raise ThumbnailUnsuitable(f"生成预计需要约 {_size_text(need)} 内存，超过这台服务器允许缩略图使用的 {_size_text(cap)}，"
+                                      "不生成缩略图；可以改用本地图片或图片地址")
+        available = self.resources.available_memory()
+        if available is not None and need > available - self._reserve():
+            raise ThumbnailRetry(f"服务器当前可用内存约 {_size_text(available)}，生成预计需要约 {_size_text(need)}，稍后再试")
+        try:
+            free = shutil.disk_usage(tempfile.gettempdir()).free
+        except OSError:
+            free = None
+        if free is not None and free < TEMP_RESERVE:
+            raise ThumbnailRetry("服务器临时目录剩余空间不足，稍后再试")
+        if kind == "image" and remote and self._read_rate and info.size > self.cache.per_blob:
+            seconds = info.size / self._read_rate
+            if seconds > TIMEOUT * 0.8:
+                raise ThumbnailRetry(f"按最近的读取速度，读完整张图片约需 {math.ceil(seconds / 60)} 分钟，"
+                                     f"超过单次处理上限 {TIMEOUT // 60} 分钟，稍后再试")
+        return need
+
+    async def _dimensions(self, info, kind, allow_remote):
+        """评估用的（尺寸, 每像素字节数）。图片总是先读文件开头 512 KiB 解析头部（不解码画面）：生成本来就要读完整个文件，
+        这点额外读取可以忽略；读不出时退回已记录的显示尺寸并按 4 字节／像素估算。视频、音频用已记录的尺寸。
+        读到的结果只留在进程内供评估使用，不写入 blobs：文件头不含 EXIF 旋转，写进去会让预览按错误的方向布局。"""
+        if kind != "image":
+            return self._known(info)
+        if info.blob_uuid in self._probed:
+            return self._known(info)
+        data = await self._read(info, 0, min(info.size, HEADER_BYTES), allow_remote)
+        header = image_header(data)
+        if header is None and data[:4] in (b"II*\x00", b"MM\x00*"):
+            # TIFF 的首个目录可以放在文件末尾：只再读那一小段。
+            order = "little" if data[:2] == b"II" else "big"
+            offset = int.from_bytes(data[4:8], order)
+            if len(data) <= offset < info.size:
+                block = await self._read(info, offset, min(info.size, offset + 4096), allow_remote)
+                header = image_header(data[:4] + (8).to_bytes(4, order) + block)
+        if header is None:
+            return self.objects.media_sizes([info.blob_uuid]).get(info.blob_uuid), None
+        self._remember(self._probed, info.blob_uuid, header)
+        return header[:2], header[2]
+
+    async def _read(self, info, start, end, allow_remote):
+        def charge(_ref, size):
+            self._remote_bytes += size
+        data = bytearray()
+        async with aclosing(self.objects.engine.stream(info.blob_uuid, start, end, window=MIB, bucket_id=info.bucket_id,
+                                                      cache_only=not allow_remote, background=True,
+                                                      read_budget=None if not allow_remote else charge)) as source:
+            async for piece in source:
+                data.extend(piece)
+        return bytes(data)
 
     async def _render(self, source, kind, directory, authorize):
         if kind != "video":
@@ -878,8 +1143,9 @@ class ThumbnailService:
         quality = asyncio.create_task(samples()) if kind == "video" else None
         # 按实际占用的物理内存（RSS）巡检，不用 RLIMIT_AS：FFmpeg 7 为每路输入、输出和滤镜各开线程，
         # 加上动态库映射，虚拟地址空间远大于实际用量，限制地址空间会让它在加载库或创建线程时直接失败。
-        # 这是保护服务器的资源上限（超出只推迟重试），不是按文件大小拒绝：至少 512 MiB，大内存服务器放宽到一半。
-        memory = max(512 * MIB, (self.resources.detected["memory_bytes"] or 0) // 2)
+        # 生成前已按估算评估过；这里按实际用量兜底：超过本机上限说明这个文件不适合这台服务器，
+        # 服务器整体可用内存见底时先停下让出资源，稍后再试。
+        memory, reserve = self._memory_cap(), self._reserve()
         try:
             while not waiting.done():
                 authorize()
@@ -888,7 +1154,11 @@ class ThumbnailService:
                 if self.resources.pressure():
                     raise ThumbnailRetry("服务器资源不足，稍后再生成")
                 if _resident(process.pid) > memory:
-                    raise ThumbnailRetry("解码所需内存超过上限，稍后再生成")
+                    raise ThumbnailUnsuitable(f"解码实际占用的内存超过这台服务器允许缩略图使用的 {_size_text(memory)}，"
+                                              "已停止，不生成缩略图；可以改用本地图片或图片地址")
+                available = self.resources.available_memory()
+                if available is not None and available < reserve // 2:
+                    raise ThumbnailRetry("服务器可用内存不足，已停止生成，稍后再试")
                 await asyncio.wait({waiting}, timeout=0.25)
             output = await stderr
             if source.failure:

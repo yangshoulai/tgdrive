@@ -244,6 +244,14 @@ class KeyApi:
         result = self.objects.move(scope, old, new, conflict)
         return {"moved": result.moved, "skipped": result.skipped}
 
+    async def move_many(self, principal: KeyPrincipal, bucket: str | None, items, conflict: str):
+        bucket_id = self._bucket(principal, bucket)
+        moves = UserApi.move_pairs(items, normalize_user_path)
+        # 先校验全部路径的授权，避免批量移动只执行了一半。
+        scope = self._scope(principal, bucket_id, [key for pair in moves for key in pair], write=True)
+        results = await self.objects.metadata.run_in_thread(self.objects.move_many, scope, moves, conflict)
+        return UserApi.move_results(moves, results)
+
     async def copy(self, principal: KeyPrincipal, bucket: str | None, source: str, target: str):
         bucket_id = self._bucket(principal, bucket)
         src, dst = normalize_user_path(source), normalize_user_path(target)

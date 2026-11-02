@@ -167,6 +167,9 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
       <KeyValue items={[["队列", `${status.jobs.length} / ${status.capacity}`], ["当前处理", `${status.jobs.filter(job => job.state === "running").length} 项`],
         ["缓存", `${formatBytes(status.cache.bytes)} / ${formatBytes(status.cache.limit_bytes)}`], ["从存储读取（本次运行）", formatBytes(status.remote_bytes)],
         ["待补图", `${status.backfill.pending} 项`],
+        ...(status.limits ? [["解码内存上限", `${formatBytes(status.limits.memory_cap)}${status.limits.memory_available != null ? `（当前可用 ${formatBytes(status.limits.memory_available)}）` : ""}`] as [string, string],
+          ["存储读取速度", status.limits.read_rate ? `${formatBytes(status.limits.read_rate)}/s` : "尚未测得"] as [string, string],
+          ...(status.limits.unsuitable ? [["资源不适合、已跳过", `${status.limits.unsuitable} 个文件`] as [string, string]] : [])] : []),
         ...(status.inline.count ? [["数据库中待转存", `${status.inline.count} 张（${formatBytes(status.inline.bytes)}）${status.inline.skipped_quota ? `，${status.inline.skipped_quota} 张因空间已满暂缓` : ""}`] as [string, string]] : [])]} />
       {!status.available && <Notice tone="warning">服务器未安装 FFmpeg，后台生成不可用；网页仍可用本地文件或已加载的画面生成。</Notice>}
       {!status.unlocked && <Notice>系统已锁定，后台任务暂停。</Notice>}
@@ -180,7 +183,7 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
       {status.recent.length > 0 && <details><summary>最近处理记录（{status.recent.length}）</summary><ul className="task-list">
         {status.recent.slice(0, 20).map(job => <li key={job.id}><span className="mono">{job.id}</span><span className="attention-copy"><strong>{kinds[job.kind]} · {labels[job.state] ?? job.state}</strong><small>{job.detail}</small></span><small className="muted">{job.at ? formatDateTime(job.at) : ""}</small></li>)}
       </ul></details>}
-      <p className="muted">浏览器停止响应 {status.client_timeout_seconds} 秒后由服务器接管；解码器卡住超过 {Math.round(status.task_timeout_seconds / 60)} 分钟会被结束并稍后重试。已收数据最长缓存 {Math.round(status.cache.ttl_seconds / 60)} 分钟。</p>
+      <p className="muted">每个任务开始前按解码所需内存（由分辨率与文件大小估算）、服务器当前可用内存、临时目录空间与存储读取速度评估：超过本机上限的文件不再自动生成（浏览器预览时仍可生成），暂时不满足的稍后再试。浏览器停止响应 {status.client_timeout_seconds} 秒后由服务器接管；解码器卡住超过 {Math.round(status.task_timeout_seconds / 60)} 分钟会被结束并稍后重试。已收数据最长缓存 {Math.round(status.cache.ttl_seconds / 60)} 分钟。</p>
     </>}
   </Panel>;
 }

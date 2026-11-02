@@ -1385,6 +1385,38 @@ class ObjectService:
 
         文件夹之间的同名目录标记直接合并；文件冲突按 conflict 处理，skip 时计入 skipped。
         """
+        result = self._move(scope, old, new, conflict, revoke_public)
+        self._changed(scope.bucket_id)
+        return result
+
+    MOVE_BATCH_LIMIT = 1000
+
+    def move_many(self, scope: Scope, moves: list[tuple[str, str]], conflict: str = "skip", *,
+                  revoke_public: bool = False) -> list[MoveResult | Exception]:
+        """在一个事务里依次移动多项，按顺序返回每项的 MoveResult 或失败原因。
+
+        单项失败只回滚该项（嵌套事务即保存点），其余照常提交；整批只提交一次、只发一次变更通知，
+        避免逐项提交在条目很多时变慢。私密授权在提交前复核，失效则整批回滚。
+        """
+        if not 1 <= len(moves) <= self.MOVE_BATCH_LIMIT:
+            raise ValueError(f"一次最多移动 {self.MOVE_BATCH_LIMIT} 项")
+        if conflict not in ("skip", "overwrite", "rename"):
+            raise ValueError("conflict must be skip, overwrite or rename")
+        results: list[MoveResult | Exception] = []
+        try:
+            with self.metadata.transaction():
+                for old, new in moves:
+                    try:
+                        results.append(self._move(scope, old, new, conflict, revoke_public))
+                    except (NotFoundError, ValueError, PermissionError) as exc:
+                        results.append(exc)
+                if scope.authorize is not None:
+                    scope.authorize()
+        finally:
+            self._changed(scope.bucket_id)
+        return results
+
+    def _move(self, scope: Scope, old: str, new: str, conflict: str, revoke_public: bool) -> MoveResult:
         self._check_scope(scope, old, write=True)
         self._check_scope(scope, new, write=True)
         if not old or not new or not old.startswith(scope.prefix) or not new.startswith(scope.prefix):
@@ -1475,9 +1507,7 @@ class ObjectService:
                 favorites.moved(db, scope.bucket_id, old, new)
             if scope.authorize is not None:
                 scope.authorize()
-            result = MoveResult(len(moves), skipped)
-        self._changed(scope.bucket_id)
-        return result
+            return MoveResult(len(moves), skipped)
 
     @staticmethod
     def _free_name(db, bucket_id: int, target: str, reserved: set[str]) -> str:

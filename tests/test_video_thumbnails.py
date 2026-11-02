@@ -43,7 +43,7 @@ class VideoDecoderTests(unittest.IsolatedAsyncioTestCase):
         self.objects = ObjectService(self.metadata, self.engine)
         self.scope = Scope(self.objects.create_bucket("video-tests"))
         self.worker = ThumbnailService(SimpleNamespace(keystore=self.keys), self.objects,
-                                       SimpleNamespace(ffmpeg=FFMPEG, detected={"memory_bytes": 1024**3}, pressure=lambda: None))
+                                       SimpleNamespace(ffmpeg=FFMPEG, detected={"memory_bytes": 1024**3}, pressure=lambda: None, available_memory=lambda: None))
 
     async def asyncTearDown(self):
         await self.worker.stop()

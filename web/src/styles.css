@@ -3997,6 +3997,7 @@ button.task-stat:focus-visible { outline: 2px solid var(--focus-ring); outline-o
 .thumbnail-auto > span { display: grid; gap: 4px; min-width: 0; }
 .thumbnail-auto strong { color: var(--ink); font-size: var(--text-sm); font-weight: 600; }
 .thumbnail-auto small { color: var(--ink-3); font-size: var(--text-xs); line-height: 1.6; overflow-wrap: anywhere; }
+.thumbnail-auto-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .thumbnail-editor-hint { margin: 0; color: var(--ink-3); font-size: var(--text-xs); line-height: 1.6; }
 @keyframes thumbnail-fade { from { opacity: 0; transform: scale(.98); } }
 @media (prefers-reduced-motion: reduce) { .thumbnail-stage > img { animation: none; } }

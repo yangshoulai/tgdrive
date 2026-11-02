@@ -719,7 +719,8 @@ class TgDriveASGI(StaticFiles):
         elif method == "POST" and route == "/delete":
             result = {"results": await self.keys.delete(principal, bucket, list(payload["paths"]), bool(payload.get("recursive", False)))}
         elif method == "POST" and route == "/move":
-            result = self.keys.move(principal, bucket, payload["from"], payload["to"], payload.get("conflict", "skip"))
+            result = await self.keys.move_many(principal, bucket, payload["items"], payload.get("conflict", "skip")) if "items" in payload \
+                else self.keys.move(principal, bucket, payload["from"], payload["to"], payload.get("conflict", "skip"))
         elif method == "POST" and route == "/copy":
             await self._send(send, 201, await self.keys.copy(principal, bucket, payload["from"], payload["to"]))
             return
@@ -1177,6 +1178,8 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/delete":
                 return 200, {"results": await user.delete(token, csrf, payload["paths"], bool(payload.get("recursive", False)))}, {}
             if method == "POST" and route == "/move":
+                if "items" in payload:
+                    return 200, await user.move_many(token, csrf, payload["items"], payload.get("conflict", "skip")), {}
                 return 200, await user.move(token, csrf, payload["from"], payload["to"], payload.get("conflict", "skip")), {}
             if method == "POST" and route == "/copy":
                 return 201, await user.copy(token, csrf, payload["from"], payload["to"]), {}

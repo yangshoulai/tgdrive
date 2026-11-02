@@ -231,7 +231,13 @@ class ResourceSettings:
             return "磁盘剩余空间不足，等待释放空间"
         # 配额和用量必须取同一 cgroup；不能拿父级的用量和子级的限额交叉比较。
         memory_threshold = 0.8 if self._memory_pressure else 0.9
-        self._memory_pressure = False
+        self._memory_pressure = any(used > limit * memory_threshold for used, limit in self._cgroup_memory())
+        if self._memory_pressure:
+            return "容器内存紧张，等待释放内存"
+        return None
+
+    def _cgroup_memory(self):
+        """逐个 cgroup 给出（已用、上限）；配额和用量必须取同一 cgroup，读不到的跳过。"""
         for filename in self.detected["memory_usage_paths"]:
             path = Path(filename)
             used = _positive(_text(path))
@@ -239,13 +245,16 @@ class ResourceSettings:
             # 顺序写入临时轨会增加可回收的文件缓存，不能把它当作解析器常驻内存而反复重下载。
             stats = dict(line.split() for line in _text(path.with_name("memory.stat")).splitlines() if len(line.split()) == 2)
             reclaimable = _positive(stats.get("inactive_file" if path.name == "memory.current" else "total_inactive_file", "")) or 0
-            if used:
-                used = max(0, used - reclaimable)
-            if used and limit and used > limit * memory_threshold:
-                self._memory_pressure = True
-        if self._memory_pressure:
-            return "容器内存紧张，等待释放内存"
-        return None
+            if used and limit:
+                yield max(0, used - reclaimable), limit
+
+    def available_memory(self) -> int | None:
+        """此刻还能使用的内存：系统 MemAvailable 与各 cgroup 剩余额度取最小值；都读不到（非 Linux）时返回 None。"""
+        values = [max(0, limit - used) for used, limit in self._cgroup_memory()]
+        for line in _text(Path("/proc/meminfo")).splitlines():
+            if line.startswith("MemAvailable:"):
+                values.append(int(line.split()[1]) * 1024)
+        return min(values) if values else None
 
     def describe(self):
         detected = {key: value for key, value in self.detected.items() if key not in ("memory_usage_paths", "memory_limits")}
