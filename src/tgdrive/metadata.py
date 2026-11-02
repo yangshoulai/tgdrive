@@ -44,7 +44,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 32
+    SCHEMA_VERSION = 33
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -727,6 +727,14 @@ class Metadata:
                     if column not in columns:
                         db.execute(f"ALTER TABLE blobs ADD COLUMN {column} INTEGER")
                 db.execute("PRAGMA user_version = 32")
+            if version < 33:
+                # 离线下载「立即下载」：插队的任务按 priority 从大到小最先调度（0 为普通排队）。部分索引只覆盖插队过的少量任务，
+                # 调度器不必对全部排队任务排序。
+                columns = {row[1] for row in db.execute("PRAGMA table_info(offline_tasks)")}
+                if "priority" not in columns:
+                    db.execute("ALTER TABLE offline_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+                db.execute("CREATE INDEX IF NOT EXISTS offline_priority ON offline_tasks(priority) WHERE priority>0")
+                db.execute("PRAGMA user_version = 33")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

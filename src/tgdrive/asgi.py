@@ -280,9 +280,9 @@ class TgDriveASGI(StaticFiles):
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
                            "/thumbnail/fetch", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
-                           "/downloads", "/downloads/clear", "/downloads/batch", "/downloads/destination"}
+                           "/downloads", "/downloads/clear", "/downloads/batch", "/downloads/destination", "/downloads/move"}
                 if route not in controls:
-                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?|/downloads/\d+/(?:stop|resume|restart|delete|update|source|cover)|/archive/jobs/[0-9a-f]{16}/cancel", route):
+                    if route not in allowed and not re.fullmatch(r"/uploads/[A-Za-z0-9_-]+(?:/complete|/parts/\d+)?|/downloads/\d+/(?:stop|resume|restart|delete|update|source|cover|now)|/archive/jobs/[0-9a-f]{16}/cancel", route):
                         raise NotFoundError("资源不存在")
                     file_user = self.private_space.files(token, access)
                     path = "/api/user/v1" + route
@@ -466,6 +466,7 @@ class TgDriveASGI(StaticFiles):
                          "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
+                         "/downloads/{}/now": "download.now", "/downloads/move": "download.move",
                          "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/downloads/stop-all": "download.stop_all", "/shares/{}/save": "share.save", "/archive/extract": "archive.extract", "/cache/reset": "client_cache.reset",
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
@@ -572,6 +573,12 @@ class TgDriveASGI(StaticFiles):
                       "count": len(ids) if isinstance(ids, list) else 0, "done": (result or {}).get("done") if ok else None}
         elif action == "download.stop_all":
             detail = {"stopped": (result or {}).get("stopped") if ok else None}
+        elif action == "download.move":
+            # 不记录保存位置的路径。
+            ids = payload.get("ids")
+            detail = {"count": len(ids) if isinstance(ids, list) else 0, "moved": (result or {}).get("moved") if ok else None}
+        elif action == "download.now":
+            detail = {"yielded": bool((result or {}).get("victim")) if ok else None}
         elif action == "download.clear":
             detail = {"status": payload.get("status") if payload.get("status") in ("completed", "failed") else None,
                       "removed": (result or {}).get("removed") if ok else None}
@@ -1035,6 +1042,11 @@ class TgDriveASGI(StaticFiles):
                     return 200, await self.offline.stop_all(account.id), {"Cache-Control": "no-store"}
                 if route == "/downloads/batch" and method == "POST":
                     return 200, await self.offline.batch(account.id, payload.get("action"), payload.get("ids"), private_scope=private_scope), {"Cache-Control": "no-store"}
+                if route == "/downloads/move" and method == "POST":
+                    return 200, self.offline.relocate(account.id, payload.get("ids"), payload.get("destination", ""), private_scope=private_scope), {"Cache-Control": "no-store"}
+                now = re.fullmatch(r"/downloads/(\d+)/now", route)
+                if now and method in ("GET", "POST"):
+                    return 200, await self.offline.prioritize(account.id, int(now[1]), preview=method == "GET", private_scope=private_scope), {"Cache-Control": "no-store"}
                 source = re.fullmatch(r"/downloads/(\d+)/source", route)
                 if source and method == "GET":
                     return 200, self.offline.source(account.id, int(source[1]), private_scope=private_scope), {"Cache-Control": "no-store"}

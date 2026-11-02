@@ -60,7 +60,7 @@ export type DownloadCandidate = { ticket: string; group: string; name: string; s
   /** 抓取脚本转交网盘文件夹里的文件时带上的子目录（相对保存位置，以 / 结尾），按原结构保存。 */
   folder?: string };
 export type DownloadStatus = "queued" | "running" | "stopped" | "interrupted" | "completed" | "failed";
-export type DownloadTask = { id: number; key: string; private: boolean; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform: "x" | "youtube" | null; phase: "resolving" | "downloading" | "merging" | "saving" | null; status: DownloadStatus; size: number | null; received: number; stored_bytes: number; segments_done: number; segments_total: number; duration: number | null; processed_seconds: number; elapsed_seconds: number; error: string | null; created_at: number; updated_at: number; speed: number; eta_seconds: number | null;
+export type DownloadTask = { id: number; key: string; private: boolean; source_host: string; method: "GET" | "POST"; kind: "http" | "hls"; platform: "x" | "youtube" | null; phase: "resolving" | "downloading" | "merging" | "saving" | null; status: DownloadStatus; /** 「立即下载」插队的顺序，0 为普通排队。 */ priority: number; size: number | null; received: number; stored_bytes: number; segments_done: number; segments_total: number; duration: number | null; processed_seconds: number; elapsed_seconds: number; error: string | null; created_at: number; updated_at: number; speed: number; eta_seconds: number | null;
   /** 成品已移入回收站或之后被清除；key 仍为删除前的位置，不暴露内部存储地址。 */
   trashed?: boolean;
   /** 来源地址：直链去掉查询串（has_query 表示有被省略的参数，完整地址经 downloadSource 读取）；私密空间锁定时为 null。 */
@@ -678,6 +678,13 @@ export const downloadSource = (id: number, privateTask = false) => request<Downl
 export const stopAllDownloads = () => post<{ stopped: number }>("/api/user/v1/downloads/stop-all", {});
 export const batchDownloads = (action: "stop" | "resume" | "delete", ids: number[], privateTasks = false) =>
   post<{ done: number; skipped: number }>(`${downloadRoute(privateTasks)}/batch`, { action, ids });
+/** 更改未完成任务的保存目录（文件名不变，正在下载的不中断）；已完成的任务计入 skipped。私密任务只能改到私密目录。 */
+export const moveDownloads = (ids: number[], destination: string, privateTasks = false) =>
+  post<{ moved: number; skipped: number; tasks: DownloadTask[] }>(`${downloadRoute(privateTasks)}/move`, { ids, destination });
+/** 立即下载需要让出的任务：victim 是将被暂停并放回排队的任务（进度最小），waiting 表示没有可让出的任务、会排在最前等待空位。 */
+export type DownloadNowPlan = { victim: Pick<DownloadTask, "id" | "key" | "private" | "kind" | "platform" | "size" | "received" | "duration" | "processed_seconds"> | null; waiting: boolean };
+export const downloadNowPlan = (id: number, privateTask = false) => request<DownloadNowPlan>(`${downloadRoute(privateTask)}/${id}/now`);
+export const downloadNow = (id: number, privateTask = false) => post<DownloadNowPlan & { task: DownloadTask }>(`${downloadRoute(privateTask)}/${id}/now`, {});
 export const updateAdminSettings = async (values: Partial<Record<keyof SystemSettings, string>>) => {
   const result = await post<SystemSettings>("/api/admin/v1/settings", values);
   setSiteConfig({ public_base_url: result.public_base_url.effective, s3_endpoint: result.s3_endpoint.effective });

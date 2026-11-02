@@ -50,7 +50,7 @@ KNOWN_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".w
 # 解析票据（parse 返回的 ticket）的有效期：解析后要在这段时间内创建任务，抓取脚本按批先解析再创建。
 TICKET_TTL = 30 * 60
 RESOLVED_TTL = {"x": 24 * 3600, "youtube": 3 * 3600}
-PUBLIC_FIELDS = ("id", "key", "source_host", "method", "kind", "platform", "phase", "status", "size", "received", "stored_bytes", "segments_done", "segments_total", "duration", "processed_seconds", "elapsed_seconds", "error", "created_at", "updated_at")
+PUBLIC_FIELDS = ("id", "key", "source_host", "method", "kind", "platform", "phase", "status", "priority", "size", "received", "stored_bytes", "segments_done", "segments_total", "duration", "processed_seconds", "elapsed_seconds", "error", "created_at", "updated_at")
 # 任务仍跟踪成品的实际位置，以便回收站还原（含冲突改名）后重新关联；展示和重新下载使用原路径。
 TASK_TRASH_PREFIXES = ((ObjectService.TRASH_PREFIX, ""), (PRIVATE_TRASH_PREFIX, PRIVATE_PREFIX))
 TASK_PATH_SQL = "CASE " + " ".join(
@@ -785,7 +785,9 @@ class OfflineDownloads:
                         source.update(request=value["request"], content_type=value["content_type"], platform_source=value.get("platform_source"), hls_audio=value.get("hls_audio"))
                         self._set(task_id, kind=value["kind"], method=value["request"]["method"], source_host=urlsplit(value["platform_source"]["url"] if value.get("platform") else value["request"]["url"]).hostname, size=value["size"])
                     self._save_source(task_id, source)
-                self._set(task_id, status="stopped" if action == "stop" else "queued", phase=None, error=None)
+                # 手动停止取消插队：之后继续时按普通顺序排队。
+                self._set(task_id, status="stopped" if action == "stop" else "queued", phase=None, error=None,
+                          **({"priority": 0} if action == "stop" else {}))
                 self._wake.set()
                 return self.public(self._row(task_id), reveal_private=reveal_private)
         finally:
@@ -793,6 +795,137 @@ class OfflineDownloads:
             if not self._control_refs[task_id]:
                 self._control_refs.pop(task_id)
                 self._controls.pop(task_id, None)
+
+    def relocate(self, user_id, ids, destination, *, private_scope: Scope | None = None) -> dict:
+        """更改未完成任务的保存目录（文件名不变），已完成的任务不能更改。正在下载的任务不中断：目标路径只在开始写入（_begin）
+        和提交（_finish）时读取，两处都读最新的 offline_tasks.key／uploads.key，这里在同一事务里改写两者。
+        普通任务与私密任务不能互相改到对方的区域；私密目录需要当前会话已解锁。同名时与创建一样自动改名。"""
+        regular = self.scope(user_id)
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or not all(type(value) is int and value > 0 for value in ids):
+            raise ValueError("请选择 1–100 个任务")
+        if not isinstance(destination, str):
+            raise ValueError("目标目录不正确")
+        private = destination.startswith(PRIVATE_PREFIX)
+        if private:
+            if private_scope is None or not private_scope.private_access or private_scope.bucket_id != regular.bucket_id:
+                raise ValueError("请先解锁私密空间，再选择私密下载位置")
+            if private_scope.authorize is not None:
+                private_scope.authorize()
+            relative = destination[len(PRIVATE_PREFIX):]
+            prefix, scope = PRIVATE_PREFIX + (normalize_user_path(relative, directory=True) if relative else ""), private_scope
+        else:
+            prefix, scope = (normalize_user_path(destination, directory=True) if destination else ""), regular
+        moved, skipped, now = [], 0, time.time()
+        with self.metadata.transaction() as db:
+            reserved = _PendingKeys(db, scope.bucket_id)
+            for task_id in dict.fromkeys(ids):
+                row = db.execute("SELECT id,key,status,upload_id FROM offline_tasks WHERE id=? AND user_id=?", (task_id, user_id)).fetchone()
+                if row is None or row["status"] == "completed" or any(row["key"].startswith(item) for item, _ in TASK_TRASH_PREFIXES):
+                    skipped += 1
+                    continue
+                if row["key"].startswith(PRIVATE_PREFIX) != private:
+                    raise ValueError("下载位置不能在我的文件与私密空间之间更改，请重新添加任务")
+                key = prefix + row["key"].rsplit("/", 1)[-1]
+                if key != row["key"]:
+                    if key in reserved or db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone():
+                        key = self.objects._free_name(db, scope.bucket_id, key, reserved)
+                    self.objects._check_scope(scope, key, write=True)
+                    db.execute("UPDATE offline_tasks SET key=?,updated_at=? WHERE id=?", (key, now, task_id))
+                    if row["upload_id"]:
+                        db.execute("UPDATE uploads SET key=? WHERE upload_id=? AND completed_at IS NULL", (key, row["upload_id"]))
+                    reserved.add(key)
+                moved.append(task_id)
+        return {"moved": len(moved), "skipped": skipped,
+                "tasks": [self.public(self._row(task_id), reveal_private=private) for task_id in moved]}
+
+    @staticmethod
+    def _exclusive(row):
+        """M3U8 与 YouTube 任务（FFmpeg 封装）全站同时只运行一个。"""
+        return row["kind"] == "hls" or row["platform"] == "youtube"
+
+    def _yield_plan(self, user_id, row):
+        """立即下载需要让出的任务：没有空位（或独占类任务已在运行）时，从该用户自己正在运行的任务里选进度最小的一个；
+        POST 任务中断后要手动重新发送，不让出。返回 (让出的任务, 是否只能排到最前等待)。不会停止其他用户的任务。"""
+        running = [self._row(task_id) for task_id, task in list(self._running.items()) if not task.done() and task_id != row["id"]]
+        if self._exclusive(row) and any(self._exclusive(item) for item in running):
+            pool = [item for item in running if self._exclusive(item)]
+        elif len(running) >= self.resources.effective()["concurrency"]:
+            pool = running
+        else:
+            return None, False
+        mine = [item for item in pool if item["user_id"] == user_id and item["method"] != "POST"]
+        if not mine:
+            return None, True
+
+        def progress(item):
+            view = self.public(item)
+            if item["kind"] == "hls" and item["duration"]:
+                return (False, view["processed_seconds"] / item["duration"], view["received"])
+            if item["size"]:
+                return (False, view["received"] / item["size"], view["received"])
+            # 总大小未知的任务无法比较百分比，排在已知进度的任务之后，按已下载量比较。
+            return (True, 0, view["received"])
+        return min(mine, key=progress), False
+
+    async def prioritize(self, user_id, task_id, *, preview=False, private_scope: Scope | None = None) -> dict:
+        """立即下载：把排队、等待恢复、已停止或失败的任务插到队列最前。没有空位时暂停该用户进度最小的一个运行中任务，
+        它回到排队（不是停止），有空位后自动继续；preview 只返回将要让出的任务，供网页确认。"""
+        self.scope(user_id)
+        row = self._row(task_id, user_id)
+        if row["status"] in ("running", "completed"):
+            raise ValueError("任务正在下载或已完成")
+        reveal = bool(private_scope and private_scope.private_access)
+        victim, waiting = self._yield_plan(user_id, row)
+        plan = {"victim": self._victim_view(victim, reveal), "waiting": waiting}
+        if preview:
+            return plan
+        lock = self._controls.setdefault(task_id, asyncio.Lock())
+        self._control_refs[task_id] = self._control_refs.get(task_id, 0) + 1
+        try:
+            async with lock:
+                row = self._row(task_id, user_id)
+                if row["status"] in ("running", "completed"):
+                    raise ValueError("任务正在下载或已完成")
+                self._retries.pop(task_id, None)
+                self._retry_at.pop(task_id, None)
+                with self.metadata.transaction() as db:
+                    top = db.execute("SELECT COALESCE(MAX(priority),0) FROM offline_tasks WHERE priority>0").fetchone()[0]
+                    db.execute("UPDATE offline_tasks SET priority=?,status='queued',phase=NULL,error=NULL,updated_at=? WHERE id=?",
+                               (top + 1, time.time(), task_id))
+        finally:
+            self._control_refs[task_id] -= 1
+            if not self._control_refs[task_id]:
+                self._control_refs.pop(task_id)
+                self._controls.pop(task_id, None)
+        # 先释放操作锁再让出：调度器会跳过持有操作锁的任务，否则让出的空位可能又被刚暂停的任务占回。
+        # 让出前重新选择：确认期间运行中的任务可能已经变化。
+        victim, waiting = self._yield_plan(user_id, self._row(task_id))
+        if victim is not None:
+            await self._yield_slot(victim["id"])
+        self._wake.set()
+        return {"task": self.public(self._row(task_id), reveal_private=reveal),
+                "victim": self._victim_view(victim, reveal), "waiting": waiting}
+
+    def _victim_view(self, row, reveal):
+        if row is None:
+            return None
+        view = self.public(row, reveal_private=reveal)
+        return {key: view[key] for key in ("id", "key", "private", "kind", "platform", "size", "received", "duration", "processed_seconds")}
+
+    async def _yield_slot(self, task_id):
+        """暂停运行中的任务并放回排队：_run 收到取消后按这里的意图写回 queued。任务若已结束（例如刚完成）则不改动。"""
+        task = self._running.get(task_id)
+        if task is None or task.done():
+            return False
+        self._intents[task_id] = ("queued", None)
+        if not task.cancelling():
+            task.cancel()
+        await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+        self._intents.pop(task_id, None)
+        # 任务在开始执行前就被取消时没有经过 _run 的取消处理；仍标记为运行中才改回排队，已完成的不动。
+        if self._row(task_id)["status"] == "running":
+            self._set(task_id, status="queued", error=None)
+        return True
 
     async def clear(self, user_id, status):
         """批量删除已完成或失败的任务；已保存的文件保留，失败任务的未完成分片一并清理。"""
@@ -903,8 +1036,12 @@ class OfflineDownloads:
                         await self._cancel(task_id, status, str(exc))
                 config = self.resources.effective()
                 if self.keystore.unlocked and not self.resources.pressure():
-                    candidates = self.metadata.db.execute("SELECT t.id,t.user_id,t.kind,t.method,t.platform FROM offline_tasks t JOIN users u ON u.id=t.user_id WHERE t.status IN ('queued','interrupted') AND u.status='active' ORDER BY t.id LIMIT 100").fetchall()
-                    hls_running = any(self._row(task_id)["kind"] == "hls" or self._row(task_id)["platform"] == "youtube" for task_id in self._running)
+                    # 插队（立即下载）的任务最先调度，其余按创建顺序；插队任务很少，走 offline_priority 部分索引。
+                    first = self.metadata.db.execute("SELECT t.id,t.user_id,t.kind,t.method,t.platform FROM offline_tasks t JOIN users u ON u.id=t.user_id WHERE t.priority>0 AND t.status IN ('queued','interrupted') AND u.status='active' ORDER BY t.priority DESC LIMIT 100").fetchall()
+                    rest = self.metadata.db.execute("SELECT t.id,t.user_id,t.kind,t.method,t.platform FROM offline_tasks t JOIN users u ON u.id=t.user_id WHERE t.status IN ('queued','interrupted') AND u.status='active' ORDER BY t.id LIMIT 100").fetchall()
+                    seen = {row["id"] for row in first}
+                    candidates = [*first, *(row for row in rest if row["id"] not in seen)]
+                    hls_running = any(self._exclusive(self._row(task_id)) for task_id in self._running)
                     now = time.monotonic()
                     for row in candidates:
                         if len(self._running) >= config["concurrency"]:

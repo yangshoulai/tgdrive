@@ -4,7 +4,7 @@ import * as api from "../api";
 import { useCursorPage, usePageSize } from "../pagination";
 import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
 import { FileTile, FileVisual, getFileKind } from "../files";
-import { DestinationPicker } from "./folders";
+import { DestinationPicker, FolderPicker } from "./folders";
 import { PrivateUnlockDialog } from "./private-unlock";
 import { usePrivateAccess } from "./private-session";
 import { LocationText, TaskStats, remainingText } from "./task-list";
@@ -23,9 +23,10 @@ export const downloadGlyph = (task: api.DownloadTask) => /\.(m4a|mp3|aac|flac|og
     : /\.(jpe?g|png|webp|gif)$/i.test(task.key) ? "image" as const : "file" as const;
 /** 进度百分比；总大小未知时返回 null，不显示虚构进度。 */
 export const downloadPercent = (task: api.DownloadTask) => task.status === "completed" ? 100 : task.kind === "hls" && task.duration ? Math.min(95, task.processed_seconds / task.duration * 95) : task.size ? Math.min(99, task.received / task.size * 100) : null;
-export const downloadStatusLabel = (task: api.DownloadTask) => task.status === "running" && task.phase ? { resolving: "解析来源", downloading: "下载媒体", merging: "合并音视频", saving: "完成保存" }[task.phase] : LABEL[task.status];
+export const downloadStatusLabel = (task: api.DownloadTask) => task.status === "running" && task.phase ? { resolving: "解析来源", downloading: "下载媒体", merging: "合并音视频", saving: "完成保存" }[task.phase]
+  : task.status === "queued" && task.priority > 0 ? "优先排队" : LABEL[task.status];
 export const parentFolder = (key: string) => key.includes("/") ? key.slice(0, key.lastIndexOf("/")) + "/" : "";
-export const downloadTaskName = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? "私密空间下载" : task.key.split("/").at(-1) ?? task.key;
+export const downloadTaskName = (task: Pick<api.DownloadTask, "key" | "private">) => task.private && !api.isPrivatePath(task.key) ? "私密空间下载" : task.key.split("/").at(-1) ?? task.key;
 const hasVisibleDownloadPath = (task: api.DownloadTask) => !task.key.startsWith(".tgdrive/") || task.private && api.isPrivatePath(task.key);
 export const canOpenDownloadFolder = (task: api.DownloadTask) => !task.trashed && hasVisibleDownloadPath(task);
 export const downloadTaskFolder = (task: api.DownloadTask) => task.private && !api.isPrivatePath(task.key) ? api.PRIVATE_PREFIX : hasVisibleDownloadPath(task) ? parentFolder(task.key) : "";
@@ -105,6 +106,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   const [selected, setSelected] = useState(new Set<number>());
   const [bulk, setBulk] = useState<"stop" | "delete" | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [now, setNow] = useState<api.DownloadTask | null>(null);
+  const [relocating, setRelocating] = useState<api.DownloadTask[] | null>(null);
   const cursor = useRef<string | null>(null), epoch = useRef(0);
   const previous = useRef(new Map<number, api.DownloadStatus>());
   const { pageSize, changePageSize, sizes } = usePageSize(DOWNLOAD_PAGE_SIZE_KEY, DOWNLOAD_PAGE_SIZES, 50);
@@ -189,6 +192,13 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       await pagination.reload();
     } catch (reason) { toast.error(api.errorMessage(reason, "清除失败，请稍后重试")); }
   }
+  /** 多选「更改保存位置」：只处理未完成的任务；我的文件与私密空间的任务不能一起更改。 */
+  function relocateSelected() {
+    const tasks = chosen.filter(movableDownload);
+    if (!tasks.length) return;
+    if (tasks.some(task => task.private) && tasks.some(task => !task.private)) { toast.error("所选任务同时包含我的文件和私密空间的任务，请分别更改保存位置"); return; }
+    setRelocating(tasks);
+  }
   const completed = () => { setNewTask(false); setEdit(null); void pagination.reload(); onChanged(); onCreated?.(); window.dispatchEvent(new Event("tessera:downloads-changed")); };
   const actions = <><Button icon="refresh" onClick={() => void pagination.reload()} disabled={pagination.loading}>刷新</Button><Button variant="primary" icon="plus" onClick={() => setNewTask(true)}>添加下载</Button></>;
   const searchField = <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder="搜索名称、路径或来源" label="搜索下载任务" />;
@@ -212,6 +222,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
         <div className="toolbar-actions">
           {chosen.some(active) && <Button size="sm" icon="pause" disabled={bulkBusy} onClick={() => setBulk("stop")}>停止</Button>}
           {chosen.some(task => ["stopped", "failed"].includes(task.status)) && <Button size="sm" icon="play" loading={bulkBusy && !bulk} disabled={bulkBusy} onClick={() => void runBulk("resume")}>继续</Button>}
+          {chosen.some(movableDownload) && <Button size="sm" icon="move" disabled={bulkBusy} onClick={relocateSelected}>更改保存位置</Button>}
           <Button size="sm" variant="danger" icon="trash" disabled={bulkBusy} onClick={() => setBulk("delete")}>删除</Button>
           <IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} />
         </div>
@@ -274,7 +285,11 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                       { label: "打开来源链接", icon: "external" as const, onSelect: () => openSource(task) },
                     ] : []),
                     ...(task.error ? [{ label: "复制失败原因", icon: "alert" as const, onSelect: () => void copyText(task.error!, "失败原因已复制") }] : []),
-                    { label: "重新下载", icon: "refresh" as const, divider: Boolean(task.source || task.error), onSelect: () => setConfirm({ task, action: "restart" }) },
+                    ...(movableDownload(task) ? [
+                      ...(task.status !== "running" ? [{ label: "立即下载", icon: "zap" as const, divider: Boolean(task.source || task.error), onSelect: () => setNow(task) }] : []),
+                      { label: "更改保存位置", icon: "move" as const, divider: task.status === "running" && Boolean(task.source || task.error), onSelect: () => setRelocating([task]) },
+                    ] : []),
+                    { label: "重新下载", icon: "refresh" as const, divider: !movableDownload(task) && Boolean(task.source || task.error), onSelect: () => setConfirm({ task, action: "restart" }) },
                     { label: "更新下载参数", icon: "settings" as const, onSelect: () => setEdit(task) },
                     { label: "删除任务", icon: "trash" as const, danger: true, divider: true, onSelect: () => setConfirm({ task, action: "delete" }) },
                   ]} /></>}</div>
@@ -289,6 +304,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     </details>
     {(newTask || edit) && <DownloadDialog task={edit} onClose={() => { setNewTask(false); setEdit(null); }} onComplete={completed} />}
     {imported && !newTask && !edit && <DownloadDialog task={null} initial={imported} onClose={() => setImported(null)} onComplete={() => { setImported(null); completed(); }} />}
+    {now && <DownloadNowDialog task={now} onClose={() => setNow(null)} onDone={() => { setNow(null); window.dispatchEvent(new Event("tessera:downloads-changed")); void pagination.reload(); }} />}
+    {relocating && <RelocateDialog tasks={relocating} onClose={() => setRelocating(null)} onDone={() => { setRelocating(null); setSelected(new Set()); void pagination.reload(); }} />}
     {clearing && <ConfirmDialog title={clearing === "completed" ? "清除已完成的任务" : "清除失败的任务"}
       description={clearing === "completed" ? "从列表中移除所有已完成的任务，已保存的文件不受影响。" : "移除所有失败的任务并清理未完成的数据，已保存的文件不受影响。"}
       confirmLabel="清除" danger onClose={() => setClearing(null)} onConfirm={() => clear(clearing)} />}
@@ -303,6 +320,71 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       danger={confirm.action === "delete" || confirm.action === "restart"} confirmLabel={confirm.action === "delete" ? "删除任务" : confirm.action === "restart" ? "重新下载" : confirm.action === "resume" ? "重新发送" : "停止下载"}
       onClose={() => setConfirm(null)} onConfirm={() => control(confirm.task, confirm.action)} />}
   </>;
+}
+
+/** 未完成且没有被删除的任务可以更改保存位置；排队、等待恢复、已停止或失败的还可以立即下载。 */
+const movableDownload = (task: api.DownloadTask) => task.status !== "completed" && !task.trashed;
+
+/** 立即下载：先向服务器查询需要让出的任务（同一账号正在运行、进度最小的一个），确认后插队；让出的任务回到排队，稍后自动继续。 */
+function DownloadNowDialog({ task, onClose, onDone }: { task: api.DownloadTask; onClose: () => void; onDone: () => void }) {
+  const [plan, setPlan] = useState<api.DownloadNowPlan | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    api.downloadNowPlan(task.id, task.private).then(value => { if (alive) setPlan(value); }, reason => { if (alive) setError(api.errorMessage(reason, "无法读取当前的下载情况")); });
+    return () => { alive = false; };
+  }, [task.id, task.private]);
+  const name = downloadTaskName(task);
+  const victim = plan?.victim;
+  const victimName = victim ? downloadTaskName(victim) : "";
+  const victimPercent = victim ? victim.kind === "hls" && victim.duration ? victim.processed_seconds / victim.duration * 100 : victim.size ? victim.received / victim.size * 100 : null : null;
+  const restarts = Boolean(victim && (victim.kind === "hls" || victim.platform));
+  async function confirm() {
+    try {
+      const result = await api.downloadNow(task.id, task.private);
+      toast.success(result.victim ? `已开始下载“${name}”，“${downloadTaskName(result.victim)}”已暂停并回到排队` : result.waiting ? `“${name}”已排到队列最前，有空位时最先开始` : `已开始下载“${name}”`);
+      onDone();
+    } catch (reason) { toast.error(api.errorMessage(reason, "没有完成，请稍后重试")); }
+  }
+  return <ConfirmDialog title="立即下载" danger={false} confirmLabel="立即下载" onClose={onClose} onConfirm={confirm}
+    description={<>
+      {error ? error : !plan ? "正在检查当前的下载…"
+        : victim ? <>“{name}”会插队立即开始下载。为腾出位置，将暂停正在下载、进度最小的“{victimName}”（{victimPercent !== null ? `已完成 ${Math.floor(victimPercent)}%` : `已下载 ${formatBytes(victim.received)}`}），它会回到排队，有空位后自动继续{restarts ? "；这类任务暂停后需要从头下载" : "，已下载的部分会保留"}。</>
+          : plan.waiting ? <>当前的下载位置都被占用，且没有可以暂停的任务（其他用户的任务或 POST 任务不会被暂停）。“{name}”会排到队列最前，有空位时最先开始。</>
+            : <>“{name}”会插队立即开始下载。</>}
+      {task.method === "POST" && ["stopped", "failed"].includes(task.status) && <> 此任务使用 POST 请求，会重新发送请求和请求体。</>}
+    </>} />;
+}
+
+/** 更改保存位置：只改目录、文件名不变；正在下载的任务不中断，完成后保存到新位置。私密任务需先解锁，且只能选择私密空间中的目录。 */
+function RelocateDialog({ tasks, onClose, onDone }: { tasks: api.DownloadTask[]; onClose: () => void; onDone: () => void }) {
+  const access = usePrivateAccess();
+  const privateTasks = tasks[0].private;
+  const current = downloadTaskFolder(tasks[0]);
+  const [destination, setDestination] = useState(current);
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  // 锁定时列表里看不到私密任务的路径：解锁后从私密空间根目录开始选择。
+  useEffect(() => { if (privateTasks && access.grant && !api.isPrivatePath(destination)) setDestination(api.PRIVATE_PREFIX); }, [privateTasks, access.grant, destination]);
+  if (privateTasks && !access.grant) return <PrivateUnlockDialog description="解锁后才能更改私密空间下载任务的保存位置。" onClose={onClose} onUnlocked={() => undefined} />;
+  const single = tasks.length === 1;
+  async function save() {
+    if (busy) return;
+    setBusy(true); setError("");
+    try {
+      const { moved, skipped } = await api.moveDownloads(tasks.map(task => task.id), destination, privateTasks);
+      toast.success(`已更改${single ? "" : ` ${moved} 个任务的`}保存位置：${api.privatePathLabel(destination)}${skipped ? `，${skipped} 个已完成或已删除的任务已跳过` : ""}`);
+      onDone();
+    } catch (reason) { setError(api.errorMessage(reason, "更改失败，请稍后重试")); setBusy(false); }
+  }
+  return <Modal title={single ? "更改保存位置" : `更改 ${tasks.length} 个任务的保存位置`} description={single ? downloadTaskName(tasks[0]) : undefined} icon="move" size="md" onClose={onClose} dismissible={!busy}
+    footer={<><Button variant="ghost" disabled={busy} onClick={onClose}>取消</Button>
+      <Button variant="primary" icon="check" loading={busy} disabled={!ready || (single && destination === current)} onClick={() => void save()}>保存到这里</Button></>}>
+    <FolderPicker value={destination} onChange={setDestination} onReady={setReady} />
+    <p className="muted">只改变保存目录，文件名不变。正在下载的任务不会中断，完成后保存到新位置；同名文件自动改名。</p>
+    {error && <Notice tone="danger">{error}</Notice>}
+  </Modal>;
 }
 
 /** 进度列：进行中显示进度条与「已下载／总大小 · 速度 · 剩余时间」，完成后显示大小与用时，失败显示原因（点击展开全文）。 */
