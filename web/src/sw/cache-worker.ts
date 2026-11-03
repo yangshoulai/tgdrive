@@ -608,9 +608,10 @@ function renewManual(job: Manual) {
 }
 
 /* 多线程缓存：大文件按 16 MiB（服务器存储分片的大小，一段只对应一个分片）切段并行下载，几个文件也可以同时缓存。
- * 所有回源请求共用一个并发上限：服务器给每个账号的读取路数减一（服务器为播放和预览保留一路），最多 3 路，
- * 也给浏览器对同一站点的连接数（HTTP/1.1 约 6 个）留出余量。请求带 X-Tessera-Background，服务器让播放优先。 */
+ * 所有回源请求共用一个并发上限：服务器给每个账号的读取路数减一（服务器为播放和预览保留一路），最多 MANUAL_MAX 路。请求带 X-Tessera-Background，服务器让播放优先。 */
 const SEGMENT_BLOCKS = 16;
+/** 浏览器里所有手动缓存与预读合计的回源路数上限；站点通常经 HTTP/2（如 Cloudflare），不受 HTTP/1.1 每站约 6 个连接的限制。 */
+const MANUAL_MAX = 6;
 let manualActive = 0;
 const manualWaiters: (() => void)[] = [];
 let readConcurrency: { value: number; at: number } | null = null;
@@ -626,16 +627,20 @@ async function manualParallel() {
     } catch { /* 沿用上次的值 */ }
     readConcurrency = { value, at: Date.now() };
   }
-  return Math.max(1, Math.min(3, readConcurrency.value - 1));
+  return Math.max(1, Math.min(MANUAL_MAX, readConcurrency.value - 1));
 }
-async function manualSlot(signal: AbortSignal) {
+/** alive：排队等空位期间每 15 秒调用一次。几个文件共用这几路，排在后面的文件要等前面的段读完；
+ *  不续期的话页面会把长时间没有进度的文件当成「本机缓存没有响应」而中断重试。 */
+async function manualSlot(signal: AbortSignal, alive?: () => void) {
   const limit = await manualParallel();
   while (manualActive >= limit) {
     signal.throwIfAborted();
-    await new Promise<void>(resolve => {
-      manualWaiters.push(resolve);
-      signal.addEventListener("abort", () => resolve(), { once: true });
+    const woken = await new Promise<boolean>(resolve => {
+      const timer = setTimeout(() => resolve(false), 15_000);
+      manualWaiters.push(() => { clearTimeout(timer); resolve(true); });
+      signal.addEventListener("abort", () => { clearTimeout(timer); resolve(true); }, { once: true });
     });
+    if (!woken) alive?.();
   }
   signal.throwIfAborted();
   manualActive++;
@@ -643,7 +648,8 @@ async function manualSlot(signal: AbortSignal) {
   return () => {
     if (released) return;
     released = true; manualActive--;
-    manualWaiters.shift()?.();
+    // 唤醒全部等待者各自重新检查：超时续期过的等待者留下的回调不会吞掉这次唤醒。
+    manualWaiters.splice(0).forEach(wake => wake());
   };
 }
 
@@ -878,8 +884,12 @@ async function stepManual(owner: string, id: string, progress: (value: unknown) 
     const count = Math.ceil(opened.info.size / BLOCK);
     const present = new Set(entry.blocks);
     const parallel = await manualParallel();
+    // 同时缓存几个文件时平分这几路：每个文件一步只排自己那一份，否则先开始的文件一次排满所有空位，
+    // 其他文件只能干等（看起来每次只有一个文件在缓存），久了还会被页面判为没有响应。
+    const files = [...manuals.values()].filter(item => item.opened && !item.controller.signal.aborted).length;
+    const share = Math.max(1, Math.ceil(parallel * 2 / Math.max(1, files)));
     const segments: [number, number][] = [];
-    for (let lo = 0; lo < count && segments.length < parallel * 2; lo += SEGMENT_BLOCKS) {
+    for (let lo = 0; lo < count && segments.length < share; lo += SEGMENT_BLOCKS) {
       const hi = Math.min(count - 1, lo + SEGMENT_BLOCKS - 1);
       let first = lo;
       while (first <= hi && present.has(first)) first++;
@@ -905,7 +915,7 @@ async function stepManual(owner: string, id: string, progress: (value: unknown) 
 }
 
 async function fetchSegment(job: Manual, opened: Opened, [first, last]: [number, number], progress: (value: unknown) => void) {
-  const release = await manualSlot(job.controller.signal);
+  const release = await manualSlot(job.controller.signal, () => { renewManual(job); progress(fileCacheState(opened.entry, opened.info.size)); });
   try {
     const end = Math.min(opened.info.size - 1, (last + 1) * BLOCK - 1);
     const headers = new Headers({ Range: `bytes=${first * BLOCK}-${end}`, "X-Tessera-Background": "cache" });
