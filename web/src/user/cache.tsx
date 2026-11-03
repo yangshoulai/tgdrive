@@ -806,7 +806,7 @@ function cacheVerdict(value: CacheDiagnosis): DiagnosisVerdict {
   const stalled = segments.filter(item => item.lastData && now - item.lastData > 20_000);
   if (stalled.length) return { tone: "warning", title: "数据中途停住", detail: `${stalled.length} 个分段超过 20 秒没有收到新数据，服务器或网络暂时没有继续发送；超过 3 分钟会自动重新请求。` };
   if (segments.some(item => item.phase === "busy")) return { tone: "info", title: "服务器读取名额已满", detail: "服务器正忙（播放、预览或其他缓存占着读取名额），分段在原地等待，空出来后自动继续。" };
-  if (value.active >= value.limit && segments.some(item => item.phase === "queued")) return { tone: "info", title: "浏览器通道已占满", detail: `${value.limit} 路都在使用，${value.files} 个文件平分；排队的分段会在前面的读完后开始。` };
+  if (value.active >= value.limit && segments.some(item => item.phase === "queued")) return { tone: "info", title: "浏览器通道已占满", detail: `${value.limit} 路都在使用，${value.files} 个文件平分（每个最多 ${value.share} 路，本文件占 ${value.mine} 路）；排队的分段会在其他文件的段读完后开始。` };
   return { tone: "success", title: "运行正常", detail: segments.length ? "各分段都在正常接收和写入。" : "这一轮的分段已结束，正在准备下一轮。" };
 }
 
@@ -826,7 +826,7 @@ function CacheDiagnosisDialog({ job, onClose }: { job: CacheJob; onClose: () => 
     {value === undefined ? <SkeletonRows rows={3} /> : !value ? <Notice tone="info">这个文件目前没有在下载（可能在排队、自动重试的等待中，或已经结束）。</Notice> : <div className="diagnosis">
       <DiagnosisMetrics items={[
         { label: "已缓存", value: `${percentOf(job.bytes, job.size)}%`, detail: `${formatBytes(job.bytes)} / ${formatBytes(job.size)}` },
-        { label: "浏览器通道", value: `${value.active} / ${value.limit}`, detail: `${value.files} 个文件在缓存`, tone: value.active >= value.limit ? "warning" : undefined },
+        { label: "浏览器通道", value: `${value.active} / ${value.limit}`, detail: `本文件占 ${value.mine} 路 · 每个文件最多 ${value.share} 路`, tone: value.active >= value.limit ? "warning" : undefined },
         { label: "本文件分段", value: value.segments.length, detail: `接收中 ${value.segments.filter(item => item.firstByte).length} 段` },
         { label: "最近的错误", value: value.lastError || job.error ? "有" : "无", detail: value.lastError || job.error || "—", tone: value.lastError || job.error ? "danger" : "success" },
       ]} />

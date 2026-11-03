@@ -147,7 +147,7 @@ export const stepFileCache = (id: string, signal: AbortSignal, progress: (state:
 /** 缓存诊断：Worker 中这个任务每个正在下载的分段停在哪一步（见 cache-worker.ts 的 SegmentDiagnosis）。 */
 export type CacheSegmentDiagnosis = { first: number; last: number; size: number; phase: "queued" | "waiting" | "busy" | "receiving" | "encrypting" | "writing";
   status?: number; received: number; stored: number; started: number; requested?: number; firstByte?: number; lastData?: number; lastStored?: number; busyCount: number };
-export type CacheDiagnosis = { now: number; active: number; limit: number; files: number; running: boolean; lastError: string; segments: CacheSegmentDiagnosis[] };
+export type CacheDiagnosis = { now: number; active: number; limit: number; mine: number; share: number; files: number; running: boolean; lastError: string; segments: CacheSegmentDiagnosis[] };
 export const diagnoseFileCache = (id: string) => ask<CacheDiagnosis | null>("tessera-cache:diagnose", { id }, 5000);
 export function cancelFileCache(id?: string) {
   // pagehide 中也能同步发出，不等待异步查找 Worker。

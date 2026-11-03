@@ -645,29 +645,46 @@ async function manualParallel() {
 async function diagnoseManual(owner: string, id: string) {
   const job = manuals.get(`${owner}:${id}`);
   if (!job) return null;
-  return { now: Date.now(), active: manualActive, limit: await manualParallel(), files: [...manuals.values()].filter(item => item.opened).length,
+  const limit = await manualParallel();
+  return { now: Date.now(), active: manualActive, limit, mine: slotUsers.get(job.key)?.active ?? 0, share: fairShare(limit), files: [...manuals.values()].filter(item => item.opened).length,
     running: job.running, lastError: job.lastError ?? "", segments: [...job.segments.values()].sort((a, b) => a.first - b.first).map(item => ({ ...item })) };
 }
 
 /** alive：排队等空位期间每 15 秒调用一次。几个文件共用这几路，排在后面的文件要等前面的段读完；
  *  不续期的话页面会把长时间没有进度的文件当成「本机缓存没有响应」而中断重试。 */
-async function manualSlot(signal: AbortSignal, alive?: () => void) {
+/** 每个文件（键为任务的 key）正在用与正在等的通道数。几个文件同时缓存时按文件平分：
+ *  一个文件最多占 ceil(总路数 / 正在缓存的文件数) 路，不让先开始或一轮排得多的文件把通道全占住。 */
+const slotUsers = new Map<string, { active: number; waiting: number }>();
+const fairShare = (limit: number) => Math.max(1, Math.ceil(limit / Math.max(1, slotUsers.size)));
+
+async function manualSlot(signal: AbortSignal, alive?: () => void, owner = "") {
   const limit = await manualParallel();
-  while (manualActive >= limit) {
+  const user = slotUsers.get(owner) ?? { active: 0, waiting: 0 };
+  slotUsers.set(owner, user);
+  // 一个文件不再使用通道时，其他文件的份额变大：唤醒等待者重新检查。
+  const leave = () => {
+    if (user.active || user.waiting || slotUsers.get(owner) !== user) return;
+    slotUsers.delete(owner);
+    manualWaiters.splice(0).forEach(wake => wake());
+  };
+  user.waiting++;
+  try {
+    while (manualActive >= limit || user.active >= fairShare(limit)) {
+      signal.throwIfAborted();
+      const woken = await new Promise<boolean>(resolve => {
+        const timer = setTimeout(() => resolve(false), 15_000);
+        manualWaiters.push(() => { clearTimeout(timer); resolve(true); });
+        signal.addEventListener("abort", () => { clearTimeout(timer); resolve(true); }, { once: true });
+      });
+      if (!woken) alive?.();
+    }
     signal.throwIfAborted();
-    const woken = await new Promise<boolean>(resolve => {
-      const timer = setTimeout(() => resolve(false), 15_000);
-      manualWaiters.push(() => { clearTimeout(timer); resolve(true); });
-      signal.addEventListener("abort", () => { clearTimeout(timer); resolve(true); }, { once: true });
-    });
-    if (!woken) alive?.();
-  }
-  signal.throwIfAborted();
-  manualActive++;
+  } catch (error) { user.waiting--; leave(); throw error; }
+  user.waiting--; user.active++; manualActive++;
   let released = false;
   return () => {
     if (released) return;
-    released = true; manualActive--;
+    released = true; manualActive--; user.active--; leave();
     // 唤醒全部等待者各自重新检查：超时续期过的等待者留下的回调不会吞掉这次唤醒。
     manualWaiters.splice(0).forEach(wake => wake());
   };
@@ -988,7 +1005,7 @@ const SEGMENT_STALL = 180_000;
 
 async function fetchSegmentOnce(job: Manual, opened: Opened, [first]: [number, number], end: number, diag: SegmentDiagnosis, progress: (value: unknown) => void) {
   const alive = () => { renewManual(job); job.noticed = Date.now(); progress(manualProgress(job, opened)); };
-  const release = await manualSlot(job.controller.signal, alive);
+  const release = await manualSlot(job.controller.signal, alive, job.key);
   // 页面与 Worker 都按「120 秒没有进度」判定任务没有响应，而进度只在写满 1 MiB 时更新：
   // 网络很慢（120 秒不到 1 MiB）或服务器还没开始返回时，每 15 秒续期一次；超过 SEGMENT_STALL 完全没有数据才中断这一段。
   const segment = new AbortController();
