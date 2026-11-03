@@ -675,10 +675,19 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         resources.update({"thumbnail_concurrency": 5})
         self.assertEqual(self.app.engine.small_reads.limit, 5, "缩略图读取并发保存后立即生效")
         resources.update({"transfer_concurrency": 12, "bucket_concurrency": 12})
+        resources.detected.update(cpu_cores=1, memory_bytes=4 * 1024 ** 3)
+        auto = resources.update({"mode": "auto"})["effective"]
+        # 读取不看 CPU 核数：单核、内存充足时「自动」虽选低资源档，读取仍按设置生效，每个账号可以用满。
+        self.assertEqual((auto["mode"], auto["transfer_concurrency"], auto["bucket_concurrency"], auto["transfer_reduced"]), ("low", 12, 12, False))
+        self.assertEqual((transfers.total, transfers.per_bucket), (12, 12))
         low = resources.update({"mode": "low"})["effective"]
-        # 低资源档最多 8 路读取，每个账号可以用满（不再减半）。
+        # 明确选择低资源档时最多 8 路读取。
         self.assertEqual((low["transfer_concurrency"], low["bucket_concurrency"], low["transfer_reduced"]), (8, 8, True))
         self.assertEqual((transfers.total, transfers.per_bucket), (8, 8))
+        # 内存不足 512 MiB 时低资源档压到 3 路。
+        resources.update({"mode": "auto"})
+        resources.detected.update(memory_bytes=400 * 1024 ** 2)
+        self.assertEqual(resources.effective()["transfer_concurrency"], 3)
         # 自定义模式不按低资源档收紧，只按检测到的内存留余量（自动模式在 1 GB 以下会选低资源档）。
         resources.update({"mode": "custom"})
         resources.detected.update(memory_bytes=512 * 1024 ** 2)

@@ -216,9 +216,11 @@ class ResourceSettings:
         platform_limit = config["platform_max_mib"]
         low_parallel = 8 if roomy else 3
         # 文件读取每路约 24 MB，最多占检测内存的三分之一；每个账号可以用满全部读取名额（低资源档不再减半）。
-        # 管理员设得更低时不主动抬高。
+        # 读取主要在等 Telegram 的网络，CPU 只用于解密（单核每秒数百 MB），所以和离线下载一样不看核数：
+        # 「自动」因核数少选了低资源档时读取只按内存收紧，内存不足 512 MiB 或无法检测才压到 3 路；
+        # 管理员明确选择「低资源」时仍按该档封顶（最多 8 路）。管理员设得更低时不主动抬高。
         transfer = config["transfer_concurrency"]
-        if mode == "low":
+        if mode == "low" and (not roomy or config["mode"] == "low"):
             transfer = min(transfer, low_parallel)
         if memory:
             transfer = min(transfer, max(2, memory // 3 // TRANSFER_MEMORY))

@@ -610,8 +610,9 @@ function renewManual(job: Manual) {
 /* 多线程缓存：大文件按 16 MiB（服务器存储分片的大小，一段只对应一个分片）切段并行下载，几个文件也可以同时缓存。
  * 所有回源请求共用一个并发上限：服务器给每个账号的读取路数减一（服务器为播放和预览保留一路），最多 MANUAL_MAX 路。请求带 X-Tessera-Background，服务器让播放优先。 */
 const SEGMENT_BLOCKS = 16;
-/** 浏览器里所有手动缓存与预读合计的回源路数上限；站点通常经 HTTP/2（如 Cloudflare），不受 HTTP/1.1 每站约 6 个连接的限制。 */
-const MANUAL_MAX = 6;
+/** 浏览器里所有手动缓存与预读合计的回源路数上限，实际取「每个账号同时读取数 − 1」（由管理员设置）。
+ *  站点经 HTTP/2（如 Cloudflare）时不受 HTTP/1.1 每站约 6 个连接的限制；这里只防止设置过大时占满浏览器。 */
+const MANUAL_MAX = 12;
 let manualActive = 0;
 const manualWaiters: (() => void)[] = [];
 let readConcurrency: { value: number; at: number } | null = null;
