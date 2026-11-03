@@ -25,7 +25,7 @@ export function UserSettingsPage({ session, onSessionChange, assistant = false, 
   useDocumentTitle(`${tab === "keys" ? "访问密钥" : tab === "cache" ? "本机缓存" : "设置"} · ${BRAND}`);
   return <div className="account-page">
     <PageHeader title="设置" description={tab === "keys" ? "让同步工具（如 rclone、AWS CLI）或你自己的脚本访问你的文件。密钥只能访问你自己的文件，随时可以停用。"
-      : tab === "cache" ? "看过的图片、音乐、视频片段和缩略图加密保存在这台设备的浏览器里，再次打开时不必重新下载。"
+      : tab === "cache" ? "看过的图片、音乐、视频片段和封面加密保存在这台设备的浏览器里，再次打开时不必重新下载。"
       : "管理你的个人资料和登录方式，登录方式也用于解锁私密空间。"} />
     {onTabChange && <Tabs label="设置" value={tab} onChange={onTabChange} options={SETTINGS_TABS} />}
     {tab === "cache" ? <LocalCacheSettings />

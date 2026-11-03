@@ -50,7 +50,7 @@ export type RegistrationSettings = Pick<RegistrationConfig, "enabled" | "email_e
 export type RegistrationUpdate = Omit<RegistrationSettings, "smtp"> & { smtp: SmtpConfig; smtp_password?: string; clear_smtp_password?: boolean };
 export type Invitation = { id: number; code: string; status: "active" | "used" | "expired" | "revoked"; quota_bytes: number | null; expires_at: number; created_at: number; used_at?: number | null };
 export type InvitationPage = { invites: Invitation[]; total: number; next_cursor: number | null };
-export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number; thumbnail_concurrency: number };
+export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number; thumbnail_concurrency: number; download_memory_percent: number; video_concurrency: number; thumbnail_cache_mib: number };
 export type ResourceSettings = { config: ResourceConfig; source: "admin" | "startup"; pressure: string | null;
   components: { versions: Record<string, string | null>; ytdlp_age_days: number | null };
   /** 生效档位：自动模式按检测到的 CPU 与内存选择 low 或 standard。 */
@@ -142,7 +142,7 @@ const SERVER_MESSAGES: Record<string, string> = {
   "shared folder changed": "分享的文件夹已有变化，请刷新页面",
   "trash entry not found": "回收站里找不到这个项目，可能已被还原或清除",
   "upload not found": "上传已过期，请重新上传",
-  "thumbnail not found": "缩略图还没有生成",
+  "thumbnail not found": "封面还没有生成",
   "source unavailable": "来源暂时无法访问，请稍后重试",
   "invalid range": "文件读取范围不正确，请刷新页面后重试",
   "the administrator account cannot be disabled": "管理员账号不能禁用",

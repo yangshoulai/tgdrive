@@ -414,7 +414,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) }] : []),
     ];
     // 任何文件都可以指定缩略图；图片、视频、音频上传后仍自动生成，用户不满意时在这里替换。
-    items.push({ label: file.thumbnails?.includes("thumb") ? "更新缩略图" : "设置缩略图", icon: "image", heading: "缩略图", onSelect: () => setThumbnailEditing(file) });
+    items.push({ label: file.thumbnails?.includes("thumb") ? "更新封面" : "设置封面", icon: "image", heading: "封面", onSelect: () => setThumbnailEditing(file) });
     if (file.public_token) items.push({ label: "打开分享页", icon: "external", onSelect: () => window.open(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "_blank", "noreferrer") });
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
     items.push({ label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming(entry) });
@@ -804,7 +804,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         onSaved={variants => { const target = thumbnailEditing; setThumbnailEditing(null);
           // 替换后先用临时版本号让地址变化，避免浏览器沿用旧图；随后的后台刷新会带回服务端的正式版本。
           const stamp = String(Date.now());
-          setFiles(current => current.map(item => item.key === target.key ? { ...item, thumbnails: variants, thumbnail_status: "ready", has_thumbnail: true, thumbnail_versions: Object.fromEntries(variants.map(variant => [variant, stamp])) } : item)); notify.success("缩略图已更新"); scheduleRefresh(); onChanged(); }} />}
+          setFiles(current => current.map(item => item.key === target.key ? { ...item, thumbnails: variants, thumbnail_status: "ready", has_thumbnail: true, thumbnail_versions: Object.fromEntries(variants.map(variant => [variant, stamp])) } : item)); notify.success("封面已更新"); scheduleRefresh(); onChanged(); }} />}
       {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
       {folderCache && <ConfirmDialog title="缓存文件夹到本机？" danger={false} className={privateSpace ? "private-dialog" : ""} confirmLabel="开始缓存" onClose={() => setFolderCache(null)}
         description={<>{folderCache.prefixes.length === 1 ? `将缓存“${baseName(folderCache.prefixes[0])}”中的所有文件，以及全部子目录中的文件。` : `将缓存所选 ${folderCache.prefixes.length} 个文件夹中的所有文件，以及全部子目录中的文件。`}

@@ -106,6 +106,6 @@ class VideoDecoderTests(unittest.IsolatedAsyncioTestCase):
         info = await self.clip("blank", "color=c=white:s=320x180:r=8:d=0.5", body=False)
         old = b"\xff\xd8\xff\xe0old-thumbnail"
         await self.objects.set_thumbnail(self.scope, info.key, old)
-        with self.assertRaisesRegex(ThumbnailError, "未替换现有缩略图"):
+        with self.assertRaisesRegex(ThumbnailError, "未替换现有封面"):
             await self.worker.generate(info, force=True)
         self.assertEqual((await self.objects.get_thumbnail(self.scope, info.key))[0], old)

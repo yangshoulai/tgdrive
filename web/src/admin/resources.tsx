@@ -9,7 +9,7 @@ const TIERS: Record<api.ResourceSettings["effective"]["mode"], string> = { low: 
 const MODE_HINTS: Record<api.ResourceConfig["mode"], string> = {
   auto: "按检测到的 CPU 和内存在「标准」与「低资源」之间选择，适合大多数部署。",
   low: "内存达到 512 MiB 时：离线下载 2 个任务，读取最多 8 路（每个账号可以全部使用），写入与网页分段最多 8 路，并按内存的三分之一收紧。更小或无法检测内存时最多 3 路、离线下载 1 个任务。",
-  custom: "自己决定同时下载的任务数（1–16）；内存 1 GiB 以上按每个任务约 128 MB、最多占内存一半封顶，更小的机器最多 2–4 个。",
+  custom: "自己决定同时下载的任务数（1–16）；按每个任务约 64 MB、最多占「离线下载可用内存」封顶（只看内存，不看 CPU 核数）；内存不足 1 GiB 的机器最多 1–4 个。",
 };
 const rate = (kib: number) => kib ? `${kib.toLocaleString("zh-CN")} KiB/s` : "不限速";
 
@@ -44,7 +44,7 @@ export function Resources() {
         <Field label="资源模式" hint={MODE_HINTS[form.mode]}>
           <select className="input" value={form.mode} onChange={event => set("mode", event.target.value as api.ResourceConfig["mode"])}>{Object.entries(MODES).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select>
         </Field>
-        {form.mode === "custom" && <Field label="同时下载的任务数" hint="1–16 个，按内存封顶（每个任务约 128 MB，最多占内存一半）；视频封装始终最多 1 个。"><input className="input" type="number" min={1} max={16} step={1} required value={form.concurrency} onChange={number("concurrency")} /></Field>}
+        {form.mode === "custom" && <Field label="同时下载的任务数" hint="1–16 个，按内存封顶（每个任务约 64 MB，总共不超过「离线下载可用内存」）；其中 M3U8／YouTube 视频按「同时封装的视频数」。"><input className="input" type="number" min={1} max={16} step={1} required value={form.concurrency} onChange={number("concurrency")} /></Field>}
         <Field label="下载限速（KiB/s）" hint="所有离线下载共用；0 表示不限速。"><input className="input" type="number" min={0} max={1048576} step={1} required value={form.bandwidth_kib} onChange={number("bandwidth_kib")} /></Field>
         <Field label="出站代理" hint="离线下载和平台解析都经此代理，留空为直连。支持 http:// 与 socks5://，密码保存后以 ****** 显示。">
           <input className="input mono" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="http://127.0.0.1:7890" value={form.proxy} onChange={event => set("proxy", event.target.value)} />
@@ -76,14 +76,22 @@ export function Resources() {
             <Field label="网页同时上传的文件数" hint="1–8；网页开始上传时读取，最长 1 分钟后生效。"><input className="input" type="number" min={1} max={8} step={1} required value={form.web_file_concurrency} onChange={number("web_file_concurrency")} /></Field>
           </div>
           <div className="form-row">
-            <Field label="缩略图读取并发" hint="网格封面、预览封面等缩略图从存储读取的同时数，所有用户共用，1–32，默认 16。不占文件读取名额，每路不到 1 MB 内存；过高可能触发 Telegram 限流。"><input className="input" type="number" min={1} max={32} step={1} required value={form.thumbnail_concurrency} onChange={number("thumbnail_concurrency")} /></Field>
+            <Field label="离线下载可用内存（%）" hint={`同时下载的任务总共最多占检测内存的比例，10–80，默认 60。每个任务按约 64 MB 估算${(settings.detected.memory_bytes ?? 0) >= 1024 ** 3 ? `，这台服务器最多 ${Math.min(16, Math.max(1, Math.floor((settings.detected.memory_bytes ?? 0) * (form.download_memory_percent || 0) / 100 / (64 * 1024 * 1024))))} 个` : ""}；内存不足 1 GiB 的机器固定为 1–4 个，CPU 核数不影响这个上限。`}>
+              <input className="input" type="number" min={10} max={80} step={5} required value={form.download_memory_percent} onChange={number("download_memory_percent")} /></Field>
+            <Field label="同时封装的视频数" hint="M3U8 与 YouTube 视频同时处理的个数，1–4，默认 2。FFmpeg 只复制音视频数据、不转码，CPU 占用不高；每个 YouTube 任务另占最多「平台临时缓存上限」的磁盘。内存不足 1 GiB 的机器固定为 1 个，也不超过同时下载的任务数。">
+              <input className="input" type="number" min={1} max={4} step={1} required value={form.video_concurrency} onChange={number("video_concurrency")} /></Field>
+          </div>
+          <div className="form-row">
+            <Field label="封面读取并发" hint="网格图、预览大图等封面从存储读取的同时数，所有用户共用，1–32，默认 16。不占文件读取名额，每路不到 1 MB 内存；过高可能触发 Telegram 限流。"><input className="input" type="number" min={1} max={32} step={1} required value={form.thumbnail_concurrency} onChange={number("thumbnail_concurrency")} /></Field>
+            <Field label="封面缓存上限（MiB）" hint={`上传、离线下载与预览时暂存刚经过的加密数据，后台生成封面时直接使用，不必再从存储读取原文件；128–8192，默认 1024。单个文件最多 ${Math.min(256, Math.floor((form.thumbnail_cache_mib || 0) / 4))} MiB（总量的四分之一、最多 256 MiB），保留 15 分钟。存放在数据目录的磁盘上，剩余空间低于「磁盘保留空间」时不再缓存。`}>
+              <input className="input" type="number" min={128} max={8192} step={128} required value={form.thumbnail_cache_mib} onChange={number("thumbnail_cache_mib")} /></Field>
           </div>
           <div className="form-row">
             <Field label="每个 Bot 的发送间隔（毫秒）" hint="0–10000。过短容易被 Telegram 限流，限流后会自动退避。"><input className="input" type="number" min={0} max={10000} step={100} required value={form.bot_interval_ms} onChange={number("bot_interval_ms")} /></Field>
             <Field label="磁盘保留空间（MiB）" hint="至少 128；剩余空间不足时离线下载等待释放。"><input className="input" type="number" min={128} max={1048576} step={1} required value={form.reserve_mib} onChange={number("reserve_mib")} /></Field>
           </div>
           {(form.x_enabled || form.youtube_enabled) && <div className="form-row">
-            <Field label="平台临时缓存上限（MiB）" hint="只限制需要缓存并合并的音视频轨；低资源模式最高 512 MiB。"><input className="input" type="number" min={16} max={8192} step={1} required value={form.platform_max_mib} onChange={number("platform_max_mib")} /></Field>
+            <Field label="平台临时缓存上限（MiB）" hint="16–8192。分离的音视频轨合并前暂存在数据目录的磁盘上，两轨合计超过这个值的格式不能选择；单轨媒体边下载边保存，不受限制。合并时剩余磁盘低于「磁盘保留空间」会停止。"><input className="input" type="number" min={16} max={8192} step={1} required value={form.platform_max_mib} onChange={number("platform_max_mib")} /></Field>
             {form.youtube_enabled && <Field label="YouTube 清晰度上限" hint="只显示来源实际提供且满足临时缓存预算的格式。"><select className="input" value={form.youtube_max_height} onChange={number("youtube_max_height")}>{[360, 480, 720, 1080, 2160].map(height => <option key={height} value={height}>{height}p</option>)}</select></Field>}
           </div>}
         </Disclosure>
@@ -98,7 +106,7 @@ export function Resources() {
         ["文件读取", `服务器 ${effective.transfer_concurrency} 路 · 每个账号 ${effective.bucket_concurrency} 路`],
         ["写入存储", `${effective.upload_concurrency} 个分片 · ${rate(effective.upload_kib)}`],
         ["网页上传", `每个文件 ${effective.web_part_concurrency} 段 · 同时 ${effective.web_file_concurrency} 个文件`],
-        ["缩略图读取", `${effective.thumbnail_concurrency} 路`],
+        ["封面读取", `${effective.thumbnail_concurrency} 路`],
         ["出站代理", effective.proxy || "直连"],
         ["视频组件", `FFmpeg ${component(effective.hls_available)} · X ${component(effective.x_available)} · YouTube ${effective.youtube_available ? "可用" : "组件不完整"}`],
       ]} />
@@ -112,11 +120,11 @@ export function Resources() {
           ["检测到的 CPU", `${settings.detected.cpu_cores.toFixed(2)} 核`],
           ["检测到的内存", settings.detected.memory_bytes ? formatBytes(settings.detected.memory_bytes) : "无法可靠检测，采用保守预算"],
           ["磁盘剩余空间", settings.detected.disk_free_bytes !== null ? formatBytes(settings.detected.disk_free_bytes) : "未知"],
-          ["视频处理", "M3U8 流式封装；分离的音视频轨使用受限缓存，视频封装同时 1 个"],
+          ["视频处理", `M3U8 流式封装；分离的音视频轨暂存在磁盘（每个最多 ${effective.platform_max_mib} MiB）；同时封装 ${effective.ffmpeg_concurrency} 个视频`],
           ["YouTube 生效上限", `${effective.youtube_max_height}p · ${effective.platform_max_mib} MiB`],
           ...Object.entries(settings.components.versions).map(([name, version]) => [`${name} 版本`, version ?? "未安装"] as [string, string]),
         ]} />
-        <p className="muted resource-footnote">降低并发不会终止现有任务或传输，后续调度使用新配置。读取名额占满时新的读取最多排队 30 秒；缩略图大图使用独立通道，不占这里的名额。</p>
+        <p className="muted resource-footnote">降低并发不会终止现有任务或传输，后续调度使用新配置。读取名额占满时新的读取最多排队 30 秒；封面大图使用独立通道，不占这里的名额。</p>
       </Disclosure>
     </Panel>
   </div>;

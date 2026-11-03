@@ -225,13 +225,13 @@ THUMBNAIL_KINDS = {"image", "video", "audio"}
 SCAN_FILES = 20000
 
 
-@tool("ui_generate_thumbnails", "生成缩略图", "browser", "read",
-      "为图片、视频和音乐补生成缩略图（列表小图、网格图与预览封面）。生成需要读取原文件，并且网格图与封面会计入用户空间，"
-      "审批模式显示「生成缩略图」卡片，完全访问下自动提交给服务器后台生成。path 可以是文件或目录；recursive 包含子目录；"
-      "曾尝试但未生成的文件也会重试，不能把 none 失败记录当作已有缩略图。regenerate 时也重新生成已有但缺少网格图的旧版缩略图。"
+@tool("ui_generate_thumbnails", "生成封面", "browser", "read",
+      "为图片、视频和音乐补生成封面（列表小图、网格图与预览大图）。生成需要读取原文件，并且网格图与封面会计入用户空间，"
+      "审批模式显示「生成封面」卡片，完全访问下自动提交给服务器后台生成。path 可以是文件或目录；recursive 包含子目录；"
+      "曾尝试但未生成的文件也会重试，不能把 none 失败记录当作已有封面。regenerate 时也重新生成已有但缺少网格图的旧版封面。"
       "单次文件数上限由管理员设置，超出时结果会说明剩余数量。",
       {"path": PATH, "recursive": {"type": "boolean", "description": "目录是否包含子目录，默认否"},
-       "regenerate": {"type": "boolean", "description": "是否重新生成缺少网格图的旧缩略图，默认否"}}, ("path",),
+       "regenerate": {"type": "boolean", "description": "是否重新生成缺少网格图的旧封面，默认否"}}, ("path",),
       params={"max_files": (500, 10, 2000, "单次最多处理文件数")})
 async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
     key = ctx.resolve(_str(args, "path", limit=1024))
@@ -262,10 +262,10 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
                "already_have": sum("thumb" in variants.get(row["blob_uuid"], ()) for row in media),
                "previously_failed": sum("none" in variants.get(row["blob_uuid"], ()) and "thumb" not in variants[row["blob_uuid"]] for row in media)}
     if not items:
-        return ToolOutput({**payload, "status": "没有需要生成缩略图的文件"}, "没有需要生成的缩略图")
+        return ToolOutput({**payload, "status": "没有需要生成封面的文件"}, "没有需要生成的封面")
     if len(todo) > len(items):
         payload["note"] = f"还有 {len(todo) - len(items)} 个文件，用户完成这一批后可以再调用一次"
-    return ToolOutput({**payload, "status": "已在对话中显示生成缩略图卡片，等待用户点击"}, f"准备为 {len(items)} 个文件生成缩略图",
+    return ToolOutput({**payload, "status": "已在对话中显示生成封面卡片，等待用户点击"}, f"准备为 {len(items)} 个文件生成封面",
                       items=len(items), event={"type": "browser", "action": "thumbnails", "items": items,
                                                 "regenerate": regenerate})
 

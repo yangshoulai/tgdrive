@@ -635,7 +635,7 @@ class AssistantService:
         if mode is not None:
             self.trace.append(conversation_id, None, "event", {
                 "type": "mode_changed", "text": "已切换到完全访问：普通修改会自动执行" if mode == "full" else "已切换到审批模式：每次修改都需要你确认",
-                "model_text": "[系统事件] 用户切换到完全访问模式。常规修改、下载任务、HTTP 请求、缓存和缩略图提交自动执行；"
+                "model_text": "[系统事件] 用户切换到完全访问模式。常规修改、下载任务、HTTP 请求、缓存和封面提交自动执行；"
                               "读取文件、图片或网页不改变此模式。彻底删除、公开分享、跨私密空间移动和 HTTP DELETE 仍需确认。" if mode == "full" else
                               "[系统事件] 用户切换到审批模式，所有修改都需要用户在卡片上确认。"})
         item = self.trace.conversation_json(self.trace.conversation(account.id, conversation_id))
@@ -668,7 +668,7 @@ class AssistantService:
             try:
                 raw = base64.b64decode(str(data or "").split(",", 1)[-1], validate=True)
             except binascii.Error as exc:
-                raise ValueError("缩略图数据不是有效的 base64") from exc
+                raise ValueError("封面数据不是有效的 base64") from exc
         await self.attachments.set_thumbnail(account.id, attachment_id, raw, variant)
 
     async def read_attachment_thumbnail(self, token: str, attachment_id: str, variant: str = "thumb"):

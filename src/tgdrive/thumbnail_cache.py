@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import tempfile
 import threading
 import time
@@ -27,16 +29,42 @@ class _Segment:
     file: object
 
 
-class ThumbnailCache:
-    """缓存现有加密分片／范围；匿名临时文件关闭即删除，不保存明文或解密密钥。"""
+# 单个文件最多占缓存总量的四分之一、且不超过这个值（另留 1 MiB 给加密帧开销）。
+PER_BLOB_MAX = 256 * MIB
 
-    def __init__(self, *, limit=128 * MIB, per_blob=64 * MIB + MIB, ttl=900):
+
+class ThumbnailCache:
+    """缓存现有加密分片／范围；匿名临时文件关闭即删除，不保存明文或解密密钥。
+    文件放在 directory（数据目录下的 thumbnail-cache，与「磁盘保留空间」检查同一块盘；未指定时用系统临时目录），
+    剩余空间低于 reserve() 时不再缓存，交给自动补图从存储读取。"""
+
+    def __init__(self, *, limit=128 * MIB, per_blob=64 * MIB + MIB, ttl=900, directory=None, reserve=None):
         self.limit, self.per_blob, self.ttl = limit, per_blob, ttl
+        self.directory, self.reserve = directory, reserve
+        if directory is not None:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
         self._lock = threading.RLock()
         self._blobs = OrderedDict()
         self._segments = OrderedDict()
         self._serial = self._size = 0
         self.on_data = None
+
+    def configure(self, limit_mib):
+        """按「封面缓存上限」调整总量与单个文件上限；调小时立即淘汰最早的数据。"""
+        with self._lock:
+            self.limit = max(1, int(limit_mib)) * MIB
+            self.per_blob = min(PER_BLOB_MAX, self.limit // 4) + MIB
+            while self._segments and self._size > self.limit:
+                self._remove(next(iter(self._segments)))
+
+    def _disk_full(self, size):
+        if self.reserve is None:
+            return False
+        try:
+            free = shutil.disk_usage(self.directory or tempfile.gettempdir()).free
+        except OSError:
+            return True
+        return free < self.reserve() + size
 
     def prepare(self, blob, key, content_type=None):
         kind = kind_of(key, content_type)
@@ -85,8 +113,10 @@ class ThumbnailCache:
                 if victim is None:
                     return
                 self._remove(victim)
+            if self._disk_full(len(data)):
+                return  # 磁盘剩余空间不足：不缓存，封面稍后由自动补图从存储读取。
             try:
-                file = tempfile.TemporaryFile(prefix="tessera-thumb-cipher-")
+                file = tempfile.TemporaryFile(prefix="tessera-thumb-cipher-", dir=self.directory)
                 file.write(data)
             except OSError:
                 if "file" in locals():

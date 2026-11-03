@@ -28,7 +28,7 @@ ACTIONS = {
     "user.register": "访客注册", "registration.update": "修改注册设置", "registration.test_email": "发送测试邮件",
     "invite.create": "创建邀请码", "invite.revoke": "撤销邀请码",
     "maintenance.gc": "运行垃圾回收", "maintenance.scrub": "运行完整性校验", "maintenance.cleanup": "清理未完成的上传",
-    "maintenance.gc_retry": "重试回收失败的分片", "maintenance.thumbnails": "调整缩略图自动补图", "backup.create": "创建备份", "backup.download": "下载备份",
+    "maintenance.gc_retry": "重试回收失败的分片", "maintenance.thumbnails": "调整封面自动补图", "backup.create": "创建备份", "backup.download": "下载备份",
     "backup.settings": "修改备份设置", "backup.delete": "删除备份", "audit.delete": "删除审计日志", "audit.clear": "清空审计日志",
     "admin.password": "修改管理员密码", "system.passphrase": "更换加密口令", "user.password_reset": "重置用户密码",
     "user.delete": "删除用户", "trash.purge": "清空回收站",

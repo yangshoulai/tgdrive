@@ -506,7 +506,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
         const cover = covers.get(index);
         if (!cover) continue;
         try { images.set(index, await imageThumbnailSet(cover)); }
-        catch (reason) { throw new Error(`${candidates[index].name} 的缩略图：${api.errorMessage(reason, "图片处理失败")}`); }
+        catch (reason) { throw new Error(`${candidates[index].name} 的封面：${api.errorMessage(reason, "图片处理失败")}`); }
       }
       const { tasks } = await api.createDownloads(chosenIndexes.map(index => ({ ticket: candidates[index].ticket, name: candidates[index].name, ...(candidates[index].folder ? { folder: candidates[index].folder } : {}) })), destination);
       let failed = 0;
@@ -515,7 +515,7 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
         if (!value || !created) continue;
         try { await api.setDownloadCover(created.id, value, api.isPrivatePath(destination)); } catch { failed++; }
       }
-      if (failed) toast.error(`任务已创建，但 ${failed} 个缩略图未能提交；下载完成后可在文件菜单「更新缩略图」中设置`);
+      if (failed) toast.error(`任务已创建，但 ${failed} 个封面未能提交；下载完成后可在文件菜单「更新封面」中设置`);
       else toast.success(`${selected.size} 个任务已加入下载队列`);
       onComplete();
     } catch (reason) {
@@ -584,9 +584,9 @@ function CoverSlot({ image, name, disabled, onEdit, onRemove }: { image: Blob | 
     return () => URL.revokeObjectURL(value);
   }, [image]);
   return <div className="download-cover">
-    {url ? <img src={url} alt={`${name} 的缩略图`} /> : <span className="download-cover-empty" aria-hidden="true"><Icon name="image" size={16} /></span>}
-    <span className="download-cover-copy">{image ? "下载完成后使用这张图片作为缩略图" : "缩略图：下载完成后自动生成"}</span>
-    <Button size="sm" variant="ghost" icon={image ? "edit" : "image"} disabled={disabled} onClick={onEdit}>{image ? "更换" : "设置缩略图"}</Button>
+    {url ? <img src={url} alt={`${name} 的封面`} /> : <span className="download-cover-empty" aria-hidden="true"><Icon name="image" size={16} /></span>}
+    <span className="download-cover-copy">{image ? "下载完成后使用这张图片作为封面" : "封面：下载完成后自动生成"}</span>
+    <Button size="sm" variant="ghost" icon={image ? "edit" : "image"} disabled={disabled} onClick={onEdit}>{image ? "更换" : "设置封面"}</Button>
     {image && <Button size="sm" variant="ghost" disabled={disabled} onClick={onRemove}>移除</Button>}
   </div>;
 }

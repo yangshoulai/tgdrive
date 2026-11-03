@@ -119,7 +119,7 @@ function waitFor(target: HTMLMediaElement, event: string | string[], signal?: Ab
       if (error) reject(error); else resolve();
     };
     const ok = () => { if (!ready || ready()) done(); }, failed = () => done(new VideoThumbnailError(videoFailure(target))), aborted = () => done(new DOMException("aborted", "AbortError"));
-    const timer = timeout === null ? null : window.setTimeout(() => done(new VideoThumbnailError("视频读取或解码超时，可重试生成缩略图")), timeout);
+    const timer = timeout === null ? null : window.setTimeout(() => done(new VideoThumbnailError("视频读取或解码超时，可重试生成封面")), timeout);
     events.forEach(name => target.addEventListener(name, ok)); target.addEventListener("error", failed, { once: true }); signal?.addEventListener("abort", aborted, { once: true });
   });
 }
@@ -170,7 +170,7 @@ async function fromVideo(src: string, signal?: AbortSignal, onFailure?: (message
     return null;
   } catch (reason) {
     if (signal?.aborted || reason instanceof DOMException && reason.name === "AbortError") throw reason;
-    onFailure?.(reason instanceof VideoThumbnailError ? reason.message : "浏览器未能截取视频画面，可重试生成缩略图");
+    onFailure?.(reason instanceof VideoThumbnailError ? reason.message : "浏览器未能截取视频画面，可重试生成封面");
     return null;
   } finally {
     video.pause();
@@ -450,7 +450,7 @@ function keepClaim(file: Pick<api.FileItem, "key" | "etag">, ticket: string, exp
 /** 用户指定的缩略图适用于任何文件：取得自定义票据（会取消这个文件排队中的自动生成），保存全部规格后移除旧的多余规格。 */
 async function saveCustomThumbnails(file: Pick<api.FileItem, "key" | "etag">, result: ThumbnailSet): Promise<string[]> {
   const lease = await api.claimThumbnail(file, true, true);
-  if (!lease.token) throw new Error("暂时无法更新缩略图，请稍后重试");
+  if (!lease.token) throw new Error("暂时无法更新封面，请稍后重试");
   const heartbeat = keepClaim(file, lease.token, lease.expires_in ?? 90);
   let released = false;
   try {

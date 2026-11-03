@@ -67,6 +67,8 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
         engine.transfers.set_limits(config["transfer_concurrency"], config["bucket_concurrency"])
         engine.upload_slots.set_limit(config["upload_concurrency"])
         engine.small_reads.set_limit(config["thumbnail_concurrency"])
+        if objects.thumbnail_service is not None:
+            objects.thumbnail_service.cache.configure(config["thumbnail_cache_mib"])
         engine.upload_rate.set_rate(config["upload_kib"] * 1024)
         store.set_bot_interval(config["bot_interval_ms"] / 1000)
         engine.upload_concurrency, engine.read_ahead = (1, 1) if low else (3, 2)

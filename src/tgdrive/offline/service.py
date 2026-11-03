@@ -459,7 +459,7 @@ class OfflineDownloads:
             return None
         url = cover.get("url") if isinstance(cover, dict) else cover
         if not isinstance(url, str) or not re.match(r"https?://", url.strip(), re.IGNORECASE) or len(url) > 4096:
-            raise ValueError("缩略图必须是 http:// 或 https:// 开头的图片地址")
+            raise ValueError("封面必须是 http:// 或 https:// 开头的图片地址")
         return {"url": url.strip()}
 
     def _remember_destination(self, db, user_id, prefix):
@@ -493,7 +493,7 @@ class OfflineDownloads:
         self.scope(user_id)
         row = self._row(task_id, user_id)
         if not self._private_view(row, private_scope):
-            raise ValueError("请先解锁私密空间，再设置缩略图")
+            raise ValueError("请先解锁私密空间，再设置封面")
         images = self._cover_images(images)
         if row["status"] == "completed":
             await self._apply_images(row, images)
@@ -513,7 +513,7 @@ class OfflineDownloads:
         import base64
         from ..thumbnails import image_mime
         if not isinstance(images, dict) or "thumb" not in images or not set(images) <= set(ObjectService.STORED_THUMBNAILS):
-            raise ValueError("缩略图至少需要列表小图（thumb）")
+            raise ValueError("封面至少需要列表小图（thumb）")
         decoded = {}
         for variant, value in images.items():
             try:
@@ -521,18 +521,18 @@ class OfflineDownloads:
             except ValueError:
                 data = b""
             if not data or len(data) > ObjectService.THUMBNAIL_LIMITS[variant] or image_mime(data) not in ("image/jpeg", "image/webp", "image/png"):
-                raise ValueError("缩略图图片格式或大小不正确")
+                raise ValueError("封面图片格式或大小不正确")
             decoded[variant] = data
         return decoded
 
     async def _apply_images(self, row, images):
         service = self.objects.thumbnail_service
         if service is None:
-            raise ValueError("缩略图服务不可用")
+            raise ValueError("封面服务不可用")
         try:
             await service.apply_custom(self._task_scope(row), row["key"], images)
         except NotFoundError:
-            raise ValueError("下载的文件已移动或删除，请在文件菜单中设置缩略图") from None
+            raise ValueError("下载的文件已移动或删除，请在文件菜单中设置封面") from None
 
     def _schedule_cover(self, task_id):
         task = asyncio.create_task(self._apply_cover(task_id))
@@ -840,15 +840,16 @@ class OfflineDownloads:
 
     @staticmethod
     def _exclusive(row):
-        """M3U8 与 YouTube 任务（FFmpeg 封装）全站同时只运行一个。"""
+        """M3U8 与 YouTube 任务（FFmpeg 封装）：全站同时最多运行「同时封装的视频数」个（resources 的 ffmpeg_concurrency）。"""
         return row["kind"] == "hls" or row["platform"] == "youtube"
 
     def _yield_plan(self, user_id, row):
         """立即下载需要让出的任务：没有空位（或独占类任务已在运行）时，从该用户自己正在运行的任务里选进度最小的一个；
         POST 任务中断后要手动重新发送，不让出。返回 (让出的任务, 是否只能排到最前等待)。不会停止其他用户的任务。"""
         running = [self._row(task_id) for task_id, task in list(self._running.items()) if not task.done() and task_id != row["id"]]
-        if self._exclusive(row) and any(self._exclusive(item) for item in running):
-            pool = [item for item in running if self._exclusive(item)]
+        videos = [item for item in running if self._exclusive(item)]
+        if self._exclusive(row) and len(videos) >= self.resources.effective()["ffmpeg_concurrency"]:
+            pool = videos
         elif len(running) >= self.resources.effective()["concurrency"]:
             pool = running
         else:
@@ -1041,14 +1042,14 @@ class OfflineDownloads:
                     rest = self.metadata.db.execute("SELECT t.id,t.user_id,t.kind,t.method,t.platform FROM offline_tasks t JOIN users u ON u.id=t.user_id WHERE t.status IN ('queued','interrupted') AND u.status='active' ORDER BY t.id LIMIT 100").fetchall()
                     seen = {row["id"] for row in first}
                     candidates = [*first, *(row for row in rest if row["id"] not in seen)]
-                    hls_running = any(self._exclusive(self._row(task_id)) for task_id in self._running)
+                    videos = sum(1 for task_id in self._running if self._exclusive(self._row(task_id)))
                     now = time.monotonic()
                     for row in candidates:
                         if len(self._running) >= config["concurrency"]:
                             break
                         if row["id"] in self._running or row["id"] in self._controls or self._retry_at.get(row["id"], 0) > now:
                             continue
-                        if (row["kind"] == "hls" or row["platform"] == "youtube") and hls_running:
+                        if self._exclusive(row) and videos >= config["ffmpeg_concurrency"]:
                             continue
                         if row["platform"]:
                             # 解析子进程由 PlatformResolver 全局限制为一个；复用解析结果的任务可以并行下载。
@@ -1060,7 +1061,7 @@ class OfflineDownloads:
                             continue
                         self._set(row["id"], status="running", error=None)
                         self._running[row["id"]] = asyncio.create_task(self._run(row["id"]))
-                        hls_running |= row["kind"] == "hls" or row["platform"] == "youtube"
+                        videos += self._exclusive(row)
             except (NotFoundError, NotReadyError):
                 pass
             self._wake.clear()

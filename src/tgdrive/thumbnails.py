@@ -422,7 +422,12 @@ class ThumbnailService:
     def __init__(self, accounts, objects, resources):
         self.accounts, self.objects, self.resources = accounts, objects, resources
         self.metadata, self.keystore = objects.metadata, accounts.keystore
-        self.cache = ThumbnailCache()
+        data_dir = getattr(resources, "data_dir", None)
+        config = getattr(resources, "config", None)
+        self.cache = ThumbnailCache(directory=data_dir / "thumbnail-cache" if data_dir is not None else None,
+                                    reserve=(lambda: config()["reserve_mib"] * 1024 * 1024) if callable(config) else None)
+        if callable(config):
+            self.cache.configure(config()["thumbnail_cache_mib"])
         objects.thumbnail_service = self
         objects.engine.thumbnail_cache = self.cache if resources.ffmpeg else None
         objects.on_change = lambda bucket: self._dispatch(self._changed, bucket)
@@ -514,7 +519,7 @@ class ThumbnailService:
             victim = next((key for key, item in self._pending.items() if (item.state == "waiting_data" or item.backfill) and key not in self._leases and item is not self._active), None)
             if victim is None:
                 if job.remote and not job.backfill:
-                    raise ValueError("缩略图队列已满，请稍后重试")
+                    raise ValueError("封面队列已满，请稍后重试")
                 return False
             self._pending.pop(victim)
         self._pending[blob] = job
@@ -604,14 +609,14 @@ class ThumbnailService:
     def _take_over(self, info):
         """用户指定的缩略图优先于自动生成：取消这个 Blob 排队或进行中的自动任务。"""
         if info.key.endswith("/") or not info.blob_uuid:
-            raise ValueError("只有文件可以设置缩略图")
+            raise ValueError("只有文件可以设置封面")
         if info.key.startswith(".tgdrive/") and not info.key.startswith(PRIVATE_PREFIX):
-            raise ValueError("系统文件不能设置缩略图")
+            raise ValueError("系统文件不能设置封面")
         job = self._pending.pop(info.blob_uuid, None)
         if job is not None:
             if self._active is job and self._task is not None:
                 self._task.cancel()
-            self._record(job, "cancelled", "用户设置了自定义缩略图")
+            self._record(job, "cancelled", "用户设置了自定义封面")
 
     def _custom_claim(self, info):
         """用户指定的缩略图（上传图片、图片地址或播放器当前画面）适用于任何文件，优先于自动生成：
@@ -687,7 +692,7 @@ class ThumbnailService:
         lease = self._leases.get(info.blob_uuid)
         if lease is None or not secrets.compare_digest(lease.token, token) or lease.until <= time.monotonic() or (
                 lease.info.bucket_id, lease.info.key, lease.info.etag) != (info.bucket_id, info.key, info.etag):
-            raise ValueError("缩略图生成授权已失效，结果已丢弃")
+            raise ValueError("封面生成授权已失效，结果已丢弃")
 
     def release(self, scope, key, etag, token):
         info = self.objects.head_object(scope, key)
@@ -711,7 +716,7 @@ class ThumbnailService:
         if info.etag != etag:
             raise ValueError("文件内容已变化，请刷新后重试")
         if not self._eligible(info):
-            raise ValueError("此文件不支持生成缩略图")
+            raise ValueError("此文件不支持生成封面")
         if not self.resources.ffmpeg:
             raise ValueError("服务器未安装 FFmpeg，无法在服务器生成")
         # 已知尺寸时当场评估，不适合就直接说明原因，不进入队列；尺寸未知的图片在任务里读文件头后再评估。
@@ -869,7 +874,7 @@ class ThumbnailService:
                                 self._record(job, "failed", failure_detail)
                             else:
                                 self._unsuitable.pop(blob, None)
-                                self._record(job, "done", "自动补图完成" if job.backfill else "缩略图处理完成")
+                                self._record(job, "done", "自动补图完成" if job.backfill else "封面处理完成")
                             self.cache.drop(blob)
                         except ThumbnailCacheMiss:
                             job.misses += 1
@@ -878,7 +883,7 @@ class ThumbnailService:
                                 job.state, job.ready_at = "queued", 0
                             elif job.misses >= MISS_LIMIT:
                                 self._pending.pop(blob, None)
-                                self._record(job, "failed", "已接收的数据不足以生成，可在文件菜单更新缩略图")
+                                self._record(job, "failed", "已接收的数据不足以生成，可在文件菜单更新封面")
                                 self.cache.drop(blob)
                             elif self.cache.revision(blob) != job.revision:
                                 job.state, job.ready_at = "queued", time.monotonic() + min(60, 2 << job.misses)
@@ -973,7 +978,7 @@ class ThumbnailService:
                 failure_detail = ("候选画面均为空白或细节不足" if kind == "video"
                                                     else "音频没有可用的内嵌封面" if kind == "audio" else "未能提取图片画面")
                 if force and kind == "video":
-                    raise ThumbnailError(failure_detail + "，未替换现有缩略图")
+                    raise ThumbnailError(failure_detail + "，未替换现有封面")
                 await self.objects.set_thumbnail(scope, info.key, None, "none")
                 return failure_detail
             saved = []
@@ -985,7 +990,7 @@ class ThumbnailService:
                 except QuotaExceededError:
                     if not saved:
                         # 没有保存任何规格：不记「无法生成」，空间腾出后还能自动补图。
-                        raise ThumbnailRetry("存储空间已满，无法保存缩略图") from None
+                        raise ThumbnailRetry("存储空间已满，无法保存封面") from None
                     break
             if force:
                 self.objects.finish_thumbnail_set(scope, info.key, saved)
@@ -1025,11 +1030,11 @@ class ThumbnailService:
         超过解码器像素上限或本机内存上限抛 ThumbnailUnsuitable（自动流程不再尝试）；
         可用内存、临时目录空间不足或按最近读取速度读不完抛 ThumbnailRetry（稍后再试）。"""
         if size and (size[0] + 128) * (size[1] + 128) >= PIXEL_LIMIT:
-            raise ThumbnailUnsuitable(f"画面 {size[0]}×{size[1]} 超过解码器的像素上限，不生成缩略图；可以改用本地图片或图片地址")
+            raise ThumbnailUnsuitable(f"画面 {size[0]}×{size[1]} 超过解码器的像素上限，不生成封面；可以改用本地图片或图片地址")
         need, cap = decode_estimate(kind, info.size, size, bpp), self._memory_cap()
         if need > cap:
-            raise ThumbnailUnsuitable(f"生成预计需要约 {_size_text(need)} 内存，超过这台服务器允许缩略图使用的 {_size_text(cap)}，"
-                                      "不生成缩略图；可以改用本地图片或图片地址")
+            raise ThumbnailUnsuitable(f"生成预计需要约 {_size_text(need)} 内存，超过这台服务器允许封面使用的 {_size_text(cap)}，"
+                                      "不生成封面；可以改用本地图片或图片地址")
         available = self.resources.available_memory()
         if available is not None and need > available - self._reserve():
             raise ThumbnailRetry(f"服务器当前可用内存约 {_size_text(available)}，生成预计需要约 {_size_text(need)}，稍后再试")
@@ -1154,8 +1159,8 @@ class ThumbnailService:
                 if self.resources.pressure():
                     raise ThumbnailRetry("服务器资源不足，稍后再生成")
                 if _resident(process.pid) > memory:
-                    raise ThumbnailUnsuitable(f"解码实际占用的内存超过这台服务器允许缩略图使用的 {_size_text(memory)}，"
-                                              "已停止，不生成缩略图；可以改用本地图片或图片地址")
+                    raise ThumbnailUnsuitable(f"解码实际占用的内存超过这台服务器允许封面使用的 {_size_text(memory)}，"
+                                              "已停止，不生成封面；可以改用本地图片或图片地址")
                 available = self.resources.available_memory()
                 if available is not None and available < reserve // 2:
                     raise ThumbnailRetry("服务器可用内存不足，已停止生成，稍后再试")
@@ -1166,7 +1171,7 @@ class ThumbnailService:
             if process.returncode:
                 if kind == "audio" and b"matches no streams" in output:
                     return None, b""
-                reason, detail = "decoder_error", "当前解码器未能生成缩略图"
+                reason, detail = "decoder_error", "当前解码器未能生成封面"
                 lowered = output.lower()
                 environment = process.returncode < 0 or any(sign.lower() in lowered for sign in ENVIRONMENT_ERRORS)
                 if environment:

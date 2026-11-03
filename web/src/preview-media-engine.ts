@@ -72,7 +72,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     if (!control) return;
     control.setAttribute("aria-disabled", String(thumbnailBusy || player.video.readyState < 2 || player.video.seeking));
     control.setAttribute("aria-busy", String(thumbnailBusy));
-    control.setAttribute("aria-label", thumbnailBusy ? "正在保存缩略图" : "将当前画面设为缩略图");
+    control.setAttribute("aria-label", thumbnailBusy ? "正在保存封面" : "将当前画面设为封面");
   };
   // 旋转 90°／270° 时窗口按转过来的比例显示；回报给上层的仍是视频本身的尺寸（用于记录分辨率）。
   let rotation = normalizeRotation(initialRotation), lastSize: { width: number; height: number } | null = null;
@@ -185,9 +185,9 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
         thumbnailState();
         try {
           await saveThumbnail(player.video, rotation);
-          if (!destroyed && current === sourceVersion) player.notice.show = "已将当前画面设为缩略图";
+          if (!destroyed && current === sourceVersion) player.notice.show = "已将当前画面设为封面";
         } catch (reason) {
-          if (!destroyed && current === sourceVersion) player.notice.show = reason instanceof Error ? reason.message : "缩略图保存失败，请重试";
+          if (!destroyed && current === sourceVersion) player.notice.show = reason instanceof Error ? reason.message : "封面保存失败，请重试";
         } finally {
           thumbnailBusy = false;
           if (!destroyed) {
@@ -198,7 +198,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
         }
       };
       player.controls.update({ name: "thumbnail", position: "right", index: 24, html: GLYPHS.thumbnail,
-        tooltip: "将当前画面设为缩略图", click: () => { void click(); } });
+        tooltip: "将当前画面设为封面", click: () => { void click(); } });
       const control = container.querySelector<HTMLElement>(".art-control-thumbnail");
       if (control) {
         control.tabIndex = 0; control.setAttribute("role", "button");

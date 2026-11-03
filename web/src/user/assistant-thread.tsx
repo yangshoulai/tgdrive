@@ -875,7 +875,7 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
   const total = event.items.length, processed = state.done + state.none + state.failed;
   const summary = [state.local ? `已生成 ${state.done} 个` : `已提交 ${state.done} 个`, state.none ? `${state.none} 个不支持` : "", state.failed ? `${state.failed} 个失败` : ""].filter(Boolean).join("，");
   return <section className="ai-card ai-browser">
-    <CardHead icon="image" title={`为 ${total} 个文件生成缩略图`} subtitle={`${event.regenerate ? "包括重做旧版缩略图 · " : ""}${state.local ? "在当前页面生成" : "由服务器后台生成"}`} />
+    <CardHead icon="image" title={`为 ${total} 个文件生成封面`} subtitle={`${event.regenerate ? "包括重做旧版封面 · " : ""}${state.local ? "在当前页面生成" : "由服务器后台生成"}`} />
     {state.phase === "idle" ? <ul className="ai-list">{event.items.slice(0, 5).map(item => <li key={item.path}><Icon name="file" size={13} /><span className="cell-truncate">{display(item.path)}</span></li>)}
       {total > 5 && <li className="ai-list-more">等 {total} 个文件</li>}</ul>
       : <div className="ai-thumbnail-progress">

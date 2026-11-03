@@ -112,7 +112,7 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
             (b"Stream specifier matches no streams", "missing_stream", "没有可用的画面或封面", ThumbnailError),
             (b"Picture size exceeds specified max pixel count", "pixel_limit", "像素数超过解码上限", ThumbnailError),
             (b"Failed to configure output pad", "filter_error", "画面转换", ThumbnailError),
-            (b"Unrecognized decoder failure", "decoder_error", "未能生成缩略图", ThumbnailError),
+            (b"Unrecognized decoder failure", "decoder_error", "未能生成封面", ThumbnailError),
             (b"CANNOT ALLOCATE MEMORY", "environment", "运行环境受限", ThumbnailRetry),
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -149,7 +149,7 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
         entry.return_value.__aenter__ = AsyncMock(return_value=self.source())
         entry.return_value.__aexit__ = AsyncMock(return_value=False)
         with patch("tgdrive.thumbnails._RangeInput", entry), \
-                self.assertRaisesRegex(ThumbnailError, "候选画面均为空白或细节不足.*未替换现有缩略图"):
+                self.assertRaisesRegex(ThumbnailError, "候选画面均为空白或细节不足.*未替换现有封面"):
             await worker.generate(info, force=True)
         worker.objects.set_thumbnail.assert_not_awaited()
         worker.objects.finish_thumbnail_set.assert_not_called()
@@ -240,7 +240,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         info = await self.put("dark.mp4")
         await self.objects.set_thumbnail(self.scope, info.key, JPEG)
         channel, render = self.renderer(None)
-        with channel, render, self.assertRaisesRegex(ThumbnailError, "未替换现有缩略图"):
+        with channel, render, self.assertRaisesRegex(ThumbnailError, "未替换现有封面"):
             await self.worker.generate(info, force=True)
         self.assertEqual(self.variants(info), ["thumb"])
 

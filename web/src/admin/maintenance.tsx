@@ -152,7 +152,7 @@ function since(seconds?: number) {
 function ThumbnailTasksPanel({ active }: { active: boolean }) {
   const [status, setStatus] = useState<api.ThumbnailQueueStatus | null>(null);
   const [error, setError] = useState("");
-  const load = useCallback(() => { void api.thumbnailQueue().then(value => { setStatus(value); setError(""); }).catch(reason => setError(api.errorMessage(reason, "缩略图队列读取失败"))); }, []);
+  const load = useCallback(() => { void api.thumbnailQueue().then(value => { setStatus(value); setError(""); }).catch(reason => setError(api.errorMessage(reason, "封面队列读取失败"))); }, []);
   useEffect(() => {
     if (!active) return;
     load();
@@ -161,7 +161,7 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
   }, [active, load]);
   const labels: Record<string, string> = { queued: "待处理", running: "处理中", waiting_client: "等待浏览器", waiting_data: "等待数据", done: "已完成", failed: "失败", cancelled: "已取消" };
   const kinds = { image: "图片", video: "视频", audio: "音频" };
-  return <Panel title="缩略图队列" description="优先使用上传和预览时已收到的数据；上传或修改 10 分钟后仍缺缩略图的图片、视频、音频由后台逐个从存储读取补齐（只产生入站流量）。此处仅显示任务编号与处理情况。"
+  return <Panel title="封面队列" description="优先使用上传和预览时已收到的数据；上传或修改 10 分钟后仍缺封面的图片、视频、音频由后台逐个从存储读取补齐（只产生入站流量）。此处仅显示任务编号与处理情况。"
     actions={<Button size="sm" icon="refresh" onClick={load}>刷新</Button>}>
     {error ? <EmptyState icon="alert" title="队列读取失败" description={error} /> : !status ? <SkeletonRows rows={2} /> : <>
       <KeyValue items={[["队列", `${status.jobs.length} / ${status.capacity}`], ["当前处理", `${status.jobs.filter(job => job.state === "running").length} 项`],
@@ -174,7 +174,7 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
       {!status.available && <Notice tone="warning">服务器未安装 FFmpeg，后台生成不可用；网页仍可用本地文件或已加载的画面生成。</Notice>}
       {!status.unlocked && <Notice>系统已锁定，后台任务暂停。</Notice>}
       {status.pressure && <Notice tone="warning">{status.pressure}</Notice>}
-      {status.jobs.length === 0 ? <p className="muted">当前没有待处理的缩略图任务。</p> : <div className="table-scroll"><div className="data-table thumbnail-jobs-table" role="table" aria-label="缩略图任务">
+      {status.jobs.length === 0 ? <p className="muted">当前没有待处理的封面任务。</p> : <div className="table-scroll"><div className="data-table thumbnail-jobs-table" role="table" aria-label="封面任务">
         <div className="data-row data-head" role="row"><span role="columnheader">任务</span><span role="columnheader">类型</span><span role="columnheader">状态</span><span role="columnheader">说明</span></div>
         {status.jobs.map(job => <div className="data-row" role="row" key={job.id}><span role="cell" className="mono">{job.id}</span><span role="cell">{kinds[job.kind]}</span>
           <span role="cell"><Badge tone={job.state === "running" ? "accent" : "neutral"}>{job.backfill && job.state === "queued" ? "自动补图" : labels[job.state] ?? job.state}</Badge></span>

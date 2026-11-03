@@ -947,10 +947,10 @@ export async function executeClientTool(name: string, args: Record<string, unkno
       for (const item of items) {
         if (signal?.aborted) break;
         try { await api.generateThumbnail({ key: item.path, etag: item.etag }); ok++; }
-        catch (reason) { failed++; note = api.errorMessage(reason, "缩略图提交失败"); }
+        catch (reason) { failed++; note = api.errorMessage(reason, "封面提交失败"); }
       }
       if (ok) for (const delay of [5000, 30000, 120000]) window.setTimeout(() => window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [...new Set(items.map(item => item.path.slice(0, item.path.lastIndexOf("/") + 1)))] } })), delay);
-      return { ok, failed, note: note || "已提交服务器生成，生成结果以文件缩略图为准" };
+      return { ok, failed, note: note || "已提交服务器生成，生成结果以文件封面为准" };
     }
     const queue = context.cacheQueue;
     if (!cacheSupported() || !queue?.available) throw new Error("这台设备不能使用本机缓存，请在设置中启用");

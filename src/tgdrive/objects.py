@@ -308,7 +308,7 @@ class ObjectService:
                 pass
             raise
         if info.blob_uuid != blob_uuid:
-            await self.engine.delete(blob_uuid)  # 内容与已有文件相同：只保留原来那份数据与缩略图
+            await self.engine.delete(blob_uuid)  # 内容与已有文件相同：只保留原来那份数据与封面
         return info
 
     MIN_PART_SIZE = 5 * 1024 * 1024  # S3 规定：除最后一段外每段至少 5 MiB
@@ -456,12 +456,12 @@ class ObjectService:
             return "image/png"
         if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
             return "image/webp"
-        raise ValueError("缩略图必须是 JPEG、PNG 或 WebP")
+        raise ValueError("封面必须是 JPEG、PNG 或 WebP")
 
     def _thumbnail_blob(self, scope: Scope, key: str, *, write: bool = False) -> tuple[ObjectInfo, str]:
         info = self._object(self._lookup(scope, key, write=write))
         if key.endswith("/") or not info.blob_uuid:
-            raise ValueError("只有文件可以设置缩略图")
+            raise ValueError("只有文件可以设置封面")
         return info, info.blob_uuid
 
     def _drop_thumbnail_objects(self, db, blob_uuid: str, now: float, bucket_id: int | None = None) -> None:
@@ -517,9 +517,9 @@ class ObjectService:
             return
         limit = self.THUMBNAIL_LIMITS.get(variant)
         if limit is None:
-            raise ValueError("不支持的缩略图规格")
+            raise ValueError("不支持的封面规格")
         if not data or len(data) > limit:
-            raise ValueError("缩略图过大")
+            raise ValueError("封面过大")
         await self._store_thumbnail(info.bucket_id, blob_uuid, variant, self._thumbnail_mime(data), data, scope)
 
     async def _store_thumbnail(self, bucket_id: int, blob_uuid: str, variant: str, mime: str, data: bytes,
@@ -622,7 +622,7 @@ class ObjectService:
             try:
                 return await self.read_thumbnail(self._object(row), variant, known=known)
             except NotFoundError:
-                continue  # 相同内容的另一份副本可能已有缩略图。
+                continue  # 相同内容的另一份副本可能已有封面。
         raise NotFoundError("thumbnail not found")
 
     MIGRATE_CURSOR = "thumbnails.migrate_cursor"

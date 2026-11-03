@@ -354,7 +354,7 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "ui_select": ("allow", "只作用于私密空间页面"),
     "ui_preview": ("allow", "使用私密预览"),
     "ui_download": ("allow", "经私密下载接口下载，锁定后失效"),
-    "ui_generate_thumbnails": ("allow", "走私密缩略图生成"),
+    "ui_generate_thumbnails": ("allow", "走私密封面生成"),
     **{name: ("allow", "只作用于私密空间；需设备已信任且已解锁") for name in ("ui_cache_status", "ui_cache_files", "ui_clear_cache")},
     "ui_copy": ("limited", "卡片显示完整文本，提示可能进入剪贴板历史"),
     "browser_open_url": ("allow", "打开任务所需的公共网页"),

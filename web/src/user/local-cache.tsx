@@ -5,7 +5,7 @@ import { type CacheDirectoryInfo, type CacheStats, browserName, cacheDirectoryIn
 import { type DeviceSettings, type Kind, effectiveMiB, sizeChoices, webkitOnly } from "../cache-store";
 import { Notice, Badge, Button, ConfirmDialog, Disclosure, EmptyState, Field, Icon, Switch, formatBytes, formatDateTime, toast, type IconName } from "../ui";
 
-const KIND_LABEL: Record<Kind, string> = { image: "图片", video: "视频", audio: "音频", thumb: "缩略图", other: "其他" };
+const KIND_LABEL: Record<Kind, string> = { image: "图片", video: "视频", audio: "音频", thumb: "封面", other: "其他" };
 const KIND_ORDER: Kind[] = ["image", "video", "audio", "thumb", "other"];
 const sizeLabel = (mib: number) => mib >= 1024 ? `${Number((mib / 1024).toFixed(1))} GB` : `${Math.round(mib)} MB`;
 
@@ -86,7 +86,7 @@ export function LocalCacheSettings() {
     <Section icon="monitor" title="本机缓存" description="看过的文件加密保存在这个浏览器里，再次打开更快，只有登录你的账号才能打开。">
       {error && <Notice tone="danger">{error}</Notice>}
       {settings && <Switch checked={settings.enabled} disabled={busy} onChange={value => void update({ enabled: value }, value ? "已开启本机缓存" : "已关闭本机缓存并清除数据")}
-          label="在这台设备上缓存文件" description="自动保存预览过的内容，包括图片、音视频、文档和缩略图；任意文件都可以通过「缓存到本机」完整保存。文件列表中绿色硬盘图标表示手动缓存、灰色表示自动缓存。" />}
+          label="在这台设备上缓存文件" description="自动保存预览过的内容，包括图片、音视频、文档和封面；任意文件都可以通过「缓存到本机」完整保存。文件列表中绿色硬盘图标表示手动缓存、灰色表示自动缓存。" />}
       {stats && <div className="local-cache-figures folder-stats-figures">
         <div><span>普通文件</span><strong>{formatBytes(stats.normal.bytes)}</strong><small>上限 {sizeLabel(effectiveMiB(normalLimit, quota))} · {stats.normal.count.toLocaleString("zh-CN")} 项</small></div>
         <div><span>私密文件</span><strong>{formatBytes(stats.private.bytes)}</strong><small>{privateOn ? `上限 ${sizeLabel(effectiveMiB(privateLimit, quota))} · ${stats.private.count} 项` : "未开启"}</small></div>
@@ -150,7 +150,7 @@ export function LocalCacheSettings() {
         catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
       }} />}
     {confirm === "all" && <ConfirmDialog title="全部清理？" confirmLabel="全部清理"
-      description="将清除这台设备上的全部本机缓存，包括普通文件、私密文件、缩略图和其他账号留下的缓存。之后打开文件需要重新下载，云端文件不受影响。"
+      description="将清除这台设备上的全部本机缓存，包括普通文件、私密文件、封面和其他账号留下的缓存。之后打开文件需要重新下载，云端文件不受影响。"
       onClose={() => setConfirm(null)} onConfirm={async () => { await wipe("all", "已清理这台设备上的全部缓存"); setConfirm(null); }} />}
     {confirm === "reset" && <ConfirmDialog title="重置所有设备的缓存？" confirmLabel="重置"
       description="所有设备上已有的本机缓存都将失效，之后打开文件需要重新下载。这台设备上的缓存会立即清除。"

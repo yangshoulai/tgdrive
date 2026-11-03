@@ -18,9 +18,10 @@ class OfflinePriorityTests(unittest.IsolatedAsyncioTestCase):
         self.bob = self.app.accounts.create_user("bob@example.com", "bob password")
         self.offline = self.app.offline
         self.offline.http = ScriptedHttp([0] * 40)
-        self.concurrency = 2
+        self.concurrency, self.videos = 2, 1
         effective = self.offline.resources.effective
-        self.offline.resources.effective = lambda: {**effective(), "concurrency": self.concurrency}
+        self.offline.resources.effective = lambda: {**effective(), "concurrency": self.concurrency, "ffmpeg_concurrency": self.videos,
+                                                    "hls_enabled": True, "hls_available": True}
 
     async def asyncTearDown(self):
         for task in self.offline._running.values():
@@ -147,6 +148,42 @@ class OfflinePriorityTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.01)
         self.assertEqual(started, [ids[1]], "最近一次插队的任务最先开始")
+
+
+    async def test_video_concurrency_limits_only_video_tasks(self):
+        videos = [await self.create(self.alice, f"v{n}.mp4") for n in range(3)]
+        plain = await self.create(self.alice, "plain.bin")
+        for task_id in videos:
+            self.offline._set(task_id, kind="hls")
+        started = []
+
+        async def run(task_id):
+            started.append(task_id)
+            await asyncio.sleep(3600)
+        self.concurrency, self.videos = 4, 2
+        self.offline._run = run
+        self.offline.resources.pressure = lambda: None
+        self.offline.start()
+        for _ in range(100):
+            if len(started) >= 3:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        self.assertEqual(sorted(started), sorted([videos[0], videos[1], plain]), "同时封装 2 个视频，第三个视频排队，普通任务照常开始")
+
+    async def test_now_for_video_yields_a_video_when_video_slots_are_full(self):
+        running_video, running_plain, target = (await self.create(self.alice, "a.mp4"), await self.create(self.alice, "b.bin"),
+                                                await self.create(self.alice, "c.mp4"))
+        for task_id in (running_video, target):
+            self.offline._set(task_id, kind="hls")
+        self.concurrency, self.videos = 4, 1
+        self.fake_running(running_video, received=50, size=100)
+        self.fake_running(running_plain, received=1, size=100)
+        plan = await self.offline.prioritize(self.alice.id, target, preview=True)
+        self.assertEqual(plan["victim"]["id"], running_video, "视频名额已满时只能让出视频任务，即使普通任务进度更小")
+        self.videos = 2
+        plan = await self.offline.prioritize(self.alice.id, target, preview=True)
+        self.assertEqual((plan["victim"], plan["waiting"]), (None, False), "还有视频名额和下载空位时不需要让出")
 
 
 if __name__ == "__main__":

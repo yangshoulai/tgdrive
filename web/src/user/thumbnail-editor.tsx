@@ -85,7 +85,7 @@ export function ImageUrlForm({ picker, disabled }: { picker: ImagePicker; disabl
 /** 更新缩略图：图片、视频、音频可以重新自动生成（上传或下载时没生成成功也能在这里补上）；
  * 任何文件都可以用一张本地图片或网络图片作为缩略图。图片在浏览器里缩放成三种规格后保存，原图不进入文件空间；
  * 网络图片由服务器代为读取，只接受常见图片格式。 */
-/** 图片超过服务器短期缓存（64 MiB）时生成要从存储读完整个文件，并按服务器内存评估；提示用户可能不会生成。 */
+/** 较大的图片生成时可能要从存储读完整个文件，并按服务器内存评估；提示用户可能不会生成。 */
 const LARGE_IMAGE = 64 * 1024 * 1024;
 
 export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem; onClose: () => void; onSaved: (variants: string[]) => void }) {
@@ -136,8 +136,8 @@ export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem
         setGenerating({ state: "running", detail: "服务器无法生成，正在这个页面读取文件生成" });
         const saved = await generateLoadedThumbnails(file, signal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(file.key), file.etag, file.size), size: file.size, signal }, media), true, controller.signal);
         if (controller.signal.aborted) return;
-        if (!saved) throw new Error("没有生成成功，可以稍后重试，或上传一张图片作为缩略图");
-        if (saved.includes("none")) throw new Error(media === "audio" ? "这个音频没有内嵌封面，可以上传一张图片作为缩略图" : "没有找到可用的画面，可以上传一张图片作为缩略图");
+        if (!saved) throw new Error("没有生成成功，可以稍后重试，或上传一张图片作为封面");
+        if (saved.includes("none")) throw new Error(media === "audio" ? "这个音频没有内嵌封面，可以上传一张图片作为封面" : "没有找到可用的画面，可以上传一张图片作为封面");
         onSaved(saved);
         return;
       }
@@ -148,7 +148,7 @@ export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem
         if (progress.state === "done" || progress.state === "idle") {
           const state = (await api.thumbnailStatus([file.key], controller.signal)).files[file.key];
           if (state?.thumbnails?.includes("thumb")) { onSaved(state.thumbnails); return; }
-          throw new Error(media === "audio" ? "这个音频没有内嵌封面，可以上传一张图片作为缩略图" : "没有找到可用的画面，可以上传一张图片作为缩略图");
+          throw new Error(media === "audio" ? "这个音频没有内嵌封面，可以上传一张图片作为封面" : "没有找到可用的画面，可以上传一张图片作为封面");
         }
         if (progress.state === "failed" || progress.state === "cancelled") throw new Error(progress.detail || "生成失败，请稍后重试");
         setGenerating({ state: "running", detail: progress.state === "running" ? "正在生成" : progress.detail || "排队中" });
@@ -175,13 +175,13 @@ export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem
     }
   };
 
-  return <Modal title="更新缩略图" description={baseName(file.key)} icon="image" size="md" className={`thumbnail-editor${api.isPrivatePath(file.key) ? " private-dialog" : ""}`}
+  return <Modal title="更新封面" description={baseName(file.key)} icon="image" size="md" className={`thumbnail-editor${api.isPrivatePath(file.key) ? " private-dialog" : ""}`}
     onClose={() => { if (!saving) onClose(); }} dismissible={!saving}
     footer={source === "auto" ? <>
       <Button variant="ghost" onClick={onClose}>{generating?.state === "running" ? "在后台继续" : "取消"}</Button>
       {generating?.state === "running" ? <Button icon="x" onClick={() => void stopGenerating()}>停止生成</Button>
-        : <Button variant="primary" icon="refresh" disabled={!media} onClick={() => void generate()}>{generating ? "重试" : current ? "重新生成" : "生成缩略图"}</Button>}
-    </> : <><Button variant="ghost" disabled={saving} onClick={onClose}>取消</Button><Button variant="primary" icon="check" loading={saving} disabled={!picked} onClick={() => void save()}>保存缩略图</Button></>}>
+        : <Button variant="primary" icon="refresh" disabled={!media} onClick={() => void generate()}>{generating ? "重试" : current ? "重新生成" : "生成封面"}</Button>}
+    </> : <><Button variant="ghost" disabled={saving} onClick={onClose}>取消</Button><Button variant="primary" icon="check" loading={saving} disabled={!picked} onClick={() => void save()}>保存封面</Button></>}>
     <div className="thumbnail-editor-body"
       onPaste={event => {
         const image = [...event.clipboardData.files].find(item => item.type.startsWith("image/"));
@@ -190,14 +190,14 @@ export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem
       <div className={`thumbnail-stage${dragging ? " is-dragging" : ""}${picked ? " has-image" : ""}`}
         onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}>
         {source !== "auto" && picked ? <>
-          <img src={picked.url} alt="新的缩略图预览" />
+          <img src={picked.url} alt="新的封面预览" />
           <span className="thumbnail-stage-tag">新图片 · {picked.width}×{picked.height} · {formatBytes(picked.blob.size)}</span>
         </> : current ? <>
-          <img src={current} alt="当前缩略图" />
-          <span className="thumbnail-stage-tag is-current">当前缩略图</span>
-        </> : <div className="thumbnail-stage-empty"><Icon name="image" size={28} /><span>还没有缩略图</span></div>}
+          <img src={current} alt="当前封面" />
+          <span className="thumbnail-stage-tag is-current">当前封面</span>
+        </> : <div className="thumbnail-stage-empty"><Icon name="image" size={28} /><span>还没有封面</span></div>}
       </div>
-      <Segmented label="缩略图来源" showLabels value={source} disabled={generating?.state === "running" || saving} onChange={value => { setSource(value); setError(""); }} options={[
+      <Segmented label="封面来源" showLabels value={source} disabled={generating?.state === "running" || saving} onChange={value => { setSource(value); setError(""); }} options={[
         { value: "auto", label: "自动生成", icon: "sparkle" }, { value: "local", label: "本地图片", icon: "upload" }, { value: "url", label: "图片地址", icon: "link" },
       ]} />
       {source === "auto" ? <div className={`thumbnail-auto${generating ? ` is-${generating.state}` : ""}`} role="status">
@@ -217,7 +217,7 @@ export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem
       </div> : source === "local" ? <LocalImageButton picker={picker} disabled={saving} dragging={dragging} onDragging={setDragging} />
         : <ImageUrlForm picker={picker} disabled={saving} />}
       {error && <Notice tone="danger">{error}</Notice>}
-      {source !== "auto" && <p className="thumbnail-editor-hint">图片会缩放为列表、网格与预览封面三种尺寸保存，原图不会存入你的文件。{source === "url" ? "网络图片由服务器读取，需能公开访问，最大 50 MB。" : ""}{video ? "播放视频时，也可以点击控制条的图片按钮把当前画面设为缩略图。" : ""}</p>}
+      {source !== "auto" && <p className="thumbnail-editor-hint">图片会缩放为列表、网格与预览大图三种尺寸保存，原图不会存入你的文件。{source === "url" ? "网络图片由服务器读取，需能公开访问，最大 50 MB。" : ""}{video ? "播放视频时，也可以点击控制条的图片按钮把当前画面设为封面。" : ""}</p>}
     </div>
   </Modal>;
 }
@@ -228,7 +228,7 @@ export function CoverPickerDialog({ name, onClose, onPick }: { name: string; onC
   const [source, setSource] = useState<"local" | "url">("local");
   const [dragging, setDragging] = useState(false);
   const { picked } = picker;
-  return <Modal title="设置缩略图" description={name} icon="image" size="md" className="thumbnail-editor" onClose={onClose}
+  return <Modal title="设置封面" description={name} icon="image" size="md" className="thumbnail-editor" onClose={onClose}
     footer={<><Button variant="ghost" onClick={onClose}>取消</Button><Button variant="primary" icon="check" disabled={!picked} onClick={() => { if (picked) onPick(picked.blob); }}>使用这张图片</Button></>}>
     <div className="thumbnail-editor-body" onPaste={event => {
       const image = [...event.clipboardData.files].find(item => item.type.startsWith("image/"));
@@ -242,16 +242,16 @@ export function CoverPickerDialog({ name, onClose, onPick }: { name: string; onC
           if (image) { setSource("local"); void picker.accept(image, image.name); }
         }}>
         {picked ? <>
-          <img src={picked.url} alt="缩略图预览" />
+          <img src={picked.url} alt="封面预览" />
           <span className="thumbnail-stage-tag">{picked.width}×{picked.height} · {formatBytes(picked.blob.size)}</span>
-        </> : <div className="thumbnail-stage-empty"><Icon name="image" size={28} /><span>选择一张图片作为缩略图</span></div>}
+        </> : <div className="thumbnail-stage-empty"><Icon name="image" size={28} /><span>选择一张图片作为封面</span></div>}
       </div>
       <Segmented label="图片来源" showLabels value={source} onChange={value => { setSource(value); picker.setError(""); }} options={[
         { value: "local", label: "本地图片", icon: "upload" }, { value: "url", label: "图片地址", icon: "link" },
       ]} />
       {source === "local" ? <LocalImageButton picker={picker} dragging={dragging} onDragging={setDragging} /> : <ImageUrlForm picker={picker} />}
       {picker.error && <Notice tone="danger">{picker.error}</Notice>}
-      <p className="thumbnail-editor-hint">下载完成后，这张图片会缩放为列表、网格与预览封面三种尺寸，作为文件的缩略图；原图不会存入你的文件。{source === "url" ? "网络图片由服务器读取，需能公开访问，最大 50 MB。" : ""}</p>
+      <p className="thumbnail-editor-hint">下载完成后，这张图片会缩放为列表、网格与预览大图三种尺寸，作为文件的封面；原图不会存入你的文件。{source === "url" ? "网络图片由服务器读取，需能公开访问，最大 50 MB。" : ""}</p>
     </div>
   </Modal>;
 }

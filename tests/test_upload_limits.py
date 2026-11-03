@@ -68,15 +68,46 @@ class ResourceBudgetTests(unittest.TestCase):
 
 
     def test_raised_limits_and_memory_ceiling_for_offline_tasks(self):
-        # 1 GiB 以上的机器：离线下载按每个任务约 128 MB、最多占内存一半封顶，最多 16 个。
-        for memory, expected in ((1024, 4), (2048, 8), (4096, 16), (16384, 16)):
+        # 1 GiB 以上的机器：离线下载按每个任务约 64 MB、默认最多占内存 60% 封顶，最多 16 个。
+        for memory, expected in ((1024, 9), (2048, 16), (16384, 16)):
             with self.subTest(memory=memory):
                 self.assertEqual(self.effective(memory=memory * MIB, cpu=4, mode="custom", concurrency=16)["concurrency"], expected)
-        self.assertTrue(self.effective(memory=2048 * MIB, cpu=4, mode="custom", concurrency=16)["reduced"])
+        self.assertTrue(self.effective(memory=1024 * MIB, cpu=4, mode="custom", concurrency=16)["reduced"])
+        # 封顶比例可配置（10%–80%）。
+        for percent, expected in ((80, 12), (30, 4), (10, 1)):
+            with self.subTest(percent=percent):
+                self.assertEqual(self.effective(memory=1024 * MIB, cpu=4, mode="custom", concurrency=16,
+                                                download_memory_percent=percent)["concurrency"], expected)
+        for bad in (9, 81, 60.5, True):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.effective(download_memory_percent=bad)
+        # 内存不足 1 GiB 仍按原来的分档，不受比例影响。
+        self.assertEqual(self.effective(memory=750 * MIB, mode="custom", concurrency=16, download_memory_percent=80)["concurrency"], 4)
+        # 单核但内存充足：下载上限只看内存，不因核数少而固定在 4 个。
+        self.assertEqual(self.effective(memory=2048 * MIB, cpu=1, mode="custom", concurrency=16)["concurrency"], 16)
+        self.assertEqual(self.effective(memory=1024 * MIB, cpu=1, mode="custom", concurrency=16)["concurrency"], 9)
         raised = self.effective(memory=16384 * MIB, cpu=8, mode="custom", transfer_concurrency=32, bucket_concurrency=32,
                                 upload_concurrency=32, web_part_concurrency=16, web_file_concurrency=8, thumbnail_concurrency=32)
         self.assertEqual(self.parallel(raised), (32, 32, 32, 16))
         self.assertEqual((raised["web_file_concurrency"], raised["thumbnail_concurrency"]), (8, 32))
+
+    def test_platform_cache_follows_setting_on_single_core_and_low_mode(self):
+        # 平台临时缓存在磁盘上，单核或低资源档都按管理员设置生效，不再压到 512 MiB。
+        for mode in ("auto", "low", "custom"):
+            with self.subTest(mode=mode):
+                effective = self.effective(memory=750 * MIB, cpu=1, mode=mode, youtube_enabled=True, platform_max_mib=4096)
+                self.assertEqual((effective["platform_max_mib"], effective["cache_mib"]), (4096, 4096))
+
+    def test_video_concurrency_setting(self):
+        self.assertEqual(self.effective(memory=2048 * MIB, cpu=1, mode="custom", concurrency=8)["ffmpeg_concurrency"], 2, "默认同时封装 2 个")
+        self.assertEqual(self.effective(memory=2048 * MIB, cpu=1, mode="custom", concurrency=8, video_concurrency=4)["video_concurrency"], 4)
+        self.assertEqual(self.effective(memory=2048 * MIB, cpu=1, mode="custom", concurrency=1, video_concurrency=4)["ffmpeg_concurrency"], 1,
+                         "不超过同时下载的任务数")
+        self.assertEqual(self.effective(memory=750 * MIB, mode="custom", concurrency=4, video_concurrency=4)["ffmpeg_concurrency"], 1,
+                         "内存不足 1 GiB 时只封装 1 个")
+        for bad in (0, 5):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.effective(video_concurrency=bad)
 
     def test_thumbnail_concurrency_defaults_and_small_machines(self):
         self.assertEqual(self.effective(memory=8192 * MIB, cpu=4)["thumbnail_concurrency"], 16)

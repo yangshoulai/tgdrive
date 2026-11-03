@@ -884,7 +884,7 @@ class UserApi:
             try:
                 raw = base64.b64decode(str(data or "").split(",", 1)[-1], validate=True)
             except binascii.Error as exc:
-                raise ValueError("缩略图数据不是有效的 base64") from exc
+                raise ValueError("封面数据不是有效的 base64") from exc
         scope, key = self._scope(token, csrf=csrf, mutation=True), self._path(path)
         if etag is not None or ticket is not None:
             info = self.objects.head_object(scope, key)
@@ -893,7 +893,7 @@ class UserApi:
                     scope.authorize()
                 current = self.objects.head_object(replace(scope, authorize=None), key)
                 if current.etag != etag or current.blob_uuid != info.blob_uuid:
-                    raise ValueError("文件已删除或覆盖，缩略图结果已丢弃")
+                    raise ValueError("文件已删除或覆盖，封面结果已丢弃")
                 if ticket is not None:
                     self.objects.thumbnail_service.check_claim(current, ticket)
             authorize()
@@ -933,7 +933,7 @@ class UserApi:
         if variants is not None:
             if (not isinstance(variants, list) or not variants or "thumb" not in variants
                     or any(not isinstance(value, str) or value not in self.objects.STORED_THUMBNAILS for value in variants)):
-                raise ValueError("缩略图规格不正确")
+                raise ValueError("封面规格不正确")
             info = self.objects.head_object(scope, key)
             if info.etag != etag:
                 raise ValueError("文件内容已变化，结果已丢弃")
@@ -961,7 +961,7 @@ class UserApi:
                         etag: str = "", known: frozenset[str] = frozenset()) -> tuple[bytes, str, str]:
         scope = self._scope(token)
         if bucket_id is not None and bucket_id != scope.bucket_id:
-            raise PermissionError("缩略图所属文件空间不匹配")
+            raise PermissionError("封面所属文件空间不匹配")
         if etag and not path:
             # 网页地址按内容版本标识，不含路径：移动、改名后浏览器缓存继续有效。
             return await self.objects.get_thumbnail_by_etag(scope, etag, variant, accept=self._path, known=known)

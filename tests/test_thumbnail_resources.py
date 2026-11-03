@@ -143,7 +143,7 @@ class AssessmentTests(unittest.IsolatedAsyncioTestCase):
             runner.cancel()
             await asyncio.gather(runner, return_exceptions=True)
         self.assertEqual(self.worker._history["blob"]["state"], "failed")
-        self.assertIn("不生成缩略图", self.worker._history["blob"]["detail"])
+        self.assertIn("不生成封面", self.worker._history["blob"]["detail"])
         self.assertIn("blob", self.worker._unsuitable)
         self.assertEqual(self.reads, [(0, 512 * 1024, {"window": MIB, "bucket_id": 7, "cache_only": False, "background": True,
                                                         "read_budget": self.reads[0][2]["read_budget"]})])

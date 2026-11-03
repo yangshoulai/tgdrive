@@ -603,8 +603,8 @@ async def get_collection(ctx: ToolContext, args: dict) -> ToolOutput:
       "（如 {n:03}{ext}）；默认使用链接里的文件名。多个相册的结果集可设 by_album=true，按相册保存到「target/相册名/」。"
       "超过单次上限时按 offset/limit 分批提议，结果里的 next_offset 是下一批的起点。已有文件直链可直接传 urls，无需逐条重新解析；"
       "当前提议上限见参数定义，在上限内优先一次提交已确认的条目；后台会自动分批入队并控制实际并发，无需按底层接口批次拆分。"
-      "续接时核对已成功提交的部分，避免重复提议。thumbnail 可选：一张图片地址（如视频封面、专辑图），下载完成后设为这些文件的缩略图；"
-      "thumbnails 可按条目顺序分别指定（与本批条目一一对应，不需要的写 null）。不传时照常自动生成缩略图。",
+      "续接时核对已成功提交的部分，避免重复提议。thumbnail 可选：一张图片地址（如视频封面、专辑图），下载完成后设为这些文件的封面；"
+      "thumbnails 可按条目顺序分别指定（与本批条目一一对应，不需要的写 null）。不传时照常自动生成封面。",
       {"collection_id": {"type": "string"}, "indices": {"type": "array", "items": {"type": "integer"}, "description": "只选结果集中的这些序号"},
        "offset": {"type": "integer", "description": "从结果集的第几项开始（与 indices 二选一）"},
        "limit": {"type": "integer", "description": "这一批最多几项，默认为单次上限"},
@@ -612,8 +612,8 @@ async def get_collection(ctx: ToolContext, args: dict) -> ToolOutput:
        "urls": {"type": "array", "items": {"type": "string"}, "description": "文件直链（http/https）"},
        "target": {"type": "string", "description": "保存目录"},
        "name_template": {"type": "string"},
-       "thumbnail": {"type": "string", "description": "下载完成后用作缩略图的图片地址（http/https），作用于本批全部文件"},
-       "thumbnails": {"type": "array", "items": {"type": ["string", "null"]}, "description": "按本批条目顺序分别指定缩略图地址"}}, ("target",),
+       "thumbnail": {"type": "string", "description": "下载完成后用作封面的图片地址（http/https），作用于本批全部文件"},
+       "thumbnails": {"type": "array", "items": {"type": ["string", "null"]}, "description": "按本批条目顺序分别指定封面地址"}}, ("target",),
       input_limits={name: ("download_urls", "action_items") for name in ("urls", "indices", "limit")})
 async def propose_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
     if ctx.offline is None:
@@ -681,7 +681,7 @@ async def propose_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
             try:
                 item["cover"] = checked_url(cover.strip())
             except ValueError as exc:
-                raise ToolError(f"缩略图地址 {cover[:80]} 不正确：{exc}") from exc
+                raise ToolError(f"封面地址 {cover[:80]} 不正确：{exc}") from exc
     for number, item in enumerate(items, 1):
         if template:
             fake = {"key": item["name"], "modified_at": time.time()}
@@ -691,7 +691,7 @@ async def propose_downloads(ctx: ToolContext, args: dict) -> ToolOutput:
     folders = len({item["folder"] for item in items if item.get("folder")})
     output = await _propose(ctx, "downloads", items, skipped=[],
                             sample=lambda item: f"{item['folder'] + '/' if item.get('folder') else ''}{item['name']} ← {item.get('host') or ''}"
-                                               + (" · 指定缩略图" if item.get("cover") else ""),
+                                               + (" · 指定封面" if item.get("cover") else ""),
                             options={"target": target, "hosts": hosts[:10], "source": source, "expires_soon": tickets,
                                      **({"album_folders": folders} if folders else {})},
                             summary=f"创建 {len(items)} 个离线下载任务，保存到 {ctx.display(target)}"
