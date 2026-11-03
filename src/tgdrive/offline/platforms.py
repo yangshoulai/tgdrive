@@ -15,10 +15,12 @@ import signal
 import subprocess
 import sys
 import tempfile
+from contextlib import aclosing
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .http import RETRY_STATUS, DownloadError, ExpiredMedia, TransientError, status_error
+from .parallel import ordered
 from .request import DownloadRequest, checked_url
 
 
@@ -417,9 +419,49 @@ class PlatformResolver:
                 await stderr
 
 
-async def track_stream(client, platform, track, *, on_size=None, retries=3):
+# 多连接读取分段媒体轨时，每条轨预读（已请求、尚未交出）的数据最多这么多。
+PREFETCH_BYTES = 64 * MIB
+
+
+async def _read_range(client, request, options, start, end, total, retries):
+    """读取媒体轨的 [start, end] 字节（可能分几次响应补齐），每次核对 206、起点与总长度，网络抖动原地重试。"""
+    pieces, position, failures = [], start, 0
+    while position <= end:
+        headers = dict(request.headers)
+        headers["Range"] = f"bytes={position}-{end}"
+        try:
+            async with client.open(request, extra_headers=headers, **options) as response:
+                if response.status in (401, 403, 404, 410):
+                    raise ExpiredMedia(f"平台拒绝了媒体请求（HTTP {response.status}）；地址可能过期，或需要平台播放校验／允许的服务器出口")
+                if response.status not in (200, 206):
+                    raise status_error(response.status, f"平台媒体下载失败（HTTP {response.status}），请更新 Cookie 或稍后重试")
+                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
+                if response.status != 206 or not match or int(match[1]) != position or not position <= int(match[2]) <= end:
+                    raise DownloadError("平台媒体返回了不一致的分段，请重新下载")
+                if int(match[3]) != total:
+                    raise DownloadError("平台媒体在下载过程中发生变化，请重新下载")
+                stop, received = int(match[2]) + 1, []
+                async for piece in response.stream():
+                    if position + len(piece) > stop:
+                        raise DownloadError("平台媒体返回的分段长度不正确，请重新下载")
+                    position += len(piece)
+                    received.append(piece)
+                pieces.extend(received)
+                if position != stop:
+                    raise TransientError("平台媒体分段传输提前中断")
+            failures = 0
+        except TransientError:
+            failures += 1
+            if failures > retries:
+                raise
+            await asyncio.sleep(min(2 ** failures, 10))
+    return pieces
+
+
+async def track_stream(client, platform, track, *, on_size=None, retries=3, connections=1):
     """读取一条平台媒体轨。解析库要求分段时按 Range 逐段请求，每段核对范围与总长度；
-    分段模式下网络中断从已读取的位置原地续读，不重新下载整条轨。"""
+    分段模式下网络中断从已读取的位置原地续读，不重新下载整条轨。connections > 1 时第一段之后的分段
+    最多 connections 个同时读取（预读总量不超过 PREFETCH_BYTES），按顺序交出。"""
     request = media_request(platform, track)
     options = {"identity": True, "url_check": lambda url: allowed_url(platform, url)}
     chunk = track.get("chunk")
@@ -470,6 +512,17 @@ async def track_stream(client, platform, track, *, on_size=None, retries=3):
             if not chunked or failures > retries:
                 raise
             await asyncio.sleep(min(2 ** failures, 10))
+            continue
+        window = max(1, min(connections, PREFETCH_BYTES // chunk)) if chunked else 1
+        if window > 1 and total is not None and offset < total:
+            # 已知总长度：其余分段多连接读取，每段读完整再按顺序交出。
+            starts = range(offset, total, chunk)
+            fetch = lambda start: _read_range(client, request, options, start, min(start + chunk, total) - 1, total, retries)
+            async with aclosing(ordered(starts, fetch, window)) as results:
+                async for pieces in results:
+                    for piece in pieces:
+                        yield piece
+            return
 
 
 def clear_cache(root: Path):
@@ -482,28 +535,35 @@ def clear_cache(root: Path):
             shutil.rmtree(path)
 
 
-async def merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, *, check, progress, throttle, phase):
-    """只缓存受限的两条输入轨；MP4 输出通过背压直接交给加密存储。"""
+async def merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, *, check, progress, throttle, phase,
+                       connections=1):
+    """只缓存受限的两条输入轨；MP4 输出通过背压直接交给加密存储。
+    两条轨同时下载（各自按 connections 多连接读取分段），任一条失败时停止另一条。"""
     cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if cache_root.is_symlink():
         raise DownloadError("离线临时目录不能是符号链接")
     with tempfile.TemporaryDirectory(prefix=f"task-{task_id}-", dir=cache_root) as directory:
-        files, received = [], 0
-        for index, track in enumerate(entry["tracks"]):
-            path = Path(directory) / f"track-{index}.mp4"
-            files.append(path)
+        files = [Path(directory) / f"track-{index}.mp4" for index in range(len(entry["tracks"]))]
+        declared, received = {}, [0] * len(files)
+
+        def over_budget():
+            raise DownloadError("分离音视频轨超过临时缓存预算，请选择较低清晰度或调整资源设置")
+
+        async def save(index, track):
             def sized(size):
-                if size is not None and received + size > limit:
-                    raise DownloadError("分离音视频轨超过临时缓存预算，请选择较低清晰度或调整资源设置")
-            stream = track_stream(client, platform, track, on_size=sized)
+                if size is not None:
+                    declared[index] = size
+                    if sum(declared.values()) > limit:
+                        over_budget()
+            stream = track_stream(client, platform, track, on_size=sized, connections=connections)
             try:
-                with path.open("wb") as output:
-                    os.chmod(path, 0o600)
+                with files[index].open("wb") as output:
+                    os.chmod(files[index], 0o600)
                     async for piece in stream:
                         check()
-                        received += len(piece)
-                        if received > limit:
-                            raise DownloadError("分离音视频轨超过临时缓存预算，请选择较低清晰度或调整资源设置")
+                        received[index] += len(piece)
+                        if sum(received) > limit:
+                            over_budget()
                         if shutil.disk_usage(cache_root).free < reserve + len(piece) + 32 * MIB:
                             raise DownloadError("临时磁盘空间不足，请释放空间后重试")
                         await throttle(len(piece))
@@ -511,6 +571,15 @@ async def merge_tracks(client, platform, entry, executable, cache_root, task_id,
                         progress(bytes_in=len(piece))
             finally:
                 await stream.aclose()
+
+        tasks = [asyncio.ensure_future(save(index, track)) for index, track in enumerate(entry["tracks"])]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         phase("merging")
         process = await asyncio.create_subprocess_exec(executable,
             "-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-max_alloc", "33554432",

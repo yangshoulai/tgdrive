@@ -559,7 +559,7 @@ class TgDriveASGI(StaticFiles):
         elif action == "backup.delete" and ok:
             target = (result or {}).get("name")
         elif action == "resources.update":
-            detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency", "upload_concurrency", "upload_kib", "bot_interval_ms", "web_part_concurrency", "web_file_concurrency", "thumbnail_concurrency", "download_memory_percent", "video_concurrency", "thumbnail_cache_mib") if key in payload}
+            detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency", "upload_concurrency", "upload_kib", "bot_interval_ms", "web_part_concurrency", "web_file_concurrency", "thumbnail_concurrency", "download_memory_percent", "video_concurrency", "thumbnail_cache_mib", "download_connections") if key in payload}
             if "proxy" in payload:
                 # 代理地址可能包含认证信息，审计只记录是否启用。
                 detail["proxy_enabled"] = bool(payload.get("proxy"))

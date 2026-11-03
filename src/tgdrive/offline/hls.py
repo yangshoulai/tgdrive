@@ -7,10 +7,15 @@ import math
 import os
 import re
 import secrets
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
 from .http import DownloadError, ExpiredMedia, SafeHttpClient, status_error
+from .parallel import ordered
+
+# 多连接预读时，声明长度不超过这个值的分片整段读进内存；更大或没有声明长度的分片照旧边读边转发，不预读。
+SEGMENT_BUFFER = 16 * 1024 * 1024
 from .request import DownloadRequest, checked_url
 
 
@@ -199,8 +204,29 @@ def playback_headers(request):
     return {key: value for key, value in request.headers if key.lower() in ("user-agent", "referer", "origin", "accept")}
 
 
+async def _segment_bytes(client, request, url, url_check, check, throttle):
+    """把一个 TS 分片整段读进内存（多连接预读用）；没有声明长度或超过 SEGMENT_BUFFER 时不读正文，返回 None。"""
+    async with client.open(request, url=url, method="GET", identity=True, url_check=url_check,
+                           extra_headers=playback_headers(request) if url_check else {}) as response:
+        if url_check and response.status in (401, 403, 404, 410):
+            raise ExpiredMedia(f"平台视频分片不可访问（HTTP {response.status}），需要重新解析")
+        if response.status != 200:
+            raise status_error(response.status, f"读取视频分片失败（HTTP {response.status}）")
+        if response.size is None or response.size > SEGMENT_BUFFER:
+            return None
+        pieces = []
+        async for piece in response.stream():
+            check()
+            await throttle(len(piece))
+            pieces.append(piece)
+    data = b"".join(pieces)
+    if len(data) != response.size:
+        raise DownloadError("视频分片不完整")
+    return data
+
+
 async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
-                executable: str, *, check, progress, throttle, url_check=None):
+                executable: str, *, check, progress, throttle, url_check=None, connections=1):
     """FFmpeg 只读取本地管道；不把用户 URL、命令或请求头交给它。
 
     delay_moov 不能省：TS 里的 AAC 带 ADTS 头，解码配置要等 aac_adtstoasc 处理第一个音频包才生成；
@@ -217,34 +243,60 @@ async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=131072,
     )
 
+    async def write(piece):
+        process.stdin.write(piece)
+        async with asyncio.timeout(120):
+            await process.stdin.drain()
+
+    async def stream_one(index, url, duration):
+        async with client.open(request, url=url, method="GET", identity=True, url_check=url_check,
+                               extra_headers=playback_headers(request) if url_check else {}) as response:
+            if url_check and response.status in (401, 403, 404, 410):
+                raise ExpiredMedia(f"平台视频分片不可访问（HTTP {response.status}），需要重新解析")
+            if response.status != 200:
+                raise status_error(response.status, f"读取视频分片失败（HTTP {response.status}）")
+            prefix, validated = b"", False
+            async for piece in response.stream():
+                check()
+                await throttle(len(piece))
+                # 强制 TS 输入，拒绝 fMP4 或把网页误当成视频；不保存整个分片。
+                if not validated:
+                    prefix += piece
+                    if len(prefix) < 377:
+                        continue
+                    if prefix[0] != 0x47 or prefix[188] != 0x47 or prefix[376] != 0x47:
+                        raise DownloadError("视频分片不是支持的 MPEG-TS 格式")
+                    piece, prefix, validated = prefix, b"", True
+                await write(piece)
+                progress(bytes_in=len(piece))
+            if not validated:
+                raise DownloadError("视频分片不完整")
+
     async def feed():
         try:
-            for index, (url, duration) in enumerate(playlist.segments):
-                check()
-                async with client.open(request, url=url, method="GET", identity=True, url_check=url_check,
-                                       extra_headers=playback_headers(request) if url_check else {}) as response:
-                    if url_check and response.status in (401, 403, 404, 410):
-                        raise ExpiredMedia(f"平台视频分片不可访问（HTTP {response.status}），需要重新解析")
-                    if response.status != 200:
-                        raise status_error(response.status, f"读取视频分片失败（HTTP {response.status}）")
-                    prefix, validated = b"", False
-                    async for piece in response.stream():
+            segments = playlist.segments
+            if connections > 1:
+                # 多连接：后面的分片提前并行读进内存，按顺序交给 FFmpeg。
+                fetch = lambda index: _segment_bytes(client, request, segments[index][0], url_check, check, throttle)
+                async with aclosing(ordered(range(len(segments)), fetch, connections)) as results:
+                    index = 0
+                    async for data in results:
                         check()
-                        await throttle(len(piece))
-                        # 强制 TS 输入，拒绝 fMP4 或把网页误当成视频；不保存整个分片。
-                        if not validated:
-                            prefix += piece
-                            if len(prefix) < 377:
-                                continue
-                            if prefix[0] != 0x47 or prefix[188] != 0x47 or prefix[376] != 0x47:
+                        url, duration = segments[index]
+                        if data is None:
+                            await stream_one(index, url, duration)
+                        else:
+                            if len(data) < 377 or data[0] != 0x47 or data[188] != 0x47 or data[376] != 0x47:
                                 raise DownloadError("视频分片不是支持的 MPEG-TS 格式")
-                            piece, prefix, validated = prefix, b"", True
-                        process.stdin.write(piece)
-                        async with asyncio.timeout(120):
-                            await process.stdin.drain()
-                        progress(bytes_in=len(piece))
-                    if not validated:
-                        raise DownloadError("视频分片不完整")
+                            for start in range(0, len(data), 65536):
+                                await write(data[start:start + 65536])
+                            progress(bytes_in=len(data))
+                        progress(segment=index + 1, seconds=duration)
+                        index += 1
+            else:
+                for index, (url, duration) in enumerate(segments):
+                    check()
+                    await stream_one(index, url, duration)
                     progress(segment=index + 1, seconds=duration)
             process.stdin.close()
         except BaseException:
@@ -287,13 +339,15 @@ class _RelayClosed(Exception):
 class _HlsRelay:
     """仅向本次 FFmpeg 暴露已登记资源；源站请求仍经 SafeHttpClient，媒体逐块转发、不落盘。"""
 
-    def __init__(self, client, *, check, progress, throttle, url_check, phase):
+    def __init__(self, client, *, check, progress, throttle, url_check, phase, connections=1):
         self.client, self.check, self.progress = client, check, progress
         self.throttle, self.url_check, self.phase = throttle, url_check, phase
         self.prefix = "/" + secrets.token_urlsafe(24) + "/"
         self.routes, self.playlists, self.keys, self.pending = {}, {}, {}, {}
         self.completed, self.handlers = 0, set()
         self.error = self.process = None
+        # 多连接预读：每个播放列表的媒体资源顺序（路径 → 同一列表里的下一项），以及已开始预读的资源。
+        self.connections, self.following, self.prefetched = max(1, connections), {}, {}
 
     async def __aenter__(self):
         self.server = await asyncio.start_server(self.serve, "127.0.0.1", 0, limit=8192)
@@ -302,6 +356,10 @@ class _HlsRelay:
 
     async def __aexit__(self, *_):
         self.server.close()
+        prefetches = list(self.prefetched.values())
+        for task in prefetches:
+            task.cancel()
+        await asyncio.gather(*prefetches, return_exceptions=True)
         handlers = list(self.handlers)
         for task in handlers:
             task.cancel()
@@ -319,7 +377,7 @@ class _HlsRelay:
         lines = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-PLAYLIST-TYPE:VOD",
                  f"#EXT-X-TARGETDURATION:{math.ceil(max(item.duration for item in parsed.items))}",
                  f"#EXT-X-MEDIA-SEQUENCE:{parsed.sequence}"]
-        active_key, active_init, keys = None, None, {}
+        active_key, active_init, keys, previous = None, None, {}, None
 
         def key_line(key):
             if key is None:
@@ -343,6 +401,9 @@ class _HlsRelay:
                 lines.append(key_line(item.asset.key))
                 active_key = item.asset.key
             local = self.asset(source, item.asset, "m4s" if item.init else "ts")
+            if previous is not None:
+                self.following[previous] = local
+            previous = local
             lines.extend((f"#EXTINF:{item.duration:.6f},", local))
             self.pending[local] = 0 if audio_track else item.duration
         lines.append("#EXT-X-ENDLIST")
@@ -367,31 +428,78 @@ class _HlsRelay:
         except TimeoutError as exc:
             raise DownloadError("视频封装中断或超时，可以重新下载") from exc
 
+    def _open(self, path):
+        source, asset, _ = self.routes[path]
+        headers = playback_headers(source) if self.url_check else {}
+        if asset.byte_range:
+            offset, length = asset.byte_range
+            headers["Range"] = f"bytes={offset}-{offset + length - 1}"
+        return self.client.open(source, url=asset.url, method="GET", identity=True, extra_headers=headers, url_check=self.url_check)
+
+    def _expected(self, path, response):
+        """核对来源响应并返回应有的长度（未声明时为 None）。"""
+        _, asset, _ = self.routes[path]
+        if self.url_check and response.status in (401, 403, 404, 410):
+            raise ExpiredMedia(f"平台视频分片不可访问（HTTP {response.status}），需要重新解析")
+        if asset.byte_range:
+            offset, length = asset.byte_range
+            if response.status in (408, 425, 429, 500, 502, 503, 504):
+                raise status_error(response.status, f"读取视频资源失败（HTTP {response.status}）")
+            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
+            if response.status != 206 or not match or (int(match[1]), int(match[2])) != (offset, offset + length - 1) or int(match[3]) < offset + length:
+                raise DownloadError("M3U8 来源未返回所请求的字节范围")
+            return length
+        if response.status != 200:
+            raise status_error(response.status, f"读取视频资源失败（HTTP {response.status}）")
+        return response.size
+
+    async def _buffer(self, path):
+        """预读一个媒体资源到内存；没有声明长度或超过 SEGMENT_BUFFER 时不读正文，返回 None（到时再边读边转发）。"""
+        async with self._open(path) as response:
+            expected = self._expected(path, response)
+            if expected is None or expected > SEGMENT_BUFFER:
+                return None
+            pieces, size = [], 0
+            async for piece in response.stream():
+                self.check()
+                size += len(piece)
+                if size > expected:
+                    raise DownloadError("M3U8 视频资源长度不正确")
+                await self.throttle(len(piece))
+                self.progress(bytes_in=len(piece))
+                pieces.append(piece)
+        if not size or size != expected:
+            raise DownloadError("M3U8 视频资源不完整")
+        return b"".join(pieces)
+
+    def _prefetch_after(self, path):
+        """FFmpeg 读到这一项时，提前开始读取同一列表里接下来的 connections - 1 项。"""
+        following = path
+        for _ in range(self.connections - 1):
+            following = self.following.get(following)
+            if following is None:
+                return
+            if following not in self.prefetched:
+                self.prefetched[following] = asyncio.ensure_future(self._buffer(following))
+
     async def send_asset(self, path, writer):
         if path in self.keys:
             await self.head(writer, size=16)
             await self.write(writer, self.keys[path])
             return
         source, asset, extension = self.routes[path]
-        headers = playback_headers(source) if self.url_check else {}
-        if asset.byte_range:
-            offset, length = asset.byte_range
-            headers["Range"] = f"bytes={offset}-{offset + length - 1}"
-        async with self.client.open(source, url=asset.url, method="GET", identity=True,
-                                    extra_headers=headers, url_check=self.url_check) as response:
-            if self.url_check and response.status in (401, 403, 404, 410):
-                raise ExpiredMedia(f"平台视频分片不可访问（HTTP {response.status}），需要重新解析")
-            if asset.byte_range:
-                if response.status in (408, 425, 429, 500, 502, 503, 504):
-                    raise status_error(response.status, f"读取视频资源失败（HTTP {response.status}）")
-                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
-                if response.status != 206 or not match or (int(match[1]), int(match[2])) != (offset, offset + length - 1) or int(match[3]) < offset + length:
-                    raise DownloadError("M3U8 来源未返回所请求的字节范围")
-                expected = length
-            else:
-                if response.status != 200:
-                    raise status_error(response.status, f"读取视频资源失败（HTTP {response.status}）")
-                expected = response.size
+        if extension != "key" and self.connections > 1:
+            self._prefetch_after(path)
+            task = self.prefetched.pop(path, None)
+            data = await task if task is not None else None
+            if data is not None:
+                await self.head(writer, size=len(data))
+                for start in range(0, len(data), 65536):
+                    await self.write(writer, data[start:start + 65536])
+                self._served(path)
+                return
+        async with self._open(path) as response:
+            expected = self._expected(path, response)
             if extension != "key":
                 await self.head(writer, size=expected)
             size, key = 0, b""
@@ -417,6 +525,9 @@ class _HlsRelay:
                 self.keys[path] = key
                 await self.head(writer, size=16)
                 await self.write(writer, key)
+        self._served(path)
+
+    def _served(self, path):
         if path in self.pending:
             duration = self.pending.pop(path)
             self.completed += 1
@@ -465,13 +576,13 @@ class _HlsRelay:
 
 async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
                 executable: str, *, check, progress, throttle, audio=None,
-                media_type="video", url_check=None, phase=None):
+                media_type="video", url_check=None, phase=None, connections=1):
     """连续 TS 走管道；复杂 HLS 只向 FFmpeg 提供重写后的回环地址，按需读取、不缓存输入。"""
     special = audio is not None or media_type == "audio" or any(
         item.init or item.asset.key or item.asset.byte_range or item.discontinuity for item in playlist.items)
     if not special:
         stream = _pipe_remux(client, request, playlist, executable,
-                             check=check, progress=progress, throttle=throttle, url_check=url_check)
+                             check=check, progress=progress, throttle=throttle, url_check=url_check, connections=connections)
         try:
             async for piece in stream:
                 yield piece
@@ -479,7 +590,7 @@ async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Play
             await stream.aclose()
         return
     async with _HlsRelay(client, check=check, progress=progress, throttle=throttle,
-                         url_check=url_check, phase=phase) as relay:
+                         url_check=url_check, phase=phase, connections=connections) as relay:
         primary = relay.playlist(request, playlist, "video.m3u8")
         secondary = relay.playlist(*audio, "audio.m3u8", True) if audio else None
         inputs = []

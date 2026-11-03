@@ -76,8 +76,12 @@ export function Resources() {
             <Field label="网页同时上传的文件数" hint="1–8；网页开始上传时读取，最长 1 分钟后生效。"><input className="input" type="number" min={1} max={8} step={1} required value={form.web_file_concurrency} onChange={number("web_file_concurrency")} /></Field>
           </div>
           <div className="form-row">
-            <Field label="离线下载可用内存（%）" hint={`同时下载的任务总共最多占检测内存的比例，10–80，默认 60。每个任务按约 64 MB 估算${(settings.detected.memory_bytes ?? 0) >= 1024 ** 3 ? `，这台服务器最多 ${Math.min(16, Math.max(1, Math.floor((settings.detected.memory_bytes ?? 0) * (form.download_memory_percent || 0) / 100 / (64 * 1024 * 1024))))} 个` : ""}；内存不足 1 GiB 的机器固定为 1–4 个，CPU 核数不影响这个上限。`}>
+            <Field label="离线下载可用内存（%）" hint={`同时下载的任务总共最多占检测内存的比例，10–80，默认 60。每个任务按约 64 MB、每多一个连接再加 32 MB 估算${(settings.detected.memory_bytes ?? 0) >= 1024 ** 3 ? `，按当前设置这台服务器最多同时下载 ${Math.min(16, Math.max(1, Math.floor((settings.detected.memory_bytes ?? 0) * (form.download_memory_percent || 0) / 100 / ((64 + 32 * Math.max(0, (form.download_connections || 1) - 1)) * 1024 * 1024))))} 个` : ""}；内存不足 1 GiB 的机器固定为 1–4 个，CPU 核数不影响这个上限。`}>
               <input className="input" type="number" min={10} max={80} step={5} required value={form.download_memory_percent} onChange={number("download_memory_percent")} /></Field>
+            <Field label="单个任务的连接数" hint="每个下载任务同时打开的连接数，1–8，默认 4。直链按 16 MB 分段同时下载，YouTube 的分段与 M3U8 的分片提前并行读取；来源按连接限速时能明显提速。来源不支持分段时自动改用 1 个连接。连接越多每个任务占的内存越多，能同时下载的任务数会相应减少；内存不足 1 GiB 的机器最多 2 个。">
+              <input className="input" type="number" min={1} max={8} step={1} required value={form.download_connections} onChange={number("download_connections")} /></Field>
+          </div>
+          <div className="form-row">
             <Field label="同时封装的视频数" hint="M3U8 与 YouTube 视频同时处理的个数，1–4，默认 2。FFmpeg 只复制音视频数据、不转码，CPU 占用不高；每个 YouTube 任务另占最多「平台临时缓存上限」的磁盘。内存不足 1 GiB 的机器固定为 1 个，也不超过同时下载的任务数。">
               <input className="input" type="number" min={1} max={4} step={1} required value={form.video_concurrency} onChange={number("video_concurrency")} /></Field>
           </div>
@@ -102,7 +106,7 @@ export function Resources() {
     <Panel title="当前生效" description={settings.source === "admin" ? "按管理员保存的配置与检测到的资源计算。" : "尚未保存过配置，使用启动参数的默认值。"}>
       <KeyValue items={[
         ["资源档位", form.mode === "auto" ? `自动 · ${TIERS[effective.mode]}` : TIERS[effective.mode]],
-        ["离线下载", `${effective.concurrency} 个任务 · ${rate(effective.bandwidth_kib)}`],
+        ["离线下载", `${effective.concurrency} 个任务 · 每个 ${effective.download_connections} 个连接 · ${rate(effective.bandwidth_kib)}`],
         ["文件读取", `服务器 ${effective.transfer_concurrency} 路 · 每个账号 ${effective.bucket_concurrency} 路`],
         ["写入存储", `${effective.upload_concurrency} 个分片 · ${rate(effective.upload_kib)}`],
         ["网页上传", `每个文件 ${effective.web_part_concurrency} 段 · 同时 ${effective.web_file_concurrency} 个文件`],

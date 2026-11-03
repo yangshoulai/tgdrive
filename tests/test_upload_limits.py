@@ -71,21 +71,31 @@ class ResourceBudgetTests(unittest.TestCase):
         # 1 GiB 以上的机器：离线下载按每个任务约 64 MB、默认最多占内存 60% 封顶，最多 16 个。
         for memory, expected in ((1024, 9), (2048, 16), (16384, 16)):
             with self.subTest(memory=memory):
-                self.assertEqual(self.effective(memory=memory * MIB, cpu=4, mode="custom", concurrency=16)["concurrency"], expected)
-        self.assertTrue(self.effective(memory=1024 * MIB, cpu=4, mode="custom", concurrency=16)["reduced"])
+                self.assertEqual(self.effective(memory=memory * MIB, cpu=4, mode="custom", concurrency=16, download_connections=1)["concurrency"], expected)
+        self.assertTrue(self.effective(memory=1024 * MIB, cpu=4, mode="custom", concurrency=16, download_connections=1)["reduced"])
         # 封顶比例可配置（10%–80%）。
         for percent, expected in ((80, 12), (30, 4), (10, 1)):
             with self.subTest(percent=percent):
-                self.assertEqual(self.effective(memory=1024 * MIB, cpu=4, mode="custom", concurrency=16,
+                self.assertEqual(self.effective(memory=1024 * MIB, cpu=4, mode="custom", concurrency=16, download_connections=1,
                                                 download_memory_percent=percent)["concurrency"], expected)
+        # 每多一个连接，任务按多 32 MiB 估算：默认 4 个连接时每个任务约 160 MiB（2 GiB 7 个、4 GiB 15 个、8 GiB 起 16 个）。
+        for connections, memory, expected in ((4, 2048, 7), (4, 4096, 15), (4, 8192, 16), (8, 2048, 4)):
+            with self.subTest(connections=connections, memory=memory):
+                effective = self.effective(memory=memory * MIB, cpu=1, mode="custom", concurrency=16, download_connections=connections)
+                self.assertEqual((effective["concurrency"], effective["download_connections"]), (expected, connections))
+        self.assertEqual(self.effective(memory=750 * MIB, mode="custom", download_connections=8)["download_connections"], 2,
+                         "内存不足 1 GiB 时每个任务最多 2 个连接")
+        for bad in (0, 9):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.effective(download_connections=bad)
         for bad in (9, 81, 60.5, True):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 self.effective(download_memory_percent=bad)
         # 内存不足 1 GiB 仍按原来的分档，不受比例影响。
         self.assertEqual(self.effective(memory=750 * MIB, mode="custom", concurrency=16, download_memory_percent=80)["concurrency"], 4)
         # 单核但内存充足：下载上限只看内存，不因核数少而固定在 4 个。
-        self.assertEqual(self.effective(memory=2048 * MIB, cpu=1, mode="custom", concurrency=16)["concurrency"], 16)
-        self.assertEqual(self.effective(memory=1024 * MIB, cpu=1, mode="custom", concurrency=16)["concurrency"], 9)
+        self.assertEqual(self.effective(memory=2048 * MIB, cpu=1, mode="custom", concurrency=16, download_connections=1)["concurrency"], 16)
+        self.assertEqual(self.effective(memory=1024 * MIB, cpu=1, mode="custom", concurrency=16, download_connections=1)["concurrency"], 9)
         raised = self.effective(memory=16384 * MIB, cpu=8, mode="custom", transfer_concurrency=32, bucket_concurrency=32,
                                 upload_concurrency=32, web_part_concurrency=16, web_file_concurrency=8, thumbnail_concurrency=32)
         self.assertEqual(self.parallel(raised), (32, 32, 32, 16))

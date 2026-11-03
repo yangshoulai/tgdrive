@@ -25,6 +25,7 @@ from .hls import load_playlist, remux
 from ..filekinds import served_type
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
 from .mp4 import FRAGMENT_PROBE, Defragmenter, is_fragmented, video_size
+from .parallel import ordered
 from .request import DownloadRequest, checked_url, command_text, filename, parse_requests, url_filename
 from .platforms import MIB, ExpiredMedia, PlatformResolver, allowed_url, clear_cache, media_request, merge_tracks, prepare, site_link, track_stream
 
@@ -40,6 +41,8 @@ DESTINATION_KEY = "offline.destination.{}"
 MAX_CREATE_ITEMS = 1000
 ACTIVE = ("queued", "running", "interrupted")
 RETRY_DELAYS = (10, 30, 90)
+# 多连接下载时单个分段遇到网络抖动的原地重试次数（每次间隔 1、2、4… 秒），仍失败才交给任务层的自动重试。
+PART_RETRIES = 3
 # 解析时探测来源文件信息（HEAD／GET 响应头）：单次上限、尝试次数、重试间隔与总时长（留在 30 秒的解析请求超时之内）。
 PROBE_TIMEOUT, PROBE_ATTEMPTS, PROBE_RETRY_DELAY, PROBE_BUDGET = 10, 2, 1, 24
 # mimetypes 对这几种常见类型给出的扩展名不符合习惯（如 .jpe），这里固定。
@@ -115,6 +118,10 @@ class Paused(NotReadyError):
     pass
 
 
+class _RangeRefused(Exception):
+    """来源不按请求返回字节范围（忽略 Range、内容已变化或长度不符）：改用单连接从头下载。"""
+
+
 class OfflineDownloads:
     def __init__(self, accounts, objects, resources, *, http=None):
         self.accounts, self.objects, self.resources = accounts, objects, resources
@@ -139,6 +146,8 @@ class OfflineDownloads:
         # 自动重试状态只在进程内保存；重启后“等待恢复”的任务本来就会继续。
         self._retries: dict[int, int] = {}
         self._retry_at: dict[int, float] = {}
+        # 多连接下载被来源拒绝过的任务：本进程内改用单连接，不再反复尝试分段。
+        self._single: set[int] = set()
         self.platforms = PlatformResolver(self.http, resources)
         self.cache_root = resources.data_dir / "offline-cache"
 
@@ -1185,12 +1194,12 @@ class OfflineDownloads:
                 body, rest = joined[:PART_SIZE], joined[PART_SIZE:]
                 pieces, buffered = ([rest] if rest else []), len(rest)
                 del joined
-                await self.objects.upload_part(scope, upload_id, number, body, PART_SIZE)
+                await self.objects.upload_part(scope, upload_id, number, body, PART_SIZE, background=True)
                 del body
                 number, stored = number + 1, stored + PART_SIZE
                 self._set(row["id"], stored_bytes=stored)
         if pieces or stored == 0:
-            await self.objects.upload_part(scope, upload_id, number, pieces, buffered)
+            await self.objects.upload_part(scope, upload_id, number, pieces, buffered, background=True)
             stored += buffered
             self._set(row["id"], stored_bytes=stored)
         return stored
@@ -1220,7 +1229,7 @@ class OfflineDownloads:
             self._video_sizes[upload_id] = size
         first = header + b"".join(head)
         del head
-        await self.objects.upload_part(scope, upload_id, 1, first, len(first))
+        await self.objects.upload_part(scope, upload_id, 1, first, len(first), background=True)
         self._set(row["id"], stored_bytes=stored + len(first))
 
     async def _finish(self, row, scope, upload_id):
@@ -1242,7 +1251,134 @@ class OfflineDownloads:
                 pass
         self._schedule_cover(row["id"])
 
+    def _connections(self) -> int:
+        """单个任务的连接数（「下载与资源」的 download_connections）。"""
+        return max(1, int(self.resources.effective().get("download_connections", 1)))
+
+    @staticmethod
+    def _part_count(size):
+        return -(-size // PART_SIZE)
+
+    @staticmethod
+    def _parts_valid(parts, size):
+        """多连接断点：每个已写入的分段都必须正好是按 16 MiB 切出的那一段（最后一段可以较短）。"""
+        total = -(-size // PART_SIZE)
+        return all(1 <= part.part_no <= total and part.size == (PART_SIZE if part.part_no < total else size - (total - 1) * PART_SIZE)
+                   for part in parts)
+
+    async def _range_part(self, row, request, state, size, number):
+        """用一个独立连接读取第 number 段（按 16 MiB 切分）；核对 206、范围、总长度与 ETag，网络抖动原地重试。"""
+        start = (number - 1) * PART_SIZE
+        end = min(size, start + PART_SIZE) - 1
+        headers = {"Range": f"bytes={start}-{end}"}
+        if state.get("etag"):
+            headers["If-Range"] = state["etag"]
+        for attempt in range(PART_RETRIES + 1):
+            pieces, received = [], 0
+            try:
+                async with self.http.open(request, extra_headers=headers, identity=True) as response:
+                    if response.status in RETRY_STATUS:
+                        raise status_error(response.status, f"来源暂时不可用（HTTP {response.status}），可以稍后继续")
+                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
+                    if (response.status != 206 or not match or (int(match[1]), int(match[2]), int(match[3])) != (start, end, size)
+                            or state.get("etag") and response.headers.get("etag") != state["etag"]):
+                        raise _RangeRefused()
+                    async for piece in response.stream():
+                        self.check(row["user_id"], row["id"])
+                        received += len(piece)
+                        if received > end - start + 1:
+                            raise _RangeRefused()
+                        await self.throttle(len(piece))
+                        self._progress(row["id"], bytes_in=len(piece))
+                        pieces.append(piece)
+                if received != end - start + 1:
+                    raise TransientError("来源分段传输提前中断")
+                return pieces
+            except TransientError:
+                # 失败的这次读取不算进度；重试从这一段的开头重新读。
+                self._progress(row["id"], bytes_in=-received)
+                if attempt == PART_RETRIES:
+                    raise
+                await asyncio.sleep(min(2 ** attempt, 10))
+
+    async def _parallel(self, row, scope, upload_id, request, state, size, *, first=None):
+        """多连接下载直链：按 16 MiB 切段，最多 download_connections 个连接同时读取，每段读完直接作为一个分段写入存储
+        （分段可以乱序写入，提交时按序号拼接）。first 是全新下载时已经打开的首个响应，用来读第 1 段，不浪费这条连接。
+        只补缺的分段，所以中断后可以从已写入的分段继续。"""
+        parts = self.objects.list_parts(scope, upload_id)
+        done = {part.part_no for part in parts}
+        stored = sum(part.size for part in parts)
+        queue = [number for number in range(1, self._part_count(size) + 1) if number not in done]
+
+        async def write(number, pieces):
+            nonlocal stored
+            # 先拼成一整段并立即释放分块列表：写入时内存里只留这一份明文（put_part 不再另拼一份）。
+            body = pieces[0] if len(pieces) == 1 else b"".join(pieces)
+            pieces.clear()
+            length = len(body)
+            self.check(row["user_id"], row["id"])
+            await self.objects.upload_part(scope, upload_id, number, body, length, background=True)
+            del body
+            stored += length
+            self._set(row["id"], stored_bytes=stored)
+
+        async def worker():
+            while queue:
+                number = queue.pop(0)
+                await write(number, await self._range_part(row, request, state, size, number))
+
+        async def first_part():
+            limit, pieces, received = min(size, PART_SIZE), [], 0
+            async for piece in first:
+                self.check(row["user_id"], row["id"])
+                piece = piece[:limit - received]
+                received += len(piece)
+                await self.throttle(len(piece))
+                self._progress(row["id"], bytes_in=len(piece))
+                pieces.append(piece)
+                if received >= limit:
+                    break
+            if received != limit:
+                raise TransientError("来源连接提前中断")
+            await write(1, pieces)
+            await worker()
+
+        count = self._connections()
+        coroutines = []
+        if first is not None and 1 in queue:
+            queue.remove(1)
+            coroutines.append(first_part())
+        coroutines.extend(worker() for _ in range(count - len(coroutines)))
+        tasks = [asyncio.ensure_future(coroutine) for coroutine in coroutines]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        if stored != size:
+            raise DownloadError("下载文件的实际长度与来源声明不一致，请重新下载")
+
+    def _parallel_ok(self, row, request, response, size):
+        return (self._connections() > 1 and row["id"] not in self._single and request.method == "GET"
+                and response.status == 200 and size is not None and size > PART_SIZE
+                and response.headers.get("accept-ranges", "").strip().lower() == "bytes")
+
     async def _http(self, row, scope, source):
+        try:
+            await self._http_once(row, scope, source)
+        except _RangeRefused:
+            # 来源不支持（或中途不再支持）分段读取：清掉已写入的分段，本进程内改用单连接从头下载。
+            self._single.add(row["id"])
+            await self._discard(self._row(row["id"]))
+            source["state"] = {}
+            self._save_source(row["id"], source)
+            self._set(row["id"], stored_bytes=0, received=0)
+            self._stats[row["id"]].update(received=0, last_bytes=0, speed=0)
+            await self._http_once(self._row(row["id"]), scope, source)
+
+    async def _http_once(self, row, scope, source):
         request = DownloadRequest.from_json(source["request"])
         state = source["state"]
         upload_id = row["upload_id"]
@@ -1256,6 +1392,18 @@ class OfflineDownloads:
         if upload:
             self._reserve_target(row, scope, upload_id)
         offset = sum(part.size for part in parts)
+        if upload and state.get("ranges"):
+            # 多连接下载中断：已写入的分段可能不连续，只补缺的分段；需要 ETag 确认来源没有变化，否则从头下载。
+            size = state.get("size")
+            if request.method == "GET" and state.get("etag") and size and self._parts_valid(parts, size):
+                self._stats[row["id"]].update(received=offset, last_bytes=offset)
+                await self._parallel(row, scope, upload_id, request, state, size)
+                state["eof"] = True
+                self._save_source(row["id"], source)
+                await self._finish(row, scope, upload_id)
+                return
+            await self._discard(row)
+            upload_id, offset, state, parts = None, 0, {}, []
         resume = offset and request.method == "GET" and state.get("etag") and all(part.size == PART_SIZE for part in parts)
         if offset and not resume:
             await self._discard(row)
@@ -1315,6 +1463,11 @@ class OfflineDownloads:
                 await self._stage_video(row, scope, upload_id, counted())
                 if size is not None and received != size:
                     raise DownloadError("下载文件的实际长度与来源声明不一致，请重新下载")
+            elif not offset and self._parallel_ok(row, request, response, size):
+                # 来源声明支持字节范围：多连接分段下载。先记下 ranges，中断后才知道要按分段补齐。
+                state["ranges"] = True
+                self._save_source(row["id"], source)
+                await self._parallel(row, scope, upload_id, request, state, size, first=stream)
             else:
                 stored = await self._stage(row, scope, upload_id, stream, offset=offset)
                 if size is not None and stored != size:
@@ -1382,7 +1535,7 @@ class OfflineDownloads:
             stream = remux(self.http, request, playlist, self.resources.ffmpeg,
                 media_type=entry["media_type"], url_check=url_check,
                 check=lambda: self.check(row["user_id"], row["id"]), progress=lambda **values: self._progress(row["id"], **values),
-                throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase))
+                throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase), connections=self._connections())
             try:
                 await self._stage_video(row, scope, upload_id, stream)
             finally:
@@ -1393,7 +1546,7 @@ class OfflineDownloads:
             def sized(size):
                 self._set(row["id"], size=size)
             upload_id = await self._begin(row, scope, entry["content_type"], size=entry["size"])
-            stream = track_stream(self.http, row["platform"], entry["tracks"][0], on_size=sized)
+            stream = track_stream(self.http, row["platform"], entry["tracks"][0], on_size=sized, connections=self._connections())
             try:
                 await self._stage(row, scope, upload_id, stream)
             finally:
@@ -1404,7 +1557,7 @@ class OfflineDownloads:
         stream = merge_tracks(self.http, row["platform"], entry, self.resources.ffmpeg, self.cache_root,
             row["id"], config["platform_max_mib"] * MIB, config["reserve_mib"] * MIB,
             check=lambda: self.check(row["user_id"], row["id"]), progress=lambda **values: self._progress(row["id"], **values),
-            throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase))
+            throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase), connections=self._connections())
         try:
             # 合并后的成品直接流入加密分片，不占用音视频输入轨的临时缓存预算。
             await self._stage_video(row, scope, upload_id, stream)
@@ -1429,7 +1582,7 @@ class OfflineDownloads:
         stream = remux(self.http, request, playlist, self.resources.ffmpeg,
             audio=audio,
             check=lambda: self.check(row["user_id"], row["id"]), progress=lambda **values: self._progress(row["id"], **values), throttle=self.throttle,
-            phase=lambda phase: self._set(row["id"], phase=phase))
+            phase=lambda phase: self._set(row["id"], phase=phase), connections=self._connections())
         try:
             await self._stage_video(row, scope, upload_id, stream)
         finally:

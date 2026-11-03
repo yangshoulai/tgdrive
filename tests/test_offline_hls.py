@@ -66,7 +66,7 @@ class PlaylistTests(unittest.TestCase):
 class FixtureHttp:
     def __init__(self, bodies, ignore_range=False, close_delay=0):
         self.bodies, self.calls, self.ignore_range = bodies, [], ignore_range
-        self.active, self.close_delay = 0, close_delay
+        self.active, self.close_delay, self.peak = 0, close_delay, 0
 
     @asynccontextmanager
     async def open(self, request, *, url=None, extra_headers=None, url_check=None, **_):
@@ -90,6 +90,7 @@ class FixtureHttp:
         response = Response()
         response.status, response.headers, response.size = status, headers, len(body)
         self.active += 1
+        self.peak = max(self.peak, self.active)
         try:
             yield response
         finally:
@@ -164,6 +165,21 @@ class RemuxTests(unittest.IsolatedAsyncioTestCase):
         _, events = await self.collect('#EXTM3U\n#EXTINF:3,\n1.ts\n#EXT-X-DISCONTINUITY\n'
             '#EXTINF:3,\n2.ts\n#EXT-X-ENDLIST\n', {'1.ts': self.ts, '2.ts': self.ts})
         self.assertEqual([event['segment'] for event in events if 'segment' in event], [1, 2])
+
+    async def test_multiple_connections_prefetch_segments_in_order(self):
+        # 普通 TS 走管道、fMP4／单文件字节范围与分离音轨走回环中转：多连接预读后成品仍完整、分片按顺序计数。
+        text = '#EXTM3U\n' + ''.join(f'#EXTINF:3,\n{index}.ts\n' for index in range(6)) + '#EXT-X-ENDLIST\n'
+        http, events = await self.collect(text, {f'{index}.ts': self.ts for index in range(6)}, connections=4, close_delay=0.01)
+        self.assertGreater(http.peak, 1, "多连接时同时读取多个分片")
+        self.assertEqual([event['segment'] for event in events if 'segment' in event], [1, 2, 3, 4, 5, 6])
+        for name in ('fmp4', 'ranges'):
+            with self.subTest(name=name):
+                folder = self.root / name
+                bodies = {path.name: path.read_bytes() for path in folder.iterdir()}
+                http, events = await self.collect((folder / 'index.m3u8').read_text(), bodies, connections=4, close_delay=0.01)
+                self.assertGreater(http.peak, 1)
+                segments = [event['segment'] for event in events if 'segment' in event]
+                self.assertEqual(segments, list(range(1, len(segments) + 1)))
 
     async def test_fmp4_init_and_single_file_ranges(self):
         for name in ('fmp4', 'ranges'):

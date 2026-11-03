@@ -22,7 +22,8 @@ DEFAULTS = {"mode": "auto", "concurrency": 1, "bandwidth_kib": 0,
             "transfer_concurrency": 8, "bucket_concurrency": 6,
             "upload_concurrency": 4, "upload_kib": 0, "bot_interval_ms": 1000,
             "web_part_concurrency": 4, "web_file_concurrency": 2, "thumbnail_concurrency": 16,
-            "download_memory_percent": 60, "video_concurrency": 2, "thumbnail_cache_mib": 1024}
+            "download_memory_percent": 60, "video_concurrency": 2, "thumbnail_cache_mib": 1024,
+            "download_connections": 4}
 # 写入存储（Telegram 发送）的每个在途分片约占明文与密文两份内存。
 UPLOAD_MEMORY = 32 * MIB
 # 文件读取并发（下载、预览、播放、本机缓存、S3 读取共用）：每路约占 (预读窗口数 + 1) × 8 MB 内存。
@@ -30,6 +31,9 @@ TRANSFER_MEMORY = 24 * MIB
 # 每个离线下载任务按约 64 MB 估算：实测直链任务正在写入时约 48 MB、排队等待写入时约 16–20 MB，
 # 视频转封装还要暂留开头 16 MB 与样本表，另留分配器余量。任务总数最多占检测内存的 download_memory_percent（默认 60%）。
 DOWNLOAD_MEMORY = 64 * MIB
+# 多连接下载时每多一个连接，任务多暂存一段：实测每个连接约 30 MB（读完的 16 MiB 一段在等待写入或加密时还有一份副本），
+# 4 个连接的直链任务峰值约 115–163 MB。
+CONNECTION_MEMORY = 32 * MIB
 DOWNLOAD_MAX = 16
 # 1.38 之前的读取并发默认值；仍保存着这组值的配置在升级后改用新默认值（见 ResourceSettings.config）。
 LEGACY_READ_DEFAULTS = (4, 2)
@@ -164,7 +168,8 @@ class ResourceSettings:
                                         ("thumbnail_concurrency", 1, 32, "封面读取并发须为 1–32"),
                                         ("download_memory_percent", 10, 80, "离线下载可用内存须为检测内存的 10%–80%"),
                                         ("video_concurrency", 1, 4, "同时封装的视频数须为 1–4"),
-                                        ("thumbnail_cache_mib", 128, 8192, "封面缓存上限须为 128–8192 MiB")):
+                                        ("thumbnail_cache_mib", 128, 8192, "封面缓存上限须为 128–8192 MiB"),
+                                        ("download_connections", 1, 8, "单个任务的连接数须为 1–8")):
             if type(merged[key]) is not int or not low <= merged[key] <= high:
                 raise ValueError(message)
         if not isinstance(merged["proxy"], str):
@@ -202,7 +207,10 @@ class ResourceSettings:
         # 内存 1 GiB 以上按每个任务约 64 MB、最多占内存的 download_memory_percent 封顶（默认 60%：1 GiB 9 个、2 GiB 起 16 个）；
         # 不足 1 GiB 或无法检测时沿用 low_ceiling 的保守分档。
         small = not memory or memory < 1024 * MIB
-        ceiling = low_ceiling if small else min(DOWNLOAD_MAX, max(1, memory * config["download_memory_percent"] // 100 // DOWNLOAD_MEMORY))
+        # 单个任务的连接数：内存不足 1 GiB 时最多 2 个；每多一个连接，任务的内存估算增加 CONNECTION_MEMORY。
+        connections = min(config["download_connections"], 2) if small else config["download_connections"]
+        per_task = DOWNLOAD_MEMORY + (connections - 1) * CONNECTION_MEMORY
+        ceiling = low_ceiling if small else min(DOWNLOAD_MAX, max(1, memory * config["download_memory_percent"] // 100 // per_task))
         # 平台临时缓存放在数据目录的磁盘上（分离的音视频轨合并前暂存），与 CPU 核数和内存无关，按管理员设置生效；
         # 磁盘是否够用由合并时的剩余空间检查（reserve_mib）保证。
         platform_limit = config["platform_max_mib"]
@@ -229,6 +237,7 @@ class ResourceSettings:
         # 还各占「平台临时缓存上限」的磁盘；内存不足 1 GiB 或无法检测时只允许 1 个，且不超过同时下载的任务数。
         video = 1 if small else max(1, min(config["video_concurrency"], concurrency))
         return {**config, "mode": mode, "concurrency": concurrency, "ffmpeg_concurrency": video, "video_concurrency": video,
+                "download_connections": connections, "task_memory_bytes": per_task,
                 "transfer_concurrency": transfer, "bucket_concurrency": bucket,
                 "upload_concurrency": upload, "web_part_concurrency": web_parts, "thumbnail_concurrency": thumbnails,
                 "upload_reduced": (upload, web_parts) != (config["upload_concurrency"], config["web_part_concurrency"]),

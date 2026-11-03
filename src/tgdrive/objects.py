@@ -1548,7 +1548,8 @@ class ObjectService:
         return row
 
     async def upload_part(self, scope: Scope, upload_id: str, part_no: int,
-                          body: AsyncIterator[bytes] | Iterable[bytes] | bytes, size: int | None = None) -> PartInfo:
+                          body: AsyncIterator[bytes] | Iterable[bytes] | bytes, size: int | None = None, *,
+                          background: bool = False) -> PartInfo:
         row = self._upload(scope, upload_id)
         if self.engine.thumbnail_cache is not None:
             self._cache_upload(row["blob_uuid"], row["key"], row["content_type"] if "content_type" in row.keys() else None)
@@ -1556,7 +1557,7 @@ class ObjectService:
         others = self.metadata.db.execute("SELECT COALESCE(SUM(size),0) FROM upload_parts WHERE upload_id=? AND part_no!=?",
                                           (upload_id, part_no)).fetchone()[0]
         body = self._guard_quota(body, self._quota_room(scope.bucket_id, row["key"], reserved=int(others)), size)
-        result = await self.engine.put_part(row["blob_uuid"], part_no, body, bucket_id=scope.bucket_id)
+        result = await self.engine.put_part(row["blob_uuid"], part_no, body, bucket_id=scope.bucket_id, background=background)
         if size is not None and size != result.size:
             raise ValueError("part size does not match request")
         self._check_scope(scope, row["key"], write=True)
