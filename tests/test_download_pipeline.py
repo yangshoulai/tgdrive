@@ -158,7 +158,7 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
             sizes.append((end or 0) - (start or 0))
             return await original(ref, start, end)
         store.get = recording
-        # 前台（播放）从小窗口起步、逐步放大；后台整段读取（本机缓存）直接用后端窗口。
+        # 前台（播放）从小窗口起步、逐步放大；后台整段读取（本机缓存）从 1 MiB 起步（这里后端窗口更小，直接用后端窗口）。
         self.assertEqual(b"".join([piece async for piece in engine.stream(blob, window=1024)]), data)
         foreground = sizes[:]
         sizes.clear()

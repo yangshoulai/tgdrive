@@ -25,7 +25,11 @@ type Source = { start: number; response: Response; controller: AbortController }
 type Background = { id: string; controller: AbortController; ready: Promise<void>; started: boolean; context: TierContext | null };
 const backgrounds = new Map<string, Background>();
 type Manual = { key: string; id: string; owner: string; route: Route; request: Request; controller: AbortController; opened?: Opened; running: boolean;
-  background?: Background; timer?: number };
+  background?: Background; timer?: number; segments: Map<number, SegmentDiagnosis>; lastError?: string; noticed?: number };
+/** 诊断：每个正在下载的分段停在哪一步。queued 等浏览器空位、waiting 等服务器开始返回、busy 服务器繁忙等待重试、
+ *  receiving 接收网络数据、encrypting 加密、writing 写入本地存储。时间都是毫秒时间戳。 */
+type SegmentDiagnosis = { first: number; last: number; size: number; phase: "queued" | "waiting" | "busy" | "receiving" | "encrypting" | "writing";
+  status?: number; received: number; stored: number; started: number; requested?: number; firstByte?: number; lastData?: number; lastStored?: number; busyCount: number };
 /** 手动缓存任务（键为 页面:任务编号）。最多同时缓存 MAX_MANUAL_FILES 个文件，所有文件的回源请求共用 manualSlot 的并发上限。 */
 const manuals = new Map<string, Manual>();
 const MAX_MANUAL_FILES = 3;
@@ -157,7 +161,9 @@ function normalContext(): Promise<TierContext | null> {
     if (signal.aborted) return null;
     lastNamespace = body.namespace;
     if (!body.key) return null;
-    scheduleReconcile(5000);
+    // 每次开始手动缓存（含自动重试）都会重新取会话；核对只在 Worker 启动后与距上次超过 10 分钟时进行，
+    // 否则缓存几个文件、反复重试时会一直发 /cache/check。文件被改动时另由页面的 nudge 触发。
+    if (Date.now() - lastReconcile > RECONCILE_INTERVAL) scheduleReconcile(5000);
     return tierContext("n", body.namespace, body.key, body.bucket_id, signal);
   })().catch(() => null);
   normal = remember(pending, 10 * 60_000);
@@ -528,7 +534,7 @@ class BlockWriter {
   private parts: Uint8Array[] = [];
   private filled = 0;
   private stopped = false;
-  constructor(private opened: Opened, private index: number, private strict?: { signal: AbortSignal; stored: () => void }) {}
+  constructor(private opened: Opened, private index: number, private strict?: { signal: AbortSignal; stored: () => void; phase?: (phase: "encrypting" | "writing" | "receiving") => void }) {}
 
   private length(index: number) { return Math.min(BLOCK, this.opened.info.size - index * BLOCK); }
 
@@ -559,10 +565,13 @@ class BlockWriter {
       this.stopped = true; return;
     }
     try {
+      this.strict?.phase?.("encrypting");
       const sealed = await seal(this.opened.key, data, blockAad(entry, index));
       this.opened.tier.signal.throwIfAborted();
       this.strict?.signal.throwIfAborted();
+      this.strict?.phase?.("writing");
       const updated = await putBlock(entry.key, index, sealed, data.length, entry.store);
+      this.strict?.phase?.("receiving");
       if (!updated) {
         if (this.strict) throw new Error("缓存已被清理，请重试");
         this.stopped = true; return;
@@ -630,6 +639,14 @@ async function manualParallel() {
   }
   return Math.max(1, Math.min(MANUAL_MAX, readConcurrency.value - 1));
 }
+/** 本机缓存任务的诊断信息：浏览器回源通道占用与每个正在进行的分段。任务不在这个 Worker 中时返回 null。 */
+async function diagnoseManual(owner: string, id: string) {
+  const job = manuals.get(`${owner}:${id}`);
+  if (!job) return null;
+  return { now: Date.now(), active: manualActive, limit: await manualParallel(), files: [...manuals.values()].filter(item => item.opened).length,
+    running: job.running, lastError: job.lastError ?? "", segments: [...job.segments.values()].sort((a, b) => a.first - b.first).map(item => ({ ...item })) };
+}
+
 /** alive：排队等空位期间每 15 秒调用一次。几个文件共用这几路，排在后面的文件要等前面的段读完；
  *  不续期的话页面会把长时间没有进度的文件当成「本机缓存没有响应」而中断重试。 */
 async function manualSlot(signal: AbortSignal, alive?: () => void) {
@@ -777,7 +794,7 @@ function manualFetch(job: Manual, options: RequestInit = {}) {
     request = new Request(url, { credentials: "same-origin" });
     headers.set("X-Tessera-Cache-Task", job.background.id);
   }
-  return fetch(request, { ...options, headers, cache: "no-store", signal: job.controller.signal });
+  return fetch(request, { ...options, headers, cache: "no-store", signal: options.signal ?? job.controller.signal });
 }
 
 async function startManual(owner: string, id: string, url: string, group?: string) {
@@ -789,7 +806,7 @@ async function startManual(owner: string, id: string, url: string, group?: strin
   if (busy(route)) return { busy: true };
   const background = group && route.tier === "p" ? await getBackground(owner, group) : undefined;
   if (busy(route)) return { busy: true };
-  const job: Manual = { key, owner, id, request, route, controller: new AbortController(), running: false, background };
+  const job: Manual = { key, owner, id, request, route, controller: new AbortController(), running: false, background, segments: new Map() };
   manuals.set(key, job); renewManual(job);
   try {
     // 点击时重取账号策略；长期播放的普通预览仍按原有的上下文周期复用。
@@ -916,19 +933,55 @@ async function stepManual(owner: string, id: string, progress: (value: unknown) 
 }
 
 async function fetchSegment(job: Manual, opened: Opened, [first, last]: [number, number], progress: (value: unknown) => void) {
-  const release = await manualSlot(job.controller.signal, () => { renewManual(job); progress(fileCacheState(opened.entry, opened.info.size)); });
+  const end = Math.min(opened.info.size - 1, (last + 1) * BLOCK - 1);
+  const diag: SegmentDiagnosis = { first, last, size: end - first * BLOCK + 1, phase: "queued", received: 0, stored: 0, started: Date.now(), busyCount: 0 };
+  job.segments.set(first, diag);
+  try { await fetchSegmentOnce(job, opened, [first, last], end, diag, progress); }
+  catch (error) {
+    if (!(error instanceof DOMException && error.name === "AbortError")) job.lastError = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally { if (job.segments.get(first) === diag) job.segments.delete(first); }
+}
+
+/** 进度：已写入本机的块（每块 1 MiB，加密与存储的单位）加上各段已收到、还没凑满一块的字节，让页面在收到数据时就前进。
+ *  pending 的部分在中断重试时会重新下载，所以单独给出，不计入已缓存的状态。 */
+const PROGRESS_INTERVAL = 250;
+function manualProgress(job: Manual, opened: Opened) {
+  const pending = [...job.segments.values()].reduce((sum, item) => sum + Math.max(0, item.received - item.stored), 0);
+  return { ...fileCacheState(opened.entry, opened.info.size), pending };
+}
+
+/** 一段超过这么久既没收到响应、也没收到新数据才算中断（重新请求这一段）；只要还在收数据，再慢也不中断。 */
+const SEGMENT_STALL = 180_000;
+
+async function fetchSegmentOnce(job: Manual, opened: Opened, [first]: [number, number], end: number, diag: SegmentDiagnosis, progress: (value: unknown) => void) {
+  const alive = () => { renewManual(job); job.noticed = Date.now(); progress(manualProgress(job, opened)); };
+  const release = await manualSlot(job.controller.signal, alive);
+  // 页面与 Worker 都按「120 秒没有进度」判定任务没有响应，而进度只在写满 1 MiB 时更新：
+  // 网络很慢（120 秒不到 1 MiB）或服务器还没开始返回时，每 15 秒续期一次；超过 SEGMENT_STALL 完全没有数据才中断这一段。
+  const segment = new AbortController();
+  const stop = () => segment.abort(job.controller.signal.reason);
+  job.controller.signal.addEventListener("abort", stop, { once: true });
+  const watchdog = setInterval(() => {
+    if (Date.now() - (diag.lastData ?? diag.requested ?? diag.started) > SEGMENT_STALL) segment.abort(new Error("服务器超过 3 分钟没有返回数据，正在重新请求这一段"));
+    else alive();
+  }, 15_000);
   try {
-    const end = Math.min(opened.info.size - 1, (last + 1) * BLOCK - 1);
+    diag.phase = "waiting"; diag.requested = Date.now();
     const headers = new Headers({ Range: `bytes=${first * BLOCK}-${end}`, "X-Tessera-Background": "cache" });
-    let response = await manualFetch(job, { headers });
+    let response = await manualFetch(job, { headers, signal: segment.signal });
+    diag.status = response.status;
     // 服务器读取名额已满（离线下载、播放占用）时返回 503 并给出 Retry-After：这是排队，不算失败，等一会儿再请求同一段。
     while (response.status === 503 && response.headers.has("retry-after")) {
       await response.body?.cancel();
       const seconds = Number(response.headers.get("retry-after"));
-      renewManual(job); progress(fileCacheState(opened.entry, opened.info.size));
+      diag.phase = "busy"; diag.busyCount++;
+      alive();
       await pause(Math.min(60, Number.isFinite(seconds) && seconds > 0 ? seconds : 5) * 1000, job.controller.signal);
       job.controller.signal.throwIfAborted();
-      response = await manualFetch(job, { headers });
+      diag.phase = "waiting"; diag.requested = Date.now();
+      response = await manualFetch(job, { headers, signal: segment.signal });
+      diag.status = response.status;
     }
     if (response.status === 401) dropKeys();
     if (response.status !== 206 || etagOf(response) !== opened.info.version || response.headers.get("content-range") !== `bytes ${first * BLOCK}-${end}/${opened.info.size}`) {
@@ -939,23 +992,33 @@ async function fetchSegment(job: Manual, opened: Opened, [first, last]: [number,
     }
     if (!response.body) throw new Error("服务器未返回文件内容");
     const reader = response.body.getReader();
-    const writer = new BlockWriter(opened, first, { signal: job.controller.signal, stored: () => {
+    diag.phase = "receiving";
+    const writer = new BlockWriter(opened, first, { signal: job.controller.signal, phase: phase => { diag.phase = phase; }, stored: () => {
+      diag.stored = Math.min(diag.size, diag.stored + BLOCK); diag.lastStored = Date.now();
       if (manuals.get(job.key) !== job || job.controller.signal.aborted) return;
-      renewManual(job); progress(fileCacheState(opened.entry, opened.info.size));
+      alive();
     } });
     let received = 0;
     try {
       while (true) {
         job.controller.signal.throwIfAborted();
+        segment.signal.throwIfAborted();
         const { value, done } = await reader.read();
         if (done) break;
         received += value.length;
+        diag.received = received; diag.lastData = Date.now(); diag.firstByte ??= diag.lastData;
         if (received > end - first * BLOCK + 1) throw new Error("服务器返回的数据大小不符");
         await writer.push(value);
+        // 每收到一批数据就通知页面，但最多每 250 毫秒一次（网络每次交来十几到几十 KB，逐批发会每秒上百条消息）。
+        if (Date.now() - (job.noticed ?? 0) >= PROGRESS_INTERVAL && manuals.get(job.key) === job) alive();
       }
     } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
     if (received !== end - first * BLOCK + 1) throw new Error("服务器提前结束了响应，请重试以继续缓存");
-  } finally { release(); }
+  } catch (error) {
+    // 看门狗中断的段报告真实原因（fetch 抛出的是 AbortError），交给页面按暂时故障重试。
+    if (segment.signal.aborted && !job.controller.signal.aborted && segment.signal.reason instanceof Error) throw segment.signal.reason;
+    throw error;
+  } finally { clearInterval(watchdog); job.controller.signal.removeEventListener("abort", stop); release(); }
 }
 
 /* ---------- 预览预读：预览打开期间，从播放位置往后多段并行补齐自动缓存；关闭预览即停止 ----------
@@ -1017,7 +1080,7 @@ async function runPrefetch(job: Prefetch) {
   const budget = tierBudget(preferences, value.route.tier);
   const cap = info.manual ? budget : Math.max(BLOCK, Math.floor(budget / 2));
   const opened: Opened = { tier: value.context, entry, info, key: value.keys.key, request: value.request, cap };
-  const worker: Manual = { key: `prefetch:${job.key}`, id: job.id, owner: job.owner, route: value.route, request: value.request, controller: job.controller, running: false };
+  const worker: Manual = { key: `prefetch:${job.key}`, id: job.id, owner: job.owner, route: value.route, request: value.request, controller: job.controller, running: false, segments: new Map() };
   const abort = () => job.controller.abort();
   value.context.signal.addEventListener("abort", abort, { once: true });
   const count = Math.ceil(info.size / BLOCK), inflight = new Set<number>();
@@ -1141,6 +1204,7 @@ async function enforce(factor = 1) {
 
 let reconcileTimer: number | undefined;
 let lastReconcile = 0;
+const RECONCILE_INTERVAL = 10 * 60_000;
 let reconciling: Promise<void> | null = null;
 
 function scheduleReconcile(delay = 3000) {
@@ -1380,6 +1444,7 @@ sw.addEventListener("message", event => {
     case "tessera-cache:release-group": reply(releaseBackground(owner, data.id ?? "")); break;
     case "tessera-cache:start": reply(startManual(owner, data.id ?? "", data.url ?? "", data.group)); break;
     case "tessera-cache:step": reply(stepManual(owner, data.id ?? "", value => port?.postMessage({ progress: value }))); break;
+    case "tessera-cache:diagnose": reply(diagnoseManual(owner, data.id ?? "")); break;
     case "tessera-cache:cancel":
       stopManualWhere(job => job.owner === owner && (!data.id || job.id === data.id));
       reply(Promise.resolve(null)); break;

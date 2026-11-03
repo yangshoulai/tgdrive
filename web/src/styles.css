@@ -2707,6 +2707,8 @@ button.task-location:focus-visible { outline: 2px solid var(--accent); outline-o
 /* 列：选择 | 文件（名称与来源） | 进度 | 保存到 | 状态 | 操作。数字用等宽数字，进度条与说明同宽，行高随说明变化但不超过两行。 */
 .task-surface > .task-table { --cols: 20px minmax(220px, 1.4fr) minmax(170px, .85fr) minmax(180px, 1.25fr) 92px 64px; min-width: 880px; }
 .task-table .data-row:not(.data-head) { min-height: 60px; padding-block: 8px; }
+.cache-diagnosis-table { --cols: 72px minmax(120px, 1.2fr) 132px 72px 88px 88px 72px; margin-top: 16px; overflow-x: auto; border: 1px solid var(--line-soft); border-radius: var(--radius-lg); }
+.cache-diagnosis-table .data-row { gap: 12px; padding: 8px 12px; font-size: var(--text-xs); }
 .task-table .cell-name { gap: 12px; }
 .task-subline { overflow: hidden; color: var(--ink-3); text-overflow: ellipsis; white-space: nowrap; }
 .task-progress { display: grid; gap: 4px; min-width: 0; font-variant-numeric: tabular-nums; }

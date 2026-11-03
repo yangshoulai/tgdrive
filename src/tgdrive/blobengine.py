@@ -259,9 +259,10 @@ class BlobEngine:
                 while position < hi_exclusive:
                     # 短 Range 和本地读取仍按原窗口一次取齐。
                     if ramp is None:
-                        # 后台整段读取（本机缓存）不会被中途放弃，直接用后端窗口。
+                        # 后台整段读取（本机缓存）不会被中途放弃，从 1 MiB 起步（1 → 4 → 8 MiB）：
+                        # 直接取整个 8 MiB 窗口时，存储读得慢就要等很久才有第一个字节，浏览器会判为没有响应、反向代理按首字节超时断开。
                         ramp = (min(window, 256 * 1024) if chunk_window > window and stop - start > chunk_window and not background
-                                else chunk_window)
+                                else min(chunk_window, 1024 * 1024) if background else chunk_window)
                     width = min(ramp, chunk_window)
                     ramp = min(ramp * 4, 1 << 40)
                     local_end = min(hi_exclusive, position + max(width, record.frame_size))

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { isCacheTaskGone, isFatalCacheError, loadPrivateCacheQueue, savePrivateCacheQueue, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
+import { diagnoseFileCache, type CacheDiagnosis, isCacheTaskGone, isFatalCacheError, loadPrivateCacheQueue, savePrivateCacheQueue, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
 import { BRAND } from "../brand";
 import { effectiveMiB } from "../cache-store";
 import { FileTile, getFileKind } from "../files";
@@ -406,9 +406,13 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
     const patch = (value: Partial<CacheJob>) => {
       if (!controller.signal.aborted) update(jobs => jobs.map(item => item.id === job.id ? { ...item, ...value } : item));
     };
-    const progress = (state: FileCacheState) => {
+    let shown = -1;
+    const progress = ({ pending = 0, ...state }: FileCacheState) => {
       if (controller.signal.aborted) return;
-      patch({ bytes: state.bytes, size: state.size });
+      // 任务进度含已收到、还没凑满一块的字节；文件的缓存状态只按已写入本机的块更新（变化时才更新，避免每 250 毫秒重绘）。
+      patch({ bytes: Math.min(state.size, state.bytes + pending), size: state.size });
+      if (state.bytes === shown) return;
+      shown = state.bytes;
       if (!api.isPrivatePath(job.file.key) || ready.current.privateReady) setStates(value => new Map(value).set(cacheFileId(job.file), state));
     };
     void (async () => {
@@ -693,6 +697,7 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
   const resumable = list.chosen.filter(job => ["paused", "canceled", "error"].includes(job.status));
   const toggle = (filter: TaskFilter) => list.setFilter(list.filter === filter ? "" : filter);
   const [unlocking, setUnlocking] = useState(false);
+  const [diagnosing, setDiagnosing] = useState<CacheJob | null>(null);
   const closeUnlock = useCallback(() => setUnlocking(false), []);
   const hiddenPrivate = queue.privateReady ? 0 : jobs.filter(job => api.isPrivatePath(job.file.key)).length;
   return <>
@@ -764,6 +769,7 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
                 {job.retrying ? "自动重试" : job.status === "queued" && job.waiting ? "等待中" : CACHE_LABEL[job.status]}</Badge></div>
               <div className="cell-actions" role="cell">{quick}<Menu label={`${name} 的更多操作`} items={[
                 ...(!hidden ? [{ label: "打开所在文件夹", icon: "folder" as const, onSelect: () => onOpenFolder(folder, secret) }] : []),
+                ...(running && !hidden ? [{ label: "查看缓存诊断", icon: "info" as const, onSelect: () => setDiagnosing(job) }] : []),
                 ...(job.status === "error" && !hidden ? [{ label: "复制失败原因", icon: "alert" as const, onSelect: () => void copyText(job.error, "失败原因已复制") }] : []),
                 { label: "清除文件的本机缓存", icon: "trash", danger: true, divider: true, disabled: hidden, onSelect: () => queue.remove(job.file) },
                 { label: "删除任务记录", icon: "x", danger: true, onSelect: () => setRemoving([job.id]) },
@@ -773,9 +779,56 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
         </div>}
     </div>
     <TaskListFooter list={list} />
+    {diagnosing && <CacheDiagnosisDialog job={jobs.find(job => job.id === diagnosing.id) ?? diagnosing} onClose={() => setDiagnosing(null)} />}
     {removing && <ConfirmDialog title={`删除 ${removing.length} 个缓存任务记录？`} confirmLabel="删除记录" description="所选任务会停止并从列表移除，已经缓存的内容和云端文件会保留。如需释放本机空间，请选择「清除文件的本机缓存」。"
       onClose={() => setRemoving(null)} onConfirm={() => { queue.removeJobs(removing); setRemoving(null); list.clearSelection(); }} />}
   </>;
+}
+
+const SEGMENT_PHASE: Record<CacheDiagnosis["segments"][number]["phase"], string> = {
+  queued: "等浏览器空位", waiting: "等服务器开始返回", busy: "服务器繁忙，稍后重试", receiving: "接收数据", encrypting: "加密", writing: "写入本机存储",
+};
+const ago = (now: number, at?: number) => at ? `${Math.max(0, Math.round((now - at) / 1000))} 秒前` : "—";
+const spent = (from?: number, to?: number) => from && to ? `${((to - from) / 1000).toFixed(1)} 秒` : "—";
+
+/** 正在缓存的文件每个分段停在哪一步：区分网络慢、服务器没开始返回与本机写入卡住。每秒刷新。 */
+function CacheDiagnosisDialog({ job, onClose }: { job: CacheJob; onClose: () => void }) {
+  const [value, setValue] = useState<CacheDiagnosis | null | undefined>(undefined);
+  useEffect(() => {
+    let alive = true;
+    const read = () => void diagnoseFileCache(job.id).then(result => { if (alive) setValue(result); }, () => { if (alive) setValue(null); });
+    read();
+    const timer = window.setInterval(read, 1000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [job.id]);
+  const now = value?.now ?? Date.now();
+  return <Modal title="缓存诊断" description={nameOf(job.file)} icon="info" size="lg" className={api.isPrivatePath(job.file.key) ? "private-dialog" : ""} onClose={onClose}
+    footer={<Button variant="ghost" onClick={onClose}>关闭</Button>}>
+    {value === undefined ? <SkeletonRows rows={3} /> : !value ? <Notice tone="info">这个文件目前没有在下载（可能在排队、自动重试的等待中，或已经结束）。</Notice> : <>
+      <KeyValue items={[
+        ["已缓存", `${formatBytes(job.bytes)} / ${formatBytes(job.size)}`],
+        ["浏览器回源通道", `${value.active} / ${value.limit} 路在用 · ${value.files} 个文件在缓存`],
+        ["最近的错误", value.lastError || job.error || "无"],
+      ]} />
+      {!value.segments.length ? <p className="muted">这一轮的分段都已结束，正在准备下一轮。</p>
+        : <div className="data-table cache-diagnosis-table" role="table" aria-label="正在下载的分段">
+          <div className="data-row data-head" role="row">
+            <span role="columnheader">分段</span><span role="columnheader">当前</span><span role="columnheader" className="cell-size">网络已收到</span>
+            <span role="columnheader" className="cell-size">已写入</span><span role="columnheader">首字节等待</span><span role="columnheader">最后收到数据</span><span role="columnheader">最后写入</span>
+          </div>
+          {value.segments.map(segment => <div key={segment.first} className="data-row" role="row">
+            <span role="cell">{segment.first}–{segment.last} MB</span>
+            <span role="cell">{SEGMENT_PHASE[segment.phase]}{segment.status ? ` · ${segment.status}` : ""}{segment.busyCount ? ` · 繁忙 ${segment.busyCount} 次` : ""}</span>
+            <span role="cell" className="cell-size">{formatBytes(segment.received)} / {formatBytes(segment.size)}</span>
+            <span role="cell" className="cell-size">{formatBytes(segment.stored)}</span>
+            <span role="cell">{segment.firstByte ? spent(segment.requested, segment.firstByte) : segment.requested ? `已等 ${spent(segment.requested, now)}` : "—"}</span>
+            <span role="cell">{ago(now, segment.lastData)}</span>
+            <span role="cell">{ago(now, segment.lastStored)}</span>
+          </div>)}
+        </div>}
+      <p className="muted">网络已收到持续增长而已写入不动：卡在本机写入；首字节等待很长：服务器在排队或从存储取数据；最后收到数据越来越久：服务器或网络没有继续发送。</p>
+    </>}
+  </Modal>;
 }
 
 function CacheProgress({ job, rate, hidden }: { job: CacheJob; rate: number; hidden: boolean }) {

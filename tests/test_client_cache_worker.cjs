@@ -144,6 +144,8 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
     Date: class extends Date { static now() { return Date.now() + state.clock; } },
     setTimeout(callback, delay) { const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay); timers.add(timer); if (delay > 1000) timer.unref(); return timer; },
     clearTimeout(timer) { clearTimeout(timer); timers.delete(timer); },
+    setInterval(callback, delay) { const timer = setInterval(callback, delay); timer.unref(); return timer; },
+    clearInterval(timer) { clearInterval(timer); },
     self: { location: { origin: ORIGIN }, addEventListener: (type, callback) => listeners.set(type, callback), clients: { matchAll: async () => state.clients } },
   });
   vm.runInContext(worker, context);

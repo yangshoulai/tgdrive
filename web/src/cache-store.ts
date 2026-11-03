@@ -24,7 +24,8 @@ export type EntryRecord = {
   info: ArrayBuffer | null;
 };
 export type EntryInfo = { etag: string; version: string; size: number; type: string; disposition: string; path: string; kind: Kind; manual?: boolean };
-export type FileCacheState = { bytes: number; size: number; complete: boolean };
+/** pending：手动缓存进行中时，已收到但还没凑满一块写入本机的字节（只用于显示进度）。 */
+export type FileCacheState = { bytes: number; size: number; complete: boolean; pending?: number };
 
 /** 只把全部块已经提交的条目视为完成；字节数相等还不足以证明中间没有缺块。 */
 export function fileCacheState(entry: EntryRecord | undefined, size: number): FileCacheState {
