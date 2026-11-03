@@ -148,6 +148,52 @@ class DirectConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(http.ranges), expected, "继续时只请求缺的分段")
 
 
+    async def test_diagnose_reports_running_writes_without_names(self):
+        data = content(4 * PART_SIZE)
+        last = f"bytes={3 * PART_SIZE}-{4 * PART_SIZE - 1}"
+        http = RangeHttp(data, fail_ranges={last}, fail_delay=1.5)
+        self.offline.http = http
+        parsed = await self.offline.parse(self.alice.id, "https://example.com/file.bin")
+        task = self.offline.create(self.alice.id, [{"ticket": parsed["candidates"][0]["ticket"], "name": "secret-name.bin"}], "d/")[0]
+        self.offline.start()
+        async with asyncio.timeout(30):
+            while not (self.offline.diagnose(self.alice.id, task["id"]).get("totals") or {}).get("writes"):
+                await asyncio.sleep(0.01)
+        report = self.offline.diagnose(self.alice.id, task["id"])
+        self.assertTrue(report["running"])
+        self.assertEqual(report["phase"], "parallel")
+        self.assertEqual(report["connections_limit"], 4)
+        self.assertNotIn("secret-name", str(report))
+        self.assertNotIn("example.com", str(report))
+        await self.wait(task["id"], ("completed", "failed"))
+        self.assertFalse(self.offline.diagnose(self.alice.id, task["id"])["running"], "任务结束后不再保留诊断")
+        with self.assertRaises(Exception):
+            self.offline.diagnose(self.alice.id + 1000, task["id"])
+
+
+class DiagnosisRecorderTests(unittest.TestCase):
+    def test_connections_and_writes_are_recorded_with_ranges_only(self):
+        from tgdrive.offline import diagnostics
+        recorder = diagnostics.TaskDiagnosis(1)
+        connection = recorder.open({"Range": "bytes=0-1048575", "Cookie": "secret"})
+        connection.response(206, 1048576)
+        connection.data(4096)
+        snapshot = recorder.snapshot()
+        self.assertEqual(snapshot["connections"][0]["range"], "0-1048575")
+        self.assertEqual((snapshot["connections"][0]["received"], snapshot["connections"][0]["size"]), (4096, 1048576))
+        self.assertNotIn("secret", str(snapshot))
+        recorder.close(connection, asyncio.CancelledError())
+        recorder.close(recorder.open(None), DownloadError("来源拒绝了这一段"))
+        snapshot = recorder.snapshot()
+        self.assertEqual(snapshot["connections"], [])
+        self.assertEqual([item["phase"] for item in snapshot["recent"]], ["failed", "cancelled"])
+        self.assertEqual(snapshot["totals"]["failed"], 1, "取消的连接不算失败")
+        entry = recorder.write_started(3, 100)
+        self.assertEqual(recorder.snapshot()["writes"][0]["part"], 3)
+        recorder.write_ended(entry)
+        self.assertEqual((recorder.snapshot()["totals"]["writes"], recorder.snapshot()["totals"]["written"]), (1, 100))
+
+
 class TrackConnectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_chunked_track_is_read_in_parallel_and_in_order(self):
         data = content(10 * MIB + 333)

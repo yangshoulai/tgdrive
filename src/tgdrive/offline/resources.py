@@ -23,7 +23,7 @@ DEFAULTS = {"mode": "auto", "concurrency": 1, "bandwidth_kib": 0,
             "upload_concurrency": 4, "upload_kib": 0, "bot_interval_ms": 1000,
             "web_part_concurrency": 4, "web_file_concurrency": 2, "thumbnail_concurrency": 16,
             "download_memory_percent": 60, "video_concurrency": 2, "thumbnail_cache_mib": 1024,
-            "download_connections": 4}
+            "download_connections": 4, "diagnostics": True}
 # 写入存储（Telegram 发送）的每个在途分片约占明文与密文两份内存。
 UPLOAD_MEMORY = 32 * MIB
 # 文件读取并发（下载、预览、播放、本机缓存、S3 读取共用）：每路约占 (预读窗口数 + 1) × 8 MB 内存。
@@ -148,7 +148,7 @@ class ResourceSettings:
         for key, low, high in (("concurrency", 1, DOWNLOAD_MAX), ("bandwidth_kib", 0, 1048576), ("reserve_mib", 128, 1048576)):
             if type(merged[key]) is not int or not low <= merged[key] <= high:
                 raise ValueError(f"并发须为 1–{DOWNLOAD_MAX}，限速须非负，磁盘保留空间至少为 128 MiB")
-        for key in ("hls_enabled", "x_enabled", "youtube_enabled"):
+        for key in ("hls_enabled", "x_enabled", "youtube_enabled", "diagnostics"):
             if type(merged[key]) is not bool:
                 raise ValueError("下载能力开关必须为布尔值")
         if type(merged["youtube_max_height"]) is not int or merged["youtube_max_height"] not in (360, 480, 720, 1080, 2160):

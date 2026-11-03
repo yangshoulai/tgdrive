@@ -202,7 +202,7 @@ class SettingsTests(unittest.TestCase):
         store._telegram = None
         user = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
         status, _, data = asyncio.run(self.client.request("GET", "/api/user/v1/upload-config", b"", user))
-        self.assertEqual((status, json.loads(data)), (200, {"part_concurrency": 6, "file_concurrency": 3, "read_concurrency": 6}))
+        self.assertEqual((status, json.loads(data)), (200, {"part_concurrency": 6, "file_concurrency": 3, "read_concurrency": 6, "diagnostics": True}))
         self.assertEqual(asyncio.run(self.client.request("GET", "/api/user/v1/upload-config", b"", {}))[0], 401)
         low = resources.update({"mode": "low"})["effective"]
         # 低资源档在内存充足时最多 8 路，管理员设的 6 路不再被收紧。

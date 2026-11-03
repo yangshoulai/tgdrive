@@ -9,6 +9,7 @@ import { PrivateUnlockDialog } from "./private-unlock";
 import { usePrivateAccess } from "./private-session";
 import { LocationText, TaskStats, remainingText } from "./task-list";
 import { CoverPickerDialog } from "./thumbnail-editor";
+import { DiagnosisMetrics, DiagnosisRow, DiagnosisSection, DiagnosisVerdictNotice, seconds as elapsedText, useDiagnosticsEnabled, type DiagnosisVerdict } from "./diagnosis";
 import { imageThumbnailSet } from "../thumbnails";
 
 const LABEL: Record<api.DownloadStatus, string> = { queued: "排队中", running: "下载中", interrupted: "等待恢复", stopped: "已停止", completed: "已完成", failed: "失败" };
@@ -108,6 +109,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
   const [bulkBusy, setBulkBusy] = useState(false);
   const [now, setNow] = useState<api.DownloadTask | null>(null);
   const [relocating, setRelocating] = useState<api.DownloadTask[] | null>(null);
+  const [diagnosing, setDiagnosing] = useState<number | null>(null);
+  const diagnostics = useDiagnosticsEnabled();
   const cursor = useRef<string | null>(null), epoch = useRef(0);
   const previous = useRef(new Map<number, api.DownloadStatus>());
   const { pageSize, changePageSize, sizes } = usePageSize(DOWNLOAD_PAGE_SIZE_KEY, DOWNLOAD_PAGE_SIZES, 50);
@@ -280,6 +283,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                   </div>
                   <div className="task-state" role="cell"><Badge tone={TONE[task.status]} dot={!completed} icon={completed ? "check" : undefined}>{downloadStatusLabel(task)}</Badge></div>
                   <div className="cell-actions" role="cell">{busy.has(task.id) ? <span className="spinner" aria-label="正在处理任务" /> : <>{quick}<Menu label={`${name}的更多操作`} items={[
+                    ...(task.status === "running" && diagnostics ? [{ label: "查看下载诊断", icon: "info" as const, onSelect: () => setDiagnosing(task.id) }] : []),
                     ...(task.source ? [
                       { label: "复制来源链接", icon: "copy" as const, onSelect: () => void copySource(task) },
                       { label: "打开来源链接", icon: "external" as const, onSelect: () => openSource(task) },
@@ -305,6 +309,7 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     {(newTask || edit) && <DownloadDialog task={edit} onClose={() => { setNewTask(false); setEdit(null); }} onComplete={completed} />}
     {imported && !newTask && !edit && <DownloadDialog task={null} initial={imported} onClose={() => setImported(null)} onComplete={() => { setImported(null); completed(); }} />}
     {now && <DownloadNowDialog task={now} onClose={() => setNow(null)} onDone={() => { setNow(null); window.dispatchEvent(new Event("tessera:downloads-changed")); void pagination.reload(); }} />}
+    {diagnosing != null && <DownloadDiagnosisDialog id={diagnosing} task={page?.tasks.find(task => task.id === diagnosing) ?? null} onClose={() => setDiagnosing(null)} />}
     {relocating && <RelocateDialog tasks={relocating} onClose={() => setRelocating(null)} onDone={() => { setRelocating(null); setSelected(new Set()); void pagination.reload(); }} />}
     {clearing && <ConfirmDialog title={clearing === "completed" ? "清除已完成的任务" : "清除失败的任务"}
       description={clearing === "completed" ? "从列表中移除所有已完成的任务，已保存的文件不受影响。" : "移除所有失败的任务并清理未完成的数据，已保存的文件不受影响。"}
@@ -320,6 +325,80 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       danger={confirm.action === "delete" || confirm.action === "restart"} confirmLabel={confirm.action === "delete" ? "删除任务" : confirm.action === "restart" ? "重新下载" : confirm.action === "resume" ? "重新发送" : "停止下载"}
       onClose={() => setConfirm(null)} onConfirm={() => control(confirm.task, confirm.action)} />}
   </>;
+}
+
+const DOWNLOAD_MODE: Record<NonNullable<api.DownloadDiagnosis["phase"]>, string> = {
+  starting: "准备中", http: "直链 · 连接中", parallel: "直链 · 多连接分段", single: "直链 · 单连接", fragmented: "直链 · 分片 MP4 转换", hls: "M3U8 · 分片预读", platform: "平台媒体",
+};
+const MIB = 1024 * 1024;
+const rangeTitle = (connection: api.DownloadConnection) => {
+  const match = /^(\d+)-(\d*)$/.exec(connection.range);
+  if (!match) return `连接 #${connection.id}`;
+  const start = Number(match[1]) / MIB, end = match[2] ? (Number(match[2]) + 1) / MIB : null;
+  return end != null ? `${start.toFixed(0)}–${end.toFixed(0)} MB` : `${start.toFixed(0)} MB 起`;
+};
+
+/** 看数据给出一句判断：来源首字节、存储写入、中途停顿、最近失败，再看是否只能单连接。 */
+function downloadVerdict(value: api.DownloadDiagnosis): DiagnosisVerdict {
+  const connections = value.connections ?? [], writes = value.writes ?? [];
+  const waiting = connections.filter(item => !item.first_byte && (item.wait ?? 0) > 10);
+  if (waiting.length) return { tone: "warning", title: "来源响应慢", detail: `${waiting.length} 个连接超过 10 秒还没收到第一个字节，来源服务器响应慢或在限制连接数；可以在「下载与资源」里减少单个任务的连接数试试。` };
+  const slowWrites = writes.filter(item => item.elapsed > 30);
+  if (slowWrites.length || writes.length && value.upload_slots.active >= value.upload_slots.limit) return { tone: "warning", title: "写入存储慢",
+    detail: `同时写入存储 ${value.upload_slots.active} / ${value.upload_slots.limit}，${writes.length} 个分段在等待或正在上传到存储（Telegram）。读完的分段要写完才会读下一段；可以调整「同时写入存储的分片数」与 Bot 发送间隔。` };
+  const stalled = connections.filter(item => item.first_byte && (item.idle ?? 0) > 20);
+  if (stalled.length) return { tone: "warning", title: "数据中途停住", detail: `${stalled.length} 个连接超过 20 秒没有收到新数据；连接超时后会自动重试这一段。` };
+  const failed = (value.recent ?? []).filter(item => item.phase === "failed");
+  if (failed.length) return { tone: "info", title: `最近有 ${failed.length} 个连接失败`, detail: `${failed[0].error || "连接中断"}；失败的分段会自动重试。` };
+  if (value.single && value.connections_limit > 1) return { tone: "info", title: "只能单连接下载", detail: "来源不支持按范围分段读取，这个任务改用 1 个连接从头下载。" };
+  return { tone: "success", title: "运行正常", detail: connections.length ? "各连接都在正常接收数据。" : "正在准备下一段或处理已下载的数据。" };
+}
+
+/** 运行中离线任务的来源连接与存储写入，每秒刷新；只有字节数、状态、范围与耗时。 */
+function DownloadDiagnosisDialog({ id, task, onClose }: { id: number; task: api.DownloadTask | null; onClose: () => void }) {
+  const [value, setValue] = useState<api.DownloadDiagnosis | null | undefined>(undefined);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    const read = () => void api.downloadDiagnosis(id).then(result => { if (alive) { setValue(result); setError(""); } },
+      reason => { if (alive) setError(api.errorMessage(reason, "读取诊断失败")); });
+    read();
+    const timer = window.setInterval(read, 1000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [id]);
+  const connections = value?.connections ?? [], writes = value?.writes ?? [];
+  const failures = (value?.recent ?? []).filter(item => item.phase === "failed");
+  return <Modal title="下载诊断" description={task ? downloadTaskName(task) : undefined} icon="info" size="lg" className={task?.private ? "private-dialog" : ""} onClose={onClose}
+    footer={<Button variant="ghost" onClick={onClose}>关闭</Button>}>
+    {error ? <Notice tone="danger">{error}</Notice> : value === undefined ? <SkeletonRows rows={3} /> : !value?.running ? <Notice tone="info">这个任务目前没有在运行（排队中、已停止或已经结束）。</Notice> : <div className="diagnosis">
+      <DiagnosisMetrics items={[
+        { label: "下载方式", value: DOWNLOAD_MODE[value.phase ?? "starting"], detail: `已运行 ${elapsedText(value.elapsed)}` },
+        { label: "来源连接", value: `${connections.length} / ${value.connections_limit}`, detail: `共 ${value.totals?.requests ?? 0} 次请求` },
+        { label: "写入存储", value: `${value.upload_slots.active} / ${value.upload_slots.limit}`, detail: `本任务已写 ${value.totals?.writes ?? 0} 段 · ${formatBytes(value.totals?.written ?? 0)}`,
+          tone: value.upload_slots.active >= value.upload_slots.limit ? "warning" : undefined },
+        { label: "失败连接", value: value.totals?.failed ?? 0, detail: failures[0]?.error || "—", tone: value.totals?.failed ? "danger" : "success" },
+      ]} />
+      <DiagnosisVerdictNotice verdict={downloadVerdict(value)} />
+      <DiagnosisSection title="来源连接" hint={task?.size ? `任务进度 ${formatBytes(task.received ?? 0)} / ${formatBytes(task.size)}` : undefined}>
+        {!connections.length ? <p className="muted">当前没有打开的来源连接。</p> : <ul className="diagnosis-list">{connections.map(item =>
+          <DiagnosisRow key={item.id} title={rangeTitle(item)} phase={item.phase === "connecting" ? "连接中" : "接收中"} tone={item.phase === "connecting" ? "warning" : "accent"}
+            size={item.size} received={item.received} meta={[
+              item.first_byte ? `首字节 ${elapsedText(item.wait)}` : `已等首字节 ${elapsedText(item.wait)}`,
+              item.first_byte && `最后收到 ${elapsedText(item.idle)}前`,
+              item.status && `HTTP ${item.status}`,
+              `已用 ${elapsedText(item.elapsed)}`,
+            ]} />)}</ul>}
+      </DiagnosisSection>
+      {writes.length > 0 && <DiagnosisSection title="正在写入存储的分段" hint="读完的分段排队上传到存储，写完才释放内存">
+        <ul className="diagnosis-list">{writes.map(item => <DiagnosisRow key={item.part} title={`第 ${item.part} 段`} phase="写入中" tone="accent" size={item.size} received={item.size}
+          meta={[`已用 ${elapsedText(item.elapsed)}`]} />)}</ul>
+      </DiagnosisSection>}
+      {failures.length > 0 && <DiagnosisSection title="最近失败的连接">
+        <ul className="diagnosis-list">{failures.slice(0, 4).map(item => <DiagnosisRow key={item.id} title={rangeTitle(item)} phase="失败" tone="danger" size={item.size} received={item.received}
+          meta={[item.status && `HTTP ${item.status}`, `持续 ${elapsedText(item.elapsed)}`]} error={item.error} />)}</ul>
+      </DiagnosisSection>}
+    </div>}
+  </Modal>;
 }
 
 /** 未完成且没有被删除的任务可以更改保存位置；排队、等待恢复、已停止或失败的还可以立即下载。 */

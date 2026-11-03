@@ -21,6 +21,7 @@ from ..crypto import derive_subkey, open_sealed, seal
 from ..errors import IntegrityError, NotFoundError, NotReadyError, QuotaExceededError
 from ..objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
 from ..work import WorkBusyError
+from . import diagnostics
 from .hls import load_playlist, remux
 from ..filekinds import served_type
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
@@ -130,6 +131,8 @@ class OfflineDownloads:
         self._runner = None
         self._running: dict[int, asyncio.Task] = {}
         self._stats: dict[int, dict] = {}
+        # 运行中任务的诊断记录（连接与写入，见 diagnostics.py）；任务结束即移除。
+        self._diagnoses: dict[int, diagnostics.TaskDiagnosis] = {}
         self._intents: dict[int, tuple[str, str | None]] = {}
         self._controls: dict[int, asyncio.Lock] = {}
         self._control_refs: dict[int, int] = {}
@@ -1101,6 +1104,11 @@ class OfflineDownloads:
             source = self._source(row)
             self._stats[task_id] = {"received": row["stored_bytes"] if row["kind"] == "http" else 0, "segments_done": 0,
                                    "processed_seconds": 0, "speed": 0, "tick": time.monotonic(), "last_bytes": row["stored_bytes"]}
+            recorder = diagnostics.TaskDiagnosis(task_id)
+            recorder.phase = "platform" if row["platform"] else "hls" if row["kind"] == "hls" else "http"
+            self._diagnoses[task_id] = recorder
+            # 之后创建的子任务（分段、双轨、分片预读）继承这个记录器；协程结束时上下文随之丢弃。
+            diagnostics.CURRENT.set(recorder)
             if row["platform"]:
                 await self._platform(row, scope, source)
             elif row["kind"] == "hls":
@@ -1132,6 +1140,7 @@ class OfflineDownloads:
             # 外部异常可能含 URL、签名或响应内容，不能直接返回或写日志。
             self._set(task_id, status="failed", error="下载或保存失败，请检查来源参数、存储通道与可用空间后重试")
         finally:
+            self._diagnoses.pop(task_id, None)
             stats = self._stats.pop(task_id, None)
             if stats:
                 self._set(task_id, **{key: stats[key] for key in ("received", "segments_done", "processed_seconds")})
@@ -1194,12 +1203,12 @@ class OfflineDownloads:
                 body, rest = joined[:PART_SIZE], joined[PART_SIZE:]
                 pieces, buffered = ([rest] if rest else []), len(rest)
                 del joined
-                await self.objects.upload_part(scope, upload_id, number, body, PART_SIZE, buffered=True)
+                await self._write_part(scope, upload_id, number, body, PART_SIZE)
                 del body
                 number, stored = number + 1, stored + PART_SIZE
                 self._set(row["id"], stored_bytes=stored)
         if pieces or stored == 0:
-            await self.objects.upload_part(scope, upload_id, number, pieces, buffered, buffered=True)
+            await self._write_part(scope, upload_id, number, pieces, buffered)
             stored += buffered
             self._set(row["id"], stored_bytes=stored)
         return stored
@@ -1229,7 +1238,7 @@ class OfflineDownloads:
             self._video_sizes[upload_id] = size
         first = header + b"".join(head)
         del head
-        await self.objects.upload_part(scope, upload_id, 1, first, len(first), buffered=True)
+        await self._write_part(scope, upload_id, 1, first, len(first))
         self._set(row["id"], stored_bytes=stored + len(first))
 
     async def _finish(self, row, scope, upload_id):
@@ -1250,6 +1259,37 @@ class OfflineDownloads:
             except Exception:  # noqa: BLE001 - 尺寸只用于播放器初始大小，记录失败时首次播放会补记
                 pass
         self._schedule_cover(row["id"])
+
+    @staticmethod
+    def _mode(mode):
+        if (recorder := diagnostics.CURRENT.get()) is not None:
+            recorder.phase = mode
+
+    async def _write_part(self, scope, upload_id, number, body, size):
+        """写入一个分段（已在内存中，只受上传名额约束），并登记到诊断记录。"""
+        recorder = diagnostics.CURRENT.get()
+        entry = recorder.write_started(number, size) if recorder is not None else None
+        failure = None
+        try:
+            return await self.objects.upload_part(scope, upload_id, number, body, size, buffered=True)
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            if entry is not None:
+                recorder.write_ended(entry, failure)
+
+    def diagnose(self, user_id: int, task_id: int) -> dict:
+        """「下载诊断」：运行中任务的来源连接与存储写入（只有字节数、状态、范围与时间，没有名称、地址或请求头）。"""
+        self.scope(user_id)
+        row = self._row(task_id, user_id)
+        recorder = self._diagnoses.get(task_id)
+        slots = self.objects.engine.upload_slots
+        result = {"running": recorder is not None, "status": row["status"], "connections_limit": self._connections(),
+                  "single": task_id in self._single, "upload_slots": {"active": slots._active, "limit": slots.limit}}
+        if recorder is not None:
+            result.update(recorder.snapshot())
+        return result
 
     def _connections(self) -> int:
         """单个任务的连接数（「下载与资源」的 download_connections）。"""
@@ -1317,7 +1357,7 @@ class OfflineDownloads:
             pieces.clear()
             length = len(body)
             self.check(row["user_id"], row["id"])
-            await self.objects.upload_part(scope, upload_id, number, body, length, buffered=True)
+            await self._write_part(scope, upload_id, number, body, length)
             del body
             stored += length
             self._set(row["id"], stored_bytes=stored)
@@ -1397,6 +1437,7 @@ class OfflineDownloads:
             size = state.get("size")
             if request.method == "GET" and state.get("etag") and size and self._parts_valid(parts, size):
                 self._stats[row["id"]].update(received=offset, last_bytes=offset)
+                self._mode("parallel")
                 await self._parallel(row, scope, upload_id, request, state, size)
                 state["eof"] = True
                 self._save_source(row["id"], source)
@@ -1460,6 +1501,7 @@ class OfflineDownloads:
                         self._progress(row["id"], bytes_in=len(piece))
                         received += len(piece)
                         yield piece
+                self._mode("fragmented")
                 await self._stage_video(row, scope, upload_id, counted())
                 if size is not None and received != size:
                     raise DownloadError("下载文件的实际长度与来源声明不一致，请重新下载")
@@ -1467,8 +1509,10 @@ class OfflineDownloads:
                 # 来源声明支持字节范围：多连接分段下载。先记下 ranges，中断后才知道要按分段补齐。
                 state["ranges"] = True
                 self._save_source(row["id"], source)
+                self._mode("parallel")
                 await self._parallel(row, scope, upload_id, request, state, size, first=stream)
             else:
+                self._mode("single")
                 stored = await self._stage(row, scope, upload_id, stream, offset=offset)
                 if size is not None and stored != size:
                     raise DownloadError("下载文件的实际长度与来源声明不一致，请重新下载")

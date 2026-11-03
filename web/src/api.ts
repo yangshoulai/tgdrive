@@ -50,7 +50,7 @@ export type RegistrationSettings = Pick<RegistrationConfig, "enabled" | "email_e
 export type RegistrationUpdate = Omit<RegistrationSettings, "smtp"> & { smtp: SmtpConfig; smtp_password?: string; clear_smtp_password?: boolean };
 export type Invitation = { id: number; code: string; status: "active" | "used" | "expired" | "revoked"; quota_bytes: number | null; expires_at: number; created_at: number; used_at?: number | null };
 export type InvitationPage = { invites: Invitation[]; total: number; next_cursor: number | null };
-export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number; thumbnail_concurrency: number; download_memory_percent: number; video_concurrency: number; thumbnail_cache_mib: number; download_connections: number };
+export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number; thumbnail_concurrency: number; download_memory_percent: number; video_concurrency: number; thumbnail_cache_mib: number; download_connections: number; diagnostics: boolean };
 export type ResourceSettings = { config: ResourceConfig; source: "admin" | "startup"; pressure: string | null;
   components: { versions: Record<string, string | null>; ytdlp_age_days: number | null };
   /** 生效档位：自动模式按检测到的 CPU 与内存选择 low 或 standard。 */
@@ -461,7 +461,16 @@ export type ThumbnailState = Pick<FileItem, "etag" | "size" | "modified_at" | "h
 export const thumbnailStatus = (paths: string[], signal?: AbortSignal) => request<{ files: Record<string, ThumbnailState> }>(fileApi("/thumbnail/status", paths[0]),
   { method: "POST", body: JSON.stringify({ paths }), signal });
 /** 网页上传并发：由管理员在「下载与资源」配置。 */
-export const uploadConfig = () => request<{ part_concurrency: number; file_concurrency: number }>("/api/user/v1/upload-config");
+export const uploadConfig = () => request<{ part_concurrency: number; file_concurrency: number; read_concurrency?: number; diagnostics?: boolean }>("/api/user/v1/upload-config");
+let diagnosticsFlag: { value: Promise<boolean>; at: number } | null = null;
+/** 管理员是否开放本机缓存与离线下载的诊断弹窗（「下载与资源」设置，默认开启）；1 分钟内复用结果。 */
+export function diagnosticsEnabled(): Promise<boolean> {
+  if (!diagnosticsFlag || Date.now() - diagnosticsFlag.at > 60_000) {
+    const value = uploadConfig().then(config => config.diagnostics !== false, () => false);
+    diagnosticsFlag = { value, at: Date.now() };
+  }
+  return diagnosticsFlag.value;
+}
 export const generateThumbnail = (file: Pick<FileItem, "key" | "etag">) => post<{ accepted: boolean }>(fileApi("/thumbnail/generate", file.key), { path: file.key, etag: file.etag });
 /** 自定义缩略图：读取用户填写的图片地址（由服务器经受控出站客户端读取，只返回受支持的图片）。 */
 export const fetchThumbnailImage = (file: Pick<FileItem, "key">, url: string, signal?: AbortSignal) =>
@@ -674,6 +683,15 @@ export const controlDownload = (id: number, action: "stop" | "resume" | "restart
 const downloadRoute = (privateTask: boolean) => `/api/user/v1${privateTask && privateAccess ? "/private" : ""}/downloads`;
 /** 「更新下载参数」回填用的完整链接与请求参数（仅任务所有者；私密任务需已解锁）。 */
 export const downloadSource = (id: number, privateTask = false) => request<DownloadSource>(`${downloadRoute(privateTask)}/${id}/source`);
+/** 下载诊断：运行中任务的来源连接与存储写入（见 offline/diagnostics.py）；时间都是距现在或持续的秒数。 */
+export type DownloadConnection = { id: number; range: string; phase: "connecting" | "receiving" | "done" | "failed" | "cancelled"; status: number | null;
+  received: number; size: number | null; elapsed: number; wait: number | null; first_byte: boolean; idle: number | null; error: string };
+export type DownloadWrite = { part: number; size: number; elapsed: number; done: boolean; error: string };
+export type DownloadDiagnosis = { running: boolean; status: DownloadStatus; connections_limit: number; single: boolean; upload_slots: { active: number; limit: number };
+  phase?: "starting" | "http" | "parallel" | "single" | "fragmented" | "hls" | "platform"; elapsed?: number;
+  totals?: { requests: number; failed: number; writes: number; written: number };
+  connections?: DownloadConnection[]; recent?: DownloadConnection[]; writes?: DownloadWrite[]; recent_writes?: DownloadWrite[] };
+export const downloadDiagnosis = (id: number) => request<DownloadDiagnosis>(`/api/user/v1/downloads/${id}/diagnose`);
 /** 停止账号下全部进行中的下载任务（含私密任务，停止不需要解锁）；任务记录和断点保留。 */
 export const stopAllDownloads = () => post<{ stopped: number }>("/api/user/v1/downloads/stop-all", {});
 export const batchDownloads = (action: "stop" | "resume" | "delete", ids: number[], privateTasks = false) =>

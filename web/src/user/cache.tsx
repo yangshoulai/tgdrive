@@ -4,11 +4,12 @@ import { diagnoseFileCache, type CacheDiagnosis, isCacheTaskGone, isFatalCacheEr
 import { BRAND } from "../brand";
 import { effectiveMiB } from "../cache-store";
 import { FileTile, getFileKind } from "../files";
-import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, Tabs, copyText, formatBytes, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
+import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, Tabs, copyText, formatBytes, formatDateTime, toast, useDocumentTitle, type MenuItem, type Tone } from "../ui";
 import { usePrivateAccess } from "./private-session";
 import { PrivateUnlockDialog } from "./private-unlock";
 import { LocationText, TaskControls, TaskListFooter, TaskStats, remainingText, useTaskList, useTransferRates, type TaskFilter, type TaskStat } from "./task-list";
 import { cacheFolderFiles } from "./cache-folders";
+import { DiagnosisMetrics, DiagnosisRow, DiagnosisSection, DiagnosisVerdictNotice, seconds, useDiagnosticsEnabled, type DiagnosisVerdict } from "./diagnosis";
 
 export type CacheReport = { state: "none" | "partial" | "auto" | "manual" | "caching"; percent?: number; blocked?: string };
 /** retrying：暂时失败后正在等待第几次自动重试（已缓存的块保留，从缺失处继续）。 */
@@ -698,6 +699,7 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
   const toggle = (filter: TaskFilter) => list.setFilter(list.filter === filter ? "" : filter);
   const [unlocking, setUnlocking] = useState(false);
   const [diagnosing, setDiagnosing] = useState<CacheJob | null>(null);
+  const diagnostics = useDiagnosticsEnabled();
   const closeUnlock = useCallback(() => setUnlocking(false), []);
   const hiddenPrivate = queue.privateReady ? 0 : jobs.filter(job => api.isPrivatePath(job.file.key)).length;
   return <>
@@ -707,7 +709,7 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
     {unlocking && <CacheUnlockDialog onClose={closeUnlock} />}
     <TaskStats label="缓存任务概览" progress={running.length ? { percent: total ? (total - left) / total * 100 : null, label: "进行中任务的总进度" } : null} items={[
       { key: "active", label: "进行中", icon: "monitor", tone: "accent", live: running.length + adding > 0, value: (running.length + adding).toLocaleString("zh-CN"),
-        detail: running.length ? speed > 0 ? `${formatBytes(speed)}/s · ${remainingText(left / speed)}` : `剩余 ${formatBytes(left)}` : adding ? "正在读取文件夹" : "多线程分段缓存，播放与预览优先",
+        detail: running.length ? speed >= MIN_RATE ? `${formatBytes(speed)}/s · ${remainingText(left / speed)}` : `剩余 ${formatBytes(left)}` : adding ? "正在读取文件夹" : "多线程分段缓存，播放与预览优先",
         selected: list.filter === "active", onSelect: () => toggle("active") },
       { key: "done", label: "已完成", icon: "checkCircle", tone: "success", value: list.counts.done.toLocaleString("zh-CN"), detail: "本次登录期间", selected: list.filter === "done", onSelect: () => toggle("done") },
       { key: "error", label: "失败", icon: "alert", tone: list.counts.error ? "danger" : "neutral", value: list.counts.error.toLocaleString("zh-CN"),
@@ -769,7 +771,7 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
                 {job.retrying ? "自动重试" : job.status === "queued" && job.waiting ? "等待中" : CACHE_LABEL[job.status]}</Badge></div>
               <div className="cell-actions" role="cell">{quick}<Menu label={`${name} 的更多操作`} items={[
                 ...(!hidden ? [{ label: "打开所在文件夹", icon: "folder" as const, onSelect: () => onOpenFolder(folder, secret) }] : []),
-                ...(running && !hidden ? [{ label: "查看缓存诊断", icon: "info" as const, onSelect: () => setDiagnosing(job) }] : []),
+                ...(running && !hidden && diagnostics ? [{ label: "查看缓存诊断", icon: "info" as const, onSelect: () => setDiagnosing(job) }] : []),
                 ...(job.status === "error" && !hidden ? [{ label: "复制失败原因", icon: "alert" as const, onSelect: () => void copyText(job.error, "失败原因已复制") }] : []),
                 { label: "清除文件的本机缓存", icon: "trash", danger: true, divider: true, disabled: hidden, onSelect: () => queue.remove(job.file) },
                 { label: "删除任务记录", icon: "x", danger: true, onSelect: () => setRemoving([job.id]) },
@@ -785,11 +787,28 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
   </>;
 }
 
-const SEGMENT_PHASE: Record<CacheDiagnosis["segments"][number]["phase"], string> = {
-  queued: "等浏览器空位", waiting: "等服务器开始返回", busy: "服务器繁忙，稍后重试", receiving: "接收数据", encrypting: "加密", writing: "写入本机存储",
+const SEGMENT_PHASE: Record<CacheDiagnosis["segments"][number]["phase"], [string, Tone]> = {
+  queued: ["等浏览器空位", "neutral"], waiting: ["等服务器返回", "warning"], busy: ["服务器繁忙", "warning"],
+  receiving: ["接收中", "accent"], encrypting: ["加密", "accent"], writing: ["写入本机", "accent"],
 };
-const ago = (now: number, at?: number) => at ? `${Math.max(0, Math.round((now - at) / 1000))} 秒前` : "—";
-const spent = (from?: number, to?: number) => from && to ? `${((to - from) / 1000).toFixed(1)} 秒` : "—";
+const ago = (now: number, at?: number) => at ? `${seconds(Math.max(0, (now - at) / 1000))}前` : "";
+
+/** 看数据给出一句判断：先查本机写入，再查服务器首字节与中途停顿，最后看浏览器通道是否占满。 */
+function cacheVerdict(value: CacheDiagnosis): DiagnosisVerdict {
+  const { now, segments } = value;
+  const writing = segments.filter(item => (item.phase === "writing" || item.phase === "encrypting") && now - (item.lastStored ?? item.firstByte ?? now) > 10_000);
+  if (writing.length) return { tone: "warning", title: "本机写入慢", detail: `${writing.length} 个分段的数据已收到，但超过 10 秒没能写入本机。请检查浏览器存储空间，或「本机缓存」设置里选择的本地文件夹是否可用。` };
+  const waits = segments.filter(item => item.requested && !item.firstByte).map(item => (now - item.requested!) / 1000);
+  const firsts = segments.filter(item => item.requested && item.firstByte).map(item => (item.firstByte! - item.requested!) / 1000);
+  const all = [...waits, ...firsts];
+  const average = all.length ? all.reduce((sum, item) => sum + item, 0) / all.length : 0;
+  if (average > 10) return { tone: "warning", title: "服务器开始返回慢", detail: `每段平均要等 ${seconds(average)}才收到第一个字节：服务器在排队读取名额，或正在从存储（Telegram）取数据。网络本身没有问题；同时缓存的文件少一些，单个文件会更快。` };
+  const stalled = segments.filter(item => item.lastData && now - item.lastData > 20_000);
+  if (stalled.length) return { tone: "warning", title: "数据中途停住", detail: `${stalled.length} 个分段超过 20 秒没有收到新数据，服务器或网络暂时没有继续发送；超过 3 分钟会自动重新请求。` };
+  if (segments.some(item => item.phase === "busy")) return { tone: "info", title: "服务器读取名额已满", detail: "服务器正忙（播放、预览或其他缓存占着读取名额），分段在原地等待，空出来后自动继续。" };
+  if (value.active >= value.limit && segments.some(item => item.phase === "queued")) return { tone: "info", title: "浏览器通道已占满", detail: `${value.limit} 路都在使用，${value.files} 个文件平分；排队的分段会在前面的读完后开始。` };
+  return { tone: "success", title: "运行正常", detail: segments.length ? "各分段都在正常接收和写入。" : "这一轮的分段已结束，正在准备下一轮。" };
+}
 
 /** 正在缓存的文件每个分段停在哪一步：区分网络慢、服务器没开始返回与本机写入卡住。每秒刷新。 */
 function CacheDiagnosisDialog({ job, onClose }: { job: CacheJob; onClose: () => void }) {
@@ -804,32 +823,34 @@ function CacheDiagnosisDialog({ job, onClose }: { job: CacheJob; onClose: () => 
   const now = value?.now ?? Date.now();
   return <Modal title="缓存诊断" description={nameOf(job.file)} icon="info" size="lg" className={api.isPrivatePath(job.file.key) ? "private-dialog" : ""} onClose={onClose}
     footer={<Button variant="ghost" onClick={onClose}>关闭</Button>}>
-    {value === undefined ? <SkeletonRows rows={3} /> : !value ? <Notice tone="info">这个文件目前没有在下载（可能在排队、自动重试的等待中，或已经结束）。</Notice> : <>
-      <KeyValue items={[
-        ["已缓存", `${formatBytes(job.bytes)} / ${formatBytes(job.size)}`],
-        ["浏览器回源通道", `${value.active} / ${value.limit} 路在用 · ${value.files} 个文件在缓存`],
-        ["最近的错误", value.lastError || job.error || "无"],
+    {value === undefined ? <SkeletonRows rows={3} /> : !value ? <Notice tone="info">这个文件目前没有在下载（可能在排队、自动重试的等待中，或已经结束）。</Notice> : <div className="diagnosis">
+      <DiagnosisMetrics items={[
+        { label: "已缓存", value: `${percentOf(job.bytes, job.size)}%`, detail: `${formatBytes(job.bytes)} / ${formatBytes(job.size)}` },
+        { label: "浏览器通道", value: `${value.active} / ${value.limit}`, detail: `${value.files} 个文件在缓存`, tone: value.active >= value.limit ? "warning" : undefined },
+        { label: "本文件分段", value: value.segments.length, detail: `接收中 ${value.segments.filter(item => item.firstByte).length} 段` },
+        { label: "最近的错误", value: value.lastError || job.error ? "有" : "无", detail: value.lastError || job.error || "—", tone: value.lastError || job.error ? "danger" : "success" },
       ]} />
-      {!value.segments.length ? <p className="muted">这一轮的分段都已结束，正在准备下一轮。</p>
-        : <div className="data-table cache-diagnosis-table" role="table" aria-label="正在下载的分段">
-          <div className="data-row data-head" role="row">
-            <span role="columnheader">分段</span><span role="columnheader">当前</span><span role="columnheader" className="cell-size">网络已收到</span>
-            <span role="columnheader" className="cell-size">已写入</span><span role="columnheader">首字节等待</span><span role="columnheader">最后收到数据</span><span role="columnheader">最后写入</span>
-          </div>
-          {value.segments.map(segment => <div key={segment.first} className="data-row" role="row">
-            <span role="cell">{segment.first}–{segment.last} MB</span>
-            <span role="cell">{SEGMENT_PHASE[segment.phase]}{segment.status ? ` · ${segment.status}` : ""}{segment.busyCount ? ` · 繁忙 ${segment.busyCount} 次` : ""}</span>
-            <span role="cell" className="cell-size">{formatBytes(segment.received)} / {formatBytes(segment.size)}</span>
-            <span role="cell" className="cell-size">{formatBytes(segment.stored)}</span>
-            <span role="cell">{segment.firstByte ? spent(segment.requested, segment.firstByte) : segment.requested ? `已等 ${spent(segment.requested, now)}` : "—"}</span>
-            <span role="cell">{ago(now, segment.lastData)}</span>
-            <span role="cell">{ago(now, segment.lastStored)}</span>
-          </div>)}
-        </div>}
-      <p className="muted">网络已收到持续增长而已写入不动：卡在本机写入；首字节等待很长：服务器在排队或从存储取数据；最后收到数据越来越久：服务器或网络没有继续发送。</p>
-    </>}
+      <DiagnosisVerdictNotice verdict={cacheVerdict(value)} />
+      <DiagnosisSection title="正在下载的分段" hint={<span className="diagnosis-legend"><span><i className="is-received" />已收到</span><span><i className="is-stored" />已写入本机</span></span>}>
+        {!value.segments.length ? <p className="muted">这一轮的分段都已结束，正在准备下一轮。</p>
+          : <ul className="diagnosis-list">{value.segments.map(segment => {
+            const [phase, tone] = SEGMENT_PHASE[segment.phase];
+            return <DiagnosisRow key={segment.first} title={`${segment.first}–${segment.last} MB`} phase={phase} tone={tone} size={segment.size}
+              received={segment.received} stored={segment.stored} meta={[
+                segment.firstByte ? `首字节 ${seconds((segment.firstByte - (segment.requested ?? segment.started)) / 1000)}` : segment.requested ? `已等首字节 ${seconds((now - segment.requested) / 1000)}` : `排队 ${seconds((now - segment.started) / 1000)}`,
+                segment.lastData && `最后收到 ${ago(now, segment.lastData)}`,
+                segment.lastStored && `最后写入 ${ago(now, segment.lastStored)}`,
+                segment.status && `HTTP ${segment.status}`,
+                segment.busyCount > 0 && `繁忙 ${segment.busyCount} 次`,
+              ]} />;
+          })}</ul>}
+      </DiagnosisSection>
+    </div>}
   </Modal>;
 }
+
+/** 低于 1 KB/s 时不显示速度与剩余时间：速度估算衰减到接近 0 时会算出几十亿秒的剩余时间。 */
+const MIN_RATE = 1024;
 
 function CacheProgress({ job, rate, hidden }: { job: CacheJob; rate: number; hidden: boolean }) {
   const [expanded, setExpanded] = useState(false);
@@ -843,7 +864,7 @@ function CacheProgress({ job, rate, hidden }: { job: CacheJob; rate: number; hid
   const detail = job.retrying ? `${hidden ? "连接中断" : job.error || "连接中断"}，正在第 ${job.retrying} 次自动重试，已缓存的部分会保留`
     : job.status === "queued" ? job.waiting ? "其他页面正在缓存，完成后自动开始" : `${formatBytes(job.bytes)} / ${formatBytes(job.size)} · 等待开始`
       : job.status === "paused" || job.status === "canceled" ? `${formatBytes(job.bytes)} / ${formatBytes(job.size)} · 已暂停，已缓存的部分会保留`
-        : [`${formatBytes(job.bytes)} / ${formatBytes(job.size)}`, rate > 0 && `${formatBytes(rate)}/s`, rate > 0 && remainingText(Math.max(0, job.size - job.bytes) / rate)].filter(Boolean).join(" · ");
+        : [`${formatBytes(job.bytes)} / ${formatBytes(job.size)}`, rate >= MIN_RATE ? `${formatBytes(rate)}/s` : "等待数据", rate >= MIN_RATE && remainingText(Math.max(0, job.size - job.bytes) / rate)].filter(Boolean).join(" · ");
   return <div className={`task-progress is-${job.retrying ? "interrupted" : job.status}`}>
     <div className="task-progress-bar"><Progress value={percent} tone={job.status === "active" && !job.retrying ? "accent" : "neutral"} label={`缓存进度`} /><span className="task-percent">{percent}%</span></div>
     <small title={detail}>{detail}</small>

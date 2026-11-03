@@ -25,7 +25,9 @@ type Source = { start: number; response: Response; controller: AbortController }
 type Background = { id: string; controller: AbortController; ready: Promise<void>; started: boolean; context: TierContext | null };
 const backgrounds = new Map<string, Background>();
 type Manual = { key: string; id: string; owner: string; route: Route; request: Request; controller: AbortController; opened?: Opened; running: boolean;
-  background?: Background; timer?: number; segments: Map<number, SegmentDiagnosis>; lastError?: string; noticed?: number };
+  background?: Background; timer?: number; segments: Map<number, SegmentDiagnosis>; lastError?: string; noticed?: number;
+  /** 正在进行的一轮分段下载；页面的每次 step 只等它最多 STEP_LIMIT，之后先回复进度，下一次 step 接着等同一轮。 */
+  round?: Promise<ReturnType<typeof fileCacheState>>; report?: (value: unknown) => void };
 /** 诊断：每个正在下载的分段停在哪一步。queued 等浏览器空位、waiting 等服务器开始返回、busy 服务器繁忙等待重试、
  *  receiving 接收网络数据、encrypting 加密、writing 写入本地存储。时间都是毫秒时间戳。 */
 type SegmentDiagnosis = { first: number; last: number; size: number; phase: "queued" | "waiting" | "busy" | "receiving" | "encrypting" | "writing";
@@ -706,7 +708,8 @@ async function startPrivateTask(owner: string, id: string, paths: string[], csrf
 
 async function getBackground(owner: string, id: string) {
   const background = backgrounds.get(`${owner}:${id}`);
-  if (!background) throw new Error("缓存任务已结束，请重新加入缓存");
+  // Worker 被浏览器重启或更新后，内存里的任务组没了：标记为已结束，页面用当前授权重新登记同一组后继续。
+  if (!background) throw new CacheTaskGone("缓存任务已结束（页面更新或浏览器回收了后台进程），正在重新登记");
   await background.ready;
   background.controller.signal.throwIfAborted();
   return background;
@@ -884,11 +887,40 @@ async function reserveQuota(keep: string, need: number) {
     throw new CacheFatal(`浏览器可用空间不足，还差约 ${sizeText(shortfall - freed)}。自动缓存已全部让出，请在「本机缓存」中清除部分手动缓存后重试`);
 }
 
+/* 浏览器只让一个 Service Worker 事件最多持续约 5 分钟，超时会直接终止 Worker（所有缓存任务的内存状态随之丢失，
+ * 页面看到的就是「没有响应」后「缓存任务已结束」）。网络慢时一轮分段可能要下好几分钟，所以一轮下载不绑在一次消息上：
+ * step 最多等 STEP_LIMIT 就回复当前进度，下一次 step 接着等同一轮；一轮失败的原因留给下一次 step 报告。 */
+const STEP_LIMIT = 60_000;
+const endedRounds = new Map<string, unknown>();
+
 async function stepManual(owner: string, id: string, progress: (value: unknown) => void) {
-  const job = manuals.get(`${owner}:${id}`);
-  if (!job || !job.opened) throw new Error("缓存任务已停止，请重试以继续缓存");
-  if (job.running) throw new Error("缓存任务正在写入");
-  job.running = true; renewManual(job);
+  const key = `${owner}:${id}`;
+  const job = manuals.get(key);
+  if (!job || !job.opened) {
+    if (endedRounds.has(key)) { const error = endedRounds.get(key); endedRounds.delete(key); throw error; }
+    throw new Error("缓存任务已停止，请重试以继续缓存");
+  }
+  renewManual(job);
+  job.report = progress;
+  if (!job.round) {
+    const round = job.round = roundManual(job, value => job.report?.(value));
+    round.catch(error => {
+      endedRounds.set(key, error);
+      setTimeout(() => { if (endedRounds.get(key) === error) endedRounds.delete(key); }, 5 * 60_000);
+    }).finally(() => { if (job.round === round) job.round = undefined; });
+  }
+  let timer: number | undefined;
+  const waited = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), STEP_LIMIT) as unknown as number; });
+  try {
+    const state = await Promise.race([job.round, waited]);
+    if (state) { endedRounds.delete(key); return state; }
+    return manualProgress(job, job.opened);
+  } finally { clearTimeout(timer); }
+}
+
+async function roundManual(job: Manual, progress: (value: unknown) => void) {
+  if (!job.opened) throw new Error("缓存任务已停止，请重试以继续缓存");
+  job.running = true;
   const abort = () => job.controller.abort();
   try {
     const value = await manualOpened(job.request.url, job.background);

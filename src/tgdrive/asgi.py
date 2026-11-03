@@ -1019,7 +1019,9 @@ class TgDriveASGI(StaticFiles):
                 # read_concurrency：每个账号同时读取的路数，本机缓存据此决定并行下载的段数。
                 return 200, {"part_concurrency": effective.get("web_part_concurrency", 4),
                              "file_concurrency": effective.get("web_file_concurrency", 2),
-                             "read_concurrency": effective.get("bucket_concurrency", 2)}, {"Cache-Control": "no-store"}
+                             "read_concurrency": effective.get("bucket_concurrency", 2),
+                             # diagnostics：管理员是否开放本机缓存与离线下载的诊断弹窗。
+                             "diagnostics": effective.get("diagnostics", True)}, {"Cache-Control": "no-store"}
             if route.startswith("/assistant/") and self.assistant is not None:
                 return await self._assistant_user(method, route[len("/assistant"):], query, payload, token, csrf,
                                                   origin=origin, ip=ip)
@@ -1053,6 +1055,11 @@ class TgDriveASGI(StaticFiles):
                 now = re.fullmatch(r"/downloads/(\d+)/now", route)
                 if now and method in ("GET", "POST"):
                     return 200, await self.offline.prioritize(account.id, int(now[1]), preview=method == "GET", private_scope=private_scope), {"Cache-Control": "no-store"}
+                diagnose = re.fullmatch(r"/downloads/(\d+)/diagnose", route)
+                if diagnose and method == "GET":
+                    if self.resources is not None and not self.resources.effective().get("diagnostics", True):
+                        raise ValueError("管理员已关闭下载诊断")
+                    return 200, self.offline.diagnose(account.id, int(diagnose[1])), {"Cache-Control": "no-store"}
                 source = re.fullmatch(r"/downloads/(\d+)/source", route)
                 if source and method == "GET":
                     return 200, self.offline.source(account.id, int(source[1]), private_scope=private_scope), {"Cache-Control": "no-store"}

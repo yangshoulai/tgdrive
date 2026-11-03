@@ -13,6 +13,7 @@ import zlib
 from contextlib import asynccontextmanager
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
+from . import diagnostics
 from .request import DownloadRequest, checked_url
 
 
@@ -181,8 +182,12 @@ class HttpResponse:
                 yield piece
 
     async def stream(self):
+        # 离线下载诊断：有记录器时按收到的字节登记（observe 由 SafeHttpClient.open 设置）。
+        observe = getattr(self, "observe", None)
         if self.encoding in ("", "identity"):
             async for piece in self._raw():
+                if observe:
+                    observe(len(piece))
                 yield piece
             return
         if self.encoding not in ("gzip", "deflate"):
@@ -190,6 +195,8 @@ class HttpResponse:
         decoder = zlib.decompressobj(31 if self.encoding == "gzip" else 15)
         try:
             async for piece in self._raw():
+                if observe:
+                    observe(len(piece))
                 pending = piece
                 while pending:
                     output = decoder.decompress(pending, 65536)
@@ -393,6 +400,9 @@ class SafeHttpClient:
         lowered = {key.lower() for key in additions}
         custom = [(key, value) for key, value in custom if key.lower() not in lowered] + list(additions.items())
         response, history = None, []
+        recorder = diagnostics.CURRENT.get()
+        connection = recorder.open(additions) if recorder is not None else None
+        failure: BaseException | None = None
         try:
             for _ in range(6):
                 if url_check:
@@ -400,6 +410,9 @@ class SafeHttpClient:
                 response = await self._connect(request, current, verb, body, custom)
                 if not redirects or response.status not in (301, 302, 303, 307, 308):
                     response.history = history
+                    if connection is not None:
+                        connection.response(response.status, response.length)
+                        response.observe = connection.data
                     yield response
                     return
                 if not request.follow_redirects:
@@ -420,10 +433,16 @@ class SafeHttpClient:
         except (OSError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, UnicodeError) as exc:
             if isinstance(exc, (UnicodeError, asyncio.LimitOverrunError)):
                 raise DownloadError("来源响应格式不正确") from exc
-            raise TransientError("来源连接中断，可以稍后重试") from exc
+            failure = TransientError("来源连接中断，可以稍后重试")
+            raise failure from exc
+        except BaseException as exc:
+            failure = exc
+            raise
         finally:
             if response is not None:
                 await self._close(response)
+            if connection is not None:
+                recorder.close(connection, failure)
 
     @staticmethod
     async def _close(response):

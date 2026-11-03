@@ -2707,8 +2707,37 @@ button.task-location:focus-visible { outline: 2px solid var(--accent); outline-o
 /* 列：选择 | 文件（名称与来源） | 进度 | 保存到 | 状态 | 操作。数字用等宽数字，进度条与说明同宽，行高随说明变化但不超过两行。 */
 .task-surface > .task-table { --cols: 20px minmax(220px, 1.4fr) minmax(170px, .85fr) minmax(180px, 1.25fr) 92px 64px; min-width: 880px; }
 .task-table .data-row:not(.data-head) { min-height: 60px; padding-block: 8px; }
-.cache-diagnosis-table { --cols: 72px minmax(120px, 1.2fr) 132px 72px 88px 88px 72px; margin-top: 16px; overflow-x: auto; border: 1px solid var(--line-soft); border-radius: var(--radius-lg); }
-.cache-diagnosis-table .data-row { gap: 12px; padding: 8px 12px; font-size: var(--text-xs); }
+/* 诊断弹窗（本机缓存与离线下载共用，见 user/diagnosis.tsx） */
+.diagnosis { display: grid; gap: 16px; }
+.diagnosis-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.diagnosis-metric { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--surface-sunken); min-width: 0; }
+.diagnosis-metric-label { color: var(--ink-3); font-size: var(--text-xs); }
+.diagnosis-metric-value { font-size: var(--text-lg); font-variant-numeric: tabular-nums; line-height: 1.3; overflow-wrap: anywhere; }
+.diagnosis-metric small { color: var(--ink-3); font-size: var(--text-xs); }
+.diagnosis-metric.is-warning { border-color: var(--warning); background: var(--warning-soft); }
+.diagnosis-metric.is-danger { border-color: var(--danger); background: var(--danger-soft); }
+.diagnosis-metric.is-success .diagnosis-metric-value { color: var(--success); }
+.diagnosis-verdict .notice-body { display: grid; gap: 2px; }
+.diagnosis-section { display: grid; gap: 8px; }
+.diagnosis-section > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.diagnosis-section h3 { margin: 0; font-size: var(--text-sm); font-weight: 600; }
+.diagnosis-section > header span { color: var(--ink-3); font-size: var(--text-xs); }
+.diagnosis-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; max-height: 360px; overflow-y: auto; }
+.diagnosis-row { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--surface); }
+.diagnosis-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.diagnosis-row-title { font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.diagnosis-row-bytes { margin-left: auto; color: var(--ink-2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.diagnosis-bar { position: relative; height: 6px; overflow: hidden; border-radius: var(--radius-pill); background: var(--line-soft); }
+.diagnosis-bar > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; transition: width var(--duration-base) ease-out; }
+.diagnosis-bar-received { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.diagnosis-bar-stored { background: var(--accent); }
+.diagnosis-bar.is-unknown .diagnosis-bar-received { opacity: .6; }
+.diagnosis-row-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--ink-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.diagnosis-row-error { margin: 0; color: var(--danger); font-size: var(--text-xs); }
+.diagnosis-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--ink-3); font-size: var(--text-xs); }
+.diagnosis-legend i { display: inline-block; width: 12px; height: 6px; margin-right: 4px; border-radius: var(--radius-pill); vertical-align: middle; }
+.diagnosis-legend .is-received { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.diagnosis-legend .is-stored { background: var(--accent); }
 .task-table .cell-name { gap: 12px; }
 .task-subline { overflow: hidden; color: var(--ink-3); text-overflow: ellipsis; white-space: nowrap; }
 .task-progress { display: grid; gap: 4px; min-width: 0; font-variant-numeric: tabular-nums; }

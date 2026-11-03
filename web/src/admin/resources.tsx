@@ -54,6 +54,7 @@ export function Resources() {
           <Switch checked={form.hls_enabled} onChange={value => set("hls_enabled", value)} label="允许下载 M3U8 视频" description="已结束、未加密的连续 TS 点播视频，保存为 MP4。需要 FFmpeg。" />
           <Switch checked={form.x_enabled} onChange={value => set("x_enabled", value)} label="允许下载 X 帖子媒体" description="解析单条帖子中的图片与视频，按文件勾选下载。" />
           <Switch checked={form.youtube_enabled} onChange={value => set("youtube_enabled", value)} label="允许下载 YouTube 视频" description="单个视频和 Shorts，选择可用的 MP4 清晰度，合并时不转码。" />
+          <Switch checked={form.diagnostics} onChange={value => set("diagnostics", value)} label="允许查看下载与缓存诊断" description="用户可在离线下载与本机缓存的任务菜单中打开诊断，查看每个连接所处的阶段、收到的字节与耗时；不含文件名、地址和内容。" />
         </div>
         {(form.x_enabled && !effective.x_available || form.youtube_enabled && !effective.youtube_available) && <Notice tone="warning">平台下载需要带解析组件的镜像；YouTube 还需要 JavaScript 运行时和 FFmpeg，安装后重启生效。</Notice>}
         {form.hls_enabled && !effective.hls_available && <Notice tone="warning">未检测到 FFmpeg。使用带 FFmpeg 的镜像并重启后才能下载 M3U8。</Notice>}
