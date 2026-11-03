@@ -9,7 +9,7 @@ const TIERS: Record<api.ResourceSettings["effective"]["mode"], string> = { low: 
 const MODE_HINTS: Record<api.ResourceConfig["mode"], string> = {
   auto: "按检测到的 CPU 和内存在「标准」与「低资源」之间选择，适合大多数部署。",
   low: "内存达到 512 MiB 时：离线下载 2 个任务，读取最多 8 路（每个账号可以全部使用），写入与网页分段最多 8 路，并按内存的三分之一收紧。更小或无法检测内存时最多 3 路、离线下载 1 个任务。",
-  custom: "自己决定同时下载的任务数；容器预算不足时实际并发仍会降低。",
+  custom: "自己决定同时下载的任务数（1–16）；内存 1 GiB 以上按每个任务约 128 MB、最多占内存一半封顶，更小的机器最多 2–4 个。",
 };
 const rate = (kib: number) => kib ? `${kib.toLocaleString("zh-CN")} KiB/s` : "不限速";
 
@@ -44,7 +44,7 @@ export function Resources() {
         <Field label="资源模式" hint={MODE_HINTS[form.mode]}>
           <select className="input" value={form.mode} onChange={event => set("mode", event.target.value as api.ResourceConfig["mode"])}>{Object.entries(MODES).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select>
         </Field>
-        {form.mode === "custom" && <Field label="同时下载的任务数" hint="1–4 个；视频封装始终最多 1 个。"><input className="input" type="number" min={1} max={4} step={1} required value={form.concurrency} onChange={number("concurrency")} /></Field>}
+        {form.mode === "custom" && <Field label="同时下载的任务数" hint="1–16 个，按内存封顶（每个任务约 128 MB，最多占内存一半）；视频封装始终最多 1 个。"><input className="input" type="number" min={1} max={16} step={1} required value={form.concurrency} onChange={number("concurrency")} /></Field>}
         <Field label="下载限速（KiB/s）" hint="所有离线下载共用；0 表示不限速。"><input className="input" type="number" min={0} max={1048576} step={1} required value={form.bandwidth_kib} onChange={number("bandwidth_kib")} /></Field>
         <Field label="出站代理" hint="离线下载和平台解析都经此代理，留空为直连。支持 http:// 与 socks5://，密码保存后以 ****** 显示。">
           <input className="input mono" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="http://127.0.0.1:7890" value={form.proxy} onChange={event => set("proxy", event.target.value)} />
@@ -59,8 +59,8 @@ export function Resources() {
         {form.hls_enabled && !effective.hls_available && <Notice tone="warning">未检测到 FFmpeg。使用带 FFmpeg 的镜像并重启后才能下载 M3U8。</Notice>}
         <Disclosure title="高级参数" description="读写并发、上传限速、Bot 发送间隔、网页上传分段与平台缓存。默认值适合大多数部署。">
           <div className="form-row">
-            <Field label="服务器同时读取数" hint="下载、预览、播放与 S3 读取共用，1–16。每路约占 24 MB 内存。">
-              <input className="input" type="number" min={1} max={16} step={1} required value={form.transfer_concurrency}
+            <Field label="服务器同时读取数" hint="下载、预览、播放与 S3 读取共用，1–32。每路约占 24 MB 内存，最多占内存三分之一。">
+              <input className="input" type="number" min={1} max={32} step={1} required value={form.transfer_concurrency}
                 onChange={event => { const value = Number(event.target.value); setForm({ ...form, transfer_concurrency: value, bucket_concurrency: Math.min(form.bucket_concurrency, Math.max(1, value)) }); }} />
             </Field>
             <Field label="每个账号同时读取数" hint="单个账号最多占用的读取数，不超过服务器总数。本机缓存最多用其中「总数减一」路，留一路给播放与预览。">
@@ -68,12 +68,15 @@ export function Resources() {
             </Field>
           </div>
           <div className="form-row">
-            <Field label="同时写入存储的分片数" hint="所有上传共用，1–16。每个分片 16 MB，约占 32 MB 内存。"><input className="input" type="number" min={1} max={16} step={1} required value={form.upload_concurrency} onChange={number("upload_concurrency")} /></Field>
+            <Field label="同时写入存储的分片数" hint="所有上传共用，1–32。每个分片 16 MB，约占 32 MB 内存，最多占内存三分之一。"><input className="input" type="number" min={1} max={32} step={1} required value={form.upload_concurrency} onChange={number("upload_concurrency")} /></Field>
             <Field label="上传限速（KiB/s）" hint="写入存储的平均速率，所有上传共用；0 表示不限速。"><input className="input" type="number" min={0} max={1048576} step={1} required value={form.upload_kib} onChange={number("upload_kib")} /></Field>
           </div>
           <div className="form-row">
-            <Field label="网页单个文件的分段并发" hint="大于 64 MB 的文件分段上传时同时发送的分段数，1–8。"><input className="input" type="number" min={1} max={8} step={1} required value={form.web_part_concurrency} onChange={number("web_part_concurrency")} /></Field>
-            <Field label="网页同时上传的文件数" hint="1–4；网页开始上传时读取，最长 1 分钟后生效。"><input className="input" type="number" min={1} max={4} step={1} required value={form.web_file_concurrency} onChange={number("web_file_concurrency")} /></Field>
+            <Field label="网页单个文件的分段并发" hint="大于 64 MB 的文件分段上传时同时发送的分段数，1–16。"><input className="input" type="number" min={1} max={16} step={1} required value={form.web_part_concurrency} onChange={number("web_part_concurrency")} /></Field>
+            <Field label="网页同时上传的文件数" hint="1–8；网页开始上传时读取，最长 1 分钟后生效。"><input className="input" type="number" min={1} max={8} step={1} required value={form.web_file_concurrency} onChange={number("web_file_concurrency")} /></Field>
+          </div>
+          <div className="form-row">
+            <Field label="缩略图读取并发" hint="网格封面、预览封面等缩略图从存储读取的同时数，所有用户共用，1–32，默认 16。不占文件读取名额，每路不到 1 MB 内存；过高可能触发 Telegram 限流。"><input className="input" type="number" min={1} max={32} step={1} required value={form.thumbnail_concurrency} onChange={number("thumbnail_concurrency")} /></Field>
           </div>
           <div className="form-row">
             <Field label="每个 Bot 的发送间隔（毫秒）" hint="0–10000。过短容易被 Telegram 限流，限流后会自动退避。"><input className="input" type="number" min={0} max={10000} step={100} required value={form.bot_interval_ms} onChange={number("bot_interval_ms")} /></Field>
@@ -95,10 +98,11 @@ export function Resources() {
         ["文件读取", `服务器 ${effective.transfer_concurrency} 路 · 每个账号 ${effective.bucket_concurrency} 路`],
         ["写入存储", `${effective.upload_concurrency} 个分片 · ${rate(effective.upload_kib)}`],
         ["网页上传", `每个文件 ${effective.web_part_concurrency} 段 · 同时 ${effective.web_file_concurrency} 个文件`],
+        ["缩略图读取", `${effective.thumbnail_concurrency} 路`],
         ["出站代理", effective.proxy || "直连"],
         ["视频组件", `FFmpeg ${component(effective.hls_available)} · X ${component(effective.x_available)} · YouTube ${effective.youtube_available ? "可用" : "组件不完整"}`],
       ]} />
-      {effective.reduced && <Notice tone="warning">资源预算不足，离线下载并发已降低。</Notice>}
+      {effective.reduced && <Notice tone="warning">资源预算不足，离线下载并发已按检测到的内存降低为 {effective.concurrency} 个。</Notice>}
       {effective.upload_reduced && <Notice tone="warning">上传并发已按{effective.mode === "low" ? "低资源档与内存预算" : "检测到的内存"}降低为写入 {effective.upload_concurrency} 个分片、网页每个文件 {effective.web_part_concurrency} 段。</Notice>}
       {effective.transfer_reduced && <Notice tone="warning">文件读取并发已按{effective.mode === "low" ? "低资源档与内存预算" : "检测到的内存"}降低为服务器 {effective.transfer_concurrency} 路、每个账号 {effective.bucket_concurrency} 路。</Notice>}
       {settings.pressure && <Notice tone="warning">{settings.pressure}</Notice>}

@@ -50,7 +50,7 @@ export type RegistrationSettings = Pick<RegistrationConfig, "enabled" | "email_e
 export type RegistrationUpdate = Omit<RegistrationSettings, "smtp"> & { smtp: SmtpConfig; smtp_password?: string; clear_smtp_password?: boolean };
 export type Invitation = { id: number; code: string; status: "active" | "used" | "expired" | "revoked"; quota_bytes: number | null; expires_at: number; created_at: number; used_at?: number | null };
 export type InvitationPage = { invites: Invitation[]; total: number; next_cursor: number | null };
-export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number };
+export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number; thumbnail_concurrency: number };
 export type ResourceSettings = { config: ResourceConfig; source: "admin" | "startup"; pressure: string | null;
   components: { versions: Record<string, string | null>; ytdlp_age_days: number | null };
   /** 生效档位：自动模式按检测到的 CPU 与内存选择 low 或 standard。 */

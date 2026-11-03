@@ -3,7 +3,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEven
 import { useDirectory, useRenderLimit, mergePublicFolderPages } from "./pagination";
 import { BRAND } from "./brand";
 import * as api from "./api";
-import { FileFilters, FilePreview, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderThumbnail, PreviewModal, SortHeader, canPreview, getFileKind, kindLabel, type EntryFilter, type FileSort } from "./files";
+import { FileFilters, FilePreview, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderThumbnail, loadedPlaceholder, PreviewModal, SortHeader, canPreview, getFileKind, kindLabel, type EntryFilter, type FileSort } from "./files";
 import { Notice, ButtonLink, Avatar, Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, SearchInput, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
 import { LoginPage } from "./shell";
 import { FolderPicker } from "./user/folders";
@@ -400,7 +400,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                   const openFile = () => canPreview(kind) ? setPreview(item) : window.location.assign(download);
                   return <div key={item.path} className={`grid-card${selected.has(item.path) ? " is-selected" : ""}`} onClick={openFile}>
                     <div className="grid-thumb"><FileThumbnail kind={kind} url={item.thumbnails?.includes("thumb") ? api.publicThumbnail(content, "grid") : undefined}
-                      placeholder={item.thumbnails?.includes("thumb") ? api.publicThumbnail(content) : undefined} />
+                      placeholder={item.thumbnails?.includes("thumb") ? loadedPlaceholder(api.publicThumbnail(content)) : undefined} />
                       <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${item.name}`} checked={selected.has(item.path)} onChange={checked => selectFiles([item.path], checked)} /></span>
                     </div>
                     <div className="grid-meta">

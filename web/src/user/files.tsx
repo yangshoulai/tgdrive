@@ -8,7 +8,7 @@ import { cacheFileId, type CacheFile } from "../cache-client";
 import { FolderStatsDialog } from "./folder-stats";
 import { ThumbnailEditor } from "./thumbnail-editor";
 import { ExtractDialog, isArchive } from "./extract";
-import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type CacheFilter, type EntryFilter, type FileSort } from "../files";
+import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, loadedPlaceholder, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type CacheFilter, type EntryFilter, type FileSort } from "../files";
 import { generateLoadedThumbnails, saveCurrentVideoThumbnail, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, videoFrameUsable } from "../thumbnails";
 
 import { Notice, ButtonLink, Badge, Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
@@ -761,7 +761,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                     <div key={entry.key} className={`grid-card${isSelected ? " is-selected" : ""}${cursorClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} onClick={() => openPreview(entry.file)}>
                       <div className="grid-thumb">
                         {/* 缩略图尚未生成时一直显示类型图标，不在文件列表中拉取原图。 */}
-                        <FileThumbnail kind={kind} url={api.fileThumbnail(entry.file, "grid")} placeholder={api.fileThumbnail(entry.file)} />
+                        <FileThumbnail kind={kind} url={api.fileThumbnail(entry.file, "grid")} placeholder={loadedPlaceholder(api.fileThumbnail(entry.file))} />
                         {!api.fileThumbnail(entry.file) && extension && !LABELLED_KINDS.has(kind) && <span className="grid-extension" aria-hidden="true">{extension}</span>}
                         <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                         {entry.file.public_token && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}

@@ -33,7 +33,8 @@ from .thumbnail_cache import ThumbnailCacheMiss
 from .work import Limiter, RateLimiter, TransferSlots, WorkBusyError
 
 # 小对象读取通道：并发数、单个对象上限与排队等待时间。
-SMALL_READ_CONCURRENCY = 8
+# 缩略图大图的独立读取通道默认并发；实际值由「下载与资源」的 thumbnail_concurrency 设置（app.apply_resources）。
+SMALL_READ_CONCURRENCY = 16
 SMALL_READ_LIMIT = 1024 * 1024
 SMALL_READ_WAIT = 60
 
@@ -68,7 +69,7 @@ class BlobEngine:
         self.fingerprint_block = BLOCK_SIZE
         self.transfers = TransferSlots(transfer_concurrency, bucket_concurrency)
         # 缩略图大图等小对象的独立读取通道：网格视图会一次请求几十张，不能和下载、预览争抢传输名额。
-        self.small_reads = asyncio.Semaphore(SMALL_READ_CONCURRENCY)
+        self.small_reads = Limiter(SMALL_READ_CONCURRENCY)
         # 全局写入存储（Telegram 发送）的分片数与平均速率，由「下载与资源」配置随时调整。
         # 每个在途分片约占明文加密文两份内存（约 32 MB）。
         self.upload_slots = Limiter(4)
@@ -327,15 +328,16 @@ class BlobEngine:
         record = self.metadata.get_blob(blob_uuid)
         if record.size is not None and record.size > limit:
             raise ValueError("object is too large for a small read")
+        slot = self.small_reads.slot()
         try:
             async with asyncio.timeout(SMALL_READ_WAIT):
-                await self.small_reads.acquire()
+                await slot.__aenter__()
         except TimeoutError as exc:
             raise WorkBusyError("传输繁忙，请稍后重试") from exc
         try:
             parts = [part async for part in self._stream(blob_uuid)]
         finally:
-            self.small_reads.release()
+            await slot.__aexit__(None, None, None)
         return b"".join(parts)
 
     async def read(self, blob_uuid: str, start: int = 0, end: int | None = None) -> bytes:

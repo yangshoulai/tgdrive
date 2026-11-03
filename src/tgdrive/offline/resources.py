@@ -21,11 +21,14 @@ DEFAULTS = {"mode": "auto", "concurrency": 1, "bandwidth_kib": 0,
             "youtube_max_height": 2160, "platform_max_mib": 512, "proxy": "",
             "transfer_concurrency": 8, "bucket_concurrency": 6,
             "upload_concurrency": 4, "upload_kib": 0, "bot_interval_ms": 1000,
-            "web_part_concurrency": 4, "web_file_concurrency": 2}
+            "web_part_concurrency": 4, "web_file_concurrency": 2, "thumbnail_concurrency": 16}
 # 写入存储（Telegram 发送）的每个在途分片约占明文与密文两份内存。
 UPLOAD_MEMORY = 32 * MIB
 # 文件读取并发（下载、预览、播放、本机缓存、S3 读取共用）：每路约占 (预读窗口数 + 1) × 8 MB 内存。
 TRANSFER_MEMORY = 24 * MIB
+# 每个离线下载任务按约 128 MB 估算（分段缓冲、加密副本与来源读取），任务总数最多占检测内存的一半。
+DOWNLOAD_MEMORY = 128 * MIB
+DOWNLOAD_MAX = 16
 # 1.38 之前的读取并发默认值；仍保存着这组值的配置在升级后改用新默认值（见 ResourceSettings.config）。
 LEGACY_READ_DEFAULTS = (4, 2)
 MASK = "******"
@@ -136,9 +139,9 @@ class ResourceSettings:
             merged["mode"] = "auto"
         if merged["mode"] not in ("auto", "low", "custom"):
             raise ValueError("资源模式不正确")
-        for key, low, high in (("concurrency", 1, 4), ("bandwidth_kib", 0, 1048576), ("reserve_mib", 128, 1048576)):
+        for key, low, high in (("concurrency", 1, DOWNLOAD_MAX), ("bandwidth_kib", 0, 1048576), ("reserve_mib", 128, 1048576)):
             if type(merged[key]) is not int or not low <= merged[key] <= high:
-                raise ValueError("并发须为 1–4，限速须非负，磁盘保留空间至少为 128 MiB")
+                raise ValueError(f"并发须为 1–{DOWNLOAD_MAX}，限速须非负，磁盘保留空间至少为 128 MiB")
         for key in ("hls_enabled", "x_enabled", "youtube_enabled"):
             if type(merged[key]) is not bool:
                 raise ValueError("下载能力开关必须为布尔值")
@@ -146,16 +149,17 @@ class ResourceSettings:
             raise ValueError("YouTube 清晰度上限不正确")
         if type(merged["platform_max_mib"]) is not int or not 16 <= merged["platform_max_mib"] <= 8192:
             raise ValueError("平台临时缓存预算须为 16–8192 MiB")
-        for key, high in (("transfer_concurrency", 16), ("bucket_concurrency", 16)):
+        for key, high in (("transfer_concurrency", 32), ("bucket_concurrency", 32)):
             if type(merged[key]) is not int or not 1 <= merged[key] <= high:
-                raise ValueError("文件读取并发须为 1–16")
+                raise ValueError("文件读取并发须为 1–32")
         if merged["bucket_concurrency"] > merged["transfer_concurrency"]:
             raise ValueError("每个账号的读取并发不能超过服务器总数")
-        for key, low, high, message in (("upload_concurrency", 1, 16, "同时写入存储的分片数须为 1–16"),
+        for key, low, high, message in (("upload_concurrency", 1, 32, "同时写入存储的分片数须为 1–32"),
                                         ("upload_kib", 0, 1048576, "上传限速须为 0–1048576 KiB/s"),
                                         ("bot_interval_ms", 0, 10000, "Bot 发送间隔须为 0–10000 毫秒"),
-                                        ("web_part_concurrency", 1, 8, "网页单个文件的分段并发须为 1–8"),
-                                        ("web_file_concurrency", 1, 4, "网页同时上传的文件数须为 1–4")):
+                                        ("web_part_concurrency", 1, 16, "网页单个文件的分段并发须为 1–16"),
+                                        ("web_file_concurrency", 1, 8, "网页同时上传的文件数须为 1–8"),
+                                        ("thumbnail_concurrency", 1, 32, "缩略图读取并发须为 1–32")):
             if type(merged[key]) is not int or not low <= merged[key] <= high:
                 raise ValueError(message)
         if not isinstance(merged["proxy"], str):
@@ -189,7 +193,8 @@ class ResourceSettings:
         # 「自动」档默认取其中较稳妥的值（最多 3 个），管理员选「自定义」可以用满上限。
         low_ceiling = (4 if memory >= 640 * MIB else 3 if roomy else 2) if memory else 1
         desired = config["concurrency"] if mode == "custom" else min(3, low_ceiling) if mode == "low" else 2
-        ceiling = low_ceiling if low else min(4, max(1, int(memory / (256 * MIB)) - 2))
+        # 内存 1 GiB 以上：按每个任务约 128 MB、最多占内存一半封顶（2 GiB 8 个、4 GiB 起 16 个）。
+        ceiling = low_ceiling if low else min(DOWNLOAD_MAX, max(1, memory // 2 // DOWNLOAD_MEMORY))
         platform_limit = min(config["platform_max_mib"], 512) if low or mode == "low" else config["platform_max_mib"]
         low_parallel = 8 if roomy else 3
         # 文件读取每路约 24 MB，最多占检测内存的三分之一；每个账号可以用满全部读取名额（低资源档不再减半）。
@@ -207,9 +212,11 @@ class ResourceSettings:
             upload = min(upload, low_parallel)
         upload = min(upload, upload_budget)
         web_parts = min(config["web_part_concurrency"], low_parallel, upload_budget) if mode == "low" else config["web_part_concurrency"]
+        # 缩略图每路读取不到 1 MB，只在内存很小或未知的低资源机器上收紧。
+        thumbnails = min(config["thumbnail_concurrency"], low_parallel) if mode == "low" and not roomy else config["thumbnail_concurrency"]
         return {**config, "mode": mode, "concurrency": min(desired, ceiling), "ffmpeg_concurrency": 1,
                 "transfer_concurrency": transfer, "bucket_concurrency": bucket,
-                "upload_concurrency": upload, "web_part_concurrency": web_parts,
+                "upload_concurrency": upload, "web_part_concurrency": web_parts, "thumbnail_concurrency": thumbnails,
                 "upload_reduced": (upload, web_parts) != (config["upload_concurrency"], config["web_part_concurrency"]),
                 "transfer_reduced": (transfer, bucket) != (config["transfer_concurrency"], config["bucket_concurrency"]),
                 "streaming": True, "cache_mib": platform_limit if config["youtube_enabled"] else 0,

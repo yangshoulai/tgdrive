@@ -67,6 +67,23 @@ class ResourceBudgetTests(unittest.TestCase):
         self.assertEqual(self.parallel(custom), (7, 3, 5, 6))
 
 
+    def test_raised_limits_and_memory_ceiling_for_offline_tasks(self):
+        # 1 GiB 以上的机器：离线下载按每个任务约 128 MB、最多占内存一半封顶，最多 16 个。
+        for memory, expected in ((1024, 4), (2048, 8), (4096, 16), (16384, 16)):
+            with self.subTest(memory=memory):
+                self.assertEqual(self.effective(memory=memory * MIB, cpu=4, mode="custom", concurrency=16)["concurrency"], expected)
+        self.assertTrue(self.effective(memory=2048 * MIB, cpu=4, mode="custom", concurrency=16)["reduced"])
+        raised = self.effective(memory=16384 * MIB, cpu=8, mode="custom", transfer_concurrency=32, bucket_concurrency=32,
+                                upload_concurrency=32, web_part_concurrency=16, web_file_concurrency=8, thumbnail_concurrency=32)
+        self.assertEqual(self.parallel(raised), (32, 32, 32, 16))
+        self.assertEqual((raised["web_file_concurrency"], raised["thumbnail_concurrency"]), (8, 32))
+
+    def test_thumbnail_concurrency_defaults_and_small_machines(self):
+        self.assertEqual(self.effective(memory=8192 * MIB, cpu=4)["thumbnail_concurrency"], 16)
+        self.assertEqual(self.effective()["thumbnail_concurrency"], 16, "512 MiB 以上的低资源机器不收紧")
+        self.assertEqual(self.effective(memory=256 * MIB)["thumbnail_concurrency"], 3, "内存很小时按低资源档收紧")
+
+
 class LimiterTests(unittest.IsolatedAsyncioTestCase):
     async def test_limiter_caps_concurrency_and_accepts_new_limit(self):
         limiter, active, peak = Limiter(2), 0, 0
@@ -153,8 +170,8 @@ class SettingsTests(unittest.TestCase):
         resources.update({"mode": "custom"})
         resources.detected.update(memory_bytes=512 * 1024 ** 2)
         self.assertEqual(resources.effective()["upload_concurrency"], 5, "每个分片约 32 MB，最多占内存的三分之一")
-        for bad in ({"upload_concurrency": 0}, {"upload_kib": -1}, {"bot_interval_ms": 10001}, {"web_part_concurrency": 9},
-                    {"web_file_concurrency": 5}, {"upload_kib": 1.5}):
+        for bad in ({"upload_concurrency": 0}, {"upload_kib": -1}, {"bot_interval_ms": 10001}, {"web_part_concurrency": 17},
+                    {"web_file_concurrency": 9}, {"upload_kib": 1.5}):
             with self.assertRaises(ValueError):
                 resources.update(bad)
 

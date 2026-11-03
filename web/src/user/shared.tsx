@@ -4,7 +4,7 @@ import { BRAND } from "../brand";
 import * as api from "../api";
 import { usePreview } from "./preview-host";
 
-import { FileFilters, FileThumbnail, FileVisual, FolderThumbnail, baseName, getFileKind, kindLabel, matchesKindFilter, parentPath, type EntryFilter } from "../files";
+import { FileFilters, FileThumbnail, FileVisual, loadedPlaceholder, FolderThumbnail, baseName, getFileKind, kindLabel, matchesKindFilter, parentPath, type EntryFilter } from "../files";
 
 import { Badge, Button, ConfirmDialog, EmptyState, Icon, IconButton, Menu, PageHeader, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type MenuItem } from "../ui";
 
@@ -103,7 +103,7 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                       <div className="grid-thumb">
                         {folder ? <FolderThumbnail previews={(pagination.page?.folder_previews?.[file.key] ?? []).flatMap(item => {
                           const url = api.fileThumbnail(item); return url ? [{ ...item, url }] : [];
-                        })} /> : <FileThumbnail kind={kind} url={api.fileThumbnail(file, "grid")} placeholder={api.fileThumbnail(file)} />}
+                        })} /> : <FileThumbnail kind={kind} url={api.fileThumbnail(file, "grid")} placeholder={loadedPlaceholder(api.fileThumbnail(file))} />}
                         <span className="grid-public grid-share-badges">{shareBadges(file)}</span>
                       </div>
                       <div className="grid-meta">

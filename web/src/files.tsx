@@ -191,7 +191,17 @@ export function FolderCover({ previews = [] }: { previews?: { key: string; url: 
   </span>;
 }
 
-/** placeholder：大图加载完成前先显示的小图（网格卡片用列表小图占位，通常已在浏览器缓存里）。 */
+/** 网格卡片的占位小图：只有本页已经加载过的列表小图才用来占位（从列表切到网格时，来自内存缓存、不产生请求）。
+ *  没加载过就不占位——否则每张卡片要多读一次存储，与网格图挤在同一条缩略图读取通道里，封面整体变慢。 */
+// 浏览器默认只保留 250 条资源计时记录；上千张缩略图的目录需要更大的缓冲，判断才不会在前几百张之后失效。
+if (typeof performance !== "undefined") performance.setResourceTimingBufferSize?.(5000);
+export function loadedPlaceholder(url?: string) {
+  if (!url || typeof performance === "undefined") return undefined;
+  const absolute = new URL(url, location.href).href;
+  return performance.getEntriesByName(absolute, "resource").length ? url : undefined;
+}
+
+/** placeholder：大图加载完成前先显示的小图（用 loadedPlaceholder 判断是否已在本页加载过）。 */
 export function FileThumbnail({ kind, url, placeholder }: { kind: FileKind; url?: string; placeholder?: string }) {
   // 按资源地址重建状态，避免缓存图片的 load 事件被挂载后的 effect 重置。
   return <ThumbnailImage key={url} kind={kind} url={url} placeholder={placeholder === url ? undefined : placeholder} />;

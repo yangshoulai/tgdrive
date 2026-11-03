@@ -60,12 +60,13 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
         "x_enabled": offline_x, "youtube_enabled": offline_youtube,
         "platform_max_mib": offline_max_mib, "youtube_max_height": youtube_max_height, "proxy": offline_proxy,
         # 启动参数只是默认值；管理员在「下载与资源」保存后以控制台设置为准，随时生效。
-        "transfer_concurrency": max(1, min(16, transfer_concurrency)),
-        "bucket_concurrency": max(1, min(16, bucket_concurrency, transfer_concurrency))})
+        "transfer_concurrency": max(1, min(32, transfer_concurrency)),
+        "bucket_concurrency": max(1, min(32, bucket_concurrency, transfer_concurrency))})
     def apply_resources(config):
         low = config["mode"] == "low" or config["concurrency"] == 1
         engine.transfers.set_limits(config["transfer_concurrency"], config["bucket_concurrency"])
         engine.upload_slots.set_limit(config["upload_concurrency"])
+        engine.small_reads.set_limit(config["thumbnail_concurrency"])
         engine.upload_rate.set_rate(config["upload_kib"] * 1024)
         store.set_bot_interval(config["bot_interval_ms"] / 1000)
         engine.upload_concurrency, engine.read_ahead = (1, 1) if low else (3, 2)

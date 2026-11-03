@@ -667,10 +667,13 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         saved = resources.update({"mode": "auto", "transfer_concurrency": 8, "bucket_concurrency": 3})
         self.assertEqual((saved["effective"]["transfer_concurrency"], saved["effective"]["bucket_concurrency"]), (8, 3))
         self.assertEqual((transfers.total, transfers.per_bucket), (8, 3), "保存后立即生效，不需要重启")
-        for bad in ({"transfer_concurrency": 0}, {"transfer_concurrency": 17}, {"transfer_concurrency": 2, "bucket_concurrency": 3},
+        for bad in ({"transfer_concurrency": 0}, {"transfer_concurrency": 33}, {"concurrency": 17}, {"thumbnail_concurrency": 0}, {"thumbnail_concurrency": 33},
+                    {"upload_concurrency": 33}, {"web_part_concurrency": 17}, {"web_file_concurrency": 9}, {"transfer_concurrency": 2, "bucket_concurrency": 3},
                     {"bucket_concurrency": True}):
             with self.assertRaises(ValueError):
                 resources.update(bad)
+        resources.update({"thumbnail_concurrency": 5})
+        self.assertEqual(self.app.engine.small_reads.limit, 5, "缩略图读取并发保存后立即生效")
         resources.update({"transfer_concurrency": 12, "bucket_concurrency": 12})
         low = resources.update({"mode": "low"})["effective"]
         # 低资源档最多 8 路读取，每个账号可以用满（不再减半）。

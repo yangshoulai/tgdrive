@@ -86,8 +86,8 @@ async function refreshUploadLimits() {
   uploadLimits.loadedAt = Date.now();
   try {
     const config = await api.uploadConfig();
-    uploadLimits.parts = Math.max(1, Math.min(8, config.part_concurrency));
-    uploadLimits.files = Math.max(1, Math.min(4, config.file_concurrency));
+    uploadLimits.parts = Math.max(1, Math.min(16, config.part_concurrency));
+    uploadLimits.files = Math.max(1, Math.min(8, config.file_concurrency));
   } catch { /* 沿用当前值 */ }
 }
 /** 小于这个大小的文件不做秒传探测：哈希加一次请求的开销比直接上传还大。 */
