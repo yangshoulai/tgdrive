@@ -831,12 +831,15 @@ function CacheDiagnosisDialog({ job, onClose }: { job: CacheJob; onClose: () => 
         { label: "最近的错误", value: value.lastError || job.error ? "有" : "无", detail: value.lastError || job.error || "—", tone: value.lastError || job.error ? "danger" : "success" },
       ]} />
       <DiagnosisVerdictNotice verdict={cacheVerdict(value)} />
-      <DiagnosisSection title="正在下载的分段" hint={<span className="diagnosis-legend"><span><i className="is-received" />已收到</span><span><i className="is-stored" />已写入本机</span></span>}>
+      <DiagnosisSection title="正在下载的分段" hint={<span className="diagnosis-legend"><span><i className="is-received" />已收到</span><span><i className="is-stored" />已缓存</span></span>}>
         {!value.segments.length ? <p className="muted">这一轮的分段都已结束，正在准备下一轮。</p>
           : <ul className="diagnosis-list">{value.segments.map(segment => {
             const [phase, tone] = SEGMENT_PHASE[segment.phase];
-            return <DiagnosisRow key={segment.first} title={`${segment.first}–${segment.last} MB`} phase={phase} tone={tone} size={segment.size}
-              received={segment.received} stored={segment.stored} meta={[
+            // 按 16 MiB 格子显示：蓝色是格子里已缓存的部分（之前已有的加上这次写入的），浅色是已收到、还没凑满一块的数据。
+            const have = segment.cached + segment.stored, pending = Math.max(0, segment.received - segment.stored);
+            return <DiagnosisRow key={segment.first} title={`${segment.cell[0]}–${segment.cell[1] + 1} MB`} phase={phase} tone={tone} size={segment.cellSize}
+              received={segment.cached + segment.received} stored={have}
+              bytes={<>已缓存 {formatBytes(have)} / {formatBytes(segment.cellSize)}{pending > 0 && <> · 接收中 {formatBytes(pending)}</>}</>} meta={[
                 segment.firstByte ? `首字节 ${seconds((segment.firstByte - (segment.requested ?? segment.started)) / 1000)}` : segment.requested ? `已等首字节 ${seconds((now - segment.requested) / 1000)}` : `排队 ${seconds((now - segment.started) / 1000)}`,
                 segment.lastData && `最后收到 ${ago(now, segment.lastData)}`,
                 segment.lastStored && `最后写入 ${ago(now, segment.lastStored)}`,

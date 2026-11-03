@@ -39,15 +39,16 @@ export function DiagnosisVerdictNotice({ verdict }: { verdict: DiagnosisVerdict 
 }
 
 /** 一个连接（或分段）一行：阶段徽标、双层进度条（浅色为已收到，深色为已写入）与几项耗时。 */
-export function DiagnosisRow({ title, phase, tone, size, received, stored, meta, error }: {
+export function DiagnosisRow({ title, phase, tone, size, received, stored, meta, error, bytes }: {
   title: ReactNode; phase: string; tone: Tone; size: number | null; received: number; stored?: number; meta: (string | number | false | null | undefined)[]; error?: string;
+  /** 替换右上角的字节说明（缓存诊断按格子显示「已缓存 / 格子大小」）。 */ bytes?: ReactNode;
 }) {
   const percent = (value: number) => size ? `${Math.min(100, value / size * 100)}%` : "0%";
   return <li className="diagnosis-row">
     <div className="diagnosis-row-head">
       <strong className="diagnosis-row-title">{title}</strong>
       <Badge tone={tone} dot>{phase}</Badge>
-      <span className="diagnosis-row-bytes">{formatBytes(received)}{size ? ` / ${formatBytes(size)}` : ""}{stored != null && <> · 已写入 {formatBytes(stored)}</>}</span>
+      <span className="diagnosis-row-bytes">{bytes ?? <>{formatBytes(received)}{size ? ` / ${formatBytes(size)}` : ""}{stored != null && <> · 已写入 {formatBytes(stored)}</>}</>}</span>
     </div>
     <div className={`diagnosis-bar${size ? "" : " is-unknown"}`} aria-hidden="true">
       <span className="diagnosis-bar-received" style={{ width: size ? percent(received) : received ? "100%" : "0%" }} />

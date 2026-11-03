@@ -31,7 +31,9 @@ type Manual = { key: string; id: string; owner: string; route: Route; request: R
 /** 诊断：每个正在下载的分段停在哪一步。queued 等浏览器空位、waiting 等服务器开始返回、busy 服务器繁忙等待重试、
  *  receiving 接收网络数据、encrypting 加密、writing 写入本地存储。时间都是毫秒时间戳。 */
 type SegmentDiagnosis = { first: number; last: number; size: number; phase: "queued" | "waiting" | "busy" | "receiving" | "encrypting" | "writing";
-  status?: number; received: number; stored: number; started: number; requested?: number; firstByte?: number; lastData?: number; lastStored?: number; busyCount: number };
+  status?: number; received: number; stored: number; started: number; requested?: number; firstByte?: number; lastData?: number; lastStored?: number; busyCount: number;
+  /** 这一段所在的 16 MiB 格子（与服务器存储分片对齐）：cell 为首尾块号，cellSize 为格子字节数，cached 为开始时格子里已缓存的字节。 */
+  cell: [number, number]; cellSize: number; cached: number };
 /** 手动缓存任务（键为 页面:任务编号）。最多同时缓存 MAX_MANUAL_FILES 个文件，所有文件的回源请求共用 manualSlot 的并发上限。 */
 const manuals = new Map<string, Manual>();
 const MAX_MANUAL_FILES = 3;
@@ -78,6 +80,8 @@ const pendingPrivate = new Map<TierContext, PrivateBatch>();
 class CacheFatal extends Error {}
 /** 服务端已没有这个私密缓存任务（服务重启或任务已释放，HTTP 410）：页面用当前授权重新登记任务组后继续，不算暂时故障。 */
 class CacheTaskGone extends Error {}
+/** 公平分配时被收回通道的分段：已写入的块保留，没写完的部分下一轮再补，不算失败。 */
+class SlotYield extends Error {}
 const TASK_GONE = "缓存任务已在服务器上结束（服务可能刚重启），正在重新登记";
 /** 4xx（除限流外）说明文件或授权已变化，重试无益；5xx、429 与网络中断按暂时故障自动重试。 */
 const statusError = (status: number, message: string) => status >= 400 && status < 500 && status !== 408 && status !== 429 ? new CacheFatal(message) : new Error(message);
@@ -656,8 +660,25 @@ async function diagnoseManual(owner: string, id: string) {
  *  一个文件最多占 ceil(总路数 / 正在缓存的文件数) 路，不让先开始或一轮排得多的文件把通道全占住。 */
 const slotUsers = new Map<string, { active: number; waiting: number }>();
 const fairShare = (limit: number) => Math.max(1, Math.ceil(limit / Math.max(1, slotUsers.size)));
+/** 每个文件正在占用的通道及收回办法（按取得顺序，最后取得的进度最少）。 */
+const slotHolders = new Map<string, { yielded: boolean; take: () => void }[]>();
 
-async function manualSlot(signal: AbortSignal, alive?: () => void, owner = "") {
+/** 有文件分到的路数不足、通道又已占满时，从超出份额的文件里收回最近取得的一路。
+ *  网络慢时一段要下好几分钟，只靠等它们自己读完，后加入的文件可能长时间一路都拿不到。 */
+function rebalance(limit: number) {
+  if (manualActive < limit) return;
+  const share = fairShare(limit);
+  if (![...slotUsers.values()].some(user => user.waiting > 0 && user.active < share)) return;
+  for (const [owner, user] of slotUsers) {
+    const holders = (slotHolders.get(owner) ?? []).filter(item => !item.yielded);
+    if (user.active - ((slotHolders.get(owner)?.length ?? 0) - holders.length) <= share || !holders.length) continue;
+    const holder = holders[holders.length - 1];
+    holder.yielded = true; holder.take();
+    return;
+  }
+}
+
+async function manualSlot(signal: AbortSignal, alive?: () => void, owner = "", take?: () => void) {
   const limit = await manualParallel();
   const user = slotUsers.get(owner) ?? { active: 0, waiting: 0 };
   slotUsers.set(owner, user);
@@ -671,6 +692,7 @@ async function manualSlot(signal: AbortSignal, alive?: () => void, owner = "") {
   try {
     while (manualActive >= limit || user.active >= fairShare(limit)) {
       signal.throwIfAborted();
+      rebalance(limit);
       const woken = await new Promise<boolean>(resolve => {
         const timer = setTimeout(() => resolve(false), 15_000);
         manualWaiters.push(() => { clearTimeout(timer); resolve(true); });
@@ -681,10 +703,15 @@ async function manualSlot(signal: AbortSignal, alive?: () => void, owner = "") {
     signal.throwIfAborted();
   } catch (error) { user.waiting--; leave(); throw error; }
   user.waiting--; user.active++; manualActive++;
+  const holder = { yielded: false, take: take ?? (() => undefined) };
+  if (take) slotHolders.set(owner, [...(slotHolders.get(owner) ?? []), holder]);
   let released = false;
   return () => {
     if (released) return;
-    released = true; manualActive--; user.active--; leave();
+    released = true; manualActive--; user.active--;
+    const rest = (slotHolders.get(owner) ?? []).filter(item => item !== holder);
+    if (rest.length) slotHolders.set(owner, rest); else slotHolders.delete(owner);
+    leave();
     // 唤醒全部等待者各自重新检查：超时续期过的等待者留下的回调不会吞掉这次唤醒。
     manualWaiters.splice(0).forEach(wake => wake());
   };
@@ -971,6 +998,8 @@ async function roundManual(job: Manual, progress: (value: unknown) => void) {
       // 文件已变化、空间不足等无法自动恢复的错误：停止其余段；临时故障让其余段继续，已写入的块都保留。
       if (error instanceof CacheFatal) job.controller.abort();
     })));
+    // 让出通道的段不算失败：这一轮照常结束，缺的块下一轮再补。
+    failures.splice(0, failures.length, ...failures.filter(error => !(error instanceof SlotYield)));
     if (failures.length) throw failures.find(error => error instanceof CacheFatal) ?? failures.find(error => !(error instanceof DOMException && error.name === "AbortError")) ?? failures[0];
     job.controller.signal.throwIfAborted();
     const state = fileCacheState(await getEntry(entry.key), opened.info.size);
@@ -983,11 +1012,17 @@ async function roundManual(job: Manual, progress: (value: unknown) => void) {
 
 async function fetchSegment(job: Manual, opened: Opened, [first, last]: [number, number], progress: (value: unknown) => void) {
   const end = Math.min(opened.info.size - 1, (last + 1) * BLOCK - 1);
-  const diag: SegmentDiagnosis = { first, last, size: end - first * BLOCK + 1, phase: "queued", received: 0, stored: 0, started: Date.now(), busyCount: 0 };
+  // 诊断按 16 MiB 格子展示：一段只补格子里缺的块，格子里已缓存的部分单独给出。
+  const cellFirst = Math.floor(first / SEGMENT_BLOCKS) * SEGMENT_BLOCKS;
+  const cellLast = Math.min(Math.ceil(opened.info.size / BLOCK) - 1, cellFirst + SEGMENT_BLOCKS - 1);
+  const blockSize = (index: number) => Math.min(BLOCK, opened.info.size - index * BLOCK);
+  const cached = opened.entry.blocks.filter(index => index >= cellFirst && index <= cellLast).reduce((sum, index) => sum + blockSize(index), 0);
+  const diag: SegmentDiagnosis = { first, last, size: end - first * BLOCK + 1, phase: "queued", received: 0, stored: 0, started: Date.now(), busyCount: 0,
+    cell: [cellFirst, cellLast], cellSize: Math.min(opened.info.size, (cellLast + 1) * BLOCK) - cellFirst * BLOCK, cached };
   job.segments.set(first, diag);
   try { await fetchSegmentOnce(job, opened, [first, last], end, diag, progress); }
   catch (error) {
-    if (!(error instanceof DOMException && error.name === "AbortError")) job.lastError = error instanceof Error ? error.message : String(error);
+    if (!(error instanceof DOMException && error.name === "AbortError") && !(error instanceof SlotYield)) job.lastError = error instanceof Error ? error.message : String(error);
     throw error;
   } finally { if (job.segments.get(first) === diag) job.segments.delete(first); }
 }
@@ -1005,10 +1040,10 @@ const SEGMENT_STALL = 180_000;
 
 async function fetchSegmentOnce(job: Manual, opened: Opened, [first]: [number, number], end: number, diag: SegmentDiagnosis, progress: (value: unknown) => void) {
   const alive = () => { renewManual(job); job.noticed = Date.now(); progress(manualProgress(job, opened)); };
-  const release = await manualSlot(job.controller.signal, alive, job.key);
+  const segment = new AbortController();
+  const release = await manualSlot(job.controller.signal, alive, job.key, () => segment.abort(new SlotYield("让出通道给其他文件")));
   // 页面与 Worker 都按「120 秒没有进度」判定任务没有响应，而进度只在写满 1 MiB 时更新：
   // 网络很慢（120 秒不到 1 MiB）或服务器还没开始返回时，每 15 秒续期一次；超过 SEGMENT_STALL 完全没有数据才中断这一段。
-  const segment = new AbortController();
   const stop = () => segment.abort(job.controller.signal.reason);
   job.controller.signal.addEventListener("abort", stop, { once: true });
   const watchdog = setInterval(() => {
@@ -1154,6 +1189,7 @@ async function runPrefetch(job: Prefetch) {
         running++;
         void fetchSegment(worker, opened, [first, last], () => undefined)
           .then(() => { failures = 0; }, error => {
+            if (error instanceof SlotYield) return;
             // 空间到上限、文件已变化等无法恢复的错误直接停止；临时故障最多连续重试几次。
             if (error instanceof CacheFatal || ++failures >= 4) job.controller.abort();
           })
