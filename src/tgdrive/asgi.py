@@ -306,10 +306,16 @@ class TgDriveASGI(StaticFiles):
                 return
             if path == "/api/user/v1/thumbnail" and method == "GET":
                 bucket_id = int(query["bucket_id"][0]) if "bucket_id" in query else None
-                data, mime, etag = await file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0],
-                                                             bucket_id=bucket_id, etag=query.get("etag", [""])[0])
-                # 私密空间的缩略图同样按版本地址长期缓存：只有授权通过才会返回，删除或覆盖后地址随内容版本变化。
-                await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
+
+                async def thumbnail():
+                    data, mime, etag = await file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0],
+                                                                 bucket_id=bucket_id, etag=query.get("etag", [""])[0],
+                                                                 known=self._validators(headers))
+                    # 私密空间的缩略图同样按版本地址长期缓存：只有授权通过才会返回，删除或覆盖后地址随内容版本变化。
+                    await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
+                # 列表滚走、重新排序或离开目录时浏览器会放弃还没返回的缩略图请求：随之停止读取，释放小读取通道，
+                # 否则这些没人要的请求会占满通道，让当前可见的缩略图排队超时（503）。
+                await self._until_disconnect(receive, thumbnail())
                 return
             if path == "/api/user/v1/avatar" and method == "GET":
                 data, mime, etag = self.user.avatar(token)
@@ -1433,6 +1439,11 @@ class TgDriveASGI(StaticFiles):
                 and query.get("v", [""])[0] == f"{source}.{variant}.{revision}"):
             return "private, max-age=31536000, immutable"
         return "private, no-cache"
+
+    @staticmethod
+    def _validators(headers) -> frozenset[str]:
+        """If-None-Match 里的 ETag（去掉引号与弱标记），读取缩略图前用来判断能否直接回 304。"""
+        return frozenset(value.strip().removeprefix("W/").strip('"') for value in headers.get("if-none-match", "").split(",") if value.strip())
 
     async def _send_thumbnail(self, send, headers, data: bytes, mime: str, etag: str, cache_control: str):
         validators = [value.strip().removeprefix("W/") for value in headers.get("if-none-match", "").split(",")]

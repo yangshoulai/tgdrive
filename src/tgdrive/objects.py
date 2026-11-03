@@ -563,9 +563,11 @@ class ObjectService:
                     self._drop_object_row(db, row["bucket_id"], row["object_key"], time.time())
                 db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant=?", (blob, row["variant"]))
 
-    async def read_thumbnail(self, info: ObjectInfo, variant: str = "thumb") -> tuple[bytes, str, str]:
+    async def read_thumbnail(self, info: ObjectInfo, variant: str = "thumb", *, known: frozenset[str] = frozenset()) -> tuple[bytes, str, str]:
         """返回 (图片, MIME, ETag)。所需规格缺失时按 THUMBNAIL_FALLBACK 退回。
-        旧版内联在表里的图片与更早的明文缩略图在转存完成前照常读取，转存由维护任务完成。"""
+        旧版内联在表里的图片与更早的明文缩略图在转存完成前照常读取，转存由维护任务完成。
+        known 是浏览器已缓存的 ETag（If-None-Match）：命中时不读取图片，返回空内容由路由回 304，
+        不必为一次验证从存储下载缩略图、占用小读取通道。"""
         if variant not in self.THUMBNAIL_LIMITS or not info.blob_uuid:
             raise NotFoundError("thumbnail not found")
         db = self.metadata.db
@@ -582,6 +584,8 @@ class ObjectService:
             if row is None:
                 continue
             etag = f"{info.etag}-{candidate}-{self._thumbnail_revision(row['created_at'])}"
+            if etag in known:
+                return b"", row["mime"], etag
             if not row["object_key"]:
                 return self.engine.open_thumbnail(info.blob_uuid, candidate, row["data"]), row["mime"], etag
             stored = db.execute("SELECT blob_uuid FROM objects WHERE bucket_id=? AND key=?",
@@ -596,11 +600,11 @@ class ObjectService:
             return await self.engine.read_small(stored["blob_uuid"]), row["mime"], etag
         raise NotFoundError("thumbnail not found")
 
-    async def get_thumbnail(self, scope: Scope, key: str, variant: str = "thumb") -> tuple[bytes, str, str]:
-        return await self.read_thumbnail(self._object(self._lookup(scope, key)), variant)
+    async def get_thumbnail(self, scope: Scope, key: str, variant: str = "thumb", *, known: frozenset[str] = frozenset()) -> tuple[bytes, str, str]:
+        return await self.read_thumbnail(self._object(self._lookup(scope, key)), variant, known=known)
 
     async def get_thumbnail_by_etag(self, scope: Scope, etag: str, variant: str = "thumb", *,
-                                    accept: Callable[[str], object] | None = None) -> tuple[bytes, str, str]:
+                                    accept: Callable[[str], object] | None = None, known: frozenset[str] = frozenset()) -> tuple[bytes, str, str]:
         """按内容版本读取缩略图：地址不含路径，移动或改名后浏览器缓存仍然有效。
         只考虑调用者用路径同样能读取的文件（accept 复核网页路径规则，_check_scope 复核前缀与私密空间）。"""
         if not etag or len(etag) > 128:
@@ -616,7 +620,7 @@ class ObjectService:
             except (PermissionError, ValueError):
                 continue
             try:
-                return await self.read_thumbnail(self._object(row), variant)
+                return await self.read_thumbnail(self._object(row), variant, known=known)
             except NotFoundError:
                 continue  # 相同内容的另一份副本可能已有缩略图。
         raise NotFoundError("thumbnail not found")

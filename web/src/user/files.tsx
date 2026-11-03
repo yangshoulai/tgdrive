@@ -88,7 +88,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
 
   const fetchPage = useCallback((cursor: string | null, signal: AbortSignal) => query
     ? api.searchFiles(query, cursor ?? "", filter === "public", 200, root, kind, signal)
-    : api.listFiles(prefix, cursor, filter === "public", 200, kind, signal), [prefix, query, filter, kind, root]);
+    // 目录每页取服务端允许的上限（1000，类型筛选与公开筛选由服务端收紧到 200）：上千个文件一两次请求读完，减少逐页往返与重排。
+    : api.listFiles(prefix, cursor, filter === "public", 1000, kind, signal), [prefix, query, filter, kind, root]);
   // 目录连续展示全部项目；搜索最多读取 SEARCH_PAGES 页，结果过多时提示细化关键词。
   const pagination = useDirectory(fetchPage, mergeFilePages, query ? SEARCH_PAGES : Infinity, reconcileFilePage);
   const load = pagination.reload;

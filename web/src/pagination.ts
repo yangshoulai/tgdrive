@@ -8,6 +8,11 @@ import type { ListPage, PublicFolderPage } from "./api";
  * 读完后整体替换，并会中断仍在进行的读取，保证修改后看到的是最新结果。maxPages 用于搜索等需要上限的场景；
  * reconcile 在刷新替换时复用未变化的条目对象，避免整表重绘；refresh(true) 为后台刷新，不显示刷新中状态。
  */
+/** 目录超过这么久仍未读完时，先显示已读到的部分（毫秒）。 */
+const PARTIAL_DELAY = 1200;
+/** 部分结果两次提交之间的最短间隔（毫秒）。 */
+const PARTIAL_INTERVAL = 3000;
+
 export function useDirectory<T extends { next_cursor: string | number | null }>(
   fetchPage: (cursor: string | null, signal: AbortSignal) => Promise<T>, merge: (previous: T, next: T) => T,
   maxPages = Infinity, reconcile?: (previous: T, next: T) => T,
@@ -31,6 +36,11 @@ export function useDirectory<T extends { next_cursor: string | number | null }>(
     try {
       let cursor: string | null = null, result: T | null = null, pages = 0;
       const seen = new Set<string>();
+      // 分批读取时不是每读到一页就提交：排序在浏览器里进行，中途提交的部分结果会在下一次提交时整体重排，
+      // 行、缩略图跟着卸载又挂载。读得快的目录（通常一两页）读完再一次显示；超过 PARTIAL_DELAY 仍未读完才先显示已读到的部分，
+      // 之后至少相隔 PARTIAL_INTERVAL 再更新。
+      const started = Date.now();
+      let shownAt = 0;
       do {
         const next = await fetchPage(cursor, controller.signal);
         if (controller.signal.aborted) return null;
@@ -40,7 +50,9 @@ export function useDirectory<T extends { next_cursor: string | number | null }>(
         if (cursor !== null && seen.has(cursor)) throw new Error("目录读取未能继续，请刷新后重试");
         if (cursor !== null) seen.add(cursor);
         if (cursor !== null && pages >= maxPages) break;
-        if (progressive && cursor !== null && (pages & (pages - 1)) === 0) {
+        const now = Date.now();
+        if (progressive && cursor !== null && now - started >= PARTIAL_DELAY && now - shownAt >= PARTIAL_INTERVAL) {
+          shownAt = now;
           shown.current = true; setPage(result); setLoading(false); setLoadingMore(true);
         }
       } while (cursor !== null);

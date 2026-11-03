@@ -155,11 +155,26 @@ export function FileTile({ kind, size = "md" }: { kind: FileKind; size?: "md" | 
 }
 
 /** 有缩略图时显示缩略图，否则（或加载失败时）显示文件类型图标。 */
-export function FileVisual({ kind, src, size = "md" }: { kind: FileKind; src?: string; size?: "md" | "lg" | "xl" }) {
+/** 缩略图读取失败（多为服务器繁忙的 503）后隔一会儿重新加载同一地址；几次后仍失败才换成类型图标。
+ *  地址不变，浏览器缓存与服务端的长期缓存判断都不受影响。 */
+const THUMBNAIL_RETRIES = [3000, 10000, 30000];
+function useImageRetry(src?: string) {
+  const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [src]);
-  if (!src || failed) return <FileTile kind={kind} size={size} />;
-  return <span className={`file-tile file-visual tile-${size}`} aria-hidden="true"><img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} /></span>;
+  const timer = useRef(0);
+  useEffect(() => { setAttempt(0); setFailed(false); return () => window.clearTimeout(timer.current); }, [src]);
+  const onError = () => {
+    if (attempt >= THUMBNAIL_RETRIES.length) { setFailed(true); return; }
+    setFailed(true);
+    timer.current = window.setTimeout(() => { setAttempt(value => value + 1); setFailed(false); }, THUMBNAIL_RETRIES[attempt]);
+  };
+  return { failed, onError, key: `${src}#${attempt}` };
+}
+
+export function FileVisual({ kind, src, size = "md" }: { kind: FileKind; src?: string; size?: "md" | "lg" | "xl" }) {
+  const retry = useImageRetry(src);
+  if (!src || retry.failed) return <FileTile kind={kind} size={size} />;
+  return <span className={`file-tile file-visual tile-${size}`} aria-hidden="true"><img key={retry.key} src={src} alt="" loading="lazy" decoding="async" onError={retry.onError} /></span>;
 }
 
 /** 网格视图文件夹卡片左侧的封面：用文件夹里已有的列表小图拼成 1／2／4 格，没有时显示文件夹图标。
@@ -198,11 +213,13 @@ export function FolderThumbnail({ previews = [] }: { previews?: { key: string; c
 function ThumbnailImage({ kind, url, placeholder }: { kind: FileKind; url?: string; placeholder?: string }) {
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   const [fallback, setFallback] = useState<"loading" | "ready" | "failed">("loading");
+  const retry = useImageRetry(url);
+  const failed = state === "failed" || retry.failed;
   const covered = state === "ready" || (placeholder && fallback === "ready");
-  return <div className={`file-thumbnail thumbnail-${state}`}>
+  return <div className={`file-thumbnail thumbnail-${failed ? "failed" : state}`}>
     {(!url || !covered) && <FileTile kind={kind} size="xl" />}
     {url && placeholder && state !== "ready" && fallback !== "failed" && <img className="thumbnail-placeholder" src={placeholder} alt="" loading="lazy" onLoad={() => setFallback("ready")} onError={() => setFallback("failed")} />}
-    {url && state !== "failed" && <img src={url} alt="" loading="lazy" onLoad={() => setState("ready")} onError={() => setState("failed")} />}
+    {url && !retry.failed && state !== "failed" && <img key={retry.key} src={url} alt="" loading="lazy" onLoad={() => setState("ready")} onError={retry.onError} />}
     {url && covered && (kind === "video" || kind === "audio") && <span className="thumbnail-badge" aria-hidden="true"><Icon name={kind === "video" ? "play" : "audio"} size={12} /></span>}
   </div>;
 }

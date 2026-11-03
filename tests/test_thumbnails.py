@@ -75,6 +75,16 @@ class ThumbnailTests(unittest.TestCase):
         # ETag 不变时返回 304
         etag = self.call("GET", "/api/user/v1/thumbnail?path=movie.mp4")[2]["etag"]
         self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=movie.mp4", headers={**self.user, "if-none-match": etag})[0], 304)
+        # 浏览器已缓存同一版本时直接回 304，不从存储读取图片、不占用小读取通道。
+        engine = self.app.objects.engine
+        original = engine.read_small, engine.open_thumbnail
+        def unexpected(*_args, **_kwargs):
+            raise AssertionError("验证缓存时不应读取缩略图")
+        engine.read_small = engine.open_thumbnail = unexpected
+        try:
+            self.assertEqual(self.call("GET", "/api/user/v1/thumbnail?path=movie.mp4", headers={**self.user, "if-none-match": etag})[0], 304)
+        finally:
+            engine.read_small, engine.open_thumbnail = original
 
     def used(self):
         return self.app.metadata.db.execute("SELECT used_bytes FROM buckets WHERE id=?", (self.alice.bucket_id,)).fetchone()[0]
@@ -497,7 +507,7 @@ class ThumbnailCacheTests(unittest.TestCase):
             asyncio.run(api.thumbnail("session", "a.jpg", bucket_id=10))
         api.objects.get_thumbnail.assert_not_called()
         asyncio.run(api.thumbnail("session", "a.jpg", bucket_id=9))
-        api.objects.get_thumbnail.assert_called_once_with(Scope(9), "a.jpg", "thumb")
+        api.objects.get_thumbnail.assert_called_once_with(Scope(9), "a.jpg", "thumb", known=frozenset())
 
     def test_regeneration_within_one_second_changes_image_version(self):
         service = ObjectService(Mock(), Mock())
