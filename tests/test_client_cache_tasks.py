@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 from tgdrive.api import UserApi
 from tgdrive.asgi import TgDriveASGI
 from tgdrive.authn import AuthenticationError
-from tgdrive.client_cache import ClientCache
+from tgdrive.client_cache import CacheTaskGone, ClientCache
 from tgdrive.errors import NotReadyError
 from tgdrive.objects import PRIVATE_PREFIX
 from tgdrive.private import PrivateLocked
@@ -112,6 +112,17 @@ class CacheTaskTests(unittest.IsolatedAsyncioTestCase):
         self.sessions.pop("session")
         with self.assertRaises(AuthenticationError):
             self.cache._task("session", task_id)
+
+    async def test_missing_task_after_restart_is_gone_not_transient(self):
+        # 任务只在内存中：服务重启后网页拿着旧编号，必须得到 410 去重新登记，而不是 5xx 让网页反复重试。
+        with self.assertRaises(CacheTaskGone):
+            self.cache.task_files("session", "lost-id")
+        with self.assertRaises(CacheTaskGone):
+            self.cache.task_key("session", "lost-id", FILE, "version")
+        status, body, _ = TgDriveASGI._error(CacheTaskGone("gone"))
+        self.assertEqual((status, body["error"]["code"]), (410, "cache_task_gone"))
+        self.create()
+        self.assertEqual(self.cache._task("session", "queue-id").bucket_id, 7, "重新登记后同一编号继续可用")
 
     async def test_password_and_cache_epoch_are_checked_each_time(self):
         task_id = self.create()

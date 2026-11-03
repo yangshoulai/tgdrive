@@ -19,6 +19,8 @@ export type CachedItemFilter = { private?: boolean; all?: boolean; prefix?: stri
 
 /** Worker 判定重试也无法解决的失败（空间不足、文件已变化、设置不允许等）；其余失败可以自动重试续传。 */
 export const isFatalCacheError = (reason: unknown) => reason instanceof Error && (reason as Error & { fatal?: boolean }).fatal === true;
+/** 服务端已没有这个私密缓存任务（如服务重启）：重新登记任务组即可继续。 */
+export const isCacheTaskGone = (reason: unknown) => reason instanceof Error && (reason as Error & { gone?: boolean }).gone === true;
 
 export const cacheSupported = () => typeof window !== "undefined" && window.isSecureContext && "serviceWorker" in navigator
   && typeof indexedDB !== "undefined" && Boolean(globalThis.crypto?.subtle);
@@ -69,7 +71,7 @@ async function ask<T>(type: string, extra: Record<string, unknown> = {}, timeout
     channel.port1.onmessage = event => {
       if (event.data?.progress) { clearTimeout(timer); timer = setTimeout(expired, timeout); progress?.(event.data.progress); return; }
       if (event.data?.ok) finish(undefined, event.data.value as T);
-      else finish(Object.assign(new Error(event.data?.error || "本机缓存操作失败"), { fatal: event.data?.fatal === true }));
+      else finish(Object.assign(new Error(event.data?.error || "本机缓存操作失败"), { fatal: event.data?.fatal === true, gone: event.data?.gone === true }));
     };
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener("abort", abort, { once: true });

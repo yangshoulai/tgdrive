@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { isFatalCacheError, loadPrivateCacheQueue, savePrivateCacheQueue, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
+import { isCacheTaskGone, isFatalCacheError, loadPrivateCacheQueue, savePrivateCacheQueue, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
 import { BRAND } from "../brand";
 import { effectiveMiB } from "../cache-store";
 import { FileTile, getFileKind } from "../files";
@@ -94,7 +94,8 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
   const [jobs, setJobs] = useState<CacheJob[]>([]), jobsRef = useRef(jobs);
   const [folders, setFolders] = useState<FolderCacheJob[]>([]), foldersRef = useRef(folders);
   const folderControllers = useRef(new Map<string, AbortController>());
-  const groups = useRef(new Map<string, { ready: Promise<void>; paths: string[] }>());
+  // renewed：最近一次重新登记的时间；同一组里几个文件同时发现任务已结束时只重新登记一次。
+  const groups = useRef(new Map<string, { ready: Promise<void>; paths: string[]; renewed?: number }>());
   const [states, setStates] = useState(new Map<string, FileCacheState>());
   const statesRef = useRef(states); statesRef.current = states;
   const [cached, setCached] = useState(new Map<string, CachedFileState>());
@@ -112,6 +113,18 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
     task.catch(() => undefined);
     groups.current.set(id, { ready: task, paths });
     return id;
+  }, []);
+  /** 服务端已没有这个任务组（服务重启）：在已解锁时用当前授权重新登记同一组路径；锁定时交给用户解锁后重试。 */
+  const renewGroup = useCallback(async (id: string) => {
+    const group = groups.current.get(id);
+    if (!group) throw new Error("缓存任务已结束，请重新加入缓存");
+    if (!ready.current.privateReady) throw new Error("服务器上的缓存任务已结束，请解锁私密空间后点「重试」继续");
+    if (!group.renewed || Date.now() - group.renewed > 5000) {
+      group.renewed = Date.now();
+      group.ready = startCacheGroup(id, group.paths);
+      group.ready.catch(() => undefined);
+    }
+    await group.ready;
   }, []);
   const refreshRef = useRef<() => void>(() => undefined);
   useEffect(() => {
@@ -406,7 +419,7 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
           await group.ready;
           controller.signal.throwIfAborted();
         }
-        let failures = 0, reached = -1;
+        let failures = 0, reached = -1, renewals = 0;
         while (true) {
           try {
             let result;
@@ -424,6 +437,14 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
             break;
           } catch (reason) {
             // 已写入的块都保留：暂时失败时稍等片刻重新开始，只补缺失的部分；空间不足等无法自动解决的失败直接报告。
+            if (!controller.signal.aborted && job.group && isCacheTaskGone(reason) && renewals < 3) {
+              // 不计入失败次数：重新登记后从已缓存处继续。
+              renewals++;
+              patch({ status: "active", waiting: true, error: api.errorMessage(reason, "正在重新登记缓存任务") });
+              cancelFileCache(job.id);
+              await renewGroup(job.group);
+              continue;
+            }
             if (controller.signal.aborted || isFatalCacheError(reason) || failures >= RETRY_DELAYS.length) throw reason;
             failures++;
             patch({ status: "active", waiting: true, retrying: failures, error: api.errorMessage(reason, "连接中断") });
@@ -440,7 +461,7 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
         setWake(value => value + 1); refreshRef.current();
       }
     })();
-  }, [jobs, enabled, available, privateCacheEnabled, wake, update]);
+  }, [jobs, enabled, available, privateCacheEnabled, wake, update, renewGroup]);
 
   const forget = useCallback(async (files: CacheFile[]) => {
     const ids = new Set(files.map(cacheFileId));
@@ -766,7 +787,7 @@ function CacheProgress({ job, rate, hidden }: { job: CacheJob; rate: number; hid
       <Icon name="alert" size={13} /><span>{message}</span></button>;
   }
   const percent = percentOf(job.bytes, job.size);
-  const detail = job.retrying ? `连接中断，正在第 ${job.retrying} 次自动重试，已缓存的部分会保留`
+  const detail = job.retrying ? `${hidden ? "连接中断" : job.error || "连接中断"}，正在第 ${job.retrying} 次自动重试，已缓存的部分会保留`
     : job.status === "queued" ? job.waiting ? "其他页面正在缓存，完成后自动开始" : `${formatBytes(job.bytes)} / ${formatBytes(job.size)} · 等待开始`
       : job.status === "paused" || job.status === "canceled" ? `${formatBytes(job.bytes)} / ${formatBytes(job.size)} · 已暂停，已缓存的部分会保留`
         : [`${formatBytes(job.bytes)} / ${formatBytes(job.size)}`, rate > 0 && `${formatBytes(rate)}/s`, rate > 0 && remainingText(Math.max(0, job.size - job.bytes) / rate)].filter(Boolean).join(" · ");

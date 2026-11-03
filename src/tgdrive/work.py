@@ -61,8 +61,9 @@ class TransferSlots:
         acquired = False
         try:
             try:
-                # 后台读取可以多等一会儿：名额让给前台时不应很快失败。
-                async with asyncio.timeout(self.wait_seconds * (4 if background else 1)):
+                # 后台读取可以多等一会儿：名额让给前台时不应很快失败。但要在常见反向代理的首字节超时
+                # （Cloudflare 100 秒）之前答复 503，否则浏览器只看到 524／连接中断，不知道是在排队。
+                async with asyncio.timeout(self.wait_seconds * (3 if background else 1)):
                     async with self._condition:
                         while self._full(bucket_id, background):
                             try:

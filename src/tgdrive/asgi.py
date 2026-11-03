@@ -16,7 +16,7 @@ from .api import AdminApi, UserApi
 from .archive import stream_zip
 from .assistant.service import AssistantDenied
 from .audit import AuditLog
-from .client_cache import ClientCache
+from .client_cache import CacheTaskGone, ClientCache
 from .authn import (
     AuthenticationError,
     CsrfError,
@@ -1808,6 +1808,7 @@ class TgDriveASGI(StaticFiles):
             message = str(exc) if str(exc).startswith(("访问密码", "登录", "验证", "通行密钥", "注册")) else "登录失败次数过多，请 15 分钟后再试"
         elif isinstance(exc, (AuthenticationError, SessionExpired)): status, code, message = 401, "unauthorized", "登录已过期，请重新登录"
         elif isinstance(exc, AssistantDenied): status, code, message = 403, "assistant_unavailable", str(exc) or "文件助手不可用"
+        elif isinstance(exc, CacheTaskGone): status, code, message = 410, "cache_task_gone", str(exc)
         elif isinstance(exc, (CsrfError, PermissionError)): status, code, message = 403, "forbidden", "没有权限执行这个操作"
         elif isinstance(exc, WorkBusyError):
             status, code, message = 503, "transfer_busy", "传输繁忙，请稍后重试"

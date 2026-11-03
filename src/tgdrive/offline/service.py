@@ -1194,12 +1194,12 @@ class OfflineDownloads:
                 body, rest = joined[:PART_SIZE], joined[PART_SIZE:]
                 pieces, buffered = ([rest] if rest else []), len(rest)
                 del joined
-                await self.objects.upload_part(scope, upload_id, number, body, PART_SIZE, background=True)
+                await self.objects.upload_part(scope, upload_id, number, body, PART_SIZE, buffered=True)
                 del body
                 number, stored = number + 1, stored + PART_SIZE
                 self._set(row["id"], stored_bytes=stored)
         if pieces or stored == 0:
-            await self.objects.upload_part(scope, upload_id, number, pieces, buffered, background=True)
+            await self.objects.upload_part(scope, upload_id, number, pieces, buffered, buffered=True)
             stored += buffered
             self._set(row["id"], stored_bytes=stored)
         return stored
@@ -1229,7 +1229,7 @@ class OfflineDownloads:
             self._video_sizes[upload_id] = size
         first = header + b"".join(head)
         del head
-        await self.objects.upload_part(scope, upload_id, 1, first, len(first), background=True)
+        await self.objects.upload_part(scope, upload_id, 1, first, len(first), buffered=True)
         self._set(row["id"], stored_bytes=stored + len(first))
 
     async def _finish(self, row, scope, upload_id):
@@ -1317,7 +1317,7 @@ class OfflineDownloads:
             pieces.clear()
             length = len(body)
             self.check(row["user_id"], row["id"])
-            await self.objects.upload_part(scope, upload_id, number, body, length, background=True)
+            await self.objects.upload_part(scope, upload_id, number, body, length, buffered=True)
             del body
             stored += length
             self._set(row["id"], stored_bytes=stored)

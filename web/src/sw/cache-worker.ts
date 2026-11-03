@@ -70,6 +70,9 @@ const pendingPrivate = new Map<TierContext, PrivateBatch>();
 /** 设备设置中这一层的容量（字节）。 */
 /** 重试也无法解决的失败（空间不足、文件已变化、设置不允许等）：页面据此停止自动重试，直接提示用户处理。 */
 class CacheFatal extends Error {}
+/** 服务端已没有这个私密缓存任务（服务重启或任务已释放，HTTP 410）：页面用当前授权重新登记任务组后继续，不算暂时故障。 */
+class CacheTaskGone extends Error {}
+const TASK_GONE = "缓存任务已在服务器上结束（服务可能刚重启），正在重新登记";
 /** 4xx（除限流外）说明文件或授权已变化，重试无益；5xx、429 与网络中断按暂时故障自动重试。 */
 const statusError = (status: number, message: string) => status >= 400 && status < 500 && status !== 408 && status !== 429 ? new CacheFatal(message) : new Error(message);
 const sizeText = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / MiB))} MB`;
@@ -701,6 +704,7 @@ async function listBackground(owner: string, id: string, prefix: string, cursor?
   const query = new URLSearchParams({ prefix, ...(cursor ? { cursor } : {}) });
   const response = await fetch(`/api/user/v1/cache/tasks/list?${query}`, { credentials: "same-origin", cache: "no-store",
     headers: { "X-Tessera-Cache-Task": background.id }, signal: background.controller.signal });
+  if (response.status === 410) throw new CacheTaskGone(TASK_GONE);
   if (!response.ok) throw new Error(`无法读取缓存目录（${response.status}），请解锁后重试`);
   const result: unknown = await response.json();
   background.controller.signal.throwIfAborted();
@@ -722,6 +726,7 @@ async function manualOpened(url: string, background?: Background) {
     const context = background.context;
     if (!preferences.enabled || !preferences.private || !context) throw new CacheFatal("私密文件缓存已关闭");
     const response = await post("/api/user/v1/cache/tasks/keys", { path: route.path, etag: route.etag }, "", { "X-Tessera-Cache-Task": background.id });
+    if (response.status === 410) throw new CacheTaskGone(TASK_GONE);
     if (!response.ok) throw new Error(`缓存任务或文件版本已变化（${response.status}），请解锁后重试`);
     const body = await response.json() as { key: string };
     context.signal.throwIfAborted();
@@ -747,6 +752,7 @@ async function fileStates(urls: string[]) {
 async function verifyManual(job: Manual) {
   const response = await manualFetch(job, { method: "HEAD" });
   if (response.status === 401) dropKeys();
+  if (response.status === 410 && job.background) throw new CacheTaskGone(TASK_GONE);
   if (!response.ok) throw statusError(response.status, `无法读取文件（${response.status}），请刷新列表后重试`);
   if (etagOf(response) !== `"${job.route.etag}"`) {
     if (job.opened) await deleteEntries([job.opened.entry.key]);
@@ -903,11 +909,21 @@ async function fetchSegment(job: Manual, opened: Opened, [first, last]: [number,
   try {
     const end = Math.min(opened.info.size - 1, (last + 1) * BLOCK - 1);
     const headers = new Headers({ Range: `bytes=${first * BLOCK}-${end}`, "X-Tessera-Background": "cache" });
-    const response = await manualFetch(job, { headers });
+    let response = await manualFetch(job, { headers });
+    // 服务器读取名额已满（离线下载、播放占用）时返回 503 并给出 Retry-After：这是排队，不算失败，等一会儿再请求同一段。
+    while (response.status === 503 && response.headers.has("retry-after")) {
+      await response.body?.cancel();
+      const seconds = Number(response.headers.get("retry-after"));
+      renewManual(job); progress(fileCacheState(opened.entry, opened.info.size));
+      await pause(Math.min(60, Number.isFinite(seconds) && seconds > 0 ? seconds : 5) * 1000, job.controller.signal);
+      job.controller.signal.throwIfAborted();
+      response = await manualFetch(job, { headers });
+    }
     if (response.status === 401) dropKeys();
     if (response.status !== 206 || etagOf(response) !== opened.info.version || response.headers.get("content-range") !== `bytes ${first * BLOCK}-${end}/${opened.info.size}`) {
       await response.body?.cancel();
       if (response.ok) { await deleteEntries([opened.entry.key]); throw new CacheFatal("文件已变化，请刷新列表后重新缓存"); }
+      if (response.status === 410 && job.background) throw new CacheTaskGone(TASK_GONE);
       throw statusError(response.status, `读取文件失败（${response.status}），请稍后重试`);
     }
     if (!response.body) throw new Error("服务器未返回文件内容");
@@ -1321,7 +1337,7 @@ sw.addEventListener("message", event => {
     group?: string; paths?: string[]; csrf?: string; prefix?: string; cursor?: string | null } | null;
   const port = event.ports[0];
   const owner = event.source && "id" in event.source ? event.source.id : "";
-  const reply = (work: Promise<unknown>) => event.waitUntil(work.then(value => port?.postMessage({ ok: true, value }), error => port?.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error), fatal: error instanceof CacheFatal })));
+  const reply = (work: Promise<unknown>) => event.waitUntil(work.then(value => port?.postMessage({ ok: true, value }), error => port?.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error), fatal: error instanceof CacheFatal, gone: error instanceof CacheTaskGone })));
   switch (data?.type) {
     case "tessera-cache:access":
       if (!data.access || pageAccess !== data.access || !data.expires || data.expires <= Date.now()) dropKeys("p");

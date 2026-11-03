@@ -48,6 +48,10 @@ def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
 
 
+class CacheTaskGone(PermissionError):
+    """服务端没有这个缓存任务（服务重启或任务已释放）：网页可以用当前的私密授权重新登记后继续。"""
+
+
 class ClientCache:
     def __init__(self, user, private_space) -> None:
         self.user, self.private_space = user, private_space
@@ -187,7 +191,10 @@ class ClientCache:
         account = self.user.accounts.account_for_session(self.user._session(token))
         with self._lock:
             task = self._tasks.get((token, task_id))
-        if task is None or task.user_id != account.id or task.bucket_id != account.bucket_id:
+        if task is None:
+            # 任务只在内存中：服务重启后网页仍拿着旧编号，返回 410 让它重新登记，而不是当作暂时故障反复重试。
+            raise CacheTaskGone("缓存任务已结束，请重新登记")
+        if task.user_id != account.id or task.bucket_id != account.bucket_id:
             raise PermissionError("缓存任务不存在或已结束")
         if task.identity != self._identity(account.id, task.device):
             raise PermissionError("缓存密钥已变化，请重新加入缓存")
