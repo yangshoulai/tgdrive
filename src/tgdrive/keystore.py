@@ -148,6 +148,13 @@ class KeyStore:
                 aad = "registration.smtp_password"
                 plain = open_sealed(old_registration_key, base64.b64decode(smtp_row["value"]), aad)
                 smtp_password = base64.b64encode(seal(new_registration_key, plain, aad)).decode()
+            # 媒体信息提供者的密钥（TMDB 令牌、字幕站账号等）逐项重新加密，aad 是各自的 settings 键名。
+            old_media_key, new_media_key = derive_subkey(old_kek, "media-provider-secret"), derive_subkey(new_kek, "media-provider-secret")
+            media_secrets = []
+            import base64
+            for media_row in self.metadata.db.execute("SELECT key, value FROM settings WHERE key LIKE 'media.secret.%'"):
+                plain = open_sealed(old_media_key, base64.b64decode(media_row["value"]), media_row["key"])
+                media_secrets.append((base64.b64encode(seal(new_media_key, plain, media_row["key"])).decode(), media_row["key"]))
             # 所有重新包裹和 keys 更新在同一个事务里。
             with self.metadata.transaction() as db:
                 db.executemany("UPDATE blobs SET wrapped_dek = ? WHERE uuid = ?", ((w, u) for u, w in wrapped))
@@ -162,6 +169,7 @@ class KeyStore:
                     db.execute("UPDATE settings SET value = ? WHERE key = 'client_cache.key'", (cache_key,))
                 if smtp_password is not None:
                     db.execute("UPDATE settings SET value=? WHERE key='registration.smtp_password'", (smtp_password,))
+                db.executemany("UPDATE settings SET value=? WHERE key=?", media_secrets)
                 for invite in db.execute("SELECT id,code_hash,code_enc FROM registration_invites"):
                     aad = f"invite:{invite['code_hash']}"
                     plain = open_sealed(old_registration_key, invite["code_enc"], aad)

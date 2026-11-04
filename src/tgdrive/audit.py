@@ -34,6 +34,7 @@ ACTIONS = {
     "user.delete": "删除用户", "trash.purge": "清空回收站",
     "resources.update": "修改下载与资源配置", "client_cache.update": "修改浏览器缓存策略", "client_cache.reset": "重置浏览器缓存密钥",
     "download.create": "创建离线下载", "archive.extract": "在线解压", "archive.compress": "在线压缩",
+    "media.save": "保存在线获取的歌词或字幕", "media.providers.update": "修改媒体信息提供者",
     "download.stop": "停止离线下载", "download.resume": "继续离线下载",
     "download.restart": "重新下载", "download.delete": "删除下载任务", "download.update": "更新下载参数", "download.move": "更改下载保存位置", "download.now": "立即下载",
     "passkey.create": "添加通行密钥", "passkey.rename": "重命名通行密钥",
@@ -72,11 +73,13 @@ class AuditLog:
             "share.save": {"saved", "bytes", "error"},
             "archive.extract": {"conflict", "keep", "format", "error"},
             "archive.compress": {"count", "compression", "error"},
+            "media.save": {"provider", "format", "replaced", "error"},
+            "media.providers.update": {"enabled", "configured", "error"},
             "assistant.attachment.save": {"bytes", "error"},
             "client.grant": {"bucket_id", "perms", "error"},
             "key.create": {"error"},
         }
-        if action in ("object.public", "share.save", "assistant.attachment.save", "archive.extract", "archive.compress"):
+        if action in ("object.public", "share.save", "assistant.attachment.save", "archive.extract", "archive.compress", "media.save"):
             target = None
         if action in allowed:
             detail = {key: value for key, value in (detail or {}).items() if key in allowed[action]}

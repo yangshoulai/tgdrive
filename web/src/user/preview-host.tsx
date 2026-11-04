@@ -1,7 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import * as api from "../api";
 import { usePrivateAccess } from "./private-session";
-import { PreviewModal, getFileKind } from "../files";
+import { PreviewModal, getFileKind, parentPath } from "../files";
+import { toast } from "../ui";
+import { MediaLookupDialog } from "./media-lookup";
+import { ThumbnailEditor } from "./thumbnail-editor";
 
 /**
  * 预览弹窗挂在应用外壳上，不随页面切换卸载：用户最小化后去看别的页面，播放不中断；
@@ -12,7 +15,7 @@ import { PreviewModal, getFileKind } from "../files";
  * 私密空间的文件在离开私密空间或锁定时立即关闭，不能跟着用户留在普通页面上。
  */
 type ModalProps = ComponentProps<typeof PreviewModal>;
-export type PreviewRequest = Omit<ModalProps, "onClose" | "minimizeRequest">;
+export type PreviewRequest = Omit<ModalProps, "onClose" | "minimizeRequest" | "onFindMedia">;
 type Slot = "video" | "audio" | "image" | "document";
 type Current = { id: number; owner: string; request: PreviewRequest; minimize: number };
 type Host = { open: (owner: string, request: PreviewRequest) => void; update: (file: api.FileItem) => void; sync: (owner: string, files: api.FileItem[]) => void; release: (owner: string) => void };
@@ -98,10 +101,25 @@ export function PreviewHost({ children, privateAllowed, enabled }: { children: R
     else if (hasPrivate && !privateAllowed) setSlots(current => mapSlots(current, value => api.isPrivatePath(value.request.file.key) ? null : value));
   }, [enabled, hasPrivate, privateAllowed]);
   const close = useCallback((id: number) => setSlots(current => mapSlots(current, value => value.id === id ? null : value)), []);
+  // 播放器里的「在线查找歌词／字幕／封面」：弹窗挂在预览宿主上，离开打开预览的页面后仍可使用。
+  const [finding, setFinding] = useState<{ file: api.FileItem; want: api.MediaWant } | null>(null);
+  const findMedia = useCallback((file: api.FileItem, want: api.MediaWant) => setFinding({ file, want }), []);
+  useEffect(() => { if (finding && (!enabled || api.isPrivatePath(finding.file.key) && !privateAllowed)) setFinding(null); }, [finding, enabled, privateAllowed]);
   return <HostContext.Provider value={host}>
     {children}
     {enabled && [...slots.values()].map(value => (!api.isPrivatePath(value.request.file.key) || privateAllowed)
-      && <PreviewModal key={value.id} {...value.request} minimizeRequest={value.minimize} onClose={() => close(value.id)} />)}
+      && <PreviewModal key={value.id} {...value.request} onFindMedia={findMedia} minimizeRequest={value.minimize} onClose={() => close(value.id)} />)}
+    {finding && finding.want !== "cover" && <MediaLookupDialog file={finding.file} want={finding.want} onClose={() => setFinding(null)} />}
+    {finding && finding.want === "cover" && <ThumbnailEditor file={finding.file} initialSource="online" onClose={() => setFinding(null)}
+      onSaved={variants => {
+        const target = finding.file;
+        setFinding(null);
+        // 与文件页的封面编辑相同：先用临时版本号让地址变化，文件页随后的刷新带回服务端的正式版本。
+        const stamp = String(Date.now());
+        host.update({ ...target, thumbnails: variants, thumbnail_status: "ready", has_thumbnail: true, thumbnail_versions: Object.fromEntries(variants.map(variant => [variant, stamp])) });
+        window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [parentPath(target.key)] } }));
+        toast.success("封面已更新");
+      }} />}
   </HostContext.Provider>;
 }
 /** 页面用来打开预览；页面卸载时自动释放它打开的预览。 */

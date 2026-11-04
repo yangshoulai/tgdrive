@@ -44,7 +44,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 35
+    SCHEMA_VERSION = 36
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -749,6 +749,20 @@ class Metadata:
                     if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
                 db.execute("PRAGMA user_version = 35")
+            if version < 36:
+                # 音视频自带的元数据（media/tags.py 解析的标签、时长、内嵌歌词／封面／字幕轨）按内容记录，副本共用。
+                # 首次查看时按需读取文件头提取；parser 是解析器版本，升级后重新提取。歌词正文与封面字节不入库，需要时按位置重读。
+                # external 记录用户在线查找时确认过的外部条目编号（TMDB、MusicBrainz 等），下次查询直接使用。
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS media_info(
+                        blob_uuid TEXT PRIMARY KEY REFERENCES blobs(uuid) ON DELETE CASCADE,
+                        parser INTEGER NOT NULL, container TEXT, duration REAL,
+                        title TEXT, artist TEXT, album TEXT, album_artist TEXT, track TEXT, year TEXT, genre TEXT,
+                        extra TEXT, streams TEXT, lyrics INTEGER NOT NULL DEFAULT 0, cover INTEGER NOT NULL DEFAULT 0,
+                        external TEXT, extracted_at REAL NOT NULL
+                    );
+                """)
+                db.execute("PRAGMA user_version = 36")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

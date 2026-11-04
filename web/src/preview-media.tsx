@@ -1,7 +1,7 @@
 /** 播放界面与歌词、字幕附件；缓冲状态始终保留播放器。
  * 视频使用 ArtPlayer（按需加载）；音乐使用原生 <audio> 与自绘界面：模糊封面背景、唱片、同步歌词（没有时显示音频信息）和一体化控制条。 */
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { errorMessage, type PreviewAsset } from "./api";
+import { errorMessage, type MediaTags, type MediaWant, type PreviewAsset, type PreviewAssetList } from "./api";
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
 import { MODE_ICONS, PLAYBACK_MODES, type PreviewNav } from "./preview-playlist";
@@ -12,13 +12,17 @@ export type { MediaProgress, MediaState } from "./preview-media-engine";
 type Engine = Awaited<ReturnType<typeof loadMediaEngine>>;
 type VideoPlayer = ReturnType<Engine["createVideoPlayer"]>;
 type Lyric = { time: number; text: string };
-export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[]>;
+export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[] | PreviewAssetList>;
 export type PlaybackControls = { play: () => Promise<void>; pause: () => void; isPlaying: () => boolean; seek: (time: number) => void; seekBy: (seconds: number) => void; adjustVolume: (delta: number) => void };
 export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number, source: VideoSizeSource) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onSaveThumbnail?: (video: HTMLVideoElement, rotation: number) => Promise<void>; onLyricLine?: (line: string | null) => void;
   /** 视频画面旋转（顺时针角度），由上层按文件记住；播放器设置菜单与快捷键 R 经 onRotate 修改。 */
   rotation?: number; onRotate?: (degrees: number) => void;
   /** 缓冲速度（字节／秒，估算值）；不在加载或缓冲、或无法估算时为 null。最小化小窗据此显示。 */
-  onBufferSpeed?: (speed: number | null) => void };
+  onBufferSpeed?: (speed: number | null) => void;
+  /** 在线查找歌词、字幕或封面（只给本人可写的文件）；没有歌词、字幕或封面时播放器里出现对应入口。 */
+  onFindAssets?: (want: MediaWant) => void;
+  /** 歌词／字幕附件有变化（如刚保存了在线找到的歌词）时递增，播放器重新读取并优先选中 preferAsset。 */
+  assetRevision?: number; preferAsset?: string };
 type Player = PlaybackControls & { setSource: (url: string, name: string, cover?: string) => void; destroy: () => void };
 
 function playbackTime(time: number): string {
@@ -118,10 +122,25 @@ function lyricAt(lines: Lyric[], time: number) {
   return low - 1;
 }
 function assetLabel(asset: PreviewAsset): string {
-  const languages: Record<string, string> = { zh: "中文", "zh-cn": "简体中文", "zh-hans": "简体中文", "zh-tw": "繁体中文", "zh-hant": "繁体中文", en: "英语", eng: "英语", ja: "日语", jpn: "日语", ko: "韩语", kor: "韩语", fr: "法语", fra: "法语", de: "德语", deu: "德语", es: "西班牙语", spa: "西班牙语", it: "意大利语", pt: "葡萄牙语", ru: "俄语" };
+  // 内置歌词与字幕轨的名称已是给人看的说明（如「内置 · 简体中文」）。
+  if (asset.source === "embedded") return asset.name;
+  const languages: Record<string, string> = { zh: "中文", chi: "中文", zho: "中文", "zh-cn": "简体中文", "zh-hans": "简体中文", "zh-tw": "繁体中文", "zh-hant": "繁体中文", en: "英语", eng: "英语", ja: "日语", jpn: "日语", ko: "韩语", kor: "韩语", fr: "法语", fra: "法语", de: "德语", deu: "德语", es: "西班牙语", spa: "西班牙语", it: "意大利语", pt: "葡萄牙语", ru: "俄语" };
   // 没有语言标记的附件按格式命名（如“SRT 字幕”“LRC 歌词”），比“默认”更清楚。
   const format = asset.name.split(".").at(-1)?.toUpperCase() ?? "";
   return (asset.language && languages[asset.language.toLowerCase()]) || asset.language || `${format} ${asset.kind === "lyrics" ? "歌词" : "字幕"}`.trim();
+}
+
+const chinese = (asset: PreviewAsset) => /^(zh|chi|zho)\b/i.test(asset.language ?? "");
+/** 默认选中的歌词或字幕：文件内置的优先。音乐依次是内置同步歌词、同名 .lrc（无语言标记优先）、内置普通歌词；
+ *  视频依次是能立即读取的内置中文字幕、同名中文字幕、其他能立即读取的内置字幕、同名字幕（无语言标记优先）。
+ *  MKV 的内置字幕要读完整个文件，只在用户从菜单里选择时提取。 */
+function pickAsset(kind: "audio" | "video", items: PreviewAsset[], prefer?: string): PreviewAsset | undefined {
+  const preferred = prefer ? items.find(item => item.path === prefer) : undefined;
+  if (preferred) return preferred;
+  const files = items.filter(item => item.source !== "embedded"), embedded = items.filter(item => item.source === "embedded");
+  if (kind === "audio") return embedded.find(item => item.synced) ?? files.find(item => !item.language) ?? files[0] ?? embedded[0];
+  const ready = embedded.filter(item => item.instant);
+  return ready.find(chinese) ?? files.find(chinese) ?? ready[0] ?? files.find(item => !item.language) ?? files[0];
 }
 
 /* ---------- 音乐：原生 <audio> ---------- */
@@ -278,7 +297,7 @@ function MediaButton({ icon, label, shortcut, onClick, disabled, active, classNa
 
 /* ---------- 统一入口 ---------- */
 
-export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation: givenRotation = 0, onRotate, onBufferSpeed }: {
+export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation: givenRotation = 0, onRotate, onBufferSpeed, onFindAssets, assetRevision = 0, preferAsset }: {
   kind: "video" | "audio"; url: string; name: string; size?: number; videoSize?: { width: number; height: number }; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav;
 } & PlaybackProps) {
@@ -301,8 +320,15 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   const [findingAssets, setFindingAssets] = useState(Boolean(loadAssets)), [discoveryError, setDiscoveryError] = useState("");
   const [assetBusy, setAssetBusy] = useState(false), [assetError, setAssetError] = useState("");
   const [lyrics, setLyrics] = useState<Lyric[]>([]), [active, setActive] = useState(-1);
+  // 没有时间轴的歌词按普通文字显示，不跟随播放滚动。
+  const [unsynced, setUnsynced] = useState(false);
+  const [tags, setTags] = useState<MediaTags | null>(null);
   const lyricRef = useRef(lyrics), lyricSource = useRef(""), timeRef = useRef(0), lyricHost = useRef<HTMLDivElement>(null);
   lyricRef.current = lyrics;
+  const preferRef = useRef(preferAsset);
+  preferRef.current = preferAsset;
+  const findRef = useRef(onFindAssets);
+  findRef.current = onFindAssets;
   useEffect(() => {
     let cancelled = false;
     const notify = (value: MediaState) => {
@@ -320,7 +346,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
           if (cancelled) return;
           timeRef.current = value.currentTime;
           setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value);
-          setBuffered(loaded); setActive(lyricAt(lyricRef.current, value.currentTime));
+          setBuffered(loaded); if (lyricRef.current[0]?.time !== -1) setActive(lyricAt(lyricRef.current, value.currentTime));
           callbacks.current.onProgress?.(value);
         },
       });
@@ -379,41 +405,61 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
     const timer = window.setTimeout(() => setSlow(true), 8000);
     return () => window.clearTimeout(timer);
   }, [state, url]);
+  const revisionUrl = useRef(url);
   useEffect(() => {
-    setAssets([]); setSelected(""); setLyrics([]); lyricRef.current = []; lyricSource.current = ""; setActive(-1); setDiscoveryError("");
+    // 只有附件变化（同一文件、版本号递增）时保留正在显示的歌词，避免重新读取时闪一下。
+    const sameFile = revisionUrl.current === url;
+    revisionUrl.current = url;
+    if (!sameFile) { setAssets([]); setSelected(""); setLyrics([]); lyricRef.current = []; lyricSource.current = ""; setActive(-1); setTags(null); }
+    setDiscoveryError("");
     setFindingAssets(Boolean(loader.current));
     if (!loader.current) return;
     const controller = new AbortController();
-    void loader.current(controller.signal).then(items => {
+    void loader.current(controller.signal).then(result => {
       if (controller.signal.aborted) return;
+      const { assets: items, tags: found } = Array.isArray(result) ? { assets: result, tags: null } : result;
+      setTags(found ?? null);
       const matches = items.filter(item => item.kind === (kind === "audio" ? "lyrics" : "subtitle"));
       setAssets(matches);
-      const preferred = kind === "audio" ? matches.find(item => !item.language) : matches.find(item => item.language?.toLowerCase().startsWith("zh"));
-      setSelected((preferred ?? matches.find(item => !item.language) ?? matches[0])?.path ?? "");
+      setSelected(pickAsset(kind, matches, preferRef.current)?.path ?? "");
     }).catch(reason => { if (!controller.signal.aborted) setDiscoveryError(errorMessage(reason, "无法查找歌词或字幕")); })
       .finally(() => { if (!controller.signal.aborted) setFindingAssets(false); });
     return () => controller.abort();
-  }, [kind, url]);
+  }, [kind, url, assetRevision]);
   useEffect(() => {
     if (!playerReady) return;
     const controller = new AbortController();
-    setAssetError(""); setAssetBusy(false); lyricRef.current = []; lyricSource.current = ""; setLyrics([]); setActive(-1);
+    setAssetError(""); setAssetBusy(false); lyricRef.current = []; lyricSource.current = ""; setLyrics([]); setActive(-1); setUnsynced(false);
     const instance = player.current as VideoPlayer | null;
     const subtitles = kind === "video" && instance && "setSubtitle" in instance ? instance : null;
     if (!selected) { if (subtitles) void subtitles.setSubtitle(null); return; }
     const asset = assets.find(item => item.path === selected);
-    if (!asset || !resolveAsset.current) return;
+    if (!asset || (!asset.read && !resolveAsset.current)) return;
     setAssetBusy(true);
     if (subtitles) void subtitles.setSubtitle(null);
-    void readPreviewText(resolveAsset.current(asset.path), 2 * 1024 * 1024, controller.signal).then(async value => {
+    // 内置字幕轨可能要先在服务器提取（MKV 要读完整个文件），进度显示在播放器的提示里。
+    let shown = -1;
+    const progress = (fraction: number | null) => {
+      const percent = fraction == null ? null : Math.floor(fraction * 20) * 5;
+      if (!subtitles || percent === shown) return;
+      shown = percent ?? -2;
+      subtitles.notice(percent == null ? "正在提取内置字幕…" : `正在提取内置字幕 ${percent}%`);
+    };
+    const read = asset.read ? asset.read(controller.signal, progress).then(text => ({ text, truncated: false }))
+      : readPreviewText(resolveAsset.current!(asset.path), 2 * 1024 * 1024, controller.signal);
+    void read.then(async value => {
       if (controller.signal.aborted) return;
       if (value.truncated) throw new Error("歌词或字幕超过 2 MB，无法完整预览");
       if (kind === "audio") {
         const parsed = parseLyrics(value.text);
-        if (!parsed.length) throw new Error("歌词没有有效的时间标签");
-        lyricRef.current = parsed; lyricSource.current = url; setLyrics(parsed); setActive(lyricAt(parsed, timeRef.current));
+        // 没有时间标签的歌词（如内嵌的普通歌词）逐行显示，不跟随播放。
+        const lines = parsed.length ? parsed : value.text.split(/\r?\n/).map(line => line.replace(/^\[[a-z]+:[^\]]*\]$/i, "").trim()).filter(Boolean).map(text => ({ time: -1, text }));
+        if (!lines.length) throw new Error("歌词是空的");
+        lyricRef.current = lines; lyricSource.current = url; setLyrics(lines); setUnsynced(!parsed.length);
+        setActive(parsed.length ? lyricAt(parsed, timeRef.current) : -1);
       } else if (subtitles) {
         await subtitles.setSubtitle(value.text, /\.srt$/i.test(asset.name) ? "srt" : "vtt");
+        if (asset.read) subtitles.notice(`已加载${asset.name}`);
       }
     }).catch(reason => { if (!controller.signal.aborted) setAssetError(errorMessage(reason, "歌词或字幕没有加载出来")); })
       .finally(() => { if (!controller.signal.aborted) setAssetBusy(false); });
@@ -446,18 +492,19 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   useEffect(() => { speedCallback.current?.(speed); }, [speed]);
   useEffect(() => () => speedCallback.current?.(null), []);
   // 同时间戳的双语歌词只取第一行；空白间奏保留行高，不让小窗口随每句歌词跳动。
-  const currentLine = kind === "audio" && !failed && selected && !assetBusy && !findingAssets && lyricSource.current === url && lyrics.length
+  const currentLine = kind === "audio" && !failed && selected && !assetBusy && !findingAssets && lyricSource.current === url && lyrics.length && !unsynced
     ? lyrics[active]?.text.split(/\r?\n/).find(line => line.trim())?.trim() ?? "" : null;
   useEffect(() => { callbacks.current.onLyricLine?.(currentLine); }, [currentLine, url]);
   const options = assets.map(asset => ({ value: asset.path, label: assetLabel(asset) + (assets.filter(item => assetLabel(item) === assetLabel(asset)).length > 1 ? ` · ${asset.name}` : "") }));
   const optionKey = options.map(option => `${option.value}=${option.label}`).join("|");
   // 视频字幕放进播放器自己的设置菜单；没有找到字幕时不出现这一项，也不再单独占一行提示。
+  const canFind = Boolean(onFindAssets);
   useEffect(() => {
     const instance = player.current as VideoPlayer | null;
     if (!playerReady || kind !== "video" || !instance) return;
-    instance.setSubtitleMenu(options, selected, setSelected);
+    instance.setSubtitleMenu(options, selected, setSelected, canFind ? { label: "在线查找字幕…", run: () => findRef.current?.("subtitle") } : undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playerReady, optionKey, selected]);
+  }, [playerReady, optionKey, selected, canFind]);
   useEffect(() => {
     const instance = player.current as VideoPlayer | null, message = assetError || discoveryError;
     if (message && kind === "video" && instance) instance.notice(message);
@@ -486,9 +533,11 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
 
   const audio = player.current as AudioPlayer | null;
   // 「歌名 - 歌手」或「歌名-歌手」：拆成标题和副标题；格式、大小已在窗口头部显示，这里不再重复。
+  // 文件带标签时用标签里的歌名、歌手与专辑。
   const base = name.replace(/\.[^.]+$/, "");
   const parts = /^(.+?)\s*[-–—]\s*([^-–—]+)$/.exec(base);
-  const title = parts ? parts[1].trim() : base, artist = parts ? parts[2].trim() : "";
+  const title = tags?.title || (parts ? parts[1].trim() : base);
+  const artist = tags?.title ? [tags.artist, tags.album].filter(Boolean).join(" · ") : parts ? parts[2].trim() : "";
   const toggle = () => { if (!audio) return; if (audio.isPlaying()) audio.pause(); else void audio.play().catch(() => undefined); };
   const modeIndex = PLAYBACK_MODES.findIndex(item => item.value === nav?.mode);
   const nextMode = PLAYBACK_MODES[(modeIndex + 1) % PLAYBACK_MODES.length];
@@ -500,7 +549,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   const lyricHint = lyricsLoading ? ""
     : assetError || discoveryError ? assetError || discoveryError
     : assets.length && !selected ? "歌词已关闭"
-    : loadAssets && !assets.length ? "没有找到同名歌词（.lrc）"
+    : loadAssets && !assets.length ? onFindAssets ? "没有歌词" : "没有找到同名歌词（.lrc）"
     : "";
   // 没有歌词时右侧显示音频信息：格式（无损格式标注）、时长、大小与按大小估算的平均码率（含封面等元数据，所以写「约」）。
   const extension = /\.([a-z\d]{2,5})$/i.exec(name)?.[1].toUpperCase() ?? "";
@@ -528,7 +577,10 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
           </p>
         </div>
         {failure || (showLyrics
-          ? <div className="audio-lyrics" ref={lyricHost} aria-label="同步歌词，点击跳转">
+          ? unsynced ? <div className="audio-lyrics is-unsynced" ref={lyricHost} aria-label="歌词（没有时间轴）">
+            {lyrics.map((line, index) => <p key={index} className="audio-lyric">{line.text}</p>)}
+          </div>
+          : <div className="audio-lyrics" ref={lyricHost} aria-label="同步歌词，点击跳转">
             {lyrics.map((line, index) => <button type="button" key={index} data-line={index} className={`audio-lyric${active === index ? " is-active" : ""}${index < active ? " is-past" : ""}`}
               aria-current={active === index ? "true" : undefined} onClick={() => audio?.seek(line.time)}>{line.text || <Icon name="audio" size={14} className="audio-lyric-rest" />}</button>)}
           </div>
@@ -537,6 +589,10 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
             : <div className="audio-info">
               {facts.length > 0 && <ul className="audio-facts" aria-label="音频信息">{facts.map(fact => <li key={fact}>{fact}</li>)}</ul>}
               {lyricHint && <p className="audio-hint">{lyricHint}</p>}
+              {onFindAssets && !lyricsLoading && !failed && (!assets.length || !cover) && <div className="audio-find">
+                {!assets.length && <Button size="sm" variant="secondary" icon="search" onClick={() => onFindAssets("lyrics")}>在线查找歌词</Button>}
+                {!cover && <Button size="sm" variant="ghost" icon="image" onClick={() => onFindAssets("cover")}>查找封面</Button>}
+              </div>}
             </div>)}
       </div>
     </div>
@@ -557,7 +613,8 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
           {assets.length > 0 && !failed && <Menu label={selected ? `歌词：${lyricLabel}（点击切换）` : "歌词已关闭（点击选择）"} align="end" above
             className={`audio-button audio-lyrics-button${selected ? " is-active" : ""}`}
             items={[{ label: "关闭歌词", icon: "x", checked: !selected, heading: "歌词", onSelect: () => setSelected("") },
-              ...options.map(option => ({ label: option.label, icon: "fileText" as const, checked: selected === option.value, onSelect: () => setSelected(option.value) }))]}>
+              ...options.map(option => ({ label: option.label, icon: "fileText" as const, checked: selected === option.value, onSelect: () => setSelected(option.value) })),
+              ...(onFindAssets ? [{ label: "在线查找歌词…", icon: "search" as const, divider: true, onSelect: () => onFindAssets("lyrics") }] : [])]}>
             <Icon name="fileText" size={20} />
           </Menu>}
           <div className="audio-volume">

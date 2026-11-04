@@ -42,6 +42,7 @@ from .objects import PRIVATE_PREFIX, Scope
 from .private import PrivateAccessLogFilter, PrivateLocked, PrivateSpace
 from .extract import ArchiveService
 from .extract import _content_type as _archive_type
+from .media.service import AssetExists, MediaService
 from .registration import RegistrationService
 from .settings import SystemSettings
 from .share import ShareAccess
@@ -96,6 +97,8 @@ class TgDriveASGI(StaticFiles):
         self.private_space = PrivateSpace(user, self.settings)
         # 在线解压：任务只在进程内存里，流式读写存储，不落本地磁盘。
         self.archives = ArchiveService(user.objects)
+        # 媒体元数据：文件自带的标签、内嵌歌词与字幕，以及可在系统设置中开关的第三方提供者（封面、歌词、字幕）。
+        self.media = MediaService(user.objects, admin.accounts.keystore, resources)
         self.passkeys = self.private_space.passkeys
         self.client_cache = ClientCache(user, self.private_space)
         self.registration = RegistrationService(user.accounts)
@@ -144,6 +147,7 @@ class TgDriveASGI(StaticFiles):
                     if self.thumbnails is not None:
                         await self.thumbnails.stop()
                     await self.archives.stop()
+                    await self.media.stop()
                     if self.scheduler is not None:
                         await self.scheduler.stop()
                     await send({"type": "lifespan.shutdown.complete"})
@@ -276,7 +280,8 @@ class TgDriveASGI(StaticFiles):
                 route = path[len("/api/user/v1/private"):]
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
-                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/move", "/archive",
+                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save",
+                           "/media/lyrics", "/media/subtitle", "/media/extract", "/media/jobs", "/move", "/archive",
                            "/archive/inspect", "/archive/extract", "/archive/jobs", "/archive/browse", "/archive/entry", "/archive/compress",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
                            "/thumbnail/fetch", "/content", "/preview-assets", "/preview-list",
@@ -457,7 +462,7 @@ class TgDriveASGI(StaticFiles):
                           "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/clients/{}/delete": "client.delete",
                           "/bots": "bot.create", "/bots/{}/status": "bot.status",
                           "/bots/{}/check": "bot.check", "/settings": "settings.update", "/resources": "resources.update",
-                          "/registration": "registration.update", "/registration/test-email": "registration.test_email",
+                          "/registration": "registration.update", "/media/providers": "media.providers.update", "/registration/test-email": "registration.test_email",
                           "/registration/invites": "invite.create", "/registration/invites/{}/revoke": "invite.revoke",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
@@ -488,7 +493,8 @@ class TgDriveASGI(StaticFiles):
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
                          "/downloads/{}/now": "download.now", "/downloads/move": "download.move",
-                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/downloads/stop-all": "download.stop_all", "/shares/{}/save": "share.save", "/archive/extract": "archive.extract", "/archive/compress": "archive.compress", "/cache/reset": "client_cache.reset",
+                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/downloads/stop-all": "download.stop_all", "/shares/{}/save": "share.save", "/archive/extract": "archive.extract", "/archive/compress": "archive.compress",
+                         "/media/save": "media.save", "/private/media/save": "media.save", "/cache/reset": "client_cache.reset",
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
@@ -588,6 +594,14 @@ class TgDriveASGI(StaticFiles):
             # 只记数量与压缩方式，不记路径。
             detail = {"count": len(payload.get("paths", [])) if isinstance(payload.get("paths"), list) else 0,
                       "compression": "store" if payload.get("compression") == "store" else "deflate"}
+        elif action == "media.providers.update":
+            # 只记启用状态与是否改了配置；配置值（含令牌、账号）一律不记。
+            providers = payload.get("providers") if isinstance(payload.get("providers"), dict) else {}
+            detail = {"enabled": {key: value["enabled"] for key, value in providers.items() if isinstance(value, dict) and isinstance(value.get("enabled"), bool)},
+                      "configured": sorted(key for key, value in providers.items() if isinstance(value, dict) and (value.get("config") or value.get("clear")))}
+        elif action == "media.save":
+            # 不记录文件路径、查询词或歌词字幕内容。
+            detail = {key: (result or {}).get(key) for key in ("provider", "format", "replaced")} if ok else {}
         elif action == "share.save":
             detail = {"saved": (result or {}).get("saved"), "bytes": (result or {}).get("bytes")} if ok else {}
         elif action == "assistant.attachment.save":
@@ -855,6 +869,14 @@ class TgDriveASGI(StaticFiles):
                 return 204, None, {"Set-Cookie": self._cookie("", expires=True)}
             if not self.admin.accounts.keystore.unlocked:
                 raise NotReadyError("系统尚未解锁")
+            if route == "/media/providers":
+                if method == "GET":
+                    return 200, self.media.describe(), {}
+                if method == "POST":
+                    return 200, self.media.configure(payload), {}
+            provider_test = re.fullmatch(r"/media/providers/([a-z0-9_-]{1,32})/test", route)
+            if provider_test and method == "POST":
+                return 200, await self.media.test(provider_test[1]), {}
             if route == "/registration":
                 if method == "GET":
                     return 200, self.registration.describe(), {}
@@ -1213,6 +1235,9 @@ class TgDriveASGI(StaticFiles):
                 return await self._archive_route(user, method, route, query, payload, token, csrf, private)
             if method == "POST" and route == "/media/size":
                 return 200, user.set_media_size(token, csrf, payload), {}
+            if route in ("/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save", "/media/lyrics", "/media/subtitle",
+                         "/media/extract", "/media/jobs"):
+                return await self._media_route(user, method, route, query, payload, token, csrf)
             if method == "GET" and route == "/files/info":
                 return 200, user.file_info(token, query.get("path", [""])[0]), {"Cache-Control": "no-store"}
             if method == "GET" and route == "/folders":
@@ -1337,6 +1362,52 @@ class TgDriveASGI(StaticFiles):
                 and query.get("bucket_id", [""])[0] and info.etag and query.get("v", [""])[0] == info.etag):
             cache_control = "private, max-age=604800, immutable"
         await self._stream_object(send, method, info, opener, query, headers, cache_control)
+
+    async def _media_route(self, user, method, route, query, payload, token, csrf):
+        """媒体元数据（media/service.py）：文件信息、在线查找、读取与保存候选、内嵌歌词与字幕。
+        私密空间走 /private 前缀，范围与授权来自当前解锁的私密会话。"""
+        # 查找、读取候选会访问第三方，按修改操作要求 CSRF；封面预览图是 <img> 的 GET 请求，凭只发给本人的候选令牌读取。
+        scope = user._scope(token, csrf=csrf, mutation=method != "GET")
+        no_store = {"Cache-Control": "no-store"}
+        source = payload if method == "POST" else {key: values[0] for key, values in query.items()}
+        if route == "/media/jobs" and method == "GET":
+            ids = [value for value in source.get("ids", "").split(",") if value]
+            return 200, {"jobs": self.media.jobs(scope, ids)}, no_store
+        path = user._path(source.get("path", ""))
+
+        def text_response(value, mime):
+            return 200, value.encode("utf-8"), {"Content-Type": mime, **no_store, "X-Content-Type-Options": "nosniff"}
+
+        if route == "/media/info" and method == "GET":
+            return 200, await self.media.info(scope, path), no_store
+        if route == "/media/lookup" and method == "POST":
+            only = payload.get("providers")
+            only = [item for item in only if isinstance(item, str)][:20] if isinstance(only, list) else None
+            overrides = payload.get("query") if isinstance(payload.get("query"), dict) else None
+            return 200, await self.media.lookup(scope, path, str(payload.get("want", "")), overrides, only), no_store
+        if route == "/media/fetch" and method == "POST":
+            fetched = await self.media.fetch(scope, path, str(payload.get("token", "")))
+            if fetched.data is not None:
+                return 200, fetched.data, {"Content-Type": fetched.mime or "application/octet-stream", **no_store}
+            return 200, {"text": fetched.text, "format": fetched.format, "name": fetched.name}, no_store
+        if route == "/media/preview" and method == "GET":
+            data, mime = await self.media.preview(scope, path, source.get("token", ""))
+            return 200, data, {"Content-Type": mime, "Cache-Control": "private, max-age=600"}
+        if route == "/media/save" and method == "POST":
+            language = payload.get("language")
+            return 201, await self.media.save(scope, path, str(payload.get("token", "")), language=language if language else None,
+                                              overwrite=payload.get("overwrite") is True), no_store
+        if route == "/media/lyrics" and method == "GET":
+            return text_response(await self.media.embedded_lyrics(scope, path, source.get("etag", "")), "text/plain; charset=utf-8")
+        if route == "/media/subtitle" and method == "GET":
+            try:
+                track = int(source.get("track", ""))
+            except ValueError:
+                raise ValueError("字幕轨编号不正确") from None
+            return text_response(self.media.embedded_subtitle(scope, path, source.get("etag", ""), track), "text/vtt; charset=utf-8")
+        if route == "/media/extract" and method == "POST":
+            return 202, await self.media.extract(scope, path, str(payload.get("etag", "")), payload.get("track")), no_store
+        raise NotFoundError("资源不存在")
 
     async def _archive_route(self, user, method, route, query, payload, token, csrf, private):
         """在线解压（extract.py）：预览压缩包、开始解压、查看与取消任务。私密空间走 /private 前缀，按当前解锁授权读写。"""
@@ -1865,6 +1936,7 @@ class TgDriveASGI(StaticFiles):
             status, code, message = 416, "range_not_satisfiable", "请求的字节范围不可满足"
             extra["Content-Range"] = f"bytes */{exc.size}"
         elif isinstance(exc, IntegrityError): status, code, message = 500, "integrity_error", "文件完整性校验失败"
+        elif isinstance(exc, AssetExists): status, code, message = 409, "asset_exists", str(exc)
         elif isinstance(exc, VersionConflict): status, code, message = 409, "version_conflict", "文件已在别处修改，请重新加载后再保存"
         elif isinstance(exc, QuotaExceededError): status, code, message = 413, "quota_exceeded", "空间不足，请先清理不需要的文件或联系管理员扩容"
         elif isinstance(exc, ValueError):

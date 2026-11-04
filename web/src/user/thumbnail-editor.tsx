@@ -3,8 +3,9 @@ import * as api from "../api";
 import { baseName, getFileKind } from "../files";
 import { createThumbnails, generateLoadedThumbnails, saveImageThumbnail, thumbnailSource } from "../thumbnails";
 import { Button, Icon, Modal, Notice, Segmented, formatBytes, shortcutLabel } from "../ui";
+import { MediaCoverSearch } from "./media-lookup";
 
-type Source = "auto" | "local" | "url";
+type Source = "auto" | "online" | "local" | "url";
 export type PickedImage = { blob: Blob; url: string; name: string; width: number; height: number };
 type Generating = { state: "running" | "failed"; detail: string };
 
@@ -88,9 +89,12 @@ export function ImageUrlForm({ picker, disabled }: { picker: ImagePicker; disabl
 /** 较大的图片生成时可能要从存储读完整个文件，并按服务器内存评估；提示用户可能不会生成。 */
 const LARGE_IMAGE = 64 * 1024 * 1024;
 
-export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem; onClose: () => void; onSaved: (variants: string[]) => void }) {
+export function ThumbnailEditor({ file, onClose, onSaved, initialSource }: { file: api.FileItem; onClose: () => void; onSaved: (variants: string[]) => void;
+  /** 打开时选中的来源（播放器里的「查找封面」直接打开在线查找）。 */ initialSource?: Source }) {
   const media = thumbnailSource(file.key, file.content_type, file.size);
-  const [source, setSource] = useState<Source>(media ? "auto" : "local");
+  // 音乐与视频可以从已开启的第三方来源（专辑封面、电影海报等）在线查找封面。
+  const online = media === "audio" || media === "video";
+  const [source, setSource] = useState<Source>(initialSource === "online" && !online ? "local" : initialSource ?? (media ? "auto" : "local"));
   const [generating, setGenerating] = useState<Generating | null>(null);
   const generation = useRef<AbortController | null>(null);
   const picker = useImagePicker(file.key);
@@ -198,7 +202,8 @@ export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem
         </> : <div className="thumbnail-stage-empty"><Icon name="image" size={28} /><span>还没有封面</span></div>}
       </div>
       <Segmented label="封面来源" showLabels value={source} disabled={generating?.state === "running" || saving} onChange={value => { setSource(value); setError(""); }} options={[
-        { value: "auto", label: "自动生成", icon: "sparkle" }, { value: "local", label: "本地图片", icon: "upload" }, { value: "url", label: "图片地址", icon: "link" },
+        { value: "auto", label: "自动生成", icon: "sparkle" }, ...(online ? [{ value: "online" as const, label: "在线查找", icon: "search" as const }] : []),
+        { value: "local", label: "本地图片", icon: "upload" }, { value: "url", label: "图片地址", icon: "link" },
       ]} />
       {source === "auto" ? <div className={`thumbnail-auto${generating ? ` is-${generating.state}` : ""}`} role="status">
         {generating?.state === "running" ? <span className="spinner" aria-hidden="true" /> : <Icon name={generating?.state === "failed" ? "alert" : "sparkle"} size={20} />}
@@ -214,10 +219,11 @@ export function ThumbnailEditor({ file, onClose, onSaved }: { file: api.FileItem
             <Button size="sm" icon="upload" onClick={() => { setSource("local"); setGenerating(null); }}>改用本地图片</Button>
             <Button size="sm" variant="ghost" icon="link" onClick={() => { setSource("url"); setGenerating(null); }}>填写图片地址</Button>
           </span>}</span>
-      </div> : source === "local" ? <LocalImageButton picker={picker} disabled={saving} dragging={dragging} onDragging={setDragging} />
+      </div> : source === "online" ? <MediaCoverSearch file={file} disabled={saving} onPick={(image, name) => { picker.setAddress(""); return accept(image, name); }} />
+        : source === "local" ? <LocalImageButton picker={picker} disabled={saving} dragging={dragging} onDragging={setDragging} />
         : <ImageUrlForm picker={picker} disabled={saving} />}
       {error && <Notice tone="danger">{error}</Notice>}
-      {source !== "auto" && <p className="thumbnail-editor-hint">图片会缩放为列表、网格与预览大图三种尺寸保存，原图不会存入你的文件。{source === "url" ? "网络图片由服务器读取，需能公开访问，最大 50 MB。" : ""}{video ? "播放视频时，也可以点击控制条的图片按钮把当前画面设为封面。" : ""}</p>}
+      {source !== "auto" && <p className="thumbnail-editor-hint">图片会缩放为列表、网格与预览大图三种尺寸保存，原图不会存入你的文件。{source === "url" ? "网络图片由服务器读取，需能公开访问，最大 50 MB。" : source === "online" ? "点一张候选图片即可预览，确认后保存。" : ""}{video ? "播放视频时，也可以点击控制条的图片按钮把当前画面设为封面。" : ""}</p>}
     </div>
   </Modal>;
 }

@@ -239,16 +239,26 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       events?.onPlaying(false); events?.onProgress?.({ currentTime: 0, duration: 0 });
       setCover(nextCover, nextSize);
     },
-    /** 字幕选择放在播放器的设置菜单里；没有字幕时不显示这一项。 */
-    setSubtitleMenu: (options: { value: string; label: string }[], selected: string, onSelect: (value: string) => void) => {
+    /** 字幕选择放在播放器的设置菜单里；没有字幕、也没有附加操作（如「在线查找字幕」）时不显示这一项。
+     *  附加操作排在最后，点击后只执行操作，不改变当前选中的字幕。 */
+    setSubtitleMenu: function setSubtitleMenu(options: { value: string; label: string }[], selected: string, onSelect: (value: string) => void, action?: { label: string; run: () => void }) {
       if (destroyed) return;
-      if (!options.length) { if (player.setting.find("subtitle")) player.setting.remove("subtitle"); return; }
-      const choices = [{ value: "", label: "关闭" }, ...options];
+      if (!options.length && !action) { if (player.setting.find("subtitle")) player.setting.remove("subtitle"); return; }
+      const ACTION = "\u0000action";
+      const choices = [...(options.length ? [{ value: "", label: "关闭" }, ...options] : []), ...(action ? [{ value: ACTION, label: action.label }] : [])];
       const current = choices.find(choice => choice.value === selected) ?? choices[0];
       const item = {
-        name: "subtitle", html: "字幕", tooltip: current.label, width: 220,
-        selector: choices.map(choice => ({ html: choice.label, value: choice.value, default: choice.value === current.value })),
-        onSelect: (option: { value?: string; html: string }) => { onSelect(String(option.value ?? "")); return option.html; },
+        name: "subtitle", html: "字幕", tooltip: options.length ? current.label : "没有字幕", width: 220,
+        selector: choices.map(choice => ({ html: choice.label, value: choice.value, default: choice.value === current.value && choice.value !== ACTION })),
+        onSelect: (option: { value?: string; html: string }) => {
+          if (option.value === ACTION) {
+            action?.run();
+            // 恢复原来的选中项与提示，附加操作不是一条字幕。
+            window.setTimeout(() => setSubtitleMenu(options, selected, onSelect, action), 0);
+            return options.length ? current.label : "没有字幕";
+          }
+          onSelect(String(option.value ?? "")); return option.html;
+        },
       };
       if (player.setting.find("subtitle")) player.setting.update(item); else player.setting.add(item);
     },
