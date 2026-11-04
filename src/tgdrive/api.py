@@ -1042,15 +1042,39 @@ class UserApi:
 
     ARCHIVE_LIMIT = 200
 
+    def _archive_roots(self, paths: list[str]) -> list[str]:
+        if not isinstance(paths, list) or not 1 <= len(paths) <= self.ARCHIVE_LIMIT or any(not isinstance(p, str) or not p for p in paths):
+            raise ValueError(f"一次最多打包 {self.ARCHIVE_LIMIT} 项")
+        keys = [self._path(p, directory=p.endswith("/")) for p in dict.fromkeys(paths)]
+        # 文件夹与其中的项目同时选择时只打包最外层，避免重复。
+        return [k for k in keys if not any(k != other and other.endswith("/") and k.startswith(other) for other in keys)]
+
+    async def archive_totals(self, token: str, paths: list[str]) -> tuple[list[str], int, int]:
+        """在线压缩前统计所选内容：(最外层路径, 文件数, 总字节数)。文件夹按键范围在 SQL 里汇总，不逐个列出。"""
+        roots = self._archive_roots(paths)
+        scope = self._scope(token)
+
+        def count() -> tuple[int, int]:
+            files = total = 0
+            db = self.objects.metadata.db
+            for key in roots:
+                if key.endswith("/"):
+                    row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE bucket_id=? AND key>=? AND key<? AND substr(key,-1)!='/'",
+                                     (scope.bucket_id, key, key + self.objects._PREFIX_END)).fetchone()
+                else:
+                    self.objects.head_object(scope, key)
+                    row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone()
+                files += int(row[0])
+                total += int(row[1])
+            return files, total
+        files, total = await self.objects.metadata.run_in_thread(count)
+        return roots, files, total
+
     async def archive(self, token: str, paths: list[str]) -> tuple[str, AsyncIterator[tuple[str, int, float, AsyncIterator[bytes]]]]:
         """打包下载所选文件与文件夹（递归）。返回压缩包名与条目迭代器；条目逐个按需读取，不在内存中拼接。
 
         每个条目都经 content 读取，因此私密空间沿用逐块校验授权；文件夹按键集分页列出。"""
-        if not isinstance(paths, list) or not 1 <= len(paths) <= self.ARCHIVE_LIMIT or any(not isinstance(p, str) for p in paths):
-            raise ValueError(f"一次最多打包下载 {self.ARCHIVE_LIMIT} 项")
-        keys = [self._path(p, directory=p.endswith("/")) for p in dict.fromkeys(paths)]
-        # 文件夹与其中的项目同时选择时只打包最外层，避免重复。
-        roots = [k for k in keys if not any(k != other and other.endswith("/") and k.startswith(other) for other in keys)]
+        roots = self._archive_roots(paths)
         scope = self._scope(token)
         # 预先校验所选文件存在，避免下载到一半才发现缺文件。
         await self.objects.metadata.run_in_thread(lambda: [self.objects.head_object(scope, k) for k in roots if not k.endswith("/")])

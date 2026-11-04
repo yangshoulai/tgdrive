@@ -22,6 +22,9 @@ class SniffTests(unittest.TestCase):
                  b"\x1aE\xdf\xa3\x01\x00\x00\x00webm": "exact:video/webm", b"PK\x03\x04" + bytes(26): "zip:application/zip",
                  b"PK\x03\x04" + bytes(26) + b"[Content_Types].xml word/document.xml": "exact:application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                  "# 标题\n正文".encode(): "text:text/plain", b"<svg xmlns='http://www.w3.org/2000/svg'/>": "exact:image/svg+xml",
+                 b"\x00\x01\x00\x00\x00\x12\x01\x00\x00\x04\x00\x20" + bytes(64): "exact:font/ttf", b"OTTO\x00\x0b" + bytes(64): "exact:font/otf",
+                 b"wOFF" + bytes(64): "exact:font/woff", b"wOF2" + bytes(64): "exact:font/woff2",
+                 b"PK\x03\x04" + bytes(26) + b"mimetypeapplication/epub+zip": "exact:application/epub+zip",
                  b"": "empty:", bytes(range(256)) * 4: "unknown:"}
         for head, expected in cases.items():
             with self.subTest(head=head[:12]):
@@ -45,6 +48,9 @@ class SniffTests(unittest.TestCase):
         self.assertEqual(kind_of("a.jpg", "application/octet-stream"), "image")
         self.assertEqual(kind_of("song.flac", "video/x-flac"), "audio", "容器相同时音频扩展名仍算音频")
         self.assertEqual(kind_of("main.py", "text/plain"), "text")
+        self.assertEqual(kind_of("book.epub", "application/epub+zip"), "document", "电子书归文档，不算压缩包")
+        self.assertEqual(kind_of("a.ipynb", "application/x-ipynb+json"), "text")
+        self.assertEqual(kind_of("a.jsonl", None), "text")
 
 
 class StoredTypeTests(unittest.IsolatedAsyncioTestCase):

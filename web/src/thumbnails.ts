@@ -481,6 +481,25 @@ export async function saveImageThumbnail(file: Pick<api.FileItem, "key" | "etag"
   return await saveCustomThumbnails(file, result);
 }
 
+/** SVG 矢量图：服务器不生成封面（SVG 可能引用外部资源），由浏览器把图片栅格化后按自定义封面保存。
+ * 传入已经显示出来的 <img>（预览时）或文件内容（上传后）；没有固有尺寸的 SVG 按 960 像素见方绘制。 */
+export async function saveSvgThumbnail(file: Pick<api.FileItem, "key" | "etag">, source: HTMLImageElement | Blob): Promise<string[]> {
+  let image: HTMLImageElement, url: string | null = null;
+  if (source instanceof Blob) {
+    url = URL.createObjectURL(source.type === "image/svg+xml" ? source : new Blob([source], { type: "image/svg+xml" }));
+    image = new Image();
+    image.src = url;
+    await image.decode();
+  } else image = source;
+  try {
+    const width = image.naturalWidth || 960, height = image.naturalHeight || 960;
+    const scale = Math.max(1, 960 / Math.max(width, height));
+    const result = await renderSet(image, width * scale, height * scale);
+    if (!result) throw new Error("矢量图没有画出来");
+    return await saveCustomThumbnails(file, result);
+  } finally { if (url) URL.revokeObjectURL(url); }
+}
+
 /** 浏览器取得生成权后处理本地／已加载数据，处理期间持续续期（不设总时限）；失败主动交还，页面关闭则由服务端超时接管。 */
 export async function generateLoadedThumbnails(file: Pick<api.FileItem, "key" | "etag">, produce: (signal: AbortSignal) => Promise<ThumbnailResult>, force = false, signal?: AbortSignal): Promise<string[] | null> {
   if (signal?.aborted) return null;

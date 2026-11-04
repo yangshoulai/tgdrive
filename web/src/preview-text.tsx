@@ -9,6 +9,13 @@ import * as api from "./api";
 import { Button, ConfirmDialog, Icon, IconButton, Segmented, Switch, copyText, formatBytes, isShortcutControl, toast, type MenuItem } from "./ui";
 import { TEXT_PREVIEW_LIMIT, type PreviewText } from "./preview-data";
 import { ENCODING_LABEL } from "./text-encoding";
+import { textViewOf, type TextView } from "./preview-formats";
+import { TablePreview } from "./preview-table";
+import { TreePreview } from "./preview-tree";
+import { NotebookPreview } from "./preview-notebook";
+
+/** 各视图在「显示方式」切换里的名称（另一项是源码）。 */
+const VIEW_LABEL: Record<TextView, string> = { markdown: "预览", table: "表格", tree: "结构", notebook: "笔记本" };
 
 /** 文本编辑：save 按原编码覆盖原文件（force 为真时不校验版本），reload 读取最新版本；onDirty 报告是否有未保存的修改。 */
 export type TextEdit = { save: (text: string, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void };
@@ -58,7 +65,9 @@ function loadRemoteImages(root: HTMLElement) {
 export function TextPreview({ content, name, code = false, downloadUrl, resolveImage, onError, edit }: {
   content: PreviewText; name: string; code?: boolean; downloadUrl: string; resolveImage?: (src: string) => string | null; onError: (reason: unknown) => void; edit?: TextEdit;
 }) {
-  const [mode, setMode] = useState<"render" | "source">(/\.(md|markdown|mdx)$/i.test(name) ? "render" : "source");
+  // 有专门视图的文本（Markdown、CSV、JSON／YAML、Notebook）默认打开视图，其余直接显示源码。
+  const view = textViewOf(name);
+  const [mode, setMode] = useState<"render" | "source">(view ? "render" : "source");
   const [wrapping, setWrapping] = useState(true);
   const [ready, setReady] = useState(false);
   const [headings, setHeadings] = useState<Heading[]>([]);
@@ -79,9 +88,11 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   const immersive = tools !== null;
   const compactTools = tools?.compact ?? false;
   const setMenuItems = tools?.setMenuItems;
-  const markdown = /\.(md|markdown|mdx)$/i.test(name);
-  // 纸张只给 Markdown 预览；纯文本、日志、代码与 Markdown 源码统一用深色通栏编辑器。
-  const paper = immersive && markdown && mode === "render";
+  const markdown = view === "markdown";
+  // 表格、结构与笔记本视图是 React 组件，不用编辑器引擎渲染。
+  const structured = mode === "render" && view !== null && !markdown;
+  // 纸张只给 Markdown 与 Notebook 预览；纯文本、日志、代码、源码、表格与结构视图统一用深色通栏。
+  const paper = immersive && (markdown || view === "notebook") && mode === "render";
   const lineCount = useMemo(() => {
     // 大文本只统计换行，避免 split 为每一行额外分配字符串。
     let count = 1;
@@ -98,6 +109,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   useEffect(() => {
     let cancelled = false;
     setReady(false); setHeadings([]);
+    if (structured) { setReady(true); return; }
     void loadTextEngine().then(engine => {
       if (cancelled || !host.current) return;
       if (mode === "render") {
@@ -165,13 +177,13 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
       }
       if (mod || event.altKey || event.shiftKey) return;
       if (key === "e" && edit && !editBlocked && !editingRef.current) { event.preventDefault(); if (!event.repeat) startEditing(); }
-      else if (key === "t" && markdown) { event.preventDefault(); if (!event.repeat) setMode(value => value === "render" ? "source" : "render"); }
+      else if (key === "t" && view) { event.preventDefault(); if (!event.repeat) setMode(value => value === "render" ? "source" : "render"); }
       else if (key === "o" && mode === "render" && headings.length) { event.preventDefault(); if (!event.repeat) setOutline(value => !value); }
       else if (key === "w" && mode === "source") { event.preventDefault(); if (!event.repeat) setWrapping(value => !value); }
     };
     document.addEventListener("keydown", handle);
     return () => document.removeEventListener("keydown", handle);
-  }, [immersive, markdown, mode, ready, headings.length, edit, editBlocked]);
+  }, [immersive, markdown, view, mode, ready, headings.length, edit, editBlocked]);
   // 预览弹窗里按 Ctrl/⌘+A 只选中文件内容，而不是整个页面；输入框（如查找框）保留原生行为。
   useEffect(() => {
     if (!ready) return;
@@ -240,7 +252,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     if (window.matchMedia("(max-width: 640px)").matches) setOutline(false);
   };
   const toolbar = immersive ? <div className="preview-text-tools">
-    {markdown && <Segmented label="显示方式" shortcut="T" value={mode} onChange={setMode} options={[{ value: "render", label: "预览" }, { value: "source", label: "源码" }]} />}
+    {view && <Segmented label="显示方式" shortcut="T" value={mode} onChange={setMode} options={[{ value: "render", label: VIEW_LABEL[view] }, { value: "source", label: "源码" }]} />}
     {markdown && mode === "render" && headings.length > 0 && <IconButton icon="list" label="目录" shortcut="O" size="sm" className="playlist-toggle" active={outline} onClick={() => setOutline(value => !value)} />}
     {!compactTools && mode === "source" && <>
       <IconButton icon="search" label="查找" shortcut="Mod+F" size="sm" disabled={!ready} onClick={() => editor.current?.search()} />
@@ -253,8 +265,8 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
       <Button size="sm" variant="primary" icon="check" shortcut="Mod+S" loading={saving} disabled={!dirty} onClick={() => void save(false)}>保存</Button>
     </span>}
   </div> : <div className="preview-toolbar">
-    {markdown && <Segmented label="显示方式" value={mode} onChange={setMode} options={[{ value: "render", label: "预览" }, { value: "source", label: "源码" }]} />}
-    {!markdown && <span className="preview-readonly"><Icon name="fileText" size={14} />只读预览</span>}
+    {view && <Segmented label="显示方式" value={mode} onChange={setMode} options={[{ value: "render", label: VIEW_LABEL[view] }, { value: "source", label: "源码" }]} />}
+    {!view && <span className="preview-readonly"><Icon name="fileText" size={14} />只读预览</span>}
     {mode === "source" && <div className="preview-toolbar-actions">
       <Button variant="ghost" size="sm" icon="search" disabled={!ready} onClick={() => editor.current?.search()}>查找</Button>
       <Button variant="ghost" size="sm" icon="copy" disabled={!ready} title={content.truncated ? "复制已加载的预览内容" : "复制全部内容"} onClick={copy}>复制</Button>
@@ -265,7 +277,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     : mode === "source" && ready ? (content.text.length ? `${lineCount.toLocaleString()} 行` : "文件内容为空") : null;
   const truncated = content.truncated && <span>仅显示前 {formatBytes(TEXT_PREVIEW_LIMIT)}{content.total ? `（共 ${formatBytes(content.total)}）` : ""}，<a href={downloadUrl}>下载完整文件</a></span>;
 
-  return <div className={`preview-text${editing ? " is-editing" : ""}${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${content.truncated ? " is-truncated" : ""}${immersive ? paper ? " is-paper" : " is-code" : ""}`}>
+  return <div className={`preview-text${editing ? " is-editing" : ""}${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${structured ? ` is-view-${view}` : ""}${content.truncated ? " is-truncated" : ""}${immersive ? paper ? " is-paper" : " is-code" : ""}`}>
     {tools ? createPortal(toolbar, tools.target) : toolbar}
     {!ready && <div className="preview-engine-loading" role="status"><span className="spinner" />正在准备预览…</div>}
     {conflict && <div className="preview-edit-conflict" role="alert">
@@ -278,13 +290,16 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     {forcing && <ConfirmDialog title="覆盖别处的修改？" description="文件在你打开之后被修改过。仍然保存会用你当前的内容覆盖它，别处的修改将丢失。" confirmLabel="覆盖保存"
       onConfirm={async () => { setForcing(false); await save(true); }} onClose={() => setForcing(false)} />}
     <div className={immersive ? "preview-sheet" : undefined}>
-      <div ref={host} className={mode === "render" ? "preview-doc md" : "preview-code-editor"} onClick={event => {
+      {structured ? view === "table" ? <TablePreview text={draft.current} name={name} truncated={content.truncated} />
+        : view === "tree" ? <TreePreview text={draft.current} name={name} truncated={content.truncated} />
+        : <div className="preview-doc"><NotebookPreview text={draft.current} /></div>
+      : <div ref={host} className={mode === "render" ? "preview-doc md" : "preview-code-editor"} onClick={event => {
         const remote = (event.target as Element).closest("button.md-remote-image");
         if (remote && host.current) { event.preventDefault(); loadRemoteImages(host.current); return; }
         const button = (event.target as Element).closest<HTMLButtonElement>("button[data-copy-code]");
         const code = button?.closest(".src-fence")?.querySelector("code");
         if (code) void copyText(code.textContent ?? "", "代码已复制");
-      }} />
+      }} />}
     </div>
     {immersive ? (status || truncated) && <div className="preview-text-capsule" role="status">{status && <span>{status}</span>}{truncated}</div> : <>
       {truncated && <div className="preview-notice">{truncated}</div>}

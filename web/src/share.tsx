@@ -109,7 +109,7 @@ export function SharePage({ token }: { token: string }) {
                 <ButtonLink variant="primary" size="md" icon="download" href={downloadUrl}>下载</ButtonLink>
               </div>
             </header>
-            {canPreview(kind) && <div className="share-preview"><FilePreview kind={kind} url={url} name={file.name} size={file.size} videoSize={file.dimensions ?? undefined} downloadUrl={downloadUrl} contentType={file.content_type} poster={hasThumbnail ? api.publicThumbnail(url, "poster") : undefined} /></div>}
+            {canPreview(kind, file.name, file.content_type) && <div className="share-preview"><FilePreview kind={kind} url={url} name={file.name} size={file.size} videoSize={file.dimensions ?? undefined} downloadUrl={downloadUrl} contentType={file.content_type} poster={hasThumbnail ? api.publicThumbnail(url, "poster") : undefined} /></div>}
           </article>
         )}
         <p className="share-footnote">这是 {BRAND} 用户分享的{file?.kind === "folder" ? "文件夹" : "文件"}，只有拿到链接的人才能访问。</p>
@@ -361,7 +361,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                 ))}
                 {shownFiles.map(item => {
                   const kind = getFileKind(item.content_type, item.name);
-                  const previewable = canPreview(kind);
+                  const previewable = canPreview(kind, item.name, item.content_type);
                   const download = api.publicFolderFile(token, item.path, true, access);
                   return (
                     <div key={item.path} role="row" className={`data-row is-clickable${selected.has(item.path) ? " is-selected" : ""}`} onClick={() => previewable ? setPreview(item) : window.location.assign(download)}>
@@ -397,7 +397,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
                   const kind = getFileKind(item.content_type, item.name);
                   const content = api.publicFolderFile(token, item.path, false, access);
                   const download = api.publicFolderFile(token, item.path, true, access);
-                  const openFile = () => canPreview(kind) ? setPreview(item) : window.location.assign(download);
+                  const openFile = () => canPreview(kind, item.name, item.content_type) ? setPreview(item) : window.location.assign(download);
                   return <div key={item.path} className={`grid-card${selected.has(item.path) ? " is-selected" : ""}`} onClick={openFile}>
                     <div className="grid-thumb"><FileThumbnail kind={kind} url={item.thumbnails?.includes("thumb") ? api.publicThumbnail(content, "grid") : undefined}
                       placeholder={item.thumbnails?.includes("thumb") ? loadedPlaceholder(api.publicThumbnail(content)) : undefined} />

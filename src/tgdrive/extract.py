@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import bz2
+import logging
 import hashlib
 import hmac
 import lzma
@@ -24,19 +25,26 @@ import struct
 import time
 import unicodedata
 import zlib
+from collections import OrderedDict
+from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from typing import AsyncIterator, Callable
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from .archive import stream_zip
 from .errors import NotFoundError, QuotaExceededError
 from .objects import PRIVATE_PREFIX, ObjectService, Scope
+
+log = logging.getLogger(__name__)
 
 MAX_ENTRIES = 50_000          # 一个压缩包最多处理的条目数
 MAX_CENTRAL = 64 * 1024 * 1024  # 中央目录最大字节数
 CHUNK = 1024 * 1024           # 解压输出分块
 SAMPLE = 500                  # 预览列出的条目数
 JOB_KEEP = 3600               # 已结束任务保留时间（秒）
+DIRECTORY_CACHE = 8           # 在线浏览时缓存的中央目录个数
+DIRECTORY_TTL = 600           # 缓存的中央目录保留时间（秒）
 JOBS_PER_USER = 50
 RUNNING = 2                   # 全站同时进行的解压任务数
 ARCHIVE_TYPES = re.compile(r"\.(zip|tar|tgz|tbz2?|txz|tar\.(?:gz|bz2|xz)|gz|bz2|xz)$", re.IGNORECASE)
@@ -562,6 +570,15 @@ def archive_format(name: str, head: bytes) -> str:
     raise ArchiveError("无法识别压缩格式，只支持 ZIP 与 TAR（含 .tar.gz、.tar.bz2、.tar.xz）")
 
 
+def _dos_time(value: int) -> str | None:
+    """ZIP 里的 DOS 日期时间是打包电脑的本地时间、不带时区：原样给出「年-月-日 时:分」，不换算时区。"""
+    date, clock = value >> 16, value & 0xFFFF
+    month, day, hour, minute = (date >> 5) & 0xF, date & 0x1F, clock >> 11, (clock >> 5) & 0x3F
+    if not date or not 1 <= month <= 12 or not 1 <= day <= 31 or hour > 23 or minute > 59:
+        return None
+    return f"{1980 + (date >> 9):04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
+
+
 def safe_relative(name: str, is_dir: bool) -> str | None:
     """压缩包里的路径转成相对保存位置的路径：去掉开头的 / 与盘符、. 段，含 .. 的条目跳过（不能越出保存位置）。"""
     name = unicodedata.normalize("NFC", name.replace("\\", "/"))
@@ -611,9 +628,11 @@ class Job:
     finished_at: float | None = None
     cancelled: bool = False
     task: asyncio.Task | None = None
+    # extract：解压；compress：在线压缩（archive 为生成的压缩包路径，destination 为它所在的文件夹）。
+    kind: str = "extract"
 
     def public(self) -> dict:
-        return {"id": self.id, "private": self.private, "archive": self.archive, "destination": self.destination, "format": self.format,
+        return {"id": self.id, "kind": self.kind, "private": self.private, "archive": self.archive, "destination": self.destination, "format": self.format,
                 "conflict": self.conflict, "keep_archive": self.keep_archive, "status": self.status,
                 "total_files": self.total_files, "total_bytes": self.total_bytes, "archive_size": self.archive_size, "read_bytes": self.read_bytes,
                 "done_files": self.done_files, "done_bytes": self.done_bytes, "skipped": self.skipped, "renamed": self.renamed,
@@ -631,6 +650,7 @@ class ArchiveService:
         self.objects = objects
         self.jobs: dict[str, Job] = {}
         self.slots = asyncio.Semaphore(RUNNING)
+        self._directories: OrderedDict[tuple, tuple[float, list[ZipEntry]]] = OrderedDict()
 
     # ----- 预览 -----
 
@@ -687,6 +707,56 @@ class ArchiveService:
             result["conflict_bytes"] = sum(existing.values())
         return result
 
+    # ----- 在线浏览（ZIP） -----
+
+    async def _zip_entries(self, scope: Scope, key: str, etag: str, source: Source) -> list[ZipEntry]:
+        """同一版本的中央目录短期复用：浏览压缩包时逐个打开条目，不必每次都重读目录。"""
+        cache_key = (scope.bucket_id, key, etag)
+        cached = self._directories.get(cache_key)
+        if cached is not None and time.monotonic() - cached[0] < DIRECTORY_TTL:
+            self._directories.move_to_end(cache_key)
+            return cached[1]
+        entries = await read_zip(source)
+        self._directories[cache_key] = (time.monotonic(), entries)
+        while len(self._directories) > DIRECTORY_CACHE:
+            self._directories.popitem(last=False)
+        return entries
+
+    async def browse(self, scope: Scope, key: str) -> dict:
+        """列出 ZIP 里的全部条目（最多 MAX_ENTRIES 个），供网页按目录浏览；TAR 没有目录索引，要读完整个压缩包才知道内容，不列出。"""
+        info, source, kind = await self._open(scope, key)
+        result: dict = {"format": kind, "size": info.size, "etag": info.etag}
+        if kind != "zip":
+            return {**result, "listable": False, "entries": []}
+        entries = await self._zip_entries(scope, key, info.etag, source)
+        items = []
+        for index, entry in enumerate(entries):
+            relative = safe_relative(entry.name, entry.is_dir)
+            if not relative or ignored(relative):
+                continue
+            method = entry.aes[1] if entry.aes else entry.method
+            items.append({"index": index, "name": relative, "dir": entry.is_dir, "size": entry.size, "compressed": entry.compressed,
+                          "modified": _dos_time(entry.mod_time), "encrypted": entry.encrypted, "supported": method in METHODS})
+        return {**result, "listable": True, "entries": items}
+
+    async def entry(self, scope: Scope, key: str, index: int, etag: str) -> tuple[str, int, AsyncIterator[bytes]]:
+        """读取 ZIP 里的一个文件（边读边解压，不写临时文件）；etag 是浏览时压缩包的版本，压缩包变化后要重新打开。"""
+        info, source, kind = await self._open(scope, key)
+        if kind != "zip":
+            raise ArchiveError("只有 ZIP 压缩包可以直接查看其中的文件，其他格式请先解压")
+        if info.etag != etag:
+            raise ArchiveError("压缩包已被修改，请重新打开")
+        entries = await self._zip_entries(scope, key, info.etag, source)
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(entries) or entries[index].is_dir:
+            raise ArchiveError("压缩包里没有这个文件")
+        entry = entries[index]
+        if entry.encrypted:
+            raise ArchiveError("加密的文件不能直接查看，请解压后打开")
+        if (entry.aes[1] if entry.aes else entry.method) not in METHODS:
+            raise ArchiveError("这个文件的压缩方式不支持，请用本地解压工具打开")
+        relative = safe_relative(entry.name, False) or "file"
+        return relative.rsplit("/", 1)[-1], entry.size, zip_entry_stream(source, entry, None)
+
     # ----- 任务 -----
 
     def _prune(self) -> None:
@@ -702,7 +772,7 @@ class ArchiveService:
     def cancel(self, owner: int, private: bool, job_id: str) -> dict:
         job = self.jobs.get(job_id)
         if job is None or job.owner != owner or job.private != private:
-            raise NotFoundError("解压任务不存在")
+            raise NotFoundError("任务不存在")
         if job.status in ("queued", "running"):
             job.cancelled = True
         return job.public()
@@ -714,12 +784,7 @@ class ArchiveService:
             raise ValueError("是否保留压缩包的设置不正确")
         if password is not None and (not isinstance(password, str) or len(password) > 1024):
             raise ValueError("密码不正确")
-        self._prune()
-        mine = [job for job in self.jobs.values() if job.owner == owner]
-        if sum(1 for job in mine if job.status in ("queued", "running")) >= 5:
-            raise ValueError("同时进行的解压任务最多 5 个，请等待完成后再试")
-        if len(mine) >= JOBS_PER_USER:
-            raise ValueError("解压记录过多，请稍后再试")
+        self._admit(owner)
         if destination.startswith(key + "/"):
             raise ValueError("不能解压到压缩包自身的位置")
         self.objects._check_scope(scope, destination + "x", write=True)
@@ -750,6 +815,86 @@ class ArchiveService:
         self.jobs[job.id] = job
         job.task = asyncio.create_task(self._run(job, scope, info.etag, plan, password.encode("utf-8") if password else None))
         return job.public()
+
+    def _admit(self, owner: int) -> None:
+        self._prune()
+        mine = [job for job in self.jobs.values() if job.owner == owner]
+        if sum(1 for job in mine if job.status in ("queued", "running")) >= 5:
+            raise ValueError("同时进行的解压与压缩任务最多 5 个，请等待完成后再试")
+        if len(mine) >= JOBS_PER_USER:
+            raise ValueError("解压与压缩记录过多，请稍后再试")
+
+    async def compress(self, owner: int, scope: Scope, target: str, entries: Callable[[], AsyncIterator[tuple[str, int, float, AsyncIterator[bytes]]]],
+                       files: int, total: int, deflate: bool) -> dict:
+        """在线压缩：把选中的文件与文件夹边读边打包成 ZIP，直接写成网盘里的一个新文件（不写临时文件）。
+        target 已同名时自动改名为「名称 (n).zip」；entries 每次调用重新生成条目（任务开始时才读取）。"""
+        if not isinstance(deflate, bool):
+            raise ValueError("压缩方式不正确")
+        if not target.lower().endswith(".zip") or target.endswith("/"):
+            raise ValueError("压缩包名称需要以 .zip 结尾")
+        self._admit(owner)
+        self.objects._check_scope(scope, target, write=True)
+        if not files:
+            raise ValueError("所选文件夹中没有可压缩的文件")
+        room = await self.objects.metadata.run_in_thread(self._room, scope)
+        if room is not None and total > room:
+            # 不压缩时压缩包比原文件略大；Deflate 的结果事先不知道，按原大小检查。
+            raise QuotaExceededError(f"空间不足：压缩包最多需要约 {total} 字节，当前可用 {max(0, room)} 字节")
+        def free() -> str:
+            db = self.objects.metadata.db
+            exists = db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, target)).fetchone()
+            return self.objects._free_name(db, scope.bucket_id, target, set()) if exists else target
+        key = await self.objects.metadata.run_in_thread(free)
+        job = Job(secrets.token_hex(8), owner, bool(scope.private_access), key, key[:key.rfind("/") + 1], "deflate" if deflate else "store",
+                  "rename", True, kind="compress", total_files=files, total_bytes=total)
+        self.jobs[job.id] = job
+        job.task = asyncio.create_task(self._run_compress(job, scope, entries, deflate))
+        return job.public()
+
+    async def _run_compress(self, job: Job, scope: Scope, entries, deflate: bool) -> None:
+        async with self.slots:
+            if job.cancelled:
+                job.status, job.finished_at = "cancelled", time.time()
+                return
+            job.status = "running"
+
+            async def counted(stream: AsyncIterator[bytes]):
+                async with aclosing(stream):
+                    async for chunk in stream:
+                        if job.cancelled:
+                            raise asyncio.CancelledError()
+                        job.done_bytes += len(chunk)
+                        yield chunk
+
+            async def tracked():
+                async with aclosing(entries()) as items:
+                    async for name, size, modified, stream in items:
+                        job.current = name
+                        yield name, size, modified, counted(stream)
+                        job.done_files += 1
+
+            async def output():
+                async for part in stream_zip(tracked(), nested=True, deflate=deflate):
+                    if job.cancelled:
+                        raise asyncio.CancelledError()
+                    job.read_bytes += len(part)
+                    yield part
+            try:
+                await self.objects.put_object(scope, job.archive, output(), None, "application/zip")
+                job.status, job.current = "completed", ""
+            except asyncio.CancelledError:
+                job.status = "cancelled"
+                if not job.cancelled:
+                    raise
+            except QuotaExceededError:
+                job.status, job.error = "failed", "空间不足，压缩没有完成"
+            except (ValueError, NotFoundError, PermissionError) as exc:
+                job.status, job.error = "failed", str(exc) or "压缩失败"
+            except Exception:
+                log.exception("在线压缩失败")
+                job.status, job.error = "failed", "压缩失败，请稍后重试"
+            finally:
+                job.finished_at = time.time()
 
     def _fail(self, job: Job, name: str, error: str) -> None:
         job.failed_count += 1

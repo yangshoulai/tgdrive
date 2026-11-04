@@ -3,14 +3,16 @@ type TextEngine = typeof import("./preview-text-engine");
 type MediaEngine = typeof import("./preview-media-engine");
 type ComposerEngine = typeof import("./composer-engine");
 type PdfEngine = typeof import("./preview-pdf-engine");
+type BookEngine = typeof import("./preview-book-engine");
 type Asset = { js: string; css?: string };
 declare global {
   interface Window {
-    tesseraPreviewAssets: { text: Asset; media: Asset; composer: Asset; pdf: Asset & { worker: string; base: string } };
+    tesseraPreviewAssets: { text: Asset; media: Asset; composer: Asset; pdf: Asset & { worker: string; base: string }; book: Asset; heif: { worker: string; wasm: string } };
     TesseraTextPreview?: TextEngine;
     TesseraMediaPreview?: MediaEngine;
     TesseraComposer?: ComposerEngine;
     TesseraPdfPreview?: PdfEngine;
+    TesseraBookPreview?: BookEngine;
   }
 }
 
@@ -58,4 +60,10 @@ export async function loadPdfEngine(): Promise<{ engine: PdfEngine; assets: { wo
   await load(asset);
   if (!window.TesseraPdfPreview) throw new Error("PDF 预览组件未能启动");
   return { engine: window.TesseraPdfPreview, assets: { worker: asset.worker, base: asset.base } };
+}
+/** EPUB 电子书（fflate 解压 + DOMPurify 清洗）：打开电子书时才加载。 */
+export async function loadBookEngine(): Promise<BookEngine> {
+  await load(window.tesseraPreviewAssets.book);
+  if (!window.TesseraBookPreview) throw new Error("电子书组件未能启动");
+  return window.TesseraBookPreview;
 }

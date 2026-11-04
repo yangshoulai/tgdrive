@@ -147,6 +147,17 @@ def sniff(head: bytes) -> str:
         return "exact:image/vnd.adobe.photoshop"
     if head[:2] == b"\xff\x0a" or head[:12] == b"\x00\x00\x00\x0cJXL \r\n\x87\n":
         return "exact:image/jxl"
+    # 字体：TrueType（版本 1.0 或 Apple 的 true）、OpenType CFF、WOFF／WOFF2 与字体集合。表数量要合理，避免把以 0x00010000 开头的任意数据认成字体。
+    if len(head) >= 12 and (head[:4] in (b"\x00\x01\x00\x00", b"true") and 0 < int.from_bytes(head[4:6], "big") < 64):
+        return "exact:font/ttf"
+    if head[:4] == b"OTTO" and len(head) >= 12 and 0 < int.from_bytes(head[4:6], "big") < 64:
+        return "exact:font/otf"
+    if head[:4] == b"wOFF" and len(head) >= 44:
+        return "exact:font/woff"
+    if head[:4] == b"wOF2" and len(head) >= 48:
+        return "exact:font/woff2"
+    if head[:4] == b"ttcf" and len(head) >= 12:
+        return "exact:font/collection"
     if head[:5] == b"%PDF-":
         return "exact:application/pdf"
     if head[:4] in (b"PK\x03\x04", b"PK\x05\x06"):

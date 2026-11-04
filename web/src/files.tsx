@@ -10,6 +10,10 @@ import { cacheFileId, startPreviewPrefetch } from "./cache-client";
 import { FileCacheButton, cacheMenuItems, useCacheFiles } from "./user/cache";
 import { PreviewToolsContext, TextPreview } from "./preview-text";
 import { PdfPreview } from "./preview-pdf";
+import { fileFormatOf } from "./preview-formats";
+import { FontPreview } from "./preview-font";
+import { EpubPreview } from "./preview-epub";
+import { ArchivePreview } from "./preview-archive";
 import { Notice, ButtonLink, Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, confirmLeave, useUnsavedChanges, type IconName, type MenuItem } from "./ui";
 import { ShortcutsDialog } from "./shortcuts";
 
@@ -94,7 +98,7 @@ export function getFileKind(type: string | null | undefined, name: string): File
   if (lower.endsWith("/")) return "folder";
   // 类型以内容为准（服务器写入时按内容判断）：只有 MIME 缺失或是通用二进制时才看扩展名，与 filekinds.py 一致。
   const generic = !mime || mime.startsWith("application/octet-stream") || mime.startsWith("binary/octet-stream");
-  const textual = mime.startsWith("text/") || mime.startsWith("application/json");
+  const textual = mime.startsWith("text/") || mime.startsWith("application/json") || /^application\/[\w.-]+\+json/.test(mime);
   const named = (pattern: RegExp) => generic && pattern.test(lower);
   if (mime.startsWith("image/") || named(/\.(png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$/)) return "image";
   if (mime === "video/mp2t" || named(/\.(mts|m2ts)$/)) return "other";
@@ -103,11 +107,12 @@ export function getFileKind(type: string | null | undefined, name: string): File
   if (!audioName && (mime.startsWith("video/") || named(/\.(mp4|webm|mov|mkv|avi|m4v|ogv)$/))) return "video";
   if (audioName || mime.startsWith("audio/")) return "audio";
   if (mime === "application/pdf" || named(/\.pdf$/)) return "pdf";
-  if (named(/\.(docx?|dotx?|odt|rtf|pages|wps)$/) || /wordprocessingml|msword|opendocument\.text/.test(mime)) return "document";
+  // EPUB 电子书归文档（内容是 ZIP，必须排在压缩包之前）。
+  if (named(/\.(docx?|dotx?|odt|rtf|pages|wps|epub)$/) || /wordprocessingml|msword|opendocument\.text/.test(mime) || mime.startsWith("application/epub")) return "document";
   if (named(/\.(xlsx?|xlsm|xltx?|ods|numbers|et)$/) || /spreadsheetml|ms-excel|opendocument\.spreadsheet/.test(mime)) return "spreadsheet";
   if (named(/\.(pptx?|potx?|odp|key|dps)$/) || /presentationml|ms-powerpoint|opendocument\.presentation/.test(mime)) return "presentation";
   if ((generic || textual) && (/\.(js|mjs|cjs|ts|tsx|jsx|py|go|rs|java|c|cc|cpp|cxx|h|hpp|cs|sh|bash|zsh|ps1|bat|html?|css|scss|sass|less|vue|svelte|sql|rb|php|swift|kt|kts|scala|dart|gradle|lua|diff|patch)$/.test(lower) || /(^|\/)(dockerfile|makefile)$/.test(lower))) return "code";
-  if (textual || named(/\.(md|markdown|mdx|rst|txt|json|jsonc|csv|tsv|log|xml|ya?ml|toml|ini|conf|cfg|properties|env|gitignore|editorconfig|lrc|srt|vtt)$/) || generic && /(^|\/)\.env(\.[\w.-]+)?$/.test(lower)) return "text";
+  if (textual || named(/\.(md|markdown|mdx|rst|txt|json|jsonc|jsonl|ndjson|geojson|ipynb|csv|tsv|log|xml|ya?ml|toml|ini|conf|cfg|properties|env|gitignore|editorconfig|lrc|srt|vtt)$/) || generic && /(^|\/)\.env(\.[\w.-]+)?$/.test(lower)) return "text";
   if (named(/\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst|dmg|iso)$/) || /zip|compressed|x-tar/.test(mime)) return "archive";
   return "other";
 }
@@ -254,7 +259,12 @@ const UNPLAYABLE_TYPES = /^(video\/(mp2t|x-msvideo|avi|x-ms-wmv|x-ms-asf|x-flv|m
 export function isPlayable(name: string, type?: string | null) {
   return !UNPLAYABLE.test(name) && !UNPLAYABLE_TYPES.test((type || "").split(";")[0].trim());
 }
-export function canPreview(kind: FileKind) { return PREVIEWABLE.includes(kind); }
+/** 能在线查看：常见类型，以及有专门查看器的字体与电子书（压缩包浏览只给本人的文件，由预览窗口单独判断）。 */
+export function canPreview(kind: FileKind, name?: string, type?: string | null) {
+  if (PREVIEWABLE.includes(kind)) return true;
+  const format = name === undefined ? null : fileFormatOf(kind, name, type);
+  return format === "font" || format === "epub";
+}
 
 /** 把 Markdown 里的相对路径图片解析为云盘内的绝对键；越出根目录或带协议的地址返回 null。 */
 export function resolveRelativeKey(baseDir: string, src: string): string | null {
@@ -270,7 +280,9 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; /** 已记录的图片／视频显示尺寸：视频按它设播放器比例，图片按它在加载前就把封面与原图放到最终位置。 */ videoSize?: api.MediaSize; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing } & PlaybackProps;
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; /** 已记录的图片／视频显示尺寸：视频按它设播放器比例，图片按它在加载前就把封面与原图放到最终位置。 */ videoSize?: api.MediaSize; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing;
+  /** 电子书的阅读位置：按内容版本记住（remember 为假时只记在本页内存里，私密文件用）。 */ positionKey?: string | null; rememberPosition?: boolean;
+  /** 本人的压缩包：可以浏览内容并在线解压。 */ archive?: { file: api.FileItem; onExtract?: () => void } } & PlaybackProps;
 /** 文本编辑：只给本人有写权限的文件。key 是文件路径（保存后地址随版本变化，编辑器不重建）；load 递增时重新读取（换文件、外部改动、冲突后重新加载）。 */
 type TextEditing = { key: string; load: number; save: (data: Uint8Array, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void };
 export function FilePreview(props: PreviewProps) {
@@ -287,14 +299,15 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, size, videoSize, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation, onRotate, onBufferSpeed, text }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, size, videoSize, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation, onRotate, onBufferSpeed, text, positionKey, rememberPosition, archive }: PreviewProps & { onRetry: () => void }) {
+  const format = fileFormatOf(kind, name, contentType);
   const [content, setContent] = useState<PreviewText | null>(null);
   // 每次读到新内容递增，文本预览按它重建；自己保存不重新读取，编辑器保持原状。
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState("");
   const [mediaFailed, setMediaFailed] = useState(false);
   // 图片复用组件，切换到下一张时清除上一张的失败状态。
-  useEffect(() => { if (kind === "image") setMediaFailed(false); if (kind === "pdf") setError(""); }, [url, kind]);
+  useEffect(() => { if (kind === "image") setMediaFailed(false); if (kind === "pdf" || format) setError(""); }, [url, kind]);
   useEffect(() => {
     if (kind !== "text" && kind !== "code") return;
     setContent(null); setError("");
@@ -327,10 +340,13 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
   );
 
   if (unplayable) return fallback;
+  if (format === "font") return error ? fallback : <FontPreview url={url} name={name} onError={setError} />;
+  if (format === "epub") return error ? fallback : <EpubPreview url={url} positionKey={positionKey ?? null} remember={rememberPosition ?? true} onError={setError} />;
+  if (format === "archive" && archive) return <ArchivePreview file={archive.file} downloadUrl={downloadUrl} onExtract={archive.onExtract} />;
   if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} videoSize={videoSize} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} rotation={rotation} onRotate={onRotate} onBufferSpeed={onBufferSpeed} />;
   if (mediaFailed) return fallback;
   // 原图从存储取回并解密需要时间：查看器先显示封面图占位，原图加载完成后淡入替换。
-  if (kind === "image") return <ImageViewer url={url} name={name} poster={poster} size={videoSize} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
+  if (kind === "image") return <ImageViewer url={url} name={name} heic={format === "heic"} poster={poster} size={videoSize} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
   if (kind === "pdf") return error ? fallback : <PdfPreview url={url} name={name} onError={setError} />;
   if (kind === "text" || kind === "code") {
     if (error) return fallback;
@@ -369,12 +385,16 @@ function rememberRotation(file: api.FileItem, degrees: number) {
   } catch { /* 存储不可用时只在本次预览里生效 */ }
 }
 export type PreviewPlayback = { playing: boolean; currentTime: number; state: MediaState };
-export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest }: PreviewSource & { file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; onVideoFrame?: (video: HTMLVideoElement, file: api.FileItem) => void; onSaveVideoThumbnail?: (video: HTMLVideoElement, file: api.FileItem, rotation: number) => Promise<void>; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
+export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onExtract, onEditImage, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest }: PreviewSource & { file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void;
+  /** 在线解压（压缩包预览里的「解压…」）。 */ onExtract?: (file: api.FileItem) => void;
+  /** 编辑图片（图片预览头部的按钮）。 */ onEditImage?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; onVideoFrame?: (video: HTMLVideoElement, file: api.FileItem) => void; onSaveVideoThumbnail?: (video: HTMLVideoElement, file: api.FileItem, rotation: number) => Promise<void>; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
   const kind = getFileKind(file.content_type, file.key);
   const media = (kind === "audio" || kind === "video") && isPlayable(file.key, file.content_type);
   const browsable = media || kind === "image";
-  // 文本与代码也用沉浸式窗口（深色画布 + 浮动头部），但没有播放列表与左右切换。
-  const reading = kind === "text" || kind === "code" || kind === "pdf";
+  // 文本、代码、PDF、电子书、字体与压缩包也用沉浸式窗口（深色画布 + 浮动头部），但没有播放列表与左右切换。
+  const format = fileFormatOf(kind, file.key, file.content_type);
+  const ownFile = /^\/api\/user\/v1\/(?:private\/)?content\?/.test(url);
+  const reading = kind === "text" || kind === "code" || kind === "pdf" || format === "epub" || format === "font" || format === "archive" && ownFile;
   const immersive = browsable || reading;
   const [textTools, setTextTools] = useState<HTMLElement | null>(null);
   const [compactActions, setCompactActions] = useState(false);
@@ -680,6 +700,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         ...(compactActions ? [
         ...textMenuItems,
         ...(onShare ? [{ label: active.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => void share() }] : []),
+        ...(onEditImage && ownSource && kind === "image" && !/\.svg$/i.test(active.key) ? [{ label: "编辑图片", icon: "crop" as const, onSelect: () => onEditImage(active) }] : []),
         ...(ownSource ? cacheMenuItems(cacheQueue, active).filter(item => !item.danger) : []),
         { label: "下载文件", icon: "download" as const, shortcut: "D", href: downloadHref, onSelect: () => {} },
         ] : []),
@@ -699,13 +720,15 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
       actions={<>
         {reading && <span className="preview-header-tools" ref={setTextTools} />}
         {!compactActions && <>
+          {onEditImage && ownSource && kind === "image" && !/\.svg$/i.test(active.key) && <IconButton icon="crop" label="编辑图片" size="sm" onClick={() => onEditImage(active)} />}
           {onShare && <IconButton icon="link" label={active.public_token ? "管理分享" : "公开分享"} shortcut="S" size="sm" onClick={() => void share()} />}
           {ownSource && <FileCacheButton file={active} />}
           <a className="icon-btn icon-btn-ghost icon-btn-sm" href={downloadHref} aria-label="下载文件" aria-keyshortcuts="D" title="下载文件（D）"><Icon name="download" size={16} /></a>
           <span className="modal-actions-divider" aria-hidden="true" />
         </>}
       </>}>
-      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} videoSize={knownSize ?? undefined} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind)) : source.url} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onBufferSpeed={setBufferSpeed} onSaveThumbnail={onSaveVideoThumbnail ? (video, degrees) => onSaveVideoThumbnail(video, active, degrees) : undefined} rotation={rotation} onRotate={rotateVideo} resolveImage={resolveImage} assetUrl={assetUrl}
+      <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} videoSize={knownSize ?? undefined} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind, active.key, active.content_type)) : source.url}
+        positionKey={active.etag || null} rememberPosition={!api.isPrivatePath(active.key)} archive={format === "archive" && ownSource ? { file: active, onExtract: onExtract ? () => onExtract(active) : undefined } : undefined} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onBufferSpeed={setBufferSpeed} onSaveThumbnail={onSaveVideoThumbnail ? (video, degrees) => onSaveVideoThumbnail(video, active, degrees) : undefined} rotation={rotation} onRotate={rotateVideo} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height, from) => { if (from === "video") recordSize(width, height); setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height }); }}
         onProgress={value => { trackPrefetch(value); setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value); }} onState={setMediaState}

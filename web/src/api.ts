@@ -367,6 +367,10 @@ export const saveTextFile = (file: FileItem, data: Uint8Array, force = false) =>
   method: "PUT", body: new Blob([data as BlobPart], { type: file.content_type || "text/plain" }),
   headers: { "Content-Type": file.content_type || "text/plain", ...(force ? {} : { "If-Match": `"${file.etag}"` }) },
 }, 120000);
+/** 图片编辑保存：etag 不为空时只覆盖仍是这个版本的原文件（否则 409 version_conflict），为空时写入新文件。 */
+export const saveImageFile = (path: string, blob: Blob, etag?: string) => request<FileItem>(`${fileApi("/files", path)}?path=${encodeURIComponent(path)}`, {
+  method: "PUT", body: blob, headers: { "Content-Type": blob.type || "application/octet-stream", ...(etag ? { "If-Match": `"${etag}"` } : {}) },
+}, 10 * 60000);
 /** 单个文件的当前元数据（最新 ETag、大小与修改时间）。 */
 export const fileInfo = (path: string) => request<FileItem>(`${fileApi("/files/info", path)}?path=${encodeURIComponent(path)}`);
 /** 侧栏收藏的文件夹（完整键，私密文件夹以 .tgdrive/private/ 开头）；missing 表示文件夹已不存在。 */
@@ -391,7 +395,8 @@ export type ArchiveInfo = {
 };
 export type ArchiveConflict = "rename" | "skip" | "overwrite";
 export type ArchiveJob = {
-  id: string; private: boolean; archive: string; destination: string; format: string; conflict: ArchiveConflict; keep_archive: boolean;
+  /** extract 为解压，compress 为在线压缩（archive 是生成的压缩包，format 为 deflate／store）。 */
+  id: string; kind: "extract" | "compress"; private: boolean; archive: string; destination: string; format: string; conflict: ArchiveConflict; keep_archive: boolean;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   total_files: number | null; total_bytes: number | null; archive_size: number; read_bytes: number;
   done_files: number; done_bytes: number; skipped: number; renamed: number; failed: number; failures: { name: string; error: string }[];
@@ -404,6 +409,15 @@ export const extractArchive = (path: string, options: { destination: string; pas
 export const archiveJobs = (ids: string[], privateJobs = false) =>
   request<{ jobs: ArchiveJob[] }>(`/api/user/v1${privateJobs ? "/private" : ""}/archive/jobs?ids=${ids.map(encodeURIComponent).join(",")}`);
 export const cancelArchiveJob = (id: string, privateJob = false) => post<ArchiveJob>(`/api/user/v1${privateJob ? "/private" : ""}/archive/jobs/${encodeURIComponent(id)}/cancel`);
+/** 在线浏览 ZIP：列出全部条目（TAR 没有目录索引，listable 为 false）；单个条目按 index 边读边解压。 */
+export type ArchiveEntry = { index: number; name: string; dir: boolean; size: number; compressed: number; /** 打包时的本地时间（年-月-日 时:分），不带时区。 */ modified: string | null; encrypted: boolean; supported: boolean };
+export const browseArchive = (path: string) =>
+  post<{ format: string; size: number; etag: string; listable: boolean; entries: ArchiveEntry[] }>(fileApi("/archive/browse", path), { path }, 60000);
+export const archiveEntryUrl = (path: string, index: number, etag: string, download = false) =>
+  mediaAccess(`${fileApi("/archive/entry", path)}?path=${encodeURIComponent(path)}&index=${index}&etag=${encodeURIComponent(etag)}${download ? "&download=1" : ""}`, path);
+/** 在线压缩：把选中的文件与文件夹打包成 ZIP 保存到网盘；默认放在第一项所在的文件夹，同名时自动改名。 */
+export const compressFiles = (paths: string[], options: { name: string; destination?: string; compression: "deflate" | "store" }) =>
+  post<ArchiveJob>(fileApi("/archive/compress", paths[0]), { paths, ...options }, 60000);
 export const FILE_UPDATED_EVENT = "tessera:file-updated";
 /** 文件在预览里被保存或刷新到新版本后广播：预览宿主更新窗口里的文件，文件页刷新所在目录。 */
 export const announceFileUpdated = (file: FileItem) => window.dispatchEvent(new CustomEvent<FileItem>(FILE_UPDATED_EVENT, { detail: file }));

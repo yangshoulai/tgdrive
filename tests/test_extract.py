@@ -233,6 +233,73 @@ class ExtractTests(unittest.IsolatedAsyncioTestCase):
         status, _ = await self.post("/archive/extract", {"path": "q.zip", "destination": "", "conflict": "merge"})
         self.assertEqual(status, 400)
 
+    async def test_browse_zip_and_read_single_entry(self):
+        data = build_zip([("文档/".encode(), b"", 0, None, True), ("文档/说明.md".encode(), "# 标题\n".encode() * 50, 8, None, True),
+                          (b"raw.bin", b"plain bytes", 0, None, True), (b"secret.txt", b"hidden" * 10, 8, "zipcrypto", True),
+                          (b"../evil.txt", b"no", 0, None, True)])
+        await self.put("包/b.zip", data)
+        status, listing = await self.post("/archive/browse", {"path": "包/b.zip"})
+        self.assertEqual(status, 200, listing)
+        self.assertTrue(listing["listable"])
+        names = {item["name"]: item for item in listing["entries"]}
+        self.assertEqual(sorted(names), ["raw.bin", "secret.txt", "文档/", "文档/说明.md"], "越界的条目不列出")
+        self.assertTrue(names["secret.txt"]["encrypted"])
+        md = names["文档/说明.md"]
+        query = f"path={quote('包/b.zip')}&index={md['index']}&etag={listing['etag']}"
+        status, headers, body = await self.client.request("GET", f"/api/user/v1/archive/entry?{query}", headers=self.auth)
+        self.assertEqual((status, body.decode()), (200, "# 标题\n" * 50))
+        self.assertEqual(headers["content-security-policy"], "sandbox")
+        self.assertIn("filename*=UTF-8''%E8%AF%B4%E6%98%8E.md", headers["content-disposition"])
+        # 加密条目、目录与过期的版本都拒绝。
+        for index, etag in ((names["secret.txt"]["index"], listing["etag"]), (names["文档/"]["index"], listing["etag"]), (md["index"], "stale")):
+            status, _, body = await self.client.request("GET", f"/api/user/v1/archive/entry?path={quote('包/b.zip')}&index={index}&etag={etag}", headers=self.auth)
+            self.assertEqual(status, 400, body)
+        # TAR 没有目录索引，不列出。
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            info = tarfile.TarInfo("a.txt"); info.size = 1; archive.addfile(info, io.BytesIO(b"a"))
+        await self.put("包/t.tar", buffer.getvalue())
+        status, listing = await self.post("/archive/browse", {"path": "包/t.tar"})
+        self.assertEqual((status, listing["listable"], listing["format"]), (200, False, "tar"))
+
+    async def compress(self, body, prefix="/api/user/v1"):
+        status, job = await self.post("/archive/compress", body, prefix)
+        self.assertEqual(status, 201, job)
+        async with asyncio.timeout(30):
+            while True:
+                status, _, data = await self.client.request("GET", f"{prefix}/archive/jobs?ids={job['id']}", headers=self.auth)
+                job = json.loads(data)["jobs"][0]
+                if job["status"] not in ("queued", "running"):
+                    return job
+                await asyncio.sleep(0.02)
+
+    async def test_compress_folders_and_files_into_zip(self):
+        big = os.urandom(300_000)
+        await self.put("项目/src/a.txt", b"hello " * 1000)
+        await self.put("项目/src/深/b.bin", big)
+        await self.put("项目/readme.md", b"# readme")
+        job = await self.compress({"paths": ["项目/src/", "项目/readme.md"], "name": "打包"})
+        self.assertEqual((job["status"], job["kind"], job["archive"], job["total_files"], job["done_files"]),
+                         ("completed", "compress", "项目/打包.zip", 3, 3), job)
+        with zipfile.ZipFile(io.BytesIO(await self.read("项目/打包.zip"))) as archive:
+            self.assertEqual(sorted(archive.namelist()), ["readme.md", "src/a.txt", "src/深/b.bin"])
+            self.assertEqual(archive.read("src/深/b.bin"), big)
+            self.assertEqual(archive.getinfo("src/a.txt").compress_type, zipfile.ZIP_DEFLATED)
+            self.assertLess(archive.getinfo("src/a.txt").compress_size, 1000, "可压缩的内容按 Deflate 变小")
+        self.assertEqual(self.app.objects.head_object(self.scope, "项目/打包.zip").content_type, "application/zip")
+        # 同名自动改名；不压缩也可以；保存位置不能在要压缩的文件夹里。
+        job = await self.compress({"paths": ["项目/readme.md"], "name": "打包.zip", "compression": "store"})
+        self.assertEqual((job["status"], job["archive"]), ("completed", "项目/打包 (1).zip"), job)
+        with zipfile.ZipFile(io.BytesIO(await self.read("项目/打包 (1).zip"))) as archive:
+            self.assertEqual(archive.getinfo("readme.md").compress_type, zipfile.ZIP_STORED)
+        status, error = await self.post("/archive/compress", {"paths": ["项目/src/"], "name": "x", "destination": "项目/src/深/"})
+        self.assertEqual(status, 400, error)
+        status, error = await self.post("/archive/compress", {"paths": ["项目/src/"], "name": "a/b"})
+        self.assertEqual(status, 400, error)
+        audit = self.app.metadata.db.execute("SELECT target, detail FROM audit_log WHERE action='archive.compress'").fetchall()
+        self.assertTrue(audit)
+        self.assertTrue(all(row["target"] is None and "项目" not in (row["detail"] or "") for row in audit), "审计不记路径")
+
     async def test_private_space_extracts_with_unlock_and_stops_when_locked(self):
         status, _, data = await self.client.request("POST", "/api/user/v1/private/unlock", json.dumps({"password": "alice password"}).encode(), self.auth)
         self.assertEqual(status, 200, data)

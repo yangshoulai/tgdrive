@@ -8,8 +8,10 @@ import { cacheFileId, type CacheFile } from "../cache-client";
 import { FolderStatsDialog } from "./folder-stats";
 import { ThumbnailEditor } from "./thumbnail-editor";
 import { ExtractDialog, isArchive } from "./extract";
+import { CompressDialog } from "./compress";
+import { ImageEditorDialog } from "./image-editor";
 import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, loadedPlaceholder, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type CacheFilter, type EntryFilter, type FileSort } from "../files";
-import { generateLoadedThumbnails, saveCurrentVideoThumbnail, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, videoFrameUsable } from "../thumbnails";
+import { generateLoadedThumbnails, saveCurrentVideoThumbnail, saveSvgThumbnail, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, videoFrameUsable } from "../thumbnails";
 
 import { BackToTop, Notice, ButtonLink, Badge, Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 import { ShortcutsDialog } from "../shortcuts";
@@ -61,6 +63,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
   const [thumbnailEditing, setThumbnailEditing] = useState<api.FileItem | null>(null);
   const [extracting, setExtracting] = useState<api.FileItem | null>(null);
+  const [compressing, setCompressing] = useState<string[] | null>(null);
+  const [editingImage, setEditingImage] = useState<api.FileItem | null>(null);
   const [renaming, setRenaming] = useState<Entry | null>(null);
   const [transferring, setTransferring] = useState<Entry[] | null>(null);
   const [moving, setMoving] = useState<Entry[] | null>(null);
@@ -245,6 +249,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       playlistFiles: entries.flatMap(entry => entry.kind === "file" ? [entry.file] : []),
       poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file), onPlaybackActivity: onPlayback,
       onShare: privateSpace ? undefined : item => { preview.update(item); setSharing(item); },
+      onExtract: item => setExtracting(item),
+      onEditImage: item => setEditingImage(item),
       onSaveVideoThumbnail: async (video, item, rotation) => {
         await saveCurrentVideoThumbnail(item, video, rotation);
         // 预览可在页面离开后继续播放；这里只更新全局预览并通知文件页刷新，不写入页面状态。
@@ -258,7 +264,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         // 原图超过 800px 却没有封面。旧版文件的 960px 封面可以代替网格图，不重复生成；矢量图跳过。
         const longest = Math.max(image.naturalWidth, image.naturalHeight), has = (variant: string) => item.thumbnails?.includes(variant);
         const missing = !has("thumb") || (longest > 240 && !has("grid") && !has("poster")) || (longest > 800 && !has("poster"));
-        if (!missing || /\.svg$/i.test(item.key)) return;
+        if (!missing) return;
+        if (/\.svg$/i.test(item.key) || (item.content_type ?? "").includes("svg")) {
+          // 矢量图由浏览器栅格化成封面（服务器不处理 SVG）；已有任何封面时不覆盖。
+          const identity = `${item.key}:${item.etag}`;
+          if (item.thumbnails?.length || previewThumbnailAttempts.current.has(identity)) return;
+          previewThumbnailAttempts.current.add(identity);
+          void saveSvgThumbnail(item, image).then(saved => { setThumbnails(item.key, saved); scheduleRefresh(); }).catch(() => undefined);
+          return;
+        }
         savePreviewThumbnail(item, () => thumbnailsFromImage(image), true);
       },
       onVideoFrame: (video, item) => {
@@ -421,7 +435,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
     items.push({ label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming(entry) });
     items.push({ label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving([entry]) });
+    if (getFileKind(file.content_type, file.key) === "image" && !/\.svg$/i.test(file.key)) items.push({ label: "编辑图片…", icon: "crop", onSelect: () => setEditingImage(file) });
     if (isArchive(file)) items.push({ label: "解压…", icon: "archive", onSelect: () => setExtracting(file) });
+    else items.push({ label: "压缩为 ZIP…", icon: "archive", onSelect: () => setCompressing([file.key]) });
     items.push({ label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([entry]) });
     if (query) items.push({ label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(parentPath(file.key)) });
     items.push(...cacheMenuItems(cacheQueue, file).filter(item => item.danger));
@@ -444,6 +460,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       ...(shared ? [{ label: "复制分享链接", icon: "copy" as const, onSelect: () => void copyText(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "分享链接已复制") }] : []),
       { label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming({ kind: "folder", key }) },
       { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving([{ kind: "folder", key }]) },
+      { label: "压缩为 ZIP…", icon: "archive", onSelect: () => setCompressing([key]) },
       { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([{ kind: "folder", key }]) },
       ...(canCacheFolders ? [{ label: "清除本机缓存", icon: "trash" as const, danger: true, divider: true, onSelect: () => cacheQueue?.removeFolders([key]) }] : []),
       { label: "删除", icon: "trash", danger: true, divider: true, shortcut: DELETE_KEY, onSelect: () => void moveToTrash([{ kind: "folder", key }]) },
@@ -646,6 +663,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
             <Button size="sm" icon="move" shortcut="M" onClick={() => setMoving(selectedEntries)}>移动</Button>
+            {selectedEntries.length <= 200 && <Button size="sm" icon="archive" onClick={() => setCompressing(selectedEntries.map(entry => entry.key))}>压缩</Button>}
             <Button size="sm" icon="lock" onClick={() => setTransferring(selectedEntries)}>{privateSpace ? "移出私密空间" : "移入私密空间"}</Button>
             <Button size="sm" variant="danger" icon="trash" onClick={() => void moveToTrash(selectedEntries)}>删除</Button>
             <IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} />
@@ -803,6 +821,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       {context && <ContextMenu x={context.x} y={context.y} label={`${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
       {statsFor && <FolderStatsDialog prefix={statsFor.prefix} title={statsFor.prefix === root ? rootName : api.privatePathLabel(statsFor.prefix).replace(/\/$/, "")} onClose={() => setStatsFor(null)} onOpenFolder={onOpenFolder} />}
       {extracting && <ExtractDialog file={extracting} onClose={() => setExtracting(null)} onOpenFolder={onOpenFolder} />}
+      {compressing && <CompressDialog keys={compressing} onClose={() => setCompressing(null)} onOpenFolder={onOpenFolder} />}
+      {editingImage && <ImageEditorDialog file={editingImage} onClose={() => setEditingImage(null)} onSaved={(item, replaced) => { if (replaced) preview.update(item); }} />}
       {thumbnailEditing && <ThumbnailEditor file={thumbnailEditing} onClose={() => setThumbnailEditing(null)}
         onSaved={variants => { const target = thumbnailEditing; setThumbnailEditing(null);
           // 替换后先用临时版本号让地址变化，避免浏览器沿用旧图；随后的后台刷新会带回服务端的正式版本。

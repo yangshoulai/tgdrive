@@ -1,7 +1,7 @@
 {
   "name": "tgdrive-web",
   "private": true,
-  "version": "1.54.0",
+  "version": "1.55.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -18,6 +18,9 @@
     "artplayer": "5.4.0",
     "codemirror": "6.0.2",
     "dompurify": "3.4.16",
+    "fflate": "0.8.3",
+    "js-yaml": "5.5.0",
+    "libheif-js": "1.23.5",
     "markdown-it": "15.0.2",
     "pdfjs-dist": "6.4.299",
     "react": "^18.3.1",

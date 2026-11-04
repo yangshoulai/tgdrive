@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type 
 import type { FileItem } from "./api";
 import type { PreviewNav, PreviewStrip } from "./preview-playlist";
 import { Icon, isShortcutControl, type IconName } from "./ui";
+import { decodeHeif } from "./heif";
 
 type Size = { width: number; height: number };
 /** 预览封面最长边为 min(960, 原图最长边)：达到这个长度说明原图至少这么大，占位时可以放大到原图将占据的尺寸。 */
@@ -29,11 +30,28 @@ function backdropOf(image: HTMLImageElement): string | null {
   } catch { return null; } // 跨域图片无法读取像素时保留已有背景，不为装饰重新请求文件。
 }
 
-export function ImageViewer({ url, name, poster, size, onLoad, onError, onImageSize, nav, strip }: {
-  url: string; name: string; poster?: string; /** 已记录的原图分辨率：加载前就按它定好显示尺寸，封面与原图都在最终位置出现，不再跳动。 */ size?: Size;
+export function ImageViewer({ url: source, name, heic = false, poster, size, onLoad, onError, onImageSize, nav, strip }: {
+  url: string; name: string; /** HEIC／HEIF：浏览器不能直接显示时在 Worker 里解码后显示。 */ heic?: boolean; poster?: string; /** 已记录的原图分辨率：加载前就按它定好显示尺寸，封面与原图都在最终位置出现，不再跳动。 */ size?: Size;
   onLoad?: (image: HTMLImageElement) => void; onError: () => void;
   onImageSize?: (width: number, height: number, original: boolean) => void; nav?: PreviewNav; strip?: PreviewStrip;
 }) {
+  // HEIC 先交给浏览器（Safari 能直接显示）；加载失败再解码成 JPEG，显示解码结果的 Blob 地址。
+  const [decoded, setDecoded] = useState<{ source: string; url: string } | null>(null);
+  const [decoding, setDecoding] = useState<string | null>(null);
+  useEffect(() => () => { if (decoded) URL.revokeObjectURL(decoded.url); }, [decoded]);
+  const url = decoded?.source === source ? decoded.url : source;
+  const heicController = useRef<AbortController | null>(null);
+  useEffect(() => () => heicController.current?.abort(), [source]);
+  function originalFailed() {
+    if (!heic || decoded?.source === source || decoding === source) { onError(); return; }
+    setDecoding(source);
+    const controller = new AbortController();
+    heicController.current?.abort(); heicController.current = controller;
+    void decodeHeif(source, controller.signal).then(result => {
+      if (!controller.signal.aborted) setDecoded({ source, url: URL.createObjectURL(result.blob) });
+    }).catch(() => { if (!controller.signal.aborted) onError(); })
+      .finally(() => { if (!controller.signal.aborted) setDecoding(null); });
+  }
   const root = useRef<HTMLDivElement>(null), canvas = useRef<HTMLDivElement>(null);
   const original = useRef<HTMLImageElement>(null), cover = useRef<HTMLImageElement>(null);
   const delivered = useRef(new WeakSet<HTMLImageElement>());
@@ -246,8 +264,8 @@ export function ImageViewer({ url, name, poster, size, onLoad, onError, onImageS
         onLoad={event => coverLoaded(event.currentTarget)} />}
       <img ref={original} key={url} className="image-full" src={url} alt={name} draggable={false} style={{ ...sized, transform }}
         onLoad={event => imageLoaded(event.currentTarget)}
-        onError={event => { if (event.currentTarget === original.current) onError(); }} />
-      {!loaded && <span className="image-loading" role="status"><span className="spinner" />{poster ? "正在加载原图…" : "正在加载…"}</span>}
+        onError={event => { if (event.currentTarget === original.current) originalFailed(); }} />
+      {!loaded && <span className="image-loading" role="status"><span className="spinner" />{decoding === source ? "正在转换 HEIC 照片…" : poster ? "正在加载原图…" : "正在加载…"}</span>}
     </div>
     {nav && nav.count > 1 && <>
       <button type="button" className="image-arrow is-previous" aria-label="上一张（←）" title="上一张（←）" onClick={nav.onPrevious}><Icon name="chevronLeft" size={22} /></button>

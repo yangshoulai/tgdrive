@@ -10,8 +10,9 @@ from pathlib import Path
 from .settings import normalize_origin
 
 # 网页（用户端、控制台、文档、分享页）的安全响应头：只允许同源脚本，禁止被其他站点嵌入框架（防点击劫持）。
+# wasm-unsafe-eval 只允许编译 WebAssembly（HEIC 图片解码器），不放开 eval 与内联脚本。
 PAGE_SECURITY_HEADERS = {
-    "Content-Security-Policy": ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "Content-Security-Policy": ("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
                                 "img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self'; connect-src 'self'; "
                                 "font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
     "X-Frame-Options": "DENY",

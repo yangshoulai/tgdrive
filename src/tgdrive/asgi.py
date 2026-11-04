@@ -41,6 +41,7 @@ from .metrics import TrafficMetrics
 from .objects import PRIVATE_PREFIX, Scope
 from .private import PrivateAccessLogFilter, PrivateLocked, PrivateSpace
 from .extract import ArchiveService
+from .extract import _content_type as _archive_type
 from .registration import RegistrationService
 from .settings import SystemSettings
 from .share import ShareAccess
@@ -276,7 +277,7 @@ class TgDriveASGI(StaticFiles):
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/move", "/archive",
-                           "/archive/inspect", "/archive/extract", "/archive/jobs",
+                           "/archive/inspect", "/archive/extract", "/archive/jobs", "/archive/browse", "/archive/entry", "/archive/compress",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
                            "/thumbnail/fetch", "/content", "/preview-assets", "/preview-list",
                            "/trash", "/trash/restore", "/trash/purge", "/uploads",
@@ -331,6 +332,20 @@ class TgDriveASGI(StaticFiles):
                 await self._send_stream(tracked_send, 200, {"Content-Type": "application/zip", "Cache-Control": "no-store",
                     "Content-Disposition": f"attachment; filename=\"files.zip\"; filename*=UTF-8''{quote(name, safe='')}",
                     "X-Content-Type-Options": "nosniff"}, stream_zip(entries, nested=True), "GET")
+                return
+            if path == "/api/user/v1/archive/entry" and method == "GET":
+                # 在线浏览压缩包：边读边解压其中一个文件（只支持 ZIP；不支持分段读取）。
+                try:
+                    index = int(query.get("index", [""])[0])
+                except ValueError:
+                    raise ValueError("条目编号不正确") from None
+                name, size, stream = await self.archives.entry(file_user._scope(token), file_user._path(query.get("path", [""])[0]),
+                                                               index, query.get("etag", [""])[0])
+                disposition = "attachment" if query.get("download", ["0"])[0] == "1" else "inline"
+                await self._until_disconnect(receive, self._send_stream(tracked_send, 200, {
+                    "Content-Type": served_type(name, _archive_type(name)) or "application/octet-stream", "Content-Length": str(size),
+                    "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox",
+                    "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(name, safe='')}"}, stream, "GET"))
                 return
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
                 await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, user=file_user, private=private))
@@ -473,7 +488,7 @@ class TgDriveASGI(StaticFiles):
                          "/downloads/{}/resume": "download.resume", "/downloads/{}/restart": "download.restart",
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
                          "/downloads/{}/now": "download.now", "/downloads/move": "download.move",
-                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/downloads/stop-all": "download.stop_all", "/shares/{}/save": "share.save", "/archive/extract": "archive.extract", "/cache/reset": "client_cache.reset",
+                         "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/downloads/stop-all": "download.stop_all", "/shares/{}/save": "share.save", "/archive/extract": "archive.extract", "/archive/compress": "archive.compress", "/cache/reset": "client_cache.reset",
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
@@ -569,6 +584,10 @@ class TgDriveASGI(StaticFiles):
             # 不记录压缩包与保存位置的路径，更不记录密码。
             detail = {"conflict": payload.get("conflict") if payload.get("conflict") in ("skip", "overwrite", "rename") else None,
                       "keep": payload.get("keep_archive") is not False, "format": (result or {}).get("format") if ok else None}
+        elif action == "archive.compress":
+            # 只记数量与压缩方式，不记路径。
+            detail = {"count": len(payload.get("paths", [])) if isinstance(payload.get("paths"), list) else 0,
+                      "compression": "store" if payload.get("compression") == "store" else "deflate"}
         elif action == "share.save":
             detail = {"saved": (result or {}).get("saved"), "bytes": (result or {}).get("bytes")} if ok else {}
         elif action == "assistant.attachment.save":
@@ -1341,9 +1360,26 @@ class TgDriveASGI(StaticFiles):
         if route == "/archive/inspect" and method == "POST":
             target = payload.get("destination")
             return 200, await self.archives.inspect(scope, user._path(payload.get("path", "")), None if target is None else destination(target), password()), no_store
+        if route == "/archive/browse" and method == "POST":
+            return 200, await self.archives.browse(scope, user._path(payload.get("path", ""))), no_store
         if route == "/archive/extract" and method == "POST":
             return 201, await self.archives.start(account.id, scope, user._path(payload.get("path", "")), destination(payload.get("destination", "")),
                                                   password(), payload.get("conflict", "rename"), payload.get("keep_archive", True)), no_store
+        if route == "/archive/compress" and method == "POST":
+            # 在线压缩：把所选文件与文件夹打包成 ZIP 保存到网盘（默认放在第一项所在的文件夹）。
+            roots, files, total = await user.archive_totals(token, payload.get("paths"))
+            folder = destination(payload["destination"]) if payload.get("destination") is not None else roots[0][:roots[0].rstrip("/").rfind("/") + 1]
+            if any(root.endswith("/") and folder.startswith(root) for root in roots):
+                raise ValueError("压缩包不能保存到要压缩的文件夹里面")
+            name = payload.get("name")
+            if not isinstance(name, str) or not name.strip() or "/" in name or "\\" in name or len(name.encode()) > 220 or any(ord(c) < 32 for c in name):
+                raise ValueError("压缩包名称不正确")
+            name = name.strip()
+            if not name.lower().endswith(".zip"):
+                name += ".zip"
+            _, entries = await user.archive(token, payload.get("paths"))
+            return 201, await self.archives.compress(account.id, scope, folder + name, lambda: entries, files, total,
+                                                     payload.get("compression", "deflate") == "deflate"), no_store
         if route == "/archive/jobs" and method == "GET":
             ids = [value for value in query["ids"][0].split(",") if value] if "ids" in query else None
             return 200, {"jobs": self.archives.list(account.id, private, ids)}, no_store

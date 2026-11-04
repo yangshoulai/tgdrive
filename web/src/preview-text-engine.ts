@@ -24,6 +24,7 @@ import { diff } from "@codemirror/legacy-modes/mode/diff";
 import { dockerFile } from "@codemirror/legacy-modes/mode/dockerfile";
 import MarkdownIt from "markdown-it";
 import DOMPurify from "dompurify";
+import { loadAll as loadAllYaml } from "js-yaml";
 import { highlight, languageOf } from "./highlight";
 
 const modes: Record<string, StreamParser<unknown>> = { c, cpp, java, csharp, kotlin, scala, dart, js: javascript, javascript, typescript, json, python, shell, go, rust, css, html, xml, yaml, toml, ruby, swift, lua, ini: properties, diff, docker: dockerFile, sql: standardSQL };
@@ -128,6 +129,12 @@ export function renderMarkdown(source: string, resolveImage?: (src: string) => s
   };
   md.renderer.rules.table_open = () => '<div class="md-table-wrap"><table>';
   md.renderer.rules.table_close = () => '</table></div>';
+  return sanitizeHtml(md.render(source), resolveImage);
+}
+
+/** 清洗一段 HTML（Markdown 渲染结果、Notebook 的 text/html 输出）。 */
+export function sanitizeHtml(html: string, resolveImage?: (src: string) => string | null): string {
+  const safeLink = (url: string) => /^(?:https?:\/\/|mailto:)/i.test(url.replace(/[\u0000-\u0020\u007f]/g, ""));
   // 允许 README 里常见的少量 HTML（居中的 div、picture、details、kbd 等），全部经 DOMPurify 清洗：
   // 不执行脚本、不加载样式与框架；图片只加载同目录（含子目录）的文件和内嵌 data 图片，外部图片先换成占位，由用户点击后再加载；
   // picture 的 source 一律去掉（srcset 可能指向外部地址），保留其中的 img；链接只放行 http(s) 与 mailto。
@@ -150,6 +157,13 @@ export function renderMarkdown(source: string, resolveImage?: (src: string) => s
     } else if (element.tagName === "INPUT" && !(element.getAttribute("type") === "checkbox" && element.hasAttribute("disabled"))) element.remove();
   });
   try {
-    return purify.sanitize(md.render(source), { ADD_ATTR: ["loading"], FORBID_TAGS: ["style", "form", "iframe", "source", "video", "audio", "object", "embed", "select", "textarea"], FORBID_ATTR: ["style", "id"] });
+    return purify.sanitize(html, { ADD_ATTR: ["loading"], FORBID_TAGS: ["style", "form", "iframe", "source", "video", "audio", "object", "embed", "select", "textarea"], FORBID_ATTR: ["style", "id"] });
   } finally { purify.removeHook("afterSanitizeAttributes"); }
+}
+
+/** YAML 转成普通对象供结构视图展示：多文档（--- 分隔）时返回数组。只用安全的 JSON 兼容类型，不执行自定义标签。 */
+export function parseYaml(source: string): { value: unknown; documents: number } {
+  // 限制别名数量与嵌套深度，防止「十亿笑声」式的别名炸弹把页面卡死。
+  const documents = loadAllYaml(source, { json: true, maxAliases: 10000, maxDepth: 200 });
+  return { value: documents.length === 1 ? documents[0] : documents, documents: documents.length };
 }

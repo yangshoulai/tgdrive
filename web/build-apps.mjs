@@ -9,7 +9,7 @@ const previewAssets={};
 // 只给按需加载的引擎（文本与媒体预览、助手输入框）使用标准打包器，主应用沿用自写打包器。
 if(!process.argv[2] || process.argv[2]==='user') {
  const dist=path.join(root,'dist');fs.mkdirSync(dist,{recursive:true});
- for(const [kind,globalName,base] of [['text','TesseraTextPreview','preview-text'],['media','TesseraMediaPreview','preview-media'],['composer','TesseraComposer','composer'],['pdf','TesseraPdfPreview','preview-pdf']]) {
+ for(const [kind,globalName,base] of [['text','TesseraTextPreview','preview-text'],['media','TesseraMediaPreview','preview-media'],['composer','TesseraComposer','composer'],['pdf','TesseraPdfPreview','preview-pdf'],['book','TesseraBookPreview','preview-book']]) {
   const result=await build({entryPoints:[path.join(root,`src/${base}-engine.ts`)],bundle:true,write:false,
    outfile:path.join(dist,`${base}.js`),format:'iife',globalName,minify:true,target:'es2022',legalComments:'inline'});
   const hash=crypto.createHash('sha256');for(const file of result.outputFiles) hash.update(file.contents);
@@ -29,6 +29,17 @@ if(!process.argv[2] || process.argv[2]==='user') {
   fs.copyFileSync(path.join(source,'build/pdf.worker.min.mjs'),path.join(target,'pdf.worker.js'));
   previewAssets.pdf={...previewAssets.pdf,worker:`/pdfjs/${version}/pdf.worker.js`,base:`/pdfjs/${version}/`};
  }
+ // HEIC：libheif 的 WebAssembly 在 Worker 里解码；wasm 按版本放在 dist/heif/<版本>/，第一次打开 HEIC 时才下载。
+ {
+  const source=path.join(root,'node_modules/libheif-js');const version=JSON.parse(fs.readFileSync(path.join(source,'package.json'),'utf8')).version;
+  fs.mkdirSync(path.join(dist,'heif',version),{recursive:true});
+  fs.copyFileSync(path.join(source,'libheif-wasm/libheif.wasm'),path.join(dist,'heif',version,'libheif.wasm'));
+  const result=await build({entryPoints:[path.join(root,'src/heif-worker.ts')],bundle:true,write:false,outfile:path.join(dist,'heif-worker.js'),format:'iife',minify:true,target:'es2022',
+   legalComments:'inline',platform:'browser',define:{'process':'undefined','__filename':'undefined'},external:['fs','path','crypto']});
+  const contents=result.outputFiles[0].contents;const name=`heif-worker-${crypto.createHash('sha256').update(contents).digest('hex').slice(0,12)}.js`;
+  fs.writeFileSync(path.join(dist,name),contents);
+  previewAssets.heif={worker:`/${name}`,wasm:`/heif/${version}/libheif.wasm`};
+ }
  // 浏览器本地缓存的 Service Worker（docs/client-cache-design.md）：地址固定为 /sw.js（作用域 /），服务端按 no-cache 返回。
  const worker=await build({entryPoints:[path.join(root,'src/sw/cache-worker.ts')],bundle:true,write:false,outfile:path.join(dist,'sw.js'),format:'iife',minify:true,target:'es2022'});
  fs.writeFileSync(path.join(dist,'sw.js'),worker.outputFiles[0].contents);
@@ -43,7 +54,7 @@ if(!process.argv[2] || process.argv[2]==='user') {
   }
   for(const dependency of Object.keys(manifest.dependencies||{})) collectLicense(dependency);
  }
- for(const name of ['artplayer','codemirror','@codemirror/legacy-modes','markdown-it','dompurify','pdfjs-dist']) collectLicense(name);
+ for(const name of ['artplayer','codemirror','@codemirror/legacy-modes','markdown-it','dompurify','pdfjs-dist','js-yaml','fflate','libheif-js']) collectLicense(name);
  fs.writeFileSync(path.join(dist,'preview-licenses.txt'),licenses.join('\n\n'));
 }
 const configs={

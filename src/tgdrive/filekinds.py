@@ -11,7 +11,8 @@
 # 扩展名生效的条件：generic 只在 MIME 缺失或通用二进制时；text 另外允许文本类 MIME（细分源代码、字幕等）；
 # media 另外允许音视频 MIME（容器相同时按音频扩展名区分）。
 _GENERIC = "(coalesce(content_type,'')='' OR lower(content_type) LIKE 'application/octet-stream%' OR lower(content_type) LIKE 'binary/octet-stream%')"
-_TEXTUAL_SQL = "(lower(coalesce(content_type,'')) LIKE 'text/%' OR lower(coalesce(content_type,'')) LIKE 'application/json%')"
+_TEXTUAL_SQL = ("(lower(coalesce(content_type,'')) LIKE 'text/%' OR lower(coalesce(content_type,'')) LIKE 'application/json%'"
+                " OR lower(coalesce(content_type,'')) LIKE 'application/%+json%')")
 _MEDIA_SQL = "(lower(coalesce(content_type,'')) LIKE 'video/%' OR lower(coalesce(content_type,'')) LIKE 'audio/%')"
 
 def _ext(*names: str) -> list[str]:
@@ -27,8 +28,9 @@ _RULES: list[tuple] = [
     ("video", ["video/%"], _ext("mp4", "webm", "mov", "mkv", "avi", "m4v", "ogv")),
     ("audio", ["audio/%"], _ext("mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac")),
     ("pdf", ["application/pdf%"], _ext("pdf")),
-    ("document", ["%wordprocessingml%", "%msword%", "%opendocument.text%"],
-     _ext("doc", "docx", "dot", "dotx", "odt", "rtf", "pages", "wps")),
+    # EPUB 电子书归文档（内容是 ZIP，但排在压缩包之前）。
+    ("document", ["%wordprocessingml%", "%msword%", "%opendocument.text%", "application/epub%"],
+     _ext("doc", "docx", "dot", "dotx", "odt", "rtf", "pages", "wps", "epub")),
     ("spreadsheet", ["%spreadsheetml%", "%ms-excel%", "%opendocument.spreadsheet%"],
      _ext("xls", "xlsx", "xlsm", "xlt", "xltx", "ods", "numbers", "et")),
     ("presentation", ["%presentationml%", "%ms-powerpoint%", "%opendocument.presentation%"],
@@ -37,8 +39,8 @@ _RULES: list[tuple] = [
                       "cs", "sh", "bash", "zsh", "ps1", "bat", "htm", "html", "css", "scss", "sass", "less", "vue", "svelte",
                       "sql", "rb", "php", "swift", "kt", "kts", "scala", "dart", "gradle", "lua", "diff", "patch")
      + ["dockerfile", "%/dockerfile", "makefile", "%/makefile"], "text"),
-    ("text", ["text/%", "application/json%"],
-     _ext("md", "markdown", "mdx", "rst", "txt", "json", "jsonc", "csv", "tsv", "log", "xml", "yml", "yaml", "toml", "ini",
+    ("text", ["text/%", "application/json%", "application/%+json%"],
+     _ext("md", "markdown", "mdx", "rst", "txt", "json", "jsonc", "jsonl", "ndjson", "geojson", "ipynb", "csv", "tsv", "log", "xml", "yml", "yaml", "toml", "ini",
           "conf", "cfg", "properties", "env", "gitignore", "editorconfig", "lrc", "srt", "vtt")
      + [".env", "%/.env", ".env.%", "%/.env.%"]),
     ("archive", ["%zip%", "%compressed%", "%x-tar%"],
@@ -121,7 +123,8 @@ def kind_of(key: str, content_type: str | None) -> str | None:
     """按与 kind_clause 相同的规则判断单个对象属于哪个筛选项（image／video／…），都不属于时返回 None。"""
     mime, name = (content_type or "").lower(), key.lower()
     generic = not mime or mime.startswith(("application/octet-stream", "binary/octet-stream"))
-    allowed = {"generic": generic, "text": generic or mime.startswith("text/") or mime.startswith("application/json"),
+    textual = mime.startswith(("text/", "application/json")) or (mime.startswith("application/") and "+json" in mime)
+    allowed = {"generic": generic, "text": generic or textual,
                "media": generic or mime.startswith(("video/", "audio/"))}
     for rule, mimes, keys, when in map(_rule, _RULES):
         if any(_like(mime, pattern) for pattern in mimes) or allowed[when] and any(_like(name, pattern) for pattern in keys):
