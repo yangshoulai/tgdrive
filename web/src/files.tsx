@@ -216,16 +216,18 @@ export function FileThumbnail({ kind, url, placeholder }: { kind: FileKind; url?
   return <ThumbnailImage key={url} kind={kind} url={url} placeholder={placeholder === url ? undefined : placeholder} />;
 }
 
-/** 文件夹只展示已有的小缩略图；空目录或尚未生成缩略图时保留文件夹图标。 */
+/** 网格里的文件夹封面：用文件夹里已有的缩略图铺满封面区，按张数拼成 1／2／4 格（不留空格子）；
+ * 加载失败的图片去掉后重新排版，一张也没有时显示文件夹图标。左下角的小标记表明这是文件夹。 */
 export function FolderThumbnail({ previews = [] }: { previews?: { key: string; content_type: string | null; url: string }[] }) {
-  if (!previews.length) return <FileThumbnail kind="folder" />;
-  return <div className="folder-thumbnail" role="img" aria-label="文件夹内容预览">
-    <div className="folder-preview-grid" aria-hidden="true">{Array.from({ length: 4 }, (_, index) => {
-      const file = previews[index];
-      return <span key={file?.key ?? index} className={`folder-preview-cell${file ? "" : " is-empty"}`}>
-        {file && <FileVisual kind={getFileKind(file.content_type, file.key)} src={file.url} size="xl" />}
-      </span>;
-    })}</div><span className="folder-preview-badge" aria-hidden="true"><FileGlyph kind="folder" size={20} /></span>
+  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set());
+  const usable = previews.filter(item => !failed.has(item.key));
+  const shown = usable.slice(0, usable.length >= 4 ? 4 : usable.length >= 2 ? 2 : 1);
+  if (!shown.length) return <FileThumbnail kind="folder" />;
+  return <div className={`folder-thumbnail is-${shown.length}`} role="img" aria-label="文件夹内容预览">
+    {shown.map(item => <span key={item.key} className="folder-thumbnail-cell" aria-hidden="true">
+      <img src={item.url} alt="" loading="lazy" decoding="async" onError={() => setFailed(current => new Set(current).add(item.key))} />
+    </span>)}
+    <span className="folder-preview-badge" aria-hidden="true"><FileGlyph kind="folder" size={16} /></span>
   </div>;
 }
 

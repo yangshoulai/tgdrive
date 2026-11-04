@@ -91,7 +91,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
   const markdown = view === "markdown";
   // 表格、结构与笔记本视图是 React 组件，不用编辑器引擎渲染。
   const structured = mode === "render" && view !== null && !markdown;
-  // 纸张只给 Markdown 与 Notebook 预览；纯文本、日志、代码、源码、表格与结构视图统一用深色通栏。
+  // 纸张给 Markdown 与 Notebook 预览；表格与结构视图是铺满窗口、跟随界面明暗的卡片；纯文本、日志、代码与源码用深色通栏编辑器。
   const paper = immersive && (markdown || view === "notebook") && mode === "render";
   const lineCount = useMemo(() => {
     // 大文本只统计换行，避免 split 为每一行额外分配字符串。
@@ -277,7 +277,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     : mode === "source" && ready ? (content.text.length ? `${lineCount.toLocaleString()} 行` : "文件内容为空") : null;
   const truncated = content.truncated && <span>仅显示前 {formatBytes(TEXT_PREVIEW_LIMIT)}{content.total ? `（共 ${formatBytes(content.total)}）` : ""}，<a href={downloadUrl}>下载完整文件</a></span>;
 
-  return <div className={`preview-text${editing ? " is-editing" : ""}${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${structured ? ` is-view-${view}` : ""}${content.truncated ? " is-truncated" : ""}${immersive ? paper ? " is-paper" : " is-code" : ""}`}>
+  return <div className={`preview-text${editing ? " is-editing" : ""}${compact ? " is-compact" : ""}${markdown && mode === "source" ? " is-markdown-source" : ""}${structured ? ` is-view-${view}` : ""}${content.truncated ? " is-truncated" : ""}${immersive ? paper ? " is-paper" : structured ? " is-panel" : " is-code" : ""}`}>
     {tools ? createPortal(toolbar, tools.target) : toolbar}
     {!ready && <div className="preview-engine-loading" role="status"><span className="spinner" />正在准备预览…</div>}
     {conflict && <div className="preview-edit-conflict" role="alert">

@@ -40,7 +40,11 @@ export function FontPreview({ url, name, onError }: { url: string; name: string;
           await face.load();
           document.fonts.add(face);
         })()]);
-        if (!controller.signal.aborted) setState({ family, info });
+        if (!controller.signal.aborted) {
+          setState({ family, info });
+          // 没有中文字形的字体（如 Arial）默认用英文样张，免得整段都是系统字体补上的字。
+          if (info.codepoints && !info.codepoints.includes(0x5929)) setPreset("en");
+        }
       } catch (reason) {
         if (!controller.signal.aborted) onError(reason instanceof Error && reason.message.includes("字体文件") ? reason.message : "浏览器无法加载这个字体文件，它可能已损坏或格式不受支持");
       }

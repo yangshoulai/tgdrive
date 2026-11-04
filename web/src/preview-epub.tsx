@@ -1,6 +1,6 @@
 /** EPUB 阅读器：一次显示一章，纸张排版与 Markdown 预览一致；目录抽屉、上一章／下一章、字号调节，记住读到的位置。
  * 书里的脚本、表单与样式都不加载（见 preview-book-engine.ts），外部链接在新标签页打开。 */
-import { useContext, useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { loadBookEngine } from "./preview-runtime";
 import { PreviewToolsContext } from "./preview-text";
@@ -128,6 +128,9 @@ export function EpubPreview({ url, positionKey, remember, onError }: { url: stri
     return () => tools.setMenuItems([]);
   }, [tools, book, fontSize]);
 
+  // 外层舞台（不滚动）：章节提示与目录挂在这里。书打开后纸张才渲染，所以在这之后读取。
+  const [stage, setStage] = useState<HTMLElement | null>(null);
+  useLayoutEffect(() => { setStage(sheet.current?.closest<HTMLElement>(".preview-stage") ?? null); }, [book]);
   if (!book) return <div className="preview-engine-loading" role="status"><span className="spinner" />正在打开电子书…</div>;
   const chapterPath = book.spine[index];
   const current = [...book.toc].reverse().find(item => item.href.split("#")[0] === chapterPath)?.title;
@@ -154,7 +157,6 @@ export function EpubPreview({ url, positionKey, remember, onError }: { url: stri
       })}
     </ol>
   </aside>;
-  const stage = host.current?.closest<HTMLElement>(".preview-stage");
   return <div className="preview-text is-paper is-epub">
     {tools ? createPortal(toolbar, tools.target) : toolbar}
     <div ref={sheet} className="preview-sheet">
@@ -177,7 +179,9 @@ export function EpubPreview({ url, positionKey, remember, onError }: { url: stri
         </nav>
       </article>
     </div>
-    <div className="preview-text-capsule" role="status"><span>第 {index + 1} / {book.spine.length} 章{current ? ` · ${current}` : ""}</span></div>
+    {/* 纸张在 .preview-text 里滚动：章节提示与目录都挂到外层舞台上，固定在窗口里，不随正文滚走。 */}
+    {(() => { const capsule = <div className="preview-text-capsule" role="status"><span>第 {index + 1} / {book.spine.length} 章{current ? ` · ${current}` : ""}</span></div>;
+      return stage ? createPortal(capsule, stage) : capsule; })()}
     {panel && (stage ? createPortal(panel, stage) : panel)}
   </div>;
 }

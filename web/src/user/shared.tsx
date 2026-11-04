@@ -104,13 +104,16 @@ export function SharedView({ session, onChanged, onOpenFolder }: { session: api.
                         {folder ? <FolderThumbnail previews={(pagination.page?.folder_previews?.[file.key] ?? []).flatMap(item => {
                           const url = api.fileThumbnail(item); return url ? [{ ...item, url }] : [];
                         })} /> : <FileThumbnail kind={kind} url={api.fileThumbnail(file, "grid")} placeholder={loadedPlaceholder(api.fileThumbnail(file))} />}
-                        <span className="grid-public grid-share-badges">{shareBadges(file)}</span>
                       </div>
                       <div className="grid-meta">
                         <button type="button" className="grid-name name-button" title={baseName(file.key)} onClick={event => { event.stopPropagation(); open(); }}><span className="grid-name-text">{baseName(file.key)}</span></button>
                         <span className="grid-sub"><span className="grid-kind">{kindLabel(kind)}</span>{" · "}<span className="grid-size">{size == null ? "—" : formatBytes(size)}</span></span>
                         <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(file.key)} 的更多操作`} items={fileMenu(file, true)} /></span>
-                        <span className="grid-share-meta" title={parentPath(file.key) ? `/${parentPath(file.key)}` : "我的文件"}>{formatDate(file.public_at)} · 下载 {file.public_downloads ?? 0} 次</span>
+                        <span className="grid-share-meta" title={parentPath(file.key) ? `位于 /${parentPath(file.key)}` : "位于 我的文件"}>
+                          <span><Icon name="download" size={12} />{(file.public_downloads ?? 0).toLocaleString("zh-CN")}</span>
+                          <span>{formatDate(file.public_at)}</span>
+                          {shareBadges(file)}
+                        </span>
                       </div>
                     </div>;
                   })}
