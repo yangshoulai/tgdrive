@@ -25,8 +25,8 @@ class ScriptedModel:
         self.replies = list(replies)
         self.calls = []
 
-    async def __call__(self, endpoint, model, system, messages, tools, *, max_tokens, on_text=None, on_reasoning=None):
-        self.calls.append({"system": system, "messages": messages, "tools": [t.name for t in tools], "model": model})
+    async def __call__(self, endpoint, model, system, messages, tools, *, max_tokens, on_text=None, on_reasoning=None, effort=None):
+        self.calls.append({"system": system, "messages": messages, "tools": [t.name for t in tools], "model": model, "effort": effort})
         if not self.replies:
             reply = Reply(text="好的。", input_tokens=10, output_tokens=5)
         else:
@@ -209,6 +209,25 @@ class AssistantTests(AssistantCase):
         self.run_async(run())
 
     # ---------- Agent 循环 ----------
+
+    def test_chosen_reasoning_effort_is_used_for_replies_only(self):
+        async def run():
+            admin, _, model = await self.setup_assistant()
+            status, _ = await self.req("POST", "/api/admin/v1/assistant/catalog",
+                                       {"provider": "local", "model": "test-model", "capabilities": {"tools": True}, "reasoning_efforts": ["low", "high"]}, admin)
+            self.assertEqual(status, 201)
+            status, _ = await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"reasoning_effort": "high"}, admin)
+            self.assertEqual(status, 200)
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            conversation = await self.start_conversation(user, "")
+            self.model.replies = [answer("好的。")]
+            status, data = await self.send(user, conversation, "你好")
+            self.assertEqual(status, 201, data)
+            replies = [item for item in self.model.calls if item["tools"]]
+            self.assertTrue(replies)
+            self.assertTrue(all(item["effort"] == "high" for item in replies), "主回复带上选择的思考程度")
+            self.assertTrue(all(item["effort"] is None for item in self.model.calls if not item["tools"]), "标题等后台调用不带")
+        self.run_async(run())
 
     def test_run_executes_tools_and_persists_trace(self):
         async def run():

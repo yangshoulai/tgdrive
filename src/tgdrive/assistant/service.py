@@ -1765,8 +1765,11 @@ class AssistantService:
                     self._validate(state)
                     if not quiet:
                         state.thinking = {}
+                    # 思考程度只用于主回复；标题、摘要等后台调用不带，避免额外的思考开销。
+                    effort = self.channels.effort(model) if stream else None
                     reply = await self.chat(endpoint, model["model"], system, prepared, tools, max_tokens=budget,
-                                            **({"on_text": on_text, "on_reasoning": on_reasoning} if stream else {}))
+                                            **({"on_text": on_text, "on_reasoning": on_reasoning} if stream else {}),
+                                            **({"effort": effort} if effort else {}))
                     reply.continuation_key = binding
                     break
                 except ProviderError as exc:

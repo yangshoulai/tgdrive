@@ -449,7 +449,8 @@ function ChannelDetail({ channel, defaultModel, onEdit, onDelete, onPick, onChan
                 <strong>{model.label}{model.id === defaultModel && <Badge tone="accent">默认</Badge>}{model.removed_upstream && <Badge tone="warning">上游已移除</Badge>}
                   {model.private_ok && <Badge icon="lock" tone="public">私密对话</Badge>}</strong>
                 <small className="assistant-model-sub"><code className="mono" title={model.test_note ?? model.model}>{model.model}</code>
-                  <CapabilityBadges value={model.capabilities} tools={model.tools} />{!model.catalog_id && <span className="assistant-cap is-off">目录未收录</span>}</small>
+                  <CapabilityBadges value={model.capabilities} tools={model.tools} />{effortOf(model) && <span className="assistant-cap is-reasoning" title="请求时使用的思考程度">思考 {effortOf(model)}</span>}
+                  {!model.catalog_id && <span className="assistant-cap is-off">目录未收录</span>}</small>
               </span>
               <span role="cell" className="muted">{model.context_window ? tokens(model.context_window) : "—"}</span>
               <span role="cell" className="muted">{model.input_price == null && model.output_price == null ? "—" : `${price(model.input_price)} / ${price(model.output_price)}`}</span>
@@ -556,6 +557,12 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiChannel | 
   );
 }
 
+const EFFORT_LABELS: Record<string, string> = { none: "不思考", minimal: "极少", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" };
+
+/** 请求时实际使用的思考程度：所选档位仍在模型目录的选项里才生效（与服务端 ChannelStore.effort 一致）。 */
+const effortOf = (model: ai.AiModel | null | undefined) =>
+  model?.reasoning_effort && model.reasoning_efforts.includes(model.reasoning_effort) ? model.reasoning_effort : null;
+
 const initialVision = (model: ai.AiModel | null): "auto" | "yes" | "no" =>
   model?.manual_fields.includes("vision") ? (model.capabilities.vision === true ? "yes" : "no") : "auto";
 
@@ -563,7 +570,8 @@ function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number
   const initial = (value: number | null | undefined) => value == null ? "" : String(value);
   const [form, setForm] = useState({ model: model?.model ?? "", display_name: model?.display_name ?? "", context_window: initial(model?.context_window),
     max_output: initial(model?.max_output), tools: model?.tools ?? "unknown" as ai.ToolSupport, sort: String(model?.sort ?? 0),
-    input_price: initial(model?.input_price), output_price: initial(model?.output_price), vision: initialVision(model), private_ok: Boolean(model?.private_ok) });
+    input_price: initial(model?.input_price), output_price: initial(model?.output_price), vision: initialVision(model), private_ok: Boolean(model?.private_ok),
+    effort: effortOf(model) ?? "" });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const number = (value: string) => value.trim() ? Number(value) : null;
@@ -581,7 +589,8 @@ function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number
     const values = { display_name: form.display_name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output),
       tools: form.tools, sort: Number(form.sort), input_price: number(form.input_price), output_price: number(form.output_price), private_ok: form.private_ok,
       // 只在改动时提交：提交会把它标记为手动值或恢复为跟随目录。
-      ...(form.vision !== initialVision(model) ? { vision: form.vision } : {}) };
+      ...(form.vision !== initialVision(model) ? { vision: form.vision } : {}),
+      ...(model && form.effort !== (model.reasoning_effort ?? "") ? { reasoning_effort: form.effort || null } : {}) };
     setBusy(true); setError("");
     try {
       if (model) await ai.updateAdminModel(model.id, values);
@@ -633,6 +642,14 @@ function ModelDialog({ channelId, model, onClose, onSaved }: { channelId: number
             <option value="auto">跟随模型目录</option><option value="yes">支持</option><option value="no">不支持</option>
           </select>
         </Field>
+        {model && <Field label="思考程度" hint={model.reasoning_efforts.length
+          ? "可选档位来自模型目录。选择后，每次回复都按这个程度请求模型思考；「不设置」时请求里不带思考程度，由模型服务决定。程度越高回答越慢、消耗的 token 越多。"
+          : model.catalog_id ? "模型目录没有提供这个模型的思考程度档位，请求里不带思考程度字段。" : "模型目录未收录这个模型，请求里不带思考程度字段。"}>
+          <select className="input" value={form.effort} disabled={!model.reasoning_efforts.length} onChange={event => setForm({ ...form, effort: event.target.value })}>
+            <option value="">不设置（由模型决定）</option>
+            {model.reasoning_efforts.map(value => <option key={value} value={value}>{EFFORT_LABELS[value] ? `${EFFORT_LABELS[value]}（${value}）` : value}</option>)}
+          </select>
+        </Field>}
         <Switch label="允许用于私密对话" checked={form.private_ok} onChange={value => setForm({ ...form, private_ok: value })}
           description="私密对话会把私密空间里的文件名、目录结构以及读取的文本和图片发给这个模型，只为你信任的模型服务开启。全局开关在“限制与额度”。" />
         {error && <Notice tone="danger">{error}</Notice>}
@@ -758,7 +775,8 @@ function CatalogTab() {
             <span role="columnheader">价格（$/M）</span><span role="columnheader">来源</span><span role="columnheader"><span className="sr-only">操作</span></span></div>
           {data.entries.map(entry => <div className="data-row" role="row" key={entry.id}>
             <span role="cell" className="name-stack"><strong>{entry.name ?? entry.model}</strong>
-              <small className="assistant-model-sub"><code className="mono">{entry.id}</code><CapabilityBadges value={entry.capabilities} /></small></span>
+              <small className="assistant-model-sub"><code className="mono">{entry.id}</code><CapabilityBadges value={entry.capabilities} />
+                {entry.reasoning_efforts.length > 0 && <span className="assistant-cap" title="可选的思考程度">思考程度 {entry.reasoning_efforts.join(" · ")}</span>}</small></span>
             <span role="cell" className="muted">{tokens(entry.context_window)}</span>
             <span role="cell" className="muted">{tokens(entry.max_output)}</span>
             <span role="cell" className="muted">{`${price(entry.input_price)} / ${price(entry.output_price)}`}</span>
@@ -804,7 +822,7 @@ function CatalogEntryDialog({ entry, onClose, onSaved }: { entry: ai.CatalogEntr
   const text = (value: number | null | undefined) => value == null ? "" : String(value);
   const [form, setForm] = useState({ provider: entry?.provider ?? "", model: entry?.model ?? "", name: entry?.name ?? "",
     context_window: text(entry?.context_window), max_output: text(entry?.max_output), input_price: text(entry?.input_price),
-    output_price: text(entry?.output_price), cache_price: text(entry?.cache_price) });
+    output_price: text(entry?.output_price), cache_price: text(entry?.cache_price), efforts: (entry?.reasoning_efforts ?? []).join(", ") });
   const [caps, setCaps] = useState<ai.Capabilities>(entry?.capabilities ?? { tools: null, reasoning: null, vision: null, structured: null });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -812,7 +830,8 @@ function CatalogEntryDialog({ entry, onClose, onSaved }: { entry: ai.CatalogEntr
   async function submit(event: FormEvent) {
     event.preventDefault();
     const values: ai.CatalogInput = { name: form.name.trim() || null, context_window: number(form.context_window), max_output: number(form.max_output),
-      input_price: number(form.input_price), output_price: number(form.output_price), cache_price: number(form.cache_price), capabilities: caps };
+      input_price: number(form.input_price), output_price: number(form.output_price), cache_price: number(form.cache_price), capabilities: caps,
+      reasoning_efforts: [...new Set(form.efforts.split(/[\s,，、]+/).map(value => value.trim().toLowerCase()).filter(Boolean))] };
     for (const [key, value] of Object.entries(values)) if (typeof value === "number" && (!Number.isFinite(value) || value < 0)) { setError(`${key} 不正确`); return; }
     setBusy(true); setError("");
     try {
@@ -845,6 +864,9 @@ function CatalogEntryDialog({ entry, onClose, onSaved }: { entry: ai.CatalogEntr
       </div>
       <div className="form-row">{capability("tools", "工具调用")}{capability("reasoning", "推理")}</div>
       <div className="form-row">{capability("vision", "图片输入")}{capability("structured", "结构化输出")}</div>
+      <Field label="思考程度档位" hint="模型接受的 effort 取值，按从低到高用逗号分隔，如 low, medium, high；留空表示没有可选的思考程度。渠道模型可从这些档位中选择。">
+        <input className="input mono" value={form.efforts} placeholder="low, medium, high" onChange={event => setForm({ ...form, efforts: event.target.value })} />
+      </Field>
       {error && <Notice tone="danger">{error}</Notice>}
     </form>
   </Modal>;

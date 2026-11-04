@@ -22,6 +22,10 @@ export type AiModel = {
   sort: number; tested_at: number | null; test_note: string | null; channel_name?: string;
   /** 允许用于私密对话（§24.6，默认关闭） */
   private_ok?: boolean;
+  /** 模型目录给出的思考程度档位（只有 effort 类型；没有时为空，请求不带思考程度字段）。 */
+  reasoning_efforts: string[];
+  /** 管理员选择的思考程度；null 表示不设置，由模型自己决定。 */
+  reasoning_effort: string | null;
 };
 /** 渠道上游模型与目录匹配结果（尚未加入时 added=false）。 */
 export type UpstreamModel = {
@@ -31,14 +35,14 @@ export type UpstreamModel = {
 export type CatalogEntry = {
   id: string; provider: string; model: string; name: string | null; family: string | null; context_window: number | null; max_output: number | null;
   input_price: number | null; output_price: number | null; cache_price: number | null; capabilities: Capabilities; knowledge: string | null;
-  released: string | null; source: "models.dev" | "openrouter" | "manual"; updated_at: number;
+  released: string | null; source: "models.dev" | "openrouter" | "manual"; updated_at: number; reasoning_efforts: string[];
 };
 export type CatalogStatus = {
   url: string; default_url: string; auto_sync: boolean; synced_at: number | null; note: string | null; error: string | null;
   total: number; manual: number; providers: number;
 };
 export type CatalogInput = { provider?: string; model?: string; name?: string | null; context_window?: number | null; max_output?: number | null;
-  input_price?: number | null; output_price?: number | null; cache_price?: number | null; capabilities?: Capabilities };
+  input_price?: number | null; output_price?: number | null; cache_price?: number | null; capabilities?: Capabilities; reasoning_efforts?: string[] };
 export type ChannelHealth = { requests: number; success_rate: number | null; p95_ms: number | null; last_error: string | null; unhealthy: boolean };
 export type ChannelProtocol = "chat_completions" | "responses";
 export type AiChannel = {
@@ -139,7 +143,7 @@ export const updateAdminChannel = (id: number, input: ChannelInput) => post<AiCh
 export const deleteAdminChannel = (id: number) => post<void>(`${ADMIN}/channels/${id}/delete`);
 export const syncAdminChannel = (id: number) => post<{ total: number; added: number; restored: number; removed: number; note: string }>(`${ADMIN}/channels/${id}/sync`, undefined, 120000);
 export const adminChannelModels = (id: number) => get<AiModel[]>(`${ADMIN}/channels/${id}/models`);
-type ModelFields = Partial<Pick<AiModel, "display_name" | "enabled" | "tools" | "context_window" | "max_output" | "sort" | "input_price" | "output_price" | "private_ok">>
+type ModelFields = Partial<Pick<AiModel, "display_name" | "enabled" | "tools" | "context_window" | "max_output" | "sort" | "input_price" | "output_price" | "private_ok" | "reasoning_effort">>
   & { /** 图片输入：auto 跟随模型目录，yes／no 为手动设置。 */ vision?: "auto" | "yes" | "no" };
 export const addAdminModel = (channelId: number, input: ModelFields & { model: string }) => post<AiModel>(`${ADMIN}/channels/${channelId}/models`, input);
 export const updateAdminModel = (id: number, input: ModelFields & { reset_catalog?: boolean }) => post<AiModel>(`${ADMIN}/models/${id}/update`, input);

@@ -409,11 +409,14 @@ def _anthropic_messages(messages: list[dict]) -> tuple[list[dict], str]:
 
 async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict], tools: list[ToolDef], *,
                max_tokens: int | None, on_text: Callable[[str], Awaitable[None]] | None = None,
-               on_reasoning: Callable[[str], Awaitable[None]] | None = None) -> Reply:
+               on_reasoning: Callable[[str], Awaitable[None]] | None = None, effort: str | None = None) -> Reply:
     """流式调用模型，逐段回调文本与思考过程，返回完整回复（含工具调用与用量）。
 
     思考过程来自 OpenAI 兼容实现的 delta.reasoning_content／delta.reasoning 与 Anthropic 的 thinking_delta，
     只用于展示，不回传给模型。
+
+    effort：管理员为模型选择的思考程度（模型目录给出的档位）；None 时请求不带思考程度字段。
+    OpenAI Chat Completions 用 reasoning_effort，Responses 用 reasoning.effort，Anthropic 用 output_config.effort。
     """
     started = time.monotonic()
     reply = Reply()
@@ -440,7 +443,7 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
     if endpoint.kind == "openai" and endpoint.protocol == "responses":
         from .responses import chat_responses
         return await chat_responses(endpoint, model, system, messages, tools, max_tokens=max_tokens,
-                                    reply=reply, started=started, emit=emit, think=think)
+                                    reply=reply, started=started, emit=emit, think=think, effort=effort)
 
     if endpoint.kind == "openai":
         body: dict = {"model": model, "messages": _openai_messages(system, messages), "stream": True,
@@ -450,6 +453,8 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
                                                                 "parameters": t.parameters}} for t in tools]
         if max_tokens:
             body["max_tokens"] = max_tokens
+        if effort:
+            body["reasoning_effort"] = effort
         url, headers = _openai_url(endpoint.base_url, "/chat/completions"), _openai_headers(endpoint)
         try:
             request = await _open("POST", url, {"Content-Type": "application/json", "Accept": "text/event-stream", **headers},
@@ -520,6 +525,8 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
             "max_tokens": max_tokens or 4096, "stream": True}
     if tools:
         body["tools"] = [{"name": t.name, "description": t.description, "input_schema": t.parameters} for t in tools]
+    if effort:
+        body["output_config"] = {"effort": effort}
     request = await _open("POST", _anthropic_url(endpoint.base_url, "/messages"),
                           {"Content-Type": "application/json", "Accept": "text/event-stream", **_anthropic_headers(endpoint)},
                           json.dumps(body, ensure_ascii=False).encode(), endpoint.timeout)

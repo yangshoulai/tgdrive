@@ -951,6 +951,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - Responses 的加密续接项只在同一模型配置下重放，随对话加密存储，排除网页消息、SSE、导出与日志；可见思考正文不回传。这样保留工具调用后的推理连续性，同时不依赖上游持久保存响应。
 - OpenAI 兼容流式响应的 `delta.reasoning_content`／`delta.reasoning`（DeepSeek、Qwen、OpenRouter、vLLM 等）与 Anthropic `thinking_delta` 作为 `reasoning_delta` 事件推送，结束后随该条助手消息加密保存（最多 20,000 字符）。
 - 思考内容只展示给用户，不发回模型（DeepSeek 要求不回传；Anthropic 不主动开启扩展思考，因此没有签名块需要回传）。
+- 思考程度（schema v35）：模型目录从 models.dev 的 `reasoning_options` 中只取 `type=effort` 的档位存入 `ai_catalog.reasoning_efforts`（开关 `toggle` 与思考预算 `budget_tokens` 不算档位；OpenRouter 格式没有档位），套用到渠道模型的 `ai_models.reasoning_efforts`；管理员在模型配置里选择 `reasoning_effort`（只能是目录给出的档位，手动目录条目可填写档位）。`ChannelStore.effort` 只在所选档位仍在当前选项中时返回它，否则请求不带思考程度字段。只有主回复带上（Chat Completions 为 `reasoning_effort`，Responses 为 `reasoning.effort`，Anthropic 为 `output_config.effort`，不开启需要回传签名的扩展思考），标题、摘要等后台调用不带；连通测试带上所选档位，渠道不接受时在测试里报错。
 - 界面：只有实际收到 reasoning 或官方思考摘要才显示大脑图标的「思考中」／「思考」折叠行并显示用时，正文默认收起。note 使用消息图标与「进度说明」，收起时保留一行进度摘要，点击展开全文；两者正文均复用安全 Markdown 渲染器，支持加粗、列表、代码与链接，不执行原始 HTML；展开后使用与工具详情一致的限高面板，流式追加，停留底部时跟随，向上翻阅时不打断。展开与滚动状态按本轮保存，流式节点落库或运行结束后保留，切换对话不共享；用户正在阅读时不自动折叠外层过程。尚未收到正文时只显示「等待模型响应」，不生成空的思考节点。所有长文本强制换行，对话区禁止横向滚动。
 
 ### 19.4 对话层次

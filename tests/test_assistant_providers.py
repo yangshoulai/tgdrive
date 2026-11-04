@@ -89,6 +89,24 @@ class ProviderTests(unittest.TestCase):
         self.assertIsNone(sent["body"]["messages"][2]["content"])
         self.assertEqual(sent["body"]["tools"][0]["function"]["name"], "search_files")
 
+    def test_reasoning_effort_is_sent_only_when_chosen(self):
+        Upstream.routes["/v1/chat/completions"] = (200, "text/event-stream", sse({"choices": [{"delta": {"content": "好"}}]}, "[DONE]"))
+        Upstream.routes["/v1/messages"] = (200, "text/event-stream", sse({"type": "message_stop"}, named=True))
+        Upstream.routes["/v1/responses"] = (200, "text/event-stream", sse({"type": "response.completed", "response": {"output": []}}, named=True))
+        messages = [{"role": "user", "content": "你好"}]
+        asyncio.run(providers.chat(self.endpoint("openai", "/v1"), "gpt-x", "系统", messages, [], max_tokens=None, effort="high"))
+        asyncio.run(providers.chat(self.endpoint("openai", "/v1"), "gpt-x", "系统", messages, [], max_tokens=None))
+        asyncio.run(providers.chat(self.endpoint("anthropic"), "claude-x", "系统", messages, [], max_tokens=None, effort="max"))
+        asyncio.run(providers.chat(self.endpoint("anthropic"), "claude-x", "系统", messages, [], max_tokens=None))
+        responses = Endpoint("openai", self.base + "/v1", "sk-test-key-123456", {}, 10, "responses")
+        asyncio.run(providers.chat(responses, "gpt-x", "系统", messages, [], max_tokens=None, effort="low"))
+        bodies = [item["body"] for item in Upstream.seen]
+        self.assertEqual(bodies[0]["reasoning_effort"], "high")
+        self.assertNotIn("reasoning_effort", bodies[1], "没有选择时不带思考程度字段")
+        self.assertEqual(bodies[2]["output_config"], {"effort": "max"})
+        self.assertNotIn("output_config", bodies[3])
+        self.assertEqual(bodies[4]["reasoning"], {"summary": "auto", "effort": "low"})
+
     def test_anthropic_stream_and_message_merging(self):
         Upstream.routes["/v1/messages"] = (200, "text/event-stream", sse(
             {"type": "message_start", "message": {"id": "msg_1", "usage": {"input_tokens": 50, "output_tokens": 1}}},

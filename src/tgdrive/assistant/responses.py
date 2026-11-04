@@ -51,9 +51,11 @@ def input_items(messages: list[dict]) -> list[dict]:
 
 async def chat_responses(endpoint: Endpoint, model: str, system: str, messages: list[dict], tools: list[ToolDef], *,
                          max_tokens: int | None, reply: Reply, started: float,
-                         emit: Callable[[str], Awaitable[None]], think: Callable[[str], Awaitable[None]]) -> Reply:
+                         emit: Callable[[str], Awaitable[None]], think: Callable[[str], Awaitable[None]],
+                         effort: str | None = None) -> Reply:
     body = {"model": model, "instructions": system, "input": input_items(messages), "stream": True,
-            "store": False, "reasoning": {"summary": "auto"}, "include": ["reasoning.encrypted_content"]}
+            "store": False, "reasoning": {"summary": "auto", **({"effort": effort} if effort else {})},
+            "include": ["reasoning.encrypted_content"]}
     if tools:
         body["tools"] = [{"type": "function", "name": tool.name, "description": tool.description,
                           "parameters": tool.parameters, "strict": False} for tool in tools]

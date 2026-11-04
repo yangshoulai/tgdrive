@@ -12,6 +12,11 @@ MODELS_DEV = {
                    "modalities": {"input": ["text", "image"]}, "cost": {"input": 2.5, "output": 10, "cache_read": 1.25},
                    "limit": {"context": 128000, "output": 16384}, "knowledge": "2023-09", "release_date": "2024-05-13"}}},
     "azure": {"id": "azure", "models": {"gpt-4o": {"id": "gpt-4o", "name": "GPT-4o (Azure)", "limit": {"context": 128000}}}},
+    "anthropic": {"id": "anthropic", "models": {
+        "claude-opus-9": {"id": "claude-opus-9", "name": "Claude Opus 9", "tool_call": True, "reasoning": True,
+                          "reasoning_options": [{"type": "toggle"}, {"type": "effort", "values": ["low", "medium", "high", "max", "low", "Bad!"]}]},
+        "claude-budget": {"id": "claude-budget", "name": "Budget only", "reasoning": True,
+                          "reasoning_options": [{"type": "budget_tokens", "min": 1024}]}}},
     "deepseek": {"id": "deepseek", "models": {
         "deepseek-reasoner": {"id": "deepseek-reasoner", "name": "DeepSeek Reasoner", "tool_call": False, "reasoning": True,
                               "cost": {"input": 0.55, "output": 2.19}, "limit": {"context": 64000, "output": 8192}}}},
@@ -33,6 +38,13 @@ class CatalogParseTests(unittest.TestCase):
         self.assertTrue(claude["capabilities"]["tools"])
         with self.assertRaises(ValueError):
             catalog.parse({"nothing": 1})
+
+    def test_reasoning_efforts_come_only_from_effort_options(self):
+        entries = {f"{e['provider']}/{e['model']}": e for e in catalog.parse(MODELS_DEV)}
+        self.assertEqual(entries["anthropic/claude-opus-9"]["reasoning_efforts"], ["low", "medium", "high", "max"], "去重并丢弃不合规的值")
+        self.assertEqual(entries["anthropic/claude-budget"]["reasoning_efforts"], [], "只有思考预算没有档位")
+        self.assertEqual(entries["openai/gpt-4o"]["reasoning_efforts"], [])
+        self.assertEqual(catalog.parse(OPENROUTER)[0]["reasoning_efforts"], [], "OpenRouter 不提供档位")
 
     def test_normalization(self):
         self.assertEqual(catalog.bare("openai/GPT-4o:free"), "gpt-4o")
@@ -85,6 +97,33 @@ class CatalogStoreTests(AssistantCase):
             self.assertEqual(status, 204)
             audit = self.app.metadata.db.execute("SELECT action FROM audit_log WHERE action LIKE 'assistant.catalog.%'").fetchall()
             self.assertGreaterEqual(len(audit), 3)
+        self.run_async(run())
+
+    def test_model_reasoning_effort_follows_catalog_options(self):
+        async def run():
+            admin, channel, model = await self.setup_assistant()
+            status, entry = await self.req("POST", "/api/admin/v1/assistant/catalog",
+                                           {"provider": "local", "model": "test-model", "capabilities": {"tools": True},
+                                            "reasoning_efforts": ["low", "high"]}, admin)
+            self.assertEqual((status, entry["reasoning_efforts"]), (201, ["low", "high"]))
+            _, models = await self.req("GET", f"/api/admin/v1/assistant/channels/{channel['id']}/models", headers=admin)
+            self.assertEqual((models[0]["reasoning_efforts"], models[0]["reasoning_effort"]), (["low", "high"], None))
+            self.assertIsNone(self.service.channels.effort(models[0]), "默认不设置，请求不带思考程度")
+            status, error = await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"reasoning_effort": "max"}, admin)
+            self.assertEqual(status, 400, "只能选目录给出的档位")
+            status, updated = await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"reasoning_effort": "high"}, admin)
+            self.assertEqual((status, updated["reasoning_effort"]), (200, "high"))
+            self.assertEqual(self.service.channels.effort(updated), "high")
+            # 目录不再提供档位时，已选的档位不再发送。
+            status, _ = await self.req("POST", "/api/admin/v1/assistant/catalog/update", {"id": "local/test-model", "reasoning_efforts": []}, admin)
+            self.assertEqual(status, 200)
+            current = self.service.channels.model(model["id"])
+            self.assertEqual((current["reasoning_efforts"], current["reasoning_effort"]), ([], "high"))
+            self.assertIsNone(self.service.channels.effort(current))
+            status, _ = await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"reasoning_effort": None}, admin)
+            self.assertEqual(status, 200)
+            status, _ = await self.req("POST", "/api/admin/v1/assistant/catalog", {"provider": "local", "model": "bad", "reasoning_efforts": ["Very High"]}, admin)
+            self.assertEqual(status, 400)
         self.run_async(run())
 
     def test_add_models_uses_catalog(self):

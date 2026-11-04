@@ -13,6 +13,7 @@ from ..errors import NotFoundError
 from ..keystore import KeyStore
 from ..metadata import Metadata
 from . import providers
+from .catalog import EFFORT_NAME, effort_list
 from .providers import Endpoint, ProviderError, ToolDef
 
 KINDS = ("openai", "anthropic")
@@ -247,6 +248,7 @@ class ChannelStore:
                 "catalog_id": row["catalog_id"], "manual_fields": manual,
                 "removed_upstream": bool(row["removed_upstream"]), "sort": row["sort"],
                 "private_ok": bool(row["private_ok"]),
+                "reasoning_efforts": effort_list(row["reasoning_efforts"]), "reasoning_effort": row["reasoning_effort"],
                 "tested_at": row["tested_at"], "test_note": row["test_note"]}
 
     def models(self, channel_id: int | None = None) -> list[dict[str, object]]:
@@ -308,7 +310,7 @@ class ChannelStore:
     @staticmethod
     def _model_fields(payload: dict) -> dict[str, object]:
         allowed = {"display_name", "enabled", "tools", "context_window", "max_output", "sort", "input_price", "output_price", "vision",
-                   "private_ok"}
+                   "private_ok", "reasoning_effort"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
@@ -326,6 +328,12 @@ class ChannelStore:
             if not isinstance(payload["private_ok"], bool):
                 raise ValueError("private_ok 必须是布尔值")
             values["private_ok"] = int(payload["private_ok"])
+        if "reasoning_effort" in payload:
+            # 思考程度：null 表示请求不带这个字段（由模型自己决定）；具体档位须是模型目录给出的选项，在 update_model 中复核。
+            effort = payload["reasoning_effort"]
+            if effort is not None and (not isinstance(effort, str) or not EFFORT_NAME.fullmatch(effort)):
+                raise ValueError("思考程度不正确")
+            values["reasoning_effort"] = effort
         if "tools" in payload:
             if payload["tools"] not in ("unknown", "yes", "no"):
                 raise ValueError("工具调用支持只能是 unknown、yes 或 no")
@@ -360,6 +368,8 @@ class ChannelStore:
         for name in ("context_window", "max_output", "tools", "input_price", "output_price"):
             if name in values and values[name] != current[name]:
                 manual.add(name)
+        if values.get("reasoning_effort") is not None and values["reasoning_effort"] not in current["reasoning_efforts"]:
+            raise ValueError("这个模型没有该思考程度；可选档位来自模型目录" + (f"：{'、'.join(current['reasoning_efforts'])}" if current["reasoning_efforts"] else "，目前没有获取到"))
         vision = values.pop("vision", None)
         if vision in ("yes", "no"):
             manual.add("vision")
@@ -377,6 +387,12 @@ class ChannelStore:
                 row = db.execute("SELECT * FROM ai_models WHERE id=?", (model_id,)).fetchone()
                 self.catalog.apply(db, row, self.catalog.match(row["model"]))
         return self.model(model_id)
+
+    @staticmethod
+    def effort(model: dict) -> str | None:
+        """请求里使用的思考程度：管理员选择了档位且仍在模型目录给出的选项中；否则不带这个字段。"""
+        effort = model.get("reasoning_effort")
+        return effort if effort and effort in (model.get("reasoning_efforts") or []) else None
 
     @staticmethod
     def vision(model: dict) -> bool:
@@ -477,8 +493,11 @@ class ChannelStore:
         endpoint = self.endpoint(model["channel_id"])
         started = time.time()
         try:
+            # 测试带上选择的思考程度，渠道不认这个档位时在这里就能发现。
+            effort = self.effort(model)
             reply = await providers.chat(endpoint, model["model"], "你是连通性测试助手。", [{"role": "user", "content": prompt}],
-                                         [tool], max_tokens=4096 if endpoint.protocol == "responses" else 256)
+                                         [tool], max_tokens=4096 if endpoint.protocol == "responses" or effort else 256,
+                                         **({"effort": effort} if effort else {}))
         except ProviderError as exc:
             note = str(exc)
             self.log_call(kind="test", channel_id=model["channel_id"], model_id=model_id, actor=actor, started_at=started,

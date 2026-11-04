@@ -92,6 +92,21 @@ def _text(value: object, limit: int = 200) -> str | None:
     return value.strip()[:limit] if isinstance(value, str) and value.strip() else None
 
 
+EFFORT_NAME = re.compile(r"[a-z][a-z0-9_-]{0,19}")
+EFFORT_MAX = 12
+
+
+def efforts(options: object) -> list[str]:
+    """models.dev 的 reasoning_options 中 type=effort 的档位（按原顺序、去重）；没有档位（只有开关或思考预算）时为空。"""
+    values: list[str] = []
+    for option in options if isinstance(options, list) else []:
+        if isinstance(option, dict) and option.get("type") == "effort" and isinstance(option.get("values"), list):
+            for value in option["values"]:
+                if isinstance(value, str) and EFFORT_NAME.fullmatch(value) and value not in values and len(values) < EFFORT_MAX:
+                    values.append(value)
+    return values
+
+
 def parse(data: object) -> list[dict]:
     """把数据源响应转换成目录条目；无法识别的格式抛 ValueError。"""
     entries: list[dict] = []
@@ -114,7 +129,8 @@ def parse(data: object) -> list[dict]:
                 "cache_price": _number(pricing.get("input_cache_read"), scale=1e6),
                 "capabilities": {"tools": "tools" in params, "reasoning": "reasoning" in params or "include_reasoning" in params,
                                  "vision": "image" in inputs, "structured": "structured_outputs" in params or "response_format" in params},
-                "knowledge": None, "released": None})
+                # OpenRouter 只说明是否支持思考，不给出可选档位。
+                "reasoning_efforts": [], "knowledge": None, "released": None})
         return entries
     if not isinstance(data, dict):
         raise ValueError("模型目录格式无法识别")
@@ -139,10 +155,19 @@ def parse(data: object) -> list[dict]:
                 "capabilities": {"tools": tool_call if isinstance(tool_call, bool) else None, "reasoning": item.get("reasoning") is True,
                                  "vision": "image" in inputs or item.get("attachment") is True,
                                  "structured": item.get("structured_output") is True},
+                "reasoning_efforts": efforts(item.get("reasoning_options")),
                 "knowledge": _text(item.get("knowledge"), 20), "released": _text(item.get("release_date"), 20)})
     if not entries:
         raise ValueError("模型目录为空或格式无法识别")
     return entries
+
+
+def effort_list(raw: object) -> list[str]:
+    try:
+        values = json.loads(raw) if isinstance(raw, str) and raw else []
+    except ValueError:
+        return []
+    return [value for value in values if isinstance(value, str) and EFFORT_NAME.fullmatch(value)][:EFFORT_MAX] if isinstance(values, list) else []
 
 
 class CatalogStore:
@@ -199,6 +224,7 @@ class CatalogStore:
                 "context_window": row["context_window"], "max_output": row["max_output"], "input_price": row["input_price"],
                 "output_price": row["output_price"], "cache_price": row["cache_price"],
                 "capabilities": {name: capabilities.get(name) for name in CAPABILITIES},
+                "reasoning_efforts": effort_list(row["reasoning_efforts"]),
                 "knowledge": row["knowledge"], "released": row["released"], "source": row["source"], "updated_at": row["updated_at"]}
 
     def entries(self, *, query: str = "", provider: str = "", cursor: str = "", limit: int = 100) -> dict[str, object]:
@@ -268,7 +294,8 @@ class CatalogStore:
 
     @staticmethod
     def _fields(payload: dict, *, creating: bool) -> dict[str, object]:
-        allowed = {"provider", "model", "name", "context_window", "max_output", "input_price", "output_price", "cache_price", "capabilities"}
+        allowed = {"provider", "model", "name", "context_window", "max_output", "input_price", "output_price", "cache_price", "capabilities",
+                   "reasoning_efforts"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"未知字段：{', '.join(sorted(unknown))}")
@@ -301,6 +328,14 @@ class CatalogStore:
             if not isinstance(caps, dict) or set(caps) - set(CAPABILITIES) or not all(v is None or isinstance(v, bool) for v in caps.values()):
                 raise ValueError("能力只能包含 tools、reasoning、vision、structured，值为布尔或 null")
             values["capabilities"] = json.dumps({name: caps.get(name) for name in CAPABILITIES})
+        if "reasoning_efforts" in payload:
+            levels = payload["reasoning_efforts"]
+            if levels is None:
+                levels = []
+            if (not isinstance(levels, list) or len(levels) > EFFORT_MAX or len(set(levels)) != len(levels)
+                    or not all(isinstance(value, str) and EFFORT_NAME.fullmatch(value) for value in levels)):
+                raise ValueError(f"思考程度最多 {EFFORT_MAX} 个不重复的档位，每个以小写字母开头，只含小写字母、数字、- 或 _")
+            values["reasoning_efforts"] = json.dumps(levels)
         return values
 
     def create(self, payload: dict) -> dict[str, object]:
@@ -387,15 +422,16 @@ class CatalogStore:
                         seen.add(entry_id)
                         values = (entry["provider"], entry["model"], entry["name"], entry["family"], entry["context_window"],
                                   entry["max_output"], entry["input_price"], entry["output_price"], entry["cache_price"],
-                                  json.dumps(entry["capabilities"]), entry["knowledge"], entry["released"], source, now)
+                                  json.dumps(entry["capabilities"]), json.dumps(entry["reasoning_efforts"]), entry["knowledge"],
+                                  entry["released"], source, now)
                         if entry_id in existing:
                             db.execute("UPDATE ai_catalog SET provider=?,model=?,name=?,family=?,context_window=?,max_output=?,input_price=?,"
-                                       "output_price=?,cache_price=?,capabilities=?,knowledge=?,released=?,source=?,updated_at=? WHERE id=?",
+                                       "output_price=?,cache_price=?,capabilities=?,reasoning_efforts=?,knowledge=?,released=?,source=?,updated_at=? WHERE id=?",
                                        (*values, entry_id))
                             updated += 1
                         else:
                             db.execute("INSERT INTO ai_catalog(provider,model,name,family,context_window,max_output,input_price,output_price,"
-                                       "cache_price,capabilities,knowledge,released,source,updated_at,id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                       "cache_price,capabilities,reasoning_efforts,knowledge,released,source,updated_at,id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                        (*values, entry_id))
                             added += 1
                     for entry_id in existing - seen:
@@ -419,7 +455,8 @@ class CatalogStore:
         caps = entry["capabilities"]
         result: dict[str, object] = {"context_window": entry["context_window"], "max_output": entry["max_output"],
                                      "input_price": entry["input_price"], "output_price": entry["output_price"],
-                                     "capabilities": json.dumps({name: caps.get(name) for name in CAPABILITIES})}
+                                     "capabilities": json.dumps({name: caps.get(name) for name in CAPABILITIES}),
+                                     "reasoning_efforts": json.dumps(entry.get("reasoning_efforts") or [])}
         if caps.get("tools") is not None:
             result["tools"] = "yes" if caps["tools"] else "no"
         return result

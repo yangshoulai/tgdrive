@@ -44,7 +44,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 34
+    SCHEMA_VERSION = 35
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -742,6 +742,13 @@ class Metadata:
                 if "sniffed" not in columns:
                     db.execute("ALTER TABLE blobs ADD COLUMN sniffed TEXT")
                 db.execute("PRAGMA user_version = 34")
+            if version < 35:
+                # 文件助手的思考程度：模型目录记录模型可选的 effort 档位（JSON 数组，来自 models.dev 的 reasoning_options），
+                # 渠道模型复制一份并保存管理员选择的档位（NULL 表示请求里不带思考程度字段）。
+                for table, column in (("ai_catalog", "reasoning_efforts"), ("ai_models", "reasoning_efforts"), ("ai_models", "reasoning_effort")):
+                    if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+                db.execute("PRAGMA user_version = 35")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""
