@@ -5,7 +5,7 @@
  * 自动读取失败时退回服务器，手动缓存必须报告写入错误。密钥只放在内存里，Worker 重启后重新向服务端获取。
  */
 import {
-  BLOCK, type Bytes, type DeviceSettings, type EntryInfo, type EntryRecord, type Kind, type Tier,
+  BLOCK, type AutomaticCacheTask, type Bytes, type DeviceSettings, type EntryInfo, type EntryRecord, type Kind, type Tier,
   aesKey, b64u, blockAad, deleteEntries, deviceId, directoryRoot, effectiveMiB, ensureEntry, evict, forgetDirectory, getMeta, preferredStore, readDirectory, setMeta, sweepDirectory, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
   kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, servedType, setManualFlags, touchEntry, updateEntryInfo,
 } from "../cache-store";
@@ -20,7 +20,7 @@ type TierContext = {
   materials: Map<string, Promise<Bytes | null>>; derived: Map<string, Promise<EntryKeys>>;
 };
 type Route = { tier: Tier; etag: string; version: string; path: string; access: string; bucketId: number | null; thumb: boolean; size?: number; preview?: boolean };
-type Opened = { tier: TierContext; entry: EntryRecord; info: EntryInfo; key: CryptoKey; request: Request; cap: number };
+type Opened = { tier: TierContext; entry: EntryRecord; info: EntryInfo; key: CryptoKey; request: Request; cap: number; automatic?: Automatic };
 type Source = { start: number; response: Response; controller: AbortController };
 type Background = { id: string; controller: AbortController; ready: Promise<void>; started: boolean; context: TierContext | null };
 const backgrounds = new Map<string, Background>();
@@ -37,6 +37,87 @@ type SegmentDiagnosis = { first: number; last: number; size: number; phase: "que
 /** 手动缓存任务（键为 页面:任务编号）。最多同时缓存 MAX_MANUAL_FILES 个文件，所有文件的回源请求共用 manualSlot 的并发上限。 */
 const manuals = new Map<string, Manual>();
 const MAX_MANUAL_FILES = 3;
+
+/* 自动任务按内容版本合并前台读取与后台预读；封面和纯缓存命中不创建任务。 */
+type Automatic = AutomaticCacheTask & { entryKey: string; ns: string; tier: Tier; readers: number; stopped: boolean; stored: number };
+const automatics = new Map<string, Automatic>();
+let lastTaskNotice = 0;
+function automaticChanged(immediate = false) {
+  const now = Date.now();
+  if (!immediate && now - lastTaskNotice < 250) return;
+  lastTaskNotice = now;
+  // 广播只携带变化通知，名称和路径通过已授权的查询取得。
+  void sw.clients.matchAll({ type: "window" }).then(clients => {
+    for (const client of clients) client.postMessage({ type: "tessera-cache:tasks-changed" });
+  }).catch(() => undefined);
+}
+function beginAutomatic(opened: Opened, prefetch = false): Automatic | undefined {
+  const { entry, info } = opened;
+  if (info.kind === "thumb" || !prefetch && (info.manual || entry.manual) || opened.cap <= entry.bytes || fileCacheState(entry, info.size).complete) return;
+  let task = automatics.get(entry.key);
+  if (!task || task.status === "done" || task.stopped && !task.readers && ![...prefetches.values()].some(job => job.task === task)) {
+    task = { id: `auto-${crypto.randomUUID()}`, entryKey: entry.key, ns: entry.ns, tier: entry.tier,
+      file: { key: info.path, etag: info.etag, size: info.size, content_type: info.type }, status: "active", bytes: entry.bytes,
+      size: info.size, error: "", note: "", waiting: false, addedAt: Date.now(), readers: 0, stopped: false, stored: entry.bytes };
+    automatics.set(entry.key, task);
+    // 活动任务保留，历史记录最多 1000 条；Worker 重启后不会自行重新下载。
+    for (const [key, old] of automatics) {
+      if (automatics.size <= 1000) break;
+      if (!old.readers && old !== task) automatics.delete(key);
+    }
+  }
+  task.readers++;
+  if (!task.stopped) { task.status = "active"; task.error = ""; task.note = ""; task.completedAt = undefined; }
+  opened.automatic = task;
+  automaticChanged(true);
+  return task;
+}
+function automaticStored(opened: Opened) {
+  const task = opened.automatic;
+  if (!task) return;
+  task.stored = Math.max(task.stored, opened.entry.bytes);
+  task.bytes = Math.max(task.bytes, task.stored);
+  if (fileCacheState(opened.entry, opened.info.size).complete) { task.status = "done"; task.error = ""; task.note = ""; task.completedAt = Date.now(); }
+  automaticChanged(task.status === "done");
+}
+function finishAutomatic(task?: Automatic, error?: unknown) {
+  if (!task) return;
+  task.readers = Math.max(0, task.readers - 1);
+  if (error && !(error instanceof DOMException && error.name === "AbortError") && !task.stopped && task.status !== "done") {
+    task.error = error instanceof Error ? error.message : String(error);
+  }
+  if (!task.readers) {
+    task.bytes = task.stored;
+    task.waiting = false;
+    if (task.status !== "done") {
+      task.status = task.error ? "error" : "canceled";
+      task.note ||= "本次预览读取已结束，已缓存的部分会保留";
+    }
+    task.completedAt = Date.now();
+  }
+  automaticChanged(true);
+}
+async function automaticTasks(withPrivate: boolean) {
+  const context = await normalContext();
+  if (!context) return [];
+  const secret = withPrivate ? await privateContext(queueRoute(pageAccess)) : null;
+  context.signal.throwIfAborted();
+  return [...automatics.values()].filter(task => task.ns === context.ns && (task.tier === "n" || secret && !secret.signal.aborted))
+    .map(({ entryKey: _key, ns: _ns, tier: _tier, readers: _readers, stopped: _stopped, stored: _stored, ...task }) => task);
+}
+async function stopAutomatic(id: string, remove: boolean) {
+  const context = await normalContext();
+  const task = [...automatics.values()].find(task => task.id === id && task.ns === context?.ns);
+  if (!task) return;
+  endAutomatic(task, remove);
+}
+function endAutomatic(task: Automatic, remove = false) {
+  task.stopped = true;
+  if (task.status !== "done") { task.status = "canceled"; task.note = "已停止本次自动缓存，已缓存的部分会保留"; task.error = ""; }
+  for (const job of prefetches.values()) if (job.task === task) { job.paused = true; job.controller.abort(); wakePrefetch(job); }
+  if (remove) automatics.delete(task.entryKey);
+  automaticChanged(true);
+}
 
 /* ---------- 路由 ---------- */
 
@@ -118,6 +199,8 @@ function clearPrivateMaterials() {
 }
 
 function dropKeys(tier?: Tier) {
+  for (const [key, task] of automatics) if (!tier || task.tier === tier) automatics.delete(key);
+  automaticChanged(true);
   stopManualWhere(job => !tier || job.route.tier === tier && !job.background);
   if (!tier) for (const key of backgrounds.keys()) void finishBackground(key);
   for (const selected of tier ? [tier] : ["n", "p"] as const) {
@@ -424,11 +507,18 @@ function build(opened: Opened, range: { start: number; end: number | null } | nu
   const controller = new AbortController();
   // 首次与后续回源共用这一活动引用；清空 initial 后取消仍能中止正在等待的 read。
   const active = { controller: initial?.controller };
+  const firstBlock = Math.floor(span.start / BLOCK), lastBlock = Math.floor(span.end / BLOCK);
+  const cachedBlocks = opened.entry.blocks.filter(index => index >= firstBlock && index <= lastBlock).length;
+  const automatic = initial || cachedBlocks < lastBlock - firstBlock + 1 ? beginAutomatic(opened) : undefined;
+  let finished = false;
   const abort = () => { controller.abort(); active.controller?.abort(); };
-  const finish = () => {
+  const finish = (error?: unknown) => {
+    if (finished) return;
+    finished = true;
     opened.tier.signal.removeEventListener("abort", abort);
     opened.request.signal.removeEventListener("abort", abort);
     active.controller?.abort();
+    finishAutomatic(automatic, error);
   };
   opened.tier.signal.addEventListener("abort", abort);
   opened.request.signal.addEventListener("abort", abort);
@@ -440,7 +530,7 @@ function build(opened: Opened, range: { start: number; end: number | null } | nu
         const next = await iterator.next();
         controller.signal.throwIfAborted();
         if (next.done) { finish(); output.close(); } else output.enqueue(next.value);
-      } catch (error) { finish(); output.error(error); }
+      } catch (error) { finish(error); output.error(error); }
     },
     async cancel() { abort(); finish(); await iterator.return(undefined).catch(() => undefined); },
   });
@@ -569,9 +659,11 @@ class BlockWriter {
     this.strict?.signal.throwIfAborted();
     this.opened.tier.signal.throwIfAborted();
     const { entry } = this.opened;
+    if (!this.strict && this.opened.automatic?.stopped) { this.stopped = true; return; }
     if (entry.blocks.includes(index)) return;
     if (entry.bytes + data.length > this.opened.cap) {
       if (this.strict) throw new CacheFatal("文件超过本机缓存的单文件上限");
+      if (this.opened.automatic) this.opened.automatic.note = "已达到自动缓存的单文件上限，已缓存的部分会保留";
       this.stopped = true; return;
     }
     try {
@@ -587,6 +679,7 @@ class BlockWriter {
         this.stopped = true; return;
       }
       this.opened.entry = updated;
+      automaticStored(this.opened);
       this.strict?.signal.throwIfAborted();
       this.strict?.stored();
       scheduleEvict();
@@ -600,6 +693,14 @@ class BlockWriter {
         throw error;
       }
       // 多半是浏览器配额不足：先淘汰一部分，这次读取不再写入。
+      const automatic = this.opened.automatic;
+      if (automatic) {
+        automatic.error = error instanceof Error ? error.message : "自动缓存写入失败，请检查本机存储空间";
+        automatic.status = "error";
+        automatic.stopped = true;
+        for (const job of prefetches.values()) if (job.task === automatic) job.controller.abort();
+        automaticChanged(true);
+      }
       this.stopped = true;
       scheduleEvict(0, 0.75);
     }
@@ -651,10 +752,13 @@ async function manualParallel() {
 }
 /** 本机缓存任务的诊断信息：浏览器回源通道占用与每个正在进行的分段。任务不在这个 Worker 中时返回 null。 */
 async function diagnoseManual(owner: string, id: string) {
-  const job = manuals.get(`${owner}:${id}`);
+  const automatic = [...automatics.values()].find(task => task.id === id);
+  // 自动任务在同一 Worker 的其他标签页也可查看；仍须核对当前账号及私密授权。
+  if (automatic && !(await automaticTasks(automatic.tier === "p")).some(task => task.id === id)) return null;
+  const job = automatic ? [...prefetches.values()].find(job => job.task === automatic)?.worker : manuals.get(`${owner}:${id}`);
   if (!job) return null;
   const limit = await manualParallel();
-  return { now: Date.now(), active: manualActive, limit, mine: slotUsers.get(job.key)?.active ?? 0, share: fairShare(limit), files: [...manuals.values()].filter(item => item.opened).length,
+  return { now: Date.now(), active: manualActive, limit, mine: slotUsers.get(job.key)?.active ?? 0, share: fairShare(limit), files: slotUsers.size,
     running: job.running, lastError: job.lastError ?? "", segments: [...job.segments.values()].sort((a, b) => a.first - b.first).map(item => ({ ...item })) };
 }
 
@@ -898,6 +1002,8 @@ async function startManual(owner: string, id: string, url: string, group?: strin
       entry = await ensureEntry(record);
       job.controller.signal.throwIfAborted();
       await updateEntryInfo(entry.key, record.info, true);
+      const automatic = automatics.get(entry.key);
+      if (automatic) endAutomatic(automatic);
       infoMemo.delete(entry.key); manualCache = null; itemCache = null;
       job.controller.signal.throwIfAborted();
       job.opened = { tier: value.context, entry, info, key: value.keys.key, request, cap };
@@ -1115,7 +1221,7 @@ async function fetchSegmentOnce(job: Manual, opened: Opened, [first]: [number, n
  * 与手动缓存共用 manualSlot 的并发上限并带后台标记，服务器始终给播放留一路读取。
  * 页面关闭预览时发 prefetch-stop；页面每 30 秒续期一次，超过 60 秒没有续期（页面崩溃、标签页关闭）也会停止。 */
 /** woken：有段完成或播放位置变化；主循环在重新安排的间隙里也不会错过这些通知。 */
-type Prefetch = { key: string; owner: string; id: string; url: string; from: number; controller: AbortController; timer?: number; wake?: () => void; woken?: boolean };
+type Prefetch = { key: string; owner: string; id: string; url: string; from: number; controller: AbortController; task?: Automatic; worker?: Manual; paused?: boolean; timer?: number; wake?: () => void; woken?: boolean };
 const prefetches = new Map<string, Prefetch>();
 const PREFETCH_IDLE = 60_000, MAX_PREFETCH_FILES = 2;
 
@@ -1142,7 +1248,7 @@ function startPrefetch(owner: string, id: string, url: string, from: number) {
   if (prefetches.size >= MAX_PREFETCH_FILES) stopPrefetch(prefetches.values().next().value);
   const job: Prefetch = { key, owner, id, url, from: position, controller: new AbortController() };
   prefetches.set(key, job); renewPrefetch(job);
-  void runPrefetch(job).catch(() => undefined).finally(() => { if (prefetches.get(key) === job) stopPrefetch(job); });
+  void runPrefetch(job).catch(() => undefined).finally(() => { if (prefetches.get(key) === job && !job.paused) stopPrefetch(job); });
 }
 
 const pause = (ms: number, signal: AbortSignal) => new Promise<void>(resolve => {
@@ -1169,16 +1275,22 @@ async function runPrefetch(job: Prefetch) {
   const budget = tierBudget(preferences, value.route.tier);
   const cap = info.manual ? budget : Math.max(BLOCK, Math.floor(budget / 2));
   const opened: Opened = { tier: value.context, entry, info, key: value.keys.key, request: value.request, cap };
-  const worker: Manual = { key: `prefetch:${job.key}`, id: job.id, owner: job.owner, route: value.route, request: value.request, controller: job.controller, running: false, segments: new Map() };
+  const automatic = beginAutomatic(opened, true);
+  if (automatic?.stopped) { finishAutomatic(automatic); return; }
+  job.task = automatic;
+  const worker: Manual = { key: `prefetch:${job.key}`, id: job.id, owner: job.owner, route: value.route, request: value.request, controller: job.controller, running: true, segments: new Map() };
+  job.worker = worker;
   const abort = () => job.controller.abort();
   value.context.signal.addEventListener("abort", abort, { once: true });
   const count = Math.ceil(info.size / BLOCK), inflight = new Set<number>();
   let running = 0, failures = 0;
+  let failure: unknown;
   try {
     while (!signal.aborted) {
       const current = await getEntry(value.key);
       if (!current) return;
       opened.entry = current;
+      automaticStored(opened);
       if (fileCacheState(current, info.size).complete || current.bytes >= cap) return;
       const parallel = await manualParallel();
       const present = new Set(current.blocks);
@@ -1192,11 +1304,17 @@ async function runPrefetch(job: Prefetch) {
         while (last < groupEnd && !present.has(last + 1) && !inflight.has(last + 1)) last++;
         for (let block = first; block <= last; block++) inflight.add(block);
         running++;
-        void fetchSegment(worker, opened, [first, last], () => undefined)
+        void fetchSegment(worker, opened, [first, last], () => {
+          if (!automatic || automatic.stopped) return;
+          const progress = manualProgress(worker, opened);
+          automatic.bytes = Math.min(info.size, Math.max(automatic.stored, progress.bytes) + (progress.pending ?? 0));
+          automatic.waiting = [...worker.segments.values()].every(segment => !segment.firstByte);
+          automaticChanged();
+        })
           .then(() => { failures = 0; }, error => {
             if (error instanceof SlotYield) return;
             // 空间到上限、文件已变化等无法恢复的错误直接停止；临时故障最多连续重试几次。
-            if (error instanceof CacheFatal || ++failures >= 4) job.controller.abort();
+            if (error instanceof CacheFatal || ++failures >= 4) { failure = error; job.controller.abort(); }
           })
           .finally(() => { for (let block = first; block <= last; block++) inflight.delete(block); running--; wakePrefetch(job); });
       }
@@ -1205,13 +1323,19 @@ async function runPrefetch(job: Prefetch) {
       if (!job.woken) await new Promise<void>(resolve => { job.wake = resolve; });
       job.wake = undefined; job.woken = false;
     }
-  } finally {
+  } catch (error) { failure = error; }
+  finally {
+    worker.running = false;
     value.context.signal.removeEventListener("abort", abort);
+    if (automatic && opened.entry.bytes >= cap && automatic.status !== "done") automatic.note = "已达到自动缓存的单文件上限，已缓存的部分会保留";
+    finishAutomatic(automatic, failure);
   }
 }
 
 async function removeFile(url: string) {
   const value = await manualOpened(url);
+  const automatic = automatics.get(value.key);
+  if (automatic) endAutomatic(automatic, true);
   stopManualWhere(job => job.route.etag === value.route.etag && job.route.tier === value.route.tier);
   await deleteEntries([value.key]);
   infoMemo.delete(value.key);
@@ -1460,6 +1584,7 @@ async function listItems(options: ItemQuery) {
 /** 按同样的条件移除（「清除筛选出的文件」）；只作用于当前账号，私密层只在已解锁、允许私密缓存时才读得到。 */
 async function removeItems(options: ItemQuery) {
   const keys = new Set((await matchItems(options)).map(item => item.key));
+  for (const task of automatics.values()) if (keys.has(task.entryKey)) endAutomatic(task, true);
   stopManualWhere(job => Boolean(job.opened && keys.has(job.opened.entry.key)));
   await deleteEntries([...keys]);
   itemCache = null; manualCache = null;
@@ -1480,6 +1605,8 @@ async function clear(scope: string, key?: string) {
     : entries.filter(entry => entry.tier === (scope === "private" ? "p" : "n") && (!namespace || entry.ns === namespace));
   if (scope === "auto") stopPrefetch();
   if (scope === "browser") stopPrefetch();
+  const keys = new Set(victims.map(entry => entry.key));
+  for (const task of automatics.values()) if (scope === "all" || keys.has(task.entryKey)) endAutomatic(task, true);
   stopManualWhere(job => scope === "all" || scope === "normal" && job.route.tier === "n" || scope === "private" && job.route.tier === "p"
     || victims.some(entry => entry.key === job.opened?.entry.key));
   await deleteEntries(victims.map(entry => entry.key));
@@ -1546,6 +1673,8 @@ sw.addEventListener("message", event => {
     case "tessera-cache:reset": dropKeys(); reply(clear("all")); break;
     case "tessera-cache:files": reply(fileStates(data.urls ?? [])); break;
     case "tessera-cache:index": reply(cacheIndex((data as { private?: boolean }).private === true)); break;
+    case "tessera-cache:automatic-tasks": reply(automaticTasks((data as { private?: boolean }).private === true)); break;
+    case "tessera-cache:automatic-stop": reply(stopAutomatic(data.id ?? "", (data as { remove?: boolean }).remove === true)); break;
     case "tessera-cache:queue-group": reply(startPrivateTask(owner, data.id ?? "", data.paths ?? [], data.csrf ?? "", data.access ?? "")); break;
     case "tessera-cache:list-group": reply(listBackground(owner, data.id ?? "", data.prefix ?? "", data.cursor)); break;
     case "tessera-cache:release-group": reply(releaseBackground(owner, data.id ?? "")); break;

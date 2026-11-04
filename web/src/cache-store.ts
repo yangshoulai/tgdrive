@@ -26,6 +26,12 @@ export type EntryRecord = {
 export type EntryInfo = { etag: string; version: string; size: number; type: string; disposition: string; path: string; kind: Kind; manual?: boolean };
 /** pending：手动缓存进行中时，已收到但还没凑满一块写入本机的字节（只用于显示进度）。 */
 export type FileCacheState = { bytes: number; size: number; complete: boolean; pending?: number };
+/** 自动缓存的运行记录只留在 Worker 内存中；不会恢复成手动下载，也不保存缓存密钥。 */
+export type AutomaticCacheTask = {
+  id: string; file: { key: string; etag: string; size: number; content_type: string };
+  status: "active" | "canceled" | "done" | "error"; bytes: number; size: number;
+  error: string; note: string; waiting: boolean; addedAt: number; completedAt?: number;
+};
 
 /** 只把全部块已经提交的条目视为完成；字节数相等还不足以证明中间没有缺块。 */
 export function fileCacheState(entry: EntryRecord | undefined, size: number): FileCacheState {

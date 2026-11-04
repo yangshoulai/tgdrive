@@ -911,6 +911,7 @@ test("关闭预览时自动缓存：不新建条目，已有的自动缓存照�
   h.preferences.auto = false; await h.message("tessera-cache:settings");
   assert.deepEqual((await h.read("file.bin")).data, h.files.get("file.bin").data);
   assert.equal([...h.entries.values()].filter(entry => entry.tier === "n").length, 0, "关闭后不新建自动缓存");
+  assert.equal((await h.ask("tessera-cache:automatic-tasks")).length, 0, "关闭后不产生自动任务");
   h.preferences.auto = true; await h.message("tessera-cache:settings");
   await h.read("file.bin");
   assert.equal((await h.read("file.bin")).response.headers.get("X-Tessera-Cache"), "hit");
@@ -918,6 +919,89 @@ test("关闭预览时自动缓存：不新建条目，已有的自动缓存照�
   assert.equal((await h.read("file.bin")).response.headers.get("X-Tessera-Cache"), "hit", "已自动缓存的文件保留并照常使用");
   await h.ask("tessera-cache:clear", { scope: "auto" });
   assert.equal([...h.entries.values()].filter(entry => !entry.manual).length, 0);
+});
+
+test("自动缓存任务合并同一文件的读取，部分停止与完整完成分开，纯命中不新增任务", async t => {
+  const h = harness(t, { "audio.mp3": bytes(3 * store.BLOCK) });
+  const notices = [];
+  h.state.clients = [{ postMessage: value => notices.push(value) }];
+  await h.read("audio.mp3", { range: `bytes=0-${store.BLOCK - 1}` });
+  const [partial] = await h.ask("tessera-cache:automatic-tasks");
+  assert.equal(partial.file.key, "audio.mp3");
+  assert.equal(partial.bytes, store.BLOCK);
+  assert.equal(partial.status, "canceled", "只读了一段，不能显示完整缓存完成");
+  const count = notices.filter(value => value.type === "tessera-cache:tasks-changed").length;
+  await h.read("audio.mp3", { range: `bytes=0-${store.BLOCK - 1}` });
+  assert.equal(notices.filter(value => value.type === "tessera-cache:tasks-changed").length, count, "部分文件中已命中的区间不触发新任务");
+  await h.read("audio.mp3");
+  const [complete] = await h.ask("tessera-cache:automatic-tasks");
+  assert.equal(complete.id, partial.id);
+  assert.equal(complete.status, "done");
+  assert.equal(complete.bytes, 3 * store.BLOCK);
+  await h.read("audio.mp3");
+  assert.equal((await h.ask("tessera-cache:automatic-tasks")).length, 1);
+  assert.ok(notices.some(value => value.type === "tessera-cache:tasks-changed"));
+  assert.ok(notices.every(value => !JSON.stringify(value).includes("audio.mp3")), "广播不携带文件名称");
+  await h.ask("tessera-cache:automatic-stop", { id: complete.id, remove: true });
+  assert.equal((await h.ask("tessera-cache:automatic-tasks")).length, 0);
+});
+
+test("自动预读任务可诊断、可停止，同一预览的心跳不会重新启动，重新打开可继续", async t => {
+  const h = harness(t, { "audio.mp3": bytes(9 * store.BLOCK) });
+  h.state.reads = 4;
+  await h.read("audio.mp3", { range: `bytes=0-${store.BLOCK - 1}` });
+  const stalled = [];
+  h.state.originHook = request => request.headers.get("x-tessera-background") === "cache"
+    ? new Promise((_, reject) => { stalled.push(request); request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }); }) : null;
+  const preview = { id: "preview-auto", url: h.url("audio.mp3"), from: 0 };
+  h.notify("tessera-cache:prefetch", preview);
+  assert.ok(await until(() => stalled.length > 0));
+  const [active] = await h.ask("tessera-cache:automatic-tasks");
+  assert.equal(active.status, "active");
+  assert.ok((await h.ask("tessera-cache:diagnose", { id: active.id })).segments.length > 0);
+  await h.ask("tessera-cache:automatic-stop", { id: active.id });
+  assert.ok(await until(() => stalled.every(request => request.signal.aborted)));
+  const count = background(h).length;
+  h.notify("tessera-cache:prefetch", preview);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(background(h).length, count, "预览心跳不能恢复已停止的自动缓存");
+  assert.equal((await h.ask("tessera-cache:automatic-tasks"))[0].status, "canceled");
+  h.notify("tessera-cache:prefetch-stop", { id: preview.id });
+  h.state.originHook = null;
+  h.notify("tessera-cache:prefetch", { ...preview, id: "preview-reopened" });
+  assert.ok(await until(async () => (await h.ask("tessera-cache:automatic-tasks"))[0]?.status === "done"));
+});
+
+test("自动缓存任务遵守私密授权，锁定后不返回私密名称，退出后清空运行记录", async t => {
+  const h = harness(t);
+  await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 60_000 });
+  await h.read("file.bin"); await h.read(SECRET);
+  assert.equal((await h.ask("tessera-cache:automatic-tasks")).length, 1);
+  assert.equal((await h.ask("tessera-cache:automatic-tasks", { private: true })).length, 2);
+  h.state.unlocked = false;
+  await h.message("tessera-cache:access", { access: "" });
+  const locked = await h.ask("tessera-cache:automatic-tasks", { private: true });
+  assert.equal(locked.length, 1);
+  assert.ok(!JSON.stringify(locked).includes(SECRET));
+  await h.message("tessera-cache:logout");
+  assert.equal((await h.ask("tessera-cache:automatic-tasks")).length, 0);
+});
+
+test("停止前台自动缓存只停止写入，预览响应仍能读完", async t => {
+  const h = harness(t, { "audio.mp3": bytes(3 * store.BLOCK) }), tail = deferred();
+  h.state.originHook = (_request, file) => new Response(new ReadableStream({
+    start(output) { output.enqueue(file.data.subarray(0, store.BLOCK)); },
+    async pull(output) { await tail.promise; output.enqueue(file.data.subarray(store.BLOCK)); output.close(); },
+  }), { headers: { ETag: `"${h.files.get("audio.mp3").etag}"`, "Content-Type": "audio/mpeg", "Content-Length": String(3 * store.BLOCK) } });
+  const response = await h.request("audio.mp3"), reader = response.body.getReader();
+  const chunks = [(await reader.read()).value];
+  const [task] = await h.ask("tessera-cache:automatic-tasks");
+  await h.ask("tessera-cache:automatic-stop", { id: task.id });
+  tail.resolve();
+  while (true) { const { value, done } = await reader.read(); if (done) break; chunks.push(value); }
+  assert.deepEqual(Buffer.concat(chunks), h.files.get("audio.mp3").data);
+  assert.equal([...h.entries.values()][0].bytes, store.BLOCK);
+  assert.equal((await h.ask("tessera-cache:automatic-tasks"))[0].status, "canceled");
 });
 
 test("清理浏览器存储只删浏览器里的条目，本地文件夹中的缓存保留；统计按位置分开", async t => {

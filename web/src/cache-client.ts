@@ -3,9 +3,9 @@
  * 并给「本机缓存」设置页提供统计、设置与清理。页面本身不持有缓存密钥。
  */
 import * as api from "./api";
-import { type CacheDirectory, type DeviceSettings, type DirectoryPermission, type FileCacheState, type Kind, directoryPermission, forgetDirectory, readDirectory, readSettings, setMeta } from "./cache-store";
+import { type AutomaticCacheTask, type CacheDirectory, type DeviceSettings, type DirectoryPermission, type FileCacheState, type Kind, directoryPermission, forgetDirectory, readDirectory, readSettings, setMeta } from "./cache-store";
 export type CacheFile = Pick<api.FileItem, "key" | "etag" | "size" | "content_type">;
-export type { FileCacheState } from "./cache-store";
+export type { AutomaticCacheTask, FileCacheState } from "./cache-store";
 export const cacheFileId = (file: CacheFile) => `${api.isPrivatePath(file.key) ? "p" : "n"}:${file.etag}`;
 const fileUrl = (file: CacheFile) => api.versionedContentUrl(api.contentUrl(file.key), file.etag, file.size);
 const changed = () => window.dispatchEvent(new Event("tessera:cache-changed"));
@@ -42,6 +42,7 @@ export function startLocalCache() {
     // Service Worker 重启后没有私密授权时会来问；只回答同一页面当前持有的授权。
     if (event.data?.type === "tessera-cache:context?") event.ports[0]?.postMessage({ access: api.getPrivateAccess(), expires: api.getPrivateAccessExpires() });
     if (event.data?.type === "tessera-cache:changed") changed();
+    if (event.data?.type === "tessera-cache:tasks-changed") window.dispatchEvent(new Event("tessera:cache-tasks-changed"));
   });
   window.addEventListener("tessera:private-access", event => notify("tessera-cache:access", { access: (event as CustomEvent<string>).detail, expires: api.getPrivateAccessExpires() }));
   window.addEventListener("tessera:logout", () => notify("tessera-cache:logout"));
@@ -138,6 +139,10 @@ export type CachedFileState = FileCacheState & { manual: boolean };
 /** 已缓存文件的索引（键与 cacheFileId 相同，不含缩略图），文件列表据此区分自动缓存与手动缓存。私密层只在私密空间已解锁时包含。 */
 export const cacheIndex = (withPrivate: boolean) =>
   ask<(CachedFileState & { id: string })[]>("tessera-cache:index", { private: withPrivate }, 30000);
+/** 自动缓存的实时任务；私密记录仅在解锁后返回。 */
+export const automaticCacheTasks = (withPrivate: boolean) =>
+  ask<AutomaticCacheTask[]>("tessera-cache:automatic-tasks", { private: withPrivate });
+export const stopAutomaticCacheTask = (id: string, remove = false) => ask<void>("tessera-cache:automatic-stop", { id, remove });
 /** 直接建立用户选定的私密缓存任务，沿用登录会话，缓存密钥只留在 Worker。 */
 export const startCacheGroup = (id: string, paths: string[]) => ask<void>("tessera-cache:queue-group", { id, paths, csrf: api.getCsrf(), access: api.getPrivateAccess() }, 30000);
 export const listCacheGroup = (id: string, prefix: string, cursor: string | null, signal: AbortSignal) =>
