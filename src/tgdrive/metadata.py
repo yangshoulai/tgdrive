@@ -44,7 +44,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 33
+    SCHEMA_VERSION = 34
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -735,6 +735,13 @@ class Metadata:
                     db.execute("ALTER TABLE offline_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
                 db.execute("CREATE INDEX IF NOT EXISTS offline_priority ON offline_tasks(priority) WHERE priority>0")
                 db.execute("PRAGMA user_version = 33")
+            if version < 34:
+                # 按内容判断的类型（sniff.py 的「把握程度:类型」）：写入第 1 段时看文件开头记录，提交对象时与上传方给出的类型合并。
+                # 旧数据为 NULL，沿用原来保存的类型。
+                columns = {row[1] for row in db.execute("PRAGMA table_info(blobs)")}
+                if "sniffed" not in columns:
+                    db.execute("ALTER TABLE blobs ADD COLUMN sniffed TEXT")
+                db.execute("PRAGMA user_version = 34")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""
@@ -845,6 +852,14 @@ class Metadata:
             raise BlobNotFound(blob_uuid)
         return BlobRecord(row["uuid"], row["size"], row["chunk_size"], row["frame_size"],
                           row["wrapped_dek"], row["status"], row["refcount"])
+
+    def set_sniffed(self, blob_uuid: str, value: str) -> None:
+        with self.transaction() as db:
+            db.execute("UPDATE blobs SET sniffed=? WHERE uuid=?", (value, blob_uuid))
+
+    def sniffed(self, blob_uuid: str) -> str | None:
+        row = self.db.execute("SELECT sniffed FROM blobs WHERE uuid=?", (blob_uuid,)).fetchone()
+        return row["sniffed"] if row else None
 
     def list_chunks(self, blob_uuid: str, *, part_no: int | None = None) -> list[ChunkRecord]:
         sql = "SELECT * FROM chunks WHERE blob_uuid = ?"

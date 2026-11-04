@@ -23,7 +23,7 @@ const instrumented = source.replace(/\s+gm\.load\(\)\.then\([\s\S]*\}\);\s*\}\)\
     getBatch: () => batch, setBatch: value => { batch = value; }, BROWSER_MAX_BYTES,
     pageSnapshot, addAssistantPage, assistantPages, sendAssistantPages, collect, addItem, checkNavigation, setActive: value => { active = value; },
     ready: gm.load(), gm, HAS_MENU, dormantFab, copy: text => gm.copy(text), openTab: url => gm.openTab(url),
-    nextRound, dropRounds, batchSummary, batchDone: () => batchDone(), cloudBatchLimit, saveSettings, settings,
+    nextRound, dropRounds, batchSummary, batchDone: () => batchDone(), batchLimit, saveSettings, settings, startBatch,
     lastTree: () => globalThis.lastTree, setPickTree: fn => { globalThis.pickTree = fn; }, createEntry, batchNameProblems,
     requestSize, wantSize, describe, noteMeta, timingSize, probeState: () => ({ probing, queued: probeQueue.length }) };
 })();`);
@@ -41,7 +41,7 @@ async function until(predicate) {
 }
 
 /** manager: "sync" 模拟 Tampermonkey／Violentmonkey（GM_*），"async" 模拟 iOS Userscripts（只有异步 GM.*，无 GM_cookie 与菜单命令）。 */
-function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = true, dom, manager = "sync", isolated = false, bridge = "dom",
+function harness({ fetch, gm, move, remove, open, parseBatch, cookies = true, cookieApi = true, dom, manager = "sync", isolated = false, bridge = "dom",
   url = "https://gallery.example/album", storage = {}, query, pageState = {}, documentCookie = "visible=page", gmCookies } = {}) {
   const values = { settings: { server: "https://tessera.example", key: "TEST:secret", cookies } };
   const requests = [], fetches = [], listeners = [], opened = [], copied = [];
@@ -73,6 +73,22 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
   };
   const document = isolated ? { cookie: documentCookie, querySelector: () => ({}), querySelectorAll: () => [],
     createElement: tag => { assert.equal(tag, "script"); return makeScript(); }, head: { appendChild: node => inject(node) } } : pageDocument;
+  const fanOutParse = (details, record) => {
+    const items = JSON.parse(details.data).items;
+    Promise.all(items.map(item => new Promise(resolve => {
+      const sub = { ...details, url: details.url.replace("/parse-batch", "/parse"), data: JSON.stringify(item),
+        onload: response => {
+          let data = null;
+          try { data = JSON.parse(response.responseText); } catch { /* 非 JSON */ }
+          resolve(response.status >= 200 && response.status < 300 ? { candidates: data?.candidates || [] }
+            : { error: data?.error?.message || `Tessera 返回 HTTP ${response.status}` });
+        },
+        onerror: () => resolve({ error: "无法连接" }), ontimeout: () => resolve({ error: "超时" }) };
+      const subRecord = { details: sub, aborted: false };
+      requests.push(subRecord);
+      gm(sub, subRecord);
+    }))).then(results => { if (!record.aborted) details.onload({ status: 200, responseText: JSON.stringify({ results }) }); });
+  };
   const xmlHttpRequest = details => {
     const record = { details, aborted: false };
     requests.push(record);
@@ -83,6 +99,9 @@ function harness({ fetch, gm, move, remove, open, cookies = true, cookieApi = tr
         : details.onload({ status: 200, responseText: '{"moved":1,"skipped":0}' });
       if (url.pathname === "/api/v1/delete") return remove ? remove(details, record)
         : details.onload({ status: 200, responseText: JSON.stringify({ results: JSON.parse(details.data).paths.map(path => ({ path, deleted: true })) }) });
+      // 批量解析：默认把每一项当作一次 /downloads/parse 交给测试的 gm 替身，再按服务器的格式合成 results。
+      if (url.pathname === "/api/v1/downloads/parse-batch" && gm && !parseBatch) return fanOutParse(details, record);
+      if (url.pathname === "/api/v1/downloads/parse-batch" && parseBatch) return parseBatch(details, record);
       if (gm) return gm(details, record);
       const data = details.method === "PUT" ? { key: url.searchParams.get("path"), size: details.data.size } : { writable: true };
       details.upload?.onprogress?.({ loaded: details.data?.size || 0 });
@@ -562,6 +581,44 @@ test("server mode sends the cloud folder of each row as the item's folder", asyn
   assert.deepEqual(creates.map(request => JSON.parse(request.details.data)), [
     { items: [{ ticket: "t-a", name: "a.bin", folder: "相册/2024/" }], destination: "photos/" },
   ]);
+});
+
+test("server parse sends direct links in batches of 20 and keeps per-row results", async () => {
+  const batches = [];
+  const h = harness({
+    gm: details => details.onload({ status: 200, responseText: JSON.stringify(
+      details.url.endsWith("/parse") ? { candidates: [{ ticket: "t-single", group: "", name: "x.bin", size: 1, warnings: [] }] } : { tasks: [] }) }),
+    parseBatch: (details) => {
+      const items = JSON.parse(details.data).items;
+      batches.push(items.length);
+      const results = items.map((item, index) => index === 1 ? { error: "来源返回 403" } : index === 2 ? { error: "排队超时", retry: true }
+        : { candidates: [{ ticket: `t-${batches.length}-${index}`, group: "0:0", name: `f${index}.bin`, size: 1, warnings: [] }] });
+      details.onload({ status: 200, responseText: JSON.stringify({ results }) });
+    } });
+  const rows = Array.from({ length: 25 }, (_, n) => ({ url: `https://cdn.example/${n}.bin`, type: "file", state: "parsing", error: "", tasks: [], platform: null }));
+  rows.push({ url: "https://x.com/u/status/1", type: "file", state: "parsing", error: "", tasks: [], platform: "x" });
+  const current = h.batch(rows);
+  current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  assert.deepEqual(batches.sort((a, b) => b - a), [20, 5], "直链每 20 个合成一个请求");
+  const single = h.requests.filter(request => new URL(request.details.url).pathname === "/api/v1/downloads/parse");
+  assert.equal(single.length, 3, "平台链接与超出时间预算的两项单独解析");
+  assert.ok(single.some(request => JSON.parse(request.details.data).input === "https://x.com/u/status/1"));
+  const failed = current.entries.filter(entry => entry.state === "parse-error");
+  assert.equal(failed.length, 2, "单项失败只标红该行");
+  assert.ok(failed.every(entry => /403/.test(entry.error)));
+  assert.equal(current.entries.filter(entry => entry.state === "waiting").length, 24);
+});
+
+test("server parse falls back to single requests when the server has no batch endpoint", async () => {
+  const h = harness({
+    gm: details => details.onload({ status: 200, responseText: JSON.stringify({ candidates: [{ ticket: "t", group: "", name: "a.bin", size: 1, warnings: [] }] }) }),
+    parseBatch: details => details.onload({ status: 404, responseText: '{"error":{"message":"not found"}}' }) });
+  const current = h.batch([0, 1, 2].map(n => ({ url: `https://cdn.example/${n}.bin`, type: "file", state: "parsing", error: "", tasks: [], platform: null })));
+  current.mode = "server";
+  await h.api.parseEntries(current, current.entries.slice());
+  assert.ok(current.entries.every(entry => entry.state === "waiting"));
+  assert.equal(h.requests.filter(request => new URL(request.details.url).pathname === "/api/v1/downloads/parse").length, 3);
 });
 
 test("server mode to private space hands renamed candidates to the Tessera page", async () => {
@@ -1528,16 +1585,31 @@ test("cloud batch size is a setting: default 100, at most 500", async () => {
   for (const manager of ["sync", "async"]) {
     const h = harness({ manager });
     await h.ready;
-    assert.equal(h.api.cloudBatchLimit(), 100, "旧设置没有这一项时默认每批 100 个");
+    assert.equal(h.api.batchLimit(), 100, "旧设置没有这一项时默认每批 100 个");
     h.api.saveSettings({ cloudBatch: 250 });
-    assert.equal(h.api.cloudBatchLimit(), 250);
+    assert.equal(h.api.batchLimit(), 250);
     assert.equal(h.api.settings().server, "https://tessera.example", "保存批大小不覆盖其他设置");
     h.api.saveSettings({ cloudBatch: 5000 });
-    assert.equal(h.api.cloudBatchLimit(), 500, "超过上限按 500");
+    assert.equal(h.api.batchLimit(), 500, "超过上限按 500");
     for (const value of [0, -3, 1.5, "abc", null]) {
       h.api.saveSettings({ cloudBatch: value });
-      assert.equal(h.api.cloudBatchLimit(), 100, `非法值 ${value} 按默认值`);
+      assert.equal(h.api.batchLimit(), 100, `非法值 ${value} 按默认值`);
     }
+  }
+});
+
+test("web resources are split into rounds by the shared batch size, without a selection cap", async () => {
+  for (const manager of ["sync", "async"]) {
+    const h = harness({ manager });
+    await h.ready;
+    h.api.saveSettings({ cloudBatch: 100 });
+    const urls = Array.from({ length: 250 }, (_, index) => `https://cdn.example/photo-${index}.jpg`);
+    // 测试环境没有面板 DOM：分批在打开确认页之前就已决定，打开确认页失败不影响检查。
+    try { h.api.startBatch(urls, "local"); } catch (error) { assert.match(String(error), /createElement/); }
+    const current = h.api.getBatch();
+    assert.equal(current.entries.length, 100, "确认页只放第一批");
+    assert.equal(current.deferred.length, 150, "其余等前一批完成后再处理，不再在 50 处截断");
+    assert.deepEqual([current.limit, current.rounds], [100, 3]);
   }
 });
 

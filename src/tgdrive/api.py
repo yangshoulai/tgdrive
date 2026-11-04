@@ -750,7 +750,8 @@ class UserApi:
             f"SELECT * FROM objects WHERE bucket_id=? AND public_token IS NOT NULL AND key IN ({marks})", (bucket_id, *prefixes)).fetchall()
         return {row["key"]: self._object_json(self.objects._object(row)) for row in rows}
 
-    async def search(self, token: str, query: str, cursor: str = "", limit: int = 100, public_only: bool = False, kind: str = ""):
+    async def search(self, token: str, query: str, cursor: str = "", limit: int = 100, public_only: bool = False, kind: str = "", prefix: str = ""):
+        """在授权范围内按名称搜索文件；prefix 为某个文件夹时只搜它及其子文件夹，关键词只匹配文件夹之下的相对路径。"""
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         scope = self._scope(token)
@@ -760,16 +761,21 @@ class UserApi:
         if len(query) > 256:
             raise ValueError("搜索词不能超过 256 个字符")
         condition, kind_args = kind_clause(kind) if kind else ("1", [])
+        base = self._path(prefix, directory=True) if prefix else scope.prefix
+        if not base.startswith(scope.prefix):
+            raise PermissionError("搜索范围超出授权")
+        # 关键词只在 base 之下的相对路径里找：搜「照片」里的文件时，不会因为上级目录名包含关键词而全部命中。
+        start = len(base) + 1
         def read_page():
             if scope.authorize is not None:
                 scope.authorize()
             return self.objects.metadata.db.execute(
                 "SELECT * FROM objects "
-                "WHERE bucket_id=? AND key>? AND instr(lower(key),lower(?))>0 "
+                "WHERE bucket_id=? AND key>? AND instr(lower(substr(key,?)),lower(?))>0 "
                 "AND substr(key,-1)!='/' AND (substr(key,1,9)!='.tgdrive/' OR ?=1) "
                 f"AND key>=? AND key<? AND (?=0 OR public_token IS NOT NULL) AND {condition} ORDER BY key LIMIT ?",
-                (account.bucket_id, cursor, query, int(scope.private_access), scope.prefix,
-                 scope.prefix + self.objects._PREFIX_END, int(public_only), *kind_args, limit + 1),
+                (account.bucket_id, cursor, start, query, int(scope.private_access), base,
+                 base + self.objects._PREFIX_END, int(public_only), *kind_args, limit + 1),
             ).fetchall()
         rows = await self.objects.metadata.run_in_thread(read_page)
         return {"objects": self._objects_json([self.objects._object(row) for row in rows[:limit]]), "common_prefixes": [],

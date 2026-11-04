@@ -50,6 +50,9 @@ class ThumbnailTests(unittest.TestCase):
         return status, (json.loads(data) if data and is_json else data), response_headers
 
     def put(self, key, data=b"original"):
+        # 类型按内容判断：图片文件名的占位内容换上 JPEG 文件头（大小不变），才会被当作图片（缩略图只给媒体文件）。
+        if key.lower().endswith((".jpg", ".jpeg")) and len(data) >= 3 and not data.startswith(b"\xff\xd8\xff"):
+            data = b"\xff\xd8\xff" + data[3:]
         return asyncio.run(self.app.objects.put_object(self.scope, key, data))
 
     def set_thumb(self, path, data, variant="thumb"):

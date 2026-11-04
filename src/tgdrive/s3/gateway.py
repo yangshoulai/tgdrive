@@ -317,7 +317,8 @@ class S3Gateway:
                 for node in root:
                     if _local(node.tag) == "Part":
                         parts.append((int(_child_text(node, "PartNumber") or "0"), (_child_text(node, "ETag") or "").strip('"')))
-                info = await self.objects.complete_multipart(scope, upload_id, parts)
+                # S3 的对象类型由客户端决定（Content-Type 原样保存与返回），不按内容改写。
+                info = await self.objects.complete_multipart(scope, upload_id, parts, declared_type=True)
                 return S3Response(200, {"Content-Type": "application/xml"},
                                   self._xml("CompleteMultipartUploadResult", {"Bucket": bucket_name, "Key": key, "ETag": f'"{info.etag}"'}))
             if upload_id and method == "DELETE" and key:
@@ -344,7 +345,7 @@ class S3Gateway:
                 return await self._copy_object(principal, lower, scope, bucket_name, key)
             if method == "PUT" and key:
                 info = await self.objects.put_object(scope, key, body_stream(MAX_OBJECT_PUT), self._declared_size(lower, signed),
-                                                     lower.get("content-type"))
+                                                     lower.get("content-type"), declared_type=True)
                 return S3Response(200, {"ETag": f'"{info.etag}"', "Content-Length": "0"})
             if method == "DELETE" and key:
                 await self.objects.delete_objects(scope, [key])

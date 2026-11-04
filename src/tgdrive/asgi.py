@@ -767,6 +767,9 @@ class TgDriveASGI(StaticFiles):
             user_id = self.keys.download_owner(principal, bucket)[0]
             result = await self.offline.parse(user_id, payload.get("input"), download_type=payload.get("download_type", "auto"),
                                               cookies=payload.get("cookies", ""))
+        elif method == "POST" and route == "/downloads/parse-batch" and self.offline is not None:
+            user_id = self.keys.download_owner(principal, bucket)[0]
+            result = await self.offline.parse_batch(user_id, payload.get("items"))
         elif method == "POST" and route == "/downloads" and self.offline is not None:
             entry = {"action": "download.create", "actor_type": "key", "actor": principal.access_key_id, "payload": payload,
                      "target_id": None, "ip": None}
@@ -1180,7 +1183,7 @@ class TgDriveASGI(StaticFiles):
             if method == "GET" and route == "/search":
                 return 200, await user.search(token, query.get("q", [""])[0],
                     query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0]),
-                    public_only=query.get("public", ["0"])[0] == "1", kind=query.get("kind", [""])[0]), {}
+                    public_only=query.get("public", ["0"])[0] == "1", kind=query.get("kind", [""])[0], prefix=query.get("prefix", [""])[0]), {}
             if method == "GET" and route == "/list":
                 return 200, await user.list(token, prefix=query.get("prefix", [""])[0],
                                                  cursor=query.get("cursor", [None])[0], limit=int(query.get("limit", ["1000"])[0]),

@@ -20,6 +20,7 @@ from .errors import InvalidStateError, NotFoundError, QuotaExceededError, ShareE
 from .filekinds import kind_clause
 from .fingerprint import combine, is_fingerprint
 from .metadata import Metadata
+from .sniff import resolve as resolve_type
 
 
 PRIVATE_PREFIX = ".tgdrive/private/"
@@ -192,12 +193,17 @@ class ObjectService:
 
     def _commit_blob(self, bucket_id: int, key: str, blob_uuid: str, size: int, etag: str,
                      content_type: str | None, user_meta: dict[str, str] | None, *, scope: Scope | None = None,
-                     dedupe: bool = False, if_match: str | None = None) -> ObjectInfo:
-        """dedupe=True 用于刚写入的新 Blob：已有相同内容时改为引用那份，调用方随后删除新 Blob（返回对象的 blob_uuid 不同）。
+                     dedupe: bool = False, if_match: str | None = None, declared: bool = False) -> ObjectInfo:
+        """declared=True 时完全采用调用方给出的类型（S3 的 Content-Type 由客户端决定，复制沿用来源的类型），不按内容判断。
+        dedupe=True 用于刚写入的新 Blob：已有相同内容时改为引用那份，调用方随后删除新 Blob（返回对象的 blob_uuid 不同）。
         对象自己的 ETag 保持不变，S3 分段上传返回的 ETag 不受影响。"""
         now = time.time()
         meta_json = json.dumps(user_meta or {}, ensure_ascii=False, separators=(",", ":"))
         with self.metadata.transaction() as db:
+            # 类型以内容为准：写入时记录的内容特征与上传方给出的类型合并（sniff.resolve），文件名或声明的类型不可信。
+            if not declared:
+                sniffed = db.execute("SELECT sniffed FROM blobs WHERE uuid=?", (blob_uuid,)).fetchone()
+                content_type = resolve_type(sniffed["sniffed"] if sniffed else None, content_type, key)
             if dedupe:
                 blob_uuid = self._duplicate_blob(db, bucket_id, blob_uuid, size) or blob_uuid
             bucket = db.execute("SELECT quota_bytes, used_bytes FROM buckets WHERE id = ?", (bucket_id,)).fetchone()
@@ -271,8 +277,9 @@ class ObjectService:
     async def put_object(self, scope: Scope, key: str, body: AsyncIterator[bytes] | Iterable[bytes] | bytes,
                          size: int | None = None, content_type: str | None = None,
                          user_meta: dict[str, str] | None = None, *, expect_md5: str | None = None, small: bool = False,
-                         if_match: str | None = None) -> ObjectInfo:
-        """if_match：只在对象当前 ETag 等于它时覆盖（网页文本编辑保存用），否则抛 VersionConflict，不写入。"""
+                         if_match: str | None = None, declared_type: bool = False) -> ObjectInfo:
+        """if_match：只在对象当前 ETag 等于它时覆盖（网页文本编辑保存用），否则抛 VersionConflict，不写入。
+        declared_type：采用调用方给出的类型、不按内容判断（S3 网关）。"""
         self._check_scope(scope, key, write=True)
         if if_match is not None:
             # 先查一次，版本已变时不必上传；提交事务内还会再复核。
@@ -299,7 +306,7 @@ class ObjectService:
                 self.metadata.set_fingerprint(blob_uuid, combine(result.size, result.leaves))
             self._check_scope(scope, key, write=True)
             info = self._commit_blob(scope.bucket_id, key, blob_uuid, result.size, result.md5,
-                                     content_type, user_meta, scope=scope, dedupe=not small, if_match=if_match)
+                                     content_type, user_meta, scope=scope, dedupe=not small, if_match=if_match, declared=declared_type)
         except Exception:
             # 已写入后端的分片由 orphan cleanup/GC 处理；元数据中的临时 blob 可立即入队。
             try:
@@ -1379,7 +1386,7 @@ class ObjectService:
             return await self.put_directory_marker(dst, dst_key)
         return self._commit_blob(dst.bucket_id, dst_key, source["blob_uuid"], source["size"], source["etag"],
                                  content_type if content_type is not None else source["content_type"],
-                                 metadata if metadata is not None else json.loads(source["user_meta"] or "{}"), scope=dst)
+                                 metadata if metadata is not None else json.loads(source["user_meta"] or "{}"), scope=dst, declared=True)
 
     def move_prefix(self, scope: Scope, old: str, new: str, conflict: str = "skip") -> int:
         return self.move(scope, old, new, conflict).moved
@@ -1573,7 +1580,7 @@ class ObjectService:
         rows = self.metadata.db.execute("SELECT * FROM upload_parts WHERE upload_id=? ORDER BY part_no", (upload_id,))
         return [PartInfo(upload_id, r["part_no"], r["size"], r["md5"], r["uploaded_at"]) for r in rows]
 
-    async def complete_multipart(self, scope: Scope, upload_id: str, parts: list[tuple[int, str]]) -> ObjectInfo:
+    async def complete_multipart(self, scope: Scope, upload_id: str, parts: list[tuple[int, str]], *, declared_type: bool = False) -> ObjectInfo:
         upload = self._upload(scope, upload_id)
         if upload["completed_at"] is not None:
             return self.head_object(scope, upload["key"])
@@ -1596,7 +1603,7 @@ class ObjectService:
         combined = hashlib.md5(b"".join(bytes.fromhex(records[p[0]]["md5"]) for p in parts)).hexdigest() + f"-{len(parts)}"
         self._check_scope(scope, upload["key"], write=True)
         info = self._commit_blob(scope.bucket_id, upload["key"], upload["blob_uuid"], blob_size, combined,
-                                 upload["content_type"], json.loads(upload["user_meta"] or "{}"), scope=scope, dedupe=True)
+                                 upload["content_type"], json.loads(upload["user_meta"] or "{}"), scope=scope, dedupe=True, declared=declared_type)
         with self.metadata.transaction() as db:
             # 合并到已有 Blob 时，上传记录（幂等重试用）改指向它，才能删除刚写入的这份。
             db.execute("UPDATE uploads SET completed_at=?, result_etag=?, blob_uuid=? WHERE upload_id=?",

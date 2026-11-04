@@ -411,7 +411,7 @@ const sentBytes = (job: UploadJob) => job.status === "done" ? job.file.size : jo
 export function UploadsPage({ queue, onOpenFolder }: { queue: UploadQueue; onOpenFolder: (prefix: string) => void }) {
   useDocumentTitle(`上传任务 · ${BRAND}`);
   const { jobs, folderShares } = queue;
-  const list = useTaskList(jobs, uploadDescription, uploadGroup);
+  const list = useTaskList(jobs, uploadDescription, uploadGroup, "tessera:upload-task-page-size");
   const [confirm, setConfirm] = useState<{ action: "cancel" | "delete" | "clear" | "cancelAll"; ids: string[] } | null>(null);
   const [pending, setPending] = useState<UploadFile[] | null>(null);
   const running = jobs.filter(job => uploadGroup(job) === "active");

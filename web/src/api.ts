@@ -50,7 +50,7 @@ export type RegistrationSettings = Pick<RegistrationConfig, "enabled" | "email_e
 export type RegistrationUpdate = Omit<RegistrationSettings, "smtp"> & { smtp: SmtpConfig; smtp_password?: string; clear_smtp_password?: boolean };
 export type Invitation = { id: number; code: string; status: "active" | "used" | "expired" | "revoked"; quota_bytes: number | null; expires_at: number; created_at: number; used_at?: number | null };
 export type InvitationPage = { invites: Invitation[]; total: number; next_cursor: number | null };
-export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number; thumbnail_concurrency: number; download_memory_percent: number; video_concurrency: number; thumbnail_cache_mib: number; download_connections: number; diagnostics: boolean };
+export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number; thumbnail_concurrency: number; download_memory_percent: number; video_concurrency: number; thumbnail_cache_mib: number; download_connections: number; parse_concurrency: number; diagnostics: boolean };
 export type ResourceSettings = { config: ResourceConfig; source: "admin" | "startup"; pressure: string | null;
   components: { versions: Record<string, string | null>; ytdlp_age_days: number | null };
   /** 生效档位：自动模式按检测到的 CPU 与内存选择 low 或 standard。 */
@@ -353,8 +353,9 @@ export const publicPreviewAssets = (token: string, path: string, access?: string
   if (access) params.set("access", access);
   return request<PreviewAsset[]>(`/api/public/v1/folders/${encodeURIComponent(token)}/preview-assets?${params}`, { signal });
 };
-export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100, root = "", kind: KindFilter = "", signal?: AbortSignal) =>
-  request<ListPage>(`${fileApi("/search", root)}?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}`, { signal });
+/** 搜索文件；prefix 为文件夹时只搜它及其子文件夹（关键词匹配文件夹之下的相对路径），空为整个空间。 */
+export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100, root = "", kind: KindFilter = "", signal?: AbortSignal, prefix = "") =>
+  request<ListPage>(`${fileApi("/search", root)}?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}${prefix ? `&prefix=${encodeURIComponent(prefix)}` : ""}`, { signal });
 /** 目录统计（含子文件夹）：数量、总大小、按类型分组（与 KIND_FILTERS 同组，另有 other）、最大的文件。 */
 export type FolderStats = { prefix: string; files: number; folders: number; bytes: number; direct_files: number; direct_folders: number;
   kinds: { kind: KindName | "other"; count: number; bytes: number }[]; largest: { key: string; size: number; content_type: string | null }[]; latest_modified: number | null };
@@ -675,7 +676,8 @@ export const lastDownloadDestination = () => request<DownloadDestination>(`/api/
 /** 为刚创建的任务提交缩略图：浏览器缩放好的各规格（base64，不含 data: 前缀）。任务完成后设为文件的缩略图。 */
 export const setDownloadCover = (id: number, images: Record<string, string>, privateTask = false) =>
   post<{ applied: boolean }>(`${downloadRoute(privateTask)}/${id}/cover`, { images });
-export const clearDownloads = (status: "completed" | "failed") => post<{ removed: number }>("/api/user/v1/downloads/clear", { status });
+/** 一次删除全部已完成或失败的任务（服务端分批处理，任务很多时可能要一会儿）。 */
+export const clearDownloads = (status: "completed" | "failed") => post<{ removed: number }>("/api/user/v1/downloads/clear", { status }, 10 * 60_000);
 export const controlDownload = (id: number, action: "stop" | "resume" | "restart" | "delete" | "update", item?: { ticket: string }, privateTask = false) => {
   const usePrivate = privateTask && Boolean(privateAccess);
   return post<DownloadTask | undefined>(`/api/user/v1${usePrivate ? "/private" : ""}/downloads/${id}/${action}`, { item });

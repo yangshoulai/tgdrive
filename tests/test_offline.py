@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 from tgdrive.app import create_app
+from tgdrive.work import Limiter
 from tgdrive.assistant.tools import ToolContext, ToolError, describe_tools, tool_params, validate_tool_settings
 from tgdrive.assistant.web_tools import parse_download_source
 from tgdrive.errors import NotFoundError
@@ -87,7 +88,8 @@ class ParseLimitTests(unittest.IsolatedAsyncioTestCase):
     def service(self):
         offline = OfflineDownloads.__new__(OfflineDownloads)
         offline.scope = Mock()
-        offline._parse_slots = asyncio.Semaphore(2)
+        offline._parse_slots = Limiter(2)
+        offline.resources = Mock(effective=lambda: {"parse_concurrency": 2})
         candidate = lambda user_id, request, *args: [{"name": request.url.rsplit("/", 1)[-1], "ticket": "fixture"}]
         offline._parse_request = AsyncMock(side_effect=candidate)
         offline._parse_platform = AsyncMock(side_effect=candidate)
@@ -113,6 +115,43 @@ class ParseLimitTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "最多解析 1000"):
             await rejected.parse(1, "\n".join(links))
         rejected._parse_request.assert_not_awaited()
+
+    async def test_batch_parse_reports_each_item_and_uses_configured_concurrency(self):
+        offline = self.service()
+        offline.resources = Mock(effective=lambda: {"parse_concurrency": 3})
+        active = peak = 0
+
+        async def inspect(user_id, request, *args):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            if request.url.endswith("/bad.bin"):
+                raise DownloadError("来源返回 403")
+            return [{"name": request.url.rsplit("/", 1)[-1], "ticket": "fixture"}]
+        offline._parse_request = AsyncMock(side_effect=inspect)
+        items = [{"input": f"https://example.com/{n}.bin"} for n in range(8)] + [{"input": "https://example.com/bad.bin"}]
+        result = await offline.parse_batch(1, items)
+        self.assertEqual(len(result["results"]), 9)
+        self.assertEqual([r["candidates"][0]["name"] for r in result["results"][:8]], [f"{n}.bin" for n in range(8)], "结果与提交顺序一一对应")
+        self.assertEqual(result["results"][8], {"error": "来源返回 403"}, "单项失败不影响其他项")
+        self.assertEqual(peak, 3, "按「同时解析的链接数」并行")
+        for bad in ([], [{"input": "x"}] * 51, [{"url": "x"}]):
+            with self.subTest(bad=len(bad)), self.assertRaises(ValueError):
+                await offline.parse_batch(1, bad)
+
+    async def test_batch_parse_returns_retry_for_items_past_budget(self):
+        offline = self.service()
+
+        async def inspect(user_id, request, *args):
+            await asyncio.sleep(5 if request.url.endswith("/slow.bin") else 0)
+            return [{"name": "ok", "ticket": "fixture"}]
+        offline._parse_request = AsyncMock(side_effect=inspect)
+        with patch("tgdrive.offline.service.PARSE_BATCH_BUDGET", 0.2):
+            result = await offline.parse_batch(1, [{"input": "https://example.com/a.bin"}, {"input": "https://example.com/slow.bin"}])
+        self.assertIn("candidates", result["results"][0])
+        self.assertTrue(result["results"][1]["retry"], "来不及解析的项交回调用方重新提交")
 
     async def test_one_source_can_return_more_than_32_candidates(self):
         offline = self.service()
@@ -420,7 +459,7 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"done": 1, "skipped": 1})
         self.assertEqual((self.offline._row(first["id"])["status"], self.offline._row(posted["id"])["status"]), ("queued", "stopped"))
         self.assertEqual(await self.offline.batch(self.admin.id, "delete", [first["id"]]), {"done": 0, "skipped": 1})
-        for payload in ({"action": "restart", "ids": [first["id"]]}, {"action": "delete", "ids": []}, {"action": "delete", "ids": ["1"]}, {"action": "delete", "ids": list(range(1, 102))}):
+        for payload in ({"action": "restart", "ids": [first["id"]]}, {"action": "delete", "ids": []}, {"action": "delete", "ids": ["1"]}, {"action": "delete", "ids": list(range(1, 502))}):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 await self.offline.batch(self.alice.id, payload["action"], payload["ids"])
         client = Client(self.app)
@@ -458,7 +497,7 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         listed = self.offline.list(self.alice.id, ids=[tasks[0]["id"], tasks[2]["id"], foreign["id"]], limit=1)
         self.assertEqual(sorted(task["id"] for task in listed["tasks"]), sorted([tasks[0]["id"], tasks[2]["id"]]), "只返回自己的任务，不受 limit 影响")
         self.assertIsNone(listed["next_cursor"])
-        for ids in ([], ["1"], list(range(1, 102))):
+        for ids in ([], ["1"], list(range(1, 502))):
             with self.subTest(ids=ids), self.assertRaises(ValueError):
                 self.offline.list(self.alice.id, ids=ids)
         client = Client(self.app)

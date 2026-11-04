@@ -11,7 +11,7 @@ import { ExtractDialog, isArchive } from "./extract";
 import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, loadedPlaceholder, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type CacheFilter, type EntryFilter, type FileSort } from "../files";
 import { generateLoadedThumbnails, saveCurrentVideoThumbnail, thumbnailsFromImage, thumbnailsFromVideo, thumbnailSource, videoFrameUsable } from "../thumbnails";
 
-import { Notice, ButtonLink, Badge, Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
+import { BackToTop, Notice, ButtonLink, Badge, Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 import { ShortcutsDialog } from "../shortcuts";
 
 import { UploadDialog, type UploadQueue } from "./uploads";
@@ -87,7 +87,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   useDocumentTitle(`${query ? `搜索“${query}”` : name} · ${BRAND}`);
 
   const fetchPage = useCallback((cursor: string | null, signal: AbortSignal) => query
-    ? api.searchFiles(query, cursor ?? "", filter === "public", 200, root, kind, signal)
+    // 在当前文件夹及其子文件夹里搜索；在根目录时就是整个空间。
+    ? api.searchFiles(query, cursor ?? "", filter === "public", 200, root, kind, signal, prefix !== root ? prefix : "")
     // 目录每页取服务端允许的上限（1000，类型筛选与公开筛选由服务端收紧到 200）：上千个文件一两次请求读完，减少逐页往返与重排。
     : api.listFiles(prefix, cursor, filter === "public", 1000, kind, signal), [prefix, query, filter, kind, root]);
   // 目录连续展示全部项目；搜索最多读取 SEARCH_PAGES 页，结果过多时提示细化关键词。
@@ -115,8 +116,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   // 离线下载完成：只有保存目录就是当前目录（或正在搜索）时才刷新。
   useEffect(() => {
     const completed = (event: Event) => {
-      const folders = (event as CustomEvent<{ folders: string[] }>).detail?.folders ?? [];
-      if (query || folders.includes(prefix)) scheduleRefresh();
+      const detail = (event as CustomEvent<{ folders: string[]; all?: boolean }>).detail;
+      // all：文件助手执行了改名、移动、删除等操作，影响的目录不确定，当前目录一律刷新。
+      if (query || detail?.all || (detail?.folders ?? []).includes(prefix)) scheduleRefresh();
     };
     // 其他入口（如文件助手把附件保存到我的文件）写入文件后同样按目录判断。
     window.addEventListener("tessera:downloads-completed", completed);
@@ -427,7 +429,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     return items;
   }
   function fileVisual(file: api.FileItem) {
-    return <FileVisual kind={getFileKind(file.content_type, file.key)} src={api.fileThumbnail(file)} />;
+    return <FileVisual kind={getFileKind(file.content_type, file.key)} src={api.fileThumbnail(file)} size="lg" />;
   }
   function folderMenu(key: string): MenuItem[] {
     const shared = publicFolders[key];
@@ -613,6 +615,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }}
       onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); if (!pendingUpload && event.dataTransfer.types.includes("Files")) void dropUpload(event.dataTransfer); }}>
+      <BackToTop />
       <PageHeader title={query ? `搜索“${query}”` : name}
         actions={<>
           <Button icon="folderPlus" shortcut="N" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
@@ -650,7 +653,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         </div>
       ) : (
         <div className="toolbar">
-          <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder={privateSpace ? "搜索私密空间，按回车" : "搜索全部文件，按回车"} label="搜索文件" shortcut="/" />
+          <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder={prefix !== root ? `在「${name}」中搜索，按回车` : privateSpace ? "搜索私密空间，按回车" : "搜索全部文件，按回车"} label="搜索文件" shortcut="/" />
           <div className="toolbar-actions">
             {!privateSpace && <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />}
             <FileSortSelect sort={sort} onSort={setSort} grid={layout === "grid"} />
@@ -689,7 +692,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             {rendered.visible.map(entry => entry.kind === "folder" ? (
               <div key={entry.key} role="row" className={`data-row is-clickable${selected.has(entry.key) ? " is-selected" : ""}${cursorClass(entry.key)}${dropClass(entry.key)}`} {...rowProps(entry)} {...dragProps(entry)} {...dropProps(entry.key)} onClick={() => onOpenFolder(entry.key)}>
                 <span role="cell" className="cell-check"><Checkbox label={`选择 ${baseName(entry.key)}`} checked={selected.has(entry.key)} onChange={value => toggleSelect(entry.key, value)} /></span>
-                <span role="cell" className="cell-name"><FileTile kind="folder" /><span className="name-stack"><button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
+                <span role="cell" className="cell-name"><FileTile kind="folder" size="lg" /><span className="name-stack"><button type="button" className="name-button" title={baseName(entry.key)} onClick={event => { event.stopPropagation(); onOpenFolder(entry.key); }}>{baseName(entry.key)}</button>
                   <span className="file-mobile-meta"><span>{["文件夹", folderSize(entry.size), entry.modified ? formatDate(entry.modified) : ""].filter(Boolean).join(" · ")}</span>{publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span></span>
                   {publicFolders[entry.key] && <Badge tone="public" icon="globe">公开</Badge>}</span>
                 <span role="cell" className="cell-type muted">文件夹</span>

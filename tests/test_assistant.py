@@ -14,6 +14,10 @@ from tgdrive.assistant.providers import ProviderError, Reply, ToolCall, ToolDef,
 from tgdrive.objects import Scope
 
 
+MEDIA_MAGIC = {".jpg": b"\xff\xd8\xff", ".jpeg": b"\xff\xd8\xff", ".png": b"\x89PNG\r\n\x1a\n", ".gif": b"GIF89a",
+               ".webp": b"RIFF\x00\x00\x00\x00WEBP", ".mp4": b"\x00\x00\x00\x10ftypisom\x00\x00\x02\x00", ".mov": b"\x00\x00\x00\x10ftypqt  \x00\x00\x02\x00",
+               ".mkv": b"\x1aE\xdf\xa3", ".mp3": b"ID3", ".flac": b"fLaC"}
+
 class ScriptedModel:
     """按顺序返回预设回复的假模型；记录每次调用收到的消息与工具定义。"""
 
@@ -72,7 +76,9 @@ class AssistantCase(unittest.TestCase):
 
     async def put(self, key, data: bytes):
         scope = Scope(self.alice.bucket_id, private_access=key.startswith(".tgdrive/private/"))
-        await self.app.objects.put_object(scope, key, data)
+        # 类型按内容判断：给媒体文件补上对应格式的文件头，占位内容才会被认成图片、视频或音频。
+        magic = next((value for suffix, value in MEDIA_MAGIC.items() if key.lower().endswith(suffix)), b"")
+        await self.app.objects.put_object(scope, key, data if not magic or data.startswith(magic) else magic + data)
 
     async def setup_assistant(self, admin=None):
         """建渠道、从上游列表（被替换为固定列表）选择模型加入、启用、设为默认并打开总开关。"""
@@ -522,9 +528,10 @@ class AssistantTests(AssistantCase):
     def test_stats_tools(self):
         async def run():
             await self.setup_assistant()
-            await self.put("a/1.jpg", b"1" * 100)
-            await self.put("a/2.jpg", b"1" * 100)  # 内容相同
-            await self.put("b/3.mp4", b"2" * 300)
+            # 带上格式文件头、总大小不变：类型按内容判断。
+            await self.put("a/1.jpg", MEDIA_MAGIC[".jpg"] + b"1" * 97)
+            await self.put("a/2.jpg", MEDIA_MAGIC[".jpg"] + b"1" * 97)  # 内容相同
+            await self.put("b/3.mp4", MEDIA_MAGIC[".mp4"] + b"2" * (300 - len(MEDIA_MAGIC[".mp4"])))
             await self.app.objects.put_directory_marker(Scope(self.alice.bucket_id), "empty/")
             user = await self.client.login("user", "alice@example.com", "alice password")
             conversation = await self.start_conversation(user)

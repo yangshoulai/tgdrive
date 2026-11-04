@@ -47,7 +47,16 @@ export const FAVORITE_ICONS: { icon: IconName | null; label: string }[] = [
   { icon: "code", label: "代码" }, { icon: "gamepad", label: "游戏" }, { icon: "palette", label: "设计" }, { icon: "download", label: "下载" },
   { icon: "archive", label: "归档" }, { icon: "cloud", label: "备份" }, { icon: "home", label: "家庭" }, { icon: "users", label: "共享" },
   { icon: "globe", label: "旅行" }, { icon: "bookmark", label: "书签" }, { icon: "flag", label: "重要" }, { icon: "key", label: "证件" },
-  { icon: "sparkle", label: "灵感" },
+  { icon: "sparkle", label: "灵感" }, { icon: "music", label: "歌单" }, { icon: "headphones", label: "播客" }, { icon: "tv", label: "剧集" },
+  { icon: "smile", label: "生活" }, { icon: "baby", label: "孩子" }, { icon: "paw", label: "宠物" }, { icon: "utensils", label: "美食" },
+  { icon: "coffee", label: "休闲" }, { icon: "gift", label: "礼物" }, { icon: "plane", label: "出行" }, { icon: "car", label: "汽车" },
+  { icon: "map", label: "地图" }, { icon: "calendar", label: "日程" }, { icon: "cart", label: "购物" }, { icon: "wallet", label: "财务" },
+  { icon: "trophy", label: "成就" }, { icon: "rocket", label: "项目" }, { icon: "leaf", label: "自然" }, { icon: "sprout", label: "成长" },
+  { icon: "dumbbell", label: "运动" }, { icon: "tag", label: "标签" }, { icon: "building", label: "公司" }, { icon: "chat", label: "聊天" },
+  { icon: "mail", label: "邮件" }, { icon: "monitor", label: "电脑" }, { icon: "server", label: "服务器" }, { icon: "shield", label: "安全" },
+  { icon: "lock", label: "私密" }, { icon: "chart", label: "报表" }, { icon: "clock", label: "时间" }, { icon: "box", label: "杂物" },
+  { icon: "zap", label: "常用" }, { icon: "brain", label: "知识" }, { icon: "wrench", label: "工具" }, { icon: "user", label: "个人" },
+  { icon: "sun", label: "白天" }, { icon: "moon", label: "夜晚" },
 ];
 const KNOWN_ICONS = new Set(FAVORITE_ICONS.map(item => item.icon).filter(Boolean));
 export const favoriteIcon = (item: Pick<Favorite, "icon" | "private">): IconName =>
@@ -84,7 +93,7 @@ export const setFavoriteIcon = (path: string, icon: string | null) => save(items
 /** 选择收藏的图标：点选即保存并关闭。 */
 function FavoriteIconDialog({ item, onClose }: { item: Favorite; onClose: () => void }) {
   const current = item.icon && KNOWN_ICONS.has(item.icon as IconName) ? item.icon : null;
-  return <Modal title="选择图标" description={`「${folderName(item.path)}」在侧栏收藏里显示的图标`} icon={favoriteIcon(item)} size="sm" onClose={onClose}>
+  return <Modal title="选择图标" description={`「${folderName(item.path)}」在侧栏收藏里显示的图标`} icon={favoriteIcon(item)} size="md" onClose={onClose}>
     <div className="favorite-icon-grid" role="listbox" aria-label="图标">
       {FAVORITE_ICONS.map(option => {
         const selected = option.icon === current;

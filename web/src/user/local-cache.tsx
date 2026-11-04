@@ -17,7 +17,7 @@ export function LocalCacheSettings() {
   const [directory, setDirectory] = useState<CacheDirectoryInfo | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState<"private" | "reset" | "all" | "browser" | null>(null);
+  const [confirm, setConfirm] = useState<"private" | "reset" | "all" | "browser" | "auto" | "browser-data" | null>(null);
   const supported = cacheSupported();
 
   const refresh = useCallback(async () => {
@@ -50,7 +50,7 @@ export function LocalCacheSettings() {
     finally { setBusy(false); }
   }
 
-  async function wipe(scope: "normal" | "private" | "all", message: string) {
+  async function wipe(scope: "normal" | "private" | "all" | "auto" | "browser", message: string) {
     setBusy(true);
     try { await clearCache(scope); toast.success(message); await refresh(); }
     catch (reason) { toast.error(api.errorMessage(reason, "清除失败，请稍后重试")); }
@@ -81,6 +81,15 @@ export function LocalCacheSettings() {
   const privateOn = Boolean(settings?.private);
   const total = (stats?.normal.count ?? 0) + (stats?.private.count ?? 0) + (stats?.others.count ?? 0);
   const totalBytes = (stats?.normal.bytes ?? 0) + (stats?.private.bytes ?? 0) + (stats?.others.bytes ?? 0);
+  // 普通／私密 × 手动／自动 四项占比（不含其他账号留下的缓存）。
+  const parts = stats ? [
+    { key: "normal-manual", label: "普通 · 手动缓存", ...stats.normal.manual, tone: 1 },
+    { key: "normal-auto", label: "普通 · 自动缓存", ...stats.normal.auto, tone: 2 },
+    { key: "private-manual", label: "私密 · 手动缓存", ...stats.private.manual, tone: 3 },
+    { key: "private-auto", label: "私密 · 自动缓存", ...stats.private.auto, tone: 4 },
+  ] : [];
+  const partsTotal = parts.reduce((sum, item) => sum + item.bytes, 0);
+  const autoUsage = stats ? { bytes: stats.normal.auto.bytes + stats.private.auto.bytes, count: stats.normal.auto.count + stats.private.auto.count } : null;
 
   return <>
     <Section icon="monitor" title="本机缓存" description="看过的文件加密保存在这个浏览器里，再次打开更快，只有登录你的账号才能打开。">
@@ -92,6 +101,18 @@ export function LocalCacheSettings() {
         <div><span>私密文件</span><strong>{formatBytes(stats.private.bytes)}</strong><small>{privateOn ? `上限 ${sizeLabel(effectiveMiB(privateLimit, quota))} · ${stats.private.count} 项` : "未开启"}</small></div>
         <div><span>浏览器占用</span><strong>{estimate ? formatBytes(estimate.usage) : "—"}</strong><small>{estimate ? `${estimate.persisted ? "已持久保存" : "空间不足时可能被浏览器清除"}` : "浏览器未提供"}</small></div>
       </div>}
+      {partsTotal > 0 && <div className="local-cache-breakdown">
+        <div className="local-cache-breakdown-head"><strong>占用明细</strong><span>共 {formatBytes(partsTotal)}</span></div>
+        <div className="folder-stats-bar" role="img" aria-label={parts.map(item => `${item.label} ${formatBytes(item.bytes)}`).join("，")}>
+          {parts.filter(item => item.bytes > 0).map(item => <span key={item.key} className={`series-${item.tone}`} style={{ flexGrow: item.bytes }} title={`${item.label} ${formatBytes(item.bytes)}`} />)}
+        </div>
+        <ul className="local-cache-breakdown-list">{parts.map(item => <li key={item.key}>
+          <i className={`folder-stats-swatch series-${item.tone}`} aria-hidden="true" />
+          <span>{item.label}</span>
+          <strong>{formatBytes(item.bytes)}</strong>
+          <small>{partsTotal ? Math.round(item.bytes / partsTotal * 100) : 0}% · {item.count.toLocaleString("zh-CN")} 项</small>
+        </li>)}</ul>
+      </div>}
       {kinds.length > 0 && <div className="local-cache-kinds">
         <div className="folder-stats-bar" role="img" aria-label={kinds.map(item => `${KIND_LABEL[item.kind]} ${formatBytes(item.bytes)}`).join("，")}>
           {kinds.map(item => <span key={item.kind} className={`kind-${item.kind}`} style={{ flexGrow: item.bytes }} title={`${KIND_LABEL[item.kind]} ${formatBytes(item.bytes)}`} />)}
@@ -101,7 +122,9 @@ export function LocalCacheSettings() {
       {settings && settings.enabled && <div className="local-cache-options">
       <CacheSizeSelect label="最多占用" value={settings.maxMiB} disabled={busy || !settings.enabled} quota={quota}
         hint="超出后先移除最久没有打开的自动缓存，手动缓存的文件会保留；自动缓存的单个文件最多占一半。" onChange={value => void update({ maxMiB: value }, "已保存")} />
-      <Switch checked={settings.video} disabled={busy || !settings.enabled} onChange={value => void update({ video: value }, "已保存")} label="自动缓存视频片段"
+      <Switch checked={settings.auto} disabled={busy || !settings.enabled} onChange={value => void update({ auto: value }, value ? "已开启预览时自动缓存" : "已关闭预览时自动缓存，已缓存的内容保留")} label="预览时自动缓存"
+        description="打开、播放文件时把看过的内容保存在这台设备上。关闭后不再自动缓存新的内容，已自动缓存的文件保留并照常使用；「缓存到本机」不受影响。" />
+      <Switch checked={settings.video} disabled={busy || !settings.enabled || !settings.auto} onChange={value => void update({ video: value }, "已保存")} label="自动缓存视频片段"
         description={webkitOnly(navigator.userAgent) ? "Safari 对缓存视频的支持还不稳定，如果开启后播放异常，请关闭此项。" : "按看过的片段保存，拖回已看过的位置时不必重新下载。"} />
       </div>}
       {settings && webkitOnly(navigator.userAgent) && !isStandalone() && <Notice>
@@ -109,8 +132,8 @@ export function LocalCacheSettings() {
     </Section>
 
 
-    {settings && settings.enabled && <CacheLocation directory={directory} quota={estimate?.quota} busy={busy}
-      onPick={() => void pickDirectory()} onRegrant={() => void regrant()} onBrowser={() => setConfirm("browser")} />}
+    {settings && settings.enabled && <CacheLocation directory={directory} quota={estimate?.quota} busy={busy} leftover={directory ? stats?.stores.browser : undefined}
+      onPick={() => void pickDirectory()} onRegrant={() => void regrant()} onBrowser={() => setConfirm("browser")} onClearBrowser={() => setConfirm("browser-data")} />}
 
     {settings && <Section icon="shield" title="私密文件" description="私密空间锁定后，已加入的缓存任务继续，副本仍需解锁才能打开；文件被移出私密空间后也不再使用。">
       <div className="account-setting-summary"><div>
@@ -131,6 +154,8 @@ export function LocalCacheSettings() {
         <Button size="sm" disabled={busy || !total} onClick={() => setConfirm("all")}>全部清理{total ? `（${formatBytes(totalBytes)}）` : ""}</Button>
         <Button size="sm" disabled={busy || !stats?.normal.count} onClick={() => void wipe("normal", "已清理普通缓存")}>清理普通缓存</Button>
         <Button size="sm" disabled={busy || !stats?.private.count} onClick={() => void wipe("private", "已清理私密缓存")}>清理私密缓存</Button>
+        <Button size="sm" disabled={busy || !autoUsage?.count} onClick={() => setConfirm("auto")}>清除自动缓存{autoUsage?.count ? `（${formatBytes(autoUsage.bytes)}）` : ""}</Button>
+        {directory && (stats?.stores.browser.count ?? 0) > 0 && <Button size="sm" disabled={busy} onClick={() => setConfirm("browser-data")}>清理浏览器存储（{formatBytes(stats!.stores.browser.bytes)}）</Button>}
       </div>
       {(stats?.others.count ?? 0) > 0 && <p className="muted local-cache-note">这台设备上还有其他账号留下的缓存（{formatBytes(stats!.others.bytes)}），「全部清理」会一并清除。</p>}
       <Disclosure title="重置所有设备的缓存" description="设备丢失时使用：让你在所有设备上的本机缓存都无法再解开。">
@@ -152,6 +177,12 @@ export function LocalCacheSettings() {
     {confirm === "all" && <ConfirmDialog title="全部清理？" confirmLabel="全部清理"
       description="将清除这台设备上的全部本机缓存，包括普通文件、私密文件、封面和其他账号留下的缓存。之后打开文件需要重新下载，云端文件不受影响。"
       onClose={() => setConfirm(null)} onConfirm={async () => { await wipe("all", "已清理这台设备上的全部缓存"); setConfirm(null); }} />}
+    {confirm === "browser-data" && <ConfirmDialog title="清理浏览器存储中的缓存？" confirmLabel="清理浏览器存储"
+      description={`改用本地文件夹之前保存在浏览器里的 ${stats?.stores.browser.count.toLocaleString("zh-CN") ?? 0} 项缓存（${formatBytes(stats?.stores.browser.bytes ?? 0)}，含其他账号留下的）会被删除，释放浏览器空间。本地文件夹「${directory?.name ?? ""}」中的缓存不受影响，云端文件也不受影响。`}
+      onClose={() => setConfirm(null)} onConfirm={async () => { await wipe("browser", "已清理浏览器存储中的缓存"); setConfirm(null); }} />}
+    {confirm === "auto" && <ConfirmDialog title="清除自动缓存？" confirmLabel="清除自动缓存"
+      description={`将清除预览时自动保存的 ${autoUsage?.count.toLocaleString("zh-CN") ?? 0} 项内容（${formatBytes(autoUsage?.bytes ?? 0)}，含封面与私密文件的自动缓存）。手动缓存的文件会保留，云端文件不受影响。`}
+      onClose={() => setConfirm(null)} onConfirm={async () => { await wipe("auto", "已清除自动缓存"); setConfirm(null); }} />}
     {confirm === "reset" && <ConfirmDialog title="重置所有设备的缓存？" confirmLabel="重置"
       description="所有设备上已有的本机缓存都将失效，之后打开文件需要重新下载。这台设备上的缓存会立即清除。"
       onClose={() => setConfirm(null)} onConfirm={async () => {
@@ -171,7 +202,8 @@ function Section({ icon, title, description, children }: { icon: IconName; title
 
 /** 缓存位置：支持目录选择的浏览器（桌面 Chrome／Edge）可以把数据块放到用户选择的本地文件夹，不受浏览器配额限制；
  * 不选也可以继续使用浏览器存储。其他浏览器只说明限制，并建议在电脑上用 Chrome 或 Edge 打开。 */
-function CacheLocation({ directory, quota, busy, onPick, onRegrant, onBrowser }: { directory: CacheDirectoryInfo | null; quota?: number; busy: boolean; onPick: () => void; onRegrant: () => void; onBrowser: () => void }) {
+function CacheLocation({ directory, quota, busy, leftover, onPick, onRegrant, onBrowser, onClearBrowser }: { directory: CacheDirectoryInfo | null; quota?: number; busy: boolean;
+  /** 改用本地文件夹后浏览器存储里还留着的缓存。 */ leftover?: { bytes: number; count: number }; onPick: () => void; onRegrant: () => void; onBrowser: () => void; onClearBrowser: () => void }) {
   const browser = browserName();
   const limit = quota ? `约 ${formatBytes(quota)}` : "由浏览器决定";
   if (!directoryAvailable()) return <Section icon="hardDrive" title="缓存位置" description="本机缓存保存在浏览器内部。">
@@ -197,6 +229,10 @@ function CacheLocation({ directory, quota, busy, onPick, onRegrant, onBrowser }:
       <Button size="sm" icon="folder" disabled={busy} onClick={onPick}>更换文件夹</Button>
       <Button size="sm" disabled={busy} onClick={onBrowser}>改回浏览器存储</Button>
     </div>
+    {leftover && leftover.count > 0 && <div className="account-setting-summary cache-location-leftover"><div>
+      <strong>浏览器存储中还有 {formatBytes(leftover.bytes)}</strong>
+      <p>这是改用本地文件夹之前缓存在浏览器里的 {leftover.count.toLocaleString("zh-CN")} 项内容，仍可使用，空间不够时会被逐步移除。不再需要时可以清理，释放浏览器空间；本地文件夹里的缓存不受影响。</p>
+    </div><Button size="sm" disabled={busy} onClick={onClearBrowser}>清理</Button></div>}
   </Section>;
 }
 

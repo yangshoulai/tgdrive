@@ -85,6 +85,8 @@ export function Resources() {
           <div className="form-row">
             <Field label="同时封装的视频数" hint="M3U8 与 YouTube 视频同时处理的个数，1–4，默认 2。FFmpeg 只复制音视频数据、不转码，CPU 占用不高；每个 YouTube 任务另占最多「平台临时缓存上限」的磁盘。内存不足 1 GiB 的机器固定为 1 个，也不超过同时下载的任务数。">
               <input className="input" type="number" min={1} max={4} step={1} required value={form.video_concurrency} onChange={number("video_concurrency")} /></Field>
+            <Field label="同时解析的链接数" hint="创建离线任务前检查链接（读取文件名、大小、是否支持分段）的同时数，所有用户共用，1–16，默认 6。抓取脚本批量提交网盘直链时按这个数并行，调高能更快完成一批；过高可能被网盘或来源站限速、拒绝。">
+              <input className="input" type="number" min={1} max={16} step={1} required value={form.parse_concurrency} onChange={number("parse_concurrency")} /></Field>
           </div>
           <div className="form-row">
             <Field label="封面读取并发" hint="网格图、预览大图等封面从存储读取的同时数，所有用户共用，1–32，默认 16。不占文件读取名额，每路不到 1 MB 内存；过高可能触发 Telegram 限流。"><input className="input" type="number" min={1} max={32} step={1} required value={form.thumbnail_concurrency} onChange={number("thumbnail_concurrency")} /></Field>
@@ -107,7 +109,7 @@ export function Resources() {
     <Panel title="当前生效" description={settings.source === "admin" ? "按管理员保存的配置与检测到的资源计算。" : "尚未保存过配置，使用启动参数的默认值。"}>
       <KeyValue items={[
         ["资源档位", form.mode === "auto" ? `自动 · ${TIERS[effective.mode]}` : TIERS[effective.mode]],
-        ["离线下载", `${effective.concurrency} 个任务 · 每个 ${effective.download_connections} 个连接 · ${rate(effective.bandwidth_kib)}`],
+        ["离线下载", `${effective.concurrency} 个任务 · 每个 ${effective.download_connections} 个连接 · ${rate(effective.bandwidth_kib)} · 同时解析 ${effective.parse_concurrency} 个链接`],
         ["文件读取", `服务器 ${effective.transfer_concurrency} 路 · 每个账号 ${effective.bucket_concurrency} 路`],
         ["写入存储", `${effective.upload_concurrency} 个分片 · ${rate(effective.upload_kib)}`],
         ["网页上传", `每个文件 ${effective.web_part_concurrency} 段 · 同时 ${effective.web_file_concurrency} 个文件`],

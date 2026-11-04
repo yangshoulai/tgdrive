@@ -335,9 +335,13 @@ async function handle(request: Request, route: Route): Promise<Response> {
       "Cache-Control": "no-store", "X-Tessera-Cache": "hit", ETag: info.version,
       ...(range ? { "Content-Range": "bytes */0" } : {}),
     } });
-    return build({ tier: context, entry, info, key: keys.key, request, cap }, range ?? null);
+    // 关闭自动缓存后已有的自动缓存照常读取，但不再补充新的块（上限设为当前已缓存的大小）。
+    const limit = preferences.auto !== false || info.manual || route.thumb ? cap : entry.bytes;
+    return build({ tier: context, entry, info, key: keys.key, request, cap: limit }, range ?? null);
   }
   if (download) return direct(request);
+  // 关闭「预览时自动缓存」：不新建自动缓存条目（封面仍按原规则缓存，列表里的封面不必每次重新下载）。
+  if (preferences.auto === false && !route.thumb) return direct(request);
   // 关闭自动缓存视频（Safari 默认）时，播放器的每次拖动都只发原始请求，不能变成两次回源。
   if (UNCACHED_DESTINATIONS.has(request.destination) && !(route.preview && PREVIEW_FRAME_DESTINATIONS.has(request.destination))
       || request.destination === "video" && !preferences.video) return direct(request);
@@ -1160,6 +1164,7 @@ async function runPrefetch(job: Prefetch) {
   }
   if (!entry || !info || signal.aborted || !info.size) return;
   if (info.kind === "video" && !preferences.video && !info.manual) return;
+  if (preferences.auto === false && !info.manual) return;
   if (entry.store === "dir" && !(await directoryRoot())) return;
   const budget = tierBudget(preferences, value.route.tier);
   const cap = info.manual ? budget : Math.max(BLOCK, Math.floor(budget / 2));
@@ -1367,18 +1372,29 @@ async function reconcile() {
 
 type Stats = {
   namespace: string | null; settings: DeviceSettings;
-  normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>> }; private: { bytes: number; count: number }; others: { bytes: number; count: number };
+  /** manual／auto：这一层里手动缓存与自动缓存各占的字节和条数（自动缓存含封面）。 */
+  normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>>; manual: Usage; auto: Usage }; private: { bytes: number; count: number; manual: Usage; auto: Usage }; others: { bytes: number; count: number };
+  /** 数据块所在位置（含其他账号留下的）：browser 为浏览器存储（IndexedDB），directory 为本地缓存文件夹。 */
+  stores: { browser: Usage; directory: Usage };
 };
+type Usage = { bytes: number; count: number };
 
 /** 只读明文字段（字节数、条目数、大类），不解密任何条目：侧栏与设置页的统计都用它。 */
 async function stats(): Promise<Stats> {
   const context = await normalContext();
   const namespace = context?.ns ?? (lastNamespace || null);
-  const result: Stats = { namespace, settings: await currentSettings(), normal: { bytes: 0, count: 0, kinds: {} },
-    private: { bytes: 0, count: 0 }, others: { bytes: 0, count: 0 } };
+  const usage = () => ({ bytes: 0, count: 0 });
+  const result: Stats = { namespace, settings: await currentSettings(), normal: { bytes: 0, count: 0, kinds: {}, manual: usage(), auto: usage() },
+    private: { bytes: 0, count: 0, manual: usage(), auto: usage() }, others: { bytes: 0, count: 0 }, stores: { browser: usage(), directory: usage() } };
   for (const entry of await listEntries()) {
+    const place = result.stores[entry.store === "dir" ? "directory" : "browser"];
+    place.bytes += entry.bytes; place.count += 1;
     const bucket = entry.ns !== namespace ? result.others : entry.tier === "p" ? result.private : result.normal;
     bucket.bytes += entry.bytes; bucket.count += 1;
+    if (bucket !== result.others) {
+      const origin = (bucket as typeof result.normal)[entry.manual ? "manual" : "auto"];
+      origin.bytes += entry.bytes; origin.count += 1;
+    }
     if (bucket === result.normal && entry.kind) result.normal.kinds[entry.kind] = (result.normal.kinds[entry.kind] ?? 0) + entry.bytes;
   }
   return result;
@@ -1436,14 +1452,14 @@ async function listItems(options: ItemQuery) {
   const matched = await matchItems(options);
   const order = options.sort ?? "recent";
   matched.sort(order === "size" ? (a, b) => b.bytes - a.bytes : order === "name" ? (a, b) => a.path.localeCompare(b.path, "zh-CN") : (a, b) => b.accessed - a.accessed);
-  const offset = Math.max(0, options.offset ?? 0), limit = Math.max(1, Math.min(200, options.limit ?? 50));
+  const offset = Math.max(0, options.offset ?? 0), limit = Math.max(1, Math.min(500, options.limit ?? 50));
   return { total: matched.length, bytes: matched.reduce((sum, item) => sum + item.bytes, 0), manual: matched.filter(item => item.manual).length,
     complete: matched.filter(item => item.complete).length, items: matched.slice(offset, offset + limit) };
 }
 
-/** 按同样的条件移除（「移除筛选出的文件」）；只作用于当前账号的普通层。 */
+/** 按同样的条件移除（「清除筛选出的文件」）；只作用于当前账号，私密层只在已解锁、允许私密缓存时才读得到。 */
 async function removeItems(options: ItemQuery) {
-  const keys = new Set((await matchItems({ ...options, private: false })).map(item => item.key));
+  const keys = new Set((await matchItems(options)).map(item => item.key));
   stopManualWhere(job => Boolean(job.opened && keys.has(job.opened.entry.key)));
   await deleteEntries([...keys]);
   itemCache = null; manualCache = null;
@@ -1457,7 +1473,13 @@ async function clear(scope: string, key?: string) {
   const victims = scope === "entry" ? entries.filter(entry => entry.key === key && (!namespace || entry.ns === namespace))
     : scope === "all" ? entries
     : scope === "others" ? entries.filter(entry => entry.ns !== namespace)
+    // 自动缓存（预览时保存的内容与封面）：普通与私密层都清，手动缓存保留；私密副本只删密文，不需要解锁。
+    : scope === "auto" ? entries.filter(entry => !entry.manual && (!namespace || entry.ns === namespace))
+    // 浏览器存储里的全部条目（改用本地文件夹之前留下的，含其他账号的）；本地文件夹里的缓存不动。
+    : scope === "browser" ? entries.filter(entry => entry.store !== "dir")
     : entries.filter(entry => entry.tier === (scope === "private" ? "p" : "n") && (!namespace || entry.ns === namespace));
+  if (scope === "auto") stopPrefetch();
+  if (scope === "browser") stopPrefetch();
   stopManualWhere(job => scope === "all" || scope === "normal" && job.route.tier === "n" || scope === "private" && job.route.tier === "p"
     || victims.some(entry => entry.key === job.opened?.entry.key));
   await deleteEntries(victims.map(entry => entry.key));

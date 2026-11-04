@@ -905,3 +905,30 @@ test("关闭预览立即停止预读：进行中的后台请求被中止，不�
   await new Promise(resolve => setTimeout(resolve, 200));
   assert.equal(background(h).length, count, "停止后不再发出新的预读请求");
 });
+
+test("关闭预览时自动缓存：不新建条目，已有的自动缓存照常命中；清除自动缓存只删自动缓存", async t => {
+  const h = harness(t);
+  h.preferences.auto = false; await h.message("tessera-cache:settings");
+  assert.deepEqual((await h.read("file.bin")).data, h.files.get("file.bin").data);
+  assert.equal([...h.entries.values()].filter(entry => entry.tier === "n").length, 0, "关闭后不新建自动缓存");
+  h.preferences.auto = true; await h.message("tessera-cache:settings");
+  await h.read("file.bin");
+  assert.equal((await h.read("file.bin")).response.headers.get("X-Tessera-Cache"), "hit");
+  h.preferences.auto = false; await h.message("tessera-cache:settings");
+  assert.equal((await h.read("file.bin")).response.headers.get("X-Tessera-Cache"), "hit", "已自动缓存的文件保留并照常使用");
+  await h.ask("tessera-cache:clear", { scope: "auto" });
+  assert.equal([...h.entries.values()].filter(entry => !entry.manual).length, 0);
+});
+
+test("清理浏览器存储只删浏览器里的条目，本地文件夹中的缓存保留；统计按位置分开", async t => {
+  const h = harness(t);
+  await h.read("file.bin"); await h.read("file.bin");
+  const entry = [...h.entries.values()].find(item => item.tier === "n");
+  assert.ok(entry);
+  h.entries.set("dir-entry", { ...entry, key: "dir-entry", store: "dir" });
+  const stats = await h.ask("tessera-cache:stats");
+  assert.equal(stats.stores.directory.count, 1);
+  assert.ok(stats.stores.browser.count >= 1);
+  await h.ask("tessera-cache:clear", { scope: "browser" });
+  assert.deepEqual([...h.entries.values()].map(item => item.store), ["dir"]);
+});

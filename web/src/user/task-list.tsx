@@ -1,13 +1,16 @@
 /** 任务中心三个页面（上传、离线下载、本机缓存）共用的结构：概览卡片、筛选工具栏、批量操作栏与分页。 */
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
+import { usePageSize } from "../pagination";
 import { Checkbox, Icon, IconButton, Pagination, SearchInput, Segmented, type IconName } from "../ui";
 
 export type TaskFilter = "" | "active" | "paused" | "done" | "error";
-const PAGE_SIZE = 50;
+/** 本机队列（上传、缓存）的每页数量，按页面分别记住。 */
+export const TASK_PAGE_SIZES = [50, 100, 200, 500];
 
-/** 本机队列只渲染当前页；选择限定当前筛选页，进度刷新不会打断勾选。 */
-export function useTaskList<T extends { id: string }>(items: T[], describe: (item: T) => string, group: (item: T) => TaskFilter) {
+/** 本机队列只渲染当前页；选择限定当前筛选页，进度刷新不会打断勾选。sizeKey 是记住每页数量的存储键。 */
+export function useTaskList<T extends { id: string }>(items: T[], describe: (item: T) => string, group: (item: T) => TaskFilter, sizeKey = "tessera:task-page-size") {
+  const { pageSize: PAGE_SIZE, changePageSize, sizes } = usePageSize(sizeKey, TASK_PAGE_SIZES, 50);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<TaskFilter>("");
   const [pageIndex, setPageIndex] = useState(0);
@@ -38,7 +41,9 @@ export function useTaskList<T extends { id: string }>(items: T[], describe: (ite
     allSelected: Boolean(visible.length) && visible.every(item => selected.has(item.id)),
     selectPage: (checked: boolean) => setSelected(checked ? new Set(visible.map(item => item.id)) : new Set()),
     pagination: { number: index + 1, hasPrevious: index > 0, hasNext: (index + 1) * PAGE_SIZE < filtered.length, loading: false,
-      previous: () => { setSelected(new Set()); setPageIndex(index - 1); }, next: () => { setSelected(new Set()); setPageIndex(index + 1); }, total: filtered.length, pageSize: PAGE_SIZE },
+      previous: () => { setSelected(new Set()); setPageIndex(index - 1); }, next: () => { setSelected(new Set()); setPageIndex(index + 1); }, total: filtered.length, pageSize: PAGE_SIZE,
+      goto: (page: number) => { setSelected(new Set()); setPageIndex(page - 1); },
+      changePageSize: (size: number) => { reset(); changePageSize(size); }, sizes },
   };
 }
 
@@ -89,7 +94,7 @@ export function TaskControls({ list, noun, actions, menu, pausedLabel = "已暂�
 }
 
 export function TaskListFooter({ list }: { list: TaskListState }) {
-  return list.pagination.total > PAGE_SIZE ? <footer className="list-footer task-footer"><Pagination {...list.pagination} /></footer> : null;
+  return list.pagination.total > TASK_PAGE_SIZES[0] ? <footer className="list-footer task-footer"><Pagination {...list.pagination} /></footer> : null;
 }
 
 /** 按 1 秒采样估算每个任务的传输速度（指数平滑），只在有进行中的任务时计时。 */

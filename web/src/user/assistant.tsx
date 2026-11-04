@@ -43,6 +43,10 @@ function refreshDetail(current: ai.ConversationDetail | null, fresh: ai.Conversa
 export type AssistantLocation = { view: string; prefix: string };
 
 /** 读取助手是否可用；不可用时不显示入口。 */
+/** 会改动文件列表的操作；执行完后通知文件页刷新。 */
+const FILE_ACTION_KINDS = new Set(["rename", "move", "organize", "mkdir", "trash", "restore", "purge", "unshare", "share", "save_attachment", "move_out", "move_in"]);
+const ACTIVE_ACTION = new Set(["pending", "confirmed", "running", "undoing"]);
+
 export function useAssistantConfig(enabled: boolean) {
   const [config, setConfig] = useState<ai.AssistantConfig | null>(null);
   const refresh = useCallback(() => {
@@ -642,6 +646,21 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
       return current;
     });
   }, [follow]);
+
+  // 文件操作（改名、移动、删除等）执行完后通知文件页刷新：确认后执行与完全访问下自动执行的都在这里收到终态。
+  // 刚打开对话时已有的终态只记录不通知。
+  const actionStates = useRef<{ conversation: string; states: Map<string, string> } | null>(null);
+  useEffect(() => {
+    if (!detail) return;
+    const id = detail.conversation.id;
+    const known = actionStates.current?.conversation === id ? actionStates.current.states : null;
+    const states = new Map(detail.actions.map(action => [action.id, action.status] as const));
+    actionStates.current = { conversation: id, states };
+    if (!known) return;
+    const changed = detail.actions.some(action => FILE_ACTION_KINDS.has(action.kind) && !ACTIVE_ACTION.has(action.status)
+      && action.status !== "rejected" && action.status !== "expired" && known.get(action.id) !== action.status);
+    if (changed) window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [], all: true } }));
+  }, [detail]);
 
   // 操作独立于模型运行，确认后需要同步真实终态并接上服务端自动创建的后续运行。
   // 同时重试缺失的操作详情，避免一次网络失败让确认请求一直不可见。

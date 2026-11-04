@@ -34,7 +34,7 @@ HELP = {
             "认证为 Authorization: Bearer <AccessKeyId>:<SecretAccessKey>，也支持 HTTP Basic；不要把真实密钥发给助手。"
             "文件接口：GET /api/v1/list、GET /api/v1/folders、POST /api/v1/folders、GET/HEAD/PUT /api/v1/files?path=…、"
             "POST /api/v1/move、POST /api/v1/delete；分享接口见 /docs/api-sharing；"
-            "离线下载：POST /api/v1/downloads/parse、POST /api/v1/downloads、GET /api/v1/downloads。"
+            "离线下载：POST /api/v1/downloads/parse（批量用 /downloads/parse-batch）、POST /api/v1/downloads、GET /api/v1/downloads。"
             "密钥只访问所属用户、授权桶与路径的普通文件，分只读/读写，不能访问私密空间。"
             "完整文件接口见 /docs/api-files，授权说明见 /docs/api-permissions。"
             "网页 /api/user/v1 与 /api/admin/v1 使用 HttpOnly Cookie 与 CSRF，仅供本站网页使用，不用于外部脚本。"),

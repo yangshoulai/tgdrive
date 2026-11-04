@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.20.0
+// @version      0.21.0
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -737,7 +737,7 @@
  * - 资源嗅探：PerformanceObserver 记录页面加载过的视频、音频、M3U8 和常见文件；图片从 DOM 中按尺寸挑选。
  * - 复制：链接，或带 User-Agent、Referer、Cookie 的 curl 命令（Cookie 经 GM_cookie 读取，包含 HttpOnly）。
  * - 保存到 Tessera（两种方式共用一个确认页：保存位置含私密空间、逐项修改文件名）：
- *   服务器下载：调用 /api/v1/downloads/parse 与 /api/v1/downloads，由服务器下载；
+ *   服务器下载：调用 /api/v1/downloads/parse-batch（旧版服务器退回 /downloads/parse）与 /api/v1/downloads，由服务器下载；
  *   本地下载：当前浏览器读取直链资源，再通过 PUT /api/v1/files 上传；单文件最多 64 MiB，不支持流媒体列表。
  *   私密空间：服务器下载转交解析结果、本地下载把文件 postMessage 给新打开的 Tessera 页面，由用户在那里解锁并确认。
  * - 发给文件助手：把当前已渲染页面的结构快照（图片候选与分页链接，不含正文）postMessage 给新打开的 Tessera 页面，
@@ -821,11 +821,12 @@
 
   // siteMode：exclude = 所有网站，排除 excludeSites；include = 只在 includeSites 中的网站。两份列表分开保存，切换模式互不覆盖。
   // destination 以 / 结尾（空串为根目录）；destinationPrivate 为 true 时保存到私密空间（需在 Tessera 页面解锁确认）。
-  // cloudBatch：网盘文件每批发送的数量（见「内置网盘适配」的 cloudBatchLimit），默认 100，最多 CLOUD_BATCH_MAX。
-  const CLOUD_BATCH_DEFAULT = 100;
-  const CLOUD_BATCH_MAX = 500;
+  // cloudBatch：每批发送的文件数（网盘文件与网页资源共用，见 batchLimit），默认 100，最多 BATCH_MAX。
+  // 存储键沿用早期只用于网盘时的名称，已保存的值继续生效。
+  const BATCH_DEFAULT = 100;
+  const BATCH_MAX = 500;
   const DEFAULTS = { server: "", key: "", destination: "", destinationPrivate: false, cookies: true, fab: true, view: "list", siteMode: "exclude", excludeSites: [], includeSites: [],
-    cloudBatch: CLOUD_BATCH_DEFAULT };
+    cloudBatch: BATCH_DEFAULT };
   const settings = () => ({ ...DEFAULTS, ...gm.get("settings", {}) });
   const saveSettings = value => gm.set("settings", { ...settings(), ...value });
 
@@ -1051,11 +1052,11 @@
   // LinkSwift's pacing: files per batch, whether one request carries the whole batch, and a pause between batches.
   const CLOUD_PACE = { baidu: { size: 50, many: true }, aliyun: { size: 3 }, quark: { size: 15, many: true }, uc: { size: 15, many: true } };
   const CLOUD_PAUSE = 1000;
-  // 每批文件数由设置「网盘每批文件数」决定（默认 100）：一批取完直链、解析完才创建任务，批太大时前面的直链与解析票据
-  // （服务器 30 分钟内有效）可能已经过期，所以最多 CLOUD_BATCH_MAX（500）。旧设置或手改的非法值按默认值处理。
-  const cloudBatchLimit = (value = settings().cloudBatch) => {
+  // 每批文件数由设置「每批文件数」决定（默认 100，网盘文件与网页资源共用）：一批解析完（网盘还要先取直链）才创建任务，
+  // 批太大时前面的直链与解析票据（服务器 30 分钟内有效）可能已经过期，所以最多 BATCH_MAX（500）。旧设置或手改的非法值按默认值处理。
+  const batchLimit = (value = settings().cloudBatch) => {
     const size = Number(value);
-    return Number.isInteger(size) && size >= 1 ? Math.min(CLOUD_BATCH_MAX, size) : CLOUD_BATCH_DEFAULT;
+    return Number.isInteger(size) && size >= 1 ? Math.min(BATCH_MAX, size) : BATCH_DEFAULT;
   };
   const CLOUD_DOWNLOAD_UA = {
     baidu: "pan.baidu.com",
@@ -1185,7 +1186,7 @@
     }
     const primitive = value => typeof value === "string" && value.length <= 8192 || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value);
     const pick = (item, names) => Object.fromEntries(names.filter(key => primitive(item?.[key])).map(key => [key, item[key]]));
-    // 勾选数量不设上限：发送时按设置的每批文件数（cloudBatchLimit）自动分批。
+    // 勾选数量不设上限：发送时按设置的每批文件数（batchLimit）自动分批。
     const result = { available, files: selected.map(item => pick(item, fields.split(" "))) };
     if (share && provider === "baidu") {
       const locals = view.locals?.dump?.() || {};
@@ -1690,7 +1691,7 @@
         allBox.checked = root.total > 0 && root.checked === root.total;
         allBox.indeterminate = root.checked > 0 && root.checked < root.total;
         allMark.className = `check${allBox.checked ? " on" : allBox.indeterminate ? " on partial" : ""}`;
-        const rounds = Math.ceil(root.checked / cloudBatchLimit());
+        const rounds = Math.ceil(root.checked / batchLimit());
         confirm.disabled = !root.checked;
         confirm.textContent = rounds > 1 ? `确定（${root.checked}，分 ${rounds} 批）` : `确定（${root.checked}）`;
       };
@@ -2140,7 +2141,7 @@
     let data = null;
     try { data = response.responseText ? JSON.parse(response.responseText) : null; } catch { /* 非 JSON */ }
     if (response.status >= 200 && response.status < 300) return data;
-    throw new Error(data?.error?.message || `Tessera 返回 HTTP ${response.status}`);
+    throw Object.assign(new Error(data?.error?.message || `Tessera 返回 HTTP ${response.status}`), { status: response.status });
   }
 
   // ---------- 浏览器下载 ----------
@@ -3075,7 +3076,6 @@
   let pointerDown = false;  // 按住鼠标期间不改动列表，避免点击落空
   const rowCache = new Map();
   const selected = new Set();  // 已勾选的资源地址，跨筛选保留
-  const BATCH_LIMIT = 50;
 
   /** context: { platform, label, url, scope } —— scope 为 X 帖子元素时只列出这条帖子的图片。 */
   function open(context) {
@@ -3242,10 +3242,8 @@
     target.toggleAll = () => {
       if (allPicked) pickable.forEach(item => selected.delete(item.url));
       else {
-        for (const item of pickable) {
-          if (selected.size >= BATCH_LIMIT) { toast(`一次最多选择 ${BATCH_LIMIT} 项`); break; }
-          selected.add(item.url);
-        }
+        // 勾选数量不设上限，发送时按设置的每批文件数（batchLimit）自动分批，与网盘文件一致。
+        for (const item of pickable) selected.add(item.url);
       }
       renderList();
     };
@@ -3293,7 +3291,6 @@
     // 勾选状态在点击时读取，行元素会被复用。
     const toggle = () => {
       if (selected.has(item.url)) selected.delete(item.url);
-      else if (selected.size >= BATCH_LIMIT) return toast(`一次最多选择 ${BATCH_LIMIT} 项`);
       else selected.add(item.url);
       renderList();
     };
@@ -3850,17 +3847,16 @@
     const known = new Map(listed.map(item => [item.url, item]));
     const byUrl = new Map(wanted.map(source => [source.url, source]));
     const ordered = [...listed.filter(item => byUrl.has(item.url)).map(item => byUrl.get(item.url)), ...wanted.filter(source => !known.has(source.url))];
-    // 网盘选择不设数量上限（与 LinkSwift 一样不在 50 处截断），按设置的每批文件数（cloudBatchLimit）自动分批：
-    // 确认页只列出第一批，开始后每批创建完任务再取下一批的直链（直链与解析票据都会过期，不能一次取完）。网页资源仍为 BATCH_LIMIT。
+    // 网盘文件与网页资源都不设数量上限，按设置的每批文件数（batchLimit）自动分批：确认页只列出第一批，
+    // 开始后每批创建完任务（或上传完）再处理下一批（网盘直链与解析票据都会过期，不能一次取完）。
     // 批大小在开始时记入 batch.limit，发送途中改设置不影响这一轮。
-    const cloud = wanted.some(source => source.cloud);
-    const size = cloud ? cloudBatchLimit() : BATCH_LIMIT;
-    const all = (cloud ? ordered : ordered.slice(0, BATCH_LIMIT)).map(({ url, platform, cloud, name, size, resent, folder }) => ({ url, platform: platform || null, cloud, resent: Boolean(resent), folder: folder || "",
+    const size = batchLimit();
+    const all = ordered.map(({ url, platform, cloud, name, size, resent, folder }) => ({ url, platform: platform || null, cloud, resent: Boolean(resent), folder: folder || "",
       type: known.get(url)?.type || (platform ? "video" : "file"), name: name || (mode === "local" ? defaultSaveName(url) : ""), sourceName: name || "", size,
       state: mode === "server" ? "parsing" : "waiting", error: "", tasks: [] }));
-    const first = cloud ? all.slice(0, size) : all;
+    const first = all.slice(0, size);
     batch = { started: false, mode, destination: savedDestination(), limit: size,
-      entries: first, deferred: all.slice(first.length), round: 1, rounds: Math.max(1, Math.ceil(all.length / (cloud ? size : all.length || 1))), archivedOk: 0 };
+      entries: first, deferred: all.slice(first.length), round: 1, rounds: Math.max(1, Math.ceil(all.length / size)), archivedOk: 0 };
     openBatch();
     const resent = all.filter(entry => entry.resent).length;
     if (resent) toast(resent === all.length ? "所选文件之前已发送过，确认后会再次下载" : `其中 ${resent} 个文件之前已发送过，不需要的可以移除`);
@@ -3868,7 +3864,11 @@
     if (mode === "server") void parseEntries(batch, batch.entries.slice());
   }
 
-  /** 服务器解析：两路并行（服务端同时最多解析 2 个）。 */
+  /** 每个批量解析请求最多带的条目数：服务器按「同时解析的链接数」并行检查，整个请求最多等 90 秒（见 /downloads/parse-batch）。 */
+  const PARSE_CHUNK = 20;
+  let parseBatchMissing = false;
+
+  /** 服务器解析：普通链接与网盘直链每 PARSE_CHUNK 个合成一个批量请求，X／YouTube 链接逐个解析（服务器每次只解析一条平台链接）；两路请求并行。 */
   async function parseEntries(current, entries) {
     // Cloud links are fetched up front in LinkSwift-sized batches (grouped per selection); each row then awaits its own link.
     const groups = new Map();
@@ -3877,56 +3877,141 @@
       groups.get(entry.cloud.session).push(entry);
     }
     for (const group of groups.values()) cloudResolveAll(group.map(entry => entry.cloud)).forEach((promise, index) => { group[index].cloudLink = promise; });
-    const queue = entries.slice();
-    const worker = async () => { while (queue.length && batch === current) await parseEntry(queue.shift(), current); };
+    const units = [];
+    let chunk = [];
+    for (const entry of entries) {
+      if (entry.platform) { units.push([entry]); continue; }
+      chunk.push(entry);
+      if (chunk.length === PARSE_CHUNK) { units.push(chunk); chunk = []; }
+    }
+    if (chunk.length) units.push(chunk);
+    for (const entry of entries) { entry.state = "parsing"; entry.error = ""; entry.resolvingCloud = Boolean(entry.cloud); }
+    updateBatch();
+    const worker = async () => {
+      while (units.length && batch === current) {
+        const unit = units.shift();
+        if (unit.length === 1 && unit[0].platform) await parseEntry(unit[0], current);
+        else await parseChunk(unit, current);
+      }
+    };
     await Promise.all([worker(), worker()]);
+  }
+
+  const parseLive = (entry, current) => batch === current && current.entries.includes(entry);
+
+  /** 一行的解析请求体：网盘文件先等直链；平台链接单独传 Cookie，文件直链把 Cookie 写进 curl 命令，与网页「下载任务」的规则一致。 */
+  async function parsePayload(entry, current) {
+    let cloudRequestInfo;
+    if (entry.cloud) {
+      entry.resolvingCloud = true;
+      updateBatch();
+      const pending = entry.cloudLink;
+      entry.cloudLink = null;
+      cloudRequestInfo = await (pending || resolveCloud(entry.cloud));
+      if (!parseLive(entry, current)) return null;
+      entry.resolvingCloud = false;
+      updateBatch();
+    }
+    const payload = cloudRequestInfo
+      ? { input: await curlFor(cloudRequestInfo.url, settings().cookies, cloudRequestInfo.headers, entry.sourceName || entry.name), download_type: "http" }
+      : entry.platform
+      ? { input: entry.url, cookies: settings().cookies ? await cookieHeader(entry.url) : "" }
+      : { input: await curlFor(entry.url) };
+    return parseLive(entry, current) ? payload : null;
+  }
+
+  function parseFailed(entry, error) {
+    entry.state = "parse-error";
+    entry.resolvingCloud = false;
+    entry.error = error.message;
+    entry.challenge = Boolean(error.challenge);
   }
 
   async function parseEntry(entry, current) {
     entry.state = "parsing"; entry.error = "";
-    entry.resolvingCloud = Boolean(entry.cloud);
     updateBatch();
     try {
-      let cloudRequestInfo;
-      if (entry.cloud) {
-        const pending = entry.cloudLink;
-        entry.cloudLink = null;
-        cloudRequestInfo = await (pending || resolveCloud(entry.cloud));
-        if (batch !== current || !current.entries.includes(entry)) return;
-        entry.resolvingCloud = false;
-        updateBatch();
-      }
-      // 平台链接单独传 Cookie；文件直链把 Cookie 写进 curl 命令，与网页「下载任务」的规则一致。
-      const payload = cloudRequestInfo
-        ? { input: await curlFor(cloudRequestInfo.url, settings().cookies, cloudRequestInfo.headers, entry.sourceName || entry.name), download_type: "http" }
-        : entry.platform
-        ? { input: entry.url, cookies: settings().cookies ? await cookieHeader(entry.url) : "" }
-        : { input: await curlFor(entry.url) };
-      if (batch !== current || !current.entries.includes(entry)) return;
+      const payload = await parsePayload(entry, current);
+      if (!payload) return;
       const parsed = await api("POST", "/api/v1/downloads/parse", payload);
-      const candidates = parsed.candidates || [];
-      if (!candidates.length) throw new Error("没有可下载的文件");
-      if (batch !== current || !current.entries.includes(entry)) return;
-      // 每个分组（X 帖子的每张图、每个视频）一行；同组的不同清晰度默认第一个，可在行内切换。
-      const groups = new Map();
-      for (const candidate of candidates) {
-        const key = candidate.group || candidate.ticket;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(candidate);
-      }
-      const index = current.entries.indexOf(entry);
-      if (index < 0) return;
-      const room = (current.limit || BATCH_LIMIT) - current.entries.length + 1;
-      const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform, cloud: entry.cloud, sourceName: entry.sourceName, resent: entry.resent, folder: entry.folder || "",
-        type: candidateType(variants[0], entry.type), variants, candidate: variants[0], name: entry.nameEdited ? entry.name : entry.sourceName || variants[0].name, nameEdited: Boolean(entry.nameEdited),
-        autoRound: entry.autoRound, state: current.started && !entry.autoRound ? "error" : "waiting", error: "", tasks: [] }));
-      current.entries.splice(index, 1, ...rows);
+      if (parseLive(entry, current)) applyParsed(entry, current, parsed.candidates || []);
     } catch (error) {
-      entry.state = "parse-error";
-      entry.error = error.message;
-      entry.challenge = Boolean(error.challenge);
+      parseFailed(entry, error);
     }
     updateBatch();
+  }
+
+  /** 一组条目合成一个 /downloads/parse-batch 请求；每行的结果各自生效，单项失败只标红该行。旧版服务器没有批量接口时逐个解析。 */
+  async function parseChunk(entries, current) {
+    if (parseBatchMissing) {
+      for (const entry of entries) if (batch === current) await parseEntry(entry, current);
+      return;
+    }
+    const ready = [];
+    // 网盘直链按 LinkSwift 的节奏陆续到达：每行等到自己的直链（失败的行单独标红），再一起提交。
+    await Promise.all(entries.map(async entry => {
+      try {
+        const payload = await parsePayload(entry, current);
+        if (payload) ready.push({ entry, payload });
+      } catch (error) {
+        parseFailed(entry, error);
+      }
+    }));
+    updateBatch();
+    if (!ready.length || batch !== current) return;
+    let parsed;
+    try {
+      parsed = await api("POST", "/api/v1/downloads/parse-batch", { items: ready.map(item => item.payload) }, { timeout: 150000 });
+    } catch (error) {
+      if (error.status === 404 || error.status === 405) {
+        parseBatchMissing = true;
+        for (const { entry } of ready) if (parseLive(entry, current)) await parseEntry(entry, current);
+        return;
+      }
+      for (const { entry } of ready) if (parseLive(entry, current)) parseFailed(entry, error);
+      updateBatch();
+      return;
+    }
+    const retry = [];
+    ready.forEach(({ entry }, index) => {
+      if (!parseLive(entry, current)) return;
+      const result = parsed?.results?.[index] || { error: "Tessera 没有返回这一项的解析结果" };
+      if (result.retry) retry.push(entry);
+      else if (result.error) parseFailed(entry, new Error(result.error));
+      else {
+        try { applyParsed(entry, current, result.candidates || []); } catch (error) { parseFailed(entry, error); }
+      }
+    });
+    updateBatch();
+    // 超出服务器时间预算的项单独再解析一次（直链已取到，不重新取链）。
+    for (const entry of retry) if (parseLive(entry, current)) {
+      entry.state = "parsing";
+      try {
+        const parsedOne = await api("POST", "/api/v1/downloads/parse", ready.find(item => item.entry === entry).payload);
+        if (parseLive(entry, current)) applyParsed(entry, current, parsedOne.candidates || []);
+      } catch (error) {
+        parseFailed(entry, error);
+      }
+      updateBatch();
+    }
+  }
+
+  /** 把解析结果换成确认页的行：每个分组（X 帖子的每张图、每个视频）一行；同组的不同清晰度默认第一个，可在行内切换。 */
+  function applyParsed(entry, current, candidates) {
+    if (!candidates.length) throw new Error("没有可下载的文件");
+    const groups = new Map();
+    for (const candidate of candidates) {
+      const key = candidate.group || candidate.ticket;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(candidate);
+    }
+    const index = current.entries.indexOf(entry);
+    if (index < 0) return;
+    const room = (current.limit || batchLimit()) - current.entries.length + 1;
+    const rows = [...groups.values()].slice(0, Math.max(1, room)).map(variants => ({ url: entry.url, platform: entry.platform, cloud: entry.cloud, sourceName: entry.sourceName, resent: entry.resent, folder: entry.folder || "",
+      type: candidateType(variants[0], entry.type), variants, candidate: variants[0], name: entry.nameEdited ? entry.name : entry.sourceName || variants[0].name, nameEdited: Boolean(entry.nameEdited),
+      autoRound: entry.autoRound, state: current.started && !entry.autoRound ? "error" : "waiting", error: "", tasks: [] }));
+    current.entries.splice(index, 1, ...rows);
   }
 
   /** 可以编辑并参与保存的条目：本地下载全部条目，服务器下载只有解析成功的条目。 */
@@ -4043,21 +4128,24 @@
     if (batch === current && pendingRounds(current) && !current.controller.signal.aborted && !current.destination.private) void nextRound(current);
   }
 
-  /** 下一批：已下载完成的行收起为计数，取下一批文件获取直链、服务器解析，然后直接创建任务（沿用确认过的保存位置）。 */
+  /** 下一批：已完成的行收起为计数，取下一批文件（服务器下载先取直链、服务器解析），然后直接创建任务或上传（沿用确认过的保存位置）。
+   *  本地上传不需要解析，中间没有 await，私密空间的「发送下一批」点击里能同步打开 Tessera 标签页。 */
   async function nextRound(current) {
     if (current.running || !pendingRounds(current) || batch !== current) return;
     const done = current.entries.filter(entryOk);
     current.archivedOk += done.length;
     current.entries = current.entries.filter(entry => !done.includes(entry));
-    const chunk = current.deferred.splice(0, current.limit || cloudBatchLimit());
+    const chunk = current.deferred.splice(0, current.limit || batchLimit());
     for (const entry of chunk) entry.autoRound = true;
     current.round += 1;
     current.entries.push(...chunk);
-    current.running = true;
-    updateBatch();
-    await parseEntries(current, chunk);
-    current.running = false;
-    if (batch !== current) return;
+    if (current.mode === "server") {
+      current.running = true;
+      updateBatch();
+      await parseEntries(current, chunk);
+      current.running = false;
+      if (batch !== current) return;
+    }
     if (current.entries.some(entry => entry.autoRound && entry.state === "waiting")) return runBatch(true);
     updateBatch();
     if (!current.destination.private) return nextRound(current);
@@ -4531,8 +4619,8 @@
     let dest = { path: current.destination || "", private: Boolean(current.destinationPrivate) };
     const cookies = h("input", { type: "checkbox", checked: current.cookies });
     const showFab = h("input", { type: "checkbox", checked: current.fab });
-    const cloudBatch = h("input", { type: "number", min: "1", max: String(CLOUD_BATCH_MAX), step: "1", inputMode: "numeric",
-      value: String(cloudBatchLimit(current.cloudBatch)) });
+    const cloudBatch = h("input", { type: "number", min: "1", max: String(BATCH_MAX), step: "1", inputMode: "numeric",
+      value: String(batchLimit(current.cloudBatch)) });
     // 显示范围：两种模式各自保留一份列表，切换模式时把输入框内容换成对应列表。
     const lists = { exclude: [...current.excludeSites], include: [...current.includeSites] };
     let mode = current.siteMode === "include" ? "include" : "exclude";
@@ -4569,7 +4657,7 @@
       if (invalid) return `无法识别的网站：${invalid}（请填写域名，例如 example.com）`;
       if (value.server && !/^https?:\/\/[^/\s]+/.test(value.server)) return "Tessera 地址应以 http:// 或 https:// 开头";
       if (value.key && !/^[^:\s]+:\S+$/.test(value.key)) return "访问密钥格式应为 AccessKeyId:Secret";
-      if (!Number.isInteger(value.cloudBatch) || value.cloudBatch < 1 || value.cloudBatch > CLOUD_BATCH_MAX) return `网盘每批文件数应为 1–${CLOUD_BATCH_MAX} 的整数`;
+      if (!Number.isInteger(value.cloudBatch) || value.cloudBatch < 1 || value.cloudBatch > BATCH_MAX) return `每批文件数应为 1–${BATCH_MAX} 的整数`;
       return "";
     };
     const test = h("button", { type: "button", className: "btn ghost" }, "测试连接");
@@ -4615,8 +4703,8 @@
         toggleRow(showFab, "显示悬浮按钮", "可拖动到屏幕左右两侧，也可以只用 Tampermonkey 菜单打开")),
       h("div", { className: "divider" }),
       h("div", { className: "group" },
-        h("label", { className: "field" }, h("span", { className: "label" }, "网盘每批文件数"), cloudBatch,
-          h("span", { className: "hint" }, `勾选的网盘文件按这个数量分批发送：每批取完直链、服务器解析后创建任务，再处理下一批。默认 ${CLOUD_BATCH_DEFAULT}，最多 ${CLOUD_BATCH_MAX}；一批越大，先取到的直链越可能在创建任务前过期。`))),
+        h("label", { className: "field" }, h("span", { className: "label" }, "每批文件数"), cloudBatch,
+          h("span", { className: "hint" }, `勾选的网页资源与网盘文件都按这个数量分批发送：每批解析完（网盘先取直链）后创建任务或上传，再处理下一批；勾选数量不限。默认 ${BATCH_DEFAULT}，最多 ${BATCH_MAX}；一批越大，先解析的链接越可能在创建任务前过期。`))),
       h("div", { className: "divider" }),
       h("div", { className: "group" },
         h("div", { className: "field" }, h("span", { className: "label" }, "显示范围"),

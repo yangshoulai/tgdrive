@@ -26,7 +26,8 @@ class KindFilterTests(unittest.TestCase):
         self.temp.cleanup()
 
     def put(self, key, content_type=None):
-        asyncio.run(self.app.objects.put_object(self.scope, key, b"x", 1, content_type))
+        # 这些用例检验按已保存类型分类的规则（旧数据与 S3 写入的类型），内容只是占位，按声明的类型保存。
+        asyncio.run(self.app.objects.put_object(self.scope, key, b"x", 1, content_type, declared_type=True))
 
     def keys(self, path):
         keys, cursor = [], ""
@@ -64,6 +65,21 @@ class KindFilterTests(unittest.TestCase):
         for bogus in ("bogus", "video,bogus", ","):
             status, _, _ = asyncio.run(self.client.request("GET", f"/api/user/v1/list?prefix=&kind={bogus}", headers=self.session))
             self.assertEqual(status, 400, bogus)
+
+    def test_search_within_folder_and_subfolders(self):
+        for key in ("照片/a.jpg", "照片/2025/照片-b.jpg", "照片集/c.jpg", "other/照片.jpg", "d.txt"):
+            self.put(key)
+        # 当前文件夹及其子文件夹；关键词只匹配文件夹之下的相对路径，上级目录名「照片」本身不算命中。
+        self.assertEqual(self.keys("/api/user/v1/search?q=jpg&prefix=" + quote("照片/")), ["照片/2025/照片-b.jpg", "照片/a.jpg"])
+        self.assertEqual(self.keys("/api/user/v1/search?q=" + quote("照片") + "&prefix=" + quote("照片/")), ["照片/2025/照片-b.jpg"])
+        # 不带 prefix 时仍是整个空间。
+        self.assertEqual(self.keys("/api/user/v1/search?q=" + quote("照片")), ["other/照片.jpg", "照片/2025/照片-b.jpg", "照片/a.jpg", "照片集/c.jpg"])
+
+    def test_rename_extension_keeps_content_type(self):
+        # 改名（含扩展名）只改名称：文件的实际类型来自上传时的内容类型，不随名称变化。
+        self.put("a.txt", "text/plain")
+        self.app.objects.move(self.scope, "a.txt", "a.jpg")
+        self.assertEqual(self.app.objects.head_object(self.scope, "a.jpg").content_type, "text/plain")
 
     def test_public_folder_filters_by_kind(self):
         for key in ("pub/a.mp4", "pub/b.jpg", "pub/c.txt", "pub/sub/d.mp4", "other.mp4"):

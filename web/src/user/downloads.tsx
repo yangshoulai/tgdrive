@@ -15,7 +15,7 @@ import { imageThumbnailSet } from "../thumbnails";
 const LABEL: Record<api.DownloadStatus, string> = { queued: "排队中", running: "下载中", interrupted: "等待恢复", stopped: "已停止", completed: "已完成", failed: "失败" };
 const TONE: Record<api.DownloadStatus, Tone> = { queued: "neutral", running: "accent", interrupted: "warning", stopped: "neutral", completed: "success", failed: "danger" };
 /** 网页每页最多 100 个任务（服务端 OfflineDownloads.list 的上限）。 */
-const DOWNLOAD_PAGE_SIZES = [20, 50, 100];
+const DOWNLOAD_PAGE_SIZES = [20, 50, 100, 200, 500];
 const DOWNLOAD_PAGE_SIZE_KEY = "tessera-download-page-size";
 export const isActiveDownload = (task: api.DownloadTask) => ["queued", "running", "interrupted"].includes(task.status);
 const active = isActiveDownload;
@@ -235,8 +235,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
       ]} /><span className="task-toolbar-meta">
         <span className="muted">{page ? `${page.total} 个任务` : "正在读取任务"}</span>
         <Menu label="清理下载任务" icon="trash" items={[
-          { label: "清除已完成的任务", icon: "checkCircle", onSelect: () => setClearing("completed") },
-          { label: "清除失败的任务", icon: "alert", onSelect: () => setClearing("failed") },
+          { label: `清除全部已完成的任务${counts?.completed ? `（${counts.completed}）` : ""}`, icon: "checkCircle", disabled: counts ? !counts.completed : false, onSelect: () => setClearing("completed") },
+          { label: `清除全部失败的任务${counts?.failed ? `（${counts.failed}）` : ""}`, icon: "alert", disabled: counts ? !counts.failed : false, onSelect: () => setClearing("failed") },
         ]} /></span></div>
     </div>
     {page?.capabilities.pressure && <Notice tone="warning" role="status">{page.capabilities.pressure}</Notice>}
@@ -311,8 +311,9 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
     {now && <DownloadNowDialog task={now} onClose={() => setNow(null)} onDone={() => { setNow(null); window.dispatchEvent(new Event("tessera:downloads-changed")); void pagination.reload(); }} />}
     {diagnosing != null && <DownloadDiagnosisDialog id={diagnosing} task={page?.tasks.find(task => task.id === diagnosing) ?? null} onClose={() => setDiagnosing(null)} />}
     {relocating && <RelocateDialog tasks={relocating} onClose={() => setRelocating(null)} onDone={() => { setRelocating(null); setSelected(new Set()); void pagination.reload(); }} />}
-    {clearing && <ConfirmDialog title={clearing === "completed" ? "清除已完成的任务" : "清除失败的任务"}
-      description={clearing === "completed" ? "从列表中移除所有已完成的任务，已保存的文件不受影响。" : "移除所有失败的任务并清理未完成的数据，已保存的文件不受影响。"}
+    {clearing && <ConfirmDialog title={clearing === "completed" ? `清除全部 ${counts?.completed ?? ""} 个已完成的任务？` : `清除全部 ${counts?.failed ?? ""} 个失败的任务？`}
+      description={clearing === "completed" ? "从列表中移除所有已完成的任务（不只是本页），已保存的文件不受影响。任务很多时需要一会儿，请不要关闭页面。"
+        : "移除所有失败的任务（不只是本页）并清理未完成的数据，已保存的文件不受影响。任务很多时需要一会儿，请不要关闭页面。"}
       confirmLabel="清除" danger onClose={() => setClearing(null)} onConfirm={() => clear(clearing)} />}
     {bulk && <ConfirmDialog title={bulk === "delete" ? `删除 ${chosen.length} 个下载任务` : `停止 ${chosen.length} 个下载任务`}
       description={bulk === "delete" ? "删除所选任务并清理未完成的数据，已保存的文件会保留。" : "文件直链停止后保留已保存的分段，来源支持时可从断点继续；平台和 M3U8 任务继续时从头下载。"}

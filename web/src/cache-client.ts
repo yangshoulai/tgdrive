@@ -12,8 +12,12 @@ const changed = () => window.dispatchEvent(new Event("tessera:cache-changed"));
 
 export type CacheStats = {
   namespace: string | null; settings: DeviceSettings;
-  normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>> }; private: { bytes: number; count: number }; others: { bytes: number; count: number };
+  /** manual／auto：这一层里手动缓存与自动缓存各占的字节和条数（自动缓存含封面）。 */
+  normal: { bytes: number; count: number; kinds: Partial<Record<Kind, number>>; manual: Usage; auto: Usage }; private: { bytes: number; count: number; manual: Usage; auto: Usage }; others: { bytes: number; count: number };
+  /** 数据块所在位置（含其他账号留下的）：browser 为浏览器存储（IndexedDB），directory 为本地缓存文件夹。 */
+  stores: { browser: Usage; directory: Usage };
 };
+type Usage = { bytes: number; count: number };
 export type CachedItem = { key: string; path: string; etag: string; type: string; kind: Kind; bytes: number; size: number; accessed: number; manual: boolean; complete: boolean; private: boolean };
 export type CachedItemFilter = { private?: boolean; all?: boolean; prefix?: string; query?: string; kind?: Kind | ""; status?: "" | "complete" | "partial"; origin?: "" | "manual" | "auto"; sort?: "recent" | "size" | "name"; offset?: number; limit?: number };
 
@@ -106,7 +110,7 @@ export async function removeCachedItems(filter: CachedItemFilter) {
   changed();
   return removed;
 }
-export const clearCache = async (scope: "normal" | "private" | "others" | "all" | "entry", key?: string) => { await ask<void>("tessera-cache:clear", { scope, key }, 30000); changed(); };
+export const clearCache = async (scope: "normal" | "private" | "others" | "all" | "entry" | "auto" | "browser", key?: string) => { await ask<void>("tessera-cache:clear", { scope, key }, 30000); changed(); };
 export const loadSettings = () => readSettings(navigator.userAgent);
 
 export async function saveSettings(next: DeviceSettings) {

@@ -302,6 +302,8 @@ def render_name(template: str, row, n: int, groups: tuple) -> str:
       "{ext} 含点的扩展名（文件夹为空）、{n} 序号（{n:03} 补零，按 sort 排序后从 start 开始）、{parent} 所在目录名、"
       "{mtime:%Y-%m-%d} 修改时间（文件夹取其中最新文件）、{1}{2} match.regex 的分组。\n"
       "- 映射模式：mapping 为 [{from, to}]，条数上限与单个操作条目上限相同，from 为文件或文件夹路径，to 只能是新名称。\n"
+      "可以修改扩展名：模板里用 {stem}.新扩展名（不写 {ext}），或在映射模式的 to 里写完整的新文件名；改名只改名称，"
+      "文件的实际类型与内容不变（不做格式转换）。\n"
       "同一次提议不能同时改名某个文件夹和它的下级。返回待确认操作的编号、条目数、冲突数和前 20 条样例。",
       {"match": RENAME_MATCH, "template": {"type": "string", "description": "新名称模板，如 {mtime:%Y%m%d}_{n:03}{ext}"},
        "mapping": {"type": "array", "items": {"type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}},

@@ -20,7 +20,7 @@ from ..api import normalize_user_path
 from ..crypto import derive_subkey, open_sealed, seal
 from ..errors import IntegrityError, NotFoundError, NotReadyError, QuotaExceededError
 from ..objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
-from ..work import WorkBusyError
+from ..work import Limiter, WorkBusyError
 from . import diagnostics
 from .hls import load_playlist, remux
 from ..filekinds import served_type
@@ -40,9 +40,15 @@ COVER_PREFIX = ".tgdrive/offline-covers/"
 DESTINATION_KEY = "offline.destination.{}"
 # 单次提交的条目数有上限（整批校验与事务）；排队任务总数不设上限，实际下载并发由资源配置决定。
 MAX_CREATE_ITEMS = 1000
+# 批量解析（脚本一次提交一组链接）：每次最多这么多项；整个请求最多等 PARSE_BATCH_BUDGET 秒，
+# 到时还没解析完的项标记 retry 交回调用方重新提交（脚本的批量解析请求最多等 120 秒）。
+PARSE_BATCH_MAX = 50
+PARSE_BATCH_BUDGET = 90
 ACTIVE = ("queued", "running", "interrupted")
 RETRY_DELAYS = (10, 30, 90)
 # 多连接下载时单个分段遇到网络抖动的原地重试次数（每次间隔 1、2、4… 秒），仍失败才交给任务层的自动重试。
+# 网页任务列表每页、多选操作与更改保存位置一次最多处理的任务数。
+PAGE_MAX = 500
 PART_RETRIES = 3
 # 解析时探测来源文件信息（HEAD／GET 响应头）：单次上限、尝试次数、重试间隔与总时长（留在 30 秒的解析请求超时之内）。
 PROBE_TIMEOUT, PROBE_ATTEMPTS, PROBE_RETRY_DELAY, PROBE_BUDGET = 10, 2, 1, 24
@@ -137,7 +143,8 @@ class OfflineDownloads:
         self._controls: dict[int, asyncio.Lock] = {}
         self._control_refs: dict[int, int] = {}
         self._wake = asyncio.Event()
-        self._parse_slots = asyncio.Semaphore(2)
+        # 所有用户共用的同时解析数（「下载与资源」的 parse_concurrency）：每项解析都要访问一次来源。
+        self._parse_slots = Limiter(2)
         # 转封装得到的视频显示尺寸（按 upload_id），提交完成后记到 Blob 上；重启后丢失也无妨，首次播放会补记。
         self._video_sizes: dict[str, tuple[int, int]] = {}
         self._closing = False
@@ -244,6 +251,7 @@ class OfflineDownloads:
         if not isinstance(cookies, str) or len(cookies.encode()) > 32768:
             raise ValueError("Cookie 文本不能超过 32 KiB")
         self.scope(user_id)
+        self._parse_slots.set_limit(max(1, int(self.resources.effective().get("parse_concurrency", 2))))
         requests = parse_requests(text, max_urls=max_urls)
         sites = [site_link(request.url) if download_type in ("auto", "x", "youtube") else None for request in requests]
         if not multiple_platforms and sum(site is not None for site in sites) > 1:
@@ -251,7 +259,7 @@ class OfflineDownloads:
         candidate_count = 0
         async def inspect(request, site):
             nonlocal candidate_count
-            async with self._parse_slots:
+            async with self._parse_slots.slot():
                 if download_type in ("x", "youtube") and (not site or site[0] != download_type):
                     raise ValueError("链接与选择的平台不匹配")
                 if site:
@@ -278,6 +286,37 @@ class OfflineDownloads:
             raise ValueError(f"解析结果超过 {max_urls} 个文件，请分批提交")
         self.scope(user_id)
         return {"candidates": candidates}
+
+    async def parse_batch(self, user_id: int, items) -> dict:
+        """一次解析一组互相独立的提交（每项与 parse 的一次请求相同）；单项失败只在该项返回 error，不影响其他项。
+        结果与 items 一一对应：{"candidates": [...]}、{"error": "..."}，或超出时间预算时 {"error": ..., "retry": true}。"""
+        if not isinstance(items, list) or not 1 <= len(items) <= PARSE_BATCH_MAX:
+            raise ValueError(f"items 应为 1–{PARSE_BATCH_MAX} 项")
+        if any(not isinstance(item, dict) or not isinstance(item.get("input"), str) for item in items):
+            raise ValueError("每一项都需要 input 文本")
+        self.scope(user_id)
+
+        async def one(item):
+            try:
+                return await self.parse(user_id, item["input"], download_type=item.get("download_type", "auto"), cookies=item.get("cookies", ""))
+            except Paused:
+                raise
+            except ValueError as exc:
+                return {"error": str(exc)}
+
+        tasks = [asyncio.create_task(one(item)) for item in items]
+        done, pending = await asyncio.wait(tasks, timeout=PARSE_BATCH_BUDGET)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            if isinstance(task.exception(), Paused):
+                raise task.exception()
+        results = [task.result() if task in done else {"error": "解析排队超时，请重新提交", "retry": True} for task in tasks]
+        if sum(len(result.get("candidates", ())) for result in results) > MAX_CREATE_ITEMS:
+            raise ValueError(f"解析结果超过 {MAX_CREATE_ITEMS} 个文件，请分批提交")
+        self.scope(user_id)
+        return {"results": results}
 
     def _encode_ticket(self, value):
         import base64
@@ -600,7 +639,7 @@ class OfflineDownloads:
         return result
 
     def list(self, user_id, *, cursor=0, status="", query="", limit=50, private_scope: Scope | None = None, ids=None,
-             area: str | None = None, max_limit: int = 100):
+             area: str | None = None, max_limit: int = PAGE_MAX):
         """任务列表（键集分页）。ids 用于托盘跟踪：只返回这些编号中属于该用户的任务（最多 100 个），不分页。
         area 为 normal／private 时在查询中只取普通或私密任务（文件助手按对话类型使用），分页与总数都按该范围计算。"""
         self.scope(user_id)
@@ -609,7 +648,7 @@ class OfflineDownloads:
             private_scope.authorize()
         if status not in ("", "active", "running", "stopped", "completed", "failed") or cursor < 0:
             raise ValueError("任务筛选或分页参数不正确")
-        # 网页每页最多 100 个；文件助手按管理员设置的上限传入 max_limit。
+        # 网页每页最多 PAGE_MAX 个；文件助手按管理员设置的上限传入 max_limit。
         limit = max(1, min(limit, max(1, min(max_limit, 2000))))
         where, args = "user_id=?", [user_id]
         if ids is not None:
@@ -714,8 +753,8 @@ class OfflineDownloads:
         """多选操作：逐项走 control 的同一套校验；单项失败（如私密空间未解锁、POST 任务需单独确认）计入 skipped。"""
         if action not in ("stop", "resume", "delete"):
             raise ValueError("批量操作只支持停止、继续和删除")
-        if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or not all(type(value) is int and value > 0 for value in ids):
-            raise ValueError("请选择 1–100 个任务")
+        if not isinstance(ids, list) or not 1 <= len(ids) <= PAGE_MAX or not all(type(value) is int and value > 0 for value in ids):
+            raise ValueError(f"请选择 1–{PAGE_MAX} 个任务")
         self.scope(user_id)
         done, skipped = 0, 0
         for task_id in dict.fromkeys(ids):
@@ -813,8 +852,8 @@ class OfflineDownloads:
         和提交（_finish）时读取，两处都读最新的 offline_tasks.key／uploads.key，这里在同一事务里改写两者。
         普通任务与私密任务不能互相改到对方的区域；私密目录需要当前会话已解锁。同名时与创建一样自动改名。"""
         regular = self.scope(user_id)
-        if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or not all(type(value) is int and value > 0 for value in ids):
-            raise ValueError("请选择 1–100 个任务")
+        if not isinstance(ids, list) or not 1 <= len(ids) <= PAGE_MAX or not all(type(value) is int and value > 0 for value in ids):
+            raise ValueError(f"请选择 1–{PAGE_MAX} 个任务")
         if not isinstance(destination, str):
             raise ValueError("目标目录不正确")
         private = destination.startswith(PRIVATE_PREFIX)
@@ -945,16 +984,20 @@ class OfflineDownloads:
         if status not in ("completed", "failed"):
             raise ValueError("只能清理已完成或失败的任务")
         self.scope(user_id)
-        rows = self.metadata.db.execute("SELECT id FROM offline_tasks WHERE user_id=? AND status=? ORDER BY id LIMIT 500",
-                                        (user_id, status)).fetchall()
-        removed = 0
-        for row in rows:
-            try:
-                await self.control(user_id, row["id"], "delete")
-                removed += 1
-            except NotFoundError:
-                pass
-        return {"removed": removed}
+        # 一次清完：按编号分批读取（每批 500），直到没有符合条件的任务；不再需要网页反复调用。
+        removed, after = 0, 0
+        while True:
+            rows = self.metadata.db.execute("SELECT id FROM offline_tasks WHERE user_id=? AND status=? AND id>? ORDER BY id LIMIT 500",
+                                            (user_id, status, after)).fetchall()
+            if not rows:
+                return {"removed": removed}
+            for row in rows:
+                after = row["id"]
+                try:
+                    await self.control(user_id, row["id"], "delete")
+                    removed += 1
+                except NotFoundError:
+                    pass
 
     async def stop_all(self, user_id):
         """停止账号下全部进行中的任务（托盘「全部取消」）：排队与中断的任务在一个事务里改为已停止，

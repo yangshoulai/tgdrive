@@ -1,13 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { diagnoseFileCache, type CacheDiagnosis, isCacheTaskGone, isFatalCacheError, loadPrivateCacheQueue, savePrivateCacheQueue, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
+import { diagnoseFileCache, removeCachedItems, type CacheDiagnosis, isCacheTaskGone, isFatalCacheError, loadPrivateCacheQueue, savePrivateCacheQueue, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
 import { BRAND } from "../brand";
+import { usePageSize } from "../pagination";
 import { effectiveMiB } from "../cache-store";
 import { FileTile, getFileKind } from "../files";
 import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, Tabs, copyText, formatBytes, formatDateTime, toast, useDocumentTitle, type MenuItem, type Tone } from "../ui";
 import { usePrivateAccess } from "./private-session";
 import { PrivateUnlockDialog } from "./private-unlock";
-import { LocationText, TaskControls, TaskListFooter, TaskStats, remainingText, useTaskList, useTransferRates, type TaskFilter, type TaskStat } from "./task-list";
+import { TASK_PAGE_SIZES, LocationText, TaskControls, TaskListFooter, TaskStats, remainingText, useTaskList, useTransferRates, type TaskFilter, type TaskStat } from "./task-list";
 import { cacheFolderFiles } from "./cache-folders";
 import { DiagnosisMetrics, DiagnosisRow, DiagnosisSection, DiagnosisVerdictNotice, seconds, useDiagnosticsEnabled, type DiagnosisVerdict } from "./diagnosis";
 
@@ -687,7 +688,7 @@ function usageStat(stats: CacheStats | null, quota: number | null, onSettings: (
 function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queue: Queue; stats: CacheStats | null; quota: number | null; onSettings: () => void; onOpenFolder: (prefix: string, privateSpace?: boolean) => void }) {
   const { jobs } = queue;
   const describe = useCallback((job: CacheJob) => api.isPrivatePath(job.file.key) && !queue.privateReady ? "私密文件" : cacheDescription(job), [queue.privateReady]);
-  const list = useTaskList(jobs, describe, cacheGroup);
+  const list = useTaskList(jobs, describe, cacheGroup, "tessera:cache-task-page-size");
   const [removing, setRemoving] = useState<string[] | null>(null);
   const running = jobs.filter(isRunning);
   const rates = useTransferRates(running.filter(job => job.status === "active" && !job.waiting).map(job => [job.id, job.bytes]));
@@ -730,7 +731,9 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
       </Notice>;
     })}</div>}
     <TaskControls list={list} noun="缓存" menu={<Menu label="清理缓存任务记录" icon="trash" items={[
-      { label: "清理已结束的记录", icon: "trash", danger: true, disabled: !jobs.some(job => !isRunning(job)), onSelect: () => setRemoving(jobs.filter(job => !isRunning(job)).map(job => job.id)) },
+      { label: `清除已完成的记录${list.counts.done ? `（${list.counts.done}）` : ""}`, icon: "checkCircle", disabled: !list.counts.done, onSelect: () => setRemoving(jobs.filter(job => job.status === "done").map(job => job.id)) },
+      { label: `清除失败的记录${list.counts.error ? `（${list.counts.error}）` : ""}`, icon: "alert", disabled: !list.counts.error, onSelect: () => setRemoving(jobs.filter(job => cacheGroup(job) === "error").map(job => job.id)) },
+      { label: "清除全部已结束的记录", icon: "trash", danger: true, divider: true, disabled: !jobs.some(job => !isRunning(job)), onSelect: () => setRemoving(jobs.filter(job => !isRunning(job)).map(job => job.id)) },
     ]} />} actions={<>
       {runningChosen.length > 0 && <Button size="sm" icon="pause" onClick={() => { runningChosen.forEach(job => queue.pause(job.id)); list.clearSelection(); }}>暂停</Button>}
       {resumable.length > 0 && <Button size="sm" icon="play" disabled={!queue.available} onClick={() => { resumable.forEach(job => queue.retry(job.id)); list.clearSelection(); }}>继续</Button>}
@@ -891,6 +894,8 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
   const [origin, setOrigin] = useState<CachedOrigin>("");
   const [sort, setSort] = useState<"recent" | "size" | "name">("recent");
   const [offset, setOffset] = useState(0);
+  const { pageSize, changePageSize, sizes } = usePageSize("tessera:cached-page-size", TASK_PAGE_SIZES, CACHED_PAGE);
+  const [clearing, setClearing] = useState<"filtered" | "auto" | null>(null);
   const [page, setPage] = useState<Awaited<ReturnType<typeof cachedItems>> | null>(null);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(new Set<string>());
@@ -919,7 +924,7 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
   const privateLocked = showPrivate && !privateReady;
   const waitingUnlock = tier === "private" && privateLocked;
   useEffect(() => { const timer = window.setTimeout(() => setQuery(search.trim()), 250); return () => window.clearTimeout(timer); }, [search]);
-  useEffect(() => { setOffset(0); setSelected(new Set()); }, [tier, query, kind, origin, sort, privateReady]);
+  useEffect(() => { setOffset(0); setSelected(new Set()); }, [tier, query, kind, origin, sort, privateReady, pageSize]);
   useEffect(() => { if (!showPrivate && tier === "private") setTier("all"); }, [showPrivate, tier]);
   useEffect(() => {
     const changed = () => setRevision(value => value + 1);
@@ -931,11 +936,11 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
     let alive = true;
     setError("");
     const scope = tier === "all" ? { all: true } : { private: tier === "private" };
-    void cachedItems({ ...scope, query, kind, origin, sort, offset, limit: CACHED_PAGE })
+    void cachedItems({ ...scope, query, kind, origin, sort, offset, limit: pageSize })
       .then(value => { if (alive) { setPage(value); setSelected(current => new Set([...current].filter(key => value.items.some(item => item.key === key)))); } })
       .catch(reason => { if (alive) setError(api.errorMessage(reason, "读取本机缓存失败，请刷新页面后重试")); });
     return () => { alive = false; };
-  }, [tier, query, kind, origin, sort, offset, revision, privateReady, waitingUnlock]);
+  }, [tier, query, kind, origin, sort, offset, revision, privateReady, waitingUnlock, pageSize]);
   const items = page?.items ?? [];
   const chosen = items.filter(item => selected.has(item.key));
   const allSelected = items.length > 0 && chosen.length === items.length;
@@ -984,6 +989,11 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
             { label: "占用空间", icon: "hardDrive", checked: sort === "size", onSelect: () => setSort("size") },
             { label: "名称", icon: "fileText", checked: sort === "name", onSelect: () => setSort("name") },
           ]} />
+          <Menu label="清除本机缓存" icon="trash" items={[
+            { label: filtered || tier !== "all" ? `清除筛选出的全部文件${page ? `（${page.total}）` : ""}` : `清除列表中的全部文件${page ? `（${page.total}）` : ""}`, icon: "trash", danger: true,
+              disabled: !page?.total, onSelect: () => setClearing("filtered") },
+            { label: "清除全部自动缓存", icon: "refresh", danger: true, onSelect: () => setClearing("auto") },
+          ]} />
         </span>
       </div>
     </div>}
@@ -1026,8 +1036,23 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
               })}
             </div>}
     </div>
-    {page && !waitingUnlock && page.total > CACHED_PAGE && <footer className="list-footer task-footer"><Pagination number={Math.floor(offset / CACHED_PAGE) + 1} total={page.total} pageSize={CACHED_PAGE} loading={false}
-      hasPrevious={offset > 0} hasNext={offset + CACHED_PAGE < page.total} previous={() => setOffset(Math.max(0, offset - CACHED_PAGE))} next={() => setOffset(offset + CACHED_PAGE)} /></footer>}
+    {page && !waitingUnlock && page.total > TASK_PAGE_SIZES[0] && <footer className="list-footer task-footer"><Pagination number={Math.floor(offset / pageSize) + 1} total={page.total} pageSize={pageSize} loading={false}
+      sizes={sizes} changePageSize={changePageSize} goto={number => { setSelected(new Set()); setOffset((number - 1) * pageSize); }}
+      hasPrevious={offset > 0} hasNext={offset + pageSize < page.total} previous={() => setOffset(Math.max(0, offset - pageSize))} next={() => setOffset(offset + pageSize)} /></footer>}
+    {clearing && <ConfirmDialog title={clearing === "auto" ? "清除全部自动缓存？" : `清除 ${page?.total ?? 0} 个文件的本机缓存？`} confirmLabel="清除缓存"
+      description={clearing === "auto" ? "预览时自动保存的内容（含封面与私密文件的自动缓存）会从这台设备删除，手动缓存的文件保留。云端文件不受影响。"
+        : `当前列表${filtered ? "筛选出的" : "中的"}全部 ${page?.total ?? 0} 个文件（${formatBytes(page?.bytes ?? 0)}）在这台设备上的副本会被删除，不只是本页。云端文件不受影响。`}
+      onClose={() => setClearing(null)} onConfirm={async () => {
+        try {
+          if (clearing === "auto") { await clearCache("auto"); toast.success("已清除自动缓存"); }
+          else {
+            const scope = tier === "all" ? { all: true } : { private: tier === "private" };
+            const removed = await removeCachedItems({ ...scope, query, kind, origin });
+            toast.success(`已清除 ${removed} 个文件的本机缓存`);
+          }
+        } catch (reason) { toast.error(api.errorMessage(reason, "清除失败，请稍后重试")); }
+        finally { setClearing(null); setSelected(new Set()); setOffset(0); setRevision(value => value + 1); }
+      }} />}
     {unlocking && <CacheUnlockDialog onClose={closeUnlock} />}
     {removing && <ConfirmDialog title={removing.length === 1 ? "清除本机缓存？" : `清除 ${removing.length} 个文件的本机缓存？`} confirmLabel="清除缓存"
       className={removing.some(item => item.private) ? "private-dialog" : ""}

@@ -67,6 +67,28 @@ const ICONS = {
   cloud: "M7.5 18.5a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18.4 9.6a4.5 4.5 0 0 1-.9 8.9z",
   flag: "M5 21V4.5m0 0h12.5l-2.5 4 2.5 4H5",
   palette: "M12 3.5a8.5 8.5 0 1 0 0 17c1.1 0 1.6-.8 1.3-1.7l-.5-1.3a1.5 1.5 0 0 1 1.4-2h2.1A4.2 4.2 0 0 0 20.5 11 8.2 8.2 0 0 0 12 3.5zM7.5 11.5h.01m3-4h.01m4.5 1.5h.01",
+  music: "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zm12-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
+  tv: "M4 7h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1zm4 15h8M8 3l4 4 4-4",
+  headphones: "M3 18v-6a9 9 0 0 1 18 0v6M3 18a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3zm18 0a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z",
+  coffee: "M17 8h1a4 4 0 0 1 0 8h-1M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4zM6 2v3m4-3v3m4-3v3",
+  gift: "M3 8h18v4H3zm2 4h14v9H5zm7-4v13m0-13S9.5 3 7.5 4.5 9 8 12 8zm0 0s2.5-5 4.5-3.5S15 8 12 8z",
+  plane: "M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z",
+  car: "M5 17H3v-5l2-5h14l2 5v5h-2M3 12h18M5 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0zm10 0a2 2 0 1 0 4 0 2 2 0 0 0-4 0zm-6 0h6",
+  map: "M9 4 3 6v14l6-2 6 2 6-2V4l-6 2zm0 0v14m6-12v14",
+  calendar: "M5 5h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM4 10h16M8 3v4m8-4v4",
+  cart: "M3 4h2l2.4 11h11.2L21 7H6.2M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm9 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2z",
+  wallet: "M4 6h15a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h12v3m-1 7h.01",
+  trophy: "M8 21h8m-4-4v4M7 4h10v5a5 5 0 0 1-10 0zm0 2H4a3 3 0 0 0 3 3m10-3h3a3 3 0 0 1-3 3",
+  rocket: "M4.5 16.5c-1.5 1.3-2 5-2 5s3.7-.5 5-2c.7-.8.7-2.1-.1-2.9a2.2 2.2 0 0 0-2.9-.1zM12 15l-3-3a22 22 0 0 1 2-3.9A12.9 12.9 0 0 1 22 2c0 2.7-.8 7.5-6 11a22.4 22.4 0 0 1-4 2zm-3-3H4s.6-3 2-4c1.6-1.1 5 0 5 0m1 7v5s3-.6 4-2c1.1-1.6 0-5 0-5",
+  leaf: "M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.5 19 2c1 2 2 4.2 2 8 0 5.5-4.8 10-10 10zM2 21c0-3 1.9-5.4 5.1-6C9.5 14.5 12 13 13 12",
+  smile: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zm-4-7s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01",
+  utensils: "M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2M7 2v20m14-7V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3zm0 0v7",
+  tag: "M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2c0 .5.2 1 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4zM7.5 7.5h.01",
+  building: "M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18zm0-10H4a2 2 0 0 0-2 2v8h4m12-13h2a2 2 0 0 1 2 2v11h-4M10 6h4m-4 4h4m-4 4h4m-4 4h4",
+  baby: "M9 12h.01M15 12h.01M10 16c.5.3 1.2.5 2 .5s1.5-.2 2-.5M19 6.3a9 9 0 0 1 1.8 3.9 2 2 0 0 1 0 3.6 9 9 0 0 1-17.6 0 2 2 0 0 1 0-3.6A9 9 0 0 1 12 3c2 0 3.5 1.1 3.5 2.5s-.9 2.5-2 2.5c-.8 0-1.5-.4-1.5-1",
+  paw: "M11 5a2 2 0 1 0 -4 0 2 2 0 0 0 4 0zm7 3a2 2 0 1 0-4 0 2 2 0 0 0 4 0zm2 6a2 2 0 1 0-4 0 2 2 0 0 0 4 0zM9 10a5 5 0 0 0-5 5c0 2.2 1.8 4 4 4 1 0 1.5-.5 2.5-.5s1.5.5 2.5.5a3 3 0 0 0 3-3c0-3.3-3.1-6-7-6zM6 8a2 2 0 1 0-4 0 2 2 0 0 0 4 0z",
+  dumbbell: "M6.5 6.5v11m11-11v11M3 9v6m18-6v6M6.5 12h11M3 9h3.5M3 15h3.5m11-6H21m-3.5 6H21",
+  sprout: "M7 20h10m-5 0v-9m0 0c0-3-2-5-6-5 0 3 2 5 6 5zm0-2c0-3 2-5 6-5 0 3-2 5-6 5z",
   arrowLeft: "M19 12H5m6-6-6 6 6 6",
   external: "M14 4h6v6m0-6-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
   logout: "M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l-4-4 4-4m-4 4h10",
@@ -230,6 +252,23 @@ export function ButtonLink({ variant = "secondary", size = "md", icon, shortcut,
       {children && <span>{children}</span>}
     </a>
   );
+}
+
+/** 长列表滚动后出现在右下角（文件助手入口上方）的「返回顶部」按钮；按钮 portal 到 body，不受列表行的包含块影响。 */
+export function BackToTop({ threshold = 800 }: { threshold?: number }) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    let frame = 0;
+    const check = () => { frame = 0; setVisible(window.scrollY > threshold); };
+    const scrolled = () => { if (!frame) frame = requestAnimationFrame(check); };
+    check();
+    window.addEventListener("scroll", scrolled, { passive: true });
+    return () => { window.removeEventListener("scroll", scrolled); if (frame) cancelAnimationFrame(frame); };
+  }, [threshold]);
+  if (!visible) return null;
+  return createPortal(<button type="button" className="back-to-top" aria-label="返回顶部" title="返回顶部"
+    onClick={() => window.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" })}>
+    <Icon name="arrowUp" size={18} /></button>, document.body);
 }
 
 export function IconButton({ icon, label, onClick, variant = "ghost", size = "md", disabled, active, shortcut, spinning, className = "" }: { className?: string; icon: IconName; label: string; onClick?: () => void; variant?: "ghost" | "secondary"; size?: "sm" | "md"; disabled?: boolean; active?: boolean; shortcut?: string; spinning?: boolean }) {
@@ -1255,9 +1294,18 @@ export function useDocumentTitle(title: string | null) {
   useEffect(() => { if (title !== null) document.title = title; }, [title]);
 }
 
-export function Pagination({ number, hasPrevious, hasNext, loading, previous, next, pageSize, changePageSize, sizes = FILE_PAGE_SIZES, total }: {
+/** 页码按钮：当前页前后各两页，首尾页总是显示，中间用省略号。 */
+function pageNumbers(current: number, pages: number): (number | "gap")[] {
+  const shown = new Set([1, pages, current - 2, current - 1, current, current + 1, current + 2].filter(page => page >= 1 && page <= pages));
+  const sorted = [...shown].sort((a, b) => a - b);
+  return sorted.flatMap((page, index) => index && page - sorted[index - 1] > 1 ? ["gap" as const, page] : [page]);
+}
+
+export function Pagination({ number, hasPrevious, hasNext, loading, previous, next, pageSize, changePageSize, sizes = FILE_PAGE_SIZES, total, goto }: {
   number: number; hasPrevious: boolean; hasNext: boolean; loading: boolean; previous: () => void; next: () => void;
   pageSize?: number; changePageSize?: (size: number) => void; sizes?: number[];
+  /** 可以直接跳到任意页（按偏移量分页的本机列表）：显示页码按钮；游标分页的列表不传，只有上一页／下一页。 */
+  goto?: (page: number) => void;
   /** 总条数：给出时显示「第 n / 共 N 页」，并在内容多于最小每页数量时保留数量选择。 */
   total?: number;
 }) {
@@ -1270,7 +1318,11 @@ export function Pagination({ number, hasPrevious, hasNext, loading, previous, ne
       {sizes.map(size => <option key={size} value={size}>{size} 项</option>)}
     </select></label>}
     <Button size="sm" disabled={loading || !hasPrevious} onClick={previous}>上一页</Button>
-    <span aria-live="polite" aria-atomic="true">{pages ? `第 ${number} / ${pages} 页` : `第 ${number} 页`}</span>
+    {goto && pages && pages > 1 ? <span className="pagination-pages">{pageNumbers(number, pages).map((page, index) => page === "gap"
+      ? <span key={`gap-${index}`} className="pagination-gap" aria-hidden="true">…</span>
+      : <button key={page} type="button" className={`pagination-page${page === number ? " is-current" : ""}`} aria-current={page === number ? "page" : undefined}
+        aria-label={`第 ${page} 页`} disabled={loading} onClick={() => page !== number && goto(page)}>{page}</button>)}</span>
+      : <span aria-live="polite" aria-atomic="true">{pages ? `第 ${number} / ${pages} 页` : `第 ${number} 页`}</span>}
     <Button size="sm" disabled={loading || !hasNext} onClick={next}>下一页</Button>
     {loading && <span className="spinner" role="status" aria-label="正在加载" />}
   </nav>;

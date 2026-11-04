@@ -132,7 +132,8 @@ class AssistantActionTests(ActionHelpers, AssistantCase):
         async def run():
             await self.setup_assistant()
             for key in ("Downloads/a.jpg", "Downloads/b.png", "Downloads/c.mp3", "Downloads/d.bin", "Downloads/图片/a.jpg"):
-                await self.put(key, key.encode())
+                # d.bin 的内容必须是二进制：类型按内容判断，文本内容会被归为文本。
+                await self.put(key, b"\x00\x01\x02" + key.encode() if key.endswith(".bin") else key.encode())
             user = await self.client.login("user", "alice@example.com", "alice password")
             conversation = await self.start_conversation(user, "Downloads/")
             action_id, tool = await self.propose(user, conversation, call("propose_organize", by="kind"))

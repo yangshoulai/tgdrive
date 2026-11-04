@@ -32,7 +32,8 @@ export function fileCacheState(entry: EntryRecord | undefined, size: number): Fi
   const count = Math.ceil(size / BLOCK);
   return { bytes: entry?.bytes ?? 0, size, complete: Boolean(entry && entry.bytes === size && entry.blocks.length === count && entry.blocks.every((value, index) => value === index)) };
 }
-export type DeviceSettings = { enabled: boolean; maxMiB: number; video: boolean; private: boolean; privateMaxMiB: number };
+/** auto：预览、播放时自动缓存看过的内容（默认开启）；关闭后不再新建或补充自动缓存，已有的自动缓存照常使用、不删除。 */
+export type DeviceSettings = { enabled: boolean; maxMiB: number; video: boolean; private: boolean; privateMaxMiB: number; auto: boolean };
 export const SIZE_CHOICES = [256, 512, 1024, 2048, 5120, 10240, 20480, 51200, 102400, 204800, 512000];
 /** 实际生效的容量（MiB）：用户设置不能突破浏览器给这个网站的配额（quota 为字节，未知时只按设置）。 */
 export const effectiveMiB = (value: number, quota?: number | null) => quota ? Math.max(1, Math.min(value, Math.floor(quota / 1048576))) : value;
@@ -306,7 +307,7 @@ export async function sweepDirectory(): Promise<number> {
 export const webkitOnly = (agent: string) => /AppleWebKit/.test(agent) && !/Chrome|Chromium|Edg|Android|CriOS|FxiOS|Firefox/.test(agent);
 
 export function defaultSettings(agent: string): DeviceSettings {
-  return { enabled: true, maxMiB: 10240, video: !webkitOnly(agent), private: false, privateMaxMiB: 2048 };
+  return { enabled: true, maxMiB: 10240, video: !webkitOnly(agent), private: false, privateMaxMiB: 2048, auto: true };
 }
 
 export async function readSettings(agent: string): Promise<DeviceSettings> {

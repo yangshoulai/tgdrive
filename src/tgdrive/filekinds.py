@@ -2,18 +2,28 @@
 
 规则按顺序匹配，先命中的类型优先（例如 MIME 是 image/* 的 .txt 算图片），所以某一类的条件是
 「命中本类规则且没有命中排在前面的任何规则」。两边的扩展名与 MIME 列表必须保持一致。
+
+类型以内容为准（写入时按内容判断，见 sniff.py）：只有 MIME 缺失或是通用二进制时才按扩展名判断，
+具体的 MIME（例如内容是文本的 a.jpg 保存为 text/plain）不会被文件名推翻。例外是同一种容器里看不出音频与视频
+（明确的音频扩展名配 video/* 仍算音频），以及文本里按扩展名细分出源代码。
 """
+
+# 扩展名生效的条件：generic 只在 MIME 缺失或通用二进制时；text 另外允许文本类 MIME（细分源代码、字幕等）；
+# media 另外允许音视频 MIME（容器相同时按音频扩展名区分）。
+_GENERIC = "(coalesce(content_type,'')='' OR lower(content_type) LIKE 'application/octet-stream%' OR lower(content_type) LIKE 'binary/octet-stream%')"
+_TEXTUAL_SQL = "(lower(coalesce(content_type,'')) LIKE 'text/%' OR lower(coalesce(content_type,'')) LIKE 'application/json%')"
+_MEDIA_SQL = "(lower(coalesce(content_type,'')) LIKE 'video/%' OR lower(coalesce(content_type,'')) LIKE 'audio/%')"
 
 def _ext(*names: str) -> list[str]:
     return [f"%.{name}" for name in names]
 
 
-# (类型, content_type 的 LIKE 模式, key 的 LIKE 模式)，顺序与 getFileKind 相同；"stream" 对应它把 MPEG-TS 归为“其他”的那一步。
-_RULES: list[tuple[str, list[str], list[str]]] = [
+# (类型, content_type 的 LIKE 模式, key 的 LIKE 模式[, 扩展名生效条件])，顺序与 getFileKind 相同；"stream" 对应它把 MPEG-TS 归为“其他”的那一步。
+_RULES: list[tuple] = [
     ("image", ["image/%"], _ext("png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg", "ico", "heic")),
     ("stream", ["video/mp2t%"], _ext("mts", "m2ts")),
     # 明确的音频扩展名优先于 video/* MIME（来源常把 FLAC、MP3 标成 video/*），与前端 audioName 一致。
-    ("audio", [], _ext("mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac")),
+    ("audio", [], _ext("mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac"), "media"),
     ("video", ["video/%"], _ext("mp4", "webm", "mov", "mkv", "avi", "m4v", "ogv")),
     ("audio", ["audio/%"], _ext("mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac")),
     ("pdf", ["application/pdf%"], _ext("pdf")),
@@ -26,7 +36,7 @@ _RULES: list[tuple[str, list[str], list[str]]] = [
     ("code", [], _ext("js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "go", "rs", "java", "c", "cc", "cpp", "cxx", "h", "hpp",
                       "cs", "sh", "bash", "zsh", "ps1", "bat", "htm", "html", "css", "scss", "sass", "less", "vue", "svelte",
                       "sql", "rb", "php", "swift", "kt", "kts", "scala", "dart", "gradle", "lua", "diff", "patch")
-     + ["dockerfile", "%/dockerfile", "makefile", "%/makefile"]),
+     + ["dockerfile", "%/dockerfile", "makefile", "%/makefile"], "text"),
     ("text", ["text/%", "application/json%"],
      _ext("md", "markdown", "mdx", "rst", "txt", "json", "jsonc", "csv", "tsv", "log", "xml", "yml", "yaml", "toml", "ini",
           "conf", "cfg", "properties", "env", "gitignore", "editorconfig", "lrc", "srt", "vtt")
@@ -43,8 +53,18 @@ KIND_GROUPS: dict[str, set[str]] = {
 }
 
 
-def _match(mimes: list[str], keys: list[str]) -> tuple[str, list[str]]:
-    parts = ["lower(coalesce(content_type,'')) LIKE ?"] * len(mimes) + ["lower(key) LIKE ?"] * len(keys)
+_WHEN = {"generic": _GENERIC, "text": f"({_GENERIC} OR {_TEXTUAL_SQL})", "media": f"({_GENERIC} OR {_MEDIA_SQL})"}
+
+
+def _rule(rule: tuple) -> tuple[str, list[str], list[str], str]:
+    name, mimes, keys, *rest = rule
+    return name, mimes, keys, rest[0] if rest else "generic"
+
+
+def _match(mimes: list[str], keys: list[str], when: str = "generic") -> tuple[str, list[str]]:
+    parts = ["lower(coalesce(content_type,'')) LIKE ?"] * len(mimes)
+    if keys:
+        parts.append(f"({_WHEN[when]} AND (" + " OR ".join(["lower(key) LIKE ?"] * len(keys)) + "))")
     return "(" + " OR ".join(parts) + ")", [*mimes, *keys]
 
 
@@ -56,8 +76,8 @@ def kind_clause(kind: str) -> tuple[str, list[str]]:
         raise ValueError("未知的文件类型筛选")
     wanted = set().union(*(KIND_GROUPS[name] for name in names))
     clauses, params, earlier = [], [], []
-    for name, mimes, keys in _RULES:
-        sql, args = _match(mimes, keys)
+    for name, mimes, keys, when in map(_rule, _RULES):
+        sql, args = _match(mimes, keys, when)
         if name in wanted:
             if earlier:
                 clauses.append(f"({sql} AND NOT ({' OR '.join(part for part, _ in earlier)}))")
@@ -74,8 +94,8 @@ def kind_case() -> tuple[str, list[str]]:
     其余归为 other。按规则顺序先命中优先，与 kind_clause 和前端 getFileKind 一致，用于目录统计的 GROUP BY。"""
     group_of = {name: group for group, names in KIND_GROUPS.items() for name in names}
     branches, params = [], []
-    for name, mimes, keys in _RULES:
-        sql, args = _match(mimes, keys)
+    for name, mimes, keys, when in map(_rule, _RULES):
+        sql, args = _match(mimes, keys, when)
         branches.append(f"WHEN {sql} THEN ?")
         params += [*args, group_of.get(name, "other")]
     return "CASE " + " ".join(branches) + " ELSE 'other' END", params
@@ -100,8 +120,11 @@ def _like(value: str, pattern: str) -> bool:
 def kind_of(key: str, content_type: str | None) -> str | None:
     """按与 kind_clause 相同的规则判断单个对象属于哪个筛选项（image／video／…），都不属于时返回 None。"""
     mime, name = (content_type or "").lower(), key.lower()
-    for rule, mimes, keys in _RULES:
-        if any(_like(mime, pattern) for pattern in mimes) or any(_like(name, pattern) for pattern in keys):
+    generic = not mime or mime.startswith(("application/octet-stream", "binary/octet-stream"))
+    allowed = {"generic": generic, "text": generic or mime.startswith("text/") or mime.startswith("application/json"),
+               "media": generic or mime.startswith(("video/", "audio/"))}
+    for rule, mimes, keys, when in map(_rule, _RULES):
+        if any(_like(mime, pattern) for pattern in mimes) or allowed[when] and any(_like(name, pattern) for pattern in keys):
             return next((group for group, members in KIND_GROUPS.items() if rule in members), None)
     return None
 

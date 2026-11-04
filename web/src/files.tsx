@@ -92,19 +92,23 @@ export function getFileKind(type: string | null | undefined, name: string): File
   const lower = name.toLowerCase();
   const mime = (type || "").split(";", 1)[0].trim().toLowerCase();
   if (lower.endsWith("/")) return "folder";
-  if (mime.startsWith("image/") || /\.(png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$/.test(lower)) return "image";
-  if (mime === "video/mp2t" || /\.(mts|m2ts)$/.test(lower)) return "other";
-  // 明确的音频扩展名优先于 video/* MIME：来源网站或下载工具常把 FLAC、MP3 标成 video/*，不能因此用视频播放器。
-  const audioName = /\.(mp3|wav|ogg|oga|opus|flac|m4a|aac)$/.test(lower);
-  if (!audioName && (mime.startsWith("video/") || /\.(mp4|webm|mov|mkv|avi|m4v|ogv)$/.test(lower))) return "video";
+  // 类型以内容为准（服务器写入时按内容判断）：只有 MIME 缺失或是通用二进制时才看扩展名，与 filekinds.py 一致。
+  const generic = !mime || mime.startsWith("application/octet-stream") || mime.startsWith("binary/octet-stream");
+  const textual = mime.startsWith("text/") || mime.startsWith("application/json");
+  const named = (pattern: RegExp) => generic && pattern.test(lower);
+  if (mime.startsWith("image/") || named(/\.(png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$/)) return "image";
+  if (mime === "video/mp2t" || named(/\.(mts|m2ts)$/)) return "other";
+  // 明确的音频扩展名优先于 video/* MIME：同一种容器看不出音频与视频，来源也常把 FLAC、MP3 标成 video/*。
+  const audioName = /\.(mp3|wav|ogg|oga|opus|flac|m4a|aac)$/.test(lower) && (generic || mime.startsWith("video/") || mime.startsWith("audio/"));
+  if (!audioName && (mime.startsWith("video/") || named(/\.(mp4|webm|mov|mkv|avi|m4v|ogv)$/))) return "video";
   if (audioName || mime.startsWith("audio/")) return "audio";
-  if (mime === "application/pdf" || lower.endsWith(".pdf")) return "pdf";
-  if (/\.(docx?|dotx?|odt|rtf|pages|wps)$/.test(lower) || /wordprocessingml|msword|opendocument\.text/.test(mime)) return "document";
-  if (/\.(xlsx?|xlsm|xltx?|ods|numbers|et)$/.test(lower) || /spreadsheetml|ms-excel|opendocument\.spreadsheet/.test(mime)) return "spreadsheet";
-  if (/\.(pptx?|potx?|odp|key|dps)$/.test(lower) || /presentationml|ms-powerpoint|opendocument\.presentation/.test(mime)) return "presentation";
-  if (/\.(js|mjs|cjs|ts|tsx|jsx|py|go|rs|java|c|cc|cpp|cxx|h|hpp|cs|sh|bash|zsh|ps1|bat|html?|css|scss|sass|less|vue|svelte|sql|rb|php|swift|kt|kts|scala|dart|gradle|lua|diff|patch)$/.test(lower) || /(^|\/)(dockerfile|makefile)$/.test(lower)) return "code";
-  if (mime.startsWith("text/") || mime === "application/json" || /\.(md|markdown|mdx|rst|txt|json|jsonc|csv|tsv|log|xml|ya?ml|toml|ini|conf|cfg|properties|env|gitignore|editorconfig|lrc|srt|vtt)$/.test(lower) || /(^|\/)\.env(\.[\w.-]+)?$/.test(lower)) return "text";
-  if (/\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst|dmg|iso)$/.test(lower) || /zip|compressed|x-tar/.test(mime)) return "archive";
+  if (mime === "application/pdf" || named(/\.pdf$/)) return "pdf";
+  if (named(/\.(docx?|dotx?|odt|rtf|pages|wps)$/) || /wordprocessingml|msword|opendocument\.text/.test(mime)) return "document";
+  if (named(/\.(xlsx?|xlsm|xltx?|ods|numbers|et)$/) || /spreadsheetml|ms-excel|opendocument\.spreadsheet/.test(mime)) return "spreadsheet";
+  if (named(/\.(pptx?|potx?|odp|key|dps)$/) || /presentationml|ms-powerpoint|opendocument\.presentation/.test(mime)) return "presentation";
+  if ((generic || textual) && (/\.(js|mjs|cjs|ts|tsx|jsx|py|go|rs|java|c|cc|cpp|cxx|h|hpp|cs|sh|bash|zsh|ps1|bat|html?|css|scss|sass|less|vue|svelte|sql|rb|php|swift|kt|kts|scala|dart|gradle|lua|diff|patch)$/.test(lower) || /(^|\/)(dockerfile|makefile)$/.test(lower))) return "code";
+  if (textual || named(/\.(md|markdown|mdx|rst|txt|json|jsonc|csv|tsv|log|xml|ya?ml|toml|ini|conf|cfg|properties|env|gitignore|editorconfig|lrc|srt|vtt)$/) || generic && /(^|\/)\.env(\.[\w.-]+)?$/.test(lower)) return "text";
+  if (named(/\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst|dmg|iso)$/) || /zip|compressed|x-tar/.test(mime)) return "archive";
   return "other";
 }
 

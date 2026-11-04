@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from contextlib import aclosing
 
 from .blobstore import BlobStore
+from .sniff import HEAD_BYTES, sniff
 from .crypto import (
     FORMAT_VERSION,
     FileKey,
@@ -159,8 +160,13 @@ class BlobEngine:
         inflight: list[asyncio.Task[ChunkRecord]] = []
         started = 0
 
+        head: bytes | None = None
+
         async def launch(plain: bytes) -> None:
-            nonlocal started, total
+            nonlocal started, total, head
+            if part_no == 1 and started == 0:
+                # 第 1 段的开头：按内容判断类型（sniff.py），分段全部写完后与分段一起登记。
+                head = plain[:HEAD_BYTES]
             md5.update(plain)
             blocks.update(plain)
             total += len(plain)
@@ -190,6 +196,8 @@ class BlobEngine:
                 pending.append(await asyncio.shield(inflight[0]))
                 inflight.pop(0)
             self.metadata.replace_part(blob_uuid, part_no, pending, old_refs, time.time())
+            if head is not None:
+                self.metadata.set_sniffed(blob_uuid, sniff(head))
         except BaseException:
             # 不取消仍在进行的写入：被取消的写入可能已把数据存进后端却丢失引用，无法回收。
             # 等它们（最多 upload_concurrency 个）结束，再把全部引用交给 GC。
