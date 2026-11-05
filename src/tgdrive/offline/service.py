@@ -689,9 +689,16 @@ class OfflineDownloads:
             args.append(query)
         total = self.metadata.db.execute(f"SELECT COUNT(*) FROM offline_tasks WHERE {where}", args).fetchone()[0]
         if cursor:
-            where += " AND id<?"
-            args.append(cursor)
-        rows = self.metadata.db.execute(f"SELECT {','.join(PUBLIC_FIELDS)},bucket_id,request_enc FROM offline_tasks WHERE {where} ORDER BY id DESC LIMIT ?", (*args, limit + 1)).fetchall()
+            # 游标是上一页最后一个任务的编号：按（添加时间倒序、同一批按编号正序）接着取。
+            # 游标任务已被删除时退回按编号，最多让同一批里的少数任务换到相邻页。
+            anchor = self.metadata.db.execute("SELECT created_at FROM offline_tasks WHERE id=? AND user_id=?", (cursor, user_id)).fetchone()
+            if anchor is None:
+                where += " AND id<?"
+                args.append(cursor)
+            else:
+                where += " AND (created_at<? OR (created_at=? AND id>?))"
+                args.extend((anchor[0], anchor[0], cursor))
+        rows = self.metadata.db.execute(f"SELECT {','.join(PUBLIC_FIELDS)},bucket_id,request_enc FROM offline_tasks WHERE {where} ORDER BY created_at DESC, id LIMIT ?", (*args, limit + 1)).fetchall()
         effective = self.resources.effective()
         key = self._key()
         tasks = []

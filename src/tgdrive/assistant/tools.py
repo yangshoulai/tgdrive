@@ -1031,7 +1031,7 @@ def _download(ctx: ToolContext, row: dict) -> dict:
 
 
 @tool("list_downloads", "下载任务", "browse", "read",
-      "列出离线下载任务（状态、进度、保存路径、错误），每页条数上限由管理员设置，按编号倒序；counts 给出各状态的总数。"
+      "列出离线下载任务（状态、进度、保存路径、错误），每页条数上限由管理员设置，按添加时间倒序（同一批按添加先后）；counts 给出各状态的总数。"
       "只为统计时看 counts 即可，不必逐页翻完；批量停止、删除某类任务时用 propose_download_control 的 status，不需要先收集编号。"
       "默认只列普通任务；area=private 时只列私密空间的任务。",
       {"status": {"type": "string", "enum": ["active", "stopped", "completed", "failed"], "description": "按状态筛选，省略为全部"},

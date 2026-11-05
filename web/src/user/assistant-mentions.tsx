@@ -1,4 +1,4 @@
-/** 输入框里的 @ 引用：输入 @ 列出当前目录，继续输入在全部普通文件中搜索；选中后插入 @/路径，发送时随消息提交。
+/** 输入框里的 @ 引用：输入 @ 列出当前目录，继续输入在当前目录及其子文件夹中搜索（不超出当前目录）；选中后插入 @/路径，发送时随消息提交。
  * 私密空间（§37）：在私密空间页面列出当前私密目录，或输入「@私密:」在私密空间中搜索（需已解锁）；插入 @私密:/路径。 */
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
@@ -14,6 +14,13 @@ const LIMIT = 20;
 export const mentionLabel = (key: string) => api.isPrivatePath(key) ? PRIVATE_LABEL + "/" + key.slice(api.PRIVATE_PREFIX.length) : "/" + key;
 export const PRIVATE_LABEL = "私密:";
 const PRIVATE_QUERY = /^私密[:：]\/?/;
+
+/** 列出与搜索的范围：私密空间页面或「@私密:」进入私密空间（需已解锁），否则是普通文件；返回（区域根、当前目录）。 */
+function scopeOf(query: string, location: string, privateUnlocked: boolean) {
+  const root = privateUnlocked && (PRIVATE_QUERY.test(query) || api.isPrivatePath(location)) ? api.PRIVATE_PREFIX : "";
+  const inside = (key: string) => root ? key.startsWith(root) : !key.startsWith(".tgdrive/");
+  return { root, inside, folder: inside(location) ? location : root };
+}
 
 const candidate = (key: string, folder: boolean): Candidate => ({ key, folder, name: baseName(key), parent: mentionLabel(parentPath(key)) });
 
@@ -63,21 +70,19 @@ export function useMentions({ draft, location, enabled, onPick, privateUnlocked 
       setLoading(true);
       try {
         // 区域：私密空间页面或「@私密:」前缀进入私密空间（需已解锁），其他情况是普通文件（排除系统区域）。
-        const asked = PRIVATE_QUERY.test(token.query);
-        if (asked && !privateUnlocked) { setItems([]); return; }
-        const root = privateUnlocked && (asked || api.isPrivatePath(location)) ? api.PRIVATE_PREFIX : "";
+        if (PRIVATE_QUERY.test(token.query) && !privateUnlocked) { setItems([]); return; }
+        const { root, inside, folder } = scopeOf(token.query, location, privateUnlocked);
         const text = token.query.replace(PRIVATE_QUERY, "").trim();
         const query = text.toLowerCase();
-        const inside = (key: string) => root ? key.startsWith(root) : !key.startsWith(".tgdrive/");
-        const folder = inside(location) ? location : root;
         const here = await api.listFiles(folder, null, false, 60, "", controller.signal);
         const folders = here.common_prefixes.filter(inside).map(key => candidate(key, true));
         const files = here.objects.filter(item => !item.key.endsWith("/") && inside(item.key)).map(item => candidate(item.key, false));
         let found = [...folders, ...files].filter(item => !query || item.name.toLowerCase().includes(query));
         if (query) {
-          const search = await api.searchFiles(text, "", false, LIMIT, root, "", controller.signal);
+          // 只在当前目录及其子文件夹里搜索：服务端按 prefix 限定范围，关键词只匹配当前目录之下的相对路径。
+          const search = await api.searchFiles(text, "", false, LIMIT, root, "", controller.signal, folder !== root ? folder : "");
           const seen = new Set(found.map(item => item.key));
-          found = [...found, ...search.objects.filter(item => !item.key.endsWith("/") && inside(item.key) && !seen.has(item.key))
+          found = [...found, ...search.objects.filter(item => !item.key.endsWith("/") && item.key.startsWith(folder) && inside(item.key) && !seen.has(item.key))
             .map(item => candidate(item.key, false))];
         }
         if (!controller.signal.aborted) { setItems(found.slice(0, LIMIT)); setActive(0); }
@@ -108,8 +113,9 @@ export function useMentions({ draft, location, enabled, onPick, privateUnlocked 
     return false;
   }
 
+  const currentFolder = scopeOf(token?.query ?? "", location, privateUnlocked).folder;
   const menu = token ? <div className="assistant-mention-menu" role="listbox" aria-label="引用文件或文件夹">
-    <div className="assistant-mention-head"><Icon name="at" size={13} /><span>{token.query ? `搜索“${token.query}”` : `当前位置 ${mentionLabel(location)}`}</span><kbd>↑↓</kbd><kbd>Enter</kbd></div>
+    <div className="assistant-mention-head"><Icon name="at" size={13} /><span>{token.query ? `在 ${mentionLabel(currentFolder)} 中搜索“${token.query.replace(PRIVATE_QUERY, "")}”` : `当前位置 ${mentionLabel(currentFolder)}`}</span><kbd>↑↓</kbd><kbd>Enter</kbd></div>
     {items.length ? items.map((item, index) => <button key={item.key} type="button" role="option" aria-selected={index === active}
       className={`assistant-mention-item${index === active ? " is-active" : ""}`}
       onMouseDown={event => event.preventDefault()} onMouseEnter={() => setActive(index)} onClick={() => choose(item)}>

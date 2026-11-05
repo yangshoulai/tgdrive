@@ -491,6 +491,8 @@ function syncModalInert() {
 }
 /** 最小化的小窗按最小化的先后排列：快捷键 I 只恢复最近最小化的一个，新小窗排在已有小窗上方。 */
 const minimizedStack: HTMLElement[] = [];
+/** 最近最小化、且匹配 selector 的小窗（例如只看音视频小窗）；没有时返回 null。 */
+export const latestMinimized = (selector: string) => [...minimizedStack].reverse().find(node => node.matches(selector)) ?? null;
 let scrollLocks = 0;
 let restoreScroll: (() => void) | null = null;
 

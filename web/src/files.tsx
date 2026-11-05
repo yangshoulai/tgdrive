@@ -14,7 +14,7 @@ import { fileFormatOf } from "./preview-formats";
 import { FontPreview } from "./preview-font";
 import { EpubPreview } from "./preview-epub";
 import { ArchivePreview } from "./preview-archive";
-import { Notice, ButtonLink, Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, toast, confirmLeave, useUnsavedChanges, type IconName, type MenuItem } from "./ui";
+import { Notice, ButtonLink, Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, latestMinimized, toast, confirmLeave, useUnsavedChanges, type IconName, type MenuItem } from "./ui";
 import { ShortcutsDialog } from "./shortcuts";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "text" | "code" | "archive" | "other";
@@ -567,6 +567,37 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     hold.last = now;
     controls.current?.seekBy(key === "arrowleft" ? -5 : 5);
   }
+  // 快捷键优先级：文件助手 > 播放器 > 页面。音视频预览打开时（含最小化），即使焦点不在播放器里也响应播放快捷键；
+  // 焦点在播放器里时由 Modal 的 onKeyDownCapture 正常处理，这里只接手播放器之外（页面、空白处）的按键。
+  const shortcutRef = useRef(handleShortcut);
+  shortcutRef.current = handleShortcut;
+  useEffect(() => {
+    if (!media) return;
+    const listener = (event: globalThis.KeyboardEvent) => {
+      const modal = stage.current?.closest<HTMLElement>(".modal");
+      const target = event.target instanceof Element ? event.target : null;
+      if (!modal || !target || modal.contains(target) || event.defaultPrevented || event.isComposing) return;
+      if (isShortcutControl(target) || document.querySelector(".assistant-drawer.is-open, .assistant-page, .menu")) return;
+      const minimized = modal.classList.contains("is-minimized");
+      // 只交给一个播放器：展开的窗口优先，其次是最近最小化的音视频小窗；其他对话框打开时不接手。
+      const others = [...document.querySelectorAll<HTMLElement>(".modal-backdrop:not(.is-minimized)")].filter(node => !node.contains(modal));
+      if (others.length) return;
+      if (minimized && (document.querySelector(".modal.has-media-surface:not(.is-minimized)") || latestMinimized(".has-media-surface") !== modal)) return;
+      // 最小化时页面仍在使用：只接手播放控制（空格／K、J／L、方向键），其余按键仍归页面。
+      const key = event.key.toLowerCase();
+      if (minimized && !["k", " ", "j", "l", "arrowleft", "arrowright", "arrowup", "arrowdown"].includes(key)) return;
+      // 用 Tab 移到按钮或链接上时，空格／回车仍激活它。
+      if ((key === " " || key === "enter") && target.closest("button, a, summary, [role='button']") && document.documentElement.dataset.input === "keyboard") return;
+      shortcutRef.current({
+        key: event.key, repeat: event.repeat, shiftKey: event.shiftKey, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey,
+        defaultPrevented: false, nativeEvent: event, target: modal, currentTarget: modal,
+        preventDefault: () => event.preventDefault(), stopPropagation: () => event.stopPropagation(),
+      } as unknown as KeyboardEvent<HTMLDivElement>);
+    };
+    // 捕获阶段：先于页面在 document 上的快捷键，接手后页面看到 defaultPrevented 即让行。
+    document.addEventListener("keydown", listener, true);
+    return () => document.removeEventListener("keydown", listener, true);
+  }, [media]);
   function handleShortcut(event: KeyboardEvent<HTMLDivElement>) {
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return;
     const key = event.key.toLowerCase(), navigation = key === "arrowleft" || key === "arrowright";

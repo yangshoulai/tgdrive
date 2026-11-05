@@ -44,7 +44,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 36
+    SCHEMA_VERSION = 37
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -763,6 +763,10 @@ class Metadata:
                     );
                 """)
                 db.execute("PRAGMA user_version = 36")
+            if version < 37:
+                # 离线下载列表按添加时间倒序、同一批（添加时间相同）按添加先后排列，键集分页走这个索引。
+                db.execute("CREATE INDEX IF NOT EXISTS offline_owner_time ON offline_tasks(user_id, created_at DESC, id)")
+                db.execute("PRAGMA user_version = 37")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

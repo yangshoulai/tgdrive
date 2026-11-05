@@ -278,6 +278,23 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
             while not predicate():
                 await asyncio.sleep(0.01)
 
+    async def test_list_newest_batch_first_and_batch_in_added_order(self):
+        parsed = await self.offline.parse(self.alice.id, "https://example.com/file.bin")
+        ticket = parsed["candidates"][0]["ticket"]
+        older = self.offline.create(self.alice.id, [{"ticket": ticket, "name": f"old-{index}.bin"} for index in range(3)], "a/")
+        with self.app.metadata.transaction() as db:
+            db.execute("UPDATE offline_tasks SET created_at=created_at-60 WHERE id IN (?,?,?)", tuple(task["id"] for task in older))
+        newer = self.offline.create(self.alice.id, [{"ticket": ticket, "name": f"new-{index}.bin"} for index in range(3)], "a/")
+        expected = [task["id"] for task in newer + older]
+        listed, cursor = [], 0
+        while True:
+            page = self.offline.list(self.alice.id, limit=2, cursor=cursor)
+            listed += [task["id"] for task in page["tasks"]]
+            if not (cursor := page["next_cursor"]):
+                break
+        self.assertEqual(listed, expected)
+        self.assertTrue(all(task["created_at"] for task in self.offline.list(self.alice.id)["tasks"]), "列表带添加时间供界面显示")
+
     async def test_search_paginates_and_respects_owner_and_private_names(self):
         parsed = await self.offline.parse(self.alice.id, "https://example.com/file.bin")
         ticket = parsed["candidates"][0]["ticket"]
@@ -289,7 +306,8 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         page = self.offline.list(self.alice.id, query="REPORT", status="active", limit=2)
         following = self.offline.list(self.alice.id, query="REPORT", status="active", limit=2, cursor=page["next_cursor"])
         self.assertEqual((page["total"], following["total"]), (3, 3))
-        self.assertEqual([task["id"] for task in page["tasks"] + following["tasks"]], [task["id"] for task in reversed(tasks)])
+        # 同一批添加的任务按添加先后排列，跨页也不重不漏。
+        self.assertEqual([task["id"] for task in page["tasks"] + following["tasks"]], [task["id"] for task in tasks])
         self.assertEqual(self.offline.list(self.alice.id, query="notes/")["total"], 3)
         self.assertEqual(self.offline.list(self.alice.id, query="EXAMPLE.COM")["total"], 4)
         self.assertEqual(self.offline.list(self.admin.id, query="Report")["total"], 0)

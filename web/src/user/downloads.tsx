@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BRAND } from "../brand";
 import * as api from "../api";
 import { useCursorPage, usePageSize } from "../pagination";
-import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, toast, useDocumentTitle, type Tone } from "../ui";
+import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, copyText, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle, type Tone } from "../ui";
 import { FileTile, FileVisual, getFileKind } from "../files";
 import { DestinationPicker, FolderPicker } from "./folders";
 import { PrivateUnlockDialog } from "./private-unlock";
@@ -273,7 +273,8 @@ export function DownloadsView({ onChanged, onOpenFolder, onCreated }: { onChange
                     {thumbnail && file ? <FileVisual kind={getFileKind(file.content_type, file.key)} src={thumbnail} /> : <FileTile kind={kind} />}
                     <div className="name-stack">
                       <strong className="task-name" title={name}>{name}</strong>
-                      <small className="task-subline" title={task.source?.url ?? task.source_host}>{task.platform === "x" ? "X · " : task.platform === "youtube" ? "YouTube · " : task.kind === "hls" ? "M3U8 · " : ""}{task.source_host}</small>
+                      <small className="task-subline"><span title={task.source?.url ?? task.source_host}>{task.platform === "x" ? "X · " : task.platform === "youtube" ? "YouTube · " : task.kind === "hls" ? "M3U8 · " : ""}{task.source_host}</span>
+                        <span className="task-added" title={`添加于 ${formatDateTime(task.created_at)}`}>{"\u00a0· "}{formatDate(task.created_at)}</span></small>
                     </div>
                   </div>
                   <div role="cell"><DownloadProgress task={task} name={name} /></div>

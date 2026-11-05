@@ -2766,7 +2766,8 @@ kbd { padding: 1px 8px; border: 1px solid var(--line); border-bottom-width: 2px;
 .task-toolbar.is-selecting { visibility: hidden; }
 .task-toolbar .segmented { max-width: 100%; overflow-x: auto; }
 .task-toolbar-meta { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
-.cache-task-source.icon-btn { display: inline-flex; gap: 8px; width: auto; height: 32px; padding: 0 12px; border-color: var(--line); font-size: var(--text-xs); white-space: nowrap; }
+/* 状态／类型与来源等多组分段筛选并排，窄屏时换行。 */
+.task-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
 .task-search .search-input { width: min(100%, 520px); }
 .task-footer { margin-top: 16px; }
 .download-glyph { display: grid; place-items: center; width: 38px; height: 42px; border-radius: var(--radius-sm); color: var(--ink-2); background: var(--surface-sunken); flex: none; }
@@ -2814,6 +2815,10 @@ button.task-location:focus-visible { outline: 2px solid var(--accent); outline-o
 .diagnosis-legend .is-stored { background: var(--accent); }
 .task-table .cell-name { gap: 12px; }
 .task-subline { overflow: hidden; color: var(--ink-3); text-overflow: ellipsis; white-space: nowrap; }
+/* 离线下载：来源过长时只截断来源，添加时间始终完整显示。 */
+.task-subline:has(.task-added) { display: flex; min-width: 0; }
+.task-subline:has(.task-added) > span:first-child { overflow: hidden; min-width: 0; text-overflow: ellipsis; }
+.task-added { flex: none; font-variant-numeric: tabular-nums; }
 .task-progress { display: grid; gap: 4px; min-width: 0; font-variant-numeric: tabular-nums; }
 .task-progress > small { overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .task-progress.is-interrupted > small { color: var(--warning); }

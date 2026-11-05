@@ -44,6 +44,6 @@ export function ShortcutsDialog({ area, kind, privateSpace = false, onClose }: {
     footer={<Button onClick={onClose}>知道了</Button>}>
     <Segmented label="快捷键使用区域" value={tab} onChange={setTab} options={[{ value: "files", label: "文件浏览" }, { value: "preview", label: "文件预览" }, { value: "assistant", label: "文件助手" }]} />
     <KeyValue items={(tab === "files" ? files : tab === "preview" ? preview : assistant).map(([key, description]) => [<kbd>{key}</kbd>, description])} />
-    <p className="field-hint shortcut-note">单字母快捷键只在当前区域的非输入位置生效。输入文字、操作菜单或打开其他弹窗时保留原有按键行为；助手的组合键可在输入中使用。</p>
+    <p className="field-hint shortcut-note">单字母快捷键只在当前区域的非输入位置生效。输入文字、操作菜单或打开其他弹窗时保留原有按键行为；助手的组合键可在输入中使用。优先级为文件助手 &gt; 播放器 &gt; 页面：播放音视频时（含最小化的小窗），焦点不在播放器里也响应播放快捷键（空格／K、J／L、方向键），文件助手打开时除外。</p>
   </Modal>;
 }

@@ -74,7 +74,8 @@ export function TaskStats({ items, progress, label }: { items: TaskStat[]; progr
 export const FILTER_LABELS: Record<TaskFilter, string> = { "": "全部", active: "进行中", paused: "已暂停", done: "已完成", error: "失败" };
 
 /** 本机队列（上传、缓存）的工具栏：搜索、带数量的状态筛选与清理菜单；有勾选时原位换成批量操作栏，高度不变。 */
-export function TaskControls({ list, noun, actions, menu, pausedLabel = "已暂停" }: { list: TaskListState; noun: string; actions: ReactNode; menu?: ReactNode; pausedLabel?: string }) {
+/** filters：放在状态筛选之后的其他分段筛选（如本机缓存的来源）。 */
+export function TaskControls({ list, noun, actions, menu, filters, pausedLabel = "已暂停" }: { list: TaskListState; noun: string; actions: ReactNode; menu?: ReactNode; filters?: ReactNode; pausedLabel?: string }) {
   const labels = { ...FILTER_LABELS, paused: pausedLabel };
   return <>
     <div className="toolbar task-search"><SearchInput value={list.search} onChange={list.setSearch} placeholder={`搜索${noun}的文件名或位置`} label={`搜索${noun}任务`} /></div>
@@ -85,8 +86,8 @@ export function TaskControls({ list, noun, actions, menu, pausedLabel = "已暂�
         <div className="toolbar-actions">{actions}<IconButton icon="x" label="取消选择" size="sm" onClick={list.clearSelection} /></div>
       </div>}
       <div className={`task-toolbar${list.chosen.length ? " is-selecting" : ""}`} aria-hidden={list.chosen.length > 0}>
-        <Segmented label={`${noun}状态`} showLabels value={list.filter} onChange={list.setFilter}
-          options={(["", "active", "paused", "done", "error"] as TaskFilter[]).map(value => ({ value, label: labels[value], count: list.counts[value] || undefined }))} />
+        <span className="task-filters"><Segmented label={`${noun}状态`} showLabels value={list.filter} onChange={list.setFilter}
+          options={(["", "active", "paused", "done", "error"] as TaskFilter[]).map(value => ({ value, label: labels[value], count: list.counts[value] || undefined }))} />{filters}</span>
         <span className="task-toolbar-meta"><span className="muted">{list.filtered.length.toLocaleString("zh-CN")} 个任务</span>{menu}</span>
       </div>
     </div>

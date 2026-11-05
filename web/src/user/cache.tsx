@@ -725,6 +725,15 @@ export function CachePage({ tab, onTabChange, onSettings, onOpenFolder }: { tab:
   </div>;
 }
 
+/** 缓存来源筛选（手动／自动），缓存任务与已缓存的文件共用；counts 只在本机队列里能直接数出时给出。 */
+function SourceFilter({ value, onChange, counts }: { value: CachedOrigin; onChange: (value: CachedOrigin) => void; counts?: { manual: number; auto: number } }) {
+  return <Segmented label="缓存来源" showLabels value={value} onChange={onChange} options={[
+    { value: "", label: "全部来源" },
+    { value: "manual", label: "手动缓存", icon: "pin", count: counts?.manual || undefined },
+    { value: "auto", label: "自动缓存", icon: "refresh", count: counts?.auto || undefined },
+  ]} />;
+}
+
 /** 本机占用的概览卡片：普通层（与私密层）已用／上限。 */
 function usageStat(stats: CacheStats | null, quota: number | null, onSettings: () => void): TaskStat {
   const used = stats ? stats.normal.bytes + stats.private.bytes : 0;
@@ -783,12 +792,8 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
         </div>
       </Notice>;
     })}</div>}
-    <TaskControls list={list} noun="缓存" pausedLabel="已暂停／停止" menu={<>
-      <Menu label={`来源：${origin === "manual" ? "手动缓存" : origin === "auto" ? "自动缓存" : "全部"}`} className="cache-task-source" items={[
-        { label: "全部来源", icon: "list", checked: origin === "", onSelect: () => changeOrigin("") },
-        { label: "手动缓存", icon: "pin", checked: origin === "manual", onSelect: () => changeOrigin("manual") },
-        { label: "自动缓存", icon: "refresh", checked: origin === "auto", onSelect: () => changeOrigin("auto") },
-      ]}><Icon name="pin" size={14} /><span>{origin === "manual" ? "手动缓存" : origin === "auto" ? "自动缓存" : "全部来源"}</span><Icon name="chevronDown" size={12} /></Menu>
+    <TaskControls list={list} noun="缓存" pausedLabel="已暂停／停止" filters={<SourceFilter value={origin} onChange={changeOrigin}
+      counts={{ manual: queue.jobs.filter(job => job.origin !== "auto").length, auto: queue.jobs.filter(job => job.origin === "auto").length }} />} menu={<>
       <Menu label="清理缓存任务记录" icon="trash" items={[
       { label: `清除已完成的记录${list.counts.done ? `（${list.counts.done}）` : ""}`, icon: "checkCircle", disabled: !list.counts.done, onSelect: () => setRemoving(jobs.filter(job => job.status === "done").map(job => job.id)) },
       { label: `清除失败的记录${list.counts.error ? `（${list.counts.error}）` : ""}`, icon: "alert", disabled: !list.counts.error, onSelect: () => setRemoving(jobs.filter(job => cacheGroup(job) === "error").map(job => job.id)) },
@@ -1037,16 +1042,11 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
         <div className="toolbar-actions">{resumableChosen(chosen).length > 0 && <Button size="sm" icon="monitor" onClick={() => resume(chosen)}>继续缓存{chosen.length > 1 ? `（${resumableChosen(chosen).length}）` : ""}</Button>}<Button size="sm" variant="danger" icon="trash" onClick={() => setRemoving(chosen)}>清除缓存</Button><IconButton icon="x" label="取消选择" size="sm" onClick={() => setSelected(new Set())} /></div>
       </div>}
       <div className={`task-toolbar${chosen.length ? " is-selecting" : ""}`} aria-hidden={chosen.length > 0}>
-        <Segmented label="文件类型" showLabels value={kind} onChange={setKind} options={[
+        <span className="task-filters"><Segmented label="文件类型" showLabels value={kind} onChange={setKind} options={[
           { value: "", label: "全部类型" }, { value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" }, { value: "other", label: "其他" },
-        ]} />
+        ]} /><SourceFilter value={origin} onChange={setOrigin} /></span>
         <span className="task-toolbar-meta">
           <span className="muted">{page ? `${page.total.toLocaleString("zh-CN")} 个文件 · ${formatBytes(page.bytes)}` : "正在读取"}</span>
-          <Menu label={`来源：${origin === "manual" ? "手动缓存" : origin === "auto" ? "自动缓存" : "全部"}`} icon="pin" items={[
-            { label: "全部来源", icon: "list", checked: origin === "", onSelect: () => setOrigin("") },
-            { label: "手动缓存", icon: "pin", checked: origin === "manual", onSelect: () => setOrigin("manual") },
-            { label: "自动缓存", icon: "refresh", checked: origin === "auto", onSelect: () => setOrigin("auto") },
-          ]} />
           <Menu label={`排序：${sort === "recent" ? "最近使用" : sort === "size" ? "占用空间" : "名称"}`} icon="sequence" items={[
             { label: "最近使用", icon: "clock", checked: sort === "recent", onSelect: () => setSort("recent") },
             { label: "占用空间", icon: "hardDrive", checked: sort === "size", onSelect: () => setSort("size") },
