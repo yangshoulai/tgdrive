@@ -44,7 +44,7 @@ export type AssistantLocation = { view: string; prefix: string };
 
 /** 读取助手是否可用；不可用时不显示入口。 */
 /** 会改动文件列表的操作；执行完后通知文件页刷新。 */
-const FILE_ACTION_KINDS = new Set(["rename", "move", "organize", "mkdir", "trash", "restore", "purge", "unshare", "share", "save_attachment", "move_out", "move_in"]);
+const FILE_ACTION_KINDS = new Set(["rename", "move", "organize", "mkdir", "trash", "restore", "purge", "unshare", "share", "save_attachment", "move_out", "move_in", "media"]);
 const ACTIVE_ACTION = new Set(["pending", "confirmed", "running", "undoing"]);
 
 export function useAssistantConfig(enabled: boolean) {
@@ -660,6 +660,11 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
     const changed = detail.actions.some(action => FILE_ACTION_KINDS.has(action.kind) && !ACTIVE_ACTION.has(action.status)
       && action.status !== "rejected" && action.status !== "expired" && known.get(action.id) !== action.status);
     if (changed) window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [], all: true } }));
+    // 保存了歌词或字幕：已打开的播放器重新读取同名文件。
+    for (const action of detail.actions) {
+      if (action.kind !== "media" || ACTIVE_ACTION.has(action.status) || known.get(action.id) === action.status || !action.result?.ok) continue;
+      for (const path of new Set((action.payload?.samples ?? []).filter(item => item.want !== "cover").map(item => item.path ?? ""))) if (path) api.announceMediaAssets(path);
+    }
   }, [detail]);
 
   // 操作独立于模型运行，确认后需要同步真实终态并接上服务端自动创建的后续运行。

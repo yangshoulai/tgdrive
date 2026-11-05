@@ -151,6 +151,48 @@ class CoverProviderTests(unittest.TestCase):
         self.assertIn("令牌", str(caught.exception))
 
 
+class VideoCoverProviderTests(unittest.TestCase):
+    def test_title_variants(self):
+        query = MediaQuery("video", title="盗梦空间 Inception")
+        self.assertEqual(query.titles(), ["Inception", "盗梦空间", "盗梦空间 Inception"])
+        self.assertEqual(query.titles("cjk")[0], "盗梦空间")
+        self.assertEqual(MediaQuery("video", title="1917").titles(), ["1917"])
+
+    def test_douban_tries_chinese_title_and_sizes_posters(self):
+        seen = []
+        def suggest(url, body):
+            seen.append(params(url)["q"])
+            if params(url)["q"] != "盗梦空间":
+                return 200, []
+            return 200, [{"title": "盗梦空间", "sub_title": "Inception", "year": "2010", "type": "movie",
+                          "img": "https://img9.doubanio.com/view/photo/s_ratio_poster/public/p513344864.jpg"}]
+        provider, ctx, http = provider_ctx("douban", {"https://movie.douban.com/j/subject_suggest": suggest})
+        results = run(provider.search(MediaQuery("video", title="盗梦空间 Inception"), "cover", ctx))
+        self.assertEqual(seen, ["盗梦空间"])
+        self.assertEqual(results[0].ref["url"], "https://img9.doubanio.com/view/photo/l_ratio_poster/public/p513344864.jpg")
+        self.assertEqual(results[0].ref["preview_headers"]["Referer"], "https://movie.douban.com/")
+        self.assertEqual(results[0].subtitle, "Inception · 2010")
+
+    def test_tvmaze_only_for_series_and_adds_episode_still(self):
+        provider, ctx, http = provider_ctx("tvmaze", {
+            "https://api.tvmaze.com/search/shows": (200, [{"show": {"id": 82, "name": "Game of Thrones", "premiered": "2011-04-17",
+                                                                   "image": {"medium": "https://static.tvmaze.com/m.jpg", "original": "https://static.tvmaze.com/o.jpg"}}}]),
+            "https://api.tvmaze.com/shows/82/episodebynumber": (200, {"name": "The Kingsroad", "image": {"medium": "https://static.tvmaze.com/e-m.jpg", "original": "https://static.tvmaze.com/e.jpg"}}),
+        })
+        self.assertEqual(run(provider.search(MediaQuery("video", title="Inception"), "cover", ctx)), [])
+        self.assertEqual(http.calls, [])
+        results = run(provider.search(MediaQuery("video", title="Game of Thrones", season=1, episode=2), "cover", ctx))
+        self.assertEqual([item.ref["url"] for item in results], ["https://static.tvmaze.com/e.jpg", "https://static.tvmaze.com/o.jpg"])
+        self.assertEqual(results[0].subtitle, "S01E02 The Kingsroad")
+
+    def test_bangumi_https_images(self):
+        provider, ctx, http = provider_ctx("bangumi", {"https://api.bgm.tv/search/subject/%E8%BF%9B%E5%87%BB%E7%9A%84%E5%B7%A8%E4%BA%BA": (200, {"list": [
+            {"name": "進撃の巨人", "name_cn": "进击的巨人", "air_date": "2013-04-06",
+             "images": {"large": "http://lain.bgm.tv/pic/cover/l/a.jpg", "common": "http://lain.bgm.tv/pic/cover/c/a.jpg"}}]})})
+        results = run(provider.search(MediaQuery("video", title="进击的巨人"), "cover", ctx))
+        self.assertEqual((results[0].title, results[0].ref["url"]), ("进击的巨人", "https://lain.bgm.tv/pic/cover/l/a.jpg"))
+
+
 class SubtitleProviderTests(unittest.TestCase):
     def test_opensubtitles_hash_login_and_download(self):
         def download(url, body):

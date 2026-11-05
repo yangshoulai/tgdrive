@@ -68,6 +68,17 @@ class MediaQuery:
     languages: tuple[str, ...] = ("zh", "en")
     extra: dict[str, str] = field(default_factory=dict)
 
+    def titles(self, prefer: str = "latin") -> list[str]:
+        """片名的几种写法：文件名常把中文名与英文名写在一起（如「盗梦空间 Inception」），合在一起搜索往往查不到。
+        prefer 决定先试英文部分（海外数据库）还是中文部分（国内数据库），最后才用完整写法。"""
+        title = (self.title or self.name).strip()
+        cjk = " ".join(re.findall(r"[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef0-9：·，！？]+", title)).strip()
+        latin = " ".join(re.findall(r"[A-Za-z0-9][A-Za-z0-9'&:!?,.\- ]*[A-Za-z0-9!?]|[A-Za-z]", title)).strip()
+        latin = latin if re.search(r"[A-Za-z]{2}", latin) else ""
+        cjk = cjk if re.search(r"[\u3000-\u9fff\uac00-\ud7af]", cjk) else ""
+        order = [latin, cjk] if prefer == "latin" else [cjk, latin]
+        return [item for item in dict.fromkeys([*order, title]) if item]
+
     @property
     def keywords(self) -> str:
         """给只支持关键词搜索的接口：歌名与歌手（视频为片名）。"""

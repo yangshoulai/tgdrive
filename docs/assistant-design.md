@@ -1528,6 +1528,15 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - **动态工具上限**：`ToolSpec.input_limits` 声明参数受哪些配置共同限制，每次模型请求按本轮生效配置生成 `maxItems`／`maximum` 与数值说明，不修改注册表。`propose_downloads` 的 `urls`、`indices` 与 `limit` 使用 `download_urls` 和 `action_items` 的较小值（默认 2000）；执行校验与结果集分页共用这一计算，避免工具宣称可接收的数量与实际操作上限不同。默认下 77 项或 2000 项可作为一个提议，后台负责分批入队。
 - 提示词：全局规则 7 根据用户目标、页面结构和已启用工具选择处理方式，不规定相册流程；规则 10 统一说明任务持续推进、批量能力、摘要行与 recall_result、notes。同一目标与授权范围内，已确认条目在当前工具上限内优先一次提交，不从历史调用的条目数推断限制；确需分页、依赖或错误恢复时再分批。相册列表分析与批量收集的具体用法保留在 `collect_gallery` 工具说明中，下载提交与批次细节保留在 `propose_downloads` 工具说明中。提示词版本为 `2026.10-p23`。
 
+## 40. 在线获取封面、歌词与字幕
+
+- 写入工具 `propose_media_assets`（`assistant/media_tools.py`，操作类型 `media`，不可撤销，不在 `CONFIRM_KINDS`）：`paths` 为文件或文件夹（取第一层音视频，合计 ≤10 个），`want` 省略时音频为封面＋歌词、视频为封面＋字幕，`force_online` 跳过内置数据，单个文件时可给 `title`／`artist`／`album`／`year` 改写查询条件。每个（文件、数据）是一个条目，查询经 `MediaService.collect`（与网页查找同一套提供者、打分与每分钟额度），每种最多 12／8／8 个候选。
+- 推荐（`best_index`）：封面 内置 > 文件哈希 > 匹配分；歌词 时长一致（±3 秒或 2%）> 能滚动 > 内置 > 匹配分；字幕 文件哈希 > 匹配分（字幕不使用内置轨）。在线结果低于 `MIN_SCORE` 不推荐。文件内置能滚动的歌词且最后时间标签不超过时长 10 秒以上时视为可信，不查找（跳过原因写给模型）；超出时视为不对，改为在线查找并不再当作「已有」。
+- 已有数据（列表小图等封面、同名 .lrc／字幕文件、内置同步歌词、内置字幕轨）：条目的 `choice`（卡片默认值）为 null＝保留现有，`best` 为推荐项；`force_online` 时只有内置数据的条目默认用推荐项。确认请求带 `choices: {条目编号: 候选编号|null}`，由 `actions.media_choices` 校验；完全访问自动执行取 `best`，直接覆盖。
+- 候选的来源引用存在操作记录的 `_refs`（`_propose(refs=)`），`action_json`、条目分页、压缩与模型结果都不带以 `_` 开头的字段。卡片经 `GET /api/user/v1/assistant/actions/<id>/media/<条目>/<候选>[?full=1]` 由服务器读取封面小图／原图与歌词字幕全文（`AssistantService.action_media`，私密操作要求已解锁，`sandbox` CSP、`no-store`）。
+- 执行（`ActionExecutor._one` 的 `media`）：复核源文件版本，`MediaService.save_frozen` 读取候选后歌词／字幕覆盖写同名文件，封面经 `render_image` 缩放后 `apply_custom`；没有 FFmpeg（或缩放失败）时按封面规格大小上限直接使用来源的小图与原图（`_unscaled`）。
+- 界面：确认卡片的 `MediaChoices`（`assistant-thread.tsx`）按条目显示封面网格或歌词／字幕单选列表（来源、推荐、能滚动、时长一致、语言、前几行与「全文」），第一项为「保留现有／不保存」。操作终态时 `assistant.tsx` 广播文件刷新与 `MEDIA_ASSETS_EVENT`。查询词会发给已启用的第三方来源，结果视为外部内容（`TAINT_TOOLS`）。回归 `tests/test_assistant_media.py`。
+
 ## 39. 下载对话
 
 - 历史列表每个对话的菜单提供「下载为 Markdown」与「下载为 JSON」，接口 `GET /api/user/v1/assistant/conversations/<id>/export?format=markdown|json&tz=<IANA 时区>`（普通会话 Cookie，GET 不需要 CSRF），响应 `Content-Disposition: attachment`、`Cache-Control: no-store`。

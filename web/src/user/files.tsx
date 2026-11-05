@@ -38,6 +38,20 @@ const DELETE_KEY = IS_MAC ? "⌘⌫" : "Del";
 const LABELLED_KINDS = new Set(["pdf", "document", "spreadsheet", "presentation"]);
 
 const SEARCH_PAGES = 5;
+/** 空白处右键菜单用的特殊键（不会与真实路径冲突）。 */
+const BACKGROUND = "\u0000background";
+/** 可以新建的文本文件；新增类型时在这里加一项。 */
+const NEW_FILES = {
+  markdown: { label: "Markdown 文件", description: "可预览排版的 .md 文档", name: "未命名.md", extension: ".md", type: "text/markdown; charset=utf-8" },
+  text: { label: "文本文件", description: "纯文本 .txt", name: "未命名.txt", extension: ".txt", type: "text/plain; charset=utf-8" },
+} as const;
+type NewFileKind = keyof typeof NEW_FILES;
+/** 当前目录里不重名的默认文件名：「未命名.md」已存在时依次用「未命名 (2).md」……。 */
+function freeName(name: string, taken: Set<string>) {
+  if (!taken.has(name)) return name;
+  const dot = name.lastIndexOf("."), stem = name.slice(0, dot), extension = name.slice(dot);
+  for (let index = 2; ; index++) if (!taken.has(`${stem} (${index})${extension}`)) return `${stem} (${index})${extension}`;
+}
 const COLLATOR = new Intl.Collator("zh-CN", { numeric: true });
 
 export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, uploadRevision, onPlayback, incoming, onIncomingTaken }: { session: api.Session; prefix: string; onOpenFolder: (prefix: string) => void; onChanged: () => void; uploads: UploadQueue; uploadRevision: number; onPlayback?: (state: PreviewPlayback) => void;
@@ -58,13 +72,14 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const cacheFilterReady = Boolean(cacheQueue?.available && (!privateSpace || cacheQueue.privateReady));
   const [kind, setKind] = useState<api.KindFilter>("");
   const [layout, setLayout] = useState<"list" | "grid">(() => (localStorage.getItem("tgdrive:layout") as "list" | "grid") || "list");
-  const [sort, setSort] = useState<FileSort>({ key: "modified", desc: true });
+  // 默认按名称升序（数字按大小比较）；用户切换的排序在切换目录后保留。
+  const [sort, setSort] = useState<FileSort>({ key: "name", desc: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const preview = usePreview();
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
   const [thumbnailEditing, setThumbnailEditing] = useState<api.FileItem | null>(null);
   const [mediaLookup, setMediaLookup] = useState<{ file: api.FileItem; want: "lyrics" | "subtitle" } | null>(null);
-  const [extracting, setExtracting] = useState<api.FileItem | null>(null);
+  const [extracting, setExtracting] = useState<{ file: api.FileItem; picks?: string[] } | null>(null);
   const [compressing, setCompressing] = useState<string[] | null>(null);
   const [editingImage, setEditingImage] = useState<api.FileItem | null>(null);
   const [renaming, setRenaming] = useState<Entry | null>(null);
@@ -74,6 +89,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   /** 键盘焦点所在的项目（方向键移动）；与勾选状态分开，和桌面文件管理器一致。 */
   const [cursor, setCursor] = useState<string | null>(null);
   const [context, setContext] = useState<{ x: number; y: number; key: string } | null>(null);
+  /** 新建文本文件的对话框：Markdown 或纯文本。 */
+  const [newFile, setNewFile] = useState<NewFileKind | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [statsFor, setStatsFor] = useState<{ prefix: string; title: string } | null>(null);
   const [folderCache, setFolderCache] = useState<{ prefixes: string[]; files: CacheFile[] } | null>(null);
@@ -199,7 +216,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   }
   const setPublicFolders = (update: (items: Record<string, api.FileItem>) => Record<string, api.FileItem>) => pagination.setPage(current => current && { ...current, public_folders: update(current.public_folders ?? {}) });
   useEffect(() => { setSelected(new Set()); }, [fetchPage, entryFilter, cacheFilter]);
-  useEffect(() => { setSearch(""); setQuery(""); }, [prefix]);
+  // 切换目录：搜索与顶部筛选（全部／公开、文件夹／文件、文件类型、本机缓存）都回到默认，不把上一个目录的筛选带过去。
+  useEffect(() => { setSearch(""); setQuery(""); setFilter("all"); setEntryFilter("all"); setKind(""); setCacheFilter(""); }, [prefix]);
   useEffect(() => { localStorage.setItem("tgdrive:layout", layout); }, [layout]);
   useEffect(() => {
     // 深路径始终先展示当前位置；祖先目录仍可横向滚动或通过键盘访问。
@@ -245,13 +263,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       return next.size === current.size ? current : next;
     });
   }, [entries, loading, pagination.loadingMore, loadError]);
-  function openPreview(file: api.FileItem) {
+  function openPreview(file: api.FileItem, startEditing = false) {
     // 打开文件时记录当前结果顺序作为播放列表；预览挂在应用外壳上，切换页面后继续播放。
-    preview.open({ file, url: api.contentUrl(file.key), downloadUrl: api.contentUrl(file.key, true), assetUrl: key => api.contentUrl(key),
+    preview.open({ file, startEditing, url: api.contentUrl(file.key), downloadUrl: api.contentUrl(file.key, true), assetUrl: key => api.contentUrl(key),
       playlistFiles: entries.flatMap(entry => entry.kind === "file" ? [entry.file] : []),
       poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file), onPlaybackActivity: onPlayback,
       onShare: privateSpace ? undefined : item => { preview.update(item); setSharing(item); },
-      onExtract: item => setExtracting(item),
+      onExtract: (item, picks) => setExtracting({ file: item, picks }),
       onEditImage: item => setEditingImage(item),
       onSaveVideoThumbnail: async (video, item, rotation) => {
         await saveCurrentVideoThumbnail(item, video, rotation);
@@ -442,7 +460,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     items.push({ label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming(entry) });
     items.push({ label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving([entry]) });
     if (getFileKind(file.content_type, file.key) === "image" && !/\.svg$/i.test(file.key)) items.push({ label: "编辑图片…", icon: "crop", onSelect: () => setEditingImage(file) });
-    if (isArchive(file)) items.push({ label: "解压…", icon: "archive", onSelect: () => setExtracting(file) });
+    if (isArchive(file)) items.push({ label: "解压…", icon: "archive", onSelect: () => setExtracting({ file }) });
     else items.push({ label: "压缩为 ZIP…", icon: "archive", onSelect: () => setCompressing([file.key]) });
     items.push({ label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([entry]) });
     if (query) items.push({ label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(parentPath(file.key)) });
@@ -603,8 +621,27 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     document.addEventListener("pointerdown", pointer, true);
     return () => { document.removeEventListener("keydown", listener); document.removeEventListener("pointerdown", pointer, true); };
   }, []);
+  /** 「新建」菜单：顶部按钮与空白处右键共用。 */
+  const newItems = (): MenuItem[] => [
+    { label: "新建文件夹", icon: "folderPlus", shortcut: "N", onSelect: () => setFolderOpen(true) },
+    { label: "新建文件", icon: "file", onSelect: () => undefined, children: (Object.keys(NEW_FILES) as NewFileKind[]).map(kind => ({
+      label: NEW_FILES[kind].label, description: NEW_FILES[kind].description, icon: "fileText" as const, onSelect: () => setNewFile(kind) })) },
+  ];
+  /** 空白处（或空目录）的右键菜单：在当前文件夹里新建、上传、刷新与全选。 */
+  function backgroundItems(): MenuItem[] {
+    const view = surface.current?.closest(".files-view");
+    const pick = (label: string) => view?.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)?.click();
+    return [
+      ...newItems(),
+      { label: "上传文件", icon: "upload", shortcut: "U", divider: true, onSelect: () => pick("选择上传文件") },
+      ...("webkitdirectory" in document.createElement("input") ? [{ label: "上传文件夹", icon: "folder" as const, onSelect: () => pick("选择上传文件夹") }] : []),
+      { label: "刷新", icon: "refresh", divider: true, onSelect: () => void refreshList() },
+      ...(entries.length ? [{ label: "全选", icon: "check" as const, shortcut: "Mod+A", onSelect: () => setSelected(new Set(entries.map(entry => entry.key))) }] : []),
+    ];
+  }
   /** 右键：点在已选中的多项之一上时对整个选择操作，否则只针对这一项。 */
   function contextItems(key: string): MenuItem[] {
+    if (key === BACKGROUND) return backgroundItems();
     if (selected.size > 1 && selected.has(key)) {
       return [
         { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", shortcut: "D", onSelect: selectedEntries.length > 200 ? downloadLimit : () => undefined,
@@ -634,6 +671,12 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
 
   return (
     <div className="files-view"
+      onContextMenu={event => {
+        // 行上的右键已经处理（preventDefault）；空白处与空目录打开当前文件夹的菜单，输入框、链接与按钮保留浏览器默认菜单。
+        if (event.defaultPrevented || query || (event.target as Element).closest("input, textarea, a, button, select, .page-header, .toolbar, .file-filters, [role=dialog]")) return;
+        event.preventDefault();
+        setContext({ x: event.clientX, y: event.clientY, key: BACKGROUND });
+      }}
       onDragEnter={event => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current++; setDragging(true); }}
       onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }}
@@ -641,7 +684,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       <BackToTop />
       <PageHeader title={query ? `搜索“${query}”` : name}
         actions={<>
-          <Button icon="folderPlus" shortcut="N" onClick={() => setFolderOpen(true)}>新建文件夹</Button>
+          <Menu label="新建" size="md" align="end" className="new-picker-trigger" items={newItems()}><Icon name="plus" size={16} /><span>新建</span><Icon name="chevronDown" size={13} /></Menu>
           <UploadPicker shortcut="U" onPick={startUpload} />
         </>}>
         {(prefix !== root || query) && <nav ref={breadcrumbNav} className="breadcrumbs file-breadcrumbs" aria-label="当前位置">
@@ -824,9 +867,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         </span>
       </footer>
 
-      {context && <ContextMenu x={context.x} y={context.y} label={`${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
+      {context && <ContextMenu x={context.x} y={context.y} label={context.key === BACKGROUND ? `${name} 的操作` : `${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
       {statsFor && <FolderStatsDialog prefix={statsFor.prefix} title={statsFor.prefix === root ? rootName : api.privatePathLabel(statsFor.prefix).replace(/\/$/, "")} onClose={() => setStatsFor(null)} onOpenFolder={onOpenFolder} />}
-      {extracting && <ExtractDialog file={extracting} onClose={() => setExtracting(null)} onOpenFolder={onOpenFolder} />}
+      {extracting && <ExtractDialog file={extracting.file} picks={extracting.picks} onClose={() => setExtracting(null)} onOpenFolder={onOpenFolder} />}
       {compressing && <CompressDialog keys={compressing} onClose={() => setCompressing(null)} onOpenFolder={onOpenFolder} />}
       {editingImage && <ImageEditorDialog file={editingImage} onClose={() => setEditingImage(null)} onSaved={(item, replaced) => { if (replaced) preview.update(item); }} />}
       {thumbnailEditing && <ThumbnailEditor file={thumbnailEditing} onClose={() => setThumbnailEditing(null)}
@@ -849,6 +892,20 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           setPendingUpload(null);
           uploads.enqueue(list.map(({ file, path }) => ({ file, path: `${destination}${path}`, isPublic,
             publicFolder: isPublic && path.includes("/") ? `${destination}${path.slice(0, path.indexOf("/") + 1)}` : undefined })));
+        }} />}
+      {newFile && <NameDialog title={`新建${NEW_FILES[newFile].label}`} label="文件名" confirm="创建" location={prefix} initial={freeName(NEW_FILES[newFile].name, new Set(files.map(item => baseName(item.key))))}
+        onClose={() => setNewFile(null)}
+        onSubmit={async (value, destination) => {
+          const spec = NEW_FILES[newFile];
+          // 没写扩展名时补上，写了别的扩展名就按用户写的。
+          const filename = /\.[^./]+$/.test(value) ? value : `${value}${spec.extension}`;
+          const path = `${destination}${filename}`;
+          if ((await api.checkFiles([path])).paths.length) throw new Error(`已有名为“${filename}”的文件，请换一个名称`);
+          const created = await api.createTextFile(path, spec.type);
+          setNewFile(null);
+          notify.success(`已创建“${filename}”`);
+          await refreshList(); onChanged();
+          openPreview(created, true);
         }} />}
       {folderOpen && <NameDialog title="新建文件夹" label="文件夹名称" confirm="创建" location={prefix} onClose={() => setFolderOpen(false)}
         onSubmit={async (value, destination) => { await api.makeFolder(`${destination}${value}`); notify.success(`已创建文件夹“${value}”`); setFolderOpen(false); await refreshList(); }} />}

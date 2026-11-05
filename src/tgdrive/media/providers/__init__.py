@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 from .assrt import AssrtProvider
+from .bangumi import BangumiProvider
 from .base import Provider
+from .douban import DoubanProvider
 from .embedded import EmbeddedProvider
 from .itunes import ItunesProvider
 from .kugou import KugouProvider
@@ -14,9 +16,11 @@ from .netease import NeteaseProvider
 from .opensubtitles import OpenSubtitlesProvider
 from .qqmusic import QQMusicProvider
 from .tmdb import TmdbProvider
+from .tvmaze import TvmazeProvider
 
 
 def registry() -> dict[str, Provider]:
     providers: list[Provider] = [EmbeddedProvider(), LrclibProvider(), NeteaseProvider(), QQMusicProvider(), KugouProvider(),
-                                 ItunesProvider(), MusicBrainzProvider(), TmdbProvider(), OpenSubtitlesProvider(), AssrtProvider()]
+                                 ItunesProvider(), MusicBrainzProvider(), DoubanProvider(), TvmazeProvider(), BangumiProvider(), TmdbProvider(),
+                                 OpenSubtitlesProvider(), AssrtProvider()]
     return {provider.id: provider for provider in providers}

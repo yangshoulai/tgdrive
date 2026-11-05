@@ -71,7 +71,7 @@ class AuditLog:
         allowed = {
             "object.public": {"public", "count", "bucket_id", "expires_at", "password", "error"},
             "share.save": {"saved", "bytes", "error"},
-            "archive.extract": {"conflict", "keep", "format", "error"},
+            "archive.extract": {"conflict", "keep", "format", "partial", "error"},
             "archive.compress": {"count", "compression", "error"},
             "media.save": {"provider", "format", "replaced", "error"},
             "media.providers.update": {"enabled", "configured", "error"},

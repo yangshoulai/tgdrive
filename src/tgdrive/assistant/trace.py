@@ -281,6 +281,8 @@ class TraceStore:
         if status == "pending" and row["expires_at"] <= time.time():
             status = "expired"
         payload = self.action_payload(row)
+        if isinstance(payload, dict):
+            payload = {key: value for key, value in payload.items() if not key.startswith("_")}
         if isinstance(payload, dict) and "items" in payload:
             payload = {**{key: value for key, value in payload.items() if key != "items"}, "samples": payload["items"][:self.SAMPLES]}
         return {"id": row["id"], "kind": row["kind"], "tool_name": row["tool_name"], "status": status, "count": row["count"],
@@ -725,7 +727,8 @@ class TraceStore:
             except Exception:
                 continue
             if isinstance(payload, dict) and "items" in payload:
-                payload = {**payload, "items": payload["items"][:self.SAMPLES], "skipped": payload.get("skipped", [])[:self.SAMPLES]}
+                payload = {**{key: value for key, value in payload.items() if not key.startswith("_")},
+                           "items": payload["items"][:self.SAMPLES], "skipped": payload.get("skipped", [])[:self.SAMPLES]}
             with self.metadata.transaction() as db:
                 db.execute("UPDATE assistant_actions SET payload=?, compacted=1 WHERE id=?",
                            (self._seal(payload, f"assistant-action:{row['id']}"), row["id"]))

@@ -284,9 +284,9 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
 type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; /** 已记录的图片／视频显示尺寸：视频按它设播放器比例，图片按它在加载前就把封面与原图放到最终位置。 */ videoSize?: api.MediaSize; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing;
   /** 电子书的阅读位置：按内容版本记住（remember 为假时只记在本页内存里，私密文件用）。 */ positionKey?: string | null; rememberPosition?: boolean;
-  /** 本人的压缩包：可以浏览内容并在线解压。 */ archive?: { file: api.FileItem; onExtract?: () => void } } & PlaybackProps;
+  /** 本人的压缩包：可以浏览内容并在线解压。 */ archive?: { file: api.FileItem; onExtract?: (picks?: string[]) => void } } & PlaybackProps;
 /** 文本编辑：只给本人有写权限的文件。key 是文件路径（保存后地址随版本变化，编辑器不重建）；load 递增时重新读取（换文件、外部改动、冲突后重新加载）。 */
-type TextEditing = { key: string; load: number; save: (data: Uint8Array, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void };
+type TextEditing = { key: string; load: number; save: (data: Uint8Array, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void; start?: boolean };
 export function FilePreview(props: PreviewProps) {
   const [attempt, setAttempt] = useState(0);
   // 音视频与图片切换时复用同一个播放器／查看器（图片的缩略图条才能从上一张平滑滚动到下一张），其他类型按地址重建。
@@ -353,7 +353,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
   if (kind === "text" || kind === "code") {
     if (error) return fallback;
     if (content === null) return <PreviewLoading onRetry={onRetry} />;
-    const edit = text && { save: (value: string, force: boolean) => text.save(encodeText(value, content.encoding, content.bom), force), reload: text.reload, onDirty: text.onDirty };
+    const edit = text && { save: (value: string, force: boolean) => text.save(encodeText(value, content.encoding, content.bom), force), reload: text.reload, onDirty: text.onDirty, start: text.start };
     return <TextPreview key={revision} content={content} name={name} code={kind === "code"} downloadUrl={downloadUrl} resolveImage={resolveImage} edit={edit || undefined}
       onError={reason => setError(api.errorMessage(reason, "文本预览没有加载出来，请刷新页面后重试"))} />;
   }
@@ -387,9 +387,11 @@ function rememberRotation(file: api.FileItem, degrees: number) {
   } catch { /* 存储不可用时只在本次预览里生效 */ }
 }
 export type PreviewPlayback = { playing: boolean; currentTime: number; state: MediaState };
-export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onExtract, onEditImage, onFindMedia, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest }: PreviewSource & { file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void;
+export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onExtract, onEditImage, onFindMedia, onMissingCover, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest, startEditing }: PreviewSource & {
+  /** 打开后直接进入文本编辑（刚新建的文件）。 */ startEditing?: boolean; file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void;
   /** 在线查找歌词、字幕或封面（播放器里没有歌词、字幕或封面时的入口）；保存后页面广播 MEDIA_ASSETS_EVENT。 */ onFindMedia?: (file: api.FileItem, want: api.MediaWant) => void;
-  /** 在线解压（压缩包预览里的「解压…」）。 */ onExtract?: (file: api.FileItem) => void;
+  /** 本人的音乐还没有封面时调用：由宿主用文件内嵌的封面补上（已有封面时服务器拒绝，不会覆盖）。 */ onMissingCover?: (file: api.FileItem) => void;
+  /** 在线解压（压缩包预览里的「解压到…」）；picks 是预览里勾选的文件，不传表示整个压缩包。 */ onExtract?: (file: api.FileItem, picks?: string[]) => void;
   /** 编辑图片（图片预览头部的按钮）。 */ onEditImage?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; onVideoFrame?: (video: HTMLVideoElement, file: api.FileItem) => void; onSaveVideoThumbnail?: (video: HTMLVideoElement, file: api.FileItem, rotation: number) => Promise<void>; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
   const kind = getFileKind(file.content_type, file.key);
   const media = (kind === "audio" || kind === "video") && isPlayable(file.key, file.content_type);
@@ -438,7 +440,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     if (!savedEtags.current.has(active.etag)) setTextLoad(current => current + 1);
   }, [active.key, active.etag]);
   const textEditing = useMemo(() => editable ? {
-    key: active.key, load: textLoad, onDirty: setTextDirty,
+    key: active.key, load: textLoad, onDirty: setTextDirty, start: Boolean(startEditing && active.key === file.key),
     save: async (data: Uint8Array, force: boolean) => {
       const item = await api.saveTextFile(active, data, force);
       savedEtags.current.add(item.etag);
@@ -455,6 +457,8 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
   // 在线查找：只给本人的音视频（我的文件与已解锁的私密空间）；保存了新的歌词或字幕后播放器重新读取并选中它。
   const findable = media && ownSource && Boolean(onFindMedia) && (!active.key.startsWith(".tgdrive/") || api.isPrivatePath(active.key));
   const [assetChange, setAssetChange] = useState<{ revision: number; prefer?: string }>({ revision: 0 });
+  const missingCover = findable && kind === "audio" && !active.thumbnails?.includes("thumb") && active.thumbnail_status !== "ready";
+  useEffect(() => { if (missingCover) onMissingCover?.(active); }, [missingCover, active.key, active.etag]);  // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const changed = (event: Event) => {
       const detail = (event as CustomEvent<{ media: string; asset?: string }>).detail;
@@ -742,7 +746,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         </>}
       </>}>
       <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} videoSize={knownSize ?? undefined} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind, active.key, active.content_type)) : source.url}
-        positionKey={active.etag || null} rememberPosition={!api.isPrivatePath(active.key)} archive={format === "archive" && ownSource ? { file: active, onExtract: onExtract ? () => onExtract(active) : undefined } : undefined} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onBufferSpeed={setBufferSpeed} onSaveThumbnail={onSaveVideoThumbnail ? (video, degrees) => onSaveVideoThumbnail(video, active, degrees) : undefined} rotation={rotation} onRotate={rotateVideo} resolveImage={resolveImage} assetUrl={assetUrl}
+        positionKey={active.etag || null} rememberPosition={!api.isPrivatePath(active.key)} archive={format === "archive" && ownSource ? { file: active, onExtract: onExtract ? picks => onExtract(active, picks) : undefined } : undefined} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onBufferSpeed={setBufferSpeed} onSaveThumbnail={onSaveVideoThumbnail ? (video, degrees) => onSaveVideoThumbnail(video, active, degrees) : undefined} rotation={rotation} onRotate={rotateVideo} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height, from) => { if (from === "video") recordSize(width, height); setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height }); }}
         onProgress={value => { trackPrefetch(value); setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value); }} onState={setMediaState}

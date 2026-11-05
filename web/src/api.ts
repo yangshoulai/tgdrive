@@ -384,6 +384,9 @@ export const mediaFetchImage = (path: string, token: string, signal?: AbortSigna
 export const mediaPreviewUrl = (path: string, token: string) => mediaAccess(fileApi("/media/preview", path) + mediaQuery(path, `&token=${encodeURIComponent(token)}`), path);
 export const mediaSave = (path: string, token: string, language?: string, overwrite = false) =>
   post<MediaSaved>(fileApi("/media/save", path), { path, token, language: language || undefined, overwrite }, 90000);
+/** 文件内嵌的封面原图（没有时 404）。 */
+export const embeddedCover = (path: string, etag: string, signal?: AbortSignal) =>
+  request<Blob>(fileApi("/media/cover", path) + mediaQuery(path, `&etag=${encodeURIComponent(etag)}`), { signal, cache: "no-store" }, 60000, "blob");
 const mediaText = async (url: string, signal?: AbortSignal) => (await request<Blob>(url, { signal, cache: "no-store" }, 60000, "blob")).text();
 export const embeddedLyrics = (path: string, etag: string, signal?: AbortSignal) =>
   mediaText(fileApi("/media/lyrics", path) + mediaQuery(path, `&etag=${encodeURIComponent(etag)}`), signal);
@@ -447,6 +450,10 @@ export const saveTextFile = (file: FileItem, data: Uint8Array, force = false) =>
   method: "PUT", body: new Blob([data as BlobPart], { type: file.content_type || "text/plain" }),
   headers: { "Content-Type": file.content_type || "text/plain", ...(force ? {} : { "If-Match": `"${file.etag}"` }) },
 }, 120000);
+/** 新建一个空的文本文件（Markdown、TXT 等），返回文件信息；调用前用 checkFiles 确认没有同名文件。 */
+export const createTextFile = (path: string, contentType: string) => request<FileItem>(`${fileApi("/files", path)}?path=${encodeURIComponent(path)}`, {
+  method: "PUT", body: new Blob([], { type: contentType }), headers: { "Content-Type": contentType },
+});
 /** 图片编辑保存：etag 不为空时只覆盖仍是这个版本的原文件（否则 409 version_conflict），为空时写入新文件。 */
 export const saveImageFile = (path: string, blob: Blob, etag?: string) => request<FileItem>(`${fileApi("/files", path)}?path=${encodeURIComponent(path)}`, {
   method: "PUT", body: blob, headers: { "Content-Type": blob.type || "application/octet-stream", ...(etag ? { "If-Match": `"${etag}"` } : {}) },
@@ -477,6 +484,7 @@ export type ArchiveConflict = "rename" | "skip" | "overwrite";
 export type ArchiveJob = {
   /** extract 为解压，compress 为在线压缩（archive 是生成的压缩包，format 为 deflate／store）。 */
   id: string; kind: "extract" | "compress"; private: boolean; archive: string; destination: string; format: string; conflict: ArchiveConflict; keep_archive: boolean;
+  /** 只解压了选中的部分文件（这时压缩包总是保留）。 */ partial?: boolean;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   total_files: number | null; total_bytes: number | null; archive_size: number; read_bytes: number;
   done_files: number; done_bytes: number; skipped: number; renamed: number; failed: number; failures: { name: string; error: string }[];
@@ -484,7 +492,8 @@ export type ArchiveJob = {
 };
 export const inspectArchive = (path: string, options: { destination?: string; password?: string } = {}) =>
   post<ArchiveInfo>(fileApi("/archive/inspect", path), { path, ...options }, 60000);
-export const extractArchive = (path: string, options: { destination: string; password?: string; conflict: ArchiveConflict; keep_archive: boolean }) =>
+/** entries：只解压这些条目（browseArchive 的 index）；不传表示整个压缩包。 */
+export const extractArchive = (path: string, options: { destination: string; password?: string; conflict: ArchiveConflict; keep_archive: boolean; entries?: number[] }) =>
   post<ArchiveJob>(fileApi("/archive/extract", path), { path, ...options }, 60000);
 export const archiveJobs = (ids: string[], privateJobs = false) =>
   request<{ jobs: ArchiveJob[] }>(`/api/user/v1${privateJobs ? "/private" : ""}/archive/jobs?ids=${ids.map(encodeURIComponent).join(",")}`);

@@ -5,41 +5,26 @@ import { createPortal } from "react-dom";
 import * as api from "./api";
 import { FileGlyph, FilePreview, canPreview, getFileKind } from "./files";
 import { PreviewToolsContext } from "./preview-text";
-import { Button, ButtonLink, Icon, IconButton, formatBytes } from "./ui";
+import { archiveChildren, expandSelection, folderCounts, folderState, type ArchiveItem as Item } from "./archive-selection";
+import { Button, ButtonLink, Checkbox, Icon, IconButton, formatBytes } from "./ui";
 
 /** 压缩包里的文件预览前要整个读出来：音视频只能顺序读取、不能拖动，超过这个大小改为下载。 */
 const ENTRY_PREVIEW_LIMIT = 256 * 1024 * 1024;
 
 type Listing = Awaited<ReturnType<typeof api.browseArchive>>;
-type Item = { name: string; path: string; dir: boolean; size: number; entry?: api.ArchiveEntry; files: number };
-
-/** 某个目录下的直接子项：文件夹汇总其中的文件数与大小（压缩包里没有目录条目的文件夹也会出现）。 */
-function childrenOf(entries: api.ArchiveEntry[], folder: string): Item[] {
-  const items = new Map<string, Item>();
-  for (const entry of entries) {
-    if (!entry.name.startsWith(folder) || entry.name === folder) continue;
-    const rest = entry.name.slice(folder.length), slash = rest.indexOf("/");
-    if (slash >= 0 && slash < rest.length - 1 || entry.dir) {
-      const name = rest.slice(0, slash >= 0 ? slash : rest.length), path = `${folder}${name}/`;
-      const item = items.get(path) ?? { name, path, dir: true, size: 0, files: 0 };
-      if (!entry.dir) { item.size += entry.size; item.files += 1; }
-      items.set(path, item);
-    } else items.set(entry.name, { name: rest, path: entry.name, dir: false, size: entry.size, entry, files: 1 });
-  }
-  const collator = new Intl.Collator("zh-CN", { numeric: true });
-  return [...items.values()].sort((a, b) => Number(b.dir) - Number(a.dir) || collator.compare(a.name, b.name));
-}
-
-export function ArchivePreview({ file, downloadUrl, onExtract }: { file: api.FileItem; downloadUrl: string; onExtract?: () => void }) {
+/** onExtract：解压（本人的压缩包才有）；picks 是勾选的文件，不传表示整个压缩包。 */
+export function ArchivePreview({ file, downloadUrl, onExtract }: { file: api.FileItem; downloadUrl: string; onExtract?: (picks?: string[]) => void }) {
   const [listing, setListing] = useState<Listing | null>(null);
   const [error, setError] = useState("");
   const [folder, setFolder] = useState("");
   const [query, setQuery] = useState("");
   const [opened, setOpened] = useState<api.ArchiveEntry | null>(null);
+  // 勾选要解压的文件（文件名集合；勾选文件夹即选中其中全部文件）。
+  const [picked, setPicked] = useState<Set<string>>(new Set());
   const tools = useContext(PreviewToolsContext);
   useEffect(() => {
     let alive = true;
-    setListing(null); setError(""); setFolder(""); setOpened(null);
+    setListing(null); setError(""); setFolder(""); setOpened(null); setPicked(new Set());
     void api.browseArchive(file.key).then(value => { if (alive) setListing(value); })
       .catch(reason => { if (alive) setError(api.errorMessage(reason, "压缩包没有打开")); });
     return () => { alive = false; };
@@ -49,8 +34,19 @@ export function ArchivePreview({ file, downloadUrl, onExtract }: { file: api.Fil
   const terms = query.trim().toLowerCase();
   const items = useMemo((): Item[] => terms
     ? entries.filter(entry => !entry.dir && entry.name.toLowerCase().includes(terms)).slice(0, 1000).map(entry => ({ name: entry.name, path: entry.name, dir: false, size: entry.size, entry, files: 1 }))
-    : childrenOf(entries, folder), [entries, folder, terms]);
-  const extract = onExtract && <Button size="sm" variant="primary" icon="archive" onClick={onExtract}>解压…</Button>;
+    : archiveChildren(entries, folder), [entries, folder, terms]);
+  const selecting = Boolean(onExtract && listing?.listable);
+  const counts = useMemo(() => folderCounts(entries, picked), [entries, picked]);
+  const pickedBytes = useMemo(() => entries.reduce((sum, entry) => !entry.dir && picked.has(entry.name) ? sum + entry.size : sum, 0), [entries, picked]);
+  const toggle = (item: Item, on: boolean) => setPicked(current => {
+    const next = new Set(current);
+    for (const name of item.dir ? expandSelection(entries, [item.path]) : [item.path]) { if (on) next.add(name); else next.delete(name); }
+    return next;
+  });
+  const extract = onExtract && (picked.size
+    ? <><Button size="sm" variant="ghost" onClick={() => setPicked(new Set())}>取消选择</Button>
+      <Button size="sm" variant="primary" icon="archive" onClick={() => onExtract([...picked])}>解压选中的 {picked.size.toLocaleString()} 个文件…</Button></>
+    : <Button size="sm" variant="primary" icon="archive" onClick={() => onExtract()}>{listing?.listable ? "全部解压到…" : "解压到…"}</Button>);
   const toolbar = <div className="preview-text-tools">{opened
     ? <Button size="sm" variant="ghost" icon="chevronLeft" onClick={() => setOpened(null)}>返回压缩包</Button>
     : extract}</div>;
@@ -80,6 +76,11 @@ export function ArchivePreview({ file, downloadUrl, onExtract }: { file: api.Fil
   const crumbs = folder ? folder.slice(0, -1).split("/") : [];
   return <>{header}<div className="preview-pane preview-archive">
     <div className="preview-table-bar">
+      {selecting && <span className="preview-archive-check"><Checkbox label={terms ? "选择全部搜索结果" : "选择这个文件夹里的全部文件"}
+        checked={items.length > 0 && items.every(item => item.dir ? folderState(counts, item.path) === "all" : picked.has(item.path))}
+        indeterminate={items.some(item => item.dir ? folderState(counts, item.path) !== "none" : picked.has(item.path))
+          && !items.every(item => item.dir ? folderState(counts, item.path) === "all" : picked.has(item.path))}
+        onChange={on => { for (const item of items) toggle(item, on); }} /></span>}
       <nav className="preview-archive-crumbs" aria-label="压缩包内的位置">
         <button type="button" disabled={!folder || Boolean(terms)} onClick={() => setFolder("")}><Icon name="archive" size={14} />{file.key.split("/").pop()}</button>
         {!terms && crumbs.map((part, position) => <span key={position}><Icon name="chevronRight" size={12} />
@@ -90,7 +91,8 @@ export function ArchivePreview({ file, downloadUrl, onExtract }: { file: api.Fil
         <Icon name="search" size={14} />
         <input type="search" placeholder="搜索压缩包里的文件" aria-label="搜索压缩包里的文件" value={query} spellCheck={false} onChange={event => setQuery(event.target.value)} />
       </label>
-      <span className="preview-table-count">{totals.files.toLocaleString()} 个文件 · {formatBytes(totals.bytes)}{totals.bytes ? ` · 压缩后 ${formatBytes(totals.packed)}` : ""}</span>
+      <span className="preview-table-count">{picked.size ? `已选 ${picked.size.toLocaleString()} / ${totals.files.toLocaleString()} 个文件 · ${formatBytes(pickedBytes)}`
+        : `${totals.files.toLocaleString()} 个文件 · ${formatBytes(totals.bytes)}${totals.bytes ? ` · 压缩后 ${formatBytes(totals.packed)}` : ""}`}</span>
     </div>
     <ul className="preview-archive-list" role="list">
       {folder && !terms && <li><button type="button" className="preview-archive-row" onClick={() => setFolder(folder.slice(0, -1).split("/").slice(0, -1).join("/").replace(/(.)$/, "$1/"))}>
@@ -100,7 +102,11 @@ export function ArchivePreview({ file, downloadUrl, onExtract }: { file: api.Fil
         const entry = item.entry, blocked = entry && (entry.encrypted ? "已加密" : !entry.supported ? "压缩方式不支持" : null);
         const viewable = entry && !blocked && canPreview(kind, item.name) && (kind !== "video" && kind !== "audio" || entry.size <= ENTRY_PREVIEW_LIMIT);
         return <li key={item.path}>
-          <div className={`preview-archive-row${blocked ? " is-blocked" : ""}`}>
+          <div className={`preview-archive-row${blocked ? " is-blocked" : ""}${selecting ? " is-selectable" : ""}`}>
+            {selecting && (() => {
+              const state = item.dir ? folderState(counts, item.path) : picked.has(item.path) ? "all" : "none";
+              return <span className="preview-archive-check"><Checkbox label={`选择 ${item.name}`} checked={state === "all"} indeterminate={state === "some"} onChange={on => toggle(item, on)} /></span>;
+            })()}
             <button type="button" className="preview-archive-open" disabled={Boolean(entry && !viewable)} title={blocked ?? (entry && !viewable ? "这种文件不能在线查看，可以下载" : undefined)}
               onClick={() => item.dir ? setFolder(item.path) : entry && viewable && setOpened(entry)}>
               <FileGlyph kind={kind} size={22} />

@@ -100,6 +100,8 @@ class ToolContext:
     # 每次自动发送前查询当前会话的完全访问权限，不能只使用本轮开始时的快照。
     auto_approve: Callable[[], bool] | None = None
     plan: Plan | None = None
+    # 媒体信息服务（封面、歌词、字幕的提供者），由 HTTP 层注入。
+    media: object | None = None
 
     @property
     def db(self):
@@ -368,6 +370,7 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "get_collection": ("limited", "只读取本对话的结果集"),
     "http_request": ("allow", "与普通对话相同，支持公共接口、认证、查询参数与正文"),
     "propose_save_attachment": ("never", "附件只能另存为普通文件"),
+    "propose_media_assets": ("allow", "查询条件（文件名与标签）会发给已启用的媒体信息提供者"),
 }
 
 
@@ -557,7 +560,7 @@ async def update_plan(ctx: ToolContext, args: dict) -> ToolOutput:
 # 读取不可信内容的工具；内容只作为数据，不改变当前访问模式。
 TAINT_TOOLS = {"read_text_file": "读取过文件内容", "analyze_page": "分析过网页", "inspect_page": "分析过网页结构", "collect_gallery": "分析过网页",
                "collect_links": "分析过网页", "parse_download_source": "解析过外部链接", "http_request": "读取过外部 HTTP 响应",
-               "view_image": "查看过图片内容"}
+               "view_image": "查看过图片内容", "propose_media_assets": "读取过第三方媒体信息"}
 
 
 @tool("recall_result", "找回工具结果", "context", "meta",

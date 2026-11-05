@@ -215,7 +215,7 @@ def _move_item(row) -> dict:
 
 
 async def _propose(ctx: ToolContext, kind: str, items: list[dict], *, skipped: list[dict], summary: str, options: dict | None = None,
-                   danger: bool = False, sample=None) -> ToolOutput:
+                   danger: bool = False, sample=None, refs: dict | None = None) -> ToolOutput:
     if ctx.propose is None:
         raise ToolError("当前无法生成待确认操作")
     if not items:
@@ -227,6 +227,9 @@ async def _propose(ctx: ToolContext, kind: str, items: list[dict], *, skipped: l
     size = sum(int(item.get("size") or 0) for item in items)
     payload = {"kind": kind, "title": KINDS[kind], "scope": ctx.scope_root, "items": items, "skipped": skipped[:200],
                "conflicts": len(skipped), "size": size, "danger": danger, "summary": summary, "options": options or {}}
+    if refs:
+        # 只在服务端使用的冻结数据（如媒体候选的来源引用）：不进入卡片、条目分页或模型结果。
+        payload["_refs"] = refs
     created = await ctx.propose(kind, payload, len(items))
     describe = sample or (lambda item: str(item))
     samples = [describe(item) for item in items[:20]]

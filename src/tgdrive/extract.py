@@ -630,10 +630,12 @@ class Job:
     task: asyncio.Task | None = None
     # extract：解压；compress：在线压缩（archive 为生成的压缩包路径，destination 为它所在的文件夹）。
     kind: str = "extract"
+    # 只解压了 ZIP 中选中的部分文件。
+    partial: bool = False
 
     def public(self) -> dict:
         return {"id": self.id, "kind": self.kind, "private": self.private, "archive": self.archive, "destination": self.destination, "format": self.format,
-                "conflict": self.conflict, "keep_archive": self.keep_archive, "status": self.status,
+                "conflict": self.conflict, "keep_archive": self.keep_archive, "partial": self.partial, "status": self.status,
                 "total_files": self.total_files, "total_bytes": self.total_bytes, "archive_size": self.archive_size, "read_bytes": self.read_bytes,
                 "done_files": self.done_files, "done_bytes": self.done_bytes, "skipped": self.skipped, "renamed": self.renamed,
                 "failed": self.failed_count, "failures": self.failures[:20], "current": self.current, "error": self.error,
@@ -777,13 +779,21 @@ class ArchiveService:
             job.cancelled = True
         return job.public()
 
-    async def start(self, owner: int, scope: Scope, key: str, destination: str, password: str | None, conflict: str, keep_archive: bool) -> dict:
+    async def start(self, owner: int, scope: Scope, key: str, destination: str, password: str | None, conflict: str, keep_archive: bool,
+                    selection: object = None) -> dict:
+        """selection：只解压 ZIP 中的这些条目（browse 返回的 index，文件夹条目可选）；None 表示全部。
+        只解压一部分时一律保留压缩包，不然没解出的文件会随压缩包一起进回收站。"""
         if conflict not in CONFLICTS:
             raise ValueError("同名文件的处理方式不正确")
         if not isinstance(keep_archive, bool):
             raise ValueError("是否保留压缩包的设置不正确")
         if password is not None and (not isinstance(password, str) or len(password) > 1024):
             raise ValueError("密码不正确")
+        if selection is not None:
+            if not isinstance(selection, list) or not selection or len(selection) > MAX_ENTRIES \
+                    or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in selection):
+                raise ValueError("要解压的文件不正确")
+            selection = set(selection)
         self._admit(owner)
         if destination.startswith(key + "/"):
             raise ValueError("不能解压到压缩包自身的位置")
@@ -791,13 +801,20 @@ class ArchiveService:
         info, source, kind = await self._open(scope, key)
         plan = None
         if kind == "zip":
-            entries = await read_zip(source)
-            if any(entry.encrypted and not entry.is_dir for entry in entries):
+            entries = await self._zip_entries(scope, key, info.etag, source)
+            if selection is not None and max(selection) >= len(entries):
+                raise ValueError("压缩包已变化，请重新打开后选择")
+            chosen = [entry for index, entry in enumerate(entries) if selection is None or index in selection]
+            if any(entry.encrypted and not entry.is_dir for entry in chosen):
                 if not password:
                     raise PasswordRequired("这个压缩包需要密码")
-                if not await check_zip_password(source, entries, password.encode("utf-8")):
+                if not await check_zip_password(source, chosen, password.encode("utf-8")):
                     raise ArchiveError("密码不正确")
-            plan = [(entry, relative) for entry in entries if (relative := safe_relative(entry.name, entry.is_dir)) and not ignored(relative)]
+            plan = [(entry, relative) for entry in chosen if (relative := safe_relative(entry.name, entry.is_dir)) and not ignored(relative)]
+            if selection is not None:
+                if not any(not entry.is_dir for entry, _ in plan):
+                    raise ValueError("请至少选择一个文件")
+                keep_archive = True
             files = [(entry, relative) for entry, relative in plan if not entry.is_dir]
             existing = await self.objects.metadata.run_in_thread(self._existing, scope, [destination + relative for _, relative in files])
             # 开始前按解压后的大小检查配额：跳过同名时不计已有文件，覆盖时扣掉被替换文件的大小。
@@ -809,6 +826,7 @@ class ArchiveService:
                 raise QuotaExceededError(f"空间不足：解压后需要约 {need} 字节，当前可用 {max(0, room)} 字节")
         job = Job(secrets.token_hex(8), owner, bool(scope.private_access), key, destination, kind, conflict, keep_archive,
                   archive_size=info.size)
+        job.partial = selection is not None
         if plan is not None:
             job.total_files = sum(1 for entry, _ in plan if not entry.is_dir)
             job.total_bytes = sum(entry.size for entry, _ in plan if not entry.is_dir)

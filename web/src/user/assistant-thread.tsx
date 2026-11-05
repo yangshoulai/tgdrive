@@ -968,7 +968,7 @@ function ShareBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
 
 const ACTION_ICONS: Record<string, IconName> = { rename: "edit", move: "move", organize: "folder", mkdir: "folderPlus", trash: "trash",
   restore: "restore", purge: "trash", unshare: "link", share: "link", downloads: "download", download_control: "download",
-  save_attachment: "paperclip", move_out: "unlock", move_in: "lock" };
+  save_attachment: "paperclip", move_out: "unlock", move_in: "lock", media: "music" };
 const STATUS_LABEL: Record<string, [string, Tone]> = {
   loading: ["正在获取状态", "neutral"], pending: ["待确认", "accent"], confirmed: ["准备执行", "accent"],
   running: ["执行中", "accent"], done: ["已完成", "success"], partial: ["部分完成", "warning"],
@@ -1037,6 +1037,102 @@ function ItemRow({ kind, item, base }: { kind: string; item: ai.ActionItem; base
     {files !== null && <small className={files ? "tone-warning" : undefined}>{files ? `含 ${files.toLocaleString("zh-CN")} 个文件` : "空目录"}</small>}</li>;
 }
 
+/* ---------- 获取封面、歌词与字幕（§40） ---------- */
+
+const MEDIA_WANTS: Record<ai.MediaActionWant, [string, IconName]> = { cover: ["封面", "image"], lyrics: ["歌词", "music"], subtitle: ["字幕", "fileText"] };
+const clock = (value: number) => `${Math.floor(value / 60)}:${String(Math.round(value % 60)).padStart(2, "0")}`;
+const sameLength = (file?: number | null, candidate?: number | null) => file != null && candidate != null && Math.abs(file - candidate) <= Math.max(3, file * 0.02);
+export type MediaSelection = Record<string, number | null>;
+
+/** 媒体操作的候选选择：每个条目（一个文件的一种数据）选一项或保留现有；候选图片与全文经服务器读取。 */
+function MediaChoices({ action, pending, value, onChange }: {
+  action: ai.AssistantAction; pending: boolean; value: MediaSelection | null; onChange: (next: MediaSelection) => void;
+}) {
+  const [items, setItems] = useState<ai.ActionItem[] | null>(null);
+  const [failed, setFailed] = useState("");
+  const [reading, setReading] = useState<{ title: string; text: string | null } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const all: ai.ActionItem[] = [];
+      for (let offset: number | null = 0; offset !== null;) {
+        const page = await ai.actionItems(action.id, offset);
+        all.push(...page.items);
+        offset = page.next_offset;
+      }
+      if (!alive) return;
+      setItems(all);
+      onChange(Object.fromEntries(all.map((item, index) => [String(index), item.choice ?? null])));
+    })().catch(reason => { if (alive) setFailed(api.errorMessage(reason, "候选加载失败，请稍后重试")); });
+    return () => { alive = false; };
+  }, [action.id]);
+  async function readFull(index: number, candidate: number, title: string) {
+    setReading({ title, text: null });
+    try { const text = await ai.actionMediaText(action.id, index, candidate); setReading(current => current && { ...current, text }); }
+    catch (reason) { setReading(null); toast.error(api.errorMessage(reason, "全文读取失败，请稍后重试")); }
+  }
+  if (failed) return <p className="ai-card-note tone-danger" role="alert">{failed}</p>;
+  if (!items || !value) return <SkeletonRows rows={3} />;
+  return <div className="ai-media">
+    {items.map((item, index) => <MediaChoice key={index} id={action.id} index={index} item={item} pending={pending}
+      chosen={value[String(index)] ?? null} onChoose={choice => onChange({ ...value, [String(index)]: choice })}
+      onRead={(candidate, title) => void readFull(index, candidate, title)} />)}
+    {reading && <Modal className="assistant-dialog" title={reading.title} size="lg" onClose={() => setReading(null)} footer={<Button onClick={() => setReading(null)}>关闭</Button>}>
+      {reading.text === null ? <SkeletonRows rows={6} /> : <pre className="ai-media-full">{reading.text}</pre>}
+    </Modal>}
+  </div>;
+}
+
+function MediaChoice({ id, index, item, pending, chosen, onChoose, onRead }: {
+  id: string; index: number; item: ai.ActionItem; pending: boolean; chosen: number | null;
+  onChoose: (choice: number | null) => void; onRead: (candidate: number, title: string) => void;
+}) {
+  const want = item.want ?? "cover";
+  const [label, icon] = MEDIA_WANTS[want];
+  const candidates = item.candidates ?? [];
+  const [broken, setBroken] = useState<Set<number>>(() => new Set());
+  const keep = item.exists ? "保留现有" : "不保存";
+  return <section className="ai-media-item">
+    <header className="ai-media-head"><Icon name={icon} size={13} /><PathText path={item.path ?? ""} /><Badge tone="neutral">{label}</Badge></header>
+    {item.exists && <p className="ai-card-note"><Icon name="alert" size={13} />{item.exists}{pending ? chosen === null ? "，当前保留现有" : "，选中的结果会覆盖它" : ""}</p>}
+    {item.note && <p className="ai-card-note"><Icon name="info" size={13} />{item.note}</p>}
+    {want === "cover" ? <div className="ai-media-covers" role="radiogroup" aria-label={`${baseName(item.path ?? "")}的${label}`}>
+      <button type="button" role="radio" aria-checked={chosen === null} className="ai-media-cover is-keep" disabled={!pending} onClick={() => onChoose(null)}>
+        <Icon name={item.exists ? "check" : "x"} size={16} /><span className="ai-media-cover-label">{keep}</span></button>
+      {candidates.map((candidate, n) => <button key={n} type="button" role="radio" aria-checked={chosen === n} className="ai-media-cover" disabled={!pending}
+        title={[candidate.title, candidate.subtitle, candidate.provider_name].filter(Boolean).join(" · ")} onClick={() => onChoose(n)}>
+        {broken.has(n) ? <span className="ai-media-cover-missing"><Icon name="image" size={16} /></span>
+          : <img src={ai.actionMediaUrl(id, index, n)} alt="" loading="lazy" onError={() => setBroken(current => new Set(current).add(n))} />}
+        <span className="ai-media-cover-label">{candidate.provider_name}</span>
+        {n === item.best && <span className="ai-media-best">推荐</span>}
+      </button>)}
+    </div>
+      : <ul className="ai-media-list" role="radiogroup" aria-label={`${baseName(item.path ?? "")}的${label}`}>
+        <li><button type="button" role="radio" aria-checked={chosen === null} className="ai-media-option" disabled={!pending} onClick={() => onChoose(null)}>
+          <span className="ai-media-radio" aria-hidden="true" /><span className="ai-media-option-body"><strong>{keep}</strong></span></button></li>
+        {candidates.map((candidate, n) => <li key={n}>
+          <button type="button" role="radio" aria-checked={chosen === n} className="ai-media-option" disabled={!pending} onClick={() => onChoose(n)}>
+            <span className="ai-media-radio" aria-hidden="true" />
+            <span className="ai-media-option-body">
+              <span className="ai-media-option-title"><strong>{candidate.title || "未命名"}</strong>{candidate.subtitle && <small>{candidate.subtitle}</small>}</span>
+              <span className="ai-media-tags">
+                <span>{candidate.provider_name}</span>
+                {n === item.best && <span className="is-best">推荐</span>}
+                {want === "lyrics" && <span>{candidate.synced ? "能滚动" : "不能滚动"}</span>}
+                {sameLength(item.duration, candidate.duration) ? <span>时长一致</span> : candidate.duration ? <span>{clock(candidate.duration)}</span> : null}
+                {candidate.language && <span>{candidate.language}</span>}
+                {candidate.hash_match && <span>文件哈希一致</span>}
+              </span>
+              {candidate.preview && <span className="ai-media-preview">{candidate.preview}</span>}
+            </span>
+          </button>
+          <button type="button" className="ai-link" onClick={() => onRead(n, `${candidate.title || label} · ${candidate.provider_name}`)}>全文</button>
+        </li>)}
+      </ul>}
+    {item.target && chosen !== null && <small className="ai-media-target">保存为同目录的「{item.target}」</small>}
+  </section>;
+}
+
 /** 移入回收站时提示文件夹里还有多少文件，避免「删除空目录」误带上非空文件夹。 */
 function TrashChips({ options }: { options?: { only_empty?: boolean; files?: number; nonempty?: number } }) {
   if (options?.only_empty) return <span><Icon name="shield" size={12} />仅空目录，执行前再核对</span>;
@@ -1095,6 +1191,7 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
   const [target, setTarget] = useState<string | null>(null);
   const [targetReady, setTargetReady] = useState(false);
   const [verify, setVerify] = useState("");
+  const [mediaChoices, setMediaChoices] = useState<MediaSelection | null>(null);
   // 通行密钥断言只用于这一次确认：随确认请求提交，不在界面里保存。
   const passkeyAssertion = useRef<{ request_id: string; credential: unknown } | null>(null);
   const status = value?.status ?? "pending";
@@ -1119,6 +1216,8 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
   const unlocked = Boolean(api.getPrivateAccess());
   const crossBlocked = cross && (!targetReady || (moveOut ? !verify && !password : !unlocked));
   const crossInput = () => ({ target: moveOut ? chosen : chosen.slice(api.PRIVATE_PREFIX.length) });
+  const media = kind === "media";
+  const picked = mediaChoices ? Object.values(mediaChoices).filter(choice => choice !== null).length : 0;
   const iconTone: Tone = danger || moveOut ? "danger" : share ? "public" : status === "done" ? "success" : "accent";
   return <section className={`ai-card ai-action is-${expired ? "expired" : status}${danger || moveOut ? " is-danger" : ""}`}>
     <CardHead icon={ACTION_ICONS[kind] ?? "check"} tone={iconTone} title={payload.title ?? ai.ACTION_KINDS[kind] ?? kind} subtitle={payload.summary}
@@ -1133,8 +1232,9 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
       {kind === "trash" && <TrashChips options={payload.options} />}
     </div>
     {payload.confirm_reason && pending && <p className="ai-card-note"><Icon name="shield" size={13} />{payload.confirm_reason}</p>}
-    {samples.length > 0 && <ItemList kind={kind} items={samples.slice(0, 3)} />}
-    {(value.count > 3 || (payload.conflicts ?? 0) > 0) && <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {value.count.toLocaleString("zh-CN")} 项</button>}
+    {media && <MediaChoices action={value} pending={pending} value={mediaChoices} onChange={setMediaChoices} />}
+    {!media && samples.length > 0 && <ItemList kind={kind} items={samples.slice(0, 3)} />}
+    {((!media && value.count > 3) || (payload.conflicts ?? 0) > 0) && <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {value.count.toLocaleString("zh-CN")} 项</button>}
     {share && pending && <div className="ai-share-form">
       <label><span>有效期</span><select className="input input-sm" value={days} onChange={event => setShareDays(Number(event.target.value))}>
         {SHARE_DAYS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
@@ -1158,7 +1258,7 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
       <span>{formatDateTime(value.expires_at)} 前有效</span>
       {pending && <>
         <Button size="sm" disabled={Boolean(busy)} loading={busy === "reject"} onClick={() => void run("reject", () => ai.rejectAction(id))}>拒绝</Button>
-        <Button size="sm" variant={danger || moveOut ? "danger" : "primary"} disabled={Boolean(busy) || (danger && !acknowledged) || (share && password.length > 0 && password.length < 4) || crossBlocked}
+        <Button size="sm" variant={danger || moveOut ? "danger" : "primary"} disabled={Boolean(busy) || (danger && !acknowledged) || (share && password.length > 0 && password.length < 4) || crossBlocked || (media && !mediaChoices)}
           loading={busy === "confirm"} aria-label={`确认执行：${payload.title ?? kind} ${value.count} 项`}
           onClick={() => { if (many && !armed) { setArmed(true); return; }
             if (cross) {
@@ -1174,8 +1274,9 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
               return;
             }
             void run("confirm", () => ai.confirmAction(id, { acknowledge: danger ? acknowledged : undefined, count: many ? value.count : undefined,
-              share: share ? { expires_days: days, ...(password ? { password } : {}) } : undefined })); }}>
-          {many && armed ? `确认执行 ${value.count.toLocaleString("zh-CN")} 项` : share ? "确认分享" : moveOut ? "验证并移出" : kind === "move_in" ? "确认移入" : "确认执行"}</Button>
+              share: share ? { expires_days: days, ...(password ? { password } : {}) } : undefined,
+              choices: media ? mediaChoices ?? undefined : undefined })); }}>
+          {media ? picked ? `保存所选 ${picked} 项` : "不保存" : many && armed ? `确认执行 ${value.count.toLocaleString("zh-CN")} 项` : share ? "确认分享" : moveOut ? "验证并移出" : kind === "move_in" ? "确认移入" : "确认执行"}</Button>
       </>}
     </footer>}
     {details && <ActionItemsDialog action={value} onClose={() => setDetails(false)} />}

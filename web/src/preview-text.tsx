@@ -18,7 +18,8 @@ import { NotebookPreview } from "./preview-notebook";
 const VIEW_LABEL: Record<TextView, string> = { markdown: "预览", table: "表格", tree: "结构", notebook: "笔记本" };
 
 /** 文本编辑：save 按原编码覆盖原文件（force 为真时不校验版本），reload 读取最新版本；onDirty 报告是否有未保存的修改。 */
-export type TextEdit = { save: (text: string, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void };
+export type TextEdit = { save: (text: string, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void;
+  /** 打开后直接进入编辑（刚新建的空文件）。 */ start?: boolean };
 
 /** 沉浸式预览的头部插槽与更多菜单；为 null 时使用内嵌工具栏。 */
 export const PreviewToolsContext = createContext<{ target: HTMLElement; compact: boolean; setMenuItems: (items: MenuItem[]) => void } | null>(null);
@@ -132,6 +133,13 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
     };
   }, [content.text, name, mode, editorRevision]);
   useEffect(() => { edit?.onDirty(dirty); }, [dirty]);
+  // 新建的文件：编辑器就绪后直接进入编辑并聚焦，只自动进入一次。
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!edit?.start || !ready || autoStarted.current || editBlocked) return;
+    autoStarted.current = true;
+    startEditing();
+  }, [ready]);  // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => edit?.onDirty(false), []);
   async function save(force: boolean) {
     if (!edit || saving) return;

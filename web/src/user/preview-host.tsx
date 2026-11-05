@@ -4,7 +4,9 @@ import { usePrivateAccess } from "./private-session";
 import { PreviewModal, getFileKind, parentPath } from "../files";
 import { toast } from "../ui";
 import { MediaLookupDialog } from "./media-lookup";
+import { generateLoadedThumbnails, thumbnailsFromBlob } from "../thumbnails";
 import { ThumbnailEditor } from "./thumbnail-editor";
+import { ExtractDialog } from "./extract";
 
 /**
  * 预览弹窗挂在应用外壳上，不随页面切换卸载：用户最小化后去看别的页面，播放不中断；
@@ -15,7 +17,7 @@ import { ThumbnailEditor } from "./thumbnail-editor";
  * 私密空间的文件在离开私密空间或锁定时立即关闭，不能跟着用户留在普通页面上。
  */
 type ModalProps = ComponentProps<typeof PreviewModal>;
-export type PreviewRequest = Omit<ModalProps, "onClose" | "minimizeRequest" | "onFindMedia">;
+export type PreviewRequest = Omit<ModalProps, "onClose" | "minimizeRequest" | "onFindMedia" | "onMissingCover">;
 type Slot = "video" | "audio" | "image" | "document";
 type Current = { id: number; owner: string; request: PreviewRequest; minimize: number };
 type Host = { open: (owner: string, request: PreviewRequest) => void; update: (file: api.FileItem) => void; sync: (owner: string, files: api.FileItem[]) => void; release: (owner: string) => void };
@@ -103,12 +105,35 @@ export function PreviewHost({ children, privateAllowed, enabled }: { children: R
   const close = useCallback((id: number) => setSlots(current => mapSlots(current, value => value.id === id ? null : value)), []);
   // 播放器里的「在线查找歌词／字幕／封面」：弹窗挂在预览宿主上，离开打开预览的页面后仍可使用。
   const [finding, setFinding] = useState<{ file: api.FileItem; want: api.MediaWant } | null>(null);
+  // 打开预览的页面没有提供解压（如从其他页面打开、或页面已离开）时，由宿主打开解压对话框，预览里的「解压到…」始终可用。
+  const [extracting, setExtracting] = useState<{ file: api.FileItem; picks?: string[] } | null>(null);
+  const extract = useCallback((file: api.FileItem, picks?: string[]) => setExtracting({ file, picks }), []);
   const findMedia = useCallback((file: api.FileItem, want: api.MediaWant) => setFinding({ file, want }), []);
+  // 文件带内嵌封面却还没有封面（S3、API、离线下载写入且服务器没有 FFmpeg，或旧文件）：播放时取出内嵌封面在浏览器缩放保存。
+  // 普通生成权（不强制）：文件已有封面或别处正在生成时服务器拒绝，所以不会覆盖已有或用户设置的封面。每个版本只尝试一次。
+  const coverTried = useRef(new Set<string>());
+  const missingCover = useCallback((file: api.FileItem) => {
+    const id = `${file.key}\n${file.etag}`;
+    if (coverTried.current.has(id)) return;
+    coverTried.current.add(id);
+    void (async () => {
+      const info = await api.mediaInfo(file.key);
+      if (!info.cover || info.etag !== file.etag) return;
+      const image = await api.embeddedCover(file.key, file.etag);
+      const saved = await generateLoadedThumbnails(file, () => thumbnailsFromBlob(image));
+      if (!saved?.includes("thumb")) return;
+      const stamp = String(Date.now());
+      host.update({ ...file, thumbnails: saved, thumbnail_status: "ready", has_thumbnail: true, thumbnail_versions: Object.fromEntries(saved.map(variant => [variant, stamp])) });
+      window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [parentPath(file.key)] } }));
+    })().catch(() => undefined);
+  }, [host]);
   useEffect(() => { if (finding && (!enabled || api.isPrivatePath(finding.file.key) && !privateAllowed)) setFinding(null); }, [finding, enabled, privateAllowed]);
+  useEffect(() => { if (extracting && (!enabled || api.isPrivatePath(extracting.file.key) && !privateAllowed)) setExtracting(null); }, [extracting, enabled, privateAllowed]);
   return <HostContext.Provider value={host}>
     {children}
     {enabled && [...slots.values()].map(value => (!api.isPrivatePath(value.request.file.key) || privateAllowed)
-      && <PreviewModal key={value.id} {...value.request} onFindMedia={findMedia} minimizeRequest={value.minimize} onClose={() => close(value.id)} />)}
+      && <PreviewModal key={value.id} {...value.request} onExtract={value.request.onExtract ?? extract} onFindMedia={findMedia} onMissingCover={missingCover} minimizeRequest={value.minimize} onClose={() => close(value.id)} />)}
+    {extracting && <ExtractDialog file={extracting.file} picks={extracting.picks} onClose={() => setExtracting(null)} />}
     {finding && finding.want !== "cover" && <MediaLookupDialog file={finding.file} want={finding.want} onClose={() => setFinding(null)} />}
     {finding && finding.want === "cover" && <ThumbnailEditor file={finding.file} initialSource="online" onClose={() => setFinding(null)}
       onSaved={variants => {

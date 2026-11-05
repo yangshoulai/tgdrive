@@ -236,6 +236,42 @@ class MediaServiceTests(unittest.TestCase):
         status, body, _ = self.call("POST", "/api/user/v1/media/save", {"path": "音乐/晴天.mp3", "token": candidate["token"]})
         self.assertEqual(status, 400)
 
+    def test_video_cover_filters_unrelated_results(self):
+        self.http.add("https://movie.douban.com/j/subject_suggest", (200, [
+            {"title": "盗梦空间", "sub_title": "Inception", "year": "2010", "type": "movie", "img": "https://img9.doubanio.com/view/photo/s_ratio_poster/public/a.jpg"},
+            {"title": "完全无关的片子", "sub_title": "", "year": "1999", "type": "movie", "img": "https://img9.doubanio.com/view/photo/s_ratio_poster/public/b.jpg"}]))
+        data = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64
+        self.put("视频/盗梦空间.Inception.2010.1080p.mp4", data, "video/mp4")
+        status, body, _ = self.call("POST", "/api/user/v1/media/lookup", {"path": "视频/盗梦空间.Inception.2010.1080p.mp4", "want": "cover", "providers": ["douban"]})
+        self.assertEqual(status, 200, body)
+        self.assertEqual([item["title"] for item in body["candidates"]], ["盗梦空间"])
+        self.assertEqual(body["providers"], [{"id": "douban", "name": "豆瓣电影", "official": False, "count": 1, "error": None}])
+
+    def test_embedded_cover_endpoint(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
+        picture = b"\x00image/png\x00\x03\x00" + png
+        info = self.put("音乐/有封面.mp3", id3([("APIC", picture), ("TIT2", b"\x03Song")]) + mpeg_frames(4))
+        status, data, headers = self.call("GET", f"/api/user/v1/media/cover?path={quote('音乐/有封面.mp3')}&etag={info.etag}")
+        self.assertEqual((status, headers["content-type"], data), (200, "image/png", png))
+        info = self.put("音乐/无封面.mp3", song())
+        self.assertEqual(self.call("GET", f"/api/user/v1/media/cover?path={quote('音乐/无封面.mp3')}&etag={info.etag}")[0], 404)
+
+    def test_commit_records_metadata_in_background(self):
+        async def scenario():
+            self.app.media.COMMIT_DELAY = 0
+            self.app.media.start()
+            data = song(title="后台记录")
+            info = await self.app.objects.put_object(self.scope, "音乐/后台.mp3", data, len(data), "audio/mpeg")
+            for _ in range(50):
+                row = self.app.metadata.db.execute("SELECT title FROM media_info WHERE blob_uuid=?", (info.blob_uuid,)).fetchone()
+                if row:
+                    break
+                await asyncio.sleep(0.02)
+            await self.app.media.stop()
+            return row
+        row = self.wait(scenario())
+        self.assertEqual(row["title"], "后台记录")
+
     def test_lookup_rate_limit(self):
         self.lrclib()
         self.put("音乐/晴天.mp3", song())

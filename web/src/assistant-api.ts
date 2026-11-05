@@ -225,7 +225,7 @@ export type MessageAttachment = { id: string; name: string; size: number; conten
 export const ACTION_KINDS: Record<string, string> = {
   rename: "批量改名", move: "移动", organize: "整理文件", mkdir: "新建文件夹", trash: "移入回收站", restore: "从回收站恢复",
   purge: "彻底删除", unshare: "取消公开", share: "公开分享", downloads: "离线下载", download_control: "下载任务操作",
-  save_attachment: "保存附件", move_out: "移出私密空间", move_in: "移入私密空间",
+  save_attachment: "保存附件", move_out: "移出私密空间", move_in: "移入私密空间", media: "获取封面、歌词与字幕",
 };
 export type ActionStatus = "pending" | "confirmed" | "rejected" | "expired" | "running" | "done" | "partial" | "failed" | "cancelled"
   | "interrupted" | "undoing" | "undone";
@@ -233,7 +233,15 @@ export type ActionStatus = "pending" | "confirmed" | "rejected" | "expired" | "r
 export type ActionItem = { from?: string; to?: string; path?: string; id?: string | number; name?: string; url?: string; host?: string;
   size?: number; folder?: boolean; op?: string; status?: string; variant?: string | null; attachment?: string;
   /** 移入回收站的文件夹内的文件数（0 为空目录） */
-  files?: number };
+  files?: number;
+  /** 获取封面、歌词与字幕（media）：每个条目是一个文件的一种数据 */
+  want?: MediaActionWant; exists?: string | null; note?: string; duration?: number | null; candidates?: MediaActionCandidate[];
+  best?: number | null; choice?: number | null; target?: string | null };
+export type MediaActionWant = "cover" | "lyrics" | "subtitle";
+/** 媒体候选（来源引用只在服务端）；封面图与歌词、字幕全文经 actionMediaUrl 读取。 */
+export type MediaActionCandidate = { provider: string; provider_name: string; title: string; subtitle: string; synced: boolean | null;
+  language: string | null; format: string | null; duration: number | null; width: number | null; height: number | null;
+  preview: string | null; note: string; score: number; hash_match: boolean; image: boolean };
 export type ShareLink = { path: string; token: string; folder: boolean; expires_at: number | null; password: boolean };
 export type ActionResult = { ok: number; skipped: number; failed: number; total: number; reasons: Record<string, number>;
   failures: { path: string; reason: string; status: "skipped" | "failed" }[]; links?: ShareLink[] };
@@ -309,8 +317,14 @@ export const actionItems = (id: string, offset = 0) =>
     `${USER}/actions/${encodeURIComponent(id)}/items${query({ offset: offset || undefined })}`);
 /** 跨区移动（§24.5.3）：target 为卡片上选择的目标目录（相对路径）；移出私密空间还要带登录密码或通行密钥断言。 */
 export type ConfirmInput = { acknowledge?: boolean; count?: number; share?: { expires_days?: number; password?: string };
+  /** 媒体操作：条目编号 → 选中的候选编号（null 为保留现有） */
+  choices?: Record<string, number | null>;
   target?: string; password?: string; passkey?: { request_id: string; credential: unknown } };
 export const confirmAction = (id: string, input: ConfirmInput = {}) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/confirm`, input);
+/** 媒体操作的候选内容：封面默认是小图，full 为原图；歌词、字幕是全文（text/plain）。 */
+export const actionMediaUrl = (id: string, item: number, candidate: number, full = false) =>
+  `${USER}/actions/${encodeURIComponent(id)}/media/${item}/${candidate}${full ? "?full=1" : ""}`;
+export const actionMediaText = (id: string, item: number, candidate: number) => guard(apiBlob(actionMediaUrl(id, item, candidate, true))).then(blob => blob.text());
 export const rejectAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/reject`, {});
 export const cancelAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/cancel`, {});
 export const undoAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/undo`, {});

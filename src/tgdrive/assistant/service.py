@@ -32,9 +32,9 @@ from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
 from ..objects import PRIVATE_PREFIX, Scope
 from ..offline.request import checked_url
-from . import client_tools, export, http_tools, knowledge, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
+from . import client_tools, export, http_tools, knowledge, media_tools, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
 from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
-from .actions import DANGER_KINDS, KINDS, ActionExecutor, Progress, share_options
+from .actions import DANGER_KINDS, KINDS, ActionExecutor, Progress, media_choices, share_options
 from .catalog import CatalogStore
 from .channels import ChannelStore
 from .config import HTTP_APPROVAL_TIMEOUT, LIMITS, PRIVATE_MARKED, PRIVATE_NOTICE, AssistantConfig
@@ -198,6 +198,9 @@ class ContextFull(Exception):
 
 
 class AssistantService:
+    # 媒体信息服务（在线获取封面、歌词、字幕），由 HTTP 层注入。
+    media = None
+
     def __init__(self, accounts, objects, offline=None, *, user_api=None, settings=None) -> None:
         self.accounts, self.objects, self.offline, self.user_api = accounts, objects, offline, user_api
         self.settings = settings
@@ -1109,6 +1112,29 @@ class AssistantService:
         _, account = self._session(token)
         return self._action_view(self.trace.action_json(self._action_row(token, account, action_id)))
 
+    async def action_media(self, token: str, action_id: str, item: int, candidate: int, *, full: bool = False) -> tuple[bytes, str]:
+        """媒体操作的候选内容（给确认卡片）：封面的小图或原图、歌词与字幕的全文。经服务器读取，浏览器不连接第三方。"""
+        _, account = self._session(token)
+        row = self._action_row(token, account, action_id)
+        if row["kind"] != "media" or self.media is None:
+            raise ValueError("这个操作没有媒体候选")
+        payload = self.trace.action_payload(row)
+        items = payload.get("items") or []
+        frozen = (payload.get("_refs") or {}).get(f"{item}:{candidate}")
+        if not 0 <= item < len(items) or not isinstance(frozen, dict):
+            raise NotFoundError("候选不存在")
+        private = self._action_private(row, payload)
+        if private:
+            self._require_unlocked(token)
+        entry = items[item]
+        scope = self.executor._scope(account.bucket_id, payload.get("scope", ""), self._guard(token, private))
+        if entry["want"] == "cover" and not full:
+            return await self.media.preview_frozen(scope, entry["path"], entry["etag"], frozen["provider"], "cover", frozen["ref"])
+        fetched = await self.media.fetch_frozen(scope, entry["path"], entry["etag"], frozen["provider"], entry["want"], frozen["ref"])
+        if entry["want"] == "cover":
+            return fetched.data, fetched.mime
+        return fetched.text.encode("utf-8"), "text/plain; charset=utf-8"
+
     def action_items(self, token: str, action_id: str, offset: int = 0) -> dict[str, object]:
         _, account = self._session(token)
         row = self._action_row(token, account, action_id)
@@ -1181,6 +1207,10 @@ class AssistantService:
             share = payload.get("share") if isinstance(payload.get("share"), dict) else {}
             confirm = {key: share[key] for key in ("expires_days", "password") if key in share}
             share_options(action_payload, confirm)
+        if row["kind"] == "media":
+            # 卡片上为每个条目选择的候选编号（null 为保留现有）。
+            confirm = {"choices": payload.get("choices") if isinstance(payload.get("choices"), dict) else {}}
+            media_choices(action_payload, confirm)
         if not self.trace.start_action(action_id):
             raise ValueError("该操作已处理或已过期")
         self._launch_action(row, account, token, action_payload, confirm, "已确认")
@@ -1995,6 +2025,7 @@ class AssistantService:
                                   url_allowed=self._url_allowed(state.conversation_id),
                                   require_private=lambda: self._private_call(state, spec),
                                   private_state=lambda: self._private_state(state),
+                                  media=self.media,
                                   **area)
             timeout = max(limits["tool_seconds"], spec.timeout or 0)
             async with asyncio.timeout(timeout) as tool_timer:

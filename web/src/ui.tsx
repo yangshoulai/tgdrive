@@ -933,7 +933,8 @@ export function LeaveGuard() {
     onConfirm={() => finish(true)} onClose={() => finish(false)} />;
 }
 
-export type MenuItem = { label: string; description?: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean; shortcut?: string; disabled?: boolean };
+export type MenuItem = { label: string; description?: string; icon: IconName; onSelect: () => void; danger?: boolean; href?: string; divider?: boolean; heading?: string; checked?: boolean; shortcut?: string; disabled?: boolean;
+  /** 二级菜单：悬停、点击或按 → 展开，选中其中一项后整个菜单关闭（此时 onSelect 不会被调用）。 */ children?: MenuItem[] };
 
 /** 浮层挂载点：全屏时只有全屏元素内的内容可见，所以菜单挂到全屏元素里，否则挂到 body。 */
 const overlayRoot = () => (document.fullscreenElement as HTMLElement | null) ?? document.body;
@@ -954,6 +955,26 @@ function MenuList({ items, label, anchor, onClose, restoreFocus, dark, surface }
   const list = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  // 展开的二级菜单：parent 是父项按钮的位置，place 是测量后实际放置的位置（右侧放不下时放到左侧）。
+  const [sub, setSub] = useState<{ label: string; parent: DOMRect; focus: boolean } | null>(null);
+  const [subPlace, setSubPlace] = useState<{ top: number; left: number } | null>(null);
+  const subList = useRef<HTMLDivElement>(null);
+  const subRef = useRef(sub); subRef.current = sub;
+  const openSub = (item: MenuItem, element: HTMLElement, focus: boolean) => {
+    if (subRef.current?.label === item.label) { if (focus) subList.current?.querySelector<HTMLElement>("[role^=menuitem]")?.focus(); return; }
+    setSubPlace(null);
+    setSub({ label: item.label, parent: element.getBoundingClientRect(), focus });
+  };
+  useLayoutEffect(() => {
+    if (!sub || !subList.current) return;
+    const width = subList.current.offsetWidth, height = subList.current.offsetHeight;
+    const right = sub.parent.right + 4, left = sub.parent.left - width - 4;
+    setSubPlace({ top: Math.max(8, Math.min(sub.parent.top - 4, window.innerHeight - height - 8)),
+      left: right + width <= window.innerWidth - 8 || left < 8 ? Math.max(8, Math.min(right, window.innerWidth - width - 8)) : left });
+  }, [sub]);
+  useLayoutEffect(() => {
+    if (sub?.focus && subPlace) subList.current?.querySelector<HTMLElement>("[role^=menuitem]")?.focus({ preventScroll: true });
+  }, [subPlace]);
   useLayoutEffect(() => {
     if (!list.current) return;
     const point = anchor();
@@ -969,14 +990,29 @@ function MenuList({ items, label, anchor, onClose, restoreFocus, dark, surface }
   }, [position]);
   useEffect(() => {
     const close = () => closeRef.current();
-    const scrolled = (event: Event) => { if (!list.current?.contains(event.target as Node)) close(); };
-    const outside = (event: Event) => { if (!list.current?.contains(event.target as Node)) close(); };
+    const within = (target: EventTarget | null) => Boolean(list.current?.contains(target as Node) || subList.current?.contains(target as Node));
+    const scrolled = (event: Event) => { if (!within(event.target)) close(); };
+    const outside = (event: Event) => { if (!within(event.target)) close(); };
     const key = (event: KeyboardEvent) => {
+      const inSub = Boolean(subList.current?.contains(document.activeElement));
+      const parentOf = () => list.current?.querySelector<HTMLElement>(`[data-submenu="${CSS.escape(subRef.current?.label ?? "")}"]`);
+      // 二级菜单里按 Esc 或 ← 只收起二级菜单，焦点回到父项。
+      if ((event.key === "Escape" || event.key === "ArrowLeft") && subRef.current) {
+        event.preventDefault(); event.stopPropagation();
+        const parent = parentOf();
+        setSub(null); parent?.focus();
+        return;
+      }
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); restoreFocus?.(); }
       if (event.key === "Tab") { event.preventDefault(); close(); restoreFocus?.(); }
+      if (event.key === "ArrowRight" && !inSub) {
+        const active = document.activeElement as HTMLElement | null;
+        if (active?.dataset.submenu) { event.preventDefault(); active.click(); }
+      }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
-        const entries = Array.from(list.current?.querySelectorAll<HTMLElement>("[role^=menuitem]") ?? []);
+        const scope = inSub ? subList.current : list.current;
+        const entries = Array.from(scope?.querySelectorAll<HTMLElement>(inSub ? "[role^=menuitem]" : ":scope > [role^=menuitem]") ?? []);
         const index = entries.indexOf(document.activeElement as HTMLElement);
         entries[(index + (event.key === "ArrowDown" ? 1 : -1) + entries.length) % entries.length]?.focus();
       }
@@ -1001,23 +1037,50 @@ function MenuList({ items, label, anchor, onClose, restoreFocus, dark, surface }
       document.removeEventListener("scroll", scrolled, true);
     };
   }, []);
-  return createPortal(
+  const menu = createPortal(
     <div ref={list} className={`menu${items.some(item => item.description !== undefined) ? " has-descriptions" : ""}${dark ? " is-dark" : ""}${surface ? " has-media-surface" : ""}${surface?.cover ? " has-cover" : ""}`} role="menu" aria-label={label}
       style={{ ...(position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }), ...(surface ? { "--preview-tint": surface.tint || undefined, "--preview-cover": surface.cover || undefined } : {}) } as CSSProperties}
       onClick={event => event.stopPropagation()} onContextMenu={event => event.preventDefault()}>
       {items.map(item => {
+        if (item.children) {
+          const expanded = sub?.label === item.label;
+          const element = <button key={item.label} type="button" role="menuitem" aria-haspopup="menu" aria-expanded={expanded} data-submenu={item.label}
+            className={`menu-item has-submenu${expanded ? " is-expanded" : ""}${item.divider && !item.heading ? " has-divider" : ""}`} disabled={item.disabled}
+            onPointerEnter={event => { if (event.pointerType === "mouse") openSub(item, event.currentTarget, false); }}
+            onClick={event => openSub(item, event.currentTarget, true)}>
+            <Icon name={item.icon} size={16} /><span className="menu-copy"><span>{item.label}</span></span><Icon name="chevronRight" size={14} className="menu-submenu-arrow" />
+          </button>;
+          return item.heading ? <Fragment key={item.label}><div className={`menu-heading${item.divider ? " has-divider" : ""}`} role="presentation">{item.heading}</div>{element}</Fragment> : element;
+        }
         const content = <><Icon name={item.icon} size={16} /><span className="menu-copy"><span>{item.label}</span>{item.description !== undefined && <small title={item.description}>{item.description}</small>}</span>{item.checked ? <span className="menu-check"><Icon name="check" size={15} /></span> : item.shortcut && <kbd className="menu-shortcut">{shortcutLabel(item.shortcut)}</kbd>}</>;
         // 带标题的分组：标题承担分隔线，选项用 menuitemradio 表示单选状态。
         const className = `menu-item${item.description !== undefined ? " has-description" : ""}${item.danger ? " is-danger" : ""}${item.divider && !item.heading ? " has-divider" : ""}`;
         const role = item.checked === undefined ? "menuitem" : "menuitemradio";
         const element = item.href
           ? <a key={item.label} role={role} className={className} aria-keyshortcuts={item.shortcut ? shortcutAria(item.shortcut) : undefined} href={item.href} onClick={() => onClose()}>{content}</a>
-          : <button key={item.label} type="button" role={role} aria-keyshortcuts={item.shortcut ? shortcutAria(item.shortcut) : undefined} aria-checked={item.checked === undefined ? undefined : item.checked} className={className} disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>{content}</button>;
+          : <button key={item.label} type="button" role={role} aria-keyshortcuts={item.shortcut ? shortcutAria(item.shortcut) : undefined} aria-checked={item.checked === undefined ? undefined : item.checked} className={className} disabled={item.disabled}
+            onPointerEnter={event => { if (event.pointerType === "mouse" && subRef.current) setSub(null); }} onClick={() => { onClose(); item.onSelect(); }}>{content}</button>;
         return item.heading ? <Fragment key={item.label}><div className={`menu-heading${item.divider ? " has-divider" : ""}`} role="presentation">{item.heading}</div>{element}</Fragment> : element;
       })}
     </div>,
     overlayRoot(),
   );
+  const submenu = sub && createPortal(<>
+      {sub && (() => {
+        const parent = items.find(item => item.label === sub.label);
+        if (!parent?.children) return null;
+        // 二级菜单单独挂到页面根部（父菜单的模糊背景会让固定定位相对它计算），点外部关闭的判断包含它。
+        return <div ref={subList} className={`menu menu-submenu${parent.children.some(child => child.description !== undefined) ? " has-descriptions" : ""}`} role="menu" aria-label={parent.label} onClick={event => event.stopPropagation()} onContextMenu={event => event.preventDefault()}
+          style={subPlace ? { position: "fixed", top: subPlace.top, left: subPlace.left } : { position: "fixed", visibility: "hidden", top: 0, left: 0 }}>
+          {parent.children.map(child => <button key={child.label} type="button" role="menuitem" className={`menu-item${child.description !== undefined ? " has-description" : ""}${child.danger ? " is-danger" : ""}${child.divider ? " has-divider" : ""}`} disabled={child.disabled}
+            aria-keyshortcuts={child.shortcut ? shortcutAria(child.shortcut) : undefined} onClick={() => { onClose(); child.onSelect(); }}>
+            <Icon name={child.icon} size={16} /><span className="menu-copy"><span>{child.label}</span>{child.description !== undefined && <small title={child.description}>{child.description}</small>}</span>
+            {child.shortcut && <kbd className="menu-shortcut">{shortcutLabel(child.shortcut)}</kbd>}
+          </button>)}
+        </div>;
+      })()}
+  </>, overlayRoot());
+  return <>{menu}{submenu}</>;
 }
 
 export function Menu({ items, label, icon = "more", size = "sm", children, className = "", shortcut, align = "end", above = false }: { shortcut?: string; align?: "start" | "end"; above?: boolean; items: MenuItem[]; label: string; icon?: IconName; size?: "sm" | "md"; children?: ReactNode; className?: string }) {

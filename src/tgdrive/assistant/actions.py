@@ -32,7 +32,9 @@ KINDS = {
     "rename": "批量改名", "move": "移动", "organize": "整理文件", "mkdir": "新建文件夹", "trash": "移入回收站",
     "restore": "从回收站恢复", "purge": "彻底删除", "unshare": "取消公开", "share": "公开分享", "downloads": "离线下载",
     "download_control": "下载任务操作", "save_attachment": "保存附件", "move_out": "移出私密空间", "move_in": "移入私密空间",
+    "media": "获取封面、歌词与字幕",
 }
+MEDIA_LABELS = {"cover": "封面", "lyrics": "歌词", "subtitle": "字幕"}
 MOVE_KINDS = ("rename", "move", "organize")
 DANGER_KINDS = ("purge",)
 # 完全访问模式下仍然必须由用户确认的类型：不可恢复，或会让数据对外可见；跨区移动的目标由用户在卡片上决定。
@@ -52,6 +54,25 @@ def share_options(payload: dict, confirm: dict | None) -> dict[str, object]:
     result: dict[str, object] = {"expires_at": time.time() + days * 86400 if days else None}
     if password:
         result["password"] = password
+    return result
+
+
+def media_choices(payload: dict, confirm: dict | None) -> list[int | None]:
+    """媒体条目各自选中的候选：用户在卡片上的选择（编号或 null＝保留现有）优先；没有选择时
+    自动执行取推荐项（best），确认执行取卡片默认值（choice，已有数据时为保留现有）。"""
+    given = (confirm or {}).get("choices")
+    if given is not None and not isinstance(given, dict):
+        raise ValueError("选择不正确")
+    result: list[int | None] = []
+    for index, item in enumerate(payload.get("items", [])):
+        count = len(item.get("candidates") or [])
+        if given is not None and str(index) in given:
+            value = given[str(index)]
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < count):
+                raise ValueError("选择的候选不正确，请刷新后重试")
+            result.append(value)
+        else:
+            result.append(item.get("best") if payload.get("auto") else item.get("choice"))
     return result
 
 
@@ -116,8 +137,8 @@ def display(key: str) -> str:
 
 
 class ActionExecutor:
-    def __init__(self, objects: ObjectService, offline=None) -> None:
-        self.objects, self.offline = objects, offline
+    def __init__(self, objects: ObjectService, offline=None, media=None) -> None:
+        self.objects, self.offline, self.media = objects, offline, media
 
     @property
     def db(self):
@@ -186,10 +207,14 @@ class ActionExecutor:
             await self._downloads(user_id, scope_root, payload, progress, on_progress, authorized,
                                   scope if scope_root.startswith(PRIVATE_PREFIX) else None)
             return None
+        choices = media_choices(payload, confirm) if kind == "media" else []
+        refs = payload.get("_refs") or {}
         for index, item in enumerate(items):
             if progress.cancel or (authorized is not None and not authorized()):
                 progress.cancel = True
                 break
+            if kind == "media":
+                item = {**item, "chosen": choices[index], "frozen": refs.get(f"{index}:{choices[index]}")}
             try:
                 await self._one(kind, user_id, bucket_id, scope_root, scope, item, progress, undo, share)
             except (PermissionError, ValueError, NotFoundError) as exc:
@@ -217,6 +242,8 @@ class ActionExecutor:
             return display(item.get("path", ""))
         if kind == "download_control":
             return f"任务 #{item['id']}"
+        if kind == "media":
+            return f"{display(item.get('path', ''))}（{MEDIA_LABELS.get(item.get('want'), '')}）"
         return display(item.get("path", ""))
 
     async def _one(self, kind, user_id, bucket_id, scope_root, scope, item, progress: Progress, undo, share=None) -> None:
@@ -326,6 +353,21 @@ class ActionExecutor:
             info = self.objects.link_copy(bucket_id, row["key"], scope, target)
             progress.ok += 1
             undo["created"].append([info.key, info.etag])
+        elif kind == "media":
+            # 保存选中的封面、歌词或字幕（覆盖已有的同类数据）；没有选择的条目保留现有。不可撤销。
+            key, label = item["path"], self._label(kind, item)
+            reason = self._check_source(bucket_id, scope_root, item, key)
+            if reason:
+                progress.skip(label, reason)
+                return
+            frozen = item.get("frozen")
+            if item.get("chosen") is None or not isinstance(frozen, dict):
+                progress.skip(label, "保留现有" if item.get("exists") else "没有选择候选")
+                return
+            if self.media is None:
+                raise ValueError("媒体信息服务不可用")
+            await self.media.save_frozen(scope, key, item["etag"], frozen["provider"], item["want"], frozen["ref"])
+            progress.ok += 1
         elif kind == "download_control":
             if self.offline is None:
                 raise ValueError("离线下载未启用")

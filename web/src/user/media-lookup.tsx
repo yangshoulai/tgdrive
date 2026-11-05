@@ -44,28 +44,56 @@ export function languageTag(value: string | null): string {
 const percent = (value: number) => `${Math.round(value * 100)}%`;
 const timeText = (seconds: number | null) => seconds == null ? "" : `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, "0")}`;
 
-/** 查询条件与结果；打开时先按文件信息自动查找一次。 */
+type Source = { id: string; name: string; state: "loading" | "done" | "failed"; count: number; error: string | null };
+const EMBEDDED = { id: "embedded", name: "内置数据" };
+function embeddedFor(info: api.MediaInfo, want: api.MediaWant) {
+  return info.embedded && (want === "cover" ? info.cover : want === "lyrics" ? Boolean(info.lyrics) : info.subtitles.some(item => item.text));
+}
+
+/** 查询条件与结果；打开时先按文件信息自动查找一次。每个来源单独请求，先返回的先显示，不等最慢的来源。 */
 function useLookup(file: api.FileItem, want: api.MediaWant) {
   const [fields, setFields] = useState<Fields>(emptyFields);
-  const [result, setResult] = useState<api.MediaLookup | null>(null);
-  const [loading, setLoading] = useState(true), [error, setError] = useState("");
+  const [sources, setSources] = useState<Source[]>([]);
+  const [candidates, setCandidates] = useState<api.MediaCandidate[]>([]);
+  const [loading, setLoading] = useState(true), [error, setError] = useState(""), [ready, setReady] = useState(false);
   const request = useRef<AbortController | null>(null);
+  const providers = useRef<{ id: string; name: string }[] | null>(null);
   async function search(overrides?: Partial<api.MediaQueryFields>) {
     request.current?.abort();
-    const controller = new AbortController();
+    const controller = new AbortController(), signal = controller.signal;
     request.current = controller;
-    setLoading(true); setError("");
+    setLoading(true); setError(""); setCandidates([]);
     try {
-      const value = await api.mediaLookup(file.key, want, overrides, undefined, controller.signal);
-      if (controller.signal.aborted) return;
-      setResult(value);
-      if (!overrides) setFields(fieldsOf(value.query));
+      if (!providers.current) {
+        const info = await api.mediaInfo(file.key, signal);
+        providers.current = [...(embeddedFor(info, want) ? [EMBEDDED] : []), ...info.providers[want]];
+      }
+      const list = providers.current;
+      const order = new Map(list.map((item, index) => [item.id, index]));
+      setSources(list.map(item => ({ ...item, state: "loading", count: 0, error: null })));
+      let filled = Boolean(overrides);
+      await Promise.all(list.map(async item => {
+        const update = (patch: Partial<Source>) => setSources(current => current.map(source => source.id === item.id ? { ...source, ...patch } : source));
+        try {
+          const value = await api.mediaLookup(file.key, want, overrides, [item.id], signal);
+          if (signal.aborted) return;
+          if (!filled) { filled = true; setFields(fieldsOf(value.query)); }
+          const status = value.providers[0];
+          update({ state: status?.error ? "failed" : "done", count: value.candidates.length, error: status?.error ?? null });
+          // 内置数据排最前，其余按匹配度，同分时按来源顺序。
+          setCandidates(current => [...current, ...value.candidates].sort((a, b) => Number(b.provider === "embedded") - Number(a.provider === "embedded")
+            || Math.round(b.score * 100) - Math.round(a.score * 100) || (order.get(a.provider) ?? 0) - (order.get(b.provider) ?? 0)));
+        } catch (reason) {
+          if (!signal.aborted) update({ state: "failed", error: api.errorMessage(reason, "查询失败") });
+        }
+      }));
     } catch (reason) {
-      if (!controller.signal.aborted) setError(api.errorMessage(reason, `查找${WANT_LABELS[want]}失败，请稍后重试`));
-    } finally { if (request.current === controller) { request.current = null; setLoading(false); } }
+      if (!signal.aborted) setError(api.errorMessage(reason, `查找${WANT_LABELS[want]}失败，请稍后重试`));
+    } finally { if (request.current === controller) { request.current = null; setLoading(false); setReady(true); } }
   }
-  useEffect(() => { void search(); return () => request.current?.abort(); }, [file.key, file.etag, want]);  // eslint-disable-line react-hooks/exhaustive-deps
-  return { fields, setFields, result, loading, error, search };
+  useEffect(() => { providers.current = null; void search(); return () => request.current?.abort(); }, [file.key, file.etag, want]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const nameOf = (id: string) => sources.find(item => item.id === id)?.name ?? id;
+  return { fields, setFields, sources, candidates, loading, ready, error, search, nameOf };
 }
 type Lookup = ReturnType<typeof useLookup>;
 
@@ -76,7 +104,7 @@ function QueryForm({ lookup, kind, want }: { lookup: Lookup; kind: "audio" | "vi
   const submit = (event: FormEvent) => { event.preventDefault(); event.stopPropagation(); if (fields.title.trim()) void lookup.search(overridesOf(fields, kind)); };
   const input = (key: keyof Fields, label: string, placeholder = "", wide = false) => <label className={`media-lookup-field${wide ? " is-wide" : ""}`} htmlFor={`${id}-${key}`}>
     <span>{label}</span>
-    <input id={`${id}-${key}`} className="input" value={fields[key]} placeholder={placeholder} disabled={loading && !lookup.result}
+    <input id={`${id}-${key}`} className="input" value={fields[key]} placeholder={placeholder} disabled={loading && !fields.title && !lookup.ready}
       inputMode={key === "year" || key === "season" || key === "episode" ? "numeric" : undefined} onChange={event => change({ [key]: event.target.value })} />
   </label>;
   return <form className="media-lookup-query" onSubmit={submit} aria-label="查询条件">
@@ -90,28 +118,23 @@ function QueryForm({ lookup, kind, want }: { lookup: Lookup; kind: "audio" | "vi
   </form>;
 }
 
-/** 各来源的查找情况：数量或失败原因。 */
-function ProviderStatus({ result, want }: { result: api.MediaLookup | null; want: api.MediaWant }) {
-  if (!result) return null;
-  const remote = result.providers.filter(item => item.id !== "embedded");
-  if (!remote.length && !result.providers.length) return <Notice tone="warning">管理员还没有开启能提供{WANT_LABELS[want]}的来源，可以请管理员在「系统设置 → 媒体信息」中开启。</Notice>;
+/** 各来源的查找情况：查询中、数量或失败原因。 */
+function ProviderStatus({ lookup, want }: { lookup: Lookup; want: api.MediaWant }) {
+  if (lookup.ready && !lookup.sources.length && !lookup.error) return <Notice tone="warning">管理员还没有开启能提供{WANT_LABELS[want]}的来源，可以请管理员在「系统设置 → 媒体信息」中开启。</Notice>;
+  if (!lookup.sources.length) return null;
   return <ul className="media-lookup-sources" aria-label="查找来源">
-    {result.providers.filter(item => item.id !== "embedded" || item.count || item.error).map(item => <li key={item.id} className={item.error ? "is-failed" : ""} title={item.error ?? undefined}>
-      <Icon name={item.error ? "alert" : "check"} size={13} />
-      <span>{item.name}</span><small>{item.error ? item.error : `${item.count} 个`}</small>
+    {lookup.sources.filter(item => item.id !== "embedded" || item.state !== "done" || item.count).map(item => <li key={item.id} className={`is-${item.state}`} title={item.error ?? undefined}>
+      {item.state === "loading" ? <span className="spinner spinner-xs" aria-hidden="true" /> : <Icon name={item.state === "failed" ? "alert" : "check"} size={13} />}
+      <span>{item.name}</span><small>{item.state === "loading" ? "查询中" : item.state === "failed" ? item.error : `${item.count} 个`}</small>
     </li>)}
   </ul>;
-}
-
-function providerName(result: api.MediaLookup, id: string) {
-  return result.providers.find(item => item.id === id)?.name ?? id;
 }
 
 /** 歌词、字幕：选择一项查看内容，保存为媒体同目录的同名文件。 */
 export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem; want: "lyrics" | "subtitle"; onClose: () => void }) {
   const kind = want === "lyrics" ? "audio" : "video";
   const lookup = useLookup(file, want);
-  const { result } = lookup;
+  const { candidates } = lookup;
   const [selected, setSelected] = useState<api.MediaCandidate | null>(null);
   const [content, setContent] = useState<Record<string, { text?: string; format?: string | null; error?: string }>>({});
   const [language, setLanguage] = useState("");
@@ -126,7 +149,11 @@ export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem;
     return () => window.removeEventListener("tessera:private-locked", locked);
   }, [file.key]);
   // 新的结果到达时默认选中第一项（匹配度最高）。
-  useEffect(() => { const first = result?.candidates.find(item => item.score > 0) ?? null; choose(first); }, [result]);  // eslint-disable-line react-hooks/exhaustive-deps
+  // 结果陆续到达：还没有选中（或选中的已不在新结果里）时选中匹配度最高的一项。
+  useEffect(() => {
+    if (selected && candidates.some(item => item.token === selected.token)) return;
+    choose(candidates.find(item => item.score > 0) ?? null);
+  }, [candidates]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   function choose(candidate: api.MediaCandidate | null) {
     setSelected(candidate);
@@ -168,13 +195,13 @@ export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem;
     </>}>
     <div className="media-lookup-body">
       <QueryForm lookup={lookup} kind={kind} want={want} />
-      <ProviderStatus result={result} want={want} />
+      <ProviderStatus lookup={lookup} want={want} />
       {lookup.error && <Notice tone="danger">{lookup.error}</Notice>}
       <div className="media-lookup-split">
         <div className="media-lookup-results" role="listbox" aria-label={`${WANT_LABELS[want]}候选`}>
-          {lookup.loading && !result ? <SkeletonRows rows={5} />
-            : result && !result.candidates.length ? <EmptyState compact icon="search" title={`没有找到${WANT_LABELS[want]}`} description="可以修改歌名、片名等查询条件后重新查找。" />
-            : result?.candidates.map(candidate => <button type="button" role="option" key={candidate.token} aria-selected={selected?.token === candidate.token}
+          {lookup.loading && !candidates.length ? <SkeletonRows rows={5} />
+            : !candidates.length ? <EmptyState compact icon="search" title={`没有找到${WANT_LABELS[want]}`} description="可以修改歌名、片名等查询条件后重新查找。" />
+            : candidates.map(candidate => <button type="button" role="option" key={candidate.token} aria-selected={selected?.token === candidate.token}
               className={`media-lookup-item${selected?.token === candidate.token ? " is-selected" : ""}`} disabled={candidate.score <= 0 && candidate.provider === "embedded"}
               onClick={() => choose(candidate)}>
               <span className="media-lookup-item-head">
@@ -183,7 +210,7 @@ export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem;
               </span>
               {candidate.subtitle && <span className="media-lookup-item-sub" title={candidate.subtitle}>{candidate.subtitle}</span>}
               <span className="media-lookup-tags">
-                <Badge tone={candidate.provider === "embedded" ? "accent" : "neutral"}>{providerName(result, candidate.provider)}</Badge>
+                <Badge tone={candidate.provider === "embedded" ? "accent" : "neutral"}>{lookup.nameOf(candidate.provider)}</Badge>
                 {candidate.hash_match && <Badge tone="success" icon="check">版本匹配</Badge>}
                 {want === "lyrics" && candidate.synced !== null && <Badge tone={candidate.synced ? "success" : "warning"}>{candidate.synced ? "同步歌词" : "没有时间轴"}</Badge>}
                 {candidate.language && <Badge>{candidate.language}</Badge>}
@@ -214,35 +241,38 @@ export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem;
   </Modal>;
 }
 
-/** 封面候选：嵌在「设置封面」里，选中后把图片交给封面编辑器按普通流程保存。 */
-export function MediaCoverSearch({ file, disabled, onPick }: { file: api.FileItem; disabled?: boolean; onPick: (image: Blob, name: string) => Promise<void> | void }) {
+/** 封面候选：嵌在「设置封面」里。点一张立即交给封面编辑器（先显示小图、后台读取原图），不必等其他图片或来源加载完。 */
+export function MediaCoverSearch({ file, selected, disabled, onPick }: { file: api.FileItem; selected?: string; disabled?: boolean;
+  onPick: (candidate: api.MediaCandidate, preview: string, label: string) => void }) {
   const kind = getFileKind(file.content_type, file.key) === "video" ? "video" : "audio";
   const lookup = useLookup(file, "cover");
-  const { result } = lookup;
-  const [picking, setPicking] = useState(""), [error, setError] = useState(""), [broken, setBroken] = useState<Set<string>>(new Set());
-  async function pick(candidate: api.MediaCandidate) {
-    if (picking) return;
-    setPicking(candidate.token); setError("");
-    try {
-      const image = await api.mediaFetchImage(file.key, candidate.token);
-      await onPick(image, `${providerName(result!, candidate.provider)}：${candidate.title}`);
-    } catch (reason) { setError(api.errorMessage(reason, "这张封面没有读取出来，请换一张")); }
-    finally { setPicking(""); }
-  }
-  const visible = result?.candidates.filter(item => !broken.has(item.token)) ?? [];
+  const [broken, setBroken] = useState<Set<string>>(new Set()), [loaded, setLoaded] = useState<Set<string>>(new Set());
+  const visible = lookup.candidates.filter(item => !broken.has(item.token));
+  const pending = lookup.sources.filter(item => item.state === "loading").length;
+  const mark = (set: typeof setLoaded, token: string) => set(current => current.has(token) ? current : new Set(current).add(token));
   return <div className="media-cover-search">
     <QueryForm lookup={lookup} kind={kind} want="cover" />
-    <ProviderStatus result={result} want="cover" />
-    {(lookup.error || error) && <Notice tone="danger">{lookup.error || error}</Notice>}
-    {lookup.loading && !result ? <div className="media-cover-grid is-loading" aria-label="正在查找">{Array.from({ length: 6 }, (_, index) => <span key={index} className="media-cover-tile is-skeleton" />)}</div>
-      : result && !visible.length ? <EmptyState compact icon="image" title="没有找到封面" description="可以修改查询条件后重新查找，或改用本地图片。" />
-      : <div className="media-cover-grid" role="list">
-        {visible.map(candidate => <button type="button" role="listitem" key={candidate.token} className={`media-cover-tile${picking === candidate.token ? " is-picking" : ""}`}
-          disabled={disabled || Boolean(picking)} title={[candidate.title, candidate.subtitle, candidate.note].filter(Boolean).join("\n")} onClick={() => void pick(candidate)}>
-          <img src={api.mediaPreviewUrl(file.key, candidate.token)} alt="" loading="lazy" onError={() => setBroken(current => new Set(current).add(candidate.token))} />
-          <span className="media-cover-caption"><strong>{candidate.title}</strong><small>{providerName(result!, candidate.provider)}{candidate.note ? ` · ${candidate.note}` : ""}</small></span>
-          {picking === candidate.token && <span className="spinner" aria-label="正在读取" />}
-        </button>)}
+    <ProviderStatus lookup={lookup} want="cover" />
+    {lookup.error && <Notice tone="danger">{lookup.error}</Notice>}
+    {lookup.ready && !lookup.loading && !visible.length && lookup.sources.length > 0
+      ? <EmptyState compact icon="image" title="没有找到封面" description={kind === "video" ? "可以把片名改成中文或英文原名、补上年份后重新查找，或改用本地图片。" : "可以修改歌名、歌手后重新查找，或改用本地图片。"} />
+      : <div className="media-cover-grid" role="listbox" aria-label="封面候选" aria-busy={pending > 0}>
+        {visible.map(candidate => {
+          const preview = api.mediaPreviewUrl(file.key, candidate.token), label = `${lookup.nameOf(candidate.provider)}：${candidate.title}`;
+          const details = [candidate.subtitle, candidate.note].filter(Boolean).join(" · ");
+          return <button type="button" role="option" aria-selected={selected === candidate.token} key={candidate.token}
+            className={`media-cover-tile${selected === candidate.token ? " is-selected" : ""}${loaded.has(candidate.token) ? " is-loaded" : ""}`}
+            disabled={disabled} title={[candidate.title, details].filter(Boolean).join("\n")} onClick={() => onPick(candidate, preview, label)}>
+            <span className="media-cover-art">
+              <img src={preview} alt="" loading="lazy" decoding="async" onLoad={() => mark(setLoaded, candidate.token)} onError={() => mark(setBroken, candidate.token)} />
+              <span className="media-cover-source">{lookup.nameOf(candidate.provider)}</span>
+              {selected === candidate.token && <span className="media-cover-check"><Icon name="check" size={14} /></span>}
+            </span>
+            <span className="media-cover-caption"><strong>{candidate.title || "（无标题）"}</strong>{details && <small>{details}</small>}</span>
+          </button>;
+        })}
+        {pending > 0 && Array.from({ length: visible.length ? 2 : 8 }, (_, index) => <span key={`skeleton-${index}`} className="media-cover-tile is-skeleton" aria-hidden="true">
+          <span className="media-cover-art" /><span className="media-cover-caption"><i /><i /></span></span>)}
       </div>}
   </div>;
 }

@@ -138,9 +138,11 @@ function pickAsset(kind: "audio" | "video", items: PreviewAsset[], prefer?: stri
   const preferred = prefer ? items.find(item => item.path === prefer) : undefined;
   if (preferred) return preferred;
   const files = items.filter(item => item.source !== "embedded"), embedded = items.filter(item => item.source === "embedded");
-  if (kind === "audio") return embedded.find(item => item.synced) ?? files.find(item => !item.language) ?? files[0] ?? embedded[0];
+  // 同目录的同名歌词、字幕文件是用户（或文件助手）有意保存的，优先于文件内置的数据；没有时用内置数据。
+  // 上传时不会把内置歌词另存为 .lrc，所以同名文件存在就说明内置数据被替换过。
+  if (kind === "audio") return files.find(item => !item.language) ?? files[0] ?? embedded.find(item => item.synced) ?? embedded[0];
   const ready = embedded.filter(item => item.instant);
-  return ready.find(chinese) ?? files.find(chinese) ?? ready[0] ?? files.find(item => !item.language) ?? files[0];
+  return files.find(chinese) ?? ready.find(chinese) ?? files.find(item => !item.language) ?? files[0] ?? ready[0];
 }
 
 /* ---------- 音乐：原生 <audio> ---------- */
@@ -377,7 +379,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   useLayoutEffect(() => {
     if (!player.current || loadedUrl.current === url) return;
     setError(""); setSlow(false); timeRef.current = 0; setProgress({ currentTime: 0, duration: 0 }); setBuffered(0);
-    lyricSource.current = ""; callbacks.current.onLyricLine?.(null);
+    lyricSource.current = ""; callbacks.current.onLyricLine?.(null); setActive(-1);
     loadedUrl.current = url;
     (player.current as VideoPlayer).setSource(url, name, cover, kind === "video" ? videoSize : undefined);
     callbacks.current.onControls?.(player.current);
@@ -465,11 +467,18 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
       .finally(() => { if (!controller.signal.aborted) setAssetBusy(false); });
     return () => { controller.abort(); if (subtitles) void subtitles.setSubtitle(null); };
   }, [selected, assets, playerReady, kind, url]);
-  useEffect(() => {
-    const row = lyricHost.current?.querySelector<HTMLElement>(`[data-line="${active}"]`);
-    if (row && lyricHost.current) lyricHost.current.scrollTo({ top: row.offsetTop - lyricHost.current.clientHeight / 2 + row.clientHeight / 2,
-      behavior: reducedMotion() ? "instant" : "smooth" });
-  }, [active]);
+  // 当前行居中；还没唱到第一句（active 为 -1）时回到顶部。换了一份歌词（切歌）时立即定位、不做滚动动画，
+  // 否则会停在上一首的位置：切歌瞬间旧音频的进度可能先算出一个靠后的行，新歌从头播放时 active 变成 -1 不会再滚回来。
+  const shownLyrics = useRef<Lyric[]>([]);
+  useLayoutEffect(() => {
+    const node = lyricHost.current;
+    if (!node) return;
+    const changed = shownLyrics.current !== lyrics;
+    shownLyrics.current = lyrics;
+    const row = active >= 0 ? node.querySelector<HTMLElement>(`[data-line="${active}"]`) : null;
+    node.scrollTo({ top: row ? row.offsetTop - node.clientHeight / 2 + row.clientHeight / 2 : 0,
+      behavior: changed || reducedMotion() ? "instant" : "smooth" });
+  }, [active, lyrics]);
   useEffect(() => {
     const node = lyricHost.current;
     if (!node) return;

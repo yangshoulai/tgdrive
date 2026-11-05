@@ -85,6 +85,8 @@ export function videoFrameUsable(video: HTMLVideoElement): boolean {
   try { return videoFramePixelsUsable(frameLuma(video)); } catch { return false; }
 }
 
+/** 把一张图片文件缩放成三种封面规格（音乐的内嵌封面等由页面取得原图后使用）。 */
+export const thumbnailsFromBlob = (blob: Blob) => fromBlob(blob);
 async function fromBlob(blob: Blob): Promise<ThumbnailSet | null> {
   const bitmap = await createImageBitmap(blob);
   try { return await renderSet(bitmap, bitmap.width, bitmap.height); } finally { bitmap.close(); }

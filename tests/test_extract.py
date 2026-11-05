@@ -262,6 +262,27 @@ class ExtractTests(unittest.IsolatedAsyncioTestCase):
         status, listing = await self.post("/archive/browse", {"path": "包/t.tar"})
         self.assertEqual((status, listing["listable"], listing["format"]), (200, False, "tar"))
 
+    async def test_extract_selected_entries_keeps_archive(self):
+        data = build_zip([("文档/".encode(), b"", 0, None, True), ("文档/a.txt".encode(), b"aaa", 0, None, True),
+                          ("文档/b.txt".encode(), b"bbb", 8, None, True), (b"c.txt", b"ccc", 0, None, True),
+                          (b"secret.txt", b"hidden", 8, "zipcrypto", True)])
+        await self.put("包/s.zip", data)
+        status, listing = await self.post("/archive/browse", {"path": "包/s.zip"})
+        index = {item["name"]: item["index"] for item in listing["entries"]}
+        # 只选未加密的文件时不需要密码；要求移走压缩包也会保留。
+        job = await self.extract({"path": "包/s.zip", "destination": "out/", "keep_archive": False, "entries": [index["文档/a.txt"], index["c.txt"]]})
+        self.assertEqual((job["status"], job["done_files"], job["total_files"], job["partial"], job["keep_archive"]), ("completed", 2, 2, True, True), job)
+        self.assertEqual(self.keys("out/"), ["out/c.txt", "out/文档/a.txt"])
+        self.assertIn("包/s.zip", self.keys("包/"))
+        audit = self.app.metadata.db.execute("SELECT detail FROM audit_log WHERE action='archive.extract' ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertTrue(json.loads(audit["detail"])["partial"])
+        # 选中加密文件仍要密码；空选择、越界编号与只选文件夹都拒绝。
+        status, error = await self.post("/archive/extract", {"path": "包/s.zip", "destination": "out2/", "entries": [index["secret.txt"]]})
+        self.assertEqual(status, 400, error)
+        for entries in ([], [999], [index["文档/"]], ["1"], [True]):
+            status, error = await self.post("/archive/extract", {"path": "包/s.zip", "destination": "out3/", "entries": entries})
+            self.assertEqual(status, 400, (entries, error))
+
     async def compress(self, body, prefix="/api/user/v1"):
         status, job = await self.post("/archive/compress", body, prefix)
         self.assertEqual(status, 201, job)

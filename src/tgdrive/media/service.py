@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import collections
 import json
 import os
@@ -36,6 +37,7 @@ from .providers.base import WANTS, Candidate, Fetched, MediaQuery, Provider, Pro
 CONFIG_KEY = "media.providers"
 SECRET_PREFIX = "media.secret."
 SECRET_CONTEXT = "media-provider-secret"
+log = logging.getLogger(__name__)
 USER_AGENT = f"Tessera/{__version__.split('+')[0]} (+https://github.com/yangshoulai/tgdrive)"
 _LANGUAGE = re.compile(r"[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*")
 
@@ -94,8 +96,8 @@ class _Http:
 class FileAccess:
     """提供者（内置数据）与服务读取当前文件：每次读取前复核授权，读取按普通读取占名额。"""
 
-    def __init__(self, service: "MediaService", scope: Scope, info: ObjectInfo):
-        self.service, self.scope, self.info = service, scope, info
+    def __init__(self, service: "MediaService", scope: Scope, info: ObjectInfo, *, background: bool = False):
+        self.service, self.scope, self.info, self.background = service, scope, info, background
         self.tags: media_tags.MediaTags | None = None
 
     async def read(self, start: int, end: int) -> bytes:
@@ -105,7 +107,7 @@ class FileAccess:
             return b""
         pieces = []
         stream = self.service.objects.engine.stream(self.info.blob_uuid, start, min(end, self.info.size), window=max(64 * 1024, end - start),
-                                                    bucket_id=self.info.bucket_id)
+                                                    bucket_id=self.info.bucket_id, background=self.background)
         try:
             async for piece in stream:
                 pieces.append(piece)
@@ -158,7 +160,8 @@ class MediaService:
     CANDIDATE_MAX = 4000
     SEARCH_TIMEOUT = 12
     LOOKUP_TIMEOUT = 20
-    LOOKUP_PER_MINUTE = 30
+    # 网页按来源逐个查询（先返回的先显示），一次查找会调用多次。
+    LOOKUP_PER_MINUTE = 120
     RESULT_TTL = 1800
     TAGS_CACHE = 32
     SUBTITLE_CACHE_BYTES = 64 * 1024 * 1024
@@ -180,6 +183,56 @@ class MediaService:
         self._subtitles: collections.OrderedDict[tuple[str, int], str] = collections.OrderedDict()
         self._jobs: dict[str, _Job] = {}
         self._extract_slots = asyncio.Semaphore(1)
+        # 写入后在后台记录文件自带的元数据（只读文件头），队列有界，满了就留到首次查看时再提取。
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._commits: asyncio.Queue | None = None
+        self._worker: asyncio.Task | None = None
+
+    # ---------- 写入后提取 ----------
+
+    COMMIT_QUEUE = 256
+    COMMIT_DELAY = 2.0
+
+    def start(self) -> None:
+        if self._worker is None:
+            self._loop = asyncio.get_running_loop()
+            self._commits = asyncio.Queue(self.COMMIT_QUEUE)
+            self._worker = asyncio.create_task(self._extract_commits())
+
+    def committed(self, info: ObjectInfo, scope: Scope | None = None) -> None:
+        """对象写入完成（上传、离线下载、解压、S3 等所有写入路径）：音视频排队提取元数据。可能在工作线程里调用。"""
+        if self._loop is None or self._commits is None or self.kind(info) is None:
+            return
+
+        def put():
+            try:
+                self._commits.put_nowait(info)
+            except asyncio.QueueFull:
+                pass
+        try:
+            if asyncio.get_running_loop() is self._loop:
+                put()
+                return
+        except RuntimeError:
+            pass
+        self._loop.call_soon_threadsafe(put)
+
+    async def _extract_commits(self) -> None:
+        while True:
+            info = await self._commits.get()
+            try:
+                await asyncio.sleep(self.COMMIT_DELAY)
+                row = self._row(info.blob_uuid)
+                if row is not None and row["parser"] == media_tags.PARSER_VERSION:
+                    continue
+                # 内部任务：按对象所在的存储桶读取，不经网页授权；读取按后台读取占名额，给播放与预览让路。
+                file = FileAccess(self, Scope(info.bucket_id, private_access=True), info, background=True)
+                file.tags = await media_tags.parse(file.read, info.size)
+                self._store(info.blob_uuid, file.tags)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # 文件已删除、存储暂时不可用等：留到首次查看时再提取
+                log.debug("写入后提取媒体信息失败：%s", type(exc).__name__)
 
     # ---------- 配置 ----------
 
@@ -404,6 +457,29 @@ class MediaService:
             raise NotFoundError(key)
         return best.text
 
+    async def embedded_cover(self, scope: Scope, key: str, etag: str) -> tuple[bytes, str]:
+        """文件内嵌的封面原图：网页在文件还没有封面时用它生成三种规格（服务器没有 FFmpeg 也能补上音乐封面）。"""
+        info, _ = self._media(scope, key)
+        if info.etag != etag:
+            raise ValueError("文件内容已变化，请重新打开")
+        if not self.enabled(self.providers["embedded"]):
+            raise ValueError("管理员已关闭内置数据")
+        file = FileAccess(self, scope, info)
+        tags = await self._parsed(file)
+        picture = tags.cover() if tags else None
+        if picture is None:
+            raise NotFoundError(key)
+        if picture.data is not None:
+            data = picture.data
+        elif picture.length > 20 * 1024 * 1024:
+            raise ValueError("内嵌封面超过 20 MB")
+        else:
+            data = await file.read(picture.offset, picture.offset + picture.length)
+        mime = _mime_ok(data)
+        if mime is None:
+            raise ValueError("内嵌封面不是受支持的图片格式")
+        return data, mime
+
     # ---------- 查找与读取 ----------
 
     def _limit(self, bucket_id: int) -> None:
@@ -426,9 +502,19 @@ class MediaService:
             value += sum(struct.unpack(f"<{chunk // 8}Q", data))
         return f"{value & 0xFFFFFFFFFFFFFFFF:016x}"
 
+    # 影视封面的来源多是模糊搜索：片名相似度低于这个值的结果不显示。
+    VIDEO_COVER_MIN = 0.5
+
     def _rank(self, query: MediaQuery, want: str, provider: Provider, candidate: Candidate) -> float:
         if provider.id == "embedded":
             return candidate.score
+        if want == "cover" and query.kind == "video":
+            if candidate.hash_match:
+                return 1.0
+            names = [candidate.title, *(part for part in candidate.subtitle.split(" · ") if part and not part.isdigit())]
+            match = max((similarity(title, name) for title in query.titles() for name in names), default=0.0)
+            year = 0.1 if query.year and query.year in candidate.subtitle else 0.0
+            return min(1.0, match * 0.9 + year + float(candidate.ref.get("bonus") or 0))
         if want == "subtitle":
             if candidate.hash_match:
                 return 1.0
@@ -453,7 +539,9 @@ class MediaService:
                     self._results.pop(stale, None)
         return results
 
-    async def lookup(self, scope: Scope, key: str, want: str, overrides: dict | None = None, only: list[str] | None = None) -> dict:
+    async def collect(self, scope: Scope, key: str, want: str, overrides: dict | None = None, only: list[str] | None = None,
+                      *, skip: tuple[str, ...] = ()) -> tuple[ObjectInfo, MediaQuery, list[Candidate], list[dict]]:
+        """查询全部已启用的提供者：返回（文件、查询条件、按分数排好的候选、各提供者状态）。候选的 ref 只留在服务端。"""
         if want not in WANTS:
             raise ValueError("不支持的查找类型")
         info, kind = self._media(scope, key)
@@ -463,7 +551,7 @@ class MediaService:
         record = await self._record(scope, info)
         query = media_query.build(kind, info.key, info.size, record, overrides)
         providers = [provider for provider in self.providers.values()
-                     if provider.supports(want, kind) and self.enabled(provider) and (not only or provider.id in only)]
+                     if provider.supports(want, kind) and self.enabled(provider) and (not only or provider.id in only) and provider.id not in skip]
         file = FileAccess(self, scope, info)
         if want == "subtitle" and any(provider.id == "opensubtitles" for provider in providers):
             query.moviehash = await self._moviehash(file)
@@ -484,17 +572,23 @@ class MediaService:
             if isinstance(outcome, BaseException):
                 status["error"] = str(outcome) if isinstance(outcome, ProviderError) else "查询超时" if isinstance(outcome, TimeoutError) else "查询失败"
             else:
-                status["count"] = len(outcome)
                 for candidate in outcome:
                     candidate.provider = provider.id
                     candidate.score = self._rank(query, want, provider, candidate)
+                    if want == "cover" and kind == "video" and provider.id != "embedded" and candidate.score < self.VIDEO_COVER_MIN:
+                        continue
                     candidates.append((order, candidate))
+                status["count"] = sum(1 for _, item in candidates if item.provider == provider.id)
             statuses.append(status)
         candidates.sort(key=lambda item: (item[1].provider != "embedded", -round(item[1].score, 2), item[0]))
-        public = [candidate.public(self._register(scope, info, want, candidate)) for _, candidate in candidates[:60]]
-        return {"want": want, "kind": kind, "query": {"title": query.title, "artist": query.artist, "album": query.album, "year": query.year,
-                                                     "season": query.season, "episode": query.episode, "duration": query.duration,
-                                                     "languages": list(query.languages)},
+        return info, query, [candidate for _, candidate in candidates], statuses
+
+    async def lookup(self, scope: Scope, key: str, want: str, overrides: dict | None = None, only: list[str] | None = None) -> dict:
+        info, query, candidates, statuses = await self.collect(scope, key, want, overrides, only)
+        public = [candidate.public(self._register(scope, info, want, candidate)) for candidate in candidates[:60]]
+        return {"want": want, "kind": query.kind, "query": {"title": query.title, "artist": query.artist, "album": query.album, "year": query.year,
+                                                           "season": query.season, "episode": query.episode, "duration": query.duration,
+                                                           "languages": list(query.languages)},
                 "candidates": public, "providers": statuses}
 
     def _register(self, scope: Scope, info: ObjectInfo, want: str, candidate: Candidate) -> str:
@@ -547,6 +641,9 @@ class MediaService:
     async def preview(self, scope: Scope, key: str, token: str) -> tuple[bytes, str]:
         """封面候选的小图：经服务器读取，浏览器不直接连接第三方（不暴露访问者地址，也符合页面 CSP）。"""
         entry, info = self._claim(scope, key, token)
+        return await self._preview(scope, entry, info)
+
+    async def _preview(self, scope: Scope, entry: _Entry, info: ObjectInfo) -> tuple[bytes, str]:
         if entry.want != "cover":
             raise ValueError("只有封面有预览图")
         url = entry.ref.get("preview_url")
@@ -555,7 +652,8 @@ class MediaService:
             return fetched.data, fetched.mime
         provider = self.providers[entry.provider]
         try:
-            data, _ = await ProviderContext(provider, self.config_of(provider), self.http).get_bytes(url, limit=self.PREVIEW_LIMIT)
+            data, _ = await ProviderContext(provider, self.config_of(provider), self.http).get_bytes(url, headers=entry.ref.get("preview_headers"),
+                                                                                                limit=self.PREVIEW_LIMIT)
         except ProviderError as exc:
             raise ValueError(str(exc)) from None
         mime = _mime_ok(data)
@@ -572,10 +670,20 @@ class MediaService:
             if not isinstance(language, str) or not _LANGUAGE.fullmatch(language) or len(language) > 16:
                 raise ValueError("语言标记只能使用字母、数字和连字符，如 zh-CN、en")
         fetched = await self._fetch(scope, entry, info)
+        return await self._write_asset(scope, key, entry.want, entry.provider, fetched, language=language, overwrite=overwrite)
+
+    @staticmethod
+    def asset_target(key: str, want: str, extension: str = "", language: str | None = None) -> str:
+        """歌词、字幕的同名文件路径：歌词为「主名.lrc」，字幕为「主名[.语言].srt|vtt」。"""
         directory, _, name = key.rpartition("/")
         stem = name.rsplit(".", 1)[0] if "." in name else name
-        extension = "lrc" if entry.want == "lyrics" else (fetched.format if fetched.format in ("srt", "vtt") else "srt")
-        target = (directory + "/" if directory else "") + stem + (f".{language}" if language else "") + "." + extension
+        extension = "lrc" if want == "lyrics" else (extension if extension in ("srt", "vtt") else "srt")
+        return (directory + "/" if directory else "") + stem + (f".{language}" if language else "") + "." + extension
+
+    async def _write_asset(self, scope: Scope, key: str, want: str, provider: str, fetched: Fetched, *, language: str | None = None,
+                           overwrite: bool = False) -> dict:
+        target = self.asset_target(key, want, fetched.format or "", language)
+        extension = target.rsplit(".", 1)[-1]
         try:
             existing = self.objects.head_object(scope, target)
         except NotFoundError:
@@ -586,7 +694,64 @@ class MediaService:
         mime = {"lrc": "text/plain; charset=utf-8", "srt": "application/x-subrip; charset=utf-8", "vtt": "text/vtt; charset=utf-8"}[extension]
         saved = await self.objects.put_object(scope, target, data, len(data), mime, if_match=existing.etag if existing else None)
         return {"path": saved.key, "name": saved.key.rsplit("/", 1)[-1], "etag": saved.etag, "size": saved.size,
-                "provider": entry.provider, "format": extension, "replaced": existing is not None}
+                "provider": provider, "format": extension, "replaced": existing is not None}
+
+    # ---------- 按冻结的候选读取与保存（文件助手的待确认操作） ----------
+
+    def _frozen(self, scope: Scope, key: str, etag: str, provider: str, want: str, ref: dict) -> tuple[_Entry, ObjectInfo]:
+        info, _ = self._media(scope, key)
+        if info.etag != etag:
+            raise ValueError("文件内容已变化，请重新查找")
+        if provider not in self.providers or want not in WANTS or not isinstance(ref, dict):
+            raise ValueError("候选已失效，请重新查找")
+        return _Entry(provider, want, ref, scope.bucket_id, key, etag, None, time.monotonic() + self.CANDIDATE_TTL), info
+
+    async def preview_frozen(self, scope: Scope, key: str, etag: str, provider: str, want: str, ref: dict) -> tuple[bytes, str]:
+        entry, info = self._frozen(scope, key, etag, provider, want, ref)
+        return await self._preview(scope, entry, info)
+
+    async def fetch_frozen(self, scope: Scope, key: str, etag: str, provider: str, want: str, ref: dict) -> Fetched:
+        entry, info = self._frozen(scope, key, etag, provider, want, ref)
+        return await self._fetch(scope, entry, info)
+
+    async def save_frozen(self, scope: Scope, key: str, etag: str, provider: str, want: str, ref: dict) -> dict:
+        """保存选中的候选并覆盖已有的同类数据：歌词、字幕写同名文件，封面经服务器缩放后设为自定义封面。"""
+        entry, info = self._frozen(scope, key, etag, provider, want, ref)
+        fetched = await self._fetch(scope, entry, info)
+        if want != "cover":
+            return await self._write_asset(scope, key, want, provider, fetched, overwrite=True)
+        thumbnails = getattr(self.objects, "thumbnail_service", None)
+        if thumbnails is None:
+            raise ValueError("封面服务不可用")
+        try:
+            images = await thumbnails.render_image(fetched.data)
+        except Exception as exc:  # FFmpeg 缩放失败时退回直接使用来源图片
+            log.info("媒体封面缩放失败：%s", type(exc).__name__)
+            images = None
+        if not images:
+            images = await self._unscaled(scope, entry, info, fetched)
+        saved = await thumbnails.apply_custom(scope, key, images)
+        return {"path": key, "provider": provider, "variants": saved}
+
+    async def _unscaled(self, scope: Scope, entry: _Entry, info: ObjectInfo, fetched: Fetched) -> dict:
+        """服务器没有 FFmpeg 时不能缩放：按各规格的大小上限直接使用来源的小图与原图（只接受常见的 JPEG／PNG／WebP）。"""
+        limits = self.objects.THUMBNAIL_LIMITS
+        pictures = [fetched.data]
+        if entry.ref.get("preview_url"):
+            try:
+                small, _ = await self._preview(scope, entry, info)
+                pictures.append(small)
+            except ValueError:
+                pass
+        usable = [data for data in pictures if data and _mime_ok(data) in ("image/jpeg", "image/png", "image/webp")]
+        images = {}
+        for variant, order in (("thumb", usable[::-1]), ("grid", usable), ("poster", usable)):
+            choice = next((data for data in order if len(data) <= limits[variant]), None)
+            if choice is not None:
+                images[variant] = choice
+        if "thumb" not in images:
+            raise ValueError("服务器没有安装 FFmpeg，这张封面太大无法直接使用；请在文件菜单「设置封面 → 在线查找」中选择")
+        return images
 
     # ---------- 内嵌字幕提取 ----------
 
@@ -712,6 +877,9 @@ class MediaService:
 
     async def stop(self) -> None:
         tasks = [job.task for job in self._jobs.values() if job.task is not None and not job.task.done()]
+        if self._worker is not None:
+            tasks.append(self._worker)
+            self._worker = None
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

@@ -99,6 +99,16 @@ class TgDriveASGI(StaticFiles):
         self.archives = ArchiveService(user.objects)
         # 媒体元数据：文件自带的标签、内嵌歌词与字幕，以及可在系统设置中开关的第三方提供者（封面、歌词、字幕）。
         self.media = MediaService(user.objects, admin.accounts.keystore, resources)
+        previous_commit = user.objects.on_commit
+
+        def committed(info, scope=None):
+            # 缩略图与媒体信息各自排队；一个出错不影响另一个。
+            try:
+                if previous_commit is not None:
+                    previous_commit(info, scope)
+            finally:
+                self.media.committed(info, scope)
+        user.objects.on_commit = committed
         self.passkeys = self.private_space.passkeys
         self.client_cache = ClientCache(user, self.private_space)
         self.registration = RegistrationService(user.accounts)
@@ -126,6 +136,7 @@ class TgDriveASGI(StaticFiles):
             assistant.on_audit = audit_auto
             # 私密对话（docs/assistant-design.md §24）：授权由私密空间管理，撤销时清除对话。
             assistant.private_space = self.private_space
+            assistant.media = assistant.executor.media = self.media
             self.private_space.assistant_busy = assistant.private_busy
             self.private_space.listeners.append(assistant.on_private_forget)
 
@@ -136,6 +147,7 @@ class TgDriveASGI(StaticFiles):
                 if message["type"] == "lifespan.startup":
                     if self.thumbnails is not None:
                         self.thumbnails.start()
+                    self.media.start()
                     if self.offline is not None:
                         self.offline.start()
                     if self.scheduler is not None:
@@ -281,7 +293,7 @@ class TgDriveASGI(StaticFiles):
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save",
-                           "/media/lyrics", "/media/subtitle", "/media/extract", "/media/jobs", "/move", "/archive",
+                           "/media/lyrics", "/media/subtitle", "/media/cover", "/media/extract", "/media/jobs", "/move", "/archive",
                            "/archive/inspect", "/archive/extract", "/archive/jobs", "/archive/browse", "/archive/entry", "/archive/compress",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
                            "/thumbnail/fetch", "/content", "/preview-assets", "/preview-list",
@@ -589,7 +601,8 @@ class TgDriveASGI(StaticFiles):
         elif action == "archive.extract":
             # 不记录压缩包与保存位置的路径，更不记录密码。
             detail = {"conflict": payload.get("conflict") if payload.get("conflict") in ("skip", "overwrite", "rename") else None,
-                      "keep": payload.get("keep_archive") is not False, "format": (result or {}).get("format") if ok else None}
+                      "keep": payload.get("keep_archive") is not False or payload.get("entries") is not None, "format": (result or {}).get("format") if ok else None,
+                      "partial": payload.get("entries") is not None}
         elif action == "archive.compress":
             # 只记数量与压缩方式，不记路径。
             detail = {"count": len(payload.get("paths", [])) if isinstance(payload.get("paths"), list) else 0,
@@ -1236,7 +1249,7 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/media/size":
                 return 200, user.set_media_size(token, csrf, payload), {}
             if route in ("/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save", "/media/lyrics", "/media/subtitle",
-                         "/media/extract", "/media/jobs"):
+                         "/media/cover", "/media/extract", "/media/jobs"):
                 return await self._media_route(user, method, route, query, payload, token, csrf)
             if method == "GET" and route == "/files/info":
                 return 200, user.file_info(token, query.get("path", [""])[0]), {"Cache-Control": "no-store"}
@@ -1399,6 +1412,9 @@ class TgDriveASGI(StaticFiles):
                                               overwrite=payload.get("overwrite") is True), no_store
         if route == "/media/lyrics" and method == "GET":
             return text_response(await self.media.embedded_lyrics(scope, path, source.get("etag", "")), "text/plain; charset=utf-8")
+        if route == "/media/cover" and method == "GET":
+            data, mime = await self.media.embedded_cover(scope, path, source.get("etag", ""))
+            return 200, data, {"Content-Type": mime, **no_store}
         if route == "/media/subtitle" and method == "GET":
             try:
                 track = int(source.get("track", ""))
@@ -1435,7 +1451,8 @@ class TgDriveASGI(StaticFiles):
             return 200, await self.archives.browse(scope, user._path(payload.get("path", ""))), no_store
         if route == "/archive/extract" and method == "POST":
             return 201, await self.archives.start(account.id, scope, user._path(payload.get("path", "")), destination(payload.get("destination", "")),
-                                                  password(), payload.get("conflict", "rename"), payload.get("keep_archive", True)), no_store
+                                                  password(), payload.get("conflict", "rename"), payload.get("keep_archive", True),
+                                                  payload.get("entries")), no_store
         if route == "/archive/compress" and method == "POST":
             # 在线压缩：把所选文件与文件夹打包成 ZIP 保存到网盘（默认放在第一项所在的文件夹）。
             roots, files, total = await user.archive_totals(token, payload.get("paths"))
@@ -1708,6 +1725,11 @@ class TgDriveASGI(StaticFiles):
         match = re.fullmatch(r"/scope-requests/([A-Za-z0-9_-]{4,40})/(confirm|reject)", route)
         if match and method == "POST":
             return 200, await service.decide_scope(token, csrf, match[1], match[2] == "confirm"), no_store
+        match = re.fullmatch(r"/actions/([A-Za-z0-9_-]{4,40})/media/(\d{1,3})/(\d{1,3})", route)
+        if match and method == "GET":
+            data, content_type = await service.action_media(token, match[1], int(match[2]), int(match[3]), full=query.get("full", [""])[0] == "1")
+            return 200, data, {"Content-Type": content_type, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+                               "Content-Security-Policy": "sandbox"}
         match = re.fullmatch(r"/actions/([A-Za-z0-9_-]{4,40})(?:/(items|confirm|reject|cancel|undo))?", route)
         if match and match[2] is None and method == "GET":
             return 200, service.action_detail(token, match[1]), no_store

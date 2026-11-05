@@ -48,8 +48,14 @@ class TmdbProvider(Provider):
         return data if isinstance(data, dict) else {}
 
     async def search(self, query: MediaQuery, want, ctx: ProviderContext) -> list[Candidate]:
+        for title in query.titles("latin"):
+            results = await self._search(query, title, ctx)
+            if results:
+                return results
+        return []
+
+    async def _search(self, query: MediaQuery, title: str, ctx: ProviderContext) -> list[Candidate]:
         language = self._language(ctx)
-        title = query.title or query.name
         series = query.season is not None or query.episode is not None
         movie_params = {"query": title, "language": language, "year": query.year or None}
         tv_params = {"query": title, "language": language, "first_air_date_year": query.year or None}
