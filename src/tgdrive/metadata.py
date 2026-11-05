@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
+import contextvars
 import json
 import shutil
 import sqlite3
@@ -15,6 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import BlobNotFound, NotFoundError
+
+
+# 元数据查询与传输的加解密、磁盘缓存分开排队。传输会持续提交默认线程池任务，
+# 小机器上即使读取名额还有空位，目录、搜索和管理页也可能一直等不到查询线程。
+# 全进程共用有界的小池子，避免每个连接或请求各建线程池。
+_database_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="tgdrive-db")
 
 
 @dataclass(frozen=True)
@@ -835,7 +843,7 @@ class Metadata:
         return {"mode": "vacuum", "freed": total - size, "free": 0, "size": size}
 
     async def run_in_thread(self, function, /, *args, **kwargs):
-        """在线程池和独立连接中执行重查询或批量事务。
+        """在元数据专用线程池和独立连接中执行重查询或批量事务。
 
         磁盘数据库使用 WAL 独立连接，避免慢查询持有主连接锁，也避免其他
         请求读到线程中尚未提交的事务。纯内存数据库仅供测试，保持原连接。
@@ -854,7 +862,8 @@ class Metadata:
             finally:
                 del self._thread.db
                 connection.close()
-        return await asyncio.to_thread(call)
+        context = contextvars.copy_context()
+        return await asyncio.get_running_loop().run_in_executor(_database_pool, context.run, call)
 
     def _schema(self, script: str) -> None:
         # executescript 会隐式提交，必须逐条执行以保持迁移原子性。

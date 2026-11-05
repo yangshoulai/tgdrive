@@ -105,12 +105,21 @@ export const getEntry = (key: string) => run(["entries"], "readonly", tx => done
 export const putEntry = (entry: EntryRecord) => run(["entries"], "readwrite", tx => { tx.objectStore("entries").put(entry); });
 /** 读取一个数据块；目录中的块在文件夹不可用或文件缺失时返回 undefined，由调用方回源。 */
 export async function getBlock(key: string, index: number, store?: "dir"): Promise<ArrayBuffer | undefined> {
-  if (store === "dir") {
-    const folder = await entryFolder(key, false);
-    if (!folder) return undefined;
-    try { return await (await (await folder.getFileHandle(`${index}`)).getFile()).arrayBuffer(); } catch { return undefined; }
-  }
-  return run(["blocks"], "readonly", tx => done(tx.objectStore("blocks").get(`${key}/${index}`)) as Promise<ArrayBuffer | undefined>);
+  return createBlockReader(key, store)(index);
+}
+
+/** 一个响应共用条目目录，避免播放时每读取 1 MiB 都重新逐层查找同一个文件夹。
+ *  句柄不跨响应缓存；文件缺失、目录撤权仍由浏览器的文件读取检查。 */
+export function createBlockReader(key: string, store?: "dir"): (index: number) => Promise<ArrayBuffer | undefined> {
+  let folder: Promise<FileSystemDirectoryHandle | null> | undefined;
+  return async index => {
+    if (store === "dir") {
+      const directory = await (folder ??= entryFolder(key, false));
+      if (!directory) return undefined;
+      try { return await (await (await directory.getFileHandle(`${index}`)).getFile()).arrayBuffer(); } catch { return undefined; }
+    }
+    return run(["blocks"], "readonly", tx => done(tx.objectStore("blocks").get(`${key}/${index}`)) as Promise<ArrayBuffer | undefined>);
+  };
 }
 
 export function listEntries(ns?: string, tier?: Tier): Promise<EntryRecord[]> {

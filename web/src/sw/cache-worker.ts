@@ -6,7 +6,7 @@
  */
 import {
   BLOCK, type AutomaticCacheTask, type Bytes, type DeviceSettings, type EntryInfo, type EntryRecord, type Kind, type Tier,
-  aesKey, b64u, blockAad, deleteEntries, deviceId, directoryRoot, effectiveMiB, ensureEntry, evict, forgetDirectory, getMeta, preferredStore, readDirectory, setMeta, sweepDirectory, fileCacheState, fromB64u, getBlock, getEntry, hkdf, hmac,
+  aesKey, b64u, blockAad, createBlockReader, deleteEntries, deviceId, directoryRoot, effectiveMiB, ensureEntry, evict, forgetDirectory, getMeta, preferredStore, readDirectory, setMeta, sweepDirectory, fileCacheState, fromB64u, getEntry, hkdf, hmac,
   kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, servedType, setManualFlags, touchEntry, updateEntryInfo,
 } from "../cache-store";
 
@@ -51,9 +51,9 @@ function automaticChanged(immediate = false) {
     for (const client of clients) client.postMessage({ type: "tessera-cache:tasks-changed" });
   }).catch(() => undefined);
 }
-function beginAutomatic(opened: Opened, prefetch = false): Automatic | undefined {
+function beginAutomatic(opened: Opened): Automatic | undefined {
   const { entry, info } = opened;
-  if (info.kind === "thumb" || !prefetch && (info.manual || entry.manual) || opened.cap <= entry.bytes || fileCacheState(entry, info.size).complete) return;
+  if (info.kind === "thumb" || info.manual || entry.manual || opened.cap <= entry.bytes || fileCacheState(entry, info.size).complete) return;
   let task = automatics.get(entry.key);
   if (!task || task.status === "done" || task.stopped && !task.readers && ![...prefetches.values()].some(job => job.task === task)) {
     task = { id: `auto-${crypto.randomUUID()}`, entryKey: entry.key, ns: entry.ns, tier: entry.tier,
@@ -387,7 +387,7 @@ async function openEntry(request: Request, route: Route): Promise<{ context: Tie
 
 async function handle(request: Request, route: Route): Promise<Response> {
   const range = parseRange(request.headers.get("range"));
-  const opened = range === undefined || (range && range.start < 0) ? null : await openEntry(request, route);
+  const opened = range === undefined ? null : await openEntry(request, route);
   if (!opened) return direct(request);
   const { context, base } = opened;
   const keys = await entryKeys(context, base, route.version);
@@ -423,6 +423,8 @@ async function handle(request: Request, route: Route): Promise<Response> {
     return build({ tier: context, entry, info, key: keys.key, request, cap: limit }, range ?? null);
   }
   if (download) return direct(request);
+  // 已有条目的大小可以把尾部 Range 换算为本地块；没有条目时保留原请求，不能用负偏移对齐回源。
+  if (range && range.start < 0) return direct(request);
   // 关闭「预览时自动缓存」：不新建自动缓存条目（封面仍按原规则缓存，列表里的封面不必每次重新下载）。
   if (preferences.auto === false && !route.thumb) return direct(request);
   // 关闭自动缓存视频（Safari 默认）时，播放器的每次拖动都只发原始请求，不能变成两次回源。
@@ -542,6 +544,31 @@ async function* produce(opened: Opened, span: { start: number; end: number }, si
   const { info } = opened;
   const finishPreviewBlock = info.kind === "other" && new URL(opened.request.url).searchParams.get("preview") === "1";
   const last = Math.floor((info.size - 1) / BLOCK);
+  const lastRequested = Math.floor(span.end / BLOCK);
+  const readBlock = createBlockReader(opened.entry.key, opened.entry.store);
+  // 图片要读完才便于完整解码；固定四块窗口减少本机逐块往返，内存仍按窗口而非文件大小增长。
+  const localWindow = info.kind === "image" ? 4 : 2;
+  type LocalBlock = { plain: Bytes } | { error: unknown };
+  const pending = new Map<number, Promise<LocalBlock>>();
+  const load = (index: number) => {
+    let result = pending.get(index);
+    if (!result) {
+      const reading = (async () => {
+        signal.throwIfAborted();
+        const sealed = await readBlock(index);
+        signal.throwIfAborted();
+        if (!sealed) throw new Error("缓存数据块缺失");
+        const plain = await open(opened.key, sealed, blockAad(opened.entry, index));
+        signal.throwIfAborted();
+        if (plain.length !== Math.min(BLOCK, info.size - index * BLOCK)) throw new Error("缓存数据块大小不符");
+        return plain;
+      })();
+      // 预读失败要留到消费该块时处理，不能产生未处理拒绝或提前丢弃已经交付的正常块。
+      result = reading.then(plain => ({ plain }), error => ({ error }));
+      pending.set(index, result);
+    }
+    return result;
+  };
   let pos = span.start;
   try {
     while (pos <= span.end) {
@@ -550,15 +577,23 @@ async function* produce(opened: Opened, span: { start: number; end: number }, si
       if (opened.entry.blocks.includes(index)) {
         let plain: Bytes | undefined;
         try {
-          const sealed = await getBlock(opened.entry.key, index, opened.entry.store);
-          if (!sealed) throw new Error("缓存数据块缺失");
-          plain = await open(opened.key, sealed, blockAad(opened.entry, index));
-          if (plain.length !== Math.min(BLOCK, info.size - index * BLOCK)) throw new Error("缓存数据块大小不符");
+          const reading = load(index);
+          // 不跨过缺块，也不超出请求；图片最多四块，其余最多两块在途。
+          for (let next = index + 1; next <= Math.min(lastRequested, index + localWindow - 1); next++) {
+            if (!opened.entry.blocks.includes(next)) break;
+            void load(next);
+          }
+          const result = await reading;
+          pending.delete(index);
+          if ("error" in result) throw result.error;
+          plain = result.plain;
         } catch {
+          signal.throwIfAborted();
           // 流已经返回给页面：删除坏条目，从尚未交付的位置继续回源，不能让用户重试整次读取。
           await deleteEntries([opened.entry.key]).catch(() => undefined);
           opened.entry = { ...opened.entry, blocks: [], bytes: 0 };
           opened.cap = 0;
+          pending.clear();
           plain = undefined;
         }
         if (plain) {
@@ -625,6 +660,7 @@ async function* produce(opened: Opened, span: { start: number; end: number }, si
       if (pos <= span.end && offset <= fetchEnd) throw new Error("服务器提前结束了响应");
     }
   } finally {
+    pending.clear();
     active.controller?.abort();
     initial?.controller.abort();
   }
@@ -1003,7 +1039,7 @@ async function startManual(owner: string, id: string, url: string, group?: strin
       job.controller.signal.throwIfAborted();
       await updateEntryInfo(entry.key, record.info, true);
       const automatic = automatics.get(entry.key);
-      if (automatic) endAutomatic(automatic);
+      if (automatic) endAutomatic(automatic, true);
       infoMemo.delete(entry.key); manualCache = null; itemCache = null;
       job.controller.signal.throwIfAborted();
       job.opened = { tier: value.context, entry, info, key: value.keys.key, request, cap };
@@ -1269,13 +1305,15 @@ async function runPrefetch(job: Prefetch) {
     await pause(500, signal);
   }
   if (!entry || !info || signal.aborted || !info.size) return;
-  if (info.kind === "video" && !preferences.video && !info.manual) return;
-  if (preferences.auto === false && !info.manual) return;
+  // 手动队列负责补全与暂停；不能在预览中再为同一条目启动自动下载。
+  if (entry.manual || info.manual) return;
+  if (info.kind === "video" && !preferences.video) return;
+  if (preferences.auto === false) return;
   if (entry.store === "dir" && !(await directoryRoot())) return;
   const budget = tierBudget(preferences, value.route.tier);
-  const cap = info.manual ? budget : Math.max(BLOCK, Math.floor(budget / 2));
+  const cap = Math.max(BLOCK, Math.floor(budget / 2));
   const opened: Opened = { tier: value.context, entry, info, key: value.keys.key, request: value.request, cap };
-  const automatic = beginAutomatic(opened, true);
+  const automatic = beginAutomatic(opened);
   if (automatic?.stopped) { finishAutomatic(automatic); return; }
   job.task = automatic;
   const worker: Manual = { key: `prefetch:${job.key}`, id: job.id, owner: job.owner, route: value.route, request: value.request, controller: job.controller, running: true, segments: new Map() };
@@ -1289,6 +1327,7 @@ async function runPrefetch(job: Prefetch) {
     while (!signal.aborted) {
       const current = await getEntry(value.key);
       if (!current) return;
+      if (current.manual) { if (automatic) endAutomatic(automatic, true); return; }
       opened.entry = current;
       automaticStored(opened);
       if (fileCacheState(current, info.size).complete || current.bytes >= cap) return;

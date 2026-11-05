@@ -47,6 +47,7 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
     getEntry: async key => clone(entries.get(key)),
     ensureEntry: async entry => { if (!entries.has(entry.key)) entries.set(entry.key, clone(entry)); return clone(entries.get(entry.key)); },
     getBlock: async (key, index) => clone(blocks.get(`${key}/${index}`)),
+    createBlockReader: (key, location) => index => memory.getBlock(key, index, location),
     listEntries: async (ns, tier) => [...entries.values()].filter(entry => (!ns || entry.ns === ns) && (!tier || entry.tier === tier)).map(clone),
     deleteEntries: async keys => {
       for (const key of keys) {
@@ -731,6 +732,144 @@ test("自动缓存已含完整媒体时，下载只读取本机且不启动新�
   assert.equal(h.origins().length, before);
 });
 
+for (const secret of [false, true]) test(`本地文件夹完整缓存的${secret ? "私密" : "普通"}视频跳转和尾部 Range 均不回源`, async t => {
+  const name = secret ? SECRET : "movie.mp4";
+  const h = harness(t, { [name]: bytes(3 * store.BLOCK + 137) });
+  h.state.store = "dir";
+  h.files.get(name).type = "video/mp4";
+  if (secret) await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 300_000 });
+  await cacheFully(h, "movie", name);
+  const before = h.origins().length, data = h.files.get(name).data;
+  for (const [range, start, end] of [
+    [`bytes=${store.BLOCK + 17}-`, store.BLOCK + 17, data.length],
+    ["bytes=1234-2345", 1234, 2346],
+    ["bytes=-4096", data.length - 4096, data.length],
+    [`bytes=-${data.length + 100}`, 0, data.length],
+  ]) {
+    const result = await h.read(name, { media: true, range });
+    assert.equal(result.response.status, 206);
+    assert.equal(result.response.headers.get("X-Tessera-Cache"), "hit");
+    assert.equal(result.response.headers.get("Content-Range"), `bytes ${start}-${end - 1}/${data.length}`);
+    assert.deepEqual(result.data, data.subarray(start, end));
+  }
+  assert.equal(h.origins().length, before, "完整缓存后的跳转不能重新请求文件内容");
+});
+
+test("本地块读取重叠进行，取消后不再继续预读", { timeout: 3000 }, async t => {
+  const h = harness(t, { "movie.mp4": bytes(8 * store.BLOCK) });
+  h.state.store = "dir";
+  h.files.get("movie.mp4").type = "video/mp4";
+  await cacheFully(h, "movie", "movie.mp4");
+  const release = deferred(), second = deferred(), reads = [];
+  t.after(() => release.resolve());
+  const getBlock = h.memory.getBlock;
+  h.memory.getBlock = async (key, index) => {
+    reads.push(index);
+    if (index === 1) second.resolve();
+    await release.promise;
+    return getBlock(key, index);
+  };
+  const response = await h.request("movie.mp4", { media: true, range: "bytes=0-" });
+  let timer;
+  try {
+    await Promise.race([second.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("本地块仍在串行读取")), 1000); })]);
+    assert.deepEqual(reads, [0, 1], "每个响应最多提前读一块，不能整部电影读入内存");
+  } finally { clearTimeout(timer); release.resolve(); }
+  await response.body.cancel();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(reads, [0, 1], "播放器取消后停止本地预读");
+});
+
+for (const location of ["idb", "dir"]) for (const secret of [false, true]) test(`${location} 完整缓存的${secret ? "私密" : "普通"}图片并行读取四块，反复预览不回源`, { timeout: 5000 }, async t => {
+  const name = secret ? ".tgdrive/private/photo.png" : "photo.png";
+  const data = bytes(7 * store.BLOCK + 17), h = harness(t, { [name]: data });
+  h.state.store = location;
+  h.files.get(name).type = "image/png";
+  if (secret) await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 300_000 });
+  await cacheFully(h, "photo", name);
+  const before = h.origins().length, release = deferred(), four = deferred(), reads = [];
+  t.after(() => release.resolve());
+  const getBlock = h.memory.getBlock;
+  let active = 0, peak = 0;
+  h.memory.getBlock = async (key, index) => {
+    reads.push(index); peak = Math.max(peak, ++active);
+    if (active === 4) four.resolve();
+    try { await release.promise; return await getBlock(key, index); }
+    finally { active--; }
+  };
+  const response = await h.request(name, { media: true });
+  let timer;
+  try {
+    await Promise.race([four.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("图片没有并行读取四块")), 1000); })]);
+    assert.deepEqual(reads, [0, 1, 2, 3], "先用固定窗口读取，不整张图片排入内存");
+  } finally { clearTimeout(timer); release.resolve(); }
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), data);
+  assert.ok(peak <= 4, `在途读取 ${peak} 块，超过窗口`);
+  assert.deepEqual(reads, [0, 1, 2, 3, 4, 5, 6, 7]);
+  for (let repeat = 0; repeat < 2; repeat++) assert.deepEqual((await h.read(name, { media: true })).data, data);
+  assert.equal(h.origins().length, before, "完整缓存后的图片重复打开不能请求原图内容");
+  reads.length = 0;
+  assert.deepEqual((await h.read(name, { range: `bytes=${store.BLOCK + 13}-${2 * store.BLOCK + 16}` })).data, data.subarray(store.BLOCK + 13, 2 * store.BLOCK + 17));
+  assert.deepEqual(reads, [1, 2], "图片的小范围读取也不能预读范围之外的块");
+});
+
+test("关闭图片预览后停止四块预读，不误删正常缓存", { timeout: 3000 }, async t => {
+  const name = "photo.png", h = harness(t, { [name]: bytes(8 * store.BLOCK) });
+  h.state.store = "dir";
+  await cacheFully(h, "photo", name);
+  const before = h.origins().length, release = deferred(), four = deferred(), reads = [];
+  t.after(() => release.resolve());
+  const getBlock = h.memory.getBlock;
+  h.memory.getBlock = async (key, index) => {
+    reads.push(index);
+    if (reads.length === 4) four.resolve();
+    await release.promise;
+    return getBlock(key, index);
+  };
+  const controller = new AbortController();
+  const response = await h.request(name, { signal: controller.signal });
+  const reading = response.arrayBuffer();
+  await four.promise;
+  controller.abort(); release.resolve();
+  await assert.rejects(reading, { name: "AbortError" });
+  assert.deepEqual(reads, [0, 1, 2, 3]);
+  assert.equal(store.fileCacheState([...h.entries.values()][0], h.files.get(name).data.length).complete, true);
+  assert.equal(h.origins().length, before);
+});
+
+test("缓存跳转的小范围请求不预读范围外的块", async t => {
+  const h = harness(t), reads = [];
+  await h.read("file.bin");
+  const getBlock = h.memory.getBlock;
+  h.memory.getBlock = async (key, index) => { reads.push(index); return getBlock(key, index); };
+  const result = await h.read("file.bin", { media: true, range: "bytes=17-117" });
+  assert.deepEqual(result.data, h.files.get("file.bin").data.subarray(17, 118));
+  assert.deepEqual(reads, [0]);
+});
+
+test("本机读取尚未完成时取消，不会误删完整缓存", { timeout: 3000 }, async t => {
+  const h = harness(t), entered = deferred(), release = deferred(), controller = new AbortController();
+  await h.read("file.bin");
+  const before = h.origins().length, getBlock = h.memory.getBlock;
+  h.memory.getBlock = async (key, index) => { entered.resolve(); await release.promise; return getBlock(key, index); };
+  const response = await h.request("file.bin", { media: true, range: "bytes=0-", signal: controller.signal });
+  const reading = response.arrayBuffer();
+  await entered.promise;
+  controller.abort(); release.resolve();
+  await assert.rejects(reading, { name: "AbortError" });
+  assert.equal(store.fileCacheState([...h.entries.values()][0], h.files.get("file.bin").data.length).complete, true);
+  assert.equal(h.origins().length, before);
+});
+
+test("没有缓存的尾部 Range 保留原请求且只回源一次", async t => {
+  const h = harness(t), data = h.files.get("file.bin").data;
+  const result = await h.read("file.bin", { media: true, range: "bytes=-4096" });
+  assert.deepEqual(result.data, data.subarray(-4096));
+  assert.equal(h.origins().length, 1);
+  assert.equal(h.origins()[0].headers.get("Range"), "bytes=-4096");
+  assert.equal(h.entries.size, 0);
+});
+
 test("清除缓存可以中止仍在预检的任务，迟到响应不能重建条目", async t => {
   const h = harness(t), started = deferred(), waiting = deferred();
   h.state.originHook = async request => { if (request.method === "HEAD") { started.resolve(); await waiting.promise; } };
@@ -970,6 +1109,49 @@ test("自动预读任务可诊断、可停止，同一预览的心跳不会重�
   h.state.originHook = null;
   h.notify("tessera-cache:prefetch", { ...preview, id: "preview-reopened" });
   assert.ok(await until(async () => (await h.ask("tessera-cache:automatic-tasks"))[0]?.status === "done"));
+});
+
+for (const secret of [false, true]) for (const complete of [false, true]) {
+  test(`${secret ? "私密" : "普通"}自动缓存${complete ? "完成" : "停止"}后转为手动，移除自动记录且保留已有块`, async t => {
+    const name = secret ? SECRET : "audio.mp3";
+    const h = harness(t, { [name]: bytes(3 * store.BLOCK) });
+    h.files.get(name).type = "audio/mpeg";
+    if (secret) await h.message("tessera-cache:access", { access: "grant", expires: Date.now() + 300_000 });
+    await h.read(name, complete ? {} : { range: `bytes=0-${store.BLOCK - 1}` });
+    const [automatic] = await h.ask("tessera-cache:automatic-tasks", { private: secret });
+    assert.equal(automatic.status, complete ? "done" : "canceled");
+    const key = [...h.entries.keys()][0], previous = [...h.entries.values()][0].bytes;
+    const result = await h.ask("tessera-cache:start", { id: "converted", url: h.url(name) });
+    assert.equal(result.bytes, previous);
+    assert.equal(result.complete, complete);
+    assert.deepEqual([...h.entries.keys()], [key], "复用同一条缓存与已写入的块");
+    assert.equal(h.entries.get(key).manual, true);
+    assert.equal((await h.ask("tessera-cache:automatic-tasks", { private: secret })).length, 0, "不能残留已停止的自动任务");
+    if (!complete) assert.equal((await h.ask("tessera-cache:step", { id: "converted" })).complete, true);
+    assert.equal((await h.ask("tessera-cache:automatic-tasks", { private: secret })).length, 0);
+  });
+}
+
+test("进行中的自动预读转手动会交还通道，后续预览不重建自动任务", async t => {
+  const h = harness(t, { "audio.mp3": bytes(9 * store.BLOCK) });
+  await h.read("audio.mp3", { range: `bytes=0-${store.BLOCK - 1}` });
+  const stalled = [];
+  h.state.originHook = request => request.headers.get("x-tessera-background") === "cache"
+    ? new Promise((_, reject) => { stalled.push(request); request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }); }) : null;
+  const preview = { id: "before-convert", url: h.url("audio.mp3"), from: 0 };
+  h.notify("tessera-cache:prefetch", preview);
+  assert.ok(await until(() => stalled.length > 0));
+  await h.ask("tessera-cache:start", { id: "manual", url: h.url("audio.mp3") });
+  assert.ok(await until(() => stalled.every(request => request.signal.aborted)), "手动接管后停止原有预读");
+  assert.equal((await h.ask("tessera-cache:automatic-tasks")).length, 0);
+  h.notify("tessera-cache:prefetch-stop", { id: preview.id });
+  const count = background(h).length;
+  h.notify("tessera-cache:prefetch", { ...preview, id: "after-convert" });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(background(h).length, count, "手动任务负责补全，新的预览不另起自动预读");
+  assert.equal((await h.ask("tessera-cache:automatic-tasks")).length, 0);
+  h.state.originHook = null;
+  while (!(await h.ask("tessera-cache:step", { id: "manual" })).complete) { /* 继续补齐 */ }
 });
 
 test("自动缓存任务遵守私密授权，锁定后不返回私密名称，退出后清空运行记录", async t => {

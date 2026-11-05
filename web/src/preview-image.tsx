@@ -55,10 +55,19 @@ export function ImageViewer({ url: source, name, heic = false, poster, size, onL
   const root = useRef<HTMLDivElement>(null), canvas = useRef<HTMLDivElement>(null);
   const original = useRef<HTMLImageElement>(null), cover = useRef<HTMLImageElement>(null);
   const delivered = useRef(new WeakSet<HTMLImageElement>());
+  const preparing = useRef(new WeakSet<HTMLImageElement>());
   // 就绪状态绑定资源地址，避免旧 load 事件或切换后的 effect 把缓存图片重新置为未加载。
   const [ready, setReady] = useState<{ url: string; image: HTMLImageElement; size: Size; warm: boolean } | null>(null);
   const [coverReady, setCoverReady] = useState<{ url: string; image: HTMLImageElement; size: Size } | null>(null);
   const loaded = ready?.url === url && ready.image === original.current, warm = loaded && ready.warm;
+  const [waiting, setWaiting] = useState<string | null>(null);
+  // 加载也可能只是本机密文读取与图片解码；快速打开时不闪现转圈，不把等待描述成远端下载。
+  useEffect(() => {
+    setWaiting(null);
+    if (loaded) return;
+    const timer = window.setTimeout(() => setWaiting(url), 300);
+    return () => window.clearTimeout(timer);
+  }, [url, loaded]);
   // 显示尺寸依次取：原图实际尺寸、已记录的分辨率、封面尺寸（封面只是占位，按比例推测原图大小）。
   const known = size && size.width > 0 && size.height > 0 ? size : null;
   const natural: (Size & { poster?: boolean }) | null = loaded ? ready.size : known ? known
@@ -77,24 +86,42 @@ export function ImageViewer({ url: source, name, heic = false, poster, size, onL
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ x: number; y: number; view: View; distance?: number; moved: boolean; startX: number; startY: number } | null>(null);
 
-  function rememberBackdrop(image: HTMLImageElement) {
-    const snapshot = backdropOf(image);
-    if (snapshot) setBackdrops(current => current.at(-1) === snapshot ? current : [...current.slice(-1), snapshot]);
-  }
   function imageLoaded(image: HTMLImageElement, fromMemory = false) {
-    if (image !== original.current || !image.naturalWidth || delivered.current.has(image)) return;
-    delivered.current.add(image);
-    setReady({ url, image, size: { width: image.naturalWidth, height: image.naturalHeight }, warm: fromMemory });
-    rememberBackdrop(image);
-    onImageSize?.(image.naturalWidth, image.naturalHeight, true); onLoad?.(image);
+    if (image !== original.current || !image.naturalWidth || delivered.current.has(image) || preparing.current.has(image)) return;
+    const show = () => {
+      if (image !== original.current || !image.naturalWidth) return;
+      delivered.current.add(image);
+      setReady({ url, image, size: { width: image.naturalWidth, height: image.naturalHeight }, warm: fromMemory });
+      onImageSize?.(image.naturalWidth, image.naturalHeight, true);
+    };
+    // load 只表示字节已到达；先异步解码，避免第一次绘制或 Canvas 取像素时在主线程同步解码大图。
+    if (fromMemory || typeof image.decode !== "function") { show(); return; }
+    preparing.current.add(image);
+    void image.decode().then(show, () => { if (image === original.current) originalFailed(); });
   }
   function coverLoaded(image: HTMLImageElement) {
     if (image !== cover.current || !image.naturalWidth || delivered.current.has(image) || (original.current && delivered.current.has(original.current))) return;
     delivered.current.add(image);
     setCoverReady({ url, image, size: { width: image.naturalWidth, height: image.naturalHeight } });
-    rememberBackdrop(image);
     onImageSize?.(image.naturalWidth, image.naturalHeight, false);
   }
+  const loadedCallback = useRef(onLoad);
+  useLayoutEffect(() => { loadedCallback.current = onLoad; }, [onLoad]);
+  useEffect(() => {
+    const image = loaded ? ready.image : coverReady?.url === url && coverReady.image === cover.current ? coverReady.image : null;
+    if (!image) return;
+    // drawImage 可能同步解码整张大图，补缩略图的回调也可能读像素：先提交原图并给浏览器一次绘制机会。
+    // 换图或关闭时撤销；封面尚未处理完就收到原图时只处理最新的图。
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        if (image !== original.current && image !== cover.current) return;
+        const snapshot = backdropOf(image);
+        if (snapshot) setBackdrops(current => current.at(-1) === snapshot ? current : [...current.slice(-1), snapshot]);
+        if (image === original.current) loadedCallback.current?.(image);
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [url, loaded, ready, coverReady]);
   useLayoutEffect(() => { setView(FIT); setRotation(0); }, [url]);
   useLayoutEffect(() => {
     const image = original.current, poster = cover.current;
@@ -258,14 +285,14 @@ export function ImageViewer({ url: source, name, heic = false, poster, size, onL
   return <div ref={root} className={`image-viewer${idle && !dragging ? " is-idle" : ""}${loaded ? " is-loaded" : ""}${warm ? " is-warm" : ""}${poster ? " has-poster" : ""}${view.scale > 1 ? " is-zoomed" : ""}${dragging ? " is-dragging" : ""}`}
     onPointerMove={wake}>
     <div className="image-backdrop" aria-hidden="true">{backdrops.map(snapshot => <div key={snapshot} className="image-backdrop-layer" style={{ backgroundImage: `url("${snapshot}")` } as CSSProperties} />)}</div>
-    <div ref={canvas} className="image-canvas" onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}
+    <div ref={canvas} className="image-canvas" aria-busy={!loaded} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}
       onDoubleClick={event => { if (view.scale > 1) setView(FIT); else zoomAt(Math.max(2.5, oneToOne), relative(event.clientX, event.clientY)); }}>
       {!posterDone && poster && <img ref={cover} key={`${url}:${poster}`} className={`image-poster${sized ? " is-sized" : ""}`} src={poster} alt="" aria-hidden="true" draggable={false} style={sized}
         onLoad={event => coverLoaded(event.currentTarget)} />}
-      <img ref={original} key={url} className="image-full" src={url} alt={name} draggable={false} style={{ ...sized, transform }}
+      <img ref={original} key={url} className="image-full" src={url} alt={name} decoding="async" draggable={false} style={{ ...sized, transform }}
         onLoad={event => imageLoaded(event.currentTarget)}
         onError={event => { if (event.currentTarget === original.current) originalFailed(); }} />
-      {!loaded && <span className="image-loading" role="status"><span className="spinner" />{decoding === source ? "正在转换 HEIC 照片…" : poster ? "正在加载原图…" : "正在加载…"}</span>}
+      {!loaded && waiting === url && <span className="image-loading" role="status"><span className="spinner" />{decoding === source ? "正在转换 HEIC 照片…" : "正在打开原图…"}</span>}
     </div>
     {nav && nav.count > 1 && <>
       <button type="button" className="image-arrow is-previous" aria-label="上一张（←）" title="上一张（←）" onClick={nav.onPrevious}><Icon name="chevronLeft" size={22} /></button>

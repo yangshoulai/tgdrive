@@ -43,6 +43,16 @@ const nameOf = (file: CacheFile) => file.key.split("/").at(-1) || file.key;
 const isRunning = (job: CacheJob) => job.status === "queued" || job.status === "active";
 const percentOf = (bytes: number, size: number, complete = false) => complete ? 100 : size ? Math.min(99, Math.floor(bytes / size * 100)) : 0;
 
+/** 手动任务接管同一层、同一内容版本；旧自动查询的迟到回复也不能重新显示被接管的记录。
+ *  手动任务结束后新产生的自动读取仍可显示（例如用户清掉副本后重新预览）。 */
+export function mergeCacheJobs(manual: CacheJob[], automatic: CacheJob[]): CacheJob[] {
+  const known = new Map(manual.map(job => [cacheFileId(job.file), job]));
+  return [...manual, ...automatic.filter(job => {
+    const found = known.get(cacheFileId(job.file));
+    return !found || !isRunning(found) && job.addedAt > found.addedAt;
+  })].sort((a, b) => a.addedAt - b.addedAt);
+}
+
 /** 网络抖动、Worker 被浏览器回收、其他页面占用等暂时失败按此间隔自动续传；连续失败（期间没有新进度）超过次数才算失败。 */
 const RETRY_DELAYS = [1000, 3000, 8000, 15000, 30000, 60000];
 /** 同时缓存的文件数，与 Worker 的 MAX_MANUAL_FILES 一致；所有文件的回源请求另有共同的并发上限。 */
@@ -357,6 +367,7 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
       ? ready.current.enabled && ready.current.available && ready.current.privateCacheEnabled && groups.current.has(queuedGroup) : canCache(file));
     if (!accepted.length) return 0;
     const privateFiles = accepted.filter(file => api.isPrivatePath(file.key));
+    const automatic = new Map(automaticRef.current.map(job => [cacheFileId(job.file), job]));
     let group = queuedGroup;
     let added = 0;
     update(value => {
@@ -366,7 +377,7 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
         const id = cacheFileId(file), found = known.get(id);
         if ((found && isRunning(found)) || queued.has(id)) continue;
         // 起始进度取已知的最大值：单文件状态只覆盖预览中的文件，列表文件要看缓存索引，不能先显示 0% 像是重新开始。
-        const bytes = Math.max(statesRef.current.get(id)?.bytes ?? 0, cachedRef.current.get(id)?.bytes ?? 0, found?.bytes ?? 0);
+        const bytes = Math.max(statesRef.current.get(id)?.bytes ?? 0, cachedRef.current.get(id)?.bytes ?? 0, found?.bytes ?? 0, automatic.get(id)?.bytes ?? 0);
         const jobId = crypto.randomUUID();
         if (!group && api.isPrivatePath(file.key)) group = jobId;
         queued.set(id, { id: jobId, file, group: api.isPrivatePath(file.key) ? group : undefined, status: "queued", bytes, size: file.size, error: "", waiting: false, addedAt: Date.now() });
@@ -374,6 +385,13 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
       added = queued.size;
       return added ? [...value.filter(job => !queued.has(cacheFileId(job.file))), ...queued.values()] : value;
     });
+    const taken = new Set(accepted.map(cacheFileId));
+    const converted = automaticRef.current.filter(job => taken.has(cacheFileId(job.file)));
+    if (converted.length) {
+      setAutomaticJobs(value => value.filter(job => !taken.has(cacheFileId(job.file))));
+      // 入队即交还自动预读通道，即使手动任务还在排队；启动手动任务时也会再次清理，覆盖消息中断与旧页面。
+      converted.forEach(job => { void stopAutomaticCacheTask(job.id, true).catch(() => undefined); });
+    }
     if (!queuedGroup && group && jobsRef.current.some(job => job.group === group)) prepareGroup(privateFiles.map(file => file.key), group);
     return added;
   }, [update, canCache, prepareGroup]);
@@ -577,7 +595,7 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
       return { state: state.manual ? "manual" : "auto" };
     });
   }, []);
-  const visibleJobs = useMemo(() => enabled ? [...jobs, ...automaticJobs].sort((a, b) => a.addedAt - b.addedAt) : [], [enabled, jobs, automaticJobs]);
+  const visibleJobs = useMemo(() => enabled ? mergeCacheJobs(jobs, automaticJobs) : [], [enabled, jobs, automaticJobs]);
   const activeCount = enabled ? visibleJobs.filter(isRunning).length + folders.filter(folder => folder.status === "active").length : 0;
   useEffect(() => { onActiveChange?.(activeCount); }, [activeCount, onActiveChange]);
   const visibleFolders = useMemo(() => enabled ? folders : [], [enabled, folders]);

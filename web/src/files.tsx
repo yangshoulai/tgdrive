@@ -347,7 +347,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
   if (format === "archive" && archive) return <ArchivePreview file={archive.file} downloadUrl={downloadUrl} onExtract={archive.onExtract} />;
   if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} videoSize={videoSize} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} rotation={rotation} onRotate={onRotate} onBufferSpeed={onBufferSpeed} onFindAssets={onFindAssets} assetRevision={assetRevision} preferAsset={preferAsset} />;
   if (mediaFailed) return fallback;
-  // 原图从存储取回并解密需要时间：查看器先显示封面图占位，原图加载完成后淡入替换。
+  // 本机缓存仍需读取、解密及图片解码：先用封面占位，原图就绪后显示；背景与补图延后到绘制之后。
   if (kind === "image") return <ImageViewer url={url} name={name} heic={format === "heic"} poster={poster} size={videoSize} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
   if (kind === "pdf") return error ? fallback : <PdfPreview url={url} name={name} onError={setError} />;
   if (kind === "text" || kind === "code") {

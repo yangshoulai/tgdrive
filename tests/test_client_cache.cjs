@@ -92,3 +92,38 @@ test("IndexedDB 同步写入失败必须回滚此前排队的块索引", async (
   assert.deepEqual(saved.blocks, []);
   assert.equal(saved.bytes, 0);
 });
+
+test("本地连续读取共用目录句柄，换目录和撤权仍生效", async () => {
+  const lookups = [];
+  let denied = false, current;
+  const directory = label => ({
+    async queryPermission() { return "granted"; },
+    async getDirectoryHandle(name) { lookups.push(`${label}/${name}`); return this; },
+    async getFileHandle(index) { return { async getFile() {
+      if (denied) throw new DOMException("revoked", "NotAllowedError");
+      return { arrayBuffer: async () => new TextEncoder().encode(`${label}/${index}`).buffer };
+    } }; },
+  });
+  current = { handle: directory("first") };
+  const db = { transaction() {
+    const tx = { objectStore() { return { get() {
+      const request = { result: current };
+      queueMicrotask(() => { request.onsuccess(); setImmediate(() => tx.oncomplete()); });
+      return request;
+    } }; } };
+    return tx;
+  } };
+  const indexedDB = { open() { const request = { result: db }; queueMicrotask(() => request.onsuccess()); return request; } };
+  const isolated = { exports: {} };
+  new Function("module", "exports", "indexedDB", bundle.outputFiles[0].text)(isolated, isolated.exports, indexedDB);
+  const cache = isolated.exports, read = cache.createBlockReader("namespace/n/entry", "dir");
+  assert.equal(new TextDecoder().decode(await read(0)), "first/0");
+  assert.equal(new TextDecoder().decode(await read(1)), "first/1");
+  assert.equal(lookups.length, 4, "根目录与条目三级目录只解析一次");
+  denied = true;
+  assert.equal(await read(2), undefined, "目录撤权时不能返回数据");
+  current = { handle: directory("second") }; denied = false;
+  cache.forgetDirectory();
+  const next = cache.createBlockReader("namespace/n/entry", "dir");
+  assert.equal(new TextDecoder().decode(await next(0)), "second/0", "新响应必须从当前目录读取");
+});

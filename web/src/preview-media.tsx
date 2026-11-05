@@ -527,7 +527,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   // 视频的提示在加载动画下方：缓冲时显示估算速度，超过 8 秒再加「加载较慢 · 重试」；音乐的速度显示在状态胶囊里。
   const videoSpeed = kind === "video" && waiting && speed != null;
   const slowNotice = !failed && (slow || videoSpeed) && <div className="preview-player-slow" role="status">
-    {videoSpeed && <span className="preview-player-speed" title="按缓冲进度与文件平均码率估算的下载速度">{formatSpeed(speed)}</span>}
+    {videoSpeed && <span className="preview-player-speed" title="按缓冲进度与文件平均码率估算的缓冲速度，并非实际网络速度">{formatSpeed(speed)}</span>}
     {slow && <><span>加载较慢</span><button type="button" onClick={onRetry}>重试</button></>}
   </div>;
 
