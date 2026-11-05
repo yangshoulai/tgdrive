@@ -64,9 +64,10 @@ class PlaylistTests(unittest.TestCase):
 
 
 class FixtureHttp:
-    def __init__(self, bodies, ignore_range=False, close_delay=0):
+    def __init__(self, bodies, ignore_range=False, close_delay=0, flaky=None):
         self.bodies, self.calls, self.ignore_range = bodies, [], ignore_range
         self.active, self.close_delay, self.peak = 0, close_delay, 0
+        self.flaky = dict(flaky or {})  # 文件名 → 还要中途断开几次（送出前一半后抛 TransientError）
 
     @asynccontextmanager
     async def open(self, request, *, url=None, extra_headers=None, url_check=None, **_):
@@ -83,10 +84,17 @@ class FixtureHttp:
             start, end = map(int, header.removeprefix('bytes=').split('-'))
             headers['content-range'] = f'bytes {start}-{end}/{len(body)}'
             body, status = body[start:end + 1], 206
+        name = urlsplit(target).path.rsplit('/', 1)[-1]
+        broken = self.flaky.get(name, 0) > 0
+        if broken:
+            self.flaky[name] -= 1
         class Response:
             async def stream(inner):
-                for offset in range(0, len(body), 65536):
-                    yield body[offset:offset + 65536]
+                step = 4096 if broken else 65536
+                for offset in range(0, len(body), step):
+                    if broken and offset >= len(body) // 2:
+                        raise TransientError('来源连接中断，可以稍后重试')
+                    yield body[offset:offset + step]
         response = Response()
         response.status, response.headers, response.size = status, headers, len(body)
         self.active += 1
@@ -136,14 +144,15 @@ class RemuxTests(unittest.IsolatedAsyncioTestCase):
     async def collect(self, text, bodies, **kwargs):
         request = DownloadRequest('https://media.example/index.m3u8', headers=[('Cookie', 'secret=hidden')])
         playlist = parse_playlist(text.encode(), request.url)
-        http = FixtureHttp(bodies, kwargs.pop('ignore_range', False), kwargs.pop('close_delay', 0))
+        http = FixtureHttp(bodies, kwargs.pop('ignore_range', False), kwargs.pop('close_delay', 0), kwargs.pop('flaky', None))
         events = []
         async def throttle(_):
             pass
         stream = remux(http, request, playlist, FFMPEG, check=lambda: None,
             progress=lambda **values: events.append(values), throttle=throttle, **kwargs)
         # 全部复杂格式都必须避免暂存明文分片；验证过程也不允许转而缓存整个分片到文件。
-        with patch.object(Path, 'open', side_effect=AssertionError('HLS 不应写入临时文件')):
+        with patch.object(Path, 'open', side_effect=AssertionError('HLS 不应写入临时文件')), \
+                patch('tgdrive.offline.hls.SEGMENT_RETRY_DELAYS', (0, 0)):
             try:
                 converter = Defragmenter()
                 chunks = [chunk async for chunk in converter.payload(stream)]
@@ -249,6 +258,24 @@ class RemuxTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(5):
                 await stream.aclose()
         self.assertEqual(http.active, 0)
+
+    async def test_interrupted_segment_retries_in_place(self):
+        # 单个分片中途断开（DNS、连接重置）时原地重新请求并跳过已写给 FFmpeg 的部分，不让整个任务从头开始；
+        # 管道（普通 TS）与回环中转（fMP4／字节范围）、单连接与多连接都覆盖。
+        text = '#EXTM3U\n' + ''.join(f'#EXTINF:3,\n{index}.ts\n' for index in range(3)) + '#EXT-X-ENDLIST\n'
+        bodies = {f'{index}.ts': self.ts for index in range(3)}
+        for connections in (1, 4):
+            with self.subTest(source='ts', connections=connections):
+                http, events = await self.collect(text, bodies, connections=connections, flaky={'1.ts': 2})
+                self.assertEqual(sum(target.endswith('/1.ts') for target, _ in http.calls), 3)
+                self.assertEqual(sum(event.get('bytes_in', 0) for event in events), 3 * len(self.ts), "重试不重复计入进度")
+            folder = self.root / 'fmp4'
+            files = {path.name: path.read_bytes() for path in folder.iterdir()}
+            segment = sorted(name for name in files if name.endswith('.m4s'))[1]
+            with self.subTest(source='fmp4', connections=connections):
+                http, events = await self.collect((folder / 'index.m3u8').read_text(), files,
+                                                  connections=connections, flaky={segment: 1})
+                self.assertEqual(sum(target.endswith('/' + segment) for target, _ in http.calls), 2)
 
     async def test_missing_segment_preserves_source_error_instead_of_saving_incomplete_video(self):
         for error in (TransientError('来源连接中断'), ExpiredMedia('平台地址过期')):

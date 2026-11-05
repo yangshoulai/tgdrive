@@ -2,10 +2,11 @@
 
 import asyncio
 import gzip
+import socket
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from tgdrive.offline.http import DownloadError, SafeHttpClient
+from tgdrive.offline.http import DownloadError, SafeHttpClient, TransientError
 from tgdrive.offline.request import DownloadRequest
 
 
@@ -85,3 +86,11 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         records = [(2, 1, 6, "", ("8.8.8.8", 80)), (2, 1, 6, "", ("10.0.0.1", 80))]
         with patch.object(loop, "getaddrinfo", new=AsyncMock(return_value=records)), self.assertRaises(DownloadError):
             await SafeHttpClient().resolve("mixed.test", 80)
+
+    async def test_dns_failure_is_retryable(self):
+        # DNS 一时查不到不能直接判失败：长时间的 M3U8 任务会因为一个分片的查询失败整体从头下载。
+        loop = asyncio.get_running_loop()
+        failure = socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+        with patch.object(loop, "getaddrinfo", new=AsyncMock(side_effect=failure)), \
+                self.assertRaisesRegex(TransientError, "无法解析下载域名"):
+            await SafeHttpClient().resolve("media.test", 443)

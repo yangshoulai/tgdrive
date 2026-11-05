@@ -144,6 +144,29 @@ class DefragmenterTests(unittest.IsolatedAsyncioTestCase):
         elst = moov.index(b"elst") + 4
         self.assertEqual(struct.unpack(">IiI", moov[elst + 20:elst + 32])[0], 4 * 5 * 3600 * 1000 // 90000 - 23)
 
+    async def test_output_over_4_gib_uses_co64_and_large_mdat(self):
+        # 超过 4 GB 的视频：stco 试算曾把位置塞进 32 位数组而 OverflowError，任务在 95% 处失败并从头重下。
+        data, _ = fragmented_mp4(3)
+        _, converter = await self.convert(data, 4096)
+        gap = 1 << 32
+        # 不真的转发 4 GB：把最后一个 mdat 的输出位置往后挪 4 GB，等同于中间还有 4 GB 数据。
+        start, length, output = converter.segments[-1]
+        converter.segments[-1] = (start, length, output + gap)
+        converter.length += gap
+        header = converter.header()
+        boxes = header[:-16]  # 末尾是 mdat 头，声明的长度包含没有附上的数据，不参与遍历
+        moov = find(boxes, [b"moov"])[0]
+        tables = boxes[moov[0]:moov[0] + moov[2]]
+        self.assertIn(b"co64", tables)
+        self.assertNotIn(b"stco", tables)
+        self.assertEqual(header[-16:-8], struct.pack(">I4s", 1, b"mdat"))
+        self.assertEqual(struct.unpack(">Q", header[-8:])[0], 16 + converter.length)
+        for at, _, _ in find(boxes, [b"moov", b"trak", b"mdia", b"minf", b"stbl", b"co64"]):
+            count = struct.unpack(">I", boxes[at + 12:at + 16])[0]
+            offsets = struct.unpack(f">{count}Q", boxes[at + 16:at + 16 + 8 * count])
+            self.assertGreater(offsets[-1], gap, "最后一个分片的数据位于 4 GB 之后")
+            self.assertLess(offsets[0], gap)
+
     async def test_truncated_or_unrecognised_output_fails(self):
         data, _ = fragmented_mp4(2)
         with self.assertRaises(DownloadError):

@@ -11,11 +11,14 @@ from contextlib import aclosing
 from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
-from .http import DownloadError, ExpiredMedia, SafeHttpClient, status_error
+from .http import DownloadError, ExpiredMedia, SafeHttpClient, TransientError, status_error
 from .parallel import ordered
 
 # 多连接预读时，声明长度不超过这个值的分片整段读进内存；更大或没有声明长度的分片照旧边读边转发，不预读。
 SEGMENT_BUFFER = 16 * 1024 * 1024
+# 单个分片遇到网络抖动（DNS、连接中断、408/429/5xx）时原地重试的间隔（秒）。封装器状态无法从中间恢复，
+# 不在这里重试的话，几千个分片里任何一次抖动都会让整个任务从头下载。
+SEGMENT_RETRY_DELAYS = (2, 5, 15, 30)
 from .request import DownloadRequest, checked_url
 
 
@@ -204,8 +207,33 @@ def playback_headers(request):
     return {key: value for key, value in request.headers if key.lower() in ("user-agent", "referer", "origin", "accept")}
 
 
+async def _retrying(attempt, check):
+    """执行 attempt()，遇到 TransientError 按 SEGMENT_RETRY_DELAYS 原地重试；其余错误直接抛出。"""
+    for delay in (*SEGMENT_RETRY_DELAYS, None):
+        try:
+            return await attempt()
+        except TransientError:
+            if delay is None:
+                raise
+        check()
+        await asyncio.sleep(delay)
+
+
+def _skip(piece, state):
+    """重试时丢弃已经交给 FFmpeg 的开头部分（state["skip"] 记剩余要丢弃的字节）。"""
+    if state["skip"]:
+        cut = min(state["skip"], len(piece))
+        state["skip"] -= cut
+        piece = piece[cut:]
+    return piece
+
+
 async def _segment_bytes(client, request, url, url_check, check, throttle):
     """把一个 TS 分片整段读进内存（多连接预读用）；没有声明长度或超过 SEGMENT_BUFFER 时不读正文，返回 None。"""
+    return await _retrying(lambda: _segment_once(client, request, url, url_check, check, throttle), check)
+
+
+async def _segment_once(client, request, url, url_check, check, throttle):
     async with client.open(request, url=url, method="GET", identity=True, url_check=url_check,
                            extra_headers=playback_headers(request) if url_check else {}) as response:
         if url_check and response.status in (401, 403, 404, 410):
@@ -249,28 +277,39 @@ async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist
             await process.stdin.drain()
 
     async def stream_one(index, url, duration):
-        async with client.open(request, url=url, method="GET", identity=True, url_check=url_check,
-                               extra_headers=playback_headers(request) if url_check else {}) as response:
-            if url_check and response.status in (401, 403, 404, 410):
-                raise ExpiredMedia(f"平台视频分片不可访问（HTTP {response.status}），需要重新解析")
-            if response.status != 200:
-                raise status_error(response.status, f"读取视频分片失败（HTTP {response.status}）")
-            prefix, validated = b"", False
-            async for piece in response.stream():
-                check()
-                await throttle(len(piece))
-                # 强制 TS 输入，拒绝 fMP4 或把网页误当成视频；不保存整个分片。
-                if not validated:
-                    prefix += piece
-                    if len(prefix) < 377:
+        # 中途断开时重新请求同一分片，跳过已经写进 FFmpeg 的部分接着写。
+        state = {"sent": 0, "size": None, "validated": False}
+
+        async def attempt():
+            async with client.open(request, url=url, method="GET", identity=True, url_check=url_check,
+                                   extra_headers=playback_headers(request) if url_check else {}) as response:
+                if url_check and response.status in (401, 403, 404, 410):
+                    raise ExpiredMedia(f"平台视频分片不可访问（HTTP {response.status}），需要重新解析")
+                if response.status != 200:
+                    raise status_error(response.status, f"读取视频分片失败（HTTP {response.status}）")
+                if state["sent"] and response.size != state["size"]:
+                    raise DownloadError("视频分片在重新读取时发生了变化，可以重新下载")
+                state["size"], state["skip"], prefix = response.size, state["sent"], b""
+                async for piece in response.stream():
+                    check()
+                    await throttle(len(piece))
+                    if not (piece := _skip(piece, state)):
                         continue
-                    if prefix[0] != 0x47 or prefix[188] != 0x47 or prefix[376] != 0x47:
-                        raise DownloadError("视频分片不是支持的 MPEG-TS 格式")
-                    piece, prefix, validated = prefix, b"", True
-                await write(piece)
-                progress(bytes_in=len(piece))
-            if not validated:
-                raise DownloadError("视频分片不完整")
+                    # 强制 TS 输入，拒绝 fMP4 或把网页误当成视频；不保存整个分片。
+                    if not state["validated"]:
+                        prefix += piece
+                        if len(prefix) < 377:
+                            continue
+                        if prefix[0] != 0x47 or prefix[188] != 0x47 or prefix[376] != 0x47:
+                            raise DownloadError("视频分片不是支持的 MPEG-TS 格式")
+                        piece, prefix, state["validated"] = prefix, b"", True
+                    await write(piece)
+                    state["sent"] += len(piece)
+                    progress(bytes_in=len(piece))
+                if not state["validated"] or state["skip"]:
+                    raise DownloadError("视频分片不完整")
+
+        await _retrying(attempt, check)
 
     async def feed():
         try:
@@ -455,19 +494,26 @@ class _HlsRelay:
 
     async def _buffer(self, path):
         """预读一个媒体资源到内存；没有声明长度或超过 SEGMENT_BUFFER 时不读正文，返回 None（到时再边读边转发）。"""
-        async with self._open(path) as response:
-            expected = self._expected(path, response)
-            if expected is None or expected > SEGMENT_BUFFER:
-                return None
-            pieces, size = [], 0
-            async for piece in response.stream():
-                self.check()
-                size += len(piece)
-                if size > expected:
-                    raise DownloadError("M3U8 视频资源长度不正确")
-                await self.throttle(len(piece))
-                self.progress(bytes_in=len(piece))
-                pieces.append(piece)
+        return await _retrying(lambda: self._buffer_once(path), self.check)
+
+    async def _buffer_once(self, path):
+        pieces, size = [], 0
+        try:
+            async with self._open(path) as response:
+                expected = self._expected(path, response)
+                if expected is None or expected > SEGMENT_BUFFER:
+                    return None
+                async for piece in response.stream():
+                    self.check()
+                    size += len(piece)
+                    if size > expected:
+                        raise DownloadError("M3U8 视频资源长度不正确")
+                    await self.throttle(len(piece))
+                    self.progress(bytes_in=len(piece))
+                    pieces.append(piece)
+        except BaseException:
+            self.progress(bytes_in=-size)  # 这次读到的数据作废，重试时重新计入
+            raise
         if not size or size != expected:
             raise DownloadError("M3U8 视频资源不完整")
         return b"".join(pieces)
@@ -498,33 +544,44 @@ class _HlsRelay:
                     await self.write(writer, data[start:start + 65536])
                 self._served(path)
                 return
-        async with self._open(path) as response:
-            expected = self._expected(path, response)
-            if extension != "key":
-                await self.head(writer, size=expected)
-            size, key = 0, b""
-            async for piece in response.stream():
-                self.check()
-                size += len(piece)
-                if extension == "key" and size > 16:
-                    raise DownloadError("M3U8 AES-128 密钥必须为 16 字节")
-                if expected is not None and size > expected:
-                    raise DownloadError("M3U8 视频资源长度不正确")
-                await self.throttle(len(piece))
-                self.progress(bytes_in=len(piece))
+        # 来源中途断开时重新请求，跳过已经转发给 FFmpeg 的部分接着发（响应头只发一次）。
+        state = {"headed": False, "expected": None, "sent": 0}
+
+        async def attempt():
+            async with self._open(path) as response:
+                expected = self._expected(path, response)
+                if state["headed"] and expected != state["expected"]:
+                    raise DownloadError("M3U8 视频资源在重新读取时发生了变化，可以重新下载")
+                if extension != "key" and not state["headed"]:
+                    await self.head(writer, size=expected)
+                    state["headed"], state["expected"] = True, expected
+                state["skip"], size, key = state["sent"], 0, b""
+                async for piece in response.stream():
+                    self.check()
+                    size += len(piece)
+                    if extension == "key" and size > 16:
+                        raise DownloadError("M3U8 AES-128 密钥必须为 16 字节")
+                    if expected is not None and size > expected:
+                        raise DownloadError("M3U8 视频资源长度不正确")
+                    await self.throttle(len(piece))
+                    if extension == "key":
+                        self.progress(bytes_in=len(piece))
+                        key += piece
+                    elif piece := _skip(piece, state):
+                        # 背压贯穿源站、FFmpeg 与加密上传；不会缓存整个分片或整个视频。
+                        await self.write(writer, piece)
+                        state["sent"] += len(piece)
+                        self.progress(bytes_in=len(piece))
+                if not size or expected is not None and size != expected or state["skip"]:
+                    raise DownloadError("M3U8 视频资源不完整")
                 if extension == "key":
-                    key += piece
-                else:
-                    # 背压贯穿源站、FFmpeg 与加密上传；不会缓存整个分片或整个视频。
-                    await self.write(writer, piece)
-            if not size or expected is not None and size != expected:
-                raise DownloadError("M3U8 视频资源不完整")
-            if extension == "key":
-                if size != 16:
-                    raise DownloadError("M3U8 AES-128 密钥必须为 16 字节")
-                self.keys[path] = key
-                await self.head(writer, size=16)
-                await self.write(writer, key)
+                    if size != 16:
+                        raise DownloadError("M3U8 AES-128 密钥必须为 16 字节")
+                    self.keys[path] = key
+                    await self.head(writer, size=16)
+                    await self.write(writer, key)
+
+        await _retrying(attempt, self.check)
         self._served(path)
 
     def _served(self, path):

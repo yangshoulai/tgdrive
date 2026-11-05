@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import re
 import time
+import traceback
 import unicodedata
 from collections.abc import Callable
 from dataclasses import replace
@@ -120,6 +121,15 @@ async def _peek(stream, size: int):
         async for piece in iterator:
             yield piece
     return bytes(head), whole()
+
+def _where(exc: BaseException) -> str:
+    """异常在本项目代码里最后经过的位置（文件:行号:函数），不含异常信息与变量值。"""
+    frames = [frame for frame in traceback.extract_tb(exc.__traceback__) if "/tgdrive/" in frame.filename.replace("\\", "/")]
+    if not frames:
+        return "未知位置"
+    frame = frames[-1]
+    return f"{frame.filename.replace(chr(92), '/').rsplit('/tgdrive/', 1)[-1]}:{frame.lineno}:{frame.name}"
+
 
 class Paused(NotReadyError):
     pass
@@ -1139,6 +1149,20 @@ class OfflineDownloads:
             stats["tick"], stats["last_bytes"] = now, stats["received"]
             self._set(task_id, **{key: stats[key] for key in ("received", "segments_done", "processed_seconds")})
 
+    def _quota_message(self, row):
+        """配额不足时说清楚是哪里的空间：账号存储桶的配额（含回收站与封面），不是服务器磁盘。"""
+        try:
+            bucket = self.objects._bucket(row["bucket_id"])
+        except NotFoundError:
+            bucket = None
+        if bucket is None or bucket["quota_bytes"] is None:
+            return "存储空间不足，请清理文件或联系管理员扩容后重试"
+        gib = lambda value: f"{max(0, int(value)) / 1024 ** 3:.2f} GB"
+        quota, used = int(bucket["quota_bytes"]), int(bucket["used_bytes"])
+        written = f"，本文件写入 {gib(row['stored_bytes'])} 后超出" if row["stored_bytes"] else ""
+        return (f"账号存储配额不足：配额 {gib(quota)}，已用 {gib(used)}（含回收站与封面），剩余 {gib(quota - used)}{written}；"
+                "请清理文件（包括清空回收站）或联系管理员扩容后重试")
+
     async def _run(self, task_id):
         started = time.monotonic()
         try:
@@ -1177,11 +1201,14 @@ class OfflineDownloads:
                 delay = RETRY_DELAYS[attempt - 1]
                 self._retries[task_id], self._retry_at[task_id] = attempt, time.monotonic() + delay
                 self._set(task_id, status="interrupted", error=f"{exc}；{delay} 秒后自动重试（第 {attempt}/{len(RETRY_DELAYS)} 次）")
-        except (DownloadError, QuotaExceededError) as exc:
-            self._set(task_id, status="failed", error=str(exc) if isinstance(exc, DownloadError) else "存储空间不足，请清理文件或联系管理员扩容后重试")
-        except Exception:
-            # 外部异常可能含 URL、签名或响应内容，不能直接返回或写日志。
-            self._set(task_id, status="failed", error="下载或保存失败，请检查来源参数、存储通道与可用空间后重试")
+        except DownloadError as exc:
+            self._set(task_id, status="failed", error=str(exc))
+        except QuotaExceededError:
+            self._set(task_id, status="failed", error=self._quota_message(self._row(task_id)))
+        except Exception as exc:
+            # 外部异常可能含 URL、签名或响应内容，不能直接返回或写日志；只记类型与出错的代码位置，便于排查。
+            log.warning("离线任务 %s 意外失败：%s（%s）", task_id, type(exc).__name__, _where(exc))
+            self._set(task_id, status="failed", error=f"下载或保存失败（内部错误 {type(exc).__name__}），请检查来源参数与存储通道后重试")
         finally:
             self._diagnoses.pop(task_id, None)
             stats = self._stats.pop(task_id, None)

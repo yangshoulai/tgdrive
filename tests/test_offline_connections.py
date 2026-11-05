@@ -128,6 +128,16 @@ class DirectConnectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(http.peak, 1)
                 await self.offline.stop()
 
+    async def test_quota_failure_explains_bucket_usage(self):
+        # 「空间不足」指账号存储桶的配额（不是服务器磁盘），失败信息要给出配额与已用量。
+        with self.app.metadata.transaction() as db:
+            db.execute("UPDATE buckets SET quota_bytes=? WHERE id=?", (2 * PART_SIZE, self.alice.bucket_id))
+        task_id = await self.download(RangeHttp(content(3 * PART_SIZE)))
+        row = self.offline._row(task_id)
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("账号存储配额不足：配额 0.03 GB，已用 0.00 GB", row["error"])
+        self.assertIn("回收站", row["error"])
+
     async def test_resume_fetches_only_missing_parts(self):
         data = content(4 * PART_SIZE)
         last = f"bytes={3 * PART_SIZE}-{4 * PART_SIZE - 1}"

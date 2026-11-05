@@ -287,7 +287,9 @@ class SafeHttpClient:
             async with asyncio.timeout(10):
                 records = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
         except (OSError, TimeoutError) as exc:
-            raise DownloadError("无法解析下载域名，请检查链接或稍后重试") from exc
+            # DNS 查询失败多是解析服务器一时没有响应：按网络抖动重试，长任务不因一次查询失败而整体失败；
+            # 域名确实不存在时，重试用完后同样以这条信息失败。
+            raise TransientError("无法解析下载域名，请检查链接或稍后重试") from exc
         addresses = list(dict.fromkeys(record[4][0] for record in records))
         if any(ipaddress.ip_address(address) in ipaddress.ip_network("198.18.0.0/15") for address in addresses):
             raise DownloadError("下载域名解析到了保留地址（198.18.0.0/15），可能启用了代理 Fake-IP；请让该域名返回真实公网 IP")

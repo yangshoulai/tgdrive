@@ -421,6 +421,8 @@ class Defragmenter:
             mdat = struct.pack(">I4sQ", 1, b"mdat", 16 + self.length)
         # 样本位置取决于 moov 的长度，moov 的长度又取决于用 stco 还是 co64：先按 stco 计算，放不下再换 co64。
         for wide in (False, True):
+            if not wide and len(self.ftyp) + len(mdat) + self.length >= 1 << 32:
+                continue  # 数据本身就超过 4 GB：stco 装不下样本位置，试算也会溢出，直接用 co64
             base = len(self.ftyp) + len(self._moov(0, wide)) + len(mdat)
             if wide or base + self.length < 1 << 32:
                 return self.ftyp + self._moov(base, wide) + mdat
