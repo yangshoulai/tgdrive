@@ -7,8 +7,6 @@ import { Icon, isShortcutControl, type IconName } from "./ui";
 import { decodeHeif } from "./heif";
 
 type Size = { width: number; height: number };
-/** 预览封面最长边为 min(960, 原图最长边)：达到这个长度说明原图至少这么大，占位时可以放大到原图将占据的尺寸。 */
-const POSTER_EDGE = 950;
 type View = { scale: number; x: number; y: number };
 const FIT: View = { scale: 1, x: 0, y: 0 };
 const MAX_ZOOM = 8;
@@ -30,8 +28,9 @@ function backdropOf(image: HTMLImageElement): string | null {
   } catch { return null; } // 跨域图片无法读取像素时保留已有背景，不为装饰重新请求文件。
 }
 
-export function ImageViewer({ url: source, name, heic = false, poster, size, onLoad, onError, onImageSize, nav, strip }: {
+export function ImageViewer({ url: source, name, heic = false, poster, posterMaxEdge = 960, size, onLoad, onError, onImageSize, nav, strip }: {
   url: string; name: string; /** HEIC／HEIF：浏览器不能直接显示时在 Worker 里解码后显示。 */ heic?: boolean; poster?: string; /** 已记录的原图分辨率：加载前就按它定好显示尺寸，封面与原图都在最终位置出现，不再跳动。 */ size?: Size;
+  /** 占位图实际规格的像素上限，用来区分已缩小的封面与原本就小的图片。 */ posterMaxEdge?: number;
   onLoad?: (image: HTMLImageElement) => void; onError: () => void;
   onImageSize?: (width: number, height: number, original: boolean) => void; nav?: PreviewNav; strip?: PreviewStrip;
 }) {
@@ -60,6 +59,7 @@ export function ImageViewer({ url: source, name, heic = false, poster, size, onL
   const [ready, setReady] = useState<{ url: string; image: HTMLImageElement; size: Size; warm: boolean } | null>(null);
   const [coverReady, setCoverReady] = useState<{ url: string; image: HTMLImageElement; size: Size } | null>(null);
   const loaded = ready?.url === url && ready.image === original.current, warm = loaded && ready.warm;
+  const covered = coverReady?.url === url && coverReady.image === cover.current;
   const [waiting, setWaiting] = useState<string | null>(null);
   // 加载也可能只是本机密文读取与图片解码；快速打开时不闪现转圈，不把等待描述成远端下载。
   useEffect(() => {
@@ -71,7 +71,7 @@ export function ImageViewer({ url: source, name, heic = false, poster, size, onL
   // 显示尺寸依次取：原图实际尺寸、已记录的分辨率、封面尺寸（封面只是占位，按比例推测原图大小）。
   const known = size && size.width > 0 && size.height > 0 ? size : null;
   const natural: (Size & { poster?: boolean }) | null = loaded ? ready.size : known ? known
-    : coverReady?.url === url && coverReady.image === cover.current ? { ...coverReady.size, poster: true } : null;
+    : covered ? { ...coverReady.size, poster: true } : null;
   const [backdrops, setBackdrops] = useState<string[]>([]);
   // 原图淡入结束前保留封面在下面，避免切换瞬间露出背景或跳动。
   const [faded, setFaded] = useState<string | null>(null);
@@ -145,8 +145,9 @@ export function ImageViewer({ url: source, name, heic = false, poster, size, onL
 
   // 适应画布的基准尺寸：旋转 90° 时宽高互换；小图不放大。
   const turned = rotation % 180 !== 0;
-  // 小图不放大；封面占位且原图明显更大时按画布放大，原图到达后尺寸不变，不会从小图跳到大图。
-  const upscale = Boolean(natural?.poster && Math.max(natural.width, natural.height) >= POSTER_EDGE);
+  // 达到实际规格上限的封面可能来自更大的原图，应铺到适配位置；未达到上限的小图保持原尺寸。
+  // 服务端缩放会取整到偶数，预留 2px，网格图和列表小图也适用。
+  const upscale = Boolean(natural?.poster && Math.max(natural.width, natural.height) >= posterMaxEdge - 2);
   const fit = natural && box.width && box.height
     ? Math.min(upscale ? Infinity : 1, (box.width - 32) / (turned ? natural.height : natural.width), (box.height - 32) / (turned ? natural.width : natural.height)) : 1;
   const display = natural ? { width: natural.width * fit, height: natural.height * fit } : null;
@@ -287,12 +288,12 @@ export function ImageViewer({ url: source, name, heic = false, poster, size, onL
     <div className="image-backdrop" aria-hidden="true">{backdrops.map(snapshot => <div key={snapshot} className="image-backdrop-layer" style={{ backgroundImage: `url("${snapshot}")` } as CSSProperties} />)}</div>
     <div ref={canvas} className="image-canvas" aria-busy={!loaded} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}
       onDoubleClick={event => { if (view.scale > 1) setView(FIT); else zoomAt(Math.max(2.5, oneToOne), relative(event.clientX, event.clientY)); }}>
-      {!posterDone && poster && <img ref={cover} key={`${url}:${poster}`} className={`image-poster${sized ? " is-sized" : ""}`} src={poster} alt="" aria-hidden="true" draggable={false} style={sized}
+      {!posterDone && poster && <img ref={cover} key={`${url}:${poster}`} className={`image-poster${sized ? " is-sized" : ""}`} src={poster} alt="" aria-hidden="true" draggable={false} style={{ ...sized, transform }}
         onLoad={event => coverLoaded(event.currentTarget)} />}
       <img ref={original} key={url} className="image-full" src={url} alt={name} decoding="async" draggable={false} style={{ ...sized, transform }}
         onLoad={event => imageLoaded(event.currentTarget)}
         onError={event => { if (event.currentTarget === original.current) originalFailed(); }} />
-      {!loaded && waiting === url && <span className="image-loading" role="status"><span className="spinner" />{decoding === source ? "正在转换 HEIC 照片…" : "正在打开原图…"}</span>}
+      {!loaded && !covered && waiting === url && <span className="image-loading" role="status"><span className="spinner" />{decoding === source ? "正在转换 HEIC 照片…" : "正在打开原图…"}</span>}
     </div>
     {nav && nav.count > 1 && <>
       <button type="button" className="image-arrow is-previous" aria-label="上一张（←）" title="上一张（←）" onClick={nav.onPrevious}><Icon name="chevronLeft" size={22} /></button>

@@ -69,6 +69,80 @@ class VideoFrameSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.kwargs["position"] for call in decoder.await_args_list], [0, 1, 3, 10, 30, 60])
 
 
+class EmbeddedVideoCoverTests(unittest.IsolatedAsyncioTestCase):
+    """只用内存字节与替身保存，验证内嵌封面优先，不创建或修改数据库。"""
+
+    def worker(self, data):
+        worker = ThumbnailService.__new__(ThumbnailService)
+        worker._read = AsyncMock(side_effect=lambda info, start, end, remote: data[start:end])
+        worker._plan = Mock()
+        worker.render_image = AsyncMock(return_value={"thumb": JPEG, "grid": JPEG, "poster": JPEG})
+        return worker
+
+    async def test_mp4_cover_is_read_before_video_frames(self):
+        from test_media_tags import box
+        art = box(b"data", bytes(8) + JPEG)
+        data = box(b"ftyp", b"isom" + bytes(8)) + box(b"moov", box(b"udta", box(b"meta", bytes(4) + box(b"ilst", box(b"covr", art)))))
+        worker, authorize = self.worker(data), Mock()
+        info = SimpleNamespace(size=len(data))
+        result = await worker._embedded_images(info, authorize, False)
+        self.assertEqual(result["thumb"], JPEG)
+        worker.render_image.assert_awaited_once_with(JPEG, authorize=authorize)
+        self.assertEqual(worker._plan.call_args.args[1], "image")
+        self.assertTrue(all(call.args[-1] is False for call in worker._read.await_args_list))
+        self.assertTrue(authorize.called)
+
+    async def test_mkv_seekhead_finds_front_cover_after_video_cluster(self):
+        from test_media_tags import ebml
+        def attached(name, picture):
+            return ebml(0x61a7, ebml(0x466e, name) + ebml(0x4660, b"image/jpeg") + ebml(0x465c, picture))
+        attachments = ebml(0x1941a469, attached(b"back.jpg", JPEG + b"back") + attached(b"cover.jpg", JPEG))
+        cluster = ebml(0x1f43b675, bytes(2 * MIB))
+        def seek(offset):
+            return ebml(0x114d9b74, ebml(0x4dbb, ebml(0x53ab, bytes.fromhex("1941a469")) + ebml(0x53ac, offset.to_bytes(8, "big"))))
+        head = seek(0)
+        data = ebml(0x1a45dfa3, b"") + ebml(0x18538067, seek(len(head) + len(cluster)) + cluster + attachments)
+        worker, authorize = self.worker(data), Mock()
+        await worker._embedded_images(SimpleNamespace(size=len(data)), authorize, True)
+        worker.render_image.assert_awaited_once_with(JPEG, authorize=authorize)
+        self.assertLess(sum(call.args[2] - call.args[1] for call in worker._read.await_args_list), MIB)
+        self.assertTrue(all(call.args[-1] is True for call in worker._read.await_args_list))
+
+    async def test_missing_cover_returns_to_frame_path(self):
+        from test_media_tags import box
+        data = box(b"ftyp", b"isom" + bytes(8)) + box(b"moov", b"")
+        worker = self.worker(data)
+        self.assertIsNone(await worker._embedded_images(SimpleNamespace(size=len(data)), Mock(), False))
+        worker.render_image.assert_not_awaited()
+
+    async def test_cache_miss_and_revoked_access_do_not_become_missing_cover(self):
+        worker = self.worker(b"")
+        info = SimpleNamespace(size=MIB)
+        worker._read.side_effect = ThumbnailCacheMiss()
+        with self.assertRaises(ThumbnailCacheMiss):
+            await worker._embedded_images(info, Mock(), False)
+        with self.assertRaises(PermissionError):
+            await worker._embedded_images(info, Mock(side_effect=PermissionError), True)
+        worker.render_image.assert_not_awaited()
+
+    async def test_generate_uses_embedded_cover_without_opening_frame_decoder(self):
+        worker = self.worker(b"")
+        info = SimpleNamespace(size=1000, key="movie.mp4", content_type="video/mp4", blob_uuid="blob", bucket_id=1, etag="etag")
+        scope = SimpleNamespace(authorize=Mock())
+        worker.resources = SimpleNamespace(ffmpeg="ffmpeg")
+        worker.cache = SimpleNamespace(prepare=Mock())
+        worker.objects = SimpleNamespace(set_thumbnail=AsyncMock(), finish_thumbnail_set=Mock())
+        worker._scope = Mock(return_value=scope)
+        worker._has_thumbnail = Mock(return_value=False)
+        worker._unsuitable = {}
+        worker._embedded_images = AsyncMock(return_value={"thumb": JPEG, "grid": JPEG})
+        worker._dimensions = AsyncMock(side_effect=AssertionError("内嵌封面不能按主视频分辨率评估"))
+        with patch("tgdrive.thumbnails._RangeInput", side_effect=AssertionError("有内嵌封面时不能截帧")):
+            await worker.generate(info, allow_remote=True)
+        worker._embedded_images.assert_awaited_once_with(info, scope.authorize, True)
+        self.assertEqual([call.args[-1] for call in worker.objects.set_thumbnail.await_args_list], ["thumb", "grid"])
+
+
 class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
     """只替身解码进程和对象存储，不创建或修改数据库。"""
 
@@ -77,6 +151,7 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
         worker.resources = SimpleNamespace(ffmpeg="ffmpeg", detected={"memory_bytes": 1024**3}, pressure=lambda: None, available_memory=lambda: None)
         worker.objects = SimpleNamespace(THUMBNAIL_LIMITS={"thumb": 96 * 1024}, engine=Mock(), media_sizes=lambda blobs: {})
         worker._unsuitable, worker._probed, worker._read_rate = OrderedDict(), OrderedDict(), None
+        worker._embedded_images = AsyncMock(return_value=None)
         return worker
 
     def source(self):

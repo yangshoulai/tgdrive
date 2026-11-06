@@ -1873,9 +1873,9 @@ html[data-input="keyboard"] .preview-text.is-editing .cm-editor.cm-focused { box
 .image-viewer.is-zoomed .image-canvas { cursor: grab; }
 .image-viewer.is-zoomed.is-dragging .image-canvas { cursor: grabbing; }
 .image-canvas > img { grid-area: 1 / 1; max-width: calc(100% - 32px); max-height: calc(100% - 32px); border-radius: var(--radius-2xs); box-shadow: 0 24px 64px var(--shade-48); -webkit-user-drag: none; }
-.image-viewer.is-zoomed .image-canvas > .image-full { max-width: none; max-height: none; }
+.image-viewer.is-zoomed .image-canvas > img { max-width: none; max-height: none; }
 /* 封面在算出显示尺寸前不出现：否则会先按自身大小画一帧、再缩放到适配位置。 */
-.image-poster { filter: blur(1.5px); }
+.image-poster { filter: blur(1.5px); transition: transform var(--duration-slow) var(--ease-out); }
 .image-poster:not(.is-sized) { visibility: hidden; }
 .image-full { opacity: 0; transition: transform var(--duration-slow) var(--ease-out), opacity var(--duration-slow) ease; will-change: transform; }
 .image-viewer.is-loaded .image-full { opacity: 1; animation: image-in .45s var(--ease-out); }
@@ -1884,7 +1884,7 @@ html[data-input="keyboard"] .preview-text.is-editing .cm-editor.cm-focused { box
 .image-viewer.is-loaded .image-poster { filter: none; }
 .image-viewer.is-warm.is-loaded .image-full, .preview-stage.is-cached .image-viewer.is-loaded .image-full { animation: none; }
 .image-viewer.is-warm .image-full, .preview-stage.is-cached .image-full { transition: transform var(--duration-slow) var(--ease-out); }
-.image-viewer.is-dragging .image-full { transition: opacity var(--duration-slow) ease; }
+.image-viewer.is-dragging .image-full, .image-viewer.is-dragging .image-poster { transition: opacity var(--duration-slow) ease; }
 @keyframes image-in { from { opacity: 0; scale: .97; } }
 @keyframes image-fade { from { opacity: 0; } }
 .image-loading { position: absolute; bottom: 72px; left: 50%; z-index: 2; display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius-pill); background: var(--shade-48); color: var(--media-ink-2); font-size: var(--text-xs); backdrop-filter: blur(10px); transform: translateX(-50%); }

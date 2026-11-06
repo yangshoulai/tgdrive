@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from .errors import NotFoundError, NotReadyError, QuotaExceededError
 from .filekinds import kind_clause, kind_of
 from .objects import PRIVATE_PREFIX, ObjectInfo, Scope
+from .media import tags as media_tags
 from .thumbnail_cache import ThumbnailCache, ThumbnailCacheMiss
 from .work import WorkBusyError
 
@@ -676,8 +677,8 @@ class ThumbnailService:
         self.objects.finish_thumbnail_set(scope, key, saved)
         return saved
 
-    async def render_image(self, data):
-        """把一张图片缩放成三种缩略图规格（离线任务的图片地址封面使用）；服务器没有 FFmpeg 时返回 None。"""
+    async def render_image(self, data, *, authorize=lambda: None):
+        """把内嵌封面或离线任务指定的图片缩放成缩略图；服务器没有 FFmpeg 时返回 None。"""
         if not self.resources.ffmpeg or image_mime(data) is None:
             return None
         with tempfile.TemporaryDirectory(prefix="tessera-cover-") as directory:
@@ -685,8 +686,35 @@ class ThumbnailService:
             path.write_bytes(data)
             source = SimpleNamespace(url=str(path), origin="", failure=None)
             async with asyncio.timeout(TIMEOUT):
-                images, _ = await self._render_frame(source, "image", Path(directory), lambda: None, protocols="file")
+                images, _ = await self._render_frame(source, "image", Path(directory), authorize, protocols="file")
             return images
+
+    async def _embedded_images(self, info, authorize, allow_remote):
+        """视频先按容器索引读取内嵌封面；与自动截帧共用缓存、授权和读取策略，不读完整个视频。"""
+        async def read(start, end):
+            authorize()
+            try:
+                return await self._read(info, start, end, allow_remote)
+            except WorkBusyError:
+                raise ThumbnailRetry("文件读取名额繁忙，稍后再生成") from None
+
+        tags = await media_tags.parse(read, info.size)
+        picture = tags.cover() if tags else None
+        if picture is None:
+            return None
+        if picture.data is not None:
+            data = picture.data
+        elif picture.length > 20 * MIB:
+            return None
+        else:
+            data = await read(picture.offset, picture.offset + picture.length)
+        if image_mime(data) is None:
+            return None
+        header = image_header(data)
+        # 封面按图片自身评估，不能因为主视频分辨率过高而拒绝一张很小的内嵌图片。
+        self._plan(SimpleNamespace(size=len(data)), "image", header[:2] if header else None,
+                   header[2] if header else None, remote=False)
+        return await self.render_image(data, authorize=authorize)
 
     def check_claim(self, info, token):
         lease = self._leases.get(info.blob_uuid)
@@ -959,18 +987,20 @@ class ThumbnailService:
             # 解码图片要读完整个文件，短期缓存装不下时只用缓存必然失败；交给自动补图或用户请求评估后再读取存储。
             raise ThumbnailRetry("图片超过服务器的短期缓存，稍后由自动补图评估后从存储读取")
         async with asyncio.timeout(TIMEOUT):
-            self._plan(info, kind, *await self._dimensions(info, kind, allow_remote), remote=allow_remote)
-            started = time.monotonic()
-            async with _RangeInput(self.objects.engine, info, scope.authorize, cache_only=not allow_remote) as source:
-                try:
-                    with tempfile.TemporaryDirectory(prefix="tessera-thumbnail-") as directory:
-                        images = await self._render(source, kind, Path(directory), scope.authorize)
-                except WorkBusyError:
-                    raise ThumbnailRetry("文件读取名额繁忙，稍后再生成") from None
-                finally:
-                    remote = source.remote_bytes if isinstance(source.remote_bytes, int) else 0
-                    self._remote_bytes += remote
-                    self._observe_rate(remote, time.monotonic() - started)
+            images = await self._embedded_images(info, scope.authorize, allow_remote) if kind == "video" else None
+            if images is None:
+                self._plan(info, kind, *await self._dimensions(info, kind, allow_remote), remote=allow_remote)
+                started = time.monotonic()
+                async with _RangeInput(self.objects.engine, info, scope.authorize, cache_only=not allow_remote) as source:
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="tessera-thumbnail-") as directory:
+                            images = await self._render(source, kind, Path(directory), scope.authorize)
+                    except WorkBusyError:
+                        raise ThumbnailRetry("文件读取名额繁忙，稍后再生成") from None
+                    finally:
+                        remote = source.remote_bytes if isinstance(source.remote_bytes, int) else 0
+                        self._remote_bytes += remote
+                        self._observe_rate(remote, time.monotonic() - started)
             scope.authorize()
             if not force and self._has_thumbnail(info.blob_uuid):
                 return

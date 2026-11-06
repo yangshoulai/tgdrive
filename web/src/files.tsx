@@ -282,7 +282,7 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 }
 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
-type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; /** 已记录的图片／视频显示尺寸：视频按它设播放器比例，图片按它在加载前就把封面与原图放到最终位置。 */ videoSize?: api.MediaSize; poster?: string; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing;
+type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; /** 已记录的图片／视频显示尺寸：视频按它设播放器比例，图片按它在加载前就把封面与原图放到最终位置。 */ videoSize?: api.MediaSize; poster?: string; posterMaxEdge?: number; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing;
   /** 电子书的阅读位置：按内容版本记住（remember 为假时只记在本页内存里，私密文件用）。 */ positionKey?: string | null; rememberPosition?: boolean;
   /** 本人的压缩包：可以浏览内容并在线解压。 */ archive?: { file: api.FileItem; onExtract?: (picks?: string[]) => void } } & PlaybackProps;
 /** 文本编辑：只给本人有写权限的文件。key 是文件路径（保存后地址随版本变化，编辑器不重建）；load 递增时重新读取（换文件、外部改动、冲突后重新加载）。 */
@@ -301,7 +301,7 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, size, videoSize, poster, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation, onRotate, onBufferSpeed, onFindAssets, assetRevision, preferAsset, text, positionKey, rememberPosition, archive }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, size, videoSize, poster, posterMaxEdge, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation, onRotate, onBufferSpeed, onFindAssets, assetRevision, preferAsset, text, positionKey, rememberPosition, archive }: PreviewProps & { onRetry: () => void }) {
   const format = fileFormatOf(kind, name, contentType);
   const [content, setContent] = useState<PreviewText | null>(null);
   // 每次读到新内容递增，文本预览按它重建；自己保存不重新读取，编辑器保持原状。
@@ -348,7 +348,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
   if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} videoSize={videoSize} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} rotation={rotation} onRotate={onRotate} onBufferSpeed={onBufferSpeed} onFindAssets={onFindAssets} assetRevision={assetRevision} preferAsset={preferAsset} />;
   if (mediaFailed) return fallback;
   // 本机缓存仍需读取、解密及图片解码：先用封面占位，原图就绪后显示；背景与补图延后到绘制之后。
-  if (kind === "image") return <ImageViewer url={url} name={name} heic={format === "heic"} poster={poster} size={videoSize} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
+  if (kind === "image") return <ImageViewer url={url} name={name} heic={format === "heic"} poster={poster} posterMaxEdge={posterMaxEdge} size={videoSize} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
   if (kind === "pdf") return error ? fallback : <PdfPreview url={url} name={name} onError={setError} />;
   if (kind === "text" || kind === "code") {
     if (error) return fallback;
@@ -360,7 +360,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
   return fallback;
 }
 
-type PreviewSource = { url: string; downloadUrl: string; poster?: string; thumbnail?: string };
+type PreviewSource = { url: string; downloadUrl: string; poster?: string; grid?: string; thumbnail?: string };
 /** 本页读到或补记过的图片／视频尺寸（按内容版本）：列表数据刷新前再次打开也直接按实际比例打开、显示分辨率。 */
 const recordedSizes = new Map<string, api.MediaSize>();
 /** 视频画面旋转按内容版本记在本机（localStorage，最多 300 个）；私密文件只在本页内存里记住，不写入浏览器存储。 */
@@ -387,7 +387,7 @@ function rememberRotation(file: api.FileItem, degrees: number) {
   } catch { /* 存储不可用时只在本次预览里生效 */ }
 }
 export type PreviewPlayback = { playing: boolean; currentTime: number; state: MediaState };
-export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClose, onShare, onExtract, onEditImage, onFindMedia, onMissingCover, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest, startEditing }: PreviewSource & {
+export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, onClose, onShare, onExtract, onEditImage, onFindMedia, onMissingCover, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest, startEditing }: PreviewSource & {
   /** 打开后直接进入文本编辑（刚新建的文件）。 */ startEditing?: boolean; file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void;
   /** 在线查找歌词、字幕或封面（播放器里没有歌词、字幕或封面时的入口）；保存后页面广播 MEDIA_ASSETS_EVENT。 */ onFindMedia?: (file: api.FileItem, want: api.MediaWant) => void;
   /** 本人的音乐还没有封面时调用：由宿主用文件内嵌的封面补上（已有封面时服务器拒绝，不会覆盖）。 */ onMissingCover?: (file: api.FileItem) => void;
@@ -410,15 +410,21 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
     item => getFileKind(item.content_type, item.key) === kind && (kind === "image" || isPlayable(item.key, item.content_type)) && parentPath(item.key) === parentPath(file.key));
   const active = browsable && playlist.current.key !== file.key ? playlist.current : file;
   const derived = (item: api.FileItem): PreviewSource => sourceFor?.(item) ?? {
-    url: api.contentUrl(item.key), downloadUrl: api.contentUrl(item.key, true), poster: api.fileThumbnail(item, "poster"), thumbnail: api.fileThumbnail(item),
+    url: api.contentUrl(item.key), downloadUrl: api.contentUrl(item.key, true), poster: api.fileThumbnail(item, "poster"), grid: api.fileThumbnail(item, "grid"), thumbnail: api.fileThumbnail(item),
   };
   // 打开的文件沿用传入的地址；缩略图按最新的文件信息计算，页面补上缩略图后预览头部与底部列表随之更新。
   const sourceOf = (item: api.FileItem): PreviewSource => {
     if (item.key !== file.key) return derived(item);
     const latest = derived(item);
-    return { url, downloadUrl, poster: latest.poster ?? poster, thumbnail: latest.thumbnail ?? thumbnail };
+    return { url, downloadUrl, poster: latest.poster ?? poster, grid: latest.grid ?? grid, thumbnail: latest.thumbnail ?? thumbnail };
   };
   const source = sourceOf(active);
+  // 先复用本页已读取的封面，避免网格图已经可见，却为了另一规格的封面再次等待回源。
+  // 按文件与封面版本固定本次选择，后续状态刷新不把正在展示的占位图换成尚未加载的地址。
+  const imagePoster = useMemo(() => kind === "image"
+    ? loadedPlaceholder(source.poster) ?? loadedPlaceholder(source.grid) ?? loadedPlaceholder(source.thumbnail) ?? source.poster ?? source.grid ?? source.thumbnail
+    : source.poster, [kind, active.key, source.poster, source.grid, source.thumbnail]);
+  const imagePosterMaxEdge = api.thumbnailSpec(active, imagePoster === source.poster ? "poster" : imagePoster === source.grid ? "grid" : "thumb").maxEdge;
   // 播放列表、最小化小窗与快捷键说明沿用音乐播放器的背景：当前文件的封面模糊后铺底，没有封面时用按文件名选的色调。
   const mediaSurface: Record<string, string> = media ? { "--preview-tint": coverTint(baseName(active.key)), ...(source.poster ? { "--preview-cover": `url("${source.poster}")` } : {}) } : {};
   const ownSource = /^\/api\/user\/v1\/(?:private\/)?content\?/.test(source.url);
@@ -777,7 +783,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, thumbnail, onClos
         </>}
       </>}>
       <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} videoSize={knownSize ?? undefined} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind, active.key, active.content_type)) : source.url}
-        positionKey={active.etag || null} rememberPosition={!api.isPrivatePath(active.key)} archive={format === "archive" && ownSource ? { file: active, onExtract: onExtract ? picks => onExtract(active, picks) : undefined } : undefined} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={source.poster} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onBufferSpeed={setBufferSpeed} onSaveThumbnail={onSaveVideoThumbnail ? (video, degrees) => onSaveVideoThumbnail(video, active, degrees) : undefined} rotation={rotation} onRotate={rotateVideo} resolveImage={resolveImage} assetUrl={assetUrl}
+        positionKey={active.etag || null} rememberPosition={!api.isPrivatePath(active.key)} archive={format === "archive" && ownSource ? { file: active, onExtract: onExtract ? picks => onExtract(active, picks) : undefined } : undefined} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={imagePoster} posterMaxEdge={imagePosterMaxEdge} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onBufferSpeed={setBufferSpeed} onSaveThumbnail={onSaveVideoThumbnail ? (video, degrees) => onSaveVideoThumbnail(video, active, degrees) : undefined} rotation={rotation} onRotate={rotateVideo} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height, from) => { if (from === "video") recordSize(width, height); setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height }); }}
         onProgress={value => { trackPrefetch(value); setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value); }} onState={setMediaState}

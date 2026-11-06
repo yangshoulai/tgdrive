@@ -580,10 +580,11 @@ export const generateThumbnail = (file: Pick<FileItem, "key" | "etag">) => post<
 export const fetchThumbnailImage = (file: Pick<FileItem, "key">, url: string, signal?: AbortSignal) =>
   request<Blob>(fileApi("/thumbnail/fetch", file.key), { method: "POST", body: JSON.stringify({ url }), signal, cache: "no-store" }, 45000, "blob");
 type ThumbnailFile = Pick<FileItem, "key" | "etag" | "thumbnails" | "has_thumbnail" | "thumbnail_versions">;
-function thumbnailSpec(file: ThumbnailFile, variant: ThumbnailVariant) {
+/** 实际回退规格、像素上限与缓存版本；预览占位和封面地址共用同一套规格判断。 */
+export function thumbnailSpec(file: ThumbnailFile, variant: ThumbnailVariant) {
   const resolved = THUMBNAIL_FALLBACK[variant].find(item => item === "thumb" || file.thumbnails?.includes(item)) ?? "thumb";
   const revision = file.thumbnail_versions?.[resolved];
-  return { variant: resolved, version: `${file.etag}.${resolved}${revision ? `.${revision}` : ""}` };
+  return { variant: resolved, maxEdge: resolved === "poster" ? 960 : resolved === "grid" ? 640 : 160, version: `${file.etag}.${resolved}${revision ? `.${revision}` : ""}` };
 }
 /** 返回所需规格的缩略图地址；网格图或封面尚未生成时按退回顺序复用已有的规格。 */
 export function fileThumbnail(file: ThumbnailFile, variant: ThumbnailVariant = "thumb") {

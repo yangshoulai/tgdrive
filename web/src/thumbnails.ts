@@ -1,4 +1,4 @@
-/** 浏览器缩略图生成：图片缩放、视频截帧、音频内嵌封面；网页上传优先复用本地文件，后台服务另行补生成。
+/** 浏览器缩略图生成：图片缩放、音视频内嵌封面、视频无封面时截帧；网页上传优先复用本地文件，后台服务另行补生成。
  * 三种规格：thumb（最长边 160px，列表、目录四宫格）、grid（640px，网格卡片）与 poster（960px，预览封面与占位）；
  * 后两种只在原图明显更大时生成，存为系统区对象并计入用户空间。旧文件没有 grid 时网格退回 poster 或旧版 320px 的 thumb。 */
 import * as api from "./api";
@@ -180,7 +180,7 @@ async function fromVideo(src: string, signal?: AbortSignal, onFailure?: (message
   }
 }
 
-/* ---------- 音频内嵌封面：MP3（ID3v2）、FLAC、M4A/MP4 ---------- */
+/* ---------- 音视频内嵌封面：MP3（ID3v2）、FLAC、M4A/MP4、Matroska 附件 ---------- */
 
 type ByteReader = { size: number; read: (offset: number, length: number) => Promise<Uint8Array> };
 
@@ -366,7 +366,83 @@ async function mp4Cover(reader: ByteReader): Promise<Blob | null> {
   return image;
 }
 
-async function audioCover(reader: ByteReader): Promise<Blob | "none" | null> {
+/** Matroska 按元素和 SeekHead 定位图片附件，跳过视频簇，不为寻找封面扫描视频正文。 */
+async function matroskaCover(input: ByteReader): Promise<Blob | null> {
+  let cachedAt = 0;
+  let cached: Uint8Array = new Uint8Array();
+  const reader: ByteReader = { size: input.size, read: async (offset, length) => {
+    if (offset < cachedAt || offset + length > cachedAt + cached.length) {
+      cachedAt = offset; cached = await input.read(offset, Math.min(input.size - offset, Math.max(length, 64 * 1024)));
+    }
+    return cached.subarray(offset - cachedAt, offset - cachedAt + length);
+  } };
+  const vint = (bytes: Uint8Array, offset: number, id = false) => {
+    let length = 1, marker = 128;
+    while (marker && !(bytes[offset] & marker)) { length++; marker >>= 1; }
+    if (!marker || length > (id ? 4 : 8) || offset + length > bytes.length) throw new Error("媒体索引不完整");
+    let value = id ? bytes[offset] : bytes[offset] & (marker - 1), unknown = !id && value === marker - 1;
+    for (let index = 1; index < length; index++) { value = value * 256 + bytes[offset + index]; unknown &&= bytes[offset + index] === 255; }
+    if (!unknown && !Number.isSafeInteger(value)) throw new Error("媒体索引无效");
+    return { value, length, unknown };
+  };
+  async function* elements(start: number, end: number) {
+    let offset = start;
+    while (offset < end) {
+      const header = await reader.read(offset, Math.min(16, end - offset)), id = vint(header, 0, true), size = vint(header, id.length);
+      const begin = offset + id.length + size.length, finish = size.unknown ? end : begin + size.value;
+      if (finish > end || finish < begin) throw new Error("媒体索引无效");
+      yield { id: id.value, start: begin, end: finish, unknown: size.unknown };
+      if (size.unknown) return;
+      offset = finish;
+    }
+  }
+  const number = (bytes: Uint8Array) => bytes.reduce((value, byte) => value * 256 + byte, 0);
+  const text = async (start: number, end: number) => new TextDecoder().decode(await reader.read(start, Math.min(512, end - start)));
+  const attachment = async (start: number, end: number) => {
+    let fallback: Blob | null = null;
+    for await (const item of elements(start, end)) {
+      if (item.id !== 0x61a7) continue;
+      let name = "", mime = "", image: [number, number] | null = null;
+      for await (const field of elements(item.start, item.end)) {
+        if (field.id === 0x466e) name = await text(field.start, field.end);
+        else if (field.id === 0x4660) mime = await text(field.start, field.end);
+        else if (field.id === 0x465c) image = [field.start, field.end - field.start];
+      }
+      if (!image || !mime.toLowerCase().startsWith("image/") || image[1] > 20 * 1024 * 1024) continue;
+      const cover = picture(await reader.read(...image));
+      if (cover && /^cover/i.test(name)) return cover;
+      fallback ??= cover;
+    }
+    return fallback;
+  };
+  for await (const root of elements(0, reader.size)) {
+    if (root.id !== 0x18538067) continue;
+    let target: number | null = null;
+    for await (const item of elements(root.start, root.end)) {
+      if (item.id === 0x1941a469) return attachment(item.start, item.end);
+      if (item.id === 0x1f43b675 || item.unknown) break;
+      if (item.id !== 0x114d9b74) continue;
+      for await (const seek of elements(item.start, item.end)) {
+        if (seek.id !== 0x4dbb) continue;
+        let id = 0, position = -1;
+        for await (const field of elements(seek.start, seek.end)) {
+          if (field.end - field.start > 8) continue;
+          if (field.id === 0x53ab) id = number(await reader.read(field.start, field.end - field.start));
+          else if (field.id === 0x53ac) position = number(await reader.read(field.start, field.end - field.start));
+        }
+        if (id === 0x1941a469 && Number.isSafeInteger(position) && position >= 0) target = root.start + position;
+      }
+    }
+    if (target !== null && target < root.end) for await (const item of elements(target, root.end)) {
+      if (item.id === 0x1941a469) return attachment(item.start, item.end);
+      break;
+    }
+    return null;
+  }
+  return null;
+}
+
+async function embeddedCover(reader: ByteReader): Promise<Blob | "none" | null> {
   const head = await reader.read(0, Math.min(reader.size, 10));
   if (ascii(head, 0, 3) === "ID3") {
     const cover = await id3Cover(reader, head);
@@ -377,6 +453,7 @@ async function audioCover(reader: ByteReader): Promise<Blob | "none" | null> {
   }
   if (ascii(head, 0, 4) === "fLaC") return await flacCover(reader) ?? "none";
   if (ascii(head, 4, 4) === "ftyp") return await mp4Cover(reader) ?? "none";
+  if (uint32(head, 0) === 0x1a45dfa3) return await matroskaCover(reader) ?? "none";
   // 未识别的封装交给服务器处理，不能据此永久标记没有封面。
   return null;
 }
@@ -388,14 +465,29 @@ type Input = ({ file: Blob } | { url: string; size: number }) & { signal?: Abort
 export async function createThumbnails(input: Input, source: ThumbnailSource): Promise<ThumbnailResult> {
   try {
     if (source === "image") return await fromBlob("file" in input ? input.file : await (await fetch(input.url, { credentials: "include", signal: input.signal })).blob());
+    const cover = await embeddedCover("file" in input ? blobReader(input.file) : urlReader(input.url, input.size, input.signal));
+    if (cover && cover !== "none") return await fromBlob(cover);
     if (source === "video") {
       const url = "file" in input ? URL.createObjectURL(input.file) : input.url;
       try { return await fromVideo(url, input.signal, input.onFailure); } finally { if ("file" in input) URL.revokeObjectURL(url); }
     }
-    const cover = await audioCover("file" in input ? blobReader(input.file) : urlReader(input.url, input.size, input.signal));
-    return cover === "none" ? "none" : cover ? await fromBlob(cover) : null;
+    return cover;
   } catch (reason) {
     if (reason instanceof DOMException && reason.name === "AbortError") throw reason;
+    return null;
+  }
+}
+
+/** 预览自动补图也先读内嵌封面，避免上传或后台尚未完成时被当前画面抢先占位；手动截帧仍用 thumbnailsFromVideo。 */
+export async function videoPreviewThumbnails(video: HTMLVideoElement, size: number, signal: AbortSignal): Promise<ThumbnailSet | null> {
+  const url = video.currentSrc;
+  if (!url) return null;
+  try {
+    const cover = await embeddedCover(urlReader(url, size, signal));
+    if (signal.aborted || video.currentSrc !== url) return null;
+    return cover && cover !== "none" ? await fromBlob(cover) : await thumbnailsFromVideo(video);
+  } catch (reason) {
+    if (signal.aborted) throw reason;
     return null;
   }
 }

@@ -4,15 +4,29 @@ import type { TextEncodingName } from "./text-encoding";
 export const TEXT_PREVIEW_LIMIT = 16 * 1024 * 1024;
 /** encoding／bom 供编辑保存按原编码写回；exact 为假表示解码时有无法识别的字节（替换成了 �），不能安全编辑。 */
 export type PreviewText = { text: string; truncated: boolean; total: number | null; encoding: TextEncodingName; bom: boolean; exact: boolean };
+class IncompleteText extends Error {
+  constructor() { super("文件读取不完整，请重试"); }
+}
 export async function readPreviewText(url: string, limit: number, signal: AbortSignal): Promise<PreviewText> {
-  const response = await fetch(url, { credentials: "include", headers: { Range: `bytes=0-${limit}` }, signal });
+  try { return await readText(url, limit, signal); }
+  catch (reason) {
+    if (!(reason instanceof IncompleteText)) throw reason;
+    signal.throwIfAborted();
+    // 小文件也可能只收到较短的范围响应；绕过 HTTP 缓存完整重读一次，仍按同一字节上限截断。
+    return readText(url, limit, signal, true);
+  }
+}
+async function readText(url: string, limit: number, signal: AbortSignal, retry = false): Promise<PreviewText> {
+  const response = await fetch(url, { credentials: "include", headers: retry ? undefined : { Range: `bytes=0-${limit}` }, cache: retry ? "reload" : "default", signal });
   if (response.status === 416 && response.headers.get("content-range") === "bytes */0") {
     await response.body?.cancel();
     return { text: "", truncated: false, total: 0, encoding: "utf-8", bom: false, exact: true };
   }
   if (!response.ok) throw new Error(`无法读取文件（${response.status}）`);
   const totalRange = /\/(\d+)$/.exec(response.headers.get("content-range") ?? "");
-  const contentLength = response.headers.get("content-length");
+  // fetch 已解压正文；压缩响应的 Content-Length 是传输大小，不能拿来判断文本是否完整。
+  const encoded = response.headers.get("content-encoding");
+  const contentLength = encoded && encoded !== "identity" ? null : response.headers.get("content-length");
   const total = totalRange ? Number(totalRange[1]) : response.status === 200 && contentLength ? Number(contentLength) : null;
   const reader = response.body?.getReader();
   if (!reader) throw new Error("无法读取文件内容");
@@ -30,10 +44,12 @@ export async function readPreviewText(url: string, limit: number, signal: AbortS
       chunks.push(value); length += value.byteLength;
     }
   } finally { reader.releaseLock(); }
+  // 「没有读完」不等于「超过预览上限」：几 KB 的歌词缺了一段时应重读，不能误报超过 2 MB。
+  const truncated = overflow || (total !== null && total > limit);
+  if (!truncated && total !== null && total > length) throw new IncompleteText();
   const bytes = new Uint8Array(length);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  const truncated = overflow || (total !== null && total > length);
   return { ...decodeText(bytes, truncated), truncated, total };
 }
 

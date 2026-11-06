@@ -424,7 +424,7 @@ function FolderShare({ token, folder, access, onPasswordRequired, saveButton, on
           url={api.publicFolderFile(token, preview.path, false, access)} downloadUrl={api.publicFolderFile(token, preview.path, true, access)}
           loadAssets={(file, signal) => api.publicPreviewAssets(token, file.key, access, signal)} assetUrl={path => api.publicFolderFile(token, path, false, access)}
           playlistFiles={page?.files.map(file => ({ ...file, key: file.path }))}
-          sourceFor={file => { const url = api.publicFolderFile(token, file.key, false, access); return { url, downloadUrl: api.publicFolderFile(token, file.key, true, access), poster: file.thumbnails?.includes("thumb") ? api.publicThumbnail(url, "poster") : undefined, thumbnail: file.thumbnails?.includes("thumb") ? api.publicThumbnail(url) : undefined }; }} />
+          sourceFor={file => { const url = api.publicFolderFile(token, file.key, false, access); return { url, downloadUrl: api.publicFolderFile(token, file.key, true, access), poster: file.thumbnails?.includes("thumb") ? api.publicThumbnail(url, "poster") : undefined, grid: file.thumbnails?.includes("thumb") ? api.publicThumbnail(url, "grid") : undefined, thumbnail: file.thumbnails?.includes("thumb") ? api.publicThumbnail(url) : undefined }; }} />
       )}
     </article>
   );
