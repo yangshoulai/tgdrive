@@ -230,13 +230,16 @@ SCAN_FILES = 20000
       "图片按原图缩放；音频、视频依次使用文件内嵌封面、在线查找（管理员启用的媒体信息来源，按匹配度自动采用）、截取视频画面（音频不能截图）。"
       "审批模式显示「生成封面」卡片，完全访问下自动提交给服务器后台生成。path 可以是文件或目录；recursive 包含子目录；"
       "曾尝试但未生成的文件也会重试，不能把 none 失败记录当作已有封面。regenerate 时也重新生成已有但缺少网格图的旧版封面。"
+      "用户要求强制更新、重置或按当前规则重新获取封面时设 force=true：已有封面的文件也全部重新生成并覆盖（包括以前截图得到或用户手动设置的封面；"
+      "视频没有可用结果时保留原封面）。"
       "单次文件数上限由管理员设置，超出时结果会说明剩余数量。",
       {"path": PATH, "recursive": {"type": "boolean", "description": "目录是否包含子目录，默认否"},
-       "regenerate": {"type": "boolean", "description": "是否重新生成缺少网格图的旧封面，默认否"}}, ("path",),
+       "regenerate": {"type": "boolean", "description": "是否重新生成缺少网格图的旧封面，默认否"},
+       "force": {"type": "boolean", "description": "强制按当前规则重新生成全部文件的封面并覆盖已有封面，默认否"}}, ("path",),
       params={"max_files": (500, 10, 2000, "单次最多处理文件数")})
 async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
     key = ctx.resolve(_str(args, "path", limit=1024))
-    recursive, regenerate = args.get("recursive") is True, args.get("regenerate") is True
+    recursive, regenerate, force = args.get("recursive") is True, args.get("regenerate") is True, args.get("force") is True
     single = None if key.endswith("/") or not key else ctx.db.execute(
         "SELECT key, size, etag, content_type, blob_uuid FROM objects WHERE bucket_id=? AND key=?", (ctx.bucket_id, key)).fetchone()
     if single is not None:
@@ -254,7 +257,7 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
     media = [row for row in rows if row["blob_uuid"] and kind_of(row["key"], row["content_type"]) in THUMBNAIL_KINDS]
     variants = ctx.objects.thumbnail_variants([row["blob_uuid"] for row in media])
     # 用户明确补图时，none 也属于缺图；只有真实的小图才算已有缩略图。
-    todo = [row for row in media if "thumb" not in variants.get(row["blob_uuid"], ())
+    todo = media if force else [row for row in media if "thumb" not in variants.get(row["blob_uuid"], ())
             or regenerate and "grid" not in variants[row["blob_uuid"]]]
     items = [{"path": row["key"], "size": int(row["size"] or 0), "etag": row["etag"], "content_type": row["content_type"],
               "retry": "none" in variants.get(row["blob_uuid"], ())}
@@ -268,7 +271,7 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
         payload["note"] = f"还有 {len(todo) - len(items)} 个文件，用户完成这一批后可以再调用一次"
     return ToolOutput({**payload, "status": "已在对话中显示生成封面卡片，等待用户点击"}, f"准备为 {len(items)} 个文件生成封面",
                       items=len(items), event={"type": "browser", "action": "thumbnails", "items": items,
-                                                "regenerate": regenerate})
+                                                "regenerate": regenerate, "force": force})
 
 
 # ---------- 本机缓存（§26）：缓存只在用户浏览器里，服务端只负责校验路径并列出文件 ----------

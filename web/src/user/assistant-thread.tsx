@@ -845,7 +845,7 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
         }
         if (local && !signal.aborted) {
           // 服务器无法生成时的退路：在当前页面读取文件生成（会产生下载流量）。
-          const work = generateLoadedThumbnails(file, claimSignal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source, "smart"), event.regenerate || item.retry === true, signal);
+          const work = generateLoadedThumbnails(file, claimSignal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source, "smart"), event.force || event.regenerate || item.retry === true, signal);
           inFlight.current = work;
           const saved = await work;
           if (!saved) counts.failed++; else if (saved.includes("none")) counts.none++; else counts.done++;
@@ -875,7 +875,7 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
   const total = event.items.length, processed = state.done + state.none + state.failed;
   const summary = [state.local ? `已生成 ${state.done} 个` : `已提交 ${state.done} 个`, state.none ? `${state.none} 个不支持` : "", state.failed ? `${state.failed} 个失败` : ""].filter(Boolean).join("，");
   return <section className="ai-card ai-browser">
-    <CardHead icon="image" title={`为 ${total} 个文件生成封面`} subtitle={`${event.regenerate ? "包括重做旧版封面 · " : ""}${state.local ? "在当前页面生成" : "由服务器后台生成"}`} />
+    <CardHead icon="image" title={`为 ${total} 个文件生成封面`} subtitle={`${event.force ? "覆盖已有封面 · " : event.regenerate ? "包括重做旧版封面 · " : ""}${state.local ? "在当前页面生成" : "由服务器后台生成"}`} />
     {state.phase === "idle" ? <ul className="ai-list">{event.items.slice(0, 5).map(item => <li key={item.path}><Icon name="file" size={13} /><span className="cell-truncate">{display(item.path)}</span></li>)}
       {total > 5 && <li className="ai-list-more">等 {total} 个文件</li>}</ul>
       : <div className="ai-thumbnail-progress">

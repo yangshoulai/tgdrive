@@ -165,6 +165,14 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
             event = (await self.tool_results(user, conversation))[-1]["event"]
             self.assertEqual([item["path"] for item in event["items"]], ["相册/a.jpg", "相册/b.png", "相册/c.mp4", "相册/sub/d.jpg"],
                              "regenerate 包含缺少网格图的旧缩略图")
+            for variant in ("grid", "poster"):
+                await self.app.objects.set_thumbnail(Scope(self.alice.bucket_id), "相册/b.png", webp, variant)
+            self.model.replies = [call("ui_generate_thumbnails", path="/相册/", force=True), answer("好")]
+            await self.send(user, conversation, "按现在的规则强制更新封面")
+            event = (await self.tool_results(user, conversation))[-1]["event"]
+            self.assertTrue(event["force"])
+            self.assertEqual([item["path"] for item in event["items"]], ["相册/a.jpg", "相册/b.png", "相册/c.mp4"],
+                             "force 时已有完整封面的文件也重新生成")
             self.model.replies = [call("ui_generate_thumbnails", path="/其他/"), answer("好")]
             await self.send(user, conversation, "其他目录")
             result = (await self.tool_results(user, conversation))[-1]

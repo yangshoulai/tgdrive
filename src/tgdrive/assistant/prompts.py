@@ -40,7 +40,8 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
                          "通过按钮让用户下载文件到本机、打开外部网页、复制文本。用户说「这些」「选中的」「这里」时先用 ui_get_view 确认指的是什么。"
                          "只有用户明确要求打开页面时才导航；提交下载后保持当前对话，用 list_downloads 或 get_download 查询进度。")
         abilities.append("- 打开已有分享：调用 ui_open_share(path)，由界面解析真实分享链接，用户点击卡片打开；不要猜令牌或把文件路径当分享地址。")
-        abilities.append("- 生成封面：用户说封面（缩略图）缺失、没有封面或网格视图模糊时，调用 ui_generate_thumbnails(path, recursive, regenerate)，"
+        abilities.append("- 生成封面：用户说封面（缩略图）缺失、没有封面或网格视图模糊时，调用 ui_generate_thumbnails(path, recursive, regenerate)；用户要求强制更新、重置或按当前规则重新获取已有封面时加 force=true，"
+                         "不要回答不能强制更新，"
                          "审批模式由用户点击卡片，完全访问下自动提交服务器生成；音频、视频依次用文件内嵌封面、在线查找（管理员启用的媒体信息来源）、"
                          "截取视频画面，图片按原图缩放；网格图与封面计入用户空间。"
                          "曾经生成失败不等于已有封面，明确补图时也应重试；只有真实图片才算已有封面，按工具返回的 need 和 previously_failed 汇报。")
