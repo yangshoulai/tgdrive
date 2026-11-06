@@ -605,10 +605,37 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
     }
     finally { setBusy(false); }
   }
+  // 同一视频的多个清晰度只能选一个：全选时每组取已选的那个，没有时取第一个。
+  const groupCount = candidates ? (task ? 1 : new Set(candidates.map((item, index) => item.variant ? item.group : `#${index}`)).size) : 0;
+  const allSelected = Boolean(candidates) && selected.size > 0 && selected.size === groupCount;
+  const selectedList = candidates ? [...selected].map(index => candidates[index]).filter(Boolean) : [];
+  const selectedSize = selectedList.reduce((sum, item) => sum + (item.size ?? 0), 0);
+  const unknownSize = selectedList.some(item => item.size === null);
+  function toggle(index: number, checked: boolean) {
+    if (!candidates) return;
+    const candidate = candidates[index];
+    setSelected(current => {
+      const next = task ? new Set<number>() : new Set(current);
+      if (checked) { if (candidate.variant) for (const item of next) if (candidates[item].group === candidate.group) next.delete(item); next.add(index); }
+      else next.delete(index);
+      return next;
+    });
+  }
+  function selectAll(checked: boolean) {
+    if (!candidates) return;
+    if (!checked) { setSelected(new Set()); return; }
+    const picked = new Map<string, number>();
+    candidates.forEach((item, index) => {
+      const key = item.variant ? item.group : `#${index}`;
+      if (!picked.has(key) || (selected.has(index) && !selected.has(picked.get(key)!))) picked.set(key, index);
+    });
+    setSelected(new Set(picked.values()));
+  }
   return <Modal title={task ? "更新下载参数" : initial ? "确认下载" : "添加下载"} icon="download" size="lg" onClose={onClose} dismissible={!busy}
+    className={`download-dialog${candidates ? " is-review" : ""}`}
     description={task ? "已填入原来的链接和请求参数，修改后重新解析，选择文件后从头重新下载。" : initial ? "这些文件由资源抓取脚本转交，确认保存位置后开始下载。" : "粘贴文件直链、X 帖子、YouTube 视频或 curl 命令。"}
     footer={<><Button disabled={busy} onClick={onClose}>取消</Button>{candidates ? <>{!initial && <Button variant="ghost" disabled={busy} onClick={() => { setCandidates(null); setError(""); }}>返回编辑</Button>}<Button variant="primary" loading={busy} disabled={!selected.size || !ready || needsUnlock} onClick={() => void submit()}>{task ? "更新并重新下载" : `开始下载${selected.size ? `（${selected.size}）` : ""}`}</Button></> : <Button variant="primary" loading={busy || prefill === "loading"} disabled={!input.trim()} onClick={() => void parse()}>{busy ? "正在读取文件信息" : "解析内容"}</Button>}</>}>
-    <div className="form">
+    <div className={candidates ? "download-review" : "form"}>
       {!candidates ? <>{prefill === "failed" && <Notice tone="warning" role="status">无法读取原来的下载参数，请重新粘贴链接或命令。</Notice>}
         <Field label="链接或下载命令" hint={task ? "已填入原来的参数，可直接修改失效的值（如过期的签名或 Cookie）；命令使用 bash 格式，不执行命令。" : "平台链接每次一个，多个直链每行一个。命令使用 bash 格式；支持请求头、Cookie、文本 POST 请求体，不执行命令。"}>
         <textarea className="input mono download-input" rows={8} autoComplete="off" autoCapitalize="none" spellCheck={false} value={input} disabled={prefill === "loading"} onChange={event => setInput(event.target.value)} placeholder={"https://example.com/video.mp4\n\ncurl 'https://example.com/file.zip' -H 'Cookie: …'"} />
@@ -622,32 +649,55 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
             void file.text().then(value => { setCookies(value); setError(""); }).catch(() => setError("无法读取 Cookie 文件，请粘贴文本"));
           }} /></Field>
         </div></details></> : <>
-        <div className="download-candidates" role="group" aria-label="选择要下载的文件">
-          {candidates.map((candidate, index) => <div className={`download-candidate${selected.has(index) ? " is-selected" : ""}`} key={candidate.ticket}>
-            <Checkbox checked={selected.has(index)} label={`下载 ${candidate.name}${candidate.variant ? ` ${candidate.variant}` : ""}`} onChange={checked => setSelected(current => { const next = task ? new Set<number>() : new Set(current); if (checked) { if (candidate.variant) for (const item of next) if (candidates[item].group === candidate.group) next.delete(item); next.add(index); } else next.delete(index); return next; })} />
-            <div className="download-candidate-copy">
-              {task ? <strong>{candidate.name}</strong> : <Field label={`文件 ${index + 1} 的名称`}><input className="input" value={candidate.name} onChange={event => setCandidates(current => current?.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) ?? null)} /></Field>}
-              {candidate.folder && <p className="muted">保存到子目录 {candidate.folder}</p>}
-              <p>{candidate.source_host} · {candidate.variant ?? candidate.content_type ?? (candidate.media_type === "image" ? "图片" : candidate.media_type === "video" ? "视频" : candidate.media_type === "audio" ? "音频" : candidate.method)} · {candidate.size !== null ? formatBytes(candidate.size) : "大小未知"}</p>
-              {(candidate.header_names.length > 0 || candidate.body_bytes > 0) && <details><summary>请求参数（凭据已隐藏）</summary><p>{candidate.header_names.length ? `请求头：${candidate.header_names.join("、")}` : "无额外请求头"}{candidate.body_bytes > 0 ? `；文本请求体 ${formatBytes(candidate.body_bytes)}` : ""}。下载时使用你提交的原值。</p></details>}
-              {candidate.method === "POST" && <p className="tone-warning">点击开始才发送 POST 请求；中断后需要手动重新发送。</p>}
-              {candidate.kind === "hls" && <p className="muted">保存为 MP4；停止后从头重新下载。</p>}
-              {candidate.platform && <p className="muted">已解析的媒体地址会直接用于下载，失效时自动重新解析；{candidate.platform === "youtube" ? "同一视频选择一个清晰度，" : ""}停止后从头下载。</p>}
-              {candidate.warnings.map((warning, i) => <p className="tone-warning" key={i}>{warning}</p>)}
-              {!task && <CoverSlot image={covers.get(index) ?? null} name={candidate.name} disabled={busy}
-                onEdit={() => setCoverFor(index)} onRemove={() => setCovers(current => { const next = new Map(current); next.delete(index); return next; })} />}
-            </div>
-          </div>)}
+        <div className="download-review-bar">
+          {!task && <Checkbox checked={allSelected} indeterminate={selected.size > 0 && !allSelected} label="全选" onChange={selectAll} />}
+          <span className="download-review-count">{task ? "选择一个文件重新下载" : <>已选 <strong>{selected.size}</strong> / {groupCount} 个文件</>}</span>
+          {selectedSize > 0 && <span className="download-review-size">{formatBytes(selectedSize)}{unknownSize ? " 以上" : ""}</span>}
         </div>
-        {task ? <p className="muted">保存位置：{task.private && !api.isPrivatePath(task.key) ? "私密空间" : api.privatePathLabel(task.key)}</p>
-          : needsUnlock ? <div className="download-import-unlock">
-            <div className="download-import-unlock-head"><Icon name="lock" size={18} /><div><strong>保存到私密空间需要先解锁</strong><p className="muted">{initial ? `解锁只在当前 ${BRAND} 页面完成，脚本和原网页拿不到你的密码。` : "上次保存到了私密空间，解锁后继续使用那个位置。"}</p></div>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => { chosen.current = true; setWantPrivate(false); setDestination(""); }}>改存普通目录</Button>
-              <Button size="sm" variant="primary" icon="unlock" disabled={busy} onClick={() => setUnlocking(true)}>解锁</Button></div>
-          </div>
-          : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { chosen.current = true; setWantPrivate(api.isPrivatePath(path)); setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示不含查询参数的来源地址。</p></>}
+        <div className="download-candidates" role="group" aria-label="选择要下载的文件">
+          {candidates.map((candidate, index) => {
+            const checked = selected.has(index);
+            const type = candidate.variant ?? candidate.content_type ?? (candidate.media_type === "image" ? "图片" : candidate.media_type === "video" ? "视频" : candidate.media_type === "audio" ? "音频" : candidate.method);
+            const hasDetails = candidate.header_names.length > 0 || candidate.body_bytes > 0;
+            return <div className={`download-candidate${checked ? " is-selected" : ""}`} key={candidate.ticket}>
+              <Checkbox checked={checked} label={`下载 ${candidate.name}${candidate.variant ? ` ${candidate.variant}` : ""}`} onChange={value => toggle(index, value)} />
+              {task ? <span className="download-candidate-tile"><FileTile kind={kindOf(candidate)} /></span>
+                : <CoverTile image={covers.get(index) ?? null} name={candidate.name} kind={kindOf(candidate)} disabled={busy}
+                  onEdit={() => setCoverFor(index)} onRemove={() => setCovers(current => { const next = new Map(current); next.delete(index); return next; })} />}
+              <div className="download-candidate-copy">
+                {task ? <strong className="download-candidate-name">{candidate.name}</strong>
+                  : <input className="input download-name" aria-label={`文件 ${index + 1} 的名称`} value={candidate.name} spellCheck={false}
+                    onChange={event => setCandidates(current => current?.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) ?? null)} />}
+                <div className="download-candidate-meta">
+                  <span>{candidate.source_host}</span>
+                  <span>{type}</span>
+                  {candidate.folder && <span className="is-folder"><Icon name="folder" size={12} />{candidate.folder}</span>}
+                  {covers.has(index) && <span className="is-cover"><Icon name="image" size={12} />已设封面</span>}
+                </div>
+                {(hasDetails || candidate.method === "POST" || candidate.kind === "hls" || candidate.platform || candidate.warnings.length > 0) && <div className="download-candidate-notes">
+                  {hasDetails && <details><summary>请求参数（凭据已隐藏）</summary><p>{candidate.header_names.length ? `请求头：${candidate.header_names.join("、")}` : "无额外请求头"}{candidate.body_bytes > 0 ? `；文本请求体 ${formatBytes(candidate.body_bytes)}` : ""}。下载时使用你提交的原值。</p></details>}
+                  {candidate.method === "POST" && <p className="tone-warning">点击开始才发送 POST 请求；中断后需要手动重新发送。</p>}
+                  {candidate.kind === "hls" && <p>保存为 MP4；停止后从头重新下载。</p>}
+                  {candidate.platform && <p>已解析的媒体地址会直接用于下载，失效时自动重新解析；{candidate.platform === "youtube" ? "同一视频选择一个清晰度，" : ""}停止后从头下载。</p>}
+                  {candidate.warnings.map((warning, i) => <p className="tone-warning" key={i}>{warning}</p>)}
+                </div>}
+              </div>
+              <span className="download-candidate-size">{candidate.size !== null ? formatBytes(candidate.size) : "大小未知"}</span>
+            </div>;
+          })}
+        </div>
+        <div className="download-review-foot">
+          {task ? <p className="muted">保存位置：{task.private && !api.isPrivatePath(task.key) ? "私密空间" : api.privatePathLabel(task.key)}</p>
+            : needsUnlock ? <div className="download-import-unlock">
+              <div className="download-import-unlock-head"><Icon name="lock" size={18} /><div><strong>保存到私密空间需要先解锁</strong><p className="muted">{initial ? `解锁只在当前 ${BRAND} 页面完成，脚本和原网页拿不到你的密码。` : "上次保存到了私密空间，解锁后继续使用那个位置。"}</p></div>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => { chosen.current = true; setWantPrivate(false); setDestination(""); }}>改存普通目录</Button>
+                <Button size="sm" variant="primary" icon="unlock" disabled={busy} onClick={() => setUnlocking(true)}>解锁</Button></div>
+            </div>
+            : <><DestinationPicker key={access.grant ? "unlocked" : "locked"} value={destination} allowPrivate onChange={path => { chosen.current = true; setWantPrivate(api.isPrivatePath(path)); setDestination(path); setReady(false); }} onReady={setReady} /><p className="muted">同名文件自动改名保存。来源凭据加密保存，任务列表只显示不含查询参数的来源地址。</p></>}
+          {error && <Notice tone="danger">{error}</Notice>}
+        </div>
       </>}
-      {error && <Notice tone="danger">{error}</Notice>}
+      {!candidates && error && <Notice tone="danger">{error}</Notice>}
     </div>
     {unlocking && needsUnlock && <PrivateUnlockDialog description={initial ? `解锁只在当前 ${BRAND} 页面完成，脚本和原网页拿不到你的密码。` : "解锁后保存到私密空间。"}
       onClose={() => setUnlocking(false)} onUnlocked={() => setUnlocking(false)} />}
@@ -657,17 +707,25 @@ function DownloadDialog({ task, initial, onClose, onComplete }: { task: api.Down
 }
 
 /** 解析结果里每个文件的缩略图：默认自动生成，可换成自己的图片。 */
-function CoverSlot({ image, name, disabled, onEdit, onRemove }: { image: Blob | null; name: string; disabled: boolean; onEdit: () => void; onRemove: () => void }) {
+function kindOf(candidate: api.DownloadCandidate) {
+  return candidate.media_type ?? getFileKind(candidate.content_type ?? null, candidate.name);
+}
+
+/** 文件行左侧的方块：没有封面时显示类型图标，点击设置封面；已设置时显示图片，可更换或移除。 */
+function CoverTile({ image, name, kind, disabled, onEdit, onRemove }: { image: Blob | null; name: string; kind: ReturnType<typeof getFileKind>; disabled: boolean; onEdit: () => void; onRemove: () => void }) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     if (!image) { setUrl(null); return; }
     const value = URL.createObjectURL(image); setUrl(value);
     return () => URL.revokeObjectURL(value);
   }, [image]);
-  return <div className="download-cover">
-    {url ? <img src={url} alt={`${name} 的封面`} /> : <span className="download-cover-empty" aria-hidden="true"><Icon name="image" size={16} /></span>}
-    <span className="download-cover-copy">{image ? "下载完成后使用这张图片作为封面" : "封面：下载完成后自动生成"}</span>
-    <Button size="sm" variant="ghost" icon={image ? "edit" : "image"} disabled={disabled} onClick={onEdit}>{image ? "更换" : "设置封面"}</Button>
-    {image && <Button size="sm" variant="ghost" disabled={disabled} onClick={onRemove}>移除</Button>}
-  </div>;
+  return <span className={`download-candidate-tile is-cover${url ? " has-image" : ""}`}>
+    <button type="button" className="download-cover-button" disabled={disabled} onClick={onEdit}
+      aria-label={image ? `更换 ${name} 的封面` : `为 ${name} 设置封面（下载完成后使用，不设置时自动生成）`}
+      title={image ? "更换封面" : "设置封面（不设置时自动生成）"}>
+      {url ? <img src={url} alt="" /> : <FileTile kind={kind} />}
+      <span className="download-cover-hint" aria-hidden="true"><Icon name={image ? "edit" : "image"} size={14} /></span>
+    </button>
+    {image && <button type="button" className="download-cover-remove" disabled={disabled} onClick={onRemove} aria-label={`移除 ${name} 的封面`} title="移除封面"><Icon name="x" size={10} /></button>}
+  </span>;
 }

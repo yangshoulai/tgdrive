@@ -82,7 +82,7 @@ class ThumbnailPolicyTests(unittest.IsolatedAsyncioTestCase):
                 self.worker._history.clear()
                 self.worker.generate = AsyncMock(return_value=None)
                 await self.run_one(job)
-                self.assertEqual(self.worker.generate.call_args.kwargs, {"force": job.force, "allow_remote": True})
+                self.assertEqual(self.worker.generate.call_args.kwargs, {"force": job.force, "allow_remote": True, "mode": job.mode})
 
     async def test_repeated_automatic_errors_stay_retryable(self):
         self.worker.generate = AsyncMock(side_effect=ThumbnailError("decoder"))
@@ -127,18 +127,18 @@ class ThumbnailPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.worker._pending["blob"] = self.worker._active = job
         task = self.worker._task = asyncio.create_task(asyncio.sleep(60))
         self.worker._leases["blob"] = _Lease(self.info, "browser", 10**12)
-        self.worker.request(self.scope, self.info.key, "etag")
+        self.worker.request(self.scope, self.info.key, "etag", "smart")
         self.assertNotIn("blob", self.worker._leases)
         await asyncio.gather(task, return_exceptions=True)
         self.assertTrue(task.cancelled())
-        self.assertEqual((job.state, job.backfill, job.force), ("queued", False, True))
+        self.assertEqual((job.state, job.backfill, job.force, job.mode), ("queued", False, True, "smart"))
 
     async def test_progress_reports_queue_then_latest_result(self):
         self.assertEqual(self.worker.progress(self.scope, self.info.key, "etag")["state"], "idle")
         self.worker._history["blob"] = {"state": "failed", "detail": "旧结果"}
         self.worker._eligible = Mock(return_value=True)
         self.worker._enqueue = Mock()
-        self.worker.request(self.scope, self.info.key, "etag")
+        self.worker.request(self.scope, self.info.key, "etag", "smart")
         self.assertNotIn("blob", self.worker._history, "重新请求时不能沿用上一次的结果")
         job = _Job(self.info, force=True, remote=True, detail="用户请求生成")
         self.worker._pending["blob"] = job

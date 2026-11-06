@@ -12,7 +12,7 @@ import { ExtractDialog, isArchive } from "./extract";
 import { CompressDialog } from "./compress";
 import { ImageEditorDialog } from "./image-editor";
 import { FileFilters, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderCover, loadedPlaceholder, ShareDialog, SortHeader, baseName, getFileKind, kindLabel, parentPath, type CacheFilter, type EntryFilter, type FileSort } from "../files";
-import { generateLoadedThumbnails, saveCurrentVideoThumbnail, saveSvgThumbnail, thumbnailsFromImage, videoPreviewThumbnails, thumbnailSource, videoFrameUsable } from "../thumbnails";
+import { generateLoadedThumbnails, saveCurrentVideoThumbnail, saveSvgThumbnail, thumbnailsFromImage, videoPreviewThumbnails, thumbnailSource, type ThumbnailResult } from "../thumbnails";
 
 import { BackToTop, Notice, ButtonLink, Badge, Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Field, Icon, IconButton, IS_MAC, KeyValue, Menu, Modal, PageHeader, SearchInput, Segmented, SkeletonRows, copyText, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, useDocumentTitle, type MenuItem } from "../ui";
 import { ShortcutsDialog } from "../shortcuts";
@@ -206,7 +206,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [waitingKey, loading]);
   const previewThumbnailAttempts = useRef(new Set<string>());
-  function savePreviewThumbnail(item: api.FileItem, produce: (signal: AbortSignal) => ReturnType<typeof thumbnailsFromImage>, force = false) {
+  function savePreviewThumbnail(item: api.FileItem, produce: (signal: AbortSignal) => Promise<ThumbnailResult>, force = false) {
     const identity = `${item.key}:${item.etag}`;
     if (previewThumbnailAttempts.current.has(identity)) return;
     previewThumbnailAttempts.current.add(identity);
@@ -296,8 +296,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         savePreviewThumbnail(item, () => thumbnailsFromImage(image), true);
       },
       onVideoFrame: (video, item) => {
-        // 内嵌封面优先；没有时复用已经通过质量检查的当前画面，不跳转播放进度。
-        if (item.thumbnails?.length || item.thumbnail_status === "unavailable" || previewThumbnailAttempts.current.has(`${item.key}:${item.etag}`) || !videoFrameUsable(video)) return;
+        // 与上传一致只用内嵌封面：按范围读取已打开的视频，不把当前画面设为封面。
+        if (item.thumbnails?.length || item.thumbnail_status === "unavailable" || previewThumbnailAttempts.current.has(`${item.key}:${item.etag}`)) return;
         const source = video.currentSrc;
         savePreviewThumbnail(item, signal => video.currentSrc === source ? videoPreviewThumbnails(video, item.size, signal) : Promise.resolve(null));
       },

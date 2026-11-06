@@ -990,7 +990,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 | `ui_download` | 把文件或文件夹下载到用户电脑 | 生成卡片，用户点击按钮后下载（浏览器要求用户手势）；多项打包为 ZIP |
 | `browser_open_url` | 在新标签页打开外部网页 | 生成卡片，用户点击后打开；只允许 http(s) |
 | `ui_copy` | 把文本复制到剪贴板 | 生成卡片，用户点击复制 |
-| `ui_generate_thumbnails` | 为图片、视频、音乐补生成封面；视频优先用内嵌图片，没有可用图片时才截帧 | 单个文件或目录，可包含子目录，单次数量由管理员配置。没有真实 `thumb` 的文件（含仅有 `none` 失败记录）默认进入补图；`regenerate` 还纳入已有小图但缺少网格图的文件。结果分别提供 `need`、`already_have`、`previously_failed`。审批模式由卡片提交，完全访问下自动提交服务器生成；仅服务器无 FFmpeg 时卡片退回浏览器，条目 `retry` 允许覆盖旧失败标记。已入队不等于已生成；完成后刷新目录元数据，图片计入用户空间 |
+| `ui_generate_thumbnails` | 为图片、视频、音乐补生成封面；图片按原图，音视频依次用内嵌图片、在线查找（`MediaService.best_cover`）、截帧（只有视频），提交 `/thumbnail/generate` 的 `mode=smart` | 单个文件或目录，可包含子目录，单次数量由管理员配置。没有真实 `thumb` 的文件（含仅有 `none` 失败记录）默认进入补图；`regenerate` 还纳入已有小图但缺少网格图的文件。结果分别提供 `need`、`already_have`、`previously_failed`。审批模式由卡片提交，完全访问下自动提交服务器生成；仅服务器无 FFmpeg 时卡片退回浏览器，条目 `retry` 允许覆盖旧失败标记。已入队不等于已生成；完成后刷新目录元数据，图片计入用户空间 |
 | `ui_cache_status` | 查询文件在这台设备上的本机缓存状态与本机缓存占用 | 实时工具，见 §26 |
 | `ui_cache_files`／`ui_clear_cache` | 把文件缓存到这台设备／清除这台设备上的缓存 | 生成卡片，用户点击后执行，见 §26 |
 
@@ -1524,7 +1524,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - **收集链接**：新工具 `collect_links(url, path|href_glob|text_contains, follow, max_pages)`，按 rel=next、「下一页」文字或下一个页码翻页（同源），去重后存为 `rule.type="links"` 的结果集；`get_collection` 显示链接文字，`propose_downloads` 拒绝链接结果集。
 - **多个相册**：`collect_gallery` 新增 `albums`（链接结果集）或 `album_urls`（≤500），用 `analyze_page` 得到的同一条规则逐个相册收集。相册内只走学到的翻页规则（`next_link` 直接复用，`url_pattern` 能按起始地址替换时复用），不跟随「下一个相册」之类的通用链接。进度保存在结果集 rule 的 `batch` 中，每次调用最多 105 秒，返回 `progress` 与 `complete`；中途超时的相册下次从头再走（按地址去重），单次调用连一个相册都没走完时按部分收集记录，避免卡住。图片记录所属相册名（第一页标题清理成单段名称，重名加序号）；第一页没有符合规则图片的相册记为失败（结构可能不同）。`max_images` 默认 20000。
 - **分批与分目录下载**：`propose_downloads` 新增 `offset`/`limit`（与 `indices` 二选一，结果给出下一批的 `next_offset`）与 `by_album`（条目带 `folder`，保存到「目标/相册名/」）。执行时按子目录分组创建任务，子目录名再清理一次并复核仍在作用域内。工具说明明确已有直链可直接提交，后台自动分批入队；模型遵守工具的提议上限，无需关心内部批次大小。
-- **下载封面**：`propose_downloads` 可附带 `thumbnail`（作用于本批全部条目）或与条目一一对应的 `thumbnails`。地址经 `check_url` 与 `checked_url` 校验后记在条目的 `cover`，确认卡片样例标注「指定缩略图」；执行器把它作为 `cover: {url}` 交给 `OfflineDownloads.create`，下载完成后由服务器读取并缩放为文件缩略图（需 FFmpeg，失败保留自动生成）。
+- **下载封面**：`propose_downloads` 可附带 `thumbnail`（作用于本批全部条目）或与条目一一对应的 `thumbnails`。地址经 `check_url` 与 `checked_url` 校验后记在条目的 `cover`，确认卡片样例标注「指定缩略图」；执行器把它作为 `cover: {url}` 交给 `OfflineDownloads.create`，提交时不自动生成，下载完成后由服务器读取并缩放为文件缩略图（需 FFmpeg，未能使用时退回自动生成）。
 - **动态工具上限**：`ToolSpec.input_limits` 声明参数受哪些配置共同限制，每次模型请求按本轮生效配置生成 `maxItems`／`maximum` 与数值说明，不修改注册表。`propose_downloads` 的 `urls`、`indices` 与 `limit` 使用 `download_urls` 和 `action_items` 的较小值（默认 2000）；执行校验与结果集分页共用这一计算，避免工具宣称可接收的数量与实际操作上限不同。默认下 77 项或 2000 项可作为一个提议，后台负责分批入队。
 - 提示词：全局规则 7 根据用户目标、页面结构和已启用工具选择处理方式，不规定相册流程；规则 10 统一说明任务持续推进、批量能力、摘要行与 recall_result、notes。同一目标与授权范围内，已确认条目在当前工具上限内优先一次提交，不从历史调用的条目数推断限制；确需分页、依赖或错误恢复时再分批。相册列表分析与批量收集的具体用法保留在 `collect_gallery` 工具说明中，下载提交与批次细节保留在 `propose_downloads` 工具说明中。提示词版本为 `2026.10-p23`。
 
@@ -1533,7 +1533,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - 写入工具 `propose_media_assets`（`assistant/media_tools.py`，操作类型 `media`，不可撤销，不在 `CONFIRM_KINDS`）：`paths` 为文件或文件夹（取第一层音视频，合计 ≤10 个），`want` 省略时音频为封面＋歌词、视频为封面＋字幕，`force_online` 跳过内置数据，单个文件时可给 `title`／`artist`／`album`／`year` 改写查询条件。每个（文件、数据）是一个条目，查询经 `MediaService.collect`（与网页查找同一套提供者、打分与每分钟额度），每种最多 12／8／8 个候选。
 - 推荐（`best_index`）：封面 内置 > 文件哈希 > 匹配分；歌词 时长一致（±3 秒或 2%）> 能滚动 > 内置 > 匹配分；字幕 文件哈希 > 匹配分（字幕不使用内置轨）。在线结果低于 `MIN_SCORE` 不推荐。文件内置能滚动的歌词且最后时间标签不超过时长 10 秒以上时视为可信，不查找（跳过原因写给模型）；超出时视为不对，改为在线查找并不再当作「已有」。
 - 已有数据（列表小图等封面、同名 .lrc／字幕文件、内置同步歌词、内置字幕轨）：条目的 `choice`（卡片默认值）为 null＝保留现有，`best` 为推荐项；`force_online` 时只有内置数据的条目默认用推荐项。确认请求带 `choices: {条目编号: 候选编号|null}`，由 `actions.media_choices` 校验；完全访问自动执行取 `best`，直接覆盖。
-- 候选的来源引用存在操作记录的 `_refs`（`_propose(refs=)`），`action_json`、条目分页、压缩与模型结果都不带以 `_` 开头的字段。卡片经 `GET /api/user/v1/assistant/actions/<id>/media/<条目>/<候选>[?full=1]` 由服务器读取封面小图／原图与歌词字幕全文（`AssistantService.action_media`，私密操作要求已解锁，`sandbox` CSP、`no-store`）。
+- 候选的来源引用存在操作记录的 `_refs`（`_propose(refs=)`），`action_json`、条目分页、压缩与模型结果都不带以 `_` 开头的字段。卡片经 `GET /api/user/v1/assistant/actions/<id>/media/<条目>/<候选>[?full=1]` 由服务器读取封面小图／原图与歌词字幕全文（`AssistantService.action_media`，私密操作要求已解锁，`sandbox` CSP、`no-store`）。确认坞里的 `MediaChoices` 按文件分组（多个文件时只展开第一个，折叠行显示当前选择），顶部「全部用推荐／全部不保存」；封面候选为横向滑动的方形卡片，歌词字幕为单选行，「全文」在行内展开（每个候选只读一次），不再另开对话框。
 - 执行（`ActionExecutor._one` 的 `media`）：复核源文件版本，`MediaService.save_frozen` 读取候选后歌词／字幕覆盖写同名文件，封面经 `render_image` 缩放后 `apply_custom`；没有 FFmpeg（或缩放失败）时按封面规格大小上限直接使用来源的小图与原图（`_unscaled`）。
 - 界面：确认卡片的 `MediaChoices`（`assistant-thread.tsx`）按条目显示封面网格或歌词／字幕单选列表（来源、推荐、能滚动、时长一致、语言、前几行与「全文」），第一项为「保留现有／不保存」。操作终态时 `assistant.tsx` 广播文件刷新与 `MEDIA_ASSETS_EVENT`。查询词会发给已启用的第三方来源，结果视为外部内容（`TAINT_TOOLS`）。回归 `tests/test_assistant_media.py`。
 

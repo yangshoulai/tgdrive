@@ -575,7 +575,9 @@ export function diagnosticsEnabled(): Promise<boolean> {
   }
   return diagnosticsFlag.value;
 }
-export const generateThumbnail = (file: Pick<FileItem, "key" | "etag">) => post<{ accepted: boolean }>(fileApi("/thumbnail/generate", file.key), { path: file.key, etag: file.etag });
+/** 请服务器生成封面：capture 为「截图生成」（图片按原图、视频截取画面）；smart 为文件助手生成（音视频依次用内嵌封面、在线查找、截取画面）。 */
+export const generateThumbnail = (file: Pick<FileItem, "key" | "etag">, mode: "capture" | "smart" = "capture") =>
+  post<{ accepted: boolean }>(fileApi("/thumbnail/generate", file.key), { path: file.key, etag: file.etag, mode });
 /** 自定义缩略图：读取用户填写的图片地址（由服务器经受控出站客户端读取，只返回受支持的图片）。 */
 export const fetchThumbnailImage = (file: Pick<FileItem, "key">, url: string, signal?: AbortSignal) =>
   request<Blob>(fileApi("/thumbnail/fetch", file.key), { method: "POST", body: JSON.stringify({ url }), signal, cache: "no-store" }, 45000, "blob");

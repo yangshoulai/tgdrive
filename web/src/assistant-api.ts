@@ -235,7 +235,7 @@ export type ActionItem = { from?: string; to?: string; path?: string; id?: strin
   /** 移入回收站的文件夹内的文件数（0 为空目录） */
   files?: number;
   /** 获取封面、歌词与字幕（media）：每个条目是一个文件的一种数据 */
-  want?: MediaActionWant; exists?: string | null; note?: string; duration?: number | null; candidates?: MediaActionCandidate[];
+  want?: MediaActionWant; kind?: "audio" | "video"; exists?: string | null; note?: string; duration?: number | null; candidates?: MediaActionCandidate[];
   best?: number | null; choice?: number | null; target?: string | null };
 export type MediaActionWant = "cover" | "lyrics" | "subtitle";
 /** 媒体候选（来源引用只在服务端）；封面图与歌词、字幕全文经 actionMediaUrl 读取。 */

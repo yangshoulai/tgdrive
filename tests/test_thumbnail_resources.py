@@ -181,7 +181,7 @@ class AssessmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_suitable_files_still_generate(self):
         self.info = ObjectInfo(7, "clip.mp4", 40 * GIB, "etag", "video/mp4", {}, 0, "blob")
         self.sizes["blob"] = (3840, 2160)
-        await self.generate(allow_remote=True)
+        await self.generate(allow_remote=True, mode="capture")
         self.input.assert_called_once()
         self.worker.objects.set_thumbnail.assert_awaited()
 

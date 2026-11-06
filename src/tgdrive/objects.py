@@ -38,6 +38,8 @@ class Scope:
     thumbnail_client: bool = False
     # 后台读取（本机缓存整文件）：让出一个读取名额给播放和预览，不用小窗口起步。
     background: bool = False
+    # 写入方已指定封面（如离线任务附带的封面）：提交时不排队自动生成，以指定的封面为准。
+    custom_cover: bool = False
 
 
 @dataclass(frozen=True)

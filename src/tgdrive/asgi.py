@@ -109,6 +109,9 @@ class TgDriveASGI(StaticFiles):
             finally:
                 self.media.committed(info, scope)
         user.objects.on_commit = committed
+        if user.objects.thumbnail_service is not None:
+            # 文件助手生成封面：内嵌封面之后、截取画面之前先在线查找。
+            user.objects.thumbnail_service.media = self.media
         self.passkeys = self.private_space.passkeys
         self.client_cache = ClientCache(user, self.private_space)
         self.registration = RegistrationService(user.accounts)
@@ -1210,7 +1213,7 @@ class TgDriveASGI(StaticFiles):
                 user.thumbnail_release(token, csrf, payload["path"], str(payload["etag"]), str(payload["ticket"]), payload.get("variants"))
                 return 204, None, {}
             if method == "POST" and route == "/thumbnail/generate":
-                return 202, user.thumbnail_generate(token, csrf, payload["path"], str(payload["etag"])), {}
+                return 202, user.thumbnail_generate(token, csrf, payload["path"], str(payload["etag"]), str(payload.get("mode") or "capture")), {}
             if method == "POST" and route == "/thumbnail/progress":
                 return 200, user.thumbnail_progress(token, payload["path"], str(payload["etag"])), {"Cache-Control": "no-store"}
             if method == "POST" and route == "/thumbnail/cancel":

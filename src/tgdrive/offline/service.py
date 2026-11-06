@@ -595,6 +595,17 @@ class OfflineDownloads:
         except NotFoundError:
             raise ValueError("下载的文件已移动或删除，请在文件菜单中设置封面") from None
 
+    def _has_cover(self, row):
+        """任务是否附带封面：网页提交的暂存图片，或创建时给出的图片地址。"""
+        prefix = f"{COVER_PREFIX}{row['id']}/"
+        if self.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
+                                    (row["bucket_id"], prefix, prefix + ObjectService._PREFIX_END)).fetchone():
+            return True
+        try:
+            return bool((self._source(row).get("cover") or {}).get("url"))
+        except Exception:  # noqa: BLE001 - 来源参数读不出时按没有封面处理，照常自动生成
+            return False
+
     def _schedule_cover(self, task_id):
         task = asyncio.create_task(self._apply_cover(task_id))
         self._covers.add(task)
@@ -602,12 +613,13 @@ class OfflineDownloads:
 
     async def _apply_cover(self, task_id):
         """下载完成后使用任务附带的封面：先用网页上传的暂存图片，没有时读取图片地址并在服务器缩放。
-        封面只是附加信息，失败不影响任务结果（自动生成的缩略图照常保留）。每个封面只使用一次。"""
+        附带封面时提交不会自动生成；封面只是附加信息，未能使用时退回自动流程（不影响任务结果）。每个封面只使用一次。"""
         try:
             row = self._row(task_id)
         except NotFoundError:
             return
         prefix, bucket = f"{COVER_PREFIX}{task_id}/", Scope(row["bucket_id"])
+        specified, applied = self._has_cover(row), False
         try:
             images = {}
             keys = [item["key"] for item in self.metadata.db.execute(
@@ -622,9 +634,12 @@ class OfflineDownloads:
                 images = await self.objects.thumbnail_service.render_image(data) or {}
             if "thumb" in images and self._row(task_id)["status"] == "completed":
                 await self._apply_images(self._row(task_id), images)
+                applied = True
         except Exception as exc:  # 封面失败只记录类型，不记录地址或文件名
             log.info("离线任务封面未能使用：task=%s error=%s", task_id, type(exc).__name__)
         finally:
+            if specified and not applied:
+                self._fallback_thumbnail(task_id)
             try:
                 await self.objects.delete_prefix(bucket, prefix)
                 current = self._row(task_id)
@@ -633,6 +648,17 @@ class OfflineDownloads:
                     self._save_source(task_id, source)
             except Exception:
                 pass
+
+    def _fallback_thumbnail(self, task_id):
+        """指定的封面没能使用（地址失效、图片无法读取等）：按普通文件的自动流程补上封面。"""
+        service = self.objects.thumbnail_service
+        try:
+            row = self._row(task_id)
+            if service is None or row["status"] != "completed":
+                return
+            service.enqueue(self.objects.head_object(self._task_scope(row), row["key"]))
+        except Exception:  # noqa: BLE001 - 文件已移动或删除时由自动补图兜底
+            pass
 
     def public(self, row, *, reveal_private=False):
         result = {key: row[key] for key in PUBLIC_FIELDS}
@@ -1328,7 +1354,9 @@ class OfflineDownloads:
             upload = self.objects._upload(scope, upload_id)
             if upload["completed_at"] is None:
                 self._reserve_target(row, scope, upload_id)
-            info = await self.objects.complete_multipart(scope, upload_id, [(part.part_no, part.etag) for part in parts])
+            # 任务附带了封面：提交时不排队自动生成，下载完成后以指定的封面为准（_apply_cover）。
+            commit_scope = replace(scope, custom_cover=True) if self._has_cover(row) else scope
+            info = await self.objects.complete_multipart(commit_scope, upload_id, [(part.part_no, part.etag) for part in parts])
             self._set(row["id"], status="completed", phase=None, key=info.key, stored_bytes=info.size, size=info.size if row["kind"] == "http" else None, error=None)
         if size := self._video_sizes.pop(upload_id, None):
             try:

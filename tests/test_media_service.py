@@ -335,3 +335,22 @@ class MovieHashTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BestCoverTests(unittest.IsolatedAsyncioTestCase):
+    """文件助手生成封面时的在线查找：只用替身，不访问网络或数据库。"""
+
+    async def test_takes_first_matching_candidate_and_skips_weak_ones(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from tgdrive.media.service import MediaService
+        service = MediaService.__new__(MediaService)
+        info = SimpleNamespace(key="a.mp3", etag="e")
+        good, weak = (SimpleNamespace(provider="itunes", ref={}, score=score, hash_match=False) for score in (0.8, 0.3))
+        service.collect = AsyncMock(return_value=(info, None, [good, weak], []))
+        service._fetch = AsyncMock(side_effect=[ValueError("坏图"), SimpleNamespace(data=b"jpeg")])
+        scope = SimpleNamespace(bucket_id=1)
+        self.assertIsNone(await service.best_cover(scope, "a.mp3"), "第一张读取失败、其余匹配度不足时不采用")
+        self.assertEqual(service.collect.await_args.kwargs, {"skip": ("embedded",), "throttle": False})
+        service.collect = AsyncMock(return_value=(info, None, [good], []))
+        self.assertEqual(await service.best_cover(scope, "a.mp3"), b"jpeg")

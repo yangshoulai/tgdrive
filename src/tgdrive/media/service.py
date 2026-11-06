@@ -540,14 +540,16 @@ class MediaService:
         return results
 
     async def collect(self, scope: Scope, key: str, want: str, overrides: dict | None = None, only: list[str] | None = None,
-                      *, skip: tuple[str, ...] = ()) -> tuple[ObjectInfo, MediaQuery, list[Candidate], list[dict]]:
-        """查询全部已启用的提供者：返回（文件、查询条件、按分数排好的候选、各提供者状态）。候选的 ref 只留在服务端。"""
+                      *, skip: tuple[str, ...] = (), throttle: bool = True) -> tuple[ObjectInfo, MediaQuery, list[Candidate], list[dict]]:
+        """查询全部已启用的提供者：返回（文件、查询条件、按分数排好的候选、各提供者状态）。候选的 ref 只留在服务端。
+        throttle=False 用于单并发的后台封面队列：不计入网页的每分钟查找次数，各提供者自身的请求间隔照常生效。"""
         if want not in WANTS:
             raise ValueError("不支持的查找类型")
         info, kind = self._media(scope, key)
         if want == "subtitle" and kind != "video" or want == "lyrics" and kind != "audio":
             raise ValueError("歌词只适用于音频，字幕只适用于视频")
-        self._limit(scope.bucket_id)
+        if throttle:
+            self._limit(scope.bucket_id)
         record = await self._record(scope, info)
         query = media_query.build(kind, info.key, info.size, record, overrides)
         providers = [provider for provider in self.providers.values()
@@ -582,6 +584,23 @@ class MediaService:
             statuses.append(status)
         candidates.sort(key=lambda item: (item[1].provider != "embedded", -round(item[1].score, 2), item[0]))
         return info, query, [candidate for _, candidate in candidates], statuses
+
+    # 自动采用在线封面的最低匹配分（与文件助手「获取封面、歌词与字幕」的自动选择一致）。
+    AUTO_COVER_MIN = 0.5
+
+    async def best_cover(self, scope: Scope, key: str) -> bytes | None:
+        """文件助手生成封面时的在线查找：跳过内置数据（已先尝试过），按匹配分依次读取前几张，返回第一张可用的原图。"""
+        info, _, candidates, _ = await self.collect(scope, key, "cover", skip=("embedded",), throttle=False)
+        for candidate in candidates[:3]:
+            if not candidate.hash_match and candidate.score < self.AUTO_COVER_MIN:
+                break  # 候选按分数从高到低排列，后面的更不匹配。
+            entry = _Entry(candidate.provider, "cover", candidate.ref, scope.bucket_id, info.key, info.etag, candidate,
+                           time.monotonic() + self.CANDIDATE_TTL)
+            try:
+                return (await self._fetch(scope, entry, info)).data
+            except ValueError:
+                continue
+        return None
 
     async def lookup(self, scope: Scope, key: str, want: str, overrides: dict | None = None, only: list[str] | None = None) -> dict:
         info, query, candidates, statuses = await self.collect(scope, key, want, overrides, only)

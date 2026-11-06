@@ -947,9 +947,9 @@ class UserApi:
             self.objects.finish_thumbnail_set(scope, key, variants)
         self.objects.thumbnail_service.release(scope, key, etag, ticket)
 
-    def thumbnail_generate(self, token, csrf, path, etag):
+    def thumbnail_generate(self, token, csrf, path, etag, mode="capture"):
         scope = self._scope(token, csrf=csrf, mutation=True)
-        return self.objects.thumbnail_service.request(scope, self._path(path), etag)
+        return self.objects.thumbnail_service.request(scope, self._path(path), etag, mode)
 
     def thumbnail_progress(self, token, path, etag):
         return self.objects.thumbnail_service.progress(self._scope(token), self._path(path), etag)

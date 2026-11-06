@@ -458,16 +458,27 @@ async function embeddedCover(reader: ByteReader): Promise<Blob | "none" | null> 
   return null;
 }
 
+/** 「更新封面 → 内置封面」在服务器读不到时（如管理员关闭了内置数据）的退路：按范围读取已有文件，只取内嵌图片。
+ *  返回 none 表示认出了封装但没有封面，null 表示这种封装浏览器认不出。 */
+export async function readEmbeddedCover(url: string, size: number, signal?: AbortSignal): Promise<Blob | "none" | null> {
+  try { return await embeddedCover(urlReader(url, size, signal)); }
+  catch (reason) { if (signal?.aborted) throw reason; return null; }
+}
+
 /* ---------- 入口 ---------- */
 
 type Input = ({ file: Blob } | { url: string; size: number }) & { signal?: AbortSignal; onFailure?: (message: string) => void };
+/** 封面来源：auto 为上传等自动流程（图片按原图，音视频只用文件内嵌封面，视频不截图）；capture 为「截图生成」（视频只截取画面）；
+ *  smart 为文件助手生成（内嵌封面优先，视频没有时再截取画面；在线查找只在服务器上进行）。 */
+export type ThumbnailMode = "auto" | "capture" | "smart";
 
-export async function createThumbnails(input: Input, source: ThumbnailSource): Promise<ThumbnailResult> {
+export async function createThumbnails(input: Input, source: ThumbnailSource, mode: ThumbnailMode = "auto"): Promise<ThumbnailResult> {
   try {
     if (source === "image") return await fromBlob("file" in input ? input.file : await (await fetch(input.url, { credentials: "include", signal: input.signal })).blob());
-    const cover = await embeddedCover("file" in input ? blobReader(input.file) : urlReader(input.url, input.size, input.signal));
+    const cover = source === "video" && mode === "capture" ? null
+      : await embeddedCover("file" in input ? blobReader(input.file) : urlReader(input.url, input.size, input.signal));
     if (cover && cover !== "none") return await fromBlob(cover);
-    if (source === "video") {
+    if (source === "video" && mode !== "auto") {
       const url = "file" in input ? URL.createObjectURL(input.file) : input.url;
       try { return await fromVideo(url, input.signal, input.onFailure); } finally { if ("file" in input) URL.revokeObjectURL(url); }
     }
@@ -478,14 +489,15 @@ export async function createThumbnails(input: Input, source: ThumbnailSource): P
   }
 }
 
-/** 预览自动补图也先读内嵌封面，避免上传或后台尚未完成时被当前画面抢先占位；手动截帧仍用 thumbnailsFromVideo。 */
-export async function videoPreviewThumbnails(video: HTMLVideoElement, size: number, signal: AbortSignal): Promise<ThumbnailSet | null> {
+/** 预览自动补图与上传一致：视频只用内嵌封面，不把当前画面固化为封面（截图请用「更新封面 → 截图生成」或播放器的「设为封面」）。
+ *  识别出封装但没有内嵌封面时返回 none；认不出的封装交给服务器判断。 */
+export async function videoPreviewThumbnails(video: HTMLVideoElement, size: number, signal: AbortSignal): Promise<ThumbnailResult> {
   const url = video.currentSrc;
   if (!url) return null;
   try {
     const cover = await embeddedCover(urlReader(url, size, signal));
     if (signal.aborted || video.currentSrc !== url) return null;
-    return cover && cover !== "none" ? await fromBlob(cover) : await thumbnailsFromVideo(video);
+    return cover && cover !== "none" ? await fromBlob(cover) : cover;
   } catch (reason) {
     if (signal.aborted) throw reason;
     return null;

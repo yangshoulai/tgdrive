@@ -90,7 +90,7 @@ class VideoDecoderTests(unittest.IsolatedAsyncioTestCase):
                 # 只在截帧期间禁止回源；缩略图存为系统区对象，读回结果本身需要读取存储。
                 self.engine.store.get = guard
                 try:
-                    await self.worker.generate(info, force=True)
+                    await self.worker.generate(info, force=True, mode="capture")
                 finally:
                     self.engine.store.get = original
                 image, mime, _ = await self.objects.get_thumbnail(self.scope, info.key)

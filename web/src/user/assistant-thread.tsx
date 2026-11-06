@@ -804,7 +804,7 @@ function BrowserCard({ event }: { event: ai.BrowserEvent }) {
   </section>;
 }
 
-/** 生成缩略图：用户点击后逐个提交给服务器后台生成（优先复用服务器已收到的数据，必要时读取存储），
+/** 生成缩略图：用户点击后逐个提交给服务器后台生成（音视频依次用内嵌封面、在线查找、截取画面；优先复用服务器已收到的数据，必要时读取存储），
  * 不经浏览器下载原文件，避免为补图产生出站流量。队列满时等待后继续提交；服务器没有 FFmpeg 时才在当前页面生成。
  * 卡片卸载（切换对话、关闭页面）时停止提交；已提交的任务继续在后台完成。 */
 function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action: "thumbnails" }> }) {
@@ -833,7 +833,7 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
       try {
         if (!local) {
           for (;;) {
-            try { await (inFlight.current = api.generateThumbnail(file)); counts.done++; folders.add(parentPath(item.path)); break; }
+            try { await (inFlight.current = api.generateThumbnail(file, "smart")); counts.done++; folders.add(parentPath(item.path)); break; }
             catch (reason) {
               const message = api.errorMessage(reason, "");
               if (message.includes("队列已满") && !signal.aborted) { await pause(signal); if (signal.aborted) break; continue; }
@@ -845,7 +845,7 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
         }
         if (local && !signal.aborted) {
           // 服务器无法生成时的退路：在当前页面读取文件生成（会产生下载流量）。
-          const work = generateLoadedThumbnails(file, claimSignal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source), event.regenerate || item.retry === true, signal);
+          const work = generateLoadedThumbnails(file, claimSignal => createThumbnails({ url: api.versionedContentUrl(api.contentUrl(item.path), item.etag), size: item.size, signal: claimSignal }, source, "smart"), event.regenerate || item.retry === true, signal);
           inFlight.current = work;
           const saved = await work;
           if (!saved) counts.failed++; else if (saved.includes("none")) counts.none++; else counts.done++;
@@ -883,7 +883,7 @@ function ThumbnailsBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { ac
         <p className="cell-truncate">{state.phase === "running" ? `正在提交 ${display(state.current)}` : summary}</p>
       </div>}
     {stopError && <p className="ai-card-note tone-danger" role="alert">{stopError}</p>}
-    <footer className="ai-card-foot"><span>{state.phase === "idle" ? "网格图与封面计入你的已用空间；服务器优先复用已收到的数据"
+    <footer className="ai-card-foot"><span>{state.phase === "idle" ? "音视频依次用内嵌封面、在线查找、截取画面；网格图与封面计入你的已用空间"
       : state.phase === "stopping" ? "正在停止已提交的生成任务"
       : state.phase === "running" ? `${processed} / ${total}` : state.phase === "stopped" ? `已停止 · ${summary}` : state.local ? "已完成" : "已全部提交，完成后自动刷新"}</span>
       {(state.phase === "running" || state.phase === "stopping" || state.phase === "done" && !state.local || Boolean(stopError)) && <Button size="sm" loading={state.phase === "stopping"} onClick={() => void stop()}>停止生成</Button>}
@@ -1044,13 +1044,14 @@ const clock = (value: number) => `${Math.floor(value / 60)}:${String(Math.round(
 const sameLength = (file?: number | null, candidate?: number | null) => file != null && candidate != null && Math.abs(file - candidate) <= Math.max(3, file * 0.02);
 export type MediaSelection = Record<string, number | null>;
 
-/** 媒体操作的候选选择：每个条目（一个文件的一种数据）选一项或保留现有；候选图片与全文经服务器读取。 */
+/** 媒体操作的候选选择：按文件分组，每个条目（一个文件的一种数据）选一项或保留现有；候选图片与全文经服务器读取。
+ *  顶部可以一键全部采用推荐或全部保留；文件多时只展开第一个，折叠的文件在标题行显示当前选择。 */
 function MediaChoices({ action, pending, value, onChange }: {
   action: ai.AssistantAction; pending: boolean; value: MediaSelection | null; onChange: (next: MediaSelection) => void;
 }) {
   const [items, setItems] = useState<ai.ActionItem[] | null>(null);
   const [failed, setFailed] = useState("");
-  const [reading, setReading] = useState<{ title: string; text: string | null } | null>(null);
+  const [open, setOpen] = useState<Set<string>>(() => new Set());
   useEffect(() => {
     let alive = true;
     void (async () => {
@@ -1062,75 +1063,126 @@ function MediaChoices({ action, pending, value, onChange }: {
       }
       if (!alive) return;
       setItems(all);
+      const first = all[0]?.path;
+      if (first) setOpen(new Set([first]));
       onChange(Object.fromEntries(all.map((item, index) => [String(index), item.choice ?? null])));
     })().catch(reason => { if (alive) setFailed(api.errorMessage(reason, "候选加载失败，请稍后重试")); });
     return () => { alive = false; };
   }, [action.id]);
-  async function readFull(index: number, candidate: number, title: string) {
-    setReading({ title, text: null });
-    try { const text = await ai.actionMediaText(action.id, index, candidate); setReading(current => current && { ...current, text }); }
-    catch (reason) { setReading(null); toast.error(api.errorMessage(reason, "全文读取失败，请稍后重试")); }
-  }
+  const groups = useMemo(() => {
+    const map = new Map<string, { item: ai.ActionItem; index: number }[]>();
+    (items ?? []).forEach((item, index) => { const key = item.path ?? ""; map.set(key, [...(map.get(key) ?? []), { item, index }]); });
+    return [...map.entries()];
+  }, [items]);
   if (failed) return <p className="ai-card-note tone-danger" role="alert">{failed}</p>;
   if (!items || !value) return <SkeletonRows rows={3} />;
+  const chosen = Object.values(value).filter(choice => choice !== null).length;
+  const recommended = Object.fromEntries(items.map((item, index) => [String(index), item.best ?? null]));
+  const keepAll = Object.fromEntries(items.map((_, index) => [String(index), null]));
+  const same = (other: MediaSelection) => items.every((_, index) => (value[String(index)] ?? null) === other[String(index)]);
+  const toggle = (path: string) => setOpen(current => { const next = new Set(current); if (next.has(path)) next.delete(path); else next.add(path); return next; });
   return <div className="ai-media">
-    {items.map((item, index) => <MediaChoice key={index} id={action.id} index={index} item={item} pending={pending}
-      chosen={value[String(index)] ?? null} onChoose={choice => onChange({ ...value, [String(index)]: choice })}
-      onRead={(candidate, title) => void readFull(index, candidate, title)} />)}
-    {reading && <Modal className="assistant-dialog" title={reading.title} size="lg" onClose={() => setReading(null)} footer={<Button onClick={() => setReading(null)}>关闭</Button>}>
-      {reading.text === null ? <SkeletonRows rows={6} /> : <pre className="ai-media-full">{reading.text}</pre>}
-    </Modal>}
+    {pending && <div className="ai-media-bar">
+      <span>已选 <strong>{chosen}</strong> / {items.length} 项</span>
+      <span className="ai-media-bar-actions">
+        <Button size="sm" variant="ghost" icon="sparkle" disabled={same(recommended)} onClick={() => onChange(recommended)}>全部用推荐</Button>
+        <Button size="sm" variant="ghost" icon="x" disabled={same(keepAll)} onClick={() => onChange(keepAll)}>全部不保存</Button>
+      </span>
+    </div>}
+    <div className="ai-media-files">
+      {groups.map(([path, entries]) => {
+        const expanded = open.has(path) || groups.length === 1;
+        return <section key={path} className={`ai-media-file${expanded ? " is-open" : ""}`}>
+          <button type="button" className="ai-media-file-head" aria-expanded={expanded} onClick={() => toggle(path)} disabled={groups.length === 1}>
+            <Icon name={entries[0].item.kind === "video" ? "film" : "music"} size={14} />
+            <span className="ai-media-file-name" title={display(path)}>{baseName(path)}</span>
+            <span className="ai-media-file-picks">{entries.map(({ item, index }) => {
+              const choice = value[String(index)] ?? null, candidate = choice === null ? null : item.candidates?.[choice];
+              return <span key={index} className={choice === null ? "" : "is-picked"}>{MEDIA_WANTS[item.want ?? "cover"][0]}：{candidate ? candidate.provider_name : item.exists ? "保留" : "不保存"}</span>;
+            })}</span>
+            {groups.length > 1 && <Icon name="chevronDown" size={14} className="ai-media-file-chevron" />}
+          </button>
+          {expanded && <div className="ai-media-file-body">
+            {entries.map(({ item, index }) => <MediaChoice key={index} id={action.id} index={index} item={item} pending={pending}
+              chosen={value[String(index)] ?? null} onChoose={choice => onChange({ ...value, [String(index)]: choice })} />)}
+          </div>}
+        </section>;
+      })}
+    </div>
   </div>;
 }
 
-function MediaChoice({ id, index, item, pending, chosen, onChoose, onRead }: {
-  id: string; index: number; item: ai.ActionItem; pending: boolean; chosen: number | null;
-  onChoose: (choice: number | null) => void; onRead: (candidate: number, title: string) => void;
+function MediaChoice({ id, index, item, pending, chosen, onChoose }: {
+  id: string; index: number; item: ai.ActionItem; pending: boolean; chosen: number | null; onChoose: (choice: number | null) => void;
 }) {
   const want = item.want ?? "cover";
   const [label, icon] = MEDIA_WANTS[want];
   const candidates = item.candidates ?? [];
   const [broken, setBroken] = useState<Set<number>>(() => new Set());
+  // 歌词、字幕的全文在行内展开（只读一次），不另开窗口。
+  const [reading, setReading] = useState<{ candidate: number; text: string | null } | null>(null);
+  const texts = useRef(new Map<number, string>());
+  async function read(candidate: number) {
+    if (reading?.candidate === candidate) { setReading(null); return; }
+    const cached = texts.current.get(candidate);
+    setReading({ candidate, text: cached ?? null });
+    if (cached !== undefined) return;
+    try {
+      const text = await ai.actionMediaText(id, index, candidate);
+      texts.current.set(candidate, text);
+      setReading(current => current?.candidate === candidate ? { candidate, text } : current);
+    } catch (reason) { setReading(null); toast.error(api.errorMessage(reason, "全文读取失败，请稍后重试")); }
+  }
   const keep = item.exists ? "保留现有" : "不保存";
-  return <section className="ai-media-item">
-    <header className="ai-media-head"><Icon name={icon} size={13} /><PathText path={item.path ?? ""} /><Badge tone="neutral">{label}</Badge></header>
-    {item.exists && <p className="ai-card-note"><Icon name="alert" size={13} />{item.exists}{pending ? chosen === null ? "，当前保留现有" : "，选中的结果会覆盖它" : ""}</p>}
+  return <div className="ai-media-item">
+    <div className="ai-media-head"><Icon name={icon} size={13} /><strong>{label}</strong>
+      <small>{candidates.length} 个候选{item.exists ? ` · ${item.exists}` : ""}</small></div>
     {item.note && <p className="ai-card-note"><Icon name="info" size={13} />{item.note}</p>}
     {want === "cover" ? <div className="ai-media-covers" role="radiogroup" aria-label={`${baseName(item.path ?? "")}的${label}`}>
       <button type="button" role="radio" aria-checked={chosen === null} className="ai-media-cover is-keep" disabled={!pending} onClick={() => onChoose(null)}>
-        <Icon name={item.exists ? "check" : "x"} size={16} /><span className="ai-media-cover-label">{keep}</span></button>
+        <span className="ai-media-cover-art"><Icon name={item.exists ? "image" : "x"} size={18} /></span>
+        <span className="ai-media-cover-label">{keep}</span>
+        {chosen === null && <span className="ai-media-check"><Icon name="check" size={12} /></span>}</button>
       {candidates.map((candidate, n) => <button key={n} type="button" role="radio" aria-checked={chosen === n} className="ai-media-cover" disabled={!pending}
         title={[candidate.title, candidate.subtitle, candidate.provider_name].filter(Boolean).join(" · ")} onClick={() => onChoose(n)}>
-        {broken.has(n) ? <span className="ai-media-cover-missing"><Icon name="image" size={16} /></span>
-          : <img src={ai.actionMediaUrl(id, index, n)} alt="" loading="lazy" onError={() => setBroken(current => new Set(current).add(n))} />}
+        <span className="ai-media-cover-art">
+          {broken.has(n) ? <Icon name="image" size={18} />
+            : <img src={ai.actionMediaUrl(id, index, n)} alt="" loading="lazy" onError={() => setBroken(current => new Set(current).add(n))} />}
+          {n === item.best && <span className="ai-media-best">推荐</span>}
+          {chosen === n && <span className="ai-media-check"><Icon name="check" size={12} /></span>}
+        </span>
         <span className="ai-media-cover-label">{candidate.provider_name}</span>
-        {n === item.best && <span className="ai-media-best">推荐</span>}
       </button>)}
     </div>
       : <ul className="ai-media-list" role="radiogroup" aria-label={`${baseName(item.path ?? "")}的${label}`}>
         <li><button type="button" role="radio" aria-checked={chosen === null} className="ai-media-option" disabled={!pending} onClick={() => onChoose(null)}>
           <span className="ai-media-radio" aria-hidden="true" /><span className="ai-media-option-body"><strong>{keep}</strong></span></button></li>
         {candidates.map((candidate, n) => <li key={n}>
-          <button type="button" role="radio" aria-checked={chosen === n} className="ai-media-option" disabled={!pending} onClick={() => onChoose(n)}>
-            <span className="ai-media-radio" aria-hidden="true" />
-            <span className="ai-media-option-body">
-              <span className="ai-media-option-title"><strong>{candidate.title || "未命名"}</strong>{candidate.subtitle && <small>{candidate.subtitle}</small>}</span>
-              <span className="ai-media-tags">
-                <span>{candidate.provider_name}</span>
-                {n === item.best && <span className="is-best">推荐</span>}
-                {want === "lyrics" && <span>{candidate.synced ? "能滚动" : "不能滚动"}</span>}
-                {sameLength(item.duration, candidate.duration) ? <span>时长一致</span> : candidate.duration ? <span>{clock(candidate.duration)}</span> : null}
-                {candidate.language && <span>{candidate.language}</span>}
-                {candidate.hash_match && <span>文件哈希一致</span>}
+          <div className={`ai-media-row${chosen === n ? " is-checked" : ""}`}>
+            <button type="button" role="radio" aria-checked={chosen === n} className="ai-media-option" disabled={!pending} onClick={() => onChoose(n)}>
+              <span className="ai-media-radio" aria-hidden="true" />
+              <span className="ai-media-option-body">
+                <span className="ai-media-option-title"><strong>{candidate.title || "未命名"}</strong>{candidate.subtitle && <small>{candidate.subtitle}</small>}</span>
+                <span className="ai-media-tags">
+                  <span>{candidate.provider_name}</span>
+                  {n === item.best && <span className="is-best">推荐</span>}
+                  {want === "lyrics" && <span>{candidate.synced ? "能滚动" : "不能滚动"}</span>}
+                  {sameLength(item.duration, candidate.duration) ? <span>时长一致</span> : candidate.duration ? <span>{clock(candidate.duration)}</span> : null}
+                  {candidate.language && <span>{candidate.language}</span>}
+                  {candidate.hash_match && <span>文件哈希一致</span>}
+                </span>
+                {candidate.preview && reading?.candidate !== n && <span className="ai-media-preview">{candidate.preview}</span>}
               </span>
-              {candidate.preview && <span className="ai-media-preview">{candidate.preview}</span>}
-            </span>
-          </button>
-          <button type="button" className="ai-link" onClick={() => onRead(n, `${candidate.title || label} · ${candidate.provider_name}`)}>全文</button>
+            </button>
+            <button type="button" className="ai-media-expand" aria-expanded={reading?.candidate === n} onClick={() => void read(n)}>
+              {reading?.candidate === n ? "收起" : "全文"}<Icon name={reading?.candidate === n ? "chevronUp" : "chevronDown"} size={12} /></button>
+          </div>
+          {reading?.candidate === n && (reading.text === null ? <div className="ai-media-full"><SkeletonRows rows={4} /></div>
+            : <pre className="ai-media-full">{reading.text}</pre>)}
         </li>)}
       </ul>}
-    {item.target && chosen !== null && <small className="ai-media-target">保存为同目录的「{item.target}」</small>}
-  </section>;
+    {item.target && chosen !== null && <small className="ai-media-target"><Icon name="fileText" size={12} />保存为同目录的「{item.target}」{item.exists ? "，覆盖现有" : ""}</small>}
+  </div>;
 }
 
 /** 移入回收站时提示文件夹里还有多少文件，避免「删除空目录」误带上非空文件夹。 */

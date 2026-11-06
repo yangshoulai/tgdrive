@@ -408,6 +408,9 @@ class _Job:
     revision: int = 0
     misses: int = 0
     backfill: bool = False
+    # auto：自动流程（图片按原图，音视频只用文件内嵌封面）；capture：截图生成（视频截取画面）；
+    # smart：文件助手生成（音视频依次用内嵌封面、在线查找、截取画面）。
+    mode: str = "auto"
 
 
 @dataclass
@@ -444,6 +447,8 @@ class ThumbnailService:
         # 资源评估：不适合这台服务器的 Blob 与原因、从文件头读到的图片尺寸（进程内，有上限）、最近的存储读取速度。
         self._unsuitable, self._probed = OrderedDict(), OrderedDict()
         self._read_rate = None
+        # 在线查找封面（文件助手生成时使用），由 asgi 注入 MediaService；没有时跳过这一步。
+        self.media = None
 
     def _dispatch(self, action, *args):
         loop = self._loop
@@ -482,6 +487,8 @@ class ThumbnailService:
         return self.metadata.db.execute("SELECT 1 FROM thumbnails WHERE blob_uuid=? LIMIT 1", (blob,)).fetchone() is not None
 
     def enqueue(self, info: ObjectInfo, scope: Scope | None = None):
+        if scope is not None and scope.custom_cover:
+            return  # 写入方已指定封面，以它为准，不从文件内容自动生成。
         if self._eligible(info) and info.blob_uuid not in self._unsuitable:
             delay = CLIENT_TIMEOUT if scope and scope.thumbnail_client else 1
             self._dispatch(self._enqueue, _Job(info, time.monotonic() + delay,
@@ -511,6 +518,7 @@ class ThumbnailService:
                 previous.info = job.info
                 self._leases.pop(blob, None)
                 previous.force, previous.remote, previous.backfill, previous.ready_at = True, True, False, 0
+                previous.mode = job.mode
                 previous.state, previous.detail = "queued", "用户请求重新生成"
                 if self._active is previous and self._task is not None:
                     self._task.cancel()  # 从后台策略切换为用户主动任务，复用已有缓存重新开始。
@@ -690,7 +698,7 @@ class ThumbnailService:
             return images
 
     async def _embedded_images(self, info, authorize, allow_remote):
-        """视频先按容器索引读取内嵌封面；与自动截帧共用缓存、授权和读取策略，不读完整个视频。"""
+        """视频按容器索引读取内嵌封面；与截图生成共用缓存、授权和读取策略，不读完整个视频。"""
         async def read(start, end):
             authorize()
             try:
@@ -708,6 +716,10 @@ class ThumbnailService:
             return None
         else:
             data = await read(picture.offset, picture.offset + picture.length)
+        return await self._render_picture(data, authorize)
+
+    async def _render_picture(self, data, authorize):
+        """把一张图片（内嵌封面或在线找到的封面）缩放成缩略图；不是受支持的图片时返回 None。"""
         if image_mime(data) is None:
             return None
         header = image_header(data)
@@ -738,13 +750,19 @@ class ThumbnailService:
                 job.state, job.detail, job.ready_at = "queued", "上传端未完成，服务端接管缓存数据", 0
         self._wake.set()
 
-    def request(self, scope, key, etag):
+    def request(self, scope, key, etag, mode="capture"):
+        """用户请求生成：capture 为「更新封面 → 截图生成」（图片按原图缩放、视频截取画面），
+        smart 为文件助手生成（音视频依次用内嵌封面、在线查找、截取画面）。"""
+        if mode not in ("capture", "smart"):
+            raise ValueError("不支持的封面生成方式")
         self.objects._check_scope(scope, key, write=True)
         info = self.objects.head_object(scope, key)
         if info.etag != etag:
             raise ValueError("文件内容已变化，请刷新后重试")
         if not self._eligible(info):
             raise ValueError("此文件不支持生成封面")
+        if mode == "capture" and source_kind(info) == "audio":
+            raise ValueError("音频没有画面可以截取，请使用内置封面、在线查找或本地图片")
         if not self.resources.ffmpeg:
             raise ValueError("服务器未安装 FFmpeg，无法在服务器生成")
         # 已知尺寸时当场评估，不适合就直接说明原因，不进入队列；尺寸未知的图片在任务里读文件头后再评估。
@@ -754,11 +772,11 @@ class ThumbnailService:
             raise ValueError(str(exc)) from None
         self._unsuitable.pop(info.blob_uuid, None)
         self._history.pop(info.blob_uuid, None)
-        self._enqueue(_Job(info, force=True, remote=True, detail="用户请求生成"))
+        self._enqueue(_Job(info, force=True, remote=True, detail="用户请求生成", mode=mode))
         return {"accepted": True}
 
     def progress(self, scope, key, etag):
-        """网页「更新缩略图 → 自动生成」查询这个文件的生成进度：排队、处理中，或最近一次的结果与原因。"""
+        """网页「更新封面 → 截图生成」与文件助手生成封面查询这个文件的生成进度：排队、处理中，或最近一次的结果与原因。"""
         self.objects._check_scope(scope, key)
         info = self.objects.head_object(scope, key)
         if info.etag != etag:
@@ -894,7 +912,7 @@ class ThumbnailService:
                         job.revision = self.cache.revision(blob)
                         self._active = job
                         started_remote = job.remote
-                        self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote))
+                        self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote, mode=job.mode))
                         try:
                             failure_detail = await self._task
                             self._pending.pop(blob, None)
@@ -970,9 +988,11 @@ class ThumbnailService:
         self.objects._check_scope(scope, info.key, write=True)
         return scope
 
-    async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False) -> str | None:
+    async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False, mode="auto") -> str | None:
         """生成并保存缩略图。用户请求、自动补图与已收数据任务走同一流程：开始前按服务器此刻的内存、临时空间与读取速度
         评估（_plan），不适合或暂时不行就不启动解码器；allow_remote 只决定缓存不足时能否从存储读取。
+        来源按 mode：自动流程中图片按原图、音视频只用文件内嵌封面（视频不自动截图）；截图生成时视频截取画面；
+        文件助手生成时音视频依次用内嵌封面、在线查找、截取画面（只有视频能截图）。
         只有确实没有可用图片才记录 none；资源不适合不记 none（浏览器预览仍可生成），运行异常交给队列延后重试。"""
         kind = source_kind(info)
         if not self._eligible(info) or not self.resources.ffmpeg:
@@ -987,26 +1007,27 @@ class ThumbnailService:
             # 解码图片要读完整个文件，短期缓存装不下时只用缓存必然失败；交给自动补图或用户请求评估后再读取存储。
             raise ThumbnailRetry("图片超过服务器的短期缓存，稍后由自动补图评估后从存储读取")
         async with asyncio.timeout(TIMEOUT):
-            images = await self._embedded_images(info, scope.authorize, allow_remote) if kind == "video" else None
-            if images is None:
-                self._plan(info, kind, *await self._dimensions(info, kind, allow_remote), remote=allow_remote)
-                started = time.monotonic()
-                async with _RangeInput(self.objects.engine, info, scope.authorize, cache_only=not allow_remote) as source:
-                    try:
-                        with tempfile.TemporaryDirectory(prefix="tessera-thumbnail-") as directory:
-                            images = await self._render(source, kind, Path(directory), scope.authorize)
-                    except WorkBusyError:
-                        raise ThumbnailRetry("文件读取名额繁忙，稍后再生成") from None
-                    finally:
-                        remote = source.remote_bytes if isinstance(source.remote_bytes, int) else 0
-                        self._remote_bytes += remote
-                        self._observe_rate(remote, time.monotonic() - started)
+            images = None
+            if kind == "video":
+                if mode != "capture":
+                    images = await self._embedded_images(info, scope.authorize, allow_remote)
+            else:
+                # 图片按原图缩放；音频由解码器取出内嵌的专辑封面（音频没有画面可截）。
+                images = await self._decode(info, kind, scope, allow_remote)
+            if images is None and mode == "smart" and kind in ("audio", "video"):
+                images = await self._online_cover(info, scope)
+            if images is None and kind == "video" and mode in ("capture", "smart"):
+                images = await self._decode(info, kind, scope, allow_remote)
             scope.authorize()
             if not force and self._has_thumbnail(info.blob_uuid):
                 return
             if images is None:
-                failure_detail = ("候选画面均为空白或细节不足" if kind == "video"
-                                                    else "音频没有可用的内嵌封面" if kind == "audio" else "未能提取图片画面")
+                if kind == "video":
+                    failure_detail = ("视频没有可用的内嵌封面" if mode == "auto" else "截取的画面均为空白或细节不足" if mode == "capture"
+                                      else "没有内嵌封面，在线也没有找到合适的封面，截取的画面均为空白或细节不足")
+                else:
+                    failure_detail = ("音频没有可用的内嵌封面" + ("，在线也没有找到合适的封面" if mode == "smart" else "")) if kind == "audio" \
+                        else "未能提取图片画面"
                 if force and kind == "video":
                     raise ThumbnailError(failure_detail + "，未替换现有封面")
                 await self.objects.set_thumbnail(scope, info.key, None, "none")
@@ -1024,6 +1045,36 @@ class ThumbnailService:
                     break
             if force:
                 self.objects.finish_thumbnail_set(scope, info.key, saved)
+
+    async def _decode(self, info, kind, scope, allow_remote):
+        """经回环地址按范围读取原文件，由解码器生成：图片缩放原图、音频取内嵌封面、视频截取画面。"""
+        self._plan(info, kind, *await self._dimensions(info, kind, allow_remote), remote=allow_remote)
+        started = time.monotonic()
+        async with _RangeInput(self.objects.engine, info, scope.authorize, cache_only=not allow_remote) as source:
+            try:
+                with tempfile.TemporaryDirectory(prefix="tessera-thumbnail-") as directory:
+                    return await self._render(source, kind, Path(directory), scope.authorize)
+            except WorkBusyError:
+                raise ThumbnailRetry("文件读取名额繁忙，稍后再生成") from None
+            finally:
+                remote = source.remote_bytes if isinstance(source.remote_bytes, int) else 0
+                self._remote_bytes += remote
+                self._observe_rate(remote, time.monotonic() - started)
+
+    async def _online_cover(self, info, scope):
+        """文件助手生成封面的第二步：从管理员启用的媒体信息来源查找，取匹配度足够的第一张（与「获取封面、歌词与字幕」同一查询）。"""
+        if self.media is None:
+            return None
+        try:
+            data = await self.media.best_cover(scope, info.key)
+        except (ValueError, NotFoundError):
+            return None
+        if data is None:
+            return None
+        try:
+            return await self._render_picture(data, scope.authorize)
+        except ThumbnailUnsuitable:
+            return None
 
     @staticmethod
     def _remember(store, key, value):

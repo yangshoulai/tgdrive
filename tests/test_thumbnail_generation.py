@@ -224,8 +224,8 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
         entry.return_value.__aenter__ = AsyncMock(return_value=self.source())
         entry.return_value.__aexit__ = AsyncMock(return_value=False)
         with patch("tgdrive.thumbnails._RangeInput", entry), \
-                self.assertRaisesRegex(ThumbnailError, "候选画面均为空白或细节不足.*未替换现有封面"):
-            await worker.generate(info, force=True)
+                self.assertRaisesRegex(ThumbnailError, "截取的画面均为空白或细节不足.*未替换现有封面"):
+            await worker.generate(info, force=True, mode="capture")
         worker.objects.set_thumbnail.assert_not_awaited()
         worker.objects.finish_thumbnail_set.assert_not_called()
 
@@ -242,9 +242,69 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
         entry.return_value.__aexit__ = AsyncMock(return_value=False)
         info = SimpleNamespace(key="clip.mp4", content_type="video/mp4", blob_uuid="blob", bucket_id=1, size=128)
         with patch("tgdrive.thumbnails._RangeInput", entry):
-            detail = await worker.generate(info)
-        self.assertEqual(detail, "候选画面均为空白或细节不足")
+            detail = await worker.generate(info, mode="capture")
+        self.assertEqual(detail, "截取的画面均为空白或细节不足")
         self.assertEqual(worker.objects.set_thumbnail.await_args.args[2:], (None, "none"))
+
+    async def test_automatic_video_without_embedded_cover_is_not_captured(self):
+        # 上传、离线下载与补图等自动流程：视频只用文件内嵌封面，没有时记「无法生成」，不截取画面。
+        worker = self.worker()
+        worker.cache = SimpleNamespace(prepare=Mock())
+        worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
+        worker._has_thumbnail = Mock(return_value=False)
+        worker._embedded_images = AsyncMock(return_value=None)
+        worker._render = AsyncMock(side_effect=AssertionError("自动流程不能截取视频画面"))
+        worker.objects.set_thumbnail = AsyncMock()
+        info = SimpleNamespace(key="clip.mp4", content_type="video/mp4", blob_uuid="blob", bucket_id=1, size=128)
+        with patch("tgdrive.thumbnails._RangeInput", side_effect=AssertionError("自动流程不能打开解码器")):
+            detail = await worker.generate(info)
+        self.assertEqual(detail, "视频没有可用的内嵌封面")
+        self.assertEqual(worker.objects.set_thumbnail.await_args.args[2:], (None, "none"))
+
+    async def test_assistant_generation_tries_embedded_then_online_then_frames(self):
+        worker = self.worker()
+        worker.cache = SimpleNamespace(prepare=Mock())
+        worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
+        worker._has_thumbnail = Mock(return_value=False)
+        worker._remote_bytes = 0
+        worker.objects.set_thumbnail = AsyncMock()
+        worker.objects.finish_thumbnail_set = Mock()
+        order = []
+        worker._embedded_images = AsyncMock(side_effect=lambda *args: order.append("embedded"))
+        worker.media = SimpleNamespace(best_cover=AsyncMock(side_effect=lambda *args: order.append("online")))
+        worker._decode = AsyncMock(side_effect=lambda *args: order.append("capture") or {"thumb": JPEG})
+        info = SimpleNamespace(key="clip.mp4", content_type="video/mp4", blob_uuid="blob", bucket_id=1, size=128)
+        await worker.generate(info, force=True, allow_remote=True, mode="smart")
+        self.assertEqual(order, ["embedded", "online", "capture"])
+        # 在线找到合适的封面时不再截取画面。
+        order.clear()
+        worker.media.best_cover = AsyncMock(side_effect=lambda *args: order.append("online") or JPEG)
+        worker._render_picture = AsyncMock(return_value={"thumb": JPEG})
+        await worker.generate(info, force=True, allow_remote=True, mode="smart")
+        self.assertEqual(order, ["embedded", "online"])
+        # 截图生成直接截取画面，不读取内嵌封面。
+        order.clear()
+        await worker.generate(info, force=True, allow_remote=True, mode="capture")
+        self.assertEqual(order, ["capture"])
+
+    def test_audio_cannot_request_frame_capture(self):
+        worker = self.worker()
+        worker.objects = SimpleNamespace(_check_scope=Mock(), head_object=Mock(return_value=SimpleNamespace(
+            key="song.mp3", content_type="audio/mpeg", blob_uuid="blob", bucket_id=1, size=128, etag="etag")))
+        with self.assertRaisesRegex(ValueError, "音频没有画面"):
+            worker.request(SimpleNamespace(), "song.mp3", "etag", "capture")
+        with self.assertRaisesRegex(ValueError, "生成方式"):
+            worker.request(SimpleNamespace(), "song.mp3", "etag", "embedded")
+
+    def test_specified_cover_skips_automatic_generation(self):
+        worker = self.worker()
+        worker._dispatch = Mock()
+        worker._unsuitable = {}
+        info = SimpleNamespace(key="clip.mp4", content_type="video/mp4", blob_uuid="blob", bucket_id=1, size=128)
+        worker.enqueue(info, SimpleNamespace(custom_cover=True, thumbnail_client=False))
+        worker._dispatch.assert_not_called()
+        worker.enqueue(info, SimpleNamespace(custom_cover=False, thumbnail_client=False))
+        worker._dispatch.assert_called_once()
 
 
 class Writer:
@@ -378,7 +438,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.worker._pending[song.blob_uuid].state, "queued", "浏览器取不到音频缓冲，直接由后台处理")
 
     async def test_cache_misses_back_off_and_give_up(self):
-        info = await self.put("clip.mp4")
+        info = await self.put("song.mp3")
         channel, render = self.renderer({})
         with channel, render as decoder:
             decoder.side_effect = ThumbnailCacheMiss("partial")
@@ -680,7 +740,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.variants(fresh), [], "刚写入的文件先留给上传端与缓存处理")
 
     async def test_backfill_defers_decoder_errors_without_a_permanent_marker(self):
-        info = await self.put("broken.mp4")
+        info = await self.put("broken.mp3")
         self.worker.cache.drop(info.blob_uuid)
         self.age(info)
         channel, render = self.remote_renderer({})

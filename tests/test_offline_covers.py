@@ -5,7 +5,7 @@ import base64
 import json
 import tempfile
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from tgdrive.app import create_app
 from tgdrive.assistant.actions import ActionExecutor
@@ -88,10 +88,29 @@ class OfflineCoverTests(unittest.IsolatedAsyncioTestCase):
     async def test_cover_failure_keeps_download_result(self):
         service = self.app.objects.thumbnail_service
         service.fetch_image = AsyncMock(side_effect=ValueError("图片地址无法访问（HTTP 404）"))
+        service.enqueue = Mock(wraps=service.enqueue)
         task = await self.make(cover="https://img.example.com/missing.jpg")
         await self.finish(task["id"])
         self.assertEqual(self.offline._row(task["id"])["status"], "completed")
         self.assertEqual(self.thumbnails("downloads/clip.bin"), set())
+        # 指定的封面没能使用时退回自动流程（提交时已因指定封面跳过）。
+        self.assertEqual([call.args[0].key for call in service.enqueue.call_args_list if not (len(call.args) > 1 and call.args[1].custom_cover)],
+                         ["downloads/clip.bin"])
+
+    async def test_specified_cover_skips_automatic_generation_on_commit(self):
+        service = self.app.objects.thumbnail_service
+        service.fetch_image = AsyncMock(return_value=(JPEG, "image/jpeg"))
+        service.render_image = AsyncMock(return_value={"thumb": JPEG})
+        committed = self.app.objects.on_commit = Mock(wraps=self.app.objects.on_commit)
+        task = await self.make("clip.mp4", cover={"url": "https://img.example.com/cover.jpg"})
+        await self.finish(task["id"])
+        commits = [call for call in committed.call_args_list if call.args[0].key == "downloads/clip.mp4"]
+        self.assertTrue(commits and all(call.args[1].custom_cover for call in commits), "提交时带上已指定封面的标记")
+        self.assertEqual(self.thumbnails("downloads/clip.mp4"), {"thumb"})
+        plain = await self.make("plain.mp4")
+        await self.finish(plain["id"])
+        commits = [call for call in committed.call_args_list if call.args[0].key == "downloads/plain.mp4"]
+        self.assertTrue(commits and not any(call.args[1].custom_cover for call in commits), "没有指定封面时照常自动生成")
 
     async def test_invalid_covers_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "图片地址"):

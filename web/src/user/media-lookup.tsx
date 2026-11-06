@@ -66,7 +66,8 @@ function useLookup(file: api.FileItem, want: api.MediaWant) {
     try {
       if (!providers.current) {
         const info = await api.mediaInfo(file.key, signal);
-        providers.current = [...(embeddedFor(info, want) ? [EMBEDDED] : []), ...info.providers[want]];
+        // 封面的内置图片在「设置封面 → 内置封面」里单独提供，在线查找只列第三方来源。
+        providers.current = [...(want !== "cover" && embeddedFor(info, want) ? [EMBEDDED] : []), ...info.providers[want].filter(item => want !== "cover" || item.id !== "embedded")];
       }
       const list = providers.current;
       const order = new Map(list.map((item, index) => [item.id, index]));
@@ -254,7 +255,9 @@ export function MediaCoverSearch({ file, selected, disabled, onPick }: { file: a
     <QueryForm lookup={lookup} kind={kind} want="cover" />
     <ProviderStatus lookup={lookup} want="cover" />
     {lookup.error && <Notice tone="danger">{lookup.error}</Notice>}
-    {lookup.ready && !lookup.loading && !visible.length && lookup.sources.length > 0
+    {lookup.ready && !lookup.loading && !lookup.sources.length && !lookup.error
+      ? <EmptyState compact icon="search" title="没有可用的在线来源" description="管理员还没有在「系统设置 → 媒体信息」开启封面来源，可以改用内置封面、本地图片或网络图片。" />
+      : lookup.ready && !lookup.loading && !visible.length && lookup.sources.length > 0
       ? <EmptyState compact icon="image" title="没有找到封面" description={kind === "video" ? "可以把片名改成中文或英文原名、补上年份后重新查找，或改用本地图片。" : "可以修改歌名、歌手后重新查找，或改用本地图片。"} />
       : <div className="media-cover-grid" role="listbox" aria-label="封面候选" aria-busy={pending > 0}>
         {visible.map(candidate => {

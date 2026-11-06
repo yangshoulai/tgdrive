@@ -970,7 +970,7 @@ export async function executeClientTool(name: string, args: Record<string, unkno
       let ok = 0, failed = 0, note = "";
       for (const item of items) {
         if (signal?.aborted) break;
-        try { await api.generateThumbnail({ key: item.path, etag: item.etag }); ok++; }
+        try { await api.generateThumbnail({ key: item.path, etag: item.etag }, "smart"); ok++; }
         catch (reason) { failed++; note = api.errorMessage(reason, "封面提交失败"); }
       }
       if (ok) for (const delay of [5000, 30000, 120000]) window.setTimeout(() => window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [...new Set(items.map(item => item.path.slice(0, item.path.lastIndexOf("/") + 1)))] } })), delay);
