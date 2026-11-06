@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 from ..api import normalize_user_path
 from ..errors import NotFoundError
-from ..filekinds import KIND_GROUPS, kind_clause
+from ..filekinds import KIND_GROUPS, kind_clause, kind_of
 from ..objects import PRIVATE_PREFIX, ObjectService, Scope
 from .attachments import PREFIX as ATTACHMENT_PREFIX, ROOT as ATTACHMENT_ROOT
 from .config import batch_limit
@@ -442,6 +442,38 @@ def _file(ctx: ToolContext, row) -> dict:
             "modified": datetime.fromtimestamp(row["modified_at"]).isoformat(timespec="seconds")}
 
 
+def _files(ctx: ToolContext, rows, *, details: bool = False) -> list[dict]:
+    """只查询本页对象的封面索引；筛选和列目录不回源读取图片或媒体内容。"""
+    rows = list(rows)
+    blobs = [row["blob_uuid"] for row in rows]
+    covers = ctx.objects.thumbnail_variants(blobs)
+    sizes = ctx.objects.media_sizes(blobs) if details else {}
+    files = []
+    for row in rows:
+        fields = ctx.objects.thumbnail_fields(covers.get(row["blob_uuid"], ()))
+        item = {**_file(ctx, row), "has_cover": fields["thumbnail_status"] == "ready",
+                "thumbnail_status": fields["thumbnail_status"]}
+        if details:
+            item.update(fields, etag=row["etag"], file_kind=kind_of(row["key"], row["content_type"]))
+            size = sizes.get(row["blob_uuid"])
+            item["dimensions"] = {"width": size[0], "height": size[1]} if size else None
+        files.append(item)
+    return files
+
+
+def _cover_condition(args: dict) -> str:
+    present = args.get("has_cover")
+    if present is None:
+        return "1"
+    if not isinstance(present, bool):
+        raise ToolError("参数 has_cover 不正确：必须是布尔值")
+    # 与 thumbnail_fields 一致：实际规格与旧版封面算有图，none 只是生成失败的标记。
+    exists = ("(EXISTS(SELECT 1 FROM thumbnails t WHERE t.blob_uuid=objects.blob_uuid "
+              "AND t.variant IN ('thumb','grid','poster')) OR "
+              "EXISTS(SELECT 1 FROM thumbnail_legacy t WHERE t.blob_uuid=objects.blob_uuid))")
+    return exists if present else f"NOT {exists}"
+
+
 def _fmt(size: int) -> str:
     value = float(size)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -457,6 +489,7 @@ async def _thread(ctx: ToolContext, function, *args):
 
 PATH = {"type": "string", "description": "以 / 开头的完整路径，或相对当前作用域的路径；省略表示作用域根"}
 KIND = {"type": "string", "enum": list(KIND_GROUPS), "description": "文件类型：image 图片、video 视频、audio 音频、document 文档、text 文本与代码、archive 压缩包"}
+HAS_COVER = {"type": "boolean", "description": "按 Tessera 已保存的封面筛选文件：true 有封面，false 无封面。生成失败不算有封面；不判断音视频内嵌封面"}
 CURSOR = {"type": "string", "description": "上一页返回的 cursor"}
 
 
@@ -595,8 +628,9 @@ async def recall_result(ctx: ToolContext, args: dict) -> ToolOutput:
 # ---------- 浏览与查询 ----------
 
 @tool("list_folder", "列出目录", "browse", "read",
-      "列出目录下的子目录和文件（名称、大小、类型、修改时间）。按名称排序时支持分页。",
-      {"path": PATH, "kind": KIND, "sort": {"type": "string", "enum": ["name", "size", "modified"], "description": "文件排序，默认 name"},
+      "列出目录下的子目录和文件（名称、大小、类型、修改时间、有无已保存封面与封面状态）。has_cover 只筛选文件，"
+      "生成失败也算无封面；不读取原文件。查找或删除没有封面的文件时可用 has_cover=false。按名称排序时支持分页。",
+      {"path": PATH, "kind": KIND, "has_cover": HAS_COVER, "sort": {"type": "string", "enum": ["name", "size", "modified"], "description": "文件排序，默认 name"},
        "cursor": CURSOR, "limit": LIMIT_ARG},
       params={"max_results": (300, 10, 5000, "单次最多列出文件数（子目录同此上限）")})
 async def list_folder(ctx: ToolContext, args: dict) -> ToolOutput:
@@ -606,6 +640,7 @@ async def list_folder(ctx: ToolContext, args: dict) -> ToolOutput:
     if sort not in ("name", "size", "modified"):
         raise ToolError("参数 sort 不正确")
     condition, kind_args = _kind(args)
+    cover = _cover_condition(args)
     cursor = _str(args, "cursor", limit=2048)
 
     def read():
@@ -617,7 +652,7 @@ async def list_folder(ctx: ToolContext, args: dict) -> ToolOutput:
             folders = [{"path": ctx.display(p), "size": sizes.get(p, 0)} for p in names]
         order = {"name": "key", "size": "size DESC, key", "modified": "modified_at DESC, key"}[sort]
         where = ("bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND instr(substr(key,?),'/')=0 "
-                 f"AND {ctx.hide()} AND {condition}")
+                 f"AND {ctx.hide()} AND {condition} AND {cover}")
         params: list = [ctx.bucket_id, prefix, prefix + END, len(prefix) + 1, *kind_args]
         offset = 0
         if sort == "name" and cursor:
@@ -632,7 +667,7 @@ async def list_folder(ctx: ToolContext, args: dict) -> ToolOutput:
                 raise ToolError("分页过深，请改用 search_files 缩小范围")
         rows = ctx.db.execute(f"SELECT * FROM objects WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
                               (*params, limit + 1, offset)).fetchall()
-        files = [_file(ctx, row) for row in rows[:limit]]
+        files = _files(ctx, rows[:limit])
         more = len(rows) > limit
         next_cursor = (ctx.display(rows[limit - 1]["key"]) if sort == "name" else str(offset + limit)) if more else None
         return folders, files, next_cursor
@@ -679,17 +714,24 @@ async def folder_tree(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("get_file_info", "文件详情", "browse", "read",
-      "单个文件或目录的详细信息：大小、类型、修改时间、是否公开；目录给出文件数与总大小。",
-      {"path": PATH}, ("path",))
+      "查询单个文件或目录的元信息：文件名、大小、MIME、内容版本、修改时间、是否公开、有无已保存封面及规格、已知尺寸。"
+      "音视频还返回实际可得的时长（秒）、标题、歌手、专辑、年份、流派、内嵌封面／歌词／字幕及同名歌词／字幕文件。"
+      "include_media=false 只查询索引；默认按需读取受预算限制的文件头，不联网查找资料。"
+      "has_cover 指已保存的展示封面，和 media.embedded_cover 分开；未支持、未读取或读取失败的内嵌信息是未知，不能当作不存在。"
+      "批量查找无展示封面的文件优先用 list_folder 或 search_files 的 has_cover=false，再按用户要求提议操作。目录返回文件数与总大小。",
+      {"path": PATH, "include_media": {"type": "boolean", "description": "是否读取音视频元数据，默认 true；false 只查询索引，不读取原文件"}}, ("path",))
 async def get_file_info(ctx: ToolContext, args: dict) -> ToolOutput:
     raw = _str(args, "path", limit=1024)
     key = ctx.resolve(raw)
+    include_media = args.get("include_media", True)
+    if not isinstance(include_media, bool):
+        raise ToolError("参数 include_media 不正确：必须是布尔值")
 
     def read():
         if not key.endswith("/") and key:
             row = ctx.db.execute("SELECT * FROM objects WHERE bucket_id=? AND key=?", (ctx.bucket_id, key)).fetchone()
             if row is not None:
-                return {**_file(ctx, row), "kind": "file", "public": row["public_token"] is not None}
+                return {**_files(ctx, [row], details=True)[0], "kind": "file", "public": row["public_token"] is not None}
         folder = key if key.endswith("/") or not key else key + "/"
         stats = ctx.db.execute("SELECT COUNT(*), COALESCE(SUM(size),0), MAX(modified_at) FROM objects WHERE bucket_id=? AND key>=? "
                                f"AND key<? AND substr(key,-1)!='/' AND {ctx.hide()}",
@@ -704,6 +746,13 @@ async def get_file_info(ctx: ToolContext, args: dict) -> ToolOutput:
                 "public": bool(marker is not None and marker["public_token"])}
 
     info = await _thread(ctx, read)
+    if info["kind"] == "file":
+        from .file_info import media_info
+        info["media"] = await media_info(ctx, key, include_media)
+        # 解析期间可能覆盖文件或撤销私密授权，不能返回混合版本或失去授权后的数据。
+        head = await _thread(ctx, ctx.objects.head_object, ctx.scope_for(key), key)
+        if head.etag != info["etag"]:
+            raise ToolError("文件内容已变化，请重新查询文件详情")
     return ToolOutput(info, f"{info['path']}")
 
 
@@ -721,11 +770,12 @@ def _regex(pattern: str) -> re.Pattern:
 
 @tool("search_files", "搜索文件", "browse", "read",
       "在当前作用域（或指定目录）内递归搜索文件，所有条件取交集。query 为名称包含的文字；glob 与 regex 匹配文件名（不含目录）。"
+      "结果包含有无已保存封面与封面状态；has_cover=false 可筛出无封面的文件（含生成失败，不判断音视频内嵌封面），不读取原文件。"
       "单次返回条数与扫描候选数由管理员设置，有更多结果或扫描未完成时返回 cursor。不会返回 .tgdrive/ 下的内容。",
       {"path": PATH, "query": {"type": "string", "description": "名称包含的文字（不区分大小写）"},
        "glob": {"type": "string", "description": "文件名通配符，如 *.jpg、IMG_*"},
        "regex": {"type": "string", "description": "文件名正则，不区分大小写"},
-       "kind": KIND, "ext": {"type": "array", "items": {"type": "string"}, "description": "扩展名列表，如 [\"jpg\",\"png\"]"},
+       "kind": KIND, "has_cover": HAS_COVER, "ext": {"type": "array", "items": {"type": "string"}, "description": "扩展名列表，如 [\"jpg\",\"png\"]"},
        "size_min": {"type": "integer", "description": "最小字节数"}, "size_max": {"type": "integer", "description": "最大字节数"},
        "modified_after": {"type": "string", "description": "YYYY-MM-DD 或 ISO 时间"},
        "modified_before": {"type": "string", "description": "YYYY-MM-DD 或 ISO 时间"},
@@ -739,7 +789,7 @@ async def search_files(ctx: ToolContext, args: dict) -> ToolOutput:
     glob = _str(args, "glob", limit=100)
     pattern = _regex(_str(args, "regex", limit=100)) if args.get("regex") else None
     condition, kind_args = _kind(args)
-    where = [f"bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND {ctx.hide()} AND {condition}"]
+    where = [f"bucket_id=? AND key>? AND key<? AND substr(key,-1)!='/' AND {ctx.hide()} AND {condition} AND {_cover_condition(args)}"]
     params: list = [ctx.bucket_id, prefix, prefix + END, *kind_args]
     if query:
         where.append("instr(lower(key),lower(?))>0")
@@ -769,17 +819,17 @@ async def search_files(ctx: ToolContext, args: dict) -> ToolOutput:
         for row in ctx.db.execute(f"SELECT * FROM objects WHERE {' AND '.join(where)} ORDER BY key LIMIT ?", (*params, scan_limit + 1)):
             scanned += 1
             if scanned > scan_limit:
-                return matched, last, True
+                return _files(ctx, matched), last, True
             last = row["key"]
             name = row["key"].rsplit("/", 1)[-1]
             if glob and not fnmatch.fnmatch(name.lower(), glob.lower()):
                 continue
             if pattern is not None and not pattern.search(name):
                 continue
-            matched.append(_file(ctx, row))
+            matched.append(row)
             if len(matched) > limit:
-                return matched, matched[limit - 1]["path"], True
-        return matched, None, False
+                return _files(ctx, matched[:limit]), matched[limit - 1]["key"], True
+        return _files(ctx, matched), None, False
 
     matched, last, more = await _thread(ctx, read)
     files = matched[:limit]

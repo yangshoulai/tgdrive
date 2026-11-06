@@ -223,10 +223,10 @@ AssistantService（src/tgdrive/assistant/）
 
 | 工具 | 说明 | 主要参数 |
 |---|---|---|
-| `list_folder` | 列出目录下的子目录和文件（名称、大小、类型、修改时间） | `path`, `kind?`, `sort?`, `cursor?`, `limit?` |
+| `list_folder` | 列出目录下的子目录和文件，含已保存封面状态，可按有无封面筛选文件 | `path`, `kind?`, `has_cover?`, `sort?`, `cursor?`, `limit?` |
 | `folder_tree` | 目录树（只含目录），可指定深度，附每个目录的文件数与大小 | `path`, `depth≤4` |
-| `get_file_info` | 单个文件或目录的详细信息（大小、类型、时间、是否公开、是否有缩略图） | `path` |
-| `search_files` | 按名称关键字／通配符／正则、类型、扩展名、大小区间、修改时间区间搜索 | `query?`, `glob?`, `regex?`, `kind?`, `ext[]?`, `size_min/max?`, `modified_after/before?`, `cursor?` |
+| `get_file_info` | 单个文件或目录的详细信息；文件含封面、已知尺寸，音视频按需读取歌手、时长、内嵌封面／歌词／字幕等元数据 | `path`, `include_media?` |
+| `search_files` | 按名称关键字／通配符／正则、类型、扩展名、大小区间、修改时间区间、有无已保存封面搜索 | `query?`, `glob?`, `regex?`, `kind?`, `has_cover?`, `ext[]?`, `size_min/max?`, `modified_after/before?`, `cursor?` |
 | `storage_stats` | 汇总统计：总量、配额、按类型／扩展名／一级目录／月份分组的数量与大小 | `path?`, `group_by` |
 | `find_large_files` | 最大的 N 个文件 | `path?`, `limit≤100`, `kind?` |
 | `find_duplicates` | 按 Blob 与秒传指纹找内容相同的文件组 | `path?`, `min_size?`, `cursor?` |
@@ -1536,6 +1536,14 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - 候选的来源引用存在操作记录的 `_refs`（`_propose(refs=)`），`action_json`、条目分页、压缩与模型结果都不带以 `_` 开头的字段。卡片经 `GET /api/user/v1/assistant/actions/<id>/media/<条目>/<候选>[?full=1]` 由服务器读取封面小图／原图与歌词字幕全文（`AssistantService.action_media`，私密操作要求已解锁，`sandbox` CSP、`no-store`）。
 - 执行（`ActionExecutor._one` 的 `media`）：复核源文件版本，`MediaService.save_frozen` 读取候选后歌词／字幕覆盖写同名文件，封面经 `render_image` 缩放后 `apply_custom`；没有 FFmpeg（或缩放失败）时按封面规格大小上限直接使用来源的小图与原图（`_unscaled`）。
 - 界面：确认卡片的 `MediaChoices`（`assistant-thread.tsx`）按条目显示封面网格或歌词／字幕单选列表（来源、推荐、能滚动、时长一致、语言、前几行与「全文」），第一项为「保留现有／不保存」。操作终态时 `assistant.tsx` 广播文件刷新与 `MEDIA_ASSETS_EVENT`。查询词会发给已启用的第三方来源，结果视为外部内容（`TAINT_TOOLS`）。回归 `tests/test_assistant_media.py`。
+
+## 41. 文件元信息与封面筛选
+
+- 扩展现有只读工具 `get_file_info`，保留文件／目录与附件路径契约。文件返回名称、大小、MIME、内容版本、修改时间、是否公开、已保存封面状态与规格、已有的图片／视频尺寸。`include_media` 默认 true；关闭时只查询索引，不读取原文件。
+- 音视频元数据复用 `MediaService.info`，按需读取受预算限制的文件头与索引，不调用在线提供者、不下载整文件、不生成封面。返回实际可得的容器、时长、标题、歌手、专辑、专辑歌手、音轨序号、年份、流派、内嵌封面／歌词／字幕轨，以及权限范围内同名歌词／字幕文件的路径；缺失字段为 null。歌词报告存在性、同步性与文件引用，不默认返回全文或图片字节。
+- `media.status` 区分 ready、unsupported、unavailable、not_requested、not_applicable；解析不支持或失败时内嵌封面／歌词保持未知，不能据此断言文件没有这些内容。读取后复核对象版本与私密授权；文件标签是数据，不能作为指令。
+- `list_folder` 与 `search_files` 批量附带 `has_cover` 和 `thumbnail_status`，并支持布尔筛选 `has_cover`。这里的封面指 Tessera 已保存的真实图片规格（含旧版封面），`none` 失败标记不算封面；不等于文件是否内嵌专辑图。筛选在 SQL 内进行，沿用作用域、账号隔离、游标与管理员结果上限，批量查询封面记录，不逐项读取图片或音视频。
+- 「删除没有封面的文件」先按目标目录、类型与 `has_cover=false` 查询完整分页，再按用户范围调用现有 `propose_trash`；不得用空字段、解析失败或生成失败原因猜测其他元信息，写入确认与访问模式沿用原规则。
 
 ## 39. 下载对话
 

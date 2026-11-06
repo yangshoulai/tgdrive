@@ -2312,14 +2312,14 @@ kbd { padding: 1px 8px; border: 1px solid var(--line); border-bottom-width: 2px;
   .folder-strip { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
   .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .mobile-bar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; justify-content: space-between; height: 56px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
-  /* iOS Safari 的 100vh 包含被工具栏遮住的部分：抽屉用动态视口高度，并整体可滚动，底部状态与账号区始终够得着。 */
-  .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 70; width: min(300px, 86vw); height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain;
+  /* iOS 的抽屉用动态视口高度；只有中间导航滚动，品牌与底部账号区不随列表移动。 */
+  .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 70; width: min(300px, 86vw); height: 100vh; height: 100dvh; overflow: hidden;
     /* 收起时不留阴影并隐藏：阴影模糊半径会越过屏幕左缘，抽屉内的链接也不应能被 Tab 到。 */
     box-shadow: none; visibility: hidden; transform: translateX(-100%);
     transition: transform var(--duration-base) var(--ease-out), box-shadow var(--duration-base), visibility 0s var(--duration-base); }
-  .sidebar-nav { flex: 1 0 auto; overflow-y: visible; }
+  .sidebar-nav { min-height: 0; overscroll-behavior-y: contain; }
   .nav-item { height: 40px; }
-  .sidebar-top, .sidebar-bottom { flex: none; }
+  .sidebar-top, .sidebar-bottom, .workspace-switch, .sidebar-action { flex: none; }
   .sidebar-close { display: inline-grid; }
   .drawer-open .sidebar { box-shadow: var(--shadow-lg); visibility: visible; transform: none; transition: transform var(--duration-base) var(--ease-out), box-shadow var(--duration-base); }
   .drawer-scrim { position: fixed; inset: 0; z-index: 65; display: block; background: var(--scrim); opacity: 0; pointer-events: none; transition: opacity var(--duration-base); }

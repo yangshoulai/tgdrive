@@ -15,6 +15,7 @@ export type NavLink = { label: string; icon: IconName; href: string };
 const COLLAPSED_GROUPS = "tessera:nav-collapsed";
 /** 桌面侧栏收起为图标栏，记在这台设备上；手机抽屉不受影响。 */
 const SIDEBAR_RAIL = "tessera:sidebar-rail";
+const MOBILE_NAV = "(max-width: 860px)";
 /** 没有手动选择时按窗口宽度决定：1200px 以下的桌面窗口自动收起，给内容区留出空间。 */
 const RAIL_AUTO = "(max-width: 1199px)";
 const readRail = (): boolean | null => {
@@ -49,9 +50,12 @@ export function AppShell<K extends string>({ groups, slot, workspaces = [], acti
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [saved, setSaved] = useState(readRail);
   const [narrow, setNarrow] = useState(autoRail);
+  const [mobile, setMobile] = useState(() => typeof matchMedia === "function" && matchMedia(MOBILE_NAV).matches);
   useEffect(() => {
     if (typeof matchMedia !== "function") return;
     const query = matchMedia(RAIL_AUTO);
+    const mobileQuery = matchMedia(MOBILE_NAV);
+    const updateMobile = () => setMobile(mobileQuery.matches);
     const update = () => {
       setNarrow(query.matches);
       // 跨过断点时回到自动：在窄窗口里展开过的侧栏，放大后不再固定为展开，反之亦然。
@@ -59,9 +63,14 @@ export function AppShell<K extends string>({ groups, slot, workspaces = [], acti
       try { localStorage.removeItem(SIDEBAR_RAIL); } catch { /* 隐私模式下不保存 */ }
     };
     query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
+    mobileQuery.addEventListener("change", updateMobile);
+    return () => {
+      query.removeEventListener("change", update);
+      mobileQuery.removeEventListener("change", updateMobile);
+    };
   }, []);
-  const rail = saved ?? narrow;
+  // 手机抽屉始终显示完整导航，不能沿用桌面图标栏的强制展开状态。
+  const rail = !mobile && (saved ?? narrow);
   const toggleRail = () => {
     try { localStorage.setItem(SIDEBAR_RAIL, rail ? "0" : "1"); } catch { /* 隐私模式下不保存 */ }
     setSaved(!rail);

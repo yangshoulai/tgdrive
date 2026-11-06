@@ -2796,7 +2796,8 @@ class AssistantService:
 
 # 摘要行保留的结果字段（§38）：继续工作所需的编号、游标与进度，裁剪后不必重新调用工具。
 _KEPT_FIELDS = ("collection_id", "action_id", "snapshot_id", "plan_id", "kind", "offset", "returned", "next_offset",
-                "next_cursor", "cursor", "count", "total", "pages", "complete", "stopped", "progress", "url", "path")
+                "next_cursor", "cursor", "count", "total", "pages", "complete", "stopped", "progress", "url", "path",
+                "has_cover", "thumbnail_status")
 
 
 def _collection_progress(result: object, seen: collections.OrderedDict[tuple[str, int], bytes]) -> bool | None:
