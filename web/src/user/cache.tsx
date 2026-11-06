@@ -4,7 +4,8 @@ import { automaticCacheTasks, stopAutomaticCacheTask, diagnoseFileCache, removeC
 import { BRAND } from "../brand";
 import { usePageSize } from "../pagination";
 import { effectiveMiB } from "../cache-store";
-import { FileTile, getFileKind } from "../files";
+import { FileVisual, canPreview, getFileKind } from "../files";
+import { usePreview } from "./preview-host";
 import { Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, KeyValue, Menu, Modal, Notice, PageHeader, Pagination, Progress, SearchInput, Segmented, SkeletonRows, Tabs, copyText, formatBytes, formatDateTime, toast, useDocumentTitle, type MenuItem, type Tone } from "../ui";
 import { usePrivateAccess } from "./private-session";
 import { PrivateUnlockDialog } from "./private-unlock";
@@ -699,6 +700,40 @@ export function cacheSelection(queue: Queue | null, files: CacheFile[]) {
   };
 }
 
+/** 缓存记录只有路径与内容版本：按当前页查询封面状态（普通、私密分开，每次最多 200 个），供封面与预览使用。
+ *  不存在或无权访问的路径不在结果里，仍按缓存记录显示类型图标、照常打开（本机缓存可直接读取）。 */
+function useCoverStates(files: CacheFile[], privateReady: boolean) {
+  const [states, setStates] = useState(() => new Map<string, api.ThumbnailState>());
+  const signature = [...new Set(files.map(file => file.key).filter(key => !api.isPrivatePath(key) || privateReady))].sort().join("\n");
+  useEffect(() => {
+    if (!signature) return;
+    const controller = new AbortController();
+    const paths = signature.split("\n");
+    const batches = [paths.filter(path => !api.isPrivatePath(path)), paths.filter(api.isPrivatePath)]
+      .flatMap(group => Array.from({ length: Math.ceil(group.length / 200) }, (_, index) => group.slice(index * 200, index * 200 + 200)));
+    void Promise.all(batches.map(batch => api.thumbnailStatus(batch, controller.signal).then(value => value.files, () => ({}) as Record<string, api.ThumbnailState>))).then(results => {
+      if (controller.signal.aborted) return;
+      setStates(current => { const next = new Map(current); for (const files of results) for (const [key, state] of Object.entries(files)) next.set(key, state); return next; });
+    });
+    return () => controller.abort();
+  }, [signature]);
+  return states;
+}
+const coverFile = (file: CacheFile, state?: api.ThumbnailState): api.FileItem => ({ modified_at: 0, ...file, ...state });
+/** 从缓存记录打开预览：只播放点击的文件，不带播放列表。 */
+function useOpenCached() {
+  const preview = usePreview();
+  const unlocked = usePrivateAccess().grant !== null;
+  /** 私密文件只有在当前会话已解锁时才能预览。 */
+  const allowed = (file: CacheFile) => !api.isPrivatePath(file.key) || unlocked;
+  return { allowed, open: (file: api.FileItem) => preview.open({ file, url: api.contentUrl(file.key), downloadUrl: api.contentUrl(file.key, true), assetUrl: key => api.contentUrl(key),
+    playlistFiles: [file], poster: api.fileThumbnail(file, "poster"), thumbnail: api.fileThumbnail(file) }) };
+}
+/** 封面与文件名：能预览时点击打开。 */
+function CachedOpen({ label, onOpen, className, children }: { label: string; onOpen?: () => void; className: string; children: ReactNode }) {
+  return onOpen ? <button type="button" className={`${className} cached-open`} title={`预览 ${label}`} onClick={onOpen}>{children}</button> : <span className={className}>{children}</span>;
+}
+
 const cacheGroup = (job: CacheJob): TaskFilter => job.status === "done" ? "done" : job.status === "error" ? "error" : job.status === "paused" || job.status === "canceled" ? "paused" : "active";
 const cacheDescription = (job: CacheJob) => `${nameOf(job.file)} ${api.privatePathLabel(job.file.key)}`;
 const folderOf = (key: string) => key.slice(0, key.lastIndexOf("/") + 1);
@@ -783,6 +818,8 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
   const diagnostics = useDiagnosticsEnabled();
   const closeUnlock = useCallback(() => setUnlocking(false), []);
   const hiddenPrivate = queue.privateReady ? 0 : jobs.filter(job => api.isPrivatePath(job.file.key)).length;
+  const covers = useCoverStates(list.visible.map(job => job.file), queue.privateReady);
+  const openCached = useOpenCached();
   return <>
     {hiddenPrivate > 0 && <Notice className="cached-private-notice" icon="lock" tone="warning">
       <span>私密空间已锁定：{hiddenPrivate} 个私密缓存任务仍在继续，名称和位置已隐藏。</span>
@@ -841,6 +878,8 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
             const running = isRunning(job), automatic = job.origin === "auto", hidden = api.isPrivatePath(job.file.key) && !queue.privateReady;
             const name = hidden ? "私密文件" : nameOf(job.file), folder = folderOf(job.file.key), secret = api.isPrivatePath(job.file.key);
             const checked = list.selected.has(job.id);
+            const file = coverFile(job.file, covers.get(job.file.key)), kind = getFileKind(file.content_type, file.key);
+            const open = !hidden && openCached.allowed(file) && canPreview(kind, file.key, file.content_type) ? () => openCached.open(file) : undefined;
             const quick = running ? <IconButton icon={automatic ? "x" : "pause"} size="sm" label={`${automatic ? "停止自动缓存" : "暂停缓存"} ${name}`} onClick={() => queue.pause(job.id)} />
               : job.status !== "done" ? <IconButton icon={automatic ? "monitor" : "play"} size="sm" label={`${automatic ? "手动缓存" : "继续缓存"} ${name}`} disabled={!queue.available || automatic && hidden} onClick={() => automatic ? queue.enqueue(job.file) : queue.retry(job.id)} />
                 : <IconButton icon="info" size="sm" label={`查看 ${name} 的缓存`} disabled={hidden} onClick={() => queue.inspect(job.file)} />;
@@ -848,8 +887,8 @@ function CacheTaskList({ queue, stats, quota, onSettings, onOpenFolder }: { queu
               <span className="cell-check" role="cell"><Checkbox checked={checked} label={`选择 ${name}`} onChange={value => list.toggle(job.id, value)} /></span>
               <div className="cell-name" role="cell">
                 {hidden ? <span className="task-lock-tile"><Icon name="lock" size={18} /></span>
-                  : <span className="cached-tile"><FileTile kind={getFileKind(job.file.content_type, job.file.key)} />{secret && <span className="cached-tile-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}</span>}
-                <div className="name-stack"><strong className="task-name" title={name}>{name}{secret && !hidden && <span className="cached-private-tag"><Icon name="lock" size={10} />私密</span>}</strong><small className="task-subline">{formatBytes(job.size)} · {automatic ? "自动缓存" : "手动缓存"}</small></div>
+                  : <CachedOpen className="cached-tile" label={name} onOpen={open}><FileVisual kind={kind} src={api.fileThumbnail(file)} />{secret && <span className="cached-tile-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}</CachedOpen>}
+                <div className="name-stack"><strong className="task-name" title={name}><CachedOpen className="task-name-text" label={name} onOpen={open}>{name}</CachedOpen>{secret && !hidden && <span className="cached-private-tag"><Icon name="lock" size={10} />私密</span>}</strong><small className="task-subline">{formatBytes(job.size)} · {automatic ? "自动缓存" : "手动缓存"}</small></div>
               </div>
               <div role="cell"><CacheProgress job={job} rate={rates.get(job.id) ?? 0} hidden={hidden} /></div>
               <div role="cell" className="muted">{hidden ? <span className="task-location"><Icon name="lock" size={12} /><span className="task-location-text"><span>私密空间已锁定</span></span></span>
@@ -1028,6 +1067,8 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
     return () => { alive = false; };
   }, [tier, query, kind, origin, sort, offset, revision, privateReady, waitingUnlock, pageSize]);
   const items = page?.items ?? [];
+  const covers = useCoverStates(items.map(fileOf), privateReady);
+  const openCached = useOpenCached();
   const chosen = items.filter(item => selected.has(item.key));
   const allSelected = items.length > 0 && chosen.length === items.length;
   const filtered = Boolean(query || kind || origin);
@@ -1095,11 +1136,14 @@ function CachedFileList({ privateReady, privateEnabled, stats, quota, onOpenFold
               </div>
               {items.map(item => {
                 const name = item.path.split("/").at(-1) || item.path, folder = folderOf(item.path), checked = selected.has(item.key), secret = item.private;
+                const file = coverFile(fileOf(item), covers.get(item.path)), kind = item.kind === "thumb" ? "image" : getFileKind(file.content_type, file.key);
+                // 只缓存了封面的记录（thumb）没有原文件可读，不提供预览。
+                const open = item.kind !== "thumb" && file.etag && openCached.allowed(file) && canPreview(kind, file.key, file.content_type) ? () => openCached.open(file) : undefined;
                 return <div key={item.key} className={`data-row task-item${secret ? " is-private" : ""}${checked ? " is-selected" : ""}`} role="row">
                   <span className="cell-check" role="cell"><Checkbox checked={checked} label={`选择 ${name}`} onChange={value => setSelected(current => { const next = new Set(current); if (value) next.add(item.key); else next.delete(item.key); return next; })} /></span>
                   <div className="cell-name" role="cell">
-                    <span className="cached-tile"><FileTile kind={item.kind === "thumb" ? "image" : getFileKind(null, item.path)} />{secret && <span className="cached-tile-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}</span>
-                    <div className="name-stack"><strong className="task-name" title={name}>{name}{secret && <span className="cached-private-tag"><Icon name="lock" size={10} />私密</span>}</strong>
+                    <CachedOpen className="cached-tile" label={name} onOpen={open}><FileVisual kind={kind} src={api.fileThumbnail(file)} />{secret && <span className="cached-tile-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}</CachedOpen>
+                    <div className="name-stack"><strong className="task-name" title={name}><CachedOpen className="task-name-text" label={name} onOpen={open}>{name}</CachedOpen>{secret && <span className="cached-private-tag"><Icon name="lock" size={10} />私密</span>}</strong>
                       <small className="task-subline">最近使用 {formatDateTime(item.accessed / 1000)}</small></div></div>
                   <div role="cell"><div className="task-progress is-done">
                     {item.complete ? <span className="task-figure">{formatBytes(item.bytes)}</span>

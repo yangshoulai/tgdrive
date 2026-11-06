@@ -25,7 +25,8 @@ const instrumented = source.replace(/\s+gm\.load\(\)\.then\([\s\S]*\}\);\s*\}\)\
     ready: gm.load(), gm, HAS_MENU, dormantFab, copy: text => gm.copy(text), openTab: url => gm.openTab(url),
     nextRound, dropRounds, batchSummary, batchDone: () => batchDone(), batchLimit, saveSettings, settings, startBatch,
     lastTree: () => globalThis.lastTree, setPickTree: fn => { globalThis.pickTree = fn; }, createEntry, batchNameProblems,
-    requestSize, wantSize, describe, noteMeta, timingSize, probeState: () => ({ probing, queued: probeQueue.length }) };
+    requestSize, wantSize, describe, noteMeta, timingSize, probeState: () => ({ probing, queued: probeQueue.length }),
+    frameAgent, onFrameItems, FRAME_CHANNEL, IS_TOP, getBatches: () => batches.slice() };
 })();`);
 assert.notEqual(instrumented, source, "userscript test hook must replace only final bootstrap");
 
@@ -143,7 +144,7 @@ function harness({ fetch, gm, move, remove, open, parseBatch, cookies = true, co
     api.setBatch(result);
     return result;
   };
-  return { api, context, pageContext, injected, scriptNodes, values, requests, fetches, opened, copied, ready: api.ready, messages: context.toastMessages, entry, batch };
+  return { api, context, pageContext, injected, scriptNodes, values, requests, fetches, opened, copied, ready: api.ready, messages: context.toastMessages, entry, batch, listeners };
 }
 
 test("browser image upload preserves bytes and isolates credentials", async () => {
@@ -1669,4 +1670,98 @@ test("private cloud rounds wait for the user, and remaining rounds can be droppe
   h.api.dropRounds();
   assert.equal(current.deferred.length, 0);
   assert.equal(h.api.batchDone(), true);
+});
+
+test("resources found inside iframes reach the top page with the frame's referer", async () => {
+  const child = { postMessage() {} }, stranger = { postMessage() {} };
+  const frames = [{ contentWindow: child }];
+  const h = harness({ dom: selector => selector === "iframe, frame" ? frames : [] });
+  await h.ready;
+  assert.equal(h.api.IS_TOP, true);
+  h.api.setActive(true);
+  const send = (source, items) => h.api.onFrameItems({ source, data: { channel: h.api.FRAME_CHANNEL, type: "frame-items", items } });
+  send(child, [
+    { url: "https://player.example/media/clip.mp4", type: "video", source: "网络", size: 2048, referer: "https://player.example/embed/7" },
+    { url: "javascript:alert(1)", type: "video" },
+    { url: "https://player.example/x.bin", type: "script" },
+  ]);
+  // 不是自己子框架发来的消息（网页脚本、其他窗口）一律忽略。
+  send(stranger, [{ url: "https://evil.example/fake.mp4", type: "video", referer: "https://evil.example/" }]);
+  const urls = [...h.api.collect().map(item => item.url)];
+  assert.deepEqual(urls, ["https://player.example/media/clip.mp4"]);
+  const item = h.api.collect()[0];
+  assert.equal(item.frame, true);
+  assert.match(h.api.describe(item), /iframe/);
+  const curl = await h.api.curlFor(item.url, false);
+  assert.match(curl, /Referer: https:\/\/player\.example\/embed\/7/);
+  h.api.setActive(false);
+  send(child, [{ url: "https://player.example/media/other.mp4", type: "video" }]);
+  assert.equal(h.api.collect().some(entry => entry.url.endsWith("other.mp4")), false, "停用后不再接收框架资源");
+});
+
+test("the frame agent only reports after the parent asks, using its own page as referer", async () => {
+  const posted = [];
+  const h = harness({ url: "https://player.example/embed/7" });
+  await h.ready;
+  const parent = { postMessage: message => posted.push(message) };
+  h.context.window.parent = parent;
+  h.api.frameAgent();
+  const listener = h.listeners.at(-1);
+  h.api.addItem("https://cdn.example/early.mp4", "video", { source: "网络" });
+  assert.equal(posted.length, 0, "上级没有请求前不发送");
+  listener({ source: { postMessage() {} }, data: { channel: h.api.FRAME_CHANNEL, type: "frame-scan" } });
+  assert.equal(posted.length, 0, "只响应父窗口");
+  listener({ source: parent, data: { channel: h.api.FRAME_CHANNEL, type: "frame-scan" } });
+  h.api.addItem("https://cdn.example/later.m3u8", "stream", { source: "网络" });
+  const reported = posted.flatMap(message => message.items.map(item => [item.url, item.referer]));
+  assert.deepEqual(reported, [["https://cdn.example/early.mp4", "https://player.example/embed/7"], ["https://cdn.example/later.m3u8", "https://player.example/embed/7"]]);
+  assert.ok(posted.every(message => message.channel === h.api.FRAME_CHANNEL && message.type === "frame-items"));
+  h.api.addItem("https://cdn.example/early.mp4", "video", { source: "网络" });
+  assert.equal(posted.length, 2, "同一地址只交一次");
+});
+
+test("a new batch can start while another is still running, skipping files already in progress", async () => {
+  let created = 0;
+  const h = harness({ gm: details => {
+    const url = new URL(details.url);
+    if (url.pathname === "/api/v1/downloads" && details.method === "POST") {
+      created++;
+      return details.onload({ status: 200, responseText: JSON.stringify({ tasks: [{ id: created, status: "running", key: "x" }] }) });
+    }
+    return details.onload({ status: 200, responseText: JSON.stringify({ tasks: [{ id: 1, status: "running", key: "x" }] }) });
+  } });
+  await h.ready;
+  const first = { mode: "server", started: false, destination: { path: "a/", private: false }, limit: 100, round: 1, rounds: 1, archivedOk: 0, deferred: [],
+    entries: [{ url: "https://cdn.example/one.bin", type: "file", name: "one.bin", candidate: { ticket: "t1" }, state: "waiting", error: "", tasks: [], folder: "" }] };
+  h.api.setBatch(first);
+  await h.api.runBatch();
+  assert.equal(h.api.batchDone(), false, "服务器任务仍在下载");
+  try { h.api.startBatch(["https://cdn.example/one.bin"], "server"); } catch (error) { assert.match(String(error), /createElement/); }
+  assert.equal(h.api.getBatch(), first, "全部在进行中时不新建批次");
+  assert.match(h.messages.at(-1), /进行中的批次/);
+  try { h.api.startBatch(["https://cdn.example/one.bin", "https://cdn.example/two.bin"], "server"); } catch (error) { assert.match(String(error), /createElement/); }
+  const second = h.api.getBatch();
+  assert.notEqual(second, first);
+  assert.deepEqual([...second.entries.map(entry => entry.url)], ["https://cdn.example/two.bin"]);
+  const tracked = h.api.getBatches();
+  assert.equal(tracked.length, 1, "未开始的确认页不进入跟踪列表");
+  assert.equal(tracked[0], first, "进行中的批次继续跟踪");
+  assert.equal(first.entries[0].state, "submitted");
+});
+
+test("local uploads from parallel batches run one file at a time", async () => {
+  let inFlight = 0, peak = 0;
+  const h = harness({ fetch: async () => {
+    inFlight++; peak = Math.max(peak, inFlight);
+    await tick(); await tick();
+    inFlight--;
+    return new Response(Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]), { headers: { "Content-Type": "image/png" } });
+  } });
+  await h.ready;
+  const first = h.batch([h.entry("https://images.example/a.jpg"), h.entry("https://images.example/b.jpg")]);
+  const running = h.api.runBatch();
+  const second = h.batch([h.entry("https://images.example/c.jpg")]);
+  await Promise.all([running, h.api.runBatch()]);
+  assert.equal(peak, 1, "同一时间只下载一个文件");
+  assert.deepEqual([...first.entries, ...second.entries].map(entry => entry.state), ["completed", "completed", "completed"]);
 });

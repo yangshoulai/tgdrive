@@ -257,10 +257,14 @@ class TraceStore:
                                  "AND expires_at>? LIMIT ?", (conversation_id, now, keep_pending)).fetchall()
             if len(pending) >= keep_pending:
                 raise ValueError(f"待确认操作最多 {keep_pending} 个，请先处理已有请求；原有请求已保留")
+            # payload 里的 _frozen（如编辑文本的新内容）单独加密存放：卡片读取与轮询不必解密它，操作结束后清除。
+            frozen = payload.get("_frozen")
+            stored = {key: value for key, value in payload.items() if key != "_frozen"}
             db.execute("INSERT INTO assistant_actions(id,conversation_id,run_id,user_id,session_hash,kind,tool_name,status,count,"
-                       "payload,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                       "payload,frozen,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (action_id, conversation_id, run_id, user_id, session_hash, kind, tool_name, "pending", count,
-                        self._seal(payload, f"assistant-action:{action_id}"), now, now + ttl))
+                        self._seal(stored, f"assistant-action:{action_id}"),
+                        None if frozen is None else self._seal(frozen, f"assistant-action:{action_id}:frozen"), now, now + ttl))
         return action_id
 
     def action(self, user_id: int, action_id: str):
@@ -272,8 +276,12 @@ class TraceStore:
 
     SAMPLES = 20
 
-    def action_payload(self, row) -> dict:
-        return self._open(row["payload"], f"assistant-action:{row['id']}")
+    def action_payload(self, row, *, frozen: bool = False) -> dict:
+        """frozen=True 时合并单独存放的冻结数据（_frozen），只在执行与查看改动时需要。"""
+        payload = self._open(row["payload"], f"assistant-action:{row['id']}")
+        if frozen and isinstance(payload, dict) and row["frozen"] is not None:
+            payload["_frozen"] = self._open(row["frozen"], f"assistant-action:{row['id']}:frozen")
+        return payload
 
     def action_json(self, row) -> dict[str, object]:
         """卡片数据：完整条目只在 /items 分页读取，这里只带前 20 条样例。"""
@@ -318,7 +326,7 @@ class TraceStore:
         def finish(status: str, result: dict, undo: dict | None, event: dict) -> None:
             now = time.time()
             with self.metadata.transaction() as db:
-                changed = db.execute("UPDATE assistant_actions SET status=?, finished_at=?, result=?, undo=? WHERE id=?",
+                changed = db.execute("UPDATE assistant_actions SET status=?, finished_at=?, result=?, undo=?, frozen=NULL WHERE id=?",
                                      (status, now, encrypt(result, f"assistant-action:{action_id}:result"),
                                       None if undo is None else encrypt(undo, f"assistant-action:{action_id}:undo"), action_id)).rowcount
                 if not changed:  # 对话或账号已经被清除，不重新创建任何记录。
@@ -353,7 +361,7 @@ class TraceStore:
         """把 pending 改为终态；已决定或已过期返回 False（保证只能确认一次）。"""
         now = time.time()
         with self.metadata.transaction() as db:
-            changed = db.execute("UPDATE assistant_actions SET status=?, decided_at=?, finished_at=?, result=? "
+            changed = db.execute("UPDATE assistant_actions SET status=?, decided_at=?, finished_at=?, result=?, frozen=NULL "
                                  "WHERE id=? AND status='pending' AND expires_at>?",
                                  (status, now, now, None if result is None else self._seal(result, f"assistant-action:{action_id}:result"),
                                   action_id, now)).rowcount
@@ -713,6 +721,9 @@ class TraceStore:
             report["actions_expired"] = db.execute(
                 "UPDATE assistant_actions SET status='expired', decided_at=? WHERE id IN "
                 "(SELECT id FROM assistant_actions WHERE status='pending' AND expires_at<=? LIMIT ?)", (now, now, batch)).rowcount
+            # 已结束或过期的操作不再需要冻结数据（各条作废路径不必逐一清理，这里统一回收）。
+            db.execute("UPDATE assistant_actions SET frozen=NULL WHERE id IN (SELECT id FROM assistant_actions WHERE frozen IS NOT NULL "
+                       "AND (status NOT IN ('pending','running') OR expires_at<=?) LIMIT ?)", (now, batch))
             db.execute("UPDATE assistant_actions SET undo=NULL WHERE id IN "
                        "(SELECT id FROM assistant_actions WHERE undo IS NOT NULL AND finished_at<? LIMIT ?)", (now - 86400, batch))
             report["usage"] = db.execute("DELETE FROM assistant_usage WHERE rowid IN "

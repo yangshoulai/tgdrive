@@ -44,7 +44,7 @@ export type AssistantLocation = { view: string; prefix: string };
 
 /** 读取助手是否可用；不可用时不显示入口。 */
 /** 会改动文件列表的操作；执行完后通知文件页刷新。 */
-const FILE_ACTION_KINDS = new Set(["rename", "move", "organize", "mkdir", "trash", "restore", "purge", "unshare", "share", "save_attachment", "move_out", "move_in", "media"]);
+const FILE_ACTION_KINDS = new Set(["rename", "move", "organize", "mkdir", "trash", "restore", "purge", "unshare", "share", "save_attachment", "move_out", "move_in", "media", "text"]);
 const ACTIVE_ACTION = new Set(["pending", "confirmed", "running", "undoing"]);
 
 export function useAssistantConfig(enabled: boolean) {

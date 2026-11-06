@@ -1545,6 +1545,15 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - `list_folder` 与 `search_files` 批量附带 `has_cover` 和 `thumbnail_status`，并支持布尔筛选 `has_cover`。这里的封面指 Tessera 已保存的真实图片规格（含旧版封面），`none` 失败标记不算封面；不等于文件是否内嵌专辑图。筛选在 SQL 内进行，沿用作用域、账号隔离、游标与管理员结果上限，批量查询封面记录，不逐项读取图片或音视频。
 - 「删除没有封面的文件」先按目标目录、类型与 `has_cover=false` 查询完整分页，再按用户范围调用现有 `propose_trash`；不得用空字段、解析失败或生成失败原因猜测其他元信息，写入确认与访问模式沿用原规则。
 
+## 42. 新建与编辑文本文件
+
+- 写入工具 `propose_write_text`（`assistant/text_tools.py`，操作类型 `text`，一次一个文件，不可撤销，不在 `CONFIRM_KINDS`；私密空间内同样可用）：`path` 不存在时用 `content` 新建（扩展名须属于文本类，`kind_of` 为 text）；已存在时 `content` 为整体改写，`edits`（≤50 处 `{find, replace, all}`）为局部修改，二者只能给一个。只编辑 UTF-8（可带 BOM）、不含 NUL 的文本，大小上限为工具参数 `max_bytes`（默认 1 MiB，管理员最多可调到 16 MiB）。这个上限与存储分片大小无关：整篇改写还受 `read_text_file` 单次读取上限与模型输出长度限制（实际远小于 16 MiB），大文件主要靠 `edits` 局部修改；工具在内存中处理整个文件，行数统计先去掉相同头尾，中间超过 20,000 行时按整段删除与新增统计，不逐行比较。
+- 整体改写前必须在本轮用 `read_text_file` 从头完整读取（不截断）同一版本：`read_text_file` 把（键、ETag）记入 `ctx.state["read_full"]`，避免改写没看过的内容。局部修改的每处原文必须逐字一致且唯一出现（或 `all=true`），找不到或出现多次时报错，让模型补充上下文。
+- 换行与 BOM：编辑在统一为 `\n` 的文本上进行，原文件只用 CRLF 时写回 CRLF，BOM 保留；内容与原文件相同时报错。
+- 隐藏的密钥：`read_text_file` 交给模型的内容里疑似密钥的片段是占位「[已隐藏的密钥]」。编辑在同样隐藏后的文本上进行，`guard.redact_values` 按出现顺序取回被隐藏的原文，写入前把新内容里的占位依次还原；占位数量与原文不一致（删除、复制）时拒绝，不能把密钥写丢或写成占位。工具结果里的 diff 同样隐藏。
+- 冻结：条目记录路径、模式、原 ETag、新旧大小、增删行数、内容类型、BOM 与一句话说明；最终写入的文本作为冻结数据 `_frozen`（`_propose(frozen=)`）由 `trace.create_action` 单独加密存进 `assistant_actions.frozen`（schema v38），payload 里没有它：卡片读取、轮询与压缩只解密 payload，只有执行（`action_payload(row, frozen=True)`）与查看改动时才读取；操作完成或被拒绝时清除，过期等其余作废路径由 `cleanup` 统一回收。它不进入卡片条目、模型结果或日志。执行（`ActionExecutor._one` 的 `text`）：新建时目标仍不能存在；改写／局部修改先 `_check_source` 复核版本，再以 `put_object(if_match=原 ETag)` 条件覆盖，确认前文件被改过则跳过，不覆盖他人的修改；配额不足记为失败。
+- 确认卡片：条目行显示「新建」与 +/− 行数；待确认时「查看改动」经 `GET /api/user/v1/assistant/actions/<id>/text/<条目>`（`AssistantService.action_text`，只给所有者，私密操作要求已解锁）读取文件当前内容与修改后的内容：服务器先去掉相同的开头与结尾，只交出有变化的一段（前后各留 3 行上下文，每侧最多 2 MiB，`start`／`skipped_before`／`skipped_after`／`truncated`），浏览器按行比较（`web/src/text-diff.ts`，Myers 算法，计算量超限时退化为整段删除加新增；未改动的长段折叠，点击展开，最多显示 2000 行）。文件已不是冻结版本时提示确认会跳过。执行到终态后由 `assistant.tsx` 广播文件刷新。回归 `tests/test_assistant_text.py`、`node --test tests/test_text_diff.cjs`。
+
 ## 39. 下载对话
 
 - 历史列表每个对话的菜单提供「下载为 Markdown」与「下载为 JSON」，接口 `GET /api/user/v1/assistant/conversations/<id>/export?format=markdown|json&tz=<IANA 时区>`（普通会话 Cookie，GET 不需要 CSRF），响应 `Content-Disposition: attachment`、`Cache-Control: no-store`。

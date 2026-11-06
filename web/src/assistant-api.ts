@@ -225,7 +225,7 @@ export type MessageAttachment = { id: string; name: string; size: number; conten
 export const ACTION_KINDS: Record<string, string> = {
   rename: "批量改名", move: "移动", organize: "整理文件", mkdir: "新建文件夹", trash: "移入回收站", restore: "从回收站恢复",
   purge: "彻底删除", unshare: "取消公开", share: "公开分享", downloads: "离线下载", download_control: "下载任务操作",
-  save_attachment: "保存附件", move_out: "移出私密空间", move_in: "移入私密空间", media: "获取封面、歌词与字幕",
+  save_attachment: "保存附件", move_out: "移出私密空间", move_in: "移入私密空间", media: "获取封面、歌词与字幕", text: "编辑文本文件",
 };
 export type ActionStatus = "pending" | "confirmed" | "rejected" | "expired" | "running" | "done" | "partial" | "failed" | "cancelled"
   | "interrupted" | "undoing" | "undone";
@@ -236,7 +236,9 @@ export type ActionItem = { from?: string; to?: string; path?: string; id?: strin
   files?: number;
   /** 获取封面、歌词与字幕（media）：每个条目是一个文件的一种数据 */
   want?: MediaActionWant; kind?: "audio" | "video"; exists?: string | null; note?: string; duration?: number | null; candidates?: MediaActionCandidate[];
-  best?: number | null; choice?: number | null; target?: string | null };
+  best?: number | null; choice?: number | null; target?: string | null;
+  /** 编辑文本文件（text）：create 新建、overwrite 整体改写、edit 局部修改；新增与删除的行数 */
+  mode?: "create" | "overwrite" | "edit"; added?: number; removed?: number; old_size?: number; summary?: string };
 export type MediaActionWant = "cover" | "lyrics" | "subtitle";
 /** 媒体候选（来源引用只在服务端）；封面图与歌词、字幕全文经 actionMediaUrl 读取。 */
 export type MediaActionCandidate = { provider: string; provider_name: string; title: string; subtitle: string; synced: boolean | null;
@@ -325,6 +327,11 @@ export const confirmAction = (id: string, input: ConfirmInput = {}) => post<Assi
 export const actionMediaUrl = (id: string, item: number, candidate: number, full = false) =>
   `${USER}/actions/${encodeURIComponent(id)}/media/${item}/${candidate}${full ? "?full=1" : ""}`;
 export const actionMediaText = (id: string, item: number, candidate: number) => guard(apiBlob(actionMediaUrl(id, item, candidate, true))).then(blob => blob.text());
+/** 文本编辑操作的前后内容（修改前为文件当前内容；changed 表示文件已不是生成操作时的版本）。大文件只交出有变化的一段。 */
+export type ActionText = { path: string; mode: string; before: string; after: string; changed: boolean;
+  /** 服务器只交出有变化的一段：start 为这一段第一行的行号，skipped_before／skipped_after 为省略的相同行数，truncated 为过长被截断 */
+  start: number; skipped_before: number; skipped_after: number; truncated: boolean };
+export const actionText = (id: string, item: number) => guard(apiGet<ActionText>(`${USER}/actions/${encodeURIComponent(id)}/text/${item}`));
 export const rejectAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/reject`, {});
 export const cancelAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/cancel`, {});
 export const undoAction = (id: string) => post<AssistantAction>(`${USER}/actions/${encodeURIComponent(id)}/undo`, {});

@@ -24,6 +24,10 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
     if can_read_text:
         abilities.append("- 阅读文本文件内容（纯文本、Markdown、代码、字幕等），据此回答、总结或给出命名建议。")
     if can_write:
+        abilities.append("- 新建与编辑文本文件：propose_write_text 新建或修改 UTF-8 文本（Markdown、纯文本、代码、JSON、字幕等），如格式化、整理、翻译或补写内容。"
+                         "整篇改写先用 read_text_file 完整读取再给出全文 content；大文件只改几处用 edits（逐字一致、唯一的原文）。"
+                         "按工具返回的 diff 核对改动；生成后按访问模式确认或自动执行，不要声称已修改而实际没有调用工具。")
+    if can_write:
         abilities.append("- 整理文件：批量改名（文件和文件夹）、移动、按规则归类、新建文件夹、移入回收站、从回收站恢复"
                          + ("、公开分享与取消公开" if can_share else "、取消公开链接")
                          + ("、彻底删除回收站条目" if can_danger else "") + "；创建与管理离线下载任务。"

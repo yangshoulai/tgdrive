@@ -215,7 +215,7 @@ def _move_item(row) -> dict:
 
 
 async def _propose(ctx: ToolContext, kind: str, items: list[dict], *, skipped: list[dict], summary: str, options: dict | None = None,
-                   danger: bool = False, sample=None, refs: dict | None = None) -> ToolOutput:
+                   danger: bool = False, sample=None, refs: dict | None = None, frozen: object = None) -> ToolOutput:
     if ctx.propose is None:
         raise ToolError("当前无法生成待确认操作")
     if not items:
@@ -230,6 +230,9 @@ async def _propose(ctx: ToolContext, kind: str, items: list[dict], *, skipped: l
     if refs:
         # 只在服务端使用的冻结数据（如媒体候选的来源引用）：不进入卡片、条目分页或模型结果。
         payload["_refs"] = refs
+    if frozen is not None:
+        # 较大的冻结数据（如编辑文本的新内容）：由 trace 单独加密存放，只在执行与查看改动时读取，操作结束后清除。
+        payload["_frozen"] = frozen
     created = await ctx.propose(kind, payload, len(items))
     describe = sample or (lambda item: str(item))
     samples = [describe(item) for item in items[:20]]

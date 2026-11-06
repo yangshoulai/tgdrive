@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ from .client import (
     TelegramTransientError,
 )
 from .pool import BotPool
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -43,7 +46,8 @@ class TelegramRef:
 
 
 class TelegramBlobStore(BlobStore):
-    MAX_UPLOAD_ATTEMPTS = 3
+    MAX_UPLOAD_ATTEMPTS = 4
+    RETRY_PAUSE = 2.0
 
     def __init__(self, pool: BotPool, *, file_path_ttl: float = 50 * 60, max_cached_paths: int = 4096) -> None:
         self.pool = pool
@@ -53,10 +57,15 @@ class TelegramBlobStore(BlobStore):
         self._file_cache: OrderedDict[tuple[str, str], tuple[str, float]] = OrderedDict()
 
     async def put(self, key: str, data: bytes) -> str:
-        # 一个 Bot 失败（限流、网络、token 失效）时换另一个 Bot 重试，失败的 Bot 进入退避冷却。
+        # 一个 Bot 失败（限流、网络、token 失效、请求被拒）时换另一个 Bot 重试，失败的 Bot 进入退避冷却；
+        # 每个 Bot 都试过后稍等再从头轮换，只有一个 Bot 时也能重试。大文件要上传几百个分片，
+        # 任何一次偶发错误都会让整个文件失败，所以不能只靠任务层从头重来。
         tried: set[str] = set()
         last_error: Exception | None = None
-        for _ in range(self.MAX_UPLOAD_ATTEMPTS):
+        for attempt in range(self.MAX_UPLOAD_ATTEMPTS):
+            if tried and tried.issuperset(self.pool.enabled_ids()):
+                tried.clear()
+                await asyncio.sleep(self.RETRY_PAUSE * attempt)
             try:
                 bot = await self.pool.acquire_for_upload(exclude=tried)
             except RuntimeError:
@@ -69,6 +78,12 @@ class TelegramBlobStore(BlobStore):
                 last_error = exc
                 continue
             except (TelegramTransientError, TelegramAuthError, OSError) as exc:
+                self.pool.mark_failure(bot.id)
+                last_error = exc
+                continue
+            except TelegramError as exc:
+                # 其他拒绝（400 等）：说明来自 Telegram，不含 token 或数据，记下来便于排查。
+                log.warning("Telegram 拒绝上传分片：bot=%s code=%s %s", bot.id, exc.error_code, exc)
                 self.pool.mark_failure(bot.id)
                 last_error = exc
                 continue

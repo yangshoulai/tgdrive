@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.21.0
+// @version      0.22.0
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
 // @match        *://*/*
 // @run-at       document-start
-// @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
 // @grant        GM_setClipboard
@@ -996,6 +995,113 @@
       }
     });
     return found;
+  }
+
+  // ---------- iframe 中的资源 ----------
+
+  // 跨域 iframe 的资源计时与 DOM 只有框架自己读得到，所以脚本也运行在框架里，但框架里只做嗅探：
+  // 收到上级的 frame-scan 后才开始记录资源，经 postMessage 逐级交给顶层页面；不挂界面、不注册菜单、不读写 GM 存储与设置。
+  // 顶层只接受来自自己子框架的消息并逐字段校验；消息里只有资源地址与元信息，顶层不向框架发送任何数据。
+  const IS_TOP = (() => { try { return window.self === window.top; } catch { return false; } })();
+  const FRAME_CHANNEL = "tessera-grabber-frames";
+  const FRAME_BATCH = 50;
+  function childFrames() {
+    const frames = [];
+    for (const node of document.querySelectorAll("iframe, frame")) {
+      try { if (node.contentWindow) frames.push(node.contentWindow); } catch { /* 已移除的框架 */ }
+    }
+    return frames;
+  }
+  const fromChild = source => Boolean(source) && childFrames().includes(source);
+  function postFrames(message) {
+    for (const target of childFrames()) {
+      try { target.postMessage({ ...message, channel: FRAME_CHANNEL }, "*"); } catch { /* 框架正在导航 */ }
+    }
+  }
+  /** 校验框架交来的一项资源；Referer 用框架页面的地址（来源站点常按它校验防盗链）。 */
+  function frameItem(value) {
+    if (!value || typeof value !== "object" || typeof value.url !== "string" || value.url.length > 4096 || !/^https?:\/\//i.test(value.url)
+      || !Object.hasOwn(TYPE_LABEL, value.type)) return null;
+    const referer = typeof value.referer === "string" && value.referer.length <= 4096 && /^https?:\/\//i.test(value.referer) ? value.referer : "";
+    const size = Number.isFinite(value.size) && value.size > 0 ? value.size : 0;
+    const dims = Array.isArray(value.dims) && value.dims.length === 2 && value.dims.every(n => Number.isFinite(n) && n > 0) ? [value.dims[0], value.dims[1]] : null;
+    return { url: value.url, type: value.type, extra: { source: value.source === "页面" ? "页面" : "网络", size, dims, referer, frame: true } };
+  }
+  function rememberFrameItems(list) {
+    let changed = false;
+    for (const value of list.slice(0, FRAME_BATCH)) {
+      const item = frameItem(value);
+      if (item && remember(item.url, item.type, item.extra)) changed = true;
+    }
+    return changed;
+  }
+
+  // 顶层：启用时每 2 秒通知子框架（新出现或刚导航的框架随之开始嗅探），打开面板时另请框架扫描 DOM。
+  let frameTimer = 0, frameDomAt = 0;
+  function onFrameItems(event) {
+    const data = event.data;
+    if (!active || !data || data.channel !== FRAME_CHANNEL || data.type !== "frame-items" || !Array.isArray(data.items) || !fromChild(event.source)) return;
+    if (rememberFrameItems(data.items)) listeners.forEach(fn => fn());
+  }
+  function watchFrames() {
+    if (frameTimer) return;
+    window.addEventListener("message", onFrameItems);
+    frameTimer = setInterval(() => postFrames({ type: "frame-scan" }), 2000);
+    postFrames({ type: "frame-scan" });
+  }
+  function unwatchFrames() {
+    if (!frameTimer) return;
+    clearInterval(frameTimer);
+    frameTimer = 0;
+    window.removeEventListener("message", onFrameItems);
+    postFrames({ type: "frame-stop" });
+  }
+  function scanFrameDom() {
+    if (!frameTimer || Date.now() - frameDomAt < 1500) return;
+    frameDomAt = Date.now();
+    postFrames({ type: "frame-scan", dom: true });
+  }
+
+  // 框架：只响应父窗口的消息；自己探测到的与下级框架交来的资源一起往上交，每个地址只交一次。
+  function frameAgent() {
+    let armed = false;
+    const sent = new Set();
+    const flush = () => {
+      if (!armed) return;
+      const fresh = [...items.values()].filter(item => !sent.has(item.url));
+      if (sent.size > 2000) sent.clear(); // 只防重复发送，顶层自己会去重
+      for (let index = 0; index < fresh.length; index += FRAME_BATCH) {
+        const chunk = fresh.slice(index, index + FRAME_BATCH);
+        chunk.forEach(item => sent.add(item.url));
+        const payload = chunk.map(item => {
+          const meta = resourceMeta.get(item.url) || {};
+          return { url: item.url, type: item.type, source: item.source, size: meta.size || 0, dims: meta.dims || null, referer: item.referer || referer() };
+        });
+        try { window.parent.postMessage({ channel: FRAME_CHANNEL, type: "frame-items", items: payload }, "*"); } catch { /* 父窗口已离开 */ }
+      }
+    };
+    window.addEventListener("message", event => {
+      const data = event.data;
+      if (!data || data.channel !== FRAME_CHANNEL) return;
+      if (event.source === window.parent && data.type === "frame-scan") {
+        if (!armed) { armed = true; listeners.add(flush); observeNetwork(); flush(); }
+        if (data.dom) whenReady(() => { for (const item of scanDom()) remember(item.url, item.type, { source: item.source, dims: item.dims }); flush(); });
+        postFrames({ type: "frame-scan", dom: Boolean(data.dom) });
+      } else if (event.source === window.parent && data.type === "frame-stop" && armed) {
+        armed = false;
+        listeners.delete(flush);
+        networkObserver?.disconnect();
+        networkObserver = null;
+        clearInterval(resourcePoll);
+        resourcePoll = null;
+        resourceIndex = 0;
+        items.clear();
+        sent.clear();
+        postFrames({ type: "frame-stop" });
+      } else if (armed && data.type === "frame-items" && Array.isArray(data.items) && fromChild(event.source)) {
+        if (rememberFrameItems(data.items)) flush();
+      }
+    });
   }
 
   // ---------- 页面识别 ----------
@@ -2060,9 +2166,11 @@
 
   const quote = value => "'" + String(value).replace(/'/g, "'\\''") + "'";
   const referer = () => location.href.split("#")[0];
+  /** iframe 里探测到的资源用所在框架的地址作 Referer，其余用当前页面。 */
+  const refererFor = url => items.get(url)?.referer || referer();
 
   async function curlFor(url, withCookies = settings().cookies, extraHeaders = {}, name = "") {
-    const headers = new Map([["user-agent", ["User-Agent", navigator.userAgent]], ["referer", ["Referer", referer()]]]);
+    const headers = new Map([["user-agent", ["User-Agent", navigator.userAgent]], ["referer", ["Referer", refererFor(url)]]]);
     const cookie = withCookies ? await cookieHeader(url) : "";
     if (cookie) headers.set("cookie", ["Cookie", cookie]);
     for (const [key, value] of Object.entries(extraHeaders)) {
@@ -2209,7 +2317,7 @@
         const cookie = cookies ? await cookieHeader(url) : "";
         const source = await gmRequest({ method: "GET", url, responseType: "blob", timeout: 180000,
           anonymous: !cookies, cookie: cookie || undefined,
-          headers: { Accept: ACCEPT[type] || "*/*", Referer: referer() },
+          headers: { Accept: ACCEPT[type] || "*/*", Referer: refererFor(url) },
           onprogress: event => onprogress(event.loaded || 0, event.lengthComputable ? event.total : null),
           errorMessage: "浏览器无法读取资源，请允许 Tampermonkey 访问来源域名，或手动保存后上传",
           timeoutMessage: "浏览器下载超时，请重试",
@@ -2470,6 +2578,7 @@
     .batch-banner { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border-radius: 12px; background: var(--accent-soft);
       color: var(--fg); text-align: left; }
     .batch-banner .meta { gap: 6px; }
+    .banner-host { display: grid; gap: 8px; }
     .batch-banner > svg { color: var(--muted); }
     .overview { display: grid; gap: 8px; }
     .overview-line { display: flex; align-items: baseline; gap: 8px; }
@@ -3170,6 +3279,7 @@
 
   function collect() {
     const scope = currentContext && currentContext.scope;
+    if (!scope) scanFrameDom();
     const dom = scanDom(scope || document);
     if (scope) { for (const item of dom) noteMeta(item.url, 0, item.dims); return dom.filter(item => !clearedUrls.has(item.url)); } // 单条帖子只看它自己的媒体
     // DOM 中扫描到的资源也记下来：之后它们离开页面（关闭弹窗、切换标签）仍然留在列表里。
@@ -3366,7 +3476,7 @@
     try { domain = new URL(item.url).hostname.replace(/^www\./, ""); } catch { /* 忽略 */ }
     const meta = resourceMeta.get(item.url) || {};
     return [TYPE_LABEL[item.type], item.type === "stream" ? "播放列表" : meta.size ? formatSize(meta.size) : "",
-      meta.dims ? `${meta.dims[0]}×${meta.dims[1]}` : "", domain].filter(Boolean).join(" · ");
+      meta.dims ? `${meta.dims[0]}×${meta.dims[1]}` : "", domain, item.frame ? "iframe" : ""].filter(Boolean).join(" · ");
   }
   function syncMeta(url) {
     const node = rowCache.get(url), item = node && (items.get(url) || { url, type: node.dataset.type });
@@ -3820,7 +3930,11 @@
    * - 服务器下载（server）：打开确认页时先解析，每个分组一行，同组的不同清晰度用下拉选择；开始后逐行创建离线任务并轮询。
    *   私密空间把解析结果（含修改后的文件名）转交 Tessera 页面确认。parsing → waiting → creating → submitted（私密：handoff）。
    */
+  // batch：面板里正在查看的批次（确认页或进度页）；batches：已经开始、仍在跟踪的全部批次。
+  // 一批还在进行时可以继续勾选并开始新的一批：旧批次在后台继续，主面板为每个批次各显示一条进度横幅。
   let batch = null;
+  const batches = [];
+  const batchAlive = current => batch === current || batches.includes(current);
   const TERMINAL = ["completed", "failed", "stopped"];
   const PHASE = { resolving: "解析媒体…", downloading: "下载中", merging: "合并中…", saving: "保存中…" };
   const MODE_LABEL = { local: "本地下载", server: "服务器下载" };
@@ -3840,8 +3954,14 @@
       toast("请先填写 Tessera 地址和访问密钥");
       return openSettings(() => open(currentContext));
     }
-    if (batch && batch.started && !batchDone()) return toast("上一批还在进行，请等待完成后再开始新的一批");
-    const wanted = sources.map(source => typeof source === "string" ? { url: source, platform: null } : source);
+    // 已结束的批次记录随新批次清除（和只有一个批次时一样）；进行中的批次保留，新批次与它们并行。
+    for (const old of batches.slice()) if (batchDone(old)) batches.splice(batches.indexOf(old), 1);
+    // 正在其他批次里处理的文件不重复加入。
+    const busy = new Set(batches.flatMap(old => [...old.entries.filter(entry => entryActive(entry, old)), ...old.deferred].map(entry => entry.url)));
+    const requested = sources.map(source => typeof source === "string" ? { url: source, platform: null } : source);
+    const wanted = requested.filter(source => !busy.has(source.url));
+    if (!wanted.length) return toast(requested.length === 1 ? "这个文件正在进行中的批次里" : "所选文件都在进行中的批次里");
+    const skipped = requested.length - wanted.length;
     // 按资源列表的显示顺序处理，而不是勾选的先后顺序。
     const listed = collect();
     const known = new Map(listed.map(item => [item.url, item]));
@@ -3859,7 +3979,8 @@
       entries: first, deferred: all.slice(first.length), round: 1, rounds: Math.max(1, Math.ceil(all.length / size)), archivedOk: 0 };
     openBatch();
     const resent = all.filter(entry => entry.resent).length;
-    if (resent) toast(resent === all.length ? "所选文件之前已发送过，确认后会再次下载" : `其中 ${resent} 个文件之前已发送过，不需要的可以移除`);
+    if (skipped) toast(`已跳过 ${skipped} 个正在其他批次里处理的文件`);
+    else if (resent) toast(resent === all.length ? "所选文件之前已发送过，确认后会再次下载" : `其中 ${resent} 个文件之前已发送过，不需要的可以移除`);
     else if (batch.deferred.length) toast(`共 ${all.length} 个文件，将分 ${batch.rounds} 批自动发送`);
     if (mode === "server") void parseEntries(batch, batch.entries.slice());
   }
@@ -3888,7 +4009,7 @@
     for (const entry of entries) { entry.state = "parsing"; entry.error = ""; entry.resolvingCloud = Boolean(entry.cloud); }
     updateBatch();
     const worker = async () => {
-      while (units.length && batch === current) {
+      while (units.length && batchAlive(current)) {
         const unit = units.shift();
         if (unit.length === 1 && unit[0].platform) await parseEntry(unit[0], current);
         else await parseChunk(unit, current);
@@ -3897,7 +4018,7 @@
     await Promise.all([worker(), worker()]);
   }
 
-  const parseLive = (entry, current) => batch === current && current.entries.includes(entry);
+  const parseLive = (entry, current) => batchAlive(current) && current.entries.includes(entry);
 
   /** 一行的解析请求体：网盘文件先等直链；平台链接单独传 Cookie，文件直链把 Cookie 写进 curl 命令，与网页「下载任务」的规则一致。 */
   async function parsePayload(entry, current) {
@@ -3944,7 +4065,7 @@
   /** 一组条目合成一个 /downloads/parse-batch 请求；每行的结果各自生效，单项失败只标红该行。旧版服务器没有批量接口时逐个解析。 */
   async function parseChunk(entries, current) {
     if (parseBatchMissing) {
-      for (const entry of entries) if (batch === current) await parseEntry(entry, current);
+      for (const entry of entries) if (batchAlive(current)) await parseEntry(entry, current);
       return;
     }
     const ready = [];
@@ -3958,7 +4079,7 @@
       }
     }));
     updateBatch();
-    if (!ready.length || batch !== current) return;
+    if (!ready.length || !batchAlive(current)) return;
     let parsed;
     try {
       parsed = await api("POST", "/api/v1/downloads/parse-batch", { items: ready.map(item => item.payload) }, { timeout: 150000 });
@@ -4057,13 +4178,20 @@
     if (retryAll) retryAll.disabled = batch.running || problems.size > 0;
   }
 
-  const entryActive = entry => ["parsing", "creating", "downloading", "uploading", "saving", "transferring"].includes(entry.state)
-    || entry.state === "waiting" && batch.started
+  const entryActive = (entry, current = batch) => ["parsing", "creating", "downloading", "uploading", "saving", "transferring"].includes(entry.state)
+    || entry.state === "waiting" && current.started
     || entry.state === "submitted" && entry.tasks.some(task => !TERMINAL.includes(task.status));
   const entryOk = entry => entry.state === "completed" || entry.state === "handoff" || entry.state === "submitted" && entry.tasks.length > 0 && entry.tasks.every(task => task.status === "completed");
   const entryFailed = entry => ["error", "stopped", "parse-error"].includes(entry.state) || entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped");
   const pendingRounds = (current = batch) => current?.deferred?.length || 0;
-  const batchDone = () => !batch || batch.started && !batch.entries.some(entryActive) && !pendingRounds();
+  const batchDone = (current = batch) => !current || current.started && !current.entries.some(entry => entryActive(entry, current)) && !pendingRounds(current);
+  let localQueue = Promise.resolve();
+  /** 依次执行本地下载（跨批次）：每个文件等前一个处理完再开始。 */
+  function localTurn(fn) {
+    const run = localQueue.then(fn, fn);
+    localQueue = run.catch(() => {});
+    return run;
+  }
 
   async function runBatch(auto = false) {
     if (batch.running) return;
@@ -4077,6 +4205,7 @@
     // 开始后未解析成功的行按失败处理，可单独重试。
     if (!current.started) for (const entry of current.entries) if (entry.state === "parse-error") entry.state = "error";
     current.started = true;
+    if (!batches.includes(current)) batches.push(current);
     current.running = true;
     current.controller = new AbortController();
     current.config ||= settings();
@@ -4114,24 +4243,25 @@
       }
     }
     const worker = async () => {
-      while (queue.length && batch === current && !current.controller.signal.aborted) {
+      while (queue.length && batchAlive(current) && !current.controller.signal.aborted) {
         const entry = queue.shift();
-        await (current.mode === "local" ? uploadEntry(entry, current) : createEntry(entry, current));
+        // 本地下载全局一次只处理一个文件：多个批次同时进行时依次上传。
+        await (current.mode === "local" ? localTurn(() => current.controller.signal.aborted ? undefined : uploadEntry(entry, current)) : createEntry(entry, current));
       }
     };
     // 本地下载一次只处理一个文件（内存与带宽）；服务器下载两路创建任务。
     await Promise.all(current.mode === "local" ? [worker()] : [worker(), worker()]);
     current.running = false;
     if (current.transfer) { current.transfer.end(); current.transfer = null; }
-    if (batch === current) updateBatch();
+    updateBatch();
     // 这一批的任务都创建好了：自动取下一批（私密空间每批要在 Tessera 页面确认，等用户点「发送下一批」）。
-    if (batch === current && pendingRounds(current) && !current.controller.signal.aborted && !current.destination.private) void nextRound(current);
+    if (batchAlive(current) && pendingRounds(current) && !current.controller.signal.aborted && !current.destination.private) void nextRound(current);
   }
 
   /** 下一批：已完成的行收起为计数，取下一批文件（服务器下载先取直链、服务器解析），然后直接创建任务或上传（沿用确认过的保存位置）。
    *  本地上传不需要解析，中间没有 await，私密空间的「发送下一批」点击里能同步打开 Tessera 标签页。 */
   async function nextRound(current) {
-    if (current.running || !pendingRounds(current) || batch !== current) return;
+    if (current.running || !pendingRounds(current) || !batchAlive(current)) return;
     const done = current.entries.filter(entryOk);
     current.archivedOk += done.length;
     current.entries = current.entries.filter(entry => !done.includes(entry));
@@ -4144,7 +4274,7 @@
       updateBatch();
       await parseEntries(current, chunk);
       current.running = false;
-      if (batch !== current) return;
+      if (!batchAlive(current)) return;
     }
     if (current.entries.some(entry => entry.autoRound && entry.state === "waiting")) return runBatch(true);
     updateBatch();
@@ -4259,7 +4389,7 @@
       await parseEntries(current, unparsed);
       current.running = false;
       current.started = started;
-      if (batch !== current) return;
+      if (!batchAlive(current)) return;
     }
     void runBatch();
   }
@@ -4285,23 +4415,26 @@
   }
   async function poll() {
     pollTimer = 0;
-    if (!batch) return;
-    const ids = batch.entries.flatMap(entry => entry.tasks.filter(task => !TERMINAL.includes(task.status)).map(task => task.id));
-    if (ids.length) {
+    const tracked = [...new Set([...batches, ...(batch ? [batch] : [])])];
+    let changed = false;
+    for (const current of tracked) {
+      const ids = current.entries.flatMap(entry => entry.tasks.filter(task => !TERMINAL.includes(task.status)).map(task => task.id));
+      if (!ids.length) continue;
       try {
         // 分批后可能同时跟踪上千个任务：每次请求最多 200 个编号，避免地址过长。
         const tasks = [];
         for (let index = 0; index < ids.length; index += 200)
-          tasks.push(...(await api("GET", `/api/v1/downloads?ids=${ids.slice(index, index + 200).join(",")}`, undefined, { config: batch.config || settings() })).tasks);
-        if (!batch) return;
+          tasks.push(...(await api("GET", `/api/v1/downloads?ids=${ids.slice(index, index + 200).join(",")}`, undefined, { config: current.config || settings() })).tasks);
+        if (!batchAlive(current)) continue;
         const fresh = new Map(tasks.map(task => [task.id, task]));
-        for (const entry of batch.entries) entry.tasks = entry.tasks.map(task => fresh.get(task.id) || task);
+        for (const entry of current.entries) entry.tasks = entry.tasks.map(task => fresh.get(task.id) || task);
         // 下载失败或被停止的资源不算已发送，下次全选时重新包含。
-        markSent(batch.entries.filter(entry => entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped")).map(entry => entry.url), false);
+        markSent(current.entries.filter(entry => entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped")).map(entry => entry.url), false);
+        changed = true;
       } catch { /* 网络抖动：下一轮再试 */ }
-      updateBatch();
     }
-    if (batch && batch.entries.some(entryActive)) schedulePoll(2000);
+    if (changed) updateBatch();
+    if (tracked.some(current => batchAlive(current) && current.entries.some(entry => entryActive(entry, current)))) schedulePoll(2000);
   }
 
   function updateBatch() {
@@ -4310,18 +4443,18 @@
     else if (panel.dataset.view === "main") renderBanner();
   }
 
-  function batchSummary() {
+  function batchSummary(current = batch) {
     // 自动分批时：已收起的完成行与未开始的批次也计入总数。
-    const total = batch.entries.length + (batch.archivedOk || 0) + pendingRounds();
-    const ok = batch.entries.filter(entryOk).length + (batch.archivedOk || 0);
-    const failed = batch.entries.filter(entryFailed).length;
-    return { total, ok, failed, finished: batchDone() };
+    const total = current.entries.length + (current.archivedOk || 0) + pendingRounds(current);
+    const ok = current.entries.filter(entryOk).length + (current.archivedOk || 0);
+    const failed = current.entries.filter(entryFailed).length;
+    return { total, ok, failed, finished: batchDone(current) };
   }
 
   /** 批次整体状态：图标、语气与标题，横幅和进度页共用。 */
-  function batchHeadline() {
-    const { total, ok, failed, finished } = batchSummary();
-    const label = MODE_LABEL[batch.mode];
+  function batchHeadline(current = batch) {
+    const { total, ok, failed, finished } = batchSummary(current);
+    const label = MODE_LABEL[current.mode];
     const running = total - ok - failed;
     const tone = !finished ? "run" : failed ? ok ? "warn" : "err" : "ok";
     return {
@@ -4334,30 +4467,36 @@
   }
 
   /** 清除批次记录（不影响已保存的文件和服务器任务）。 */
-  function clearBatch() {
-    if (batch && batch.started && !batchDone()) return toast("还有文件在传输，请等待完成或停止后再清除");
+  function clearBatch(current = batch) {
+    if (current && current.started && !batchDone(current)) return toast("还有文件在传输，请等待完成或停止后再清除");
+    if (batches.includes(current)) batches.splice(batches.indexOf(current), 1);
+    if (batch !== current) return renderBanner();
     batch = null;
     if (panel && panel.dataset.view === "batch") open(currentContext);
     else renderBanner();
   }
 
-  /** 主面板顶部的批次入口：只创建一次，之后原地更新文字和进度，避免轮询时替换节点吞掉点击；结束后可关闭。 */
+  /** 主面板顶部的批次入口：每个已开始的批次一条，节点按批次复用，之后原地更新文字和进度，避免轮询时替换节点吞掉点击；结束后可关闭。 */
+  const banners = new WeakMap();
   function renderBanner() {
     const target = panel && panel.querySelector(".banner-host");
     if (!target) return;
-    target.hidden = !batch || !batch.started;
-    if (target.hidden) return target.replaceChildren();
-    let banner = target.querySelector(".batch-banner");
+    const shown = batches.filter(current => current.started);
+    target.hidden = !shown.length;
+    syncChildren(target, shown.map(bannerFor));
+  }
+  function bannerFor(current) {
+    let banner = banners.get(current);
     if (!banner) {
       banner = h("div", { className: "batch-banner" },
-        h("button", { type: "button", className: "banner-open", onclick: openBatch },
+        h("button", { type: "button", className: "banner-open", onclick: () => openBatch(current) },
           h("span", { className: "status-icon" }),
           h("div", { className: "meta" }, h("div", { className: "name" }), h("div", { className: "sub" }), h("div", { className: "progress thin" }, h("span"))),
           svg("chevron")),
-        iconButton("close", "清除记录", clearBatch, "banner-close"));
-      target.replaceChildren(banner);
+        iconButton("close", "清除记录", () => clearBatch(current), "banner-close"));
+      banners.set(current, banner);
     }
-    const head = batchHeadline();
+    const head = batchHeadline(current);
     banner.className = `batch-banner tone-${head.tone}`;
     const icon = banner.querySelector(".status-icon");
     if (icon.dataset.icon !== head.icon) { icon.dataset.icon = head.icon; icon.replaceChildren(svg(head.icon, 16, head.icon === "check" ? 2.6 : 2)); }
@@ -4369,9 +4508,11 @@
     banner.querySelector(".progress").hidden = head.finished;
     banner.querySelector(".progress > span").style.width = head.width;
     banner.querySelector(".banner-close").hidden = !head.finished;
+    return banner;
   }
 
-  function openBatch() {
+  function openBatch(current = batch) {
+    batch = current;
     if (!batch) return open(currentContext);
     frame(MODE_LABEL[batch.mode], h("div", { className: "batch-host" }), { back: () => open(currentContext), footer: [], wide: true });
     panel.dataset.view = "batch";
@@ -4804,6 +4945,7 @@
     if (active) return;
     active = true;
     observeNetwork();
+    watchFrames();
     watchNavigation();
     whenReady(() => { if (!active) return; mount(); watchDom(); refreshFab(); });
   }
@@ -4816,6 +4958,7 @@
     clearInterval(resourcePoll);
     resourcePoll = null;
     resourceIndex = 0;
+    unwatchFrames();
     domObserver?.disconnect();
     domObserver = null;
     document.querySelectorAll("[data-tessera-grabber]").forEach(node => node.remove());
@@ -4839,6 +4982,9 @@
     if (!active && dormantFab()) whenReady(() => { if (!active && dormantFab()) { mount(); refreshFab(); } });
     updateMenu();
   }
+
+  // iframe 里只运行嗅探代理（见「iframe 中的资源」），不注册菜单、不读取设置、不挂界面。
+  if (!IS_TOP) { frameAgent(); return; }
 
   gm.menu("打开资源面板", () => open());
   gm.menu("设置", () => openSettings());

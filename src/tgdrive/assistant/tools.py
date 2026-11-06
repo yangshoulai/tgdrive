@@ -371,6 +371,7 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "http_request": ("allow", "与普通对话相同，支持公共接口、认证、查询参数与正文"),
     "propose_save_attachment": ("never", "附件只能另存为普通文件"),
     "propose_media_assets": ("allow", "查询条件（文件名与标签）会发给已启用的媒体信息提供者"),
+    "propose_write_text": ("allow", "只新建或修改私密空间内的文本文件"),
 }
 
 
@@ -1168,6 +1169,9 @@ async def read_text_file(ctx: ToolContext, args: dict) -> ToolOutput:
     from .guard import redact_content
     text, hidden = redact_content(text)
     truncated = end < size
+    if offset == 0 and not truncated:
+        # 完整读过的版本：propose_write_text 整体改写前据此确认模型看过全文（§42）。
+        ctx.state.setdefault("read_full", set()).add((key, row["etag"]))
     return ToolOutput({"path": ctx.display(key), "size": size, "offset": offset, "bytes": len(head), "truncated": truncated,
                        "next_offset": end if truncated else None, "content": text,
                        **({"note": f"内容中 {hidden} 处疑似密钥已隐藏"} if hidden else {})},

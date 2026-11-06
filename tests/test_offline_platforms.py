@@ -228,6 +228,35 @@ class PlatformTasks(unittest.IsolatedAsyncioTestCase):
         finally:
             service.RETRY_DELAYS = original
 
+    async def test_telegram_rejection_retries_with_readable_error(self):
+        # 存储通道偶发拒绝（400 等）按暂时故障自动重试，错误里给出 Telegram 的说明；凭据错误直接失败。
+        from tgdrive.offline import service
+        from tgdrive.telegram.client import TelegramAuthError, TelegramError
+        http, failures = self.http, [TelegramError("Bad Request: something went wrong", method="sendDocument", error_code=400)]
+        class Rejected(MemoryHttp):
+            @asynccontextmanager
+            async def open(inner, request, **kwargs):
+                if failures:
+                    raise failures.pop()
+                async with http.open(request, **kwargs) as response:
+                    yield response
+        original = service.RETRY_DELAYS
+        service.RETRY_DELAYS = (0.05, 0.05, 0.05)
+        try:
+            task = await self.make()
+            self.offline.http = Rejected()
+            self.offline.start()
+            row = await self.wait(task["id"], ("interrupted",))
+            self.assertIn("Telegram 400：Bad Request: something went wrong", row["error"])
+            row = await self.wait(task["id"])
+            self.assertEqual((row["status"], row["error"]), ("completed", None))
+            failures.append(TelegramAuthError("Forbidden: bot was kicked", method="sendDocument", error_code=403))
+            await self.offline.control(self.user.id, task["id"], "restart")
+            row = await self.wait(task["id"], ("failed",))
+            self.assertIn("Bot 凭据无效或没有频道权限", row["error"])
+        finally:
+            service.RETRY_DELAYS = original
+
     async def test_clear_finished_tasks_keeps_files_and_active_tasks(self):
         done, failed, queued = [await self.make() for _ in range(3)]
         self.offline.start()

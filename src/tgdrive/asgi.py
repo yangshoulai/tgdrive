@@ -1733,6 +1733,9 @@ class TgDriveASGI(StaticFiles):
             data, content_type = await service.action_media(token, match[1], int(match[2]), int(match[3]), full=query.get("full", [""])[0] == "1")
             return 200, data, {"Content-Type": content_type, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
                                "Content-Security-Policy": "sandbox"}
+        match = re.fullmatch(r"/actions/([A-Za-z0-9_-]{4,40})/text/(\d{1,3})", route)
+        if match and method == "GET":
+            return 200, await service.action_text(token, match[1], int(match[2])), no_store
         match = re.fullmatch(r"/actions/([A-Za-z0-9_-]{4,40})(?:/(items|confirm|reject|cancel|undo))?", route)
         if match and match[2] is None and method == "GET":
             return 200, service.action_detail(token, match[1]), no_store

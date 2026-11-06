@@ -22,6 +22,7 @@ from ..crypto import derive_subkey, open_sealed, seal
 from ..errors import IntegrityError, NotFoundError, NotReadyError, QuotaExceededError
 from ..objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
 from ..work import Limiter, WorkBusyError
+from ..telegram.client import TelegramAuthError, TelegramError
 from . import diagnostics
 from .hls import load_playlist, remux
 from ..filekinds import served_type
@@ -1223,8 +1224,15 @@ class OfflineDownloads:
         except Paused as exc:
             row = self._row(task_id)
             self._set(task_id, status="stopped" if "账号" in str(exc) or row["method"] == "POST" else "interrupted", error=str(exc))
-        except (TransientError, WorkBusyError) as exc:
+        except TelegramAuthError as exc:
+            self._set(task_id, status="failed", error=f"写入存储通道失败：Bot 凭据无效或没有频道权限（Telegram {exc.error_code or ''}：{exc}），请在控制台检查存储通道")
+        except (TransientError, WorkBusyError, TelegramError) as exc:
             # 存储写入名额暂时被占满（批量下载、上传与缩略图同时写入）和网络抖动一样自动重试，不直接判为失败。
+            # Telegram 的拒绝（含 400）在换 Bot 重试后仍失败时也按暂时故障处理：大文件分片多，偶发错误不应让任务直接失败；
+            # 断点续传保留已写入的分段。说明来自 Telegram，不含 token 或来源地址。
+            if isinstance(exc, TelegramError):
+                log.warning("离线任务 %s 写入存储失败：%s code=%s %s（%s）", task_id, type(exc).__name__, exc.error_code, exc, _where(exc))
+                exc = TransientError(f"写入存储通道失败（Telegram{f' {exc.error_code}' if exc.error_code else ''}：{exc}）")
             row = self._row(task_id)
             attempt = self._retries.get(task_id, 0) + 1
             if row["method"] == "POST" or attempt > len(RETRY_DELAYS):

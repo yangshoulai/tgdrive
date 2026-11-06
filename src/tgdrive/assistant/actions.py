@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from ..errors import NotFoundError
+from ..errors import NotFoundError, QuotaExceededError, VersionConflict
 from ..objects import PRIVATE_PREFIX, ObjectService, Scope
 from ..offline.request import filename
 from ..offline.service import MAX_CREATE_ITEMS, task_path
@@ -32,7 +32,7 @@ KINDS = {
     "rename": "批量改名", "move": "移动", "organize": "整理文件", "mkdir": "新建文件夹", "trash": "移入回收站",
     "restore": "从回收站恢复", "purge": "彻底删除", "unshare": "取消公开", "share": "公开分享", "downloads": "离线下载",
     "download_control": "下载任务操作", "save_attachment": "保存附件", "move_out": "移出私密空间", "move_in": "移入私密空间",
-    "media": "获取封面、歌词与字幕",
+    "media": "获取封面、歌词与字幕", "text": "编辑文本文件",
 }
 MEDIA_LABELS = {"cover": "封面", "lyrics": "歌词", "subtitle": "字幕"}
 MOVE_KINDS = ("rename", "move", "organize")
@@ -215,6 +215,8 @@ class ActionExecutor:
                 break
             if kind == "media":
                 item = {**item, "chosen": choices[index], "frozen": refs.get(f"{index}:{choices[index]}")}
+            elif kind == "text":
+                item = {**item, "text": (payload.get("_frozen") or {}).get(str(index))}
             try:
                 await self._one(kind, user_id, bucket_id, scope_root, scope, item, progress, undo, share)
             except (PermissionError, ValueError, NotFoundError) as exc:
@@ -367,6 +369,39 @@ class ActionExecutor:
             if self.media is None:
                 raise ValueError("媒体信息服务不可用")
             await self.media.save_frozen(scope, key, item["etag"], frozen["provider"], item["want"], frozen["ref"])
+            progress.ok += 1
+        elif kind == "text":
+            # 新建或改写文本文件（§42）：新建时目标仍不能存在；改写按冻结的版本条件覆盖（If-Match），确认前被改过就跳过。不可撤销。
+            from .text_tools import BOM
+            key = item["path"]
+            text = item.get("text")
+            if not isinstance(text, str):
+                progress.skip(display(key), "操作内容缺失，请重新生成")
+                return
+            if not self._inside(scope_root, key):
+                progress.skip(display(key), "不在作用域内")
+                return
+            if item["mode"] == "create":
+                if self._exists(bucket_id, key) or self._exists(bucket_id, key + "/"):
+                    progress.skip(display(key), "已存在同名文件，请重新生成操作")
+                    return
+                if_match = None
+            else:
+                reason = self._check_source(bucket_id, scope_root, item, key)
+                if reason:
+                    progress.skip(display(key), reason)
+                    return
+                if_match = item["etag"]
+            # 冻结的文本已按原文件的换行方式处理，原样写回；BOM 由条目标记。
+            data = (BOM if item.get("bom") else b"") + text.encode("utf-8")
+            try:
+                await self.objects.put_object(scope, key, data, len(data), item.get("content_type") or "text/plain", if_match=if_match)
+            except VersionConflict:
+                progress.skip(display(key), "源文件已被修改")
+                return
+            except QuotaExceededError:
+                progress.fail(display(key), "存储空间不足")
+                return
             progress.ok += 1
         elif kind == "download_control":
             if self.offline is None:

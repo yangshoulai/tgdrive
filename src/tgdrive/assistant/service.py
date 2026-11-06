@@ -32,7 +32,7 @@ from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
 from ..objects import PRIVATE_PREFIX, Scope
 from ..offline.request import checked_url
-from . import client_tools, export, http_tools, knowledge, media_tools, prompts, providers, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
+from . import client_tools, export, http_tools, knowledge, media_tools, prompts, providers, text_tools, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
 from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
 from .actions import DANGER_KINDS, KINDS, ActionExecutor, Progress, media_choices, share_options
 from .catalog import CatalogStore
@@ -1135,6 +1135,51 @@ class AssistantService:
             return fetched.data, fetched.mime
         return fetched.text.encode("utf-8"), "text/plain; charset=utf-8"
 
+    async def action_text(self, token: str, action_id: str, item: int) -> dict[str, object]:
+        """文本编辑操作的前后内容（给确认卡片做对比，§42）：修改后的内容取自单独存放的冻结数据，修改前读取文件当前内容。
+        只给操作所有者本人；私密操作要求当前会话已解锁。"""
+        _, account = self._session(token)
+        row = self._action_row(token, account, action_id)
+        if row["kind"] != "text":
+            raise ValueError("这个操作没有文本内容")
+        payload = self.trace.action_payload(row, frozen=True)
+        items = payload.get("items") or []
+        after = (payload.get("_frozen") or {}).get(str(item))
+        if not 0 <= item < len(items) or not isinstance(after, str):
+            raise NotFoundError("条目不存在")
+        private = self._action_private(row, payload)
+        if private:
+            self._require_unlocked(token)
+        entry = items[item]
+        before, changed = "", False
+        if entry.get("mode") != "create":
+            scope = self.executor._scope(account.bucket_id, payload.get("scope", ""), self._guard(token, private))
+            try:
+                info, stream = await self.objects.get_object(scope, entry["path"])
+                changed = info.etag != entry.get("etag")
+                chunks = [chunk async for chunk in stream]
+                before = b"".join(chunks).decode("utf-8", "replace").removeprefix("\ufeff")
+            except NotFoundError:
+                changed = True
+        # 只交出有变化的一段（前后各留 3 行上下文）：大文件相同的开头与结尾只给行数，每侧最多 DIFF_BYTES。
+        old, new = before.replace("\r\n", "\n").split("\n"), after.replace("\r\n", "\n").split("\n")
+        head, tail = text_tools.trim_common(old, new)
+        start, keep = max(0, head - 3), max(0, tail - 3)
+        middle_old, middle_new = old[start:len(old) - keep], new[start:len(new) - keep]
+
+        def clip(lines: list[str]) -> tuple[str, bool]:
+            text = "\n".join(lines)
+            if len(text) <= self.DIFF_BYTES:
+                return text, False
+            return text[:self.DIFF_BYTES].rsplit("\n", 1)[0], True
+        before_text, cut_old = clip(middle_old)
+        after_text, cut_new = clip(middle_new)
+        return {"path": entry["path"], "mode": entry.get("mode"), "before": before_text, "after": after_text, "changed": changed,
+                "start": start + 1, "skipped_before": start, "skipped_after": keep, "truncated": cut_old or cut_new}
+
+    # 查看改动时每侧最多交给浏览器的字符数。
+    DIFF_BYTES = 2 * 1024 * 1024
+
     def action_items(self, token: str, action_id: str, offset: int = 0) -> dict[str, object]:
         _, account = self._session(token)
         row = self._action_row(token, account, action_id)
@@ -1192,7 +1237,7 @@ class AssistantService:
             raise ValueError("这是不可恢复的操作，请先勾选「我了解此操作不可恢复」")
         if row["count"] > 1000 and payload.get("count") != row["count"]:
             raise ValueError(f"条目较多，请再次确认执行 {row['count']} 项")
-        action_payload = self.trace.action_payload(row)
+        action_payload = self.trace.action_payload(row, frozen=True)
         if self._action_private(row, action_payload):
             # 作用于私密空间的操作：确认时必须已解锁，且仍允许处理私密内容。
             if self.private_space is None:

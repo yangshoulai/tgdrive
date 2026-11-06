@@ -52,7 +52,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 37
+    SCHEMA_VERSION = 38
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -775,6 +775,12 @@ class Metadata:
                 # 离线下载列表按添加时间倒序、同一批（添加时间相同）按添加先后排列，键集分页走这个索引。
                 db.execute("CREATE INDEX IF NOT EXISTS offline_owner_time ON offline_tasks(user_id, created_at DESC, id)")
                 db.execute("PRAGMA user_version = 37")
+            if version < 38:
+                # 文件助手待确认操作的大块冻结数据（如编辑文本的新内容，最多 16 MiB）单独存放：卡片读取与轮询只解密 payload，
+                # 只有执行与查看改动时才读取；操作结束后立即清除。
+                if "frozen" not in {row[1] for row in db.execute("PRAGMA table_info(assistant_actions)")}:
+                    db.execute("ALTER TABLE assistant_actions ADD COLUMN frozen BLOB")
+                db.execute("PRAGMA user_version = 38")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

@@ -1381,7 +1381,8 @@ button.extract-tree-toggle:hover { background: var(--surface-sunken); color: var
 /* 视频最小化时保留画面：只显示视频本身，控制交给下方的迷你控制条。 */
 .preview-modal-video.is-minimized .modal-body { display: block; margin: 12px 12px 0; overflow: hidden; border-radius: var(--radius-md); background: var(--black); }
 .preview-modal-video.is-minimized .preview-stage { display: block; height: auto; }
-.preview-modal-video.is-minimized .preview-playlist-panel { display: none; }
+/* 选择器要比下方抽屉的 `.preview-stage.is-media .preview-playlist-panel`（display: flex）更具体，否则会被它覆盖。 */
+.preview-modal.is-minimized .preview-stage.is-media .preview-playlist-panel { display: none; }
 .preview-modal-video.is-minimized .preview-video-host { width: 100%; height: auto; max-height: none; aspect-ratio: 16 / 9; }
 /* ArtPlayer 在控制条自动隐藏时把 art-mini-progress-bar 加在播放器根节点上，不能用它来选择要隐藏的元素。 */
 .preview-modal-video.is-minimized :is(.art-bottom, .art-notice, .art-state, .art-settings, .art-contextmenus, .art-layers) { display: none !important; }
@@ -3413,6 +3414,23 @@ button.task-location:hover .task-location-text > span { color: var(--accent); }
 .ai-thumbnail-progress { display: grid; gap: 8px; min-width: 0; }
 .ai-thumbnail-progress p { margin: 0; color: var(--ink-3); font-size: var(--text-xs); }
 .ai-diff-row del { min-width: 0; color: var(--ink-3); text-decoration-color: color-mix(in srgb, var(--danger) 60%, transparent); overflow-wrap: anywhere; }
+/* 编辑文本文件（§42）：条目行的增删行数与改动对比。 */
+.ai-line-stats { flex: none; margin-left: auto; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.ai-line-stats ins { color: var(--success); text-decoration: none; }
+.ai-line-stats del { color: var(--danger); text-decoration: none; }
+.ai-text-changes { display: grid; gap: 8px; justify-items: start; }
+.ai-text-diff { width: 100%; max-height: 360px; overflow: auto; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--surface); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.6; }
+.ai-text-diff-line { display: grid; grid-template-columns: 36px 36px 16px minmax(0, 1fr); min-width: max-content; }
+.ai-text-diff-line code { padding-right: 12px; font-size: inherit; white-space: pre; }
+.ai-text-diff-line.is-add { background: var(--success-soft); }
+.ai-text-diff-line.is-del { background: var(--danger-soft); }
+.ai-text-diff-no { padding-right: 8px; color: var(--ink-3); text-align: right; user-select: none; font-variant-numeric: tabular-nums; }
+.ai-text-diff-sign { color: var(--ink-3); user-select: none; }
+.ai-text-diff-line.is-add .ai-text-diff-sign { color: var(--success); }
+.ai-text-diff-line.is-del .ai-text-diff-sign { color: var(--danger); }
+.ai-text-diff-skip { display: block; width: 100%; padding: 4px 12px; border: 0; background: var(--surface-sunken); color: var(--ink-3); font: inherit; font-family: var(--font); text-align: left; cursor: pointer; }
+.ai-text-diff-skip:hover { color: var(--accent); }
+.ai-text-diff-more { margin: 0; padding: 4px 12px; color: var(--ink-3); font-family: var(--font); }
 .ai-diff-row ins { min-width: 0; padding: 0 4px; border-radius: var(--radius-xs); background: var(--success-soft); color: var(--success); text-decoration: none; overflow-wrap: anywhere; }
 .ai-diff-row small { margin-left: auto; flex: none; color: var(--ink-3); }
 .ai-diff.is-plain { max-height: 320px; overflow-y: auto; }
@@ -4159,6 +4177,12 @@ button.task-stat:focus-visible { outline: 2px solid var(--focus-ring); outline-o
 .task-stat.is-warning.is-selected { border-color: color-mix(in srgb, var(--warning) 45%, var(--line)); background: color-mix(in srgb, var(--warning-soft) 60%, var(--surface)); }
 /* 私密空间的缓存：锁形角标、暖色「私密」标签与左侧暖色细条，和普通文件一眼区分。 */
 .cached-tile { position: relative; display: inline-flex; flex: none; }
+/* 缓存记录的封面与文件名：能预览时点击单独打开。 */
+.cached-open { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.task-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+button.task-name-text:hover { color: var(--accent); }
+button.cached-tile:hover .file-tile { box-shadow: 0 0 0 2px var(--accent-soft); }
+.cached-open:focus-visible { border-radius: var(--radius-xs); outline: 2px solid var(--accent); outline-offset: 2px; }
 .cached-tile-lock { position: absolute; right: -4px; bottom: -3px; display: grid; width: 16px; height: 16px; place-items: center; border: 2px solid var(--surface); border-radius: 50%; background: var(--warning); color: var(--on-accent); }
 .cached-private-tag { display: inline-flex; flex: none; align-items: center; gap: 4px; padding: 0 8px; border-radius: var(--radius-xs); background: var(--warning-soft); color: var(--warning); font-size: var(--text-micro); font-weight: 500; line-height: 18px; }
 .task-table .task-item.is-private { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warning) 70%, transparent); background: color-mix(in srgb, var(--warning-soft) 28%, transparent); }

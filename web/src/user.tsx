@@ -367,7 +367,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       ] }}>
       <PrivateSessionProvider enabled={workspaceReady}>
       <CacheTasksProvider enabled={workspaceReady} owner={session.bucket_id != null ? String(session.bucket_id) : undefined} onOpenTasks={openCacheTasks} onActiveChange={setCacheActive}>
-      <PreviewHost enabled={workspaceReady} privateAllowed={section === "private"}>
+      <PreviewHost enabled={workspaceReady} privateAllowed={section === "private" || section === "cache"}>
         {content}
       <AssistantLauncher available={workspaceReady && assistantAvailable && Boolean(assistant.config) && !assistantPage} open={assistantOpen} status={assistantStatus} onToggle={toggleAssistant} />
       {/* 统一对话（§37）：只有一个助手，涉及私密空间的对话在锁定时需要解锁。 */}

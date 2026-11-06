@@ -30,17 +30,23 @@ _PATTERNS = re.compile("|".join([
 
 def redact_content(text: str) -> tuple[str, int]:
     """把文本中形如密钥的片段替换为占位文本，返回（新文本，替换次数）。"""
-    count = 0
+    redacted, values = redact_values(text)
+    return redacted, len(values)
+
+
+def redact_values(text: str) -> tuple[str, list[str]]:
+    """同 redact_content，另按出现顺序返回被占位替换掉的原文（不含保留下来的键名），供编辑文本时还原（text_tools）。"""
+    values: list[str] = []
 
     def replace(match: re.Match) -> str:
-        nonlocal count
-        count += 1
         value = match.group(0)
         # 「password = xxx」这类保留键名，便于模型理解上下文。
         key = re.match(r"(?i)((?:api[_-]?key|secret[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)[\"']?\s*[:=]\s*[\"']?)", value)
-        return (key.group(1) if key else "") + HIDDEN
+        prefix = key.group(1) if key else ""
+        values.append(value[len(prefix):])
+        return prefix + HIDDEN
 
-    return _PATTERNS.sub(replace, text), count
+    return _PATTERNS.sub(replace, text), values
 
 
 class SecretGuard:

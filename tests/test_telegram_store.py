@@ -129,6 +129,45 @@ class M2Tests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(TelegramError):
                     await store.delete(ref)
 
+    async def test_upload_retries_rejected_chunk_with_single_bot(self):
+        # 大文件有几百个分片：Telegram 偶发的 400 类拒绝要在同一个 Bot 上稍后重试，不能让整个文件失败。
+        class FlakyUpload(FakeTransport):
+            rejected = 0
+
+            async def request(self, method, url, headers, body):
+                if url.endswith("/sendDocument") and not self.rejected:
+                    self.rejected += 1
+                    return self._json({"ok": False, "error_code": 400, "description": "Bad Request: something went wrong"})
+                return await super().request(method, url, headers, body)
+
+        transport = FlakyUpload()
+        pool = BotPool([PoolBot("b1", TelegramClient("123:fake", api_base="https://fake", transport=transport), -1001)], min_interval=0)
+        store = TelegramBlobStore(pool)
+        store.RETRY_PAUSE = 0
+        ref = await store.put("ignored", b"payload")
+        self.assertEqual(transport.rejected, 1)
+        self.assertEqual(await store.get(ref), b"payload")
+
+    async def test_upload_gives_up_after_repeated_rejections(self):
+        class Rejecting(FakeTransport):
+            calls = 0
+
+            async def request(self, method, url, headers, body):
+                if url.endswith("/sendDocument"):
+                    self.calls += 1
+                    return self._json({"ok": False, "error_code": 400, "description": "Bad Request: chat not found"})
+                return await super().request(method, url, headers, body)
+
+        transport = Rejecting()
+        pool = BotPool([PoolBot("b1", TelegramClient("123:fake", api_base="https://fake", transport=transport), -1001)], min_interval=0)
+        pool.BASE_COOLDOWN = 0  # 连续失败后的冷却（15 秒）在测试里不等待
+        store = TelegramBlobStore(pool)
+        store.RETRY_PAUSE = 0
+        with self.assertRaises(TelegramError) as caught:
+            await store.put("ignored", b"payload")
+        self.assertEqual(caught.exception.error_code, 400)
+        self.assertEqual(transport.calls, store.MAX_UPLOAD_ATTEMPTS)
+
 
 if __name__ == "__main__":
     unittest.main()

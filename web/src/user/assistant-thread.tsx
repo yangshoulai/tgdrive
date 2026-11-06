@@ -13,6 +13,7 @@ import { mentionLabel } from "./assistant-mentions";
 import { usePreview } from "./preview-host";
 import { FileGlyph, getFileKind, parentPath } from "../files";
 import { FolderPicker } from "./folders";
+import { diffLines, diffParts } from "../text-diff";
 import { passkeyUnavailable, privatePasskeyAssertion } from "../passkeys";
 import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
 import { useCacheQueue } from "./cache";
@@ -465,7 +466,7 @@ function ProcessText({ text, ms, live, startedAt, note, disclosure, onOpen }: {
 }
 
 const TOOL_ICONS: [RegExp, IconName][] = [
-  [/^propose_save_attachment/, "paperclip"], [/^ui_generate_thumbnails/, "image"],
+  [/^propose_save_attachment/, "paperclip"], [/^propose_write_text/, "fileText"], [/^ui_generate_thumbnails/, "image"],
   [/^(list_folder|folder_tree|find_empty)/, "folder"], [/^(search_files|find_large|find_duplicates)/, "search"],
   [/^(storage_stats|trash_stats)/, "pulse"], [/^(list_trash)/, "trash"], [/^read_text_file/, "fileText"], [/^get_file_info/, "file"],
   [/^(list_public|propose_share|propose_unshare)/, "link"], [/download/, "download"], [/^(inspect_page|analyze_page|collect_gallery|collect_links|parse_download)/, "globe"],
@@ -968,7 +969,7 @@ function ShareBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
 
 const ACTION_ICONS: Record<string, IconName> = { rename: "edit", move: "move", organize: "folder", mkdir: "folderPlus", trash: "trash",
   restore: "restore", purge: "trash", unshare: "link", share: "link", downloads: "download", download_control: "download",
-  save_attachment: "paperclip", move_out: "unlock", move_in: "lock", media: "music" };
+  save_attachment: "paperclip", move_out: "unlock", move_in: "lock", media: "music", text: "fileText" };
 const STATUS_LABEL: Record<string, [string, Tone]> = {
   loading: ["正在获取状态", "neutral"], pending: ["待确认", "accent"], confirmed: ["准备执行", "accent"],
   running: ["执行中", "accent"], done: ["已完成", "success"], partial: ["部分完成", "warning"],
@@ -1029,12 +1030,59 @@ function ItemRow({ kind, item, base }: { kind: string; item: ai.ActionItem; base
       <span className="ai-path-to"><Icon name="chevronRight" size={12} /><ins>{display(parentOf(item.path ?? ""))}</ins></span></span></li>;
   if (CROSS_KINDS.includes(kind) && item.from) return <li className="ai-diff-row"><Icon name={item.folder ? "folder" : "file"} size={13} />
     <PathText path={item.from} base={base} /></li>;
+  if (kind === "text") return <li className="ai-diff-row"><Icon name="fileText" size={13} /><PathText path={item.path ?? ""} base={base} />
+    <small className="ai-line-stats">{item.mode === "create" ? "新建 · " : ""}<ins>+{item.added ?? 0}</ins> <del>−{item.removed ?? 0}</del> 行</small></li>;
   if (kind === "download_control") return <li className="ai-diff-row"><Icon name="download" size={13} />
     <span className="ai-path" title={display(item.path ?? "")}><span className="ai-path-name">#{item.id} {baseName(item.path ?? "")}</span></span></li>;
   const files = kind === "trash" && typeof item.files === "number" ? item.files : null;
   return <li className="ai-diff-row"><Icon name={item.folder || item.path?.endsWith("/") ? "folder" : "file"} size={13} />
     <PathText path={item.path ?? ""} base={base} />
     {files !== null && <small className={files ? "tone-warning" : undefined}>{files ? `含 ${files.toLocaleString("zh-CN")} 个文件` : "空目录"}</small>}</li>;
+}
+
+/* ---------- 编辑文本文件（§42） ---------- */
+
+const DIFF_RENDER_LIMIT = 2000;
+
+/** 文本编辑的改动对比：展开时经服务器读取文件当前内容与修改后的内容，在浏览器里按行比较；未改动的长段折叠，点击展开。 */
+function TextChanges({ id }: { id: string }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<ai.ActionText | null>(null);
+  const [error, setError] = useState("");
+  const [shown, setShown] = useState(new Set<number>());
+  useEffect(() => {
+    if (!open || data) return;
+    let alive = true;
+    ai.actionText(id, 0).then(value => { if (alive) setData(value); }, reason => { if (alive) setError(api.errorMessage(reason, "读取改动失败")); });
+    return () => { alive = false; };
+  }, [open, data, id]);
+  const all = useMemo(() => data ? diffLines(data.before, data.after, data.start) : [], [data]);
+  const parts = useMemo(() => diffParts(all), [all]);
+  let rendered = 0;
+  return <div className="ai-text-changes">
+    <button type="button" className="ai-link" aria-expanded={open} onClick={() => setOpen(value => !value)}>{open ? "收起改动" : "查看改动"}</button>
+    {open && (error ? <p className="ai-card-note tone-danger"><Icon name="alert" size={13} />{error}</p>
+      : !data ? <SkeletonRows rows={3} />
+        : <>
+          {data.changed && <p className="ai-card-note tone-warning"><Icon name="alert" size={13} />文件在生成这个操作之后已被修改，确认时会跳过，不会覆盖。</p>}
+          <div className="ai-text-diff" role="table" aria-label="改动对比">
+            {data.skipped_before > 0 && <p className="ai-text-diff-more">前 {data.skipped_before.toLocaleString("zh-CN")} 行未改动</p>}
+            {parts.map((part, index) => {
+              if (part.type === "skip" && !shown.has(index)) return <button key={index} type="button" className="ai-text-diff-skip"
+                onClick={() => setShown(current => new Set(current).add(index))}>未改动的 {part.count.toLocaleString("zh-CN")} 行，点击展开</button>;
+              const lines = part.type === "lines" ? part.lines : all.slice(part.from, part.from + part.count);
+              if (rendered >= DIFF_RENDER_LIMIT) return null;
+              const visible = lines.slice(0, DIFF_RENDER_LIMIT - rendered);
+              rendered += visible.length;
+              return visible.map((line, offset) => <div key={`${index}:${offset}`} role="row" className={`ai-text-diff-line is-${line.type}`}>
+                <span className="ai-text-diff-no">{line.oldNo ?? ""}</span><span className="ai-text-diff-no">{line.newNo ?? ""}</span>
+                <span className="ai-text-diff-sign">{line.type === "add" ? "+" : line.type === "del" ? "−" : ""}</span><code>{line.text || " "}</code></div>);
+            })}
+            {(rendered >= DIFF_RENDER_LIMIT || data.truncated) && <p className="ai-text-diff-more">改动较多，只显示前面的部分</p>}
+            {data.skipped_after > 0 && !data.truncated && <p className="ai-text-diff-more">后 {data.skipped_after.toLocaleString("zh-CN")} 行未改动</p>}
+          </div>
+        </>)}
+  </div>;
 }
 
 /* ---------- 获取封面、歌词与字幕（§40） ---------- */
@@ -1286,6 +1334,7 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
     {payload.confirm_reason && pending && <p className="ai-card-note"><Icon name="shield" size={13} />{payload.confirm_reason}</p>}
     {media && <MediaChoices action={value} pending={pending} value={mediaChoices} onChange={setMediaChoices} />}
     {!media && samples.length > 0 && <ItemList kind={kind} items={samples.slice(0, 3)} />}
+    {kind === "text" && pending && <TextChanges id={id} />}
     {((!media && value.count > 3) || (payload.conflicts ?? 0) > 0) && <button type="button" className="ai-link" onClick={() => setDetails(true)}>查看全部 {value.count.toLocaleString("zh-CN")} 项</button>}
     {share && pending && <div className="ai-share-form">
       <label><span>有效期</span><select className="input input-sm" value={days} onChange={event => setShareDays(Number(event.target.value))}>
