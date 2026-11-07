@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.23.1
+// @version      0.23.2
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -1266,6 +1266,44 @@
         selected = list(node(".wp-s-core-pan")?.__vue__?.selectedList);
         if (!available) selected = list(node(".file-list")?.__vue__?.allFileList).filter(item => item.selected);
         if (!available) { try { selected = list(view.require?.("system-core:context/context.js")?.instanceForSystem?.list?.getSelected?.()); } catch { /* Try the page bridge. */ } }
+        if (!available && !share) {
+          // Other views of my drive (categories such as the image timeline, search results…) use different components.
+          // Look through the page's Vue 2 components, their parents and the Vuex state for a non-empty array whose
+          // name mentions select/check and whose items are drive files (fs_id). Only a hit counts as recognised.
+          const isFile = item => item && typeof item === "object" && ["number", "string"].includes(typeof item.fs_id);
+          const pickArray = (owner, keys) => {
+            for (const key of keys) {
+              if (!/select|check/i.test(key)) continue;
+              let value;
+              try { value = owner[key] ?? owner.$data?.[key]; } catch { continue; }
+              if (Array.isArray(value) && value.length && value.every(isFile)) return value;
+            }
+            return null;
+          };
+          const seen = new Set(), queue = [];
+          const elements = doc.querySelectorAll?.("[class]") || [];
+          for (let index = 0; index < elements.length && index < 6000 && queue.length < 600; index++) {
+            const vm = elements[index].__vue__;
+            if (vm && !seen.has(vm)) { seen.add(vm); queue.push(vm); }
+          }
+          for (let index = 0; index < queue.length && queue.length < 900; index++) {
+            const parent = queue[index].$parent;
+            if (parent && !seen.has(parent)) { seen.add(parent); queue.push(parent); }
+          }
+          let found = null;
+          for (const vm of queue) {
+            found = pickArray(vm, [...Object.keys(vm.$data || {}), ...Object.keys(vm._computedWatchers || {}), ...Object.keys(vm.$props || {})]);
+            if (found) break;
+          }
+          const store = queue.find(vm => vm.$store)?.$store;
+          const walk = (value, depth) => {
+            if (found || !value || typeof value !== "object" || depth > 3) return;
+            found = pickArray(value, Object.keys(value));
+            if (!found) for (const key of Object.keys(value)) { if (value[key] && typeof value[key] === "object" && !Array.isArray(value[key])) walk(value[key], depth + 1); }
+          };
+          if (!found && store) { walk(store.state, 0); if (!found) found = pickArray(store.getters || {}, Object.keys(store.getters || {})); }
+          if (found) selected = list(found);
+        }
         if ((!available || !selected.length) && share) {
           // New share page (disk-share-v2, Vue 3, since 2026-11): checkboxes live on the list rows and file
           // metadata in locals.file_list (kept in sync when entering sub-folders); a single-file share has no rows.

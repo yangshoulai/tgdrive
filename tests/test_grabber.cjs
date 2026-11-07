@@ -1450,6 +1450,24 @@ test("cloud Baidu disk-share-v2 single-file share uses the page file", async () 
   assert.deepEqual(Array.from(sources, source => source.cloud.file.server_filename), ["only.mp4"]);
 });
 
+for (const isolated of [false, true]) test(`cloud Baidu my-drive category views read selection from page components (isolated=${isolated})`, async () => {
+  // 图片分类（时间轴）等视图不是 .wp-s-core-pan／.file-list：在组件数据里找名字带 select 的网盘文件数组。
+  const parent = { $data: { checkedFiles: [{ fs_id: 7, server_filename: "photo.jpg", size: 9, isdir: 0 }] } };
+  const other = { $data: { selectedTab: ["all"], list: [{ fs_id: 8, server_filename: "other.jpg" }] }, $parent: parent };
+  const h = harness({ isolated, url: "https://pan.baidu.com/disk/main#/index?category=3", query: () => null,
+    dom: selector => selector === "[class]" ? [{ __vue__: other }, { __vue__: other }] : [] });
+  const sources = await h.api.cloudSources(h.api.cloudOf());
+  assert.deepEqual(Array.from(sources, source => source.cloud.file.server_filename), ["photo.jpg"], "不认名字不带 select／check 的数组，也不认非文件数组");
+});
+
+test("cloud Baidu my-drive views can keep the selection in the Vuex store", async () => {
+  const store = { state: { image: { timeline: { selectedList: [{ fs_id: 3, server_filename: "store.jpg", isdir: 0 }] } } }, getters: {} };
+  const h = harness({ url: "https://pan.baidu.com/disk/main#/index?category=3", query: () => null,
+    dom: selector => selector === "[class]" ? [{ __vue__: { $data: {}, $store: store } }] : [] });
+  const sources = await h.api.cloudSources(h.api.cloudOf());
+  assert.deepEqual(Array.from(sources, source => source.cloud.file.server_filename), ["store.jpg"]);
+});
+
 test("cloud Tianyi share signature includes the share identity in the prescribed order", async () => {
   const h = harness({ url: "https://cloud.189.cn/web/share?code=abc", query: selector => selector === ".info-detail"
     ? { __vue__: { fileDetail: { fileId: "t1", fileName: "shared.bin", isFolder: false, shareId: "s1" } } } : null,

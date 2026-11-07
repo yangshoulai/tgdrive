@@ -32,6 +32,7 @@ Tessera 资源抓取脚本的九个网盘适配器改编自 [LinkSwift](https://
 - 百度 OAuth 由用户点击授权，绑定一次性 state 和十分钟有效期；不后台代替用户确认授权。令牌保存在脚本管理器存储，回调捕获后移除地址栏片段。使用的是固定上游 OAuth client_id，授权应用与权限以百度页面为准。
 - 每项在确认页取链并经服务器解析；取链失败可重试，服务器任务失败后重试会重新获取直链与票据、创建新任务，保留用户修改的保存名。未增加原服务器任务的更新接口，也不承诺换链接断点续传。
 - 私密空间仍转交 Tessera 页面解锁并确认；网盘取链结果仅进入服务器下载流程，不走浏览器 64 MiB 上传流程。
+- 0.23.2 起百度自盘的图片分类等视图在上游的三个读取来源都失败时，从页面 Vue 组件与 Vuex 状态中找名字含 select／check 的网盘文件数组（上游没有这一步）。
 - 0.23.1 适配百度新版分享页（`disk-share-v2`，Vue 3）：参考上游尚未合并的 PR [#557](https://github.com/hmjz100/LinkSwift/pull/557)（提交 `ef2ed3b44014ba76c4ae7ca7d01fa7d637d18b98`，yyan160），旧来源都读不到时从列表行 `.JS-list-view-item[data-file-key]` 的 `.wp-checkbox--checked` 读取勾选、按 `locals.file_list` 补齐文件信息，单文件分享直接取页面文件；分享参数兼容 `locals.get()`／`yunData`，`sekey` 依次取 `currentSekey`／locals／`BDCLND` Cookie，页面自带的 `sign`／`timestamp` 直接使用，没有时才请求 `tplconfig`。PR 合并后按「跟进更新」重新比对基线。
 - 签名地址和登录凭据仅在内存中流转；已发送记录使用不带签名、提取码或文件名的选择标识。除百度 OAuth 外，不在脚本管理器存储另建网盘账号凭据副本。
 
