@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import * as api from "../api";
 import { FileThumbnail, FileVisual, baseName, canPreview, getFileKind, kindLabel, parentPath } from "../files";
 import { coverTint } from "../preview-media";
-import { Button, EmptyState, Icon, PageHeader, SearchInput, SkeletonRows, formatBytes, useDocumentTitle, type IconName } from "../ui";
+import { Button, EmptyState, Icon, PageHeader, SearchInput, SkeletonRows, formatBytes, toast, useDocumentTitle, type IconName } from "../ui";
 import { BRAND } from "../brand";
 import { usePreview } from "./preview-host";
 import { useThumbnailPolling } from "./thumbnail-polling";
@@ -201,7 +201,7 @@ export function MediaLibraryView({ view, group: folder, onOpenGroup: onOpenFolde
   if (view === "music") {
     if (folder !== null) return <MusicAlbum key={folder} album={folder} onBack={() => onOpenFolder(null)} />;
     return <div className="library-view">
-      <PageHeader title={config.title} description={config.description} />
+      <PageHeader title={config.title} description={config.description} actions={<PlayAllMusic />} />
       <LibrarySearch search={search} placeholder="搜索歌名、艺人、专辑、文件名或文件夹" />
       {search.query ? <MediaSearch key={search.query} view={view} query={search.query} onOpenFolder={onOpenFolder} />
         : <MusicAlbums onOpenAlbum={onOpenFolder} />}
@@ -394,6 +394,31 @@ function MusicAlbums({ onOpenAlbum }: { onOpenAlbum: (album: string) => void }) 
       </button>)}
     </div>
   </LibraryState>;
+}
+
+/** 「全部播放」：读出全部音乐（上限 FOLDER_LIMIT），按专辑名排列（无专辑在最后）、专辑内按曲目号与文件名，作为播放列表从第一首开始。 */
+function PlayAllMusic() {
+  const open = usePreviewOpener([]);
+  const [busy, setBusy] = useState(false);
+  const play = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      let cursor: string | null = "", items: api.LibraryItem[] = [];
+      do {
+        const page = await api.library("music", { cursor: cursor ?? "", limit: 500 });
+        items = items.concat(page.objects); cursor = page.next_cursor;
+      } while (cursor && items.length < FOLDER_LIMIT);
+      if (!items.length) { toast.info("还没有音乐"); return; }
+      const albums = new Map<string, api.LibraryItem[]>();
+      for (const item of items) albums.set(albumOf(item), [...albums.get(albumOf(item)) ?? [], item]);
+      const tracks = [...albums.entries()].sort(([a], [b]) => Number(!a) - Number(!b) || collator.compare(a, b)).flatMap(([, list]) => ordered("music", list));
+      open(tracks[0], tracks);
+    } catch (reason) {
+      toast.error(api.errorMessage(reason, "读取音乐失败，请稍后重试"));
+    } finally { setBusy(false); }
+  };
+  return <Button variant="primary" icon="play" loading={busy} onClick={() => void play()}>全部播放</Button>;
 }
 
 function MusicAlbum({ album, onBack }: { album: string; onBack: () => void }) {
