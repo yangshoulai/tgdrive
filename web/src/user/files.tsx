@@ -848,7 +848,13 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         onSaved={variants => { const target = thumbnailEditing; setThumbnailEditing(null);
           // 替换后先用临时版本号让地址变化，避免浏览器沿用旧图；随后的后台刷新会带回服务端的正式版本。
           const stamp = String(Date.now());
-          setFiles(current => current.map(item => item.key === target.key ? { ...item, thumbnails: variants, thumbnail_status: "ready", has_thumbnail: true, thumbnail_versions: Object.fromEntries(variants.map(variant => [variant, stamp])) } : item)); notify.success("封面已更新"); scheduleRefresh(); onChanged(); }} />}
+          setFiles(current => current.map(item => item.key === target.key ? { ...item, thumbnails: variants, thumbnail_status: "ready", has_thumbnail: true, thumbnail_versions: Object.fromEntries(variants.map(variant => [variant, stamp])) } : item));
+          // 立即换成服务端的正式版本：封面地址按内容版本查找，内容相同的另一份文件也有封面时，要靠版本选中这一份。
+          void api.thumbnailStatus([target.key]).then(({ files: states }) => {
+            const state = states[target.key];
+            if (state?.etag === target.etag) setFiles(current => current.map(item => item.key === target.key ? { ...item, ...state } : item));
+          }, () => undefined);
+          notify.success("封面已更新"); scheduleRefresh(); onChanged(); }} />}
       {mediaLookup && <MediaLookupDialog file={mediaLookup.file} want={mediaLookup.want} onClose={() => setMediaLookup(null)} />}
       {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
       {folderCache && <ConfirmDialog title="缓存文件夹到本机？" danger={false} className={privateSpace ? "private-dialog" : ""} confirmLabel="开始缓存" onClose={() => setFolderCache(null)}

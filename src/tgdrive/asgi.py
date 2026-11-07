@@ -334,7 +334,7 @@ class TgDriveASGI(StaticFiles):
                 async def thumbnail():
                     data, mime, etag = await file_user.thumbnail(token, query.get("path", [""])[0], query.get("variant", ["thumb"])[0],
                                                                  bucket_id=bucket_id, etag=query.get("etag", [""])[0],
-                                                                 known=self._validators(headers))
+                                                                 known=self._validators(headers), version=query.get("v", [""])[0])
                     # 私密空间的缩略图同样按版本地址长期缓存：只有授权通过才会返回，删除或覆盖后地址随内容版本变化。
                     await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._thumbnail_cache_control(query, etag))
                 # 列表滚走、重新排序或离开目录时浏览器会放弃还没返回的缩略图请求：随之停止读取，释放小读取通道，

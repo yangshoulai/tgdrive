@@ -89,3 +89,40 @@ class StoredTypeTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImageMistakenForVideoTests(unittest.IsolatedAsyncioTestCase):
+    """部分图片被当成视频（列表显示为视频却无法播放）：识别规则与已保存文件的修正。"""
+    asyncSetUp, asyncTearDown, type_of = StoredTypeTests.asyncSetUp, StoredTypeTests.asyncTearDown, StoredTypeTests.type_of
+
+    def test_unknown_brand_heif_and_miaf_are_images(self):
+        # 陌生品牌的 ISO-BMFF：meta 里的处理器是 pict 就是图片，不再一律当成 MP4 视频。
+        heif = b"\x00\x00\x00\x14ftypabcd\x00\x00\x00\x00abcd" + b"\x00\x00\x00\x21meta\x00\x00\x00\x00\x00\x00\x00\x21hdlr\x00\x00\x00\x00\x00\x00\x00\x00pict" + bytes(32)
+        self.assertEqual(sniff(heif), "exact:image/heif")
+        miaf = b"\x00\x00\x00\x1cftypabcd\x00\x00\x00\x00abcdmiafMA1B" + bytes(32)
+        self.assertEqual(sniff(miaf), "exact:image/heif")
+        self.assertEqual(sniff(MP4), "exact:video/mp4", "普通 MP4 不受影响")
+
+    def test_unknown_content_with_image_name_is_not_video(self):
+        self.assertEqual(resolve("unknown:", "video/mp4", "photo.jpg"), "image/jpeg", "网站把图片标成视频：按文件名保存为图片")
+        self.assertEqual(resolve("unknown:", "video/mp4", "clip.mp4"), "application/octet-stream", "声称视频又认不出时仍按通用二进制")
+
+    async def test_maintenance_retypes_stored_images(self):
+        objects, db = self.app.objects, self.app.metadata
+        await objects.put_object(self.scope, "old/photo.jpg", JPEG, len(JPEG), "image/jpeg")
+        await objects.put_object(self.scope, "old/movie.mp4", MP4, len(MP4), "video/mp4")
+        await objects.put_object(self.scope, "old/real.jpg", MP4, len(MP4), "video/mp4")
+        row = db.db.execute("SELECT blob_uuid FROM objects WHERE bucket_id=? AND key=?", (self.alice.bucket_id, "old/photo.jpg")).fetchone()
+        with db.transaction() as tx:
+            # 模拟内容识别上线前保存、来源把图片标成视频的文件：没有识别记录，类型是 video/mp4，还记过「无法生成封面」。
+            tx.execute("UPDATE blobs SET sniffed=NULL WHERE uuid=?", (row["blob_uuid"],))
+            tx.execute("UPDATE objects SET content_type='video/mp4' WHERE bucket_id=? AND key=?", (self.alice.bucket_id, "old/photo.jpg"))
+            tx.execute("INSERT INTO thumbnails(blob_uuid, variant, mime, data, created_at) VALUES (?, 'none', '', x'', 0)", (row["blob_uuid"],))
+        result = await self.app.maintenance.retyper.run_once()
+        self.assertEqual((result["fixed"], result["done"]), (1, True))
+        self.assertEqual(await self.type_of("old/photo.jpg"), "image/jpeg")
+        self.assertEqual(await self.type_of("old/movie.mp4"), "video/mp4", "真正的视频不动")
+        self.assertEqual(await self.type_of("old/real.jpg"), "video/mp4", "名字像图片、内容确实是 MP4 的保持视频")
+        self.assertIsNone(db.db.execute("SELECT 1 FROM thumbnails WHERE blob_uuid=? AND variant='none'", (row["blob_uuid"],)).fetchone(),
+                          "清掉无法生成封面的记录，让封面重新生成")
+        self.assertEqual(await self.app.maintenance.retyper.run_once(), {"done": True}, "扫完一遍后不再重复读取")

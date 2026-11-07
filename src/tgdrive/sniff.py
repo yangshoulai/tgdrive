@@ -21,7 +21,8 @@ HEAD_BYTES = 8192
 
 _FTYP_AUDIO = {b"M4A ", b"M4B ", b"M4P ", b"F4A ", b"F4B "}
 _FTYP_IMAGE = {b"avif": "image/avif", b"avis": "image/avif", b"heic": "image/heic", b"heix": "image/heic",
-               b"heim": "image/heic", b"heis": "image/heic", b"hevc": "image/heic", b"mif1": "image/heif", b"msf1": "image/heif"}
+               b"heim": "image/heic", b"heis": "image/heic", b"hevc": "image/heic", b"mif1": "image/heif", b"msf1": "image/heif",
+               b"miaf": "image/heif"}
 _FTYP_OTHER = {b"qt  ": "video/quicktime", b"3gp4": "video/3gpp", b"3gp5": "video/3gpp", b"3gp6": "video/3gpp",
                b"3g2a": "video/3gpp2", b"crx ": "image/x-canon-cr3"}
 _OOXML = {b"word/": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -53,6 +54,15 @@ def _ftyp(head: bytes) -> str | None:
         return "audio/mp4"
     if major in _FTYP_OTHER:
         return _FTYP_OTHER[major]
+    # 品牌不认识时看开头里的处理器类型（hdlr 盒子：类型后跳过版本／标志与预留各 4 字节）：HEIF 系列图片的 meta 里是 pict，
+    # 不能因为品牌陌生就当成视频（列表会显示为视频却无法播放）。没有线索时仍按 MP4 视频。
+    handler = head.find(b"hdlr")
+    if handler > 0 and len(head) >= handler + 16:
+        kind = head[handler + 12:handler + 16]
+        if kind == b"pict":
+            return "image/heif"
+        if kind == b"soun" and b"vide" not in head:
+            return "audio/mp4"
     return "video/mp4"
 
 
@@ -242,6 +252,11 @@ def resolve(sniffed: str | None, provided: str | None, key: str = "") -> str | N
                 return candidate
         return "application/octet-stream"
     if certainty == "unknown":
+        # 内容认不出、来源却说是音视频，而文件名是图片：多半是网站给错了 Content-Type（离线下载常见），按图片保存，
+        # 不让列表显示成无法播放的视频。
+        guessed = mimetypes.guess_type(name)[0] or ""
+        if given.startswith(("video/", "audio/")) and guessed.startswith("image/"):
+            return guessed
         if given in _SIGNED:
             # 声称是有明确格式的媒体或压缩包，内容却认不出：不能让浏览器按它去解码。
             return "application/octet-stream"

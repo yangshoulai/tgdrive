@@ -613,14 +613,20 @@ class ObjectService:
         return await self.read_thumbnail(self._object(self._lookup(scope, key)), variant, known=known)
 
     async def get_thumbnail_by_etag(self, scope: Scope, etag: str, variant: str = "thumb", *,
-                                    accept: Callable[[str], object] | None = None, known: frozenset[str] = frozenset()) -> tuple[bytes, str, str]:
+                                    accept: Callable[[str], object] | None = None, known: frozenset[str] = frozenset(),
+                                    version: str = "") -> tuple[bytes, str, str]:
         """按内容版本读取缩略图：地址不含路径，移动或改名后浏览器缓存仍然有效。
-        只考虑调用者用路径同样能读取的文件（accept 复核网页路径规则，_check_scope 复核前缀与私密空间）。"""
+        只考虑调用者用路径同样能读取的文件（accept 复核网页路径规则，_check_scope 复核前缀与私密空间）。
+        内容相同的文件 ETag 相同，却可能是各自独立的 Blob、各有各的封面（没有内容指纹时不会合并，例如同一部电影下载了两次）：
+        地址里的封面版本 version 优先选中封面版本相同的那份，否则会一直显示另一份文件的封面，更新封面也看不到变化。"""
         if not etag or len(etag) > 128:
             raise NotFoundError("thumbnail not found")
         self._bucket(scope.bucket_id)
         rows = self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id=? AND etag=? AND blob_uuid IS NOT NULL "
                                         "AND substr(key,-1)!='/' ORDER BY key LIMIT 16", (scope.bucket_id, etag)).fetchall()
+        if version and len({row["blob_uuid"] for row in rows}) > 1:
+            versions = self.thumbnail_versions([row["blob_uuid"] for row in rows])
+            rows = sorted(rows, key=lambda row: version not in versions.get(row["blob_uuid"], {}).values())
         for row in rows:
             try:
                 if accept is not None:

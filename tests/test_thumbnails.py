@@ -150,6 +150,22 @@ class ThumbnailTests(unittest.TestCase):
         self.app.objects.move(Scope(self.alice.bucket_id, private_access=True), "moved/photo.jpg", ".tgdrive/private/photo.jpg")
         self.assertEqual(self.call("GET", url)[0], 404)
 
+    def test_etag_address_picks_the_copy_whose_cover_version_matches(self):
+        # 同一部电影下载了两次：内容相同、ETag 相同，但没有内容指纹不会合并，是两个 Blob、各有各的封面。
+        first = self.put("a/movie.mp4", b"same movie bytes")
+        with self.app.metadata.transaction() as db:
+            db.execute("UPDATE blobs SET fingerprint=NULL WHERE uuid=?", (first.blob_uuid,))
+        second = self.put("b/movie.mp4", b"same movie bytes")
+        self.assertEqual(first.etag, second.etag)
+        self.assertNotEqual(first.blob_uuid, second.blob_uuid)
+        self.assertEqual(self.set_thumb("a/movie.mp4", WEBP), 204)
+        self.assertEqual(self.set_thumb("b/movie.mp4", JPEG), 204)
+        versions = self.app.objects.thumbnail_versions([first.blob_uuid, second.blob_uuid])
+        version, first_version = versions[second.blob_uuid]["thumb"], versions[first.blob_uuid]["thumb"]
+        url = f"/api/user/v1/thumbnail?etag={second.etag}&variant=thumb&bucket_id={self.alice.bucket_id}"
+        self.assertEqual(self.call("GET", f"{url}&v={version}")[1], JPEG, "按封面版本选中刚更新封面的那份，不是路径排在前面的另一份")
+        self.assertEqual(self.call("GET", f"{url}&v={first_version}")[1], WEBP)
+
     def test_stored_thumbnails_do_not_wait_for_transfer_slots(self):
         self.put("photo.jpg")
         self.put("other.jpg")

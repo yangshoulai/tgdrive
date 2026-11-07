@@ -142,6 +142,10 @@ export function PreviewHost({ children, privateAllowed, enabled }: { children: R
         // 与文件页的封面编辑相同：先用临时版本号让地址变化，文件页随后的刷新带回服务端的正式版本。
         const stamp = String(Date.now());
         host.update({ ...target, thumbnails: variants, thumbnail_status: "ready", has_thumbnail: true, thumbnail_versions: Object.fromEntries(variants.map(variant => [variant, stamp])) });
+        void api.thumbnailStatus([target.key]).then(({ files }) => {
+          const state = files[target.key];
+          if (state?.etag === target.etag) host.update({ ...target, ...state });
+        }, () => undefined);
         window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [parentPath(target.key)] } }));
         toast.success("封面已更新");
       }} />}

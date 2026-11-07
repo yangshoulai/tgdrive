@@ -177,6 +177,69 @@ class Scrubber:
         return ScrubReport(len(rows), bad, wrapped)
 
 
+class MediaRetyper:
+    """修正被当成音视频的图片：内容识别（sniff.py）上线前保存的文件、引用它们的秒传副本，以及按旧规则把陌生品牌的
+    ISO-BMFF 图片认成 MP4 的文件，类型可能是 video/*，列表显示为视频却无法播放。只检查文件名像图片、类型是音视频、
+    内容识别结果缺失或可能误判的 Blob：重读开头 64 KiB 重新识别，改正后清掉「无法生成封面」的记录让封面重新生成。
+    按 Blob 编号游标分批处理，扫完一遍记下版本，之后不再重复读取（新写入的文件已在写入时按新规则识别）。"""
+    CURSOR_KEY = "maintenance.retype_cursor"
+    DONE_KEY = "maintenance.retype_done"
+    VERSION = 1
+    HEAD = 64 * 1024
+    _IMAGE_NAMES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif", ".bmp", ".tif", ".tiff", ".jxl")
+
+    def __init__(self, metadata: Metadata, engine: BlobEngine) -> None:
+        self.metadata, self.engine = metadata, engine
+
+    async def run_once(self, *, limit: int = 40) -> dict[str, object]:
+        from . import exif
+        from .sniff import HEAD_BYTES, resolve, sniff
+        if _get_state(self.metadata, self.DONE_KEY) == self.VERSION:
+            return {"done": True}
+        cursor = _get_state(self.metadata, self.CURSOR_KEY) or ""
+        names = " OR ".join("lower(o.key) LIKE ?" for _ in self._IMAGE_NAMES)
+
+        def candidates():
+            return self.metadata.db.execute(
+                "SELECT o.blob_uuid AS blob, MIN(o.bucket_id) AS bucket_id, b.size AS size FROM objects o JOIN blobs b ON b.uuid=o.blob_uuid "
+                "WHERE o.blob_uuid > ? AND b.status='complete' AND (o.content_type LIKE 'video/%' OR o.content_type LIKE 'audio/%') "
+                f"AND (b.sniffed IS NULL OR b.sniffed IN ('exact:video/mp4', 'exact:audio/mp4', 'unknown:')) AND ({names}) "
+                "GROUP BY o.blob_uuid ORDER BY o.blob_uuid LIMIT ?",
+                (cursor, *[f"%{suffix}" for suffix in self._IMAGE_NAMES], limit)).fetchall()
+        rows = await self.metadata.run_in_thread(candidates)
+        checked = fixed = failed = 0
+        for row in rows:
+            checked += 1
+            try:
+                head = b"".join([piece async for piece in self.engine.stream(row["blob"], 0, min(row["size"] or 0, self.HEAD),
+                                                                               bucket_id=row["bucket_id"], background=True)])
+            except Exception:  # 读不到（已删除、存储暂时不可用）就跳过，不影响其他文件
+                failed += 1
+                continue
+            detected = sniff(head[:HEAD_BYTES])
+
+            def apply(blob=row["blob"], detected=detected, taken=exif.taken_at(head)) -> int:
+                changed = 0
+                with self.metadata.transaction() as db:
+                    db.execute("UPDATE blobs SET sniffed=?, taken_at=COALESCE(?, taken_at) WHERE uuid=?", (detected, taken, blob))
+                    for item in db.execute("SELECT bucket_id, key, content_type FROM objects WHERE blob_uuid=? "
+                                           "AND (content_type LIKE 'video/%' OR content_type LIKE 'audio/%')", (blob,)).fetchall():
+                        value = resolve(detected, item["content_type"], item["key"])
+                        if value and value.startswith("image/"):
+                            db.execute("UPDATE objects SET content_type=? WHERE bucket_id=? AND key=?", (value, item["bucket_id"], item["key"]))
+                            changed += 1
+                    if changed:
+                        db.execute("DELETE FROM thumbnails WHERE blob_uuid=? AND variant='none'", (blob,))
+                return changed
+            fixed += await self.metadata.run_in_thread(apply)
+        if len(rows) < limit:
+            _set_state(self.metadata, self.DONE_KEY, self.VERSION)
+            _set_state(self.metadata, self.CURSOR_KEY, None)
+        elif rows:
+            _set_state(self.metadata, self.CURSOR_KEY, rows[-1]["blob"])
+        return {"checked": checked, "fixed": fixed, "failed": failed, "done": len(rows) < limit}
+
+
 class Cleaner:
     """回收中断或放弃的写入：未完成的分段上传、崩溃遗留的临时 Blob、过期的分段上传记录。"""
 
@@ -461,6 +524,7 @@ class MaintenanceService:
         self.gc = GarbageCollector(metadata, store)
         self.scrub = Scrubber(metadata, engine)
         self.cleaner = Cleaner(metadata)
+        self.retyper = MediaRetyper(metadata, engine)
         self.snapshots = EncryptedSnapshotStore(metadata, keystore)
         self.backups = BackupService(self.snapshots, backup_dir or Path(metadata.path).parent / "backups")
         self.trash_purger = None  # 由应用工厂注入：async (now) -> int
@@ -520,6 +584,7 @@ class MaintenanceScheduler:
             steps.append(("scrub", lambda: self._scrub()))
         if self._due("backup", self.backup_every, now):
             steps.append(("backup", lambda: asyncio.to_thread(self.service.backups.create)))
+        steps.append(("retype", lambda: self.service.retyper.run_once()))
         steps.append(("compact", lambda: self.service.metadata.run_in_thread(self.service.metadata.compact)))
         for name, step in steps:
             try:
