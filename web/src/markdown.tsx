@@ -11,7 +11,9 @@ type Ctx = { refs: Map<string, { url: string; title?: string }>; resolveImage?: 
   /** 只放行允许的链接（私密对话只认对话中出现过的地址），其余显示为文字。 */
   allowLink?: (href: string) => boolean;
   /** 链接前加地球图标（用户消息）。 */
-  linkIcon?: boolean };
+  linkIcon?: boolean;
+  /** 行内代码的自定义渲染（文件助手把 `/路径` 渲染成可点击的位置）；返回 null 时按普通代码显示。 */
+  renderCode?: (code: string) => ReactNode | null };
 
 /** @ 引用胶囊：文件夹以 / 结尾，只显示最后一级名称，完整路径放在提示里。 */
 export function MentionPill({ path }: { path: string }) {
@@ -153,7 +155,8 @@ function inline(text: string, ctx: Ctx): ReactNode[] {
       if (end > 0) {
         let code = text.slice(i + run, end).replace(/\n/g, " ");
         if (code.length > 2 && code.startsWith(" ") && code.endsWith(" ")) code = code.slice(1, -1);
-        add(key => <code key={key}>{code}</code>);
+        const custom = ctx.renderCode?.(code);
+        add(key => custom ? <Fragment key={key}>{custom}</Fragment> : <code key={key}>{code}</code>);
         i = end + run; continue;
       }
       buf += "`".repeat(run); i += run; continue;
@@ -396,7 +399,7 @@ function blocks(lines: string[], ctx: Ctx, tight = false): ReactNode[] {
   return out;
 }
 
-function parse(source: string, resolveImage?: (src: string) => string | null, extra: Pick<Ctx, "mentions" | "renderMention" | "linkIcon" | "allowLink"> = {}): ReactNode[] {
+function parse(source: string, resolveImage?: (src: string) => string | null, extra: Pick<Ctx, "mentions" | "renderMention" | "linkIcon" | "allowLink" | "renderCode"> = {}): ReactNode[] {
   const lines = source.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n");
   const head: ReactNode[] = [];
   if (lines[0]?.trim() === "---") {
@@ -419,9 +422,10 @@ function parse(source: string, resolveImage?: (src: string) => string | null, ex
   return [...head, ...blocks(content, { refs, resolveImage, depth: 0, ...extra })];
 }
 
-export function Markdown({ source, resolveImage, mentions, renderMention, linkIcon, allowLink }: { source: string; resolveImage?: (src: string) => string | null;
-  mentions?: string[]; renderMention?: (path: string) => ReactNode; linkIcon?: boolean; allowLink?: (href: string) => boolean }) {
+export function Markdown({ source, resolveImage, mentions, renderMention, linkIcon, allowLink, renderCode }: { source: string; resolveImage?: (src: string) => string | null;
+  mentions?: string[]; renderMention?: (path: string) => ReactNode; linkIcon?: boolean; allowLink?: (href: string) => boolean;
+  renderCode?: (code: string) => ReactNode | null }) {
   const sorted = useMemo(() => mentions?.length ? [...mentions].sort((a, b) => b.length - a.length) : undefined, [mentions?.join("\n")]); // eslint-disable-line react-hooks/exhaustive-deps
-  const nodes = useMemo(() => parse(source, resolveImage, { mentions: sorted, renderMention, linkIcon, allowLink }), [source, resolveImage, sorted, renderMention, linkIcon, allowLink]);
+  const nodes = useMemo(() => parse(source, resolveImage, { mentions: sorted, renderMention, linkIcon, allowLink, renderCode }), [source, resolveImage, sorted, renderMention, linkIcon, allowLink, renderCode]);
   return <div className="md">{nodes}</div>;
 }

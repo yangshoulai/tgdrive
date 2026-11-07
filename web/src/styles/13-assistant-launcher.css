@@ -1,4 +1,4 @@
-/* ---------- 文件助手入口：右下角圆形图标；处理中外圈光环旋转，悬停上浮放大，待确认显示暖色角标 ---------- */
+/* ---------- 文件助手入口：右下角圆形按钮，中间是与品牌徽标同族的助手标识；处理中外圈墨色光环旋转，悬停上浮放大，待确认显示暖色角标 ---------- */
 .back-to-top { position: fixed; right: max(28px, calc(env(safe-area-inset-right) + 20px)); bottom: max(96px, calc(env(safe-area-inset-bottom) + 88px)); z-index: var(--z-float); display: grid; width: 44px; height: 44px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink-2); box-shadow: var(--shadow-md); cursor: pointer; animation: back-to-top-in var(--duration-base) var(--ease-out); transition: background-color var(--duration-fast), color var(--duration-fast), transform var(--duration-fast); }
 .back-to-top:hover { background: var(--surface-hover); color: var(--ink); transform: translateY(-2px); }
 .back-to-top:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
@@ -6,19 +6,18 @@
 @media (prefers-reduced-motion: reduce) { .back-to-top { animation: none; transition: none; } }
 .assistant-launcher { --launcher-size: 52px; position: fixed; right: max(24px, calc(env(safe-area-inset-right) + 16px)); bottom: max(24px, calc(env(safe-area-inset-bottom) + 16px)); z-index: var(--z-launcher);
   display: grid; width: var(--launcher-size); height: var(--launcher-size); padding: 0; place-items: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--line)); border-radius: 50%; background: var(--surface); color: var(--accent-ink);
-  box-shadow: 0 1px 2px var(--shade-8), 0 8px 24px -6px color-mix(in srgb, var(--accent) 28%, var(--shade-16)), inset 0 1px 0 var(--tray-highlight);
+  border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink);
+  box-shadow: 0 1px 2px var(--shade-8), 0 8px 24px -6px var(--shade-16), inset 0 1px 0 var(--tray-highlight);
   animation: launcher-in var(--duration-slow) var(--ease-out) both;
   transition: transform var(--duration-base) var(--ease-out), box-shadow var(--duration-base), border-color var(--duration-fast); }
 .assistant-launcher[hidden] { display: none; }
-.assistant-launcher-orb { position: relative; z-index: 1; display: grid; width: calc(var(--launcher-size) - 8px); height: calc(var(--launcher-size) - 8px); place-items: center; border-radius: 50%;
-  background: radial-gradient(circle at 30% 25%, color-mix(in srgb, var(--accent) 16%, var(--surface)) 0, var(--surface) 72%); transition: transform var(--duration-slow) var(--ease-out); }
+.assistant-launcher-orb { position: relative; z-index: 1; display: grid; width: calc(var(--launcher-size) - 8px); height: calc(var(--launcher-size) - 8px); place-items: center; border-radius: 50%; transition: transform var(--duration-slow) var(--ease-out); }
 /* 外圈光环：静止时透明；处理中是一段旋转的渐变弧线，待确认时为静止的暖色圆环。 */
 .assistant-launcher-ring { position: absolute; inset: -4px; border-radius: 50%; opacity: 0; pointer-events: none;
-  background: conic-gradient(from 0deg, transparent 0 40%, color-mix(in srgb, var(--accent) 25%, transparent) 60%, var(--accent) 88%, transparent 100%);
+  background: conic-gradient(from 0deg, transparent 0 40%, color-mix(in srgb, var(--ink) 20%, transparent) 60%, var(--ink) 88%, transparent 100%);
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), var(--black) calc(100% - 2.5px)); mask: radial-gradient(farthest-side, transparent calc(100% - 3px), var(--black) calc(100% - 2.5px));
   transition: opacity var(--duration-base); }
-.assistant-launcher.is-working { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.assistant-launcher.is-working { border-color: var(--line-strong); }
 .assistant-launcher.is-working .assistant-launcher-ring { opacity: 1; animation: launcher-spin 1.2s linear infinite; }
 .assistant-launcher.is-working .assistant-launcher-orb { animation: launcher-breathe 2.4s ease-in-out infinite; }
 .assistant-launcher.has-pending { border-color: color-mix(in srgb, var(--warning) 55%, var(--line)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 14%, transparent), var(--shadow-lg); }
@@ -28,8 +27,8 @@
 .assistant-launcher:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring), var(--shadow-lg); }
 .assistant-launcher:active { transform: scale(.94); }
 @media (hover: hover) and (pointer: fine) {
-  .assistant-launcher:hover { transform: translateY(-3px) scale(1.06); border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
-    box-shadow: 0 2px 4px var(--shade-8), 0 16px 34px -8px color-mix(in srgb, var(--accent) 45%, var(--shade-16)), 0 0 0 6px color-mix(in srgb, var(--accent) 8%, transparent), inset 0 1px 0 var(--tray-highlight); }
+  .assistant-launcher:hover { transform: translateY(-3px) scale(1.06); border-color: var(--line-strong);
+    box-shadow: 0 2px 4px var(--shade-8), 0 16px 34px -8px var(--shade-16), inset 0 1px 0 var(--tray-highlight); }
   .assistant-launcher:hover .assistant-launcher-orb { transform: rotate(-12deg) scale(1.05); }
   .assistant-launcher:hover:active { transform: translateY(-1px) scale(.97); }
 }

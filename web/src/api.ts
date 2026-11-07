@@ -442,10 +442,25 @@ export const publicPreviewAssets = (token: string, path: string, access?: string
 export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100, root = "", kind: KindFilter = "", signal?: AbortSignal, prefix = "") =>
   request<ListPage>(`${fileApi("/search", root)}?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}${prefix ? `&prefix=${encodeURIComponent(prefix)}` : ""}`, { signal });
 /** 跨文件夹浏览：recent 最近修改的全部文件，photos 按拍摄时间的图片与视频，music 全部音频（按路径）。 */
-export type LibraryView = "recent" | "photos" | "music";
+export type LibraryView = "recent" | "photos" | "videos" | "music";
 export type LibraryItem = FileItem & { taken_at?: number };
-export const library = (view: LibraryView, cursor = "", limit = 100, signal?: AbortSignal) =>
-  request<{ objects: LibraryItem[]; next_cursor: string | null }>(`/api/user/v1/library?view=${view}&limit=${limit}&cursor=${encodeURIComponent(cursor)}`, { signal });
+/** 媒体库的一页文件：q 按相对路径（音乐另含歌名、艺人、专辑）筛选；folder 给出时只列这个文件夹直接包含的文件（"" 为根目录）；
+ * album 只用于音乐，列出这张专辑的歌曲（"" 为没有专辑的歌曲）。 */
+export const library = (view: LibraryView, options: { cursor?: string; limit?: number; q?: string; folder?: string; album?: string } = {}, signal?: AbortSignal) => {
+  const params = new URLSearchParams({ view, limit: String(options.limit ?? 100), cursor: options.cursor ?? "" });
+  if (options.q) params.set("q", options.q);
+  if (options.folder !== undefined) params.set("folder", options.folder);
+  if (options.album !== undefined) params.set("album", options.album);
+  return request<{ objects: LibraryItem[]; next_cursor: string | null }>(`/api/user/v1/library?${params}`, { signal });
+};
+export type LibraryFolder = { path: string; count: number; size: number; latest: number; samples: LibraryItem[] };
+/** 相册与影视按文件夹分组（按最近时间倒序），每组带最多 4 个样本用作封面。 */
+export const libraryFolders = (view: "photos" | "videos", q = "", signal?: AbortSignal) =>
+  request<{ folders: LibraryFolder[]; truncated: boolean }>(`/api/user/v1/library/folders?${new URLSearchParams({ view, q })}`, { signal });
+/** 一张专辑：标签里专辑名相同的歌曲（不区分艺人）；album 为 "" 的一项是没有专辑的歌曲。samples 按曲目号排在最前的 4 首。 */
+export type LibraryAlbum = { album: string; count: number; size: number; duration: number; latest: number; artist: string | null; year: string | null; samples: LibraryItem[] };
+export const libraryAlbums = (q = "", signal?: AbortSignal) =>
+  request<{ albums: LibraryAlbum[]; truncated: boolean }>(`/api/user/v1/library/albums?${new URLSearchParams({ q })}`, { signal });
 /** 目录统计（含子文件夹）：数量、总大小、按类型分组（与 KIND_FILTERS 同组，另有 other）、最大的文件。 */
 export type FolderStats = { prefix: string; files: number; folders: number; bytes: number; direct_files: number; direct_folders: number;
   kinds: { kind: KindName | "other"; count: number; bytes: number }[]; largest: { key: string; size: number; content_type: string | null }[]; latest_modified: number | null };

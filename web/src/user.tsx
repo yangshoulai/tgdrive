@@ -17,7 +17,7 @@ import { UploadsPage, useUploadQueue } from "./user/uploads";
 
 import { SharedView } from "./user/shared";
 import { TrashView } from "./user/trash";
-import { MusicView, PhotosView, RecentView } from "./user/library";
+import { MediaLibraryView, RecentView, type MediaView } from "./user/library";
 import { DownloadsView } from "./user/downloads";
 import { PreviewHost } from "./user/preview-host";
 import { CachePage, CacheTasksProvider, type CacheTab } from "./user/cache";
@@ -101,7 +101,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
     onSessionChange={patch => setSession(current => current && { ...current, ...patch })} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "private" | "uploads" | "downloads" | "cache" | "account" | "assistantPage" | "recent" | "photos" | "music";
+type UserSection = "files" | "shared" | "trash" | "private" | "uploads" | "downloads" | "cache" | "account" | "assistantPage" | "recent" | "photos" | "videos" | "music";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -109,6 +109,8 @@ const ADMIN_KEYS: readonly string[] = ADMIN_MODULES.map(item => item.key);
 const isAdminSection = (section: Section): section is AdminModule => ADMIN_KEYS.includes(section);
 // 旧下载记录或书签可能包含回收站等内部地址；普通文件导航不展示系统目录。
 const visibleFilesPrefix = (prefix: string) => prefix === ".tgdrive" || prefix.startsWith(".tgdrive/") ? "" : prefix;
+
+const isMediaSection = (section: Section): section is MediaView => section === "photos" || section === "videos" || section === "music";
 
 function readLocation(): { section: Section; prefix: string } {
   const { pathname, search } = window.location;
@@ -124,9 +126,13 @@ function readLocation(): { section: Section; prefix: string } {
   if (view === "account" || view === "keys") return { section: "account", prefix: view === "keys" ? "keys" : params.get("tab") === "keys" || params.get("tab") === "cache" ? params.get("tab")! : "" };
   // 任务中心：本机缓存页的 prefix 字段沿用为标签名（?view=cache&tab=files）。
   if (view === "cache") return { section: "cache", prefix: params.get("tab") === "files" ? "files" : "" };
-  // 媒体库：音乐页的 prefix 字段沿用为打开的专辑（?view=music&album=…）。
-  if (view === "music") return { section: "music", prefix: params.get("album") ?? "" };
-  const section = view === "shared" || view === "trash" || view === "private" || view === "uploads" || view === "downloads" || view === "recent" || view === "photos" ? view : "files";
+  // 媒体库：prefix 字段沿用为打开的一组，前面加 "/" 与「未打开」区分——相册、影视是文件夹（?view=photos&folder=… ，根目录为空值），
+  // 音乐是专辑（?view=music&album=… ，无专辑为空值）。
+  if (view === "photos" || view === "videos" || view === "music") {
+    const key = view === "music" ? "album" : "folder";
+    return { section: view, prefix: params.has(key) ? `/${params.get(key)}` : "" };
+  }
+  const section = view === "shared" || view === "trash" || view === "private" || view === "uploads" || view === "downloads" || view === "recent" ? view : "files";
   const prefix = params.get("path") ?? "";
   return { section, prefix: section === "private" ? api.PRIVATE_PREFIX + prefix : section === "files" ? visibleFilesPrefix(prefix) : prefix };
 }
@@ -139,7 +145,7 @@ function sectionUrl(section: Section, prefix = "") {
   if (section === "assistantPage" && prefix) params.set("c", prefix);
   if (section === "account" && (prefix === "keys" || prefix === "cache")) params.set("tab", prefix);
   if (section === "cache" && prefix === "files") params.set("tab", prefix);
-  if (section === "music" && prefix) params.set("album", prefix);
+  if (isMediaSection(section) && prefix) params.set(section === "music" ? "album" : "folder", prefix.slice(1));
   const query = params.toString();
   return query ? `/?${query}` : "/";
 }
@@ -340,8 +346,8 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       {section === "downloads" && <DownloadsView onChanged={refreshUsage} onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCreated={() => setDownloadRevision(value => value + 1)} />}
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
       {section === "recent" && <RecentView onOpenFolder={prefix => navigate("files", prefix)} />}
-      {section === "photos" && <PhotosView />}
-      {section === "music" && <MusicView album={location.prefix} onOpenAlbum={id => navigate("music", id)} />}
+      {isMediaSection(section) && <MediaLibraryView view={section} group={location.prefix ? location.prefix.slice(1) : null}
+        onOpenGroup={group => navigate(section, group === null ? "" : `/${group}`)} onOpenLocation={prefix => navigate("files", prefix)} />}
     </>;
   }
   // 打开的正是某个收藏的文件夹时，由侧栏收藏高亮，「我的文件」「私密空间」不再同时高亮。
@@ -358,6 +364,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
     ] },
     { label: "媒体库", workspace: personalWorkspace, items: [
       { key: "photos", label: "相册", icon: "image" },
+      { key: "videos", label: "影视", icon: "film" },
       { key: "music", label: "音乐", icon: "music" },
     ] },
     { label: "分享", workspace: personalWorkspace, items: [

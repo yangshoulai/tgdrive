@@ -781,29 +781,65 @@ class UserApi:
         return {"objects": self._objects_json([self.objects._object(row) for row in rows[:limit]]), "common_prefixes": [],
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
-    LIBRARY_VIEWS = ("recent", "photos", "music")
+    LIBRARY_VIEWS = ("recent", "photos", "videos", "music")
+    _LIBRARY_KINDS = {"photos": "image", "videos": "video", "music": "audio"}
+    # 文件所在文件夹（以 / 结尾，根目录为空串）：rtrim 去掉末尾所有非 / 字符，即最后一个 / 之后的文件名。
+    _FOLDER_SQL = "rtrim(o.key, replace(o.key, '/', ''))"
+    LIBRARY_FOLDER_LIMIT = 2000
+    # 音乐按标签里的专辑名归类（只看名称，同名专辑不再按艺人区分）；没有专辑的歌曲归为空串一组。
+    _ALBUM_SQL = "trim(coalesce(m.album, ''))"
+    # 曲目号（"3"、"3/12" 取前面的数字）；没有时排在有曲目号的歌曲之后。
+    _TRACK_SQL = "CASE WHEN CAST(m.track AS INTEGER)>0 THEN CAST(m.track AS INTEGER) ELSE 1000000 END"
 
-    async def library(self, token: str, view: str, cursor: str = "", limit: int = 100) -> dict[str, object]:
-        """跨文件夹浏览（普通文件，不含私密空间与系统区）：recent 按修改时间倒序的全部文件，photos 按拍摄时间
-        （EXIF，没有时用修改时间）倒序的图片与视频，music 按路径排列的全部音频（网页按专辑分组）。键集分页，游标是上一页最后一项。"""
+    def _library_filter(self, token: str, view: str, query: str):
+        """媒体库公共条件：普通文件（不含私密空间与系统区）、按视图限定类型、可选关键词。
+        关键词匹配授权前缀之下的相对路径（文件夹名或文件名）；音乐另匹配标签里的歌名、艺人与专辑。"""
         if view not in self.LIBRARY_VIEWS:
             raise ValueError("浏览方式不正确")
+        query = query.strip()
+        if len(query) > 200:
+            raise ValueError("搜索词太长")
         session = self._session(token)
         account = self.accounts.account_for_session(session)
         scope = self._scope(token)
+        base = scope.prefix
+        sql = "o.bucket_id=? AND o.key>=? AND o.key<? AND substr(o.key,-1)!='/' AND substr(o.key,1,9)!='.tgdrive/'"
+        args: list[object] = [account.bucket_id, base, base + self.objects._PREFIX_END]
+        if view in self._LIBRARY_KINDS:
+            # kind_clause 只引用 objects 独有的 key、content_type 列，与其他表连接后不需要加表名。
+            condition, kind_args = kind_clause(self._LIBRARY_KINDS[view])
+            sql += f" AND {condition}"
+            args += kind_args
+        if query:
+            fields = ["lower(substr(o.key,?))"]
+            if view == "music":
+                fields += ["lower(coalesce(m.title,''))", "lower(coalesce(m.artist,''))", "lower(coalesce(m.album,''))"]
+            sql += " AND (" + " OR ".join(f"instr({field},lower(?))>0" for field in fields) + ")"
+            args += [len(base) + 1, query] + [query] * (len(fields) - 1)
+        joins = "LEFT JOIN blobs b ON b.uuid=o.blob_uuid" + (" LEFT JOIN media_info m ON m.blob_uuid=o.blob_uuid" if view == "music" else "")
+        return account, base, joins, sql, args
+
+    async def library(self, token: str, view: str, cursor: str = "", limit: int = 100,
+                      query: str = "", folder: str | None = None, album: str | None = None) -> dict[str, object]:
+        """跨文件夹浏览：recent 按修改时间倒序的全部文件；photos（图片）、videos（视频）、music（音频）。
+        folder 给出时只列这个文件夹里直接包含的文件（照片按拍摄时间倒序，其余按路径）；没有 folder 时按路径排列，
+        网页按所在文件夹（音乐按专辑）分段（搜索结果）。album 只用于音乐：标签里专辑名（去掉首尾空白）相同的歌曲，
+        空串为没有专辑的歌曲。键集分页，游标是上一页最后一项。"""
+        _, base, joins, sql, args = self._library_filter(token, view, query)
         limit = max(1, min(limit, 500))
-        base, end = scope.prefix, scope.prefix + self.objects._PREFIX_END
-        common = "o.bucket_id=? AND o.key>=? AND o.key<? AND substr(o.key,-1)!='/' AND substr(o.key,1,9)!='.tgdrive/'"
-        args: list[object] = [account.bucket_id, base, end]
-        if view == "music":
-            condition, kind_args = kind_clause("audio")
-            order, sort = "o.key", "o.key"
-            after = ("AND o.key>?", [cursor]) if cursor else ("", [])
-        else:
-            condition, kind_args = kind_clause("image,video") if view == "photos" else ("1", [])
-            sort = "COALESCE(b.taken_at, o.modified_at)" if view == "photos" else "o.modified_at"
+        if album is not None and view == "music":
+            sql += f" AND {self._ALBUM_SQL}=?"
+            args.append(album.strip())
+        if folder is not None and view != "recent":
+            folder = self._path(folder, directory=True) if folder else ""
+            start = base + folder
+            sql += " AND o.key>=? AND o.key<? AND instr(substr(o.key,?),'/')=0"
+            args += [start, start + self.objects._PREFIX_END, len(start) + 1]
+        by_time = view == "recent" or (view == "photos" and folder is not None)
+        if by_time:
+            sort = "o.modified_at" if view == "recent" else "COALESCE(b.taken_at, o.modified_at)"
             order = f"{sort} DESC, o.key"
-            after = ("", [])
+            after: tuple[str, list[object]] = ("", [])
             if cursor:
                 stamp, _, key = cursor.partition("\n")
                 try:
@@ -811,13 +847,14 @@ class UserApi:
                 except ValueError as exc:
                     raise ValueError("游标不正确") from exc
                 after = (f"AND ({sort}<? OR ({sort}=? AND o.key>?))", [stamp_value, stamp_value, key])
-        # kind_clause 只引用 objects 独有的 key、content_type 列，与 blobs 连接后不需要加表名。
+        else:
+            sort = order = "o.key"
+            after = ("AND o.key>?", [cursor]) if cursor else ("", [])
 
         def read_page():
             return self.objects.metadata.db.execute(
-                f"SELECT o.*, b.taken_at AS taken_at, {sort} AS sort_value FROM objects o LEFT JOIN blobs b ON b.uuid=o.blob_uuid "
-                f"WHERE {common} AND {condition} {after[0]} ORDER BY {order} LIMIT ?",
-                (*args, *kind_args, *after[1], limit + 1)).fetchall()
+                f"SELECT o.*, b.taken_at AS taken_at, {sort} AS sort_value FROM objects o {joins} "
+                f"WHERE {sql} {after[0]} ORDER BY {order} LIMIT ?", (*args, *after[1], limit + 1)).fetchall()
         rows = await self.objects.metadata.run_in_thread(read_page)
         page = rows[:limit]
         objects = self._objects_json([self.objects._object(row) for row in page])
@@ -825,8 +862,78 @@ class UserApi:
             if row["taken_at"] is not None:
                 value["taken_at"] = row["taken_at"]
         last = page[-1] if len(rows) > limit else None
-        next_cursor = None if last is None else last["key"] if view == "music" else f"{last['sort_value']!r}\n{last['key']}"
+        next_cursor = None if last is None else f"{last['sort_value']!r}\n{last['key']}" if by_time else last["key"]
         return {"objects": objects, "next_cursor": next_cursor}
+
+    async def library_folders(self, token: str, view: str, query: str = "") -> dict[str, object]:
+        """媒体库按文件夹分组：每个直接包含这类文件的文件夹给出数量、大小、最近时间与最多 4 个样本（照片取最新的，
+        影视按路径取前几个），文件夹按最近时间倒序。最多 LIBRARY_FOLDER_LIMIT 个文件夹。音乐按专辑浏览，见 library_albums。"""
+        if view not in ("photos", "videos"):
+            raise ValueError("浏览方式不正确")
+        _, base, joins, sql, args = self._library_filter(token, view, query)
+        stamp = "COALESCE(b.taken_at, o.modified_at)" if view == "photos" else "o.modified_at"
+        sample = "stamp DESC, key" if view == "photos" else "key"
+        folder_order = "latest DESC, folder"
+        limit = self.LIBRARY_FOLDER_LIMIT
+
+        def read():
+            return self.objects.metadata.db.execute(
+                f"WITH media AS (SELECT o.*, {stamp} AS stamp, {self._FOLDER_SQL} AS folder FROM objects o {joins} WHERE {sql}), "
+                f"ranked AS (SELECT *, row_number() OVER (PARTITION BY folder ORDER BY {sample}) AS rank, "
+                "count(*) OVER (PARTITION BY folder) AS total, sum(size) OVER (PARTITION BY folder) AS bytes, "
+                "max(stamp) OVER (PARTITION BY folder) AS latest FROM media), "
+                f"folders AS (SELECT folder FROM ranked WHERE rank=1 ORDER BY {folder_order} LIMIT ?) "
+                f"SELECT * FROM ranked WHERE rank<=4 AND folder IN (SELECT folder FROM folders) ORDER BY {folder_order}, rank",
+                (*args, limit + 1)).fetchall()
+        rows = await self.objects.metadata.run_in_thread(read)
+        groups: dict[str, dict[str, object]] = {}
+        samples: dict[str, list] = {}
+        for row in rows:
+            path = row["folder"][len(base):]
+            if path not in groups:
+                groups[path] = {"path": path, "count": row["total"], "size": row["bytes"] or 0, "latest": row["latest"]}
+                samples[path] = []
+            samples[path].append(row)
+        truncated = len(groups) > limit
+        folders = list(groups.values())[:limit]
+        for item in folders:
+            item["samples"] = self._objects_json([self.objects._object(row) for row in samples[item["path"]]])
+        return {"folders": folders, "truncated": truncated}
+
+    async def library_albums(self, token: str, query: str = "") -> dict[str, object]:
+        """音乐按专辑归类：标签里专辑名相同的歌曲为一张专辑（不区分艺人），没有专辑的歌曲合为 album 为空串的一项（排在最后）。
+        每张专辑给出数量、大小、总时长、艺人（只有一位时，否则为「多位艺人」）与按曲目号排在最前的 4 首（第一首的封面作专辑封面）。"""
+        _, _, joins, sql, args = self._library_filter(token, "music", query)
+        limit = self.LIBRARY_FOLDER_LIMIT
+
+        def read():
+            return self.objects.metadata.db.execute(
+                f"WITH media AS (SELECT o.*, {self._ALBUM_SQL} AS album, nullif(trim(coalesce(m.artist,'')),'') AS artist, "
+                f"m.year AS year, coalesce(m.duration, 0) AS duration, {self._TRACK_SQL} AS track_no FROM objects o {joins} WHERE {sql}), "
+                "ranked AS (SELECT *, row_number() OVER (PARTITION BY album ORDER BY track_no, key) AS rank, "
+                "count(*) OVER (PARTITION BY album) AS total, sum(size) OVER (PARTITION BY album) AS bytes, "
+                "sum(duration) OVER (PARTITION BY album) AS seconds, max(modified_at) OVER (PARTITION BY album) AS latest, "
+                "min(artist) OVER (PARTITION BY album) AS artist_first, max(artist) OVER (PARTITION BY album) AS artist_last, "
+                "max(year) OVER (PARTITION BY album) AS album_year FROM media), "
+                "albums AS (SELECT album FROM ranked WHERE rank=1 ORDER BY album='', album LIMIT ?) "
+                "SELECT * FROM ranked WHERE rank<=4 AND album IN (SELECT album FROM albums) ORDER BY album='', album, rank",
+                (*args, limit + 1)).fetchall()
+        rows = await self.objects.metadata.run_in_thread(read)
+        groups: dict[str, dict[str, object]] = {}
+        samples: dict[str, list] = {}
+        for row in rows:
+            name = row["album"]
+            if name not in groups:
+                artist = row["artist_first"] if row["artist_first"] == row["artist_last"] else "多位艺人"
+                groups[name] = {"album": name, "count": row["total"], "size": row["bytes"] or 0, "duration": row["seconds"] or 0,
+                                "latest": row["latest"], "artist": artist, "year": row["album_year"]}
+                samples[name] = []
+            samples[name].append(row)
+        truncated = len(groups) > limit
+        albums = list(groups.values())[:limit]
+        for item in albums:
+            item["samples"] = self._objects_json([self.objects._object(row) for row in samples[item["album"]]])
+        return {"albums": albums, "truncated": truncated}
 
     async def folder(self, token: str, csrf: str, path: str) -> dict[str, object]:
         session = self._session(token, csrf=csrf, mutation=True)

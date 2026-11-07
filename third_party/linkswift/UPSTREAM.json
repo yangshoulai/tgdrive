@@ -9,16 +9,70 @@
   "license": "AGPL-3.0-or-later",
   "adapted_on": "2026-10-26",
   "adapters": {
-    "baidu": ["$baidu.getSelectedList", "$baidu.getFilesUrl", "$baidu.getShareData", "$baidu.getShareFilesUrl"],
-    "aliyun": ["$aliyun.getSelectedList", "$aliyun.getFilesUrl"],
-    "mcloud": ["$mcloud.getSelectedList", "$mcloud.getSign", "$mcloud.getFileUrl"],
-    "tcloud": ["$tcloud.getSelectedList", "$tcloud.getToken", "$tcloud.getFileUrl"],
-    "xunlei": ["$xunlei.getSelectedList", "$xunlei.getToken", "$xunlei._getCaptchaSign", "$xunlei.getFileUrl"],
-    "guangya": ["$guangya.getSelectedList", "$guangya.getToken", "$guangya.getShareToken", "$guangya.getFileUrl"],
-    "quark": ["$quark.getSelectedList", "$quark.getSocialToken", "$quark.getLink"],
-    "uc": ["$uc.getSelectedList", "$uc.getLink"],
-    "123pan": ["$123pan.getSelectedList", "$123pan.getFileUrl"]
+    "baidu": [
+      "$baidu.getSelectedList",
+      "$baidu.getFilesUrl",
+      "$baidu.getShareData",
+      "$baidu.getShareFilesUrl"
+    ],
+    "aliyun": [
+      "$aliyun.getSelectedList",
+      "$aliyun.getFilesUrl"
+    ],
+    "mcloud": [
+      "$mcloud.getSelectedList",
+      "$mcloud.getSign",
+      "$mcloud.getFileUrl"
+    ],
+    "tcloud": [
+      "$tcloud.getSelectedList",
+      "$tcloud.getToken",
+      "$tcloud.getFileUrl"
+    ],
+    "xunlei": [
+      "$xunlei.getSelectedList",
+      "$xunlei.getToken",
+      "$xunlei._getCaptchaSign",
+      "$xunlei.getFileUrl"
+    ],
+    "guangya": [
+      "$guangya.getSelectedList",
+      "$guangya.getToken",
+      "$guangya.getShareToken",
+      "$guangya.getFileUrl"
+    ],
+    "quark": [
+      "$quark.getSelectedList",
+      "$quark.getSocialToken",
+      "$quark.getLink"
+    ],
+    "uc": [
+      "$uc.getSelectedList",
+      "$uc.getLink"
+    ],
+    "123pan": [
+      "$123pan.getSelectedList",
+      "$123pan.getFileUrl"
+    ]
   },
-  "shared": ["config", "base.findReact"],
-  "runtime": "userscripts/tessera-grabber.user.js"
+  "shared": [
+    "config",
+    "base.findReact"
+  ],
+  "runtime": "userscripts/tessera-grabber.user.js",
+  "patches": [
+    {
+      "pull": "https://github.com/hmjz100/LinkSwift/pull/557",
+      "commit": "ef2ed3b44014ba76c4ae7ca7d01fa7d637d18b98",
+      "repository": "https://github.com/yyan160/LinkSwift",
+      "state": "open",
+      "adapted_on": "2026-11-07",
+      "functions": [
+        "$baidu.getSelectedList",
+        "$baidu.getShareSelectedList",
+        "$baidu.getShareData"
+      ],
+      "note": "百度新版分享页 disk-share-v2"
+    }
+  ]
 }

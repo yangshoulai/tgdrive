@@ -26,6 +26,8 @@ type Background = { id: string; controller: AbortController; ready: Promise<void
 const backgrounds = new Map<string, Background>();
 type Manual = { key: string; id: string; owner: string; route: Route; request: Request; controller: AbortController; opened?: Opened; running: boolean;
   background?: Background; timer?: number; segments: Map<number, SegmentDiagnosis>; lastError?: string; noticed?: number;
+  /** 页面最近一次 start／step 的时间：只有页面推进才算任务仍有人负责（分段的进度通知不算）。 */
+  stepped: number;
   /** 正在进行的一轮分段下载；页面的每次 step 只等它最多 STEP_LIMIT，之后先回复进度，下一次 step 接着等同一轮。 */
   round?: Promise<ReturnType<typeof fileCacheState>>; report?: (value: unknown) => void };
 /** 诊断：每个正在下载的分段停在哪一步。queued 等浏览器空位、waiting 等服务器开始返回、busy 服务器繁忙等待重试、
@@ -759,8 +761,23 @@ const manualKeys = () => new Set([...manuals.values()].flatMap(job => job.opened
 
 function renewManual(job: Manual) {
   clearTimeout(job.timer);
+  job.stepped = Date.now();
   // 页面关闭、消息超时或 Worker 重启都不留下持久任务；已提交的块仍可再次续传。
+  // 只由页面的 start／step 续期：分段看门狗与排队等通道只给页面发进度，不能替没有页面的任务续期，
+  // 否则页面刷新或关闭后遗留的任务会一直占着这个文件，新页面永远等在「其他页面正在缓存」。
   job.timer = setTimeout(() => stopManual(job), 120_000) as unknown as number;
+}
+
+/** 页面超过这么久没有推进（start／step）的手动任务视为遗留：正常页面每一步最多等 STEP_LIMIT（60 秒）就会再推进。 */
+const ORPHAN_AFTER = 90_000;
+/** 启动新任务前清掉遗留任务：发起它的页面已经关闭或刷新（client 不存在），或页面很久没有推进。已提交的块保留。 */
+async function dropOrphanManuals() {
+  const now = Date.now();
+  for (const job of [...manuals.values()]) {
+    if (now - job.stepped > ORPHAN_AFTER) { stopManual(job); continue; }
+    const client = sw.clients.get ? await sw.clients.get(job.owner).catch(() => undefined) : null;
+    if (client === undefined && manuals.get(job.key) === job) stopManual(job);
+  }
 }
 
 /* 多线程缓存：大文件按 16 MiB（服务器存储分片的大小，一段只对应一个分片）切段并行下载，几个文件也可以同时缓存。
@@ -991,13 +1008,17 @@ function manualFetch(job: Manual, options: RequestInit = {}) {
 async function startManual(owner: string, id: string, url: string, group?: string) {
   if (!owner || !id || id.length > 100) throw new CacheFatal("缓存任务来源无效");
   const key = `${owner}:${id}`;
+  // 同一页面用同一任务编号再次启动（重试、页面内重新排队）：旧任务没有别人负责，直接接管。
+  const previous = manuals.get(key);
+  if (previous) stopManual(previous);
+  await dropOrphanManuals();
   const busy = (route: Route) => manuals.has(key) || manuals.size >= MAX_MANUAL_FILES
     || [...manuals.values()].some(job => job.route.etag === route.etag && job.route.tier === route.tier);
   const { request, route } = manualRoute(url);
   if (busy(route)) return { busy: true };
   const background = group && route.tier === "p" ? await getBackground(owner, group) : undefined;
   if (busy(route)) return { busy: true };
-  const job: Manual = { key, owner, id, request, route, controller: new AbortController(), running: false, background, segments: new Map() };
+  const job: Manual = { key, owner, id, request, route, controller: new AbortController(), running: false, background, segments: new Map(), stepped: Date.now() };
   manuals.set(key, job); renewManual(job);
   try {
     // 点击时重取账号策略；长期播放的普通预览仍按原有的上下文周期复用。
@@ -1185,7 +1206,8 @@ function manualProgress(job: Manual, opened: Opened) {
 const SEGMENT_STALL = 180_000;
 
 async function fetchSegmentOnce(job: Manual, opened: Opened, [first]: [number, number], end: number, diag: SegmentDiagnosis, progress: (value: unknown) => void) {
-  const alive = () => { renewManual(job); job.noticed = Date.now(); progress(manualProgress(job, opened)); };
+  // 只给页面发进度、让页面知道还活着；Worker 端的租期仍只由页面的 step 续期（见 renewManual）。
+  const alive = () => { job.noticed = Date.now(); progress(manualProgress(job, opened)); };
   const segment = new AbortController();
   const release = await manualSlot(job.controller.signal, alive, job.key, () => segment.abort(new SlotYield("让出通道给其他文件")));
   // 页面与 Worker 都按「120 秒没有进度」判定任务没有响应，而进度只在写满 1 MiB 时更新：

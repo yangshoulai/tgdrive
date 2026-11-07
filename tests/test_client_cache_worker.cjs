@@ -147,7 +147,7 @@ function harness(t, fixtures = { "file.bin": bytes(3 * store.BLOCK + 137), [SECR
     clearTimeout(timer) { clearTimeout(timer); timers.delete(timer); },
     setInterval(callback, delay) { const timer = setInterval(callback, delay); timer.unref(); return timer; },
     clearInterval(timer) { clearInterval(timer); },
-    self: { location: { origin: ORIGIN }, addEventListener: (type, callback) => listeners.set(type, callback), clients: { matchAll: async () => state.clients } },
+    self: { location: { origin: ORIGIN }, addEventListener: (type, callback) => listeners.set(type, callback), clients: { matchAll: async () => state.clients, get: async id => state.closed?.has(id) ? undefined : { id } } },
   });
   vm.runInContext(worker, context);
   const h = {
@@ -542,6 +542,35 @@ test("多个页面共享缓存名额，其他页面不能操作当前任务", as
   assert.equal((await h.ask("tessera-cache:step", { id: "a" })).complete, true);
   assert.equal((await h.ask("tessera-cache:start", { id: "b", url }, "page-B")).complete, true);
   assert.equal(h.origins().filter(request => request.method === "GET").length, 1);
+});
+
+test("页面关闭或刷新后遗留的手动任务不再占着文件，新页面可以接手", async t => {
+  const h = harness(t, { "file.bin": bytes(9 * store.BLOCK) });
+  const url = h.url("file.bin");
+  await h.ask("tessera-cache:start", { id: "a", url }, "page-A");
+  assert.equal((await h.ask("tessera-cache:start", { id: "b", url }, "page-B")).busy, true, "另一个仍在推进的页面正在缓存同一文件时等待");
+  h.state.closed = new Set(["page-A"]);
+  const taken = await h.ask("tessera-cache:start", { id: "b", url }, "page-B");
+  assert.equal(taken.busy, false, "发起页面已关闭：遗留任务被清掉");
+  let state = taken;
+  while (!state.complete) state = await h.ask("tessera-cache:step", { id: "b" }, "page-B");
+  assert.deepEqual((await h.read("file.bin")).data, h.files.get("file.bin").data);
+});
+
+test("页面很久没有推进的手动任务视为遗留，排队中的分段也不能替它续期", async t => {
+  const h = harness(t, { "file.bin": bytes(9 * store.BLOCK) });
+  const url = h.url("file.bin");
+  await h.ask("tessera-cache:start", { id: "a", url }, "page-A");
+  h.state.clock += 91_000;
+  assert.equal((await h.ask("tessera-cache:start", { id: "b", url }, "page-B")).busy, false, "超过 90 秒没有 step 的任务不再阻挡同一文件");
+  await assert.rejects(h.ask("tessera-cache:step", { id: "a" }, "page-A"), /任务已停止/);
+});
+
+test("同一页面用同一任务编号再次启动时接管旧任务", async t => {
+  const h = harness(t, { "file.bin": bytes(9 * store.BLOCK) });
+  const url = h.url("file.bin");
+  await h.ask("tessera-cache:start", { id: "a", url }, "page-A");
+  assert.equal((await h.ask("tessera-cache:start", { id: "a", url }, "page-A")).busy, false);
 });
 
 test("手动缓存按段并行回源，标记为后台读取，并发不超过读取路数减一", async t => {

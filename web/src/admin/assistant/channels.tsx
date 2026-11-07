@@ -272,9 +272,9 @@ export function ChannelDialog({ channel, onClose, onSaved }: { channel: ai.AiCha
 
 export const EFFORT_LABELS: Record<string, string> = { none: "不思考", minimal: "极少", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" };
 
-/** 请求时实际使用的思考程度：所选档位仍在模型目录的选项里才生效（与服务端 ChannelStore.effort 一致）。 */
+/** 请求时实际使用的思考程度：所选档位仍在可选档位里才生效（与服务端 ChannelStore.effort 一致）。 */
 export const effortOf = (model: ai.AiModel | null | undefined) =>
-  model?.reasoning_effort && model.reasoning_efforts.includes(model.reasoning_effort) ? model.reasoning_effort : null;
+  model?.reasoning_effort && (model.effort_options ?? model.reasoning_efforts).includes(model.reasoning_effort) ? model.reasoning_effort : null;
 
 export const initialVision = (model: ai.AiModel | null): "auto" | "yes" | "no" =>
   model?.manual_fields.includes("vision") ? (model.capabilities.vision === true ? "yes" : "no") : "auto";
@@ -355,12 +355,13 @@ export function ModelDialog({ channelId, model, onClose, onSaved }: { channelId:
             <option value="auto">跟随模型目录</option><option value="yes">支持</option><option value="no">不支持</option>
           </select>
         </Field>
-        {model && <Field label="思考程度" hint={model.reasoning_efforts.length
-          ? "可选档位来自模型目录。选择后，每次回复都按这个程度请求模型思考；「不设置」时请求里不带思考程度，由模型服务决定。程度越高回答越慢、消耗的 token 越多。"
-          : model.catalog_id ? "模型目录没有提供这个模型的思考程度档位，请求里不带思考程度字段。" : "模型目录未收录这个模型，请求里不带思考程度字段。"}>
-          <select className="input" value={form.effort} disabled={!model.reasoning_efforts.length} onChange={event => setForm({ ...form, effort: event.target.value })}>
+        {model && <Field label="思考程度" hint={(model.efforts_known
+          ? "可选档位来自模型目录。"
+          : `${model.catalog_id ? "模型目录没有提供这个模型的档位" : "模型目录未收录这个模型"}，下面是常用档位，选择后请点「测试」确认渠道接受。`)
+          + "选择后，每次回复都按这个程度请求模型思考；「不设置」时请求里不带思考程度，由模型服务决定（有的模型这时不思考，也就没有思考过程可显示）。程度越高回答越慢、消耗的 token 越多。"}>
+          <select className="input" value={form.effort} onChange={event => setForm({ ...form, effort: event.target.value })}>
             <option value="">不设置（由模型决定）</option>
-            {model.reasoning_efforts.map(value => <option key={value} value={value}>{EFFORT_LABELS[value] ? `${EFFORT_LABELS[value]}（${value}）` : value}</option>)}
+            {(model.effort_options ?? model.reasoning_efforts).map(value => <option key={value} value={value}>{EFFORT_LABELS[value] ? `${EFFORT_LABELS[value]}（${value}）` : value}</option>)}
           </select>
         </Field>}
         <Switch label="允许用于私密对话" checked={form.private_ok} onChange={value => setForm({ ...form, private_ok: value })}

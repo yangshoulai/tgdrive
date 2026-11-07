@@ -836,7 +836,7 @@ class AssistantService:
             raise ValueError("上一条消息还在处理，请稍候或先停止")
         active = sum(1 for run in self.runs.values() if run.user_id == user_id and run.finished_at is None)
         if active >= limits["user_concurrency"]:
-            raise ValueError("你有其他对话正在处理，请稍候")
+            raise ValueError("另一个对话还在处理，请稍候再发送；可在对话列表中查看或停止它")
         self._check_budget(user_id)
         self._check_rate(user_id, limits)
         return limits

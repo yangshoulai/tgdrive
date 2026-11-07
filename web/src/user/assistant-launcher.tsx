@@ -23,7 +23,7 @@ export function AssistantLauncher({ available, open, status, onToggle }: { avail
     className={`assistant-launcher${working ? " is-working" : ""}${status.pending ? " has-pending" : ""}`}
     aria-label={`${name}${state}`} title={`${name}（${shortcutLabel("Mod+J")}）${state}`} aria-keyshortcuts="Meta+J Control+J" onClick={onToggle}>
     <span className="assistant-launcher-ring" aria-hidden="true" />
-    <span className="assistant-launcher-orb" aria-hidden="true"><AssistantMark size={26} state={working ? "thinking" : "idle"} /></span>
+    <span className="assistant-launcher-orb" aria-hidden="true"><AssistantMark size={30} state={working ? "thinking" : "idle"} /></span>
     {status.private && <span className="assistant-launcher-lock" aria-hidden="true"><Icon name="lock" size={10} /></span>}
     {status.pending > 0 && <span className="assistant-launcher-badge" aria-hidden="true">{badgeText(status.pending)}</span>}
   </button>, document.body);

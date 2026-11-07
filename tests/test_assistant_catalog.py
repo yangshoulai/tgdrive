@@ -114,12 +114,15 @@ class CatalogStoreTests(AssistantCase):
             status, updated = await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"reasoning_effort": "high"}, admin)
             self.assertEqual((status, updated["reasoning_effort"]), (200, "high"))
             self.assertEqual(self.service.channels.effort(updated), "high")
-            # 目录不再提供档位时，已选的档位不再发送。
+            # 目录不再提供档位时改用常用档位：已选的 high 仍在其中，继续发送；不在常用档位里的不能选。
             status, _ = await self.req("POST", "/api/admin/v1/assistant/catalog/update", {"id": "local/test-model", "reasoning_efforts": []}, admin)
             self.assertEqual(status, 200)
             current = self.service.channels.model(model["id"])
-            self.assertEqual((current["reasoning_efforts"], current["reasoning_effort"]), ([], "high"))
-            self.assertIsNone(self.service.channels.effort(current))
+            self.assertEqual((current["reasoning_efforts"], current["reasoning_effort"], current["efforts_known"]), ([], "high", False))
+            self.assertEqual(current["effort_options"], ["minimal", "low", "medium", "high", "xhigh"])
+            self.assertEqual(self.service.channels.effort(current), "high")
+            status, _ = await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"reasoning_effort": "max"}, admin)
+            self.assertEqual(status, 400)
             status, _ = await self.req("POST", f"/api/admin/v1/assistant/models/{model['id']}/update", {"reasoning_effort": None}, admin)
             self.assertEqual(status, 200)
             status, _ = await self.req("POST", "/api/admin/v1/assistant/catalog", {"provider": "local", "model": "bad", "reasoning_efforts": ["Very High"]}, admin)

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.23.0
+// @version      0.23.1
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -1266,6 +1266,26 @@
         selected = list(node(".wp-s-core-pan")?.__vue__?.selectedList);
         if (!available) selected = list(node(".file-list")?.__vue__?.allFileList).filter(item => item.selected);
         if (!available) { try { selected = list(view.require?.("system-core:context/context.js")?.instanceForSystem?.list?.getSelected?.()); } catch { /* Try the page bridge. */ } }
+        if ((!available || !selected.length) && share) {
+          // New share page (disk-share-v2, Vue 3, since 2026-11): checkboxes live on the list rows and file
+          // metadata in locals.file_list (kept in sync when entering sub-folders); a single-file share has no rows.
+          const locals = view.locals;
+          const raw = locals?.dump?.()?.file_list;
+          const files = Array.isArray(raw?.value) ? raw.value : Array.isArray(raw) ? raw : locals?.get?.("file_list");
+          const rows = nodes(".JS-list-view-item[data-file-key]").filter(row => row.getAttribute?.("data-file-key") || row.dataset?.fileKey);
+          const known = Array.isArray(files) ? files : [];
+          if (rows.length) {
+            available = true;
+            selected = rows.filter(row => row.querySelector?.(".wp-checkbox--checked, [aria-checked='true']")).map(row => {
+              const key = String(row.getAttribute?.("data-file-key") || row.dataset?.fileKey);
+              const file = known.find(item => String(item.fs_id) === key);
+              if (file) return file;
+              const link = row.querySelector?.(".filename");
+              const size = row.querySelector?.(".file-size")?.textContent?.trim() || "";
+              return { fs_id: key, server_filename: link?.title || link?.textContent?.trim() || key, size: 0, isdir: /个(?:文件|项目)/.test(size) ? 1 : 0 };
+            });
+          } else if (/single/.test(String(view.SHAREPAGETYPE || locals?.dump?.()?.share_page_type?.value || "")) && known.length) selected = list(known);
+        }
         break;
       }
       case "aliyun": selected = reactList(['[class^="node-list-table-view--"], [class*="node-list-table-view--"], [class*="node-list-grid-view--"]'], ["dataSource"], "fileId", ["selectedKeys"]); break;
@@ -1297,10 +1317,21 @@
     // 勾选数量不设上限：发送时按设置的每批文件数（batchLimit）自动分批。
     const result = { available, files: selected.map(item => pick(item, fields.split(" "))) };
     if (share && provider === "baidu") {
+      // Old share pages keep these in locals.dump() or yunData; disk-share-v2 also exposes locals.get(), may carry
+      // sign/timestamp itself, and keeps the verified extraction key in the BDCLND cookie.
       const locals = view.locals?.dump?.() || {};
-      const value = key => locals[key]?.value ?? locals[key];
-      result.shareData = pick({ uk: value("share_uk"), id: value("shareid"), bdstoken: value("bdstoken"),
-        jsToken: view.jsToken || "", sekey: view.currentSekey || view.cache?.list?.config?.params?.sekey || "" }, ["uk", "id", "bdstoken", "jsToken", "sekey"]);
+      const value = key => {
+        let found = locals[key]?.value ?? locals[key];
+        if (found == null || found === "") { try { found = view.locals?.get?.(key); } catch { /* Not available. */ } }
+        return found ?? view.yunData?.[key] ?? "";
+      };
+      const cookie = name => {
+        const raw = String(doc.cookie || "").split(";").map(part => part.trim()).find(part => part.startsWith(name + "="))?.slice(name.length + 1) || "";
+        try { return decodeURIComponent(raw); } catch { return raw; }
+      };
+      result.shareData = pick({ uk: value("share_uk"), id: value("shareid"), bdstoken: value("bdstoken"), jsToken: view.jsToken || value("jsToken"),
+        sekey: view.currentSekey || value("currentSekey") || value("sekey") || cookie("BDCLND") || view.cache?.list?.config?.params?.sekey || "",
+        sign: value("sign"), timestamp: value("timestamp") }, ["uk", "id", "bdstoken", "jsToken", "sekey", "sign", "timestamp"]);
     }
     return result;
   }
@@ -1370,7 +1401,7 @@
       source.search = "";
       if (!context.share) source.pathname = "/";
       source.hash = `tessera-${context.provider}-${encodeURIComponent(String(item[idKey]))}`;
-      const shareData = context.provider === "baidu" && snapshot.shareData ? Object.fromEntries(["uk", "id", "bdstoken", "jsToken", "sekey"]
+      const shareData = context.provider === "baidu" && snapshot.shareData ? Object.fromEntries(["uk", "id", "bdstoken", "jsToken", "sekey", "sign", "timestamp"]
         .filter(key => ["string", "number"].includes(typeof snapshot.shareData[key]) && String(snapshot.shareData[key]).length <= 8192).map(key => [key, snapshot.shareData[key]])) : undefined;
       // 在网盘里勾选是明确的选择：之前发送过的也一起进入确认页（标「已发送过」，可移除），不再静默跳过或拦下。
       unique.set(source.href, { url: source.href, name: String(file[nameKey] || file.filename || ""), size: Number(file[sizeKey]) || null,
@@ -1517,6 +1548,8 @@
     const shared = await cloudOnce(context, "baidu-share", async () => {
       const data = context.shareData || {};
       if (!data.uk || !data.id) throw new Error("请先打开分享文件列表并完成提取码验证，再获取文件");
+      // The new share page already provides a signature; only ask tplconfig when it is missing.
+      if (data.sign && data.timestamp) return data;
       const url = new URL("https://pan.baidu.com/share/tplconfig?fields=sign,timestamp&channel=chunlei&web=1&app_id=250528&clienttype=0&view_mode=1");
       url.searchParams.set("surl", new URL(context.url).pathname.split("/").pop());
       url.searchParams.set("bdstoken", data.bdstoken || "");

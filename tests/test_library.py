@@ -69,10 +69,15 @@ class LibraryTests(unittest.TestCase):
             with self.app.metadata.transaction() as db:
                 db.execute("UPDATE objects SET modified_at=? WHERE bucket_id=? AND key=?", (modified, self.alice.bucket_id, key))
 
-    def page(self, view, limit=2):
+    def get(self, path):
+        status, _, data = asyncio.run(self.client.request("GET", path, headers=self.session))
+        self.assertEqual(status, 200, data)
+        return json.loads(data)
+
+    def page(self, view, limit=2, extra=""):
         keys, cursor, bodies = [], "", []
         while True:
-            status, _, data = asyncio.run(self.client.request("GET", f"/api/user/v1/library?view={view}&limit={limit}&cursor={quote(cursor)}",
+            status, _, data = asyncio.run(self.client.request("GET", f"/api/user/v1/library?view={view}&limit={limit}&cursor={quote(cursor)}{extra}",
                                                               headers=self.session))
             self.assertEqual(status, 200, data)
             body = json.loads(data)
@@ -93,19 +98,87 @@ class LibraryTests(unittest.TestCase):
         keys, _ = self.page("recent")
         self.assertEqual(keys, ["b/new.txt", "c/mid.txt", "c/same.txt", "a/old.txt"], "按修改时间倒序，同一时间按路径，翻页不重复不遗漏")
 
-    def test_photos_prefer_exif_time_and_music_lists_audio(self):
+    def test_photos_are_images_only_and_folder_lists_by_taken_time(self):
         now = time.time()
         self.put("trip/early.jpg", exif_jpeg("2019:05:01 08:00:00"), "image/jpeg", now)
         self.put("trip/plain.jpg", b"\xff\xd8\xff\xdb" + b"\x00" * 64, "image/jpeg", now - 50)
+        self.put("trip/day/sub.jpg", b"\xff\xd8\xff\xdb" + b"\x00" * 64, "image/jpeg", now)
+        self.put("trip/clip.mp4", b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64, "video/mp4", now)
         self.put("notes.txt", b"x", "text/plain", now)
-        self.put("music/b.mp3", b"ID3" + b"\x00" * 64, "audio/mpeg")
-        self.put("music/a.mp3", b"ID3" + b"\x00" * 64, "audio/mpeg")
-        keys, bodies = self.page("photos")
-        self.assertEqual(keys, ["trip/plain.jpg", "trip/early.jpg"], "有 EXIF 的按拍摄时间（2019 年）排在后面")
+        keys, bodies = self.page("photos", extra="&folder=" + quote("trip/"))
+        self.assertEqual(keys, ["trip/plain.jpg", "trip/early.jpg"], "只列这个文件夹直接包含的图片，有 EXIF 的按拍摄时间（2019 年）排在后面，不含视频")
         self.assertEqual(bodies[1]["taken_at"], datetime(2019, 5, 1, 8, tzinfo=timezone.utc).timestamp())
         self.assertNotIn("taken_at", bodies[0])
-        keys, _ = self.page("music")
-        self.assertEqual(keys, ["music/a.mp3", "music/b.mp3"])
+        keys, _ = self.page("photos")
+        self.assertEqual(keys, ["trip/day/sub.jpg", "trip/early.jpg", "trip/plain.jpg"], "不带文件夹时按路径排列，便于网页按文件夹分段")
+        keys, _ = self.page("videos")
+        self.assertEqual(keys, ["trip/clip.mp4"])
+
+    def test_folders_group_media_by_parent_directory(self):
+        now = time.time()
+        for index in range(6):
+            self.put(f"trip/{index}.jpg", b"\xff\xd8\xff\xdb" + bytes([index]) * 64, "image/jpeg", now - 100 + index)
+        self.put("home.jpg", b"\xff\xd8\xff\xdb" + b"\x09" * 64, "image/jpeg", now)
+        self.put("trip/day/sub.jpg", b"\xff\xd8\xff\xdb" + b"\x08" * 64, "image/jpeg", now - 500)
+        body = self.get("/api/user/v1/library/folders?view=photos")
+        self.assertFalse(body["truncated"])
+        self.assertEqual([(item["path"], item["count"]) for item in body["folders"]], [("", 1), ("trip/", 6), ("trip/day/", 1)],
+                         "按最近时间倒序；根目录与子文件夹各自成组")
+        trip = body["folders"][1]
+        self.assertEqual([item["key"] for item in trip["samples"]], ["trip/5.jpg", "trip/4.jpg", "trip/3.jpg", "trip/2.jpg"], "样本取最新的 4 张")
+        self.assertEqual(trip["size"], 6 * 68)
+
+    def tag(self, key, **fields):
+        row = self.app.metadata.db.execute("SELECT blob_uuid FROM objects WHERE bucket_id=? AND key=?", (self.alice.bucket_id, key)).fetchone()
+        names = ", ".join(fields)
+        with self.app.metadata.transaction() as db:
+            db.execute(f"INSERT INTO media_info(blob_uuid, parser, extracted_at, {names}) VALUES (?,?,?,{','.join('?' for _ in fields)})",
+                       (row["blob_uuid"], 1, time.time(), *fields.values()))
+
+    def test_music_groups_by_album_name(self):
+        self.put("a/1.mp3", b"ID3" + b"\x01" * 64, "audio/mpeg")
+        self.put("b/2.mp3", b"ID3" + b"\x02" * 64, "audio/mpeg")
+        self.put("b/3.mp3", b"ID3" + b"\x03" * 64, "audio/mpeg")
+        self.put("c/loose.mp3", b"ID3" + b"\x04" * 64, "audio/mpeg")
+        self.put("c/blank.mp3", b"ID3" + b"\x05" * 64, "audio/mpeg")
+        self.tag("b/2.mp3", album="精选", artist="甲", track="2/10", duration=30.0)
+        self.tag("a/1.mp3", album=" 精选 ", artist="乙", track="1", duration=40.0)
+        self.tag("b/3.mp3", album="林间", artist="甲")
+        self.tag("c/blank.mp3", album="", title="空专辑")
+        body = self.get("/api/user/v1/library/albums")
+        self.assertFalse(body["truncated"])
+        self.assertEqual([(item["album"], item["count"]) for item in body["albums"]], [("林间", 1), ("精选", 2), ("", 2)],
+                         "同名专辑（去掉首尾空白）合为一张，不区分艺人；没有专辑的歌曲合为一项排在最后")
+        album = body["albums"][1]
+        self.assertEqual([item["key"] for item in album["samples"]], ["a/1.mp3", "b/2.mp3"], "按曲目号排列，第一首作封面")
+        self.assertEqual((album["artist"], album["duration"]), ("多位艺人", 70.0))
+        self.assertEqual(body["albums"][0]["artist"], "甲")
+        keys, _ = self.page("music", extra="&album=" + quote("精选"))
+        self.assertEqual(sorted(keys), ["a/1.mp3", "b/2.mp3"])
+        keys, _ = self.page("music", extra="&album=")
+        self.assertEqual(keys, ["c/blank.mp3", "c/loose.mp3"], "空专辑名与没有标签记录的歌曲都在「无专辑」里")
+
+    def test_music_search_matches_path_and_tags(self):
+        self.put("music/b.mp3", b"ID3" + b"\x00" * 64, "audio/mpeg")
+        self.put("albums/Rain Song.mp3", b"ID3" + b"\x02" * 64, "audio/mpeg")
+        keys, _ = self.page("music", extra="&q=rain")
+        self.assertEqual(keys, ["albums/Rain Song.mp3"], "按文件名匹配，不区分大小写")
+        keys, _ = self.page("music", extra="&q=" + quote("albums"))
+        self.assertEqual(keys, ["albums/Rain Song.mp3"], "也匹配文件夹名")
+        self.tag("music/b.mp3", title="晨间漫步", artist="Tessera 乐队", album="林间")
+        keys, _ = self.page("music", extra="&q=" + quote("乐队"))
+        self.assertEqual(keys, ["music/b.mp3"], "音乐还匹配标签里的歌名、艺人与专辑")
+        albums = self.get("/api/user/v1/library/albums?q=" + quote("漫步"))["albums"]
+        self.assertEqual([(item["album"], item["count"]) for item in albums], [("林间", 1)], "搜索时只统计匹配的歌曲")
+        status, _, _ = asyncio.run(self.client.request("GET", "/api/user/v1/library/folders?view=music", headers=self.session))
+        self.assertEqual(status, 400, "音乐按专辑浏览，不提供文件夹分组")
+
+    def test_recent_search_matches_relative_path(self):
+        now = time.time()
+        self.put("Work/report.txt", b"r", "text/plain", now)
+        self.put("notes.txt", b"n", "text/plain", now)
+        keys, _ = self.page("recent", extra="&q=work")
+        self.assertEqual(keys, ["Work/report.txt"])
 
     def test_rejects_unknown_view(self):
         status, _, data = asyncio.run(self.client.request("GET", "/api/user/v1/library?view=all", headers=self.session))

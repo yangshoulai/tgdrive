@@ -9,14 +9,14 @@ import * as ai from "../assistant-api";
 import { AssistantMark, Badge, Button, ConfirmDialog, EmptyState, downloadFile, Icon, IconButton, Menu, Modal, Segmented, SkeletonRows, formatBytes, isShortcutControl, shortcutLabel, toast, type IconName, type MenuItem } from "../ui";
 import { ShortcutsDialog } from "../shortcuts";
 import type { PageImport } from "./page-import";
-import { Thread, PlanBar, latestPlan, useMarkState, type HttpApproval, type LiveRun } from "./assistant-thread";
+import { Thread, PlanBar, PathOpenContext, latestPlan, type HttpApproval, type LiveRun } from "./assistant-thread";
 import { ReviewQueue, pendingReviews, type ReviewRequest } from "./assistant-review";
 import { AttachmentTray, useAttachments } from "./assistant-attachments";
 import { filesBridge, getPrivateSection, openPrivateSection, waitForFiles } from "./assistant-bridge";
 import { usePrivateAccess } from "./private-session";
 import type { AssistantDockStatus } from "./assistant-hooks";
 import { assistantEnvironment } from "./assistant-environment";
-import { commonFolder, mentionLabel, useMentions } from "./assistant-mentions";
+import { PRIVATE_LABEL, commonFolder, mentionLabel, useMentions } from "./assistant-mentions";
 import { PrivateUnlockDialog } from "./private-unlock";
 import { AssistantComposer, type ComposerHandle } from "./assistant-composer";
 import { lockAssistantPage, watchAssistantViewport } from "./assistant-layout";
@@ -51,6 +51,9 @@ const ACTIVE_ACTION = new Set(["pending", "confirmed", "running", "undoing"]);
 export type AssistantNavigate = (view: "files" | "trash" | "downloads" | "shared" | "private", prefix?: string) => void;
 const FULL_ACK_KEY = "tessera-assistant-full-ack-v2";
 const EMPTY_LIVE: LiveRun = { reasoning: "", reasoningStartedAt: null, streaming: "", tools: [], phase: "thinking" };
+
+/** 头部的作用域：根目录写作「全部文件」（与对话列表一致），其余显示路径。 */
+const scopeText = (scope: string) => !scope || scope === "/" ? "全部文件" : scope;
 
 export function AssistantDrawer({ open, config, location, onClose, onConfigChanged, mode = "drawer", initialConversation, onOpenPage,
   onConversationChange, onFilesChanged, pageImport, onPageImportDone, onNavigate, onStatus }: {
@@ -162,7 +165,6 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const locationKey = location.view === "files" ? location.prefix : inPrivatePage ? location.prefix || api.PRIVATE_PREFIX : "";
   // 作用域只针对普通文件；私密位置不改变作用域。
   const normalLocation = api.isPrivatePath(locationKey) ? "" : locationKey;
-  const headerMark = useMarkState(runId ? live ?? EMPTY_LIVE : null);
   const chosenScope = scopeTarget === HERE ? normalLocation : scopeTarget;
   const mention = useMentions({ draft, location: locationKey, privateUnlocked: config.private_available && unlocked,
     enabled: config.notice_ack && !(config.usage.limit && config.usage.today >= config.usage.limit),
@@ -269,6 +271,19 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   const cacheQueue = useCacheQueue();
   const clientContext = useRef({ location, onNavigate, page, privateUnlocked: unlocked, cacheQueue, open });
   clientContext.current = { location, onNavigate, page, privateUnlocked: unlocked, cacheQueue, open };
+  /** 回复里的 `/路径`：文件夹直接打开，文件打开所在目录并选中（与浏览器工具 ui_navigate／ui_select 同一套校验，私密路径须已解锁）。
+   *  手机上抽屉铺满屏幕，打开后收起抽屉才能看到文件页。 */
+  const openPath = useCallback((label: string) => {
+    const privatePath = label.startsWith(PRIVATE_LABEL);
+    const relative = (privatePath ? label.slice(PRIVATE_LABEL.length) : label).replace(/^\//, "");
+    const key = privatePath ? api.PRIVATE_PREFIX + relative : relative;
+    const folder = !relative || relative.endsWith("/");
+    const parent = key.endsWith("/") ? key : key.slice(0, key.lastIndexOf("/") + 1) || (privatePath ? api.PRIVATE_PREFIX : "");
+    const task = folder ? executeClientTool("ui_navigate", { view: "files", path: key, private: privatePath }, clientContext.current)
+      : executeClientTool("ui_select", { folder: parent, paths: [key] }, clientContext.current);
+    if (mobile) onClose();
+    void task.catch(reason => toast.error(api.errorMessage(reason, "无法打开这个位置")));
+  }, [mobile, onClose]);
   const detailRef = useRef(detail);
   detailRef.current = detail;
   const runClientCall = useCallback(async (runId: string, event: ai.RunEvent) => {
@@ -814,9 +829,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
   }} />;
   const header = <header className="assistant-header">
     <IconButton className={page ? "assistant-mobile-history" : undefined} icon="list" label="对话历史" shortcut="H" active={history} onClick={() => { setHistory(value => !value); if (!history) loadConversations(); }} />
-    <span className={`assistant-brand-mark${runId ? " is-working" : ""}`} aria-hidden="true"><AssistantMark size={24} state={headerMark} /></span>
+    {/* 抽屉顶部的标识保持静止：运行状态由消息头像与输入框上的进度表现，顶部不再跟着动。 */}
+    <span className="assistant-brand-mark" aria-hidden="true"><AssistantMark size={28} /></span>
     <div className="assistant-title"><strong>{privateChat && <span className="assistant-private-tag" title="这个对话涉及私密空间，锁定后需要解锁才能查看"><Icon name="lock" size={11} />私密</span>}{detail?.conversation.title || (privateChat ? "私密对话" : "文件助手")}</strong>
-      <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{detail ? (privateChat ? `私密空间 · ${conversationScope}` : conversationScope) : "查找、整理，让文件井井有条"}</small></div>
+      <small>{accessMode === "full" && <span className="assistant-full-tag"><Icon name="zap" size={11} />完全访问</span>}{detail ? (privateChat ? `私密空间 · ${conversationScope}` : scopeText(conversationScope)) : "查找、整理，让文件井井有条"}</small></div>
     <IconButton icon="plus" label="新对话" shortcut="Mod+Shift+O" onClick={newConversation} />
     <IconButton className="assistant-keyboard-help" icon="keyboard" label="键盘快捷键" shortcut="?" onClick={() => setShortcutsOpen(true)} />
     {!page && onOpenPage && <IconButton icon="maximize" label="在全页打开" onClick={() => onOpenPage(currentId)} />}
@@ -833,8 +849,10 @@ export function AssistantDrawer({ open, config, location, onClose, onConfigChang
         {!config.notice_ack ? <NoticeCard notice={config.notice} retention={config.retention_days} onAccept={() => void acknowledge()} />
           : loading ? <SkeletonRows rows={4} />
           : !detail ? <Welcome location={effectiveScope} view={location.view} privateSpace={inPrivatePage} onPick={text => { setDraft(text); input.current?.focus(); }} />
-          : <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} runId={runId} httpApprovals={httpApprovals}
-              onRetry={retryFrom} onReview={focusReview} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />}
+          : <PathOpenContext.Provider value={page || !onNavigate ? null : openPath}>
+            <Thread detail={detail} live={live} liveModel={selectedModel?.label} modelLabel={modelLabel} runId={runId} httpApprovals={httpApprovals}
+              onRetry={retryFrom} onReview={focusReview} onActionChanged={reloadDetail} onFilesChanged={onFilesChanged} />
+          </PathOpenContext.Provider>}
         {reconnecting && <p className="ai-notice" role="status"><Icon name="refresh" size={14} /><span>重新连接中…</span></p>}
       </div>
     </div>
@@ -1164,7 +1182,7 @@ const PAGE_STARTERS: Record<string, { title: string; description: string; text: 
 
 function Welcome({ location, view, privateSpace, onPick }: { location: string; view?: string; privateSpace?: boolean; onPick: (text: string) => void }) {
   if (privateSpace) return <div className="assistant-welcome is-private">
-    <span className="assistant-welcome-icon"><AssistantMark size={36} /></span>
+    <span className="assistant-welcome-icon"><AssistantMark size={48} /></span>
     <span className="assistant-eyebrow"><Icon name="lock" size={12} />私密对话</span>
     <h3>处理私密空间里的文件。</h3>
     <p className="muted">在这里发起的对话会标记为私密，保存在对话历史中；<br />私密空间锁定后，需要解锁才能查看或继续。</p>
@@ -1184,7 +1202,7 @@ function Welcome({ location, view, privateSpace, onPick }: { location: string; v
     { title: "发现重复", description: "看看能节省多少空间", text: "找出这里的重复文件，先不要修改", icon: "copy" },
   ];
   return <div className="assistant-welcome">
-    <span className="assistant-welcome-icon"><AssistantMark size={36} /></span>
+    <span className="assistant-welcome-icon"><AssistantMark size={48} /></span>
     <span className="assistant-eyebrow">你的文件，有了新帮手</span>
     <h3>让文件，井井有条。</h3>
     <p className="muted">查找、理解、整理，一句话就开始。<br />每一步修改，都由你来决定。</p>

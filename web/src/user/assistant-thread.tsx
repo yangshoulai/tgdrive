@@ -18,7 +18,7 @@ import { passkeyUnavailable, privatePasskeyAssertion } from "../passkeys";
 import { createThumbnails, generateLoadedThumbnails, thumbnailSource } from "../thumbnails";
 import { useCacheQueue } from "./cache";
 import { cacheFileId, cacheStats, cacheSupported } from "../cache-client";
-import { Notice as InlineNotice, ButtonLink, AssistantMark, Badge, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
+import { Notice as InlineNotice, ButtonLink, AssistantMark, Badge, shortcutLabel, type AssistantMarkState, Button, Checkbox, Icon, Modal, Progress, SkeletonRows, copyText, formatBytes, formatDateTime, toast, type IconName, type Tone } from "../ui";
 
 /** 对象键的显示路径：私密空间的条目显示为相对私密空间根的路径。 */
 /** 对象键 → 显示路径：私密空间写作 私密:/路径（与助手使用的写法一致，§37.3）。 */
@@ -27,6 +27,23 @@ const baseName = (key: string) => key.replace(/\/$/, "").split("/").pop() || key
 const parentOf = (key: string) => { const trimmed = key.replace(/\/$/, ""); return trimmed.includes("/") ? trimmed.slice(0, trimmed.lastIndexOf("/") + 1) : ""; };
 const seconds = (ms: number) => ms < 1000 ? "不到 1 秒" : `${Math.round(ms / 1000)} 秒`;
 const duration = (ms: number | null | undefined) => ms == null ? "" : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+
+/** 回复正文里的 `/路径`（私密为 `私密:/路径`）可以点开：由抽屉提供，打开所在目录并选中文件；全页模式不提供，按普通代码显示。 */
+export const PathOpenContext = createContext<((path: string) => void) | null>(null);
+const PATH_CODE = /^(?:私密:)?\/[^\s`]{0,300}$/;
+const pathIsFolder = (path: string) => path.endsWith("/") || !/\.[^/.]{1,12}$/.test(path.split("/").at(-1) ?? "");
+
+/** 回复里的路径胶囊：类型图标 + 完整路径，点击在文件页中打开。 */
+function usePathCode() {
+  const openPath = useContext(PathOpenContext);
+  return useCallback((code: string) => {
+    if (!openPath || !PATH_CODE.test(code) || code.includes("*")) return null;
+    // 模型常把文件夹写成不带结尾 / 的「/音乐」：最后一段没有扩展名时按文件夹处理。
+    const folder = pathIsFolder(code);
+    return <button type="button" className="md-path" title={folder ? "在文件页中打开这个文件夹" : "在文件页中打开所在文件夹并选中"} onClick={() => openPath(folder && !code.endsWith("/") ? code + "/" : code)}>
+      <FileGlyph kind={folder ? "folder" : getFileKind(null, code)} size={13} /><span>{code}</span></button>;
+  }, [openPath]);
+}
 
 export type LiveRun = {
   reasoning: string; reasoningStartedAt: number | null; streaming: string;
@@ -249,7 +266,11 @@ function TurnView({ turn, live, runId = null, model, httpApprovals, onRetry }: {
   if (inline) steps.push({ kind: "note", key: "live-note", text: live!.streaming, live: true });
   const streaming = inline ? "" : live?.streaming ?? "";
   const mark = useMarkState(live);
-  const waiting = httpApprovals.some(approval => approval.status === "pending");
+  const decisions = useContext(DecisionContext);
+  const renderCode = usePathCode();
+  // 等待用户处理（HTTP 审批、操作确认、提问）时，状态写「等待你确认」，不再显示「等待模型响应」。
+  const waiting = httpApprovals.some(approval => approval.status === "pending")
+    || Boolean(live) && steps.some(step => step.kind === "decision" && decisionState(step, decisions) === "pending");
   const plans = turn.cards.filter(message => message.event?.type === "plan");
   const cards = turn.cards.filter(message => message.event?.type !== "plan");
   // 公开分享的链接令牌只给界面；放在时间线之外，折叠过程时也能直接复制。
@@ -267,11 +288,12 @@ function TurnView({ turn, live, runId = null, model, httpApprovals, onRetry }: {
         <div className="ai-reply-head"><strong>文件助手</strong>{model && <span className="ai-model" title={model}>{model}</span>}
           {live && <LiveStatus live={live} waiting={waiting} />}</div>
         {plans.map(message => message.event?.type === "plan" && <PlanLine key={message.event.id ?? turn.key} plan={message.event} />)}
+        {live && !waiting && !steps.length && !streaming && !plans.length && <div className="ai-typing" aria-hidden="true"><i /><i /><i /></div>}
         {steps.length > 0 && <Process steps={steps} live={Boolean(live)} />}
         {cards.map(message => message.event?.type === "browser" && <BrowserCard key={`card-${message.seq}`} event={message.event} />)}
         {shared.map(action => <ShareLinks key={action.id} action={action} />)}
         {(answer || streaming) && <div className="ai-answer">
-          <Markdown source={streaming || answer?.text || ""} />{streaming && <i className="ai-caret" aria-hidden="true" />}
+          <Markdown source={streaming || answer?.text || ""} renderCode={renderCode} />{streaming && <i className="ai-caret" aria-hidden="true" />}
         </div>}
         {turn.notices.map(notice => <Notice key={notice.seq} message={notice} onRetry={notice.retry ? retry : undefined} />)}
         {!live && (answer || turn.output > 0) && <div className="ai-reply-foot">
@@ -284,7 +306,7 @@ function TurnView({ turn, live, runId = null, model, httpApprovals, onRetry }: {
 }
 
 function LiveStatus({ live, waiting = false }: { live: LiveRun; waiting?: boolean }) {
-  const label = waiting ? "等待确认" : live.phase === "queued" ? `排队中${live.queue ? `，前面 ${live.queue} 个` : ""}`
+  const label = waiting ? "等待你确认" : live.phase === "queued" ? `排队中${live.queue ? `，前面 ${live.queue} 个` : ""}`
     : live.tools.length ? `正在${live.tools.at(-1)!.label}` : live.streaming ? "正在回复" : live.reasoning ? "正在思考" : live.phase === "thinking" ? "等待模型响应" : "正在准备";
   return <span className="ai-live" role="status"><i aria-hidden="true" /><span className={waiting ? undefined : "ai-shimmer"}>{label}</span></span>;
 }
@@ -445,6 +467,7 @@ function ProcessText({ text, ms, live, startedAt, note, disclosure, onOpen }: {
   useEffect(() => {
     if (open && live && disclosure.follow && box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [text, live, open, disclosure]);
+  const renderCode = usePathCode();
   const elapsed = live ? (startedAt ? Math.max(0, now - startedAt) : 0) : ms;
   const summary = note ? text.replace(/\s+/g, " ").trim() : "";
   return <div className={`ai-step ${note ? "ai-note" : "ai-thinking"}${open ? " is-open" : ""}${live ? " is-live" : ""}`}>
@@ -460,7 +483,7 @@ function ProcessText({ text, ms, live, startedAt, note, disclosure, onOpen }: {
       <div id={contentId} className="ai-tool-detail ai-thinking-text" hidden={!open} ref={box} aria-live="off"
         onScroll={event => { const node = event.currentTarget; disclosure.top = node.scrollTop;
           disclosure.follow = node.scrollHeight - node.scrollTop - node.clientHeight < 24; }}>
-        {open && <Markdown source={text} />}</div>
+        {open && <Markdown source={text} renderCode={note ? renderCode : undefined} />}</div>
     </div>
   </div>;
 }
@@ -719,7 +742,9 @@ export function PlanBar({ plan, running, onContinue }: { plan: ai.PlanEvent; run
   const next = current ?? plan.items.find(item => item.status !== "completed");
   const subtitle = status === "completed" ? "全部步骤已完成" : next ? `${current ? "当前" : "下一步"}：${next.content}` : "查看完整计划";
   const resumable = canResumePlan(plan, running);
-  return <section className={`assistant-plan-bar ai-plan is-${status}`} aria-label="当前任务计划" onKeyDown={event => {
+  // 全部完成后收成一行，把空间还给消息；展开时仍可查看完整步骤。
+  const compact = status === "completed" && !expanded;
+  return <section className={`assistant-plan-bar ai-plan is-${status}${compact ? " is-compact" : ""}`} aria-label="当前任务计划" onKeyDown={event => {
     if (!expanded || event.key !== "Escape" || event.nativeEvent.isComposing || event.repeat) return;
     event.preventDefault(); event.stopPropagation(); setExpanded(false); trigger.current?.focus({ preventScroll: true });
   }}><div className="assistant-plan-inner">
@@ -729,13 +754,13 @@ export function PlanBar({ plan, running, onContinue }: { plan: ai.PlanEvent; run
         <span className="assistant-plan-icon" aria-hidden="true">{status === "in_progress" && running ? <ActivityDots /> : <Icon name={status === "completed" ? "check" : "list"} size={14} />}</span>
         <span className="assistant-plan-summary"><span className="assistant-plan-meta">
           <strong>{plan.title ?? "任务计划"}</strong><Badge tone={tone}>{PLAN_LABELS[status]}</Badge>
-        </span><small title={subtitle}>{subtitle}</small></span>
+        </span>{!compact && <small title={subtitle}>{subtitle}</small>}</span>
         <span className="assistant-plan-count">{done}/{plan.items.length}</span>
         <Icon name="chevronDown" size={14} />
       </button>
       {resumable && <Button size="sm" icon="play" onClick={onContinue}>继续</Button>}
     </div>
-    <PlanMeter done={done} total={plan.items.length} />
+    {!compact && <PlanMeter done={done} total={plan.items.length} />}
     <div id={panelId} className="assistant-plan-panel" hidden={!expanded} role="region" aria-label="完整任务计划" tabIndex={0}
       onPointerDown={event => {
         if (!(event.target as Element).closest("button, a")) event.currentTarget.focus({ preventScroll: true });
@@ -1014,8 +1039,7 @@ function ItemRow({ kind, item, base }: { kind: string; item: ai.ActionItem; base
     const rename = kind === "rename" || parentOf(item.from) === parentOf(item.to);
     return <li className="ai-diff-row"><Icon name={item.folder ? "folder" : "file"} size={13} />
       {rename ? <span className="ai-path" title={`${display(item.from)} → ${display(item.to)}`}>
-        <span className="ai-path-name"><del>{baseName(item.from)}</del></span>
-        <span className="ai-path-name"><Icon name="chevronRight" size={12} /><ins>{baseName(item.to)}</ins></span>
+        <span className="ai-rename"><del>{baseName(item.from)}</del><Icon name="arrowRight" size={12} /><ins>{baseName(item.to)}</ins></span>
         {parentOf(item.from) !== base && parentOf(item.from) && <span className="ai-path-dir">{display(parentOf(item.from))}</span>}
       </span>
         : <span className="ai-path" title={`${display(item.from)} → ${display(item.to)}`}>
@@ -1357,7 +1381,10 @@ export function ActionCard({ id, action, fallback, onChanged, onFilesChanged }: 
     </div>}
     {pending && danger && <label className="ai-ack"><Checkbox checked={acknowledged} onChange={setAcknowledged} label="我了解此操作不可恢复" /><span>我了解此操作不可恢复</span></label>}
     {pending && <footer className="ai-card-foot">
-      <span>{formatDateTime(value.expires_at)} 前有效</span>
+      {/* 有效期通常是 24 小时，只在快到期时提醒；平时提示键盘确认（危险操作不提供快捷确认）。 */}
+      <span className={value.expires_at - now < 3600 ? "tone-warning" : undefined} title={`${formatDateTime(value.expires_at)} 前有效`}>
+        {value.expires_at - now < 3600 ? `${Math.max(1, Math.ceil((value.expires_at - now) / 60))} 分钟后失效`
+          : danger || moveOut || cross || share ? "" : <span className="ai-key-hint"><kbd>{shortcutLabel("Mod+Enter")}</kbd> 确认</span>}</span>
       {pending && <>
         <Button size="sm" disabled={Boolean(busy)} loading={busy === "reject"} onClick={() => void run("reject", () => ai.rejectAction(id))}>拒绝</Button>
         <Button size="sm" variant={danger || moveOut ? "danger" : "primary"} disabled={Boolean(busy) || (danger && !acknowledged) || (share && password.length > 0 && password.length < 4) || crossBlocked || (media && !mediaChoices)}

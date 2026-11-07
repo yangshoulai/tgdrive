@@ -24,6 +24,8 @@ export type AiModel = {
   private_ok?: boolean;
   /** 模型目录给出的思考程度档位（只有 effort 类型；没有时为空，请求不带思考程度字段）。 */
   reasoning_efforts: string[];
+  /** 可选的思考程度：模型目录的档位；目录没有时为常用档位（efforts_known 为假）。 */
+  effort_options: string[]; efforts_known: boolean;
   /** 管理员选择的思考程度；null 表示不设置，由模型自己决定。 */
   reasoning_effort: string | null;
 };

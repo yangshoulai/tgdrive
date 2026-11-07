@@ -45,6 +45,10 @@ def normalize_base_url(value: object) -> str:
     return value
 
 
+# 模型目录没有给出思考程度档位时（目录未收录、手动添加的模型），管理员仍可从这些常用档位里选择：
+# 有的模型默认不思考，只有请求里带上程度才会返回思考过程。渠道不接受时请改回「不设置」。
+COMMON_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+
 class ChannelStore:
     def __init__(self, metadata: Metadata, keystore: KeyStore, *, log_call: Callable[..., None] | None = None, catalog=None) -> None:
         self.metadata, self.keystore = metadata, keystore
@@ -249,6 +253,8 @@ class ChannelStore:
                 "removed_upstream": bool(row["removed_upstream"]), "sort": row["sort"],
                 "private_ok": bool(row["private_ok"]),
                 "reasoning_efforts": effort_list(row["reasoning_efforts"]), "reasoning_effort": row["reasoning_effort"],
+                "effort_options": effort_list(row["reasoning_efforts"]) or list(COMMON_EFFORTS),
+                "efforts_known": bool(effort_list(row["reasoning_efforts"])),
                 "tested_at": row["tested_at"], "test_note": row["test_note"]}
 
     def models(self, channel_id: int | None = None) -> list[dict[str, object]]:
@@ -368,8 +374,8 @@ class ChannelStore:
         for name in ("context_window", "max_output", "tools", "input_price", "output_price"):
             if name in values and values[name] != current[name]:
                 manual.add(name)
-        if values.get("reasoning_effort") is not None and values["reasoning_effort"] not in current["reasoning_efforts"]:
-            raise ValueError("这个模型没有该思考程度；可选档位来自模型目录" + (f"：{'、'.join(current['reasoning_efforts'])}" if current["reasoning_efforts"] else "，目前没有获取到"))
+        if values.get("reasoning_effort") is not None and values["reasoning_effort"] not in current["effort_options"]:
+            raise ValueError(f"这个模型没有该思考程度，可选：{'、'.join(current['effort_options'])}")
         vision = values.pop("vision", None)
         if vision in ("yes", "no"):
             manual.add("vision")
@@ -390,9 +396,11 @@ class ChannelStore:
 
     @staticmethod
     def effort(model: dict) -> str | None:
-        """请求里使用的思考程度：管理员选择了档位且仍在模型目录给出的选项中；否则不带这个字段。"""
+        """请求里使用的思考程度：管理员选择了档位且仍在可选档位中（模型目录给出的档位；目录没有时为常用档位 COMMON_EFFORTS）；
+        否则不带这个字段。"""
         effort = model.get("reasoning_effort")
-        return effort if effort and effort in (model.get("reasoning_efforts") or []) else None
+        options = model.get("effort_options") or model.get("reasoning_efforts") or []
+        return effort if effort and effort in options else None
 
     @staticmethod
     def vision(model: dict) -> bool:

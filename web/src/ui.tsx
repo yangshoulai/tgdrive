@@ -91,6 +91,7 @@ const ICONS = {
   dumbbell: "M6.5 6.5v11m11-11v11M3 9v6m18-6v6M6.5 12h11M3 9h3.5M3 15h3.5m11-6H21m-3.5 6H21",
   sprout: "M7 20h10m-5 0v-9m0 0c0-3-2-5-6-5 0 3 2 5 6 5zm0-2c0-3 2-5 6-5 0 3-2 5-6 5z",
   arrowLeft: "M19 12H5m6-6-6 6 6 6",
+  arrowRight: "M5 12h14m-6-6 6 6-6 6",
   external: "M14 4h6v6m0-6-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
   logout: "M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l-4-4 4-4m-4 4h10",
   menu: "M4 6h16M4 12h16M4 18h16",
@@ -169,32 +170,19 @@ export function LogoMark({ size = 24 }: { size?: number }) {
   );
 }
 
-/** 文件助手标识：实心文件（currentColor）+ 品牌琥珀折角（与 LogoMark 的琥珀片呼应）+ 镂空双眼与浅笑。
- * 实心形状在 18–20px 仍然清晰；眼睛与嘴用 --surface，深浅色下都与身体拉开对比。运行状态只改变双眼明暗。 */
 export type AssistantMarkState = "idle" | "thinking" | "tool" | "writing";
 
-/** 文件助手头像「瓦片智核」：四块马赛克瓦片（右上为品牌琥珀色）围绕发光内核。
- * thinking 瓦片环绕旋转、内核呼吸；tool 瓦片依次向内咬合并有扫描线；writing 内核轻柔呼吸；idle 静止。 */
-export function AssistantMark({ size = 20, state = "idle", monochrome = false }: { size?: number; state?: AssistantMarkState; monochrome?: boolean }) {
-  const glow = useId();
+/** 文件助手标识：与品牌 LogoMark 同一套造型——墨色圆角方块里三块白色瓦片（透明度递减），右上角的纸飞机换成琥珀色四芒星。
+ * 自身就是完整的徽标，外层容器不再加底色或描边。运行状态只在消息头像与右下角入口里有动效（抽屉顶部保持静止）：
+ * thinking 瓦片依次明暗、星芒旋转闪烁；tool 瓦片依次向内咬合；writing 星芒轻柔闪烁；idle 静止。 */
+export function AssistantMark({ size = 20, state = "idle" }: { size?: number; state?: AssistantMarkState }) {
   return (
-    <svg className={`assistant-mark is-${state}${monochrome ? " is-monochrome" : ""}`} viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
-      <defs>
-        <radialGradient id={glow}>
-          <stop offset="0" stopColor="currentColor" stopOpacity=".55" />
-          <stop offset="1" stopColor="currentColor" stopOpacity="0" />
-        </radialGradient>
-      </defs>
-      <g className="assistant-mark-tiles">
-        <rect className="assistant-mark-tile is-a" x="2.5" y="2.5" width="7" height="7" rx="2" />
-        <rect className="assistant-mark-tile is-b" x="14.5" y="2.5" width="7" height="7" rx="2" />
-        <rect className="assistant-mark-tile is-c" x="14.5" y="14.5" width="7" height="7" rx="2" />
-        <rect className="assistant-mark-tile is-d" x="2.5" y="14.5" width="7" height="7" rx="2" />
-      </g>
-      <circle className="assistant-mark-halo" cx="12" cy="12" r="5.6" fill={`url(#${glow})`} />
-      <circle className="assistant-mark-core" cx="12" cy="12" r="2.5" />
-      <circle className="assistant-mark-spark" cx="11.2" cy="11.2" r=".85" />
-      <rect className="assistant-mark-scan" x="1.5" y="1" width="21" height="1.3" rx=".65" />
+    <svg className={`assistant-mark is-${state}`} viewBox="0 0 32 32" width={size} height={size} aria-hidden="true">
+      <rect className="assistant-mark-bg" x=".5" y=".5" width="31" height="31" rx="7.5" />
+      <rect className="assistant-mark-tile is-a" x="5" y="5" width="10" height="10" rx="2.4" />
+      <rect className="assistant-mark-tile is-d" x="5" y="17" width="10" height="10" rx="2.4" />
+      <rect className="assistant-mark-tile is-c" x="17" y="17" width="10" height="10" rx="2.4" />
+      <path className="assistant-mark-spark" d="M22 4.4C22.55 8.1 23.9 9.45 27.6 10 23.9 10.55 22.55 11.9 22 15.6 21.45 11.9 20.1 10.55 16.4 10 20.1 9.45 21.45 8.1 22 4.4Z" />
     </svg>
   );
 }

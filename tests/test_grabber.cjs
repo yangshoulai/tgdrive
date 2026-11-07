@@ -1414,6 +1414,42 @@ test("cloud Baidu share reads isolated page verification without exposing GM API
   assert.equal(h.opened.length, 0);
 });
 
+for (const isolated of [false, true]) test(`cloud Baidu disk-share-v2 reads checked rows, page signature and BDCLND (isolated=${isolated})`, async () => {
+  // 2026-11 起百度分享页为 Vue 3（disk-share-v2）：旧的 __vue__ 选择都不存在，勾选在列表行上，文件信息在 locals.file_list。
+  const row = (key, checked, name = "") => ({ dataset: { fileKey: key }, getAttribute: attr => attr === "data-file-key" ? key : null,
+    querySelector: selector => selector.includes("wp-checkbox--checked") ? (checked ? {} : null)
+      : selector === ".filename" ? { title: name, textContent: name } : selector === ".file-size" ? { textContent: "3.2 MB" } : null });
+  const rows = [row("9", true), row("10", false), row("11", true, "fallback.bin")];
+  let signed = 0;
+  const h = harness({ isolated, url: "https://pan.baidu.com/s/1share", documentCookie: "BAIDUID=abc; BDCLND=COOKIE%2FKEY",
+    query: () => null, dom: selector => selector === ".JS-list-view-item[data-file-key]" ? rows : [],
+    pageState: { locals: { dump: () => ({ file_list: { value: [{ fs_id: 9, server_filename: "shared.bin", size: 42, isdir: 0 }, { fs_id: 10, server_filename: "other.bin", isdir: 0 }] },
+      share_uk: { value: "uk" }, shareid: { value: "share-id" }, bdstoken: { value: "BDSTOKEN" }, sign: { value: "PAGE_SIGN" }, timestamp: { value: 456 } }) } },
+    gm: details => {
+      if (details.url.includes("tplconfig")) { signed++; return jsonReply(details, { data: { sign: "x", timestamp: 1 } }); }
+      const url = new URL(details.url);
+      assert.equal(url.searchParams.get("sign"), "PAGE_SIGN");
+      assert.equal(url.searchParams.get("timestamp"), "456");
+      const form = new URLSearchParams(details.data);
+      assert.deepEqual(JSON.parse(form.get("extra")), { sekey: "COOKIE/KEY" });
+      const id = JSON.parse(form.get("fid_list"))[0];
+      return jsonReply(details, { errno: 0, list: [{ fs_id: id, dlink: `https://d.pcs.baidu.com/${id}.bin` }] });
+    },
+  });
+  const sources = await h.api.cloudSources(h.api.cloudOf());
+  assert.deepEqual(Array.from(sources, source => source.cloud.file.server_filename), ["shared.bin", "fallback.bin"], "只取勾选的行；locals 没有的文件用行上的名称兜底");
+  assert.equal((await h.api.resolveCloud(sources[0].cloud)).url, "https://d.pcs.baidu.com/9.bin");
+  assert.equal(signed, 0, "页面已给出签名时不再请求 tplconfig");
+});
+
+test("cloud Baidu disk-share-v2 single-file share uses the page file", async () => {
+  const h = harness({ url: "https://pan.baidu.com/s/1single", query: () => null, dom: () => [],
+    pageState: { SHAREPAGETYPE: "single_file_page", locals: { dump: () => ({ file_list: { value: [{ fs_id: 5, server_filename: "only.mp4", isdir: 0 }] },
+      share_uk: { value: "uk" }, shareid: { value: "id" } }) } } });
+  const sources = await h.api.cloudSources(h.api.cloudOf());
+  assert.deepEqual(Array.from(sources, source => source.cloud.file.server_filename), ["only.mp4"]);
+});
+
 test("cloud Tianyi share signature includes the share identity in the prescribed order", async () => {
   const h = harness({ url: "https://cloud.189.cn/web/share?code=abc", query: selector => selector === ".info-detail"
     ? { __vue__: { fileDetail: { fileId: "t1", fileName: "shared.bin", isFolder: false, shareId: "s1" } } } : null,

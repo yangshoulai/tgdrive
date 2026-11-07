@@ -1242,7 +1242,13 @@ class TgDriveASGI(StaticFiles):
                 return 204, None, {}
             if method == "GET" and route == "/library":
                 return 200, await user.library(token, query.get("view", [""])[0], query.get("cursor", [""])[0],
-                                               int(query.get("limit", ["100"])[0])), {}
+                                               int(query.get("limit", ["100"])[0]), query.get("q", [""])[0],
+                                               query["folder"][0] if "folder" in query else None,
+                                               query["album"][0] if "album" in query else None), {}
+            if method == "GET" and route == "/library/albums":
+                return 200, await user.library_albums(token, query.get("q", [""])[0]), {}
+            if method == "GET" and route == "/library/folders":
+                return 200, await user.library_folders(token, query.get("view", [""])[0], query.get("q", [""])[0]), {}
             if method == "GET" and route == "/search":
                 return 200, await user.search(token, query.get("q", [""])[0],
                     query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0]),
