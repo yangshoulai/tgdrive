@@ -1,0 +1,562 @@
+/* ---------- 媒体预览：音乐、视频、图片共用深色画布 ----------
+ * 头部浮在画布上（见下方「沉浸式预览」）；画布内统一白色文字、半透明玻璃按钮和细白线。动效都尊重“减少动画”偏好。 */
+.preview-stage.is-media { --media-ink-2: var(--on-dark-72); --media-ink-3: var(--on-dark-56); --media-glass: var(--on-dark-8); --media-glass-strong: var(--on-dark-16); --media-line: var(--on-dark-8); background: var(--media-canvas); color: var(--media-ink); }
+.preview-stage.is-media :focus-visible { outline: 2px solid var(--on-dark-90); outline-offset: 2px; }
+.preview-equalizer { display: flex; align-items: center; gap: 4px; height: 16px; color: var(--accent); }
+.preview-equalizer i { width: 3px; height: 16px; border-radius: var(--radius-2xs); background: currentColor; transform: scaleY(.25); }
+:is(.preview-player-audio, .preview-mini-player).is-playing .preview-equalizer i { animation: audio-bars .95s ease-in-out infinite alternate; }
+:is(.preview-player-audio, .preview-mini-player).is-playing .preview-equalizer i:nth-child(2) { animation-duration: 1.25s; animation-delay: -.45s; }
+:is(.preview-player-audio, .preview-mini-player).is-playing .preview-equalizer i:nth-child(3) { animation-duration: .75s; animation-delay: -.2s; }
+:is(.preview-player-audio, .preview-mini-player).is-playing .preview-equalizer i:nth-child(4) { animation-duration: 1.05s; animation-delay: -.65s; }
+@keyframes audio-bars { 0% { transform: scaleY(.25); } 50% { transform: scaleY(1); } 100% { transform: scaleY(.45); } }
+
+/* 音乐：模糊封面做背景，左侧唱片机（封面在唱片中心），右侧标题与歌词，底部一体化控制条。 */
+.preview-player-audio { position: relative; isolation: isolate; display: flex; flex-direction: column; overflow: hidden; overflow: clip; height: min(540px, var(--preview-player-height, calc(100dvh - 220px))); container: audio-player / inline-size; background: var(--dark-surface); color: var(--on-dark); }
+.preview-player-audio::after { position: absolute; inset: 0; z-index: -1; background: linear-gradient(to bottom, var(--shade-8), var(--shade-48)); content: ""; }
+.audio-backdrop { position: absolute; inset: -20%; z-index: -2; background: radial-gradient(40% 50% at 22% 30%, color-mix(in srgb, var(--preview-tint, var(--accent)) 50%, transparent), transparent 70%), radial-gradient(45% 55% at 78% 72%, color-mix(in srgb, var(--preview-tint, var(--accent)) 26%, transparent), transparent 70%), var(--dark-surface); filter: blur(40px); animation: backdrop-drift 30s ease-in-out infinite alternate; animation-play-state: paused; }
+.preview-player-audio.has-cover .audio-backdrop { background: var(--preview-cover) center / cover no-repeat; filter: blur(64px) saturate(1.6) brightness(.52); }
+.preview-player-audio.is-active .audio-backdrop { animation-play-state: running; }
+@keyframes backdrop-drift { from { transform: scale(1.04) translate(-2%, -1%) rotate(0deg); } to { transform: scale(1.18) translate(2%, 2%) rotate(8deg); } }
+.audio-body { flex: 1; min-height: 0; overflow: hidden; overflow: clip; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: center; gap: 36px; padding: 36px 44px 8px; }
+.audio-art { position: relative; justify-self: center; width: clamp(160px, calc(var(--preview-player-height, 540px) - 220px), 300px); aspect-ratio: 1; }
+/* 唱片（网易云音乐式）：唱片占 86% 居中偏下，封面占唱片 66%，外圈是黑色刻纹；唱针支点在唱片上方偏右，播放时落到外圈，暂停时向右抬开。
+ * 唱片由 Turntable 用 JS 转动（起转、停转有缓动），表面高光是不随唱片转动的独立层。 */
+.audio-turntable { position: relative; width: 100%; height: 100%; }
+/* 金属转盘：比唱片大一圈，拉丝金属（锥形渐变）加上沿受光、下沿暗边和落在背景上的投影，让唱片像放在唱机上。 */
+.audio-platter { position: absolute; top: 11%; left: 4%; width: 92%; aspect-ratio: 1; border-radius: 50%;
+  background: conic-gradient(from 20deg, var(--on-dark-8), var(--on-dark-16) 8%, var(--on-dark-4) 18%, var(--on-dark-12) 32%, var(--on-dark-4) 47%, var(--on-dark-16) 58%, var(--on-dark-4) 70%, var(--on-dark-12) 84%, var(--on-dark-8)), var(--dark-surface-raised);
+  box-shadow: 0 30px 50px -14px var(--shade-80), 0 0 0 1px var(--on-dark-8), inset 0 1px 1px var(--on-dark-24), inset 0 -3px 6px var(--shade-48); }
+.audio-record { position: absolute; top: 14%; left: 7%; width: 86%; aspect-ratio: 1; border-radius: 50%; box-shadow: 0 6px 14px var(--shade-64), 0 1px 3px var(--shade-48); }
+.audio-record-disc { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 50%; background: repeating-radial-gradient(circle, var(--dark-surface-raised) 0 1px, var(--dark-surface-deep) 1.5px 3px);
+  box-shadow: inset 0 0 0 1px var(--on-dark-16), inset 0 0 0 3px var(--dark-surface-deep); will-change: transform; }
+.audio-record-disc::before { position: absolute; inset: 15.5%; border-radius: 50%; background: var(--dark-surface-deep); box-shadow: 0 0 0 1px var(--on-dark-8); content: ""; }
+/* 标签：有封面时是封面，没有时是按文件名选的柔和色调（--preview-tint）加细同心纹与音符印记，边缘略微内凹。 */
+.audio-record-label { position: relative; display: grid; width: 66%; aspect-ratio: 1; place-items: center; overflow: hidden; border-radius: 50%; box-shadow: 0 0 0 2px var(--shade-48); }
+.audio-record-label.is-blank { background: repeating-radial-gradient(circle, transparent 0 7px, var(--shade-8) 7.5px 8px), radial-gradient(circle at 35% 28%, color-mix(in srgb, var(--preview-tint, var(--series-other)) 45%, var(--on-dark)), color-mix(in srgb, var(--preview-tint, var(--series-other)) 70%, var(--dark-surface-deep)) 62%, color-mix(in srgb, var(--preview-tint, var(--series-other)) 40%, var(--dark-surface-deep))); color: var(--on-dark-72); }
+.audio-record-label::after { position: absolute; inset: 0; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--on-dark-16), inset 0 -4px 10px var(--shade-48), inset 0 3px 8px var(--on-dark-8); content: ""; }
+.audio-record-mark { position: absolute; top: 20%; left: calc(50% - 9px); opacity: .7; }
+.audio-record-label img { width: 100%; height: 100%; object-fit: cover; }
+.audio-record-sheen { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 30deg, transparent 0 6%, var(--on-dark-16) 12%, transparent 20% 56%, var(--on-dark-12) 62%, transparent 70%); pointer-events: none;
+  -webkit-mask: radial-gradient(circle, transparent 0 66%, var(--black) 67%); mask: radial-gradient(circle, transparent 0 66%, var(--black) 67%); }
+/* 不随唱片转动的光照：左上受光、右下背光，转动时高光与阴影留在原处，唱片看起来是有厚度的圆盘。 */
+.audio-record-light { position: absolute; inset: 0; border-radius: 50%; background: radial-gradient(120% 120% at 26% 16%, var(--on-dark-12), transparent 40%), radial-gradient(90% 90% at 78% 88%, var(--shade-32), transparent 60%); pointer-events: none; }
+.audio-record-spindle { position: absolute; top: calc(50% - 3%); left: calc(50% - 3%); width: 6%; aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle at 35% 30%, var(--on-dark), var(--on-dark-56) 45%, var(--shade-64)); box-shadow: 0 1px 3px var(--shade-80), 0 0 0 2px var(--shade-32); }
+.audio-tonearm { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 4px 6px var(--shade-48)); transform: rotate(-32deg); transform-origin: 57% 4%; transition: transform .8s var(--ease-out); }
+.preview-player-audio.is-active .audio-tonearm { transform: rotate(0deg); }
+.audio-tonearm-base { stroke: var(--on-dark-24); stroke-width: .8; }
+.audio-tonearm-ring { fill: var(--dark-surface-raised); stroke: var(--on-dark-16); stroke-width: .8; }
+.audio-tonearm-weight { fill: var(--dark-surface-raised); stroke: var(--on-dark-40); stroke-width: .8; }
+.audio-tonearm-pivot { fill: var(--dark-surface-raised); }
+.audio-tonearm-arm { fill: none; stroke-width: 1.8; stroke-linecap: round; }
+.audio-tonearm-head { stroke: var(--shade-32); stroke-width: .4; }
+.audio-side { display: flex; flex-direction: column; justify-content: center; gap: 16px; min-width: 0; height: 100%; min-height: 0; }
+.audio-body.has-lyrics .audio-side { justify-content: flex-start; padding-top: 4px; }
+.audio-heading { display: grid; justify-items: start; gap: 8px; }
+.audio-heading h3 { display: -webkit-box; margin: 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-family: var(--font-display); font-size: var(--text-xl); font-weight: 600; letter-spacing: -.01em; line-height: var(--leading-tight); overflow-wrap: anywhere; }
+.audio-heading p { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--media-ink-2); font-size: var(--text-xs); }
+.audio-heading .preview-equalizer { height: 12px; color: var(--on-dark); }
+.audio-heading .preview-equalizer i { width: 2.5px; height: 12px; }
+/* 播放状态：标题、歌手之下单独一行，与歌手拉开距离；播放中是律动条，加载中是细圆环，暂停是图标，不再显示静止的小点。 */
+.audio-heading .audio-status { margin-top: 8px; gap: 8px; height: 24px; padding: 0 8px 0 8px; border-radius: var(--radius-pill); background: var(--media-glass); color: var(--media-ink-2); font-size: var(--text-xs); font-weight: 500; }
+.audio-status.is-playing { color: var(--on-dark); }
+.audio-status.is-failed { color: var(--on-dark-danger); }
+.audio-status-spinner { width: 12px; height: 12px; border: 1.5px solid var(--on-dark-24); border-top-color: var(--on-dark); border-radius: 50%; animation: spin .8s linear infinite; }
+/* 歌词选择在控制条右侧（与音量、播放列表并列），有歌词时带小圆点。 */
+.audio-lyrics-button.icon-btn { border-color: transparent; background: transparent; color: var(--media-ink-2); }
+.audio-lyrics-button.icon-btn:hover:not(:disabled), .audio-lyrics-button.icon-btn[aria-expanded="true"] { background: var(--media-glass); color: var(--on-dark); }
+.audio-lyrics-button.icon-btn.is-active { color: var(--on-dark); }
+.audio-lyrics { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; mask-image: linear-gradient(transparent, var(--black) 22%, var(--black) 78%, transparent); }
+.audio-lyrics::-webkit-scrollbar { display: none; }
+/* 首尾留白用占位元素按歌词区自身高度计算：百分比内边距按宽度算且不能收缩，矮屏上会把歌词挤到控制条下面。 */
+.audio-lyrics::before, .audio-lyrics::after { display: block; height: 42%; content: ""; }
+.audio-lyric { display: block; width: 100%; padding: 8px 0; border: 0; background: transparent; color: var(--on-dark-40); font: inherit; font-size: var(--text-lg); font-weight: 600; line-height: var(--leading-normal); text-align: left; white-space: pre-line; cursor: pointer; transform-origin: left center; transition: color .4s, transform .4s var(--ease-out); }
+.audio-lyric:hover { color: var(--on-dark-72); }
+.audio-lyric.is-active { color: var(--on-dark); transform: scale(1.06); }
+/* 歌词加载：几行长短不一的柔光占位条，与真实歌词同样左对齐；300 ms 后才出现，没有歌词的歌曲不会闪一下。 */
+.audio-lyrics-skeleton { display: grid; justify-items: start; gap: 16px; padding: 8px 0; animation: lyrics-skeleton-in var(--duration-slow) .3s both; }
+.audio-lyrics-skeleton i { width: 64%; height: 14px; border-radius: var(--radius-pill); background: linear-gradient(90deg, var(--on-dark-8) 0 30%, var(--on-dark-16) 50%, var(--on-dark-8) 70% 100%) 0 0 / 300% 100%; animation: lyrics-shimmer 1.6s ease-in-out infinite; }
+.audio-lyrics-skeleton i:nth-child(1) { width: 72%; height: 18px; }
+.audio-lyrics-skeleton i:nth-child(2) { width: 48%; animation-delay: .1s; }
+.audio-lyrics-skeleton i:nth-child(3) { width: 60%; animation-delay: .2s; opacity: .8; }
+.audio-lyrics-skeleton i:nth-child(4) { width: 40%; animation-delay: .3s; opacity: .6; }
+.audio-lyrics-skeleton i:nth-child(5) { width: 54%; animation-delay: .4s; opacity: .4; }
+@keyframes lyrics-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@keyframes lyrics-skeleton-in { from { opacity: 0; transform: translateY(4px); } }
+.audio-info { display: grid; justify-items: start; gap: 12px; }
+.audio-facts { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.audio-facts li { height: 24px; padding: 0 8px; border: 1px solid var(--on-dark-12); border-radius: var(--radius-pill); color: var(--media-ink-2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; line-height: 22px; }
+.audio-hint { margin: 0; color: var(--media-ink-3); font-size: var(--text-xs); line-height: var(--leading-relaxed); }
+.audio-controls { flex: none; padding: 4px 32px 20px; }
+.audio-timeline { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center; gap: 12px; color: var(--media-ink-3); font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
+.audio-time:first-child { text-align: right; }
+.audio-track { position: relative; display: flex; align-items: center; height: 22px; }
+.audio-track::before, .audio-track::after { position: absolute; left: 0; height: 4px; border-radius: var(--radius-pill); pointer-events: none; transition: height var(--duration-fast); content: ""; }
+.audio-track::before { right: 0; background: linear-gradient(to right, var(--on-dark-24) var(--loaded), var(--on-dark-12) var(--loaded)); }
+.audio-track::after { width: var(--played); background: var(--on-dark); }
+.audio-track:hover::before, .audio-track:hover::after { height: 6px; }
+.audio-track input { position: relative; z-index: 1; width: 100%; height: 22px; margin: 0; background: transparent; appearance: none; -webkit-appearance: none; cursor: pointer; }
+.audio-track input:disabled { cursor: default; }
+.audio-track input::-webkit-slider-runnable-track { height: 22px; background: transparent; }
+.audio-track input::-webkit-slider-thumb { width: 14px; height: 14px; margin-top: 4px; border: 0; border-radius: 50%; background: var(--on-dark); box-shadow: var(--shadow-dark-sm); appearance: none; -webkit-appearance: none; transform: scale(0); transition: transform var(--duration-fast); }
+.audio-track input::-moz-range-track { height: 22px; background: transparent; }
+.audio-track input::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: var(--on-dark); box-shadow: var(--shadow-dark-sm); transform: scale(0); transition: transform var(--duration-fast); }
+.audio-track:hover input:not(:disabled)::-webkit-slider-thumb, .audio-track input:focus-visible::-webkit-slider-thumb { transform: scale(1); }
+.audio-track:hover input:not(:disabled)::-moz-range-thumb, .audio-track input:focus-visible::-moz-range-thumb { transform: scale(1); }
+/* 进度条不画焦点框（深色画布的通用焦点规则 .preview-stage.is-media :focus-visible 更具体，需要同等优先级覆盖）：
+ * 点过进度条再按方向键快进时不出现整条白框；键盘焦点改由放大的滑块加一圈柔和光晕表示。 */
+.audio-track input:focus-visible, .preview-stage.is-media .audio-track input:focus-visible { outline: none; }
+.audio-track input:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--on-dark-24), 0 2px 8px var(--shade-48); }
+.audio-track input:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px var(--on-dark-24), 0 2px 8px var(--shade-48); }
+.audio-track-tip { position: absolute; bottom: 22px; padding: 2px 8px; border-radius: var(--radius-xs); background: var(--shade-64); color: var(--on-dark); font-size: var(--text-micro); pointer-events: none; white-space: nowrap; transform: translateX(-50%); }
+.audio-buttons { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 12px; margin-top: 4px; }
+.audio-buttons-main { display: flex; align-items: center; gap: 16px; }
+.audio-buttons-end { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.audio-button { position: relative; display: grid; width: 38px; height: 38px; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--media-ink-2); cursor: pointer; transition: background-color var(--duration-fast), color var(--duration-fast), transform var(--duration-fast); }
+.audio-button:hover:not(:disabled) { background: var(--media-glass); color: var(--on-dark); }
+.audio-button:active:not(:disabled) { transform: scale(.9); }
+.audio-button:disabled { opacity: .3; cursor: default; }
+.audio-button.is-active { color: var(--on-dark); }
+.audio-button.is-active::after { position: absolute; bottom: 3px; width: 4px; height: 4px; border-radius: 50%; background: currentColor; content: ""; }
+.audio-play { position: relative; display: grid; width: 56px; height: 56px; place-items: center; border: 0; border-radius: 50%; background: var(--on-dark); color: var(--dark-surface); box-shadow: var(--shadow-dark-md); cursor: pointer; transition: transform var(--duration-base) var(--ease-out), box-shadow var(--duration-base); }
+.audio-play:hover:not(:disabled) { transform: scale(1.06); box-shadow: var(--shadow-dark-md); }
+.audio-play:active:not(:disabled) { transform: scale(.94); }
+.audio-play:disabled { opacity: .5; cursor: default; }
+.audio-play svg { fill: currentColor; stroke-width: 2.6; }
+.audio-play svg path[d^="M7 4.8"] { transform: translateX(1px); }
+.preview-player-audio.is-waiting .audio-play::after { position: absolute; inset: -5px; border: 2px solid var(--on-dark-90); border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; content: ""; }
+.audio-volume { display: flex; align-items: center; }
+.audio-volume input { width: 0; height: 22px; margin: 0; opacity: 0; background: transparent; appearance: none; -webkit-appearance: none; cursor: pointer; transition: width var(--duration-base) var(--ease-out), opacity var(--duration-base), margin var(--duration-base); }
+.audio-volume:hover input, .audio-volume:focus-within input { width: 84px; margin: 0 8px 0 2px; opacity: 1; }
+.audio-volume input::-webkit-slider-runnable-track { height: 4px; border-radius: var(--radius-pill); background: linear-gradient(to right, var(--on-dark) var(--volume), var(--on-dark-16) var(--volume)); }
+.audio-volume input::-webkit-slider-thumb { width: 12px; height: 12px; margin-top: -4px; border: 0; border-radius: 50%; background: var(--on-dark); appearance: none; -webkit-appearance: none; }
+.audio-volume input::-moz-range-track { height: 4px; border-radius: var(--radius-pill); background: linear-gradient(to right, var(--on-dark) var(--volume), var(--on-dark-16) var(--volume)); }
+.audio-volume input::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: var(--on-dark); }
+/* 音量滑块同样不画焦点框，键盘焦点用滑块光晕表示。 */
+.preview-stage.is-media .audio-volume input:focus-visible { outline: none; }
+.audio-volume input:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--on-dark-24); }
+.audio-volume input:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px var(--on-dark-24); }
+@media (hover: none) { .audio-volume input { width: 72px; margin: 0 8px 0 2px; opacity: 1; } }
+.preview-player-audio .preview-player-failure { flex: 1; min-height: 0; padding: 12px 0; align-items: flex-start; text-align: left; color: var(--on-dark); }
+.preview-player-audio .preview-player-failure > span:not(.preview-failure-icon) { color: var(--media-ink-2); }
+.preview-player-audio .preview-failure-icon { background: var(--on-dark-12); color: var(--on-dark); }
+.preview-player-audio .preview-player-failure .btn-secondary { border-color: var(--on-dark-16); background: var(--media-glass); color: var(--on-dark); box-shadow: none; }
+.preview-player-audio .preview-player-slow { background: var(--shade-48); color: var(--on-dark); backdrop-filter: blur(10px); }
+.preview-player-audio .preview-player-slow button { background: var(--media-glass-strong); color: var(--on-dark); }
+@container audio-player (max-width: 600px) {
+  .audio-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); align-items: start; gap: 16px; padding: 24px 20px 8px; }
+  .audio-art { width: clamp(108px, min(42cqw, calc(var(--preview-player-height, 540px) * .32)), 200px); margin: 0 auto; }
+  .audio-side { align-self: stretch; height: auto; align-items: center; justify-content: flex-start; gap: 8px; text-align: center; }
+  /* 歌手与状态并排一行，给歌词多留一行空间。 */
+  .audio-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 8px; }
+  .audio-heading h3 { width: 100%; font-size: var(--text-lg); }
+  .audio-heading .audio-status { margin-top: 0; }
+  .audio-lyrics-skeleton { justify-items: center; align-self: stretch; }
+  .audio-lyrics { align-self: stretch; }
+  .audio-lyric { text-align: center; transform-origin: center; font-size: var(--text-md); }
+  .audio-info { justify-items: center; }
+  .audio-facts { justify-content: center; }
+  .audio-controls { padding: 2px 16px 16px; }
+  .audio-buttons-main { gap: 8px; }
+  .audio-volume input { display: none; }
+}
+/* 手机宽度：音量交给系统按键，控制条右侧只留歌词与播放列表，不与「下一首」挤在一起。 */
+@container audio-player (max-width: 420px) { .audio-volume { display: none; } }
+/* 矮窗口：唱片缩小放在标题左侧，不再隐藏。 */
+@media (max-height: 640px) {
+  .audio-body { grid-template-columns: auto minmax(0, 1fr); grid-template-rows: none; align-items: center; gap: 24px; }
+  .audio-art { width: clamp(96px, calc(var(--preview-player-height, 400px) * .4), 168px); margin: 0; }
+  .audio-side { align-self: center; align-items: flex-start; text-align: left; }
+  .audio-heading { justify-content: flex-start; }
+  .audio-lyric { text-align: left; transform-origin: left center; }
+  .audio-lyrics-skeleton { justify-items: start; }
+  .audio-info { justify-items: start; }
+  .audio-facts { justify-content: flex-start; }
+}
+
+
+/* ---------- 沉浸式预览：音乐、视频、图片的头部浮在深色画布上 ----------
+ * 不再有白色头部栏：头部透明，叠一层自上而下的暗色渐变；画布占满窗口，播放器用 --preview-header-height 给顶部内容留位置。
+ * 视频与图片在鼠标静止后隐藏头部（.is-chrome-idle），音乐始终显示。缩略图只在最小化时出现在头部，避免与封面重复。 */
+.preview-modal.is-dark-surface:not(.is-minimized) { position: relative; border: 0; background: var(--media-canvas); color: var(--media-ink); box-shadow: var(--shadow-media); }
+.preview-modal.is-immersive:not(.is-minimized) .modal-header { position: absolute; inset: 0 0 auto 0; z-index: 4; padding: 12px 12px 32px 20px; border-bottom: 0; background: linear-gradient(to bottom, var(--shade-64), var(--shade-32) 58%, transparent); pointer-events: none; transition: opacity var(--duration-slow) ease, transform var(--duration-slow) ease; }
+.preview-modal.is-immersive:not(.is-minimized) .modal-header > * { pointer-events: auto; }
+/* 浮动头部在窄窗口也保持一行（标题省略），不在画面上叠两行。 */
+.preview-modal.is-immersive:not(.is-minimized) .modal-header { flex-wrap: nowrap; }
+.preview-modal.is-immersive:not(.is-minimized) .modal-window-actions { width: auto; }
+@media (max-width: 640px) { .preview-modal.is-immersive:not(.is-minimized) .modal-header { padding: 8px 8px 24px 16px; } }
+.preview-modal.is-immersive:not(.is-minimized) .modal-header > .file-tile { display: none; }
+.preview-modal.is-dark-surface:not(.is-minimized) .modal-heading h2 { color: var(--on-dark); text-shadow: 0 1px 8px var(--shade-32); }
+.preview-modal.is-dark-surface:not(.is-minimized) .modal-heading p, .preview-modal.is-dark-surface:not(.is-minimized) .modal-heading p * { color: var(--on-dark-56); }
+.preview-modal.is-dark-surface:not(.is-minimized) .modal-window-actions .icon-btn { color: var(--on-dark-72); }
+.preview-modal.is-dark-surface:not(.is-minimized) .modal-window-actions .icon-btn:hover:not(:disabled), .preview-modal.is-dark-surface:not(.is-minimized) .modal-window-actions .icon-btn.is-active { background: var(--on-dark-12); color: var(--on-dark); }
+.preview-modal.is-dark-surface:not(.is-minimized) .modal-actions-divider { background: var(--on-dark-16); }
+.preview-modal.is-dark-surface:not(.is-minimized) .modal-header :focus-visible { outline-color: var(--on-dark-90); }
+/* 音乐：标题已在播放器里显示，头部只留格式、大小、日期，标题保留给读屏。 */
+.preview-modal-audio.is-immersive:not(.is-minimized) .modal-heading h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.preview-modal-audio.is-immersive:not(.is-minimized) .modal-heading p { margin-top: 0; }
+.preview-modal-audio.is-immersive:not(.is-minimized) .modal-header { background: linear-gradient(to bottom, var(--shade-32), transparent); }
+/* 图片：画布从头部下方开始，适应窗口时整张图不被头部遮住；背景模糊层仍铺满整个窗口。 */
+.preview-modal.is-immersive:not(.is-minimized) .image-canvas { margin-top: max(0px, calc(var(--preview-header-height, 56px) - 20px)); }
+.preview-modal.is-immersive:not(.is-minimized) .audio-body { padding-top: calc(var(--preview-header-height, 56px) + 4px); }
+/* 「加载较慢 · 重试」放在浮动头部下方，不与全屏、窗口选项、关闭按钮重叠。 */
+.preview-modal.is-immersive:not(.is-minimized) .preview-player-slow { top: calc(var(--preview-header-height, 56px) + 6px); right: 16px; }
+/* 视频的「加载较慢 · 重试」放在画面中央的加载圈正下方，和加载状态在一起，而不是挤在头部角落。 */
+.preview-player-video .preview-player-slow, .preview-modal.is-immersive:not(.is-minimized) .preview-player-video .preview-player-slow { top: calc(50% + 44px); right: auto; left: 50%; transform: translateX(-50%); }
+.preview-modal.is-chrome-idle:not(.is-minimized) .modal-header { opacity: 0; transform: translateY(-8px); }
+.preview-modal.is-chrome-idle:not(.is-minimized) .modal-header > * { pointer-events: none; }
+.preview-modal.is-chrome-idle:not(.is-minimized) .preview-stage { cursor: none; }
+@media (prefers-reduced-motion: reduce) { .preview-modal.is-immersive .modal-header { transition: none; } }
+
+/* 文本阅读（沉浸式）：深色画布与浮动头部；只有 Markdown 预览放在居中纸张上，纯文本、日志、代码与 Markdown 源码都用通栏深色编辑器。 */
+:root {
+  --code-canvas: var(--media-canvas); --code-ink: #e4e5ee; --code-ink-3: #6f7389; --code-line: rgba(255, 255, 255, .06); --code-panel: #1a1b21;
+  --code-selection: rgba(124, 146, 255, .28);
+  --code-string: #8fd19e; --code-keyword: #c9a3f2; --code-property: #7cc8e0; --code-number: #f0b07a; --code-variable: #ee9ac0; --code-fn: #9db8f5;
+}
+.preview-modal.is-reading { max-width: 1080px; container: preview-window / inline-size; }
+/* 窄窗口：文件名独占一行，工具与窗口按钮保持同一行；次要操作由更多菜单提供。 */
+@container preview-window (max-width: 580px) {
+  .preview-modal.is-reading.is-immersive:not(.is-minimized) .modal-header { flex-wrap: wrap; row-gap: 8px; }
+  .preview-modal.is-reading.is-immersive:not(.is-minimized) .modal-window-actions { width: 100%; min-width: 0; flex-wrap: nowrap; justify-content: flex-end; }
+  .preview-modal.is-reading .preview-text-tools { margin-right: auto; }
+}
+.preview-modal.is-reading.is-chrome-idle:not(.is-minimized) .preview-stage { cursor: auto; }
+.preview-modal.is-reading:not(.is-minimized) .preview-stage.is-reading { position: relative; display: block; height: min(var(--preview-content-height, 72vh), 860px); min-height: 280px; background: var(--media-canvas); }
+.preview-modal.is-reading.is-sized:not(.is-minimized) .preview-stage.is-reading { height: var(--preview-content-height, 72vh); }
+.preview-modal.is-reading.is-expanded:not(.is-minimized) .preview-stage.is-reading { height: auto; }
+.preview-stage.is-reading .preview-text { position: absolute; inset: 0; display: block; }
+/* 代码与 Markdown 源码靠纵向 flex 把编辑器限制在舞台高度内，由编辑器自己滚动；上一条的选择器优先级更高，必须在这里恢复 flex。 */
+.preview-stage.is-reading .preview-text.is-code { display: flex; }
+.preview-stage.is-reading .preview-engine-loading { position: absolute; inset: 0; z-index: 1; min-height: 0; color: var(--on-dark-72); }
+/* 纸张：外层滚动，纸张宽度适合阅读；顶部给浮动头部留出空间，底部给状态胶囊留白。 */
+.preview-text.is-paper { overflow-y: auto; overscroll-behavior: contain; background: transparent; padding: calc(var(--preview-header-height, 56px) + 16px) 24px 72px; scrollbar-color: var(--on-dark-24) transparent; }
+/* 纸张至少铺满可见高度：短文档也像一整页，而不是悬在画布上的小卡片。 */
+.preview-text.is-paper .preview-sheet { width: 100%; max-width: 780px; min-height: 100%; margin: 0 auto; overflow: hidden; border-radius: var(--radius-xl); background: var(--surface); color: var(--ink);
+  box-shadow: 0 1px 0 var(--on-dark-4) inset, 0 24px 60px -18px var(--shade-64), 0 0 0 1px var(--shade-32); animation: sheet-in .28s var(--ease-out); }
+@keyframes sheet-in { from { opacity: 0; transform: translateY(10px); } }
+.preview-text.is-paper .preview-doc { max-width: none; max-height: none; padding: 48px 56px 56px; overflow: visible; }
+.preview-text.is-paper .preview-doc :is(h1, h2, h3) { scroll-margin-top: calc(var(--preview-header-height, 56px) + 24px); }
+.preview-text.is-paper .preview-code-editor { padding: 12px 0; }
+.preview-text.is-paper .cm-editor { max-height: none !important; min-height: 0 !important; background: transparent !important; }
+/* 纸张由外层滚动；无溢出的编辑器不能截断滚轮向外传递。源码模式仍由 CodeMirror 自己滚动。 */
+.preview-text.is-paper .cm-scroller { overflow: visible; overscroll-behavior: auto; }
+.preview-text.is-paper .cm-gutters { background: transparent !important; }
+@media (max-width: 640px) {
+  .preview-text.is-paper { padding: calc(var(--preview-header-height, 56px) + 4px) 8px 64px; }
+  .preview-text.is-paper .preview-doc { padding: 28px 20px 36px; }
+}
+/* 代码：通栏深色编辑器，局部覆盖颜色令牌，浅色与深色界面下一致。 */
+.preview-text.is-code { --surface: var(--code-canvas); --surface-sunken: var(--code-panel); --ink: var(--code-ink); --ink-3: var(--code-ink-3); --line-soft: var(--code-line); --line: var(--on-dark-8);
+  --selection: var(--code-selection); --syntax-string: var(--code-string); --syntax-keyword: var(--code-keyword); --syntax-property: var(--code-property); --syntax-number: var(--code-number);
+  --syntax-variable: var(--code-variable); --syntax-fn: var(--code-fn); display: flex; flex-direction: column; padding-top: var(--preview-header-height, 56px); background: var(--code-canvas); color: var(--code-ink); }
+.preview-text.is-code .preview-sheet { display: flex; flex: 1; min-height: 0; flex-direction: column; border-top: 1px solid var(--code-line); }
+.preview-text.is-code .preview-code-editor { display: flex; flex: 1; min-height: 0; }
+.preview-text.is-code .cm-editor { flex: 1; height: 100%; max-height: none !important; min-height: 0 !important; }
+.preview-text.is-code .cm-scroller { padding-bottom: 48px; }
+/* 头部工具：与窗口按钮同一组，白色图标；分段控件改用半透明玻璃底。 */
+.preview-header-tools { display: contents; }
+.preview-text-tools { display: flex; align-items: center; gap: 2px; }
+.preview-text-tools .segmented { margin-right: 8px; border-color: var(--on-dark-12); background: var(--on-dark-8); }
+.preview-text-tools .segmented button { color: var(--on-dark-72); }
+.preview-text-tools .segmented button.is-active { background: var(--on-dark-90); color: var(--dark-surface); }
+.preview-text-tools .icon-btn { color: var(--on-dark-72); }
+.preview-text-tools .icon-btn:hover:not(:disabled), .preview-text-tools .icon-btn.is-active { background: var(--on-dark-16); color: var(--on-dark); }
+@media (max-width: 640px) { .preview-text-tools .segmented { margin-right: 2px; } }
+/* 文本编辑：深色头部里的「退出编辑／保存」，保存是浅色实心按钮；编辑状态与编码显示在底部胶囊。 */
+.preview-edit-actions { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.preview-text-tools .btn-ghost { color: var(--on-dark-72); }
+.preview-text-tools .btn-ghost:hover:not(:disabled) { background: var(--on-dark-16); color: var(--on-dark); }
+.preview-text-tools .btn-primary { background: var(--on-dark-90); color: var(--dark-surface); }
+.preview-text-tools .btn-primary:hover:not(:disabled) { background: var(--on-dark); }
+.preview-text-tools .btn-primary:disabled { background: var(--on-dark-16); color: var(--on-dark-56); }
+/* 编辑时光标已说明焦点位置，不再显示键盘导航用的焦点框。 */
+html[data-input="keyboard"] .preview-text.is-editing .cm-editor.cm-focused { box-shadow: none; }
+.preview-text.is-editing .cm-cursor { border-left-color: var(--code-ink); }
+.preview-text.is-editing .cm-activeLine { background: transparent; }
+.preview-edit-conflict { position: absolute; top: calc(var(--preview-header-height, 56px) + 12px); left: 50%; z-index: 3; display: flex; max-width: calc(100% - 32px); flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 8px 8px 12px; border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); border-radius: var(--radius-md); background: var(--shade-80); color: var(--on-dark);
+  font-size: var(--text-sm); box-shadow: var(--shadow-md); transform: translateX(-50%); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+.preview-edit-conflict > svg { flex: none; color: var(--on-dark-danger); }
+.preview-edit-conflict .btn-ghost { color: var(--on-dark-72); }
+.preview-edit-conflict .btn-ghost:hover:not(:disabled) { background: var(--on-dark-16); color: var(--on-dark); }
+/* 底部状态胶囊：行数与截断提示浮在内容上，不占阅读空间。 */
+.preview-text-capsule { position: absolute; bottom: 14px; left: 50%; z-index: 2; display: flex; max-width: calc(100% - 32px); align-items: center; gap: 8px; padding: 8px 16px; border: 1px solid var(--on-dark-8); border-radius: var(--radius-pill);
+  background: var(--shade-80); color: var(--on-dark-72); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; transform: translateX(-50%);
+  backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); box-shadow: 0 12px 30px -10px var(--shade-48); }
+.preview-text-capsule > span { overflow: hidden; text-overflow: ellipsis; }
+.preview-text-capsule > span + span { padding-left: 8px; border-left: 1px solid var(--on-dark-16); }
+.preview-text-capsule a { color: var(--on-dark); text-decoration: underline; text-underline-offset: 2px; }
+/* PDF 阅读：pdf.js 把页面画在 canvas 上，白色纸张纵向排列在深色画布里；工具放在浮动头部，样式与文本工具相同。 */
+/* 阅读类预览（PDF 页面、Markdown／纯文本纸张）会滚到浮动头部下面，渐变头部在白底上发白：改为深色磨砂实底（仍浮动、静止后隐藏），内容从头部下方开始。 */
+.preview-modal.is-reading.is-immersive:not(.is-minimized) .modal-header { padding-bottom: 12px; border-bottom: 1px solid var(--on-dark-8); background: color-mix(in srgb, var(--media-canvas) 88%, transparent);
+  backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); }
+@media (max-width: 640px) { .preview-modal.is-reading.is-immersive:not(.is-minimized) .modal-header { padding-bottom: 8px; } }
+.preview-stage.is-reading .preview-pdf { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.preview-pdf-scroller { position: relative; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none; }
+.preview-pdf.is-immersive .preview-pdf-scroller { padding-top: var(--preview-header-height, 0px); }
+.preview-pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 16px; width: max-content; min-width: 100%; padding-inline: 24px; }
+.preview-pdf-page-sheet { position: relative; flex: none; overflow: hidden; border-radius: var(--radius-xs); background: var(--on-dark); box-shadow: 0 1px 2px var(--shade-32), 0 12px 32px -12px var(--shade-48); }
+.preview-pdf-page-sheet canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.preview-pdf-page-sheet.is-idle::after, .preview-pdf-page-sheet.is-drawing::after { content: ""; position: absolute; top: 50%; left: 50%; width: 18px; height: 18px; margin: -8px 0 0 -8px; border: 2px solid var(--shade-8); border-top-color: var(--shade-48); border-radius: 50%; animation: spin .8s linear infinite; }
+.preview-pdf-page-error { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--paper-ink-3); font-size: var(--text-sm); }
+/* 文字层：透明文字叠在画面上，只用于选择、复制与浏览器查找。规则取自 pdf.js 的 pdf_viewer.css（.textLayer），
+ * pdf.js 给每个文字片段写入 --font-height、--scale-x 等变量，字号与位置都靠这里的 calc 换算。 */
+.preview-pdf-text { --user-unit: 1; --total-scale-factor: calc(var(--scale-factor) * var(--user-unit)); --scale-round-x: 1px; --scale-round-y: 1px;
+  --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size));
+  position: absolute; inset: 0; z-index: 1; overflow: clip; color-scheme: only light; line-height: 1; letter-spacing: normal; word-spacing: normal; text-align: initial; text-size-adjust: none; -webkit-text-size-adjust: none;
+  forced-color-adjust: none; transform-origin: 0 0; caret-color: CanvasText; }
+.preview-pdf-text :is(span, br) { position: absolute; color: transparent; white-space: pre; cursor: text; transform-origin: 0% 0%; user-select: text; -webkit-user-select: text; }
+.preview-pdf-text > :not(.markedContent), .preview-pdf-text .markedContent span:not(.markedContent) { --font-height: 0; --scale-x: 1; --rotate: 0deg; z-index: 1;
+  font-size: calc(var(--text-scale-factor) * var(--font-height)); transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
+.preview-pdf-text .markedContent { display: contents; }
+.preview-pdf-text span[role="img"] { cursor: default; user-select: none; -webkit-user-select: none; }
+.preview-pdf-text ::selection { background: var(--selection); color: transparent; }
+.preview-pdf-text br::selection { background: transparent; }
+.preview-pdf-text .endOfContent { position: absolute; inset: 100% 0 0; z-index: 0; display: block; cursor: default; user-select: none; -webkit-user-select: none; }
+.preview-pdf-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--on-dark-72); font-size: var(--text-sm); }
+.preview-pdf-spinner { width: 16px; height: 16px; border: 2px solid var(--on-dark-16); border-top-color: var(--on-dark); border-radius: 50%; animation: spin .8s linear infinite; }
+.preview-pdf-tools { display: flex; align-items: center; gap: 2px; margin-right: auto; color: var(--on-dark-72); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.preview-pdf-tools .icon-btn { color: var(--on-dark-72); }
+.preview-pdf-tools .icon-btn:hover:not(:disabled), .preview-pdf-tools .icon-btn.is-active { background: var(--on-dark-16); color: var(--on-dark); }
+.preview-pdf-tools .icon-btn:disabled { opacity: .35; }
+.preview-pdf-page { display: flex; align-items: center; gap: 4px; margin: 0 2px; white-space: nowrap; }
+.preview-pdf-page input { box-sizing: content-box; height: 22px; padding: 0 8px; border: 1px solid var(--on-dark-16); border-radius: var(--radius-sm); background: var(--on-dark-8); color: var(--on-dark); font: inherit; text-align: center; }
+.preview-pdf-page input:focus { border-color: var(--on-dark-40); outline: none; background: var(--on-dark-16); }
+.preview-pdf-page span { color: var(--on-dark-56); }
+.preview-pdf-divider { width: 1px; height: 16px; margin: 0 8px; background: var(--on-dark-16); }
+.preview-pdf-zoom { min-width: 64px; height: 28px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.preview-pdf-zoom:hover { background: var(--on-dark-16); color: var(--on-dark); }
+.preview-pdf-bar { display: flex; justify-content: center; padding: 8px; border-bottom: 1px solid var(--on-dark-8); background: var(--media-canvas); }
+.preview-pdf:not(.is-immersive) { position: relative; display: flex; flex-direction: column; height: min(78vh, 900px); background: var(--media-canvas); }
+.preview-pdf:not(.is-immersive) .preview-outline-panel { top: 50px; }
+/* 窄窗口：头部放不下全部工具，只留目录与页码（滚动翻页、页面适合宽度）。 */
+@container preview-window (max-width: 580px) {
+  .preview-pdf-tools > :is(.preview-pdf-divider, .preview-pdf-zoom, .preview-pdf-step) { display: none; }
+}
+@media (max-width: 640px) { .preview-pdf-pages { padding-inline: 8px; gap: 8px; } }
+/* 目录抽屉：沿用播放列表的磨砂玻璃抽屉。 */
+.preview-stage.is-reading .preview-outline-panel, .preview-pdf .preview-outline-panel { position: absolute; top: calc(var(--preview-header-height, 0px) + 6px); right: 12px; bottom: 12px; z-index: 3; display: flex; flex-direction: column;
+  width: min(300px, calc(100% - 24px)); min-height: 0; overflow: hidden; border: 1px solid var(--on-dark-8); border-radius: var(--radius-lg); background: var(--shade-80); color: var(--on-dark);
+  box-shadow: var(--shadow-dark-lg), inset 0 1px 0 var(--on-dark-4); backdrop-filter: blur(28px) saturate(1.5); -webkit-backdrop-filter: blur(28px) saturate(1.5); animation: drawer-in var(--duration-slow) var(--ease-out); }
+.preview-outline-item { display: block; width: 100%; min-height: 34px; padding: 8px 12px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--on-dark-90); font: inherit; font-size: var(--text-sm); line-height: var(--leading-snug); text-align: left; cursor: pointer; }
+.preview-outline-item:hover { background: var(--on-dark-8); color: var(--on-dark); }
+.preview-outline-item { position: relative; }
+.preview-outline-item.is-active { background: var(--on-dark-8); color: var(--on-dark); }
+.preview-outline-item.is-active::before { content: ""; position: absolute; top: 8px; bottom: 8px; left: 3px; width: 3px; border-radius: var(--radius-xs); background: currentColor; }
+.preview-outline-item[data-level="0"] { font-weight: 600; }
+.preview-outline-item[data-level="1"] { padding-left: 24px; color: var(--on-dark-72); }
+.preview-outline-item[data-level="2"] { padding-left: 40px; color: var(--on-dark-56); font-size: var(--text-xs); }
+@media (prefers-reduced-motion: reduce) { .preview-text.is-paper .preview-sheet, .preview-stage.is-reading .preview-outline-panel { animation: none; } }
+
+/* 播放列表抽屉：浮在画面右侧的磨砂玻璃卡片，不挤压播放器；顶部过滤，当前项高亮并带律动条。 */
+.preview-stage.is-media .preview-playlist-panel { position: absolute; top: calc(var(--preview-header-height, 0px) + 6px); right: 12px; bottom: 12px; z-index: 3; display: flex; flex-direction: column;
+  width: min(340px, calc(100% - 24px)); min-height: 0; overflow: hidden; border: 1px solid var(--on-dark-8); border-radius: var(--radius-lg); background: var(--shade-80); color: var(--on-dark);
+  box-shadow: var(--shadow-dark-lg), inset 0 1px 0 var(--on-dark-4); backdrop-filter: blur(28px) saturate(1.5); -webkit-backdrop-filter: blur(28px) saturate(1.5); animation: drawer-in var(--duration-slow) var(--ease-out); }
+@keyframes drawer-in { from { opacity: 0; transform: translateX(24px) scale(.98); } }
+/* 播放器的播放列表与最小化小窗：和音乐播放器一样，用当前文件的封面模糊后铺底（没有封面时用按文件名选的色调）。
+ * 伪元素在各自的层叠上下文里位于背景之上、内容之下。 */
+.preview-modal.has-media-surface .preview-playlist-panel, .preview-modal.has-media-surface.is-minimized { isolation: isolate; }
+.preview-modal.has-media-surface .preview-playlist-panel::before, .preview-modal.has-media-surface.is-minimized::before {
+  position: absolute; inset: -48px; z-index: -1; background: radial-gradient(50% 60% at 25% 20%, color-mix(in srgb, var(--preview-tint, var(--accent)) 45%, transparent), transparent 72%), radial-gradient(55% 60% at 80% 85%, color-mix(in srgb, var(--preview-tint, var(--accent)) 22%, transparent), transparent 72%), var(--dark-surface);
+  filter: blur(36px); pointer-events: none; content: ""; }
+.preview-modal.has-cover .preview-playlist-panel::before, .preview-modal.has-cover.is-minimized::before { background: var(--preview-cover) center / cover no-repeat, var(--dark-surface); filter: blur(48px) saturate(1.6) brightness(.42); }
+.preview-playlist-panel > header { display: flex; flex: none; align-items: center; gap: 8px; padding: 16px 8px 8px 16px; }
+.preview-playlist-title { display: flex; flex: 1; align-items: baseline; gap: 8px; min-width: 0; }
+.preview-playlist-title strong { font-size: var(--text-md); font-weight: 600; }
+.preview-playlist-count { color: var(--on-dark-56); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.preview-playlist-panel .icon-btn { color: var(--on-dark-72); }
+.preview-playlist-panel .icon-btn:hover:not(:disabled) { background: var(--on-dark-12); color: var(--on-dark); }
+.preview-playlist-search { display: flex; flex: none; align-items: center; gap: 8px; height: 34px; margin: 0 12px 8px; padding: 0 8px 0 12px; border: 1px solid var(--on-dark-8); border-radius: var(--radius-md); background: var(--on-dark-8); color: var(--on-dark-56); transition: border-color var(--duration-fast), background var(--duration-fast); }
+.preview-playlist-search:focus-within { border-color: var(--on-dark-24); background: var(--on-dark-8); color: var(--on-dark); }
+.preview-playlist-search input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: none; background: transparent; color: var(--on-dark); font: inherit; font-size: var(--text-sm); }
+.preview-stage.is-media .preview-playlist-search input:focus-visible { outline: none; }
+/* 抽屉停在控制条上方，播放、音量和列表按钮始终可点。 */
+.preview-modal-audio .preview-stage.is-media .preview-playlist-panel { bottom: 112px; }
+.preview-modal-video .preview-stage.is-media .preview-playlist-panel { bottom: 64px; }
+.preview-playlist-search input::placeholder { color: var(--on-dark-40); }
+.preview-playlist-search input::-webkit-search-cancel-button { display: none; }
+.preview-playlist-search button { display: grid; width: 20px; height: 20px; place-items: center; padding: 0; border: 0; border-radius: 50%; background: var(--on-dark-16); color: var(--on-dark); cursor: pointer; }
+.preview-playlist-items { position: relative; flex: 1; min-height: 0; margin: 0; padding: 0 8px 8px; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; list-style: none; scrollbar-width: thin; scrollbar-color: var(--on-dark-16) transparent; }
+.preview-track { position: relative; display: grid; grid-template-columns: 24px 40px minmax(0, 1fr) 16px; align-items: center; gap: 8px; width: 100%; min-height: 56px; padding: 8px 8px 8px 8px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--on-dark-90); text-align: left; cursor: pointer; transition: background-color var(--duration-fast), color var(--duration-fast); }
+.preview-track:hover { background: var(--on-dark-8); color: var(--on-dark); }
+.preview-track.is-current { background: linear-gradient(90deg, var(--on-dark-16), var(--on-dark-4)); color: var(--on-dark); }
+.preview-track.is-current::before { position: absolute; top: 12px; bottom: 12px; left: 0; width: 3px; border-radius: var(--radius-2xs); background: var(--on-dark); content: ""; }
+.preview-track-order { display: grid; place-items: center; color: var(--on-dark-40); font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
+.preview-track-order .preview-equalizer { height: 12px; gap: 2px; color: var(--on-dark); }
+.preview-track-order .preview-equalizer i { width: 2.5px; height: 12px; }
+.preview-playlist-panel.is-playing .preview-track-order .preview-equalizer i { animation: audio-bars .95s ease-in-out infinite alternate; }
+.preview-playlist-panel.is-playing .preview-track-order .preview-equalizer i:nth-child(2) { animation-duration: 1.25s; animation-delay: -.45s; }
+.preview-playlist-panel.is-playing .preview-track-order .preview-equalizer i:nth-child(3) { animation-duration: .75s; animation-delay: -.2s; }
+.preview-playlist-panel.is-playing .preview-track-order .preview-equalizer i:nth-child(4) { animation-duration: 1.05s; animation-delay: -.65s; }
+/* 没有封面的音乐：按文件名固定的图表色渐变块（--cover-tint 由 coverTint 给出）。 */
+.tint-cover { display: grid; width: 100%; height: 100%; place-items: center; border-radius: inherit; background: linear-gradient(135deg, color-mix(in srgb, var(--cover-tint) 85%, var(--on-dark)), color-mix(in srgb, var(--cover-tint) 70%, var(--black))); color: var(--on-dark-90); }
+.preview-track-cover .tint-cover { width: 40px; height: 40px; border-radius: var(--radius-sm); box-shadow: var(--shadow-dark-sm); }
+.preview-track-cover .file-tile { width: 40px; height: 40px; border-radius: var(--radius-sm); box-shadow: var(--shadow-dark-sm); }
+.preview-track-cover .file-tile:not(.file-visual) { background: var(--on-dark-8); color: var(--on-dark-72); }
+.preview-track-description { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+.preview-track-description strong { max-width: 100%; overflow: hidden; font-size: var(--text-sm); font-weight: 500; line-height: var(--leading-snug); text-overflow: ellipsis; white-space: nowrap; }
+.preview-track-description > span { color: var(--on-dark-40); font-size: var(--text-micro); line-height: var(--leading-snug); }
+.preview-track.is-current .preview-track-description strong { font-weight: 600; }
+.preview-track-play { color: var(--on-dark-72); opacity: 0; transition: opacity var(--duration-fast); }
+.preview-track:hover .preview-track-play, .preview-track:focus-visible .preview-track-play { opacity: 1; }
+@media (hover: none) { .preview-track-play { display: none; } }
+.preview-playlist-empty { padding: 28px 12px; color: var(--on-dark-56); font-size: var(--text-xs); text-align: center; overflow-wrap: anywhere; }
+
+/* 音乐播放器细节：歌手副标题、当前歌词的柔光。 */
+.audio-heading h3 { font-size: var(--text-2xl); }
+.audio-artist { margin: 0; color: var(--media-ink-2); font-size: var(--text-md); font-weight: 500; }
+.audio-lyric.is-active { text-shadow: 0 0 22px var(--on-dark-40); }
+
+/* 视频：ArtPlayer 换成白色主题、细进度条、底部渐变和磨砂玻璃的中央播放键与菜单。 */
+.preview-video-host .art-video-player { --art-theme: var(--on-dark); --art-progress-height: 4px; --art-control-height: 44px; --art-control-icon-size: 34px; --art-bottom-gap: 6px; --art-padding: 12px; --art-hover-color: var(--on-dark-40); --art-loaded-color: var(--on-dark-24); --art-progress-color: var(--on-dark-16); --art-widget-background: var(--shade-80); --art-tip-background: var(--shade-80); --art-border-radius: var(--radius-lg); --art-control-opacity: .85; --art-indicator-size: 14px; --art-state-size: 72px; font-family: var(--font); }
+.preview-video-host .art-video-player .art-bottom { padding: 0 var(--preview-video-padding, 16px) 8px; background-image: linear-gradient(to top, var(--shade-64), var(--shade-32) 55%, transparent) !important; }
+.preview-video-host .art-progress:hover { --art-progress-height: 6px; }
+.preview-video-host .art-control:hover { --art-control-opacity: 1; }
+.preview-video-host .art-state, .preview-video-host .art-layer-state { display: grid; place-items: center; border-radius: 50%; background: var(--on-dark-16); box-shadow: var(--shadow-dark-md); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); transition: transform var(--duration-base) var(--ease-out), background-color var(--duration-base); }
+.preview-video-host .art-state:hover, .preview-video-host .art-layer-state:hover { background: var(--on-dark-24); transform: scale(1.06); }
+.preview-video-host :is(.art-settings, .art-selector-list, .art-contextmenus) { backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4); box-shadow: var(--shadow-dark-md); }
+
+/* 图片：深色画布、模糊背景、可缩放平移的原图，悬浮工具栏和底部缩略图条。 */
+.preview-modal-image { --media-canvas: var(--image-canvas); }
+.preview-modal-image .preview-stage { background: var(--media-canvas); }
+.image-viewer { position: relative; isolation: isolate; display: flex; flex-direction: column; overflow: hidden; overflow: clip; height: min(max(600px, 78dvh), var(--preview-player-height, calc(100dvh - 220px))); background: var(--image-canvas); color: var(--on-dark); user-select: none; -webkit-user-select: none; }
+.image-backdrop { position: absolute; inset: -12%; z-index: -1; filter: blur(52px) saturate(1.4) brightness(.42); opacity: .8; transform: scale(1.1); }
+.image-backdrop-layer { position: absolute; inset: 0; background-position: center; background-size: cover; }
+.image-backdrop-layer:last-child { animation: image-fade var(--duration-base) ease-out; }
+.image-canvas { position: relative; display: grid; flex: 1; min-height: 0; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; overflow: hidden; overflow: clip; touch-action: none; cursor: zoom-in; }
+.image-viewer.is-zoomed .image-canvas { cursor: grab; }
+.image-viewer.is-zoomed.is-dragging .image-canvas { cursor: grabbing; }
+.image-canvas > img { grid-area: 1 / 1; max-width: calc(100% - 32px); max-height: calc(100% - 32px); border-radius: var(--radius-2xs); box-shadow: var(--shadow-dark-lg); -webkit-user-drag: none; }
+.image-viewer.is-zoomed .image-canvas > img { max-width: none; max-height: none; }
+/* 封面在算出显示尺寸前不出现：否则会先按自身大小画一帧、再缩放到适配位置。 */
+.image-poster { filter: blur(1.5px); transition: transform var(--duration-slow) var(--ease-out); }
+.image-poster:not(.is-sized) { visibility: hidden; }
+.image-full { opacity: 0; transition: transform var(--duration-slow) var(--ease-out), opacity var(--duration-slow) ease; will-change: transform; }
+.image-viewer.is-loaded .image-full { opacity: 1; animation: image-in .45s var(--ease-out); }
+/* 有封面占位时原图与封面尺寸、位置一致，只做淡入，不再缩放入场；封面在淡入结束后才移除。 */
+.image-viewer.has-poster.is-loaded .image-full { animation: image-fade .35s ease-out; }
+.image-viewer.is-loaded .image-poster { filter: none; }
+.image-viewer.is-warm.is-loaded .image-full, .preview-stage.is-cached .image-viewer.is-loaded .image-full { animation: none; }
+.image-viewer.is-warm .image-full, .preview-stage.is-cached .image-full { transition: transform var(--duration-slow) var(--ease-out); }
+.image-viewer.is-dragging .image-full, .image-viewer.is-dragging .image-poster { transition: opacity var(--duration-slow) ease; }
+@keyframes image-in { from { opacity: 0; scale: .97; } }
+@keyframes image-fade { from { opacity: 0; } }
+.image-loading { position: absolute; bottom: 72px; left: 50%; z-index: 2; display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius-pill); background: var(--shade-48); color: var(--media-ink-2); font-size: var(--text-xs); backdrop-filter: blur(10px); transform: translateX(-50%); }
+.image-loading .spinner { width: 12px; height: 12px; border-color: var(--on-dark-24); border-top-color: var(--on-dark); }
+.image-arrow { position: absolute; top: 50%; z-index: 3; display: grid; width: 44px; height: 44px; margin-top: -24px; place-items: center; border: 0; border-radius: 50%; background: var(--on-dark-12); color: var(--on-dark); cursor: pointer; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); transition: opacity var(--duration-slow), background-color var(--duration-fast), transform var(--duration-fast); }
+.image-arrow.is-previous { left: 16px; }
+.image-arrow.is-next { right: 16px; }
+.image-arrow:hover { background: var(--on-dark-24); }
+.image-arrow:active { transform: scale(.92); }
+.image-viewer:has(.image-strip) .image-arrow { top: calc(50% - 40px); }
+.image-toolbar { position: absolute; bottom: 16px; left: 50%; z-index: 3; display: flex; width: max-content; align-items: center; gap: 2px; padding: 4px; border-radius: var(--radius-pill); background: var(--shade-64); box-shadow: 0 10px 30px var(--shade-32), inset 0 0 0 1px var(--on-dark-8); backdrop-filter: blur(16px) saturate(1.4); -webkit-backdrop-filter: blur(16px) saturate(1.4); transform: translateX(-50%); transition: opacity var(--duration-slow), transform var(--duration-slow) var(--ease-out); }
+.image-viewer:has(.image-strip) .image-toolbar { bottom: 92px; }
+.image-tool { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--on-dark-90); cursor: pointer; transition: background-color var(--duration-fast), color var(--duration-fast); }
+.image-tool:hover:not(:disabled), .image-zoom-level:hover { background: var(--media-glass, var(--on-dark-8)); color: var(--on-dark); }
+.image-tool:disabled { opacity: .35; cursor: default; }
+.image-zoom-level { min-width: 54px; height: 34px; padding: 0 8px; border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--on-dark); font: inherit; font-size: var(--text-xs); font-weight: 500; font-variant-numeric: tabular-nums; cursor: pointer; }
+.image-tool-divider { width: 1px; height: 18px; margin: 0 4px; background: var(--on-dark-16); }
+.image-counter { padding: 0 8px 0 4px; white-space: nowrap; color: var(--on-dark-72); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.image-viewer.is-idle .image-toolbar { opacity: 0; pointer-events: none; transform: translate(-50%, 8px); }
+.image-viewer.is-idle .image-arrow { opacity: 0; pointer-events: none; }
+.image-strip { display: flex; flex: none; justify-content: safe center; gap: 8px; margin: 0; padding: 8px 16px 12px; overflow-x: auto; list-style: none; scrollbar-width: none; background: linear-gradient(transparent, var(--shade-32)); }
+.image-strip::-webkit-scrollbar { display: none; }
+.image-strip button { display: grid; width: 56px; height: 56px; padding: 0; place-items: center; overflow: hidden; border: 0; border-radius: var(--radius-md); background: var(--on-dark-8); color: var(--on-dark-56); opacity: .5; cursor: pointer; transition: opacity var(--duration-base), transform var(--duration-base) var(--ease-out), box-shadow var(--duration-base); }
+.image-strip button:hover { opacity: .9; }
+.image-strip button.is-current { opacity: 1; box-shadow: 0 0 0 2px var(--on-dark); transform: translateY(-2px); }
+.image-strip img { width: 100%; height: 100%; object-fit: cover; }
+@media (hover: none) { .image-arrow { display: none; } .image-toolbar { bottom: 12px; } .image-viewer:has(.image-strip) .image-toolbar { bottom: 84px; } }
+.preview-modal.is-expanded :is(.image-viewer, .preview-player-audio) { height: 100%; }
+/* 拖动调整过大小的窗口：图片画布占满窗口给出的高度。 */
+.preview-modal.is-sized:not(.is-minimized) .image-viewer { height: var(--preview-player-height, 100%); }
+.preview-modal.is-expanded .audio-art { width: clamp(160px, 34vh, 340px); }
+.share-card .image-viewer { height: min(70dvh, 640px); }
+@media (prefers-reduced-motion: reduce) {
+  :is(.preview-player-audio, .preview-mini-player).is-playing .preview-equalizer i { animation: none; transform: scaleY(.65); }
+  .audio-lyrics-skeleton i { animation: none; }
+  .audio-status-spinner { animation-duration: 2.4s; }
+  .audio-backdrop, .image-backdrop-layer, .image-viewer.is-loaded .image-full { animation: none; }
+  .audio-tonearm, .audio-lyric, .image-full { transition: none; }
+  .preview-modal.is-minimized, .preview-mini-lyric, .preview-mini-player.is-waiting .preview-mini-play { animation: none; }
+}
+.preview-engine-loading { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 240px; padding: 24px; color: var(--ink-2); }
+.preview-code-editor { min-width: 0; width: 100%; }
+.preview-code-editor .cm-search { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 36px 8px 16px; font-size: var(--text-xs); }
+.preview-code-editor .cm-search label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.preview-code-editor .cm-search .cm-textfield { min-width: 100px; max-width: 100%; padding: 4px 8px; border-radius: var(--radius-xs); font: inherit; }
+.preview-code-editor .cm-search .cm-button { padding: 4px 8px; border-radius: var(--radius-xs); font: inherit; }
+.preview-code-editor .cm-search input[type="checkbox"] { accent-color: var(--accent); }
+.preview-code-editor .cm-panels { border-color: var(--line-soft); }
+/* 只读预览：点击选择文字时不加边框，只在键盘导航进入时用内描边提示焦点。 */
+html[data-input="keyboard"] .preview-code-editor .cm-editor.cm-focused { box-shadow: inset 0 0 0 2px var(--focus-ring); }
+.preview-frame { width: 100%; height: calc(100vh - 280px); height: calc(100dvh - 280px); min-height: 420px; border: 0; background: var(--surface); }
+.preview-text { --preview-content-height: calc(100dvh - 290px); --preview-reading-height: calc(var(--preview-content-height) - var(--preview-notice-height, 0px)); display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); }
+.preview-text.is-compact { --preview-text-min-height: 160px; }
+.preview-text.is-truncated { --preview-notice-height: 52px; }
+.preview-text-status { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; padding: 8px 16px; border-top: 1px solid var(--line-soft); color: var(--ink-3); font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
+.preview-loading { display: grid; place-content: center; justify-items: center; gap: 16px; min-height: 280px; padding: 24px; color: var(--ink-2); }
+.preview-resource { position: relative; min-width: 0; width: 100%; min-height: 280px; }
+/* 封面图占位：原图在后台加载，完成后淡入替换。 */
+.preview-resource:not(.is-ready) .preview-media-full { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
+.preview-resource.is-ready .preview-media-full img { animation: fade var(--duration-base) ease-out; }
+.preview-media-poster { position: relative; }
+.preview-media-poster img { width: 100%; height: auto; max-height: calc(100vh - 300px); max-height: calc(100dvh - 300px); object-fit: contain; filter: saturate(.92); }
+.preview-poster-status { position: absolute; right: 36px; bottom: 36px; display: inline-flex; align-items: center; gap: 8px; padding: 8px 8px; border-radius: var(--radius-sm); background: var(--media-overlay); color: var(--media-ink); font-size: var(--text-xs); }
+.preview-poster-status .spinner { width: 13px; height: 13px; }
+.preview-media-loader { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; background: var(--surface-sunken); }
+.preview-fallback { display: grid; place-content: center; justify-items: center; gap: 8px; padding: 56px 24px; text-align: center; }
+.preview-fallback h3 { margin-top: 8px; font-size: var(--text-lg); }
+.preview-fallback p { margin-bottom: 16px; color: var(--ink-2); }
+
+/* 分享状态卡：关闭时中性，开启时变为公开暖色 */
+.share-status { padding: 16px 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); transition: background-color var(--duration-base), border-color var(--duration-base); }
+.share-status.is-public { border-color: var(--line); background: var(--surface-sunken); }
+.share-status.is-public .switch-input:checked + .switch-track { background: var(--public); }
+
+/* 上传 */
+.upload-picker-trigger.icon-btn { display: inline-flex; justify-content: center; gap: 8px; width: auto; height: 34px; padding: 0 12px; background: var(--primary); color: var(--on-primary); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; }
+.upload-picker-trigger.icon-btn:hover, .upload-picker-trigger.icon-btn.is-active { background: var(--primary-hover); color: var(--on-primary); }
+.new-picker-trigger.icon-btn { display: inline-flex; justify-content: center; gap: 8px; width: auto; height: 34px; padding: 0 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; }
+.new-picker-trigger.icon-btn:hover, .new-picker-trigger.icon-btn.is-active { background: var(--surface-hover); color: var(--ink); }
+.upload-selection { display: grid; gap: 12px; min-width: 0; }
+.upload-selection .search-input { width: 100%; }
+.upload-type-filters { margin: 0; padding: 2px; }
+.upload-tree-surface { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.upload-selection-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface-sunken); font-size: var(--text-sm); }
+.upload-selection-bar > label { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; cursor: pointer; }
+.upload-selection-bar > .muted { font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.upload-tree-scroll { max-height: min(360px, 42dvh); overflow-y: auto; overscroll-behavior: contain; }
+.upload-tree { margin: 0; padding: 4px 0; list-style: none; }
+.upload-tree-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 42px; padding: 0 12px 0 calc(8px + var(--upload-depth) * 16px); font-size: var(--text-sm); }
+.upload-tree-row:hover { background: var(--surface-hover); }
+.upload-tree-check { display: flex; flex: none; align-items: center; justify-content: center; width: 28px; min-height: 40px; cursor: pointer; }
+.upload-tree-name { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; min-height: 40px; padding: 0; border: 0; border-radius: var(--radius-xs); background: transparent; color: inherit; font: inherit; text-align: left; }
+button.upload-tree-name { cursor: pointer; }
+.upload-tree-name > :not(:last-child) { flex: none; }
+.upload-tree-name > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-tree-spacer { width: 14px; }
+.upload-tree-meta { flex: none; font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.upload-tree-row.is-folder .upload-tree-name { font-weight: 500; }
+.upload-tree-row.is-excluded .upload-tree-name { color: var(--ink-3); }
+.upload-selection-hint { margin: 0; font-size: var(--text-xs); line-height: var(--leading-relaxed); }
+.upload-selection-empty { display: grid; justify-items: center; gap: 8px; padding: 32px 16px; color: var(--ink-3); font-size: var(--text-sm); }
+@media (max-width: 860px) {
+  .files-view .page-header-actions > .upload-picker-trigger, .files-view .page-header-actions > .new-picker-trigger { flex: 1 1 0; }
+  .upload-picker-trigger.icon-btn, .new-picker-trigger.icon-btn { min-height: 40px; }
+  .upload-type-filters .filter-chip { min-height: 36px; }
+  .upload-tree-row { padding-right: 8px; padding-left: calc(4px + var(--upload-depth) * 12px); }
+  .upload-tree-check { width: 40px; }
+  .upload-dialog .search-input input { font-size: var(--text-lg); }
+}
+
+/* 文件缓存状态的小圆环（file-cache-ring）沿用这两条描边规则。 */
+.tray-ring-track { stroke: var(--accent-soft); }
+.tray-ring-value { stroke: currentColor; stroke-dasharray: 100; stroke-dashoffset: calc(100 - var(--tray-progress)); stroke-linecap: round; transition: stroke-dashoffset .5s var(--ease-out), stroke var(--duration-slow); }
+
+/* 代码块 */
+.code-block { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); }
+.code-block-bar { display: flex; align-items: center; justify-content: space-between; height: 34px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--line-soft); color: var(--ink-3); font-family: var(--font-mono); font-size: var(--text-xs); }
+.code-block-bar button { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--ink-2); font-family: var(--font); font-size: var(--text-xs); }
+.code-block-bar button:hover { background: var(--surface-hover); color: var(--ink); }
+.code-block pre { margin: 0; padding: 16px; overflow-x: auto; font-size: var(--text-xs); line-height: var(--leading-relaxed); }
+

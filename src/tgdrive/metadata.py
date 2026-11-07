@@ -52,7 +52,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 38
+    SCHEMA_VERSION = 40
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -781,6 +781,18 @@ class Metadata:
                 if "frozen" not in {row[1] for row in db.execute("PRAGMA table_info(assistant_actions)")}:
                     db.execute("ALTER TABLE assistant_actions ADD COLUMN frozen BLOB")
                 db.execute("PRAGMA user_version = 38")
+            if version < 39:
+                # 文件助手用量另记缓存命中的输入 token：每日额度与每轮预算按计费等价量计算（缓存读取按十分之一计），
+                # 统计页仍显示原始输入量。
+                if "cached_tokens" not in {row[1] for row in db.execute("PRAGMA table_info(assistant_usage)")}:
+                    db.execute("ALTER TABLE assistant_usage ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0")
+                db.execute("PRAGMA user_version = 39")
+            if version < 40:
+                # 照片拍摄时间（EXIF，写入第 1 段时读取，exif.py）与按修改时间浏览的索引：「最近」与「相册」视图按它们键集分页。
+                if "taken_at" not in {row[1] for row in db.execute("PRAGMA table_info(blobs)")}:
+                    db.execute("ALTER TABLE blobs ADD COLUMN taken_at REAL")
+                db.execute("CREATE INDEX IF NOT EXISTS objects_by_modified ON objects(bucket_id, modified_at DESC, key)")
+                db.execute("PRAGMA user_version = 40")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""
@@ -893,9 +905,9 @@ class Metadata:
         return BlobRecord(row["uuid"], row["size"], row["chunk_size"], row["frame_size"],
                           row["wrapped_dek"], row["status"], row["refcount"])
 
-    def set_sniffed(self, blob_uuid: str, value: str) -> None:
+    def set_sniffed(self, blob_uuid: str, value: str, taken_at: float | None = None) -> None:
         with self.transaction() as db:
-            db.execute("UPDATE blobs SET sniffed=? WHERE uuid=?", (value, blob_uuid))
+            db.execute("UPDATE blobs SET sniffed=?, taken_at=? WHERE uuid=?", (value, taken_at, blob_uuid))
 
     def sniffed(self, blob_uuid: str) -> str | None:
         row = self.db.execute("SELECT sniffed FROM blobs WHERE uuid=?", (blob_uuid,)).fetchone()

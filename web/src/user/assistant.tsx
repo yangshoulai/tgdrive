@@ -14,6 +14,7 @@ import { ReviewQueue, pendingReviews, type ReviewRequest } from "./assistant-rev
 import { AttachmentTray, useAttachments } from "./assistant-attachments";
 import { filesBridge, getPrivateSection, openPrivateSection, waitForFiles } from "./assistant-bridge";
 import { usePrivateAccess } from "./private-session";
+import type { AssistantDockStatus } from "./assistant-hooks";
 import { assistantEnvironment } from "./assistant-environment";
 import { commonFolder, mentionLabel, useMentions } from "./assistant-mentions";
 import { PrivateUnlockDialog } from "./private-unlock";
@@ -44,21 +45,8 @@ export type AssistantLocation = { view: string; prefix: string };
 
 /** 读取助手是否可用；不可用时不显示入口。 */
 /** 会改动文件列表的操作；执行完后通知文件页刷新。 */
-const FILE_ACTION_KINDS = new Set(["rename", "move", "organize", "mkdir", "trash", "restore", "purge", "unshare", "share", "save_attachment", "move_out", "move_in", "media", "text"]);
+const FILE_ACTION_KINDS = new Set(["rename", "move", "organize", "mkdir", "trash", "restore", "purge", "unshare", "share", "save_attachment", "move_out", "move_in", "media", "text", "copy", "extract", "compress"]);
 const ACTIVE_ACTION = new Set(["pending", "confirmed", "running", "undoing"]);
-
-export function useAssistantConfig(enabled: boolean) {
-  const [config, setConfig] = useState<ai.AssistantConfig | null>(null);
-  const refresh = useCallback(() => {
-    if (!enabled) { setConfig(null); return; }
-    void ai.assistantConfig().then(setConfig).catch(() => setConfig(null));
-  }, [enabled]);
-  useEffect(refresh, [refresh]);
-  return { config, refresh };
-}
-
-/** 抽屉关闭时也要让人看见的状态：运行中、等待处理的请求数，以及当前对话是否涉及私密空间。 */
-export type AssistantDockStatus = { running: boolean; pending: number; private: boolean };
 
 export type AssistantNavigate = (view: "files" | "trash" | "downloads" | "shared" | "private", prefix?: string) => void;
 const FULL_ACK_KEY = "tessera-assistant-full-ack-v2";
@@ -1039,7 +1027,7 @@ export async function executeClientTool(name: string, args: Record<string, unkno
 /** 本机缓存查询（§26）：只回答服务端发来的文件；缓存索引在这台设备的浏览器里，服务端看不到。 */
 async function cacheStatus(args: Record<string, unknown>, queue: ReturnType<typeof useCacheQueue>): Promise<Record<string, unknown>> {
   if (!cacheSupported()) return { available: false, reason: "这个浏览器不能使用本机缓存：需要通过 https:// 地址访问并使用较新的浏览器，无痕模式下不可用" };
-  if (!queue?.available) return { available: false, reason: "这台设备的本机缓存已关闭（可在「设置 → 本机缓存」开启），或管理员不允许使用" };
+  if (!queue?.available) return { available: false, reason: "这台设备的本机缓存已关闭（可在「设置 → 缓存设置」开启），或管理员不允许使用" };
   const stats = await cacheStats();
   const items = (Array.isArray(args.items) ? args.items : []) as (CacheFile & { path: string })[];
   const files = items.map(item => ({ key: item.path, etag: item.etag, size: item.size, content_type: item.content_type }));
@@ -1345,17 +1333,3 @@ function groupByDate(items: ai.Conversation[]): [string, ai.Conversation[]][] {
 }
 
 /** ⌘/Ctrl+J 开关抽屉；文件页的快捷键在输入控件中让行，这个组合键带修饰键所以全局生效。 */
-export function useAssistantShortcut(enabled: boolean, toggle: () => void) {
-  useEffect(() => {
-    if (!enabled) return;
-    const handler = (event: KeyboardEvent) => {
-      if (!event.defaultPrevented && !event.isComposing && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "j") {
-        if (document.querySelector(".modal-backdrop:not(.is-minimized), .menu")) return;
-        event.preventDefault();
-        if (!event.repeat) toggle();
-      }
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [enabled, toggle]);
-}

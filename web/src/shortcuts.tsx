@@ -9,6 +9,7 @@ export function ShortcutsDialog({ area, kind, privateSpace = false, onClose }: {
   const [tab, setTab] = useState<Area>(area);
   const mod = (key: string) => shortcutLabel(`Mod+${key}`);
   const files: Row[] = [
+    [mod("K"), "命令面板：跳转页面、查找文件与常用操作（任何页面可用）"],
     ["/", "搜索文件"], ["↑ ↓ ← →", "移动焦点；左右键用于网格，Shift 连续选择"],
     ["Home / End", "跳到第一项／最后一项"], ["↵ / 空格", "打开项目／选中或取消选中"],
     [IS_MAC ? "⌘↑" : "Alt + ↑", "返回上一级文件夹"], [mod("A"), "全选当前结果"],
@@ -31,7 +32,9 @@ export function ShortcutsDialog({ area, kind, privateSpace = false, onClose }: {
     ...(!kind || kind === "audio" || kind === "video" ? [["← →", "短按：上一首／下一首；长按：后退／快进"]] as Row[] : []),
     ...(!kind || kind === "image" ? [["+ / − / 0 / R", "图片放大／缩小／适应窗口／旋转"]] as Row[] : []),
     ...(!kind || kind === "video" ? [["R", "视频画面顺时针旋转 90°"]] as Row[] : []),
-    ...(!kind || kind === "audio" || kind === "video" ? [["空格 / K", "播放／暂停"], ["J / L", "后退／前进 10 秒"], ["↑ / ↓", "增加／减少音量"], ["O", "打开／收起播放列表"]] as Row[] : []),
+    ...(!kind || kind === "audio" || kind === "video" ? [["空格 / K", "播放／暂停"], ["J / L", "后退／前进 10 秒"], ["↑ / ↓", "增加／减少音量"], ["M", "静音／取消静音"],
+      ["Shift+< / Shift+>", "减慢／加快播放（每次 0.25×）"], ["0 – 9", "跳到 0%–90% 的位置"], ["C", "打开／关闭字幕或歌词"], ["G / H", "歌词或字幕提前／延后 0.5 秒"], ["O", "打开／收起播放列表"]] as Row[] : []),
+    ...(!kind || kind === "video" ? [[", / .", "暂停时后退／前进一帧"]] as Row[] : []),
     ["Esc", "退出全屏或关闭预览；固定窗口保留"], ["?", "打开快捷键说明"],
   ];
   const assistant: Row[] = [

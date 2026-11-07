@@ -746,6 +746,23 @@ class ObjectService:
         return {row["uuid"]: (row["media_width"], row["media_height"]) for row in self.metadata.db.execute(
             f"SELECT uuid, media_width, media_height FROM blobs WHERE uuid IN ({marks}) AND media_width IS NOT NULL", unique)}
 
+    MEDIA_TAG_FIELDS = ("title", "artist", "album", "album_artist", "track", "year", "duration")
+
+    def media_tags(self, blob_uuids: list[str]) -> dict[str, dict[str, object]]:
+        """批量读取已记录的音视频标签（media_info，写入后由媒体服务提取）：列表与播放列表据此显示歌名、艺人、专辑与时长。
+        只读已有记录，不在列表时解析文件；没有记录或全部为空的不返回。"""
+        unique = list(dict.fromkeys(uuid for uuid in blob_uuids if uuid))
+        if not unique:
+            return {}
+        marks = ",".join("?" for _ in unique)
+        result: dict[str, dict[str, object]] = {}
+        for row in self.metadata.db.execute(
+                f"SELECT blob_uuid, {', '.join(self.MEDIA_TAG_FIELDS)} FROM media_info WHERE blob_uuid IN ({marks})", unique):
+            tags = {name: row[name] for name in self.MEDIA_TAG_FIELDS if row[name] not in (None, "")}
+            if tags:
+                result[row["blob_uuid"]] = tags
+        return result
+
     def set_media_size(self, scope: Scope, key: str, etag: str, width: object, height: object) -> bool:
         """记录图片／视频的显示尺寸（浏览器读到的 naturalWidth／videoWidth 等，已按旋转方向换算）。
         只在对象仍是这个版本时写入；同一内容的所有副本共用这条记录。返回是否写入。"""
@@ -833,6 +850,27 @@ class ObjectService:
                            (entry_id, scope.bucket_id, key, int(folder), int(stats[1]), int(stats[0]), time.time()))
             entries.append({"id": entry_id, "path": key})
         return entries
+
+    VERSION_WINDOW = 600
+
+    def keep_version(self, scope: Scope, key: str, etag: str | None = None) -> str | None:
+        """覆盖保存前把当前版本放进回收站（引用同一个 Blob，不复制数据，计入配额）：条目的原位置就是这个文件，
+        还原时与新版本并存（自动改名为「名称 (1)」）。etag 给出时只在当前版本相符时保留。返回回收站条目编号；
+        文件不存在或是文件夹时返回 None。"""
+        self._check_scope(scope, key, write=True)
+        row = self.metadata.db.execute("SELECT etag, size, blob_uuid FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone()
+        if row is None or not row["blob_uuid"] or (etag is not None and row["etag"] != etag):
+            return None
+        # 连续保存（编辑时反复 ⌘S）只保留这次编辑开始前的版本：10 分钟内已保留过同一文件就不再新增。
+        if self.metadata.db.execute("SELECT 1 FROM trash WHERE bucket_id=? AND original_path=? AND deleted_at>? LIMIT 1",
+                                    (scope.bucket_id, key, time.time() - self.VERSION_WINDOW)).fetchone():
+            return None
+        entry_id = f"{int(time.time() * 1000)}-{secrets.token_hex(3)}"
+        self.link_copy(scope.bucket_id, key, replace(scope, prefix="", private_access=True), self._trash_key(entry_id, key))
+        with self.metadata.transaction() as db:
+            db.execute("INSERT INTO trash(id,bucket_id,original_path,is_folder,size,item_count,deleted_at) VALUES(?,?,?,?,?,?,?)",
+                       (entry_id, scope.bucket_id, key, 0, int(row["size"] or 0), 1, time.time()))
+        return entry_id
 
     def list_trash(self, bucket_id: int, *, private: bool = False) -> list[dict[str, object]]:
         rows = self.metadata.db.execute("SELECT * FROM trash WHERE bucket_id=? AND (substr(original_path,1,?)=?)=? "

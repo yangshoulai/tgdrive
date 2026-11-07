@@ -371,10 +371,15 @@ def _anthropic_images(images: list[dict]) -> list[dict]:
             for image in images]
 
 
-def _anthropic_messages(messages: list[dict]) -> tuple[list[dict], str]:
-    """Anthropic 要求 user／assistant 交替：连续的 user（含工具结果）合并成一条。额外的 system 消息拼进系统提示。"""
+CACHE = {"type": "ephemeral"}
+
+
+def _anthropic_messages(messages: list[dict]) -> list[dict]:
+    """Anthropic 要求 user／assistant 交替：连续的 user（含工具结果）合并成一条。
+
+    system 消息（运行状态块、控制事件）按原位置放进 user 轮次：拼进系统提示会让每一步的前缀都不同，
+    提示词缓存永远命中不了。这些文字都自带「不是用户发言」或「[系统事件]」标记。"""
     result: list[dict] = []
-    extra_system: list[str] = []
 
     def push(role: str, blocks: list[dict]) -> None:
         if result and result[-1]["role"] == role:
@@ -385,7 +390,7 @@ def _anthropic_messages(messages: list[dict]) -> tuple[list[dict], str]:
     for message in messages:
         role = message["role"]
         if role == "system":
-            extra_system.append(message["content"])
+            push("user", [{"type": "text", "text": message["content"] or " ", "_dynamic": True}])
         elif role == "user":
             push("user", [{"type": "text", "text": message["content"] or " "}, *_anthropic_images(message.get("images") or [])])
         elif role == "tool":
@@ -404,7 +409,29 @@ def _anthropic_messages(messages: list[dict]) -> tuple[list[dict], str]:
                 blocks.append({"type": "tool_use", "id": call["id"], "name": call["name"],
                                "input": arguments if isinstance(arguments, dict) else {}})
             push("assistant", blocks or [{"type": "text", "text": " "}])
-    return result, "\n\n".join(extra_system)
+    if result and result[0]["role"] != "user":
+        result.insert(0, {"role": "user", "content": [{"type": "text", "text": " "}]})
+    _cache_points(result)
+    return result
+
+
+def _cache_points(messages: list[dict]) -> None:
+    """在对话里放两个缓存断点：最新内容之前（跳过末尾每步都变的状态块）与上一个 user 轮次的末尾。
+
+    Anthropic 从断点向前最多查找 20 个内容块的已有缓存，上一个 user 轮次的断点让并行调用较多的一步也能命中。
+    工具定义与系统提示另有两个断点，合计不超过上限 4 个。"""
+    marked = 0
+    for message in reversed(messages):
+        if message["role"] != "user" or marked >= 2:
+            continue
+        for block in reversed(message["content"]):
+            if not block.get("_dynamic"):
+                block["cache_control"] = CACHE
+                marked += 1
+                break
+    for message in messages:
+        for block in message["content"]:
+            block.pop("_dynamic", None)
 
 
 async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict], tools: list[ToolDef], *,
@@ -520,11 +547,12 @@ async def chat(endpoint: Endpoint, model: str, system: str, messages: list[dict]
                             for index, slot in sorted(calls.items()) if slot["name"]]
         return reply
 
-    converted, extra = _anthropic_messages(messages)
-    body = {"model": model, "system": system + ("\n\n" + extra if extra else ""), "messages": converted,
-            "max_tokens": max_tokens or 4096, "stream": True}
+    # 提示词缓存：工具定义、系统提示与对话前缀每步基本不变，长任务每步只为新增部分付全价（§23）。
+    body = {"model": model, "system": [{"type": "text", "text": system or " ", "cache_control": CACHE}],
+            "messages": _anthropic_messages(messages), "max_tokens": max_tokens or 4096, "stream": True}
     if tools:
         body["tools"] = [{"name": t.name, "description": t.description, "input_schema": t.parameters} for t in tools]
+        body["tools"][-1]["cache_control"] = CACHE
     if effort:
         body["output_config"] = {"effort": effort}
     request = await _open("POST", _anthropic_url(endpoint.base_url, "/messages"),

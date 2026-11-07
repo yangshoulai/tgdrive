@@ -64,7 +64,7 @@ class PrivateAssistantTests(ActionHelpers, AssistantCase):
             self.assertIn({"type": "private_required", "reason": "locked"}, events)
             tools = await self.tool_results(user, conversation)
             self.assertEqual(tools[-1]["status"], "error")
-            self.assertNotIn("3000", json.dumps(tools, ensure_ascii=False))
+            self.assertNotIn("3000", json.dumps([tool["result"] for tool in tools], ensure_ascii=False), "未解锁时不读取内容")
             self.assertFalse(self.service.trace.is_private(conversation))
             # 解锁后继续：读取成功、对话被标记，路径以「私密:/」显示。
             user = await self.unlock(user)

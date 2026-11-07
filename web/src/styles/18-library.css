@@ -1,0 +1,62 @@
+/* ---------- 媒体库：最近、相册、音乐 ---------- */
+.library-view { display: grid; gap: 8px; }
+.library-group { display: grid; gap: 8px; margin-bottom: 24px; }
+.library-group-title { position: sticky; top: 0; z-index: 2; display: flex; align-items: baseline; gap: 8px; padding: 8px 0; background: var(--canvas); font-size: var(--text-md); font-weight: 600; }
+.library-group-title span { color: var(--ink-3); font-size: var(--text-xs); font-weight: 400; }
+.library-list { display: grid; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-lg); list-style: none; overflow: hidden; }
+.library-row { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 0 12px; border-top: 1px solid var(--line-soft); }
+.library-row:first-child { border-top: 0; }
+.library-row:hover { background: var(--surface-hover); }
+.library-row-main { display: flex; flex: 1; align-items: center; gap: 12px; min-width: 0; padding: 8px 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.library-row-main .file-tile { flex: none; border-radius: var(--radius-md); }
+.library-row-text { display: grid; min-width: 0; }
+.library-row-text strong { overflow: hidden; font-size: var(--text-md); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.library-row-text span { color: var(--ink-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.library-row-folder { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 4px; max-width: 40%; padding: 4px 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink-3); font-size: var(--text-xs); cursor: pointer; }
+.library-row-folder span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-row-folder:hover { background: var(--surface-sunken); color: var(--accent-ink); }
+.library-more { display: flex; justify-content: center; align-items: center; gap: 8px; min-height: 48px; color: var(--ink-3); font-size: var(--text-sm); }
+.library-back { display: inline-flex; align-items: center; gap: 4px; justify-self: start; padding: 4px 8px 4px 4px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink-3); font-size: var(--text-sm); cursor: pointer; }
+.library-back:hover { background: var(--surface-hover); color: var(--ink); }
+
+.photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 4px; }
+.photo-tile { position: relative; overflow: hidden; aspect-ratio: 1; padding: 0; border: 0; border-radius: var(--radius-sm); background: var(--surface-sunken); cursor: pointer; }
+.photo-tile .file-thumbnail { width: 100%; height: 100%; }
+.photo-tile img, .album-cover img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transition: transform var(--duration-slow) var(--ease-out); }
+.photo-tile:hover img, .album-card:hover .album-cover img { transform: scale(1.03); }
+@media (prefers-reduced-motion: reduce) { .photo-tile img, .album-cover img { transition: none; } }
+.photo-tile:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.photo-tile-duration { position: absolute; right: 4px; bottom: 4px; padding: 0 4px; border-radius: var(--radius-xs); background: var(--shade-64); color: var(--on-dark); font-size: var(--text-micro); font-variant-numeric: tabular-nums; line-height: 18px; }
+
+.album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); gap: 24px 16px; }
+.album-card { display: grid; gap: 4px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.album-card strong { overflow: hidden; margin-top: 4px; font-size: var(--text-md); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.album-card > span:last-child { overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.album-card:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 4px; border-radius: var(--radius-lg); }
+.album-cover { position: relative; display: block; overflow: hidden; aspect-ratio: 1; border-radius: var(--radius-lg); background: var(--surface-sunken); box-shadow: var(--shadow-sm); }
+.album-cover .file-thumbnail, .album-cover .tint-cover { width: 100%; height: 100%; }
+.album-cover .thumbnail-badge { display: none; }
+.album-card:hover .album-cover { box-shadow: var(--shadow-md); }
+.album-cover-lg { width: 200px; flex: none; }
+.album-header { display: flex; align-items: flex-end; gap: 24px; margin: 8px 0 16px; }
+.album-header-text { display: grid; gap: 4px; min-width: 0; }
+.album-header-kind { color: var(--ink-3); font-size: var(--text-xs); }
+.album-header h1 { overflow-wrap: anywhere; font-family: var(--font-display); font-size: var(--text-display); font-weight: 600; letter-spacing: -.02em; line-height: var(--leading-display); }
+.album-header p { color: var(--ink-2); font-size: var(--text-sm); }
+.album-header-actions { display: flex; gap: 8px; margin-top: 8px; }
+.track-list { margin: 0; padding: 0; list-style: none; }
+.track-row { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 4px 12px; border: 0; border-radius: var(--radius-md); background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.track-row:hover { background: var(--surface-hover); }
+.track-number, .track-duration { color: var(--ink-3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.track-number { text-align: right; }
+.track-text { display: grid; min-width: 0; }
+.track-text strong { overflow: hidden; font-size: var(--text-md); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.track-text span { overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 640px) {
+  .photo-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; }
+  .album-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 12px; }
+  .album-header { flex-direction: column; align-items: flex-start; }
+  .album-cover-lg { width: 160px; }
+  .library-row-folder { display: none; }
+}
+

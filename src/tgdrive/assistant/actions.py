@@ -32,7 +32,7 @@ KINDS = {
     "rename": "批量改名", "move": "移动", "organize": "整理文件", "mkdir": "新建文件夹", "trash": "移入回收站",
     "restore": "从回收站恢复", "purge": "彻底删除", "unshare": "取消公开", "share": "公开分享", "downloads": "离线下载",
     "download_control": "下载任务操作", "save_attachment": "保存附件", "move_out": "移出私密空间", "move_in": "移入私密空间",
-    "media": "获取封面、歌词与字幕", "text": "编辑文本文件",
+    "media": "获取封面、歌词与字幕", "text": "编辑文本文件", "copy": "复制", "extract": "解压", "compress": "压缩",
 }
 MEDIA_LABELS = {"cover": "封面", "lyrics": "歌词", "subtitle": "字幕"}
 MOVE_KINDS = ("rename", "move", "organize")
@@ -137,8 +137,8 @@ def display(key: str) -> str:
 
 
 class ActionExecutor:
-    def __init__(self, objects: ObjectService, offline=None, media=None) -> None:
-        self.objects, self.offline, self.media = objects, offline, media
+    def __init__(self, objects: ObjectService, offline=None, media=None, archives=None) -> None:
+        self.objects, self.offline, self.media, self.archives = objects, offline, media, archives
 
     @property
     def db(self):
@@ -236,9 +236,118 @@ class ActionExecutor:
             return None
         return {key: value for key, value in undo.items() if value}
 
+    async def _copy(self, bucket_id, scope_root, scope, item, progress: Progress, undo) -> None:
+        """复制：新对象引用同一个 Blob（不搬运数据）；文件夹连同全部内容一起复制，目标已有同名文件时自动改名。"""
+        source, target = item["from"], item["to"]
+        reason = self._check_source(bucket_id, scope_root, item, source)
+        if reason is None and not self._inside(scope_root, target):
+            reason = "目标不在作用域内"
+        if reason is None and source.endswith("/") and target.startswith(source):
+            reason = "不能复制到它自己里面"
+        if reason:
+            progress.skip(display(source), reason)
+            return
+        if not source.endswith("/"):
+            info = self.objects.link_copy(bucket_id, source, scope, target)
+            undo["created"].append([info.key, info.etag])
+            progress.ok += 1
+            return
+        rows = self.db.execute("SELECT key FROM objects WHERE bucket_id=? AND key>? AND key<? ORDER BY key",
+                               (bucket_id, source, source + END)).fetchall()
+        if not self._exists(bucket_id, target):
+            self.objects._write_directory_marker(scope, target)
+            undo["mkdir"].append(target)
+        for index, row in enumerate(rows):
+            if progress.cancel:
+                break
+            destination = target + row["key"][len(source):]
+            if destination.endswith("/"):
+                if not self._exists(bucket_id, destination):
+                    self.objects._write_directory_marker(scope, destination)
+                    undo["mkdir"].append(destination)
+            else:
+                info = self.objects.link_copy(bucket_id, row["key"], scope, destination)
+                undo["created"].append([info.key, info.etag])
+            if index % 200 == 199:
+                await asyncio.sleep(0)
+        progress.ok += 1
+
+    async def _archive_job(self, kind, user_id, bucket_id, scope_root, scope, item, progress: Progress, undo) -> None:
+        """解压与压缩交给网页同一套任务队列（extract.ArchiveService），等它结束后按结果记账；用户取消时一并取消任务。"""
+        if self.archives is None:
+            progress.fail(display(item["path"]), "服务器暂不支持在线解压与压缩")
+            return
+        if kind == "extract":
+            key = item["path"]
+            reason = self._check_source(bucket_id, scope_root, item, key)
+            if reason is None and not self._inside(scope_root, item["destination"]):
+                reason = "解压位置不在作用域内"
+            if reason:
+                progress.skip(display(key), reason)
+                return
+            from ..extract import PasswordRequired
+            try:
+                job = await self.archives.start(user_id, scope, key, item["destination"], None, item["conflict"], item["keep_archive"])
+            except PasswordRequired:
+                progress.skip(display(key), "压缩包有密码：请在文件页用「解压…」输入密码后解压")
+                return
+        else:
+            roots = item["sources"]
+            for root in roots:
+                reason = "不在作用域内" if not self._inside(scope_root, root) else None
+                if reason is None and not (self._exists(bucket_id, root) if root.endswith("/") else self._version(bucket_id, root)):
+                    reason = "已不存在"
+                if reason:
+                    progress.skip(display(root), reason)
+                    return
+            if not self._inside(scope_root, item["path"]):
+                progress.skip(display(item["path"]), "保存位置不在作用域内")
+                return
+            files, total = self._totals(bucket_id, roots)
+            job = await self.archives.compress(user_id, scope, item["path"], lambda: self._zip_entries(bucket_id, scope, roots),
+                                               files, total, bool(item.get("deflate", True)))
+        record = self.archives.jobs[job["id"]]
+        while record.status in ("queued", "running"):
+            if progress.cancel:
+                self.archives.cancel(user_id, record.private, record.id)
+            await asyncio.sleep(0.5)
+        label = display(item["path"])
+        if record.status != "completed":
+            progress.fail(label, record.error or ("已取消" if record.status == "cancelled" else "执行失败"))
+            return
+        progress.ok += 1
+        if record.skipped:
+            progress.reasons[f"{record.skipped} 个同名文件已跳过"] += 1
+        if record.renamed:
+            progress.reasons[f"{record.renamed} 个同名文件已改名保存"] += 1
+        if kind == "compress" and (row := self._version(bucket_id, record.archive)):
+            undo["created"].append([record.archive, row["etag"]])
+
+    def _totals(self, bucket_id: int, roots: list[str]) -> tuple[int, int]:
+        files = total = 0
+        for key in roots:
+            if key.endswith("/"):
+                row = self.db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE bucket_id=? AND key>=? AND key<? "
+                                      "AND substr(key,-1)!='/'", (bucket_id, key, key + END)).fetchone()
+            else:
+                row = self.db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone()
+            files, total = files + int(row[0]), total + int(row[1])
+        return files, total
+
+    async def _zip_entries(self, bucket_id: int, scope: Scope, roots: list[str]):
+        """压缩包条目：名称相对于各项所在目录，逐个按需读取（与网页打包下载相同）。"""
+        for root in roots:
+            base = root[:root.rstrip("/").rfind("/") + 1]
+            keys = [root] if not root.endswith("/") else [row["key"] for row in self.db.execute(
+                "SELECT key FROM objects WHERE bucket_id=? AND key>=? AND key<? AND substr(key,-1)!='/' ORDER BY key",
+                (bucket_id, root, root + END))]
+            for key in keys:
+                info, stream = await self.objects.get_object(scope, key)
+                yield key[len(base):], info.size, info.modified_at, stream
+
     @staticmethod
     def _label(kind: str, item: dict) -> str:
-        if kind in MOVE_KINDS:
+        if kind in MOVE_KINDS or kind == "copy":
             return display(item["from"])
         if kind in ("restore", "purge"):
             return display(item.get("path", ""))
@@ -271,6 +380,10 @@ class ActionExecutor:
                 undo["moves"].append([target, source, {"etag": row["etag"], "modified_at": row["modified_at"]} if row else {}])
             else:
                 undo["moves"].append([target, source, {"directory_version": directory_version(self.db, bucket_id, target)[0]}])
+        elif kind == "copy":
+            await self._copy(bucket_id, scope_root, scope, item, progress, undo)
+        elif kind in ("extract", "compress"):
+            await self._archive_job(kind, user_id, bucket_id, scope_root, scope, item, progress, undo)
         elif kind == "mkdir":
             key = item["path"]
             if not self._inside(scope_root, key):

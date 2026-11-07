@@ -1,0 +1,172 @@
+/* ---------- 代码与 Markdown 预览（命名空间 src-* / hl-* / md，避免与文档站的 .code-block 冲突） ---------- */
+
+.hl-comment { color: var(--ink-3); font-style: italic; }
+.hl-string, .hl-inserted { color: var(--syntax-string); }
+.hl-number, .hl-literal { color: var(--syntax-number); }
+.hl-keyword { color: var(--syntax-keyword); }
+.hl-type { color: var(--syntax-type); }
+.hl-function { color: var(--syntax-fn); }
+.hl-attr { color: var(--syntax-property); }
+.hl-tag, .hl-variable, .hl-deleted { color: var(--syntax-tag); }
+.hl-meta { color: var(--syntax-meta); }
+.src-view { margin: 0; padding: 16px 24px; overflow: auto; color: var(--ink); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-loose); tab-size: 4; white-space: pre-wrap; overflow-wrap: anywhere; counter-reset: line; }
+.src-view code { font-size: inherit; }
+.src-view.has-lines .src-line { position: relative; display: block; padding-left: 3.8em; counter-increment: line; }
+.src-view.has-lines .src-line::before { content: counter(line); position: absolute; left: 0; width: 2.8em; color: var(--ink-3); opacity: .7; text-align: right; user-select: none; }
+.preview-toolbar { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; min-height: 44px; padding: 8px 12px; border-bottom: 1px solid var(--line-soft); background: var(--surface-sunken); }
+.preview-readonly { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: var(--text-xs); white-space: nowrap; }
+.preview-toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: auto; }
+.preview-toolbar-actions .btn { gap: 4px; padding: 0 8px; font-size: var(--text-xs); font-weight: 500; }
+.preview-toolbar-actions .btn svg { width: 14px; height: 14px; }
+.preview-toolbar .switch-row { min-height: 30px; gap: 8px; padding: 0 4px 0 8px; }
+.preview-toolbar .switch-label { color: var(--ink-2); font-size: var(--text-xs); font-weight: 500; }
+.preview-toolbar .switch-track { width: 28px; height: 16px; }
+.preview-toolbar .switch-thumb { top: 2px; left: 2px; width: 12px; height: 12px; }
+.preview-toolbar .switch-input:checked + .switch-track .switch-thumb { transform: translateX(12px); }
+.preview-notice { padding: 8px 16px; border-top: 1px solid var(--line-soft); color: var(--ink-2); font-size: var(--text-xs); background: var(--warning-soft); }
+.preview-notice a { color: var(--accent-ink); text-decoration: underline; text-underline-offset: 2px; }
+.preview-doc { width: 100%; max-width: 820px; max-height: min(620px, var(--preview-reading-height)); margin: 0 auto; padding: 28px 32px 36px; overflow-y: auto; overscroll-behavior: contain; }
+.src-fence { margin: 16px 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunken); }
+.src-fence-bar { display: flex; user-select: none; -webkit-user-select: none; align-items: center; justify-content: space-between; padding: 4px 8px 4px 16px; border-bottom: 1px solid var(--line-soft); color: var(--ink-3); font-family: var(--font-mono); font-size: var(--text-xs); }
+.src-fence-bar button { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--ink-2); font: inherit; }
+.src-fence-bar button:hover { background: var(--surface-hover); color: var(--ink); }
+.src-fence .src-view { max-height: 520px; padding: 12px 16px; }
+.md { color: var(--ink); font-size: var(--text-reading); line-height: var(--leading-loose); overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.7em 0 .6em; font-weight: 600; line-height: var(--leading-tight); }
+.md h1 { padding-bottom: .3em; border-bottom: 1px solid var(--line); font-size: 1.85em; }
+.md h2 { padding-bottom: .3em; border-bottom: 1px solid var(--line-soft); font-size: 1.45em; }
+.md h3 { font-size: 1.2em; }
+.md h4 { font-size: 1.05em; }
+.md h5, .md h6 { color: var(--ink-2); font-size: .95em; }
+.md p { margin: 0 0 1em; }
+.md a { color: var(--accent-ink); text-decoration: underline; text-underline-offset: 2px; }
+.md ul, .md ol { margin: 0 0 1em; padding-left: 1.7em; }
+.md li > ul, .md li > ol { margin: .25em 0 0; }
+.md li + li { margin-top: .25em; }
+.md li > p { margin-bottom: .5em; }
+.md li.md-task { margin-left: -1.4em; list-style: none; }
+.md li.md-task input { margin: 0 .5em 0 0; vertical-align: -1px; accent-color: var(--accent); }
+.md blockquote { margin: 0 0 1em; padding: 2px 16px; border-left: 3px solid var(--accent-soft); color: var(--ink-2); }
+.md hr { margin: 1.8em 0; border: 0; border-top: 1px solid var(--line); }
+.md :not(pre) > code { padding: .15em .4em; border-radius: var(--radius-xs); background: color-mix(in srgb, var(--ink) 8%, transparent); font-size: .88em; }
+.md pre { margin: 0 0 1em; padding: 16px; overflow-x: auto; background: var(--surface-sunken); font-size: var(--text-sm); line-height: var(--leading-loose); }
+.md .src-fence pre { margin: 0; }
+.md img { max-width: 100%; height: auto; border-radius: var(--radius-sm); vertical-align: middle; }
+/* README 常见的 HTML：align 属性按原意对齐；details 可展开；kbd 键帽。 */
+.md [align="center"] { text-align: center; }
+.md [align="right"] { text-align: right; }
+.md details { margin: 0 0 1em; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.md summary { cursor: pointer; font-weight: 600; }
+.md kbd { padding: 1px 8px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: var(--radius-xs); background: var(--surface-sunken); font-family: var(--font-mono); font-size: .85em; }
+/* 外部图片占位：点击后加载本文档的全部外部图片。 */
+.md .md-remote-image { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; margin: 2px 0; padding: 4px 8px; border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-2); font: inherit; font-size: var(--text-xs); vertical-align: middle; cursor: pointer; }
+.md .md-remote-image span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.md .md-remote-image small { color: var(--accent-ink); }
+.md .md-remote-image:hover { border-color: var(--accent); }
+.md .md-missing-image { color: var(--ink-3); font-size: var(--text-xs); }
+.md-table-wrap { margin: 0 0 1em; overflow-x: auto; }
+.md table { border-collapse: collapse; font-size: .95em; }
+.md th, .md td { padding: 8px 12px; border: 1px solid var(--line); text-align: left; }
+.md th { background: var(--surface-sunken); font-weight: 600; }
+.md tbody tr:nth-child(even) { background: var(--surface-sunken); }
+@media (max-width: 860px) {
+  .preview-text { --preview-content-height: calc(100dvh - 320px); }
+  .preview-text.is-markdown-source { --preview-content-height: calc(100dvh - 380px); }
+  .preview-text.is-truncated { --preview-notice-height: 70px; }
+  .preview-doc { padding: 20px 16px 28px; }
+  .preview-toolbar { padding: 8px 8px; gap: 8px; }
+  .preview-toolbar .switch-row { min-height: 34px; }
+  .preview-readonly { font-size: var(--text-micro); gap: 4px; }
+  .preview-modal .modal-header { padding: 8px 8px 8px 16px; }
+  .preview-meta .preview-meta-date { display: none; }
+  .preview-modal .file-tile svg { width: 28px; height: 28px; }
+  .preview-modal .modal-header { gap: 8px; }
+  .preview-modal .modal-window-actions { gap: 0; }
+  .preview-modal .modal-window-actions .icon-btn { width: 34px; min-width: 34px; min-height: 36px; }
+  .preview-modal .modal-actions-divider { display: none; }
+}
+
+/* 扩展预览占满可用画布，尺寸变化只影响布局，不重建阅读器或播放器。 */
+.preview-modal.is-expanded .modal-header, .preview-modal.is-expanded .modal-footer { flex: none; }
+.preview-modal.is-expanded .modal-body { display: flex; overflow: hidden; }
+.preview-modal.is-expanded .preview-stage { flex: 1; min-height: 0; width: 100%; }
+.preview-modal.is-expanded .preview-player { align-self: stretch; min-height: 0; height: 100%; }
+.preview-modal.is-expanded .preview-player-surface { flex: none; }
+.preview-modal.is-expanded .preview-player-video .preview-player-surface { flex: 1; min-height: 0; }
+.preview-modal.is-expanded .preview-video-host { width: 100%; height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; }
+.preview-modal.is-expanded .preview-text { min-height: 0; height: 100%; }
+.preview-modal.is-expanded .preview-toolbar, .preview-modal.is-expanded .preview-notice, .preview-modal.is-expanded .preview-text-status { flex: none; }
+.preview-modal.is-expanded .preview-code-editor { flex: 1; min-height: 0; }
+.preview-modal.is-expanded .cm-editor { height: 100%; min-height: 0; max-height: none; }
+.preview-modal.is-expanded .preview-doc { flex: 1; min-height: 0; max-height: none; }
+/* 扩展后舞台高度固定：网格行必须是 minmax(0, 1fr)，图片的百分比最大高度才有确定的参照，否则按原图高度撑开被裁切。 */
+.preview-modal.is-expanded .preview-stage { grid-template-rows: minmax(0, 1fr); }
+.preview-modal.is-expanded .preview-stage.has-playlist { grid-template-rows: minmax(0, 1fr); }
+.preview-modal.is-expanded .preview-stage.has-playlist > .preview-player { height: 100%; }
+.preview-modal.is-expanded .preview-resource { min-height: 0; height: 100%; }
+.preview-modal.is-expanded .preview-media { height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); padding: 16px; }
+.preview-modal.is-expanded .preview-media img { max-width: 100%; max-height: 100%; min-height: 0; object-fit: contain; }
+.preview-modal.is-expanded .preview-frame { height: 100%; min-height: 0; }
+@media (max-width: 860px) {
+  .modal-backdrop.is-expanded:not(.is-fullscreen):not(:fullscreen) { padding: var(--floating-top) var(--floating-right) var(--floating-bottom) var(--floating-left); }
+  .modal.is-expanded { border-radius: var(--radius-xl); }
+  .preview-modal.is-expanded .modal-body { padding: 0; }
+}
+
+/* 手机预览使用完整可见视口；横屏触屏设备即使宽于 860px，也不能回到桌面浮窗尺寸。 */
+@media (max-width: 860px), (hover: none) and (pointer: coarse) {
+  .modal-backdrop:has(> .preview-modal.is-immersive):not(.is-minimized) {
+    place-items: stretch; grid-template-rows: minmax(0, 1fr);
+    padding: var(--floating-top) var(--floating-right) var(--floating-bottom) var(--floating-left);
+  }
+  .modal.preview-modal.is-immersive:not(.is-minimized) { width: 100%; height: 100%; max-width: none; max-height: 100%; min-height: 0; border-radius: var(--radius-xl); }
+  .preview-modal.is-immersive:not(.is-minimized) > .modal-body { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+  .preview-modal.is-immersive:not(.is-minimized) .preview-stage { flex: 1; min-height: 0; height: 100%; }
+  .preview-modal-audio:not(.is-minimized) .preview-player-audio { height: 100%; }
+  .preview-modal-image:not(.is-minimized) .image-viewer { height: 100%; max-height: none; }
+  .preview-modal.is-immersive:not(.is-minimized) .modal-window-actions { flex: none; width: auto; }
+  .preview-modal.is-immersive:not(.is-minimized) .modal-window-actions .icon-btn { width: 40px; min-width: 40px; min-height: 40px; }
+  .preview-modal-video.is-immersive:not(.is-minimized) .modal-header { position: relative; inset: auto; flex: none; flex-wrap: nowrap; min-height: 64px; padding: 8px 12px; background: var(--media-canvas); opacity: 1; transform: none; }
+  .preview-modal-video.is-immersive:not(.is-minimized) .modal-header > * { pointer-events: auto; }
+  .preview-modal-video .preview-video-host .art-video-player { --art-control-icon-size: 36px; }
+  .preview-video-host :is(.art-control-pip, .art-control-fullscreenWeb) { display: none !important; }
+  .preview-stage.is-media .preview-playlist-panel > header { min-height: 56px; padding: 8px 12px 8px 16px; }
+  .preview-stage.is-media .preview-playlist-panel > header .icon-btn { width: 40px; height: 40px; }
+  .preview-playlist-search { height: 40px; }
+  .preview-playlist-search input { font-size: var(--text-lg); }
+  .preview-playlist-items { touch-action: pan-y pinch-zoom; }
+  .preview-track { min-height: 68px; grid-template-columns: 20px 40px minmax(0, 1fr); gap: 8px; padding: 8px 8px; }
+  .preview-track-description strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; overflow-wrap: anywhere; }
+  .preview-track-play { display: none; }
+  .preview-modal-video:not(.is-minimized) .preview-stage.is-playlist-open { grid-template-rows: minmax(0, min(44%, calc(100cqw / var(--preview-video-ratio, 1.777778)))) minmax(0, 1fr); }
+  .preview-modal-video .preview-stage.is-playlist-open > .preview-player { grid-row: 1; max-height: none; }
+  .preview-modal-video .preview-stage.is-playlist-open > .preview-playlist-panel {
+    position: relative; inset: auto; grid-column: 1; grid-row: 2; width: 100%; height: 100%; border: 0; border-top: 1px solid color-mix(in srgb, var(--media-ink) 12%, transparent);
+    border-radius: 0; background: color-mix(in srgb, var(--media-canvas) 94%, var(--media-ink)); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+    animation: preview-list-in var(--duration-base) var(--ease-out);
+  }
+  .modal-backdrop.is-fullscreen:has(> .preview-modal.is-immersive) { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .modal-backdrop.is-fullscreen .modal.preview-modal.is-immersive { border-radius: 0; }
+}
+@media (max-width: 860px) and (orientation: portrait), (hover: none) and (pointer: coarse) and (orientation: portrait) {
+  /* 竖屏未展开列表时贴合视频，避免横向视频上下出现大块空白；展开后把空间留给完整列表。 */
+  .modal.preview-modal-video.is-immersive:not(.is-minimized):not(.has-playlist-open):not(.is-expanded) {
+    align-self: center; height: min(100%, calc((100vw - var(--floating-left) - var(--floating-right)) / var(--preview-video-ratio, 1.777778) + 64px));
+  }
+}
+@media (max-width: 860px) and (orientation: landscape), (hover: none) and (pointer: coarse) and (orientation: landscape) {
+  .modal-backdrop:has(> .preview-modal.is-immersive):not(.is-minimized):not(.is-fullscreen) { padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
+  .modal.preview-modal.is-immersive:not(.is-minimized) { border-radius: var(--radius-lg); }
+  .preview-modal-video.is-immersive:not(.is-minimized) .modal-header { position: absolute; inset: 0 0 auto; min-height: 0; padding: 8px 8px 24px 16px; background: linear-gradient(to bottom, var(--media-overlay), transparent); }
+  .preview-modal-video.is-chrome-idle:not(.has-playlist-open):not(.is-minimized) .modal-header { opacity: 0; transform: translateY(-8px); }
+  .preview-modal-video.is-chrome-idle:not(.has-playlist-open):not(.is-minimized) .modal-header > * { pointer-events: none; }
+  .preview-modal-video { --preview-mobile-list-width: clamp(240px, 34%, 360px); }
+  .preview-modal-video.has-playlist-open:not(.is-minimized) .modal-header { right: var(--preview-mobile-list-width); }
+  .preview-modal-video:not(.is-minimized) .preview-stage.is-playlist-open { grid-template-columns: minmax(0, 1fr) var(--preview-mobile-list-width); grid-template-rows: minmax(0, 1fr); }
+  .preview-modal-video .preview-stage.is-playlist-open > .preview-playlist-panel { grid-column: 2; grid-row: 1; border-top: 0; border-left: 1px solid color-mix(in srgb, var(--media-ink) 12%, transparent); animation-name: drawer-in; }
+}
+@keyframes preview-list-in { from { opacity: 0; transform: translateY(12px); } }
+@media (prefers-reduced-motion: reduce) { .preview-stage.is-media .preview-playlist-panel { animation: none; } }
+

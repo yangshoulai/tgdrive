@@ -308,6 +308,48 @@ class M5Tests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_static_serves_precompressed_assets(self):
+        import asyncio
+
+        async def run():
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                static = root / "dist"
+                static.mkdir()
+                (static / "index.html").write_text("<html>tgdrive</html>", encoding="utf-8")
+                (static / "index.html.gz").write_bytes(b"never")
+                (static / "app-0123456789ab.js").write_bytes(b"plain")
+                (static / "app-0123456789ab.js.br").write_bytes(b"brotli")
+                (static / "app-0123456789ab.js.gz").write_bytes(b"gzip")
+                app = create_app(root / "data", static_dir=static)
+
+                async def get(path, encoding=None):
+                    sent = []
+
+                    async def receive():
+                        return {"type": "http.request", "body": b"", "more_body": False}
+
+                    async def send(message):
+                        sent.append(message)
+                    headers = [(b"host", b"drive.example.test")] + ([(b"accept-encoding", encoding.encode())] if encoding else [])
+                    await app({"type": "http", "method": "GET", "path": path, "query_string": b"", "headers": headers}, receive, send)
+                    return {k.decode().lower(): v.decode() for k, v in sent[0]["headers"]}, sent[-1]["body"]
+
+                headers, body = await get("/app-0123456789ab.js", "gzip, deflate, br")
+                self.assertEqual((body, headers["content-encoding"], headers["content-type"]), (b"brotli", "br", "text/javascript"))
+                self.assertEqual(headers["vary"], "Accept-Encoding")
+                headers, body = await get("/app-0123456789ab.js", "gzip, br;q=0")
+                self.assertEqual((body, headers["content-encoding"]), (b"gzip", "gzip"))
+                headers, body = await get("/app-0123456789ab.js")
+                self.assertEqual(body, b"plain")
+                self.assertNotIn("content-encoding", headers)
+                headers, body = await get("/", "gzip")
+                self.assertIn(b"tgdrive", body, "index.html 由服务端改写，不使用预压缩文件")
+                self.assertNotIn("content-encoding", headers)
+                app.metadata.close()
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()

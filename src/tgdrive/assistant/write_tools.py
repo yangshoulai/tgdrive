@@ -11,6 +11,7 @@ import re
 from datetime import datetime
 
 from ..api import normalize_user_path
+from ..extract import ARCHIVE_TYPES, UNSUPPORTED
 from ..filekinds import kind_clause, kind_of
 from ..objects import PRIVATE_PREFIX
 from .actions import KINDS, directory_version, folder_files
@@ -431,6 +432,125 @@ async def propose_move(ctx: ToolContext, args: dict) -> ToolOutput:
     return await _propose(ctx, "move", items, skipped=skipped, sample=_arrow(ctx),
                           summary=f"移动 {len(items)} 项（{_fmt(size)}）到 {ctx.display(target_dir)}"
                           + (f"，{len(skipped)} 项将跳过" if skipped else ""))
+
+
+@tool("propose_copy", "复制", "write", "write",
+      "生成把文件或文件夹复制到目标目录的操作（服务端引用同一份数据，不重新上传，计入配额）；审批模式等待确认，完全访问下自动执行。"
+      "sources 与 match 二选一；文件夹连同其中全部内容一起复制；目标已有同名时默认自动加 (1)(2)。不能复制到文件夹自身里面。",
+      {"sources": {"type": "array", "items": {"type": "string"}, "description": "要复制的文件或文件夹路径（上限为单个操作条目数）"},
+       "match": MATCH, "target": {"type": "string", "description": "目标目录，不存在时自动创建"},
+       "conflict": {**CONFLICT, "description": "目标重名时：suffix 自动加 (1)(2)（默认），skip 跳过"}},
+      ("target",))
+async def propose_copy(ctx: ToolContext, args: dict) -> ToolOutput:
+    target_dir = ctx.resolve(_str(args, "target", limit=1024) or None, directory=True)
+    targets = Targets(ctx, args.get("conflict") or "suffix")
+    if bool(args.get("sources")) == bool(args.get("match")):
+        raise ToolError("请在 sources 与 match 中二选一")
+    if args.get("sources"):
+        rows, skipped = _source_rows(ctx, args["sources"])
+    else:
+        rows, skipped = await _rows(ctx, args["match"], _item_limit(ctx)), []
+    folders = sorted(row["key"] for row in rows if row["key"].endswith("/"))
+    items = []
+    for row in rows:
+        source = row["key"]
+        # 同时选中文件夹和其中的文件时只复制文件夹。
+        if any(source != folder and source.startswith(folder) for folder in folders):
+            continue
+        if source.endswith("/") and target_dir.startswith(source):
+            skipped.append({"path": ctx.display(source), "reason": "不能复制到它自己里面"})
+            continue
+        target = target_dir + _name_of(source) + ("/" if source.endswith("/") else "")
+        ctx.valid_key(target)
+        claimed = targets.claim(target)
+        if claimed is None:
+            skipped.append({"path": ctx.display(source), "reason": "目标已存在同名项目"})
+            continue
+        items.append({**_move_item(row), "to": claimed})
+    size = sum(item["size"] for item in items)
+    return await _propose(ctx, "copy", items, skipped=skipped, sample=_arrow(ctx),
+                          summary=f"复制 {len(items)} 项（{_fmt(size)}）到 {ctx.display(target_dir)}"
+                          + (f"，{len(skipped)} 项将跳过" if skipped else ""))
+
+
+@tool("propose_extract", "解压", "write", "write",
+      "生成在线解压压缩包的操作（服务端边读边解压，支持 ZIP、TAR、.tar.gz/.tgz、.tar.bz2、.tar.xz 与单个 .gz/.bz2/.xz；不支持 7z、RAR）。"
+      "destination 省略时解压到压缩包所在目录下与压缩包同名的文件夹。加密的 ZIP 需要用户在文件页用「解压…」输入密码，助手不能代为解压。"
+      "conflict：rename 保留两者（默认）、skip 跳过、overwrite 覆盖；keep_archive=false 时全部成功后把压缩包移入回收站。",
+      {"paths": {"type": "array", "items": {"type": "string"}, "description": "压缩包路径（最多 20 个）"},
+       "destination": {"type": "string", "description": "解压到的目录；省略时为压缩包同名文件夹"},
+       "conflict": {"type": "string", "enum": ["rename", "skip", "overwrite"]},
+       "keep_archive": {"type": "boolean", "description": "是否保留压缩包，默认 true"}}, ("paths",))
+async def propose_extract(ctx: ToolContext, args: dict) -> ToolOutput:
+    paths = args.get("paths")
+    if not isinstance(paths, list) or not 1 <= len(paths) <= 20:
+        raise ToolError("参数 paths 需要 1–20 个压缩包路径")
+    conflict = args.get("conflict") or "rename"
+    if conflict not in ("rename", "skip", "overwrite"):
+        raise ToolError("参数 conflict 不正确：可选 rename、skip 或 overwrite")
+    keep = args.get("keep_archive", True)
+    if not isinstance(keep, bool):
+        raise ToolError("参数 keep_archive 必须是布尔值")
+    chosen = _str(args, "destination", limit=1024)
+    destination = ctx.resolve(chosen, directory=True) if chosen else None
+    items, skipped = [], []
+    for value in dict.fromkeys(paths):
+        key = ctx.resolve(value)
+        name = _name_of(key)
+        if UNSUPPORTED.search(name):
+            skipped.append({"path": ctx.display(key), "reason": "不支持 7z、RAR 等格式"})
+            continue
+        if not ARCHIVE_TYPES.search(name):
+            skipped.append({"path": ctx.display(key), "reason": "不是支持的压缩包"})
+            continue
+        row = ctx.db.execute("SELECT size, etag FROM objects WHERE bucket_id=? AND key=?", (ctx.bucket_id, key)).fetchone()
+        if row is None:
+            skipped.append({"path": ctx.display(key), "reason": "文件不存在"})
+            continue
+        folder = destination or _parent_of(key) + ARCHIVE_TYPES.sub("", name).rstrip(". ") + "/"
+        if folder.startswith(key + "/"):
+            skipped.append({"path": ctx.display(key), "reason": "不能解压到压缩包自身的位置"})
+            continue
+        ctx.valid_key(folder)
+        items.append({"path": key, "etag": row["etag"], "size": int(row["size"] or 0), "destination": folder,
+                      "conflict": conflict, "keep_archive": keep})
+    return await _propose(ctx, "extract", items, skipped=skipped,
+                          sample=lambda item: f"{ctx.display(item['path'])} → {ctx.display(item['destination'])}",
+                          summary=f"解压 {len(items)} 个压缩包" + ("" if keep else "，完成后把压缩包移入回收站"))
+
+
+@tool("propose_compress", "压缩", "write", "write",
+      "生成把文件与文件夹打包成一个 ZIP 保存到网盘的操作（服务端边读边压缩，不改动原文件）。name 是压缩包名称（自动补 .zip），"
+      "target 为保存目录，默认是第一项所在的目录，不能放在要压缩的文件夹里面；同名时自动改名。compression：deflate 压缩（默认）、store 只打包。",
+      {"sources": {"type": "array", "items": {"type": "string"}, "description": "要压缩的文件或文件夹路径（最多 200 项）"},
+       "name": {"type": "string", "description": "压缩包名称，如 旅行照片.zip"},
+       "target": {"type": "string", "description": "保存到的目录"},
+       "compression": {"type": "string", "enum": ["deflate", "store"]}}, ("sources", "name"))
+async def propose_compress(ctx: ToolContext, args: dict) -> ToolOutput:
+    sources = args.get("sources")
+    if not isinstance(sources, list) or not 1 <= len(sources) <= 200:
+        raise ToolError("参数 sources 需要 1–200 个路径")
+    rows, skipped = _source_rows(ctx, sources)
+    roots = [row["key"] for row in rows]
+    roots = [key for key in dict.fromkeys(roots) if not any(key != other and other.endswith("/") and key.startswith(other) for other in roots)]
+    if not roots:
+        raise ToolError("没有可以压缩的文件或文件夹")
+    name = _check_name(_str(args, "name", limit=255).strip())
+    if not name.lower().endswith(".zip"):
+        name += ".zip"
+    chosen = _str(args, "target", limit=1024)
+    folder = ctx.resolve(chosen, directory=True) if chosen else _parent_of(roots[0])
+    if any(root.endswith("/") and folder.startswith(root) for root in roots):
+        raise ToolError("压缩包不能保存到要压缩的文件夹里面")
+    target = ctx.valid_key(folder + name)
+    compression = args.get("compression") or "deflate"
+    if compression not in ("deflate", "store"):
+        raise ToolError("参数 compression 不正确：可选 deflate 或 store")
+    size = sum(int(row["size"] or 0) for row in rows if row["key"] in roots)
+    item = {"path": target, "sources": roots, "size": size, "deflate": compression == "deflate"}
+    return await _propose(ctx, "compress", [item], skipped=skipped,
+                          sample=lambda value: f"{len(value['sources'])} 项 → {ctx.display(value['path'])}",
+                          summary=f"把 {len(roots)} 项（{_fmt(size)}）压缩为 {ctx.display(target)}")
 
 
 @tool("propose_organize", "整理文件", "write", "write",

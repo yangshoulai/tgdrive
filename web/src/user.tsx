@@ -3,10 +3,11 @@ import { BRAND } from "./brand";
 import { RegisterPage } from "./register";
 import * as api from "./api";
 import { type CacheStats, cacheStats, cacheSupported, startLocalCache } from "./cache-client";
-import { DocsPage } from "./docs/docs";
+import { Loadable, lazyComponent, preload } from "./lazy";
 
 import { SharePage } from "./share";
-import { ADMIN_MODULES, AdminConsole, LockedGate, type AdminModule } from "./admin";
+import { ADMIN_MODULES, type AdminModule } from "./admin-modules";
+import { LockedGate } from "./admin/lock";
 import { AppShell, FullPageLoading, LoginPage, SetupPage, isPlainClick, useSessionGuard, type NavGroup } from "./shell";
 import { Notice, Button, ButtonLink, Icon, Progress, confirmLeave, formatBytes, hasUnsavedChanges, toast, usageTone, useDocumentTitle, type IconName } from "./ui";
 
@@ -16,17 +17,25 @@ import { UploadsPage, useUploadQueue } from "./user/uploads";
 
 import { SharedView } from "./user/shared";
 import { TrashView } from "./user/trash";
+import { MusicView, PhotosView, RecentView } from "./user/library";
 import { DownloadsView } from "./user/downloads";
 import { PreviewHost } from "./user/preview-host";
 import { CachePage, CacheTasksProvider, type CacheTab } from "./user/cache";
-import { FavoritesNav, useFavorites } from "./user/favorites";
-import { AssistantDrawer, useAssistantConfig, useAssistantShortcut, type AssistantDockStatus } from "./user/assistant";
+import { FavoritesNav, folderName as folderTitle, useFavorites } from "./user/favorites";
+import { useAssistantConfig, useAssistantShortcut, type AssistantDockStatus } from "./user/assistant-hooks";
 import { AssistantLauncher } from "./user/assistant-launcher";
+import { CommandPalette, useCommandPaletteShortcut, type Command } from "./user/command-palette";
 import { useDownloadActivity } from "./user/download-activity";
 import { takePageImportRequest, usePageImport } from "./user/page-import";
 import { PrivateSessionProvider } from "./user/private-session";
 import { EmailDialog, UserSettingsPage } from "./user/account";
 import { onThemeChange, setThemePreference, themePreference, type ThemePreference } from "./theme";
+
+// 文档站、系统管理与文件助手是独立分块（build-apps.mjs），用到时才下载，首屏只加载文件空间。
+const loadAssistant = () => import("./user/assistant");
+const DocsPage = lazyComponent(() => import("./docs/docs"), module => module.DocsPage);
+const AdminConsole = lazyComponent(() => import("./admin"), module => module.AdminConsole);
+const AssistantDrawer = lazyComponent(loadAssistant, module => module.AssistantDrawer);
 
 /* ---------- 路由 ---------- */
 
@@ -38,7 +47,7 @@ import { onThemeChange, setThemePreference, themePreference, type ThemePreferenc
 export function App() {
   const path = window.location.pathname;
   if (path === "/register" || path === "/register/") return <RegisterPage />;
-  if (path === "/docs" || path.startsWith("/docs/")) return <DocsPage />;
+  if (path === "/docs" || path.startsWith("/docs/")) return <Loadable fallback={<FullPageLoading label="正在打开文档" />}><DocsPage /></Loadable>;
   const share = path.match(/^\/s\/([A-Za-z0-9_-]+)/);
   if (share) return <SharePage token={share[1]} />;
   if (/^\/admin\/docs(?:\/|$)/.test(path)) {
@@ -92,7 +101,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
     onSessionChange={patch => setSession(current => current && { ...current, ...patch })} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "private" | "uploads" | "downloads" | "cache" | "account" | "assistantPage";
+type UserSection = "files" | "shared" | "trash" | "private" | "uploads" | "downloads" | "cache" | "account" | "assistantPage" | "recent" | "photos" | "music";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -115,7 +124,9 @@ function readLocation(): { section: Section; prefix: string } {
   if (view === "account" || view === "keys") return { section: "account", prefix: view === "keys" ? "keys" : params.get("tab") === "keys" || params.get("tab") === "cache" ? params.get("tab")! : "" };
   // 任务中心：本机缓存页的 prefix 字段沿用为标签名（?view=cache&tab=files）。
   if (view === "cache") return { section: "cache", prefix: params.get("tab") === "files" ? "files" : "" };
-  const section = view === "shared" || view === "trash" || view === "private" || view === "uploads" || view === "downloads" ? view : "files";
+  // 媒体库：音乐页的 prefix 字段沿用为打开的专辑（?view=music&album=…）。
+  if (view === "music") return { section: "music", prefix: params.get("album") ?? "" };
+  const section = view === "shared" || view === "trash" || view === "private" || view === "uploads" || view === "downloads" || view === "recent" || view === "photos" ? view : "files";
   const prefix = params.get("path") ?? "";
   return { section, prefix: section === "private" ? api.PRIVATE_PREFIX + prefix : section === "files" ? visibleFilesPrefix(prefix) : prefix };
 }
@@ -128,6 +139,7 @@ function sectionUrl(section: Section, prefix = "") {
   if (section === "assistantPage" && prefix) params.set("c", prefix);
   if (section === "account" && (prefix === "keys" || prefix === "cache")) params.set("tab", prefix);
   if (section === "cache" && prefix === "files") params.set("tab", prefix);
+  if (section === "music" && prefix) params.set("album", prefix);
   const query = params.toString();
   return query ? `/?${query}` : "/";
 }
@@ -265,6 +277,8 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const toggleAssistant = useCallback(() => { if (!assistantPage) setAssistantOpen(value => !value); }, [assistantPage]);
   const openCacheTasks = useCallback(() => { setAssistantOpen(false); navigate("cache"); }, [navigate]);
   useAssistantShortcut(assistantAvailable, toggleAssistant);
+  // 助手可用时在空闲时预先下载抽屉分块，第一次按 ⌘J 不用等网络。
+  useEffect(() => { if (assistantAvailable) preload(loadAssistant); }, [assistantAvailable]);
   useEffect(() => { if (!assistantAvailable) setAssistantOpen(false); }, [assistantAvailable]);
   useEffect(() => { if (assistantPage) setAssistantOpen(false); }, [assistantPage]);
   // 抓取脚本「发给文件助手」：收到页面快照后打开助手，由用户确认发送。
@@ -280,14 +294,22 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const downloadsActive = useDownloadActivity(workspaceReady, downloadRevision, refreshUsage);
   const [cacheActive, setCacheActive] = useState(0);
   const uploadsActive = uploads.jobs.filter(job => job.status === "queued" || job.status === "uploading").length;
+  // 有上传在进行时离开页面会中断上传（大文件可以重新选择同一文件续传），先让浏览器确认。
+  const uploading = uploadsActive > 0;
+  useEffect(() => {
+    if (!uploading) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [uploading]);
   let content: ReactNode;
   if (section === "assistantPage") {
     content = !assistantAvailable || !assistant.config ? (assistant.config ? <AccessDenied /> : <FullPageLoading label="正在读取文件助手" />)
-      : <AssistantDrawer mode="page" open config={assistant.config} onClose={() => navigate("files")} onConfigChanged={assistant.refresh}
+      : <Loadable fallback={<FullPageLoading label="正在打开文件助手" />}><AssistantDrawer mode="page" open config={assistant.config} onClose={() => navigate("files")} onConfigChanged={assistant.refresh}
           onStatus={setAssistantStatus}
           location={{ view: "assistant", prefix: "" }} initialConversation={location.prefix || null} onFilesChanged={filesChanged}
           pageImport={pageImport} onPageImportDone={clearPageImport}
-          onConversationChange={id => { if ((id ?? "") !== (new URLSearchParams(window.location.search).get("c") ?? "")) window.history.replaceState(null, "", sectionUrl("assistantPage", id ?? "")); }} />;
+          onConversationChange={id => { if ((id ?? "") !== (new URLSearchParams(window.location.search).get("c") ?? "")) window.history.replaceState(null, "", sectionUrl("assistantPage", id ?? "")); }} /></Loadable>;
   } else if (section === "account") {
     content = <UserSettingsPage session={session} onSessionChange={onSessionChange} assistant={assistantAvailable} onOpenConversation={id => navigate("assistantPage", id)}
       tab={location.prefix === "keys" || location.prefix === "cache" ? location.prefix : "account"} onTabChange={tab => navigate("account", tab === "account" ? "" : tab)}
@@ -295,8 +317,10 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   } else if (isAdminSection(section)) {
     if (!isAdmin) content = <AccessDenied />;
     else if (status === null) content = <FullPageLoading label="正在读取系统状态" />;
-    else content = <AdminConsole module={section} session={session} status={status} onStatus={setStatus} onRefreshStatus={unlocked}
-      onNavigate={navigate} onLocked={onLogout} onConfigSaved={() => setConfigVersion(version => version + 1)} />;
+    else content = <Loadable fallback={<FullPageLoading label="正在打开系统管理" />}>
+      <AdminConsole module={section} session={session} status={status} onStatus={setStatus} onRefreshStatus={unlocked}
+        onNavigate={navigate} onLocked={onLogout} onConfigSaved={() => setConfigVersion(version => version + 1)} />
+    </Loadable>;
   } else if (!isAdmin && session.unlocked === false) {
     // 服务刚重启、管理员还没有解锁：保持登录的普通用户进来后看到的是说明，而不是一连串错误。
     content = <UnavailableGate />;
@@ -315,6 +339,9 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         onSettings={() => navigate("account", "cache")} onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} />}
       {section === "downloads" && <DownloadsView onChanged={refreshUsage} onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCreated={() => setDownloadRevision(value => value + 1)} />}
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
+      {section === "recent" && <RecentView onOpenFolder={prefix => navigate("files", prefix)} />}
+      {section === "photos" && <PhotosView />}
+      {section === "music" && <MusicView album={location.prefix} onOpenAlbum={id => navigate("music", id)} />}
     </>;
   }
   // 打开的正是某个收藏的文件夹时，由侧栏收藏高亮，「我的文件」「私密空间」不再同时高亮。
@@ -325,8 +352,13 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const groups: NavGroup<Section>[] = [
     { label: "文件", workspace: personalWorkspace, items: [
       { key: "files", label: "我的文件", icon: "folder" },
+      { key: "recent", label: "最近", icon: "clock" },
       { key: "private", label: "私密空间", icon: "lock" },
       { key: "trash", label: "回收站", icon: "trash" },
+    ] },
+    { label: "媒体库", workspace: personalWorkspace, items: [
+      { key: "photos", label: "相册", icon: "image" },
+      { key: "music", label: "音乐", icon: "music" },
     ] },
     { label: "分享", workspace: personalWorkspace, items: [
       { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },
@@ -337,6 +369,27 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       { key: "cache", label: "本机缓存", icon: "monitor", count: cacheActive, live: cacheActive > 0 },
     ] },
     ...(isAdmin ? adminGroups() : []),
+  ];
+  // 命令面板（⌘K）：侧栏的全部页面、收藏的文件夹、外观与常用操作，再加上按名称查找文件。
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const togglePalette = useCallback(() => setPaletteOpen(value => !value), []);
+  useCommandPaletteShortcut(workspaceReady, togglePalette);
+  const commands: Command[] = [
+    ...groups.flatMap(group => group.items.map(item => ({ id: `nav:${item.key}`, label: item.label, group: "跳转", icon: item.icon,
+      hint: group.workspace === "系统管理" ? "系统管理" : group.label, run: () => navigate(item.key) }))),
+    ...favoriteList.map(item => ({ id: `fav:${item.path}`, label: folderTitle(item.path), group: "收藏", icon: (item.private ? "lock" : "folder") as IconName,
+      hint: item.private ? "私密空间" : `/${item.path}`, run: () => navigate(item.private ? "private" : "files", item.path) })),
+    { id: "act:upload", label: "上传文件", group: "操作", icon: "upload", keywords: "上传 文件夹",
+      run: () => { if (section !== "files") navigate("files", location.prefix); window.setTimeout(() => document.querySelector<HTMLButtonElement>(".files-view .upload-picker-trigger")?.click(), 120); } },
+    ...(assistantAvailable && !assistantPage ? [{ id: "act:assistant", label: "打开文件助手", group: "操作", icon: "sparkle" as IconName, hint: "⌘J", run: toggleAssistant }] : []),
+    { id: "act:account", label: "账号设置", group: "操作", icon: "user", run: () => navigate("account") },
+    { id: "act:keys", label: "访问密钥", group: "操作", icon: "key", run: () => navigate("account", "keys") },
+    { id: "act:cache-settings", label: "缓存设置", group: "操作", icon: "monitor", run: () => navigate("account", "cache") },
+    { id: "act:docs", label: "使用文档", group: "操作", icon: "book", run: () => window.open("/docs", "_blank", "noopener") },
+    { id: "theme:system", label: "外观：跟随系统", group: "外观", icon: "monitor", keywords: "主题", run: () => setThemePreference("system") },
+    { id: "theme:light", label: "外观：浅色", group: "外观", icon: "sun", keywords: "主题 白天", run: () => setThemePreference("light") },
+    { id: "theme:dark", label: "外观：深色", group: "外观", icon: "moon", keywords: "主题 夜间 暗色", run: () => setThemePreference("dark") },
+    { id: "act:logout", label: "退出登录", group: "操作", icon: "logout", run: () => void logout() },
   ];
   return (
     <AppShell active={section} onNavigate={key => navigate(key)} hrefFor={key => sectionUrl(key)} groups={groups}
@@ -359,7 +412,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         // 设置从头像菜单进入，不占侧栏位置；三个标签各有入口。
         { label: "账号", icon: "user", heading: "设置", onSelect: () => navigate("account") },
         { label: "访问密钥", icon: "key", onSelect: () => navigate("account", "keys") },
-        { label: "本机缓存", icon: "monitor", onSelect: () => navigate("account", "cache") },
+        { label: "缓存设置", icon: "monitor", onSelect: () => navigate("account", "cache") },
         { label: "跟随系统", icon: "monitor", heading: "外观", divider: true, checked: theme === "system", onSelect: () => setThemePreference("system") },
         { label: "浅色", icon: "sun", checked: theme === "light", onSelect: () => setThemePreference("light") },
         { label: "深色", icon: "moon", checked: theme === "dark", onSelect: () => setThemePreference("dark") },
@@ -371,10 +424,11 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
         {content}
       <AssistantLauncher available={workspaceReady && assistantAvailable && Boolean(assistant.config) && !assistantPage} open={assistantOpen} status={assistantStatus} onToggle={toggleAssistant} />
       {/* 统一对话（§37）：只有一个助手，涉及私密空间的对话在锁定时需要解锁。 */}
-      {assistantAvailable && assistant.config && !assistantPage && <AssistantDrawer open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)} onStatus={setAssistantStatus}
+      {assistantAvailable && assistant.config && !assistantPage && <Loadable fallback={null}><AssistantDrawer open={assistantOpen} config={assistant.config} onClose={() => setAssistantOpen(false)} onStatus={setAssistantStatus}
         onConfigChanged={assistant.refresh} location={{ view: section, prefix: section === "files" || section === "private" ? location.prefix : "" }}
         onFilesChanged={filesChanged} pageImport={pageImport} onPageImportDone={clearPageImport} onNavigate={(view, prefix) => navigate(view, prefix ?? "")}
-        onOpenPage={id => { setAssistantOpen(false); navigate("assistantPage", id ?? ""); }} />}
+        onOpenPage={id => { setAssistantOpen(false); navigate("assistantPage", id ?? ""); }} /></Loadable>}
+      {paletteOpen && <CommandPalette commands={commands} onClose={() => setPaletteOpen(false)} onOpenFolder={prefix => navigate("files", prefix)} />}
       {/* 助手抽屉也在预览宿主内：消息里的附件图片直接打开预览。 */}
       </PreviewHost>
       </CacheTasksProvider>

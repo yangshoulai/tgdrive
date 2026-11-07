@@ -5,6 +5,7 @@ import { errorMessage, type MediaTags, type MediaWant, type PreviewAsset, type P
 import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
 import { MODE_ICONS, PLAYBACK_MODES, type PreviewNav } from "./preview-playlist";
+import { useMediaSession } from "./media-session";
 import { Button, Icon, Menu, formatBytes, shortcutAria, shortcutLabel, type IconName } from "./ui";
 import type { MediaProgress, MediaState, VideoSizeSource } from "./preview-media-engine";
 export type { MediaProgress, MediaState } from "./preview-media-engine";
@@ -13,7 +14,13 @@ type Engine = Awaited<ReturnType<typeof loadMediaEngine>>;
 type VideoPlayer = ReturnType<Engine["createVideoPlayer"]>;
 type Lyric = { time: number; text: string };
 export type AssetLoader = (signal: AbortSignal) => Promise<PreviewAsset[] | PreviewAssetList>;
-export type PlaybackControls = { play: () => Promise<void>; pause: () => void; isPlaying: () => boolean; seek: (time: number) => void; seekBy: (seconds: number) => void; adjustVolume: (delta: number) => void };
+export type PlaybackControls = { play: () => Promise<void>; pause: () => void; isPlaying: () => boolean; seek: (time: number) => void; seekBy: (seconds: number) => void; adjustVolume: (delta: number) => void;
+  /** 快捷键用：静音、调速、逐帧（只有视频）、开关字幕或歌词（播放器有附件时）。 */
+  toggleMute?: () => void; adjustRate?: (delta: number) => number; step?: (direction: 1 | -1) => void; toggleCaptions?: () => void;
+  /** 歌词或字幕整体提前（负）／延后（正）若干秒，返回新的偏移。 */
+  shiftCaptions?: (seconds: number) => number;
+  /** 当前时长（秒），按百分比跳转用；未知时为 0。 */
+  duration?: () => number };
 export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolean) => void; onProgress?: (progress: MediaProgress) => void; onState?: (state: MediaState) => void; onControls?: (controls: PlaybackControls | null) => void; onVideoSize?: (width: number, height: number, source: VideoSizeSource) => void; onVideoFrame?: (video: HTMLVideoElement) => void; onSaveThumbnail?: (video: HTMLVideoElement, rotation: number) => Promise<void>; onLyricLine?: (line: string | null) => void;
   /** 视频画面旋转（顺时针角度），由上层按文件记住；播放器设置菜单与快捷键 R 经 onRotate 修改。 */
   rotation?: number; onRotate?: (degrees: number) => void;
@@ -22,7 +29,11 @@ export type PlaybackProps = { onEnded?: () => void; onPlaying?: (playing: boolea
   /** 在线查找歌词、字幕或封面（只给本人可写的文件）；没有歌词、字幕或封面时播放器里出现对应入口。 */
   onFindAssets?: (want: MediaWant) => void;
   /** 歌词／字幕附件有变化（如刚保存了在线找到的歌词）时递增，播放器重新读取并优先选中 preferAsset。 */
-  assetRevision?: number; preferAsset?: string };
+  assetRevision?: number; preferAsset?: string;
+  /** 音乐播完后的下一首地址：播到后段时预先缓冲（双缓冲），切歌时直接起播。 */
+  upcoming?: string | null;
+  /** 系统媒体控制（锁屏、耳机线控、键盘媒体键）显示的信息。 */
+  session?: { title: string; artwork?: string } };
 type Player = PlaybackControls & { setSource: (url: string, name: string, cover?: string) => void; destroy: () => void };
 
 function playbackTime(time: number): string {
@@ -149,13 +160,20 @@ function pickAsset(kind: "audio" | "video", items: PreviewAsset[], prefer?: stri
 
 const VOLUME_KEY = "tessera-volume";
 type AudioEvents = { notify: (state: MediaState) => void; onPlaying: (playing: boolean) => void; onProgress: (progress: MediaProgress, buffered: number) => void; onEnded: () => void; onVolume: (volume: number, muted: boolean) => void };
-type AudioPlayer = Player & { element: HTMLAudioElement; setVolume: (volume: number) => void; toggleMute: () => void };
+type AudioPlayer = Player & { readonly element: HTMLAudioElement; setVolume: (volume: number) => void; toggleMute: () => void;
+  /** 预先加载下一首（备用元素）；传 null 放弃。切到同一地址时直接换用备用元素，起播不用再等网络。 */
+  prepare: (url: string | null) => void };
+
+const absolute = (url: string) => new URL(url, window.location.href).href;
 
 function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
-  const audio = new Audio();
-  audio.preload = "metadata";
+  const fresh = () => { const element = new Audio(); element.preload = "metadata"; return element; };
+  let audio = fresh();
   try { const saved = Number(localStorage.getItem(VOLUME_KEY)); if (saved >= 0 && saved <= 1 && localStorage.getItem(VOLUME_KEY) !== null) audio.volume = saved; } catch { /* 无法读取偏好时使用默认音量 */ }
   let ready = false, destroyed = false;
+  // 备用元素预先缓冲下一首；blessed 是最近一次成功播放的元素：部分浏览器（iOS）只允许用户操作过的元素在后台播放，
+  // 换用的元素被拒绝时退回它，连播不会因此停下。
+  let standby: HTMLAudioElement | null = null, blessed: HTMLAudioElement | null = null;
   const progress = (): MediaProgress => {
     const duration = Number.isFinite(audio.duration) ? Math.max(0, audio.duration) : 0;
     const currentTime = Number.isFinite(audio.currentTime) ? Math.max(0, audio.currentTime) : 0;
@@ -178,12 +196,36 @@ function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
       try { localStorage.setItem(VOLUME_KEY, String(audio.volume)); } catch { /* 偏好保存失败不影响播放 */ }
     }],
   ];
-  for (const [name, handler] of listeners) audio.addEventListener(name, handler);
+  const attach = (element: HTMLAudioElement) => { for (const [name, handler] of listeners) element.addEventListener(name, handler); };
+  const detach = (element: HTMLAudioElement) => { for (const [name, handler] of listeners) element.removeEventListener(name, handler); };
+  const release = (element: HTMLAudioElement | null) => { if (!element) return; element.pause(); element.removeAttribute("src"); element.load(); };
+  /** 换成另一个元素继续播放：保留音量与静音，监听器跟着移过去。 */
+  const adopt = (element: HTMLAudioElement) => {
+    element.volume = audio.volume; element.muted = audio.muted; element.playbackRate = element.defaultPlaybackRate = audio.playbackRate;
+    detach(audio); audio = element; attach(audio);
+    ready = audio.readyState >= 1;
+    events.notify(ready ? "ready" : "loading");
+    events.onPlaying(false); update();
+  };
+  attach(audio);
   audio.src = url;
   events.onVolume(audio.volume, audio.muted);
+  const play = async () => {
+    try {
+      await audio.play();
+      if (blessed !== audio) { if (blessed && blessed !== standby) release(blessed); blessed = audio; }
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "NotAllowedError") || !blessed || blessed === audio) throw error;
+      // 换用的元素没有得到播放许可：退回用户操作过的元素，按地址重新加载。
+      const source = audio.currentSrc || audio.src, rejected = audio;
+      blessed.src = source; adopt(blessed); release(rejected);
+      blessed.playbackRate = blessed.defaultPlaybackRate = rejected.playbackRate;
+      await audio.play();
+    }
+  };
   return {
-    element: audio,
-    play: () => audio.play(),
+    get element() { return audio; },
+    play,
     pause: () => audio.pause(),
     isPlaying: () => !audio.paused,
     seek: time => { audio.currentTime = time; update(); },
@@ -191,15 +233,36 @@ function createAudioPlayer(url: string, events: AudioEvents): AudioPlayer {
     adjustVolume: delta => { audio.muted = false; audio.volume = Math.max(0, Math.min(1, audio.volume + delta)); },
     setVolume: volume => { audio.volume = Math.max(0, Math.min(1, volume)); audio.muted = volume === 0; },
     toggleMute: () => { if (audio.muted || audio.volume === 0) { audio.muted = false; if (audio.volume === 0) audio.volume = .6; } else audio.muted = true; },
+    adjustRate: delta => {
+      const rate = Math.round(Math.max(0.25, Math.min(3, audio.playbackRate + delta)) * 100) / 100;
+      audio.playbackRate = audio.defaultPlaybackRate = rate;
+      return rate;
+    },
+    duration: () => progress().duration,
+    prepare: next => {
+      if (destroyed) return;
+      if (!next) { if (standby !== blessed) release(standby); standby = null; return; }
+      if (standby && standby.src === absolute(next)) return;
+      if (standby !== blessed) release(standby);
+      standby = fresh(); standby.preload = "auto"; standby.src = next;
+    },
     setSource: nextUrl => {
-      audio.pause(); ready = false; events.notify("loading");
+      audio.pause();
+      if (standby && standby.src === absolute(nextUrl)) {
+        // 下一首已经在备用元素里缓冲：直接换用，旧元素若是用户操作过的就留作退路。
+        const previous = audio, next = standby;
+        standby = null; adopt(next);
+        if (previous !== blessed) release(previous);
+        return;
+      }
+      ready = false; events.notify("loading");
       audio.src = nextUrl; audio.load();
       events.onPlaying(false); events.onProgress({ currentTime: 0, duration: 0 }, 0);
     },
     destroy: () => {
-      destroyed = true; audio.pause();
-      for (const [name, handler] of listeners) audio.removeEventListener(name, handler);
-      audio.removeAttribute("src"); audio.load();
+      destroyed = true; detach(audio);
+      for (const element of new Set([audio, standby, blessed])) release(element);
+      standby = blessed = null;
     },
   };
 }
@@ -299,7 +362,7 @@ function MediaButton({ icon, label, shortcut, onClick, disabled, active, classNa
 
 /* ---------- 统一入口 ---------- */
 
-export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation: givenRotation = 0, onRotate, onBufferSpeed, onFindAssets, assetRevision = 0, preferAsset }: {
+export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation: givenRotation = 0, onRotate, onBufferSpeed, onFindAssets, assetRevision = 0, preferAsset, upcoming = null, session }: {
   kind: "video" | "audio"; url: string; name: string; size?: number; videoSize?: { width: number; height: number }; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav;
 } & PlaybackProps) {
@@ -331,6 +394,22 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   preferRef.current = preferAsset;
   const findRef = useRef(onFindAssets);
   findRef.current = onFindAssets;
+  // 快捷键 C：开关字幕或歌词，再次打开时回到上次的选择。
+  const captions = useRef(() => {}), lastCaption = useRef("");
+  // 歌词偏移（秒）：正数表示歌词延后出现。换歌时归零；字幕偏移由视频播放器自己保存。
+  const lyricOffset = useRef(0);
+  const extend = <T extends Player>(instance: T): T => Object.assign(instance, {
+    toggleCaptions: () => captions.current(),
+    shiftCaptions: (instance as PlaybackControls).shiftCaptions ?? ((seconds: number) => {
+      lyricOffset.current = Math.round(Math.max(-30, Math.min(30, lyricOffset.current + seconds)) * 10) / 10;
+      if (lyricRef.current[0]?.time !== -1) setActive(lyricAt(lyricRef.current, timeRef.current - lyricOffset.current));
+      return lyricOffset.current;
+    }),
+    duration: (instance as PlaybackControls).duration ?? (() => {
+      const element = (instance as unknown as VideoPlayer).media?.();
+      return element && Number.isFinite(element.duration) ? element.duration : 0;
+    }),
+  });
   useEffect(() => {
     let cancelled = false;
     const notify = (value: MediaState) => {
@@ -348,11 +427,11 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
           if (cancelled) return;
           timeRef.current = value.currentTime;
           setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value);
-          setBuffered(loaded); if (lyricRef.current[0]?.time !== -1) setActive(lyricAt(lyricRef.current, value.currentTime));
+          setBuffered(loaded); if (lyricRef.current[0]?.time !== -1) setActive(lyricAt(lyricRef.current, value.currentTime - lyricOffset.current));
           callbacks.current.onProgress?.(value);
         },
       });
-      player.current = audio;
+      player.current = extend(audio);
       loadedUrl.current = source.current.url;
       setPlayerReady(true);
       callbacks.current.onControls?.(audio);
@@ -366,7 +445,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
           onRotate: (degrees: number) => (callbacks.current.onRotate ?? setLocalRotation)(degrees) };
         const initial = source.current;
         const video = engine.createVideoPlayer(host.current, initial.url, notify, initial.cover, events, () => navRef.current, initial.videoSize, initial.rotation);
-        player.current = video;
+        player.current = extend(video);
         loadedUrl.current = initial.url;
         setPlayerReady(true);
         callbacks.current.onControls?.(video);
@@ -378,7 +457,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   }, [kind]);
   useLayoutEffect(() => {
     if (!player.current || loadedUrl.current === url) return;
-    setError(""); setSlow(false); timeRef.current = 0; setProgress({ currentTime: 0, duration: 0 }); setBuffered(0);
+    setError(""); setSlow(false); timeRef.current = 0; lyricOffset.current = 0; setProgress({ currentTime: 0, duration: 0 }); setBuffered(0);
     lyricSource.current = ""; callbacks.current.onLyricLine?.(null); setActive(-1);
     loadedUrl.current = url;
     (player.current as VideoPlayer).setSource(url, name, cover, kind === "video" ? videoSize : undefined);
@@ -386,6 +465,13 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
     // 封面元信息变化不重置已在播放的媒体。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, playerReady]);
+  // 播放过半或只剩 30 秒时预先缓冲下一首；下一首变化或不再连播时放弃。
+  const nearEnd = kind === "audio" && progress.duration > 0 && (progress.currentTime >= progress.duration / 2 || progress.duration - progress.currentTime <= 30);
+  useEffect(() => {
+    const instance = player.current as AudioPlayer | null;
+    if (kind !== "audio" || !playerReady || !instance || !("prepare" in instance)) return;
+    instance.prepare(nearEnd && upcoming && upcoming !== url ? upcoming : null);
+  }, [kind, playerReady, nearEnd, upcoming, url]);
   // 视频把上一个／下一个、播放列表与播放模式放进 ArtPlayer 控制条；导航变化时刷新这些控件。
   const navKey = nav ? `${nav.index}/${nav.count}/${nav.mode}/${nav.playlistOpen}` : "";
   useEffect(() => {
@@ -458,7 +544,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
         const lines = parsed.length ? parsed : value.text.split(/\r?\n/).map(line => line.replace(/^\[[a-z]+:[^\]]*\]$/i, "").trim()).filter(Boolean).map(text => ({ time: -1, text }));
         if (!lines.length) throw new Error("歌词是空的");
         lyricRef.current = lines; lyricSource.current = url; setLyrics(lines); setUnsynced(!parsed.length);
-        setActive(parsed.length ? lyricAt(parsed, timeRef.current) : -1);
+        setActive(parsed.length ? lyricAt(parsed, timeRef.current - lyricOffset.current) : -1);
       } else if (subtitles) {
         await subtitles.setSubtitle(value.text, /\.srt$/i.test(asset.name) ? "srt" : "vtt");
         if (asset.read) subtitles.notice(`已加载${asset.name}`);
@@ -495,6 +581,11 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
     const instance = player.current;
     return instance ? "element" in instance ? (instance as AudioPlayer).element : (instance as VideoPlayer).media() : null;
   }, []);
+  useMediaSession({
+    active: playerReady && state !== "failed", playing, media: mediaElement, controls: player.current, nav,
+    title: tags?.title || session?.title || name, artist: tags?.artist || tags?.album_artist || "", album: tags?.album || "",
+    artwork: session?.artwork ?? cover,
+  });
   const speed = useBufferSpeed(mediaElement, waiting && !failed && playerReady, size, url);
   const speedCallback = useRef(onBufferSpeed);
   speedCallback.current = onBufferSpeed;
@@ -504,6 +595,13 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   const currentLine = kind === "audio" && !failed && selected && !assetBusy && !findingAssets && lyricSource.current === url && lyrics.length && !unsynced
     ? lyrics[active]?.text.split(/\r?\n/).find(line => line.trim())?.trim() ?? "" : null;
   useEffect(() => { callbacks.current.onLyricLine?.(currentLine); }, [currentLine, url]);
+  captions.current = () => {
+    if (!assets.length) return;
+    const instance = player.current as VideoPlayer | null, label = kind === "audio" ? "歌词" : "字幕";
+    if (selected) { lastCaption.current = selected; setSelected(""); }
+    else setSelected(assets.find(item => item.path === lastCaption.current)?.path ?? pickAsset(kind, assets)?.path ?? assets[0].path);
+    if (kind === "video" && instance && "notice" in instance) instance.notice(selected ? `已关闭${label}` : `已打开${label}`);
+  };
   const options = assets.map(asset => ({ value: asset.path, label: assetLabel(asset) + (assets.filter(item => assetLabel(item) === assetLabel(asset)).length > 1 ? ` · ${asset.name}` : "") }));
   const optionKey = options.map(option => `${option.value}=${option.label}`).join("|");
   // 视频字幕放进播放器自己的设置菜单；没有找到字幕时不出现这一项，也不再单独占一行提示。
@@ -591,7 +689,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
           </div>
           : <div className="audio-lyrics" ref={lyricHost} aria-label="同步歌词，点击跳转">
             {lyrics.map((line, index) => <button type="button" key={index} data-line={index} className={`audio-lyric${active === index ? " is-active" : ""}${index < active ? " is-past" : ""}`}
-              aria-current={active === index ? "true" : undefined} onClick={() => audio?.seek(line.time)}>{line.text || <Icon name="audio" size={14} className="audio-lyric-rest" />}</button>)}
+              aria-current={active === index ? "true" : undefined} onClick={() => audio?.seek(Math.max(0, line.time + lyricOffset.current))}>{line.text || <Icon name="audio" size={14} className="audio-lyric-rest" />}</button>)}
           </div>
           : lyricsLoading
             ? <div className="audio-lyrics-skeleton" role="status" aria-label="正在加载歌词"><i /><i /><i /><i /><i /></div>

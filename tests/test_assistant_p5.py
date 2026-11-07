@@ -17,6 +17,7 @@ from tgdrive.objects import Scope
 class AssistantP5Tests(ActionHelpers, AssistantCase):
     async def ready(self, files=(), location=""):
         admin, channel, model = await self.setup_assistant()
+        self.model_id = model["id"]
         for key in files:
             await self.put(key, key.encode())
         user = await self.client.login("user", "alice@example.com", "alice password")
@@ -202,6 +203,15 @@ class AssistantP5Tests(ActionHelpers, AssistantCase):
                                  + [("completed", f".tgdrive/private/p{n}.txt") for n in range(120)])
             # 单次上限由管理员在工具配置中设置（默认 200）；调到 100 后按 100 分页，模型要求更多也按上限处理。
             status, _ = await self.req("POST", "/api/admin/v1/assistant/tools", {"list_downloads": {"max_results": 100}}, admin)
+            self.assertEqual(status, 200)
+            # 测试模型的窗口是 64k，100 项会超过按窗口收紧的结果上限：截短后不能保留续读位置，否则会跳过中间的任务。
+            self.model.replies = [call("list_downloads", limit=100), answer("好")]
+            await self.send(user, conversation, "有多少下载任务")
+            cut = (await self.tool_results(user, conversation))[-1]
+            self.assertLess(len(cut["result"]["tasks"]), 100)
+            self.assertNotIn("next_cursor", cut["result"])
+            self.assertIn("续读位置已失效", cut["result"]["note"])
+            status, _ = await self.req("POST", f"/api/admin/v1/assistant/models/{self.model_id}/update", {"context_window": 1_000_000}, admin)
             self.assertEqual(status, 200)
             self.model.replies = [call("list_downloads", limit=1000), answer("好")]
             await self.send(user, conversation, "有多少下载任务")

@@ -24,11 +24,22 @@ function initialMode(): PlaybackMode {
   catch { return "sequence"; }
 }
 const nameOf = (file: FileItem) => file.key.slice(file.key.lastIndexOf("/") + 1);
+/** 列表里的曲目名：有标签时用歌名，否则用文件名。 */
+const trackTitle = (file: FileItem) => file.media?.title || nameOf(file);
+const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+/** 副标题：有标签时显示艺人与时长，否则显示类型与大小。 */
+function trackDetail(file: FileItem, typeLabel: string) {
+  const { artist, duration } = file.media ?? {};
+  if (artist || duration) return [artist, duration ? clock(duration) : null].filter(Boolean).join(" · ");
+  return `${typeLabel} · ${formatBytes(file.size)}`;
+}
 
 export function usePreviewPlaylist(file: FileItem, kind: string, files: FileItem[] | undefined, accepts: (file: FileItem) => boolean) {
   const [selection, setSelection] = useState({ origin: file.key, file });
   const [mode, setMode] = useState<PlaybackMode>(initialMode);
   const history = useRef<string[]>([]), returning = useRef(false);
+  // 随机模式预先定下的下一首：预缓冲与真正切歌取同一首。
+  const planned = useRef<{ from: string; key: string } | null>(null);
   const base = useMemo(() => {
     const seen = new Set<string>();
     return (files ?? [file]).filter(item => {
@@ -58,14 +69,30 @@ export function usePreviewPlaylist(file: FileItem, kind: string, files: FileItem
     returning.current = false;
     setSelection({ origin: file.key, file: next });
   }
+  function randomPick(): FileItem {
+    const plan = planned.current, kept = plan?.from === current.key ? items.find(item => item.key === plan.key) : undefined;
+    if (kept) return kept;
+    const choices = items.filter(item => item.key !== current.key);
+    const pick = choices.length ? choices[Math.floor(Math.random() * choices.length)] : current;
+    planned.current = { from: current.key, key: pick.key };
+    return pick;
+  }
   function next(ended = false): FileItem | null {
     if (kind !== "image" && ended && mode === "single") return current;
     if (kind !== "image" && mode === "random") {
-      const choices = items.filter(item => item.key !== current.key);
-      return choices.length ? choices[Math.floor(Math.random() * choices.length)] : current;
+      const pick = randomPick();
+      planned.current = null;
+      return pick;
     }
     const index = items.findIndex(item => item.key === current.key);
     return items[index + 1] ?? (mode === "loop" || !ended ? items[0] : null);
+  }
+  /** 当前这首播完后会播放的文件（不切换）：音乐据此预先缓冲；单曲循环与列表结束时为 null。 */
+  function upcoming(): FileItem | null {
+    if (kind === "image" || mode === "single") return null;
+    if (mode === "random") { const pick = randomPick(); return pick.key === current.key ? null : pick; }
+    const index = items.findIndex(item => item.key === current.key);
+    return items[index + 1] ?? (mode === "loop" && items[0]?.key !== current.key ? items[0] : null);
   }
   function previous(): FileItem {
     if (kind !== "image" && mode === "random") {
@@ -81,7 +108,7 @@ export function usePreviewPlaylist(file: FileItem, kind: string, files: FileItem
     setMode(value); history.current = []; returning.current = false;
     try { localStorage.setItem(MODE_KEY, value); } catch { /* 本地偏好不可用时仍可切换。 */ }
   }
-  return { items, current, select, next, previous, mode, changeMode };
+  return { items, current, select, next, previous, upcoming, mode, changeMode };
 }
 
 /**
@@ -96,7 +123,10 @@ export function PlaylistPanel({ playlist, onSelect, onCollapse, renderThumbnail,
   const [query, setQuery] = useState("");
   const index = playlist.items.findIndex(file => file.key === playlist.current.key);
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const shown = terms.length ? playlist.items.filter(file => { const name = nameOf(file).toLowerCase(); return terms.every(term => name.includes(term)); }) : playlist.items;
+  const shown = terms.length ? playlist.items.filter(file => {
+    const text = [nameOf(file), file.media?.title, file.media?.artist, file.media?.album].filter(Boolean).join(" ").toLowerCase();
+    return terms.every(term => text.includes(term));
+  }) : playlist.items;
   useEffect(() => {
     const node = list.current;
     if (!node) return;
@@ -129,7 +159,7 @@ export function PlaylistPanel({ playlist, onSelect, onCollapse, renderThumbnail,
     </header>
     {playlist.items.length > 1 && <label className="preview-playlist-search">
       <Icon name="search" size={14} />
-      <input ref={search} type="search" placeholder="过滤文件名" aria-label={`过滤${label}`} value={query} spellCheck={false}
+      <input ref={search} type="search" placeholder={typeLabel === "音频" ? "过滤歌名、艺人或文件名" : "过滤文件名"} aria-label={`过滤${label}`} value={query} spellCheck={false}
         onChange={event => setQuery(event.target.value)} />
       {query && <button type="button" aria-label="清空过滤" title="清空过滤" onClick={() => { setQuery(""); search.current?.focus(); }}><Icon name="x" size={12} /></button>}
     </label>}
@@ -142,7 +172,7 @@ export function PlaylistPanel({ playlist, onSelect, onCollapse, renderThumbnail,
             <span className="preview-track-order" aria-hidden="true">{current && !image
               ? <span className="preview-equalizer"><i /><i /><i /><i /></span> : String(order).padStart(2, "0")}</span>
             <span className="preview-track-cover">{renderThumbnail(file)}</span>
-            <span className="preview-track-description"><strong>{nameOf(file)}</strong><span>{typeLabel} · {formatBytes(file.size)}</span></span>
+            <span className="preview-track-description"><strong>{trackTitle(file)}</strong><span>{trackDetail(file, typeLabel)}</span></span>
             {!current && <Icon name={image ? "image" : "play"} size={14} className="preview-track-play" />}
           </button>
         </li>;

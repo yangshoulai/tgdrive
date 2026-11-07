@@ -23,8 +23,19 @@ PAGE_SECURITY_HEADERS = {
 
 
 
+def _accepts(header: str, coding: str) -> bool:
+    """Accept-Encoding 是否接受某种编码（q=0 表示拒绝）。"""
+    for part in header.lower().split(","):
+        name, _, params = part.strip().partition(";")
+        if name.strip() == coding:
+            quality = params.strip()
+            return not (quality.startswith("q=") and quality[2:].strip() in ("0", "0.0", "0.00", "0.000"))
+    return False
+
+
 class StaticFiles:
-    async def _static(self, send, path: str, method: str, *, https: bool = False, origin: str = "") -> None:
+    async def _static(self, send, path: str, method: str, *, https: bool = False, origin: str = "",
+                      accept_encoding: str = "") -> None:
         assert self.static_dir is not None
         static_dir = Path(self.static_dir)
         # 单页应用：真实存在的文件原样返回，其余路径（/、/docs、/s/<令牌>、/admin/...）都交给 index.html，
@@ -46,7 +57,14 @@ class StaticFiles:
         if not candidate.is_file():
             await self._send(send, 404, {"error": {"code": "not_found", "message": "前端资源未构建"}})
             return
-        data = await asyncio.to_thread(candidate.read_bytes)
+        # 构建时预压缩的 .br／.gz（build-apps.mjs）：浏览器支持时直接返回，主包体积约为原来的四分之一。
+        encoding = None
+        if candidate.name != "index.html":
+            for name, suffix in (("br", ".br"), ("gzip", ".gz")):
+                if _accepts(accept_encoding, name) and (encoded := candidate.with_name(candidate.name + suffix)).is_file():
+                    candidate_data, encoding = encoded, name
+                    break
+        data = await asyncio.to_thread((candidate_data if encoding else candidate).read_bytes)
         if candidate.name == "index.html":
             # 爬虫不执行应用脚本；在原始 HTML 中使用部署地址，兼容未配置地址的首次部署。
             try:
@@ -63,6 +81,10 @@ class StaticFiles:
                    # sw.js 的地址固定，必须每次校验，浏览器才能及时取得新版本（其余资源文件名带内容哈希）。
                    "Cache-Control": "no-cache" if candidate.name in ("index.html", "sw.js") else "public, max-age=31536000, immutable",
                    **PAGE_SECURITY_HEADERS}
+        if candidate.name != "index.html":
+            headers["Vary"] = "Accept-Encoding"
+        if encoding:
+            headers["Content-Encoding"] = encoding
         if https:
             headers["Strict-Transport-Security"] = "max-age=31536000"
         await send({"type": "http.response.start", "status": 200, "headers": self._headers(headers)})

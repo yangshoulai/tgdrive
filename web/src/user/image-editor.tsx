@@ -198,7 +198,7 @@ export function ImageEditorDialog({ file, onClose, onSaved }: { file: api.FileIt
       void generateLoadedThumbnails(item, signal => createThumbnails({ file: blob, signal }, "image"), overwrite).catch(() => undefined);
       if (overwrite) api.announceFileUpdated(item);
       window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [parentPath(item.key)] } }));
-      toast.success(overwrite ? "已保存修改" : `已另存为「${baseName(item.key)}」`);
+      toast.success(overwrite ? "已保存修改，原图放进了回收站，需要时可以还原" : `已另存为「${baseName(item.key)}」`);
       onSaved?.(item, overwrite);
       onClose();
     } catch (reason) {

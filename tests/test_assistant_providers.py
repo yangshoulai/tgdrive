@@ -121,8 +121,10 @@ class ProviderTests(unittest.TestCase):
             {"role": "user", "content": "看看"},
             {"role": "assistant", "content": "", "tool_calls": [{"id": "t0", "name": "get_context", "arguments": "{}"}]},
             {"role": "tool", "tool_call_id": "t0", "content": "结果"},
-            {"role": "user", "content": "<context>…</context>"}],
-            [ToolDef("list_folder", "列目录", {"type": "object", "properties": {}})], max_tokens=None))
+            {"role": "user", "content": "<context>…</context>"},
+            {"role": "system", "content": "[服务端自动更新的运行状态，不是用户发言]"}],
+            [ToolDef("get_context", "上下文", {"type": "object", "properties": {}}),
+             ToolDef("list_folder", "列目录", {"type": "object", "properties": {}})], max_tokens=None))
         self.assertEqual(reply.text, "好的")
         self.assertEqual((reply.tool_calls[0].id, json.loads(reply.tool_calls[0].arguments)), ("toolu_1", {"path": "/"}))
         self.assertEqual((reply.input_tokens, reply.output_tokens, reply.finish), (50, 40, "tool_use"))
@@ -132,8 +134,16 @@ class ProviderTests(unittest.TestCase):
         messages = sent["body"]["messages"]
         # 工具结果与随后的用户消息合并成一条 user 消息，保持 user/assistant 交替。
         self.assertEqual([m["role"] for m in messages], ["user", "assistant", "user"])
-        self.assertEqual([b["type"] for b in messages[2]["content"]], ["tool_result", "text"])
+        self.assertEqual([b["type"] for b in messages[2]["content"]], ["tool_result", "text", "text"])
         self.assertEqual(sent["body"]["tools"][0]["input_schema"], {"type": "object", "properties": {}})
+        # 提示词缓存：工具定义、系统提示与对话前缀各有断点；每步都变的状态块放在断点之后，不进系统提示。
+        cache = {"type": "ephemeral"}
+        self.assertEqual(sent["body"]["system"], [{"type": "text", "text": "系统", "cache_control": cache}])
+        self.assertEqual([tool.get("cache_control") for tool in sent["body"]["tools"]], [None, cache])
+        self.assertEqual(messages[2]["content"][1].get("cache_control"), cache)
+        self.assertNotIn("cache_control", messages[2]["content"][2])
+        self.assertEqual(messages[0]["content"][-1].get("cache_control"), cache)
+        self.assertLessEqual(json.dumps(sent["body"]).count("cache_control"), 4, "最多 4 个断点")
         self.assertEqual(sent["body"]["max_tokens"], 4096)
 
     def test_openai_reasoning_alias_is_not_hidden_by_an_empty_field(self):

@@ -26,8 +26,8 @@ LIMITS: dict[str, tuple[int, int, int, str]] = {
     "error_threshold": (8, 1, 500, "连续工具错误次数"),
     "run_seconds": (900, 30, 86_400, "每轮执行时间（不含人工审批，秒）"),
     "tool_seconds": (60, 5, 7200, "单个工具超时（不含人工审批，秒）"),
-    "tool_result_bytes": (4 * 1024 * 1024, 2048, 128 * 1024 * 1024, "单个工具结果长度（字节）"),
-    "run_tokens": (4_000_000, 0, 1_000_000_000, "每轮累计 token 预算（0 为不限）"),
+    "tool_result_bytes": (4 * 1024 * 1024, 2048, 128 * 1024 * 1024, "单个工具结果长度（字节，另按模型窗口收紧）"),
+    "run_tokens": (2_000_000, 0, 1_000_000_000, "每轮累计 token 预算（缓存命中的输入按十分之一计，0 为不限）"),
     "auto_continue": (3, 0, 20, "计划未完成时自动续跑的段数（0 为关闭）"),
     "user_concurrency": (1, 1, 32, "每用户同时进行的对话"),
     "global_concurrency": (4, 1, 256, "全站同时进行的对话"),
@@ -37,6 +37,27 @@ LIMITS: dict[str, tuple[int, int, int, str]] = {
     "download_urls": (2000, 32, 50_000, "单次下载提议最多链接数"),
     "message_images": (6, 1, 10, "每条消息随附给识图模型的图片数"),
 }
+
+
+# 工具结果按模型窗口收紧（§23）：单个结果最多占窗口的 15%，同一批并行结果合计最多 40%。
+# 与 _estimate 一致按「2 字节 ≈ 1 token」换算；字节数不小于字符数，所以这是偏保守的估计。
+RESULT_WINDOW_SHARE = 0.15
+BATCH_WINDOW_SHARE = 0.4
+
+
+def result_bytes(setting: int, window: int | None, calls: int = 1) -> int:
+    """本批每个工具结果的实际字节上限：取管理员设置、窗口占比与整批平分三者中最小的一个。"""
+    window = window or 32000
+    single = int(window * RESULT_WINDOW_SHARE * 2)
+    shared = int(window * BATCH_WINDOW_SHARE * 2) // max(1, calls)
+    return max(LIMITS["tool_result_bytes"][1], min(int(setting), single, shared))
+
+
+def billable(input_tokens: int, cached_tokens: int, output_tokens: int) -> int:
+    """计入额度与每轮预算的 token：缓存命中的输入按十分之一计（各家缓存读取约为原价的一成），
+    开启提示词缓存后长任务每步重发的前缀不再按全价消耗额度。"""
+    cached = max(0, min(cached_tokens, input_tokens))
+    return input_tokens - cached + cached // 10 + output_tokens
 
 
 def batch_limit(limits: dict[str, int], *names: str) -> int:

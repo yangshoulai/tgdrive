@@ -149,7 +149,7 @@ export function TextPreview({ content, name, code = false, downloadUrl, resolveI
       await edit.save(text, force);
       saved.current = draft.current = text;
       setDirty(false); setConflict(false);
-      toast.success("已保存");
+      toast.success("已保存，原来的版本放进了回收站，需要时可以还原");
     } catch (reason) {
       if (reason instanceof api.ApiError && reason.code === "version_conflict") setConflict(true);
       else toast.error(reason instanceof api.ApiError ? reason.message : reason instanceof Error ? reason.message : "保存失败，请稍后重试");

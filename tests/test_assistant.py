@@ -40,8 +40,8 @@ class ScriptedModel:
         return reply
 
 
-def call(name, **arguments):
-    return Reply(tool_calls=[ToolCall(f"call_{name}_{time.time_ns()}", name, json.dumps(arguments, ensure_ascii=False))],
+def call(tool_name, /, **arguments):
+    return Reply(tool_calls=[ToolCall(f"call_{tool_name}_{time.time_ns()}", tool_name, json.dumps(arguments, ensure_ascii=False))],
                  input_tokens=100, output_tokens=20)
 
 

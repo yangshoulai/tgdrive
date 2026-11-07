@@ -153,6 +153,7 @@ class AssistantLoopTests(AssistantCase):
             async def spend(state, *args):
                 result = await execute(state, *args)
                 state.input_tokens += 4000
+                state.budget_tokens += 4000
                 return result
 
             with mock.patch.object(self.service, "_execute", side_effect=spend):

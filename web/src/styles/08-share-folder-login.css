@@ -1,0 +1,326 @@
+/* ---------- 分享的文件夹（访客只读浏览） ---------- */
+
+.share-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 8px 16px; border-top: 1px solid var(--line); background: var(--surface); color: var(--ink-3); font-size: var(--text-sm); }
+.share-crumbs > span { display: inline-flex; align-items: center; gap: 2px; }
+.share-crumbs button { height: 26px; padding: 0 8px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--ink-2); }
+.share-crumbs button:hover { background: var(--surface-hover); color: var(--ink); }
+.share-crumbs strong { padding: 0 8px; color: var(--ink); font-weight: 500; }
+.share-folder-loading { padding: 12px 24px; }
+.share-folder-filters { display: grid; gap: 12px; padding: 0 20px 12px; }
+.share-folder-filters .filter-chips, .share-folder-filters .file-filters { margin: 0; }
+.share-folder-search { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.share-folder-search .search-input { flex: 1; width: auto; min-width: 0; }
+.share-folder-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line); font-size: var(--text-xs); }
+.share-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.share-select-all { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); cursor: pointer; }
+.share-grid .grid-check { opacity: 1; }
+.share-folder .share-grid { border-top: 1px solid var(--line); }
+.public-folder-table { --cols: 20px minmax(0, 1fr) 88px 96px 132px 52px; }
+.public-file-details { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.public-file-details .name-button { width: 100%; text-align: left; }
+.public-file-meta { display: none; }
+.share-folder .public-folder-table .data-row { padding-inline: 20px; }
+.share-folder .public-folder-table .data-head { border-top: 1px solid var(--line); border-radius: 0; }
+.share-folder .public-folder-table .data-row:last-child { border-radius: 0; }
+.share-folder .empty-state { padding-block: 48px; }
+.share-folder .public-folder-table .data-row > .cell-actions:last-child { position: static; padding-left: 0; background: transparent; box-shadow: none; }
+@media (max-width: 860px) {
+  .public-folder-table { --cols: 20px minmax(0, 1fr) 76px 80px 44px; }
+  .public-folder-table .data-row > .cell-date { display: none; }
+  .share-crumbs, .share-folder-toolbar, .share-folder-filters, .share-folder .public-folder-table .data-row { padding-inline: 16px; }
+  .share-folder .share-grid { padding: 16px; }
+}
+@media (max-width: 640px) {
+  .folder-strip { grid-template-columns: minmax(0, 1fr); }
+  .public-folder-table { --cols: 20px minmax(0, 1fr) 44px; }
+  .public-folder-table .data-row > .cell-type, .public-folder-table .data-row > .cell-size { display: none; }
+  .public-folder-table .data-row:not(.data-head) { min-height: 64px; }
+  .public-file-meta { display: block; margin-top: 4px; color: var(--ink-3); font-size: var(--text-micro); }
+}
+
+/* ---------- 登录页：保持登录、显示密码 ---------- */
+
+.link-button { padding: 0; border: 0; background: transparent; color: var(--accent-ink); font: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.link-button:hover { color: var(--accent); }
+.check-row { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.check-row .checkbox { margin-top: 4px; }
+.check-row strong { display: block; font-size: var(--text-md); font-weight: 500; }
+.check-row small { display: block; margin-top: 1px; color: var(--ink-3); font-size: var(--text-sm); }
+.input-affix-lg .input-lg { flex: 1; min-width: 0; }
+.affix-toggle { align-self: stretch; padding: 0 16px; border: 0; border-left: 1px solid var(--line-soft); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: transparent; color: var(--ink-2); font-size: var(--text-sm); }
+.affix-toggle:hover { background: var(--surface-hover); color: var(--ink); }
+
+/* 手机文件条目保留名称、容量和操作，不需要横向滑动。管理表格仍在各自容器中滚动。 */
+@media (max-width: 860px) {
+  .btn-md, .icon-btn-md, .icon-btn-sm { min-height: 40px; }
+  .icon-btn-md, .icon-btn-sm { min-width: 40px; }
+  .btn-sm, .segmented button { min-height: 36px; }
+  .file-filters .filter-chip, .file-filters > .filter-more { height: 36px; min-height: 36px; }
+  .menu-item { min-height: 40px; }
+  .mobile-bar > .icon-btn { width: 44px; height: 44px; }
+  .mobile-bar > .mobile-account { border-radius: 50%; }
+  .search-input { height: 40px; }
+  .breadcrumbs button { min-height: 36px; }
+  .file-surface > .file-table { min-width: 0; --cols: 24px minmax(0, 1fr) 44px; }
+  .file-table .data-row { gap: 8px; min-height: 76px; padding: 8px 12px; contain-intrinsic-size: 76px; }
+  .file-table .data-head { min-height: 44px; padding-block: 0; }
+  .file-table .cell-name { gap: 8px; }
+  .file-table .name-stack { gap: 4px; }
+  .file-table .cell-type, .file-table .cell-size, .file-table .cell-date, .file-table .cell-name > .badge, .file-table .cell-name > .cell-cache { display: none; }
+  .file-table .cell-actions:last-child { position: static; padding-left: 0; box-shadow: none; background: transparent; }
+  .file-mobile-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--ink-3); font-size: var(--text-xs); }
+  .file-mobile-meta > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-mobile-meta .badge { flex: none; font-size: var(--text-micro); padding: 1px 4px; }
+  .mobile-file-sort { display: flex; }
+  .mobile-file-sort select { height: 40px; }
+  /* 文件页顶部：面包屑占满整行，目录名与新建、上传同一行——两个按钮收成 40px 图标按钮，省出一整行给文件列表；
+     工具栏第二行不换行，排序框占满剩余宽度，目录统计改用列表底部的链接。 */
+  .files-view .page-header { flex-direction: row; flex-wrap: nowrap; align-items: flex-end; gap: 12px; }
+  .files-view .page-header-main { flex: 1; min-width: 0; }
+  .files-view .page-header-main > .breadcrumbs { margin-bottom: 8px; }
+  .files-view .page-header-actions { flex: none; flex-wrap: nowrap; }
+  .files-view .page-header-actions > .upload-picker-trigger, .files-view .page-header-actions > .new-picker-trigger { flex: none; width: 40px; padding: 0; }
+  .files-view .page-header-actions > .upload-picker-trigger > :not(:first-child), .files-view .page-header-actions > .new-picker-trigger > :not(:first-child) { display: none; }
+  /* 窄屏面包屑：每一项都限宽，当前位置也不会比屏幕宽，滚到末尾时能完整看到它的省略号。 */
+  .file-breadcrumbs .crumb-label { max-width: 8em; }
+  .file-breadcrumbs button[aria-current="page"] .crumb-label { max-width: min(16em, 52vw); }
+  /* 根目录只留图标（名称仍在按钮的 title 与读屏文本中），常见的两三级路径不必横向滚动。 */
+  .file-breadcrumbs li:first-child button:not([aria-current="page"]) .crumb-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .files-view .toolbar { gap: 8px; }
+  .files-view .toolbar > .toolbar-actions { flex-wrap: nowrap; gap: 8px; }
+  .files-view .toolbar .mobile-file-sort { flex: 1 1 auto; }
+  .files-view .toolbar .mobile-file-sort select { width: 100%; max-width: none; }
+  .files-view .toolbar .toolbar-stats { display: none; }
+  .list-footer .shortcut-hint { display: none; }
+  .selection-bar { align-items: flex-start; }
+  .selection-bar .toolbar-actions { width: 100%; justify-content: flex-start; }
+  .modal { max-height: calc(100dvh - var(--floating-top) - var(--floating-bottom)); }
+  .modal-body { padding: 16px 20px; }
+  .modal-footer { flex-wrap: wrap; padding: 16px 20px; }
+  .modal-footer .btn { min-width: 76px; }
+  .destination-summary { flex-wrap: wrap; gap: 8px; padding: 12px; }
+  .destination-summary > div { min-width: 100px; }
+  .move-head { flex-wrap: wrap; }
+  .move-list { max-height: min(280px, 40dvh); }
+  .move-new-actions .btn { min-height: 44px; }
+  .copy-field { flex-wrap: wrap; }
+  .copy-field input { flex-basis: 100px; min-height: 36px; }
+  .disclosure-meta { font-size: var(--text-micro); }
+  .toaster { bottom: 12px; }
+  .toast button { min-width: 32px; min-height: 32px; }
+}
+
+@media (max-width: 640px) {
+  .file-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.workspace-switch { padding: 0 12px 16px; }
+.workspace-switch .segmented { display: flex; width: 100%; }
+.workspace-switch .segmented button { flex: 1; justify-content: center; height: 30px; gap: 8px; }
+.workspace-switch .segmented button svg { color: var(--ink-3); }
+.workspace-switch .segmented button.is-active svg { color: var(--accent); }
+
+.maintenance-section[hidden] { display: none; }
+
+.traffic-readout { min-height: 20px; color: var(--ink-2); font-size: var(--text-xs); }
+/* 用量与流量共用曲线：SVG 按容器拉伸（线宽不缩放），数据点与刻度按同一坐标定位。 */
+.usage-curve { display: grid; gap: 8px; }
+.usage-curve-body { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }
+.usage-curve-axis { display: flex; flex-direction: column; justify-content: space-between; margin: -8px 0; color: var(--ink-3); font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
+.usage-curve-plot { position: relative; height: 180px; border-radius: var(--radius-xs); cursor: crosshair; touch-action: pan-y; }
+.usage-curve-plot:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.usage-curve-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.usage-curve-grid { stroke: var(--line-soft); stroke-width: 1; }
+.usage-curve-area { fill: color-mix(in srgb, currentColor 14%, transparent); }
+.usage-curve-line { fill: none; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.usage-curve-guide { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 3; }
+.usage-curve-dot { position: absolute; width: 10px; height: 10px; border: 2px solid var(--surface); border-radius: 50%; background: currentColor; box-shadow: 0 0 0 1px currentColor; transform: translate(-50%, -50%); pointer-events: none; }
+.usage-curve-ticks { position: relative; height: 16px; margin-left: 64px; color: var(--ink-3); font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
+.usage-curve-ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.usage-curve-ticks span:first-child { transform: none; }
+.usage-curve-ticks span:last-child { transform: translateX(-100%); }
+.usage-curve-ticks span:only-child { transform: translateX(-50%); }
+
+/* 离线任务复用文件列表的行、缩略图和表格滚动容器。 */
+.task-controls { display: grid; align-items: center; min-height: 44px; margin-bottom: 16px; }
+.task-controls > .task-toolbar, .task-controls > .task-selection { grid-area: 1 / 1; margin: 0; }
+.task-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.task-toolbar.is-selecting { visibility: hidden; }
+.task-toolbar .segmented { max-width: 100%; overflow-x: auto; }
+.task-toolbar-meta { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+/* 状态／类型与来源等多组分段筛选并排，窄屏时换行。 */
+.task-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.task-search .search-input { width: min(100%, 520px); }
+.task-footer { margin-top: 16px; }
+.download-glyph { display: grid; place-items: center; width: 38px; height: 42px; border-radius: var(--radius-sm); color: var(--ink-2); background: var(--surface-sunken); flex: none; }
+.download-glyph-video { color: var(--tile-video); background: var(--tile-video-bg); }
+.download-glyph-audio { color: var(--tile-audio); background: var(--tile-audio-bg); }
+.download-glyph-image { color: var(--tile-image); background: var(--tile-image-bg); }
+button.task-location { cursor: pointer; }
+button.task-location:hover { color: var(--accent); }
+button.task-location:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--radius-xs); }
+.task-surface { overflow-x: auto; }
+.task-table .data-head > .cell-actions { background: var(--surface-sunken); box-shadow: none; }
+/* 列：选择 | 文件（名称与来源） | 进度 | 保存到 | 状态 | 操作。数字用等宽数字，进度条与说明同宽，行高随说明变化但不超过两行。 */
+.task-surface > .task-table { --cols: 20px minmax(220px, 1.4fr) minmax(170px, .85fr) minmax(180px, 1.25fr) 92px 64px; min-width: 880px; }
+.task-table .data-row:not(.data-head) { min-height: 60px; padding-block: 8px; }
+/* 诊断弹窗（本机缓存与离线下载共用，见 user/diagnosis.tsx） */
+.diagnosis { display: grid; gap: 16px; }
+.diagnosis-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.diagnosis-metric { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--surface-sunken); min-width: 0; }
+.diagnosis-metric-label { color: var(--ink-3); font-size: var(--text-xs); }
+.diagnosis-metric-value { font-size: var(--text-lg); font-variant-numeric: tabular-nums; line-height: var(--leading-tight); overflow-wrap: anywhere; }
+.diagnosis-metric small { color: var(--ink-3); font-size: var(--text-xs); }
+.diagnosis-metric.is-warning { border-color: var(--warning); background: var(--warning-soft); }
+.diagnosis-metric.is-danger { border-color: var(--danger); background: var(--danger-soft); }
+.diagnosis-metric.is-success .diagnosis-metric-value { color: var(--success); }
+.diagnosis-verdict .notice-body { display: grid; gap: 2px; }
+.diagnosis-section { display: grid; gap: 8px; }
+.diagnosis-section > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.diagnosis-section h3 { margin: 0; font-size: var(--text-sm); font-weight: 600; }
+.diagnosis-section > header span { color: var(--ink-3); font-size: var(--text-xs); }
+.diagnosis-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; max-height: 360px; overflow-y: auto; }
+.diagnosis-row { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--surface); }
+.diagnosis-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.diagnosis-row-title { font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.diagnosis-row-bytes { margin-left: auto; color: var(--ink-2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.diagnosis-bar { position: relative; height: 6px; overflow: hidden; border-radius: var(--radius-pill); background: var(--line-soft); }
+.diagnosis-bar > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; transition: width var(--duration-base) ease-out; }
+.diagnosis-bar-received { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.diagnosis-bar-stored { background: var(--accent); }
+.diagnosis-bar.is-unknown .diagnosis-bar-received { opacity: .6; }
+.diagnosis-row-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--ink-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.diagnosis-row-error { margin: 0; color: var(--danger); font-size: var(--text-xs); }
+.diagnosis-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--ink-3); font-size: var(--text-xs); }
+.diagnosis-legend i { display: inline-block; width: 12px; height: 6px; margin-right: 4px; border-radius: var(--radius-pill); vertical-align: middle; }
+.diagnosis-legend .is-received { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.diagnosis-legend .is-stored { background: var(--accent); }
+.task-table .cell-name { gap: 12px; }
+.task-subline { overflow: hidden; color: var(--ink-3); text-overflow: ellipsis; white-space: nowrap; }
+/* 离线下载：来源过长时只截断来源，添加时间始终完整显示。 */
+.task-subline:has(.task-added) { display: flex; min-width: 0; }
+.task-subline:has(.task-added) > span:first-child { overflow: hidden; min-width: 0; text-overflow: ellipsis; }
+.task-added { flex: none; font-variant-numeric: tabular-nums; }
+.task-progress { display: grid; gap: 4px; min-width: 0; font-variant-numeric: tabular-nums; }
+.task-progress > small { overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.task-progress.is-interrupted > small { color: var(--warning); }
+.task-progress.is-done { gap: 1px; }
+.task-figure { color: var(--ink-2); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.task-progress-bar { display: flex; align-items: center; gap: 8px; min-height: 16px; }
+.task-progress-bar > .progress, .task-progress-bar > .task-unknown { flex: 1; min-width: 40px; }
+.task-percent { flex: none; min-width: 32px; color: var(--ink-2); font-size: var(--text-xs); text-align: right; }
+.task-unknown { position: relative; height: 4px; overflow: hidden; border-radius: var(--radius-xs); background: var(--line); }
+/* 总大小未知时不画虚构的百分比，下载中用一段往复移动的高光表示仍在进行。 */
+.task-unknown.is-running::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 30%; border-radius: inherit; background: var(--accent); animation: task-sweep 1.4s ease-in-out infinite alternate; }
+@keyframes task-sweep { from { transform: translateX(0); } to { transform: translateX(233%); } }
+@media (prefers-reduced-motion: reduce) { .task-unknown.is-running::after { animation: none; width: 100%; opacity: .35; } }
+.task-failure { display: flex; align-items: flex-start; gap: 8px; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--danger); font: inherit; font-size: var(--text-xs); line-height: var(--leading-normal); text-align: left; cursor: pointer; }
+.task-failure > svg { flex: none; margin-top: 2px; }
+.task-failure > span { display: -webkit-box; min-width: 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+.task-failure.is-expanded > span { display: block; }
+.task-failure:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: var(--radius-xs); }
+.task-state { display: flex; min-width: 0; }
+.task-table .name-stack { flex: 1; gap: 2px; }
+.task-name { font-weight: 500; }
+/* 保留筛选工具栏的响应式占位，勾选后表头复选框不移动。 */
+.task-selection { min-height: 44px; flex-wrap: nowrap; align-items: center; }
+.task-selection .toolbar-actions { width: auto; flex-wrap: nowrap; }
+.task-location { display: inline-flex; min-width: 0; max-width: 100%; align-items: flex-start; gap: 4px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; line-height: var(--leading-normal); text-align: left; }
+.task-location > svg { flex: none; margin-top: 4px; }
+/* 保存位置：目录名最多两行，上级路径一行省略；按任意字符折行，完整路径在悬停提示里。 */
+.task-location-text { display: grid; min-width: 0; gap: 1px; }
+.task-location-text > span { display: -webkit-box; overflow: hidden; color: var(--ink-2); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.task-location-text > small { overflow: hidden; color: var(--ink-3); font-size: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; }
+button.task-location:hover .task-location-text > span { color: var(--accent); }
+.task-pill { display: inline-flex; align-items: center; gap: 8px; font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.task-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.task-pill.is-active { color: var(--accent-ink); }
+.task-pill.is-failed { color: var(--danger); }
+.task-help { margin-top: 16px; color: var(--ink-3); font-size: var(--text-xs); line-height: var(--leading-loose); }
+.task-help summary { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+.task-help summary::-webkit-details-marker { display: none; }
+.task-help summary:hover { color: var(--ink-2); }
+.task-help[open] summary > svg:last-child { transform: rotate(180deg); }
+.task-help p { max-width: 80ch; margin: 8px 0 0; }
+.download-input { height: auto; min-height: 180px; padding: 12px; resize: vertical; line-height: var(--leading-loose); }
+.download-cookie-options > .form { margin-top: 12px; }
+.download-cookie-input { height: auto; min-height: 104px; padding: 8px 8px; resize: vertical; line-height: var(--leading-relaxed); }
+.download-cookie-file { height: 40px; padding: 8px 8px; line-height: 26px; }
+.download-cookie-file::file-selector-button { height: 26px; margin: 0 8px 0 0; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-sunken); font: inherit; line-height: 24px; color: inherit; vertical-align: middle; cursor: pointer; }
+/* 确认文件：顶部选择栏与底部保存位置固定，只有中间的文件列表滚动（文件多时不用滚到底找保存位置）。 */
+.download-dialog.is-review .modal-body { display: flex; flex: 1; flex-direction: column; min-height: 0; padding: 0; overflow: hidden; }
+.download-review { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.download-review-bar { display: flex; flex: none; align-items: center; gap: 12px; min-height: 48px; margin-top: 8px; padding: 8px 24px 8px 16px; border-bottom: 1px solid var(--line-soft); color: var(--ink-3); font-size: var(--text-sm); }
+.download-review-bar > .checkbox { flex: none; margin-left: 8px; }
+.download-review-count { flex: 1; min-width: 0; }
+.download-review-count strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.download-review-size { flex: none; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.download-candidates { flex: 1 1 auto; min-height: 96px; margin: 0; padding: 4px 8px; overflow-y: auto; overscroll-behavior: contain; }
+.download-candidate { display: grid; grid-template-columns: auto 40px minmax(0, 1fr) auto; align-items: start; gap: 12px; padding: 12px 16px 12px 8px; border-radius: var(--radius-md); transition: background-color var(--duration-fast); }
+.download-candidate + .download-candidate { box-shadow: 0 -1px 0 var(--line-soft); }
+.download-candidate:hover { background: var(--surface-hover); }
+.download-candidate:not(.is-selected) :is(.download-candidate-tile, .download-candidate-copy, .download-candidate-size) { opacity: .55; }
+.download-candidate > .checkbox { flex: none; margin: 12px 0 0 8px; }
+.download-candidate-tile { position: relative; display: grid; width: 40px; height: 40px; place-items: center; border-radius: var(--radius-md); background: var(--surface-sunken); }
+.download-candidate-tile .file-tile { width: 40px; height: 40px; }
+.download-cover-button { position: relative; display: grid; width: 100%; height: 100%; place-items: center; padding: 0; overflow: hidden; border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
+.download-cover-button > img { width: 100%; height: 100%; object-fit: cover; }
+.download-cover-button:disabled { cursor: default; }
+.download-cover-button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.download-cover-hint { position: absolute; inset: 0; display: grid; place-items: center; background: var(--shade-64); color: var(--on-dark); opacity: 0; transition: opacity var(--duration-fast); }
+.download-cover-button:hover:not(:disabled) .download-cover-hint, .download-cover-button:focus-visible .download-cover-hint { opacity: 1; }
+.download-candidate-tile.has-image { box-shadow: 0 0 0 1px var(--line); }
+.download-cover-remove { position: absolute; top: -4px; right: -4px; display: grid; width: 16px; height: 16px; place-items: center; padding: 0; border: 0; border-radius: 50%; background: var(--ink-2); color: var(--surface); cursor: pointer; opacity: 0; transition: opacity var(--duration-fast); }
+.download-candidate:hover .download-cover-remove, .download-cover-remove:focus-visible { opacity: 1; }
+.download-candidate-copy { display: grid; gap: 4px; min-width: 0; }
+.download-candidate-name { overflow: hidden; padding-top: 8px; font-size: var(--text-sm); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+/* 文件名输入框平时像普通文字，悬停与聚焦时才显出边框。 */
+.download-name.input { height: 32px; margin-left: -8px; padding: 0 8px; border-color: transparent; background: transparent; box-shadow: none; font-size: var(--text-sm); font-weight: 600; text-overflow: ellipsis; }
+.download-name.input:hover { border-color: var(--line); background: var(--surface); }
+.download-name.input:focus { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft); }
+.download-candidate-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; color: var(--ink-3); font-size: var(--text-xs); }
+.download-candidate-meta > span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.download-candidate-meta > span + span::before { content: ""; width: 3px; height: 3px; margin-right: 8px; border-radius: 50%; background: var(--line-strong); }
+.download-candidate-meta > span.is-cover { color: var(--accent-ink); }
+.download-candidate-notes { display: grid; gap: 4px; color: var(--ink-3); font-size: var(--text-xs); }
+.download-candidate-notes p { margin: 0; line-height: var(--leading-relaxed); overflow-wrap: anywhere; }
+.download-candidate-notes summary { width: fit-content; color: var(--ink-2); cursor: pointer; }
+.download-candidate-notes details p { margin-top: 4px; }
+.download-candidate-size { padding-top: 8px; color: var(--ink-2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.download-review-foot { display: grid; flex: none; gap: 8px; max-height: 55%; padding: 16px 24px; overflow-y: auto; border-top: 1px solid var(--line-soft); background: var(--surface); overscroll-behavior: contain; }
+.download-review-foot > p { margin: 0; font-size: var(--text-xs); }
+@media (max-width: 640px) {
+  .download-review-bar { padding: 8px 16px 8px 8px; }
+  .download-candidates { padding: 4px; }
+  .download-candidate { grid-template-columns: auto 40px minmax(0, 1fr); gap: 8px 12px; padding: 12px 8px; }
+  .download-candidate-size { grid-column: 3; padding-top: 0; }
+  .download-review-foot { padding: 12px 16px; }
+  .download-cover-remove { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) { .download-candidate, .download-cover-hint, .download-cover-remove { transition: none; } }
+/* 窄屏保留各列并在容器内横向滚动，行尾操作沿用表格的固定列。 */
+@media (max-width: 860px) {
+  .task-controls { min-height: 48px; }
+  .task-surface > .task-table { --cols: 20px minmax(200px, 1.4fr) minmax(150px, .85fr) minmax(160px, 1.25fr) 92px 96px; }
+}
+@media (max-width: 640px) {
+  .task-selection { padding-left: 8px; }
+  .task-selection .toolbar-actions { gap: 4px; }
+  .task-selection .selection-count { white-space: nowrap; }
+  /* 四个按钮同时出现时宽度不够，窄屏只写「N 项」。 */
+  .task-selection-prefix { display: none; }
+  /* 手机上不横向滚动：每个任务排成三行——名称与操作、进度、保存位置与状态。 */
+  .task-surface > .task-table { min-width: 0; }
+  .task-table .data-head { grid-template-columns: 20px minmax(0, 1fr); }
+  .task-table .data-head > :nth-child(n + 3) { display: none; }
+  .task-table .task-item { grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-areas: "check name actions" ". progress progress" ". place state"; gap: 8px 12px; padding: 12px 16px; }
+  .task-item > :nth-child(1) { grid-area: check; }
+  .task-item > :nth-child(2) { grid-area: name; }
+  .task-item > :nth-child(3) { grid-area: progress; }
+  .task-item > :nth-child(4) { grid-area: place; align-self: center; }
+  .task-item > :nth-child(5) { grid-area: state; justify-content: flex-end; }
+  .task-table .task-item > .cell-actions { grid-area: actions; position: static; box-shadow: none; background: transparent; }
+}
+@media (max-width: 860px) {
+}
+

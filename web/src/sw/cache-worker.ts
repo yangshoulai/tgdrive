@@ -1014,7 +1014,7 @@ async function startManual(owner: string, id: string, url: string, group?: strin
       if (!Number.isSafeInteger(size) || size < 0) throw new CacheFatal("服务器未提供有效的文件大小");
       const preferences = await currentSettings();
       const budget = tierBudget(preferences, route.tier), cap = budget;
-      if (size > budget) throw new CacheFatal(`文件（${sizeText(size)}）超过本机缓存上限 ${sizeText(budget)}，请先在「设置 → 本机缓存」中提高上限`);
+      if (size > budget) throw new CacheFatal(`文件（${sizeText(size)}）超过本机缓存上限 ${sizeText(budget)}，请先在「设置 → 缓存设置」中提高上限`);
       // 手动缓存优先于自动缓存：自动缓存的文件随时可以让出空间（enforce 按最久未使用先移除），
       // 已手动缓存的文件不会被挤掉；它们加上这个文件仍超出上限时，交给用户自己清理。
       const pinned = (await listEntries(value.context.ns, route.tier)).filter(item => item.manual && item.key !== value.key).reduce((sum, item) => sum + item.bytes, 0);

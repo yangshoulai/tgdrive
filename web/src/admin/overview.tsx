@@ -5,7 +5,7 @@ import { CurveChart } from "../curve-chart";
 
 import { Button, EmptyState, Icon, PageHeader, Panel, SkeletonRows, formatBytes, formatCount, formatNumber, useDocumentTitle, type IconName } from "../ui";
 
-import type { AdminModule } from "../admin";
+import type { AdminModule } from "../admin-modules";
 
 /* ---------- 概览 ---------- */
 

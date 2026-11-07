@@ -40,6 +40,7 @@ const ICONS = {
   lock: "M7 11V8a5 5 0 0 1 10 0v3M6 11h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1Z",
   unlock: "M7 11V8a5 5 0 0 1 9.6-2M6 11h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1Z",
   check: "m5 12.5 4.5 4.5L19 7.5",
+  filter: "M4 6.5h16M7 12h10m-6.5 5.5h3",
   checkCircle: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm-4-9 2.8 2.8L16 9.6",
   clock: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-14v5l3 2",
   alert: "M12 3.5 2.5 20h19zM12 10v4.5m0 2.5h.01",
@@ -1126,8 +1127,26 @@ function dismissToast(id: number) {
   toasts = toasts.filter(item => item.id !== id);
   listeners.forEach(listener => listener(toasts));
 }
+/** 同一名称的状态提示原地更新（如连续调速、调整歌词时间），不叠出多条。 */
+const statusToasts = new Map<string, { id: number; timer: number }>();
+function statusToast(key: string, message: string) {
+  const current = statusToasts.get(key);
+  if (current && toasts.some(item => item.id === current.id)) {
+    window.clearTimeout(current.timer);
+    toasts = toasts.map(item => item.id === current.id ? { ...item, message } : item);
+    listeners.forEach(listener => listener(toasts));
+    current.timer = window.setTimeout(() => { dismissToast(current.id); statusToasts.delete(key); }, 2400);
+    return current.id;
+  }
+  const id = ++toastId;
+  toasts = [...toasts.slice(-3), { id, tone: "info", message }];
+  listeners.forEach(listener => listener(toasts));
+  statusToasts.set(key, { id, timer: window.setTimeout(() => { dismissToast(id); statusToasts.delete(key); }, 2400) });
+  return id;
+}
 export const toast = {
   dismiss: dismissToast,
+  status: statusToast,
   success: (message: string, action?: ToastAction) => pushToast("success", message, action),
   error: (message: string) => pushToast("error", message),
   info: (message: string, action?: ToastAction) => pushToast("info", message, action),

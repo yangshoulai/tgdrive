@@ -140,6 +140,8 @@ class TgDriveASGI(StaticFiles):
             # 私密对话（docs/assistant-design.md §24）：授权由私密空间管理，撤销时清除对话。
             assistant.private_space = self.private_space
             assistant.media = assistant.executor.media = self.media
+            # 助手的解压与压缩（propose_extract／propose_compress）沿用网页的任务队列与并发限制。
+            assistant.executor.archives = self.archives
             self.private_space.assistant_busy = assistant.private_busy
             self.private_space.listeners.append(assistant.on_private_forget)
 
@@ -259,7 +261,8 @@ class TgDriveASGI(StaticFiles):
             if self.static_dir is not None and method in ("GET", "HEAD") and not path.startswith("/api/"):
                 https = scope.get("scheme") == "https"
                 await self._static(tracked_send, path, method, https=https,
-                                   origin=f"{scope.get('scheme', 'http')}://{headers.get('host', 'localhost')}")
+                                   origin=f"{scope.get('scheme', 'http')}://{headers.get('host', 'localhost')}",
+                                   accept_encoding=headers.get("accept-encoding", ""))
                 return
             if path in {"/api/admin/v1/objects", "/api/admin/v1/content", "/api/admin/v1/thumbnail",
                         "/api/admin/v1/preview-assets", "/api/admin/v1/preview-list", "/api/admin/v1/objects/public"}:
@@ -1237,6 +1240,9 @@ class TgDriveASGI(StaticFiles):
             if upload_route and method == "DELETE" and not upload_route.group(2):
                 await user.abort_upload(token, csrf, upload_route.group(1))
                 return 204, None, {}
+            if method == "GET" and route == "/library":
+                return 200, await user.library(token, query.get("view", [""])[0], query.get("cursor", [""])[0],
+                                               int(query.get("limit", ["100"])[0])), {}
             if method == "GET" and route == "/search":
                 return 200, await user.search(token, query.get("q", [""])[0],
                     query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0]),

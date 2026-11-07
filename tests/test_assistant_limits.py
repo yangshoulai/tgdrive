@@ -54,7 +54,7 @@ class AssistantLimitsTests(AssistantCase):
             status, _ = await self.req("POST", "/api/admin/v1/assistant/settings", {"user_daily_tokens": 10_000_000_001}, admin)
             self.assertEqual(status, 400)
             _, limits = await self.req("GET", "/api/admin/v1/assistant/limits", headers=admin)
-            self.assertEqual(limits["values"]["run_tokens"], 4_000_000)
+            self.assertEqual(limits["values"]["run_tokens"], 2_000_000)
             self.assertNotIn("max_messages", limits["values"])
             for value in (0, 100_000_000, 400_000):
                 status, limits = await self.req("POST", "/api/admin/v1/assistant/limits", {"run_tokens": value, "max_messages": 20}, admin)
@@ -132,3 +132,11 @@ class AssistantBulkCapacityTests(unittest.TestCase):
             db.execute("UPDATE objects SET etag='changed' WHERE key='source/54999.txt'")
             self.assertEqual(executor._check_source(1, "", frozen, "source/"), "源文件夹内容已变化，请重新生成操作",
                              "旧复核边界之后的变化仍须检出")
+
+
+class BillableTests(unittest.TestCase):
+    def test_cached_input_counts_one_tenth(self):
+        from tgdrive.assistant.config import billable
+        self.assertEqual(billable(100_000, 90_000, 2_000), 10_000 + 9_000 + 2_000)
+        self.assertEqual(billable(1_000, 5_000, 0), 100, "缓存量不会超过输入量")
+        self.assertEqual(billable(1_000, 0, 10), 1_010)

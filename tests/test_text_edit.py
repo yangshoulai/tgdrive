@@ -75,6 +75,30 @@ class TextEditSaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(json.loads(body)["etag"], self.objects.head_object(self.scope, "code.py").etag, "冲突后可取得最新版本")
 
+    async def test_web_save_keeps_previous_version_in_trash(self):
+        client = Client(self.app)
+        headers = await client.login("user", "alice@example.com", "alice password")
+        first = await self.objects.put_object(self.scope, "draft.md", b"# old", 5, "text/markdown")
+        url = "/api/user/v1/files?path=" + quote("draft.md")
+        status, _, body = await client.request("PUT", url, b"# new", {**headers, "if-match": f'"{first.etag}"'})
+        self.assertEqual(status, 200, body)
+        trash = self.objects.list_trash(self.alice.bucket_id)
+        self.assertEqual([(entry["path"], entry["size"]) for entry in trash], [("draft.md", 5)], "旧版本进入回收站")
+        # 10 分钟内连续保存只保留编辑前的版本。
+        current = self.objects.head_object(self.scope, "draft.md").etag
+        status, _, _ = await client.request("PUT", url, b"# newer", {**headers, "if-match": f'"{current}"'})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.objects.list_trash(self.alice.bucket_id)), 1)
+        await self.objects.put_object(self.scope, "draft.md", b"# new", 5, "text/markdown")
+        # 冲突时不留下多余的旧版本。
+        status, _, _ = await client.request("PUT", url, b"# other", {**headers, "if-match": '"' + '0' * 32 + '"'})
+        self.assertEqual(status, 409)
+        self.assertEqual(len(self.objects.list_trash(self.alice.bucket_id)), 1)
+        # 还原后与新版本并存。
+        self.objects.restore(self.scope, [trash[0]["id"]])
+        self.assertEqual(await self.read("draft.md"), b"# new")
+        self.assertEqual(await self.read("draft (1).md"), b"# old")
+
 
 if __name__ == "__main__":
     unittest.main()

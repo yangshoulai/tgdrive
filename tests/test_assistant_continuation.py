@@ -85,9 +85,13 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不是用户发言", history[-1]["content"])
         self.assertEqual(providers._openai_messages("规则", history)[-1]["role"], "system")
         self.assertEqual(responses.input_items(history)[-1]["role"], "system")
-        anthropic, extra_system = providers._anthropic_messages(history)
-        self.assertEqual(anthropic, [{"role": "user", "content": [{"type": "text", "text": "继续，完成当前任务的全部必要工作"}]}])
-        self.assertIn("不是用户发言", extra_system)
+        anthropic = providers._anthropic_messages(history)
+        self.assertEqual(len(anthropic), 1)
+        first, status = anthropic[0]["content"]
+        self.assertEqual(first, {"type": "text", "text": "继续，完成当前任务的全部必要工作", "cache_control": providers.CACHE},
+                         "缓存断点落在每步都变的状态块之前")
+        self.assertIn("不是用户发言", status["text"])
+        self.assertNotIn("cache_control", status)
 
     async def test_control_event_is_deferred_until_tool_result_and_not_a_user_request(self):
         service, state = self.fixture([])

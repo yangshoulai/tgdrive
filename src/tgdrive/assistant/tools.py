@@ -372,6 +372,9 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "propose_save_attachment": ("never", "附件只能另存为普通文件"),
     "propose_media_assets": ("allow", "查询条件（文件名与标签）会发给已启用的媒体信息提供者"),
     "propose_write_text": ("allow", "只新建或修改私密空间内的文本文件"),
+    "propose_copy": ("allow", "源与目标都必须在私密空间内"),
+    "propose_extract": ("na", "私密空间的压缩包请在页面上用「解压…」"),
+    "propose_compress": ("na", "私密空间的文件请在页面上压缩"),
 }
 
 

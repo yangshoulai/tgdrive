@@ -1,0 +1,286 @@
+/* tgdrive 设计系统 · 规范见 DESIGN.md · 本目录按文件名顺序拼接成一个样式表（build-apps.mjs），这里是令牌
+ * 断点只用这几档：宽度 480 / 640 / 760 / 860（侧栏收起）/ 960 / 1100，高度 640 / 720；管理端模型工具栏按内容宽度另用 1250。
+ * 所有颜色、间距、圆角都来自 :root 令牌；组件只引用令牌，不写裸色值。
+ * 深色模式只覆盖令牌，不覆盖组件。 */
+
+:root {
+  /* 中性色：白色工作区 + 浅灰侧栏，靠细线而不是阴影分层 */
+  --canvas: #ffffff;
+  --surface: #ffffff;
+  /* 图表分类色（固定顺序，已校验色觉差异与对比度）：只用于统计图，文件图标仍用中性色。 */
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4; --series-6: #6250d6; --series-other: #a3a3ad;
+  --surface-sunken: #f7f7f8;
+  --surface-hover: #f1f1f3;
+  --line: #e4e4e8;
+  --line-soft: #ededf0;
+  --line-strong: #d1d1d7;
+  --ink: #17171c;
+  --ink-2: #4a4a54;
+  --ink-3: #6b6b76;
+  --ink-inverse: #ffffff;
+  /* 所有预览（文本、代码、PDF、图片、视频、音乐）共用同一个中性深色画布。 */
+  --media-canvas: #111216;
+  --image-canvas: var(--media-canvas);
+  --media-ink: #ffffff;
+  --media-overlay: rgba(16, 19, 32, .8);
+
+  /* 主按钮用墨色；主色（青金蓝）只用于选中、焦点、链接与进度 */
+  --primary: #17171c;
+  --primary-hover: #33333b;
+  --on-primary: #ffffff;
+  --accent: #3550d4;
+  --accent-hover: #2b45bd;
+  --accent-soft: #eef0fd;
+  --accent-ink: #2a40b0;
+  --selection: rgba(53, 80, 212, .2);
+
+  /* 公开使用琥珀色；风险提示另用橙色，避免混淆。 */
+  --public: #c4760b;
+  --public-soft: #fdf0da;
+  --public-ink: #8f5506;
+
+  --success: #187648;
+  --success-soft: #e1f4ea;
+  --warning: #a65416;
+  --warning-soft: #fff0e4;
+  --danger: #b63834;
+  --danger-hover: #a93631;
+  --danger-soft: #fbe8e6;
+
+  --admin: #7048b8;
+  --admin-soft: #efe9fb;
+  --chart-out: #257e8b;
+
+  /* 文字落在主色/危险色背景上 */
+  --on-accent: #ffffff;
+
+  /* 文件类型记号：统一用中性单色，类型靠记号形状与格式标签区分，不靠颜色（避免列表花哨）。
+   * 各类型令牌保留给预览图标、下载任务等处引用，但取同一组值。 */
+  --glyph-mark: #5f5f6b;
+  --glyph-mark-bg: #f1f1f4;
+  --tile-image: var(--glyph-mark);
+  --tile-image-bg: var(--glyph-mark-bg);
+  --tile-video: var(--glyph-mark);
+  --tile-video-bg: var(--glyph-mark-bg);
+  --tile-audio: var(--glyph-mark);
+  --tile-audio-bg: var(--glyph-mark-bg);
+  --tile-pdf: var(--glyph-mark);
+  --tile-pdf-bg: var(--glyph-mark-bg);
+  --tile-text: var(--glyph-mark);
+  --tile-text-bg: var(--glyph-mark-bg);
+  --tile-code: var(--glyph-mark);
+  --tile-code-bg: var(--glyph-mark-bg);
+  --tile-archive: var(--glyph-mark);
+  --tile-archive-bg: var(--glyph-mark-bg);
+
+  /* 代码高亮 */
+  --syntax-string: #2c7a4b;
+  --syntax-keyword: #7a3fb0;
+  --syntax-property: #0b6a8a;
+  --syntax-number: #b0581c;
+  --syntax-variable: #a33d6a;
+  --syntax-fn: #3c5fb8;
+
+
+  /* 标志：与网页图标一致的暗灰底座 + 三块白色瓦片（透明度递减）+ 公开色纸飞机，浅色与深色模式相同 */
+  --logo-bg: #0b0c13;
+  --logo-tile: #ffffff;
+  --logo-ring: transparent;
+  --logo-plane: #f0a22e;
+  --logo-fold: #c27a10;
+
+  /* 文件类型图标：纸面与文件夹 */
+  --glyph-paper: #ffffff;
+  --glyph-edge: #c4c4cc;
+  --folder-back: #7d90e6;
+  --folder-front: #a9b7f3;
+
+  /* 代码高亮：与文档站共用 */
+  --syntax-type: #96640a;
+  --syntax-tag: #b0364f;
+  --syntax-meta: #7a829c;
+
+  --focus: 0 0 0 3px rgba(53, 80, 212, .16);
+  --focus-ring: color-mix(in srgb, var(--accent) 60%, transparent);
+  --shadow-sm: 0 1px 2px rgba(16, 16, 24, .05);
+  --shadow-md: 0 8px 24px rgba(16, 16, 24, .08), 0 2px 6px rgba(16, 16, 24, .04);
+  --shadow-lg: 0 24px 64px rgba(16, 16, 24, .16), 0 4px 12px rgba(16, 16, 24, .06);
+  --shadow-tray: 0 16px 48px -12px rgba(26, 32, 64, .18), 0 4px 12px -4px rgba(26, 32, 64, .1);
+  --tray-highlight: rgba(255, 255, 255, .9);
+  --shadow-media: 0 30px 80px -20px rgba(0, 0, 0, .55);
+
+  /* 深色界面元素（媒体预览、播放器、登录页插画、深色菜单）在浅色与深色模式下都保持深色：
+   * 前景与叠加只用这一组白色透明度阶梯（on-dark）与黑色阴影阶梯（shade），不写裸的 rgba。 */
+  --on-dark: #ffffff;
+  --black: #000000;
+  --on-dark-90: rgba(255, 255, 255, .9);
+  --on-dark-72: rgba(255, 255, 255, .72);
+  --on-dark-56: rgba(255, 255, 255, .56);
+  --on-dark-40: rgba(255, 255, 255, .4);
+  --on-dark-24: rgba(255, 255, 255, .24);
+  --on-dark-16: rgba(255, 255, 255, .16);
+  --on-dark-12: rgba(255, 255, 255, .12);
+  --on-dark-8: rgba(255, 255, 255, .08);
+  --on-dark-4: rgba(255, 255, 255, .04);
+  --on-dark-danger: #ffaba2;
+  --shade-8: rgba(0, 0, 0, .08);
+  --shade-16: rgba(0, 0, 0, .16);
+  --shade-32: rgba(0, 0, 0, .32);
+  --shade-48: rgba(0, 0, 0, .48);
+  --shade-64: rgba(0, 0, 0, .64);
+  --shade-80: rgba(0, 0, 0, .8);
+  /* 深色画布上的投影（播放器控件、小窗、深色浮层），浅色与深色模式相同。 */
+  --shadow-dark-sm: 0 2px 8px var(--shade-32);
+  --shadow-dark-md: 0 10px 32px var(--shade-32);
+  --shadow-dark-lg: 0 24px 60px -12px var(--shade-64);
+  /* 深色表面：音乐播放器、唱片、深色菜单与登录页插画共用 */
+  --dark-surface: #111216;
+  --dark-surface-raised: #1a1a20;
+  --dark-surface-deep: #0b0b10;
+  /* 预览中的纸面（PDF 页、文本纸张）始终为浅色 */
+  --paper-ink-3: #6b6f80;
+  --radius-pill: 999px;
+  --field-width: 560px;
+  --field-width-wide: 720px;
+
+  --radius-2xs: 2px; /* 细条装饰（进度刻度、当前项标记、光标）专用 */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+
+  /* 窄屏浮层共用外侧留白，横屏时同时避开设备安全区域。 */
+  --floating-gutter: 16px;
+  --floating-top: max(var(--floating-gutter), env(safe-area-inset-top));
+  --floating-right: max(var(--floating-gutter), env(safe-area-inset-right));
+  --floating-bottom: max(var(--floating-gutter), env(safe-area-inset-bottom));
+  --floating-left: max(var(--floating-gutter), env(safe-area-inset-left));
+
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  /* 品牌标语用系统自带的宋体，营造书卷气；不加载外部字体。 */
+  --font-serif: "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", "SimSun", serif;
+
+  /* 字号阶梯：界面只用这几档，不写半像素或零散字号（文档站正文另有阅读字号）。 */
+  --text-micro: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 22px;
+  --text-display: 28px;
+  /* 长文排版（文档站、Markdown 预览）专用：正文 15px、导语 17px、文档标题 32px。界面控件不要使用。 */
+  --text-reading: 15px;
+  --text-lead: 17px;
+  --text-hero: 32px;
+
+  /* 行高：界面文字只用这几档（px 行高仅用于与固定高度的图标、按钮对齐，1 用于单行图标）。 */
+  --leading-display: 1.2; /* 大标题与指标数字 */
+  --leading-tight: 1.3;
+  --leading-snug: 1.45;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.6;
+  --leading-loose: 1.75;
+  /* 动效：悬停与颜色变化用 fast，展开、抽屉与浮层用 base，较大的面板与入场用 slow；统一使用 ease-out 曲线。 */
+  --duration-fast: .12s;
+  --duration-base: .2s;
+  --duration-slow: .3s;
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  /* 遮罩：弹窗、手机抽屉与文档目录共用。 */
+  --scrim: rgba(12, 12, 16, .42);
+
+  /* 层级：页面级浮层只用这一组令牌（数值越大越靠上）；组件内部的局部叠放（0–9）可以直接写数字。 */
+  --z-sticky: 20;
+  --z-overlay-scrim: 25;
+  --z-overlay-nav: 30;
+  --z-float: 44;
+  --z-launcher: 45;
+  --z-drawer-scrim: 49;
+  --z-drawer: 50;
+  --z-minimized: 55;
+  --z-modal: 60;
+  --z-sidebar-scrim: 65;
+  --z-sidebar: 70;
+  --z-menu: 80;
+  --z-toast: 90;
+  --z-skip-link: 100;
+
+  --sidebar-width: 232px;
+  --content-width: 1200px;
+
+  color-scheme: light;
+  color: var(--ink);
+  background: var(--canvas);
+  font-family: var(--font);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 深色主题：data-theme 由 theme.ts（及页面加载前的 theme-*.js）按用户偏好或系统外观设置。 */
+:root[data-theme="dark"] {
+  --canvas: #0e0e11;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-6: #9085e9; --series-other: #5c5c66;
+  --surface: #0e0e11;
+  --surface-sunken: #141418;
+  --surface-hover: #1c1c21;
+  --line: #26262d;
+  --line-soft: #1e1e24;
+  --line-strong: #3a3a43;
+  --ink: #ededf0;
+  --ink-2: #b4b4bd;
+  --ink-3: #8e8e99;
+  --ink-inverse: #0e0e11;
+  --primary: #ededf0;
+  --primary-hover: #ffffff;
+  --on-primary: #0e0e11;
+  --accent: #8b9cff;
+  --accent-hover: #a3b1ff;
+  --accent-soft: rgba(139, 156, 255, .13);
+  --accent-ink: #b0bcff;
+  --selection: rgba(139, 156, 255, .32);
+  --public: #eca94c;
+  --public-soft: rgba(236, 169, 76, .14);
+  --public-ink: #f3c179;
+  --success: #4cc08a;
+  --success-soft: rgba(76, 192, 138, .14);
+  --warning: #eba76f;
+  --warning-soft: rgba(235, 167, 111, .14);
+  --danger: #e0645b;
+  --danger-hover: #ea7d75;
+  --danger-soft: rgba(224, 100, 91, .14);
+  --admin: #b79bf2;
+  --admin-soft: rgba(183, 155, 242, .16);
+  --chart-out: #77c8d4;
+  --syntax-string: #8fd19e;
+  --syntax-keyword: #c9a3f2;
+  --syntax-property: #7cc8e0;
+  --syntax-number: #f0b07a;
+  --syntax-variable: #ee9ac0;
+  --syntax-fn: #9db8f5;
+  /* 深色背景上给暗灰底座加一圈细描边，保证轮廓可见 */
+  --logo-ring: rgba(255, 255, 255, .16);
+  --glyph-mark: #a3a3ae;
+  --glyph-mark-bg: rgba(255, 255, 255, .06);
+  --glyph-paper: #1b1b21;
+  --glyph-edge: #4a4a55;
+  --folder-back: #4c5db8;
+  --folder-front: #6a7bd6;
+  --syntax-type: #e0b55c;
+  --syntax-tag: #f0828f;
+  --syntax-meta: #8a97a5;
+  --focus: 0 0 0 3px rgba(139, 156, 255, .2);
+  --focus-ring: color-mix(in srgb, var(--accent) 65%, transparent);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, .5), 0 0 0 1px rgba(255, 255, 255, .04);
+  --shadow-lg: 0 24px 64px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 255, 255, .05);
+  --shadow-tray: 0 20px 56px -12px rgba(0, 0, 0, .65), 0 4px 16px rgba(0, 0, 0, .3);
+  --tray-highlight: rgba(255, 255, 255, .08);
+  color-scheme: dark;
+}
+

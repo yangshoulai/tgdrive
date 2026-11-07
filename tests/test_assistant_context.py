@@ -1,9 +1,11 @@
 """文件助手上下文压缩加固（docs/assistant-design.md §23）。"""
 import json
 import unittest
+from unittest import mock
 
 from tests.test_assistant import AssistantCase, answer, call
 from tgdrive.assistant import providers
+from tgdrive.assistant.config import result_bytes
 from tgdrive.assistant.providers import ProviderError, Reply
 
 TEXT = "word " * 6000  # 约 3 万字符，估算约 1.5 万 token
@@ -51,9 +53,15 @@ class ContextTests(AssistantCase):
             self.assertIn("short text", json.dumps(tool["result"], ensure_ascii=False))
         self.run_async(scenario())
 
+    # 下面两个用例验证超大结果时的兜底，关闭按窗口收紧；窗口按当前约 2.4 万 token 的固定开销（系统提示与工具定义）设置：三个结果超过 85%。
+    @mock.patch("tgdrive.assistant.service.result_bytes", lambda setting, window, calls=1: setting)
     def test_single_run_shrinks_older_results_of_this_run(self):
+        async def no_compact(*args, **kwargs):
+            return False  # 只验证本轮兜底：模型摘要不可用时，较早的结果换成摘要行
+
         async def scenario():
-            user, conversation = await self.prepare(60000)
+            self.service._compact = no_compact
+            user, conversation = await self.prepare(78000)
             self.model.replies = [call("read_text_file", path="/文档/a.txt"), call("read_text_file", path="/文档/b.txt"),
                                   call("read_text_file", path="/文档/c.txt"), answer("三个文件都读完了")]
             status, data = await self.send(user, conversation, "依次读三个文件")
@@ -65,9 +73,28 @@ class ContextTests(AssistantCase):
             self.assertEqual(self.service.runs[data["run_id"]].stop_reason, "completed")
         self.run_async(scenario())
 
+    def test_result_bytes_follow_window_and_batch(self):
+        self.assertEqual(result_bytes(4 * 1024 * 1024, 1_000_000), 300_000, "1M 窗口：单个结果最多约占 15%")
+        self.assertEqual(result_bytes(4 * 1024 * 1024, 1_000_000, 8), 100_000, "并行 8 个：整批合计最多约占 40%")
+        self.assertEqual(result_bytes(65536, 1_000_000), 65536, "管理员设置更小时以设置为准")
+        self.assertEqual(result_bytes(4 * 1024 * 1024, None), 9600, "未知窗口按 32k 计算")
+        self.assertEqual(result_bytes(4 * 1024 * 1024, 1000, 8), 2048, "不低于设置的下限")
+
+    def test_tool_result_is_capped_by_model_window(self):
+        async def scenario():
+            user, conversation = await self.prepare(60000)
+            self.model.replies = [call("read_text_file", path="/文档/a.txt"), answer("读完了")]
+            status, data = await self.send(user, conversation, "读 a.txt")
+            self.assertEqual(status, 201, data)
+            content = self.tool_contents(self.model.calls[1])[0]
+            self.assertLessEqual(len(content.encode()), 18000 + 512, "60k 窗口下单个结果约 18 KB")
+            self.assertEqual(self.service.runs[data["run_id"]].stop_reason, "completed", "结果按窗口收紧后不会撑满上下文")
+        self.run_async(scenario())
+
+    @mock.patch("tgdrive.assistant.service.result_bytes", lambda setting, window, calls=1: setting)
     def test_context_full_stops_without_calling_channel(self):
         async def scenario():
-            user, conversation = await self.prepare(25000)
+            user, conversation = await self.prepare(32000)
             self.model.replies = [call("read_text_file", path="/文档/a.txt"), answer("不应该被调用")]
             status, data = await self.send(user, conversation, "读 a.txt")
             self.assertEqual(status, 201, data)

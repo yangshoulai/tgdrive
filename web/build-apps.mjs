@@ -3,7 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
-import { build } from 'esbuild';
+import zlib from 'node:zlib';
+import { build, transform } from 'esbuild';
 const root=path.dirname(fileURLToPath(import.meta.url));
 const previewAssets={};
 // 只给按需加载的引擎（文本与媒体预览、助手输入框）使用标准打包器，主应用沿用自写打包器。
@@ -65,8 +66,15 @@ const configs={
 for(const app of process.argv[2] ? [process.argv[2]] : ['user']) {
  const config=configs[app];
  if(!config) throw Error('未知应用');
- const modules={};
+ const modules={};const staticDeps={};const lazyEntries=[];
+ const resolveDep=(file,dep)=>{
+  let target=path.resolve(path.dirname(file),dep);
+  if(!path.extname(target)) target=['.tsx','.ts'].map(ext=>target+ext).find(fs.existsSync);
+  if(!target) throw Error(`找不到 ${dep}（${file}）`);
+  return target;
+ };
  // 用队列而不是递归遍历依赖：导入链很深时，递归叠加 TypeScript 自身的输出栈会超出调用栈上限。
+ // 动态 import() 被 TypeScript 转成 Promise.resolve().then(() => require(...))：改成 __lazy(...)，目标模块单独成分块按需加载。
  function visit(start) {
   const queue=[start];
   while(queue.length) {
@@ -74,26 +82,56 @@ for(const app of process.argv[2] ? [process.argv[2]] : ['user']) {
    const id=path.relative(root,file);
    if(id in modules) continue;
    let code=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX},fileName:file}).outputText;
+   code=code.replace(/Promise\.resolve\(\)\.then\(\(\) => require\("(\.[^"\n]+)"\)\)/g,(all,dep)=>{
+    const target=resolveDep(file,dep);queue.push(target);
+    const targetId=path.relative(root,target);if(!lazyEntries.includes(targetId)) lazyEntries.push(targetId);
+    return `__lazy(${JSON.stringify(targetId)})`;
+   });
+   staticDeps[id]=[];
    code=code.replace(/require\("([^"\n]+)"\)/g,(all,dep)=>{
     if(!dep.startsWith('.')) return all;
-    let target=path.resolve(path.dirname(file),dep);
-    if(!path.extname(target)) target=['.tsx','.ts'].map(ext=>target+ext).find(fs.existsSync);
-    queue.push(target);
-    return `require(${JSON.stringify(path.relative(root,target))})`;
+    const target=resolveDep(file,dep);queue.push(target);
+    const targetId=path.relative(root,target);staticDeps[id].push(targetId);
+    return `require(${JSON.stringify(targetId)})`;
    });
    modules[id]=code;
   }
   return path.relative(root,start);
  }
  const entry=visit(path.join(root,'src',config.entry+'.tsx'));
- const mountId='root';
- const sourceBundle=`(()=>{const React=window.React;const ReactDOM=window.ReactDOM;const cache={};const modules={${Object.entries(modules).map(([id,code])=>JSON.stringify(id)+':function(module,exports,require){'+code+'}').join(',')}};function require(id){if(id==='react')return window.React;if(id==='react-dom')return window.ReactDOM;if(id==='react/jsx-runtime')return {jsx:(t,p,k)=>React.createElement(t,{...p,key:k}),jsxs:(t,p,k)=>React.createElement(t,{...p,key:k}),Fragment:React.Fragment};if(cache[id])return cache[id].exports;const m={exports:{}};cache[id]=m;modules[id](m,m.exports,require);return m.exports;}const Entry=require(${JSON.stringify(entry)});const App=Entry.${config.exportName};ReactDOM.createRoot(document.getElementById(${JSON.stringify(mountId)})).render(React.createElement(App));})();`;
- const bundle=`window.tesseraPreviewAssets=${JSON.stringify(previewAssets)};`+sourceBundle;
- const css=fs.readFileSync(path.join(root,'src/styles.css'),'utf8');
- const hash=crypto.createHash('sha256').update(bundle+css).digest('hex').slice(0,12);
+ const closure=start=>{const seen=new Set();const queue=[start];while(queue.length){const id=queue.pop();if(seen.has(id))continue;seen.add(id);queue.push(...staticDeps[id]);}return seen;};
+ // 分块：入口静态依赖的模块进主包；只被一个按需入口用到的模块进该入口的分块；被多个分块共用的模块放回主包（只登记，用到时才执行）。
+ const main=closure(entry);const owner={};
+ for(const lazy of lazyEntries) if(!main.has(lazy)) for(const id of closure(lazy)) if(!main.has(id)) owner[id]=id in owner&&owner[id]!==lazy?null:lazy;
+ const chunkModules={};const mainModules={};
+ for(const [id,code] of Object.entries(modules)) {
+  const chunk=owner[id];
+  if(chunk) (chunkModules[chunk]??={})[id]=code; else mainModules[id]=code;
+ }
+ const moduleMap=entries=>'{'+Object.entries(entries).map(([id,code])=>JSON.stringify(id)+':function(module,exports,require,__lazy){'+code+'}').join(',')+'}';
+ const minify=async code=>(await transform(code,{loader:'js',minify:true,target:'es2022',legalComments:'none'})).code;
  const dist=path.join(root,'dist',config.outputDir);fs.mkdirSync(dist,{recursive:true});
- for(const old of fs.readdirSync(dist)) if(/^app-[0-9a-f]+\.(js|css)$/.test(old)) fs.unlinkSync(path.join(dist,old));
+ const chunkUrls={};
+ for(const [lazy,entries] of Object.entries(chunkModules)) {
+  const code=await minify(`window.__tesseraModules(${moduleMap(entries)});`);
+  const name=`chunk-${lazy.replace(/^src\//,'').replace(/\.tsx?$/,'').replace(/[^a-z0-9]+/gi,'-')}-${crypto.createHash('sha256').update(code).digest('hex').slice(0,12)}.js`;
+  // 与预览引擎一样保留旧分块：已打开的旧页面仍能按旧地址加载。
+  fs.writeFileSync(path.join(dist,name),code);chunkUrls[lazy]=`${config.assetPrefix}${name}`;
+ }
+ const mountId='root';
+ const runtime=`const chunks=${JSON.stringify(chunkUrls)};const loading={};window.__tesseraModules=defs=>{Object.assign(modules,defs)};`
+  +`function lazy(id){if(id in modules)return Promise.resolve().then(()=>require(id));const url=chunks[id];if(!url)return Promise.reject(Error("缺少按需加载的模块 "+id));`
+  +`loading[url]??=new Promise((resolve,reject)=>{const script=document.createElement("script");script.src=url;script.onload=resolve;script.onerror=()=>{delete loading[url];script.remove();reject(Error("页面组件加载失败，请检查网络后重试"))};document.head.appendChild(script)});`
+  +`return loading[url].then(()=>require(id));}`;
+ const sourceBundle=`(()=>{const React=window.React;const ReactDOM=window.ReactDOM;const cache={};const modules=${moduleMap(mainModules)};${runtime}function require(id){if(id==='react')return window.React;if(id==='react-dom')return window.ReactDOM;if(id==='react/jsx-runtime')return {jsx:(t,p,k)=>React.createElement(t,{...p,key:k}),jsxs:(t,p,k)=>React.createElement(t,{...p,key:k}),Fragment:React.Fragment};if(cache[id])return cache[id].exports;const m={exports:{}};cache[id]=m;modules[id](m,m.exports,require,lazy);return m.exports;}const Entry=require(${JSON.stringify(entry)});const App=Entry.${config.exportName};ReactDOM.createRoot(document.getElementById(${JSON.stringify(mountId)})).render(React.createElement(App));})();`;
+ const bundle=await minify(`window.tesseraPreviewAssets=${JSON.stringify(previewAssets)};`+sourceBundle);
+ // 样式按领域拆在 src/styles/ 下，按文件名顺序拼接成一个样式表（编号决定层叠顺序：令牌在最前，新增页面放在末尾）。
+ const stylesDir=path.join(root,'src/styles');
+ const css=fs.readdirSync(stylesDir).filter(name=>name.endsWith('.css')).sort().map(name=>fs.readFileSync(path.join(stylesDir,name),'utf8')).join('');
+ const hash=crypto.createHash('sha256').update(bundle+css).digest('hex').slice(0,12);
+ for(const old of fs.readdirSync(dist)) if(/^app-[0-9a-f]+\.(js|css)(\.br|\.gz)?$/.test(old)) fs.unlinkSync(path.join(dist,old));
  fs.writeFileSync(path.join(dist,`app-${hash}.js`),bundle);fs.writeFileSync(path.join(dist,`app-${hash}.css`),css);
+ console.log(`主包 ${Math.round(bundle.length/1024)} KB；分块：${Object.entries(chunkModules).map(([id,entries])=>`${id}（${Object.keys(entries).length} 个模块）`).join('，')||'无'}`);
  // 外观主题在首帧前应用（CSP 不允许内联脚本，所以单独成文件放在 head）；存储键与解析规则需和 src/theme.ts 一致。
  const themeInit=`(()=>{let p=null;try{p=localStorage.getItem("tessera-theme")}catch{}const d=p==="dark"||(p!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light"})();`;
  const themeHash=crypto.createHash('sha256').update(themeInit).digest('hex').slice(0,12);
@@ -113,5 +151,21 @@ for(const app of process.argv[2] ? [process.argv[2]] : ['user']) {
  const socialMeta=`<meta name="description" content="${description}"><meta property="og:type" content="website"><meta property="og:site_name" content="${title}"><meta property="og:title" content="${title} · ${tagline}"><meta property="og:description" content="${description}"><meta property="og:locale" content="zh_CN"><meta property="og:url" content="/"><meta property="og:image" content="${socialPath}"><meta property="og:image:type" content="image/png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="${title}：${tagline}"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${title} · ${tagline}"><meta name="twitter:description" content="${description}"><meta name="twitter:image" content="${socialPath}"><meta name="twitter:image:alt" content="${title}：${tagline}">`;
  const favicon='data:image/svg+xml,'+encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='#0b0c13'/><rect x='5' y='5' width='10' height='10' rx='2.4' fill='#fff'/><rect x='5' y='17' width='10' height='10' rx='2.4' fill='#fff' fill-opacity='.6'/><rect x='17' y='17' width='10' height='10' rx='2.4' fill='#fff' fill-opacity='.32'/><polygon points='18.2,6.2 25.8,6.2 25.8,13.8' fill='#f0a22e' stroke='#f0a22e' stroke-width='2.4' stroke-linejoin='round'/><path d='M25.1 6.9 22.2 9.8' stroke='#c27a10' stroke-width='1.1' stroke-linecap='round'/></svg>");
  fs.writeFileSync(path.join(dist,'index.html'),`<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>${socialMeta}<meta name="theme-color" content="#0b0c13"><link rel="icon" type="image/svg+xml" href="${favicon}"><script src="${prefix}theme-${themeHash}.js"></script><link rel="stylesheet" href="${prefix}app-${hash}.css"></head><body><div id="root"></div><script src="${prefix}react.js"></script><script src="${prefix}react-dom.js"></script><script src="${prefix}app-${hash}.js"></script></body></html>`);
- console.log(`${app}: ${dist} (${Object.keys(modules).join(', ')})`);
+ // 预压缩：服务端按 Accept-Encoding 直接返回 .br／.gz（static.py），不在请求时压缩。index.html 由服务端改写，不预压缩。
+ const compressible=/\.(js|mjs|css|wasm|json|svg|txt)$/;
+ (function compress(folder) {
+  for(const name of fs.readdirSync(folder)) {
+   const file=path.join(folder,name);const stat=fs.statSync(file);
+   if(stat.isDirectory()) { compress(file); continue; }
+   if(/\.(br|gz)$/.test(name)) { if(!fs.existsSync(file.slice(0,-3))) fs.unlinkSync(file); continue; }
+   if(!compressible.test(name)||stat.size<1024) continue;
+   // 文件名带内容哈希或位于版本目录（pdfjs/<版本>/ 等）的只压缩一次；其余（sw.js、react.js 等）按修改时间判断。
+   const fresh=suffix=>fs.existsSync(file+suffix)&&(/-[0-9a-f]{12}\./.test(name)||/[\\/]\d+\.\d+\.\d+[\\/]/.test(file)||fs.statSync(file+suffix).mtimeMs>=stat.mtimeMs);
+   if(fresh('.br')&&fresh('.gz')) continue;
+   const data=fs.readFileSync(file);
+   fs.writeFileSync(file+'.br',zlib.brotliCompressSync(data,{params:{[zlib.constants.BROTLI_PARAM_QUALITY]:11,[zlib.constants.BROTLI_PARAM_SIZE_HINT]:data.length}}));
+   fs.writeFileSync(file+'.gz',zlib.gzipSync(data,{level:9}));
+  }
+ })(dist);
+ console.log(`${app}: ${dist}（${Object.keys(modules).length} 个模块）`);
 }

@@ -38,7 +38,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   // 不自动重连：播放失败直接交给预览界面显示原因与重试，避免画面上反复出现“重新连接”。
   Artplayer.RECONNECT_TIME_MAX = 0;
   const player = new Artplayer({ container, url, poster: poster ?? "", lang: "zh-cn", autoplay: false, theme: "#ffffff",
-    setting: true, playbackRate: true, aspectRatio: true, fullscreen: true, fullscreenWeb: true, pip: true, miniProgressBar: true, fastForward: true,
+    setting: true, playbackRate: true, aspectRatio: true, subtitleOffset: true, fullscreen: true, fullscreenWeb: true, pip: true, miniProgressBar: true, fastForward: true,
     // 快捷键由预览窗口统一处理，避免全局监听重复跳转或影响最小化后的页面操作。
     hotkey: false, mutex: true, autoSize: false, moreVideoAttr: { preload: "metadata", playsInline: true } });
   const controls = [["playAndPause", "播放视频"], ["setting", "显示设置"], ["pip", "开启画中画"], ["fullscreenWeb", "网页全屏"], ["fullscreen", "全屏"]];
@@ -225,11 +225,30 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       rotation = next; applyRotation(); player.emit("resize");
     },
     adjustVolume: (delta: number) => { player.volume = Math.max(0, Math.min(1, player.video.volume + delta)); },
+    toggleMute: () => { player.muted = !player.muted; player.notice.show = player.muted ? "已静音" : "取消静音"; },
+    /** 调整播放速度（0.25×–3×），返回新速度；ArtPlayer 的设置菜单与这里共用同一个值。 */
+    adjustRate: (delta: number) => {
+      const rate = Math.round(Math.max(0.25, Math.min(3, player.playbackRate + delta)) * 100) / 100;
+      player.playbackRate = rate; player.notice.show = `播放速度 ${rate}×`;
+      return rate;
+    },
+    /** 字幕提前（负）或延后（正），设置菜单里的「字幕偏移」与这里共用同一个值；换片时归零。 */
+    shiftCaptions: (seconds: number) => {
+      const offset = Math.round(Math.max(-10, Math.min(10, player.subtitleOffset + seconds)) * 10) / 10;
+      player.subtitleOffset = offset;
+      player.notice.show = offset ? `字幕${offset > 0 ? "延后" : "提前"} ${Math.abs(offset)} 秒` : "字幕时间已还原";
+      return offset;
+    },
+    /** 暂停时逐帧前进或后退（按 30 帧／秒估算）。 */
+    step: (direction: 1 | -1) => {
+      if (!player.video.paused) player.pause();
+      seekBy(player.video, direction / 30); updateProgress();
+    },
     setSource: (nextUrl: string, _name: string, nextCover?: string, nextSize?: { width: number; height: number }) => {
       sourceVersion++;
       player.pause(); ready = false; notify("loading");
       container.style.removeProperty("--preview-video-ratio"); lastSize = null;
-      player.poster = nextCover ?? ""; player.url = nextUrl;
+      player.poster = nextCover ?? ""; player.url = nextUrl; player.subtitleOffset = 0;
       // 换源后立即重置原生媒体和控件，不能等新文件的 timeupdate 来清掉旧时间与缓冲条。
       player.video.load(); player.currentTime = 0;
       thumbnailState();

@@ -12,7 +12,7 @@ import { usePrivateAccess } from "./private-session";
 
 export type SettingsTab = "account" | "keys" | "cache";
 const SETTINGS_TABS: { value: SettingsTab; label: string; icon: "user" | "key" | "monitor" }[] = [{ value: "account", label: "账号", icon: "user" },
-  { value: "keys", label: "访问密钥", icon: "key" }, { value: "cache", label: "本机缓存", icon: "monitor" }];
+  { value: "keys", label: "访问密钥", icon: "key" }, { value: "cache", label: "缓存设置", icon: "monitor" }];
 
 /** 设置：从头像菜单进入，分「账号」「访问密钥」「本机缓存」三个标签页（地址 ?view=account&tab=keys|cache，旧地址 ?view=keys 仍可用）。 */
 export function UserSettingsPage({ session, onSessionChange, assistant = false, onOpenConversation, tab = "account", onTabChange, bucketName = null, keysAvailable = true }: {
@@ -22,7 +22,7 @@ export function UserSettingsPage({ session, onSessionChange, assistant = false, 
   tab?: SettingsTab; onTabChange?: (tab: SettingsTab) => void; bucketName?: string | null;
   /** 系统锁定或服务尚未解锁时不能管理访问密钥 */
   keysAvailable?: boolean }) {
-  useDocumentTitle(`${tab === "keys" ? "访问密钥" : tab === "cache" ? "本机缓存" : "设置"} · ${BRAND}`);
+  useDocumentTitle(`${tab === "keys" ? "访问密钥" : tab === "cache" ? "缓存设置" : "设置"} · ${BRAND}`);
   return <div className="account-page">
     <PageHeader title="设置" description={tab === "keys" ? "让同步工具（如 rclone、AWS CLI）或你自己的脚本访问你的文件。密钥只能访问你自己的文件，随时可以停用。"
       : tab === "cache" ? "看过的图片、音乐、视频片段和封面加密保存在这台设备的浏览器里，再次打开时不必重新下载。"

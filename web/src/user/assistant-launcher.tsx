@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { AssistantMark, Icon, shortcutLabel } from "../ui";
-import { type AssistantDockStatus } from "./assistant";
+import { type AssistantDockStatus } from "./assistant-hooks";
 
 const badgeText = (count: number) => count > 99 ? "99+" : count.toLocaleString("zh-CN");
 

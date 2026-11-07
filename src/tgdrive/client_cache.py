@@ -39,7 +39,7 @@ class CacheTask:
     paths: tuple[str, ...]
 
 
-# 本机缓存是每台设备上用户自己的选择：是否缓存、是否缓存私密文件、占用多少空间都在「设置 → 本机缓存」中设置，
+# 本机缓存是每台设备上用户自己的选择：是否缓存、是否缓存私密文件、占用多少空间都在「设置 → 缓存设置」中设置，
 # 服务端不再有管理员策略。接口仍返回固定的 policy 字段，兼容已经安装的旧版 Service Worker。
 POLICY = {"enabled": True, "private_enabled": True}
 

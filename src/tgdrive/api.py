@@ -781,6 +781,53 @@ class UserApi:
         return {"objects": self._objects_json([self.objects._object(row) for row in rows[:limit]]), "common_prefixes": [],
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
+    LIBRARY_VIEWS = ("recent", "photos", "music")
+
+    async def library(self, token: str, view: str, cursor: str = "", limit: int = 100) -> dict[str, object]:
+        """跨文件夹浏览（普通文件，不含私密空间与系统区）：recent 按修改时间倒序的全部文件，photos 按拍摄时间
+        （EXIF，没有时用修改时间）倒序的图片与视频，music 按路径排列的全部音频（网页按专辑分组）。键集分页，游标是上一页最后一项。"""
+        if view not in self.LIBRARY_VIEWS:
+            raise ValueError("浏览方式不正确")
+        session = self._session(token)
+        account = self.accounts.account_for_session(session)
+        scope = self._scope(token)
+        limit = max(1, min(limit, 500))
+        base, end = scope.prefix, scope.prefix + self.objects._PREFIX_END
+        common = "o.bucket_id=? AND o.key>=? AND o.key<? AND substr(o.key,-1)!='/' AND substr(o.key,1,9)!='.tgdrive/'"
+        args: list[object] = [account.bucket_id, base, end]
+        if view == "music":
+            condition, kind_args = kind_clause("audio")
+            order, sort = "o.key", "o.key"
+            after = ("AND o.key>?", [cursor]) if cursor else ("", [])
+        else:
+            condition, kind_args = kind_clause("image,video") if view == "photos" else ("1", [])
+            sort = "COALESCE(b.taken_at, o.modified_at)" if view == "photos" else "o.modified_at"
+            order = f"{sort} DESC, o.key"
+            after = ("", [])
+            if cursor:
+                stamp, _, key = cursor.partition("\n")
+                try:
+                    stamp_value = float(stamp)
+                except ValueError as exc:
+                    raise ValueError("游标不正确") from exc
+                after = (f"AND ({sort}<? OR ({sort}=? AND o.key>?))", [stamp_value, stamp_value, key])
+        # kind_clause 只引用 objects 独有的 key、content_type 列，与 blobs 连接后不需要加表名。
+
+        def read_page():
+            return self.objects.metadata.db.execute(
+                f"SELECT o.*, b.taken_at AS taken_at, {sort} AS sort_value FROM objects o LEFT JOIN blobs b ON b.uuid=o.blob_uuid "
+                f"WHERE {common} AND {condition} {after[0]} ORDER BY {order} LIMIT ?",
+                (*args, *kind_args, *after[1], limit + 1)).fetchall()
+        rows = await self.objects.metadata.run_in_thread(read_page)
+        page = rows[:limit]
+        objects = self._objects_json([self.objects._object(row) for row in page])
+        for value, row in zip(objects, page):
+            if row["taken_at"] is not None:
+                value["taken_at"] = row["taken_at"]
+        last = page[-1] if len(rows) > limit else None
+        next_cursor = None if last is None else last["key"] if view == "music" else f"{last['sort_value']!r}\n{last['key']}"
+        return {"objects": objects, "next_cursor": next_cursor}
+
     async def folder(self, token: str, csrf: str, path: str) -> dict[str, object]:
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
@@ -791,12 +838,20 @@ class UserApi:
                   content_type: str | None = None, size: int | None = None,
                   public: bool | None = None, if_match: str | None = None) -> dict[str, object]:
         """上传对象；public 为 None 时保持原有公开状态，True/False 显式开启或关闭链接。
-        if_match 是打开时的 ETag（文本编辑保存）：对象已被改动时抛 VersionConflict（409），不覆盖。"""
+        if_match 是打开时的 ETag（文本编辑保存、图片编辑覆盖原图）：对象已被改动时抛 VersionConflict（409），不覆盖；
+        相符时先把旧版本放进回收站（ObjectService.keep_version），误改后可以从回收站还原。"""
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
         key = self._path(path)
-        item = await self.objects.put_object(replace(self._scope(token), thumbnail_client=True), key, body,
-                                             len(body) if isinstance(body, bytes) else size, content_type, if_match=if_match)
+        scope = self._scope(token)
+        kept = self.objects.keep_version(scope, key, if_match) if if_match else None
+        try:
+            item = await self.objects.put_object(replace(scope, thumbnail_client=True), key, body,
+                                                 len(body) if isinstance(body, bytes) else size, content_type, if_match=if_match)
+        except BaseException:
+            if kept:
+                await self.objects.purge_trash(replace(scope, prefix="", private_access=True), [kept])
+            raise
         if public is not None:
             item = self.objects.set_public(self._scope(token), key, public)
         return self._object_json(item)
@@ -1232,11 +1287,14 @@ class UserApi:
         """序列化一页对象，并用一次查询附上缩略图状态。"""
         versions = self.objects.thumbnail_versions([item.blob_uuid for item in items])
         sizes = self.objects.media_sizes([item.blob_uuid for item in items]) if hasattr(self.objects, "media_sizes") else {}
+        tags = self.objects.media_tags([item.blob_uuid for item in items]) if hasattr(self.objects, "media_tags") else {}
         result = []
         for item in items:
             value = self._object_json(item, tuple(versions.get(item.blob_uuid or "", {})), versions.get(item.blob_uuid or "", {}))
             if size := sizes.get(item.blob_uuid or ""):
                 value["dimensions"] = {"width": size[0], "height": size[1]}
+            if found := tags.get(item.blob_uuid or ""):
+                value["media"] = found
             result.append(value)
         return result
 

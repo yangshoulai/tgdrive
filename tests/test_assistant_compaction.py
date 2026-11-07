@@ -71,7 +71,7 @@ class RollingContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.trace.messages(state.conversation_id)[:-1], original, "原始留痕不能被删除或改写")
         self.assert_pairs(history)
         providers._openai_messages("规则", _clean(history))
-        anthropic, _ = providers._anthropic_messages(_clean(history))
+        anthropic = providers._anthropic_messages(_clean(history))
         self.assertEqual(anthropic[0]["role"], "user", "兼容要求首条为用户消息的渠道")
         responses.input_items(_clean(history))
 

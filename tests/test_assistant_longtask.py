@@ -117,7 +117,7 @@ class LongTaskTools(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(site.requests), 4)
         listed = await get_collection(self.context(trace, cid), {"collection_id": output.result["collection_id"]})
         self.assertEqual(listed.result["kind"], "links")
-        self.assertEqual(listed.result["items"][0], {"url": f"{SITE}/album/1", "text": "相册 1"})
+        self.assertEqual(listed.result["items"][0], {"index": 0, "url": f"{SITE}/album/1", "text": "相册 1"})
         with patch("tgdrive.assistant.web_tools._fetch_page", Site()):
             glob = await collect_links(self.context(trace, cid), {"url": f"{SITE}/model", "href_glob": f"{SITE}/album/*", "follow": False})
         self.assertEqual(glob.result["count"], 25)

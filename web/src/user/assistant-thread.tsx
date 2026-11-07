@@ -467,6 +467,7 @@ function ProcessText({ text, ms, live, startedAt, note, disclosure, onOpen }: {
 
 const TOOL_ICONS: [RegExp, IconName][] = [
   [/^propose_save_attachment/, "paperclip"], [/^propose_write_text/, "fileText"], [/^ui_generate_thumbnails/, "image"],
+  [/^propose_(extract|compress)/, "archive"], [/^propose_copy/, "copy"],
   [/^(list_folder|folder_tree|find_empty)/, "folder"], [/^(search_files|find_large|find_duplicates)/, "search"],
   [/^(storage_stats|trash_stats)/, "pulse"], [/^(list_trash)/, "trash"], [/^read_text_file/, "fileText"], [/^get_file_info/, "file"],
   [/^(list_public|propose_share|propose_unshare)/, "link"], [/download/, "download"], [/^(inspect_page|analyze_page|collect_gallery|collect_links|parse_download)/, "globe"],
@@ -914,8 +915,8 @@ function CacheBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
   const present = usable.filter(file => (queue?.cached.get(cacheFileId(file))?.bytes ?? 0) > 0 || queue?.jobs.some(job => cacheFileId(job.file) === cacheFileId(file)));
   const targets = caching ? usable : present;
   const blocked = !cacheSupported() ? "这个浏览器不能使用本机缓存（需要 https:// 访问与较新的浏览器，无痕模式不可用）"
-    : !queue?.available ? "这台设备的本机缓存已关闭，可在「设置 → 本机缓存」开启"
-    : !usable.length && event.private ? "私密文件需要先在「设置 → 本机缓存」信任这台设备，并保持私密空间解锁"
+    : !queue?.available ? "这台设备的本机缓存已关闭，可在「设置 → 缓存设置」开启"
+    : !usable.length && event.private ? "私密文件需要先在「设置 → 缓存设置」信任这台设备，并保持私密空间解锁"
     : !caching && !present.length && phase !== "done" ? "这些文件在这台设备上没有缓存" : "";
   const total = event.items.length;
   async function run() {
@@ -934,7 +935,7 @@ function CacheBrowserCard({ event }: { event: Extract<ai.BrowserEvent, { action:
       subtitle={`${formatBytes(event.size)} · 只影响这台设备`} />
     <ul className="ai-list">{event.items.slice(0, 5).map(item => <li key={item.path}><Icon name="file" size={13} /><span className="cell-truncate">{display(item.path)}</span></li>)}
       {total > 5 && <li className="ai-list-more">等 {total} 个文件</li>}</ul>
-    {caching && limit !== null && event.size > limit && phase === "idle" && <p className="ai-card-note"><Icon name="alert" size={13} />超过这台设备的缓存上限（{formatBytes(limit)}），较早打开的缓存会被移除。可在「设置 → 本机缓存」调大上限。</p>}
+    {caching && limit !== null && event.size > limit && phase === "idle" && <p className="ai-card-note"><Icon name="alert" size={13} />超过这台设备的缓存上限（{formatBytes(limit)}），较早打开的缓存会被移除。可在「设置 → 缓存设置」调大上限。</p>}
     {error && <p className="ai-card-note tone-danger" role="alert">{error}</p>}
     <footer className="ai-card-foot"><span>{note}</span>
       {phase === "done" ? <Icon name="check" size={16} />

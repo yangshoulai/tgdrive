@@ -18,6 +18,8 @@ export type FileItem = {
   public_downloads?: number;
   /** 图片／视频的显示尺寸（上传、离线下载转封装或首次预览时记录）；播放器据此一开始就按视频比例打开，预览头部显示分辨率。 */
   dimensions?: MediaSize | null;
+  /** 已记录的音视频标签（写入后由服务器提取）：播放列表与音乐库显示歌名、艺人、专辑、曲目号与时长（秒）。 */
+  media?: { title?: string; artist?: string; album?: string; album_artist?: string; track?: string; year?: string; duration?: number };
   has_thumbnail?: boolean;
   /** 已有的实际图片规格："thumb"、"grid"、"poster"，没有图片时为空。 */
   thumbnails?: string[];
@@ -439,6 +441,11 @@ export const publicPreviewAssets = (token: string, path: string, access?: string
 /** 搜索文件；prefix 为文件夹时只搜它及其子文件夹（关键词匹配文件夹之下的相对路径），空为整个空间。 */
 export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100, root = "", kind: KindFilter = "", signal?: AbortSignal, prefix = "") =>
   request<ListPage>(`${fileApi("/search", root)}?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}${prefix ? `&prefix=${encodeURIComponent(prefix)}` : ""}`, { signal });
+/** 跨文件夹浏览：recent 最近修改的全部文件，photos 按拍摄时间的图片与视频，music 全部音频（按路径）。 */
+export type LibraryView = "recent" | "photos" | "music";
+export type LibraryItem = FileItem & { taken_at?: number };
+export const library = (view: LibraryView, cursor = "", limit = 100, signal?: AbortSignal) =>
+  request<{ objects: LibraryItem[]; next_cursor: string | null }>(`/api/user/v1/library?view=${view}&limit=${limit}&cursor=${encodeURIComponent(cursor)}`, { signal });
 /** 目录统计（含子文件夹）：数量、总大小、按类型分组（与 KIND_FILTERS 同组，另有 other）、最大的文件。 */
 export type FolderStats = { prefix: string; files: number; folders: number; bytes: number; direct_files: number; direct_folders: number;
   kinds: { kind: KindName | "other"; count: number; bytes: number }[]; largest: { key: string; size: number; content_type: string | null }[]; latest_modified: number | null };

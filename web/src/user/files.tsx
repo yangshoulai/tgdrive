@@ -24,6 +24,7 @@ import type { PreviewPlayback } from "../files";
 import { usePrivateToast } from "./private-session";
 import { usePreview } from "./preview-host";
 import { FileCacheStatus, cacheMenuItems, cacheSelection, useCacheQueue } from "./cache";
+import { useThumbnailPolling } from "./thumbnail-polling";
 import { favoriteMenuItem, useFavorites } from "./favorites";
 import { useFilesBridge } from "./assistant-bridge";
 
@@ -174,37 +175,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   };
   // 预览打开时，把页面上最新的文件信息（补上的缩略图、覆盖后的新版本）同步给预览的当前文件与底部列表。
   useEffect(() => { preview.sync(files); }, [files, preview.sync]);
-  // 等待缩略图：当前列表里有缺缩略图的图片、视频、音频时，只查询这些文件的缩略图状态（不重读整个目录），
-  // 间隔 10 秒起逐次加倍到 5 分钟，页面隐藏时跳过，最长等 1 小时；文件被删除或覆盖时改为整页后台刷新。
-  const waitingThumbnails = useMemo(() => files
-    .filter(item => !item.thumbnails?.length && item.thumbnail_status !== "unavailable" && thumbnailSource(item.key, item.content_type, item.size))
-    .sort((a, b) => b.modified_at - a.modified_at).slice(0, 200), [files]);
-  const waitingKey = waitingThumbnails.map(item => `${item.key}\n${item.etag}`).join("\n");
-  useEffect(() => {
-    if (!waitingThumbnails.length || loading) return;
-    let delay = 10000, timer = 0, stopped = false;
-    const controller = new AbortController(), started = Date.now(), waiting = waitingThumbnails;
-    const tick = async () => {
-      if (document.visibilityState === "visible") {
-        try {
-          const { files: states } = await api.thumbnailStatus(waiting.map(item => item.key), controller.signal);
-          if (stopped) return;
-          if (waiting.some(item => !states[item.key] || states[item.key].etag !== item.etag)) scheduleRefresh();
-          const settled = new Map(Object.entries(states).filter(([, state]) => state.thumbnails?.length || state.thumbnail_status === "unavailable"));
-          if (settled.size) setFiles(current => current.map(item => {
-            const state = settled.get(item.key);
-            return state && state.etag === item.etag ? { ...item, ...state } : item;
-          }));
-        } catch { if (stopped) return; }
-      }
-      if (stopped || Date.now() - started > 3600_000) return;
-      delay = Math.min(delay * 2, 300_000);
-      timer = window.setTimeout(() => void tick(), delay);
-    };
-    timer = window.setTimeout(() => void tick(), delay);
-    return () => { stopped = true; window.clearTimeout(timer); controller.abort(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [waitingKey, loading]);
+  // 等待封面：只轮询列表里缺封面的媒体（thumbnail-polling.ts）；文件被删除或覆盖时改为整页后台刷新。
+  useThumbnailPolling(files, !loading, setFiles, scheduleRefresh);
   const previewThumbnailAttempts = useRef(new Set<string>());
   function savePreviewThumbnail(item: api.FileItem, produce: (signal: AbortSignal) => Promise<ThumbnailResult>, force = false) {
     const identity = `${item.key}:${item.etag}`;
@@ -722,7 +694,6 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         <div className="toolbar">
           <SearchInput value={search} onChange={setSearch} onSubmit={() => setQuery(search.trim())} onClear={() => setQuery("")} placeholder={prefix !== root ? `在「${name}」中搜索，按回车` : privateSpace ? "搜索私密空间，按回车" : "搜索全部文件，按回车"} label="搜索文件" shortcut="/" />
           <div className="toolbar-actions">
-            {!privateSpace && <Segmented label="筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部" }, { value: "public", label: "公开" }]} />}
             <FileSortSelect sort={sort} onSort={setSort} grid={layout === "grid"} />
             <IconButton icon="chart" label="目录统计" variant="secondary" className="toolbar-stats" onClick={() => setStatsFor({ prefix, title: name })} />
             <IconButton icon="refresh" label="刷新" shortcut="R" variant="secondary" spinning={pagination.refreshing} disabled={loading} onClick={() => void refreshList()} />
@@ -732,7 +703,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       )}
 
       <FileFilters entry={entryFilter} kind={kind} onEntryChange={setEntryFilter} onKindChange={setKind}
-        cache={cacheFilterReady ? cacheFilter : ""} onCacheChange={cacheFilterReady ? setCacheFilter : undefined} />
+        cache={cacheFilterReady ? cacheFilter : ""} onCacheChange={cacheFilterReady ? setCacheFilter : undefined}
+        scope={privateSpace ? undefined : filter} onScopeChange={privateSpace ? undefined : setFilter} />
 
       <section ref={surface} className={`file-surface${layout === "grid" && !loading && !loadError && entries.length > 0 ? " is-grid" : ""}${dragging ? " is-dragging" : ""}`} aria-label="文件列表">
         {loading ? <SkeletonRows rows={6} /> : loadError ? (

@@ -8,13 +8,14 @@ import { PlaylistPanel, usePreviewPlaylist, type PreviewNav, type PreviewStrip }
 import { ImageViewer } from "./preview-image";
 import { cacheFileId, startPreviewPrefetch } from "./cache-client";
 import { FileCacheButton, cacheMenuItems, useCacheFiles } from "./user/cache";
+import { playerShortcut } from "./preview-keys";
 import { PreviewToolsContext, TextPreview } from "./preview-text";
 import { PdfPreview } from "./preview-pdf";
 import { fileFormatOf } from "./preview-formats";
 import { FontPreview } from "./preview-font";
 import { EpubPreview } from "./preview-epub";
 import { ArchivePreview } from "./preview-archive";
-import { Notice, ButtonLink, Badge, Button, CopyField, Field, FilterChips, Icon, IconButton, KeyValue, Modal, Switch, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, latestMinimized, toast, confirmLeave, useUnsavedChanges, type IconName, type MenuItem } from "./ui";
+import { Notice, ButtonLink, Badge, Button, CopyField, Field, Icon, IconButton, KeyValue, Menu, Modal, Switch, downloadFile, formatBytes, formatDate, formatDateTime, isShortcutControl, latestMinimized, toast, confirmLeave, useUnsavedChanges, type IconName, type MenuItem } from "./ui";
 import { ShortcutsDialog } from "./shortcuts";
 
 export type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "text" | "code" | "archive" | "other";
@@ -31,39 +32,43 @@ const ENTRY_FILTERS: { value: EntryFilter; label: string }[] = [
   { value: "all", label: "全部" }, { value: "folder", label: "文件夹" }, { value: "file", label: "文件" },
 ];
 
-/** 一行筛选：先选项目（全部／文件夹／文件），分隔线后是文件类型（可多选，取并集）；选类型即切到「文件」，
- * 取消全部类型保持「文件」，选文件夹或全部会清除类型。 */
-export function FileFilters({ entry, kind, onEntryChange, onKindChange, cache, onCacheChange }: {
+/** 一行筛选：「全部」与文件类型按钮常驻（类型可多选，取并集）；项目（文件夹／文件）、公开范围与本机缓存收进末尾的「筛选」菜单，
+ * 按钮上显示已启用的条件数。选类型或缓存条件即切到「文件」，选「只看文件夹」会清除类型与缓存条件，「全部」清除一切条件。 */
+export function FileFilters({ entry, kind, onEntryChange, onKindChange, cache, onCacheChange, scope, onScopeChange }: {
   entry: EntryFilter; kind: api.KindFilter; onEntryChange: (value: EntryFilter) => void; onKindChange: (value: api.KindFilter) => void;
-  /** 本机缓存可用时传入：再加一组「已缓存／未缓存」（单选，再点一次取消）；选中即切到「文件」。 */
+  /** 本机缓存可用时传入：菜单里多一组「已缓存／未缓存」。 */
   cache?: CacheFilter; onCacheChange?: (value: CacheFilter) => void;
+  /** 我的文件传入：菜单里多一组「全部／仅公开」。 */
+  scope?: "all" | "public"; onScopeChange?: (value: "all" | "public") => void;
 }) {
   const chosen = api.kindValues(kind);
+  const extra = (entry !== "all" ? 1 : 0) + (scope === "public" ? 1 : 0) + (cache ? 1 : 0);
+  const everything = !chosen.length && !extra;
+  const reset = () => { onKindChange(""); onEntryChange("all"); onCacheChange?.(""); onScopeChange?.("all"); };
+  const items: MenuItem[] = [
+    ...ENTRY_FILTERS.map((option, index) => ({ heading: index === 0 ? "项目" : undefined, label: option.value === "all" ? "文件夹和文件" : option.value === "folder" ? "只看文件夹" : "只看文件",
+      icon: (option.value === "folder" ? "folder" : "file") as IconName, checked: entry === option.value,
+      onSelect: () => { onEntryChange(option.value); if (option.value === "folder") { onKindChange(""); onCacheChange?.(""); } } })),
+    ...(onScopeChange ? [{ heading: "公开", label: "全部文件", icon: "file" as IconName, checked: scope !== "public", divider: true, onSelect: () => onScopeChange("all") },
+      { label: "只看已公开", icon: "globe" as IconName, checked: scope === "public", onSelect: () => onScopeChange("public") }] : []),
+    ...(onCacheChange ? [{ heading: "本机缓存", label: "不限", icon: "hardDrive" as IconName, checked: !cache, divider: true, onSelect: () => onCacheChange("") },
+      ...CACHE_FILTERS.map(option => ({ label: option.label, description: option.title, icon: (option.value === "cached" ? "check" : "hardDrive") as IconName, checked: cache === option.value,
+        onSelect: () => { onCacheChange(option.value); if (entry === "folder") onEntryChange("file"); } }))] : []),
+    ...(extra ? [{ label: "清除这些条件", icon: "x" as IconName, divider: true, onSelect: () => { onEntryChange("all"); onCacheChange?.(""); onScopeChange?.("all"); } }] : []),
+  ];
   return <div className="file-filters">
-    <FilterChips label="项目" value={entry} options={ENTRY_FILTERS} onChange={value => {
-      onEntryChange(value); if (value !== "file") { onKindChange(""); onCacheChange?.(""); }
-    }} />
-    <span className="file-filters-divider" aria-hidden="true" />
     <div className="filter-chips" role="group" aria-label="文件类型（可多选）">
+      <button type="button" aria-pressed={everything} className={`filter-chip${everything ? " is-active" : ""}`} onClick={reset}>全部</button>
       {api.KIND_FILTERS.map(option => {
         const active = chosen.includes(option.value);
         return <button key={option.value} type="button" aria-pressed={active} className={`filter-chip is-multi${active ? " is-active" : ""}`}
-          onClick={() => { const next = api.toggleKind(kind, option.value); onKindChange(next); if (next) onEntryChange("file"); }}>
+          onClick={() => { const next = api.toggleKind(kind, option.value); onKindChange(next); if (next && entry === "folder") onEntryChange("file"); }}>
           {active && <Icon name="check" size={12} />}{option.label}</button>;
       })}
-      {chosen.length > 1 && <button type="button" className="filter-chip-clear" onClick={() => onKindChange("")}>清除</button>}
     </div>
-    {onCacheChange && <>
-      <span className="file-filters-divider" aria-hidden="true" />
-      <div className="filter-chips" role="group" aria-label="本机缓存">
-        {CACHE_FILTERS.map(option => {
-          const active = cache === option.value;
-          return <button key={option.value} type="button" aria-pressed={active} title={option.title} className={`filter-chip is-multi${active ? " is-active" : ""}`}
-            onClick={() => { onCacheChange(active ? "" : option.value); if (!active) onEntryChange("file"); }}>
-            {active && <Icon name="check" size={12} />}{option.label}</button>;
-        })}
-      </div>
-    </>}
+    <Menu items={items} label={extra ? `更多筛选（已启用 ${extra} 项）` : "更多筛选"} align="start" className={`filter-chip filter-more${extra ? " is-active" : ""}`}>
+      <Icon name="filter" size={14} /><span>筛选</span>{extra > 0 && <span className="filter-more-count">{extra}</span>}
+    </Menu>
   </div>;
 }
 
@@ -301,7 +306,7 @@ function PreviewLoading({ onRetry }: { onRetry: () => void }) {
   </div>;
 }
 
-function PreviewContent({ kind, url, name, downloadUrl, contentType, size, videoSize, poster, posterMaxEdge, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation, onRotate, onBufferSpeed, onFindAssets, assetRevision, preferAsset, text, positionKey, rememberPosition, archive }: PreviewProps & { onRetry: () => void }) {
+function PreviewContent({ kind, url, name, downloadUrl, contentType, size, videoSize, poster, posterMaxEdge, onImageLoad, onImageSize, resolveImage, loadAssets, assetUrl, nav, strip, onRetry, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation, onRotate, onBufferSpeed, onFindAssets, assetRevision, preferAsset, upcoming, session, text, positionKey, rememberPosition, archive }: PreviewProps & { onRetry: () => void }) {
   const format = fileFormatOf(kind, name, contentType);
   const [content, setContent] = useState<PreviewText | null>(null);
   // 每次读到新内容递增，文本预览按它重建；自己保存不重新读取，编辑器保持原状。
@@ -345,7 +350,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
   if (format === "font") return error ? fallback : <FontPreview url={url} name={name} onError={setError} />;
   if (format === "epub") return error ? fallback : <EpubPreview url={url} positionKey={positionKey ?? null} remember={rememberPosition ?? true} onError={setError} />;
   if (format === "archive" && archive) return <ArchivePreview file={archive.file} downloadUrl={downloadUrl} onExtract={archive.onExtract} />;
-  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} videoSize={videoSize} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} rotation={rotation} onRotate={onRotate} onBufferSpeed={onBufferSpeed} onFindAssets={onFindAssets} assetRevision={assetRevision} preferAsset={preferAsset} />;
+  if (kind === "video" || kind === "audio") return <MediaPreview kind={kind} url={url} name={name} size={size} videoSize={videoSize} cover={poster} onRetry={onRetry} loadAssets={loadAssets} assetUrl={assetUrl} nav={nav} onEnded={onEnded} onPlaying={onPlaying} onProgress={onProgress} onState={onState} onControls={onControls} onVideoSize={onVideoSize} onVideoFrame={onVideoFrame} onSaveThumbnail={onSaveThumbnail} onLyricLine={onLyricLine} rotation={rotation} onRotate={onRotate} onBufferSpeed={onBufferSpeed} onFindAssets={onFindAssets} assetRevision={assetRevision} preferAsset={preferAsset} upcoming={upcoming} session={session} />;
   if (mediaFailed) return fallback;
   // 本机缓存仍需读取、解密及图片解码：先用封面占位，原图就绪后显示；背景与补图延后到绘制之后。
   if (kind === "image") return <ImageViewer url={url} name={name} heic={format === "heic"} poster={poster} posterMaxEdge={posterMaxEdge} size={videoSize} nav={nav} strip={strip} onError={() => setMediaFailed(true)} onLoad={onImageLoad} onImageSize={onImageSize} />;
@@ -387,8 +392,9 @@ function rememberRotation(file: api.FileItem, degrees: number) {
   } catch { /* 存储不可用时只在本次预览里生效 */ }
 }
 export type PreviewPlayback = { playing: boolean; currentTime: number; state: MediaState };
-export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, onClose, onShare, onExtract, onEditImage, onFindMedia, onMissingCover, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, sourceFor, onPlaybackActivity, minimizeRequest, startEditing }: PreviewSource & {
-  /** 打开后直接进入文本编辑（刚新建的文件）。 */ startEditing?: boolean; file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void;
+export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, onClose, onShare, onExtract, onEditImage, onFindMedia, onMissingCover, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, anyFolder = false, sourceFor, onPlaybackActivity, minimizeRequest, startEditing }: PreviewSource & {
+  /** 打开后直接进入文本编辑（刚新建的文件）。 */ startEditing?: boolean;
+  /** 播放列表不限同一文件夹（相册、音乐库、最近这类跨文件夹的页面）。 */ anyFolder?: boolean; file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void;
   /** 在线查找歌词、字幕或封面（播放器里没有歌词、字幕或封面时的入口）；保存后页面广播 MEDIA_ASSETS_EVENT。 */ onFindMedia?: (file: api.FileItem, want: api.MediaWant) => void;
   /** 本人的音乐还没有封面时调用：由宿主用文件内嵌的封面补上（已有封面时服务器拒绝，不会覆盖）。 */ onMissingCover?: (file: api.FileItem) => void;
   /** 在线解压（压缩包预览里的「解压到…」）；picks 是预览里勾选的文件，不传表示整个压缩包。 */ onExtract?: (file: api.FileItem, picks?: string[]) => void;
@@ -407,7 +413,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const readingTools = useMemo(() => reading && textTools ? { target: textTools, compact: compactActions, setMenuItems: setTextMenuItems } : null, [reading, textTools, compactActions]);
   const playlist = usePreviewPlaylist(file, kind, playlistFiles,
-    item => getFileKind(item.content_type, item.key) === kind && (kind === "image" || isPlayable(item.key, item.content_type)) && parentPath(item.key) === parentPath(file.key));
+    item => getFileKind(item.content_type, item.key) === kind && (kind === "image" || isPlayable(item.key, item.content_type)) && (anyFolder || parentPath(item.key) === parentPath(file.key)));
   const active = browsable && playlist.current.key !== file.key ? playlist.current : file;
   const derived = (item: api.FileItem): PreviewSource => sourceFor?.(item) ?? {
     url: api.contentUrl(item.key), downloadUrl: api.contentUrl(item.key, true), poster: api.fileThumbnail(item, "poster"), grid: api.fileThumbnail(item, "grid"), thumbnail: api.fileThumbnail(item),
@@ -419,6 +425,10 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
     return { url, downloadUrl, poster: latest.poster ?? poster, grid: latest.grid ?? grid, thumbnail: latest.thumbnail ?? thumbnail };
   };
   const source = sourceOf(active);
+  // 音乐连播：下一首的地址交给播放器预先缓冲（随机模式在 upcoming 里定下，播完时取同一首）。
+  const upcomingFile = kind === "audio" && browsable ? playlist.upcoming() : null;
+  // 与实际播放地址一致（带内容版本），切歌时播放器才能认出已缓冲的备用元素。
+  const upcomingUrl = upcomingFile ? api.versionedContentUrl(sourceOf(upcomingFile).url, upcomingFile.etag, upcomingFile.size, true) : null;
   // 先复用本页已读取的封面，避免网格图已经可见，却为了另一规格的封面再次等待回源。
   // 按文件与封面版本固定本次选择，后续状态刷新不把正在展示的占位图换成尚未加载的地址。
   const imagePoster = useMemo(() => kind === "image"
@@ -612,6 +622,15 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
     if (navigation && media && !event.shiftKey && target.closest("[data-media-progress]")) { pressArrow(event, key); return; }
     if (isShortcutControl(target)) return;
     if (key === "?") { event.preventDefault(); event.stopPropagation(); event.currentTarget.classList.remove("is-chrome-idle"); if (!event.repeat) void showShortcuts(); return; }
+    // 播放快捷键（M、C、G／H、0–9、Shift+< >、视频的 , .）见 preview-keys.ts。
+    if (media && controls.current && (kind === "audio" || kind === "video")) {
+      const handled = playerShortcut(event, kind, controls.current);
+      if (handled) {
+        event.preventDefault(); event.stopPropagation();
+        if (handled.feedback) toast.status(handled.feedback.status, handled.feedback.message);
+        return;
+      }
+    }
     if (event.shiftKey) return;
     if (key === "d" || key === "s" && onShare || key === "o" && media && playlist.items.length > 1) {
       event.preventDefault(); event.stopPropagation();
@@ -790,10 +809,16 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
         onLyricLine={line => setLyric(current => current.key === active.key && current.line === line ? current : { key: active.key, line })}
         onControls={instance => { controls.current = instance; if (instance && pendingPlay.current) { pendingPlay.current = false; play(); } }}
         loadAssets={loadAssets ? signal => loadAssets(active, signal) : assetUrl ? signal => ownSource ? api.mediaAssets(active, signal) : api.previewAssets(active.key, signal) : undefined}
-        onFindAssets={findable ? want => onFindMedia?.(active, want) : undefined} assetRevision={assetChange.revision} preferAsset={assetChange.prefer} nav={nav} strip={strip} /></PreviewCachedContext.Provider></PreviewToolsContext.Provider>
+        onFindAssets={findable ? want => onFindMedia?.(active, want) : undefined} assetRevision={assetChange.revision} preferAsset={assetChange.prefer} nav={nav} strip={strip}
+        upcoming={kind === "audio" ? upcomingUrl : null} session={media ? { title: baseName(active.key).replace(/\.[^.]+$/, ""), artwork: source.poster } : undefined} /></PreviewCachedContext.Provider></PreviewToolsContext.Provider>
         {panelOpen && <PlaylistPanel playlist={playlist} onSelect={select} typeLabel={kindLabel(kind)} playing={playing}
           onCollapse={() => setPlaylistExpanded(false)}
-          renderThumbnail={item => <FileVisual kind={getFileKind(item.content_type, item.key)} src={sourceOf(item).thumbnail} size="md" />} />}
+          renderThumbnail={item => {
+            const itemKind = getFileKind(item.content_type, item.key), thumb = sourceOf(item).thumbnail;
+            // 没有封面的音乐用按文件名固定的色调块，与播放器唱片标签一致，比通用文件图标更容易区分曲目。
+            return itemKind === "audio" && !thumb ? <span className="tint-cover" style={{ "--cover-tint": coverTint(baseName(item.key)) } as CSSProperties}><Icon name="audio" size={16} /></span>
+              : <FileVisual kind={itemKind} src={thumb} size="md" />;
+          }} />}
       </div>
     </Modal>
     {shortcutsOpen && <ShortcutsDialog area="preview" kind={kind} privateSpace={api.isPrivatePath(active.key)} onClose={() => setShortcutsOpen(false)} />}</>

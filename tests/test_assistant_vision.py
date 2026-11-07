@@ -164,9 +164,9 @@ class ProviderImageFormatTests(unittest.TestCase):
         messages = [{"role": "user", "content": "看图", "images": [self.IMAGE]},
                     {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "name": "view_image", "arguments": "{}"}]},
                     {"role": "tool", "tool_call_id": "1", "content": "ok", "images": [self.IMAGE]}]
-        result, _ = providers._anthropic_messages(messages)
+        result = providers._anthropic_messages(messages)
         image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "cG5n"}}
-        self.assertEqual(result[0]["content"][1], image)
+        self.assertEqual(result[0]["content"][1], {**image, "cache_control": providers.CACHE}, "上一个 user 轮次末尾是缓存断点")
         self.assertEqual(result[2]["content"][0]["content"], [{"type": "text", "text": "ok"}, image])
 
     def test_text_only_messages_are_unchanged(self):

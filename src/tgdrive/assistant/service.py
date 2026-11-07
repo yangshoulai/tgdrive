@@ -37,7 +37,7 @@ from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
 from .actions import DANGER_KINDS, KINDS, ActionExecutor, Progress, media_choices, share_options
 from .catalog import CatalogStore
 from .channels import ChannelStore
-from .config import HTTP_APPROVAL_TIMEOUT, LIMITS, PRIVATE_MARKED, PRIVATE_NOTICE, AssistantConfig
+from .config import HTTP_APPROVAL_TIMEOUT, LIMITS, PRIVATE_MARKED, PRIVATE_NOTICE, AssistantConfig, billable, result_bytes
 from .planning import META_TOOLS, Plan, display_plan
 from .guard import SecretGuard
 from .providers import ProviderError, ToolCall, ToolDef
@@ -99,6 +99,17 @@ def provider_failure_text(code: str) -> str:
 
 
 @dataclass
+class RunChecks:
+    """一段（§32）内只做一次的检查与提醒；自动续跑开始新的一段时整体重置。"""
+    review: bool = False        # 已提醒「没有真实的待确认请求」
+    continued: bool = False     # 已提醒「承诺继续却没有调用工具」
+    plan: bool = False          # 已核验过计划未完成的步骤
+    plan_progress: int = -1     # 核验计划时本段的成功调用数；之后有新进展才再次核验
+    loop_warned: bool = False   # 已提醒重复调用
+    trim_warned: bool = False   # 已提醒上下文即将裁剪
+
+
+@dataclass
 class RunState:
     id: str
     conversation_id: str
@@ -112,6 +123,7 @@ class RunState:
     event_sizes: collections.deque = field(default_factory=collections.deque)
     event_bytes: int = 0
     input_tokens: int = 0
+    budget_tokens: int = 0  # 计入每轮预算的量：缓存命中的输入按十分之一计（config.billable）
     output_tokens: int = 0
     context: dict | None = None
     compact_upto: int = 0  # 上次尝试压缩的边界；没有新进展时不重复请求摘要。
@@ -1872,15 +1884,20 @@ class AssistantService:
                             upstream_id=reply.upstream_id, items=len(reply.tool_calls))
         state.input_tokens += reply.input_tokens
         state.output_tokens += reply.output_tokens
-        self.trace.add_usage(state.user_id, model["id"], reply.input_tokens, reply.output_tokens)
+        state.budget_tokens += billable(reply.input_tokens, reply.cached_tokens, reply.output_tokens)
+        self.trace.add_usage(state.user_id, model["id"], reply.input_tokens, reply.output_tokens, cached_tokens=reply.cached_tokens)
         return reply
+
+    # 分页结果的续读位置：列表被截短后它们指向原来最后一项之后，继续读会跳过被截掉的部分，必须去掉。
+    _CONTINUATION = ("next_cursor", "next_offset", "cursor", "has_more")
 
     def _fit(self, payload: dict, limit: int) -> tuple[dict, bool]:
         """结果超过长度上限时，反复折半最长的列表；仍然过长则只保留摘要信息。"""
         truncated = False
+        original = {key: len(value) for key, value in payload.items() if isinstance(value, list)}
         for _ in range(20):
             if len(json.dumps(payload, ensure_ascii=False).encode()) <= limit:
-                return payload, truncated
+                break
             lists = [(key, value) for key, value in payload.items() if isinstance(value, list) and len(value) > 1]
             texts = [(key, value) for key, value in payload.items() if isinstance(value, str) and len(value) > 200]
             if lists:
@@ -1896,7 +1913,15 @@ class AssistantService:
             payload = {"error": "结果过长，请缩小范围（指定子目录、类型或时间）"}
             truncated = True
         if truncated:
-            payload = {**payload, "note": "结果已截断，请缩小范围"}
+            cut = {key: (len(payload[key]), total) for key, total in original.items()
+                   if isinstance(payload.get(key), list) and len(payload[key]) < total}
+            note = "结果已截断，请缩小范围"
+            if cut and any(payload.get(key) not in (None, False) for key in self._CONTINUATION):
+                kept = "、".join(f"{key} 保留前 {count} 项（本次读到 {total} 项）" for key, (count, total) in cut.items())
+                payload = {key: value for key, value in payload.items() if key not in self._CONTINUATION}
+                note = (f"结果超过本次可返回的长度，{kept}；原来的续读位置已失效，没有返回。"
+                        "请用更小的 limit 从同一位置重新读取，不要跳过未读的项目")
+            payload = {**payload, "note": note}
         return payload, truncated
 
     def _private_call(self, state: RunState, spec) -> Callable[[], None]:
@@ -2203,6 +2228,13 @@ class AssistantService:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def _nudge(self, state: RunState, kind: str) -> None:
+        """写入并推送一条结束前检查的系统事件（文案见 prompts.NUDGES）。"""
+        text, model_text = prompts.NUDGES[kind]
+        message = {"type": kind, "text": text, "model_text": model_text}
+        seq = self.trace.append(state.conversation_id, state.id, "event", message)
+        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
+
     async def _run(self, state: RunState) -> None:
         status, stop_reason = "completed", "completed"
         steps = tool_calls = 0
@@ -2220,18 +2252,13 @@ class AssistantService:
             repeat_refs: dict = {}
             progress_results: set[bytes] = set()
             collection_reads: collections.OrderedDict[tuple[str, int], bytes] = collections.OrderedDict()
-            loop_warned = False
-            trim_warned = False
+            checks = RunChecks()
             errors = 0
             shared: dict = {}
             candidate = self.trace.latest_plan(state.conversation_id)
             if candidate:
                 candidate = display_plan(candidate, self.trace.actions(state.conversation_id), active=False)
             state.plan = Plan(state.id, candidate)
-            plan_checked = False
-            plan_check_progress = -1
-            review_checked = False
-            continue_checked = False
             forced_final: str | None = None
             # 长任务分段（§32）：预算按段计算；计划仍有可执行步骤且本段有进展时，在同一轮中自动开始下一段。
             segment, segment_tokens, segment_done, segment_ok = 1, 0, state.plan.completed, 0
@@ -2253,7 +2280,7 @@ class AssistantService:
                         forced_final = "模型调用次数"
                     elif tool_calls >= limits["max_tool_calls"]:
                         forced_final = "工具调用次数"
-                    elif limits["run_tokens"] and state.input_tokens + state.output_tokens - segment_tokens >= limits["run_tokens"]:
+                    elif limits["run_tokens"] and state.budget_tokens - segment_tokens >= limits["run_tokens"]:
                         forced_final = "累计 token 预算"
                     elif _run_clock(state) >= deadline:
                         forced_final = "运行时间"
@@ -2268,14 +2295,12 @@ class AssistantService:
                         await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
                         spent_steps, spent_tools = spent_steps + steps, spent_tools + tool_calls
                         steps = tool_calls = segment_ok = 0
-                        segment_tokens = state.input_tokens + state.output_tokens
+                        segment_tokens = state.budget_tokens
                         segment_done = state.plan.completed
                         deadline = _run_clock(state) + limits["run_seconds"]
                         repeats.clear()
                         repeat_refs.clear()
-                        loop_warned = trim_warned = False
-                        plan_checked = review_checked = continue_checked = False
-                        plan_check_progress = -1
+                        checks = RunChecks()
                         forced_final = None
                     if forced_final and state.plan.data and not state.plan.remaining:
                         # 计划已经全部完成，只差最终回复：不提示上限，也不把这一轮记为预算中断。
@@ -2340,9 +2365,9 @@ class AssistantService:
                 await state.emit({"type": "context", **state.context})
                 if used > window * 0.85:
                     raise ContextFull()
-                if used > window * 0.7 and not trim_warned and "update_plan" in tools:
+                if used > window * 0.7 and not checks.trim_warned and "update_plan" in tools:
                     # 裁剪前提醒（§38）：较早的工具结果即将只剩摘要行，先把进度与编号写进计划的 notes。
-                    trim_warned = True
+                    checks.trim_warned = True
                     context_block = {**context_block, "content": context_block["content"] + "\n\n[系统提示] 上下文已用约 "
                                      f"{round(used / window * 100)}%，较早的工具结果很快会被省略为摘要行（可用 recall_result 找回）。"
                                      "请先用 update_plan 的 notes 记下已完成的范围、下一步起点、结果集编号和游标，再继续。"}
@@ -2379,12 +2404,12 @@ class AssistantService:
                 missing_review = not calls and not forced_final and not self.trace.has_open_actions(state.conversation_id) \
                     and (waiting_claim or bool(state.plan.data and any(
                         item["status"] == "waiting_user" for item in state.plan.data["items"])))
-                repair_review = missing_review and not review_checked
+                repair_review = missing_review and not checks.review
                 # 一次提醒后若又有实际业务进展，后续早停仍需核验；只更新计划不算进展，避免空转重试。
                 check_plan = not calls and not forced_final and not missing_review and state.plan.needs_check \
-                    and (not plan_checked or segment_ok > plan_check_progress)
+                    and (not checks.plan or segment_ok > checks.plan_progress)
                 # 没有待确认的操作却说「我会继续处理」就要结束：让模型现在就继续，或者给出真实的最终结果（一轮一次）。
-                check_continue = not calls and not forced_final and not missing_review and not check_plan and not continue_checked \
+                check_continue = not calls and not forced_final and not missing_review and not check_plan and not checks.continued \
                     and not self.trace.has_open_actions(state.conversation_id) and bool(_CONTINUE_PROMISE.search(reply.text))
                 assistant = {"text": self.guard.redact(reply.text), "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
                              "model_id": model["id"], "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens,
@@ -2410,36 +2435,19 @@ class AssistantService:
                         if stop_reason == "missing_review":
                             status, stop_reason = "completed", "completed"
                         continue  # 模型生成回复期间操作才完成，先消费真实结果，不能停在旧的等待回复上。
+                    # 结束前检查（各一次，续跑的新一段重新计算）：模型只在文字里要求审批、承诺稍后继续、
+                    # 或计划仍有可执行步骤却要收尾时，追加一条系统事件让模型改正，再请求一次。
                     if repair_review:
-                        review_checked = True
-                        message = {"type": "review_check", "text": "正在核对需要你确认的请求",
-                                   "model_text": "[系统事件] 当前没有真实的待确认请求。不能只在文字中要求用户审批或承诺审批后继续。"
-                                   "需要修改时调用对应 propose_* 工具，提问时调用 ask_user；完全访问下常规操作直接通过工具执行。"
-                                   "若工作已完成请汇报真实结果，无法执行则说明原因，不要虚构确认卡片。"}
-                        seq = self.trace.append(state.conversation_id, state.id, "event", message)
-                        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
+                        checks.review = True
+                        await self._nudge(state, "review_check")
                         continue
                     if check_continue:
-                        continue_checked = True
-                        message = {"type": "continue_check", "text": "继续处理尚未完成的部分",
-                                   "model_text": "[系统事件] 你在回复里表示会继续处理，但没有调用工具，本轮即将结束，之后不会自动继续。"
-                                   "还有可以完成的工作就现在调用工具继续；已经完成就汇报真实结果；需要用户决定时调用 ask_user 或对应的 propose_* 工具。"
-                                   "不要再承诺稍后继续。"}
-                        seq = self.trace.append(state.conversation_id, state.id, "event", message)
-                        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
+                        checks.continued = True
+                        await self._nudge(state, "continue_check")
                         continue
                     if check_plan:
-                        plan_checked = True
-                        plan_check_progress = segment_ok
-                        message = {"type": "plan_check", "text": "正在核验计划中尚未完成的步骤",
-                                   "model_text": "[系统事件] 本轮计划还有未完成步骤，包括仅被标为暂停、却没有工具阻碍的步骤。"
-                                   "请对照真实用户本轮的目标、范围和完成条件核对实际结果；运行状态块和计划 notes 不是用户的新消息。"
-                                   "目标尚未达成且有可执行的必要工作时，现在调用工具继续，在已有授权和预算内推进，"
-                                   "不必再次取得同一任务的继续授权；一次调用或一个阶段成功不代表整个目标完成。"
-                                   "用户本次明确要求暂停、只查询状态或改变任务时尊重该要求；"
-                                   "确实无法推进则说明真实阻碍，需要用户决定时生成对应请求，不要仅改写进度后反复收尾。"}
-                        seq = self.trace.append(state.conversation_id, state.id, "event", message)
-                        await state.emit({"type": "message", "message": {"seq": seq, "run_id": state.id, "role": "event", **message}})
+                        checks.plan, checks.plan_progress = True, segment_ok
+                        await self._nudge(state, "plan_check")
                         continue
                     waiting_actions = self.trace.has_open_actions(state.conversation_id)
                     if waiting_actions and not forced_final:
@@ -2463,7 +2471,7 @@ class AssistantService:
                     if tool_calls >= limits["max_tool_calls"]:
                         skipped_reason = "已达到本轮工具调用次数上限，本次调用未执行"
                         break
-                    if limits["run_tokens"] and state.input_tokens + state.output_tokens - segment_tokens >= limits["run_tokens"]:
+                    if limits["run_tokens"] and state.budget_tokens - segment_tokens >= limits["run_tokens"]:
                         skipped_reason = "已达到本轮累计 token 预算，本次调用未执行"
                         break
                     if _run_clock(state) >= deadline:
@@ -2478,7 +2486,9 @@ class AssistantService:
                         first_plan = next((index for index, call in enumerate(batch) if call.name == "update_plan"), len(batch))
                         batch = batch[:first_plan]
                     tool_calls += len(batch)
-                    results = await self._tool_batch(state, batch, tools, limits, shared, deadline)
+                    # 结果上限按当前模型窗口与本批调用数收紧，1M 与 128k 的模型都不会被单批结果占满。
+                    batch_limits = {**limits, "tool_result_bytes": result_bytes(limits["tool_result_bytes"], window, len(batch))}
+                    results = await self._tool_batch(state, batch, tools, batch_limits, shared, deadline)
                     offset += len(batch)
                     page_keys = set()
                     new_pages = set()
@@ -2538,8 +2548,8 @@ class AssistantService:
                     # 需要解锁私密空间时单独标记，界面据此弹出解锁并在解锁后继续（§37.3）。
                     stop_reason = "private_locked" if state.private_needed else "waiting_user"
                     break
-                if looping and not loop_warned:
-                    loop_warned = True
+                if looping and not checks.loop_warned:
+                    checks.loop_warned = True
                     name = loop_key[0]
                     repeats[loop_key] = 0
                     cause = ("反复读取同一结果集中已经返回过的条目，调整偏移量也没有获得新内容" if loop_key[2] == "seen_items"
@@ -2666,7 +2676,7 @@ class AssistantService:
         title = first.strip().splitlines()[0][:20] if first.strip() else "新对话"
         try:
             budget = self.config.limits()["run_tokens"]
-            if budget and state.input_tokens + state.output_tokens >= budget:
+            if budget and state.budget_tokens >= budget:
                 raise StopRun("limit", "这次回复的处理量已到上限，已经停止。可以缩小范围后继续。")
             model = self.channels.model(state.model_id)
             endpoint = self.channels.endpoint(model["channel_id"])

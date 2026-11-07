@@ -1,0 +1,79 @@
+/* ---------- 任务中心：上传任务、离线下载、本机缓存三个页面共用 ---------- */
+.nav-count.is-live { background: var(--accent-soft); color: var(--accent-ink); box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent); animation: nav-live 2s ease-out infinite; }
+@keyframes nav-live { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 35%, transparent); } 70%, 100% { box-shadow: 0 0 0 6px transparent; } }
+.task-page > .tabs { margin-bottom: 16px; }
+.task-page > .inline-note, .task-page > .form-alert { margin-bottom: 16px; }
+.task-stats { margin-bottom: 16px; }
+/* 列数等于卡片数，三张卡片时也铺满整行；四张及以上在中等宽度改为两列。 */
+.task-stats-grid { display: grid; grid-template-columns: repeat(var(--stat-count, 4), minmax(0, 1fr)); gap: 12px; }
+.task-stat { position: relative; display: flex; align-items: flex-start; gap: 12px; min-width: 0; padding: 16px 16px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); color: inherit; font: inherit; text-align: left;
+  box-shadow: var(--shadow-sm); transition: border-color var(--duration-fast), background-color var(--duration-fast), transform var(--duration-base) var(--ease-out), box-shadow var(--duration-base); }
+button.task-stat { cursor: pointer; }
+button.task-stat:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.task-stat.is-selected { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent-soft) 60%, var(--surface)); }
+.task-stat.is-danger.is-selected { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); background: color-mix(in srgb, var(--danger-soft) 60%, var(--surface)); }
+.task-stat-icon { display: grid; flex: none; width: 36px; height: 36px; place-items: center; border-radius: var(--radius-md); background: var(--surface-sunken); color: var(--ink-3); }
+.task-stat-icon.is-accent { background: var(--accent-soft); color: var(--accent-ink); }
+.task-stat-icon.is-success { background: var(--success-soft); color: var(--success); }
+.task-stat-icon.is-danger { background: var(--danger-soft); color: var(--danger); }
+.task-stat-icon.is-warning { background: var(--warning-soft); color: var(--warning); }
+.task-stat.is-warning.is-selected { border-color: color-mix(in srgb, var(--warning) 45%, var(--line)); background: color-mix(in srgb, var(--warning-soft) 60%, var(--surface)); }
+/* 私密空间的缓存：锁形角标、暖色「私密」标签与左侧暖色细条，和普通文件一眼区分。 */
+.cached-tile { position: relative; display: inline-flex; flex: none; }
+/* 缓存记录的封面与文件名：能预览时点击单独打开。 */
+.cached-open { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.task-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+button.task-name-text:hover { color: var(--accent); }
+button.cached-tile:hover .file-tile { box-shadow: 0 0 0 2px var(--accent-soft); }
+.cached-open:focus-visible { border-radius: var(--radius-xs); outline: 2px solid var(--accent); outline-offset: 2px; }
+.cached-tile-lock { position: absolute; right: -4px; bottom: -3px; display: grid; width: 16px; height: 16px; place-items: center; border: 2px solid var(--surface); border-radius: 50%; background: var(--warning); color: var(--on-accent); }
+.cached-private-tag { display: inline-flex; flex: none; align-items: center; gap: 4px; padding: 0 8px; border-radius: var(--radius-xs); background: var(--warning-soft); color: var(--warning); font-size: var(--text-micro); font-weight: 500; line-height: 18px; }
+.task-table .task-item.is-private { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warning) 70%, transparent); background: color-mix(in srgb, var(--warning-soft) 28%, transparent); }
+.task-table .task-item.is-private:hover { background: color-mix(in srgb, var(--warning-soft) 45%, var(--surface-hover)); }
+.task-item.is-private .task-location > svg { color: var(--warning); }
+.cached-private-notice .notice-body { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; width: 100%; }
+.task-page > .cached-private-notice, .task-page .cached-private-notice { margin-bottom: 12px; }
+.task-stat-icon.is-live { animation: task-live 1.8s ease-in-out infinite; }
+@keyframes task-live { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 12%, transparent); } }
+.task-stat-copy { display: grid; min-width: 0; gap: 2px; }
+.task-stat-label { color: var(--ink-3); font-size: var(--text-xs); }
+.task-stat-value { overflow: hidden; color: var(--ink); font-size: var(--text-xl); font-weight: 600; line-height: var(--leading-display); text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.task-stat.is-danger .task-stat-value { color: var(--danger); }
+.task-stat-detail { overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.task-stats-progress { position: relative; height: 3px; margin-top: 12px; overflow: hidden; border-radius: var(--radius-pill); background: var(--line-soft); }
+.task-stats-progress > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, var(--surface))); transition: width var(--duration-slow) var(--ease-out); }
+.task-stats-progress.is-indeterminate > span { width: 30%; animation: task-sweep 1.4s ease-in-out infinite alternate; }
+@media (hover: hover) and (pointer: fine) {
+  button.task-stat:hover { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); transform: translateY(-1px); box-shadow: var(--shadow-md); }
+}
+.task-search { flex-wrap: wrap; gap: 8px 12px; margin-bottom: 12px; }
+.task-search .search-input { width: min(100%, 520px); }
+.task-name { display: flex; min-width: 0; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-name > svg { flex: none; color: var(--public, var(--accent)); }
+.task-lock-tile { display: grid; flex: none; width: 32px; height: 36px; place-items: center; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-3); }
+.task-progress.is-stopped > small { white-space: normal; }
+.task-item.is-done .task-figure { color: var(--ink); }
+.task-item.is-canceled, .task-item.is-paused { color: var(--ink-2); }
+.task-page .task-folder-notices { display: grid; gap: 8px; margin-bottom: 16px; }
+.task-folder-notice { align-items: flex-start; padding: 8px 12px; }
+.task-folder-notice > svg { margin-top: 4px; }
+.task-folder-notice .notice-body { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.task-folder-notice-main { min-width: 0; font-size: var(--text-xs); }
+.task-folder-notice p { margin: 2px 0 0; line-height: var(--leading-normal); overflow-wrap: anywhere; }
+.task-folder-notice .task-folder-notice-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-folder-notice-actions { display: flex; align-self: center; gap: 4px; }
+@media (max-width: 1100px) { .task-stats-grid.is-wide { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) {
+  .task-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .task-stats-grid > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .task-stat { gap: 8px; padding: 12px; }
+  .task-stat-icon { width: 30px; height: 30px; }
+  .task-stat-value { font-size: var(--text-lg); }
+  .task-search .search-input { width: 100%; }
+  .task-name { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav-count.is-live, .task-stat-icon.is-live, .task-stats-progress.is-indeterminate > span { animation: none; }
+  button.task-stat:hover { transform: none; }
+}
+

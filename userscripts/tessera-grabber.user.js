@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.22.0
+// @version      0.23.0
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -825,7 +825,9 @@
   const BATCH_DEFAULT = 100;
   const BATCH_MAX = 500;
   const DEFAULTS = { server: "", key: "", destination: "", destinationPrivate: false, cookies: true, fab: true, view: "list", siteMode: "exclude", excludeSites: [], includeSites: [],
-    cloudBatch: BATCH_DEFAULT };
+    cloudBatch: BATCH_DEFAULT, hideSmall: true };
+  /** 宽或高小于这个像素的图片多是图标、头像与表情：默认隐藏，筛选行里一键显示。 */
+  const SMALL_IMAGE = 200;
   const settings = () => ({ ...DEFAULTS, ...gm.get("settings", {}) });
   const saveSettings = value => gm.set("settings", { ...settings(), ...value });
 
@@ -2411,13 +2413,15 @@
     .root {
       --bg: #ffffff; --fg: #15161d; --muted: #6b6d7a; --faint: #a3a5b1; --line: rgba(20, 22, 40, .08); --line-strong: rgba(20, 22, 40, .16);
       --soft: rgba(20, 22, 40, .045); --hover: rgba(20, 22, 40, .04);
-      --accent: #4c5cf5; --accent-2: #8b5cf6; --accent-hover: #3f4fe6; --accent-soft: rgba(76, 92, 245, .1); --amber: #f0a22e;
+      /* 与 Tessera 网页同一套色彩：主按钮用墨色，青金蓝只用于选中、焦点、链接与进度。 */
+      --accent: #3550d4; --accent-hover: #2b45bd; --accent-soft: rgba(53, 80, 212, .1); --amber: #f0a22e;
+      --primary: #17171c; --primary-hover: #33333b; --on-primary: #ffffff;
       --danger: #e5484d; --success: #12a150;
-      --grad: linear-gradient(135deg, #4c5cf5 0%, #7c5cf6 55%, #a855f7 100%);
+      --grad: var(--accent);
       --glass: rgba(255, 255, 255, .9); --glass-line: rgba(255, 255, 255, .7);
       --text-md: 14px; --text-lg: 16px; --radius-lg: 10px; --radius-xl: 14px; --radius-panel: 20px;
       --shadow: 0 0 0 1px rgba(20, 22, 40, .06), 0 2px 6px rgba(20, 22, 40, .06), 0 24px 60px -12px rgba(30, 30, 80, .28);
-      --glow: 0 6px 20px -6px rgba(92, 80, 246, .55);
+      --glow: 0 1px 2px rgba(20, 22, 40, .12);
       --logo-bg: #0b0c13; --logo-tile: #fff; --logo-ring: transparent; --logo-plane: #f0a22e; --logo-fold: #c27a10;
       font: 13px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
       color: var(--fg); -webkit-font-smoothing: antialiased;
@@ -2426,10 +2430,11 @@
       .root {
         --bg: #16171f; --fg: #f2f3f7; --muted: #9a9cab; --faint: #6c6e7d; --line: rgba(255, 255, 255, .08); --line-strong: rgba(255, 255, 255, .16);
         --soft: rgba(255, 255, 255, .06); --hover: rgba(255, 255, 255, .05);
-        --accent: #8c96ff; --accent-2: #b48cff; --accent-hover: #a3abff; --accent-soft: rgba(140, 150, 255, .16); --danger: #ff6b70; --success: #3ddc84;
+        --accent: #8b9cff; --accent-hover: #a3b1ff; --accent-soft: rgba(139, 156, 255, .14); --danger: #ff6b70; --success: #3ddc84;
+        --primary: #ededf0; --primary-hover: #ffffff; --on-primary: #0e0e11;
         --glass: rgba(22, 23, 32, .9); --glass-line: rgba(255, 255, 255, .08);
         --shadow: 0 0 0 1px rgba(255, 255, 255, .06), 0 2px 6px rgba(0, 0, 0, .3), 0 28px 70px -12px rgba(0, 0, 0, .7);
-        --glow: 0 6px 22px -6px rgba(140, 120, 255, .6);
+        --glow: 0 1px 2px rgba(0, 0, 0, .4);
         --logo-ring: rgba(255, 255, 255, .16);
       }
     }
@@ -2702,10 +2707,6 @@
       animation: pop .22s cubic-bezier(.2, .9, .3, 1.2); transform-origin: bottom right; }
     /* 只做缩放位移不改透明度：动画被节流或暂停时面板仍然完整可见 */
     @keyframes pop { from { transform: translateY(8px) scale(.97); } }
-    /* 顶部一抹品牌光晕 */
-    .panel::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 120px; pointer-events: none; z-index: 0;
-      background: radial-gradient(120% 90% at 0% 0%, rgba(124, 92, 246, .16), transparent 60%),
-                  radial-gradient(80% 80% at 100% 0%, rgba(240, 162, 46, .12), transparent 60%); }
     .panel > * { position: relative; z-index: 1; }
     .panel > .layer { position: absolute; z-index: 3; }
     header { height: 60px; padding: 0 12px 0 18px; border-bottom: 1px solid var(--line); gap: 12px; }
@@ -2717,29 +2718,32 @@
     footer { padding: 12px 18px; background: color-mix(in srgb, var(--bg) 40%, transparent); }
     @media (max-width: 560px) { header { padding-left: 14px; } .body { padding: 14px; } footer { padding: 12px 14px; } }
 
-    /* 按钮：主按钮用品牌渐变与柔光 */
+    /* 按钮：主按钮用墨色（与 Tessera 网页一致），行内操作平时低调、悬停时才用强调色 */
     .icon-btn { border-radius: 9px; transition: background .15s, color .15s, transform .15s; }
     .icon-btn:active:not(:disabled) { transform: scale(.92); }
     .btn { height: 34px; border-radius: 10px; transition: background .15s, box-shadow .2s, transform .15s, filter .15s; }
     .btn:active:not(:disabled) { transform: translateY(1px); }
-    .btn.primary { background: var(--grad); box-shadow: var(--glow), inset 0 1px 0 rgba(255, 255, 255, .22); }
-    .btn.primary:hover:not(:disabled) { background: var(--grad); filter: brightness(1.08) saturate(1.1); box-shadow: 0 10px 26px -6px rgba(92, 80, 246, .6), inset 0 1px 0 rgba(255, 255, 255, .25); }
-    .icon-btn.accent { color: var(--accent); background: var(--accent-soft); }
-    .icon-btn.accent:hover:not(:disabled), .item.is-selected .icon-btn.accent { color: #fff; background: var(--grad); box-shadow: var(--glow); }
+    .btn.primary { background: var(--primary); color: var(--on-primary); box-shadow: var(--glow); }
+    .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
+    .icon-btn.accent { color: var(--muted); background: transparent; }
+    .item:hover .icon-btn.accent, .item:focus-within .icon-btn.accent { color: var(--accent); background: var(--accent-soft); }
+    .icon-btn.accent:hover:not(:disabled) { color: #fff; background: var(--accent); }
+    .item.is-selected .icon-btn.accent { color: var(--accent); background: var(--accent-soft); }
 
     /* 悬浮按钮：深色底座 + 渐变光环，角标用品牌琥珀色 */
     .fab { width: 42px; height: 42px; border: 0; background: radial-gradient(circle at 30% 25%, #2a2c3d, #0b0c13 70%);
-      box-shadow: 0 0 0 1.5px rgba(255, 255, 255, .08), 0 8px 24px -6px rgba(11, 12, 19, .55), 0 0 0 4px rgba(124, 92, 246, 0); }
+      box-shadow: 0 0 0 1.5px rgba(255, 255, 255, .08), 0 8px 24px -6px rgba(11, 12, 19, .55), 0 0 0 4px rgba(53, 80, 212, 0); }
     .fab::after { content: ""; position: absolute; inset: -2px; border-radius: 50%; padding: 2px; background: var(--grad); opacity: .0;
       -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; transition: opacity .2s; }
     .fab:hover::after, .fab.has-items::after { opacity: 1; }
-    .fab:hover { transform: scale(1.08); box-shadow: 0 0 0 1.5px rgba(255, 255, 255, .1), 0 12px 30px -6px rgba(92, 80, 246, .55); }
+    .fab:hover { transform: scale(1.08); box-shadow: 0 0 0 1.5px rgba(255, 255, 255, .1), 0 12px 30px -6px rgba(11, 12, 19, .55); }
     .badge { top: -3px; right: -3px; min-width: 18px; height: 18px; border-radius: 9px; line-height: 18px; background: var(--amber); color: #1a1205;
       box-shadow: 0 0 0 2px #0b0c13; z-index: 1; }
 
     /* 标签与筛选 */
     .chip { height: 28px; padding: 0 12px; border-radius: 14px; border: 0; background: var(--soft); transition: background .15s, color .15s; }
     .chip:hover { background: var(--line-strong); }
+    .chip-toggle { margin-left: auto; }
     .chip[aria-pressed=true] { background: var(--accent-soft); color: var(--accent); font-weight: 600; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent); }
     .section-head h2 { font-size: 13px; font-weight: 650; }
     .check { border-radius: 6px; }
@@ -2792,7 +2796,7 @@
     .hero-mark { background: var(--grad); color: #fff; box-shadow: var(--glow); }
     .dest { border-radius: 14px; border-color: var(--line); background: var(--soft); }
     .dest .tile { width: 36px; height: 36px; background: var(--bg); }
-    .dest.private { background: linear-gradient(135deg, rgba(76, 92, 245, .1), rgba(168, 85, 247, .1)); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+    .dest.private { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
     .dest.private .tile { background: var(--grad); color: #fff; box-shadow: var(--glow); }
     /* 批次状态：横幅与进度页摘要共用状态图标与语气色（run 渐变、ok 绿、warn 琥珀、err 红） */
     .status-icon { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; flex: none; color: #fff; background: var(--grad); box-shadow: var(--glow); }
@@ -2802,7 +2806,7 @@
     .tone-err .status-icon { background: linear-gradient(135deg, #ff6b6f, #e5484d); box-shadow: 0 6px 18px -6px rgba(229, 72, 77, .5); }
     .batch-banner { position: relative; display: flex; align-items: center; padding: 0; border-radius: 14px; background: var(--soft);
       box-shadow: inset 0 0 0 1px var(--line); transition: box-shadow .15s, background .15s; }
-    .batch-banner.tone-run { background: linear-gradient(135deg, rgba(76, 92, 245, .1), rgba(168, 85, 247, .1)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent); }
+    .batch-banner.tone-run { background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent); }
     .batch-banner:hover { box-shadow: inset 0 0 0 1px var(--line-strong); }
     .banner-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 10px 12px; text-align: left; border-radius: 14px; }
     .banner-open .meta { gap: 2px; }
@@ -3141,6 +3145,20 @@
   window.addEventListener("pointerup", () => { pointerDown = false; }, true);
   window.addEventListener("pointercancel", () => { pointerDown = false; }, true);
 
+  // 面板快捷键（焦点在面板内、不在输入框时）：A 全选／取消全选，V 切换列表与网格，⌘／Ctrl+Enter 服务器下载已勾选的资源。
+  window.addEventListener("keydown", event => {
+    if (!panel || panel.layer || panel.back || event.isComposing || event.target !== host) return;
+    const inner = shadow && shadow.activeElement || null;
+    if (inner && /^(INPUT|TEXTAREA|SELECT)$/.test(inner.tagName)) return;
+    const key = event.key.toLowerCase(), list = panel.querySelector(".list-host");
+    if (!event.metaKey && !event.ctrlKey && !event.altKey && key === "a" && list && list.toggleAll) list.toggleAll();
+    else if (!event.metaKey && !event.ctrlKey && !event.altKey && key === "v") { saveSettings({ view: settings().view === "grid" ? "list" : "grid" }); renderList(); }
+    else if ((event.metaKey || event.ctrlKey) && key === "enter" && selected.size) startBatch([...selected], "server");
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+
   // ESC：有上一级时返回，主面板时关闭。只处理焦点在面板内或页面上没有焦点的情况，不打断网页输入框；全屏时交给网页。
   window.addEventListener("keydown", event => {
     if (event.key !== "Escape" || !panel || document.fullscreenElement || event.isComposing) return;
@@ -3325,7 +3343,12 @@
     const counts = all.reduce((acc, item) => ({ ...acc, [item.type]: (acc[item.type] || 0) + 1 }), {});
     const types = Object.keys(TYPE_LABEL).filter(type => counts[type]);
     if (filter !== "all" && !counts[filter]) filter = "all";
-    const shown = all.filter(item => filter === "all" || item.type === filter);
+    const hideSmall = settings().hideSmall !== false;
+    const isSmall = item => { const dims = item.type === "image" && (resourceMeta.get(item.url) || {}).dims; return Boolean(dims && (dims[0] < SMALL_IMAGE || dims[1] < SMALL_IMAGE)); };
+    const typed = all.filter(item => filter === "all" || item.type === filter);
+    const small = typed.filter(isSmall).length;
+    // 已勾选的小图仍然显示，避免隐藏后看不到却被一起发送。
+    const shown = hideSmall ? typed.filter(item => !isSmall(item) || selected.has(item.url)) : typed;
     // 全选只作用于当前筛选下显示、且尚未发送过的资源。
     const pickable = shown.filter(item => !sent.has(item.url));
     const picked = pickable.filter(item => selected.has(item.url)).length;
@@ -3375,12 +3398,15 @@
     parts.check.className = `check${picked ? " on" : ""}`;
     parts.check.replaceChildren(svg(allPicked ? "check" : "minus", 12, 3));
     // 筛选标签只在种类或数量变化时重建。
-    const chipKey = types.length > 1 ? `${filter}|${types.map(type => `${type}:${counts[type]}`).join(",")}` : "";
+    const chipKey = types.length > 1 || small ? `${filter}|${types.map(type => `${type}:${counts[type]}`).join(",")}|${small}|${hideSmall}` : "";
     if (parts.chips.dataset.key !== chipKey) {
       parts.chips.dataset.key = chipKey;
       const chip = (value, label) => h("button", { type: "button", className: "chip", "aria-pressed": String(filter === value),
         onclick: () => { filter = value; renderList(); } }, label);
-      parts.chips.replaceChildren(...(chipKey ? [chip("all", "全部"), ...types.map(type => chip(type, `${TYPE_LABEL[type]} ${counts[type]}`))] : []));
+      const smallChip = small ? [h("button", { type: "button", className: "chip chip-toggle", "aria-pressed": String(!hideSmall),
+        title: `宽或高小于 ${SMALL_IMAGE} 像素的图片（多是图标、头像）`,
+        onclick: () => { saveSettings({ hideSmall: !hideSmall }); renderList(); } }, hideSmall ? `显示 ${small} 张小图` : "隐藏小图")] : [];
+      parts.chips.replaceChildren(...(types.length > 1 ? [chip("all", "全部"), ...types.map(type => chip(type, `${TYPE_LABEL[type]} ${counts[type]}`))] : []), ...smallChip);
     }
     parts.chips.hidden = !chipKey;
     syncChildren(parts.list, shown.map(item => {

@@ -439,16 +439,19 @@ class TraceStore:
 
     # ---------- 用量 ----------
 
-    def add_usage(self, user_id: int, model_id: int, input_tokens: int, output_tokens: int, runs: int = 0) -> None:
+    def add_usage(self, user_id: int, model_id: int, input_tokens: int, output_tokens: int, runs: int = 0,
+                  cached_tokens: int = 0) -> None:
         with self.metadata.transaction() as db:
-            db.execute("INSERT INTO assistant_usage(user_id,day,model_id,input_tokens,output_tokens,runs) VALUES(?,?,?,?,?,?) "
+            db.execute("INSERT INTO assistant_usage(user_id,day,model_id,input_tokens,output_tokens,runs,cached_tokens) VALUES(?,?,?,?,?,?,?) "
                        "ON CONFLICT(user_id,day,model_id) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,"
-                       "output_tokens=output_tokens+excluded.output_tokens, runs=runs+excluded.runs",
-                       (user_id, today(), model_id, input_tokens, output_tokens, runs))
+                       "output_tokens=output_tokens+excluded.output_tokens, runs=runs+excluded.runs, "
+                       "cached_tokens=cached_tokens+excluded.cached_tokens",
+                       (user_id, today(), model_id, input_tokens, output_tokens, runs, cached_tokens))
 
     def tokens_today(self, user_id: int) -> int:
-        row = self.metadata.db.execute("SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM assistant_usage WHERE user_id=? AND day=?",
-                                       (user_id, today())).fetchone()
+        """今天计入额度的 token：缓存命中的输入按十分之一计（与 config.billable 一致）。"""
+        row = self.metadata.db.execute("SELECT COALESCE(SUM(input_tokens+output_tokens-cached_tokens+cached_tokens/10),0) "
+                                       "FROM assistant_usage WHERE user_id=? AND day=?", (user_id, today())).fetchone()
         return int(row[0])
 
     def usage_by_day(self, *, days: int = 30, user_id: int | None = None) -> list[dict[str, object]]:
