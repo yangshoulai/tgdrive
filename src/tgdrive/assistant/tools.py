@@ -917,7 +917,7 @@ async def find_large_files(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("find_duplicates", "查找重复文件", "browse", "read",
-      "按内容找出完全相同的文件组（同一份数据或相同内容指纹），按可节省空间排序。每组列出全部副本路径（超过上限时 paths_truncated 为 true），"
+      "按内容找出完全相同的文件组（相同内容指纹；没有指纹的文件按相同的内容摘要 ETag 与大小），按可节省空间排序。每组列出全部副本路径（超过上限时 paths_truncated 为 true），"
       "组数与每组路径数的上限由管理员设置；total_groups 是全部重复组数，next_offset 不为空时用 offset 继续读取下一批。",
       {"path": PATH, "min_size": {"type": "integer", "description": "只看不小于该字节数的文件，默认 1"},
        "offset": {"type": "integer", "description": "从第几组开始，默认 0"}, "limit": LIMIT_ARG},
@@ -932,16 +932,20 @@ async def find_duplicates(ctx: ToolContext, args: dict) -> ToolOutput:
              f"AND substr(o.key,-1)!='/' AND {ctx.hide('o.key')} AND o.size>=?")
     params = (ctx.bucket_id, prefix, prefix + END, max(min_size, 1))
 
+    # 内容相同的判断：有内容指纹时按指纹；没有指纹时（例如离线下载的分段不是 16 MiB 的整数倍，相同内容也不会合并成一个 Blob）
+    # 按内容摘要 ETag 与大小，否则同一部电影下载两次会被说成「不重复」。复制得到的副本共用 Blob 与 ETag，同样归为一组。
+    content = "COALESCE(b.fingerprint, 'etag:' || o.etag || ':' || o.size)"
+
     def read():
         # objects 与 blobs 都有 size 列，聚合结果必须另起别名，否则 ORDER BY 报列名歧义。
-        grouped = (f"SELECT COALESCE(b.fingerprint, o.blob_uuid) AS content, COUNT(*) AS copies, MAX(o.size) AS file_size "
+        grouped = (f"SELECT {content} AS content, COUNT(*) AS copies, MAX(o.size) AS file_size "
                    f"{scope} GROUP BY content HAVING copies>1")
         total, reclaimable = ctx.db.execute(f"SELECT COUNT(*), COALESCE(SUM(file_size*(copies-1)),0) FROM ({grouped})", params).fetchone()
         rows = ctx.db.execute(f"{grouped} ORDER BY file_size*(copies-1) DESC, content LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
         groups = []
         for row in rows:
             paths = [ctx.display(r["key"]) for r in ctx.db.execute(
-                f"SELECT o.key {scope} AND COALESCE(b.fingerprint, o.blob_uuid)=? ORDER BY o.key LIMIT ?",
+                f"SELECT o.key {scope} AND {content}=? ORDER BY o.key LIMIT ?",
                 (*params, row["content"], max_paths + 1))]
             group = {"copies": int(row["copies"]), "size": int(row["file_size"]),
                      "reclaimable": int(row["file_size"]) * (int(row["copies"]) - 1), "paths": paths[:max_paths]}

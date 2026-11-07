@@ -599,6 +599,27 @@ class AssistantTests(AssistantCase):
             self.assertEqual(last["groups"][0]["size"], 100)
         self.run_async(run())
 
+    def test_duplicates_without_fingerprint_match_by_etag(self):
+        async def run():
+            await self.setup_assistant()
+            # 同一部电影下载了两次：内容相同、ETag 相同，没有内容指纹，是两个独立的 Blob。
+            await self.put("movies/a.mp4", MEDIA_MAGIC[".mp4"] + b"m" * 200)
+            with self.app.metadata.transaction() as db:
+                db.execute("UPDATE blobs SET fingerprint=NULL")
+            await self.put("movies/b.mp4", MEDIA_MAGIC[".mp4"] + b"m" * 200)
+            with self.app.metadata.transaction() as db:
+                db.execute("UPDATE blobs SET fingerprint=NULL")
+            blobs = {row[0] for row in self.app.metadata.db.execute("SELECT blob_uuid FROM objects WHERE key LIKE 'movies/%'")}
+            self.assertEqual(len(blobs), 2, "没有指纹时不会合并")
+            await self.put("movies/c.mp4", MEDIA_MAGIC[".mp4"] + b"x" * 200)
+            user = await self.client.login("user", "alice@example.com", "alice password")
+            conversation = await self.start_conversation(user)
+            self.model.replies = [Reply(tool_calls=[ToolCall("1", "find_duplicates", '{"path": "/movies"}')]), answer("好")]
+            await self.send(user, conversation, "查重")
+            result = next(m["result"] for m in await self.messages(user, conversation) if m["role"] == "tool")
+            self.assertEqual([group["paths"] for group in result["groups"]], [["/movies/a.mp4", "/movies/b.mp4"]])
+        self.run_async(run())
+
     def test_tool_budget_does_not_execute_extra_calls(self):
         async def run():
             admin, _, _ = await self.setup_assistant()
