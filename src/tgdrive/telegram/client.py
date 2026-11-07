@@ -299,3 +299,43 @@ class TelegramClient:
 
     async def delete_message(self, chat_id: int | str, message_id: int) -> None:
         await self._api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+
+    # ---------- 交互机器人（telegram/bot.py）：长轮询收消息、回复与按钮回调 ----------
+
+    async def get_updates(self, offset: int | None, *, timeout: int = 25) -> list[Mapping[str, Any]]:
+        payload: dict[str, Any] = {"timeout": timeout, "allowed_updates": ["message", "callback_query"]}
+        if offset is not None:
+            payload["offset"] = offset
+        return list(await self._api("getUpdates", payload) or [])
+
+    async def delete_webhook(self) -> None:
+        # 设置过 Webhook 的 Bot 不能用 getUpdates 收消息；保存交互机器人时先移除（不丢弃待处理的消息）。
+        await self._api("deleteWebhook", {"drop_pending_updates": False})
+
+    async def send_message(self, chat_id: int | str, text: str, *, html: bool = False,
+                           buttons: list[list[Mapping[str, str]]] | None = None, reply_to: int | None = None) -> Mapping[str, Any]:
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "link_preview_options": {"is_disabled": True}}
+        if html:
+            payload["parse_mode"] = "HTML"
+        if buttons:
+            payload["reply_markup"] = {"inline_keyboard": buttons}
+        if reply_to is not None:
+            payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+        return await self._api("sendMessage", payload)
+
+    async def edit_message_text(self, chat_id: int | str, message_id: int, text: str, *, html: bool = False,
+                                buttons: list[list[Mapping[str, str]]] | None = None) -> None:
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text,
+                                   "link_preview_options": {"is_disabled": True}, "reply_markup": {"inline_keyboard": buttons or []}}
+        if html:
+            payload["parse_mode"] = "HTML"
+        await self._api("editMessageText", payload)
+
+    async def answer_callback_query(self, callback_id: str, text: str = "") -> None:
+        await self._api("answerCallbackQuery", {"callback_query_id": callback_id, **({"text": text} if text else {})})
+
+    async def send_chat_action(self, chat_id: int | str, action: str = "typing") -> None:
+        await self._api("sendChatAction", {"chat_id": chat_id, "action": action})
+
+    async def set_my_commands(self, commands: list[tuple[str, str]]) -> None:
+        await self._api("setMyCommands", {"commands": [{"command": name, "description": text} for name, text in commands]})

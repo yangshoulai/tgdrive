@@ -1,15 +1,17 @@
-/** 媒体库：跨文件夹浏览「最近」（按天分组的最近文件）与「相册」（图片）、「影视」（视频）、「音乐」（音频）。
+/** 媒体库：跨文件夹浏览「最近」（按天分组的最近文件）、「星标」（加了星标的文件）与「相册」（图片）、「影视」（视频）、「音乐」（音频）。
  * 相册与影视首页按所在文件夹分组（GET /api/user/v1/library/folders），打开文件夹只列其中直接包含的这类文件；
- * 音乐按标签里的专辑名归类（GET /library/albums，同名专辑合为一张，没有专辑的归为「无专辑」）。
+ * 音乐分「专辑」与「歌单」两个标签：专辑按标签里的专辑名归类（GET /library/albums，同名专辑合为一张，没有专辑的归为「无专辑」），
+ * 歌单是用户自己整理的歌曲列表（/playlists，顺序可调整）。
  * 搜索按相对路径（音乐另含歌名、艺人、专辑）匹配，结果按文件夹（音乐按专辑）分段。数据只含普通文件；预览挂在应用外壳上，播放列表不限同一文件夹。 */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
 import { FileThumbnail, FileVisual, baseName, canPreview, getFileKind, kindLabel, parentPath } from "../files";
 import { coverTint } from "../preview-media";
-import { Button, EmptyState, Icon, PageHeader, SearchInput, SkeletonRows, formatBytes, toast, useDocumentTitle, type IconName } from "../ui";
+import { Button, ConfirmDialog, EmptyState, Icon, Menu, PageHeader, SearchInput, SkeletonRows, Tabs, formatBytes, toast, useDocumentTitle, type IconName, type MenuItem } from "../ui";
 import { BRAND } from "../brand";
 import { usePreview } from "./preview-host";
 import { useThumbnailPolling } from "./thumbnail-polling";
+import { PlaylistNameDialog, useAddToPlaylist } from "./playlists";
 
 export type MediaView = "photos" | "videos" | "music";
 /** 一个文件夹最多读多少个文件（影视与音乐按名称排序，需要读完）。 */
@@ -178,6 +180,73 @@ export function RecentView({ onOpenFolder }: { onOpenFolder: (prefix: string) =>
   </div>;
 }
 
+/* ---------- 星标 ---------- */
+
+/** 星标：普通空间里加了星标的文件，最近加星标的在前，按加星标的日期分组；行尾的星标按钮取消星标。 */
+export function StarredView({ onOpenFolder }: { onOpenFolder: (prefix: string) => void }) {
+  useDocumentTitle(`星标 · ${BRAND}`);
+  const search = useSearch();
+  const [items, setItems] = useState<api.FileItem[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true), [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const busy = useRef(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    setItems([]); setCursor(null); setLoading(true); setError("");
+    api.starredFiles({ q: search.query, limit: 120 }, controller.signal).then(page => { setItems(page.objects); setCursor(page.next_cursor); setLoading(false); },
+      reason => { if (!controller.signal.aborted) { setError(api.errorMessage(reason, "读取失败，请稍后重试")); setLoading(false); } });
+    return () => controller.abort();
+  }, [search.query, attempt]);
+  const more = useCallback(() => {
+    if (!cursor || busy.current) return;
+    busy.current = true; setLoadingMore(true);
+    api.starredFiles({ q: search.query, limit: 120, cursor }).then(page => { setItems(list => list.concat(page.objects)); setCursor(page.next_cursor); },
+      reason => toast.error(api.errorMessage(reason, "读取失败，请稍后重试"))).finally(() => { busy.current = false; setLoadingMore(false); });
+  }, [cursor, search.query]);
+  useThumbnailPolling(items, !loading, setItems, () => undefined);
+  const open = usePreviewOpener(items);
+  const groups = useMemo(() => groupBy(items, item => dayGroup(item.starred_at ?? item.modified_at)), [items]);
+  async function unstar(item: api.FileItem) {
+    try {
+      await api.setStarred([item.key], false);
+      setItems(list => list.filter(entry => entry.key !== item.key));
+      toast.success(`已取消「${baseName(item.key)}」的星标`, { label: "撤销", onClick: () => void api.setStarred([item.key], true).then(() => setAttempt(value => value + 1)) });
+    } catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
+  }
+  return <div className="library-view">
+    <PageHeader title="星标" description="加了星标的文件，不论放在哪个文件夹；在文件的更多操作里加星标，或选中后按 * 键。" />
+    <LibrarySearch search={search} placeholder="按文件名或文件夹名搜索加了星标的文件" />
+    <LibraryState loading={loading} error={error} onRetry={() => setAttempt(value => value + 1)}
+      empty={!items.length ? search.query
+        ? <EmptyState icon="search" title="没有找到文件" description={`没有路径包含「${search.query}」的星标文件。`} />
+        : <EmptyState icon="star" title="还没有星标文件" description="在文件的更多操作里选择「加星标」，常用的文件会集中出现在这里。" /> : null}>
+      {groups.map(group => <section key={group.label} className="library-group">
+        <h2 className="library-group-title">{group.label}<span>{group.items.length} 个</span></h2>
+        <ul className="library-list">
+          {group.items.map(item => {
+            const kind = getFileKind(item.content_type, item.key), folder = parentPath(item.key);
+            return <li key={item.key} className="library-row">
+              <button type="button" className="library-row-main" onClick={() => canPreview(kind, item.key, item.content_type) ? open(item) : onOpenFolder(folder)}>
+                <FileVisual kind={kind} src={api.fileThumbnail(item)} size="lg" />
+                <span className="library-row-text"><strong>{baseName(item.key)}</strong>
+                  <span>{kindLabel(kind)} · {formatBytes(item.size)}</span></span>
+              </button>
+              <button type="button" className="library-row-folder" title={`打开 ${folderLabel(folder)}`} onClick={() => onOpenFolder(folder)}>
+                <Icon name="folder" size={14} /><span>{folderLabel(folder)}</span>
+              </button>
+              <button type="button" className="icon-btn icon-btn-ghost icon-btn-sm star-toggle is-starred" aria-label={`取消「${baseName(item.key)}」的星标`}
+                title="取消星标" onClick={() => void unstar(item)}><Icon name="star" filled size={16} /></button>
+            </li>;
+          })}
+        </ul>
+      </section>)}
+      <LoadMore active={Boolean(cursor)} loading={loadingMore} onMore={more} />
+    </LibraryState>
+  </div>;
+}
+
 /* ---------- 相册、影视、音乐 ---------- */
 
 const trackNumber = (item: api.FileItem) => parseInt(item.media?.track ?? "", 10) || Number.MAX_SAFE_INTEGER;
@@ -191,20 +260,31 @@ function ordered(view: MediaView, items: api.LibraryItem[]) {
 const albumName = (album: string) => album || "无专辑";
 const albumOf = (item: api.FileItem) => item.media?.album?.trim() ?? "";
 
-/** 媒体库三页的入口：group 为 null 时显示分组（或搜索结果），否则打开这一组——相册与影视是文件夹（"" 为根目录），音乐是专辑（"" 为无专辑）。 */
-export function MediaLibraryView({ view, group: folder, onOpenGroup: onOpenFolder, onOpenLocation }: {
-  view: MediaView; group: string | null; onOpenGroup: (group: string | null) => void; onOpenLocation: (prefix: string) => void;
+/** 媒体库三页的入口。place 是地址里的位置（user.tsx 的 prefix）：空串为首页；"/<名称>" 打开一组——相册与影视是文件夹（"" 为根目录），
+ * 音乐是专辑（"" 为无专辑）；音乐另有 "playlists"（歌单标签）与 "playlist:<编号>"（打开一个歌单）。 */
+export function MediaLibraryView({ view, place, onPlace, onOpenLocation }: {
+  view: MediaView; place: string; onPlace: (place: string) => void; onOpenLocation: (prefix: string) => void;
 }) {
   const search = useSearch();
   const config = VIEWS[view];
-  useDocumentTitle(`${folder !== null ? `${view === "music" ? albumName(folder) : folderName(folder)} · ` : ""}${config.title} · ${BRAND}`);
+  const folder = place.startsWith("/") ? place.slice(1) : null;
+  const onOpenFolder = (group: string | null) => onPlace(group === null ? "" : `/${group}`);
+  const playlist = view === "music" && place.startsWith("playlist:") ? Number(place.slice(9)) || null : null;
+  const tab = place === "playlists" ? "playlists" : "albums";
+  useDocumentTitle(`${folder !== null ? `${view === "music" ? albumName(folder) : folderName(folder)} · ` : tab === "playlists" ? "歌单 · " : ""}${config.title} · ${BRAND}`);
   if (view === "music") {
-    if (folder !== null) return <MusicAlbum key={folder} album={folder} onBack={() => onOpenFolder(null)} />;
+    if (playlist !== null) return <PlaylistPage key={playlist} id={playlist} onBack={() => onPlace("playlists")} onOpenLocation={onOpenLocation} />;
+    if (folder !== null) return <MusicAlbum key={folder} album={folder} onBack={() => onOpenFolder(null)} onOpenLocation={onOpenLocation} />;
     return <div className="library-view">
-      <PageHeader title={config.title} description={config.description} actions={<PlayAllMusic />} />
-      <LibrarySearch search={search} placeholder="搜索歌名、艺人、专辑、文件名或文件夹" />
-      {search.query ? <MediaSearch key={search.query} view={view} query={search.query} onOpenFolder={onOpenFolder} />
-        : <MusicAlbums onOpenAlbum={onOpenFolder} />}
+      <PageHeader title={config.title} description={tab === "playlists" ? "你整理的歌单：从专辑、搜索结果或文件列表把歌曲加入歌单，顺序可以随时调整。" : config.description}
+        actions={tab === "albums" ? <PlayAllMusic /> : <NewPlaylistButton onCreated={id => onPlace(`playlist:${id}`)} />} />
+      <Tabs label="音乐浏览方式" className="library-tabs" value={tab} onChange={value => onPlace(value === "playlists" ? "playlists" : "")}
+        options={[{ value: "albums", label: "专辑", icon: "music" }, { value: "playlists", label: "歌单", icon: "playlist" }]} />
+      {tab === "playlists" ? <PlaylistsHome onOpen={id => onPlace(`playlist:${id}`)} /> : <>
+        <LibrarySearch search={search} placeholder="搜索歌名、艺人、专辑、文件名或文件夹" />
+        {search.query ? <MediaSearch key={search.query} view={view} query={search.query} onOpenFolder={onOpenFolder} onOpenLocation={onOpenLocation} />
+          : <MusicAlbums onOpenAlbum={onOpenFolder} />}
+      </>}
     </div>;
   }
   if (folder !== null) return <MediaFolder key={`${view}:${folder}`} view={view} folder={folder} onBack={() => onOpenFolder(null)} onOpenLocation={onOpenLocation} />;
@@ -212,7 +292,7 @@ export function MediaLibraryView({ view, group: folder, onOpenGroup: onOpenFolde
     <PageHeader title={config.title} description={config.description} />
     <LibrarySearch search={search} placeholder={`按文件名或文件夹名搜索${config.noun}`} />
     {search.query
-      ? <MediaSearch key={`${view}:${search.query}`} view={view} query={search.query} onOpenFolder={onOpenFolder} />
+      ? <MediaSearch key={`${view}:${search.query}`} view={view} query={search.query} onOpenFolder={onOpenFolder} onOpenLocation={onOpenLocation} />
       : <MediaFolders key={view} view={view} onOpenFolder={onOpenFolder} />}
   </div>;
 }
@@ -261,11 +341,12 @@ function FolderCover({ view, folder }: { view: "photos" | "videos"; folder: api.
   </span>;
 }
 
-function MediaSearch({ view, query, onOpenFolder }: { view: MediaView; query: string; onOpenFolder: (folder: string) => void }) {
+function MediaSearch({ view, query, onOpenFolder, onOpenLocation }: { view: MediaView; query: string; onOpenFolder: (folder: string) => void; onOpenLocation: (prefix: string) => void }) {
   const config = VIEWS[view];
   const library = useLibrary(view, { q: query, page: 200 });
   useThumbnailPolling(library.items, !library.loading, library.setItems, () => undefined);
   const open = usePreviewOpener(library.items);
+  const adding = useAddToPlaylist();
   // 音乐按专辑分段（专辑名排序，无专辑在最后），其余按文件夹（服务端按路径返回，同一文件夹相邻）。
   const groups = useMemo(() => {
     if (view !== "music") return groupBy(library.items, item => parentPath(item.key)).map(group => ({ ...group, items: ordered(view, group.items) }));
@@ -281,10 +362,20 @@ function MediaSearch({ view, query, onOpenFolder }: { view: MediaView; query: st
           <Icon name={view === "music" ? "music" : "folder"} size={16} />{view === "music" ? albumName(group.label) : folderLabel(group.label)}</button>
         <span>{group.items.length} {config.unit}</span>
       </h2>
-      <MediaItems view={view} items={group.items} open={file => open(file, group.items)} />
+      <MediaItems view={view} items={group.items} open={file => open(file, group.items)}
+        menu={view === "music" ? track => trackMenu(track, adding.open, onOpenLocation) : undefined} />
     </section>)}
     <LoadMore active={library.hasMore} loading={library.loadingMore} onMore={library.more} />
+    {adding.dialog}
   </LibraryState>;
+}
+
+/** 曲目的更多操作：加入歌单、打开所在文件夹；歌单页在前面另加调整顺序与移除。 */
+function trackMenu(track: api.LibraryItem, addToPlaylist: (files: api.FileItem[]) => void, onOpenLocation: (prefix: string) => void): MenuItem[] {
+  return [
+    { label: "添加到歌单…", icon: "playlist", onSelect: () => addToPlaylist([track]) },
+    { label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenLocation(parentPath(track.key)) },
+  ];
 }
 
 function MediaFolder({ view, folder, onBack, onOpenLocation }: { view: "photos" | "videos"; folder: string; onBack: () => void; onOpenLocation: (prefix: string) => void }) {
@@ -323,7 +414,8 @@ function MediaFolder({ view, folder, onBack, onOpenLocation }: { view: "photos" 
 }
 
 /** 一组文件：照片是方形网格，影视是带名称与时长的横向封面，音乐是曲目列表。 */
-function MediaItems({ view, items, open }: { view: MediaView; items: api.LibraryItem[]; open: (file: api.LibraryItem) => void }) {
+function MediaItems({ view, items, open, menu }: { view: MediaView; items: api.LibraryItem[]; open: (file: api.LibraryItem) => void;
+  /** 音乐曲目行尾的更多操作菜单。 */ menu?: (track: api.LibraryItem, index: number) => MenuItem[] }) {
   if (view === "photos") return <div className="photo-grid">
     {items.map(item => <button key={item.key} type="button" className="photo-tile" title={baseName(item.key)} onClick={() => open(item)}>
       <FileThumbnail kind="image" url={api.fileThumbnail(item, "grid")} placeholder={api.fileThumbnail(item)} />
@@ -353,6 +445,7 @@ function MediaItems({ view, items, open }: { view: MediaView; items: api.Library
           <span title={track.key}>{[track.media?.artist, folderLabel(parentPath(track.key))].filter(Boolean).join(" · ")}</span></span>
         <span className="track-duration">{clock(track.media?.duration)}</span>
       </button>
+      {menu && <span className="track-menu"><Menu label={`${trackTitle(track)} 的更多操作`} items={menu(track, index)} /></span>}
     </li>)}
   </ol>;
 }
@@ -360,11 +453,11 @@ function MediaItems({ view, items, open }: { view: MediaView; items: api.Library
 /* ---------- 音乐：按专辑 ---------- */
 
 /** 专辑封面：用排在最前的歌曲的封面（第一首没有封面时依次往后找）；都没有时用按专辑名选的色调。 */
-function AlbumCover({ album, tracks, size = "md" }: { album: string; tracks: api.LibraryItem[]; size?: "md" | "lg" }) {
+function AlbumCover({ album, tracks, size = "md", icon = "music" }: { album: string; tracks: api.LibraryItem[]; size?: "md" | "lg"; icon?: IconName }) {
   const cover = tracks.find(track => api.fileThumbnail(track));
   return <span className={`album-cover album-cover-${size}`} style={{ "--cover-tint": coverTint(album || "无专辑") } as CSSProperties}>
     {cover ? <FileThumbnail kind="audio" url={api.fileThumbnail(cover, "grid")} placeholder={api.fileThumbnail(cover)} />
-      : <span className="tint-cover"><Icon name="music" size={size === "lg" ? 40 : 28} /></span>}
+      : <span className="tint-cover"><Icon name={icon} size={size === "lg" ? 40 : 28} /></span>}
   </span>;
 }
 
@@ -421,8 +514,9 @@ function PlayAllMusic() {
   return <Button variant="primary" icon="play" loading={busy} onClick={() => void play()}>全部播放</Button>;
 }
 
-function MusicAlbum({ album, onBack }: { album: string; onBack: () => void }) {
+function MusicAlbum({ album, onBack, onOpenLocation }: { album: string; onBack: () => void; onOpenLocation: (prefix: string) => void }) {
   const library = useLibrary("music", { album, all: true });
+  const adding = useAddToPlaylist();
   useThumbnailPolling(library.items, !library.loading, library.setItems, () => undefined);
   const tracks = useMemo(() => ordered("music", library.items), [library.items]);
   const open = usePreviewOpener(tracks);
@@ -441,13 +535,151 @@ function MusicAlbum({ album, onBack }: { album: string; onBack: () => void }) {
         {!library.loading && <p>{[album ? artist : null, album ? year : null, `${tracks.length} 首`, total ? clock(total) : null].filter(Boolean).join(" · ")}</p>}
         <div className="album-header-actions">
           {tracks.length > 0 && <Button variant="primary" icon="play" onClick={() => open(tracks[0])}>全部播放</Button>}
+          {tracks.length > 0 && <Button icon="playlist" onClick={() => adding.open(tracks)}>添加到歌单</Button>}
         </div>
       </div>
     </header>
     <LibraryState loading={library.loading} error={library.error} onRetry={library.reload}
       empty={!tracks.length ? <EmptyState icon="music" title="这张专辑里没有歌曲" description="歌曲可能已被移动、删除或修改了专辑信息。" /> : null}>
-      <MediaItems view="music" items={tracks} open={file => open(file)} />
+      <MediaItems view="music" items={tracks} open={file => open(file)} menu={track => trackMenu(track, adding.open, onOpenLocation)} />
     </LibraryState>
+    {adding.dialog}
+  </div>;
+}
+
+/* ---------- 音乐：歌单 ---------- */
+
+function shuffled<T>(items: T[]) {
+  const list = [...items];
+  for (let index = list.length - 1; index > 0; index--) {
+    const other = Math.floor(Math.random() * (index + 1));
+    [list[index], list[other]] = [list[other], list[index]];
+  }
+  return list;
+}
+
+function NewPlaylistButton({ onCreated }: { onCreated: (id: number) => void }) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <Button variant="primary" icon="plus" onClick={() => setOpen(true)}>新建歌单</Button>
+    {open && <PlaylistNameDialog title="新建歌单" confirm="创建" onClose={() => setOpen(false)}
+      onSubmit={async name => { const playlist = await api.createPlaylist(name); setOpen(false); onCreated(playlist.id); }} />}
+  </>;
+}
+
+/** 歌单封面：前四首都有封面时拼成四宫格，否则用第一张封面；都没有时用按名称选的色调。 */
+function PlaylistCover({ playlist, size = "md" }: { playlist: Pick<api.Playlist, "name" | "samples">; size?: "md" | "lg" }) {
+  const covers = playlist.samples.filter(item => api.fileThumbnail(item));
+  if (covers.length >= 4) return <span className={`album-cover album-cover-${size} is-mosaic`}>{covers.slice(0, 4).map(item =>
+    <span key={item.key}><FileThumbnail kind="audio" url={api.fileThumbnail(item, "grid")} placeholder={api.fileThumbnail(item)} /></span>)}</span>;
+  return <AlbumCover album={playlist.name} tracks={covers} size={size} icon="playlist" />;
+}
+
+function PlaylistsHome({ onOpen }: { onOpen: (id: number) => void }) {
+  const [lists, setLists] = useState<api.Playlist[] | null>(null);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLists(null); setError("");
+    api.playlists(controller.signal).then(result => setLists(result.playlists), reason => {
+      if (!controller.signal.aborted) setError(api.errorMessage(reason, "读取失败，请稍后重试"));
+    });
+    return () => controller.abort();
+  }, [attempt]);
+  return <LibraryState loading={!lists && !error} error={error} onRetry={() => setAttempt(value => value + 1)}
+    empty={lists && !lists.length ? <EmptyState icon="playlist" title="还没有歌单" description="点右上角「新建歌单」，或在专辑、搜索结果和文件列表里选择「添加到歌单」。" /> : null}>
+    <p className="library-summary">{lists?.length ?? 0} 个歌单</p>
+    <div className="media-folders is-music">
+      {(lists ?? []).map(item => <button key={item.id} type="button" className="media-folder" onClick={() => onOpen(item.id)} title={item.name}>
+        <PlaylistCover playlist={item} />
+        <strong>{item.name}</strong>
+        <span>{[`${item.count} 首`, item.duration ? clock(item.duration) : null].filter(Boolean).join(" · ")}</span>
+      </button>)}
+    </div>
+  </LibraryState>;
+}
+
+function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () => void; onOpenLocation: (prefix: string) => void }) {
+  const [info, setInfo] = useState<api.PlaylistInfo | null>(null);
+  const [tracks, setTracks] = useState<api.LibraryItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [renaming, setRenaming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const adding = useAddToPlaylist();
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true); setError("");
+    void (async () => {
+      try {
+        let cursor: string | null = "", items: api.LibraryItem[] = [], playlist: api.PlaylistInfo | null = null;
+        do {
+          const page = await api.playlistItems(id, cursor ?? "", 500, controller.signal);
+          playlist = page.playlist; items = items.concat(page.objects); cursor = page.next_cursor;
+        } while (cursor && !controller.signal.aborted);
+        setInfo(playlist); setTracks(items);
+      } catch (reason) {
+        if (!controller.signal.aborted) setError(api.errorMessage(reason, "歌单读取失败，请稍后重试"));
+      } finally { if (!controller.signal.aborted) setLoading(false); }
+    })();
+    return () => controller.abort();
+  }, [id, attempt]);
+  useThumbnailPolling(tracks, !loading, setTracks, () => undefined);
+  useTagFill(tracks, setTracks);
+  const open = usePreviewOpener(tracks);
+  useDocumentTitle(`${info?.name ?? "歌单"} · 音乐 · ${BRAND}`);
+  const total = tracks.reduce((sum, track) => sum + (track.media?.duration ?? 0), 0);
+  async function change(update: Parameters<typeof api.updatePlaylist>[1], apply: (list: api.LibraryItem[]) => api.LibraryItem[], message?: string) {
+    const before = tracks;
+    setTracks(apply);
+    try { const result = await api.updatePlaylist(id, update); setInfo(result); if (message) toast.success(message); }
+    catch (reason) { setTracks(before); toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
+  }
+  const moveTo = (track: api.LibraryItem, target: number) => {
+    const without = tracks.filter(item => item.key !== track.key);
+    const before = without[target]?.key ?? null;
+    void change({ move: { path: track.key, before } }, () => [...without.slice(0, target), track, ...without.slice(target)]);
+  };
+  const menu = (track: api.LibraryItem, index: number): MenuItem[] => {
+    const order: MenuItem[] = [
+      ...(index > 0 ? [{ label: "移到最前", icon: "arrowUp" as const, onSelect: () => moveTo(track, 0) },
+        { label: "上移", icon: "chevronUp" as const, onSelect: () => moveTo(track, index - 1) }] : []),
+      ...(index < tracks.length - 1 ? [{ label: "下移", icon: "chevronDown" as const, onSelect: () => moveTo(track, index + 1) }] : []),
+    ];
+    const [first, ...rest] = trackMenu(track, adding.open, onOpenLocation);
+    return [...order, { ...first, divider: order.length > 0 }, ...rest,
+      { label: "从歌单移除", icon: "x", danger: true, divider: true, onSelect: () => void change({ remove: [track.key] }, list => list.filter(item => item.key !== track.key), `已从歌单移除「${trackTitle(track)}」`) }];
+  };
+  return <div className="library-view">
+    <button type="button" className="library-back" onClick={onBack}><Icon name="chevronLeft" size={16} />歌单</button>
+    <header className="album-header">
+      <PlaylistCover playlist={{ name: info?.name ?? "", samples: tracks.slice(0, 4) }} size="lg" />
+      <div className="album-header-text">
+        <span className="album-header-kind">歌单</span>
+        <h1>{info?.name ?? "歌单"}</h1>
+        {!loading && <p>{[`${tracks.length} 首`, total ? clock(total) : null].filter(Boolean).join(" · ")}</p>}
+        <div className="album-header-actions">
+          {tracks.length > 0 && <Button variant="primary" icon="play" onClick={() => open(tracks[0])}>全部播放</Button>}
+          {tracks.length > 1 && <Button icon="shuffle" onClick={() => { const list = shuffled(tracks); open(list[0], list); }}>随机播放</Button>}
+          {info && <Menu label="歌单的更多操作" size="md" items={[
+            { label: "重命名", icon: "edit", onSelect: () => setRenaming(true) },
+            { label: "删除歌单", icon: "trash", danger: true, divider: true, onSelect: () => setDeleting(true) },
+          ]} />}
+        </div>
+      </div>
+    </header>
+    <LibraryState loading={loading} error={error} onRetry={() => setAttempt(value => value + 1)}
+      empty={!tracks.length ? <EmptyState icon="playlist" title="歌单里还没有歌曲" description="在专辑、搜索结果或文件列表里选择「添加到歌单」。移入回收站的歌曲暂不显示，还原后回到原位置。" /> : null}>
+      <MediaItems view="music" items={tracks} open={file => open(file)} menu={menu} />
+    </LibraryState>
+    {adding.dialog}
+    {renaming && info && <PlaylistNameDialog title="重命名歌单" confirm="保存" initial={info.name} onClose={() => setRenaming(false)}
+      onSubmit={async name => { setInfo(await api.updatePlaylist(id, { name })); setRenaming(false); }} />}
+    {deleting && info && <ConfirmDialog title="删除歌单" confirmLabel="删除" onClose={() => setDeleting(false)}
+      description={<>删除歌单「{info.name}」？歌单里的歌曲文件不会被删除。</>}
+      onConfirm={async () => { await api.deletePlaylist(id); toast.success(`已删除歌单「${info.name}」`); onBack(); }} />}
   </div>;
 }
 

@@ -52,7 +52,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 40
+    SCHEMA_VERSION = 41
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -793,6 +793,38 @@ class Metadata:
                     db.execute("ALTER TABLE blobs ADD COLUMN taken_at REAL")
                 db.execute("CREATE INDEX IF NOT EXISTS objects_by_modified ON objects(bucket_id, modified_at DESC, key)")
                 db.execute("PRAGMA user_version = 40")
+            if version < 41:
+                # 文件星标：记在对象行上，移动、改名、移入回收站与还原都随行保留；覆盖写入沿用，复制与转存不继承。
+                # 歌单：条目按 (存储桶, 键) 引用文件，文件移动时由触发器同步键；文件删除后条目留存但不再列出。
+                # Telegram 交互机器人：每个账号绑定一个私聊，一个私聊只属于一个账号。
+                if "starred_at" not in {row[1] for row in db.execute("PRAGMA table_info(objects)")}:
+                    db.execute("ALTER TABLE objects ADD COLUMN starred_at REAL")
+                db.executescript("""
+                    CREATE INDEX IF NOT EXISTS objects_starred ON objects(bucket_id, starred_at DESC, key) WHERE starred_at IS NOT NULL;
+                    CREATE TABLE IF NOT EXISTS playlists(
+                        id INTEGER PRIMARY KEY, bucket_id INTEGER NOT NULL REFERENCES buckets(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS playlists_by_bucket ON playlists(bucket_id, updated_at DESC);
+                    CREATE TABLE IF NOT EXISTS playlist_items(
+                        playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+                        bucket_id INTEGER NOT NULL, key TEXT NOT NULL, position INTEGER NOT NULL, added_at REAL NOT NULL,
+                        PRIMARY KEY(playlist_id, key)
+                    ) WITHOUT ROWID;
+                    CREATE INDEX IF NOT EXISTS playlist_items_order ON playlist_items(playlist_id, position);
+                    CREATE INDEX IF NOT EXISTS playlist_items_by_key ON playlist_items(bucket_id, key);
+                    CREATE TRIGGER IF NOT EXISTS playlist_items_follow AFTER UPDATE OF key ON objects
+                    WHEN old.key != new.key BEGIN
+                        UPDATE playlist_items SET key=new.key WHERE bucket_id=old.bucket_id AND key=old.key;
+                    END;
+                    CREATE TABLE IF NOT EXISTS telegram_links(
+                        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        chat_id INTEGER NOT NULL UNIQUE, tg_username TEXT, tg_name TEXT,
+                        folder TEXT NOT NULL DEFAULT '', notify INTEGER NOT NULL DEFAULT 1,
+                        conversation_id TEXT, created_at REAL NOT NULL
+                    );
+                """)
+                db.execute("PRAGMA user_version = 41")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

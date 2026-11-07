@@ -89,7 +89,8 @@ class TgDriveASGI(StaticFiles):
                  static_dir: str | Path | None = None,
                  public_base_url: str | None = None, settings: SystemSettings | None = None,
                  keys: KeyApi | None = None, scheduler=None, metrics: TrafficMetrics | None = None,
-                 context: AppContext | None = None, offline=None, resources=None, assistant=None, thumbnails=None) -> None:
+                 context: AppContext | None = None, offline=None, resources=None, assistant=None, thumbnails=None,
+                 telegram_bot=None) -> None:
         self.scheduler = scheduler
         self.admin, self.user, self.s3 = admin, user, s3
         # 对外地址也是通行密钥的固定来源，不能由任意请求头决定。
@@ -132,6 +133,13 @@ class TgDriveASGI(StaticFiles):
         self.offline, self.resources = offline, resources
         self.thumbnails = thumbnails
         self.assistant = assistant
+        # Telegram 交互机器人（telegram/bot.py）：绑定与解绑由机器人在私聊里完成，审计由这里写入。
+        self.telegram_bot = telegram_bot
+        if telegram_bot is not None:
+            def audit_bot(action: str, user_id: int, detail: dict) -> None:
+                row = admin.accounts.metadata.db.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
+                self.audit.record(action, actor_type="user", actor=row["username"] if row else None, ok=True, detail=detail)
+            telegram_bot.on_audit = audit_bot
         if assistant is not None:
             def audit_auto(action: str, user_id: int, detail: dict) -> None:
                 row = admin.accounts.metadata.db.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
@@ -155,10 +163,14 @@ class TgDriveASGI(StaticFiles):
                     self.media.start()
                     if self.offline is not None:
                         self.offline.start()
+                    if self.telegram_bot is not None:
+                        self.telegram_bot.start()
                     if self.scheduler is not None:
                         self.scheduler.start()
                     await send({"type": "lifespan.startup.complete"})
                 elif message["type"] == "lifespan.shutdown":
+                    if self.telegram_bot is not None:
+                        await self.telegram_bot.stop()
                     if self.offline is not None:
                         await self.offline.stop()
                     if self.thumbnails is not None:
@@ -479,7 +491,8 @@ class TgDriveASGI(StaticFiles):
                           "/clients/{}/status": "client.status", "/clients/{}/grants": "client.grant",
                           "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/clients/{}/delete": "client.delete",
                           "/bots": "bot.create", "/bots/{}/status": "bot.status",
-                          "/bots/{}/check": "bot.check", "/settings": "settings.update", "/resources": "resources.update",
+                          "/bots/{}/check": "bot.check", "/telegram-bot": "telegram_bot.update", "/telegram-bot/delete": "telegram_bot.delete",
+                          "/settings": "settings.update", "/resources": "resources.update",
                           "/registration": "registration.update", "/media/providers": "media.providers.update", "/registration/test-email": "registration.test_email",
                           "/registration/invites": "invite.create", "/registration/invites/{}/revoke": "invite.revoke",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
@@ -523,7 +536,7 @@ class TgDriveASGI(StaticFiles):
                          "/assistant/actions/{}/reject": "assistant.action.reject",
                          "/assistant/actions/{}/cancel": "assistant.action.cancel",
                          "/assistant/actions/{}/undo": "assistant.action.undo",
-                         "/assistant/attachments/{}/save": "assistant.attachment.save"},
+                         "/assistant/attachments/{}/save": "assistant.attachment.save", "/telegram/unlink": "telegram.unlink"},
     }
 
     def _audit_entry(self, method, path, payload, token, scope):
@@ -589,6 +602,11 @@ class TgDriveASGI(StaticFiles):
             detail = {key: payload.get(key) for key in ("bucket_id", "perms")}
         elif action == "bot.create":
             target, detail = payload.get("name"), {"channel_id": payload.get("channel_id")}
+        elif action == "telegram_bot.update":
+            # token 不写入审计，只记是否更换以及启用状态。
+            detail = {"token_changed": bool(payload.get("token")), **({"enabled": bool(payload["enabled"])} if "enabled" in payload else {})}
+            if ok:
+                target = (result or {}).get("username")
         elif action == "bot.check" and ok:
             detail = {"status": (result or {}).get("status")}
         elif action in ("audit.delete", "audit.clear") and ok:
@@ -928,6 +946,14 @@ class TgDriveASGI(StaticFiles):
                     cursor=int(query.get("cursor", ["0"])[0])), {}
             if method == "GET" and route == "/bots":
                 return 200, await self.admin.list_bots(token), {}
+            if route in ("/telegram-bot", "/telegram-bot/delete") and self.telegram_bot is not None:
+                self.admin.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=method != "GET")
+                if method == "GET" and route == "/telegram-bot":
+                    return 200, self.telegram_bot.admin_status(), {"Cache-Control": "no-store"}
+                if method == "POST" and route == "/telegram-bot":
+                    return 200, await self.telegram_bot.configure(payload.get("token"), payload.get("enabled")), {}
+                if method == "POST":
+                    return 200, self.telegram_bot.remove(), {}
             if method == "POST" and route == "/users":
                 quota = payload.get("quota_bytes")
                 return 201, await self.admin.acreate_user(token, csrf, payload["username"], payload["password"],
@@ -1249,6 +1275,37 @@ class TgDriveASGI(StaticFiles):
                 return 200, await user.library_albums(token, query.get("q", [""])[0]), {}
             if method == "GET" and route == "/library/folders":
                 return 200, await user.library_folders(token, query.get("view", [""])[0], query.get("q", [""])[0]), {}
+            if route.startswith("/telegram") and route in ("/telegram", "/telegram/link", "/telegram/unlink") and self.telegram_bot is not None:
+                account = user.accounts.account_for_session(user._session(token, csrf=csrf, mutation=method != "GET"))
+                if method == "GET" and route == "/telegram":
+                    return 200, self.telegram_bot.user_status(account.id), {"Cache-Control": "no-store"}
+                if method == "POST" and route == "/telegram":
+                    return 200, self.telegram_bot.update_link(account.id, payload), {}
+                if method == "POST" and route == "/telegram/link":
+                    return 200, self.telegram_bot.create_code(account.id), {"Cache-Control": "no-store"}
+                if method == "POST" and route == "/telegram/unlink":
+                    self.telegram_bot.unlink(account.id)
+                    return 200, self.telegram_bot.user_status(account.id), {}
+            if method == "POST" and route == "/star":
+                return 200, await user.set_starred(token, csrf, payload.get("paths"), payload.get("starred", True)), {}
+            if method == "GET" and route == "/starred":
+                return 200, await user.starred(token, query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0]),
+                                               query.get("q", [""])[0], query.get("kind", [""])[0]), {"Cache-Control": "no-store"}
+            if route == "/playlists" and method == "GET":
+                return 200, await user.list_playlists(token), {"Cache-Control": "no-store"}
+            if route == "/playlists" and method == "POST":
+                return 201, await user.create_playlist(token, csrf, payload.get("name"), payload.get("paths")), {}
+            if route == "/playlists/containing" and method == "POST":
+                return 200, await user.playlists_containing(token, payload.get("paths")), {"Cache-Control": "no-store"}
+            playlist_route = re.fullmatch(r"/playlists/(\d{1,12})(/delete)?", route)
+            if playlist_route and method == "GET" and not playlist_route[2]:
+                return 200, await user.playlist(token, int(playlist_route[1]), query.get("cursor", [""])[0],
+                                                int(query.get("limit", ["200"])[0])), {"Cache-Control": "no-store"}
+            if playlist_route and method == "POST" and not playlist_route[2]:
+                return 200, await user.update_playlist(token, csrf, int(playlist_route[1]), payload), {}
+            if playlist_route and method == "POST" and playlist_route[2]:
+                await user.delete_playlist(token, csrf, int(playlist_route[1]))
+                return 204, None, {}
             if method == "GET" and route == "/search":
                 return 200, await user.search(token, query.get("q", [""])[0],
                     query.get("cursor", [""])[0], int(query.get("limit", ["100"])[0]),

@@ -258,3 +258,8 @@ kbd { padding: 1px 8px; border: 1px solid var(--line); border-bottom-width: 2px;
 .gc-failure { display: grid; gap: 4px; }
 .gc-failure > small { color: var(--ink-2); line-height: var(--leading-relaxed); }
 
+
+/* 存储通道页的 Telegram 交互机器人面板。 */
+.panel-title-with-badge { display: inline-flex; align-items: center; gap: 8px; }
+.interaction-bot-empty { display: grid; justify-items: start; gap: 12px; }
+.interaction-bot-empty p { margin: 0; color: var(--ink-3); font-size: var(--text-sm); line-height: var(--leading-loose); }

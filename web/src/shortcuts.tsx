@@ -15,7 +15,7 @@ export function ShortcutsDialog({ area, kind, privateSpace = false, onClose }: {
     [IS_MAC ? "⌘↑" : "Alt + ↑", "返回上一级文件夹"], [mod("A"), "全选当前结果"],
     ["N", "新建文件夹"], ["U", "打开上传菜单"], ["R", "刷新当前文件列表"], ["V", "切换列表／网格视图"],
     ["M", "移动所选项目或焦点项目"], ["D", "下载所选项目或焦点项目"],
-    ...(!privateSpace ? [["S", "公开分享或管理分享"] as Row] : []),
+    ...(!privateSpace ? [["S", "公开分享或管理分享"] as Row, ["*", "给所选文件或焦点文件加星标／取消星标"] as Row] : []),
     ["F2", "重命名焦点项目"], [IS_MAC ? "⌘⌫ / Delete" : "Delete / Backspace", "移到回收站，执行前确认"],
     [shortcutLabel("Shift+F10"), "打开焦点项目的操作菜单"], ["Esc", "取消选择；再次按下清除焦点"], ["?", "打开快捷键说明"],
   ];

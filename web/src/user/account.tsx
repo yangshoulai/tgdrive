@@ -3,7 +3,8 @@ import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } fr
 import * as api from "../api";
 import * as ai from "../assistant-api";
 import { BRAND } from "../brand";
-import { Notice, Avatar, Badge, Button, EmptyState, Field, Icon, Modal, PageHeader, PasswordField, Tabs, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
+import { Notice, Avatar, Badge, Button, ButtonLink, ConfirmDialog, EmptyState, Field, Icon, Modal, PageHeader, PasswordField, Switch, Tabs, copyText, formatBytes, formatDate, toast, useDocumentTitle } from "../ui";
+import { FolderPicker } from "./folders";
 import { KeysView } from "./keys";
 import { LocalCacheSettings } from "./local-cache";
 import { PasskeysSettings } from "./passkeys";
@@ -51,9 +52,98 @@ function AccountSettings({ session, onSessionChange, assistant, onOpenConversati
       onOpen={() => setEditing("passkeys")} onClose={() => setEditing(null)} />
     <PrivateSettingsSummary editing={editing === "private"} busy={busy} onBusyChange={setBusy}
       onOpen={() => setEditing("private")} onClose={() => setEditing(null)} />
+    <TelegramSettings />
     <AssistantAttachmentsSummary assistant={assistant} onOpenConversation={onOpenConversation} />
     <p className="account-page-help"><Icon name="info" size={16} /><span>忘记登录密码？请联系管理员重置。<a className="link" href="/docs/account" target="_blank" rel="noreferrer">了解账号与登录方式</a></span></p>
   </>;
+}
+
+/** Telegram：管理员配置了交互机器人后出现。绑定用一次性链接（10 分钟有效），在 Telegram 里点开即完成；
+ * 绑定后可设置保存位置（发链接创建的离线下载与发来的文件都保存在这里）和下载完成提醒。 */
+function TelegramSettings() {
+  const id = useId();
+  const [status, setStatus] = useState<api.TelegramStatus | null>(null);
+  const [binding, setBinding] = useState<{ url: string; expires_at: number } | null>(null);
+  const [choosing, setChoosing] = useState(false);
+  const [unlinking, setUnlinking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    api.telegramStatus(controller.signal).then(setStatus, () => undefined);
+    return () => controller.abort();
+  }, []);
+  // 等待在 Telegram 里点开绑定链接：每 3 秒查一次，绑定成功后关闭对话框。
+  useEffect(() => {
+    if (!binding) return;
+    const timer = window.setInterval(() => {
+      void api.telegramStatus().then(value => {
+        if (value.link) { setStatus(value); setBinding(null); toast.success("Telegram 绑定成功"); }
+        else if (Date.now() / 1000 > binding.expires_at) setBinding(null);
+      }, () => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [binding]);
+  if (!status || (!status.available && !status.link)) return null;
+  async function startBinding() {
+    setBusy(true);
+    try { setBinding(await api.telegramLinkCode()); }
+    catch (reason) { toast.error(api.errorMessage(reason, "生成绑定链接失败，请稍后重试")); }
+    finally { setBusy(false); }
+  }
+  async function update(change: { folder?: string; notify?: boolean }) {
+    setBusy(true);
+    try { setStatus(await api.updateTelegram(change)); return true; }
+    catch (reason) { toast.error(api.errorMessage(reason, "保存失败，请稍后重试")); return false; }
+    finally { setBusy(false); }
+  }
+  const link = status.link;
+  const who = link ? link.tg_username ? `@${link.tg_username}` : link.tg_name || "Telegram 账号" : "";
+  return <section className="account-section" aria-labelledby={`${id}-title`}>
+    <header className="account-section-heading"><Icon name="send" size={20} /><div><h2 id={`${id}-title`}>Telegram</h2>
+      <p>在 Telegram 里发链接创建离线下载、转发文件保存到网盘{status.assistant ? "、向文件助手提问" : ""}，下载完成时收到提醒。</p></div></header>
+    <div className="account-section-content account-passkeys">
+      {!link ? <div className="account-setting-summary">
+        <div><strong>还没有绑定</strong><p>{status.bot_username ? <>绑定后，在 Telegram 中与 <a className="link" href={`https://t.me/${status.bot_username}`} target="_blank" rel="noreferrer">@{status.bot_username}</a> 私聊即可使用。</> : "机器人暂时不可用。"}</p></div>
+        <Button size="sm" icon="send" loading={busy} disabled={!status.available} onClick={() => void startBinding()}>绑定 Telegram</Button>
+      </div> : <>
+        <div className="account-setting-summary">
+          <div><strong>已绑定 {who}</strong><p>{link.tg_name && link.tg_username ? `${link.tg_name} · ` : ""}绑定于 {formatDate(link.created_at)}{status.bot_username ? ` · 机器人 @${status.bot_username}` : ""}</p></div>
+          <Badge tone={status.available ? "success" : "warning"}>{status.available ? "可用" : "机器人已停用"}</Badge>
+        </div>
+        <div className="account-setting-summary">
+          <div><strong>保存位置</strong><p>{link.folder ? `/${link.folder.replace(/\/$/, "")}` : "我的文件（根目录）"}：发来的链接与文件都保存在这里，在 Telegram 里也可以用 /folder 修改。</p></div>
+          <Button size="sm" icon="folder" disabled={busy} onClick={() => setChoosing(true)}>修改</Button>
+        </div>
+        <Switch label="下载完成提醒" description="离线下载（含网页创建的）完成或失败时，机器人发消息提醒你；私密空间的任务不显示文件名。"
+          checked={link.notify} disabled={busy} onChange={notify => void update({ notify })} />
+        <div className="account-private-actions"><Button size="sm" icon="x" disabled={busy} onClick={() => setUnlinking(true)}>解除绑定</Button></div>
+      </>}
+    </div>
+    {binding && <Modal title="绑定 Telegram" icon="send" size="sm" onClose={() => setBinding(null)}
+      footer={<><Button onClick={() => void copyText(binding.url, "绑定链接已复制")}>复制链接</Button><ButtonLink variant="primary" icon="external" href={binding.url} target="_blank" rel="noreferrer">在 Telegram 中打开</ButtonLink></>}>
+      <div className="telegram-binding">
+        <p>点击「在 Telegram 中打开」，在机器人对话里点「开始」即完成绑定。也可以复制链接，在已登录 Telegram 的手机上打开。</p>
+        <code className="mono">{binding.url}</code>
+        <p className="muted"><span className="spinner" aria-hidden="true" /> 等待绑定…链接 10 分钟内有效，只能使用一次。</p>
+      </div>
+    </Modal>}
+    {choosing && link && <TelegramFolderDialog initial={link.folder} onClose={() => setChoosing(false)}
+      onSave={async folder => { if (await update({ folder })) { setChoosing(false); toast.success("保存位置已更新"); } }} />}
+    {unlinking && <ConfirmDialog title="解除 Telegram 绑定？" confirmLabel="解除绑定" onClose={() => setUnlinking(false)}
+      description="机器人将不再响应这个 Telegram 账号的消息，也不再发送下载提醒。之后可以随时重新绑定。"
+      onConfirm={async () => { setStatus(await api.unlinkTelegram()); setUnlinking(false); toast.success("已解除 Telegram 绑定"); }} />}
+  </section>;
+}
+
+function TelegramFolderDialog({ initial, onClose, onSave }: { initial: string; onClose: () => void; onSave: (folder: string) => Promise<void> }) {
+  const [folder, setFolder] = useState(initial);
+  const [ready, setReady] = useState(true);
+  const [busy, setBusy] = useState(false);
+  return <Modal title="Telegram 保存位置" description="发给机器人的链接（离线下载）与文件保存到这个文件夹。" onClose={onClose} dismissible={!busy}
+    footer={<><Button disabled={busy} onClick={onClose}>取消</Button><Button variant="primary" loading={busy} disabled={!ready}
+      onClick={() => { setBusy(true); void onSave(folder).finally(() => setBusy(false)); }}>保存</Button></>}>
+    <FolderPicker value={folder} onChange={setFolder} onReady={setReady} />
+  </Modal>;
 }
 
 /** 助手附件：随对话保存、计入已用空间，不提供单独删除（docs/assistant-design.md §22.5）。 */

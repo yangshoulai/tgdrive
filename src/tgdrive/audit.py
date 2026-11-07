@@ -24,6 +24,8 @@ ACTIONS = {
     "user.password": "修改密码", "user.create": "创建用户", "user.status": "更改用户状态", "user.quota": "调整配额",
     "key.create": "创建访问密钥", "key.disable": "禁用访问密钥", "key.delete": "删除访问密钥", "client.delete": "删除密钥客户端", "client.status": "更改密钥状态", "client.grant": "修改密钥授权",
     "bot.create": "添加存储通道", "bot.status": "更改通道状态", "bot.check": "检查存储通道",
+    "telegram_bot.update": "修改 Telegram 机器人", "telegram_bot.delete": "删除 Telegram 机器人",
+    "telegram.link": "绑定 Telegram", "telegram.unlink": "解除 Telegram 绑定",
     "object.public": "更改公开分享", "settings.update": "修改系统设置",
     "user.register": "访客注册", "registration.update": "修改注册设置", "registration.test_email": "发送测试邮件",
     "invite.create": "创建邀请码", "invite.revoke": "撤销邀请码",

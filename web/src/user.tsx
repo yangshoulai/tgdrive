@@ -17,7 +17,7 @@ import { UploadsPage, useUploadQueue } from "./user/uploads";
 
 import { SharedView } from "./user/shared";
 import { TrashView } from "./user/trash";
-import { MediaLibraryView, RecentView, type MediaView } from "./user/library";
+import { MediaLibraryView, RecentView, StarredView, type MediaView } from "./user/library";
 import { DownloadsView } from "./user/downloads";
 import { PreviewHost } from "./user/preview-host";
 import { CachePage, CacheTasksProvider, type CacheTab } from "./user/cache";
@@ -101,7 +101,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
     onSessionChange={patch => setSession(current => current && { ...current, ...patch })} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "private" | "uploads" | "downloads" | "cache" | "account" | "assistantPage" | "recent" | "photos" | "videos" | "music";
+type UserSection = "files" | "shared" | "trash" | "private" | "uploads" | "downloads" | "cache" | "account" | "assistantPage" | "recent" | "starred" | "photos" | "videos" | "music";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -127,12 +127,15 @@ function readLocation(): { section: Section; prefix: string } {
   // 任务中心：本机缓存页的 prefix 字段沿用为标签名（?view=cache&tab=files）。
   if (view === "cache") return { section: "cache", prefix: params.get("tab") === "files" ? "files" : "" };
   // 媒体库：prefix 字段沿用为打开的一组，前面加 "/" 与「未打开」区分——相册、影视是文件夹（?view=photos&folder=… ，根目录为空值），
-  // 音乐是专辑（?view=music&album=… ，无专辑为空值）。
+  // 音乐是专辑（?view=music&album=… ，无专辑为空值）；音乐的歌单标签是 "playlists"（?view=music&tab=playlists），
+  // 打开一个歌单是 "playlist:<编号>"（?view=music&playlist=…）。
   if (view === "photos" || view === "videos" || view === "music") {
+    if (view === "music" && /^\d+$/.test(params.get("playlist") ?? "")) return { section: view, prefix: `playlist:${params.get("playlist")}` };
+    if (view === "music" && params.get("tab") === "playlists") return { section: view, prefix: "playlists" };
     const key = view === "music" ? "album" : "folder";
     return { section: view, prefix: params.has(key) ? `/${params.get(key)}` : "" };
   }
-  const section = view === "shared" || view === "trash" || view === "private" || view === "uploads" || view === "downloads" || view === "recent" ? view : "files";
+  const section = view === "shared" || view === "trash" || view === "private" || view === "uploads" || view === "downloads" || view === "recent" || view === "starred" ? view : "files";
   const prefix = params.get("path") ?? "";
   return { section, prefix: section === "private" ? api.PRIVATE_PREFIX + prefix : section === "files" ? visibleFilesPrefix(prefix) : prefix };
 }
@@ -145,7 +148,9 @@ function sectionUrl(section: Section, prefix = "") {
   if (section === "assistantPage" && prefix) params.set("c", prefix);
   if (section === "account" && (prefix === "keys" || prefix === "cache")) params.set("tab", prefix);
   if (section === "cache" && prefix === "files") params.set("tab", prefix);
-  if (isMediaSection(section) && prefix) params.set(section === "music" ? "album" : "folder", prefix.slice(1));
+  if (section === "music" && prefix === "playlists") params.set("tab", "playlists");
+  else if (section === "music" && prefix.startsWith("playlist:")) params.set("playlist", prefix.slice(9));
+  else if (isMediaSection(section) && prefix) params.set(section === "music" ? "album" : "folder", prefix.slice(1));
   const query = params.toString();
   return query ? `/?${query}` : "/";
 }
@@ -346,8 +351,9 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       {section === "downloads" && <DownloadsView onChanged={refreshUsage} onOpenFolder={(prefix, privateSpace) => navigate(privateSpace ? "private" : "files", prefix)} onCreated={() => setDownloadRevision(value => value + 1)} />}
       {section === "trash" && <TrashView onChanged={refreshUsage} onOpenFolder={prefix => navigate("files", prefix)} />}
       {section === "recent" && <RecentView onOpenFolder={prefix => navigate("files", prefix)} />}
-      {isMediaSection(section) && <MediaLibraryView view={section} group={location.prefix ? location.prefix.slice(1) : null}
-        onOpenGroup={group => navigate(section, group === null ? "" : `/${group}`)} onOpenLocation={prefix => navigate("files", prefix)} />}
+      {section === "starred" && <StarredView onOpenFolder={prefix => navigate("files", prefix)} />}
+      {isMediaSection(section) && <MediaLibraryView view={section} place={location.prefix}
+        onPlace={place => navigate(section, place)} onOpenLocation={prefix => navigate("files", prefix)} />}
     </>;
   }
   // 打开的正是某个收藏的文件夹时，由侧栏收藏高亮，「我的文件」「私密空间」不再同时高亮。
@@ -359,6 +365,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
     { label: "文件", workspace: personalWorkspace, items: [
       { key: "files", label: "我的文件", icon: "folder" },
       { key: "recent", label: "最近", icon: "clock" },
+      { key: "starred", label: "星标", icon: "star" },
       { key: "private", label: "私密空间", icon: "lock" },
       { key: "trash", label: "回收站", icon: "trash" },
     ] },

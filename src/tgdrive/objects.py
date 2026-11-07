@@ -57,6 +57,7 @@ class ObjectInfo:
     public_expires_at: float | None = None
     public_has_password: bool = False
     public_downloads: int = 0
+    starred_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -150,7 +151,8 @@ class ObjectService:
         get = lambda name, default=None: row[name] if name in columns else default
         return ObjectInfo(row["bucket_id"], row["key"], row["size"], row["etag"], row["content_type"],
                           user_meta, row["modified_at"], row["blob_uuid"], get("public_token"), get("public_at"),
-                          get("public_expires_at"), bool(get("public_password")), int(get("public_downloads", 0) or 0))
+                          get("public_expires_at"), bool(get("public_password")), int(get("public_downloads", 0) or 0),
+                          get("starred_at"))
 
     def _lookup(self, scope: Scope, key: str, *, write: bool = False):
         self._check_scope(scope, key, write=write)
@@ -223,12 +225,13 @@ class ObjectService:
             db.execute("DELETE FROM objects WHERE bucket_id = ? AND key = ?", (bucket_id, key))
             if old and old["blob_uuid"]:
                 self._release_blob(db, old["blob_uuid"], now, bucket_id)
-            # 覆盖写入保留原公开链接，已分享的地址不会因为更新内容而失效。
+            # 覆盖写入保留原公开链接与星标，已分享的地址不会因为更新内容而失效。
             share = [old[name] if old else None for name in ("public_token", "public_at", "public_expires_at", "public_password")]
             downloads = old["public_downloads"] if old else 0
             db.execute("INSERT INTO objects(bucket_id,key,blob_uuid,size,etag,content_type,user_meta,modified_at,"
-                       "public_token,public_at,public_expires_at,public_password,public_downloads) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                       (bucket_id, key, blob_uuid, size, etag, content_type, meta_json, now, *share, downloads))
+                       "public_token,public_at,public_expires_at,public_password,public_downloads,starred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (bucket_id, key, blob_uuid, size, etag, content_type, meta_json, now, *share, downloads,
+                        old["starred_at"] if old else None))
             # 相对更新：释放旧 Blob 时可能顺带删除了该桶里的大缩略图，那部分已在上面扣减。
             db.execute("UPDATE buckets SET used_bytes = used_bytes - ? + ? WHERE id = ?", (old_size, size, bucket_id))
         row = self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id = ? AND key = ?", (bucket_id, key)).fetchone()
@@ -411,6 +414,29 @@ class ObjectService:
                 db.execute("UPDATE objects SET public_token=NULL, public_at=NULL, public_expires_at=NULL, public_password=NULL, "
                            "public_downloads=0 WHERE bucket_id=? AND key=?", (scope.bucket_id, key))
         return self.head_object(scope, key)
+
+    STAR_LIMIT = 1000
+
+    def set_starred(self, scope: Scope, keys: list[str], starred: bool) -> int:
+        """给普通文件加上或去掉星标（不含文件夹、私密空间与系统区）；已是目标状态的文件不改动，返回改动的数量。
+        星标时间即加星标的时间，「星标」视图按它倒序。"""
+        if not 1 <= len(keys) <= self.STAR_LIMIT:
+            raise ValueError(f"一次最多处理 {self.STAR_LIMIT} 个文件")
+        for key in keys:
+            self._check_scope(scope, key, write=True)
+            if key.endswith("/") or key.startswith(".tgdrive/"):
+                raise ValueError("只能给普通文件加星标")
+        changed = 0
+        with self.metadata.transaction() as db:
+            for key in keys:
+                if db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone() is None:
+                    raise NotFoundError(key)
+                changed += db.execute(
+                    "UPDATE objects SET starred_at=? WHERE bucket_id=? AND key=? AND (starred_at IS NULL)=?",
+                    (time.time() if starred else None, scope.bucket_id, key, int(starred))).rowcount
+            if scope.authorize is not None:
+                scope.authorize()
+        return changed
 
     _UNSET = object()
 

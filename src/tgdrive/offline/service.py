@@ -171,6 +171,8 @@ class OfflineDownloads:
         self._single: set[int] = set()
         self.platforms = PlatformResolver(self.http, resources)
         self.cache_root = resources.data_dir / "offline-cache"
+        # 任务结束（完成或失败）后的通知，参数是任务行；Telegram 交互机器人用它推送提醒。不得抛出或阻塞。
+        self.on_finished: Callable[[object], None] | None = None
 
     def _key(self, label="offline-request"):
         return derive_subkey(self.keystore.require_kek(), label)
@@ -1269,6 +1271,11 @@ class OfflineDownloads:
                 self._retry_at.pop(task_id, None)
             self._intents.pop(task_id, None)
             self._wake.set()
+            if row["status"] in ("completed", "failed") and self.on_finished is not None:
+                try:
+                    self.on_finished(row)
+                except Exception as exc:
+                    log.debug("离线任务结束通知暂未投递：%s", type(exc).__name__)
 
     def _task_scope(self, row):
         if row["key"].startswith(PRIVATE_PREFIX):

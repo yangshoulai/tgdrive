@@ -155,6 +155,12 @@ class KeyStore:
             for media_row in self.metadata.db.execute("SELECT key, value FROM settings WHERE key LIKE 'media.secret.%'"):
                 plain = open_sealed(old_media_key, base64.b64decode(media_row["value"]), media_row["key"])
                 media_secrets.append((base64.b64encode(seal(new_media_key, plain, media_row["key"])).decode(), media_row["key"]))
+            # Telegram 交互机器人的 token（telegram/bot.py）与存储通道的 Bot 用同一个子密钥，aad 不同。
+            interaction_token = None
+            interaction_row = self.metadata.db.execute("SELECT value FROM settings WHERE key='telegram.bot.token'").fetchone()
+            if interaction_row is not None:
+                plain = open_sealed(old_bot_key, base64.b64decode(interaction_row["value"]), "telegram-interaction-bot")
+                interaction_token = base64.b64encode(seal(new_bot_key, plain, "telegram-interaction-bot")).decode()
             # 所有重新包裹和 keys 更新在同一个事务里。
             with self.metadata.transaction() as db:
                 db.executemany("UPDATE blobs SET wrapped_dek = ? WHERE uuid = ?", ((w, u) for u, w in wrapped))
@@ -170,6 +176,8 @@ class KeyStore:
                 if smtp_password is not None:
                     db.execute("UPDATE settings SET value=? WHERE key='registration.smtp_password'", (smtp_password,))
                 db.executemany("UPDATE settings SET value=? WHERE key=?", media_secrets)
+                if interaction_token is not None:
+                    db.execute("UPDATE settings SET value=? WHERE key='telegram.bot.token'", (interaction_token,))
                 for invite in db.execute("SELECT id,code_hash,code_enc FROM registration_invites"):
                     aad = f"invite:{invite['code_hash']}"
                     plain = open_sealed(old_registration_key, invite["code_enc"], aad)

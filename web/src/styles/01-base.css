@@ -411,3 +411,8 @@ body:has(.modal-backdrop:not(.is-minimized) > .preview-modal):not(:has(.modal-ba
 .toast-info > svg { color: var(--accent); }
 @keyframes slide-in { from { opacity: 0; transform: translateY(12px); } }
 
+/* 设置 → Telegram 的绑定对话框。 */
+.telegram-binding { display: grid; gap: 12px; }
+.telegram-binding p { margin: 0; line-height: var(--leading-loose); }
+.telegram-binding code { display: block; padding: 8px 10px; overflow-wrap: anywhere; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: var(--text-xs); }
+.telegram-binding .muted { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: var(--text-sm); }

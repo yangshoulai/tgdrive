@@ -27,6 +27,7 @@ import { FileCacheStatus, cacheMenuItems, cacheSelection, useCacheQueue } from "
 import { useThumbnailPolling } from "./thumbnail-polling";
 import { favoriteMenuItem, useFavorites } from "./favorites";
 import { useFilesBridge } from "./assistant-bridge";
+import { useAddToPlaylist } from "./playlists";
 
 /* ---------- 文件 ---------- */
 
@@ -290,6 +291,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const selectedEntries = entries.filter(entry => selected.has(entry.key));
   const selectedFiles = selectedEntries.filter((entry): entry is Extract<Entry, { kind: "file" }> => entry.kind === "file");
   const downloadLimit = () => notify.error("一次最多打包 200 项，请减少选择，或直接下载整个文件夹");
+  const selectionStarred = selectedFiles.length > 0 && selectedFiles.every(entry => entry.file.starred_at);
+  const selectedAudio = selectedFiles.map(entry => entry.file).filter(file => getFileKind(file.content_type, file.key) === "audio");
 
   function toggleSelect(key: string, value: boolean) {
     setSelected(current => { const next = new Set(current); if (value) next.add(key); else next.delete(key); return next; });
@@ -308,6 +311,19 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     setSharing(current => current && current.key === updated.key ? { ...current, ...updated } : current);
     preview.update(updated);
   }
+  /** 加上或去掉星标（普通空间的文件），原地更新列表。 */
+  async function star(targets: api.FileItem[], value: boolean) {
+    const keys = new Set(targets.map(file => file.key));
+    if (!keys.size) return;
+    try {
+      await api.setStarred([...keys], value);
+      const now = Date.now() / 1000;
+      setFiles(current => current.map(item => keys.has(item.key) ? { ...item, starred_at: value ? item.starred_at ?? now : undefined } : item));
+      const label = keys.size === 1 ? `「${baseName(targets[0].key)}」` : `${keys.size} 个文件`;
+      notify.success(value ? `已给${label}加星标` : `已取消${label}的星标`);
+    } catch (reason) { notify.error(api.errorMessage(reason, "星标更新失败，请稍后重试")); }
+  }
+  const playlistAdding = useAddToPlaylist();
   async function bulkPublic(isPublic: boolean) {
     try {
       const result = await api.setPublic(selectedFiles.map(entry => entry.key), isPublic);
@@ -419,13 +435,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     const items: MenuItem[] = [
       { label: "下载", icon: "download", shortcut: "D", onSelect: () => undefined, href: api.versionedContentUrl(api.contentUrl(file.key, true), file.etag, file.size) },
       ...cacheMenuItems(cacheQueue, file).filter(item => !item.danger),
-      ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) }] : []),
+      ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) },
+        { label: file.starred_at ? "取消星标" : "加星标", icon: "star" as const, shortcut: "*", onSelect: () => void star([file], !file.starred_at) }] : []),
     ];
     // 任何文件都可以指定缩略图；图片、视频、音频上传后仍自动生成，用户不满意时在这里替换。
     items.push({ label: file.thumbnails?.includes("thumb") ? "更新封面" : "设置封面", icon: "image", heading: "封面", onSelect: () => setThumbnailEditing(file) });
     // 歌词与字幕：从已开启的来源在线查找，保存为同名文件。
     const fileKind = getFileKind(file.content_type, file.key);
     if (fileKind === "audio") items.push({ label: "查找歌词…", icon: "music", onSelect: () => setMediaLookup({ file, want: "lyrics" }) });
+    if (fileKind === "audio" && !privateSpace) items.push({ label: "添加到歌单…", icon: "playlist", onSelect: () => playlistAdding.open([file]) });
     if (fileKind === "video") items.push({ label: "查找字幕…", icon: "fileText", onSelect: () => setMediaLookup({ file, want: "subtitle" }) });
     if (file.public_token) items.push({ label: "打开分享页", icon: "external", onSelect: () => window.open(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "_blank", "noreferrer") });
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
@@ -577,6 +595,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       openEntry(current);
     } else if ((event.key === "s" || event.key === "S") && !mod && !event.altKey && !event.shiftKey && current && !privateSpace) {
       setSharing(current.kind === "folder" ? folderItem(current.key) : current.file);
+    } else if (event.key === "*" && !mod && !event.altKey && !privateSpace && targets.some(entry => entry.kind === "file")) {
+      const files = targets.flatMap(entry => entry.kind === "file" ? [entry.file] : []);
+      void star(files, !files.every(file => file.starred_at));
     } else if (event.key === "F2" && current && plain && !event.shiftKey) {
       setRenaming(current);
     } else if (!event.altKey && !event.shiftKey && (event.key === "Delete" && !mod || event.key === "Backspace" && (mod || !IS_MAC)) && (selected.size || current)) {
@@ -619,6 +640,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", shortcut: "D", onSelect: selectedEntries.length > 200 ? downloadLimit : () => undefined,
           href: selectedEntries.length > 200 ? undefined : downloadUrl(selectedEntries) },
         { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving(selectedEntries) },
+        ...(!privateSpace && selectedFiles.length ? [{ label: selectionStarred ? "取消星标" : `给 ${selectedFiles.length} 个文件加星标`, icon: "star" as const, shortcut: "*",
+          onSelect: () => void star(selectedFiles.map(entry => entry.file), !selectionStarred) }] : []),
+        ...(!privateSpace && selectedAudio.length ? [{ label: `把 ${selectedAudio.length} 首歌加入歌单…`, icon: "playlist" as const, onSelect: () => playlistAdding.open(selectedAudio) }] : []),
         { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring(selectedEntries) },
         ...(canCacheSelection ? [{ label: selectedCacheFolders.length ? "缓存所选项目到本机" : `缓存 ${selectionCache.cacheable.length} 个文件到本机`, icon: "monitor" as const, onSelect: cacheSelected }] : []),
         ...(canClearSelection ? [{ label: selectedCacheFolders.length ? "清除所选项目的本机缓存" : `清除 ${selectionCache.cached.length} 个文件的本机缓存`, icon: "trash" as const, danger: true, divider: true, onSelect: clearSelectedCache }] : []),
@@ -683,6 +707,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             {canClearSelection && <Button size="sm" icon="trash" onClick={clearSelectedCache}>清除本机缓存</Button>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
+            {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="star" shortcut="*" onClick={() => void star(selectedFiles.map(entry => entry.file), !selectionStarred)}>{selectionStarred ? "取消星标" : "加星标"}</Button>}
+            {!privateSpace && selectedAudio.length > 0 && <Button size="sm" icon="playlist" onClick={() => playlistAdding.open(selectedAudio)}>加入歌单</Button>}
             <Button size="sm" icon="move" shortcut="M" onClick={() => setMoving(selectedEntries)}>移动</Button>
             {selectedEntries.length <= 200 && <Button size="sm" icon="archive" onClick={() => setCompressing(selectedEntries.map(entry => entry.key))}>压缩</Button>}
             <Button size="sm" icon="lock" onClick={() => setTransferring(selectedEntries)}>{privateSpace ? "移出私密空间" : "移入私密空间"}</Button>
@@ -752,6 +778,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                     <span className="file-mobile-meta"><span>{kindLabel(getFileKind(entry.file.content_type, entry.key))} · {formatBytes(entry.file.size)} · {formatDate(entry.file.modified_at)}</span>{entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}<FileCacheStatus file={entry.file} /></span>
                     {query && parentPath(entry.key) && <small>{privateSpace ? api.privatePathLabel(parentPath(entry.key)) : parentPath(entry.key)}</small>}
                   </span>
+                  {entry.file.starred_at && <span className="star-mark" title="已加星标"><Icon name="star" filled size={14} /></span>}
                   {entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}
                   <FileCacheStatus file={entry.file} className="cell-cache" />
                 </span>
@@ -807,6 +834,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                         {!api.fileThumbnail(entry.file) && extension && !LABELLED_KINDS.has(kind) && <span className="grid-extension" aria-hidden="true">{extension}</span>}
                         <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                         {entry.file.public_token && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
+                        {entry.file.starred_at && <span className="grid-star" title="已加星标"><Icon name="star" filled size={14} /></span>}
                         <FileCacheStatus file={entry.file} className="grid-cache" />
                       </div>
                       <div className="grid-meta">
@@ -856,6 +884,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           }, () => undefined);
           notify.success("封面已更新"); scheduleRefresh(); onChanged(); }} />}
       {mediaLookup && <MediaLookupDialog file={mediaLookup.file} want={mediaLookup.want} onClose={() => setMediaLookup(null)} />}
+      {playlistAdding.dialog}
       {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
       {folderCache && <ConfirmDialog title="缓存文件夹到本机？" danger={false} className={privateSpace ? "private-dialog" : ""} confirmLabel="开始缓存" onClose={() => setFolderCache(null)}
         description={<>{folderCache.prefixes.length === 1 ? `将缓存“${baseName(folderCache.prefixes[0])}”中的所有文件，以及全部子目录中的文件。` : `将缓存所选 ${folderCache.prefixes.length} 个文件夹中的所有文件，以及全部子目录中的文件。`}

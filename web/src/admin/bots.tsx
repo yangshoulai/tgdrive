@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { SITE } from "../brand";
 import * as api from "../api";
 
-import { Notice, Badge, Button, ConfirmDialog, EmptyState, Field, Icon, IconButton, Menu, Modal, PageHeader, SetupGuide, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle } from "../ui";
+import { Notice, Badge, Button, ConfirmDialog, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Panel, SetupGuide, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 存储通道 ---------- */
 
@@ -100,6 +100,7 @@ export function Bots() {
           <li>停用通道只影响之后上传的文件；已经保存在这个通道里的文件仍可正常读取。</li>
         </ul>
       </div></details>
+      <InteractionBotPanel />
       {creating && <CreateBotDialog onClose={() => setCreating(false)} onCreated={bot => { setCreating(false); void check(bot, true); }} />}
       {disabling && <ConfirmDialog title={`停用 ${disabling.name}？`} description="新上传的文件不会再保存到这个通道，已保存的文件仍可正常读取。" confirmLabel="停用通道" onClose={() => setDisabling(null)}
         onConfirm={async () => { if (await setStatus(disabling, "disabled")) setDisabling(null); }} />}
@@ -144,4 +145,82 @@ function CreateBotDialog({ onClose, onCreated }: { onClose: () => void; onCreate
       </form>
     </Modal>
   );
+}
+
+/* ---------- Telegram 交互机器人 ---------- */
+
+/** 用户在 Telegram 私聊里使用的机器人：与存储通道分开，另用一个 Bot（不能复用存储 Bot，避免把存储频道的 Bot 暴露给所有用户）。
+ * token 只写不读；保存时先用 getMe 校验并移除 Webhook，服务端用长轮询收消息，不需要公网地址。 */
+function InteractionBotPanel() {
+  const [status, setStatus] = useState<api.InteractionBotStatus | null>(null);
+  const [error, setError] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => { void api.adminTelegramBot().then(value => { setStatus(value); setError(""); }, reason => setError(api.errorMessage(reason, "读取失败，请稍后重试"))); }, []);
+  useEffect(load, [load]);
+  // 刚保存或出错时稍后再读一次，显示轮询是否已经连上。
+  useEffect(() => {
+    if (!status?.enabled || status.last_poll_at) return;
+    const timer = window.setTimeout(load, 4000);
+    return () => window.clearTimeout(timer);
+  }, [status, load]);
+  async function toggle(enabled: boolean) {
+    setBusy(true);
+    try { setStatus(await api.saveAdminTelegramBot({ enabled })); toast.success(enabled ? "已启用 Telegram 机器人" : "已停用 Telegram 机器人"); }
+    catch (reason) { toast.error(api.errorMessage(reason, "保存失败，请稍后重试")); }
+    finally { setBusy(false); }
+  }
+  const badge = !status?.configured ? <Badge>未配置</Badge> : !status.enabled ? <Badge dot>已停用</Badge>
+    : status.last_error ? <Badge tone="danger" icon="alert">连接异常</Badge> : status.last_poll_at ? <Badge tone="success" dot>运行中</Badge> : <Badge tone="warning" dot>正在连接</Badge>;
+  return <Panel title={<span className="panel-title-with-badge">Telegram 机器人{status && badge}</span>}
+    description="用户绑定后，可以在 Telegram 私聊里发链接创建离线下载、转发文件保存到网盘、向文件助手提问，并收到下载完成提醒。请另建一个 Bot，不要使用存储通道的 Bot。"
+    actions={status?.configured ? <Menu label="Telegram 机器人的操作" size="md" items={[
+      { label: "更换 token", icon: "key", onSelect: () => setEditing(true) },
+      status.enabled ? { label: "停用", icon: "lock", onSelect: () => void toggle(false) } : { label: "启用", icon: "unlock", onSelect: () => void toggle(true) },
+      { label: "删除配置", icon: "trash", danger: true, divider: true, onSelect: () => setRemoving(true) },
+    ]} /> : undefined}>
+    {error ? <Notice tone="danger">{error}</Notice> : !status ? <SkeletonRows rows={2} /> : !status.configured ? (
+      <div className="interaction-bot-empty">
+        <p>在 Telegram 中向 <code>@BotFather</code> 发送 <code>/newbot</code> 创建一个新的 Bot，复制它给出的 token 填到这里。机器人只在私聊中响应，群组里的消息会被忽略。</p>
+        <Button variant="primary" icon="plus" onClick={() => setEditing(true)}>配置机器人</Button>
+      </div>
+    ) : <>
+      <KeyValue items={[
+        ["机器人", status.username ? <a className="link" href={`https://t.me/${status.username}`} target="_blank" rel="noreferrer">@{status.username}</a> : "—"],
+        ["已绑定用户", `${status.linked_users} 人`],
+        ["最近收到消息检查", status.last_poll_at ? formatDateTime(status.last_poll_at) : "—"],
+      ]} />
+      {status.enabled && status.last_error && <Notice tone="danger">{status.last_error}</Notice>}
+      {!status.enabled && <Notice tone="info">机器人已停用：不再收消息和发送提醒，已有的绑定保留。</Notice>}
+    </>}
+    {editing && <InteractionBotDialog configured={Boolean(status?.configured)} busy={busy} onClose={() => setEditing(false)}
+      onSaved={value => { setStatus(value); setEditing(false); toast.success(`已连接 @${value.username ?? "机器人"}`); }} />}
+    {removing && <ConfirmDialog title="删除 Telegram 机器人配置？" confirmLabel="删除" onClose={() => setRemoving(false)}
+      description="机器人会停止收消息和发送提醒。用户的绑定会保留，重新配置同一个或新的机器人后继续可用（换成新机器人时，用户需要在 Telegram 里先点一次「开始」）。"
+      onConfirm={async () => { setStatus(await api.deleteAdminTelegramBot()); setRemoving(false); toast.success("已删除 Telegram 机器人配置"); }} />}
+  </Panel>;
+}
+
+function InteractionBotDialog({ configured, busy, onClose, onSaved }: { configured: boolean; busy: boolean; onClose: () => void; onSaved: (status: api.InteractionBotStatus) => void }) {
+  const [token, setToken] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!/^\d+:[\w-]{20,}$/.test(token.trim())) { setError("格式应为 123456789:AA… 的完整 token"); return; }
+    setSaving(true);
+    try { onSaved(await api.saveAdminTelegramBot({ token: token.trim() })); }
+    catch (reason) { setError(api.errorMessage(reason, "保存失败，请检查 token")); }
+    finally { setSaving(false); }
+  }
+  return <Modal title={configured ? "更换机器人 token" : "配置 Telegram 机器人"} description="token 保存后只以密文存在，不会再次显示。保存时会检查 token 并设置机器人的命令菜单。" icon="send" onClose={onClose} dismissible={!saving}
+    footer={<><Button disabled={saving} onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="interaction-bot-form" loading={saving} disabled={busy}>保存</Button></>}>
+    <form id="interaction-bot-form" className="form" onSubmit={submit} noValidate>
+      <Field label="Bot token" htmlFor="interaction-bot-token" error={error} hint="向 @BotFather 发送 /newbot 获取。请使用一个新的 Bot，不要填存储通道正在使用的 token。">
+        <input id="interaction-bot-token" className="input mono" type="password" autoComplete="new-password" value={token} autoFocus
+          onChange={event => { setToken(event.target.value); setError(""); }} />
+      </Field>
+    </form>
+  </Modal>;
 }

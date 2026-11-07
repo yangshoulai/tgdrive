@@ -27,6 +27,8 @@ export type FileItem = {
   thumbnail_status?: "missing" | "ready" | "unavailable";
   /** 各规格保存时的独立版本，用于浏览器缓存失效。 */
   thumbnail_versions?: Partial<Record<ThumbnailVariant, string>>;
+  /** 加星标的时间（秒）；没有星标时不返回。只有普通空间的文件可以加星标。 */
+  starred_at?: number;
 };
 export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subtitle"; language: string | null; size: number; etag: string;
   /** 文件内置的歌词或字幕轨（media/info 给出）：没有对应的文件，由 read 读取内容（字幕轨可能要先在服务器提取）。 */
@@ -461,6 +463,43 @@ export const libraryFolders = (view: "photos" | "videos", q = "", signal?: Abort
 export type LibraryAlbum = { album: string; count: number; size: number; duration: number; latest: number; artist: string | null; year: string | null; samples: LibraryItem[] };
 export const libraryAlbums = (q = "", signal?: AbortSignal) =>
   request<{ albums: LibraryAlbum[]; truncated: boolean }>(`/api/user/v1/library/albums?${new URLSearchParams({ q })}`, { signal });
+/** Telegram 交互机器人（用户）：available 为管理员已启用；link 是当前账号绑定的私聊与它的设置（保存位置、下载提醒）。 */
+export type TelegramLink = { tg_username: string | null; tg_name: string | null; folder: string; notify: boolean; created_at: number };
+export type TelegramStatus = { available: boolean; bot_username: string | null; assistant: boolean; link: TelegramLink | null };
+export const telegramStatus = (signal?: AbortSignal) => request<TelegramStatus>("/api/user/v1/telegram", { signal });
+/** 一次性绑定链接（t.me/<机器人>?start=…），10 分钟内有效、只能用一次。 */
+export const telegramLinkCode = () => post<{ code: string; url: string; expires_at: number }>("/api/user/v1/telegram/link", {});
+export const updateTelegram = (change: { folder?: string; notify?: boolean }) => post<TelegramStatus>("/api/user/v1/telegram", change);
+export const unlinkTelegram = () => post<TelegramStatus>("/api/user/v1/telegram/unlink", {});
+/** Telegram 交互机器人（管理员）：token 只写不读。 */
+export type InteractionBotStatus = { configured: boolean; enabled: boolean; username: string | null; name: string | null; bot_id: number | null;
+  linked_users: number; running: boolean; last_error: string | null; last_poll_at: number | null };
+export const adminTelegramBot = (signal?: AbortSignal) => request<InteractionBotStatus>("/api/admin/v1/telegram-bot", { signal });
+export const saveAdminTelegramBot = (change: { token?: string; enabled?: boolean }) => post<InteractionBotStatus>("/api/admin/v1/telegram-bot", change, 30000);
+export const deleteAdminTelegramBot = () => post<InteractionBotStatus>("/api/admin/v1/telegram-bot/delete", {});
+/** 加上或去掉星标（普通空间里的文件，一次最多 1000 个）；changed 是实际改动的数量。 */
+export const setStarred = (paths: string[], starred: boolean) => post<{ changed: number; starred: boolean }>("/api/user/v1/star", { paths, starred });
+/** 星标视图：最近加星标的在前；q 按相对路径、kind 按类型筛选。 */
+export const starredFiles = (options: { cursor?: string; limit?: number; q?: string; kind?: KindFilter } = {}, signal?: AbortSignal) => {
+  const params = new URLSearchParams({ limit: String(options.limit ?? 100), cursor: options.cursor ?? "" });
+  if (options.q) params.set("q", options.q);
+  if (options.kind) params.set("kind", options.kind);
+  return request<{ objects: FileItem[]; next_cursor: string | null }>(`/api/user/v1/starred?${params}`, { signal });
+};
+/** 音乐歌单：count、duration 只计当前能播放的歌曲（回收站里的不算）；samples 是排在最前的 4 首（封面拼图）。 */
+export type Playlist = { id: number; name: string; count: number; duration: number; created_at: number; updated_at: number; samples: LibraryItem[] };
+export type PlaylistInfo = Pick<Playlist, "id" | "name" | "created_at" | "updated_at">;
+export const playlists = (signal?: AbortSignal) => request<{ playlists: Playlist[]; limit: { playlists: number; items: number } }>("/api/user/v1/playlists", { signal });
+/** 一页歌曲（按歌单顺序）；游标是上一页最后一首的位置。 */
+export const playlistItems = (id: number, cursor = "", limit = 500, signal?: AbortSignal) =>
+  request<{ playlist: PlaylistInfo; objects: LibraryItem[]; next_cursor: string | null }>(`/api/user/v1/playlists/${id}?${new URLSearchParams({ cursor, limit: String(limit) })}`, { signal });
+export const createPlaylist = (name: string, paths: string[] = []) => post<PlaylistInfo>("/api/user/v1/playlists", { name, paths });
+/** 改名、追加（已在歌单里的不重复）、移除，或把一首歌移到 before 之前（null 为末尾）。 */
+export const updatePlaylist = (id: number, change: { name?: string; add?: string[]; remove?: string[]; move?: { path: string; before: string | null } }) =>
+  post<PlaylistInfo & { added?: number; removed?: number }>(`/api/user/v1/playlists/${id}`, change);
+export const deletePlaylist = (id: number) => post<void>(`/api/user/v1/playlists/${id}/delete`, {});
+/** 这些文件已在哪些歌单里（「添加到歌单」标出已添加的）。 */
+export const playlistsContaining = (paths: string[]) => post<{ playlists: Record<string, number[]> }>("/api/user/v1/playlists/containing", { paths });
 /** 目录统计（含子文件夹）：数量、总大小、按类型分组（与 KIND_FILTERS 同组，另有 other）、最大的文件。 */
 export type FolderStats = { prefix: string; files: number; folders: number; bytes: number; direct_files: number; direct_folders: number;
   kinds: { kind: KindName | "other"; count: number; bytes: number }[]; largest: { key: string; size: number; content_type: string | null }[]; latest_modified: number | null };

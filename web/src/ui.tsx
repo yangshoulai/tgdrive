@@ -69,6 +69,7 @@ const ICONS = {
   flag: "M5 21V4.5m0 0h12.5l-2.5 4 2.5 4H5",
   palette: "M12 3.5a8.5 8.5 0 1 0 0 17c1.1 0 1.6-.8 1.3-1.7l-.5-1.3a1.5 1.5 0 0 1 1.4-2h2.1A4.2 4.2 0 0 0 20.5 11 8.2 8.2 0 0 0 12 3.5zM7.5 11.5h.01m3-4h.01m4.5 1.5h.01",
   music: "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zm12-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
+  playlist: "M4 6h11M4 11h11M4 16h6m10-9v8.5m0 0a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zm0-8.5 2-1",
   tv: "M4 7h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1zm4 15h8M8 3l4 4 4-4",
   headphones: "M3 18v-6a9 9 0 0 1 18 0v6M3 18a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3zm18 0a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z",
   coffee: "M17 8h1a4 4 0 0 1 0 8h-1M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4zM6 2v3m4-3v3m4-3v3",
@@ -138,9 +139,11 @@ const ICONS = {
 } as const;
 export type IconName = keyof typeof ICONS;
 
-/** 实心版本：外形描边 + 用奇偶规则挖空细节的填充，镂空处透出背景，不依赖底色。目前只有缓存状态用到（手动实心、自动空心）。 */
+/** 实心版本：外形描边 + 用奇偶规则挖空细节的填充，镂空处透出背景，不依赖底色。缓存状态（手动实心、自动空心）与星标用到。 */
 const FILLED: Partial<Record<IconName, { shape: string; holes: string }>> = {
   hardDrive: { shape: "M6 5h12l3 10v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-4z", holes: "M3 14.4h18v1.2H3zM6.2 17.5a.8.8 0 1 0 1.6 0a.8.8 0 1 0-1.6 0zM9.2 17.5a.8.8 0 1 0 1.6 0a.8.8 0 1 0-1.6 0z" },
+  // 文件星标：已加星标时实心。
+  star: { shape: "m12 3.5 2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z", holes: "" },
 };
 
 export function Icon({ name, size = 18, className, filled = false }: { name: IconName; size?: number; className?: string; filled?: boolean }) {

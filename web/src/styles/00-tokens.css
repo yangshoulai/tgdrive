@@ -43,6 +43,8 @@
   --success-soft: #e1f4ea;
   --warning: #a65416;
   --warning-soft: #fff0e4;
+  /* 文件星标（实心星）：比警告色更亮的琥珀色，只用于星标标记。 */
+  --star: #d38b06;
   --danger: #b63834;
   --danger-hover: #a93631;
   --danger-soft: #fbe8e6;
@@ -251,6 +253,7 @@
   --success-soft: rgba(76, 192, 138, .14);
   --warning: #eba76f;
   --warning-soft: rgba(235, 167, 111, .14);
+  --star: #f2b84b;
   --danger: #e0645b;
   --danger-hover: #ea7d75;
   --danger-soft: rgba(224, 100, 91, .14);

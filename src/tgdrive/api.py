@@ -14,6 +14,7 @@ from .accounts import AccountService
 from .authn import AuthenticationError, Session, hash_password
 from .errors import NotFoundError, NotReadyError
 from . import favorites
+from .playlists import ITEM_LIMIT as PLAYLIST_ITEMS, LIMIT as PLAYLIST_LIMIT, Playlists
 from .filekinds import kind_case, kind_clause
 from .maintenance import MaintenanceService
 from .metrics import TrafficMetrics
@@ -412,6 +413,13 @@ class UserApi:
     def __init__(self, accounts: AccountService, objects: ObjectService,
                  clients: ClientAuthStore | None = None) -> None:
         self.accounts, self.objects, self.clients = accounts, objects, clients
+        self._playlists: Playlists | None = None
+
+    @property
+    def playlists(self) -> Playlists:
+        if self._playlists is None:
+            self._playlists = Playlists(self.objects.metadata)
+        return self._playlists
 
     def _session(self, token: str, *, csrf: str | None = None, mutation: bool = False) -> Session:
         if not self.accounts.keystore.unlocked:
@@ -935,6 +943,124 @@ class UserApi:
             item["samples"] = self._objects_json([self.objects._object(row) for row in samples[item["album"]]])
         return {"albums": albums, "truncated": truncated}
 
+    # ---------- 星标 ----------
+
+    def _file_paths(self, paths: object, limit: int) -> list[str]:
+        if not isinstance(paths, list) or not paths or len(paths) > limit or not all(isinstance(path, str) for path in paths):
+            raise ValueError(f"请选择 1–{limit} 个文件")
+        return [self._path(path) for path in paths]
+
+    async def set_starred(self, token: str, csrf: str, paths: object, starred: object) -> dict[str, object]:
+        self._session(token, csrf=csrf, mutation=True)
+        keys = self._file_paths(paths, self.objects.STAR_LIMIT)
+        changed = await self.objects.metadata.run_in_thread(self.objects.set_starred, self._scope(token), keys, bool(starred))
+        return {"changed": changed, "starred": bool(starred)}
+
+    async def starred(self, token: str, cursor: str = "", limit: int = 100, query: str = "", kind: str = "") -> dict[str, object]:
+        """「星标」视图：普通空间里加了星标的文件，最近加星标的在前；可按关键词（相对路径）与类型筛选。键集分页。"""
+        account = self.accounts.account_for_session(self._session(token))
+        scope = self._scope(token)
+        limit = max(1, min(limit, 500))
+        query = unicodedata.normalize("NFC", query.strip())
+        if len(query) > 200:
+            raise ValueError("搜索词太长")
+        sql = "bucket_id=? AND starred_at IS NOT NULL AND substr(key,1,9)!='.tgdrive/' AND key>=? AND key<?"
+        args: list[object] = [account.bucket_id, scope.prefix, scope.prefix + self.objects._PREFIX_END]
+        if kind:
+            condition, kind_args = kind_clause(kind)
+            sql += f" AND {condition}"
+            args += kind_args
+        if query:
+            sql += " AND instr(lower(substr(key,?)),lower(?))>0"
+            args += [len(scope.prefix) + 1, query]
+        if cursor:
+            stamp, _, key = cursor.partition("\n")
+            try:
+                value = float(stamp)
+            except ValueError as exc:
+                raise ValueError("游标不正确") from exc
+            sql += " AND (starred_at<? OR (starred_at=? AND key>?))"
+            args += [value, value, key]
+
+        def read_page():
+            return self.objects.metadata.db.execute(
+                f"SELECT * FROM objects WHERE {sql} ORDER BY starred_at DESC, key LIMIT ?", (*args, limit + 1)).fetchall()
+        rows = await self.objects.metadata.run_in_thread(read_page)
+        page = rows[:limit]
+        last = page[-1] if len(rows) > limit else None
+        return {"objects": self._objects_json([self.objects._object(row) for row in page]),
+                "next_cursor": None if last is None else f"{last['starred_at']!r}\n{last['key']}"}
+
+    # ---------- 歌单 ----------
+
+    def _playlist_bucket(self, token: str, csrf: str | None = None, *, mutation: bool = False) -> int:
+        account = self.accounts.account_for_session(self._session(token, csrf=csrf, mutation=mutation))
+        if account.bucket_id is None:
+            raise PermissionError("该账号没有文件空间")
+        return account.bucket_id
+
+    async def list_playlists(self, token: str) -> dict[str, object]:
+        bucket_id = self._playlist_bucket(token)
+        def read():
+            items = self.playlists.list(bucket_id)
+            for item in items:
+                item["samples"] = self._objects_json([self.objects._object(row) for row in item["samples"]])
+            return {"playlists": items, "limit": self.playlists_limit()}
+        return await self.objects.metadata.run_in_thread(read)
+
+    @staticmethod
+    def playlists_limit() -> dict[str, int]:
+        return {"playlists": PLAYLIST_LIMIT, "items": PLAYLIST_ITEMS}
+
+    async def playlist(self, token: str, playlist_id: int, cursor: str = "", limit: int = 200) -> dict[str, object]:
+        bucket_id = self._playlist_bucket(token)
+        try:
+            position = int(cursor) if cursor else -1
+        except ValueError as exc:
+            raise ValueError("游标不正确") from exc
+        def read():
+            rows, next_position = self.playlists.items(bucket_id, playlist_id, position, limit)
+            return {"playlist": self.playlists.get(bucket_id, playlist_id),
+                    "objects": self._objects_json([self.objects._object(row) for row in rows]),
+                    "next_cursor": None if next_position is None else str(next_position)}
+        return await self.objects.metadata.run_in_thread(read)
+
+    async def create_playlist(self, token: str, csrf: str, name: object, paths: object = None) -> dict[str, object]:
+        bucket_id = self._playlist_bucket(token, csrf, mutation=True)
+        keys = self._file_paths(paths, self.playlists_limit()["items"]) if paths else []
+        playlist_id = await self.objects.metadata.run_in_thread(self.playlists.create, bucket_id, name, keys)
+        return self.playlists.get(bucket_id, playlist_id)
+
+    async def update_playlist(self, token: str, csrf: str, playlist_id: int, payload: dict) -> dict[str, object]:
+        """改名（name）、追加（add）、移除（remove）或调整一首歌的位置（move: {path, before}），可以同时给出几项。"""
+        bucket_id = self._playlist_bucket(token, csrf, mutation=True)
+        limit = self.playlists_limit()["items"]
+        def write():
+            result: dict[str, object] = {}
+            if "name" in payload:
+                self.playlists.rename(bucket_id, playlist_id, payload["name"])
+            if payload.get("add"):
+                result["added"] = self.playlists.add(bucket_id, playlist_id, self._file_paths(payload["add"], limit))
+            if payload.get("remove"):
+                result["removed"] = self.playlists.remove(bucket_id, playlist_id, self._file_paths(payload["remove"], limit))
+            move = payload.get("move")
+            if move is not None:
+                if not isinstance(move, dict) or not isinstance(move.get("path"), str) or not isinstance(move.get("before"), (str, type(None))):
+                    raise ValueError("调整顺序的参数不正确")
+                self.playlists.move(bucket_id, playlist_id, self._path(move["path"]),
+                                    None if move.get("before") is None else self._path(move["before"]))
+            return {**self.playlists.get(bucket_id, playlist_id), **result}
+        return await self.objects.metadata.run_in_thread(write)
+
+    async def delete_playlist(self, token: str, csrf: str, playlist_id: int) -> None:
+        bucket_id = self._playlist_bucket(token, csrf, mutation=True)
+        await self.objects.metadata.run_in_thread(self.playlists.delete, bucket_id, playlist_id)
+
+    async def playlists_containing(self, token: str, paths: object) -> dict[str, object]:
+        bucket_id = self._playlist_bucket(token)
+        keys = self._file_paths(paths, 500)
+        return {"playlists": await self.objects.metadata.run_in_thread(self.playlists.containing, bucket_id, keys)}
+
     async def folder(self, token: str, csrf: str, path: str) -> dict[str, object]:
         session = self._session(token, csrf=csrf, mutation=True)
         account = self.accounts.account_for_session(session)
@@ -1415,4 +1541,5 @@ class UserApi:
         return {"key": item.key, "size": item.size, "etag": item.etag, "content_type": item.content_type,
                 "user_meta": meta, "modified_at": item.modified_at, **state,
                 "public_token": item.public_token, "public_at": item.public_at, "public_expires_at": item.public_expires_at,
-                "public_has_password": item.public_has_password, "public_downloads": item.public_downloads}
+                "public_has_password": item.public_has_password, "public_downloads": item.public_downloads,
+                **({"starred_at": item.starred_at} if item.starred_at else {})}

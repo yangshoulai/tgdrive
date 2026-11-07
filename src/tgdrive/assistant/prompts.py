@@ -143,6 +143,11 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
 - 需要用户自己操作时，说清楚在界面哪里点（例如“在文件的 ⋯ 菜单里选择「公开分享」”）；做不到的事直接说明原因和替代办法。"""
 
 
+# Telegram 交互机器人发来的对话（telegram/bot.py）：上下文里的「用户所在页面」。
+TELEGRAM_VIEW = ("Telegram 机器人私聊（用户没有打开网页，不能操作页面；回复以简短的纯文本发到 Telegram，"
+                 "Markdown 只支持粗体、行内代码与代码块；需要确认的操作会在 Telegram 里显示确认按钮）")
+
+
 def context_block(*, scope_root: str, view: str, location: str, used: str, quota: str, remaining_steps: int,
                   remaining_tools: int, parallel_calls: int, pending: str = "无", private_remaining: int | None = None,
                   private: str = "", plan: str = "无") -> str:

@@ -21,6 +21,7 @@ from .metrics import TrafficMetrics
 from .objects import ObjectService
 from .offline.resources import ResourceSettings
 from .offline.service import OfflineDownloads
+from .telegram.bot import InteractionBot
 from .s3.auth import ClientAuthStore
 from .s3.gateway import S3Gateway
 from .settings import SystemSettings
@@ -104,11 +105,15 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     assistant = AssistantService(accounts, objects, offline, user_api=user, settings=context.system_settings)
     maintenance.assistant_cleaner = assistant.cleanup
     maintenance.assistant_catalog = assistant.sync_catalog_if_due
+    # Telegram 交互机器人：私聊里创建离线下载、保存文件、向文件助手提问，并推送下载完成提醒。
+    telegram_bot = InteractionBot(accounts, objects, offline, assistant=assistant, settings=context.system_settings)
+    offline.on_finished = telegram_bot.offline_finished
     app = TgDriveASGI(admin, user,
                       s3=s3, s3_host=s3_host, static_dir=static_dir, secure_cookies=secure_cookies,
                       settings=context.system_settings,
                       scheduler=MaintenanceScheduler(maintenance) if run_scheduler else None, metrics=metrics,
-                      context=context, offline=offline, resources=resources, assistant=assistant, thumbnails=thumbnails)
+                      context=context, offline=offline, resources=resources, assistant=assistant, thumbnails=thumbnails,
+                      telegram_bot=telegram_bot)
     app.metadata = context.metadata
     app.keystore = context.keystore
     app.engine = context.engine
@@ -119,6 +124,7 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     app.telegram_bots = context.telegram_bots
     app.system_settings = context.system_settings
     app.assistant = assistant
+    app.telegram_bot = telegram_bot
     return app
 
 

@@ -156,6 +156,8 @@ class RunState:
     locked: bool = False
     private_needed: bool = False
     plan: Plan = field(default_factory=Plan)
+    # 对话从哪里发来：web 是网页对话框；telegram 是交互机器人（telegram/bot.py），没有网页，不提供浏览器工具。
+    channel: str = "web"
 
     async def emit(self, event: dict) -> None:
         self.seq += 1
@@ -765,7 +767,8 @@ class AssistantService:
             self.trace.append(conversation_id, None, "event", {"type": "private", "text": PRIVATE_MARKED})
         return access
 
-    async def send(self, token: str, csrf: str, conversation_id: str, payload: dict) -> dict[str, object]:
+    async def send(self, token: str, csrf: str, conversation_id: str, payload: dict, *, channel: str = "web") -> dict[str, object]:
+        """channel 只由服务端内部调用方指定（Telegram 机器人传 telegram），不读取网页请求里的字段。"""
         session, account = self._session(token, csrf=csrf, mutation=True)
         row = self.trace.conversation(account.id, conversation_id)
         self._check_private(token, conversation_id)
@@ -780,6 +783,8 @@ class AssistantService:
             raise ValueError(f"消息最多 {MAX_TEXT} 个字符")
         self._admit(account.id, row)
         view = payload.get("view") if isinstance(payload.get("view"), str) and len(payload.get("view")) <= 20 else "files"
+        if channel == "telegram":
+            view = "telegram"
         scope_root = row["scope_root"]
         choice = payload.get("scope")
         location = self._place(payload.get("location"))
@@ -817,7 +822,8 @@ class AssistantService:
         run_id = self.trace.start_run(conversation_id, model_id, prompts.PROMPT_VERSION)
         message_seq = self._append_user(account.id, conversation_id, run_id, body, attachments)
         state = self._start(run_id, conversation_id, account, token, model_id, view, location,
-                            environment=knowledge.client_environment(payload.get("environment")), private=private, access=access)
+                            environment=knowledge.client_environment(payload.get("environment")), private=private, access=access,
+                            channel=channel)
         return {"run_id": state.id, "message_seq": message_seq}
 
     def _append_user(self, user_id: int, conversation_id: str, run_id: str, body: dict, attachments: list[str],
@@ -889,13 +895,17 @@ class AssistantService:
         return {"run_id": state.id, "message_seq": message_seq}
 
     def _start(self, run_id: str, conversation_id: str, account, token: str, model_id: int, view: str, location: str,
-               *, environment: dict | None = None, private: bool | None = None, access: str | None = None) -> RunState:
+               *, environment: dict | None = None, private: bool | None = None, access: str | None = None,
+               channel: str | None = None) -> RunState:
         if private is None:
             private = self.trace.is_private(conversation_id)
         if private and access is None:
             access = self._session_access(token)
+        if channel is None:
+            # 确认操作后继续执行的运行沿用这个对话上一轮的来源（Telegram 里确认的操作继续在 Telegram 回复）。
+            channel = next((run.channel for run in reversed(self.runs.values()) if run.conversation_id == conversation_id and run.token == token), "web")
         state = RunState(run_id, conversation_id, account.id, account.bucket_id, token, model_id, view, location,
-                         private=private, access=access)
+                         private=private, access=access, channel=channel)
         state.environment = environment if environment is not None else next(
             (run.environment for run in reversed(self.runs.values()) if run.conversation_id == conversation_id and run.token == token), {})
         state.trim_events = self._gc_runs
@@ -2268,6 +2278,9 @@ class AssistantService:
                 endpoint = self.channels.endpoint(model["channel_id"])
                 can_see = self.channels.vision(model)
                 tools = self._user_tools(state.user_id)
+                if state.channel == "telegram":
+                    # Telegram 里没有网页：浏览器工具（读取页面、跳转、下载按钮等）不提供给模型。
+                    tools = {name: spec for name, spec in tools.items() if spec.group != "browser"}
                 if state.plan.has_actions:
                     state.plan.reconcile(self.trace.actions(state.conversation_id))
                 await self._publish_plan(state)
@@ -2346,7 +2359,8 @@ class AssistantService:
                 # 状态快照不能伪装成最新用户消息，否则模型会把原始任务误判为已被状态说明取代。
                 context_block = {"role": "system", "content": prompts.context_block(
                     private_remaining=remaining, private=private_status,
-                    scope_root=display(scope_root), view=state.view, location=display(state.location),
+                    scope_root=display(scope_root), location=display(state.location),
+                    view=prompts.TELEGRAM_VIEW if state.channel == "telegram" else state.view,
                     used=_fmt(usage["used_bytes"] if usage else 0),
                     quota="不限" if not usage or usage["quota_bytes"] is None else _fmt(usage["quota_bytes"]),
                     remaining_steps=max(0, limits["max_steps"] - steps), remaining_tools=max(0, limits["max_tool_calls"] - tool_calls),

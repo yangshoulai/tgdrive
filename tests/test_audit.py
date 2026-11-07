@@ -177,4 +177,5 @@ class AuditLabelTests(unittest.TestCase):
         from tgdrive.audit import ACTIONS
         actions = {action for routes in TgDriveASGI._AUDITED.values() for action in routes.values()}
         actions |= {"assistant.action.auto"}  # 完全访问模式自动执行，由助手服务直接写入
+        actions |= {"telegram.link"}  # 在 Telegram 私聊里完成绑定，由交互机器人直接写入
         self.assertEqual(sorted(actions - ACTIONS.keys()), [])

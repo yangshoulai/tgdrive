@@ -178,6 +178,9 @@
 .grid-check { position: absolute; top: 8px; left: 8px; display: grid; padding: 4px; border-radius: var(--radius-xs); background: var(--surface); opacity: 0; transition: opacity var(--duration-fast); }
 .grid-card:hover .grid-check, .grid-card.is-selected .grid-check, .grid-check:focus-within { opacity: 1; }
 .grid-public { position: absolute; top: 8px; right: 8px; }
+/* 星标：列表里跟在文件名之后，网格卡片在缩略图左下角。 */
+.star-mark { display: inline-flex; flex: none; color: var(--star); }
+.grid-star { position: absolute; bottom: 8px; left: 8px; display: inline-flex; padding: 3px; border-radius: 999px; background: color-mix(in srgb, var(--surface) 88%, transparent); color: var(--star); box-shadow: var(--shadow-sm); }
 .grid-meta { display: grid; min-width: 0; min-height: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: start; row-gap: 4px; padding: 8px 4px 8px 12px; }
 .grid-name { display: block; width: 100%; min-width: 0; min-height: 0; overflow: hidden; appearance: none; -webkit-appearance: none; font-size: var(--text-sm); font-weight: 500; text-align: left; }
 /* 文件名最多两行：同一批文件常有相同的前缀，只显示一行时难以区分。 */
