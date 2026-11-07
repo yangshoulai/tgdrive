@@ -132,14 +132,29 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
   player.on("video:playing", markReady);
   player.on("video:waiting", () => notify(ready ? "buffering" : "loading"));
   player.on("video:pause", () => { if (ready) notify("ready"); });
-  player.on("video:durationchange", updateProgress);
+  player.on("video:durationchange", () => { updateProgress(); fitControls(); });
   player.on("video:timeupdate", () => { updateProgress(); if (player.video.readyState >= 2) events?.onVideoFrame?.(player.video); });
   player.on("video:seeked", () => { updateProgress(); if (player.video.readyState >= 2) markReady(); });
   player.on("video:seeking", thumbnailState);
   player.on("video:ended", () => { markReady(); events?.onPlaying(false); events?.onEnded(); });
   player.on("video:error", () => notify("failed"));
+  /** 控制条放不下时按优先级依次收起按钮：画中画、网页全屏、音量、时间、上一个／下一个（键盘 ← → 仍可切换）。
+   * 窗口宽度、按钮数量（多文件时多出上一个、下一个与播放列表）和时间文字长度（超过一小时更宽）都会改变所需宽度，
+   * 所以按实际布局测量，而不是只靠固定的宽度断点。 */
+  const SQUEEZE = ["pip", "fullscreenWeb", "volume", "time", "previous next"];
+  const fitControls = () => {
+    if (destroyed) return;
+    const bar = frame.querySelector<HTMLElement>(".art-controls");
+    if (!bar) return;
+    const overflowing = () => {
+      const limit = bar.getBoundingClientRect().right + 1;
+      return [...bar.querySelectorAll<HTMLElement>(".art-control")].some(node => node.offsetParent && node.getBoundingClientRect().right > limit);
+    };
+    SQUEEZE.forEach((_, index) => frame.classList.remove(`art-squeeze-${index + 1}`));
+    for (let level = 1; level <= SQUEEZE.length && overflowing(); level++) frame.classList.add(`art-squeeze-${level}`);
+  };
   // ArtPlayer 默认只监听浏览器窗口；弹窗拖动改变容器尺寸时也要更新比例与控件布局。
-  const observer = new ResizeObserver(() => { measure(); player.emit("resize"); });
+  const observer = new ResizeObserver(() => { measure(); player.emit("resize"); fitControls(); });
   observer.observe(container);
   // 原生全屏时放大的是播放器本身，容器尺寸不变，所以也要观察播放器。
   observer.observe(frame);
@@ -168,6 +183,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
         onSelect: (option: { value?: Mode; html: string }) => { if (option.value) navigation?.()?.onMode?.(option.value); return option.html; } };
       if (player.setting.find("mode")) player.setting.update(item); else player.setting.add(item);
     } else if (player.setting.find("mode")) player.setting.remove("mode");
+    fitControls();
   };
   return {
     refreshNavigation,

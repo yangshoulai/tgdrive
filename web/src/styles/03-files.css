@@ -479,6 +479,12 @@ button.extract-tree-toggle:hover { background: var(--surface-sunken); color: var
 .preview-video-host .art-control-thumbnail svg, .preview-video-host .art-setting-item-left-icon svg[fill="none"] { fill: none; }
 .preview-video-host .art-control-thumbnail .spinner { width: 18px; height: 18px; color: var(--media-ink); }
 .preview-video-host .art-subtitle { font-family: var(--font); }
+/* 控制条放不下时由 preview-media-engine.ts 的 fitControls 逐级加类，按优先级收起按钮（类名累加，级别越高收起越多）。 */
+.preview-video-host .art-squeeze-1 .art-control-pip,
+.preview-video-host .art-squeeze-2 .art-control-fullscreenWeb,
+.preview-video-host .art-squeeze-3 .art-control-volume,
+.preview-video-host .art-squeeze-4 .art-control-time,
+.preview-video-host .art-squeeze-5 :is(.art-control-previous, .art-control-next) { display: none !important; }
 @container video-preview (max-width: 480px) {
   .preview-video-host .art-control-pip, .preview-video-host .art-control-fullscreenWeb { display: none !important; }
   .preview-modal-video .preview-video-host .art-control-volume { display: none !important; }
