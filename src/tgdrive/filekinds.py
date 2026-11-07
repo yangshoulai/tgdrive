@@ -10,7 +10,11 @@
 
 # 扩展名生效的条件：generic 只在 MIME 缺失或通用二进制时；text 另外允许文本类 MIME（细分源代码、字幕等）；
 # media 另外允许音视频 MIME（容器相同时按音频扩展名区分）。
-_GENERIC = "(coalesce(content_type,'')='' OR lower(content_type) LIKE 'application/octet-stream%' OR lower(content_type) LIKE 'binary/octet-stream%')"
+# 不说明具体格式的类型：空、通用二进制，以及下载站常用的「强制下载」类类型（application/force-download 等）。
+# 这些类型按扩展名判断，否则一张 PNG 会被当成「其他文件」而无法预览。前端 files.tsx 的 getFileKind 保持同一份列表。
+GENERIC_TYPES = ("application/octet-stream", "binary/", "application/force-download", "application/x-download", "application/download",
+                 "application/unknown", "application/x-unknown", "application/binary", "unknown/")
+_GENERIC = "(coalesce(content_type,'')='' OR " + " OR ".join(f"lower(content_type) LIKE '{prefix}%'" for prefix in GENERIC_TYPES) + ")"
 _TEXTUAL_SQL = ("(lower(coalesce(content_type,'')) LIKE 'text/%' OR lower(coalesce(content_type,'')) LIKE 'application/json%'"
                 " OR lower(coalesce(content_type,'')) LIKE 'application/%+json%')")
 _MEDIA_SQL = "(lower(coalesce(content_type,'')) LIKE 'video/%' OR lower(coalesce(content_type,'')) LIKE 'audio/%')"
@@ -122,7 +126,7 @@ def _like(value: str, pattern: str) -> bool:
 def kind_of(key: str, content_type: str | None) -> str | None:
     """按与 kind_clause 相同的规则判断单个对象属于哪个筛选项（image／video／…），都不属于时返回 None。"""
     mime, name = (content_type or "").lower(), key.lower()
-    generic = not mime or mime.startswith(("application/octet-stream", "binary/octet-stream"))
+    generic = not mime or mime.startswith(GENERIC_TYPES)
     textual = mime.startswith(("text/", "application/json")) or (mime.startswith("application/") and "+json" in mime)
     allowed = {"generic": generic, "text": generic or textual,
                "media": generic or mime.startswith(("video/", "audio/"))}

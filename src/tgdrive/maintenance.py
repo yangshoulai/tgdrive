@@ -178,13 +178,13 @@ class Scrubber:
 
 
 class MediaRetyper:
-    """修正被当成音视频的图片：内容识别（sniff.py）上线前保存的文件、引用它们的秒传副本，以及按旧规则把陌生品牌的
-    ISO-BMFF 图片认成 MP4 的文件，类型可能是 video/*，列表显示为视频却无法播放。只检查文件名像图片、类型是音视频、
-    内容识别结果缺失或可能误判的 Blob：重读开头 64 KiB 重新识别，改正后清掉「无法生成封面」的记录让封面重新生成。
+    """修正类型不是图片的图片：内容识别（sniff.py）上线前保存的文件、引用它们的秒传副本，以及按旧规则把陌生品牌的
+    ISO-BMFF 图片认成 MP4 的文件，类型可能是 video/*（显示为视频却无法播放）或来源给的 application/force-download 等
+    （显示为「其他文件」不能预览）。只检查文件名像图片、类型不是图片、内容识别结果缺失或可能误判的 Blob：重读开头 64 KiB 重新识别，改正后清掉「无法生成封面」的记录让封面重新生成。
     按 Blob 编号游标分批处理，扫完一遍记下版本，之后不再重复读取（新写入的文件已在写入时按新规则识别）。"""
     CURSOR_KEY = "maintenance.retype_cursor"
     DONE_KEY = "maintenance.retype_done"
-    VERSION = 1
+    VERSION = 2  # 2：从「类型是音视频」扩大到「类型不是图片」
     HEAD = 64 * 1024
     _IMAGE_NAMES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif", ".bmp", ".tif", ".tiff", ".jxl")
 
@@ -202,8 +202,8 @@ class MediaRetyper:
         def candidates():
             return self.metadata.db.execute(
                 "SELECT o.blob_uuid AS blob, MIN(o.bucket_id) AS bucket_id, b.size AS size FROM objects o JOIN blobs b ON b.uuid=o.blob_uuid "
-                "WHERE o.blob_uuid > ? AND b.status='complete' AND (o.content_type LIKE 'video/%' OR o.content_type LIKE 'audio/%') "
-                f"AND (b.sniffed IS NULL OR b.sniffed IN ('exact:video/mp4', 'exact:audio/mp4', 'unknown:')) AND ({names}) "
+                "WHERE o.blob_uuid > ? AND b.status='complete' AND coalesce(o.content_type,'') NOT LIKE 'image/%' "
+                f"AND (b.sniffed IS NULL OR b.sniffed IN ('exact:video/mp4', 'exact:audio/mp4', 'unknown:') OR b.sniffed LIKE 'exact:image/%') AND ({names}) "
                 "GROUP BY o.blob_uuid ORDER BY o.blob_uuid LIMIT ?",
                 (cursor, *[f"%{suffix}" for suffix in self._IMAGE_NAMES], limit)).fetchall()
         rows = await self.metadata.run_in_thread(candidates)
@@ -223,7 +223,7 @@ class MediaRetyper:
                 with self.metadata.transaction() as db:
                     db.execute("UPDATE blobs SET sniffed=?, taken_at=COALESCE(?, taken_at) WHERE uuid=?", (detected, taken, blob))
                     for item in db.execute("SELECT bucket_id, key, content_type FROM objects WHERE blob_uuid=? "
-                                           "AND (content_type LIKE 'video/%' OR content_type LIKE 'audio/%')", (blob,)).fetchall():
+                                           "AND coalesce(content_type,'') NOT LIKE 'image/%'", (blob,)).fetchall():
                         value = resolve(detected, item["content_type"], item["key"])
                         if value and value.startswith("image/"):
                             db.execute("UPDATE objects SET content_type=? WHERE bucket_id=? AND key=?", (value, item["bucket_id"], item["key"]))

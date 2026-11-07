@@ -97,12 +97,16 @@ export function matchesKindFilter(file: { content_type?: string | null; key: str
     : value === "text" ? kind === "text" || kind === "code" : kind === value);
 }
 
+const GENERIC_TYPES = ["application/octet-stream", "binary/", "application/force-download", "application/x-download", "application/download",
+  "application/unknown", "application/x-unknown", "application/binary", "unknown/"];
+
 export function getFileKind(type: string | null | undefined, name: string): FileKind {
   const lower = name.toLowerCase();
   const mime = (type || "").split(";", 1)[0].trim().toLowerCase();
   if (lower.endsWith("/")) return "folder";
   // 类型以内容为准（服务器写入时按内容判断）：只有 MIME 缺失或是通用二进制时才看扩展名，与 filekinds.py 一致。
-  const generic = !mime || mime.startsWith("application/octet-stream") || mime.startsWith("binary/octet-stream");
+  // 与 filekinds.py 的 GENERIC_TYPES 一致：通用二进制与下载站的「强制下载」类类型都按扩展名判断。
+  const generic = !mime || GENERIC_TYPES.some(prefix => mime.startsWith(prefix));
   const textual = mime.startsWith("text/") || mime.startsWith("application/json") || /^application\/[\w.-]+\+json/.test(mime);
   const named = (pattern: RegExp) => generic && pattern.test(lower);
   if (mime.startsWith("image/") || named(/\.(png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$/)) return "image";

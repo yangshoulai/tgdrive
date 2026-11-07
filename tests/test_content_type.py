@@ -51,6 +51,8 @@ class SniffTests(unittest.TestCase):
         self.assertEqual(kind_of("book.epub", "application/epub+zip"), "document", "电子书归文档，不算压缩包")
         self.assertEqual(kind_of("a.ipynb", "application/x-ipynb+json"), "text")
         self.assertEqual(kind_of("a.jsonl", None), "text")
+        self.assertEqual(kind_of("0018.png", "application/force-download"), "image", "下载站的强制下载类型不说明格式，按扩展名")
+        self.assertEqual(kind_of("a.png", "binary/x-anything"), "image")
 
 
 class StoredTypeTests(unittest.IsolatedAsyncioTestCase):
@@ -126,3 +128,14 @@ class ImageMistakenForVideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(db.db.execute("SELECT 1 FROM thumbnails WHERE blob_uuid=? AND variant='none'", (row["blob_uuid"],)).fetchone(),
                           "清掉无法生成封面的记录，让封面重新生成")
         self.assertEqual(await self.app.maintenance.retyper.run_once(), {"done": True}, "扫完一遍后不再重复读取")
+
+    async def test_maintenance_retypes_images_saved_with_download_types(self):
+        objects, db = self.app.objects, self.app.metadata
+        await objects.put_object(self.scope, "dl/0018.png", PNG, len(PNG), "image/png")
+        row = db.db.execute("SELECT blob_uuid FROM objects WHERE bucket_id=? AND key=?", (self.alice.bucket_id, "dl/0018.png")).fetchone()
+        with db.transaction() as tx:
+            tx.execute("UPDATE blobs SET sniffed=NULL WHERE uuid=?", (row["blob_uuid"],))
+            tx.execute("UPDATE objects SET content_type='application/force-download' WHERE bucket_id=? AND key=?", (self.alice.bucket_id, "dl/0018.png"))
+        result = await self.app.maintenance.retyper.run_once()
+        self.assertEqual(result["fixed"], 1)
+        self.assertEqual(await self.type_of("dl/0018.png"), "image/png")
