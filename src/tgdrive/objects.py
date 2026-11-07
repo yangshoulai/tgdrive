@@ -425,7 +425,7 @@ class ObjectService:
         for key in keys:
             self._check_scope(scope, key, write=True)
             if key.endswith("/") or key.startswith(".tgdrive/"):
-                raise ValueError("只能给普通文件加星标")
+                raise ValueError("只能收藏普通文件")
         changed = 0
         with self.metadata.transaction() as db:
             for key in keys:

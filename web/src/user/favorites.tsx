@@ -1,5 +1,5 @@
 /**
- * 侧栏「收藏」：固定常用文件夹（类似 Finder 的个人收藏）。列表按账号保存在服务端（GET/PUT /api/user/v1/favorites），
+ * 侧栏「常用文件夹」（代码与注释里仍叫收藏／favorites）：固定常用文件夹（类似 Finder 的个人收藏）。列表按账号保存在服务端（GET/PUT /api/user/v1/favorites），
  * 多台设备同步；私密文件夹锁定时也显示（locked），点击后进入私密空间并弹出解锁框，解锁后打开该文件夹。
  * 入口：文件夹菜单「固定到侧栏」，或把文件夹从文件列表拖到收藏区域；收藏之间拖动排序，右键可上移、下移、移除。
  * 文件夹移动或改名后服务端同步改写（图标随之保留），移入回收站后移除；已不存在的显示为灰色。
@@ -41,7 +41,7 @@ function privateLockChanged(locked: boolean) {
 
 /** 侧栏收藏可选的图标；null 为默认（文件夹，私密文件夹为锁形）。名称是 ui.tsx 的图标名，服务端只校验格式。 */
 export const FAVORITE_ICONS: { icon: IconName | null; label: string }[] = [
-  { icon: null, label: "默认" }, { icon: "star", label: "收藏" }, { icon: "heart", label: "喜欢" }, { icon: "audio", label: "音乐" },
+  { icon: null, label: "默认" }, { icon: "star", label: "重点" }, { icon: "heart", label: "喜欢" }, { icon: "audio", label: "音乐" },
   { icon: "film", label: "电影" }, { icon: "video", label: "视频" }, { icon: "image", label: "图片" }, { icon: "camera", label: "照片" },
   { icon: "book", label: "资料" }, { icon: "fileText", label: "文档" }, { icon: "briefcase", label: "工作" }, { icon: "graduation", label: "学习" },
   { icon: "code", label: "代码" }, { icon: "gamepad", label: "游戏" }, { icon: "palette", label: "设计" }, { icon: "download", label: "下载" },
@@ -75,14 +75,14 @@ async function save(next: string[], success?: string, icons: Record<string, stri
     if (success) toast.success(success);
   } catch (reason) {
     items = previous; emit();
-    toast.error(api.errorMessage(reason, "收藏没有保存，请稍后重试"));
+    toast.error(api.errorMessage(reason, "常用文件夹没有保存，请稍后重试"));
   }
 }
 
 export const isFavorite = (path: string) => items.some(item => item.path === path);
 export function pinFolder(path: string, index = items.length) {
   if (isFavorite(path)) return Promise.resolve();
-  if (items.length >= 50) { toast.error("最多收藏 50 个文件夹"); return Promise.resolve(); }
+  if (items.length >= 50) { toast.error("最多固定 50 个常用文件夹"); return Promise.resolve(); }
   const next = items.map(item => item.path);
   next.splice(Math.max(0, Math.min(index, next.length)), 0, path);
   return save(next, `已将“${folderName(path)}”固定到侧栏`);
@@ -93,7 +93,7 @@ export const setFavoriteIcon = (path: string, icon: string | null) => save(items
 /** 选择收藏的图标：点选即保存并关闭。 */
 function FavoriteIconDialog({ item, onClose }: { item: Favorite; onClose: () => void }) {
   const current = item.icon && KNOWN_ICONS.has(item.icon as IconName) ? item.icon : null;
-  return <Modal title="选择图标" description={`「${folderName(item.path)}」在侧栏收藏里显示的图标`} icon={favoriteIcon(item)} size="md" onClose={onClose}>
+  return <Modal title="选择图标" description={`「${folderName(item.path)}」在侧栏常用文件夹里显示的图标`} icon={favoriteIcon(item)} size="md" onClose={onClose}>
     <div className="favorite-icon-grid" role="listbox" aria-label="图标">
       {FAVORITE_ICONS.map(option => {
         const selected = option.icon === current;
@@ -181,7 +181,7 @@ export function FavoritesNav({ section, prefix, rail, onOpen, hrefFor }: {
     let keys: string[] = [];
     try { keys = JSON.parse(event.dataTransfer.getData(FILE_DRAG) || "[]"); } catch { /* 忽略无法识别的拖入内容 */ }
     const folders = keys.filter(key => typeof key === "string" && key.endsWith("/") && !isFavorite(key));
-    if (!folders.length) { if (keys.length) toast.info(keys.some(key => key.endsWith("/")) ? "文件夹已在收藏中" : "只能把文件夹固定到侧栏"); return; }
+    if (!folders.length) { if (keys.length) toast.info(keys.some(key => key.endsWith("/")) ? "文件夹已在常用文件夹中" : "只能把文件夹固定到侧栏"); return; }
     const next = list.map(item => item.path);
     next.splice(target, 0, ...folders);
     void save(next.slice(0, 50), folders.length === 1 ? `已将“${folderName(folders[0])}”固定到侧栏` : `已将 ${folders.length} 个文件夹固定到侧栏`);

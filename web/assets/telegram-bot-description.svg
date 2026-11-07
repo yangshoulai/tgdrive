@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360">
+  <!-- Telegram 机器人的介绍图（BotFather /setdescriptionpic，必须 640×360）：品牌标记、名称、标语与机器人能做的事。 -->
+  <defs>
+    <radialGradient id="glow" cx="30%" cy="40%" r="80%">
+      <stop offset="0" stop-color="#1d2133"/>
+      <stop offset="1" stop-color="#0b0c13"/>
+    </radialGradient>
+  </defs>
+  <rect width="640" height="360" fill="url(#glow)"/>
+  <g transform="translate(48 100) scale(5)">
+    <rect x="5" y="5" width="10" height="10" rx="2.4" fill="#fff"/>
+    <rect x="5" y="17" width="10" height="10" rx="2.4" fill="#fff" fill-opacity=".6"/>
+    <rect x="17" y="17" width="10" height="10" rx="2.4" fill="#fff" fill-opacity=".32"/>
+    <polygon points="18.2,6.2 25.8,6.2 25.8,13.8" fill="#f0a22e" stroke="#f0a22e" stroke-width="2.4" stroke-linejoin="round"/>
+    <path d="M25.1 6.9 22.2 9.8" stroke="#c27a10" stroke-width="1.1" stroke-linecap="round"/>
+  </g>
+  <g font-family="-apple-system, 'PingFang SC', 'Helvetica Neue', sans-serif">
+    <text x="232" y="150" fill="#fff" font-size="52" font-weight="700" letter-spacing="-1">Tessera</text>
+    <text x="234" y="190" fill="#f0a22e" font-size="20" letter-spacing="4">千片成璧，唯你可合</text>
+    <text x="234" y="236" fill="#c9ccd8" font-size="15">发链接 · 离线下载到网盘</text>
+    <text x="234" y="262" fill="#c9ccd8" font-size="15">转发文件 · 直接保存</text>
+    <text x="234" y="288" fill="#c9ccd8" font-size="15">问文件助手 · 下载完成提醒</text>
+  </g>
+</svg>

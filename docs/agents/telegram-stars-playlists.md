@@ -8,9 +8,12 @@
 - 消息路由（`_message`）：命令（/help /status /folder /notify /ask /new /unbind）→ 带文件（document／photo 取最大尺寸／video／audio／voice／animation／video_note）保存到 `telegram_links.folder`（Bot API 只能下载 20 MB 以内；同名用 `_free_name` 改名；同一 `media_group_id` 攒 2 秒合并回复）→ 含 `http(s)://` 或以 `curl ` 开头的文字走 `OfflineDownloads.parse(multiple_platforms=True)` + `create`，同一 `group` 的候选按 `_variant_score`（分辨率、码率）选最高的一个 → 其余文字转给文件助手。消息里有链接又想问助手时用 `/ask`。
 - 文件助手：机器人为账号建一个内存会话（`sessions.create`，12 小时，过期或改密码、禁用后重建），对话编号存 `telegram_links.conversation_id`（私密对话不复用）。`AssistantService.send(..., channel="telegram")` 让 `RunState.channel = "telegram"`：去掉 `group == "browser"` 的工具，上下文块的「用户所在页面」换成 `prompts.TELEGRAM_VIEW`；确认后继续的运行沿用同一会话上一轮的 channel。回复取本轮最后一条 assistant 消息，`markdown_html` 转成 Telegram HTML 子集（400 解析失败时退回纯文本），按 4000 字切分。本轮新建、待确认的操作（`assistant_actions.run_id`）逐个发「确认／拒绝」按钮（`callback_data = a:<id>:y|n`），回调里用同一个机器人会话调用 `decide_action`（`acknowledge` 由按钮表示），之后等操作结束并转发继续运行的回复或执行结果。操作卡片绑定发起它的会话：机器人会话重建后旧卡片会提示过期。
 - 下载提醒：`OfflineDownloads.on_finished(row)` 在任务完成或失败（`_run` 的 finally）时调用 `offline_finished`，绑定且开启提醒（`notify`）的私聊收到消息；私密空间的任务不显示文件名与路径；对外地址是 https 时附「打开文件夹／查看离线下载」按钮。
+- 机器人头像与介绍图：`web/assets/telegram-bot-avatar.svg`（1024×1024，BotFather `/setuserpic`）与 `telegram-bot-description.svg`（必须 640×360，`/setdescriptionpic`），用 Chrome headless 截图生成同名 PNG。
 - 回归：`tests/test_telegram_bot.py`（假 Telegram 客户端，含绑定、保存文件、建离线任务、提醒、HTTP 接口与审计、助手回复与确认按钮）。
 
-## 文件星标（`objects.starred_at`）
+## 收藏夹（文件星标，`objects.starred_at`）
+
+- 界面统一叫「收藏夹」「收藏／取消收藏」；代码标识（`star`、`starred_at`、`/star`、`/starred`、`?view=starred`）与注释里的「星标」保持不变。侧栏的「常用文件夹」分组（代码里叫收藏，`favorites.py`）是固定的文件夹，是另一回事。
 
 - 星标是对象行上的时间戳：移动、改名、移入回收站与还原随行保留（都是 `UPDATE key`），`_commit_blob` 覆盖写入沿用旧值，复制、转存、`link_copy` 不继承。只能给普通空间的文件加（不含文件夹、私密空间、系统区）。`POST /api/user/v1/star {paths, starred}`（`ObjectService.set_starred`，一次 ≤1000）；`GET /starred`（`UserApi.starred`，按 `starred_at DESC, key` 键集分页，`objects_starred` 部分索引，支持 `q`、`kind`）。网页对象 JSON 在有星标时带 `starred_at`。
 - 前端：侧栏「文件 → 星标」（`?view=starred`，`library.tsx` 的 `StarredView`，按加星标日期分组，行尾实心星取消并可撤销）；文件菜单「加星标／取消星标」、多选菜单与选择栏、快捷键 `*`（所选或焦点文件，私密空间不处理）；列表文件名后、网格缩略图左下角显示实心星（`--star` 令牌）。回归 `tests/test_stars_playlists.py`。
@@ -19,4 +22,4 @@
 
 - 条目按 (存储桶, 键) 引用普通空间的音频文件（`kind_of == "audio"`），每个账号 ≤200 个歌单、每个歌单 ≤5000 首。`objects` 上的触发器 `playlist_items_follow`（`AFTER UPDATE OF key`）让条目跟随移动；移入回收站的歌曲不列出、还原后回到原位；永久删除后条目留存但 JOIN 不到对象而不列出。位置是连续整数，移动一首时整体重排。
 - 接口：`GET/POST /api/user/v1/playlists`、`GET /playlists/{id}?cursor=`（游标是位置）、`POST /playlists/{id}`（`name`／`add`／`remove`／`move:{path,before}` 可同时给出）、`POST /playlists/{id}/delete`、`POST /playlists/containing`。只在普通空间路由提供（私密路由白名单不含）。`UserApi.playlists` 惰性创建（部分测试用 `SimpleNamespace` 代替对象服务）。
-- 前端：音乐页「专辑／歌单」标签（`?view=music&tab=playlists`，打开歌单 `?view=music&playlist=<id>`；`location.prefix` 为 `playlists`／`playlist:<id>`），歌单页可全部播放、随机播放、重命名、删除，曲目菜单有移到最前、上移、下移、添加到歌单、打开所在文件夹、从歌单移除。「添加到歌单」对话框在 `user/playlists.tsx`（不导入 library.tsx，避免循环依赖），专辑页、搜索结果、文件菜单与多选（音频）共用。回归 `tests/test_stars_playlists.py`。
+- 前端：音乐页「专辑／歌单」标签（`?view=music&tab=playlists`，打开歌单 `?view=music&playlist=<id>`；`location.prefix` 为 `playlists`／`playlist:<id>`），歌单页可全部播放、随机播放、重命名、删除，曲目菜单有移到最前、上移、下移、添加到歌单、打开所在文件夹、从歌单移除。歌单页「添加歌曲」是 `SongPickerDialog`（`library?view=music&q=` 分页，多选后一次 `add`）；专辑、搜索结果与歌单页的曲目用 `useTrackSelection` 多选、`TrackSelectionBar` 批量加入或移除；曲目行的所在歌单标记来自 `usePlaylistMembership`（读全部歌单名称 + `/playlists/containing` 每批 500 首），任何改动调用 `playlistsChanged()` 广播 `tessera:playlists-changed` 让各列表刷新。「添加到歌单」对话框在 `user/playlists.tsx`（不导入 library.tsx，避免循环依赖），专辑页、搜索结果、文件菜单与多选（音频）共用。回归 `tests/test_stars_playlists.py`。

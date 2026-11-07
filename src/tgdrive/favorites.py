@@ -1,4 +1,4 @@
-"""侧栏「收藏」：用户固定在侧栏的常用文件夹（类似 Finder 的个人收藏），按存储桶保存在 settings 表。
+"""侧栏「常用文件夹」（代码里叫收藏／favorites）：用户固定在侧栏的常用文件夹（类似 Finder 的个人收藏），按存储桶保存在 settings 表。
 
 每项是文件夹的完整键（以 / 结尾）加可选的图标名：普通文件夹如 ``照片/2024/``，私密空间的文件夹以 ``.tgdrive/private/`` 开头。
 图标只是界面里的名称（如 ``audio``、``film``），服务端只校验格式，前端不认识的名称按默认文件夹图标显示。
@@ -39,7 +39,7 @@ def icon_name(value: object) -> str | None:
     if value in (None, "", "folder"):
         return None
     if not isinstance(value, str) or not _ICON.fullmatch(value):
-        raise ValueError("收藏的图标不正确")
+        raise ValueError("常用文件夹的图标不正确")
     return value
 
 

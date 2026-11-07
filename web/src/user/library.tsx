@@ -1,4 +1,4 @@
-/** 媒体库：跨文件夹浏览「最近」（按天分组的最近文件）、「星标」（加了星标的文件）与「相册」（图片）、「影视」（视频）、「音乐」（音频）。
+/** 媒体库：跨文件夹浏览「最近」（按天分组的最近文件）、「收藏夹」（收藏的文件，代码里叫 starred）与「相册」（图片）、「影视」（视频）、「音乐」（音频）。
  * 相册与影视首页按所在文件夹分组（GET /api/user/v1/library/folders），打开文件夹只列其中直接包含的这类文件；
  * 音乐分「专辑」与「歌单」两个标签：专辑按标签里的专辑名归类（GET /library/albums，同名专辑合为一张，没有专辑的归为「无专辑」），
  * 歌单是用户自己整理的歌曲列表（/playlists，顺序可调整）。
@@ -7,11 +7,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import * as api from "../api";
 import { FileThumbnail, FileVisual, baseName, canPreview, getFileKind, kindLabel, parentPath } from "../files";
 import { coverTint } from "../preview-media";
-import { Button, ConfirmDialog, EmptyState, Icon, Menu, PageHeader, SearchInput, SkeletonRows, Tabs, formatBytes, toast, useDocumentTitle, type IconName, type MenuItem } from "../ui";
+import { Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, Menu, PageHeader, SearchInput, SkeletonRows, Tabs, formatBytes, toast, useDocumentTitle, type IconName, type MenuItem } from "../ui";
 import { BRAND } from "../brand";
 import { usePreview } from "./preview-host";
 import { useThumbnailPolling } from "./thumbnail-polling";
-import { PlaylistNameDialog, useAddToPlaylist } from "./playlists";
+import { PlaylistBadge, PlaylistNameDialog, SongPickerDialog, playlistsChanged, useAddToPlaylist, usePlaylistMembership } from "./playlists";
 
 export type MediaView = "photos" | "videos" | "music";
 /** 一个文件夹最多读多少个文件（影视与音乐按名称排序，需要读完）。 */
@@ -182,9 +182,9 @@ export function RecentView({ onOpenFolder }: { onOpenFolder: (prefix: string) =>
 
 /* ---------- 星标 ---------- */
 
-/** 星标：普通空间里加了星标的文件，最近加星标的在前，按加星标的日期分组；行尾的星标按钮取消星标。 */
+/** 收藏夹：普通空间里收藏的文件，最近收藏的在前，按收藏日期分组；行尾的星形按钮取消收藏。 */
 export function StarredView({ onOpenFolder }: { onOpenFolder: (prefix: string) => void }) {
-  useDocumentTitle(`星标 · ${BRAND}`);
+  useDocumentTitle(`收藏夹 · ${BRAND}`);
   const search = useSearch();
   const [items, setItems] = useState<api.FileItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -212,16 +212,16 @@ export function StarredView({ onOpenFolder }: { onOpenFolder: (prefix: string) =
     try {
       await api.setStarred([item.key], false);
       setItems(list => list.filter(entry => entry.key !== item.key));
-      toast.success(`已取消「${baseName(item.key)}」的星标`, { label: "撤销", onClick: () => void api.setStarred([item.key], true).then(() => setAttempt(value => value + 1)) });
+      toast.success(`已取消收藏「${baseName(item.key)}」`, { label: "撤销", onClick: () => void api.setStarred([item.key], true).then(() => setAttempt(value => value + 1)) });
     } catch (reason) { toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
   }
   return <div className="library-view">
-    <PageHeader title="星标" description="加了星标的文件，不论放在哪个文件夹；在文件的更多操作里加星标，或选中后按 * 键。" />
-    <LibrarySearch search={search} placeholder="按文件名或文件夹名搜索加了星标的文件" />
+    <PageHeader title="收藏夹" description="收藏的文件，不论放在哪个文件夹；在文件的更多操作里选「收藏」，或选中后按 * 键。" />
+    <LibrarySearch search={search} placeholder="按文件名或文件夹名搜索收藏的文件" />
     <LibraryState loading={loading} error={error} onRetry={() => setAttempt(value => value + 1)}
       empty={!items.length ? search.query
-        ? <EmptyState icon="search" title="没有找到文件" description={`没有路径包含「${search.query}」的星标文件。`} />
-        : <EmptyState icon="star" title="还没有星标文件" description="在文件的更多操作里选择「加星标」，常用的文件会集中出现在这里。" /> : null}>
+        ? <EmptyState icon="search" title="没有找到文件" description={`没有路径包含「${search.query}」的收藏文件。`} />
+        : <EmptyState icon="star" title="还没有收藏的文件" description="在文件的更多操作里选择「收藏」，常用的文件会集中出现在这里。" /> : null}>
       {groups.map(group => <section key={group.label} className="library-group">
         <h2 className="library-group-title">{group.label}<span>{group.items.length} 个</span></h2>
         <ul className="library-list">
@@ -236,8 +236,8 @@ export function StarredView({ onOpenFolder }: { onOpenFolder: (prefix: string) =
               <button type="button" className="library-row-folder" title={`打开 ${folderLabel(folder)}`} onClick={() => onOpenFolder(folder)}>
                 <Icon name="folder" size={14} /><span>{folderLabel(folder)}</span>
               </button>
-              <button type="button" className="icon-btn icon-btn-ghost icon-btn-sm star-toggle is-starred" aria-label={`取消「${baseName(item.key)}」的星标`}
-                title="取消星标" onClick={() => void unstar(item)}><Icon name="star" filled size={16} /></button>
+              <button type="button" className="icon-btn icon-btn-ghost icon-btn-sm star-toggle is-starred" aria-label={`取消收藏「${baseName(item.key)}」`}
+                title="取消收藏" onClick={() => void unstar(item)}><Icon name="star" filled size={16} /></button>
             </li>;
           })}
         </ul>
@@ -347,6 +347,8 @@ function MediaSearch({ view, query, onOpenFolder, onOpenLocation }: { view: Medi
   useThumbnailPolling(library.items, !library.loading, library.setItems, () => undefined);
   const open = usePreviewOpener(library.items);
   const adding = useAddToPlaylist();
+  const selection = useTrackSelection(view === "music" ? library.items : []);
+  const membership = usePlaylistMembership(view === "music" ? library.items.map(item => item.key) : []);
   // 音乐按专辑分段（专辑名排序，无专辑在最后），其余按文件夹（服务端按路径返回，同一文件夹相邻）。
   const groups = useMemo(() => {
     if (view !== "music") return groupBy(library.items, item => parentPath(item.key)).map(group => ({ ...group, items: ordered(view, group.items) }));
@@ -356,6 +358,7 @@ function MediaSearch({ view, query, onOpenFolder, onOpenLocation }: { view: Medi
   }, [library.items, view]);
   return <LibraryState loading={library.loading} error={library.error} onRetry={library.reload}
     empty={!library.items.length ? <EmptyState icon="search" title={`没有找到${config.noun}`} description={`没有与「${query}」匹配的${config.noun}。`} /> : null}>
+    {view === "music" && <TrackSelectionBar selection={selection} items={library.items} onAdd={adding.open} />}
     {groups.map(group => <section key={group.label} className="library-group">
       <h2 className="library-group-title">
         <button type="button" className="library-group-link" onClick={() => onOpenFolder(group.label)}>
@@ -363,7 +366,8 @@ function MediaSearch({ view, query, onOpenFolder, onOpenLocation }: { view: Medi
         <span>{group.items.length} {config.unit}</span>
       </h2>
       <MediaItems view={view} items={group.items} open={file => open(file, group.items)}
-        menu={view === "music" ? track => trackMenu(track, adding.open, onOpenLocation) : undefined} />
+        menu={view === "music" ? track => trackMenu(track, adding.open, onOpenLocation) : undefined}
+        selection={view === "music" ? selection : undefined} membership={view === "music" ? membership : undefined} />
     </section>)}
     <LoadMore active={library.hasMore} loading={library.loadingMore} onMore={library.more} />
     {adding.dialog}
@@ -414,8 +418,10 @@ function MediaFolder({ view, folder, onBack, onOpenLocation }: { view: "photos" 
 }
 
 /** 一组文件：照片是方形网格，影视是带名称与时长的横向封面，音乐是曲目列表。 */
-function MediaItems({ view, items, open, menu }: { view: MediaView; items: api.LibraryItem[]; open: (file: api.LibraryItem) => void;
-  /** 音乐曲目行尾的更多操作菜单。 */ menu?: (track: api.LibraryItem, index: number) => MenuItem[] }) {
+function MediaItems({ view, items, open, menu, selection, membership, playlist }: { view: MediaView; items: api.LibraryItem[]; open: (file: api.LibraryItem) => void;
+  /** 音乐曲目行尾的更多操作菜单。 */ menu?: (track: api.LibraryItem, index: number) => MenuItem[];
+  /** 音乐曲目的多选（行首复选框；有选中项时一直显示）。 */ selection?: TrackSelection;
+  /** 每首歌所在的歌单（行内标记）；playlist 是当前打开的歌单，标记里不再列出它。 */ membership?: (key: string) => api.Playlist[]; playlist?: number }) {
   if (view === "photos") return <div className="photo-grid">
     {items.map(item => <button key={item.key} type="button" className="photo-tile" title={baseName(item.key)} onClick={() => open(item)}>
       <FileThumbnail kind="image" url={api.fileThumbnail(item, "grid")} placeholder={api.fileThumbnail(item)} />
@@ -432,9 +438,11 @@ function MediaItems({ view, items, open, menu }: { view: MediaView; items: api.L
       <span>{[item.dimensions ? `${item.dimensions.height}p` : null, formatBytes(item.size)].filter(Boolean).join(" · ")}</span>
     </button>)}
   </div>;
-  return <ol className="track-list">
-    {items.map((track, index) => <li key={track.key}>
-      <button type="button" className="track-row" onClick={() => open(track)}>
+  return <ol className={`track-list${selection ? " is-selectable" : ""}${selection?.selected.size ? " is-selecting" : ""}`}>
+    {items.map((track, index) => <li key={track.key} className={selection?.selected.has(track.key) ? "is-selected" : undefined}>
+      {selection && <span className="track-check"><Checkbox label={`选择 ${trackTitle(track)}`} checked={selection.selected.has(track.key)}
+        onChange={value => selection.toggle(track.key, value)} /></span>}
+      <button type="button" className="track-row" onClick={() => selection?.selected.size ? selection.toggle(track.key, !selection.selected.has(track.key)) : open(track)}>
         {/* 左侧是在这份列表里的序号（已按曲目号排好）；标签里的原曲目号在只收录部分曲目或合并同名专辑时会跳号，不直接显示。 */}
         <span className="track-number">{index + 1}</span>
         <span className="track-cover" style={{ "--cover-tint": coverTint(track.key) } as CSSProperties}>
@@ -443,11 +451,49 @@ function MediaItems({ view, items, open, menu }: { view: MediaView; items: api.L
         </span>
         <span className="track-text"><strong>{trackTitle(track)}</strong>
           <span title={track.key}>{[track.media?.artist, folderLabel(parentPath(track.key))].filter(Boolean).join(" · ")}</span></span>
+        {membership && <PlaylistBadge lists={membership(track.key)} exclude={playlist} />}
         <span className="track-duration">{clock(track.media?.duration)}</span>
       </button>
       {menu && <span className="track-menu"><Menu label={`${trackTitle(track)} 的更多操作`} items={menu(track, index)} /></span>}
     </li>)}
   </ol>;
+}
+
+/* ---------- 音乐：多选 ---------- */
+
+type TrackSelection = { selected: Set<string>; toggle: (key: string, value: boolean) => void };
+
+/** 曲目多选：列表变化时去掉已不在列表里的选择。 */
+function useTrackSelection(items: api.LibraryItem[]) {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  useEffect(() => setSelected(current => {
+    const keys = new Set(items.map(item => item.key));
+    const next = new Set([...current].filter(key => keys.has(key)));
+    return next.size === current.size ? current : next;
+  }), [items]);
+  const toggle = useCallback((key: string, value: boolean) => setSelected(current => {
+    const next = new Set(current);
+    if (value) next.add(key); else next.delete(key);
+    return next;
+  }), []);
+  return { selected, toggle, setSelected, picked: items.filter(item => selected.has(item.key)) };
+}
+
+/** 选中歌曲后出现在列表上方的操作栏：全选、加入歌单，以及调用方给出的其他操作（歌单页的「从歌单移除」）。 */
+function TrackSelectionBar({ selection, items, onAdd, children }: { selection: ReturnType<typeof useTrackSelection>; items: api.LibraryItem[];
+  onAdd: (files: api.LibraryItem[]) => void; children?: ReactNode }) {
+  const count = selection.selected.size;
+  const all = count > 0 && items.every(item => selection.selected.has(item.key));
+  return <div className={`toolbar selection-bar track-selection-bar${count ? "" : " is-idle"}`} role="toolbar" aria-label="所选歌曲的操作">
+    <label className="track-selection-all"><Checkbox label="全选" checked={all} indeterminate={count > 0 && !all}
+      onChange={value => selection.setSelected(value ? new Set(items.map(item => item.key)) : new Set())} />
+      <span className="selection-count">{count ? `已选择 ${count} 首` : "选择歌曲"}</span></label>
+    {count > 0 && <div className="toolbar-actions">
+      <Button size="sm" icon="playlist" onClick={() => onAdd(selection.picked)}>加入歌单</Button>
+      {children}
+      <IconButton icon="x" label="取消选择" size="sm" onClick={() => selection.setSelected(new Set())} />
+    </div>}
+  </div>;
 }
 
 /* ---------- 音乐：按专辑 ---------- */
@@ -519,6 +565,8 @@ function MusicAlbum({ album, onBack, onOpenLocation }: { album: string; onBack: 
   const adding = useAddToPlaylist();
   useThumbnailPolling(library.items, !library.loading, library.setItems, () => undefined);
   const tracks = useMemo(() => ordered("music", library.items), [library.items]);
+  const selection = useTrackSelection(tracks);
+  const membership = usePlaylistMembership(tracks.map(track => track.key));
   const open = usePreviewOpener(tracks);
   useTagFill(library.items, library.setItems);
   const total = tracks.reduce((sum, track) => sum + (track.media?.duration ?? 0), 0);
@@ -535,13 +583,15 @@ function MusicAlbum({ album, onBack, onOpenLocation }: { album: string; onBack: 
         {!library.loading && <p>{[album ? artist : null, album ? year : null, `${tracks.length} 首`, total ? clock(total) : null].filter(Boolean).join(" · ")}</p>}
         <div className="album-header-actions">
           {tracks.length > 0 && <Button variant="primary" icon="play" onClick={() => open(tracks[0])}>全部播放</Button>}
-          {tracks.length > 0 && <Button icon="playlist" onClick={() => adding.open(tracks)}>添加到歌单</Button>}
+          {tracks.length > 0 && <Button icon="playlist" onClick={() => adding.open(tracks)}>整张加入歌单</Button>}
         </div>
       </div>
     </header>
     <LibraryState loading={library.loading} error={library.error} onRetry={library.reload}
       empty={!tracks.length ? <EmptyState icon="music" title="这张专辑里没有歌曲" description="歌曲可能已被移动、删除或修改了专辑信息。" /> : null}>
-      <MediaItems view="music" items={tracks} open={file => open(file)} menu={track => trackMenu(track, adding.open, onOpenLocation)} />
+      <TrackSelectionBar selection={selection} items={tracks} onAdd={adding.open} />
+      <MediaItems view="music" items={tracks} open={file => open(file)} menu={track => trackMenu(track, adding.open, onOpenLocation)}
+        selection={selection} membership={membership} />
     </LibraryState>
     {adding.dialog}
   </div>;
@@ -608,6 +658,7 @@ function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () =
   const [attempt, setAttempt] = useState(0);
   const [renaming, setRenaming] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [picking, setPicking] = useState(false);
   const adding = useAddToPlaylist();
   useEffect(() => {
     const controller = new AbortController();
@@ -629,12 +680,14 @@ function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () =
   useThumbnailPolling(tracks, !loading, setTracks, () => undefined);
   useTagFill(tracks, setTracks);
   const open = usePreviewOpener(tracks);
+  const selection = useTrackSelection(tracks);
+  const membership = usePlaylistMembership(tracks.map(track => track.key));
   useDocumentTitle(`${info?.name ?? "歌单"} · 音乐 · ${BRAND}`);
   const total = tracks.reduce((sum, track) => sum + (track.media?.duration ?? 0), 0);
   async function change(update: Parameters<typeof api.updatePlaylist>[1], apply: (list: api.LibraryItem[]) => api.LibraryItem[], message?: string) {
     const before = tracks;
     setTracks(apply);
-    try { const result = await api.updatePlaylist(id, update); setInfo(result); if (message) toast.success(message); }
+    try { const result = await api.updatePlaylist(id, update); setInfo(result); if (update.remove) playlistsChanged(); if (message) toast.success(message); }
     catch (reason) { setTracks(before); toast.error(api.errorMessage(reason, "操作失败，请稍后重试")); }
   }
   const moveTo = (track: api.LibraryItem, target: number) => {
@@ -662,6 +715,7 @@ function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () =
         {!loading && <p>{[`${tracks.length} 首`, total ? clock(total) : null].filter(Boolean).join(" · ")}</p>}
         <div className="album-header-actions">
           {tracks.length > 0 && <Button variant="primary" icon="play" onClick={() => open(tracks[0])}>全部播放</Button>}
+          {info && <Button icon="plus" onClick={() => setPicking(true)}>添加歌曲</Button>}
           {tracks.length > 1 && <Button icon="shuffle" onClick={() => { const list = shuffled(tracks); open(list[0], list); }}>随机播放</Button>}
           {info && <Menu label="歌单的更多操作" size="md" items={[
             { label: "重命名", icon: "edit", onSelect: () => setRenaming(true) },
@@ -671,15 +725,25 @@ function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () =
       </div>
     </header>
     <LibraryState loading={loading} error={error} onRetry={() => setAttempt(value => value + 1)}
-      empty={!tracks.length ? <EmptyState icon="playlist" title="歌单里还没有歌曲" description="在专辑、搜索结果或文件列表里选择「添加到歌单」。移入回收站的歌曲暂不显示，还原后回到原位置。" /> : null}>
-      <MediaItems view="music" items={tracks} open={file => open(file)} menu={menu} />
+      empty={!tracks.length ? <EmptyState icon="playlist" title="歌单里还没有歌曲" description="点「添加歌曲」从全部音乐里搜索并勾选，或在专辑、搜索结果与文件列表里选择「添加到歌单」。移入回收站的歌曲暂不显示，还原后回到原位置。"
+        action={info ? <Button variant="primary" icon="plus" onClick={() => setPicking(true)}>添加歌曲</Button> : undefined} /> : null}>
+      <TrackSelectionBar selection={selection} items={tracks} onAdd={adding.open}>
+        <Button size="sm" variant="danger" icon="x" onClick={() => {
+          const keys = new Set(selection.selected);
+          void change({ remove: [...keys] }, list => list.filter(item => !keys.has(item.key)), `已从歌单移除 ${keys.size} 首歌`);
+          selection.setSelected(new Set());
+        }}>从歌单移除</Button>
+      </TrackSelectionBar>
+      <MediaItems view="music" items={tracks} open={file => open(file)} menu={menu} selection={selection} membership={membership} playlist={id} />
     </LibraryState>
     {adding.dialog}
+    {picking && info && <SongPickerDialog playlist={info} existing={new Set(tracks.map(track => track.key))} onClose={() => setPicking(false)}
+      onAdded={() => setAttempt(value => value + 1)} />}
     {renaming && info && <PlaylistNameDialog title="重命名歌单" confirm="保存" initial={info.name} onClose={() => setRenaming(false)}
       onSubmit={async name => { setInfo(await api.updatePlaylist(id, { name })); setRenaming(false); }} />}
     {deleting && info && <ConfirmDialog title="删除歌单" confirmLabel="删除" onClose={() => setDeleting(false)}
       description={<>删除歌单「{info.name}」？歌单里的歌曲文件不会被删除。</>}
-      onConfirm={async () => { await api.deletePlaylist(id); toast.success(`已删除歌单「${info.name}」`); onBack(); }} />}
+      onConfirm={async () => { await api.deletePlaylist(id); playlistsChanged(); toast.success(`已删除歌单「${info.name}」`); onBack(); }} />}
   </div>;
 }
 

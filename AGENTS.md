@@ -30,7 +30,7 @@ Tessera（仓库名 tgdrive）：基于 Telegram Bot + 私有频道的加密分�
 - [文件助手](docs/agents/assistant.md)：Agent 循环、工具、确认坞、长任务、识图与附件、本机缓存工具、私密对话、思考程度、P5、媒体与文本工具。
 - [资源抓取脚本](docs/agents/grabber.md)：userscripts/tessera-grabber.user.js：兼容层、iframe、批次、网盘取链与网盘文件夹。
 - [账号、分享与私密空间](docs/agents/accounts.md)：公开分享与转存、公开链接令牌、访客注册、账号资料、私密空间。
-- [Telegram 交互机器人、星标与歌单](docs/agents/telegram-stars-playlists.md)：机器人绑定、长轮询、离线下载与文件保存、助手对话与确认按钮、下载提醒；文件星标；音乐歌单。
+- [Telegram 交互机器人、收藏夹（星标）与歌单](docs/agents/telegram-stars-playlists.md)：机器人绑定、长轮询、离线下载与文件保存、助手对话与确认按钮、下载提醒；文件星标；音乐歌单。
 
 ## 常用命令
 

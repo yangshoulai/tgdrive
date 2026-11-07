@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Telegram 机器人头像：品牌标记居中，Telegram 会裁成圆形，内容保持在中间 60% 以内。 -->
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="42%" r="62%">
+      <stop offset="0" stop-color="#1d2133"/>
+      <stop offset="1" stop-color="#0b0c13"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+  <g transform="translate(192 192) scale(20)">
+    <rect x="5" y="5" width="10" height="10" rx="2.4" fill="#fff"/>
+    <rect x="5" y="17" width="10" height="10" rx="2.4" fill="#fff" fill-opacity=".6"/>
+    <rect x="17" y="17" width="10" height="10" rx="2.4" fill="#fff" fill-opacity=".32"/>
+    <polygon points="18.2,6.2 25.8,6.2 25.8,13.8" fill="#f0a22e" stroke="#f0a22e" stroke-width="2.4" stroke-linejoin="round"/>
+    <path d="M25.1 6.9 22.2 9.8" stroke="#c27a10" stroke-width="1.1" stroke-linecap="round"/>
+  </g>
+</svg>

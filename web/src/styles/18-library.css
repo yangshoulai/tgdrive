@@ -93,6 +93,29 @@
 .track-menu { flex: none; padding-right: 8px; opacity: 0; transition: opacity var(--duration-fast) var(--ease-out); }
 .track-list > li:hover .track-menu, .track-menu:focus-within, .track-menu:has([aria-expanded="true"]) { opacity: 1; }
 @media (hover: none) { .track-menu { opacity: 1; } }
+/* 曲目多选：行首复选框悬停时出现，有选中项后一直显示；选中行用强调色浅底。 */
+.track-check { display: inline-flex; flex: none; width: 0; overflow: hidden; opacity: 0; transition: opacity var(--duration-fast) var(--ease-out); }
+.track-list.is-selectable > li:hover .track-check, .track-list.is-selecting .track-check, .track-check:focus-within { width: 28px; padding-left: 10px; opacity: 1; }
+@media (hover: none) { .track-list.is-selectable .track-check { width: 28px; padding-left: 10px; opacity: 1; } }
+.track-list > li.is-selected, .track-list > li.is-selected:hover { background: var(--accent-soft); }
+.track-selection-bar { margin-bottom: 8px; }
+.track-selection-bar.is-idle { border-color: transparent; background: transparent; box-shadow: none; }
+.track-selection-all { display: inline-flex; align-items: center; gap: 10px; padding-left: 10px; cursor: pointer; }
+.track-selection-bar.is-idle .selection-count { color: var(--ink-3); font-weight: 400; }
+/* 曲目所在的歌单。 */
+.playlist-badge { display: inline-flex; align-items: center; gap: 4px; max-width: 160px; padding: 2px 8px; overflow: hidden; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.playlist-badge svg { flex: none; }
+.track-row:has(.playlist-badge) { grid-template-columns: 24px 40px minmax(0, 1fr) auto auto; }
+/* 给歌单挑选歌曲的对话框。 */
+.song-picker-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.song-picker-toolbar .search-input { flex: 1; }
+.song-picker-all { display: inline-flex; flex: none; align-items: center; gap: 8px; color: var(--ink-2); font-size: var(--text-sm); cursor: pointer; }
+.song-picker-list { display: grid; gap: 2px; max-height: min(60vh, 560px); margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.song-picker-row { display: grid; grid-template-columns: auto 40px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 52px; padding: 4px 10px; border-radius: var(--radius-md); cursor: pointer; }
+.song-picker-row:hover { background: var(--surface-hover); }
+.song-picker-row:has(input:checked:not(:disabled)) { background: var(--accent-soft); }
+.song-picker-row.is-disabled { cursor: default; opacity: .6; }
+.song-picker-count { margin-right: auto; color: var(--ink-3); font-size: var(--text-sm); }
 /* 音乐页「专辑／歌单」标签。 */
 .library-tabs { margin-bottom: 16px; }
 /* 歌单封面：前四首都有封面时拼成四宫格。 */

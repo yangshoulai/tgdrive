@@ -709,7 +709,7 @@ class UserApi:
         scope = self._scope(token, csrf=csrf, mutation=True)
         raw = items if items is not None else paths
         if not isinstance(raw, list) or len(raw) > favorites.LIMIT:
-            raise ValueError(f"最多收藏 {favorites.LIMIT} 个文件夹")
+            raise ValueError(f"最多固定 {favorites.LIMIT} 个常用文件夹")
         unlocked = self._private_unlocked(token)
         with self.objects.metadata.transaction() as db:
             current = favorites.load(db, scope.bucket_id)

@@ -365,7 +365,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
     { label: "文件", workspace: personalWorkspace, items: [
       { key: "files", label: "我的文件", icon: "folder" },
       { key: "recent", label: "最近", icon: "clock" },
-      { key: "starred", label: "星标", icon: "star" },
+      { key: "starred", label: "收藏夹", icon: "star" },
       { key: "private", label: "私密空间", icon: "lock" },
       { key: "trash", label: "回收站", icon: "trash" },
     ] },
@@ -391,7 +391,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const commands: Command[] = [
     ...groups.flatMap(group => group.items.map(item => ({ id: `nav:${item.key}`, label: item.label, group: "跳转", icon: item.icon,
       hint: group.workspace === "系统管理" ? "系统管理" : group.label, run: () => navigate(item.key) }))),
-    ...favoriteList.map(item => ({ id: `fav:${item.path}`, label: folderTitle(item.path), group: "收藏", icon: (item.private ? "lock" : "folder") as IconName,
+    ...favoriteList.map(item => ({ id: `fav:${item.path}`, label: folderTitle(item.path), group: "常用文件夹", icon: (item.private ? "lock" : "folder") as IconName,
       hint: item.private ? "私密空间" : `/${item.path}`, run: () => navigate(item.private ? "private" : "files", item.path) })),
     { id: "act:upload", label: "上传文件", group: "操作", icon: "upload", keywords: "上传 文件夹",
       run: () => { if (section !== "files") navigate("files", location.prefix); window.setTimeout(() => document.querySelector<HTMLButtonElement>(".files-view .upload-picker-trigger")?.click(), 120); } },
@@ -408,7 +408,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   return (
     <AppShell active={section} onNavigate={key => navigate(key)} hrefFor={key => sectionUrl(key)} groups={groups}
       activeHighlight={!favoriteOpen}
-      slot={{ label: "收藏", after: "文件", render: rail => <FavoritesNav section={section} prefix={location.prefix} rail={rail}
+      slot={{ label: "常用文件夹", after: "文件", render: rail => <FavoritesNav section={section} prefix={location.prefix} rail={rail}
         onOpen={path => navigate(api.isPrivatePath(path) ? "private" : "files", path)} hrefFor={path => sectionUrl(api.isPrivatePath(path) ? "private" : "files", path)} /> }}
       workspaces={isAdmin ? [{ label: "我的空间", icon: "folder" }, { label: "系统管理", icon: "shield" }] : []}
       links={[{ label: "使用文档", icon: "book", href: "/docs" }]}

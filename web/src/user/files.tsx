@@ -320,8 +320,8 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       const now = Date.now() / 1000;
       setFiles(current => current.map(item => keys.has(item.key) ? { ...item, starred_at: value ? item.starred_at ?? now : undefined } : item));
       const label = keys.size === 1 ? `「${baseName(targets[0].key)}」` : `${keys.size} 个文件`;
-      notify.success(value ? `已给${label}加星标` : `已取消${label}的星标`);
-    } catch (reason) { notify.error(api.errorMessage(reason, "星标更新失败，请稍后重试")); }
+      notify.success(value ? `已收藏${label}` : `已取消收藏${label}`);
+    } catch (reason) { notify.error(api.errorMessage(reason, "收藏失败，请稍后重试")); }
   }
   const playlistAdding = useAddToPlaylist();
   async function bulkPublic(isPublic: boolean) {
@@ -436,7 +436,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       { label: "下载", icon: "download", shortcut: "D", onSelect: () => undefined, href: api.versionedContentUrl(api.contentUrl(file.key, true), file.etag, file.size) },
       ...cacheMenuItems(cacheQueue, file).filter(item => !item.danger),
       ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) },
-        { label: file.starred_at ? "取消星标" : "加星标", icon: "star" as const, shortcut: "*", onSelect: () => void star([file], !file.starred_at) }] : []),
+        { label: file.starred_at ? "取消收藏" : "收藏", icon: "star" as const, shortcut: "*", onSelect: () => void star([file], !file.starred_at) }] : []),
     ];
     // 任何文件都可以指定缩略图；图片、视频、音频上传后仍自动生成，用户不满意时在这里替换。
     items.push({ label: file.thumbnails?.includes("thumb") ? "更新封面" : "设置封面", icon: "image", heading: "封面", onSelect: () => setThumbnailEditing(file) });
@@ -640,7 +640,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", shortcut: "D", onSelect: selectedEntries.length > 200 ? downloadLimit : () => undefined,
           href: selectedEntries.length > 200 ? undefined : downloadUrl(selectedEntries) },
         { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving(selectedEntries) },
-        ...(!privateSpace && selectedFiles.length ? [{ label: selectionStarred ? "取消星标" : `给 ${selectedFiles.length} 个文件加星标`, icon: "star" as const, shortcut: "*",
+        ...(!privateSpace && selectedFiles.length ? [{ label: selectionStarred ? "取消收藏" : `收藏 ${selectedFiles.length} 个文件`, icon: "star" as const, shortcut: "*",
           onSelect: () => void star(selectedFiles.map(entry => entry.file), !selectionStarred) }] : []),
         ...(!privateSpace && selectedAudio.length ? [{ label: `把 ${selectedAudio.length} 首歌加入歌单…`, icon: "playlist" as const, onSelect: () => playlistAdding.open(selectedAudio) }] : []),
         { label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring(selectedEntries) },
@@ -707,7 +707,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             {canClearSelection && <Button size="sm" icon="trash" onClick={clearSelectedCache}>清除本机缓存</Button>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
-            {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="star" shortcut="*" onClick={() => void star(selectedFiles.map(entry => entry.file), !selectionStarred)}>{selectionStarred ? "取消星标" : "加星标"}</Button>}
+            {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="star" shortcut="*" onClick={() => void star(selectedFiles.map(entry => entry.file), !selectionStarred)}>{selectionStarred ? "取消收藏" : "收藏"}</Button>}
             {!privateSpace && selectedAudio.length > 0 && <Button size="sm" icon="playlist" onClick={() => playlistAdding.open(selectedAudio)}>加入歌单</Button>}
             <Button size="sm" icon="move" shortcut="M" onClick={() => setMoving(selectedEntries)}>移动</Button>
             {selectedEntries.length <= 200 && <Button size="sm" icon="archive" onClick={() => setCompressing(selectedEntries.map(entry => entry.key))}>压缩</Button>}
@@ -778,7 +778,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                     <span className="file-mobile-meta"><span>{kindLabel(getFileKind(entry.file.content_type, entry.key))} · {formatBytes(entry.file.size)} · {formatDate(entry.file.modified_at)}</span>{entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}<FileCacheStatus file={entry.file} /></span>
                     {query && parentPath(entry.key) && <small>{privateSpace ? api.privatePathLabel(parentPath(entry.key)) : parentPath(entry.key)}</small>}
                   </span>
-                  {entry.file.starred_at && <span className="star-mark" title="已加星标"><Icon name="star" filled size={14} /></span>}
+                  {entry.file.starred_at && <span className="star-mark" title="已收藏"><Icon name="star" filled size={14} /></span>}
                   {entry.file.public_token && <Badge tone="public" icon="globe">公开</Badge>}
                   <FileCacheStatus file={entry.file} className="cell-cache" />
                 </span>
@@ -834,7 +834,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                         {!api.fileThumbnail(entry.file) && extension && !LABELLED_KINDS.has(kind) && <span className="grid-extension" aria-hidden="true">{extension}</span>}
                         <span className="grid-check" onClick={event => event.stopPropagation()}><Checkbox label={`选择 ${baseName(entry.key)}`} checked={isSelected} onChange={value => toggleSelect(entry.key, value)} /></span>
                         {entry.file.public_token && <span className="grid-public"><Badge tone="public" icon="globe">公开</Badge></span>}
-                        {entry.file.starred_at && <span className="grid-star" title="已加星标"><Icon name="star" filled size={14} /></span>}
+                        {entry.file.starred_at && <span className="grid-star" title="已收藏"><Icon name="star" filled size={14} /></span>}
                         <FileCacheStatus file={entry.file} className="grid-cache" />
                       </div>
                       <div className="grid-meta">
