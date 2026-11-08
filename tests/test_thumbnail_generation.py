@@ -771,6 +771,31 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([call.kwargs["cache_only"] for call in source.call_args_list], [True, False],
                              "无需新数据或预览，自动从只用缓存切换为允许读取存储")
 
+    async def test_committed_video_uses_storage_without_waiting_for_backfill_age(self):
+        self.objects.on_commit = self.worker.enqueue
+        self.worker.start()
+        self.worker._backfill_at = float("inf")
+        for cached in (False, True):
+            with self.subTest(cached=cached):
+                channel, render = self.remote_renderer(None)
+                with channel as source, render as decoder:
+                    decoder.side_effect = ([ThumbnailCacheMiss("partial")] if cached else []) + [{"thumb": JPEG}]
+                    info = await self.put(f"committed-{cached}.mp4")
+                    if not cached:
+                        self.worker.cache.drop(info.blob_uuid)
+                    async with asyncio.timeout(3):
+                        while info.blob_uuid not in self.worker._pending:
+                            await asyncio.sleep(0.01)
+                        job = self.worker._pending[info.blob_uuid]
+                        self.assertTrue(job.committed, "写入提交必须带上完成标记")
+                        job.ready_at = 0
+                        self.worker._wake.set()
+                        while not self.variants(info):
+                            await asyncio.sleep(0.01)
+                    self.assertEqual([call.kwargs["cache_only"] for call in source.call_args_list],
+                                     [True, False] if cached else [False])
+                    self.assertFalse(job.force, "自动回源不能强制覆盖已有封面")
+
     async def test_backfill_defers_decoder_errors_without_a_permanent_marker(self):
         info = await self.put("broken.mp3")
         self.worker.cache.drop(info.blob_uuid)

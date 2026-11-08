@@ -161,7 +161,7 @@ function ThumbnailTasksPanel({ active }: { active: boolean }) {
   }, [active, load]);
   const labels: Record<string, string> = { queued: "待处理", running: "处理中", waiting_client: "等待浏览器", waiting_data: "等待数据", done: "已完成", failed: "失败", cancelled: "已取消" };
   const kinds = { image: "图片", video: "视频", audio: "音频" };
-  return <Panel title="封面队列" description="优先使用上传和预览时已收到的数据；上传或修改 10 分钟后仍缺封面的图片、视频、音频由后台逐个从存储读取补齐（只产生入站流量）。此处仅显示任务编号与处理情况。"
+  return <Panel title="封面队列" description="上传、离线下载与 Bot 保存完成后自动排队，优先使用缓存，不足时立即排队从存储读取；网页上传先等待浏览器本地生成。旧文件由空闲补图兜底。此处仅显示任务编号与处理情况。"
     actions={<Button size="sm" icon="refresh" onClick={load}>刷新</Button>}>
     {error ? <EmptyState icon="alert" title="队列读取失败" description={error} /> : !status ? <SkeletonRows rows={2} /> : <>
       <KeyValue items={[["队列", `${status.jobs.length} / ${status.capacity}`], ["当前处理", `${status.jobs.filter(job => job.state === "running").length} 项`],

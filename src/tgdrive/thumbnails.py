@@ -411,6 +411,8 @@ class _Job:
     # auto：自动流程（图片按原图，音视频优先内嵌封面，视频没有时截帧）；capture：截图生成（视频截取画面）；
     # smart：文件助手生成（音视频依次用内嵌封面、在线查找、截取画面）。
     mode: str = "auto"
+    # 写入已经提交，不会再收到这次上传的数据；缓存不足时直接排队回源，不等下次预览或补图年龄。
+    committed: bool = False
 
 
 @dataclass
@@ -421,7 +423,7 @@ class _Lease:
 
 
 class ThumbnailService:
-    """单并发协作队列。即时任务复用已收数据，空闲补图按管理员日额度回源，用户请求不设单文件门槛。"""
+    """单并发协作队列。写入完成后优先用缓存、必要时回源；预览复用已读数据，旧文件由空闲补图兜底。"""
 
     def __init__(self, accounts, objects, resources):
         self.accounts, self.objects, self.resources = accounts, objects, resources
@@ -493,7 +495,7 @@ class ThumbnailService:
             delay = CLIENT_TIMEOUT if scope and scope.thumbnail_client else 1
             self._dispatch(self._enqueue, _Job(info, time.monotonic() + delay,
                 state="waiting_client" if delay == CLIENT_TIMEOUT else "queued",
-                detail="等待上传端生成" if delay == CLIENT_TIMEOUT else "等待处理"))
+                detail="等待上传端生成" if delay == CLIENT_TIMEOUT else "等待处理", committed=True))
 
     def observe(self, info, *, client=False):
         """用户真正读取文件时登记；接下来交付的密文会进入缓存，不另开原文件请求。
@@ -514,6 +516,9 @@ class ThumbnailService:
             return False
         previous = self._pending.get(blob)
         if previous is not None:
+            previous.committed = previous.committed or job.committed
+            if job.committed and previous.state == "waiting_data" and not previous.remote and blob not in self._leases:
+                self._queue_backfill(previous, "文件已保存，缓存不足，从存储读取")
             if job.remote and not job.backfill and (not previous.remote or previous.backfill):
                 previous.info = job.info
                 self._leases.pop(blob, None)
@@ -859,13 +864,17 @@ class ThumbnailService:
                     continue
                 # 文件已写入且达到补图年龄，不能因为缓存任务仍占着队列就永久等下一次预览。
                 previous.info = info
-                previous.remote, previous.backfill = True, True
-                previous.state, previous.detail, previous.ready_at = "queued", "自动补图：缓存不足，从存储读取", 0
-                self._wake.set()
+                self._queue_backfill(previous, "自动补图：缓存不足，从存储读取")
                 added = True
                 continue
             added = self._enqueue(_Job(info, remote=True, backfill=True, detail="自动补图：从存储读取")) or added
         return added
+
+    def _queue_backfill(self, job, detail):
+        """复用现有任务，低优先级按需读取存储；不强制覆盖已有封面，也不增加解码并发。"""
+        job.remote, job.backfill = True, True
+        job.state, job.detail, job.ready_at = "queued", detail, 0
+        self._wake.set()
 
     def _repair(self):
         """升级后执行一次：旧版失败标记交给自动补图，版本 2 只重试启用截帧回退的视频。"""
@@ -921,12 +930,17 @@ class ThumbnailService:
                             self._pending.pop(blob)
                             self.cache.drop(blob)
                             continue
-                        if not job.remote and not self.cache.revision(blob):
+                        revision = self.cache.revision(blob)
+                        if job.committed and not job.remote and (not revision or (
+                                source_kind(job.info) == "image" and job.info.size > self.cache.per_blob)):
+                            self._queue_backfill(job, "文件已保存，缓存不足，从存储读取")
+                            continue
+                        if not job.remote and not revision:
                             # 没有任何已接收的数据：不占队列名额，等文件被实际读取时 observe 再登记。
                             self._pending.pop(blob, None)
                             continue
                         job.state, job.detail = "running", "使用已接收缓存" if not job.remote else "优先使用缓存，必要时读取存储"
-                        job.revision = self.cache.revision(blob)
+                        job.revision = revision
                         self._active = job
                         started_remote = job.remote
                         self._task = asyncio.create_task(self.generate(job.info, force=job.force, allow_remote=job.remote, mode=job.mode))
@@ -944,6 +958,8 @@ class ThumbnailService:
                             job.state, job.detail = "waiting_data", f"已接收的数据还不够，等待新数据；写入满 {BACKFILL_AGE // 60} 分钟后由空闲补图接管"
                             if job.remote and not started_remote:
                                 job.state, job.ready_at = "queued", 0
+                            elif job.committed and not started_remote:
+                                self._queue_backfill(job, "文件已保存，缓存不足，从存储读取")
                             elif job.misses >= MISS_LIMIT:
                                 self._pending.pop(blob, None)
                                 self._record(job, "failed", "已接收的数据不足以生成，可在文件菜单更新封面")
