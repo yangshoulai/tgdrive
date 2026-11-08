@@ -850,8 +850,19 @@ class ThumbnailService:
             # 游标只越过已经看过的文件；名额满时这一页剩下的文件下次接着处理，不能等到下一轮。
             self._backfill_cursor = (info.bucket_id, info.key)
             blob = info.blob_uuid
-            if (not self._eligible(info) or blob in self._pending or blob in self._leases or blob in self._backfill_skip
+            if (not self._eligible(info) or blob in self._leases or blob in self._backfill_skip
                     or blob in self._unsuitable):
+                continue
+            previous = self._pending.get(blob)
+            if previous is not None:
+                if previous.state != "waiting_data" or previous.remote:
+                    continue
+                # 文件已写入且达到补图年龄，不能因为缓存任务仍占着队列就永久等下一次预览。
+                previous.info = info
+                previous.remote, previous.backfill = True, True
+                previous.state, previous.detail, previous.ready_at = "queued", "自动补图：缓存不足，从存储读取", 0
+                self._wake.set()
+                added = True
                 continue
             added = self._enqueue(_Job(info, remote=True, backfill=True, detail="自动补图：从存储读取")) or added
         return added
@@ -930,7 +941,7 @@ class ThumbnailService:
                             self.cache.drop(blob)
                         except ThumbnailCacheMiss:
                             job.misses += 1
-                            job.state, job.detail = "waiting_data", "已接收的数据还不够，等待继续播放或下载；不会自动回源"
+                            job.state, job.detail = "waiting_data", f"已接收的数据还不够，等待新数据；写入满 {BACKFILL_AGE // 60} 分钟后由空闲补图接管"
                             if job.remote and not started_remote:
                                 job.state, job.ready_at = "queued", 0
                             elif job.misses >= MISS_LIMIT:

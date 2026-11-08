@@ -152,6 +152,7 @@ class InteractionBot:
         # 大文件同时下载的数量与离线下载相同（「下载与资源」按机器内存自动选择）；占用的磁盘按文件大小预留。
         self._imports = Limiter(1)
         self._reserved = 0
+        self._file_timestamp = 0
         self.metadata, self.keystore = accounts.metadata, accounts.keystore
         self.client_factory = client_factory
         self._codes: dict[str, tuple[int, float]] = {}
@@ -789,6 +790,14 @@ class InteractionBot:
             info = await client.get_file(item["file_id"])
             scope = self.offline.scope(link["user_id"])
             safe = filename(name) or "Telegram 文件"
+            stem, extension = os.path.splitext(safe.lower())
+            if stem.endswith(".tar") and extension in (".gz", ".bz2", ".xz"):
+                extension = ".tar" + extension
+            if not extension:
+                extension = (mimetypes.guess_extension((mime or "").split(";", 1)[0].strip().lower()) or ".bin").lower()
+            # 同一毫秒的批量文件也各用一个时间戳，避免共享原文件名或覆盖彼此。
+            self._file_timestamp = max(time.time_ns() // 1_000_000, self._file_timestamp + 1)
+            safe = f"{self._file_timestamp}{extension}"
             key = link["folder"] + safe
             def free():
                 with self.metadata.transaction() as db:

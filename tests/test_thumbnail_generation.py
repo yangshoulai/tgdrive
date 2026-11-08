@@ -747,6 +747,30 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(call.kwargs.get("cache_only") is False for call in source.call_args_list), "补图直接读取存储，不设额度")
         self.assertEqual(self.variants(fresh), [], "刚写入的文件先留给上传端与缓存处理")
 
+    async def test_backfill_takes_over_waiting_data_without_another_preview(self):
+        info = await self.put("waiting.mp4")
+        self.age(info)
+        job = _Job(info)
+        channel, render = self.remote_renderer(None)
+        with channel as source, render as decoder:
+            decoder.side_effect = [ThumbnailCacheMiss("partial"), {"thumb": JPEG}]
+            self.worker.start()
+            self.worker._backfill_at = float("inf")
+            self.worker._enqueue(job)
+            async with asyncio.timeout(3):
+                while job.state != "waiting_data":
+                    await asyncio.sleep(0.01)
+            self.assertEqual(decoder.await_count, 1)
+            self.worker._backfill_at = 0
+            self.worker._wake.set()
+            async with asyncio.timeout(3):
+                while not self.variants(info):
+                    await asyncio.sleep(0.01)
+            self.assertEqual(decoder.await_count, 2)
+            self.assertTrue(job.backfill)
+            self.assertEqual([call.kwargs["cache_only"] for call in source.call_args_list], [True, False],
+                             "无需新数据或预览，自动从只用缓存切换为允许读取存储")
+
     async def test_backfill_defers_decoder_errors_without_a_permanent_marker(self):
         info = await self.put("broken.mp3")
         self.worker.cache.drop(info.blob_uuid)
