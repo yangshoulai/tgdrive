@@ -616,7 +616,8 @@ class TgDriveASGI(StaticFiles):
             detail = {"saved": (result or {}).get("saved")}
         elif action == "telegram_bot.update":
             # token 不写入审计，只记是否更换以及启用状态。
-            detail = {"token_changed": bool(payload.get("token")), **({"enabled": bool(payload["enabled"])} if "enabled" in payload else {})}
+            detail = {"token_changed": bool(payload.get("token")), **({"enabled": bool(payload["enabled"])} if "enabled" in payload else {}),
+                      **({"self_hosted": bool(payload["api_url"])} if "api_url" in payload else {})}
             if ok:
                 target = (result or {}).get("username")
         elif action == "bot.check" and ok:
@@ -963,7 +964,8 @@ class TgDriveASGI(StaticFiles):
                 if method == "GET" and route == "/telegram-bot":
                     return 200, self.telegram_bot.admin_status(), {"Cache-Control": "no-store"}
                 if method == "POST" and route == "/telegram-bot":
-                    return 200, await self.telegram_bot.configure(payload.get("token"), payload.get("enabled")), {}
+                    options = {name: payload[name] for name in ("api_url", "files_dir") if name in payload}
+                    return 200, await self.telegram_bot.configure(payload.get("token"), payload.get("enabled"), **options), {}
                 if method == "POST":
                     return 200, self.telegram_bot.remove(), {}
             if method == "POST" and route == "/users":

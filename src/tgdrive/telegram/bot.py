@@ -6,7 +6,10 @@
 
 已绑定的私聊里：
 - 发链接、M3U8 或 curl 命令：解析后在设置的保存位置创建离线下载（每项选清晰度最高的一个）；
-- 发送或转发文件（照片、视频、音频、文档）：保存到同一位置。Bot API 只能下载 20 MB 以内的文件；
+- 发送或转发文件（照片、视频、音频、文档）：保存到同一位置。官方 Bot API 只能下载 20 MB 以内的文件；
+  配置自建 Bot API 服务（telegram-bot-api 的 --local 模式，docker-compose 的 bot-api 配置）后上限为 2000 MB：
+  服务把文件下载到它自己的目录，Tessera 从挂载的同一目录边读边写入网盘，保存后删除；大文件按离线下载的同时下载数逐个处理，
+  开始前检查目录所在磁盘的剩余空间；
 - 其他文字（或 /ask）：转给文件助手，回复以文本发回；需要确认的操作附带「确认」「拒绝」按钮，在这个私聊里决定；
 - 离线下载完成或失败时推送提醒（可在设置里关闭；私密空间的任务不显示文件名）。
 助手对话用机器人为这个账号建立的内存会话（与网页会话一样 12 小时有效、过期重建）；助手里需要浏览器的工具不提供，
@@ -18,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import html
+import os
+import shutil
 import json
 import logging
 import mimetypes
@@ -33,7 +38,8 @@ from ..errors import NotFoundError, NotReadyError, QuotaExceededError
 from ..objects import PRIVATE_PREFIX
 from ..offline.http import DownloadError
 from ..offline.request import filename
-from .client import TelegramAuthError, TelegramClient, TelegramError, TelegramRateLimitError
+from ..work import Limiter
+from .client import PooledTransport, TelegramAuthError, TelegramClient, TelegramError, TelegramRateLimitError
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +50,11 @@ TOKEN_AAD = "telegram-interaction-bot"
 TOKEN_PATTERN = re.compile(r"\d{6,20}:[A-Za-z0-9_-]{20,}")
 CODE_TTL = 600
 FILE_LIMIT = 20 * 1024 * 1024
+# 自建 Bot API 服务（--local）允许机器人下载的上限。
+LOCAL_FILE_LIMIT = 2000 * 1024 * 1024
+# 自建服务的默认工作目录（aiogram/telegram-bot-api 镜像的 TELEGRAM_WORK_DIR），Tessera 挂载到同一路径。
+DEFAULT_FILES_DIR = "/var/lib/telegram-bot-api"
+READ_PIECE = 1024 * 1024
 MESSAGE_LIMIT = 4000
 ASSISTANT_WAIT = 15 * 60
 ACTION_WAIT = 10 * 60
@@ -61,7 +72,7 @@ COMMANDS = [
 
 HELP = ("可以这样使用：\n"
         "• 发送链接、M3U8 地址或 curl 命令：创建离线下载，完成或失败时提醒你\n"
-        "• 发送或转发照片、视频、音频、文档：保存到网盘（Telegram 只允许机器人下载 20 MB 以内的文件）\n"
+        "• 发送或转发照片、视频、音频、文档：保存到网盘（单个文件 {limit} 以内）\n"
         "• 直接发文字：向文件助手提问；需要确认的操作会附带按钮\n\n"
         "命令：\n" + "\n".join(f"/{name} — {text}" for name, text in COMMANDS))
 
@@ -132,8 +143,15 @@ def _variant_score(candidate: dict) -> tuple[int, float]:
 
 
 class InteractionBot:
-    def __init__(self, accounts, objects, offline, *, assistant=None, settings=None, client_factory=TelegramClient) -> None:
+    def __init__(self, accounts, objects, offline, *, assistant=None, settings=None, client_factory=TelegramClient,
+                 api_url: str = "", files_dir: str = "", resources=None) -> None:
         self.accounts, self.objects, self.offline, self.assistant, self.settings = accounts, objects, offline, assistant, settings
+        # 启动参数（TGDRIVE_TELEGRAM_BOT_API_URL／_DIR）只是默认值，控制台保存的设置优先。
+        self.default_api_url, self.default_files_dir = (api_url or "").strip().rstrip("/"), (files_dir or "").strip() or DEFAULT_FILES_DIR
+        self.resources = resources
+        # 大文件同时下载的数量与离线下载相同（「下载与资源」按机器内存自动选择）；占用的磁盘按文件大小预留。
+        self._imports = Limiter(1)
+        self._reserved = 0
         self.metadata, self.keystore = accounts.metadata, accounts.keystore
         self.client_factory = client_factory
         self._codes: dict[str, tuple[int, float]] = {}
@@ -142,7 +160,7 @@ class InteractionBot:
         self._albums: dict[str, dict] = {}
         self._background: set[asyncio.Task] = set()
         self._client: TelegramClient | None = None
-        self._client_token: str | None = None
+        self._client_token: tuple[str, str] | None = None
         self._task: asyncio.Task | None = None
         self._wake: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -183,30 +201,115 @@ class InteractionBot:
             return None
         return open_sealed(self._key(), base64.b64decode(stored), TOKEN_AAD).decode()
 
+    def api_url(self, info: dict | None = None) -> str:
+        """当前使用的 Bot API 地址：空串为官方服务器。控制台保存过（含保存为空）时以控制台为准，否则用启动参数。"""
+        info = self._info() if info is None else info
+        return info["api_url"] if isinstance(info.get("api_url"), str) else self.default_api_url
+
+    def files_dir(self, info: dict | None = None) -> str:
+        info = self._info() if info is None else info
+        return info["files_dir"] if isinstance(info.get("files_dir"), str) and info["files_dir"] else self.default_files_dir
+
+    def _make_client(self, token: str, api_url: str) -> TelegramClient:
+        if not api_url:
+            return self.client_factory(token)
+        # 自建服务在本地模式下 getFile 要等它把整个文件（最大 2000 MB）下载完才返回，连接超时放宽到 1 小时；
+        # 用单独的连接池，不占用存储通道共用的连接。
+        return self.client_factory(token, api_base=api_url, transport=PooledTransport(timeout=3600))
+
     def client(self) -> TelegramClient | None:
         """当前启用的交互机器人客户端；没有配置、已停用或系统锁定时为 None（锁定时不在内存里保留 token）。"""
-        if not self.keystore.unlocked or not self._info().get("enabled"):
+        info = self._info()
+        if not self.keystore.unlocked or not info.get("enabled"):
             self._client = self._client_token = None
             return None
         token = self._token()
         if token is None:
             return None
-        if token != self._client_token:
-            self._client, self._client_token = self.client_factory(token), token
+        signature = (token, self.api_url(info))
+        if signature != self._client_token:
+            self._client, self._client_token = self._make_client(*signature), signature
         return self._client
+
+    def file_limit(self) -> int:
+        return LOCAL_FILE_LIMIT if self.api_url() else FILE_LIMIT
+
+    def _help(self) -> str:
+        return HELP.replace("{limit}", "2000 MB" if self.api_url() else "20 MB")
 
     def admin_status(self) -> dict[str, object]:
         info = self._info()
         configured = self._setting(TOKEN_KEY) is not None
         linked = self.metadata.db.execute("SELECT COUNT(*) FROM telegram_links").fetchone()[0]
+        api_url, files_dir = self.api_url(info), self.files_dir(info)
+        try:
+            usage = shutil.disk_usage(files_dir) if api_url else None
+        except OSError:
+            usage = None
         return {"configured": configured, "enabled": bool(configured and info.get("enabled")), "username": info.get("username"),
                 "name": info.get("name"), "bot_id": info.get("id"), "linked_users": linked,
+                "api_url": api_url, "api_url_source": "console" if isinstance(info.get("api_url"), str) else "startup" if self.default_api_url else "default",
+                "default_api_url": self.default_api_url, "files_dir": files_dir, "file_limit": self.file_limit(),
+                "files_dir_ready": bool(api_url) and os.access(files_dir, os.R_OK | os.X_OK),
+                "files_dir_free": usage.free if usage else None, "import_concurrency": self._import_limit(),
                 "running": bool(self._task and not self._task.done()) and configured and bool(info.get("enabled")),
                 "last_error": self.last_error if configured else None, "last_poll_at": self.last_poll_at}
 
-    async def configure(self, token: object = None, enabled: object = None) -> dict[str, object]:
-        """保存或更换 token（先用 getMe 校验并移除 Webhook），或单独启用／停用。token 只以密文保存，不出现在返回值里。"""
+    _UNSET = object()
+
+    @staticmethod
+    def _clean_url(value: object) -> str:
+        if value in (None, ""):
+            return ""
+        if not isinstance(value, str) or not re.fullmatch(r"https?://[A-Za-z0-9.\-_:\[\]]+(/[A-Za-z0-9._~\-/]*)?", value.strip()):
+            raise ValueError("Bot API 地址应形如 http://telegram-bot-api:8081，留空使用官方服务器")
+        return value.strip().rstrip("/")
+
+    async def _switch_server(self, token: str, old: str, new: str) -> None:
+        """机器人从一个 Bot API 服务换到另一个：先在原服务上 logOut（官方要求，否则新服务收不到消息）。
+        从自建服务换回官方后，官方服务器约 10 分钟内拒绝登录。原服务已退出或连不上时忽略。"""
+        if old == new:
+            return
+        try:
+            await self._make_client(token, old).log_out()
+        except (TelegramError, OSError) as exc:
+            log.info("交互机器人在原 Bot API 服务上退出时出错（已忽略）：%s", type(exc).__name__)
+
+    async def configure(self, token: object = None, enabled: object = None, *, api_url: object = _UNSET,
+                        files_dir: object = _UNSET) -> dict[str, object]:
+        """保存或更换 token（先用 getMe 校验并移除 Webhook）、切换 Bot API 服务（api_url，空串为官方）与文件目录，
+        或单独启用／停用。token 只以密文保存，不出现在返回值里。"""
         info = self._info()
+        old_url = self.api_url(info)
+        new_url = old_url if api_url is self._UNSET else self._clean_url(api_url)
+        if files_dir is not self._UNSET:
+            if files_dir not in (None, "") and (not isinstance(files_dir, str) or not files_dir.startswith("/") or len(files_dir) > 512):
+                raise ValueError("文件目录应为容器内的绝对路径，例如 /var/lib/telegram-bot-api")
+            info["files_dir"] = (files_dir or "").strip()
+        if api_url is not self._UNSET:
+            info["api_url"] = new_url
+        if token in (None, "") and new_url != old_url:
+            current = self._token()
+            if current is None:
+                raise ValueError("请先填写交互机器人的 token")
+            await self._switch_server(current, old_url, new_url)
+            client = self._make_client(current, new_url)
+            try:
+                await client.get_me()
+                await client.delete_webhook()
+            except TelegramAuthError as exc:
+                raise ValueError("新的 Bot API 服务拒绝了这个 token（从自建服务换回官方后约 10 分钟内无法登录，请稍后再试）") from exc
+            except (TelegramError, OSError) as exc:
+                raise ValueError(f"无法连接新的 Bot API 服务：{exc}") from exc
+            with self.metadata.transaction() as db:
+                self._save(db, INFO_KEY, json.dumps(info, ensure_ascii=False))
+            self.last_error = None
+            self._kick()
+            return self.admin_status()
+        if token in (None, "") and enabled is None:
+            with self.metadata.transaction() as db:
+                self._save(db, INFO_KEY, json.dumps(info, ensure_ascii=False))
+            return self.admin_status()
         if token not in (None, ""):
             if not isinstance(token, str) or not TOKEN_PATTERN.fullmatch(token.strip()):
                 raise ValueError("Bot token 格式不正确，应形如 123456789:AAH…")
@@ -216,7 +319,10 @@ class InteractionBot:
                 stored = open_sealed(self._key(), row["token_enc"], f"telegram-bot:{row['id']}").decode()
                 if stored.split(":", 1)[0] == token.split(":", 1)[0]:
                     raise ValueError("这个 Bot 正在用作存储通道，请另建一个 Bot 作为交互机器人")
-            client = self.client_factory(token)
+            if new_url:
+                # 新 token 直接用自建服务：先在官方服务器上退出，否则自建服务收不到这个机器人的消息。
+                await self._switch_server(token, "", new_url)
+            client = self._make_client(token, new_url)
             try:
                 me = await client.get_me()
                 await client.delete_webhook()
@@ -227,7 +333,8 @@ class InteractionBot:
                 raise ValueError(f"无法连接 Telegram：{exc}") from exc
             sealed = base64.b64encode(seal(self._key(), token.encode(), TOKEN_AAD)).decode()
             changed = info.get("id") != me.get("id")
-            info = {"id": me.get("id"), "username": me.get("username"), "name": me.get("first_name"),
+            info = {**{key: info[key] for key in ("api_url", "files_dir") if key in info},
+                    "id": me.get("id"), "username": me.get("username"), "name": me.get("first_name"),
                     "enabled": True if enabled is None else bool(enabled), "saved_at": time.time()}
             with self.metadata.transaction() as db:
                 self._save(db, TOKEN_KEY, sealed)
@@ -446,7 +553,7 @@ class InteractionBot:
             return
         message_id = message.get("message_id")
         if command in ("/start", "/help"):
-            await self._reply(chat_id, f"已绑定 Tessera 账号 {account['username']}。\n\n{HELP}\n\n当前保存位置：{_display(link['folder'])}")
+            await self._reply(chat_id, f"已绑定 Tessera 账号 {account['username']}。\n\n{self._help()}\n\n当前保存位置：{_display(link['folder'])}")
         elif command == "/status":
             await self._status(chat_id, link)
         elif command == "/folder":
@@ -472,7 +579,7 @@ class InteractionBot:
             else:
                 await self._reply(chat_id, "在 /ask 后面写上问题，例如：/ask 帮我找出上周下载的视频")
         elif command:
-            await self._reply(chat_id, f"不认识这个命令。\n\n{HELP}")
+            await self._reply(chat_id, f"不认识这个命令。\n\n{self._help()}")
         elif self._media(message) is not None:
             await self._save_file(chat_id, link, message)
         elif URL_PATTERN.search(text) or text.lower().startswith("curl "):
@@ -503,7 +610,7 @@ class InteractionBot:
                        (user_id, chat_id, (sender.get("username") or None), name,
                         previous["folder"] if previous else "", previous["notify"] if previous else 1, time.time()))
         self._audit("telegram.link", user_id)
-        await self._reply(chat_id, f"绑定成功，已连接 Tessera 账号 {account['username']}。\n\n{HELP}")
+        await self._reply(chat_id, f"绑定成功，已连接 Tessera 账号 {account['username']}。\n\n{self._help()}")
 
     async def _status(self, chat_id: int, link) -> None:
         rows = self.metadata.db.execute(
@@ -603,21 +710,83 @@ class InteractionBot:
                 return item, name, mime
         return None
 
+    def _import_limit(self) -> int:
+        if self.resources is None:
+            return 1
+        try:
+            return max(1, int(self.resources.effective()["concurrency"]))
+        except Exception:
+            return 1
+
+    def _local_path(self, file_path: str) -> str:
+        """自建服务（--local）返回服务器上的绝对路径：Tessera 必须把同一目录挂载在 files_dir，且只读取这个目录里的文件。"""
+        root = os.path.realpath(self.files_dir())
+        path = os.path.realpath(file_path)
+        if os.path.commonpath([root, path]) != root:
+            raise ValueError(f"文件不在 Tessera 挂载的 Bot API 目录（{self.files_dir()}）里，请检查 docker-compose 的挂载配置")
+        return path
+
+    async def _read_local(self, path: str):
+        """逐块读取自建服务下载的文件（在线程里读，不阻塞事件循环）。"""
+        handle = await asyncio.to_thread(open, path, "rb")
+        try:
+            while True:
+                piece = await asyncio.to_thread(handle.read, READ_PIECE)
+                if not piece:
+                    return
+                yield piece
+        finally:
+            await asyncio.to_thread(handle.close)
+
     async def _save_file(self, chat_id: int, link, message: dict) -> None:
         item, name, mime = self._media(message)
-        if (item.get("file_size") or 0) > FILE_LIMIT:
-            await self._reply(chat_id, f"「{name}」有 {_size(item['file_size'])}，Telegram 只允许机器人下载 20 MB 以内的文件。"
-                                       "更大的文件请在网页上传，或发送它的下载链接。", reply_to=message.get("message_id"))
+        size = item.get("file_size") or 0
+        limit = self.file_limit()
+        if size > limit:
+            hint = ("Telegram 只允许机器人下载 2000 MB 以内的文件。" if limit > FILE_LIMIT
+                    else "官方 Bot API 只允许机器人下载 20 MB 以内的文件（管理员配置自建 Bot API 服务后可到 2000 MB）。")
+            await self._reply(chat_id, f"「{name}」有 {_size(size)}，{hint}更大的文件请在网页上传，或发送它的下载链接。",
+                              reply_to=message.get("message_id"))
             return
+        if self.client() is None:
+            return
+        if size > FILE_LIMIT:
+            # 大文件在后台下载与保存，同一私聊的其他消息不必等它完成。
+            self._spawn(self._save_large(chat_id, link, message, item, name, mime, size))
+            return
+        await self._import(chat_id, link, message, item, name, mime)
+
+    async def _save_large(self, chat_id: int, link, message: dict, item: dict, name: str, mime: str | None, size: int) -> None:
+        reply_to = message.get("message_id")
+        self._imports.set_limit(self._import_limit())
+        reserve = (self.resources.effective().get("reserve_mib", 512) if self.resources is not None else 512) * 1024 * 1024
+        try:
+            free = shutil.disk_usage(self.files_dir()).free
+        except OSError:
+            await self._reply(chat_id, "暂时无法保存大文件：Tessera 读不到 Bot API 服务的文件目录，请联系管理员检查挂载配置。", reply_to=reply_to)
+            return
+        if free - self._reserved - size < reserve:
+            await self._reply(chat_id, f"「{name}」有 {_size(size)}，服务器磁盘剩余空间不够同时下载它，请稍后再发，或发送下载链接改用离线下载。",
+                              reply_to=reply_to)
+            return
+        self._reserved += size
+        try:
+            if self._imports._active >= self._imports.limit:
+                await self._reply(chat_id, f"「{name}」（{_size(size)}）已排队，前面的大文件保存后开始下载。", reply_to=reply_to)
+            async with self._imports.slot():
+                await self._reply(chat_id, f"正在下载「{name}」（{_size(size)}），大文件需要几分钟，完成后通知你。", reply_to=reply_to)
+                await self._import(chat_id, link, message, item, name, mime)
+        finally:
+            self._reserved -= size
+
+    async def _import(self, chat_id: int, link, message: dict, item: dict, name: str, mime: str | None) -> None:
         client = self.client()
         if client is None:
             return
         self._spawn(self._typing(client, chat_id, 1, action="upload_document"))
+        local = None
         try:
             info = await client.get_file(item["file_id"])
-            response = await client.download_file(info.file_path)
-            if response.status != 200:
-                raise TelegramError(f"HTTP {response.status}")
             scope = self.offline.scope(link["user_id"])
             safe = filename(name) or "Telegram 文件"
             key = link["folder"] + safe
@@ -626,14 +795,32 @@ class InteractionBot:
                     if db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone() is None:
                         return key
                     return self.objects._free_name(db, scope.bucket_id, key, set())
-            key = await self.metadata.run_in_thread(free)
-            await self.objects.put_object(scope, key, response.body, len(response.body), mime)
+            if info.file_path.startswith("/"):
+                # 自建服务的本地模式：文件已在共享目录里，边读边写入网盘，不整个读进内存。
+                local = self._local_path(info.file_path)
+                length = os.path.getsize(local)
+                key = await self.metadata.run_in_thread(free)
+                await self.objects.put_object(scope, key, self._read_local(local), length, mime)
+            else:
+                response = await client.download_file(info.file_path)
+                if response.status != 200:
+                    raise TelegramError(f"HTTP {response.status}")
+                key = await self.metadata.run_in_thread(free)
+                await self.objects.put_object(scope, key, response.body, len(response.body), mime)
         except TelegramError as exc:
             await self._reply(chat_id, f"读取「{name}」失败：{exc}", reply_to=message.get("message_id"))
             return
-        except (ValueError, PermissionError, NotReadyError, QuotaExceededError) as exc:
-            await self._reply(chat_id, f"保存「{name}」失败：{exc}", reply_to=message.get("message_id"))
+        except (ValueError, PermissionError, NotReadyError, QuotaExceededError, OSError) as exc:
+            reason = "服务器读不到 Bot API 服务下载的文件，请联系管理员检查挂载与权限" if isinstance(exc, OSError) and not isinstance(exc, PermissionError) else exc
+            await self._reply(chat_id, f"保存「{name}」失败：{reason}", reply_to=message.get("message_id"))
             return
+        finally:
+            if local is not None:
+                # 保存后立即删除；没有删除权限时由 bot-api 容器的定时清理删除（docker-compose 示例）。
+                try:
+                    await asyncio.to_thread(os.remove, local)
+                except OSError:
+                    pass
         saved = key.rsplit("/", 1)[-1]
         group = message.get("media_group_id")
         if not group:

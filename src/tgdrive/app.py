@@ -40,7 +40,7 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
                offline_reserve_mib: int = 512, offline_hls: bool = False,
                offline_x: bool = False, offline_youtube: bool = False,
                offline_max_mib: int = 512, youtube_max_height: int = 2160,
-               offline_proxy: str = "") -> TgDriveASGI:
+               offline_proxy: str = "", telegram_bot_api_url: str = "", telegram_bot_api_dir: str = "") -> TgDriveASGI:
     root = Path(data_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     if not os.access(root, os.W_OK | os.X_OK):
@@ -106,7 +106,8 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     maintenance.assistant_cleaner = assistant.cleanup
     maintenance.assistant_catalog = assistant.sync_catalog_if_due
     # Telegram 交互机器人：私聊里创建离线下载、保存文件、向文件助手提问，并推送下载完成提醒。
-    telegram_bot = InteractionBot(accounts, objects, offline, assistant=assistant, settings=context.system_settings)
+    telegram_bot = InteractionBot(accounts, objects, offline, assistant=assistant, settings=context.system_settings, resources=resources,
+                                  api_url=telegram_bot_api_url, files_dir=telegram_bot_api_dir)
     offline.on_finished = telegram_bot.offline_finished
     app = TgDriveASGI(admin, user,
                       s3=s3, s3_host=s3_host, static_dir=static_dir, secure_cookies=secure_cookies,
@@ -209,6 +210,10 @@ def main() -> None:
     parser.add_argument("--offline-youtube", action="store_true", default=os.environ.get("TGDRIVE_OFFLINE_YOUTUBE", "0") == "1", help="允许 YouTube 单视频与 Shorts，需平台组件、JavaScript 运行时和 FFmpeg")
     parser.add_argument("--offline-max-mib", type=int, default=int(os.environ.get("TGDRIVE_OFFLINE_MAX_MIB", "512")), help="需临时缓存的音视频输入轨上限，MiB")
     parser.add_argument("--youtube-max-height", type=int, default=int(os.environ.get("TGDRIVE_YOUTUBE_MAX_HEIGHT", "2160")))
+    parser.add_argument("--telegram-bot-api-url", default=os.environ.get("TGDRIVE_TELEGRAM_BOT_API_URL", ""),
+                        help="自建 Telegram Bot API 服务地址（--local 模式），如 http://telegram-bot-api:8081；控制台设置优先")
+    parser.add_argument("--telegram-bot-api-dir", default=os.environ.get("TGDRIVE_TELEGRAM_BOT_API_DIR", ""),
+                        help="自建 Bot API 服务的工作目录在本容器内的挂载路径，默认 /var/lib/telegram-bot-api")
     parser.add_argument("--offline-proxy", default=os.environ.get("TGDRIVE_OFFLINE_PROXY", ""),
                         help="离线下载出站代理，http://主机:端口 或 socks5://主机:端口；启用后由代理解析域名")
     args = parser.parse_args()
@@ -230,7 +235,8 @@ def main() -> None:
                            offline_bandwidth_kib=args.offline_bandwidth_kib, offline_reserve_mib=args.offline_reserve_mib,
                            offline_hls=args.offline_hls, offline_x=args.offline_x, offline_youtube=args.offline_youtube,
                            offline_max_mib=args.offline_max_mib, youtube_max_height=args.youtube_max_height,
-                           offline_proxy=args.offline_proxy), **uvicorn_options)
+                           offline_proxy=args.offline_proxy, telegram_bot_api_url=args.telegram_bot_api_url,
+                           telegram_bot_api_dir=args.telegram_bot_api_dir), **uvicorn_options)
 
 
 if __name__ == "__main__":

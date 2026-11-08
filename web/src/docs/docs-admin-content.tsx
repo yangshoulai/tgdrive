@@ -43,6 +43,9 @@ function AdminStorageChannels() {
       <H2 id="telegram-bot">Telegram 机器人</H2>
       <p>页面底部的「Telegram 机器人」让用户在 Telegram 私聊里使用 {BRAND}：发链接创建离线下载、转发 20 MB 以内的文件保存到网盘、向文件助手提问，并在离线下载完成或失败时收到提醒。向 <C>@BotFather</C> 发送 <C>/newbot</C> 另建一个 Bot，点「配置机器人」填入 token；保存时会检查 token、移除已有的 Webhook 并设置命令菜单。服务用长轮询收消息，不需要公网地址或开放端口。</p>
       <p>请不要使用存储通道的 Bot（会被拒绝）：交互机器人对所有用户可见，存储 Bot 应只留在私有频道里。同一个 Bot 也不能同时被别的程序用来收消息，否则面板会显示「另一个程序正在用这个机器人接收消息」。停用或删除配置后机器人不再收消息和发送提醒，用户的绑定保留；换成新的 Bot 后，用户需要在 Telegram 里先点一次「开始」。token 只以密文保存，审计日志只记录是否更换。</p>
+      <H2 id="telegram-bot-api">接收大文件：自建 Bot API 服务</H2>
+      <p>官方 Bot API 只允许机器人接收 20 MB 以内的文件。自建 Telegram 官方开源的 Bot API 服务（本地模式）后上限为 2000 MB。准备：在 <C>my.telegram.org</C> 的 API development tools 创建应用，得到 <C>api_id</C> 与 <C>api_hash</C>，写进 docker-compose 同目录的 <C>.env</C>（<C>TELEGRAM_API_ID</C>、<C>TELEGRAM_API_HASH</C>）；取消 docker-compose.yml 里 tgdrive 服务的 <C>TGDRIVE_TELEGRAM_BOT_API_URL</C>、<C>TGDRIVE_TELEGRAM_BOT_API_DIR</C> 与共享数据卷三行注释，执行 <C>docker compose --profile bot-api up -d</C>。也可以在本页「Telegram 机器人」的更多菜单「Bot API 服务…」里切换。切换时机器人先在原服务上退出登录；换回官方后约 10 分钟内官方服务器不能登录。</p>
+      <p>资源：服务本身约占一两百 MB 内存；文件先完整下载到它的目录，再由 Tessera 边读边加密上传，保存后立即删除，所以磁盘要能放下正在保存的文件（最大 2000 MB）并留出「下载与资源」里的保留空间。大文件同时保存的数量与离线下载的同时下载数相同（按机器内存自动选择），空间不够时机器人直接回复。服务器必须能直接连上 Telegram；不要把服务的 8081 端口开放到公网。</p>
     </>
   );
 }
@@ -75,6 +78,8 @@ function AdminDeploy() {
         [<C>--offline-max-mib</C>, <C>TGDRIVE_OFFLINE_MAX_MIB</C>, "512", "需临时缓存的音视频输入轨上限，MiB（暂存在数据目录的磁盘上，按设置生效，不随资源档位收紧）"],
         [<C>--youtube-max-height</C>, <C>TGDRIVE_YOUTUBE_MAX_HEIGHT</C>, "2160", "YouTube 清晰度上限；低资源模式不自动下调"],
         [<C>--offline-proxy</C>, <C>TGDRIVE_OFFLINE_PROXY</C>, "直连", "离线下载出站代理，http://主机:端口 或 socks5://主机:端口，可带用户名密码；管理员设置优先"],
+        [<C>--telegram-bot-api-url</C>, <C>TGDRIVE_TELEGRAM_BOT_API_URL</C>, "官方", "自建 Telegram Bot API 服务地址，如 http://telegram-bot-api:8081；控制台设置优先"],
+        [<C>--telegram-bot-api-dir</C>, <C>TGDRIVE_TELEGRAM_BOT_API_DIR</C>, <C>/var/lib/telegram-bot-api</C>, "自建服务工作目录在本容器内的挂载路径"],
         [<C>--trusted-proxies</C>, <C>TGDRIVE_TRUSTED_PROXIES</C>, "Uvicorn 默认", "信任 X-Forwarded-For/Proto 的代理 IP 或网段，逗号分隔"],
       ]} />
       <Callout tone="danger" title="生产环境必须使用 HTTPS">默认情况下会话 Cookie 带有 Secure 标记，浏览器只会通过 HTTPS 发送。不要在公网环境开启 --insecure-cookies。</Callout>

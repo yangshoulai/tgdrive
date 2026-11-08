@@ -26,8 +26,43 @@ services:
       # TGDRIVE_OFFLINE_PROXY: http://proxy.example:7890
       # 反向代理与容器不在同一网段时填写，例如 172.20.0.0/16。
       # TGDRIVE_TRUSTED_PROXIES: 172.20.0.0/16
+      # 自建 Telegram Bot API（见下方 telegram-bot-api 服务）：让交互机器人能接收 2000 MB 以内的文件。
+      # 启用时取消下面两行与 volumes 里的一行注释；控制台「存储通道 → Telegram 机器人」里的设置优先。
+      # TGDRIVE_TELEGRAM_BOT_API_URL: http://telegram-bot-api:8081
+      # TGDRIVE_TELEGRAM_BOT_API_DIR: /var/lib/telegram-bot-api
     volumes:
       - tgdrive-data:/data
+      # - telegram-bot-api-data:/var/lib/telegram-bot-api
+
+  # 自建 Telegram Bot API 服务（--local 模式）：只在启用 bot-api 配置时启动。
+  # 1. 在 my.telegram.org 的 API development tools 创建应用，把 api_id、api_hash 写进同目录的 .env：
+  #      TELEGRAM_API_ID=1234567
+  #      TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
+  # 2. 取消上面 tgdrive 服务里三行注释，然后启动：docker compose --profile bot-api up -d
+  # 3. 控制台「存储通道 → Telegram 机器人」显示「自建服务」后即可转发大文件；首次切换会让机器人先在官方服务器上退出。
+  # 不要把 8081 端口映射到公网：只有 tgdrive 通过容器网络访问它。
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    profiles: ["bot-api"]
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_LOCAL: "1"
+    # 让服务以 tgdrive 的 uid（10001）运行，tgdrive 才能读取并在保存后删除下载的文件；
+    # 另每 10 分钟删除下载超过 1 小时、仍留在目录里的媒体文件（保存失败或中断时留下的），不动机器人自己的数据库。
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sed -i 's/^telegram-bot-api:x:101:101:/telegram-bot-api:x:10001:10001:/' /etc/passwd
+        sed -i 's/^telegram-bot-api:x:101:/telegram-bot-api:x:10001:/' /etc/group
+        chown -R 10001:10001 "$$TELEGRAM_WORK_DIR" "$$TELEGRAM_TEMP_DIR"
+        (while sleep 600; do find "$$TELEGRAM_WORK_DIR" -mindepth 3 -type f -mmin +60 \( -path '*/documents/*' -o -path '*/videos/*' -o -path '*/photos/*' -o -path '*/music/*' -o -path '*/voice/*' -o -path '*/animations/*' -o -path '*/video_notes/*' -o -path '*/temp/*' \) -delete; done) &
+        exec /docker-entrypoint.sh
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
 
 volumes:
   tgdrive-data:
+  telegram-bot-api-data:

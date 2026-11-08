@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { SITE } from "../brand";
 import * as api from "../api";
 
-import { Notice, Badge, Button, ConfirmDialog, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Panel, SetupGuide, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle } from "../ui";
+import { Notice, Badge, Button, ConfirmDialog, EmptyState, Field, Icon, IconButton, KeyValue, Menu, Modal, PageHeader, Panel, Segmented, SetupGuide, SkeletonRows, formatBytes, formatDate, formatDateTime, toast, useDocumentTitle } from "../ui";
 
 /* ---------- 存储通道 ---------- */
 
@@ -156,6 +156,7 @@ function InteractionBotPanel() {
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [server, setServer] = useState(false);
   const [busy, setBusy] = useState(false);
   const load = useCallback(() => { void api.adminTelegramBot().then(value => { setStatus(value); setError(""); }, reason => setError(api.errorMessage(reason, "读取失败，请稍后重试"))); }, []);
   useEffect(load, [load]);
@@ -177,6 +178,7 @@ function InteractionBotPanel() {
     description="用户绑定后，可以在 Telegram 私聊里发链接创建离线下载、转发文件保存到网盘、向文件助手提问，并收到下载完成提醒。请另建一个 Bot，不要使用存储通道的 Bot。"
     actions={status?.configured ? <Menu label="Telegram 机器人的操作" size="md" items={[
       { label: "更换 token", icon: "key", onSelect: () => setEditing(true) },
+      { label: "Bot API 服务…", icon: "server", onSelect: () => setServer(true) },
       status.enabled ? { label: "停用", icon: "lock", onSelect: () => void toggle(false) } : { label: "启用", icon: "unlock", onSelect: () => void toggle(true) },
       { label: "删除配置", icon: "trash", danger: true, divider: true, onSelect: () => setRemoving(true) },
     ]} /> : undefined}>
@@ -189,6 +191,11 @@ function InteractionBotPanel() {
       <KeyValue items={[
         ["机器人", status.username ? <a className="link" href={`https://t.me/${status.username}`} target="_blank" rel="noreferrer">@{status.username}</a> : "—"],
         ["已绑定用户", `${status.linked_users} 人`],
+        ["Bot API 服务", status.api_url ? <span className="interaction-bot-server">自建 <code>{status.api_url}</code>{status.api_url_source === "startup" && <small className="muted">（启动参数）</small>}</span> : "官方服务器"],
+        ["单个文件上限", `${formatBytes(status.file_limit)}${status.api_url ? `，大文件同时下载 ${status.import_concurrency} 个` : ""}`],
+        ...(status.api_url ? [["文件目录", <span className="interaction-bot-server"><code>{status.files_dir}</code>{status.files_dir_ready
+          ? <Badge tone="success">可读取{status.files_dir_free != null ? ` · 剩余 ${formatBytes(status.files_dir_free)}` : ""}</Badge>
+          : <Badge tone="danger">未挂载或无权限</Badge>}</span>] as [string, ReactNode]] : []),
         ["最近收到消息检查", status.last_poll_at ? formatDateTime(status.last_poll_at) : "—"],
       ]} />
       {status.enabled && status.last_error && <Notice tone="danger">{status.last_error}</Notice>}
@@ -196,6 +203,8 @@ function InteractionBotPanel() {
     </>}
     {editing && <InteractionBotDialog configured={Boolean(status?.configured)} busy={busy} onClose={() => setEditing(false)}
       onSaved={value => { setStatus(value); setEditing(false); toast.success(`已连接 @${value.username ?? "机器人"}`); }} />}
+    {server && status && <BotApiServerDialog status={status} onClose={() => setServer(false)}
+      onSaved={value => { setStatus(value); setServer(false); toast.success(value.api_url ? "已切换到自建 Bot API 服务" : "已切换到官方 Bot API 服务器"); }} />}
     {removing && <ConfirmDialog title="删除 Telegram 机器人配置？" confirmLabel="删除" onClose={() => setRemoving(false)}
       description="机器人会停止收消息和发送提醒。用户的绑定会保留，重新配置同一个或新的机器人后继续可用（换成新机器人时，用户需要在 Telegram 里先点一次「开始」）。"
       onConfirm={async () => { setStatus(await api.deleteAdminTelegramBot()); setRemoving(false); toast.success("已删除 Telegram 机器人配置"); }} />}
@@ -221,6 +230,41 @@ function InteractionBotDialog({ configured, busy, onClose, onSaved }: { configur
         <input id="interaction-bot-token" className="input mono" type="password" autoComplete="new-password" value={token} autoFocus
           onChange={event => { setToken(event.target.value); setError(""); }} />
       </Field>
+    </form>
+  </Modal>;
+}
+
+/** 选择 Bot API 服务：官方服务器（机器人只能接收 20 MB 以内的文件）或自建的 telegram-bot-api（--local 模式，2000 MB 以内）。
+ * 切换时机器人先在原服务上退出；从自建服务换回官方后，官方服务器约 10 分钟内不能登录。 */
+function BotApiServerDialog({ status, onClose, onSaved }: { status: api.InteractionBotStatus; onClose: () => void; onSaved: (status: api.InteractionBotStatus) => void }) {
+  const [mode, setMode] = useState<"official" | "local">(status.api_url ? "local" : "official");
+  const [url, setUrl] = useState(status.api_url || status.default_api_url || "http://telegram-bot-api:8081");
+  const [dir, setDir] = useState(status.files_dir);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true); setError("");
+    try { onSaved(await api.saveAdminTelegramBot(mode === "official" ? { api_url: "" } : { api_url: url.trim(), files_dir: dir.trim() })); }
+    catch (reason) { setError(api.errorMessage(reason, "切换失败，请检查地址后重试")); }
+    finally { setSaving(false); }
+  }
+  return <Modal title="Bot API 服务" description="官方服务器只允许机器人接收 20 MB 以内的文件；自建 telegram-bot-api 服务（docker-compose 的 bot-api 配置）可到 2000 MB。" icon="server"
+    onClose={onClose} dismissible={!saving}
+    footer={<><Button disabled={saving} onClick={onClose}>取消</Button><Button variant="primary" type="submit" form="bot-api-form" loading={saving}>保存并切换</Button></>}>
+    <form id="bot-api-form" className="form" onSubmit={submit} noValidate>
+      <Segmented label="Bot API 服务" showLabels value={mode} onChange={setMode}
+        options={[{ value: "official", label: "官方服务器" }, { value: "local", label: "自建服务" }]} />
+      {mode === "local" && <>
+        <Field label="服务地址" htmlFor="bot-api-url" hint="容器网络里的地址，例如 http://telegram-bot-api:8081。不要把这个端口开放到公网。">
+          <input id="bot-api-url" className="input mono" value={url} onChange={event => { setUrl(event.target.value); setError(""); }} />
+        </Field>
+        <Field label="文件目录" htmlFor="bot-api-dir" hint="自建服务的工作目录在 Tessera 容器里的挂载路径，两个容器挂载同一个数据卷。">
+          <input id="bot-api-dir" className="input mono" value={dir} onChange={event => { setDir(event.target.value); setError(""); }} />
+        </Field>
+      </>}
+      <Notice tone="info">切换时机器人会先在原来的服务上退出登录。从自建服务换回官方服务器后，官方服务器约 10 分钟内不能登录，期间机器人收不到消息。</Notice>
+      {error && <Notice tone="danger">{error}</Notice>}
     </form>
   </Modal>;
 }

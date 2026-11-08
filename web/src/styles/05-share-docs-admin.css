@@ -263,3 +263,4 @@ kbd { padding: 1px 8px; border: 1px solid var(--line); border-bottom-width: 2px;
 .panel-title-with-badge { display: inline-flex; align-items: center; gap: 8px; }
 .interaction-bot-empty { display: grid; justify-items: start; gap: 12px; }
 .interaction-bot-empty p { margin: 0; color: var(--ink-3); font-size: var(--text-sm); line-height: var(--leading-loose); }
+.interaction-bot-server { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }

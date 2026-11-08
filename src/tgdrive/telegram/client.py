@@ -339,3 +339,7 @@ class TelegramClient:
 
     async def set_my_commands(self, commands: list[tuple[str, str]]) -> None:
         await self._api("setMyCommands", {"commands": [{"command": name, "description": text} for name, text in commands]})
+
+    async def log_out(self) -> None:
+        # 机器人换到另一个 Bot API 服务前，先在原服务上退出（官方服务器退出后约 10 分钟内不能重新登录）。
+        await self._api("logOut")

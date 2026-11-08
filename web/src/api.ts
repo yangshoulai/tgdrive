@@ -473,9 +473,13 @@ export const updateTelegram = (change: { folder?: string; notify?: boolean }) =>
 export const unlinkTelegram = () => post<TelegramStatus>("/api/user/v1/telegram/unlink", {});
 /** Telegram 交互机器人（管理员）：token 只写不读。 */
 export type InteractionBotStatus = { configured: boolean; enabled: boolean; username: string | null; name: string | null; bot_id: number | null;
-  linked_users: number; running: boolean; last_error: string | null; last_poll_at: number | null };
+  linked_users: number; running: boolean; last_error: string | null; last_poll_at: number | null;
+  /** 当前使用的 Bot API 地址（空为官方）；api_url_source：console 控制台设置、startup 启动参数、default 默认官方。 */
+  api_url: string; api_url_source: "console" | "startup" | "default"; default_api_url: string;
+  /** 自建服务的文件目录（Tessera 容器内的挂载路径）、能否读取与所在磁盘剩余空间；file_limit 是机器人能接收的单个文件上限。 */
+  files_dir: string; files_dir_ready: boolean; files_dir_free: number | null; file_limit: number; import_concurrency: number };
 export const adminTelegramBot = (signal?: AbortSignal) => request<InteractionBotStatus>("/api/admin/v1/telegram-bot", { signal });
-export const saveAdminTelegramBot = (change: { token?: string; enabled?: boolean }) => post<InteractionBotStatus>("/api/admin/v1/telegram-bot", change, 30000);
+export const saveAdminTelegramBot = (change: { token?: string; enabled?: boolean; api_url?: string; files_dir?: string }) => post<InteractionBotStatus>("/api/admin/v1/telegram-bot", change, 30000);
 export const deleteAdminTelegramBot = () => post<InteractionBotStatus>("/api/admin/v1/telegram-bot/delete", {});
 /** 加上或去掉星标（普通空间里的文件，一次最多 1000 个）；changed 是实际改动的数量。 */
 export const setStarred = (paths: string[], starred: boolean) => post<{ changed: number; starred: boolean }>("/api/user/v1/star", { paths, starred });

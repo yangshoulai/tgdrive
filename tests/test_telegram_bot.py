@@ -18,10 +18,11 @@ class FakeClient:
     """记录发出的请求；文件下载返回预先放好的内容。"""
     files: dict[str, bytes] = {}
 
-    def __init__(self, token):
-        self.token = token
+    def __init__(self, token, api_base="official", transport=None):
+        self.token, self.api_base = token, api_base
         self.sent: list[dict] = []
         self.calls: list[str] = []
+        self.local_files: dict[str, str] = {}
 
     async def get_me(self):
         return {"id": 42, "username": "tessera_bot", "first_name": "Tessera"}
@@ -42,7 +43,12 @@ class FakeClient:
     async def send_chat_action(self, chat_id, action="typing"):
         pass
 
+    async def log_out(self):
+        self.calls.append("logOut")
+
     async def get_file(self, file_id):
+        if file_id in self.local_files:
+            return FileInfo(file_id, None, self.local_files[file_id])
         return FileInfo(file_id, None, f"documents/{file_id}")
 
     async def download_file(self, file_path, start=None, end=None):
@@ -57,8 +63,8 @@ class TelegramBotTests(unittest.TestCase):
         self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
         self.bot = self.app.telegram_bot
         self.clients: list[FakeClient] = []
-        def factory(token):
-            client = FakeClient(token)
+        def factory(token, **options):
+            client = FakeClient(token, **options)
             self.clients.append(client)
             return client
         self.bot.client_factory = factory
@@ -104,6 +110,43 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(self.bot._token(), TOKEN, "更换加密口令后 token 仍可解开")
         with self.assertRaises(ValueError):
             asyncio.run(self.bot.configure("not-a-token"))
+
+    def test_self_hosted_server_saves_large_files_from_shared_directory(self):
+        self.configure_and_bind()
+        files = Path(self.temp.name) / "bot-api"
+        (files / "bot" / "videos").mkdir(parents=True)
+        status = asyncio.run(self.bot.configure(api_url="http://telegram-bot-api:8081", files_dir=str(files)))
+        self.assertEqual((status["api_url"], status["file_limit"], status["files_dir_ready"]), ("http://telegram-bot-api:8081", botmod.LOCAL_FILE_LIMIT, True))
+        official = [client for client in self.clients if client.api_base == "official"]
+        self.assertIn("logOut", [call for client in official for call in client.calls], "换到自建服务前先在官方服务器上退出")
+        local = self.bot.client()
+        self.assertEqual(local.api_base, "http://telegram-bot-api:8081")
+        movie = files / "bot" / "videos" / "file_1.mp4"
+        content = b"\x00\x00\x00\x18ftypisom" + b"v" * (3 * 1024 * 1024)
+        movie.write_bytes(content)
+        local.local_files["big"] = str(movie)
+        size = 30 * 1024 * 1024  # 声明的大小超过官方的 20 MB 上限，走后台大文件流程
+        self.dispatch(self.message(video={"file_id": "big", "file_unique_id": "u", "file_name": "电影.mp4", "mime_type": "video/mp4", "file_size": size}))
+        texts = [item["text"] for item in self.sent]
+        self.assertTrue(any("正在下载「电影.mp4」" in text for text in texts), texts)
+        self.assertIn("已保存到", texts[-1])
+        row = self.app.metadata.db.execute("SELECT size FROM objects WHERE bucket_id=? AND key=?", (self.alice.bucket_id, "电影.mp4")).fetchone()
+        self.assertEqual(row["size"], len(content))
+        self.assertFalse(movie.exists(), "保存后删除 Bot API 服务下载的文件")
+        # 目录外的路径不读取；磁盘空间不够时直接回复。
+        local.local_files["outside"] = "/etc/hosts"
+        self.dispatch(self.message(document={"file_id": "outside", "file_name": "hosts.txt", "file_size": 100}))
+        self.assertIn("挂载", self.sent[-1]["text"])
+        from unittest import mock
+        with mock.patch.object(botmod.shutil, "disk_usage", return_value=mock.Mock(free=40 * 1024 * 1024)):
+            self.dispatch(self.message(video={"file_id": "big2", "file_name": "大.mp4", "file_size": size}))
+        self.assertIn("剩余空间不够", self.sent[-1]["text"])
+        self.dispatch(self.message(video={"file_id": "huge", "file_name": "巨.mp4", "file_size": botmod.LOCAL_FILE_LIMIT + 1}))
+        self.assertIn("2000 MB", self.sent[-1]["text"])
+        # 换回官方：在自建服务上退出，上限回到 20 MB。
+        status = asyncio.run(self.bot.configure(api_url=""))
+        self.assertEqual((status["api_url"], status["file_limit"]), ("", botmod.FILE_LIMIT))
+        self.assertIn("logOut", [call for client in self.clients if client.api_base != "official" for call in client.calls], "换回官方前在自建服务上退出")
 
     def test_storage_bot_token_is_rejected(self):
         self.app.telegram_bots.create("主存储", TOKEN, "-1001234567890")
@@ -222,7 +265,7 @@ class TelegramAssistantTests(AssistantCase):
             await self.put("old.txt", b"old")
             bot = self.app.telegram_bot
             clients = []
-            bot.client_factory = lambda token: clients.append(FakeClient(token)) or clients[-1]
+            bot.client_factory = lambda token, **options: clients.append(FakeClient(token, **options)) or clients[-1]
             await bot.configure(TOKEN)
             bot._loop = asyncio.get_running_loop()
             code = bot.create_code(self.alice.id)["code"]
