@@ -3,9 +3,10 @@
  * 歌单页本身在 library.tsx（音乐页的「歌单」标签）；这里不导入媒体库，避免循环依赖。 */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import * as api from "../api";
+import { BRAND } from "../brand";
 import { FileThumbnail, baseName, parentPath } from "../files";
 import { coverTint } from "../preview-media";
-import { Button, Checkbox, EmptyState, Field, Icon, Modal, SearchInput, SkeletonRows, toast } from "../ui";
+import { Badge, Button, ButtonLink, Checkbox, CopyField, EmptyState, Field, Icon, KeyValue, Modal, Notice, SearchInput, SkeletonRows, Switch, formatDateTime, toast } from "../ui";
 
 /** 歌单有改动（新建、删除、加入、移出）时通知同一页面上的其他部分重新读取所在歌单。 */
 const CHANGED = "tessera:playlists-changed";
@@ -221,5 +222,75 @@ export function SongPickerDialog({ playlist, existing, onClose, onAdded }: {
         })}
         {cursor && <div ref={more} className="library-more">{loadingMore ? <><span className="spinner" aria-hidden="true" />正在加载</> : null}</div>}
       </ul>}
+  </Modal>;
+}
+
+/** 分享歌单：开关公开链接，设置有效期、访问密码，以及默认关闭的「允许下载」「允许保存到自己的文件」。每项改动立即保存。 */
+export function PlaylistShareDialog({ playlist, onClose, onChange }: { playlist: api.PlaylistInfo; onClose: () => void; onChange: (share: api.PlaylistShare | null) => void }) {
+  const [share, setShare] = useState<api.PlaylistShare | null>(playlist.share ?? null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [password, setPassword] = useState("");
+  const [editingPassword, setEditingPassword] = useState(false);
+  async function apply(options: Parameters<typeof api.sharePlaylist>[1], message: string) {
+    if (busy) return false;
+    setBusy(true); setError("");
+    try {
+      const result = await api.sharePlaylist(playlist.id, options);
+      setShare(result.share); onChange(result.share); toast.success(message);
+      return true;
+    } catch (reason) { setError(api.errorMessage(reason, "更新分享设置失败，请稍后重试")); return false; }
+    finally { setBusy(false); }
+  }
+  const link = share ? api.playlistShareUrl(share.token) : null;
+  async function savePassword() {
+    if (password.length < 4) { setError("访问密码至少 4 个字符"); return; }
+    if (await apply({ enabled: true, password }, "已设置访问密码，旧的验证凭证已失效")) { setPassword(""); setEditingPassword(false); }
+  }
+  return <Modal title="分享歌单" description={playlist.name} icon="link" onClose={onClose} dismissible={!busy}
+    footer={<>{link && <ButtonLink variant="ghost" size="md" icon="external" href={link} target="_blank" rel="noreferrer">打开分享页</ButtonLink>}<Button disabled={busy} onClick={onClose}>完成</Button></>}>
+    <div className={`share-status${share ? " is-public" : ""}`}>
+      <Switch checked={Boolean(share)} disabled={busy} label={share ? "任何拥有链接的人都可以收听" : "仅自己可见"}
+        onChange={value => void apply({ enabled: value }, value ? "已开启歌单分享" : "已关闭分享，原链接立即失效")}
+        description={share ? "访问者无需登录即可查看曲目并在线播放，看不到歌曲存放在哪个文件夹。歌单里加歌、删歌或调整顺序会同步到分享页。"
+          : "开启后生成分享链接，可随时关闭；再次开启会得到新的链接。"} />
+    </div>
+    {error && <Notice tone="danger">{error}</Notice>}
+    <p className="share-save-status" role="status">{busy ? "正在保存设置…" : "更改自动保存"}</p>
+    {share && link && <>
+      <Field label="分享链接"><CopyField value={link} label="歌单分享链接" copyMessage="分享链接已复制" primary /></Field>
+      <div className="playlist-share-options">
+        <Switch checked={share.download} disabled={busy} label="允许下载" description="访问者可以下载单首歌曲。关闭时只能在线播放。"
+          onChange={download => void apply({ enabled: true, download }, download ? "已允许下载" : "已关闭下载")} />
+        <Switch checked={share.save} disabled={busy} label="允许保存到自己的文件" description={`登录的 ${BRAND} 用户可以把歌曲保存到自己的文件夹（不复制数据，计入对方的空间）。`}
+          onChange={save => void apply({ enabled: true, save }, save ? "已允许保存" : "已关闭保存")} />
+      </div>
+      <details className="settings-disclosure">
+        <summary><span>访问设置</span><span className="disclosure-meta">{share.has_password ? "有密码" : "无密码"} · {share.expires_at ? "限时有效" : "永久有效"}</span><Icon name="chevronDown" size={16} /></summary>
+        <div className="disclosure-body form">
+          <Field label="有效期" hint={share.expires_at ? `将于 ${formatDateTime(share.expires_at)} 失效。再次选择天数会从现在重新计算。` : "链接一直有效，直到你关闭分享。"}>
+            <select className="input" value={share.expires_at ? "custom" : "never"} disabled={busy}
+              onChange={event => { const days = event.target.value === "never" ? null : Number(event.target.value);
+                void apply({ enabled: true, expires_at: days === null ? null : Date.now() / 1000 + days * 86400 }, days === null ? "链接已设为永久有效" : `链接将在 ${days} 天后失效`); }}>
+              {share.expires_at && <option value="custom" disabled>当前：{formatDateTime(share.expires_at)} 失效</option>}
+              <option value="never">永久有效</option><option value="1">从现在起 1 天</option><option value="7">从现在起 7 天</option><option value="30">从现在起 30 天</option>
+            </select>
+          </Field>
+          <Field label="访问密码" htmlFor="playlist-share-password" hint="至少 4 个字符。修改密码后，访问者需重新验证。">
+            {share.has_password && !editingPassword ? <div className="share-password-set">
+              <Badge tone="accent" icon="lock">已设置</Badge>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditingPassword(true)}>修改</Button>
+              <Button size="sm" variant="ghost-danger" disabled={busy} onClick={() => void apply({ enabled: true, password: null }, "已取消访问密码")}>取消密码</Button>
+            </div> : <form className="share-password-form" noValidate onSubmit={event => { event.preventDefault(); void savePassword(); }}>
+              <input id="playlist-share-password" className="input" type="text" autoComplete="off" placeholder="不设置则无需密码" value={password} disabled={busy}
+                onChange={event => { setPassword(event.target.value); setError(""); }} />
+              <Button size="sm" type="submit" disabled={busy || !password}>设置密码</Button>
+              {editingPassword && <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setEditingPassword(false); setPassword(""); }}>取消</Button>}
+            </form>}
+          </Field>
+          <KeyValue items={[["开启时间", formatDateTime(share.shared_at)], ["歌曲移动或改名", "仍在分享页里"], ["移入回收站的歌曲", "分享页暂不显示"]]} />
+        </div>
+      </details>
+    </>}
   </Modal>;
 }

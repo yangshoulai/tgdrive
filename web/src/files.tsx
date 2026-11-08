@@ -345,7 +345,7 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
       <p>{error || (failed ? "可能是网络中断，或浏览器不支持这个格式。可以重试，或下载后打开。" : unplayable ? "请下载后用本地播放器打开，例如 VLC、IINA。" : advice)}</p>
       <div className="preview-recovery">
         {failed && <Button size="sm" icon="refresh" onClick={onRetry}>重试</Button>}
-        <ButtonLink variant={failed ? "secondary" : "primary"} size="sm" icon="download" href={downloadUrl}>下载文件</ButtonLink>
+        {downloadUrl && <ButtonLink variant={failed ? "secondary" : "primary"} size="sm" icon="download" href={downloadUrl}>下载文件</ButtonLink>}
       </div>
     </div>
   );
@@ -640,7 +640,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
       event.preventDefault(); event.stopPropagation();
       event.currentTarget.classList.remove("is-chrome-idle");
       if (!event.repeat) {
-        if (key === "d") downloadFile(downloadHref);
+        if (key === "d") { if (downloadHref) downloadFile(downloadHref); }
         else if (key === "s") void share();
         else setPlaylistExpanded(value => !value);
       }
@@ -780,7 +780,8 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
         ...(onShare ? [{ label: active.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => void share() }] : []),
         ...(onEditImage && ownSource && kind === "image" && !/\.svg$/i.test(active.key) ? [{ label: "编辑图片", icon: "crop" as const, onSelect: () => onEditImage(active) }] : []),
         ...(ownSource ? cacheMenuItems(cacheQueue, active).filter(item => !item.danger) : []),
-        { label: "下载文件", icon: "download" as const, shortcut: "D", href: downloadHref, onSelect: () => {} },
+        // 下载地址为空（分享者没有允许下载的歌单分享）时不提供下载。
+        ...(downloadHref ? [{ label: "下载文件", icon: "download" as const, shortcut: "D", href: downloadHref, onSelect: () => {} }] : []),
         ] : []),
       ]}
       resizable={kind === "audio" ? undefined : `preview-${kind === "code" ? "text" : kind}`} aspectRatio={kind === "video" ? videoRatio : undefined} windowKey={file.key} minimizedContent={media ? <MinimizedPlayback progress={progress} state={mediaState} playing={playing} lyric={kind === "audio" && lyric.key === active.key ? lyric.line : null} speed={bufferSpeed} onSeek={time => controls.current?.seek(time)} onToggle={togglePlayback} nav={nav} />
@@ -801,7 +802,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
           {onEditImage && ownSource && kind === "image" && !/\.svg$/i.test(active.key) && <IconButton icon="crop" label="编辑图片" size="sm" onClick={() => onEditImage(active)} />}
           {onShare && <IconButton icon="link" label={active.public_token ? "管理分享" : "公开分享"} shortcut="S" size="sm" onClick={() => void share()} />}
           {ownSource && <FileCacheButton file={active} />}
-          <a className="icon-btn icon-btn-ghost icon-btn-sm" href={downloadHref} aria-label="下载文件" aria-keyshortcuts="D" title="下载文件（D）"><Icon name="download" size={16} /></a>
+          {downloadHref && <a className="icon-btn icon-btn-ghost icon-btn-sm" href={downloadHref} aria-label="下载文件" aria-keyshortcuts="D" title="下载文件（D）"><Icon name="download" size={16} /></a>}
           <span className="modal-actions-divider" aria-hidden="true" />
         </>}
       </>}>

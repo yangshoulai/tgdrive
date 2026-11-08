@@ -424,6 +424,10 @@ class TgDriveASGI(StaticFiles):
                 data, mime, etag = self.user.accounts.avatar(int(sharer["user_id"]))
                 await self._send_thumbnail(tracked_send, headers, data, mime, etag, self._avatar_cache_control(query))
                 return
+            playlist_media = re.fullmatch(r"/api/public/v1/playlists/([A-Za-z0-9_-]+)/(avatar|items/([0-9a-f]{20})/(content|assets/(\d{1,3})))", path)
+            if playlist_media and method in ("GET", "HEAD"):
+                await self._until_disconnect(receive, self._playlist_media(tracked_send, method, playlist_media, query, headers))
+                return
             folder_download = re.fullmatch(r"/api/public/v1/folders/([A-Za-z0-9_-]+)/download", path)
             if folder_download and method == "POST":
                 if headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
@@ -536,7 +540,8 @@ class TgDriveASGI(StaticFiles):
                          "/assistant/actions/{}/reject": "assistant.action.reject",
                          "/assistant/actions/{}/cancel": "assistant.action.cancel",
                          "/assistant/actions/{}/undo": "assistant.action.undo",
-                         "/assistant/attachments/{}/save": "assistant.attachment.save", "/telegram/unlink": "telegram.unlink"},
+                         "/assistant/attachments/{}/save": "assistant.attachment.save", "/telegram/unlink": "telegram.unlink",
+                         "/playlists/{}/share": "playlist.share", "/playlist-shares/{}/save": "playlist_share.save"},
     }
 
     def _audit_entry(self, method, path, payload, token, scope):
@@ -547,7 +552,8 @@ class TgDriveASGI(StaticFiles):
             if not path.startswith(prefix + "/"):
                 continue
             route = path[len(prefix):]
-            pattern = re.sub(r"^/(users|clients|bots|downloads|audit)/\d+/", r"/\1/{}/", route)
+            pattern = re.sub(r"^/(users|clients|bots|downloads|audit|playlists)/\d+/", r"/\1/{}/", route)
+            pattern = re.sub(r"^/playlist-shares/[A-Za-z0-9_-]+/", "/playlist-shares/{}/", pattern)
             pattern = re.sub(r"^/registration/invites/\d+/", "/registration/invites/{}/", pattern)
             pattern = re.sub(r"^/shares/[A-Za-z0-9_-]+/", "/shares/{}/", pattern)
             pattern = re.sub(r"^/assistant/(channels|models|users)/\d+/", r"/assistant/\1/{}/", pattern)
@@ -560,7 +566,7 @@ class TgDriveASGI(StaticFiles):
             role = "admin" if prefix.endswith("admin/v1") else (session.role if session else "user")
             actor = str(payload.get("username") or "") if action.endswith(".login") or action == "system.setup" else (session.username if session else None)
             # 分享令牌本身就是访问凭据，不写入审计。
-            target_id = route.split("/")[pattern.split("/").index("{}")] if pattern.count("{}") and not pattern.startswith("/shares/") else None
+            target_id = route.split("/")[pattern.split("/").index("{}")] if pattern.count("{}") and not pattern.startswith(("/shares/", "/playlist-shares/")) else None
             return {"action": action, "actor_type": role, "actor": actor or None, "payload": payload, "target_id": target_id,
                     "ip": (scope.get("client") or [None])[0]}
         return None
@@ -602,6 +608,12 @@ class TgDriveASGI(StaticFiles):
             detail = {key: payload.get(key) for key in ("bucket_id", "perms")}
         elif action == "bot.create":
             target, detail = payload.get("name"), {"channel_id": payload.get("channel_id")}
+        elif action == "playlist.share":
+            # 访问密码与令牌不写入审计。
+            detail = {"enabled": payload.get("enabled", True) is not False, **{name: bool(payload[name]) for name in ("download", "save") if name in payload},
+                      **({"password": bool(payload["password"])} if "password" in payload else {})}
+        elif action == "playlist_share.save" and ok:
+            detail = {"saved": (result or {}).get("saved")}
         elif action == "telegram_bot.update":
             # token 不写入审计，只记是否更换以及启用状态。
             detail = {"token_changed": bool(payload.get("token")), **({"enabled": bool(payload["enabled"])} if "enabled" in payload else {})}
@@ -1297,13 +1309,21 @@ class TgDriveASGI(StaticFiles):
                 return 201, await user.create_playlist(token, csrf, payload.get("name"), payload.get("paths")), {}
             if route == "/playlists/containing" and method == "POST":
                 return 200, await user.playlists_containing(token, payload.get("paths")), {"Cache-Control": "no-store"}
-            playlist_route = re.fullmatch(r"/playlists/(\d{1,12})(/delete)?", route)
+            playlist_route = re.fullmatch(r"/playlists/(\d{1,12})(/delete|/share)?", route)
+            if playlist_route and method == "POST" and playlist_route[2] == "/share":
+                return 200, await user.share_playlist(token, csrf, int(playlist_route[1]), payload), {}
+            playlist_share = re.fullmatch(r"/playlist-shares/([A-Za-z0-9_-]{8,64})/(status|save)", route)
+            if playlist_share and playlist_share[2] == "status" and method == "GET":
+                return 200, user.playlist_share_status(token, playlist_share[1]), {"Cache-Control": "no-store"}
+            if playlist_share and playlist_share[2] == "save" and method == "POST":
+                self._shared_playlist(playlist_share[1], payload.get("access"))
+                return 200, await user.save_playlist_share(token, csrf, playlist_share[1], payload.get("destination", ""), payload.get("items")), {}
             if playlist_route and method == "GET" and not playlist_route[2]:
                 return 200, await user.playlist(token, int(playlist_route[1]), query.get("cursor", [""])[0],
                                                 int(query.get("limit", ["200"])[0])), {"Cache-Control": "no-store"}
             if playlist_route and method == "POST" and not playlist_route[2]:
                 return 200, await user.update_playlist(token, csrf, int(playlist_route[1]), payload), {}
-            if playlist_route and method == "POST" and playlist_route[2]:
+            if playlist_route and method == "POST" and playlist_route[2] == "/delete":
                 await user.delete_playlist(token, csrf, int(playlist_route[1]))
                 return 204, None, {}
             if method == "GET" and route == "/search":
@@ -1369,6 +1389,8 @@ class TgDriveASGI(StaticFiles):
                 raise ValueError("分享设置已更改，请重新输入访问密码")
             access, expires = self.share_access.grant(token, password_hash)
             return 200, {"access": access, "expires_at": expires}, {}
+        elif (shared_playlist := re.fullmatch(r"/api/public/v1/playlists/([A-Za-z0-9_-]+)(/unlock|/items/([0-9a-f]{20})/assets)?", path)):
+            return await self._public_playlist(method, shared_playlist, query, payload, ip)
         elif path.startswith("/api/public/v1/objects/") and method == "GET":
             token = path[len("/api/public/v1/objects/"):]
             info, password_hash = self._public_share(token)
@@ -1405,6 +1427,87 @@ class TgDriveASGI(StaticFiles):
     @staticmethod
     def _share_options(payload):
         return {name: payload[name] for name in ("expires_at", "password") if name in payload}
+
+    def _shared_playlist(self, token: str, access: str | None):
+        """分享的歌单行；有访问密码时校验访问凭证（凭证按「playlist:令牌」签发，与文件分享的令牌互不通用）。"""
+        if not self.user.accounts.keystore.unlocked:
+            raise NotReadyError("system is locked")
+        row = self.user.playlists.public(token)
+        if row["share_password"] and not self.share_access.check(f"playlist:{token}", row["share_password"], access):
+            raise SharePasswordRequired("password required")
+        return row
+
+    async def _public_playlist(self, method, match, query, payload, ip):
+        token, action = match[1], match[2] or ""
+        user = self.user
+        if action == "/unlock" and method == "POST":
+            if not user.accounts.keystore.unlocked:
+                raise NotReadyError("system is locked")
+            row = user.playlists.public(token)
+            limiter, key = user.accounts.sessions, f"share:playlist:{token}|{ip or '-'}"
+            def check_attempts():
+                if limiter.is_rate_limited(key):
+                    raise TooManyAttempts("too many attempts")
+            check_attempts()
+            if not row["share_password"] or not await user.accounts.password_work.run(
+                    verify_password, str(payload.get("password", "")), row["share_password"], before=check_attempts):
+                limiter.record_failure(key)
+                raise ValueError("访问密码不正确")
+            if user.playlists.public(token)["share_password"] != row["share_password"]:
+                raise ValueError("分享设置已更改，请重新输入访问密码")
+            access, expires = self.share_access.grant(f"playlist:{token}", row["share_password"])
+            return 200, {"access": access, "expires_at": expires}, {}
+        if method != "GET":
+            raise NotFoundError("接口不存在")
+        access = query.get("access", [None])[0]
+        if action.endswith("/assets"):
+            row = self._shared_playlist(token, access)
+            item = user.playlists.public_item(row, match[3])
+            assets = await user.objects.apreview_assets(Scope(row["bucket_id"]), item["key"])
+            # 歌词、字幕附件只给出名称与类型，地址按序号读取，不暴露存放路径。
+            return 200, [{**{name: value for name, value in asset.items() if name != "path"}, "path": f"{match[3]}/{index}"}
+                         for index, asset in enumerate(assets)], {"Cache-Control": "no-store"}
+        try:
+            row = self._shared_playlist(token, access)
+        except SharePasswordRequired:
+            return 200, {"token": token, "password_required": True}, {"Cache-Control": "no-store"}
+        def read():
+            items = user.public_playlist_items(row)
+            sharer = user.accounts.sharer(row["bucket_id"])
+            return {"token": token, "password_required": False, "name": row["name"], "shared_at": row["share_at"],
+                    "updated_at": row["updated_at"], "expires_at": row["share_expires_at"], "download": bool(row["share_download"]),
+                    "save": bool(row["share_save"]), "items": items, "duration": sum((item.get("media") or {}).get("duration") or 0 for item in items),
+                    "sharer": {"nickname": sharer["nickname"], "avatar_version": sharer["avatar_version"]} if sharer else None}
+        return 200, await user.objects.metadata.run_in_thread(read), {"Cache-Control": "no-store"}
+
+    async def _playlist_media(self, send, method, match, query, headers):
+        """分享歌单里的歌曲、封面、歌词附件与分享者头像。都按当前歌单内容校验：歌曲移出歌单、关闭分享或改了密码后立即失效。"""
+        token = match[1]
+        row = self._shared_playlist(token, query.get("access", [None])[0])
+        objects = self.user.objects
+        if match[2] == "avatar":
+            sharer = self.user.accounts.sharer(row["bucket_id"])
+            if sharer is None or not sharer["avatar_version"]:
+                raise NotFoundError("头像不存在")
+            data, mime, etag = self.user.accounts.avatar(int(sharer["user_id"]))
+            await self._send_thumbnail(send, headers, data, mime, etag, self._avatar_cache_control(query))
+            return
+        item = objects._object(self.user.playlists.public_item(row, match[3]))
+        scope = Scope(row["bucket_id"])
+        if match[5] is not None:
+            assets = await objects.apreview_assets(scope, item.key)
+            index = int(match[5])
+            if index >= len(assets):
+                raise NotFoundError("附件不存在")
+            item = objects.head_object(scope, str(assets[index]["path"]))
+        elif "thumbnail" in query:
+            data, mime, etag = await objects.read_thumbnail(item, query["thumbnail"][0])
+            await self._send_thumbnail(send, headers, data, mime, etag, "public, no-cache")
+            return
+        if query.get("download", ["0"])[0] == "1" and not row["share_download"]:
+            raise PermissionError("分享者没有允许下载这个歌单里的歌曲")
+        await self._stream_object(send, method, item, lambda start, end: objects.get_object(scope, item.key, start, end),
+                                  query, headers, "public, no-cache")
 
     def _public_share(self, token: str):
         """返回 (info, 密码哈希)。过期抛 ShareExpiredError，不存在抛 NotFoundError。"""

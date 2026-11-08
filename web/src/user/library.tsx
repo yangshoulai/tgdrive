@@ -11,7 +11,7 @@ import { Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Pa
 import { BRAND } from "../brand";
 import { usePreview } from "./preview-host";
 import { useThumbnailPolling } from "./thumbnail-polling";
-import { PlaylistBadge, PlaylistNameDialog, SongPickerDialog, playlistsChanged, useAddToPlaylist, usePlaylistMembership } from "./playlists";
+import { PlaylistBadge, PlaylistNameDialog, PlaylistShareDialog, SongPickerDialog, playlistsChanged, useAddToPlaylist, usePlaylistMembership } from "./playlists";
 
 export type MediaView = "photos" | "videos" | "music";
 /** 一个文件夹最多读多少个文件（影视与音乐按名称排序，需要读完）。 */
@@ -643,8 +643,8 @@ function PlaylistsHome({ onOpen }: { onOpen: (id: number) => void }) {
     <div className="media-folders is-music">
       {(lists ?? []).map(item => <button key={item.id} type="button" className="media-folder" onClick={() => onOpen(item.id)} title={item.name}>
         <PlaylistCover playlist={item} />
-        <strong>{item.name}</strong>
-        <span>{[`${item.count} 首`, item.duration ? clock(item.duration) : null].filter(Boolean).join(" · ")}</span>
+        <strong>{item.shared && <Icon name="globe" size={14} className="playlist-shared-mark" />}{item.name}</strong>
+        <span>{[`${item.count} 首`, item.duration ? clock(item.duration) : null, item.shared ? "已分享" : null].filter(Boolean).join(" · ")}</span>
       </button>)}
     </div>
   </LibraryState>;
@@ -659,6 +659,7 @@ function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () =
   const [renaming, setRenaming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const adding = useAddToPlaylist();
   useEffect(() => {
     const controller = new AbortController();
@@ -717,6 +718,7 @@ function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () =
           {tracks.length > 0 && <Button variant="primary" icon="play" onClick={() => open(tracks[0])}>全部播放</Button>}
           {info && <Button icon="plus" onClick={() => setPicking(true)}>添加歌曲</Button>}
           {tracks.length > 1 && <Button icon="shuffle" onClick={() => { const list = shuffled(tracks); open(list[0], list); }}>随机播放</Button>}
+          {info && <Button icon={info.share ? "globe" : "link"} onClick={() => setSharing(true)}>{info.share ? "已分享" : "分享"}</Button>}
           {info && <Menu label="歌单的更多操作" size="md" items={[
             { label: "重命名", icon: "edit", onSelect: () => setRenaming(true) },
             { label: "删除歌单", icon: "trash", danger: true, divider: true, onSelect: () => setDeleting(true) },
@@ -737,6 +739,7 @@ function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () =
       <MediaItems view="music" items={tracks} open={file => open(file)} menu={menu} selection={selection} membership={membership} playlist={id} />
     </LibraryState>
     {adding.dialog}
+    {sharing && info && <PlaylistShareDialog playlist={info} onClose={() => setSharing(false)} onChange={share => setInfo(current => current && { ...current, share })} />}
     {picking && info && <SongPickerDialog playlist={info} existing={new Set(tracks.map(track => track.key))} onClose={() => setPicking(false)}
       onAdded={() => setAttempt(value => value + 1)} />}
     {renaming && info && <PlaylistNameDialog title="重命名歌单" confirm="保存" initial={info.name} onClose={() => setRenaming(false)}

@@ -487,8 +487,10 @@ export const starredFiles = (options: { cursor?: string; limit?: number; q?: str
   return request<{ objects: FileItem[]; next_cursor: string | null }>(`/api/user/v1/starred?${params}`, { signal });
 };
 /** 音乐歌单：count、duration 只计当前能播放的歌曲（回收站里的不算）；samples 是排在最前的 4 首（封面拼图）。 */
-export type Playlist = { id: number; name: string; count: number; duration: number; created_at: number; updated_at: number; samples: LibraryItem[] };
-export type PlaylistInfo = Pick<Playlist, "id" | "name" | "created_at" | "updated_at">;
+export type Playlist = { id: number; name: string; count: number; duration: number; created_at: number; updated_at: number; samples: LibraryItem[]; shared?: boolean };
+/** 歌单分享：download、save 是分享者勾选的「允许下载」「允许保存到自己的文件」，默认关闭。 */
+export type PlaylistShare = { token: string; shared_at: number; expires_at: number | null; has_password: boolean; download: boolean; save: boolean };
+export type PlaylistInfo = Pick<Playlist, "id" | "name" | "created_at" | "updated_at"> & { share?: PlaylistShare | null };
 export const playlists = (signal?: AbortSignal) => request<{ playlists: Playlist[]; limit: { playlists: number; items: number } }>("/api/user/v1/playlists", { signal });
 /** 一页歌曲（按歌单顺序）；游标是上一页最后一首的位置。 */
 export const playlistItems = (id: number, cursor = "", limit = 500, signal?: AbortSignal) =>
@@ -497,6 +499,35 @@ export const createPlaylist = (name: string, paths: string[] = []) => post<Playl
 /** 改名、追加（已在歌单里的不重复）、移除，或把一首歌移到 before 之前（null 为末尾）。 */
 export const updatePlaylist = (id: number, change: { name?: string; add?: string[]; remove?: string[]; move?: { path: string; before: string | null } }) =>
   post<PlaylistInfo & { added?: number; removed?: number }>(`/api/user/v1/playlists/${id}`, change);
+/** 开启、修改或关闭歌单分享；password 为空字符串或 null 时取消密码，不给出时不变。 */
+export const sharePlaylist = (id: number, options: { enabled: boolean; expires_at?: number | null; password?: string | null; download?: boolean; save?: boolean }) =>
+  post<{ share: PlaylistShare | null }>(`/api/user/v1/playlists/${id}/share`, options);
+export const playlistShareUrl = (token: string) => `${userSiteOrigin()}/m/${encodeURIComponent(token)}`;
+/** 访客看到的分享歌单：歌曲只有编号、文件名与标签信息，不含存放路径。 */
+export type PublicPlaylistItem = Omit<FileItem, "key"> & { id: string; name: string };
+export type PublicPlaylist = { token: string; password_required: true } | { token: string; password_required: false; name: string; shared_at: number; updated_at: number;
+  expires_at: number | null; download: boolean; save: boolean; items: PublicPlaylistItem[]; duration: number; sharer: PublicSharer | null };
+const playlistBase = (token: string) => `/api/public/v1/playlists/${encodeURIComponent(token)}`;
+const withAccess = (url: string, access?: string | null, extra = "") => {
+  const params = [access ? `access=${encodeURIComponent(access)}` : "", extra].filter(Boolean).join("&");
+  return params ? `${url}?${params}` : url;
+};
+export const publicPlaylist = (token: string, access?: string | null) => request<PublicPlaylist>(withAccess(playlistBase(token), access));
+export const unlockPublicPlaylist = (token: string, password: string) => post<{ access: string; expires_at: number }>(`${playlistBase(token)}/unlock`, { password });
+export const publicPlaylistContent = (token: string, item: string, access?: string | null, download = false) =>
+  withAccess(`${playlistBase(token)}/items/${item}/content`, access, download ? "download=1" : "");
+export const publicPlaylistAssets = (token: string, item: string, access?: string | null, signal?: AbortSignal) =>
+  request<PreviewAsset[]>(withAccess(`${playlistBase(token)}/items/${item}/assets`, access), { signal });
+/** 歌词附件：asset.path 是「歌曲编号/序号」。 */
+export const publicPlaylistAsset = (token: string, path: string, access?: string | null) => {
+  const [item, index] = path.split("/");
+  return withAccess(`${playlistBase(token)}/items/${item}/assets/${index}`, access);
+};
+export const publicPlaylistAvatar = (token: string, sharer: PublicSharer, access?: string | null) => sharer.avatar_version
+  ? withAccess(`${playlistBase(token)}/avatar`, access, `v=${sharer.avatar_version}`) : undefined;
+export const playlistShareStatus = (token: string) => request<{ own: boolean }>(`/api/user/v1/playlist-shares/${encodeURIComponent(token)}/status`);
+export const savePlaylistShare = (token: string, destination: string, access: string | null, items?: string[]) =>
+  post<{ saved: number; items: string[] }>(`/api/user/v1/playlist-shares/${encodeURIComponent(token)}/save`, { destination, access, ...(items ? { items } : {}) }, 120000);
 export const deletePlaylist = (id: number) => post<void>(`/api/user/v1/playlists/${id}/delete`, {});
 /** 这些文件已在哪些歌单里（「添加到歌单」标出已添加的）。 */
 export const playlistsContaining = (paths: string[]) => post<{ playlists: Record<string, number[]> }>("/api/user/v1/playlists/containing", { paths });

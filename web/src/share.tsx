@@ -152,7 +152,9 @@ function SharerLine({ token, sharer, access }: { token: string; sharer?: api.Pub
   return <div className="share-sharer"><Avatar name={sharer.nickname} src={api.publicSharerAvatar(token, sharer, access)} size={20} /><span><strong>{sharer.nickname}</strong> 分享</span></div>;
 }
 
-function PasswordGate({ token, onUnlocked }: { token: string; onUnlocked: (grant: string) => void }) {
+/** 访问密码页；unlock 默认验证文件分享，歌单分享（playlist-share.tsx）传入自己的验证接口。 */
+export function PasswordGate({ token, onUnlocked, unlock = api.unlockShare }: { token: string; onUnlocked: (grant: string) => void;
+  unlock?: (token: string, password: string) => Promise<{ access: string }> }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -160,7 +162,7 @@ function PasswordGate({ token, onUnlocked }: { token: string; onUnlocked: (grant
     event.preventDefault();
     if (!password) { setError("请输入访问密码"); return; }
     setBusy(true); setError("");
-    try { onUnlocked((await api.unlockShare(token, password)).access); }
+    try { onUnlocked((await unlock(token, password)).access); }
     catch (reason) {
       setError(reason instanceof api.ApiError && reason.status === 429 ? "尝试次数过多，请 15 分钟后再试" : api.errorMessage(reason, "验证失败，请稍后重试"));
     } finally { setBusy(false); }

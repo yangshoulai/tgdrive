@@ -6,6 +6,7 @@ import { type CacheStats, cacheStats, cacheSupported, startLocalCache } from "./
 import { Loadable, lazyComponent, preload } from "./lazy";
 
 import { SharePage } from "./share";
+import { PlaylistSharePage } from "./playlist-share";
 import { ADMIN_MODULES, type AdminModule } from "./admin-modules";
 import { LockedGate } from "./admin/lock";
 import { AppShell, FullPageLoading, LoginPage, SetupPage, isPlainClick, useSessionGuard, type NavGroup } from "./shell";
@@ -50,6 +51,8 @@ export function App() {
   if (path === "/docs" || path.startsWith("/docs/")) return <Loadable fallback={<FullPageLoading label="正在打开文档" />}><DocsPage /></Loadable>;
   const share = path.match(/^\/s\/([A-Za-z0-9_-]+)/);
   if (share) return <SharePage token={share[1]} />;
+  const playlistShare = path.match(/^\/m\/([A-Za-z0-9_-]+)/);
+  if (playlistShare) return <PlaylistSharePage token={playlistShare[1]} />;
   if (/^\/admin\/docs(?:\/|$)/.test(path)) {
     // 旧文档地址统一跳转，保留具体页面、查询参数与页内锚点。
     window.location.replace(path.replace(/^\/admin\/docs/, "/docs") + window.location.search + window.location.hash);

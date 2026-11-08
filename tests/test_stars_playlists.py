@@ -2,6 +2,7 @@
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from urllib.parse import quote
@@ -108,3 +109,89 @@ class StarPlaylistTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlaylistShareTests(unittest.TestCase):
+    """歌单分享：访客只看到歌单里的歌曲（不含路径），密码、有效期、下载与保存选项，歌单改动立即生效。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.app = create_app(Path(self.temp.name) / "data", secure_cookies=False, run_scheduler=False)
+        self.app.accounts.setup("encryption passphrase", "admin@example.com", "admin password")
+        self.alice = self.app.accounts.create_user("alice@example.com", "alice password")
+        self.bob = self.app.accounts.create_user("bob@example.com", "bob password")
+        self.client = Client(self.app)
+        self.alice_session = asyncio.run(self.client.login("user", "alice@example.com", "alice password"))
+        self.bob_session = asyncio.run(self.client.login("user", "bob@example.com", "bob password"))
+        scope = Scope(self.alice.bucket_id)
+        for key in ("私人/歌/a.mp3", "私人/歌/b.mp3", "私人/歌/a.lrc", "私人/secret.mp3"):
+            data = b"[00:01.00]hello" if key.endswith(".lrc") else MP3 + key.encode()
+            asyncio.run(self.app.objects.put_object(scope, key, data, len(data), "text/plain" if key.endswith(".lrc") else "audio/mpeg"))
+        self.playlist = self.call("POST", "/api/user/v1/playlists", {"name": "分享", "paths": ["私人/歌/a.mp3", "私人/歌/b.mp3"]}, expect=201)["id"]
+
+    def tearDown(self):
+        self.app.metadata.close()
+        self.temp.cleanup()
+
+    def call(self, method, path, body=None, *, session=None, expect=200, raw=False):
+        payload = b"" if body is None else json.dumps(body).encode()
+        status, headers, data = asyncio.run(self.client.request(method, path, payload, headers={} if session is False else session or self.alice_session))
+        self.assertEqual(status, expect, data[:300])
+        return (headers, data) if raw else json.loads(data) if data else None
+
+    def share(self, **options):
+        return self.call("POST", f"/api/user/v1/playlists/{self.playlist}/share", {"enabled": True, **options})["share"]
+
+    def test_visitors_see_only_playlist_songs_without_paths(self):
+        share = self.share()
+        self.assertEqual((share["download"], share["save"], share["has_password"]), (False, False, False), "两个选项默认关闭")
+        page = self.call("GET", f"/api/public/v1/playlists/{share['token']}", session=False)
+        self.assertEqual([item["name"] for item in page["items"]], ["a.mp3", "b.mp3"])
+        self.assertNotIn("私人", json.dumps(page, ensure_ascii=False), "访客看不到存放路径")
+        item = page["items"][0]["id"]
+        base = f"/api/public/v1/playlists/{share['token']}/items/{item}"
+        _, data = self.call("GET", base + "/content", session=False, raw=True)
+        self.assertTrue(data.startswith(MP3))
+        self.call("GET", base + "/content?download=1", session=False, expect=403)
+        assets = self.call("GET", base + "/assets", session=False)
+        self.assertEqual([asset["kind"] for asset in assets], ["lyrics"])
+        self.assertNotIn("私人", json.dumps(assets, ensure_ascii=False))
+        asset_item, index = assets[0]["path"].split("/")
+        _, lyric = self.call("GET", f"/api/public/v1/playlists/{share['token']}/items/{asset_item}/assets/{index}", session=False, raw=True)
+        self.assertEqual(lyric, b"[00:01.00]hello")
+        # 不在歌单里的文件无法通过编号读取；移出歌单后立即失效。
+        from tgdrive.playlists import Playlists
+        self.call("GET", f"/api/public/v1/playlists/{share['token']}/items/{Playlists.item_id(share['token'], '私人/secret.mp3')}/content", session=False, expect=404)
+        self.call("POST", f"/api/user/v1/playlists/{self.playlist}", {"remove": ["私人/歌/a.mp3"]})
+        self.call("GET", base + "/content", session=False, expect=404)
+        # 关闭分享后链接失效，再开启得到新链接。
+        self.call("POST", f"/api/user/v1/playlists/{self.playlist}/share", {"enabled": False})
+        self.call("GET", f"/api/public/v1/playlists/{share['token']}", session=False, expect=404)
+        self.assertNotEqual(self.share()["token"], share["token"])
+
+    def test_password_expiry_download_and_save(self):
+        share = self.share(password="1234", download=True, save=True)
+        token = share["token"]
+        self.assertTrue(self.call("GET", f"/api/public/v1/playlists/{token}", session=False)["password_required"])
+        self.call("POST", f"/api/public/v1/playlists/{token}/unlock", {"password": "wrong"}, session=False, expect=400)
+        access = self.call("POST", f"/api/public/v1/playlists/{token}/unlock", {"password": "1234"}, session=False)["access"]
+        page = self.call("GET", f"/api/public/v1/playlists/{token}?access={access}", session=False)
+        self.assertEqual(len(page["items"]), 2)
+        item = page["items"][1]["id"]
+        self.call("GET", f"/api/public/v1/playlists/{token}/items/{item}/content", session=False, expect=403)
+        _, data = self.call("GET", f"/api/public/v1/playlists/{token}/items/{item}/content?download=1&access={access}", session=False, raw=True)
+        self.assertTrue(data.startswith(MP3))
+        # 访客保存：引用同一份数据到自己的文件夹；自己的分享不能保存。
+        self.call("POST", f"/api/user/v1/playlist-shares/{token}/save", {"destination": "收到的", "items": [item]}, session=self.bob_session, expect=403)
+        saved = self.call("POST", f"/api/user/v1/playlist-shares/{token}/save", {"destination": "收到的", "items": [item], "access": access}, session=self.bob_session)
+        self.assertEqual(saved["items"], ["收到的/b.mp3"])
+        self.assertEqual(self.call("GET", f"/api/user/v1/playlist-shares/{token}/status", session=self.bob_session)["own"], False)
+        self.call("POST", f"/api/user/v1/playlist-shares/{token}/save", {"destination": "", "access": access}, expect=400)
+        audit = [row["detail"] or "" for row in self.app.metadata.db.execute("SELECT detail FROM audit_log WHERE action LIKE 'playlist%'")]
+        self.assertTrue(audit and not any("1234" in detail or token in detail for detail in audit), "审计不记录密码与令牌")
+        # 关闭保存后访客不能再保存；过期后链接不可用。
+        self.share(save=False)
+        self.call("POST", f"/api/user/v1/playlist-shares/{token}/save", {"destination": "", "access": access}, session=self.bob_session, expect=400)
+        with self.app.metadata.transaction() as db:
+            db.execute("UPDATE playlists SET share_expires_at=? WHERE id=?", (time.time() - 1, self.playlist))
+        self.call("GET", f"/api/public/v1/playlists/{token}?access={access}", session=False, expect=410)

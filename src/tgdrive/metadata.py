@@ -52,7 +52,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 41
+    SCHEMA_VERSION = 42
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -825,6 +825,15 @@ class Metadata:
                     );
                 """)
                 db.execute("PRAGMA user_version = 41")
+            if version < 42:
+                # 歌单分享：令牌、有效期、访问密码（哈希）与两个默认关闭的选项（允许下载单首、允许登录访客保存到自己的文件）。
+                columns = {row[1] for row in db.execute("PRAGMA table_info(playlists)")}
+                for name, kind in (("share_token", "TEXT"), ("share_at", "REAL"), ("share_expires_at", "REAL"), ("share_password", "TEXT"),
+                                   ("share_download", "INTEGER NOT NULL DEFAULT 0"), ("share_save", "INTEGER NOT NULL DEFAULT 0")):
+                    if name not in columns:
+                        db.execute(f"ALTER TABLE playlists ADD COLUMN {name} {kind}")
+                db.execute("CREATE UNIQUE INDEX IF NOT EXISTS playlists_share_token ON playlists(share_token) WHERE share_token IS NOT NULL")
+                db.execute("PRAGMA user_version = 42")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

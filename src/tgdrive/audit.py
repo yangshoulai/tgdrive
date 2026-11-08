@@ -26,6 +26,7 @@ ACTIONS = {
     "bot.create": "添加存储通道", "bot.status": "更改通道状态", "bot.check": "检查存储通道",
     "telegram_bot.update": "修改 Telegram 机器人", "telegram_bot.delete": "删除 Telegram 机器人",
     "telegram.link": "绑定 Telegram", "telegram.unlink": "解除 Telegram 绑定",
+    "playlist.share": "更改歌单分享", "playlist_share.save": "保存他人分享的歌单",
     "object.public": "更改公开分享", "settings.update": "修改系统设置",
     "user.register": "访客注册", "registration.update": "修改注册设置", "registration.test_email": "发送测试邮件",
     "invite.create": "创建邀请码", "invite.revoke": "撤销邀请码",
@@ -73,6 +74,7 @@ class AuditLog:
         allowed = {
             "object.public": {"public", "count", "bucket_id", "expires_at", "password", "error"},
             "share.save": {"saved", "bytes", "error"},
+            "playlist_share.save": {"saved", "error"},
             "archive.extract": {"conflict", "keep", "format", "partial", "error"},
             "archive.compress": {"count", "compression", "error"},
             "media.save": {"provider", "format", "replaced", "error"},

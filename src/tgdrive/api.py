@@ -1056,6 +1056,67 @@ class UserApi:
         bucket_id = self._playlist_bucket(token, csrf, mutation=True)
         await self.objects.metadata.run_in_thread(self.playlists.delete, bucket_id, playlist_id)
 
+    async def share_playlist(self, token: str, csrf: str, playlist_id: int, payload: dict) -> dict[str, object]:
+        """开启、修改或关闭歌单分享：enabled、expires_at（时间戳或 None）、password（字符串，空为取消；不给出时不变）、
+        download、save（默认关闭）。密码哈希在专用线程里计算，不占用事件循环。"""
+        bucket_id = self._playlist_bucket(token, csrf, mutation=True)
+        enabled = payload.get("enabled", True) is not False
+        options: dict[str, object] = {}
+        if enabled:
+            if "expires_at" in payload:
+                value = payload["expires_at"]
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                    raise ValueError("有效期不正确")
+                options["expires_at"] = value
+            if "password" in payload:
+                password = payload["password"]
+                if password not in (None, "") and (not isinstance(password, str) or len(password) < 4 or len(password) > 128):
+                    raise ValueError("访问密码需要 4–128 个字符")
+                options["password_hash"] = await self.accounts.password_work.run(hash_password, password, min_length=4) if password else None
+            for name in ("download", "save"):
+                if name in payload:
+                    options[name] = bool(payload[name])
+        share = await self.objects.metadata.run_in_thread(lambda: self.playlists.set_share(bucket_id, playlist_id, enabled, **options))
+        return {"share": share}
+
+    def public_playlist_items(self, row) -> list[dict[str, object]]:
+        """访客看到的歌曲：编号、文件名与标签信息、大小、类型和封面状态；不含存放路径与公开链接字段。"""
+        rows = self.playlists.public_items(row)
+        values = self._objects_json([self.objects._object(item) for item in rows])
+        kept = ("size", "etag", "content_type", "modified_at", "media", "has_thumbnail", "thumbnails", "thumbnail_status", "thumbnail_versions")
+        return [{"id": self.playlists.item_id(row["share_token"], item["key"]), "name": item["key"].rsplit("/", 1)[-1],
+                 **{name: value[name] for name in kept if name in value}} for item, value in zip(rows, values)]
+
+    def playlist_share_status(self, token: str, share_token: str) -> dict[str, object]:
+        """只回答这个歌单分享是不是当前账号自己的，不向访客透露分享者。"""
+        return {"own": self.playlists.public(share_token)["bucket_id"] == self._scope(token).bucket_id}
+
+    async def save_playlist_share(self, token: str, csrf: str, share_token: str, destination: object, items: object) -> dict[str, object]:
+        """把分享歌单里的歌曲保存到自己的文件夹：引用同一份数据（不复制），计入自己的空间，同名时自动改名。
+        分享者需开启「允许保存」；items 是访客看到的歌曲编号，省略时保存全部。调用方负责校验分享密码。"""
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        if not isinstance(destination, str):
+            raise ValueError("目标目录不正确")
+        if items is not None and (not isinstance(items, list) or not all(isinstance(item, str) for item in items) or len(items) > 5000):
+            raise ValueError("items 必须为歌曲编号数组")
+        prefix = self._path(destination, directory=True) if destination else ""
+
+        def save():
+            row = self.playlists.public(share_token)
+            if not row["share_save"]:
+                raise ValueError("分享者没有允许保存这个歌单里的歌曲")
+            if row["bucket_id"] == scope.bucket_id:
+                raise ValueError("这是你自己分享的歌单，歌曲已经在你的文件中")
+            chosen = self.playlists.public_items(row)
+            if items is not None:
+                wanted = set(items)
+                chosen = [item for item in chosen if self.playlists.item_id(share_token, item["key"]) in wanted]
+            if not chosen:
+                raise ValueError("没有可保存的歌曲")
+            saved = [self.objects.link_copy(row["bucket_id"], item["key"], scope, prefix + item["key"].rsplit("/", 1)[-1]).key for item in chosen]
+            return {"saved": len(saved), "items": saved}
+        return await self.objects.metadata.run_in_thread(save)
+
     async def playlists_containing(self, token: str, paths: object) -> dict[str, object]:
         bucket_id = self._playlist_bucket(token)
         keys = self._file_paths(paths, 500)
