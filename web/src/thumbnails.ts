@@ -159,7 +159,7 @@ async function fromVideo(src: string, signal?: AbortSignal, onFailure?: (message
       video.pause();
     }
     if (videoFrameUsable(video)) return await thumbnailsFromVideo(video);
-    // 仅本地上传或显式生成时尝试多个位置；真实预览仍只截当前画面，不跳转播放位置。
+    // 仅本地上传或显式生成时尝试多个位置；真实预览不跳转播放位置。
     for (const candidate of VIDEO_FRAME_TIMES.slice(1)) {
       const time = Number.isFinite(video.duration) ? Math.min(candidate, Math.max(0, video.duration - 0.1)) : candidate;
       if (time <= video.currentTime + 0.01 || performance.now() >= deadline) continue;
@@ -468,7 +468,7 @@ export async function readEmbeddedCover(url: string, size: number, signal?: Abor
 /* ---------- 入口 ---------- */
 
 type Input = ({ file: Blob } | { url: string; size: number }) & { signal?: AbortSignal; onFailure?: (message: string) => void };
-/** 封面来源：auto 为上传等自动流程（图片按原图，音视频只用文件内嵌封面，视频不截图）；capture 为「截图生成」（视频只截取画面）；
+/** 封面来源：auto 为上传等自动流程（图片按原图，音视频优先内嵌封面，视频没有时截帧）；capture 为「截图生成」（视频只截取画面）；
  *  smart 为文件助手生成（内嵌封面优先，视频没有时再截取画面；在线查找只在服务器上进行）。 */
 export type ThumbnailMode = "auto" | "capture" | "smart";
 
@@ -478,7 +478,7 @@ export async function createThumbnails(input: Input, source: ThumbnailSource, mo
     const cover = source === "video" && mode === "capture" ? null
       : await embeddedCover("file" in input ? blobReader(input.file) : urlReader(input.url, input.size, input.signal));
     if (cover && cover !== "none") return await fromBlob(cover);
-    if (source === "video" && mode !== "auto") {
+    if (source === "video") {
       const url = "file" in input ? URL.createObjectURL(input.file) : input.url;
       try { return await fromVideo(url, input.signal, input.onFailure); } finally { if ("file" in input) URL.revokeObjectURL(url); }
     }
@@ -489,15 +489,15 @@ export async function createThumbnails(input: Input, source: ThumbnailSource, mo
   }
 }
 
-/** 预览自动补图与上传一致：视频只用内嵌封面，不把当前画面固化为封面（截图请用「更新封面 → 截图生成」或播放器的「设为封面」）。
- *  识别出封装但没有内嵌封面时返回 none；认不出的封装交给服务器判断。 */
+/** 预览只提取视频内嵌封面，不跳转播放进度或把当前画面固化为封面。
+ *  没有内嵌封面时返回 null、交还生成权，由服务器沿用缓存与补图策略截帧，不能记为无法生成。 */
 export async function videoPreviewThumbnails(video: HTMLVideoElement, size: number, signal: AbortSignal): Promise<ThumbnailResult> {
   const url = video.currentSrc;
   if (!url) return null;
   try {
     const cover = await embeddedCover(urlReader(url, size, signal));
     if (signal.aborted || video.currentSrc !== url) return null;
-    return cover && cover !== "none" ? await fromBlob(cover) : cover;
+    return cover && cover !== "none" ? await fromBlob(cover) : null;
   } catch (reason) {
     if (signal.aborted) throw reason;
     return null;

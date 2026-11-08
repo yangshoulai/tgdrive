@@ -269,7 +269,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         savePreviewThumbnail(item, () => thumbnailsFromImage(image), true);
       },
       onVideoFrame: (video, item) => {
-        // 与上传一致只用内嵌封面：按范围读取已打开的视频，不把当前画面设为封面。
+        // 预览只按范围读取内嵌封面，没有时交还生成权由后台截图，不把当前播放画面设为封面。
         if (item.thumbnails?.length || item.thumbnail_status === "unavailable" || previewThumbnailAttempts.current.has(`${item.key}:${item.etag}`)) return;
         const source = video.currentSrc;
         savePreviewThumbnail(item, signal => video.currentSrc === source ? videoPreviewThumbnails(video, item.size, signal) : Promise.resolve(null));

@@ -246,20 +246,28 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail, "截取的画面均为空白或细节不足")
         self.assertEqual(worker.objects.set_thumbnail.await_args.args[2:], (None, "none"))
 
-    async def test_automatic_video_without_embedded_cover_is_not_captured(self):
-        # 上传、离线下载与补图等自动流程：视频只用文件内嵌封面，没有时记「无法生成」，不截取画面。
+    async def test_automatic_video_without_embedded_cover_falls_back_to_frames(self):
+        # 上传、离线下载只用已收缓存，补图可回源；都先找内嵌封面，没有时截帧，不在线查找。
         worker = self.worker()
         worker.cache = SimpleNamespace(prepare=Mock())
-        worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
+        scope = SimpleNamespace(authorize=Mock())
+        worker._scope = Mock(return_value=scope)
         worker._has_thumbnail = Mock(return_value=False)
-        worker._embedded_images = AsyncMock(return_value=None)
-        worker._render = AsyncMock(side_effect=AssertionError("自动流程不能截取视频画面"))
         worker.objects.set_thumbnail = AsyncMock()
+        worker._online_cover = AsyncMock(side_effect=AssertionError("自动流程不在线查找封面"))
         info = SimpleNamespace(key="clip.mp4", content_type="video/mp4", blob_uuid="blob", bucket_id=1, size=128)
-        with patch("tgdrive.thumbnails._RangeInput", side_effect=AssertionError("自动流程不能打开解码器")):
-            detail = await worker.generate(info)
-        self.assertEqual(detail, "视频没有可用的内嵌封面")
-        self.assertEqual(worker.objects.set_thumbnail.await_args.args[2:], (None, "none"))
+        for allow_remote in (False, True):
+            with self.subTest(allow_remote=allow_remote):
+                order = []
+                worker._embedded_images = AsyncMock(side_effect=lambda *args: order.append("embedded"))
+                worker._decode = AsyncMock(side_effect=lambda *args: order.append("capture") or {"thumb": JPEG})
+                worker.objects.set_thumbnail.reset_mock()
+                self.assertIsNone(await worker.generate(info, allow_remote=allow_remote))
+                self.assertEqual(order, ["embedded", "capture"])
+                worker._embedded_images.assert_awaited_once_with(info, scope.authorize, allow_remote)
+                worker._decode.assert_awaited_once_with(info, "video", scope, allow_remote)
+                worker.objects.set_thumbnail.assert_awaited_once_with(scope, info.key, JPEG, "thumb")
+                worker._online_cover.assert_not_awaited()
 
     async def test_assistant_generation_tries_embedded_then_online_then_frames(self):
         worker = self.worker()
@@ -813,6 +821,25 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         await self.objects.set_thumbnail(self.scope, info.key, None, "none")
         self.worker._repair()
         self.assertEqual(self.variants(info), ["none"], "只执行一次，之后的确定结果保留")
+
+    async def test_repair_retries_old_video_marks_without_touching_audio_or_saved_covers(self):
+        self.worker._save_setting("thumbnails.repair", {"version": 1})
+        video = await self.put("old.mp4")
+        generic = await self.put("generic.mkv")
+        audio = await self.put("song.mp3")
+        covered = await self.put("covered.mp4")
+        for info in (video, generic, audio):
+            await self.objects.set_thumbnail(self.scope, info.key, None, "none")
+        await self.objects.set_thumbnail(self.scope, covered.key, JPEG)
+        self.worker._repair()
+        self.assertEqual(self.variants(video), [])
+        self.assertEqual(self.variants(generic), [])
+        self.assertEqual(self.variants(audio), ["none"])
+        self.assertEqual(self.variants(covered), ["thumb"])
+        self.assertEqual(self.worker._setting("thumbnails.repair"), {"version": 2})
+        await self.objects.set_thumbnail(self.scope, video.key, None, "none")
+        self.worker._repair()
+        self.assertEqual(self.variants(video), ["none"], "截帧后仍无合格画面时不再重置失败标记")
 
 
 if __name__ == "__main__":

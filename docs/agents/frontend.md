@@ -2,6 +2,8 @@
 
 给 AI 代理的模块细则（由根目录 AGENTS.md 索引）。web/src 的组件、预览引擎、文档站、样式与主题。
 
+- `thumbnails.ts`：网页上传优先从本地文件取内嵌封面，视频没有时按既有时间点截图并过滤空白画面；音频仍只取内嵌封面。预览页的 `videoPreviewThumbnails` 没有内嵌封面时返回 `null`、交还生成权，由后台截图补齐，不能写入 `none` 阻止后续补图。详细约束见 [media.md](media.md)。
+
   - `ui.tsx`：设计系统基元（按钮、表单、弹窗、菜单、toast、格式化、配置页的 `SetupGuide` 配置指南）。新界面必须复用这里的组件。弹窗里再打开的 `Modal` 经 `ModalDepth` 上下文按嵌套层级排序（`--modal-depth` 提高 z-index，`modalStack` 按层级插入并由 `syncModalInert` 只让最上层可操作）：React 先挂载子组件，同一次渲染里同时打开的内外两层不能按挂载顺序叠放。列表行操作遵循 `DESIGN.md`「列表行操作规范」：一个快捷操作 + ⋯ 菜单，删除、禁用／启用等只放菜单末尾并确认。存储通道的指南步骤（`admin/bots.tsx` 的 `STORAGE_STEPS`）是管理员文档「存储通道」页的精简版，两处同步修改。
   - `shell.tsx`：应用外壳、登录页、首次初始化页。
   - 菜单的二级菜单用 `MenuItem.children`（`ui.tsx` 的 `MenuList` 渲染，单独 portal 到页面根部）。文件页的「新建」菜单与空白处右键共用 `user/files.tsx` 的 `newItems`；可新建的文本类型在 `NEW_FILES` 里加一项即可（`api.createTextFile` 写空文件，打开预览时 `startEditing` 直接进入编辑）。空白处右键靠 `.files-view` 铺满一屏，行上的右键已 `preventDefault`，外层据此区分。

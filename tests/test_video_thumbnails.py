@@ -109,3 +109,19 @@ class VideoDecoderTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ThumbnailError, "未替换现有封面"):
             await self.worker.generate(info, force=True)
         self.assertEqual((await self.objects.get_thumbnail(self.scope, info.key))[0], old)
+
+    async def test_automatic_video_without_embedded_cover_uses_cached_frames(self):
+        info = await self.clip("automatic", "color=c=black:s=320x180:r=8:d=2")
+        original = self.engine.store.get
+        guard = AsyncMock(side_effect=AssertionError("自动生成只能复用上传和离线下载已收到的数据"))
+        self.engine.store.get = guard
+        try:
+            await self.worker.generate(info)
+        finally:
+            self.engine.store.get = original
+        guard.assert_not_awaited()
+        image, mime, _ = await self.objects.get_thumbnail(self.scope, info.key)
+        self.assertEqual(mime, "image/jpeg")
+        pixels = await self.ffmpeg("-i", "pipe:0", "-vf", "scale=32:32:out_range=full", "-frames:v", "1",
+                                   "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1", data=image)
+        self.assertTrue(video_frame_usable(pixels), "没有内嵌封面时应跳过黑屏片头、截取正文")

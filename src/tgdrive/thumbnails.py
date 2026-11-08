@@ -60,7 +60,7 @@ DECODER_ERRORS = (
     ("filter_error", (b"error reinitializing filters", b"error initializing complex filters", b"error while filtering",
                       b"failed to configure output pad"), "解码器未能完成画面转换"),
 )
-# 一次性清理：修复前运行环境问题会被误记为「无法生成」，升级后清掉这些记录让补图重新处理。
+# 一次性清理：运行环境问题、旧版视频仅提取内嵌封面的策略会留下「无法生成」，升级后交给补图重新处理。
 REPAIR_KEY = "thumbnails.repair"
 # 资源评估：生成前按这台服务器此刻的内存、临时目录与读取速度判断是否适合，不设固定的文件大小门槛。
 # 估算系数来自实测（同一滤镜图、单线程，误差约 5%）：图片约「像素 × 解码后每像素字节数 + 文件大小 × 2」（管道解封装器
@@ -408,7 +408,7 @@ class _Job:
     revision: int = 0
     misses: int = 0
     backfill: bool = False
-    # auto：自动流程（图片按原图，音视频只用文件内嵌封面）；capture：截图生成（视频截取画面）；
+    # auto：自动流程（图片按原图，音视频优先内嵌封面，视频没有时截帧）；capture：截图生成（视频截取画面）；
     # smart：文件助手生成（音视频依次用内嵌封面、在线查找、截取画面）。
     mode: str = "auto"
 
@@ -857,12 +857,18 @@ class ThumbnailService:
         return added
 
     def _repair(self):
-        """升级后执行一次：清掉旧版因解码器运行环境受限而误记的「无法生成」，交给自动补图重新处理。"""
-        if self._setting(REPAIR_KEY).get("version", 0) >= 1:
+        """升级后执行一次：旧版失败标记交给自动补图，版本 2 只重试启用截帧回退的视频。"""
+        version = self._setting(REPAIR_KEY).get("version", 0)
+        if version >= 2:
             return
         with self.metadata.transaction() as db:
-            db.execute("DELETE FROM thumbnails WHERE variant='none'")
-        self._save_setting(REPAIR_KEY, {"version": 1})
+            if version < 1:
+                db.execute("DELETE FROM thumbnails WHERE variant='none'")
+            else:
+                clause, args = kind_clause("video")
+                db.execute("DELETE FROM thumbnails WHERE variant='none' AND blob_uuid IN "
+                           f"(SELECT blob_uuid FROM objects WHERE {clause})", args)
+        self._save_setting(REPAIR_KEY, {"version": 2})
 
     def _record(self, job, state, detail):
         blob = job.info.blob_uuid
@@ -991,7 +997,7 @@ class ThumbnailService:
     async def generate(self, info: ObjectInfo, original: Scope | None = None, *, force=False, allow_remote=False, mode="auto") -> str | None:
         """生成并保存缩略图。用户请求、自动补图与已收数据任务走同一流程：开始前按服务器此刻的内存、临时空间与读取速度
         评估（_plan），不适合或暂时不行就不启动解码器；allow_remote 只决定缓存不足时能否从存储读取。
-        来源按 mode：自动流程中图片按原图、音视频只用文件内嵌封面（视频不自动截图）；截图生成时视频截取画面；
+        来源按 mode：自动流程中图片按原图、音视频优先用文件内嵌封面，视频没有时截取画面；截图生成时视频直接截取画面；
         文件助手生成时音视频依次用内嵌封面、在线查找、截取画面（只有视频能截图）。
         只有确实没有可用图片才记录 none；资源不适合不记 none（浏览器预览仍可生成），运行异常交给队列延后重试。"""
         kind = source_kind(info)
@@ -1016,14 +1022,15 @@ class ThumbnailService:
                 images = await self._decode(info, kind, scope, allow_remote)
             if images is None and mode == "smart" and kind in ("audio", "video"):
                 images = await self._online_cover(info, scope)
-            if images is None and kind == "video" and mode in ("capture", "smart"):
+            if images is None and kind == "video":
                 images = await self._decode(info, kind, scope, allow_remote)
             scope.authorize()
             if not force and self._has_thumbnail(info.blob_uuid):
                 return
             if images is None:
                 if kind == "video":
-                    failure_detail = ("视频没有可用的内嵌封面" if mode == "auto" else "截取的画面均为空白或细节不足" if mode == "capture"
+                    failure_detail = ("没有内嵌封面，截取的画面均为空白或细节不足" if mode == "auto"
+                                      else "截取的画面均为空白或细节不足" if mode == "capture"
                                       else "没有内嵌封面，在线也没有找到合适的封面，截取的画面均为空白或细节不足")
                 else:
                     failure_detail = ("音频没有可用的内嵌封面" + ("，在线也没有找到合适的封面" if mode == "smart" else "")) if kind == "audio" \
