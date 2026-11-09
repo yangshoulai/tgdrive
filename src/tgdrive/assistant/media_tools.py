@@ -97,17 +97,20 @@ def _files(ctx: ToolContext, paths: list) -> tuple[list[str], list[dict]]:
 def _existing(ctx: ToolContext, scope, key: str, info: dict, blob: str | None) -> dict[str, tuple[str | None, bool]]:
     """已有的封面、歌词、字幕：（说明文字，是否只有文件内置的数据）；说明为 None 表示没有。"""
     assets = ctx.objects.preview_assets(scope, key)
-    cover = blob and ctx.db.execute("SELECT 1 FROM thumbnails WHERE blob_uuid=? AND variant IN ('thumb','grid','poster') LIMIT 1",
-                                    (blob,)).fetchone()
-    lyrics = [item["name"] for item in assets if item["kind"] == "lyrics"]
-    subtitles = [item["name"] for item in assets if item["kind"] == "subtitle"]
-    streams = info.get("subtitles") or []
-    synced = (info.get("lyrics") or {}).get("synced")
+    head = ctx.objects.head_object(scope, key)
+    cover = bool(ctx.objects.file_thumbnail_versions([head])[(head.bucket_id, head.key)])
+    rows = ctx.objects.file_metadata.assets(head.metadata_id)
+    lyrics = [item for item in rows if item["kind"] == "lyrics"]
+    subtitles = [item for item in rows if item["kind"] == "subtitle"]
+    # 没有保存歌词时播放器回退到文件内置的歌词，视同「只有文件内置的数据」。
+    fallback = info.get("embedded_lyrics")
+    native_lyrics = bool(lyrics) and all(item["source"] == "embedded" for item in lyrics) or not lyrics and bool(fallback)
+    native_subtitles = bool(subtitles) and all((item["source"] or "").startswith("embedded:") for item in subtitles)
+    synced = (info.get("lyrics") or fallback or {}).get("synced")
     return {
         "cover": ("已有封面" if cover else None, False),
-        "lyrics": (f"已有歌词文件「{lyrics[0]}」", False) if lyrics else ("文件内置能滚动的歌词" if synced else None, True),
-        "subtitle": ((f"已有字幕文件「{subtitles[0]}」" + (f" 等 {len(subtitles)} 个" if len(subtitles) > 1 else "")), False) if subtitles
-        else (f"文件内置 {len(streams)} 条字幕轨" if streams else None, True),
+        "lyrics": (("文件内置能滚动的歌词" if synced else "文件内置歌词") if native_lyrics else "已有歌词元数据" if lyrics else None, native_lyrics),
+        "subtitle": (f"已有 {len(subtitles)} 条字幕元数据" if subtitles else None, native_subtitles),
     }
 
 
@@ -129,11 +132,13 @@ async def _lookup(ctx: ToolContext, key: str, wants: list[str] | None, force: bo
             continue
         note, skip = "", ("embedded",) if force or want == "subtitle" else ()
         exists, embedded_only = existing[want]
-        lyrics = info.get("lyrics") or {}
+        lyrics = info.get("lyrics") or info.get("embedded_lyrics") or {}
         if want == "lyrics" and lyrics and not force:
             if lyrics.get("synced"):
                 try:
-                    end = last_time(await media.embedded_lyrics(scope, key, head.etag))
+                    text = ((await ctx.objects.file_metadata.read_asset(scope, key, lyrics["id"]))[0].decode("utf-8") if lyrics.get("id")
+                            else await media.embedded_lyrics(scope, key, head.etag))
+                    end = last_time(text)
                 except (ValueError, NotFoundError):
                     end = None
                 if info.get("duration") and end and end > info["duration"] + 10:
@@ -158,12 +163,13 @@ async def _lookup(ctx: ToolContext, key: str, wants: list[str] | None, force: bo
             continue
         candidates = [_public(candidate, names) for candidate in found]
         best = best_index(want, candidates, query.duration)
-        entries.append({"path": key, "etag": head.etag, "modified_at": head.modified_at, "kind": kind, "want": want,
+        entries.append({"path": key, "etag": head.etag, "modified_at": head.modified_at, "kind": kind, "want": want, "metadata_revision": info["revision"],
+                        "cover_versions": ctx.objects.file_thumbnail_versions([head])[(head.bucket_id, head.key)] if want == "cover" else None,
                         "exists": exists, "note": note, "duration": query.duration, "candidates": candidates,
                         # 审批模式的默认选择：已有同类数据时保留现有，由用户决定是否覆盖；
                         # 用户明确要求在线查找（force_online）时，只有文件内置数据的条目直接换成在线结果。
                         "best": best, "choice": best if not exists or force and embedded_only else None,
-                        "target": media.asset_target(key, want, found[best or 0].format or "").rsplit("/", 1)[-1] if want != "cover" else None,
+                        "target": ("歌词元数据" if want == "lyrics" else "字幕元数据") if want != "cover" else None,
                         "_refs": [{"provider": candidate.provider, "ref": candidate.ref} for candidate in found]})
     return entries, skipped
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError
+from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError, info_fields
 from .. import text as media_text
 
 API = "https://lrclib.net/api"
@@ -16,6 +16,7 @@ class LrclibProvider(Provider):
     capabilities = frozenset({"lyrics"})
     media = frozenset({"audio"})
     default_enabled = True
+    info = True
     guide = (GuideStep("无需配置", "打开开关即可使用。查询会把歌名、歌手、专辑与时长发送给 LRCLIB。"),)
 
     async def search(self, query: MediaQuery, want, ctx: ProviderContext) -> list[Candidate]:
@@ -40,6 +41,7 @@ class LrclibProvider(Provider):
                 "lyrics", str(item.get("trackName") or ""), {"id": item.get("id"), "text": lyrics, "synced": bool(synced), "artist": str(item.get("artistName") or "")},
                 subtitle=" · ".join(part for part in (str(item.get("artistName") or ""), str(item.get("albumName") or "")) if part),
                 synced=bool(synced), format="lrc" if synced else "txt",
+                fields=info_fields(title=item.get("trackName"), artist=item.get("artistName"), album=item.get("albumName")),
                 duration=float(duration) if isinstance(duration, (int, float)) else None, preview=media_text.preview(lyrics),
                 note="" if synced else "没有时间轴"))
         return results

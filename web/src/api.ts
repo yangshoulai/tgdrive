@@ -31,8 +31,8 @@ export type FileItem = {
   starred_at?: number;
 };
 export type PreviewAsset = { path: string; name: string; kind: "lyrics" | "subtitle"; language: string | null; size: number; etag: string;
-  /** 文件内置的歌词或字幕轨（media/info 给出）：没有对应的文件，由 read 读取内容（字幕轨可能要先在服务器提取）。 */
-  source?: "file" | "embedded"; synced?: boolean;
+  /** metadata：已保存的元数据资源（优先）；embedded：没有保存时回退的文件内置歌词或字幕轨；file：仅供编辑器手动导入的同目录文件。由 read 读取内容。 */
+  source?: "file" | "embedded" | "metadata"; id?: string; default?: boolean; format?: string; synced?: boolean;
   /** 内置字幕能否立即读取（已提取过，或 MP4 这类有索引的容器）；MKV 要读完整个文件，不自动选中。 */ instant?: boolean; read?: (signal: AbortSignal, onProgress?: (fraction: number | null) => void) => Promise<string> };
 export type PreviewListPage = { objects: FileItem[]; next_cursor: string | null };
 /** public_folders：这一页里已公开的文件夹（键是文件夹路径，以 / 结尾）。 */
@@ -358,13 +358,17 @@ export const listFiles = (prefix = "", cursor: string | null = null, publicOnly 
 export const previewAssets = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(`${fileApi("/preview-assets", path)}?path=${encodeURIComponent(path)}`, { signal });
 
 /* ---------- 媒体元数据：文件自带的标签、内嵌歌词与字幕，在线查找封面／歌词／字幕 ---------- */
-export type MediaWant = "cover" | "lyrics" | "subtitle";
-export type MediaSubtitleStream = { index: number; codec: string; language: string | null; title: string | null; default: boolean; text: boolean; extracted: boolean };
+/** info：查找歌名、歌手、专辑、年份等字段（候选直接带 fields，不需要读取）。 */
+export type MediaWant = "cover" | "lyrics" | "subtitle" | "info";
+export type MediaSubtitleStream = { index: number; codec: string; language: string | null; title: string | null; default: boolean; text?: boolean; extracted?: boolean };
 export type MediaTags = { title: string | null; artist: string | null; album: string | null; album_artist: string | null; track: string | null; year: string | null; genre: string | null };
-export type MediaInfo = MediaTags & { kind: "audio" | "video"; etag: string; embedded: boolean; ffmpeg: boolean; container: string | null; duration: number | null;
-  lyrics: { synced: boolean } | null; cover: boolean; subtitles: MediaSubtitleStream[]; providers: Record<MediaWant, { id: string; name: string }[]> };
+/** lyrics／subtitles 是已保存的元数据资源；embedded_lyrics／embedded_subtitles 是没有保存时可回退的文件内置数据。 */
+export type MediaInfo = MediaTags & { kind: "audio" | "video"; etag: string; revision: number; embedded: boolean; ffmpeg: boolean; container: string | null; duration: number | null;
+  lyrics: PreviewAsset | null; embedded_lyrics: { synced: boolean } | null; /** 文件本身是否带歌词（不论是否已保存或被清空）。 */ file_lyrics: { synced: boolean } | null; cover: boolean; subtitles: PreviewAsset[];
+  embedded_subtitles: MediaSubtitleStream[]; streams?: MediaSubtitleStream[]; initialization?: string; detail?: string; providers: Record<MediaWant, { id: string; name: string }[]> };
 export type MediaQueryFields = { title: string; artist: string; album: string; year: string; season: number | null; episode: number | null; duration: number | null; languages: string[] };
-export type MediaCandidate = { token: string; want: MediaWant; provider: string; title: string; subtitle: string; synced: boolean | null; language: string | null;
+export type MediaInfoField = "title" | "artist" | "album" | "album_artist" | "track" | "year" | "genre" | "composer" | "director" | "actors" | "description";
+export type MediaCandidate = { token: string; want: MediaWant; provider: string; title: string; subtitle: string; fields: Partial<Record<MediaInfoField, string>>; synced: boolean | null; language: string | null;
   format: string | null; duration: number | null; width: number | null; height: number | null; preview: string | null; note: string; score: number;
   hash_match: boolean; has_preview_image: boolean };
 export type MediaLookupStatus = { id: string; name: string; official: boolean; count: number; error: string | null };
@@ -378,32 +382,31 @@ export const announceMediaAssets = (media: string, asset?: string) => window.dis
 export type PreviewAssetList = { assets: PreviewAsset[]; tags?: MediaTags | null };
 const mediaQuery = (path: string, extra = "") => `?path=${encodeURIComponent(path)}${extra}`;
 export const mediaInfo = (path: string, signal?: AbortSignal) => request<MediaInfo>(fileApi("/media/info", path) + mediaQuery(path), { signal });
-export type AudioEditFields = Record<"title" | "artist" | "album" | "album_artist" | "track" | "year" | "genre" | "lyrics" | "subtitle", string>;
-export type AudioEditInfo = { etag: string; kind: "audio" | "video"; fields: Omit<AudioEditFields, "lyrics" | "subtitle">; lyrics: string; cover: boolean; editable: boolean; reason: string };
+export type AudioEditFields = Record<"title" | "artist" | "album" | "album_artist" | "track" | "year" | "genre" | "composer" | "director" | "actors" | "description" | "lyrics" | "subtitle", string>;
+/** lyrics_source：metadata 为已保存的歌词，embedded 为预填的文件内置歌词（不修改就不会保存）；embedded_subtitles 为还没保存的内置文字字幕轨。 */
+export type AudioEditInfo = { etag: string; revision: number; kind: "audio" | "video" | "other"; size: number; duration: number | null; assets: PreviewAsset[];
+  embedded_subtitles: MediaSubtitleStream[]; initialization: { state: string; detail: string }; fields: Omit<AudioEditFields, "lyrics" | "subtitle">;
+  lyrics: string; lyrics_source: "metadata" | "embedded" | ""; cover: boolean; editable: boolean; reason: string };
 export type AudioEditJob = { id: string; path: string; state: "queued" | "running" | "done" | "failed" | "cancelled";
   read: number; stored: number; size: number; detail: string; result: FileItem | null };
 export const audioEditInfo = (path: string, signal?: AbortSignal) => request<AudioEditInfo>(fileApi("/media/edit", path) + mediaQuery(path), { signal });
 export const audioCoverImage = (url: string, signal?: AbortSignal) => request<Blob>(url, { signal, cache: "no-store" }, 60000, "blob");
 export const cancelAudioEdit = (path: string, id: string) => post<{ cancelled: boolean; committed: boolean }>(fileApi("/media/edit/cancel", path), { id });
-async function audioEditSaved(path: string, fields: Partial<AudioEditFields>) {
+export const mediaImportFiles = (path: string, signal?: AbortSignal) => request<PreviewAsset[]>(fileApi("/media/import-files", path) + mediaQuery(path), { signal });
+export const mediaAssetText = (path: string, id: string, signal?: AbortSignal) => mediaText(fileApi("/media/asset", path) + mediaQuery(path, `&id=${encodeURIComponent(id)}`), signal);
+export type SubtitleEdit = { id?: string; text?: string; language?: string | null; title?: string; default?: boolean };
+async function audioEditSaved(path: string, asset?: string) {
   const saved = await fileInfo(path);
   announceFileUpdated(saved);
-  let prefer = fields.lyrics?.trim() ? `embedded:lyrics:${saved.key}` : undefined;
-  if (fields.subtitle?.trim()) {
-    const media = await mediaInfo(saved.key).catch(() => null);
-    const last = media?.subtitles.at(-1);
-    if (last) prefer = `embedded:subtitle:${last.index}:${saved.key}`;
-  }
-  announceMediaAssets(saved.key, prefer);
-  window.dispatchEvent(new CustomEvent("tessera:files-mutated"));
-  window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [saved.key.replace(/[^/]+$/, "")] } }));
+  announceMediaAssets(saved.key, asset);
   return saved;
 }
-/** 保存内置标签：等待条件提交完成后广播新版本，播放器、目录和音乐库据此更新。 */
+/** 仅保存独立元数据；原文件内容与 ETag 不变。 */
 export async function saveAudioMetadata(file: Pick<FileItem, "key" | "etag">, fields: Partial<AudioEditFields>, cover = "keep",
-  signal?: AbortSignal, onProgress?: (job: AudioEditJob) => void): Promise<FileItem> {
+  signal?: AbortSignal, onProgress?: (job: AudioEditJob) => void, options?: { revision: number; subtitles?: { upsert: SubtitleEdit[]; remove: string[]; exclude?: number[] } }): Promise<FileItem> {
+  const revision = options?.revision ?? (await audioEditInfo(file.key, signal)).revision;
   let job = await request<AudioEditJob>(fileApi("/media/edit", file.key), {
-    method: "POST", body: JSON.stringify({ path: file.key, etag: file.etag, fields, cover }), signal,
+    method: "POST", body: JSON.stringify({ path: file.key, etag: file.etag, fields, cover, revision, subtitles: options?.subtitles }), signal,
   }, 60000);
   try {
     while (job.state === "queued" || job.state === "running") {
@@ -419,11 +422,11 @@ export async function saveAudioMetadata(file: Pick<FileItem, "key" | "etag">, fi
       job = result.jobs[0];
     }
     if (job.state !== "done") throw new Error(job.detail || "音频信息保存失败");
-    return await audioEditSaved(file.key, fields);
+    return await audioEditSaved(file.key, (job.result as (FileItem & { asset?: string }) | null)?.asset);
   } catch (reason) {
     if (signal?.aborted) {
       const result = await cancelAudioEdit(file.key, job.id).catch(() => null);
-      if (result?.committed) return audioEditSaved(file.key, fields);
+      if (result?.committed) return audioEditSaved(file.key, (job.result as (FileItem & { asset?: string }) | null)?.asset);
     }
     throw reason;
   }
@@ -460,21 +463,24 @@ export async function embeddedSubtitle(path: string, etag: string, track: number
   return mediaText(url, signal);
 }
 const LANGUAGE_NAMES: Record<string, string> = { chi: "中文", zho: "中文", zh: "中文", eng: "英语", en: "英语", jpn: "日语", ja: "日语", kor: "韩语", ko: "韩语" };
-/** 本人文件的歌词与字幕：文件内置的（内置数据开启时）排在同名文件之前；分享页仍只用同名文件。 */
+/** 播放器的歌词与字幕：已保存的元数据资源优先；没有保存时回退到文件内置的歌词或文字字幕轨（同目录文件只在编辑框中手动导入）。
+ *  内置字幕在服务器提取后会保存为元数据，以后不再为它读取原文件。 */
 export async function mediaAssets(file: Pick<FileItem, "key" | "etag">, signal: AbortSignal): Promise<PreviewAssetList> {
-  const [info, files] = await Promise.all([mediaInfo(file.key, signal).catch(() => null), previewAssets(file.key, signal)]);
+  // 媒体信息读不出来（如空文件）时仍加载已保存的资源，只是没有内置数据可回退。
+  const info = await mediaInfo(file.key, signal).catch(reason => { if (signal.aborted) throw reason; return null; });
+  const saved = (await previewAssets(file.key, signal)).map(asset => ({ ...asset, read: (abort: AbortSignal) => mediaAssetText(file.key, asset.id!, abort) }));
   const embedded: PreviewAsset[] = [];
-  if (info?.embedded && info.etag === file.etag) {
-    if (info.kind === "audio" && info.lyrics) embedded.push({ path: `embedded:lyrics:${file.key}`, name: "内置歌词", kind: "lyrics", language: null, size: 0, etag: info.etag,
-      source: "embedded", synced: info.lyrics.synced, read: abort => embeddedLyrics(file.key, info.etag, abort) });
-    if (info.kind === "video" && info.ffmpeg) for (const stream of info.subtitles.filter(item => item.text)) {
+  if (info && info.etag === file.etag) {
+    if (info.kind === "audio" && info.embedded_lyrics) embedded.push({ path: `embedded:lyrics:${file.key}`, name: "内置歌词", kind: "lyrics", language: null, size: 0, etag: info.etag,
+      source: "embedded", synced: info.embedded_lyrics.synced, read: abort => embeddedLyrics(file.key, info.etag, abort) });
+    if (info.kind === "video" && info.ffmpeg) for (const stream of info.embedded_subtitles) {
       const language = stream.language && (LANGUAGE_NAMES[stream.language.toLowerCase()] ?? stream.language);
       embedded.push({ path: `embedded:subtitle:${stream.index}:${file.key}`, name: `内置 · ${stream.title || language || `字幕 ${stream.index + 1}`}`,
         kind: "subtitle", language: stream.language, size: 0, etag: info.etag, source: "embedded", instant: stream.extracted || info.container !== "matroska",
         read: (abort, progress) => embeddedSubtitle(file.key, info.etag, stream.index, abort, progress) });
     }
   }
-  return { assets: [...embedded, ...files], tags: info };
+  return { assets: [...saved, ...embedded], tags: info };
 }
 export const previewList = (path: string, cursor: string | null, signal: AbortSignal) => request<PreviewListPage>(
   `${fileApi("/preview-list", path)}?path=${encodeURIComponent(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
@@ -485,10 +491,17 @@ export const publicPreviewList = async (token: string, path: string, cursor: str
   const page = await request<PublicFolderPage>(`/api/public/v1/folders/${encodeURIComponent(token)}/list?${params}`, { signal });
   return { objects: page.files.map(file => ({ ...file, key: file.path })), next_cursor: page.next_cursor };
 };
-export const publicPreviewAssets = (token: string, path: string, access?: string | null, signal?: AbortSignal) => {
+export async function publicObjectAssets(token: string, access: string | null, signal: AbortSignal): Promise<PreviewAssetList> {
+  const base = `/api/public/v1/objects/${encodeURIComponent(token)}`;
+  const params = access ? `access=${encodeURIComponent(access)}` : "";
+  const result = await request<PreviewAssetList>(`${base}/preview-assets?${params}`, { signal });
+  return { ...result, assets: result.assets.map(asset => ({ ...asset, read: (abort: AbortSignal) => mediaText(`${base}/asset?${params}&id=${encodeURIComponent(asset.id!)}`, abort) })) };
+}
+export const publicPreviewAssets = async (token: string, path: string, access?: string | null, signal?: AbortSignal) => {
   const params = new URLSearchParams({ path });
   if (access) params.set("access", access);
-  return request<PreviewAsset[]>(`/api/public/v1/folders/${encodeURIComponent(token)}/preview-assets?${params}`, { signal });
+  const assets = await request<PreviewAsset[]>(`/api/public/v1/folders/${encodeURIComponent(token)}/preview-assets?${params}`, { signal });
+  return assets.map(asset => ({ ...asset, read: (abort: AbortSignal) => mediaText(`/api/public/v1/folders/${encodeURIComponent(token)}/asset?${params}&id=${encodeURIComponent(asset.id!)}`, abort) }));
 };
 /** 搜索文件；prefix 为文件夹时只搜它及其子文件夹（关键词匹配文件夹之下的相对路径），空为整个空间。 */
 export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100, root = "", kind: KindFilter = "", signal?: AbortSignal, prefix = "") =>
@@ -831,7 +844,7 @@ export function uploadPartWithProgress(uploadId: string, partNo: number, blob: B
 }
 
 /** 已用空间分项：我的文件、回收站、私密空间、助手附件与缩略图（网格图和预览封面；列表小图不计入）。 */
-export type StorageUsage = { total: number; quota_bytes: number | null; files: number; trash: number; private: number; assistant: number; thumbnails?: number };
+export type StorageUsage = { total: number; quota_bytes: number | null; files: number; trash: number; private: number; assistant: number; thumbnails?: number; media?: number };
 export const storageUsage = () => request<StorageUsage>("/api/user/v1/usage");
 
 /* ---------- 用户客户端密钥 ---------- */

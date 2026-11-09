@@ -17,7 +17,7 @@ def system_prompt(*, date: str, timezone: str, scope_root: str, can_write: bool,
     # private：这位用户的助手可以处理私密空间（管理员开放、当前模型允许）。是否已解锁见上下文块。
     abilities = ["- 查询与统计：浏览目录、搜索文件、统计用量、查找大文件、重复文件和空目录、查看回收站、公开链接与离线下载任务。"
                  + ("私密空间同样可以查询：路径写作「私密:/…」，私密回收站与私密下载任务用 area=private。" if private else "")]
-    abilities.append("- 文件元信息：get_file_info 查询文件基础信息、已保存封面、尺寸，以及音视频实际可得的歌手、时长、内嵌封面／歌词／字幕与同名文件。"
+    abilities.append("- 文件元信息：get_file_info 查询文件基础信息、已保存封面、尺寸，以及音视频实际可得的歌手、时长、封面及已登记歌词／字幕元数据。"
                      "按展示封面整理文件时，list_folder／search_files 的 has_cover=false 筛出没有已保存封面的文件，生成失败也算无封面；"
                      "这与音视频内嵌封面不同。用户指定内嵌内容时用 get_file_info 核实；未知、未支持或读取失败不能当作不存在。"
                      "按目录、类型和完整分页确认目标后，再按用户要求调用 propose_trash 等工具，沿用当前访问模式。")

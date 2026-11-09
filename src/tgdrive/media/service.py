@@ -3,23 +3,26 @@
 - 文件自带的元数据由 ``tags.parse`` 按需读取文件头提取，按 Blob 记在 ``media_info``（副本共用）。
 - 提供者在系统设置里逐个开关；秘密配置用 KEK 子密钥 ``media-provider-secret`` 加密保存，接口只回显是否已填写。
 - 查找结果的 ``ref``（外部地址、编号等）只留在服务端，网页拿到的是绑定（存储桶、路径、版本）的短期令牌。
-- 原有候选保存接口仍写同目录歌词与字幕；音频内置标签、歌词与封面写回由 ``editor.py`` 管理。
+- 字段按文件独立保存，歌词、字幕和自定义封面保存为用户隐藏空间中的加密对象，不改写原文件。
 - 内嵌字幕轨用 FFmpeg 经回环地址按范围读取原文件提取成 WebVTT；MKV 的字幕分散在整个文件里，需要读完整个文件，
-  所以提取是后台任务，结果只缓存在内存。
+  所以首次提取是可恢复的后台任务，结果持久保存为小资源。
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import logging
 import collections
+import dataclasses
+import logging
 import json
 import os
 import re
 import secrets
 import struct
 import time
+import tempfile
+from pathlib import Path
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -32,6 +35,7 @@ from . import query as media_query
 from . import tags as media_tags
 from . import text as media_text
 from .providers import registry
+from .records import ASSET_LIMIT, parsed_fields
 from .providers.base import WANTS, Candidate, Fetched, MediaQuery, Provider, ProviderContext, ProviderError, score, similarity
 
 CONFIG_KEY = "media.providers"
@@ -116,9 +120,13 @@ class FileAccess:
         return b"".join(pieces)
 
     async def subtitle(self, index: int) -> str:
+        assets = self.service.objects.file_metadata.assets(self.info.metadata_id, "subtitle")
+        asset = next((item for item in assets if item["source"] == f"embedded:{index}"), None)
+        if asset:
+            return (await self.service.objects.file_metadata.read_asset(self.scope, self.info.key, asset["id"]))[0].decode("utf-8")
         text = self.service._subtitles.get((self.info.blob_uuid, index))
         if text is None:
-            raise ProviderError("这条内嵌字幕还没有提取，请在播放器的字幕菜单中选择它，提取完成后再保存")
+            raise ProviderError("这条内嵌字幕尚在后台提取，请稍后重试或手动导入")
         return text
 
 
@@ -149,6 +157,8 @@ class _Job:
     detail: str = ""
     finished: float = 0.0
     task: asyncio.Task | None = field(default=None, repr=False)
+    # 同一次读取里一并提取的全部字幕轨（含 track）。
+    tracks: set[int] = field(default_factory=set)
 
     def public(self) -> dict:
         return {"id": self.id, "path": self.key, "track": self.track, "state": self.state, "read": self.read, "size": self.size,
@@ -187,6 +197,7 @@ class MediaService:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._commits: asyncio.Queue | None = None
         self._worker: asyncio.Task | None = None
+        self._initializing: dict[str, asyncio.Lock] = {}
         from .editor import AudioEditor
         self.editor = AudioEditor(self)
 
@@ -219,22 +230,69 @@ class MediaService:
             pass
         self._loop.call_soon_threadsafe(put)
 
+    async def ensure_metadata(self, scope, key):
+        """确保文件有元数据记录并完成首次字段解析（只读文件头与索引，已有解析缓存时不读取）。
+        歌词、字幕不在这里提取：播放与编辑时没有保存的资源就回退到文件内置的数据，避免为整个视频回源。"""
+        store = self.objects.file_metadata
+        info, row = store.ensure(scope, key)
+        if row["kind"] == "other" or row["fields_ready"]:
+            return info, row
+        ident = info.metadata_id
+        task = self._initializing.get(ident)
+        if task is None:
+            # 同一文件的并发请求共用一次解析。
+            task = asyncio.ensure_future(self._initialize(scope, key, info))
+            self._initializing[ident] = task
+            def done(finished):
+                self._initializing.pop(ident, None)
+                if not finished.cancelled():
+                    finished.exception()  # 发起请求已断开时由后续请求或后台任务重试，不留下未读取的异常。
+            task.add_done_callback(done)
+        await asyncio.shield(task)
+        return info, store.row(ident)
+
+    async def _initialize(self, scope, key, info):
+        store = self.objects.file_metadata
+        # 解析按后台读取占名额，给播放与预览让路；每次读取前复核调用方的授权。
+        reader = Scope(info.bucket_id, private_access=True, authorize=lambda: self.objects.head_object(scope, key))
+        record = await self._record(reader, info, background=True)
+        store.initial_fields(reader, info, parsed_fields(record) if record else {})
+
     async def _extract_commits(self) -> None:
+        """后台逐个完成首次解析：新写入的文件优先（数据多半还在短期密文缓存里，不必回源），升级前的文件随后补齐。"""
+        store = self.objects.file_metadata
+        swept = 0.0
         while True:
-            info = await self._commits.get()
+            if time.monotonic() - swept > 3600:
+                await self.metadata.run_in_thread(store.sweep)
+                swept = time.monotonic()
+            info = await self.metadata.run_in_thread(store.pending)
+            if info is None:
+                try:
+                    await asyncio.wait_for(self._commits.get(), 10)
+                except TimeoutError:
+                    pass
+                continue
             try:
-                await asyncio.sleep(self.COMMIT_DELAY)
-                row = self._row(info.blob_uuid)
-                if row is not None and row["parser"] == media_tags.PARSER_VERSION:
-                    continue
-                # 内部任务：按对象所在的存储桶读取，不经网页授权；读取按后台读取占名额，给播放与预览让路。
-                file = FileAccess(self, Scope(info.bucket_id, private_access=True), info, background=True)
-                file.tags = await media_tags.parse(file.read, info.size)
-                self._store(info.blob_uuid, file.tags)
+                def authorize():
+                    self.keystore.require_kek()
+                    row = self.metadata.db.execute("SELECT u.status FROM buckets b LEFT JOIN users u ON u.id=b.owner_user_id WHERE b.id=?", (info.bucket_id,)).fetchone()
+                    if row is None or row["status"] not in (None, "active"):
+                        raise PermissionError("账号已禁用或删除")
+                scope = Scope(info.bucket_id, private_access=True, authorize=authorize)
+                authorize()
+                store.state(info.metadata_id, "running")
+                await self.ensure_metadata(scope, info.key)
+                # 字段可能已由按需请求或复制带来；状态单独收尾，避免同一条记录被反复选中。
+                store.state(info.metadata_id, "ready")
             except asyncio.CancelledError:
+                if info.metadata_id:
+                    store.state(info.metadata_id, "retry", "服务重启后继续解析", retry=5)
                 raise
-            except Exception as exc:  # 文件已删除、存储暂时不可用等：留到首次查看时再提取
-                log.debug("写入后提取媒体信息失败：%s", type(exc).__name__)
+            except Exception as exc:
+                # 暂时不可读、存储繁忙等都可恢复：稍后重试，期间按需请求仍会尝试解析。
+                store.state(info.metadata_id, "partial", str(exc)[:256] if isinstance(exc, (ValueError, ProviderError)) else "首次解析暂未完成，稍后重试", retry=300)
+                log.debug("首次解析媒体信息失败：%s", type(exc).__name__)
 
     # ---------- 配置 ----------
 
@@ -418,10 +476,10 @@ class MediaService:
                        "track=excluded.track, year=excluded.year, genre=excluded.genre, extra=excluded.extra, streams=excluded.streams, "
                        "lyrics=excluded.lyrics, cover=excluded.cover, extracted_at=excluded.extracted_at", values)
 
-    async def _record(self, scope: Scope, info: ObjectInfo) -> dict:
+    async def _record(self, scope: Scope, info: ObjectInfo, *, background: bool = False) -> dict:
         row = self._row(info.blob_uuid)
         if row is None or row["parser"] != media_tags.PARSER_VERSION:
-            file = FileAccess(self, scope, info)
+            file = FileAccess(self, scope, info, background=background)
             await self._parsed(file)
             self._store(info.blob_uuid, file.tags)
             row = self._row(info.blob_uuid)
@@ -432,26 +490,33 @@ class MediaService:
             "cover": row["cover"], "external": json.loads(row["external"] or "{}")}
 
     async def info(self, scope: Scope, key: str) -> dict:
+        """播放器与编辑器用的媒体信息。lyrics／subtitles 是已保存的元数据资源；没有保存时给出可回退的文件内置数据：
+        embedded_lyrics（用户没有清空过歌词时）与 embedded_subtitles（没有保存过、也没有被排除的文字字幕轨）。"""
         info, kind = self._media(scope, key)
+        info, row = await self.ensure_metadata(scope, key)
         record = await self._record(scope, info)
-        embedded = self.enabled(self.providers["embedded"]) if "embedded" in self.providers else False
+        store = self.objects.file_metadata
+        fields = store.fields(row)
         providers = {want: [{"id": provider.id, "name": provider.name} for provider in self.providers.values()
-                            if provider.id != "embedded" and provider.supports(want, kind) and self.enabled(provider)] for want in WANTS}
-        subtitles = []
-        if embedded:
-            for stream in record.get("streams") or []:
-                subtitles.append({**stream, "extracted": (info.blob_uuid, stream["index"]) in self._subtitles})
-        return {"kind": kind, "etag": info.etag, "embedded": embedded, "ffmpeg": bool(getattr(self.resources, "ffmpeg", None)),
-                **{name: record.get(name) for name in ("container", "duration", "title", "artist", "album", "album_artist", "track", "year", "genre")},
-                "lyrics": ({"synced": record.get("lyrics") == 2} if embedded and record.get("lyrics") else None),
-                "cover": bool(embedded and record.get("cover")), "subtitles": subtitles, "providers": providers}
+                            if provider.id != "embedded" and provider.supports(want, kind) and self.enabled(provider)] for want in (*WANTS, "info")}
+        assets = store.preview_assets(info)
+        lyrics = next((asset for asset in assets if asset["kind"] == "lyrics"), None)
+        embedded_lyrics = ({"synced": record.get("lyrics") == 2} if kind == "audio" and lyrics is None and not row["manual_lyrics"]
+                           and record.get("lyrics") else None)
+        embedded_subtitles = [{**stream, "extracted": (info.blob_uuid, stream["index"]) in self._subtitles}
+                              for stream in store.embedded_subtitles(row, record.get("streams") or [])] if kind == "video" else []
+        return {**record, **fields, "kind": kind, "etag": info.etag, "revision": row["revision"], "embedded": True,
+                "ffmpeg": bool(getattr(self.resources, "ffmpeg", None)), "providers": providers,
+                "lyrics": lyrics, "embedded_lyrics": embedded_lyrics,
+                "file_lyrics": {"synced": record.get("lyrics") == 2} if record.get("lyrics") else None,
+                "subtitles": [asset for asset in assets if asset["kind"] == "subtitle"], "embedded_subtitles": embedded_subtitles,
+                "initialization": row["state"], "detail": row["detail"]}
 
     async def embedded_lyrics(self, scope: Scope, key: str, etag: str) -> str:
         info, _ = self._media(scope, key)
         if info.etag != etag:
             raise ValueError("文件内容已变化，请重新打开")
-        if not self.enabled(self.providers["embedded"]):
-            raise ValueError("管理员已关闭内置数据")
+        # 没有保存歌词时播放与编辑回退到文件内置的歌词：只读文件头，不受在线「内置数据」来源开关影响。
         file = FileAccess(self, scope, info)
         tags = await self._parsed(file)
         best = tags.best_lyrics() if tags else None
@@ -545,14 +610,15 @@ class MediaService:
                       *, skip: tuple[str, ...] = (), throttle: bool = True) -> tuple[ObjectInfo, MediaQuery, list[Candidate], list[dict]]:
         """查询全部已启用的提供者：返回（文件、查询条件、按分数排好的候选、各提供者状态）。候选的 ref 只留在服务端。
         throttle=False 用于单并发的后台封面队列：不计入网页的每分钟查找次数，各提供者自身的请求间隔照常生效。"""
-        if want not in WANTS:
+        if want not in (*WANTS, "info"):
             raise ValueError("不支持的查找类型")
         info, kind = self._media(scope, key)
         if want == "subtitle" and kind != "video" or want == "lyrics" and kind != "audio":
             raise ValueError("歌词只适用于音频，字幕只适用于视频")
         if throttle:
             self._limit(scope.bucket_id)
-        record = await self._record(scope, info)
+        info, metadata = await self.ensure_metadata(scope, key)
+        record = (await self._record(scope, info)) | self.objects.file_metadata.fields(metadata)
         query = media_query.build(kind, info.key, info.size, record, overrides)
         providers = [provider for provider in self.providers.values()
                      if provider.supports(want, kind) and self.enabled(provider) and (not only or provider.id in only) and provider.id not in skip]
@@ -567,7 +633,17 @@ class MediaService:
             missing = provider.missing(config)
             if missing:
                 raise ProviderError("管理员尚未完成配置")
-            return await self._search(provider, query, want, ProviderContext(provider, config, self.http, file if provider.id == "embedded" else None))
+            context = ProviderContext(provider, config, self.http, file if provider.id == "embedded" else None)
+            if want != "info":
+                return await self._search(provider, query, want, context)
+            # 查找信息：复用封面或歌词搜索（共用结果缓存），只取带结构化字段的结果，按字段去重。
+            results, seen = [], set()
+            for candidate in await self._search(provider, query, provider.info_want(kind), context):
+                signature = tuple(sorted(candidate.fields.items()))
+                if candidate.fields and signature not in seen:
+                    seen.add(signature)
+                    results.append(dataclasses.replace(candidate, want="info"))
+            return results
 
         outcomes = await asyncio.gather(*(run(provider) for provider in providers), return_exceptions=True)
         statuses, candidates = [], []
@@ -606,7 +682,8 @@ class MediaService:
 
     async def lookup(self, scope: Scope, key: str, want: str, overrides: dict | None = None, only: list[str] | None = None) -> dict:
         info, query, candidates, statuses = await self.collect(scope, key, want, overrides, only)
-        public = [candidate.public(self._register(scope, info, want, candidate)) for candidate in candidates[:60]]
+        # 信息候选直接带字段，不需要读取令牌。
+        public = [candidate.public("" if want == "info" else self._register(scope, info, want, candidate)) for candidate in candidates[:60]]
         return {"want": want, "kind": query.kind, "query": {"title": query.title, "artist": query.artist, "album": query.album, "year": query.year,
                                                            "season": query.season, "episode": query.episode, "duration": query.duration,
                                                            "languages": list(query.languages)},
@@ -683,15 +760,17 @@ class MediaService:
         return data, mime
 
     async def save(self, scope: Scope, key: str, token: str, *, language: str | None = None, overwrite: bool = False) -> dict:
-        """把歌词或字幕保存为媒体同目录的同名文件（``preview_assets`` 自动发现）。"""
+        """把歌词或字幕保存为文件元数据资源。"""
         entry, info = self._claim(scope, key, token)
         if entry.want not in ("lyrics", "subtitle"):
             raise ValueError("封面请在「设置封面」中保存")
         if language:
             if not isinstance(language, str) or not _LANGUAGE.fullmatch(language) or len(language) > 16:
                 raise ValueError("语言标记只能使用字母、数字和连字符，如 zh-CN、en")
+        original, row = await self.ensure_metadata(scope, key)
         fetched = await self._fetch(scope, entry, info)
-        return await self._write_asset(scope, key, entry.want, entry.provider, fetched, language=language, overwrite=overwrite)
+        return await self._write_asset(scope, key, entry.want, entry.provider, fetched, language=language, overwrite=overwrite,
+                                       expected=(original.metadata_id, row["revision"], info.etag))
 
     @staticmethod
     def asset_target(key: str, want: str, extension: str = "", language: str | None = None) -> str:
@@ -702,20 +781,22 @@ class MediaService:
         return (directory + "/" if directory else "") + stem + (f".{language}" if language else "") + "." + extension
 
     async def _write_asset(self, scope: Scope, key: str, want: str, provider: str, fetched: Fetched, *, language: str | None = None,
-                           overwrite: bool = False) -> dict:
-        target = self.asset_target(key, want, fetched.format or "", language)
-        extension = target.rsplit(".", 1)[-1]
+                           overwrite: bool = False, expected=None) -> dict:
+        info, row = await self.ensure_metadata(scope, key)
+        if expected is not None and (info.metadata_id, row["revision"], info.etag) != expected:
+            raise VersionConflict("元数据已在查找期间修改，请重新获取候选")
+        existing = [asset for asset in self.objects.file_metadata.assets(info.metadata_id, want)
+                    if want == "lyrics" or asset["language"] == language]
+        if existing and not overwrite:
+            raise AssetExists("已有同类元数据资源，请确认是否替换")
+        asset = await self.objects.file_metadata.stage_text(scope, info, want, fetched.text, language=language,
+            title="歌词" if want == "lyrics" else language or "字幕", default=not existing or bool(existing[0]["is_default"]))
         try:
-            existing = self.objects.head_object(scope, target)
-        except NotFoundError:
-            existing = None
-        if existing is not None and not overwrite:
-            raise AssetExists(f"已有同名文件「{target.rsplit('/', 1)[-1]}」")
-        data = fetched.text.encode("utf-8")
-        mime = {"lrc": "text/plain; charset=utf-8", "srt": "application/x-subrip; charset=utf-8", "vtt": "text/vtt; charset=utf-8"}[extension]
-        saved = await self.objects.put_object(scope, target, data, len(data), mime, if_match=existing.etag if existing else None)
-        return {"path": saved.key, "name": saved.key.rsplit("/", 1)[-1], "etag": saved.etag, "size": saved.size,
-                "provider": provider, "format": extension, "replaced": existing is not None}
+            self.objects.file_metadata.commit_edit(scope, info, row["revision"], {}, [asset],
+                remove=[item["id"] for item in existing] if want == "subtitle" else [], lyrics=want == "lyrics", subtitles=want == "subtitle")
+        finally:
+            await self.objects.file_metadata.discard(info.bucket_id, [asset])
+        return self.objects.file_metadata.public_asset(asset) | {"provider": provider, "replaced": bool(existing)}
 
     # ---------- 按冻结的候选读取与保存（文件助手的待确认操作） ----------
 
@@ -736,11 +817,17 @@ class MediaService:
         return await self._fetch(scope, entry, info)
 
     async def save_frozen(self, scope: Scope, key: str, etag: str, provider: str, want: str, ref: dict) -> dict:
-        """保存选中的候选并覆盖已有的同类数据：歌词、字幕写同名文件，封面经服务器缩放后设为自定义封面。"""
+        """保存选中的候选并覆盖已有的同类数据：歌词、字幕保存到隐藏空间，封面经服务器缩放后设为自定义封面。"""
         entry, info = self._frozen(scope, key, etag, provider, want, ref)
+        original, row = await self.ensure_metadata(scope, key)
+        cover_versions = self.objects.file_thumbnail_versions([original])[(original.bucket_id, original.key)]
         fetched = await self._fetch(scope, entry, info)
         if want != "cover":
-            return await self._write_asset(scope, key, want, provider, fetched, overwrite=True)
+            return await self._write_asset(scope, key, want, provider, fetched, overwrite=True,
+                expected=(original.metadata_id, row["revision"], info.etag))
+        current = self.objects.head_object(scope, key)
+        if current.metadata_id != original.metadata_id or current.etag != etag:
+            raise VersionConflict("原文件已变化，请重新查找")
         thumbnails = getattr(self.objects, "thumbnail_service", None)
         if thumbnails is None:
             raise ValueError("封面服务不可用")
@@ -751,6 +838,9 @@ class MediaService:
             images = None
         if not images:
             images = await self._unscaled(scope, entry, info, fetched)
+        current = self.objects.head_object(scope, key)
+        if cover_versions != self.objects.file_thumbnail_versions([current])[(current.bucket_id, current.key)]:
+            raise VersionConflict("封面已在读取候选期间修改，请重新查找")
         saved = await thumbnails.apply_custom(scope, key, images)
         return {"path": key, "provider": provider, "variants": saved}
 
@@ -792,22 +882,24 @@ class MediaService:
         return text
 
     async def extract(self, scope: Scope, key: str, etag: str, track: object) -> dict:
+        """按需提取内置文字字幕（没有保存的字幕时播放器回退到它们）。MKV 等容器要读完整个文件，所以一次读取同时提取
+        所有还没保存的文字轨，并保存为元数据资源：同一个视频以后不再为字幕回源读取。"""
         if not isinstance(track, int) or isinstance(track, bool) or not 0 <= track < 256:
             raise ValueError("字幕轨编号不正确")
         info, kind = self._media(scope, key)
         if kind != "video" or info.etag != etag:
             raise ValueError("文件内容已变化，请重新打开")
-        if not self.enabled(self.providers["embedded"]):
-            raise ValueError("管理员已关闭内置数据")
+        info, row = await self.ensure_metadata(scope, key)
         record = await self._record(scope, info)
-        stream = next((item for item in record.get("streams") or [] if item["index"] == track), None)
+        streams = record.get("streams") or []
+        stream = next((item for item in streams if item["index"] == track), None)
         if stream is None or not stream.get("text"):
             raise ValueError("这条字幕轨不是文字字幕，无法提取")
         self._expire_jobs()
         for job in self._jobs.values():
-            if job.bucket_id == scope.bucket_id and job.blob == info.blob_uuid and job.track == track and job.state in ("queued", "running", "done"):
+            if job.bucket_id == scope.bucket_id and job.blob == info.blob_uuid and track in job.tracks and job.state in ("queued", "running", "done"):
                 return job.public()
-        job = _Job(secrets.token_hex(8), scope.bucket_id, info.blob_uuid, info.key, info.etag, track, info.size)
+        job = _Job(secrets.token_hex(8), scope.bucket_id, info.blob_uuid, info.key, info.etag, track, info.size, tracks={track})
         if (info.blob_uuid, track) in self._subtitles:
             job.state, job.finished = "done", time.monotonic()
             self._jobs[job.id] = job
@@ -816,8 +908,12 @@ class MediaService:
             raise ValueError("服务器没有安装 FFmpeg，无法提取内嵌字幕")
         if sum(1 for item in self._jobs.values() if item.bucket_id == scope.bucket_id and item.state in ("queued", "running")) >= self.JOBS_PER_USER:
             raise ValueError("同时提取的字幕太多，请等前面的完成")
+        others = [item for item in self.objects.file_metadata.embedded_subtitles(row, streams)
+                  if item["index"] != track and (info.blob_uuid, item["index"]) not in self._subtitles]
+        wanted = [stream, *others][:ASSET_LIMIT]
+        job.tracks = {item["index"] for item in wanted}
         self._jobs[job.id] = job
-        job.task = asyncio.create_task(self._run_extract(job, scope, info))
+        job.task = asyncio.create_task(self._run_extract(job, scope, info, wanted))
         return job.public()
 
     def jobs(self, scope: Scope, ids: list[str]) -> list[dict]:
@@ -829,7 +925,7 @@ class MediaService:
         for job_id in [key for key, job in self._jobs.items() if job.finished and job.finished < now - self.JOB_KEEP]:
             self._jobs.pop(job_id, None)
 
-    async def _run_extract(self, job: _Job, scope: Scope, info: ObjectInfo) -> None:
+    async def _run_extract(self, job: _Job, scope: Scope, info: ObjectInfo, streams: list[dict]) -> None:
         from ..thumbnails import FORMATS, _RangeInput
 
         def authorize():
@@ -839,53 +935,57 @@ class MediaService:
             if current.etag != job.etag:
                 raise ValueError("文件内容已变化")
 
+        extracted: list[tuple[dict, str]] = []
         try:
             async with self._extract_slots:
                 job.state = "running"
+                # 原视频经回环地址按范围读取，不落盘；临时目录里只有受大小限制的字幕输出。
                 async with _RangeInput(self.objects.engine, info, authorize) as source:
-                    options = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-protocol_whitelist", "http,tcp",
-                               "-format_whitelist", FORMATS, "-i", source.url, "-map", f"0:s:{job.track}", "-f", "webvtt", "pipe:1"]
-                    env = {key: value for key, value in os.environ.items()
-                           if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
-                    env["http_proxy"] = source.origin
-                    process = await asyncio.create_subprocess_exec(self.resources.ffmpeg, *options, env=env, stdin=asyncio.subprocess.DEVNULL,
-                                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                    output = bytearray()
+                    with tempfile.TemporaryDirectory(prefix="tessera-subtitles-") as directory:
+                        outputs = [(stream, Path(directory) / f"{stream['index']}.vtt") for stream in streams]
+                        options = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-protocol_whitelist", "http,tcp",
+                                   "-format_whitelist", FORMATS, "-i", source.url]
+                        for stream, path in outputs:
+                            options += ["-map", f"0:s:{stream['index']}", "-c:s", "webvtt", "-f", "webvtt", "-fs", str(self.SUBTITLE_LIMIT + 1), str(path)]
+                        env = {key: value for key, value in os.environ.items()
+                               if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
+                        env["http_proxy"] = source.origin
+                        process = await asyncio.create_subprocess_exec(self.resources.ffmpeg, *options, env=env, stdin=asyncio.subprocess.DEVNULL,
+                                                                       stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
 
-                    async def collect():
-                        while True:
-                            piece = await process.stdout.read(65536)
-                            if not piece:
-                                return
-                            output.extend(piece)
-                            if len(output) > self.SUBTITLE_LIMIT:
-                                raise ValueError("字幕超过 4 MB")
+                        async def drain():
+                            # 持续排空错误流，不把整段日志留在内存。
+                            while await process.stderr.read(65536):
+                                pass
 
-                    async def progress():
-                        while True:
-                            job.read = source.remote_bytes
-                            await asyncio.sleep(0.5)
+                        async def progress():
+                            while True:
+                                job.read = source.remote_bytes
+                                await asyncio.sleep(0.5)
 
-                    watcher = asyncio.create_task(progress())
-                    try:
-                        async with asyncio.timeout(self.EXTRACT_TIMEOUT):
-                            _, errors = await asyncio.gather(collect(), process.stderr.read())
-                            code = await process.wait()
-                    except BaseException:
-                        if process.returncode is None:
-                            process.kill()
-                            await process.wait()
-                        raise
-                    finally:
-                        watcher.cancel()
-                    if source.failure is not None:
-                        raise source.failure
-                    if code != 0:
-                        raise ValueError("FFmpeg 无法提取这条字幕")
-                text = media_text.decode(bytes(output)).replace("\r\n", "\n")
-                if "-->" not in text:
-                    raise ValueError("这条字幕轨没有内容")
-                self._remember_subtitle(job.blob, job.track, text)
+                        watcher = asyncio.create_task(progress())
+                        try:
+                            async with asyncio.timeout(self.EXTRACT_TIMEOUT):
+                                await drain()
+                                code = await process.wait()
+                        except BaseException:
+                            if process.returncode is None:
+                                process.kill()
+                                await process.wait()
+                            raise
+                        finally:
+                            watcher.cancel()
+                        if source.failure is not None:
+                            raise source.failure
+                        for stream, path in outputs:
+                            if not path.exists() or path.stat().st_size > self.SUBTITLE_LIMIT:
+                                continue
+                            text = media_text.decode(path.read_bytes()).replace("\r\n", "\n")
+                            if "-->" in text:
+                                self._remember_subtitle(job.blob, stream["index"], text)
+                                extracted.append((stream, text))
+                if not any(stream["index"] == job.track for stream, _ in extracted):
+                    raise ValueError("FFmpeg 无法提取这条字幕" if code != 0 else "这条字幕轨没有内容")
                 job.state, job.read = "done", job.size
         except asyncio.CancelledError:
             job.state, job.detail = "failed", "已取消"
@@ -895,6 +995,19 @@ class MediaService:
             job.detail = str(exc) if isinstance(exc, (ValueError, ProviderError)) else "提取失败，请稍后重试"
         finally:
             job.finished = time.monotonic()
+        # 保存为元数据资源（尽力而为）：失败（如空间已满）时本次播放仍用内存里的结果，下次再提取。
+        store = self.objects.file_metadata
+        for stream, text in extracted:
+            try:
+                await store.initial_asset(scope, info, "subtitle", text, source=f"embedded:{stream['index']}",
+                                          title=stream.get("title") or stream.get("language") or f"字幕 {stream['index'] + 1}",
+                                          language=self._language_tag(stream.get("language")), default=bool(stream.get("default")))
+            except Exception as exc:
+                log.debug("保存内置字幕失败：%s", type(exc).__name__)
+
+    @staticmethod
+    def _language_tag(value):
+        return value if isinstance(value, str) and _LANGUAGE.fullmatch(value) and len(value) <= 16 else None
 
     async def stop(self) -> None:
         await self.editor.stop()

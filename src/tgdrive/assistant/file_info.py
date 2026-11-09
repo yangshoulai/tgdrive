@@ -38,16 +38,20 @@ async def media_info(ctx: ToolContext, key: str, include: bool) -> dict:
     except (PermissionError, NotFoundError, NotReadyError):
         raise
     except Exception:
-        # 网络、资源或解析故障不是“没有封面／歌词”的证据；基础信息和已知的同名文件仍可返回。
+        # 网络、资源或解析故障不是“没有封面／歌词”的证据；基础信息和已登记的元数据资源仍可返回。
         return {**result, "reason": "媒体信息读取失败，不能判断内嵌内容是否存在"}
     result.update({name: info.get(name) for name in (
-        "container", "duration", "title", "artist", "album", "album_artist", "track", "year", "genre")})
+        "container", "duration", "title", "artist", "album", "album_artist", "track", "year", "genre", "composer", "director", "actors", "description")})
     if not info.get("container"):
         return {**result, "status": "unsupported", "reason": "未能解析此文件的媒体格式，内嵌内容状态未知"}
+    assets = ctx.objects.file_metadata.preview_assets(ctx.objects.head_object(scope, key))
+    for name, asset_kind in (("lyrics_files", "lyrics"), ("subtitle_files", "subtitle")):
+        result[name] = [item for item in assets if item["kind"] == asset_kind]
     result.update(status="ready", embedded_enabled=info["embedded"])
     if info["embedded"]:
-        lyrics = info.get("lyrics")
+        # 文件自带的歌词与字幕轨；已保存的歌词、字幕见 lyrics_files／subtitle_files（播放时优先使用）。
+        lyrics = info.get("file_lyrics")
         result.update(embedded_cover=info["cover"],
                       embedded_lyrics={"present": bool(lyrics), "synced": lyrics.get("synced") if lyrics else None},
-                      subtitles=info["subtitles"])
+                      subtitles=info["subtitles"], embedded_subtitles=info.get("embedded_subtitles") or [])
     return result

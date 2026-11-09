@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 
-from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError
+from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError, info_fields
 from .. import text as media_text
 
 SEARCH = "https://krcs.kugou.com/search"
@@ -21,6 +21,7 @@ class KugouProvider(Provider):
     capabilities = frozenset({"lyrics"})
     media = frozenset({"audio"})
     official = False
+    info = True
     notice = "使用酷狗客户端的公开歌词接口，并非官方开放平台：接口可能随时变更、限流或失效，请自行评估使用条款。"
     guide = (GuideStep("无需配置", "打开开关即可使用。查询会把歌名、歌手与时长发送给酷狗。"),)
 
@@ -36,6 +37,7 @@ class KugouProvider(Provider):
             duration = item.get("duration")
             results.append(Candidate("lyrics", str(item.get("song") or ""), {"id": str(item["id"]), "accesskey": str(item["accesskey"]), "artist": str(item.get("singer") or "")},
                                      subtitle=str(item.get("singer") or ""), synced=True, format="lrc",
+                                     fields=info_fields(title=item.get("song"), artist=item.get("singer")),
                                      duration=duration / 1000 if isinstance(duration, (int, float)) and duration else None))
         return results
 

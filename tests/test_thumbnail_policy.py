@@ -28,7 +28,7 @@ class ThumbnailPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.worker._backfill_skip = {}
         self.worker._unsuitable, self.worker._probed, self.worker._read_rate = OrderedDict(), OrderedDict(), None
         self.worker._has_thumbnail = Mock(return_value=False)
-        self.worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
+        self.worker._scope = Mock(return_value=Scope(1, authorize=Mock()))
         self.worker._plan_backfill = AsyncMock(return_value=False)
         self.worker._render = AsyncMock(return_value={"thumb": b"jpeg"})
 

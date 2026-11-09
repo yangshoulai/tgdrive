@@ -535,7 +535,7 @@ class ThumbnailCacheTests(unittest.TestCase):
             {"mime": "image/webp", "data": b"sealed", "created_at": 1000.002, "bucket_id": None, "object_key": None},
         ]
         service.engine.open_thumbnail.return_value = WEBP
-        info = SimpleNamespace(blob_uuid="blob", etag="content-2")
+        info = SimpleNamespace(blob_uuid="blob", etag="content-2", metadata_id=None)
         first = asyncio.run(service.read_thumbnail(info))[2]
         second = asyncio.run(service.read_thumbnail(info))[2]
         self.assertNotEqual(first, second)
@@ -548,7 +548,7 @@ class ThumbnailCacheTests(unittest.TestCase):
         service = ObjectService(Mock(), Mock())
         service.metadata.cached_read = lambda key, read: read()
         row = {"prefix": "album/", "key": "album/a.jpg", "size": 8, "etag": "content", "content_type": "image/jpeg",
-               "modified_at": 1000, "thumbnail_created_at": 1000.001}
+               "modified_at": 1000, "thumbnail_created_at": 1000.001, "metadata_id": None, "custom_at": None}
         service.metadata.db.execute.return_value = [row]
         folder = service.folder_previews(Scope(9), ["album/"])["album/"][0]
         service.metadata.db.execute.return_value = [
@@ -577,9 +577,10 @@ class FolderPreviewQueryTests(unittest.TestCase):
         legacy = [("blob-2",)]
         definitions, values = [], []
         for name, columns, rows in (
-                ("objects", "bucket_id,key,blob_uuid,size,etag,content_type,modified_at", objects),
+                ("objects", "bucket_id,key,blob_uuid,size,etag,content_type,modified_at,metadata_id", [row + (None,) for row in objects]),
                 ("thumbnails", "blob_uuid,variant,created_at", thumbnails),
-                ("thumbnail_legacy", "blob_uuid", legacy)):
+                ("thumbnail_legacy", "blob_uuid", legacy),
+                ("file_media_assets", "id,metadata_id,kind,variant,updated_at", [(None, None, None, None, None)])):
             placeholders = ",".join("(" + ",".join("?" for _ in row) + ")" for row in rows)
             definitions.append(f"{name}({columns}) AS MATERIALIZED (VALUES {placeholders})")
             values.extend(value for row in rows for value in row)

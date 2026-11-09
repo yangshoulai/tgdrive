@@ -241,12 +241,12 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
     key = ctx.resolve(_str(args, "path", limit=1024))
     recursive, regenerate, force = args.get("recursive") is True, args.get("regenerate") is True, args.get("force") is True
     single = None if key.endswith("/") or not key else ctx.db.execute(
-        "SELECT key, size, etag, content_type, blob_uuid FROM objects WHERE bucket_id=? AND key=?", (ctx.bucket_id, key)).fetchone()
+        "SELECT * FROM objects WHERE bucket_id=? AND key=?", (ctx.bucket_id, key)).fetchone()
     if single is not None:
         rows = [single]
     else:
         folder = key.rstrip("/") + "/" if key else ctx.scope_root
-        rows = ctx.db.execute("SELECT key, size, etag, content_type, blob_uuid FROM objects WHERE bucket_id=? AND key>=? AND key<? "
+        rows = ctx.db.execute("SELECT * FROM objects WHERE bucket_id=? AND key>=? AND key<? "
                               f"AND substr(key,-1)!='/' AND {ctx.hide()} ORDER BY key LIMIT ?",
                               (ctx.bucket_id, folder, folder + END, SCAN_FILES)).fetchall()
         if not rows and ctx.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
@@ -255,16 +255,17 @@ async def ui_generate_thumbnails(ctx: ToolContext, args: dict) -> ToolOutput:
         if not recursive:
             rows = [row for row in rows if "/" not in row["key"][len(folder):]]
     media = [row for row in rows if row["blob_uuid"] and kind_of(row["key"], row["content_type"]) in THUMBNAIL_KINDS]
-    variants = ctx.objects.thumbnail_variants([row["blob_uuid"] for row in media])
+    versions = ctx.objects.file_thumbnail_versions([ctx.objects._object(row) for row in media])
+    variants = {row["key"]: versions.get((ctx.bucket_id, row["key"]), {}) for row in media}
     # 用户明确补图时，none 也属于缺图；只有真实的小图才算已有缩略图。
-    todo = media if force else [row for row in media if "thumb" not in variants.get(row["blob_uuid"], ())
-            or regenerate and "grid" not in variants[row["blob_uuid"]]]
+    todo = media if force else [row for row in media if "thumb" not in variants.get(row["key"], ())
+            or regenerate and "grid" not in variants[row["key"]]]
     items = [{"path": row["key"], "size": int(row["size"] or 0), "etag": row["etag"], "content_type": row["content_type"],
-              "retry": "none" in variants.get(row["blob_uuid"], ())}
+              "retry": "none" in variants.get(row["key"], ())}
              for row in todo[:int(ctx.params.get("max_files", 500))]]
     payload = {"media_files": len(media), "need": len(todo), "in_card": len(items),
-               "already_have": sum("thumb" in variants.get(row["blob_uuid"], ()) for row in media),
-               "previously_failed": sum("none" in variants.get(row["blob_uuid"], ()) and "thumb" not in variants[row["blob_uuid"]] for row in media)}
+               "already_have": sum("thumb" in variants.get(row["key"], ()) for row in media),
+               "previously_failed": sum("none" in variants.get(row["key"], ()) and "thumb" not in variants[row["key"]] for row in media)}
     if not items:
         return ToolOutput({**payload, "status": "没有需要生成封面的文件"}, "没有需要生成的封面")
     if len(todo) > len(items):

@@ -4,7 +4,7 @@ import { Badge, Button, Field, Notice, Panel, SetupGuide, SkeletonRows, Switch, 
 
 /* ---------- 系统设置 · 媒体信息：封面、歌词、字幕的来源 ---------- */
 
-const WANT_LABELS: Record<api.MediaWant, string> = { cover: "封面", lyrics: "歌词", subtitle: "字幕" };
+const WANT_LABELS: Record<api.MediaWant, string> = { cover: "封面", lyrics: "歌词", subtitle: "字幕", info: "信息" };
 const MEDIA_LABELS = { audio: "音乐", video: "视频" } as const;
 
 type Draft = { enabled: boolean; config: Record<string, string>; secrets: Record<string, string>; clear: string[] };

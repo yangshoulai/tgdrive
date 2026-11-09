@@ -28,7 +28,7 @@ class FileInfoTests(AssistantCase):
         return ToolContext(self.alice.id, self.alice.bucket_id, root, self.app.objects, None, "files", root,
                            {}, {}, media=self.app.media, read_only=True, **extra)
 
-    def test_media_tags_embedded_cover_and_sidecar_references(self):
+    def test_media_tags_cover_and_registered_resource_references(self):
         async def run():
             await self.put("音乐/晴天.mp3", song())
             await self.put("音乐/晴天.lrc", b"[00:01.00]lyrics")
@@ -44,8 +44,8 @@ class FileInfoTests(AssistantCase):
             self.assertGreater(media["duration"], 0)
             self.assertTrue(media["embedded_cover"])
             self.assertEqual(media["embedded_lyrics"], {"present": True, "synced": False})
-            self.assertEqual([item["path"] for item in media["lyrics_files"]], ["/音乐/晴天.lrc"])
-            self.assertEqual([item["path"] for item in media["subtitle_files"]], ["/音乐/晴天.zh.srt"])
+            self.assertEqual(media["lyrics_files"], [], "首次解析不另存内置歌词，播放时直接回退读取")
+            self.assertEqual(media["subtitle_files"], [], "同目录文件不会自动登记为元数据")
             self.assertNotIn("text", media["embedded_lyrics"])
             request.assert_not_called()
             taint.assert_called_once_with("读取过文件元数据")

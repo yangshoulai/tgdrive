@@ -1553,6 +1553,74 @@ async function reconcile() {
   }
 }
 
+/* ---------- 手动检查：找出云端已删除、覆盖或移走的文件仍占用的本机缓存 ---------- */
+
+type StaleItem = { key: string; path: string; bytes: number; private: boolean; manual: boolean; kind: Kind | "broken" };
+type CheckResult = { checked: number; stale: StaleItem[]; staleCount: number; staleBytes: number; privateChecked: boolean; privateSkipped: number };
+let lastCheck: { ns: string; keys: Set<string> } | null = null;
+
+/** 只检查、不删除：普通层按 /cache/check 核对仍被引用的版本；私密层在私密空间已解锁时按密钥接口核对，锁定时跳过并报告数量。
+ *  解不开的条目（换过密码或重置过缓存）同样算作可清理。结果最多列出 500 项，总数与字节数按全部计算。 */
+async function checkCache(): Promise<CheckResult> {
+  const context = await normalContext();
+  if (!context) throw new Error("请先登录");
+  const stale: StaleItem[] = [];
+  let checked = 0;
+  async function scan(tier: "n" | "p", key: CryptoKey, verify: (etags: string[]) => Promise<Set<string> | null>) {
+    const byEtag = new Map<string, { entry: EntryRecord; path: string; kind: Kind }[]>();
+    for (const entry of await listEntries(context!.ns, tier)) {
+      checked++;
+      const info = await openInfo(key, entry);
+      if (!info) { stale.push({ key: entry.key, path: "", bytes: entry.bytes, private: tier === "p", manual: Boolean(entry.manual), kind: "broken" }); continue; }
+      byEtag.set(info.etag, [...(byEtag.get(info.etag) ?? []), { entry, path: info.path, kind: info.kind }]);
+    }
+    const etags = [...byEtag.keys()];
+    for (let index = 0; index < etags.length; index += 500) {
+      const batch = etags.slice(index, index + 500);
+      const valid = await verify(batch);
+      if (!valid) throw new Error("无法连接服务器核对缓存，请稍后重试");
+      for (const etag of batch.filter(item => !valid.has(item)))
+        for (const item of byEtag.get(etag) ?? [])
+          stale.push({ key: item.entry.key, path: item.path, bytes: item.entry.bytes, private: tier === "p", manual: Boolean(item.entry.manual), kind: item.kind });
+    }
+  }
+  await scan("n", context.info, async batch => {
+    const response = await post("/api/user/v1/cache/check", { etags: batch });
+    return response.ok ? new Set((await response.json() as { valid: string[] }).valid) : null;
+  });
+  const privateEntries = await listEntries(context.ns, "p");
+  const secret = privateEntries.length && privateTier && (Date.now() < privateTier.expires || privateTier.access === pageAccess && Date.now() < pageAccessExpires)
+    ? await privateTier.promise.catch(() => null) : null;
+  if (secret && !secret.signal.aborted) {
+    await scan("p", secret.info, async batch => {
+      const response = await post("/api/user/v1/private/cache/keys", { device: await deviceId(), etags: batch }, secret.access);
+      if (!response.ok) return null;
+      const keys = (await response.json() as { keys: Record<string, { key: string } | null> }).keys;
+      return new Set(batch.filter(etag => keys[etag]));
+    });
+  }
+  const privateChecked = Boolean(secret) || !privateEntries.length;
+  lastCheck = { ns: context.ns, keys: new Set(stale.map(item => item.key)) };
+  stale.sort((a, b) => b.bytes - a.bytes);
+  return { checked, stale: stale.slice(0, 500), staleCount: stale.length, staleBytes: stale.reduce((sum, item) => sum + item.bytes, 0),
+    privateChecked, privateSkipped: privateChecked ? 0 : privateEntries.length };
+}
+
+/** 清理上一次检查找到的条目（只接受那次结果里的编号），并顺带删除本地缓存文件夹里没有记录的残留文件。 */
+async function cleanStale(keys: string[] | "all") {
+  const context = await normalContext();
+  if (!context || !lastCheck || lastCheck.ns !== context.ns) throw new Error("检查结果已过期，请重新检查");
+  const victims = new Set(keys === "all" ? lastCheck.keys : keys.filter(key => lastCheck!.keys.has(key)));
+  for (const task of automatics.values()) if (victims.has(task.entryKey)) endAutomatic(task, true);
+  stopManualWhere(job => Boolean(job.opened && victims.has(job.opened.entry.key)));
+  const entries = (await listEntries(context.ns)).filter(entry => victims.has(entry.key));
+  await deleteEntries(entries.map(entry => entry.key));
+  for (const key of victims) lastCheck.keys.delete(key);
+  itemCache = null; manualCache = null;
+  const orphans = await sweepDirectory().catch(() => 0);
+  return { removed: entries.length, bytes: entries.reduce((sum, entry) => sum + entry.bytes, 0), orphans };
+}
+
 /* ---------- 页面消息 ---------- */
 
 type Stats = {
@@ -1730,6 +1798,12 @@ sw.addEventListener("message", event => {
     case "tessera-cache:stats": reply(stats()); break;
     case "tessera-cache:items": reply(listItems((data as { filter?: ItemQuery }).filter ?? {})); break;
     case "tessera-cache:remove-items": reply(removeItems((data as { filter?: ItemQuery }).filter ?? {})); break;
+    case "tessera-cache:check": reply(checkCache()); break;
+    case "tessera-cache:clean-stale": {
+      const keys = (data as { keys?: unknown }).keys;
+      reply(cleanStale(keys === "all" ? "all" : Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : []));
+      break;
+    }
     case "tessera-cache:clear": reply(clear(data.scope ?? "normal", data.key)); break;
     case "tessera-cache:reset": dropKeys(); reply(clear("all")); break;
     case "tessera-cache:files": reply(fileStates(data.urls ?? [])); break;

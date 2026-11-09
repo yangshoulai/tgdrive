@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 
-from .base import Candidate, ConfigField, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError
+from .base import Candidate, ConfigField, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError, info_fields
 
 API = "https://api.themoviedb.org/3"
 IMAGES = "https://image.tmdb.org/t/p"
@@ -18,6 +18,7 @@ class TmdbProvider(Provider):
     homepage = "https://www.themoviedb.org"
     capabilities = frozenset({"cover"})
     media = frozenset({"video"})
+    info = True
     fields = (ConfigField("token", "API 读访问令牌", secret=True, required=True,
                           hint="TMDB 设置 → API 页面的「API 读访问令牌」（较长的一串）；也可以填写 v3 的 API 密钥（32 位）。"),
               ConfigField("language", "结果语言", hint="海报与片名的语言，如 zh-CN、zh-TW、en-US。留空为 zh-CN。", placeholder="zh-CN"))
@@ -80,18 +81,19 @@ class TmdbProvider(Provider):
             name = str(item.get("title") or item.get("name") or "")
             year = str(item.get("release_date") or item.get("first_air_date") or "")[:4]
             label = " · ".join(part for part in ("电影" if media == "movie" else "剧集", year) if part)
+            details = info_fields(title=name, year=year, description=item.get("overview"))
             if item.get("poster_path"):
-                results.append(self._image(item["poster_path"], name, label, "海报", 2 / 3))
+                results.append(self._image(item["poster_path"], name, label, "海报", 2 / 3, fields=details))
             if item.get("backdrop_path"):
-                results.append(self._image(item["backdrop_path"], name, label, "剧照", 16 / 9))
+                results.append(self._image(item["backdrop_path"], name, label, "剧照", 16 / 9, fields=details))
         return results
 
     @staticmethod
-    def _image(path: str, title: str, subtitle: str, note: str, ratio: float, bonus: float = 0.0) -> Candidate:
+    def _image(path: str, title: str, subtitle: str, note: str, ratio: float, bonus: float = 0.0, fields=None) -> Candidate:
         width = 780 if ratio < 1 else 1280
         return Candidate("cover", title, {"url": f"{IMAGES}/{'w780' if ratio < 1 else 'w1280'}{path}", "preview_url": f"{IMAGES}/w300{path}",
                                           "bonus": bonus},
-                         subtitle=subtitle, note=f"{note} · 数据来自 TMDB", width=width, height=round(width / ratio))
+                         subtitle=subtitle, note=f"{note} · 数据来自 TMDB", width=width, height=round(width / ratio), fields=fields or {})
 
     async def fetch(self, ref, want, ctx: ProviderContext) -> Fetched:
         data, mime = await ctx.get_bytes(ref["url"])

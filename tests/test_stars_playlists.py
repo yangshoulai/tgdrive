@@ -127,6 +127,10 @@ class PlaylistShareTests(unittest.TestCase):
         for key in ("私人/歌/a.mp3", "私人/歌/b.mp3", "私人/歌/a.lrc", "私人/secret.mp3"):
             data = b"[00:01.00]hello" if key.endswith(".lrc") else MP3 + key.encode()
             asyncio.run(self.app.objects.put_object(scope, key, data, len(data), "text/plain" if key.endswith(".lrc") else "audio/mpeg"))
+        async def register():
+            info, _ = self.app.objects.file_metadata.ensure(scope, "私人/歌/a.mp3")
+            await self.app.objects.file_metadata.initial_asset(scope, info, "lyrics", "[00:01.00]hello", source="embedded", default=True)
+        asyncio.run(register())
         self.playlist = self.call("POST", "/api/user/v1/playlists", {"name": "分享", "paths": ["私人/歌/a.mp3", "私人/歌/b.mp3"]}, expect=201)["id"]
 
     def tearDown(self):

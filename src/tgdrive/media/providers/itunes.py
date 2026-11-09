@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .base import Candidate, ConfigField, Fetched, GuideStep, MediaQuery, Provider, ProviderContext
+from .base import Candidate, ConfigField, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, info_fields
 
 API = "https://itunes.apple.com/search"
 
@@ -21,6 +21,7 @@ class ItunesProvider(Provider):
     capabilities = frozenset({"cover"})
     media = frozenset({"audio"})
     default_enabled = True
+    info = True
     fields = (ConfigField("country", "商店地区", hint="两位地区代码，决定搜索哪个地区的商店，如 TW、HK、US、JP。留空为 TW（中国大陆商店的搜索接口目前不返回结果）。", placeholder="TW"),)
     guide = (GuideStep("无需密钥", "打开开关即可使用。查询会把歌名、歌手与专辑发送给苹果。"),
              GuideStep("选择商店地区", "中文歌曲建议用 TW 或 HK，欧美歌曲用 US；地区不同，收录与封面会有差异。中国大陆（CN）商店的搜索接口目前不返回结果。"))
@@ -46,7 +47,10 @@ class ItunesProvider(Provider):
             results.append(Candidate("cover", str(item.get("trackName") or album), {"url": _sized(artwork, 1200), "preview_url": _sized(artwork, 240),
                                      "artist": str(item.get("artistName") or "")},
                                      subtitle=" · ".join(part for part in (str(item.get("artistName") or ""), album, year) if part),
-                                     duration=millis / 1000 if isinstance(millis, (int, float)) else None, width=1200, height=1200))
+                                     duration=millis / 1000 if isinstance(millis, (int, float)) else None, width=1200, height=1200,
+                                     fields=info_fields(title=item.get("trackName"), artist=item.get("artistName"), album=album,
+                                                        album_artist=item.get("collectionArtistName"), year=year, genre=item.get("primaryGenreName"),
+                                                        track=item.get("trackNumber"))))
         return results
 
     async def fetch(self, ref, want, ctx: ProviderContext) -> Fetched:

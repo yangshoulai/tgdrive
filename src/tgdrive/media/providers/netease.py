@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError
+from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError, info_fields, year_of
 from .. import text as media_text
 
 API = "https://music.163.com/api"
@@ -18,6 +18,7 @@ class NeteaseProvider(Provider):
     capabilities = frozenset({"cover", "lyrics"})
     media = frozenset({"audio"})
     official = False
+    info = True
     notice = "使用网易云音乐网页端的公开接口，并非官方开放平台：接口可能随时变更、限流或失效，请自行评估使用条款。"
     guide = (GuideStep("无需配置", "打开开关即可使用。查询会把歌名与歌手发送给网易云音乐。"),
              GuideStep("出现失败时", "多为接口变更或请求过于频繁导致，稍后再试；长期失效时可关闭此项，改用其他歌词来源。"))
@@ -33,7 +34,9 @@ class NeteaseProvider(Provider):
             album = song.get("al") or {}
             duration = song.get("dt")
             common = dict(subtitle=" · ".join(part for part in (artists, str(album.get("name") or "")) if part),
-                          duration=duration / 1000 if isinstance(duration, (int, float)) else None)
+                          duration=duration / 1000 if isinstance(duration, (int, float)) else None,
+                          fields=info_fields(title=song.get("name"), artist=artists, album=album.get("name"),
+                                             track=song.get("no") or None, year=year_of(song.get("publishTime"))))
             if want == "cover":
                 picture = album.get("picUrl")
                 if picture:

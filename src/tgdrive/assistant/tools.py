@@ -450,11 +450,11 @@ def _files(ctx: ToolContext, rows, *, details: bool = False) -> list[dict]:
     """只查询本页对象的封面索引；筛选和列目录不回源读取图片或媒体内容。"""
     rows = list(rows)
     blobs = [row["blob_uuid"] for row in rows]
-    covers = ctx.objects.thumbnail_variants(blobs)
+    covers = ctx.objects.file_thumbnail_versions([ctx.objects._object(row) for row in rows])
     sizes = ctx.objects.media_sizes(blobs) if details else {}
     files = []
     for row in rows:
-        fields = ctx.objects.thumbnail_fields(covers.get(row["blob_uuid"], ()))
+        fields = ctx.objects.thumbnail_fields(covers.get((ctx.bucket_id, row["key"]), ()))
         item = {**_file(ctx, row), "has_cover": fields["thumbnail_status"] == "ready",
                 "thumbnail_status": fields["thumbnail_status"]}
         if details:
@@ -474,7 +474,8 @@ def _cover_condition(args: dict) -> str:
     # 与 thumbnail_fields 一致：实际规格与旧版封面算有图，none 只是生成失败的标记。
     exists = ("(EXISTS(SELECT 1 FROM thumbnails t WHERE t.blob_uuid=objects.blob_uuid "
               "AND t.variant IN ('thumb','grid','poster')) OR "
-              "EXISTS(SELECT 1 FROM thumbnail_legacy t WHERE t.blob_uuid=objects.blob_uuid))")
+              "EXISTS(SELECT 1 FROM thumbnail_legacy t WHERE t.blob_uuid=objects.blob_uuid) OR "
+              "EXISTS(SELECT 1 FROM file_media_assets a WHERE a.metadata_id=objects.metadata_id AND a.kind='cover'))")
     return exists if present else f"NOT {exists}"
 
 

@@ -22,7 +22,7 @@ from typing import Awaitable, Callable
 
 Reader = Callable[[int, int], Awaitable[bytes]]
 
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 READ_BUDGET = 16 * 1024 * 1024   # 单个文件解析时最多读取的字节数
 WINDOW = 64 * 1024               # 每次回源至少读取这么多，减少往返
 FIELD_LIMIT = 1024 * 1024        # 单个标签字段（歌词等）最多读取这么多
@@ -211,8 +211,14 @@ _MUSICBRAINZ = {
 
 
 def _extra(tags: MediaTags, name: str, value: str | None) -> None:
-    key = _MUSICBRAINZ.get(name.strip().lower())
+    name = name.strip().lower()
     value = _clean(value)
+    aliases = {"composer": "composer", "director": "director", "actor": "actors", "actors": "actors", "cast": "actors",
+               "description": "description", "comment": "description", "synopsis": "description"}
+    if name in aliases and value:
+        tags.extra.setdefault(aliases[name], value[:16384 if aliases[name] == "description" else 4096])
+        return
+    key = _MUSICBRAINZ.get(name)
     if key and value and key not in tags.extra:
         tags.extra[key] = value.split("/")[0].strip()[:64]
 
@@ -409,6 +415,10 @@ def _id3_frame(frame_id: str, body: bytes, tags: MediaTags) -> None:
             text = "\n".join(lines)[:FIELD_LIMIT]
             tags.lyrics.insert(0, Lyrics(text, True, _language(language, text), "id3"))
         return
+    if frame_id in ("COMM", "COM") and len(body) > 4:
+        _, value = _split_terminated(encoding, body[4:])
+        _extra(tags, "description", _id3_text(encoding, value))
+        return
     if frame_id in ("TXXX", "TXX"):
         description, value = _split_terminated(encoding, body[1:])
         _extra(tags, _id3_text(encoding, description), _id3_text(encoding, value))
@@ -425,6 +435,8 @@ def _id3_frame(frame_id: str, body: bytes, tags: MediaTags) -> None:
         tags.set("genre", _genre(values[0] if values else None))
     elif frame_id in ("TLEN", "TLE") and value and value.isdigit() and tags.duration is None:
         tags.duration = int(value) / 1000
+    elif frame_id in ("TCOM", "TCM"):
+        _extra(tags, "composer", value)
     elif frame_id in ("TSRC", "TRC"):
         _extra(tags, "isrc", value)
 
@@ -733,9 +745,25 @@ async def _mp4_meta(source: _Source, start: int, end: int, tags: MediaTags) -> N
     probe = await source.get(start, 8)
     # ISO 的 meta 是带版本号的完整盒子；QuickTime 的没有。
     offset = 0 if probe[4:8] == b"hdlr" else 4
+    names, tables = {}, []
     async for leaf, leaf_start, leaf_end in _boxes(source, start + offset, end):
-        if leaf == b"ilst":
-            await _mp4_ilst(source, leaf_start, leaf_end, tags)
+        if leaf == b"keys" and leaf_end - leaf_start <= FIELD_LIMIT:
+            data = await source.get(leaf_start, leaf_end - leaf_start)
+            if len(data) < 8:
+                continue
+            count, position = int.from_bytes(data[4:8], "big"), 8
+            for index in range(1, min(count, 1024) + 1):
+                if position + 8 > len(data):
+                    break
+                size = int.from_bytes(data[position:position + 4], "big")
+                if size < 8 or position + size > len(data):
+                    break
+                names[index] = data[position + 8:position + size].decode("utf-8", errors="replace")
+                position += size
+        elif leaf == b"ilst":
+            tables.append((leaf_start, leaf_end))
+    for table_start, table_end in tables:
+        await _mp4_ilst(source, table_start, table_end, tags, names)
 
 
 async def _mp4_track(source: _Source, start: int, end: int, ordinal: int) -> SubtitleStream | None:
@@ -765,7 +793,7 @@ async def _mp4_track(source: _Source, start: int, end: int, ordinal: int) -> Sub
     return SubtitleStream(ordinal, name, language, None, enabled, _MP4_SUBTITLE_CODECS.get(codec, False))
 
 
-async def _mp4_ilst(source: _Source, start: int, end: int, tags: MediaTags) -> None:
+async def _mp4_ilst(source: _Source, start: int, end: int, tags: MediaTags, names=None) -> None:
     async for kind, item_start, item_end in _boxes(source, start, end):
         mean = name = None
         async for child, child_start, child_end in _boxes(source, item_start, item_end):
@@ -785,7 +813,17 @@ async def _mp4_ilst(source: _Source, start: int, end: int, tags: MediaTags) -> N
             if length <= 0 or length > FIELD_LIMIT:
                 continue
             value = await source.get(value_start, length)
-            if kind in _MP4_TEXT:
+            key = (names or {}).get(int.from_bytes(kind, "big"))
+            if key:
+                text = value.decode("utf-8", errors="replace")
+                key = key.removeprefix("com.apple.quicktime.").lower()
+                if key in ("title", "artist", "album", "album_artist", "track", "genre"):
+                    tags.set(key, text)
+                elif key in ("year", "date", "creationdate"):
+                    tags.set("year", _year(text))
+                else:
+                    _extra(tags, key, text)
+            elif kind in _MP4_TEXT:
                 tags.set(_MP4_TEXT[kind], value.decode("utf-8", errors="replace"))
             elif kind == b"\xa9day":
                 tags.set("year", _year(value.decode("utf-8", errors="replace")))
@@ -804,6 +842,8 @@ async def _mp4_ilst(source: _Source, start: int, end: int, tags: MediaTags) -> N
                 item = _lyrics(value.decode("utf-8", errors="replace"), "mp4")
                 if item:
                     tags.lyrics.append(item)
+            elif kind in (b"\xa9wrt", b"desc", b"ldes", b"\xa9cmt"):
+                _extra(tags, "composer" if kind == b"\xa9wrt" else "description", value.decode("utf-8", errors="replace"))
             elif kind == b"----" and mean and name and "itunes" in mean.lower():
                 _extra(tags, name, value.decode("utf-8", errors="replace"))
             break
@@ -951,6 +991,8 @@ async def _matroska_child(source, child, start, end, segment, tags, seen, target
                     tags.set("year", _year(value))
                 elif name == "GENRE":
                     tags.set("genre", value)
+                elif name:
+                    _extra(tags, name, value)
     elif child == _ATTACHMENTS:
         async for attached, attached_start, attached_end, _ in _elements(source, start, end):
             if attached != 0x61A7:
@@ -996,6 +1038,8 @@ async def _wav(source: _Source, tags: MediaTags) -> None:
                         tags.set(_WAV_INFO[item], value)
                     elif item == b"ICRD":
                         tags.set("year", _year(value))
+                    elif item in (b"ICMT", b"IWRI"):
+                        _extra(tags, "description" if item == b"ICMT" else "composer", value)
                     offset += 8 + size + (size & 1)
         elif kind in (b"id3 ", b"ID3 "):
             head = await source.get(body, 3)

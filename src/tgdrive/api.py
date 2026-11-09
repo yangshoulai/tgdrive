@@ -526,9 +526,10 @@ class UserApi:
         private = total(".tgdrive/private/") + total(".tgdrive/private-trash/")
         assistant = total(".tgdrive/assistant/")
         thumbnails = total(self.objects.THUMBNAIL_PREFIX)
+        media = total(self.objects.file_metadata.PREFIX)
         used = int(bucket["used_bytes"])
         return {"total": used, "quota_bytes": bucket["quota_bytes"], "trash": trash, "private": private, "assistant": assistant,
-                "thumbnails": thumbnails, "files": max(0, used - trash - private - assistant - thumbnails)}
+                "thumbnails": thumbnails, "media": media, "files": max(0, used - trash - private - assistant - thumbnails - media)}
 
     async def list(self, token: str, *, prefix: str = "", cursor: str | None = None, limit: int = 1000, public_only: bool = False,
                    kind: str = ""):
@@ -794,10 +795,14 @@ class UserApi:
     # 文件所在文件夹（以 / 结尾，根目录为空串）：rtrim 去掉末尾所有非 / 字符，即最后一个 / 之后的文件名。
     _FOLDER_SQL = "rtrim(o.key, replace(o.key, '/', ''))"
     LIBRARY_FOLDER_LIMIT = 2000
-    # 音乐按标签里的专辑名归类（只看名称，同名专辑不再按艺人区分）；没有专辑的歌曲归为空串一组。
-    _ALBUM_SQL = "trim(coalesce(m.album, ''))"
+    # 音乐按文件级元数据（手动修改 > 首次解析）里的专辑名归类（只看名称，同名专辑不再按艺人区分）；没有专辑的歌曲归为空串一组。
+    _ALBUM_SQL = "trim(coalesce(coalesce(json_extract(f.overrides,'$.album'),json_extract(f.auto_fields,'$.album')), ''))"
     # 曲目号（"3"、"3/12" 取前面的数字）；没有时排在有曲目号的歌曲之后。
-    _TRACK_SQL = "CASE WHEN CAST(m.track AS INTEGER)>0 THEN CAST(m.track AS INTEGER) ELSE 1000000 END"
+    _TRACK_SQL = "CASE WHEN CAST(coalesce(json_extract(f.overrides,'$.track'),json_extract(f.auto_fields,'$.track')) AS INTEGER)>0 THEN CAST(coalesce(json_extract(f.overrides,'$.track'),json_extract(f.auto_fields,'$.track')) AS INTEGER) ELSE 1000000 END"
+
+    @staticmethod
+    def _field_sql(name: str) -> str:
+        return f"coalesce(json_extract(f.overrides,'$.{name}'),json_extract(f.auto_fields,'$.{name}'))"
 
     def _library_filter(self, token: str, view: str, query: str):
         """媒体库公共条件：普通文件（不含私密空间与系统区）、按视图限定类型、可选关键词。
@@ -821,10 +826,10 @@ class UserApi:
         if query:
             fields = ["lower(substr(o.key,?))"]
             if view == "music":
-                fields += ["lower(coalesce(m.title,''))", "lower(coalesce(m.artist,''))", "lower(coalesce(m.album,''))"]
+                fields += [f"lower(coalesce({self._field_sql(name)},''))" for name in ("title", "artist", "album")]
             sql += " AND (" + " OR ".join(f"instr({field},lower(?))>0" for field in fields) + ")"
             args += [len(base) + 1, query] + [query] * (len(fields) - 1)
-        joins = "LEFT JOIN blobs b ON b.uuid=o.blob_uuid" + (" LEFT JOIN media_info m ON m.blob_uuid=o.blob_uuid" if view == "music" else "")
+        joins = "LEFT JOIN blobs b ON b.uuid=o.blob_uuid" + (" LEFT JOIN file_metadata f ON f.id=o.metadata_id" if view == "music" else "")
         return account, base, joins, sql, args
 
     async def library(self, token: str, view: str, cursor: str = "", limit: int = 100,
@@ -916,8 +921,8 @@ class UserApi:
 
         def read():
             return self.objects.metadata.db.execute(
-                f"WITH media AS (SELECT o.*, {self._ALBUM_SQL} AS album, nullif(trim(coalesce(m.artist,'')),'') AS artist, "
-                f"m.year AS year, coalesce(m.duration, 0) AS duration, {self._TRACK_SQL} AS track_no FROM objects o {joins} WHERE {sql}), "
+                f"WITH media AS (SELECT o.*, {self._ALBUM_SQL} AS album, nullif(trim(coalesce({self._field_sql('artist')},'')),'') AS artist, "
+                f"{self._field_sql('year')} AS year, coalesce(json_extract(f.auto_fields,'$.duration'), 0) AS duration, {self._TRACK_SQL} AS track_no FROM objects o {joins} WHERE {sql}), "
                 "ranked AS (SELECT *, row_number() OVER (PARTITION BY album ORDER BY track_no, key) AS rank, "
                 "count(*) OVER (PARTITION BY album) AS total, sum(size) OVER (PARTITION BY album) AS bytes, "
                 "sum(duration) OVER (PARTITION BY album) AS seconds, max(modified_at) OVER (PARTITION BY album) AS latest, "
@@ -1252,7 +1257,8 @@ class UserApi:
                 if ticket is not None:
                     self.objects.thumbnail_service.check_claim(current, ticket)
             authorize()
-            guarded = replace(scope, authorize=authorize)
+            custom = bool(ticket and self.objects.thumbnail_service.check_claim(info, ticket).custom)
+            guarded = replace(scope, authorize=authorize, custom_cover=custom)
         else:
             guarded = scope  # 兼容旧客户端；新版客户端均带内容版本和生成票据。
         await self.objects.set_thumbnail(guarded, key, raw, variant)
@@ -1292,8 +1298,8 @@ class UserApi:
             info = self.objects.head_object(scope, key)
             if info.etag != etag:
                 raise ValueError("文件内容已变化，结果已丢弃")
-            self.objects.thumbnail_service.check_claim(info, ticket)
-            self.objects.finish_thumbnail_set(scope, key, variants)
+            lease = self.objects.thumbnail_service.check_claim(info, ticket)
+            self.objects.finish_thumbnail_set(replace(scope, custom_cover=lease.custom), key, variants)
         self.objects.thumbnail_service.release(scope, key, etag, ticket)
 
     def thumbnail_generate(self, token, csrf, path, etag, mode="capture"):
@@ -1579,15 +1585,15 @@ class UserApi:
 
     def _objects_json(self, items) -> list[dict[str, object]]:
         """序列化一页对象，并用一次查询附上缩略图状态。"""
-        versions = self.objects.thumbnail_versions([item.blob_uuid for item in items])
+        versions = self.objects.file_thumbnail_versions(items)
         sizes = self.objects.media_sizes([item.blob_uuid for item in items]) if hasattr(self.objects, "media_sizes") else {}
-        tags = self.objects.media_tags([item.blob_uuid for item in items]) if hasattr(self.objects, "media_tags") else {}
+        tags = self.objects.file_media_fields(items)
         result = []
         for item in items:
-            value = self._object_json(item, tuple(versions.get(item.blob_uuid or "", {})), versions.get(item.blob_uuid or "", {}))
+            value = self._object_json(item, tuple(versions.get((item.bucket_id, item.key), {})), versions.get((item.bucket_id, item.key), {}))
             if size := sizes.get(item.blob_uuid or ""):
                 value["dimensions"] = {"width": size[0], "height": size[1]}
-            if found := tags.get(item.blob_uuid or ""):
+            if found := tags.get((item.bucket_id, item.key)):
                 value["media"] = found
             result.append(value)
         return result

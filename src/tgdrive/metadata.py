@@ -7,6 +7,7 @@ import base64
 import concurrent.futures
 import contextvars
 import json
+import secrets
 import shutil
 import sqlite3
 import threading
@@ -52,7 +53,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 42
+    SCHEMA_VERSION = 44
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -834,6 +835,51 @@ class Metadata:
                         db.execute(f"ALTER TABLE playlists ADD COLUMN {name} {kind}")
                 db.execute("CREATE UNIQUE INDEX IF NOT EXISTS playlists_share_token ON playlists(share_token) WHERE share_token IS NOT NULL")
                 db.execute("PRAGMA user_version = 42")
+            if version < 43:
+                # 文件级元数据与媒体内容分离，正文仍走加密对象存储并计入桶配额。
+                if "metadata_id" not in {row[1] for row in db.execute("PRAGMA table_info(objects)")}:
+                    db.execute("ALTER TABLE objects ADD COLUMN metadata_id TEXT")
+                db.execute("CREATE INDEX IF NOT EXISTS objects_metadata_id ON objects(metadata_id) WHERE metadata_id IS NOT NULL")
+                db.execute("""CREATE TABLE IF NOT EXISTS file_metadata(
+                    id TEXT PRIMARY KEY, bucket_id INTEGER NOT NULL REFERENCES buckets(id) ON DELETE CASCADE,
+                    source_blob TEXT NOT NULL, kind TEXT NOT NULL,
+                    auto_fields TEXT NOT NULL DEFAULT '{}', overrides TEXT NOT NULL DEFAULT '{}',
+                    revision INTEGER NOT NULL DEFAULT 0, fields_ready INTEGER NOT NULL DEFAULT 0,
+                    manual_lyrics INTEGER NOT NULL DEFAULT 0, manual_subtitles INTEGER NOT NULL DEFAULT 0, excluded_subtitles TEXT NOT NULL DEFAULT '[]',
+                    state TEXT NOT NULL DEFAULT 'pending', detail TEXT NOT NULL DEFAULT '',
+                    retry_at REAL NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL)""")
+                db.execute("CREATE INDEX IF NOT EXISTS file_metadata_pending ON file_metadata(state,retry_at)")
+                db.execute("""CREATE TABLE IF NOT EXISTS file_media_assets(
+                    id TEXT PRIMARY KEY, metadata_id TEXT NOT NULL REFERENCES file_metadata(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL, variant TEXT NOT NULL DEFAULT '', language TEXT, title TEXT NOT NULL DEFAULT '',
+                    object_key TEXT NOT NULL, etag TEXT NOT NULL, size INTEGER NOT NULL, format TEXT NOT NULL,
+                    source TEXT, is_default INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL,
+                    UNIQUE(metadata_id,kind,source))""")
+                db.execute("CREATE INDEX IF NOT EXISTS file_media_assets_file ON file_media_assets(metadata_id,kind)")
+                db.execute("CREATE INDEX IF NOT EXISTS file_media_assets_object ON file_media_assets(object_key)")
+                db.execute("PRAGMA user_version = 43")
+            if version < 44:
+                # 升级前的文件补建文件级元数据：已有解析缓存（media_info）的直接复制为首次字段，不回源读取；
+                # 没有缓存的音视频标记为待解析，由媒体服务在后台按新文件优先的顺序逐个读取文件头。
+                from .filekinds import kind_of
+                from .media.records import parsed_fields
+                rows = db.execute(
+                    "SELECT o.bucket_id, o.key, o.blob_uuid, o.content_type, m.title, m.artist, m.album, m.album_artist, m.track, m.year, "
+                    "m.genre, m.extra, m.duration, m.blob_uuid AS parsed FROM objects o LEFT JOIN media_info m ON m.blob_uuid=o.blob_uuid "
+                    "WHERE o.metadata_id IS NULL AND o.blob_uuid IS NOT NULL AND substr(o.key,-1)!='/' "
+                    "AND (substr(o.key,1,9)!='.tgdrive/' OR substr(o.key,1,17)='.tgdrive/private/')").fetchall()
+                now = time.time()
+                for row in rows:
+                    kind = kind_of(row["key"], row["content_type"])
+                    kind = kind if kind in ("audio", "video") else "other"
+                    fields = parsed_fields(row) if kind != "other" and row["parsed"] else {}
+                    ready = kind == "other" or bool(row["parsed"])
+                    ident = secrets.token_hex(16)
+                    db.execute("INSERT INTO file_metadata(id,bucket_id,source_blob,kind,auto_fields,state,fields_ready,created_at,updated_at) "
+                               "VALUES(?,?,?,?,?,?,?,?,?)", (ident, row["bucket_id"], row["blob_uuid"], kind, json.dumps(fields, ensure_ascii=False),
+                                                             "ready" if ready else "pending", int(ready), 0, now))
+                    db.execute("UPDATE objects SET metadata_id=? WHERE bucket_id=? AND key=?", (ident, row["bucket_id"], row["key"]))
+                db.execute("PRAGMA user_version = 44")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""

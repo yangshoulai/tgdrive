@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import Candidate, Fetched, MediaQuery, Provider, ProviderContext, ProviderError
+from .base import Candidate, Fetched, MediaQuery, Provider, ProviderContext, ProviderError, info_fields
 from .. import text as media_text
 
 _IMAGE_LIMIT = 20 * 1024 * 1024
@@ -15,6 +15,10 @@ class EmbeddedProvider(Provider):
     capabilities = frozenset({"cover", "lyrics", "subtitle"})
     media = frozenset({"audio", "video"})
     default_enabled = True
+    info = True
+
+    def info_want(self, kind):
+        return "info"
 
     async def search(self, query: MediaQuery, want, ctx: ProviderContext) -> list[Candidate]:
         file = ctx.file
@@ -22,6 +26,12 @@ class EmbeddedProvider(Provider):
         if tags is None:
             return []
         label = tags.title or query.title or query.name
+        if want == "info":
+            # 文件自带的标签：用户改过字段后可以借此恢复。
+            fields = info_fields(**{name: getattr(tags, name) for name in ("title", "artist", "album", "album_artist", "track", "year", "genre")},
+                                 **{name: tags.extra.get(name) for name in ("composer", "director", "actors", "description")})
+            return [Candidate("info", label, {}, subtitle=" · ".join(part for part in (tags.artist, tags.album) if part), note="文件自带的标签",
+                              score=1.0, fields=fields)] if fields else []
         if want == "cover":
             return [Candidate("cover", label, {"picture": index}, subtitle=picture.mime or "内嵌图片", note="文件内嵌封面",
                               score=1.0, preview="embedded")

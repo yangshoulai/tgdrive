@@ -7,7 +7,10 @@ import { Badge, Button, ConfirmDialog, EmptyState, Icon, Modal, Notice, Skeleton
  *  查询条件先用文件自带的标签（没有时用文件名推断），可以改写后重新查找；结果按匹配度排序，标明来源。
  *  所有第三方请求都由服务器发出，浏览器只拿到候选的短期令牌，封面小图也经服务器读取。 */
 
-const WANT_LABELS: Record<api.MediaWant, string> = { cover: "封面", lyrics: "歌词", subtitle: "字幕" };
+const WANT_LABELS: Record<api.MediaWant, string> = { cover: "封面", lyrics: "歌词", subtitle: "字幕", info: "信息" };
+/** 编辑器与「查找信息」共用的字段名称。 */
+export const AUDIO_FIELD_LABELS: Partial<Record<api.MediaInfoField, string>> = { title: "歌曲名", artist: "歌手", album: "专辑", album_artist: "专辑歌手", track: "曲目编号", year: "发行年份", genre: "流派", composer: "作曲", description: "说明" };
+export const VIDEO_FIELD_LABELS: Partial<Record<api.MediaInfoField, string>> = { title: "标题", artist: "创作者", director: "导演", actors: "演员", year: "发行年份", genre: "类型", description: "简介" };
 const LANGUAGES: { value: string; label: string }[] = [
   { value: "", label: "不标注语言" }, { value: "zh-CN", label: "简体中文（zh-CN）" }, { value: "zh-TW", label: "繁体中文（zh-TW）" },
   { value: "zh", label: "中文（zh）" }, { value: "en", label: "英语（en）" }, { value: "ja", label: "日语（ja）" }, { value: "ko", label: "韩语（ko）" },
@@ -47,7 +50,7 @@ const timeText = (seconds: number | null) => seconds == null ? "" : `${Math.floo
 type Source = { id: string; name: string; state: "loading" | "done" | "failed"; count: number; error: string | null };
 const EMBEDDED = { id: "embedded", name: "内置数据" };
 function embeddedFor(info: api.MediaInfo, want: api.MediaWant) {
-  return info.embedded && (want === "cover" ? info.cover : want === "lyrics" ? Boolean(info.lyrics) : info.subtitles.some(item => item.text));
+  return want === "info" || (want === "cover" ? info.cover : want === "lyrics" ? Boolean(info.file_lyrics) : (info.streams ?? []).some(item => item.text));
 }
 
 /** 查询条件与结果；打开时先按文件信息自动查找一次。每个来源单独请求，先返回的先显示，不等最慢的来源。 */
@@ -131,8 +134,8 @@ function ProviderStatus({ lookup, want }: { lookup: Lookup; want: api.MediaWant 
   </ul>;
 }
 
-/** 歌词、字幕：选择一项查看内容，保存为媒体同目录的同名文件。 */
-export function MediaLookupDialog({ file, want, onClose, onPickText }: { file: api.FileItem; want: "lyrics" | "subtitle"; onClose: () => void; onPickText?: (text: string) => void }) {
+/** 歌词、字幕：选择一项查看内容，保存到独立元数据资源。 */
+export function MediaLookupDialog({ file, want, onClose, onPickText }: { file: api.FileItem; want: "lyrics" | "subtitle"; onClose: () => void; onPickText?: (text: string, details?: { language: string | null; title: string }) => void }) {
   const kind = want === "lyrics" ? "audio" : "video";
   const lookup = useLookup(file, want);
   const { candidates } = lookup;
@@ -140,15 +143,6 @@ export function MediaLookupDialog({ file, want, onClose, onPickText }: { file: a
   const [content, setContent] = useState<Record<string, { text?: string; format?: string | null; error?: string }>>({});
   const [language, setLanguage] = useState("");
   const [saving, setSaving] = useState(false), [conflict, setConflict] = useState<string | null>(null);
-  const [editInfo, setEditInfo] = useState<api.AudioEditInfo | null>(null);
-  const [saveMode, setSaveMode] = useState<"embedded" | "file" | null>(null), [saveStatus, setSaveStatus] = useState("");
-  const embedded = want === "lyrics" && (saveMode ?? (editInfo?.editable ? "embedded" : "file")) === "embedded";
-  useEffect(() => {
-    if (want !== "lyrics" || onPickText) return;
-    const controller = new AbortController();
-    void api.audioEditInfo(file.key, controller.signal).then(setEditInfo).catch(() => undefined);
-    return () => controller.abort();
-  }, [file.key, want]);
   const reading = useRef<AbortController | null>(null);
   const close = useRef(onClose); close.current = onClose;
   useEffect(() => () => reading.current?.abort(), []);
@@ -177,19 +171,11 @@ export function MediaLookupDialog({ file, want, onClose, onPickText }: { file: a
       .catch(reason => { if (!controller.signal.aborted) setContent(current => ({ ...current, [candidate.token]: { error: api.errorMessage(reason, "内容没有读取出来") } })); });
   }
   const shown = selected ? content[selected.token] : undefined;
-  const stem = baseName(file.key).replace(/\.[^.]+$/, "");
-  const extension = want === "lyrics" ? "lrc" : shown?.format === "vtt" ? "vtt" : "srt";
-  const target = `${stem}${language ? `.${language}` : ""}.${extension}`;
-
   async function save(overwrite = false) {
     if (!selected || saving) return;
-    if (onPickText && shown?.text) { onPickText(shown.text); return; }
+    if (onPickText && shown?.text) { onPickText(shown.text, { language: selected.language, title: selected.title }); return; }
     setSaving(true);
     try {
-      if (embedded && shown?.text && editInfo) {
-        await api.saveAudioMetadata({ ...file, etag: editInfo.etag }, { lyrics: shown.text }, "keep", undefined, job => setSaveStatus(job.detail));
-        toast.success("歌词已写入音频文件"); onClose(); return;
-      }
       const saved = await api.mediaSave(file.key, selected.token, language, overwrite);
       api.announceMediaAssets(file.key, saved.path);
       window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [parentPath(file.key)] } }));
@@ -204,22 +190,13 @@ export function MediaLookupDialog({ file, want, onClose, onPickText }: { file: a
   return <Modal title={`在线查找${WANT_LABELS[want]}`} description={baseName(file.key)} icon="search" size="lg"
     className={`media-lookup${api.isPrivatePath(file.key) ? " private-dialog" : ""}`} onClose={() => { if (!saving) onClose(); }} dismissible={!saving}
     footer={<>
-      {selected && !onPickText && <span className="media-lookup-target" title={embedded ? baseName(file.key) : target}>{embedded ? "写入" : "保存为"} <strong>{embedded ? baseName(file.key) : target}</strong></span>}
+      {selected && !onPickText && <span className="media-lookup-target">保存到文件元数据</span>}
       <Button variant="ghost" disabled={saving} onClick={onClose}>取消</Button>
-      <Button variant="primary" icon="check" loading={saving} disabled={!selected || !shown?.text} onClick={() => void save()}>{onPickText ? `使用这份${WANT_LABELS[want]}` : embedded ? "写入音频" : `保存${WANT_LABELS[want]}`}</Button>
+      <Button variant="primary" icon="check" loading={saving} disabled={!selected || !shown?.text} onClick={() => void save()}>{onPickText ? `使用这份${WANT_LABELS[want]}` : `保存${WANT_LABELS[want]}`}</Button>
     </>}>
     <div className="media-lookup-body">
       <QueryForm lookup={lookup} kind={kind} want={want} />
       <ProviderStatus lookup={lookup} want={want} />
-      {saving && saveStatus && <Notice>{saveStatus}</Notice>}
-      {want === "lyrics" && !onPickText && <label className="media-lookup-field">
-        <span>保存方式</span>
-        <select className="input" value={embedded ? "embedded" : "file"} disabled={saving} onChange={event => setSaveMode(event.target.value as "embedded" | "file")}>
-          <option value="embedded" disabled={!editInfo?.editable}>写入音频文件（推荐）</option>
-          <option value="file">另存为同目录 .lrc 文件</option>
-        </select>
-        {!editInfo?.editable && <small>内置歌词支持 MP3、FLAC、M4A、WAV，服务器需安装 FFmpeg。</small>}
-      </label>}
       {lookup.error && <Notice tone="danger">{lookup.error}</Notice>}
       <div className="media-lookup-split">
         <div className="media-lookup-results" role="listbox" aria-label={`${WANT_LABELS[want]}候选`}>
@@ -255,12 +232,12 @@ export function MediaLookupDialog({ file, want, onClose, onPickText }: { file: a
         <select className="input" value={language} onChange={event => setLanguage(event.target.value)}>
           {LANGUAGES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
         </select>
-        <small>写进文件名，播放器按它显示字幕语言；同一视频可以保存多种语言的字幕。</small>
+        <small>保存在元数据中，播放器按它显示字幕语言；同一视频可以保存多种语言的字幕。</small>
       </label>}
-      <p className="media-lookup-hint">{onPickText ? `选中的${WANT_LABELS[want]}先填入编辑窗口，点击「保存元数据」后才写入文件。` : want === "lyrics" ? embedded ? "歌词直接内置到音频中，不生成额外文件，也不会重新编码音频。" : "歌词保存为与音乐同名的 .lrc 文件，放在同一文件夹，播放时自动加载。" : "字幕保存为与视频同名的 .srt 或 .vtt 文件，放在同一文件夹，播放时可在字幕菜单里选择。"}
+      <p className="media-lookup-hint">{onPickText ? `选中的${WANT_LABELS[want]}先填入编辑窗口，点击「保存元数据」后生效。` : "资源保存在用户隐藏空间并计入配额，原文件不会改动。"}
         查询由服务器发给所选来源，只包含查询条件{want === "subtitle" ? "与用于匹配版本的文件特征值" : ""}，不发送文件内容。</p>
     </div>
-    {conflict && <ConfirmDialog title="替换已有的文件？" confirmLabel="替换" description={`${conflict}。替换后原来的内容会被覆盖。`}
+    {conflict && <ConfirmDialog title="替换已有的元数据资源？" confirmLabel="替换" description={`${conflict}。替换后原来的内容会被覆盖。`}
       onClose={() => setConflict(null)} onConfirm={async () => { setConflict(null); await save(true); }} />}
   </Modal>;
 }
@@ -301,4 +278,81 @@ export function MediaCoverSearch({ file, selected, disabled, onPick }: { file: a
           <span className="media-cover-art" /><span className="media-cover-caption"><i /><i /></span></span>)}
       </div>}
   </div>;
+}
+
+/** 查找歌名、歌手、专辑、年份等信息：结果直接带字段，选中后逐项勾选要填入的内容，先填进编辑窗口，保存元数据时才生效。 */
+export function MediaInfoLookupDialog({ file, current, onClose, onApply }: { file: api.FileItem; current: Partial<Record<api.MediaInfoField, string>>; onClose: () => void;
+  onApply: (fields: Partial<Record<api.MediaInfoField, string>>) => void }) {
+  const kind = getFileKind(file.content_type, file.key) === "video" ? "video" : "audio";
+  const labels = kind === "video" ? VIDEO_FIELD_LABELS : AUDIO_FIELD_LABELS;
+  const lookup = useLookup(file, "info");
+  const candidates = lookup.candidates.filter(item => Object.keys(item.fields).some(name => name in labels));
+  const [selected, setSelected] = useState<api.MediaCandidate | null>(null);
+  const [picked, setPicked] = useState<Set<api.MediaInfoField>>(new Set());
+  function choose(candidate: api.MediaCandidate | null) {
+    setSelected(candidate);
+    // 默认勾选与当前值不同的字段；空白与相同的字段不必覆盖。
+    setPicked(new Set(candidate ? (Object.keys(labels) as api.MediaInfoField[]).filter(name => candidate.fields[name] && candidate.fields[name] !== (current[name] ?? "")) : []));
+  }
+  useEffect(() => {
+    if (selected && candidates.includes(selected)) return;
+    choose(candidates.find(item => item.provider !== "embedded") ?? candidates[0] ?? null);
+  }, [lookup.candidates]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const rows = selected ? (Object.keys(labels) as api.MediaInfoField[]).filter(name => selected.fields[name]) : [];
+  const toggle = (name: api.MediaInfoField) => setPicked(value => { const next = new Set(value); if (next.has(name)) next.delete(name); else next.add(name); return next; });
+  const keyOf = (item: api.MediaCandidate, index: number) => `${item.provider}-${index}`;
+  return <Modal title="在线查找信息" description={baseName(file.key)} icon="search" size="lg"
+    className={`media-lookup media-info-lookup${api.isPrivatePath(file.key) ? " private-dialog" : ""}`} onClose={onClose}
+    footer={<>
+      <span className="media-lookup-target">{picked.size ? `将填入 ${picked.size} 项` : "勾选要填入的字段"}</span>
+      <Button variant="ghost" onClick={onClose}>取消</Button>
+      <Button variant="primary" icon="check" disabled={!selected || !picked.size} onClick={() => {
+        if (!selected) return;
+        onApply(Object.fromEntries([...picked].map(name => [name, selected.fields[name] ?? ""])));
+      }}>填入所选字段</Button>
+    </>}>
+    <div className="media-lookup-body">
+      <QueryForm lookup={lookup} kind={kind} want="info" />
+      <ProviderStatus lookup={lookup} want="info" />
+      {lookup.error && <Notice tone="danger">{lookup.error}</Notice>}
+      <div className="media-lookup-split">
+        <div className="media-lookup-results" role="listbox" aria-label="信息候选">
+          {lookup.loading && !candidates.length ? <SkeletonRows rows={5} />
+            : !candidates.length ? <EmptyState compact icon="search" title="没有找到信息" description={kind === "video" ? "可以改用中文或英文原名、补上年份后重新查找。" : "可以修改歌名、歌手后重新查找。"} />
+            : candidates.map((candidate, index) => {
+              const active = selected === candidate;
+              const facts = [candidate.fields.artist, candidate.fields.album, candidate.fields.year].filter(Boolean).join(" · ") || candidate.subtitle;
+              return <button type="button" role="option" key={keyOf(candidate, index)} aria-selected={active}
+                className={`media-lookup-item${active ? " is-selected" : ""}`} onClick={() => choose(candidate)}>
+                <span className="media-lookup-item-head">
+                  <strong title={candidate.fields.title || candidate.title}>{candidate.fields.title || candidate.title || "（无标题）"}</strong>
+                  {candidate.provider !== "embedded" && <span className="media-lookup-score" title="匹配度">{percent(candidate.score)}</span>}
+                </span>
+                {facts && <span className="media-lookup-item-sub" title={facts}>{facts}</span>}
+                <span className="media-lookup-tags">
+                  <Badge tone={candidate.provider === "embedded" ? "accent" : "neutral"}>{lookup.nameOf(candidate.provider)}</Badge>
+                  {candidate.fields.genre && <Badge>{candidate.fields.genre}</Badge>}
+                </span>
+              </button>;
+            })}
+        </div>
+        <div className="media-lookup-preview media-info-compare" aria-live="polite">
+          {!selected ? <EmptyState compact icon="fileText" title="选择一项查看字段" />
+            : <table>
+              <thead><tr><th scope="col"><span className="sr-only">填入</span></th><th scope="col">字段</th><th scope="col">当前</th><th scope="col">查找结果</th></tr></thead>
+              <tbody>{rows.map(name => {
+                const now = current[name] ?? "", next = selected.fields[name] ?? "", same = now === next;
+                return <tr key={name} className={same ? "is-same" : picked.has(name) ? "is-picked" : undefined} onClick={() => !same && toggle(name)}>
+                  <td><input type="checkbox" aria-label={`填入${labels[name]}`} checked={picked.has(name)} disabled={same} onChange={() => toggle(name)} onClick={event => event.stopPropagation()} /></td>
+                  <th scope="row">{labels[name]}</th>
+                  <td className="media-info-old" title={now}>{now || <span className="muted">空</span>}</td>
+                  <td className="media-info-new" title={next}>{next}{same && <small>相同</small>}</td>
+                </tr>;
+              })}</tbody>
+            </table>}
+        </div>
+      </div>
+      <p className="media-lookup-hint">勾选的字段先填入编辑窗口，点击「保存元数据」后生效。查询由服务器发给所选来源，只包含查询条件，不发送文件内容。</p>
+    </div>
+  </Modal>;
 }

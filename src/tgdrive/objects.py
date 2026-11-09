@@ -58,6 +58,7 @@ class ObjectInfo:
     public_has_password: bool = False
     public_downloads: int = 0
     starred_at: float | None = None
+    metadata_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,8 @@ class ObjectService:
         self.metadata, self.engine = metadata, engine
         self.on_commit: Callable[[ObjectInfo, Scope | None], None] | None = None
         self.on_change: Callable[[int], None] | None = None
+        from .media.records import FileMetadataStore
+        self.file_metadata = FileMetadataStore(self)
         self.thumbnail_service = None
 
     def _changed(self, bucket_id: int) -> None:
@@ -152,7 +155,7 @@ class ObjectService:
         return ObjectInfo(row["bucket_id"], row["key"], row["size"], row["etag"], row["content_type"],
                           user_meta, row["modified_at"], row["blob_uuid"], get("public_token"), get("public_at"),
                           get("public_expires_at"), bool(get("public_password")), int(get("public_downloads", 0) or 0),
-                          get("starred_at"))
+                          get("starred_at"), get("metadata_id"))
 
     def _lookup(self, scope: Scope, key: str, *, write: bool = False):
         self._check_scope(scope, key, write=write)
@@ -197,7 +200,7 @@ class ObjectService:
 
     def _commit_blob(self, bucket_id: int, key: str, blob_uuid: str, size: int, etag: str,
                      content_type: str | None, user_meta: dict[str, str] | None, *, scope: Scope | None = None,
-                     dedupe: bool = False, if_match: str | None = None, declared: bool = False) -> ObjectInfo:
+                     dedupe: bool = False, if_match: str | None = None, declared: bool = False, metadata_source=None) -> ObjectInfo:
         """declared=True 时完全采用调用方给出的类型（S3 的 Content-Type 由客户端决定，复制沿用来源的类型），不按内容判断。
         dedupe=True 用于刚写入的新 Blob：已有相同内容时改为引用那份，调用方随后删除新 Blob（返回对象的 blob_uuid 不同）。
         对象自己的 ETag 保持不变，S3 分段上传返回的 ETag 不受影响。"""
@@ -234,6 +237,15 @@ class ObjectService:
                         old["starred_at"] if old else None))
             # 相对更新：释放旧 Blob 时可能顺带删除了该桶里的大缩略图，那部分已在上面扣减。
             db.execute("UPDATE buckets SET used_bytes = used_bytes - ? + ? WHERE id = ?", (old_size, size, bucket_id))
+            previous = old["metadata_id"] if old else None
+            ident = previous if old is not None and old["blob_uuid"] == blob_uuid else None
+            if previous and previous != ident:
+                self.file_metadata.drop_unreferenced(db, previous, now)
+            if self.file_metadata.eligible(key):
+                if not ident:
+                    ident = (self.file_metadata.clone(db, metadata_source, bucket_id, key, now) if metadata_source is not None
+                             else self.file_metadata.create(db, bucket_id, blob_uuid, key, content_type, now))
+                db.execute("UPDATE objects SET metadata_id=? WHERE bucket_id=? AND key=?", (ident, bucket_id, key))
         row = self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id = ? AND key = ?", (bucket_id, key)).fetchone()
         info = self._object(row)
         self._changed(bucket_id)
@@ -532,10 +544,11 @@ class ObjectService:
             db.execute("UPDATE thumbnails SET bucket_id=? WHERE blob_uuid=? AND variant=?", (target, blob_uuid, row["variant"]))
 
     def _drop_object_row(self, db, bucket_id: int, key: str, now: float) -> None:
-        old = db.execute("SELECT blob_uuid, size FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone()
+        old = db.execute("SELECT blob_uuid, size, metadata_id FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key)).fetchone()
         if old is None:
             return
         db.execute("DELETE FROM objects WHERE bucket_id=? AND key=?", (bucket_id, key))
+        self.file_metadata.drop_unreferenced(db, old["metadata_id"], now)
         db.execute("UPDATE buckets SET used_bytes = MAX(0, used_bytes - ?) WHERE id=?", (old["size"], bucket_id))
         if old["blob_uuid"]:
             self._release_blob(db, old["blob_uuid"], now)
@@ -555,6 +568,9 @@ class ObjectService:
             raise ValueError("不支持的封面规格")
         if not data or len(data) > limit:
             raise ValueError("封面过大")
+        if scope.custom_cover:
+            await self.file_metadata.set_cover(scope, key, data, variant)
+            return
         await self._store_thumbnail(info.bucket_id, blob_uuid, variant, self._thumbnail_mime(data), data, scope)
 
     async def _store_thumbnail(self, bucket_id: int, blob_uuid: str, variant: str, mime: str, data: bytes,
@@ -588,6 +604,9 @@ class ObjectService:
         """重新生成成功后移除未生成的旧规格；失败期间始终保留原来的缩略图。"""
         if "thumb" not in variants:
             return
+        if scope.custom_cover:
+            self.file_metadata.finish_covers(scope, key, variants)
+            return
         _, blob = self._thumbnail_blob(scope, key, write=True)
         with self.metadata.transaction() as db:
             rows = db.execute("SELECT variant,bucket_id,object_key FROM thumbnails WHERE blob_uuid=?", (blob,)).fetchall()
@@ -605,6 +624,9 @@ class ObjectService:
         不必为一次验证从存储下载缩略图、占用小读取通道。"""
         if variant not in self.THUMBNAIL_LIMITS or not info.blob_uuid:
             raise NotFoundError("thumbnail not found")
+        custom = await self.file_metadata.read_cover(info, variant, known)
+        if custom is not None:
+            return custom
         db = self.metadata.db
         for candidate in self.THUMBNAIL_FALLBACK[variant]:
             sql = "SELECT mime, data, created_at, bucket_id, object_key FROM thumbnails WHERE blob_uuid=? AND variant=?"
@@ -648,11 +670,13 @@ class ObjectService:
         if not etag or len(etag) > 128:
             raise NotFoundError("thumbnail not found")
         self._bucket(scope.bucket_id)
+        ident = version.split(":")[1] if re.fullmatch(r"m:[0-9a-f]{32}:\d+", version) else None
         rows = self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id=? AND etag=? AND blob_uuid IS NOT NULL "
-                                        "AND substr(key,-1)!='/' ORDER BY key LIMIT 16", (scope.bucket_id, etag)).fetchall()
-        if version and len({row["blob_uuid"] for row in rows}) > 1:
-            versions = self.thumbnail_versions([row["blob_uuid"] for row in rows])
-            rows = sorted(rows, key=lambda row: version not in versions.get(row["blob_uuid"], {}).values())
+                                        + ("AND metadata_id=? " if ident else "") + "AND substr(key,-1)!='/' ORDER BY key LIMIT 16",
+                                        (scope.bucket_id, etag, ident) if ident else (scope.bucket_id, etag)).fetchall()
+        if version and len(rows) > 1:
+            versions = self.file_thumbnail_versions([self._object(row) for row in rows])
+            rows = sorted(rows, key=lambda row: version not in versions.get((row["bucket_id"], row["key"]), {}).values())
         for row in rows:
             try:
                 if accept is not None:
@@ -758,6 +782,16 @@ class ObjectService:
         """内部缩略图记录，含 none 失败标记；网页输出需经 thumbnail_fields 分离图片与状态。"""
         return {uuid: list(versions) for uuid, versions in self.thumbnail_versions(blob_uuids).items()}
 
+    def file_thumbnail_versions(self, items):
+        base = self.thumbnail_versions([item.blob_uuid for item in items])
+        custom = self.file_metadata.cover_versions(items)
+        return {(item.bucket_id, item.key): custom.get(item.metadata_id, base.get(item.blob_uuid or "", {})) for item in items}
+
+    def file_media_fields(self, items):
+        """列表展示的歌名、艺人、专辑等只来自文件级元数据（手动覆盖 > 首次解析），不再读取按 Blob 的解析缓存。"""
+        custom = self.file_metadata.summaries(items)
+        return {(item.bucket_id, item.key): custom[item.metadata_id] for item in items if item.metadata_id in custom}
+
     @classmethod
     def thumbnail_fields(cls, variants: Iterable[str] = (), versions: dict[str, str] | None = None) -> dict[str, object]:
         """none 只表示曾尝试但未生成，不能出现在网页的图片规格或图片版本中。"""
@@ -777,23 +811,6 @@ class ObjectService:
         marks = ",".join("?" for _ in unique)
         return {row["uuid"]: (row["media_width"], row["media_height"]) for row in self.metadata.db.execute(
             f"SELECT uuid, media_width, media_height FROM blobs WHERE uuid IN ({marks}) AND media_width IS NOT NULL", unique)}
-
-    MEDIA_TAG_FIELDS = ("title", "artist", "album", "album_artist", "track", "year", "duration")
-
-    def media_tags(self, blob_uuids: list[str]) -> dict[str, dict[str, object]]:
-        """批量读取已记录的音视频标签（media_info，写入后由媒体服务提取）：列表与播放列表据此显示歌名、艺人、专辑与时长。
-        只读已有记录，不在列表时解析文件；没有记录或全部为空的不返回。"""
-        unique = list(dict.fromkeys(uuid for uuid in blob_uuids if uuid))
-        if not unique:
-            return {}
-        marks = ",".join("?" for _ in unique)
-        result: dict[str, dict[str, object]] = {}
-        for row in self.metadata.db.execute(
-                f"SELECT blob_uuid, {', '.join(self.MEDIA_TAG_FIELDS)} FROM media_info WHERE blob_uuid IN ({marks})", unique):
-            tags = {name: row[name] for name in self.MEDIA_TAG_FIELDS if row[name] not in (None, "")}
-            if tags:
-                result[row["blob_uuid"]] = tags
-        return result
 
     def set_media_size(self, scope: Scope, key: str, etag: str, width: object, height: object) -> bool:
         """记录图片／视频的显示尺寸（浏览器读到的 naturalWidth／videoWidth 等，已按旋转方向换算）。
@@ -1061,11 +1078,11 @@ class ObjectService:
             else:
                 page = self.list_objects(scope, prefix, "/", cursor, max(1, min(limit, 500)))
             return (page, self.folder_summary(scope, page.common_prefixes),
-                    self.thumbnail_variants([item.blob_uuid for item in page.objects]), self.folder_previews(scope, page.common_prefixes))
+                    self.file_thumbnail_versions(page.objects), self.folder_previews(scope, page.common_prefixes))
         page, sizes, thumbnails, previews = await self.metadata.run_in_thread(read_page)
         files = [{"name": item.key[len(prefix):], "path": item.key[len(root.key):], "size": item.size, "content_type": item.content_type,
                   "etag": item.etag, "modified_at": item.modified_at,
-                  **self.thumbnail_fields(thumbnails.get(item.blob_uuid or "", []))}
+                  **self.thumbnail_fields(thumbnails.get((item.bucket_id, item.key), {}))}
                  for item in page.objects if item.key != prefix and not item.key.endswith("/")]
         folders = [{"name": value[len(prefix):].rstrip("/"), "path": value[len(root.key):], "size": sizes[value][0], "modified_at": sizes[value][1],
                     "previews": [{"name": item["key"].rsplit("/", 1)[-1], "path": item["key"][len(root.key):],
@@ -1180,6 +1197,11 @@ class ObjectService:
                                                           row["content_type"], row["user_meta"], now))
                     saved += 1
             db.execute("UPDATE buckets SET used_bytes = used_bytes + ? WHERE id=?", (total, dst.bucket_id))
+            for index, row, rest in plan:
+                if row is not None and row["blob_uuid"]:
+                    key = renamed[index] + rest
+                    ident = self.file_metadata.clone(db, row, dst.bucket_id, key, now)
+                    db.execute("UPDATE objects SET metadata_id=? WHERE bucket_id=? AND key=?", (ident, dst.bucket_id, key))
             # 每次保存计为一次下载，分享者能看到被转存，以后的下载次数上限也不会被绕过。
             db.execute("UPDATE objects SET public_downloads=public_downloads+1 WHERE bucket_id=? AND key=?", (root.bucket_id, root.key))
         return {"saved": saved, "bytes": total, "items": renamed}
@@ -1214,6 +1236,8 @@ class ObjectService:
                        "VALUES(?,?,?,?,?,?,?,?)", (dst.bucket_id, final, row["blob_uuid"], row["size"], row["etag"],
                                                   row["content_type"], row["user_meta"], now))
             db.execute("UPDATE buckets SET used_bytes = used_bytes + ? WHERE id=?", (row["size"], dst.bucket_id))
+            ident = self.file_metadata.clone(db, row, dst.bucket_id, final, now)
+            db.execute("UPDATE objects SET metadata_id=? WHERE bucket_id=? AND key=?", (ident, dst.bucket_id, final))
         return self._object(self.metadata.db.execute("SELECT * FROM objects WHERE bucket_id=? AND key=?",
                                                       (dst.bucket_id, final)).fetchone())
 
@@ -1237,6 +1261,7 @@ class ObjectService:
                     continue
                 if row["blob_uuid"]:
                     db.execute("DELETE FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key))
+                    self.file_metadata.drop_unreferenced(db, row["metadata_id"], now)
                     self._release_blob(db, row["blob_uuid"], now, scope.bucket_id)
                 else:
                     db.execute("DELETE FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key))
@@ -1269,19 +1294,20 @@ class ObjectService:
                 # 否则 SQLite 可能为桶内每个对象重复计算候选，即使 LIMIT 很小也会拖慢目录列表。
                 # 每个目录单独执行有界查询，最多检查 PREVIEW_SAMPLE 个文件，避免为凑四张封面扫描整个目录。
                 rows = self.metadata.db.execute(
-                    "SELECT sample.key,sample.size,sample.etag,sample.content_type,sample.modified_at,"
+                    "SELECT sample.key,sample.size,sample.etag,sample.content_type,sample.modified_at,sample.metadata_id,c.updated_at AS custom_at,"
                     "t.created_at AS thumbnail_created_at FROM ("
-                    "SELECT key,blob_uuid,size,etag,content_type,modified_at FROM objects WHERE bucket_id=? "
+                    "SELECT key,blob_uuid,size,etag,content_type,modified_at,metadata_id FROM objects WHERE bucket_id=? "
                     "AND key>? AND key<? AND substr(key,-1)!='/' "
                     "AND (substr(key,1,9)!='.tgdrive/' OR ?=1) ORDER BY key LIMIT ?) sample "
                     "LEFT JOIN thumbnails t ON t.blob_uuid=sample.blob_uuid AND t.variant='thumb' "
                     "LEFT JOIN thumbnail_legacy l ON l.blob_uuid=sample.blob_uuid "
-                    "WHERE t.blob_uuid IS NOT NULL OR l.blob_uuid IS NOT NULL ORDER BY sample.key LIMIT 4",
+                    "LEFT JOIN file_media_assets c ON c.metadata_id=sample.metadata_id AND c.kind='cover' AND c.variant='thumb' "
+                    "WHERE t.blob_uuid IS NOT NULL OR l.blob_uuid IS NOT NULL OR c.id IS NOT NULL ORDER BY sample.key LIMIT 4",
                     (scope.bucket_id, prefix, prefix + self._PREFIX_END, int(scope.private_access), self.PREVIEW_SAMPLE))
                 for row in rows:
                     item = {key: row[key] for key in ("key", "size", "etag", "content_type", "modified_at")}
                     previews[prefix].append({**item, "thumbnails": ["thumb"], "has_thumbnail": True,
-                        "thumbnail_versions": {"thumb": self._thumbnail_revision(row["thumbnail_created_at"])}})
+                        "thumbnail_versions": {"thumb": f"m:{row['metadata_id']}:{int(row['custom_at'] * 1000000)}" if row["custom_at"] else self._thumbnail_revision(row["thumbnail_created_at"])}})
             return previews
         return self.metadata.cached_read(("folder-previews", scope.bucket_id, tuple(prefixes)), read)
 
@@ -1407,7 +1433,7 @@ class ObjectService:
             return self.list_objects(scope, directory, "/", cursor, max(1, min(limit, 200)))
         return await self.metadata.run_in_thread(read)
 
-    def preview_assets(self, scope: Scope, key: str) -> list[dict[str, object]]:
+    def related_media_files(self, scope: Scope, key: str) -> list[dict[str, object]]:
         """按同目录、同主文件名查找歌词和字幕，不依赖文件列表当前页。"""
         info = self.head_object(scope, key)
         if info.key.endswith("/") or (key.startswith(".tgdrive/") and not scope.private_access):
@@ -1446,6 +1472,10 @@ class ObjectService:
                     break
         return assets
 
+    def preview_assets(self, scope: Scope, key: str) -> list[dict[str, object]]:
+        """播放只读取已登记资源；同目录发现仅供编辑器显式导入。"""
+        return self.file_metadata.preview_assets(self.head_object(scope, key))
+
     async def apreview_assets(self, scope: Scope, key: str) -> list[dict[str, object]]:
         return await self.metadata.run_in_thread(self.preview_assets, scope, key)
 
@@ -1458,7 +1488,7 @@ class ObjectService:
             return await self.put_directory_marker(dst, dst_key)
         return self._commit_blob(dst.bucket_id, dst_key, source["blob_uuid"], source["size"], source["etag"],
                                  content_type if content_type is not None else source["content_type"],
-                                 metadata if metadata is not None else json.loads(source["user_meta"] or "{}"), scope=dst, declared=True)
+                                 metadata if metadata is not None else json.loads(source["user_meta"] or "{}"), scope=dst, declared=True, metadata_source=source)
 
     def move_prefix(self, scope: Scope, old: str, new: str, conflict: str = "skip") -> int:
         return self.move(scope, old, new, conflict).moved
@@ -1539,6 +1569,7 @@ class ObjectService:
                         continue
                     if conflict == "overwrite":
                         db.execute("DELETE FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, target))
+                        self.file_metadata.drop_unreferenced(db, existing["metadata_id"], now)
                         if existing["blob_uuid"]:
                             self._release_blob(db, existing["blob_uuid"], now, scope.bucket_id)
                         db.execute("UPDATE buckets SET used_bytes = used_bytes - ? WHERE id=?",

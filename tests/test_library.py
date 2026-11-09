@@ -129,11 +129,11 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(trip["size"], 6 * 68)
 
     def tag(self, key, **fields):
-        row = self.app.metadata.db.execute("SELECT blob_uuid FROM objects WHERE bucket_id=? AND key=?", (self.alice.bucket_id, key)).fetchone()
-        names = ", ".join(fields)
+        # 音乐库只读文件级元数据（首次解析字段），不再读取按 Blob 的解析缓存 media_info。
+        row = self.app.metadata.db.execute("SELECT metadata_id FROM objects WHERE bucket_id=? AND key=?", (self.alice.bucket_id, key)).fetchone()
         with self.app.metadata.transaction() as db:
-            db.execute(f"INSERT INTO media_info(blob_uuid, parser, extracted_at, {names}) VALUES (?,?,?,{','.join('?' for _ in fields)})",
-                       (row["blob_uuid"], 1, time.time(), *fields.values()))
+            db.execute("UPDATE file_metadata SET auto_fields=?, fields_ready=1, state='ready' WHERE id=?",
+                       (json.dumps(fields, ensure_ascii=False), row["metadata_id"]))
 
     def test_music_groups_by_album_name(self):
         self.put("a/1.mp3", b"ID3" + b"\x01" * 64, "audio/mpeg")

@@ -15,7 +15,7 @@ class ThumbnailStateTests(unittest.TestCase):
     def test_list_separates_missing_failed_and_ready_files(self):
         api = UserApi.__new__(UserApi)
         versions = {"failed": {"none": "1"}, "ready": {"thumb": "2", "grid": "3", "poster": "4"}}
-        api.objects = SimpleNamespace(thumbnail_versions=Mock(return_value=versions))
+        api.objects = SimpleNamespace(file_thumbnail_versions=Mock(return_value={(1, key + ".mp4"): value for key, value in versions.items()}), file_media_fields=Mock(return_value={}))
         files = [ObjectInfo(1, name + ".mp4", 100, name, "video/mp4", {}, 0, name)
                  for name in ("missing", "failed", "ready")]
         missing, failed, ready = api._objects_json(files)
@@ -26,7 +26,7 @@ class ThumbnailStateTests(unittest.TestCase):
         self.assertEqual(ready["thumbnail_versions"], versions["ready"])
         self.assertEqual(set(ready["thumbnails"]), {"thumb", "grid", "poster"})
         self.assertEqual(versions["failed"], {"none": "1"}, "网页过滤不能删除内部失败记录")
-        api.objects.thumbnail_versions.assert_called_once_with(["missing", "failed", "ready"])
+        api.objects.file_thumbnail_versions.assert_called_once_with(files)
 
     def test_real_images_take_precedence_over_a_stale_failure_marker(self):
         state = ObjectService.thumbnail_fields(("none", "thumb"), {"none": "1", "thumb": "2"})
@@ -42,10 +42,10 @@ class ThumbnailStateTests(unittest.TestCase):
     def test_download_task_does_not_publish_none_as_an_image(self):
         worker = OfflineDownloads.__new__(OfflineDownloads)
         worker.metadata = Mock()
-        worker.metadata.db.execute.return_value = [{"key": "clip.mp4", "size": 100, "etag": "etag",
+        worker.metadata.db.execute.return_value = [{"bucket_id": 1, "modified_at": 0, "user_meta": "{}", "key": "clip.mp4", "size": 100, "etag": "etag",
                                                     "content_type": "video/mp4", "blob_uuid": "blob"}]
         worker.objects = ObjectService(Mock(), Mock())
-        worker.objects.thumbnail_versions = Mock(return_value={"blob": {"none": "1"}})
+        worker.objects.file_thumbnail_versions = Mock(return_value={(1, "clip.mp4"): {"none": "1"}})
         task = {}
         worker._attach_files(1, [(task, {"bucket_id": 1, "key": "clip.mp4"})])
         self.assertEqual((task["file"]["thumbnails"], task["file"]["thumbnail_versions"], task["file"]["thumbnail_status"]),
@@ -55,8 +55,8 @@ class ThumbnailStateTests(unittest.TestCase):
 class AssistantThumbnailStateTests(unittest.IsolatedAsyncioTestCase):
     def context(self, rows, variants):
         objects = ObjectService(Mock(), Mock())
-        objects.metadata.db.execute.return_value.fetchall.return_value = rows
-        objects.thumbnail_variants = Mock(return_value=variants)
+        objects.metadata.db.execute.return_value.fetchall.return_value = [dict(row, bucket_id=1, user_meta="{}", modified_at=0) for row in rows]
+        objects.file_thumbnail_versions = Mock(return_value={(1, row["key"]): variants.get(row["blob_uuid"], {}) for row in rows})
         return ToolContext(user_id=1, bucket_id=1, scope_root="", objects=objects, offline=None,
                            view="files", location="", params={"max_files": 500}, state={})
 

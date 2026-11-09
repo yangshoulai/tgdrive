@@ -6,7 +6,7 @@ import base64
 import binascii
 import html
 
-from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError
+from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError, info_fields, year_of
 from .. import text as media_text
 
 SEARCH = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
@@ -33,6 +33,7 @@ class QQMusicProvider(Provider):
     capabilities = frozenset({"cover", "lyrics"})
     media = frozenset({"audio"})
     official = False
+    info = True
     notice = "使用 QQ 音乐网页端的公开接口，并非官方开放平台：接口可能随时变更、限流或失效，请自行评估使用条款。"
     guide = (GuideStep("无需配置", "打开开关即可使用。查询会把歌名与歌手发送给 QQ 音乐。"),)
 
@@ -51,7 +52,9 @@ class QQMusicProvider(Provider):
             artists = " / ".join(str(item.get("name")) for item in song.get("singer") or [] if isinstance(item, dict) and item.get("name"))
             interval = song.get("interval")
             common = dict(subtitle=" · ".join(part for part in (artists, str(album_name or "")) if part),
-                          duration=float(interval) if isinstance(interval, (int, float)) and interval else None)
+                          duration=float(interval) if isinstance(interval, (int, float)) and interval else None,
+                          fields=info_fields(title=title, artist=artists, album=album_name, year=year_of(song.get("time_public")),
+                                             track=song.get("index_album") or None))
             if want == "cover":
                 if album_mid:
                     results.append(Candidate("cover", str(title), {"url": COVER.format(size=800, mid=album_mid),

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError
+import html
+import re
+
+from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, ProviderError, info_fields
 
 API = "https://api.tvmaze.com"
 
@@ -15,6 +18,7 @@ class TvmazeProvider(Provider):
     capabilities = frozenset({"cover"})
     media = frozenset({"video"})
     default_enabled = True
+    info = True
     notice = "数据来自 TVmaze（CC BY-SA）。"
     guide = (GuideStep("无需配置", "打开开关即可使用。查询会把剧名发送给 TVmaze，英文剧名效果最好。"),)
 
@@ -44,8 +48,11 @@ class TvmazeProvider(Provider):
                 if not image.get("original"):
                     continue
                 year = str(show.get("premiered") or "")[:4]
+                summary = re.sub(r"<[^>]+>", "", str(show.get("summary") or ""))
+                genres = " / ".join(str(item) for item in show.get("genres") or [] if item)
                 results.append(Candidate("cover", str(show.get("name") or ""), {"url": image["original"], "preview_url": image.get("medium") or image["original"]},
-                                         subtitle=" · ".join(part for part in ("剧集", year) if part), note="海报 · 数据来自 TVmaze"))
+                                         subtitle=" · ".join(part for part in ("剧集", year) if part), note="海报 · 数据来自 TVmaze",
+                                         fields=info_fields(title=show.get("name"), year=year, genre=genres, description=html.unescape(summary))))
             return results
         return []
 

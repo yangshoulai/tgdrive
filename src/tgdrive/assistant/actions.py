@@ -481,6 +481,13 @@ class ActionExecutor:
                 return
             if self.media is None:
                 raise ValueError("媒体信息服务不可用")
+            info, row = self.objects.file_metadata.ensure(scope, key)
+            if item.get("metadata_revision") is not None and row["revision"] != item["metadata_revision"]:
+                progress.skip(label, "元数据已修改，请重新获取候选")
+                return
+            if item.get("want") == "cover" and item.get("cover_versions") is not None and item["cover_versions"] != self.objects.file_thumbnail_versions([info])[(info.bucket_id, info.key)]:
+                progress.skip(label, "封面已修改，请重新获取候选")
+                return
             await self.media.save_frozen(scope, key, item["etag"], frozen["provider"], item["want"], frozen["ref"])
             progress.ok += 1
         elif kind == "text":

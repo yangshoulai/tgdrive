@@ -111,6 +111,16 @@ export async function removeCachedItems(filter: CachedItemFilter) {
   changed();
   return removed;
 }
+/** 手动检查本机缓存：列出云端已删除、覆盖或移走（不再引用这个版本）的文件仍占用的缓存，以及解不开的条目；只检查不删除。 */
+export type StaleCacheItem = { key: string; path: string; bytes: number; private: boolean; manual: boolean; kind: Kind | "broken" };
+export type CacheCheck = { checked: number; stale: StaleCacheItem[]; staleCount: number; staleBytes: number; privateChecked: boolean; privateSkipped: number };
+export const checkCache = () => ask<CacheCheck>("tessera-cache:check", {}, 120000);
+/** 清理检查找到的条目（all 为上次检查的全部结果）；同时删除本地缓存文件夹里没有记录的残留文件。 */
+export async function cleanStaleCache(keys: string[] | "all") {
+  const result = await ask<{ removed: number; bytes: number; orphans: number }>("tessera-cache:clean-stale", { keys }, 120000);
+  changed();
+  return result;
+}
 export const clearCache = async (scope: "normal" | "private" | "others" | "all" | "entry" | "auto" | "browser", key?: string) => { await ask<void>("tessera-cache:clear", { scope, key }, 30000); changed(); };
 export const loadSettings = () => readSettings(navigator.userAgent);
 

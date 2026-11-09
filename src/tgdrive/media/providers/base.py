@@ -17,9 +17,12 @@ from difflib import SequenceMatcher
 from typing import Any, Literal
 from urllib.parse import urlencode
 
-Want = Literal["cover", "lyrics", "subtitle"]
+Want = Literal["cover", "lyrics", "subtitle", "info"]
 Kind = Literal["audio", "video"]
 WANTS: tuple[Want, ...] = ("cover", "lyrics", "subtitle")
+# 「info」不是独立的查询：声明 info=True 的提供者在封面或歌词搜索结果里附带结构化字段（Candidate.fields），
+# 编辑元数据时据此填入歌名、歌手、专辑、年份等，不另外请求第三方。
+INFO_FIELDS = ("title", "artist", "album", "album_artist", "track", "year", "genre", "composer", "director", "actors", "description")
 
 
 class ProviderError(Exception):
@@ -106,9 +109,11 @@ class Candidate:
     note: str = ""
     score: float = 0.0
     hash_match: bool = False
+    # 结构化元数据（INFO_FIELDS 中的键），供「查找信息」填入编辑器；只含非空字符串。
+    fields: dict[str, str] = field(default_factory=dict)
 
     def public(self, token: str) -> dict:
-        return {"token": token, "want": self.want, "provider": self.provider, "title": self.title, "subtitle": self.subtitle,
+        return {"token": token, "want": self.want, "provider": self.provider, "title": self.title, "subtitle": self.subtitle, "fields": self.fields,
                 "synced": self.synced, "language": self.language, "format": self.format, "duration": self.duration,
                 "width": self.width, "height": self.height, "preview": self.preview, "note": self.note,
                 "score": round(self.score, 3), "hash_match": self.hash_match, "has_preview_image": bool(self.ref.get("preview_url"))}
@@ -134,6 +139,8 @@ class Provider:
     media: frozenset[Kind] = frozenset()
     official: bool = True
     default_enabled: bool = False
+    # 搜索结果带结构化字段（Candidate.fields），可用于「查找信息」。
+    info: bool = False
     fields: tuple[ConfigField, ...] = ()
     guide: tuple[GuideStep, ...] = ()
     notice: str = ""
@@ -142,7 +149,13 @@ class Provider:
     interval_hosts: tuple[str, ...] | None = None
 
     def supports(self, want: str, kind: str) -> bool:
+        if want == "info":
+            return self.info and kind in self.media
         return want in self.capabilities and kind in self.media
+
+    def info_want(self, kind: str) -> Want:
+        """「查找信息」复用哪种搜索（结果与封面、歌词查找共用缓存）。"""
+        return "cover" if self.supports("cover", kind) else "lyrics" if self.supports("lyrics", kind) else "subtitle"
 
     async def search(self, query: MediaQuery, want: Want, ctx: "ProviderContext") -> list[Candidate]:
         raise NotImplementedError
@@ -161,7 +174,7 @@ class Provider:
 
     def describe(self) -> dict:
         return {"id": self.id, "name": self.name, "description": self.description, "homepage": self.homepage,
-                "capabilities": [item for item in WANTS if item in self.capabilities], "media": sorted(self.media),
+                "capabilities": [item for item in WANTS if item in self.capabilities] + (["info"] if self.info else []), "media": sorted(self.media),
                 "official": self.official, "default_enabled": self.default_enabled,
                 "fields": [item.describe() for item in self.fields], "guide": [item.describe() for item in self.guide],
                 "notice": self.notice, "needs_config": any(item.required for item in self.fields)}
@@ -216,6 +229,28 @@ class ProviderContext:
             return json.loads(match.group(1) if match else text)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ProviderError("接口返回的数据格式不正确，可能已变更") from exc
+
+
+def info_fields(**values) -> dict[str, str]:
+    """整理提供者给出的字段：去掉空值与首尾空白，限制长度（简介 16 KB，演员 4 KB，其余 512 字节以内）。"""
+    result = {}
+    for name, value in values.items():
+        if name not in INFO_FIELDS or value is None or isinstance(value, bool):
+            continue
+        text = re.sub(r"\s+", " ", str(value)).strip() if name != "description" else str(value).strip()
+        limit = 16000 if name == "description" else 4000 if name == "actors" else 200
+        if text:
+            result[name] = text[:limit]
+    return result
+
+
+def year_of(value) -> str | None:
+    """发行时间转年份：毫秒时间戳（网易云）或「2005-01-01」这类日期字符串。"""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        import datetime
+        return str(datetime.datetime.fromtimestamp(value / 1000, datetime.timezone.utc).year)
+    match = re.match(r"\s*(\d{4})", str(value or ""))
+    return match.group(1) if match else None
 
 
 def _status_message(status: int) -> str:

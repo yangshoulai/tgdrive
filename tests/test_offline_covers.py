@@ -51,8 +51,7 @@ class OfflineCoverTests(unittest.IsolatedAsyncioTestCase):
 
     def thumbnails(self, key, scope=None):
         info = self.app.objects.head_object(scope or self.scope, key)
-        return {row["variant"] for row in self.app.metadata.db.execute(
-            "SELECT variant FROM thumbnails WHERE blob_uuid=?", (info.blob_uuid,))}
+        return set(self.app.objects.file_thumbnail_versions([info])[(info.bucket_id, info.key)])
 
     def staged(self, task_id):
         prefix = f"{COVER_PREFIX}{task_id}/"

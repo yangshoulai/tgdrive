@@ -109,7 +109,8 @@ class PublicFolderTests(unittest.TestCase):
             for path in ("dir/song.live.mp4", "dir/song.live.lrc", "dir/song.live.srt", "dir/song.live.zh_Hans.VTT",
                          "dir/song.live.en.srt", "dir/song.live.sequel.srt", "dir/song.live/sub.srt", "other/song.live.srt"):
                 await self.put(alice, path)
-            status, assets = await self.api("GET", "/api/user/v1/preview-assets?path=dir/song.live.mp4", alice)
+            self.assertEqual((await self.api("GET", "/api/user/v1/preview-assets?path=dir/song.live.mp4", alice))[1], [])
+            status, assets = await self.api("GET", "/api/user/v1/media/import-files?path=dir/song.live.mp4", alice)
             self.assertEqual(status, 200)
             self.assertEqual([item["name"] for item in assets], ["song.live.en.srt", "song.live.lrc", "song.live.srt", "song.live.zh_Hans.VTT"])
             self.assertEqual([item["language"] for item in assets], ["en", None, None, "zh-Hans"])
@@ -134,7 +135,7 @@ class PublicFolderTests(unittest.TestCase):
             self.assertEqual((await self.api("GET", route))[0], 403)
             _, grant = await self.api("POST", f"/api/public/v1/objects/{token}/unlock", None, {"password": "secret1"})
             status, assets = await self.api("GET", f"{route}&access={grant['access']}")
-            self.assertEqual((status, [item["path"] for item in assets]), (200, ["a.lrc"]))
+            self.assertEqual((status, [item["path"] for item in assets]), (200, []))
             for path in ("../other/secret.txt", "/other/secret.txt", "sub/../../other/secret.txt", "sub/"):
                 status, _ = await self.api("GET", f"/api/public/v1/folders/{token}/preview-assets?path={path}&access={grant['access']}")
                 self.assertIn(status, (400, 404))

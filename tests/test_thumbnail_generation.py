@@ -128,7 +128,7 @@ class EmbeddedVideoCoverTests(unittest.IsolatedAsyncioTestCase):
     async def test_generate_uses_embedded_cover_without_opening_frame_decoder(self):
         worker = self.worker(b"")
         info = SimpleNamespace(size=1000, key="movie.mp4", content_type="video/mp4", blob_uuid="blob", bucket_id=1, etag="etag")
-        scope = SimpleNamespace(authorize=Mock())
+        scope = Scope(1, authorize=Mock())
         worker.resources = SimpleNamespace(ffmpeg="ffmpeg")
         worker.cache = SimpleNamespace(prepare=Mock())
         worker.objects = SimpleNamespace(set_thumbnail=AsyncMock(), finish_thumbnail_set=Mock())
@@ -213,7 +213,7 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_usable_video_frame_preserves_existing_thumbnail(self):
         worker = self.worker()
         worker.cache = SimpleNamespace(prepare=Mock())
-        worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
+        worker._scope = Mock(return_value=Scope(1, authorize=Mock()))
         worker._has_thumbnail = Mock(return_value=False)
         worker._render = AsyncMock(return_value=None)
         worker._remote_bytes = 0
@@ -232,7 +232,7 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_automatic_no_frame_returns_a_failure_detail(self):
         worker = self.worker()
         worker.cache = SimpleNamespace(prepare=Mock())
-        worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
+        worker._scope = Mock(return_value=Scope(1, authorize=Mock()))
         worker._has_thumbnail = Mock(return_value=False)
         worker._render = AsyncMock(return_value=None)
         worker._remote_bytes = 0
@@ -250,7 +250,7 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
         # 上传、离线下载只用已收缓存，补图可回源；都先找内嵌封面，没有时截帧，不在线查找。
         worker = self.worker()
         worker.cache = SimpleNamespace(prepare=Mock())
-        scope = SimpleNamespace(authorize=Mock())
+        scope = Scope(1, authorize=Mock())
         worker._scope = Mock(return_value=scope)
         worker._has_thumbnail = Mock(return_value=False)
         worker.objects.set_thumbnail = AsyncMock()
@@ -272,7 +272,7 @@ class DecoderFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_assistant_generation_tries_embedded_then_online_then_frames(self):
         worker = self.worker()
         worker.cache = SimpleNamespace(prepare=Mock())
-        worker._scope = Mock(return_value=SimpleNamespace(authorize=Mock()))
+        worker._scope = Mock(return_value=Scope(1, authorize=Mock()))
         worker._has_thumbnail = Mock(return_value=False)
         worker._remote_bytes = 0
         worker.objects.set_thumbnail = AsyncMock()

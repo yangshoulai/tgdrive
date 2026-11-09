@@ -177,7 +177,7 @@ function StorageMeter({ usage, percent, onOpenCache }: { usage: Usage | null; pe
   type Row = [string, IconName, number];
   const groups: { label: string; hint: string; rows: Row[] }[] = detail ? [
     { label: "用户数据", hint: "你保存的文件", rows: [["我的文件", "folder", detail.files], ["回收站", "trash", detail.trash], ["私密空间", "lock", detail.private]] },
-    { label: "系统数据", hint: "自动生成的封面与文件助手对话附件", rows: [["封面", "image", detail.thumbnails ?? 0], ["助手附件", "paperclip", detail.assistant]] },
+    { label: "系统数据", hint: "封面、歌词、字幕与文件助手对话附件", rows: [["封面", "image", detail.thumbnails ?? 0], ["媒体元数据", "fileText", detail.media ?? 0], ["助手附件", "paperclip", detail.assistant]] },
   ] : [];
   const total = groups.reduce((sum, group) => sum + group.rows.reduce((value, row) => value + row[2], 0), 0);
   return <div className={`storage-meter${open ? " is-open" : ""}`} title={usage?.quota_bytes == null ? "空间不限" : undefined}>

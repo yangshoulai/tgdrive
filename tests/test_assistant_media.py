@@ -13,6 +13,7 @@ from tgdrive.assistant.actions import Progress, media_choices
 from tgdrive.assistant.media_tools import best_index, last_time, propose_media_assets
 from tgdrive.assistant.tools import ToolContext, ToolError
 from tgdrive.objects import Scope
+from tgdrive.media.providers.base import Fetched
 from tests.test_media_service import FakeHttp, song
 from tests.test_assistant import AssistantCase, call
 from tests.test_assistant_actions import ActionHelpers
@@ -116,26 +117,31 @@ class MediaToolTests(unittest.TestCase):
         progress = self.execute(payload)
         self.assertEqual((progress.ok, progress.failed), (1, 0), progress.failures)
         info = self.app.objects.head_object(self.scope, "音乐/晴天.mp3")
-        variants = {row["variant"] for row in self.app.metadata.db.execute("SELECT variant FROM thumbnails WHERE blob_uuid=?", (info.blob_uuid,))}
+        variants = set(self.app.objects.file_thumbnail_versions([info])[(info.bucket_id, info.key)])
         self.assertTrue({"thumb", "grid", "poster"} <= variants)
 
     def test_existing_lyrics_need_choice_unless_auto(self):
         self.put("音乐/晴天.mp3", id3([("TIT2", b"\x03\xe6\x99\xb4\xe5\xa4\xa9")]) + mpeg_frames(20))
-        self.put("音乐/晴天.lrc", b"[00:01.00]old", "text/plain")
+        self.put("音乐/晴天.lrc", b"[00:01.00]sidecar", "text/plain")
+        self.wait(self.app.media._write_asset(self.scope, "音乐/晴天.mp3", "lyrics", "test", Fetched(text="[00:01.00]old", format="lrc")))
         self.run_tool({"paths": ["/音乐/晴天.mp3"], "want": ["lyrics"]})
         payload = self.proposed[-1]
         item = payload["items"][0]
-        self.assertEqual((item["exists"], item["choice"], item["target"]), ("已有歌词文件「晴天.lrc」", None, "晴天.lrc"))
+        self.assertEqual((item["exists"], item["choice"], item["target"]), ("已有歌词元数据", None, "歌词元数据"))
         progress = self.execute(payload)
         self.assertEqual((progress.ok, progress.skipped), (0, 1))
         self.assertEqual(progress.failures[0]["reason"], "保留现有")
         progress = self.execute(payload, {"choices": {"0": item["best"]}})
         self.assertEqual(progress.ok, 1, progress.failures)
+        info = self.app.objects.head_object(self.scope, "音乐/晴天.mp3")
+        asset = self.app.objects.file_metadata.assets(info.metadata_id, "lyrics")[0]
+        self.assertIn("故事的小黄花", self.wait(self.app.objects.file_metadata.read_asset(self.scope, info.key, asset["id"]))[0].decode())
         _, stream = self.wait(self.app.objects.get_object(self.scope, "音乐/晴天.lrc"))
-        self.assertIn("故事的小黄花", b"".join(self.wait(self._collect(stream))).decode())
+        self.assertEqual(b"".join(self.wait(self._collect(stream))), b"[00:01.00]sidecar")
         # 完全访问：直接覆盖。
         self.put("音乐/晴天.lrc", b"[00:01.00]old", "text/plain")
-        self.assertEqual(self.execute({**payload, "auto": True}).ok, 1)
+        self.run_tool({"paths": ["/音乐/晴天.mp3"], "want": ["lyrics"]})
+        self.assertEqual(self.execute({**self.proposed[-1], "auto": True}).ok, 1)
 
     async def _collect(self, stream):
         return [chunk async for chunk in stream]
@@ -185,7 +191,7 @@ class MediaActionFlowTests(ActionHelpers, AssistantCase):
             self.assertNotIn("_refs", json.dumps(tool["result"], ensure_ascii=False))
             _, detail = await self.req("GET", f"/api/user/v1/assistant/actions/{action_id}", headers=user)
             self.assertNotIn("_refs", detail["payload"])
-            self.assertEqual(detail["payload"]["samples"][0]["choice"], None)
+            self.assertEqual(detail["payload"]["samples"][0]["choice"], 0, "同目录文件不再视为已有歌词元数据")
             status, _, text = await self.client.request("GET", f"/api/user/v1/assistant/actions/{action_id}/media/0/0", b"", user)
             self.assertEqual(status, 200)
             self.assertIn("故事的小黄花", text.decode())
@@ -195,8 +201,10 @@ class MediaActionFlowTests(ActionHelpers, AssistantCase):
             self.assertEqual(status, 400)
             status, done = await self.confirm(user, action_id, {"choices": {"0": 0}})
             self.assertEqual((status, done["status"], done["result"]["ok"]), (200, "done", 1))
-            _, stream = await self.app.objects.get_object(Scope(self.alice.bucket_id), "音乐/晴天.lrc")
-            self.assertIn("故事的小黄花", b"".join([chunk async for chunk in stream]).decode())
+            scope = Scope(self.alice.bucket_id)
+            info = self.app.objects.head_object(scope, "音乐/晴天.mp3")
+            asset = self.app.objects.file_metadata.assets(info.metadata_id, "lyrics")[0]
+            self.assertIn("故事的小黄花", (await self.app.objects.file_metadata.read_asset(scope, info.key, asset["id"]))[0].decode())
         self.run_async(run())
 
 

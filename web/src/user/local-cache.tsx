@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useId, useState } from "react";
 
 import * as api from "../api";
-import { type CacheDirectoryInfo, type CacheStats, browserName, cacheDirectoryInfo, cacheStats, cacheSupported, chooseCacheDirectory, clearCache, directoryAvailable, isStandalone, loadSettings, regrantCacheDirectory, resetAllDevices, saveSettings, stopCacheDirectory, storageEstimate } from "../cache-client";
+import { type CacheCheck, type CacheDirectoryInfo, type CacheStats, browserName, cacheDirectoryInfo, cacheStats, cacheSupported, checkCache, chooseCacheDirectory, cleanStaleCache, clearCache, directoryAvailable, isStandalone, loadSettings, regrantCacheDirectory, resetAllDevices, saveSettings, stopCacheDirectory, storageEstimate } from "../cache-client";
 import { type DeviceSettings, type Kind, effectiveMiB, sizeChoices, webkitOnly } from "../cache-store";
 import { Notice, Badge, Button, ConfirmDialog, Disclosure, EmptyState, Field, Icon, Switch, formatBytes, formatDateTime, toast, type IconName } from "../ui";
 
@@ -149,6 +149,8 @@ export function LocalCacheSettings() {
         onChange={value => void update({ privateMaxMiB: value }, "已保存")} />}
     </Section>}
 
+    {settings && <StaleCacheCheck busy={busy} empty={!total} onCleaned={refresh} />}
+
     <Section icon="trash" title="清理" description="清理只删除这台设备上的副本，云端文件不受影响。">
       <div className="account-private-actions">
         <Button size="sm" disabled={busy || !total} onClick={() => setConfirm("all")}>全部清理{total ? `（${formatBytes(totalBytes)}）` : ""}</Button>
@@ -249,4 +251,55 @@ function CacheSizeSelect({ label, value, hint, quota, disabled, onChange }: { la
       {choices.map(choice => <option key={choice} value={choice}>{sizeLabel(choice)}{quota && choice * 1048576 > quota ? "（超出浏览器可用空间）" : ""}</option>)}
     </select>
   </Field>;
+}
+
+const STALE_KIND: Record<string, string> = { ...KIND_LABEL, broken: "无法解开" };
+/** 手动检查：找出云端已删除、覆盖或移出的文件仍占着的本机缓存（以及换过密码后解不开的条目），确认后再清理。
+ *  Worker 也会定期自动核对；这里给用户一个立即检查、看清楚再删的入口。 */
+function StaleCacheCheck({ busy, empty, onCleaned }: { busy: boolean; empty: boolean; onCleaned: () => Promise<void> }) {
+  const [result, setResult] = useState<CacheCheck | null>(null);
+  const [state, setState] = useState<"idle" | "checking" | "cleaning">("idle");
+  const [confirm, setConfirm] = useState(false);
+  async function run() {
+    setState("checking");
+    try { setResult(await checkCache()); }
+    catch (reason) { toast.error(api.errorMessage(reason, "检查失败，请稍后重试")); }
+    finally { setState("idle"); }
+  }
+  async function clean() {
+    setState("cleaning");
+    try {
+      const done = await cleanStaleCache("all");
+      toast.success(`已清理 ${done.removed.toLocaleString("zh-CN")} 项，释放 ${formatBytes(done.bytes)}${done.orphans ? `，并删除 ${done.orphans} 个残留文件` : ""}`);
+      setResult(null); setConfirm(false); await onCleaned();
+    } catch (reason) { toast.error(api.errorMessage(reason, "清理失败，请重新检查")); }
+    finally { setState("idle"); }
+  }
+  const shown = result?.stale.slice(0, 50) ?? [];
+  return <Section icon="refresh" title="检查本机缓存" description="找出云端已删除、覆盖或移出的文件仍占用的缓存，确认后清理；只检查这台设备，不会改动云端文件。">
+    <div className="account-setting-summary"><div>
+      <strong>{!result ? "还没有检查" : result.staleCount ? `发现 ${result.staleCount.toLocaleString("zh-CN")} 项失效缓存，共 ${formatBytes(result.staleBytes)}` : "没有发现失效的缓存"}</strong>
+      <p>{!result ? "会逐项核对这台设备上缓存的文件是否仍在你的空间里。私密文件只在私密空间已解锁时核对。"
+        : `检查了 ${result.checked.toLocaleString("zh-CN")} 项缓存。${result.privateSkipped ? `私密空间未解锁，跳过了 ${result.privateSkipped.toLocaleString("zh-CN")} 项私密缓存，解锁后可再检查。` : ""}`}</p>
+    </div>
+      <Button size="sm" icon="refresh" loading={state === "checking"} disabled={busy || empty || state !== "idle"} onClick={() => void run()}>{result ? "重新检查" : "开始检查"}</Button>
+    </div>
+    {result && result.staleCount > 0 && <>
+      <ul className="stale-cache-list" aria-label="失效的缓存">
+        {shown.map(item => <li key={item.key}>
+          <Icon name={item.private ? "lock" : item.kind === "broken" ? "alert" : "file"} size={15} />
+          <span className="stale-cache-path" title={item.path || undefined}>{item.path ? item.path.replace(/^\.tgdrive\/private\//, "私密空间/") : "无法解开的缓存（密码或缓存已重置）"}</span>
+          <span className="stale-cache-tags">{item.manual && <Badge tone="success">手动</Badge>}<Badge>{STALE_KIND[item.kind] ?? "其他"}</Badge></span>
+          <strong>{formatBytes(item.bytes)}</strong>
+        </li>)}
+      </ul>
+      {result.staleCount > shown.length && <p className="muted local-cache-note">另有 {(result.staleCount - shown.length).toLocaleString("zh-CN")} 项未列出，清理时一并处理。</p>}
+      <div className="account-private-actions">
+        <Button size="sm" variant="danger" icon="trash" disabled={busy || state !== "idle"} loading={state === "cleaning"} onClick={() => setConfirm(true)}>清理 {result.staleCount.toLocaleString("zh-CN")} 项（{formatBytes(result.staleBytes)}）</Button>
+      </div>
+    </>}
+    {confirm && result && <ConfirmDialog title="清理失效的缓存？" confirmLabel="清理"
+      description={`将删除这台设备上 ${result.staleCount.toLocaleString("zh-CN")} 项已不在云端的缓存（${formatBytes(result.staleBytes)}），包括其中手动缓存的文件。云端文件不受影响。`}
+      onClose={() => setConfirm(false)} onConfirm={clean} />}
+  </Section>;
 }

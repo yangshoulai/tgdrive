@@ -135,6 +135,7 @@ function lyricAt(lines: Lyric[], time: number) {
 function assetLabel(asset: PreviewAsset): string {
   // 内置歌词与字幕轨的名称已是给人看的说明（如「内置 · 简体中文」）。
   if (asset.source === "embedded") return asset.name;
+  if (asset.source === "metadata") return asset.name + (asset.language && !asset.name.includes(asset.language) ? ` · ${asset.language}` : "");
   const languages: Record<string, string> = { zh: "中文", chi: "中文", zho: "中文", "zh-cn": "简体中文", "zh-hans": "简体中文", "zh-tw": "繁体中文", "zh-hant": "繁体中文", en: "英语", eng: "英语", ja: "日语", jpn: "日语", ko: "韩语", kor: "韩语", fr: "法语", fra: "法语", de: "德语", deu: "德语", es: "西班牙语", spa: "西班牙语", it: "意大利语", pt: "葡萄牙语", ru: "俄语" };
   // 没有语言标记的附件按格式命名（如“SRT 字幕”“LRC 歌词”），比“默认”更清楚。
   const format = asset.name.split(".").at(-1)?.toUpperCase() ?? "";
@@ -142,18 +143,12 @@ function assetLabel(asset: PreviewAsset): string {
 }
 
 const chinese = (asset: PreviewAsset) => /^(zh|chi|zho)\b/i.test(asset.language ?? "");
-/** 默认选中的歌词或字幕：文件内置的优先。音乐依次是内置同步歌词、同名 .lrc（无语言标记优先）、内置普通歌词；
- *  视频依次是能立即读取的内置中文字幕、同名中文字幕、其他能立即读取的内置字幕、同名字幕（无语言标记优先）。
- *  MKV 的内置字幕要读完整个文件，只在用户从菜单里选择时提取。 */
-function pickAsset(kind: "audio" | "video", items: PreviewAsset[], prefer?: string): PreviewAsset | undefined {
-  const preferred = prefer ? items.find(item => item.path === prefer) : undefined;
-  if (preferred) return preferred;
-  const files = items.filter(item => item.source !== "embedded"), embedded = items.filter(item => item.source === "embedded");
-  // 同目录的同名歌词、字幕文件是用户（或文件助手）有意保存的，优先于文件内置的数据；没有时用内置数据。
-  // 上传时不会把内置歌词另存为 .lrc，所以同名文件存在就说明内置数据被替换过。
-  if (kind === "audio") return files.find(item => !item.language) ?? files[0] ?? embedded.find(item => item.synced) ?? embedded[0];
-  const ready = embedded.filter(item => item.instant);
-  return files.find(chinese) ?? ready.find(chinese) ?? files.find(item => !item.language) ?? files[0] ?? ready[0];
+/** 默认选中的歌词或字幕：已保存的元数据优先（默认项 → 中文字幕／同步歌词 → 第一项），没有保存时回退到文件内置的。
+ *  内置歌词只读文件头，直接使用；内置字幕只自动选能立即读取的（MKV 要读完整个文件，只在用户从菜单里选择时提取）。 */
+function pickAsset(kind: "audio" | "video", items: PreviewAsset[]): PreviewAsset | undefined {
+  const saved = items.filter(item => item.source !== "embedded"), embedded = items.filter(item => item.source === "embedded");
+  const best = (list: PreviewAsset[]) => list.find(item => item.default) ?? (kind === "video" ? list.find(chinese) : list.find(item => item.synced)) ?? list[0];
+  return best(saved) ?? (kind === "audio" ? best(embedded) : best(embedded.filter(item => item.instant)));
 }
 
 /* ---------- 音乐：原生 <audio> ---------- */
@@ -503,14 +498,16 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
     setFindingAssets(Boolean(loader.current));
     if (!loader.current) return;
     const controller = new AbortController();
+    const prefer = preferRef.current;
     void loader.current(controller.signal).then(result => {
       if (controller.signal.aborted) return;
       const { assets: items, tags: found } = Array.isArray(result) ? { assets: result, tags: null } : result;
       setTags(found ?? null);
       const matches = items.filter(item => item.kind === (kind === "audio" ? "lyrics" : "subtitle"));
       setAssets(matches);
-      setSelected(pickAsset(kind, matches, preferRef.current)?.path ?? "");
-    }).catch(reason => { if (!controller.signal.aborted) setDiscoveryError(errorMessage(reason, "无法查找歌词或字幕")); })
+      setSelected(previous => prefer && matches.some(item => item.path === prefer) ? prefer
+        : sameFile && matches.some(item => item.path === previous) ? previous : pickAsset(kind, matches)?.path ?? "");
+    }).catch(reason => { if (!controller.signal.aborted) setDiscoveryError(errorMessage(reason, "无法读取歌词或字幕")); })
       .finally(() => { if (!controller.signal.aborted) setFindingAssets(false); });
     return () => controller.abort();
   }, [kind, url, assetRevision]);
@@ -546,7 +543,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
         lyricRef.current = lines; lyricSource.current = url; setLyrics(lines); setUnsynced(!parsed.length);
         setActive(parsed.length ? lyricAt(parsed, timeRef.current - lyricOffset.current) : -1);
       } else if (subtitles) {
-        await subtitles.setSubtitle(value.text, /\.srt$/i.test(asset.name) ? "srt" : "vtt");
+        await subtitles.setSubtitle(value.text, asset.format === "srt" || /\.srt$/i.test(asset.name) ? "srt" : "vtt");
         if (asset.read) subtitles.notice(`已加载${asset.name}`);
       }
     }).catch(reason => { if (!controller.signal.aborted) setAssetError(errorMessage(reason, "歌词或字幕没有加载出来")); })
@@ -656,7 +653,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   const lyricHint = lyricsLoading ? ""
     : assetError || discoveryError ? assetError || discoveryError
     : assets.length && !selected ? "歌词已关闭"
-    : loadAssets && !assets.length ? onFindAssets ? "没有歌词" : "没有找到同名歌词（.lrc）"
+    : loadAssets && !assets.length ? onFindAssets ? "没有歌词" : "没有歌词元数据"
     : "";
   // 没有歌词时右侧显示音频信息：格式（无损格式标注）、时长、大小与按大小估算的平均码率（含封面等元数据，所以写「约」）。
   const extension = /\.([a-z\d]{2,5})$/i.exec(name)?.[1].toUpperCase() ?? "";

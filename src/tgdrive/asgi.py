@@ -313,7 +313,7 @@ class TgDriveASGI(StaticFiles):
                 route = path[len("/api/user/v1/private"):]
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
-                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save",
+                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/media/asset", "/media/import-files", "/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save",
                            "/media/lyrics", "/media/subtitle", "/media/cover", "/media/extract", "/media/jobs", "/media/edit", "/media/edit/jobs", "/media/edit/cancel", "/move", "/archive",
                            "/archive/inspect", "/archive/extract", "/archive/jobs", "/archive/browse", "/archive/entry", "/archive/compress",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
@@ -1310,7 +1310,11 @@ class TgDriveASGI(StaticFiles):
                 return 200, await user.alist_public(token, limit=int(query["limit"][0]) if "limit" in query else None,
                     cursor=query.get("cursor", [""])[0]), {}
             if method == "GET" and route == "/preview-assets":
-                return 200, await user.preview_assets(token, query.get("path", [""])[0]), {}
+                key = user._path(query.get("path", [""])[0])
+                info = user.objects.head_object(user._scope(token), key)
+                if self.media.kind(info):
+                    await self.media.ensure_metadata(user._scope(token), key)
+                return 200, await user.preview_assets(token, key), {"Cache-Control": "no-store"}
             if method == "GET" and route == "/preview-list":
                 return 200, await user.preview_list(token, query.get("path", [""])[0],
                                                         query.get("cursor", [None])[0] or None), {}
@@ -1428,7 +1432,7 @@ class TgDriveASGI(StaticFiles):
                 return await self._archive_route(user, method, route, query, payload, token, csrf, private)
             if method == "POST" and route == "/media/size":
                 return 200, user.set_media_size(token, csrf, payload), {}
-            if route in ("/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save", "/media/lyrics", "/media/subtitle",
+            if route in ("/media/asset", "/media/import-files", "/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save", "/media/lyrics", "/media/subtitle",
                          "/media/cover", "/media/extract", "/media/jobs", "/media/edit", "/media/edit/jobs", "/media/edit/cancel"):
                 return await self._media_route(user, method, route, query, payload, token, csrf)
             if method == "GET" and route == "/files/info":
@@ -1461,6 +1465,24 @@ class TgDriveASGI(StaticFiles):
                 return 204, None, {}
         elif path == "/api/public/v1/config" and method == "GET":
             return 200, self.settings.public_config(), {}
+        elif re.fullmatch(r"/api/public/v1/objects/[A-Za-z0-9_-]+/(preview-assets|asset)", path) and method == "GET":
+            share_token = path.split("/")[5]
+            def authorize():
+                current, password = self._public_share(share_token)
+                if current.key.endswith("/"):
+                    raise NotFoundError("资源不存在")
+                if password and not self.share_access.check(share_token, password, query.get("access", [None])[0]):
+                    raise SharePasswordRequired("password required")
+                return current
+            info = authorize()
+            scope = Scope(info.bucket_id, authorize=authorize)
+            if path.endswith("/asset"):
+                data, mime, _ = await user.objects.file_metadata.read_asset(scope, info.key, query.get("id", [""])[0])
+                return 200, data, {"Content-Type": mime, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+            media = await self.media.info(scope, info.key) if self.media.kind(info) else None
+            # 分享页只需要播放器显示的标签，不返回来源配置、外部条目编号等内部信息。
+            tags = {name: media.get(name) for name in ("title", "artist", "album", "album_artist", "track", "year", "genre", "duration")} if media else None
+            return 200, {"assets": await user.objects.apreview_assets(scope, info.key), "tags": tags}, {"Cache-Control": "no-store"}
         elif re.fullmatch(r"/api/public/v1/objects/[A-Za-z0-9_-]+/unlock", path) and method == "POST":
             token = path.split("/")[5]
             info, password_hash = self._public_share(token)
@@ -1490,7 +1512,7 @@ class TgDriveASGI(StaticFiles):
                 return 200, {"token": info.public_token, "kind": "folder", "name": info.key.rstrip("/").rsplit("/", 1)[-1],
                              "password_required": False, "modified_at": info.modified_at, "public_at": info.public_at,
                              "expires_at": info.public_expires_at, "sharer": sharer}, {}
-            thumbnails = user.objects.thumbnail_variants([info.blob_uuid]).get(info.blob_uuid or "", [])
+            thumbnails = user.objects.file_thumbnail_versions([info])[(info.bucket_id, info.key)]
             dimensions = user.objects.media_sizes([info.blob_uuid]).get(info.blob_uuid or "")
             return 200, {"token": info.public_token, "kind": "file", "name": info.key.rsplit("/", 1)[-1], "size": info.size,
                          "content_type": info.content_type, "etag": info.etag, "password_required": False,
@@ -1498,15 +1520,25 @@ class TgDriveASGI(StaticFiles):
                          **({"dimensions": {"width": dimensions[0], "height": dimensions[1]}} if dimensions else {}),
                          "modified_at": info.modified_at, "public_at": info.public_at,
                          "expires_at": info.public_expires_at, "sharer": sharer}, {}
-        elif re.fullmatch(r"/api/public/v1/folders/[A-Za-z0-9_-]+/(list|preview-assets)", path) and method == "GET":
+        elif re.fullmatch(r"/api/public/v1/folders/[A-Za-z0-9_-]+/(list|preview-assets|asset)", path) and method == "GET":
             token = path.split("/")[5]
             info, password_hash = self._public_share(token)
             if password_hash and not self.share_access.check(token, password_hash, query.get("access", [None])[0]):
                 raise SharePasswordRequired("password required")
-            if path.endswith("/preview-assets"):
+            if path.endswith(("/preview-assets", "/asset")):
                 root, file = user.objects.public_folder_file(token, query.get("path", [""])[0])
-                assets = await user.objects.apreview_assets(Scope(root.bucket_id, prefix=root.key), file.key)
-                return 200, [{**asset, "path": asset["path"][len(root.key):]} for asset in assets], {}
+                def authorize():
+                    current, password = self._public_share(token)
+                    if password and not self.share_access.check(token, password, query.get("access", [None])[0]):
+                        raise SharePasswordRequired("password required")
+                    user.objects.public_folder_file(token, query.get("path", [""])[0])
+                scope = Scope(root.bucket_id, prefix=root.key, authorize=authorize)
+                if path.endswith("/asset"):
+                    data, mime, _ = await user.objects.file_metadata.read_asset(scope, file.key, query.get("id", [""])[0])
+                    return 200, data, {"Content-Type": mime, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+                if self.media.kind(file):
+                    await self.media.ensure_metadata(scope, file.key)
+                return 200, await user.objects.apreview_assets(scope, file.key), {"Cache-Control": "no-store"}
             return 200, await user.objects.list_public_folder(
                 token, query.get("path", [""])[0], query.get("cursor", [None])[0] or None, int(query.get("limit", ["200"])[0]),
                 query.get("kind", [""])[0]), {}
@@ -1551,7 +1583,12 @@ class TgDriveASGI(StaticFiles):
         if action.endswith("/assets"):
             row = self._shared_playlist(token, access)
             item = user.playlists.public_item(row, match[3])
-            assets = await user.objects.apreview_assets(Scope(row["bucket_id"]), item["key"])
+            def authorize():
+                current = self._shared_playlist(token, access)
+                user.playlists.public_item(current, match[3])
+            scope = Scope(row["bucket_id"], authorize=authorize)
+            await self.media.ensure_metadata(scope, item["key"])
+            assets = await user.objects.apreview_assets(scope, item["key"])
             # 歌词、字幕附件只给出名称与类型，地址按序号读取，不暴露存放路径。
             return 200, [{**{name: value for name, value in asset.items() if name != "path"}, "path": f"{match[3]}/{index}"}
                          for index, asset in enumerate(assets)], {"Cache-Control": "no-store"}
@@ -1587,7 +1624,12 @@ class TgDriveASGI(StaticFiles):
             index = int(match[5])
             if index >= len(assets):
                 raise NotFoundError("附件不存在")
-            item = objects.head_object(scope, str(assets[index]["path"]))
+            def authorize():
+                current = self._shared_playlist(token, query.get("access", [None])[0])
+                self.user.playlists.public_item(current, match[3])
+            data, mime, etag = await objects.file_metadata.read_asset(Scope(row["bucket_id"], authorize=authorize), item.key, assets[index]["id"])
+            await self._send_thumbnail(send, headers, data, mime, etag, "no-store")
+            return
         elif "thumbnail" in query:
             data, mime, etag = await objects.read_thumbnail(item, query["thumbnail"][0])
             await self._send_thumbnail(send, headers, data, mime, etag, "public, no-cache")
@@ -1654,6 +1696,11 @@ class TgDriveASGI(StaticFiles):
             ids = [value for value in source.get("ids", "").split(",") if value]
             return 200, {"jobs": self.media.jobs(scope, ids)}, no_store
         path = user._path(source.get("path", ""))
+        if route == "/media/asset" and method == "GET":
+            data, mime, _ = await user.objects.file_metadata.read_asset(scope, path, source.get("id", ""))
+            return 200, data, {"Content-Type": mime, **no_store, "X-Content-Type-Options": "nosniff"}
+        if route == "/media/import-files" and method == "GET":
+            return 200, await user.objects.metadata.run_in_thread(user.objects.related_media_files, scope, path), no_store
         if route == "/media/edit":
             if method == "GET":
                 return 200, await self.media.editor.info(scope, path), no_store

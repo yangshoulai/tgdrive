@@ -17,3 +17,5 @@
 - 工具结果按窗口收紧与提示词缓存（设计 §23 第 6、7 点）：每批执行前 `config.result_bytes(设置, 窗口, 调用数)`（单个 ≤ 窗口 15%，整批 ≤ 40%）；`_fit` 截短带续读位置的列表时去掉 `next_cursor`／`next_offset` 并在 `note` 说明，避免模型跳过被截掉的部分。Anthropic 渠道的 system 消息按原位置放进 user 轮次，工具、系统提示与对话末尾共 4 个 `cache_control` 断点（`providers._cache_points`）。每轮预算与每日额度按 `config.billable` 计（缓存读取按十分之一，用量表 v39 的 `cached_tokens`），`RunState.budget_tokens` 累计。
 - 结束前检查（审批承诺、继续承诺、计划核验）的文案在 `prompts.NUDGES`，由 `service._nudge` 写入；每段一次的标志集中在 `RunChecks`，自动续跑时整体重置，新增检查加字段而不是新的局部变量。
 - 复制、解压与压缩工具（设计 §23 第 8 点）：`propose_copy`／`propose_extract`／`propose_compress`，执行器经 `executor.archives` 复用 `ArchiveService`，私密空间只能复制。回归 `tests/test_assistant_archive_tools.py`。
+
+- 歌词、字幕候选保存到隐藏资源，同目录文件不参与已有元数据判断。操作冻结 metadata_revision，执行前及读取候选期间复核；封面使用文件级版本，不能只查 Blob 默认封面。 详见 [文件级元数据](../media-metadata.md)。

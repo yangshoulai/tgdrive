@@ -91,7 +91,8 @@ class MediaServiceTests(unittest.TestCase):
         info = self.put("音乐/晴天.mp3", song())
         status, body, _ = self.call("GET", "/api/user/v1/media/info?path=" + quote("音乐/晴天.mp3"))
         self.assertEqual(status, 200, body)
-        self.assertEqual((body["kind"], body["title"], body["artist"], body["lyrics"]), ("audio", "晴天", "周杰伦", {"synced": True}))
+        # 首次解析只记字段，不把内置歌词另存为资源；没有保存的歌词时给出内置歌词作为回退。
+        self.assertEqual((body["kind"], body["title"], body["artist"], body["lyrics"], body["embedded_lyrics"]["synced"]), ("audio", "晴天", "周杰伦", None, True))
         self.assertGreater(body["duration"], 0)
         self.assertEqual(body["providers"]["lyrics"], [{"id": "lrclib", "name": "LRCLIB"}])
         row = self.app.metadata.db.execute("SELECT title, lyrics FROM media_info WHERE blob_uuid=?", (info.blob_uuid,)).fetchone()
@@ -108,12 +109,17 @@ class MediaServiceTests(unittest.TestCase):
         bob = self.wait(self.client.login("user", "bob@example.com", "bob password"))
         self.assertEqual(self.call("GET", "/api/user/v1/media/info?path=" + quote("音乐/晴天.mp3"), auth=bob)[0], 404)
 
-    def test_disabling_embedded_hides_builtin_data(self):
+    def test_disabling_lookup_provider_keeps_initialized_metadata(self):
         self.put("音乐/晴天.mp3", song())
         self.enable(embedded=False)
         status, body, _ = self.call("GET", "/api/user/v1/media/info?path=" + quote("音乐/晴天.mp3"))
         self.assertEqual(status, 200)
-        self.assertEqual((body["title"], body["lyrics"], body["embedded"]), ("晴天", None, False))
+        self.assertEqual((body["title"], body["embedded_lyrics"]["synced"], body["embedded"]), ("晴天", True, True))
+        # 关闭在线「内置数据」来源不影响播放回退读取文件自带的歌词。
+        info = self.app.objects.head_object(self.scope, "音乐/晴天.mp3")
+        status, text, _ = self.call("GET", f"/api/user/v1/media/lyrics?path={quote('音乐/晴天.mp3')}&etag={info.etag}")
+        self.assertEqual(status, 200)
+        self.assertIn("故事的小黄花", text.decode())
 
     # ---------- 配置 ----------
 
@@ -183,11 +189,12 @@ class MediaServiceTests(unittest.TestCase):
 
         status, fetched, _ = self.call("POST", "/api/user/v1/media/fetch", {"path": "音乐/晴天.mp3", "token": first["token"]})
         self.assertEqual((status, fetched["format"]), (200, "lrc"))
-        status, saved, _ = self.call("POST", "/api/user/v1/media/save", {"path": "音乐/晴天.mp3", "token": first["token"]})
+        status, saved, _ = self.call("POST", "/api/user/v1/media/save", {"path": "音乐/晴天.mp3", "token": first["token"], "overwrite": True})
         self.assertEqual(status, 201, saved)
-        self.assertEqual((saved["path"], saved["replaced"]), ("音乐/晴天.lrc", False))
+        self.assertTrue(saved["path"].startswith("metadata:"))
+        self.assertFalse(saved["replaced"])
         status, assets, _ = self.call("GET", "/api/user/v1/preview-assets?path=" + quote("音乐/晴天.mp3"))
-        self.assertEqual([item["name"] for item in assets], ["晴天.lrc"])
+        self.assertEqual([item["kind"] for item in assets], ["lyrics"])
         status, body, _ = self.call("POST", "/api/user/v1/media/save", {"path": "音乐/晴天.mp3", "token": first["token"]})
         self.assertEqual((status, body["error"]["code"]), (409, "asset_exists"))
         status, saved, _ = self.call("POST", "/api/user/v1/media/save", {"path": "音乐/晴天.mp3", "token": first["token"], "overwrite": True})
@@ -304,8 +311,9 @@ class MediaServiceTests(unittest.TestCase):
         status, body, _ = self.call("POST", "/api/user/v1/private/media/lookup", {"path": PRIVATE_PREFIX + "音乐/晴天.mp3", "want": "lyrics"})
         self.assertEqual(status, 200, body)
         token = next(item["token"] for item in body["candidates"] if item["provider"] == "lrclib")
-        status, saved, _ = self.call("POST", "/api/user/v1/private/media/save", {"path": PRIVATE_PREFIX + "音乐/晴天.mp3", "token": token})
-        self.assertEqual((status, saved["path"]), (201, PRIVATE_PREFIX + "音乐/晴天.lrc"))
+        status, saved, _ = self.call("POST", "/api/user/v1/private/media/save", {"path": PRIVATE_PREFIX + "音乐/晴天.mp3", "token": token, "overwrite": True})
+        self.assertEqual(status, 201, saved)
+        self.assertTrue(saved["path"].startswith("metadata:"))
         # 普通接口不能访问私密文件。
         self.assertNotEqual(self.call("GET", f"/api/user/v1/media/info?path={path}")[0], 200)
 

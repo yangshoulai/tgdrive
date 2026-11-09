@@ -11,3 +11,5 @@
 - GC 失败队列跨重启保留，8 次失败后暂停。Telegram 删除仅在明确返回 400「message to delete not found」时按幂等成功处理，不能把普通 404、频道、凭据或权限错误当成清除成功。`maintenance.status` 的 `gc_failures` 通过 SQL 聚合为固定的原因、数量与建议，不暴露分片引用或原始错误；维护页待清除总数包含暂停项，「重新尝试」先重新入队再立即执行一轮，运行中禁止重复提交。回归 `tests/test_gc_failures.py` 与 `tests/test_telegram_store.py` 使用替身，不连接数据库或 Telegram。
 
 - 浏览索引：v40 新增 `objects_by_modified(bucket_id, modified_at DESC, key)`，供「最近」「相册」视图键集分页。
+
+- 媒体资源位于 `.tgdrive/media/`，使用 ObjectService 加密、配额与引用回收；用量单列「媒体元数据」。复制增加目标引用及配额，回收站保留，永久删除释放。手动编辑不得回源读写完整媒体。 详见 [文件级元数据](../media-metadata.md)。

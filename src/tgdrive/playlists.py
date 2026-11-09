@@ -48,10 +48,10 @@ class Playlists:
         """全部歌单（最近修改的在前）：数量与总时长只计当前能播放的歌曲；samples 是排在最前的 4 首的对象行（封面用）。"""
         db = self.metadata.db
         rows = db.execute(
-            "SELECT p.*, COUNT(o.key) AS total, COALESCE(SUM(m.duration),0) AS seconds FROM playlists p "
+            "SELECT p.*, COUNT(o.key) AS total, COALESCE(SUM(json_extract(f.auto_fields,'$.duration')),0) AS seconds FROM playlists p "
             "LEFT JOIN playlist_items i ON i.playlist_id=p.id "
             f"LEFT JOIN objects o ON o.bucket_id=i.bucket_id AND o.key=i.key AND {_VISIBLE} "
-            "LEFT JOIN media_info m ON m.blob_uuid=o.blob_uuid "
+            "LEFT JOIN file_metadata f ON f.id=o.metadata_id "
             "WHERE p.bucket_id=? GROUP BY p.id ORDER BY p.updated_at DESC, p.id DESC", (bucket_id,)).fetchall()
         result = []
         for row in rows:

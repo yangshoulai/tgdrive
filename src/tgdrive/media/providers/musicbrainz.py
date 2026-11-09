@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext
+from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, info_fields
 
 API = "https://musicbrainz.org/ws/2"
 COVERS = "https://coverartarchive.org"
@@ -22,6 +22,7 @@ class MusicBrainzProvider(Provider):
     capabilities = frozenset({"cover"})
     media = frozenset({"audio"})
     default_enabled = True
+    info = True
     interval = 1.1
     interval_hosts = ("musicbrainz.org",)
     guide = (GuideStep("无需配置", "打开开关即可使用。MusicBrainz 限制每秒最多一次查询，结果可能比其他来源慢一些。"),
@@ -53,7 +54,8 @@ class MusicBrainzProvider(Provider):
                                          "preview_url": f"{COVERS}/release-group/{group}/front-250", "artist": artist},
                                          subtitle=" · ".join(part for part in (artist, str(release_item.get("title") or ""), year) if part),
                                          duration=length / 1000 if isinstance(length, (int, float)) else None,
-                                         note="封面库可能没有这张专辑的封面"))
+                                         note="封面库可能没有这张专辑的封面",
+                                         fields=info_fields(title=recording.get("title"), artist=artist, album=release_item.get("title"), year=year)))
                 if len(results) >= 8:
                     return results
         return results

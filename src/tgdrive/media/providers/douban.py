@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext
+from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, info_fields
 
 SUGGEST = "https://movie.douban.com/j/subject_suggest"
 HEADERS = {"Referer": "https://movie.douban.com/",
@@ -25,6 +25,7 @@ class DoubanProvider(Provider):
     media = frozenset({"video"})
     official = False
     default_enabled = True
+    info = True
     notice = "使用豆瓣网页的搜索建议接口，并非官方开放平台：接口可能随时变更、限流或失效，请自行评估使用条款。"
     guide = (GuideStep("无需配置", "打开开关即可使用。查询会把片名发送给豆瓣；海报图片由服务器读取。"),)
 
@@ -40,7 +41,8 @@ class DoubanProvider(Provider):
                 subtitle = " · ".join(part for part in (str(item.get("sub_title") or ""), str(item.get("year") or "")) if part)
                 episodes = str(item.get("episode") or "")
                 results.append(Candidate("cover", name, {"url": _sized(image, "l"), "preview_url": _sized(image, "m"), "preview_headers": HEADERS},
-                                         subtitle=subtitle, note=f"海报{f' · 共 {episodes} 集' if episodes else ''}"))
+                                         subtitle=subtitle, note=f"海报{f' · 共 {episodes} 集' if episodes else ''}",
+                                         fields=info_fields(title=name, year=item.get("year"))))
             if results:
                 return results
         return []

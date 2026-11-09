@@ -123,3 +123,12 @@
   .preview-modal:not(.is-immersive):not(.is-minimized) .modal-heading { flex: 1; min-width: 0; }
   .preview-modal:not(.is-immersive):not(.is-minimized) .modal-window-actions { flex: none; width: auto; gap: 0; }
 }
+
+/* 设置 → 本机缓存 → 检查本机缓存：失效条目列表（最多显示 50 项）。 */
+.stale-cache-list { display: grid; max-height: 280px; margin: 0; padding: 0; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius-lg); list-style: none; }
+.stale-cache-list li { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 12px; font-size: var(--text-sm); }
+.stale-cache-list li + li { border-top: 1px solid var(--line-soft); }
+.stale-cache-list li > svg { flex: none; color: var(--ink-3); }
+.stale-cache-path { flex: 1; min-width: 0; overflow: hidden; color: var(--ink-2); text-overflow: ellipsis; white-space: nowrap; }
+.stale-cache-tags { display: flex; flex: none; gap: 4px; }
+.stale-cache-list li > strong { flex: none; min-width: 64px; color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; text-align: right; }

@@ -763,14 +763,14 @@ class OfflineDownloads:
         found = {}
         for start in range(0, len(keys), 200):
             chunk = keys[start:start + 200]
-            for item in self.metadata.db.execute(f"SELECT key,size,etag,content_type,blob_uuid FROM objects WHERE bucket_id=? AND key IN ({','.join('?' * len(chunk))})", (bucket, *chunk)):
+            for item in self.metadata.db.execute(f"SELECT * FROM objects WHERE bucket_id=? AND key IN ({','.join('?' * len(chunk))})", (bucket, *chunk)):
                 found[item["key"]] = item
-        versions = self.objects.thumbnail_versions([item["blob_uuid"] for item in found.values()])
+        versions = self.objects.file_thumbnail_versions([self.objects._object(item) for item in found.values()])
         for task, row in pairs:
             item = found.get(row["key"])
             if item is None or row["bucket_id"] != bucket:
                 continue
-            states = versions.get(item["blob_uuid"] or "", {})
+            states = versions.get((bucket, item["key"]), {})
             task["file"] = {"key": item["key"], "size": item["size"], "etag": item["etag"], "content_type": item["content_type"],
                             **self.objects.thumbnail_fields(states, states)}
 

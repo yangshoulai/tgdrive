@@ -420,6 +420,7 @@ class _Lease:
     info: ObjectInfo
     token: str
     until: float
+    custom: bool = False
 
 
 class ThumbnailService:
@@ -637,7 +638,7 @@ class ThumbnailService:
         取消这个 Blob 排队或进行中的自动任务并收回旧票据，不登记新任务；保存仍走带票据的普通写入。"""
         self._take_over(info)
         blob = info.blob_uuid
-        lease = _Lease(info, secrets.token_urlsafe(24), time.monotonic() + CLIENT_TIMEOUT)
+        lease = _Lease(info, secrets.token_urlsafe(24), time.monotonic() + CLIENT_TIMEOUT, custom=True)
         self._leases[blob] = lease
         return {"token": lease.token, "expires_in": CLIENT_TIMEOUT}
 
@@ -682,6 +683,8 @@ class ThumbnailService:
         info = self.objects.head_object(scope, key)
         self._take_over(info)
         self._leases.pop(info.blob_uuid, None)
+        from dataclasses import replace
+        scope = replace(scope, custom_cover=True)
         saved = []
         for variant in ("thumb", "grid", "poster"):
             if variant in images:
@@ -738,6 +741,7 @@ class ThumbnailService:
         if lease is None or not secrets.compare_digest(lease.token, token) or lease.until <= time.monotonic() or (
                 lease.info.bucket_id, lease.info.key, lease.info.etag) != (info.bucket_id, info.key, info.etag):
             raise ValueError("封面生成授权已失效，结果已丢弃")
+        return lease
 
     def release(self, scope, key, etag, token):
         info = self.objects.head_object(scope, key)
@@ -1030,7 +1034,10 @@ class ThumbnailService:
         kind = source_kind(info)
         if not self._eligible(info) or not self.resources.ffmpeg:
             return
-        scope = self._scope(info, None)
+        scope = self._scope(info, original)
+        if force:
+            from dataclasses import replace
+            scope = replace(scope, custom_cover=True)
         self.cache.prepare(info.blob_uuid, info.key, info.content_type)
         if not force and self._has_thumbnail(info.blob_uuid):
             return

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext
+from .base import Candidate, Fetched, GuideStep, MediaQuery, Provider, ProviderContext, info_fields
 
 API = "https://api.bgm.tv"
 
@@ -21,6 +21,7 @@ class BangumiProvider(Provider):
     capabilities = frozenset({"cover"})
     media = frozenset({"video"})
     default_enabled = True
+    info = True
     guide = (GuideStep("无需配置", "打开开关即可使用。查询会把片名发送给 Bangumi；只收录动画作品。"),)
 
     async def search(self, query: MediaQuery, want, ctx: ProviderContext) -> list[Candidate]:
@@ -37,7 +38,8 @@ class BangumiProvider(Provider):
                 results.append(Candidate("cover", str(item.get("name_cn") or item.get("name") or ""),
                                          {"url": _https(images["large"]), "preview_url": _https(images.get("common") or images["large"])},
                                          subtitle=" · ".join(part for part in (str(item.get("name") or ""), year) if part and part != item.get("name_cn")),
-                                         note="动画封面"))
+                                         note="动画封面", fields=info_fields(title=item.get("name_cn") or item.get("name"), year=year,
+                                                                           genre="动画", description=item.get("summary"))))
             if results:
                 return results
         return []
