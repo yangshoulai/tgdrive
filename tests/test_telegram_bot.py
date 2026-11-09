@@ -127,12 +127,11 @@ class TelegramBotTests(unittest.TestCase):
         movie.write_bytes(content)
         local.local_files["big"] = str(movie)
         size = 30 * 1024 * 1024  # 声明的大小超过官方的 20 MB 上限，走后台大文件流程
-        with patch.object(botmod.time, "time_ns", return_value=1700000000123_000_000):
-            self.dispatch(self.message(video={"file_id": "big", "file_unique_id": "u", "file_name": "电影.MP4", "mime_type": "video/mp4", "file_size": size}))
+        self.dispatch(self.message(video={"file_id": "big", "file_unique_id": "u", "file_name": "电影.MP4", "mime_type": "video/mp4", "file_size": size}))
         texts = [item["text"] for item in self.sent]
         self.assertTrue(any("正在下载「电影.MP4」" in text for text in texts), texts)
         self.assertIn("已保存到", texts[-1])
-        row = self.app.metadata.db.execute("SELECT size FROM objects WHERE bucket_id=? AND key=?", (self.alice.bucket_id, "1700000000123.mp4")).fetchone()
+        row = self.app.metadata.db.execute("SELECT size FROM objects WHERE bucket_id=? AND key=?", (self.alice.bucket_id, "电影.mp4")).fetchone()
         self.assertEqual(row["size"], len(content))
         self.assertFalse(movie.exists(), "保存后删除 Bot API 服务下载的文件")
         # 目录外的路径不读取；磁盘空间不够时直接回复。
@@ -178,10 +177,16 @@ class TelegramBotTests(unittest.TestCase):
         FakeClient.files = {"doc1": b"hello telegram"}
         document = {"file_id": "doc1", "file_unique_id": "u1", "file_name": "note.TXT", "mime_type": "text/plain", "file_size": 14}
         with patch.object(botmod.time, "time_ns", return_value=1700000000123_000_000):
+            self.dispatch(self.message(document=document, caption="说明不能覆盖原名"))
             self.dispatch(self.message(document=document))
-            self.dispatch(self.message(document={**document, "file_name": "无扩展名"}))
+            unnamed = {**document, "file_name": None}
+            self.dispatch(self.message(document=unnamed, caption="自定义标题.TXT\n第二行不参与命名"))
+            self.dispatch(self.message(document=unnamed))
+            self.dispatch(self.message(document=unnamed))
         keys = [row["key"] for row in self.app.metadata.db.execute("SELECT key FROM objects WHERE bucket_id=? ORDER BY key", (self.alice.bucket_id,))]
-        self.assertEqual(keys, ["下载/Telegram/1700000000123.txt", "下载/Telegram/1700000000124.txt"], "时间戳递增、扩展名小写，没有扩展名时按 MIME 补齐")
+        self.assertEqual(keys, ["下载/Telegram/1700000000123.txt", "下载/Telegram/1700000000124.txt",
+                               "下载/Telegram/note (1).txt", "下载/Telegram/note.txt", "下载/Telegram/自定义标题.txt"],
+                         "原名优先、说明第一行其次、时间戳兜底；扩展名小写，同名不覆盖")
         self.assertIn("1700000000124.txt", self.sent[-1]["text"])
         self.dispatch(self.message(document={**document, "file_id": "big", "file_size": 30 * 1024 * 1024}))
         self.assertIn("20 MB", self.sent[-1]["text"])

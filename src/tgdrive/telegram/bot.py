@@ -789,15 +789,25 @@ class InteractionBot:
         try:
             info = await client.get_file(item["file_id"])
             scope = self.offline.scope(link["user_id"])
-            safe = filename(name) or "Telegram 文件"
-            stem, extension = os.path.splitext(safe.lower())
+            original = filename(item.get("file_name"), fallback="")
+            source = original or filename(name)
+            stem, extension = os.path.splitext(source.lower())
             if stem.endswith(".tar") and extension in (".gz", ".bz2", ".xz"):
                 extension = ".tar" + extension
             if not extension:
                 extension = (mimetypes.guess_extension((mime or "").split(";", 1)[0].strip().lower()) or ".bin").lower()
-            # 同一毫秒的批量文件也各用一个时间戳，避免共享原文件名或覆盖彼此。
-            self._file_timestamp = max(time.time_ns() // 1_000_000, self._file_timestamp + 1)
-            safe = f"{self._file_timestamp}{extension}"
+            caption = (message.get("caption") or "").strip().splitlines()
+            base = original or (filename(caption[0], fallback="") if caption else "")
+            # 只取说明第一行；原名或说明已带同样的扩展名时先去掉，统一补小写，避免出现 .MP4.mp4。
+            if base.lower().endswith(extension):
+                base = base[:-len(extension)].strip().strip(".")
+            if not base:
+                self._file_timestamp = max(time.time_ns() // 1_000_000, self._file_timestamp + 1)
+                base = str(self._file_timestamp)
+            # 为扩展名留出长度，不能截断中文字符或把扩展名截掉。
+            while len((base + extension).encode("utf-8")) > 220:
+                base = base[:-1]
+            safe = f"{base}{extension}"
             key = link["folder"] + safe
             def free():
                 with self.metadata.transaction() as db:
