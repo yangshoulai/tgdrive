@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -40,7 +41,7 @@ class AudioEditorTests(unittest.IsolatedAsyncioTestCase):
         path = self.folder / ("source." + extension)
         lyrics = ["-metadata", "UNSYNCEDLYRICS=旧歌词", "-metadata", "SYNCEDLYRICS=[00:00.10]旧同步歌词"] if extension == "flac" else []
         subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.4",
-                        "-metadata", "artist=原歌手", "-metadata", "comment=keep me", *lyrics, str(path)], check=True)
+                        "-metadata", "artist=原歌手", "-metadata", "comment=keep me", "-metadata", "date=2020-04-05", *lyrics, str(path)], check=True)
         return path
 
     async def wait(self, job):
@@ -54,15 +55,15 @@ class AudioEditorTests(unittest.IsolatedAsyncioTestCase):
     def pcm(self, path):
         return subprocess.check_output([FFMPEG, "-v", "error", "-i", str(path), "-map", "0:a:0", "-f", "hash", "-hash", "sha256", "-"])
 
-    async def test_three_formats_embed_tags_lyrics_and_cover_without_reencoding(self):
+    async def test_audio_formats_embed_tags_lyrics_and_cover_without_reencoding(self):
         cover = self.folder / "cover.png"
         subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64", "-frames:v", "1", str(cover)], check=True)
-        for extension in ("mp3", "flac", "m4a"):
+        for extension in ("mp3", "flac", "m4a", "wav"):
             with self.subTest(extension=extension):
                 path = self.sample(extension)
                 info = await self.app.objects.put_object(self.scope, path.name, path.read_bytes(), content_type="audio/" + extension)
                 job = await self.editor.start(self.scope, path.name, {"etag": info.etag,
-                    "fields": {"title": "新歌名", "artist": "新歌手", "album": "新专辑", "lyrics": LYRICS},
+                    "fields": {"title": "新歌名", "artist": "新歌手", "album": "新专辑", "album_artist": "专辑歌手", "track": "3/12", "genre": "流行", "lyrics": LYRICS},
                     "cover": base64.b64encode(cover.read_bytes()).decode()})
                 result = await self.wait(job)
                 self.assertEqual(result["state"], "done", result)
@@ -70,6 +71,9 @@ class AudioEditorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(latest["fields"]["title"], "新歌名")
                 self.assertEqual(latest["fields"]["artist"], "新歌手")
                 self.assertEqual(latest["fields"]["album"], "新专辑")
+                self.assertEqual(latest["fields"]["album_artist"], "专辑歌手")
+                self.assertEqual(latest["fields"]["track"], "3/12")
+                self.assertEqual(latest["fields"]["genre"], "流行")
                 self.assertEqual(latest["lyrics"], LYRICS.strip())
                 self.assertTrue(latest["cover"])
                 output = self.folder / ("saved." + extension)
@@ -77,6 +81,8 @@ class AudioEditorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.pcm(path), self.pcm(output), "保存标签不能改变解码后的音频")
                 dump = subprocess.check_output([FFMPEG, "-v", "error", "-i", str(output), "-f", "ffmetadata", "-"]).decode()
                 self.assertIn("keep me", dump)
+                if extension != "mp3":
+                    self.assertIn("2020-04-05", dump, "未修改日期时保留原完整日期")
                 self.assertIsNone(self.app.metadata.db.execute("SELECT 1 FROM objects WHERE key LIKE '%.lrc'").fetchone())
                 unchanged = await self.wait(await self.editor.start(self.scope, path.name, {"etag": latest["etag"], "fields": {"title": "只改歌名"}}))
                 self.assertEqual(unchanged["state"], "done", unchanged)
@@ -104,6 +110,86 @@ class AudioEditorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.app.objects.head_object(self.scope, path.name).etag, info.etag)
         finally:
             self.editor.slot.release()
+
+    async def test_edit_keeps_chinese_in_legacy_mp3_tags(self):
+        path = self.sample("mp3")
+        data = path.read_bytes()
+        size = sum((value & 127) << shift for value, shift in zip(data[6:10], (21, 14, 7, 0)))
+        frames = b""
+        for name, text in ((b"TIT2", "原歌曲"), (b"TPE1", "原歌手"), (b"TALB", "原专辑")):
+            body = b"\x00" + text.encode("gb18030")
+            frames += name + struct.pack(">I", len(body)) + b"\x00\x00" + body
+        header = b"ID3\x03\x00\x00" + bytes((len(frames) >> shift) & 127 for shift in (21, 14, 7, 0))
+        path.write_bytes(header + frames + data[10 + size:])
+        info = await self.app.objects.put_object(self.scope, path.name, path.read_bytes(), content_type="audio/mpeg")
+        original = await self.editor.info(self.scope, path.name)
+        self.assertEqual(original["fields"]["artist"], "原歌手")
+        result = await self.wait(await self.editor.start(self.scope, path.name, {"etag": info.etag, "fields": {"title": "改后的歌曲"}}))
+        self.assertEqual(result["state"], "done", result)
+        latest = await self.editor.info(self.scope, path.name)
+        self.assertEqual(latest["fields"]["title"], "改后的歌曲")
+        self.assertEqual(latest["fields"]["artist"], "原歌手")
+        self.assertEqual(latest["fields"]["album"], "原专辑")
+
+    async def test_edit_keeps_chinese_in_legacy_flac_tags(self):
+        path = self.sample("flac")
+        data, position, blocks = path.read_bytes(), 4, []
+        while True:
+            kind = data[position]
+            length = int.from_bytes(data[position + 1:position + 4], "big")
+            body = data[position + 4:position + 4 + length]
+            position += 4 + length
+            if kind & 127 == 4:
+                vendor_size = int.from_bytes(body[:4], "little")
+                offset = 4 + vendor_size
+                count = int.from_bytes(body[offset:offset + 4], "little")
+                prefix, offset, entries = body[:offset], offset + 4, []
+                for _ in range(count):
+                    size = int.from_bytes(body[offset:offset + 4], "little")
+                    item = body[offset + 4:offset + 4 + size]
+                    if item.partition(b"=")[0].lower() == b"artist":
+                        item = b"artist=" + "原歌手".encode("gb18030")
+                    entries.append(item); offset += 4 + size
+                body = prefix + struct.pack("<I", count) + b"".join(struct.pack("<I", len(item)) + item for item in entries)
+            blocks.append(bytes([kind]) + len(body).to_bytes(3, "big") + body)
+            if kind & 128:
+                break
+        path.write_bytes(b"fLaC" + b"".join(blocks) + data[position:])
+        info = await self.app.objects.put_object(self.scope, path.name, path.read_bytes(), content_type="audio/flac")
+        original = await self.editor.info(self.scope, path.name)
+        self.assertEqual(original["fields"]["artist"], "原歌手")
+        result = await self.wait(await self.editor.start(self.scope, path.name, {"etag": info.etag, "fields": {"title": "中文歌名"}}))
+        self.assertEqual(result["state"], "done", result)
+        latest = await self.editor.info(self.scope, path.name)
+        self.assertEqual((latest["fields"]["title"], latest["fields"]["artist"]), ("中文歌名", "原歌手"))
+
+    async def test_video_fields_and_subtitles_keep_video_and_audio(self):
+        subtitle = "1\n00:00:00,000 --> 00:00:00,300\n中文字幕测试\n"
+        for extension in ("mp4", "mov", "mkv", "webm"):
+            with self.subTest(extension=extension):
+                path = self.folder / ("video." + extension)
+                codecs = ["-c:v", "libvpx-vp9", "-c:a", "libopus"] if extension == "webm" else ["-c:v", "libx264", "-c:a", "aac"]
+                subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=10", "-f", "lavfi", "-i", "sine=duration=0.4", "-t", "0.4", *codecs, str(path)], check=True)
+                info = await self.app.objects.put_object(self.scope, path.name, path.read_bytes(), content_type="video/" + extension)
+                with self.assertRaisesRegex(ValueError, "不是可识别的字幕格式"):
+                    await self.editor.start(self.scope, path.name, {"etag": info.etag, "fields": {"subtitle": "没有时间轴的文字"}})
+                job = await self.editor.start(self.scope, path.name, {"etag": info.etag, "fields": {"title": "中文视频", "artist": "创作者", "year": "2026", "genre": "测试", "subtitle": subtitle}})
+                result = await self.wait(job)
+                self.assertEqual(result["state"], "done", result)
+                latest = await self.editor.info(self.scope, path.name)
+                self.assertEqual(latest["fields"]["title"], "中文视频")
+                output = self.folder / ("saved-video." + extension)
+                output.write_bytes(await self.content(path.name))
+                self.assertEqual(self.pcm(path), self.pcm(output))
+                def video_hash(file):
+                    return subprocess.check_output([FFMPEG, "-v", "error", "-i", str(file), "-map", "0:v:0", "-f", "hash", "-hash", "sha256", "-"])
+                self.assertEqual(video_hash(path), video_hash(output))
+                text = subprocess.check_output([FFMPEG, "-v", "error", "-i", str(output), "-map", "0:s:0", "-f", "srt", "-"]).decode()
+                self.assertIn("中文字幕测试", text)
+                second = await self.wait(await self.editor.start(self.scope, path.name, {"etag": latest["etag"], "fields": {"title": "只改视频标题"}}))
+                self.assertEqual(second["state"], "done", second)
+                record = await self.app.media.info(self.scope, path.name)
+                self.assertEqual(len(record["subtitles"]), 1)
 
     async def test_private_jobs_are_not_visible_through_normal_scope(self):
         path = self.sample("mp3")

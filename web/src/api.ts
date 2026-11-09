@@ -378,8 +378,8 @@ export const announceMediaAssets = (media: string, asset?: string) => window.dis
 export type PreviewAssetList = { assets: PreviewAsset[]; tags?: MediaTags | null };
 const mediaQuery = (path: string, extra = "") => `?path=${encodeURIComponent(path)}${extra}`;
 export const mediaInfo = (path: string, signal?: AbortSignal) => request<MediaInfo>(fileApi("/media/info", path) + mediaQuery(path), { signal });
-export type AudioEditFields = Record<"title" | "artist" | "album" | "album_artist" | "track" | "year" | "genre" | "lyrics", string>;
-export type AudioEditInfo = { etag: string; fields: Omit<AudioEditFields, "lyrics">; lyrics: string; cover: boolean; editable: boolean; reason: string };
+export type AudioEditFields = Record<"title" | "artist" | "album" | "album_artist" | "track" | "year" | "genre" | "lyrics" | "subtitle", string>;
+export type AudioEditInfo = { etag: string; kind: "audio" | "video"; fields: Omit<AudioEditFields, "lyrics" | "subtitle">; lyrics: string; cover: boolean; editable: boolean; reason: string };
 export type AudioEditJob = { id: string; path: string; state: "queued" | "running" | "done" | "failed" | "cancelled";
   read: number; stored: number; size: number; detail: string; result: FileItem | null };
 export const audioEditInfo = (path: string, signal?: AbortSignal) => request<AudioEditInfo>(fileApi("/media/edit", path) + mediaQuery(path), { signal });
@@ -388,7 +388,13 @@ export const cancelAudioEdit = (path: string, id: string) => post<{ cancelled: b
 async function audioEditSaved(path: string, fields: Partial<AudioEditFields>) {
   const saved = await fileInfo(path);
   announceFileUpdated(saved);
-  announceMediaAssets(saved.key, fields.lyrics?.trim() ? `embedded:lyrics:${saved.key}` : undefined);
+  let prefer = fields.lyrics?.trim() ? `embedded:lyrics:${saved.key}` : undefined;
+  if (fields.subtitle?.trim()) {
+    const media = await mediaInfo(saved.key).catch(() => null);
+    const last = media?.subtitles.at(-1);
+    if (last) prefer = `embedded:subtitle:${last.index}:${saved.key}`;
+  }
+  announceMediaAssets(saved.key, prefer);
   window.dispatchEvent(new CustomEvent("tessera:files-mutated"));
   window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [saved.key.replace(/[^/]+$/, "")] } }));
   return saved;

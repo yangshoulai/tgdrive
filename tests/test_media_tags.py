@@ -53,6 +53,10 @@ def ebml(element: int, payload: bytes) -> bytes:
 
 
 class Id3Tests(unittest.TestCase):
+    def test_mislabeled_utf8_is_not_decoded_as_gbk(self):
+        result, _ = run(id3([("TIT2", b"\x00" + "中文歌名".encode("utf-8"))]) + mpeg_frames())
+        self.assertEqual(result.title, "中文歌名")
+
     def test_text_frames_lyrics_and_duration(self):
         lyrics = "[00:01.00]第一句\n[00:05.20]第二句"
         tag = id3([
@@ -166,7 +170,7 @@ class Mp4Tests(unittest.TestCase):
         moov = box(b"moov", mvhd + self.track(b"vide", b"avc1", "und") + self.track(b"sbtl", b"tx3g") + self.track(b"text", b"tx3g", "eng") + box(b"udta", meta))
         data = box(b"ftyp", b"M4A " + b"\x00" * 4) + box(b"mdat", b"\x00" * (3 * 1024 * 1024)) + moov
         result, reads = run(data)
-        self.assertEqual((result.title, result.artist, result.track, result.year), ("七里香", "Jay", "7", "2004"))
+        self.assertEqual((result.title, result.artist, result.track, result.year), ("七里香", "Jay", "7/10", "2004"))
         self.assertAlmostEqual(result.duration, 125.5)
         self.assertFalse(result.best_lyrics().synced)
         found = result.cover()

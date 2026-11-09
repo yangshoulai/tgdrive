@@ -1,4 +1,4 @@
-"""音频标签写回：流复制音频、临时输出、条件提交；不把整首音频放进内存。"""
+"""媒体元数据写回：流复制、临时输出、读回检查、条件提交；不把完整媒体放进内存。"""
 
 from __future__ import annotations
 
@@ -16,10 +16,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..errors import NotFoundError, VersionConflict
-from .tags import FIELD_LIMIT, READ_BUDGET, _id3_text, _split_terminated
+from .tags import FIELD_LIMIT, READ_BUDGET, _id3_text, _split_terminated, _year
 
-FIELDS = {"title", "artist", "album", "album_artist", "track", "year", "genre", "lyrics"}
-FORMATS = {"mp3": ("mp3", "mp3"), "flac": ("flac", "flac"), "mp4": ("mov", "ipod")}
+TEXT_FIELDS = {"title", "artist", "album", "album_artist", "track", "year", "genre"}
+FIELDS = TEXT_FIELDS | {"lyrics", "subtitle"}
+FORMATS = {"mp3": ("mp3", "mp3"), "flac": ("flac", "flac"), "mp4": ("mov", "mp4"), "wav": ("wav", "wav"), "matroska": ("matroska", "matroska")}
+ID3_FIELDS = {"title": b"TIT2", "artist": b"TPE1", "album": b"TALB", "album_artist": b"TPE2", "track": b"TRCK", "year": b"TYER", "genre": b"TCON"}
 LYRICS_BUFFER = "tessera_lyrics_buffer"
 
 
@@ -36,8 +38,32 @@ def mp3_lyrics_frames(lyrics):
     return b"".join(frames)
 
 
-def write_mp3_lyrics(path, frames):
-    """FFmpeg 的部分版本把 lyrics 写成 TXXX；改为标准 ID3v2.3 USLT，保留音频与其他帧。
+def id3_text_frames(fields):
+    result = b""
+    for key, value in fields.items():
+        if key in ID3_FIELDS and value:
+            body = b"\x01" + value.encode("utf-16")
+            result += ID3_FIELDS[key] + struct.pack(">I", len(body)) + b"\x00\x00" + body
+    return result
+
+
+def append_wav_tags(path, frames):
+    """WAV INFO 无法容纳歌词和图片，附上标准 ID3 块并更新 RIFF 长度。"""
+    size = path.stat().st_size
+    chunk = b"id3 " + struct.pack("<I", len(frames) + 10)
+    header = b"ID3\x03\x00\x00" + bytes((len(frames) >> shift) & 127 for shift in (21, 14, 7, 0))
+    data = chunk + header + frames + (b"\x00" if len(frames) & 1 else b"")
+    if size + len(data) - 8 > 0xFFFFFFFF:
+        raise ValueError("WAV 写回暂支持 4 GB 以内的 RIFF 文件")
+    with path.open("r+b") as handle:
+        if handle.read(4) != b"RIFF":
+            raise ValueError("WAV 容器格式不正确")
+        handle.seek(0, 2); handle.write(data)
+        handle.seek(4); handle.write(struct.pack("<I", size + len(data) - 8))
+
+
+def write_mp3_lyrics(path, frames, fields=None):
+    """歌词写标准 USLT、文本写 Unicode，避免 FFmpeg 的标签兼容性与旧编码问题。
 
     封装时预留了标签空间，这里只原位改文件头，不移动或读取音频数据。
     """
@@ -57,6 +83,9 @@ def write_mp3_lyrics(path, frames):
             if end > len(original):
                 raise ValueError("MP3 标签内容不完整")
             remove = name in (b"USLT", b"SYLT")
+            if fields:
+                remove |= name in {ID3_FIELDS[key] for key in fields if key in ID3_FIELDS}
+                remove |= "year" in fields and name in (b"TDRC", b"TDOR")
             if name == b"TXXX" and length:
                 body = original[cursor + 10:end]
                 descriptor, _ = _split_terminated(body[0], body[1:])
@@ -114,7 +143,7 @@ class EditJob:
     state: str = "queued"
     read: int = 0
     stored: int = 0
-    detail: str = "等待更新音频信息"
+    detail: str = "等待更新元数据"
     finished: float = 0
     result: dict | None = None
     task: asyncio.Task | None = field(default=None, repr=False)
@@ -137,18 +166,18 @@ class AudioEditor:
 
     @staticmethod
     def supported(info, record, ffmpeg):
-        return bool(ffmpeg and record.get("container") in FORMATS and info.key.lower().endswith((".mp3", ".flac", ".m4a")))
+        return bool(ffmpeg and record.get("container") in FORMATS and info.key.lower().endswith((".mp3", ".flac", ".m4a", ".wav", ".mp4", ".m4v", ".mov", ".mkv", ".webm")))
 
     def validate(self, payload):
         fields = payload.get("fields", {})
         if not isinstance(fields, dict) or set(fields) - FIELDS:
-            raise ValueError("音频信息包含不支持的字段")
+            raise ValueError("元数据包含不支持的字段")
         result = {}
         for key, value in fields.items():
-            limit = FIELD_LIMIT // 2 if key == "lyrics" else 512
+            limit = FIELD_LIMIT // 2 if key in ("lyrics", "subtitle") else 512
             if (not isinstance(value, str) or "\x00" in value or len(value.encode()) > limit
                     or key == "lyrics" and len(value.encode("utf-16")) + 8 > FIELD_LIMIT):
-                raise ValueError("歌词最多 512 KB，其他音频信息每项最多 512 字节，不能含空字符")
+                raise ValueError("歌词或字幕最多 512 KB，其他元数据每项最多 512 字节，不能含空字符")
             result[key] = value.replace("\r\n", "\n").replace("\r", "\n") if key == "lyrics" else value.strip()
         cover = payload.get("cover", "keep")
         picture = None
@@ -163,7 +192,7 @@ class AudioEditor:
             if len(picture) > self.COVER_LIMIT or image_mime(picture) not in ("image/jpeg", "image/png"):
                 raise ValueError("内置封面仅支持 5 MB 以内的 JPEG 或 PNG 图片")
         if not result and cover == "keep":
-            raise ValueError("没有需要保存的音频信息")
+            raise ValueError("没有需要保存的元数据")
         return result, cover, picture
 
     async def info(self, scope, key):
@@ -174,25 +203,40 @@ class AudioEditor:
         file = FileAccess(self.media, scope, info)
         tags = await self.media._parsed(file)
         lyrics = tags.best_lyrics() if tags else None
-        return {"etag": info.etag, "fields": {key: record.get(key) or "" for key in FIELDS - {"lyrics"}},
+        return {"etag": info.etag, "kind": kind, "fields": {key: record.get(key) or "" for key in TEXT_FIELDS},
                 "lyrics": lyrics.text if lyrics else "", "cover": bool(tags and tags.pictures),
-                "editable": kind == "audio" and self.supported(info, record, getattr(self.media.resources, "ffmpeg", None)),
-                "reason": "支持 MP3、FLAC、M4A；服务器需安装 FFmpeg"}
+                "editable": self.supported(info, record, getattr(self.media.resources, "ffmpeg", None)),
+                "reason": "支持 MP3、FLAC、M4A、WAV 和 MP4、MOV、MKV、WebM；服务器需安装 FFmpeg"}
 
     async def start(self, scope, key, payload):
         fields, cover, picture = self.validate(payload)
         info, kind = self.media._media(scope, key)
         self.media.objects._check_scope(scope, key, write=True)
         if payload.get("etag") != info.etag:
-            raise VersionConflict("音频已在别处修改，请重新打开后再编辑")
+            raise VersionConflict("文件已在别处修改，请重新打开后再编辑")
         record = await self.media._record(scope, info)
-        if kind != "audio" or not self.supported(info, record, getattr(self.media.resources, "ffmpeg", None)):
-            raise ValueError("当前仅支持 MP3、FLAC、M4A 音频，服务器需要安装 FFmpeg")
+        if not self.supported(info, record, getattr(self.media.resources, "ffmpeg", None)):
+            raise ValueError("此格式暂不支持元数据写回，或服务器没有安装 FFmpeg")
+        if record.get("container") == "mp4" and fields.get("track"):
+            parts = fields["track"].split("/")
+            if len(parts) > 2 or any(not part.isascii() or not part.isdigit() or not 0 < int(part) <= 65535 for part in parts):
+                raise ValueError("此格式的曲目编号需为数字或编号/总数，每项为 1–65535")
+        if "subtitle" in fields and kind != "video" or "lyrics" in fields and kind != "audio":
+            raise ValueError("歌词只能写入音频，字幕只能写入视频")
+        if fields.get("subtitle", "").strip():
+            from .text import normalize_subtitle
+            from .providers.base import ProviderError
+            try:
+                normalize_subtitle(fields["subtitle"].encode("utf-8"))
+            except ProviderError as exc:
+                raise ValueError(str(exc)) from None
+        if kind == "video" and cover != "keep":
+            raise ValueError("视频封面请通过封面页更新，不改动视频画面")
         now = time.monotonic()
         self.jobs = {key: job for key, job in self.jobs.items() if not job.finished or now - job.finished < self.KEEP}
         active = [job for job in self.jobs.values() if not job.finished]
         if len(active) >= self.MAX_JOBS or any(job.bucket == scope.bucket_id for job in active):
-            raise ValueError("已有音频正在保存，请等待完成后重试")
+            raise ValueError("已有文件正在保存，请等待完成后重试")
         job = EditJob(secrets.token_hex(8), scope.bucket_id, key, info.etag, info.size)
         self.jobs[job.id] = job
         job.task = asyncio.create_task(self.run(job, scope, info, record["container"], fields, cover, picture))
@@ -209,10 +253,10 @@ class AudioEditor:
 
     def cancel(self, scope, ident):
         if not isinstance(ident, str):
-            raise ValueError("音频保存任务编号不正确")
+            raise ValueError("元数据保存任务编号不正确")
         jobs = self.status(scope, [ident])
         if not jobs:
-            raise NotFoundError("音频保存任务不存在")
+            raise NotFoundError("元数据保存任务不存在")
         job = self.jobs[ident]
         cancelled = False
         if job.result is None and job.state in ("queued", "running") and job.task is not None and not job.task.done():
@@ -231,7 +275,7 @@ class AudioEditor:
             while chunk := await stream.read(65536):
                 data.extend(chunk)
                 if len(data) > limit:
-                    raise ValueError("音频标签数据超过处理上限")
+                    raise ValueError("媒体标签数据超过处理上限")
             return bytes(data)
 
         async def watch():
@@ -250,7 +294,7 @@ class AudioEditor:
                 task.result()
             data, _ = await operation
             if await process.wait() != 0:
-                raise ValueError("无法更新这份音频文件，请确认文件格式及内容完整")
+                raise ValueError("无法更新这份媒体文件，请确认文件格式及内容完整")
             authorize()
             return data
         finally:
@@ -281,7 +325,7 @@ class AudioEditor:
         def authorize():
             objects._check_scope(scope, info.key, write=True)
             if objects.head_object(scope, info.key).etag != info.etag:
-                raise VersionConflict("音频已在别处修改，本次修改未覆盖原文件")
+                raise VersionConflict("文件已在别处修改，本次修改未覆盖原文件")
 
         try:
             async with self.slot, asyncio.timeout(self.TIMEOUT):
@@ -292,7 +336,7 @@ class AudioEditor:
                 with tempfile.TemporaryDirectory(prefix="audio-edit-", dir=parent) as directory:
                     folder = Path(directory)
                     if shutil.disk_usage(folder).free < info.size + self.COVER_LIMIT + reserve:
-                        raise ValueError("临时空间不足，需要容纳一份音频和封面，请稍后重试")
+                        raise ValueError("临时空间不足，需要容纳一份媒体文件和封面，请稍后重试")
                     images = {}
                     if cover == "keep":
                         for variant in objects.thumbnail_variants([info.blob_uuid]).get(info.blob_uuid, []):
@@ -302,31 +346,45 @@ class AudioEditor:
                                 images[variant] = (await objects.get_thumbnail(scope, info.key, variant))[0]
                             except NotFoundError:
                                 pass
-                    job.state, job.detail = "running", "正在写入音频信息，音频不会重新编码"
+                    job.state, job.detail = "running", "正在写入元数据，音视频不会重新编码"
                     async with _RangeInput(objects.engine, info, authorize) as source:
+                        from .service import FileAccess
+                        from . import tags as media_tags
+                        file = FileAccess(self.media, scope, info)
+                        tags = await self.media._parsed(file)
+                        # FFmpeg 不识别旧标签中误声明的 GBK；用已正确解码的字段覆盖，避免未修改的中文也乱码。
+                        # 年份读取会省略月日；未修改日期时保留原日期标签，不能用年份覆盖完整日期。
+                        canonical = {key: getattr(tags, key) for key in TEXT_FIELDS - {"year"} if tags and getattr(tags, key) is not None}
+                        canonical.update({key: value for key, value in fields.items() if key in TEXT_FIELDS})
+                        video = self.media.kind(info) == "video"
                         input_format, output_format = FORMATS[container]
+                        if container == "mp4":
+                            output_format = "mov" if info.key.lower().endswith(".mov") else "mp4" if video else "ipod"
+                        elif info.key.lower().endswith(".webm"):
+                            output_format = "webm"
                         inputs = ["-protocol_whitelist", "http,tcp", "-f", input_format]
                         if container == "mp4":
                             inputs += ["-enable_drefs", "0", "-use_absolute_path", "0"]
                         inputs += ["-i", source.url]
-                        values = {("date" if key == "year" else key): value for key, value in fields.items() if key != "lyrics"}
+                        values = {("date" if key == "year" else key): value for key, value in canonical.items()}
                         native_lyrics = None
-                        if container == "mp3":
-                            from .service import FileAccess
-                            tags = await self.media._parsed(FileAccess(self.media, scope, info))
+                        native_fields = id3_text_frames(canonical)
+                        if container in ("mp3", "wav"):
                             lyrics = [(fields["lyrics"], "und")] if "lyrics" in fields else [(item.text, item.language) for item in tags.lyrics] if tags else []
                             native_lyrics = mp3_lyrics_frames(lyrics)
-                            values[LYRICS_BUFFER] = "0" * (len(native_lyrics) + 128)
+                            if container == "mp3":
+                                values[LYRICS_BUFFER] = "0" * (len(native_lyrics) + len(native_fields) + 128)
                         elif "lyrics" in fields:
                             metadata = await self.command(inputs + ["-t", "0", "-f", "ffmetadata", "pipe:1"], authorize, folder, reserve)
                             values.update({key: "" for key in lyric_keys(metadata.decode("utf-8", errors="replace"))})
                             values["lyrics"] = fields["lyrics"]
                         (folder / "tags").write_text(metadata_text(values), encoding="utf-8")
-                        options = inputs + ["-protocol_whitelist", "file", "-f", "ffmetadata", "-i", str(folder / "tags")]
-                        options += ["-map", "0:a", "-map_metadata", "1", "-map_metadata", "0", "-c", "copy"]
-                        if cover == "keep":
+                        metadata_inputs = inputs + ["-protocol_whitelist", "file", "-f", "ffmetadata", "-i", str(folder / "tags")]
+                        options = metadata_inputs.copy()
+                        options += ["-map", "0" if video else "0:a", "-map_metadata", "1", "-map_metadata", "0", "-c", "copy"]
+                        if cover == "keep" and not video and container != "wav":
                             options += ["-map", "0:v?"]
-                        elif picture is not None:
+                        elif picture is not None and container != "wav":
                             (folder / "cover").write_bytes(picture)
                             # 限定单张图片解封装器，禁止把用户提供的数据当作播放列表访问其他文件或网络。
                             options = inputs + ["-protocol_whitelist", "file", "-f", "ffmetadata", "-i", str(folder / "tags"),
@@ -335,18 +393,57 @@ class AudioEditor:
                                 "-disposition:v", "attached_pic", "-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"]
                         if container == "mp3":
                             options += ["-id3v2_version", "3"]
+                        if container == "wav":
+                            options += ["-rf64", "never"]
+                        if fields.get("subtitle", "").strip():
+                            from .text import normalize_subtitle
+                            subtitle = normalize_subtitle(fields["subtitle"].encode("utf-8"))
+                            (folder / "subtitle").write_text(subtitle.text, encoding="utf-8")
+                            codec = "mov_text" if container == "mp4" else "webvtt" if output_format == "webm" else "subrip"
+                            index = len(tags.subtitles) if tags else 0
+                            subtitle_input = ["-protocol_whitelist", "file", "-f", "webvtt" if subtitle.format == "vtt" else "srt", "-sub_charenc", "UTF-8", "-i", str(folder / "subtitle")]
+                            options = metadata_inputs + subtitle_input + options[len(metadata_inputs):] + ["-map", "2:s:0", f"-c:s:{index}", codec, f"-metadata:s:s:{index}", "language=und"]
                         output = folder / "edited"
                         options += ["-f", output_format, str(output)]
                         def progress():
                             job.read = min(info.size, source.remote_bytes)
                         await self.command(options, authorize, folder, reserve, progress=progress)
-                        if native_lyrics is not None:
-                            await asyncio.to_thread(write_mp3_lyrics, output, native_lyrics)
+                        if container == "mp3":
+                            await asyncio.to_thread(write_mp3_lyrics, output, native_lyrics + native_fields, canonical)
+                        elif container == "wav":
+                            art = picture
+                            if cover == "keep" and tags and tags.pictures:
+                                art = (await self.media.embedded_cover(scope, info.key, info.etag))[0]
+                            frames = native_fields + native_lyrics
+                            if art:
+                                from ..thumbnails import image_mime
+                                body = b"\x00" + image_mime(art).encode("ascii") + b"\x00\x03\x00" + art
+                                frames += b"APIC" + struct.pack(">I", len(body)) + b"\x00\x00" + body
+                            await asyncio.to_thread(append_wav_tags, output, frames)
+                        async def read_output(start, end):
+                            def read():
+                                with output.open("rb") as handle:
+                                    handle.seek(start)
+                                    return handle.read(end - start)
+                            return await asyncio.to_thread(read)
+                        written = await media_tags.parse(read_output, output.stat().st_size)
+                        for key, value in canonical.items():
+                            expected_text = _year(value) if key == "year" else value.strip() or None
+                            if key == "track" and container == "mp4" and value:
+                                expected_text = "/".join(str(int(part)) for part in value.split("/"))
+                            if (getattr(written, key, None) or None) != expected_text:
+                                raise ValueError("元数据写回校验失败，原文件未修改，请检查文件编码或格式")
+                        if "lyrics" in fields:
+                            actual = written.best_lyrics() if written else None
+                            if (actual.text if actual else "") != fields["lyrics"].strip():
+                                raise ValueError("歌词写回校验失败，原文件未修改")
+                        if fields.get("subtitle", "").strip() and len(written.subtitles if written else []) != len(tags.subtitles if tags else []) + 1:
+                            raise ValueError("字幕写回校验失败，原文件未修改")
                         if source.failure is not None:
                             raise source.failure
                         job.read = min(info.size, source.remote_bytes)
                     authorize()
-                    job.detail = "正在保存音频文件"
+                    job.detail = "正在保存媒体文件"
                     size = output.stat().st_size
                     async def body():
                         nonlocal expected
@@ -361,7 +458,7 @@ class AudioEditor:
                     commit_scope = replace(scope, custom_cover=bool(images) or picture is not None)
                     saved = await objects.put_object(commit_scope, info.key, body(), size, info.content_type, info.user_meta, if_match=info.etag)
                     job.result = UserApi._object_json(saved)
-                    job.detail = "音频已保存，正在更新媒体信息"
+                    job.detail = "文件已保存，正在更新媒体信息"
                     # 原路径的分享与收藏由条件覆盖保留；新 Blob 重新提取标签及封面。
                     def saved_authorize():
                         objects._check_scope(scope, saved.key, write=True)
@@ -379,15 +476,15 @@ class AudioEditor:
                         # 音频内容已经成功提交，封面缓存交给既有后台补图，不误报整个保存失败。
                         if thumbnails is not None:
                             thumbnails.enqueue(saved)
-                    job.state, job.detail = "done", "音频信息已保存"
+                    job.state, job.detail = "done", "元数据已保存"
         except asyncio.CancelledError:
             if not committed():
                 job.state, job.detail = "cancelled", "已取消，未完成的修改不会覆盖原文件"
             else:
-                job.state, job.detail = "done", "音频信息已保存"
+                job.state, job.detail = "done", "元数据已保存"
         except Exception as exc:
             if committed():
-                job.state, job.detail = "done", "音频信息已保存"
+                job.state, job.detail = "done", "元数据已保存"
             else:
                 job.state = "failed"
                 job.detail = str(exc) if isinstance(exc, (ValueError, VersionConflict, PermissionError)) else "保存失败，请稍后重试"

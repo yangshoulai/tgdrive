@@ -23,4 +23,4 @@
 
 - 脚本安全解锁页 `grabber-private.tsx` 是独立入口，`node build-apps.mjs` 默认同时构建 user 与 private，后者输出 `dist/grabber/index.html`；它不加载主站会话 Provider，不读 Cookie，以专用 MessagePort 接收当前脚本的密钥与安装标识，密码不离开 Tessera 来源。仅该 HTML 的响应允许跨站嵌入，主站保持 frame-ancestors none。表单复用 ui 基元及现有通行密钥验证，样式在 `18-grabber-private.css`，窄屏输入字号至少 16px。
 
-- 音频信息编辑窗口为 `user/audio-editor.tsx`（样式 `59-audio-editor.css`），由文件菜单与 PreviewHost 打开，私密锁定时卸载。复用 Modal／Field／Segmented／图片选择器，分信息、歌词、封面；未保存修改用 useUnsavedChanges，关闭时确认。保存会轮询 `media/edit/jobs`，取消后检查是否已提交；成功后更新播放器、目录、专辑与缓存。在线歌词弹窗支持直接写入音频，以及给编辑窗口挑选歌词；无 FFmpeg 或不支持的格式保留同目录 LRC 保存。
+- 元数据编辑窗口为 `user/metadata-editor.tsx`（样式 `59-audio-editor.css`），由文件菜单与 PreviewHost 打开，私密锁定时卸载。复用 Modal／Field／Segmented／图片选择器，按类型显示信息、歌词／字幕、封面；未保存修改用 useUnsavedChanges，关闭时确认。保存会轮询 `media/edit/jobs`，取消后检查是否已提交；成功后更新播放器、目录、专辑与缓存。在线歌词弹窗支持直接写入音频，以及给编辑窗口挑选歌词；无 FFmpeg 或不支持的格式保留同目录 LRC 保存。

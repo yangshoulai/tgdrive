@@ -22,7 +22,7 @@ from typing import Awaitable, Callable
 
 Reader = Callable[[int, int], Awaitable[bytes]]
 
-PARSER_VERSION = 1
+PARSER_VERSION = 2
 READ_BUDGET = 16 * 1024 * 1024   # 单个文件解析时最多读取的字节数
 WINDOW = 64 * 1024               # 每次回源至少读取这么多，减少往返
 FIELD_LIMIT = 1024 * 1024        # 单个标签字段（歌词等）最多读取这么多
@@ -130,6 +130,10 @@ def _clean(value: str | None) -> str | None:
 
 def _legacy(data: bytes) -> str:
     """ID3 声明 ISO-8859-1 的文本实际上常是 GBK：能按 GB18030 严格解出中日韩文字时采用它。"""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
     if any(byte >= 0x80 for byte in data):
         try:
             text = data.decode("gb18030")
@@ -138,6 +142,14 @@ def _legacy(data: bytes) -> str:
         except UnicodeDecodeError:
             pass
     return data.decode("latin-1")
+
+
+def _unicode(data: bytes) -> str:
+    """标准 UTF-8 优先；兼容旧工具写入的 GBK 标签，避免先用替换字符丢失原文。"""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return _legacy(data)
 
 
 def is_synced(text: str) -> bool:
@@ -541,7 +553,7 @@ def _vorbis_comment(data: bytes, tags: MediaTags) -> None:
             except (ValueError, struct.error):
                 pass
             continue
-        text = value.decode("utf-8", errors="replace")
+        text = _unicode(value)
         if key in _VORBIS:
             tags.set(_VORBIS[key], text)
         elif key in ("date", "year", "originaldate"):
@@ -700,6 +712,18 @@ async def _mp4(source: _Source, tags: MediaTags) -> None:
                 async for item, item_start, item_end in _boxes(source, child_start, child_end):
                     if item == b"meta":
                         await _mp4_meta(source, item_start, item_end, tags)
+                    elif item in _MP4_TEXT or item in (b"\xa9day", b"\xa9gen"):
+                        # QuickTime 把文本直接放在 udta：两字节长度、两字节语言，然后才是正文。
+                        if 4 <= item_end - item_start <= FIELD_LIMIT:
+                            raw = await source.get(item_start, item_end - item_start)
+                            length = int.from_bytes(raw[:2], "big")
+                            value = _unicode(raw[4:4 + length])
+                            if item in _MP4_TEXT:
+                                tags.set(_MP4_TEXT[item], value)
+                            elif item == b"\xa9day":
+                                tags.set("year", _year(value))
+                            else:
+                                tags.set("genre", value)
             elif child == b"meta":
                 await _mp4_meta(source, child_start, child_end, tags)
         return
@@ -774,7 +798,8 @@ async def _mp4_ilst(source: _Source, start: int, end: int, tags: MediaTags) -> N
             elif kind == b"trkn" and len(value) >= 4:
                 number = struct.unpack(">H", value[2:4])[0]
                 if number:
-                    tags.set("track", str(number))
+                    total = struct.unpack(">H", value[4:6])[0] if len(value) >= 6 else 0
+                    tags.set("track", f"{number}/{total}" if total else str(number))
             elif kind == b"\xa9lyr":
                 item = _lyrics(value.decode("utf-8", errors="replace"), "mp4")
                 if item:
@@ -922,7 +947,7 @@ async def _matroska_child(source, child, start, end, segment, tags, seen, target
                     tags.set("title", value)
                 elif name == "ARTIST":
                     tags.set("artist", value)
-                elif name in ("DATE_RELEASED", "DATE_RECORDED"):
+                elif name in ("DATE", "YEAR", "DATE_RELEASED", "DATE_RECORDED"):
                     tags.set("year", _year(value))
                 elif name == "GENRE":
                     tags.set("genre", value)

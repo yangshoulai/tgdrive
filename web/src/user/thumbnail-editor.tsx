@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ComponentProps, type DragEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import * as api from "../api";
 import { baseName } from "../files";
 import { createThumbnails, generateLoadedThumbnails, readEmbeddedCover, saveImageThumbnail, thumbnailSource } from "../thumbnails";
@@ -101,7 +102,8 @@ const SOURCES: Record<Source, { label: string; icon: IconName }> = {
 /** 更新封面：来源依次是内置封面（音视频文件里嵌入的图片）、本地图片、网络图片、截图生成（图片按原图缩放、视频截取画面）
  * 与在线查找（音视频，管理员启用的媒体信息来源）。任何文件都可以用本地或网络图片；图片在浏览器里缩放成三种规格后保存，
  * 原图不进入文件空间，网络图片由服务器代为读取。截图生成交给服务器（服务器没有 FFmpeg 时在这个页面读取文件生成）。 */
-export function ThumbnailEditor({ file, onClose, onSaved, initialSource }: { file: api.FileItem; onClose: () => void; onSaved: (variants: string[]) => void;
+export function ThumbnailEditor({ file, onClose, onSaved, initialSource, inline, footerTarget, onSaveImage, onBusyChange, onDirtyChange, onCancelSave, saveHint }: { file: api.FileItem; onClose: () => void; onSaved: (variants: string[]) => void;
+  inline?: boolean; footerTarget?: HTMLElement | null; onSaveImage?: (blob: Blob) => Promise<string[]>; onBusyChange?: (busy: boolean) => void; onDirtyChange?: (dirty: boolean) => void; onCancelSave?: () => void; saveHint?: string;
   /** 打开时选中的来源（播放器里的「查找封面」直接打开在线查找）。 */ initialSource?: Source }) {
   const media = thumbnailSource(file.key, file.content_type, file.size);
   const playable = media === "audio" || media === "video";
@@ -113,11 +115,13 @@ export function ThumbnailEditor({ file, onClose, onSaved, initialSource }: { fil
   const picker = useImagePicker(file.key);
   const { picked, setPicked, error, setError, accept } = picker;
   const [saving, setSaving] = useState(false);
+  useEffect(() => { onBusyChange?.(saving); }, [saving, onBusyChange]);
   const [dragging, setDragging] = useState(false);
   const [embedded, setEmbedded] = useState<Embedded | null>(null);
   // 在线候选：点中后立即显示小图并在后台读取原图，保存时再等原图读完。
   const [onlinePick, setOnlinePick] = useState<OnlinePick | null>(null), [onlineLoading, setOnlineLoading] = useState(false);
   const latestPick = useRef("");
+  useEffect(() => { onDirtyChange?.(source !== "embedded" && Boolean(picked || onlinePick)); }, [source, picked, onlinePick, onDirtyChange]);
   const close = useRef(onClose); close.current = onClose;
   const current = api.fileThumbnail(file, "poster");
   const video = media === "video";
@@ -187,7 +191,7 @@ export function ThumbnailEditor({ file, onClose, onSaved, initialSource }: { fil
     try {
       const image = source === "online" && onlinePick && onlineLoading ? await onlinePick.ready : picked;
       if (!image) { setSaving(false); return; }
-      onSaved(await saveImageThumbnail(file, image.blob));
+      onSaved(await (onSaveImage ? onSaveImage(image.blob) : saveImageThumbnail(file, image.blob)));
     }
     catch (reason) { setError(api.errorMessage(reason, "保存失败，请稍后重试")); setSaving(false); }
   }
@@ -316,16 +320,16 @@ export function ThumbnailEditor({ file, onClose, onSaved, initialSource }: { fil
     </div>;
   }
 
-  return <Modal title={current ? "更新封面" : "设置封面"} description={baseName(file.key)} icon="image" size="lg"
+  return <ThumbnailFrame inline={inline} footerTarget={footerTarget} title={current ? "更新封面" : "设置封面"} description={baseName(file.key)} icon="image" size="lg"
     className={`thumbnail-editor${api.isPrivatePath(file.key) ? " private-dialog" : ""}`}
     onClose={() => { if (!saving) onClose(); }} dismissible={!saving}
     footer={<>
-      <span className="thumbnail-editor-foot">{source === "capture" ? "" : "图片会缩放为三种尺寸保存，原图不会存入你的文件"}</span>
+      <span className="thumbnail-editor-foot" role="status">{saveHint ?? (source === "capture" ? "" : "图片会缩放为三种尺寸保存，原图不会存入你的文件")}</span>
       {source === "capture" ? <>
         <Button variant="ghost" onClick={onClose}>{generating?.state === "running" ? "在后台继续" : "取消"}</Button>
         {generating?.state === "running" ? <Button icon="stop" onClick={() => void stopGenerating()}>停止生成</Button>
           : <Button variant="primary" icon="camera" onClick={() => void generate()}>{generating ? "重试" : video ? "截取画面" : current ? "重新生成" : "生成封面"}</Button>}
-      </> : <><Button variant="ghost" disabled={saving} onClick={onClose}>取消</Button>
+      </> : <><Button variant="ghost" disabled={saving && !onCancelSave} onClick={() => saving ? onCancelSave?.() : onClose()}>{saving && onCancelSave ? "取消保存" : "取消"}</Button>
         <Button variant="primary" icon="check" loading={saving} disabled={!canSave} onClick={() => void save()}>{saving && source === "online" && onlineLoading ? "正在读取原图" : "保存封面"}</Button></>}
     </>}>
     <div className="thumbnail-editor-body"
@@ -352,7 +356,11 @@ export function ThumbnailEditor({ file, onClose, onSaved, initialSource }: { fil
         <div className="thumbnail-panel-wrap">{panel}{error && <Notice tone="danger">{error}</Notice>}</div>
       </div>
     </div>
-  </Modal>;
+  </ThumbnailFrame>;
+}
+
+function ThumbnailFrame({ inline, footerTarget, ...props }: ComponentProps<typeof Modal> & { inline?: boolean; footerTarget?: HTMLElement | null }) {
+  return inline ? <section className={props.className}>{props.children}{footerTarget ? createPortal(props.footer, footerTarget) : <footer className="metadata-panel-footer">{props.footer}</footer>}</section> : <Modal {...props} />;
 }
 
 function PanelHead({ icon, title, detail }: { icon: IconName; title: string; detail: string }) {

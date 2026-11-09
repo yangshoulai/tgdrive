@@ -6,9 +6,7 @@ import * as api from "../api";
 import { cacheFileId, type CacheFile } from "../cache-client";
 
 import { FolderStatsDialog } from "./folder-stats";
-import { ThumbnailEditor } from "./thumbnail-editor";
-import { MediaLookupDialog } from "./media-lookup";
-import { AudioEditor } from "./audio-editor";
+import { MetadataEditor } from "./metadata-editor";
 import { ExtractDialog, isArchive } from "./extract";
 import { CompressDialog } from "./compress";
 import { ImageEditorDialog } from "./image-editor";
@@ -80,9 +78,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const preview = usePreview();
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
-  const [thumbnailEditing, setThumbnailEditing] = useState<api.FileItem | null>(null);
-  const [mediaLookup, setMediaLookup] = useState<{ file: api.FileItem; want: "lyrics" | "subtitle" } | null>(null);
-  const [audioEditing, setAudioEditing] = useState<api.FileItem | null>(null);
+  const [metadataEditing, setMetadataEditing] = useState<api.FileItem | null>(null);
   const [extracting, setExtracting] = useState<{ file: api.FileItem; picks?: string[] } | null>(null);
   const [compressing, setCompressing] = useState<string[] | null>(null);
   const [editingImage, setEditingImage] = useState<api.FileItem | null>(null);
@@ -440,14 +436,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) },
         { label: file.starred_at ? "取消收藏" : "收藏", icon: "star" as const, shortcut: "*", onSelect: () => void star([file], !file.starred_at) }] : []),
     ];
-    // 任何文件都可以指定缩略图；图片、视频、音频上传后仍自动生成，用户不满意时在这里替换。
-    items.push({ label: file.thumbnails?.includes("thumb") ? "更新封面" : "设置封面", icon: "image", heading: "封面", onSelect: () => setThumbnailEditing(file) });
-    // 歌词可内置到支持的音频或另存同名文件，字幕沿用同名文件。
+    items.push({ label: "编辑元数据", icon: "edit", onSelect: () => setMetadataEditing(file) });
     const fileKind = getFileKind(file.content_type, file.key);
-    if (fileKind === "audio") items.push({ label: "编辑音频信息…", icon: "edit", onSelect: () => setAudioEditing(file) });
-    if (fileKind === "audio") items.push({ label: "查找歌词…", icon: "music", onSelect: () => setMediaLookup({ file, want: "lyrics" }) });
     if (fileKind === "audio" && !privateSpace) items.push({ label: "添加到歌单…", icon: "playlist", onSelect: () => playlistAdding.open([file]) });
-    if (fileKind === "video") items.push({ label: "查找字幕…", icon: "fileText", onSelect: () => setMediaLookup({ file, want: "subtitle" }) });
     if (file.public_token) items.push({ label: "打开分享页", icon: "external", onSelect: () => window.open(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "_blank", "noreferrer") });
     if (file.public_token) items.push({ label: "复制分享链接", icon: "copy", onSelect: () => void copyText(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "分享链接已复制") });
     items.push({ label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming(entry) });
@@ -875,19 +866,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       {extracting && <ExtractDialog file={extracting.file} picks={extracting.picks} onClose={() => setExtracting(null)} onOpenFolder={onOpenFolder} />}
       {compressing && <CompressDialog keys={compressing} onClose={() => setCompressing(null)} onOpenFolder={onOpenFolder} />}
       {editingImage && <ImageEditorDialog file={editingImage} onClose={() => setEditingImage(null)} onSaved={(item, replaced) => { if (replaced) preview.update(item); }} />}
-      {thumbnailEditing && <ThumbnailEditor file={thumbnailEditing} onClose={() => setThumbnailEditing(null)}
-        onSaved={variants => { const target = thumbnailEditing; setThumbnailEditing(null);
-          // 替换后先用临时版本号让地址变化，避免浏览器沿用旧图；随后的后台刷新会带回服务端的正式版本。
-          const stamp = String(Date.now());
-          setFiles(current => current.map(item => item.key === target.key ? { ...item, thumbnails: variants, thumbnail_status: "ready", has_thumbnail: true, thumbnail_versions: Object.fromEntries(variants.map(variant => [variant, stamp])) } : item));
-          // 立即换成服务端的正式版本：封面地址按内容版本查找，内容相同的另一份文件也有封面时，要靠版本选中这一份。
-          void api.thumbnailStatus([target.key]).then(({ files: states }) => {
-            const state = states[target.key];
-            if (state?.etag === target.etag) setFiles(current => current.map(item => item.key === target.key ? { ...item, ...state } : item));
-          }, () => undefined);
-          notify.success("封面已更新"); scheduleRefresh(); onChanged(); }} />}
-      {mediaLookup && <MediaLookupDialog file={mediaLookup.file} want={mediaLookup.want} onClose={() => setMediaLookup(null)} />}
-      {audioEditing && <AudioEditor file={audioEditing} onClose={() => setAudioEditing(null)} />}
+      {metadataEditing && <MetadataEditor file={metadataEditing} onClose={() => setMetadataEditing(null)} />}
       {playlistAdding.dialog}
       {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
       {folderCache && <ConfirmDialog title="缓存文件夹到本机？" danger={false} className={privateSpace ? "private-dialog" : ""} confirmLabel="开始缓存" onClose={() => setFolderCache(null)}
