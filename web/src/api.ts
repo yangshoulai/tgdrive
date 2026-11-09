@@ -378,6 +378,50 @@ export const announceMediaAssets = (media: string, asset?: string) => window.dis
 export type PreviewAssetList = { assets: PreviewAsset[]; tags?: MediaTags | null };
 const mediaQuery = (path: string, extra = "") => `?path=${encodeURIComponent(path)}${extra}`;
 export const mediaInfo = (path: string, signal?: AbortSignal) => request<MediaInfo>(fileApi("/media/info", path) + mediaQuery(path), { signal });
+export type AudioEditFields = Record<"title" | "artist" | "album" | "album_artist" | "track" | "year" | "genre" | "lyrics", string>;
+export type AudioEditInfo = { etag: string; fields: Omit<AudioEditFields, "lyrics">; lyrics: string; cover: boolean; editable: boolean; reason: string };
+export type AudioEditJob = { id: string; path: string; state: "queued" | "running" | "done" | "failed" | "cancelled";
+  read: number; stored: number; size: number; detail: string; result: FileItem | null };
+export const audioEditInfo = (path: string, signal?: AbortSignal) => request<AudioEditInfo>(fileApi("/media/edit", path) + mediaQuery(path), { signal });
+export const audioCoverImage = (url: string, signal?: AbortSignal) => request<Blob>(url, { signal, cache: "no-store" }, 60000, "blob");
+export const cancelAudioEdit = (path: string, id: string) => post<{ cancelled: boolean; committed: boolean }>(fileApi("/media/edit/cancel", path), { id });
+async function audioEditSaved(path: string, fields: Partial<AudioEditFields>) {
+  const saved = await fileInfo(path);
+  announceFileUpdated(saved);
+  announceMediaAssets(saved.key, fields.lyrics?.trim() ? `embedded:lyrics:${saved.key}` : undefined);
+  window.dispatchEvent(new CustomEvent("tessera:files-mutated"));
+  window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [saved.key.replace(/[^/]+$/, "")] } }));
+  return saved;
+}
+/** 保存内置标签：等待条件提交完成后广播新版本，播放器、目录和音乐库据此更新。 */
+export async function saveAudioMetadata(file: Pick<FileItem, "key" | "etag">, fields: Partial<AudioEditFields>, cover = "keep",
+  signal?: AbortSignal, onProgress?: (job: AudioEditJob) => void): Promise<FileItem> {
+  let job = await request<AudioEditJob>(fileApi("/media/edit", file.key), {
+    method: "POST", body: JSON.stringify({ path: file.key, etag: file.etag, fields, cover }), signal,
+  }, 60000);
+  try {
+    while (job.state === "queued" || job.state === "running") {
+      onProgress?.(job);
+      await new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) return reject(new DOMException("已取消", "AbortError"));
+        const stop = () => { clearTimeout(timer); reject(new DOMException("已取消", "AbortError")); };
+        const timer = window.setTimeout(() => { signal?.removeEventListener("abort", stop); resolve(); }, 800);
+        signal?.addEventListener("abort", stop, { once: true });
+      });
+      const result = await request<{ jobs: AudioEditJob[] }>(fileApi("/media/edit/jobs", file.key) + `?ids=${job.id}`, { signal });
+      if (!result.jobs[0]) throw new Error("保存任务已结束，请重新读取文件信息");
+      job = result.jobs[0];
+    }
+    if (job.state !== "done") throw new Error(job.detail || "音频信息保存失败");
+    return await audioEditSaved(file.key, fields);
+  } catch (reason) {
+    if (signal?.aborted) {
+      const result = await cancelAudioEdit(file.key, job.id).catch(() => null);
+      if (result?.committed) return audioEditSaved(file.key, fields);
+    }
+    throw reason;
+  }
+}
 export const mediaLookup = (path: string, want: MediaWant, query?: Partial<MediaQueryFields>, providers?: string[], signal?: AbortSignal) =>
   request<MediaLookup>(fileApi("/media/lookup", path), { method: "POST", body: JSON.stringify({ path, want, query, providers }), signal }, 60000);
 export const mediaFetchText = (path: string, token: string, signal?: AbortSignal) =>

@@ -132,7 +132,7 @@ function ProviderStatus({ lookup, want }: { lookup: Lookup; want: api.MediaWant 
 }
 
 /** 歌词、字幕：选择一项查看内容，保存为媒体同目录的同名文件。 */
-export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem; want: "lyrics" | "subtitle"; onClose: () => void }) {
+export function MediaLookupDialog({ file, want, onClose, onPickLyrics }: { file: api.FileItem; want: "lyrics" | "subtitle"; onClose: () => void; onPickLyrics?: (text: string) => void }) {
   const kind = want === "lyrics" ? "audio" : "video";
   const lookup = useLookup(file, want);
   const { candidates } = lookup;
@@ -140,6 +140,15 @@ export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem;
   const [content, setContent] = useState<Record<string, { text?: string; format?: string | null; error?: string }>>({});
   const [language, setLanguage] = useState("");
   const [saving, setSaving] = useState(false), [conflict, setConflict] = useState<string | null>(null);
+  const [editInfo, setEditInfo] = useState<api.AudioEditInfo | null>(null);
+  const [saveMode, setSaveMode] = useState<"embedded" | "file" | null>(null), [saveStatus, setSaveStatus] = useState("");
+  const embedded = want === "lyrics" && (saveMode ?? (editInfo?.editable ? "embedded" : "file")) === "embedded";
+  useEffect(() => {
+    if (want !== "lyrics" || onPickLyrics) return;
+    const controller = new AbortController();
+    void api.audioEditInfo(file.key, controller.signal).then(setEditInfo).catch(() => undefined);
+    return () => controller.abort();
+  }, [file.key, want]);
   const reading = useRef<AbortController | null>(null);
   const close = useRef(onClose); close.current = onClose;
   useEffect(() => () => reading.current?.abort(), []);
@@ -174,8 +183,13 @@ export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem;
 
   async function save(overwrite = false) {
     if (!selected || saving) return;
+    if (onPickLyrics && shown?.text) { onPickLyrics(shown.text); return; }
     setSaving(true);
     try {
+      if (embedded && shown?.text && editInfo) {
+        await api.saveAudioMetadata({ ...file, etag: editInfo.etag }, { lyrics: shown.text }, "keep", undefined, job => setSaveStatus(job.detail));
+        toast.success("歌词已写入音频文件"); onClose(); return;
+      }
       const saved = await api.mediaSave(file.key, selected.token, language, overwrite);
       api.announceMediaAssets(file.key, saved.path);
       window.dispatchEvent(new CustomEvent("tessera:files-added", { detail: { folders: [parentPath(file.key)] } }));
@@ -190,13 +204,22 @@ export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem;
   return <Modal title={`在线查找${WANT_LABELS[want]}`} description={baseName(file.key)} icon="search" size="lg"
     className={`media-lookup${api.isPrivatePath(file.key) ? " private-dialog" : ""}`} onClose={() => { if (!saving) onClose(); }} dismissible={!saving}
     footer={<>
-      {selected && <span className="media-lookup-target" title={target}>保存为 <strong>{target}</strong></span>}
+      {selected && !onPickLyrics && <span className="media-lookup-target" title={embedded ? baseName(file.key) : target}>{embedded ? "写入" : "保存为"} <strong>{embedded ? baseName(file.key) : target}</strong></span>}
       <Button variant="ghost" disabled={saving} onClick={onClose}>取消</Button>
-      <Button variant="primary" icon="check" loading={saving} disabled={!selected || !shown?.text} onClick={() => void save()}>保存{WANT_LABELS[want]}</Button>
+      <Button variant="primary" icon="check" loading={saving} disabled={!selected || !shown?.text} onClick={() => void save()}>{onPickLyrics ? "使用这份歌词" : embedded ? "写入音频" : `保存${WANT_LABELS[want]}`}</Button>
     </>}>
     <div className="media-lookup-body">
       <QueryForm lookup={lookup} kind={kind} want={want} />
       <ProviderStatus lookup={lookup} want={want} />
+      {saving && saveStatus && <Notice>{saveStatus}</Notice>}
+      {want === "lyrics" && !onPickLyrics && <label className="media-lookup-field">
+        <span>保存方式</span>
+        <select className="input" value={embedded ? "embedded" : "file"} disabled={saving} onChange={event => setSaveMode(event.target.value as "embedded" | "file")}>
+          <option value="embedded" disabled={!editInfo?.editable}>写入音频文件（推荐）</option>
+          <option value="file">另存为同目录 .lrc 文件</option>
+        </select>
+        {!editInfo?.editable && <small>内置歌词支持 MP3、FLAC、M4A，服务器需安装 FFmpeg。</small>}
+      </label>}
       {lookup.error && <Notice tone="danger">{lookup.error}</Notice>}
       <div className="media-lookup-split">
         <div className="media-lookup-results" role="listbox" aria-label={`${WANT_LABELS[want]}候选`}>
@@ -234,7 +257,7 @@ export function MediaLookupDialog({ file, want, onClose }: { file: api.FileItem;
         </select>
         <small>写进文件名，播放器按它显示字幕语言；同一视频可以保存多种语言的字幕。</small>
       </label>}
-      <p className="media-lookup-hint">{want === "lyrics" ? "歌词保存为与音乐同名的 .lrc 文件，放在同一文件夹，播放时自动加载。" : "字幕保存为与视频同名的 .srt 或 .vtt 文件，放在同一文件夹，播放时可在字幕菜单里选择。"}
+      <p className="media-lookup-hint">{want === "lyrics" ? onPickLyrics ? "选中的歌词先填入编辑窗口，点击「保存到音频」后才写入文件。" : embedded ? "歌词直接内置到音频中，不生成额外文件，也不会重新编码音频。" : "歌词保存为与音乐同名的 .lrc 文件，放在同一文件夹，播放时自动加载。" : "字幕保存为与视频同名的 .srt 或 .vtt 文件，放在同一文件夹，播放时可在字幕菜单里选择。"}
         查询由服务器发给所选来源，只包含查询条件{want === "subtitle" ? "与用于匹配版本的文件特征值" : ""}，不发送文件内容。</p>
     </div>
     {conflict && <ConfirmDialog title="替换已有的文件？" confirmLabel="替换" description={`${conflict}。替换后原来的内容会被覆盖。`}

@@ -74,7 +74,12 @@ function useLibrary(view: api.LibraryView, options: { q?: string; folder?: strin
     if (!cursor || busy.current) return;
     setLoadingMore(true); void load(cursor, false);
   }, [cursor, load]);
-  const reload = useCallback(() => { setLoading(true); void load(null, true); }, [load]);
+  const reload = useCallback(() => { generation.current += 1; setLoading(true); void load(null, true); }, [load]);
+  useEffect(() => {
+    const changed = () => reload();
+    window.addEventListener(api.FILE_UPDATED_EVENT, changed);
+    return () => window.removeEventListener(api.FILE_UPDATED_EVENT, changed);
+  }, [reload]);
   return { items, setItems, loading, loadingMore, error, hasMore: Boolean(cursor), more, reload };
 }
 
@@ -511,6 +516,11 @@ function MusicAlbums({ onOpenAlbum }: { onOpenAlbum: (album: string) => void }) 
   const [state, setState] = useState<{ albums: api.LibraryAlbum[]; truncated: boolean } | null>(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const changed = () => setAttempt(value => value + 1);
+    window.addEventListener(api.FILE_UPDATED_EVENT, changed);
+    return () => window.removeEventListener(api.FILE_UPDATED_EVENT, changed);
+  }, []);
   useEffect(() => {
     const controller = new AbortController();
     setState(null); setError("");

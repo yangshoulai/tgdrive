@@ -8,6 +8,7 @@ import { cacheFileId, type CacheFile } from "../cache-client";
 import { FolderStatsDialog } from "./folder-stats";
 import { ThumbnailEditor } from "./thumbnail-editor";
 import { MediaLookupDialog } from "./media-lookup";
+import { AudioEditor } from "./audio-editor";
 import { ExtractDialog, isArchive } from "./extract";
 import { CompressDialog } from "./compress";
 import { ImageEditorDialog } from "./image-editor";
@@ -81,6 +82,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
   const [thumbnailEditing, setThumbnailEditing] = useState<api.FileItem | null>(null);
   const [mediaLookup, setMediaLookup] = useState<{ file: api.FileItem; want: "lyrics" | "subtitle" } | null>(null);
+  const [audioEditing, setAudioEditing] = useState<api.FileItem | null>(null);
   const [extracting, setExtracting] = useState<{ file: api.FileItem; picks?: string[] } | null>(null);
   const [compressing, setCompressing] = useState<string[] | null>(null);
   const [editingImage, setEditingImage] = useState<api.FileItem | null>(null);
@@ -440,8 +442,9 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     ];
     // 任何文件都可以指定缩略图；图片、视频、音频上传后仍自动生成，用户不满意时在这里替换。
     items.push({ label: file.thumbnails?.includes("thumb") ? "更新封面" : "设置封面", icon: "image", heading: "封面", onSelect: () => setThumbnailEditing(file) });
-    // 歌词与字幕：从已开启的来源在线查找，保存为同名文件。
+    // 歌词可内置到支持的音频或另存同名文件，字幕沿用同名文件。
     const fileKind = getFileKind(file.content_type, file.key);
+    if (fileKind === "audio") items.push({ label: "编辑音频信息…", icon: "edit", onSelect: () => setAudioEditing(file) });
     if (fileKind === "audio") items.push({ label: "查找歌词…", icon: "music", onSelect: () => setMediaLookup({ file, want: "lyrics" }) });
     if (fileKind === "audio" && !privateSpace) items.push({ label: "添加到歌单…", icon: "playlist", onSelect: () => playlistAdding.open([file]) });
     if (fileKind === "video") items.push({ label: "查找字幕…", icon: "fileText", onSelect: () => setMediaLookup({ file, want: "subtitle" }) });
@@ -884,6 +887,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           }, () => undefined);
           notify.success("封面已更新"); scheduleRefresh(); onChanged(); }} />}
       {mediaLookup && <MediaLookupDialog file={mediaLookup.file} want={mediaLookup.want} onClose={() => setMediaLookup(null)} />}
+      {audioEditing && <AudioEditor file={audioEditing} onClose={() => setAudioEditing(null)} />}
       {playlistAdding.dialog}
       {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
       {folderCache && <ConfirmDialog title="缓存文件夹到本机？" danger={false} className={privateSpace ? "private-dialog" : ""} confirmLabel="开始缓存" onClose={() => setFolderCache(null)}

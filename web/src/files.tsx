@@ -396,11 +396,12 @@ function rememberRotation(file: api.FileItem, degrees: number) {
   } catch { /* 存储不可用时只在本次预览里生效 */ }
 }
 export type PreviewPlayback = { playing: boolean; currentTime: number; state: MediaState };
-export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, onClose, onShare, onExtract, onEditImage, onFindMedia, onMissingCover, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, anyFolder = false, sourceFor, onPlaybackActivity, minimizeRequest, startEditing }: PreviewSource & {
+export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, onClose, onShare, onExtract, onEditImage, onEditAudio, onFindMedia, onMissingCover, onImageLoad, onVideoFrame, onSaveVideoThumbnail, assetUrl, loadAssets, playlistFiles, anyFolder = false, sourceFor, onPlaybackActivity, minimizeRequest, startEditing }: PreviewSource & {
   /** 打开后直接进入文本编辑（刚新建的文件）。 */ startEditing?: boolean;
   /** 播放列表不限同一文件夹（相册、音乐库、最近这类跨文件夹的页面）。 */ anyFolder?: boolean; file: api.FileItem; onClose: () => void; minimizeRequest?: number; onShare?: (file: api.FileItem) => void;
   /** 在线查找歌词、字幕或封面（播放器里没有歌词、字幕或封面时的入口）；保存后页面广播 MEDIA_ASSETS_EVENT。 */ onFindMedia?: (file: api.FileItem, want: api.MediaWant) => void;
   /** 本人的音乐还没有封面时调用：由宿主用文件内嵌的封面补上（已有封面时服务器拒绝，不会覆盖）。 */ onMissingCover?: (file: api.FileItem) => void;
+  /** 编辑本人的音频内置标签、歌词与封面。 */ onEditAudio?: (file: api.FileItem) => void;
   /** 在线解压（压缩包预览里的「解压到…」）；picks 是预览里勾选的文件，不传表示整个压缩包。 */ onExtract?: (file: api.FileItem, picks?: string[]) => void;
   /** 编辑图片（图片预览头部的按钮）。 */ onEditImage?: (file: api.FileItem) => void; onImageLoad?: (image: HTMLImageElement, file: api.FileItem) => void; onVideoFrame?: (video: HTMLVideoElement, file: api.FileItem) => void; onSaveVideoThumbnail?: (video: HTMLVideoElement, file: api.FileItem, rotation: number) => Promise<void>; assetUrl?: (key: string) => string; loadAssets?: (file: api.FileItem, signal: AbortSignal) => Promise<api.PreviewAsset[]>; playlistFiles?: api.FileItem[]; sourceFor?: (file: api.FileItem) => PreviewSource; onPlaybackActivity?: (state: PreviewPlayback) => void }) {
   const kind = getFileKind(file.content_type, file.key);
@@ -779,6 +780,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
         ...textMenuItems,
         ...(onShare ? [{ label: active.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => void share() }] : []),
         ...(onEditImage && ownSource && kind === "image" && !/\.svg$/i.test(active.key) ? [{ label: "编辑图片", icon: "crop" as const, onSelect: () => onEditImage(active) }] : []),
+        ...(onEditAudio && ownSource && kind === "audio" ? [{ label: "编辑音频信息", icon: "edit" as const, onSelect: () => onEditAudio(active) }] : []),
         ...(ownSource ? cacheMenuItems(cacheQueue, active).filter(item => !item.danger) : []),
         // 下载地址为空（分享者没有允许下载的歌单分享）时不提供下载。
         ...(downloadHref ? [{ label: "下载文件", icon: "download" as const, shortcut: "D", href: downloadHref, onSelect: () => {} }] : []),
@@ -800,6 +802,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
         {reading && <span className="preview-header-tools" ref={setTextTools} />}
         {!compactActions && <>
           {onEditImage && ownSource && kind === "image" && !/\.svg$/i.test(active.key) && <IconButton icon="crop" label="编辑图片" size="sm" onClick={() => onEditImage(active)} />}
+          {onEditAudio && ownSource && kind === "audio" && <IconButton icon="edit" label="编辑音频信息" size="sm" onClick={() => onEditAudio(active)} />}
           {onShare && <IconButton icon="link" label={active.public_token ? "管理分享" : "公开分享"} shortcut="S" size="sm" onClick={() => void share()} />}
           {ownSource && <FileCacheButton file={active} />}
           {downloadHref && <a className="icon-btn icon-btn-ghost icon-btn-sm" href={downloadHref} aria-label="下载文件" aria-keyshortcuts="D" title="下载文件（D）"><Icon name="download" size={16} /></a>}

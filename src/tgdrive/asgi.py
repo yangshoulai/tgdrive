@@ -314,7 +314,7 @@ class TgDriveASGI(StaticFiles):
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
                 allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save",
-                           "/media/lyrics", "/media/subtitle", "/media/cover", "/media/extract", "/media/jobs", "/move", "/archive",
+                           "/media/lyrics", "/media/subtitle", "/media/cover", "/media/extract", "/media/jobs", "/media/edit", "/media/edit/jobs", "/media/edit/cancel", "/move", "/archive",
                            "/archive/inspect", "/archive/extract", "/archive/jobs", "/archive/browse", "/archive/entry", "/archive/compress",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
                            "/thumbnail/fetch", "/content", "/preview-assets", "/preview-list",
@@ -448,6 +448,9 @@ class TgDriveASGI(StaticFiles):
             # 抓取脚本转交的页面快照最多 2 MB（JSON 编码后略大），其余接口沿用通用上限。
             body_limit = max(self.json_limit, 3 * 1024 * 1024) if re.fullmatch(
                 r"/api/user/v1/assistant/conversations/[A-Za-z0-9_-]{4,40}/snapshots", path) else self.json_limit
+            if path in ("/api/user/v1/media/edit", "/api/user/v1/private/media/edit"):
+                # 最多 5 MB 的 base64 封面，加上歌词与 JSON 编码开销；不放宽其他接口。
+                body_limit = max(body_limit, self.media.editor.REQUEST_LIMIT)
             async for chunk in body_stream():
                 if len(data) + len(chunk) > body_limit:
                     await self._send(tracked_send, 413, {"error": {"code": "body_too_large", "message": "JSON 请求体过大"}})
@@ -532,7 +535,7 @@ class TgDriveASGI(StaticFiles):
                          "/downloads/{}/delete": "download.delete", "/downloads/{}/update": "download.update",
                          "/downloads/{}/now": "download.now", "/downloads/move": "download.move",
                          "/downloads/clear": "download.clear", "/downloads/batch": "download.batch", "/downloads/stop-all": "download.stop_all", "/shares/{}/save": "share.save", "/archive/extract": "archive.extract", "/archive/compress": "archive.compress",
-                         "/media/save": "media.save", "/private/media/save": "media.save", "/cache/reset": "client_cache.reset",
+                         "/media/save": "media.save", "/private/media/save": "media.save", "/media/edit": "media.edit", "/private/media/edit": "media.edit", "/cache/reset": "client_cache.reset",
                          "/private/passkeys/unlock/verify": "private.passkey.unlock",
                          "/passkeys/register/verify": "passkey.create", "/passkeys/rename": "passkey.rename",
                          "/passkeys/delete": "passkey.delete", "/passkeys/enable-login": "passkey.enable",
@@ -1426,7 +1429,7 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/media/size":
                 return 200, user.set_media_size(token, csrf, payload), {}
             if route in ("/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save", "/media/lyrics", "/media/subtitle",
-                         "/media/cover", "/media/extract", "/media/jobs"):
+                         "/media/cover", "/media/extract", "/media/jobs", "/media/edit", "/media/edit/jobs", "/media/edit/cancel"):
                 return await self._media_route(user, method, route, query, payload, token, csrf)
             if method == "GET" and route == "/files/info":
                 return 200, user.file_info(token, query.get("path", [""])[0]), {"Cache-Control": "no-store"}
@@ -1643,10 +1646,19 @@ class TgDriveASGI(StaticFiles):
         scope = user._scope(token, csrf=csrf, mutation=method != "GET")
         no_store = {"Cache-Control": "no-store"}
         source = payload if method == "POST" else {key: values[0] for key, values in query.items()}
+        if route == "/media/edit/jobs" and method == "GET":
+            return 200, {"jobs": self.media.editor.status(scope, source.get("ids", "").split(","))}, no_store
+        if route == "/media/edit/cancel" and method == "POST":
+            return 200, self.media.editor.cancel(scope, source.get("id")), no_store
         if route == "/media/jobs" and method == "GET":
             ids = [value for value in source.get("ids", "").split(",") if value]
             return 200, {"jobs": self.media.jobs(scope, ids)}, no_store
         path = user._path(source.get("path", ""))
+        if route == "/media/edit":
+            if method == "GET":
+                return 200, await self.media.editor.info(scope, path), no_store
+            if method == "POST":
+                return 202, await self.media.editor.start(scope, path, payload), no_store
 
         def text_response(value, mime):
             return 200, value.encode("utf-8"), {"Content-Type": mime, **no_store, "X-Content-Type-Options": "nosniff"}

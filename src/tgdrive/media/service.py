@@ -3,7 +3,7 @@
 - 文件自带的元数据由 ``tags.parse`` 按需读取文件头提取，按 Blob 记在 ``media_info``（副本共用）。
 - 提供者在系统设置里逐个开关；秘密配置用 KEK 子密钥 ``media-provider-secret`` 加密保存，接口只回显是否已填写。
 - 查找结果的 ``ref``（外部地址、编号等）只留在服务端，网页拿到的是绑定（存储桶、路径、版本）的短期令牌。
-- 歌词与字幕保存为媒体同目录的同名文件（``preview_assets`` 自动发现）；封面由网页按自定义封面流程保存。
+- 原有候选保存接口仍写同目录歌词与字幕；音频内置标签、歌词与封面写回由 ``editor.py`` 管理。
 - 内嵌字幕轨用 FFmpeg 经回环地址按范围读取原文件提取成 WebVTT；MKV 的字幕分散在整个文件里，需要读完整个文件，
   所以提取是后台任务，结果只缓存在内存。
 """
@@ -187,6 +187,8 @@ class MediaService:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._commits: asyncio.Queue | None = None
         self._worker: asyncio.Task | None = None
+        from .editor import AudioEditor
+        self.editor = AudioEditor(self)
 
     # ---------- 写入后提取 ----------
 
@@ -895,6 +897,7 @@ class MediaService:
             job.finished = time.monotonic()
 
     async def stop(self) -> None:
+        await self.editor.stop()
         tasks = [job.task for job in self._jobs.values() if job.task is not None and not job.task.done()]
         if self._worker is not None:
             tasks.append(self._worker)

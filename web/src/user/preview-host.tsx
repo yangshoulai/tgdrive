@@ -7,6 +7,7 @@ import { MediaLookupDialog } from "./media-lookup";
 import { generateLoadedThumbnails, thumbnailsFromBlob } from "../thumbnails";
 import { ThumbnailEditor } from "./thumbnail-editor";
 import { ExtractDialog } from "./extract";
+import { AudioEditor } from "./audio-editor";
 
 /**
  * 预览弹窗挂在应用外壳上，不随页面切换卸载：用户最小化后去看别的页面，播放不中断；
@@ -17,7 +18,7 @@ import { ExtractDialog } from "./extract";
  * 私密空间的文件在离开私密空间或锁定时立即关闭，不能跟着用户留在普通页面上。
  */
 type ModalProps = ComponentProps<typeof PreviewModal>;
-export type PreviewRequest = Omit<ModalProps, "onClose" | "minimizeRequest" | "onFindMedia" | "onMissingCover">;
+export type PreviewRequest = Omit<ModalProps, "onClose" | "minimizeRequest" | "onFindMedia" | "onMissingCover" | "onEditAudio">;
 type Slot = "video" | "audio" | "image" | "document";
 type Current = { id: number; owner: string; request: PreviewRequest; minimize: number };
 type Host = { open: (owner: string, request: PreviewRequest) => void; update: (file: api.FileItem) => void; sync: (owner: string, files: api.FileItem[]) => void; release: (owner: string) => void };
@@ -105,6 +106,7 @@ export function PreviewHost({ children, privateAllowed, enabled }: { children: R
   const close = useCallback((id: number) => setSlots(current => mapSlots(current, value => value.id === id ? null : value)), []);
   // 播放器里的「在线查找歌词／字幕／封面」：弹窗挂在预览宿主上，离开打开预览的页面后仍可使用。
   const [finding, setFinding] = useState<{ file: api.FileItem; want: api.MediaWant } | null>(null);
+  const [audioEditing, setAudioEditing] = useState<api.FileItem | null>(null);
   // 打开预览的页面没有提供解压（如从其他页面打开、或页面已离开）时，由宿主打开解压对话框，预览里的「解压到…」始终可用。
   const [extracting, setExtracting] = useState<{ file: api.FileItem; picks?: string[] } | null>(null);
   const extract = useCallback((file: api.FileItem, picks?: string[]) => setExtracting({ file, picks }), []);
@@ -129,10 +131,12 @@ export function PreviewHost({ children, privateAllowed, enabled }: { children: R
   }, [host]);
   useEffect(() => { if (finding && (!enabled || api.isPrivatePath(finding.file.key) && !privateAllowed)) setFinding(null); }, [finding, enabled, privateAllowed]);
   useEffect(() => { if (extracting && (!enabled || api.isPrivatePath(extracting.file.key) && !privateAllowed)) setExtracting(null); }, [extracting, enabled, privateAllowed]);
+  useEffect(() => { if (audioEditing && (!enabled || api.isPrivatePath(audioEditing.key) && !privateAllowed)) setAudioEditing(null); }, [audioEditing, enabled, privateAllowed]);
   return <HostContext.Provider value={host}>
     {children}
     {enabled && [...slots.values()].map(value => (!api.isPrivatePath(value.request.file.key) || privateAllowed)
-      && <PreviewModal key={value.id} {...value.request} onExtract={value.request.onExtract ?? extract} onFindMedia={findMedia} onMissingCover={missingCover} minimizeRequest={value.minimize} onClose={() => close(value.id)} />)}
+      && <PreviewModal key={value.id} {...value.request} onExtract={value.request.onExtract ?? extract} onFindMedia={findMedia} onEditAudio={setAudioEditing} onMissingCover={missingCover} minimizeRequest={value.minimize} onClose={() => close(value.id)} />)}
+    {audioEditing && <AudioEditor file={audioEditing} onClose={() => setAudioEditing(null)} />}
     {extracting && <ExtractDialog file={extracting.file} picks={extracting.picks} onClose={() => setExtracting(null)} />}
     {finding && finding.want !== "cover" && <MediaLookupDialog file={finding.file} want={finding.want} onClose={() => setFinding(null)} />}
     {finding && finding.want === "cover" && <ThumbnailEditor file={finding.file} initialSource="online" onClose={() => setFinding(null)}
