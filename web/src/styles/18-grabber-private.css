@@ -1,0 +1,9 @@
+.grabber-private { display: grid; gap: 16px; padding: 24px; max-width: 480px; margin: 0 auto; }
+.grabber-private h2 { font-size: var(--text-lg); margin: 0; }
+.grabber-private .muted { font-size: var(--text-sm); overflow-wrap: anywhere; }
+.grabber-private .form { display: grid; gap: 16px; }
+.grabber-private-origin { padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+@media (max-width: 480px) {
+  .grabber-private { padding: 16px; }
+  .grabber-private input { font-size: var(--text-lg); }
+}

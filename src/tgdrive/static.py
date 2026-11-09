@@ -83,6 +83,11 @@ class StaticFiles:
                    **PAGE_SECURITY_HEADERS}
         if candidate.name != "index.html":
             headers["Vary"] = "Accept-Encoding"
+        if candidate == static_dir / "grabber" / "index.html":
+            # 只有无 Cookie、无普通网页会话的脚本解锁入口允许嵌入；主站继续禁止被第三方嵌入。
+            headers["Content-Security-Policy"] = PAGE_SECURITY_HEADERS["Content-Security-Policy"].replace("frame-ancestors 'none'", "frame-ancestors *")
+            headers.pop("X-Frame-Options", None)
+            headers["Referrer-Policy"] = "no-referrer"
         if encoding:
             headers["Content-Encoding"] = encoding
         if https:

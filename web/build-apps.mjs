@@ -61,9 +61,11 @@ if(!process.argv[2] || process.argv[2]==='user') {
 const configs={
  // 整个站点是同一个应用，包含文件空间、按角色显示的系统管理与完整的公开文档。
  user:{entry:'user',exportName:'App',outputDir:'',assetPrefix:'/'},
+ // 脚本内嵌的安全解锁页：独立入口，不初始化网页登录会话，不依赖第三方 Cookie。
+ private:{entry:'grabber-private',exportName:'App',outputDir:'grabber',assetPrefix:'/grabber/'},
 };
 // 单一站点：全部产物都在 dist/，由同一个服务进程托管；不带参数时全部构建。
-for(const app of process.argv[2] ? [process.argv[2]] : ['user']) {
+for(const app of process.argv[2] ? [process.argv[2]] : ['user','private']) {
  const config=configs[app];
  if(!config) throw Error('未知应用');
  const modules={};const staticDeps={};const lazyEntries=[];

@@ -821,15 +821,19 @@ class OfflineDownloads:
                 skipped += 1
         return {"done": done, "skipped": skipped}
 
-    def status_of(self, user_id: int, ids: list[int], permits: Callable[[str], bool]) -> list[dict]:
-        """按 ID 查询任务状态（访问密钥轮询进度用）：只返回该用户、路径被 permits 允许的普通任务，不含私密任务。"""
+    def status_of(self, user_id: int, ids: list[int], permits: Callable[[str], bool], *, private_scope: Scope | None = None) -> list[dict]:
+        """按 ID 查询任务状态（访问密钥轮询进度用）：只返回该用户、路径被 permits 允许的任务；默认排除私密任务，显式 private_scope 时仅返回已授权私密任务。"""
         self.scope(user_id)
         if not isinstance(ids, list) or len(ids) > 100 or not all(type(value) is int for value in ids):
             raise ValueError("ids 最多 100 个任务编号")
         if not ids:
             return []
-        rows = self.metadata.db.execute(f"SELECT {','.join(PUBLIC_FIELDS)} FROM offline_tasks WHERE user_id=? AND id IN ({','.join('?' * len(ids))}) ORDER BY id",
+        rows = self.metadata.db.execute(f"SELECT {','.join(PUBLIC_FIELDS)},bucket_id FROM offline_tasks WHERE user_id=? AND id IN ({','.join('?' * len(ids))}) ORDER BY id",
                                         (user_id, *ids)).fetchall()
+        if private_scope is not None:
+            return [self.public(row, reveal_private=True) for row in rows
+                    if task_path(row["key"]).startswith(PRIVATE_PREFIX) and permits(task_path(row["key"]))
+                    and self._private_view(row, private_scope)]
         return [self.public(row) for row in rows if not row["key"].startswith(".tgdrive/") and permits(row["key"])]
 
     async def control(self, user_id, task_id, action, *, item=None, private_scope: Scope | None = None):

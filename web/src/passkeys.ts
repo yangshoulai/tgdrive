@@ -70,6 +70,8 @@ async function authenticate(options: AuthenticationOptions, signal: AbortSignal)
   } catch (reason) { throw deviceError(reason); }
 }
 
+export { authenticate as authenticatePasskey };
+
 export type PasskeyRegistrationStage = "device" | "saving";
 
 export async function registerPasskey(password: string, name: string, signal: AbortSignal, onStage?: (stage: PasskeyRegistrationStage) => void) {

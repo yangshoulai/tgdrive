@@ -40,6 +40,7 @@ from .keyapi import KeyApi, KeyAuthError
 from .metrics import TrafficMetrics
 from .objects import PRIVATE_PREFIX, Scope
 from .private import PrivateAccessLogFilter, PrivateLocked, PrivateSpace
+from .private_keys import KeyPrivateAccess, PrivateKeyPrincipal
 from .extract import ArchiveService
 from .extract import _content_type as _archive_type
 from .media.service import AssetExists, MediaService
@@ -123,6 +124,7 @@ class TgDriveASGI(StaticFiles):
             access_logger.addFilter(PrivateAccessLogFilter())
         # /api/v1 只认访问密钥；未注入时使用用户 API 的对象服务与密钥存储。
         self.keys = keys or (KeyApi(user.objects, user.clients) if user.clients is not None else None)
+        self.key_private = KeyPrivateAccess(self.keys, self.private_space) if self.keys is not None else None
         self.audit = AuditLog(admin.accounts.metadata)
         self.share_access = ShareAccess(admin.accounts.keystore)
         self.s3_host = s3_host.split(":", 1)[0].lower() if s3_host else None
@@ -196,7 +198,7 @@ class TgDriveASGI(StaticFiles):
         host = headers.get("host", "localhost").split(":", 1)[0].lower()
         query = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
         started = False
-        private_response = (path.startswith("/api/user/v1/private/") or path.startswith("/api/user/v1/passkeys")
+        private_response = (path.startswith("/api/user/v1/private/") or path.startswith("/api/v1/private/") or path.startswith("/api/user/v1/passkeys")
                             or path.startswith("/api/user/v1/cache/tasks")
                             or path.startswith("/api/user/v1/registration") or path == "/api/user/v1/register"
                             or path.startswith("/api/admin/v1/registration"))
@@ -283,7 +285,8 @@ class TgDriveASGI(StaticFiles):
                 self.admin.accounts.account_for_session(session)
                 raise PermissionError("系统管理不提供用户文件访问，请在我的空间管理自己的文件")
             if path.startswith("/api/v1/"):
-                await self._key_api(tracked_send, method, path[len("/api/v1"):], query, headers, body_stream)
+                await self._key_api(tracked_send, method, path[len("/api/v1"):], query, headers, body_stream,
+                                    (scope.get("client") or [None])[0])
                 return
             if path in ("/api/user/v1/cache/tasks/content", "/api/user/v1/cache/tasks/list") and method in ("GET", "HEAD"):
                 cache_user = self.client_cache.task_files(token, headers.get("x-tessera-cache-task", ""))
@@ -767,7 +770,7 @@ class TgDriveASGI(StaticFiles):
         self.audit.record("backup.download", actor_type="admin", actor=self.admin.accounts.sessions.peek(token).username,
                           ok=True, target=name)
 
-    async def _key_api(self, send, method, route, query, headers, body_stream):
+    async def _key_api(self, send, method, route, query, headers, body_stream, ip=None):
         """访问密钥 API：不读取 Cookie、不校验 CSRF，权限完全由密钥授权决定。"""
         if self.keys is None:
             raise NotFoundError("接口不存在")
@@ -776,6 +779,9 @@ class TgDriveASGI(StaticFiles):
         principal = self.keys.authenticate(headers.get("authorization"))
         arg = lambda name, default="": query.get(name, [default])[0]
         bucket = arg("bucket") or None
+        if route.startswith("/private/"):
+            await self._key_private_api(send, method, route[len("/private"):], query, headers, body_stream, principal, bucket, ip)
+            return
         if route == "/files" and method == "PUT":
             size = int(headers["content-length"]) if "content-length" in headers else None
             public = query.get("public", [None])[0]
@@ -868,6 +874,83 @@ class TgDriveASGI(StaticFiles):
         else:
             raise NotFoundError("接口不存在")
         await self._send(send, 200, result)
+
+    async def _key_private_api(self, send, method, route, query, headers, body_stream, principal, bucket, ip=None):
+        """仅对经过账号再次验证的密钥开放临时私密写入，不接受网页 Cookie。"""
+        service = self.key_private
+        client = headers.get("x-tessera-private-client", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", client):
+            raise ValueError("缺少当前脚本安装的私密授权标识，请更新资源抓取脚本")
+        principal = PrivateKeyPrincipal(principal.access_key_id, principal.client_id, client)
+        arg = lambda name, default="": query.get(name, [default])[0]
+        access = headers.get("x-private-access", "")
+        if method == "PUT" and route == "/files":
+            size = int(headers["content-length"]) if "content-length" in headers else None
+            result = await service.put(principal, bucket, access, arg("path"), body_stream(), headers.get("content-type"), size)
+            await self._send(send, 200, result, {"Cache-Control": "no-store"})
+            return
+        data = bytearray()
+        async for chunk in body_stream():
+            if len(data) + len(chunk) > self.json_limit:
+                raise ValueError("JSON 请求体过大")
+            data.extend(chunk)
+        payload = json.loads(data) if data else {}
+        if not isinstance(payload, dict):
+            raise ValueError("JSON 请求体必须为对象")
+        bucket = payload.get("bucket") or bucket
+        origin = headers.get("origin")
+        status = 200
+        audit = None
+        if method == "POST" and route in ("/unlock", "/passkeys/unlock/verify", "/lock", "/downloads"):
+            audit = {"action": "download.create" if route == "/downloads" else "private.lock" if route == "/lock" else "private.unlock",
+                     "actor_type": "key", "actor": principal.access_key_id, "payload": {}, "target_id": None, "ip": ip}
+        try:
+            if method == "GET" and route == "/status":
+                result = service.status(principal, bucket, origin)
+            elif method == "POST" and route == "/unlock":
+                result = await service.unlock(principal, bucket, payload.get("password"), ip)
+            elif method == "POST" and route == "/passkeys/unlock/options":
+                result = service.passkey_options(principal, bucket, origin, ip)
+            elif method == "POST" and route == "/passkeys/unlock/verify":
+                result = await service.passkey_unlock(principal, bucket, payload, origin, ip)
+            elif method == "POST" and route == "/activity":
+                result = service.activity(principal, bucket, access, payload.get("active") is True)
+            elif method == "POST" and route == "/lock":
+                service.lock(principal, bucket, access)
+                result = {"unlocked": False}
+            elif route == "/folders" and method == "GET":
+                result = await service.folders(principal, bucket, access, arg("prefix"), arg("cursor"), int(arg("limit", "100")))
+            elif route == "/folders" and method == "POST":
+                result = await service.folder(principal, bucket, access, payload["path"])
+                status = 201
+            elif route == "/move" and method == "POST":
+                result = await service.metadata.run_in_thread(service.move, principal, bucket, access, payload)
+            elif route == "/delete" and method == "POST":
+                result = await service.delete(principal, bucket, access, payload.get("paths"))
+            elif route == "/downloads" and method == "POST" and self.offline is not None:
+                scope = service.scope(principal, bucket, access, active=True)
+                owner = service.owner(principal, bucket)
+                result = {"tasks": self.offline.create(owner["id"], payload.get("items"),
+                    service.path(payload.get("destination") or "", directory=True), private_scope=scope)}
+                status = 201
+            elif route == "/downloads" and method == "GET" and self.offline is not None:
+                scope = service.scope(principal, bucket, access)
+                ids = [int(value) for value in arg("ids").split(",") if value.strip()]
+                result = {"tasks": self.offline.status_of(service.owner(principal, bucket)["id"], ids,
+                    lambda key: key.startswith(PRIVATE_PREFIX), private_scope=scope)}
+            else:
+                raise NotFoundError("接口不存在")
+            if route == "/downloads":
+                for task in result["tasks"]:
+                    if task["key"].startswith(PRIVATE_PREFIX):
+                        task["key"] = task["key"][len(PRIVATE_PREFIX):]
+        except Exception as exc:
+            if audit:
+                self._write_audit(audit, ok=False, error=exc)
+            raise
+        if audit:
+            self._write_audit(audit, ok=True)
+        await self._send(send, status, result, {"Cache-Control": "no-store"})
 
     async def _route(self, method, path, query, payload, token, csrf, ip=None, *, user=None, private=False, access="", origin=None, passkey_browser="", cache_task=""):
         user = user or self.user

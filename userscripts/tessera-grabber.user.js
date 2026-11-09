@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.23.2
+// @version      0.24.0
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
@@ -738,7 +738,7 @@
  * - 保存到 Tessera（两种方式共用一个确认页：保存位置含私密空间、逐项修改文件名）：
  *   服务器下载：调用 /api/v1/downloads/parse-batch（旧版服务器退回 /downloads/parse）与 /api/v1/downloads，由服务器下载；
  *   本地下载：当前浏览器读取直链资源，再通过 PUT /api/v1/files 上传；单文件最多 64 MiB，不支持流媒体列表。
- *   私密空间：服务器下载转交解析结果、本地下载把文件 postMessage 给新打开的 Tessera 页面，由用户在那里解锁并确认。
+ *   私密空间：面板内嵌 Tessera 安全页面完成解锁，短期授权有效时直接创建下载或上传，私密交互续期、闲置自动上锁。
  * - 发给文件助手：把当前已渲染页面的结构快照（图片候选与分页链接，不含正文）postMessage 给新打开的 Tessera 页面，
  *   可以逐页暂存后一起发送；由用户在 Tessera 的助手对话框里点击发送，不经过访问密钥。
  * Cookie 只放进你复制的命令或发给你自己配置的 Tessera 服务器，不发往其他地方。
@@ -758,7 +758,7 @@
   const GMA = typeof GM !== "undefined" ? GM : null;
   const SYNC_STORE = typeof GM_getValue === "function" && typeof GM_setValue === "function";
   const HAS_MENU = typeof GM_registerMenuCommand === "function";
-  const STORE_KEYS = ["settings", "sent", "fabPosition", "assistant-pages", "cloud-baidu-token", "cloud-baidu-auth"];
+  const STORE_KEYS = ["settings", "sent", "fabPosition", "assistant-pages", "cloud-baidu-token", "cloud-baidu-auth", "private-client"];
   const cache = new Map();
   const gm = {
     get(key, fallback) {
@@ -2307,13 +2307,123 @@
     });
   }
 
-  async function api(method, path, body, { config = settings(), signal, contentType = "application/json", binary = false, onprogress,
+  const privateGrants = new Map(), privateViews = new Set();
+  function privateClient() {
+    let value = gm.get("private-client", "");
+    if (!/^[a-f0-9]{64}$/.test(value)) {
+      value = [...crypto.getRandomValues(new Uint8Array(32))].map(byte => byte.toString(16).padStart(2, "0")).join("");
+      gm.set("private-client", value);
+    }
+    return value;
+  }
+  const privateId = config => `${config.server}\n${config.key}`;
+  const privateCurrent = config => privateGrants.get(privateId(config));
+  function privateForget(config) {
+    const id = privateId(config), previous = privateGrants.get(id);
+    if (!previous) return;
+    clearTimeout(previous.timer);
+    privateGrants.delete(id);
+    for (const current of batches) if (current.destination.private && current.mode === "local" && privateId(current.config || settings()) === id
+        && current.entries.some(entry => ["downloading", "uploading", "saving"].includes(entry.state))) current.controller?.abort();
+    for (const update of [...privateViews]) update();
+    updateBatch();
+  }
+  function privateRemember(config, value) {
+    const previous = privateCurrent(config);
+    if (previous) clearTimeout(previous.timer);
+    if (!value.access) return privateForget(config);
+    const grant = { ...value, until: Date.now() + value.remaining_seconds * 1000, lastTouch: previous?.lastTouch || 0 };
+    grant.timer = setTimeout(() => {
+      // 上传过程会在服务器续期；到本地期限时只查询状态，不能靠轮询延长授权。
+      void api("GET", "/api/v1/private/status", undefined, { config, timeout: 15000 }).then(state => {
+        if (privateCurrent(config) !== grant) return;
+        state.unlocked ? privateRemember(config, state) : privateForget(config);
+      }).catch(() => { if (privateCurrent(config) === grant) privateForget(config); });
+    }, Math.max(1000, value.remaining_seconds * 1000 + 50));
+    privateGrants.set(privateId(config), grant);
+    if (!previous || previous.access !== grant.access) for (const update of [...privateViews]) update();
+    return grant;
+  }
+  async function privateGrant(config = settings()) {
+    let grant = privateCurrent(config);
+    if (!grant || grant.until <= Date.now()) {
+      const state = await api("GET", "/api/v1/private/status", undefined, { config });
+      if (!state.unlocked) { privateForget(config); throw Object.assign(new Error("私密空间已锁定，请先解锁"), { status: 423 }); }
+      grant = privateRemember(config, state);
+    }
+    return grant;
+  }
+  function privateTouch(config = settings()) {
+    const grant = privateCurrent(config);
+    if (!grant || Date.now() - grant.lastTouch < 15000) return;
+    grant.lastTouch = Date.now();
+    void api("POST", "/api/v1/activity", { active: true }, { config, privateSpace: true }).catch(() => {});
+  }
+  async function privateLock(config = settings()) {
+    try { await api("POST", "/api/v1/lock", {}, { config, privateSpace: true }); }
+    finally { privateForget(config); }
+  }
+
+  /** 密码留在 Tessera 来源文档；密钥与授权只通过专用 MessagePort 交换，不使用全局消息传递秘密。 */
+  async function ensurePrivate(config = settings()) {
+    try { return await privateGrant(config); }
+    catch (error) { if (error.status !== 423) throw error; }
+    if (!panel) throw new Error("请打开面板后解锁私密空间");
+    const host = panel, previous = host.layer;
+    return await new Promise((resolve, reject) => {
+      const origin = new URL(config.server).origin;
+      const url = `${config.server.replace(/\/+$/, "")}/grabber/index.html`;
+      let settled = false, channel = null, popup = null;
+      const iframe = h("iframe", { title: "Tessera 私密空间解锁", src: url, referrerPolicy: "no-referrer",
+        sandbox: "allow-scripts allow-same-origin allow-forms", allow: "publickey-credentials-get",
+        style: "width:100%;height:420px;border:0;background:transparent" });
+      const hint = h("p", { className: "hint" }, "密码仅在 Tessera 的安全页面输入；浏览器支持时可用通行密钥快捷解锁。");
+      const fallback = h("button", { type: "button", className: "btn ghost", onclick: () => {
+        popup = page.open(url, "_blank", "popup,width=460,height=560");
+        if (!popup) hint.textContent = "解锁窗口被拦截，请允许弹出窗口后重试。";
+      } }, "网页限制内嵌时，在独立小窗口解锁");
+      const layer = h("div", { className: "layer private-unlock-layer", role: "dialog", "aria-label": "解锁私密空间" },
+        h("header", {}, h("span", { className: "title" }, "解锁私密空间")),
+        h("div", { className: "body" }, hint, iframe, fallback),
+        h("footer", {}, h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: () => finish(null, stoppedError()) }, "取消")));
+      const controller = { close: () => finish(null, stoppedError()), privateMode: true };
+      function finish(grant, error) {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener("message", ready);
+        channel?.port1.close(); popup?.close(); layer.remove();
+        host.classList.remove("private-unlock-open");
+        if (host.layer === controller) host.layer = previous || null;
+        if (!previous) host.classList.remove("has-layer");
+        if (error) reject(error);
+        else resolve(privateRemember(config, { ...grant, unlocked: true }));
+      }
+      function ready(event) {
+        if (event.origin !== origin || event.data?.type !== "tessera-private-ready"
+            || event.source !== iframe.contentWindow && event.source !== popup) return;
+        channel?.port1.close();
+        channel = new MessageChannel();
+        channel.port1.onmessage = message => { if (message.data?.type === "unlocked" && message.data.grant?.access) finish(message.data.grant); };
+        event.source.postMessage({ type: "tessera-private-connect" }, origin, [channel.port2]);
+        channel.port1.postMessage({ type: "init", key: config.key, client: privateClient() });
+      }
+      window.addEventListener("message", ready);
+      host.layer = controller; host.classList.add("has-layer", "private-unlock-open"); host.append(layer);
+      placePanel();
+    });
+  }
+
+  async function api(method, path, body, { config = settings(), signal, contentType = "application/json", binary = false, onprogress, privateSpace = false,
     timeout = method === "PUT" ? 600000 : 180000 } = {}) {
     const { server, key } = config;
     if (!server || !key) return Promise.reject(new Error("请先在设置中填写 Tessera 地址和访问密钥"));
+    const grant = privateSpace ? await privateGrant(config) : null;
+    if (privateSpace) path = path.replace(/^\/api\/v1(?=\/)/, "/api/v1/private");
     const response = await gmRequest({
       method, url: server.replace(/\/+$/, "") + path, anonymous: true, timeout,
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": contentType },
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": contentType,
+        ...(path.startsWith("/api/v1/private/") ? { "X-Tessera-Private-Client": privateClient() } : {}),
+        ...(grant ? { "X-Private-Access": grant.access } : {}) },
       data: body === undefined ? undefined : binary ? body : JSON.stringify(body),
       upload: onprogress ? { onprogress } : undefined,
       errorMessage: "无法连接 Tessera，请检查地址，并在 Tampermonkey 提示时允许访问该域名",
@@ -2321,7 +2431,12 @@
     }, signal);
     let data = null;
     try { data = response.responseText ? JSON.parse(response.responseText) : null; } catch { /* 非 JSON */ }
-    if (response.status >= 200 && response.status < 300) return data;
+    if (response.status >= 200 && response.status < 300) {
+      if (grant && (method !== "GET" || path.startsWith("/api/v1/private/folders")))
+        privateRemember(config, { ...grant, remaining_seconds: grant.idle_seconds });
+      return data;
+    }
+    if (privateSpace && [401, 403, 423].includes(response.status)) privateForget(config);
     throw Object.assign(new Error(data?.error?.message || `Tessera 返回 HTTP ${response.status}`), { status: response.status });
   }
 
@@ -2726,6 +2841,9 @@
     .dest.private { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); background: var(--accent-soft); }
     /* 选择层覆盖在面板上，面板内容较少时撑高到能浏览目录的高度 */
     .panel.has-layer { min-height: min(440px, calc(100vh - 96px)); }
+    .panel.private-unlock-open { min-height: min(660px, var(--panel-available, calc(100vh - 96px))); }
+    .private-unlock-layer > .body { display: flex; flex-direction: column; gap: 12px; }
+    .private-unlock-layer > .body > iframe { flex: 1 0 360px; }
     .layer { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; background: var(--bg); animation: rise .14s ease-out; }
     .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 12px; color: var(--muted); }
     .crumbs button { height: 24px; max-width: 100%; padding: 0 6px; border-radius: 6px; color: var(--muted);
@@ -3161,6 +3279,7 @@
     panel.classList.toggle("is-sheet", sheet);
     if (sheet) {
       Object.assign(panel.style, { left: "0", right: "0", bottom: "0", maxHeight: `${Math.min(760, Math.round(innerHeight * 0.88))}px` });
+      panel.style.setProperty("--panel-available", panel.style.maxHeight);
       return;
     }
     panel.style[left ? "left" : "right"] = "12px";
@@ -3174,6 +3293,7 @@
       panel.style.top = `${fabRect.bottom + 12}px`;
       panel.style.maxHeight = `${Math.min(760, innerHeight - fabRect.bottom - 24)}px`;
     }
+    panel.style.setProperty("--panel-available", panel.style.maxHeight);
   }
 
   /** 无菜单的管理器在非 Tessera 页面需要淡化按钮兜底。 */
@@ -3206,6 +3326,7 @@
   }
 
   function close() {
+    panel?.layer?.close();
     panel?.remove();
     panel = null;
     listeners.delete(renderListIfOpen);
@@ -3258,6 +3379,12 @@
       footer ? h("footer", {}, footer) : null);
     panel.back = back;
     panel.addEventListener("pointerdown", () => { pointerDown = true; });
+    const activity = event => {
+      if (event.isTrusted && (panel?.layer?.privateMode || panel?.dataset.view === "batch" && batch?.destination.private))
+        privateTouch(panel?.dataset.view === "batch" ? batch?.config || settings() : settings());
+    };
+    panel.addEventListener("pointerdown", activity);
+    panel.addEventListener("keydown", activity);
     root.append(panel);
     placePanel();
     return panel;
@@ -3652,8 +3779,8 @@
 
   const savedDestination = () => ({ path: settings().destination || "", private: Boolean(settings().destinationPrivate) });
   const rememberDestination = dest => saveSettings({ destination: dest.path, destinationPrivate: dest.private });
-  const destinationLabel = dest => dest.private ? "私密空间" : dest.path ? dest.path.replace(/\/$/, "") : "根目录";
-  const destinationSub = dest => dest.private ? "在 Tessera 页面解锁后确认" : "保存位置";
+  const destinationLabel = dest => dest.private ? `私密空间${dest.path && privateCurrent(settings()) ? ` / ${dest.path.replace(/\/$/, "")}` : ""}` : dest.path ? dest.path.replace(/\/$/, "") : "根目录";
+  const destinationSub = dest => dest.private ? privateCurrent(settings()) ? "私密空间已解锁" : "私密空间 · 发送前解锁" : "保存位置";
 
   /** 保存位置摘要行；点击「更改」在当前面板上打开目录选择层。get/set 由调用方保存状态。 */
   function destinationRow(get, set, allowPrivate = true) {
@@ -3669,6 +3796,8 @@
       sub.textContent = destinationSub(dest);
     }
     update();
+    const refresh = () => { if (row.isConnected === false) privateViews.delete(refresh); else update(); };
+    privateViews.add(refresh);
     return row;
   }
 
@@ -3677,20 +3806,30 @@
     if (!panel) return;
     panel.layer?.close();
     let mode = initial.private && allowPrivate ? "private" : "files";
-    let prefix = initial.private ? "" : initial.path;
+    let prefix = initial.path || "";
     let state = { folders: [], next: null, writable: true, loading: true, error: "" };
-    let request = 0;
+    let request = 0, unlocking = false;
     const body = h("div", { className: "body" });
     const footer = h("footer", {});
     const layer = h("div", { className: "layer", role: "dialog", "aria-label": "选择保存位置" },
       h("header", {}, iconButton("back", "返回", () => closeLayer(), "back"), h("span", { className: "title" }, "选择保存位置")), body, footer);
     const host = panel;
     const closeLayer = () => {
+      privateViews.delete(privateChanged);
       layer.remove();
       host.classList.remove("has-layer");
       if (panel && panel.layer === controller) panel.layer = null;
     };
-    const controller = { close: closeLayer };
+    const controller = { close: closeLayer, get privateMode() { return mode === "private"; } };
+    const privateChanged = () => {
+      if (layer.isConnected === false) return privateViews.delete(privateChanged);
+      if (mode === "private" && !privateCurrent(settings())) {
+        if (unlocking) return;
+        request++; state = { folders: [], next: null, writable: false, loading: false, error: "私密空间已锁定，请重新解锁" };
+        render();
+      }
+    };
+    privateViews.add(privateChanged);
     panel.layer = controller;
     host.classList.add("has-layer");
     panel.append(layer);
@@ -3701,8 +3840,14 @@
       else state.loading = true;
       render();
       try {
+        const privateSpace = mode === "private";
+        if (privateSpace) {
+          unlocking = true;
+          try { await ensurePrivate(); } finally { unlocking = false; }
+        }
+        if (id !== request) return;
         const query = `prefix=${encodeURIComponent(prefix)}&limit=100${more && state.next ? `&cursor=${encodeURIComponent(state.next)}` : ""}`;
-        const page = await api("GET", `/api/v1/folders?${query}`);
+        const page = await api("GET", `/api/v1/folders?${query}`, undefined, { privateSpace });
         if (id !== request) return;
         state = { folders: more ? state.folders.concat(page.folders) : page.folders, next: page.next_cursor, writable: page.writable, loading: false, error: "" };
       } catch (error) {
@@ -3719,22 +3864,26 @@
         onclick: () => {
           if (mode === value) return;
           mode = value;
+          prefix = "";
           // 从私密空间打开时还没读取过目录：第一次切到「我的文件」才发请求。
-          if (mode === "files" && !request) void load(); else render();
+          void load();
         } }, label);
       const parts = [h("div", { className: "segmented", role: "radiogroup", "aria-label": "目标空间" }, seg("files", "我的文件"), seg("private", "私密空间"))];
-      if (mode === "private") {
+      if (mode === "private" && !privateCurrent(settings())) {
         parts.push(h("div", { className: "private-note" },
-          h("strong", {}, "保存到私密空间"),
-          h("span", {}, "访问密钥不能直接写入私密空间，发送时会打开一个 Tessera 标签页：服务器下载转交解析结果，浏览器上传转交下载好的文件。在那里用登录密码或通行密钥解锁、确认后保存。"),
-          h("span", {}, "密码只在 Tessera 自己的页面里输入，当前网页和脚本都拿不到。服务器解析结果 30 分钟内有效。")));
+          h("strong", {}, state.loading ? "正在解锁私密空间…" : "私密空间已锁定"),
+          h("span", {}, state.error || "在面板内用账号登录密码解锁；支持的浏览器也可使用通行密钥。解锁后直接选择目录、下载或上传。"),
+          h("button", { type: "button", className: "btn primary", disabled: state.loading, onclick: () => void load() }, "解锁私密空间")));
         footer.replaceChildren(h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: closeLayer }, "取消"),
-          h("button", { type: "button", className: "btn primary", onclick: () => { closeLayer(); onPick({ path: "", private: true }); } }, svg("lock"), "选择私密空间"));
+          h("span", { className: "hint" }, "密码只在 Tessera 来源的安全页面中输入"));
         body.replaceChildren(...parts);
         return;
       }
+      if (mode === "private") parts.push(h("div", { className: "private-note" },
+        h("strong", {}, "私密空间已解锁"), h("span", {}, `有私密操作时续期，闲置 ${(privateCurrent(settings())?.idle_seconds || 1800) / 60} 分钟自动锁定`),
+        h("button", { type: "button", className: "btn ghost", onclick: () => void privateLock().catch(error => toast(error.message)) }, "立即锁定")));
       const segments = prefix.split("/").filter(Boolean);
-      const crumbs = [h("button", { type: "button", onclick: () => enter(""), ...(segments.length ? {} : { "aria-current": "page" }) }, "根目录")];
+      const crumbs = [h("button", { type: "button", onclick: () => enter(""), ...(segments.length ? {} : { "aria-current": "page" }) }, mode === "private" ? "私密空间" : "根目录")];
       segments.forEach((segment, index) => {
         const path = segments.slice(0, index + 1).join("/") + "/";
         crumbs.push(svg("chevron", 12), h("button", { type: "button", onclick: () => enter(path), ...(index === segments.length - 1 ? { "aria-current": "page" } : {}) }, segment));
@@ -3756,7 +3905,7 @@
         if (!name) return input.focus();
         if (/[\\/]/.test(name) || name === "." || name === ".." || name.startsWith(".tgdrive")) return toast("文件夹名称不能包含 / 或 \\");
         createButton.disabled = true;
-        try { await api("POST", "/api/v1/folders", { path: prefix + name + "/" }); enter(prefix + name + "/"); }
+        try { await api("POST", "/api/v1/folders", { path: prefix + name + "/" }, { privateSpace: mode === "private" }); enter(prefix + name + "/"); }
         catch (error) { toast(error.message); createButton.disabled = false; }
       }
       createButton.addEventListener("click", () => void create());
@@ -3764,71 +3913,10 @@
       else if (!state.loading) parts.push(h("p", { className: "hint" }, "这个访问密钥不能写入当前目录，请进入有读写权限的文件夹。"));
       footer.replaceChildren(h("span", { className: "spacer" }), h("button", { type: "button", className: "btn ghost", onclick: closeLayer }, "取消"),
         h("button", { type: "button", className: "btn primary", disabled: !state.writable || state.loading && !state.folders.length,
-          onclick: () => { closeLayer(); onPick({ path: prefix, private: false }); } }, `保存到「${destinationLabel({ path: prefix })}」`));
+          onclick: () => { closeLayer(); onPick({ path: prefix, private: mode === "private" }); } }, `保存到「${destinationLabel({ path: prefix, private: mode === "private" })}」`));
       body.replaceChildren(...parts);
     }
-    if (mode === "files") void load(); else render();
-  }
-
-  /**
-   * 把解析结果转交给 Tessera 页面确认（私密空间）：结果放在地址的 # 片段里，不会发给服务器或进入访问日志；
-   * 票据由服务器加密、绑定账号并在 30 分钟后过期，页面读取后立即从地址栏移除。
-   */
-  function handoff(candidates) {
-    const json = JSON.stringify({ private: true, candidates: candidates.map(item => ({ ...item })) });
-    const bytes = new TextEncoder().encode(json);
-    let binary = "";
-    for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-    const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    // 浏览器地址最长约 2 MB；网盘一次最多可选 1000 个文件，过大时请分批转交。
-    if (encoded.length > 1_800_000) throw new Error("转交到私密空间的文件太多，请减少勾选数量后分批发送");
-    gm.openTab(`${settings().server.replace(/\/+$/, "")}/?view=downloads#import=${encoded}`);
-  }
-
-  /**
-   * 浏览器上传到私密空间：访问密钥不能写入私密空间，改为把浏览器下载好的文件交给 Tessera 页面（web/src/user/transfer.ts）。
-   * 必须在点击事件里同步调用，否则新标签页会被拦截。页面报到后逐个 postMessage 发送 Blob，页面确认收到才算转交成功；
-   * 用户在 Tessera 页面里解锁并确认后，文件才通过网页会话上传，密码不会经过当前网页。
-   */
-  function openTransfer(server) {
-    const origin = new URL(server).origin;
-    const nonce = [...crypto.getRandomValues(new Uint8Array(18))].map(value => value.toString(16).padStart(2, "0")).join("");
-    const tab = page.open(`${origin}/?view=private#receive=${nonce}&from=${encodeURIComponent(location.origin)}`, "_blank");
-    if (!tab) throw new Error("浏览器拦截了新标签页，请允许当前网站打开弹出窗口后重试");
-    let markReady;
-    const ready = new Promise(resolve => { markReady = resolve; });
-    const pending = new Map();
-    let index = 0;
-    // 只认 Tessera 的 origin 与本次的随机 nonce；不比较 event.source，脚本与网页运行在不同上下文时窗口对象不一定相等。
-    const onMessage = event => {
-      const data = event.data;
-      if (event.origin !== origin || !data || data.source !== "tessera" || data.nonce !== nonce) return;
-      if (data.type === "transfer-ready") markReady();
-      const waiter = data.type === "transfer-ack" && pending.get(data.index);
-      if (!waiter) return;
-      pending.delete(data.index);
-      if (data.ok) waiter.resolve(); else waiter.reject(new Error(data.error || "Tessera 页面拒收了文件"));
-    };
-    window.addEventListener("message", onMessage);
-    const within = (promise, ms, message) => new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(message)), ms);
-      promise.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
-    });
-    const waitReady = () => within(ready, 300000, "Tessera 页面没有响应：请确认已在新标签页登录 Tessera；部分网站禁止跨站窗口通信，这时请手动保存后上传");
-    return {
-      async send(blob, name, mime) {
-        await waitReady();
-        if (tab.closed) throw new Error("Tessera 标签页已关闭，请重试");
-        const id = index++;
-        const acked = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
-        tab.postMessage({ source: "tessera-grabber", nonce, type: "file", index: id, name, blob: new Blob([blob], { type: mime }) }, origin);
-        await within(acked, 60000, "Tessera 页面没有确认收到文件，请重试");
-      },
-      end() {
-        waitReady().then(() => tab.postMessage({ source: "tessera-grabber", nonce, type: "end" }, origin)).catch(() => {})
-          .finally(() => setTimeout(() => window.removeEventListener("message", onMessage), 60000));
-      },
-    };
+    void load();
   }
 
   // ----- 发给文件助手（docs/assistant-design.md §9.1） -----
@@ -4022,10 +4110,10 @@
   /**
    * 批次在页面内存中保存：关闭面板后继续传输、轮询进度，重新打开时主面板顶部显示入口。两种方式共用同一个确认页
    * （保存位置含私密空间、逐项保存文件名），只是读取文件的一方不同：
-   * - 本地下载（local）：当前浏览器读取直链 → PUT 临时名 → move 提交；私密空间把文件交给 Tessera 页面。
-   *   waiting → downloading → uploading → saving → completed（私密：transferring → handoff）。
+   * - 本地下载（local）：当前浏览器读取直链 → PUT 临时名 → move 提交；私密空间使用临时授权。
+   *   waiting → downloading → uploading → saving → completed（私密操作使用临时授权）。
    * - 服务器下载（server）：打开确认页时先解析，每个分组一行，同组的不同清晰度用下拉选择；开始后逐行创建离线任务并轮询。
-   *   私密空间把解析结果（含修改后的文件名）转交 Tessera 页面确认。parsing → waiting → creating → submitted（私密：handoff）。
+   *   私密空间在面板内解锁后直接创建任务。parsing → waiting → creating → submitted。
    */
   // batch：面板里正在查看的批次（确认页或进度页）；batches：已经开始、仍在跟踪的全部批次。
   // 一批还在进行时可以继续勾选并开始新的一批：旧批次在后台继续，主面板为每个批次各显示一条进度横幅。
@@ -4268,17 +4356,16 @@
       const parsing = batch.entries.some(entry => entry.state === "parsing");
       batch.submit.disabled = problems.size > 0 || parsing || !ready;
       const label = batch.submit.querySelector("span");
-      label.textContent = parsing ? "正在解析…" : batch.destination.private && batch.mode === "server" ? `到 Tessera 确认 ${ready} 项`
-        : `${batch.mode === "local" ? "开始上传" : "开始下载"} ${ready} 项`;
+      label.textContent = parsing ? "正在解析…" : `${batch.mode === "local" ? "开始上传" : "开始下载"} ${ready} 项`;
     }
     const retryAll = panel?.querySelector("[data-retry-failed]");
     if (retryAll) retryAll.disabled = batch.running || problems.size > 0;
   }
 
-  const entryActive = (entry, current = batch) => ["parsing", "creating", "downloading", "uploading", "saving", "transferring"].includes(entry.state)
+  const entryActive = (entry, current = batch) => ["parsing", "creating", "downloading", "uploading", "saving"].includes(entry.state)
     || entry.state === "waiting" && current.started
     || entry.state === "submitted" && entry.tasks.some(task => !TERMINAL.includes(task.status));
-  const entryOk = entry => entry.state === "completed" || entry.state === "handoff" || entry.state === "submitted" && entry.tasks.length > 0 && entry.tasks.every(task => task.status === "completed");
+  const entryOk = entry => entry.state === "completed" || entry.state === "submitted" && entry.tasks.length > 0 && entry.tasks.every(task => task.status === "completed");
   const entryFailed = entry => ["error", "stopped", "parse-error"].includes(entry.state) || entry.state === "submitted" && entry.tasks.some(task => task.status === "failed" || task.status === "stopped");
   const pendingRounds = (current = batch) => current?.deferred?.length || 0;
   const batchDone = (current = batch) => !current || current.started && !current.entries.some(entry => entryActive(entry, current)) && !pendingRounds(current);
@@ -4290,15 +4377,20 @@
     return run;
   }
 
-  async function runBatch(auto = false) {
-    if (batch.running) return;
-    const current = batch;
+  async function runBatch(auto = false, current = batch) {
+    if (current.running) return;
     if (current.mode === "local") for (const entry of current.entries) entry.name ??= defaultSaveName(entry.url);
     // 自动续发的批次沿用原文件名，不因前面批次里改坏的失败行而停下（服务器会为同名文件自动改名）。
     const problem = auto ? null : batchNameProblems(current).values().next().value;
     if (problem) return toast(problem);
     const queue = current.entries.filter(entry => entry.state === "waiting");
     if (!queue.length) return toast("没有可保存的文件");
+    if (current.destination.private) {
+      current.running = true;
+      try { await ensurePrivate(current.config || settings()); }
+      catch (error) { current.running = false; current.needsUnlock = true; updateBatch(); return toast(error.message); }
+      current.needsUnlock = false;
+    }
     // 开始后未解析成功的行按失败处理，可单独重试。
     if (!current.started) for (const entry of current.entries) if (entry.state === "parse-error") entry.state = "error";
     current.started = true;
@@ -4309,29 +4401,11 @@
     selected.clear();
     rememberDestination(current.destination);
     const privateSpace = current.destination.private;
-    // 私密空间 + 服务器下载：解析结果连同修改后的文件名一次性转交 Tessera 页面确认。
-    if (current.mode === "server" && privateSpace) {
-      try { handoff(queue.map(entry => ({ ...entry.candidate, name: entry.name.trim().normalize("NFC"), ...(entry.folder ? { folder: entry.folder } : {}) }))); }
-      catch (error) { current.running = false; current.started = false; updateBatch(); return toast(error.message); }
-      for (const entry of queue) { entry.state = "handoff"; entry.delivered = true; }
-      current.running = false;
-      toast(`已在 Tessera 中打开 ${queue.length} 项，请在那里解锁并确认`);
-      return updateBatch();
-    }
-    if (current.mode === "local" && privateSpace) {
-      // 新标签页必须在点击事件里同步打开，放在任何 await 之前。
-      try { current.transfer = openTransfer(current.config.server); }
-      catch (error) {
-        for (const entry of queue) { entry.state = "error"; entry.error = error.message; }
-        current.running = false;
-        return updateBatch();
-      }
-    }
     updateBatch();
-    if (current.mode === "local" && !privateSpace) {
+    if (current.mode === "local") {
       try {
         const folder = await api("GET", `/api/v1/folders?prefix=${encodeURIComponent(current.destination.path)}&limit=1`, undefined,
-          { config: current.config, signal: current.controller.signal });
+          { config: current.config, signal: current.controller.signal, privateSpace });
         if (!folder?.writable) throw new Error("访问密钥不能写入所选目录，请更改保存位置或密钥授权");
       } catch (error) {
         for (const entry of queue) { entry.state = error.name === "AbortError" ? "stopped" : "error"; entry.error = error.message; }
@@ -4349,14 +4423,12 @@
     // 本地下载一次只处理一个文件（内存与带宽）；服务器下载两路创建任务。
     await Promise.all(current.mode === "local" ? [worker()] : [worker(), worker()]);
     current.running = false;
-    if (current.transfer) { current.transfer.end(); current.transfer = null; }
     updateBatch();
-    // 这一批的任务都创建好了：自动取下一批（私密空间每批要在 Tessera 页面确认，等用户点「发送下一批」）。
-    if (batchAlive(current) && pendingRounds(current) && !current.controller.signal.aborted && !current.destination.private) void nextRound(current);
+    // 这一批任务创建完成后继续下一批；私密授权过期时再请求解锁，不逐批跳转确认。
+    if (batchAlive(current) && pendingRounds(current) && !current.controller.signal.aborted) void nextRound(current);
   }
 
-  /** 下一批：已完成的行收起为计数，取下一批文件（服务器下载先取直链、服务器解析），然后直接创建任务或上传（沿用确认过的保存位置）。
-   *  本地上传不需要解析，中间没有 await，私密空间的「发送下一批」点击里能同步打开 Tessera 标签页。 */
+  /** 下一批沿用已确认的位置；私密授权有效时直接继续，失效时再请求解锁。 */
   async function nextRound(current) {
     if (current.running || !pendingRounds(current) || !batchAlive(current)) return;
     const done = current.entries.filter(entryOk);
@@ -4373,9 +4445,9 @@
       current.running = false;
       if (!batchAlive(current)) return;
     }
-    if (current.entries.some(entry => entry.autoRound && entry.state === "waiting")) return runBatch(true);
+    if (current.entries.some(entry => entry.autoRound && entry.state === "waiting")) return runBatch(true, current);
     updateBatch();
-    if (!current.destination.private) return nextRound(current);
+    return nextRound(current);
   }
 
   /** 放弃还没开始的批次（已创建的任务不受影响）。 */
@@ -4385,6 +4457,15 @@
     batch.deferred = [];
     toast(`已放弃剩余 ${count} 个文件`);
     updateBatch();
+  }
+
+  async function resumePrivate(current = batch) {
+    try {
+      await ensurePrivate(current.config || settings());
+      current.needsUnlock = false;
+      if (current.entries.some(entry => entry.state === "waiting")) return runBatch(true, current);
+      updateBatch(); schedulePoll(0);
+    } catch (error) { toast(error.message); }
   }
 
   async function uploadEntry(entry, current) {
@@ -4397,27 +4478,18 @@
         onprogress: (received, total) => { entry.received = received; entry.total = total; updateBatch(); } });
       if (signal.aborted) throw stoppedError();
       entry.size = blob.size;
-      if (current.transfer) {
-        entry.state = "transferring";
-        updateBatch();
-        await current.transfer.send(blob, uploadSaveName(entry, mime), mime);
-        entry.state = "handoff";
-        entry.delivered = true;
-        markSent([entry.url]);
-        return updateBatch();
-      }
       entry.path ||= current.destination.path + uploadSaveName(entry, mime);
       entry.stagePath ||= current.destination.path + browserTemporaryName();
       entry.state = "uploading";
       updateBatch();
       staged = true;
       const result = await api("PUT", `/api/v1/files?path=${encodeURIComponent(entry.stagePath)}`, blob,
-        { config: current.config, signal, contentType: mime, binary: true,
+        { config: current.config, signal, contentType: mime, binary: true, privateSpace: current.destination.private,
           onprogress: event => { entry.uploaded = event.loaded || 0; updateBatch(); } });
       if (result?.key !== entry.stagePath || result.size !== blob.size) throw new Error("Tessera 未确认文件保存成功，请检查保存目录后重试");
       entry.state = "saving";
       updateBatch();
-      const moved = await api("POST", "/api/v1/move", { from: entry.stagePath, to: entry.path, conflict: "skip" }, { config: current.config, signal });
+      const moved = await api("POST", "/api/v1/move", { from: entry.stagePath, to: entry.path, conflict: "skip" }, { config: current.config, signal, privateSpace: current.destination.private });
       if (moved?.skipped) throw new Error("保存目录已有同名文件，已保留原文件；请修改保存文件名后重试");
       if (moved?.moved !== 1) throw new Error("Tessera 未确认保存文件名，请检查保存目录后重试");
       entry.state = "completed";
@@ -4426,7 +4498,7 @@
       let cleanupFailed = false;
       if (staged) {
         try {
-          const removed = await api("POST", "/api/v1/delete", { paths: [entry.stagePath] }, { config: current.config, timeout: 10000 });
+          const removed = await api("POST", "/api/v1/delete", { paths: [entry.stagePath] }, { config: current.config, timeout: 10000, privateSpace: current.destination.private });
           if (!removed?.results?.some(item => item.path === entry.stagePath)) cleanupFailed = true;
         } catch { cleanupFailed = true; }
       }
@@ -4452,7 +4524,7 @@
       const result = await api("POST", "/api/v1/downloads", {
         items: [{ ticket: entry.candidate.ticket, name: entry.name.trim().normalize("NFC"), ...(entry.folder ? { folder: entry.folder } : {}) }],
         destination: current.destination.path,
-      }, { config: current.config });
+      }, { config: current.config, privateSpace: current.destination.private });
       entry.tasks = result.tasks || [];
       entry.state = "submitted";
       markSent([entry.url]);
@@ -4518,10 +4590,11 @@
       const ids = current.entries.flatMap(entry => entry.tasks.filter(task => !TERMINAL.includes(task.status)).map(task => task.id));
       if (!ids.length) continue;
       try {
-        // 分批后可能同时跟踪上千个任务：每次请求最多 200 个编号，避免地址过长。
+        // 按接口的 100 个编号上限分页；私密状态轮询不续期。
         const tasks = [];
-        for (let index = 0; index < ids.length; index += 200)
-          tasks.push(...(await api("GET", `/api/v1/downloads?ids=${ids.slice(index, index + 200).join(",")}`, undefined, { config: current.config || settings() })).tasks);
+        for (let index = 0; index < ids.length; index += 100)
+          tasks.push(...(await api("GET", `/api/v1/downloads?ids=${ids.slice(index, index + 100).join(",")}`, undefined,
+            { config: current.config || settings(), privateSpace: current.destination.private })).tasks);
         if (!batchAlive(current)) continue;
         const fresh = new Map(tasks.map(task => [task.id, task]));
         for (const entry of current.entries) entry.tasks = entry.tasks.map(task => fresh.get(task.id) || task);
@@ -4618,6 +4691,8 @@
 
   /** 一个条目的状态文字、语气与进度（0–1，null 为不确定进度，undefined 为不显示）。 */
   function entryStatus(entry) {
+    if (batch.destination.private && !privateCurrent(batch.config || settings()))
+      return { text: "私密空间已锁定，解锁后查看保存详情" };
     if (entry.state === "waiting") return { text: batch.started ? "等待中" : "" };
     if (entry.state === "parsing") return { text: entry.resolvingCloud ? "正在获取网盘直链…" : "服务器解析中…", tone: "run", progress: null };
     if (entry.state === "parse-error") return { text: entry.error || "解析失败", tone: "err" };
@@ -4625,7 +4700,6 @@
     if (entry.state === "error") return { text: entry.error || "保存失败", tone: "err" };
     if (entry.state === "stopped") return { text: entry.error || "已停止", tone: "err" };
     if (entry.state === "saving") return { text: "正在保存文件…", tone: "run", progress: null };
-    if (entry.state === "transferring") return { text: "正在交给 Tessera 页面…", tone: "run", progress: null };
     if (entry.state === "completed") return { text: `已上传 · ${formatSize(entry.size)} · ${entry.path}`, tone: "ok", progress: 1 };
     if (entry.state === "downloading" || entry.state === "uploading") {
       const upload = entry.state === "uploading";
@@ -4634,7 +4708,6 @@
       const progress = total ? Math.min(1, received / total) : null;
       return { text: `${upload ? "上传中" : "浏览器下载中"} · ${progress === null ? formatSize(received) : `${Math.floor(progress * 100)}%`}${upload && progress === 1 ? " · 等待保存确认" : ""}`, tone: "run", progress };
     }
-    if (entry.state === "handoff") return { text: `已转交 Tessera 确认${entry.size ? ` · ${formatSize(entry.size)}` : ""}`, tone: "ok", progress: 1 };
     const task = entry.tasks.find(item => !TERMINAL.includes(item.status)) || entry.tasks.find(item => item.status !== "completed") || entry.tasks[0];
     if (!task) return { text: "已提交" };
     if (task.status === "completed") return { text: `已完成 · ${formatSize(task.stored_bytes || task.size)} · ${task.key}`, tone: "ok", progress: 1 };
@@ -4753,14 +4826,14 @@
       const list = h("div", { className: "list batch-list" });
       if (!batch.started) {
         const privateNote = local
-          ? "开始后会打开 Tessera 标签页接收文件，在那里解锁私密空间并确认上传；请保持两个页面打开。"
-          : "解析结果会转交 Tessera 标签页，在那里解锁私密空间并确认后开始下载；解析结果 30 分钟内有效。";
+          ? "在当前面板解锁后直接上传到私密目录；解锁期间可以连续发送，无需逐批跳转确认。请保持来源网页打开。"
+          : "在当前面板解锁后直接创建私密下载任务；私密操作自动续期，闲置超时后重新解锁。解析结果 30 分钟内有效。";
         target.replaceChildren(
           destinationRow(() => batch.destination, value => { batch.destination = value; rememberDestination(value); renderBatch(); }),
           h("div", { className: "section" },
             h("div", { className: "section-head" }, h("h2", {}, "保存的文件", h("span", { className: "count" }))),
             pendingRounds() ? h("p", { className: "hint rounds-note" }, svg("rows", 14),
-              h("span", {}, `共 ${batch.entries.length + pendingRounds()} 个文件，分 ${batch.rounds} 批自动发送：下面是第 1 批（可改名、移除），之后每批在上一批创建好任务后自动获取直链并提交，沿用同一保存位置，按网盘原文件名保存。${batch.destination.private ? "保存到私密空间时每批都要在 Tessera 页面确认。" : ""}`)) : null,
+              h("span", {}, `共 ${batch.entries.length + pendingRounds()} 个文件，分 ${batch.rounds} 批自动发送：下面是第 1 批（可改名、移除），之后每批在上一批创建好任务后自动获取直链并提交，沿用同一保存位置，按网盘原文件名保存。${batch.destination.private ? "私密解锁有效期间同样自动续发，无需逐批确认。" : ""}`)) : null,
             list),
           h("p", { className: "hint batch-note" }, svg(local ? "globe" : "download"), h("span", {}, batch.destination.private ? privateNote : local
             ? "由当前浏览器读取文件后上传，适合服务器被拒绝（防盗链、登录、人机验证）的资源。单文件最多 64 MiB；请保持网页打开，关闭面板后传输会继续。"
@@ -4792,20 +4865,20 @@
     const head = batchHeadline();
     const { ok, failed, finished } = head;
     const overview = target.querySelector(".overview");
-    const handedOff = batch.destination.private;
+    const privateSpace = batch.destination.private;
     overview.className = `overview tone-${head.tone}`;
     const icon = overview.querySelector(".status-icon");
     if (icon.dataset.icon !== head.icon) { icon.dataset.icon = head.icon; icon.replaceChildren(svg(head.icon, 18, head.icon === "check" ? 2.6 : 2)); }
     overview.querySelector("strong").textContent = head.title;
     const roundText = batch.rounds > 1 ? `第 ${batch.round} / ${batch.rounds} 批 · ` : "";
-    overview.querySelector(".sub").textContent = roundText + (handedOff ? "私密空间 · 在 Tessera 页面确认" : `保存到「${destinationLabel(batch.destination)}」`);
+    overview.querySelector(".sub").textContent = roundText + (privateSpace ? `私密空间 · ${privateCurrent(batch.config || settings()) ? "已解锁" : "已锁定"}` : `保存到「${destinationLabel(batch.destination)}」`);
     // 统计胶囊：数量变化时才重建。
     const stats = overview.querySelector(".stats");
     const statKey = `${ok}:${failed}:${head.running}`;
     if (stats.dataset.key !== statKey) {
       stats.dataset.key = statKey;
       stats.replaceChildren(...[
-        ok ? h("span", { className: "stat ok" }, `${handedOff ? "已转交" : "成功"} ${ok}`) : null,
+        ok ? h("span", { className: "stat ok" }, `成功 ${ok}`) : null,
         failed ? h("span", { className: "stat err" }, `失败 ${failed}`) : null,
         head.running ? h("span", { className: "stat run" }, `进行中 ${head.running}`) : null,
       ].filter(Boolean));
@@ -4816,13 +4889,14 @@
     const failedEntries = batch.entries.filter(entry => entryFailed(entry) && !entryActive(entry));
     const switchable = !local && finished ? failedEntries.filter(entry => !entry.platform && browserEligible(entry)) : [];
     const clearable = batch.entries.some(entry => entryOk(entry));
-    const mode = `${finished ? "done" : "run"}:${failedEntries.length > 0}:${switchable.length > 0}:${Boolean(batch.running)}:${clearable}:${pendingRounds()}`;
+    const needsUnlock = privateSpace && !batch.running && (batch.needsUnlock || !privateCurrent(batch.config || settings()));
+    const mode = `${finished ? "done" : "run"}:${failedEntries.length > 0}:${switchable.length > 0}:${Boolean(batch.running)}:${clearable}:${pendingRounds()}:${Boolean(needsUnlock)}`;
     if (footer.dataset.mode === mode) { syncBatchNames(); return; }
     footer.dataset.mode = mode;
     const server = (batch.config || settings()).server.replace(/\/+$/, "");
-    const link = server + (handedOff ? "/?view=private" : local ? "/?view=files" : "/?view=downloads");
+    const link = server + (privateSpace ? "/?view=private" : local ? "/?view=files" : "/?view=downloads");
     footer.replaceChildren(...[
-      h("button", { type: "button", className: "btn ghost", onclick: () => gm.openTab(link) }, local || handedOff ? "查看文件" : "查看下载任务"),
+      h("button", { type: "button", className: "btn ghost", onclick: () => gm.openTab(link) }, local || privateSpace ? "查看文件" : "查看下载任务"),
       h("span", { className: "spacer" }),
       switchable.length ? h("button", { type: "button", className: "btn ghost", title: "服务器被来源拒绝时，用当前浏览器读取后上传",
         onclick: () => startBatch([...new Set(switchable.map(entry => entry.url))], "local") }, "失败项改用本地下载") : null,
@@ -4830,7 +4904,8 @@
         onclick: () => retryEntries(batch.entries.filter(entry => entryFailed(entry) && !entryActive(entry))) }, "重试失败项") : null,
       local && !finished ? h("button", { type: "button", className: "btn", onclick: stopBatch }, "停止") : null,
       pendingRounds() ? h("button", { type: "button", className: "btn ghost", title: "不再发送还没开始的批次，已创建的任务照常下载", onclick: dropRounds }, `放弃剩余 ${pendingRounds()} 个`) : null,
-      pendingRounds() && handedOff && !batch.running ? h("button", { type: "button", className: "btn primary", title: "获取下一批直链并转交 Tessera 页面确认",
+      needsUnlock ? h("button", { type: "button", className: "btn primary", onclick: () => void resumePrivate() }, svg("lock"), "解锁并继续") : null,
+      pendingRounds() && privateSpace && !batch.running && !needsUnlock && !batch.entries.some(entry => entry.state === "waiting") ? h("button", { type: "button", className: "btn primary", title: "获取下一批直链并发送到私密目录（授权过期时需重新解锁）",
         onclick: () => void nextRound(batch) }, svg("send"), `发送下一批（第 ${batch.round + 1} / ${batch.rounds} 批）`) : null,
       clearable && (failedEntries.length || !finished) ? h("button", { type: "button", className: "btn ghost", title: "从列表移除已完成的项，保留失败项",
         onclick: () => clearEntries(batch.entries.filter(entryOk)) }, "清除已完成") : null,

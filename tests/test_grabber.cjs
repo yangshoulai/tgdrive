@@ -26,7 +26,8 @@ const instrumented = source.replace(/\s+gm\.load\(\)\.then\([\s\S]*\}\);\s*\}\)\
     nextRound, dropRounds, batchSummary, batchDone: () => batchDone(), batchLimit, saveSettings, settings, startBatch,
     lastTree: () => globalThis.lastTree, setPickTree: fn => { globalThis.pickTree = fn; }, createEntry, batchNameProblems,
     requestSize, wantSize, describe, noteMeta, timingSize, probeState: () => ({ probing, queued: probeQueue.length }),
-    frameAgent, onFrameItems, FRAME_CHANNEL, IS_TOP, getBatches: () => batches.slice() };
+    frameAgent, onFrameItems, FRAME_CHANNEL, IS_TOP, getBatches: () => batches.slice(),
+    privateClient, privateCurrent, privateGrant, privateForget, privateTouch, privateLock };
 })();`);
 assert.notEqual(instrumented, source, "userscript test hook must replace only final bootstrap");
 
@@ -42,7 +43,7 @@ async function until(predicate) {
 }
 
 /** manager: "sync" 模拟 Tampermonkey／Violentmonkey（GM_*），"async" 模拟 iOS Userscripts（只有异步 GM.*，无 GM_cookie 与菜单命令）。 */
-function harness({ fetch, gm, move, remove, open, parseBatch, cookies = true, cookieApi = true, dom, manager = "sync", isolated = false, bridge = "dom",
+function harness({ fetch, gm, move, remove, open, parseBatch, privateStatus, cookies = true, cookieApi = true, dom, manager = "sync", isolated = false, bridge = "dom",
   url = "https://gallery.example/album", storage = {}, query, pageState = {}, documentCookie = "visible=page", gmCookies } = {}) {
   const values = { settings: { server: "https://tessera.example", key: "TEST:secret", cookies } };
   const requests = [], fetches = [], listeners = [], opened = [], copied = [];
@@ -96,9 +97,12 @@ function harness({ fetch, gm, move, remove, open, parseBatch, cookies = true, co
     queueMicrotask(() => {
       if (record.aborted) return;
       const url = new URL(details.url);
-      if (url.pathname === "/api/v1/move") return move ? move(details, record)
+      const apiPath = url.pathname.replace("/api/v1/private/", "/api/v1/");
+      if (url.pathname === "/api/v1/private/status") return details.onload({ status: 200, responseText: JSON.stringify(
+        privateStatus || { configured: true, unlocked: false, idle_seconds: 300, remaining_seconds: 0 }) });
+      if (apiPath === "/api/v1/move") return move ? move(details, record)
         : details.onload({ status: 200, responseText: '{"moved":1,"skipped":0}' });
-      if (url.pathname === "/api/v1/delete") return remove ? remove(details, record)
+      if (apiPath === "/api/v1/delete") return remove ? remove(details, record)
         : details.onload({ status: 200, responseText: JSON.stringify({ results: JSON.parse(details.data).paths.map(path => ({ path, deleted: true })) }) });
       // 批量解析：默认把每一项当作一次 /downloads/parse 交给测试的 gm 替身，再按服务器的格式合成 results。
       if (url.pathname === "/api/v1/downloads/parse-batch" && gm && !parseBatch) return fanOutParse(details, record);
@@ -114,7 +118,7 @@ function harness({ fetch, gm, move, remove, open, parseBatch, cookies = true, co
     window, unsafeWindow: window, document,
     location: new URL(url), localStorage: storageApi, navigator: { userAgent: "BrowserTest/1" },
     URL, URLSearchParams, Blob, Response, ReadableStream, AbortController, btoa, atob, DOMException, TextEncoder, Uint8Array, Uint32Array, crypto: webcrypto,
-    setTimeout: (fn, delay) => fn.name === "poll" ? 0 : setTimeout(fn, delay), clearTimeout, clearInterval,
+    setTimeout: (fn, delay) => { const timer = fn.name === "poll" ? 0 : setTimeout(fn, delay); if (delay > 100000) timer.unref?.(); return timer; }, clearTimeout, clearInterval,
     ...(manager === "sync" ? {
       GM_getValue: (key, fallback) => values[key] ?? fallback,
       GM_setValue: (key, value) => { values[key] = value; },
@@ -388,42 +392,35 @@ test("read-only destination fails before downloading the source", async () => {
   assert.equal(h.fetches.length, 0);
 });
 
-test("browser mode hands private-space files to the Tessera page instead of the key API", async () => {
-  const posted = [];
-  let opened = "";
-  const h = harness({ open: (url, target, listeners) => {
-    opened = url;
-    const nonce = /#receive=([a-f\d]+)&/.exec(url)[1];
-    const reply = data => listeners.forEach(listener => listener({ origin: "https://tessera.example", data: { source: "tessera", nonce, ...data } }));
-    queueMicrotask(() => reply({ type: "transfer-ready" }));
-    return { closed: false, postMessage(data, origin) {
-      posted.push({ data, origin });
-      if (data.type === "file") queueMicrotask(() => reply({ type: "transfer-ack", index: data.index, ok: true }));
-    } };
-  } });
+for (const manager of ["sync", "async"]) test(`private browser upload reuses its grant without leaving the panel (${manager})`, async () => {
+  const h = harness({ manager, privateStatus: { unlocked: true, access: "private-grant", idle_seconds: 300, remaining_seconds: 250 } });
+  await h.ready;
   const current = h.batch();
-  current.destination = { path: "", private: true };
+  current.destination = { path: "secret/", private: true };
   await h.api.runBatch();
-  await until(() => posted.some(message => message.data.type === "end"));
   const entry = current.entries[0];
-  assert.equal(entry.state, "handoff");
-  assert.equal(entry.delivered, true);
-  assert.match(opened, /^https:\/\/tessera\.example\/\?view=private#receive=[a-f\d]{36}&from=https%3A%2F%2Fgallery\.example$/);
-  const file = posted.find(message => message.data.type === "file");
-  assert.equal(file.origin, "https://tessera.example");
-  assert.equal(file.data.name, "0048.jpg");
-  assert.deepEqual(new Uint8Array(await file.data.blob.arrayBuffer()), png);
-  // 私密空间不经过访问密钥：没有目录检查、上传或移动请求。
-  assert.equal(h.requests.some(request => request.details.url.startsWith("https://tessera.example")), false);
+  assert.equal(entry.state, "completed");
+  assert.equal(entry.path, "secret/0048.jpg");
+  assert.equal(h.opened.length, 0);
+  const upload = h.requests.find(request => request.details.method === "PUT").details;
+  assert.match(upload.url, /\/api\/v1\/private\/files\?/);
+  assert.equal(upload.headers["X-Private-Access"], "private-grant");
+  assert.match(upload.headers["X-Tessera-Private-Client"], /^[a-f0-9]{64}$/);
+  assert.equal(upload.headers["X-Tessera-Private-Client"], h.values["private-client"]);
+  assert.deepEqual(new Uint8Array(await upload.data.arrayBuffer()), png);
+  assert.equal(h.fetches[0].options.headers, undefined);
+  h.api.privateForget(h.api.settings());
 });
 
-test("blocked popup fails the private transfer before downloading", async () => {
+test("locked private space waits for panel unlock before reading source files", async () => {
   const h = harness();
   const current = h.batch();
   current.destination = { path: "", private: true };
   await h.api.runBatch();
-  assert.match(current.entries[0].error, /拦截了新标签页/);
+  assert.equal(current.entries[0].state, "waiting");
+  assert.match(h.messages.at(-1), /打开面板.*解锁/);
   assert.equal(h.fetches.length, 0);
+  assert.equal(h.opened.length, 0);
 });
 
 test("Cloudflare challenge is reported so the user can verify in a tab", async () => {
@@ -622,21 +619,23 @@ test("server parse falls back to single requests when the server has no batch en
   assert.equal(h.requests.filter(request => new URL(request.details.url).pathname === "/api/v1/downloads/parse").length, 3);
 });
 
-test("server mode to private space hands renamed candidates to the Tessera page", async () => {
-  const h = harness({ gm: details => details.onload({ status: 200, responseText: JSON.stringify(parseResponse) }) });
+test("private server mode directly creates the selected renamed candidates", async () => {
+  let id = 0;
+  const h = harness({ privateStatus: { unlocked: true, access: "private-grant", idle_seconds: 300, remaining_seconds: 250 },
+    gm: details => jsonReply(details, details.url.endsWith("/parse") ? parseResponse : { tasks: [{ id: ++id, status: "completed" }] }) });
   const current = h.batch([{ url: "https://cdn.example/clip.m3u8", type: "stream", state: "parsing", error: "", tasks: [], platform: null }]);
   current.mode = "server";
   current.destination = { path: "", private: true };
   await h.api.parseEntries(current, current.entries.slice());
   current.entries[1].name = "封面.jpg";
   await h.api.runBatch();
-  assert.equal(h.opened.length, 1);
-  const match = /\/\?view=downloads#import=([\w-]+)$/.exec(h.opened[0]);
-  const json = JSON.parse(Buffer.from(match[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
-  assert.equal(json.private, true);
-  assert.deepEqual(json.candidates.map(item => [item.ticket, item.name]), [["t-720", "clip.mp4"], ["t-img", "封面.jpg"]]);
+  assert.equal(h.opened.length, 0);
+  const creates = h.requests.filter(request => request.details.url.endsWith("/api/v1/private/downloads"));
+  assert.deepEqual(creates.flatMap(request => JSON.parse(request.details.data).items.map(item => [item.ticket, item.name])),
+    [["t-720", "clip.mp4"], ["t-img", "封面.jpg"]]);
   assert.equal(h.requests.some(request => request.details.url.endsWith("/api/v1/downloads")), false);
-  assert.ok(current.entries.every(entry => entry.state === "handoff"));
+  assert.ok(current.entries.every(entry => entry.state === "submitted"));
+  h.api.privateForget(h.api.settings());
 });
 
 test("server parse failure is skipped at start and can be re-parsed", async () => {
@@ -1548,9 +1547,13 @@ test("cloud Xunlei renews expired tokens once and signs the provider captcha req
   assert.ok(!JSON.stringify(result).includes("REFRESH_SECRET"));
 });
 
-test("cloud private-space handoff carries renamed tickets, with no key-API private task creation", async () => {
-  const h = harness({ ...cloudFixture("aliyun"), manager: "async", gm: details => details.url.includes("api.alipan.com")
-    ? jsonReply(details, { url: "https://files.example/private.bin" }) : jsonReply(details, { candidates: [{ ticket: "private-ticket", name: "cdn.bin", kind: "http" }] }) });
+test("cloud private-space download sends renamed tickets with a temporary private grant", async () => {
+  const h = harness({ ...cloudFixture("aliyun"), manager: "async",
+    privateStatus: { unlocked: true, access: "private-grant", idle_seconds: 300, remaining_seconds: 250 }, gm: details => {
+      if (details.url.includes("api.alipan.com")) return jsonReply(details, { url: "https://files.example/private.bin" });
+      if (new URL(details.url).pathname === "/api/v1/private/downloads") return jsonReply(details, { tasks: [{ id: 1, status: "completed", key: "私密文件.bin" }] });
+      return jsonReply(details, { candidates: [{ ticket: "private-ticket", name: "cdn.bin", kind: "http" }] });
+    } });
   await h.ready;
   const source = (await h.api.cloudSources(h.api.cloudOf()))[0];
   const current = h.batch([{ ...source, sourceName: source.name, state: "parsing", tasks: [] }]);
@@ -1558,12 +1561,16 @@ test("cloud private-space handoff carries renamed tickets, with no key-API priva
   await h.api.parseEntries(current, current.entries.slice());
   current.entries[0].name = "私密文件.bin";
   await h.api.runBatch();
-  const imported = JSON.parse(Buffer.from(new URL(h.opened[0]).hash.slice("#import=".length), "base64url"));
-  assert.equal(imported.private, true);
-  assert.equal(imported.candidates[0].name, "私密文件.bin");
-  assert.equal(imported.candidates[0].ticket, "private-ticket");
-  assert.ok(!JSON.stringify(imported).includes("ALI_TOKEN"));
+  const create = h.requests.find(request => new URL(request.details.url).pathname === "/api/v1/private/downloads").details;
+  const payload = JSON.parse(create.data);
+  assert.equal(payload.items[0].name, "私密文件.bin");
+  assert.equal(payload.items[0].ticket, "private-ticket");
+  assert.equal(create.headers["X-Private-Access"], "private-grant");
+  assert.ok(!create.data.includes("ALI_TOKEN"));
+  assert.equal(h.opened.length, 0);
+  assert.equal(current.entries[0].state, "submitted");
   assert.ok(!h.requests.some(request => new URL(request.details.url).pathname === "/api/v1/downloads"));
+  h.api.privateForget(h.api.settings());
 });
 
 test("cloud retry after an expired SSO session obtains fresh credentials before parsing", async () => {
@@ -1697,12 +1704,18 @@ test("later rounds keep the batch size the send started with", async () => {
   assert.deepEqual({ ...h.api.batchSummary(), finished: true }, { total: 250, ok: 250, failed: 0, finished: true });
 });
 
-test("private cloud rounds wait for the user, and remaining rounds can be dropped", async () => {
-  const h = harness({ gm: details => {
+test("private cloud rounds continue under the same grant without repeated page confirmation", async () => {
+  let created = 0;
+  const h = harness({ privateStatus: { unlocked: true, access: "private-grant", idle_seconds: 300, remaining_seconds: 250 }, gm: details => {
     const url = new URL(details.url);
     if (url.pathname === "/api/v1/downloads/parse") {
       const name = JSON.parse(details.data).input.match(/file-(\d+)/)[1] + ".bin";
       return details.onload({ status: 200, responseText: JSON.stringify({ candidates: [{ ticket: "t" + name, group: "", name, size: 1, warnings: [] }] }) });
+    }
+    if (url.pathname === "/api/v1/private/downloads" && details.method === "POST") {
+      created++;
+      assert.equal(details.headers["X-Private-Access"], "private-grant");
+      return jsonReply(details, { tasks: [{ id: created, status: "completed", key: "x" }] });
     }
     return details.onload({ status: 200, responseText: "{}" });
   } });
@@ -1714,16 +1727,52 @@ test("private cloud rounds wait for the user, and remaining rounds can be droppe
   h.api.setBatch(current);
   await h.api.parseEntries(current, current.entries.slice());
   await h.api.runBatch();
-  assert.equal(h.opened.length, 1);
-  for (let i = 0; i < 50; i++) await tick();
-  assert.equal(current.deferred.length, 750, "私密空间不自动发送下一批");
-  assert.equal(h.api.batchDone(), false);
-  await h.api.nextRound(current);
-  assert.equal(h.opened.length, 2);
-  assert.equal(current.round, 2);
-  h.api.dropRounds();
+  await until(() => created === 1250 && current.round === 3 && !current.running);
+  assert.equal(h.opened.length, 0);
+  assert.equal(current.round, 3);
   assert.equal(current.deferred.length, 0);
   assert.equal(h.api.batchDone(), true);
+  assert.equal(h.requests.filter(request => request.details.url.endsWith("/private/status")).length, 1);
+  h.api.privateForget(h.api.settings());
+});
+
+test("private status polling does not renew a grant, while private interaction does", async () => {
+  const h = harness({ privateStatus: { unlocked: true, access: "private-grant", idle_seconds: 300, remaining_seconds: 250 } });
+  await h.ready;
+  const config = h.api.settings();
+  const original = await h.api.privateGrant(config);
+  await h.api.api("GET", "/api/v1/downloads?ids=1", undefined, { privateSpace: true });
+  assert.equal(h.api.privateCurrent(config), original);
+  h.api.privateTouch(config);
+  await until(() => h.api.privateCurrent(config) !== original);
+  assert.equal(h.api.privateCurrent(config).remaining_seconds, 300);
+  const activity = h.requests.find(request => request.details.url.endsWith("/private/activity")).details;
+  assert.deepEqual(JSON.parse(activity.data), { active: true });
+  h.api.privateForget(config);
+});
+
+test("private idle deadline clears the local grant without user interaction", async () => {
+  const state = { unlocked: true, access: "private-grant", idle_seconds: 300, remaining_seconds: 0 };
+  const h = harness({ privateStatus: state });
+  await h.ready;
+  const config = h.api.settings();
+  await h.api.privateGrant(config);
+  state.unlocked = false; state.access = null;
+  await new Promise(resolve => setTimeout(resolve, 1050));
+  assert.equal(h.api.privateCurrent(config), undefined);
+  assert.equal(h.requests.filter(request => request.details.url.endsWith("/private/status")).length, 2);
+});
+
+test("locking private space aborts a source download before private upload", async () => {
+  const h = harness({ privateStatus: { unlocked: true, access: "private-grant", idle_seconds: 300, remaining_seconds: 250 },
+    fetch: (_, { signal }) => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true })) });
+  const current = h.batch(); current.destination.private = true;
+  const running = h.api.runBatch();
+  await until(() => h.fetches.length === 1);
+  h.api.privateForget(h.api.settings());
+  await running;
+  assert.equal(current.entries[0].state, "stopped");
+  assert.equal(h.requests.some(request => request.details.method === "PUT"), false);
 });
 
 test("resources found inside iframes reach the top page with the frame's referer", async () => {
