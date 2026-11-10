@@ -6,6 +6,7 @@ import json
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from tgdrive.app import create_app
@@ -119,28 +120,86 @@ class AccessErrorTests(unittest.TestCase):
             asyncio.run(store.get(ref))
 
 
+class BackupBotClient(FakeClient):
+    """备份 Bot 的替身：按场景返回 getMe／getChatMember。"""
+    member = {"status": "administrator", "can_post_messages": True}
+    bad_token = False
+    missing_chat = False
+
+    def __init__(self, token, **_):
+        super().__init__()
+        self.token = token
+
+    async def get_me(self):
+        from tgdrive.telegram.client import TelegramAuthError
+        if self.bad_token:
+            raise TelegramAuthError("Unauthorized", method="getMe", error_code=401)
+        return {"id": int(self.token.split(":")[0]), "username": "my_backup_bot"}
+
+    async def get_chat_member(self, chat, user):
+        from tgdrive.telegram.client import TelegramError
+        if self.missing_chat:
+            raise TelegramError("Bad Request: chat not found", method="getChatMember", error_code=400)
+        return dict(self.member)
+
+
+TOKEN = "777000111:" + "A" * 35
+
+
 class RemoteBackupTests(Base):
-    def test_split_upload_and_rotation(self):
-        client = FakeClient()
-        pool = BotPool([PoolBot("1", client, -1001)])
-        remote = RemoteBackup(self.app.metadata, lambda: pool, part_size=1024)
+    def remote(self, storage=()):
+        clients = []
+        def factory(token, **options):
+            client = BackupBotClient(token)
+            clients.append(client)
+            return client
+        return RemoteBackup(self.app.metadata, self.app.keystore, storage_bot_ids=lambda: list(storage), client_factory=factory, part_size=1024), clients
+
+    def test_dedicated_bot_is_checked_and_token_hidden(self):
+        remote, _ = self.remote(storage=["123456"])
+        with self.assertRaisesRegex(ValueError, "-100"):
+            asyncio.run(remote.configure({"enabled": True, "channel": "1234567890", "keep": 3, "token": TOKEN}))
+        with self.assertRaisesRegex(ValueError, "存储通道"):
+            asyncio.run(remote.configure({"enabled": True, "channel": "-1001234567890", "keep": 3, "token": "123456:" + "B" * 35}))
+        with self.assertRaisesRegex(ValueError, "token"):
+            asyncio.run(remote.configure({"enabled": True, "channel": "-1001234567890", "keep": 3}))
+        cases = [("bad_token", True, "无效"), ("missing_chat", True, "找不到频道"),
+                 ("member", {"status": "member"}, "不是频道"), ("member", {"status": "administrator", "can_post_messages": False}, "发布消息")]
+        for attribute, value, message in cases:
+            with self.subTest(attribute=attribute), patch.object(BackupBotClient, attribute, value):
+                with self.assertRaisesRegex(ValueError, message):
+                    asyncio.run(remote.configure({"enabled": True, "channel": "-1001234567890", "keep": 3, "token": TOKEN}))
+        status = asyncio.run(remote.configure({"enabled": True, "channel": "-1001234567890", "keep": 3, "token": TOKEN}))
+        self.assertEqual((status["bot"], status["has_token"]), ("my_backup_bot", True))
+        self.assertNotIn(TOKEN, json.dumps(status))
+        stored = self.app.metadata.db.execute("SELECT value FROM settings WHERE key='backup.remote'").fetchone()["value"]
+        self.assertNotIn("A" * 35, stored, "token 加密保存")
+        # token 留空沿用已保存的；更换口令后仍能解开（keystore.rotate 重新加密）。
+        asyncio.run(remote.configure({"enabled": True, "channel": "-1001234567890", "keep": 5}))
+        self.app.keystore.rotate("encryption passphrase", "another passphrase 2026")
+        self.assertEqual(remote._token(), TOKEN)
+
+    def test_split_upload_and_rotation_use_backup_bot(self):
+        remote, clients = self.remote()
         self.assertIsNone(asyncio.run(remote.upload(Path(self.temp.name) / "missing")))  # 未启用
-        remote.configure(True, "-1002", 1)
+        asyncio.run(remote.configure({"enabled": True, "channel": "-1002000000001", "keep": 1, "token": TOKEN}))
         backup = Path(self.temp.name) / "tgdrive-20261110-030000-1.tgdbak"
         backup.write_bytes(b"x" * 2500)
         result = asyncio.run(remote.upload(backup))
         self.assertEqual(result["parts"], 3)
-        self.assertEqual([name for _, name, _ in client.sent],
-                         [f"{backup.name}.00{i}" for i in (1, 2, 3)])
-        self.assertTrue(all(chat == "-1002" for chat, _, _ in client.sent))
+        sender = clients[-1]
+        self.assertEqual([name for _, name, _ in sender.sent], [f"{backup.name}.00{i}" for i in (1, 2, 3)])
+        self.assertTrue(all(chat == "-1002000000001" for chat, _, _ in sender.sent))
+        self.assertTrue(all(client.token == TOKEN for client in clients), "只使用备份 Bot")
         asyncio.run(remote.upload(backup))
-        self.assertEqual(len(client.deleted), 3)  # 只保留 1 份：上一组分卷被删除
+        self.assertEqual(len(clients[-1].deleted), 3)  # 只保留 1 份：上一组分卷由备份 Bot 删除
         self.assertEqual(len(remote.items()), 1)
 
-    def test_invalid_channel_rejected(self):
-        remote = RemoteBackup(self.app.metadata, lambda: None)
-        with self.assertRaises(ValueError):
-            remote.configure(True, "not a channel", 3)
+    def test_search_key_survives_passphrase_rotation(self):
+        search = self.app.assistant.search
+        search.configure({"provider": "brave", "api_key": "BSA-secret-key-123"})
+        self.app.keystore.rotate("encryption passphrase", "another passphrase 2026")
+        self.assertEqual(search._secret(search._stored()), "BSA-secret-key-123")
 
 
 class ReclaimTests(Base):

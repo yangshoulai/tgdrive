@@ -161,6 +161,19 @@ class KeyStore:
             if interaction_row is not None:
                 plain = open_sealed(old_bot_key, base64.b64decode(interaction_row["value"]), "telegram-interaction-bot")
                 interaction_token = base64.b64encode(seal(new_bot_key, plain, "telegram-interaction-bot")).decode()
+            # 设置项里 JSON 字段中的密文：文件助手网络搜索的 API Key、元数据备份的独立 Bot token。
+            json_secrets = []
+            for settings_key, field, subkey, aad in (("assistant.search", "key", "assistant-search", "assistant-search-key"),
+                                                     ("backup.remote", "token", "backup-remote", "backup-remote-token")):
+                json_row = self.metadata.db.execute("SELECT value FROM settings WHERE key=?", (settings_key,)).fetchone()
+                try:
+                    document = json.loads(json_row["value"]) if json_row is not None else None
+                except ValueError:
+                    document = None
+                if isinstance(document, dict) and document.get(field):
+                    plain = open_sealed(derive_subkey(old_kek, subkey), base64.b64decode(document[field]), aad)
+                    document[field] = base64.b64encode(seal(derive_subkey(new_kek, subkey), plain, aad)).decode()
+                    json_secrets.append((json.dumps(document, ensure_ascii=False, separators=(",", ":")), settings_key))
             # 所有重新包裹和 keys 更新在同一个事务里。
             with self.metadata.transaction() as db:
                 db.executemany("UPDATE blobs SET wrapped_dek = ? WHERE uuid = ?", ((w, u) for u, w in wrapped))
@@ -176,6 +189,7 @@ class KeyStore:
                 if smtp_password is not None:
                     db.execute("UPDATE settings SET value=? WHERE key='registration.smtp_password'", (smtp_password,))
                 db.executemany("UPDATE settings SET value=? WHERE key=?", media_secrets)
+                db.executemany("UPDATE settings SET value=? WHERE key=?", json_secrets)
                 if interaction_token is not None:
                     db.execute("UPDATE settings SET value=? WHERE key='telegram.bot.token'", (interaction_token,))
                 for invite in db.execute("SELECT id,code_hash,code_enc FROM registration_invites"):

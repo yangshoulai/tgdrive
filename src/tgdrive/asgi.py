@@ -637,8 +637,8 @@ class TgDriveASGI(StaticFiles):
         elif action == "assistant.search" and ok:
             detail = {"provider": (result or {}).get("provider"), "configured": (result or {}).get("configured")}
         elif action == "backup.remote" and ok:
-            detail = {"enabled": (result or {}).get("enabled"), "keep": (result or {}).get("keep"),
-                      "dedicated_channel": bool((result or {}).get("channel"))}
+            # 只记是否启用、保留份数与备份 Bot 的用户名，不记 token 或频道 ID。
+            detail = {"enabled": (result or {}).get("enabled"), "keep": (result or {}).get("keep"), "bot": (result or {}).get("bot")}
         elif action == "backup.delete" and ok:
             target = (result or {}).get("name")
         elif action == "resources.update":

@@ -88,7 +88,9 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     maintenance = MaintenanceService(metadata, engine, store, keystore, backup_dir=root / "backups",
                                      audit_retention_days=audit_retention_days)
     maintenance.scrub.budget_source = lambda: resources.config()["scrub_daily_mib"] * 1024 * 1024
-    maintenance.remote_backup = RemoteBackup(metadata, store.pool)  # 加密备份另发一份到 Telegram 频道（控制台启用）
+    # 元数据备份的独立 Bot 与频道（backup_remote.py）；存储通道的 Bot 不能用作备份 Bot。
+    maintenance.remote_backup = RemoteBackup(metadata, keystore, storage_bot_ids=lambda: [
+        telegram_bots.token(int(row["id"])).split(":", 1)[0] for row in telegram_bots.list()])
     maintenance.trash_purger = objects.purge_expired_trash  # 回收站条目保留 30 天后自动永久删除
 
     async def migrate_thumbnails() -> dict[str, int]:

@@ -389,15 +389,14 @@ class AdminApi:
     def remote_backup_settings(self, token: str) -> dict[str, object]:
         self.accounts.sessions.require(token, role="admin")
         remote = self._maintenance().remote_backup
-        return remote.status() if remote is not None else {"enabled": False, "channel": "", "keep": 7, "uploaded": []}
+        return remote.status() if remote is not None else {"enabled": False, "channel": "", "keep": 7, "bot": None, "has_token": False, "uploaded": []}
 
     async def configure_remote_backup(self, token: str, csrf: str, payload: dict) -> dict[str, object]:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         remote = self._maintenance().remote_backup
         if remote is None:
             raise ValueError("当前部署不支持把备份发送到 Telegram")
-        await self.accounts.metadata.run_in_thread(remote.configure, payload.get("enabled"), payload.get("channel"), payload.get("keep"))
-        return remote.status()
+        return await remote.configure(payload)
 
     async def delete_backup(self, token: str, csrf: str, name: str) -> dict[str, str]:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)

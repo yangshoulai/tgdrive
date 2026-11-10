@@ -760,7 +760,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
         <div className="audio-buttons-main">
           <MediaButton icon="previous" label="上一首" shortcut="ArrowLeft" disabled={!nav || nav.count < 2} onClick={nav?.onPrevious} />
           <button type="button" className="audio-play" aria-label={playing ? "暂停" : "播放"} aria-keyshortcuts="Space K" title={playing ? "暂停（空格 / K）" : "播放（空格 / K）"} disabled={failed} onClick={toggle}>
-            <Icon name={playing ? "pause" : "play"} size={24} />
+            <Icon name={playing ? "pause" : "play"} size={20} />
           </button>
           <MediaButton icon="next" label="下一首" shortcut="ArrowRight" disabled={!nav || nav.count < 2} onClick={nav?.onNext} />
         </div>

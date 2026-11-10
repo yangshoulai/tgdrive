@@ -1025,9 +1025,10 @@ export const backupSettings = () => request<BackupSettings>("/api/admin/v1/backu
 export const configureBackups = (keep: number) => post<BackupSettings>("/api/admin/v1/backups/settings", { keep }, 15 * 60000);
 export const deleteBackup = (name: string) => post<{ name: string }>("/api/admin/v1/backups/delete", { name }, 15 * 60000);
 export const createBackup = () => post<Backup>("/api/admin/v1/backups", undefined, 15 * 60000);
-export type RemoteBackupStatus = { enabled: boolean; channel: string; keep: number; uploaded: { name: string; size: number; uploaded_at: number; parts: number; channel: string }[] };
+export type RemoteBackupStatus = { enabled: boolean; channel: string; keep: number; /** 备份 Bot 的用户名（不含 @），未配置为 null */ bot: string | null; has_token: boolean; uploaded: { name: string; size: number; uploaded_at: number; parts: number; channel: string }[] };
 export const remoteBackupSettings = () => request<RemoteBackupStatus>("/api/admin/v1/backups/remote");
-export const configureRemoteBackup = (enabled: boolean, channel: string, keep: number) => post<RemoteBackupStatus>("/api/admin/v1/backups/remote", { enabled, channel, keep });
+/** token 留空表示沿用已保存的备份 Bot；启用时服务端会向 Telegram 预检 Bot 与频道权限。 */
+export const configureRemoteBackup = (values: { enabled: boolean; channel: string; keep: number; token?: string }) => post<RemoteBackupStatus>("/api/admin/v1/backups/remote", values, 60000);
 export const backupUrl = (name: string) => `/api/admin/v1/backups/${encodeURIComponent(name)}`;
 export const setAdminUserQuota = (id: number, quotaBytes: number | null) => post<void>(`/api/admin/v1/users/${id}/quota`, { quota_bytes: quotaBytes });
 export const adminClients = () => request<AdminClient[]>("/api/admin/v1/clients");
