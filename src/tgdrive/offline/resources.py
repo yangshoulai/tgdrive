@@ -23,7 +23,10 @@ DEFAULTS = {"mode": "auto", "concurrency": 1, "bandwidth_kib": 0,
             "upload_concurrency": 4, "upload_kib": 0, "bot_interval_ms": 1000,
             "web_part_concurrency": 4, "web_file_concurrency": 2, "thumbnail_concurrency": 16,
             "download_memory_percent": 60, "video_concurrency": 2, "thumbnail_cache_mib": 1024,
-            "download_connections": 4, "parse_concurrency": 6, "diagnostics": True}
+            "download_connections": 4, "parse_concurrency": 6, "diagnostics": True,
+            # 文件校验（巡检）每天最多读取的已存数据量，0 关闭自动校验；Telegram 机器人「发回」文件的大小上限
+            # （文件整读进内存后发送；官方 Bot API 另有 50 MB 上限，见 telegram/bot.py 的 _send_limit）。
+            "scrub_daily_mib": 2048, "telegram_send_mib": 200}
 # 写入存储（Telegram 发送）的每个在途分片约占明文与密文两份内存。
 UPLOAD_MEMORY = 32 * MIB
 # 文件读取并发（下载、预览、播放、本机缓存、S3 读取共用）：每路约占 (预读窗口数 + 1) × 8 MB 内存。
@@ -170,7 +173,9 @@ class ResourceSettings:
                                         ("video_concurrency", 1, 4, "同时封装的视频数须为 1–4"),
                                         ("thumbnail_cache_mib", 128, 8192, "封面缓存上限须为 128–8192 MiB"),
                                         ("download_connections", 1, 8, "单个任务的连接数须为 1–8"),
-                                        ("parse_concurrency", 1, 16, "同时解析的链接数须为 1–16")):
+                                        ("parse_concurrency", 1, 16, "同时解析的链接数须为 1–16"),
+                                        ("scrub_daily_mib", 0, 1048576, "文件校验每日读取量须为 0–1048576 MiB（0 为关闭）"),
+                                        ("telegram_send_mib", 1, 2000, "机器人发回文件上限须为 1–2000 MiB")):
             if type(merged[key]) is not int or not low <= merged[key] <= high:
                 raise ValueError(message)
         if not isinstance(merged["proxy"], str):

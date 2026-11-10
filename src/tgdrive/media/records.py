@@ -285,6 +285,9 @@ class FileMetadataStore:
             raise ValueError("此类文件不支持这些元数据字段")
         result = {}
         for key, value in fields.items():
+            if value is None:
+                result[key] = None  # 恢复为文件自带（自动解析）的值：去掉覆盖
+                continue
             limit = 16384 if key == "description" else 4096 if key == "actors" else 512
             if not isinstance(value, str) or "\x00" in value or len(value.encode("utf-8")) > limit:
                 raise ValueError("元数据字段内容过长或包含空字符")
@@ -318,6 +321,7 @@ class FileMetadataStore:
                     db.execute("UPDATE file_media_assets SET is_default=0 WHERE metadata_id=? AND kind='subtitle'", (info.metadata_id,))
                 db.execute("UPDATE file_media_assets SET language=?,title=?,is_default=?,updated_at=? WHERE id=?",
                            (update["language"], update["title"], update["is_default"], now, old["id"]))
+            before = db.execute("SELECT COUNT(*) FROM file_media_assets WHERE metadata_id=? AND kind='subtitle'", (info.metadata_id,)).fetchone()[0]
             for asset in staged:
                 old = current.get(asset["id"])
                 if old:
@@ -327,9 +331,10 @@ class FileMetadataStore:
                     db.execute("UPDATE file_media_assets SET is_default=0 WHERE metadata_id=? AND kind=?", (info.metadata_id, asset["kind"]))
                 self.insert_asset(db, asset)
             count = db.execute("SELECT COUNT(*) FROM file_media_assets WHERE metadata_id=? AND kind='subtitle'", (info.metadata_id,)).fetchone()[0]
-            if count > ASSET_LIMIT:
+            # 只拒绝让数量继续增长的编辑：旧版本自动提取可能已超过上限，不能因此连标题都改不了。
+            if count > ASSET_LIMIT and count > before:
                 raise ValueError("每个视频最多保存 32 条字幕")
-            overrides = json.loads(row["overrides"]) | fields
+            overrides = {key: value for key, value in (json.loads(row["overrides"]) | fields).items() if value is not None}
             db.execute("UPDATE file_metadata SET overrides=?,revision=revision+1,manual_lyrics=MAX(manual_lyrics,?),"
                        "manual_subtitles=MAX(manual_subtitles,?),excluded_subtitles=?,updated_at=? WHERE id=?",
                        (json.dumps(overrides, ensure_ascii=False), int(lyrics), int(subtitles), json.dumps(sorted(excluded)), now, info.metadata_id))
@@ -347,14 +352,19 @@ class FileMetadataStore:
         row = self.row(info.metadata_id)
         def excluded(row):
             return row["manual_lyrics"] if kind == "lyrics" else source in json.loads(row["excluded_subtitles"])
-        if row is None or excluded(row) or any(asset["source"] == source for asset in self.assets(info.metadata_id, kind)):
+        existing = self.assets(info.metadata_id, kind) if row is not None else []
+        if row is None or excluded(row) or any(asset["source"] == source for asset in existing):
             return
+        if kind == "subtitle" and len(existing) >= ASSET_LIMIT:
+            return  # 内置字幕轨超过上限的部分不自动保存，仍作为回退来源播放
         asset = await self.stage_text(scope, info, kind, text, source=source, language=language, title=title, default=default)
         try:
             with self.metadata.transaction() as db:
                 self.guard(scope, info)()
                 row = self.row(info.metadata_id)
-                if row is not None and not excluded(row) and not db.execute(
+                full = kind == "subtitle" and db.execute("SELECT COUNT(*) FROM file_media_assets WHERE metadata_id=? AND kind='subtitle'",
+                                                         (info.metadata_id,)).fetchone()[0] >= ASSET_LIMIT
+                if row is not None and not full and not excluded(row) and not db.execute(
                         "SELECT 1 FROM file_media_assets WHERE metadata_id=? AND kind=? AND source=?", (info.metadata_id, kind, source)).fetchone():
                     if asset["is_default"] and db.execute("SELECT 1 FROM file_media_assets WHERE metadata_id=? AND kind=? AND is_default=1",
                                                            (info.metadata_id, kind)).fetchone():

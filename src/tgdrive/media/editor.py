@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -66,6 +67,9 @@ class AudioEditor:
         covers = self.media.objects.file_thumbnail_versions([info])[(info.bucket_id, info.key)]
         return {"etag": info.etag, "revision": row["revision"], "kind": row["kind"], "size": info.size,
                 "duration": fields.get("duration"), "fields": {key: str(fields.get(key) or "") for key in FIELDS},
+                # 文件自带（自动解析）的值与已手动覆盖的字段：编辑器据此提供「恢复为文件自带值」。
+                "auto_fields": {key: str(value) for key, value in json.loads(row["auto_fields"]).items() if key in FIELDS and value not in (None, "")},
+                "overridden": sorted(key for key in json.loads(row["overrides"]) if key in FIELDS),
                 "lyrics": text, "lyrics_source": source,
                 "assets": [asset for asset in assets if asset["kind"] == "subtitle"], "embedded_subtitles": embedded,
                 "cover": "thumb" in covers, "editable": row["kind"] in ("audio", "video"),

@@ -24,6 +24,8 @@
 .share-folder .public-folder-table .data-row:last-child { border-radius: 0; }
 .share-folder .empty-state { padding-block: 48px; }
 .share-folder .public-folder-table .data-row > .cell-actions:last-child { position: static; padding-left: 0; background: transparent; box-shadow: none; }
+/* 目录统计只放一个入口：宽屏在工具栏（长列表时也始终可见），窄屏工具栏放不下时改在页脚汇总旁。 */
+@media (min-width: 861px) { .list-footer .footer-stats { display: none; } }
 @media (max-width: 860px) {
   .public-folder-table { --cols: 20px minmax(0, 1fr) 76px 80px 44px; }
   .public-folder-table .data-row > .cell-date { display: none; }

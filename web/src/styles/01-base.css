@@ -86,6 +86,8 @@ html[data-input="pointer"] :focus-visible:not(input, textarea, select) { outline
 .account-attachments li { display: grid; grid-template-columns: 15px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); color: var(--ink-3); }
 .account-attachments-title { display: grid; gap: 2px; min-width: 0; }
 .account-attachments-title strong { overflow: hidden; color: var(--ink); font-size: var(--text-sm); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+/* 偏好是完整的一句话：允许换行，不截断。 */
+.account-memories .account-attachments-title strong { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 .account-attachments-title small { color: var(--ink-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .account-attachments-note { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: var(--ink-3); font-size: var(--text-xs); }
 .account-attachments-note > span { flex: 1 1 200px; min-width: 0; }
@@ -289,6 +291,15 @@ html[data-input="pointer"] .switch-input:focus-visible + .switch-track { outline
 .file-filters-divider { flex: none; width: 1px; height: 16px; margin: 0 8px; background: var(--line-strong); }
 .filter-chips { display: flex; gap: 8px; margin: -4px 0 12px; overflow-x: auto; scrollbar-width: none; }
 .filter-chips::-webkit-scrollbar { display: none; }
+/* 标签放不下时在可继续滚动的一侧渐隐，提示还有内容（滚动驱动动画；不能滚动时时间轴无效、不渐隐）。 */
+@property --chips-fade-start { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --chips-fade-end { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@supports (animation-timeline: scroll()) {
+  .filter-chips { -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--chips-fade-start), #000 calc(100% - var(--chips-fade-end)), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 var(--chips-fade-start), #000 calc(100% - var(--chips-fade-end)), transparent);
+    animation: chips-fade linear both; animation-timeline: scroll(self inline); }
+  @keyframes chips-fade { 0% { --chips-fade-start: 0px; --chips-fade-end: 32px; } 8% { --chips-fade-start: 24px; } 92% { --chips-fade-end: 32px; } 100% { --chips-fade-start: 24px; --chips-fade-end: 0px; } }
+}
 .filter-chip { flex: none; height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--radius-pill); background: var(--surface); color: var(--ink-2); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; transition: color var(--duration-fast), background-color var(--duration-fast), border-color var(--duration-fast); }
 .filter-chip:hover { border-color: var(--line-strong); color: var(--ink); }
 .filter-chip.is-active { border-color: var(--ink); background: var(--ink); color: var(--surface); }

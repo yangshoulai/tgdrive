@@ -9,6 +9,7 @@ import { Stat } from "../overview";
 import { CurveChart } from "../../curve-chart";
 
 import { byteSetting, settingLabel, settingNumber, settingRange } from "./shared";
+import { SearchPanel } from "./search";
 
 export const LIMIT_GROUPS: { title: string; description: string; keys: string[] }[] = [
   { title: "Agent 循环", description: "每一轮对话（一条用户消息触发的处理）的运行限制。工具调用超过同时执行数时会分批排队；触达总次数、时间或预算上限后，助手会总结已完成的部分并停止。累计 token 预算合计本轮每次模型请求的输入与输出，设为 0 表示不限，与模型上下文容量独立。长任务带有计划时，预算用完但计划仍有可执行步骤、本段有实际进展且没有等待确认，会按「自动续跑段数」在同一轮中开始新的一段，每段预算重新计算；用户可随时停止，每日额度照常生效。", keys: ["max_steps", "max_tool_calls", "parallel_calls", "repeat_threshold", "error_threshold", "run_seconds", "tool_seconds", "tool_result_bytes", "run_tokens", "auto_continue"] },
@@ -88,6 +89,7 @@ export function LimitsTab({ settings, onSaved }: { settings: ai.AssistantSetting
         <Switch label="允许用户使用私密对话" checked={settings.private} onChange={value => void setPrivate(value)}
           description="还需要至少一个在模型配置中「允许用于私密对话」的模型；可在“用户”页按人单独允许或禁止。关闭时立即停止所有进行中的私密任务。" />
       </Panel>
+      <SearchPanel />
       <Panel title="额度与保留期" description="每个用户的默认额度可在“用户”页按人覆盖。">
         <div className="form settings-form assistant-limit-form">
           {numberField("user_daily_tokens", "每用户每日 token（0 为不限）", settings.bounds.user_daily_tokens, general.user_daily_tokens, value => setGeneral({ ...general, user_daily_tokens: value }))}

@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import re
+import shutil
 import time
 import traceback
 import unicodedata
@@ -24,7 +25,7 @@ from ..objects import PRIVATE_PREFIX, PRIVATE_TRASH_PREFIX, ObjectService, Scope
 from ..work import Limiter, WorkBusyError
 from ..telegram.client import TelegramAuthError, TelegramError
 from . import diagnostics
-from .hls import load_playlist, remux
+from .hls import SegmentCache, load_playlist, remux
 from ..filekinds import served_type
 from .http import RETRY_STATUS, DownloadError, SafeHttpClient, TransientError, status_error
 from .mp4 import FRAGMENT_PROBE, Defragmenter, is_fragmented, video_size
@@ -47,7 +48,25 @@ MAX_CREATE_ITEMS = 1000
 PARSE_BATCH_MAX = 50
 PARSE_BATCH_BUDGET = 90
 ACTIVE = ("queued", "running", "interrupted")
-RETRY_DELAYS = (10, 30, 90)
+# 自动重试的等待（秒）。尾部拉长到分钟级，让持续几分钟到半小时的存储通道或来源故障也能自动恢复；
+# 有新进度的失败重新从第 1 次计数（见 _run），大文件偶发抖动不会累计到失败。
+RETRY_DELAYS = (10, 30, 90, 300, 600, 1200)
+
+
+def _http_date(value: str) -> bool:
+    """IMF-fixdate（如 Wed, 21 Oct 2015 07:28:00 GMT）：只接受这种标准格式作为续传校验值。"""
+    return bool(re.fullmatch(r"[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT", value or ""))
+
+
+def _validator(state) -> str | None:
+    """续传时 If-Range 用的校验值：优先强 ETag，其次 Last-Modified。"""
+    return state.get("etag") or state.get("last_modified") or None
+
+
+def _unchanged(state, headers) -> bool:
+    if state.get("etag"):
+        return headers.get("etag") == state["etag"]
+    return bool(state.get("last_modified")) and headers.get("last-modified") == state["last_modified"]
 # 多连接下载时单个分段遇到网络抖动的原地重试次数（每次间隔 1、2、4… 秒），仍失败才交给任务层的自动重试。
 # 网页任务列表每页、多选操作与更改保存位置一次最多处理的任务数。
 PAGE_MAX = 500
@@ -167,6 +186,8 @@ class OfflineDownloads:
         # 自动重试状态只在进程内保存；重启后“等待恢复”的任务本来就会继续。
         self._retries: dict[int, int] = {}
         self._retry_at: dict[int, float] = {}
+        # 存储通道（Telegram）写入失败时全局暂停调度到这个时刻，避免故障期间队列里的任务逐个启动、逐个耗尽重试。
+        self._storage_paused_until = 0.0
         # 多连接下载被来源拒绝过的任务：本进程内改用单连接，不再反复尝试分段。
         self._single: set[int] = set()
         self.platforms = PlatformResolver(self.http, resources)
@@ -866,6 +887,7 @@ class OfflineDownloads:
                 # 手动操作重新计算自动重试次数。
                 self._retries.pop(task_id, None)
                 self._retry_at.pop(task_id, None)
+                self._storage_paused_until = 0.0  # 用户手动重试：立即再试一次存储通道
                 row = self._row(task_id, user_id)
                 self.scope(user_id)
                 if action == "delete":
@@ -873,9 +895,11 @@ class OfflineDownloads:
                     await self.objects.delete_prefix(Scope(row["bucket_id"]), f"{COVER_PREFIX}{task_id}/")
                     with self.metadata.transaction() as db:
                         db.execute("DELETE FROM offline_tasks WHERE id=? AND user_id=?", (task_id, user_id))
+                    self._drop_segments(task_id)
                     return None
                 if action in ("restart", "update"):
                     await self._discard(row)
+                    self._drop_segments(task_id)
                     self._set(task_id, key=task_path(row["key"]), received=0, stored_bytes=0, segments_done=0, processed_seconds=0, elapsed_seconds=0)
                     source = self._source(self._row(task_id))
                     source["state"] = {}
@@ -990,6 +1014,7 @@ class OfflineDownloads:
                     raise ValueError("任务正在下载或已完成")
                 self._retries.pop(task_id, None)
                 self._retry_at.pop(task_id, None)
+                self._storage_paused_until = 0.0  # 用户手动重试：立即再试一次存储通道
                 with self.metadata.transaction() as db:
                     top = db.execute("SELECT COALESCE(MAX(priority),0) FROM offline_tasks WHERE priority>0").fetchone()[0]
                     db.execute("UPDATE offline_tasks SET priority=?,status='queued',phase=NULL,error=NULL,updated_at=? WHERE id=?",
@@ -1099,11 +1124,35 @@ class OfflineDownloads:
                 if not task.cancelling():
                     task.cancel()
 
+    def _segment_dir(self, task_id):
+        return self.cache_root / f"hls-{int(task_id)}"
+
+    def _track_dir(self, task_id):
+        return self.cache_root / f"tracks-{int(task_id)}"
+
+    def _drop_segments(self, task_id):
+        """清理任务的续传缓存：M3U8 源分片（hls-<任务>）与平台分离音视频轨（tracks-<任务>）。"""
+        for path in (self._segment_dir(task_id), self._track_dir(task_id)):
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+
+    def _sweep_segments(self):
+        """启动时清理不再需要续传的缓存（M3U8 分片、平台音视频轨）：任务已完成、失败或删除。"""
+        if not self.cache_root.is_dir() or self.cache_root.is_symlink():
+            return
+        keep = {row[0] for row in self.metadata.db.execute(
+            "SELECT id FROM offline_tasks WHERE status IN ('queued','running','interrupted','stopped')")}
+        for path in self.cache_root.iterdir():
+            match = re.fullmatch(r"(?:hls|tracks)-(\d+)", path.name)
+            if match and int(match[1]) not in keep and path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+
     def start(self):
         if self._runner is not None:
             return
         self._closing = False
         clear_cache(self.cache_root)
+        self._sweep_segments()
         with self.metadata.transaction() as db:
             db.execute("UPDATE offline_tasks SET status=CASE WHEN method='POST' THEN 'stopped' ELSE 'interrupted' END,"
                        "error=CASE WHEN method='POST' THEN '服务已重启，POST 任务需手动重新发送' ELSE '服务已重启，等待恢复' END,updated_at=? WHERE status='running'", (time.time(),))
@@ -1141,7 +1190,7 @@ class OfflineDownloads:
                         status = "stopped" if "账号" in str(exc) or row["method"] == "POST" else "interrupted"
                         await self._cancel(task_id, status, str(exc))
                 config = self.resources.effective()
-                if self.keystore.unlocked and not self.resources.pressure():
+                if self.keystore.unlocked and not self.resources.pressure() and time.monotonic() >= self._storage_paused_until:
                     # 插队（立即下载）的任务最先调度，其余按创建顺序；插队任务很少，走 offline_priority 部分索引。
                     first = self.metadata.db.execute("SELECT t.id,t.user_id,t.kind,t.method,t.platform FROM offline_tasks t JOIN users u ON u.id=t.user_id WHERE t.priority>0 AND t.status IN ('queued','interrupted') AND u.status='active' ORDER BY t.priority DESC LIMIT 100").fetchall()
                     rest = self.metadata.db.execute("SELECT t.id,t.user_id,t.kind,t.method,t.platform FROM offline_tasks t JOIN users u ON u.id=t.user_id WHERE t.status IN ('queued','interrupted') AND u.status='active' ORDER BY t.id LIMIT 100").fetchall()
@@ -1210,6 +1259,7 @@ class OfflineDownloads:
             scope = self._task_scope(row)
             source = self._source(row)
             self._stats[task_id] = {"received": row["stored_bytes"] if row["kind"] == "http" else 0, "segments_done": 0,
+                                   "start": row["stored_bytes"] if row["kind"] == "http" else 0,
                                    "processed_seconds": 0, "speed": 0, "tick": time.monotonic(), "last_bytes": row["stored_bytes"]}
             recorder = diagnostics.TaskDiagnosis(task_id)
             recorder.phase = "platform" if row["platform"] else "hls" if row["kind"] == "hls" else "http"
@@ -1236,10 +1286,15 @@ class OfflineDownloads:
             # 存储写入名额暂时被占满（批量下载、上传与缩略图同时写入）和网络抖动一样自动重试，不直接判为失败。
             # Telegram 的拒绝（含 400）在换 Bot 重试后仍失败时也按暂时故障处理：大文件分片多，偶发错误不应让任务直接失败；
             # 断点续传保留已写入的分段。说明来自 Telegram，不含 token 或来源地址。
+            storage = isinstance(exc, TelegramError)
             if isinstance(exc, TelegramError):
                 log.warning("离线任务 %s 写入存储失败：%s code=%s %s（%s）", task_id, type(exc).__name__, exc.error_code, exc, _where(exc))
                 exc = TransientError(f"写入存储通道失败（Telegram{f' {exc.error_code}' if exc.error_code else ''}：{exc}）")
             row = self._row(task_id)
+            stats = self._stats.get(task_id) or {}
+            if stats.get("received", 0) > stats.get("start", 0) or stats.get("segments_done", 0):
+                # 本次运行有新进度：之前的失败已经恢复过，重新计数。
+                self._retries.pop(task_id, None)
             attempt = self._retries.get(task_id, 0) + 1
             if row["method"] == "POST" or attempt > len(RETRY_DELAYS):
                 self._retries.pop(task_id, None)
@@ -1247,6 +1302,8 @@ class OfflineDownloads:
             else:
                 delay = RETRY_DELAYS[attempt - 1]
                 self._retries[task_id], self._retry_at[task_id] = attempt, time.monotonic() + delay
+                if storage:
+                    self._storage_paused_until = max(self._storage_paused_until, time.monotonic() + delay)
                 self._set(task_id, status="interrupted", error=f"{exc}；{delay} 秒后自动重试（第 {attempt}/{len(RETRY_DELAYS)} 次）")
         except DownloadError as exc:
             self._set(task_id, status="failed", error=str(exc))
@@ -1271,6 +1328,8 @@ class OfflineDownloads:
                 self._set(task_id, phase=None)
             else:
                 self._retries.pop(task_id, None)
+            if (row["kind"] == "hls" or row["platform"]) and row["status"] in ("completed", "failed"):
+                self._drop_segments(task_id)
             if row["status"] != "interrupted":
                 self._retry_at.pop(task_id, None)
             self._intents.pop(task_id, None)
@@ -1435,8 +1494,8 @@ class OfflineDownloads:
         start = (number - 1) * PART_SIZE
         end = min(size, start + PART_SIZE) - 1
         headers = {"Range": f"bytes={start}-{end}"}
-        if state.get("etag"):
-            headers["If-Range"] = state["etag"]
+        if _validator(state):
+            headers["If-Range"] = _validator(state)
         for attempt in range(PART_RETRIES + 1):
             pieces, received = [], 0
             try:
@@ -1445,7 +1504,7 @@ class OfflineDownloads:
                         raise status_error(response.status, f"来源暂时不可用（HTTP {response.status}），可以稍后继续")
                     match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
                     if (response.status != 206 or not match or (int(match[1]), int(match[2]), int(match[3])) != (start, end, size)
-                            or state.get("etag") and response.headers.get("etag") != state["etag"]):
+                            or _validator(state) and not _unchanged(state, response.headers)):
                         raise _RangeRefused()
                     async for piece in response.stream():
                         self.check(row["user_id"], row["id"])
@@ -1559,7 +1618,7 @@ class OfflineDownloads:
         if upload and state.get("ranges"):
             # 多连接下载中断：已写入的分段可能不连续，只补缺的分段；需要 ETag 确认来源没有变化，否则从头下载。
             size = state.get("size")
-            if request.method == "GET" and state.get("etag") and size and self._parts_valid(parts, size):
+            if request.method == "GET" and _validator(state) and size and self._parts_valid(parts, size):
                 self._stats[row["id"]].update(received=offset, last_bytes=offset)
                 self._mode("parallel")
                 await self._parallel(row, scope, upload_id, request, state, size)
@@ -1569,19 +1628,19 @@ class OfflineDownloads:
                 return
             await self._discard(row)
             upload_id, offset, state, parts = None, 0, {}, []
-        resume = offset and request.method == "GET" and state.get("etag") and all(part.size == PART_SIZE for part in parts)
+        resume = offset and request.method == "GET" and _validator(state) and all(part.size == PART_SIZE for part in parts)
         if offset and not resume:
             await self._discard(row)
             upload_id, offset, state = None, 0, {}
         self._stats[row["id"]].update(received=offset, last_bytes=offset)
-        extra = {"Range": f"bytes={offset}-", "If-Range": state["etag"]} if resume else {}
+        extra = {"Range": f"bytes={offset}-", "If-Range": _validator(state)} if resume else {}
         async with self.http.open(request, extra_headers=extra, identity=True) as response:
             if response.status in RETRY_STATUS:
                 # 来源临时故障不能当作文件变化而清理断点。
                 raise status_error(response.status, f"来源暂时不可用（HTTP {response.status}），可以稍后继续")
             if resume:
                 match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
-                unchanged = response.headers.get("etag") == state["etag"] and response.url == state.get("url")
+                unchanged = _unchanged(state, response.headers) and response.url == state.get("url")
                 if response.status == 416 and unchanged and response.headers.get("content-range") == f"bytes */{offset}" and state.get("size") == offset:
                     state["eof"] = True
                     source["state"] = state
@@ -1601,7 +1660,11 @@ class OfflineDownloads:
                     raise status_error(response.status, f"来源下载失败（HTTP {response.status}），请检查链接和认证参数")
                 size = response.size
                 etag = response.headers.get("etag", "")
-                state = {"etag": etag if re.fullmatch(r'"[\x21\x23-\x7e]{0,4096}"', etag) and size is not None else None,
+                strong = etag if re.fullmatch(r'"[\x21\x23-\x7e]{0,4096}"', etag) and size is not None else None
+                modified = response.headers.get("last-modified", "")
+                state = {"etag": strong,
+                         # 没有强 ETag 的来源（很多下载站只给 Last-Modified）用修改时间加总长度确认来源未变，也能续传。
+                         "last_modified": modified if not strong and size is not None and _http_date(modified) else None,
                          "url": response.url, "size": size, "eof": False}
             self._set(row["id"], size=size)
             source["state"] = state
@@ -1725,7 +1788,8 @@ class OfflineDownloads:
         stream = merge_tracks(self.http, row["platform"], entry, self.resources.ffmpeg, self.cache_root,
             row["id"], config["platform_max_mib"] * MIB, config["reserve_mib"] * MIB,
             check=lambda: self.check(row["user_id"], row["id"]), progress=lambda **values: self._progress(row["id"], **values),
-            throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase), connections=self._connections())
+            throttle=self.throttle, phase=lambda phase: self._set(row["id"], phase=phase), connections=self._connections(),
+            resume_dir=self._track_dir(row["id"]))
         try:
             # 合并后的成品直接流入加密分片，不占用音视频输入轨的临时缓存预算。
             await self._stage_video(row, scope, upload_id, stream)
@@ -1747,8 +1811,10 @@ class OfflineDownloads:
             audio = (audio_request, await load_playlist(self.http, audio_request))
         self._set(row["id"], phase="downloading", segments_total=len(playlist.segments) + (len(audio[1].segments) if audio else 0), duration=playlist.duration)
         upload_id = await self._begin(row, scope, "video/mp4")
+        # 分段续传：已完整读取的源分片缓存在本机，中断后重新封装时不再从来源下载（hls.SegmentCache）。
+        cache = SegmentCache(self._segment_dir(row["id"]), reserve=self.resources.effective()["reserve_mib"] * MIB)
         stream = remux(self.http, request, playlist, self.resources.ffmpeg,
-            audio=audio,
+            audio=audio, cache=cache,
             check=lambda: self.check(row["user_id"], row["id"]), progress=lambda **values: self._progress(row["id"], **values), throttle=self.throttle,
             phase=lambda phase: self._set(row["id"], phase=phase), connections=self._connections())
         try:

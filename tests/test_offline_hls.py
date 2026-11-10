@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from tgdrive.offline.hls import _HlsRelay, parse_playlist, remux
+from tgdrive.offline.hls import SegmentCache, _HlsRelay, parse_playlist, remux
 from tgdrive.offline.http import DownloadError, ExpiredMedia, TransientError
 from tgdrive.offline.mp4 import Defragmenter
 from tgdrive.offline.request import DownloadRequest
@@ -169,6 +169,43 @@ class RemuxTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decoded.stderr, decoded.stderr.decode(errors='replace'))
         self.assertGreater(len(body), 1000)
         return http, events
+
+    async def test_segment_cache_resumes_without_redownloading(self):
+        # 分段续传：第一次在第 3 个分片失败中断；第二次已完整读过的分片从本机缓存读取，不再请求来源，成品仍可解码。
+        text = '#EXTM3U\n' + ''.join(f'#EXTINF:3,\n{index}.ts\n' for index in range(4)) + '#EXT-X-ENDLIST\n'
+        request = DownloadRequest('https://media.example/index.m3u8')
+        playlist = parse_playlist(text.encode(), request.url)
+        async def throttle(_):
+            pass
+        async def run(bodies, connections):
+            http = FixtureHttp(bodies)
+            cache = SegmentCache(self.root / f'cache-{connections}')
+            stream = remux(http, request, playlist, FFMPEG, check=lambda: None, progress=lambda **_: None,
+                           throttle=throttle, connections=connections, cache=cache)
+            try:
+                body = b''.join([piece async for piece in stream])
+            finally:
+                await stream.aclose()
+            return http, cache, body
+        for connections in (1, 3):
+            with self.subTest(connections=connections):
+                broken = {f'{index}.ts': self.ts for index in range(4)} | {'2.ts': DownloadError('来源返回 404')}
+                with patch('tgdrive.offline.hls.SEGMENT_RETRY_DELAYS', (0,)):
+                    with self.assertRaises(DownloadError):
+                        await run(broken, connections)
+                http, cache, body = await run({f'{index}.ts': self.ts for index in range(4)}, connections)
+                fetched = {urlsplit(url).path.rsplit('/', 1)[-1] for url, _ in http.calls}
+                self.assertNotIn('0.ts', fetched)
+                self.assertNotIn('1.ts', fetched)
+                self.assertIn('2.ts', fetched)
+                self.assertGreaterEqual(cache.hits, 2)
+                output = self.root / f'resumed-{connections}.mp4'
+                output.write_bytes(body)
+                decoded = subprocess.run([FFMPEG, '-hide_banner', '-loglevel', 'error', '-i', str(output), '-f', 'null', '-'], capture_output=True)
+                self.assertEqual(decoded.returncode, 0, decoded.stderr.decode(errors='replace'))
+        # 地址变化（重新解析）的分片不会命中旧缓存。
+        cache = SegmentCache(self.root / 'cache-1')
+        self.assertIsNone(await cache.get(0, 'https://media.example/other/0.ts'))
 
     async def test_discontinuities_remux_real_ts(self):
         _, events = await self.collect('#EXTM3U\n#EXTINF:3,\n1.ts\n#EXT-X-DISCONTINUITY\n'

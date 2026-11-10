@@ -44,6 +44,18 @@ class FakeClient:
     async def send_chat_action(self, chat_id, action="typing"):
         pass
 
+    async def delete_message(self, chat_id, message_id):
+        self.calls.append(f"deleteMessage:{message_id}")
+
+    async def edit_message_text(self, chat_id, message_id, text, *, html=False, buttons=None):
+        self.sent.append({"chat_id": chat_id, "text": text, "edited": message_id, "buttons": buttons})
+
+    async def send_document(self, chat_id, data, *, filename="blob.bin"):
+        self.sent.append({"chat_id": chat_id, "document": filename, "size": len(data), "text": ""})
+
+    async def answer_callback_query(self, callback_id, text=""):
+        self.calls.append(f"answer:{text}")
+
     async def log_out(self):
         self.calls.append("logOut")
 
@@ -245,6 +257,58 @@ class TelegramBotTests(unittest.TestCase):
         link = call("POST", "/api/user/v1/telegram/link", {})
         self.assertTrue(link["url"].startswith("https://t.me/tessera_bot?start="))
         call("POST", "/api/user/v1/telegram", {"folder": "x"}, expect=400)
+
+    def callback(self, data, chat=555, message_id=9):
+        return {"update_id": 2, "callback_query": {"id": "cb", "data": data,
+                                                   "message": {"message_id": message_id, "chat": {"id": chat, "type": "private"}}}}
+
+    def test_find_sends_files_back_and_shares_links(self):
+        self.configure_and_bind()
+        scope = Scope(self.alice.bucket_id)
+        asyncio.run(self.app.objects.put_object(scope, "合同/租房合同.pdf", b"%PDF-1.4 contract"))
+        asyncio.run(self.app.objects.put_object(Scope(self.alice.bucket_id, private_access=True), ".tgdrive/private/合同-私密.pdf", b"secret"))
+        self.dispatch(self.message("/find 合同"))
+        reply = self.sent[-1]
+        self.assertIn("/合同/租房合同.pdf", reply["text"])
+        self.assertNotIn("私密", reply["text"], "系统区与私密空间不出现在搜索结果里")
+        send, share = reply["buttons"][0][0]["callback_data"], reply["buttons"][0][1]["callback_data"]
+        self.dispatch(self.callback(send))
+        self.assertEqual((self.sent[-1]["document"], self.sent[-1]["size"]), ("租房合同.pdf", len(b"%PDF-1.4 contract")))
+        # 没有设置公开访问地址时不生成链接、也不公开文件。
+        self.dispatch(self.callback(share))
+        self.assertIn("answer:管理员还没有在控制台设置公开访问地址", "\n".join(self.bot.client().calls))
+        self.app.system_settings.update({"public_base_url": "https://drive.example.com"})
+        self.dispatch(self.callback(share))
+        token = self.app.objects.head_object(scope, "合同/租房合同.pdf").public_token
+        self.assertIn(f"https://drive.example.com/s/{token}", self.sent[-1]["text"])
+        # 发回上限来自「下载与资源」；官方 Bot API 时不超过 50 MB。
+        self.app.offline.resources.update({"telegram_send_mib": 1000})
+        self.assertEqual(self.bot._send_limit(), 50 * 1024 * 1024)
+        self.app.offline.resources.update({"telegram_send_mib": 20})
+        self.assertEqual(self.bot._send_limit(), 20 * 1024 * 1024)
+        # 其他聊天拿到按钮数据也不能使用。
+        self.dispatch(self.callback(send, chat=777))
+        self.assertIn("answer:账号未绑定或服务暂不可用", self.bot.client().calls)
+        self.dispatch(self.message("/usage"))
+        self.assertIn("已用空间", self.sent[-1]["text"])
+
+    def test_status_buttons_pause_resume_and_cancel(self):
+        self.configure_and_bind()
+        with self.app.metadata.transaction() as db:
+            db.execute("INSERT INTO offline_tasks(user_id,bucket_id,kind,method,key,source_host,status,request_enc,created_at,updated_at) "
+                       "SELECT ?,?,'http','GET','downloads/a.bin','example.com','stopped',x'00',1,1", (self.alice.id, self.alice.bucket_id))
+        task_id = self.app.metadata.db.execute("SELECT id FROM offline_tasks").fetchone()[0]
+        calls = []
+        async def control(user_id, ident, action):
+            calls.append((user_id, ident, action))
+        self.app.offline.control = control
+        self.dispatch(self.message("/status"))
+        buttons = self.sent[-1]["buttons"]
+        self.assertEqual(buttons[0][0]["callback_data"], f"t:{task_id}:resume")
+        self.dispatch(self.callback(buttons[0][0]["callback_data"]))
+        self.dispatch(self.callback(buttons[0][1]["callback_data"]))
+        self.assertEqual(calls, [(self.alice.id, task_id, "resume"), (self.alice.id, task_id, "delete")])
+        self.assertEqual(self.sent[-1]["edited"], 9, "按钮所在的消息原地刷新")
 
     def test_markdown_conversion(self):
         self.assertEqual(botmod.markdown_html("**粗体** 与 `a<b>` 和 [链接](https://e.com/x)"),

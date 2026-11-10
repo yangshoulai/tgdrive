@@ -64,7 +64,8 @@
 .cell-size, .cell-date { font-variant-numeric: tabular-nums; }
 /* 数值列右对齐，位数对齐便于比较；排序箭头放在标题左侧，标题与数字右缘对齐。 */
 .cell-size, .cell-count { text-align: right; white-space: nowrap; }
-.cell-size > .sort-button, .cell-count > .sort-button { flex-direction: row-reverse; }
+/* row-reverse 时行内弹性盒的基线取自排在前面的排序图标，按钮会被抬高约 1px；改为顶部对齐，与其他列表头同一基线。 */
+.cell-size > .sort-button, .cell-count > .sort-button { flex-direction: row-reverse; vertical-align: top; }
 .cell-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
 /* 预览头部的缓存按钮：完整缓存显示硬盘图标，手动实心、自动空心（同为中性色）；部分缓存显示进度。 */
 .file-cache-button { display: inline-flex; flex: none; gap: 4px; width: auto; min-width: 28px; padding-inline: 8px; font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
@@ -523,3 +524,7 @@ button.extract-tree-toggle:hover { background: var(--surface-sunken); color: var
 .preview-player-video .preview-player-slow button { background: var(--on-dark-16); color: inherit; }
 .preview-player-audio .preview-player-slow { border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); box-shadow: var(--shadow-sm); }
 .preview-player-audio .preview-player-slow button { background: var(--surface-hover); color: var(--ink); }
+/* 进度条悬停预览（preview-media-engine 的 attachSeekPreview）：位于时间提示上方，第一帧画好前不显示空框。 */
+.preview-video-host .art-seek-preview { position: absolute; bottom: calc(100% + 34px); z-index: 30; width: 176px; overflow: hidden; border-radius: var(--radius-md); background: #000; box-shadow: 0 0 0 1px var(--on-dark-16), 0 12px 32px -8px var(--shade-80); opacity: 0; transform: translateX(-50%); transition: opacity var(--duration-fast); pointer-events: none; }
+.preview-video-host .art-seek-preview.is-ready { opacity: 1; }
+.preview-video-host .art-seek-preview canvas { display: block; width: 100%; height: auto; }

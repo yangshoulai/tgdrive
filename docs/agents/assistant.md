@@ -19,3 +19,5 @@
 - 复制、解压与压缩工具（设计 §23 第 8 点）：`propose_copy`／`propose_extract`／`propose_compress`，执行器经 `executor.archives` 复用 `ArchiveService`，私密空间只能复制。回归 `tests/test_assistant_archive_tools.py`。
 
 - 歌词、字幕候选保存到隐藏资源，同目录文件不参与已有元数据判断。操作冻结 metadata_revision，执行前及读取候选期间复核；封面使用文件级版本，不能只查 Blob 默认封面。 详见 [文件级元数据](../media-metadata.md)。
+- 网络搜索（`assistant/search.py` 的 `SearchService`，工具 `web_search` 在 `recall_tools.py`）：管理员在控制台「权限与工具」选择自建 SearXNG（需开启 JSON 输出，可在内网，与模型渠道一样直接请求、不经离线下载的公网限制）、Brave Search API 或 Tavily；API Key 用 KEK 派生子密钥加密存在 settings `assistant.search`，接口只回掩码，审计 `assistant.search` 只记服务类型与是否配置。未配置时 `_user_tools` 去掉 `web_search`，提示词也不介绍它。结果标记为外部内容（`taint`），每轮次数受工具参数 `searches_per_run` 限制。
+- 跨对话偏好记忆（`assistant/memory.py` 的 `MemoryStore`，schema v45 表 `assistant_memories`，正文用留痕密钥加密，账号删除级联、「清除全部助手数据」一并删除）：工具 `remember_preference`（用户明确要求时写入，经 `redact` 拒绝凭据，私密对话中禁止）、`forget_preference`、`list_preferences`；每人最多 50 条、每条 200 字。偏好以「用户让你记住的偏好」段落进入系统提示词（`prompts.system_prompt(memories=…)`），与当前要求冲突时以当前要求为准。用户在「账号设置 → 助手记住的偏好」查看、逐条删除或清空（`/api/user/v1/assistant/memories`）。回归：`tests/test_assistant_recall.py`。

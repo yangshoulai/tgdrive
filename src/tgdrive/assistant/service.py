@@ -32,7 +32,7 @@ from ..authn import AuthenticationError
 from ..errors import NotFoundError, NotReadyError
 from ..objects import PRIVATE_PREFIX, Scope
 from ..offline.request import checked_url
-from . import client_tools, export, http_tools, knowledge, media_tools, prompts, providers, text_tools, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
+from . import client_tools, export, http_tools, knowledge, media_tools, prompts, providers, recall_tools, text_tools, vision, web, web_tools, write_tools  # noqa: F401  导入即注册工具
 from .attachments import PREFIX as ATTACHMENT_PREFIX, AttachmentStore
 from .actions import DANGER_KINDS, KINDS, ActionExecutor, Progress, media_choices, share_options
 from .catalog import CatalogStore
@@ -214,6 +214,9 @@ class ContextFull(Exception):
 class AssistantService:
     # 媒体信息服务（在线获取封面、歌词、字幕），由 HTTP 层注入。
     media = None
+    # 网络搜索与偏好记忆（__init__ 中创建）；未创建时视为未配置。
+    search = None
+    memory = None
 
     def __init__(self, accounts, objects, offline=None, *, user_api=None, settings=None) -> None:
         self.accounts, self.objects, self.offline, self.user_api = accounts, objects, offline, user_api
@@ -221,6 +224,11 @@ class AssistantService:
         self.metadata, self.keystore = accounts.metadata, accounts.keystore
         self.config = AssistantConfig(self.metadata)
         self.trace = TraceStore(self.metadata, self.keystore)
+        # 网络搜索（管理员配置）与跨对话偏好记忆。
+        from .memory import MemoryStore
+        from .search import SearchService
+        self.search = SearchService(self.metadata, self.keystore)
+        self.memory = MemoryStore(self.metadata, self.trace)
         # 私密空间授权（PrivateSpace），由 HTTP 层注入；未注入时助手不能处理私密空间。
         self.private_space = None
         # 执行中的私密操作：操作编号 → 使用的私密授权（锁定时取消、执行期间续期）。
@@ -383,7 +391,11 @@ class AssistantService:
 
     def _user_tools(self, user_id: int):
         level = self.config.policy(user_id)["effective"]["max_level"]
-        return effective_tools(self._tool_settings(), level)
+        tools = effective_tools(self._tool_settings(), level)
+        if "web_search" in tools and not (self.search is not None and self.search.configured()):
+            # 管理员没有配置搜索服务：不提供这个工具，模型不会白白调用。
+            tools = {name: spec for name, spec in tools.items() if name != "web_search"}
+        return tools
 
     def _choose_model(self, requested: object, fallback: int | None, *, private: bool = False) -> int:
         for candidate in (requested, fallback, self.config.default_model):
@@ -494,6 +506,24 @@ class AssistantService:
                 "private_available": private_available, "private_notice": PRIVATE_NOTICE,
                 "private_notice_ack": policy["private_notice_ack_at"] is not None,
                 "private_unlocked": self._session_access(token) is not None}
+
+    # ---------- 偏好记忆（memory.py） ----------
+
+    def list_memories(self, token: str) -> dict[str, object]:
+        _, account = self._session(token)
+        from .memory import MAX_ITEMS
+        return {"items": self.memory.list(account.id), "limit": MAX_ITEMS}
+
+    def delete_memory(self, token: str, csrf: str, ident: int) -> dict[str, object]:
+        _, account = self._session(token, csrf=csrf, mutation=True)
+        if not self.memory.remove(account.id, ident):
+            raise NotFoundError("这条偏好不存在")
+        return self.list_memories(token)
+
+    def clear_memories(self, token: str, csrf: str) -> dict[str, object]:
+        _, account = self._session(token, csrf=csrf, mutation=True)
+        self.memory.clear(account.id)
+        return self.list_memories(token)
 
     def ack_notice(self, token: str, csrf: str, private: bool = False) -> None:
         _, account = self._session(token, csrf=csrf, mutation=True)
@@ -2106,6 +2136,7 @@ class AssistantService:
                                   require_private=lambda: self._private_call(state, spec),
                                   private_state=lambda: self._private_state(state),
                                   media=self.media,
+                                  search=self.search.search if self.search is not None and self.search.configured() else None, memory=self.memory,
                                   **area)
             timeout = max(limits["tool_seconds"], spec.timeout or 0)
             async with asyncio.timeout(timeout) as tool_timer:
@@ -2344,7 +2375,9 @@ class AssistantService:
                                                can_move_private="propose_move_to_private" in tools,
                                                can_plan="update_plan" in tools, can_inspect="inspect_page" in tools,
                                                auto_share=bool(self.config.setting("full_auto_share")),
-                                               auto_purge=bool(self.config.setting("full_auto_purge")))
+                                               auto_purge=bool(self.config.setting("full_auto_purge")),
+                                               can_search="web_search" in tools, can_remember="remember_preference" in tools and not state.private,
+                                               memories=self.memory.list(state.user_id) if self.memory is not None else [])
                 pending = self.trace.pending_actions(state.conversation_id)
                 remaining, private_status = None, ""
                 if self.private_space is not None and self._availability(state.user_id, private=True)[0]:
@@ -2835,6 +2868,8 @@ class AssistantService:
         self.attachments.purge_all()
         self.trace.purge_all()
         self.config.purge_all()
+        if self.memory is not None:
+            self.memory.clear_all()
 
     async def cleanup(self, now: float | None = None) -> dict[str, int]:
         """维护任务：按保留期清理留痕与调用日志；附件先于对话删除，之后再兜底清理残留与超时未发送的附件。"""

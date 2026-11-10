@@ -65,6 +65,9 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     if (event.key === "Escape" && player.fullscreenWeb) { event.preventDefault(); event.stopPropagation(); player.fullscreenWeb = false; }
   };
   document.addEventListener("keydown", exitWebScreen, true);
+  let currentUrl = url;
+  // 进度条悬停预览：时长取播放器当前值，旋转随画面设置。
+  const seekPreview = attachSeekPreview(container, () => currentUrl, () => rotation, () => Number.isFinite(player.video.duration) ? player.video.duration : 0);
   let ready = false, destroyed = false, subtitleUrl: string | null = null, version = 0;
   let saveThumbnail: ((video: HTMLVideoElement, rotation: number) => Promise<void>) | null = null, thumbnailBusy = false, sourceVersion = 0;
   const thumbnailState = () => {
@@ -262,6 +265,7 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
     },
     setSource: (nextUrl: string, _name: string, nextCover?: string, nextSize?: { width: number; height: number }) => {
       sourceVersion++;
+      currentUrl = nextUrl; seekPreview.reset();
       player.pause(); ready = false; notify("loading");
       container.style.removeProperty("--preview-video-ratio"); lastSize = null;
       player.poster = nextCover ?? ""; player.url = nextUrl; player.subtitleOffset = 0;
@@ -321,10 +325,68 @@ export function createVideoPlayer(container: HTMLDivElement, url: string, notify
       return switching;
     },
     destroy: () => {
-      destroyed = true; version++; observer.disconnect(); document.removeEventListener("keydown", exitWebScreen, true);
+      destroyed = true; version++; seekPreview.destroy(); observer.disconnect(); document.removeEventListener("keydown", exitWebScreen, true);
       if (cover) { cover.onload = null; cover.src = ""; }
       player.destroy(); container.style.removeProperty("--preview-video-ratio");
       if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);
     },
+  };
+}
+
+/** 进度条悬停预览：用一个隐藏的第二个 video 定位到悬停时间并截一帧显示在进度条上方。
+ *  只在第一次悬停时创建（preload=metadata，按 Range 读取少量数据，同样经过本机缓存）；
+ *  上一次定位还没完成时只记下最新时间，不堆积请求。触屏设备没有悬停，不启用。 */
+function attachSeekPreview(container: HTMLElement, getUrl: () => string, getRotation: () => number, getDuration: () => number) {
+  const bar = container.querySelector<HTMLElement>(".art-control-progress");
+  const noop = { reset: () => {}, destroy: () => {} };
+  if (!bar || !window.matchMedia?.("(hover: hover) and (pointer: fine)").matches) return noop;
+  const box = document.createElement("div");
+  box.className = "art-seek-preview"; box.hidden = true; box.setAttribute("aria-hidden", "true");
+  const canvas = document.createElement("canvas");
+  box.append(canvas);
+  bar.append(box);
+  let probe: HTMLVideoElement | null = null, pending: number | null = null, busy = false, broken = false;
+  const WIDTH = 176;
+  const draw = () => {
+    if (!probe || !probe.videoWidth) return;
+    const rotation = getRotation(), quarter = rotation % 180 !== 0;
+    const ratio = probe.videoHeight / probe.videoWidth, height = Math.round(WIDTH * (quarter ? 1 / ratio : ratio));
+    canvas.width = WIDTH * 2; canvas.height = Math.min(height, WIDTH * 2) * 2;
+    const g = canvas.getContext("2d");
+    if (!g) return;
+    g.save(); g.translate(canvas.width / 2, canvas.height / 2); g.rotate(rotation * Math.PI / 180);
+    const w = quarter ? canvas.height : canvas.width, h = quarter ? canvas.width : canvas.height;
+    g.drawImage(probe, -w / 2, -h / 2, w, h); g.restore();
+    box.classList.add("is-ready");
+  };
+  const seek = (time: number) => {
+    if (!probe) return;
+    if (busy) { pending = time; return; }
+    busy = true; probe.currentTime = time;
+  };
+  const ensure = () => {
+    if (probe || broken) return;
+    probe = document.createElement("video");
+    probe.muted = true; probe.preload = "metadata"; probe.playsInline = true; probe.src = getUrl();
+    probe.addEventListener("seeked", () => { busy = false; draw(); if (pending !== null) { const next = pending; pending = null; seek(next); } });
+    probe.addEventListener("error", () => { broken = true; box.hidden = true; });
+  };
+  const move = (event: PointerEvent) => {
+    const duration = getDuration();
+    if (!duration || broken) return;
+    ensure();
+    const rect = bar.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    box.hidden = false;
+    const half = WIDTH / 2;
+    box.style.left = `${Math.min(rect.width - half, Math.max(half, ratio * rect.width))}px`;
+    seek(ratio * duration);
+  };
+  const leave = () => { box.hidden = true; pending = null; };
+  bar.addEventListener("pointermove", move);
+  bar.addEventListener("pointerleave", leave);
+  return {
+    reset: () => { leave(); box.classList.remove("is-ready"); broken = false; busy = false; if (probe) { probe.removeAttribute("src"); probe.load(); probe = null; } },
+    destroy: () => { bar.removeEventListener("pointermove", move); bar.removeEventListener("pointerleave", leave); if (probe) { probe.removeAttribute("src"); probe.load(); } box.remove(); },
   };
 }

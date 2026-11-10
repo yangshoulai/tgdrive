@@ -15,6 +15,7 @@ from .blobengine import BlobEngine
 from .blobstore import LocalDiskBlobStore
 from .context import AppContext
 from .keystore import KeyStore
+from .backup_remote import RemoteBackup
 from .maintenance import MaintenanceScheduler, MaintenanceService
 from .metadata import Metadata
 from .metrics import TrafficMetrics
@@ -86,6 +87,8 @@ def create_app(data_dir: str | Path = "./data", *, static_dir: str | Path | None
     metrics = TrafficMetrics()
     maintenance = MaintenanceService(metadata, engine, store, keystore, backup_dir=root / "backups",
                                      audit_retention_days=audit_retention_days)
+    maintenance.scrub.budget_source = lambda: resources.config()["scrub_daily_mib"] * 1024 * 1024
+    maintenance.remote_backup = RemoteBackup(metadata, store.pool)  # 加密备份另发一份到 Telegram 频道（控制台启用）
     maintenance.trash_purger = objects.purge_expired_trash  # 回收站条目保留 30 天后自动永久删除
 
     async def migrate_thumbnails() -> dict[str, int]:

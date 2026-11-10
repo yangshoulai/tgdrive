@@ -346,6 +346,15 @@ class ObjectService:
             "(?=1 AND substr(o.key,1,?)=?)) ORDER BY o.modified_at DESC LIMIT 1",
             (bucket_id, fingerprint, size, len(prefix), prefix, int(private_access), len(PRIVATE_PREFIX), PRIVATE_PREFIX)).fetchone()
 
+    def has_size_candidate(self, scope: Scope, size: int) -> bool:
+        """秒传预检：调用者授权范围内是否有大小相同、已有内容指纹的文件（与 find_by_fingerprint 的范围一致）。"""
+        prefix = scope.prefix
+        return self.metadata.db.execute(
+            "SELECT 1 FROM objects o JOIN blobs b ON b.uuid = o.blob_uuid "
+            "WHERE o.bucket_id = ? AND o.size = ? AND b.fingerprint IS NOT NULL AND b.status = 'complete' "
+            "AND substr(o.key, 1, ?) = ? AND (substr(o.key,1,9)!='.tgdrive/' OR (?=1 AND substr(o.key,1,?)=?)) LIMIT 1",
+            (scope.bucket_id, size, len(prefix), prefix, int(scope.private_access), len(PRIVATE_PREFIX), PRIVATE_PREFIX)).fetchone() is not None
+
     def instant_put(self, scope: Scope, key: str, size: int, fingerprint: str,
                     content_type: str | None = None) -> ObjectInfo | None:
         """秒传：同一存储桶里已有内容指纹相同的对象时，让新路径直接引用它的加密 Blob，不传输任何数据。

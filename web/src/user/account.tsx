@@ -54,6 +54,7 @@ function AccountSettings({ session, onSessionChange, assistant, onOpenConversati
       onOpen={() => setEditing("private")} onClose={() => setEditing(null)} />
     <TelegramSettings />
     <AssistantAttachmentsSummary assistant={assistant} onOpenConversation={onOpenConversation} />
+    {assistant && <AssistantMemories />}
     <p className="account-page-help"><Icon name="info" size={16} /><span>忘记登录密码？请联系管理员重置。<a className="link" href="/docs/account" target="_blank" rel="noreferrer">了解账号与登录方式</a></span></p>
   </>;
 }
@@ -144,6 +145,49 @@ function TelegramFolderDialog({ initial, onClose, onSave }: { initial: string; o
       onClick={() => { setBusy(true); void onSave(folder).finally(() => setBusy(false)); }}>保存</Button></>}>
     <FolderPicker value={folder} onChange={setFolder} onReady={setReady} />
   </Modal>;
+}
+
+/** 文件助手记住的偏好：用户在对话里让助手「记住」的内容，之后每个对话都会参考；可逐条删除或全部清空。 */
+function AssistantMemories() {
+  const id = useId();
+  const [data, setData] = useState<{ items: ai.Memory[]; limit: number } | null>(null);
+  const [error, setError] = useState("");
+  const [clearing, setClearing] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    ai.memories().then(value => { if (alive) setData(value); }).catch(reason => { if (alive) setError(api.errorMessage(reason, "偏好加载失败，请稍后重试")); });
+    return () => { alive = false; };
+  }, []);
+  async function remove(item: ai.Memory) {
+    try { setData(await ai.deleteMemory(item.id)); toast.success("已删除这条偏好"); }
+    catch (reason) { toast.error(api.errorMessage(reason, "删除失败，请稍后重试")); }
+  }
+  async function clear() {
+    setClearing(true);
+    try { setData(await ai.clearMemories()); toast.success("已清空偏好"); }
+    catch (reason) { toast.error(api.errorMessage(reason, "清空失败，请稍后重试")); }
+    finally { setClearing(false); }
+  }
+  return <section className="account-section" aria-labelledby={`${id}-title`}>
+    <header className="account-section-heading"><Icon name="brain" size={20} /><div><h2 id={`${id}-title`}>助手记住的偏好</h2><p>在对话里对文件助手说「记住……」，之后的每个对话都会参考。</p></div></header>
+    <div className="account-section-content">
+      {error ? <Notice tone="danger">{error}</Notice> : !data ? <p className="muted">正在加载…</p> : data.items.length === 0
+        ? <div className="account-setting-summary"><div><strong>还没有记住的偏好</strong><p>例如：「记住，照片按 年-月 建文件夹整理」「以后回复用英文」。私密对话中不会记录偏好。</p></div></div>
+        : <>
+          <ul className="account-attachments account-memories" aria-label="记住的偏好">
+            {data.items.map(item => <li key={item.id}>
+              <Icon name="bookmark" size={15} />
+              <span className="account-attachments-title"><strong title={item.text}>{item.text}</strong><small>记于 {formatDate(item.created_at)}</small></span>
+              <Button size="sm" variant="ghost" onClick={() => void remove(item)} aria-label={`删除偏好：${item.text}`}>删除</Button>
+            </li>)}
+          </ul>
+          <div className="account-attachments-note"><Icon name="info" size={13} />
+            <span>共 {data.items.length} / {data.limit} 条，加密保存，只用于你的对话。</span>
+            <Button size="sm" variant="ghost" loading={clearing} onClick={() => void clear()}>全部清空</Button>
+          </div>
+        </>}
+    </div>
+  </section>;
 }
 
 /** 助手附件：随对话保存、计入已用空间，不提供单独删除（docs/assistant-design.md §22.5）。 */

@@ -88,6 +88,40 @@ class FileMetadataTests(unittest.IsolatedAsyncioTestCase):
         note = await self.put("a.txt", b"hello", "text/plain")
         self.assertNotIn((note.bucket_id, note.key), self.app.objects.file_media_fields([note]))
 
+    async def test_reset_field_restores_file_value(self):
+        info = await self.put("音乐/晴天.mp3")
+        editor = self.app.media.editor
+        opened = await editor.info(self.scope, info.key)
+        job = await editor.start(self.scope, info.key, {"etag": info.etag, "revision": opened["revision"], "fields": {"title": "", "album": "我的专辑"}})
+        await editor.jobs[job["id"]].task
+        opened = await editor.info(self.scope, info.key)
+        self.assertEqual((opened["fields"]["title"], opened["overridden"]), ("", ["album", "title"]))
+        self.assertEqual(opened["auto_fields"]["title"], "晴天")
+        # null 表示去掉覆盖，恢复为文件自带的值；其他覆盖保留。
+        job = await editor.start(self.scope, info.key, {"etag": info.etag, "revision": opened["revision"], "fields": {"title": None}})
+        await editor.jobs[job["id"]].task
+        self.assertEqual(editor.jobs[job["id"]].state, "done", editor.jobs[job["id"]].detail)
+        opened = await editor.info(self.scope, info.key)
+        self.assertEqual((opened["fields"]["title"], opened["fields"]["album"], opened["overridden"]), ("晴天", "我的专辑", ["album"]))
+
+    async def test_over_limit_subtitles_do_not_lock_field_edits(self):
+        from tgdrive.media.records import ASSET_LIMIT
+        info = await self.put("视频/b.mkv", b"\x1a\x45\xdf\xa3" + b"\x00" * 64, "video/x-matroska")
+        await self.app.media.ensure_metadata(self.scope, info.key)
+        row = self.store.row(info.metadata_id)
+        # 旧版本自动提取时不检查数量：模拟已有 ASSET_LIMIT+2 条字幕。
+        for index in range(ASSET_LIMIT + 2):
+            asset = await self.store.stage_text(self.scope, info, "subtitle", f"1\n00:00:01,000 --> 00:00:02,000\n第{index}条\n", source=f"embedded:{index}")
+            with self.app.metadata.transaction() as db:
+                self.store.insert_asset(db, asset)
+        # 自动提取不再超过上限。
+        await self.store.initial_asset(self.scope, info, "subtitle", "1\n00:00:01,000 --> 00:00:02,000\nx\n", source="embedded:99")
+        self.assertEqual(len(self.store.assets(info.metadata_id, "subtitle")), ASSET_LIMIT + 2)
+        editor = self.app.media.editor
+        job = await editor.start(self.scope, info.key, {"etag": info.etag, "revision": row["revision"], "fields": {"title": "新标题"}})
+        await editor.jobs[job["id"]].task
+        self.assertEqual(editor.jobs[job["id"]].state, "done", editor.jobs[job["id"]].detail)
+
     async def test_excluded_embedded_subtitles_stop_falling_back(self):
         info = await self.put("视频/a.mkv", b"\x1a\x45\xdf\xa3" + b"\x00" * 64, "video/x-matroska")
         _, row = self.store.ensure(self.scope, info.key)

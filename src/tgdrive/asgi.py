@@ -313,7 +313,7 @@ class TgDriveASGI(StaticFiles):
                 route = path[len("/api/user/v1/private"):]
                 controls = {"/status", "/setup", "/unlock", "/lock", "/activity", "/settings", "/transfer", "/cache/session", "/cache/keys",
                             "/passkeys", "/passkeys/unlock/options", "/passkeys/unlock/verify"}
-                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/media/size", "/media/asset", "/media/import-files", "/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save",
+                allowed = {"/list", "/search", "/stats", "/folders", "/files", "/files/check", "/files/info", "/files/instant", "/files/instant/probe", "/media/size", "/media/asset", "/media/import-files", "/media/info", "/media/lookup", "/media/fetch", "/media/preview", "/media/save",
                            "/media/lyrics", "/media/subtitle", "/media/cover", "/media/extract", "/media/jobs", "/media/edit", "/media/edit/jobs", "/media/edit/cancel", "/move", "/archive",
                            "/archive/inspect", "/archive/extract", "/archive/jobs", "/archive/browse", "/archive/entry", "/archive/compress",
                            "/copy", "/delete", "/thumbnail", "/thumbnail/status", "/thumbnail/claim", "/thumbnail/release", "/thumbnail/generate", "/thumbnail/cancel", "/thumbnail/progress",
@@ -388,7 +388,7 @@ class TgDriveASGI(StaticFiles):
             if path == "/api/user/v1/content" and method in ("GET", "HEAD"):
                 await self._until_disconnect(receive, self._content(tracked_send, method, token, query, headers, user=file_user, private=private))
                 return
-            if path.startswith("/api/admin/v1/backups/") and path != "/api/admin/v1/backups/settings" and method == "GET":
+            if path.startswith("/api/admin/v1/backups/") and path not in ("/api/admin/v1/backups/settings", "/api/admin/v1/backups/remote") and method == "GET":
                 await self._backup_download(tracked_send, token, path.rsplit("/", 1)[-1])
                 return
             attachment = re.fullmatch(r"/api/user/v1/assistant/attachments(?:/([0-9a-f]{32})/(content|thumbnail))?", path)
@@ -501,18 +501,18 @@ class TgDriveASGI(StaticFiles):
                           "/clients/{}/status": "client.status", "/clients/{}/grants": "client.grant",
                           "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/clients/{}/delete": "client.delete",
                           "/bots": "bot.create", "/bots/{}/status": "bot.status",
-                          "/bots/{}/check": "bot.check", "/telegram-bot": "telegram_bot.update", "/telegram-bot/delete": "telegram_bot.delete",
+                          "/bots/{}/check": "bot.check", "/bots/{}/reclaim": "bot.reclaim", "/telegram-bot": "telegram_bot.update", "/telegram-bot/delete": "telegram_bot.delete",
                           "/settings": "settings.update", "/resources": "resources.update",
                           "/registration": "registration.update", "/media/providers": "media.providers.update", "/registration/test-email": "registration.test_email",
                           "/registration/invites": "invite.create", "/registration/invites/{}/revoke": "invite.revoke",
                           "/maintenance/gc": "maintenance.gc", "/maintenance/scrub": "maintenance.scrub",
                           "/maintenance/cleanup": "maintenance.cleanup", "/maintenance/gc/retry": "maintenance.gc_retry",
                           "/audit/{}/delete": "audit.delete", "/audit/clear": "audit.clear",
-                          "/backups/settings": "backup.settings", "/backups/delete": "backup.delete",
+                          "/backups/settings": "backup.settings", "/backups/remote": "backup.remote", "/backups/delete": "backup.delete",
                           "/backups": "backup.create", "/password": "admin.password", "/passphrase": "system.passphrase",
                           "/users/{}/password": "user.password_reset", "/users/{}/delete": "user.delete",
                           "/assistant/settings": "assistant.settings", "/assistant/limits": "assistant.settings",
-                          "/assistant/tools": "assistant.tools.update", "/assistant/channels": "assistant.channel.create",
+                          "/assistant/tools": "assistant.tools.update", "/assistant/search": "assistant.search", "/assistant/channels": "assistant.channel.create",
                           "/assistant/channels/{}/update": "assistant.channel.update",
                           "/assistant/channels/{}/delete": "assistant.channel.delete",
                           "/assistant/channels/{}/sync": "assistant.channel.sync",
@@ -626,16 +626,23 @@ class TgDriveASGI(StaticFiles):
                       **({"self_hosted": bool(payload["api_url"])} if "api_url" in payload else {})}
             if ok:
                 target = (result or {}).get("username")
+        elif action == "bot.reclaim" and ok:
+            detail = {key: (result or {}).get(key) for key in ("reclaimed", "failed", "rebound_gc", "remaining")}
         elif action == "bot.check" and ok:
             detail = {"status": (result or {}).get("status")}
         elif action in ("audit.delete", "audit.clear") and ok:
             detail = {"deleted": (result or {}).get("deleted")}
         elif action == "backup.settings" and ok:
             detail = {"keep": (result or {}).get("keep")}
+        elif action == "assistant.search" and ok:
+            detail = {"provider": (result or {}).get("provider"), "configured": (result or {}).get("configured")}
+        elif action == "backup.remote" and ok:
+            detail = {"enabled": (result or {}).get("enabled"), "keep": (result or {}).get("keep"),
+                      "dedicated_channel": bool((result or {}).get("channel"))}
         elif action == "backup.delete" and ok:
             target = (result or {}).get("name")
         elif action == "resources.update":
-            detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency", "upload_concurrency", "upload_kib", "bot_interval_ms", "web_part_concurrency", "web_file_concurrency", "thumbnail_concurrency", "download_memory_percent", "video_concurrency", "thumbnail_cache_mib", "download_connections") if key in payload}
+            detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency", "upload_concurrency", "upload_kib", "bot_interval_ms", "web_part_concurrency", "web_file_concurrency", "thumbnail_concurrency", "download_memory_percent", "video_concurrency", "thumbnail_cache_mib", "download_connections", "scrub_daily_mib", "telegram_send_mib") if key in payload}
             if "proxy" in payload:
                 # 代理地址可能包含认证信息，审计只记录是否启用。
                 detail["proxy_enabled"] = bool(payload.get("proxy"))
@@ -1062,6 +1069,10 @@ class TgDriveASGI(StaticFiles):
                 return 201, self.admin.create_client(token, csrf, payload["name"], payload.get("grants", [])), {}
             if method == "POST" and route == "/bots":
                 return 201, self.admin.create_bot(token, csrf, payload["name"], payload["token"], payload["channel_id"]), {}
+            if re.fullmatch(r"/bots/\d+/reclaim", route) and method == "GET":
+                return 200, await self.admin.reclaim_status(token, int(route.split("/")[2])), {}
+            if re.fullmatch(r"/bots/\d+/reclaim", route) and method == "POST":
+                return 200, await self.admin.reclaim_bot(token, csrf, int(route.split("/")[2]), payload.get("limit", 200)), {}
             if route.startswith("/bots/") and route.endswith("/check") and method == "POST":
                 return 200, await self.admin.check_bot(token, csrf, int(route.split("/")[2])), {}
             if route.startswith("/bots/") and route.endswith("/status") and method == "POST":
@@ -1094,6 +1105,10 @@ class TgDriveASGI(StaticFiles):
                 return 200, self.admin.backup_settings(token), {}
             if method == "POST" and route == "/backups/settings":
                 return 200, await self.admin.configure_backups(token, csrf, payload.get("keep")), {}
+            if method == "GET" and route == "/backups/remote":
+                return 200, self.admin.remote_backup_settings(token), {}
+            if method == "POST" and route == "/backups/remote":
+                return 200, await self.admin.configure_remote_backup(token, csrf, payload), {}
             if method == "POST" and route == "/backups/delete":
                 name = payload.get("name")
                 if not isinstance(name, str):
@@ -1354,6 +1369,8 @@ class TgDriveASGI(StaticFiles):
             if method == "POST" and route == "/thumbnail/fetch":
                 data, mime = await user.thumbnail_fetch(token, csrf, payload.get("url"))
                 return 200, data, {"Content-Type": mime, "Cache-Control": "no-store"}
+            if method == "POST" and route == "/files/instant/probe":
+                return 200, user.instant_probe(token, payload["path"], payload["size"]), {}
             if method == "POST" and route == "/files/instant":
                 public = payload.get("public")
                 return 200, user.instant_put(token, csrf, payload["path"], payload["size"], payload["fingerprint"],
@@ -2002,6 +2019,13 @@ class TgDriveASGI(StaticFiles):
         if route == "/notice/ack" and method == "POST":
             service.ack_notice(token, csrf, private=payload.get("private") is True)
             return 204, None, {}
+        if route == "/memories" and method == "GET":
+            return 200, service.list_memories(token), no_store
+        if route == "/memories/clear" and method == "POST":
+            return 200, service.clear_memories(token, csrf), no_store
+        memory = re.fullmatch(r"/memories/(\d{1,12})/delete", route)
+        if memory and method == "POST":
+            return 200, service.delete_memory(token, csrf, int(memory[1])), no_store
         if route == "/conversations" and method == "GET":
             return 200, service.list_conversations(token, cursor=query.get("cursor", [""])[0],
                                                    archived=query.get("archived", ["0"])[0] in ("1", "true")), no_store
@@ -2098,6 +2122,12 @@ class TgDriveASGI(StaticFiles):
                 return 200, service.admin_settings(), {}
             if method == "POST":
                 return 200, service.admin_update_settings(payload), {}
+        if route == "/search":
+            # 网络搜索服务（assistant/search.py）：API Key 加密保存，只返回掩码。
+            if method == "GET":
+                return 200, service.search.describe(), {}
+            if method == "POST":
+                return 200, service.search.configure(payload), {}
         if route == "/limits":
             if method == "GET":
                 return 200, service.admin_limits(), {}

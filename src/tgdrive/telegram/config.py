@@ -154,6 +154,11 @@ class ConfiguredBlobStore(BlobStore):
         self._telegram, self._signature = TelegramBlobStore(BotPool(pool_bots, min_interval=self.bot_interval)), signature
         return self._telegram
 
+    def pool(self):
+        """当前的 Bot 池；未配置 Telegram 或系统锁定时为 None。"""
+        store = self._build()
+        return None if store is None else store.pool
+
     @staticmethod
     def _telegram_bot_id(ref: str) -> str | None:
         try:

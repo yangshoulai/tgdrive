@@ -135,6 +135,14 @@ export type UsageReport = {
 export const adminUsage = (days: number, signal?: AbortSignal) => get<UsageReport>(`${ADMIN}/usage${query({ days })}`, signal);
 export const adminSettings = () => get<AssistantSettings>(`${ADMIN}/settings`);
 export const updateAdminSettings = (values: Partial<Omit<AssistantSettings, "bounds" | "notice_default" | "notice">> & { notice?: string | null }) => post<AssistantSettings>(`${ADMIN}/settings`, values);
+export type SearchSettings = { provider: string; url: string; api_key: string | null; configured: boolean;
+  providers: { value: string; label: string; needs_url: boolean; needs_key: boolean }[] };
+export const adminSearch = () => get<SearchSettings>(`${ADMIN}/search`);
+export const updateAdminSearch = (values: Record<string, string>) => post<SearchSettings>(`${ADMIN}/search`, values);
+export type Memory = { id: number; text: string; created_at: number };
+export const memories = () => get<{ items: Memory[]; limit: number }>(`${USER}/memories`);
+export const deleteMemory = (id: number) => post<{ items: Memory[]; limit: number }>(`${USER}/memories/${id}/delete`, {});
+export const clearMemories = () => post<{ items: Memory[]; limit: number }>(`${USER}/memories/clear`, {});
 export const adminLimits = () => get<AssistantLimits>(`${ADMIN}/limits`);
 export const updateAdminLimits = (values: Record<string, number>) => post<AssistantLimits>(`${ADMIN}/limits`, values);
 export const adminTools = () => get<AdminTool[]>(`${ADMIN}/tools`);

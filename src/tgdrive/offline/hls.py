@@ -22,6 +22,56 @@ SEGMENT_RETRY_DELAYS = (2, 5, 15, 30)
 from .request import DownloadRequest, checked_url
 
 
+class SegmentCache:
+    """M3U8 分段续传：把已完整读取的源分片按「序号-地址哈希」存到本机临时目录（offline-cache/hls-<任务>/）。
+
+    封装器状态无法从中间恢复，任务中断后会重新封装、重新上传；有缓存的分片直接从本地读给 FFmpeg，不再从来源下载，
+    长视频不必整段重新下载。重新解析后地址变化的分片不会命中。磁盘剩余低于 reserve 时不再写入（只影响续传）。
+    目录由 OfflineDownloads 在任务完成、失败或删除时清理。"""
+
+    def __init__(self, directory, *, reserve: int = 0) -> None:
+        from pathlib import Path
+        self.directory, self.reserve = Path(directory), reserve
+        self.hits = 0
+
+    def _path(self, index: int, url: str):
+        import hashlib
+        return self.directory / f"{index:06d}-{hashlib.sha1(url.encode()).hexdigest()[:16]}.ts"
+
+    async def get(self, index: int, url: str) -> bytes | None:
+        path = self._path(index, url)
+        def read():
+            try:
+                return path.read_bytes()
+            except OSError:
+                return None
+        data = await asyncio.to_thread(read)
+        if data is not None:
+            self.hits += 1
+        return data
+
+    def room(self, size: int) -> bool:
+        import shutil
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            return shutil.disk_usage(self.directory).free - size > self.reserve
+        except OSError:
+            return False
+
+    async def put(self, index: int, url: str, data: bytes) -> None:
+        if not self.room(len(data)):
+            return
+        path = self._path(index, url)
+        temp = path.with_suffix(".part")
+        def write():
+            try:
+                temp.write_bytes(data)
+                os.replace(temp, path)
+            except OSError:
+                temp.unlink(missing_ok=True)
+        await asyncio.to_thread(write)
+
+
 @dataclass(frozen=True)
 class Key:
     url: str
@@ -254,7 +304,7 @@ async def _segment_once(client, request, url, url_check, check, throttle):
 
 
 async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
-                executable: str, *, check, progress, throttle, url_check=None, connections=1):
+                executable: str, *, check, progress, throttle, url_check=None, connections=1, cache: SegmentCache | None = None):
     """FFmpeg 只读取本地管道；不把用户 URL、命令或请求头交给它。
 
     delay_moov 不能省：TS 里的 AAC 带 ADTS 头，解码配置要等 aac_adtstoasc 处理第一个音频包才生成；
@@ -276,9 +326,21 @@ async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist
         async with asyncio.timeout(120):
             await process.stdin.drain()
 
+    async def write_cached(data):
+        if len(data) < 377 or data[0] != 0x47 or data[188] != 0x47 or data[376] != 0x47:
+            raise DownloadError("视频分片不是支持的 MPEG-TS 格式")
+        for start in range(0, len(data), 65536):
+            await write(data[start:start + 65536])
+        progress(bytes_in=len(data))
+
     async def stream_one(index, url, duration):
+        # 已缓存（上次中断前完整读过）的分片直接从本地读。
+        if cache is not None and (data := await cache.get(index, url)) is not None:
+            await write_cached(data)
+            return
         # 中途断开时重新请求同一分片，跳过已经写进 FFmpeg 的部分接着写。
-        state = {"sent": 0, "size": None, "validated": False}
+        # 只有一次读完整的分片才写缓存：重试时开头部分已经丢弃，拼不出完整内容。
+        state = {"sent": 0, "size": None, "validated": False, "keep": [] if cache is not None else None}
 
         async def attempt():
             async with client.open(request, url=url, method="GET", identity=True, url_check=url_check,
@@ -290,9 +352,15 @@ async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist
                 if state["sent"] and response.size != state["size"]:
                     raise DownloadError("视频分片在重新读取时发生了变化，可以重新下载")
                 state["size"], state["skip"], prefix = response.size, state["sent"], b""
+                if state["sent"]:
+                    state["keep"] = None
                 async for piece in response.stream():
                     check()
                     await throttle(len(piece))
+                    if state["keep"] is not None:
+                        state["keep"].append(piece)
+                        if sum(map(len, state["keep"])) > SEGMENT_BUFFER * 4:
+                            state["keep"] = None  # 特别大的分片不缓存，避免占用过多内存
                     if not (piece := _skip(piece, state)):
                         continue
                     # 强制 TS 输入，拒绝 fMP4 或把网页误当成视频；不保存整个分片。
@@ -310,13 +378,24 @@ async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist
                     raise DownloadError("视频分片不完整")
 
         await _retrying(attempt, check)
+        if state["keep"] is not None and state["size"] is not None:
+            data = b"".join(state["keep"])
+            if len(data) == state["size"]:
+                await cache.put(index, url, data)
 
     async def feed():
         try:
             segments = playlist.segments
             if connections > 1:
                 # 多连接：后面的分片提前并行读进内存，按顺序交给 FFmpeg。
-                fetch = lambda index: _segment_bytes(client, request, segments[index][0], url_check, check, throttle)
+                async def fetch(index):
+                    url = segments[index][0]
+                    if cache is not None and (data := await cache.get(index, url)) is not None:
+                        return data
+                    data = await _segment_bytes(client, request, url, url_check, check, throttle)
+                    if cache is not None and data is not None:
+                        await cache.put(index, url, data)
+                    return data
                 async with aclosing(ordered(range(len(segments)), fetch, connections)) as results:
                     index = 0
                     async for data in results:
@@ -325,11 +404,7 @@ async def _pipe_remux(client: SafeHttpClient, request: DownloadRequest, playlist
                         if data is None:
                             await stream_one(index, url, duration)
                         else:
-                            if len(data) < 377 or data[0] != 0x47 or data[188] != 0x47 or data[376] != 0x47:
-                                raise DownloadError("视频分片不是支持的 MPEG-TS 格式")
-                            for start in range(0, len(data), 65536):
-                                await write(data[start:start + 65536])
-                            progress(bytes_in=len(data))
+                            await write_cached(data)
                         progress(segment=index + 1, seconds=duration)
                         index += 1
             else:
@@ -633,13 +708,13 @@ class _HlsRelay:
 
 async def remux(client: SafeHttpClient, request: DownloadRequest, playlist: Playlist,
                 executable: str, *, check, progress, throttle, audio=None,
-                media_type="video", url_check=None, phase=None, connections=1):
+                media_type="video", url_check=None, phase=None, connections=1, cache: SegmentCache | None = None):
     """连续 TS 走管道；复杂 HLS 只向 FFmpeg 提供重写后的回环地址，按需读取、不缓存输入。"""
     special = audio is not None or media_type == "audio" or any(
         item.init or item.asset.key or item.asset.byte_range or item.discontinuity for item in playlist.items)
     if not special:
         stream = _pipe_remux(client, request, playlist, executable,
-                             check=check, progress=progress, throttle=throttle, url_check=url_check, connections=connections)
+                             check=check, progress=progress, throttle=throttle, url_check=url_check, connections=connections, cache=cache)
         try:
             async for piece in stream:
                 yield piece

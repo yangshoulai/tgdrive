@@ -102,6 +102,10 @@ class ToolContext:
     plan: Plan | None = None
     # 媒体信息服务（封面、歌词、字幕的提供者），由 HTTP 层注入。
     media: object | None = None
+    # 网络搜索（管理员配置的搜索服务）：(query, count, language) -> 结果列表；未配置时为 None。
+    search: Callable[[str, int, str], Awaitable[list]] | None = None
+    # 跨对话偏好记忆（memory.MemoryStore）
+    memory: object | None = None
 
     @property
     def db(self):
@@ -369,6 +373,10 @@ PRIVATE: dict[str, tuple[str, str | None]] = {
     "collect_links": ("limited", "只按筛选条件翻页，不离开起始网站"),
     "get_collection": ("limited", "只读取本对话的结果集"),
     "http_request": ("allow", "与普通对话相同，支持公共接口、认证、查询参数与正文"),
+    "web_search": ("allow", "查询词发送给管理员配置的搜索服务"),
+    "remember_preference": ("never", "私密对话的内容不写入普通对话也能看到的偏好"),
+    "forget_preference": ("allow", "删除一条偏好"),
+    "list_preferences": ("allow", "读取用户让助手记住的偏好"),
     "propose_save_attachment": ("never", "附件只能另存为普通文件"),
     "propose_media_assets": ("allow", "查询条件（文件名与标签）会发给已启用的媒体信息提供者"),
     "propose_write_text": ("allow", "只新建或修改私密空间内的文本文件"),

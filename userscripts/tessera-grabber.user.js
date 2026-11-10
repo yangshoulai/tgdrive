@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Tessera 资源抓取
 // @namespace    https://github.com/yangshoulai/tgdrive
-// @version      0.24.0
+// @version      0.25.0
 // @description  从网盘、X、YouTube 和其他网页获取文件，发送到 Tessera 离线下载，或在浏览器下载后上传
 // @author       yangshoulai
 // @license      AGPL-3.0-or-later
 // @icon         data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%3Crect%20width%3D%2732%27%20height%3D%2732%27%20rx%3D%278%27%20fill%3D%27%230b0c13%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%275%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.6%27%2F%3E%3Crect%20x%3D%2717%27%20y%3D%2717%27%20width%3D%2710%27%20height%3D%2710%27%20rx%3D%272.4%27%20fill%3D%27%23fff%27%20fill-opacity%3D%27.32%27%2F%3E%3Cpolygon%20points%3D%2718.2%2C6.2%2025.8%2C6.2%2025.8%2C13.8%27%20fill%3D%27%23f0a22e%27%20stroke%3D%27%23f0a22e%27%20stroke-width%3D%272.4%27%20stroke-linejoin%3D%27round%27%2F%3E%3Cpath%20d%3D%27M25.1%206.9%2022.2%209.8%27%20stroke%3D%27%23c27a10%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E
+// @updateURL    https://raw.githubusercontent.com/yangshoulai/tgdrive/main/userscripts/tessera-grabber.user.js
+// @downloadURL  https://raw.githubusercontent.com/yangshoulai/tgdrive/main/userscripts/tessera-grabber.user.js
 // @match        *://*/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -825,11 +827,19 @@
   const BATCH_DEFAULT = 100;
   const BATCH_MAX = 500;
   const DEFAULTS = { server: "", key: "", destination: "", destinationPrivate: false, cookies: true, fab: true, view: "list", siteMode: "exclude", excludeSites: [], includeSites: [],
-    cloudBatch: BATCH_DEFAULT, hideSmall: true };
+    cloudBatch: BATCH_DEFAULT, hideSmall: true, theme: "system" };
   /** 宽或高小于这个像素的图片多是图标、头像与表情：默认隐藏，筛选行里一键显示。 */
   const SMALL_IMAGE = 200;
   const settings = () => ({ ...DEFAULTS, ...gm.get("settings", {}) });
   const saveSettings = value => gm.set("settings", { ...settings(), ...value });
+  /** 外观：system 跟随系统；light／dark 固定。脚本读不到 Tessera 站点的主题（不同源），与网页不一致时在这里改。 */
+  const THEMES = [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]];
+  function applyTheme() {
+    if (!root) return;
+    const theme = settings().theme;
+    if (theme === "light" || theme === "dark") root.dataset.theme = theme;
+    else delete root.dataset.theme;
+  }
 
   // ---------- 已发送记录 ----------
 
@@ -946,10 +956,18 @@
       networkObserver.observe({ type: "resource", buffered: true });
     } catch { networkObserver = null; /* 浏览器不支持资源计时 */ }
     // Safari 扩展的内容脚本环境里观察器可能收不到页面资源：同时定时读取资源计时列表补齐（重复地址由 remember 去重）。
-    if (!resourcePoll) resourcePoll = setInterval(pollResources, 2000);
+    // 面板关闭或标签页在后台时降频到每 10 秒：脚本在所有网站运行，常驻的 2 秒轮询会持续占用页面主线程。
+    if (!resourcePoll) resourcePoll = setInterval(() => { if (idleTick("resources")) pollResources(); }, 2000);
     pollResources();
   }
   let resourcePoll = null, resourceIndex = 0;
+  const idleCounters = {};
+  /** 定时任务是否在这一拍执行：面板打开且页面可见时每拍执行，否则每 5 拍执行一次。 */
+  function idleTick(name) {
+    if (panel && !document.hidden) { idleCounters[name] = 0; return true; }
+    idleCounters[name] = (idleCounters[name] || 0) + 1;
+    return idleCounters[name] % 5 === 0;
+  }
   function pollResources() {
     const timeline = page.performance || window.performance;
     let entries;
@@ -1048,7 +1066,7 @@
   function watchFrames() {
     if (frameTimer) return;
     window.addEventListener("message", onFrameItems);
-    frameTimer = setInterval(() => postFrames({ type: "frame-scan" }), 2000);
+    frameTimer = setInterval(() => { if (idleTick("frames")) postFrames({ type: "frame-scan" }); }, 2000);
     postFrames({ type: "frame-scan" });
   }
   function unwatchFrames() {
@@ -2613,7 +2631,7 @@
       color: var(--fg); -webkit-font-smoothing: antialiased;
     }
     @media (prefers-color-scheme: dark) {
-      .root {
+      .root:not([data-theme=light]) {
         --bg: #16171f; --fg: #f2f3f7; --muted: #9a9cab; --faint: #6c6e7d; --line: rgba(255, 255, 255, .08); --line-strong: rgba(255, 255, 255, .16);
         --soft: rgba(255, 255, 255, .06); --hover: rgba(255, 255, 255, .05);
         --accent: #8b9cff; --accent-hover: #a3b1ff; --accent-soft: rgba(139, 156, 255, .14); --danger: #ff6b70; --success: #3ddc84;
@@ -2623,6 +2641,17 @@
         --glow: 0 1px 2px rgba(0, 0, 0, .4);
         --logo-ring: rgba(255, 255, 255, .16);
       }
+    }
+    /* 设置里选了「深色」时不看系统外观；选「浅色」时上面的媒体查询不生效。 */
+    .root[data-theme=dark] {
+      --bg: #16171f; --fg: #f2f3f7; --muted: #9a9cab; --faint: #6c6e7d; --line: rgba(255, 255, 255, .08); --line-strong: rgba(255, 255, 255, .16);
+      --soft: rgba(255, 255, 255, .06); --hover: rgba(255, 255, 255, .05);
+      --accent: #8b9cff; --accent-hover: #a3b1ff; --accent-soft: rgba(139, 156, 255, .14); --danger: #ff6b70; --success: #3ddc84;
+      --primary: #ededf0; --primary-hover: #ffffff; --on-primary: #0e0e11;
+      --glass: rgba(22, 23, 32, .9); --glass-line: rgba(255, 255, 255, .08);
+      --shadow: 0 0 0 1px rgba(255, 255, 255, .06), 0 2px 6px rgba(0, 0, 0, .3), 0 28px 70px -12px rgba(0, 0, 0, .7);
+      --glow: 0 1px 2px rgba(0, 0, 0, .4);
+      --logo-ring: rgba(255, 255, 255, .16);
     }
     svg { display: block; flex: none; }
     .logo-bg { fill: var(--logo-bg); stroke: var(--logo-ring); } .logo-tile { fill: var(--logo-tile); }
@@ -2858,6 +2887,7 @@
     .new-folder input { flex: 1; min-width: 0; }
     .private-note { display: grid; gap: 10px; padding: 14px; border-radius: 10px; background: var(--soft); color: var(--muted); font-size: 12px; line-height: 1.6; }
     .private-note strong { color: var(--fg); font-size: 13px; }
+    .segmented.is-three { grid-template-columns: 1fr 1fr 1fr; }
     .segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 2px; border-radius: 9px; background: var(--soft); }
     .segmented button { height: 30px; border-radius: 7px; font-size: 12px; color: var(--muted); }
     .segmented button[aria-checked=true] { background: var(--bg); color: var(--fg); font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
@@ -2976,7 +3006,8 @@
     .list.grid .item:hover .item-actions, .list.grid .item:focus-within .item-actions { opacity: 1; }
     .list.grid .item-actions .icon-btn { width: 28px; height: 28px; border-radius: 50%; background: rgba(15, 16, 24, .62); color: #fff;
       -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
-    .list.grid .item-actions .icon-btn.accent { background: var(--grad); }
+    /* 触屏上操作按钮常驻显示：每张卡片都铺实心强调色会很重，只在按下／悬停时强调。 */
+    .list.grid .item-actions .icon-btn.accent:hover:not(:disabled), .list.grid .item-actions .icon-btn.accent:active { background: var(--grad); }
     @media (hover: none) { .list.grid .item-actions, .list.grid .check { opacity: 1; } }
     @media (max-width: 560px) { .list.grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
@@ -3204,6 +3235,7 @@
     host.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483646;";
     shadow = host.attachShadow({ mode: "closed" });
     root = h("div", { className: "root" });
+    applyTheme();
     shadow.append(h("style", {}, STYLE), root);
     badge = h("span", { className: "badge", hidden: true });
     fab = h("button", { type: "button", className: "fab", title: "Tessera 资源抓取（可拖动）", "aria-label": "Tessera 资源抓取" }, logo(26), badge);
@@ -4953,6 +4985,12 @@
       modeButtons[value] = h("button", { type: "button", role: "radio", onclick: () => { lists[mode] = parseSites(); mode = value; showMode(); } }, label);
     }
     showMode();
+    let theme = THEMES.some(([value]) => value === current.theme) ? current.theme : "system";
+    const themeButtons = THEMES.map(([value, label]) => {
+      const button = h("button", { type: "button", role: "radio", "aria-checked": String(value === theme) }, label);
+      button.addEventListener("click", () => { theme = value; themeButtons.forEach((item, index) => item.setAttribute("aria-checked", String(THEMES[index][0] === theme))); });
+      return button;
+    });
     const status = h("div", { className: "status", hidden: true });
     const say = (text, tone = "") => {
       status.hidden = false; status.className = `status ${tone}`; status.textContent = text;
@@ -4963,7 +5001,7 @@
       return { server: server.value.trim().replace(/\/+$/, ""), key: key.value.trim(),
         destination: dest.path, destinationPrivate: dest.private, cookies: cookies.checked, fab: showFab.checked,
         cloudBatch: cloudBatch.value.trim() === "" ? NaN : Number(cloudBatch.value),
-        siteMode: mode, excludeSites: lists.exclude, includeSites: lists.include };
+        siteMode: mode, excludeSites: lists.exclude, includeSites: lists.include, theme };
     };
     const validate = value => {
       const invalid = [...value.excludeSites, ...value.includeSites].find(rule => !normalizeSite(rule));
@@ -4999,6 +5037,7 @@
       const clean = list => [...new Set(list.map(normalizeSite))];
       saveSettings({ ...value, excludeSites: clean(value.excludeSites), includeSites: clean(value.includeSites) });
       applySiteState();
+      applyTheme();
       refreshFab();
       toast("设置已保存");
       back ? back() : close();
@@ -5013,7 +5052,10 @@
       h("div", { className: "divider" }),
       h("div", { className: "group" },
         toggleRow(cookies, "附带登录 Cookie", "下载需要登录才能看的内容时使用"),
-        toggleRow(showFab, "显示悬浮按钮", "可拖动到屏幕左右两侧，也可以只用 Tampermonkey 菜单打开")),
+        toggleRow(showFab, "显示悬浮按钮", "可拖动到屏幕左右两侧，也可以只用 Tampermonkey 菜单打开"),
+        h("div", { className: "field" }, h("span", { className: "label" }, "外观"),
+          h("div", { className: "segmented is-three", role: "radiogroup", "aria-label": "外观" }, themeButtons),
+          h("span", { className: "hint" }, "脚本无法读取 Tessera 网页里的主题设置；两边明暗不一致时，在这里选成与网页相同。"))),
       h("div", { className: "divider" }),
       h("div", { className: "group" },
         h("label", { className: "field" }, h("span", { className: "label" }, "每批文件数"), cloudBatch,
@@ -5106,7 +5148,7 @@
     const navigation = page.navigation || window.navigation;
     try { navigation?.addEventListener("navigatesuccess", () => checkNavigation()); } catch { /* 不支持 Navigation API */ }
     window.addEventListener("popstate", () => checkNavigation());
-    navTimer = setInterval(() => checkNavigation(), 1000);
+    navTimer = setInterval(() => { if (!document.hidden) checkNavigation(); }, 1000);
   }
 
   // ---------- 启动 ----------

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { SITE } from "../brand";
 import * as api from "../api";
 
@@ -27,6 +27,7 @@ export function Bots() {
   const [creating, setCreating] = useState(false);
   const [disabling, setDisabling] = useState<api.BotConfig | null>(null);
   const [checking, setChecking] = useState<number | null>(null);
+  const [reclaiming, setReclaiming] = useState<api.BotConfig | null>(null);
   const [error, setError] = useState("");
   useDocumentTitle(`存储通道 · ${SITE.admin}`);
   const load = useCallback(() => { setError(""); void api.adminBots().then(setBots).catch(reason => setError(api.errorMessage(reason, "存储通道加载失败，请稍后重试"))); }, []);
@@ -84,6 +85,7 @@ export function Bots() {
                     bot.status === "active"
                       ? { label: "停用通道", icon: "lock", danger: true, onSelect: () => setDisabling(bot) }
                       : { label: "启用通道", icon: "unlock", onSelect: () => void setStatus(bot, "active") },
+                    { label: "转交分片给其他 Bot…", icon: "refresh", disabled: !bot.chunk_count, onSelect: () => setReclaiming(bot) },
                   ]} />
                 </span>
               </div>
@@ -98,13 +100,55 @@ export function Bots() {
           <li>Bot token 加密保存，页面和接口都不会再显示明文。</li>
           <li>私有频道中只保留存储用的 Bot，并关闭不需要的管理员权限。</li>
           <li>停用通道只影响之后上传的文件；已经保存在这个通道里的文件仍可正常读取。</li>
+          <li>Bot 被封禁或 token 作废时，它上传的分片仍在频道里，但只有它自己能读取。可在操作菜单中选择「转交分片给其他 Bot」，由另一个已启用、且是原频道管理员的 Bot 转发并接管这些分片。</li>
         </ul>
       </div></details>
       <InteractionBotPanel />
       {creating && <CreateBotDialog onClose={() => setCreating(false)} onCreated={bot => { setCreating(false); void check(bot, true); }} />}
+      {reclaiming && <ReclaimDialog bot={reclaiming} onClose={() => { setReclaiming(null); load(); }} />}
       {disabling && <ConfirmDialog title={`停用 ${disabling.name}？`} description="新上传的文件不会再保存到这个通道，已保存的文件仍可正常读取。" confirmLabel="停用通道" onClose={() => setDisabling(null)}
         onConfirm={async () => { if (await setStatus(disabling, "disabled")) setDisabling(null); }} />}
     </>
+  );
+}
+
+function ReclaimDialog({ bot, onClose }: { bot: api.BotConfig; onClose: () => void }) {
+  const [pending, setPending] = useState<{ chunks: number; gc: number } | null>(null);
+  const [running, setRunning] = useState(false);
+  const [done, setDone] = useState({ reclaimed: 0, failed: 0 });
+  const [errors, setErrors] = useState<Record<string, number>>({});
+  const [error, setError] = useState("");
+  const stop = useRef(false);
+  useEffect(() => { void api.reclaimStatus(bot.id).then(setPending).catch(reason => setError(api.errorMessage(reason, "读取待转交的分片失败"))); }, [bot.id]);
+  async function start() {
+    setRunning(true); setError(""); stop.current = false;
+    let total = { reclaimed: 0, failed: 0 }; const reasons: Record<string, number> = {};
+    try {
+      while (!stop.current) {
+        const result = await api.reclaimBot(bot.id);
+        total = { reclaimed: total.reclaimed + result.reclaimed, failed: total.failed + result.failed };
+        for (const item of result.errors) reasons[item.reason] = (reasons[item.reason] ?? 0) + item.count;
+        setDone(total); setErrors({ ...reasons }); setPending({ chunks: result.remaining, gc: 0 });
+        // 本批没有任何进展（全部失败）时停下，避免对同一批反复请求。
+        if (!result.remaining || !result.reclaimed) break;
+      }
+    } catch (reason) { setError(api.errorMessage(reason, "转交失败，请稍后重试")); }
+    finally { setRunning(false); }
+  }
+  return (
+    <Modal title={`转交 ${bot.name} 的分片`} size="sm" onClose={() => { stop.current = true; onClose(); }} dismissible={!running}
+      description="由其他已启用的 Bot 把这些分片消息转发到自己的存储频道并接管读取；原消息之后由新 Bot 删除。适用于 Bot 被封禁或 token 作废的情况。"
+      footer={<><Button disabled={running} onClick={onClose}>关闭</Button>
+        {running ? <Button onClick={() => { stop.current = true; }}>暂停</Button>
+          : <Button variant="primary" disabled={!pending?.chunks} onClick={() => void start()}>{done.reclaimed || done.failed ? "继续转交" : "开始转交"}</Button>}</>}>
+      <div className="form">
+        {pending === null && !error ? <SkeletonRows rows={1} /> : pending && <p>{pending.chunks ? `还有 ${pending.chunks.toLocaleString("zh-CN")} 个分片属于这个 Bot。` : "这个 Bot 已没有需要转交的分片。"}</p>}
+        {(done.reclaimed > 0 || done.failed > 0) && <p className="muted">已转交 {done.reclaimed.toLocaleString("zh-CN")} 个{done.failed ? `，失败 ${done.failed.toLocaleString("zh-CN")} 个` : ""}。</p>}
+        {Object.entries(errors).map(([reason, count]) => <Notice key={reason} tone="warning">{count} 个：{reason}</Notice>)}
+        {error && <Notice tone="danger">{error}</Notice>}
+        <Notice tone="info">接管的 Bot 必须是原频道的管理员。每个分片需要一次转发，速度受 Bot 发送间隔限制。</Notice>
+      </div>
+    </Modal>
   );
 }
 

@@ -97,6 +97,15 @@ class InstantUploadTests(unittest.IsolatedAsyncioTestCase):
         narrow = Scope(self.scope.bucket_id, prefix="public/")
         self.assertIsNone(self.service.instant_put(narrow, "public/copy.bin", len(data), reference(data)))
 
+    async def test_size_probe_matches_fingerprint_scope(self):
+        # 秒传预检：只在同一存储桶、授权前缀内按大小判断；没有同样大小的文件时前端可以跳过计算指纹。
+        data = os.urandom(BLOCK * 2)
+        await self.service.put_object(self.scope, "private/a.bin", data, len(data))
+        self.assertTrue(self.service.has_size_candidate(self.scope, len(data)))
+        self.assertFalse(self.service.has_size_candidate(self.scope, len(data) + 1))
+        self.assertFalse(self.service.has_size_candidate(self.other, len(data)), "不透露其他存储桶的文件")
+        self.assertFalse(self.service.has_size_candidate(Scope(self.scope.bucket_id, prefix="public/"), len(data)))
+
     async def test_trash_internal_prefix_is_ignored(self):
         data = os.urandom(BLOCK * 2)
         await self.service.put_object(self.scope, "a.bin", data, len(data))

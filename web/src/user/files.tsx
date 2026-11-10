@@ -835,7 +835,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
                         {/* 卡片本身只响应鼠标；文件名按钮是键盘与读屏用户的打开入口。 */}
                         <button type="button" className="grid-name name-button" title={baseName(entry.key)}
                           onClick={event => { event.stopPropagation(); openPreview(entry.file); }}>
-                          <span className="grid-name-text">{baseName(entry.key)}</span>
+                          <GridName name={baseName(entry.key)} />
                         </button>
                         <span className="grid-sub"><span className="grid-size">{formatBytes(entry.file.size)}</span>{" · "}<span className="grid-kind">{formatDate(entry.file.modified_at)}</span></span>
                         <span className="grid-menu" onClick={event => event.stopPropagation()}><Menu label={`${baseName(entry.key)} 的更多操作`} items={fileMenu(entry.file)} /></span>
@@ -853,7 +853,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
 
       <footer className="list-footer">
         <span className="list-footer-summary">{loading ? "正在加载" : [entries.some(item => item.kind === "folder") && `${entries.filter(item => item.kind === "folder").length} 个文件夹`, entries.some(item => item.kind === "file") && `${entries.filter(item => item.kind === "file").length} 个文件`, entries.some(item => item.kind === "file") && formatBytes(entries.reduce((sum, item) => sum + (item.kind === "file" ? item.file.size : 0), 0))].filter(Boolean).join(" · ") || (kind || entryFilter !== "all" || filter === "public" ? "没有符合条件的项目" : "空文件夹")}
-          {!loading && !query && <button type="button" className="link-button" onClick={() => setStatsFor({ prefix, title: name })}><Icon name="chart" size={14} /><span>目录统计</span></button>}</span>
+          {!loading && !query && <button type="button" className="link-button footer-stats" onClick={() => setStatsFor({ prefix, title: name })}><Icon name="chart" size={14} /><span>目录统计</span></button>}</span>
         <span className="list-footer-end">
           {pagination.loadingMore ? <span role="status">正在读取其余项目…</span>
             : pagination.truncated && <span role="status">仅显示前 {SEARCH_PAGES * 200} 个结果，请细化关键词</span>}
@@ -979,4 +979,15 @@ function NameDialog({ title, label, confirm, initial = "", location, onClose, on
       </form>
     </Modal>
   );
+}
+
+/** 网格文件名：拆成主体、主体末尾与扩展名。桌面按普通文本两行截断；手机单行显示，在中间省略，保留主体末尾几位与扩展名
+ *  （如 IMG_20…6000.png），同一批相似文件仍能区分，也不会在扩展名中间断行。 */
+function GridName({ name }: { name: string }) {
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 && name.length - dot <= 8 ? name.slice(dot) : "";
+  const stem = ext ? name.slice(0, dot) : name;
+  const tail = [...stem].length > 8 ? [...stem].slice(-4).join("") : "";
+  const head = tail ? stem.slice(0, stem.length - tail.length) : stem;
+  return <span className="grid-name-text"><span className="grid-name-stem">{head}</span>{(tail || ext) && <span className="grid-name-ext">{tail}{ext}</span>}</span>;
 }

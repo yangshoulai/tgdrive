@@ -6,7 +6,8 @@ import { readPreviewText } from "./preview-data";
 import { loadMediaEngine } from "./preview-runtime";
 import { MODE_ICONS, PLAYBACK_MODES, type PreviewNav } from "./preview-playlist";
 import { useMediaSession } from "./media-session";
-import { Button, Icon, Menu, formatBytes, shortcutAria, shortcutLabel, type IconName } from "./ui";
+import { clockLabel, readResume, resumeEligible, writeResume } from "./media-resume";
+import { Button, Icon, Menu, formatBytes, shortcutAria, shortcutLabel, toast, type IconName } from "./ui";
 import type { MediaProgress, MediaState, VideoSizeSource } from "./preview-media-engine";
 export type { MediaProgress, MediaState } from "./preview-media-engine";
 
@@ -95,7 +96,7 @@ export function MinimizedPlayback({ progress, state, playing, lyric, speed, onSe
     </div>
     <div className="preview-mini-controls">
       {nav?.onMode && nav.mode
-        ? <MediaButton icon={MODE_ICONS[nav.mode]} label={`${PLAYBACK_MODES[modeIndex]?.label ?? "播放模式"}（点击切换为${nextMode.label}）`} active={nav.mode !== "sequence"} onClick={() => nav.onMode?.(nextMode.value)} />
+        ? <MediaButton icon={MODE_ICONS[nav.mode]} text={PLAYBACK_MODES[modeIndex]?.label ?? "播放模式"} label={`${PLAYBACK_MODES[modeIndex]?.label ?? "播放模式"}（点击切换为${nextMode.label}）`} active={nav.mode !== "sequence"} onClick={() => nav.onMode?.(nextMode.value)} />
         : <span />}
       <div className="preview-mini-transport">
         <MediaButton icon="previous" label="上一个" shortcut="ArrowLeft" disabled={!nav || nav.count < 2} onClick={nav?.onPrevious} />
@@ -351,15 +352,18 @@ function Timeline({ progress, buffered, disabled, onSeek }: { progress: MediaPro
   </div>;
 }
 
-function MediaButton({ icon, label, shortcut, onClick, disabled, active, className = "" }: { icon: IconName; label: string; shortcut?: string; onClick?: () => void; disabled?: boolean; active?: boolean; className?: string }) {
-  return <button type="button" className={`audio-button${active ? " is-active" : ""} ${className}`} aria-label={label} title={shortcut ? `${label}（${shortcutLabel(shortcut)}）` : label} aria-keyshortcuts={shortcut ? shortcutAria(shortcut) : undefined} aria-pressed={active} disabled={disabled} onClick={onClick}><Icon name={icon} size={20} /></button>;
+/** text：宽播放器上显示在图标旁的短文字（窄屏由样式隐藏，只留图标与提示）。 */
+function MediaButton({ icon, label, text, shortcut, onClick, disabled, active, className = "" }: { icon: IconName; label: string; text?: string; shortcut?: string; onClick?: () => void; disabled?: boolean; active?: boolean; className?: string }) {
+  return <button type="button" className={`audio-button${text ? " has-text" : ""}${active ? " is-active" : ""} ${className}`} aria-label={label} title={shortcut ? `${label}（${shortcutLabel(shortcut)}）` : label} aria-keyshortcuts={shortcut ? shortcutAria(shortcut) : undefined} aria-pressed={active} disabled={disabled} onClick={onClick}><Icon name={icon} size={20} />{text && <span className="audio-button-text" aria-hidden="true">{text}</span>}</button>;
 }
 
 /* ---------- 统一入口 ---------- */
 
-export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation: givenRotation = 0, onRotate, onBufferSpeed, onFindAssets, assetRevision = 0, preferAsset, upcoming = null, session }: {
+export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry, loadAssets, assetUrl, nav, onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, rotation: givenRotation = 0, onRotate, onBufferSpeed, onFindAssets, assetRevision = 0, preferAsset, upcoming = null, session, resumeKey = null, rememberResume = true }: {
   kind: "video" | "audio"; url: string; name: string; size?: number; videoSize?: { width: number; height: number }; cover?: string; onRetry: () => void;
   loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav;
+  /** 续播：按内容版本记住播放位置（null 时不记）；rememberResume 为假时只记在本页内存里（私密文件）。 */
+  resumeKey?: string | null; rememberResume?: boolean;
 } & PlaybackProps) {
   const host = useRef<HTMLDivElement>(null), player = useRef<Player | null>(null);
   // 上层不记旋转（如分享页）时由播放器自己保存，只在本次预览中生效。
@@ -371,9 +375,44 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
   callbacks.current = { onEnded, onPlaying, onProgress, onState, onControls, onVideoSize, onVideoFrame, onSaveThumbnail, onLyricLine, onRotate }; source.current = { url, name, cover, videoSize, rotation };
   const navRef = useRef(nav);
   navRef.current = nav;
+  // 续播：取得时长后跳到上次位置一次；之后每 5 秒记一次（暂停与关闭时立即记），接近结尾时清除。
+  const resume = useRef({ key: resumeKey, remember: rememberResume, restored: "", savedAt: 0, last: { currentTime: 0, duration: 0 } });
+  resume.current.key = resumeKey; resume.current.remember = rememberResume;
+  const trackResume = useRef((value: MediaProgress) => {
+    const state = resume.current;
+    if (!state.key || !resumeEligible(kind, value.duration)) return;
+    state.last = value;
+    if (state.restored !== state.key) {
+      state.restored = state.key;
+      const at = readResume(state.key, state.remember, value.duration);
+      if (at !== null && value.currentTime < 5) {
+        player.current?.seek(at);
+        toast.info(`已从 ${clockLabel(at)} 继续播放`, { label: "从头播放", onClick: () => player.current?.seek(0) });
+        state.savedAt = Date.now();
+        return;
+      }
+    }
+    if (Date.now() - state.savedAt >= 5000) { state.savedAt = Date.now(); writeResume(state.key, state.remember, value.currentTime, value.duration); }
+  });
+  const flushResume = () => {
+    const state = resume.current;
+    if (state.key && state.restored === state.key && resumeEligible(kind, state.last.duration)) writeResume(state.key, state.remember, state.last.currentTime, state.last.duration);
+  };
+  useEffect(() => () => flushResume(), [resumeKey]); // 换文件或关闭时记下最后的位置
   const [state, setState] = useState<MediaState>("loading"), [error, setError] = useState("");
   const [playing, setPlaying] = useState(false);
   const [playerReady, setPlayerReady] = useState(false), [slow, setSlow] = useState(false);
+  // 睡眠定时（只用于音频）：到点暂停；「播完本首」在本首结束时停下，不再自动播放下一首。
+  const [sleepTimer, setSleepTimer] = useState<{ until: number } | { endOfTrack: true } | null>(null), [sleepNow, setSleepNow] = useState(() => Date.now());
+  const sleepRef = useRef(sleepTimer);
+  sleepRef.current = sleepTimer;
+  useEffect(() => {
+    if (!sleepTimer || !("until" in sleepTimer)) return;
+    const tick = window.setInterval(() => setSleepNow(Date.now()), 15000);
+    const stop = window.setTimeout(() => { player.current?.pause(); setSleepTimer(null); toast.info("睡眠定时已到，已暂停播放"); }, Math.max(0, sleepTimer.until - Date.now()));
+    return () => { window.clearInterval(tick); window.clearTimeout(stop); };
+  }, [sleepTimer]);
+  useEffect(() => { if (!playing) flushResume(); }, [playing]);
   const [progress, setProgress] = useState<MediaProgress>({ currentTime: 0, duration: 0 }), [buffered, setBuffered] = useState(0);
   const [volume, setVolume] = useState({ level: 1, muted: false });
   const [assets, setAssets] = useState<PreviewAsset[]>([]), [selected, setSelected] = useState("");
@@ -416,7 +455,10 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
     notify("loading"); callbacks.current.onProgress?.({ currentTime: 0, duration: 0 });
     if (kind === "audio") {
       const audio = createAudioPlayer(source.current.url, {
-        notify, onPlaying: playingChanged, onEnded: () => callbacks.current.onEnded?.(),
+        notify, onPlaying: playingChanged, onEnded: () => {
+          if (sleepRef.current && "endOfTrack" in sleepRef.current) { setSleepTimer(null); toast.info("本首已播完，睡眠定时已停止播放"); return; }
+          callbacks.current.onEnded?.();
+        },
         onVolume: (level, muted) => { if (!cancelled) setVolume({ level, muted }); },
         onProgress: (value, loaded) => {
           if (cancelled) return;
@@ -424,6 +466,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
           setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value);
           setBuffered(loaded); if (lyricRef.current[0]?.time !== -1) setActive(lyricAt(lyricRef.current, value.currentTime - lyricOffset.current));
           callbacks.current.onProgress?.(value);
+          trackResume.current(value);
         },
       });
       player.current = extend(audio);
@@ -434,7 +477,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
       void loadMediaEngine().then(engine => {
         if (cancelled || !host.current) return;
         const events = { onEnded: () => callbacks.current.onEnded?.(), onPlaying: playingChanged,
-          onProgress: (value: MediaProgress) => { if (!cancelled) callbacks.current.onProgress?.(value); },
+          onProgress: (value: MediaProgress) => { if (!cancelled) { callbacks.current.onProgress?.(value); trackResume.current(value); } },
           onVideoSize: (width: number, height: number, from: VideoSizeSource) => callbacks.current.onVideoSize?.(width, height, from),
           onVideoFrame: (video: HTMLVideoElement) => callbacks.current.onVideoFrame?.(video),
           onRotate: (degrees: number) => (callbacks.current.onRotate ?? setLocalRotation)(degrees) };
@@ -460,6 +503,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
     // 封面元信息变化不重置已在播放的媒体。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, playerReady]);
+  const sleepText = !sleepTimer ? "" : "endOfTrack" in sleepTimer ? "本首后" : `${Math.max(1, Math.ceil((sleepTimer.until - sleepNow) / 60000))} 分`;
   // 播放过半或只剩 30 秒时预先缓冲下一首；下一首变化或不再连播时放弃。
   const nearEnd = kind === "audio" && progress.duration > 0 && (progress.currentTime >= progress.duration / 2 || progress.duration - progress.currentTime <= 30);
   useEffect(() => {
@@ -704,7 +748,14 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
       <Timeline progress={progress} buffered={buffered} disabled={failed} onSeek={time => audio?.seek(time)} />
       <div className="audio-buttons">
         <div className="audio-buttons-start">
-          {nav?.onMode && nav.mode && <MediaButton icon={MODE_ICONS[nav.mode]} label={`${PLAYBACK_MODES[modeIndex]?.label ?? "播放模式"}（点击切换为${nextMode.label}）`} active={nav.mode !== "sequence"} onClick={() => nav.onMode?.(nextMode.value)} />}
+          <Menu label={sleepTimer ? `睡眠定时：${sleepText}（点击修改）` : "睡眠定时"} align="start" above
+            className={`audio-button${sleepTimer ? " has-text is-active" : ""} audio-sleep-button`}
+            items={[{ label: "关闭", icon: "x", heading: "睡眠定时", checked: !sleepTimer, onSelect: () => setSleepTimer(null) },
+              ...[15, 30, 45, 60, 90].map(minutes => ({ label: `${minutes} 分钟后暂停`, icon: "clock" as const, onSelect: () => { setSleepNow(Date.now()); setSleepTimer({ until: Date.now() + minutes * 60000 }); } })),
+              { label: "播完本首后暂停", icon: "music" as const, checked: Boolean(sleepTimer && "endOfTrack" in sleepTimer), onSelect: () => setSleepTimer({ endOfTrack: true }) }]}>
+            <Icon name="moon" size={18} />{sleepTimer && <span className="audio-button-text" aria-hidden="true">{sleepText}</span>}
+          </Menu>
+          {nav?.onMode && nav.mode && <MediaButton icon={MODE_ICONS[nav.mode]} text={PLAYBACK_MODES[modeIndex]?.label ?? "播放模式"} label={`${PLAYBACK_MODES[modeIndex]?.label ?? "播放模式"}（点击切换为${nextMode.label}）`} active={nav.mode !== "sequence"} onClick={() => nav.onMode?.(nextMode.value)} />}
         </div>
         <div className="audio-buttons-main">
           <MediaButton icon="previous" label="上一首" shortcut="ArrowLeft" disabled={!nav || nav.count < 2} onClick={nav?.onPrevious} />
@@ -715,11 +766,11 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
         </div>
         <div className="audio-buttons-end">
           {assets.length > 0 && !failed && <Menu label={selected ? `歌词：${lyricLabel}（点击切换）` : "歌词已关闭（点击选择）"} align="end" above
-            className={`audio-button audio-lyrics-button${selected ? " is-active" : ""}`}
+            className={`audio-button has-text audio-lyrics-button${selected ? " is-active" : ""}`}
             items={[{ label: "关闭歌词", icon: "x", checked: !selected, heading: "歌词", onSelect: () => setSelected("") },
               ...options.map(option => ({ label: option.label, icon: "fileText" as const, checked: selected === option.value, onSelect: () => setSelected(option.value) })),
               ...(onFindAssets ? [{ label: "在线查找歌词…", icon: "search" as const, divider: true, onSelect: () => onFindAssets("lyrics") }] : [])]}>
-            <Icon name="fileText" size={20} />
+            <Icon name="fileText" size={20} /><span className="audio-button-text" aria-hidden="true">歌词</span>
           </Menu>}
           <div className="audio-volume">
             <MediaButton icon={volumeIcon} label={volume.muted ? "取消静音" : "静音"} onClick={() => audio?.toggleMute()} />
@@ -728,7 +779,7 @@ export function MediaPreview({ kind, url, name, size, videoSize, cover, onRetry,
               onChange={event => audio?.setVolume(Number(event.target.value))}
               onKeyDown={event => { if (event.key.startsWith("Arrow")) event.stopPropagation(); }} />
           </div>
-          {nav?.onPlaylist && nav.count > 1 && <MediaButton icon="list" className="playlist-toggle" label={`播放列表（${nav.index + 1} / ${nav.count}）`} shortcut="O" active={nav.playlistOpen} onClick={nav.onPlaylist} />}
+          {nav?.onPlaylist && nav.count > 1 && <MediaButton icon="list" className="playlist-toggle" text={`列表 ${nav.index + 1}/${nav.count}`} label={`播放列表（${nav.index + 1} / ${nav.count}）`} shortcut="O" active={nav.playlistOpen} onClick={nav.onPlaylist} />}
         </div>
       </div>
     </div>

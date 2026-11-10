@@ -53,7 +53,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 44
+    SCHEMA_VERSION = 45
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -880,6 +880,13 @@ class Metadata:
                                                              "ready" if ready else "pending", int(ready), 0, now))
                     db.execute("UPDATE objects SET metadata_id=? WHERE bucket_id=? AND key=?", (ident, row["bucket_id"], row["key"]))
                 db.execute("PRAGMA user_version = 44")
+            if version < 45:
+                # 文件助手跨对话偏好记忆（assistant/memory.py）：正文用助手留痕密钥加密；账号删除时一并删除。
+                db.execute("""CREATE TABLE IF NOT EXISTS assistant_memories(
+                    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    body BLOB NOT NULL, created_at REAL NOT NULL)""")
+                db.execute("CREATE INDEX IF NOT EXISTS assistant_memories_by_user ON assistant_memories(user_id, id)")
+                db.execute("PRAGMA user_version = 45")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""
@@ -1026,11 +1033,21 @@ class Metadata:
                            row["plain_size"], row["cipher_size"], row["salt"],
                            row["cipher_sha256"], row["blob_ref"])
 
-    def replace_part(self, blob_uuid: str, part_no: int, chunks: list[ChunkRecord], old_refs: list[str], now: float) -> None:
+    def replace_part(self, blob_uuid: str, part_no: int, chunks: list[ChunkRecord], old_refs: list[str] | None, now: float) -> None:
+        """用 chunks 替换分段 part_no。
+
+        被替换的引用在同一事务内现查现入队：同一分段并发重传时，先完成的那批分片已不在调用方开始时读到的列表里，
+        只按旧列表入队会让它们删行却不进 GC，永久留在频道里。old_refs 仅为兼容旧调用，不再使用。
+        """
+        del old_refs
         with self.transaction() as db:
+            current = [row[0] for row in db.execute(
+                "SELECT blob_ref FROM chunks WHERE blob_uuid = ? AND part_no = ?", (blob_uuid, part_no))]
             db.execute("DELETE FROM chunks WHERE blob_uuid = ? AND part_no = ?", (blob_uuid, part_no))
-            for ref in old_refs:
-                db.execute("INSERT INTO gc_queue(blob_ref,enqueued_at) VALUES(?,?)", (ref, now))
+            keep = {c.blob_ref for c in chunks}
+            for ref in current:
+                if ref not in keep:
+                    db.execute("INSERT INTO gc_queue(blob_ref,enqueued_at) VALUES(?,?)", (ref, now))
             db.executemany(
                 "INSERT INTO chunks(blob_uuid,part_no,sub_idx,offset,plain_size,cipher_size,salt,cipher_sha256,blob_ref) "
                 "VALUES(?,?,?,?,?,?,?,?,?)",

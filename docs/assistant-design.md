@@ -1572,3 +1572,20 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 - 只能下载自己的对话（他人返回 404）；涉及私密的对话要求同一登录会话已解锁，否则 423 `private_locked`，抽屉弹出解锁，解锁后自动重新下载；锁定的私密对话在菜单里也提供下载入口。
 - 内容是明文留痕，范围与对话详情一致：去掉只给模型看的包装文本（`model_content`、`model_text`）、图片字节与内部字段（`assistant/export.py` 的 `_HIDDEN`）。Markdown 按时间顺序列出用户消息（引用、附件名、网页快照）、助手回复（思考以引用块呈现）、工具调用（参数与结果，单个结果最多 20,000 字符）与系统事件；JSON 带格式标识 `tessera.assistant.conversation`、版本、对话元数据、全部消息与操作记录。时间按前端传入的时区，无效时用 UTC。
 - 审计 `assistant.conversation.export`，只记对话编号、格式与消息数，不记标题或内容。
+
+## 43. 网络搜索与跨对话偏好记忆
+
+### 43.1 网络搜索（`web_search`）
+
+- 管理员在「权限与工具」的「网络搜索」面板选择一个搜索服务：自建 SearXNG（填实例地址，需在实例里开启 JSON 输出，可以是内网地址）、Brave Search API 或 Tavily（填 API Key）。实现见 `assistant/search.py` 的 `SearchService`。
+- 搜索服务由管理员配置、可信，与模型渠道一样由服务端直接请求，不经过离线下载对公网地址的限制。API Key 用 KEK 派生的子密钥加密保存在 settings `assistant.search`，接口与页面只返回掩码；系统锁定时不可用。
+- 未配置时 `_user_tools` 去掉 `web_search`，系统提示词也不介绍它，模型不会白白调用。工具只把查询词与结果数发给搜索服务；查询词经 `redact` 检查，不能带凭据。结果（标题、地址、摘要，只保留 http(s) 地址）是不可信的外部内容，调用后标记来源（`taint`）。每轮次数由工具参数 `searches_per_run` 限制（默认 8）。
+- 私密对话同样可用（`PRIVATE` 表 `allow`），说明里写明查询词会发给搜索服务；提示词要求不把文件内容与私密信息放进查询词。
+- 审计 `assistant.search` 只记服务类型与是否已配置，不记地址或 Key。
+
+### 43.2 跨对话偏好记忆
+
+- 用户明确说「记住」「以后都……」时，模型用 `remember_preference` 保存一条简短偏好（命名习惯、默认位置、回复语言等），之后的每个对话都会在系统提示词的「用户让你记住的偏好」段落里看到它（带编号）。与当前要求冲突时以当前要求为准，可以提醒用户是否更新。
+- 存储：schema v45 表 `assistant_memories(user_id, body, created_at)`，正文用对话留痕密钥加密（AAD 绑定用户与编号），账号删除时级联删除，「清除全部助手数据」时一并删除。每人最多 50 条、每条最多 200 字，重复内容不新增。
+- 只记用户本人表达的偏好：写入经 `redact` 拒绝凭据；私密对话中禁止写入（`PRIVATE` 表 `never`），避免私密对话的内容出现在普通对话里；不根据外部内容或推测自动记。`forget_preference` 按编号删除，`list_preferences` 列出全部。
+- 用户在「账号设置 → 助手记住的偏好」查看、逐条删除或全部清空（`GET /api/user/v1/assistant/memories`、`POST …/memories/<id>/delete`、`POST …/memories/clear`）。

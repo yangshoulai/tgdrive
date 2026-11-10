@@ -310,6 +310,23 @@ class AdminApi:
             raise NotReadyError("Telegram Bot 配置尚未启用")
         return await self.telegram_bots.check(bot_id)
 
+    def _reclaimer(self):
+        from .telegram.reclaim import BotReclaimer
+        if self.storage is None or not hasattr(self.storage, "pool"):
+            raise NotReadyError("Telegram Bot 配置尚未启用")
+        return BotReclaimer(self.accounts.metadata, self.storage.pool)
+
+    async def reclaim_status(self, token: str, bot_id: int) -> dict[str, int]:
+        self.accounts.sessions.require(token, role="admin")
+        return await self.accounts.metadata.run_in_thread(self._reclaimer().pending, str(bot_id))
+
+    async def reclaim_bot(self, token: str, csrf: str, bot_id: int, limit: int = 200) -> dict[str, object]:
+        """把失效 Bot 上传的分片交给其他可用 Bot 重新认领（见 telegram/reclaim.py）。每次处理一批，界面循环调用。"""
+        self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        if type(limit) is not int:
+            raise ValueError("每次认领数量必须是整数")
+        return await self._reclaimer().run_once(str(bot_id), limit=limit)
+
     def set_bot_status(self, token: str, csrf: str, bot_id: int, status: str) -> None:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         if self.telegram_bots is None:
@@ -369,6 +386,19 @@ class AdminApi:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         return await self.accounts.metadata.run_in_thread(self._maintenance().backups.configure, keep)
 
+    def remote_backup_settings(self, token: str) -> dict[str, object]:
+        self.accounts.sessions.require(token, role="admin")
+        remote = self._maintenance().remote_backup
+        return remote.status() if remote is not None else {"enabled": False, "channel": "", "keep": 7, "uploaded": []}
+
+    async def configure_remote_backup(self, token: str, csrf: str, payload: dict) -> dict[str, object]:
+        self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
+        remote = self._maintenance().remote_backup
+        if remote is None:
+            raise ValueError("当前部署不支持把备份发送到 Telegram")
+        await self.accounts.metadata.run_in_thread(remote.configure, payload.get("enabled"), payload.get("channel"), payload.get("keep"))
+        return remote.status()
+
     async def delete_backup(self, token: str, csrf: str, name: str) -> dict[str, str]:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         import asyncio
@@ -380,7 +410,7 @@ class AdminApi:
     async def create_backup(self, token: str, csrf: str) -> dict[str, object]:
         self.accounts.sessions.require(token, role="admin", csrf=csrf, mutation=True)
         import asyncio
-        result = await asyncio.to_thread(self._maintenance().backups.create)
+        result = await self._maintenance().backup()
         self._maintenance().record("backup", result)
         return result
 
@@ -1154,6 +1184,14 @@ class UserApi:
         if public is not None:
             item = self.objects.set_public(self._scope(token), key, public)
         return self._object_json(item)
+
+    def instant_probe(self, token: str, path: str, size: object) -> dict[str, bool]:
+        """秒传预检：授权范围内有没有大小完全相同的文件。没有就不可能秒传，前端跳过计算完整指纹、直接上传。"""
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            raise ValueError("文件大小不正确")
+        scope = self._scope(token)
+        self.objects._check_scope(scope, self._path(path), write=True)
+        return {"candidates": self.objects.has_size_candidate(scope, size)}
 
     def instant_put(self, token: str, csrf: str, path: str, size: int, fingerprint: str,
                     content_type: str | None = None, public: bool | None = None) -> dict[str, object]:

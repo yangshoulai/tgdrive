@@ -270,8 +270,11 @@ function TasksPanel({ unlocked, active }: { unlocked: boolean; active: boolean }
         <li>
           <span className="attention-icon tone-accent"><Icon name="checkCircle" size={17} /></span>
           <span className="attention-copy">
-            <strong>文件校验</strong><small>检查已保存的文件是否完好；每次从上次停下的位置继续，所有文件轮流被检查。</small>
-            {outcome(status?.scrub, task => n(task.bad) ? `检查 ${n(task.checked)} 个文件，发现 ${n(task.bad)} 个损坏` : `检查 ${n(task.checked)} 个文件，全部完好${task.wrapped ? "（已完成一轮）" : ""}`)}
+            <strong>文件校验</strong><small>每天按「系统设置 → 下载与资源」中的读取量检查已保存的数据是否完好；从上次停下的位置继续，所有文件轮流被检查。存储凭据失效时会停止并提示，不会误报为损坏。</small>
+            {outcome(status?.scrub, task => {
+              const read = typeof task.bytes === "number" ? `（读取 ${formatBytes(task.bytes)}）` : "";
+              return n(task.bad) ? `检查 ${n(task.checked)} 个文件${read}，发现 ${n(task.bad)} 个损坏` : `检查 ${n(task.checked)} 个文件${read}，全部完好${task.wrapped ? "（已完成一轮）" : ""}`;
+            })}
             <Switch checked={deep} onChange={setDeep} label="深度校验" description="手动运行时额外检查文件内容能否正常打开，耗时更长。" />
           </span>
           <Button size="sm" loading={running === "scrub"} disabled={!unlocked || running !== null} onClick={() => void run("scrub", async () => {
@@ -296,19 +299,26 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
   const [settings, setSettings] = useState<api.BackupSettings | null>(null);
   const [editing, setEditing] = useState(false);
   const [keep, setKeep] = useState("");
+  const [remote, setRemote] = useState<api.RemoteBackupStatus | null>(null);
+  const [remoteForm, setRemoteForm] = useState({ enabled: false, channel: "", keep: "7" });
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<api.Backup | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const load = useCallback(() => {
     setError("");
-    void Promise.all([api.listBackups(), api.backupSettings()]).then(([items, config]) => { setBackups(items); setSettings(config); })
+    void Promise.all([api.listBackups(), api.backupSettings(), api.remoteBackupSettings()]).then(([items, config, channel]) => { setBackups(items); setSettings(config); setRemote(channel); })
       .catch(reason => setError(api.errorMessage(reason, "备份列表加载失败，请稍后重试")));
   }, []);
   useEffect(load, [load]);
   async function create() {
     setBusy(true);
-    try { const backup = await api.createBackup(); toast.success(`已创建备份 ${backup.name}`); load(); }
+    try {
+      const backup = await api.createBackup();
+      if (backup.remote_error) toast.error(`已创建本机备份 ${backup.name}，但${backup.remote_error}`);
+      else toast.success(backup.remote ? `已创建备份 ${backup.name}，并发送到 Telegram 频道` : `已创建备份 ${backup.name}`);
+      load();
+    }
     catch (reason) { toast.error(api.errorMessage(reason, "备份失败，请稍后重试")); }
     finally { setBusy(false); }
   }
@@ -316,14 +326,19 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
     event.preventDefault();
     const value = Number(keep);
     if (!Number.isInteger(value) || value < 1 || value > 1000) { toast.error("备份最大数量必须是 1–1000 的整数"); return; }
+    const remoteKeep = Number(remoteForm.keep);
+    if (remoteForm.enabled && (!Number.isInteger(remoteKeep) || remoteKeep < 1 || remoteKeep > 100)) { toast.error("频道中保留的备份数量必须是 1–100 的整数"); return; }
     setSaving(true);
-    try { setSettings(await api.configureBackups(value)); toast.success("备份设置已保存，下次成功备份后按新上限保留"); setEditing(false); }
+    try {
+      const [config, channel] = await Promise.all([api.configureBackups(value), api.configureRemoteBackup(remoteForm.enabled, remoteForm.channel.trim(), remoteForm.enabled ? remoteKeep : (remote?.keep ?? 7))]);
+      setSettings(config); setRemote(channel); toast.success("备份设置已保存，下次成功备份后生效"); setEditing(false);
+    }
     catch (reason) { toast.error(api.errorMessage(reason, "保存失败，请稍后重试")); }
     finally { setSaving(false); }
   }
   return (
     <Panel title="数据备份" description={`数据库记录了每个文件保存在哪里、如何打开。它丢失后，已保存的文件将无法读取。系统每天自动备份一次${settings ? `，最多保留最近 ${settings.keep} 份` : ""}。`}
-      actions={<><Button size="sm" disabled={!settings || busy} onClick={() => { if (settings) { setKeep(String(settings.keep)); setEditing(true); } }}>备份设置</Button>
+      actions={<><Button size="sm" disabled={!settings || busy} onClick={() => { if (settings) { setKeep(String(settings.keep)); setRemoteForm({ enabled: remote?.enabled ?? false, channel: remote?.channel ?? "", keep: String(remote?.keep ?? 7) }); setEditing(true); } }}>备份设置</Button>
         <Button size="sm" icon="plus" loading={busy} disabled={!unlocked} onClick={() => void create()}>立即备份</Button></>} flush>
       {error ? <EmptyState icon="alert" title="备份列表加载失败" description={error} action={<Button onClick={load}>重试</Button>} /> : backups === null ? <SkeletonRows rows={2} /> : backups.length === 0 ? <EmptyState icon="shield" title="还没有备份" description="解锁后系统会自动创建第一份备份。" /> : (
         <div className="table-scroll"><div className="data-table backups-table" role="table" aria-label="备份">
@@ -340,6 +355,8 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
         </div></div>
       )}
       <div className="panel-note">
+        {remote?.enabled ? <p>每份备份还会发送到 Telegram {remote.channel ? `备份频道 ${remote.channel}` : "存储频道"}，频道中保留最近 {remote.keep} 份{remote.uploaded[0] ? `，最近一次发送于 ${formatDateTime(remote.uploaded[0].uploaded_at)}` : ""}。超过 45 MB 的备份分卷发送（*.tgdbak.001、.002…），恢复前按序号拼接：<code>cat 名称.tgdbak.0* &gt; 名称.tgdbak</code>。</p>
+          : <Notice tone="warning">备份目前只保存在本机磁盘。磁盘损坏时备份也会一起丢失，建议在「备份设置」里开启发送到 Telegram 频道。</Notice>}
         <p>备份已用加密口令加密，可以放在其他机器或网盘。请把备份保存在服务器以外的地方。恢复时先停止服务，然后执行：</p>
         <div className="code-block"><pre><code>tgdrive restore tgdrive-20261007-030000.tgdbak --data-dir /var/lib/tgdrive</code></pre></div>
         <p className="muted">恢复需要输入<strong>创建该备份时</strong>的加密口令。原数据库会被保留为 meta.db.before-restore-*，不会被覆盖。</p>
@@ -350,6 +367,16 @@ function BackupsPanel({ unlocked }: { unlocked: boolean }) {
           <Field label="备份最大数量" hint="可设为 1–1000 份。修改不会立即删除现有备份；下次手动或自动备份成功后生效。">
             <input className="input" type="number" min={1} max={1000} step={1} value={keep} onChange={event => setKeep(event.target.value)} disabled={saving} autoFocus />
           </Field>
+          <Switch checked={remoteForm.enabled} onChange={enabled => setRemoteForm({ ...remoteForm, enabled })} label="同时发送到 Telegram 频道"
+            description="备份已加密，发到频道不会泄露内容。服务器磁盘损坏时，可以从频道下载备份恢复。" />
+          {remoteForm.enabled && <>
+            <Field label="备份频道" hint="填写频道 ID（如 -1001234567890）或 @用户名；第一个可用的 Bot 必须是该频道的管理员。留空则发送到存储频道（存储频道被删时备份也会一起丢失）。">
+              <input className="input" value={remoteForm.channel} placeholder="留空使用存储频道" onChange={event => setRemoteForm({ ...remoteForm, channel: event.target.value })} disabled={saving} />
+            </Field>
+            <Field label="频道中保留的份数" hint="1–100 份。更早的备份消息会被删除；超过 48 小时的消息 Telegram 可能不允许 Bot 删除，需要手动清理。">
+              <input className="input" type="number" min={1} max={100} step={1} value={remoteForm.keep} onChange={event => setRemoteForm({ ...remoteForm, keep: event.target.value })} disabled={saving} />
+            </Field>
+          </>}
         </form>
       </Modal>}
       {deleting && <ConfirmDialog title="删除这份备份？" description={`备份 ${deleting.name} 将被永久删除，无法撤销。当前数据库和已保存的文件不受影响。删除前请确认已有其他可用备份。`}

@@ -23,3 +23,8 @@
 - `tags.PARSER_VERSION=3` 令旧缓存按需重读，保留 GB18030／UTF-8／UTF-16 兼容，补充作曲、简介、导演、演员及 MP4 mdta 键。编辑值以 Unicode 字段和 UTF-8 资源保存，不经 FFmpeg 标签重编码。
 - `ThumbnailEditor inline` 保留内置、本地、网络、截图、在线来源，音频也使用独立封面。custom claim 租约传至保存和 finish；显式服务器截图写文件级覆盖。保存封面后，未保存字段回信息页继续编辑。
 - 播放：`api.mediaAssets` 合并已保存资源（`source: metadata`）与回退的内置歌词／字幕（`source: embedded`），`preview-media.tsx` 的 `pickAsset` 先在已保存资源里按默认项 → 中文字幕／同步歌词 → 第一项选，没有时才用内置的（内置字幕只自动选 `instant`）；不再轮询初始化状态。分享页只用已保存资源，公开接口的 `tags` 只含展示字段。公开文件／文件夹／歌单读取复核密码、有效期、账号与引用；私密读取后复核授权。保存仅广播 FILE_UPDATED_EVENT、MEDIA_ASSETS_EVENT；审计不含字段或正文。助手与 /media/save 同样写隐藏资源。回归覆盖原件不变、计费、复制隔离、生命周期、版本、取消、私密、分享、自动多轨及封面来源。
+- 恢复为文件自带值：编辑接口 `fields` 中值为 `null` 的字段去掉手动覆盖（`validate_fields` 保留 `None`，`commit_edit` 合并后丢弃）；`editor.info` 返回 `auto_fields`（自动解析值）与 `overridden`（已覆盖字段），编辑器据此在字段下显示「恢复为文件自带值」。
+- 字幕数量上限 `ASSET_LIMIT`（32）：自动提取（`initial_asset`）达到上限后不再保存新轨（仍作为回退来源播放）；`commit_edit` 只拒绝让数量继续增长的编辑，旧版本已超限的文件仍能修改其他字段。
+- 续播：`media-resume.ts`，按内容版本（etag，宿主经 `positionKey` 传入）记在 `localStorage` 的 `tessera:media-position`（最多 300 项），私密文件只记在内存。只对 ≥2 分钟的视频与 ≥10 分钟的音频生效；播放超过 15 秒才记、离结尾不到 20 秒清除；取得时长后跳到上次位置一次，并提示「已从 mm:ss 继续播放」带「从头播放」。每 5 秒、暂停、换文件与关闭时保存。
+- 睡眠定时（只有音频播放器）：控制条左侧月亮按钮，15／30／45／60／90 分钟后暂停或「播完本首后暂停」（拦截本首的 onEnded，不自动播放下一首）；开启时按钮显示剩余分钟数。
+- 进度条悬停预览（视频）：`preview-media-engine.ts` 的 `attachSeekPreview` 在第一次悬停时创建隐藏 video（preload=metadata），定位到悬停时间截一帧画到进度条上方；定位进行中只保留最新时间；换源时重置、销毁时释放；触屏（无悬停）不启用；画面旋转时预览同步旋转。

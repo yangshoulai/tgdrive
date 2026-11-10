@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useId, useState } from "react";
 
 import * as api from "../api";
-import { type CacheCheck, type CacheDirectoryInfo, type CacheStats, browserName, cacheDirectoryInfo, cacheStats, cacheSupported, checkCache, chooseCacheDirectory, cleanStaleCache, clearCache, directoryAvailable, isStandalone, loadSettings, regrantCacheDirectory, resetAllDevices, saveSettings, stopCacheDirectory, storageEstimate } from "../cache-client";
+import { type CacheCheck, type CacheDirectoryInfo, type CacheStats, browserName, cacheDirectoryInfo, cacheStats, cacheSupported, checkCache, chooseCacheDirectory, cleanStaleCache, clearCache, directoryAvailable, isStandalone, loadSettings, regrantCacheDirectory, requestPersistentStorage, resetAllDevices, saveSettings, stopCacheDirectory, storageEstimate } from "../cache-client";
 import { type DeviceSettings, type Kind, effectiveMiB, sizeChoices, webkitOnly } from "../cache-store";
 import { Notice, Badge, Button, ConfirmDialog, Disclosure, EmptyState, Field, Icon, Switch, formatBytes, formatDateTime, toast, type IconName } from "../ui";
 
@@ -99,7 +99,10 @@ export function LocalCacheSettings() {
       {stats && <div className="local-cache-figures folder-stats-figures">
         <div><span>普通文件</span><strong>{formatBytes(stats.normal.bytes)}</strong><small>上限 {sizeLabel(effectiveMiB(normalLimit, quota))} · {stats.normal.count.toLocaleString("zh-CN")} 项</small></div>
         <div><span>私密文件</span><strong>{formatBytes(stats.private.bytes)}</strong><small>{privateOn ? `上限 ${sizeLabel(effectiveMiB(privateLimit, quota))} · ${stats.private.count} 项` : "未开启"}</small></div>
-        <div><span>浏览器占用</span><strong>{estimate ? formatBytes(estimate.usage) : "—"}</strong><small>{estimate ? `${estimate.persisted ? "已持久保存" : "空间不足时可能被浏览器清除"}` : "浏览器未提供"}</small></div>
+        <div><span>浏览器占用</span><strong>{estimate ? formatBytes(estimate.usage) : "—"}</strong><small>{estimate ? estimate.persisted ? "已持久保存" : <>空间不足时可能被浏览器清除 <button type="button" className="link-button" onClick={() => void requestPersistentStorage().then(granted => {
+          toast[granted ? "success" : "info"](granted ? "浏览器已同意持久保存缓存" : "浏览器暂未同意持久保存；常用本站或安装为应用后通常会自动同意");
+          void storageEstimate().then(setEstimate);
+        })}>申请持久保存</button></> : "浏览器未提供"}</small></div>
       </div>}
       {partsTotal > 0 && <div className="local-cache-breakdown">
         <div className="local-cache-breakdown-head"><strong>占用明细</strong><span>共 {formatBytes(partsTotal)}</span></div>

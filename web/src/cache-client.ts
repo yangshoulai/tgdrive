@@ -48,6 +48,8 @@ export function startLocalCache() {
   window.addEventListener("tessera:logout", () => notify("tessera-cache:logout"));
   window.addEventListener("tessera:files-mutated", () => notify("tessera-cache:nudge"));
   notify("tessera-cache:access", { access: api.getPrivateAccess(), expires: api.getPrivateAccessExpires() });
+  // 缓存默认开启时用户可能从没切换过开关，saveSettings 里的申请不会执行：启动时对已开启的设备申请一次持久存储。
+  void loadSettings().then(settings => { if (settings.enabled) void requestPersistentStorage(); }).catch(() => undefined);
 }
 
 async function worker(timeout = 3000): Promise<ServiceWorker | null> {
@@ -129,7 +131,7 @@ export async function saveSettings(next: DeviceSettings) {
   await ask("tessera-cache:settings");
   changed();
   // 开启时申请持久化存储，减少浏览器在空间紧张时自动清除缓存；拒绝也不影响使用。
-  if (next.enabled) void navigator.storage?.persist?.().catch(() => false);
+  if (next.enabled) void requestPersistentStorage();
 }
 
 /** 让所有设备上的缓存都无法再解开（服务端纪元加一），并清除这台设备上的数据。 */
@@ -181,6 +183,15 @@ export async function storageEstimate(): Promise<{ usage: number; quota: number;
     if (!estimate) return null;
     return { usage: estimate.usage ?? 0, quota: estimate.quota ?? 0, persisted: Boolean(await navigator.storage.persisted?.()) };
   } catch { return null; }
+}
+
+/** 申请持久存储：浏览器存储紧张时不整库清除本机缓存。Chrome 按站点使用情况自动批准，Firefox 会询问用户；
+ *  已持久或不支持时直接返回当前状态。 */
+export async function requestPersistentStorage(): Promise<boolean> {
+  try {
+    if (await navigator.storage?.persisted?.()) return true;
+    return Boolean(await navigator.storage?.persist?.());
+  } catch { return false; }
 }
 
 export const isStandalone = () => window.matchMedia?.("(display-mode: standalone)").matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;

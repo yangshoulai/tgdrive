@@ -37,7 +37,8 @@ from .work import Limiter, RateLimiter, TransferSlots, WorkBusyError
 # 小对象读取通道：并发数、单个对象上限与排队等待时间。
 # 缩略图大图的独立读取通道默认并发；实际值由「下载与资源」的 thumbnail_concurrency 设置（app.apply_resources）。
 SMALL_READ_CONCURRENCY = 16
-SMALL_READ_LIMIT = 1024 * 1024
+# 系统小对象（封面大图、歌词与字幕资源）上限，须不小于 media.records.TEXT_LIMIT。
+SMALL_READ_LIMIT = 2 * 1024 * 1024
 SMALL_READ_WAIT = 60
 
 
@@ -114,10 +115,10 @@ class BlobEngine:
     async def put_part(self, blob_uuid: str, part_no: int, body: AsyncIterator[bytes] | Iterable[bytes] | bytes,
                        *, bucket_id: int | None = None, small: bool = False, buffered: bool = False) -> PartResult:
         if small:
-            # 缩略图等系统小对象（≤1 MiB，已在内存中）：只受上传名额与限速约束，不占文件传输名额，
+            # 缩略图、歌词字幕等系统小对象（≤2 MiB，已在内存中）：只受上传名额与限速约束，不占文件传输名额，
             # 否则每张图片的三种缩略图会挤掉同一存储桶的离线下载与上传，让它们等待超时。
             if not isinstance(body, bytes) or len(body) > SMALL_READ_LIMIT:
-                raise ValueError("small writes must be bytes up to 1 MiB")
+                raise ValueError("系统小对象最多 2 MB")
             return await self._put_part(blob_uuid, part_no, body)
         if buffered:
             # 离线下载的分段已在内存中：只受上传名额与限速约束，不占文件读取名额。
@@ -138,9 +139,6 @@ class BlobEngine:
         md5 = hashlib.md5()
         blocks = BlockHasher(self.fingerprint_block)
         pending: list[ChunkRecord] = []
-        old_refs: list[str] = []
-        old = self.metadata.list_chunks(blob_uuid, part_no=part_no)
-        old_refs.extend(c.blob_ref for c in old)
         total = 0
         # 用片段列表攒满一个分片再拼接。不要用 bytearray 追加后 del 头部：CPython 会让其底层分配不断增长，
         # 上传 400 MB 时进程常驻内存可涨到 1 GB 以上。
@@ -196,7 +194,7 @@ class BlobEngine:
             while inflight:
                 pending.append(await asyncio.shield(inflight[0]))
                 inflight.pop(0)
-            self.metadata.replace_part(blob_uuid, part_no, pending, old_refs, time.time())
+            self.metadata.replace_part(blob_uuid, part_no, pending, None, time.time())
             if head is not None:
                 self.metadata.set_sniffed(blob_uuid, sniff(head[:HEAD_BYTES]), exif.taken_at(head))
         except BaseException:
@@ -341,7 +339,7 @@ class BlobEngine:
         """读取一个小对象（缩略图大图），不占传输名额；等待过久时返回 WorkBusyError，浏览器稍后重试。"""
         record = self.metadata.get_blob(blob_uuid)
         if record.size is not None and record.size > limit:
-            raise ValueError("object is too large for a small read")
+            raise ValueError("对象过大，无法按小对象读取")
         slot = self.small_reads.slot()
         try:
             async with asyncio.timeout(SMALL_READ_WAIT):

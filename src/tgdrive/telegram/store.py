@@ -10,7 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from ..blobstore import BlobStore
-from ..errors import BlobNotFound, IntegrityError
+from ..errors import BlobNotFound, IntegrityError, StorageAccessError
 from .client import (
     TelegramAuthError,
     TelegramError,
@@ -125,7 +125,10 @@ class TelegramBlobStore(BlobStore):
             bot = self.pool.get(ref.bot)
         except (ValueError, KeyError) as exc:
             raise BlobNotFound(ref_value) from exc
-        path = await self._file_path(ref)
+        try:
+            path = await self._file_path(ref)
+        except TelegramAuthError as exc:
+            raise StorageAccessError("Telegram Bot 凭据不可用，请检查 Bot token") from exc
         response = await bot.client.download_file(path, start, end)
         if response.status == 404:
             path = await self._file_path(ref, refresh=True)
@@ -134,6 +137,9 @@ class TelegramBlobStore(BlobStore):
             raise TelegramRateLimitError("Telegram 文件下载限流", retry_after=1, method="file")
         if response.status >= 500:
             raise TelegramTransientError("Telegram 文件下载暂时失败", method="file", status=response.status)
+        if response.status in (401, 403):
+            # 凭据或权限问题：与「分片不存在」区分，巡检不应把它记成分片损坏。
+            raise StorageAccessError(f"Telegram 拒绝读取分片（HTTP {response.status}），请检查 Bot 凭据与频道权限")
         if response.status >= 400:
             raise BlobNotFound(ref_value)
         if start is not None or end is not None:

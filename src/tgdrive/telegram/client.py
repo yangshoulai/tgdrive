@@ -297,6 +297,15 @@ class TelegramClient:
         url = f"{self.api_base}/file/bot{self.token}/{file_path.lstrip('/')}"
         return await self.transport.request("GET", url, headers, None)
 
+    async def forward_message(self, chat_id: int | str, from_chat_id: int | str, message_id: int) -> SentDocument:
+        """把一条文件消息转发到 chat_id，返回新消息及本 Bot 可用的 file_id（file_id 只对取得它的 Bot 有效）。"""
+        message = await self._api("forwardMessage", {"chat_id": chat_id, "from_chat_id": from_chat_id, "message_id": message_id,
+                                                     "disable_notification": True})
+        document = message.get("document") or {}
+        if not document.get("file_id"):
+            raise TelegramError("转发的消息里没有文件", method="forwardMessage")
+        return SentDocument(int(message["message_id"]), document["file_id"], document.get("file_unique_id"))
+
     async def delete_message(self, chat_id: int | str, message_id: int) -> None:
         await self._api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 

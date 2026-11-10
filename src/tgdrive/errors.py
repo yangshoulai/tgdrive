@@ -43,3 +43,7 @@ class VersionConflict(TgDriveError):
 
 class QuotaExceededError(TgDriveError):
     """对象提交后会超过存储桶配额。"""
+
+
+class StorageAccessError(TgDriveError):
+    """存储后端拒绝访问（凭据失效、Bot 被移出频道等，HTTP 401/403），不代表分片已损坏或丢失。"""

@@ -47,6 +47,7 @@ class ScrubReport:
     checked: int
     bad: list[tuple[str, list[tuple[int, int]]]]
     wrapped: bool = False
+    bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -150,15 +151,30 @@ class GarbageCollector:
 
 
 class Scrubber:
+    """巡检：按每轮字节预算（而不是文件数）读取分片并校验。视频库里一个文件可能有几 GB，按文件数巡检会让每天的
+    Telegram 读取量不可控。每轮至少检查一个 Blob，保证游标总能前进。"""
     CURSOR_KEY = "maintenance.scrub_cursor"
+    DEFAULT_BUDGET = 2 * 1024 ** 3  # 每轮（默认每天）2 GiB
 
     def __init__(self, metadata: Metadata, engine: BlobEngine) -> None:
         self.metadata, self.engine = metadata, engine
+        # 由应用工厂注入：返回「下载与资源」里的每日读取量（字节，0 为关闭）。未注入时用默认值。
+        self.budget_source = None
 
-    async def run_once(self, *, limit: int = 100, deep: bool = False) -> ScrubReport:
-        """从上次停下的位置继续检查，检查到末尾后从头开始，保证所有文件轮流被覆盖。"""
+    def budget(self) -> int:
+        if self.budget_source is None:
+            return self.DEFAULT_BUDGET
+        value = self.budget_source()
+        return value if type(value) is int and value >= 0 else self.DEFAULT_BUDGET
+
+    async def run_once(self, *, limit: int = 100, deep: bool = False, budget: int | None = None) -> ScrubReport:
+        """从上次停下的位置继续检查，检查到末尾后从头开始，保证所有文件轮流被覆盖。
+
+        limit 是一轮最多检查的 Blob 数，budget 是一轮最多读取的密文字节数（默认取设置）。
+        存储拒绝访问（StorageAccessError）时停止本轮、不移动游标，也不把分片记成损坏。"""
         if limit <= 0:
             raise ValueError("limit must be positive")
+        budget = self.budget() if budget is None else budget
         cursor = _get_state(self.metadata, self.CURSOR_KEY)
         args: tuple = (limit,)
         where = "status='complete'"
@@ -166,15 +182,25 @@ class Scrubber:
             where += " AND (created_at, uuid) > (?, ?)"
             args = (cursor[0], cursor[1], limit)
         rows = self.metadata.db.execute(
-            f"SELECT uuid, created_at FROM blobs WHERE {where} ORDER BY created_at, uuid LIMIT ?", args).fetchall()
+            f"SELECT uuid, created_at, COALESCE(size,0) AS size FROM blobs WHERE {where} ORDER BY created_at, uuid LIMIT ?", args).fetchall()
         bad: list[tuple[str, list[tuple[int, int]]]] = []
+        checked = spent = 0
+        last = None
         for row in rows:
+            if checked and spent + int(row["size"]) > budget:
+                break
             failures = await self.engine.scrub(row["uuid"], deep=deep)
             if failures:
                 bad.append((row["uuid"], failures))
-        wrapped = len(rows) < limit
-        _set_state(self.metadata, self.CURSOR_KEY, None if wrapped else [rows[-1]["created_at"], rows[-1]["uuid"]])
-        return ScrubReport(len(rows), bad, wrapped)
+            checked += 1
+            spent += int(row["size"])
+            last = row
+        wrapped = checked == len(rows) and len(rows) < limit
+        if wrapped:
+            _set_state(self.metadata, self.CURSOR_KEY, None)
+        elif last is not None:
+            _set_state(self.metadata, self.CURSOR_KEY, [last["created_at"], last["uuid"]])
+        return ScrubReport(checked, bad, wrapped, spent)
 
 
 class MediaRetyper:
@@ -531,6 +557,20 @@ class MaintenanceService:
         self.thumbnail_migrator = None  # 由应用工厂注入：async () -> dict，旧版内联缩略图转存为系统区对象并清理未登记的对象
         self.assistant_cleaner = None  # 由应用工厂注入：async (now) -> dict，按保留期清理助手留痕与调用日志
         self.assistant_catalog = None  # 由应用工厂注入：async (now) -> dict，每天同步一次模型目录
+        self.remote_backup = None  # 由应用工厂注入：backup_remote.RemoteBackup，把备份发到 Telegram 频道
+
+    async def backup(self) -> dict[str, object]:
+        """生成本机备份，启用时再发到 Telegram 频道。发送失败不删除本机备份，结果中带上错误说明。"""
+        result = await asyncio.to_thread(self.backups.create)
+        if self.remote_backup is not None:
+            try:
+                remote = await self.remote_backup.upload(self.backups.directory / str(result["name"]))
+                if remote is not None:
+                    result["remote"] = remote
+            except Exception as exc:
+                log.warning("备份发送到 Telegram 失败：%s", type(exc).__name__)
+                result["remote_error"] = f"发送到 Telegram 频道失败：{str(exc)[:200]}"
+        return result
 
     def status(self) -> dict[str, object]:
         state = _get_state(self.metadata, self.STATUS_KEY, {}) or {}
@@ -550,7 +590,7 @@ class MaintenanceScheduler:
     """在服务进程内定期运行维护任务。系统锁定时跳过，单个任务失败不影响其他任务。"""
 
     def __init__(self, service: MaintenanceService, *, interval: float = 600, scrub_every: float = 86400,
-                 scrub_batch: int = 200, backup_every: float = 86400) -> None:
+                 scrub_batch: int = 5000, backup_every: float = 86400) -> None:
         self.service, self.interval = service, interval
         self.scrub_every, self.scrub_batch, self.backup_every = scrub_every, scrub_batch, backup_every
         self._task: asyncio.Task | None = None
@@ -580,10 +620,10 @@ class MaintenanceScheduler:
             steps.append(("assistant", lambda: self.service.assistant_cleaner(now)))
         if self.service.assistant_catalog is not None:
             steps.append(("assistant_catalog", lambda: self.service.assistant_catalog(now)))
-        if self._due("scrub", self.scrub_every, now):
+        if self._due("scrub", self.scrub_every, now) and self.service.scrub.budget() > 0:
             steps.append(("scrub", lambda: self._scrub()))
         if self._due("backup", self.backup_every, now):
-            steps.append(("backup", lambda: asyncio.to_thread(self.service.backups.create)))
+            steps.append(("backup", lambda: self.service.backup()))
         steps.append(("retype", lambda: self.service.retyper.run_once()))
         steps.append(("compact", lambda: self.service.metadata.run_in_thread(self.service.metadata.compact)))
         for name, step in steps:
@@ -607,8 +647,8 @@ class MaintenanceScheduler:
 
     async def _scrub(self) -> dict[str, object]:
         report = await self.service.scrub.run_once(limit=self.scrub_batch)
-        return {"checked": report.checked, "bad": len(report.bad), "bad_blobs": [uuid for uuid, _ in report.bad][:20],
-                "wrapped": report.wrapped}
+        return {"checked": report.checked, "bytes": report.bytes, "bad": len(report.bad),
+                "bad_blobs": [uuid for uuid, _ in report.bad][:20], "wrapped": report.wrapped}
 
     async def run_forever(self) -> None:
         while True:

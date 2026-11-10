@@ -15,3 +15,6 @@
 - `KeyPrivateAccess` 只在内存保存每把密钥和脚本安装的内部会话，复用 PrivateSpace 的账号验证、限速、闲置时间与失效规则，内部会话 token/CSRF 不返回客户端。密码不保存，短期授权不写 GM 存储；同一安装换网页后可通过 status 恢复未过期授权。
 - 私密目录浏览、新建、上传字节、创建任务及可信的面板交互续期；status 与下载进度轮询不续期。闲置到期清空目录列表、隐藏私密目标路径并取消进行中的本地私密上传，服务器已创建的下载继续；进度页用「解锁并继续」恢复等待发送的条目或重新查询状态。每个写入分片和提交仍校验账号、密钥与授权；move/delete 只允许提交或清理同目录脚本临时对象，不覆盖已有文件。
 - 回归：`tests/test_private_key_access.py` 与 `tests/test_grabber.cjs`；浏览器检查跨来源 iframe 的 MessagePort、密码输入、取消返回目录层、超时与窄屏／深色显示。
+- 自动更新：头部声明 `@updateURL`／`@downloadURL`（GitHub main 分支的原始文件），发布脚本改动时提升 `@version`。
+- 外观：设置项 `theme`（`system`／`light`／`dark`，`THEMES`、`applyTheme` 写 `.root[data-theme]`）。脚本读不到 Tessera 网页的主题（不同源），深色变量同时用于 `prefers-color-scheme: dark`（排除 `data-theme=light`）与 `.root[data-theme=dark]`，两处保持一致。
+- 常驻定时器降频：资源计时轮询与 iframe 扫描经 `idleTick` 判断，面板打开且页面可见时每 2 秒一次，否则每 10 秒一次；换页检测在页面隐藏时跳过。网格卡片的「服务器下载」只在悬停／按下时铺强调色（触屏上按钮常驻，每张都实心会很重）。

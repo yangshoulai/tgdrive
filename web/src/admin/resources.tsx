@@ -58,7 +58,7 @@ export function Resources() {
         </div>
         {(form.x_enabled && !effective.x_available || form.youtube_enabled && !effective.youtube_available) && <Notice tone="warning">平台下载需要带解析组件的镜像；YouTube 还需要 JavaScript 运行时和 FFmpeg，安装后重启生效。</Notice>}
         {form.hls_enabled && !effective.hls_available && <Notice tone="warning">未检测到 FFmpeg。使用带 FFmpeg 的镜像并重启后才能下载 M3U8。</Notice>}
-        <Disclosure title="高级参数" description="读写并发、上传限速、Bot 发送间隔、网页上传分段与平台缓存。默认值适合大多数部署。">
+        <Disclosure title="高级参数" description="读写并发、上传限速、Bot 发送间隔、网页上传分段、平台缓存、文件校验读取量与机器人发回上限。默认值适合大多数部署。">
           <div className="form-row">
             <Field label="服务器同时读取数" hint="下载、预览、播放与 S3 读取共用，1–32。每路约占 24 MB 内存，最多占内存三分之一。">
               <input className="input" type="number" min={1} max={32} step={1} required value={form.transfer_concurrency}
@@ -96,6 +96,12 @@ export function Resources() {
           <div className="form-row">
             <Field label="每个 Bot 的发送间隔（毫秒）" hint="0–10000。过短容易被 Telegram 限流，限流后会自动退避。"><input className="input" type="number" min={0} max={10000} step={100} required value={form.bot_interval_ms} onChange={number("bot_interval_ms")} /></Field>
             <Field label="磁盘保留空间（MiB）" hint="至少 128；剩余空间不足时离线下载等待释放。"><input className="input" type="number" min={128} max={1048576} step={1} required value={form.reserve_mib} onChange={number("reserve_mib")} /></Field>
+          </div>
+          <div className="form-row">
+            <Field label="文件校验每日读取量（MiB）" hint="后台「文件校验」每天最多从存储读取这么多已保存的数据，检查是否完好，读满后第二天从停下的位置继续。0–1048576，默认 2048；0 关闭自动校验（仍可在「安全与维护」手动运行）。数值越大检查一轮越快，但占用的 Telegram 读取量越多。">
+              <input className="input" type="number" min={0} max={1048576} step={256} required value={form.scrub_daily_mib} onChange={number("scrub_daily_mib")} /></Field>
+            <Field label="机器人发回文件上限（MiB）" hint="Telegram 机器人用 /find 把文件发回聊天时的大小上限，文件会整个读进服务器内存后发送。1–2000，默认 200；使用官方 Bot API 时 Telegram 只允许 50 MB，配置自建 Bot API 服务后才能超过。">
+              <input className="input" type="number" min={1} max={2000} step={10} required value={form.telegram_send_mib} onChange={number("telegram_send_mib")} /></Field>
           </div>
           {(form.x_enabled || form.youtube_enabled) && <div className="form-row">
             <Field label="平台临时缓存上限（MiB）" hint="16–8192。分离的音视频轨合并前暂存在数据目录的磁盘上，两轨合计超过这个值的格式不能选择；单轨媒体边下载边保存，不受限制。合并时剩余磁盘低于「磁盘保留空间」会停止。"><input className="input" type="number" min={16} max={8192} step={1} required value={form.platform_max_mib} onChange={number("platform_max_mib")} /></Field>

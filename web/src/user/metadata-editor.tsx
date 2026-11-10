@@ -31,6 +31,7 @@ export function MetadataEditor({ file, onClose, initialTab }: { file: api.FileIt
   const labels = video ? VIDEO_FIELD_LABELS : AUDIO_FIELD_LABELS, order = video ? VIDEO_ORDER : AUDIO_ORDER;
   const [tab, setTab] = useState<MetadataTab>(initialTab && (media || initialTab === "cover") ? initialTab : media ? "info" : "cover");
   const [info, setInfo] = useState<api.AudioEditInfo | null>(null), [fields, setFields] = useState(EMPTY);
+  const [resets, setResets] = useState<Set<keyof api.AudioEditFields>>(new Set());
   const [tracks, setTracks] = useState<Track[]>([]), [selected, setSelected] = useState(""), [removed, setRemoved] = useState<string[]>([]);
   const [excluded, setExcluded] = useState<number[]>([]), [extracting, setExtracting] = useState<Record<number, number | null>>({});
   const [error, setError] = useState(""), [busy, setBusy] = useState(false), [reading, setReading] = useState(false);
@@ -42,7 +43,7 @@ export function MetadataEditor({ file, onClose, initialTab }: { file: api.FileIt
   const input = useRef<HTMLInputElement>(null);
   const original = info ? { ...EMPTY, ...info.fields, lyrics: info.lyrics } : EMPTY;
   const changedFields = info ? (Object.keys(EMPTY) as (keyof api.AudioEditFields)[]).filter(key => fields[key] !== original[key]) : [];
-  const changes = changedFields.length + removed.length + excluded.length + tracks.filter(track => track.changed).length;
+  const changes = changedFields.length + [...resets].filter(name => !changedFields.includes(name)).length + removed.length + excluded.length + tracks.filter(track => track.changed).length;
   const dirty = changes > 0;
   const track = tracks.find(item => item.key === selected);
   const embedded = (info?.embedded_subtitles ?? []).filter(stream => !tracks.some(item => item.embedded && item.key === `embedded-${stream.index}`));
@@ -52,7 +53,7 @@ export function MetadataEditor({ file, onClose, initialTab }: { file: api.FileIt
     const value = await api.audioEditInfo(file.key, signal);
     setInfo(value);
     const rows = value.assets.map(asset => ({ key: asset.id!, id: asset.id, title: asset.name, language: asset.language || "", default: !!asset.default }));
-    if (!keep) { setFields({ ...EMPTY, ...value.fields, lyrics: value.lyrics }); setTracks(rows); setSelected(rows[0]?.key || ""); return; }
+    if (!keep) { setFields({ ...EMPTY, ...value.fields, lyrics: value.lyrics }); setResets(new Set()); setTracks(rows); setSelected(rows[0]?.key || ""); return; }
     // 提取内置字幕后只补上新保存的轨道，不打断正在编辑的内容。
     setTracks(items => [...items, ...rows.filter(row => !items.some(item => item.id === row.id) && !removed.includes(row.id!))]);
     setSelected(current => current || rows.find(row => !removed.includes(row.id!))?.key || "");
@@ -83,7 +84,15 @@ export function MetadataEditor({ file, onClose, initialTab }: { file: api.FileIt
   }, [selected, tab, info]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const close = () => { if (busy) return; if (dirty || coverDirty) setDiscard(true); else onClose(); };
-  const set = (name: keyof api.AudioEditFields, value: string) => setFields(current => ({ ...current, [name]: value }));
+  const set = (name: keyof api.AudioEditFields, value: string) => {
+    setFields(current => ({ ...current, [name]: value }));
+    setResets(current => { if (!current.has(name)) return current; const next = new Set(current); next.delete(name); return next; });
+  };
+  /** 恢复为文件自带的值：显示自动解析的内容，保存时去掉这个字段的手动覆盖。 */
+  const reset = (name: keyof api.AudioEditFields) => {
+    setFields(current => ({ ...current, [name]: info?.auto_fields?.[name] ?? "" }));
+    setResets(current => new Set(current).add(name));
+  };
   function addTrack(text = "", language = "", title = "字幕") {
     const key = `new-${Date.now()}-${Math.random()}`;
     setTracks(items => [...items, { key, title, language, default: !items.length, text, changed: true, textChanged: true }]);
@@ -108,7 +117,8 @@ export function MetadataEditor({ file, onClose, initialTab }: { file: api.FileIt
     if (!info || busy) return;
     const controller = new AbortController(); operation.current = controller; setBusy(true); setError("");
     try {
-      const values = Object.fromEntries(changedFields.map(name => [name, fields[name]]));
+      const values: Partial<Record<keyof api.AudioEditFields, string | null>> = Object.fromEntries(changedFields.map(name => [name, fields[name]]));
+      for (const name of resets) values[name] = null;
       await api.saveAudioMetadata({ ...file, etag: info.etag }, values, "keep", controller.signal, setProgress, { revision: info.revision,
         subtitles: { upsert: tracks.filter(item => item.changed).map(item => ({ id: item.id, title: item.title, language: item.language || null, default: item.default, ...(item.textChanged ? { text: item.text } : {}) })),
           remove: removed, exclude: excluded } });
@@ -196,7 +206,8 @@ export function MetadataEditor({ file, onClose, initialTab }: { file: api.FileIt
             <Button size="sm" icon="search" onClick={() => setLookup("info")}>在线查找</Button>
           </div>
           <div className="metadata-grid">{order.map(name => <div key={name} className={`metadata-cell${WIDE.includes(name) ? " is-wide" : ""}${fields[name] !== original[name] ? " is-changed" : ""}`}>
-            <Field label={labels[name] ?? name}>
+            <Field label={labels[name] ?? name} hint={info.overridden?.includes(name) && !resets.has(name) ? <button type="button" className="link-button" onClick={() => reset(name)}
+              title={info.auto_fields?.[name] ? `文件自带：${info.auto_fields[name]}` : "文件中没有这一项"}>恢复为文件自带值</button> : resets.has(name) ? "保存后恢复为文件自带值" : undefined}>
               {name === "description" ? <textarea id={`${id}-${name}`} className="input" rows={4} value={fields[name]} maxLength={16000} onChange={event => set(name, event.target.value)} />
                 : <input id={`${id}-${name}`} className="input" value={fields[name]} placeholder={PLACEHOLDERS[name]} maxLength={name === "actors" ? 4000 : 512}
                   inputMode={name === "year" || name === "track" ? "numeric" : undefined} onChange={event => set(name, event.target.value)} />}

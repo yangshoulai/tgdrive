@@ -13,3 +13,10 @@
 - 浏览索引：v40 新增 `objects_by_modified(bucket_id, modified_at DESC, key)`，供「最近」「相册」视图键集分页。
 
 - 媒体资源位于 `.tgdrive/media/`，使用 ObjectService 加密、配额与引用回收；用量单列「媒体元数据」。复制增加目标引用及配额，回收站保留，永久删除释放。手动编辑不得回源读写完整媒体。 详见 [文件级元数据](../media-metadata.md)。
+- 分段替换：`Metadata.replace_part` 在同一事务内现查该分段已有的分片引用并入 GC 队列（`old_refs` 参数已不再使用），同一分段并发重传（S3 客户端重试、网页分段重试）时先完成的那批分片不会删行却漏进 GC。不要改回「调用方开始时读旧列表」。回归：`tests/test_storage_resilience.py`。
+- 系统小对象（封面大图、歌词与字幕资源）上限 `blobengine.SMALL_READ_LIMIT` = 2 MiB，必须不小于 `media.records.TEXT_LIMIT`；`put_part(small=True)` 与 `read_small` 共用它。
+- 存储拒绝访问：Telegram 下载返回 401/403 或 `getFile` 报 `TelegramAuthError` 时抛 `errors.StorageAccessError`（不是 `BlobNotFound`）。巡检遇到它直接中止本轮、不移动游标，不把分片记成损坏。
+- 巡检（`maintenance.Scrubber`）按每轮字节预算而不是文件数推进：预算是「下载与资源」的 `scrub_daily_mib`（默认 2048，0 关闭自动校验，调度器跳过；应用工厂注入 `Scrubber.budget_source`），每轮至少检查一个 Blob；`MaintenanceScheduler.scrub_batch`（5000）只是数量上限。报告带 `bytes`。
+- 失效 Bot 的分片重新认领：`telegram/reclaim.py` 的 `BotReclaimer`。`TelegramRef` 已含频道与消息编号，旧数据无需迁移；另一个已启用的 Bot `forwardMessage` 到自己的存储频道，取得自己的 file_id 后按旧引用精确替换 `chunks.blob_ref`，原消息以「新 Bot + 原频道 + 原消息」入 GC；GC 队列里属于失效 Bot 的条目直接改由新 Bot 删除并清零失败次数。转发后核对 `file_unique_id`。接口 `GET/POST /api/admin/v1/bots/<id>/reclaim`（审计 `bot.reclaim`），控制台「存储通道」操作菜单「转交分片给其他 Bot」循环调用直到没有进展。
+- 元数据备份异地副本：`backup_remote.RemoteBackup`（`MaintenanceService.remote_backup`，由应用工厂注入，取 `ConfiguredBlobStore.pool()`）。`MaintenanceService.backup()` 先写本机备份，启用时再按 45 MB 分卷（`*.tgdbak.001…`，无本机数据库也能从 Telegram 客户端下载拼接恢复）发到独立备份频道，未填频道时回落到第一个可用 Bot 的存储频道；频道里按 `keep`（1–100）轮换，记录在 settings `backup.remote.items`。发送失败只在结果里写 `remote_error`，不删除本机备份。接口 `GET/POST /api/admin/v1/backups/remote`（审计 `backup.remote` 只记是否启用、份数与是否使用独立频道）。
+- 秒传预检：网页上传 8 MB 以上的文件、且同一批里没有同样大小的待传文件时，先调用 `POST /files/instant/probe`（`ObjectService.has_size_candidate`，范围与 `find_by_fingerprint` 相同：同一存储桶、授权前缀、排除系统区但私密授权时包含私密空间）；没有同样大小的文件就跳过计算完整指纹直接上传。不要改成跨存储桶判断（会泄露其他用户是否有同样大小的文件）。

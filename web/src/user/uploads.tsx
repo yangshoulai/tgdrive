@@ -93,12 +93,53 @@ async function refreshUploadLimits() {
 /** 小于这个大小的文件不做秒传探测：哈希加一次请求的开销比直接上传还大。 */
 // 秒传探测的最小文件：照片多在 1 MiB 以下，也要能复用已有内容与缩略图；更小的文件多一次请求不划算，由服务端写入后合并兜底。
 const INSTANT_MIN_SIZE = 64 * 1024;
+/** 达到这个大小才先按大小预检：小文件算指纹很快，多一次请求不划算。 */
+const PROBE_MIN_SIZE = 8 * 1024 * 1024;
 const resumeKey = (path: string, file: File) => `tgdrive:resume:${path}:${file.size}:${file.lastModified}`;
 const privateResumes = new Map<string, string>();
-const readResume = (key: string) => key.includes(`:${api.PRIVATE_PREFIX}`) ? privateResumes.get(key) ?? null : localStorage.getItem(key);
-const writeResume = (key: string, value: string) => { if (key.includes(`:${api.PRIVATE_PREFIX}`)) privateResumes.set(key, value); else localStorage.setItem(key, value); };
+/** 续传记录保存为 {id, at}；服务端 7 天后清理未完成的上传，本地记录同样过期，避免长期留在 localStorage。旧版只存了上传 ID。 */
+const RESUME_TTL = 7 * 86400_000;
+function parseResume(raw: string | null): { id: string; at: number } | null {
+  if (!raw) return null;
+  try { const value = JSON.parse(raw) as { id?: unknown; at?: unknown }; if (typeof value.id === "string" && typeof value.at === "number") return { id: value.id, at: value.at }; } catch { /* 旧格式 */ }
+  return { id: raw, at: 0 };
+}
+function sweepResumes() {
+  try {
+    const now = Date.now();
+    for (let index = localStorage.length - 1; index >= 0; index--) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith("tgdrive:resume:")) continue;
+      const value = parseResume(localStorage.getItem(key));
+      if (!value) continue;
+      // 旧格式没有时间：补上当前时间，从现在起计算过期。
+      if (!value.at) localStorage.setItem(key, JSON.stringify({ id: value.id, at: now }));
+      else if (now - value.at > RESUME_TTL) localStorage.removeItem(key);
+    }
+  } catch { /* 存储不可用 */ }
+}
+sweepResumes();
+const readResume = (key: string) => key.includes(`:${api.PRIVATE_PREFIX}`) ? privateResumes.get(key) ?? null : parseResume(localStorage.getItem(key))?.id ?? null;
+const writeResume = (key: string, value: string) => { if (key.includes(`:${api.PRIVATE_PREFIX}`)) privateResumes.set(key, value); else localStorage.setItem(key, JSON.stringify({ id: value, at: Date.now() })); };
 const removeResume = (key: string) => { privateResumes.delete(key); if (!key.includes(`:${api.PRIVATE_PREFIX}`)) localStorage.removeItem(key); };
 const sleep = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
+
+/** 不分段的上传（≤64 MB）：网络中断或服务端 5xx 时自动重试 4 次（1、2、4、8 秒后），与分段上传一致。
+ *  写入固定路径是覆盖语义，重复提交不会产生副本。 */
+async function uploadSingle(job: UploadJob, control: { aborted: boolean; abort?: () => void }, onProgress: (percent: number) => void): Promise<api.FileItem> {
+  for (let attempt = 0; ; attempt++) {
+    if (control.aborted) throw new api.ApiError("已取消上传", 0, "upload_aborted");
+    const task = api.uploadFileWithProgress(job.path, job.file, { isPublic: job.isPublic || undefined, onProgress: progress => onProgress(progress.percent) });
+    control.abort = task.abort;
+    try { return await task.promise; }
+    catch (reason) {
+      const transient = reason instanceof api.ApiError && (reason.status === 0 || reason.status >= 500) && reason.code !== "upload_aborted";
+      if (!transient || attempt >= 4 || control.aborted) throw reason;
+      onProgress(0);
+      await sleep(1000 * 2 ** attempt);
+    }
+  }
+}
 
 async function uploadMultipart(job: UploadJob, signal: { aborted: boolean; abort?: () => void },
                                onProgress: (percent: number) => void, onResumed: () => void): Promise<api.FileItem> {
@@ -177,6 +218,8 @@ export type UploadQueue = ReturnType<typeof useUploadQueue>;
 
 export function useUploadQueue(onSettled: () => void) {
   const [jobs, setJobs] = useState<UploadJob[]>([]);
+  const jobsRef = useRef(jobs);
+  jobsRef.current = jobs;
   const [folderShares, setFolderShares] = useState<FolderShare[]>([]);
   const folderGroups = useRef(new Map<string, FolderShareWork>());
   const queue = useRef<UploadJob[]>([]);
@@ -226,7 +269,14 @@ export function useUploadQueue(onSettled: () => void) {
     try {
       // 先算内容指纹并向服务端探测：存储桶里已有相同内容就直接引用，不传输任何数据。
       let instant: api.FileItem | null = null;
-      if (job.file.size >= INSTANT_MIN_SIZE && fingerprintSupported()) {
+      // 大文件先按大小预检：存储桶里没有同样大小的文件就不可能秒传，跳过读取整个文件计算指纹（10 GB 文件省一遍完整读取）。
+      // 同一批里有同样大小的文件时仍计算指纹，保留「同批相同内容只上传一份」。
+      let worthHashing = job.file.size >= INSTANT_MIN_SIZE && fingerprintSupported();
+      if (worthHashing && job.file.size >= PROBE_MIN_SIZE && !jobsRef.current.some(other => other.id !== job.id && other.file.size === job.file.size && (other.status === "queued" || other.status === "uploading"))) {
+        try { worthHashing = (await api.instantProbe(job.path, job.file.size)).candidates; }
+        catch { /* 预检失败时照常计算指纹 */ }
+      }
+      if (worthHashing) {
         update(job.id, { phase: "hashing", percent: 0 });
         try {
           const fingerprint = await fingerprintFile(job.file, fraction => update(job.id, { percent: fraction * 100 }), control);
@@ -259,11 +309,7 @@ export function useUploadQueue(onSettled: () => void) {
       if (control.aborted) throw cancelled();
       if (instant) { promise = Promise.resolve(instant); update(job.id, { instant: true }); tally.current.instant++; }
       else if (multipart) promise = uploadMultipart(job, control, percent => update(job.id, { percent }), () => update(job.id, { resumed: true }));
-      else {
-        const task = api.uploadFileWithProgress(job.path, job.file, { isPublic: job.isPublic || undefined, onProgress: progress => update(job.id, { percent: progress.percent }) });
-        control.abort = task.abort;
-        promise = task.promise;
-      }
+      else promise = uploadSingle(job, control, percent => update(job.id, { percent }));
     } catch (reason) {
       promise = Promise.reject(reason);
     }

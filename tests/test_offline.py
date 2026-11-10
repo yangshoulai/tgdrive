@@ -226,10 +226,10 @@ class ParseLimitTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MemoryResponse:
-    def __init__(self, request, method, start, size, *, changed=False):
+    def __init__(self, request, method, start, size, *, changed=False, modified=None):
         self.url, self.method, self.start = request.url, method, start
         self.size, self.status = size - start, 206 if start else 200
-        self.headers = {"etag": '"changed"' if changed else '"version-1"', "content-type": "application/octet-stream"}
+        self.headers = ({"last-modified": modified} if modified else {"etag": '"changed"' if changed else '"version-1"'}) | {"content-type": "application/octet-stream"}
         if start:
             self.headers["content-range"] = f"bytes {start}-{size - 1}/{size}"
 
@@ -244,7 +244,7 @@ class MemoryResponse:
 
 class MemoryHttp:
     def __init__(self, size=1000):
-        self.size, self.calls, self.changed = size, [], False
+        self.size, self.calls, self.changed, self.modified = size, [], False, None
 
     @asynccontextmanager
     async def open(self, request, *, method=None, extra_headers=None, **kwargs):
@@ -252,7 +252,7 @@ class MemoryHttp:
         extra = extra_headers or {}
         self.calls.append((method, dict(extra), request.url))
         start = int(extra.get("Range", "bytes=0-").split("=", 1)[1].split("-", 1)[0])
-        yield MemoryResponse(request, method, start, self.size, changed=self.changed)
+        yield MemoryResponse(request, method, start, self.size, changed=self.changed, modified=self.modified)
 
 
 class TaskTests(unittest.IsolatedAsyncioTestCase):
@@ -619,6 +619,20 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.offline._row(task["id"])["status"] == "completed")
         ranges = [headers for method, headers, _ in self.http.calls if method == "GET" and headers]
         self.assertEqual(ranges[-1], {"Range": "bytes=16777216-", "If-Range": '"version-1"'})
+        self.assertEqual(self.app.objects.head_object(Scope(self.alice.bucket_id), "downloads/file.bin").size, self.http.size)
+
+    async def test_last_modified_resume_without_etag(self):
+        # 只有 Last-Modified 的来源也能续传：If-Range 带修改时间，响应的修改时间与总长度一致才追加。
+        self.http.size = 20 * 1024 * 1024
+        self.http.modified = "Wed, 21 Oct 2026 07:28:00 GMT"
+        task = await self.make()
+        self.offline.start()
+        await self.wait_for(lambda: self.offline._row(task["id"])["stored_bytes"] >= 16 * 1024 * 1024)
+        await self.offline.control(self.alice.id, task["id"], "stop")
+        await self.offline.control(self.alice.id, task["id"], "resume")
+        await self.wait_for(lambda: self.offline._row(task["id"])["status"] == "completed")
+        ranges = [headers for method, headers, _ in self.http.calls if method == "GET" and headers]
+        self.assertEqual(ranges[-1], {"Range": "bytes=16777216-", "If-Range": "Wed, 21 Oct 2026 07:28:00 GMT"})
         self.assertEqual(self.app.objects.head_object(Scope(self.alice.bucket_id), "downloads/file.bin").size, self.http.size)
 
     async def test_temporary_source_error_keeps_breakpoint_and_retries(self):

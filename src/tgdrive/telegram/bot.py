@@ -29,13 +29,14 @@ import mimetypes
 import re
 import secrets
 import time
+import unicodedata
 from datetime import datetime
 from urllib.parse import quote
 
 from ..api import normalize_user_path
 from ..crypto import derive_subkey, open_sealed, seal
 from ..errors import NotFoundError, NotReadyError, QuotaExceededError
-from ..objects import PRIVATE_PREFIX
+from ..objects import PRIVATE_PREFIX, Scope
 from ..offline.http import DownloadError
 from ..offline.request import filename
 from ..work import Limiter
@@ -57,12 +58,20 @@ DEFAULT_FILES_DIR = "/var/lib/telegram-bot-api"
 READ_PIECE = 1024 * 1024
 MESSAGE_LIMIT = 4000
 ASSISTANT_WAIT = 15 * 60
+# 超过 ASSISTANT_WAIT 后不再显示进度，但继续在后台等待，最长 RELAY_LIMIT，完成后主动推送结果。
+RELAY_LIMIT = 3 * 60 * 60
+PROGRESS_EVERY = 5
+# /find 结果按钮的有效期与每次最多列出的文件数。
+PICK_TTL = 30 * 60
+FIND_LIMIT = 10
 ACTION_WAIT = 10 * 60
 URL_PATTERN = re.compile(r"https?://", re.IGNORECASE)
 
 COMMANDS = [
     ("help", "使用说明"),
-    ("status", "最近的离线下载"),
+    ("status", "最近的离线下载，可暂停、继续或取消"),
+    ("find", "搜索文件，可发回或生成分享链接：/find 关键词"),
+    ("usage", "查看空间用量"),
     ("folder", "查看或修改保存位置"),
     ("notify", "开关下载完成提醒：/notify on 或 off"),
     ("ask", "向文件助手提问（消息里有链接时用它）"),
@@ -75,6 +84,19 @@ HELP = ("可以这样使用：\n"
         "• 发送或转发照片、视频、音频、文档：保存到网盘（单个文件 {limit} 以内）\n"
         "• 直接发文字：向文件助手提问；需要确认的操作会附带按钮\n\n"
         "命令：\n" + "\n".join(f"/{name} — {text}" for name, text in COMMANDS))
+
+
+def _duration(seconds: float) -> str:
+    seconds = int(seconds)
+    return f"{seconds // 60} 分 {seconds % 60} 秒" if seconds >= 60 else f"{seconds} 秒"
+
+
+def _size(value: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value} B"
 
 
 def _display(path: str) -> str:
@@ -156,6 +178,8 @@ class InteractionBot:
         self.metadata, self.keystore = accounts.metadata, accounts.keystore
         self.client_factory = client_factory
         self._codes: dict[str, tuple[int, float]] = {}
+        # /find 结果按钮：短编号 → (用户, 路径, ETag, 过期时刻)，只在内存中保存 PICK_TTL。
+        self._picks: dict[str, tuple[int, str, str, float]] = {}
         self._sessions: dict[int, str] = {}
         self._chat_locks: dict[int, asyncio.Lock] = {}
         self._albums: dict[str, dict] = {}
@@ -557,6 +581,10 @@ class InteractionBot:
             await self._reply(chat_id, f"已绑定 Tessera 账号 {account['username']}。\n\n{self._help()}\n\n当前保存位置：{_display(link['folder'])}")
         elif command == "/status":
             await self._status(chat_id, link)
+        elif command == "/find":
+            await self._find(chat_id, link, argument)
+        elif command == "/usage":
+            await self._usage(chat_id, link)
         elif command == "/folder":
             await self._set_folder(chat_id, link, argument)
         elif command == "/notify":
@@ -613,20 +641,128 @@ class InteractionBot:
         self._audit("telegram.link", user_id)
         await self._reply(chat_id, f"绑定成功，已连接 Tessera 账号 {account['username']}。\n\n{self._help()}")
 
-    async def _status(self, chat_id: int, link) -> None:
+    STATUS_LABELS = {"queued": "排队中", "running": "下载中", "completed": "已完成", "failed": "失败", "stopped": "已暂停",
+                     "interrupted": "等待恢复"}
+
+    def _status_view(self, user_id: int):
         rows = self.metadata.db.execute(
-            "SELECT * FROM offline_tasks WHERE user_id=? ORDER BY created_at DESC, id DESC LIMIT 8", (link["user_id"],)).fetchall()
+            "SELECT * FROM offline_tasks WHERE user_id=? ORDER BY created_at DESC, id DESC LIMIT 8", (user_id,)).fetchall()
         if not rows:
-            await self._reply(chat_id, "还没有离线下载。发送链接即可创建。")
-            return
-        labels = {"queued": "排队中", "running": "下载中", "completed": "已完成", "failed": "失败", "stopped": "已暂停",
-                  "interrupted": "等待恢复"}
-        lines = []
-        for row in rows:
+            return "还没有离线下载。发送链接即可创建。", None
+        lines, buttons = [], []
+        for index, row in enumerate(rows, 1):
             name = "私密空间下载" if row["key"].startswith(PRIVATE_PREFIX) else row["key"].rsplit("/", 1)[-1]
             progress = f" {row['stored_bytes'] * 100 // row['size']}%" if row["status"] == "running" and row["size"] else ""
-            lines.append(f"• {labels.get(row['status'], row['status'])}{progress} — {name}")
-        await self._reply(chat_id, "最近的离线下载：\n" + "\n".join(lines))
+            lines.append(f"{index}. {self.STATUS_LABELS.get(row['status'], row['status'])}{progress} — {name}")
+            # 每个未完成的任务一行按钮：暂停／继续、取消（删除任务，已保存的文件不受影响）。
+            if row["status"] in ("queued", "running", "interrupted"):
+                buttons.append([{"text": f"{index}. ⏸ 暂停", "callback_data": f"t:{row['id']}:stop"},
+                                {"text": "✖ 取消", "callback_data": f"t:{row['id']}:delete"}])
+            elif row["status"] in ("stopped", "failed"):
+                buttons.append([{"text": f"{index}. ▶ {'重试' if row['status'] == 'failed' else '继续'}", "callback_data": f"t:{row['id']}:resume"},
+                                {"text": "✖ 取消", "callback_data": f"t:{row['id']}:delete"}])
+        if buttons:
+            buttons.append([{"text": "↻ 刷新", "callback_data": "t:0:refresh"}])
+        return "最近的离线下载：\n" + "\n".join(lines), buttons or None
+
+    async def _status(self, chat_id: int, link) -> None:
+        text, buttons = self._status_view(link["user_id"])
+        await self._reply(chat_id, text, buttons=buttons)
+
+    async def _task_callback(self, chat_id: int, callback: dict, link, task_id: int, action: str) -> str:
+        if action != "refresh":
+            try:
+                await self.offline.control(link["user_id"], task_id, action)
+            except (ValueError, NotFoundError, PermissionError) as exc:
+                return str(exc)[:180] or "操作失败"
+        message = callback.get("message") or {}
+        if message.get("message_id"):
+            text, buttons = self._status_view(link["user_id"])
+            await self._edit(chat_id, message["message_id"], text, buttons=buttons or [])
+        return {"stop": "已暂停", "resume": "已继续", "delete": "已取消任务，已保存的文件不受影响", "refresh": "已刷新"}.get(action, "完成")
+
+    # ---------- 搜索、发回与分享 ----------
+
+    async def _find(self, chat_id: int, link, argument: str) -> None:
+        query = unicodedata.normalize("NFC", argument.strip())
+        if not query:
+            await self._reply(chat_id, "在 /find 后面写上文件名里的关键词，例如：/find 合同")
+            return
+        if len(query) > 100:
+            await self._reply(chat_id, "关键词太长了，请缩短到 100 个字符以内。")
+            return
+        account = self._account(link["user_id"])
+        # 只搜「我的文件」：.tgdrive/ 系统区（回收站、私密空间、助手附件）不出现在结果里。
+        rows = self.metadata.db.execute(
+            "SELECT key,size,etag FROM objects WHERE bucket_id=? AND substr(key,1,9)!='.tgdrive/' AND substr(key,-1)!='/' "
+            "AND instr(lower(key),lower(?))>0 ORDER BY modified_at DESC LIMIT ?", (account["bucket_id"], query, FIND_LIMIT + 1)).fetchall()
+        if not rows:
+            await self._reply(chat_id, f"没有找到包含「{query}」的文件。")
+            return
+        now = time.monotonic()
+        self._picks = {key: value for key, value in self._picks.items() if value[3] > now}
+        lines, buttons = [], []
+        for index, row in enumerate(rows[:FIND_LIMIT], 1):
+            pick = secrets.token_urlsafe(6)
+            self._picks[pick] = (link["user_id"], row["key"], row["etag"], now + PICK_TTL)
+            lines.append(f"{index}. {_display(row['key'])}（{_size(int(row['size'] or 0))}）")
+            buttons.append([{"text": f"{index}. ⬇ 发回", "callback_data": f"f:{pick}:s"}, {"text": "🔗 分享链接", "callback_data": f"f:{pick}:l"}])
+        more = f"\n只列出最近修改的 {FIND_LIMIT} 个，可以换个更具体的关键词。" if len(rows) > FIND_LIMIT else ""
+        await self._reply(chat_id, f"找到这些文件：\n" + "\n".join(lines) + more, buttons=buttons)
+
+    def _send_limit(self) -> int:
+        # 上限由「下载与资源」的 telegram_send_mib 配置（文件整读进内存后发送）；官方 Bot API 另有 50 MB 上限。
+        configured = (self.resources.config()["telegram_send_mib"] if self.resources is not None else 200) * 1024 * 1024
+        return configured if self.api_url() else min(configured, 50 * 1024 * 1024)
+
+    async def _file_callback(self, chat_id: int, link, pick: str, action: str) -> str:
+        entry = self._picks.get(pick)
+        if entry is None or entry[0] != link["user_id"] or entry[3] < time.monotonic():
+            return "这个按钮已过期，请重新 /find"
+        account = self._account(link["user_id"])
+        scope = Scope(account["bucket_id"])
+        try:
+            info = self.objects.head_object(scope, entry[1])
+        except NotFoundError:
+            return "文件已被移动或删除"
+        name = entry[1].rsplit("/", 1)[-1]
+        if action == "l":
+            base = (self.settings.get("public_base_url") if self.settings is not None else None) or ""
+            if not base:
+                return "管理员还没有在控制台设置公开访问地址，暂时无法生成链接"
+            try:
+                shared = self.objects.set_public(scope, entry[1], True)
+            except (PermissionError, ValueError) as exc:
+                return str(exc)[:180]
+            self._audit("telegram.share", link["user_id"])
+            await self._reply(chat_id, f"「{name}」的分享链接（任何人可访问，可在网页的「公开分享」里关闭）：\n{base.rstrip('/')}/s/{shared.public_token}")
+            return "已生成分享链接"
+        if info.size > self._send_limit():
+            return f"文件超过 {_size(self._send_limit())}，请在网页下载"
+        client = self.client()
+        if client is None:
+            return "机器人暂时不可用"
+        self._spawn(self._send_back(chat_id, client, scope, entry[1], name))
+        return "正在发送…"
+
+    async def _send_back(self, chat_id: int, client: TelegramClient, scope, key: str, name: str) -> None:
+        try:
+            _, stream = await self.objects.get_object(scope, key)
+            data = b"".join([piece async for piece in stream])
+            await client.send_document(chat_id, data, filename=name)
+        except (TelegramError, OSError, NotFoundError) as exc:
+            await self._reply(chat_id, f"发送「{name}」失败：{exc}"[:300])
+
+    async def _usage(self, chat_id: int, link) -> None:
+        account = self._account(link["user_id"])
+        bucket = self.metadata.db.execute("SELECT used_bytes,quota_bytes FROM buckets WHERE id=?", (account["bucket_id"],)).fetchone()
+        used, quota = int(bucket["used_bytes"] or 0), bucket["quota_bytes"]
+        trash = int(self.metadata.db.execute("SELECT COALESCE(SUM(size),0) FROM objects WHERE bucket_id=? AND key>=? AND key<?",
+                                             (account["bucket_id"], ".tgdrive/trash/", ".tgdrive/trash/\U0010ffff")).fetchone()[0])
+        lines = [f"已用空间：{_size(used)}" + (f" / {_size(int(quota))}（{used * 100 // max(1, int(quota))}%）" if quota else "（不限额）")]
+        if trash:
+            lines.append(f"其中回收站：{_size(trash)}，可在网页清空回收站释放空间")
+        await self._reply(chat_id, "\n".join(lines))
 
     async def _set_folder(self, chat_id: int, link, argument: str) -> None:
         if not argument.strip():
@@ -910,25 +1046,56 @@ class InteractionBot:
         await self._relay(chat_id, link["user_id"], conversation, started["run_id"], reply_to=message_id)
 
     async def _relay(self, chat_id: int, user_id: int, conversation: str, run_id: str, *, reply_to: int | None = None) -> None:
-        """等这一轮结束，把最后一条回复发回 Telegram；本轮新提出、等待确认的操作逐个附上按钮。"""
+        """等这一轮结束，把最后一条回复发回 Telegram；本轮新提出、等待确认的操作逐个附上按钮。
+
+        处理期间先发一条进度消息并定时编辑（已执行几步、已用时间）；超过 ASSISTANT_WAIT 后改为提示「完成后推送」，
+        继续在后台等待，结束时删除进度消息并主动发送结果。"""
         state = self.assistant.runs.get(run_id)
         client = self.client()
-        if state is not None and state.task is not None:
-            typing = None
-            if client is not None:
-                typing = asyncio.get_running_loop().create_task(self._typing(client, chat_id, ASSISTANT_WAIT // 5))
+        if state is not None and state.task is not None and not state.task.done():
+            started = time.monotonic()
+            progress = await self._reply(chat_id, "⏳ 文件助手正在处理…", reply_to=reply_to)
+            progress_id = (progress or {}).get("message_id")
+            last_text, notified = "", False
+            typing = asyncio.get_running_loop().create_task(self._typing(client, chat_id, ASSISTANT_WAIT // 5)) if client is not None else None
             try:
-                await asyncio.wait_for(asyncio.shield(state.task), ASSISTANT_WAIT)
-            except TimeoutError:
-                await self._reply(chat_id, "文件助手还在处理，完成后可以在网页的对话列表里查看结果。")
-                return
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
+                while not state.task.done():
+                    elapsed = time.monotonic() - started
+                    if elapsed >= RELAY_LIMIT:
+                        await self._reply(chat_id, "文件助手处理时间过长，请稍后在网页的对话列表里查看结果。")
+                        return
+                    try:
+                        await asyncio.wait_for(asyncio.shield(state.task), PROGRESS_EVERY)
+                    except TimeoutError:
+                        pass
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        break
+                    if state.task.done() or client is None or not progress_id:
+                        continue
+                    elapsed = time.monotonic() - started
+                    if elapsed >= ASSISTANT_WAIT:
+                        if not notified:
+                            notified = True
+                            if typing is not None:
+                                typing.cancel()
+                            await self._edit(chat_id, progress_id, "⏳ 文件助手还在处理，完成后会在这里推送结果。")
+                        continue
+                    steps = self.metadata.db.execute("SELECT COUNT(*) FROM assistant_messages WHERE conversation_id=? AND role='tool' AND seq>?",
+                                                     (conversation, self._run_start(conversation, run_id))).fetchone()[0]
+                    text = f"⏳ 文件助手正在处理…（{f'已执行 {steps} 步，' if steps else ''}已用 {_duration(elapsed)}）"
+                    if text != last_text:
+                        last_text = text
+                        await self._edit(chat_id, progress_id, text)
             finally:
                 if typing is not None:
                     typing.cancel()
+            if progress_id and client is not None:
+                try:
+                    await client.delete_message(chat_id, progress_id)
+                except (TelegramError, OSError):
+                    pass
         messages = [item for item in self.assistant.trace.messages(conversation, limit=200, latest=True) if item.get("run_id") == run_id]
         replies = [item.get("text") for item in messages if item["role"] == "assistant" and (item.get("text") or "").strip()]
         if replies:
@@ -940,6 +1107,22 @@ class InteractionBot:
         for row in self.metadata.db.execute("SELECT id FROM assistant_actions WHERE run_id=? AND status='pending' ORDER BY created_at",
                                             (run_id,)).fetchall():
             await self._offer_action(chat_id, user_id, row["id"])
+
+    def _run_start(self, conversation: str, run_id: str) -> int:
+        """这一轮之前的最后一条消息序号：只统计本轮执行的工具步骤。"""
+        for item in self.assistant.trace.messages(conversation, limit=400, latest=True):
+            if item.get("run_id") != run_id:
+                return int(item.get("seq") or 0)
+        return 0
+
+    async def _edit(self, chat_id: int, message_id: int, text: str, *, buttons=None) -> None:
+        client = self.client()
+        if client is None:
+            return
+        try:
+            await client.edit_message_text(chat_id, message_id, text, **({"buttons": buttons} if buttons is not None else {}))
+        except (TelegramError, OSError):
+            pass
 
     def _action_text(self, action: dict) -> str:
         from ..assistant.actions import KINDS
@@ -978,6 +1161,19 @@ class InteractionBot:
         if client is None:
             return
         data = str(callback.get("data") or "")
+        other = re.fullmatch(r"(?:t:(\d{1,12}):(stop|resume|delete|refresh)|f:([A-Za-z0-9_-]{4,16}):([sl]))", data)
+        if other is not None:
+            link = self._link(chat_id=chat_id)
+            account = self._account(link["user_id"]) if link is not None else None
+            if link is None or account is None or account["status"] != "active" or not self.keystore.unlocked:
+                await client.answer_callback_query(callback["id"], "账号未绑定或服务暂不可用")
+                return
+            if other[1]:
+                reply = await self._task_callback(chat_id, callback, link, int(other[1]), other[2])
+            else:
+                reply = await self._file_callback(chat_id, link, other[3], other[4])
+            await client.answer_callback_query(callback["id"], reply[:180])
+            return
         match = re.fullmatch(r"a:([A-Za-z0-9_-]{1,40}):([yn])", data)
         link = self._link(chat_id=chat_id)
         if match is None or link is None or self.assistant is None:

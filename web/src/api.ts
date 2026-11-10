@@ -57,7 +57,7 @@ export type RegistrationSettings = Pick<RegistrationConfig, "enabled" | "email_e
 export type RegistrationUpdate = Omit<RegistrationSettings, "smtp"> & { smtp: SmtpConfig; smtp_password?: string; clear_smtp_password?: boolean };
 export type Invitation = { id: number; code: string; status: "active" | "used" | "expired" | "revoked"; quota_bytes: number | null; expires_at: number; created_at: number; used_at?: number | null };
 export type InvitationPage = { invites: Invitation[]; total: number; next_cursor: number | null };
-export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number; thumbnail_concurrency: number; download_memory_percent: number; video_concurrency: number; thumbnail_cache_mib: number; download_connections: number; parse_concurrency: number; diagnostics: boolean };
+export type ResourceConfig = { mode: "auto" | "low" | "custom"; concurrency: number; scrub_daily_mib: number; telegram_send_mib: number; bandwidth_kib: number; reserve_mib: number; hls_enabled: boolean; x_enabled: boolean; youtube_enabled: boolean; youtube_max_height: number; platform_max_mib: number; proxy: string; transfer_concurrency: number; bucket_concurrency: number; upload_concurrency: number; upload_kib: number; bot_interval_ms: number; web_part_concurrency: number; web_file_concurrency: number; thumbnail_concurrency: number; download_memory_percent: number; video_concurrency: number; thumbnail_cache_mib: number; download_connections: number; parse_concurrency: number; diagnostics: boolean };
 export type ResourceSettings = { config: ResourceConfig; source: "admin" | "startup"; pressure: string | null;
   components: { versions: Record<string, string | null>; ytdlp_age_days: number | null };
   /** 生效档位：自动模式按检测到的 CPU 与内存选择 low 或 standard。 */
@@ -386,7 +386,9 @@ export type AudioEditFields = Record<"title" | "artist" | "album" | "album_artis
 /** lyrics_source：metadata 为已保存的歌词，embedded 为预填的文件内置歌词（不修改就不会保存）；embedded_subtitles 为还没保存的内置文字字幕轨。 */
 export type AudioEditInfo = { etag: string; revision: number; kind: "audio" | "video" | "other"; size: number; duration: number | null; assets: PreviewAsset[];
   embedded_subtitles: MediaSubtitleStream[]; initialization: { state: string; detail: string }; fields: Omit<AudioEditFields, "lyrics" | "subtitle">;
-  lyrics: string; lyrics_source: "metadata" | "embedded" | ""; cover: boolean; editable: boolean; reason: string };
+  lyrics: string; lyrics_source: "metadata" | "embedded" | ""; cover: boolean; editable: boolean; reason: string;
+  /** 文件自带（自动解析）的字段值与已手动覆盖的字段；旧服务器没有这两项。 */
+  auto_fields?: Partial<Record<keyof AudioEditFields, string>>; overridden?: (keyof AudioEditFields)[] };
 export type AudioEditJob = { id: string; path: string; state: "queued" | "running" | "done" | "failed" | "cancelled";
   read: number; stored: number; size: number; detail: string; result: FileItem | null };
 export const audioEditInfo = (path: string, signal?: AbortSignal) => request<AudioEditInfo>(fileApi("/media/edit", path) + mediaQuery(path), { signal });
@@ -402,7 +404,8 @@ async function audioEditSaved(path: string, asset?: string) {
   return saved;
 }
 /** 仅保存独立元数据；原文件内容与 ETag 不变。 */
-export async function saveAudioMetadata(file: Pick<FileItem, "key" | "etag">, fields: Partial<AudioEditFields>, cover = "keep",
+/** fields 中值为 null 的字段恢复为文件自带（自动解析）的值，去掉手动覆盖。 */
+export async function saveAudioMetadata(file: Pick<FileItem, "key" | "etag">, fields: Partial<Record<keyof AudioEditFields, string | null>>, cover = "keep",
   signal?: AbortSignal, onProgress?: (job: AudioEditJob) => void, options?: { revision: number; subtitles?: { upsert: SubtitleEdit[]; remove: string[]; exclude?: number[] } }): Promise<FileItem> {
   const revision = options?.revision ?? (await audioEditInfo(file.key, signal)).revision;
   let job = await request<AudioEditJob>(fileApi("/media/edit", file.key), {
@@ -775,6 +778,8 @@ export function versionedContentUrl(url: string, etag: string, size?: number, pr
 export type UploadState = { upload_id: string; path: string; completed: boolean; parts: { part_no: number; size: number; etag: string }[] };
 export type InstantResult = ({ hit: true } & FileItem) | { hit: false };
 /** 秒传：存储桶里已有内容相同的文件时直接引用；未命中返回 { hit: false }，调用方再走普通上传。 */
+/** 秒传预检：授权范围内有没有大小相同的文件；没有就不可能秒传，可以跳过计算完整指纹。 */
+export const instantProbe = (path: string, size: number) => post<{ candidates: boolean }>(fileApi("/files/instant/probe", path), { path, size });
 export const instantUpload = (path: string, size: number, fingerprint: string, contentType: string, isPublic?: boolean) =>
   post<InstantResult>(fileApi("/files/instant", path), { path, size, fingerprint, content_type: contentType || undefined, ...(isPublic === undefined ? {} : { public: isPublic }) });
 export const createUpload = (path: string, contentType: string) => post<{ upload_id: string; part_size: number }>(fileApi("/uploads", path), { path, content_type: contentType });
@@ -1013,13 +1018,16 @@ export type ThumbnailQueueStatus = { available: boolean; unlocked: boolean; pres
 export const thumbnailQueue = () => request<ThumbnailQueueStatus>("/api/admin/v1/maintenance/thumbnails");
 export const runCleanup = () => post<{ aborted_uploads: number; stale_blobs: number; expired_upload_records: number }>("/api/admin/v1/maintenance/cleanup");
 export const retryDeadGc = () => post<{ requeued: number }>("/api/admin/v1/maintenance/gc/retry");
-export type Backup = { name: string; size: number; created_at: number };
+export type Backup = { name: string; size: number; created_at: number; remote?: { name: string; parts: number; channel: string }; remote_error?: string };
 export type BackupSettings = { keep: number };
 export const listBackups = () => request<Backup[]>("/api/admin/v1/backups");
 export const backupSettings = () => request<BackupSettings>("/api/admin/v1/backups/settings");
 export const configureBackups = (keep: number) => post<BackupSettings>("/api/admin/v1/backups/settings", { keep }, 15 * 60000);
 export const deleteBackup = (name: string) => post<{ name: string }>("/api/admin/v1/backups/delete", { name }, 15 * 60000);
 export const createBackup = () => post<Backup>("/api/admin/v1/backups", undefined, 15 * 60000);
+export type RemoteBackupStatus = { enabled: boolean; channel: string; keep: number; uploaded: { name: string; size: number; uploaded_at: number; parts: number; channel: string }[] };
+export const remoteBackupSettings = () => request<RemoteBackupStatus>("/api/admin/v1/backups/remote");
+export const configureRemoteBackup = (enabled: boolean, channel: string, keep: number) => post<RemoteBackupStatus>("/api/admin/v1/backups/remote", { enabled, channel, keep });
 export const backupUrl = (name: string) => `/api/admin/v1/backups/${encodeURIComponent(name)}`;
 export const setAdminUserQuota = (id: number, quotaBytes: number | null) => post<void>(`/api/admin/v1/users/${id}/quota`, { quota_bytes: quotaBytes });
 export const adminClients = () => request<AdminClient[]>("/api/admin/v1/clients");
@@ -1030,6 +1038,8 @@ export const disableAdminKey = (accessKeyId: string) => post<void>("/api/admin/v
 export const adminBots = (signal?: AbortSignal) => request<BotConfig[]>("/api/admin/v1/bots", { signal });
 export const createAdminBot = (name: string, token: string, channelId: string) => post<BotConfig>("/api/admin/v1/bots", { name, token, channel_id: channelId });
 export const checkAdminBot = (id: number) => post<{ id: number; ok: boolean; status: string }>(`/api/admin/v1/bots/${id}/check`);
+export const reclaimStatus = (id: number) => request<{ chunks: number; gc: number }>(`/api/admin/v1/bots/${id}/reclaim`);
+export const reclaimBot = (id: number, limit = 200) => post<{ reclaimed: number; failed: number; rebound_gc: number; remaining: number; errors: { reason: string; count: number }[] }>(`/api/admin/v1/bots/${id}/reclaim`, { limit }, 15 * 60000);
 export const setAdminBotStatus = (id: number, status: "active" | "disabled") => post<void>(`/api/admin/v1/bots/${id}/status`, { status });
 export type AdminObjectSummary = { total: number; public_total: number };
 export const adminObjectSummary = (signal?: AbortSignal) => request<AdminObjectSummary>("/api/admin/v1/objects/summary", { signal });

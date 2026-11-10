@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import base64
 import importlib.metadata
 import importlib.util
@@ -535,21 +536,57 @@ def clear_cache(root: Path):
             shutil.rmtree(path)
 
 
+def track_identity(track) -> str:
+    """轨的身份：平台直链带签名、会过期，重新解析后地址会变；有 itag／clen（格式编号与内容长度）时用它们，否则用去掉查询串的地址。"""
+    from urllib.parse import parse_qs, urlsplit
+    parts = urlsplit(str(track.get("url") or ""))
+    query = parse_qs(parts.query)
+    if query.get("itag"):
+        return f"itag={query['itag'][0]};clen={(query.get('clen') or [''])[0]}"
+    return f"{parts.netloc}{parts.path}"
+
+
 async def merge_tracks(client, platform, entry, executable, cache_root, task_id, limit, reserve, *, check, progress, throttle, phase,
-                       connections=1):
+                       connections=1, resume_dir: Path | None = None):
     """只缓存受限的两条输入轨；MP4 输出通过背压直接交给加密存储。
-    两条轨同时下载（各自按 connections 多连接读取分段），任一条失败时停止另一条。"""
+    两条轨同时下载（各自按 connections 多连接读取分段），任一条失败时停止另一条。
+
+    resume_dir：按整条轨续传。轨完整下载后写完成标记（身份与大小），任务中断后重跑时身份、大小一致的轨直接复用，
+    只下载没完成的轨；目录由 OfflineDownloads 在任务完成、失败或删除时清理。"""
     cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if cache_root.is_symlink():
         raise DownloadError("离线临时目录不能是符号链接")
-    with tempfile.TemporaryDirectory(prefix=f"task-{task_id}-", dir=cache_root) as directory:
+    if resume_dir is not None:
+        resume_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if resume_dir.is_symlink():
+            raise DownloadError("离线临时目录不能是符号链接")
+        holder = contextlib.nullcontext(str(resume_dir))
+    else:
+        holder = tempfile.TemporaryDirectory(prefix=f"task-{task_id}-", dir=cache_root)
+    with holder as directory:
         files = [Path(directory) / f"track-{index}.mp4" for index in range(len(entry["tracks"]))]
+        markers = [Path(directory) / f"track-{index}.done" for index in range(len(entry["tracks"]))]
         declared, received = {}, [0] * len(files)
+
+        def finished(index, track) -> bool:
+            if resume_dir is None:
+                return False
+            try:
+                mark = json.loads(markers[index].read_text())
+                return mark.get("id") == track_identity(track) and files[index].stat().st_size == mark.get("size")
+            except (OSError, ValueError):
+                return False
 
         def over_budget():
             raise DownloadError("分离音视频轨超过临时缓存预算，请选择较低清晰度或调整资源设置")
 
         async def save(index, track):
+            if finished(index, track):
+                size = files[index].stat().st_size
+                received[index] = declared[index] = size
+                progress(bytes_in=size)
+                return
+            markers[index].unlink(missing_ok=True)
             def sized(size):
                 if size is not None:
                     declared[index] = size
@@ -571,10 +608,21 @@ async def merge_tracks(client, platform, entry, executable, cache_root, task_id,
                         progress(bytes_in=len(piece))
             finally:
                 await stream.aclose()
+            if resume_dir is not None and (index not in declared or declared[index] == received[index]):
+                markers[index].write_text(json.dumps({"id": track_identity(track), "size": received[index]}))
 
         tasks = [asyncio.ensure_future(save(index, track)) for index, track in enumerate(entry["tracks"])]
         try:
             await asyncio.gather(*tasks)
+        except (DownloadError, TransientError, OSError) as exc:
+            # 一条轨因来源问题失败：续传时让另一条轨继续下完并留下完成标记，下次重试只需下载失败的那条。
+            if resume_dir is not None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            raise exc
         except BaseException:
             for task in tasks:
                 task.cancel()
