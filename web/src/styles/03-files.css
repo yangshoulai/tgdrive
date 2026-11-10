@@ -14,7 +14,11 @@
 /* 缩略图：与类型图标同尺寸的圆角小图，细描边避免浅色图片与背景融在一起。 */
 .file-visual { position: relative; overflow: hidden; border-radius: var(--radius-xs); background: var(--surface-sunken); }
 .file-visual::after { position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 10%, transparent); content: ""; }
-.file-visual img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.file-visual img { display: block; width: 100%; height: 100%; object-fit: cover; transition: opacity var(--duration-base) var(--ease-out); }
+.file-visual.is-loading { background: linear-gradient(90deg, var(--surface-sunken) 0%, var(--line-soft) 50%, var(--surface-sunken) 100%) 0 0 / 200% 100%; animation: shimmer 1.3s ease-in-out infinite; }
+.file-visual.is-loading img { opacity: 0; }
+.is-dark-surface .file-visual.is-loading, .preview-track-cover .file-visual.is-loading { background-image: linear-gradient(90deg, var(--on-dark-8) 0%, var(--on-dark-16) 50%, var(--on-dark-8) 100%); }
+@media (prefers-reduced-motion: reduce) { .file-visual.is-loading { animation: none; } }
 .file-visual.tile-md { width: 24px; height: 24px; }
 .file-visual.tile-lg { width: 32px; height: 32px; border-radius: var(--radius-sm); }
 .file-visual.tile-xl { width: 56px; height: 56px; border-radius: var(--radius-lg); }
@@ -305,7 +309,9 @@ button.extract-tree-toggle:hover { background: var(--surface-sunken); color: var
 .file-thumbnail.thumbnail-loading img:not(.thumbnail-placeholder) { opacity: 0; }
 /* 网格卡片：大图到达前先铺列表小图（轻微模糊掩盖放大），大图叠在上面淡入。 */
 .file-thumbnail img.thumbnail-placeholder { filter: blur(6px); transform: scale(1.04); }
-.thumbnail-loading { position: absolute; right: 10px; bottom: 10px; color: var(--ink-3); }
+.file-thumbnail img:not(.thumbnail-placeholder) { transition: opacity var(--duration-base) var(--ease-out); }
+/* 封面到达前的骨架：铺满封面区，形状与圆角跟随容器。 */
+.file-thumbnail .thumbnail-skeleton { position: absolute; inset: 0; border-radius: 0; }
 .thumbnail-badge { position: absolute; left: 8px; bottom: 8px; display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: var(--shade-64); color: var(--on-dark); backdrop-filter: blur(4px); }
 .file-thumbnail .btn { z-index: 1; }
 /* 文件夹封面：已有缩略图铺满封面区，1 张整幅、2 张左右、4 张田字格，格间留 2px 细缝；左下角的文件夹标记带模糊底，不挡画面。 */

@@ -1677,6 +1677,75 @@ class TgDriveASGI(StaticFiles):
         return info, row["public_password"]
 
     @staticmethod
+    def _card_size(size: int) -> str:
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if value < 1024 or unit == "TB":
+                return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+            value /= 1024
+        return ""
+
+    @staticmethod
+    def _card_cover(thumbnails) -> str | None:
+        """链接预览用的封面规格：优先预览大图；没有封面时为 None（保留站点默认卡片）。"""
+        return next((name for name in ("poster", "grid", "thumb") if name in (thumbnails or ())), None)
+
+    async def _share_card(self, path: str) -> dict | None:
+        """分享链接的预览卡片（Open Graph）：标题用分享名，封面取分享内容自己的封面。
+
+        与分享页同一权限边界：设了访问密码、已过期、已失效或系统未解锁时，只给出通用标题，不透露名称、分享者与封面。"""
+        match = re.fullmatch(r"/(s|m)/([A-Za-z0-9_-]{8,64})/?", path)
+        if not match:
+            return None
+        kind, token = match.groups()
+        page = f"/{kind}/{token}"
+        noun = "歌单" if kind == "m" else "分享"
+
+        def read() -> dict | None:
+            if not self.user.accounts.keystore.unlocked:
+                return None
+            try:
+                if kind == "m":
+                    row = self.user.playlists.public(token)
+                    password = row["share_password"]
+                else:
+                    row = self.user.objects.public_row(token)
+                    info = self.user.objects.resolve_public(token)
+                    password = row["public_password"]
+            except ShareExpiredError:
+                # 令牌无效时不把请求路径写回页面（og:url 保持站点首页）。
+                return {"title": "这个链接已过期", "description": "分享者设置的有效期已过。"}
+            except NotFoundError:
+                return {"title": "这个链接已失效", "description": "分享者可能已关闭分享，或链接输入有误。"}
+            if password:
+                return {"title": f"受密码保护的{noun}", "description": "输入访问密码后即可查看。", "path": page}
+            sharer = self.user.accounts.sharer(row["bucket_id"])
+            by = f"{sharer['nickname']} 分享的" if sharer else "分享的"
+            if kind == "m":
+                items = self.user.public_playlist_items(row)
+                seconds = int(sum((item.get("media") or {}).get("duration") or 0 for item in items))
+                length = f"{seconds // 3600} 小时 {seconds % 3600 // 60} 分钟" if seconds >= 3600 else f"{seconds // 60} 分钟" if seconds >= 60 else ""
+                cover = next(((item["id"], variant) for item in items if (variant := self._card_cover(item.get("thumbnails")))), None)
+                return {"title": row["name"], "path": page,
+                        "description": " · ".join(part for part in (f"{by}歌单", f"{len(items)} 首", length) if part),
+                        "image": f"/api/public/v1/playlists/{token}/items/{cover[0]}/content?thumbnail={cover[1]}" if cover else None}
+            name = info.key.rstrip("/").rsplit("/", 1)[-1]
+            if info.key.endswith("/"):
+                return {"title": name, "description": f"{by}文件夹", "path": page}
+            variant = self._card_cover(self.user.objects.thumbnail_fields(
+                self.user.objects.file_thumbnail_versions([info])[(info.bucket_id, info.key)])["thumbnails"])
+            media = (info.content_type or "").split("/", 1)[0]
+            return {"title": name, "path": page, "description": f"{by}文件 · {self._card_size(info.size)}",
+                    "image": f"/p/{token}/{quote(name)}?thumbnail={variant}" if variant else None, "large": media in ("image", "video")}
+
+        try:
+            return await self.user.objects.metadata.run_in_thread(read)
+        except Exception:
+            # 预览信息只是锦上添花：读取出错时照常返回页面，使用站点默认卡片。
+            log.exception("share card failed for %s", page)
+            return None
+
+    @staticmethod
     def _avatar_cache_control(query) -> str:
         # 地址带头像版本时内容不变，可长期私有缓存；否则每次协商。
         return "private, max-age=31536000, immutable" if query.get("v") else "private, no-cache"

@@ -3,6 +3,7 @@
 给 AI 代理的模块细则（由根目录 AGENTS.md 索引）。公开分享与转存、公开链接令牌、访客注册、账号资料、私密空间。
 
 - 文件夹也能公开：分享信息（令牌、有效期、密码、下载次数）保存在文件夹的**目录标记行**（以 `/` 结尾的对象）上，没有标记的隐式文件夹在分享时补一个。访客只读：`/s/<令牌>` 浏览（`?path=` 为相对路径），`/api/public/v1/folders/<令牌>/list` 列目录，`/p/<令牌>/<相对路径>` 读取文件；相对路径必须经 `ObjectService._public_relative` 校验，不得越出被分享的目录。重写目录标记（新建同名文件夹、移入回收站）时必须保留这些列，不能用新行覆盖。
+- 链接预览（Open Graph）：返回 `/s/<令牌>`、`/m/<令牌>` 的 index.html 前，`TgDriveASGI._share_card` 在页面查询线程里读取分享名、分享者昵称、首曲或文件自己的封面（`poster` > `grid` > `thumb`，地址沿用 `/p/…?thumbnail=` 与歌单 `items/<编号>/content?thumbnail=`），`static.apply_share_card` 改写 `<title>`、description、og/twitter 标签；不含存放路径。设了访问密码只给「受密码保护的分享／歌单」，过期或失效只给通用标题且 og:url 保持首页（不反射无效令牌），系统未解锁或读取出错时保留站点默认卡片。回归：`tests/test_stars_playlists.py` 的 `test_share_pages_carry_link_preview_metadata`。
 - 保存他人分享（`ObjectService.save_public`，网页入口 `/api/user/v1/shares/<令牌>/status|save`）：新对象直接引用来源 Blob（增加 refcount、计入保存者配额），不得复制来源的公开分享列；整个保存在一个事务内完成，相对路径必须经 `_public_relative` 校验；分享者本人保存返回 400，密码分享由路由层用 `share_access` 校验。
 - 公开链接令牌存放在 `objects.public_token`：覆盖写入在 `_commit_blob` 中继承，移动随行保留；禁用账号或锁定系统时 `/p/` 不可访问。新增改写对象行的代码路径时需要保持这一语义。
 - 访客注册（`registration.py`／`mailer.py`，schema v27）：默认关闭，配置入口 `/admin/settings?tab=registration`，公共网页接口 `/api/auth/v1/registration`、`/registration/code`、`/register`。邮箱验证码与邀请码可单独或同时开放，同时开放时任选其一；邀请码单次核销与账号创建必须同事务。SMTP 密码和邀请码用 `registration-secret` 子密钥加密，改系统口令时在 `keystore.rotate` 一起重加密；验证码仅在内存中保留 HMAC 摘要。邀请链接用 `/register#invite=…`，前端只读固定邀请码，禁止把邀请码、验证码、SMTP 密码写入审计。邮件发送强制 TLS；测试必须替身发送，不得连接真实 SMTP。

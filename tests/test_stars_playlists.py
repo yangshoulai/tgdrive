@@ -173,6 +173,54 @@ class PlaylistShareTests(unittest.TestCase):
         self.call("GET", f"/api/public/v1/playlists/{share['token']}", session=False, expect=404)
         self.assertNotEqual(self.share()["token"], share["token"])
 
+    def test_share_pages_carry_link_preview_metadata(self):
+        """分享页的 index.html 带上分享名作为 Open Graph 标题；设了密码、失效的链接不透露名称。"""
+        static = Path(self.temp.name) / "static"
+        static.mkdir()
+        (static / "index.html").write_text(
+            '<head><title>Tessera</title><meta name="description" content="站点"><meta property="og:site_name" content="Tessera">'
+            '<meta property="og:title" content="Tessera · 标语"><meta property="og:description" content="站点"><meta property="og:url" content="/">'
+            '<meta property="og:image" content="/social.png"><meta property="og:image:width" content="1200"><meta name="twitter:card" content="summary_large_image">'
+            '<meta name="twitter:title" content="Tessera"><meta name="twitter:description" content="站点"><meta name="twitter:image" content="/social.png"></head>', encoding="utf-8")
+        self.app.static_dir = static.resolve()
+        page = lambda path: self.call("GET", path, session=False, raw=True)[1].decode()
+        token = self.share()["token"]
+        html = page(f"/m/{token}")
+        self.assertIn("<title>分享 · Tessera</title>", html)
+        self.assertIn('<meta property="og:title" content="分享">', html)
+        self.assertIn(f'<meta property="og:url" content="http://localhost/m/{token}">', html)
+        self.assertIn("2 首", html)
+        self.assertNotIn("私人", html, "预览信息不含存放路径")
+        self.assertIn('content="http://localhost/social.png"', html, "没有封面时保留站点卡片")
+        # 有密码：只给通用标题。
+        self.share(password="1234")
+        html = page(f"/m/{token}")
+        self.assertIn("受密码保护的歌单", html)
+        self.assertNotIn("<title>分享 ·", html)
+        # 无效令牌：通用标题，不把请求路径写回页面。
+        html = page("/m/nonexistent-token")
+        self.assertIn("这个链接已失效", html)
+        self.assertNotIn("nonexistent-token", html)
+        # 单个文件的分享：文件名与大小。
+        self.call("POST", "/api/user/v1/public", {"path": "私人/歌/b.mp3", "public": True})
+        file_token = self.app.metadata.db.execute("SELECT public_token FROM objects WHERE key='私人/歌/b.mp3'").fetchone()[0]
+        html = page(f"/s/{file_token}")
+        self.assertIn('<meta property="og:title" content="b.mp3">', html)
+        self.assertIn("分享的文件", html)
+        self.assertNotIn("私人", html)
+
+    def test_share_card_rewrites_cover(self):
+        from tgdrive.static import apply_share_card
+        html = ('<title>T</title><meta property="og:site_name" content="T"><meta property="og:image" content="/s.png">'
+                '<meta property="og:image:width" content="1200"><meta name="twitter:image" content="/s.png"><meta name="twitter:card" content="summary_large_image">'
+                '<meta property="og:title" content="T">')
+        out = apply_share_card(html, {"title": 'A "<b>"', "description": "d", "path": "/m/x", "image": "/api/c?thumbnail=poster"})
+        self.assertIn("<title>A &quot;&lt;b&gt;&quot; · T</title>".replace("&quot;", '"'), out)
+        self.assertIn('content="A &quot;&lt;b&gt;&quot;"', out)
+        self.assertEqual(out.count('content="/api/c?thumbnail=poster"'), 2)
+        self.assertNotIn("og:image:width", out)
+        self.assertIn('<meta name="twitter:card" content="summary">', out)
+
     def test_password_expiry_download_and_save(self):
         share = self.share(password="1234", download=True, save=True)
         token = share["token"]

@@ -69,6 +69,25 @@
 .skeleton-line { height: 11px; }
 .skeleton-short { width: 72px; margin-left: auto; }
 @keyframes shimmer { to { background-position: -200% 0; } }
+/* 形状骨架：卡片网格（列宽沿用真实网格的类名）、曲目列表；淡入避免很快返回时闪一下。 */
+.skeleton-cards, .skeleton-tracks { animation: skeleton-in var(--duration-slow) var(--ease-out) .12s both; }
+.skeleton-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 20px 16px; }
+.skeleton-card { display: grid; align-content: start; gap: 8px; min-width: 0; }
+.skeleton-cover { width: 100%; aspect-ratio: 1; border-radius: var(--radius-md); }
+.skeleton-cover.is-wide { aspect-ratio: 16 / 9; }
+.skeleton-cover.is-book { aspect-ratio: 3 / 4; }
+.skeleton-card .skeleton-line { height: 12px; margin-top: 4px; }
+.skeleton-card .skeleton-line.is-sub { height: 8px; margin-top: 0; }
+.skeleton-tracks { display: grid; }
+.skeleton-track { display: grid; grid-template-columns: 24px 40px minmax(0, 1fr) 40px; align-items: center; gap: 12px; min-height: 52px; padding: 4px 12px; }
+.skeleton-track .is-number { justify-self: end; width: 12px; height: 10px; }
+.skeleton-thumb { width: 40px; height: 40px; border-radius: var(--radius-sm); }
+.skeleton-track-text { display: grid; gap: 8px; }
+.skeleton-track .skeleton-line { height: 10px; }
+.skeleton-track .skeleton-line.is-sub { height: 8px; }
+.skeleton-track .is-time { width: 32px; height: 10px; }
+@keyframes skeleton-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton, .skeleton-cards, .skeleton-tracks { animation: none; } }
 
 .progress { height: 4px; overflow: hidden; border-radius: var(--radius-pill); background: var(--line-soft); }
 .progress span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width var(--duration-base) ease-out; }

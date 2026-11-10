@@ -5,7 +5,7 @@ import { BRAND } from "./brand";
 import * as api from "./api";
 import { FileThumbnail, PreviewModal } from "./files";
 import { coverTint } from "./preview-media";
-import { Avatar, Brand, Button, Checkbox, EmptyState, Icon, Menu, Modal, Notice, SkeletonRows, Toaster, copyText, formatDateTime, toast, type MenuItem } from "./ui";
+import { Avatar, Brand, Button, Checkbox, EmptyState, Icon, Menu, Modal, Notice, SkeletonTracks, Toaster, copyText, formatDateTime, toast, type MenuItem } from "./ui";
 import { LoginPage } from "./shell";
 import { FolderPicker } from "./user/folders";
 import { PasswordGate } from "./share";
@@ -96,10 +96,14 @@ export function PlaylistSharePage({ token }: { token: string }) {
             : error.code === "share_expired" ? "分享者设置的有效期已过。如仍需要，请联系分享者重新分享。" : "分享者可能已关闭分享或删除了歌单，或链接输入有误。"} />
       </div> : locked ? <PasswordGate token={token} unlock={api.unlockPublicPlaylist}
         onUnlocked={grant => { sessionStorage.setItem(accessKey(token), grant); setAccess(grant); }} />
-      : !data ? <div className="share-card"><SkeletonRows rows={4} /></div>
-      : <article className="share-card playlist-share">
-        <header className="album-header">
-          <span className={`album-cover album-cover-lg${covers.length >= 4 ? " is-mosaic" : ""}`} style={{ "--cover-tint": coverTint(data.name) } as CSSProperties}>
+      : !data ? <PlaylistShareSkeleton />
+      : <article className="share-card playlist-share" style={{ "--cover-tint": coverTint(data.name) } as CSSProperties}>
+        <header className="album-header playlist-hero">
+          {/* 页头铺底：第一张封面的大幅模糊，没有封面时只用按歌单名选的色调渐变。 */}
+          <span className="playlist-hero-backdrop" aria-hidden="true">
+            {covers[0] && <img src={api.publicThumbnail(api.publicPlaylistContent(token, covers[0].id, access), "grid")} alt="" decoding="async" onError={event => { event.currentTarget.hidden = true; }} />}
+          </span>
+          <span className={`album-cover album-cover-lg${covers.length >= 4 ? " is-mosaic" : ""}`}>
             {covers.length >= 4 ? covers.map(item => <span key={item.id}><FileThumbnail kind="audio" url={api.publicThumbnail(api.publicPlaylistContent(token, item.id, access), "grid")} /></span>)
               : covers[0] ? <FileThumbnail kind="audio" url={api.publicThumbnail(api.publicPlaylistContent(token, covers[0].id, access), "grid")} />
               : <span className="tint-cover"><Icon name="playlist" size={40} /></span>}
@@ -126,7 +130,9 @@ export function PlaylistSharePage({ token }: { token: string }) {
           </div>
         </div>}
         {!total ? <EmptyState icon="playlist" title="歌单里还没有歌曲" description="分享者还没有往这个歌单里加入歌曲。" />
-          : <ol className={`track-list${canSave ? " is-selectable" : ""}${selected.size ? " is-selecting" : ""}`}>
+          : <>
+          <div className="playlist-tracks-head" aria-hidden="true"><span>#</span><span>标题</span><span><Icon name="clock" size={14} /></span></div>
+          <ol className={`track-list playlist-share-tracks${canSave ? " is-selectable" : ""}${selected.size ? " is-selecting" : ""}`}>
             {data.items.map((item, index) => {
               const url = api.publicPlaylistContent(token, item.id, access);
               const menu: MenuItem[] = [
@@ -137,7 +143,7 @@ export function PlaylistSharePage({ token }: { token: string }) {
                 {canSave && <span className="track-check"><Checkbox label={`选择 ${titleOf(item)}`} checked={selected.has(item.id)}
                   onChange={value => setSelected(current => { const next = new Set(current); if (value) next.add(item.id); else next.delete(item.id); return next; })} /></span>}
                 <button type="button" className="track-row" onClick={() => play(files[index])}>
-                  <span className="track-number">{index + 1}</span>
+                  <span className="track-number"><span>{index + 1}</span><Icon name="play" size={14} /></span>
                   <span className="track-cover" style={{ "--cover-tint": coverTint(item.id) } as CSSProperties}>
                     {item.thumbnails?.includes("thumb") ? <FileThumbnail kind="audio" url={api.publicThumbnail(url)} /> : <span className="tint-cover"><Icon name="music" size={16} /></span>}
                   </span>
@@ -147,7 +153,8 @@ export function PlaylistSharePage({ token }: { token: string }) {
                 {menu.length > 0 && <span className="track-menu"><Menu label={`${titleOf(item)} 的更多操作`} items={menu} /></span>}
               </li>;
             })}
-          </ol>}
+          </ol>
+        </>}
       </article>}
       <p className="share-footnote">这是 {BRAND} 用户分享的歌单，只有拿到链接的人才能访问。</p>
     </main>
@@ -157,6 +164,22 @@ export function PlaylistSharePage({ token }: { token: string }) {
     {saving !== undefined && data && <SavePlaylistDialog token={token} access={access} items={saving} total={total}
       onClose={() => setSaving(undefined)} onSaved={() => setSelected(new Set())} onPasswordRequired={() => { setSaving(undefined); load(access); }} />}
     <Toaster />
+  </div>;
+}
+
+/** 首次打开时的骨架：与加载完成后的页头、曲目列表同形同位，内容到达时不跳动。 */
+function PlaylistShareSkeleton() {
+  return <div className="share-card playlist-share is-skeleton" aria-busy="true" aria-label="正在加载歌单">
+    <div className="album-header playlist-hero">
+      <span className="album-cover album-cover-lg skeleton" />
+      <div className="album-header-text">
+        <span className="skeleton skeleton-line" style={{ width: 40 }} />
+        <span className="skeleton playlist-skeleton-title" />
+        <span className="skeleton skeleton-line" style={{ width: 120 }} />
+        <div className="album-header-actions"><span className="skeleton playlist-skeleton-button" /><span className="skeleton playlist-skeleton-button" /></div>
+      </div>
+    </div>
+    <SkeletonTracks rows={6} />
   </div>;
 }
 

@@ -186,13 +186,20 @@ function useImageRetry(src?: string) {
     setFailed(true);
     timer.current = window.setTimeout(() => { setAttempt(value => value + 1); setFailed(false); }, THUMBNAIL_RETRIES[attempt]);
   };
-  return { failed, onError, key: `${src}#${attempt}` };
+  // failed 在等待重试期间也为真；gaveUp 才是重试用尽，之前仍按「加载中」显示骨架。
+  return { failed, gaveUp: failed && attempt >= THUMBNAIL_RETRIES.length, onError, key: `${src}#${attempt}` };
 }
 
 export function FileVisual({ kind, src, size = "md" }: { kind: FileKind; src?: string; size?: "md" | "lg" | "xl" }) {
   const retry = useImageRetry(src);
-  if (!src || retry.failed) return <FileTile kind={kind} size={size} />;
-  return <span className={`file-tile file-visual tile-${size}`} aria-hidden="true"><img key={retry.key} src={src} alt="" loading="lazy" decoding="async" onError={retry.onError} /></span>;
+  // 记下已加载的地址而不是布尔值：换地址时自动回到加载中，不需要在 effect 里重置（缓存图片的 load 可能早于 effect）。
+  const [loadedKey, setLoadedKey] = useState("");
+  const loaded = loadedKey === retry.key;
+  if (!src || retry.gaveUp) return <FileTile kind={kind} size={size} />;
+  // 加载中（含等待重试）显示骨架闪光，图片到达后淡入。
+  return <span className={`file-tile file-visual tile-${size}${loaded ? "" : " is-loading"}`} aria-hidden="true">
+    {!retry.failed && <img key={retry.key} src={src} alt="" loading="lazy" decoding="async" onLoad={() => setLoadedKey(retry.key)} onError={retry.onError} />}
+  </span>;
 }
 
 /** 网格视图文件夹卡片左侧的封面：用文件夹里已有的列表小图拼成 1／2／4 格，没有时显示文件夹图标。
@@ -244,10 +251,12 @@ function ThumbnailImage({ kind, url, placeholder }: { kind: FileKind; url?: stri
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   const [fallback, setFallback] = useState<"loading" | "ready" | "failed">("loading");
   const retry = useImageRetry(url);
-  const failed = state === "failed" || retry.failed;
+  const failed = state === "failed" || retry.gaveUp;
   const covered = state === "ready" || (placeholder && fallback === "ready");
+  // 封面到达前（含等待重试）铺满骨架闪光；没有封面或重试用尽才显示文件类型图标。
   return <div className={`file-thumbnail thumbnail-${failed ? "failed" : state}`}>
-    {(!url || !covered) && <FileTile kind={kind} size="xl" />}
+    {(!url || failed) && <FileTile kind={kind} size="xl" />}
+    {url && !failed && !covered && <span className="skeleton thumbnail-skeleton" aria-hidden="true" />}
     {url && placeholder && state !== "ready" && fallback !== "failed" && <img className="thumbnail-placeholder" src={placeholder} alt="" loading="lazy" onLoad={() => setFallback("ready")} onError={() => setFallback("failed")} />}
     {url && !retry.failed && state !== "failed" && <img key={retry.key} src={url} alt="" loading="lazy" onLoad={() => setState("ready")} onError={retry.onError} />}
     {url && covered && (kind === "video" || kind === "audio") && <span className="thumbnail-badge" aria-hidden="true"><Icon name={kind === "video" ? "play" : "audio"} size={12} /></span>}

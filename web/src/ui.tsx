@@ -1273,6 +1273,41 @@ export function SkeletonRows({ rows = 5 }: { rows?: number }) {
   );
 }
 
+/** 卡片网格的骨架：封面形状与真实网格一致（square 方形、wide 16:9、book 3:4），下方两行文字，首屏不跳动。
+ *  className 传真实网格的类名（如 "video-grid"、"media-folders is-books"），列宽与间距直接沿用。 */
+export function SkeletonCards({ count = 8, shape = "square", className = "skeleton-grid", lines = 2 }: { count?: number; shape?: "square" | "wide" | "book"; className?: string; lines?: 0 | 1 | 2 }) {
+  return (
+    <div className={`${className} skeleton-cards`} aria-busy="true" aria-label="正在加载">
+      {Array.from({ length: count }, (_, index) => (
+        <div className="skeleton-card" key={index}>
+          <span className={`skeleton skeleton-cover is-${shape}`} />
+          {lines > 0 && <span className="skeleton skeleton-line" style={{ width: `${82 - (index % 3) * 14}%` }} />}
+          {lines > 1 && <span className="skeleton skeleton-line is-sub" style={{ width: `${52 - (index % 2) * 12}%` }} />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** 曲目列表的骨架：序号、封面小图、两行文字与时长，与 .track-row 等高。 */
+export function SkeletonTracks({ rows = 6 }: { rows?: number }) {
+  return (
+    <div className="skeleton-tracks" aria-busy="true" aria-label="正在加载">
+      {Array.from({ length: rows }, (_, index) => (
+        <div className="skeleton-track" key={index}>
+          <span className="skeleton skeleton-line is-number" />
+          <span className="skeleton skeleton-thumb" />
+          <span className="skeleton-track-text">
+            <span className="skeleton skeleton-line" style={{ width: `${44 - (index % 3) * 8}%` }} />
+            <span className="skeleton skeleton-line is-sub" style={{ width: `${28 - (index % 2) * 6}%` }} />
+          </span>
+          <span className="skeleton skeleton-line is-time" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function Progress({ value, tone = "accent", label }: { value: number; tone?: Tone; label?: string }) {
   const clamped = Math.max(0, Math.min(100, value));
   return (

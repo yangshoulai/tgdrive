@@ -4,7 +4,7 @@ import asyncio
 import errno
 import mimetypes
 import re
-from html import escape
+from html import escape, unescape
 from pathlib import Path
 
 from .settings import normalize_origin
@@ -33,7 +33,39 @@ def _accepts(header: str, coding: str) -> bool:
     return False
 
 
+def _set_meta(html: str, attribute: str, name: str, value: str) -> str:
+    return re.sub(rf'(<meta {attribute}="{re.escape(name)}" content=")[^"]*(")',
+                  lambda match: match[1] + escape(value, quote=True) + match[2], html, count=1)
+
+
+def apply_share_card(html: str, card: dict) -> str:
+    """把分享链接自己的标题、说明与封面写进 index.html 的 Open Graph／Twitter 元信息（爬虫不执行脚本）。
+
+    card：title（页面标题，不含站点名）、description、path（分享页路径，令牌无效时省略、保持首页）、image（站内封面路径，可省略，
+    省略时保留站点默认卡片）、large（封面是否适合大图卡片）。站点名取自构建产物里的 og:site_name。"""
+    site = re.search(r'<meta property="og:site_name" content="([^"]*)"', html)
+    site_name = unescape(site[1]) if site else ""
+    title = f"{card['title']} · {site_name}" if site_name else card["title"]
+    html = re.sub(r"<title>[^<]*</title>", lambda _: f"<title>{escape(title, quote=False)}</title>", html, count=1)
+    for attribute, name, value in (("name", "description", card["description"]), ("property", "og:title", card["title"]),
+                                   ("property", "og:description", card["description"]), ("property", "og:url", card.get("path") or "/"),
+                                   ("name", "twitter:title", card["title"]), ("name", "twitter:description", card["description"]),
+                                   ("property", "og:image:alt", card["title"]), ("name", "twitter:image:alt", card["title"])):
+        html = _set_meta(html, attribute, name, value)
+    if card.get("image"):
+        # 封面尺寸因文件而异，去掉站点卡片的固定宽高与类型，由爬虫自行读取。
+        html = re.sub(r'<meta property="og:image:(?:type|width|height)" content="[^"]*">', "", html)
+        html = _set_meta(html, "property", "og:image", card["image"])
+        html = _set_meta(html, "name", "twitter:image", card["image"])
+        html = _set_meta(html, "name", "twitter:card", "summary_large_image" if card.get("large") else "summary")
+    return html
+
+
 class StaticFiles:
+    async def _share_card(self, path: str) -> dict | None:
+        """分享页（/s/、/m/）的链接预览信息；应用在 asgi.py 中实现，默认不改写。"""
+        return None
+
     async def _static(self, send, path: str, method: str, *, https: bool = False, origin: str = "",
                       accept_encoding: str = "") -> None:
         assert self.static_dir is not None
@@ -66,6 +98,8 @@ class StaticFiles:
                     break
         data = await asyncio.to_thread((candidate_data if encoding else candidate).read_bytes)
         if candidate.name == "index.html":
+            if candidate == static_dir / "index.html" and (card := await self._share_card(path)):
+                data = apply_share_card(data.decode("utf-8"), card).encode("utf-8")
             # 爬虫不执行应用脚本；在原始 HTML 中使用部署地址，兼容未配置地址的首次部署。
             try:
                 origin = normalize_origin(self.settings.get("public_base_url") or origin, "站点地址") or ""

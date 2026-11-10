@@ -7,7 +7,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import * as api from "../api";
 import { FileThumbnail, FileVisual, baseName, canPreview, getFileKind, kindLabel, parentPath } from "../files";
 import { coverTint } from "../preview-media";
-import { Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Icon, IconButton, Menu, PageHeader, SearchInput, Segmented, SkeletonRows, Tabs, formatBytes, toast, useDocumentTitle, type IconName, type MenuItem } from "../ui";
+import { Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Icon, IconButton, Menu, PageHeader, SearchInput, Segmented, SkeletonCards, SkeletonRows, SkeletonTracks, Tabs, formatBytes, toast, useDocumentTitle, type IconName, type MenuItem } from "../ui";
 import { BRAND } from "../brand";
 import { usePreview } from "./preview-host";
 import { useThumbnailPolling } from "./thumbnail-polling";
@@ -143,8 +143,17 @@ const time = (seconds: number) => new Date(seconds * 1000).toLocaleTimeString("z
 const folderName = (path: string) => path ? baseName(path.replace(/\/$/, "")) : "我的文件";
 const folderLabel = (path: string) => path ? `/${path.replace(/\/$/, "")}` : "我的文件";
 
-function LibraryState({ loading, error, empty, onRetry, children }: { loading: boolean; error: string; empty: ReactNode; onRetry: () => void; children: ReactNode }) {
-  if (loading) return <SkeletonRows rows={6} />;
+/** 每种视图首屏的骨架，形状与真实内容一致：文件夹／专辑卡片、照片方格、影视横封面、书籍竖封面、曲目列表。 */
+function itemsSkeleton(view: MediaView) {
+  if (view === "music") return <SkeletonTracks rows={8} />;
+  if (view === "photos") return <SkeletonCards className="photo-grid" count={18} lines={0} />;
+  return view === "books" ? <SkeletonCards className="book-grid" shape="book" count={12} /> : <SkeletonCards className="video-grid" shape="wide" count={8} />;
+}
+const foldersSkeleton = (view: MediaView) =>
+  <SkeletonCards className={`media-folders is-${view}`} shape={view === "videos" ? "wide" : view === "books" ? "book" : "square"} count={view === "books" ? 12 : 8} />;
+
+function LibraryState({ loading, error, empty, onRetry, skeleton, children }: { loading: boolean; error: string; empty: ReactNode; onRetry: () => void; skeleton?: ReactNode; children: ReactNode }) {
+  if (loading) return <>{skeleton ?? <SkeletonRows rows={6} />}</>;
   if (error) return <EmptyState icon="alert" title="读取失败" description={error} action={<Button icon="refresh" onClick={onRetry}>重试</Button>} />;
   return <>{empty ?? children}</>;
 }
@@ -358,7 +367,7 @@ function MediaFolders({ view, onOpenFolder }: { view: FolderMediaView; onOpenFol
   }, [view, attempt, collection]);
   const folders = state?.folders ?? [];
   const total = folders.reduce((sum, item) => sum + item.count, 0);
-  return <LibraryState loading={!state && !error} error={error} onRetry={() => setAttempt(value => value + 1)}
+  return <LibraryState loading={!state && !error} error={error} onRetry={() => setAttempt(value => value + 1)} skeleton={foldersSkeleton(view)}
     empty={state && !folders.length ? <EmptyState icon={config.icon} title={collection === "excluded" ? "没有未收录的文件" : `还没有${config.noun}`} description={collection === "excluded" ? "被排除或尚未指定收录的文件会出现在这里。" : "可以检查收录规则，或切换到「未收录」查找并加入文件。"} /> : null}>
     <p className="library-summary">{folders.length} 个文件夹 · {total} {config.unit}{state?.truncated ? `（只显示最近的 ${folders.length} 个文件夹，可用搜索查找其余的）` : ""}</p>
     <div className={`media-folders is-${view}`}>
@@ -402,7 +411,7 @@ function MediaSearch({ view, query, onOpenFolder, onOpenLocation }: { view: Medi
     for (const item of library.items) albums.set(albumOf(item), [...albums.get(albumOf(item)) ?? [], item]);
     return [...albums.entries()].sort(([a], [b]) => Number(!a) - Number(!b) || collator.compare(a, b)).map(([label, items]) => ({ label, items: ordered(view, items) }));
   }, [library.items, view]);
-  return <LibraryState loading={library.loading} error={library.error} onRetry={library.reload}
+  return <LibraryState loading={library.loading} error={library.error} onRetry={library.reload} skeleton={itemsSkeleton(view)}
     empty={!library.items.length ? <EmptyState icon="search" title={`没有找到${config.noun}`} description={`没有与「${query}」匹配的${config.noun}。`} /> : null}>
     {view === "music" && <TrackSelectionBar selection={selection} items={library.items} onAdd={adding.open} />}
     {groups.map(group => <section key={group.label} className="library-group">
@@ -453,7 +462,7 @@ function MediaFolder({ view, folder, onBack, onOpenLocation }: { view: FolderMed
       </div>
     </header>
     <LibraryControls />
-    <LibraryState loading={library.loading} error={library.error} onRetry={library.reload}
+    <LibraryState loading={library.loading} error={library.error} onRetry={library.reload} skeleton={itemsSkeleton(view)}
       empty={!items.length ? <EmptyState icon={config.icon} title={`当前范围没有${config.noun}`} description="可以切换收录范围，或调整文件夹与文件的收录设置。" /> : null}>
       {view === "photos"
         ? groupBy(items, photoMonth).map(group => <section key={group.label} className="library-group">
@@ -611,7 +620,7 @@ function MusicAlbums({ onOpenAlbum }: { onOpenAlbum: (album: string) => void }) 
   const albums = state?.albums ?? [];
   const total = albums.reduce((sum, item) => sum + item.count, 0);
   const named = albums.filter(item => item.album).length;
-  return <LibraryState loading={!state && !error} error={error} onRetry={() => setAttempt(value => value + 1)}
+  return <LibraryState loading={!state && !error} error={error} onRetry={() => setAttempt(value => value + 1)} skeleton={foldersSkeleton("music")}
     empty={state && !albums.length ? <EmptyState icon="music" title={collection === "excluded" ? "没有未收录的音乐" : "还没有音乐"} description="可以检查收录规则，或切换收录范围查找文件。" /> : null}>
     <p className="library-summary">{named} 张专辑 · {total} 首{state?.truncated ? `（只显示前 ${albums.length} 张专辑，可用搜索查找其余的）` : ""}</p>
     <div className="media-folders is-music">
@@ -678,7 +687,7 @@ function MusicAlbum({ album, onBack, onOpenLocation }: { album: string; onBack: 
       </div>
     </header>
     <LibraryControls />
-    <LibraryState loading={library.loading} error={library.error} onRetry={library.reload}
+    <LibraryState loading={library.loading} error={library.error} onRetry={library.reload} skeleton={<SkeletonTracks rows={8} />}
       empty={!tracks.length ? <EmptyState icon="music" title="当前范围没有歌曲" description="可以切换收录范围，或检查歌曲的收录设置与专辑信息。" /> : null}>
       <TrackSelectionBar selection={selection} items={tracks} onAdd={adding.open} />
       <MediaItems view="music" items={tracks} open={file => open(file)} menu={track => trackMenu(track, adding.open, onOpenLocation)}
@@ -728,7 +737,7 @@ function PlaylistsHome({ onOpen }: { onOpen: (id: number) => void }) {
     });
     return () => controller.abort();
   }, [attempt]);
-  return <LibraryState loading={!lists && !error} error={error} onRetry={() => setAttempt(value => value + 1)}
+  return <LibraryState loading={!lists && !error} error={error} onRetry={() => setAttempt(value => value + 1)} skeleton={foldersSkeleton("music")}
     empty={lists && !lists.length ? <EmptyState icon="playlist" title="还没有歌单" description="点右上角「新建歌单」，或在专辑、搜索结果和文件列表里选择「添加到歌单」。" /> : null}>
     <p className="library-summary">{lists?.length ?? 0} 个歌单</p>
     <div className="media-folders is-music">
@@ -825,7 +834,7 @@ function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () =
         </div>
       </div>
     </header>
-    <LibraryState loading={loading} error={error} onRetry={() => setAttempt(value => value + 1)}
+    <LibraryState loading={loading} error={error} onRetry={() => setAttempt(value => value + 1)} skeleton={<SkeletonTracks rows={8} />}
       empty={!tracks.length ? <EmptyState icon="playlist" title="歌单里还没有歌曲" description="点「添加歌曲」从全部音乐里搜索并勾选，或在专辑、搜索结果与文件列表里选择「添加到歌单」。移入回收站的歌曲暂不显示，还原后回到原位置。"
         action={info ? <Button variant="primary" icon="plus" onClick={() => setPicking(true)}>添加歌曲</Button> : undefined} /> : null}>
       <TrackSelectionBar selection={selection} items={tracks} onAdd={adding.open}>

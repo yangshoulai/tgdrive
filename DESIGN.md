@@ -148,7 +148,7 @@ Tessera（项目与命令行名称仍为 tgdrive）是个人和小团队使用�
 | `Modal` / `ConfirmDialog` | portal 到 body、唯一标题；焦点进入、Tab 循环、Esc 仅关闭最上层、关闭后焦点归还；提交期间可禁止关闭 |
 | `Menu` / `ContextMenu` | 行级“更多”菜单与右键菜单共用 `MenuList`：portal 到 `body`（全屏时挂到全屏元素内），不会被行的 `content-visibility`、`overflow` 裁切；支持方向键、Esc、点外部与滚动关闭；菜单项可带 `shortcut` 提示（如 F2、⌘⌫） |
 | `toast` + `Toaster` | 底部居中；成功 3.8 秒，带操作的提示 8 秒；错误保留至手动关闭或被队列替换，使用 `role="alert"`，最多 4 条；长文件名在任意字符处换行，「撤销」等操作按钮不收缩、不换行 |
-| `PageHeader` / `Panel` / `SkeletonRows` / `Progress` / `CopyField` / `KeyValue` | 页面结构与状态。窄屏页头：标题与操作放得下时同一行，放不下时操作换行；文件页的两个操作按钮各占一半宽度 |
+| `PageHeader` / `Panel` / `SkeletonRows` / `SkeletonCards` / `SkeletonTracks` / `Progress` / `CopyField` / `KeyValue` | 页面结构与状态。首屏加载用与真实内容同形同位的骨架：表格与列表用 `SkeletonRows`，卡片网格用 `SkeletonCards`（传真实网格类名，封面形状 square／wide／book），曲目列表用 `SkeletonTracks`；封面图到达前 `FileThumbnail`／`FileVisual` 自带闪光骨架，只有没有封面或重试用尽才显示文件类型图标。窄屏页头：标题与操作放得下时同一行，放不下时操作换行；文件页的两个操作按钮各占一半宽度 |
 | `EmptyState` | 页面级空状态（居中图标、标题、说明、次要按钮）；`compact` 用于面板、弹窗与设置分组（图标在左、文字左对齐、虚线边框）。列表内部的“没有匹配项”一行提示（播放列表、对话历史、@ 引用、位置选择、文档搜索）可以保留各自的样式 |
 | `SetupGuide` | 配置页顶部的「配置指南」：可折叠卡片，书本图标 + 标题与一句说明，展开后是带编号圆点与竖向连线的步骤（标题 + 说明，可含行内代码、列表、代码块和表格），底部「查看完整文档」；尚未配置时默认展开，用户折叠／展开后记在 `localStorage` 的 `tessera-guide-<id>`。用于存储通道、系统设置的访问地址和文件助手的渠道与模型；每项都有详尽提示的表单（如下载与资源）不另加指南 |
 | `Pagination` | 统一上一页、页码和下一页；只有一页时不渲染（包括每页数量选择）；加载时禁用翻页并显示状态，窄屏自动换行 |
