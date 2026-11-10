@@ -21,8 +21,10 @@ from types import SimpleNamespace
 
 from .errors import NotFoundError, NotReadyError, QuotaExceededError
 from .filekinds import kind_clause, kind_of
+from .library import book_type
 from .objects import PRIVATE_PREFIX, ObjectInfo, Scope
 from .media import tags as media_tags
+from .media import book_covers
 from .thumbnail_cache import ThumbnailCache, ThumbnailCacheMiss
 from .work import WorkBusyError
 
@@ -270,6 +272,8 @@ def source_kind(info: ObjectInfo) -> str | None:
         return None
     if kind == "image" and (info.key.lower().endswith(".svg") or "svg" in (info.content_type or "").lower()):
         return None
+    if book_type(info.key, info.content_type):
+        return "book"
     return kind if kind in ("image", "video", "audio") else None
 
 
@@ -501,6 +505,9 @@ class ThumbnailService:
     def observe(self, info, *, client=False):
         """用户真正读取文件时登记；接下来交付的密文会进入缓存，不另开原文件请求。
         client 表示读取者是登录的网页：图片和视频由预览页用已解码的画面生成，后台只在超时后接管。"""
+        # 书籍只在新增提交时自动提取；打开历史书籍不能隐式触发补图。
+        if source_kind(info) == "book":
+            return
         if self._eligible(info) and not self._has_thumbnail(info.blob_uuid):
             if client and source_kind(info) in ("image", "video"):
                 job = _Job(info, time.monotonic() + PREVIEW_GRACE, state="waiting_client", detail="等待预览页用已加载的画面生成")
@@ -509,7 +516,8 @@ class ThumbnailService:
             self._dispatch(self._enqueue, job)
 
     def wants_data(self, info):
-        return self._eligible(info) and not self._has_thumbnail(info.blob_uuid)
+        return (self._eligible(info) and not self._has_thumbnail(info.blob_uuid)
+                and (source_kind(info) != "book" or info.blob_uuid in self._pending))
 
     def _enqueue(self, job):
         blob = job.info.blob_uuid
@@ -726,6 +734,26 @@ class ThumbnailService:
             data = await read(picture.offset, picture.offset + picture.length)
         return await self._render_picture(data, authorize)
 
+    async def _book_images(self, info, authorize, allow_remote):
+        async def read(start, end):
+            authorize()
+            try:
+                data = await self._read(info, start, end, allow_remote)
+            except WorkBusyError:
+                raise ThumbnailRetry("文件读取名额繁忙，稍后再生成") from None
+            authorize()
+            return data
+
+        try:
+            data = await book_covers.read_cover(read, info.size, info.key, info.content_type)
+        except book_covers.BookCoverError as exc:
+            raise ThumbnailError(str(exc)) from None
+        if data is None:
+            return None
+        if image_mime(data) is None:
+            raise ThumbnailError("书籍内置封面不是受支持的图片格式")
+        return await self._render_picture(data, authorize)
+
     async def _render_picture(self, data, authorize):
         """把一张图片（内嵌封面或在线找到的封面）缩放成缩略图；不是受支持的图片时返回 None。"""
         if image_mime(data) is None:
@@ -772,11 +800,14 @@ class ThumbnailService:
             raise ValueError("此文件不支持生成封面")
         if mode == "capture" and source_kind(info) == "audio":
             raise ValueError("音频没有画面可以截取，请使用内置封面、在线查找或本地图片")
+        if mode == "capture" and source_kind(info) == "book":
+            raise ValueError("书籍请使用内置封面或本地图片")
         if not self.resources.ffmpeg:
             raise ValueError("服务器未安装 FFmpeg，无法在服务器生成")
         # 已知尺寸时当场评估，不适合就直接说明原因，不进入队列；尺寸未知的图片在任务里读文件头后再评估。
         try:
-            self._plan(info, source_kind(info), *self._known(info), remote=True)
+            if source_kind(info) != "book":
+                self._plan(info, source_kind(info), *self._known(info), remote=True)
         except ThumbnailError as exc:
             raise ValueError(str(exc)) from None
         self._unsuitable.pop(info.blob_uuid, None)
@@ -927,7 +958,7 @@ class ThumbnailService:
                     ready = (item for item in self._pending.values() if item.state == "queued" and item.ready_at <= now and item.info.blob_uuid not in self._leases)
                     # 用户请求优先，其次是只用缓存的自动任务，最后才是需要读取存储的补图；同级先图片和音频。
                     job = min(ready, key=lambda item: (2 if item.backfill else 0 if item.remote else 1,
-                                                       {"image": 0, "audio": 1, "video": 2}[source_kind(item.info)]), default=None)
+                                                       {"image": 0, "audio": 1, "book": 1, "video": 2}[source_kind(item.info)]), default=None)
                     if job is not None:
                         blob = job.info.blob_uuid
                         if not job.force and self._has_thumbnail(blob):
@@ -1051,6 +1082,8 @@ class ThumbnailService:
             if kind == "video":
                 if mode != "capture":
                     images = await self._embedded_images(info, scope.authorize, allow_remote)
+            elif kind == "book":
+                images = await self._book_images(info, scope.authorize, allow_remote)
             else:
                 # 图片按原图缩放；音频由解码器取出内嵌的专辑封面（音频没有画面可截）。
                 images = await self._decode(info, kind, scope, allow_remote)
@@ -1066,6 +1099,8 @@ class ThumbnailService:
                     failure_detail = ("没有内嵌封面，截取的画面均为空白或细节不足" if mode == "auto"
                                       else "截取的画面均为空白或细节不足" if mode == "capture"
                                       else "没有内嵌封面，在线也没有找到合适的封面，截取的画面均为空白或细节不足")
+                elif kind == "book":
+                    failure_detail = "书籍没有可用的封面图片"
                 else:
                     failure_detail = ("音频没有可用的内嵌封面" + ("，在线也没有找到合适的封面" if mode == "smart" else "")) if kind == "audio" \
                         else "未能提取图片画面"

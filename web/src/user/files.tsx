@@ -27,6 +27,7 @@ import { useThumbnailPolling } from "./thumbnail-polling";
 import { favoriteMenuItem, useFavorites } from "./favorites";
 import { useFilesBridge } from "./assistant-bridge";
 import { useAddToPlaylist } from "./playlists";
+import { useLibraryPolicyEditor } from "./library-policy";
 
 /* ---------- 文件 ---------- */
 
@@ -77,6 +78,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const [sort, setSort] = useState<FileSort>({ key: "name", desc: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const preview = usePreview();
+  const libraryPolicy = useLibraryPolicyEditor();
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
   const [metadataEditing, setMetadataEditing] = useState<api.FileItem | null>(null);
   const [extracting, setExtracting] = useState<{ file: api.FileItem; picks?: string[] } | null>(null);
@@ -437,6 +439,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
         { label: file.starred_at ? "取消收藏" : "收藏", icon: "star" as const, shortcut: "*", onSelect: () => void star([file], !file.starred_at) }] : []),
     ];
     items.push({ label: "编辑元数据", icon: "edit", onSelect: () => setMetadataEditing(file) });
+    if (!privateSpace) items.push({ label: "媒体库收录…", icon: "book", onSelect: () => libraryPolicy.open([file.key]) });
     const fileKind = getFileKind(file.content_type, file.key);
     if (fileKind === "audio" && !privateSpace) items.push({ label: "添加到歌单…", icon: "playlist", onSelect: () => playlistAdding.open([file]) });
     if (file.public_token) items.push({ label: "打开分享页", icon: "external", onSelect: () => window.open(api.publicLinks(file.public_token!, baseName(file.key), session.public_base_url).page, "_blank", "noreferrer") });
@@ -463,6 +466,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       ...(canCacheFolders ? [{ label: "缓存到本机", icon: "monitor" as const, onSelect: () => setFolderCache({ prefixes: [key], files: [] }) }] : []),
       { label: "目录统计", icon: "chart", onSelect: () => setStatsFor({ prefix: key, title: baseName(key) }) },
       favoriteMenuItem(key),
+      ...(!privateSpace ? [{ label: "媒体库收录…", icon: "book" as const, onSelect: () => libraryPolicy.open([key]) }] : []),
       ...(!privateSpace ? [{ label: shared ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(folderItem(key)) }] : []),
       ...(shared ? [{ label: "打开分享页", icon: "external" as const, onSelect: () => window.open(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "_blank", "noreferrer") }] : []),
       ...(shared ? [{ label: "复制分享链接", icon: "copy" as const, onSelect: () => void copyText(api.publicLinks(shared.public_token!, baseName(key), session.public_base_url).page, "分享链接已复制") }] : []),
@@ -703,6 +707,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
             {selectedFiles.some(entry => entry.file.public_token) && <Button size="sm" icon="lock" onClick={() => void bulkPublic(false)}>取消公开</Button>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="star" shortcut="*" onClick={() => void star(selectedFiles.map(entry => entry.file), !selectionStarred)}>{selectionStarred ? "取消收藏" : "收藏"}</Button>}
             {!privateSpace && selectedAudio.length > 0 && <Button size="sm" icon="playlist" onClick={() => playlistAdding.open(selectedAudio)}>加入歌单</Button>}
+            {!privateSpace && <Button size="sm" icon="book" onClick={() => libraryPolicy.open(selectedEntries.map(entry => entry.key))}>媒体库收录</Button>}
             <Button size="sm" icon="move" shortcut="M" onClick={() => setMoving(selectedEntries)}>移动</Button>
             {selectedEntries.length <= 200 && <Button size="sm" icon="archive" onClick={() => setCompressing(selectedEntries.map(entry => entry.key))}>压缩</Button>}
             <Button size="sm" icon="lock" onClick={() => setTransferring(selectedEntries)}>{privateSpace ? "移出私密空间" : "移入私密空间"}</Button>
@@ -867,6 +872,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       {compressing && <CompressDialog keys={compressing} onClose={() => setCompressing(null)} onOpenFolder={onOpenFolder} />}
       {editingImage && <ImageEditorDialog file={editingImage} onClose={() => setEditingImage(null)} onSaved={(item, replaced) => { if (replaced) preview.update(item); }} />}
       {metadataEditing && <MetadataEditor file={metadataEditing} onClose={() => setMetadataEditing(null)} />}
+      {libraryPolicy.dialog}
       {playlistAdding.dialog}
       {shortcutsOpen && <ShortcutsDialog area="files" privateSpace={privateSpace} onClose={() => setShortcutsOpen(false)} />}
       {folderCache && <ConfirmDialog title="缓存文件夹到本机？" danger={false} className={privateSpace ? "private-dialog" : ""} confirmLabel="开始缓存" onClose={() => setFolderCache(null)}

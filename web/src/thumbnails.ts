@@ -20,6 +20,30 @@ export function thumbnailSource(name: string, type: string | null | undefined, s
   return kind === "video" || kind === "audio" ? kind : null;
 }
 
+/** 与后端 library.BOOK_FORMATS 保持一致；PDF／TXT 不属于内嵌书籍封面的读取范围。 */
+export function bookCoverSource(name: string, type: string | null | undefined): boolean {
+  const mime = (type || "").split(";", 1)[0].trim().toLowerCase();
+  const suffix = name.split(".").at(-1)?.toLowerCase() || "";
+  const generic = !mime || ["application/octet-stream", "binary/", "application/force-download", "application/x-download", "application/download",
+    "application/unknown", "application/x-unknown", "application/binary", "unknown/"].some(prefix => mime.startsWith(prefix));
+  return [
+    [["epub"], ["application/epub+zip"], ["application/zip", "application/x-zip-compressed"]],
+    [["mobi", "azw", "azw3"], ["application/x-mobipocket-ebook", "application/vnd.amazon.ebook"], []],
+    [["fb2"], ["application/x-fictionbook+xml", "application/x-fictionbook"], ["text/plain", "text/xml", "application/xml"]],
+    [["cbz"], ["application/vnd.comicbook+zip", "application/x-cbz"], ["application/zip", "application/x-zip-compressed"]],
+    [["cbr"], ["application/vnd.comicbook-rar", "application/x-cbr"], ["application/vnd.rar", "application/x-rar-compressed"]],
+  ].some(([extensions, mimes, containers]) => mimes.includes(mime) || extensions.includes(suffix) && (generic || containers.includes(mime)));
+}
+
+/** 新上传书籍由服务器按范围提取原图，再由浏览器生成尺寸；基础镜像无需 FFmpeg。 */
+export async function createBookThumbnails(file: api.FileItem, signal?: AbortSignal): Promise<ThumbnailResult> {
+  try { return await fromBlob(await api.embeddedCover(file.key, file.etag, signal)); }
+  catch (reason) {
+    if (signal?.aborted) throw reason;
+    return reason instanceof api.ApiError && reason.status === 404 ? "none" : null;
+  }
+}
+
 /* ---------- 编码 ---------- */
 
 async function encode(source: CanvasImageSource, width: number, height: number, { size, budget }: typeof THUMB): Promise<string | null> {

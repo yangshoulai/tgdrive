@@ -206,8 +206,8 @@ export function MetadataEditor({ file, onClose, initialTab }: { file: api.FileIt
             <Button size="sm" icon="search" onClick={() => setLookup("info")}>在线查找</Button>
           </div>
           <div className="metadata-grid">{order.map(name => <div key={name} className={`metadata-cell${WIDE.includes(name) ? " is-wide" : ""}${fields[name] !== original[name] ? " is-changed" : ""}`}>
-            <Field label={labels[name] ?? name} hint={info.overridden?.includes(name) && !resets.has(name) ? <button type="button" className="link-button" onClick={() => reset(name)}
-              title={info.auto_fields?.[name] ? `文件自带：${info.auto_fields[name]}` : "文件中没有这一项"}>恢复为文件自带值</button> : resets.has(name) ? "保存后恢复为文件自带值" : undefined}>
+            <Field label={labels[name] ?? name} hint={info.overridden?.includes(name) && !resets.has(name) ? <Button size="sm" variant="ghost" icon="rotate" className="metadata-field-reset" onClick={() => reset(name)}
+              aria-label={`${labels[name] ?? name}：恢复为文件自带值`} title={info.auto_fields?.[name] ? `文件自带：${info.auto_fields[name]}` : "文件中没有这一项"}>恢复为文件自带值</Button> : resets.has(name) ? "保存后恢复为文件自带值" : undefined}>
               {name === "description" ? <textarea id={`${id}-${name}`} className="input" rows={4} value={fields[name]} maxLength={16000} onChange={event => set(name, event.target.value)} />
                 : <input id={`${id}-${name}`} className="input" value={fields[name]} placeholder={PLACEHOLDERS[name]} maxLength={name === "actors" ? 4000 : 512}
                   inputMode={name === "year" || name === "track" ? "numeric" : undefined} onChange={event => set(name, event.target.value)} />}

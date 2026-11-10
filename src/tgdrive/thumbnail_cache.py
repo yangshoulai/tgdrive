@@ -11,6 +11,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from .filekinds import kind_of
+from .library import book_type
 
 
 MIB = 1024 * 1024
@@ -68,7 +69,7 @@ class ThumbnailCache:
 
     def prepare(self, blob, key, content_type=None):
         kind = kind_of(key, content_type)
-        if kind not in ("image", "video", "audio") or key.endswith("/"):
+        if (kind not in ("image", "video", "audio") and not book_type(key, content_type)) or key.endswith("/"):
             return
         if key.startswith(".tgdrive/") and not key.startswith(".tgdrive/private/"):
             return

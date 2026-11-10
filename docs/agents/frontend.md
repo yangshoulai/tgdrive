@@ -1,5 +1,10 @@
 # 前端结构与界面组件
 
+- 新书籍上传通过 `bookCoverSource` 判断明确电子书／漫画格式，在已有生成票据内调用 `createBookThumbnails`：服务端提取原图，浏览器生成三尺寸。`ThumbnailEditor` 为这些格式显示「内置封面」，不增加在线查找或截图；PDF／TXT 不显示此来源。`useThumbnailPolling` 只为近期书籍查询状态，不触发历史文件提取。详见 [书籍封面读取](../book-covers.md)。
+
+- 媒体库 `MediaItems` 的右键与更多菜单共用 `itemMenu`，照片／影视／书籍卡片及专辑／搜索／歌单曲目都可编辑元数据。右键状态按文件 key 解析最新项，滚动或条目消失时关闭；菜单 portal 到页面根部。`MetadataEditor` 由外层 `MediaLibraryView` 持有，避免查询刷新卸载编辑器。歌单监听 `FILE_UPDATED_EVENT` 合并最新文件字段并保持顺序。
+- 元数据字段的恢复操作复用 `Button size="sm" variant="ghost"` 与 `metadata-field-reset`，使用辅助文字色和恢复图标，不再用 `.link-button`；保留原有恢复后待保存的语义。
+
 给 AI 代理的模块细则（由根目录 AGENTS.md 索引）。web/src 的组件、预览引擎、文档站、样式与主题。
 
 - `thumbnails.ts`：网页上传优先从本地文件取内嵌封面，视频没有时按既有时间点截图并过滤空白画面；音频仍只取内嵌封面。预览页的 `videoPreviewThumbnails` 没有内嵌封面时返回 `null`、交还生成权，由后台截图补齐，不能写入 `none` 阻止后续补图。详细约束见 [media.md](media.md)。
@@ -19,7 +24,7 @@
 - 样式在 `web/src/styles/`：`00-tokens.css` 是全部令牌（含 `--z-*` 层级、`--leading-*` 行高、`--shadow-dark-*`），其余按领域编号；新页面的样式加新文件或放进对应领域文件，编号决定层叠顺序。断点只用 480／640／760／860／960／1100（高度 640／720），页面级层级只用 `--z-*`。
 - 命令面板 `user/command-palette.tsx`（⌘K，挂在 `PreviewHost` 内）：命令来自 `user.tsx` 的侧栏分组、收藏与常用操作，文件查找经 `api.searchFiles`（200 ms 防抖，8 项）。提示组件新增 `toast.status(名称, 文案)`：同名提示原地更新，用于连续调速、调整歌词时间。
 - 系统管理的文件助手页拆在 `admin/assistant/`（每个标签一个文件，`shared.tsx` 放共用常量与格式化），`admin/assistant.tsx` 只负责分发并转出 `AssistantPolicyDialog`／`price`／`tokens`。
-- 媒体库 `user/library.tsx`：「最近」与「相册」（只含图片）「影视」（视频）「音乐」（音频）读 `GET /api/user/v1/library?view=recent|photos|videos|music`（`UserApi.library`，键集分页，只含普通文件；`q` 匹配授权前缀下的相对路径，音乐另匹配 `media_info` 的歌名、艺人、专辑；`folder` 只列该文件夹直接包含的文件，照片按拍摄时间、其余按路径，空值为根目录）。相册与影视首页按所在文件夹分组：`GET /library/folders`（`UserApi.library_folders`，只接受 photos／videos，`rtrim(key, replace(key,'/',''))` 取父目录、窗口函数给数量／大小／最近时间与 4 个样本，最多 `LIBRARY_FOLDER_LIMIT` 个文件夹，按最近时间倒序），打开文件夹的地址是 `?view=photos|videos&folder=<路径>`。音乐按专辑：`GET /library/albums`（`UserApi.library_albums`，`_ALBUM_SQL` 只按去掉首尾空白的专辑名归类、不区分艺人，没有专辑或没有标签记录的歌曲归为空串「无专辑」并排在最后；样本按 `_TRACK_SQL` 曲目号排序，第一首有封面的作专辑封面），`library?view=music&album=` 列一张专辑，地址 `?view=music&album=<专辑名>`。`location.prefix` 带前导 `/` 区分「无专辑／根目录」与未打开。搜索结果按文件夹（音乐按专辑）分段。影视文件夹与专辑打开时读完（上限 5000）并按曲目号／文件名自然排序；曲目行左侧显示列表内序号（`index + 1`，不显示标签里的原曲目号，合并或只收录部分曲目时会跳号）与每首自己的封面小图；预览用 `anyFolder` 让播放列表跨文件夹；打开专辑时为最多 60 首没有标签记录的歌曲补读 `/media/info`（补读后下次进入才会归到对应专辑）。样式类名用 `media-folder*`（`.folder-card`／`.folder-cover` 已被文件网格占用）。缺封面的轮询统一用 `user/thumbnail-polling.ts` 的 `useThumbnailPolling`（文件页与媒体库共用）。回归 `tests/test_library.py`。星标视图与音乐歌单见 [telegram-stars-playlists.md](telegram-stars-playlists.md)。
+- 媒体库 `user/library.tsx`：「最近」与「相册」（只含图片）「影视」（视频）「音乐」（音频）「书籍」（电子书）读 `GET /api/user/v1/library?view=recent|photos|videos|music|books`（`UserApi.library`，键集分页，只含普通文件；`q` 匹配授权前缀下的相对路径，音乐另匹配 `file_metadata` 的歌名、艺人、专辑；`folder` 只列该文件夹直接包含的文件，照片按拍摄时间、其余按路径，空值为根目录）。相册、影视与书籍首页按所在文件夹分组：`GET /library/folders`（`UserApi.library_folders`，只接受 photos／videos／books，`rtrim(key, replace(key,'/',''))` 取父目录、窗口函数给数量／大小／最近时间与 4 个样本，最多 `LIBRARY_FOLDER_LIMIT` 个文件夹，按最近时间倒序），打开文件夹的地址是 `?view=photos|videos|books&folder=<路径>`。音乐按专辑：`GET /library/albums`（`UserApi.library_albums`，`_ALBUM_SQL` 只按去掉首尾空白的专辑名归类、不区分艺人，没有专辑或没有标签记录的歌曲归为空串「无专辑」并排在最后；样本按 `_TRACK_SQL` 曲目号排序，第一首有封面的作专辑封面），`library?view=music&album=` 列一张专辑，地址 `?view=music&album=<专辑名>`。`location.prefix` 带前导 `/` 区分「无专辑／根目录」与未打开。搜索结果按文件夹（音乐按专辑）分段。影视／书籍文件夹与专辑打开时读完（上限 5000）并按曲目号／文件名自然排序；曲目行左侧显示列表内序号（`index + 1`，不显示标签里的原曲目号，合并或只收录部分曲目时会跳号）与每首自己的封面小图；预览用 `anyFolder` 让播放列表跨文件夹；打开专辑时为最多 60 首没有标签记录的歌曲补读 `/media/info`（补读后下次进入才会归到对应专辑）。样式类名用 `media-folder*`（`.folder-card`／`.folder-cover` 已被文件网格占用）。缺封面的轮询统一用 `user/thumbnail-polling.ts` 的 `useThumbnailPolling`（文件页与媒体库共用）。回归 `tests/test_library.py`。星标视图与音乐歌单见 [telegram-stars-playlists.md](telegram-stars-playlists.md)。
 
 - 脚本安全解锁页 `grabber-private.tsx` 是独立入口，`node build-apps.mjs` 默认同时构建 user 与 private，后者输出 `dist/grabber/index.html`；它不加载主站会话 Provider，不读 Cookie，以专用 MessagePort 接收当前脚本的密钥与安装标识，密码不离开 Tessera 来源。仅该 HTML 的响应允许跨站嵌入，主站保持 frame-ancestors none。表单复用 ui 基元及现有通行密钥验证，样式在 `18-grabber-private.css`，窄屏输入字号至少 16px。
 
@@ -28,3 +33,5 @@
 - 元数据编辑器按音频／视频／其他文件显示相应页；字幕提供轨道选择、名称、语言、默认项与删除，窄屏单列。保存只传字段与资源增量，全部封面使用独立保存流程。 详见 [文件级元数据](../media-metadata.md)。
 - 深色媒体表面的模糊铺底（音乐播放器 `.audio-backdrop`、播放列表与最小化小窗的 `::before`）：外扩距离必须大于模糊扩散（约 3σ），否则边缘混入透明、透出深色底，形成一圈「黑边」。有封面铺底的播放列表面板不用实体边框（`overflow` 只裁到内边距边缘，边框区域只剩底色，会成为暗线），改用 `::after` 浅色内描边。唱片投影须落在 `.audio-body` 底部留白内，否则被 `overflow: clip` 截成硬边。
 - 音频控制条：播放模式、歌词、播放列表按钮在宽播放器上带短文字（`MediaButton` 的 `text`，容器宽度 ≤600px 时只留图标），开启状态只用颜色区分（开启纯白加粗、关闭半透明灰），不加底色，也不用图标下的小圆点；宽窗口打开播放列表时 `.audio-body` 右侧让出抽屉宽度、唱片缩小，不遮挡歌名。
+
+- 媒体库收录设置：`user/library-policy.tsx` 复用 Modal、单选与 FolderPicker，文件／目录／多选入口共用。`library.tsx` 的上下文共享 included／excluded／all，查询、目录样本、专辑统计与全部播放采用同一范围；保存后广播 `LIBRARY_UPDATED_EVENT`。书籍使用 3:4 卡片，PDF／TXT 默认在未收录中，可按文件或目录加入。只改展示偏好；规则契约见 [媒体库与收录管理](../media-library.md)。

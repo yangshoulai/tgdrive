@@ -528,6 +528,7 @@ class TgDriveASGI(StaticFiles):
                           "/assistant/conversations/delete": "assistant.trace.delete", "/assistant/purge": "assistant.data.purge"},
         "/api/user/v1": {"/login": "user.login", "/logout": "user.logout", "/password": "user.password", "/register": "user.register",
                          "/profile": "account.profile", "/email": "account.email", "/avatar": "account.avatar",
+                         "/library/policy": "library.policy",
                          "/avatar/delete": "account.avatar_delete",
                          "/clients": "key.create", "/client-keys/disable": "key.disable", "/client-keys/delete": "key.delete", "/public": "object.public",
                          "/trash/purge": "trash.purge", "/downloads": "download.create", "/downloads/{}/stop": "download.stop",
@@ -701,6 +702,9 @@ class TgDriveASGI(StaticFiles):
         elif action == "account.email":
             # 新登录邮箱记为目标，便于追溯账号改名；不记录确认用的密码。
             target = (result or {}).get("username") if ok else None
+        elif action == "library.policy":
+            detail = {"count": len(payload["paths"]) if isinstance(payload.get("paths"), list) else 0,
+                      "policy": payload.get("policy") if payload.get("policy") in ("auto", "include", "exclude") else None}
         elif action == "user.delete":
             detail = {"deleted_objects": (result or {}).get("deleted_objects")} if ok else {}
             target = (result or {}).get("username") if ok else target
@@ -1391,11 +1395,19 @@ class TgDriveASGI(StaticFiles):
                 return 200, await user.library(token, query.get("view", [""])[0], query.get("cursor", [""])[0],
                                                int(query.get("limit", ["100"])[0]), query.get("q", [""])[0],
                                                query["folder"][0] if "folder" in query else None,
-                                               query["album"][0] if "album" in query else None), {}
+                                               query["album"][0] if "album" in query else None,
+                                               query.get("collection", ["included"])[0]), {}
             if method == "GET" and route == "/library/albums":
-                return 200, await user.library_albums(token, query.get("q", [""])[0]), {}
+                return 200, await user.library_albums(token, query.get("q", [""])[0], query.get("collection", ["included"])[0]), {}
             if method == "GET" and route == "/library/folders":
-                return 200, await user.library_folders(token, query.get("view", [""])[0], query.get("q", [""])[0]), {}
+                return 200, await user.library_folders(token, query.get("view", [""])[0], query.get("q", [""])[0], query.get("collection", ["included"])[0]), {}
+            if route == "/library/rules" and method == "GET" and not private:
+                return 200, user.library_rules(token), {"Cache-Control": "no-store"}
+            if route == "/library/policy" and not private:
+                if method == "GET":
+                    return 200, await user.objects.metadata.run_in_thread(user.library_policy, token, query.get("path", [""])[0]), {"Cache-Control": "no-store"}
+                if method == "POST":
+                    return 200, user.set_library_policy(token, csrf, payload.get("paths"), payload.get("policy")), {}
             if route.startswith("/telegram") and route in ("/telegram", "/telegram/link", "/telegram/unlink") and self.telegram_bot is not None:
                 account = user.accounts.account_for_session(user._session(token, csrf=csrf, mutation=method != "GET"))
                 if method == "GET" and route == "/telegram":

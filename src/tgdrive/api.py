@@ -13,7 +13,7 @@ from dataclasses import replace
 from .accounts import AccountService
 from .authn import AuthenticationError, Session, hash_password
 from .errors import NotFoundError, NotReadyError
-from . import favorites
+from . import favorites, library as media_library
 from .playlists import ITEM_LIMIT as PLAYLIST_ITEMS, LIMIT as PLAYLIST_LIMIT, Playlists
 from .filekinds import kind_case, kind_clause
 from .maintenance import MaintenanceService
@@ -819,7 +819,7 @@ class UserApi:
         return {"objects": self._objects_json([self.objects._object(row) for row in rows[:limit]]), "common_prefixes": [],
                 "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None}
 
-    LIBRARY_VIEWS = ("recent", "photos", "videos", "music")
+    LIBRARY_VIEWS = ("recent", "photos", "videos", "music", "books")
     _LIBRARY_KINDS = {"photos": "image", "videos": "video", "music": "audio"}
     # 文件所在文件夹（以 / 结尾，根目录为空串）：rtrim 去掉末尾所有非 / 字符，即最后一个 / 之后的文件名。
     _FOLDER_SQL = "rtrim(o.key, replace(o.key, '/', ''))"
@@ -833,11 +833,83 @@ class UserApi:
     def _field_sql(name: str) -> str:
         return f"coalesce(json_extract(f.overrides,'$.{name}'),json_extract(f.auto_fields,'$.{name}'))"
 
-    def _library_filter(self, token: str, view: str, query: str):
+    def library_rules(self, token: str) -> dict[str, object]:
+        scope = self._scope(token)
+        rules = media_library.load(self.objects.metadata.db, scope.bucket_id)
+        return {"folders": [{"path": path, "policy": rules[path]} for path in sorted(rules)
+                            if not path.startswith(".tgdrive/")], "limit": media_library.FOLDER_LIMIT}
+
+    def library_policy(self, token: str, path: str) -> dict[str, object]:
+        scope = self._scope(token)
+        directory = not path or path.endswith("/")
+        path = self._path(path, directory=directory) if path else ""
+        rules = media_library.load(self.objects.metadata.db, scope.bucket_id)
+        effective, inherited = media_library.inherited(rules, path, directory=directory)
+        if directory:
+            count = self.objects.metadata.db.execute(
+                "SELECT count(*) FROM objects WHERE bucket_id=? AND key>=? AND key<? "
+                "AND substr(key,-1)!='/' AND substr(key,1,9)!='.tgdrive/'",
+                (scope.bucket_id, path, path + self.objects._PREFIX_END)).fetchone()[0]
+            return {"path": path, "policy": rules.get(path, "auto"), "effective": effective,
+                    "inherited_from": None if path in rules else inherited, "directory": True, "count": count}
+        info = self.objects.head_object(scope, path)
+        row = self.objects.file_metadata.row(info.metadata_id)
+        policy = row["library_policy"] if row else "auto"
+        if policy != "auto":
+            effective, inherited = policy, None
+        category = media_library.category(info.key, info.content_type)
+        automatic = category != "books" or media_library.book_type(info.key, info.content_type)
+        included = category is not None and effective != "exclude" and (automatic or effective == "include")
+        return {"path": path, "policy": policy, "effective": effective, "inherited_from": inherited,
+                "directory": False, "category": category, "included": included,
+                "requires_include": category == "books" and not automatic}
+
+    def set_library_policy(self, token: str, csrf: str, paths: object, policy: object) -> dict[str, object]:
+        scope = self._scope(token, csrf=csrf, mutation=True)
+        if policy not in media_library.POLICIES:
+            raise ValueError("媒体库收录方式不正确")
+        if not isinstance(paths, list) or not paths or len(paths) > 1000 or not all(isinstance(path, str) for path in paths):
+            raise ValueError("请选择 1–1000 个文件或文件夹")
+        paths = list(dict.fromkeys(self._path(path, directory=path.endswith("/")) if path else "" for path in paths))
+        with self.objects.metadata.transaction() as db:
+            rules = media_library.load(db, scope.bucket_id)
+            previous_count = sum(not path.startswith(".tgdrive/") for path in rules)
+            files = []
+            for path in paths:
+                if not path or path.endswith("/"):
+                    if policy == "auto":
+                        rules.pop(path, None)
+                    else:
+                        if path and db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
+                                               (scope.bucket_id, path, path + self.objects._PREFIX_END)).fetchone() is None:
+                            raise NotFoundError("文件夹已不存在，请刷新后重试")
+                        rules[path] = policy
+                else:
+                    info = self.objects.head_object(scope, path)
+                    if policy == "include" and media_library.category(info.key, info.content_type) is None:
+                        raise ValueError("只能收录图片、音视频和书籍；PDF、TXT 可以手动作为书籍加入")
+                    files.append(info)
+            count = sum(not path.startswith(".tgdrive/") for path in rules)
+            if count > media_library.FOLDER_LIMIT and count > previous_count:
+                raise ValueError(f"最多设置 {media_library.FOLDER_LIMIT} 条文件夹收录规则")
+            # 所有输入验证完成后一起提交，批量失败不能只改一部分文件。
+            for info in files:
+                ident = info.metadata_id
+                if not ident or self.objects.file_metadata.row(ident) is None:
+                    ident = self.objects.file_metadata.create(db, scope.bucket_id, info.blob_uuid, info.key, info.content_type)
+                    db.execute("UPDATE objects SET metadata_id=? WHERE bucket_id=? AND key=?", (ident, scope.bucket_id, info.key))
+                db.execute("UPDATE file_metadata SET library_policy=? WHERE id=? AND bucket_id=?", (policy, ident, scope.bucket_id))
+            media_library.store(db, scope.bucket_id, rules)
+            self._scope(token, csrf=csrf, mutation=True)
+        return {"updated": len(paths)}
+
+    def _library_filter(self, token: str, view: str, query: str, collection: str = "included"):
         """媒体库公共条件：普通文件（不含私密空间与系统区）、按视图限定类型、可选关键词。
         关键词匹配授权前缀之下的相对路径（文件夹名或文件名）；音乐另匹配标签里的歌名、艺人与专辑。"""
         if view not in self.LIBRARY_VIEWS:
             raise ValueError("浏览方式不正确")
+        if collection not in media_library.COLLECTIONS:
+            raise ValueError("媒体库收录范围不正确")
         query = query.strip()
         if len(query) > 200:
             raise ValueError("搜索词太长")
@@ -847,11 +919,26 @@ class UserApi:
         base = scope.prefix
         sql = "o.bucket_id=? AND o.key>=? AND o.key<? AND substr(o.key,-1)!='/' AND substr(o.key,1,9)!='.tgdrive/'"
         args: list[object] = [account.bucket_id, base, base + self.objects._PREFIX_END]
+        source = "objects o"
+        if view != "recent":
+            source, rule_args = media_library.source(media_library.load(self.objects.metadata.db, account.bucket_id), self.objects._PREFIX_END)
+            args = rule_args + args
         if view in self._LIBRARY_KINDS:
             # kind_clause 只引用 objects 独有的 key、content_type 列，与其他表连接后不需要加表名。
             condition, kind_args = kind_clause(self._LIBRARY_KINDS[view])
             sql += f" AND {condition}"
             args += kind_args
+        elif view == "books":
+            condition, book_args = media_library.book_clause(documents=True)
+            sql += f" AND {condition}"
+            args += book_args
+        if view != "recent" and collection != "all":
+            included = "o.library_policy!='exclude'"
+            if view == "books":
+                automatic, automatic_args = media_library.book_clause()
+                included += f" AND ({automatic} OR o.library_policy='include')"
+                args += automatic_args
+            sql += f" AND {'NOT ' if collection == 'excluded' else ''}({included})"
         if query:
             fields = ["lower(substr(o.key,?))"]
             if view == "music":
@@ -859,15 +946,16 @@ class UserApi:
             sql += " AND (" + " OR ".join(f"instr({field},lower(?))>0" for field in fields) + ")"
             args += [len(base) + 1, query] + [query] * (len(fields) - 1)
         joins = "LEFT JOIN blobs b ON b.uuid=o.blob_uuid" + (" LEFT JOIN file_metadata f ON f.id=o.metadata_id" if view == "music" else "")
-        return account, base, joins, sql, args
+        return account, base, source, joins, sql, args
 
     async def library(self, token: str, view: str, cursor: str = "", limit: int = 100,
-                      query: str = "", folder: str | None = None, album: str | None = None) -> dict[str, object]:
-        """跨文件夹浏览：recent 按修改时间倒序的全部文件；photos（图片）、videos（视频）、music（音频）。
+                      query: str = "", folder: str | None = None, album: str | None = None,
+                      collection: str = "included") -> dict[str, object]:
+        """跨文件夹浏览：recent 全部最近文件；photos（图片）、videos（视频）、music（音频）、books（书籍）。
         folder 给出时只列这个文件夹里直接包含的文件（照片按拍摄时间倒序，其余按路径）；没有 folder 时按路径排列，
         网页按所在文件夹（音乐按专辑）分段（搜索结果）。album 只用于音乐：标签里专辑名（去掉首尾空白）相同的歌曲，
         空串为没有专辑的歌曲。键集分页，游标是上一页最后一项。"""
-        _, base, joins, sql, args = self._library_filter(token, view, query)
+        _, base, source, joins, sql, args = self._library_filter(token, view, query, collection)
         limit = max(1, min(limit, 500))
         if album is not None and view == "music":
             sql += f" AND {self._ALBUM_SQL}=?"
@@ -895,7 +983,7 @@ class UserApi:
 
         def read_page():
             return self.objects.metadata.db.execute(
-                f"SELECT o.*, b.taken_at AS taken_at, {sort} AS sort_value FROM objects o {joins} "
+                f"SELECT o.*, b.taken_at AS taken_at, {sort} AS sort_value FROM {source} {joins} "
                 f"WHERE {sql} {after[0]} ORDER BY {order} LIMIT ?", (*args, *after[1], limit + 1)).fetchall()
         rows = await self.objects.metadata.run_in_thread(read_page)
         page = rows[:limit]
@@ -903,16 +991,20 @@ class UserApi:
         for value, row in zip(objects, page):
             if row["taken_at"] is not None:
                 value["taken_at"] = row["taken_at"]
+            if view != "recent":
+                automatic = view != "books" or media_library.book_type(row["key"], row["content_type"])
+                value["library"] = {"policy": row["file_library_policy"], "effective": row["library_policy"],
+                                    "included": row["library_policy"] != "exclude" and (automatic or row["library_policy"] == "include")}
         last = page[-1] if len(rows) > limit else None
         next_cursor = None if last is None else f"{last['sort_value']!r}\n{last['key']}" if by_time else last["key"]
         return {"objects": objects, "next_cursor": next_cursor}
 
-    async def library_folders(self, token: str, view: str, query: str = "") -> dict[str, object]:
-        """媒体库按文件夹分组：每个直接包含这类文件的文件夹给出数量、大小、最近时间与最多 4 个样本（照片取最新的，
-        影视按路径取前几个），文件夹按最近时间倒序。最多 LIBRARY_FOLDER_LIMIT 个文件夹。音乐按专辑浏览，见 library_albums。"""
-        if view not in ("photos", "videos"):
+    async def library_folders(self, token: str, view: str, query: str = "", collection: str = "included") -> dict[str, object]:
+        """媒体库按文件夹分组：相册、影视与书籍给出数量、大小、最近时间与最多 4 个样本（照片取最新的，
+        影视与书籍按路径取前几个），文件夹按最近时间倒序。最多 LIBRARY_FOLDER_LIMIT 个文件夹。音乐见 library_albums。"""
+        if view not in ("photos", "videos", "books"):
             raise ValueError("浏览方式不正确")
-        _, base, joins, sql, args = self._library_filter(token, view, query)
+        _, base, source, joins, sql, args = self._library_filter(token, view, query, collection)
         stamp = "COALESCE(b.taken_at, o.modified_at)" if view == "photos" else "o.modified_at"
         sample = "stamp DESC, key" if view == "photos" else "key"
         folder_order = "latest DESC, folder"
@@ -920,7 +1012,7 @@ class UserApi:
 
         def read():
             return self.objects.metadata.db.execute(
-                f"WITH media AS (SELECT o.*, {stamp} AS stamp, {self._FOLDER_SQL} AS folder FROM objects o {joins} WHERE {sql}), "
+                f"WITH media AS (SELECT o.*, {stamp} AS stamp, {self._FOLDER_SQL} AS folder FROM {source} {joins} WHERE {sql}), "
                 f"ranked AS (SELECT *, row_number() OVER (PARTITION BY folder ORDER BY {sample}) AS rank, "
                 "count(*) OVER (PARTITION BY folder) AS total, sum(size) OVER (PARTITION BY folder) AS bytes, "
                 "max(stamp) OVER (PARTITION BY folder) AS latest FROM media), "
@@ -942,16 +1034,16 @@ class UserApi:
             item["samples"] = self._objects_json([self.objects._object(row) for row in samples[item["path"]]])
         return {"folders": folders, "truncated": truncated}
 
-    async def library_albums(self, token: str, query: str = "") -> dict[str, object]:
+    async def library_albums(self, token: str, query: str = "", collection: str = "included") -> dict[str, object]:
         """音乐按专辑归类：标签里专辑名相同的歌曲为一张专辑（不区分艺人），没有专辑的歌曲合为 album 为空串的一项（排在最后）。
         每张专辑给出数量、大小、总时长、艺人（只有一位时，否则为「多位艺人」）与按曲目号排在最前的 4 首（第一首的封面作专辑封面）。"""
-        _, _, joins, sql, args = self._library_filter(token, "music", query)
+        _, _, source, joins, sql, args = self._library_filter(token, "music", query, collection)
         limit = self.LIBRARY_FOLDER_LIMIT
 
         def read():
             return self.objects.metadata.db.execute(
                 f"WITH media AS (SELECT o.*, {self._ALBUM_SQL} AS album, nullif(trim(coalesce({self._field_sql('artist')},'')),'') AS artist, "
-                f"{self._field_sql('year')} AS year, coalesce(json_extract(f.auto_fields,'$.duration'), 0) AS duration, {self._TRACK_SQL} AS track_no FROM objects o {joins} WHERE {sql}), "
+                f"{self._field_sql('year')} AS year, coalesce(json_extract(f.auto_fields,'$.duration'), 0) AS duration, {self._TRACK_SQL} AS track_no FROM {source} {joins} WHERE {sql}), "
                 "ranked AS (SELECT *, row_number() OVER (PARTITION BY album ORDER BY track_no, key) AS rank, "
                 "count(*) OVER (PARTITION BY album) AS total, sum(size) OVER (PARTITION BY album) AS bytes, "
                 "sum(duration) OVER (PARTITION BY album) AS seconds, max(modified_at) OVER (PARTITION BY album) AS latest, "

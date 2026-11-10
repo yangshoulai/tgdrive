@@ -29,11 +29,13 @@ from urllib.parse import urlsplit
 from ..crypto import derive_subkey, open_sealed, seal
 from ..errors import NotFoundError, VersionConflict
 from ..filekinds import kind_of
+from ..library import book_type
 from ..objects import ObjectInfo, Scope
 from ..version import __version__
 from . import query as media_query
 from . import tags as media_tags
 from . import text as media_text
+from . import book_covers
 from .providers import registry
 from .records import ASSET_LIMIT, parsed_fields
 from .providers.base import WANTS, Candidate, Fetched, MediaQuery, Provider, ProviderContext, ProviderError, score, similarity
@@ -525,23 +527,47 @@ class MediaService:
         return best.text
 
     async def embedded_cover(self, scope: Scope, key: str, etag: str) -> tuple[bytes, str]:
-        """文件内嵌的封面原图：网页在文件还没有封面时用它生成三种规格（服务器没有 FFmpeg 也能补上音乐封面）。"""
-        info, _ = self._media(scope, key)
+        """只读内置封面原图；书籍按索引提取，网页可在服务器没有 FFmpeg 时生成三种规格。"""
+        info = self.objects.head_object(scope, key)
+        book = book_type(info.key, info.content_type)
+        if not book:
+            info, _ = self._media(scope, key)
+        elif not info.blob_uuid or key.endswith("/") or key.startswith(".tgdrive/") and not scope.private_access:
+            raise ValueError("只能读取普通书籍文件的内置封面")
         if info.etag != etag:
             raise ValueError("文件内容已变化，请重新打开")
-        if not self.enabled(self.providers["embedded"]):
+        if not book and not self.enabled(self.providers["embedded"]):
             raise ValueError("管理员已关闭内置数据")
+
+        def check():
+            current = self.objects.head_object(scope, key)
+            if (current.blob_uuid, current.etag, current.metadata_id) != (info.blob_uuid, info.etag, info.metadata_id):
+                raise ValueError("文件内容已变化，请重新打开")
+
         file = FileAccess(self, scope, info)
-        tags = await self._parsed(file)
-        picture = tags.cover() if tags else None
-        if picture is None:
-            raise NotFoundError(key)
-        if picture.data is not None:
-            data = picture.data
-        elif picture.length > 20 * 1024 * 1024:
-            raise ValueError("内嵌封面超过 20 MB")
+
+        async def read(start, end):
+            check()
+            data = await file.read(start, end)
+            check()
+            return data
+
+        if book:
+            data = await book_covers.read_cover(read, info.size, info.key, info.content_type)
         else:
-            data = await file.read(picture.offset, picture.offset + picture.length)
+            tags = await self._parsed(file)
+            picture = tags.cover() if tags else None
+            if picture is None:
+                data = None
+            elif picture.data is not None:
+                data = picture.data
+            elif picture.length > 20 * 1024 * 1024:
+                raise ValueError("内嵌封面超过 20 MB")
+            else:
+                data = await read(picture.offset, picture.offset + picture.length)
+        check()
+        if data is None:
+            raise NotFoundError(key)
         mime = _mime_ok(data)
         if mime is None:
             raise ValueError("内嵌封面不是受支持的图片格式")

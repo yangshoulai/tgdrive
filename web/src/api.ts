@@ -509,26 +509,42 @@ export const publicPreviewAssets = async (token: string, path: string, access?: 
 /** 搜索文件；prefix 为文件夹时只搜它及其子文件夹（关键词匹配文件夹之下的相对路径），空为整个空间。 */
 export const searchFiles = (query: string, cursor = "", publicOnly = false, limit = 100, root = "", kind: KindFilter = "", signal?: AbortSignal, prefix = "") =>
   request<ListPage>(`${fileApi("/search", root)}?limit=${limit}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor)}&public=${publicOnly ? "1" : "0"}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}${prefix ? `&prefix=${encodeURIComponent(prefix)}` : ""}`, { signal });
-/** 跨文件夹浏览：recent 最近修改的全部文件，photos 按拍摄时间的图片与视频，music 全部音频（按路径）。 */
-export type LibraryView = "recent" | "photos" | "videos" | "music";
-export type LibraryItem = FileItem & { taken_at?: number };
+/** 跨文件夹浏览：相册、影视、音乐与书籍只展示符合收录规则的普通文件；recent 保持所有最近文件。 */
+export type LibraryView = "recent" | "photos" | "videos" | "music" | "books";
+export type LibraryCollection = "included" | "excluded" | "all";
+export type LibraryPolicy = "auto" | "include" | "exclude";
+export const LIBRARY_UPDATED_EVENT = "tessera:library-updated";
+export const announceLibraryUpdated = () => window.dispatchEvent(new Event(LIBRARY_UPDATED_EVENT));
+export type LibraryPolicyInfo = { path: string; policy: LibraryPolicy; effective: LibraryPolicy; inherited_from: string | null;
+  directory: boolean; count?: number; category?: Exclude<LibraryView, "recent"> | null; included?: boolean; requires_include?: boolean };
+export const libraryPolicy = (path: string, signal?: AbortSignal) =>
+  request<LibraryPolicyInfo>(`/api/user/v1/library/policy?${new URLSearchParams({ path })}`, { signal });
+export const setLibraryPolicy = async (paths: string[], policy: LibraryPolicy) => {
+  const result = await request<{ updated: number }>("/api/user/v1/library/policy", { method: "POST", body: JSON.stringify({ paths, policy }) });
+  announceLibraryUpdated();
+  return result;
+};
+export const libraryRules = (signal?: AbortSignal) =>
+  request<{ folders: { path: string; policy: LibraryPolicy }[]; limit: number }>("/api/user/v1/library/rules", { signal });
+export type LibraryItem = FileItem & { taken_at?: number; library?: { policy: LibraryPolicy; effective: LibraryPolicy; included: boolean } };
 /** 媒体库的一页文件：q 按相对路径（音乐另含歌名、艺人、专辑）筛选；folder 给出时只列这个文件夹直接包含的文件（"" 为根目录）；
  * album 只用于音乐，列出这张专辑的歌曲（"" 为没有专辑的歌曲）。 */
-export const library = (view: LibraryView, options: { cursor?: string; limit?: number; q?: string; folder?: string; album?: string } = {}, signal?: AbortSignal) => {
+export const library = (view: LibraryView, options: { cursor?: string; limit?: number; q?: string; folder?: string; album?: string; collection?: LibraryCollection } = {}, signal?: AbortSignal) => {
   const params = new URLSearchParams({ view, limit: String(options.limit ?? 100), cursor: options.cursor ?? "" });
   if (options.q) params.set("q", options.q);
   if (options.folder !== undefined) params.set("folder", options.folder);
   if (options.album !== undefined) params.set("album", options.album);
+  if (options.collection) params.set("collection", options.collection);
   return request<{ objects: LibraryItem[]; next_cursor: string | null }>(`/api/user/v1/library?${params}`, { signal });
 };
 export type LibraryFolder = { path: string; count: number; size: number; latest: number; samples: LibraryItem[] };
-/** 相册与影视按文件夹分组（按最近时间倒序），每组带最多 4 个样本用作封面。 */
-export const libraryFolders = (view: "photos" | "videos", q = "", signal?: AbortSignal) =>
-  request<{ folders: LibraryFolder[]; truncated: boolean }>(`/api/user/v1/library/folders?${new URLSearchParams({ view, q })}`, { signal });
+/** 相册、影视与书籍按文件夹分组（按最近时间倒序），每组带最多 4 个样本用作封面。 */
+export const libraryFolders = (view: "photos" | "videos" | "books", q = "", signal?: AbortSignal, collection: LibraryCollection = "included") =>
+  request<{ folders: LibraryFolder[]; truncated: boolean }>(`/api/user/v1/library/folders?${new URLSearchParams({ view, q, collection })}`, { signal });
 /** 一张专辑：标签里专辑名相同的歌曲（不区分艺人）；album 为 "" 的一项是没有专辑的歌曲。samples 按曲目号排在最前的 4 首。 */
 export type LibraryAlbum = { album: string; count: number; size: number; duration: number; latest: number; artist: string | null; year: string | null; samples: LibraryItem[] };
-export const libraryAlbums = (q = "", signal?: AbortSignal) =>
-  request<{ albums: LibraryAlbum[]; truncated: boolean }>(`/api/user/v1/library/albums?${new URLSearchParams({ q })}`, { signal });
+export const libraryAlbums = (q = "", signal?: AbortSignal, collection: LibraryCollection = "included") =>
+  request<{ albums: LibraryAlbum[]; truncated: boolean }>(`/api/user/v1/library/albums?${new URLSearchParams({ q, collection })}`, { signal });
 /** Telegram 交互机器人（用户）：available 为管理员已启用；link 是当前账号绑定的私聊与它的设置（保存位置、下载提醒）。 */
 export type TelegramLink = { tg_username: string | null; tg_name: string | null; folder: string; notify: boolean; created_at: number };
 export type TelegramStatus = { available: boolean; bot_username: string | null; assistant: boolean; link: TelegramLink | null };

@@ -1,5 +1,7 @@
 # 存储、传输与资源限制
 
+- `ThumbnailCache.prepare` 也接纳明确电子书／漫画的上传密文，使新增书籍封面提取复用已传输字节；历史预览不登记书籍生成任务。容量、过期、加密和并发规则沿用原有实现。CBR 解析仅在受限子进程中使用系统 libarchive，不新增 Python 依赖，不把整个书籍写入内存或临时文件。
+
 给 AI 代理的模块细则（由根目录 AGENTS.md 索引）。读取名额、并发上限、传输性能、秒传、内容类型识别、Telegram 分片上传、GC。
 
 - 文件读取名额（`TransferSlots`，下载、预览、播放、S3 读取共用）由「系统设置 → 下载与资源」的 `transfer_concurrency`／`bucket_concurrency` 配置（`ResourceSettings`，1–32，启动参数 `--transfer-concurrency`／`--bucket-concurrency` 只作默认值，旧配置缺项时用启动值补齐），默认 8／6，`effective()` 只按内存收紧（每路 24 MB，最多占三分之一；不足 512 MiB 或未知时 3 路），不看 CPU 核数——「自动」因单核选了低资源档时读取仍按设置生效，只有管理员明确选择「低资源」才封顶 8 路，每账号不再减半，`app.apply_resources` 保存后立即生效；1.38 之前保存的旧默认值 4／2 由 `ResourceSettings.config` 一次性升级（settings `offline.resources.read_defaults`）。后台读取（本机缓存整文件，请求头 `X-Tessera-Background: cache` → `Scope.background` → `TransferSlots.slot(background=True)`）最多占「名额 − 1」、排队等待 3 倍时间（90 秒，须短于反向代理的首字节超时），从 1 MiB 起步（1→4→8 MiB，不用前台的 256 KB 起步，也不直接取整个后端窗口，否则存储慢时首字节要等整个 8 MiB）；本机缓存的 Worker 收到 503 + Retry-After 时原地等待同一段，不计入失败重试；离线下载写入内存中的分段（`upload_part(..., buffered=True)`）不占这些读取名额，只受上传名额约束；播放与预览不要加这个标记。

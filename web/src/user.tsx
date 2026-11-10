@@ -104,7 +104,7 @@ function WorkspaceSession({ justInitialized }: { justInitialized: boolean }) {
     onSessionChange={patch => setSession(current => current && { ...current, ...patch })} />;
 }
 
-type UserSection = "files" | "shared" | "trash" | "private" | "uploads" | "downloads" | "cache" | "account" | "assistantPage" | "recent" | "starred" | "photos" | "videos" | "music";
+type UserSection = "files" | "shared" | "trash" | "private" | "uploads" | "downloads" | "cache" | "account" | "assistantPage" | "recent" | "starred" | "photos" | "videos" | "music" | "books";
 type Section = UserSection | AdminModule;
 type Usage = { used_bytes: number; quota_bytes: number | null; id: number };
 
@@ -113,7 +113,7 @@ const isAdminSection = (section: Section): section is AdminModule => ADMIN_KEYS.
 // 旧下载记录或书签可能包含回收站等内部地址；普通文件导航不展示系统目录。
 const visibleFilesPrefix = (prefix: string) => prefix === ".tgdrive" || prefix.startsWith(".tgdrive/") ? "" : prefix;
 
-const isMediaSection = (section: Section): section is MediaView => section === "photos" || section === "videos" || section === "music";
+const isMediaSection = (section: Section): section is MediaView => section === "photos" || section === "videos" || section === "music" || section === "books";
 
 function readLocation(): { section: Section; prefix: string } {
   const { pathname, search } = window.location;
@@ -132,7 +132,7 @@ function readLocation(): { section: Section; prefix: string } {
   // 媒体库：prefix 字段沿用为打开的一组，前面加 "/" 与「未打开」区分——相册、影视是文件夹（?view=photos&folder=… ，根目录为空值），
   // 音乐是专辑（?view=music&album=… ，无专辑为空值）；音乐的歌单标签是 "playlists"（?view=music&tab=playlists），
   // 打开一个歌单是 "playlist:<编号>"（?view=music&playlist=…）。
-  if (view === "photos" || view === "videos" || view === "music") {
+  if (view === "photos" || view === "videos" || view === "music" || view === "books") {
     if (view === "music" && /^\d+$/.test(params.get("playlist") ?? "")) return { section: view, prefix: `playlist:${params.get("playlist")}` };
     if (view === "music" && params.get("tab") === "playlists") return { section: view, prefix: "playlists" };
     const key = view === "music" ? "album" : "folder";
@@ -376,6 +376,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       { key: "photos", label: "相册", icon: "image" },
       { key: "videos", label: "影视", icon: "film" },
       { key: "music", label: "音乐", icon: "music" },
+      { key: "books", label: "书籍", icon: "book" },
     ] },
     { label: "分享", workspace: personalWorkspace, items: [
       { key: "shared", label: "公开分享", icon: "globe", count: sharedCount },

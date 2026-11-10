@@ -210,6 +210,9 @@ class FileMetadataStore:
         db.execute("UPDATE file_metadata SET auto_fields=?,overrides=?,fields_ready=?,manual_lyrics=?,manual_subtitles=?,excluded_subtitles=?,state=? WHERE id=?",
                    (row["auto_fields"], row["overrides"], row["fields_ready"], row["manual_lyrics"], row["manual_subtitles"], row["excluded_subtitles"],
                     "ready" if row["state"] == "ready" else "pending", ident))
+        if source["bucket_id"] == bucket_id:
+            # 本人的复制沿用决定；分享转存不把别人的媒体库偏好带进接收者账号。
+            db.execute("UPDATE file_metadata SET library_policy=? WHERE id=?", (row["library_policy"], ident))
         for asset in self.assets(row["id"]):
             old = db.execute("SELECT * FROM objects WHERE bucket_id=? AND key=?", (source["bucket_id"], asset["object_key"])).fetchone()
             if old is None:

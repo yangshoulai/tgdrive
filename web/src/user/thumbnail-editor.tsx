@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type ComponentProps, type DragEvent
 import { createPortal } from "react-dom";
 import * as api from "../api";
 import { baseName } from "../files";
-import { createThumbnails, generateLoadedThumbnails, readEmbeddedCover, saveImageThumbnail, thumbnailSource } from "../thumbnails";
+import { bookCoverSource, createThumbnails, generateLoadedThumbnails, readEmbeddedCover, saveImageThumbnail, thumbnailSource } from "../thumbnails";
 import { Button, Icon, Modal, Notice, Segmented, formatBytes, shortcutLabel, type IconName } from "../ui";
 import { MediaCoverSearch } from "./media-lookup";
 
@@ -99,16 +99,17 @@ const SOURCES: Record<Source, { label: string; icon: IconName }> = {
   capture: { label: "截图生成", icon: "camera" }, online: { label: "在线查找", icon: "search" },
 };
 
-/** 更新封面：来源依次是内置封面（音视频文件里嵌入的图片）、本地图片、网络图片、截图生成（图片按原图缩放、视频截取画面）
+/** 更新封面：来源依次是内置封面（音视频／书籍的图片）、本地图片、网络图片、截图生成（图片按原图缩放、视频截取画面）
  * 与在线查找（音视频，管理员启用的媒体信息来源）。任何文件都可以用本地或网络图片；图片在浏览器里缩放成三种规格后保存，
  * 原图不进入文件空间，网络图片由服务器代为读取。截图生成交给服务器（服务器没有 FFmpeg 时在这个页面读取文件生成）。 */
 export function ThumbnailEditor({ file, onClose, onSaved, initialSource, inline, footerTarget, onSaveImage, onBusyChange, onDirtyChange, onCancelSave, saveHint }: { file: api.FileItem; onClose: () => void; onSaved: (variants: string[]) => void;
   inline?: boolean; footerTarget?: HTMLElement | null; onSaveImage?: (blob: Blob) => Promise<string[]>; onBusyChange?: (busy: boolean) => void; onDirtyChange?: (dirty: boolean) => void; onCancelSave?: () => void; saveHint?: string;
   /** 打开时选中的来源（播放器里的「查找封面」直接打开在线查找）。 */ initialSource?: Source }) {
   const media = thumbnailSource(file.key, file.content_type, file.size);
+  const book = bookCoverSource(file.key, file.content_type);
   const playable = media === "audio" || media === "video";
   const sources = (Object.keys(SOURCES) as Source[]).filter(item =>
-    item === "embedded" || item === "online" ? playable : item === "capture" ? media === "image" || media === "video" : true);
+    item === "embedded" ? playable || book : item === "online" ? playable : item === "capture" ? media === "image" || media === "video" : true);
   const [source, setSource] = useState<Source>(initialSource && sources.includes(initialSource) ? initialSource : sources[0]);
   const [generating, setGenerating] = useState<Generating | null>(null);
   const generation = useRef<AbortController | null>(null);
@@ -151,10 +152,10 @@ export function ThumbnailEditor({ file, onClose, onSaved, initialSource, inline,
     catch (reason) {
       if (controller.signal.aborted) return;
       const missing = reason instanceof api.ApiError && reason.status === 404;
-      const local = missing ? null : await readEmbeddedCover(api.versionedContentUrl(api.contentUrl(file.key), file.etag, file.size), file.size, controller.signal).catch(() => null);
+      const local = missing || book ? null : await readEmbeddedCover(api.versionedContentUrl(api.contentUrl(file.key), file.etag, file.size), file.size, controller.signal).catch(() => null);
       if (controller.signal.aborted) return;
       result = local instanceof Blob ? { state: "found", blob: local }
-        : missing || local === "none" ? { state: "none", detail: "文件里没有嵌入封面图片" }
+        : missing || local === "none" ? { state: "none", detail: book ? "这本书没有可读取的封面图片" : "文件里没有嵌入封面图片" }
         : { state: "failed", detail: api.errorMessage(reason, "读取内置封面失败，请稍后重试") };
     }
     setEmbedded(result);
@@ -278,8 +279,8 @@ export function ThumbnailEditor({ file, onClose, onSaved, initialSource, inline,
   if (source === "embedded") {
     const state = embedded ?? { state: "loading" as const };
     panel = <div className="thumbnail-panel">
-      <PanelHead icon="box" title="使用文件里嵌入的封面" detail={media === "audio" ? "音乐文件常把专辑封面嵌在标签里，直接取出这张图片，不需要联网。" : "MP4、MKV 等视频可以带一张海报图片，直接取出使用，不会截取画面。"} />
-      {state.state === "loading" ? <div className="thumbnail-status" role="status"><span className="spinner" aria-hidden="true" /><span><strong>正在读取内置封面</strong><small>只读取文件开头的标签与索引，不下载整个文件</small></span></div>
+      <PanelHead icon="box" title="使用文件里嵌入的封面" detail={book ? "读取电子书里的封面图片；漫画优先使用标记的封面，没有时使用按页码排序的第一张图片。" : media === "audio" ? "音乐文件常把专辑封面嵌在标签里，直接取出这张图片，不需要联网。" : "MP4、MKV 等视频可以带一张海报图片，直接取出使用，不会截取画面。"} />
+      {state.state === "loading" ? <div className="thumbnail-status" role="status"><span className="spinner" aria-hidden="true" /><span><strong>正在读取内置封面</strong><small>{book ? "正在从书籍中寻找封面图片" : "只读取文件开头的标签与索引，不下载整个文件"}</small></span></div>
         : state.state === "found" ? <div className="thumbnail-status is-done" role="status"><Icon name="checkCircle" size={20} /><span><strong>找到了内置封面</strong>
           <small>{picked ? `${picked.width}×${picked.height} · ${formatBytes(picked.blob.size)}，` : ""}点「保存封面」即可使用</small></span></div>
         : <><div className={`thumbnail-status is-${state.state === "none" ? "empty" : "failed"}`} role="status"><Icon name={state.state === "none" ? "info" : "alert"} size={20} />

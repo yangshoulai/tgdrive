@@ -4,7 +4,7 @@ import * as api from "../api";
 
 import { fingerprintFile, fingerprintSupported } from "../fingerprint";
 import { FileTile, FileVisual, baseName, getFileKind } from "../files";
-import { createThumbnails, generateLoadedThumbnails, readImageSize, readVideoSize, saveSvgThumbnail, thumbnailSource } from "../thumbnails";
+import { bookCoverSource, createBookThumbnails, createThumbnails, generateLoadedThumbnails, readImageSize, readVideoSize, saveSvgThumbnail, thumbnailSource } from "../thumbnails";
 
 import { BRAND } from "../brand";
 import { Notice, Badge, Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, Menu, Modal, PageHeader, Progress, Switch, copyText, formatBytes, toast, useDocumentTitle } from "../ui";
@@ -327,6 +327,7 @@ export function useUploadQueue(onSettled: () => void) {
         }
       }
       const source = thumbnailSource(job.file.name, job.file.type, job.file.size);
+      const book = bookCoverSource(result.key, result.content_type);
       // 图片／视频的显示尺寸从本地文件读取并记录：视频播放时一开始就按比例打开，预览头部显示分辨率（同内容已记录时跳过）。
       if ((source === "video" || source === "image") && !result.dimensions)
         void (source === "video" ? readVideoSize(job.file) : readImageSize(job.file)).then(size => { if (size) void api.setMediaSize(result, size).catch(() => undefined); });
@@ -334,9 +335,9 @@ export function useUploadQueue(onSettled: () => void) {
         // SVG 由浏览器用本地文件栅格化成封面（服务器不处理矢量图）；失败不影响上传结果。
         void saveSvgThumbnail(result, job.file).then(() => { if (!disposed.current) settled.current(); }).catch(() => undefined);
       }
-      if (!disposed.current && !result.thumbnails?.length && result.thumbnail_status !== "unavailable" && source) {
-        // 用本地文件生成缩略图（图片缩放、视频截帧、音频封面），不需要再下载；失败不影响上传结果。
-        void generateLoadedThumbnails(result, signal => createThumbnails({ file: job.file, signal }, source))
+      if (!disposed.current && !result.thumbnails?.length && result.thumbnail_status !== "unavailable" && (source || book)) {
+        // 音视频和图片复用本地文件；书籍由服务器只提取封面原图，浏览器缩放；失败不影响上传结果。
+        void generateLoadedThumbnails(result, signal => source ? createThumbnails({ file: job.file, signal }, source) : createBookThumbnails(result, signal))
           .then(() => { if (!disposed.current) settled.current(); }).catch(() => undefined);
       }
     } catch (reason) {

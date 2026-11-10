@@ -1,19 +1,25 @@
-/** 媒体库：跨文件夹浏览「最近」（按天分组的最近文件）、「收藏夹」（收藏的文件，代码里叫 starred）与「相册」（图片）、「影视」（视频）、「音乐」（音频）。
- * 相册与影视首页按所在文件夹分组（GET /api/user/v1/library/folders），打开文件夹只列其中直接包含的这类文件；
+/** 媒体库：跨文件夹浏览「最近」「收藏夹」与「相册」（图片）、「影视」（视频）、「音乐」（音频）、「书籍」。
+ * 相册、影视与书籍首页按所在文件夹分组（GET /api/user/v1/library/folders），打开文件夹只列其中直接包含的这类文件；
  * 音乐分「专辑」与「歌单」两个标签：专辑按标签里的专辑名归类（GET /library/albums，同名专辑合为一张，没有专辑的归为「无专辑」），
  * 歌单是用户自己整理的歌曲列表（/playlists，顺序可调整）。
  * 搜索按相对路径（音乐另含歌名、艺人、专辑）匹配，结果按文件夹（音乐按专辑）分段。数据只含普通文件；预览挂在应用外壳上，播放列表不限同一文件夹。 */
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import * as api from "../api";
 import { FileThumbnail, FileVisual, baseName, canPreview, getFileKind, kindLabel, parentPath } from "../files";
 import { coverTint } from "../preview-media";
-import { Button, Checkbox, ConfirmDialog, EmptyState, Icon, IconButton, Menu, PageHeader, SearchInput, SkeletonRows, Tabs, formatBytes, toast, useDocumentTitle, type IconName, type MenuItem } from "../ui";
+import { Button, Checkbox, ConfirmDialog, ContextMenu, EmptyState, Icon, IconButton, Menu, PageHeader, SearchInput, Segmented, SkeletonRows, Tabs, formatBytes, toast, useDocumentTitle, type IconName, type MenuItem } from "../ui";
 import { BRAND } from "../brand";
 import { usePreview } from "./preview-host";
 import { useThumbnailPolling } from "./thumbnail-polling";
 import { PlaylistBadge, PlaylistNameDialog, PlaylistShareDialog, SongPickerDialog, playlistsChanged, useAddToPlaylist, usePlaylistMembership } from "./playlists";
+import { LibraryRulesDialog, useLibraryPolicyEditor } from "./library-policy";
+import { MetadataEditor } from "./metadata-editor";
 
-export type MediaView = "photos" | "videos" | "music";
+export type MediaView = "photos" | "videos" | "music" | "books";
+type FolderMediaView = Exclude<MediaView, "music">;
+const LibraryContext = createContext<{ collection: api.LibraryCollection; setCollection: (value: api.LibraryCollection) => void;
+  openPolicy: (paths: string[]) => void; openRules: () => void; editMetadata: (file: api.FileItem) => void }>({
+    collection: "included", setCollection: () => undefined, openPolicy: () => undefined, openRules: () => undefined, editMetadata: () => undefined });
 /** 一个文件夹最多读多少个文件（影视与音乐按名称排序，需要读完）。 */
 const FOLDER_LIMIT = 5_000;
 /** 进入音乐文件夹时，最多为多少首还没有标签记录的歌曲补读标签（每首只读文件头）。 */
@@ -24,6 +30,7 @@ const VIEWS: Record<MediaView, { title: string; icon: IconName; unit: string; no
   photos: { title: "相册", icon: "image", unit: "张", noun: "照片", description: "所有文件夹里的照片，按所在文件夹分组；文件夹内按拍摄时间排列（读取 EXIF，没有时按修改时间）。" },
   videos: { title: "影视", icon: "film", unit: "个", noun: "视频", description: "所有文件夹里的视频，按所在文件夹分组；文件夹内按名称排列，剧集按集数顺序。" },
   music: { title: "音乐", icon: "music", unit: "首", noun: "音乐", description: "所有文件夹里的音乐，按歌曲标签里的专辑归类（同名专辑合为一张），没有专辑的歌曲归在「无专辑」；专辑内按曲目号排列。" },
+  books: { title: "书籍", icon: "book", unit: "本", noun: "书籍", description: "电子书按所在文件夹分组，文件夹内按名称排列；PDF、TXT 可通过文件或文件夹的收录设置加入。" },
 };
 
 /** 输入后稍等再搜索，避免每个字都请求一次。 */
@@ -38,6 +45,7 @@ function useSearch() {
 
 /** 读媒体库的文件：all 为真时按游标读完（上限 FOLDER_LIMIT），否则按滚动逐页读取。 */
 function useLibrary(view: api.LibraryView, options: { q?: string; folder?: string; album?: string; all?: boolean; page?: number }) {
+  const { collection } = useContext(LibraryContext);
   const { q = "", folder, album, all = false, page = 200 } = options;
   const [items, setItems] = useState<api.LibraryItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -50,7 +58,7 @@ function useLibrary(view: api.LibraryView, options: { q?: string; folder?: strin
     try {
       let next = from, collected: api.LibraryItem[] = [];
       do {
-        const result = await api.library(view, { cursor: next ?? "", limit: all ? 500 : page, q, folder, album }, signal);
+        const result = await api.library(view, { cursor: next ?? "", limit: all ? 500 : page, q, folder, album, collection }, signal);
         collected = collected.concat(result.objects); next = result.next_cursor;
       } while (all && next && collected.length < FOLDER_LIMIT && !signal?.aborted);
       if (signal?.aborted || current !== generation.current) return;
@@ -61,7 +69,7 @@ function useLibrary(view: api.LibraryView, options: { q?: string; folder?: strin
     } finally {
       if (current === generation.current) { busy.current = false; setLoading(false); setLoadingMore(false); }
     }
-  }, [view, q, folder, album, all, page]);
+  }, [view, q, folder, album, all, page, collection]);
   useEffect(() => {
     const controller = new AbortController();
     generation.current += 1;
@@ -78,7 +86,8 @@ function useLibrary(view: api.LibraryView, options: { q?: string; folder?: strin
   useEffect(() => {
     const changed = () => reload();
     window.addEventListener(api.FILE_UPDATED_EVENT, changed);
-    return () => window.removeEventListener(api.FILE_UPDATED_EVENT, changed);
+    window.addEventListener(api.LIBRARY_UPDATED_EVENT, changed);
+    return () => { window.removeEventListener(api.FILE_UPDATED_EVENT, changed); window.removeEventListener(api.LIBRARY_UPDATED_EVENT, changed); };
   }, [reload]);
   return { items, setItems, loading, loadingMore, error, hasMore: Boolean(cursor), more, reload };
 }
@@ -265,9 +274,33 @@ function ordered(view: MediaView, items: api.LibraryItem[]) {
 const albumName = (album: string) => album || "无专辑";
 const albumOf = (item: api.FileItem) => item.media?.album?.trim() ?? "";
 
-/** 媒体库三页的入口。place 是地址里的位置（user.tsx 的 prefix）：空串为首页；"/<名称>" 打开一组——相册与影视是文件夹（"" 为根目录），
+/** 媒体库的入口。place 是地址里的位置（user.tsx 的 prefix）：空串为首页；"/<名称>" 打开一组——相册、影视与书籍是文件夹（"" 为根目录），
  * 音乐是专辑（"" 为无专辑）；音乐另有 "playlists"（歌单标签）与 "playlist:<编号>"（打开一个歌单）。 */
 export function MediaLibraryView({ view, place, onPlace, onOpenLocation }: {
+  view: MediaView; place: string; onPlace: (place: string) => void; onOpenLocation: (prefix: string) => void;
+}) {
+  const [collection, setCollection] = useState<api.LibraryCollection>("included");
+  const [rules, setRules] = useState(false);
+  const [metadataEditing, setMetadataEditing] = useState<api.FileItem | null>(null);
+  const editor = useLibraryPolicyEditor();
+  return <LibraryContext.Provider value={{ collection, setCollection, openPolicy: editor.open, openRules: () => setRules(true), editMetadata: setMetadataEditing }}>
+    <MediaLibraryContent view={view} place={place} onPlace={onPlace} onOpenLocation={onOpenLocation} />
+    {rules && <LibraryRulesDialog onClose={() => setRules(false)} />}
+    {editor.dialog}
+    {metadataEditing && <MetadataEditor file={metadataEditing} onClose={() => setMetadataEditing(null)} />}
+  </LibraryContext.Provider>;
+}
+
+function LibraryControls() {
+  const { collection, setCollection, openRules } = useContext(LibraryContext);
+  return <div className="library-collection-toolbar">
+    <Segmented value={collection} label="媒体库收录范围" onChange={setCollection}
+      options={[{ value: "included", label: "已收录" }, { value: "excluded", label: "未收录" }, { value: "all", label: "全部" }]} />
+    <Button size="sm" icon="settings" onClick={openRules}>收录规则</Button>
+  </div>;
+}
+
+function MediaLibraryContent({ view, place, onPlace, onOpenLocation }: {
   view: MediaView; place: string; onPlace: (place: string) => void; onOpenLocation: (prefix: string) => void;
 }) {
   const search = useSearch();
@@ -286,6 +319,7 @@ export function MediaLibraryView({ view, place, onPlace, onOpenLocation }: {
       <Tabs label="音乐浏览方式" className="library-tabs" value={tab} onChange={value => onPlace(value === "playlists" ? "playlists" : "")}
         options={[{ value: "albums", label: "专辑", icon: "music" }, { value: "playlists", label: "歌单", icon: "playlist" }]} />
       {tab === "playlists" ? <PlaylistsHome onOpen={id => onPlace(`playlist:${id}`)} /> : <>
+        <LibraryControls />
         <LibrarySearch search={search} placeholder="搜索歌名、艺人、专辑、文件名或文件夹" />
         {search.query ? <MediaSearch key={search.query} view={view} query={search.query} onOpenFolder={onOpenFolder} onOpenLocation={onOpenLocation} />
           : <MusicAlbums onOpenAlbum={onOpenFolder} />}
@@ -295,6 +329,7 @@ export function MediaLibraryView({ view, place, onPlace, onOpenLocation }: {
   if (folder !== null) return <MediaFolder key={`${view}:${folder}`} view={view} folder={folder} onBack={() => onOpenFolder(null)} onOpenLocation={onOpenLocation} />;
   return <div className="library-view">
     <PageHeader title={config.title} description={config.description} />
+    <LibraryControls />
     <LibrarySearch search={search} placeholder={`按文件名或文件夹名搜索${config.noun}`} />
     {search.query
       ? <MediaSearch key={`${view}:${search.query}`} view={view} query={search.query} onOpenFolder={onOpenFolder} onOpenLocation={onOpenLocation} />
@@ -302,23 +337,29 @@ export function MediaLibraryView({ view, place, onPlace, onOpenLocation }: {
   </div>;
 }
 
-function MediaFolders({ view, onOpenFolder }: { view: "photos" | "videos"; onOpenFolder: (folder: string) => void }) {
+function MediaFolders({ view, onOpenFolder }: { view: FolderMediaView; onOpenFolder: (folder: string) => void }) {
+  const { collection } = useContext(LibraryContext);
   const config = VIEWS[view];
   const [state, setState] = useState<{ folders: api.LibraryFolder[]; truncated: boolean } | null>(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
+    const changed = () => setAttempt(value => value + 1);
+    window.addEventListener(api.FILE_UPDATED_EVENT, changed); window.addEventListener(api.LIBRARY_UPDATED_EVENT, changed);
+    return () => { window.removeEventListener(api.FILE_UPDATED_EVENT, changed); window.removeEventListener(api.LIBRARY_UPDATED_EVENT, changed); };
+  }, []);
+  useEffect(() => {
     const controller = new AbortController();
     setState(null); setError("");
-    api.libraryFolders(view, "", controller.signal).then(setState, reason => {
+    api.libraryFolders(view, "", controller.signal, collection).then(setState, reason => {
       if (!controller.signal.aborted) setError(api.errorMessage(reason, "读取失败，请稍后重试"));
     });
     return () => controller.abort();
-  }, [view, attempt]);
+  }, [view, attempt, collection]);
   const folders = state?.folders ?? [];
   const total = folders.reduce((sum, item) => sum + item.count, 0);
   return <LibraryState loading={!state && !error} error={error} onRetry={() => setAttempt(value => value + 1)}
-    empty={state && !folders.length ? <EmptyState icon={config.icon} title={`还没有${config.noun}`} description={`上传的${config.noun}会按所在文件夹出现在这里。`} /> : null}>
+    empty={state && !folders.length ? <EmptyState icon={config.icon} title={collection === "excluded" ? "没有未收录的文件" : `还没有${config.noun}`} description={collection === "excluded" ? "被排除或尚未指定收录的文件会出现在这里。" : "可以检查收录规则，或切换到「未收录」查找并加入文件。"} /> : null}>
     <p className="library-summary">{folders.length} 个文件夹 · {total} {config.unit}{state?.truncated ? `（只显示最近的 ${folders.length} 个文件夹，可用搜索查找其余的）` : ""}</p>
     <div className={`media-folders is-${view}`}>
       {folders.map(item => <button key={item.path} type="button" className="media-folder" onClick={() => onOpenFolder(item.path)} title={folderLabel(item.path)}>
@@ -332,8 +373,8 @@ function MediaFolders({ view, onOpenFolder }: { view: "photos" | "videos"; onOpe
 }
 
 /** 文件夹封面：相册是最新四张照片的拼图，影视用第一个有封面的视频；没有封面时用按名称选的色调。 */
-function FolderCover({ view, folder }: { view: "photos" | "videos"; folder: api.LibraryFolder }) {
-  const kind = view === "photos" ? "image" : "video";
+function FolderCover({ view, folder }: { view: FolderMediaView; folder: api.LibraryFolder }) {
+  const kind = view === "photos" ? "image" : view === "books" ? "document" : "video";
   const tint = { "--cover-tint": coverTint(folder.path || "root") } as CSSProperties;
   if (view === "photos" && folder.samples.length >= 4) {
     return <span className="media-folder-cover is-mosaic">{folder.samples.slice(0, 4).map(item =>
@@ -387,8 +428,9 @@ function trackMenu(track: api.LibraryItem, addToPlaylist: (files: api.FileItem[]
   ];
 }
 
-function MediaFolder({ view, folder, onBack, onOpenLocation }: { view: "photos" | "videos"; folder: string; onBack: () => void; onOpenLocation: (prefix: string) => void }) {
+function MediaFolder({ view, folder, onBack, onOpenLocation }: { view: FolderMediaView; folder: string; onBack: () => void; onOpenLocation: (prefix: string) => void }) {
   const config = VIEWS[view];
+  const { openPolicy } = useContext(LibraryContext);
   // 照片按拍摄时间分页读取；影视要按名称排序，读完整个文件夹。
   const library = useLibrary(view, { folder, all: view !== "photos", page: 200 });
   useThumbnailPolling(library.items, !library.loading, library.setItems, () => undefined);
@@ -406,11 +448,13 @@ function MediaFolder({ view, folder, onBack, onOpenLocation }: { view: "photos" 
         <div className="album-header-actions">
           {view === "videos" && items.length > 0 && <Button variant="primary" icon="play" onClick={() => open(items[0])}>从头播放</Button>}
           <Button icon="folder" onClick={() => onOpenLocation(folder)}>在文件中打开</Button>
+          <Button icon="book" onClick={() => openPolicy([folder])}>文件夹收录设置</Button>
         </div>
       </div>
     </header>
+    <LibraryControls />
     <LibraryState loading={library.loading} error={library.error} onRetry={library.reload}
-      empty={!items.length ? <EmptyState icon={config.icon} title={`这个文件夹里没有${config.noun}`} description="文件可能已被移动或删除。" /> : null}>
+      empty={!items.length ? <EmptyState icon={config.icon} title={`当前范围没有${config.noun}`} description="可以切换收录范围，或调整文件夹与文件的收录设置。" /> : null}>
       {view === "photos"
         ? groupBy(items, photoMonth).map(group => <section key={group.label} className="library-group">
           <h2 className="library-group-title">{group.label}<span>{group.items.length} {config.unit}</span></h2>
@@ -422,29 +466,58 @@ function MediaFolder({ view, folder, onBack, onOpenLocation }: { view: "photos" 
   </div>;
 }
 
-/** 一组文件：照片是方形网格，影视是带名称与时长的横向封面，音乐是曲目列表。 */
+/** 一组文件：照片是方形网格，影视是横向封面，书籍是竖向封面，音乐是曲目列表。 */
 function MediaItems({ view, items, open, menu, selection, membership, playlist }: { view: MediaView; items: api.LibraryItem[]; open: (file: api.LibraryItem) => void;
   /** 音乐曲目行尾的更多操作菜单。 */ menu?: (track: api.LibraryItem, index: number) => MenuItem[];
   /** 音乐曲目的多选（行首复选框；有选中项时一直显示）。 */ selection?: TrackSelection;
   /** 每首歌所在的歌单（行内标记）；playlist 是当前打开的歌单，标记里不再列出它。 */ membership?: (key: string) => api.Playlist[]; playlist?: number }) {
-  if (view === "photos") return <div className="photo-grid">
-    {items.map(item => <button key={item.key} type="button" className="photo-tile" title={baseName(item.key)} onClick={() => open(item)}>
+  const { collection, openPolicy, editMetadata } = useContext(LibraryContext);
+  const [context, setContext] = useState<{ key: string; x: number; y: number } | null>(null);
+  const contextIndex = context ? items.findIndex(item => item.key === context.key) : -1;
+  const contextFile = items[contextIndex];
+  useEffect(() => { if (context && !contextFile) setContext(null); }, [context, contextFile]);
+  const policyMenu = (item: api.LibraryItem): MenuItem[] => {
+    const included = item.library?.included ?? collection !== "excluded";
+    return [
+      { label: included ? "从媒体库排除" : "加入媒体库", icon: "book", onSelect: () => {
+        void api.setLibraryPolicy([item.key], included ? "exclude" : "include")
+          .then(() => toast.success(included ? "已从媒体库排除，原文件仍可正常访问" : "已加入媒体库"))
+          .catch(reason => toast.error(api.errorMessage(reason, "更新收录设置失败")));
+      } },
+      { label: "收录设置…", icon: "settings", onSelect: () => openPolicy([item.key]) },
+    ];
+  };
+  const itemMenu = (item: api.LibraryItem, index: number): MenuItem[] => {
+    const custom = menu?.(item, index) ?? [];
+    return [{ label: "编辑元数据", icon: "edit", onSelect: () => editMetadata(item) },
+      ...custom.filter(action => !action.danger), ...policyMenu(item), ...custom.filter(action => action.danger)];
+  };
+  const onContextMenu = (event: MouseEvent<HTMLElement>, item: api.LibraryItem) => {
+    if ((event.target as Element).closest("input, a, [role=menu]")) return;
+    event.preventDefault(); event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setContext({ key: item.key, x: event.clientX || rect.left + 16, y: event.clientY || rect.bottom });
+  };
+  let content: ReactNode;
+  if (view === "photos") content = <div className="photo-grid">
+    {items.map((item, index) => <div key={item.key} className="library-media-item" onContextMenu={event => onContextMenu(event, item)}><button type="button" className="photo-tile" title={baseName(item.key)} onClick={() => open(item)}>
       <FileThumbnail kind="image" url={api.fileThumbnail(item, "grid")} placeholder={api.fileThumbnail(item)} />
-    </button>)}
+      {collection === "all" && <span className="library-item-state">{item.library?.included ? "已收录" : "未收录"}</span>}
+    </button><span className="library-media-menu"><Menu label={`${baseName(item.key)} 的更多操作`} items={itemMenu(item, index)} /></span></div>)}
   </div>;
-  if (view === "videos") return <div className="video-grid">
-    {items.map(item => <button key={item.key} type="button" className="video-card" title={baseName(item.key)} onClick={() => open(item)}>
-      <span className="video-card-poster" style={{ "--cover-tint": coverTint(item.key) } as CSSProperties}>
-        {api.fileThumbnail(item) ? <FileThumbnail kind="video" url={api.fileThumbnail(item, "grid")} placeholder={api.fileThumbnail(item)} />
-          : <span className="tint-cover"><Icon name="film" size={28} /></span>}
+  else if (view === "videos" || view === "books") content = <div className={view === "books" ? "book-grid" : "video-grid"}>
+    {items.map((item, index) => <div key={item.key} className="library-media-item" onContextMenu={event => onContextMenu(event, item)}><button type="button" className="video-card" title={baseName(item.key)} onClick={() => open(item)}>
+      <span className={`video-card-poster${view === "books" ? " is-book" : ""}`} style={{ "--cover-tint": coverTint(item.key) } as CSSProperties}>
+        {api.fileThumbnail(item) ? <FileThumbnail kind={view === "books" ? "document" : "video"} url={api.fileThumbnail(item, "grid")} placeholder={api.fileThumbnail(item)} />
+          : <span className="tint-cover"><Icon name={VIEWS[view].icon} size={28} /></span>}
         {item.media?.duration ? <span className="photo-tile-duration">{clock(item.media.duration)}</span> : null}
       </span>
       <strong>{baseName(item.key).replace(/\.[^.]+$/, "")}</strong>
-      <span>{[item.dimensions ? `${item.dimensions.height}p` : null, formatBytes(item.size)].filter(Boolean).join(" · ")}</span>
-    </button>)}
+      <span>{[view === "books" ? item.key.split(".").pop()?.toUpperCase() : item.dimensions ? `${item.dimensions.height}p` : null, formatBytes(item.size), collection === "all" ? item.library?.included ? "已收录" : "未收录" : null].filter(Boolean).join(" · ")}</span>
+    </button><span className="library-media-menu"><Menu label={`${baseName(item.key)} 的更多操作`} items={itemMenu(item, index)} /></span></div>)}
   </div>;
-  return <ol className={`track-list${selection ? " is-selectable" : ""}${selection?.selected.size ? " is-selecting" : ""}`}>
-    {items.map((track, index) => <li key={track.key} className={selection?.selected.has(track.key) ? "is-selected" : undefined}>
+  else content = <ol className={`track-list${selection ? " is-selectable" : ""}${selection?.selected.size ? " is-selecting" : ""}`}>
+    {items.map((track, index) => <li key={track.key} className={selection?.selected.has(track.key) ? "is-selected" : undefined} onContextMenu={event => onContextMenu(event, track)}>
       {selection && <span className="track-check"><Checkbox label={`选择 ${trackTitle(track)}`} checked={selection.selected.has(track.key)}
         onChange={value => selection.toggle(track.key, value)} /></span>}
       <button type="button" className="track-row" onClick={() => selection?.selected.size ? selection.toggle(track.key, !selection.selected.has(track.key)) : open(track)}>
@@ -455,13 +528,15 @@ function MediaItems({ view, items, open, menu, selection, membership, playlist }
             : <span className="tint-cover"><Icon name="music" size={16} /></span>}
         </span>
         <span className="track-text"><strong>{trackTitle(track)}</strong>
-          <span title={track.key}>{[track.media?.artist, folderLabel(parentPath(track.key))].filter(Boolean).join(" · ")}</span></span>
+          <span title={track.key}>{[track.media?.artist, folderLabel(parentPath(track.key)), collection === "all" ? track.library?.included ? "已收录" : "未收录" : null].filter(Boolean).join(" · ")}</span></span>
         {membership && <PlaylistBadge lists={membership(track.key)} exclude={playlist} />}
         <span className="track-duration">{clock(track.media?.duration)}</span>
       </button>
-      {menu && <span className="track-menu"><Menu label={`${trackTitle(track)} 的更多操作`} items={menu(track, index)} /></span>}
+      <span className="track-menu"><Menu label={`${trackTitle(track)} 的更多操作`} items={itemMenu(track, index)} /></span>
     </li>)}
   </ol>;
+  return <>{content}{context && contextFile && <ContextMenu key={`${context.key}:${context.x}:${context.y}`} x={context.x} y={context.y}
+    label={`${view === "music" ? trackTitle(contextFile) : baseName(contextFile.key)} 的更多操作`} items={itemMenu(contextFile, contextIndex)} onClose={() => setContext(null)} />}</>;
 }
 
 /* ---------- 音乐：多选 ---------- */
@@ -487,6 +562,7 @@ function useTrackSelection(items: api.LibraryItem[]) {
 /** 选中歌曲后出现在列表上方的操作栏：全选、加入歌单，以及调用方给出的其他操作（歌单页的「从歌单移除」）。 */
 function TrackSelectionBar({ selection, items, onAdd, children }: { selection: ReturnType<typeof useTrackSelection>; items: api.LibraryItem[];
   onAdd: (files: api.LibraryItem[]) => void; children?: ReactNode }) {
+  const { openPolicy } = useContext(LibraryContext);
   const count = selection.selected.size;
   const all = count > 0 && items.every(item => selection.selected.has(item.key));
   return <div className={`toolbar selection-bar track-selection-bar${count ? "" : " is-idle"}`} role="toolbar" aria-label="所选歌曲的操作">
@@ -495,6 +571,7 @@ function TrackSelectionBar({ selection, items, onAdd, children }: { selection: R
       <span className="selection-count">{count ? `已选择 ${count} 首` : "选择歌曲"}</span></label>
     {count > 0 && <div className="toolbar-actions">
       <Button size="sm" icon="playlist" onClick={() => onAdd(selection.picked)}>加入歌单</Button>
+      <Button size="sm" icon="book" onClick={() => openPolicy(selection.picked.map(item => item.key))}>媒体库收录</Button>
       {children}
       <IconButton icon="x" label="取消选择" size="sm" onClick={() => selection.setSelected(new Set())} />
     </div>}
@@ -513,27 +590,29 @@ function AlbumCover({ album, tracks, size = "md", icon = "music" }: { album: str
 }
 
 function MusicAlbums({ onOpenAlbum }: { onOpenAlbum: (album: string) => void }) {
+  const { collection } = useContext(LibraryContext);
   const [state, setState] = useState<{ albums: api.LibraryAlbum[]; truncated: boolean } | null>(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     const changed = () => setAttempt(value => value + 1);
     window.addEventListener(api.FILE_UPDATED_EVENT, changed);
-    return () => window.removeEventListener(api.FILE_UPDATED_EVENT, changed);
+    window.addEventListener(api.LIBRARY_UPDATED_EVENT, changed);
+    return () => { window.removeEventListener(api.FILE_UPDATED_EVENT, changed); window.removeEventListener(api.LIBRARY_UPDATED_EVENT, changed); };
   }, []);
   useEffect(() => {
     const controller = new AbortController();
     setState(null); setError("");
-    api.libraryAlbums("", controller.signal).then(setState, reason => {
+    api.libraryAlbums("", controller.signal, collection).then(setState, reason => {
       if (!controller.signal.aborted) setError(api.errorMessage(reason, "读取失败，请稍后重试"));
     });
     return () => controller.abort();
-  }, [attempt]);
+  }, [attempt, collection]);
   const albums = state?.albums ?? [];
   const total = albums.reduce((sum, item) => sum + item.count, 0);
   const named = albums.filter(item => item.album).length;
   return <LibraryState loading={!state && !error} error={error} onRetry={() => setAttempt(value => value + 1)}
-    empty={state && !albums.length ? <EmptyState icon="music" title="还没有音乐" description="上传的音乐会按专辑出现在这里。" /> : null}>
+    empty={state && !albums.length ? <EmptyState icon="music" title={collection === "excluded" ? "没有未收录的音乐" : "还没有音乐"} description="可以检查收录规则，或切换收录范围查找文件。" /> : null}>
     <p className="library-summary">{named} 张专辑 · {total} 首{state?.truncated ? `（只显示前 ${albums.length} 张专辑，可用搜索查找其余的）` : ""}</p>
     <div className="media-folders is-music">
       {albums.map(item => <button key={item.album || "\u0000"} type="button" className="media-folder" onClick={() => onOpenAlbum(item.album)} title={albumName(item.album)}>
@@ -547,6 +626,7 @@ function MusicAlbums({ onOpenAlbum }: { onOpenAlbum: (album: string) => void }) 
 
 /** 「全部播放」：读出全部音乐（上限 FOLDER_LIMIT），按专辑名排列（无专辑在最后）、专辑内按曲目号与文件名，作为播放列表从第一首开始。 */
 function PlayAllMusic() {
+  const { collection } = useContext(LibraryContext);
   const open = usePreviewOpener([]);
   const [busy, setBusy] = useState(false);
   const play = async () => {
@@ -555,7 +635,7 @@ function PlayAllMusic() {
     try {
       let cursor: string | null = "", items: api.LibraryItem[] = [];
       do {
-        const page = await api.library("music", { cursor: cursor ?? "", limit: 500 });
+        const page = await api.library("music", { cursor: cursor ?? "", limit: 500, collection });
         items = items.concat(page.objects); cursor = page.next_cursor;
       } while (cursor && items.length < FOLDER_LIMIT);
       if (!items.length) { toast.info("还没有音乐"); return; }
@@ -597,8 +677,9 @@ function MusicAlbum({ album, onBack, onOpenLocation }: { album: string; onBack: 
         </div>
       </div>
     </header>
+    <LibraryControls />
     <LibraryState loading={library.loading} error={library.error} onRetry={library.reload}
-      empty={!tracks.length ? <EmptyState icon="music" title="这张专辑里没有歌曲" description="歌曲可能已被移动、删除或修改了专辑信息。" /> : null}>
+      empty={!tracks.length ? <EmptyState icon="music" title="当前范围没有歌曲" description="可以切换收录范围，或检查歌曲的收录设置与专辑信息。" /> : null}>
       <TrackSelectionBar selection={selection} items={tracks} onAdd={adding.open} />
       <MediaItems view="music" items={tracks} open={file => open(file)} menu={track => trackMenu(track, adding.open, onOpenLocation)}
         selection={selection} membership={membership} />
@@ -671,6 +752,14 @@ function PlaylistPage({ id, onBack, onOpenLocation }: { id: number; onBack: () =
   const [picking, setPicking] = useState(false);
   const [sharing, setSharing] = useState(false);
   const adding = useAddToPlaylist();
+  useEffect(() => {
+    const updated = (event: Event) => {
+      const file = (event as CustomEvent<api.FileItem>).detail;
+      setTracks(current => current.map(track => track.key === file.key ? { ...track, ...file } : track));
+    };
+    window.addEventListener(api.FILE_UPDATED_EVENT, updated);
+    return () => window.removeEventListener(api.FILE_UPDATED_EVENT, updated);
+  }, []);
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true); setError("");

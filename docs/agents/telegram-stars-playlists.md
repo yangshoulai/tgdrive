@@ -22,6 +22,8 @@
 
 ## 音乐歌单（`playlists.py`，`playlists`／`playlist_items`）
 
+- 歌单曲目的右键与行尾更多菜单共用操作项，包含「编辑元数据」；右键保留选择且不触发播放，「从歌单移除」置于末尾。编辑器挂在媒体库外层，保存后用 `FILE_UPDATED_EVENT` 合并最新文件信息，歌单顺序与成员不变。
+
 - 条目按 (存储桶, 键) 引用普通空间的音频文件（`kind_of == "audio"`），每个账号 ≤200 个歌单、每个歌单 ≤5000 首。`objects` 上的触发器 `playlist_items_follow`（`AFTER UPDATE OF key`）让条目跟随移动；移入回收站的歌曲不列出、还原后回到原位；永久删除后条目留存但 JOIN 不到对象而不列出。位置是连续整数，移动一首时整体重排。
 - 歌单分享（schema v42 的 `playlists.share_*`）：`POST /api/user/v1/playlists/{id}/share`（`enabled`、`expires_at`、`password`，以及默认关闭的 `download`、`save`；关闭时清除令牌与设置，再开得到新链接；密码哈希走 `password_work`；审计只记开关与是否设密码）。访客页 `/m/<令牌>`（`web/src/playlist-share.tsx`），公开接口在 `/api/public/v1/playlists/<令牌>`：歌单 JSON 的歌曲只有 `id`（`Playlists.item_id`＝令牌与键的 SHA-256 前 20 位）、文件名与标签，不含路径；`/unlock` 签发的访问凭证按 `playlist:<令牌>` 计算，与文件分享不互通；`/items/<id>/content`（`download=1` 需开启下载）、`?thumbnail=`、`/items/<id>/assets` 与 `/assets/<序号>`（同名歌词、字幕附件，不暴露路径）、`/avatar` 都每次按当前歌单内容校验（`_shared_playlist`、`_playlist_media`）。登录访客 `POST /api/user/v1/playlist-shares/<令牌>/save` 用 `link_copy` 引用到自己的文件夹（需开启保存，自己的分享返回 400），`/status` 只回答是否为自己的分享。预览窗口的 `downloadUrl` 为空时不显示下载。回归 `tests/test_stars_playlists.py` 的 `PlaylistShareTests`。
 - 接口：`GET/POST /api/user/v1/playlists`、`GET /playlists/{id}?cursor=`（游标是位置）、`POST /playlists/{id}`（`name`／`add`／`remove`／`move:{path,before}` 可同时给出）、`POST /playlists/{id}/delete`、`POST /playlists/containing`。只在普通空间路由提供（私密路由白名单不含）。`UserApi.playlists` 惰性创建（部分测试用 `SimpleNamespace` 代替对象服务）。

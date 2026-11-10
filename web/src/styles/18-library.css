@@ -1,5 +1,33 @@
-/* ---------- 媒体库：最近、相册、影视、音乐 ---------- */
+/* ---------- 媒体库：最近、相册、影视、音乐、书籍 ---------- */
 .library-view { display: grid; gap: 8px; }
+.library-collection-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.library-policy-form, .library-rules { display: grid; gap: 16px; }
+.library-policy-current { margin: 0; color: var(--ink-3); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.library-policy-current > span { display: block; margin-top: 8px; }
+.library-policy-options { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.library-policy-option { display: flex; align-items: flex-start; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-md); cursor: pointer; }
+.library-policy-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.library-policy-option > input { flex: none; margin: 4px 0 0; accent-color: var(--accent); }
+.library-policy-option > span { display: grid; gap: 4px; min-width: 0; }
+.library-policy-option strong, .library-rule-row strong { font-size: var(--text-sm); font-weight: 500; }
+.library-policy-option small, .library-rule-row small { color: var(--ink-3); font-size: var(--text-xs); }
+.library-rules-heading, .library-rule-row { display: flex; align-items: center; gap: 12px; }
+.library-rules-heading { justify-content: space-between; }
+.library-rule-row { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.library-rule-row > span { display: grid; flex: 1; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.library-rule-row > svg { flex: none; color: var(--ink-3); }
+.library-rule-list { margin: 0; padding: 0; list-style: none; }
+.library-rule-picker { display: grid; gap: 12px; }
+.library-rule-picker > .btn { justify-self: end; }
+.library-media-item { position: relative; min-width: 0; }
+.library-media-item > button { width: 100%; }
+.library-media-menu { position: absolute; top: 8px; right: 8px; border-radius: var(--radius-sm); background: var(--surface); opacity: 0; }
+.library-media-item:hover .library-media-menu, .library-media-item:focus-within .library-media-menu { opacity: 1; }
+.library-item-state { position: absolute; left: 8px; bottom: 8px; padding: 4px 8px; border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); font-size: var(--text-xs); }
+.book-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 24px 16px; }
+.video-card-poster.is-book, .is-books .media-folder-cover { aspect-ratio: 3 / 4; }
+@media (hover: none) { .library-media-menu { opacity: 1; } }
+@media (max-width: 640px) { .book-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 12px; } }
 .library-group { display: grid; gap: 8px; margin-bottom: 24px; }
 .library-group-title { position: sticky; top: 0; z-index: 2; display: flex; align-items: baseline; gap: 8px; padding: 8px 0; background: var(--canvas); font-size: var(--text-md); font-weight: 600; }
 .library-group-title span { color: var(--ink-3); font-size: var(--text-xs); font-weight: 400; }

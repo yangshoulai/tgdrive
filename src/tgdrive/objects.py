@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from typing import Callable
 
 from .blobengine import BlobEngine
-from . import favorites
+from . import favorites, library
 from .errors import InvalidStateError, NotFoundError, QuotaExceededError, ShareExpiredError, VersionConflict
 from .filekinds import kind_clause
 from .fingerprint import combine, is_fingerprint
@@ -1366,6 +1366,14 @@ class ObjectService:
                     (scope.bucket_id, prefix, prefix + self._PREFIX_END, batch))]
             keys = await self.metadata.run_in_thread(read_keys)
             if not keys:
+                def clear_rules():
+                    self._check_scope(scope, prefix, write=True)
+                    with self.metadata.transaction() as db:
+                        # 再查一次，避免读完最后一批后新写入的文件失去目录规则。
+                        if db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key>=? AND key<? LIMIT 1",
+                                      (scope.bucket_id, prefix, prefix + self._PREFIX_END)).fetchone() is None:
+                            library.removed(db, scope.bucket_id, prefix)
+                await self.metadata.run_in_thread(clear_rules)
                 return deleted
             results = await self.metadata.run_in_thread(self._delete_objects_sync, scope, keys)
             deleted += sum(result.deleted for result in results)
@@ -1628,6 +1636,7 @@ class ObjectService:
             if folder and moves:
                 # 侧栏收藏随文件夹一起移动；移入回收站时移除（favorites.moved）。
                 favorites.moved(db, scope.bucket_id, old, new)
+                library.moved(db, scope.bucket_id, old, new, actual_moves, self._PREFIX_END)
             if scope.authorize is not None:
                 scope.authorize()
             return MoveResult(len(moves), skipped)

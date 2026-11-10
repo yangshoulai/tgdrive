@@ -53,7 +53,7 @@ class ChunkRecord:
 class Metadata:
     """短事务 SQLite 访问层；连接按实例复用，写事务由锁串行化。"""
 
-    SCHEMA_VERSION = 45
+    SCHEMA_VERSION = 46
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
@@ -887,6 +887,10 @@ class Metadata:
                     body BLOB NOT NULL, created_at REAL NOT NULL)""")
                 db.execute("CREATE INDEX IF NOT EXISTS assistant_memories_by_user ON assistant_memories(user_id, id)")
                 db.execute("PRAGMA user_version = 45")
+            if version < 46:
+                # 收录偏好属于文件，同内容副本可分别决定，移动与回收站不改变设置。
+                db.execute("ALTER TABLE file_metadata ADD COLUMN library_policy TEXT NOT NULL DEFAULT 'auto'")
+                db.execute("PRAGMA user_version = 46")
 
     def cached_read(self, key: tuple, function, *, ttl: float = 2):
         """短期复用统计结果；提交写事务立即失效，缓存大小有界。"""
