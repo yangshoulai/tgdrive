@@ -4,7 +4,7 @@ import { useDirectory, useRenderLimit, mergePublicFolderPages } from "./paginati
 import { BRAND } from "./brand";
 import * as api from "./api";
 import { FileFilters, FilePreview, FileSortSelect, FileThumbnail, FileTile, FileVisual, FolderThumbnail, loadedPlaceholder, PreviewModal, SortHeader, canPreview, getFileKind, kindLabel, type EntryFilter, type FileSort } from "./files";
-import { Notice, ButtonLink, Avatar, Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, SearchInput, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
+import { Notice, ButtonLink, Avatar, Brand, Button, Checkbox, EmptyState, Field, Icon, Modal, type IconName, SearchInput, Segmented, SkeletonRows, Toaster, copyText, formatBytes, formatDate, formatDateTime, toast } from "./ui";
 import { LoginPage } from "./shell";
 import { FolderPicker } from "./user/folders";
 
@@ -70,11 +70,9 @@ export function SharePage({ token }: { token: string }) {
   const downloadUrl = single ? api.publicPath(token, single.name, true, access) : "";
   const hasThumbnail = Boolean(single?.thumbnails?.includes("thumb"));
   return (
-    <div className="share-page">
-      <header className="share-bar">
-        <Brand tagline />
-        <span className="share-bar-note"><Icon name="globe" size={15} />公开分享</span>
-      </header>
+    <div className="share-page has-stage">
+      <span className="share-stage" aria-hidden="true" />
+      <ShareBar icon="globe" label="公开分享" />
       <main className="share-main">
         {error ? (
           <div className="share-card share-missing">
@@ -153,6 +151,23 @@ function SharerLine({ token, sharer, access }: { token: string; sharer?: api.Pub
 }
 
 /** 访问密码页；unlock 默认验证文件分享，歌单分享（playlist-share.tsx）传入自己的验证接口。 */
+/** 分享页顶栏：固定在页面顶部，滚动后加半透明底与分隔线。
+ * compact 是滚过页头后在顶栏中间显示的精简信息（歌单的封面、名称与播放按钮），compactVisible 控制显隐。 */
+export function ShareBar({ icon, label, compact, compactVisible = false }: { icon: IconName; label: string; compact?: ReactNode; compactVisible?: boolean }) {
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const update = () => setScrolled(window.scrollY > 4);
+    update();
+    window.addEventListener("scroll", update, { passive: true });
+    return () => window.removeEventListener("scroll", update);
+  }, []);
+  return <header className={`share-bar${scrolled ? " is-scrolled" : ""}${compact && compactVisible ? " is-compact" : ""}`}>
+    <Brand tagline />
+    {compact && <div className="share-bar-compact" aria-hidden={!compactVisible} {...(compactVisible ? {} : { inert: "" })}>{compact}</div>}
+    <span className="share-bar-note"><Icon name={icon} size={15} />{label}</span>
+  </header>;
+}
+
 export function PasswordGate({ token, onUnlocked, unlock = api.unlockShare }: { token: string; onUnlocked: (grant: string) => void;
   unlock?: (token: string, password: string) => Promise<{ access: string }> }) {
   const [password, setPassword] = useState("");

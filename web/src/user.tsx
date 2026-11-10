@@ -22,13 +22,13 @@ import { MediaLibraryView, RecentView, StarredView, type MediaView } from "./use
 import { DownloadsView } from "./user/downloads";
 import { PreviewHost } from "./user/preview-host";
 import { CachePage, CacheTasksProvider, type CacheTab } from "./user/cache";
-import { FavoritesNav, folderName as folderTitle, useFavorites } from "./user/favorites";
+import { FavoritesNav, folderName as folderTitle, privateIcon, useFavorites } from "./user/favorites";
 import { useAssistantConfig, useAssistantShortcut, type AssistantDockStatus } from "./user/assistant-hooks";
 import { AssistantLauncher } from "./user/assistant-launcher";
 import { CommandPalette, useCommandPaletteShortcut, type Command } from "./user/command-palette";
 import { useDownloadActivity } from "./user/download-activity";
 import { takePageImportRequest, usePageImport } from "./user/page-import";
-import { PrivateSessionProvider } from "./user/private-session";
+import { PrivateSessionProvider, usePrivateUnlocked } from "./user/private-session";
 import { EmailDialog, UserSettingsPage } from "./user/account";
 import { onThemeChange, setThemePreference, themePreference, type ThemePreference } from "./theme";
 
@@ -361,6 +361,8 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   }
   // 打开的正是某个收藏的文件夹时，由侧栏收藏高亮，「我的文件」「私密空间」不再同时高亮。
   const favoriteList = useFavorites();
+  // 侧栏在 PrivateSessionProvider 之外，用模块级的解锁状态切换「私密空间」的锁形／开锁图标。
+  const privateUnlocked = usePrivateUnlocked();
   const favoriteOpen = (section === "files" || section === "private") && favoriteList.some(item => item.path === location.prefix);
   // 个人空间与系统管理都按用途分组；管理员在两个工作区之间切换，侧栏只显示当前工作区的分组。
   const personalWorkspace = isAdmin ? "我的空间" : undefined;
@@ -369,7 +371,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
       { key: "files", label: "我的文件", icon: "folder" },
       { key: "recent", label: "最近", icon: "clock" },
       { key: "starred", label: "收藏夹", icon: "star" },
-      { key: "private", label: "私密空间", icon: "lock" },
+      { key: "private", label: "私密空间", icon: privateUnlocked ? "unlock" : "lock" },
       { key: "trash", label: "回收站", icon: "trash" },
     ] },
     { label: "媒体库", workspace: personalWorkspace, items: [
@@ -395,7 +397,7 @@ function MainShell({ session, onLogout, onSessionChange }: { session: api.Sessio
   const commands: Command[] = [
     ...groups.flatMap(group => group.items.map(item => ({ id: `nav:${item.key}`, label: item.label, group: "跳转", icon: item.icon,
       hint: group.workspace === "系统管理" ? "系统管理" : group.label, run: () => navigate(item.key) }))),
-    ...favoriteList.map(item => ({ id: `fav:${item.path}`, label: folderTitle(item.path), group: "常用文件夹", icon: (item.private ? "lock" : "folder") as IconName,
+    ...favoriteList.map(item => ({ id: `fav:${item.path}`, label: folderTitle(item.path), group: "常用文件夹", icon: (item.private ? privateIcon(item) : "folder") as IconName,
       hint: item.private ? "私密空间" : `/${item.path}`, run: () => navigate(item.private ? "private" : "files", item.path) })),
     { id: "act:upload", label: "上传文件", group: "操作", icon: "upload", keywords: "上传 文件夹",
       run: () => { if (section !== "files") navigate("files", location.prefix); window.setTimeout(() => document.querySelector<HTMLButtonElement>(".files-view .upload-picker-trigger")?.click(), 120); } },

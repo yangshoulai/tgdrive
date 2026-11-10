@@ -1,7 +1,29 @@
 /* ---------- 公开分享页 ---------- */
 
-.share-page { display: flex; min-height: 100vh; min-height: 100dvh; flex-direction: column; background: var(--surface-sunken); }
-.share-bar { display: flex; align-items: center; justify-content: space-between; height: 56px; padding: 0 28px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.share-page { position: relative; isolation: isolate; display: flex; min-height: 100vh; min-height: 100dvh; flex-direction: column; background: var(--surface-sunken); }
+/* 顶栏固定在页面顶部：三栏（品牌｜滚过页头后的精简信息｜分享类型），滚动后加半透明底与分隔线。 */
+.share-bar { position: sticky; top: 0; z-index: var(--z-sticky); display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 16px; height: 56px; padding: 0 28px;
+  border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 86%, transparent); -webkit-backdrop-filter: saturate(1.6) blur(14px); backdrop-filter: saturate(1.6) blur(14px);
+  transition: background-color var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out); }
+.share-bar > .brand { justify-self: start; }
+.share-bar > .share-bar-note { grid-column: 3; justify-self: end; }
+/* 歌单页：在页面顶端时顶栏透明，透出页头的氛围底；滚动后才有底色。 */
+.share-page.has-stage .share-bar:not(.is-scrolled) { border-bottom-color: transparent; background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
+.share-bar-compact { display: flex; align-items: center; gap: 10px; max-width: min(440px, 46vw); min-width: 0; opacity: 0; transform: translateY(6px); pointer-events: none;
+  transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out); }
+.share-bar.is-compact .share-bar-compact { opacity: 1; transform: none; pointer-events: auto; }
+.share-bar-compact strong { overflow: hidden; font-size: var(--text-md); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.share-bar-cover { position: relative; display: block; flex: none; overflow: hidden; width: 28px; height: 28px; border-radius: var(--radius-xs); background: var(--surface-sunken); box-shadow: inset 0 0 0 1px var(--line-soft); }
+.share-bar-cover .file-thumbnail, .share-bar-cover .tint-cover { width: 100%; height: 100%; }
+.share-bar-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.share-bar-cover .thumbnail-badge { display: none; }
+.share-bar-play { flex: none; }
+/* 文件分享页顶部的柔光底：品牌蓝与公开琥珀两团很淡的光晕，向下渐隐，顶栏在页面顶端时透出它。 */
+.share-stage { position: absolute; inset: 0 0 auto; z-index: -1; height: 420px; pointer-events: none;
+  background: radial-gradient(50% 90% at 22% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 70%),
+    radial-gradient(40% 80% at 82% 0%, color-mix(in srgb, var(--public) 12%, transparent), transparent 70%);
+  -webkit-mask-image: linear-gradient(180deg, #000 30%, transparent); mask-image: linear-gradient(180deg, #000 30%, transparent); }
+@media (prefers-reduced-motion: reduce) { .share-bar, .share-bar-compact { transition: none; } .share-bar-compact { transform: none; } }
 .share-bar-note { display: inline-flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; border-radius: var(--radius-pill); background: var(--public-soft); color: var(--public-ink); font-size: var(--text-sm); font-weight: 500; }
 .share-main { display: grid; align-content: start; gap: 16px; width: 100%; max-width: 960px; margin: 0 auto; padding: 40px 24px; }
 .share-card { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-sm); }

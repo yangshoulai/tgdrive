@@ -59,8 +59,10 @@ export const FAVORITE_ICONS: { icon: IconName | null; label: string }[] = [
   { icon: "sun", label: "白天" }, { icon: "moon", label: "夜晚" },
 ];
 const KNOWN_ICONS = new Set(FAVORITE_ICONS.map(item => item.icon).filter(Boolean));
-export const favoriteIcon = (item: Pick<Favorite, "icon" | "private">): IconName =>
-  item.icon && KNOWN_ICONS.has(item.icon as IconName) ? item.icon as IconName : item.private ? "lock" : "folder";
+/** 私密文件夹的锁形图标：已解锁用开锁，锁定时用锁。 */
+export const privateIcon = (item: Pick<Favorite, "locked">): IconName => item.locked ? "lock" : "unlock";
+export const favoriteIcon = (item: Pick<Favorite, "icon" | "private" | "locked">): IconName =>
+  item.icon && KNOWN_ICONS.has(item.icon as IconName) ? item.icon as IconName : item.private ? privateIcon(item) : "folder";
 
 /** 按新顺序整体保存；icons 覆盖个别收藏的图标，其余沿用当前图标。 */
 async function save(next: string[], success?: string, icons: Record<string, string | null> = {}) {
@@ -97,7 +99,7 @@ function FavoriteIconDialog({ item, onClose }: { item: Favorite; onClose: () => 
     <div className="favorite-icon-grid" role="listbox" aria-label="图标">
       {FAVORITE_ICONS.map(option => {
         const selected = option.icon === current;
-        const shown: IconName = option.icon ?? (item.private ? "lock" : "folder");
+        const shown: IconName = option.icon ?? (item.private ? privateIcon(item) : "folder");
         return <button key={option.label} type="button" role="option" aria-selected={selected} className={`favorite-icon-option${selected ? " is-selected" : ""}`}
           title={option.icon ? option.label : item.private ? "默认（私密文件夹）" : "默认（文件夹）"}
           onClick={() => { if (!selected) void setFavoriteIcon(item.path, option.icon); onClose(); }}>
@@ -222,7 +224,7 @@ export function FavoritesNav({ section, prefix, rail, onOpen, hrefFor }: {
         onDragEnd={() => { setDragging(null); setDrop(null); }}
         onDragOver={event => over(event, index)} onDrop={dropAt}>
         <Icon name={favoriteIcon(item)} size={17} /><span className="nav-label">{name}</span>
-        {item.private && favoriteIcon(item) !== "lock" && <Icon name="lock" size={12} className="nav-favorite-lock" />}
+        {item.private && favoriteIcon(item) !== privateIcon(item) && <Icon name={privateIcon(item)} size={12} className="nav-favorite-lock" />}
       </a>;
     })}
     {!list.length && loaded && !rail && <p className={`nav-favorites-empty${armed ? " is-armed" : ""}`}>{armed || drop !== null ? "松开即可固定到侧栏" : "把文件夹拖到这里，或在文件夹菜单中选择「固定到侧栏」"}</p>}

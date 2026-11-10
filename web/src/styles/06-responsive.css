@@ -126,6 +126,9 @@
   .auth-form-pane { padding: 24px; }
   .share-bar { padding: 0 16px; }
   .share-bar .brand-tagline { display: none; }
+  .share-bar { grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; }
+  .share-bar-compact { max-width: none; justify-self: start; }
+  .share-bar.is-compact .brand-name, .share-bar.is-compact .share-bar-note { display: none; }
   .share-main { padding: 24px 12px; }
   .share-head { flex-wrap: wrap; padding: 16px; }
   .share-actions { width: 100%; flex-wrap: wrap; }

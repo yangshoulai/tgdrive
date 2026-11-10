@@ -1,4 +1,4 @@
-import { createContext, createElement, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import * as api from "../api";
 import type { PreviewPlayback } from "../files";
 import { toast } from "../ui";
@@ -31,6 +31,16 @@ type PrivateSession = {
 const PrivateContext = createContext<PrivateSession | null>(null);
 
 /** 生命周期挂在应用外壳；切页不撤销，刷新由服务端按当前登录会话恢复。 */
+/** 私密空间当前是否已解锁的模块级副本：侧栏菜单与常用文件夹在 Provider 之外，用它切换锁形／开锁图标。 */
+let unlockedNow = false;
+const unlockedListeners = new Set<() => void>();
+function setUnlockedNow(value: boolean) {
+  if (unlockedNow === value) return;
+  unlockedNow = value; unlockedListeners.forEach(listener => listener());
+}
+const subscribeUnlocked = (listener: () => void) => { unlockedListeners.add(listener); return () => { unlockedListeners.delete(listener); }; };
+export function usePrivateUnlocked() { return useSyncExternalStore(subscribeUnlocked, () => unlockedNow); }
+
 export function PrivateSessionProvider({ children, enabled }: { children: ReactNode; enabled: boolean }) {
   const [grant, setGrant] = useState<api.PrivateGrant | null>(null), [restoring, setRestoring] = useState(enabled), [error, setError] = useState("");
   const [idleSeconds, setIdleSeconds] = useState(1800);
@@ -46,7 +56,7 @@ export function PrivateSessionProvider({ children, enabled }: { children: ReactN
     const wasLocked = !current.grant;
     current.revision++; current.grant = value; current.until = requestedAt + (value.remaining_seconds ?? value.idle_seconds) * 1000;
     current.human = current.reported = Date.now(); current.playing = false; current.playbackOwner = null;
-    api.setPrivateAccess(value.access, current.until); setGrant(value); setIdleSeconds(value.idle_seconds); setRestoring(false); setError("");
+    api.setPrivateAccess(value.access, current.until); setGrant(value); setUnlockedNow(true); setIdleSeconds(value.idle_seconds); setRestoring(false); setError("");
     // 侧栏收藏等位于 Provider 之外的界面据此重新读取私密内容。
     if (wasLocked) window.dispatchEvent(new CustomEvent("tessera:private-unlocked"));
   }, []);
@@ -54,6 +64,7 @@ export function PrivateSessionProvider({ children, enabled }: { children: ReactN
     const current = state.current;
     const access = current.grant?.access;
     current.revision++; current.grant = null; current.until = 0; current.playing = false; current.playbackOwner = null;
+    setUnlockedNow(false);
     if (access && api.getPrivateAccess() === access) {
       api.setPrivateAccess("");
       window.dispatchEvent(new CustomEvent("tessera:private-locked", { detail: access }));
@@ -159,7 +170,7 @@ export function PrivateSessionProvider({ children, enabled }: { children: ReactN
       document.removeEventListener("visibilitychange", visible); window.removeEventListener("tessera:private-locked", expired);
       window.removeEventListener("tessera:private-policy-changed", policyChanged);
       channel.current?.close(); channel.current = null; beatRef.current = restoreRef.current = () => undefined;
-      state.current.playing = false;
+      state.current.playing = false; setUnlockedNow(false);
       if (api.getPrivateAccess() === state.current.grant?.access) api.setPrivateAccess("");
       // 页面离开和刷新只释放客户端状态；服务端授权继续按闲置时间到期。
     };
