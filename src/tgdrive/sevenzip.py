@@ -12,16 +12,22 @@ BLOCK_SIZE = 256 * 1024
 MESSAGE_LIMIT = 32 * 1024
 TIMEOUT = 60
 ERRORS = {
-    "unavailable": "解压 7z 分卷需要服务器安装支持 7z 的 libarchive",
-    "encrypted": "暂不支持有密码的 7z 分卷，请在本地解压",
-    "invalid": "7z 分卷已损坏或使用了不支持的压缩方式",
+    "unavailable": "解压 7z 需要服务器安装支持 7z 的 libarchive",
+    "aes_unavailable": "服务器缺少加密 7z 解码组件，请安装 Tessera 的运行依赖",
+    "encrypted": "这个 7z 压缩包需要密码",
+    "password": "密码不正确或 7z 压缩包已损坏",
+    "unsupported": "这个 7z 压缩包使用了当前解码器不支持的压缩方式",
+    "unchecked": "7z 压缩包内有文件缺少完整性校验信息，无法确认解密结果",
+    "invalid": "7z 压缩包已损坏或使用了不支持的压缩方式",
     "name": "7z 压缩包内有文件名过长的条目",
     "limit": "7z 压缩包超过解码资源上限",
 }
 
 
 class SevenZipError(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str = "invalid"):
+        super().__init__(message)
+        self.code = code
 
 
 class Decoder:
@@ -61,7 +67,9 @@ class Decoder:
                 raise SevenZipError(ERRORS["invalid"])
             if "error" in message:
                 code = message["error"]
-                raise SevenZipError(ERRORS.get(code, ERRORS["invalid"]) if isinstance(code, str) else ERRORS["invalid"])
+                if not isinstance(code, str) or code not in ERRORS:
+                    code = "invalid"
+                raise SevenZipError(ERRORS[code], code=code)
             if "read" not in message:
                 return message
             request = message["read"]
@@ -109,7 +117,7 @@ class Decoder:
 
 @asynccontextmanager
 async def open_decoder(read: Callable[[int, int], Awaitable[bytes]], size: int,
-                       check: Callable[[], None]) -> AsyncIterator[Decoder]:
+                       check: Callable[[], None], *, password: str | None, max_entries: int) -> AsyncIterator[Decoder]:
     try:
         process = await asyncio.create_subprocess_exec(
             sys.executable, "-B", "-m", "tgdrive.sevenzip_worker",
@@ -120,7 +128,8 @@ async def open_decoder(read: Callable[[int, int], Awaitable[bytes]], size: int,
         raise SevenZipError("无法启动 7z 解码进程，请稍后重试") from None
     decoder = Decoder(process, read, size, check)
     try:
-        await decoder._send(f"{size}\n".encode("ascii"))
+        # 密码和归档大小走同一条管道，进程参数里只有固定的模块名。
+        await decoder._send(json.dumps({"size": size, "password": password, "max_entries": max_entries}).encode("ascii") + b"\n")
         yield decoder
     except TimeoutError:
         raise SevenZipError("读取 7z 压缩包超时，请稍后重试") from None

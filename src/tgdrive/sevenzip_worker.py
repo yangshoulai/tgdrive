@@ -1,28 +1,86 @@
-"""受限的原生 7z 解码进程。通过 stdin / stdout 随机读取归档并传回条目。"""
+"""受限的 7z 解码进程。通过 stdin / stdout 随机读取归档并传回条目。"""
 
 from __future__ import annotations
 
 import ctypes as ct
 from ctypes.util import find_library
+import io
 import json
+import lzma
 import stat
+import struct
 import sys
 
-from .sevenzip import BLOCK_SIZE
+from .sevenzip import BLOCK_SIZE, MESSAGE_LIMIT
+
+MAX_READ_REQUEST = 64 * 1024 * 1024  # 7z 目录可能需要一次读取，管道上仍拆成小块。
+MEMORY_LIMIT = 256 * 1024 * 1024
 
 
 class DecodeError(Exception):
     pass
 
 
-def emit(message: dict, data: bytes = b"") -> None:
+def emit(message: dict, data: bytes | memoryview = b"") -> None:
     sys.stdout.buffer.write(json.dumps(message, ensure_ascii=False).encode("utf-8") + b"\n")
     if data:
         sys.stdout.buffer.write(data)
     sys.stdout.buffer.flush()
 
 
-def extract(size: int) -> None:
+class RangeInput(io.RawIOBase):
+    def __init__(self, size: int):
+        self.size, self.position = size, 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self.position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence not in (io.SEEK_SET, io.SEEK_CUR, io.SEEK_END):
+            raise ValueError("invalid seek mode")
+        target = (0, self.position, self.size)[whence] + offset
+        if not 0 <= target <= self.size:
+            raise ValueError("invalid seek position")
+        self.position = target
+        return target
+
+    def read(self, size: int = -1) -> bytes:
+        if not 0 <= size <= MAX_READ_REQUEST:
+            raise DecodeError("limit")
+        end = min(self.position + size, self.size)
+        pieces = []
+        while self.position < end:
+            stop = min(self.position + BLOCK_SIZE, end)
+            emit({"read": [self.position, stop]})
+            data = sys.stdin.buffer.read(stop - self.position)
+            if len(data) != stop - self.position:
+                raise DecodeError("invalid")
+            pieces.append(data)
+            self.position = stop
+        return b"".join(pieces)
+
+
+def select_entry(name: str, kind: str, size: int) -> bool:
+    if not name or type(size) is not int or size < 0:
+        raise DecodeError("invalid")
+    if len(name.encode("utf-8")) > 4096:
+        raise DecodeError("name")
+    emit({"entry": [name, kind, size]})
+    command = sys.stdin.buffer.read(1)
+    if command == b"s":
+        return False
+    if command == b"x" and kind == "file":
+        return True
+    raise DecodeError("invalid")
+
+
+def extract(source: RangeInput) -> None:
     library = find_library("archive")
     if not library:
         raise DecodeError("unavailable")
@@ -54,36 +112,27 @@ def extract(size: int) -> None:
     except (OSError, AttributeError):
         raise DecodeError("unavailable") from None
 
-    position, buffer = 0, None
+    buffer = None
 
     @read_cb
     def read(_, __, output):
-        nonlocal position, buffer
-        end = min(position + BLOCK_SIZE, size)
-        if end == position:
-            return 0
+        nonlocal buffer
         try:
-            emit({"read": [position, end]})
-            data = sys.stdin.buffer.read(end - position)
-            if len(data) != end - position:
-                return -1
+            data = source.read(BLOCK_SIZE)
+            if not data:
+                return 0
             buffer = ct.create_string_buffer(data)
             output[0] = ct.cast(buffer, ptr)
-            position = end
             return len(data)
-        except (OSError, MemoryError):
+        except (DecodeError, OSError, MemoryError):
             return -1
 
     @seek_cb
     def seek(_, __, offset, mode):
-        nonlocal position
-        if mode not in (0, 1, 2):
+        try:
+            return source.seek(offset, mode)
+        except ValueError:
             return -1
-        target = (0, position, size)[mode] + offset
-        if not 0 <= target <= size:
-            return -1
-        position = target
-        return target
 
     archive = lib.archive_read_new()
     if not archive:
@@ -110,47 +159,129 @@ def extract(size: int) -> None:
             raw = lib.archive_entry_pathname_utf8(entry)
             if not raw:
                 raise DecodeError("invalid")
-            if len(raw) > 4096:
-                raise DecodeError("name")
             filetype = lib.archive_entry_filetype(entry)
             kind = {stat.S_IFREG: "file", stat.S_IFDIR: "dir"}.get(filetype, "special")
             if lib.archive_entry_hardlink(entry):
                 kind = "special"
             entry_size = lib.archive_entry_size(entry) if kind == "file" else 0
-            emit({"entry": [raw.decode("utf-8"), kind, entry_size]})
-            command = sys.stdin.buffer.read(1)
-            if command == b"s":
-                checked(lib.archive_read_data_skip(archive))
-            elif command == b"x" and kind == "file":
+            if select_entry(raw.decode("utf-8"), kind, entry_size):
                 while count := checked(lib.archive_read_data(archive, block, BLOCK_SIZE)):
                     emit({"data": count}, block[:count])
                 emit({"end": True})
             else:
-                raise DecodeError("invalid")
+                checked(lib.archive_read_data_skip(archive))
     finally:
         lib.archive_read_free(archive)
 
 
+def extract_with_password(source: RangeInput, password: str, max_entries: int) -> None:
+    try:
+        from py7zr import SevenZipFile, exceptions
+        from py7zr.io import MemIO, Py7zIO, WriterFactory
+    except ImportError:
+        raise DecodeError("aes_unavailable") from None
+
+    class EntryOutput(Py7zIO):
+        def __init__(self, entry):
+            if entry.is_symlink or entry.is_junction:
+                kind = "special"
+            elif entry.is_directory:
+                kind = "dir"
+            else:
+                kind = "file" if entry.is_file else "special"
+            self.limit, self.count = entry.uncompressed, 0
+            self.selected = select_entry(entry.filename, kind, self.limit if kind == "file" else 0)
+            if self.selected and self.limit and entry.crc32 is None:
+                # 缺少条目 CRC 时，不能仅凭解出相同长度就提交 AES 解密结果。
+                raise DecodeError("unchecked")
+
+        def write(self, data: bytes | bytearray) -> int:
+            self.count += len(data)
+            if self.selected:
+                if self.count > self.limit:
+                    raise DecodeError("invalid")
+                view = memoryview(data)
+                for offset in range(0, len(view), BLOCK_SIZE):
+                    chunk = view[offset:offset + BLOCK_SIZE]
+                    emit({"data": len(chunk)}, chunk)
+            return len(data)
+
+        def read(self, size: int | None = None) -> bytes:
+            raise DecodeError("invalid")
+
+        def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+            raise DecodeError("invalid")
+
+        def seekable(self) -> bool:
+            return False
+
+        def flush(self) -> None:
+            pass
+
+        def size(self) -> int:
+            return self.count
+
+        def close(self) -> None:
+            # py7zr 只在条目解完且 CRC 校验成功后关闭写入器，主进程届时才结束对象上传。
+            if self.selected:
+                if self.count != self.limit:
+                    raise DecodeError("invalid")
+                emit({"end": True})
+
+    class Entries(WriterFactory):
+        def __init__(self, files):
+            self.files = files
+
+        def create(self, filename: str) -> Py7zIO:
+            return EntryOutput(self.files[int(filename)])
+
+    try:
+        with SevenZipFile(source, "r", password=password) as archive:
+            if len(archive.files) > max_entries:
+                raise DecodeError("limit")
+            factory = Entries(archive.files)
+            # 使用固定版本 py7zr 的成员编号，将每个条目直接绑定到管道写入器。
+            # 归档路径始终由主进程校验和处理，重名、目录和链接沿用已有语义。
+            for entry in archive.files:
+                archive.worker.register_filelike(entry.id, MemIO(str(entry.id), factory))
+            archive.worker.extract(source, None, parallel=False)
+    except exceptions.PasswordRequired:
+        raise DecodeError("encrypted") from None
+    except exceptions.UnsupportedCompressionMethodError:
+        raise DecodeError("unsupported") from None
+    except (exceptions.ArchiveError, lzma.LZMAError, ValueError, EOFError, TypeError, IndexError, KeyError, struct.error):
+        # 错密码与损坏的 AES 数据可能产生同一种解码错误，不外传第三方异常的内容。
+        raise DecodeError("password") from None
+
+
 def main() -> None:
     try:
+        request = json.loads(sys.stdin.buffer.readline(MESSAGE_LIMIT))
+        size, password, max_entries = request["size"], request["password"], request["max_entries"]
+        if not (type(size) is int and 0 < size < 2**63 and type(max_entries) is int and max_entries > 0
+                and (password is None or isinstance(password, str) and 0 < len(password) <= 1024)):
+            raise DecodeError("invalid")
         if sys.platform != "win32":
             import resource
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             if sys.platform == "linux":
-                memory = 256 * 1024 * 1024
-                soft, _ = resource.getrlimit(resource.RLIMIT_AS)
-                limit = min(soft, memory) if soft != resource.RLIM_INFINITY else memory
-                resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-        size = int(sys.stdin.buffer.readline(32))
-        if not 0 < size < 2**63:
-            raise DecodeError("invalid")
-        extract(size)
+                # py7zr 以 RLIMIT_DATA 估算解压缓冲大小，避免按宿主机可用内存分配。
+                limits = (resource.RLIMIT_AS, resource.RLIMIT_DATA) if password is not None else (resource.RLIMIT_AS,)
+                for resource_id in limits:
+                    soft, _ = resource.getrlimit(resource_id)
+                    limit = min(soft, MEMORY_LIMIT) if soft != resource.RLIM_INFINITY else MEMORY_LIMIT
+                    resource.setrlimit(resource_id, (limit, limit))
+        source = RangeInput(size)
+        if password is None:
+            extract(source)
+        else:
+            extract_with_password(source, password, max_entries)
         emit({"done": True})
     except DecodeError as exc:
         emit({"error": str(exc)})
     except MemoryError:
         emit({"error": "limit"})
-    except (ValueError, OSError):
+    except (ValueError, OSError, KeyError, TypeError):
         emit({"error": "invalid"})
 
 

@@ -312,6 +312,9 @@ class ActionExecutor:
                 self.archives.cancel(user_id, record.private, record.id)
             await asyncio.sleep(0.5)
         label = display(item["path"])
+        if record.password_error:
+            progress.skip(label, "压缩包有密码：请在文件页用「解压…」输入密码后解压")
+            return
         if record.status != "completed":
             progress.fail(label, record.error or ("已取消" if record.status == "cancelled" else "执行失败"))
             return

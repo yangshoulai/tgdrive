@@ -80,7 +80,7 @@ class ArchiveToolTests(ActionHelpers, AssistantCase):
             await self.send(user, conversation, "解压")
             tool = (await self.tool_results(user, conversation))[-1]
             self.assertEqual(tool["status"], "error")
-            self.assertIn("7z", tool["result"]["error"])
+            self.assertIn("RAR", tool["result"]["error"])
         self.run_async(run())
 
     def test_compress_creates_zip_and_undo_removes_it(self):

@@ -650,8 +650,8 @@ export const formatDimensions = (size: MediaSize) => `${size.width} × ${size.he
 /** 记录图片／视频的显示尺寸（只写入仍是这个版本的文件）。 */
 export const setMediaSize = (file: Pick<FileItem, "key" | "etag">, size: MediaSize) =>
   post<{ saved: boolean }>(fileApi("/media/size", file.key), { path: file.key, etag: file.etag, width: size.width, height: size.height });
-/** 在线解压（服务器流式解压，不占本机磁盘）：支持 ZIP 与 TAR（含 .tar.gz／.tar.bz2／.tar.xz）及单个 .gz／.bz2／.xz。 */
-export const ARCHIVE_NAME = /\.(zip|tar|tgz|tbz2?|txz|tar\.(?:gz|bz2|xz)|gz|bz2|xz)$/i;
+/** 支持在线解压的单包：ZIP、7z、TAR 系列及单个 .gz／.bz2／.xz。 */
+export const ARCHIVE_NAME = /\.(zip|7z|tar|tgz|tbz2?|txz|tar\.(?:gz|bz2|xz)|gz|bz2|xz)$/i;
 /** 捕获分卷名中包含目录的共同部分，例如 folder/archive.7z。 */
 export const ARCHIVE_VOLUME_NAME = /^(.*\.7z)\.[0-9]{3,}$/i;
 export type ArchiveInfo = {
@@ -668,7 +668,7 @@ export type ArchiveJob = {
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   total_files: number | null; total_bytes: number | null; archive_size: number; read_bytes: number;
   done_files: number; done_bytes: number; skipped: number; renamed: number; failed: number; failures: { name: string; error: string }[];
-  current: string; error: string; archive_removed: boolean; created_at: number; finished_at: number | null;
+  current: string; error: string; password_error?: boolean; archive_removed: boolean; created_at: number; finished_at: number | null;
 };
 export const inspectArchive = (path: string, options: { destination?: string; password?: string; volumes?: string[] } = {}) =>
   post<ArchiveInfo>(fileApi("/archive/inspect", path), { path, ...options }, 60000);
@@ -678,7 +678,7 @@ export const extractArchive = (path: string, options: { destination: string; pas
 export const archiveJobs = (ids: string[], privateJobs = false) =>
   request<{ jobs: ArchiveJob[] }>(`/api/user/v1${privateJobs ? "/private" : ""}/archive/jobs?ids=${ids.map(encodeURIComponent).join(",")}`);
 export const cancelArchiveJob = (id: string, privateJob = false) => post<ArchiveJob>(`/api/user/v1${privateJob ? "/private" : ""}/archive/jobs/${encodeURIComponent(id)}/cancel`);
-/** 在线浏览 ZIP：列出全部条目（TAR 没有目录索引，listable 为 false）；单个条目按 index 边读边解压。 */
+/** ZIP 列出全部条目，其他格式返回 listable=false。单个 ZIP 条目按 index 边读边解压。 */
 export type ArchiveEntry = { index: number; name: string; dir: boolean; size: number; compressed: number; /** 打包时的本地时间（年-月-日 时:分），不带时区。 */ modified: string | null; encrypted: boolean; supported: boolean };
 export const browseArchive = (path: string) =>
   post<{ format: string; size: number; etag: string; listable: boolean; entries: ArchiveEntry[] }>(fileApi("/archive/browse", path), { path }, 60000);
