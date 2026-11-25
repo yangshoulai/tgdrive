@@ -1,5 +1,7 @@
 # 离线下载
 
+- 「下载与资源」的 `ResourceSettings` 在原有配置 JSON 保存 `sevenzip_memory_mib`。0 为自动，手动值为 128–8192 MiB。`effective` 返回按当前环境封顶的值，供管理页展示。解压任务读取同一配置和探测值，按 [文件页、预览与任务中心](files-ui.md) 的预算调度。
+
 给 AI 代理的模块细则（由根目录 AGENTS.md 索引）。队列、访问密钥创建任务、封面与保存位置、多连接、诊断、保存位置与优先级、出站请求、视频封装。
 
 - 离线队列不设每账号未完成任务上限（原 `MAX_PENDING_TASKS` 已删除），同名检查用 `offline/service.py` 的 `_PendingKeys` 按需逐个查询（`offline_by_key` 索引），不要改回读出全部未完成任务的路径；网页与访问密钥的单次解析／创建由 `MAX_CREATE_ITEMS`（1000）限制；创建保留整批校验与事务。助手按 `actions.DOWNLOAD_BATCH` 自动分批入队并检查进度、取消与授权，不向模型暴露内部批次，不提高实际下载并发。浏览器工具作用于私密空间（`area=private` 或 `私密:/` 路径）时只有私密目录与私密回收站两个页面（后端 `PRIVATE_VIEWS`，前端 `executeClientTool` 也拒绝），锁定时前端拒绝私密导航；隐藏抽屉拒绝新的 `client_call`。

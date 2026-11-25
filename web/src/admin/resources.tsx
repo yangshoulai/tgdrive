@@ -58,7 +58,7 @@ export function Resources() {
         </div>
         {(form.x_enabled && !effective.x_available || form.youtube_enabled && !effective.youtube_available) && <Notice tone="warning">平台下载需要带解析组件的镜像；YouTube 还需要 JavaScript 运行时和 FFmpeg，安装后重启生效。</Notice>}
         {form.hls_enabled && !effective.hls_available && <Notice tone="warning">未检测到 FFmpeg。使用带 FFmpeg 的镜像并重启后才能下载 M3U8。</Notice>}
-        <Disclosure title="高级参数" description="读写并发、上传限速、Bot 发送间隔、网页上传分段、平台缓存、文件校验读取量与机器人发回上限。默认值适合大多数部署。">
+        <Disclosure title="高级参数" description="读写并发、解压内存、上传限速、平台缓存、文件校验与机器人设置。">
           <div className="form-row">
             <Field label="服务器同时读取数" hint="下载、预览、播放与 S3 读取共用，1–32。每路约占 24 MB 内存，最多占内存三分之一。">
               <input className="input" type="number" min={1} max={32} step={1} required value={form.transfer_concurrency}
@@ -76,9 +76,13 @@ export function Resources() {
             <Field label="网页单个文件的分段并发" hint="大于 64 MB 的文件分段上传时同时发送的分段数，1–16。"><input className="input" type="number" min={1} max={16} step={1} required value={form.web_part_concurrency} onChange={number("web_part_concurrency")} /></Field>
             <Field label="网页同时上传的文件数" hint="1–8；网页开始上传时读取，最长 1 分钟后生效。"><input className="input" type="number" min={1} max={8} step={1} required value={form.web_file_concurrency} onChange={number("web_file_concurrency")} /></Field>
           </div>
+          <Field label="7z 解压内存上限（MiB）" hint="留空时按环境自动设置。手动可填 128–8192，实际值受服务器内存预算约束。Linux 上按任务执行，保存后对后续解压生效。">
+            <input className="input" type="number" min={128} max={8192} step={1} placeholder="自动" disabled={busy}
+              value={form.sevenzip_memory_mib || ""} onChange={number("sevenzip_memory_mib")} />
+          </Field>
           <div className="form-row">
             <Field label="离线下载可用内存（%）" hint={`同时下载的任务总共最多占检测内存的比例，10–80，默认 60。每个任务按约 64 MB、每多一个连接再加 32 MB 估算${(settings.detected.memory_bytes ?? 0) >= 1024 ** 3 ? `，按当前设置这台服务器最多同时下载 ${Math.min(16, Math.max(1, Math.floor((settings.detected.memory_bytes ?? 0) * (form.download_memory_percent || 0) / 100 / ((64 + 32 * Math.max(0, (form.download_connections || 1) - 1)) * 1024 * 1024))))} 个` : ""}；内存不足 1 GiB 的机器固定为 1–4 个，CPU 核数不影响这个上限。`}>
-              <input className="input" type="number" min={10} max={80} step={5} required value={form.download_memory_percent} onChange={number("download_memory_percent")} /></Field>
+              <input className="input" type="number" min={10} max={80} step={1} required value={form.download_memory_percent} onChange={number("download_memory_percent")} /></Field>
             <Field label="单个任务的连接数" hint="每个下载任务同时打开的连接数，1–8，默认 4。直链按 16 MB 分段同时下载，YouTube 的分段与 M3U8 的分片提前并行读取；来源按连接限速时能明显提速。来源不支持分段时自动改用 1 个连接。连接越多每个任务占的内存越多，能同时下载的任务数会相应减少；内存不足 1 GiB 的机器最多 2 个。">
               <input className="input" type="number" min={1} max={8} step={1} required value={form.download_connections} onChange={number("download_connections")} /></Field>
           </div>
@@ -91,17 +95,17 @@ export function Resources() {
           <div className="form-row">
             <Field label="封面读取并发" hint="网格图、预览大图等封面从存储读取的同时数，所有用户共用，1–32，默认 16。不占文件读取名额，每路不到 1 MB 内存；过高可能触发 Telegram 限流。"><input className="input" type="number" min={1} max={32} step={1} required value={form.thumbnail_concurrency} onChange={number("thumbnail_concurrency")} /></Field>
             <Field label="封面缓存上限（MiB）" hint={`上传、离线下载与预览时暂存刚经过的加密数据，后台生成封面时直接使用，不必再从存储读取原文件；128–8192，默认 1024。单个文件最多 ${Math.min(256, Math.floor((form.thumbnail_cache_mib || 0) / 4))} MiB（总量的四分之一、最多 256 MiB），保留 15 分钟。存放在数据目录的磁盘上，剩余空间低于「磁盘保留空间」时不再缓存。`}>
-              <input className="input" type="number" min={128} max={8192} step={128} required value={form.thumbnail_cache_mib} onChange={number("thumbnail_cache_mib")} /></Field>
+              <input className="input" type="number" min={128} max={8192} step={1} required value={form.thumbnail_cache_mib} onChange={number("thumbnail_cache_mib")} /></Field>
           </div>
           <div className="form-row">
-            <Field label="每个 Bot 的发送间隔（毫秒）" hint="0–10000。过短容易被 Telegram 限流，限流后会自动退避。"><input className="input" type="number" min={0} max={10000} step={100} required value={form.bot_interval_ms} onChange={number("bot_interval_ms")} /></Field>
+            <Field label="每个 Bot 的发送间隔（毫秒）" hint="0–10000。过短容易被 Telegram 限流，限流后会自动退避。"><input className="input" type="number" min={0} max={10000} step={1} required value={form.bot_interval_ms} onChange={number("bot_interval_ms")} /></Field>
             <Field label="磁盘保留空间（MiB）" hint="至少 128；剩余空间不足时离线下载等待释放。"><input className="input" type="number" min={128} max={1048576} step={1} required value={form.reserve_mib} onChange={number("reserve_mib")} /></Field>
           </div>
           <div className="form-row">
             <Field label="文件校验每日读取量（MiB）" hint="后台「文件校验」每天最多从存储读取这么多已保存的数据，检查是否完好，读满后第二天从停下的位置继续。0–1048576，默认 2048；0 关闭自动校验（仍可在「安全与维护」手动运行）。数值越大检查一轮越快，但占用的 Telegram 读取量越多。">
-              <input className="input" type="number" min={0} max={1048576} step={256} required value={form.scrub_daily_mib} onChange={number("scrub_daily_mib")} /></Field>
+              <input className="input" type="number" min={0} max={1048576} step={1} required value={form.scrub_daily_mib} onChange={number("scrub_daily_mib")} /></Field>
             <Field label="机器人发回文件上限（MiB）" hint="Telegram 机器人用 /find 把文件发回聊天时的大小上限，文件会整个读进服务器内存后发送。1–2000，默认 200；使用官方 Bot API 时 Telegram 只允许 50 MB，配置自建 Bot API 服务后才能超过。">
-              <input className="input" type="number" min={1} max={2000} step={10} required value={form.telegram_send_mib} onChange={number("telegram_send_mib")} /></Field>
+              <input className="input" type="number" min={1} max={2000} step={1} required value={form.telegram_send_mib} onChange={number("telegram_send_mib")} /></Field>
           </div>
           {(form.x_enabled || form.youtube_enabled) && <div className="form-row">
             <Field label="平台临时缓存上限（MiB）" hint="16–8192。分离的音视频轨合并前暂存在数据目录的磁盘上，两轨合计超过这个值的格式不能选择；单轨媒体边下载边保存，不受限制。合并时剩余磁盘低于「磁盘保留空间」会停止。"><input className="input" type="number" min={16} max={8192} step={1} required value={form.platform_max_mib} onChange={number("platform_max_mib")} /></Field>
@@ -119,6 +123,7 @@ export function Resources() {
         ["文件读取", `服务器 ${effective.transfer_concurrency} 路 · 每个账号 ${effective.bucket_concurrency} 路`],
         ["写入存储", `${effective.upload_concurrency} 个分片 · ${rate(effective.upload_kib)}`],
         ["网页上传", `每个文件 ${effective.web_part_concurrency} 段 · 同时 ${effective.web_file_concurrency} 个文件`],
+        ["7z 解压内存", `${settings.config.sevenzip_memory_mib ? "手动" : "自动"} · 每个任务 ${effective.sevenzip_memory_mib.toLocaleString("zh-CN")} MiB`],
         ["封面读取", `${effective.thumbnail_concurrency} 路`],
         ["出站代理", effective.proxy || "直连"],
         ["视频组件", `FFmpeg ${component(effective.hls_available)} · X ${component(effective.x_available)} · YouTube ${effective.youtube_available ? "可用" : "组件不完整"}`],
@@ -126,6 +131,7 @@ export function Resources() {
       {effective.reduced && <Notice tone="warning">资源预算不足，离线下载并发已按检测到的内存降低为 {effective.concurrency} 个。</Notice>}
       {effective.upload_reduced && <Notice tone="warning">上传并发已按{effective.mode === "low" ? "低资源档与内存预算" : "检测到的内存"}降低为写入 {effective.upload_concurrency} 个分片、网页每个文件 {effective.web_part_concurrency} 段。</Notice>}
       {effective.transfer_reduced && <Notice tone="warning">文件读取并发已按{effective.mode === "low" ? "低资源档与内存预算" : "检测到的内存"}降低为服务器 {effective.transfer_concurrency} 路、每个账号 {effective.bucket_concurrency} 路。</Notice>}
+      {settings.config.sevenzip_memory_mib > effective.sevenzip_memory_mib && <Notice tone="warning">7z 解压内存上限已按服务器预算调整为每个任务 {effective.sevenzip_memory_mib.toLocaleString("zh-CN")} MiB。</Notice>}
       {settings.pressure && <Notice tone="warning">{settings.pressure}</Notice>}
       {settings.components.ytdlp_age_days !== null && settings.components.ytdlp_age_days > 60 && <Notice tone="warning">yt-dlp 已发布 {settings.components.ytdlp_age_days} 天。YouTube 经常调整接口，解析失败时请拉取最新的平台镜像。</Notice>}
       <Disclosure title="检测信息与组件版本" description="服务器资源、视频处理方式与各组件版本。">

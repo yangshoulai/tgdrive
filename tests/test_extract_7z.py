@@ -1,5 +1,6 @@
 """用 7z 单包和分卷样本验证在线解压，存储以字节对象代替。"""
 
+import asyncio
 import hashlib
 import io
 import lzma
@@ -7,6 +8,7 @@ import random
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from ctypes.util import find_library
@@ -17,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 from tgdrive.errors import NotFoundError
 from tgdrive.extract import ArchiveError, ArchiveService
 from tgdrive.objects import ObjectService, Scope
+from tgdrive.sevenzip import MIB
 
 
 def split_archive(archive: bytes, name: str) -> dict[str, bytes]:
@@ -25,7 +28,8 @@ def split_archive(archive: bytes, name: str) -> dict[str, bytes]:
             for index, start in enumerate(range(0, len(archive), width))}
 
 
-def encrypted_archive(files: dict[str, bytes], password: str, header_encryption: bool, *, store: bool = False) -> bytes:
+def encrypted_archive(files: dict[str, bytes], password: str, header_encryption: bool, *,
+                      store: bool = False, dictionary_size: int | None = None) -> bytes:
     import py7zr
 
     buffer = io.BytesIO()
@@ -34,6 +38,11 @@ def encrypted_archive(files: dict[str, bytes], password: str, header_encryption:
     with py7zr.SevenZipFile(buffer, "w", password=password, header_encryption=header_encryption, filters=filters) as archive:
         for name, data in files.items():
             archive.writestr(data, name)
+        if dictionary_size is not None:
+            # 扩大头部声明的 LZMA2 字典，验证解码内存边界时无需在压缩阶段也分配同样大的字典。
+            coders = archive.header.main_streams.unpackinfo.folders[0].coders
+            lzma2 = next(coder for coder in coders if coder["method"] == b"\x21")
+            lzma2["properties"] = lzma._encode_filter_properties({"id": lzma.FILTER_LZMA2, "dict_size": dictionary_size})
     return buffer.getvalue()
 
 
@@ -160,6 +169,44 @@ class SevenZipExtractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("分卷已被修改", job.error)
         self.assertEqual(set(self.store.objects), set(self.paths))
 
+    async def test_waiting_7z_jobs_can_cancel_or_use_updated_memory(self):
+        configured = 768
+        key = "资料.7z"
+        self.store.objects[key] = self.archive
+        service = ArchiveService(self.store, memory_bytes=2048 * MIB, sevenzip_memory_mib=lambda: configured)
+        started, release = asyncio.Event(), asyncio.Event()
+        write = self.store.put_object
+
+        async def slow_write(scope, target, body, size, content_type, *, buffered=False):
+            if target.startswith("第一套/"):
+                started.set()
+                await release.wait()
+            await write(scope, target, body, size, content_type, buffered=buffered)
+
+        async def start(destination):
+            result = await service.start(1, self.scope, key, destination, None, "rename", True)
+            return service.jobs[result["id"]]
+
+        self.store.put_object = slow_write
+        try:
+            first = await start("第一套/")
+            await asyncio.wait_for(started.wait(), 5)
+            cancelled = await start("取消/")
+            await asyncio.sleep(0)
+            self.assertEqual(cancelled.status, "queued")
+            self.assertEqual(service.cancel(1, False, cancelled.id)["status"], "cancelled")
+            waiting = await start("第二套/")
+            await asyncio.sleep(0)
+            self.assertEqual(waiting.status, "queued")
+            configured = 256
+            await asyncio.wait_for(waiting.task, 5)
+            self.assertEqual((first.status, waiting.status, waiting.done_files), ("running", "completed", len(self.files)))
+            release.set()
+            await first.task
+            self.assertEqual(first.status, "completed")
+        finally:
+            await service.stop()
+
 
 class SevenZipPasswordTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
@@ -173,14 +220,36 @@ class SevenZipPasswordTests(unittest.IsolatedAsyncioTestCase):
             cls.cases[encrypt_names, False] = {"加密.7z": archive}
             cls.cases[encrypt_names, True] = split_archive(archive, "加密.7z")
 
-    async def extract(self, sources, password, *, split):
+    async def extract(self, sources, password, *, split, memory_bytes=None):
         store = MemoryObjects(sources)
-        service = ArchiveService(store)
+        service = ArchiveService(store, memory_bytes=memory_bytes)
         paths = list(sources)
         result = await service.start(1, Scope(1), paths[0], "结果/", password, "rename", True, volumes=paths[::-1] if split else None)
         job = service.jobs[result["id"]]
         await job.task
         return store, job.public()
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux 解码进程内存限制")
+    async def test_large_dictionary_with_container_memory_budget(self):
+        data = b"LZMA2 dictionary sample\n" * 4096
+        sources = {"加密.7z": encrypted_archive({"sample.txt": data}, self.password, True, dictionary_size=256 * MIB)}
+        store, job = await self.extract(sources, self.password, split=False, memory_bytes=1024 * MIB)
+        self.assertEqual((job["status"], job["password_error"]), ("failed", False), job)
+        self.assertIn("解码内存不足", job["error"])
+        self.assertEqual(store.objects, sources)
+
+        store, job = await self.extract(sources, self.password, split=False, memory_bytes=2048 * MIB)
+        self.assertEqual((job["status"], job["done_files"]), ("completed", 1), job)
+        self.assertEqual(store.objects["结果/sample.txt"], data)
+
+    async def test_archive_with_more_than_50000_entries(self):
+        # 用可跳过的资源分支覆盖全部条目，再校验最后一个文件的内容。
+        files = {f"__MACOSX/{index}.txt": b"" for index in range(50_000)}
+        files["sample.txt"] = b"last entry"
+        archive = await asyncio.to_thread(encrypted_archive, files, self.password, True)
+        store, job = await self.extract({"加密.7z": archive}, self.password, split=False, memory_bytes=2048 * MIB)
+        self.assertEqual((job["status"], job["done_files"]), ("completed", 1), job)
+        self.assertEqual(store.objects["结果/sample.txt"], files["sample.txt"])
 
     async def test_correct_password_for_content_and_encrypted_names(self):
         for (encrypt_names, split), sources in self.cases.items():

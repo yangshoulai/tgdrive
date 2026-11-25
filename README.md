@@ -356,6 +356,8 @@ docker compose up -d --no-build
 
 更多参数见 `tgdrive --help` 与 [docker-compose.yml](docker-compose.yml)。可信代理只填写实际代理地址，不在不受控的网络中使用 `*`。
 
+Linux 上，在线解压 7z 按内存预算处理压缩包。单任务上限默认自动设置，例如 2 GiB 容器为 512 MiB，4 GiB 及以上为 1 GiB。管理员可在「系统设置 → 下载与资源 → 高级参数」填写「7z 解压内存上限」，留空恢复自动。保存后对后续解压任务生效，「当前生效」显示按服务器预算计算的上限。
+
 <details>
 <summary><b>从源码运行</b>（Python 3.12+、Node.js 20+）</summary>
 

@@ -22,12 +22,13 @@ import lzma
 import re
 import secrets
 import struct
+import sys
 import time
 import unicodedata
 import zlib
 from bisect import bisect_right
 from collections import OrderedDict
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from itertools import accumulate
 from typing import AsyncIterator, Callable
@@ -37,11 +38,11 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from .archive import stream_zip
 from .errors import NotFoundError, QuotaExceededError
 from .objects import PRIVATE_PREFIX, ObjectService, Scope
-from .sevenzip import SevenZipError, open_decoder
+from .sevenzip import SevenZipError, decoder_memory_budget, decoder_memory_limit, open_decoder
 
 log = logging.getLogger(__name__)
 
-MAX_ENTRIES = 50_000          # 一个压缩包最多处理的条目数
+MAX_ZIP_ENTRIES = 50_000      # ZIP 需要在主进程列出可选择的条目
 MAX_CENTRAL = 64 * 1024 * 1024  # 中央目录最大字节数
 CHUNK = 1024 * 1024           # 解压输出分块
 MAX_VOLUMES = 1000            # 限制一次预检读取的对象元数据量
@@ -313,8 +314,8 @@ async def read_zip(source: Source) -> list[ZipEntry]:
         if record[:4] != b"PK\x06\x06" or len(record) < 56:
             raise ArchiveError("ZIP64 目录记录无效")
         total, central_size, central_offset = struct.unpack_from("<QQQ", record, 32)
-    if total > MAX_ENTRIES:
-        raise ArchiveError(f"压缩包里的条目太多（超过 {MAX_ENTRIES} 个）")
+    if total > MAX_ZIP_ENTRIES:
+        raise ArchiveError(f"压缩包里的条目太多（超过 {MAX_ZIP_ENTRIES} 个）")
     if central_size > MAX_CENTRAL or central_offset + central_size > source.size:
         raise ArchiveError("ZIP 目录过大或已损坏")
     central = await source.read(central_offset, central_offset + central_size)
@@ -710,10 +711,15 @@ def _content_type(key: str) -> str | None:
 
 
 class ArchiveService:
-    def __init__(self, objects: ObjectService):
+    def __init__(self, objects: ObjectService, *, memory_bytes: int | None = None,
+                 sevenzip_memory_mib: Callable[[], int] | None = None):
         self.objects = objects
         self.jobs: dict[str, Job] = {}
         self.slots = asyncio.Semaphore(RUNNING)
+        self._decoder_budget = decoder_memory_budget(memory_bytes)
+        self._decoder_config = sevenzip_memory_mib
+        self._decoder_reserved = 0
+        self._decoder_slots = asyncio.Condition()
         self._directories: OrderedDict[tuple, tuple[float, list[ZipEntry]]] = OrderedDict()
 
     # ----- 预览 -----
@@ -826,7 +832,7 @@ class ArchiveService:
         return entries
 
     async def browse(self, scope: Scope, key: str) -> dict:
-        """列出 ZIP 里的全部条目（最多 MAX_ENTRIES 个），供网页按目录浏览。"""
+        """列出 ZIP 里的全部条目（最多 MAX_ZIP_ENTRIES 个），供网页按目录浏览。"""
         info, source, kind = await self._open(scope, key)
         result: dict = {"format": kind, "size": info.size, "etag": info.etag}
         if kind != "zip":
@@ -878,7 +884,9 @@ class ArchiveService:
             raise NotFoundError("任务不存在")
         if job.status in ("queued", "running") and not job.cancelled:
             job.cancelled = True
-            if job.format == "7z" and job.status == "running" and job.task is not None:
+            if job.format == "7z" and job.task is not None:
+                if job.status == "queued":
+                    job.status, job.finished_at = "cancelled", time.time()
                 job.task.cancel()
         return job.public()
 
@@ -897,7 +905,7 @@ class ArchiveService:
         except UnicodeEncodeError:
             raise ValueError("密码含有不支持的字符") from None
         if selection is not None:
-            if not isinstance(selection, list) or not selection or len(selection) > MAX_ENTRIES \
+            if not isinstance(selection, list) or not selection or len(selection) > MAX_ZIP_ENTRIES \
                     or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in selection):
                 raise ValueError("要解压的文件不正确")
             selection = set(selection)
@@ -1171,6 +1179,30 @@ class ArchiveService:
         finally:
             await reader.close()
 
+    @asynccontextmanager
+    async def _reserve_decoder_memory(self, job: Job) -> AsyncIterator[int]:
+        async with self._decoder_slots:
+            while True:
+                configured = self._decoder_config() if self._decoder_config is not None else 0
+                memory_limit = decoder_memory_limit(self._decoder_budget, configured)
+                if self._decoder_reserved + memory_limit <= self._decoder_budget:
+                    self._decoder_reserved += memory_limit
+                    job.status = "running"
+                    break
+                job.status = "queued"
+                try:
+                    # 保存较小的上限后，等待中的任务也能按新预算启动。
+                    async with asyncio.timeout(0.5):
+                        await self._decoder_slots.wait()
+                except TimeoutError:
+                    pass
+        try:
+            yield memory_limit
+        finally:
+            async with self._decoder_slots:
+                self._decoder_reserved -= memory_limit
+                self._decoder_slots.notify_all()
+
     async def _run_7z(self, job: Job, scope: Scope, source: SevenZipSource, password: str | None) -> None:
         def check():
             if job.cancelled:
@@ -1184,14 +1216,11 @@ class ArchiveService:
             return data
 
         reserved = set(source.keys)
+        reserved_path_bytes = sum(map(sys.getsizeof, reserved))
         await self.objects.metadata.run_in_thread(source.check_versions)
-        async with open_decoder(read, source.size, check, password=password, max_entries=MAX_ENTRIES) as decoder:
-            for index in range(MAX_ENTRIES + 1):
-                entry = await decoder.next_entry()
-                if entry is None:
-                    break
-                if index == MAX_ENTRIES:
-                    raise ArchiveError("7z 压缩包内的文件和文件夹过多")
+        async with (self._reserve_decoder_memory(job) as memory_limit,
+                    open_decoder(read, source.size, check, password=password, memory_limit=memory_limit) as decoder):
+            while (entry := await decoder.next_entry()) is not None:
                 name, kind, size = entry
                 relative = safe_relative(name, kind == "dir")
                 if not relative or ignored(relative):
@@ -1207,6 +1236,10 @@ class ArchiveService:
                 else:
                     key = await self._target(scope, job, relative, reserved)
                     if key is not None:
+                        # 同名处理在主进程记录已写入的路径，按实际占用限制这部分内存。
+                        reserved_path_bytes += sys.getsizeof(key)
+                        if reserved_path_bytes + sys.getsizeof(reserved) > memory_limit // 8:
+                            raise ArchiveError("7z 解压的文件路径占用内存超出预算，解压已停止")
                         before = job.done_bytes
                         try:
                             async with aclosing(decoder.content(size)) as content:

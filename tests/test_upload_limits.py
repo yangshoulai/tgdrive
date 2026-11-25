@@ -28,6 +28,18 @@ class ResourceBudgetTests(unittest.TestCase):
     def parallel(self, effective):
         return tuple(effective[key] for key in ("transfer_concurrency", "bucket_concurrency", "upload_concurrency", "web_part_concurrency"))
 
+    def test_7z_memory_uses_auto_or_admin_limit_within_container_budget(self):
+        for memory, configured, expected in ((None, 0, 256), (256, 0, 128), (1024, 0, 256),
+                                              (2048, 0, 512), (8192, 0, 1024), (2048, 768, 768),
+                                              (2048, 2048, 1024), (2048, 128, 128)):
+            with self.subTest(memory=memory, configured=configured):
+                budget = memory * MIB if memory is not None else None
+                effective = self.effective(memory=budget, sevenzip_memory_mib=configured)
+                self.assertEqual(effective["sevenzip_memory_mib"], expected)
+        for invalid in (-1, 127, 8193, 256.5, True, "512"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "7z 解压内存上限"):
+                ResourceSettings.validate({"sevenzip_memory_mib": invalid})
+
     def test_low_defaults_allow_parallel_transfers_in_personal_deployment(self):
         effective = self.effective()
         # 个人部署：低资源档也允许每个账号用满读取名额（不再减半），离线下载默认同时 3 个（自定义可到 4 个）。

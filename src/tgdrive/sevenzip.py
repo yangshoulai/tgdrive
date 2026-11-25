@@ -9,6 +9,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 BLOCK_SIZE = 256 * 1024
+MIB = 1024 * 1024
+MIN_MEMORY_LIMIT = 128 * MIB
+DEFAULT_MEMORY_LIMIT = 256 * MIB
+MAX_AUTO_MEMORY_LIMIT = 1024 * MIB
+MAX_MEMORY_LIMIT = 8192 * MIB
 MESSAGE_LIMIT = 32 * 1024
 TIMEOUT = 60
 ERRORS = {
@@ -20,8 +25,23 @@ ERRORS = {
     "unchecked": "7z 压缩包内有文件缺少完整性校验信息，无法确认解密结果",
     "invalid": "7z 压缩包已损坏或使用了不支持的压缩方式",
     "name": "7z 压缩包内有文件名过长的条目",
-    "limit": "7z 压缩包超过解码资源上限",
+    "memory": "7z 解码内存不足，解压已停止",
 }
+
+
+def decoder_memory_budget(memory_bytes: int | None) -> int:
+    """给同时运行的 7z 解码进程留出内存，未知时按两路默认值计算。"""
+    if memory_bytes is None:
+        return 2 * DEFAULT_MEMORY_LIMIT
+    return max(MIN_MEMORY_LIMIT, memory_bytes // (2 * MIB) * MIB)
+
+
+def decoder_memory_limit(budget: int, configured_mib: int = 0) -> int:
+    if configured_mib:
+        return min(budget, configured_mib * MIB)
+    # 自动通常给两路均分，小容器可集中预算给一个任务使用。
+    automatic = max(DEFAULT_MEMORY_LIMIT, budget // (2 * MIB) * MIB)
+    return min(budget, MAX_AUTO_MEMORY_LIMIT, automatic)
 
 
 class SevenZipError(ValueError):
@@ -117,7 +137,8 @@ class Decoder:
 
 @asynccontextmanager
 async def open_decoder(read: Callable[[int, int], Awaitable[bytes]], size: int,
-                       check: Callable[[], None], *, password: str | None, max_entries: int) -> AsyncIterator[Decoder]:
+                       check: Callable[[], None], *, password: str | None,
+                       memory_limit: int) -> AsyncIterator[Decoder]:
     try:
         process = await asyncio.create_subprocess_exec(
             sys.executable, "-B", "-m", "tgdrive.sevenzip_worker",
@@ -128,8 +149,9 @@ async def open_decoder(read: Callable[[int, int], Awaitable[bytes]], size: int,
         raise SevenZipError("无法启动 7z 解码进程，请稍后重试") from None
     decoder = Decoder(process, read, size, check)
     try:
-        # 密码和归档大小走同一条管道，进程参数里只有固定的模块名。
-        await decoder._send(json.dumps({"size": size, "password": password, "max_entries": max_entries}).encode("ascii") + b"\n")
+        # 密码通过管道传递，进程参数里只有固定的模块名。
+        request = {"size": size, "password": password, "memory_limit": memory_limit}
+        await decoder._send(json.dumps(request).encode("ascii") + b"\n")
         yield decoder
     except TimeoutError:
         raise SevenZipError("读取 7z 压缩包超时，请稍后重试") from None

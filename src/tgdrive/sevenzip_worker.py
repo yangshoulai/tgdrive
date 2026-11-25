@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes as ct
 from ctypes.util import find_library
+import errno
 import io
 import json
 import lzma
@@ -11,10 +12,9 @@ import stat
 import struct
 import sys
 
-from .sevenzip import BLOCK_SIZE, MESSAGE_LIMIT
+from .sevenzip import BLOCK_SIZE, MAX_MEMORY_LIMIT, MESSAGE_LIMIT, MIB
 
-MAX_READ_REQUEST = 64 * 1024 * 1024  # 7z 目录可能需要一次读取，管道上仍拆成小块。
-MEMORY_LIMIT = 256 * 1024 * 1024
+PY7ZR_OUTPUT_BLOCK = 4 * MIB
 
 
 class DecodeError(Exception):
@@ -29,8 +29,9 @@ def emit(message: dict, data: bytes | memoryview = b"") -> None:
 
 
 class RangeInput(io.RawIOBase):
-    def __init__(self, size: int):
+    def __init__(self, size: int, memory_limit: int):
         self.size, self.position = size, 0
+        self.memory_limit = memory_limit
 
     def readable(self) -> bool:
         return True
@@ -51,9 +52,12 @@ class RangeInput(io.RawIOBase):
         return target
 
     def read(self, size: int = -1) -> bytes:
-        if not 0 <= size <= MAX_READ_REQUEST:
-            raise DecodeError("limit")
+        if size < 0:
+            raise DecodeError("invalid")
         end = min(self.position + size, self.size)
+        # 合并读取分块时，分块与返回值会暂时各占一份内存。
+        if end - self.position > self.memory_limit // 2:
+            raise DecodeError("memory")
         pieces = []
         while self.position < end:
             stop = min(self.position + BLOCK_SIZE, end)
@@ -102,6 +106,7 @@ def extract(source: RangeInput) -> None:
         "archive_entry_size": (offset_type, [ptr]),
         "archive_entry_is_encrypted": (ct.c_int, [ptr]),
         "archive_entry_hardlink": (ct.c_char_p, [ptr]),
+        "archive_errno": (ct.c_int, [ptr]),
         "archive_error_string": (ct.c_char_p, [ptr]),
     }
     try:
@@ -113,10 +118,11 @@ def extract(source: RangeInput) -> None:
         raise DecodeError("unavailable") from None
 
     buffer = None
+    out_of_memory = False
 
     @read_cb
     def read(_, __, output):
-        nonlocal buffer
+        nonlocal buffer, out_of_memory
         try:
             data = source.read(BLOCK_SIZE)
             if not data:
@@ -124,7 +130,10 @@ def extract(source: RangeInput) -> None:
             buffer = ct.create_string_buffer(data)
             output[0] = ct.cast(buffer, ptr)
             return len(data)
-        except (DecodeError, OSError, MemoryError):
+        except MemoryError:
+            out_of_memory = True
+            return -1
+        except (DecodeError, OSError):
             return -1
 
     @seek_cb
@@ -136,10 +145,12 @@ def extract(source: RangeInput) -> None:
 
     archive = lib.archive_read_new()
     if not archive:
-        raise DecodeError("limit")
+        raise DecodeError("memory")
 
     def checked(status):
         if status < 0:
+            if out_of_memory or lib.archive_errno(archive) == errno.ENOMEM:
+                raise DecodeError("memory")
             message = lib.archive_error_string(archive) or b""
             raise DecodeError("encrypted" if b"encrypt" in message.lower() else "invalid")
         return status
@@ -174,12 +185,15 @@ def extract(source: RangeInput) -> None:
         lib.archive_read_free(archive)
 
 
-def extract_with_password(source: RangeInput, password: str, max_entries: int) -> None:
+def extract_with_password(source: RangeInput, password: str) -> None:
     try:
         from py7zr import SevenZipFile, exceptions
+        from py7zr import py7zr as reader
         from py7zr.io import MemIO, Py7zIO, WriterFactory
     except ImportError:
         raise DecodeError("aes_unavailable") from None
+    # 固定版本的 py7zr 默认根据进程内存扩大每次输出，容易挤占大字典所需的内存。
+    reader.get_memory_limit = lambda: PY7ZR_OUTPUT_BLOCK
 
     class EntryOutput(Py7zIO):
         def __init__(self, entry):
@@ -237,8 +251,6 @@ def extract_with_password(source: RangeInput, password: str, max_entries: int) -
 
     try:
         with SevenZipFile(source, "r", password=password) as archive:
-            if len(archive.files) > max_entries:
-                raise DecodeError("limit")
             factory = Entries(archive.files)
             # 使用固定版本 py7zr 的成员编号，将每个条目直接绑定到管道写入器。
             # 归档路径始终由主进程校验和处理，重名、目录和链接沿用已有语义。
@@ -257,31 +269,34 @@ def extract_with_password(source: RangeInput, password: str, max_entries: int) -
 def main() -> None:
     try:
         request = json.loads(sys.stdin.buffer.readline(MESSAGE_LIMIT))
-        size, password, max_entries = request["size"], request["password"], request["max_entries"]
-        if not (type(size) is int and 0 < size < 2**63 and type(max_entries) is int and max_entries > 0
+        size, password, memory_limit = request["size"], request["password"], request["memory_limit"]
+        if not (type(size) is int and 0 < size < 2**63
+                and type(memory_limit) is int and 0 < memory_limit <= MAX_MEMORY_LIMIT
                 and (password is None or isinstance(password, str) and 0 < len(password) <= 1024)):
             raise DecodeError("invalid")
         if sys.platform != "win32":
             import resource
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             if sys.platform == "linux":
-                # py7zr 以 RLIMIT_DATA 估算解压缓冲大小，避免按宿主机可用内存分配。
                 limits = (resource.RLIMIT_AS, resource.RLIMIT_DATA) if password is not None else (resource.RLIMIT_AS,)
                 for resource_id in limits:
                     soft, _ = resource.getrlimit(resource_id)
-                    limit = min(soft, MEMORY_LIMIT) if soft != resource.RLIM_INFINITY else MEMORY_LIMIT
-                    resource.setrlimit(resource_id, (limit, limit))
-        source = RangeInput(size)
+                    if soft != resource.RLIM_INFINITY:
+                        memory_limit = min(soft, memory_limit)
+                    resource.setrlimit(resource_id, (memory_limit, memory_limit))
+        source = RangeInput(size, memory_limit)
         if password is None:
             extract(source)
         else:
-            extract_with_password(source, password, max_entries)
+            extract_with_password(source, password)
         emit({"done": True})
     except DecodeError as exc:
         emit({"error": str(exc)})
     except MemoryError:
-        emit({"error": "limit"})
-    except (ValueError, OSError, KeyError, TypeError):
+        emit({"error": "memory"})
+    except OSError as exc:
+        emit({"error": "memory" if exc.errno == errno.ENOMEM else "invalid"})
+    except (ValueError, KeyError, TypeError):
         emit({"error": "invalid"})
 
 

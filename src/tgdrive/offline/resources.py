@@ -11,6 +11,7 @@ from pathlib import Path
 
 from urllib.parse import quote
 
+from ..sevenzip import MAX_MEMORY_LIMIT, MIN_MEMORY_LIMIT, decoder_memory_budget, decoder_memory_limit
 from .http import proxy_parts
 from .platforms import capabilities, tool_version
 
@@ -23,7 +24,7 @@ DEFAULTS = {"mode": "auto", "concurrency": 1, "bandwidth_kib": 0,
             "upload_concurrency": 4, "upload_kib": 0, "bot_interval_ms": 1000,
             "web_part_concurrency": 4, "web_file_concurrency": 2, "thumbnail_concurrency": 16,
             "download_memory_percent": 60, "video_concurrency": 2, "thumbnail_cache_mib": 1024,
-            "download_connections": 4, "parse_concurrency": 6, "diagnostics": True,
+            "download_connections": 4, "parse_concurrency": 6, "diagnostics": True, "sevenzip_memory_mib": 0,
             # 文件校验（巡检）每天最多读取的已存数据量，0 关闭自动校验；Telegram 机器人「发回」文件的大小上限
             # （文件整读进内存后发送；官方 Bot API 另有 50 MB 上限，见 telegram/bot.py 的 _send_limit）。
             "scrub_daily_mib": 2048, "telegram_send_mib": 200}
@@ -158,6 +159,10 @@ class ResourceSettings:
             raise ValueError("YouTube 清晰度上限不正确")
         if type(merged["platform_max_mib"]) is not int or not 16 <= merged["platform_max_mib"] <= 8192:
             raise ValueError("平台临时缓存预算须为 16–8192 MiB")
+        sevenzip_mib = merged["sevenzip_memory_mib"]
+        low, high = MIN_MEMORY_LIMIT // MIB, MAX_MEMORY_LIMIT // MIB
+        if type(sevenzip_mib) is not int or (sevenzip_mib != 0 and not low <= sevenzip_mib <= high):
+            raise ValueError(f"7z 解压内存上限须为 {low}–{high} MiB，0 表示自动")
         for key, high in (("transfer_concurrency", 32), ("bucket_concurrency", 32)):
             if type(merged[key]) is not int or not 1 <= merged[key] <= high:
                 raise ValueError("文件读取并发须为 1–32")
@@ -248,6 +253,7 @@ class ResourceSettings:
                 "download_connections": connections, "task_memory_bytes": per_task,
                 "transfer_concurrency": transfer, "bucket_concurrency": bucket,
                 "upload_concurrency": upload, "web_part_concurrency": web_parts, "thumbnail_concurrency": thumbnails,
+                "sevenzip_memory_mib": decoder_memory_limit(decoder_memory_budget(memory), config["sevenzip_memory_mib"]) // MIB,
                 "upload_reduced": (upload, web_parts) != (config["upload_concurrency"], config["web_part_concurrency"]),
                 "transfer_reduced": (transfer, bucket) != (config["transfer_concurrency"], config["bucket_concurrency"]),
                 "streaming": True, "cache_mib": platform_limit if config["youtube_enabled"] else 0,

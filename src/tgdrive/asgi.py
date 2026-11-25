@@ -98,7 +98,9 @@ class TgDriveASGI(StaticFiles):
         self.settings = settings or SystemSettings(admin.accounts.metadata, {"public_base_url": public_base_url})
         self.private_space = PrivateSpace(user, self.settings)
         # 在线解压：任务只在进程内存里，流式读写存储，不落本地磁盘。
-        self.archives = ArchiveService(user.objects)
+        memory_bytes = resources.detected["memory_bytes"] if resources is not None else None
+        archive_memory = (lambda: resources.config()["sevenzip_memory_mib"]) if resources is not None else None
+        self.archives = ArchiveService(user.objects, memory_bytes=memory_bytes, sevenzip_memory_mib=archive_memory)
         # 媒体元数据：文件自带的标签、内嵌歌词与字幕，以及可在系统设置中开关的第三方提供者（封面、歌词、字幕）。
         self.media = MediaService(user.objects, admin.accounts.keystore, resources)
         previous_commit = user.objects.on_commit
@@ -644,6 +646,8 @@ class TgDriveASGI(StaticFiles):
             target = (result or {}).get("name")
         elif action == "resources.update":
             detail = {key: payload.get(key) for key in ("mode", "concurrency", "bandwidth_kib", "reserve_mib", "hls_enabled", "x_enabled", "youtube_enabled", "youtube_max_height", "platform_max_mib", "transfer_concurrency", "bucket_concurrency", "upload_concurrency", "upload_kib", "bot_interval_ms", "web_part_concurrency", "web_file_concurrency", "thumbnail_concurrency", "download_memory_percent", "video_concurrency", "thumbnail_cache_mib", "download_connections", "scrub_daily_mib", "telegram_send_mib") if key in payload}
+            if ok and "sevenzip_memory_mib" in payload:
+                detail["sevenzip_memory_mib"] = (result or {}).get("config", {}).get("sevenzip_memory_mib")
             if "proxy" in payload:
                 # 代理地址可能包含认证信息，审计只记录是否启用。
                 detail["proxy_enabled"] = bool(payload.get("proxy"))
