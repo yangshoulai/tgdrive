@@ -41,7 +41,7 @@ from .metrics import TrafficMetrics
 from .objects import PRIVATE_PREFIX, Scope
 from .private import PrivateAccessLogFilter, PrivateLocked, PrivateSpace
 from .private_keys import KeyPrivateAccess, PrivateKeyPrincipal
-from .extract import ArchiveService
+from .extract import MAX_VOLUMES, ArchiveService
 from .extract import _content_type as _archive_type
 from .media.service import AssetExists, MediaService
 from .registration import RegistrationService
@@ -651,8 +651,10 @@ class TgDriveASGI(StaticFiles):
             detail = {"count": len(payload.get("items", [])) if isinstance(payload.get("items"), list) else 0}
         elif action == "archive.extract":
             # 不记录压缩包与保存位置的路径，更不记录密码。
+            keep = payload.get("keep_archive") is not False or payload.get("entries") is not None or payload.get("volumes") is not None
             detail = {"conflict": payload.get("conflict") if payload.get("conflict") in ("skip", "overwrite", "rename") else None,
-                      "keep": payload.get("keep_archive") is not False or payload.get("entries") is not None, "format": (result or {}).get("format") if ok else None,
+                      "keep": (result or {}).get("keep_archive", keep) if ok else keep,
+                      "format": (result or {}).get("format") if ok else None,
                       "partial": payload.get("entries") is not None}
         elif action == "archive.compress":
             # 只记数量与压缩方式，不记路径。
@@ -1861,15 +1863,29 @@ class TgDriveASGI(StaticFiles):
                 raise ValueError("密码不正确")
             return value or None
 
+        def source():
+            path = payload.get("path")
+            if not isinstance(path, str):
+                raise ValueError("请选择一个压缩包文件")
+            volumes = payload.get("volumes")
+            if volumes is not None:
+                if (not isinstance(volumes, list) or not 1 <= len(volumes) <= MAX_VOLUMES
+                        or any(not isinstance(part, str) for part in volumes)):
+                    raise ValueError(f"请选择一套 7z 分卷，一次最多 {MAX_VOLUMES} 卷")
+                volumes = [user._path(part) for part in volumes]
+            return user._path(path), volumes
+
         if route == "/archive/inspect" and method == "POST":
             target = payload.get("destination")
-            return 200, await self.archives.inspect(scope, user._path(payload.get("path", "")), None if target is None else destination(target), password()), no_store
+            path, volumes = source()
+            return 200, await self.archives.inspect(scope, path, None if target is None else destination(target), password(), volumes=volumes), no_store
         if route == "/archive/browse" and method == "POST":
             return 200, await self.archives.browse(scope, user._path(payload.get("path", ""))), no_store
         if route == "/archive/extract" and method == "POST":
-            return 201, await self.archives.start(account.id, scope, user._path(payload.get("path", "")), destination(payload.get("destination", "")),
+            path, volumes = source()
+            return 201, await self.archives.start(account.id, scope, path, destination(payload.get("destination", "")),
                                                   password(), payload.get("conflict", "rename"), payload.get("keep_archive", True),
-                                                  payload.get("entries")), no_store
+                                                  payload.get("entries"), volumes=volumes), no_store
         if route == "/archive/compress" and method == "POST":
             # 在线压缩：把所选文件与文件夹打包成 ZIP 保存到网盘（默认放在第一项所在的文件夹）。
             roots, files, total = await user.archive_totals(token, payload.get("paths"))

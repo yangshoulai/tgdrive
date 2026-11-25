@@ -652,6 +652,8 @@ export const setMediaSize = (file: Pick<FileItem, "key" | "etag">, size: MediaSi
   post<{ saved: boolean }>(fileApi("/media/size", file.key), { path: file.key, etag: file.etag, width: size.width, height: size.height });
 /** 在线解压（服务器流式解压，不占本机磁盘）：支持 ZIP 与 TAR（含 .tar.gz／.tar.bz2／.tar.xz）及单个 .gz／.bz2／.xz。 */
 export const ARCHIVE_NAME = /\.(zip|tar|tgz|tbz2?|txz|tar\.(?:gz|bz2|xz)|gz|bz2|xz)$/i;
+/** 捕获分卷名中包含目录的共同部分，例如 folder/archive.7z。 */
+export const ARCHIVE_VOLUME_NAME = /^(.*\.7z)\.[0-9]{3,}$/i;
 export type ArchiveInfo = {
   format: string; size: number; room: number | null; listable: boolean; encrypted: boolean; encryption?: "aes" | "zipcrypto" | null;
   files: number | null; total_bytes: number | null; entries: { name: string; size: number; dir: boolean }[];
@@ -668,10 +670,10 @@ export type ArchiveJob = {
   done_files: number; done_bytes: number; skipped: number; renamed: number; failed: number; failures: { name: string; error: string }[];
   current: string; error: string; archive_removed: boolean; created_at: number; finished_at: number | null;
 };
-export const inspectArchive = (path: string, options: { destination?: string; password?: string } = {}) =>
+export const inspectArchive = (path: string, options: { destination?: string; password?: string; volumes?: string[] } = {}) =>
   post<ArchiveInfo>(fileApi("/archive/inspect", path), { path, ...options }, 60000);
 /** entries：只解压这些条目（browseArchive 的 index）；不传表示整个压缩包。 */
-export const extractArchive = (path: string, options: { destination: string; password?: string; conflict: ArchiveConflict; keep_archive: boolean; entries?: number[] }) =>
+export const extractArchive = (path: string, options: { destination: string; password?: string; conflict: ArchiveConflict; keep_archive: boolean; entries?: number[]; volumes?: string[] }) =>
   post<ArchiveJob>(fileApi("/archive/extract", path), { path, ...options }, 60000);
 export const archiveJobs = (ids: string[], privateJobs = false) =>
   request<{ jobs: ArchiveJob[] }>(`/api/user/v1${privateJobs ? "/private" : ""}/archive/jobs?ids=${ids.map(encodeURIComponent).join(",")}`);

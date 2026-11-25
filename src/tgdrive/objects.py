@@ -294,9 +294,10 @@ class ObjectService:
     async def put_object(self, scope: Scope, key: str, body: AsyncIterator[bytes] | Iterable[bytes] | bytes,
                          size: int | None = None, content_type: str | None = None,
                          user_meta: dict[str, str] | None = None, *, expect_md5: str | None = None, small: bool = False,
-                         if_match: str | None = None, declared_type: bool = False) -> ObjectInfo:
+                         if_match: str | None = None, declared_type: bool = False, buffered: bool = False) -> ObjectInfo:
         """if_match：只在对象当前 ETag 等于它时覆盖（网页文本编辑保存用），否则抛 VersionConflict，不写入。
-        declared_type：采用调用方给出的类型、不按内容判断（S3 网关）。"""
+        declared_type：采用调用方给出的类型、不按内容判断（S3 网关）。
+        buffered：由已有并发限制的服务端任务生成数据，写入只占上传名额。"""
         self._check_scope(scope, key, write=True)
         if if_match is not None:
             # 先查一次，版本已变时不必上传；提交事务内还会再复核。
@@ -313,7 +314,7 @@ class ObjectService:
         blob_uuid = self.engine.begin_blob()
         self._cache_upload(blob_uuid, key, content_type)
         try:
-            result = await self.engine.put_part(blob_uuid, 1, body, bucket_id=scope.bucket_id, small=small)
+            result = await self.engine.put_part(blob_uuid, 1, body, bucket_id=scope.bucket_id, small=small, buffered=buffered)
             if size is not None and result.size != size:
                 raise ValueError("object size does not match request")
             if expect_md5 is not None and result.md5.lower() != expect_md5.lower():
@@ -324,7 +325,7 @@ class ObjectService:
             self._check_scope(scope, key, write=True)
             info = self._commit_blob(scope.bucket_id, key, blob_uuid, result.size, result.md5,
                                      content_type, user_meta, scope=scope, dedupe=not small, if_match=if_match, declared=declared_type)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             # 已写入后端的分片由 orphan cleanup/GC 处理；元数据中的临时 blob 可立即入队。
             try:
                 await self.engine.delete(blob_uuid)

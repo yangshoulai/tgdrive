@@ -81,7 +81,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const libraryPolicy = useLibraryPolicyEditor();
   const [sharing, setSharing] = useState<api.FileItem | null>(null);
   const [metadataEditing, setMetadataEditing] = useState<api.FileItem | null>(null);
-  const [extracting, setExtracting] = useState<{ file: api.FileItem; picks?: string[] } | null>(null);
+  const [extracting, setExtracting] = useState<{ file: api.FileItem; picks?: string[]; volumes?: string[] } | null>(null);
   const [compressing, setCompressing] = useState<string[] | null>(null);
   const [editingImage, setEditingImage] = useState<api.FileItem | null>(null);
   const [renaming, setRenaming] = useState<Entry | null>(null);
@@ -293,6 +293,15 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const downloadLimit = () => notify.error("一次最多打包 200 项，请减少选择，或直接下载整个文件夹");
   const selectionStarred = selectedFiles.length > 0 && selectedFiles.every(entry => entry.file.starred_at);
   const selectedAudio = selectedFiles.map(entry => entry.file).filter(file => getFileKind(file.content_type, file.key) === "audio");
+  const volumeBase = api.ARCHIVE_VOLUME_NAME.exec(selectedFiles[0]?.key ?? "")?.[1];
+  const canExtractVolumes = volumeBase !== undefined && selectedFiles.length === selected.size
+    && selectedFiles.every(entry => api.ARCHIVE_VOLUME_NAME.exec(entry.key)?.[1] === volumeBase);
+
+  function extractVolumes() {
+    if (!canExtractVolumes) return;
+    const first = selectedFiles.find(entry => entry.key.endsWith(".001")) ?? selectedFiles[0];
+    setExtracting({ file: first.file, volumes: selectedFiles.map(entry => entry.key) });
+  }
 
   function toggleSelect(key: string, value: boolean) {
     setSelected(current => { const next = new Set(current); if (value) next.add(key); else next.delete(key); return next; });
@@ -637,6 +646,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       return [
         { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", shortcut: "D", onSelect: selectedEntries.length > 200 ? downloadLimit : () => undefined,
           href: selectedEntries.length > 200 ? undefined : downloadUrl(selectedEntries) },
+        ...(canExtractVolumes ? [{ label: "解压…", icon: "archive" as const, onSelect: extractVolumes }] : []),
         { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving(selectedEntries) },
         ...(!privateSpace && selectedFiles.length ? [{ label: selectionStarred ? "取消收藏" : `收藏 ${selectedFiles.length} 个文件`, icon: "star" as const, shortcut: "*",
           onSelect: () => void star(selectedFiles.map(entry => entry.file), !selectionStarred) }] : []),
@@ -701,6 +711,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <div className="toolbar-actions">
             {selectedEntries.length > 200 ? <Button size="sm" icon="download" onClick={downloadLimit}>下载</Button>
               : <ButtonLink variant="secondary" size="sm" shortcut="D" icon="download" href={downloadUrl(selectedEntries)}>下载</ButtonLink>}
+            {canExtractVolumes && <Button size="sm" icon="archive" onClick={extractVolumes}>解压…</Button>}
             {canCacheSelection && <Button size="sm" icon="monitor" onClick={cacheSelected}>缓存到本机</Button>}
             {canClearSelection && <Button size="sm" icon="trash" onClick={clearSelectedCache}>清除本机缓存</Button>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}
@@ -868,7 +879,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
 
       {context && <ContextMenu x={context.x} y={context.y} label={context.key === BACKGROUND ? `${name} 的操作` : `${baseName(context.key)} 的操作`} items={contextItems(context.key)} onClose={() => setContext(null)} />}
       {statsFor && <FolderStatsDialog prefix={statsFor.prefix} title={statsFor.prefix === root ? rootName : api.privatePathLabel(statsFor.prefix).replace(/\/$/, "")} onClose={() => setStatsFor(null)} onOpenFolder={onOpenFolder} />}
-      {extracting && <ExtractDialog file={extracting.file} picks={extracting.picks} onClose={() => setExtracting(null)} onOpenFolder={onOpenFolder} />}
+      {extracting && <ExtractDialog file={extracting.file} picks={extracting.picks} volumes={extracting.volumes} onClose={() => setExtracting(null)} onOpenFolder={onOpenFolder} />}
       {compressing && <CompressDialog keys={compressing} onClose={() => setCompressing(null)} onOpenFolder={onOpenFolder} />}
       {editingImage && <ImageEditorDialog file={editingImage} onClose={() => setEditingImage(null)} onSaved={(item, replaced) => { if (replaced) preview.update(item); }} />}
       {metadataEditing && <MetadataEditor file={metadataEditing} onClose={() => setMetadataEditing(null)} />}

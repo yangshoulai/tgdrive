@@ -89,7 +89,7 @@
   /* 根目录只留图标（名称仍在按钮的 title 与读屏文本中），常见的两三级路径不必横向滚动。 */
   .file-breadcrumbs li:first-child button:not([aria-current="page"]) .crumb-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .files-view .toolbar { gap: 8px; }
-  .files-view .toolbar > .toolbar-actions { flex-wrap: nowrap; gap: 8px; }
+  .files-view .toolbar:not(.selection-bar) > .toolbar-actions { flex-wrap: nowrap; gap: 8px; }
   .files-view .toolbar .mobile-file-sort { flex: 1 1 auto; }
   .files-view .toolbar .mobile-file-sort select { width: 100%; max-width: none; }
   .files-view .toolbar .toolbar-stats { display: none; }

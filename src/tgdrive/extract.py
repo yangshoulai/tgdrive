@@ -1,4 +1,4 @@
-"""在线解压：把存储里的 ZIP／TAR 压缩包解到同一账号的文件空间。
+"""在线解压：把存储里的压缩包解到同一账号的文件空间。
 
 全程流式，不写本地临时文件：按字节范围从存储读取压缩包 → 内存中解密、解压 → 直接写回存储（put_object），
 所以服务器本机磁盘大小不受影响，只受账号配额限制（开始前按解压后大小检查）。
@@ -6,7 +6,7 @@
 - ZIP：读中央目录得到全部条目（支持 ZIP64、UTF-8／GBK 文件名、存储／Deflate／BZip2／LZMA），每个条目是一段连续字节，
   单独按范围读取；支持传统 ZipCrypto 与 WinZip AES 密码。
 - TAR（含 .tar.gz／.tgz／.tar.bz2／.tar.xz）：顺序读一遍；单个 .gz／.bz2／.xz 文件解出一个文件。
-- 7z、RAR 需要外部程序，不支持。
+- 无密码的 7z 分卷：按卷号映射字节范围，由独立的 libarchive 解码进程逐条读取。
 
 任务只在进程内存里（重启后丢失，已解出的文件保留）；密码只在任务运行期间留在内存，不写日志、审计或接口回显。
 """
@@ -25,9 +25,11 @@ import struct
 import time
 import unicodedata
 import zlib
+from bisect import bisect_right
 from collections import OrderedDict
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
+from itertools import accumulate
 from typing import AsyncIterator, Callable
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -35,12 +37,16 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from .archive import stream_zip
 from .errors import NotFoundError, QuotaExceededError
 from .objects import PRIVATE_PREFIX, ObjectService, Scope
+from .sevenzip import open_decoder
 
 log = logging.getLogger(__name__)
 
 MAX_ENTRIES = 50_000          # 一个压缩包最多处理的条目数
 MAX_CENTRAL = 64 * 1024 * 1024  # 中央目录最大字节数
 CHUNK = 1024 * 1024           # 解压输出分块
+MAX_VOLUMES = 1000            # 限制一次预检读取的对象元数据量
+VOLUME_WINDOW = 4 * 1024 * 1024
+SEVEN_ZIP_VOLUME = re.compile(r"(.*\.7z)\.[0-9]{3,}\Z", re.IGNORECASE)
 SAMPLE = 500                  # 预览列出的条目数
 JOB_KEEP = 3600               # 已结束任务保留时间（秒）
 DIRECTORY_CACHE = 8           # 在线浏览时缓存的中央目录个数
@@ -88,6 +94,45 @@ class Source:
     async def read(self, start: int, end: int) -> bytes:
         parts = [chunk async for chunk in self.stream(start, end)]
         return b"".join(parts)
+
+
+class VolumeSource:
+    """把一组已锁定版本的分卷映射到同一字节地址空间，只缓存最近读过的窗口。"""
+
+    def __init__(self, volumes: list[Source]):
+        self.volumes = volumes
+        self.keys = frozenset(volume.key for volume in volumes)
+        self.ends = list(accumulate(volume.size for volume in volumes))
+        self.size = self.ends[-1]
+        self.window_start, self.window = 0, b""
+
+    async def read(self, start: int, end: int, *, window: int = VOLUME_WINDOW) -> bytes:
+        pieces = []
+        while start < end:
+            if not self.window_start <= start < self.window_start + len(self.window):
+                index = bisect_right(self.ends, start)
+                volume_start = self.ends[index - 1] if index else 0
+                stop = min(self.ends[index], start + window)
+                try:
+                    self.window = await self.volumes[index].read(start - volume_start, stop - volume_start)
+                except NotFoundError:
+                    raise ArchiveError("分卷已移动或删除，请重新选择后解压") from None
+                if len(self.window) != stop - start:
+                    raise ArchiveError("分卷数据不完整，请检查压缩包")
+                self.window_start = start
+            stop = min(end, self.window_start + len(self.window))
+            pieces.append(self.window[start - self.window_start:stop - self.window_start])
+            start = stop
+        return b"".join(pieces)
+
+    def check_versions(self) -> None:
+        for volume in self.volumes:
+            try:
+                info = volume.objects.head_object(volume.scope, volume.key)
+            except NotFoundError:
+                raise ArchiveError("分卷已移动或删除，请重新选择后解压") from None
+            if info.etag != volume.etag or info.size != volume.size:
+                raise ArchiveError("分卷已被修改，请重新选择后解压")
 
 
 class Reader:
@@ -666,6 +711,40 @@ class ArchiveService:
         head = await source.read(0, min(info.size, 512))
         return info, source, archive_format(key.rsplit("/", 1)[-1], head)
 
+    async def _open_volumes(self, scope: Scope, key: str, paths: list[str]) -> VolumeSource:
+        if not 1 <= len(paths) <= MAX_VOLUMES:
+            raise ArchiveError(f"请选择一套 7z 分卷，一次最多 {MAX_VOLUMES} 卷")
+        match = SEVEN_ZIP_VOLUME.fullmatch(key)
+        if not match or key not in paths:
+            raise ArchiveError("请选择同一文件夹内的一套 7z 分卷")
+        base = match[1]
+        for path in paths:
+            part = SEVEN_ZIP_VOLUME.fullmatch(path)
+            if not part or part[1] != base:
+                raise ArchiveError("请选择同一文件夹内、名称相同的一套 7z 分卷")
+        ordered = [f"{base}.{number:03d}" for number in range(1, len(paths) + 1)]
+        if set(paths) != set(ordered):
+            raise ArchiveError("请选择从 .001 开始的连续分卷，补齐缺少的卷后再试")
+
+        def snapshots():
+            return [self.objects.head_object(scope, path) for path in ordered]
+
+        try:
+            infos = await self.objects.metadata.run_in_thread(snapshots)
+        except NotFoundError:
+            raise ArchiveError("分卷已移动或删除，请重新选择后解压") from None
+        if any(info.size <= 0 for info in infos):
+            raise ArchiveError("所选分卷包含空文件，请检查压缩包")
+        source = VolumeSource([Source(self.objects, scope, info.key, info.etag, info.size) for info in infos])
+        head = await source.read(0, min(32, source.size), window=32)
+        if len(head) != 32 or head[:6] != b"7z\xbc\xaf\x27\x1c" or zlib.crc32(head[12:]) != int.from_bytes(head[8:12], "little"):
+            raise ArchiveError("7z 首卷无效或已损坏，请检查 .001 分卷")
+        # 7z 的起始头记录末尾目录的位置与长度，卷号连续也要核对尾卷是否齐全。
+        offset, length = struct.unpack_from("<QQ", head, 12)
+        if source.size < 32 + offset + length:
+            raise ArchiveError("7z 分卷不完整，请选齐所有分卷后再试")
+        return source
+
     def _existing(self, scope: Scope, keys: list[str]) -> dict[str, int]:
         found = {}
         db = self.objects.metadata.db
@@ -678,7 +757,12 @@ class ArchiveService:
     def _room(self, scope: Scope) -> int | None:
         return self.objects._quota_room(scope.bucket_id, "")
 
-    async def inspect(self, scope: Scope, key: str, destination: str | None, password: str | None) -> dict:
+    async def inspect(self, scope: Scope, key: str, destination: str | None, password: str | None,
+                      *, volumes: list[str] | None = None) -> dict:
+        if volumes is not None:
+            source = await self._open_volumes(scope, key, volumes)
+            return {"format": "7z", "size": source.size, "room": await self.objects.metadata.run_in_thread(self._room, scope),
+                    "listable": False, "encrypted": False, "files": None, "total_bytes": None, "entries": []}
         info, source, kind = await self._open(scope, key)
         result: dict = {"format": kind, "size": info.size, "room": await self.objects.metadata.run_in_thread(self._room, scope)}
         if kind != "zip":
@@ -775,12 +859,14 @@ class ArchiveService:
         job = self.jobs.get(job_id)
         if job is None or job.owner != owner or job.private != private:
             raise NotFoundError("任务不存在")
-        if job.status in ("queued", "running"):
+        if job.status in ("queued", "running") and not job.cancelled:
             job.cancelled = True
+            if job.format == "7z" and job.status == "running" and job.task is not None:
+                job.task.cancel()
         return job.public()
 
     async def start(self, owner: int, scope: Scope, key: str, destination: str, password: str | None, conflict: str, keep_archive: bool,
-                    selection: object = None) -> dict:
+                    selection: object = None, *, volumes: list[str] | None = None) -> dict:
         """selection：只解压 ZIP 中的这些条目（browse 返回的 index，文件夹条目可选）；None 表示全部。
         只解压一部分时一律保留压缩包，不然没解出的文件会随压缩包一起进回收站。"""
         if conflict not in CONFLICTS:
@@ -798,10 +884,19 @@ class ArchiveService:
         if destination.startswith(key + "/"):
             raise ValueError("不能解压到压缩包自身的位置")
         self.objects._check_scope(scope, destination + "x", write=True)
-        info, source, kind = await self._open(scope, key)
+        if volumes is None:
+            _, source, kind = await self._open(scope, key)
+        else:
+            if selection is not None or password:
+                raise ArchiveError("7z 分卷仅支持整包解压，且暂不支持加密分卷")
+            source = await self._open_volumes(scope, key, volumes)
+            if any(destination.startswith(path + "/") for path in source.keys):
+                raise ArchiveError("不能解压到分卷自身的位置")
+            key = source.volumes[0].key
+            kind, keep_archive = "7z", True
         plan = None
         if kind == "zip":
-            entries = await self._zip_entries(scope, key, info.etag, source)
+            entries = await self._zip_entries(scope, key, source.etag, source)
             if selection is not None and max(selection) >= len(entries):
                 raise ValueError("压缩包已变化，请重新打开后选择")
             chosen = [entry for index, entry in enumerate(entries) if selection is None or index in selection]
@@ -824,14 +919,15 @@ class ArchiveService:
             room = await self.objects.metadata.run_in_thread(self._room, scope)
             if room is not None and need > room:
                 raise QuotaExceededError(f"空间不足：解压后需要约 {need} 字节，当前可用 {max(0, room)} 字节")
+        self._admit(owner)  # 读取期间可能有其他请求已提交任务。
         job = Job(secrets.token_hex(8), owner, bool(scope.private_access), key, destination, kind, conflict, keep_archive,
-                  archive_size=info.size)
+                  archive_size=source.size)
         job.partial = selection is not None
         if plan is not None:
             job.total_files = sum(1 for entry, _ in plan if not entry.is_dir)
             job.total_bytes = sum(entry.size for entry, _ in plan if not entry.is_dir)
         self.jobs[job.id] = job
-        job.task = asyncio.create_task(self._run(job, scope, info.etag, plan, password.encode("utf-8") if password else None))
+        job.task = asyncio.create_task(self._run(job, scope, source, plan, password.encode("utf-8") if password else None))
         return job.public()
 
     def _admit(self, owner: int) -> None:
@@ -936,37 +1032,45 @@ class ArchiveService:
         reserved.add(key)
         return key
 
-    async def _write(self, scope: Scope, job: Job, key: str, body: AsyncIterator[bytes], size: int | None) -> None:
+    async def _write_directory(self, scope: Scope, key: str) -> None:
+        exists = await self.objects.metadata.run_in_thread(
+            lambda: self.objects.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone() is not None)
+        if not exists:
+            await self.objects.put_directory_marker(scope, key)
+
+    async def _write(self, scope: Scope, job: Job, key: str, body: AsyncIterator[bytes], size: int | None, *, buffered: bool = False) -> None:
         async def counted():
             async for chunk in body:
                 if job.cancelled:
                     raise asyncio.CancelledError()
                 job.done_bytes += len(chunk)
                 yield chunk
-        await self.objects.put_object(scope, key, counted(), size, _content_type(key))
+        await self.objects.put_object(scope, key, counted(), size, _content_type(key), buffered=buffered)
 
-    async def _run(self, job: Job, scope: Scope, etag: str, plan, password: bytes | None) -> None:
+    async def _run(self, job: Job, scope: Scope, source: Source | VolumeSource, plan, password: bytes | None) -> None:
         async with self.slots:
             if job.cancelled:
                 job.status, job.finished_at = "cancelled", time.time()
                 return
             job.status = "running"
-            source = Source(self.objects, scope, job.archive, etag, job.archive_size,
-                            on_read=lambda size: setattr(job, "read_bytes", job.read_bytes + size))
             reserved: set[str] = set()
             try:
-                if plan is not None:
-                    await self._run_zip(job, scope, source, plan, password, reserved)
+                if isinstance(source, VolumeSource):
+                    await self._run_7z(job, scope, source)
                 else:
-                    await self._run_stream(job, scope, source, reserved)
+                    source.on_read = lambda size: setattr(job, "read_bytes", job.read_bytes + size)
+                    if plan is not None:
+                        await self._run_zip(job, scope, source, plan, password, reserved)
+                    else:
+                        await self._run_stream(job, scope, source, reserved)
                 if job.cancelled:
                     job.status = "cancelled"
                 else:
                     job.status = "completed"
-                    if not job.keep_archive and not job.failed_count:
+                    if isinstance(source, Source) and not job.keep_archive and not job.failed_count:
                         # 解压全部成功才移走原压缩包，放进回收站，可以还原。
                         info = await self.objects.metadata.run_in_thread(self.objects.head_object, scope, job.archive)
-                        if info.etag == etag:
+                        if info.etag == source.etag:
                             await self.objects.trash(scope, [job.archive])
                             job.archive_removed = True
             except asyncio.CancelledError:
@@ -990,11 +1094,7 @@ class ArchiveService:
                 scope.authorize()
             job.current = relative
             if entry.is_dir:
-                key = job.destination + relative
-                exists = await self.objects.metadata.run_in_thread(
-                    lambda: self.objects.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone() is not None)
-                if not exists:
-                    await self.objects.put_directory_marker(scope, key)
+                await self._write_directory(scope, job.destination + relative)
                 continue
             key = await self._target(scope, job, relative, reserved)
             if key is None:
@@ -1034,11 +1134,7 @@ class ArchiveService:
                     continue
                 job.current = relative
                 if member.kind == "dir":
-                    key = job.destination + relative
-                    exists = await self.objects.metadata.run_in_thread(
-                        lambda: self.objects.metadata.db.execute("SELECT 1 FROM objects WHERE bucket_id=? AND key=?", (scope.bucket_id, key)).fetchone() is not None)
-                    if not exists:
-                        await self.objects.put_directory_marker(scope, key)
+                    await self._write_directory(scope, job.destination + relative)
                     continue
                 if member.kind != "file":
                     self._fail(job, relative, "链接等特殊文件不解压")
@@ -1050,6 +1146,54 @@ class ArchiveService:
                 job.done_files += 1
         finally:
             await reader.close()
+
+    async def _run_7z(self, job: Job, scope: Scope, source: VolumeSource) -> None:
+        def check():
+            if job.cancelled:
+                raise asyncio.CancelledError()
+            if scope.authorize is not None:
+                scope.authorize()
+
+        async def read(start: int, end: int) -> bytes:
+            data = await source.read(start, end)
+            job.read_bytes += len(data)
+            return data
+
+        reserved = set(source.keys)
+        await self.objects.metadata.run_in_thread(source.check_versions)
+        async with open_decoder(read, source.size, check) as decoder:
+            for index in range(MAX_ENTRIES + 1):
+                entry = await decoder.next_entry()
+                if entry is None:
+                    break
+                if index == MAX_ENTRIES:
+                    raise ArchiveError("7z 压缩包内的文件和文件夹过多")
+                name, kind, size = entry
+                relative = safe_relative(name, kind == "dir")
+                if not relative or ignored(relative):
+                    await decoder.skip()
+                    continue
+                job.current = relative
+                if kind == "dir":
+                    await self._write_directory(scope, job.destination + relative)
+                elif kind != "file":
+                    self._fail(job, relative, "链接等特殊文件不解压")
+                elif job.destination + relative in source.keys:
+                    self._fail(job, relative, "与原分卷同名，已跳过")
+                else:
+                    key = await self._target(scope, job, relative, reserved)
+                    if key is not None:
+                        before = job.done_bytes
+                        try:
+                            async with aclosing(decoder.content(size)) as content:
+                                await self._write(scope, job, key, content, size, buffered=True)
+                        except (Exception, asyncio.CancelledError):
+                            job.done_bytes = before
+                            raise
+                        job.done_files += 1
+                        continue
+                await decoder.skip()
+        await self.objects.metadata.run_in_thread(source.check_versions)
 
     async def stop(self) -> None:
         for job in self.jobs.values():
